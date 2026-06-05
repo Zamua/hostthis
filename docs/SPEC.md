@@ -184,6 +184,17 @@ expires in 24h (2026-06-06 12:34 UTC)
 Reads stdin until EOF or 5 MB. Validates content type (HTML or Markdown
 in v1). Generates a fresh random slug.
 
+Optional `--name`:
+```
+cat demo.html | ssh hostthis.dev --name "Acme prototype v3"
+https://abc12345.hostthis.dev
+"Acme prototype v3" — expires in 24h (2026-06-06 12:34 UTC)
+```
+The name is owner-only metadata for `list`; it never appears in the
+URL. Names are 1–60 chars, any printable Unicode except newlines.
+Anonymous uploads ignore `--name` (no identity to attach it to) with
+a stderr note.
+
 **stdout vs stderr discipline**: the URL is the *only* thing on stdout —
 one line, no trailing whitespace, no formatting — so pipes Just Work:
 
@@ -220,17 +231,27 @@ an update).
 ### List your pastes
 ```
 ssh hostthis.dev list
-SLUG       SIZE    KIND      UPDATED    EXPIRES IN   VERSIONS
-abc12345   1.2k    html      2h ago     22h          v2
-x7y8z9q0   540B    markdown   8h ago    16h          v1
-mnop4567   3.8k    html      18h ago    6h           v1
+SLUG       NAME                  SIZE    KIND      UPDATED    EXPIRES IN   VERS
+abc12345   Acme prototype v3     1.2k    html      2h ago     22h          v2
+x7y8z9q0   —                      540B   markdown  8h ago     16h          v1
+mnop4567   Onboarding email      3.8k    html      18h ago    6h           v1
 ```
 Sorted by expiry asc (soonest-to-die first, so you notice things about
-to disappear). Output is tab-separated for easy `awk`-ing. Anonymous
-sessions return empty (no identity).
+to disappear). `NAME` column shows the user-supplied label or `—` if
+none. Output is tab-separated for easy `awk`-ing. Anonymous sessions
+return empty (no identity).
 
 When a paste is within 1h of expiry, the row's `EXPIRES IN` is rendered
 in red (ANSI, only when stderr says we're on a TTY).
+
+### Rename
+```
+ssh hostthis.dev rename abc12345 "Acme prototype v4"
+renamed.
+```
+Sets / changes the `NAME` for one of your pastes. Pass an empty string
+to clear: `ssh hostthis.dev rename abc12345 ""`. Renaming does NOT
+reset the expiry clock — purely metadata.
 
 ### Show content (read back over ssh)
 ```
@@ -318,19 +339,20 @@ ssh hostthis.dev
 hostthis.dev — pipe rendered content (html/markdown), get a URL.
               pastes expire 24h after their last update.
 
-  cat file.html | ssh hostthis.dev          upload
-  cat file.html | ssh hostthis.dev <slug>   update an existing upload
-  ssh hostthis.dev list                     your active pastes
-  ssh hostthis.dev show <slug>              read content (owner only)
-  ssh hostthis.dev versions <slug>          history (within the 24h window)
-  ssh hostthis.dev pin <slug> <ver>         set served version
-  ssh hostthis.dev delete <slug>            permanent
-  ssh hostthis.dev unpublish <slug>         public 404s
-  ssh hostthis.dev publish <slug>           undo unpublish
-  ssh hostthis.dev link <slug> --expires …  signed share URL
-  ssh hostthis.dev unshare <slug>           revoke signed links
-  ssh hostthis.dev whoami                   your identity + quota
-  ssh hostthis.dev token create             issue an HTTP API token
+  cat file.html | ssh hostthis.dev [--name "…"]      upload
+  cat file.html | ssh hostthis.dev <slug>            update an existing upload
+  ssh hostthis.dev list                              your active pastes
+  ssh hostthis.dev show <slug>                       read content (owner only)
+  ssh hostthis.dev rename <slug> "<name>"            set / change a paste's label
+  ssh hostthis.dev versions <slug>                   history (within the 24h window)
+  ssh hostthis.dev pin <slug> <ver>                  set served version
+  ssh hostthis.dev delete <slug>                     permanent
+  ssh hostthis.dev unpublish <slug>                  public 404s
+  ssh hostthis.dev publish <slug>                    undo unpublish
+  ssh hostthis.dev link <slug> --expires …           signed share URL
+  ssh hostthis.dev unshare <slug>                    revoke signed links
+  ssh hostthis.dev whoami                            your identity + quota
+  ssh hostthis.dev token create                      issue an HTTP API token
 
 You: SHA256:abc... (4 active uploads, 38/200 MB this 30d window)
 ```
