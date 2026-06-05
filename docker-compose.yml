@@ -1,0 +1,33 @@
+# Local + production-shaped docker-compose. Same image runs in both.
+#
+#   docker compose up --build       # build + run; ssh on 12222, http on 18080
+#   docker compose down
+#
+# Host ports avoid 2222 / 8080 because those are commonly already taken
+# (Mac mini also runs caddy + a hello-world service on :8080). Container
+# ports stay :2222 / :8080 — only the host-side mapping shifts.
+#
+# Production: drop these mappings, run with --network=host on the VPS,
+# nginx terminates TLS for hostthis.dev and proxies 127.0.0.1:8080 →
+# the container.
+
+services:
+  hostthis:
+    build: .
+    image: hostthis:dev
+    ports:
+      - "12222:2222"
+      - "18080:8080"
+    volumes:
+      - ./data:/var/lib/hostthis
+    environment:
+      # In dev we run path-mode so wildcard DNS + certs aren't required.
+      # Production deploys MUST set HOSTTHIS_URL_MODE=subdomain — the
+      # binary logs a loud warning otherwise.
+      HOSTTHIS_APEX_DOMAIN: localhost:18080
+      HOSTTHIS_URL_MODE: path
+      HOSTTHIS_PUBLIC_SCHEME: http
+    restart: unless-stopped
+    # Distroless's nonroot uid is 65532. Make sure the host's ./data
+    # dir is writable by that uid; setup.sh handles it.
+    user: "65532:65532"

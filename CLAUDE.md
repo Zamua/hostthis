@@ -137,8 +137,31 @@ deploy scripts under `deploy/`, integration tests under `tests/`.
 
 ## Local setup
 
-Not yet — there's no code. Once there is, this section will document
-how to build, run, and test locally.
+Go 1.25+ and Docker required.
+
+```
+make build         # local Go build → ./bin/hostthisd
+make test          # run all tests (domain unit + storage + service + ssh/http e2e)
+make run           # run locally, no container; ssh :2222 http :8080, path-mode
+
+make docker-build  # build the container image
+make docker-up     # docker compose up; same ports; data persists in ./data
+make docker-down   # tear down
+```
+
+Quick smoke from another terminal once it's live:
+
+```
+# make run    — ssh :2222 / http :8080
+# make docker-up — ssh :12222 / http :18080 (host ports shifted to avoid common clashes)
+
+echo '<!doctype html><h1>hi</h1>' | ssh -p 12222 -o StrictHostKeyChecking=no localhost
+# → prints a URL like http://localhost:18080/p/abc12345
+curl <that URL>
+```
+
+The binary defaults to `--mode path` (apex/p/&lt;slug&gt; URLs) for dev. Use
+`--mode subdomain` only for production deploys with a wildcard cert.
 
 ## Don'ts
 
