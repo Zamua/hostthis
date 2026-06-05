@@ -120,12 +120,14 @@ retention — see those sections for fixed numbers):
 | **anonymous** | no ssh key offered (SSH `none` auth) | upload only |
 | **keyed** | any ssh key offered | upload + `list` + `show` + `update` + `rename` + `versions` + `pin` + `delete` against your own pastes |
 
-Anonymous uploads are owner-less: nobody can `list` or `update` them
-once submitted. They live their full retention window and then expire.
+Anonymous uploads are quota-tracked by their client IP subnet
+(`ip:<subnet>` identity — see Limits) but have no management
+capability: nobody can `list`, `update`, `delete`, etc. them once
+submitted. They live their full retention window and then expire.
 
-There is no "new key cooldown" or trust ramp — the per-class quota
-(see "Limits & Sybil defense") already bounds abuse via key rotation,
-so we don't add a second mechanism for the same problem.
+There is no "new key cooldown" or trust ramp — the per-identity
+quota (see Limits) already bounds abuse via key rotation, so we
+don't add a second mechanism for the same problem.
 
 ### Security: snooping a public key gives nothing
 
@@ -142,22 +144,20 @@ signature. Never trust a self-asserted username or fingerprint.
 
 ## File handling
 
-- **Per-paste hard cap**: 5 MB. Universal across tiers. Sized for the
-  worst-case legitimate use (a self-contained HTML page with embedded
-  base64 images, or a long Markdown doc). Larger than that and the user
-  is sharing the wrong thing through hostthis.
+- **Per-paste hard cap**: 1 MiB. Equal to the per-identity quota
+  (see Limits). A user with an empty quota can upload up to 1 MiB
+  in one shot; anything larger is rejected before any bytes hit disk.
 - **Format gate**: accept only supported content types (HTML, Markdown
   in v1). Server sniffs the first 512 bytes for content type via
   `http.DetectContentType` and cross-checks any explicit `--type` flag.
   Unsupported content is rejected with a clear error pointing at
-  alternatives — no silent fallback to `attachment` rendering.
+  what we accept — no silent fallback to `attachment` rendering.
 - **No streaming reads from upload**: server buffers the whole stdin
-  into memory (≤ 5 MB so a fixed buffer is fine) before committing.
+  into memory (≤ 1 MiB so a fixed buffer is fine) before committing.
 - **Storage**: SHA256-keyed content-addressed blobs on disk
   (`data/blobs/<sha256[:2]>/<sha256>`). Multiple slugs pointing to the
-  same blob share the storage. Rendered output (Markdown → HTML) is
-  cached alongside the source blob, keyed by source SHA + renderer
-  version, regenerated on renderer-version bumps.
+  same blob share the storage. Markdown is rendered to HTML on every
+  read (cheap enough at our content sizes; no cache layer yet).
 
 ## Retention
 
@@ -192,7 +192,7 @@ cat index.html | ssh hostthis.dev
 https://abc12345.hostthis.dev
 expires in 24h (2026-06-06 12:34 UTC)
 ```
-Reads stdin until EOF or 5 MB. Validates content type (HTML or Markdown
+Reads stdin until EOF or 1 MiB. Validates content type (HTML or Markdown
 in v1). Generates a fresh random slug.
 
 Optional `--name`:
@@ -305,10 +305,11 @@ the verb is explicit enough).
 ```
 ssh hostthis.dev whoami
 key:     SHA256:abc...xyz
-joined:  2025-12-01
-uploads: 4 active (24h)
-quota:   38 / 200 MB this 30d window
+joined:  2026-06-05
+active:  4 paste(s)
 ```
+Anonymous sessions print `anonymous — no ssh key offered` on stderr
+and exit 0.
 
 ### Help
 ```
@@ -325,49 +326,20 @@ hostthis.dev — pipe rendered content (html/markdown), get a URL.
   ssh hostthis.dev pin <slug> <ver>                  set served version
   ssh hostthis.dev delete <slug>                     permanent
   ssh hostthis.dev whoami                            your identity + active count
-
-You: SHA256:abc... (4 active uploads, 312 KiB / 1 MiB)
 ```
 
 ---
 
 ## Apex landing page
 
-`https://hostthis.dev/` serves one static HTML page. Its job is exactly:
-*explain how to use this in 10 seconds*. Not a marketing page, not a
-dashboard, not interactive — just the docs the user needs to send their
-first paste.
+`https://<apex>/` serves a single static HTML page styled as a
+roff(1)-shaped manpage. Its job: explain what to type to get a URL,
+in 10 seconds. Not a marketing page, not a dashboard, not interactive.
 
-Content (final copy can iterate; this is the substance):
-
-```
-hostthis.dev
-
-Pipe a file to ssh, get a URL.
-
-    $ cat index.html | ssh hostthis.dev
-    https://abc12345.hostthis.dev
-
-Supported: HTML, Markdown.
-
-Your ssh key is your account. No signup.
-
-    $ ssh hostthis.dev whoami    your identity (or run --help for more)
-    $ ssh hostthis.dev list      pastes tied to your key
-
-[full verb list as a small <table> or definition list]
-
-Source: github.com/<org>/hostthis
-```
-
-Constraints:
-- *Single static HTML file*, served from the binary's embedded assets.
-  No JS unless we add a tiny copy-button. No external fonts/CSS/CDN.
-  Total weight under 20 KB.
-- *No content-rendering surface*. The apex never serves user content;
-  reserved subdomains include the apex hostname itself.
-- *Style*: monospace by default (it's a terminal-flavored tool). Minimal
-  CSS, single accent color. Dark + light via `prefers-color-scheme`.
+The bytes shipped on the public instance live in
+[`web/landing.html`](../web/landing.html); the binary loads them at
+startup (`HOSTTHIS_LANDING` path), nginx in front serves the same
+bytes directly for efficiency. Single file, no JS, no external assets.
 
 ## Limits
 
@@ -422,8 +394,6 @@ Response headers on paste reads:
   who sent it
 - `Permissions-Policy: camera=(), microphone=(), geolocation=(), usb=(), payment=()`
   — deny everything that needs explicit user grant
-- `Cross-Origin-Opener-Policy: same-origin` — pastes can't open windows
-  to other origins and retain references
 
 ### What this means for the visitor
 
@@ -458,11 +428,11 @@ markdown path.
 
 ### Abuse reporting
 
-Every paste page can render a small "report" link (it points at an apex
-form). The form lets visitors flag phishing / malware / DMCA. Reports
-flow to the operator's queue; flagged pastes can be unpublished by ops
-without owner action. Since our default-24h retention already evicts
-everything in a day, the abuse window is naturally bounded.
+24h retention is the primary defense — every paste evicts itself in a
+day even if the operator does nothing. For faster takedown, an
+operator can delete a slug's row directly from the sqlite db; the
+next read 404s and the next sweep GCs the blob. A user-facing
+"report this paste" UI is out of scope for v1.
 
 ---
 
@@ -471,68 +441,36 @@ everything in a day, the abuse window is naturally bounded.
 The public `hostthis.dev` is the default deploy, but the same Go binary
 runs on any box. Minimal runtime config (env vars or single TOML):
 
-```toml
-[server]
-ssh_listen = ":2222"
-http_listen = ":8080"
-apex_domain = "hostthis.dev"
-data_dir    = "/var/lib/hostthis"
-url_mode    = "subdomain"          # or "path" — dev only, see "Dev-only path mode"
+All operator knobs are flags or env vars on the binary (no config
+file). Defaults in parens:
 
-[storage]
-max_bytes        = 6_000_000_000   # service-wide hard cap on disk usage
-warn_pct         = 80              # log warnings above this fill
-reject_pct       = 95              # refuse new uploads above this fill
-
-[tls]
-# operator points these at their own wildcard cert for *.<apex_domain>
-cert_file = "/etc/hostthis/wildcard.pem"
-key_file  = "/etc/hostthis/wildcard.key"
-
-[features]
-trusted_network = false
+```
+--ssh-addr      / HOSTTHIS_SSH_ADDR        listen for ssh           (:2222)
+--http-addr     / HOSTTHIS_HTTP_ADDR       listen for http          (:8080)
+--apex-domain   / HOSTTHIS_APEX_DOMAIN     public apex              (hostthis.dev)
+--mode          / HOSTTHIS_URL_MODE        subdomain | path         (path)
+--scheme        / HOSTTHIS_PUBLIC_SCHEME   https | http             (https)
+--data-dir      / HOSTTHIS_DATA_DIR        where sqlite + blobs live (./data)
+--landing       / HOSTTHIS_LANDING         path to landing.html      (web/landing.html)
 ```
 
-### Service-wide storage cap
-
-A single operator knob bounds total disk usage to keep hostthis from
-filling the disk on a small VPS. The server tracks total bytes-on-disk
-across the sqlite db + the blob store (basically the size of
-`data_dir`). Behavior:
-
-- **Below `warn_pct`**: normal.
-- **At or above `warn_pct`**: log a warning every minute, surface a
-  one-line note in the `whoami` response footer ("⚠ service at 82% of
-  its disk budget").
-- **At or above `reject_pct`**: refuse new uploads with a 503-shaped
-  error ("hostthis is at capacity — try again after the next expiry
-  sweep"). Existing pastes are served fine. The expiry sweep runs
-  more aggressively (every minute instead of every 10 minutes) to
-  reclaim space.
-- **At 100%**: hard refuse. Even an in-flight upload that would push
-  us over is aborted before flushing to disk.
-
-The cap is service-wide, not per-class. Per-class quotas (200 MB /
-30d) sit underneath: a single class can never exhaust the disk by
-itself, but the aggregate of all classes can. The service-wide cap
-catches that.
-
-Default for `max_bytes` if unset: `0` = no cap (let disk fill). The
-binary refuses to start in this mode if it detects it's running in a
-container or in production-flagged mode without an explicit cap set.
+The runtime container reads the same env vars; the deploy compose
+file in `deploy/vps/compose.yml` shows the production-shaped
+invocation.
 
 ### Everything else is hardcoded
 
-Caps (per-paste, per-class), retention (24h), quota class behavior,
-sandbox headers, slug generation alphabet — none of it is
-configurable. The product is opinionated on purpose; operator choice
-is limited to where it listens, where data lives, what disk budget
-it gets, and the `trusted_network` toggle.
+Per-paste cap, per-identity quota, retention, sandbox headers, slug
+alphabet — none of it is configurable. The product is opinionated on
+purpose; operator choice is "where does it listen, where does data
+live, what's the public URL shape."
 
-`trusted_network = true` skips IP-subnet tracking in the quota class
-(quotas become purely per-key, anonymous uploads share a single global
-anon class). Exists for LAN-only / VPN-fronted self-hosts where
-household merging would be annoying.
+Operators worried about disk pressure should put hostthis behind
+their reverse proxy's rate limit (the natural place for a per-IP
+throttle) or run it on a host where 24h × the steady-state upload
+rate × N identities is comfortably below disk capacity. With 5–6 GB
+of data dir at the 1 MiB / identity / 24h shape, that's room for a
+few thousand actively-uploading identities.
 
 ---
 
@@ -575,14 +513,15 @@ breaking v1 semantics. Adding any of them should go through an ADR first
 
 ## Open questions
 
-- **Signed-link tokens: rotate on `unpublish`?** Probably yes — `unpublish`
-  should invalidate active signed links automatically (defense in depth);
-  user can re-issue with `link`.
-- **Quota display in `list` footer?** Currently shown in `whoami` only.
-  Probably yes — no surprises when hitting the cap.
-- **Owner notification when a paste expires?** Right now expiry is silent.
-  A best-effort "your paste expired" line in the next `list` output could
-  remind owners that the 24h clock ticks. Maybe.
-- **Mermaid as first rendered-format expansion**: confirm the `goldmark`
-  + `mermaid` SVG renderer choice once we get to it; for now Mermaid is
+- **Quota display in `whoami` and `list`**: right now `whoami` shows
+  only the active count, not "312 KiB / 1 MiB used". Probably worth
+  adding so users see the cap approaching before they hit it.
+- **Owner notification when a paste expires?** Expiry is silent today.
+  A "this paste expired N ago" line in the next `list` could surface
+  it. Low priority.
+- **Mermaid as first rendered-format expansion**: confirm the goldmark
+  + mermaid SVG renderer choice once we get there; for now Mermaid is
   v2+ and out of scope.
+- **Render cache for Markdown**: we render on every read. Cheap today,
+  worth caching by content sha + renderer version if a hot paste
+  starts dominating CPU.
