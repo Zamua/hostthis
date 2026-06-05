@@ -50,7 +50,7 @@ data-dir-perms:
 #  - You can `ssh $(VPS_HOST)` and `sudo` on the far end.
 #  - deploy/vps/compose.yml maps host :22→container :2222 and
 #    127.0.0.1:8080→container :8080.
-#  - nginx (or any other front door) terminates TLS for your apex
+#  - A TLS-terminating reverse proxy terminates HTTPS for your apex
 #    domain and proxies /p/ to 127.0.0.1:8080.
 #
 # Typical flow:

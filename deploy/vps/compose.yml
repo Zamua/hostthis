@@ -1,5 +1,5 @@
 # Production compose for a single-host deploy behind a TLS-terminating
-# reverse proxy (nginx, caddy, traefik, whatever).
+# reverse proxy.
 #
 # This file is separate from the root docker-compose.yml so the root
 # one stays scoped to local dev (shifted ports). Build context points
