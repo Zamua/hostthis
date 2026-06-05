@@ -13,13 +13,18 @@
 package ssh
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
 	"strings"
 
 	gossh "github.com/gliderlabs/ssh"
@@ -36,10 +41,11 @@ type URLBuilder func(domain.Slug) string
 
 // Server is the SSH listener.
 type Server struct {
-	Addr     string         // e.g. ":2222"
-	Upload   *service.Upload
-	BuildURL URLBuilder
-	Logger   *log.Logger
+	Addr        string // e.g. ":2222"
+	HostKeyPath string // path to persistent ed25519 host key; generated on first run
+	Upload      *service.Upload
+	BuildURL    URLBuilder
+	Logger      *log.Logger
 }
 
 // ListenAndServe blocks. Returns whatever the listener returns —
@@ -62,12 +68,59 @@ func (s *Server) ListenAndServe() error {
 		},
 		Handler: s.handleSession,
 	}
+
+	// Persist the host key across restarts so clients don't see
+	// "REMOTE HOST IDENTIFICATION HAS CHANGED" warnings every time
+	// the container is rebuilt. Without this, gliderlabs generates a
+	// fresh ephemeral key on every boot. HostKeyPath empty → ephemeral
+	// (fine for tests; production sets a path under the data dir).
+	if s.HostKeyPath != "" {
+		signer, err := loadOrCreateHostKey(s.HostKeyPath)
+		if err != nil {
+			return fmt.Errorf("ssh host key %q: %w", s.HostKeyPath, err)
+		}
+		server.AddHostKey(signer)
+	}
+
 	s.Logger.Printf("ssh: listening on %s", s.Addr)
 	err := server.ListenAndServe()
 	if errors.Is(err, net.ErrClosed) {
 		return nil
 	}
 	return err
+}
+
+// loadOrCreateHostKey reads an ed25519 host key from path, or generates
+// + persists a fresh one if the file doesn't exist. Returns an
+// xssh.Signer ready for AddHostKey.
+//
+// File format is OpenSSH-compatible PEM (`OPENSSH PRIVATE KEY` block via
+// x509.MarshalPKCS8PrivateKey — gliderlabs / x/crypto both accept it).
+func loadOrCreateHostKey(path string) (xssh.Signer, error) {
+	if body, err := os.ReadFile(path); err == nil {
+		signer, err := xssh.ParsePrivateKey(body)
+		if err != nil {
+			return nil, fmt.Errorf("parse existing host key: %w", err)
+		}
+		return signer, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read host key: %w", err)
+	}
+
+	// Generate.
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generate host key: %w", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return nil, fmt.Errorf("marshal host key: %w", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	if err := os.WriteFile(path, pemBytes, 0o600); err != nil {
+		return nil, fmt.Errorf("write host key: %w", err)
+	}
+	return xssh.ParsePrivateKey(pemBytes)
 }
 
 // handleSession is invoked once per incoming session. We read the
