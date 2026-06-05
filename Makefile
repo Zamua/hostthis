@@ -76,11 +76,19 @@ deploy-sync: _require-vps-host
 	  ./ $(VPS_HOST):/tmp/hostthis-staging/
 	ssh $(VPS_HOST) "sudo mkdir -p $(VPS_PATH)/data && sudo rsync -a --delete /tmp/hostthis-staging/ $(VPS_PATH)/ --exclude=/data && sudo chown -R $(VPS_USER):$(VPS_USER) $(VPS_PATH) && sudo chown -R $(CONTAINER_UID):$(CONTAINER_UID) $(VPS_PATH)/data"
 
-deploy-build: _require-vps-host
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo docker compose -f deploy/vps/compose.yml build"
+# Build the env-var prefix once. Sets the runtime config the compose
+# file reads (apex, mode, scheme) plus the absolute data path so the
+# volume mount doesn't depend on cwd.
+DEPLOY_ENV = HOSTTHIS_APEX_DOMAIN='$(HOSTTHIS_APEX_DOMAIN)' \
+             HOSTTHIS_URL_MODE='$(or $(HOSTTHIS_URL_MODE),path)' \
+             HOSTTHIS_PUBLIC_SCHEME='$(or $(HOSTTHIS_PUBLIC_SCHEME),https)' \
+             HOSTTHIS_DATA_PATH='$(VPS_PATH)/data'
 
-deploy-restart: _require-vps-host
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo docker compose -f deploy/vps/compose.yml up -d"
+deploy-build: _require-vps-host _require-apex
+	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose -f deploy/vps/compose.yml build"
+
+deploy-restart: _require-vps-host _require-apex
+	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose -f deploy/vps/compose.yml up -d"
 
 deploy-logs: _require-vps-host
 	ssh $(VPS_HOST) "sudo docker logs -f --tail 60 hostthis"
@@ -91,6 +99,12 @@ deploy-down: _require-vps-host
 _require-vps-host:
 	@if [ -z "$(VPS_HOST)" ]; then \
 	  echo "VPS_HOST is required. Pass it like: make deploy VPS_HOST=myvps"; \
+	  exit 1; \
+	fi
+
+_require-apex:
+	@if [ -z "$(HOSTTHIS_APEX_DOMAIN)" ]; then \
+	  echo "HOSTTHIS_APEX_DOMAIN is required. Pass it like: make deploy HOSTTHIS_APEX_DOMAIN=example.com"; \
 	  exit 1; \
 	fi
 

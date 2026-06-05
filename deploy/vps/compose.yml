@@ -41,7 +41,10 @@ services:
       - "22:2222"
       - "127.0.0.1:8080:8080"
     volumes:
-      - ./data:/var/lib/hostthis
+      # Operator sets HOSTTHIS_DATA_PATH to wherever they want sqlite +
+      # blobs to persist on the host. Defaults to `./data` (relative to
+      # this compose file, i.e. deploy/vps/data) if not set.
+      - "${HOSTTHIS_DATA_PATH:-./data}:/var/lib/hostthis"
     environment:
       HOSTTHIS_URL_MODE: "${HOSTTHIS_URL_MODE:-path}"
       HOSTTHIS_PUBLIC_SCHEME: "${HOSTTHIS_PUBLIC_SCHEME:-https}"
