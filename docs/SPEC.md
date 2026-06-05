@@ -92,6 +92,29 @@ billing, signin, signup, signout, login, logout, register, dev, staging,
 prod, test, console, hostthis, mcp, help, about
 ```
 
+### Dev-only path mode
+
+For local development where wildcard DNS + certs are friction (the Mac
+mini tailnet case), the binary supports a `--mode path` flag (or
+`HOSTTHIS_URL_MODE=path` env). In path mode:
+
+- Pastes live at `<apex>/p/<slug>` instead of `<slug>.<apex>`.
+- The SSH server emits the path-shape URL after upload.
+- The HTTP router accepts both `<slug>.apex` and `apex/p/<slug>`.
+- Storage, validation, rendering, sanitization, and CSP headers are
+  identical to subdomain mode — only the URL emission and routing
+  differ at the I/O boundary.
+
+**Path mode is dev-only and breaks the origin-isolation property** —
+all pastes share the apex origin, so user-uploaded JS could read apex
+cookies or talk to other pastes' state. The binary's startup logs a
+loud warning when running in path mode, and any deploy script that
+ships a production binary with `--mode path` should be rejected by CI.
+
+The integration test suite always runs against subdomain mode (using
+Host-header tagging in the test HTTP client — no DNS needed) so the
+origin-isolation guarantees are pinned regardless of dev convenience.
+
 ---
 
 ## Identity
@@ -639,25 +662,63 @@ runs on any box. Minimal runtime config (env vars or single TOML):
 ssh_listen = ":2222"
 http_listen = ":8080"
 apex_domain = "hostthis.dev"
-data_dir = "/var/lib/hostthis"
+data_dir    = "/var/lib/hostthis"
+url_mode    = "subdomain"          # or "path" — dev only, see "Dev-only path mode"
+
+[storage]
+max_bytes        = 6_000_000_000   # service-wide hard cap on disk usage
+warn_pct         = 80              # log warnings above this fill
+reject_pct       = 95              # refuse new uploads above this fill
 
 [tls]
 # operator points these at their own wildcard cert for *.<apex_domain>
 cert_file = "/etc/hostthis/wildcard.pem"
 key_file  = "/etc/hostthis/wildcard.key"
+
+[features]
+trusted_network = false
 ```
 
-Everything else — caps, retention, quota class behavior, sandbox
-headers — is hardcoded and not configurable. The product is opinionated
-on purpose; operator choice is limited to "where does it listen and
-where does data live".
+### Service-wide storage cap
 
-A trusted-network deploy can set `features.trusted_network = true` to
-skip IP-subnet tracking in the quota class (quotas become purely
-per-key, anonymous uploads share a single global anon class). This is
-the *only* exposed knob beyond ports / data-dir / TLS, and it exists
-specifically to keep household merging from being annoying on LAN-only
-self-hosts.
+A single operator knob bounds total disk usage to keep hostthis from
+filling the disk on a small VPS. The server tracks total bytes-on-disk
+across the sqlite db + the blob store (basically the size of
+`data_dir`). Behavior:
+
+- **Below `warn_pct`**: normal.
+- **At or above `warn_pct`**: log a warning every minute, surface a
+  one-line note in the `whoami` response footer ("⚠ service at 82% of
+  its disk budget").
+- **At or above `reject_pct`**: refuse new uploads with a 503-shaped
+  error ("hostthis is at capacity — try again after the next expiry
+  sweep"). Existing pastes are served fine. The expiry sweep runs
+  more aggressively (every minute instead of every 10 minutes) to
+  reclaim space.
+- **At 100%**: hard refuse. Even an in-flight upload that would push
+  us over is aborted before flushing to disk.
+
+The cap is service-wide, not per-class. Per-class quotas (200 MB /
+30d) sit underneath: a single class can never exhaust the disk by
+itself, but the aggregate of all classes can. The service-wide cap
+catches that.
+
+Default for `max_bytes` if unset: `0` = no cap (let disk fill). The
+binary refuses to start in this mode if it detects it's running in a
+container or in production-flagged mode without an explicit cap set.
+
+### Everything else is hardcoded
+
+Caps (per-paste, per-class), retention (24h), quota class behavior,
+sandbox headers, slug generation alphabet — none of it is
+configurable. The product is opinionated on purpose; operator choice
+is limited to where it listens, where data lives, what disk budget
+it gets, and the `trusted_network` toggle.
+
+`trusted_network = true` skips IP-subnet tracking in the quota class
+(quotas become purely per-key, anonymous uploads share a single global
+anon class). Exists for LAN-only / VPN-fronted self-hosts where
+household merging would be annoying.
 
 ---
 
