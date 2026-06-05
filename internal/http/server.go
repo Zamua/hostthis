@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/render"
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
@@ -108,11 +109,17 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request) {
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(body)
 	case domain.KindMarkdown:
-		// Phase 1: serve raw markdown as text/plain. Server-side
-		// rendering to sanitized HTML lands in Phase 2 when we wire
-		// goldmark + bluemonday.
-		h.Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write(body)
+		// Render markdown → sanitized HTML on every read. The render
+		// is pure and cheap (~1ms for typical docs); a cache keyed
+		// on (ContentSHA, render.MarkdownRendererVersion) can land
+		// later if cold renders become hot.
+		rendered, err := render.Markdown(body)
+		if err != nil {
+			http.Error(w, "render error", http.StatusInternalServerError)
+			return
+		}
+		h.Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(rendered)
 	default:
 		http.Error(w, "unsupported kind", http.StatusInternalServerError)
 	}
