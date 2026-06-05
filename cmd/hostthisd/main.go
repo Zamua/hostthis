@@ -67,10 +67,11 @@ func main() {
 	build := buildURL(*scheme, *apexDomain, *urlMode, logger)
 
 	sshServer := &hostssh.Server{
-		Addr:     *sshAddr,
-		Upload:   uploadSvc,
-		BuildURL: build,
-		Logger:   logger,
+		Addr:        *sshAddr,
+		HostKeyPath: filepath.Join(*dataDir, "ssh_host_ed25519_key"),
+		Upload:      uploadSvc,
+		BuildURL:    build,
+		Logger:      logger,
 	}
 
 	httpServer := &httpapi.Server{

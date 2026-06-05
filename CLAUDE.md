@@ -163,6 +163,24 @@ curl <that URL>
 The binary defaults to `--mode path` (apex/p/&lt;slug&gt; URLs) for dev. Use
 `--mode subdomain` only for production deploys with a wildcard cert.
 
+## Deploy (single-host VPS)
+
+The repo expects an `ssh vps` alias in `~/.ssh/config` that reaches an
+admin shell on the target host, and assumes the runtime layout from
+[`deploy/vps/compose.yml`](deploy/vps/compose.yml).
+
+```
+make deploy           # rsync working tree → build container → restart
+make deploy-sync      # just rsync the tree (chowns to apps + data to 65532)
+make deploy-build     # just rebuild the image on the VPS
+make deploy-restart   # docker compose up -d on the VPS
+make deploy-logs      # tail container logs
+make deploy-down      # docker compose down on the VPS
+```
+
+The VPS variables (host, install path, compose path) can be overridden:
+`make deploy VPS_HOST=other VPS_PATH=/srv/hostthis`.
+
 ## Don'ts
 
 - Don't commit environment-specific paths, IPs, hostnames, account IDs,
