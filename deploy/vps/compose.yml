@@ -1,0 +1,47 @@
+# Production compose for a single-host VPS deploy behind nginx + TLS.
+#
+# This file lives separately from the root docker-compose.yml so the
+# root one stays scoped to local dev (shifted ports, no nginx in front).
+# Build context points at the repo root via the relative path.
+#
+# Run from the repo root on the VPS:
+#   sudo docker compose -f deploy/vps/compose.yml up -d --build
+#   sudo docker compose -f deploy/vps/compose.yml logs -f
+#   sudo docker compose -f deploy/vps/compose.yml down
+#
+# Expected operator setup:
+#   - Host has nothing on :22 (admin SSH is on a non-default port).
+#   - ufw allows inbound on 22/tcp.
+#   - nginx terminates TLS for hostthis.dev (apex + wildcard) and
+#     proxies /p/* and any subdomain HTTP traffic to 127.0.0.1:8080.
+#   - The host directory /home/apps/projects/hostthis/data exists and
+#     is chowned to uid 65532 (distroless 'nonroot'). The compose
+#     binds it as the persistence volume.
+
+services:
+  hostthis:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: hostthis:prod
+    container_name: hostthis
+    restart: unless-stopped
+    ports:
+      # Host :22 → container's SSH; users type `ssh hostthis.dev`.
+      # Host :8080 → container's HTTP; nginx proxies subdomain + /p/* traffic.
+      - "22:2222"
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - /home/apps/projects/hostthis/data:/var/lib/hostthis
+    environment:
+      # Phase 1: path mode. Wildcard cert (subdomain mode) lands when
+      # we cut DNS-01 via certbot-dns-cloudflare. The binary logs a
+      # WARN when running path mode and the spec flags it as dev-only,
+      # but for v0.1 we're shipping the path-mode shape publicly while
+      # the wildcard cert is in flight.
+      HOSTTHIS_URL_MODE: path
+      HOSTTHIS_PUBLIC_SCHEME: https
+      HOSTTHIS_APEX_DOMAIN: hostthis.dev
+      HOSTTHIS_DATA_DIR: /var/lib/hostthis
+      HOSTTHIS_LANDING: /app/web/landing.html
+    user: "65532:65532"
