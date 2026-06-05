@@ -1,7 +1,6 @@
 // Package main wires the hostthis daemon: SSH server + HTTP server +
-// storage. Phase 1 is the minimum viable loop — anonymous upload via
-// ssh, read via http /p/<slug>. Everything else from SPEC.md ships
-// in later phases.
+// storage + the periodic expiry sweep. Reads flags / env for the
+// runtime config (apex domain, URL mode, scheme, ports, data dir).
 package main
 
 import (

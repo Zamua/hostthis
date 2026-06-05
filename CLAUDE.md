@@ -32,44 +32,6 @@ Every other long-running project has watched its spec drift until nobody
 trusted it. The discipline of editing the spec first is the only thing
 that keeps the spec useful.
 
-### ADRs for shaping decisions
-
-When you make a design choice that:
-
-- has multiple defensible alternatives,
-- is hard to reverse later (URL shape, wire protocol, identity model, data
-  shape, on-disk layout, public API), and
-- would surprise a reader of the code who hadn't seen the discussion,
-
-file an Architecture Decision Record under [`docs/adr/`](docs/adr/).
-[`docs/adr/README.md`](docs/adr/README.md) is the template + the
-when-to-write guide.
-
-ADRs are immutable once accepted. To change a decision, write a new ADR
-that supersedes the old one. The old one stays in the tree so future
-readers can see what was considered last time and why.
-
-Don't ADR every small thing. Library choice, directory layout,
-code-style — skip. ADR when the decision *shapes* the project.
-
-**ADRs are not autonomous work.** If you're an AI agent, do not write
-an ADR on your own initiative and commit it. ADRs codify decisions, and
-decisions require a human in the loop. The process is:
-
-1. *Surface the question*. When you hit a design fork that looks
-   ADR-worthy, stop and tell the user: "this looks ADR-worthy because
-   X, Y. The alternatives are A, B, C." Wait for them to agree it's
-   worth an ADR. They may decide it's small enough to skip.
-2. *Draft for review*. Once they agree, draft the ADR following the
-   `docs/adr/README.md` template and share it for review. Do not commit
-   it yet.
-3. *Wait for approval*. Iterate on the draft until the user explicitly
-   approves it. Only then commit and proceed to implementation.
-
-The "spec-first" rule still applies — if the decision changes product
-behavior, the spec edit is part of the implementation step *after* the
-ADR is approved.
-
 ### Implementation discipline: DDD + TDD
 
 Two non-negotiable practices when writing code.
@@ -122,18 +84,22 @@ docs(spec): clarify retention TTL behavior for keyed pastes
 ## Repo layout
 
 ```
-docs/
-  SPEC.md          product spec — source of truth for behavior
-  adr/
-    README.md      ADR template + when-to-write guide
-    NNNN-*.md      individual decision records (none yet)
-CLAUDE.md          this file — contributor workflow conventions
-README.md          (not yet) human-facing intro
+cmd/hostthisd/       single binary entry point
+internal/
+  domain/            pure types + invariants (no I/O)
+  storage/           sqlite repos + on-disk blob store
+  service/           use cases (upload, manage, sweep)
+  ssh/               gliderlabs ssh server + verb dispatch
+  http/              apex landing + paste read surface
+  render/            markdown → sanitized HTML
+web/landing.html     embedded apex landing page
+docs/SPEC.md         product spec — source of truth for behavior
+deploy/vps/          docker-compose for remote single-host deploys
+Dockerfile           multi-stage build → distroless static image
+Makefile             build / test / run / docker-up / deploy targets
+CLAUDE.md            contributor workflow conventions
+README.md            user-facing manpage
 ```
-
-Once code lands, expect `cmd/` (Go binaries), `internal/` (private
-packages), `pkg/` (anything intended for external import), a `Makefile`,
-deploy scripts under `deploy/`, integration tests under `tests/`.
 
 ## Local setup
 
