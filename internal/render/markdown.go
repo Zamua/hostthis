@@ -111,17 +111,17 @@ func extractTitle(src []byte) string {
 }
 
 // defaultStyles is the inline stylesheet for rendered markdown pages.
-// Monospace headings + serif body, warm cream/charcoal palette matching
-// the apex landing page. Mobile-first. ~3 KB.
+// Monospace headings + serif body, neutral black-on-white / white-on-
+// black palette matching the apex landing page. Mobile-first. ~3 KB.
 const defaultStyles = `<style>
   :root {
-    --bg:#f4ecd8; --ink:#2a2520; --soft:#6e6660; --accent:#a04018;
-    --rule:#d8cdb1; --code-bg:#ece0c0;
+    --bg:#ffffff; --ink:#111111; --soft:#555555; --accent:#111111;
+    --rule:#dddddd; --code-bg:#f4f4f4;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg:#181410; --ink:#e0d6c4; --soft:#948a7c; --accent:#ff9a4d;
-      --rule:#322d24; --code-bg:#241f18;
+      --bg:#0a0a0a; --ink:#f0f0f0; --soft:#999999; --accent:#f0f0f0;
+      --rule:#2a2a2a; --code-bg:#1a1a1a;
     }
   }
   * { box-sizing: border-box; }
@@ -145,15 +145,15 @@ const defaultStyles = `<style>
   h3 { font-size: 1.15rem; }
   h4, h5, h6 { font-size: 1rem; color: var(--soft); text-transform: uppercase; letter-spacing: 0.05em; }
   p { margin: 0.6rem 0 1rem; }
-  a { color: var(--accent); text-underline-offset: 2px; }
-  a:hover { text-decoration-thickness: 2px; }
+  a { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--soft); }
+  a:hover { text-decoration-color: var(--ink); text-decoration-thickness: 2px; }
   hr { border: 0; border-top: 1px solid var(--rule); margin: 2rem 0; }
   blockquote {
     margin: 1rem 0;
     padding: 0.4rem 1rem;
     border-left: 3px solid var(--accent);
     color: var(--soft);
-    background: rgba(255, 154, 77, 0.05);
+    background: var(--code-bg);
   }
   ul, ol { padding-left: 1.4rem; margin: 0.6rem 0 1rem; }
   li { margin: 0.2rem 0; }
