@@ -11,14 +11,14 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/storage"
 )
 
 // PasteRepo is the persistence interface the upload service needs.
 // internal/storage.PasteRepo satisfies it.
 type PasteRepo interface {
-	Insert(domain.Paste) error
+	InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Paste, error)
-	SumActiveSizeByOwner(owner string, now time.Time) (int64, error)
 }
 
 // BlobStore writes and reads content-addressed bytes.
@@ -34,12 +34,14 @@ var SlugTakenErr = errors.New("service: slug taken (after retries)")
 
 // Upload is the application service for new paste creation.
 type Upload struct {
-	Repo  PasteRepo
-	Blobs BlobStore
-	Now   func() time.Time // overridable for tests
+	Repo            PasteRepo
+	Blobs           BlobStore
+	ServiceCapBytes int64 // 0 = no service-wide cap
+	Now             func() time.Time
 }
 
-// NewUpload wires defaults.
+// NewUpload wires defaults. ServiceCap defaults to 0 (no cap); main
+// flips it to the operator value.
 func NewUpload(repo PasteRepo, blobs BlobStore) *Upload {
 	return &Upload{Repo: repo, Blobs: blobs, Now: time.Now}
 }
@@ -53,6 +55,9 @@ type Result struct {
 // ErrOverQuota is returned when accepting the upload would push the
 // identity's total active bytes above UserQuotaBytes.
 var ErrOverQuota = errors.New("service: would exceed your 1 MiB total quota; delete a paste or wait for one to expire")
+
+// ErrServiceFull is returned when the service-wide disk cap is hit.
+var ErrServiceFull = errors.New("service: service is at capacity, try again after the next expiry")
 
 // Create persists a new paste owned by the given identity.
 // The identity is a "key:<fp>" string built from the uploader's ssh
@@ -74,13 +79,6 @@ func (u *Upload) Create(body []byte, owner string, name string, typeHint string)
 		return Result{}, err
 	}
 	now := u.Now().UTC()
-	used, err := u.Repo.SumActiveSizeByOwner(owner, now)
-	if err != nil {
-		return Result{}, fmt.Errorf("quota check: %w", err)
-	}
-	if used+int64(len(body)) > int64(domain.UserQuotaBytes) {
-		return Result{}, ErrOverQuota
-	}
 	sha := domain.HashContent(body)
 	if err := u.Blobs.Put(sha, body); err != nil {
 		return Result{}, fmt.Errorf("blob write: %w", err)
@@ -98,19 +96,24 @@ func (u *Upload) Create(body []byte, owner string, name string, typeHint string)
 	}
 	// Retry on slug collision. SlugAlphabet has 32^8 ≈ 1.1e12 distinct
 	// slugs; collisions inside 5 retries are vanishingly unlikely.
+	// The quota checks live inside InsertWithQuotaCheck so concurrent
+	// uploads can't both pass and both insert.
 	const maxRetries = 5
 	for range maxRetries {
 		p.Slug = domain.NewRandomSlug()
-		err := u.Repo.Insert(p)
-		if err == nil {
+		err := u.Repo.InsertWithQuotaCheck(p, u.ServiceCapBytes, int64(domain.UserQuotaBytes), now)
+		switch {
+		case err == nil:
 			return Result{Paste: p}, nil
-		}
-		// Any sentinel that maps to "slug taken" → retry. Other errors
-		// bubble up immediately.
-		if isSlugTaken(err) {
+		case errors.Is(err, storage.ErrServiceFull):
+			return Result{}, ErrServiceFull
+		case errors.Is(err, storage.ErrOverUserQuota):
+			return Result{}, ErrOverQuota
+		case isSlugTaken(err):
 			continue
+		default:
+			return Result{}, err
 		}
-		return Result{}, err
 	}
 	return Result{}, SlugTakenErr
 }

@@ -36,6 +36,7 @@ type Server struct {
 	HostKeyPath string
 	Upload      *service.Upload
 	Manage      *service.Manage
+	KeyGate     *service.KeyGate // optional; nil disables the Sybil rate limit
 	BuildURL    URLBuilder
 	Logger      *log.Logger
 }
@@ -88,6 +89,26 @@ func (s *Server) handleSession(sess gossh.Session) {
 		return
 	}
 	owner := domain.IdentityFromKeyFingerprint(keyedFP).String()
+
+	// Sybil rate limit: cap the number of distinct fresh fingerprints
+	// any one IP subnet can introduce in a 24h window. Returning users
+	// (any (key, subnet) we've seen before) pass through with no
+	// accounting.
+	if s.KeyGate != nil {
+		subnet := ipSubnet(remoteIP(sess))
+		if err := s.KeyGate.Admit(owner, subnet); err != nil {
+			if errors.Is(err, service.ErrSybilRateLimit) {
+				fmt.Fprintln(sess.Stderr(), "hostthis: too many new keys from this network today.")
+				fmt.Fprintln(sess.Stderr(), "  try again tomorrow, or use an existing key already known to hostthis.")
+				_ = sess.Exit(6)
+				return
+			}
+			fmt.Fprintf(sess.Stderr(), "hostthis: key gate: %v\n", err)
+			_ = sess.Exit(1)
+			return
+		}
+	}
+
 	argv := sess.Command()
 
 	if len(argv) == 0 {
@@ -431,6 +452,36 @@ func exitForServiceErr(err error) int {
 	default:
 		return 1
 	}
+}
+
+// remoteIP extracts the client's IP address from a session's
+// RemoteAddr. Returns nil for unknown / unparseable.
+func remoteIP(sess gossh.Session) net.IP {
+	addr := sess.RemoteAddr()
+	if addr == nil {
+		return nil
+	}
+	if tcp, ok := addr.(*net.TCPAddr); ok {
+		return tcp.IP
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return nil
+	}
+	return net.ParseIP(host)
+}
+
+// ipSubnet returns the canonical subnet string for the Sybil gate.
+// IPv4 → "/24" prefix; IPv6 → "/48". A nil IP becomes "unknown" so
+// the gate treats it as one stable bucket rather than crashing.
+func ipSubnet(ip net.IP) string {
+	if ip == nil {
+		return "unknown"
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.Mask(net.CIDRMask(24, 32)).String() + "/24"
+	}
+	return ip.Mask(net.CIDRMask(48, 128)).String() + "/48"
 }
 
 // fingerprintKey returns the canonical SHA256 fingerprint of an ssh
