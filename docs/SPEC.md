@@ -624,34 +624,6 @@ NOT execute JS, even though uploaded HTML can.
 
 ---
 
-## llms.txt — AI-agent docs
-
-`https://hostthis.dev/llms.txt` is a single plain-text page documenting
-hostthis for AI agents to read at runtime. It's the official ai-discovery
-surface in lieu of an MCP server — simpler to ship, no protocol/SDK
-churn, and any LLM that can curl can use it.
-
-Content: a thorough how-to covering:
-- The "pipe to ssh" upload model and the URL shape
-- Supported content types (HTML, Markdown)
-- The 24-hour retention rule
-- The full set of ssh verbs with examples
-- The HTTP API endpoints + the "tokens issued via ssh only" rule
-- Identity model (ssh-key fingerprint = account, anonymous = upload-only)
-- Quota model (rolling 30d window, union over key+IP class)
-- Sandboxing rules for any rendered HTML the agent publishes (default
-  strict CSP; how to opt into a relaxed one if needed)
-- What's deliberately NOT supported (no binaries, no long-term storage,
-  no MCP)
-
-The page is generated from the spec at build time — single source of
-truth is `docs/SPEC.md`, the llms.txt is a flattened, agent-friendly
-view of it.
-
-The apex landing page links to it visibly so humans can read it too.
-
----
-
 ## Self-hosting
 
 The public `hostthis.dev` is the default deploy, but the same Go binary
@@ -742,8 +714,11 @@ or "general file host". Keep the surface small.
 - **Custom domains** (`pastes.mycompany.com`). The wildcard subdomain
   pattern covers branding-via-slug well enough.
 - **Email notifications**. The ssh response IS the notification.
-- **MCP server**. We expose an `llms.txt` instead — much simpler to
-  ship and maintain than an MCP server with versioning churn.
+- **MCP server**. The apex landing page is already terse, factual, and
+  curl-able by any LLM; a separate machine-doc surface would just
+  duplicate it.
+- **Separate `/llms.txt`**. Same reason — the landing page IS the
+  programmatic reference. Duplicating it as plain text would drift.
 - **GitHub (or any third-party) account linking / OAuth**. ssh keys
   alone carry identity; we don't need a second source of trust.
 - **Operator-configurable limits**. Caps, retention, sandbox headers
