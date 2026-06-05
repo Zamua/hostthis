@@ -75,19 +75,18 @@ func (s *Server) ListenAndServe() error {
 // client does that for us). The first token is the verb. An empty
 // command means "anonymous-or-keyed implicit upload."
 func (s *Server) handleSession(sess gossh.Session) {
-	// Identity is the unit of quota accounting AND the gate for
-	// management verbs. We try "key:<fp>" first (set when the client
-	// offered a publickey); fall back to "ip:<subnet>" derived from
-	// the session's RemoteAddr. Empty only if both fail, which
-	// shouldn't happen.
+	// hostthis requires an ssh key on every session. Without a key
+	// there's no identity to attribute the paste to or to enforce
+	// the per-identity quota against. Bail with a helpful message.
 	keyedFP, _ := sess.Context().Value("ownerHash").(string)
-	var owner string
-	switch {
-	case keyedFP != "":
-		owner = domain.IdentityFromKeyFingerprint(keyedFP).String()
-	default:
-		owner = domain.IdentityFromIP(remoteIP(sess)).String()
+	if keyedFP == "" {
+		fmt.Fprintln(sess.Stderr(), "hostthis: ssh key required.")
+		fmt.Fprintln(sess.Stderr(), "  generate one (ssh-keygen -t ed25519) and add it to ssh-agent,")
+		fmt.Fprintln(sess.Stderr(), "  or pass it on the command line: ssh -i ~/.ssh/id_ed25519 hostthis.dev")
+		_ = sess.Exit(3)
+		return
 	}
+	owner := domain.IdentityFromKeyFingerprint(keyedFP).String()
 	argv := sess.Command()
 
 	if len(argv) == 0 {
@@ -191,11 +190,6 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	}
 
 	// Create path.
-	anonymous := !domain.Identity(owner).IsKeyed()
-	if anonymous && args.Name != "" {
-		fmt.Fprintln(sess.Stderr(), "note: --name ignored on anonymous upload")
-		args.Name = ""
-	}
 	res, err := s.Upload.Create(body, owner, args.Name, args.Type)
 	if err != nil {
 		emitServiceErr(sess, err)
@@ -207,9 +201,6 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		fmt.Fprintf(sess.Stderr(), "%q — expires in 24h\n", res.Paste.Name)
 	} else {
 		fmt.Fprintln(sess.Stderr(), "expires in 24h")
-	}
-	if anonymous {
-		fmt.Fprintln(sess.Stderr(), "note: anonymous upload — add an ssh key for list / update / delete")
 	}
 	_ = sess.Exit(0)
 }
@@ -442,24 +433,6 @@ func exitForServiceErr(err error) int {
 	default:
 		return 1
 	}
-}
-
-// remoteIP extracts the client's IP address from a session's
-// RemoteAddr. Falls back to nil — IdentityFromIP handles that.
-func remoteIP(sess gossh.Session) net.IP {
-	addr := sess.RemoteAddr()
-	if addr == nil {
-		return nil
-	}
-	if tcp, ok := addr.(*net.TCPAddr); ok {
-		return tcp.IP
-	}
-	// Generic fallback: split host:port and parse.
-	host, _, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		return nil
-	}
-	return net.ParseIP(host)
 }
 
 // fingerprintKey returns the canonical SHA256 fingerprint of an ssh

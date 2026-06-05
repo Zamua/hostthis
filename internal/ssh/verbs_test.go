@@ -202,18 +202,25 @@ func TestVerbList_AfterUpload(t *testing.T) {
 	}
 }
 
-func TestVerbWhoami_AnonAndKeyed(t *testing.T) {
+func TestVerbWhoami_Keyed(t *testing.T) {
 	s := startStack(t)
-	_, stderr, _ := s.runAnon("whoami", nil)
-	if !strings.Contains(stderr, "anonymous") {
-		t.Fatalf("anon whoami should say so: %q", stderr)
-	}
 	stdout, _, _ := s.run("whoami", nil)
 	if !strings.Contains(stdout, s.keyedOwner) {
 		t.Fatalf("keyed whoami should show owner: %q", stdout)
 	}
 	if !strings.Contains(stdout, "active:") {
 		t.Fatalf("expected active count line: %q", stdout)
+	}
+}
+
+func TestAnonRejectedAtSession(t *testing.T) {
+	s := startStack(t)
+	_, stderr, exit := s.runAnon("whoami", nil)
+	if exit == 0 {
+		t.Fatalf("anonymous session should be rejected, got exit 0")
+	}
+	if !strings.Contains(stderr, "ssh key required") {
+		t.Fatalf("expected key-required nudge: %q", stderr)
 	}
 }
 
@@ -228,10 +235,14 @@ func TestVerbShow_OwnerOnly(t *testing.T) {
 	if !strings.Contains(body, "hello") {
 		t.Fatalf("show returned wrong body: %q", body)
 	}
-	// Anon trying to show should get not-found / forbidden.
-	_, stderr, exitAnon := s.runAnon("show "+slug, nil)
-	if exitAnon == 0 {
-		t.Fatalf("anon show should fail, got 0 exit (stderr=%q)", stderr)
+	// A second keyed identity (different ssh key) trying to show the
+	// first owner's paste should get not-found / forbidden — same as
+	// any unauthorized read of someone else's slug.
+	otherClient, _ := newKeyClient(t, s.sshAddr)
+	stdoutOther, stderrOther, exitOther := s.runOn(otherClient, "show "+slug, nil)
+	if exitOther == 0 {
+		t.Fatalf("other-owner show should fail, got 0 exit (stdout=%q stderr=%q)",
+			stdoutOther, stderrOther)
 	}
 }
 
@@ -336,23 +347,14 @@ func TestVerbHelp_OnUnknown(t *testing.T) {
 	}
 }
 
-func TestAnonCannotManage(t *testing.T) {
+func TestAnonCannotUpload(t *testing.T) {
 	s := startStack(t)
-	// Anon upload first
-	stdout, _, _ := s.runAnon("", []byte("<!doctype html><p>anon</p>"))
-	slug := extractSlug(stdout)
-	// Anon list → ErrEmptyOwner
-	_, stderr, exit := s.runAnon("list", nil)
+	_, stderr, exit := s.runAnon("", []byte("<!doctype html><p>x</p>"))
 	if exit == 0 {
-		t.Fatalf("anon list should fail")
+		t.Fatalf("anon upload should be rejected, got exit 0")
 	}
-	if !strings.Contains(stderr, "add an ssh key") {
-		t.Fatalf("expected anon nudge: %q", stderr)
-	}
-	// Anon delete should also fail
-	_, _, exit = s.runAnon("delete "+slug, nil)
-	if exit == 0 {
-		t.Fatalf("anon delete should fail")
+	if !strings.Contains(stderr, "ssh key required") {
+		t.Fatalf("expected key-required message: %q", stderr)
 	}
 }
 
