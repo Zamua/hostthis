@@ -316,15 +316,6 @@ uploads: 4 active (24h)
 quota:   38 / 200 MB this 30d window
 ```
 
-### Issue an HTTP API token
-```
-ssh hostthis.dev token create
-htst_live_z9k2q...
-```
-One-time output (we don't store the raw value, only a hash). Use as
-`Authorization: Bearer <token>` against the HTTP surface (see "HTTP /
-curl fallback"). `token list` / `token revoke <prefix>` round it out.
-
 ### Help
 ```
 ssh hostthis.dev
@@ -339,10 +330,9 @@ hostthis.dev — pipe rendered content (html/markdown), get a URL.
   ssh hostthis.dev versions <slug>                   history (within the 24h window)
   ssh hostthis.dev pin <slug> <ver>                  set served version
   ssh hostthis.dev delete <slug>                     permanent
-  ssh hostthis.dev whoami                            your identity + quota
-  ssh hostthis.dev token create                      issue an HTTP API token
+  ssh hostthis.dev whoami                            your identity + active count
 
-You: SHA256:abc... (4 active uploads, 38/200 MB this 30d window)
+You: SHA256:abc... (4 active uploads, 312 KiB / 1 MiB)
 ```
 
 ---
@@ -385,129 +375,33 @@ Constraints:
 - *Style*: monospace by default (it's a terminal-flavored tool). Minimal
   CSS, single accent color. Dark + light via `prefers-color-scheme`.
 
-## HTTP / curl fallback
+## Limits
 
-For environments without ssh (some CI, some sandboxes), the HTTP surface
-mirrors the ssh verbs 1:1. **The HTTP surface always requires a token** —
-no anonymous curl. Tokens are issued only via the ssh path, which means
-quota tracking always has a key fingerprint to attribute uploads to.
+One limit, one number.
 
-Get a token first:
+*1 MiB per identity, total across active pastes.*
 
-```
-$ ssh hostthis.dev token create
-htst_live_z9k2q...
-```
+"Identity" is either the SHA256 fingerprint of the uploader's ssh public
+key (keyed users) or the client's IP subnet (anonymous; /24 for IPv4,
+/48 for IPv6). The cap covers the sum of all of the identity's active
+pastes' sizes. When pastes expire (24h), the cap frees up. Anyone
+trying to upload more gets a "you'd exceed your 1 MiB total quota"
+error.
 
-Then use it:
+That's it. No per-paste cap separate from the identity cap (since one
+paste fitting in 1 MiB *is* the only upload an identity can make from
+zero used bytes). No rolling-window quota, no per-IP-and-per-key
+tracking, no rate limiter.
 
-```
-$ curl -H "Authorization: Bearer htst_live_z9k2q..." \
-       -H "Content-Type: text/html" \
-       --data-binary @index.html https://hostthis.dev/u
-https://abc12345.hostthis.dev
-```
-
-A request to any HTTP endpoint without a valid `Authorization: Bearer …`
-header returns `401`, with a body pointing at `ssh hostthis.dev token create`.
-
-Endpoints (all under `https://hostthis.dev/api/`):
-- `POST /api/u[/<slug>]` — upload (new, or update existing)
-- `GET  /api/list` — your active pastes
-- `GET  /api/show/<slug>` — content (owner only)
-- `GET  /api/versions/<slug>` — history
-- `POST /api/pin/<slug>/<ver>` — set served version
-- `POST /api/rename/<slug>` — set / change paste's label
-- `DELETE /api/<slug>` — permanent delete
-- `GET  /api/whoami` — identity + quota
-
----
-
-## Limits & Sybil defense
-
-Layered, defense-in-depth. The headline defense is the **union-quota
-model**: per-key caps and per-IP caps aren't independent ceilings (which
-would let an attacker rotate one axis to bypass the other) — they share
-the same quota via an equivalence-class structure.
+The bound on what a single attacker can do to the service is therefore
+1 MiB per identity. Sybil rotation across IP subnets remains possible
+but slow (a /24 wide enough to look like a real ISP block is harder to
+spoof than to rotate). Operators with abuse concerns can layer
+their reverse proxy or hosting-provider rate limits on top.
 
 ### Caps
 
-- **Per-paste hard cap**: 5 MB. Universal. Never raised.
-- **Per-quota-class total**: 200 MB rolling 30-day window. Covers normal
-  use (LLM artifacts, prototypes); abusers hit the wall fast.
-- **Per-quota-class upload rate**: 50 MB per day. Smoothing burst usage.
-
-### The quota class — "union of key and IP"
-
-Every upload is tagged with (`key_fingerprint`, `ip_subnet`). For IPv4,
-`ip_subnet` is the `/24`; for IPv6, the `/48`. (Anonymous uploads use
-`key_fingerprint = null`.)
-
-Quotas are tracked per **equivalence class**, not per axis. The classes
-form via simple union: any two upload identities that share *either* a
-key fingerprint *or* an IP subnet land in the same class. Quota usage
-sums across all uploads in the class.
-
-Concretely:
-- Anon upload from IP `1.2.3.0/24` → class `{(null, 1.2.3.0/24)}`.
-- A keyed upload from the same subnet → joins the same class
-  (`(K1, 1.2.3.0/24)` shares subnet with `(null, 1.2.3.0/24)`).
-- That same key from a different subnet `5.6.7.0/24` → joins the same
-  class (shares key `K1`).
-- A new key from `5.6.7.0/24` → joins the same class (shares subnet).
-
-To escape the class, an attacker must rotate **both** the key fingerprint
-**and** the IP subnet *simultaneously*. Rotating only one keeps them
-trapped in the existing class with its accumulated quota.
-
-Implementation: a union-find structure keyed on (key, subnet) tuples,
-persisted in sqlite. Each upload reads the tuple, finds (or creates) its
-class, checks the class's rolling quota, and accepts or rejects.
-
-### Edge case: household merging
-
-Legitimate users on shared networks (family, coworking spaces, dorms)
-will see their classes merge across people:
-
-- Roommate A uploads with key K_A from home IP `H/24`.
-- Roommate B uploads with key K_B from same `H/24` → joins A's class.
-- Now both share a 200 MB / 30d window even though they're different
-  people.
-
-This is intentional cost for the Sybil defense. We accept the false-positive
-merging because the alternative (independent per-key + per-IP caps with
-OR-rejection) lets a determined abuser stay below both ceilings forever
-by playing them off each other. If household merging becomes a real
-complaint, raise the per-class cap (still keep the union structure) before
-splitting axes.
-
-### Other defenses
-
-1. **New keys start at anon tier**: 7-day cooldown before establishing.
-   Defeats `ssh-keygen ∞ times` for instant-trust abuse. A class can
-   contain a mix of established and new keys; the *behavior* tier
-   (ephemeral default, no long-term option) is per-key, but the *quota*
-   is per-class.
-2. **Per-paste hard cap**: never exceeded regardless of trust. Worst case
-   is bounded.
-3. **Retention TTL backstop**: even long-term pastes flip to ephemeral
-   after 365 days of owner-silence. Caps storage explosion from forgotten
-   accounts.
-4. **GitHub verify** (optional uplift): doesn't add a hard defense but
-   raises the cost of generating a fresh trust-signal for an attacker
-   (they need a fresh GitHub account too).
-5. **Per-class abuse signal**: if any paste in the class is flagged for
-   abuse (DMCA, malware, phishing), the class is throttled or banned —
-   the merging that hurts legit households also hurts attackers who
-   share infrastructure with each other.
-
-### Self-hosted relaxation
-
-For deploys on trusted networks (friends-only, VPN-fronted, LAN-only)
-the operator can disable IP-subnet tracking entirely via the
-`features.trusted_network` flag — quotas then become purely per-key,
-and anonymous uploads share a single global anonymous class. Public
-deploys keep the full union-quota machinery on.
+That's the whole list. See the prose above for "Identity" definition.
 
 ---
 

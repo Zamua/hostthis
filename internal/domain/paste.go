@@ -17,7 +17,7 @@ import (
 // model.
 type Paste struct {
 	Slug          Slug
-	OwnerHash     string      // SHA256 fingerprint of the owner's ssh key, or "" for anonymous
+	Identity      Identity    // "key:<fp>" or "ip:<subnet>" — quota AND capability gate
 	Kind          ContentKind // html | markdown of the currently-served version
 	ContentSHA    string      // sha256 of the currently-served bytes
 	Size          int         // bytes (currently-served)

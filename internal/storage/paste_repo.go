@@ -27,11 +27,11 @@ func (r *PasteRepo) Insert(p domain.Paste) error {
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op when commit succeeds
 	_, err = tx.Exec(`
-		INSERT INTO pastes (slug, owner_hash, kind, content_sha, size, name,
+		INSERT INTO pastes (slug, identity, kind, content_sha, size, name,
 		                    pinned_version,
 		                    created_at, updated_at, expires_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, p.Slug.String(), p.OwnerHash, string(p.Kind), p.ContentSHA, p.Size, p.Name,
+	`, p.Slug.String(), p.Identity.String(), string(p.Kind), p.ContentSHA, p.Size, p.Name,
 		p.PinnedVersion,
 		formatTime(p.CreatedAt), formatTime(p.UpdatedAt), formatTime(p.ExpiresAt))
 	if err != nil {
@@ -55,7 +55,7 @@ func (r *PasteRepo) Insert(p domain.Paste) error {
 // them.
 func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
 	row := r.db.QueryRow(`
-		SELECT slug, owner_hash, kind, content_sha, size, name,
+		SELECT slug, identity, kind, content_sha, size, name,
 		       pinned_version,
 		       created_at, updated_at, expires_at
 		FROM pastes WHERE slug = ?
@@ -65,17 +65,17 @@ func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
 
 // ListByOwner returns all of an owner's active pastes, ordered by
 // expires_at ascending (soonest to die first — matches what `list`
-// should show). The owner_hash empty string returns no rows
+// should show). The identity empty string returns no rows
 // (anonymous has no list capability).
 func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	if owner == "" {
 		return nil, nil
 	}
 	rows, err := r.db.Query(`
-		SELECT slug, owner_hash, kind, content_sha, size, name,
+		SELECT slug, identity, kind, content_sha, size, name,
 		       pinned_version,
 		       created_at, updated_at, expires_at
-		FROM pastes WHERE owner_hash = ?
+		FROM pastes WHERE identity = ?
 		ORDER BY expires_at ASC
 	`, owner)
 	if err != nil {
@@ -216,11 +216,29 @@ func (r *PasteRepo) CountByOwner(owner string) (int, error) {
 		return 0, nil
 	}
 	var n int
-	err := r.db.QueryRow(`SELECT COUNT(*) FROM pastes WHERE owner_hash = ?`, owner).Scan(&n)
+	err := r.db.QueryRow(`SELECT COUNT(*) FROM pastes WHERE identity = ?`, owner).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("count by owner: %w", err)
 	}
 	return n, nil
+}
+
+// SumActiveSizeByOwner returns the total bytes the identity currently
+// has alive (sum of all non-expired pastes' size). Used by the quota
+// check at upload time.
+func (r *PasteRepo) SumActiveSizeByOwner(owner string, now time.Time) (int64, error) {
+	if owner == "" {
+		return 0, nil
+	}
+	var n sql.NullInt64
+	err := r.db.QueryRow(`
+		SELECT COALESCE(SUM(size), 0) FROM pastes
+		WHERE identity = ? AND expires_at > ?
+	`, owner, formatTime(now)).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("sum active size: %w", err)
+	}
+	return n.Int64, nil
 }
 
 // OwnerFirstSeen returns the earliest CreatedAt across the owner's
@@ -231,7 +249,7 @@ func (r *PasteRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 		return time.Time{}, nil
 	}
 	var s sql.NullString
-	err := r.db.QueryRow(`SELECT MIN(created_at) FROM pastes WHERE owner_hash = ?`, owner).Scan(&s)
+	err := r.db.QueryRow(`SELECT MIN(created_at) FROM pastes WHERE identity = ?`, owner).Scan(&s)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("owner first seen: %w", err)
 	}
@@ -245,8 +263,8 @@ func (r *PasteRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 // place to update if columns shift.
 func scanPaste(s scanner) (domain.Paste, error) {
 	var p domain.Paste
-	var slugStr, kind, created, updated, expires string
-	if err := s.Scan(&slugStr, &p.OwnerHash, &kind, &p.ContentSHA, &p.Size, &p.Name,
+	var slugStr, identStr, kind, created, updated, expires string
+	if err := s.Scan(&slugStr, &identStr, &kind, &p.ContentSHA, &p.Size, &p.Name,
 		&p.PinnedVersion,
 		&created, &updated, &expires); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -255,6 +273,7 @@ func scanPaste(s scanner) (domain.Paste, error) {
 		return domain.Paste{}, fmt.Errorf("scan paste: %w", err)
 	}
 	p.Slug = domain.Slug(slugStr)
+	p.Identity = domain.Identity(identStr)
 	p.Kind = domain.ContentKind(kind)
 	p.CreatedAt = parseTime(created)
 	p.UpdatedAt = parseTime(updated)

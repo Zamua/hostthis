@@ -35,7 +35,6 @@ type Server struct {
 	HostKeyPath string
 	Upload      *service.Upload
 	Manage      *service.Manage
-	Token       *service.TokenService
 	BuildURL    URLBuilder
 	Logger      *log.Logger
 }
@@ -76,7 +75,19 @@ func (s *Server) ListenAndServe() error {
 // client does that for us). The first token is the verb. An empty
 // command means "anonymous-or-keyed implicit upload."
 func (s *Server) handleSession(sess gossh.Session) {
-	owner, _ := sess.Context().Value("ownerHash").(string)
+	// Identity is the unit of quota accounting AND the gate for
+	// management verbs. We try "key:<fp>" first (set when the client
+	// offered a publickey); fall back to "ip:<subnet>" derived from
+	// the session's RemoteAddr. Empty only if both fail, which
+	// shouldn't happen.
+	keyedFP, _ := sess.Context().Value("ownerHash").(string)
+	var owner string
+	switch {
+	case keyedFP != "":
+		owner = domain.IdentityFromKeyFingerprint(keyedFP).String()
+	default:
+		owner = domain.IdentityFromIP(remoteIP(sess)).String()
+	}
 	argv := sess.Command()
 
 	if len(argv) == 0 {
@@ -118,8 +129,6 @@ func (s *Server) handleSession(sess gossh.Session) {
 		s.verbPin(sess, owner, argv[1:])
 	case "whoami":
 		s.verbWhoami(sess, owner)
-	case "token":
-		s.verbToken(sess, owner, argv[1:])
 	default:
 		// Looks like a slug? Treat as `update`. The slug-update
 		// shortcut is the SPEC.md "cat foo | ssh hostthis.dev <slug>"
@@ -182,14 +191,14 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	}
 
 	// Create path.
-	if owner == "" && args.Name != "" {
+	anonymous := !domain.Identity(owner).IsKeyed()
+	if anonymous && args.Name != "" {
 		fmt.Fprintln(sess.Stderr(), "note: --name ignored on anonymous upload")
 		args.Name = ""
 	}
 	res, err := s.Upload.Create(body, owner, args.Name, args.Type)
 	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(1)
+		emitServiceErr(sess, err)
 		return
 	}
 	url := s.BuildURL(res.Paste.Slug)
@@ -199,7 +208,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	} else {
 		fmt.Fprintln(sess.Stderr(), "expires in 24h")
 	}
-	if owner == "" {
+	if anonymous {
 		fmt.Fprintln(sess.Stderr(), "note: anonymous upload — add an ssh key for list / update / delete")
 	}
 	_ = sess.Exit(0)
@@ -350,7 +359,7 @@ func (s *Server) verbPin(sess gossh.Session, owner string, argv []string) {
 // -- whoami -----------------------------------------------------------------
 
 func (s *Server) verbWhoami(sess gossh.Session, owner string) {
-	if owner == "" {
+	if !domain.Identity(owner).IsKeyed() {
 		fmt.Fprintln(sess.Stderr(), "anonymous — no ssh key offered")
 		_ = sess.Exit(0)
 		return
@@ -360,36 +369,14 @@ func (s *Server) verbWhoami(sess gossh.Session, owner string) {
 		emitServiceErr(sess, err)
 		return
 	}
-	fmt.Fprintf(sess, "key:     %s\n", info.OwnerHash)
+	// info.Identity is "key:SHA256:abcd..." — strip the prefix for
+	// display so it matches `ssh-keygen -lf` style.
+	fmt.Fprintf(sess, "key:     %s\n", strings.TrimPrefix(info.Identity, domain.IdentityKeyPrefix))
 	if !info.FirstSeen.IsZero() {
 		fmt.Fprintf(sess, "joined:  %s\n", info.FirstSeen.Format("2006-01-02"))
 	}
 	fmt.Fprintf(sess, "active:  %d paste(s)\n", info.Active)
 	_ = sess.Exit(0)
-}
-
-// -- token ------------------------------------------------------------------
-
-func (s *Server) verbToken(sess gossh.Session, owner string, argv []string) {
-	if len(argv) < 1 {
-		fmt.Fprintln(sess.Stderr(), "hostthis: usage: token create")
-		_ = sess.Exit(2)
-		return
-	}
-	switch argv[0] {
-	case "create":
-		raw, err := s.Token.Create(owner)
-		if err != nil {
-			emitServiceErr(sess, err)
-			return
-		}
-		fmt.Fprintln(sess, raw)
-		fmt.Fprintln(sess.Stderr(), "save this — it's shown only once. use it as `Authorization: Bearer <token>` for the HTTP API.")
-		_ = sess.Exit(0)
-	default:
-		fmt.Fprintf(sess.Stderr(), "hostthis: unknown token subcommand %q\n", argv[0])
-		_ = sess.Exit(2)
-	}
 }
 
 // -- help -------------------------------------------------------------------
@@ -411,9 +398,9 @@ const helpText = `hostthis — pipe rendered content (html/markdown), get a URL.
   ssh hostthis.dev pin <slug> <ver>               set served version
   ssh hostthis.dev delete <slug>                  permanent
   ssh hostthis.dev whoami                         your identity + active count
-  ssh hostthis.dev token create                   issue an HTTP API token
 
-uploads accept HTML and Markdown only. 5 MB per paste. 24h retention.
+uploads accept HTML and Markdown only. 1 MiB per identity, total
+across active pastes. 24h retention.
 the URL itself is the secret — 8-char random slug, ~10^12 possibilities.
 share the URL with anyone you want; don't share it with anyone you don't.`
 
@@ -455,6 +442,24 @@ func exitForServiceErr(err error) int {
 	default:
 		return 1
 	}
+}
+
+// remoteIP extracts the client's IP address from a session's
+// RemoteAddr. Falls back to nil — IdentityFromIP handles that.
+func remoteIP(sess gossh.Session) net.IP {
+	addr := sess.RemoteAddr()
+	if addr == nil {
+		return nil
+	}
+	if tcp, ok := addr.(*net.TCPAddr); ok {
+		return tcp.IP
+	}
+	// Generic fallback: split host:port and parse.
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return nil
+	}
+	return net.ParseIP(host)
 }
 
 // fingerprintKey returns the canonical SHA256 fingerprint of an ssh

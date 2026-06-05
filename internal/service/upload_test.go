@@ -38,8 +38,8 @@ func TestUpload_Create_HTML(t *testing.T) {
 	if res.Paste.Kind != domain.KindHTML {
 		t.Fatalf("kind: got %q, want html", res.Paste.Kind)
 	}
-	if res.Paste.OwnerHash != "owner-key-hash" {
-		t.Fatalf("owner: got %q, want %q", res.Paste.OwnerHash, "owner-key-hash")
+	if string(res.Paste.Identity) != "owner-key-hash" {
+		t.Fatalf("identity: got %q, want %q", res.Paste.Identity, "owner-key-hash")
 	}
 	if res.Paste.Name != "demo" {
 		t.Fatalf("name: got %q, want %q", res.Paste.Name, "demo")
@@ -69,8 +69,8 @@ func TestUpload_Create_Markdown(t *testing.T) {
 	if res.Paste.Kind != domain.KindMarkdown {
 		t.Fatalf("kind: got %q, want markdown", res.Paste.Kind)
 	}
-	if res.Paste.OwnerHash != "" {
-		t.Fatalf("anonymous should have empty OwnerHash, got %q", res.Paste.OwnerHash)
+	if res.Paste.Identity != "" {
+		t.Fatalf("anonymous should have empty Identity, got %q", res.Paste.Identity)
 	}
 }
 

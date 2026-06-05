@@ -18,6 +18,7 @@ import (
 type PasteRepo interface {
 	Insert(domain.Paste) error
 	Get(domain.Slug) (domain.Paste, error)
+	SumActiveSizeByOwner(owner string, now time.Time) (int64, error)
 }
 
 // BlobStore writes and reads content-addressed bytes.
@@ -49,11 +50,15 @@ type Result struct {
 	Paste domain.Paste
 }
 
-// CreateAnonymous accepts up to MaxPasteBytes from `body`, detects
-// the content kind (HTML or Markdown), persists, and returns the
-// resulting Paste. Anonymous = OwnerHash is "". Caller (SSH layer)
-// passes its key fingerprint via Owner; the HTTP api layer passes
-// from its token.
+// ErrOverQuota is returned when accepting the upload would push the
+// identity's total active bytes above UserQuotaBytes.
+var ErrOverQuota = errors.New("service: would exceed your 1 MiB total quota; delete a paste or wait for one to expire")
+
+// Create persists a new paste owned by the given identity.
+// The identity is either a "key:<fp>" string (keyed user) or
+// "ip:<subnet>" (anonymous; SSH layer derives this from RemoteAddr).
+// The identity gates quota — sum of identity's active pastes plus
+// this body cannot exceed UserQuotaBytes.
 //
 // Type detection uses domain.DetectKind; unsupported types return
 // domain.ErrUnsupportedKind so the caller can surface the right
@@ -69,13 +74,20 @@ func (u *Upload) Create(body []byte, owner string, name string, typeHint string)
 	if err != nil {
 		return Result{}, err
 	}
+	now := u.Now().UTC()
+	used, err := u.Repo.SumActiveSizeByOwner(owner, now)
+	if err != nil {
+		return Result{}, fmt.Errorf("quota check: %w", err)
+	}
+	if used+int64(len(body)) > int64(domain.UserQuotaBytes) {
+		return Result{}, ErrOverQuota
+	}
 	sha := domain.HashContent(body)
 	if err := u.Blobs.Put(sha, body); err != nil {
 		return Result{}, fmt.Errorf("blob write: %w", err)
 	}
-	now := u.Now().UTC()
 	p := domain.Paste{
-		OwnerHash:     owner,
+		Identity:      domain.Identity(owner),
 		Kind:          kind,
 		ContentSHA:    sha,
 		Size:          len(body),
