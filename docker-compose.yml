@@ -3,13 +3,12 @@
 #   docker compose up --build       # build + run; ssh on 12222, http on 18080
 #   docker compose down
 #
-# Host ports avoid 2222 / 8080 because those are commonly already taken
-# (Mac mini also runs caddy + a hello-world service on :8080). Container
-# ports stay :2222 / :8080 — only the host-side mapping shifts.
+# Host ports avoid 2222 / 8080 because those are commonly already
+# taken. Container ports stay :2222 / :8080 — only the host-side
+# mapping shifts.
 #
-# Production: drop these mappings, run with --network=host on the VPS,
-# nginx terminates TLS for hostthis.dev and proxies 127.0.0.1:8080 →
-# the container.
+# Production: drop these mappings, run with --network=host, and
+# have a TLS-terminating reverse proxy front 127.0.0.1:8080.
 
 services:
   hostthis:
