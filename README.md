@@ -16,14 +16,6 @@ ssh hostthis.dev command [args]
 Reads HTML or Markdown from stdin, stores it, prints a URL. The URL
 serves the content for 24 hours from the last update, then it's deleted.
 
-Your ssh key is your account — no signup, no password. A key is
-required to upload; sessions without one are refused with a nudge
-toward `ssh-keygen`.
-
-The URL itself is the secret: 8-char random slug from a 32-char
-alphabet, ~10^12 possibilities. Share the URL with whoever you want to
-see the paste; nobody who doesn't have it can find it.
-
 ## Commands
 
 <dl>
