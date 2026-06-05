@@ -99,9 +99,10 @@ func (m *Manage) Show(slug domain.Slug, owner string) (domain.Paste, []byte, err
 // Update appends a new version to an existing slug, makes it the
 // pinned version, and resets the 24h expiry. Owner-gated.
 //
-// Quota: the new content size REPLACES the existing pinned size in
-// the active-bytes total (older versions still count). We enforce
-// (sum_active - existing_size + new_size) <= UserQuotaBytes.
+// Quota: the new version row ADDS to the identity's active-bytes
+// total (existing versions stay on disk until the parent paste
+// expires or is deleted). The check is therefore the same shape as
+// Upload's: used + new <= UserQuotaBytes.
 func (m *Manage) Update(slug domain.Slug, owner string, body []byte, typeHint string) (domain.Paste, int, error) {
 	if len(body) == 0 {
 		return domain.Paste{}, 0, errors.New("empty upload")
@@ -109,8 +110,7 @@ func (m *Manage) Update(slug domain.Slug, owner string, body []byte, typeHint st
 	if len(body) > domain.MaxPasteBytes {
 		return domain.Paste{}, 0, fmt.Errorf("upload exceeds %d-byte cap", domain.MaxPasteBytes)
 	}
-	existing, err := m.requireOwner(slug, owner)
-	if err != nil {
+	if _, err := m.requireOwner(slug, owner); err != nil {
 		return domain.Paste{}, 0, err
 	}
 	kind, err := domain.DetectKind(body, typeHint)
@@ -122,10 +122,7 @@ func (m *Manage) Update(slug domain.Slug, owner string, body []byte, typeHint st
 	if err != nil {
 		return domain.Paste{}, 0, fmt.Errorf("quota check: %w", err)
 	}
-	// Subtract the existing pinned-size (it's being replaced) and add
-	// the new body's size; older versions still contribute.
-	projected := used - int64(existing.Size) + int64(len(body))
-	if projected > int64(domain.UserQuotaBytes) {
+	if used+int64(len(body)) > int64(domain.UserQuotaBytes) {
 		return domain.Paste{}, 0, ErrOverQuota
 	}
 	sha := domain.HashContent(body)

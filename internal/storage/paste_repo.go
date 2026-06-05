@@ -224,16 +224,25 @@ func (r *PasteRepo) CountByOwner(owner string) (int, error) {
 }
 
 // SumActiveSizeByOwner returns the total bytes the identity currently
-// has alive (sum of all non-expired pastes' size). Used by the quota
-// check at upload time.
+// has alive — the sum of every VERSION row attached to any of its
+// non-expired pastes. We sum versions, not pastes, so that update
+// history is properly accounted: each call to `update` adds a new
+// version row that persists on disk until the parent paste expires
+// or is deleted.
+//
+// Delete frees this completely: the FK cascade drops the parent
+// paste row AND all its version rows, so the next call to this
+// function returns the lower total.
 func (r *PasteRepo) SumActiveSizeByOwner(owner string, now time.Time) (int64, error) {
 	if owner == "" {
 		return 0, nil
 	}
 	var n sql.NullInt64
 	err := r.db.QueryRow(`
-		SELECT COALESCE(SUM(size), 0) FROM pastes
-		WHERE identity = ? AND expires_at > ?
+		SELECT COALESCE(SUM(v.size), 0)
+		FROM versions v
+		JOIN pastes p ON p.slug = v.slug
+		WHERE p.identity = ? AND p.expires_at > ?
 	`, owner, formatTime(now)).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("sum active size: %w", err)
