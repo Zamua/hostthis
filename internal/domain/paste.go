@@ -14,8 +14,7 @@ import (
 // There's no Published flag or per-paste secret — the URL slug
 // itself is the secret (8 chars / 32^8 ≈ 10^12 possibilities), so
 // "share the URL with whoever you want to see it" is the access
-// model. Same posture as a YouTube unlisted link or a GitHub
-// secret gist.
+// model.
 type Paste struct {
 	Slug          Slug
 	OwnerHash     string      // SHA256 fingerprint of the owner's ssh key, or "" for anonymous

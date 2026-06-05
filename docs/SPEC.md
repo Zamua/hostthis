@@ -63,8 +63,6 @@ Each paste lives at its own subdomain on the apex:
 There's no concept of "public vs private" because the slug *is* the
 secret: 32^8 ≈ 1.1 × 10^12 possibilities, computationally infeasible to
 guess. Anyone with the URL can view; anyone without it can't find it.
-Same posture as YouTube unlisted, GitHub secret gists, Drive "anyone
-with the link."
 
 Apex `https://hostthis.dev` is the homepage / docs. Never serves user
 content.
