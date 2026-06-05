@@ -1,7 +1,9 @@
 # hostthis — spec
 
-A self-hostable, dev-first paste service. Pipe a file to ssh, get back a URL.
-No signup, no UI, no CLI to install. Your existing ssh key is the account.
+A self-hostable, dev-first paste service for content that *needs rendering
+to be shareable* — HTML, Markdown, and a small future set of rendered
+formats. Pipe a file to ssh, get back a URL. No signup, no UI, no CLI
+to install. Your existing ssh key is the account.
 
 ```
 $ cat index.html | ssh hostthis.dev
@@ -15,19 +17,46 @@ out of scope for v1 — see "Non-goals" at the bottom.
 
 ## What it is, what it isn't
 
-- It IS: ephemeral-to-permanent file/HTML hosting addressable by URL, with
-  ssh-pipe as the primary upload mechanism.
+- It IS: a hosting target for **content that needs rendering to share
+  well** — HTML pages, Markdown docs — addressable by URL, with ssh-pipe
+  as the primary upload mechanism.
 - It IS: dev-first. The mental model is `git push` for documents — your ssh
   key is your identity, every operation is one line in a terminal.
-- It IS: a hosting target for LLM-generated artifacts (HTML mockups, ZIPs,
-  Markdown reports) that need an immediate sharable URL.
+- It IS: useful for LLM-generated artifacts that are awkward to share
+  otherwise (HTML mockups from Claude, Markdown reports from Cursor, etc.).
+- It IS NOT: a general file host. ZIPs, binaries, photos, videos — those
+  belong on elsewhere.
 - It IS NOT: a comment/collaboration platform (other tools fill that role).
-- It IS NOT: a long-term file vault (elsewhere).
 - It IS NOT: a transient blob host (other tools fill that role).
 
-The differentiator from existing tools: `ssh-pipe upload` + `versioned HTML
-hosting` + `ssh-key identity` + `self-hostable` + `dev-first API/CLI surface`.
-No tool combines all of those.
+The differentiator from existing tools: `ssh-pipe upload` + `rendered HTML/
+Markdown hosting` + `ssh-key identity` + `self-hostable` + `dev-first
+API/CLI surface`. No tool combines all of those.
+
+## Supported formats
+
+**v1**: HTML, Markdown.
+
+Detection: by content type sniffed from the first 512 bytes plus optional
+explicit `--type` flag at upload time. Markdown is rendered to HTML
+server-side at request time (no client JS required); the rendered HTML
+follows the same sandboxing rules as user-supplied HTML.
+
+**Future** (post-v1, behind a feature flag):
+- Mermaid diagrams (render server-side to SVG / PNG)
+- Maybe: PlantUML, GraphViz / DOT, ASCII tables
+
+Uploads of unsupported types are **rejected** with a clear error pointing
+at what we accept:
+
+```
+$ cat photo.jpg | ssh hostthis.dev
+error: hostthis only accepts content that needs rendering (html, markdown).
+       for binary files, use elsewhere.
+```
+
+This is deliberate scope: every accepted format expands the surface for
+abuse + sandboxing edge cases. Stay narrow.
 
 ---
 
@@ -72,20 +101,20 @@ password. First time a key fingerprint connects, the server creates an
 account row keyed on the SHA256 fingerprint. Every subsequent connection
 from the same key is "the same user".
 
-Three identity tiers:
+Two tiers, distinguished only by *what you can do* (not size or
+retention — see those sections for fixed numbers):
 
-| Tier | How | Limits | Retention |
-|---|---|---|---|
-| **anonymous** | no ssh key offered (SSH `none` auth) | 5 MB per paste | 7 days |
-| **new keyed** | first-time key, < 7 days old | 5 MB per paste | 7 days |
-| **established keyed** | key seen for ≥ 7 days, no abuse flags | 25 MB per paste, 500 MB total | forever (until `delete`) |
+| Tier | How | Can do |
+|---|---|---|
+| **anonymous** | no ssh key offered (SSH `none` auth) | upload only |
+| **keyed** | any ssh key offered | upload + `list` + `show` + `update` + `delete` + `unpublish`/`publish` + `link`/`unshare` against your own pastes |
 
-New keys start at anon limits to defeat Sybil abuse (`ssh-keygen ∞ times`
-for unlimited quota). They auto-bump after 7 days of no abuse.
+Anonymous uploads are owner-less: nobody can `list` or `update` them
+once submitted. They live their full retention window and then expire.
 
-Optional uplift: `ssh hostthis.dev verify github` opens an OAuth flow that
-links the key to a verified GitHub account → immediate bump to established
-tier (skips the 7-day cooldown). Not required, just speeds up trust.
+There is no "new key cooldown" or trust ramp — the per-class quota
+(see "Limits & Sybil defense") already bounds abuse via key rotation,
+so we don't add a second mechanism for the same problem.
 
 ### Security: snooping a public key gives nothing
 
@@ -102,17 +131,42 @@ signature. Never trust a self-asserted username or fingerprint.
 
 ## File handling
 
-- **Per-paste hard cap**: 25 MB (configurable by operator, but a per-paste
-  ceiling always exists). Anon and new-keyed get 5 MB.
-- **Format**: any binary. Server sniffs the first 512 bytes for content
-  type via the standard `http.DetectContentType` algorithm. HTML/MD render
-  as pages; images render inline; everything else is `Content-Disposition:
-  attachment` by default.
-- **No streaming reads from upload**: server buffers the whole stdin into
-  memory or a temp file before committing. The 25 MB cap means a small fixed
-  buffer is fine.
-- **Storage**: SHA256-keyed content-addressed blobs on disk (`data/blobs/<sha256[:2]>/<sha256>`).
-  Multiple slugs pointing to the same blob share the storage.
+- **Per-paste hard cap**: 5 MB. Universal across tiers. Sized for the
+  worst-case legitimate use (a self-contained HTML page with embedded
+  base64 images, or a long Markdown doc). Larger than that and the user
+  is sharing the wrong thing through hostthis.
+- **Format gate**: accept only supported content types (HTML, Markdown
+  in v1). Server sniffs the first 512 bytes for content type via
+  `http.DetectContentType` and cross-checks any explicit `--type` flag.
+  Unsupported content is rejected with a clear error pointing at
+  alternatives — no silent fallback to `attachment` rendering.
+- **No streaming reads from upload**: server buffers the whole stdin
+  into memory (≤ 5 MB so a fixed buffer is fine) before committing.
+- **Storage**: SHA256-keyed content-addressed blobs on disk
+  (`data/blobs/<sha256[:2]>/<sha256>`). Multiple slugs pointing to the
+  same blob share the storage. Rendered output (Markdown → HTML) is
+  cached alongside the source blob, keyed by source SHA + renderer
+  version, regenerated on renderer-version bumps.
+
+## Retention
+
+**Every paste lives for 24 hours from its last update**, then it's
+deleted (slug, all versions, content blob if unreferenced). No
+exceptions, no user-facing control, no operator config.
+
+- Initial upload: 24h clock starts.
+- Each `update <slug>` resets the clock to 24h from that moment.
+- No `touch` verb, no `--expires` flag. Time-based extension only happens
+  as a side effect of actually changing content.
+
+Rationale for short + fixed: hostthis is for *shareable rendered content*
+(HTML mockups, Markdown reports, demo prototypes). The use case is
+"send this link to a coworker today"; nobody is sending an "open this
+link in two months" URL through us. 24h forces the asker to re-host if
+they need it again, which catches stale-link rot at the source.
+
+Long-term hosting is a deliberate non-goal — see "Non-goals" at the
+bottom. If the use case shows up later, it'll be specced and ADR'd then.
 
 ---
 
@@ -126,12 +180,13 @@ With no command and no stdin, the server prints the help banner.
 cat index.html | ssh hostthis.dev
 → https://abc12345.hostthis.dev
 ```
-Reads stdin until EOF or 25 MB. Generates a fresh random slug. Returns
-the URL to stdout (one line, suitable for pipes).
+Reads stdin until EOF or 5 MB. Validates content type (HTML or Markdown
+in v1). Generates a fresh random slug. Returns the URL to stdout (one
+line, suitable for pipes).
 
 If the user has no ssh key in their agent, the server still accepts the
 upload via SSH's `none` auth method, prints the URL, and appends a one-line
-nudge about adding a key to get history.
+nudge about adding a key to get `list` / `update` / `delete` capability.
 
 ### Upload (update an existing slug)
 ```
@@ -218,94 +273,212 @@ auth: anyone with the URL views. Revoke any time with `unshare`.
 `--expires`: `Nh` (hours), `Nd` (days), `never`. Default 24h. No upper bound
 enforced; operators may config one.
 
-### Touch (refresh retention TTL)
-```
-ssh hostthis.dev touch abc12345
-touched. TTL reset.
-```
-Resets the "untouched for N days → expire" backstop. Keyed pastes have a
-365-day backstop by default; this prolongs another 365 days. Auto-applied
-on `update` and `pin` too.
-
 ### Identity
 ```
 ssh hostthis.dev whoami
 key:     SHA256:abc...xyz
 joined:  2025-12-01
-uploads: 4
-tier:    established
-quota:   312/500 MB
+uploads: 4 active (24h)
+quota:   38 / 200 MB this 30d window
 ```
 
-### Verify GitHub (optional uplift)
+### Issue an HTTP API token
 ```
-ssh hostthis.dev verify github
-visit: https://hostthis.dev/oauth/github?k=...
+ssh hostthis.dev token create
+htst_live_z9k2q...
 ```
-OAuth flow; on success, account is marked `verified:github:<username>`
-and tier bumps to established immediately.
+One-time output (we don't store the raw value, only a hash). Use as
+`Authorization: Bearer <token>` against the HTTP surface (see "HTTP /
+curl fallback"). `token list` / `token revoke <prefix>` round it out.
 
 ### Help
 ```
 ssh hostthis.dev
-hostthis.dev — pipe a file, get a URL
+hostthis.dev — pipe rendered content (html/markdown), get a URL.
+              pastes expire 24h after their last update.
 
   cat file.html | ssh hostthis.dev          upload
   cat file.html | ssh hostthis.dev <slug>   update an existing upload
-  ssh hostthis.dev list                     your uploads
+  ssh hostthis.dev list                     your active pastes
   ssh hostthis.dev show <slug>              read content (owner only)
-  ssh hostthis.dev versions <slug>          history
+  ssh hostthis.dev versions <slug>          history (within the 24h window)
   ssh hostthis.dev pin <slug> <ver>         set served version
   ssh hostthis.dev delete <slug>            permanent
   ssh hostthis.dev unpublish <slug>         public 404s
   ssh hostthis.dev publish <slug>           undo unpublish
   ssh hostthis.dev link <slug> --expires …  signed share URL
   ssh hostthis.dev unshare <slug>           revoke signed links
-  ssh hostthis.dev touch <slug>             refresh retention TTL
-  ssh hostthis.dev whoami                   your identity
-  ssh hostthis.dev verify github            link a GitHub account
+  ssh hostthis.dev whoami                   your identity + quota
+  ssh hostthis.dev token create             issue an HTTP API token
 
-You: SHA256:abc... (4 uploads, established tier)
+You: SHA256:abc... (4 active uploads, 38/200 MB this 30d window)
 ```
 
 ---
+
+## Apex landing page
+
+`https://hostthis.dev/` serves one static HTML page. Its job is exactly:
+*explain how to use this in 10 seconds*. Not a marketing page, not a
+dashboard, not interactive — just the docs the user needs to send their
+first paste.
+
+Content (final copy can iterate; this is the substance):
+
+```
+hostthis.dev
+
+Pipe a file to ssh, get a URL.
+
+    $ cat index.html | ssh hostthis.dev
+    https://abc12345.hostthis.dev
+
+Supported: HTML, Markdown.
+
+Your ssh key is your account. No signup.
+
+    $ ssh hostthis.dev whoami    your identity (or run --help for more)
+    $ ssh hostthis.dev list      pastes tied to your key
+
+[full verb list as a small <table> or definition list]
+
+Source: github.com/<org>/hostthis
+```
+
+Constraints:
+- *Single static HTML file*, served from the binary's embedded assets.
+  No JS unless we add a tiny copy-button. No external fonts/CSS/CDN.
+  Total weight under 20 KB.
+- *No content-rendering surface*. The apex never serves user content;
+  reserved subdomains include the apex hostname itself.
+- *Style*: monospace by default (it's a terminal-flavored tool). Minimal
+  CSS, single accent color. Dark + light via `prefers-color-scheme`.
 
 ## HTTP / curl fallback
 
-For environments without ssh (some CI, some sandboxes):
+For environments without ssh (some CI, some sandboxes), the HTTP surface
+mirrors the ssh verbs 1:1. **The HTTP surface always requires a token** —
+no anonymous curl. Tokens are issued only via the ssh path, which means
+quota tracking always has a key fingerprint to attribute uploads to.
+
+Get a token first:
 
 ```
-curl --data-binary @index.html https://hostthis.dev/u
+$ ssh hostthis.dev token create
+htst_live_z9k2q...
+```
+
+Then use it:
+
+```
+$ curl -H "Authorization: Bearer htst_live_z9k2q..." \
+       -H "Content-Type: text/html" \
+       --data-binary @index.html https://hostthis.dev/u
 https://abc12345.hostthis.dev
 ```
 
-Anonymous always. For keyed actions over HTTP, the user issues an API token
-via `ssh hostthis.dev token create` (one-time output), then passes it as
-`Authorization: Bearer <token>` on `/u`, `/list`, `/delete/<slug>`, etc.
+A request to any HTTP endpoint without a valid `Authorization: Bearer …`
+header returns `401`, with a body pointing at `ssh hostthis.dev token create`.
 
-The HTTP surface mirrors the ssh verbs 1:1.
+Endpoints (all under `https://hostthis.dev/api/`):
+- `POST /api/u[/<slug>]` — upload (new, or update existing)
+- `GET  /api/list` — your active pastes
+- `GET  /api/show/<slug>` — content (owner only)
+- `GET  /api/versions/<slug>` — history
+- `POST /api/pin/<slug>/<ver>` — set served version
+- `DELETE /api/<slug>` — permanent delete
+- `POST /api/unpublish/<slug>` / `POST /api/publish/<slug>`
+- `POST /api/link/<slug>` — issue signed share link
+- `POST /api/unshare/<slug>` — revoke all signed share links
+- `GET  /api/whoami` — identity + quota
 
 ---
 
-## Abuse defenses
+## Limits & Sybil defense
 
-Layered, defense-in-depth — no single mechanism is bulletproof but combined
-they bound worst-case damage.
+Layered, defense-in-depth. The headline defense is the **union-quota
+model**: per-key caps and per-IP caps aren't independent ceilings (which
+would let an attacker rotate one axis to bypass the other) — they share
+the same quota via an equivalence-class structure.
 
-1. **Per-IP daily cap**: 100 MB uploaded per `/24` (IPv4) or `/48` (IPv6)
-   per day. Bypassable with residential proxies but raises the bar.
-2. **New keys start at anon tier**: 7-day cooldown before bumping to
-   established. Defeats trivial `ssh-keygen` rotation for unlimited quota.
-3. **Per-paste hard cap**: 25 MB ceiling. No path to upload a 1 GB file
-   ever, by any user, regardless of trust state.
-4. **Retention TTL backstop**: even keyed pastes expire after 365 days of
-   no `touch`. Caps long-term storage explosion.
-5. **Optional GitHub verify** for instant trust uplift. Doesn't add hard
-   defenses but makes the trust signal cheaper for real users.
+### Caps
 
-For self-hosted instances on trusted networks (friends-only, behind a
-VPN, etc.) the operator can disable the IP cap and the new-key cooldown
-via config. Public-internet deploys keep all defenses on by default.
+- **Per-paste hard cap**: 5 MB. Universal. Never raised.
+- **Per-quota-class total**: 200 MB rolling 30-day window. Covers normal
+  use (LLM artifacts, prototypes); abusers hit the wall fast.
+- **Per-quota-class upload rate**: 50 MB per day. Smoothing burst usage.
+
+### The quota class — "union of key and IP"
+
+Every upload is tagged with (`key_fingerprint`, `ip_subnet`). For IPv4,
+`ip_subnet` is the `/24`; for IPv6, the `/48`. (Anonymous uploads use
+`key_fingerprint = null`.)
+
+Quotas are tracked per **equivalence class**, not per axis. The classes
+form via simple union: any two upload identities that share *either* a
+key fingerprint *or* an IP subnet land in the same class. Quota usage
+sums across all uploads in the class.
+
+Concretely:
+- Anon upload from IP `1.2.3.0/24` → class `{(null, 1.2.3.0/24)}`.
+- A keyed upload from the same subnet → joins the same class
+  (`(K1, 1.2.3.0/24)` shares subnet with `(null, 1.2.3.0/24)`).
+- That same key from a different subnet `5.6.7.0/24` → joins the same
+  class (shares key `K1`).
+- A new key from `5.6.7.0/24` → joins the same class (shares subnet).
+
+To escape the class, an attacker must rotate **both** the key fingerprint
+**and** the IP subnet *simultaneously*. Rotating only one keeps them
+trapped in the existing class with its accumulated quota.
+
+Implementation: a union-find structure keyed on (key, subnet) tuples,
+persisted in sqlite. Each upload reads the tuple, finds (or creates) its
+class, checks the class's rolling quota, and accepts or rejects.
+
+### Edge case: household merging
+
+Legitimate users on shared networks (family, coworking spaces, dorms)
+will see their classes merge across people:
+
+- Roommate A uploads with key K_A from home IP `H/24`.
+- Roommate B uploads with key K_B from same `H/24` → joins A's class.
+- Now both share a 200 MB / 30d window even though they're different
+  people.
+
+This is intentional cost for the Sybil defense. We accept the false-positive
+merging because the alternative (independent per-key + per-IP caps with
+OR-rejection) lets a determined abuser stay below both ceilings forever
+by playing them off each other. If household merging becomes a real
+complaint, raise the per-class cap (still keep the union structure) before
+splitting axes.
+
+### Other defenses
+
+1. **New keys start at anon tier**: 7-day cooldown before establishing.
+   Defeats `ssh-keygen ∞ times` for instant-trust abuse. A class can
+   contain a mix of established and new keys; the *behavior* tier
+   (ephemeral default, no long-term option) is per-key, but the *quota*
+   is per-class.
+2. **Per-paste hard cap**: never exceeded regardless of trust. Worst case
+   is bounded.
+3. **Retention TTL backstop**: even long-term pastes flip to ephemeral
+   after 365 days of owner-silence. Caps storage explosion from forgotten
+   accounts.
+4. **GitHub verify** (optional uplift): doesn't add a hard defense but
+   raises the cost of generating a fresh trust-signal for an attacker
+   (they need a fresh GitHub account too).
+5. **Per-class abuse signal**: if any paste in the class is flagged for
+   abuse (DMCA, malware, phishing), the class is throttled or banned —
+   the merging that hurts legit households also hurts attackers who
+   share infrastructure with each other.
+
+### Self-hosted relaxation
+
+For deploys on trusted networks (friends-only, VPN-fronted, LAN-only)
+the operator can disable IP-subnet tracking entirely via the
+`features.trusted_network` flag — quotas then become purely per-key,
+and anonymous uploads share a single global anonymous class. Public
+deploys keep the full union-quota machinery on.
 
 ---
 
@@ -314,102 +487,184 @@ via config. Public-internet deploys keep all defenses on by default.
 Subdomain-per-paste means each user-uploaded HTML lives on its own origin.
 Browsers enforce the same-origin policy: cookies, JS, and CSP from
 `abc12345.hostthis.dev` cannot reach `xyz67890.hostthis.dev` or the apex.
+The apex `hostthis.dev` never sets a `Domain=.hostthis.dev` cookie, so
+subdomain pastes cannot read apex cookies either.
 
-Additional hardening on the response side:
+Default response headers for HTML pages (operator can override):
 
-- `Content-Security-Policy: default-src 'self' data: blob:; frame-ancestors 'none'`
-  on HTML responses (operator can override per-paste later)
-- `X-Frame-Options: DENY` (no embedding)
-- `Referrer-Policy: no-referrer`
-- `Permissions-Policy` disabling camera / microphone / geo by default
-- `Content-Disposition: attachment` for any unknown content-type (forces
-  download, doesn't render)
+- `Content-Security-Policy` (see below — the JS question)
+- `X-Frame-Options: DENY` — no embedding the paste in iframes elsewhere
+- `Referrer-Policy: no-referrer` — visiting a paste leaks nothing about
+  who sent it
+- `Permissions-Policy: camera=(), microphone=(), geolocation=(), usb=(), payment=()`
+  — deny everything that needs explicit user grant
+- `Cross-Origin-Opener-Policy: same-origin` — pastes can't open
+  windows to other origins and retain references
 
-HTML rendering is opt-in by content type; everything else is opt-out
-(safer default).
+### JavaScript: we allow it
+
+Banning JS in user HTML would kill the primary use case (LLM-generated
+interactive prototypes, demos with charts/toggles/forms). We allow it,
+but isolate hard and constrain what it can do:
+
+**Allowed by default CSP**:
+- `script-src 'self' 'unsafe-inline'` — inline scripts and same-origin
+  external scripts (i.e. scripts the paste itself contains)
+- `style-src 'self' 'unsafe-inline'` — same for CSS
+- `img-src 'self' data: blob: https:` — local + data URIs + any HTTPS image
+- `font-src 'self' data: https:` — same for fonts
+- `connect-src 'self'` — **fetch/XHR/WebSocket restricted to same-origin**
+
+**Why restrict `connect-src`**: the highest-leverage attack on a JS-permissive
+host is exfiltration — a paste loads, looks legit, but its JS POSTs the
+visitor's input (or fingerprinting data) to an attacker-controlled domain.
+With `connect-src 'self'`, the paste's JS can only call back to its own
+subdomain, which is read-only (we don't accept user data via paste URLs).
+Phishing attempts at credential theft still happen but the stolen data
+has no exfiltration channel.
+
+Cost: legitimate pastes that need to call external APIs (e.g. a demo that
+hits OpenAI directly) don't work out-of-the-box. Owner can opt into a
+relaxed CSP via metadata on upload (`--csp loose`), which sets
+`connect-src https:` — this is a deliberate, owner-acknowledged opt-in.
+Default stays strict.
+
+**Phishing**: the URL pattern (`<slug>.hostthis.dev`) is the user's signal
+that the page is user-uploaded content, not a real site. We reinforce
+with a small "uploaded via hostthis.dev — treat as untrusted" interstitial
+on first visit per paste per browser session (dismissible). Same approach
+GitHub uses for `isolated-user-content subdomains`.
+
+**Crypto-mining / drive-by / browser exploits**: same-origin isolation
+limits blast radius to the visitor's session on that one paste. Modern
+browsers also block most known exploit categories. We accept residual
+risk; abuse reports remove offending pastes.
+
+**Abuse reporting**: every paste page renders a small "report" link in
+the response (CSP-permitted, hits the apex). An apex form lets visitors
+flag phishing / malware / DMCA. Reports flow to the operator's queue;
+flagged pastes can be unpublished by ops without owner action.
+
+### Markdown rendering
+
+Markdown is rendered to HTML server-side by a memory-safe Go markdown
+library (likely `gomarkdown/markdown` or `yuin/goldmark`). The output is
+sanitized through `bluemonday`'s UGC policy to strip event handlers,
+javascript: URLs, and dangerous tags. The sanitized HTML is then served
+with the same CSP as user-supplied HTML.
+
+This makes Markdown safer than HTML by default — uploaded Markdown can
+NOT execute JS, even though uploaded HTML can.
 
 ---
 
-## MCP server surface
+## llms.txt — AI-agent docs
 
-Expose a Model Context Protocol server at `https://hostthis.dev/mcp` so
-Claude / Cursor / n8n can publish directly. Tools mirror the ssh verbs:
+`https://hostthis.dev/llms.txt` is a single plain-text page documenting
+hostthis for AI agents to read at runtime. It's the official ai-discovery
+surface in lieu of an MCP server — simpler to ship, no protocol/SDK
+churn, and any LLM that can curl can use it.
 
-- `hostthis_upload(content, slug?, content_type?)` → returns URL
-- `hostthis_update(slug, content)` → returns URL
-- `hostthis_list()` → returns array
-- `hostthis_delete(slug)` → returns null
-- `hostthis_show(slug)` → returns content
-- `hostthis_versions(slug)` → returns array
-- `hostthis_pin(slug, version)` → returns URL
+Content: a thorough how-to covering:
+- The "pipe to ssh" upload model and the URL shape
+- Supported content types (HTML, Markdown)
+- The 24-hour retention rule
+- The full set of ssh verbs with examples
+- The HTTP API endpoints + the "tokens issued via ssh only" rule
+- Identity model (ssh-key fingerprint = account, anonymous = upload-only)
+- Quota model (rolling 30d window, union over key+IP class)
+- Sandboxing rules for any rendered HTML the agent publishes (default
+  strict CSP; how to opt into a relaxed one if needed)
+- What's deliberately NOT supported (no binaries, no long-term storage,
+  no MCP)
 
-Auth: API token from `ssh hostthis.dev token create`, passed as Bearer.
+The page is generated from the spec at build time — single source of
+truth is `docs/SPEC.md`, the llms.txt is a flattened, agent-friendly
+view of it.
+
+The apex landing page links to it visibly so humans can read it too.
 
 ---
 
 ## Self-hosting
 
 The public `hostthis.dev` is the default deploy, but the same Go binary
-runs on any box. Operator config (TOML):
+runs on any box. Minimal runtime config (env vars or single TOML):
 
 ```toml
 [server]
-ssh_listen = ":2200"
+ssh_listen = ":2222"
 http_listen = ":8080"
 apex_domain = "hostthis.dev"
+data_dir = "/var/lib/hostthis"
 
-[limits]
-anon_per_paste_mb = 5
-keyed_per_paste_mb = 25
-keyed_quota_total_mb = 500
-anon_retention_days = 7
-keyed_retention_days = 365  # backstop, refreshable with `touch`
-ip_daily_cap_mb = 100
-new_key_cooldown_days = 7
-
-[features]
-github_verify = true
-mcp_server = true
-curl_fallback = true
+[tls]
+# operator points these at their own wildcard cert for *.<apex_domain>
+cert_file = "/etc/hostthis/wildcard.pem"
+key_file  = "/etc/hostthis/wildcard.key"
 ```
 
-A trusted-network deploy (LAN-only, VPN-fronted) can relax all of these
-defaults — no IP cap, no cooldown, longer retention — via the
-`features.trusted_network` toggle.
+Everything else — caps, retention, quota class behavior, sandbox
+headers — is hardcoded and not configurable. The product is opinionated
+on purpose; operator choice is limited to "where does it listen and
+where does data live".
+
+A trusted-network deploy can set `features.trusted_network = true` to
+skip IP-subnet tracking in the quota class (quotas become purely
+per-key, anonymous uploads share a single global anon class). This is
+the *only* exposed knob beyond ports / data-dir / TLS, and it exists
+specifically to keep household merging from being annoying on LAN-only
+self-hosts.
 
 ---
 
 ## Non-goals (explicitly out of v1 scope)
 
-These are interesting but pull the product toward "over-scope".
-Keep the surface small.
+These are interesting but pull the product toward "over-scope"
+or "general file host". Keep the surface small.
 
+- **Long-term storage**. Every paste expires at 24h, period. If you need
+  a permanent URL, host elsewhere.
+- **Binary / non-renderable file hosting**. ZIPs, photos, videos,
+  arbitrary blobs — that's not in scope.
 - **Comments / threaded discussion**. not a goal.
 - **Password protection on public pastes**. Signed share links cover the
   "private but shareable" case; password is duplicative friction.
-- **View limits / view counts visible to the public**. Owner can see counts
-  via `ssh whoami` if we add it later, but no public-facing analytics.
+- **View limits / view counts visible to the public**. Owner can see
+  totals in `whoami`; no public-facing analytics.
 - **Visual editor**. ssh pipe is the only authoring tool. Edit locally,
   re-pipe.
 - **Teams / orgs / shared accounts**. Personal use only.
 - **Custom domains** (`pastes.mycompany.com`). The wildcard subdomain
   pattern covers branding-via-slug well enough.
 - **Email notifications**. The ssh response IS the notification.
+- **MCP server**. We expose an `llms.txt` instead — much simpler to
+  ship and maintain than an MCP server with versioning churn.
+- **GitHub (or any third-party) account linking / OAuth**. ssh keys
+  alone carry identity; we don't need a second source of trust.
+- **Operator-configurable limits**. Caps, retention, sandbox headers
+  are hardcoded; the only operator knobs are ports / data-dir / TLS /
+  trusted-network toggle.
 
 If real demand surfaces for any of these later, they can be added without
-breaking v1 semantics.
+breaking v1 semantics. Adding any of them should go through an ADR first
+(see [docs/adr/](adr/)) — these are explicit no's, not oversights.
 
 ---
 
 ## Open questions
 
-- **GitHub verify v1 vs v2?** If we skip GitHub verify in v1, the trust
-  ramp is 7 days of waiting — annoying for legit users. Including it costs
-  ~2h of OAuth wiring. Probably v1.
 - **Signed-link tokens: rotate on `unpublish`?** Probably yes — `unpublish`
   should invalidate active signed links automatically (defense in depth);
   user can re-issue with `link`.
-- **Quota display**: show in `whoami` and in `list` footer? Probably yes —
-  no surprises when hitting the cap.
-- **CSP override per paste**: do owners need to relax CSP for legit pastes
-  that load external CDN scripts? Punt to operator config for v1.
+- **Quota display in `list` footer?** Currently shown in `whoami` only.
+  Probably yes — no surprises when hitting the cap.
+- **CSP relaxation flag (`--csp loose`) value**: which precise CSP value
+  is "loose enough for real LLM-generated demos to work" without leaving
+  the door wide open? Needs testing against actual artifacts.
+- **Owner notification when a paste expires?** Right now expiry is silent.
+  A best-effort "your paste expired" line in the next `list` output could
+  remind owners that the 24h clock ticks. Maybe.
+- **Mermaid as first rendered-format expansion**: confirm the `goldmark`
+  + `mermaid` SVG renderer choice once we get to it; for now Mermaid is
+  v2+ and out of scope.
