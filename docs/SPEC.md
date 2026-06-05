@@ -338,8 +338,9 @@ in 10 seconds. Not a marketing page, not a dashboard, not interactive.
 
 The bytes shipped on the public instance live in
 [`web/landing.html`](../web/landing.html); the binary loads them at
-startup (`HOSTTHIS_LANDING` path), nginx in front serves the same
-bytes directly for efficiency. Single file, no JS, no external assets.
+startup (`HOSTTHIS_LANDING` path) and a reverse proxy in front can
+serve the same bytes directly for efficiency. Single file, no JS,
+no external assets.
 
 ## Limits
 
