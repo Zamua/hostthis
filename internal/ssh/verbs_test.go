@@ -275,34 +275,6 @@ func TestVerbDelete_Roundtrip(t *testing.T) {
 	}
 }
 
-func TestVerbUnpublishPublish(t *testing.T) {
-	s := startStack(t)
-	stdout, _, _ := s.run("", []byte("<!doctype html><p>x</p>"))
-	slug := extractSlug(stdout)
-
-	// Unpublish → 404
-	_, _, exit := s.run("unpublish "+slug, nil)
-	if exit != 0 {
-		t.Fatalf("unpublish exit: %d", exit)
-	}
-	resp, _ := http.Get(s.httpURL + "/p/" + slug)
-	if resp.StatusCode != 404 {
-		t.Fatalf("expected 404 after unpublish, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-
-	// Republish → 200
-	_, _, exit = s.run("publish "+slug, nil)
-	if exit != 0 {
-		t.Fatalf("publish exit: %d", exit)
-	}
-	resp, _ = http.Get(s.httpURL + "/p/" + slug)
-	if resp.StatusCode != 200 {
-		t.Fatalf("expected 200 after publish, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-}
-
 func TestVerbRename(t *testing.T) {
 	s := startStack(t)
 	stdout, _, _ := s.run("", []byte("<!doctype html><p>x</p>"))
@@ -352,35 +324,6 @@ func TestVerbUpdate_AppendsVersion(t *testing.T) {
 	resp.Body.Close()
 	if !strings.Contains(string(body), "v1") {
 		t.Fatalf("expected v1 served after pin: %q", body)
-	}
-}
-
-func TestVerbLink_UnshareCycle(t *testing.T) {
-	s := startStack(t)
-	stdout, _, _ := s.run("", []byte("<!doctype html><p>x</p>"))
-	slug := extractSlug(stdout)
-	_, _, _ = s.run("unpublish "+slug, nil)
-	// Generate a signed link
-	linkStdout, linkStderr, exit := s.run("link "+slug+" --expires 1h", nil)
-	if exit != 0 {
-		t.Fatalf("link exit: %d (%q)", exit, linkStderr)
-	}
-	signedURL := strings.TrimSpace(linkStdout)
-	if !strings.Contains(signedURL, "?k=") {
-		t.Fatalf("link should include ?k=: %q", signedURL)
-	}
-	// Fetching the signed URL should succeed
-	resp, _ := http.Get(signedURL)
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("signed URL should serve 200, got %d", resp.StatusCode)
-	}
-	// Unshare invalidates
-	_, _, _ = s.run("unshare "+slug, nil)
-	resp2, _ := http.Get(signedURL)
-	resp2.Body.Close()
-	if resp2.StatusCode != 404 {
-		t.Fatalf("after unshare, signed URL should 404, got %d", resp2.StatusCode)
 	}
 }
 

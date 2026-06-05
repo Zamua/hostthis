@@ -12,7 +12,6 @@ import (
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/render"
-	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
@@ -100,19 +99,6 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request) {
 		// content that's technically expired.
 		http.NotFound(w, r)
 		return
-	}
-	if !p.Published {
-		// Allow access only if the request carries a valid signed
-		// share token. ?k=<token>
-		token := r.URL.Query().Get("k")
-		if token == "" {
-			http.NotFound(w, r)
-			return
-		}
-		if err := service.VerifyShareToken(p, token, now); err != nil {
-			http.NotFound(w, r)
-			return
-		}
 	}
 	body, err := s.Blobs.Get(p.ContentSHA)
 	if err != nil {

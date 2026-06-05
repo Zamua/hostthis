@@ -112,18 +112,10 @@ func (s *Server) handleSession(sess gossh.Session) {
 		s.verbRename(sess, owner, argv[1:])
 	case "delete":
 		s.verbDelete(sess, owner, argv[1:])
-	case "publish":
-		s.verbPublish(sess, owner, argv[1:])
-	case "unpublish":
-		s.verbUnpublish(sess, owner, argv[1:])
 	case "versions":
 		s.verbVersions(sess, owner, argv[1:])
 	case "pin":
 		s.verbPin(sess, owner, argv[1:])
-	case "link":
-		s.verbLink(sess, owner, argv[1:])
-	case "unshare":
-		s.verbUnshare(sess, owner, argv[1:])
 	case "whoami":
 		s.verbWhoami(sess, owner)
 	case "token":
@@ -227,20 +219,16 @@ func (s *Server) verbList(sess gossh.Session, owner string) {
 		return
 	}
 	// Header on stderr so stdout is grep/awk friendly.
-	fmt.Fprintln(sess.Stderr(), "SLUG\tNAME\tSIZE\tKIND\tEXPIRES_IN\tVERS\tPUB")
+	fmt.Fprintln(sess.Stderr(), "SLUG\tNAME\tSIZE\tKIND\tEXPIRES_IN\tVERS")
 	now := s.Manage.Now().UTC()
 	for _, p := range pastes {
 		name := p.Name
 		if name == "" {
 			name = "—"
 		}
-		pub := "y"
-		if !p.Published {
-			pub = "n"
-		}
-		fmt.Fprintf(sess, "%s\t%s\t%s\t%s\t%s\tv%d\t%s\n",
+		fmt.Fprintf(sess, "%s\t%s\t%s\t%s\t%s\tv%d\n",
 			p.Slug, name, humanBytes(p.Size), p.Kind,
-			humanDuration(p.ExpiresAt.Sub(now)), p.PinnedVersion, pub)
+			humanDuration(p.ExpiresAt.Sub(now)), p.PinnedVersion)
 	}
 	_ = sess.Exit(0)
 }
@@ -302,38 +290,6 @@ func (s *Server) verbDelete(sess gossh.Session, owner string, argv []string) {
 	_ = sess.Exit(0)
 }
 
-// -- publish / unpublish ----------------------------------------------------
-
-func (s *Server) verbPublish(sess gossh.Session, owner string, argv []string) {
-	slug, err := requireSlug(argv)
-	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(2)
-		return
-	}
-	if err := s.Manage.Publish(slug, owner); err != nil {
-		emitServiceErr(sess, err)
-		return
-	}
-	fmt.Fprintln(sess.Stderr(), "published.")
-	_ = sess.Exit(0)
-}
-
-func (s *Server) verbUnpublish(sess gossh.Session, owner string, argv []string) {
-	slug, err := requireSlug(argv)
-	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(2)
-		return
-	}
-	if err := s.Manage.Unpublish(slug, owner); err != nil {
-		emitServiceErr(sess, err)
-		return
-	}
-	fmt.Fprintln(sess.Stderr(), "unpublished. URL now 404s for everyone but signed links.")
-	_ = sess.Exit(0)
-}
-
 // -- versions / pin ---------------------------------------------------------
 
 func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
@@ -388,51 +344,6 @@ func (s *Server) verbPin(sess gossh.Session, owner string, argv []string) {
 		return
 	}
 	fmt.Fprintf(sess.Stderr(), "pinned v%d.\n", ver.VerNum)
-	_ = sess.Exit(0)
-}
-
-// -- link / unshare ---------------------------------------------------------
-
-func (s *Server) verbLink(sess gossh.Session, owner string, argv []string) {
-	if len(argv) < 1 {
-		fmt.Fprintln(sess.Stderr(), "hostthis: usage: link <slug> [--expires <dur>]")
-		_ = sess.Exit(2)
-		return
-	}
-	slug, err := domain.ParseSlug(argv[0])
-	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: invalid slug %q\n", argv[0])
-		_ = sess.Exit(2)
-		return
-	}
-	lifetime, err := parseLifetimeFlag(argv[1:])
-	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(2)
-		return
-	}
-	link, err := s.Manage.Link(slug, owner, lifetime)
-	if err != nil {
-		emitServiceErr(sess, err)
-		return
-	}
-	fmt.Fprintf(sess, "%s?k=%s\n", s.BuildURL(link.Slug), link.Token)
-	fmt.Fprintf(sess.Stderr(), "expires %s\n", link.Expires.Format("2006-01-02 15:04 UTC"))
-	_ = sess.Exit(0)
-}
-
-func (s *Server) verbUnshare(sess gossh.Session, owner string, argv []string) {
-	slug, err := requireSlug(argv)
-	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(2)
-		return
-	}
-	if err := s.Manage.Unshare(slug, owner); err != nil {
-		emitServiceErr(sess, err)
-		return
-	}
-	fmt.Fprintln(sess.Stderr(), "all signed links revoked.")
 	_ = sess.Exit(0)
 }
 
@@ -499,14 +410,12 @@ const helpText = `hostthis — pipe rendered content (html/markdown), get a URL.
   ssh hostthis.dev versions <slug>                history within the 24h window
   ssh hostthis.dev pin <slug> <ver>               set served version
   ssh hostthis.dev delete <slug>                  permanent
-  ssh hostthis.dev unpublish <slug>               public 404s
-  ssh hostthis.dev publish <slug>                 undo unpublish
-  ssh hostthis.dev link <slug> [--expires <dur>]  signed share URL
-  ssh hostthis.dev unshare <slug>                 revoke signed links
   ssh hostthis.dev whoami                         your identity + active count
   ssh hostthis.dev token create                   issue an HTTP API token
 
-uploads accept HTML and Markdown only. 5 MB per paste. 24h retention.`
+uploads accept HTML and Markdown only. 5 MB per paste. 24h retention.
+the URL itself is the secret — 8-char random slug, ~10^12 possibilities.
+share the URL with anyone you want; don't share it with anyone you don't.`
 
 // -- helpers ----------------------------------------------------------------
 

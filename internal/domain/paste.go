@@ -10,6 +10,12 @@ import (
 // Paste is the unit a user uploads. The "currently served" bytes are
 // addressed by ContentSHA + Kind. Older versions live in a parallel
 // versions table, addressed by (Slug, VerNum).
+//
+// There's no Published flag or per-paste secret — the URL slug
+// itself is the secret (8 chars / 32^8 ≈ 10^12 possibilities), so
+// "share the URL with whoever you want to see it" is the access
+// model. Same posture as a YouTube unlisted link or a GitHub
+// secret gist.
 type Paste struct {
 	Slug          Slug
 	OwnerHash     string      // SHA256 fingerprint of the owner's ssh key, or "" for anonymous
@@ -17,9 +23,7 @@ type Paste struct {
 	ContentSHA    string      // sha256 of the currently-served bytes
 	Size          int         // bytes (currently-served)
 	Name          string      // optional owner-set label; empty when unset
-	Published     bool        // false ⇒ public URL returns 404
 	PinnedVersion int         // which ver_num is currently served
-	ShareSecret   []byte      // HMAC key for signed share URLs; bumped on `unshare`
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 	ExpiresAt     time.Time // UpdatedAt + RetentionWindow; only `update` moves it
@@ -36,16 +40,6 @@ type Version struct {
 	CreatedAt  time.Time
 }
 
-// NewShareSecret returns 32 random bytes suitable for the per-paste
-// HMAC key. Bumped on `unshare` to invalidate every outstanding
-// signed share URL for the slug in one move.
-func NewShareSecret() []byte {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		panic("hostthis: crypto/rand failure: " + err.Error())
-	}
-	return b
-}
 
 // RetentionWindow is the fixed 24-hour TTL per SPEC.md. Not config.
 const RetentionWindow = 24 * time.Hour

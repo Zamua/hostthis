@@ -28,11 +28,11 @@ func (r *PasteRepo) Insert(p domain.Paste) error {
 	defer tx.Rollback() //nolint:errcheck // no-op when commit succeeds
 	_, err = tx.Exec(`
 		INSERT INTO pastes (slug, owner_hash, kind, content_sha, size, name,
-		                    published, pinned_version, share_secret,
+		                    pinned_version,
 		                    created_at, updated_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, p.Slug.String(), p.OwnerHash, string(p.Kind), p.ContentSHA, p.Size, p.Name,
-		boolToInt(p.Published), p.PinnedVersion, p.ShareSecret,
+		p.PinnedVersion,
 		formatTime(p.CreatedAt), formatTime(p.UpdatedAt), formatTime(p.ExpiresAt))
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -56,7 +56,7 @@ func (r *PasteRepo) Insert(p domain.Paste) error {
 func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
 	row := r.db.QueryRow(`
 		SELECT slug, owner_hash, kind, content_sha, size, name,
-		       published, pinned_version, share_secret,
+		       pinned_version,
 		       created_at, updated_at, expires_at
 		FROM pastes WHERE slug = ?
 	`, slug.String())
@@ -73,7 +73,7 @@ func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	}
 	rows, err := r.db.Query(`
 		SELECT slug, owner_hash, kind, content_sha, size, name,
-		       published, pinned_version, share_secret,
+		       pinned_version,
 		       created_at, updated_at, expires_at
 		FROM pastes WHERE owner_hash = ?
 		ORDER BY expires_at ASC
@@ -112,15 +112,6 @@ func (r *PasteRepo) SetName(slug domain.Slug, name string) error {
 	return nil
 }
 
-// SetPublished flips the published flag.
-func (r *PasteRepo) SetPublished(slug domain.Slug, published bool) error {
-	_, err := r.db.Exec(`UPDATE pastes SET published = ? WHERE slug = ?`, boolToInt(published), slug.String())
-	if err != nil {
-		return fmt.Errorf("set published: %w", err)
-	}
-	return nil
-}
-
 // SetPinnedVersion changes which version_num the public URL serves,
 // and rolls the pastes row's content_sha + size + kind to match.
 // Caller verified ver exists.
@@ -132,16 +123,6 @@ func (r *PasteRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error
 	`, ver.VerNum, ver.ContentSHA, ver.Size, string(ver.Kind), slug.String())
 	if err != nil {
 		return fmt.Errorf("set pinned version: %w", err)
-	}
-	return nil
-}
-
-// BumpShareSecret regenerates the per-paste HMAC key, invalidating
-// all outstanding signed share links for the slug.
-func (r *PasteRepo) BumpShareSecret(slug domain.Slug, fresh []byte) error {
-	_, err := r.db.Exec(`UPDATE pastes SET share_secret = ? WHERE slug = ?`, fresh, slug.String())
-	if err != nil {
-		return fmt.Errorf("bump share secret: %w", err)
 	}
 	return nil
 }
@@ -265,9 +246,8 @@ func (r *PasteRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 func scanPaste(s scanner) (domain.Paste, error) {
 	var p domain.Paste
 	var slugStr, kind, created, updated, expires string
-	var publishedInt int
 	if err := s.Scan(&slugStr, &p.OwnerHash, &kind, &p.ContentSHA, &p.Size, &p.Name,
-		&publishedInt, &p.PinnedVersion, &p.ShareSecret,
+		&p.PinnedVersion,
 		&created, &updated, &expires); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Paste{}, ErrNotFound
@@ -276,7 +256,6 @@ func scanPaste(s scanner) (domain.Paste, error) {
 	}
 	p.Slug = domain.Slug(slugStr)
 	p.Kind = domain.ContentKind(kind)
-	p.Published = publishedInt != 0
 	p.CreatedAt = parseTime(created)
 	p.UpdatedAt = parseTime(updated)
 	p.ExpiresAt = parseTime(expires)
@@ -289,13 +268,6 @@ type scanner interface{ Scan(dest ...any) error }
 
 // ErrSlugTaken is returned by Insert when the chosen slug already exists.
 var ErrSlugTaken = errors.New("storage: slug already taken")
-
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
 
 func isUniqueViolation(err error) bool {
 	if err == nil {
