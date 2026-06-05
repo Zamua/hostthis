@@ -52,6 +52,24 @@ readers can see what was considered last time and why.
 Don't ADR every small thing. Library choice, directory layout,
 code-style — skip. ADR when the decision *shapes* the project.
 
+**ADRs are not autonomous work.** If you're an AI agent, do not write
+an ADR on your own initiative and commit it. ADRs codify decisions, and
+decisions require a human in the loop. The process is:
+
+1. *Surface the question*. When you hit a design fork that looks
+   ADR-worthy, stop and tell the user: "this looks ADR-worthy because
+   X, Y. The alternatives are A, B, C." Wait for them to agree it's
+   worth an ADR. They may decide it's small enough to skip.
+2. *Draft for review*. Once they agree, draft the ADR following the
+   `docs/adr/README.md` template and share it for review. Do not commit
+   it yet.
+3. *Wait for approval*. Iterate on the draft until the user explicitly
+   approves it. Only then commit and proceed to implementation.
+
+The "spec-first" rule still applies — if the decision changes product
+behavior, the spec edit is part of the implementation step *after* the
+ADR is approved.
+
 ### Commits
 
 Conventional Commits style, single line. No co-author trailers, no
