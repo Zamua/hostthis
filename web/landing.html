@@ -4,8 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>hostthis(1) &mdash; pipe a file to ssh, get a URL</title>
-<meta name="description" content="A dev-first paste service for HTML and Markdown. Pipe a file to ssh, get back a URL. Your ssh key is your account. Pastes expire after 24 hours.">
+<title>hostthis(1)</title>
 <style>
   :root {
     --bg: #f4ecd8;
@@ -29,74 +28,42 @@
     margin: 0 auto;
     padding: 1.6rem 1.2rem 3rem;
   }
-  /* --- man page header strip --- */
-  .titleline {
+  .titleline, .footline {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.02em;
-    border-bottom: 1px solid currentColor;
-    padding-bottom: 0.4rem;
-    margin-bottom: 2rem;
     gap: 1rem;
   }
-  .titleline .center { color: var(--ink-soft); font-weight: 600; }
-  /* --- sections --- */
+  .titleline {
+    border-bottom: 1px solid currentColor;
+    padding-bottom: 0.4rem;
+    margin-bottom: 1.6rem;
+  }
+  .footline {
+    border-top: 1px solid currentColor;
+    padding-top: 0.4rem;
+    margin-top: 2.4rem;
+  }
+  .titleline .center, .footline .center { color: var(--ink-soft); font-weight: 600; }
   h2 {
     font-size: 1rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    margin: 2rem 0 0.4rem;
+    margin: 1.6rem 0 0.4rem;
   }
-  /* Body paragraphs / lists indented under section header, the way roff renders */
-  .indent {
-    padding-left: 4ch;
-  }
-  p { margin: 0.4rem 0 0.6rem; }
-  /* Command definition lists — hanging indent like man synopsis */
-  dl {
-    margin: 0.4rem 0 0.4rem;
-  }
-  dt {
-    font-weight: 700;
-    margin-top: 0.7rem;
-  }
-  dd {
-    margin: 0.1rem 0 0 4ch;
-    color: var(--ink-soft);
-  }
-  /* preformatted blocks — keep the same indent as section body */
-  pre {
-    margin: 0.4rem 0 0.8rem;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
+  .indent { padding-left: 4ch; }
+  p { margin: 0.3rem 0 0.5rem; }
+  pre { margin: 0.3rem 0 0.6rem; white-space: pre-wrap; word-break: break-word; }
   code { font-family: inherit; }
+  dl { margin: 0.3rem 0; }
+  dt { font-weight: 700; margin-top: 0.55rem; }
+  dd { margin: 0.1rem 0 0 4ch; color: var(--ink-soft); }
   strong, b { font-weight: 700; color: var(--ink); }
-  .accent { color: var(--accent); }
-  a {
-    color: var(--accent);
-    text-decoration: underline;
-    text-underline-offset: 2px;
-  }
-  /* trailing man page footer */
-  .footline {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.02em;
-    border-top: 1px solid currentColor;
-    padding-top: 0.4rem;
-    margin-top: 3rem;
-    gap: 1rem;
-    color: var(--ink);
-  }
-  .footline .center { color: var(--ink-soft); font-weight: 600; }
+  a { color: var(--accent); }
   @media (max-width: 540px) {
     body { padding: 1rem 0.7rem 2.5rem; font-size: 13px; }
     .titleline, .footline { font-size: 0.8rem; }
@@ -114,137 +81,92 @@
 </header>
 
 <h2>Name</h2>
-<div class="indent">
-<p><strong>hostthis</strong> &mdash; pipe HTML or Markdown to ssh, get a public URL.</p>
-</div>
+<div class="indent"><p>hostthis &mdash; host an HTML or Markdown paste at a URL for 24 hours.</p></div>
 
 <h2>Synopsis</h2>
 <div class="indent">
-<pre><strong>cat</strong> <em>file</em> | <strong>ssh hostthis.dev</strong> [<em>slug</em>] [<strong>--name</strong> <em>"label"</em>]
-<strong>ssh hostthis.dev</strong> <em>verb</em> [<em>args</em>]</pre>
+<pre><strong>cat</strong> <em>file</em> | <strong>ssh hostthis.dev</strong> [<em>slug</em>] [<strong>--name</strong> <em>label</em>]
+<strong>ssh hostthis.dev</strong> <em>command</em> [<em>args</em>]</pre>
 </div>
 
 <h2>Description</h2>
 <div class="indent">
-<p>
-A dev-first paste service for content that needs <em>rendering</em> to be
-shareable &mdash; HTML and Markdown today; mermaid and friends later.
-Pipe a file to <strong>ssh</strong>, get a URL on stdout. Every paste lives at
-its own subdomain (<code>&lt;slug&gt;.hostthis.dev</code>) so the browser
-sandbox isolates each one. Every paste expires <strong>24 hours</strong>
-after its last update.
-</p>
-
-<p>
-Your ssh key is your account &mdash; no signup, no password, no UI. Without
-a key you can still upload anonymously; you just can&rsquo;t list, update, or
-delete your pastes from another machine. Public-key snooping gives an
-attacker nothing &mdash; ssh requires proving you hold the private key.
-</p>
-</div>
-
-<h2>Examples</h2>
-<div class="indent">
-<pre><span class="accent">$</span> cat index.html | ssh hostthis.dev
-<span class="accent">https://abc12345.hostthis.dev</span>
-<span class="accent">expires in 24h</span>
-
-<span class="accent">$</span> cat README.md | ssh hostthis.dev --name "Project README"
-<span class="accent">https://x7y8z9q0.hostthis.dev</span>
-<span class="accent">"Project README" &mdash; expires in 24h</span>
-
-<span class="accent">$</span> cat v2.html | ssh hostthis.dev abc12345    # update (24h clock resets)
-<span class="accent">$</span> ssh hostthis.dev list                       # your active pastes
-<span class="accent">$</span> ssh hostthis.dev delete abc12345             # permanent</pre>
+<p>Reads HTML or Markdown from stdin, stores it, prints a URL. The URL serves the
+content for 24 hours from the last update, then it&rsquo;s deleted.</p>
 </div>
 
 <h2>Commands</h2>
 <div class="indent">
 <dl>
   <dt>cat <em>file</em> | ssh hostthis.dev [<strong>--name</strong> <em>label</em>]</dt>
-  <dd>upload a new paste (random slug)</dd>
+  <dd>upload</dd>
 
   <dt>cat <em>file</em> | ssh hostthis.dev <em>slug</em></dt>
-  <dd>update an existing paste; resets the 24h clock</dd>
+  <dd>replace <em>slug</em>&rsquo;s content; resets the 24h clock</dd>
 
   <dt>ssh hostthis.dev <strong>list</strong></dt>
-  <dd>your active pastes, soonest-to-expire first</dd>
+  <dd>active pastes, soonest to expire first</dd>
 
   <dt>ssh hostthis.dev <strong>show</strong> <em>slug</em></dt>
-  <dd>read content back over ssh (owner only)</dd>
+  <dd>print content to stdout</dd>
 
-  <dt>ssh hostthis.dev <strong>rename</strong> <em>slug</em> <em>"label"</em></dt>
-  <dd>set or change a paste&rsquo;s label; empty string to clear</dd>
+  <dt>ssh hostthis.dev <strong>rename</strong> <em>slug</em> <em>label</em></dt>
+  <dd>set label; empty string clears</dd>
 
   <dt>ssh hostthis.dev <strong>versions</strong> <em>slug</em></dt>
-  <dd>history within the 24h window</dd>
+  <dd>list versions</dd>
 
   <dt>ssh hostthis.dev <strong>pin</strong> <em>slug</em> <em>ver</em></dt>
-  <dd>set which version the URL serves; does not reset the clock</dd>
+  <dd>serve <em>ver</em></dd>
 
   <dt>ssh hostthis.dev <strong>unpublish</strong> <em>slug</em></dt>
-  <dd>URL returns 404 to the public; owner can still <code>show</code> and <code>link</code></dd>
+  <dd>URL returns 404</dd>
 
   <dt>ssh hostthis.dev <strong>publish</strong> <em>slug</em></dt>
   <dd>undo unpublish</dd>
 
-  <dt>ssh hostthis.dev <strong>link</strong> <em>slug</em> <strong>--expires</strong> <em>24h</em></dt>
-  <dd>issue a signed share URL for an unpublished paste</dd>
+  <dt>ssh hostthis.dev <strong>link</strong> <em>slug</em> <strong>--expires</strong> <em>dur</em></dt>
+  <dd>signed share URL</dd>
 
   <dt>ssh hostthis.dev <strong>unshare</strong> <em>slug</em></dt>
-  <dd>revoke all signed share links for a paste</dd>
+  <dd>revoke signed URLs</dd>
 
   <dt>ssh hostthis.dev <strong>delete</strong> <em>slug</em></dt>
-  <dd>permanent; no confirmation prompt</dd>
+  <dd>delete</dd>
 
   <dt>ssh hostthis.dev <strong>whoami</strong></dt>
-  <dd>your identity and quota</dd>
+  <dd>print identity and quota</dd>
 
   <dt>ssh hostthis.dev <strong>token create</strong></dt>
-  <dd>issue an HTTP API token (for environments without ssh)</dd>
+  <dd>print an HTTP API token</dd>
 </dl>
 </div>
 
-<h2>Accepted formats</h2>
+<h2>Examples</h2>
 <div class="indent">
-<p>HTML and Markdown. Per-paste cap is 5 MB. Anything else (zips, images,
-binaries) gets rejected with a pointer to a real file host. The acceptance
-gate exists so the sandbox has a small attack surface.</p>
-</div>
-
-<h2>Security</h2>
-<div class="indent">
-<p>Every paste lives at its own subdomain &mdash; cookies, JS, and CSP from
-<code>abc.hostthis.dev</code> can&rsquo;t reach <code>xyz.hostthis.dev</code> or
-the apex. The default CSP is strict: scripts are same-origin only,
-<code>connect-src</code> is <code>self</code> so exfiltration channels are
-closed. Markdown is server-side sanitized before rendering so uploaded
-Markdown can never execute JS.</p>
+<pre>cat index.html | ssh hostthis.dev
+cat README.md  | ssh hostthis.dev --name notes
+cat v2.html    | ssh hostthis.dev abc12345
+ssh hostthis.dev list
+ssh hostthis.dev delete abc12345</pre>
 </div>
 
 <h2>Limits</h2>
 <div class="indent">
-<p>
-Per-paste hard cap: 5 MB.<br>
-Per quota class: 200 MB rolling 30-day window; 50 MB/day rate.<br>
-Retention: 24 hours from last update, then deleted.
-</p>
-
-<p>The quota class is the equivalence class formed by union of your ssh
-key fingerprint and your IP subnet. Two requests share a quota if they
-share either the key or the subnet &mdash; to escape the class an attacker
-must rotate both simultaneously.</p>
+<p>5 MB per paste. 50 MB per day per quota class. 200 MB per 30 days per quota class. 24h retention. HTML and Markdown only.</p>
 </div>
 
-<h2>For AI agents</h2>
+<h2>Files</h2>
 <div class="indent">
-<p>A thorough plain-text how-to lives at
-<a href="/llms.txt">/llms.txt</a>. Any LLM that can curl can use hostthis.</p>
+<dl>
+  <dt>/llms.txt</dt>
+  <dd>plain-text reference for programmatic use</dd>
+</dl>
 </div>
 
-<h2>See also</h2>
+<h2>See Also</h2>
 <div class="indent">
-<p>Source: <a href="https://github.com/Zamua/hostthis">github.com/Zamua/hostthis</a></p>
+<p><a href="https://github.com/Zamua/hostthis">github.com/Zamua/hostthis</a></p>
 </div>
 
 <footer class="footline">
