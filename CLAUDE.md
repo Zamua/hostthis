@@ -163,23 +163,34 @@ curl <that URL>
 The binary defaults to `--mode path` (apex/p/&lt;slug&gt; URLs) for dev. Use
 `--mode subdomain` only for production deploys with a wildcard cert.
 
-## Deploy (single-host VPS)
+## Deploy (single host over ssh)
 
-The repo expects an `ssh vps` alias in `~/.ssh/config` that reaches an
-admin shell on the target host, and assumes the runtime layout from
-[`deploy/vps/compose.yml`](deploy/vps/compose.yml).
+The make targets rsync the working tree, build the image, and restart
+the container on a remote host you reach via ssh. All host-specific
+settings come from `VPS_*` variables passed on the command line.
 
 ```
-make deploy           # rsync working tree → build container → restart
-make deploy-sync      # just rsync the tree (chowns to apps + data to 65532)
-make deploy-build     # just rebuild the image on the VPS
-make deploy-restart   # docker compose up -d on the VPS
-make deploy-logs      # tail container logs
-make deploy-down      # docker compose down on the VPS
+make deploy VPS_HOST=myvps VPS_PATH=/opt/hostthis VPS_USER=apps \
+            HOSTTHIS_APEX_DOMAIN=example.com
 ```
 
-The VPS variables (host, install path, compose path) can be overridden:
-`make deploy VPS_HOST=other VPS_PATH=/srv/hostthis`.
+Available targets:
+
+| target | what it does |
+| --- | --- |
+| `make deploy` | sync + build + restart in one go |
+| `make deploy-sync` | rsync working tree; chown checkout to VPS_USER, data to container uid |
+| `make deploy-build` | rebuild the image on the host |
+| `make deploy-restart` | docker compose up -d on the host |
+| `make deploy-logs` | tail the container logs |
+| `make deploy-down` | docker compose down on the host |
+
+The runtime config (apex domain, URL mode, scheme) is read from
+`HOSTTHIS_*` env vars by [`deploy/vps/compose.yml`](deploy/vps/compose.yml).
+The compose file refuses to start without `HOSTTHIS_APEX_DOMAIN` set.
+
+For repeated deploys to the same host, drop a (gitignored) shell
+script at `.env.deploy` and `source` it before running `make`.
 
 ## Don'ts
 
