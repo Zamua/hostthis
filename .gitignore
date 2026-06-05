@@ -1,9 +1,13 @@
-# Secrets — anything env-like stays out of the repo
+# secrets
 .env
 .env.*
 !.env.example
 
-# OS / editor cruft
+# os cruft
 .DS_Store
 *.swp
 *.swo
+
+# build artifacts
+/bin/
+/data/
