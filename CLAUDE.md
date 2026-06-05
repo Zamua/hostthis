@@ -70,6 +70,44 @@ The "spec-first" rule still applies — if the decision changes product
 behavior, the spec edit is part of the implementation step *after* the
 ADR is approved.
 
+### Implementation discipline: DDD + TDD
+
+Two non-negotiable practices when writing code.
+
+**Domain-Driven Design.** Organize packages by *bounded context*, not by
+technical layer.
+
+- The domain layer (pure types, value objects, business rules) lives in
+  its own package(s) and imports *nothing* from infrastructure — no
+  SQL, no SSH, no HTTP, no third-party SDKs. It's plain Go data + pure
+  functions you can test without spinning up anything.
+- Infrastructure adapters (sqlite repo, SSH server, HTTP handlers,
+  filesystem blob store) live in separate packages and depend on the
+  domain. The domain never depends back.
+- Application services orchestrate use cases by composing the domain
+  with the adapters via small interfaces. Routes / SSH handlers /
+  CLI verbs are thin translation layers that call services and shape
+  the response.
+- Don't reach for fancy DDD patterns (aggregates, events, unit-of-work,
+  specifications) unless the type system or a concrete use case forces
+  them. The shape — domain-pure, infra-separate, services-on-top — is
+  what matters; the ceremony is optional.
+
+**Test-Driven Development.** Tests are part of the same change as the
+code they cover, not a follow-up.
+
+- For new behavior: red → green → refactor. Write the failing test
+  that pins the spec'd behavior, make it pass, clean up.
+- For modifying existing behavior: write a characterization test that
+  pins the *current* behavior first, then change the code + the test
+  together. Keeps regressions visible.
+- Prefer integration tests over unit tests where the boundary is real
+  (sqlite, real SSH session via in-memory listener, etc.) — they catch
+  more, mock less. Reserve unit tests for pure domain logic where
+  there's nothing to integrate.
+- A PR that "adds a feature without tests" doesn't ship. The spec edit
+  + the code + the tests are one change.
+
 ### Commits
 
 Conventional Commits style, single line. No co-author trailers, no
