@@ -178,20 +178,33 @@ With no command and no stdin, the server prints the help banner.
 ### Upload (new)
 ```
 cat index.html | ssh hostthis.dev
-→ https://abc12345.hostthis.dev
+https://abc12345.hostthis.dev
+expires in 24h (2026-06-06 12:34 UTC)
 ```
 Reads stdin until EOF or 5 MB. Validates content type (HTML or Markdown
-in v1). Generates a fresh random slug. Returns the URL to stdout (one
-line, suitable for pipes).
+in v1). Generates a fresh random slug.
+
+**stdout vs stderr discipline**: the URL is the *only* thing on stdout —
+one line, no trailing whitespace, no formatting — so pipes Just Work:
+
+```
+cat foo.html | ssh hostthis.dev | pbcopy   # → URL only on the clipboard
+```
+
+Everything else (expiry note, key-onboarding nudge, warnings) prints to
+stderr. Pipes lose it, but the user's terminal still renders it because
+stderr is a TTY by default.
 
 If the user has no ssh key in their agent, the server still accepts the
-upload via SSH's `none` auth method, prints the URL, and appends a one-line
-nudge about adding a key to get `list` / `update` / `delete` capability.
+upload via SSH's `none` auth method, prints the URL, and appends to
+stderr a one-line nudge about adding a key to get `list` / `update` /
+`delete` capability.
 
 ### Upload (update an existing slug)
 ```
 cat v2.html | ssh hostthis.dev abc12345
-→ https://abc12345.hostthis.dev  (v2)
+https://abc12345.hostthis.dev
+v2 — expires in 24h (2026-06-06 14:12 UTC)
 ```
 Slug as positional arg means "update this one". Server checks ownership
 against the key fingerprint. Errors:
@@ -199,20 +212,25 @@ against the key fingerprint. Errors:
 - `404`: slug doesn't exist
 - `413`: payload too large
 
-Update creates a new immutable version under the hood (SHA-keyed blob
-ref). The slug always serves the currently-pinned version (defaults to
-latest after an update).
+Update resets the 24h retention clock to "24h from now" and creates a
+new immutable version under the hood (SHA-keyed blob ref). The slug
+always serves the currently-pinned version (defaults to latest after
+an update).
 
 ### List your pastes
 ```
 ssh hostthis.dev list
-SLUG       SIZE    KIND    UPDATED       VERSIONS
-abc12345   1.2k    html    2h ago        v2
-x7y8z9q0   540B    text    1d ago        v1
-mnop4567   3.8k    html    3d ago        v1
+SLUG       SIZE    KIND      UPDATED    EXPIRES IN   VERSIONS
+abc12345   1.2k    html      2h ago     22h          v2
+x7y8z9q0   540B    markdown   8h ago    16h          v1
+mnop4567   3.8k    html      18h ago    6h           v1
 ```
-Sorted by last-updated desc. Output is tab-separated for easy `awk`-ing.
-Anonymous sessions return empty (no identity).
+Sorted by expiry asc (soonest-to-die first, so you notice things about
+to disappear). Output is tab-separated for easy `awk`-ing. Anonymous
+sessions return empty (no identity).
+
+When a paste is within 1h of expiry, the row's `EXPIRES IN` is rendered
+in red (ANSI, only when stderr says we're on a TTY).
 
 ### Show content (read back over ssh)
 ```
@@ -226,18 +244,21 @@ local tooling. Anonymous error: `403`.
 ```
 ssh hostthis.dev versions abc12345
 v3  current  2026-06-05 14:32  1.2k
-v2           2026-06-04 09:15  1.1k
-v1           2026-06-03 18:22  0.9k
+v2           2026-06-05 12:15  1.1k
+v1           2026-06-05 11:22  0.9k
+expires in 22h (2026-06-06 14:32 UTC)
 ```
+The expiry footer is on stderr (same convention as upload), so a script
+that wants just the version list can pipe stdout cleanly.
 
 ### Pin a version (rollback or roll-forward)
 ```
 ssh hostthis.dev pin abc12345 v1     # roll back
 ssh hostthis.dev pin abc12345 v3     # roll forward
 ```
-Sets which version `<slug>.hostthis.dev` serves. No version is ever deleted
-unless `delete` is called on the whole slug. Reads symmetric in either time
-direction — "rollback" framing is intentionally avoided.
+Sets which version `<slug>.hostthis.dev` serves. Pinning does NOT reset
+the expiry clock — only `update` does that. Reads symmetric in either
+time direction — "rollback" framing is intentionally avoided.
 
 ### Delete (permanent)
 ```
