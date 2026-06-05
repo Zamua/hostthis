@@ -23,10 +23,11 @@ type PasteAdmin interface {
 	GetVersion(domain.Slug, int) (domain.Version, error)
 	CountByOwner(owner string) (int, error)
 	OwnerFirstSeen(owner string) (time.Time, error)
+	SumActiveSizeByOwner(owner string, now time.Time) (int64, error)
 }
 
 // ErrNotOwner is returned by any owner-gated operation when the
-// requesting OwnerHash doesn't match the paste's OwnerHash. The
+// requesting identity doesn't match the paste's identity. The
 // SSH/HTTP surfaces map this to 403.
 var ErrNotOwner = errors.New("service: not the paste owner")
 
@@ -56,17 +57,18 @@ func NewManage(repo PasteAdmin, blobs BlobStore) *Manage {
 }
 
 // requireOwner returns the paste if owner matches; otherwise the
-// appropriate sentinel. Empty owner is treated as "anonymous" and
-// rejected with ErrEmptyOwner — no anonymous management.
+// appropriate sentinel. Anonymous identities (no key offered) and
+// empty owners are rejected — only keyed identities (which carry
+// the "key:" prefix) can manage their pastes.
 func (m *Manage) requireOwner(slug domain.Slug, owner string) (domain.Paste, error) {
-	if owner == "" {
+	if !domain.Identity(owner).IsKeyed() {
 		return domain.Paste{}, ErrEmptyOwner
 	}
 	p, err := m.Repo.Get(slug)
 	if err != nil {
 		return domain.Paste{}, ErrNotFound
 	}
-	if p.OwnerHash != owner {
+	if p.Identity.String() != owner {
 		// Don't leak existence; surface as ErrNotFound at the boundary.
 		return domain.Paste{}, ErrNotFound
 	}
@@ -75,7 +77,7 @@ func (m *Manage) requireOwner(slug domain.Slug, owner string) (domain.Paste, err
 
 // List returns the owner's active pastes, soonest-to-expire first.
 func (m *Manage) List(owner string) ([]domain.Paste, error) {
-	if owner == "" {
+	if !domain.Identity(owner).IsKeyed() {
 		return nil, ErrEmptyOwner
 	}
 	return m.Repo.ListByOwner(owner)
@@ -96,6 +98,10 @@ func (m *Manage) Show(slug domain.Slug, owner string) (domain.Paste, []byte, err
 
 // Update appends a new version to an existing slug, makes it the
 // pinned version, and resets the 24h expiry. Owner-gated.
+//
+// Quota: the new content size REPLACES the existing pinned size in
+// the active-bytes total (older versions still count). We enforce
+// (sum_active - existing_size + new_size) <= UserQuotaBytes.
 func (m *Manage) Update(slug domain.Slug, owner string, body []byte, typeHint string) (domain.Paste, int, error) {
 	if len(body) == 0 {
 		return domain.Paste{}, 0, errors.New("empty upload")
@@ -103,18 +109,29 @@ func (m *Manage) Update(slug domain.Slug, owner string, body []byte, typeHint st
 	if len(body) > domain.MaxPasteBytes {
 		return domain.Paste{}, 0, fmt.Errorf("upload exceeds %d-byte cap", domain.MaxPasteBytes)
 	}
-	if _, err := m.requireOwner(slug, owner); err != nil {
+	existing, err := m.requireOwner(slug, owner)
+	if err != nil {
 		return domain.Paste{}, 0, err
 	}
 	kind, err := domain.DetectKind(body, typeHint)
 	if err != nil {
 		return domain.Paste{}, 0, err
 	}
+	now := m.Now().UTC()
+	used, err := m.Repo.SumActiveSizeByOwner(owner, now)
+	if err != nil {
+		return domain.Paste{}, 0, fmt.Errorf("quota check: %w", err)
+	}
+	// Subtract the existing pinned-size (it's being replaced) and add
+	// the new body's size; older versions still contribute.
+	projected := used - int64(existing.Size) + int64(len(body))
+	if projected > int64(domain.UserQuotaBytes) {
+		return domain.Paste{}, 0, ErrOverQuota
+	}
 	sha := domain.HashContent(body)
 	if err := m.Blobs.Put(sha, body); err != nil {
 		return domain.Paste{}, 0, fmt.Errorf("blob write: %w", err)
 	}
-	now := m.Now().UTC()
 	ver, err := m.Repo.AppendVersion(slug, kind, sha, len(body), now)
 	if err != nil {
 		return domain.Paste{}, 0, err
@@ -173,14 +190,14 @@ func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version
 
 // Whoami returns the per-owner summary used by the `whoami` verb.
 type WhoamiInfo struct {
-	OwnerHash  string
-	Active     int
-	FirstSeen  time.Time
+	Identity  string
+	Active    int
+	FirstSeen time.Time
 }
 
 // Whoami populates WhoamiInfo for an owner (key fingerprint).
 func (m *Manage) Whoami(owner string) (WhoamiInfo, error) {
-	if owner == "" {
+	if !domain.Identity(owner).IsKeyed() {
 		return WhoamiInfo{}, ErrEmptyOwner
 	}
 	active, err := m.Repo.CountByOwner(owner)
@@ -191,7 +208,7 @@ func (m *Manage) Whoami(owner string) (WhoamiInfo, error) {
 	if err != nil {
 		return WhoamiInfo{}, err
 	}
-	return WhoamiInfo{OwnerHash: owner, Active: active, FirstSeen: first}, nil
+	return WhoamiInfo{Identity: owner, Active: active, FirstSeen: first}, nil
 }
 
 // validName: per spec, 1–60 printable Unicode chars, no newlines.

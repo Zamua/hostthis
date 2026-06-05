@@ -22,9 +22,15 @@ const (
 var ErrUnsupportedKind = errors.New(
 	"hostthis only accepts content that needs rendering (html, markdown)")
 
-// MaxPasteBytes is the universal per-paste size cap. Per SPEC.md, this
-// is hardcoded — never raised by config or by tier.
-const MaxPasteBytes = 5 << 20 // 5 MiB
+// MaxPasteBytes is the universal per-paste size cap. Equals the
+// per-user quota (UserQuotaBytes) — there's only ever one number to
+// reason about: a user has 1 MiB of active content total.
+const MaxPasteBytes = 1 << 20 // 1 MiB
+
+// UserQuotaBytes is the cap on the total size of an identity's active
+// pastes. "Identity" is the ssh key fingerprint for keyed uploads or
+// the client IP subnet for anonymous ones; either way, the same cap.
+const UserQuotaBytes = 1 << 20 // 1 MiB
 
 // DetectKind classifies up to the first 512 bytes of an upload as one
 // of the supported ContentKinds, or returns ErrUnsupportedKind.

@@ -27,7 +27,6 @@ type stack struct {
 	httpURL     string
 	sshAddr     string
 	repo        *storage.PasteRepo
-	tokenRepo   *storage.TokenRepo
 	blobs       *storage.BlobStore
 	keyedClient *xssh.Client
 	keyedOwner  string
@@ -94,10 +93,8 @@ func startStack(t *testing.T) *stack {
 		t.Fatalf("blobs: %v", err)
 	}
 	repo := storage.NewPasteRepo(db)
-	tokenRepo := storage.NewTokenRepo(db)
 	upload := service.NewUpload(repo, blobs)
 	manage := service.NewManage(repo, blobs)
-	tokenSvc := service.NewTokenService(tokenRepo)
 
 	httpSrv := httptest.NewServer((&httpapi.Server{Pastes: repo, Blobs: blobs}).Handler())
 	t.Cleanup(httpSrv.Close)
@@ -110,7 +107,6 @@ func startStack(t *testing.T) *stack {
 		Addr:   addr,
 		Upload: upload,
 		Manage: manage,
-		Token:  tokenSvc,
 		BuildURL: func(s domain.Slug) string {
 			return httpSrv.URL + "/p/" + s.String()
 		},
@@ -127,7 +123,6 @@ func startStack(t *testing.T) *stack {
 		httpURL:     httpSrv.URL,
 		sshAddr:     addr,
 		repo:        repo,
-		tokenRepo:   tokenRepo,
 		blobs:       blobs,
 		keyedClient: keyedClient,
 		keyedOwner:  keyedOwner,
@@ -324,18 +319,6 @@ func TestVerbUpdate_AppendsVersion(t *testing.T) {
 	resp.Body.Close()
 	if !strings.Contains(string(body), "v1") {
 		t.Fatalf("expected v1 served after pin: %q", body)
-	}
-}
-
-func TestVerbTokenCreate(t *testing.T) {
-	s := startStack(t)
-	stdout, stderr, exit := s.run("token create", nil)
-	if exit != 0 {
-		t.Fatalf("token create exit: %d (%q)", exit, stderr)
-	}
-	tok := strings.TrimSpace(stdout)
-	if !strings.HasPrefix(tok, "htst_live_") {
-		t.Fatalf("token format wrong: %q", tok)
 	}
 }
 

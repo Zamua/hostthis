@@ -49,7 +49,6 @@ func main() {
 	defer db.Close()
 
 	pasteRepo := storage.NewPasteRepo(db)
-	tokenRepo := storage.NewTokenRepo(db)
 	blobs, err := storage.NewBlobStore(filepath.Join(*dataDir, "blobs"))
 	if err != nil {
 		logger.Fatalf("blob store: %v", err)
@@ -57,7 +56,6 @@ func main() {
 
 	uploadSvc := service.NewUpload(pasteRepo, blobs)
 	manageSvc := service.NewManage(pasteRepo, blobs)
-	tokenSvc := service.NewTokenService(tokenRepo)
 	sweepSvc := service.NewSweep(pasteRepo, blobs, logger)
 
 	landing, err := os.ReadFile(*landingPath)
@@ -75,7 +73,6 @@ func main() {
 		HostKeyPath: filepath.Join(*dataDir, "ssh_host_ed25519_key"),
 		Upload:      uploadSvc,
 		Manage:      manageSvc,
-		Token:       tokenSvc,
 		BuildURL:    build,
 		Logger:      logger,
 	}

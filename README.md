@@ -13,9 +13,9 @@ hostthis — pipe rendered content (html/markdown), get a URL.
   ssh hostthis.dev pin <slug> <ver>               set served version
   ssh hostthis.dev delete <slug>                  permanent
   ssh hostthis.dev whoami                         your identity + active count
-  ssh hostthis.dev token create                   issue an HTTP API token
 
-uploads accept HTML and Markdown only. 5 MB per paste. 24h retention.
+uploads accept HTML and Markdown only. 1 MiB per identity, total
+across active pastes. 24h retention.
 the URL itself is the secret — 8-char random slug, ~10^12 possibilities.
 share the URL with anyone you want; don't share it with anyone you don't.
 ```

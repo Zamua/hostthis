@@ -33,7 +33,7 @@ func TestPasteRepo_InsertAndGet(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second) // round-trip safely through RFC3339Nano
 	p := domain.Paste{
 		Slug:          "abc23456",
-		OwnerHash:     "sha256:test",
+		Identity:      "key:sha256:test",
 		Kind:          domain.KindHTML,
 		ContentSHA:    "sha-of-bytes",
 		Size:          42,
@@ -50,7 +50,7 @@ func TestPasteRepo_InsertAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.Slug != p.Slug || got.OwnerHash != p.OwnerHash || got.Kind != p.Kind ||
+	if got.Slug != p.Slug || got.Identity != p.Identity || got.Kind != p.Kind ||
 		got.ContentSHA != p.ContentSHA || got.Size != p.Size || got.Name != p.Name {
 		t.Fatalf("round-trip mismatch:\n got  %+v\n want %+v", got, p)
 	}
