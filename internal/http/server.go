@@ -1,6 +1,9 @@
 // Package http serves the apex landing + the paste read surface.
-// Phase 1 supports path-mode only (`/p/<slug>`); subdomain-mode
-// routing comes when the wildcard cert is in place.
+//
+// The router accepts both URL shapes simultaneously so the binary
+// works whether the operator runs in subdomain mode (`<slug>.apex`)
+// or path mode (`apex/p/<slug>`). The actual mode is set by what URL
+// the SSH server emits after upload; the HTTP side just doesn't care.
 package http
 
 import (
@@ -32,6 +35,7 @@ type Server struct {
 	Pastes      PasteReader
 	Blobs       BlobReader
 	LandingHTML []byte // optional — apex landing page bytes embedded at build
+	ApexDomain  string // e.g. "hostthis.dev" — used to peel slug subdomains
 	Now         func() time.Time
 }
 
@@ -45,23 +49,60 @@ func (s *Server) nowOrTime() time.Time {
 // Handler returns the mux that the caller binds with http.ListenAndServe.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-
-	// Apex landing (path-mode dev: this is reached at "/")
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Anything under /p/ is a paste lookup; everything else under /
-		// is either the apex or a 404.
+		// 1. Subdomain mode: Host like "<slug>.<apex>" → serve paste.
+		if slug, ok := s.slugFromHost(r.Host); ok {
+			// In subdomain mode the path doesn't matter; whatever the
+			// visitor appends gets ignored. Slug subdomains only serve
+			// the paste root.
+			s.servePasteSlug(w, r, slug)
+			return
+		}
+		// 2. Path mode: /p/<slug> on the apex.
 		if strings.HasPrefix(r.URL.Path, "/p/") {
-			s.servePaste(w, r)
+			slugStr := strings.TrimPrefix(r.URL.Path, "/p/")
+			slug, err := domain.ParseSlug(slugStr)
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			s.servePasteSlug(w, r, slug)
 			return
 		}
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
+		// 3. Apex root → landing.
+		if r.URL.Path == "/" {
+			s.serveLanding(w, r)
 			return
 		}
-		s.serveLanding(w, r)
+		http.NotFound(w, r)
 	})
-
 	return mux
+}
+
+// slugFromHost returns (slug, true) when host is "<slug>.<apex>" and
+// the slug parses cleanly. Otherwise (_, false). Strips the port if
+// present.
+func (s *Server) slugFromHost(host string) (domain.Slug, bool) {
+	if s.ApexDomain == "" {
+		return "", false
+	}
+	if i := strings.Index(host, ":"); i >= 0 {
+		host = host[:i]
+	}
+	suffix := "." + s.ApexDomain
+	if !strings.HasSuffix(host, suffix) {
+		return "", false
+	}
+	sub := strings.TrimSuffix(host, suffix)
+	if strings.Contains(sub, ".") {
+		// Multi-level subdomain (e.g. "x.y.apex") — not a slug, ignore.
+		return "", false
+	}
+	slug, err := domain.ParseSlug(sub)
+	if err != nil {
+		return "", false
+	}
+	return slug, true
 }
 
 func (s *Server) serveLanding(w http.ResponseWriter, _ *http.Request) {
@@ -76,13 +117,10 @@ func (s *Server) serveLanding(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(s.LandingHTML)
 }
 
-func (s *Server) servePaste(w http.ResponseWriter, r *http.Request) {
-	slugStr := strings.TrimPrefix(r.URL.Path, "/p/")
-	slug, err := domain.ParseSlug(slugStr)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
+// servePasteSlug serves the paste for the given slug, with all the
+// sandboxing headers. Both the subdomain and the path entry points
+// funnel through here.
+func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug domain.Slug) {
 	p, err := s.Pastes.Get(slug)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {

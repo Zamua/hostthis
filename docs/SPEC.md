@@ -88,26 +88,20 @@ prod, test, console, hostthis, mcp, help, about
 
 ### Dev-only path mode
 
-For local development where wildcard DNS + certs are friction (the Mac
-mini tailnet case), the binary supports a `--mode path` flag (or
-`HOSTTHIS_URL_MODE=path` env). In path mode:
+Production runs subdomain mode (`<slug>.<apex>`). For local development
+where wildcard DNS + certs are friction, the binary also supports a
+`--mode path` flag (or `HOSTTHIS_URL_MODE=path` env):
 
 - Pastes live at `<apex>/p/<slug>` instead of `<slug>.<apex>`.
 - The SSH server emits the path-shape URL after upload.
-- The HTTP router accepts both `<slug>.apex` and `apex/p/<slug>`.
-- Storage, validation, rendering, sanitization, and response headers are
-  identical to subdomain mode — only the URL emission and routing
-  differ at the I/O boundary.
+- The HTTP router accepts BOTH forms at runtime — same handler — so
+  changing modes is just changing what URL gets emitted.
 
 **Path mode is dev-only and breaks the origin-isolation property** —
 all pastes share the apex origin, so user-uploaded JS could read apex
 cookies or talk to other pastes' state. The binary's startup logs a
-loud warning when running in path mode, and any deploy script that
-ships a production binary with `--mode path` should be rejected by CI.
-
-The integration test suite always runs against subdomain mode (using
-Host-header tagging in the test HTTP client — no DNS needed) so the
-origin-isolation guarantees are pinned regardless of dev convenience.
+loud warning when running in path mode, and any production deploy
+must use `--mode subdomain`.
 
 ---
 

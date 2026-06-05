@@ -80,7 +80,7 @@ deploy-sync: _require-vps-host
 # file reads (apex, mode, scheme) plus the absolute data path so the
 # volume mount doesn't depend on cwd.
 DEPLOY_ENV = HOSTTHIS_APEX_DOMAIN='$(HOSTTHIS_APEX_DOMAIN)' \
-             HOSTTHIS_URL_MODE='$(or $(HOSTTHIS_URL_MODE),path)' \
+             HOSTTHIS_URL_MODE='$(or $(HOSTTHIS_URL_MODE),subdomain)' \
              HOSTTHIS_PUBLIC_SCHEME='$(or $(HOSTTHIS_PUBLIC_SCHEME),https)' \
              HOSTTHIS_DATA_PATH='$(VPS_PATH)/data'
 

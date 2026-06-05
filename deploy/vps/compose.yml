@@ -46,7 +46,7 @@ services:
       # this compose file, i.e. deploy/vps/data) if not set.
       - "${HOSTTHIS_DATA_PATH:-./data}:/var/lib/hostthis"
     environment:
-      HOSTTHIS_URL_MODE: "${HOSTTHIS_URL_MODE:-path}"
+      HOSTTHIS_URL_MODE: "${HOSTTHIS_URL_MODE:-subdomain}"
       HOSTTHIS_PUBLIC_SCHEME: "${HOSTTHIS_PUBLIC_SCHEME:-https}"
       HOSTTHIS_APEX_DOMAIN: "${HOSTTHIS_APEX_DOMAIN:?HOSTTHIS_APEX_DOMAIN is required}"
       HOSTTHIS_DATA_DIR: /var/lib/hostthis
