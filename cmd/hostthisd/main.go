@@ -81,6 +81,7 @@ func main() {
 		Pastes:      pasteRepo,
 		Blobs:       blobs,
 		LandingHTML: landing,
+		ApexDomain:  *apexDomain,
 	}
 	httpSrv := &http.Server{
 		Addr:              *httpAddr,
