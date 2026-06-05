@@ -24,15 +24,16 @@ ssh hostthis.dev rename <slug> "<name>"         set / change a paste's label
 ssh hostthis.dev versions <slug>                history within the 24h window
 ssh hostthis.dev pin <slug> <ver>               set served version
 ssh hostthis.dev delete <slug>                  permanent
-ssh hostthis.dev unpublish <slug>               public 404s
-ssh hostthis.dev publish <slug>                 undo unpublish
-ssh hostthis.dev link <slug> [--expires <dur>]  signed share URL
-ssh hostthis.dev unshare <slug>                 revoke signed links
 ssh hostthis.dev whoami                         your identity + active count
 ssh hostthis.dev token create                   issue an HTTP API token
 ```
 
 Limits: 5 MB per paste. 24h retention. HTML and Markdown only.
+
+The URL itself is the secret — an 8-char random slug from a 32-char
+alphabet, so ~10^12 possibilities. Share the URL with whoever you want
+to see the paste; nobody who doesn't have it can find it. Same posture
+as YouTube unlisted, GitHub secret gists, Drive "anyone with the link."
 
 The public instance is at [hostthis.dev](https://hostthis.dev). The spec
 that defines the behavior lives at [docs/SPEC.md](docs/SPEC.md).

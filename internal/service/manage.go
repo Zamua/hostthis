@@ -17,9 +17,7 @@ type PasteAdmin interface {
 	ListByOwner(owner string) ([]domain.Paste, error)
 	Delete(domain.Slug) error
 	SetName(domain.Slug, string) error
-	SetPublished(domain.Slug, bool) error
 	SetPinnedVersion(domain.Slug, domain.Version) error
-	BumpShareSecret(slug domain.Slug, fresh []byte) error
 	AppendVersion(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, now time.Time) (int, error)
 	ListVersions(domain.Slug) ([]domain.Version, error)
 	GetVersion(domain.Slug, int) (domain.Version, error)
@@ -149,20 +147,6 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 	return m.Repo.Delete(slug)
 }
 
-// Publish / Unpublish flip the visibility bit.
-func (m *Manage) Publish(slug domain.Slug, owner string) error {
-	return m.setPublished(slug, owner, true)
-}
-func (m *Manage) Unpublish(slug domain.Slug, owner string) error {
-	return m.setPublished(slug, owner, false)
-}
-func (m *Manage) setPublished(slug domain.Slug, owner string, pub bool) error {
-	if _, err := m.requireOwner(slug, owner); err != nil {
-		return err
-	}
-	return m.Repo.SetPublished(slug, pub)
-}
-
 // Versions returns the slug's full history (newest first).
 func (m *Manage) Versions(slug domain.Slug, owner string) ([]domain.Version, error) {
 	if _, err := m.requireOwner(slug, owner); err != nil {
@@ -185,15 +169,6 @@ func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version
 		return domain.Version{}, err
 	}
 	return ver, nil
-}
-
-// Unshare rotates the per-paste HMAC key, invalidating every
-// outstanding signed share URL for the slug.
-func (m *Manage) Unshare(slug domain.Slug, owner string) error {
-	if _, err := m.requireOwner(slug, owner); err != nil {
-		return err
-	}
-	return m.Repo.BumpShareSecret(slug, domain.NewShareSecret())
 }
 
 // Whoami returns the per-owner summary used by the `whoami` verb.

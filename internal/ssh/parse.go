@@ -59,44 +59,6 @@ func parseUploadFlags(argv []string) (uploadArgs, error) {
 	return out, nil
 }
 
-// parseLifetimeFlag handles `--expires <dur>` for the `link` verb.
-// Accepts Go duration syntax (`24h`, `7d` shorthand, `never` → 0).
-func parseLifetimeFlag(argv []string) (time.Duration, error) {
-	for i := 0; i < len(argv); i++ {
-		a := argv[i]
-		var raw string
-		switch {
-		case a == "--expires":
-			if i+1 >= len(argv) {
-				return 0, fmt.Errorf("--expires needs a value")
-			}
-			raw = argv[i+1]
-			i++
-		case strings.HasPrefix(a, "--expires="):
-			raw = strings.TrimPrefix(a, "--expires=")
-		default:
-			return 0, fmt.Errorf("unexpected argument %q", a)
-		}
-		if raw == "never" {
-			return 0, nil // service caps to MaxShareLinkLifetime
-		}
-		// Shorthand: "Nd" → "N*24h"
-		if strings.HasSuffix(raw, "d") {
-			n, err := strconv.Atoi(strings.TrimSuffix(raw, "d"))
-			if err != nil || n < 0 {
-				return 0, fmt.Errorf("invalid --expires %q", raw)
-			}
-			return time.Duration(n) * 24 * time.Hour, nil
-		}
-		d, err := time.ParseDuration(raw)
-		if err != nil {
-			return 0, fmt.Errorf("invalid --expires %q", raw)
-		}
-		return d, nil
-	}
-	return 0, nil // default lifetime in service
-}
-
 // parseInt is a thin alias to keep the call sites short.
 func parseInt(s string) (int, error) { return strconv.Atoi(s) }
 

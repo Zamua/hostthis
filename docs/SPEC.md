@@ -57,13 +57,17 @@ abuse + sandboxing edge cases. Stay narrow.
 
 Each paste lives at its own subdomain on the apex:
 
-- `https://abc12345.hostthis.dev` — anon upload, random 8-char slug
+- `https://abc12345.hostthis.dev` — random 8-char slug
   (alphabet: `abcdefghijkmnpqrstuvwxyz23456789` — lowercase, no ambiguous chars)
-- `https://abc12345.hostthis.dev?k=<token>` — signed share link for an
-  unpublished paste
 
-Apex `https://hostthis.dev` is the homepage / docs / dashboard. Never serves
-user content.
+There's no concept of "public vs private" because the slug *is* the
+secret: 32^8 ≈ 1.1 × 10^12 possibilities, computationally infeasible to
+guess. Anyone with the URL can view; anyone without it can't find it.
+Same posture as YouTube unlisted, GitHub secret gists, Drive "anyone
+with the link."
+
+Apex `https://hostthis.dev` is the homepage / docs. Never serves user
+content.
 
 **Subdomain-per-paste, not path-per-paste**, because:
 - Each paste gets its own origin — cookies, JS, CSP can't reach apex or
@@ -122,7 +126,7 @@ retention — see those sections for fixed numbers):
 | Tier | How | Can do |
 |---|---|---|
 | **anonymous** | no ssh key offered (SSH `none` auth) | upload only |
-| **keyed** | any ssh key offered | upload + `list` + `show` + `update` + `delete` + `unpublish`/`publish` + `link`/`unshare` against your own pastes |
+| **keyed** | any ssh key offered | upload + `list` + `show` + `update` + `rename` + `versions` + `pin` + `delete` against your own pastes |
 
 Anonymous uploads are owner-less: nobody can `list` or `update` them
 once submitted. They live their full retention window and then expire.
@@ -273,8 +277,8 @@ reset the expiry clock — purely metadata.
 ssh hostthis.dev show abc12345
 <the html streams to stdout>
 ```
-Owner-only. Use case: reading an unpublished paste, piping back through
-local tooling. Anonymous error: `403`.
+Owner-only. Use case: piping a paste back through local tooling.
+Anonymous error: `403`.
 
 ### Versions
 ```
@@ -304,31 +308,6 @@ deleted.
 Wipes the slug record + all versions. Reuses the slug for future random
 generation. No undo. No confirm prompt (ssh sessions don't tty cleanly;
 the verb is explicit enough).
-
-### Unpublish / publish (visibility toggle)
-```
-ssh hostthis.dev unpublish abc12345
-unpublished. URL now 404s.
-
-ssh hostthis.dev publish abc12345
-published. URL serves again.
-```
-While unpublished, `<slug>.hostthis.dev` returns 404 to everyone. Owner can
-still read via `show` over ssh, and can issue signed share links via `link`.
-
-### Signed share links
-```
-ssh hostthis.dev link abc12345 --expires 24h
-https://abc12345.hostthis.dev?k=hX9pQ2...
-
-ssh hostthis.dev unshare abc12345
-all signed links revoked.
-```
-Token is HMAC-bound to your ssh-key fingerprint + slug + version. URL-bearer
-auth: anyone with the URL views. Revoke any time with `unshare`.
-
-`--expires`: `Nh` (hours), `Nd` (days), `never`. Default 24h. No upper bound
-enforced; operators may config one.
 
 ### Identity
 ```
@@ -362,10 +341,6 @@ hostthis.dev — pipe rendered content (html/markdown), get a URL.
   ssh hostthis.dev versions <slug>                   history (within the 24h window)
   ssh hostthis.dev pin <slug> <ver>                  set served version
   ssh hostthis.dev delete <slug>                     permanent
-  ssh hostthis.dev unpublish <slug>                  public 404s
-  ssh hostthis.dev publish <slug>                    undo unpublish
-  ssh hostthis.dev link <slug> --expires …           signed share URL
-  ssh hostthis.dev unshare <slug>                    revoke signed links
   ssh hostthis.dev whoami                            your identity + quota
   ssh hostthis.dev token create                      issue an HTTP API token
 
@@ -444,10 +419,8 @@ Endpoints (all under `https://hostthis.dev/api/`):
 - `GET  /api/show/<slug>` — content (owner only)
 - `GET  /api/versions/<slug>` — history
 - `POST /api/pin/<slug>/<ver>` — set served version
+- `POST /api/rename/<slug>` — set / change paste's label
 - `DELETE /api/<slug>` — permanent delete
-- `POST /api/unpublish/<slug>` / `POST /api/publish/<slug>`
-- `POST /api/link/<slug>` — issue signed share link
-- `POST /api/unshare/<slug>` — revoke all signed share links
 - `GET  /api/whoami` — identity + quota
 
 ---
