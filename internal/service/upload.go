@@ -55,10 +55,9 @@ type Result struct {
 var ErrOverQuota = errors.New("service: would exceed your 1 MiB total quota; delete a paste or wait for one to expire")
 
 // Create persists a new paste owned by the given identity.
-// The identity is either a "key:<fp>" string (keyed user) or
-// "ip:<subnet>" (anonymous; SSH layer derives this from RemoteAddr).
-// The identity gates quota — sum of identity's active pastes plus
-// this body cannot exceed UserQuotaBytes.
+// The identity is a "key:<fp>" string built from the uploader's ssh
+// public key fingerprint. The identity gates quota — sum of the
+// identity's active pastes plus this body cannot exceed UserQuotaBytes.
 //
 // Type detection uses domain.DetectKind; unsupported types return
 // domain.ErrUnsupportedKind so the caller can surface the right

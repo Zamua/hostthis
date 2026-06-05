@@ -1,7 +1,8 @@
 // Package ssh implements the SSH-pipe surface — the user's full CLI.
-// The server accepts any auth (publickey or none) so anonymous uploads
-// work. The user's public-key fingerprint, when present, is captured
-// and passed to the application services as the owner identity.
+// Every session must offer a publickey; sessions without one are
+// rejected at startup. The presented key's SHA256 fingerprint becomes
+// the identity passed to the application services for quota
+// accounting and ownership checks.
 package ssh
 
 import (
@@ -73,7 +74,7 @@ func (s *Server) ListenAndServe() error {
 //
 // `sess.Command()` returns the already-shell-split arg vector (ssh
 // client does that for us). The first token is the verb. An empty
-// command means "anonymous-or-keyed implicit upload."
+// command means "implicit upload of whatever's on stdin."
 func (s *Server) handleSession(sess gossh.Session) {
 	// hostthis requires an ssh key on every session. Without a key
 	// there's no identity to attribute the paste to or to enforce
@@ -148,7 +149,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 
 func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	// argv may be:
-	//   nil / []              → new anonymous-or-keyed upload
+	//   nil / []              → new upload
 	//   [<slug>]              → update an existing slug
 	//   [--name "label"] etc. → new upload with flags
 	//   [<slug> --name "…"]   → update with flags (rename in one shot)
@@ -350,11 +351,8 @@ func (s *Server) verbPin(sess gossh.Session, owner string, argv []string) {
 // -- whoami -----------------------------------------------------------------
 
 func (s *Server) verbWhoami(sess gossh.Session, owner string) {
-	if !domain.Identity(owner).IsKeyed() {
-		fmt.Fprintln(sess.Stderr(), "anonymous — no ssh key offered")
-		_ = sess.Exit(0)
-		return
-	}
+	// handleSession rejects key-less sessions before they get here,
+	// so owner is always a key:<fp> identity by this point.
 	info, err := s.Manage.Whoami(owner)
 	if err != nil {
 		emitServiceErr(sess, err)
