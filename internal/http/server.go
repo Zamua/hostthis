@@ -89,21 +89,19 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Sandboxing headers per SPEC.md HTML-sandboxing section.
-	// These apply even in path-mode dev — origin isolation isn't
-	// real in path-mode, but defense-in-depth headers still keep
-	// the browser from doing surprising things with the bytes.
+	// No Content-Security-Policy — origin isolation (subdomain-per-paste)
+	// is the actual security boundary. Same posture as codepen et al.
+	// We do keep the headers that don't restrict what the paste's JS
+	// can DO inside its own origin:
+	//   - X-Frame-Options DENY: no clickjacking embed
+	//   - Referrer-Policy no-referrer: visitor's referrer doesn't leak
+	//   - Permissions-Policy: deny camera/mic/geo/usb/payment (the
+	//     categories that need explicit user grant; we don't want
+	//     malicious pastes triggering those prompts)
 	h := w.Header()
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()")
-	h.Set("Content-Security-Policy",
-		"default-src 'self' data: blob:; "+
-			"script-src 'self' 'unsafe-inline'; "+
-			"style-src 'self' 'unsafe-inline'; "+
-			"img-src 'self' data: blob: https:; "+
-			"font-src 'self' data: https:; "+
-			"connect-src 'self'; "+
-			"frame-ancestors 'none'")
 
 	switch p.Kind {
 	case domain.KindHTML:
