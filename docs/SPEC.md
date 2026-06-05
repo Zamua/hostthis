@@ -93,7 +93,7 @@ mini tailnet case), the binary supports a `--mode path` flag (or
 - Pastes live at `<apex>/p/<slug>` instead of `<slug>.<apex>`.
 - The SSH server emits the path-shape URL after upload.
 - The HTTP router accepts both `<slug>.apex` and `apex/p/<slug>`.
-- Storage, validation, rendering, sanitization, and CSP headers are
+- Storage, validation, rendering, sanitization, and response headers are
   identical to subdomain mode — only the URL emission and routing
   differ at the I/O boundary.
 
@@ -542,77 +542,68 @@ deploys keep the full union-quota machinery on.
 
 ## HTML sandboxing
 
-Subdomain-per-paste means each user-uploaded HTML lives on its own origin.
-Browsers enforce the same-origin policy: cookies, JS, and CSP from
-`abc12345.hostthis.dev` cannot reach `xyz67890.hostthis.dev` or the apex.
-The apex `hostthis.dev` never sets a `Domain=.hostthis.dev` cookie, so
-subdomain pastes cannot read apex cookies either.
+**Origin isolation is the security boundary, not CSP.** Subdomain-per-paste
+means each user-uploaded HTML lives on its own origin. Browsers enforce
+the same-origin policy: cookies, storage, and JS from `abc12345.hostthis.dev`
+cannot reach `xyz67890.hostthis.dev` or the apex. The apex `hostthis.dev`
+never sets a `Domain=.hostthis.dev` cookie, so subdomain pastes cannot
+read apex cookies either. This is the same model major user-content hosts
+(codepen, jsfiddle, codesandbox, gh-pages) rely on.
 
-Default response headers for HTML pages (operator can override):
+Within a paste's own origin, we do NOT impose a Content-Security-Policy.
+JS can do anything any same-origin script can do: load libraries from any
+CDN, fetch any HTTPS endpoint, render WebGL, talk to APIs. The pragmatic
+default matches the industry — codepen ships no CSP on user pens at all.
 
-- `Content-Security-Policy` (see below — the JS question)
+Response headers on paste reads:
+
 - `X-Frame-Options: DENY` — no embedding the paste in iframes elsewhere
+  (clickjacking defense)
 - `Referrer-Policy: no-referrer` — visiting a paste leaks nothing about
   who sent it
 - `Permissions-Policy: camera=(), microphone=(), geolocation=(), usb=(), payment=()`
   — deny everything that needs explicit user grant
-- `Cross-Origin-Opener-Policy: same-origin` — pastes can't open
-  windows to other origins and retain references
+- `Cross-Origin-Opener-Policy: same-origin` — pastes can't open windows
+  to other origins and retain references
 
-### JavaScript: we allow it
+### What this means for the visitor
 
-Banning JS in user HTML would kill the primary use case (LLM-generated
-interactive prototypes, demos with charts/toggles/forms). We allow it,
-but isolate hard and constrain what it can do:
+A paste's HTML can:
 
-**Allowed by default CSP**:
-- `script-src 'self' 'unsafe-inline'` — inline scripts and same-origin
-  external scripts (i.e. scripts the paste itself contains)
-- `style-src 'self' 'unsafe-inline'` — same for CSS
-- `img-src 'self' data: blob: https:` — local + data URIs + any HTTPS image
-- `font-src 'self' data: https:` — same for fonts
-- `connect-src 'self'` — **fetch/XHR/WebSocket restricted to same-origin**
+- Load JS, CSS, fonts, images from any CDN
+- Fetch any HTTPS API
+- Render WebGL, Canvas, Web Audio, anything browsers support
+- Inline `<script>`, `<style>`, modules
+- Run user-supplied JS that does anything that JS can do
 
-**Why restrict `connect-src`**: the highest-leverage attack on a JS-permissive
-host is exfiltration — a paste loads, looks legit, but its JS POSTs the
-visitor's input (or fingerprinting data) to an attacker-controlled domain.
-With `connect-src 'self'`, the paste's JS can only call back to its own
-subdomain, which is read-only (we don't accept user data via paste URLs).
-Phishing attempts at credential theft still happen but the stolen data
-has no exfiltration channel.
+A paste's HTML cannot:
 
-Cost: legitimate pastes that need to call external APIs (e.g. a demo that
-hits OpenAI directly) don't work out-of-the-box. Owner can opt into a
-relaxed CSP via metadata on upload (`--csp loose`), which sets
-`connect-src https:` — this is a deliberate, owner-acknowledged opt-in.
-Default stays strict.
+- Read cookies from `hostthis.dev` apex or other paste subdomains
+- Touch the visitor's filesystem, camera, mic, or geolocation without
+  the explicit prompt the browser shows (and Permissions-Policy denies
+  some categories outright)
+- Be embedded in another site's iframe (X-Frame-Options: DENY)
+- Tell other sites where the visitor came from (Referrer-Policy)
 
-**Phishing**: the URL pattern (`<slug>.hostthis.dev`) is the user's signal
-that the page is user-uploaded content, not a real site. We reinforce
-with a small "uploaded via hostthis.dev — treat as untrusted" interstitial
-on first visit per paste per browser session (dismissible). Standard
-pattern for hosts that serve untrusted user content on isolated subdomains.
-
-**Crypto-mining / drive-by / browser exploits**: same-origin isolation
-limits blast radius to the visitor's session on that one paste. Modern
-browsers also block most known exploit categories. We accept residual
-risk; abuse reports remove offending pastes.
-
-**Abuse reporting**: every paste page renders a small "report" link in
-the response (CSP-permitted, hits the apex). An apex form lets visitors
-flag phishing / malware / DMCA. Reports flow to the operator's queue;
-flagged pastes can be unpublished by ops without owner action.
+Treat any URL on hostthis.dev as untrusted user content — same as you'd
+treat a codepen, a gist, or a github.io page.
 
 ### Markdown rendering
 
 Markdown is rendered to HTML server-side by a memory-safe Go markdown
-library (likely `gomarkdown/markdown` or `yuin/goldmark`). The output is
-sanitized through `bluemonday`'s UGC policy to strip event handlers,
-javascript: URLs, and dangerous tags. The sanitized HTML is then served
-with the same CSP as user-supplied HTML.
+library (likely `goldmark`). The output is sanitized through `bluemonday`'s
+UGC policy to strip event handlers, `javascript:` URLs, and dangerous
+tags before being served. Uploaded Markdown therefore can NOT execute JS
+even though uploaded HTML can — the sanitizer is the safety net for the
+markdown path.
 
-This makes Markdown safer than HTML by default — uploaded Markdown can
-NOT execute JS, even though uploaded HTML can.
+### Abuse reporting
+
+Every paste page can render a small "report" link (it points at an apex
+form). The form lets visitors flag phishing / malware / DMCA. Reports
+flow to the operator's queue; flagged pastes can be unpublished by ops
+without owner action. Since our default-24h retention already evicts
+everything in a day, the abuse window is naturally bounded.
 
 ---
 
@@ -730,9 +721,6 @@ breaking v1 semantics. Adding any of them should go through an ADR first
   user can re-issue with `link`.
 - **Quota display in `list` footer?** Currently shown in `whoami` only.
   Probably yes — no surprises when hitting the cap.
-- **CSP relaxation flag (`--csp loose`) value**: which precise CSP value
-  is "loose enough for real LLM-generated demos to work" without leaving
-  the door wide open? Needs testing against actual artifacts.
 - **Owner notification when a paste expires?** Right now expiry is silent.
   A best-effort "your paste expired" line in the next `list` output could
   remind owners that the 24h clock ticks. Maybe.

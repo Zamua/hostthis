@@ -129,11 +129,21 @@ func TestUploadAndServe(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Fatalf("content-type: got %q, want text/html…", ct)
 	}
-	if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "connect-src 'self'") {
-		t.Fatalf("CSP missing connect-src 'self': %q", csp)
+	// We deliberately do NOT set a Content-Security-Policy on paste
+	// reads — origin isolation is the security boundary, not CSP.
+	// Confirm the header is absent so a future "let's add a CSP back"
+	// refactor has to update this test deliberately.
+	if csp := resp.Header.Get("Content-Security-Policy"); csp != "" {
+		t.Fatalf("Content-Security-Policy should be unset on paste reads, got %q", csp)
 	}
 	if xfo := resp.Header.Get("X-Frame-Options"); xfo != "DENY" {
 		t.Fatalf("X-Frame-Options: got %q, want DENY", xfo)
+	}
+	if rp := resp.Header.Get("Referrer-Policy"); rp != "no-referrer" {
+		t.Fatalf("Referrer-Policy: got %q, want no-referrer", rp)
+	}
+	if pp := resp.Header.Get("Permissions-Policy"); !strings.Contains(pp, "camera=()") {
+		t.Fatalf("Permissions-Policy: got %q, want camera=() at minimum", pp)
 	}
 }
 
