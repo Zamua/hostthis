@@ -75,14 +75,17 @@ func (u *Upload) Create(body []byte, owner string, name string, typeHint string)
 	}
 	now := u.Now().UTC()
 	p := domain.Paste{
-		OwnerHash:  owner,
-		Kind:       kind,
-		ContentSHA: sha,
-		Size:       len(body),
-		Name:       name,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		ExpiresAt:  now.Add(domain.RetentionWindow),
+		OwnerHash:     owner,
+		Kind:          kind,
+		ContentSHA:    sha,
+		Size:          len(body),
+		Name:          name,
+		Published:     true,
+		PinnedVersion: 1,
+		ShareSecret:   domain.NewShareSecret(),
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		ExpiresAt:     now.Add(domain.RetentionWindow),
 	}
 	// Retry on slug collision. SlugAlphabet has 32^8 ≈ 1.1e12 distinct
 	// slugs; collisions inside 5 retries are vanishingly unlikely.

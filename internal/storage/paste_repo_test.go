@@ -32,15 +32,18 @@ func TestPasteRepo_InsertAndGet(t *testing.T) {
 	repo, _ := newTestDB(t)
 	now := time.Now().UTC().Truncate(time.Second) // round-trip safely through RFC3339Nano
 	p := domain.Paste{
-		Slug:       "abc23456",
-		OwnerHash:  "sha256:test",
-		Kind:       domain.KindHTML,
-		ContentSHA: "sha-of-bytes",
-		Size:       42,
-		Name:       "demo",
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		ExpiresAt:  now.Add(domain.RetentionWindow),
+		Slug:          "abc23456",
+		OwnerHash:     "sha256:test",
+		Kind:          domain.KindHTML,
+		ContentSHA:    "sha-of-bytes",
+		Size:          42,
+		Name:          "demo",
+		Published:     true,
+		PinnedVersion: 1,
+		ShareSecret:   domain.NewShareSecret(),
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		ExpiresAt:     now.Add(domain.RetentionWindow),
 	}
 	if err := repo.Insert(p); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -71,13 +74,16 @@ func TestPasteRepo_InsertDuplicateSlugFails(t *testing.T) {
 	repo, _ := newTestDB(t)
 	now := time.Now().UTC().Truncate(time.Second)
 	p := domain.Paste{
-		Slug:       "abc23456",
-		Kind:       domain.KindHTML,
-		ContentSHA: "x",
-		Size:       1,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		ExpiresAt:  now.Add(domain.RetentionWindow),
+		Slug:          "abc23456",
+		Kind:          domain.KindHTML,
+		ContentSHA:    "x",
+		Size:          1,
+		Published:     true,
+		PinnedVersion: 1,
+		ShareSecret:   domain.NewShareSecret(),
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		ExpiresAt:     now.Add(domain.RetentionWindow),
 	}
 	if err := repo.Insert(p); err != nil {
 		t.Fatalf("first insert: %v", err)
