@@ -68,10 +68,19 @@ func TestUploadAndServe(t *testing.T) {
 	waitForSSH(t, sshAddr)
 
 	// Real ssh client. No host-key verification — we're talking to our
-	// own test server on localhost.
+	// own test server on localhost. Generate a fresh ed25519 key and
+	// authenticate with it (anonymous uploads are no longer allowed).
+	_, priv, err := genEd25519()
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	signer, err := xssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
 	cfg := &xssh.ClientConfig{
-		User:            "anon",
-		Auth:            []xssh.AuthMethod{xssh.Password("ignored")},
+		User:            "anyone",
+		Auth:            []xssh.AuthMethod{xssh.PublicKeys(signer)},
 		HostKeyCallback: xssh.InsecureIgnoreHostKey(),
 		Timeout:         3 * time.Second,
 	}

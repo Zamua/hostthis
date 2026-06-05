@@ -112,18 +112,9 @@ password. First time a key fingerprint connects, the server creates an
 account row keyed on the SHA256 fingerprint. Every subsequent connection
 from the same key is "the same user".
 
-Two tiers, distinguished only by *what you can do* (not size or
-retention — see those sections for fixed numbers):
-
-| Tier | How | Can do |
-|---|---|---|
-| **anonymous** | no ssh key offered (SSH `none` auth) | upload only |
-| **keyed** | any ssh key offered | upload + `list` + `show` + `update` + `rename` + `versions` + `pin` + `delete` against your own pastes |
-
-Anonymous uploads are quota-tracked by their client IP subnet
-(`ip:<subnet>` identity — see Limits) but have no management
-capability: nobody can `list`, `update`, `delete`, etc. them once
-submitted. They live their full retention window and then expire.
+A key is required on every session. Without one the server prints
+"ssh key required" on stderr, points at `ssh-keygen`, and exits 3.
+There is no anonymous mode.
 
 There is no "new key cooldown" or trust ramp — the per-identity
 quota (see Limits) already bounds abuse via key rotation, so we
@@ -308,8 +299,8 @@ key:     SHA256:abc...xyz
 joined:  2026-06-05
 active:  4 paste(s)
 ```
-Anonymous sessions print `anonymous — no ssh key offered` on stderr
-and exit 0.
+Sessions without a key never reach this verb — they're rejected at
+session startup with "ssh key required" on stderr and exit 3.
 
 ### Help
 ```
@@ -348,23 +339,20 @@ One limit, one number.
 
 *1 MiB per identity, total across active pastes.*
 
-"Identity" is either the SHA256 fingerprint of the uploader's ssh public
-key (keyed users) or the client's IP subnet (anonymous; /24 for IPv4,
-/48 for IPv6). The cap covers the sum of all of the identity's active
-pastes' sizes. When pastes expire (24h), the cap frees up. Anyone
-trying to upload more gets a "you'd exceed your 1 MiB total quota"
-error.
+"Identity" is the SHA256 fingerprint of the uploader's ssh public
+key. The cap covers the sum of all of the identity's active pastes'
+sizes. When pastes expire (24h) or get deleted, the cap frees up.
+Anyone trying to upload more gets a "you'd exceed your 1 MiB total
+quota" error.
 
 That's it. No per-paste cap separate from the identity cap (since one
 paste fitting in 1 MiB *is* the only upload an identity can make from
-zero used bytes). No rolling-window quota, no per-IP-and-per-key
-tracking, no rate limiter.
+zero used bytes). No rolling-window quota, no rate limiter.
 
 The bound on what a single attacker can do to the service is therefore
-1 MiB per identity. Sybil rotation across IP subnets remains possible
-but slow (a /24 wide enough to look like a real ISP block is harder to
-spoof than to rotate). Operators with abuse concerns can layer
-their reverse proxy or hosting-provider rate limits on top.
+1 MiB per ssh key. Sybil rotation via `ssh-keygen` is unbounded by us;
+operators with abuse concerns can layer their reverse proxy or
+hosting-provider rate limits on top.
 
 ### Caps
 
