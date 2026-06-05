@@ -65,8 +65,7 @@ func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
 
 // ListByOwner returns all of an owner's active pastes, ordered by
 // expires_at ascending (soonest to die first — matches what `list`
-// should show). The identity empty string returns no rows
-// (anonymous has no list capability).
+// should show). Empty identity returns no rows.
 func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	if owner == "" {
 		return nil, nil
