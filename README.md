@@ -72,10 +72,6 @@ ssh hostthis.dev delete abc12345
 1 MiB per identity, total across active pastes. 24h retention. HTML
 and Markdown only.
 
-## See Also
-
-Source: [github.com/Zamua/hostthis](https://github.com/Zamua/hostthis)
-
 ## License
 
 MIT — see [LICENSE](LICENSE).
