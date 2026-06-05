@@ -22,16 +22,10 @@ out of scope for v1 — see "Non-goals" at the bottom.
   as the primary upload mechanism.
 - It IS: dev-first. The mental model is `git push` for documents — your ssh
   key is your identity, every operation is one line in a terminal.
-- It IS: useful for LLM-generated artifacts that are awkward to share
-  otherwise (HTML mockups from Claude, Markdown reports from Cursor, etc.).
-- It IS NOT: a general file host. ZIPs, binaries, photos, videos — those
-  belong on elsewhere.
-- It IS NOT: a comment/collaboration platform (other tools fill that role).
-- It IS NOT: a transient blob host (other tools fill that role).
-
-The differentiator from existing tools: `ssh-pipe upload` + `rendered HTML/
-Markdown hosting` + `ssh-key identity` + `self-hostable` + `dev-first
-API/CLI surface`. No tool combines all of those.
+- It IS NOT: a general file host. ZIPs, binaries, photos, videos belong
+  elsewhere.
+- It IS NOT: a comment/collaboration platform.
+- It IS NOT: a transient blob host for opaque bytes.
 
 ## Supported formats
 
@@ -52,7 +46,6 @@ at what we accept:
 ```
 $ cat photo.jpg | ssh hostthis.dev
 error: hostthis only accepts content that needs rendering (html, markdown).
-       for binary files, use elsewhere.
 ```
 
 This is deliberate scope: every accepted format expands the surface for
@@ -74,8 +67,7 @@ user content.
 
 **Subdomain-per-paste, not path-per-paste**, because:
 - Each paste gets its own origin — cookies, JS, CSP can't reach apex or
-  other pastes. Standard sandbox pattern (matches `multi-tenant subdomain hosts`,
-  `(another such host)`, `(another such host)`).
+  other pastes. Standard sandbox pattern for multi-tenant content hosts.
 - Reads cleaner in chats ("check this out: `acme-demo.hostthis.dev`").
 - Shorter total URL than `hostthis.dev/p/abc12345`.
 
@@ -598,8 +590,8 @@ Default stays strict.
 **Phishing**: the URL pattern (`<slug>.hostthis.dev`) is the user's signal
 that the page is user-uploaded content, not a real site. We reinforce
 with a small "uploaded via hostthis.dev — treat as untrusted" interstitial
-on first visit per paste per browser session (dismissible). Same approach
-GitHub uses for `isolated-user-content subdomains`.
+on first visit per paste per browser session (dismissible). Standard
+pattern for hosts that serve untrusted user content on isolated subdomains.
 
 **Crypto-mining / drive-by / browser exploits**: same-origin isolation
 limits blast radius to the visitor's session on that one paste. Modern
@@ -696,14 +688,14 @@ household merging would be annoying.
 
 ## Non-goals (explicitly out of v1 scope)
 
-These are interesting but pull the product toward "over-scope"
-or "general file host". Keep the surface small.
+These are interesting but expand the product beyond "host renderable
+content for 24 hours." Keep the surface small.
 
 - **Long-term storage**. Every paste expires at 24h, period. If you need
   a permanent URL, host elsewhere.
 - **Binary / non-renderable file hosting**. ZIPs, photos, videos,
-  arbitrary blobs — that's not in scope.
-- **Comments / threaded discussion**. not a goal.
+  arbitrary blobs are out of scope.
+- **Comments / threaded discussion**. Out of scope.
 - **Password protection on public pastes**. Signed share links cover the
   "private but shareable" case; password is duplicative friction.
 - **View limits / view counts visible to the public**. Owner can see

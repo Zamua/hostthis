@@ -18,10 +18,9 @@ const (
 
 // ErrUnsupportedKind is returned when content sniffs to something
 // outside the v1 accepted set. The error message is what the user
-// sees on stderr; keep it pointed at alternatives.
+// sees on stderr.
 var ErrUnsupportedKind = errors.New(
-	"hostthis only accepts content that needs rendering (html, markdown). " +
-		"for binary files, use elsewhere")
+	"hostthis only accepts content that needs rendering (html, markdown)")
 
 // MaxPasteBytes is the universal per-paste size cap. Per SPEC.md, this
 // is hardcoded — never raised by config or by tier.
