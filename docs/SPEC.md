@@ -177,7 +177,7 @@ link in two months" URL through us. 24h forces the asker to re-host if
 they need it again, which catches stale-link rot at the source.
 
 Long-term hosting is a deliberate non-goal — see "Non-goals" at the
-bottom. If the use case shows up later, it'll be specced and ADR'd then.
+bottom.
 
 ---
 
@@ -503,12 +503,11 @@ content for 24 hours." Keep the surface small.
 - **GitHub (or any third-party) account linking / OAuth**. ssh keys
   alone carry identity; we don't need a second source of trust.
 - **Operator-configurable limits**. Caps, retention, sandbox headers
-  are hardcoded; the only operator knobs are ports / data-dir / TLS /
-  trusted-network toggle.
+  are hardcoded; the only operator knobs are ports / data-dir / apex
+  domain / URL mode / scheme.
 
-If real demand surfaces for any of these later, they can be added without
-breaking v1 semantics. Adding any of them should go through an ADR first
-(see [docs/adr/](adr/)) — these are explicit no's, not oversights.
+If real demand surfaces for any of these later, they can be added
+without breaking v1 semantics. These are explicit no's, not oversights.
 
 ---
 
