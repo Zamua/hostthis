@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/render"
+	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
@@ -31,6 +33,14 @@ type Server struct {
 	Pastes      PasteReader
 	Blobs       BlobReader
 	LandingHTML []byte // optional — apex landing page bytes embedded at build
+	Now         func() time.Time
+}
+
+func (s *Server) nowOrTime() time.Time {
+	if s.Now != nil {
+		return s.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // Handler returns the mux that the caller binds with http.ListenAndServe.
@@ -82,6 +92,27 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+	now := s.nowOrTime()
+	if !now.Before(p.ExpiresAt) {
+		// Past the 24h window. The background sweep will delete this
+		// shortly; we 404 in the meantime so visitors don't see
+		// content that's technically expired.
+		http.NotFound(w, r)
+		return
+	}
+	if !p.Published {
+		// Allow access only if the request carries a valid signed
+		// share token. ?k=<token>
+		token := r.URL.Query().Get("k")
+		if token == "" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := service.VerifyShareToken(p, token, now); err != nil {
+			http.NotFound(w, r)
+			return
+		}
 	}
 	body, err := s.Blobs.Get(p.ContentSHA)
 	if err != nil {

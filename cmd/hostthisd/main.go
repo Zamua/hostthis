@@ -49,12 +49,16 @@ func main() {
 	defer db.Close()
 
 	pasteRepo := storage.NewPasteRepo(db)
+	tokenRepo := storage.NewTokenRepo(db)
 	blobs, err := storage.NewBlobStore(filepath.Join(*dataDir, "blobs"))
 	if err != nil {
 		logger.Fatalf("blob store: %v", err)
 	}
 
 	uploadSvc := service.NewUpload(pasteRepo, blobs)
+	manageSvc := service.NewManage(pasteRepo, blobs)
+	tokenSvc := service.NewTokenService(tokenRepo)
+	sweepSvc := service.NewSweep(pasteRepo, blobs, logger)
 
 	landing, err := os.ReadFile(*landingPath)
 	if err != nil {
@@ -70,6 +74,8 @@ func main() {
 		Addr:        *sshAddr,
 		HostKeyPath: filepath.Join(*dataDir, "ssh_host_ed25519_key"),
 		Upload:      uploadSvc,
+		Manage:      manageSvc,
+		Token:       tokenSvc,
 		BuildURL:    build,
 		Logger:      logger,
 	}
@@ -85,8 +91,8 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Run both servers; whichever exits first wins. Signals tear both
-	// down cleanly.
+	// Run both servers + the sweep goroutine; whichever signaling
+	// event hits first wins. Signals tear them all down cleanly.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -96,6 +102,7 @@ func main() {
 		logger.Printf("http: listening on %s", *httpAddr)
 		errs <- httpSrv.ListenAndServe()
 	}()
+	go sweepSvc.Run(ctx)
 
 	select {
 	case <-ctx.Done():
