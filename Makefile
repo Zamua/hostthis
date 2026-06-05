@@ -65,8 +65,21 @@ VPS_USER ?= $(shell whoami)
 # you know why.
 CONTAINER_UID ?= 65532
 
-deploy: _require-vps-host deploy-sync deploy-build deploy-restart
+deploy: _require-vps-host deploy-sync deploy-build deploy-restart deploy-smoke
 	@echo "deployed; check with 'make deploy-logs VPS_HOST=$(VPS_HOST)'"
+
+# Run the verb-level smoke test against the live URL after every
+# deploy. Pass HOSTTHIS_HOST to target a non-default host.
+deploy-smoke: _require-apex
+	@echo
+	@echo "=== smoke-testing deployed instance ==="
+	@sleep 3   # give the new container a beat to start listening
+	HOSTTHIS_HOST="$(HOSTTHIS_APEX_DOMAIN)" ./scripts/smoke.sh
+
+# Standalone smoke target — runs against whatever HOSTTHIS_HOST is set
+# to (defaults to hostthis.dev). Useful for ad-hoc verification.
+smoke:
+	HOSTTHIS_HOST="$(or $(HOSTTHIS_HOST),hostthis.dev)" ./scripts/smoke.sh
 
 # Push the local working tree to the VPS, excluding build/data artifacts.
 # Re-chowns the checkout to VPS_USER and the data dir to the container uid.

@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/storage"
 )
 
 // PasteAdmin is the persistence interface for everything except
@@ -18,12 +19,11 @@ type PasteAdmin interface {
 	Delete(domain.Slug) error
 	SetName(domain.Slug, string) error
 	SetPinnedVersion(domain.Slug, domain.Version) error
-	AppendVersion(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, now time.Time) (int, error)
+	AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, serviceCap, userCap int64, now time.Time) (int, error)
 	ListVersions(domain.Slug) ([]domain.Version, error)
 	GetVersion(domain.Slug, int) (domain.Version, error)
 	CountByOwner(owner string) (int, error)
 	OwnerFirstSeen(owner string) (time.Time, error)
-	SumActiveSizeByOwner(owner string, now time.Time) (int64, error)
 }
 
 // ErrNotOwner is returned by any owner-gated operation when the
@@ -47,9 +47,10 @@ var ErrInvalidName = errors.New("service: name must be 1–60 printable Unicode 
 // Manage is the verb-level service. Each method maps to one ssh verb
 // (or HTTP endpoint) and is owner-gated.
 type Manage struct {
-	Repo  PasteAdmin
-	Blobs BlobStore // for Show + Update; same interface as Upload
-	Now   func() time.Time
+	Repo            PasteAdmin
+	Blobs           BlobStore // for Show + Update; same interface as Upload
+	ServiceCapBytes int64     // 0 = no service-wide cap
+	Now             func() time.Time
 }
 
 func NewManage(repo PasteAdmin, blobs BlobStore) *Manage {
@@ -118,20 +119,20 @@ func (m *Manage) Update(slug domain.Slug, owner string, body []byte, typeHint st
 		return domain.Paste{}, 0, err
 	}
 	now := m.Now().UTC()
-	used, err := m.Repo.SumActiveSizeByOwner(owner, now)
-	if err != nil {
-		return domain.Paste{}, 0, fmt.Errorf("quota check: %w", err)
-	}
-	if used+int64(len(body)) > int64(domain.UserQuotaBytes) {
-		return domain.Paste{}, 0, ErrOverQuota
-	}
 	sha := domain.HashContent(body)
 	if err := m.Blobs.Put(sha, body); err != nil {
 		return domain.Paste{}, 0, fmt.Errorf("blob write: %w", err)
 	}
-	ver, err := m.Repo.AppendVersion(slug, kind, sha, len(body), now)
+	ver, err := m.Repo.AppendVersionWithQuotaCheck(slug, kind, sha, len(body), m.ServiceCapBytes, int64(domain.UserQuotaBytes), now)
 	if err != nil {
-		return domain.Paste{}, 0, err
+		switch {
+		case errors.Is(err, storage.ErrServiceFull):
+			return domain.Paste{}, 0, ErrServiceFull
+		case errors.Is(err, storage.ErrOverUserQuota):
+			return domain.Paste{}, 0, ErrOverQuota
+		default:
+			return domain.Paste{}, 0, err
+		}
 	}
 	p, err := m.Repo.Get(slug) // re-read so caller sees updated UpdatedAt + ExpiresAt
 	if err != nil {

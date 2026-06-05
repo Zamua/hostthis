@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -10,6 +11,15 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
+// ErrServiceFull is returned when accepting a write would push total
+// active bytes (across all identities) past the operator-configured
+// service-wide cap. Caller surfaces a "try again later" message.
+var ErrServiceFull = errors.New("storage: service is at capacity")
+
+// ErrOverUserQuota is returned when accepting a write would push an
+// identity's active bytes past its per-user cap.
+var ErrOverUserQuota = errors.New("storage: would exceed user quota")
+
 // PasteRepo is the sqlite-backed implementation of paste persistence.
 type PasteRepo struct {
 	db *sql.DB
@@ -17,24 +27,70 @@ type PasteRepo struct {
 
 func NewPasteRepo(db *sql.DB) *PasteRepo { return &PasteRepo{db: db} }
 
-// Insert writes a new paste row plus its v1 version row in one
-// transaction. Returns ErrSlugTaken if the slug is already in use —
-// the caller retries with a fresh random slug.
-func (r *PasteRepo) Insert(p domain.Paste) error {
-	tx, err := r.db.Begin()
+// InsertWithQuotaCheck atomically (under BEGIN IMMEDIATE):
+//  1. checks service-wide active bytes + p.Size against serviceCap (0 → no cap)
+//  2. checks identity active bytes + p.Size against userCap
+//  3. inserts the paste row + its v1 version row
+//
+// Concurrent calls serialize at the transaction boundary, so two
+// uploads from the same identity can't both pass the user-cap check
+// and both insert. Same for two uploads in different identities
+// fighting over the last bytes of the service-wide cap.
+//
+// Returns:
+//   - nil on success
+//   - ErrSlugTaken if p.Slug is already in use (caller retries with a fresh slug)
+//   - ErrServiceFull if accepting would exceed serviceCap
+//   - ErrOverUserQuota if accepting would exceed userCap
+func (r *PasteRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int64, now time.Time) error {
+	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op when commit succeeds
-	_, err = tx.Exec(`
+	defer tx.Rollback() //nolint:errcheck
+
+	nowStr := formatTime(now)
+	body := int64(p.Size)
+
+	// 1. Service-wide check.
+	if serviceCap > 0 {
+		var total int64
+		if err := tx.QueryRow(`
+			SELECT COALESCE(SUM(v.size), 0)
+			FROM versions v
+			JOIN pastes pp ON pp.slug = v.slug
+			WHERE pp.expires_at > ?
+		`, nowStr).Scan(&total); err != nil {
+			return fmt.Errorf("service-wide sum: %w", err)
+		}
+		if total+body > serviceCap {
+			return ErrServiceFull
+		}
+	}
+	// 2. Per-identity check.
+	if userCap > 0 {
+		var ownerTotal int64
+		if err := tx.QueryRow(`
+			SELECT COALESCE(SUM(v.size), 0)
+			FROM versions v
+			JOIN pastes pp ON pp.slug = v.slug
+			WHERE pp.identity = ? AND pp.expires_at > ?
+		`, p.Identity.String(), nowStr).Scan(&ownerTotal); err != nil {
+			return fmt.Errorf("identity sum: %w", err)
+		}
+		if ownerTotal+body > userCap {
+			return ErrOverUserQuota
+		}
+	}
+	// 3. Insert.
+	if _, err := tx.Exec(`
 		INSERT INTO pastes (slug, identity, kind, content_sha, size, name,
 		                    pinned_version,
 		                    created_at, updated_at, expires_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, p.Slug.String(), p.Identity.String(), string(p.Kind), p.ContentSHA, p.Size, p.Name,
 		p.PinnedVersion,
-		formatTime(p.CreatedAt), formatTime(p.UpdatedAt), formatTime(p.ExpiresAt))
-	if err != nil {
+		formatTime(p.CreatedAt), formatTime(p.UpdatedAt), formatTime(p.ExpiresAt)); err != nil {
 		if isUniqueViolation(err) {
 			return ErrSlugTaken
 		}
@@ -47,6 +103,13 @@ func (r *PasteRepo) Insert(p domain.Paste) error {
 		return fmt.Errorf("insert v1 for %q: %w", p.Slug, err)
 	}
 	return tx.Commit()
+}
+
+// Insert is the simple variant used by tests + any caller that
+// doesn't need quota enforcement. Production paths use
+// InsertWithQuotaCheck.
+func (r *PasteRepo) Insert(p domain.Paste) error {
+	return r.InsertWithQuotaCheck(p, 0, 0, p.CreatedAt)
 }
 
 // Get returns the paste for slug, or ErrNotFound. Expired pastes are
@@ -126,15 +189,63 @@ func (r *PasteRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error
 	return nil
 }
 
-// AppendVersion writes a new version row for an existing paste, sets
-// it as the pinned version, and bumps updated_at + expires_at to
-// reset the 24h retention clock. Returns the new ver_num.
-func (r *PasteRepo) AppendVersion(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, now time.Time) (int, error) {
-	tx, err := r.db.Begin()
+// AppendVersionWithQuotaCheck atomically (under BEGIN IMMEDIATE):
+//  1. checks service-wide active bytes + size against serviceCap
+//  2. checks identity (the existing paste's owner) active bytes + size against userCap
+//  3. inserts a new version row + bumps the paste's head + clock
+//
+// The "size" being charged is the new version's bytes — older versions
+// continue to count toward the identity's total until the parent paste
+// expires or is deleted.
+func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, serviceCap, userCap int64, now time.Time) (int, error) {
+	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+
+	nowStr := formatTime(now)
+	body := int64(size)
+
+	// Look up the paste's identity (needed for the user-cap check).
+	var ownerIdentity string
+	if err := tx.QueryRow(`SELECT identity FROM pastes WHERE slug = ?`, slug.String()).Scan(&ownerIdentity); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		return 0, fmt.Errorf("lookup paste identity: %w", err)
+	}
+
+	// Service-wide check.
+	if serviceCap > 0 {
+		var total int64
+		if err := tx.QueryRow(`
+			SELECT COALESCE(SUM(v.size), 0)
+			FROM versions v
+			JOIN pastes pp ON pp.slug = v.slug
+			WHERE pp.expires_at > ?
+		`, nowStr).Scan(&total); err != nil {
+			return 0, fmt.Errorf("service-wide sum: %w", err)
+		}
+		if total+body > serviceCap {
+			return 0, ErrServiceFull
+		}
+	}
+	// Per-identity check.
+	if userCap > 0 {
+		var ownerTotal int64
+		if err := tx.QueryRow(`
+			SELECT COALESCE(SUM(v.size), 0)
+			FROM versions v
+			JOIN pastes pp ON pp.slug = v.slug
+			WHERE pp.identity = ? AND pp.expires_at > ?
+		`, ownerIdentity, nowStr).Scan(&ownerTotal); err != nil {
+			return 0, fmt.Errorf("identity sum: %w", err)
+		}
+		if ownerTotal+body > userCap {
+			return 0, ErrOverUserQuota
+		}
+	}
 
 	var maxVer int
 	if err := tx.QueryRow(`SELECT COALESCE(MAX(ver_num), 0) FROM versions WHERE slug = ?`, slug.String()).Scan(&maxVer); err != nil {
@@ -145,7 +256,7 @@ func (r *PasteRepo) AppendVersion(slug domain.Slug, kind domain.ContentKind, con
 	if _, err := tx.Exec(`
 		INSERT INTO versions (slug, ver_num, kind, content_sha, size, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
-	`, slug.String(), newVer, string(kind), contentSHA, size, formatTime(now)); err != nil {
+	`, slug.String(), newVer, string(kind), contentSHA, size, nowStr); err != nil {
 		return 0, fmt.Errorf("insert version: %w", err)
 	}
 	if _, err := tx.Exec(`
@@ -153,13 +264,19 @@ func (r *PasteRepo) AppendVersion(slug domain.Slug, kind domain.ContentKind, con
 		SET kind = ?, content_sha = ?, size = ?,
 		    pinned_version = ?, updated_at = ?, expires_at = ?
 		WHERE slug = ?
-	`, string(kind), contentSHA, size, newVer, formatTime(now), formatTime(expires), slug.String()); err != nil {
+	`, string(kind), contentSHA, size, newVer, nowStr, formatTime(expires), slug.String()); err != nil {
 		return 0, fmt.Errorf("update paste head: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return newVer, nil
+}
+
+// AppendVersion is the simple variant used by tests + any caller that
+// doesn't need quota enforcement.
+func (r *PasteRepo) AppendVersion(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, now time.Time) (int, error) {
+	return r.AppendVersionWithQuotaCheck(slug, kind, contentSHA, size, 0, 0, now)
 }
 
 // ListVersions returns the version history for slug, newest first.
