@@ -50,11 +50,17 @@ func (s *Server) nowOrTime() time.Time {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// 1. Subdomain mode: Host like "<slug>.<apex>" → serve paste.
+		// 1. Subdomain mode: Host like "<slug>.<apex>" → serve paste,
+		// but ONLY at path "/". Any other path on the slug subdomain
+		// (favicon.ico, /style.css, /wp-login.php, etc.) returns 404
+		// — otherwise the browser's automatic favicon fetch sees the
+		// full paste HTML labeled text/html and keeps the loading
+		// indicator spinning in some clients.
 		if slug, ok := s.slugFromHost(r.Host); ok {
-			// In subdomain mode the path doesn't matter; whatever the
-			// visitor appends gets ignored. Slug subdomains only serve
-			// the paste root.
+			if r.URL.Path != "/" {
+				http.NotFound(w, r)
+				return
+			}
 			s.servePasteSlug(w, r, slug)
 			return
 		}
