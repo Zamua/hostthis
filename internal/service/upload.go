@@ -89,7 +89,7 @@ func (u *Upload) Create(body []byte, owner string, name string, typeHint string)
 		ContentSHA:    sha,
 		Size:          len(body),
 		Name:          name,
-		PinnedVersion: 1,
+		PinnedVersion: 0, // unpinned by default — public URL follows the latest version
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		ExpiresAt:     now.Add(domain.RetentionWindow),

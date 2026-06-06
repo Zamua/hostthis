@@ -87,7 +87,7 @@ func TestQuota_VersionsCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, _, err := manage.Update(r.Paste.Slug, owner, htmlBody(600_000), ""); !errors.Is(err, service.ErrOverQuota) {
+	if _, err := manage.Update(r.Paste.Slug, owner, htmlBody(600_000), ""); !errors.Is(err, service.ErrOverQuota) {
 		t.Fatalf("second 600k version should be over quota, got %v", err)
 	}
 }

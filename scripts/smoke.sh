@@ -116,6 +116,25 @@ echo "$body" | grep -q "smoke 1" && ! echo "$body" | grep -q "v2" \
   && ok "pin v1 rolls back served bytes" \
   || bad "pin v1" "served: $body"
 
+# ---- 8b. update while pinned holds pin + warns -----------------------------
+step "update while pinned (pin should hold)"
+upd_pinned=$(echo '<!doctype html><h1>smoke 1 — v3 while pinned</h1>' | $SSH "$HOST" "$SLUG1" 2>&1)
+echo "$upd_pinned" | grep -q "pinned to v1" \
+  && ok "update warns about active pin" \
+  || bad "update while pinned (stderr warning)" "$upd_pinned"
+body_after=$(curl -sS "$URL1")
+echo "$body_after" | grep -q "smoke 1" && ! echo "$body_after" | grep -q "v3" \
+  && ok "URL still serves v1 after pinned update" \
+  || bad "pinned URL serves v1" "$body_after"
+
+# ---- 8c. unpin → URL now serves the new latest -----------------------------
+step "unpin (URL should jump to v3)"
+$SSH "$HOST" unpin "$SLUG1" >/dev/null 2>&1
+body_unpinned=$(curl -sS "$URL1")
+echo "$body_unpinned" | grep -q "v3" \
+  && ok "unpin rolls URL forward to latest" \
+  || bad "unpin" "served: $body_unpinned"
+
 # ---- 9. show (over ssh) ----------------------------------------------------
 step "show (owner read over ssh)"
 show_out=$($SSH "$HOST" show "$SLUG1" 2>&1)

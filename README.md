@@ -39,7 +39,10 @@ serves the content for 24 hours from the last update, then it's deleted.
 <dd>list versions within the 24h window</dd>
 
 <dt><code>ssh hostthis.dev pin <em>slug</em> <em>ver</em></code></dt>
-<dd>serve <em>ver</em></dd>
+<dd>stick the URL to <em>ver</em>; survives future updates</dd>
+
+<dt><code>ssh hostthis.dev unpin <em>slug</em></code></dt>
+<dd>clear the pin; URL serves the latest version</dd>
 
 <dt><code>ssh hostthis.dev delete <em>slug</em></code></dt>
 <dd>permanent</dd>

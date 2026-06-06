@@ -19,7 +19,8 @@ type PasteAdmin interface {
 	Delete(domain.Slug) error
 	SetName(domain.Slug, string) error
 	SetPinnedVersion(domain.Slug, domain.Version) error
-	AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, serviceCap, userCap int64, now time.Time) (int, error)
+	Unpin(domain.Slug) error
+	AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, serviceCap, userCap int64, now time.Time) (storage.AppendResult, error)
 	ListVersions(domain.Slug) ([]domain.Version, error)
 	GetVersion(domain.Slug, int) (domain.Version, error)
 	CountByOwner(owner string) (int, error)
@@ -97,48 +98,64 @@ func (m *Manage) Show(slug domain.Slug, owner string) (domain.Paste, []byte, err
 	return p, body, nil
 }
 
-// Update appends a new version to an existing slug, makes it the
-// pinned version, and resets the 24h expiry. Owner-gated.
-//
-// Quota: the new version row ADDS to the identity's active-bytes
-// total (existing versions stay on disk until the parent paste
-// expires or is deleted). The check is therefore the same shape as
-// Upload's: used + new <= UserQuotaBytes.
-func (m *Manage) Update(slug domain.Slug, owner string, body []byte, typeHint string) (domain.Paste, int, error) {
+// UpdateResult is returned from Update so the SSH layer can surface
+// the right messaging — in particular, whether the paste was pinned
+// before the update (in which case the new version was saved but
+// isn't being served).
+type UpdateResult struct {
+	Paste     domain.Paste
+	NewVer    int
+	WasPinned bool
+	PinnedAt  int // ver_num of the still-served version if WasPinned
+}
+
+// Update appends a new version to an existing slug and resets the
+// 24h expiry. If the paste was UNPINNED (default), the new version
+// also becomes the served version. If it was PINNED to a specific
+// version, the pin holds and the new version is recorded but not
+// served — the SSH layer prints a note pointing at `unpin` or
+// `pin <new ver>`.
+func (m *Manage) Update(slug domain.Slug, owner string, body []byte, typeHint string) (UpdateResult, error) {
 	if len(body) == 0 {
-		return domain.Paste{}, 0, errors.New("empty upload")
+		return UpdateResult{}, errors.New("empty upload")
 	}
 	if len(body) > domain.MaxPasteBytes {
-		return domain.Paste{}, 0, fmt.Errorf("upload exceeds %d-byte cap", domain.MaxPasteBytes)
+		return UpdateResult{}, fmt.Errorf("upload exceeds %d-byte cap", domain.MaxPasteBytes)
 	}
-	if _, err := m.requireOwner(slug, owner); err != nil {
-		return domain.Paste{}, 0, err
+	existing, err := m.requireOwner(slug, owner)
+	if err != nil {
+		return UpdateResult{}, err
 	}
 	kind, err := domain.DetectKind(body, typeHint)
 	if err != nil {
-		return domain.Paste{}, 0, err
+		return UpdateResult{}, err
 	}
 	now := m.Now().UTC()
 	sha := domain.HashContent(body)
 	if err := m.Blobs.Put(sha, body); err != nil {
-		return domain.Paste{}, 0, fmt.Errorf("blob write: %w", err)
+		return UpdateResult{}, fmt.Errorf("blob write: %w", err)
 	}
-	ver, err := m.Repo.AppendVersionWithQuotaCheck(slug, kind, sha, len(body), m.ServiceCapBytes, int64(domain.UserQuotaBytes), now)
+	res, err := m.Repo.AppendVersionWithQuotaCheck(slug, kind, sha, len(body), m.ServiceCapBytes, int64(domain.UserQuotaBytes), now)
 	if err != nil {
 		switch {
 		case errors.Is(err, storage.ErrServiceFull):
-			return domain.Paste{}, 0, ErrServiceFull
+			return UpdateResult{}, ErrServiceFull
 		case errors.Is(err, storage.ErrOverUserQuota):
-			return domain.Paste{}, 0, ErrOverQuota
+			return UpdateResult{}, ErrOverQuota
 		default:
-			return domain.Paste{}, 0, err
+			return UpdateResult{}, err
 		}
 	}
 	p, err := m.Repo.Get(slug) // re-read so caller sees updated UpdatedAt + ExpiresAt
 	if err != nil {
-		return domain.Paste{}, 0, err
+		return UpdateResult{}, err
 	}
-	return p, ver, nil
+	return UpdateResult{
+		Paste:     p,
+		NewVer:    res.NewVer,
+		WasPinned: res.WasPinned,
+		PinnedAt:  existing.PinnedVersion,
+	}, nil
 }
 
 // Rename sets the human label. Empty string clears it.
@@ -170,11 +187,15 @@ func (m *Manage) Versions(slug domain.Slug, owner string) ([]domain.Version, err
 	return m.Repo.ListVersions(slug)
 }
 
-// Pin sets which version_num the public URL serves. Does NOT reset
-// the expiry clock — only Update does that.
+// Pin sets which version_num the public URL serves and makes it
+// sticky — subsequent `update`s won't bump the pin. Does NOT reset
+// the expiry clock; only Update does that.
 func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version, error) {
 	if _, err := m.requireOwner(slug, owner); err != nil {
 		return domain.Version{}, err
+	}
+	if verNum < 1 {
+		return domain.Version{}, fmt.Errorf("version must be >= 1; use `unpin` to clear")
 	}
 	ver, err := m.Repo.GetVersion(slug, verNum)
 	if err != nil {
@@ -184,6 +205,16 @@ func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version
 		return domain.Version{}, err
 	}
 	return ver, nil
+}
+
+// Unpin clears a sticky pin and reverts the URL to "always serve the
+// latest version." On future updates the new version is published
+// immediately.
+func (m *Manage) Unpin(slug domain.Slug, owner string) error {
+	if _, err := m.requireOwner(slug, owner); err != nil {
+		return err
+	}
+	return m.Repo.Unpin(slug)
 }
 
 // Whoami returns the per-owner summary used by the `whoami` verb.
