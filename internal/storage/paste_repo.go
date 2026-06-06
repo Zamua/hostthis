@@ -174,9 +174,9 @@ func (r *PasteRepo) SetName(slug domain.Slug, name string) error {
 	return nil
 }
 
-// SetPinnedVersion changes which version_num the public URL serves,
-// and rolls the pastes row's content_sha + size + kind to match.
-// Caller verified ver exists.
+// SetPinnedVersion sets the pin to a specific version_num and rolls
+// the pastes row's denormalized head (content_sha + size + kind) to
+// that version's bytes. Caller verified ver exists.
 func (r *PasteRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error {
 	_, err := r.db.Exec(`
 		UPDATE pastes
@@ -189,31 +189,80 @@ func (r *PasteRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error
 	return nil
 }
 
+// Unpin clears the pin (pinned_version=0) and rolls the denormalized
+// head fields back to whatever the latest version (MAX ver_num) is.
+func (r *PasteRepo) Unpin(slug domain.Slug) error {
+	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var (
+		maxVer    int
+		kind, sha string
+		size      int
+	)
+	if err := tx.QueryRow(`
+		SELECT ver_num, kind, content_sha, size FROM versions
+		WHERE slug = ? ORDER BY ver_num DESC LIMIT 1
+	`, slug.String()).Scan(&maxVer, &kind, &sha, &size); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("lookup latest version: %w", err)
+	}
+	if _, err := tx.Exec(`
+		UPDATE pastes
+		SET pinned_version = 0, kind = ?, content_sha = ?, size = ?
+		WHERE slug = ?
+	`, kind, sha, size, slug.String()); err != nil {
+		return fmt.Errorf("unpin: %w", err)
+	}
+	return tx.Commit()
+}
+
+// AppendResult reports what AppendVersionWithQuotaCheck did. The
+// caller (SSH layer) uses WasPinned to decide whether to surface a
+// "your pin held; new version isn't being served" warning.
+type AppendResult struct {
+	NewVer    int
+	WasPinned bool // paste was pinned to a specific version BEFORE this append
+}
+
 // AppendVersionWithQuotaCheck atomically (under BEGIN IMMEDIATE):
 //  1. checks service-wide active bytes + size against serviceCap
 //  2. checks identity (the existing paste's owner) active bytes + size against userCap
-//  3. inserts a new version row + bumps the paste's head + clock
+//  3. inserts a new version row
+//  4. resets the 24h clock (updated_at + expires_at)
+//  5. if the paste was UNPINNED (pinned_version=0), updates the
+//     denormalized head fields (kind, content_sha, size) so the public
+//     URL serves the new bytes. If the paste was PINNED to a specific
+//     version, the head fields stay pointing at that version's data —
+//     the new version is recorded but not served until the user
+//     `unpin`s or `pin`s a different version.
 //
 // The "size" being charged is the new version's bytes — older versions
 // continue to count toward the identity's total until the parent paste
 // expires or is deleted.
-func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, serviceCap, userCap int64, now time.Time) (int, error) {
+func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, serviceCap, userCap int64, now time.Time) (AppendResult, error) {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
-		return 0, fmt.Errorf("begin tx: %w", err)
+		return AppendResult{}, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	nowStr := formatTime(now)
 	body := int64(size)
 
-	// Look up the paste's identity (needed for the user-cap check).
+	// Look up the paste's identity + pin state.
 	var ownerIdentity string
-	if err := tx.QueryRow(`SELECT identity FROM pastes WHERE slug = ?`, slug.String()).Scan(&ownerIdentity); err != nil {
+	var existingPin int
+	if err := tx.QueryRow(`SELECT identity, pinned_version FROM pastes WHERE slug = ?`, slug.String()).Scan(&ownerIdentity, &existingPin); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, ErrNotFound
+			return AppendResult{}, ErrNotFound
 		}
-		return 0, fmt.Errorf("lookup paste identity: %w", err)
+		return AppendResult{}, fmt.Errorf("lookup paste identity: %w", err)
 	}
 
 	// Service-wide check.
@@ -225,10 +274,10 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 			JOIN pastes pp ON pp.slug = v.slug
 			WHERE pp.expires_at > ?
 		`, nowStr).Scan(&total); err != nil {
-			return 0, fmt.Errorf("service-wide sum: %w", err)
+			return AppendResult{}, fmt.Errorf("service-wide sum: %w", err)
 		}
 		if total+body > serviceCap {
-			return 0, ErrServiceFull
+			return AppendResult{}, ErrServiceFull
 		}
 	}
 	// Per-identity check.
@@ -240,16 +289,16 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 			JOIN pastes pp ON pp.slug = v.slug
 			WHERE pp.identity = ? AND pp.expires_at > ?
 		`, ownerIdentity, nowStr).Scan(&ownerTotal); err != nil {
-			return 0, fmt.Errorf("identity sum: %w", err)
+			return AppendResult{}, fmt.Errorf("identity sum: %w", err)
 		}
 		if ownerTotal+body > userCap {
-			return 0, ErrOverUserQuota
+			return AppendResult{}, ErrOverUserQuota
 		}
 	}
 
 	var maxVer int
 	if err := tx.QueryRow(`SELECT COALESCE(MAX(ver_num), 0) FROM versions WHERE slug = ?`, slug.String()).Scan(&maxVer); err != nil {
-		return 0, fmt.Errorf("max ver: %w", err)
+		return AppendResult{}, fmt.Errorf("max ver: %w", err)
 	}
 	newVer := maxVer + 1
 	expires := now.Add(domain.RetentionWindow)
@@ -257,26 +306,44 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 		INSERT INTO versions (slug, ver_num, kind, content_sha, size, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 	`, slug.String(), newVer, string(kind), contentSHA, size, nowStr); err != nil {
-		return 0, fmt.Errorf("insert version: %w", err)
+		return AppendResult{}, fmt.Errorf("insert version: %w", err)
 	}
-	if _, err := tx.Exec(`
-		UPDATE pastes
-		SET kind = ?, content_sha = ?, size = ?,
-		    pinned_version = ?, updated_at = ?, expires_at = ?
-		WHERE slug = ?
-	`, string(kind), contentSHA, size, newVer, nowStr, formatTime(expires), slug.String()); err != nil {
-		return 0, fmt.Errorf("update paste head: %w", err)
+
+	// Head fields (kind, content_sha, size) ARE updated only when the
+	// paste was unpinned. A pinned paste keeps serving its pinned
+	// version's data; the new version is recorded but not yet served.
+	if existingPin == 0 {
+		if _, err := tx.Exec(`
+			UPDATE pastes
+			SET kind = ?, content_sha = ?, size = ?,
+			    updated_at = ?, expires_at = ?
+			WHERE slug = ?
+		`, string(kind), contentSHA, size, nowStr, formatTime(expires), slug.String()); err != nil {
+			return AppendResult{}, fmt.Errorf("update paste head (unpinned): %w", err)
+		}
+	} else {
+		// Pinned — only bump the clock; head fields stay pointing at
+		// the pinned version's bytes.
+		if _, err := tx.Exec(`
+			UPDATE pastes
+			SET updated_at = ?, expires_at = ?
+			WHERE slug = ?
+		`, nowStr, formatTime(expires), slug.String()); err != nil {
+			return AppendResult{}, fmt.Errorf("update paste head (pinned): %w", err)
+		}
 	}
+
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return AppendResult{}, err
 	}
-	return newVer, nil
+	return AppendResult{NewVer: newVer, WasPinned: existingPin != 0}, nil
 }
 
 // AppendVersion is the simple variant used by tests + any caller that
 // doesn't need quota enforcement.
 func (r *PasteRepo) AppendVersion(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, now time.Time) (int, error) {
-	return r.AppendVersionWithQuotaCheck(slug, kind, contentSHA, size, 0, 0, now)
+	res, err := r.AppendVersionWithQuotaCheck(slug, kind, contentSHA, size, 0, 0, now)
+	return res.NewVer, err
 }
 
 // ListVersions returns the version history for slug, newest first.

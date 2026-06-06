@@ -148,6 +148,8 @@ func (s *Server) handleSession(sess gossh.Session) {
 		s.verbVersions(sess, owner, argv[1:])
 	case "pin":
 		s.verbPin(sess, owner, argv[1:])
+	case "unpin":
+		s.verbUnpin(sess, owner, argv[1:])
 	case "whoami":
 		s.verbWhoami(sess, owner)
 	default:
@@ -195,7 +197,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	if args.Slug != "" {
 		// Update path.
 		slug, _ := domain.ParseSlug(args.Slug)
-		p, ver, err := s.Manage.Update(slug, owner, body, args.Type)
+		res, err := s.Manage.Update(slug, owner, body, args.Type)
 		if err != nil {
 			fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
 			_ = sess.Exit(exitForServiceErr(err))
@@ -204,9 +206,16 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		if args.Name != "" {
 			_ = s.Manage.Rename(slug, owner, args.Name)
 		}
-		url := s.BuildURL(p.Slug)
+		url := s.BuildURL(res.Paste.Slug)
 		fmt.Fprintln(sess, url)
-		fmt.Fprintf(sess.Stderr(), "v%d — expires in 24h\n", ver)
+		fmt.Fprintf(sess.Stderr(), "v%d saved — expires in 24h\n", res.NewVer)
+		if res.WasPinned {
+			fmt.Fprintf(sess.Stderr(),
+				"note: this paste is pinned to v%d, so the URL still serves v%d, not v%d.\n",
+				res.PinnedAt, res.PinnedAt, res.NewVer)
+			fmt.Fprintf(sess.Stderr(), "  ssh hostthis.dev unpin %s        # always serve latest\n", slug)
+			fmt.Fprintf(sess.Stderr(), "  ssh hostthis.dev pin %s %d       # serve this new version\n", slug, res.NewVer)
+		}
 		_ = sess.Exit(0)
 		return
 	}
@@ -328,16 +337,44 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 	}
 	p, _ := s.Manage.Repo.Get(slug)
 	now := s.Manage.Now().UTC()
+
+	// `current` marker: when pinned_version is 0, the served version
+	// is the max ver_num. ListVersions returns newest first, so the
+	// first row is MAX.
+	servedVer := p.PinnedVersion
+	if servedVer == 0 && len(vers) > 0 {
+		servedVer = vers[0].VerNum
+	}
+
 	for _, v := range vers {
 		marker := "       "
-		if v.VerNum == p.PinnedVersion {
+		if v.VerNum == servedVer {
 			marker = "current"
 		}
 		fmt.Fprintf(sess, "v%d\t%s\t%s\t%s\n",
 			v.VerNum, marker, v.CreatedAt.Format("2006-01-02 15:04 UTC"), humanBytes(v.Size))
 	}
-	fmt.Fprintf(sess.Stderr(), "expires in %s (%s)\n",
-		humanDuration(p.ExpiresAt.Sub(now)), p.ExpiresAt.Format("2006-01-02 15:04 UTC"))
+	pinNote := "unpinned"
+	if p.PinnedVersion != 0 {
+		pinNote = fmt.Sprintf("pinned to v%d", p.PinnedVersion)
+	}
+	fmt.Fprintf(sess.Stderr(), "%s — expires in %s (%s)\n",
+		pinNote, humanDuration(p.ExpiresAt.Sub(now)), p.ExpiresAt.Format("2006-01-02 15:04 UTC"))
+	_ = sess.Exit(0)
+}
+
+func (s *Server) verbUnpin(sess gossh.Session, owner string, argv []string) {
+	slug, err := requireSlug(argv)
+	if err != nil {
+		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
+		_ = sess.Exit(2)
+		return
+	}
+	if err := s.Manage.Unpin(slug, owner); err != nil {
+		emitServiceErr(sess, err)
+		return
+	}
+	fmt.Fprintln(sess.Stderr(), "unpinned. URL now serves the latest version.")
 	_ = sess.Exit(0)
 }
 
@@ -405,7 +442,8 @@ const helpText = `hostthis — pipe rendered content (html/markdown), get a URL.
   ssh hostthis.dev show <slug>                    read content (owner only)
   ssh hostthis.dev rename <slug> "<name>"         set / change a paste's label
   ssh hostthis.dev versions <slug>                history within the 24h window
-  ssh hostthis.dev pin <slug> <ver>               set served version
+  ssh hostthis.dev pin <slug> <ver>               stick the URL to <ver> (survives updates)
+  ssh hostthis.dev unpin <slug>                   clear the pin; URL serves the latest
   ssh hostthis.dev delete <slug>                  permanent
   ssh hostthis.dev whoami                         your identity + active count
 

@@ -274,14 +274,27 @@ expires in 22h (2026-06-06 14:32 UTC)
 The expiry footer is on stderr (same convention as upload), so a script
 that wants just the version list can pipe stdout cleanly.
 
-### Pin a version (rollback or roll-forward)
+### Pin a version (sticky)
 ```
-ssh hostthis.dev pin abc12345 v1     # roll back
-ssh hostthis.dev pin abc12345 v3     # roll forward
+ssh hostthis.dev pin abc12345 1      # always serve v1
+ssh hostthis.dev pin abc12345 3      # switch to v3
 ```
-Sets which version `<slug>.hostthis.dev` serves. Pinning does NOT reset
-the expiry clock — only `update` does that. Reads symmetric in either
-time direction — "rollback" framing is intentionally avoided.
+Sets the URL to serve a specific version and makes it sticky:
+subsequent `update`s record new versions but do not change which one
+the URL serves until the user `unpin`s or `pin`s a different one.
+
+Pinning does NOT reset the expiry clock — only `update` does that.
+
+A freshly uploaded paste is *unpinned*: the URL always serves the
+latest version, and each `update` publishes immediately.
+
+### Unpin (back to "always latest")
+```
+ssh hostthis.dev unpin abc12345
+unpinned. URL now serves the latest version.
+```
+Reverts the URL to "follow the head" semantics — every future
+`update` becomes the served version.
 
 ### Delete (permanent)
 ```
@@ -314,7 +327,8 @@ hostthis.dev — pipe rendered content (html/markdown), get a URL.
   ssh hostthis.dev show <slug>                       read content (owner only)
   ssh hostthis.dev rename <slug> "<name>"            set / change a paste's label
   ssh hostthis.dev versions <slug>                   history (within the 24h window)
-  ssh hostthis.dev pin <slug> <ver>                  set served version
+  ssh hostthis.dev pin <slug> <ver>                  stick the URL to <ver> (sticky across updates)
+  ssh hostthis.dev unpin <slug>                      clear the pin; URL serves the latest
   ssh hostthis.dev delete <slug>                     permanent
   ssh hostthis.dev whoami                            your identity + active count
 ```
