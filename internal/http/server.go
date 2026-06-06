@@ -138,7 +138,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	}
 	now := s.nowOrTime()
 	if !now.Before(p.ExpiresAt) {
-		// Past the 24h window. The background sweep will delete this
+		// Past the retention window. The background sweep will delete this
 		// shortly; we 404 in the meantime so visitors don't see
 		// content that's technically expired.
 		http.NotFound(w, r)

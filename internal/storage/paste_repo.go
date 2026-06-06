@@ -234,7 +234,7 @@ type AppendResult struct {
 //  1. checks service-wide active bytes + size against serviceCap
 //  2. checks identity (the existing paste's owner) active bytes + size against userCap
 //  3. inserts a new version row
-//  4. resets the 24h clock (updated_at + expires_at)
+//  4. resets the retention clock (updated_at + expires_at)
 //  5. if the paste was UNPINNED (pinned_version=0), updates the
 //     denormalized head fields (kind, content_sha, size) so the public
 //     URL serves the new bytes. If the paste was PINNED to a specific

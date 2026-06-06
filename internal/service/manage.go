@@ -110,7 +110,7 @@ type UpdateResult struct {
 }
 
 // Update appends a new version to an existing slug and resets the
-// 24h expiry. If the paste was UNPINNED (default), the new version
+// retention expiry. If the paste was UNPINNED (default), the new version
 // also becomes the served version. If it was PINNED to a specific
 // version, the pin holds and the new version is recorded but not
 // served — the SSH layer prints a note pointing at `unpin` or

@@ -208,7 +208,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		}
 		url := s.BuildURL(res.Paste.Slug)
 		fmt.Fprintln(sess, url)
-		fmt.Fprintf(sess.Stderr(), "v%d saved — expires in 24h\n", res.NewVer)
+		fmt.Fprintf(sess.Stderr(), "v%d saved — expires in 7 days\n", res.NewVer)
 		if res.WasPinned {
 			fmt.Fprintf(sess.Stderr(),
 				"note: this paste is pinned to v%d, so the URL still serves v%d, not v%d.\n",
@@ -229,9 +229,9 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	url := s.BuildURL(res.Paste.Slug)
 	fmt.Fprintln(sess, url)
 	if res.Paste.Name != "" {
-		fmt.Fprintf(sess.Stderr(), "%q — expires in 24h\n", res.Paste.Name)
+		fmt.Fprintf(sess.Stderr(), "%q — expires in 7 days\n", res.Paste.Name)
 	} else {
-		fmt.Fprintln(sess.Stderr(), "expires in 24h")
+		fmt.Fprintln(sess.Stderr(), "expires in 7 days")
 	}
 	_ = sess.Exit(0)
 }
@@ -434,21 +434,21 @@ func (s *Server) verbHelp(sess gossh.Session) {
 }
 
 const helpText = `hostthis — pipe rendered content (html/markdown), get a URL.
-              pastes expire 24h after their last update.
+              pastes expire 7 days after their last update.
 
   cat file | ssh hostthis.dev [--name "..."]      upload
   cat file | ssh hostthis.dev <slug>              update an existing upload
   ssh hostthis.dev list                           your active pastes
   ssh hostthis.dev show <slug>                    read content (owner only)
   ssh hostthis.dev rename <slug> "<name>"         set / change a paste's label
-  ssh hostthis.dev versions <slug>                history within the 24h window
+  ssh hostthis.dev versions <slug>                history within the 7-day window
   ssh hostthis.dev pin <slug> <ver>               stick the URL to <ver> (survives updates)
   ssh hostthis.dev unpin <slug>                   clear the pin; URL serves the latest
   ssh hostthis.dev delete <slug>                  permanent
   ssh hostthis.dev whoami                         your identity + active count
 
 uploads accept HTML and Markdown only. 1 MiB per identity, total
-across active pastes. 24h retention.
+across active pastes. 7-day retention.
 the URL itself is the secret — 8-char random slug, ~10^12 possibilities.
 share the URL with anyone you want; don't share it with anyone you don't.`
 

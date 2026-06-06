@@ -53,8 +53,8 @@ func TestSweep_Once(t *testing.T) {
 		t.Fatalf("nothing should sweep yet: pastes=%d blobs=%d", pastes, gcBlobs)
 	}
 
-	// 25 hours later, both have expired.
-	future := now.Add(25 * time.Hour)
+	// 8 days later, both have expired (retention is 7d).
+	future := now.Add(8 * 24 * time.Hour)
 	pastes, gcBlobs, err = sweep.Once(future)
 	if err != nil {
 		t.Fatalf("sweep 2: %v", err)
