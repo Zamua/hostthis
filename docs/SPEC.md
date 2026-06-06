@@ -152,20 +152,20 @@ signature. Never trust a self-asserted username or fingerprint.
 
 ## Retention
 
-**Every paste lives for 24 hours from its last update**, then it's
+**Every paste lives for 7 days from its last update**, then it's
 deleted (slug, all versions, content blob if unreferenced). No
 exceptions, no user-facing control, no operator config.
 
-- Initial upload: 24h clock starts.
-- Each `update <slug>` resets the clock to 24h from that moment.
+- Initial upload: 7-day clock starts.
+- Each `update <slug>` resets the clock to 7 days from that moment.
 - No `touch` verb, no `--expires` flag. Time-based extension only happens
   as a side effect of actually changing content.
 
 Rationale for short + fixed: hostthis is for *shareable rendered content*
 (HTML mockups, Markdown reports, demo prototypes). The use case is
-"send this link to a coworker today"; nobody is sending an "open this
-link in two months" URL through us. 24h forces the asker to re-host if
-they need it again, which catches stale-link rot at the source.
+"send this link to a coworker this week"; nobody is sending an "open
+this link in six months" URL through us. 7 days forces the asker to
+re-host if they need it again, which catches stale-link rot at the source.
 
 Long-term hosting is a deliberate non-goal — see "Non-goals" at the
 bottom.
@@ -181,7 +181,7 @@ With no command and no stdin, the server prints the help banner.
 ```
 cat index.html | ssh hostthis.dev
 https://abc12345.hostthis.dev
-expires in 24h (2026-06-06 12:34 UTC)
+expires in 7d (2026-06-13 12:34 UTC)
 ```
 Reads stdin until EOF or 1 MiB. Validates content type (HTML or Markdown
 in v1). Generates a fresh random slug.
@@ -190,7 +190,8 @@ Optional `--name`:
 ```
 cat demo.html | ssh hostthis.dev --name "Acme prototype v3"
 https://abc12345.hostthis.dev
-"Acme prototype v3" — expires in 24h (2026-06-06 12:34 UTC)
+"Acme prototype v3" — expires in 7d (2026-06-13 12:34 UTC)
+
 ```
 The name is owner-only metadata for `list`; it never appears in the
 URL. Names are 1–60 chars, any printable Unicode except newlines.
@@ -217,7 +218,7 @@ stderr a one-line nudge about adding a key to get `list` / `update` /
 ```
 cat v2.html | ssh hostthis.dev abc12345
 https://abc12345.hostthis.dev
-v2 — expires in 24h (2026-06-06 14:12 UTC)
+v2 — expires in 7d (2026-06-13 14:12 UTC)
 ```
 Slug as positional arg means "update this one". Server checks ownership
 against the key fingerprint. Errors:
@@ -225,7 +226,7 @@ against the key fingerprint. Errors:
 - `404`: slug doesn't exist
 - `413`: payload too large
 
-Update resets the 24h retention clock to "24h from now" and creates a
+Update resets the 7-day retention clock to "7 days from now" and creates a
 new immutable version under the hood (SHA-keyed blob ref). The slug
 always serves the currently-pinned version (defaults to latest after
 an update).
@@ -319,14 +320,14 @@ session startup with "ssh key required" on stderr and exit 3.
 ```
 ssh hostthis.dev
 hostthis.dev — pipe rendered content (html/markdown), get a URL.
-              pastes expire 24h after their last update.
+              pastes expire 7 days after their last update.
 
   cat file.html | ssh hostthis.dev [--name "…"]      upload
   cat file.html | ssh hostthis.dev <slug>            update an existing upload
   ssh hostthis.dev list                              your active pastes
   ssh hostthis.dev show <slug>                       read content (owner only)
   ssh hostthis.dev rename <slug> "<name>"            set / change a paste's label
-  ssh hostthis.dev versions <slug>                   history (within the 24h window)
+  ssh hostthis.dev versions <slug>                   history (within the 7-day window)
   ssh hostthis.dev pin <slug> <ver>                  stick the URL to <ver> (sticky across updates)
   ssh hostthis.dev unpin <slug>                      clear the pin; URL serves the latest
   ssh hostthis.dev delete <slug>                     permanent
@@ -355,7 +356,7 @@ One limit, one number.
 
 "Identity" is the SHA256 fingerprint of the uploader's ssh public
 key. The cap covers the sum of all of the identity's active pastes'
-sizes. When pastes expire (24h) or get deleted, the cap frees up.
+sizes. When pastes expire (7 days) or get deleted, the cap frees up.
 Anyone trying to upload more gets a "you'd exceed your 1 MiB total
 quota" error.
 
@@ -431,7 +432,7 @@ markdown path.
 
 ### Abuse reporting
 
-24h retention is the primary defense — every paste evicts itself in a
+7-day retention is the primary defense — every paste evicts itself in a
 day even if the operator does nothing. For faster takedown, an
 operator can delete a slug's row directly from the sqlite db; the
 next read 404s and the next sweep GCs the blob. A user-facing
@@ -470,9 +471,9 @@ live, what's the public URL shape."
 
 Operators worried about disk pressure should put hostthis behind
 their reverse proxy's rate limit (the natural place for a per-IP
-throttle) or run it on a host where 24h × the steady-state upload
+throttle) or run it on a host where 7 days × the steady-state upload
 rate × N identities is comfortably below disk capacity. With 5–6 GB
-of data dir at the 1 MiB / identity / 24h shape, that's room for a
+of data dir at the 1 MiB / identity / 7-day shape, that's room for a
 few thousand actively-uploading identities.
 
 ---
@@ -480,10 +481,10 @@ few thousand actively-uploading identities.
 ## Non-goals (explicitly out of v1 scope)
 
 These are interesting but expand the product beyond "host renderable
-content for 24 hours." Keep the surface small.
+content for 7 days." Keep the surface small.
 
-- **Long-term storage**. Every paste expires at 24h, period. If you need
-  a permanent URL, host elsewhere.
+- **Long-term storage**. Every paste expires at 7 days, period. If you
+  need a permanent URL, host elsewhere.
 - **Binary / non-renderable file hosting**. ZIPs, photos, videos,
   arbitrary blobs are out of scope.
 - **Comments / threaded discussion**. Out of scope.

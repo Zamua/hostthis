@@ -1,6 +1,6 @@
 -- Extend pastes for publish/unpublish, version pinning, and signed
 -- share URLs. Add a versions table so update keeps history within
--- the 24h retention window.
+-- the retention window.
 
 ALTER TABLE pastes ADD COLUMN published      INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE pastes ADD COLUMN pinned_version INTEGER NOT NULL DEFAULT 1;

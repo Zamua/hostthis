@@ -40,8 +40,8 @@ type Version struct {
 }
 
 
-// RetentionWindow is the fixed 24-hour TTL per SPEC.md. Not config.
-const RetentionWindow = 24 * time.Hour
+// RetentionWindow is the fixed 7-day TTL per SPEC.md. Not config.
+const RetentionWindow = 7 * 24 * time.Hour
 
 // HashContent returns the canonical content hash used to address blobs
 // and detect dedupable uploads. The same bytes always produce the

@@ -54,7 +54,7 @@ func TestUpload_Create_HTML(t *testing.T) {
 	if _, err := domain.ParseSlug(string(res.Paste.Slug)); err != nil {
 		t.Fatalf("returned slug is invalid: %v", err)
 	}
-	// Expiry should be ~24h from now.
+	// Expiry should be RetentionWindow from now.
 	if res.Paste.ExpiresAt.Sub(res.Paste.CreatedAt) != domain.RetentionWindow {
 		t.Fatalf("expiry: got %v, want %v", res.Paste.ExpiresAt.Sub(res.Paste.CreatedAt), domain.RetentionWindow)
 	}

@@ -115,7 +115,7 @@ func TestUploadAndServe(t *testing.T) {
 		t.Fatalf("stdout doesn't look like a paste URL: %q (stderr: %q)",
 			stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "expires in 24h") {
+	if !strings.Contains(stderr.String(), "expires in 7 days") {
 		t.Fatalf("stderr should mention expiry, got %q", stderr.String())
 	}
 

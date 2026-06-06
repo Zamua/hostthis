@@ -81,7 +81,7 @@
 </header>
 
 <h2>Name</h2>
-<div class="indent"><p>hostthis &mdash; host an HTML or Markdown paste at a URL for 24 hours.</p></div>
+<div class="indent"><p>hostthis &mdash; host an HTML or Markdown paste at a URL for 7 days.</p></div>
 
 <h2>Synopsis</h2>
 <div class="indent">
@@ -92,7 +92,7 @@
 <h2>Description</h2>
 <div class="indent">
 <p>Reads HTML or Markdown from stdin, stores it, prints a URL. The URL serves the
-content for 24 hours from the last update, then it&rsquo;s deleted.</p>
+content for 7 days from the last update, then it&rsquo;s deleted.</p>
 </div>
 
 <h2>Commands</h2>
@@ -102,7 +102,7 @@ content for 24 hours from the last update, then it&rsquo;s deleted.</p>
   <dd>upload</dd>
 
   <dt>cat <em>file</em> | ssh hostthis.dev <em>slug</em></dt>
-  <dd>replace <em>slug</em>&rsquo;s content; resets the 24h clock</dd>
+  <dd>replace <em>slug</em>&rsquo;s content; resets the 7-day clock</dd>
 
   <dt>ssh hostthis.dev <strong>list</strong></dt>
   <dd>active pastes, soonest to expire first</dd>
@@ -141,7 +141,7 @@ ssh hostthis.dev delete abc12345</pre>
 
 <h2>Limits</h2>
 <div class="indent">
-<p>1 MiB per identity, total across active pastes. 24h retention. HTML and Markdown only.</p>
+<p>1 MiB per identity, total across active pastes. 7-day retention. HTML and Markdown only.</p>
 </div>
 
 <footer class="footline">

@@ -2,7 +2,7 @@
 
 ## Name
 
-hostthis — host an HTML or Markdown paste at a URL for 24 hours.
+hostthis — host an HTML or Markdown paste at a URL for 7 days.
 
 ## Synopsis
 
@@ -14,7 +14,7 @@ ssh hostthis.dev command [args]
 ## Description
 
 Reads HTML or Markdown from stdin, stores it, prints a URL. The URL
-serves the content for 24 hours from the last update, then it's deleted.
+serves the content for 7 days from the last update, then it's deleted.
 
 ## Commands
 
@@ -24,7 +24,7 @@ serves the content for 24 hours from the last update, then it's deleted.
 <dd>upload</dd>
 
 <dt><code>cat <em>file</em> | ssh hostthis.dev <em>slug</em></code></dt>
-<dd>replace <em>slug</em>'s content; resets the 24h clock</dd>
+<dd>replace <em>slug</em>'s content; resets the 7-day clock</dd>
 
 <dt><code>ssh hostthis.dev list</code></dt>
 <dd>active pastes, soonest to expire first</dd>
@@ -36,7 +36,7 @@ serves the content for 24 hours from the last update, then it's deleted.
 <dd>set label; empty string clears</dd>
 
 <dt><code>ssh hostthis.dev versions <em>slug</em></code></dt>
-<dd>list versions within the 24h window</dd>
+<dd>list versions within the 7-day window</dd>
 
 <dt><code>ssh hostthis.dev pin <em>slug</em> <em>ver</em></code></dt>
 <dd>stick the URL to <em>ver</em>; survives future updates</dd>
@@ -64,7 +64,7 @@ ssh hostthis.dev delete abc12345
 
 ## Limits
 
-1 MiB per identity, total across active pastes. 24h retention. HTML
+1 MiB per identity, total across active pastes. 7-day retention. HTML
 and Markdown only.
 
 ## License

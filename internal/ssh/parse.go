@@ -74,9 +74,10 @@ func humanBytes(n int) string {
 	}
 }
 
-// humanDuration formats a remaining-time duration as "Xh Ym",
-// "Ym Xs", or "<1m" / "expired" for edge cases. Designed for the
-// EXPIRES_IN column in `list` and the footer of `versions`.
+// humanDuration formats a remaining-time duration compactly.
+// Used in the EXPIRES_IN column of `list` and the footer of
+// `versions`. Goes "Nd Hh" for >= 1 day, "NhMm" for >= 1 hour,
+// "Nm" for >= 1 minute, "<1m" / "expired" at the edges.
 func humanDuration(d time.Duration) string {
 	if d <= 0 {
 		return "expired"
@@ -84,12 +85,16 @@ func humanDuration(d time.Duration) string {
 	if d < time.Minute {
 		return "<1m"
 	}
-	h := int(d.Hours())
-	m := int(d.Minutes()) - h*60
+	totalHours := int(d.Hours())
+	days := totalHours / 24
+	hours := totalHours - days*24
+	minutes := int(d.Minutes()) - totalHours*60
 	switch {
-	case h >= 1:
-		return fmt.Sprintf("%dh%dm", h, m)
+	case days >= 1:
+		return fmt.Sprintf("%dd%dh", days, hours)
+	case hours >= 1:
+		return fmt.Sprintf("%dh%dm", hours, minutes)
 	default:
-		return fmt.Sprintf("%dm", m)
+		return fmt.Sprintf("%dm", minutes)
 	}
 }
