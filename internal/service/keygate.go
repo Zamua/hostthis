@@ -13,6 +13,11 @@ type KeyGateRepo interface {
 	// or admits + records a fresh key when subnet hasn't hit
 	// `limitPerSubnet` distinct new fingerprints in the window.
 	AdmitNewKey(identity, subnet string, now time.Time, limitPerSubnet int, window time.Duration) (knownAlready bool, err error)
+
+	// DeleteFirstSeenOlderThan removes rows past the rate-limit
+	// window — they no longer affect any future admission decision.
+	// Called by the periodic sweep to keep the table from growing.
+	DeleteFirstSeenOlderThan(cutoff time.Time) (int, error)
 }
 
 // KeyGate gates new SSH sessions: a fresh (identity, ip-subnet) pair
@@ -60,6 +65,14 @@ func (g *KeyGate) Admit(identity, ipSubnet string) error {
 	}
 	_ = known // not used by callers right now, but useful for telemetry
 	return nil
+}
+
+// PruneOldRows deletes rows older than the rate-limit window. The
+// sweep service calls this on every tick so the table stays bounded.
+// Returns the number of rows deleted.
+func (g *KeyGate) PruneOldRows(now time.Time) (int, error) {
+	cutoff := now.Add(-g.Window)
+	return g.Repo.DeleteFirstSeenOlderThan(cutoff)
 }
 
 // isStorageRateLimitErr matches storage.ErrTooManyNewKeys without

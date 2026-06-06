@@ -66,6 +66,7 @@ func main() {
 	keyGate.MaxFreshKeysPerSubnet = *freshKeysLimit
 	keyGate.Window = *freshKeysWindow
 	sweepSvc := service.NewSweep(pasteRepo, blobs, logger)
+	sweepSvc.KeyGate = keyGate
 
 	logger.Printf("config: storage_cap=%d bytes, fresh_keys/subnet=%d per %s",
 		*storageCap, *freshKeysLimit, *freshKeysWindow)
@@ -97,9 +98,17 @@ func main() {
 		ApexDomain:  *apexDomain,
 	}
 	httpSrv := &http.Server{
-		Addr:              *httpAddr,
-		Handler:           httpServer.Handler(),
+		Addr:    *httpAddr,
+		Handler: httpServer.Handler(),
+		// Bound the four axes a slow / hostile client could try to
+		// hold open. Reads are tiny (we only do GETs for content +
+		// headers), writes are at most MaxPasteBytes (1 MiB), so the
+		// values below are generous but not unbounded.
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    8 << 10, // 8 KiB
 	}
 
 	// Run both servers + the sweep goroutine; whichever signaling

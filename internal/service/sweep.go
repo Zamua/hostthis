@@ -24,11 +24,12 @@ type SweepBlobs interface {
 }
 
 // Sweep runs the periodic expiry job: deletes pastes whose
-// expires_at has passed, then garbage-collects any blob files no
-// longer referenced.
+// expires_at has passed, garbage-collects any blob files no longer
+// referenced, and prunes stale rate-limit rows from the key gate.
 type Sweep struct {
 	Repo     SweepRepo
 	Blobs    SweepBlobs
+	KeyGate  *KeyGate // optional; nil disables the key_first_seen prune
 	Interval time.Duration
 	Logger   *log.Logger
 	Now      func() time.Time
@@ -70,10 +71,18 @@ func (s *Sweep) tick() {
 	pasteCount, blobCount, err := s.Once(now)
 	if err != nil {
 		s.Logger.Printf("sweep: %v", err)
-		return
 	}
-	if pasteCount > 0 || blobCount > 0 {
-		s.Logger.Printf("sweep: deleted %d expired paste(s), gc'd %d blob(s)", pasteCount, blobCount)
+	var prunedKeys int
+	if s.KeyGate != nil {
+		n, err := s.KeyGate.PruneOldRows(now)
+		if err != nil {
+			s.Logger.Printf("sweep: prune key_first_seen: %v", err)
+		}
+		prunedKeys = n
+	}
+	if pasteCount > 0 || blobCount > 0 || prunedKeys > 0 {
+		s.Logger.Printf("sweep: deleted %d expired paste(s), gc'd %d blob(s), pruned %d key-gate row(s)",
+			pasteCount, blobCount, prunedKeys)
 	}
 }
 

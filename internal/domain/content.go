@@ -44,27 +44,42 @@ const UserQuotaBytes = 1 << 20 // 1 MiB
 // and unrendered text isn't a hostthis use case.
 //
 // The hint argument is an optional explicit content-type the caller
-// supplies (e.g. from a `--type` flag); when present it overrides
-// sniffing. Pass "" to sniff.
+// supplies (e.g. from a `--type` flag). A hint biases the classifier
+// but does NOT bypass the textual-content check: a hint of `html`
+// applied to binary bytes (zip, image, etc.) still rejects. This
+// prevents a user from labelling a binary as HTML to smuggle it
+// through and have it served with `Content-Type: text/html`.
+//
+// Pass "" to skip the hint and rely purely on sniffing.
 func DetectKind(b []byte, hint string) (ContentKind, error) {
 	hint = strings.ToLower(strings.TrimSpace(hint))
-	switch {
-	case hint == "html" || strings.HasPrefix(hint, "text/html"):
-		return KindHTML, nil
-	case hint == "md" || hint == "markdown" || strings.HasPrefix(hint, "text/markdown"):
-		return KindMarkdown, nil
-	case hint != "":
-		// Caller gave an explicit hint we don't recognize → reject up
-		// front; don't silently fall through to sniffing.
-		return "", ErrUnsupportedKind
-	}
-
-	// No hint — sniff.
 	sniff := b
 	if len(sniff) > 512 {
 		sniff = sniff[:512]
 	}
 	ct := http.DetectContentType(sniff)
+
+	// Hint path: trust the user's labelling for *which* renderer to
+	// use, but require the bytes to sniff as some flavor of text. If
+	// they sniff as binary (image/zip/audio/etc.) we reject even if
+	// the hint says "html".
+	switch {
+	case hint == "html" || strings.HasPrefix(hint, "text/html"):
+		if !strings.HasPrefix(ct, "text/") {
+			return "", ErrUnsupportedKind
+		}
+		return KindHTML, nil
+	case hint == "md" || hint == "markdown" || strings.HasPrefix(hint, "text/markdown"):
+		if !strings.HasPrefix(ct, "text/") {
+			return "", ErrUnsupportedKind
+		}
+		return KindMarkdown, nil
+	case hint != "":
+		// Hint we don't understand → reject without trying sniffing.
+		return "", ErrUnsupportedKind
+	}
+
+	// No hint — pure sniffing.
 	switch {
 	case strings.HasPrefix(ct, "text/html"):
 		return KindHTML, nil

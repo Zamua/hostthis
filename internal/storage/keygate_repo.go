@@ -77,6 +77,19 @@ func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitP
 	return false, tx.Commit()
 }
 
+// DeleteFirstSeenOlderThan removes key_first_seen rows whose
+// first_seen_at is before cutoff. Such rows can never contribute to
+// the rate-limit count again — they're past the window — so they're
+// safe to drop. Without this, the table grows forever.
+func (r *KeyGateRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
+	res, err := r.db.Exec(`DELETE FROM key_first_seen WHERE first_seen_at < ?`, formatTime(cutoff))
+	if err != nil {
+		return 0, fmt.Errorf("prune key_first_seen: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // ErrTooManyNewKeys is returned by AdmitNewKey when the subnet has
 // hit its fresh-key quota for the window.
 var ErrTooManyNewKeys = errors.New("storage: too many new keys from this network")
