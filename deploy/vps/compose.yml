@@ -52,6 +52,7 @@ x-hostthis-common: &hostthis-common
     - "traefik.http.routers.hostthis-apex-https.rule=Host(`${HOSTTHIS_APEX_DOMAIN}`)"
     - "traefik.http.routers.hostthis-apex-https.entryPoints=https"
     - "traefik.http.routers.hostthis-apex-https.tls=true"
+    - "traefik.http.routers.hostthis-apex-https.tls.certresolver=letsencrypt"
     - "traefik.http.routers.hostthis-apex-https.service=hostthis"
     - "traefik.http.routers.hostthis-apex-http.rule=Host(`${HOSTTHIS_APEX_DOMAIN}`)"
     - "traefik.http.routers.hostthis-apex-http.entryPoints=http"
