@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- build stage ------------------------------------------------------------
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 
 WORKDIR /src
 
@@ -14,7 +14,11 @@ COPY . .
 # Pure-Go sqlite (modernc.org/sqlite) means CGO=0 — static binary,
 # trivial to drop into distroless.
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-    go build -ldflags="-s -w" -o /out/hostthisd ./cmd/hostthisd
+    go build -ldflags="-s -w" -o /out/hostthisd ./cmd/hostthisd \
+ && CGO_ENABLED=0 GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+    go build -ldflags="-s -w" -o /out/hostthis-blob-migrate ./cmd/hostthis-blob-migrate \
+ && CGO_ENABLED=0 GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+    go build -ldflags="-s -w" -o /out/hostthis-blob-verify ./cmd/hostthis-blob-verify
 
 # ---- runtime stage ----------------------------------------------------------
 FROM gcr.io/distroless/static-debian12:nonroot
@@ -25,6 +29,8 @@ FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
 
 COPY --from=build /out/hostthisd /app/hostthisd
+COPY --from=build /out/hostthis-blob-migrate /app/hostthis-blob-migrate
+COPY --from=build /out/hostthis-blob-verify /app/hostthis-blob-verify
 COPY web/landing.html /app/web/landing.html
 
 EXPOSE 2222 8080

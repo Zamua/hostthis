@@ -36,7 +36,11 @@ type Server struct {
 	Blobs       BlobReader
 	LandingHTML []byte // optional — apex landing page bytes embedded at build
 	ApexDomain  string // e.g. "hostthis.dev" — used to peel slug subdomains
-	Now         func() time.Time
+	// Color labels the replica in blue/green deploys. Echoed in the
+	// X-Backend-Color response header on /healthz so operators can verify
+	// which backend is responding. Empty for single-replica deploys.
+	Color string
+	Now   func() time.Time
 }
 
 func (s *Server) nowOrTime() time.Time {
@@ -50,6 +54,16 @@ func (s *Server) nowOrTime() time.Time {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// 0. Health endpoint — apex only, no Host-based routing. Used by
+		// load balancers / haproxy / nginx to decide if this backend is
+		// ready to take traffic. Cheap: just confirms the HTTP server is
+		// up. Container startup opens the db + verifies blob backend
+		// before binding the http listener, so an HTTP response from
+		// here means the backend is healthy enough to serve.
+		if r.URL.Path == "/healthz" {
+			s.serveHealthz(w, r)
+			return
+		}
 		// 1. Subdomain mode: Host like "<slug>.<apex>" → serve paste,
 		// but ONLY at path "/". Any other path on the slug subdomain
 		// (favicon.ico, /style.css, /wp-login.php, etc.) returns 404
@@ -83,6 +97,16 @@ func (s *Server) Handler() http.Handler {
 		http.NotFound(w, r)
 	})
 	return mux
+}
+
+func (s *Server) serveHealthz(w http.ResponseWriter, _ *http.Request) {
+	h := w.Header()
+	h.Set("Content-Type", "text/plain; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+	if s.Color != "" {
+		h.Set("X-Backend-Color", s.Color)
+	}
+	_, _ = w.Write([]byte("ok\n"))
 }
 
 // slugFromHost returns (slug, true) when host is "<slug>.<apex>" and

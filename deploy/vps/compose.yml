@@ -1,31 +1,17 @@
-# Production compose for a single-host deploy behind a TLS-terminating
-# reverse proxy.
+# Production compose for hostthis on the VPS.
 #
-# This file is separate from the root docker-compose.yml so the root
-# one stays scoped to local dev (shifted ports). Build context points
-# at the repo root via the relative path.
+# Single hostthis container + MinIO sidecar for blob storage.
+# Traefik (in the infra repo) routes hostthis.dev → this container
+# via docker labels. SSH stays on host :22 directly (traefik doesn't
+# yet handle the SSH tcp-stream entrypoint for hostthis; future work).
 #
-# Operator-tunable settings come from environment variables — set them
-# in the shell, `docker compose --env-file ...`, or a local
-# (untracked) `.env` next to this file:
+# Bring up:
+#   sudo docker compose -f deploy/vps/compose.yml --env-file deploy/vps/.env up -d --build
 #
-#   HOSTTHIS_APEX_DOMAIN  public apex (e.g. hostthis.dev)
-#   HOSTTHIS_URL_MODE     `subdomain` (prod with wildcard cert) or `path`
-#   HOSTTHIS_PUBLIC_SCHEME  `https` (or `http` if the proxy doesn't TLS)
-#   HOSTTHIS_DATA_DIR     defaults to ./data (relative to this compose file)
-#
-# Run from the repo root:
-#   sudo docker compose -f deploy/vps/compose.yml up -d --build
-#   sudo docker compose -f deploy/vps/compose.yml logs -f
-#   sudo docker compose -f deploy/vps/compose.yml down
-#
-# Expected operator setup:
-#   - Host has nothing on :22 (admin SSH moved to a non-default port).
-#   - Firewall allows inbound on 22/tcp.
-#   - Reverse proxy terminates TLS for HOSTTHIS_APEX_DOMAIN and proxies
-#     /p/* (and any subdomain traffic, in subdomain mode) to 127.0.0.1:8080.
-#   - The host data directory exists and is chowned to uid 65532
-#     (distroless 'nonroot'). `make deploy` handles this.
+# Requires:
+#   - traefik_proxy external docker network (created by infra/traefik)
+#   - /home/admin/hostthis.env on the VPS with MinIO credentials
+#     (per .env.example in this dir)
 
 services:
   hostthis:
@@ -35,15 +21,14 @@ services:
     image: hostthis:prod
     container_name: hostthis
     restart: unless-stopped
+    user: "65532:65532"
     ports:
-      # Host :22 → container's SSH; users type `ssh <apex>`.
-      # Host :8080 → container's HTTP; proxy fronts subdomain + /p/* traffic.
-      - "22:2222"
-      - "127.0.0.1:8080:8080"
+      # SSH stays on the host's :22 — traefik doesn't currently route ssh
+      # tcp-stream for hostthis. Future task.
+      - "0.0.0.0:22:2222"
+    networks:
+      - traefik_proxy
     volumes:
-      # Operator sets HOSTTHIS_DATA_PATH to wherever they want sqlite +
-      # blobs to persist on the host. Defaults to `./data` (relative to
-      # this compose file, i.e. deploy/vps/data) if not set.
       - "${HOSTTHIS_DATA_PATH:-./data}:/var/lib/hostthis"
     environment:
       HOSTTHIS_URL_MODE: "${HOSTTHIS_URL_MODE:-subdomain}"
@@ -51,4 +36,75 @@ services:
       HOSTTHIS_APEX_DOMAIN: "${HOSTTHIS_APEX_DOMAIN:?HOSTTHIS_APEX_DOMAIN is required}"
       HOSTTHIS_DATA_DIR: /var/lib/hostthis
       HOSTTHIS_LANDING: /app/web/landing.html
-    user: "65532:65532"
+      HOSTTHIS_BACKEND_COLOR: "${HOSTTHIS_BACKEND_COLOR:-}"
+
+      # Blob storage. Defaults to disk during the migration window; flip
+      # to "s3" + the HOSTTHIS_S3_* vars below once blobs are mirrored.
+      HOSTTHIS_BLOB_BACKEND: "${HOSTTHIS_BLOB_BACKEND:-disk}"
+      HOSTTHIS_S3_ENDPOINT: "${HOSTTHIS_S3_ENDPOINT:-http://minio:9000}"
+      HOSTTHIS_S3_BUCKET: "${HOSTTHIS_S3_BUCKET:-hostthis-blobs}"
+      HOSTTHIS_S3_REGION: "${HOSTTHIS_S3_REGION:-us-east-1}"
+      HOSTTHIS_S3_ACCESS_KEY: "${HOSTTHIS_S3_ACCESS_KEY:-}"
+      HOSTTHIS_S3_SECRET_KEY: "${HOSTTHIS_S3_SECRET_KEY:-}"
+      HOSTTHIS_S3_USE_SSL: "${HOSTTHIS_S3_USE_SSL:-false}"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik_proxy"
+
+      # apex hostthis.dev — landing + /p/* paste reads
+      - "traefik.http.routers.hostthis-apex-https.rule=Host(`${HOSTTHIS_APEX_DOMAIN}`)"
+      - "traefik.http.routers.hostthis-apex-https.entryPoints=https"
+      - "traefik.http.routers.hostthis-apex-https.tls=true"
+      - "traefik.http.routers.hostthis-apex-https.service=hostthis"
+      - "traefik.http.routers.hostthis-apex-http.rule=Host(`${HOSTTHIS_APEX_DOMAIN}`)"
+      - "traefik.http.routers.hostthis-apex-http.entryPoints=http"
+      - "traefik.http.routers.hostthis-apex-http.middlewares=hostthis-redirect-https"
+
+      # wildcard *.hostthis.dev — paste subdomain reads
+      - "traefik.http.routers.hostthis-wild-https.rule=HostRegexp(`^[a-z0-9-]+\\.hostthis\\.dev$`)"
+      - "traefik.http.routers.hostthis-wild-https.entryPoints=https"
+      - "traefik.http.routers.hostthis-wild-https.tls=true"
+      - "traefik.http.routers.hostthis-wild-https.service=hostthis"
+      - "traefik.http.routers.hostthis-wild-http.rule=HostRegexp(`^[a-z0-9-]+\\.hostthis\\.dev$`)"
+      - "traefik.http.routers.hostthis-wild-http.entryPoints=http"
+      - "traefik.http.routers.hostthis-wild-http.middlewares=hostthis-redirect-https"
+
+      # middlewares
+      - "traefik.http.middlewares.hostthis-redirect-https.redirectScheme.scheme=https"
+      - "traefik.http.middlewares.hostthis-redirect-https.redirectScheme.permanent=true"
+
+      # service definition + active healthcheck
+      - "traefik.http.services.hostthis.loadbalancer.server.port=8080"
+      - "traefik.http.services.hostthis.loadbalancer.healthCheck.path=/healthz"
+      - "traefik.http.services.hostthis.loadbalancer.healthCheck.interval=10s"
+      - "traefik.http.services.hostthis.loadbalancer.healthCheck.timeout=3s"
+
+  # MinIO sidecar — S3-compatible object store for hostthis blobs.
+  # 127.0.0.1-only for the host bindings; container-to-container
+  # traffic is on the traefik_proxy network. Bucket created manually
+  # on first boot (one-time mc command).
+  minio:
+    image: minio/minio:latest
+    container_name: hostthis-minio
+    restart: unless-stopped
+    user: "${MINIO_RUN_AS:-1002:1002}"
+    command: server --console-address :9001 /data
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}"
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - "${MINIO_DATA_PATH:-./minio-data}:/data"
+    networks:
+      - traefik_proxy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  traefik_proxy:
+    external: true
