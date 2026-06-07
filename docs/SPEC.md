@@ -185,7 +185,7 @@ With no command and no stdin, the server prints the help banner.
 ```
 cat index.html | ssh hostthis.dev
 https://abc12345.hostthis.dev
-expires in 7d (2026-06-13 12:34 UTC)
+expires in 7 days
 ```
 Reads stdin until EOF or 1 MiB. Validates content type (HTML or Markdown
 in v1). Generates a fresh random slug.
@@ -194,8 +194,7 @@ Optional `--name`:
 ```
 cat demo.html | ssh hostthis.dev --name "Acme prototype v3"
 https://abc12345.hostthis.dev
-"Acme prototype v3" — expires in 7d (2026-06-13 12:34 UTC)
-
+"Acme prototype v3" — expires in 7 days
 ```
 The name is owner-only metadata for `list`; it never appears in the
 URL. Names are 1–60 chars, any printable Unicode except newlines.
@@ -219,18 +218,33 @@ exit code 3. See the `Identity` section above.
 ```
 cat v2.html | ssh hostthis.dev abc12345
 https://abc12345.hostthis.dev
-v2 — expires in 7d (2026-06-13 14:12 UTC)
+v2 saved — expires in 7 days
 ```
 Slug as positional arg means "update this one". Server checks ownership
-against the key fingerprint. Errors:
-- `403`: slug exists but you don't own it
-- `404`: slug doesn't exist
-- `413`: payload too large
+against the key fingerprint. Failure modes (exit codes; SSH stderr message
+in italics):
 
-Update resets the 7-day retention clock to "7 days from now" and creates a
-new immutable version under the hood (SHA-keyed blob ref). The slug
-always serves the currently-pinned version (defaults to latest after
-an update).
+- *not found* (exit 1): slug doesn't exist OR exists but the connecting
+  ssh key isn't its owner. Indistinguishable on purpose — the owner-check
+  fail surfaces as "not found" so a non-owner can't probe for the
+  existence of slugs they don't own.
+- *upload exceeds 1 MiB cap* (exit 1): payload too large; rejected
+  before any bytes hit disk.
+- *usage error* (exit 2): malformed args, bad flag value.
+
+Update creates a new immutable version under the hood (SHA-keyed blob
+ref) and resets the 7-day retention clock. What the URL serves next
+depends on pin state:
+
+- If the paste is *unpinned* (default for new uploads): the new
+  version becomes the served version immediately. Standard "head"
+  semantics.
+- If the paste is *pinned* to a specific version (via `pin`): the pin
+  holds. The new version is recorded in history but is NOT served.
+  Stderr emits a `note: this paste is pinned to v1, so the URL still
+  serves v1, not v2` along with hints for `unpin` or `pin <newver>`.
+
+See the Pin / Unpin sections below for the full sticky semantics.
 
 ### List your pastes
 ```
@@ -244,8 +258,8 @@ Sorted by expiry asc (soonest-to-die first, so you notice things about
 to disappear). `NAME` column shows the user-supplied label or `—` if
 none. Output is tab-separated for easy `awk`-ing.
 
-When a paste is within 1h of expiry, the row's `EXPIRES IN` is rendered
-in red (ANSI, only when stderr says we're on a TTY).
+When the user has zero active pastes, the command prints a single
+`no active pastes` line to stderr and exits 0.
 
 ### Rename
 ```
@@ -262,17 +276,36 @@ ssh hostthis.dev show abc12345
 <the html streams to stdout>
 ```
 Owner-only. Use case: piping a paste back through local tooling.
+Non-owners (including connecting with a different ssh key than the
+one that originally uploaded) see "not found" — the server doesn't
+distinguish "doesn't exist" from "exists but not yours" in any verb,
+so an attacker can't probe for slugs they don't own.
 
 ### Versions
 ```
 ssh hostthis.dev versions abc12345
-v3  current  2026-06-05 14:32  1.2k
-v2           2026-06-05 12:15  1.1k
-v1           2026-06-05 11:22  0.9k
-expires in 22h (2026-06-06 14:32 UTC)
+v3	current	2026-06-05 14:32 UTC	1.2k
+v2		2026-06-05 12:15 UTC	1.1k
+v1		2026-06-05 11:22 UTC	0.9k
 ```
-The expiry footer is on stderr (same convention as upload), so a script
-that wants just the version list can pipe stdout cleanly.
+
+Stdout: tab-separated rows, newest first. The `current` marker
+identifies the version the URL is currently serving (either the
+pinned ver_num or `MAX(ver_num)` when unpinned).
+
+Stderr footer carries the pin state plus the expiry:
+
+```
+unpinned — expires in 6d22h (2026-06-13 14:32 UTC)
+```
+
+or when pinned:
+
+```
+pinned to v1 — expires in 6d22h (2026-06-13 14:32 UTC)
+```
+
+Pipe stdout cleanly (`| awk` etc.); footer lives on stderr.
 
 ### Pin a version (sticky)
 ```
@@ -321,16 +354,16 @@ ssh hostthis.dev
 hostthis.dev — pipe rendered content (html/markdown), get a URL.
               pastes expire 7 days after their last update.
 
-  cat file.html | ssh hostthis.dev [--name "…"]      upload
-  cat file.html | ssh hostthis.dev <slug>            update an existing upload
-  ssh hostthis.dev list                              your active pastes
-  ssh hostthis.dev show <slug>                       read content (owner only)
-  ssh hostthis.dev rename <slug> "<name>"            set / change a paste's label
-  ssh hostthis.dev versions <slug>                   history (within the 7-day window)
-  ssh hostthis.dev pin <slug> <ver>                  stick the URL to <ver> (sticky across updates)
-  ssh hostthis.dev unpin <slug>                      clear the pin; URL serves the latest
-  ssh hostthis.dev delete <slug>                     permanent
-  ssh hostthis.dev whoami                            your identity + active count
+  cat file | ssh hostthis.dev [--name "..."]      upload
+  cat file | ssh hostthis.dev <slug>              update an existing upload
+  ssh hostthis.dev list                           your active pastes
+  ssh hostthis.dev show <slug>                    read content (owner only)
+  ssh hostthis.dev rename <slug> "<name>"         set / change a paste's label
+  ssh hostthis.dev versions <slug>                history within the 7-day window
+  ssh hostthis.dev pin <slug> <ver>               stick the URL to <ver> (survives updates)
+  ssh hostthis.dev unpin <slug>                   clear the pin; URL serves the latest
+  ssh hostthis.dev delete <slug>                  permanent
+  ssh hostthis.dev whoami                         your identity + active count
 ```
 
 ---
