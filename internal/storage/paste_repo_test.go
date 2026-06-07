@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -93,7 +94,7 @@ func TestBlobStore_PutAndGet(t *testing.T) {
 	_, blobs := newTestDB(t)
 	content := []byte("<!doctype html><p>hello")
 	sha := domain.HashContent(content)
-	if err := blobs.Put(sha, content); err != nil {
+	if err := blobs.Put(sha, bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	got, err := blobs.Get(sha)
@@ -110,7 +111,7 @@ func TestBlobStore_PutIdempotent(t *testing.T) {
 	content := []byte("same bytes")
 	sha := domain.HashContent(content)
 	for range 3 {
-		if err := blobs.Put(sha, content); err != nil {
+		if err := blobs.Put(sha, bytes.NewReader(content), int64(len(content))); err != nil {
 			t.Fatalf("put: %v", err)
 		}
 	}

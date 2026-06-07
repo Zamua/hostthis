@@ -119,7 +119,11 @@ func (s *Server) serveLanding(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintln(w, "hostthis — landing page not embedded.")
 		return
 	}
+	// Landing changes more often than pastes (rare edits, new copy);
+	// 5-min cache balances "operators can ship a copy fix and see it
+	// in minutes" against not hammering origin for every visitor.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=300")
 	_, _ = w.Write(s.LandingHTML)
 }
 
@@ -144,26 +148,46 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		http.NotFound(w, r)
 		return
 	}
+
+	// Sandboxing headers per SPEC.md HTML-sandboxing section.
+	h := w.Header()
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()")
+
+	// Cache-Control: 1h max-age is the sweet spot for hostthis. Active
+	// changes (update/delete) fire an explicit purge via CachePurger;
+	// passive expiry gets at most 1h of staleness which is acceptable.
+	h.Set("Cache-Control", "public, max-age=3600")
+	h.Set("Last-Modified", p.UpdatedAt.UTC().Format(http.TimeFormat))
+
+	// ETag is the content SHA for HTML — content-addressed, byte-stable.
+	// For markdown the rendered output depends on the renderer version,
+	// so we mix that in so that a renderer bump invalidates the cache
+	// without us having to manually purge.
+	etag := `"` + p.ContentSHA + `"`
+	if p.Kind == domain.KindMarkdown {
+		etag = `"` + p.ContentSHA + "-" + render.MarkdownRendererVersion + `"`
+	}
+	h.Set("ETag", etag)
+
+	// Conditional GET: 304 if either If-None-Match or If-Modified-Since says so.
+	if etagMatches(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
+		if since, err := http.ParseTime(ims); err == nil && !p.UpdatedAt.UTC().Truncate(time.Second).After(since) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
 	body, err := s.Blobs.Get(p.ContentSHA)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-
-	// Sandboxing headers per SPEC.md HTML-sandboxing section.
-	// No Content-Security-Policy — origin isolation (subdomain-per-paste)
-	// is the actual security boundary. Same posture as codepen et al.
-	// We do keep the headers that don't restrict what the paste's JS
-	// can DO inside its own origin:
-	//   - X-Frame-Options DENY: no clickjacking embed
-	//   - Referrer-Policy no-referrer: visitor's referrer doesn't leak
-	//   - Permissions-Policy: deny camera/mic/geo/usb/payment (the
-	//     categories that need explicit user grant; we don't want
-	//     malicious pastes triggering those prompts)
-	h := w.Header()
-	h.Set("X-Frame-Options", "DENY")
-	h.Set("Referrer-Policy", "no-referrer")
-	h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()")
 
 	switch p.Kind {
 	case domain.KindHTML:
@@ -184,4 +208,21 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	default:
 		http.Error(w, "unsupported kind", http.StatusInternalServerError)
 	}
+}
+
+// etagMatches checks if the client's If-None-Match header lists our
+// etag. Supports the comma-separated form and the "*" wildcard.
+func etagMatches(ifNoneMatch, etag string) bool {
+	if ifNoneMatch == "" {
+		return false
+	}
+	if strings.TrimSpace(ifNoneMatch) == "*" {
+		return true
+	}
+	for _, candidate := range strings.Split(ifNoneMatch, ",") {
+		if strings.TrimSpace(candidate) == etag {
+			return true
+		}
+	}
+	return false
 }

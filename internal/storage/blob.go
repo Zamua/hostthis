@@ -3,6 +3,7 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -22,11 +23,14 @@ func NewBlobStore(root string) (*BlobStore, error) {
 	return &BlobStore{root: root}, nil
 }
 
-// Put writes content addressed by sha. If a file already exists at
-// the destination, we trust the existing bytes (content-addressed —
-// sha collision is the only way to "overwrite" and that's not a real
-// concern at sha256).
-func (b *BlobStore) Put(sha string, content []byte) error {
+// Put streams r into the content-addressed location for sha. If a file
+// already exists at the destination, we trust the existing bytes
+// (content-addressed — sha collision is the only way to "overwrite"
+// and that's not a real concern at sha256). size is the expected byte
+// length of r; passed for symmetry with S3-shaped backends that need
+// to send Content-Length up front. The disk impl doesn't strictly
+// require it but accepts it for interface uniformity.
+func (b *BlobStore) Put(sha string, r io.Reader, size int64) error {
 	if len(sha) < 2 {
 		return fmt.Errorf("blob: sha too short")
 	}
@@ -37,6 +41,8 @@ func (b *BlobStore) Put(sha string, content []byte) error {
 	dst := filepath.Join(dir, sha)
 	if _, err := os.Stat(dst); err == nil {
 		// Already there — no-op. Content-addressed means same bytes.
+		// Drain r so a caller streaming a request body doesn't block.
+		_, _ = io.Copy(io.Discard, r)
 		return nil
 	}
 	// Write to a tmp file, fsync, rename. This makes Put atomic under
@@ -48,7 +54,7 @@ func (b *BlobStore) Put(sha string, content []byte) error {
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // safe — if rename succeeded, file no longer exists
-	if _, err := tmp.Write(content); err != nil {
+	if _, err := io.Copy(tmp, r); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("blob write: %w", err)
 	}
