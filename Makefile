@@ -124,9 +124,9 @@ smoke:
 deploy-sync: _require-vps-host
 	rsync -az --delete \
 	  --exclude='/data' --exclude='/bin' --exclude='/.git/objects' --exclude='*.log' \
-	  --exclude='/deploy/vps/data' --exclude='/deploy/vps/minio-data' --exclude='/deploy/vps/.env' \
+	  --exclude='/minio-data' --exclude='/deploy/vps/.env' \
 	  ./ $(VPS_HOST):/tmp/hostthis-staging/
-	ssh $(VPS_HOST) "sudo mkdir -p $(VPS_PATH)/data $(VPS_PATH)/deploy/vps/minio-data && sudo rsync -a --delete /tmp/hostthis-staging/ $(VPS_PATH)/ --exclude=/data --exclude=/deploy/vps/data --exclude=/deploy/vps/minio-data --exclude=/deploy/vps/.env && sudo chown -R $(VPS_USER):$(VPS_USER) $(VPS_PATH) && sudo chown -R $(CONTAINER_UID):$(CONTAINER_UID) $(VPS_PATH)/data && sudo chown -R $(MINIO_UID):$(MINIO_UID) $(VPS_PATH)/deploy/vps/minio-data"
+	ssh $(VPS_HOST) "sudo mkdir -p $(VPS_PATH)/data $(VPS_PATH)/minio-data && sudo rsync -a --delete /tmp/hostthis-staging/ $(VPS_PATH)/ --exclude=/data --exclude=/minio-data --exclude=/deploy/vps/.env && sudo chown -R $(VPS_USER):$(VPS_USER) $(VPS_PATH) && sudo chown -R $(CONTAINER_UID):$(CONTAINER_UID) $(VPS_PATH)/data && sudo chown -R $(MINIO_UID):$(MINIO_UID) $(VPS_PATH)/minio-data"
 
 # Build the env-var prefix once. Sets the runtime config the compose
 # file reads (apex, mode, scheme) plus the absolute data path so the

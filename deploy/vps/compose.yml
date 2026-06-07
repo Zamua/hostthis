@@ -80,14 +80,22 @@ x-hostthis-common: &hostthis-common
     - "traefik.http.services.hostthis.loadbalancer.healthCheck.path=/healthz"
     - "traefik.http.services.hostthis.loadbalancer.healthCheck.interval=10s"
     - "traefik.http.services.hostthis.loadbalancer.healthCheck.timeout=3s"
+    # TCP router for ssh — raw TCP has no SNI, so HostSNI(*) catches all
+    # traffic on the ssh entrypoint. Traefik load-balances across both
+    # replicas on container port 2222. Established SSH connections to a
+    # restarting replica get reset; new connections route to the surviving
+    # replica.
+    - "traefik.tcp.routers.hostthis-ssh.rule=HostSNI(`*`)"
+    - "traefik.tcp.routers.hostthis-ssh.entryPoints=ssh"
+    - "traefik.tcp.routers.hostthis-ssh.service=hostthis-ssh"
+    - "traefik.tcp.services.hostthis-ssh.loadbalancer.server.port=2222"
 
 services:
   hostthis-blue:
     <<: *hostthis-common
     container_name: hostthis-blue
-    # Blue owns the SSH bind. Only one container can hold :22.
-    ports:
-      - "0.0.0.0:22:2222"
+    # No host port binding — traefik owns :22 on the host and routes
+    # to both replicas via TCP labels (see hostthis-common labels).
     environment:
       <<: *hostthis-env
       HOSTTHIS_BACKEND_COLOR: blue
