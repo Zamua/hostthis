@@ -2,8 +2,27 @@ package http
 
 import (
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/storage"
 )
+
+// stubPasteReader / stubBlobReader satisfy the read interfaces.
+type stubPasteReader struct{ p domain.Paste }
+
+func (s stubPasteReader) Get(slug domain.Slug) (domain.Paste, error) {
+	if s.p.Slug != slug {
+		return domain.Paste{}, storage.ErrNotFound
+	}
+	return s.p, nil
+}
+
+type stubBlobReader struct{ body []byte }
+
+func (s stubBlobReader) Get(sha string) ([]byte, error) { return s.body, nil }
 
 func TestSlugFromHost(t *testing.T) {
 	s := &Server{ApexDomain: "hostthis.dev"}
@@ -80,5 +99,125 @@ func TestSubdomain_OnlyServesRoot(t *testing.T) {
 		if w.Code != 404 {
 			t.Fatalf("%s on slug subdomain: got %d, want 404", path, w.Code)
 		}
+	}
+}
+
+// TestPasteRead_CacheHeaders pins the Cache-Control + ETag + Last-Modified
+// headers on a successful paste read. Those headers are the contract with
+// the CDN; if they regress, edge caching silently breaks.
+func TestPasteRead_CacheHeaders(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
+	expiresAt := updatedAt.Add(7 * 24 * time.Hour)
+	body := []byte("<!doctype html><h1>hi</h1>")
+	paste := domain.Paste{
+		Slug:       "abc23456",
+		Kind:       domain.KindHTML,
+		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
+		UpdatedAt:  updatedAt,
+		ExpiresAt:  expiresAt,
+	}
+	srv := &Server{
+		Pastes:     stubPasteReader{p: paste},
+		Blobs:      stubBlobReader{body: body},
+		ApexDomain: "hostthis.dev",
+		Now:        func() time.Time { return updatedAt.Add(time.Hour) },
+	}
+	r := httptest.NewRequest("GET", "/p/abc23456", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code != 200 {
+		t.Fatalf("status: got %d, want 200", w.Code)
+	}
+	if got := w.Header().Get("Cache-Control"); got != "public, max-age=3600" {
+		t.Errorf("Cache-Control: got %q, want public, max-age=3600", got)
+	}
+	wantETag := `"` + paste.ContentSHA + `"`
+	if got := w.Header().Get("ETag"); got != wantETag {
+		t.Errorf("ETag: got %q, want %q", got, wantETag)
+	}
+	if got := w.Header().Get("Last-Modified"); got == "" || !strings.Contains(got, "Jun 2026") {
+		t.Errorf("Last-Modified: got %q", got)
+	}
+}
+
+func TestPasteRead_IfNoneMatch304(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
+	paste := domain.Paste{
+		Slug:       "abc23456",
+		Kind:       domain.KindHTML,
+		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
+		UpdatedAt:  updatedAt,
+		ExpiresAt:  updatedAt.Add(7 * 24 * time.Hour),
+	}
+	srv := &Server{
+		Pastes:     stubPasteReader{p: paste},
+		Blobs:      stubBlobReader{body: []byte("body")},
+		ApexDomain: "hostthis.dev",
+		Now:        func() time.Time { return updatedAt.Add(time.Hour) },
+	}
+	r := httptest.NewRequest("GET", "/p/abc23456", nil)
+	r.Header.Set("If-None-Match", `"`+paste.ContentSHA+`"`)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code != 304 {
+		t.Fatalf("status: got %d, want 304 Not Modified", w.Code)
+	}
+	if w.Body.Len() > 0 {
+		t.Errorf("304 response body should be empty, got %d bytes", w.Body.Len())
+	}
+}
+
+func TestPasteRead_MarkdownETagIncludesRendererVersion(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
+	paste := domain.Paste{
+		Slug:       "abc23456",
+		Kind:       domain.KindMarkdown,
+		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
+		UpdatedAt:  updatedAt,
+		ExpiresAt:  updatedAt.Add(7 * 24 * time.Hour),
+	}
+	srv := &Server{
+		Pastes:     stubPasteReader{p: paste},
+		Blobs:      stubBlobReader{body: []byte("# hi")},
+		ApexDomain: "hostthis.dev",
+		Now:        func() time.Time { return updatedAt.Add(time.Hour) },
+	}
+	r := httptest.NewRequest("GET", "/p/abc23456", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	etag := w.Header().Get("ETag")
+	if !strings.Contains(etag, paste.ContentSHA) {
+		t.Errorf("md ETag should include content SHA, got %q", etag)
+	}
+	if !strings.Contains(etag, "md.v1") {
+		t.Errorf("md ETag should include renderer version, got %q", etag)
+	}
+}
+
+func TestPasteRead_IfModifiedSince304(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
+	paste := domain.Paste{
+		Slug:       "abc23456",
+		Kind:       domain.KindHTML,
+		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
+		UpdatedAt:  updatedAt,
+		ExpiresAt:  updatedAt.Add(7 * 24 * time.Hour),
+	}
+	srv := &Server{
+		Pastes:     stubPasteReader{p: paste},
+		Blobs:      stubBlobReader{body: []byte("body")},
+		ApexDomain: "hostthis.dev",
+		Now:        func() time.Time { return updatedAt.Add(time.Hour) },
+	}
+	r := httptest.NewRequest("GET", "/p/abc23456", nil)
+	r.Header.Set("If-Modified-Since", updatedAt.Add(time.Hour).UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"))
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code != 304 {
+		t.Fatalf("status: got %d, want 304", w.Code)
 	}
 }

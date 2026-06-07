@@ -147,12 +147,15 @@ signature. Never trust a self-asserted username or fingerprint.
   `http.DetectContentType` and cross-checks any explicit `--type` flag.
   Unsupported content is rejected with a clear error pointing at
   what we accept — no silent fallback to `attachment` rendering.
-- **No streaming reads from upload**: server buffers the whole stdin
-  into memory (≤ 1 MiB so a fixed buffer is fine) before committing.
-- **Storage**: SHA256-keyed content-addressed blobs on disk
-  (`data/blobs/<sha256[:2]>/<sha256>`). Multiple slugs pointing to the
-  same blob share the storage. Markdown is rendered to HTML on every
-  read (cheap enough at our content sizes; no cache layer yet).
+- **Streaming I/O**: server reads stdin as a stream (no full-buffer
+  allocation) up to a size cap of 1 MiB+1 byte, hashes incrementally,
+  and streams the bytes to the configured `BlobStore`. The S3-compatible
+  backend pushes the bytes straight through to the object store without
+  ever holding the full payload in RAM.
+- **Storage backend**: pluggable. See "Blob storage backends" below.
+  Default is the on-disk store (`data/blobs/<sha256[:2]>/<sha256>`).
+  Markdown is rendered to HTML on every read (cheap enough at our
+  content sizes; no cache layer yet).
 
 ## Retention
 
@@ -448,7 +451,215 @@ rather than fail fast.
   but we render on every read with no per-slug rate limit; a hot
   markdown slug hammered in parallel pegs CPU.
 - *Bandwidth amplification*. No per-slug egress cap. Hetzner-style
-  free egress allowances are generous but not infinite.
+  free egress allowances are generous but not infinite. A CDN in front
+  (see "Edge caching" below) makes this concern moot for cached reads.
+
+---
+
+## Blob storage backends
+
+Blob bytes are content-addressed by SHA256 and stored via a small
+`BlobStore` interface declared by the service layer:
+
+```go
+type BlobStore interface {
+    Put(sha string, r io.Reader, size int64) error
+    Get(sha string) ([]byte, error)
+}
+
+type SweepBlobs interface {
+    WalkBlobs(fn func(sha string) error) error
+    Remove(sha string) error
+}
+```
+
+The service layer never imports a specific backend — it depends only on
+those four methods. Backends are swapped via the
+`HOSTTHIS_BLOB_BACKEND` env var at startup.
+
+### Available backends
+
+`disk` (default): bytes live on local disk under
+`<data-dir>/blobs/<sha256[:2]>/<sha256>`. Two-character sharding keeps
+any single directory's entry count manageable. Linux page cache absorbs
+hot blob reads. Fine up to a few tens of GB and a few thousand
+identities.
+
+`s3` (S3-compatible): bytes live in an S3-compatible object store
+addressed by SHA256 keys. Works against any S3-protocol backend:
+
+| Provider | Notes |
+| --- | --- |
+| MinIO  | Self-hosted, OSS. The reference target. Free. |
+| Storj  | 25 GB free tier, no payment method. |
+| Backblaze B2 | 10 GB free tier, payment method required for free. |
+| Cloudflare R2 | 10 GB free + free egress, *payment method required*. |
+| AWS S3 | Reference protocol; expensive on egress. |
+| Wasabi / Vultr / Tigris / SeaweedFS | All work; details vary. |
+
+Env vars when `HOSTTHIS_BLOB_BACKEND=s3`:
+
+```
+HOSTTHIS_S3_ENDPOINT     URL of the S3 endpoint (e.g. https://minio.local:9000)
+HOSTTHIS_S3_BUCKET       bucket name (must exist before startup)
+HOSTTHIS_S3_REGION       region label (some providers care, some don't; default 'us-east-1')
+HOSTTHIS_S3_ACCESS_KEY   access key id
+HOSTTHIS_S3_SECRET_KEY   secret access key
+HOSTTHIS_S3_USE_SSL      'true' or 'false' (default true)
+```
+
+### Switching backends
+
+The default is `disk`. To switch to S3 (against a provider you've
+already provisioned a bucket on):
+
+1. Set the env vars above.
+2. Set `HOSTTHIS_BLOB_BACKEND=s3`.
+3. Restart hostthis.
+
+What happens to existing on-disk blobs after the switch:
+
+- The 7-day retention guarantee means everything on disk expires within
+  a week of the switch with no action.
+- During that week, new pastes go to S3; older pastes remain on disk and
+  continue to serve from there only if the operator runs hostthis with
+  a one-shot migration helper OR uses a compound backend (not shipped;
+  trivial to add).
+- The simplest path for hostthis at any realistic scale: flip the
+  switch, accept that pastes uploaded before the switch live their last
+  7 days on disk, then delete the old `data/blobs/` directory.
+
+For operators who can't tolerate the 7-day overlap, two small
+helpers ship in `cmd/`:
+
+- `hostthis-blob-migrate` walks `<data-dir>/blobs/` and `Put`s every
+  blob to the configured S3 endpoint. Idempotent — skips blobs already
+  present in S3 (HEAD-checks by SHA256 key first). Run before flipping
+  the env var.
+- `hostthis-blob-verify` walks the disk store and, for every blob,
+  fetches the corresponding object from S3 and asserts byte-for-byte
+  equality (in practice: hash check, since the SHA *is* the address).
+  Exits non-zero if anything is missing or mismatched. Run after the
+  migrator, before deleting `data/blobs/`.
+
+Together they let an operator do a zero-loss migration:
+
+```
+HOSTTHIS_BLOB_BACKEND=disk    # still serving from disk
+hostthis-blob-migrate          # copy all blobs to S3
+hostthis-blob-verify           # confirm parity
+HOSTTHIS_BLOB_BACKEND=s3       # restart hostthis pointing at S3
+# wait one safe interval, confirm everything still works
+rm -rf data/blobs              # reclaim disk space
+```
+
+---
+
+## Edge caching
+
+hostthis has two scaling cliffs that a CDN solves:
+
+- *Egress bandwidth*: a 1 MiB paste served at 100 req/s = ~250 TB/month.
+  Hetzner free egress is ~20 TB; one viral paste could blow the budget
+  in days. A CDN absorbs ~95% of reads at the edge, dropping origin
+  bandwidth to a sliver.
+- *Render CPU*: every GET to a markdown paste re-runs goldmark (~1ms).
+  A hot URL at 10k req/s pegs a CPU core. CDN-cached HTML means the
+  render runs ~once per cache POP per paste version.
+
+### Cache-Control posture
+
+Paste read responses set:
+
+```
+Cache-Control: public, max-age=3600
+ETag: "<sha256>"
+Last-Modified: <RFC1123 from paste.UpdatedAt>
+```
+
+CDNs cache for one hour, then revalidate. Browsers cache and send
+conditional `If-None-Match` / `If-Modified-Since` on revisits;
+hostthis returns 304 Not Modified when the content SHA matches,
+saving body bytes on the wire.
+
+Apex landing page is `Cache-Control: public, max-age=300` (5 min) so
+content updates propagate quickly without becoming a no-cache origin
+hammer.
+
+### Active invalidation: CachePurger interface
+
+When a paste is updated or deleted, the cached version at the CDN edge
+becomes stale. hostthis fires a purge call to drop the entry so the
+next reader fetches fresh from origin.
+
+The interface lives in the service layer; no production code knows
+which CDN is in front (or that one is in front at all):
+
+```go
+type CachePurger interface {
+    PurgePaste(slug string) error
+}
+```
+
+Three implementations ship:
+
+| Impl | When used | Behavior |
+| --- | --- | --- |
+| `noop` (default) | No CDN, or CDN with adequate max-age | No-op; relies on cache TTL expiry |
+| `cloudflare` | Cloudflare in front | POSTs to `/zones/<id>/purge_cache` with the slug's URL |
+| `fastly` (not shipped, easy add) | Fastly in front | POSTs to Fastly's purge API |
+
+Service-layer code calls `Cache.PurgePaste(slug)` after every `Delete`
+and every successful `Update`. The interface doesn't fail loudly: a
+purge error logs but doesn't fail the underlying operation (the paste
+IS updated/deleted on origin; the CDN just keeps stale content for the
+remaining TTL).
+
+Env vars when `HOSTTHIS_CACHE_BACKEND=cloudflare`:
+
+```
+HOSTTHIS_CF_PURGE_TOKEN  CF API token, scoped only to 'Cache Purge' on the zone
+HOSTTHIS_CF_ZONE_ID      zone id of the apex domain
+HOSTTHIS_PUBLIC_URL_BASE base URL hostthis emits (e.g. https://hostthis.dev)
+                         used to construct the purge URL per slug
+```
+
+The purge token is the only long-lived credential hostthis needs for
+the CDN; it's narrowly scoped (zone-level cache-purge only) so leakage
+worst-case is "attacker can purge our cache (slowing us down briefly)".
+
+### Cache-vs-expiry timing
+
+| Scenario | What happens at the CDN |
+| --- | --- |
+| Owner runs `update` on a slug | Purge fires; readers see new content within ~30s globally |
+| Owner runs `delete` on a slug | Purge fires; URL returns 404 within ~30s globally |
+| Paste expires naturally (7d) | No purge; CDN serves cached version for up to max-age (1h) after origin starts 404'ing, then revalidates and updates cache to 404 |
+
+The natural-expiry case is acceptable lag for ephemeral content — a
+recently-expired paste continuing to be reachable for an extra hour
+is not a correctness issue.
+
+### Switching CDN providers
+
+Replacing Cloudflare with Fastly / Bunny.net / a different provider is:
+
+1. Add an `internal/cache/<provider>.go` implementing `CachePurger`.
+2. Wire it in `cmd/hostthisd/main.go` by extending the `HOSTTHIS_CACHE_BACKEND` switch.
+3. Change nameservers / DNS at the registrar.
+4. Reconfigure cache rules in the new provider's dashboard.
+
+Total: ~100 lines of Go + dashboard work. The service layer is
+unchanged; this is hexagonal-architecture portability in action.
+
+### Apex must stay DNS-only when a CDN is in front
+
+A subtle but critical setup detail: only the wildcard `*.<apex>` DNS
+record is proxied through the CDN. The apex `<apex>` itself must remain
+DNS-only (CF terminology: gray cloud) so the SSH listener on the origin
+remains reachable. CDNs proxy HTTP/HTTPS only; they don't forward SSH.
+The two surfaces don't overlap (ssh is always on apex, paste reads
+are always on subdomains), so the split is clean.
 
 ---
 
@@ -536,6 +747,21 @@ file). Defaults in parens:
 --storage-cap-bytes      / HOSTTHIS_STORAGE_CAP_BYTES       service-wide cap (0 disables)           (5 GiB)
 --fresh-keys-per-subnet  / HOSTTHIS_FRESH_KEYS_PER_SUBNET   sybil-gate threshold                    (20)
 --fresh-keys-window      / HOSTTHIS_FRESH_KEYS_WINDOW       sybil-gate rolling window               (24h)
+
+# Blob backend
+                         / HOSTTHIS_BLOB_BACKEND            disk | s3                               (disk)
+                         / HOSTTHIS_S3_ENDPOINT             S3 endpoint URL                         (required if s3)
+                         / HOSTTHIS_S3_BUCKET               bucket name                             (required if s3)
+                         / HOSTTHIS_S3_REGION               region label                            (us-east-1)
+                         / HOSTTHIS_S3_ACCESS_KEY           access key id                           (required if s3)
+                         / HOSTTHIS_S3_SECRET_KEY           secret access key                       (required if s3)
+                         / HOSTTHIS_S3_USE_SSL              true | false                            (true)
+
+# CDN / cache purger
+                         / HOSTTHIS_CACHE_BACKEND           noop | cloudflare                       (noop)
+                         / HOSTTHIS_CF_PURGE_TOKEN          CF token (Cache:Purge scope only)       (required if cloudflare)
+                         / HOSTTHIS_CF_ZONE_ID              CF zone id for the apex                 (required if cloudflare)
+                         / HOSTTHIS_PUBLIC_URL_BASE         base URL used to construct purge URLs   (https://<apex>)
 ```
 
 The runtime container reads the same env vars; the deploy compose
@@ -558,6 +784,10 @@ invocation.
 - Service-wide storage cap (`--storage-cap-bytes`, set to 0 to disable)
 - Sybil gate (`--fresh-keys-per-subnet`, `--fresh-keys-window`,
   both can be tightened or relaxed for the operator's threat model)
+- Blob backend (`HOSTTHIS_BLOB_BACKEND=disk|s3`) and its connection
+  config (endpoint, bucket, credentials)
+- CDN cache purger (`HOSTTHIS_CACHE_BACKEND=noop|cloudflare`) and its
+  credential (`HOSTTHIS_CF_PURGE_TOKEN`)
 
 Operators worried about disk pressure can either tune
 `--storage-cap-bytes` down or put hostthis behind a reverse proxy

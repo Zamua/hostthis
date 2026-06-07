@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"bytes"
 	"io"
 	"log"
 	"path/filepath"
@@ -122,7 +123,7 @@ func TestSweep_GCsOrphanBlobOnly(t *testing.T) {
 
 	// Write an orphan blob directly.
 	orphanSHA := domain.HashContent([]byte("orphan"))
-	if err := blobs.Put(orphanSHA, []byte("orphan")); err != nil {
+	if err := blobs.Put(orphanSHA, bytes.NewReader([]byte("orphan")), int64(len("orphan"))); err != nil {
 		t.Fatal(err)
 	}
 

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"time"
@@ -50,7 +51,9 @@ var ErrInvalidName = errors.New("service: name must be 1–60 printable Unicode 
 type Manage struct {
 	Repo            PasteAdmin
 	Blobs           BlobStore // for Show + Update; same interface as Upload
-	ServiceCapBytes int64     // 0 = no service-wide cap
+	Cache           CachePurger // never called if nil; for CDN invalidation on Update/Delete
+	PublicURL       URLBuilder  // required iff Cache is set; turns slug into purge URL
+	ServiceCapBytes int64       // 0 = no service-wide cap
 	Now             func() time.Time
 }
 
@@ -132,7 +135,7 @@ func (m *Manage) Update(slug domain.Slug, owner string, body []byte, typeHint st
 	}
 	now := m.Now().UTC()
 	sha := domain.HashContent(body)
-	if err := m.Blobs.Put(sha, body); err != nil {
+	if err := m.Blobs.Put(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 		return UpdateResult{}, fmt.Errorf("blob write: %w", err)
 	}
 	res, err := m.Repo.AppendVersionWithQuotaCheck(slug, kind, sha, len(body), m.ServiceCapBytes, int64(domain.UserQuotaBytes), now)
@@ -150,12 +153,24 @@ func (m *Manage) Update(slug domain.Slug, owner string, body []byte, typeHint st
 	if err != nil {
 		return UpdateResult{}, err
 	}
+	m.purge(slug)
 	return UpdateResult{
 		Paste:     p,
 		NewVer:    res.NewVer,
 		WasPinned: res.WasPinned,
 		PinnedAt:  existing.PinnedVersion,
 	}, nil
+}
+
+// purge fires the configured CachePurger for slug's public URL.
+// Errors are swallowed — purge is best-effort and the impl is expected
+// to log internally. If Cache or PublicURL is nil (no CDN configured),
+// no-ops.
+func (m *Manage) purge(slug domain.Slug) {
+	if m.Cache == nil || m.PublicURL == nil {
+		return
+	}
+	_ = m.Cache.PurgeURLs([]string{m.PublicURL(slug)})
 }
 
 // Rename sets the human label. Empty string clears it.
@@ -176,7 +191,11 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 	if _, err := m.requireOwner(slug, owner); err != nil {
 		return err
 	}
-	return m.Repo.Delete(slug)
+	if err := m.Repo.Delete(slug); err != nil {
+		return err
+	}
+	m.purge(slug)
+	return nil
 }
 
 // Versions returns the slug's full history (newest first).

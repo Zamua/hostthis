@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Zamua/hostthis/internal/cache"
 	"github.com/Zamua/hostthis/internal/domain"
 	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/service"
@@ -62,6 +63,11 @@ func main() {
 	uploadSvc.ServiceCapBytes = *storageCap
 	manageSvc := service.NewManage(pasteRepo, blobs)
 	manageSvc.ServiceCapBytes = *storageCap
+
+	// CDN cache purger. Default is noop (no CDN in front); when CF is
+	// configured we wire it up so Update/Delete invalidate the edge
+	// cache entries for the affected slugs.
+	manageSvc.Cache = buildCachePurger(logger)
 	keyGate := service.NewKeyGate(keyGateRepo)
 	keyGate.MaxFreshKeysPerSubnet = *freshKeysLimit
 	keyGate.Window = *freshKeysWindow
@@ -80,6 +86,7 @@ func main() {
 	// production; path mode is the dev-friendly alternative documented
 	// in SPEC.md "Dev-only path mode".
 	build := buildURL(*scheme, *apexDomain, *urlMode, logger)
+	manageSvc.PublicURL = service.URLBuilder(build)
 
 	sshServer := &hostssh.Server{
 		Addr:        *sshAddr,
@@ -136,6 +143,27 @@ func main() {
 	shutdownCtx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer scancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+}
+
+// buildCachePurger reads HOSTTHIS_CACHE_BACKEND and returns the
+// configured CachePurger. Defaults to Noop (no CDN in front).
+func buildCachePurger(logger *log.Logger) service.CachePurger {
+	backend := strings.ToLower(envOr("HOSTTHIS_CACHE_BACKEND", "noop"))
+	switch backend {
+	case "", "noop":
+		return cache.Noop{}
+	case "cloudflare":
+		zone := os.Getenv("HOSTTHIS_CF_ZONE_ID")
+		token := os.Getenv("HOSTTHIS_CF_PURGE_TOKEN")
+		if zone == "" || token == "" {
+			logger.Fatalf("HOSTTHIS_CACHE_BACKEND=cloudflare requires HOSTTHIS_CF_ZONE_ID and HOSTTHIS_CF_PURGE_TOKEN")
+		}
+		logger.Printf("cache: cloudflare purger enabled for zone %s", zone)
+		return &cache.Cloudflare{ZoneID: zone, Token: token, Logger: logger}
+	default:
+		logger.Fatalf("unknown HOSTTHIS_CACHE_BACKEND %q (want noop|cloudflare)", backend)
+		return nil
+	}
 }
 
 // buildURL returns the URL emitter for a given scheme + mode + apex.

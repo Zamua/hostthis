@@ -5,8 +5,10 @@
 package service
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -21,9 +23,13 @@ type PasteRepo interface {
 	Get(domain.Slug) (domain.Paste, error)
 }
 
-// BlobStore writes and reads content-addressed bytes.
+// BlobStore writes and reads content-addressed bytes. Put streams r
+// to the backing store; size is the expected byte length (required by
+// S3-shaped backends to set Content-Length, accepted by the disk impl
+// for interface uniformity). Get returns the full bytes in memory —
+// fine at our 1 MiB-per-paste cap.
 type BlobStore interface {
-	Put(sha string, content []byte) error
+	Put(sha string, r io.Reader, size int64) error
 	Get(sha string) ([]byte, error)
 }
 
@@ -80,7 +86,7 @@ func (u *Upload) Create(body []byte, owner string, name string, typeHint string)
 	}
 	now := u.Now().UTC()
 	sha := domain.HashContent(body)
-	if err := u.Blobs.Put(sha, body); err != nil {
+	if err := u.Blobs.Put(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 		return Result{}, fmt.Errorf("blob write: %w", err)
 	}
 	p := domain.Paste{
