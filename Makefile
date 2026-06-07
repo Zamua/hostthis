@@ -93,9 +93,13 @@ VPS_HOST ?=
 VPS_PATH ?= /opt/hostthis
 VPS_USER ?= $(shell whoami)
 
-# Distroless 'nonroot' uid the container runs as. Don't change unless
-# you know why.
+# Distroless 'nonroot' uid the hostthis container runs as.
+# Don't change unless you know why.
 CONTAINER_UID ?= 65532
+
+# MinIO sidecar runs as the non-root operator user (apps on the
+# canonical deploy). Adjust if your VPS uses a different non-root uid.
+MINIO_UID ?= 1002
 
 deploy: _require-vps-host deploy-sync deploy-build deploy-restart deploy-smoke
 	@echo "deployed; check with 'make deploy-logs VPS_HOST=$(VPS_HOST)'"
@@ -115,11 +119,14 @@ smoke:
 
 # Push the local working tree to the VPS, excluding build/data artifacts.
 # Re-chowns the checkout to VPS_USER and the data dir to the container uid.
+# Also preserves deploy/vps/.env (operator-managed secrets like MinIO creds)
+# and the minio-data volume across rsyncs.
 deploy-sync: _require-vps-host
 	rsync -az --delete \
 	  --exclude='/data' --exclude='/bin' --exclude='/.git/objects' --exclude='*.log' \
+	  --exclude='/deploy/vps/data' --exclude='/deploy/vps/minio-data' --exclude='/deploy/vps/.env' \
 	  ./ $(VPS_HOST):/tmp/hostthis-staging/
-	ssh $(VPS_HOST) "sudo mkdir -p $(VPS_PATH)/data && sudo rsync -a --delete /tmp/hostthis-staging/ $(VPS_PATH)/ --exclude=/data && sudo chown -R $(VPS_USER):$(VPS_USER) $(VPS_PATH) && sudo chown -R $(CONTAINER_UID):$(CONTAINER_UID) $(VPS_PATH)/data"
+	ssh $(VPS_HOST) "sudo mkdir -p $(VPS_PATH)/data $(VPS_PATH)/deploy/vps/minio-data && sudo rsync -a --delete /tmp/hostthis-staging/ $(VPS_PATH)/ --exclude=/data --exclude=/deploy/vps/data --exclude=/deploy/vps/minio-data --exclude=/deploy/vps/.env && sudo chown -R $(VPS_USER):$(VPS_USER) $(VPS_PATH) && sudo chown -R $(CONTAINER_UID):$(CONTAINER_UID) $(VPS_PATH)/data && sudo chown -R $(MINIO_UID):$(MINIO_UID) $(VPS_PATH)/deploy/vps/minio-data"
 
 # Build the env-var prefix once. Sets the runtime config the compose
 # file reads (apex, mode, scheme) plus the absolute data path so the

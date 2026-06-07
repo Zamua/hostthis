@@ -197,6 +197,35 @@ func TestPasteRead_MarkdownETagIncludesRendererVersion(t *testing.T) {
 	}
 }
 
+func TestHealthz_ReturnsOK(t *testing.T) {
+	srv := &Server{ApexDomain: "hostthis.dev", Color: "blue"}
+	r := httptest.NewRequest("GET", "/healthz", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("status: got %d, want 200", w.Code)
+	}
+	if got := w.Body.String(); got != "ok\n" {
+		t.Errorf("body: got %q, want %q", got, "ok\n")
+	}
+	if got := w.Header().Get("X-Backend-Color"); got != "blue" {
+		t.Errorf("X-Backend-Color: got %q, want blue", got)
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control: got %q, want no-store", got)
+	}
+}
+
+func TestHealthz_NoColorWhenUnset(t *testing.T) {
+	srv := &Server{ApexDomain: "hostthis.dev"}
+	r := httptest.NewRequest("GET", "/healthz", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+	if got := w.Header().Get("X-Backend-Color"); got != "" {
+		t.Errorf("X-Backend-Color: got %q, want empty", got)
+	}
+}
+
 func TestPasteRead_IfModifiedSince304(t *testing.T) {
 	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	paste := domain.Paste{

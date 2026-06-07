@@ -104,6 +104,7 @@ func main() {
 		Blobs:       blobs,
 		LandingHTML: landing,
 		ApexDomain:  *apexDomain,
+		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),
 	}
 	httpSrv := &http.Server{
 		Addr:    *httpAddr,
