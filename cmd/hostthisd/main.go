@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -54,7 +55,7 @@ func main() {
 
 	pasteRepo := storage.NewPasteRepo(db)
 	keyGateRepo := storage.NewKeyGateRepo(db)
-	blobs, err := storage.NewBlobStore(filepath.Join(*dataDir, "blobs"))
+	blobs, blobsSweep, err := buildBlobStore(*dataDir, logger)
 	if err != nil {
 		logger.Fatalf("blob store: %v", err)
 	}
@@ -71,7 +72,7 @@ func main() {
 	keyGate := service.NewKeyGate(keyGateRepo)
 	keyGate.MaxFreshKeysPerSubnet = *freshKeysLimit
 	keyGate.Window = *freshKeysWindow
-	sweepSvc := service.NewSweep(pasteRepo, blobs, logger)
+	sweepSvc := service.NewSweep(pasteRepo, blobsSweep, logger)
 	sweepSvc.KeyGate = keyGate
 
 	logger.Printf("config: storage_cap=%d bytes, fresh_keys/subnet=%d per %s",
@@ -143,6 +144,40 @@ func main() {
 	shutdownCtx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer scancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+}
+
+// buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the
+// configured BlobStore + SweepBlobs (same type, narrowed via two
+// interfaces). The disk backend is the default; "s3" picks up an
+// S3-compatible endpoint via HOSTTHIS_S3_* env vars.
+func buildBlobStore(dataDir string, logger *log.Logger) (service.BlobStore, service.SweepBlobs, error) {
+	backend := strings.ToLower(envOr("HOSTTHIS_BLOB_BACKEND", "disk"))
+	switch backend {
+	case "", "disk":
+		bs, err := storage.NewBlobStore(filepath.Join(dataDir, "blobs"))
+		if err != nil {
+			return nil, nil, err
+		}
+		logger.Printf("blobs: disk backend at %s/blobs", dataDir)
+		return bs, bs, nil
+	case "s3":
+		cfg := storage.S3Config{
+			EndpointURL: os.Getenv("HOSTTHIS_S3_ENDPOINT"),
+			Bucket:      os.Getenv("HOSTTHIS_S3_BUCKET"),
+			Region:      envOr("HOSTTHIS_S3_REGION", "us-east-1"),
+			AccessKey:   os.Getenv("HOSTTHIS_S3_ACCESS_KEY"),
+			SecretKey:   os.Getenv("HOSTTHIS_S3_SECRET_KEY"),
+			UseSSL:      strings.ToLower(envOr("HOSTTHIS_S3_USE_SSL", "true")) != "false",
+		}
+		bs, err := storage.NewS3BlobStore(cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		logger.Printf("blobs: s3 backend at %s bucket=%s", cfg.EndpointURL, cfg.Bucket)
+		return bs, bs, nil
+	default:
+		return nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|s3)", backend)
+	}
 }
 
 // buildCachePurger reads HOSTTHIS_CACHE_BACKEND and returns the

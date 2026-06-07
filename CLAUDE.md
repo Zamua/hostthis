@@ -115,6 +115,43 @@ make docker-up     # docker compose up; same ports; data persists in ./data
 make docker-down   # tear down
 ```
 
+### Testing the S3 blob backend locally
+
+The S3-compatible backend (`HOSTTHIS_BLOB_BACKEND=s3`) is exercised by an
+integration test that needs a live S3 endpoint. The dev compose at
+`deploy/dev/docker-compose.yml` brings up a local MinIO + auto-creates
+the test bucket.
+
+```
+make dev-minio-up  # starts MinIO at :9000 (s3) + :9001 (console)
+make test-s3       # runs ./internal/storage TestS3BlobStore_RoundTrip
+make dev-minio-down  # teardown (with volume wipe)
+```
+
+The default `make test` skips this test if `MINIO_TEST_ENDPOINT` is unset,
+so CI runs that don't have Docker available don't fail.
+
+### Migrating live blobs from disk to S3
+
+Two operator binaries handle the one-way disk → S3 migration:
+
+```
+# 1. Copy blobs (idempotent: re-Putting an existing key is a no-op).
+HOSTTHIS_DATA_DIR=/path/to/data \
+HOSTTHIS_S3_ENDPOINT=https://… HOSTTHIS_S3_BUCKET=… \
+HOSTTHIS_S3_ACCESS_KEY=… HOSTTHIS_S3_SECRET_KEY=… \
+make blob-migrate
+
+# 2. Verify byte-for-byte (re-hashes every S3 object).
+make blob-verify   # exits non-zero on any mismatch / missing object
+
+# 3. Flip the env var on the deploy and restart.
+HOSTTHIS_BLOB_BACKEND=s3
+```
+
+Both binaries read the same `HOSTTHIS_S3_*` env vars hostthisd does, so
+there's no second config surface to maintain.
+
 Quick smoke from another terminal once it's live:
 
 ```
