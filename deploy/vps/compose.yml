@@ -1,88 +1,96 @@
-# Production compose for hostthis on the VPS.
+# Production compose for hostthis on the VPS — blue/green for HTTP.
 #
-# Single hostthis container + MinIO sidecar for blob storage.
-# Traefik (in the infra repo) routes hostthis.dev → this container
-# via docker labels. SSH stays on host :22 directly (traefik doesn't
-# yet handle the SSH tcp-stream entrypoint for hostthis; future work).
+# Layout:
+#   hostthis-blue   binds :22(host) for SSH + serves HTTP via traefik labels
+#   hostthis-green  HTTP only via traefik labels
+#   hostthis-minio  S3-compatible blob store (sidecar)
 #
-# Bring up:
-#   sudo docker compose -f deploy/vps/compose.yml --env-file deploy/vps/.env up -d --build
+# Both blue + green:
+#   - Mount the same /var/lib/hostthis volume (sqlite WAL + shared ssh host key)
+#   - Talk to the same minio sidecar over the docker network
+#   - Register under the SAME traefik service name → traefik load-balances + actively healthchecks
 #
-# Requires:
-#   - traefik_proxy external docker network (created by infra/traefik)
-#   - /home/admin/hostthis.env on the VPS with MinIO credentials
-#     (per .env.example in this dir)
+# SSH is bound by blue only — there's only one host :22 port. This means
+# SSH gets a brief outage during blue's restart, but HTTP (the bulk of
+# traffic) is zero-downtime. Moving SSH to traefik tcp routing for full
+# zero-downtime on the ssh path is a follow-up (see infra/TODO.md).
+#
+# Bring up via deploy/vps/deploy-rolling.sh on the VPS — it rotates one
+# color at a time, waiting for /healthz before flipping. Or to do a
+# non-rolling restart from local:
+#
+#   make deploy VPS_HOST=vps VPS_PATH=/home/apps/projects/hostthis ...
+
+x-hostthis-common: &hostthis-common
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  image: hostthis:prod
+  restart: unless-stopped
+  user: "65532:65532"
+  networks:
+    - traefik_proxy
+  volumes:
+    - "${HOSTTHIS_DATA_PATH:-./data}:/var/lib/hostthis"
+  environment: &hostthis-env
+    HOSTTHIS_URL_MODE: "${HOSTTHIS_URL_MODE:-subdomain}"
+    HOSTTHIS_PUBLIC_SCHEME: "${HOSTTHIS_PUBLIC_SCHEME:-https}"
+    HOSTTHIS_APEX_DOMAIN: "${HOSTTHIS_APEX_DOMAIN:?HOSTTHIS_APEX_DOMAIN is required}"
+    HOSTTHIS_DATA_DIR: /var/lib/hostthis
+    HOSTTHIS_LANDING: /app/web/landing.html
+    HOSTTHIS_BLOB_BACKEND: "${HOSTTHIS_BLOB_BACKEND:-disk}"
+    HOSTTHIS_S3_ENDPOINT: "${HOSTTHIS_S3_ENDPOINT:-http://minio:9000}"
+    HOSTTHIS_S3_BUCKET: "${HOSTTHIS_S3_BUCKET:-hostthis-blobs}"
+    HOSTTHIS_S3_REGION: "${HOSTTHIS_S3_REGION:-us-east-1}"
+    HOSTTHIS_S3_ACCESS_KEY: "${HOSTTHIS_S3_ACCESS_KEY:-}"
+    HOSTTHIS_S3_SECRET_KEY: "${HOSTTHIS_S3_SECRET_KEY:-}"
+    HOSTTHIS_S3_USE_SSL: "${HOSTTHIS_S3_USE_SSL:-false}"
+  labels:
+    - "traefik.enable=true"
+    - "traefik.docker.network=traefik_proxy"
+    # apex hostthis.dev
+    - "traefik.http.routers.hostthis-apex-https.rule=Host(`${HOSTTHIS_APEX_DOMAIN}`)"
+    - "traefik.http.routers.hostthis-apex-https.entryPoints=https"
+    - "traefik.http.routers.hostthis-apex-https.tls=true"
+    - "traefik.http.routers.hostthis-apex-https.service=hostthis"
+    - "traefik.http.routers.hostthis-apex-http.rule=Host(`${HOSTTHIS_APEX_DOMAIN}`)"
+    - "traefik.http.routers.hostthis-apex-http.entryPoints=http"
+    - "traefik.http.routers.hostthis-apex-http.middlewares=hostthis-redirect-https"
+    # wildcard *.hostthis.dev
+    - "traefik.http.routers.hostthis-wild-https.rule=HostRegexp(`^[a-z0-9-]+\\.hostthis\\.dev$`)"
+    - "traefik.http.routers.hostthis-wild-https.entryPoints=https"
+    - "traefik.http.routers.hostthis-wild-https.tls=true"
+    - "traefik.http.routers.hostthis-wild-https.service=hostthis"
+    - "traefik.http.routers.hostthis-wild-http.rule=HostRegexp(`^[a-z0-9-]+\\.hostthis\\.dev$`)"
+    - "traefik.http.routers.hostthis-wild-http.entryPoints=http"
+    - "traefik.http.routers.hostthis-wild-http.middlewares=hostthis-redirect-https"
+    # middlewares
+    - "traefik.http.middlewares.hostthis-redirect-https.redirectScheme.scheme=https"
+    - "traefik.http.middlewares.hostthis-redirect-https.redirectScheme.permanent=true"
+    # shared service definition + active healthcheck — load-balances across both replicas
+    - "traefik.http.services.hostthis.loadbalancer.server.port=8080"
+    - "traefik.http.services.hostthis.loadbalancer.healthCheck.path=/healthz"
+    - "traefik.http.services.hostthis.loadbalancer.healthCheck.interval=10s"
+    - "traefik.http.services.hostthis.loadbalancer.healthCheck.timeout=3s"
 
 services:
-  hostthis:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    image: hostthis:prod
-    container_name: hostthis
-    restart: unless-stopped
-    user: "65532:65532"
+  hostthis-blue:
+    <<: *hostthis-common
+    container_name: hostthis-blue
+    # Blue owns the SSH bind. Only one container can hold :22.
     ports:
-      # SSH stays on the host's :22 — traefik doesn't currently route ssh
-      # tcp-stream for hostthis. Future task.
       - "0.0.0.0:22:2222"
-    networks:
-      - traefik_proxy
-    volumes:
-      - "${HOSTTHIS_DATA_PATH:-./data}:/var/lib/hostthis"
     environment:
-      HOSTTHIS_URL_MODE: "${HOSTTHIS_URL_MODE:-subdomain}"
-      HOSTTHIS_PUBLIC_SCHEME: "${HOSTTHIS_PUBLIC_SCHEME:-https}"
-      HOSTTHIS_APEX_DOMAIN: "${HOSTTHIS_APEX_DOMAIN:?HOSTTHIS_APEX_DOMAIN is required}"
-      HOSTTHIS_DATA_DIR: /var/lib/hostthis
-      HOSTTHIS_LANDING: /app/web/landing.html
-      HOSTTHIS_BACKEND_COLOR: "${HOSTTHIS_BACKEND_COLOR:-}"
+      <<: *hostthis-env
+      HOSTTHIS_BACKEND_COLOR: blue
 
-      # Blob storage. Defaults to disk during the migration window; flip
-      # to "s3" + the HOSTTHIS_S3_* vars below once blobs are mirrored.
-      HOSTTHIS_BLOB_BACKEND: "${HOSTTHIS_BLOB_BACKEND:-disk}"
-      HOSTTHIS_S3_ENDPOINT: "${HOSTTHIS_S3_ENDPOINT:-http://minio:9000}"
-      HOSTTHIS_S3_BUCKET: "${HOSTTHIS_S3_BUCKET:-hostthis-blobs}"
-      HOSTTHIS_S3_REGION: "${HOSTTHIS_S3_REGION:-us-east-1}"
-      HOSTTHIS_S3_ACCESS_KEY: "${HOSTTHIS_S3_ACCESS_KEY:-}"
-      HOSTTHIS_S3_SECRET_KEY: "${HOSTTHIS_S3_SECRET_KEY:-}"
-      HOSTTHIS_S3_USE_SSL: "${HOSTTHIS_S3_USE_SSL:-false}"
-    labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=traefik_proxy"
+  hostthis-green:
+    <<: *hostthis-common
+    container_name: hostthis-green
+    environment:
+      <<: *hostthis-env
+      HOSTTHIS_BACKEND_COLOR: green
 
-      # apex hostthis.dev — landing + /p/* paste reads
-      - "traefik.http.routers.hostthis-apex-https.rule=Host(`${HOSTTHIS_APEX_DOMAIN}`)"
-      - "traefik.http.routers.hostthis-apex-https.entryPoints=https"
-      - "traefik.http.routers.hostthis-apex-https.tls=true"
-      - "traefik.http.routers.hostthis-apex-https.service=hostthis"
-      - "traefik.http.routers.hostthis-apex-http.rule=Host(`${HOSTTHIS_APEX_DOMAIN}`)"
-      - "traefik.http.routers.hostthis-apex-http.entryPoints=http"
-      - "traefik.http.routers.hostthis-apex-http.middlewares=hostthis-redirect-https"
-
-      # wildcard *.hostthis.dev — paste subdomain reads
-      - "traefik.http.routers.hostthis-wild-https.rule=HostRegexp(`^[a-z0-9-]+\\.hostthis\\.dev$`)"
-      - "traefik.http.routers.hostthis-wild-https.entryPoints=https"
-      - "traefik.http.routers.hostthis-wild-https.tls=true"
-      - "traefik.http.routers.hostthis-wild-https.service=hostthis"
-      - "traefik.http.routers.hostthis-wild-http.rule=HostRegexp(`^[a-z0-9-]+\\.hostthis\\.dev$`)"
-      - "traefik.http.routers.hostthis-wild-http.entryPoints=http"
-      - "traefik.http.routers.hostthis-wild-http.middlewares=hostthis-redirect-https"
-
-      # middlewares
-      - "traefik.http.middlewares.hostthis-redirect-https.redirectScheme.scheme=https"
-      - "traefik.http.middlewares.hostthis-redirect-https.redirectScheme.permanent=true"
-
-      # service definition + active healthcheck
-      - "traefik.http.services.hostthis.loadbalancer.server.port=8080"
-      - "traefik.http.services.hostthis.loadbalancer.healthCheck.path=/healthz"
-      - "traefik.http.services.hostthis.loadbalancer.healthCheck.interval=10s"
-      - "traefik.http.services.hostthis.loadbalancer.healthCheck.timeout=3s"
-
-  # MinIO sidecar — S3-compatible object store for hostthis blobs.
-  # 127.0.0.1-only for the host bindings; container-to-container
-  # traffic is on the traefik_proxy network. Bucket created manually
-  # on first boot (one-time mc command).
   minio:
     image: minio/minio:latest
     container_name: hostthis-minio
