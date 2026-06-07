@@ -137,10 +137,10 @@ DEPLOY_ENV = HOSTTHIS_APEX_DOMAIN='$(HOSTTHIS_APEX_DOMAIN)' \
              HOSTTHIS_DATA_PATH='$(VPS_PATH)/data'
 
 deploy-build: _require-vps-host _require-apex
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose -f deploy/vps/compose.yml build"
+	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose --env-file deploy/vps/.env -f deploy/vps/compose.yml build"
 
 deploy-restart: _require-vps-host _require-apex
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose -f deploy/vps/compose.yml up -d"
+	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose --env-file deploy/vps/.env -f deploy/vps/compose.yml up -d --remove-orphans"
 
 deploy-logs: _require-vps-host
 	ssh $(VPS_HOST) "sudo docker logs -f --tail 60 hostthis"
