@@ -48,11 +48,15 @@ x-hostthis-common: &hostthis-common
   labels:
     - "traefik.enable=true"
     - "traefik.docker.network=traefik_proxy"
-    # apex hostthis.dev
+    # apex hostthis.dev + wildcard *.hostthis.dev share one DNS-01 cert
+    # issued for hostthis.dev with SAN *.hostthis.dev. Using letsencrypt-dns
+    # (cloudflare provider) because TLS-ALPN-01 can't issue wildcards.
     - "traefik.http.routers.hostthis-apex-https.rule=Host(`${HOSTTHIS_APEX_DOMAIN}`)"
     - "traefik.http.routers.hostthis-apex-https.entryPoints=https"
     - "traefik.http.routers.hostthis-apex-https.tls=true"
-    - "traefik.http.routers.hostthis-apex-https.tls.certresolver=letsencrypt"
+    - "traefik.http.routers.hostthis-apex-https.tls.certresolver=letsencrypt-dns"
+    - "traefik.http.routers.hostthis-apex-https.tls.domains[0].main=${HOSTTHIS_APEX_DOMAIN}"
+    - "traefik.http.routers.hostthis-apex-https.tls.domains[0].sans=*.${HOSTTHIS_APEX_DOMAIN}"
     - "traefik.http.routers.hostthis-apex-https.service=hostthis"
     - "traefik.http.routers.hostthis-apex-http.rule=Host(`${HOSTTHIS_APEX_DOMAIN}`)"
     - "traefik.http.routers.hostthis-apex-http.entryPoints=http"
@@ -61,6 +65,9 @@ x-hostthis-common: &hostthis-common
     - "traefik.http.routers.hostthis-wild-https.rule=HostRegexp(`^[a-z0-9-]+\\.hostthis\\.dev$`)"
     - "traefik.http.routers.hostthis-wild-https.entryPoints=https"
     - "traefik.http.routers.hostthis-wild-https.tls=true"
+    - "traefik.http.routers.hostthis-wild-https.tls.certresolver=letsencrypt-dns"
+    - "traefik.http.routers.hostthis-wild-https.tls.domains[0].main=${HOSTTHIS_APEX_DOMAIN}"
+    - "traefik.http.routers.hostthis-wild-https.tls.domains[0].sans=*.${HOSTTHIS_APEX_DOMAIN}"
     - "traefik.http.routers.hostthis-wild-https.service=hostthis"
     - "traefik.http.routers.hostthis-wild-http.rule=HostRegexp(`^[a-z0-9-]+\\.hostthis\\.dev$`)"
     - "traefik.http.routers.hostthis-wild-http.entryPoints=http"
