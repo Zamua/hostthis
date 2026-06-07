@@ -1,0 +1,46 @@
+# Dev-only docker compose: stands up a local MinIO so the S3 blob
+# backend can be exercised end-to-end without paying for cloud storage.
+#
+# Usage:
+#   docker compose -f deploy/dev/docker-compose.yml up -d
+#   make test-s3                  # runs the integration test against this MinIO
+#   docker compose -f deploy/dev/docker-compose.yml down -v
+#
+# Console UI: http://localhost:9001 (admin / supersecret)
+# S3 endpoint: http://localhost:9000
+
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: hostthis-dev-minio
+    command: server --console-address :9001 /data
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: supersecret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # one-shot job that creates the test bucket so the integration test
+  # doesn't have to. Idempotent — re-running is a no-op.
+  bucket-init:
+    image: minio/mc:latest
+    container_name: hostthis-dev-bucket-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c '
+        mc alias set local http://minio:9000 admin supersecret &&
+        (mc mb --ignore-existing local/hostthis-blobs)
+      '
+
+volumes:
+  minio-data:
