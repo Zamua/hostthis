@@ -2,7 +2,7 @@
 
 ## Name
 
-**hostthis** — pipe a rendered file in, get a public URL out. No signup, no app.
+**hostthis** - pipe a rendered file in, get a public URL out. No signup, no app.
 
 ## Synopsis
 
@@ -15,15 +15,13 @@ ssh hostthis.dev                                 # show help
 
 ## Description
 
-**hostthis** publishes HTML or Markdown for 7 days at a random
-subdomain like `https://7gh3kp29.hostthis.dev`. One ssh pipe, no
-signup, no install. Useful when you want a shareable URL for a
-one-off HTML mock, a Markdown writeup, a screenshot annotation, or
-anything you need a teammate or LLM to load in a browser without
-spinning up a deploy. The URL is the secret — anyone who has it can
-view; nobody else can. Identity is your ssh public key: anyone with
-a different key can read the URL but can't update, rename, pin, or
-delete the paste.
+Publishes HTML or Markdown for 7 days at a random subdomain. One ssh
+pipe, no signup, no install. Useful when you want a shareable URL
+for a one-off HTML mock, a Markdown writeup, a screenshot
+annotation, or anything you need a teammate or LLM to load in a
+browser without spinning up a deploy. Identity is your ssh public
+key: anyone with a different key can read the URL but can't update,
+rename, pin, or delete the paste.
 
 ## Commands
 
@@ -41,10 +39,10 @@ cat foo.html | ssh hostthis.dev --type html
 ```
 
 Reads stdin, sniffs content type, prints the URL on stdout (one line,
-no trailing whitespace — pipes Just Work). Owner-only metadata
+no trailing whitespace - pipes Just Work). Owner-only metadata
 (the name label) goes on stderr.
 
-The optional `--type` flag overrides content sniffing — useful when
+The optional `--type` flag overrides content sniffing - useful when
 you're piping something like a Jinja template that confuses sniffers.
 
 ### Update an existing paste
@@ -68,7 +66,7 @@ Tab-separated rows, soonest to expire first:
 ```
 SLUG       NAME              SIZE   KIND   EXPIRES_IN  VERS
 abc12345   prototype v3      1.2k   html   6d 23h      v2
-x7y8z9q0   —                 540B   html   6d 16h      v3 (pinned, latest v5)
+x7y8z9q0   -                 540B   html   6d 16h      v3 (pinned, latest v5)
 ```
 
 The `VERS` column shows the served version + pin state.
@@ -102,12 +100,12 @@ Output:
 ```
 v4   current   2026-06-05 15:01 UTC   1.4k
 v3             2026-06-05 14:32 UTC   1.2k
-v2   deleted   2026-06-05 12:15 UTC   —
+v2   deleted   2026-06-05 12:15 UTC   -
 v1             2026-06-05 11:22 UTC   0.9k
 ```
 
-- `current` — the version the URL is serving right now.
-- `deleted` — bytes freed via `delete <slug> <ver>`; row stays as
+- `current` - the version the URL is serving right now.
+- `deleted` - bytes freed via `delete <slug> <ver>`; row stays as
   a tombstone so the version number doesn't get reused.
 
 ### Pin / unpin
@@ -122,7 +120,7 @@ Pinning lets you publish updates without changing what the URL
 serves. Useful when you want to keep a known-good version stable
 while iterating on the next one.
 
-Pinning does NOT reset the 7-day clock — only `update` does that.
+Pinning does NOT reset the 7-day clock - only `update` does that.
 
 ### Delete
 
@@ -131,7 +129,7 @@ ssh hostthis.dev delete <slug>             # wipe the entire paste
 ssh hostthis.dev delete <slug> <ver>       # tombstone just that version
 ```
 
-Whole-paste delete is permanent — no undo, the slug becomes
+Whole-paste delete is permanent - no undo, the slug becomes
 available for future random generation.
 
 Per-version delete frees the blob bytes (so they don't count against
@@ -148,7 +146,7 @@ ssh hostthis.dev whoami
 
 Prints your ssh key fingerprint + how many active pastes you own.
 Sessions without an ssh key are rejected at session startup with
-"ssh key required" on stderr — anonymous uploads aren't allowed.
+"ssh key required" on stderr - anonymous uploads aren't allowed.
 
 ### Help
 
@@ -191,12 +189,12 @@ ssh hostthis.dev delete 7gh3kp29
 
 - **10 MiB per identity** total, counting post-compression bytes
   across every active version of every active paste. HTML/Markdown
-  compresses 5–10× under zstd, so the real ceiling on raw payload is
-  much higher (typically 50–100 MiB of text).
+  compresses 5-10x under zstd, so the real ceiling on raw payload is
+  much higher (typically 50-100 MiB of text).
 - **Per-paste cap = identity cap (10 MiB compressed)**. Same number;
   a user can spend their quota as one big paste or many small ones.
 - **7-day retention** from the last `update`. Nothing renews
-  automatically — re-pipe the content (or `update` it) to extend.
+  automatically - re-pipe the content (or `update` it) to extend.
 - **Content types**: HTML and Markdown only. Binaries / images /
   zips are rejected at upload.
 - **Per-network rate limit on fresh keys**: 20 new ssh keys per
@@ -207,14 +205,14 @@ ssh hostthis.dev delete 7gh3kp29
 
 The CLI exits with conventional codes:
 
-- `0` — success
-- `1` — service error (quota exhausted, paste size cap exceeded,
+- `0` - success
+- `1` - service error (quota exhausted, paste size cap exceeded,
   service at storage capacity, unsupported content type)
-- `2` — usage error (bad args, malformed flag)
-- `3` — auth required (no ssh key offered)
-- `4` — not found / not owner (deliberately indistinguishable so
+- `2` - usage error (bad args, malformed flag)
+- `3` - auth required (no ssh key offered)
+- `4` - not found / not owner (deliberately indistinguishable so
   non-owners can't probe slug existence)
-- `6` — sybil gate (too many new keys from this network today)
+- `6` - sybil gate (too many new keys from this network today)
 
 ## Self-hosting
 
@@ -228,4 +226,4 @@ The project is open source under MIT. Patches welcome.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).

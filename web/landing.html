@@ -81,7 +81,7 @@
 </header>
 
 <h2>Name</h2>
-<div class="indent"><p>hostthis &mdash; pipe a rendered file in, get a public URL out. No signup, no app.</p></div>
+<div class="indent"><p>hostthis - pipe a rendered file in, get a public URL out. No signup, no app.</p></div>
 
 <h2>Synopsis</h2>
 <div class="indent">
@@ -93,14 +93,12 @@
 
 <h2>Description</h2>
 <div class="indent">
-<p><strong>hostthis</strong> publishes HTML or Markdown for 7 days at a random
-subdomain like <code>https://7gh3kp29.hostthis.dev</code>. One ssh pipe, no signup,
-no install. Useful when you want a shareable URL for a one-off HTML mock, a Markdown
-writeup, a screenshot annotation, or anything you need a teammate or LLM to load in
-a browser without spinning up a deploy. The URL is the secret &mdash; anyone who has
-it can view; nobody else can. Identity is your ssh public key: anyone with a
-different key can read the URL but can&rsquo;t update, rename, pin, or delete
-the paste.</p>
+<p>Publishes HTML or Markdown for 7 days at a random subdomain. One ssh pipe, no
+signup, no install. Useful when you want a shareable URL for a one-off HTML mock,
+a Markdown writeup, a screenshot annotation, or anything you need a teammate or LLM
+to load in a browser without spinning up a deploy. Identity is your ssh public key:
+anyone with a different key can read the URL but can&rsquo;t update, rename, pin, or
+delete the paste.</p>
 </div>
 
 <h2>Commands</h2>
@@ -153,8 +151,8 @@ ssh hostthis.dev delete abc12345</pre>
 <h2>Limits</h2>
 <div class="indent">
 <p>10 MiB per identity, counting post-compression bytes across every active version
-of every active paste. Highly redundant text compresses 5&ndash;10&times; under zstd,
-so the real ceiling on raw payload is typically 50&ndash;100 MiB of text.</p>
+of every active paste. Highly redundant text compresses 5-10x under zstd,
+so the real ceiling on raw payload is typically 50-100 MiB of text.</p>
 
 <p>HTML and Markdown only. 7-day retention from the last <code>update</code>.</p>
 </div>
