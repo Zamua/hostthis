@@ -136,7 +136,17 @@ deploy-build: _require-vps-host _require-apex
 	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose --env-file deploy/vps/.env -f deploy/vps/compose.yml build"
 
 deploy-restart: _require-vps-host _require-apex
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose --env-file deploy/vps/.env -f deploy/vps/compose.yml up -d --remove-orphans"
+	@# Ensure the minio sidecar + any other "non-rollable" services are
+	@# up. compose up -d is a no-op when nothing's changed but creates
+	@# new services on first run + flushes orphan removal.
+	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose --env-file deploy/vps/.env -f deploy/vps/compose.yml up -d --no-recreate --remove-orphans minio"
+	@# Roll the hostthis service: bring up a NEW container alongside
+	@# the OLD, wait ~15s for traefik to register it as healthy via
+	@# the /healthz active probe, then stop the OLD. Zero-downtime for
+	@# HTTP (traefik always has a healthy backend); SSH in-flight to
+	@# the stopping container gets TCP-reset. See infra/APP-PATTERN.md
+	@# "Deploy strategy" for the rationale.
+	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker rollout --env-file deploy/vps/.env -f deploy/vps/compose.yml --wait 15 hostthis"
 
 deploy-logs: _require-vps-host
 	ssh $(VPS_HOST) "sudo docker logs -f --tail 60 hostthis"
