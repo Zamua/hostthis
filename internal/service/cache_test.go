@@ -44,7 +44,7 @@ func TestManage_DeletePurgesURL(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	purger := &recordingPurger{}
 	manage.Cache = purger
-	manage.PublicURL = func(s domain.Slug) string { return "https://hostthis.dev/p/" + s.String() }
+	manage.PublicURL = func(s domain.Slug) string { return "https://paste.test/p/" + s.String() }
 
 	owner := "key:test-id"
 	res, err := upload.Create(bytes.NewReader(htmlBody(200)), owner, "", "")
@@ -58,7 +58,7 @@ func TestManage_DeletePurgesURL(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("purger called %d times, want 1: %v", len(calls), calls)
 	}
-	wantURL := "https://hostthis.dev/p/" + res.Paste.Slug.String()
+	wantURL := "https://paste.test/p/" + res.Paste.Slug.String()
 	if len(calls[0]) != 1 || calls[0][0] != wantURL {
 		t.Errorf("purger urls: got %v, want [%s]", calls[0], wantURL)
 	}
@@ -68,7 +68,7 @@ func TestManage_UpdatePurgesURL(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	purger := &recordingPurger{}
 	manage.Cache = purger
-	manage.PublicURL = func(s domain.Slug) string { return "https://hostthis.dev/p/" + s.String() }
+	manage.PublicURL = func(s domain.Slug) string { return "https://paste.test/p/" + s.String() }
 
 	owner := "key:test-id"
 	res, err := upload.Create(bytes.NewReader(htmlBody(200)), owner, "", "")
@@ -88,7 +88,7 @@ func TestManage_DeletePurgeErrorDoesntFailOp(t *testing.T) {
 	upload, manage, repo := newStack(t)
 	purger := &recordingPurger{failNext: true}
 	manage.Cache = purger
-	manage.PublicURL = func(s domain.Slug) string { return "https://hostthis.dev/p/" + s.String() }
+	manage.PublicURL = func(s domain.Slug) string { return "https://paste.test/p/" + s.String() }
 
 	owner := "key:test-id"
 	res, err := upload.Create(bytes.NewReader(htmlBody(200)), owner, "", "")
@@ -108,7 +108,7 @@ func TestManage_PinPurgesURL(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	purger := &recordingPurger{}
 	manage.Cache = purger
-	manage.PublicURL = func(s domain.Slug) string { return "https://hostthis.dev/p/" + s.String() }
+	manage.PublicURL = func(s domain.Slug) string { return "https://paste.test/p/" + s.String() }
 
 	owner := "key:test-id"
 	res, err := upload.Create(bytes.NewReader(htmlBody(200)), owner, "", "")
@@ -130,7 +130,7 @@ func TestManage_PinPurgesURL(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("pin should purge once, got %d calls: %v", len(calls), calls)
 	}
-	wantURL := "https://hostthis.dev/p/" + res.Paste.Slug.String()
+	wantURL := "https://paste.test/p/" + res.Paste.Slug.String()
 	if len(calls[0]) != 1 || calls[0][0] != wantURL {
 		t.Errorf("pin purger urls: got %v, want [%s]", calls[0], wantURL)
 	}
@@ -140,7 +140,7 @@ func TestManage_UnpinPurgesURL(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	purger := &recordingPurger{}
 	manage.Cache = purger
-	manage.PublicURL = func(s domain.Slug) string { return "https://hostthis.dev/p/" + s.String() }
+	manage.PublicURL = func(s domain.Slug) string { return "https://paste.test/p/" + s.String() }
 
 	owner := "key:test-id"
 	res, err := upload.Create(bytes.NewReader(htmlBody(200)), owner, "", "")

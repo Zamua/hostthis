@@ -36,6 +36,7 @@ type URLBuilder func(domain.Slug) string
 type Server struct {
 	Addr        string
 	HostKeyPath string
+	ApexDomain  string // used in user-visible messages (help text, error hints).
 	Upload      *service.Upload
 	Manage      *service.Manage
 	KeyGate     *service.KeyGate // optional; nil disables the Sybil rate limit
@@ -104,7 +105,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 	if keyedFP == "" {
 		fmt.Fprintln(sess.Stderr(), "hostthis: ssh key required.")
 		fmt.Fprintln(sess.Stderr(), "  generate one (ssh-keygen -t ed25519) and add it to ssh-agent,")
-		fmt.Fprintln(sess.Stderr(), "  or pass it on the command line: ssh -i ~/.ssh/id_ed25519 hostthis.dev")
+		fmt.Fprintf(sess.Stderr(), "  or pass it on the command line: ssh -i ~/.ssh/id_ed25519 %s\n", s.apex())
 		_ = sess.Exit(3)
 		return
 	}
@@ -197,7 +198,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 		// Unknown verb — print the error and the help, then exit nonzero.
 		// Matches what git, kubectl, etc. do.
 		fmt.Fprintf(sess.Stderr(), "hostthis: unknown command %q\n\n", first)
-		emitHelp(sess)
+		emitHelp(sess, s.apex())
 		_ = sess.Exit(2)
 	}
 }
@@ -243,8 +244,8 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 			fmt.Fprintf(sess.Stderr(),
 				"note: this paste is pinned to v%d, so the URL still serves v%d, not v%d.\n",
 				res.PinnedAt, res.PinnedAt, res.NewVer)
-			fmt.Fprintf(sess.Stderr(), "  ssh hostthis.dev unpin %s        # always serve latest\n", slug)
-			fmt.Fprintf(sess.Stderr(), "  ssh hostthis.dev pin %s %d       # serve this new version\n", slug, res.NewVer)
+			fmt.Fprintf(sess.Stderr(), "  ssh %s unpin %s        # always serve latest\n", s.apex(), slug)
+			fmt.Fprintf(sess.Stderr(), "  ssh %s pin %s %d       # serve this new version\n", s.apex(), slug, res.NewVer)
 		}
 		_ = sess.Exit(0)
 		return
@@ -569,20 +570,26 @@ func max0(n int) int {
 // -- help -------------------------------------------------------------------
 
 func (s *Server) verbHelp(sess gossh.Session) {
-	emitHelp(sess)
+	emitHelp(sess, s.apex())
 	_ = sess.Exit(0)
 }
 
-// emitHelp writes helpText to the session's stderr, translating LF
+// apex returns the configured apex domain. The binary refuses to
+// start with an empty apex (cmd/hostthisd enforces this), so this
+// is always non-empty in production. Tests that construct Server
+// directly must set ApexDomain too.
+func (s *Server) apex() string { return s.ApexDomain }
+
+// emitHelp writes the rendered help text to stderr, translating LF
 // to CRLF when the session has a PTY allocated. The PTY is in raw
 // mode on the client (it expects \r\n from the remote) and a bare
 // \n produces a "staircase" effect — the cursor advances a line but
 // doesn't return to column 0, so subsequent lines start where the
-// previous one ended. `ssh hostthis.dev` (no command, interactive
-// shell) defaults to allocating a PTY; `ssh hostthis.dev help`
-// doesn't. Same helpText, different newline handling.
-func emitHelp(sess gossh.Session) {
-	text := helpText
+// previous one ended. An interactive `ssh <apex>` (no command)
+// defaults to allocating a PTY; `ssh <apex> help` doesn't. Same
+// helpText, different newline handling.
+func emitHelp(sess gossh.Session, apex string) {
+	text := helpText(apex)
 	if _, _, hasPty := sess.Pty(); hasPty {
 		text = strings.ReplaceAll(text, "\n", "\r\n")
 		fmt.Fprint(sess.Stderr(), text, "\r\n")
@@ -591,30 +598,33 @@ func emitHelp(sess gossh.Session) {
 	fmt.Fprintln(sess.Stderr(), text)
 }
 
-const helpText = `Pipe a rendered file in, get a URL out. Pastes expire 7 days after last update.
+// helpTextTemplate is the canonical user-facing help. {{apex}}
+// placeholders are substituted at render time with the configured
+// apex domain so the help is correct under any deployment.
+const helpTextTemplate = `Pipe a rendered file in, get a URL out. Pastes expire 7 days after last update.
 
 UPLOAD
 
-    cat foo.html | ssh hostthis.dev
-    cat doc.md   | ssh hostthis.dev --name "design notes"
+    cat foo.html | ssh {{apex}}
+    cat doc.md   | ssh {{apex}} --name "design notes"
 
 UPDATE & MANAGE (owner only; ssh key authenticates)
 
-    cat foo.html | ssh hostthis.dev <slug>      replace bytes; URL stays the same
-    ssh hostthis.dev list                       all your active pastes
-    ssh hostthis.dev show <slug>                read content back
-    ssh hostthis.dev rename <slug> "label"      set / change owner label
-    ssh hostthis.dev delete <slug>              wipe the paste entirely
-    ssh hostthis.dev delete <slug> <ver>        free one version's bytes (tombstone)
-    ssh hostthis.dev whoami                     show your identity + active count
+    cat foo.html | ssh {{apex}} <slug>      replace bytes; URL stays the same
+    ssh {{apex}} list                       all your active pastes
+    ssh {{apex}} show <slug>                read content back
+    ssh {{apex}} rename <slug> "label"      set / change owner label
+    ssh {{apex}} delete <slug>              wipe the paste entirely
+    ssh {{apex}} delete <slug> <ver>        free one version's bytes (tombstone)
+    ssh {{apex}} whoami                     show your identity + active count
 
 VERSION HISTORY
 
     Each ` + "`update`" + ` adds a new version (v2, v3, ...). Default URL serves the latest.
 
-    ssh hostthis.dev versions <slug>            timeline of every version
-    ssh hostthis.dev pin <slug> <ver>           stick URL to <ver> (survives updates)
-    ssh hostthis.dev unpin <slug>               URL follows latest again
+    ssh {{apex}} versions <slug>            timeline of every version
+    ssh {{apex}} pin <slug> <ver>           stick URL to <ver> (survives updates)
+    ssh {{apex}} unpin <slug>               URL follows latest again
 
 LIMITS
 
@@ -624,6 +634,12 @@ LIMITS
     lot of content under the cap.
 
     Content types: HTML, Markdown. Anything else rejected at upload.`
+
+// helpText returns the rendered help with apex substituted in.
+// Caller must pass a non-empty apex.
+func helpText(apex string) string {
+	return strings.ReplaceAll(helpTextTemplate, "{{apex}}", apex)
+}
 
 // -- helpers ----------------------------------------------------------------
 

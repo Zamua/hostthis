@@ -1,4 +1,15 @@
-# Production compose for hostthis on the VPS.
+# Reference compose file for running hostthis behind traefik on a VPS.
+# Copy this to YOUR deploy location + customize via your .env. The
+# only operator inputs are the env vars referenced below:
+#
+#   HOSTTHIS_APEX_DOMAIN        public domain (e.g. paste.example.com)
+#   HOSTTHIS_APEX_DOMAIN_REGEX  same domain, regex-escaped for the
+#                                wildcard router (e.g. paste\.example\.com)
+#   HOSTTHIS_S3_*               blob storage credentials
+#   MINIO_ROOT_USER / _PASSWORD  if you also run the minio sidecar here
+#   (others — see env block below)
+#
+# Original compose for hostthis on the operator's VPS.
 #
 # Single hostthis container in steady state; rolling deploy via the
 # docker-rollout plugin brings up a NEW container alongside, waits
@@ -76,14 +87,14 @@ services:
       - "traefik.http.routers.hostthis-apex-http.entryPoints=http"
       - "traefik.http.routers.hostthis-apex-http.middlewares=hostthis-redirect-https"
       # wildcard *.hostthis.dev
-      - "traefik.http.routers.hostthis-wild-https.rule=HostRegexp(`^[a-z0-9-]+\\.hostthis\\.dev$`)"
+      - "traefik.http.routers.hostthis-wild-https.rule=HostRegexp(`^[a-z0-9-]+\\.${HOSTTHIS_APEX_DOMAIN_REGEX}$`)"
       - "traefik.http.routers.hostthis-wild-https.entryPoints=https"
       - "traefik.http.routers.hostthis-wild-https.tls=true"
       - "traefik.http.routers.hostthis-wild-https.tls.certresolver=letsencrypt-dns"
       - "traefik.http.routers.hostthis-wild-https.tls.domains[0].main=${HOSTTHIS_APEX_DOMAIN}"
       - "traefik.http.routers.hostthis-wild-https.tls.domains[0].sans=*.${HOSTTHIS_APEX_DOMAIN}"
       - "traefik.http.routers.hostthis-wild-https.service=hostthis"
-      - "traefik.http.routers.hostthis-wild-http.rule=HostRegexp(`^[a-z0-9-]+\\.hostthis\\.dev$`)"
+      - "traefik.http.routers.hostthis-wild-http.rule=HostRegexp(`^[a-z0-9-]+\\.${HOSTTHIS_APEX_DOMAIN_REGEX}$`)"
       - "traefik.http.routers.hostthis-wild-http.entryPoints=http"
       - "traefik.http.routers.hostthis-wild-http.middlewares=hostthis-redirect-https"
       # middlewares
