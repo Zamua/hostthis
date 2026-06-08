@@ -22,7 +22,8 @@ type Paste struct {
 	ContentSHA    string      // sha256 of the currently-served bytes
 	Size          int         // bytes (currently-served)
 	Name          string      // optional owner-set label; empty when unset
-	PinnedVersion int         // which ver_num is currently served
+	PinnedVersion int         // explicit pin; 0 means unpinned (follow latest)
+	LatestVersion int         // MAX(ver_num) — what an `update` would advance from; 0 if not loaded
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 	ExpiresAt     time.Time // UpdatedAt + RetentionWindow; only `update` moves it

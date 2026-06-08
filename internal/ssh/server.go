@@ -257,11 +257,28 @@ func (s *Server) verbList(sess gossh.Session, owner string) {
 		if name == "" {
 			name = "—"
 		}
-		fmt.Fprintf(sess, "%s\t%s\t%s\t%s\t%s\tv%d\n",
+		fmt.Fprintf(sess, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.Slug, name, humanBytes(p.Size), p.Kind,
-			humanDuration(p.ExpiresAt.Sub(now)), p.PinnedVersion)
+			humanDuration(p.ExpiresAt.Sub(now)), renderVersCol(p))
 	}
 	_ = sess.Exit(0)
+}
+
+// renderVersCol renders the VERS column for `list`. Three states per spec:
+//
+//	unpinned                       → "v<latest>"
+//	pinned, pin == latest          → "v<latest> (pinned)"
+//	pinned, pin <  latest          → "v<pin> (pinned, latest v<latest>)"
+//
+// LatestVersion comes from MAX(ver_num); always >= 1 for active pastes.
+func renderVersCol(p domain.Paste) string {
+	if p.PinnedVersion == 0 {
+		return fmt.Sprintf("v%d", p.LatestVersion)
+	}
+	if p.PinnedVersion >= p.LatestVersion {
+		return fmt.Sprintf("v%d (pinned)", p.PinnedVersion)
+	}
+	return fmt.Sprintf("v%d (pinned, latest v%d)", p.PinnedVersion, p.LatestVersion)
 }
 
 // -- show -------------------------------------------------------------------
