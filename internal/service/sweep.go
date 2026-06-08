@@ -110,6 +110,27 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 	for _, sha := range refs {
 		refSet[sha] = struct{}{}
 	}
+	// Belt-and-suspenders DATA-LOSS guard: if the repo says zero shas
+	// are referenced AND we didn't just delete any pastes (so an
+	// empty referenced set isn't the expected after-effect of an
+	// expiry pass) AND the blob store has blobs in it, something is
+	// broken (buggy repo impl, schema misalignment, partial-restore).
+	// Treating every blob as orphan and deleting them all is exactly
+	// the 2026-06-08 incident we never want to repeat. Sample the
+	// blob count first; abort the GC pass if pathological. The cost
+	// of refusing in a legit "user deleted their last paste, no new
+	// uploads" edge case is leaving one orphan blob until the next
+	// upload — strictly better than nuking the bucket.
+	if len(refSet) == 0 && pastesDeleted == 0 {
+		blobCount := 0
+		if walkErr := s.Blobs.WalkBlobs(func(sha string) error { blobCount++; return nil }); walkErr != nil {
+			return pastesDeleted, 0, fmt.Errorf("walk blobs (guard): %w", walkErr)
+		}
+		if blobCount > 0 {
+			s.Logger.Printf("sweep: ABORTING blob GC — repo reports 0 referenced shas, no pastes were swept this tick, but blob store has %d objects; suspected repo bug. No blobs deleted.", blobCount)
+			return pastesDeleted, 0, nil
+		}
+	}
 	walkErr := s.Blobs.WalkBlobs(func(sha string) error {
 		if _, ok := refSet[sha]; ok {
 			return nil
