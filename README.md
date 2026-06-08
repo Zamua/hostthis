@@ -21,22 +21,9 @@ signup, no install. Useful when you want a shareable URL for a
 one-off HTML mock, a Markdown writeup, a screenshot annotation, or
 anything you need a teammate or LLM to load in a browser without
 spinning up a deploy. The URL is the secret — anyone who has it can
-view; nobody else can.
-
-Identity is your ssh public key. Anyone with a different key sees
-your paste at the URL like everyone else does, but can't `update`,
-`rename`, `pin`, or `delete` it — those verbs are owner-only and
-authenticated by the same key you used at upload time.
-
-### When NOT to use it
-
-- Anything that needs to outlast a week. Pastes are deleted 7 days
-  after the last update — that's the entire product. If you want
-  permanent hosting, use GitHub Pages / Vercel / Netlify.
-- Anything sensitive. The URL is the access control. Anyone you
-  share the URL with can read; anyone who guesses an 8-char slug can
-  read. The slug space is huge but not infinite — don't host secrets.
-- Binary files / arbitrary blobs. Only HTML and Markdown are accepted.
+view; nobody else can. Identity is your ssh public key: anyone with
+a different key can read the URL but can't update, rename, pin, or
+delete the paste.
 
 ## Commands
 
