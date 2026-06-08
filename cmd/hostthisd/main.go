@@ -31,7 +31,7 @@ func main() {
 		dataDir        = flag.String("data-dir", envOr("HOSTTHIS_DATA_DIR", "./data"), "where sqlite + blobs live")
 		sshAddr        = flag.String("ssh-addr", envOr("HOSTTHIS_SSH_ADDR", ":2222"), "ssh listen address")
 		httpAddr       = flag.String("http-addr", envOr("HOSTTHIS_HTTP_ADDR", ":8080"), "http listen address")
-		apexDomain     = flag.String("apex-domain", envOr("HOSTTHIS_APEX_DOMAIN", "hostthis.dev"), "public apex (for URL emission)")
+		apexDomain     = flag.String("apex-domain", os.Getenv("HOSTTHIS_APEX_DOMAIN"), "public apex (required; e.g. paste.example.com)")
 		urlMode        = flag.String("mode", envOr("HOSTTHIS_URL_MODE", "path"), "url mode: subdomain (prod) | path (dev)")
 		scheme         = flag.String("scheme", envOr("HOSTTHIS_PUBLIC_SCHEME", "https"), "public URL scheme (https for prod, http for local dev)")
 		landingPath    = flag.String("landing", envOr("HOSTTHIS_LANDING", "web/landing.html"), "path to apex landing HTML")
@@ -42,6 +42,10 @@ func main() {
 	flag.Parse()
 
 	logger := log.New(os.Stderr, "hostthis ", log.LstdFlags|log.LUTC)
+
+	if *apexDomain == "" {
+		logger.Fatalf("--apex-domain is required (or set HOSTTHIS_APEX_DOMAIN). Pass the public domain hostthis serves on, e.g. paste.example.com.")
+	}
 
 	metadata, err := buildMetadata(*dataDir, logger)
 	if err != nil {
@@ -95,6 +99,12 @@ func main() {
 	if err != nil {
 		logger.Printf("warn: landing not loaded from %q: %v (apex will serve a stub)", *landingPath, err)
 	}
+	// Substitute the apex placeholder so the landing page tells visitors
+	// to ssh to the actual configured domain. The template ships with
+	// `{{APEX}}` everywhere a hostname appears (e.g. `ssh {{APEX}} list`).
+	if len(landing) > 0 {
+		landing = []byte(strings.ReplaceAll(string(landing), "{{APEX}}", *apexDomain))
+	}
 
 	// URL builder picks based on mode. Subdomain mode is required for
 	// production; path mode is the dev-friendly alternative documented
@@ -105,6 +115,7 @@ func main() {
 	sshServer := &hostssh.Server{
 		Addr:        *sshAddr,
 		HostKeyPath: filepath.Join(*dataDir, "ssh_host_ed25519_key"),
+		ApexDomain:  *apexDomain,
 		Upload:      uploadSvc,
 		Manage:      manageSvc,
 		KeyGate:     keyGate,

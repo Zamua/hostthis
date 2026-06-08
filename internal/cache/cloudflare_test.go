@@ -28,7 +28,7 @@ func TestCloudflare_PurgeURLs_Success(t *testing.T) {
 			Transport: redirectTransport{base: srv.URL},
 		},
 	}
-	if err := c.PurgeURLs([]string{"https://hostthis.dev/p/abc", "https://abc.hostthis.dev/"}); err != nil {
+	if err := c.PurgeURLs([]string{"https://paste.test/p/abc", "https://abc.paste.test/"}); err != nil {
 		t.Fatalf("PurgeURLs returned %v, want nil", err)
 	}
 	if gotAuth != "Bearer tok-456" {
@@ -43,7 +43,7 @@ func TestCloudflare_PurgeURLs_Success(t *testing.T) {
 	if err := json.Unmarshal([]byte(gotBody), &parsed); err != nil {
 		t.Fatalf("body unmarshal: %v", err)
 	}
-	if len(parsed.Files) != 2 || parsed.Files[0] != "https://hostthis.dev/p/abc" {
+	if len(parsed.Files) != 2 || parsed.Files[0] != "https://paste.test/p/abc" {
 		t.Errorf("body files: got %v", parsed.Files)
 	}
 }
@@ -64,7 +64,7 @@ func TestCloudflare_PurgeURLs_Non2xx(t *testing.T) {
 			Transport: redirectTransport{base: srv.URL},
 		},
 	}
-	err := c.PurgeURLs([]string{"https://hostthis.dev/p/abc"})
+	err := c.PurgeURLs([]string{"https://paste.test/p/abc"})
 	if err == nil {
 		t.Fatal("expected error on 403, got nil")
 	}

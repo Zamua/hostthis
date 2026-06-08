@@ -25,27 +25,27 @@ type stubBlobReader struct{ body []byte }
 func (s stubBlobReader) Get(sha string) ([]byte, error) { return s.body, nil }
 
 func TestSlugFromHost(t *testing.T) {
-	s := &Server{ApexDomain: "hostthis.dev"}
+	s := &Server{ApexDomain: "paste.test"}
 	cases := []struct {
 		host    string
 		want    string // empty when expected ok=false
 		wantOK  bool
 	}{
-		{"abc23456.hostthis.dev", "abc23456", true},
-		{"abc23456.hostthis.dev:443", "abc23456", true},
-		{"hostthis.dev", "", false},
-		{"hostthis.dev:443", "", false},
+		{"abc23456.paste.test", "abc23456", true},
+		{"abc23456.paste.test:443", "abc23456", true},
+		{"paste.test", "", false},
+		{"paste.test:443", "", false},
 		// Multi-level subdomain — ignored.
-		{"foo.abc23456.hostthis.dev", "", false},
+		{"foo.abc23456.paste.test", "", false},
 		// Wrong apex — ignored.
 		{"abc23456.example.com", "", false},
 		// Slug too short — fails ParseSlug.
-		{"abc.hostthis.dev", "", false},
+		{"abc.paste.test", "", false},
 		// Slug uses uppercase — fails ParseSlug.
-		{"ABC23456.hostthis.dev", "", false},
+		{"ABC23456.paste.test", "", false},
 		// Reserved-ish but valid slug shape — accepted (apex landing
 		// blocks reserved by never generating them, not by Host check).
-		{"abcdefgh.hostthis.dev", "abcdefgh", true},
+		{"abcdefgh.paste.test", "abcdefgh", true},
 	}
 	for _, c := range cases {
 		t.Run(c.host, func(t *testing.T) {
@@ -74,7 +74,7 @@ func TestSlugFromHost_NoApexConfigured(t *testing.T) {
 // request gets a 60 KB HTML response and the loading indicator
 // hangs.
 func TestSubdomain_OnlyServesRoot(t *testing.T) {
-	srv := &Server{ApexDomain: "hostthis.dev"}
+	srv := &Server{ApexDomain: "paste.test"}
 	mux := srv.Handler()
 
 	// "/" on a slug subdomain — would call servePasteSlug. We don't
@@ -83,7 +83,7 @@ func TestSubdomain_OnlyServesRoot(t *testing.T) {
 
 	// /favicon.ico on a slug subdomain → must be 404.
 	r := httptest.NewRequest("GET", "/favicon.ico", nil)
-	r.Host = "abc23456.hostthis.dev"
+	r.Host = "abc23456.paste.test"
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 	if w.Code != 404 {
@@ -93,7 +93,7 @@ func TestSubdomain_OnlyServesRoot(t *testing.T) {
 	// /anything else on slug subdomain → 404.
 	for _, path := range []string{"/style.css", "/wp-login.php", "/p/abc23456", "/foo/bar"} {
 		r := httptest.NewRequest("GET", path, nil)
-		r.Host = "abc23456.hostthis.dev"
+		r.Host = "abc23456.paste.test"
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, r)
 		if w.Code != 404 {
@@ -119,7 +119,7 @@ func TestPasteRead_CacheHeaders(t *testing.T) {
 	srv := &Server{
 		Pastes:     stubPasteReader{p: paste},
 		Blobs:      stubBlobReader{body: body},
-		ApexDomain: "hostthis.dev",
+		ApexDomain: "paste.test",
 		Now:        func() time.Time { return updatedAt.Add(time.Hour) },
 	}
 	r := httptest.NewRequest("GET", "/p/abc23456", nil)
@@ -153,7 +153,7 @@ func TestPasteRead_IfNoneMatch304(t *testing.T) {
 	srv := &Server{
 		Pastes:     stubPasteReader{p: paste},
 		Blobs:      stubBlobReader{body: []byte("body")},
-		ApexDomain: "hostthis.dev",
+		ApexDomain: "paste.test",
 		Now:        func() time.Time { return updatedAt.Add(time.Hour) },
 	}
 	r := httptest.NewRequest("GET", "/p/abc23456", nil)
@@ -181,7 +181,7 @@ func TestPasteRead_MarkdownETagIncludesRendererVersion(t *testing.T) {
 	srv := &Server{
 		Pastes:     stubPasteReader{p: paste},
 		Blobs:      stubBlobReader{body: []byte("# hi")},
-		ApexDomain: "hostthis.dev",
+		ApexDomain: "paste.test",
 		Now:        func() time.Time { return updatedAt.Add(time.Hour) },
 	}
 	r := httptest.NewRequest("GET", "/p/abc23456", nil)
@@ -198,7 +198,7 @@ func TestPasteRead_MarkdownETagIncludesRendererVersion(t *testing.T) {
 }
 
 func TestHealthz_ReturnsOK(t *testing.T) {
-	srv := &Server{ApexDomain: "hostthis.dev", Color: "blue"}
+	srv := &Server{ApexDomain: "paste.test", Color: "blue"}
 	r := httptest.NewRequest("GET", "/healthz", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
@@ -217,7 +217,7 @@ func TestHealthz_ReturnsOK(t *testing.T) {
 }
 
 func TestHealthz_NoColorWhenUnset(t *testing.T) {
-	srv := &Server{ApexDomain: "hostthis.dev"}
+	srv := &Server{ApexDomain: "paste.test"}
 	r := httptest.NewRequest("GET", "/healthz", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
@@ -238,7 +238,7 @@ func TestPasteRead_IfModifiedSince304(t *testing.T) {
 	srv := &Server{
 		Pastes:     stubPasteReader{p: paste},
 		Blobs:      stubBlobReader{body: []byte("body")},
-		ApexDomain: "hostthis.dev",
+		ApexDomain: "paste.test",
 		Now:        func() time.Time { return updatedAt.Add(time.Hour) },
 	}
 	r := httptest.NewRequest("GET", "/p/abc23456", nil)

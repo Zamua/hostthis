@@ -107,9 +107,10 @@ func startStack(t *testing.T) *stack {
 	_ = l.Close()
 
 	sshSrv := &hostssh.Server{
-		Addr:   addr,
-		Upload: upload,
-		Manage: manage,
+		Addr:       addr,
+		ApexDomain: "paste.test",
+		Upload:     upload,
+		Manage:     manage,
 		BuildURL: func(s domain.Slug) string {
 			return httpSrv.URL + "/p/" + s.String()
 		},

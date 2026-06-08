@@ -85,13 +85,13 @@ func TestMarkdown_StripsOnclickHandlers(t *testing.T) {
 }
 
 func TestMarkdown_PreservesSafeLink(t *testing.T) {
-	src := []byte(`See [hostthis](https://hostthis.dev/).`)
+	src := []byte(`See [hostthis](https://paste.test/).`)
 	out, err := Markdown(src)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(out)
-	if !strings.Contains(s, `href="https://hostthis.dev/"`) {
+	if !strings.Contains(s, `href="https://paste.test/"`) {
 		t.Fatalf("safe link missing: %s", s)
 	}
 }

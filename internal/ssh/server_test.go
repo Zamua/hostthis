@@ -53,8 +53,9 @@ func TestUploadAndServe(t *testing.T) {
 	_ = sshListener.Close() // gliderlabs opens its own listener; we just wanted the port
 
 	sshSrv := &hostssh.Server{
-		Addr:   sshAddr,
-		Upload: upload,
+		Addr:       sshAddr,
+		ApexDomain: "paste.test",
+		Upload:     upload,
 		BuildURL: func(s domain.Slug) string {
 			// Build the URL pointing at the httptest server we just stood
 			// up, in path-mode shape (`/p/<slug>`). This is what the
@@ -108,7 +109,7 @@ func TestUploadAndServe(t *testing.T) {
 	sess.Stdout = &stdout
 	sess.Stderr = &stderr
 
-	// Empty command = upload. Matches "cat foo | ssh hostthis.dev" exactly.
+	// Empty command = upload. Matches "cat foo | ssh paste.test" exactly.
 	if err := sess.Run(""); err != nil {
 		t.Fatalf("ssh run: %v\nstderr: %s", err, stderr.String())
 	}
