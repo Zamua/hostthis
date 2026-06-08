@@ -15,31 +15,18 @@ ssh hostthis.dev                                 # show help
 
 ## Description
 
-**hostthis** publishes HTML or Markdown for 7 days at a random subdomain
-like `https://7gh3kp29.hostthis.dev`. The workflow is a single ssh pipe —
-no account, no install, nothing to remember between sessions besides
-the URL you got back.
-
-The slug is the URL. The URL is the secret (8 random chars,
-~10<sup>12</sup> combos). Share it with whoever you want; treat it
-like a private link. There's no password gate, no view counter, no
-analytics.
+**hostthis** publishes HTML or Markdown for 7 days at a random
+subdomain like `https://7gh3kp29.hostthis.dev`. One ssh pipe, no
+signup, no install. Useful when you want a shareable URL for a
+one-off HTML mock, a Markdown writeup, a screenshot annotation, or
+anything you need a teammate or LLM to load in a browser without
+spinning up a deploy. The URL is the secret — anyone who has it can
+view; nobody else can.
 
 Identity is your ssh public key. Anyone with a different key sees
 your paste at the URL like everyone else does, but can't `update`,
 `rename`, `pin`, or `delete` it — those verbs are owner-only and
 authenticated by the same key you used at upload time.
-
-### When to use it
-
-- Sharing a one-off HTML demo, design mock, or screenshot annotation
-  with a teammate or client.
-- Publishing notes / a writeup at a temp URL during an incident or
-  brainstorm.
-- Posting a rendered Markdown doc to a chat channel that doesn't
-  render Markdown inline (`cat doc.md | ssh hostthis.dev`).
-- Sending an LLM a one-off HTML page and getting back a stable URL
-  it can reference.
 
 ### When NOT to use it
 
