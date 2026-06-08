@@ -133,12 +133,17 @@ func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	if owner == "" {
 		return nil, nil
 	}
+	// Subquery computes MAX(ver_num) per paste so `list` can show "latest
+	// vN" alongside the served version. The N+1 query alternative would
+	// have been simpler but the active-pastes-per-owner count is small
+	// enough that one join in one statement is the right shape.
 	rows, err := r.db.Query(`
-		SELECT slug, identity, kind, content_sha, size, name,
-		       pinned_version,
-		       created_at, updated_at, expires_at
-		FROM pastes WHERE identity = ?
-		ORDER BY expires_at ASC
+		SELECT p.slug, p.identity, p.kind, p.content_sha, p.size, p.name,
+		       p.pinned_version,
+		       p.created_at, p.updated_at, p.expires_at,
+		       COALESCE((SELECT MAX(ver_num) FROM versions v WHERE v.slug = p.slug), 1) AS latest_version
+		FROM pastes p WHERE p.identity = ?
+		ORDER BY p.expires_at ASC
 	`, owner)
 	if err != nil {
 		return nil, fmt.Errorf("list by owner: %w", err)
@@ -146,7 +151,7 @@ func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	defer rows.Close()
 	var out []domain.Paste
 	for rows.Next() {
-		p, err := scanPaste(rows)
+		p, err := scanPasteWithLatest(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -463,6 +468,29 @@ func scanPaste(s scanner) (domain.Paste, error) {
 			return domain.Paste{}, ErrNotFound
 		}
 		return domain.Paste{}, fmt.Errorf("scan paste: %w", err)
+	}
+	p.Slug = domain.Slug(slugStr)
+	p.Identity = domain.Identity(identStr)
+	p.Kind = domain.ContentKind(kind)
+	p.CreatedAt = parseTime(created)
+	p.UpdatedAt = parseTime(updated)
+	p.ExpiresAt = parseTime(expires)
+	return p, nil
+}
+
+// scanPasteWithLatest is scanPaste plus the latest_version column. Used
+// by ListByOwner; one extra COALESCE'd subquery in the SELECT.
+func scanPasteWithLatest(s scanner) (domain.Paste, error) {
+	var p domain.Paste
+	var slugStr, identStr, kind, created, updated, expires string
+	if err := s.Scan(&slugStr, &identStr, &kind, &p.ContentSHA, &p.Size, &p.Name,
+		&p.PinnedVersion,
+		&created, &updated, &expires,
+		&p.LatestVersion); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Paste{}, ErrNotFound
+		}
+		return domain.Paste{}, fmt.Errorf("scan paste with latest: %w", err)
 	}
 	p.Slug = domain.Slug(slugStr)
 	p.Identity = domain.Identity(identStr)

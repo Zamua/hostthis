@@ -103,6 +103,68 @@ func TestManage_DeletePurgeErrorDoesntFailOp(t *testing.T) {
 	}
 }
 
+func TestManage_PinPurgesURL(t *testing.T) {
+	upload, manage, _ := newStack(t)
+	purger := &recordingPurger{}
+	manage.Cache = purger
+	manage.PublicURL = func(s domain.Slug) string { return "https://hostthis.dev/p/" + s.String() }
+
+	owner := "key:test-id"
+	res, err := upload.Create(htmlBody(200), owner, "", "")
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if _, err := manage.Update(res.Paste.Slug, owner, htmlBody(300), ""); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	// Update purged once. Reset to focus on Pin's behavior.
+	purger.mu.Lock()
+	purger.urls = nil
+	purger.mu.Unlock()
+
+	if _, err := manage.Pin(res.Paste.Slug, owner, 1); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	calls := purger.calls()
+	if len(calls) != 1 {
+		t.Fatalf("pin should purge once, got %d calls: %v", len(calls), calls)
+	}
+	wantURL := "https://hostthis.dev/p/" + res.Paste.Slug.String()
+	if len(calls[0]) != 1 || calls[0][0] != wantURL {
+		t.Errorf("pin purger urls: got %v, want [%s]", calls[0], wantURL)
+	}
+}
+
+func TestManage_UnpinPurgesURL(t *testing.T) {
+	upload, manage, _ := newStack(t)
+	purger := &recordingPurger{}
+	manage.Cache = purger
+	manage.PublicURL = func(s domain.Slug) string { return "https://hostthis.dev/p/" + s.String() }
+
+	owner := "key:test-id"
+	res, err := upload.Create(htmlBody(200), owner, "", "")
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if _, err := manage.Update(res.Paste.Slug, owner, htmlBody(300), ""); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if _, err := manage.Pin(res.Paste.Slug, owner, 1); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	purger.mu.Lock()
+	purger.urls = nil
+	purger.mu.Unlock()
+
+	if err := manage.Unpin(res.Paste.Slug, owner); err != nil {
+		t.Fatalf("unpin: %v", err)
+	}
+	calls := purger.calls()
+	if len(calls) != 1 {
+		t.Fatalf("unpin should purge once, got %d calls: %v", len(calls), calls)
+	}
+}
+
 func TestManage_NoCacheConfiguredIsFine(t *testing.T) {
 	// Cache and PublicURL left nil — the default. Delete must still work.
 	upload, manage, _ := newStack(t)

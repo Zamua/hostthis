@@ -255,11 +255,22 @@ ssh hostthis.dev list
 SLUG       NAME                  SIZE    KIND      EXPIRES_IN   VERS
 abc12345   Acme prototype v3     1.2k    html      6d22h        v2
 x7y8z9q0   —                      540B   markdown  6d16h        v1
-mnop4567   Onboarding email      3.8k    html      5d6h         v1
+mnop4567   Onboarding email      3.8k    html      5d6h         v3 (pinned, latest v5)
+zwy11122   —                     800B    html      4d12h        v3 (pinned)
 ```
 Sorted by expiry asc (soonest-to-die first, so you notice things about
 to disappear). `NAME` column shows the user-supplied label or `—` if
 none. Output is tab-separated for easy `awk`-ing.
+
+The `VERS` column reports the version the URL currently serves:
+
+- **Unpinned (default)**: bare `v<N>` where N = `MAX(ver_num)`, the
+  same version every `update` advances.
+- **Pinned to the latest version**: `v<N> (pinned)` — the pin matches
+  the latest, so behavior matches unpinned but the pin is still set.
+- **Pinned to an older version**: `v<served> (pinned, latest v<max>)` —
+  surfaces both the served and the latest in one column so the owner
+  can spot stale-pin situations at a glance.
 
 When the user has zero active pastes, the command prints a single
 `no active pastes` line to stderr and exits 0.
@@ -588,9 +599,20 @@ hammer.
 
 ### Active invalidation: CachePurger interface
 
-When a paste is updated or deleted, the cached version at the CDN edge
-becomes stale. hostthis fires a purge call to drop the entry so the
-next reader fetches fresh from origin.
+When the bytes served at a paste's URL change, the cached version at
+the CDN edge (and in browsers) becomes stale. hostthis fires a purge
+call so the next reader fetches fresh from origin.
+
+Operations that fire a purge:
+- `update` — content for the latest version changes.
+- `delete` — URL should return 404, not the cached body.
+- `pin` — the served version changes (e.g. pinning v1 hides v2 again).
+- `unpin` — when a pin was holding the URL on an older version,
+  unpinning re-exposes the latest; without a purge the old pinned
+  bytes stick until max-age expires.
+
+`rename` does NOT purge — the name is owner-only metadata, not part of
+the public response. Same with `versions`/`list`/`whoami`/`show`.
 
 The interface lives in the service layer; no production code knows
 which CDN is in front (or that one is in front at all):

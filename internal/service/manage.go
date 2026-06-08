@@ -223,6 +223,11 @@ func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version
 	if err := m.Repo.SetPinnedVersion(slug, ver); err != nil {
 		return domain.Version{}, err
 	}
+	// Pin changes the bytes served at the URL — must purge CDN/browser caches
+	// or stale content lingers until the 1h max-age expires. Without this,
+	// pinning to an older version "doesn't take effect" from the user's
+	// perspective until they hard-refresh.
+	m.purge(slug)
 	return ver, nil
 }
 
@@ -233,7 +238,13 @@ func (m *Manage) Unpin(slug domain.Slug, owner string) error {
 	if _, err := m.requireOwner(slug, owner); err != nil {
 		return err
 	}
-	return m.Repo.Unpin(slug)
+	if err := m.Repo.Unpin(slug); err != nil {
+		return err
+	}
+	// Unpin can change the served version (pin was older → unpin reveals
+	// latest). Always purge to be safe.
+	m.purge(slug)
+	return nil
 }
 
 // Whoami returns the per-owner summary used by the `whoami` verb.
