@@ -1,9 +1,9 @@
 package service
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 	"unicode/utf8"
 
@@ -120,34 +120,32 @@ type UpdateResult struct {
 // version, the pin holds and the new version is recorded but not
 // served — the SSH layer prints a note pointing at `unpin` or
 // `pin <new ver>`.
-func (m *Manage) Update(slug domain.Slug, owner string, body []byte, typeHint string) (UpdateResult, error) {
-	if len(body) == 0 {
-		return UpdateResult{}, errors.New("empty upload")
-	}
-	if len(body) > domain.HardRawByteCap {
+func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint string) (UpdateResult, error) {
+	staged, err := streamUpload(body)
+	switch {
+	case errors.Is(err, errRawCapExceeded):
 		return UpdateResult{}, ErrRawTooLarge
+	case errors.Is(err, errCompressedCapExceeded):
+		return UpdateResult{}, ErrCompressedTooLarge
+	case err != nil:
+		return UpdateResult{}, fmt.Errorf("staging: %w", err)
 	}
-	csize, err := compressedSize(body)
-	if err != nil {
-		return UpdateResult{}, fmt.Errorf("compressed-size check: %w", err)
-	}
-	if csize > domain.MaxPasteBytes {
-		return UpdateResult{}, fmt.Errorf("%w (your bytes compress to %d)", ErrCompressedTooLarge, csize)
+	if staged.RawSize == 0 {
+		return UpdateResult{}, errors.New("empty upload")
 	}
 	existing, err := m.requireOwner(slug, owner)
 	if err != nil {
 		return UpdateResult{}, err
 	}
-	kind, err := domain.DetectKind(body, typeHint)
+	kind, err := domain.DetectKind(staged.Prefix, typeHint)
 	if err != nil {
 		return UpdateResult{}, err
 	}
 	now := m.Now().UTC()
-	sha := domain.HashContent(body)
-	if err := m.Blobs.Put(sha, bytes.NewReader(body), int64(len(body))); err != nil {
+	if err := m.Blobs.PutPrecompressed(staged.SHA, staged.Body); err != nil {
 		return UpdateResult{}, fmt.Errorf("blob write: %w", err)
 	}
-	res, err := m.Repo.AppendVersionWithQuotaCheck(slug, kind, sha, csize, m.ServiceCapBytes, int64(domain.UserQuotaBytes), now)
+	res, err := m.Repo.AppendVersionWithQuotaCheck(slug, kind, staged.SHA, staged.CompressedSize, m.ServiceCapBytes, int64(domain.UserQuotaBytes), now)
 	if err != nil {
 		switch {
 		case errors.Is(err, storage.ErrServiceFull):

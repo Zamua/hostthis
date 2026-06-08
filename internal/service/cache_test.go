@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"bytes"
 	"sync"
 	"testing"
 
@@ -46,7 +47,7 @@ func TestManage_DeletePurgesURL(t *testing.T) {
 	manage.PublicURL = func(s domain.Slug) string { return "https://hostthis.dev/p/" + s.String() }
 
 	owner := "key:test-id"
-	res, err := upload.Create(htmlBody(200), owner, "", "")
+	res, err := upload.Create(bytes.NewReader(htmlBody(200)), owner, "", "")
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -70,11 +71,11 @@ func TestManage_UpdatePurgesURL(t *testing.T) {
 	manage.PublicURL = func(s domain.Slug) string { return "https://hostthis.dev/p/" + s.String() }
 
 	owner := "key:test-id"
-	res, err := upload.Create(htmlBody(200), owner, "", "")
+	res, err := upload.Create(bytes.NewReader(htmlBody(200)), owner, "", "")
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
-	if _, err := manage.Update(res.Paste.Slug, owner, htmlBody(300), ""); err != nil {
+	if _, err := manage.Update(res.Paste.Slug, owner, bytes.NewReader(htmlBody(300)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	calls := purger.calls()
@@ -90,7 +91,7 @@ func TestManage_DeletePurgeErrorDoesntFailOp(t *testing.T) {
 	manage.PublicURL = func(s domain.Slug) string { return "https://hostthis.dev/p/" + s.String() }
 
 	owner := "key:test-id"
-	res, err := upload.Create(htmlBody(200), owner, "", "")
+	res, err := upload.Create(bytes.NewReader(htmlBody(200)), owner, "", "")
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -110,11 +111,11 @@ func TestManage_PinPurgesURL(t *testing.T) {
 	manage.PublicURL = func(s domain.Slug) string { return "https://hostthis.dev/p/" + s.String() }
 
 	owner := "key:test-id"
-	res, err := upload.Create(htmlBody(200), owner, "", "")
+	res, err := upload.Create(bytes.NewReader(htmlBody(200)), owner, "", "")
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
-	if _, err := manage.Update(res.Paste.Slug, owner, htmlBody(300), ""); err != nil {
+	if _, err := manage.Update(res.Paste.Slug, owner, bytes.NewReader(htmlBody(300)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	// Update purged once. Reset to focus on Pin's behavior.
@@ -142,11 +143,11 @@ func TestManage_UnpinPurgesURL(t *testing.T) {
 	manage.PublicURL = func(s domain.Slug) string { return "https://hostthis.dev/p/" + s.String() }
 
 	owner := "key:test-id"
-	res, err := upload.Create(htmlBody(200), owner, "", "")
+	res, err := upload.Create(bytes.NewReader(htmlBody(200)), owner, "", "")
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
-	if _, err := manage.Update(res.Paste.Slug, owner, htmlBody(300), ""); err != nil {
+	if _, err := manage.Update(res.Paste.Slug, owner, bytes.NewReader(htmlBody(300)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if _, err := manage.Pin(res.Paste.Slug, owner, 1); err != nil {
@@ -169,7 +170,7 @@ func TestManage_NoCacheConfiguredIsFine(t *testing.T) {
 	// Cache and PublicURL left nil — the default. Delete must still work.
 	upload, manage, _ := newStack(t)
 	owner := "key:test-id"
-	res, err := upload.Create(htmlBody(200), owner, "", "")
+	res, err := upload.Create(bytes.NewReader(htmlBody(200)), owner, "", "")
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}

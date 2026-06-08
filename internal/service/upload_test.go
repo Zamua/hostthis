@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -21,17 +22,18 @@ func newRealStack(t *testing.T) *Upload {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	blobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
+	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blobs: %v", err)
 	}
+	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	return NewUpload(storage.NewPasteRepo(db), blobs)
 }
 
 func TestUpload_Create_HTML(t *testing.T) {
 	u := newRealStack(t)
 	body := []byte("<!doctype html><p>hi</p>")
-	res, err := u.Create(body, "owner-key-hash", "demo", "")
+	res, err := u.Create(bytes.NewReader(body), "owner-key-hash", "demo", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -65,7 +67,7 @@ func TestUpload_Create_HTML(t *testing.T) {
 
 func TestUpload_Create_Markdown(t *testing.T) {
 	u := newRealStack(t)
-	res, err := u.Create([]byte("# Title\n\nbody"), "", "", "")
+	res, err := u.Create(bytes.NewReader([]byte("# Title\n\nbody")), "", "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -79,7 +81,7 @@ func TestUpload_Create_Markdown(t *testing.T) {
 
 func TestUpload_Create_RejectsUnsupportedKind(t *testing.T) {
 	u := newRealStack(t)
-	_, err := u.Create([]byte("\x89PNG\r\n\x1a\n...binary bytes..."), "", "", "")
+	_, err := u.Create(bytes.NewReader([]byte("\x89PNG\r\n\x1a\n...binary bytes...")), "", "", "")
 	if !errors.Is(err, domain.ErrUnsupportedKind) {
 		t.Fatalf("err: got %v, want ErrUnsupportedKind", err)
 	}
@@ -87,7 +89,7 @@ func TestUpload_Create_RejectsUnsupportedKind(t *testing.T) {
 
 func TestUpload_Create_RejectsEmpty(t *testing.T) {
 	u := newRealStack(t)
-	_, err := u.Create([]byte{}, "", "", "")
+	_, err := u.Create(bytes.NewReader([]byte{}), "", "", "")
 	if err == nil {
 		t.Fatalf("empty upload should error")
 	}
@@ -97,7 +99,7 @@ func TestUpload_Create_RejectsOversize(t *testing.T) {
 	u := newRealStack(t)
 	body := make([]byte, domain.MaxPasteBytes+1)
 	body[0] = '<' // doesn't really matter, we should reject before sniffing
-	_, err := u.Create(body, "", "", "")
+	_, err := u.Create(bytes.NewReader(body), "", "", "")
 	if err == nil {
 		t.Fatalf("oversize upload should error")
 	}
@@ -107,7 +109,7 @@ func TestUpload_Create_HonorsHint(t *testing.T) {
 	u := newRealStack(t)
 	// "anything" doesn't look like html or markdown, but the hint
 	// should force html acceptance.
-	res, err := u.Create([]byte("anything goes"), "", "", "html")
+	res, err := u.Create(bytes.NewReader([]byte("anything goes")), "", "", "html")
 	if err != nil {
 		t.Fatalf("create with html hint: %v", err)
 	}
@@ -119,11 +121,11 @@ func TestUpload_Create_HonorsHint(t *testing.T) {
 func TestUpload_Create_DedupsBlobOnSameBytes(t *testing.T) {
 	u := newRealStack(t)
 	body := []byte("<!doctype html><p>same</p>")
-	r1, err := u.Create(body, "", "", "")
+	r1, err := u.Create(bytes.NewReader(body), "", "", "")
 	if err != nil {
 		t.Fatalf("first create: %v", err)
 	}
-	r2, err := u.Create(body, "", "", "")
+	r2, err := u.Create(bytes.NewReader(body), "", "", "")
 	if err != nil {
 		t.Fatalf("second create: %v", err)
 	}
@@ -139,7 +141,7 @@ func TestUpload_Create_TimestampStable(t *testing.T) {
 	u := newRealStack(t)
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	u.Now = func() time.Time { return now }
-	res, err := u.Create([]byte("<p>x"), "", "", "")
+	res, err := u.Create(bytes.NewReader([]byte("<p>x")), "", "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

@@ -33,10 +33,13 @@ func TestUploadAndServe(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	blobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
+	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
+	// Wrap with compression so service writes + http reads decode
+	// transparently — mirrors the production wiring in cmd/hostthisd.
+	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	repo := storage.NewPasteRepo(db)
 	upload := service.NewUpload(repo, blobs)
 
