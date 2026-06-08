@@ -10,6 +10,7 @@ require (
 	github.com/yuin/goldmark v1.8.2
 	golang.org/x/crypto v0.51.0
 	modernc.org/sqlite v1.51.0
+	slatedb.io/slatedb-go v0.13.1
 )
 
 require (
