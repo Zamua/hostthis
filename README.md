@@ -17,11 +17,10 @@ ssh hostthis.dev                                 # show help
 
 Publishes HTML or Markdown for 7 days at a random subdomain. One ssh
 pipe, no signup, no install. Useful when you want a shareable URL
-for a one-off HTML mock, a Markdown writeup, a screenshot
-annotation, or anything you need a teammate or LLM to load in a
-browser without spinning up a deploy. Identity is your ssh public
-key: anyone with a different key can read the URL but can't update,
-rename, pin, or delete the paste.
+for a one-off HTML mock, a Markdown writeup, or anything you need a
+teammate or LLM to load in a browser without spinning up a deploy.
+Identity is your ssh public key: anyone with a different key can
+read the URL but can't update, rename, pin, or delete the paste.
 
 ## Commands
 
