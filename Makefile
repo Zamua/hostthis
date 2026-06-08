@@ -146,7 +146,7 @@ deploy-restart: _require-vps-host _require-apex
 	@# HTTP (traefik always has a healthy backend); SSH in-flight to
 	@# the stopping container gets TCP-reset. See infra/APP-PATTERN.md
 	@# "Deploy strategy" for the rationale.
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker rollout --env-file deploy/vps/.env -f deploy/vps/compose.yml --wait 15 hostthis"
+	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker rollout -p vps --env-file deploy/vps/.env -f deploy/vps/compose.yml -w 15 hostthis"
 
 deploy-logs: _require-vps-host
 	ssh $(VPS_HOST) "sudo docker logs -f --tail 60 hostthis"
