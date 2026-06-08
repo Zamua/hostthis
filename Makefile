@@ -115,14 +115,18 @@ smoke:
 
 # Push the local working tree to the VPS, excluding build/data artifacts.
 # Re-chowns the checkout to VPS_USER and the data dir to the container uid.
-# Also preserves deploy/vps/.env (operator-managed secrets like MinIO creds)
-# and the minio-data volume across rsyncs.
+# Preserves deploy/vps/ entirely (operator-managed compose + .env +
+# any other deploy-shape files; not tracked in the public repo) and
+# the minio-data volume across rsyncs. The repo intentionally ships
+# NO sample deploy files — how to run this binary on YOUR infra is
+# your choice. Anything operator-side that hostthis needs is set up
+# once on the VPS at <vps-path>/deploy/vps/ + survives rsyncs.
 deploy-sync: _require-vps-host
 	rsync -az --delete \
 	  --exclude='/data' --exclude='/bin' --exclude='/.git/objects' --exclude='*.log' \
-	  --exclude='/deploy/vps/.env' \
+	  --exclude='/deploy/vps' \
 	  ./ $(VPS_HOST):/tmp/hostthis-staging/
-	ssh $(VPS_HOST) "sudo mkdir -p $(VPS_PATH)/data && sudo rsync -a --delete /tmp/hostthis-staging/ $(VPS_PATH)/ --exclude=/data --exclude=/deploy/vps/.env --exclude=/.git/objects && sudo chown -R $(VPS_USER):$(VPS_USER) $(VPS_PATH) && sudo chown -R $(CONTAINER_UID):$(CONTAINER_UID) $(VPS_PATH)/data"
+	ssh $(VPS_HOST) "sudo mkdir -p $(VPS_PATH)/data && sudo rsync -a --delete /tmp/hostthis-staging/ $(VPS_PATH)/ --exclude=/data --exclude=/deploy/vps --exclude=/.git/objects && sudo chown -R $(VPS_USER):$(VPS_USER) $(VPS_PATH) && sudo chown -R $(CONTAINER_UID):$(CONTAINER_UID) $(VPS_PATH)/data"
 
 # Build the env-var prefix once. Sets the runtime config the compose
 # file reads (apex, mode, scheme) plus the absolute data path so the
