@@ -33,11 +33,11 @@ func TestSweep_Once(t *testing.T) {
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	upload.Now = func() time.Time { return now }
 
-	r1, err := upload.Create([]byte("<!doctype html><p>a</p>"), "owner-a", "", "")
+	r1, err := upload.Create(bytes.NewReader([]byte("<!doctype html><p>a</p>")), "owner-a", "", "")
 	if err != nil {
 		t.Fatalf("upload 1: %v", err)
 	}
-	r2, err := upload.Create([]byte("<!doctype html><p>b</p>"), "owner-b", "", "")
+	r2, err := upload.Create(bytes.NewReader([]byte("<!doctype html><p>b</p>")), "owner-b", "", "")
 	if err != nil {
 		t.Fatalf("upload 2: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestSweep_KeepsActive(t *testing.T) {
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	upload.Now = func() time.Time { return now }
 
-	r, err := upload.Create([]byte("<!doctype html><p>still here</p>"), "owner", "", "")
+	r, err := upload.Create(bytes.NewReader([]byte("<!doctype html><p>still here</p>")), "owner", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestSweep_GCsOrphanBlobOnly(t *testing.T) {
 	// Write a referenced blob via the upload path.
 	upload := service.NewUpload(repo, blobs)
 	upload.Now = func() time.Time { return time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC) }
-	_, err := upload.Create([]byte("<!doctype html><p>ref</p>"), "owner", "", "")
+	_, err := upload.Create(bytes.NewReader([]byte("<!doctype html><p>ref</p>")), "owner", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

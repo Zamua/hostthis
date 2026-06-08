@@ -5,7 +5,6 @@
 package service
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -26,10 +25,13 @@ type PasteRepo interface {
 // BlobStore writes and reads content-addressed bytes. Put streams r
 // to the backing store; size is the expected byte length (required by
 // S3-shaped backends to set Content-Length, accepted by the disk impl
-// for interface uniformity). Get returns the full bytes in memory —
-// fine at our 1 MiB-per-paste cap.
+// for interface uniformity). PutPrecompressed writes a body that's
+// already magic-prefixed + zstd-encoded — used by the streaming upload
+// path so the staging buffer doesn't get re-encoded on its way down.
+// Get returns the full UNCOMPRESSED bytes in memory.
 type BlobStore interface {
 	Put(sha string, r io.Reader, size int64) error
+	PutPrecompressed(sha string, body []byte) error
 	Get(sha string) ([]byte, error)
 }
 
@@ -80,40 +82,38 @@ var ErrServiceFull = errors.New("service: service is at capacity, try again afte
 // public key fingerprint. The identity gates quota — sum of the
 // identity's active pastes plus this body cannot exceed UserQuotaBytes.
 //
-// Type detection uses domain.DetectKind; unsupported types return
-// domain.ErrUnsupportedKind so the caller can surface the right
-// message verbatim.
-func (u *Upload) Create(body []byte, owner string, name string, typeHint string) (Result, error) {
-	if len(body) == 0 {
+// Reads body via the streaming pipeline (single pass: hash + compress
+// + count, peak memory ~MaxPasteBytes). Type detection runs on the
+// captured 512-byte prefix so we don't have to re-read the source.
+//
+// Unsupported types return domain.ErrUnsupportedKind so the caller
+// can surface the right message verbatim.
+func (u *Upload) Create(body io.Reader, owner string, name string, typeHint string) (Result, error) {
+	staged, err := streamUpload(body)
+	switch {
+	case errors.Is(err, errRawCapExceeded):
+		return Result{}, ErrRawTooLarge
+	case errors.Is(err, errCompressedCapExceeded):
+		return Result{}, ErrCompressedTooLarge
+	case err != nil:
+		return Result{}, fmt.Errorf("staging: %w", err)
+	}
+	if staged.RawSize == 0 {
 		return Result{}, errors.New("empty upload")
 	}
-	if len(body) > domain.HardRawByteCap {
-		return Result{}, ErrRawTooLarge
-	}
-	// Compressed-size gate. We re-compress in the storage layer when
-	// the blob actually lands, but this check runs first so we can
-	// reject without touching the blob store on an over-cap upload.
-	csize, err := compressedSize(body)
-	if err != nil {
-		return Result{}, fmt.Errorf("compressed-size check: %w", err)
-	}
-	if csize > domain.MaxPasteBytes {
-		return Result{}, fmt.Errorf("%w (your bytes compress to %d)", ErrCompressedTooLarge, csize)
-	}
-	kind, err := domain.DetectKind(body, typeHint)
+	kind, err := domain.DetectKind(staged.Prefix, typeHint)
 	if err != nil {
 		return Result{}, err
 	}
 	now := u.Now().UTC()
-	sha := domain.HashContent(body)
-	if err := u.Blobs.Put(sha, bytes.NewReader(body), int64(len(body))); err != nil {
+	if err := u.Blobs.PutPrecompressed(staged.SHA, staged.Body); err != nil {
 		return Result{}, fmt.Errorf("blob write: %w", err)
 	}
 	p := domain.Paste{
 		Identity:      domain.Identity(owner),
 		Kind:          kind,
-		ContentSHA:    sha,
-		Size:          csize,
+		ContentSHA:    staged.SHA,
+		Size:          staged.CompressedSize,
 		Name:          name,
 		PinnedVersion: 0, // unpinned by default — public URL follows the latest version
 		CreatedAt:     now,

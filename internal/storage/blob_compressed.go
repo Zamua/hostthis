@@ -30,6 +30,14 @@ type innerBlobStore interface {
 	Get(sha string) ([]byte, error)
 }
 
+// PutPrecompressed writes a body that is ALREADY zstd-encoded with the
+// magic prefix in place. Used by the streaming upload path in the
+// service layer, which produces the encoded bytes incrementally as
+// stdin arrives — no point asking this wrapper to compress them again.
+func (c *CompressedBlobStore) PutPrecompressed(sha string, body []byte) error {
+	return c.Inner.Put(sha, bytes.NewReader(body), int64(len(body)))
+}
+
 // magic prefix for blobs written by this layer.
 //
 //   - bytes 0..1: 'H' 'Z'             (hostthis-zstd)

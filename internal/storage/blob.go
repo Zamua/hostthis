@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -69,6 +70,14 @@ func (b *BlobStore) Put(sha string, r io.Reader, size int64) error {
 		return fmt.Errorf("blob rename: %w", err)
 	}
 	return nil
+}
+
+// PutPrecompressed writes already-encoded bytes (magic prefix + zstd)
+// straight to storage. Equivalent to Put for the disk store since the
+// disk store doesn't transform bytes; provided so the disk store
+// satisfies the same service-layer interface as CompressedBlobStore.
+func (b *BlobStore) PutPrecompressed(sha string, body []byte) error {
+	return b.Put(sha, bytes.NewReader(body), int64(len(body)))
 }
 
 // PutBytesOverwrite forces a rewrite of the blob at sha, bypassing

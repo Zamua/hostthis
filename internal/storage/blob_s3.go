@@ -111,6 +111,13 @@ func (s *S3BlobStore) Put(sha string, r io.Reader, size int64) error {
 	return nil
 }
 
+// PutPrecompressed writes already-encoded bytes straight to S3.
+// Equivalent to Put for this backend; parallel to the disk store's
+// method so both satisfy the service-layer BlobStore interface.
+func (s *S3BlobStore) PutPrecompressed(sha string, body []byte) error {
+	return s.Put(sha, bytes.NewReader(body), int64(len(body)))
+}
+
 // PutBytesOverwrite forces a rewrite of the object at sha, bypassing
 // the content-addressed skip in Put. Only the blob-compress migrator
 // uses this.

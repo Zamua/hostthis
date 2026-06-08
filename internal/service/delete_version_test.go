@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 
@@ -16,15 +17,15 @@ func TestDeleteVersion_FreesQuota(t *testing.T) {
 	//   try v3 = 3M       → would be 12M total, ErrOverQuota
 	//   delete-version v1 → frees 3M, total = 6M
 	//   v3 = 3M           → fits (total 9M)
-	r, err := upload.Create(htmlBody(3_000_000), owner, "", "")
+	r, err := upload.Create(bytes.NewReader(htmlBody(3_000_000)), owner, "", "")
 	if err != nil {
 		t.Fatalf("create v1: %v", err)
 	}
-	if _, err := manage.Update(r.Paste.Slug, owner, htmlBody(6_000_000), ""); err != nil {
+	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(6_000_000)), ""); err != nil {
 		t.Fatalf("update v2: %v", err)
 	}
 	// Baseline — v3 attempt should fail before delete-version.
-	if _, err := manage.Update(r.Paste.Slug, owner, htmlBody(3_000_000), ""); !errors.Is(err, service.ErrOverQuota) {
+	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(3_000_000)), ""); !errors.Is(err, service.ErrOverQuota) {
 		t.Fatalf("expected over-quota baseline, got %v", err)
 	}
 	dr, err := manage.DeleteVersion(r.Paste.Slug, owner, 1)
@@ -35,7 +36,7 @@ func TestDeleteVersion_FreesQuota(t *testing.T) {
 		t.Fatalf("delete result unexpected: %+v", dr)
 	}
 	// With v1 freed, v3 should now fit.
-	if _, err := manage.Update(r.Paste.Slug, owner, htmlBody(3_000_000), ""); err != nil {
+	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(3_000_000)), ""); err != nil {
 		t.Fatalf("after delete-version v1, 3M update should fit: %v", err)
 	}
 }
@@ -43,7 +44,7 @@ func TestDeleteVersion_FreesQuota(t *testing.T) {
 func TestDeleteVersion_RefusesCurrent(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	owner := "key:dv-current"
-	r, err := upload.Create(htmlBody(1000), owner, "", "")
+	r, err := upload.Create(bytes.NewReader(htmlBody(1000)), owner, "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -57,11 +58,11 @@ func TestDeleteVersion_RefusesCurrent(t *testing.T) {
 func TestDeleteVersion_RefusesPinnedCurrent(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	owner := "key:dv-pinned"
-	r, err := upload.Create(htmlBody(1000), owner, "", "")
+	r, err := upload.Create(bytes.NewReader(htmlBody(1000)), owner, "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := manage.Update(r.Paste.Slug, owner, htmlBody(1000), ""); err != nil {
+	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(1000)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	// Pin to v1 — now v1 is the served version (even though v2 is newer).
@@ -81,11 +82,11 @@ func TestDeleteVersion_RefusesPinnedCurrent(t *testing.T) {
 func TestDeleteVersion_AlreadyDeleted(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	owner := "key:dv-already"
-	r, err := upload.Create(htmlBody(1000), owner, "", "")
+	r, err := upload.Create(bytes.NewReader(htmlBody(1000)), owner, "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := manage.Update(r.Paste.Slug, owner, htmlBody(1000), ""); err != nil {
+	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(1000)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if _, err := manage.DeleteVersion(r.Paste.Slug, owner, 1); err != nil {
@@ -99,7 +100,7 @@ func TestDeleteVersion_AlreadyDeleted(t *testing.T) {
 func TestDeleteVersion_NotFound(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	owner := "key:dv-notfound"
-	r, err := upload.Create(htmlBody(1000), owner, "", "")
+	r, err := upload.Create(bytes.NewReader(htmlBody(1000)), owner, "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -111,11 +112,11 @@ func TestDeleteVersion_NotFound(t *testing.T) {
 func TestDeleteVersion_VersionsListShowsTombstone(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	owner := "key:dv-list"
-	r, err := upload.Create(htmlBody(1000), owner, "", "")
+	r, err := upload.Create(bytes.NewReader(htmlBody(1000)), owner, "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := manage.Update(r.Paste.Slug, owner, htmlBody(1000), ""); err != nil {
+	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(1000)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if _, err := manage.DeleteVersion(r.Paste.Slug, owner, 1); err != nil {

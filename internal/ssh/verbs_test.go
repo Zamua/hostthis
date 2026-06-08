@@ -27,7 +27,7 @@ type stack struct {
 	httpURL     string
 	sshAddr     string
 	repo        *storage.PasteRepo
-	blobs       *storage.BlobStore
+	blobs       *storage.CompressedBlobStore
 	keyedClient *xssh.Client
 	keyedOwner  string
 	anonClient  *xssh.Client
@@ -88,10 +88,13 @@ func startStack(t *testing.T) *stack {
 		t.Fatalf("db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	blobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
+	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blobs: %v", err)
 	}
+	// Same wrapping as production cmd/hostthisd: service + http surface
+	// both go through the compression layer; only the sweep talks raw.
+	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	repo := storage.NewPasteRepo(db)
 	upload := service.NewUpload(repo, blobs)
 	manage := service.NewManage(repo, blobs)

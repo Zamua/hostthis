@@ -183,24 +183,18 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		_ = sess.Exit(2)
 		return
 	}
-	// Read up to the raw-byte hard fast-fail. The compressed-size cap
-	// is enforced by the service layer once the body is in hand.
-	body, err := io.ReadAll(io.LimitReader(sess, int64(domain.HardRawByteCap)+1))
-	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: read upload: %v\n", err)
-		_ = sess.Exit(1)
-		return
-	}
-	if len(body) > domain.HardRawByteCap {
-		fmt.Fprintf(sess.Stderr(), "hostthis: upload too large to consider (raw input exceeded %d-byte cap)\n", domain.HardRawByteCap)
-		_ = sess.Exit(1)
-		return
-	}
+	// Hand the live session reader to the service layer. The service
+	// streams bytes through hash + compress + raw-counter, capping
+	// at HardRawByteCap on the input side and MaxPasteBytes on the
+	// compressed side. We DO NOT buffer the body here — that would
+	// peak memory at HardRawByteCap per concurrent upload, which
+	// blows the VPS RAM budget at modest concurrency.
+	limited := io.LimitReader(sess, int64(domain.HardRawByteCap)+1)
 
 	if args.Slug != "" {
 		// Update path.
 		slug, _ := domain.ParseSlug(args.Slug)
-		res, err := s.Manage.Update(slug, owner, body, args.Type)
+		res, err := s.Manage.Update(slug, owner, limited, args.Type)
 		if err != nil {
 			fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
 			_ = sess.Exit(exitForServiceErr(err))
@@ -224,7 +218,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	}
 
 	// Create path.
-	res, err := s.Upload.Create(body, owner, args.Name, args.Type)
+	res, err := s.Upload.Create(limited, owner, args.Name, args.Type)
 	if err != nil {
 		emitServiceErr(sess, err)
 		return
