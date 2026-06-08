@@ -159,8 +159,11 @@ func buildBlobStore(dataDir string, logger *log.Logger) (service.BlobStore, serv
 		if err != nil {
 			return nil, nil, err
 		}
-		logger.Printf("blobs: disk backend at %s/blobs", dataDir)
-		return bs, bs, nil
+		logger.Printf("blobs: disk backend at %s/blobs (zstd-compressed at rest)", dataDir)
+		// Wrap with the compression layer for Put/Get used by upload + manage.
+		// Sweep uses WalkBlobs + Remove which are sha-only (no body access),
+		// so it bypasses the wrapper and talks to the raw backend.
+		return storage.NewCompressedBlobStore(bs), bs, nil
 	case "s3":
 		cfg := storage.S3Config{
 			EndpointURL: os.Getenv("HOSTTHIS_S3_ENDPOINT"),
@@ -174,8 +177,8 @@ func buildBlobStore(dataDir string, logger *log.Logger) (service.BlobStore, serv
 		if err != nil {
 			return nil, nil, err
 		}
-		logger.Printf("blobs: s3 backend at %s bucket=%s", cfg.EndpointURL, cfg.Bucket)
-		return bs, bs, nil
+		logger.Printf("blobs: s3 backend at %s bucket=%s (zstd-compressed at rest)", cfg.EndpointURL, cfg.Bucket)
+		return storage.NewCompressedBlobStore(bs), bs, nil
 	default:
 		return nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|s3)", backend)
 	}

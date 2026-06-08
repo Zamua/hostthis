@@ -18,6 +18,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	gossh "github.com/gliderlabs/ssh"
@@ -182,14 +183,16 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		_ = sess.Exit(2)
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(sess, int64(domain.MaxPasteBytes)+1))
+	// Read up to the raw-byte hard fast-fail. The compressed-size cap
+	// is enforced by the service layer once the body is in hand.
+	body, err := io.ReadAll(io.LimitReader(sess, int64(domain.HardRawByteCap)+1))
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "hostthis: read upload: %v\n", err)
 		_ = sess.Exit(1)
 		return
 	}
-	if len(body) > domain.MaxPasteBytes {
-		fmt.Fprintf(sess.Stderr(), "hostthis: upload exceeds %d-byte cap\n", domain.MaxPasteBytes)
+	if len(body) > domain.HardRawByteCap {
+		fmt.Fprintf(sess.Stderr(), "hostthis: upload too large to consider (raw input exceeded %d-byte cap)\n", domain.HardRawByteCap)
 		_ = sess.Exit(1)
 		return
 	}
@@ -324,18 +327,72 @@ func (s *Server) verbRename(sess gossh.Session, owner string, argv []string) {
 // -- delete -----------------------------------------------------------------
 
 func (s *Server) verbDelete(sess gossh.Session, owner string, argv []string) {
-	slug, err := requireSlug(argv)
-	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
+	// Two-shape dispatch:
+	//   delete <slug>           → wipe the whole paste
+	//   delete <slug> <verN>    → tombstone just that version
+	// Anything else → usage error.
+	switch len(argv) {
+	case 0:
+		fmt.Fprintln(sess.Stderr(), "usage: delete <slug> [<ver>]")
+		_ = sess.Exit(2)
+		return
+	case 1:
+		slug, err := requireSlug(argv)
+		if err != nil {
+			fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
+			_ = sess.Exit(2)
+			return
+		}
+		if err := s.Manage.Delete(slug, owner); err != nil {
+			emitServiceErr(sess, err)
+			return
+		}
+		fmt.Fprintln(sess.Stderr(), "deleted.")
+		_ = sess.Exit(0)
+		return
+	case 2:
+		slug, err := requireSlug(argv[:1])
+		if err != nil {
+			fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
+			_ = sess.Exit(2)
+			return
+		}
+		verNum, err := parseVersionArg(argv[1])
+		if err != nil {
+			fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
+			_ = sess.Exit(2)
+			return
+		}
+		res, err := s.Manage.DeleteVersion(slug, owner, verNum)
+		switch {
+		case err == nil:
+			fmt.Fprintf(sess.Stderr(), "deleted v%d. freed %s.\n", res.VerNum, humanBytes(res.FreedBytes))
+			_ = sess.Exit(0)
+		case errors.Is(err, service.ErrVersionAlreadyDeleted):
+			fmt.Fprintf(sess.Stderr(), "version v%d already deleted\n", verNum)
+			_ = sess.Exit(0)
+		case errors.Is(err, service.ErrVersionCurrentlyServed):
+			fmt.Fprintf(sess.Stderr(), "hostthis: v%d is currently served — pin a different version first (or `unpin` if pinning was active)\n", verNum)
+			_ = sess.Exit(2)
+		default:
+			emitServiceErr(sess, err)
+		}
+		return
+	default:
+		fmt.Fprintln(sess.Stderr(), "usage: delete <slug> [<ver>]")
 		_ = sess.Exit(2)
 		return
 	}
-	if err := s.Manage.Delete(slug, owner); err != nil {
-		emitServiceErr(sess, err)
-		return
+}
+
+// parseVersionArg parses "2" or "v2" → 2. Rejects negatives and zero.
+func parseVersionArg(s string) (int, error) {
+	s = strings.TrimPrefix(s, "v")
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("invalid version %q (want a positive integer like 2 or v2)", s)
 	}
-	fmt.Fprintln(sess.Stderr(), "deleted.")
-	_ = sess.Exit(0)
+	return n, nil
 }
 
 // -- versions / pin ---------------------------------------------------------
@@ -356,20 +413,32 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 	now := s.Manage.Now().UTC()
 
 	// `current` marker: when pinned_version is 0, the served version
-	// is the max ver_num. ListVersions returns newest first, so the
-	// first row is MAX.
+	// is the MAX non-deleted ver_num. ListVersions returns newest first
+	// (including tombstones), so we walk forward to the first non-deleted.
 	servedVer := p.PinnedVersion
-	if servedVer == 0 && len(vers) > 0 {
-		servedVer = vers[0].VerNum
+	if servedVer == 0 {
+		for _, v := range vers {
+			if !v.Deleted {
+				servedVer = v.VerNum
+				break
+			}
+		}
 	}
 
 	for _, v := range vers {
 		marker := "       "
-		if v.VerNum == servedVer {
+		switch {
+		case v.Deleted:
+			marker = "deleted"
+		case v.VerNum == servedVer:
 			marker = "current"
 		}
+		size := humanBytes(v.Size)
+		if v.Deleted {
+			size = "—"
+		}
 		fmt.Fprintf(sess, "v%d\t%s\t%s\t%s\n",
-			v.VerNum, marker, v.CreatedAt.Format("2006-01-02 15:04 UTC"), humanBytes(v.Size))
+			v.VerNum, marker, v.CreatedAt.Format("2006-01-02 15:04 UTC"), size)
 	}
 	pinNote := "unpinned"
 	if p.PinnedVersion != 0 {

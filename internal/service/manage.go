@@ -24,6 +24,7 @@ type PasteAdmin interface {
 	AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, serviceCap, userCap int64, now time.Time) (storage.AppendResult, error)
 	ListVersions(domain.Slug) ([]domain.Version, error)
 	GetVersion(domain.Slug, int) (domain.Version, error)
+	DeleteVersion(domain.Slug, int) error
 	CountByOwner(owner string) (int, error)
 	OwnerFirstSeen(owner string) (time.Time, error)
 }
@@ -122,8 +123,15 @@ func (m *Manage) Update(slug domain.Slug, owner string, body []byte, typeHint st
 	if len(body) == 0 {
 		return UpdateResult{}, errors.New("empty upload")
 	}
-	if len(body) > domain.MaxPasteBytes {
-		return UpdateResult{}, fmt.Errorf("upload exceeds %d-byte cap", domain.MaxPasteBytes)
+	if len(body) > domain.HardRawByteCap {
+		return UpdateResult{}, ErrRawTooLarge
+	}
+	csize, err := compressedSize(body)
+	if err != nil {
+		return UpdateResult{}, fmt.Errorf("compressed-size check: %w", err)
+	}
+	if csize > domain.MaxPasteBytes {
+		return UpdateResult{}, fmt.Errorf("%w (your bytes compress to %d)", ErrCompressedTooLarge, csize)
 	}
 	existing, err := m.requireOwner(slug, owner)
 	if err != nil {
@@ -138,7 +146,7 @@ func (m *Manage) Update(slug domain.Slug, owner string, body []byte, typeHint st
 	if err := m.Blobs.Put(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 		return UpdateResult{}, fmt.Errorf("blob write: %w", err)
 	}
-	res, err := m.Repo.AppendVersionWithQuotaCheck(slug, kind, sha, len(body), m.ServiceCapBytes, int64(domain.UserQuotaBytes), now)
+	res, err := m.Repo.AppendVersionWithQuotaCheck(slug, kind, sha, csize, m.ServiceCapBytes, int64(domain.UserQuotaBytes), now)
 	if err != nil {
 		switch {
 		case errors.Is(err, storage.ErrServiceFull):
@@ -198,12 +206,91 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 	return nil
 }
 
-// Versions returns the slug's full history (newest first).
+// Versions returns the slug's full history (newest first). Includes
+// tombstoned (deleted) rows — the `versions` verb renders them with
+// a `deleted` marker.
 func (m *Manage) Versions(slug domain.Slug, owner string) ([]domain.Version, error) {
 	if _, err := m.requireOwner(slug, owner); err != nil {
 		return nil, err
 	}
 	return m.Repo.ListVersions(slug)
+}
+
+// DeleteVersionResult reports what DeleteVersion did so the SSH
+// layer can format messaging like "deleted v2. freed 187.3k.".
+type DeleteVersionResult struct {
+	VerNum     int
+	FreedBytes int
+}
+
+// ErrVersionAlreadyDeleted is returned when the target version is
+// already a tombstone. Caller chooses whether to treat this as a
+// soft success or hard error.
+var ErrVersionAlreadyDeleted = errors.New("service: version already deleted")
+
+// ErrVersionCurrentlyServed is returned when the target version is
+// the one the URL currently serves. Caller should hint at `pin`
+// (to a different version) or `unpin` as the way to free it.
+var ErrVersionCurrentlyServed = errors.New("service: version is currently served by the URL; pin a different version first")
+
+// DeleteVersion frees a single version's blob bytes (tombstones the
+// row). Refused when:
+//   - paste doesn't exist or owner doesn't match → ErrNotFound
+//   - target version doesn't exist → ErrNotFound
+//   - target is already tombstoned → ErrVersionAlreadyDeleted
+//   - target is the version the URL currently serves → ErrVersionCurrentlyServed
+//
+// On success, returns the version number and the freed byte count
+// (the row's pre-deletion size column).
+func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (DeleteVersionResult, error) {
+	p, err := m.requireOwner(slug, owner)
+	if err != nil {
+		return DeleteVersionResult{}, err
+	}
+	if verNum < 1 {
+		return DeleteVersionResult{}, fmt.Errorf("version must be >= 1")
+	}
+	target, err := m.Repo.GetVersion(slug, verNum)
+	if err != nil {
+		return DeleteVersionResult{}, ErrNotFound
+	}
+	if target.Deleted {
+		return DeleteVersionResult{VerNum: verNum, FreedBytes: 0}, ErrVersionAlreadyDeleted
+	}
+
+	servedVer, err := m.servedVersion(slug, p.PinnedVersion)
+	if err != nil {
+		return DeleteVersionResult{}, err
+	}
+	if servedVer == verNum {
+		return DeleteVersionResult{}, ErrVersionCurrentlyServed
+	}
+
+	if err := m.Repo.DeleteVersion(slug, verNum); err != nil {
+		return DeleteVersionResult{}, err
+	}
+	// No cache purge — the served bytes didn't change; we just freed
+	// an older version's bytes that no URL surface was exposing.
+	return DeleteVersionResult{VerNum: verNum, FreedBytes: target.Size}, nil
+}
+
+// servedVersion returns the ver_num of the version the URL is
+// currently serving for slug. Mirrors the read path: pinned wins,
+// else MAX(non-deleted ver_num).
+func (m *Manage) servedVersion(slug domain.Slug, pinnedVersion int) (int, error) {
+	if pinnedVersion > 0 {
+		return pinnedVersion, nil
+	}
+	versions, err := m.Repo.ListVersions(slug)
+	if err != nil {
+		return 0, err
+	}
+	for _, v := range versions {
+		if !v.Deleted {
+			return v.VerNum, nil
+		}
+	}
+	return 0, nil // no live versions — shouldn't happen for an active paste
 }
 
 // Pin sets which version_num the public URL serves and makes it

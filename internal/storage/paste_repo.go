@@ -52,14 +52,14 @@ func (r *PasteRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 	nowStr := formatTime(now)
 	body := int64(p.Size)
 
-	// 1. Service-wide check.
+	// 1. Service-wide check. Tombstoned (deleted) versions contribute 0.
 	if serviceCap > 0 {
 		var total int64
 		if err := tx.QueryRow(`
 			SELECT COALESCE(SUM(v.size), 0)
 			FROM versions v
 			JOIN pastes pp ON pp.slug = v.slug
-			WHERE pp.expires_at > ?
+			WHERE pp.expires_at > ? AND v.deleted = 0
 		`, nowStr).Scan(&total); err != nil {
 			return fmt.Errorf("service-wide sum: %w", err)
 		}
@@ -67,14 +67,14 @@ func (r *PasteRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 			return ErrServiceFull
 		}
 	}
-	// 2. Per-identity check.
+	// 2. Per-identity check. Tombstoned versions contribute 0.
 	if userCap > 0 {
 		var ownerTotal int64
 		if err := tx.QueryRow(`
 			SELECT COALESCE(SUM(v.size), 0)
 			FROM versions v
 			JOIN pastes pp ON pp.slug = v.slug
-			WHERE pp.identity = ? AND pp.expires_at > ?
+			WHERE pp.identity = ? AND pp.expires_at > ? AND v.deleted = 0
 		`, p.Identity.String(), nowStr).Scan(&ownerTotal); err != nil {
 			return fmt.Errorf("identity sum: %w", err)
 		}
@@ -141,7 +141,7 @@ func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 		SELECT p.slug, p.identity, p.kind, p.content_sha, p.size, p.name,
 		       p.pinned_version,
 		       p.created_at, p.updated_at, p.expires_at,
-		       COALESCE((SELECT MAX(ver_num) FROM versions v WHERE v.slug = p.slug), 1) AS latest_version
+		       COALESCE((SELECT MAX(ver_num) FROM versions v WHERE v.slug = p.slug AND v.deleted = 0), 1) AS latest_version
 		FROM pastes p WHERE p.identity = ?
 		ORDER BY p.expires_at ASC
 	`, owner)
@@ -270,14 +270,14 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 		return AppendResult{}, fmt.Errorf("lookup paste identity: %w", err)
 	}
 
-	// Service-wide check.
+	// Service-wide check. Tombstoned versions contribute 0.
 	if serviceCap > 0 {
 		var total int64
 		if err := tx.QueryRow(`
 			SELECT COALESCE(SUM(v.size), 0)
 			FROM versions v
 			JOIN pastes pp ON pp.slug = v.slug
-			WHERE pp.expires_at > ?
+			WHERE pp.expires_at > ? AND v.deleted = 0
 		`, nowStr).Scan(&total); err != nil {
 			return AppendResult{}, fmt.Errorf("service-wide sum: %w", err)
 		}
@@ -285,14 +285,14 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 			return AppendResult{}, ErrServiceFull
 		}
 	}
-	// Per-identity check.
+	// Per-identity check. Tombstoned versions contribute 0.
 	if userCap > 0 {
 		var ownerTotal int64
 		if err := tx.QueryRow(`
 			SELECT COALESCE(SUM(v.size), 0)
 			FROM versions v
 			JOIN pastes pp ON pp.slug = v.slug
-			WHERE pp.identity = ? AND pp.expires_at > ?
+			WHERE pp.identity = ? AND pp.expires_at > ? AND v.deleted = 0
 		`, ownerIdentity, nowStr).Scan(&ownerTotal); err != nil {
 			return AppendResult{}, fmt.Errorf("identity sum: %w", err)
 		}
@@ -301,6 +301,9 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 		}
 	}
 
+	// MAX(ver_num) includes deleted rows — version numbers are NOT
+	// reused even after a tombstone. Predictable for users who
+	// `versions` and see continuous numbering.
 	var maxVer int
 	if err := tx.QueryRow(`SELECT COALESCE(MAX(ver_num), 0) FROM versions WHERE slug = ?`, slug.String()).Scan(&maxVer); err != nil {
 		return AppendResult{}, fmt.Errorf("max ver: %w", err)
@@ -352,9 +355,11 @@ func (r *PasteRepo) AppendVersion(slug domain.Slug, kind domain.ContentKind, con
 }
 
 // ListVersions returns the version history for slug, newest first.
+// Includes tombstoned (deleted=1) rows so the `versions` verb can
+// render them with a `deleted` marker.
 func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	rows, err := r.db.Query(`
-		SELECT slug, ver_num, kind, content_sha, size, created_at
+		SELECT slug, ver_num, kind, content_sha, size, created_at, deleted
 		FROM versions WHERE slug = ?
 		ORDER BY ver_num DESC
 	`, slug.String())
@@ -366,26 +371,31 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	for rows.Next() {
 		var v domain.Version
 		var slugStr, kind, created string
-		if err := rows.Scan(&slugStr, &v.VerNum, &kind, &v.ContentSHA, &v.Size, &created); err != nil {
+		var deletedInt int
+		if err := rows.Scan(&slugStr, &v.VerNum, &kind, &v.ContentSHA, &v.Size, &created, &deletedInt); err != nil {
 			return nil, err
 		}
 		v.Slug = domain.Slug(slugStr)
 		v.Kind = domain.ContentKind(kind)
 		v.CreatedAt = parseTime(created)
+		v.Deleted = deletedInt != 0
 		out = append(out, v)
 	}
 	return out, rows.Err()
 }
 
-// GetVersion returns a single version row, or ErrNotFound.
+// GetVersion returns a single version row, or ErrNotFound. Returns
+// tombstoned rows too; callers needing "real, with bytes" should
+// check v.Deleted.
 func (r *PasteRepo) GetVersion(slug domain.Slug, ver int) (domain.Version, error) {
 	row := r.db.QueryRow(`
-		SELECT slug, ver_num, kind, content_sha, size, created_at
+		SELECT slug, ver_num, kind, content_sha, size, created_at, deleted
 		FROM versions WHERE slug = ? AND ver_num = ?
 	`, slug.String(), ver)
 	var v domain.Version
 	var slugStr, kind, created string
-	if err := row.Scan(&slugStr, &v.VerNum, &kind, &v.ContentSHA, &v.Size, &created); err != nil {
+	var deletedInt int
+	if err := row.Scan(&slugStr, &v.VerNum, &kind, &v.ContentSHA, &v.Size, &created, &deletedInt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Version{}, ErrNotFound
 		}
@@ -394,7 +404,34 @@ func (r *PasteRepo) GetVersion(slug domain.Slug, ver int) (domain.Version, error
 	v.Slug = domain.Slug(slugStr)
 	v.Kind = domain.ContentKind(kind)
 	v.CreatedAt = parseTime(created)
+	v.Deleted = deletedInt != 0
 	return v, nil
+}
+
+// DeleteVersion marks a single version's blob bytes as freed by
+// flipping the deleted flag to 1. The row stays so:
+//   - ver_num isn't reused (a future `update` still gets MAX(ver_num)+1)
+//   - audit trail + `versions` history survives
+//
+// Quota SUMs, latest-served-version pickers, and AppendVersion's
+// MAX(ver_num) all filter `deleted = 0` so tombstones don't influence
+// active accounting.
+//
+// Returns ErrNotFound if (slug, ver) doesn't exist. Does NOT check
+// owner or served-status — service layer enforces those.
+func (r *PasteRepo) DeleteVersion(slug domain.Slug, ver int) error {
+	res, err := r.db.Exec(`UPDATE versions SET deleted = 1 WHERE slug = ? AND ver_num = ?`, slug.String(), ver)
+	if err != nil {
+		return fmt.Errorf("delete version: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // CountByOwner returns how many active pastes the owner has — used

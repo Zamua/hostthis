@@ -22,15 +22,27 @@ const (
 var ErrUnsupportedKind = errors.New(
 	"hostthis only accepts content that needs rendering (html, markdown)")
 
-// MaxPasteBytes is the universal per-paste size cap. Equals the
-// per-user quota (UserQuotaBytes) — there's only ever one number to
-// reason about: a user has 1 MiB of active content total.
-const MaxPasteBytes = 1 << 20 // 1 MiB
+// MaxPasteBytes is the universal per-paste size cap, measured in
+// COMPRESSED bytes (post-zstd, as written to the blob store). Equals
+// the per-identity quota (UserQuotaBytes) — there's only ever one
+// number to reason about: an identity has 10 MiB of stored content
+// total. Highly redundant text (typical HTML/Markdown) compresses
+// 5–10× so users can upload ~50–100 MiB of raw text under this cap.
+const MaxPasteBytes = 10 << 20 // 10 MiB
 
-// UserQuotaBytes is the cap on the total size of an identity's active
-// pastes. "Identity" is the ssh key fingerprint for keyed uploads or
-// the client IP subnet for anonymous ones; either way, the same cap.
-const UserQuotaBytes = 1 << 20 // 1 MiB
+// UserQuotaBytes is the cap on the total compressed size of an
+// identity's active pastes (counting every non-deleted version).
+// "Identity" is the ssh key fingerprint for keyed uploads or the
+// client IP subnet for anonymous ones; either way, the same cap.
+const UserQuotaBytes = 10 << 20 // 10 MiB
+
+// HardRawByteCap is the hard fast-fail cap on RAW input bytes — the
+// server stops reading after this many uncompressed bytes regardless
+// of how well they'd compress. Bounds the upload read so an attacker
+// can't stream an arbitrarily large payload to discover its
+// compression ratio. Generous enough that no legitimate text payload
+// hits it; tight enough to keep request memory bounded.
+const HardRawByteCap = 100 << 20 // 100 MiB
 
 // DetectKind classifies up to the first 512 bytes of an upload as one
 // of the supported ContentKinds, or returns ErrUnsupportedKind.
