@@ -1,111 +1,98 @@
-# Production compose for hostthis on the VPS — blue/green for HTTP.
+# Production compose for hostthis on the VPS.
 #
-# Layout:
-#   hostthis-blue   binds :22(host) for SSH + serves HTTP via traefik labels
-#   hostthis-green  HTTP only via traefik labels
-#   hostthis-minio  S3-compatible blob store (sidecar)
+# Single hostthis container in steady state; rolling deploy via the
+# docker-rollout plugin brings up a NEW container alongside, waits
+# for traefik to mark it healthy, then drops the OLD. See
+# infra/APP-PATTERN.md "Deploy strategy" for the full rationale.
 #
-# Both blue + green:
-#   - Mount the same /var/lib/hostthis volume (sqlite WAL + shared ssh host key)
-#   - Talk to the same minio sidecar over the docker network
-#   - Register under the SAME traefik service name → traefik load-balances + actively healthchecks
+# Traffic routing:
+#   HTTP / HTTPS — traefik docker labels (per infra/traefik) route
+#     hostthis.dev + *.hostthis.dev → service hostthis on port 8080
+#   SSH (:22 on host) — traefik tcp router with HostSNI(*) → port 2222
+#     on the container. New SSH connections go to the currently-healthy
+#     container; in-flight sessions on a stopping container get TCP-reset
+#     (clients retry).
 #
-# SSH is bound by blue only — there's only one host :22 port. This means
-# SSH gets a brief outage during blue's restart, but HTTP (the bulk of
-# traffic) is zero-downtime. Moving SSH to traefik tcp routing for full
-# zero-downtime on the ssh path is a follow-up (see infra/TODO.md).
-#
-# Bring up via deploy/vps/deploy-rolling.sh on the VPS — it rotates one
-# color at a time, waiting for /healthz before flipping. Or to do a
-# non-rolling restart from local:
-#
-#   make deploy VPS_HOST=vps VPS_PATH=/home/apps/projects/hostthis ...
-
-x-hostthis-common: &hostthis-common
-  build:
-    context: ../..
-    dockerfile: Dockerfile
-  image: hostthis:prod
-  restart: unless-stopped
-  user: "65532:65532"
-  networks:
-    - traefik_proxy
-  volumes:
-    - "${HOSTTHIS_DATA_PATH:-./data}:/var/lib/hostthis"
-  environment: &hostthis-env
-    HOSTTHIS_URL_MODE: "${HOSTTHIS_URL_MODE:-subdomain}"
-    HOSTTHIS_PUBLIC_SCHEME: "${HOSTTHIS_PUBLIC_SCHEME:-https}"
-    HOSTTHIS_APEX_DOMAIN: "${HOSTTHIS_APEX_DOMAIN:?HOSTTHIS_APEX_DOMAIN is required}"
-    HOSTTHIS_DATA_DIR: /var/lib/hostthis
-    HOSTTHIS_LANDING: /app/web/landing.html
-    HOSTTHIS_BLOB_BACKEND: "${HOSTTHIS_BLOB_BACKEND:-disk}"
-    HOSTTHIS_S3_ENDPOINT: "${HOSTTHIS_S3_ENDPOINT:-http://minio:9000}"
-    HOSTTHIS_S3_BUCKET: "${HOSTTHIS_S3_BUCKET:-hostthis-blobs}"
-    HOSTTHIS_S3_REGION: "${HOSTTHIS_S3_REGION:-us-east-1}"
-    HOSTTHIS_S3_ACCESS_KEY: "${HOSTTHIS_S3_ACCESS_KEY:-}"
-    HOSTTHIS_S3_SECRET_KEY: "${HOSTTHIS_S3_SECRET_KEY:-}"
-    HOSTTHIS_S3_USE_SSL: "${HOSTTHIS_S3_USE_SSL:-false}"
-  labels:
-    - "traefik.enable=true"
-    - "traefik.docker.network=traefik_proxy"
-    # apex hostthis.dev + wildcard *.hostthis.dev share one DNS-01 cert
-    # issued for hostthis.dev with SAN *.hostthis.dev. Using letsencrypt-dns
-    # (cloudflare provider) because TLS-ALPN-01 can't issue wildcards.
-    - "traefik.http.routers.hostthis-apex-https.rule=Host(`${HOSTTHIS_APEX_DOMAIN}`)"
-    - "traefik.http.routers.hostthis-apex-https.entryPoints=https"
-    - "traefik.http.routers.hostthis-apex-https.tls=true"
-    - "traefik.http.routers.hostthis-apex-https.tls.certresolver=letsencrypt-dns"
-    - "traefik.http.routers.hostthis-apex-https.tls.domains[0].main=${HOSTTHIS_APEX_DOMAIN}"
-    - "traefik.http.routers.hostthis-apex-https.tls.domains[0].sans=*.${HOSTTHIS_APEX_DOMAIN}"
-    - "traefik.http.routers.hostthis-apex-https.service=hostthis"
-    - "traefik.http.routers.hostthis-apex-http.rule=Host(`${HOSTTHIS_APEX_DOMAIN}`)"
-    - "traefik.http.routers.hostthis-apex-http.entryPoints=http"
-    - "traefik.http.routers.hostthis-apex-http.middlewares=hostthis-redirect-https"
-    # wildcard *.hostthis.dev
-    - "traefik.http.routers.hostthis-wild-https.rule=HostRegexp(`^[a-z0-9-]+\\.hostthis\\.dev$`)"
-    - "traefik.http.routers.hostthis-wild-https.entryPoints=https"
-    - "traefik.http.routers.hostthis-wild-https.tls=true"
-    - "traefik.http.routers.hostthis-wild-https.tls.certresolver=letsencrypt-dns"
-    - "traefik.http.routers.hostthis-wild-https.tls.domains[0].main=${HOSTTHIS_APEX_DOMAIN}"
-    - "traefik.http.routers.hostthis-wild-https.tls.domains[0].sans=*.${HOSTTHIS_APEX_DOMAIN}"
-    - "traefik.http.routers.hostthis-wild-https.service=hostthis"
-    - "traefik.http.routers.hostthis-wild-http.rule=HostRegexp(`^[a-z0-9-]+\\.hostthis\\.dev$`)"
-    - "traefik.http.routers.hostthis-wild-http.entryPoints=http"
-    - "traefik.http.routers.hostthis-wild-http.middlewares=hostthis-redirect-https"
-    # middlewares
-    - "traefik.http.middlewares.hostthis-redirect-https.redirectScheme.scheme=https"
-    - "traefik.http.middlewares.hostthis-redirect-https.redirectScheme.permanent=true"
-    # shared service definition + active healthcheck — load-balances across both replicas
-    - "traefik.http.services.hostthis.loadbalancer.server.port=8080"
-    - "traefik.http.services.hostthis.loadbalancer.healthCheck.path=/healthz"
-    - "traefik.http.services.hostthis.loadbalancer.healthCheck.interval=10s"
-    - "traefik.http.services.hostthis.loadbalancer.healthCheck.timeout=3s"
-    # TCP router for ssh — raw TCP has no SNI, so HostSNI(*) catches all
-    # traffic on the ssh entrypoint. Traefik load-balances across both
-    # replicas on container port 2222. Established SSH connections to a
-    # restarting replica get reset; new connections route to the surviving
-    # replica.
-    - "traefik.tcp.routers.hostthis-ssh.rule=HostSNI(`*`)"
-    - "traefik.tcp.routers.hostthis-ssh.entryPoints=ssh"
-    - "traefik.tcp.routers.hostthis-ssh.service=hostthis-ssh"
-    - "traefik.tcp.services.hostthis-ssh.loadbalancer.server.port=2222"
+# Both NEW and OLD containers during the brief overlap window:
+#   - share the same bind-mounted /var/lib/hostthis (sqlite WAL + ssh
+#     host key); SQLite's BEGIN IMMEDIATE serializes writers across
+#     processes
+#   - share the same minio sidecar
+#   - register identical traefik labels → traefik load-balances both
+#     until OLD goes away
 
 services:
-  hostthis-blue:
-    <<: *hostthis-common
-    container_name: hostthis-blue
-    # No host port binding — traefik owns :22 on the host and routes
-    # to both replicas via TCP labels (see hostthis-common labels).
+  hostthis:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: hostthis:prod
+    restart: unless-stopped
+    user: "65532:65532"
+    networks:
+      - traefik_proxy
+    volumes:
+      - "${HOSTTHIS_DATA_PATH:-./data}:/var/lib/hostthis"
     environment:
-      <<: *hostthis-env
-      HOSTTHIS_BACKEND_COLOR: blue
-
-  hostthis-green:
-    <<: *hostthis-common
-    container_name: hostthis-green
-    environment:
-      <<: *hostthis-env
-      HOSTTHIS_BACKEND_COLOR: green
+      HOSTTHIS_URL_MODE: "${HOSTTHIS_URL_MODE:-subdomain}"
+      HOSTTHIS_PUBLIC_SCHEME: "${HOSTTHIS_PUBLIC_SCHEME:-https}"
+      HOSTTHIS_APEX_DOMAIN: "${HOSTTHIS_APEX_DOMAIN:?HOSTTHIS_APEX_DOMAIN is required}"
+      HOSTTHIS_DATA_DIR: /var/lib/hostthis
+      HOSTTHIS_LANDING: /app/web/landing.html
+      HOSTTHIS_BLOB_BACKEND: "${HOSTTHIS_BLOB_BACKEND:-disk}"
+      HOSTTHIS_S3_ENDPOINT: "${HOSTTHIS_S3_ENDPOINT:-http://minio:9000}"
+      HOSTTHIS_S3_BUCKET: "${HOSTTHIS_S3_BUCKET:-hostthis-blobs}"
+      HOSTTHIS_S3_REGION: "${HOSTTHIS_S3_REGION:-us-east-1}"
+      HOSTTHIS_S3_ACCESS_KEY: "${HOSTTHIS_S3_ACCESS_KEY:-}"
+      HOSTTHIS_S3_SECRET_KEY: "${HOSTTHIS_S3_SECRET_KEY:-}"
+      HOSTTHIS_S3_USE_SSL: "${HOSTTHIS_S3_USE_SSL:-false}"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik_proxy"
+      # apex hostthis.dev + wildcard *.hostthis.dev share one DNS-01 cert
+      # issued for hostthis.dev with SAN *.hostthis.dev. Using letsencrypt-dns
+      # (cloudflare provider) because TLS-ALPN-01 can't issue wildcards.
+      - "traefik.http.routers.hostthis-apex-https.rule=Host(`${HOSTTHIS_APEX_DOMAIN}`)"
+      - "traefik.http.routers.hostthis-apex-https.entryPoints=https"
+      - "traefik.http.routers.hostthis-apex-https.tls=true"
+      - "traefik.http.routers.hostthis-apex-https.tls.certresolver=letsencrypt-dns"
+      - "traefik.http.routers.hostthis-apex-https.tls.domains[0].main=${HOSTTHIS_APEX_DOMAIN}"
+      - "traefik.http.routers.hostthis-apex-https.tls.domains[0].sans=*.${HOSTTHIS_APEX_DOMAIN}"
+      - "traefik.http.routers.hostthis-apex-https.service=hostthis"
+      - "traefik.http.routers.hostthis-apex-http.rule=Host(`${HOSTTHIS_APEX_DOMAIN}`)"
+      - "traefik.http.routers.hostthis-apex-http.entryPoints=http"
+      - "traefik.http.routers.hostthis-apex-http.middlewares=hostthis-redirect-https"
+      # wildcard *.hostthis.dev
+      - "traefik.http.routers.hostthis-wild-https.rule=HostRegexp(`^[a-z0-9-]+\\.hostthis\\.dev$`)"
+      - "traefik.http.routers.hostthis-wild-https.entryPoints=https"
+      - "traefik.http.routers.hostthis-wild-https.tls=true"
+      - "traefik.http.routers.hostthis-wild-https.tls.certresolver=letsencrypt-dns"
+      - "traefik.http.routers.hostthis-wild-https.tls.domains[0].main=${HOSTTHIS_APEX_DOMAIN}"
+      - "traefik.http.routers.hostthis-wild-https.tls.domains[0].sans=*.${HOSTTHIS_APEX_DOMAIN}"
+      - "traefik.http.routers.hostthis-wild-https.service=hostthis"
+      - "traefik.http.routers.hostthis-wild-http.rule=HostRegexp(`^[a-z0-9-]+\\.hostthis\\.dev$`)"
+      - "traefik.http.routers.hostthis-wild-http.entryPoints=http"
+      - "traefik.http.routers.hostthis-wild-http.middlewares=hostthis-redirect-https"
+      # middlewares
+      - "traefik.http.middlewares.hostthis-redirect-https.redirectScheme.scheme=https"
+      - "traefik.http.middlewares.hostthis-redirect-https.redirectScheme.permanent=true"
+      # service definition + active healthcheck.
+      # During a rolling deploy both OLD and NEW containers register
+      # under the same service name; traefik load-balances across both
+      # while the NEW one warms up + after OLD is removed it routes
+      # solely to NEW.
+      - "traefik.http.services.hostthis.loadbalancer.server.port=8080"
+      - "traefik.http.services.hostthis.loadbalancer.healthCheck.path=/healthz"
+      - "traefik.http.services.hostthis.loadbalancer.healthCheck.interval=10s"
+      - "traefik.http.services.hostthis.loadbalancer.healthCheck.timeout=3s"
+      # TCP router for ssh — raw TCP has no SNI, so HostSNI(*) catches
+      # all traffic on the ssh entrypoint. Traefik routes to whichever
+      # container is currently healthy on port 2222. In-flight SSH
+      # sessions on a stopping container get TCP-reset.
+      - "traefik.tcp.routers.hostthis-ssh.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.hostthis-ssh.entryPoints=ssh"
+      - "traefik.tcp.routers.hostthis-ssh.service=hostthis-ssh"
+      - "traefik.tcp.services.hostthis-ssh.loadbalancer.server.port=2222"
 
   minio:
     image: minio/minio:latest
