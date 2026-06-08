@@ -56,6 +56,7 @@ type Manage struct {
 	Cache           CachePurger // never called if nil; for CDN invalidation on Update/Delete
 	PublicURL       URLBuilder  // required iff Cache is set; turns slug into purge URL
 	ServiceCapBytes int64       // 0 = no service-wide cap
+	KeyGate         *KeyGate    // optional; populates WhoamiInfo.Session when set
 	Now             func() time.Time
 }
 
@@ -335,15 +336,18 @@ func (m *Manage) Unpin(slug domain.Slug, owner string) error {
 
 // Whoami returns the per-owner summary used by the `whoami` verb.
 type WhoamiInfo struct {
-	Identity     string
-	Active       int
-	FirstSeen    time.Time
-	UsedBytes    int   // compressed bytes summed across active non-deleted versions
-	QuotaBytes   int   // domain.UserQuotaBytes — surfaced so SSH formatter doesn't import domain
+	Identity   string
+	Active     int
+	FirstSeen  time.Time
+	UsedBytes  int // compressed bytes summed across active non-deleted versions
+	QuotaBytes int // domain.UserQuotaBytes — surfaced so SSH formatter doesn't import domain
+	Session    SessionInfo // per-session keygate state; zero value if KeyGate isn't wired
 }
 
-// Whoami populates WhoamiInfo for an owner (key fingerprint).
-func (m *Manage) Whoami(owner string) (WhoamiInfo, error) {
+// Whoami populates WhoamiInfo for an owner (key fingerprint). subnet
+// may be empty when the caller doesn't have one (tests etc.); session
+// fields are then zero. KeyGate may be nil — same effect.
+func (m *Manage) Whoami(owner, subnet string) (WhoamiInfo, error) {
 	if !domain.Identity(owner).IsKeyed() {
 		return WhoamiInfo{}, ErrEmptyOwner
 	}
@@ -359,13 +363,21 @@ func (m *Manage) Whoami(owner string) (WhoamiInfo, error) {
 	if err != nil {
 		return WhoamiInfo{}, err
 	}
-	return WhoamiInfo{
+	info := WhoamiInfo{
 		Identity:   owner,
 		Active:     active,
 		FirstSeen:  first,
 		UsedBytes:  used,
 		QuotaBytes: domain.UserQuotaBytes,
-	}, nil
+	}
+	if m.KeyGate != nil && subnet != "" {
+		// Best-effort: a keygate error doesn't fail whoami; session
+		// fields just stay zero. The user still sees their pastes.
+		if s, err := m.KeyGate.Inspect(owner, subnet); err == nil {
+			info.Session = s
+		}
+	}
+	return info, nil
 }
 
 // validName: per spec, 1–60 printable Unicode chars, no newlines.

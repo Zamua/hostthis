@@ -1014,6 +1014,68 @@ func (r *SlateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 	return false, nil
 }
 
+// SubnetSnapshot counts in-window rows for a subnet + finds the
+// oldest first_seen value among them. Used by the rich Sybil refusal
+// + by whoami's per-session budget block.
+func (r *SlateRepo) SubnetSnapshot(subnet string, now time.Time, window time.Duration) (int, time.Time, error) {
+	items, err := r.scanPrefix(prefixKeygateSubnet(subnet))
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	cutoff := now.Add(-window)
+	count := 0
+	var oldest time.Time
+	for _, item := range items {
+		t, err := time.Parse(time.RFC3339Nano, string(item.Value))
+		if err != nil {
+			continue
+		}
+		if !t.After(cutoff) {
+			continue
+		}
+		count++
+		if oldest.IsZero() || t.Before(oldest) {
+			oldest = t
+		}
+	}
+	return count, oldest, nil
+}
+
+// SubnetsForIdentity counts distinct in-window subnets for an identity.
+// Walks the global keygate prefix; cost is O(total keygate rows) which
+// is bounded by the per-subnet cap × number of active subnets.
+func (r *SlateRepo) SubnetsForIdentity(identity string, now time.Time, window time.Duration) (int, error) {
+	items, err := r.scanPrefix([]byte("keygate/"))
+	if err != nil {
+		return 0, err
+	}
+	cutoff := now.Add(-window)
+	seen := make(map[string]struct{})
+	for _, item := range items {
+		// key shape: keygate/<subnet>/<identity>
+		k := string(item.Key)
+		rest := strings.TrimPrefix(k, "keygate/")
+		idx := strings.LastIndex(rest, "/")
+		if idx < 0 {
+			continue
+		}
+		subnet := rest[:idx]
+		id := rest[idx+1:]
+		if id != identity {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339Nano, string(item.Value))
+		if err != nil {
+			continue
+		}
+		if !t.After(cutoff) {
+			continue
+		}
+		seen[subnet] = struct{}{}
+	}
+	return len(seen), nil
+}
+
 func (r *SlateRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 	items, err := r.scanPrefix([]byte("keygate/"))
 	if err != nil {
