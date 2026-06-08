@@ -64,11 +64,41 @@ read the URL but can't update, rename, pin, or delete the paste.
 ## Examples
 
 ```
+# upload, get a URL on stdout
 cat index.html | ssh hostthis.dev
-cat README.md  | ssh hostthis.dev --name notes
-cat v2.html    | ssh hostthis.dev abc12345
+
+# upload with an owner-only label visible in `list`
+cat notes.md | ssh hostthis.dev --name "alpha notes"
+
+# update an existing paste (same URL, new bytes; bumps to v2, v3, ...)
+cat v2.html | ssh hostthis.dev abc12345
+
+# force content type when sniffing gets it wrong
+cat tricky.html | ssh hostthis.dev --type html
+
+# see your active pastes, plus your current quota usage
 ssh hostthis.dev list
+ssh hostthis.dev whoami
+
+# walk a paste's version history
+ssh hostthis.dev versions abc12345
+
+# read content back (owner only)
+ssh hostthis.dev show abc12345
+
+# stick the URL on v1 even though v3 is the latest
+ssh hostthis.dev pin abc12345 1
+ssh hostthis.dev unpin abc12345
+
+# free one version's bytes; the history row stays as a tombstone
+ssh hostthis.dev delete abc12345 2
+
+# delete the paste entirely
 ssh hostthis.dev delete abc12345
+
+# set or clear the owner label
+ssh hostthis.dev rename abc12345 "new label"
+ssh hostthis.dev rename abc12345 ""
 ```
 
 ## Limits
