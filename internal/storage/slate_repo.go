@@ -917,11 +917,17 @@ func (r *SlateRepo) ExpiredSlugs(now time.Time) ([]string, error) {
 	return out, nil
 }
 
+// UnreferencedBlobSHAs returns the set of REFERENCED content SHAs —
+// note the misleading name (inherited from the sqlite impl). The
+// sweep treats the returned slice as the allow-list: any blob whose
+// sha is NOT in this slice is deleted as orphan. Returning an empty
+// slice while the bucket has blobs in it = TOTAL DATA LOSS, which is
+// exactly what happened the first time this method was a stub. Don't
+// stub it.
+//
+// A sha is "referenced" if it's the head sha of an active paste OR
+// the content_sha of a non-deleted version row.
 func (r *SlateRepo) UnreferencedBlobSHAs() ([]string, error) {
-	// Build the set of currently-referenced shas: head sha of every
-	// paste + content_sha of every (non-deleted) version row.
-	// Mirror of the sqlite query. Returns nothing — the sweep walks
-	// the blob store and checks each sha against this set.
 	pastes, err := r.scanPrefix([]byte("pastes/"))
 	if err != nil {
 		return nil, err
@@ -949,13 +955,11 @@ func (r *SlateRepo) UnreferencedBlobSHAs() ([]string, error) {
 			referenced[v.ContentSHA] = struct{}{}
 		}
 	}
-	// The sqlite impl returns nothing here and lets the sweep walker
-	// look up each sha individually. For symmetry we do the same:
-	// returning a snapshot of "referenced" shas would invert the
-	// semantics. Caller iterates blobs and checks IsReferenced(sha).
-	// TODO(slate): add IsReferenced(sha) helper alongside this.
-	_ = referenced
-	return nil, nil
+	out := make([]string, 0, len(referenced))
+	for sha := range referenced {
+		out = append(out, sha)
+	}
+	return out, nil
 }
 
 // --- KeyGateRepo (Sybil rate limit) ----------------------------------------

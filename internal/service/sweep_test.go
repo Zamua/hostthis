@@ -140,3 +140,50 @@ func TestSweep_GCsOrphanBlobOnly(t *testing.T) {
 		t.Fatalf("orphan should be gone")
 	}
 }
+
+// TestSweep_GuardsAgainstBuggyRepoZeroRefs is the safety net for the
+// 2026-06-08 data-loss incident: if a buggy metadata-repo impl
+// returns zero referenced shas while blobs exist AND no pastes were
+// just deleted, the sweep MUST refuse to GC instead of wiping the
+// bucket. We model the bug with a fake repo whose UnreferencedBlobSHAs
+// always returns nil.
+func TestSweep_GuardsAgainstBuggyRepoZeroRefs(t *testing.T) {
+	dir := t.TempDir()
+	blobs, _ := storage.NewBlobStore(filepath.Join(dir, "blobs"))
+
+	// Two real blobs in the store.
+	sha1 := domain.HashContent([]byte("aaa"))
+	sha2 := domain.HashContent([]byte("bbb"))
+	for sha, body := range map[string][]byte{sha1: []byte("aaa"), sha2: []byte("bbb")} {
+		if err := blobs.Put(sha, bytes.NewReader(body), int64(len(body))); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	repo := &buggyRepo{} // returns 0 referenced, 0 expired
+	sweep := service.NewSweep(repo, blobs, log.New(io.Discard, "", 0))
+
+	_, gc, err := sweep.Once(time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("sweep should not error, just refuse: %v", err)
+	}
+	if gc != 0 {
+		t.Fatalf("guard MUST refuse GC, got gc=%d", gc)
+	}
+	// Both blobs must still exist.
+	for _, sha := range []string{sha1, sha2} {
+		if _, err := blobs.Get(sha); err != nil {
+			t.Fatalf("blob %s should survive a buggy repo: %v", sha, err)
+		}
+	}
+}
+
+// buggyRepo simulates the SlateRepo.UnreferencedBlobSHAs-returns-nil
+// bug from 2026-06-08. Only methods the sweep actually invokes are
+// stubbed; everything else panics so the test surfaces unexpected
+// calls.
+type buggyRepo struct{}
+
+func (buggyRepo) ExpiredSlugs(_ time.Time) ([]string, error)    { return nil, nil }
+func (buggyRepo) Delete(_ domain.Slug) error                    { panic("not expected") }
+func (buggyRepo) UnreferencedBlobSHAs() ([]string, error)       { return nil, nil }
