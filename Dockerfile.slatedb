@@ -54,15 +54,15 @@ ENV CGO_ENABLED=1 \
 # is compiled in. The sqlite path remains AS-WELL — operator picks at
 # runtime via HOSTTHIS_METADATA_BACKEND.
 RUN GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-        go build -tags slatedb -ldflags="-s -w" -o /out/hostthisd ./cmd/hostthisd \
+        go build -tags slatedb -buildvcs=false -ldflags="-s -w" -o /out/hostthisd ./cmd/hostthisd \
  && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-        go build -tags slatedb -ldflags="-s -w" -o /out/hostthis-metadata-migrate ./cmd/hostthis-metadata-migrate \
+        go build -tags slatedb -buildvcs=false -ldflags="-s -w" -o /out/hostthis-metadata-migrate ./cmd/hostthis-metadata-migrate \
  && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-        go build -ldflags="-s -w" -o /out/hostthis-blob-migrate ./cmd/hostthis-blob-migrate \
+        go build -buildvcs=false -ldflags="-s -w" -o /out/hostthis-blob-migrate ./cmd/hostthis-blob-migrate \
  && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-        go build -ldflags="-s -w" -o /out/hostthis-blob-verify ./cmd/hostthis-blob-verify \
+        go build -buildvcs=false -ldflags="-s -w" -o /out/hostthis-blob-verify ./cmd/hostthis-blob-verify \
  && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-        go build -ldflags="-s -w" -o /out/hostthis-blob-compress ./cmd/hostthis-blob-compress
+        go build -buildvcs=false -ldflags="-s -w" -o /out/hostthis-blob-compress ./cmd/hostthis-blob-compress
 
 # ---- runtime stage ----------------------------------------------------------
 # distroless/cc has glibc + dynamic loader. distroless/static doesn't.
