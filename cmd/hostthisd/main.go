@@ -75,6 +75,17 @@ func main() {
 	sweepSvc := service.NewSweep(pasteRepo, blobsSweep, logger)
 	sweepSvc.KeyGate = keyGate
 
+	// HOSTTHIS_SWEEP_DISABLED=true skips the periodic sweep entirely
+	// for the lifetime of the process. Operator handle for cutover
+	// windows where blob GC must NOT run (e.g. switching the
+	// metadata backend before the new backend's view of "referenced
+	// shas" has caught up with the bucket). Unset / "false" leaves
+	// the default 10-min sweep on.
+	sweepDisabled := strings.EqualFold(envOr("HOSTTHIS_SWEEP_DISABLED", "false"), "true")
+	if sweepDisabled {
+		logger.Printf("sweep: DISABLED via HOSTTHIS_SWEEP_DISABLED=true (no periodic expiry / blob GC / key-gate prune this process lifetime)")
+	}
+
 	logger.Printf("config: storage_cap=%d bytes, fresh_keys/subnet=%d per %s",
 		*storageCap, *freshKeysLimit, *freshKeysWindow)
 
@@ -131,7 +142,9 @@ func main() {
 		logger.Printf("http: listening on %s", *httpAddr)
 		errs <- httpSrv.ListenAndServe()
 	}()
-	go sweepSvc.Run(ctx)
+	if !sweepDisabled {
+		go sweepSvc.Run(ctx)
+	}
 
 	select {
 	case <-ctx.Done():
