@@ -64,6 +64,7 @@
   dd { margin: 0.1rem 0 0 4ch; color: var(--ink-soft); }
   strong, b { font-weight: 700; color: var(--ink); }
   a { color: var(--accent); }
+  .ink-soft { color: var(--ink-soft); }
   @media (max-width: 540px) {
     body { padding: 1rem 0.7rem 2.5rem; font-size: 13px; }
     .titleline, .footline { font-size: 0.8rem; }
@@ -141,11 +142,41 @@ the paste.</p>
 
 <h2>Examples</h2>
 <div class="indent">
-<pre>cat index.html | ssh hostthis.dev
-cat README.md  | ssh hostthis.dev --name notes
-cat v2.html    | ssh hostthis.dev abc12345
+<pre><span class="ink-soft"># upload, get a URL on stdout</span>
+cat index.html | ssh hostthis.dev
+
+<span class="ink-soft"># upload with an owner-only label visible in `list`</span>
+cat notes.md | ssh hostthis.dev --name "alpha notes"
+
+<span class="ink-soft"># update an existing paste (same URL, new bytes; bumps to v2, v3, ...)</span>
+cat v2.html | ssh hostthis.dev abc12345
+
+<span class="ink-soft"># force content type when sniffing gets it wrong</span>
+cat tricky.html | ssh hostthis.dev --type html
+
+<span class="ink-soft"># see your active pastes, plus your current quota usage</span>
 ssh hostthis.dev list
-ssh hostthis.dev delete abc12345</pre>
+ssh hostthis.dev whoami
+
+<span class="ink-soft"># walk a paste's version history</span>
+ssh hostthis.dev versions abc12345
+
+<span class="ink-soft"># read content back (owner only)</span>
+ssh hostthis.dev show abc12345
+
+<span class="ink-soft"># stick the URL on v1 even though v3 is the latest</span>
+ssh hostthis.dev pin abc12345 1
+ssh hostthis.dev unpin abc12345
+
+<span class="ink-soft"># free one version's bytes; the history row stays as a tombstone</span>
+ssh hostthis.dev delete abc12345 2
+
+<span class="ink-soft"># delete the paste entirely</span>
+ssh hostthis.dev delete abc12345
+
+<span class="ink-soft"># set or clear the owner label</span>
+ssh hostthis.dev rename abc12345 "new label"
+ssh hostthis.dev rename abc12345 ""</pre>
 </div>
 
 <h2>Limits</h2>
