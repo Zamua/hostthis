@@ -111,6 +111,21 @@ func (s *S3BlobStore) Put(sha string, r io.Reader, size int64) error {
 	return nil
 }
 
+// PutBytesOverwrite forces a rewrite of the object at sha, bypassing
+// the content-addressed skip in Put. Only the blob-compress migrator
+// uses this.
+func (s *S3BlobStore) PutBytesOverwrite(sha string, body []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := s.client.PutObject(ctx, s.bucket, sha, bytes.NewReader(body), int64(len(body)), minio.PutObjectOptions{
+		ContentType: "application/octet-stream",
+	})
+	if err != nil {
+		return fmt.Errorf("s3 put-overwrite %s: %w", sha, err)
+	}
+	return nil
+}
+
 func (s *S3BlobStore) Get(sha string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

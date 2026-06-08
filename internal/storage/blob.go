@@ -71,6 +71,40 @@ func (b *BlobStore) Put(sha string, r io.Reader, size int64) error {
 	return nil
 }
 
+// PutBytesOverwrite forces a rewrite of the blob at sha, bypassing
+// the content-addressed skip in Put. Only the blob-compress migrator
+// uses this — Put's "already there → skip" optimization is the right
+// behavior for the normal upload path, where dedup is the whole point.
+//
+// Atomic in the same way Put is: write tmp, fsync, rename.
+func (b *BlobStore) PutBytesOverwrite(sha string, body []byte) error {
+	if len(sha) < 2 {
+		return fmt.Errorf("blob: sha too short")
+	}
+	dir := filepath.Join(b.root, sha[:2])
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("blob mkdir %q: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("blob tmp create: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("blob write: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("blob sync: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("blob close: %w", err)
+	}
+	return os.Rename(tmpName, filepath.Join(dir, sha))
+}
+
 // Get returns the bytes for sha, or ErrNotFound.
 func (b *BlobStore) Get(sha string) ([]byte, error) {
 	if len(sha) < 2 {
