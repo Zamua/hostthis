@@ -43,18 +43,18 @@ func main() {
 
 	logger := log.New(os.Stderr, "hostthis ", log.LstdFlags|log.LUTC)
 
-	if err := os.MkdirAll(*dataDir, 0o750); err != nil {
-		logger.Fatalf("mkdir data-dir: %v", err)
-	}
-
-	db, err := storage.Open(filepath.Join(*dataDir, "hostthis.db"))
+	metadata, err := buildMetadata(*dataDir, logger)
 	if err != nil {
-		logger.Fatalf("open db: %v", err)
+		logger.Fatalf("metadata backend: %v", err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := metadata.Close(); err != nil {
+			logger.Printf("metadata close: %v", err)
+		}
+	}()
 
-	pasteRepo := storage.NewPasteRepo(db)
-	keyGateRepo := storage.NewKeyGateRepo(db)
+	pasteRepo := metadata.Repo
+	keyGateRepo := metadata.KeyGate
 	blobs, blobsSweep, err := buildBlobStore(*dataDir, logger)
 	if err != nil {
 		logger.Fatalf("blob store: %v", err)
