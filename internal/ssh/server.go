@@ -211,7 +211,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		}
 		url := s.BuildURL(res.Paste.Slug)
 		fmt.Fprintln(sess, url)
-		fmt.Fprintf(sess.Stderr(), "v%d saved — expires in 7 days\n", res.NewVer)
+		fmt.Fprintf(sess.Stderr(), "v%d saved. expires in 7 days\n", res.NewVer)
 		if res.WasPinned {
 			fmt.Fprintf(sess.Stderr(),
 				"note: this paste is pinned to v%d, so the URL still serves v%d, not v%d.\n",
@@ -232,7 +232,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	url := s.BuildURL(res.Paste.Slug)
 	fmt.Fprintln(sess, url)
 	if res.Paste.Name != "" {
-		fmt.Fprintf(sess.Stderr(), "%q — expires in 7 days\n", res.Paste.Name)
+		fmt.Fprintf(sess.Stderr(), "%q. expires in 7 days\n", res.Paste.Name)
 	} else {
 		fmt.Fprintln(sess.Stderr(), "expires in 7 days")
 	}
@@ -258,7 +258,7 @@ func (s *Server) verbList(sess gossh.Session, owner string) {
 	for _, p := range pastes {
 		name := p.Name
 		if name == "" {
-			name = "—"
+			name = "-"
 		}
 		fmt.Fprintf(sess, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.Slug, name, humanBytes(p.Size), p.Kind,
@@ -372,7 +372,7 @@ func (s *Server) verbDelete(sess gossh.Session, owner string, argv []string) {
 			fmt.Fprintf(sess.Stderr(), "version v%d already deleted\n", verNum)
 			_ = sess.Exit(0)
 		case errors.Is(err, service.ErrVersionCurrentlyServed):
-			fmt.Fprintf(sess.Stderr(), "hostthis: v%d is currently served — pin a different version first (or `unpin` if pinning was active)\n", verNum)
+			fmt.Fprintf(sess.Stderr(), "hostthis: v%d is currently served. pin a different version first (or `unpin` if pinning was active)\n", verNum)
 			_ = sess.Exit(2)
 		default:
 			emitServiceErr(sess, err)
@@ -435,7 +435,7 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 		}
 		size := humanBytes(v.Size)
 		if v.Deleted {
-			size = "—"
+			size = "-"
 		}
 		fmt.Fprintf(sess, "v%d\t%s\t%s\t%s\n",
 			v.VerNum, marker, v.CreatedAt.Format("2006-01-02 15:04 UTC"), size)
@@ -444,7 +444,7 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 	if p.PinnedVersion != 0 {
 		pinNote = fmt.Sprintf("pinned to v%d", p.PinnedVersion)
 	}
-	fmt.Fprintf(sess.Stderr(), "%s — expires in %s (%s)\n",
+	fmt.Fprintf(sess.Stderr(), "%s. expires in %s (%s)\n",
 		pinNote, humanDuration(p.ExpiresAt.Sub(now)), p.ExpiresAt.Format("2006-01-02 15:04 UTC"))
 	_ = sess.Exit(0)
 }
@@ -524,15 +524,12 @@ func (s *Server) verbHelp(sess gossh.Session) {
 	_ = sess.Exit(0)
 }
 
-const helpText = `hostthis — pipe a rendered file in, get a URL out. pastes expire 7 days after last update.
+const helpText = `Pipe a rendered file in, get a URL out. Pastes expire 7 days after last update.
 
 UPLOAD
 
     cat foo.html | ssh hostthis.dev
-        → https://7gh3kp29.hostthis.dev   (random subdomain, 7-day TTL)
-
-    cat doc.md | ssh hostthis.dev --name "design notes"
-        → URL plus an owner-only label visible in ` + "`list`" + `
+    cat doc.md   | ssh hostthis.dev --name "design notes"
 
 UPDATE & MANAGE (owner only; ssh key authenticates)
 
@@ -546,7 +543,7 @@ UPDATE & MANAGE (owner only; ssh key authenticates)
 
 VERSION HISTORY
 
-    Each ` + "`update`" + ` adds a new version (v2, v3, …). Default URL serves the latest.
+    Each ` + "`update`" + ` adds a new version (v2, v3, ...). Default URL serves the latest.
 
     ssh hostthis.dev versions <slug>            timeline of every version
     ssh hostthis.dev pin <slug> <ver>           stick URL to <ver> (survives updates)
@@ -556,15 +553,10 @@ LIMITS
 
     10 MiB total per identity, counting post-compression bytes across
     all your active pastes (every version of every paste). Highly
-    redundant text compresses 5–10×, so typical HTML/Markdown fits a
+    redundant text compresses 5-10x, so typical HTML/Markdown fits a
     lot of content under the cap.
 
-    Content types: HTML, Markdown. Anything else rejected at upload.
-
-THE URL IS THE SECRET
-
-    Slug is 8 random chars (~10^12 combos). Share the URL with anyone
-    you want; don't share it with anyone you don't. No password gate.`
+    Content types: HTML, Markdown. Anything else rejected at upload.`
 
 // -- helpers ----------------------------------------------------------------
 
@@ -578,7 +570,7 @@ func requireSlug(argv []string) (domain.Slug, error) {
 func emitServiceErr(sess gossh.Session, err error) {
 	switch {
 	case errors.Is(err, service.ErrEmptyOwner):
-		fmt.Fprintln(sess.Stderr(), "hostthis: add an ssh key — this command needs an identity")
+		fmt.Fprintln(sess.Stderr(), "hostthis: add an ssh key. this command needs an identity")
 	case errors.Is(err, service.ErrNotFound):
 		fmt.Fprintln(sess.Stderr(), "hostthis: not found")
 	case errors.Is(err, service.ErrNotOwner):

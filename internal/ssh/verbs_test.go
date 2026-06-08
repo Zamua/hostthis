@@ -342,7 +342,7 @@ func TestVerbHelp_OnUnknown(t *testing.T) {
 	if !strings.Contains(stderr, "unknown command") {
 		t.Fatalf("expected 'unknown command': %q", stderr)
 	}
-	if !strings.Contains(stderr, "hostthis — pipe") {
+	if !strings.Contains(stderr, "Pipe a rendered file") {
 		t.Fatalf("expected help text after the error: %q", stderr)
 	}
 }
