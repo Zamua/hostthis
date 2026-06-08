@@ -95,10 +95,24 @@ func (s *Server) handleSession(sess gossh.Session) {
 	// any one IP subnet can introduce in a 24h window. Returning users
 	// (any (key, subnet) we've seen before) pass through with no
 	// accounting.
+	subnet := ipSubnet(remoteIP(sess))
 	if s.KeyGate != nil {
-		subnet := ipSubnet(remoteIP(sess))
 		if err := s.KeyGate.Admit(owner, subnet); err != nil {
+			var ref *service.SybilRefusal
+			if errors.As(err, &ref) {
+				fmt.Fprintf(sess.Stderr(), "hostthis: too many new keys from this network today\n")
+				fmt.Fprintf(sess.Stderr(), "  subnet %s used %d of %d in the last 24h\n", ref.Subnet, ref.FreshCountInWindow, ref.Cap)
+				fmt.Fprintf(sess.Stderr(), "  your key %s isn't yet registered here\n", strings.TrimPrefix(owner, domain.IdentityKeyPrefix))
+				fmt.Fprintln(sess.Stderr(), "to get in:")
+				fmt.Fprintln(sess.Stderr(), "  (a) use a key already known on this subnet")
+				if frees := ref.NextSlotFreesAt(); !frees.IsZero() {
+					fmt.Fprintf(sess.Stderr(), "  (b) wait until %s — the oldest entry ages out then\n", frees.UTC().Format("2006-01-02 15:04 UTC"))
+				}
+				_ = sess.Exit(6)
+				return
+			}
 			if errors.Is(err, service.ErrSybilRateLimit) {
+				// Fallback when the rich enrichment failed.
 				fmt.Fprintln(sess.Stderr(), "hostthis: too many new keys from this network today.")
 				fmt.Fprintln(sess.Stderr(), "  try again tomorrow, or use an existing key already known to hostthis.")
 				_ = sess.Exit(6)
@@ -496,7 +510,8 @@ func (s *Server) verbPin(sess gossh.Session, owner string, argv []string) {
 func (s *Server) verbWhoami(sess gossh.Session, owner string) {
 	// handleSession rejects key-less sessions before they get here,
 	// so owner is always a key:<fp> identity by this point.
-	info, err := s.Manage.Whoami(owner)
+	subnet := ipSubnet(remoteIP(sess))
+	info, err := s.Manage.Whoami(owner, subnet)
 	if err != nil {
 		emitServiceErr(sess, err)
 		return
@@ -513,7 +528,23 @@ func (s *Server) verbWhoami(sess gossh.Session, owner string) {
 		fmt.Fprintf(sess, "quota:   %s / %s (%.0f%%)\n",
 			humanBytes(info.UsedBytes), humanBytes(info.QuotaBytes), pct)
 	}
+	if info.Session.Subnet != "" {
+		fmt.Fprintln(sess)
+		fmt.Fprintln(sess, "session:")
+		fmt.Fprintf(sess, "  subnet:        %s\n", info.Session.Subnet)
+		fmt.Fprintf(sess, "  seen subnets:  %d  (this one + %d other in the last 24h)\n",
+			info.Session.IdentitySubnets, max0(info.Session.IdentitySubnets-1))
+		fmt.Fprintf(sess, "  subnet budget: %d of %d fresh keys used here today\n",
+			info.Session.SubnetFreshCount, info.Session.SubnetCap)
+	}
 	_ = sess.Exit(0)
+}
+
+func max0(n int) int {
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 // -- help -------------------------------------------------------------------

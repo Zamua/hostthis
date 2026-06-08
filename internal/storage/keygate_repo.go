@@ -77,6 +77,41 @@ func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitP
 	return false, tx.Commit()
 }
 
+// SubnetSnapshot returns (freshCount, oldestFirstSeen) for in-window
+// rows from subnet. Empty subnet → (0, zero-time, nil). See the
+// service-layer KeyGateRepo interface for usage.
+func (r *KeyGateRepo) SubnetSnapshot(subnet string, now time.Time, window time.Duration) (int, time.Time, error) {
+	windowStart := now.Add(-window)
+	var count int
+	var oldest sql.NullString
+	err := r.db.QueryRow(`
+		SELECT COUNT(*), MIN(first_seen_at) FROM key_first_seen
+		WHERE ip_subnet = ? AND first_seen_at > ?
+	`, subnet, formatTime(windowStart)).Scan(&count, &oldest)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("subnet snapshot: %w", err)
+	}
+	var t time.Time
+	if oldest.Valid {
+		t = parseTime(oldest.String)
+	}
+	return count, t, nil
+}
+
+// SubnetsForIdentity counts distinct in-window subnets for identity.
+func (r *KeyGateRepo) SubnetsForIdentity(identity string, now time.Time, window time.Duration) (int, error) {
+	windowStart := now.Add(-window)
+	var n int
+	err := r.db.QueryRow(`
+		SELECT COUNT(DISTINCT ip_subnet) FROM key_first_seen
+		WHERE identity = ? AND first_seen_at > ?
+	`, identity, formatTime(windowStart)).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("subnets for identity: %w", err)
+	}
+	return n, nil
+}
+
 // DeleteFirstSeenOlderThan removes key_first_seen rows whose
 // first_seen_at is before cutoff. Such rows can never contribute to
 // the rate-limit count again — they're past the window — so they're

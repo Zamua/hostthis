@@ -18,6 +18,20 @@ type KeyGateRepo interface {
 	// window — they no longer affect any future admission decision.
 	// Called by the periodic sweep to keep the table from growing.
 	DeleteFirstSeenOlderThan(cutoff time.Time) (int, error)
+
+	// SubnetSnapshot returns (freshCount, oldestFirstSeen) for the
+	// (identity, subnet)-rows from this subnet within the window.
+	// freshCount is how many rows count toward the per-subnet cap;
+	// oldestFirstSeen is the earliest in-window first_seen — adding
+	// `window` to it gives the moment when the next slot frees up.
+	// Empty subnet (no rows in window) returns (0, time.Time{}).
+	// Used by Admit's refusal path + by Whoami for budget display.
+	SubnetSnapshot(subnet string, now time.Time, window time.Duration) (freshCount int, oldestFirstSeen time.Time, err error)
+
+	// SubnetsForIdentity returns the number of distinct subnets this
+	// identity has rows for within the window. Used by Whoami so the
+	// user can see how many networks their key is grandfathered on.
+	SubnetsForIdentity(identity string, now time.Time, window time.Duration) (int, error)
 }
 
 // KeyGate gates new SSH sessions: a fresh (identity, ip-subnet) pair
@@ -45,26 +59,89 @@ func NewKeyGate(repo KeyGateRepo) *KeyGate {
 	}
 }
 
-// ErrSybilRateLimit is returned when the subnet has exceeded its fresh-
-// key allowance. The SSH server surfaces a friendly "too many new keys
-// from this network today; try tomorrow or reuse an existing key"
-// message and exits the session.
+// ErrSybilRateLimit is the sentinel for "the subnet has exceeded its
+// fresh-key allowance." Callers should prefer `errors.As` on
+// *SybilRefusal (which still matches via errors.Is(err, ErrSybilRateLimit))
+// to surface a richer message including current cap usage + when the
+// next slot frees up.
 var ErrSybilRateLimit = errors.New("service: too many new keys from this network today")
 
+// SybilRefusal enriches ErrSybilRateLimit with the context the SSH
+// layer needs to print a self-diagnosing message: which subnet, how
+// full the cap is, and when the oldest in-window entry ages out.
+type SybilRefusal struct {
+	Subnet              string
+	Cap                 int
+	FreshCountInWindow  int
+	OldestEntryFirstSeen time.Time
+	Window              time.Duration
+}
+
+func (e *SybilRefusal) Error() string { return ErrSybilRateLimit.Error() }
+func (e *SybilRefusal) Is(target error) bool { return target == ErrSybilRateLimit }
+// NextSlotFreesAt returns the moment the oldest in-window entry ages
+// out and frees a slot. Zero time if no in-window entries.
+func (e *SybilRefusal) NextSlotFreesAt() time.Time {
+	if e.OldestEntryFirstSeen.IsZero() { return time.Time{} }
+	return e.OldestEntryFirstSeen.Add(e.Window)
+}
+
 // Admit gates one session. Both identity and ipSubnet must be non-empty.
+// On refusal returns *SybilRefusal (which is also errors.Is(ErrSybilRateLimit)).
 func (g *KeyGate) Admit(identity, ipSubnet string) error {
 	now := g.Now().UTC()
 	known, err := g.Repo.AdmitNewKey(identity, ipSubnet, now, g.MaxFreshKeysPerSubnet, g.Window)
 	if err != nil {
-		// Map storage's "too many new keys" → our user-facing sentinel.
-		// Other errors propagate.
 		if isStorageRateLimitErr(err) {
-			return ErrSybilRateLimit
+			// Enrich with subnet snapshot. Best-effort: if the
+			// snapshot itself errors, fall back to the bare sentinel
+			// so the caller still gets a sensible response.
+			count, oldest, sErr := g.Repo.SubnetSnapshot(ipSubnet, now, g.Window)
+			if sErr != nil {
+				return ErrSybilRateLimit
+			}
+			return &SybilRefusal{
+				Subnet: ipSubnet, Cap: g.MaxFreshKeysPerSubnet,
+				FreshCountInWindow: count, OldestEntryFirstSeen: oldest,
+				Window: g.Window,
+			}
 		}
 		return err
 	}
-	_ = known // not used by callers right now, but useful for telemetry
+	_ = known
 	return nil
+}
+
+// SessionInfo is the per-session keygate state surfaced by `whoami`.
+// Filled by KeyGate.Inspect(identity, subnet); zero values are OK.
+type SessionInfo struct {
+	Subnet            string        // canonical /24 or /48 the session came from
+	SubnetFreshCount  int           // current rows in this subnet's window
+	SubnetCap         int           // configured limit per subnet
+	IdentitySubnets   int           // distinct subnets this identity has rows for
+}
+
+// Inspect returns the rollup KeyGate state for an admitted session.
+// Called by Whoami AFTER admit, so we don't gate on success.
+func (g *KeyGate) Inspect(identity, ipSubnet string) (SessionInfo, error) {
+	if g == nil {
+		return SessionInfo{}, nil
+	}
+	now := g.Now().UTC()
+	subCount, _, err := g.Repo.SubnetSnapshot(ipSubnet, now, g.Window)
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	idSubnets, err := g.Repo.SubnetsForIdentity(identity, now, g.Window)
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	return SessionInfo{
+		Subnet: ipSubnet,
+		SubnetFreshCount: subCount,
+		SubnetCap: g.MaxFreshKeysPerSubnet,
+		IdentitySubnets: idSubnets,
+	}, nil
 }
 
 // PruneOldRows deletes rows older than the rate-limit window. The

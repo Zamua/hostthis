@@ -72,6 +72,8 @@ func main() {
 	keyGate := service.NewKeyGate(keyGateRepo)
 	keyGate.MaxFreshKeysPerSubnet = *freshKeysLimit
 	keyGate.Window = *freshKeysWindow
+	// Whoami uses the keygate for per-session subnet/budget info.
+	manageSvc.KeyGate = keyGate
 	sweepSvc := service.NewSweep(pasteRepo, blobsSweep, logger)
 	sweepSvc.KeyGate = keyGate
 
