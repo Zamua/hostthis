@@ -1,0 +1,92 @@
+# syntax=docker/dockerfile:1
+#
+# Dockerfile.slatedb — opt-in image with the SlateDB metadata backend
+# compiled in. Coexists with the default Dockerfile (which stays
+# sqlite-only + CGO=0 + distroless/static, ~75 MB image).
+#
+# Three stages:
+#   1. uniffi-build:  Rust toolchain → libslatedb_uniffi.so (~30 MB)
+#   2. go-build:      Go toolchain + cgo → hostthisd, migrate, verify, compress
+#   3. runtime:       distroless/cc:nonroot + libslatedb_uniffi.so + binaries
+#
+# Final image is ~150-180 MB vs ~75 MB for the sqlite default. Use
+# the default for any deployment that doesn't need slatedb yet.
+
+# SlateDB tag to clone + build. Keep aligned with the slatedb-go
+# version pinned in go.mod (slatedb.io/slatedb-go).
+ARG SLATEDB_VERSION=v0.13.1
+
+# ---- uniffi-build stage -----------------------------------------------------
+FROM rust:1.91-slim-bookworm AS uniffi-build
+ARG SLATEDB_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git ca-certificates pkg-config libssl-dev cmake \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git clone --depth 1 --branch ${SLATEDB_VERSION} \
+        https://github.com/slatedb/slatedb.git . \
+ && cargo build --release -p slatedb-uniffi \
+ && ls -la /src/target/release/libslatedb_uniffi.so
+
+# ---- go-build stage ---------------------------------------------------------
+FROM golang:1.26-bookworm AS go-build
+ARG SLATEDB_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc libc6-dev \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+
+# The .so must be on the linker path at build time (cgo LDFLAGS:
+# -lslatedb_uniffi) AND on the loader path at runtime (final image).
+COPY --from=uniffi-build /src/target/release/libslatedb_uniffi.so /usr/local/lib/
+
+# Cache module downloads independently of source edits.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ENV CGO_ENABLED=1 \
+    CGO_LDFLAGS="-L/usr/local/lib" \
+    LD_LIBRARY_PATH=/usr/local/lib
+
+# Build all four binaries with -tags slatedb so the slatedb code path
+# is compiled in. The sqlite path remains AS-WELL — operator picks at
+# runtime via HOSTTHIS_METADATA_BACKEND.
+RUN GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+        go build -tags slatedb -ldflags="-s -w" -o /out/hostthisd ./cmd/hostthisd \
+ && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+        go build -tags slatedb -ldflags="-s -w" -o /out/hostthis-metadata-migrate ./cmd/hostthis-metadata-migrate \
+ && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+        go build -ldflags="-s -w" -o /out/hostthis-blob-migrate ./cmd/hostthis-blob-migrate \
+ && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+        go build -ldflags="-s -w" -o /out/hostthis-blob-verify ./cmd/hostthis-blob-verify \
+ && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+        go build -ldflags="-s -w" -o /out/hostthis-blob-compress ./cmd/hostthis-blob-compress
+
+# ---- runtime stage ----------------------------------------------------------
+# distroless/cc has glibc + dynamic loader. distroless/static doesn't.
+FROM gcr.io/distroless/cc-debian12:nonroot
+
+WORKDIR /app
+
+COPY --from=uniffi-build /src/target/release/libslatedb_uniffi.so /usr/local/lib/
+COPY --from=go-build /out/hostthisd /app/hostthisd
+COPY --from=go-build /out/hostthis-metadata-migrate /app/hostthis-metadata-migrate
+COPY --from=go-build /out/hostthis-blob-migrate /app/hostthis-blob-migrate
+COPY --from=go-build /out/hostthis-blob-verify /app/hostthis-blob-verify
+COPY --from=go-build /out/hostthis-blob-compress /app/hostthis-blob-compress
+COPY web/landing.html /app/web/landing.html
+
+EXPOSE 2222 8080
+
+# LD_LIBRARY_PATH so the dynamic loader finds libslatedb_uniffi.so.
+ENV HOSTTHIS_DATA_DIR=/var/lib/hostthis \
+    HOSTTHIS_SSH_ADDR=:2222 \
+    HOSTTHIS_HTTP_ADDR=:8080 \
+    HOSTTHIS_LANDING=/app/web/landing.html \
+    LD_LIBRARY_PATH=/usr/local/lib
+
+USER nonroot:nonroot
+
+ENTRYPOINT ["/app/hostthisd"]
