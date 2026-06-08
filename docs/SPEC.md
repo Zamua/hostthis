@@ -523,12 +523,23 @@ bounded.
 
 ### Atomicity
 
-All three caps and the Sybil admit run inside `BEGIN IMMEDIATE`
-transactions (via `database/sql` `LevelSerializable`, which the
-modernc sqlite driver translates to BEGIN IMMEDIATE), so concurrent
-writers serialize at the transaction boundary instead of racing a
-stale SUM check. `busy_timeout(5000)` makes contention wait up to 5s
-rather than fail fast.
+All three caps and the Sybil admit run inside a single atomic
+transaction so concurrent writers serialize at the transaction
+boundary instead of racing a stale SUM check. The underlying
+mechanism depends on the metadata backend in use:
+
+- **sqlite backend** — `BEGIN IMMEDIATE` (via `database/sql`
+  `LevelSerializable`, which the modernc sqlite driver translates).
+  `busy_timeout(5000)` makes contention wait up to 5s rather than
+  fail fast.
+- **slatedb backend** — `Db.begin(IsolationLevel.SnapshotIsolation)`
+  with a `WriteBatch` for the actual multi-key writes; SlateDB's
+  manifest-level fencing ensures only one writer is alive at a time
+  across processes.
+
+The service layer treats both backends identically; the atomicity
+contract is "the multi-row write either fully lands or doesn't, with
+no half-applied state visible to readers."
 
 ### Threat model: what's bounded and what isn't
 
@@ -688,6 +699,92 @@ HOSTTHIS_BLOB_BACKEND=s3       # restart hostthis pointing at S3
 # wait one safe interval, confirm everything still works
 rm -rf data/blobs              # reclaim disk space
 ```
+
+---
+
+## Metadata storage backends
+
+The metadata layer (paste rows, version rows, identity quota
+counters, slug-to-identity index, Sybil key_first_seen rows) is
+pluggable. Two backends ship:
+
+- **sqlite** — single `<data-dir>/hostthis.db` file, WAL mode,
+  `BEGIN IMMEDIATE` transactions. The default. Zero operational
+  overhead, perfect for single-host deployments.
+- **slatedb** — embedded LSM-tree store with all data persisted to
+  an S3-compatible object store (MinIO, R2, S3, GCS, ABS). Same
+  HOSTTHIS_S3_* env vars as the blob backend, plus an explicit
+  bucket name so metadata and blobs can live in separate buckets.
+
+The service layer talks to a small set of interfaces
+(`PasteAdmin`, `KeyGateRepo`, `SweepRepo`) implemented by both
+backends. Domain layer + HTTP/SSH adapters are unaware of which is
+in use. Switching is one env var:
+
+```
+HOSTTHIS_METADATA_BACKEND=sqlite                  # default
+HOSTTHIS_METADATA_BACKEND=slatedb                 # opt-in
+HOSTTHIS_METADATA_S3_BUCKET=hostthis-metadata     # required for slatedb
+# (S3 endpoint/credentials reused from HOSTTHIS_S3_*)
+```
+
+### Why pluggable
+
+- **Stepping stone to multi-region.** SlateDB-on-MinIO validates the
+  cloud-object-store metadata path locally. Same code then points at
+  R2 in production with one env var change — no app rebuild.
+- **Stateless containers.** With SlateDB, the container holds no
+  durable state; killing it and bringing it up elsewhere is safe.
+  SQLite ties data to a host path.
+- **Scaling headroom.** SQLite's `BEGIN IMMEDIATE` caps sustained
+  writes at single-writer throughput (~100/s realistic). SlateDB
+  batches writes into SSTables and tolerates higher rates.
+
+### Migration: sqlite → slatedb (one-way)
+
+```
+HOSTTHIS_METADATA_BACKEND=sqlite                  # still on sqlite
+hostthis-metadata-migrate                          # reads sqlite, writes to slatedb
+HOSTTHIS_METADATA_BACKEND=slatedb                 # restart pointing at slatedb
+# wait one safe interval, confirm everything still works
+rm <data-dir>/hostthis.db                          # reclaim disk space
+```
+
+The migrator is idempotent: re-running it overwrites existing
+SlateDB keys with the same data. Safe to run repeatedly during a
+staged cutover.
+
+### Atomicity contract (both backends)
+
+Every write that touches multiple keys is committed atomically:
+
+- New paste = (paste row) + (v1 version row) + (identity quota
+  counter bump) + (slug-to-identity pointer). All four land or none.
+- Update = (new version row) + (paste head pointer update if
+  unpinned) + (identity quota counter bump). All three land or none.
+- Per-version delete = (version tombstone) + (identity quota counter
+  decrement). Both land or neither.
+- Whole-paste delete = (paste row delete) + (cascade to all version
+  rows) + (slug pointer delete) + (counter recompute). All land or
+  none.
+
+sqlite enforces this via `BEGIN IMMEDIATE`; slatedb via
+`Db.begin(IsolationLevel.SnapshotIsolation)` with `WriteBatch`.
+
+### Compose & operator config
+
+The blob backend (`HOSTTHIS_BLOB_BACKEND`) and the metadata backend
+(`HOSTTHIS_METADATA_BACKEND`) are independent. Reasonable combos:
+
+| metadata | blob | shape |
+| --- | --- | --- |
+| sqlite | disk | single-host, no cloud deps |
+| sqlite | s3 | single-host metadata + cloud blobs (today's prod) |
+| slatedb | s3 | fully stateless container; one MinIO/R2 bucket each |
+| slatedb | s3 (same bucket) | same — uses key prefixes `metadata/` and `blobs/` |
+
+Bucket-per-domain is recommended: separate IAM/credential rotation
+for metadata vs blobs.
 
 ---
 
