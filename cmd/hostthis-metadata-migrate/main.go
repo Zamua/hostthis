@@ -30,7 +30,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +54,17 @@ func main() {
 	src := storage.NewPasteRepo(db)
 	logger.Printf("source: sqlite at %s", dbPath)
 
+	// Debug: total row count direct from sqlite (bypassing the
+	// repo). Helps diagnose silent empty-source bugs.
+	var npastes, nversions int
+	if err := db.QueryRow("SELECT COUNT(*) FROM pastes").Scan(&npastes); err != nil {
+		logger.Printf("warn: pastes count: %v", err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM versions").Scan(&nversions); err != nil {
+		logger.Printf("warn: versions count: %v", err)
+	}
+	logger.Printf("source counts: pastes=%d versions=%d", npastes, nversions)
+
 	// Destination: slatedb.
 	bucket := strings.TrimSpace(os.Getenv("HOSTTHIS_METADATA_S3_BUCKET"))
 	if bucket == "" {
@@ -69,19 +79,14 @@ func main() {
 	if accessKey == "" || secretKey == "" {
 		logger.Fatalf("HOSTTHIS_METADATA_S3_ACCESS_KEY + HOSTTHIS_METADATA_S3_SECRET_KEY are required")
 	}
-	q := url.Values{}
-	if endpoint != "" {
-		q.Set("endpoint", endpoint)
-	}
-	q.Set("region", region)
-	q.Set("access_key_id", accessKey)
-	q.Set("secret_access_key", secretKey)
-	if !useSSL {
-		q.Set("allow_http", "true")
-	}
 	dst, err := storage.NewSlateRepo(storage.SlateConfig{
-		ObjectStoreURL: fmt.Sprintf("s3://%s?%s", bucket, q.Encode()),
-		DbName:         dbName,
+		Endpoint:  endpoint,
+		Region:    region,
+		Bucket:    bucket,
+		AccessKey: accessKey,
+		SecretKey: secretKey,
+		UseSSL:    useSSL,
+		DbName:    dbName,
 	})
 	if err != nil {
 		logger.Fatalf("open slatedb: %v", err)
