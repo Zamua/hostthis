@@ -246,8 +246,13 @@ func (s *Server) verbList(sess gossh.Session, owner string) {
 		_ = sess.Exit(0)
 		return
 	}
-	// Header on stderr so stdout is grep/awk friendly.
-	fmt.Fprintln(sess.Stderr(), "SLUG\tNAME\tSIZE\tKIND\tEXPIRES_IN\tVERS")
+	// Header on stdout (was stderr historically — stderr ordering
+	// vs stdout is non-deterministic over ssh, so the header could
+	// arrive AFTER the rows from the user's perspective. The spec
+	// shows the header at the top of the output; stdout + write-order
+	// guarantees that). Scripts that want headerless output can
+	// strip the first line with `tail -n +2`.
+	fmt.Fprintln(sess, "SLUG\tNAME\tSIZE\tKIND\tEXPIRES_IN\tVERS")
 	now := s.Manage.Now().UTC()
 	for _, p := range pastes {
 		name := p.Name

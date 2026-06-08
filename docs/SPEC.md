@@ -293,7 +293,9 @@ zwy11122   —                     800B    html      4d12h        v3 (pinned)
 ```
 Sorted by expiry asc (soonest-to-die first, so you notice things about
 to disappear). `NAME` column shows the user-supplied label or `—` if
-none. Output is tab-separated for easy `awk`-ing.
+none. Output is tab-separated for easy `awk`-ing. The header line is
+on stdout (top of the output) so it appears reliably before the rows;
+scripts wanting headerless output can pipe through `tail -n +2`.
 
 The `VERS` column reports the version the URL currently serves:
 
