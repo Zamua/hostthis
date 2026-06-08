@@ -81,18 +81,29 @@
 </header>
 
 <h2>Name</h2>
-<div class="indent"><p>hostthis &mdash; host an HTML or Markdown paste at a URL for 7 days.</p></div>
+<div class="indent"><p>hostthis &mdash; pipe a rendered file in, get a public URL out. No signup, no app.</p></div>
 
 <h2>Synopsis</h2>
 <div class="indent">
-<pre><strong>cat</strong> <em>file</em> | <strong>ssh hostthis.dev</strong> [<em>slug</em>] [<strong>--name</strong> <em>label</em>]
-<strong>ssh hostthis.dev</strong> <em>command</em> [<em>args</em>]</pre>
+<pre><strong>cat</strong> <em>file</em> | <strong>ssh hostthis.dev</strong> [<strong>--name</strong> <em>label</em>] [<strong>--type</strong> html|markdown]
+<strong>cat</strong> <em>file</em> | <strong>ssh hostthis.dev</strong> <em>slug</em>            # update an existing paste
+<strong>ssh hostthis.dev</strong> <em>command</em> [<em>args</em>]
+<strong>ssh hostthis.dev</strong>                            # show help</pre>
 </div>
 
 <h2>Description</h2>
 <div class="indent">
-<p>Reads HTML or Markdown from stdin, stores it, prints a URL. The URL serves the
-content for 7 days from the last update, then it&rsquo;s deleted.</p>
+<p><strong>hostthis</strong> publishes HTML or Markdown for 7 days at a random
+subdomain like <code>https://7gh3kp29.hostthis.dev</code>. One ssh pipe, no signup,
+no install. Useful when you want a shareable URL for a one-off HTML mock, a Markdown
+writeup, a screenshot annotation, or anything you need a teammate or LLM to load in
+a browser without spinning up a deploy. The URL is the secret &mdash; anyone who has
+it can view; nobody else can.</p>
+
+<p>Identity is your ssh public key. Anyone with a different key sees your paste at
+the URL like everyone else does, but can&rsquo;t <code>update</code>,
+<code>rename</code>, <code>pin</code>, or <code>delete</code> it &mdash; those verbs
+are owner-only and authenticated by the same key you used at upload time.</p>
 </div>
 
 <h2>Commands</h2>
@@ -123,10 +134,13 @@ content for 7 days from the last update, then it&rsquo;s deleted.</p>
   <dd>clear the pin; URL serves the latest version</dd>
 
   <dt>ssh hostthis.dev <strong>delete</strong> <em>slug</em></dt>
-  <dd>permanent</dd>
+  <dd>wipe the entire paste; permanent</dd>
+
+  <dt>ssh hostthis.dev <strong>delete</strong> <em>slug</em> <em>ver</em></dt>
+  <dd>free one version&rsquo;s bytes; keeps the history row as a tombstone</dd>
 
   <dt>ssh hostthis.dev <strong>whoami</strong></dt>
-  <dd>print identity and active count</dd>
+  <dd>identity, active count, and quota usage</dd>
 </dl>
 </div>
 
@@ -141,7 +155,11 @@ ssh hostthis.dev delete abc12345</pre>
 
 <h2>Limits</h2>
 <div class="indent">
-<p>1 MiB per identity, total across active pastes. 7-day retention. HTML and Markdown only.</p>
+<p>10 MiB per identity, counting post-compression bytes across every active version
+of every active paste. Highly redundant text compresses 5&ndash;10&times; under zstd,
+so the real ceiling on raw payload is typically 50&ndash;100 MiB of text.</p>
+
+<p>HTML and Markdown only. 7-day retention from the last <code>update</code>.</p>
 </div>
 
 <h2>See Also</h2>
