@@ -467,12 +467,23 @@ func (r *PasteRepo) SumActiveSizeByOwner(owner string, now time.Time) (int64, er
 		SELECT COALESCE(SUM(v.size), 0)
 		FROM versions v
 		JOIN pastes p ON p.slug = v.slug
-		WHERE p.identity = ? AND p.expires_at > ?
+		WHERE p.identity = ? AND p.expires_at > ? AND v.deleted = 0
 	`, owner, formatTime(now)).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("sum active size: %w", err)
 	}
 	return n.Int64, nil
+}
+
+// SumActiveBytesByOwner is the int-returning shape the service layer's
+// PasteAdmin interface expects (whoami formatting uses int). Same
+// query as SumActiveSizeByOwner but with the type narrowed.
+func (r *PasteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, error) {
+	n, err := r.SumActiveSizeByOwner(owner, now)
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
 }
 
 // OwnerFirstSeen returns the earliest CreatedAt across the owner's

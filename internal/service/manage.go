@@ -26,6 +26,7 @@ type PasteAdmin interface {
 	GetVersion(domain.Slug, int) (domain.Version, error)
 	DeleteVersion(domain.Slug, int) error
 	CountByOwner(owner string) (int, error)
+	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
 	OwnerFirstSeen(owner string) (time.Time, error)
 }
 
@@ -336,9 +337,11 @@ func (m *Manage) Unpin(slug domain.Slug, owner string) error {
 
 // Whoami returns the per-owner summary used by the `whoami` verb.
 type WhoamiInfo struct {
-	Identity  string
-	Active    int
-	FirstSeen time.Time
+	Identity     string
+	Active       int
+	FirstSeen    time.Time
+	UsedBytes    int   // compressed bytes summed across active non-deleted versions
+	QuotaBytes   int   // domain.UserQuotaBytes — surfaced so SSH formatter doesn't import domain
 }
 
 // Whoami populates WhoamiInfo for an owner (key fingerprint).
@@ -354,7 +357,17 @@ func (m *Manage) Whoami(owner string) (WhoamiInfo, error) {
 	if err != nil {
 		return WhoamiInfo{}, err
 	}
-	return WhoamiInfo{Identity: owner, Active: active, FirstSeen: first}, nil
+	used, err := m.Repo.SumActiveBytesByOwner(owner, m.Now().UTC())
+	if err != nil {
+		return WhoamiInfo{}, err
+	}
+	return WhoamiInfo{
+		Identity:   owner,
+		Active:     active,
+		FirstSeen:  first,
+		UsedBytes:  used,
+		QuotaBytes: domain.UserQuotaBytes,
+	}, nil
 }
 
 // validName: per spec, 1–60 printable Unicode chars, no newlines.

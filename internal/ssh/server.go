@@ -509,6 +509,11 @@ func (s *Server) verbWhoami(sess gossh.Session, owner string) {
 		fmt.Fprintf(sess, "joined:  %s\n", info.FirstSeen.Format("2006-01-02"))
 	}
 	fmt.Fprintf(sess, "active:  %d paste(s)\n", info.Active)
+	if info.QuotaBytes > 0 {
+		pct := float64(info.UsedBytes) * 100 / float64(info.QuotaBytes)
+		fmt.Fprintf(sess, "quota:   %s / %s (%.0f%%)\n",
+			humanBytes(info.UsedBytes), humanBytes(info.QuotaBytes), pct)
+	}
 	_ = sess.Exit(0)
 }
 
@@ -519,24 +524,47 @@ func (s *Server) verbHelp(sess gossh.Session) {
 	_ = sess.Exit(0)
 }
 
-const helpText = `hostthis — pipe rendered content (html/markdown), get a URL.
-              pastes expire 7 days after their last update.
+const helpText = `hostthis — pipe a rendered file in, get a URL out. pastes expire 7 days after last update.
 
-  cat file | ssh hostthis.dev [--name "..."]      upload
-  cat file | ssh hostthis.dev <slug>              update an existing upload
-  ssh hostthis.dev list                           your active pastes
-  ssh hostthis.dev show <slug>                    read content (owner only)
-  ssh hostthis.dev rename <slug> "<name>"         set / change a paste's label
-  ssh hostthis.dev versions <slug>                history within the 7-day window
-  ssh hostthis.dev pin <slug> <ver>               stick the URL to <ver> (survives updates)
-  ssh hostthis.dev unpin <slug>                   clear the pin; URL serves the latest
-  ssh hostthis.dev delete <slug>                  permanent
-  ssh hostthis.dev whoami                         your identity + active count
+UPLOAD
 
-uploads accept HTML and Markdown only. 1 MiB per identity, total
-across active pastes. 7-day retention.
-the URL itself is the secret — 8-char random slug, ~10^12 possibilities.
-share the URL with anyone you want; don't share it with anyone you don't.`
+    cat foo.html | ssh hostthis.dev
+        → https://7gh3kp29.hostthis.dev   (random subdomain, 7-day TTL)
+
+    cat doc.md | ssh hostthis.dev --name "design notes"
+        → URL plus an owner-only label visible in ` + "`list`" + `
+
+UPDATE & MANAGE (owner only; ssh key authenticates)
+
+    cat foo.html | ssh hostthis.dev <slug>      replace bytes; URL stays the same
+    ssh hostthis.dev list                       all your active pastes
+    ssh hostthis.dev show <slug>                read content back
+    ssh hostthis.dev rename <slug> "label"      set / change owner label
+    ssh hostthis.dev delete <slug>              wipe the paste entirely
+    ssh hostthis.dev delete <slug> <ver>        free one version's bytes (tombstone)
+    ssh hostthis.dev whoami                     show your identity + active count
+
+VERSION HISTORY
+
+    Each ` + "`update`" + ` adds a new version (v2, v3, …). Default URL serves the latest.
+
+    ssh hostthis.dev versions <slug>            timeline of every version
+    ssh hostthis.dev pin <slug> <ver>           stick URL to <ver> (survives updates)
+    ssh hostthis.dev unpin <slug>               URL follows latest again
+
+LIMITS
+
+    10 MiB total per identity, counting post-compression bytes across
+    all your active pastes (every version of every paste). Highly
+    redundant text compresses 5–10×, so typical HTML/Markdown fits a
+    lot of content under the cap.
+
+    Content types: HTML, Markdown. Anything else rejected at upload.
+
+THE URL IS THE SECRET
+
+    Slug is 8 random chars (~10^12 combos). Share the URL with anyone
+    you want; don't share it with anyone you don't. No password gate.`
 
 // -- helpers ----------------------------------------------------------------
 
