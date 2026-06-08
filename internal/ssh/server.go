@@ -164,7 +164,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 		// Unknown verb — print the error and the help, then exit nonzero.
 		// Matches what git, kubectl, etc. do.
 		fmt.Fprintf(sess.Stderr(), "hostthis: unknown command %q\n\n", first)
-		fmt.Fprintln(sess.Stderr(), helpText)
+		emitHelp(sess)
 		_ = sess.Exit(2)
 	}
 }
@@ -519,8 +519,26 @@ func (s *Server) verbWhoami(sess gossh.Session, owner string) {
 // -- help -------------------------------------------------------------------
 
 func (s *Server) verbHelp(sess gossh.Session) {
-	fmt.Fprintln(sess.Stderr(), helpText)
+	emitHelp(sess)
 	_ = sess.Exit(0)
+}
+
+// emitHelp writes helpText to the session's stderr, translating LF
+// to CRLF when the session has a PTY allocated. The PTY is in raw
+// mode on the client (it expects \r\n from the remote) and a bare
+// \n produces a "staircase" effect — the cursor advances a line but
+// doesn't return to column 0, so subsequent lines start where the
+// previous one ended. `ssh hostthis.dev` (no command, interactive
+// shell) defaults to allocating a PTY; `ssh hostthis.dev help`
+// doesn't. Same helpText, different newline handling.
+func emitHelp(sess gossh.Session) {
+	text := helpText
+	if _, _, hasPty := sess.Pty(); hasPty {
+		text = strings.ReplaceAll(text, "\n", "\r\n")
+		fmt.Fprint(sess.Stderr(), text, "\r\n")
+		return
+	}
+	fmt.Fprintln(sess.Stderr(), text)
 }
 
 const helpText = `Pipe a rendered file in, get a URL out. Pastes expire 7 days after last update.
