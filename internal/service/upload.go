@@ -59,8 +59,18 @@ type Result struct {
 }
 
 // ErrOverQuota is returned when accepting the upload would push the
-// identity's total active bytes above UserQuotaBytes.
-var ErrOverQuota = errors.New("service: would exceed your 1 MiB total quota; delete a paste or wait for one to expire")
+// identity's total active COMPRESSED bytes above UserQuotaBytes.
+var ErrOverQuota = errors.New("service: would exceed your 10 MiB total quota; delete a paste or wait for one to expire")
+
+// ErrRawTooLarge is returned when the raw input exceeded the
+// 100 MiB hard fast-fail cap. The server stopped reading before any
+// compression check could run.
+var ErrRawTooLarge = errors.New("service: upload too large to consider (raw input exceeded 100 MiB cap)")
+
+// ErrCompressedTooLarge is returned when the input compressed under
+// zstd to more than MaxPasteBytes. Caller may want to surface the
+// compressed-size number to the user; see Upload.Create.
+var ErrCompressedTooLarge = errors.New("service: upload exceeds 10 MiB compressed cap")
 
 // ErrServiceFull is returned when the service-wide disk cap is hit.
 var ErrServiceFull = errors.New("service: service is at capacity, try again after the next expiry")
@@ -77,8 +87,18 @@ func (u *Upload) Create(body []byte, owner string, name string, typeHint string)
 	if len(body) == 0 {
 		return Result{}, errors.New("empty upload")
 	}
-	if len(body) > domain.MaxPasteBytes {
-		return Result{}, fmt.Errorf("upload exceeds %d-byte cap", domain.MaxPasteBytes)
+	if len(body) > domain.HardRawByteCap {
+		return Result{}, ErrRawTooLarge
+	}
+	// Compressed-size gate. We re-compress in the storage layer when
+	// the blob actually lands, but this check runs first so we can
+	// reject without touching the blob store on an over-cap upload.
+	csize, err := compressedSize(body)
+	if err != nil {
+		return Result{}, fmt.Errorf("compressed-size check: %w", err)
+	}
+	if csize > domain.MaxPasteBytes {
+		return Result{}, fmt.Errorf("%w (your bytes compress to %d)", ErrCompressedTooLarge, csize)
 	}
 	kind, err := domain.DetectKind(body, typeHint)
 	if err != nil {
@@ -93,7 +113,7 @@ func (u *Upload) Create(body []byte, owner string, name string, typeHint string)
 		Identity:      domain.Identity(owner),
 		Kind:          kind,
 		ContentSHA:    sha,
-		Size:          len(body),
+		Size:          csize,
 		Name:          name,
 		PinnedVersion: 0, // unpinned by default — public URL follows the latest version
 		CreatedAt:     now,

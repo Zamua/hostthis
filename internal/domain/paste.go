@@ -31,6 +31,11 @@ type Paste struct {
 
 // Version is a snapshot in a paste's history. v1 is the initial
 // upload; each subsequent `update` writes a new row with ver_num+1.
+//
+// Deleted=true marks a tombstone — the row stays so version numbers
+// don't get reused and `versions` shows the history, but the blob
+// bytes are gone (quota SUMs skip it; serving falls back to MAX of
+// non-deleted ver_num). Set by `delete <slug> <ver>`.
 type Version struct {
 	Slug       Slug
 	VerNum     int
@@ -38,6 +43,7 @@ type Version struct {
 	ContentSHA string
 	Size       int
 	CreatedAt  time.Time
+	Deleted    bool
 }
 
 

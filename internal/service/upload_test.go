@@ -44,8 +44,11 @@ func TestUpload_Create_HTML(t *testing.T) {
 	if res.Paste.Name != "demo" {
 		t.Fatalf("name: got %q, want %q", res.Paste.Name, "demo")
 	}
-	if res.Paste.Size != len(body) {
-		t.Fatalf("size: got %d, want %d", res.Paste.Size, len(body))
+	// After compression, Size is the compressed (stored) byte count.
+	// For short input zstd's header overhead can make it larger than
+	// the original; only assert "positive + plausible".
+	if res.Paste.Size <= 0 || res.Paste.Size > len(body)*2+64 {
+		t.Fatalf("size: got %d, want positive ~within 2x of %d", res.Paste.Size, len(body))
 	}
 	if res.Paste.ContentSHA != domain.HashContent(body) {
 		t.Fatalf("sha mismatch")

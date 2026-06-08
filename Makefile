@@ -122,7 +122,7 @@ deploy-sync: _require-vps-host
 	  --exclude='/data' --exclude='/bin' --exclude='/.git/objects' --exclude='*.log' \
 	  --exclude='/deploy/vps/.env' \
 	  ./ $(VPS_HOST):/tmp/hostthis-staging/
-	ssh $(VPS_HOST) "sudo mkdir -p $(VPS_PATH)/data && sudo rsync -a --delete /tmp/hostthis-staging/ $(VPS_PATH)/ --exclude=/data --exclude=/deploy/vps/.env && sudo chown -R $(VPS_USER):$(VPS_USER) $(VPS_PATH) && sudo chown -R $(CONTAINER_UID):$(CONTAINER_UID) $(VPS_PATH)/data"
+	ssh $(VPS_HOST) "sudo mkdir -p $(VPS_PATH)/data && sudo rsync -a --delete /tmp/hostthis-staging/ $(VPS_PATH)/ --exclude=/data --exclude=/deploy/vps/.env --exclude=/.git/objects && sudo chown -R $(VPS_USER):$(VPS_USER) $(VPS_PATH) && sudo chown -R $(CONTAINER_UID):$(CONTAINER_UID) $(VPS_PATH)/data"
 
 # Build the env-var prefix once. Sets the runtime config the compose
 # file reads (apex, mode, scheme) plus the absolute data path so the

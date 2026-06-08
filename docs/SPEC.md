@@ -139,23 +139,50 @@ signature. Never trust a self-asserted username or fingerprint.
 
 ## File handling
 
-- **Per-paste hard cap**: 1 MiB. Equal to the per-identity quota
-  (see Limits). A user with an empty quota can upload up to 1 MiB
-  in one shot; anything larger is rejected before any bytes hit disk.
+- **Per-paste hard cap**: 10 MiB of COMPRESSED bytes (post-zstd).
+  Equal to the per-identity quota (see Limits). Compression-aware:
+  heavily redundant content (typical HTML/Markdown) compresses 5–10×,
+  so a user can upload ~50–100 MiB of text and still fit; binary or
+  already-compressed payloads compress poorly and hit the cap fast.
+  The user-visible cap is the same number in both directions because
+  it's the number that actually constrains the service.
+- **Hard raw-byte fast-fail**: 100 MiB. To prevent an attacker from
+  streaming arbitrary bytes forever just to discover whether they
+  compress under the cap, the server stops reading after 100 MiB of
+  INPUT regardless of how well it compresses. Anything that requires
+  reading more than that is "too big to evaluate" and rejected with
+  `upload too large to consider`. Generous enough that no legitimate
+  text payload ever hits this; tight enough to bound the read.
 - **Format gate**: accept only supported content types (HTML, Markdown
   in v1). Server sniffs the first 512 bytes for content type via
   `http.DetectContentType` and cross-checks any explicit `--type` flag.
   Unsupported content is rejected with a clear error pointing at
   what we accept — no silent fallback to `attachment` rendering.
 - **Streaming I/O**: server reads stdin as a stream (no full-buffer
-  allocation) up to a size cap of 1 MiB+1 byte, hashes incrementally,
-  and streams the bytes to the configured `BlobStore`. The S3-compatible
-  backend pushes the bytes straight through to the object store without
-  ever holding the full payload in RAM.
+  allocation), tees through three sinks in parallel: a sha256 hasher
+  (over uncompressed bytes — content addressability is by ORIGINAL
+  content), a zstd writer (compressed output to staging), and a
+  raw-byte counter (the 100 MiB fast-fail). After EOF, the compressed
+  staging buffer's size is compared against the 10 MiB cap. If it
+  fits, the staged bytes are flushed to the configured `BlobStore`
+  under the original-content sha256 key. If not, the upload is
+  rejected with `upload exceeds 10 MiB compressed cap; your bytes
+  compress to <actual> — try removing binary data` and the staging
+  buffer is discarded.
 - **Storage backend**: pluggable. See "Blob storage backends" below.
   Default is the on-disk store (`data/blobs/<sha256[:2]>/<sha256>`).
   Markdown is rendered to HTML on every read (cheap enough at our
   content sizes; no cache layer yet).
+- **Storage compression**: all blob bytes are persisted zstd-encoded
+  by the storage layer. Compression is invisible above the BlobStore
+  interface — `Put` compresses on the way in (level 3, balance of
+  speed and ratio), `Get` decompresses on the way out. The blob key
+  remains the sha256 of the ORIGINAL (uncompressed) bytes, so dedup
+  works on logical content. Both the disk store and the S3 backend
+  share the same encoding. See "Blob storage backends → On-disk
+  format" below for the compression-version header and the fallback
+  for older uncompressed blobs (rolling-migration support; no flag
+  day).
 
 ## Retention
 
@@ -190,8 +217,10 @@ cat index.html | ssh hostthis.dev
 https://abc12345.hostthis.dev
 expires in 7 days
 ```
-Reads stdin until EOF or 1 MiB. Validates content type (HTML or Markdown
-in v1). Generates a fresh random slug.
+Reads stdin until EOF or the per-paste cap (10 MiB after compression;
+see "File handling → Per-paste hard cap" for the bytes-counted detail).
+Validates content type (HTML or Markdown in v1). Generates a fresh
+random slug.
 
 Optional `--name`:
 ```
@@ -231,8 +260,12 @@ in italics):
   ssh key isn't its owner. Indistinguishable on purpose — the owner-check
   fail surfaces as "not found" so a non-owner can't probe for the
   existence of slugs they don't own.
-- *upload exceeds 1 MiB cap* (exit 1): payload too large; rejected
-  before any bytes hit disk.
+- *upload exceeds 10 MiB compressed cap* (exit 1): payload too large
+  even after zstd compression; rejected before any bytes hit the
+  blob store. Stderr surfaces the actual compressed size so the
+  caller knows how far over they were.
+- *upload too large to consider* (exit 1): raw input exceeded the
+  100 MiB hard-fast-fail. No compressed-size check was attempted.
 - *usage error* (exit 2): malformed args, bad flag value.
 
 Update creates a new immutable version under the hood (SHA-keyed blob
@@ -298,14 +331,21 @@ so an attacker can't probe for slugs they don't own.
 ### Versions
 ```
 ssh hostthis.dev versions abc12345
-v3	current	2026-06-05 14:32 UTC	1.2k
-v2		2026-06-05 12:15 UTC	1.1k
+v4	current	2026-06-05 15:01 UTC	1.4k
+v3		2026-06-05 14:32 UTC	1.2k
+v2	deleted	2026-06-05 12:15 UTC	—
 v1		2026-06-05 11:22 UTC	0.9k
 ```
 
-Stdout: tab-separated rows, newest first. The `current` marker
-identifies the version the URL is currently serving (either the
-pinned ver_num or `MAX(ver_num)` when unpinned).
+Stdout: tab-separated rows, newest first. The middle column carries
+a status marker:
+
+- `current` — the version the URL is currently serving (the
+  pinned ver_num or `MAX(non-deleted ver_num)` when unpinned).
+- `deleted` — the blob bytes were freed via `delete <slug> <ver>`. The
+  metadata row remains as a tombstone so the version number isn't
+  reused; the size column is `—` since no bytes exist anymore.
+- empty — non-current, non-deleted version (still occupies quota).
 
 Stderr footer carries the pin state plus the expiry:
 
@@ -344,13 +384,50 @@ Reverts the URL to "follow the head" semantics — every future
 `update` becomes the served version.
 
 ### Delete (permanent)
+
+Two forms — same verb, slug-only vs slug+version:
+
+**Whole-paste delete:**
 ```
 ssh hostthis.dev delete abc12345
 deleted.
 ```
-Wipes the slug record + all versions. Reuses the slug for future random
-generation. No undo. No confirm prompt (ssh sessions don't tty cleanly;
-the verb is explicit enough).
+Wipes the slug record + all versions (including any tombstone rows
+from prior `delete <slug> <ver>` calls). Reuses the slug for future
+random generation. No undo. No confirm prompt (ssh sessions don't
+tty cleanly; the verb is explicit enough).
+
+**Per-version delete (free bytes; keep the history row):**
+```
+ssh hostthis.dev delete abc12345 2
+deleted v2. freed 187.3k.
+```
+
+Deletes the blob bytes for one historical version, leaving the
+metadata row in place as a tombstone. The version number is NOT
+reused (a future `update` still bumps to `MAX(ver_num)+1`); `versions`
+shows the row with a `deleted` marker.
+
+Use for freeing quota when an older version isn't worth keeping but
+the user wants the version-history audit trail.
+
+Refused with a stderr error when:
+
+- The target version is currently served (latest if unpinned, or the
+  pinned version). The caller is told to `pin` to a different version
+  first (or `unpin` if pinning to v1 with v2 still alive). Exit 2.
+- The target version is already deleted (idempotent-but-noisy: exit 0
+  with a `version v<N> already deleted` note on stderr).
+- The slug doesn't exist or isn't owned by the caller. Exit 4 with
+  the standard not-found-or-not-owned message (no information leak
+  about other identities' pastes).
+
+Freed bytes are subtracted from the per-identity quota immediately,
+so an `upload` can use the space in the same shell session.
+
+Dispatch rule for the verb: `delete <slug>` (one arg) → whole-paste
+delete; `delete <slug> <verN>` (two args) → per-version delete.
+Anything else → exit 2 with `usage: delete <slug> [<ver>]`.
 
 ### Identity
 ```
@@ -398,22 +475,36 @@ no external assets.
 
 Three caps and an SSH-handshake gate, each enforced atomically.
 
-### Per-identity quota: 1 MiB
+### Per-identity quota: 10 MiB (compressed)
 
-The sum of an identity's active pastes' bytes (including all versions
-of an updated paste) cannot exceed `UserQuotaBytes` (1 MiB; not
-operator-configurable). "Identity" is the SHA256 fingerprint of the
-uploader's ssh public key. When pastes expire (7 days) or get
-deleted, the cap frees up. Over-quota uploads error with `would
-exceed your 1 MiB total quota`.
+The sum of an identity's active pastes' COMPRESSED bytes (counting
+EVERY non-deleted version of an updated paste) cannot exceed
+`UserQuotaBytes` (10 MiB; not operator-configurable). "Identity" is
+the SHA256 fingerprint of the uploader's ssh public key. When pastes
+expire (7 days), get deleted, or have older versions explicitly
+deleted via `delete <slug> <ver>`, the cap frees up. Over-quota uploads
+error with `would exceed your 10 MiB total quota`.
+
+This is the SAME 10 MiB as the per-paste cap — both count
+post-compression bytes, so the bookkeeping number is consistent
+everywhere. A user can spend their quota as one 10 MiB paste, ten
+1 MiB pastes, or any mix.
+
+Deleted versions (via `delete <slug> <ver>`) contribute zero bytes to the
+quota even though the metadata row remains as a tombstone — only the
+blob bytes are gone.
 
 ### Service-wide storage cap: default 5 GiB
 
 `--storage-cap-bytes` / `HOSTTHIS_STORAGE_CAP_BYTES` bounds total
-active bytes across every identity. Default 5 GiB; 0 disables the
-check. Past the cap, new uploads get `service is at capacity; try
+active LOGICAL bytes across every identity. Default 5 GiB; 0 disables
+the check. Past the cap, new uploads get `service is at capacity; try
 again after the next expiry`. The system recovers as old pastes
 expire.
+
+The cap counts UNCOMPRESSED bytes (the size users perceive); actual
+on-disk / object-store usage is typically 5–10× smaller because of
+zstd compression in the blob layer.
 
 ### Sybil rate limit: 20 fresh keys per IP subnet per 24h
 
@@ -442,9 +533,10 @@ rather than fail fast.
 ### Threat model: what's bounded and what isn't
 
 *Bounded by the protocol*:
-- One ssh key → 1 MiB of active bytes, ever
-- One IP subnet → ~20 fresh keys × 1 MiB = ~20 MiB/day
-- All identities combined → 5 GiB
+- One ssh key → 10 MiB of active LOGICAL bytes, ever
+- One IP subnet → ~20 fresh keys × 10 MiB = ~200 MiB/day logical
+  (~20–40 MiB/day actual storage after zstd)
+- All identities combined → 5 GiB logical (~500 MiB–1 GiB actual)
 - Concurrent SUM-check races → atomic transactions
 - 7-day retention as the long-term release valve
 
@@ -519,6 +611,39 @@ HOSTTHIS_S3_SECRET_KEY   secret access key
 HOSTTHIS_S3_USE_SSL      'true' or 'false' (default true)
 ```
 
+### On-disk format
+
+Every blob written by either backend is zstd-compressed (level 3) and
+prefixed with a 4-byte magic header `HZ\0\x01` (`HZ` for hostthis-zstd,
+`\0\x01` for format version 1). The compressed body follows the magic.
+Layout:
+
+```
+0..3      : magic 'H' 'Z' 0x00 0x01
+4..N      : zstd-encoded original bytes
+```
+
+Reads:
+- Decoder inspects the first 4 bytes. If they match the magic, the
+  rest is zstd-decoded and returned.
+- If they don't match, the blob is treated as a legacy uncompressed
+  blob (written before this change) and returned as-is. Backstop for
+  the rolling migration; remains in place indefinitely as defensive
+  code since the cost is one cheap byte-compare per Get.
+
+Writes:
+- Always compressed + prefixed; legacy raw-bytes writes are never
+  emitted by the current binary.
+
+Object/file naming is the sha256 of the ORIGINAL (uncompressed)
+bytes for both backends — dedup happens on logical content, not on
+the compressed representation. Two pastes with identical bytes share
+one stored object.
+
+Migrating legacy blobs (one-shot) is a follow-up runbook in the
+repo; not required for correctness (legacy reads continue to work)
+but reduces storage by 5–10× when run.
+
 ### Switching backends
 
 The default is `disk`. To switch to S3 (against a provider you've
@@ -570,7 +695,7 @@ rm -rf data/blobs              # reclaim disk space
 
 hostthis has two scaling cliffs that a CDN solves:
 
-- *Egress bandwidth*: a 1 MiB paste served at 100 req/s = ~250 TB/month.
+- *Egress bandwidth*: a 10 MiB paste served at 100 req/s = ~2.5 PB/month.
   Hetzner free egress is ~20 TB; one viral paste could blow the budget
   in days. A CDN absorbs ~95% of reads at the edge, dropping origin
   bandwidth to a sliver.
@@ -793,8 +918,10 @@ invocation.
 ### What's hardcoded vs operator-tunable
 
 *Hardcoded* (product opinions, not knobs):
-- Per-paste cap (1 MiB)
-- Per-identity quota (1 MiB)
+- Per-paste cap (10 MiB compressed)
+- Per-identity quota (10 MiB compressed)
+- Raw-input hard fast-fail (100 MiB, prevents unbounded reads)
+- Blob compression (zstd level 3, all blobs)
 - Retention (7 days)
 - Sandbox headers (X-Frame-Options, Referrer-Policy, Permissions-Policy)
 - Slug alphabet (`abcdefghijkmnpqrstuvwxyz23456789`)
@@ -814,8 +941,10 @@ invocation.
 Operators worried about disk pressure can either tune
 `--storage-cap-bytes` down or put hostthis behind a reverse proxy
 that adds per-IP rate limiting on top of the Sybil gate. With the
-default 5 GiB at the 1 MiB / identity / 7-day shape, that's room
-for a few thousand actively-uploading identities.
+default 5 GiB at the 10 MiB / identity / 7-day shape, that's room
+for ~500 actively-uploading identities at full quota; in practice
+most identities use a small fraction of their cap so the real
+ceiling is much higher.
 
 ---
 
@@ -859,7 +988,7 @@ without breaking v1 semantics. These are explicit no's, not oversights.
 ## Open questions
 
 - **Quota display in `whoami` and `list`**: right now `whoami` shows
-  only the active count, not "312 KiB / 1 MiB used". Probably worth
+  only the active count, not "1.4 MiB / 10 MiB used". Probably worth
   adding so users see the cap approaching before they hit it.
 - **Owner notification when a paste expires?** Expiry is silent today.
   A "this paste expired N ago" line in the next `list` could surface
