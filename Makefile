@@ -148,7 +148,7 @@ deploy-restart: _require-vps-host _require-apex
 	@# Ensure the minio sidecar + any other "non-rollable" services are
 	@# up. compose up -d is a no-op when nothing's changed but creates
 	@# new services on first run + flushes orphan removal.
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose --env-file $(OPS_DEPLOY_DIR)/.env -f $(OPS_DEPLOY_DIR)/compose.yml up -d --no-recreate --remove-orphans minio"
+	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose -p vps --env-file $(OPS_DEPLOY_DIR)/.env -f $(OPS_DEPLOY_DIR)/compose.yml up -d --no-recreate --remove-orphans minio"
 	@# Roll the hostthis service: bring up a NEW container alongside
 	@# the OLD, wait ~15s for traefik to register it as healthy via
 	@# the /healthz active probe, then stop the OLD. Zero-downtime for
