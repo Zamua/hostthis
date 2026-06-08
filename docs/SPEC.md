@@ -506,12 +506,12 @@ The cap counts UNCOMPRESSED bytes (the size users perceive); actual
 on-disk / object-store usage is typically 5–10× smaller because of
 zstd compression in the blob layer.
 
-### Sybil rate limit: 20 fresh keys per IP subnet per 24h
+### Sybil rate limit: fresh keys per IP subnet per 24h
 
 Every SSH session derives a subnet (`/24` for IPv4, `/48` for IPv6)
 from `RemoteAddr` and admits the connection only if the
 (fingerprint, subnet) pair is already known OR the subnet has fewer
-than `--fresh-keys-per-subnet` (default 20) distinct fresh
+than `--fresh-keys-per-subnet` (default 10) distinct fresh
 fingerprints in the last `--fresh-keys-window` (default 24h).
 Otherwise the session is refused at startup with exit code 6 and the
 stderr line `too many new keys from this network today`.
@@ -520,6 +520,15 @@ Storage is a `key_first_seen(identity, ip_subnet, first_seen_at)`
 table, swept by the same periodic worker that deletes expired
 pastes — rows past the window are dropped to keep the table
 bounded.
+
+**Implication: same key + different subnet = a fresh registration.**
+A user who connects from a new IP (different ISP, mobile network,
+VPN, coffee-shop wifi) is "new" to the gate even if their ssh key is
+the same as one we've seen before. They need either: (a) an existing
+(fingerprint, subnet) slot on the current subnet, or (b) the
+operator to bump `--fresh-keys-per-subnet` temporarily. The gate is
+deliberately a subnet-scoped abuse control, not a per-key whitelist —
+this is the trade-off.
 
 ### Atomicity
 
@@ -545,8 +554,8 @@ no half-applied state visible to readers."
 
 *Bounded by the protocol*:
 - One ssh key → 10 MiB of active LOGICAL bytes, ever
-- One IP subnet → ~20 fresh keys × 10 MiB = ~200 MiB/day logical
-  (~20–40 MiB/day actual storage after zstd)
+- One IP subnet → ~10 fresh keys × 10 MiB = ~100 MiB/day logical
+  (~10–20 MiB/day actual storage after zstd)
 - All identities combined → 5 GiB logical (~500 MiB–1 GiB actual)
 - Concurrent SUM-check races → atomic transactions
 - 7-day retention as the long-term release valve
@@ -989,7 +998,7 @@ file). Defaults in parens:
 --data-dir               / HOSTTHIS_DATA_DIR                where sqlite + blobs live               (./data)
 --landing                / HOSTTHIS_LANDING                 path to landing.html                    (web/landing.html)
 --storage-cap-bytes      / HOSTTHIS_STORAGE_CAP_BYTES       service-wide cap (0 disables)           (5 GiB)
---fresh-keys-per-subnet  / HOSTTHIS_FRESH_KEYS_PER_SUBNET   sybil-gate threshold                    (20)
+--fresh-keys-per-subnet  / HOSTTHIS_FRESH_KEYS_PER_SUBNET   sybil-gate threshold                    (10)
 --fresh-keys-window      / HOSTTHIS_FRESH_KEYS_WINDOW       sybil-gate rolling window               (24h)
 
 # Blob backend
