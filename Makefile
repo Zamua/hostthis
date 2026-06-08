@@ -136,27 +136,34 @@ DEPLOY_ENV = HOSTTHIS_APEX_DOMAIN='$(HOSTTHIS_APEX_DOMAIN)' \
              HOSTTHIS_PUBLIC_SCHEME='$(or $(HOSTTHIS_PUBLIC_SCHEME),https)' \
              HOSTTHIS_DATA_PATH='$(VPS_PATH)/data'
 
+# Operator-side compose + env. Lives OUTSIDE the public source repo
+# (in the operator's own infra checkout) — see global CLAUDE.md.
+# Override by setting OPS_DEPLOY_DIR=... when invoking make.
+OPS_DEPLOY_DIR ?= /home/admin/infra/hostthis
+
 deploy-build: _require-vps-host _require-apex
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose --env-file deploy/vps/.env -f deploy/vps/compose.yml build"
+	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose --env-file $(OPS_DEPLOY_DIR)/.env -f $(OPS_DEPLOY_DIR)/compose.yml build"
 
 deploy-restart: _require-vps-host _require-apex
 	@# Ensure the minio sidecar + any other "non-rollable" services are
 	@# up. compose up -d is a no-op when nothing's changed but creates
 	@# new services on first run + flushes orphan removal.
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose --env-file deploy/vps/.env -f deploy/vps/compose.yml up -d --no-recreate --remove-orphans minio"
+	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose --env-file $(OPS_DEPLOY_DIR)/.env -f $(OPS_DEPLOY_DIR)/compose.yml up -d --no-recreate --remove-orphans minio"
 	@# Roll the hostthis service: bring up a NEW container alongside
 	@# the OLD, wait ~15s for traefik to register it as healthy via
 	@# the /healthz active probe, then stop the OLD. Zero-downtime for
 	@# HTTP (traefik always has a healthy backend); SSH in-flight to
 	@# the stopping container gets TCP-reset. See infra/APP-PATTERN.md
-	@# "Deploy strategy" for the rationale.
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker rollout -p vps --env-file deploy/vps/.env -f deploy/vps/compose.yml -w 15 hostthis"
+	@# "Deploy strategy" for the rationale. -p vps preserves the
+	@# existing container naming (vps-hostthis-N); migrating to -p
+	@# hostthis is a separate task that involves a manual swap.
+	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker rollout -p vps --env-file $(OPS_DEPLOY_DIR)/.env -f $(OPS_DEPLOY_DIR)/compose.yml -w 15 hostthis"
 
 deploy-logs: _require-vps-host
 	ssh $(VPS_HOST) "sudo docker logs -f --tail 60 hostthis"
 
 deploy-down: _require-vps-host
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo docker compose -f deploy/vps/compose.yml down"
+	ssh $(VPS_HOST) "sudo docker compose -f $(OPS_DEPLOY_DIR)/compose.yml down"
 
 _require-vps-host:
 	@if [ -z "$(VPS_HOST)" ]; then \
