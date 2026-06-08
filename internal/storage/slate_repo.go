@@ -51,6 +51,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -61,18 +62,19 @@ import (
 )
 
 // SlateConfig captures the connection parameters for the SlateDB
-// metadata store.
+// metadata store. NewSlateRepo writes these to the AWS_* process env
+// vars before calling ObjectStoreResolve — that's how the underlying
+// OpenDAL/object_store crate picks up S3 configuration (passing the
+// same fields via URL query params does NOT work; the crate ignores
+// them).
 type SlateConfig struct {
-	// ObjectStoreURL is the OpenDAL-style URL identifying the bucket
-	// + region + endpoint. Examples:
-	//   "s3://my-bucket?endpoint=http://minio:9000&access_key_id=…&secret_access_key=…&allow_http=true"
-	//   "s3://my-bucket?region=us-east-1"   (uses standard AWS creds)
-	// See slatedb-go's ObjectStoreResolve docs for the URL grammar.
-	ObjectStoreURL string
-	// DbName is the logical database name within the bucket. Becomes
-	// the key prefix for all of SlateDB's internal SST + manifest
-	// files. Lets one bucket host multiple SlateDB instances.
-	DbName string
+	Endpoint  string // e.g. "http://minio:9000"; empty for AWS
+	Region    string // e.g. "us-east-1"
+	Bucket    string // bucket name (required)
+	AccessKey string
+	SecretKey string
+	UseSSL    bool   // false → set AWS_ALLOW_HTTP=true (MinIO dev)
+	DbName    string // logical db name within the bucket; key prefix for SlateDB files
 }
 
 // SlateRepo is the SlateDB-backed metadata store. Satisfies the
@@ -86,10 +88,38 @@ type SlateRepo struct {
 
 // NewSlateRepo opens a SlateDB instance backed by the configured
 // object store. Caller must Close() to flush + shut down cleanly.
+// Sets process-global AWS_* env vars from cfg — the OpenDAL crate
+// SlateDB uses internally reads them. Don't run two SlateRepo
+// instances pointing at different buckets within the same process
+// (the env-var write would collide).
 func NewSlateRepo(cfg SlateConfig) (*SlateRepo, error) {
-	store, err := slatedb.ObjectStoreResolve(cfg.ObjectStoreURL)
+	if cfg.Bucket == "" {
+		return nil, fmt.Errorf("SlateConfig.Bucket required")
+	}
+	if cfg.DbName == "" {
+		cfg.DbName = "hostthis-metadata"
+	}
+	if cfg.Region == "" {
+		cfg.Region = "us-east-1"
+	}
+	if cfg.Endpoint != "" {
+		os.Setenv("AWS_ENDPOINT_URL", cfg.Endpoint)
+	}
+	os.Setenv("AWS_REGION", cfg.Region)
+	os.Setenv("AWS_ACCESS_KEY_ID", cfg.AccessKey)
+	os.Setenv("AWS_SECRET_ACCESS_KEY", cfg.SecretKey)
+	if !cfg.UseSSL {
+		os.Setenv("AWS_ALLOW_HTTP", "true")
+	}
+	// Path-style addressing — MinIO + most non-AWS S3-compatibles
+	// don't support virtual-hosted-style (bucket.host) without
+	// custom DNS. Harmless on AWS proper too.
+	os.Setenv("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", "false")
+
+	url := "s3://" + cfg.Bucket + "/"
+	store, err := slatedb.ObjectStoreResolve(url)
 	if err != nil {
-		return nil, fmt.Errorf("resolve object store: %w", err)
+		return nil, fmt.Errorf("resolve object store %q: %w", url, err)
 	}
 	builder := slatedb.NewDbBuilder(cfg.DbName, store)
 	db, err := builder.Build()

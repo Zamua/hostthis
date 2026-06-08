@@ -17,7 +17,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"strings"
 
@@ -40,25 +39,14 @@ func buildMetadataSlate(logger *log.Logger) (*metadataBundle, error) {
 		return nil, fmt.Errorf("HOSTTHIS_METADATA_S3_ACCESS_KEY + HOSTTHIS_METADATA_S3_SECRET_KEY are required")
 	}
 
-	// OpenDAL URL grammar:
-	//   s3://<bucket>?endpoint=<url>&region=<r>&access_key_id=<id>&secret_access_key=<sk>&allow_http=true
-	// allow_http=true is required when endpoint scheme is http (MinIO
-	// dev clusters); harmless when https.
-	q := url.Values{}
-	if endpoint != "" {
-		q.Set("endpoint", endpoint)
-	}
-	q.Set("region", region)
-	q.Set("access_key_id", accessKey)
-	q.Set("secret_access_key", secretKey)
-	if !useSSL {
-		q.Set("allow_http", "true")
-	}
-	objURL := fmt.Sprintf("s3://%s?%s", bucket, q.Encode())
-
 	repo, err := storage.NewSlateRepo(storage.SlateConfig{
-		ObjectStoreURL: objURL,
-		DbName:         dbName,
+		Endpoint:  endpoint,
+		Region:    region,
+		Bucket:    bucket,
+		AccessKey: accessKey,
+		SecretKey: secretKey,
+		UseSSL:    useSSL,
+		DbName:    dbName,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open slatedb: %w", err)
