@@ -171,7 +171,7 @@ mv /tmp/hostthis-smoke.slugs.new /tmp/hostthis-smoke.slugs
 # ---- 13. unknown verb → help -----------------------------------------------
 step "unknown verb → help"
 unk=$($SSH "$HOST" notarealverb 2>&1; true)
-echo "$unk" | grep -q "unknown command" && echo "$unk" | grep -q "hostthis — pipe" \
+echo "$unk" | grep -q "unknown command" && echo "$unk" | grep -q "Pipe a rendered file" \
   && ok "unknown verb prints help" \
   || bad "unknown verb" "$unk"
 
