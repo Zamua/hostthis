@@ -921,9 +921,8 @@ func (r *SlateRepo) ExpiredSlugs(now time.Time) ([]string, error) {
 // note the misleading name (inherited from the sqlite impl). The
 // sweep treats the returned slice as the allow-list: any blob whose
 // sha is NOT in this slice is deleted as orphan. Returning an empty
-// slice while the bucket has blobs in it = TOTAL DATA LOSS, which is
-// exactly what happened the first time this method was a stub. Don't
-// stub it.
+// slice while the bucket has blobs would tell the sweep "everything
+// is orphan" and wipe the bucket — never stub this method to nil.
 //
 // A sha is "referenced" if it's the head sha of an active paste OR
 // the content_sha of a non-deleted version row.

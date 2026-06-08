@@ -115,12 +115,11 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 	// empty referenced set isn't the expected after-effect of an
 	// expiry pass) AND the blob store has blobs in it, something is
 	// broken (buggy repo impl, schema misalignment, partial-restore).
-	// Treating every blob as orphan and deleting them all is exactly
-	// the 2026-06-08 incident we never want to repeat. Sample the
-	// blob count first; abort the GC pass if pathological. The cost
-	// of refusing in a legit "user deleted their last paste, no new
-	// uploads" edge case is leaving one orphan blob until the next
-	// upload — strictly better than nuking the bucket.
+	// Treating every blob as orphan and deleting them all would wipe
+	// the bucket on the next tick — refuse instead. The cost in a
+	// legitimate "user deleted their last paste, no new uploads"
+	// edge case is leaving one orphan blob until the next upload —
+	// strictly better than nuking the bucket.
 	if len(refSet) == 0 && pastesDeleted == 0 {
 		blobCount := 0
 		if walkErr := s.Blobs.WalkBlobs(func(sha string) error { blobCount++; return nil }); walkErr != nil {
