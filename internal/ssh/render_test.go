@@ -7,9 +7,9 @@ import (
 )
 
 // TestRenderVersCol pins the three VERS-column states from SPEC.md's
-// "List your pastes" section. Was a bare `v<PinnedVersion>` before
-// 2026-06-07; that rendered "v0" for unpinned pastes (the column's
-// default value), which was useless.
+// "List your pastes" section: latest-served, pinned, and the
+// "v0 must never appear for unpinned pastes" regression guard
+// (PinnedVersion=0 is a sentinel, not a version number to display).
 func TestRenderVersCol(t *testing.T) {
 	cases := []struct {
 		name string

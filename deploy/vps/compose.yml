@@ -116,12 +116,9 @@ services:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
     volumes:
-      # Named docker volume — docker manages the storage location
-      # (/var/lib/docker/volumes/hostthis_minio_data/_data). Was a
-      # host bind-mount until 2026-06-07; bind-mount got wiped twice
-      # the same day by `make deploy-sync` rsync deletes, losing the
-      # paste blob for one user. Named volume sits outside the project
-      # tree so no host-level file op can hose it.
+      # Named docker volume — sits outside the project tree so
+      # operator-level file ops on the source checkout (rsync,
+      # rm -rf staging, etc.) can't reach it.
       - hostthis_minio_data:/data
     networks:
       - traefik_proxy
