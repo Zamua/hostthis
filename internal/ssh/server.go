@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	gossh "github.com/gliderlabs/ssh"
+	proxyproto "github.com/pires/go-proxyproto"
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -44,6 +45,15 @@ type Server struct {
 
 // ListenAndServe blocks. Returns whatever the listener returns —
 // typically nil after a clean shutdown or net.ErrClosed.
+//
+// When HOSTTHIS_SSH_PROXY_PROTOCOL=true is set in the environment,
+// the listener is wrapped with go-proxyproto's listener so PROXY
+// protocol v1/v2 headers from a TCP-level forwarder (traefik, haproxy,
+// nginx stream) are parsed and net.Conn.RemoteAddr() returns the real
+// client IP. Required when hostthis SSH is behind traefik's TCP router
+// — without it, every session looks like it's coming from the
+// traefik container's docker-bridge IP and the Sybil per-subnet
+// rate limit collapses to a global cap.
 func (s *Server) ListenAndServe() error {
 	server := &gossh.Server{
 		Addr: s.Addr,
@@ -64,8 +74,17 @@ func (s *Server) ListenAndServe() error {
 		}
 		server.AddHostKey(signer)
 	}
+	// Plain Listen first; optionally wrap with go-proxyproto.
+	ln, err := net.Listen("tcp", s.Addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", s.Addr, err)
+	}
+	if strings.EqualFold(os.Getenv("HOSTTHIS_SSH_PROXY_PROTOCOL"), "true") {
+		ln = &proxyproto.Listener{Listener: ln}
+		s.Logger.Printf("ssh: PROXY protocol parsing enabled (real client IPs come from PROXY headers)")
+	}
 	s.Logger.Printf("ssh: listening on %s", s.Addr)
-	err := server.ListenAndServe()
+	err = server.Serve(ln)
 	if errors.Is(err, net.ErrClosed) {
 		return nil
 	}

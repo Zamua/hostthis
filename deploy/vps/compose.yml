@@ -58,6 +58,7 @@ services:
       HOSTTHIS_FRESH_KEYS_PER_SUBNET: "${HOSTTHIS_FRESH_KEYS_PER_SUBNET:-10}"
       HOSTTHIS_FRESH_KEYS_WINDOW: "${HOSTTHIS_FRESH_KEYS_WINDOW:-24h}"
       HOSTTHIS_STORAGE_CAP_BYTES: "${HOSTTHIS_STORAGE_CAP_BYTES:-5368709120}"
+      HOSTTHIS_SSH_PROXY_PROTOCOL: "${HOSTTHIS_SSH_PROXY_PROTOCOL:-false}"
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik_proxy"
@@ -105,6 +106,13 @@ services:
       - "traefik.tcp.routers.hostthis-ssh.entryPoints=ssh"
       - "traefik.tcp.routers.hostthis-ssh.service=hostthis-ssh"
       - "traefik.tcp.services.hostthis-ssh.loadbalancer.server.port=2222"
+      # PROXY protocol v2 — preserves the real client IP through the
+      # TCP forwarder. hostthisd parses these headers when
+      # HOSTTHIS_SSH_PROXY_PROTOCOL=true (set in deploy/vps/.env).
+      # Without this the Sybil per-subnet rate limit collapses to a
+      # global cap because every session arrives from the traefik
+      # container's docker-bridge IP.
+      - "traefik.tcp.services.hostthis-ssh.loadbalancer.proxyProtocol.version=2"
 
   minio:
     image: minio/minio:latest
