@@ -198,10 +198,15 @@ func TestVerbList_AfterUpload(t *testing.T) {
 	if !strings.Contains(stdout, "demo") {
 		t.Fatalf("named paste should appear in list: %q", stdout)
 	}
-	// Two rows of tab-separated output
+	// Header + 2 rows of tab-separated output. Header MUST be the first
+	// stdout line — pins the regression where it was emitted on stderr
+	// (which arrived AFTER the rows from the client's perspective).
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 list rows, got %d:\n%s", len(lines), stdout)
+	if len(lines) != 3 {
+		t.Fatalf("expected header + 2 list rows = 3 lines, got %d:\n%s", len(lines), stdout)
+	}
+	if !strings.HasPrefix(lines[0], "SLUG\t") {
+		t.Fatalf("first stdout line should be SLUG header, got %q", lines[0])
 	}
 }
 
