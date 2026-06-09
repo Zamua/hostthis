@@ -1,4 +1,35 @@
-.PHONY: build test run docker-build docker-up docker-down deploy deploy-build deploy-restart deploy-logs deploy-down clean fmt vet dev-minio-up dev-minio-down test-s3 blob-migrate blob-verify
+.PHONY: help build test smoke dev run docker-build docker-up docker-down \
+        dev-minio-up dev-minio-down test-s3 blob-migrate blob-verify \
+        fmt vet clean data-dir-perms
+
+# Default goal: show the help text rather than silently no-op.
+.DEFAULT_GOAL := help
+
+# Developer-facing targets only. Operator deploy targets (deploy-*,
+# logs-*, promote, etc.) live in the operator's private infra repo
+# at infra/hostthis/Makefile and are run from there. This file ships
+# in the public repo and stays clean of operator paths / ssh / sudo.
+
+help:
+	@echo "Developer targets:"
+	@echo "  make build         build ./bin/hostthisd (local Go)"
+	@echo "  make test          run all unit + integration tests"
+	@echo "  make smoke         exercise the verb surface against a live URL"
+	@echo "                     (HOSTTHIS_HOST=… ; defaults to hostthis.dev)"
+	@echo "  make dev           hot-iterate locally (no container)"
+	@echo "  make run           alias for 'make dev'"
+	@echo "  make docker-build  build the container image (tag hostthis:dev)"
+	@echo "  make docker-up     bring up local compose stack"
+	@echo "  make docker-down   tear it down"
+	@echo "  make dev-minio-up  start local MinIO for the S3 backend test"
+	@echo "  make test-s3       run the S3 round-trip integration test"
+	@echo "  make blob-migrate  copy disk blobs into the configured S3 backend"
+	@echo "  make blob-verify   verify every disk blob round-trips against S3"
+	@echo "  make fmt / vet     gofmt / go vet"
+	@echo "  make clean         remove ./bin and ./data"
+	@echo
+	@echo "Deploy targets live in the operator's private infra repo:"
+	@echo "  make -C ~/Dropbox/workspace/macmini/infra/hostthis <target>"
 
 # -- local Go ----------------------------------------------------------------
 
@@ -10,13 +41,19 @@ test:
 
 # Run locally (no container) — useful for fast iteration. Defaults to
 # path mode so wildcard DNS isn't required.
-run:
+dev run:
 	HOSTTHIS_URL_MODE=path \
 	HOSTTHIS_PUBLIC_SCHEME=http \
 	HOSTTHIS_APEX_DOMAIN=localhost:8080 \
 	HOSTTHIS_DATA_DIR=./data \
 	HOSTTHIS_LANDING=./web/landing.html \
 	go run ./cmd/hostthisd
+
+# Standalone smoke target — runs against whatever HOSTTHIS_HOST is set
+# to (defaults to hostthis.dev). Useful for ad-hoc verification + run
+# by the operator's deploy as a post-deploy check.
+smoke:
+	HOSTTHIS_HOST="$(or $(HOSTTHIS_HOST),hostthis.dev)" ./scripts/smoke.sh
 
 fmt:
 	gofmt -s -w .
@@ -73,113 +110,6 @@ blob-verify:
 data-dir-perms:
 	@mkdir -p ./data
 	@if [ "$$(uname)" = "Linux" ]; then sudo chown -R 65532:65532 ./data; fi
-
-# -- Remote deploy -----------------------------------------------------------
-# Targets a single-host install over ssh. Override the VPS_* variables on
-# the command line or in a local (untracked) `.env.deploy` you source first.
-#
-# Assumes:
-#  - You can `ssh $(VPS_HOST)` and `sudo` on the far end.
-#  - An operator-managed compose file at $(OPS_DEPLOY_DIR)/compose.yml
-#    on the remote host maps host :22 to container :2222 and
-#    127.0.0.1:8080 to container :8080. This file is NOT shipped in
-#    the repo; set it up once on the remote out of band.
-#  - A TLS-terminating reverse proxy terminates HTTPS for your apex
-#    domain and proxies /p/ to 127.0.0.1:8080.
-#
-# Typical flow:
-#   make deploy VPS_HOST=myvps VPS_PATH=/opt/hostthis VPS_USER=apps
-#   make deploy-logs VPS_HOST=myvps
-
-VPS_HOST ?=
-VPS_PATH ?= /opt/hostthis
-VPS_USER ?= $(shell whoami)
-
-# Distroless 'nonroot' uid the hostthis container runs as.
-# Don't change unless you know why.
-CONTAINER_UID ?= 65532
-
-deploy: _require-vps-host deploy-sync deploy-build deploy-restart deploy-smoke
-	@echo "deployed; check with 'make deploy-logs VPS_HOST=$(VPS_HOST)'"
-
-# Run the verb-level smoke test against the live URL after every
-# deploy. Pass HOSTTHIS_HOST to target a non-default host.
-deploy-smoke: _require-apex
-	@echo
-	@echo "=== smoke-testing deployed instance ==="
-	@sleep 3   # give the new container a beat to start listening
-	HOSTTHIS_HOST="$(HOSTTHIS_APEX_DOMAIN)" ./scripts/smoke.sh
-
-# Standalone smoke target — runs against whatever HOSTTHIS_HOST is set
-# to (defaults to hostthis.dev). Useful for ad-hoc verification.
-smoke:
-	HOSTTHIS_HOST="$(or $(HOSTTHIS_HOST),hostthis.dev)" ./scripts/smoke.sh
-
-# Push the local working tree to the VPS, excluding build/data artifacts.
-# Re-chowns the checkout to VPS_USER and the data dir to the container uid.
-# The repo intentionally ships NO sample production deploy files. How
-# to run this binary on YOUR infra is your choice; the operator-side
-# compose + .env live OUTSIDE this checkout (at $(OPS_DEPLOY_DIR) on
-# the remote) and are not touched by the rsync.
-deploy-sync: _require-vps-host
-	rsync -az --delete \
-	  --exclude='/data' --exclude='/bin' --exclude='/.git/objects' --exclude='*.log' \
-	  ./ $(VPS_HOST):/tmp/hostthis-staging/
-	ssh $(VPS_HOST) "sudo mkdir -p $(VPS_PATH)/data && sudo rsync -a --delete /tmp/hostthis-staging/ $(VPS_PATH)/ --exclude=/data --exclude=/.git/objects && sudo chown -R $(VPS_USER):$(VPS_USER) $(VPS_PATH) && sudo chown -R $(CONTAINER_UID):$(CONTAINER_UID) $(VPS_PATH)/data"
-
-# Build the env-var prefix once. Sets the runtime config the compose
-# file reads (apex, mode, scheme) plus the absolute data path so the
-# volume mount doesn't depend on cwd.
-DEPLOY_ENV = HOSTTHIS_APEX_DOMAIN='$(HOSTTHIS_APEX_DOMAIN)' \
-             HOSTTHIS_URL_MODE='$(or $(HOSTTHIS_URL_MODE),subdomain)' \
-             HOSTTHIS_PUBLIC_SCHEME='$(or $(HOSTTHIS_PUBLIC_SCHEME),https)' \
-             HOSTTHIS_DATA_PATH='$(VPS_PATH)/data'
-
-# Operator-side compose + env file path on the remote host. Lives
-# OUTSIDE this source checkout (in whatever directory you manage your
-# infra config from). Override on the make command line:
-#   make deploy ... OPS_DEPLOY_DIR=/srv/hostthis-ops
-OPS_DEPLOY_DIR ?= /opt/hostthis-ops
-
-# Compose project name on the remote. Sets the prefix for container
-# names ($(COMPOSE_PROJECT)-hostthis-N, $(COMPOSE_PROJECT)-minio-N, ...).
-# Override if you already have an established naming scheme in place.
-COMPOSE_PROJECT ?= hostthis
-
-deploy-build: _require-vps-host _require-apex
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose --env-file $(OPS_DEPLOY_DIR)/.env -f $(OPS_DEPLOY_DIR)/compose.yml build"
-
-deploy-restart: _require-vps-host _require-apex
-	@# Ensure the minio sidecar + any other "non-rollable" services are
-	@# up. compose up -d is a no-op when nothing's changed but creates
-	@# new services on first run + flushes orphan removal.
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose -p $(COMPOSE_PROJECT) --env-file $(OPS_DEPLOY_DIR)/.env -f $(OPS_DEPLOY_DIR)/compose.yml up -d --no-recreate --remove-orphans minio"
-	@# Roll the hostthis service: bring up a NEW container alongside
-	@# the OLD, wait ~15s for the reverse proxy to register it as
-	@# healthy via the /healthz active probe, then stop the OLD.
-	@# Zero-downtime for HTTP (the proxy always has a healthy backend);
-	@# SSH in-flight to the stopping container gets TCP-reset.
-	@# Requires `docker rollout` (https://github.com/wowu/docker-rollout)
-	@# installed on the remote.
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker rollout -p $(COMPOSE_PROJECT) --env-file $(OPS_DEPLOY_DIR)/.env -f $(OPS_DEPLOY_DIR)/compose.yml -w 15 hostthis"
-
-deploy-logs: _require-vps-host
-	ssh $(VPS_HOST) "sudo docker logs -f --tail 60 hostthis"
-
-deploy-down: _require-vps-host
-	ssh $(VPS_HOST) "sudo docker compose -f $(OPS_DEPLOY_DIR)/compose.yml down"
-
-_require-vps-host:
-	@if [ -z "$(VPS_HOST)" ]; then \
-	  echo "VPS_HOST is required. Pass it like: make deploy VPS_HOST=myvps"; \
-	  exit 1; \
-	fi
-
-_require-apex:
-	@if [ -z "$(HOSTTHIS_APEX_DOMAIN)" ]; then \
-	  echo "HOSTTHIS_APEX_DOMAIN is required. Pass it like: make deploy HOSTTHIS_APEX_DOMAIN=example.com"; \
-	  exit 1; \
-	fi
 
 clean:
 	rm -rf bin data

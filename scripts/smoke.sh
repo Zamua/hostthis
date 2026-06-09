@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Smoke-test every spec'd ssh verb against a deployed hostthis instance.
-# Designed to be run after `make deploy` against a live URL.
+# Run via `make smoke` against a live URL, or invoked post-deploy by
+# the operator-side deploy tooling (which lives outside this repo).
 #
 #   ./scripts/smoke.sh                      # uses HOSTTHIS_HOST=hostthis.dev
 #   HOSTTHIS_HOST=staging.example.com ./scripts/smoke.sh

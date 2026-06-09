@@ -95,7 +95,7 @@ internal/
 web/landing.html     embedded apex landing page
 docs/SPEC.md         product spec; source of truth for behavior
 Dockerfile           multi-stage build; distroless static image
-Makefile             build / test / run / docker-up / deploy targets
+Makefile             build / test / run / docker-up / smoke targets
 CLAUDE.md            contributor workflow conventions
 README.md            user-facing manpage
 ```
@@ -165,47 +165,25 @@ curl <that URL>
 The binary defaults to `--mode path` (apex/p/&lt;slug&gt; URLs) for dev. Use
 `--mode subdomain` only for production deploys with a wildcard cert.
 
-## Deploy (single host over ssh)
+## Deploy
 
-The make targets rsync the working tree, build the image, and restart
-the container on a remote host you reach via ssh. All host-specific
-settings come from `VPS_*` variables passed on the command line.
+This repo ships application code and a `make smoke` target only. Deploy
+mechanics (rsync to a host, build the image remotely, rolling restart,
+log tailing, takedown) live OUTSIDE this repo, in the operator's private
+infra checkout. The shape is intentional: anyone cloning the public repo
+gets a clean buildable + testable Go service with no operator paths,
+ssh aliases, or sudo invocations baked in.
 
-```
-make deploy VPS_HOST=myvps VPS_PATH=/opt/hostthis VPS_USER=apps \
-            HOSTTHIS_APEX_DOMAIN=example.com
-```
+If you operate a deploy of hostthis, your operator-side concerns belong
+next to the production `compose.yml` + `.env` (one directory per app),
+and you reference this repo from there as a source dependency. The
+operator-side Makefile shells through to `make -C <hostthis-repo> smoke`
+for post-deploy verification.
 
-Available targets:
-
-| target | what it does |
-| --- | --- |
-| `make deploy` | sync + build + restart in one go |
-| `make deploy-sync` | rsync working tree; chown checkout to VPS_USER, data to container uid |
-| `make deploy-build` | rebuild the image on the host |
-| `make deploy-restart` | docker compose up -d on the host |
-| `make deploy-logs` | tail the container logs |
-| `make deploy-down` | docker compose down on the host |
-
-The runtime config (apex domain, URL mode, scheme) is read from
-`HOSTTHIS_*` env vars by the operator-side compose file. This repo
-ships no sample deploy compose; how to run the binary on your infra
-is your choice. The Makefile's `deploy-build` / `deploy-restart`
-targets invoke `docker compose -f $(OPS_DEPLOY_DIR)/compose.yml ...`
-where `OPS_DEPLOY_DIR` defaults to a path on the remote host that you
-manage outside this repo. Override it on the command line if your
-operator config lives elsewhere:
-
-```
-make deploy VPS_HOST=myvps HOSTTHIS_APEX_DOMAIN=example.com \
-            OPS_DEPLOY_DIR=/srv/hostthis-ops
-```
-
-The compose file must refuse to start without `HOSTTHIS_APEX_DOMAIN`
-set (the binary requires it).
-
-For repeated deploys to the same host, drop a (gitignored) shell
-script at `.env.deploy` and `source` it before running `make`.
+The runtime config (apex domain, URL mode, scheme, S3 credentials,
+MinIO root creds) is read from `HOSTTHIS_*` and `MINIO_*` env vars by
+the operator-side compose file. The binary refuses to start without
+`HOSTTHIS_APEX_DOMAIN` set.
 
 ## Don'ts
 
