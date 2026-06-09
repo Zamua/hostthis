@@ -21,7 +21,8 @@ import (
 	"strconv"
 	"strings"
 
-	gossh "github.com/gliderlabs/ssh"
+	gossh "github.com/charmbracelet/ssh"
+	"github.com/charmbracelet/wish"
 	proxyproto "github.com/pires/go-proxyproto"
 	xssh "golang.org/x/crypto/ssh"
 
@@ -55,25 +56,44 @@ type Server struct {
 // — without it, every session looks like it's coming from the
 // traefik container's docker-bridge IP and the Sybil per-subnet
 // rate limit collapses to a global cap.
+//
+// The server is built with charmbracelet/wish: the underlying
+// *ssh.Server is the charmbracelet fork of gliderlabs/ssh and the
+// behavior matches the previous gliderlabs setup byte-for-byte. The
+// session-time concerns (key-required, Sybil gate, verb dispatch) are
+// expressed as wish middlewares stacked so the key-required check is
+// outermost, the Sybil gate next, and the verb dispatcher innermost.
 func (s *Server) ListenAndServe() error {
-	server := &gossh.Server{
-		Addr: s.Addr,
-		PublicKeyHandler: func(ctx gossh.Context, key gossh.PublicKey) bool {
+	signer, err := s.hostSigner()
+	if err != nil {
+		return err
+	}
+	srv, err := wish.NewServer(
+		wish.WithAddress(s.Addr),
+		withHostSigner(signer),
+		wish.WithPublicKeyAuth(func(ctx gossh.Context, key gossh.PublicKey) bool {
 			ctx.SetValue("ownerHash", fingerprintKey(key))
 			return true
-		},
-		PasswordHandler: func(_ gossh.Context, _ string) bool { return true },
-		KeyboardInteractiveHandler: func(_ gossh.Context, _ xssh.KeyboardInteractiveChallenge) bool {
+		}),
+		wish.WithPasswordAuth(func(_ gossh.Context, _ string) bool { return true }),
+		wish.WithKeyboardInteractiveAuth(func(_ gossh.Context, _ xssh.KeyboardInteractiveChallenge) bool {
 			return true
-		},
-		Handler: s.handleSession,
-	}
-	if s.HostKeyPath != "" {
-		signer, err := loadOrCreateHostKey(s.HostKeyPath)
-		if err != nil {
-			return fmt.Errorf("ssh host key %q: %w", s.HostKeyPath, err)
-		}
-		server.AddHostKey(signer)
+		}),
+		// Middlewares compose first-to-last → the LAST middleware in the
+		// argument list wraps the rest and runs FIRST per request. To
+		// get the desired call order
+		//   1. keyRequired   (outermost; refuses keyless sessions)
+		//   2. ratelimit     (Sybil gate; refuses bursts of fresh keys)
+		//   3. terminal      (the verb dispatcher)
+		// we list them inner-to-outer.
+		wish.WithMiddleware(
+			s.terminalMiddleware(),
+			s.ratelimitMiddleware(),
+			s.keyRequiredMiddleware(),
+		),
+	)
+	if err != nil {
+		return fmt.Errorf("ssh wish server: %w", err)
 	}
 	// Plain Listen first; optionally wrap with go-proxyproto.
 	ln, err := net.Listen("tcp", s.Addr)
@@ -85,64 +105,134 @@ func (s *Server) ListenAndServe() error {
 		s.Logger.Printf("ssh: PROXY protocol parsing enabled (real client IPs come from PROXY headers)")
 	}
 	s.Logger.Printf("ssh: listening on %s", s.Addr)
-	err = server.Serve(ln)
+	err = srv.Serve(ln)
 	if errors.Is(err, net.ErrClosed) {
 		return nil
 	}
 	return err
 }
 
+// hostSigner loads (or, on first run, creates) the host key signer
+// using the existing PKCS8-PEM format. Returns nil signer when
+// HostKeyPath is empty; wish.NewServer then auto-generates an
+// in-memory ed25519 key, which is what the test fixtures rely on.
+func (s *Server) hostSigner() (xssh.Signer, error) {
+	if s.HostKeyPath == "" {
+		return nil, nil
+	}
+	signer, err := loadOrCreateHostKey(s.HostKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("ssh host key %q: %w", s.HostKeyPath, err)
+	}
+	return signer, nil
+}
+
+// withHostSigner returns an ssh.Option that registers a pre-loaded
+// signer as a host key. Skips when signer is nil (so wish's auto-gen
+// path stays available for tests).
+func withHostSigner(signer xssh.Signer) gossh.Option {
+	return func(srv *gossh.Server) error {
+		if signer == nil {
+			return nil
+		}
+		srv.AddHostKey(signer)
+		return nil
+	}
+}
+
+// keyRequiredMiddleware refuses sessions that authenticated via
+// password / keyboard-interactive (no public key presented). hostthis
+// needs a key on every session to attribute the paste to an identity
+// and to enforce the per-identity quota. Without one we exit 3 with a
+// helpful message pointing at ssh-keygen.
+func (s *Server) keyRequiredMiddleware() wish.Middleware {
+	return func(next gossh.Handler) gossh.Handler {
+		return func(sess gossh.Session) {
+			keyedFP, _ := sess.Context().Value("ownerHash").(string)
+			if keyedFP == "" {
+				fmt.Fprintln(sess.Stderr(), "hostthis: ssh key required.")
+				fmt.Fprintln(sess.Stderr(), "  generate one (ssh-keygen -t ed25519) and add it to ssh-agent,")
+				fmt.Fprintf(sess.Stderr(), "  or pass it on the command line: ssh -i ~/.ssh/id_ed25519 %s\n", s.apex())
+				_ = sess.Exit(3)
+				return
+			}
+			next(sess)
+		}
+	}
+}
+
+// ratelimitMiddleware enforces the Sybil per-subnet cap on the number
+// of distinct fresh fingerprints any one IP subnet can introduce in
+// the configured window. Returning users — any (key, subnet) we've
+// seen before — pass through with no accounting. When the gate is
+// nil, the middleware is a no-op.
+func (s *Server) ratelimitMiddleware() wish.Middleware {
+	return func(next gossh.Handler) gossh.Handler {
+		return func(sess gossh.Session) {
+			if s.KeyGate == nil {
+				next(sess)
+				return
+			}
+			keyedFP, _ := sess.Context().Value("ownerHash").(string)
+			// keyRequired runs before us, so a missing key would have
+			// already exited. The defensive guard keeps the middleware
+			// honest if the chain is reordered in a future refactor.
+			if keyedFP == "" {
+				next(sess)
+				return
+			}
+			owner := domain.IdentityFromKeyFingerprint(keyedFP).String()
+			subnet := ipSubnet(remoteIP(sess))
+			if err := s.KeyGate.Admit(owner, subnet); err != nil {
+				var ref *service.SybilRefusal
+				if errors.As(err, &ref) {
+					fmt.Fprintf(sess.Stderr(), "hostthis: too many new keys from this network today\n")
+					fmt.Fprintf(sess.Stderr(), "  subnet %s used %d of %d in the last 24h\n", ref.Subnet, ref.FreshCountInWindow, ref.Cap)
+					fmt.Fprintf(sess.Stderr(), "  your key %s isn't yet registered here\n", strings.TrimPrefix(owner, domain.IdentityKeyPrefix))
+					fmt.Fprintln(sess.Stderr(), "to get in:")
+					fmt.Fprintln(sess.Stderr(), "  (a) use a key already known on this subnet")
+					if frees := ref.NextSlotFreesAt(); !frees.IsZero() {
+						fmt.Fprintf(sess.Stderr(), "  (b) wait until %s — the oldest entry ages out then\n", frees.UTC().Format("2006-01-02 15:04 UTC"))
+					}
+					_ = sess.Exit(6)
+					return
+				}
+				if errors.Is(err, service.ErrSybilRateLimit) {
+					// Fallback when the rich enrichment failed.
+					fmt.Fprintln(sess.Stderr(), "hostthis: too many new keys from this network today.")
+					fmt.Fprintln(sess.Stderr(), "  try again tomorrow, or use an existing key already known to hostthis.")
+					_ = sess.Exit(6)
+					return
+				}
+				fmt.Fprintf(sess.Stderr(), "hostthis: key gate: %v\n", err)
+				_ = sess.Exit(1)
+				return
+			}
+			next(sess)
+		}
+	}
+}
+
+// terminalMiddleware is the innermost middleware: the verb dispatcher.
+// It ignores `next` (which is wish's noop stub) because the dispatcher
+// is the terminal handler — there's nothing further in the chain.
+func (s *Server) terminalMiddleware() wish.Middleware {
+	return func(_ gossh.Handler) gossh.Handler {
+		return s.handleSession
+	}
+}
+
 // handleSession dispatches one ssh command.
 //
 // `sess.Command()` returns the already-shell-split arg vector (ssh
 // client does that for us). The first token is the verb. An empty
-// command means "implicit upload of whatever's on stdin."
+// command means "implicit upload of whatever's on stdin." Key-required
+// and Sybil-gate refusals are handled in upstream middlewares — by
+// the time we get here we know the session has a public key and the
+// gate (if configured) admitted it.
 func (s *Server) handleSession(sess gossh.Session) {
-	// hostthis requires an ssh key on every session. Without a key
-	// there's no identity to attribute the paste to or to enforce
-	// the per-identity quota against. Bail with a helpful message.
 	keyedFP, _ := sess.Context().Value("ownerHash").(string)
-	if keyedFP == "" {
-		fmt.Fprintln(sess.Stderr(), "hostthis: ssh key required.")
-		fmt.Fprintln(sess.Stderr(), "  generate one (ssh-keygen -t ed25519) and add it to ssh-agent,")
-		fmt.Fprintf(sess.Stderr(), "  or pass it on the command line: ssh -i ~/.ssh/id_ed25519 %s\n", s.apex())
-		_ = sess.Exit(3)
-		return
-	}
 	owner := domain.IdentityFromKeyFingerprint(keyedFP).String()
-
-	// Sybil rate limit: cap the number of distinct fresh fingerprints
-	// any one IP subnet can introduce in a 24h window. Returning users
-	// (any (key, subnet) we've seen before) pass through with no
-	// accounting.
-	subnet := ipSubnet(remoteIP(sess))
-	if s.KeyGate != nil {
-		if err := s.KeyGate.Admit(owner, subnet); err != nil {
-			var ref *service.SybilRefusal
-			if errors.As(err, &ref) {
-				fmt.Fprintf(sess.Stderr(), "hostthis: too many new keys from this network today\n")
-				fmt.Fprintf(sess.Stderr(), "  subnet %s used %d of %d in the last 24h\n", ref.Subnet, ref.FreshCountInWindow, ref.Cap)
-				fmt.Fprintf(sess.Stderr(), "  your key %s isn't yet registered here\n", strings.TrimPrefix(owner, domain.IdentityKeyPrefix))
-				fmt.Fprintln(sess.Stderr(), "to get in:")
-				fmt.Fprintln(sess.Stderr(), "  (a) use a key already known on this subnet")
-				if frees := ref.NextSlotFreesAt(); !frees.IsZero() {
-					fmt.Fprintf(sess.Stderr(), "  (b) wait until %s — the oldest entry ages out then\n", frees.UTC().Format("2006-01-02 15:04 UTC"))
-				}
-				_ = sess.Exit(6)
-				return
-			}
-			if errors.Is(err, service.ErrSybilRateLimit) {
-				// Fallback when the rich enrichment failed.
-				fmt.Fprintln(sess.Stderr(), "hostthis: too many new keys from this network today.")
-				fmt.Fprintln(sess.Stderr(), "  try again tomorrow, or use an existing key already known to hostthis.")
-				_ = sess.Exit(6)
-				return
-			}
-			fmt.Fprintf(sess.Stderr(), "hostthis: key gate: %v\n", err)
-			_ = sess.Exit(1)
-			return
-		}
-	}
 
 	argv := sess.Command()
 
@@ -528,8 +618,8 @@ func (s *Server) verbPin(sess gossh.Session, owner string, argv []string) {
 // -- whoami -----------------------------------------------------------------
 
 func (s *Server) verbWhoami(sess gossh.Session, owner string) {
-	// handleSession rejects key-less sessions before they get here,
-	// so owner is always a key:<fp> identity by this point.
+	// keyRequiredMiddleware rejects key-less sessions before they get
+	// here, so owner is always a key:<fp> identity by this point.
 	subnet := ipSubnet(remoteIP(sess))
 	info, err := s.Manage.Whoami(owner, subnet)
 	if err != nil {
