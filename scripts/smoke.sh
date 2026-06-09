@@ -267,21 +267,24 @@ echo "$nokey" | grep -q "ssh key required" \
   && ok "no-key session refused" \
   || bad "no-key rejection" "$nokey"
 
-# ---- 16. hardening: local port-forward refused (-L) -----------------------
+# ---- 16. hardening: direct-tcpip channel refused (-W) ---------------------
 # Phase C4: the server's LocalPortForwardingCallback returns false, so
-# the client's direct-tcpip channel request is refused. With
-# ExitOnForwardFailure=yes the ssh client exits non-zero rather than
-# silently degrading. We use a high port unlikely to clash locally.
-step "ssh -L (local forward) refused"
+# the client's direct-tcpip channel request is refused.
+#
+# Why -W not -L: with -L the ssh client only opens the direct-tcpip
+# channel WHEN TRAFFIC FLOWS through the local listener; a session that
+# doesn't push bytes never triggers the server-side check. -W asks ssh
+# to use stdio as a direct-tcpip channel IMMEDIATELY at session start,
+# which forces the server to accept-or-reject before any command runs.
+step "ssh -W (direct-tcpip channel) refused"
 fwd_l=$(ssh -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
-        -o ExitOnForwardFailure=yes \
-        -L 19999:localhost:80 -- "$HOST" whoami 2>&1)
+        -W localhost:80 "$HOST" 2>&1 </dev/null)
 fwd_l_rc=$?
 if [ "$fwd_l_rc" -ne 0 ] && \
    echo "$fwd_l" | grep -qiE "refused|open failed|administratively prohibited|forward"; then
-  ok "local forward refused (rc=$fwd_l_rc)"
+  ok "direct-tcpip refused (rc=$fwd_l_rc)"
 else
-  bad "ssh -L not refused" "rc=$fwd_l_rc out=$fwd_l"
+  bad "ssh -W not refused" "rc=$fwd_l_rc out=$fwd_l"
 fi
 
 # ---- 17. hardening: reverse port-forward refused (-R) ---------------------
