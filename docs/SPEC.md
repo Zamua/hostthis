@@ -459,6 +459,28 @@ hostthis.dev — pipe rendered content (html/markdown), get a URL.
   ssh hostthis.dev whoami                         your identity + active count
 ```
 
+### Color output
+
+hostthis emits plain text by default and may add ANSI color escapes in
+the future for human-targeted output (warnings, refusal messages, the
+`whoami` block). When that lands, every emit site routes through one
+helper that follows the universal CLI convention
+(https://no-color.org):
+
+- No PTY allocated → plain text. Pipes (`ssh ... | foo`), redirections
+  (`> file`), and scripted clients never receive escapes.
+- `NO_COLOR` set to any value, including the empty string → plain
+  text. Per the no-color.org spec, presence alone disables.
+- `TERM=dumb` → plain text. Long-standing opt-out for non-ANSI
+  terminals (M-x shell, screen readers, log capture).
+- Otherwise → color permitted.
+
+`NO_COLOR` and `TERM` are read from the SSH session's client-supplied
+environment (the variables the user's local ssh client forwards via
+`SendEnv` or sets explicitly), not from the hostthisd process's own
+environment. A user opting out on their machine therefore disables
+color for their sessions without affecting anyone else.
+
 ---
 
 ## Apex landing page
