@@ -215,6 +215,50 @@ echo "$hlp" | grep -q "UPDATE & MANAGE" && echo "$hlp" | grep -q " list " \
   && ok "help lists verbs" \
   || bad "help" "$hlp"
 
+# ---- 14a. per-verb help: help put ------------------------------------------
+# Phase C3: `help <verb>` emits the verb's descriptor (signature +
+# description + examples) instead of the global banner. The `put`
+# descriptor's Description mentions the literal token "put" and its
+# Signature contains the `--name` flag, which the global banner does
+# not, so checking for both reliably distinguishes verb help from the
+# global help.
+step "help put (per-verb help)"
+help_put=$($SSH "$HOST" help put 2>&1)
+help_put_rc=$?
+echo "$help_put" | grep -q "put" && echo "$help_put" | grep -q -- "--name" \
+  && [ "$help_put_rc" -eq 0 ] \
+  && ok "help put emits verb-specific help" \
+  || bad "help put" "rc=$help_put_rc out=$help_put"
+
+# ---- 14b. per-verb help: put --help byte-matches help put ------------------
+# `<verb> --help` and `<verb> -h` are routed through the same descriptor
+# lookup as `help <verb>`, so all three forms should produce identical
+# bytes on stderr.
+step "put --help matches help put"
+put_dashdash=$($SSH "$HOST" put --help 2>&1)
+[ "$put_dashdash" = "$help_put" ] \
+  && ok "put --help byte-matches help put" \
+  || bad "put --help" "got: $put_dashdash"
+
+# ---- 14c. per-verb help: put -h byte-matches help put ----------------------
+step "put -h matches help put"
+put_h=$($SSH "$HOST" put -h 2>&1)
+[ "$put_h" = "$help_put" ] \
+  && ok "put -h byte-matches help put" \
+  || bad "put -h" "got: $put_h"
+
+# ---- 14d. help <unknown> → unknown-verb message + global banner ------------
+# `help <unknown>` prefixes an `unknown verb` line and then emits the
+# global banner, exiting 0 (the user asked for help, so they get help).
+step "help unknown → unknown-verb + global banner"
+help_unk=$($SSH "$HOST" help notarealverb 2>&1)
+help_unk_rc=$?
+echo "$help_unk" | grep -q "unknown verb" \
+  && echo "$help_unk" | grep -q "UPDATE & MANAGE" \
+  && [ "$help_unk_rc" -eq 0 ] \
+  && ok "help unknown shows banner with prefix, exit 0" \
+  || bad "help unknown" "rc=$help_unk_rc out=$help_unk"
+
 # ---- 15. session without a key is rejected ---------------------------------
 step "no-key session is rejected"
 nokey=$(ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o PreferredAuthentications=password \
@@ -222,6 +266,54 @@ nokey=$(ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o PreferredAuthen
 echo "$nokey" | grep -q "ssh key required" \
   && ok "no-key session refused" \
   || bad "no-key rejection" "$nokey"
+
+# ---- 16. hardening: local port-forward refused (-L) -----------------------
+# Phase C4: the server's LocalPortForwardingCallback returns false, so
+# the client's direct-tcpip channel request is refused. With
+# ExitOnForwardFailure=yes the ssh client exits non-zero rather than
+# silently degrading. We use a high port unlikely to clash locally.
+step "ssh -L (local forward) refused"
+fwd_l=$(ssh -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+        -o ExitOnForwardFailure=yes \
+        -L 19999:localhost:80 -- "$HOST" whoami 2>&1)
+fwd_l_rc=$?
+if [ "$fwd_l_rc" -ne 0 ] && \
+   echo "$fwd_l" | grep -qiE "refused|open failed|administratively prohibited|forward"; then
+  ok "local forward refused (rc=$fwd_l_rc)"
+else
+  bad "ssh -L not refused" "rc=$fwd_l_rc out=$fwd_l"
+fi
+
+# ---- 17. hardening: reverse port-forward refused (-R) ---------------------
+# ReversePortForwardingCallback returns false, so the `tcpip-forward`
+# global request is rejected at session start. ExitOnForwardFailure=yes
+# guarantees ssh exits non-zero in that case.
+step "ssh -R (reverse forward) refused"
+fwd_r=$(ssh -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+        -o ExitOnForwardFailure=yes \
+        -R 19998:localhost:80 -- "$HOST" whoami 2>&1)
+fwd_r_rc=$?
+if [ "$fwd_r_rc" -ne 0 ] && \
+   echo "$fwd_r" | grep -qiE "refused|open failed|administratively prohibited|forward"; then
+  ok "reverse forward refused (rc=$fwd_r_rc)"
+else
+  bad "ssh -R not refused" "rc=$fwd_r_rc out=$fwd_r"
+fi
+
+# ---- 18. hardening: subsystem (sftp) refused ------------------------------
+# SessionRequestCallback returns false for "subsystem", so sftp's
+# subsystem handshake fails. BatchMode=yes prevents sftp from hanging
+# on a password prompt if auth somehow fell through.
+step "sftp subsystem refused"
+sftp_out=$(sftp -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+           -o BatchMode=yes -b /dev/null "$HOST" 2>&1)
+sftp_rc=$?
+if [ "$sftp_rc" -ne 0 ] && \
+   echo "$sftp_out" | grep -qiE "subsystem|refused|received remote disconnect|connection closed"; then
+  ok "sftp subsystem refused (rc=$sftp_rc)"
+else
+  bad "sftp not refused" "rc=$sftp_rc out=$sftp_out"
+fi
 
 # ---- summary ---------------------------------------------------------------
 printf "\n"
