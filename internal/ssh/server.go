@@ -91,6 +91,12 @@ func (s *Server) ListenAndServe() error {
 			s.ratelimitMiddleware(),
 			s.keyRequiredMiddleware(),
 		),
+		// Defense-in-depth: refuse port-forwarding (-L / -R), agent-
+		// forwarding usefulness, X11, and subsystem (sftp/scp) channels.
+		// See hardening.go for the full rationale and the upstream-
+		// defaults audit. hostthis sessions are short-lived
+		// single-command exchanges; none of those channels are needed.
+		withHardening(),
 	)
 	if err != nil {
 		return fmt.Errorf("ssh wish server: %w", err)
