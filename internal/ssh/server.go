@@ -249,7 +249,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 		// this, we'd block reading stdin from a user just typing
 		// `ssh hostthis.dev` to "see what it does."
 		if _, _, hasPty := sess.Pty(); hasPty {
-			s.verbHelp(sess)
+			s.verbHelp(sess, nil)
 			return
 		}
 		s.verbUpload(sess, owner, nil)
@@ -264,9 +264,27 @@ func (s *Server) handleSession(sess gossh.Session) {
 		return
 	}
 
+	// `<verb> --help` / `<verb> -h` intercept: if the first token is a
+	// known verb (or a doc-only alias like `put` / `get`) and a help
+	// flag appears later in argv, emit verb-specific help instead of
+	// running the verb. This guards against side effects (delete, pin,
+	// etc.) when the user only wanted documentation.
+	if argvWantsHelp(argv) {
+		if d, ok := lookupVerbDescriptor(argv[0]); ok {
+			emitVerbHelp(sess, s.apex(), d)
+			_ = sess.Exit(0)
+			return
+		}
+	}
+
 	switch first := argv[0]; first {
 	case "help", "--help", "-h":
-		s.verbHelp(sess)
+		// `help <verb>` → verb-specific help when <verb> is recognized;
+		// otherwise an `unknown verb` prefix + the global banner. The
+		// bare `help` (and the `--help` / `-h` no-verb forms) keep
+		// emitting the global help banner; that path is pinned
+		// byte-exact by the Phase A characterization tests.
+		s.verbHelp(sess, argv[1:])
 	case "list":
 		s.verbList(sess, owner)
 	case "show":
@@ -665,7 +683,32 @@ func max0(n int) int {
 
 // -- help -------------------------------------------------------------------
 
-func (s *Server) verbHelp(sess gossh.Session) {
+// verbHelp dispatches help requests. With no extra args it emits the
+// global help banner (Phase A pins this byte-exact). With one extra
+// arg that matches a known verb (or doc-only alias like `put` / `get`),
+// it emits verb-specific help. With one extra arg that doesn't match,
+// it prefixes an `unknown verb` line and falls back to the global
+// banner — mirroring the "unknown command" treatment for dispatch
+// misses, but without the exit 2 (the user explicitly asked for help,
+// so we hand them help and exit 0).
+func (s *Server) verbHelp(sess gossh.Session, rest []string) {
+	if len(rest) == 0 {
+		emitHelp(sess, s.apex())
+		_ = sess.Exit(0)
+		return
+	}
+	verb := rest[0]
+	if d, ok := lookupVerbDescriptor(verb); ok {
+		emitVerbHelp(sess, s.apex(), d)
+		_ = sess.Exit(0)
+		return
+	}
+	// PTY-aware CRLF for the prefix line, matching emitHelp's discipline.
+	prefix := fmt.Sprintf("hostthis: unknown verb %q\n\n", verb)
+	if _, _, hasPty := sess.Pty(); hasPty {
+		prefix = strings.ReplaceAll(prefix, "\n", "\r\n")
+	}
+	fmt.Fprint(sess.Stderr(), prefix)
 	emitHelp(sess, s.apex())
 	_ = sess.Exit(0)
 }
