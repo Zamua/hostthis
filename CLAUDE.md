@@ -93,9 +93,8 @@ internal/
   http/              apex landing + paste read surface
   render/            markdown → sanitized HTML
 web/landing.html     embedded apex landing page
-docs/SPEC.md         product spec — source of truth for behavior
-deploy/vps/          docker-compose for remote single-host deploys
-Dockerfile           multi-stage build → distroless static image
+docs/SPEC.md         product spec; source of truth for behavior
+Dockerfile           multi-stage build; distroless static image
 Makefile             build / test / run / docker-up / deploy targets
 CLAUDE.md            contributor workflow conventions
 README.md            user-facing manpage
@@ -189,8 +188,21 @@ Available targets:
 | `make deploy-down` | docker compose down on the host |
 
 The runtime config (apex domain, URL mode, scheme) is read from
-`HOSTTHIS_*` env vars by [`deploy/vps/compose.yml`](deploy/vps/compose.yml).
-The compose file refuses to start without `HOSTTHIS_APEX_DOMAIN` set.
+`HOSTTHIS_*` env vars by the operator-side compose file. This repo
+ships no sample deploy compose; how to run the binary on your infra
+is your choice. The Makefile's `deploy-build` / `deploy-restart`
+targets invoke `docker compose -f $(OPS_DEPLOY_DIR)/compose.yml ...`
+where `OPS_DEPLOY_DIR` defaults to a path on the remote host that you
+manage outside this repo. Override it on the command line if your
+operator config lives elsewhere:
+
+```
+make deploy VPS_HOST=myvps HOSTTHIS_APEX_DOMAIN=example.com \
+            OPS_DEPLOY_DIR=/srv/hostthis-ops
+```
+
+The compose file must refuse to start without `HOSTTHIS_APEX_DOMAIN`
+set (the binary requires it).
 
 For repeated deploys to the same host, drop a (gitignored) shell
 script at `.env.deploy` and `source` it before running `make`.
