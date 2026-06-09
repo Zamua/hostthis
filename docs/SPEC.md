@@ -307,7 +307,7 @@ Slug as positional arg means "update this one". Server checks ownership
 against the key fingerprint. Failure modes (exit codes; SSH stderr message
 in italics):
 
-- *not found* (exit 1): slug doesn't exist OR exists but the connecting
+- *not found* (exit 4): slug doesn't exist OR exists but the connecting
   ssh key isn't its owner. Indistinguishable on purpose — the owner-check
   fail surfaces as "not found" so a non-owner can't probe for the
   existence of slugs they don't own.
@@ -318,6 +318,8 @@ in italics):
 - *upload too large to consider* (exit 1): raw input exceeded the
   100 MiB hard-fast-fail. No compressed-size check was attempted.
 - *usage error* (exit 2): malformed args, bad flag value.
+
+See "Exit codes" below for the canonical mapping.
 
 Update creates a new immutable version under the hood (SHA-keyed blob
 ref) and resets the 7-day retention clock. What the URL serves next
