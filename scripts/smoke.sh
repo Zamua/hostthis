@@ -3,8 +3,15 @@
 # Run via `make smoke` against a live URL, or invoked post-deploy by
 # the operator-side deploy tooling (which lives outside this repo).
 #
-#   ./scripts/smoke.sh                      # uses HOSTTHIS_HOST=hostthis.dev
+#   ./scripts/smoke.sh                                   # production: HOSTTHIS_HOST=hostthis.dev (subdomain mode)
 #   HOSTTHIS_HOST=staging.example.com ./scripts/smoke.sh
+#   HOSTTHIS_HOST=hostthis-local ./scripts/smoke.sh      # local dev compose (path mode)
+#
+# Works against either URL_MODE the server is configured with:
+#   subdomain  → upload returns https://<slug>.<apex>/    (production shape)
+#   path       → upload returns http(s)://<apex>/p/<slug> (dev compose shape)
+# The mode is auto-detected from the URL the first upload prints; the
+# script never needs to know which mode the server is in.
 #
 # Generates a throwaway ed25519 key under /tmp, uploads two pastes,
 # runs every verb against them, asserts the expected output / http
@@ -20,6 +27,28 @@ set -u  # don't set -e — we want to keep going on individual failures
 HOST="${HOSTTHIS_HOST:-hostthis.dev}"
 KEY="$(mktemp -u /tmp/hostthis-smoke-XXXXXX)"
 SSH="ssh -i $KEY -o StrictHostKeyChecking=no -o IdentitiesOnly=yes"
+
+# slug_from_url extracts the 8-char slug from a hostthis URL. Handles
+# both URL shapes the server can emit:
+#   subdomain mode: https://<slug>.apex.tld/      → take chars before first dot
+#   path mode:      http(s)://host[:port]/p/<slug> → take chars after last "/"
+# Slug is always exactly 8 chars (domain.SlugLength), so we use that as
+# the disambiguator: strip scheme, then look at the LAST path segment
+# (path mode) OR the FIRST hostname label (subdomain mode), and return
+# whichever is 8 chars.
+slug_from_url() {
+  local url="$1"
+  # Strip scheme.
+  local rest="${url#http://}"
+  rest="${rest#https://}"
+  # If the path contains "/p/<slug>", it's path mode: take the last segment.
+  if [[ "$rest" == */p/* ]]; then
+    printf '%s' "${rest##*/}"
+    return
+  fi
+  # Otherwise subdomain mode: slug is the first DNS label.
+  printf '%s' "${rest%%.*}"
+}
 
 PASS=0
 FAIL=0
@@ -61,7 +90,7 @@ step "upload HTML with --name"
 URL1=$(echo '<!doctype html><h1>smoke 1</h1>' | \
   ssh -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -- \
     "$HOST" '--name "smoke html"' 2>/dev/null | head -1)
-SLUG1=$(echo "$URL1" | sed -E 's|https://([^.]+)\.[^/]+|\1|')
+SLUG1=$(slug_from_url "$URL1")
 if [ -z "$URL1" ]; then
   bad "upload HTML (--name)" "no URL emitted"
 else
@@ -74,7 +103,7 @@ step "upload Markdown"
 URL2=$(printf '# Smoke MD\n\nbody\n' | \
   ssh -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -- \
     "$HOST" '--name "smoke md"' 2>/dev/null | head -1)
-SLUG2=$(echo "$URL2" | sed -E 's|https://([^.]+)\.[^/]+|\1|')
+SLUG2=$(slug_from_url "$URL2")
 if [ -z "$URL2" ]; then
   bad "upload Markdown" "no URL emitted"
 else
@@ -179,7 +208,10 @@ echo "$unk" | grep -q "unknown command" && echo "$unk" | grep -q "Pipe a rendere
 # ---- 14. help directly -----------------------------------------------------
 step "explicit help"
 hlp=$($SSH "$HOST" help 2>&1)
-echo "$hlp" | grep -q "ssh hostthis.dev list" \
+# Assert on a fragment that's identical in every deploy regardless of
+# the configured apex domain. The verb table in helpText() lives under
+# the "UPDATE & MANAGE" heading and is the same string for every host.
+echo "$hlp" | grep -q "UPDATE & MANAGE" && echo "$hlp" | grep -q " list " \
   && ok "help lists verbs" \
   || bad "help" "$hlp"
 
