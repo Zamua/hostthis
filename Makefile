@@ -80,8 +80,10 @@ data-dir-perms:
 #
 # Assumes:
 #  - You can `ssh $(VPS_HOST)` and `sudo` on the far end.
-#  - deploy/vps/compose.yml maps host :22→container :2222 and
-#    127.0.0.1:8080→container :8080.
+#  - An operator-managed compose file at $(OPS_DEPLOY_DIR)/compose.yml
+#    on the remote host maps host :22 to container :2222 and
+#    127.0.0.1:8080 to container :8080. This file is NOT shipped in
+#    the repo; set it up once on the remote out of band.
 #  - A TLS-terminating reverse proxy terminates HTTPS for your apex
 #    domain and proxies /p/ to 127.0.0.1:8080.
 #
@@ -115,18 +117,15 @@ smoke:
 
 # Push the local working tree to the VPS, excluding build/data artifacts.
 # Re-chowns the checkout to VPS_USER and the data dir to the container uid.
-# Preserves deploy/vps/ entirely (operator-managed compose + .env +
-# any other deploy-shape files; not tracked in the public repo) and
-# the minio-data volume across rsyncs. The repo intentionally ships
-# NO sample deploy files — how to run this binary on YOUR infra is
-# your choice. Anything operator-side that hostthis needs is set up
-# once on the VPS at <vps-path>/deploy/vps/ + survives rsyncs.
+# The repo intentionally ships NO sample production deploy files. How
+# to run this binary on YOUR infra is your choice; the operator-side
+# compose + .env live OUTSIDE this checkout (at $(OPS_DEPLOY_DIR) on
+# the remote) and are not touched by the rsync.
 deploy-sync: _require-vps-host
 	rsync -az --delete \
 	  --exclude='/data' --exclude='/bin' --exclude='/.git/objects' --exclude='*.log' \
-	  --exclude='/deploy/vps' \
 	  ./ $(VPS_HOST):/tmp/hostthis-staging/
-	ssh $(VPS_HOST) "sudo mkdir -p $(VPS_PATH)/data && sudo rsync -a --delete /tmp/hostthis-staging/ $(VPS_PATH)/ --exclude=/data --exclude=/deploy/vps --exclude=/.git/objects && sudo chown -R $(VPS_USER):$(VPS_USER) $(VPS_PATH) && sudo chown -R $(CONTAINER_UID):$(CONTAINER_UID) $(VPS_PATH)/data"
+	ssh $(VPS_HOST) "sudo mkdir -p $(VPS_PATH)/data && sudo rsync -a --delete /tmp/hostthis-staging/ $(VPS_PATH)/ --exclude=/data --exclude=/.git/objects && sudo chown -R $(VPS_USER):$(VPS_USER) $(VPS_PATH) && sudo chown -R $(CONTAINER_UID):$(CONTAINER_UID) $(VPS_PATH)/data"
 
 # Build the env-var prefix once. Sets the runtime config the compose
 # file reads (apex, mode, scheme) plus the absolute data path so the
@@ -136,10 +135,16 @@ DEPLOY_ENV = HOSTTHIS_APEX_DOMAIN='$(HOSTTHIS_APEX_DOMAIN)' \
              HOSTTHIS_PUBLIC_SCHEME='$(or $(HOSTTHIS_PUBLIC_SCHEME),https)' \
              HOSTTHIS_DATA_PATH='$(VPS_PATH)/data'
 
-# Operator-side compose + env. Lives OUTSIDE the public source repo
-# (in the operator's own infra checkout) — see global CLAUDE.md.
-# Override by setting OPS_DEPLOY_DIR=... when invoking make.
-OPS_DEPLOY_DIR ?= /home/admin/infra/hostthis
+# Operator-side compose + env file path on the remote host. Lives
+# OUTSIDE this source checkout (in whatever directory you manage your
+# infra config from). Override on the make command line:
+#   make deploy ... OPS_DEPLOY_DIR=/srv/hostthis-ops
+OPS_DEPLOY_DIR ?= /opt/hostthis-ops
+
+# Compose project name on the remote. Sets the prefix for container
+# names ($(COMPOSE_PROJECT)-hostthis-N, $(COMPOSE_PROJECT)-minio-N, ...).
+# Override if you already have an established naming scheme in place.
+COMPOSE_PROJECT ?= hostthis
 
 deploy-build: _require-vps-host _require-apex
 	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose --env-file $(OPS_DEPLOY_DIR)/.env -f $(OPS_DEPLOY_DIR)/compose.yml build"
@@ -148,16 +153,15 @@ deploy-restart: _require-vps-host _require-apex
 	@# Ensure the minio sidecar + any other "non-rollable" services are
 	@# up. compose up -d is a no-op when nothing's changed but creates
 	@# new services on first run + flushes orphan removal.
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose -p vps --env-file $(OPS_DEPLOY_DIR)/.env -f $(OPS_DEPLOY_DIR)/compose.yml up -d --no-recreate --remove-orphans minio"
+	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker compose -p $(COMPOSE_PROJECT) --env-file $(OPS_DEPLOY_DIR)/.env -f $(OPS_DEPLOY_DIR)/compose.yml up -d --no-recreate --remove-orphans minio"
 	@# Roll the hostthis service: bring up a NEW container alongside
-	@# the OLD, wait ~15s for traefik to register it as healthy via
-	@# the /healthz active probe, then stop the OLD. Zero-downtime for
-	@# HTTP (traefik always has a healthy backend); SSH in-flight to
-	@# the stopping container gets TCP-reset. See infra/APP-PATTERN.md
-	@# "Deploy strategy" for the rationale. -p vps preserves the
-	@# existing container naming (vps-hostthis-N); migrating to -p
-	@# hostthis is a separate task that involves a manual swap.
-	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker rollout -p vps --env-file $(OPS_DEPLOY_DIR)/.env -f $(OPS_DEPLOY_DIR)/compose.yml -w 15 hostthis"
+	@# the OLD, wait ~15s for the reverse proxy to register it as
+	@# healthy via the /healthz active probe, then stop the OLD.
+	@# Zero-downtime for HTTP (the proxy always has a healthy backend);
+	@# SSH in-flight to the stopping container gets TCP-reset.
+	@# Requires `docker rollout` (https://github.com/wowu/docker-rollout)
+	@# installed on the remote.
+	ssh $(VPS_HOST) "cd $(VPS_PATH) && sudo $(DEPLOY_ENV) docker rollout -p $(COMPOSE_PROJECT) --env-file $(OPS_DEPLOY_DIR)/.env -f $(OPS_DEPLOY_DIR)/compose.yml -w 15 hostthis"
 
 deploy-logs: _require-vps-host
 	ssh $(VPS_HOST) "sudo docker logs -f --tail 60 hostthis"

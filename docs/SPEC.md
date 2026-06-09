@@ -1019,9 +1019,9 @@ file). Defaults in parens:
                          / HOSTTHIS_PUBLIC_URL_BASE         base URL used to construct purge URLs   (https://<apex>)
 ```
 
-The runtime container reads the same env vars; the deploy compose
-file in `deploy/vps/compose.yml` shows the production-shaped
-invocation.
+The runtime container reads the same env vars. The operator supplies
+a docker-compose (or equivalent) file out of band; this repo ships no
+sample production compose.
 
 ### What's hardcoded vs operator-tunable
 
