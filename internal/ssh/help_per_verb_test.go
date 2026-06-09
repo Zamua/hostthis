@@ -46,7 +46,7 @@ func TestHelpVerb_HelpSpaceVerb(t *testing.T) {
 			if !strings.Contains(stderr, "Examples:") {
 				t.Fatalf("expected Examples: section in verb help, got %q", stderr)
 			}
-			// `help <verb>` MUST NOT emit the global banner — that's the
+			// `help <verb>` MUST NOT emit the global banner - that's the
 			// whole point of verb-specific help. The global banner's
 			// opening line is the canary.
 			if strings.Contains(stderr, "Pipe a rendered file in") {
@@ -253,6 +253,6 @@ func TestHelpVerb_NoSideEffects(t *testing.T) {
 	// A real delete that hit not-found would say `not found` on
 	// stderr; the help intercept must short-circuit before then.
 	if strings.Contains(stderr, "not found") {
-		t.Fatalf("intercept failed — delete ran instead of help: %q", stderr)
+		t.Fatalf("intercept failed - delete ran instead of help: %q", stderr)
 	}
 }
