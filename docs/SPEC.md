@@ -135,6 +135,57 @@ Implementation must use `golang.org/x/crypto/ssh`'s `PublicKeyCallback`,
 which is invoked AFTER the lib has already cryptographically verified the
 signature. Never trust a self-asserted username or fingerprint.
 
+### SSH session hardening
+
+A hostthis session is a single short verb exchange: client connects,
+runs one command, server replies, connection closes. None of the other
+SSH protocol surfaces are needed, and every one we leave open is a
+potential pivot if an identity is ever compromised. The server refuses
+them all at the wish/charmbracelet layer, as defense in depth on top
+of the per-identity quota and the Sybil per-subnet gate.
+
+Disabled:
+
+- **Local port forwarding** (`ssh -L`, the `direct-tcpip` channel).
+  `LocalPortForwardingCallback` returns false. The default wish channel
+  handler map doesn't register `direct-tcpip` either, so the channel-
+  open is refused before the callback is even consulted. Belt and
+  suspenders.
+- **Reverse port forwarding** (`ssh -R`, the `tcpip-forward` global
+  request). `ReversePortForwardingCallback` returns false. The client
+  receives a denial on the forward request and never gets a listener.
+- **Subsystems** (sftp, scp-via-subsystem, anything else). The
+  `SessionRequestCallback` returns false for `requestType ==
+  "subsystem"`. The library also has an empty `SubsystemHandlers` map,
+  so any subsystem name would be refused regardless; the callback
+  guarantees the refusal even if a future upstream change adds a
+  default subsystem.
+- **X11 forwarding** (`ssh -X`, the `x11-req` session request). The
+  library has no x11-req branch in its request switch, so it falls to
+  the default case which replies `false`. No additional gate needed,
+  but the contract is documented so a future change can't quietly
+  enable it.
+- **Agent forwarding** (`ssh -A`, the `auth-agent-req@openssh.com`
+  session request). The library acknowledges the request but hostthis
+  never sets up a forwarding socket, so the request is functionally a
+  no-op for any client that tried to use it. No agent is ever exposed
+  back to the connecting client.
+
+Kept enabled:
+
+- **PTY allocation.** The verb-help formatter switches LF to CRLF when
+  a PTY is present, and the test suite exercises both shapes. A PTY by
+  itself is not a tunnel; it's just stdin/stdout wrapped in line
+  discipline.
+- **shell and exec session requests.** These are the canonical paths
+  for running a verb. The `SessionRequestCallback` returns true for
+  both.
+
+The mechanism lives in `internal/ssh/hardening.go` (the `withHardening`
+ssh.Option) and is wired into `wish.NewServer` alongside the other
+With* options. Refusal behavior is pinned by
+`internal/ssh/hardening_test.go`.
+
 ---
 
 ## File handling
