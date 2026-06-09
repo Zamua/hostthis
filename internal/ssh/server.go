@@ -656,8 +656,6 @@ func emitServiceErr(sess gossh.Session, err error) {
 		fmt.Fprintln(sess.Stderr(), "hostthis: add an ssh key. this command needs an identity")
 	case errors.Is(err, service.ErrNotFound):
 		fmt.Fprintln(sess.Stderr(), "hostthis: not found")
-	case errors.Is(err, service.ErrNotOwner):
-		fmt.Fprintln(sess.Stderr(), "hostthis: not your paste")
 	case errors.Is(err, service.ErrInvalidName):
 		fmt.Fprintln(sess.Stderr(), "hostthis: name must be 1–60 printable chars, no newlines")
 	case errors.Is(err, domain.ErrUnsupportedKind):
@@ -668,14 +666,19 @@ func emitServiceErr(sess gossh.Session, err error) {
 	_ = sess.Exit(exitForServiceErr(err))
 }
 
+// exitForServiceErr maps a service-layer error to the canonical exit code.
+// Note: ErrNotOwner is intentionally NOT a case here. Every owner-gated
+// path in service.Manage collapses not-owner to ErrNotFound (see
+// requireOwner) so existence doesn't leak across identities. The SSH
+// surface therefore never sees ErrNotOwner; mapping it would be dead
+// code. A foreign-identity verb attempt is indistinguishable from a
+// well-formed-but-missing slug: both exit 4.
 func exitForServiceErr(err error) int {
 	switch {
 	case errors.Is(err, service.ErrEmptyOwner):
 		return 3
 	case errors.Is(err, service.ErrNotFound):
 		return 4
-	case errors.Is(err, service.ErrNotOwner):
-		return 5
 	default:
 		return 1
 	}

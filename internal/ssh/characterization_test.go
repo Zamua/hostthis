@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -853,7 +854,66 @@ func TestHelp_Characterization(t *testing.T) {
 			t.Fatalf("help should mention apex 'paste.test', got %q", stderr)
 		}
 	})
+
+	t.Run("HelpVerb_NoPty_ByteExactGolden", func(t *testing.T) {
+		// Pin the FULL stderr byte content of the no-PTY help banner.
+		// Substring assertions elsewhere catch big drifts but miss
+		// single-character edits ("paste" -> "paste " in any line is
+		// a silent regression for users running ssh + reading output
+		// on a narrow terminal). The golden below is the canonical
+		// rendered help for apex "paste.test"; a single byte added,
+		// removed, or reordered in helpTextTemplate must fail this.
+		_, stderr, exit := s.run("help", nil)
+		if exit != 0 {
+			t.Fatalf("exit: %d", exit)
+		}
+		if stderr != expectedHelpNoPty_PasteTest {
+			t.Fatalf("help banner drift on no-PTY render:\n got %d bytes:\n%q\nwant %d bytes:\n%q",
+				len(stderr), stderr, len(expectedHelpNoPty_PasteTest), expectedHelpNoPty_PasteTest)
+		}
+	})
 }
+
+// expectedHelpNoPty_PasteTest is the byte-exact rendered help banner
+// emitted to stderr when no PTY is allocated and the configured apex
+// is "paste.test". emitHelp's no-PTY path uses fmt.Fprintln, which
+// appends a single trailing "\n", so the golden ends with one LF after
+// the closing period. Any drift in helpTextTemplate (line addition,
+// character insertion, whitespace tweak) MUST fail the golden assertion
+// — that's the whole point of pinning the full string.
+const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pastes expire 7 days after last update.\n" +
+	"\n" +
+	"UPLOAD\n" +
+	"\n" +
+	"    cat foo.html | ssh paste.test\n" +
+	"    cat doc.md   | ssh paste.test --name \"design notes\"\n" +
+	"\n" +
+	"UPDATE & MANAGE (owner only; ssh key authenticates)\n" +
+	"\n" +
+	"    cat foo.html | ssh paste.test <slug>      replace bytes; URL stays the same\n" +
+	"    ssh paste.test list                       all your active pastes\n" +
+	"    ssh paste.test show <slug>                read content back\n" +
+	"    ssh paste.test rename <slug> \"label\"      set / change owner label\n" +
+	"    ssh paste.test delete <slug>              wipe the paste entirely\n" +
+	"    ssh paste.test delete <slug> <ver>        free one version's bytes (tombstone)\n" +
+	"    ssh paste.test whoami                     show your identity + active count\n" +
+	"\n" +
+	"VERSION HISTORY\n" +
+	"\n" +
+	"    Each `update` adds a new version (v2, v3, ...). Default URL serves the latest.\n" +
+	"\n" +
+	"    ssh paste.test versions <slug>            timeline of every version\n" +
+	"    ssh paste.test pin <slug> <ver>           stick URL to <ver> (survives updates)\n" +
+	"    ssh paste.test unpin <slug>               URL follows latest again\n" +
+	"\n" +
+	"LIMITS\n" +
+	"\n" +
+	"    10 MiB total per identity, counting post-compression bytes across\n" +
+	"    all your active pastes (every version of every paste). Highly\n" +
+	"    redundant text compresses 5-10x, so typical HTML/Markdown fits a\n" +
+	"    lot of content under the cap.\n" +
+	"\n" +
+	"    Content types: HTML, Markdown. Anything else rejected at upload.\n"
 
 // ---------------------------------------------------------------------------
 // 10. Auth refusal + Sybil refusal
@@ -960,9 +1020,9 @@ func TestSybilGate_Characterization(t *testing.T) {
 // v1 parsing enabled via the env var. Tests inject a v1 PROXY header on
 // the wire before the SSH handshake.
 type proxyProtoStack struct {
-	t          *testing.T
-	sshAddr    string
-	keyGate    *service.KeyGate
+	t       *testing.T
+	sshAddr string
+	keyGate *service.KeyGate
 }
 
 func startProxyProtoStack(t *testing.T, freshKeysPerSubnet int) *proxyProtoStack {
@@ -1131,34 +1191,34 @@ func TestExitCodes_Characterization(t *testing.T) {
 		desc   string
 	}{
 		{
-			name:   "ExitCode0_HelpSuccess",
-			cmd:    "help",
-			want:   0,
-			desc:   "help is the canonical exit-0 path with no side effects",
+			name: "ExitCode0_HelpSuccess",
+			cmd:  "help",
+			want: 0,
+			desc: "help is the canonical exit-0 path with no side effects",
 		},
 		{
-			name:   "ExitCode0_WhoamiSuccess",
-			cmd:    "whoami",
-			want:   0,
-			desc:   "whoami always exits 0 for a keyed session",
+			name: "ExitCode0_WhoamiSuccess",
+			cmd:  "whoami",
+			want: 0,
+			desc: "whoami always exits 0 for a keyed session",
 		},
 		{
-			name:   "ExitCode2_UnknownVerb",
-			cmd:    "wibble",
-			want:   2,
-			desc:   "unknown command → exit 2 with help dump",
+			name: "ExitCode2_UnknownVerb",
+			cmd:  "wibble",
+			want: 2,
+			desc: "unknown command → exit 2 with help dump",
 		},
 		{
-			name:   "ExitCode2_UsageError_DeleteNoArgs",
-			cmd:    "delete",
-			want:   2,
-			desc:   "verb-level usage error → exit 2",
+			name: "ExitCode2_UsageError_DeleteNoArgs",
+			cmd:  "delete",
+			want: 2,
+			desc: "verb-level usage error → exit 2",
 		},
 		{
-			name:   "ExitCode2_InvalidVer",
-			cmd:    "delete " + slugA + " notanumber",
-			want:   2,
-			desc:   "non-numeric ver arg → exit 2",
+			name: "ExitCode2_InvalidVer",
+			cmd:  "delete " + slugA + " notanumber",
+			want: 2,
+			desc: "non-numeric ver arg → exit 2",
 		},
 		{
 			name:   "ExitCode3_KeylessSession",
@@ -1168,10 +1228,10 @@ func TestExitCodes_Characterization(t *testing.T) {
 			desc:   "session without a key → exit 3",
 		},
 		{
-			name:   "ExitCode4_NotFound",
-			cmd:    "show " + domain.NewRandomSlug().String(),
-			want:   4,
-			desc:   "well-formed but non-existent slug → exit 4",
+			name: "ExitCode4_NotFound",
+			cmd:  "show " + domain.NewRandomSlug().String(),
+			want: 4,
+			desc: "well-formed but non-existent slug → exit 4",
 		},
 		{
 			name:   "ExitCode4_NotOwner_CollapsedToNotFound",
@@ -1283,5 +1343,271 @@ func TestConcurrent_Characterization(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("default-client list should be empty (uploads were on fresh identities), got %d rows: %q",
 			count, listOut)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 15. Owner-collapse: NotOwner is intentionally indistinguishable from
+//     NotFound at the SSH boundary. Every owner-gated verb pinned here
+//     to lock in the "no existence leak" contract.
+// ---------------------------------------------------------------------------
+
+func TestOwnerCollapse_Characterization(t *testing.T) {
+	// service.Manage.requireOwner returns ErrNotFound (NOT ErrNotOwner)
+	// whenever the slug belongs to a different identity. The SSH surface
+	// therefore always exits 4 on a foreign-slug verb, never 5. This pins
+	// that collapse across every owner-gated verb. If a future refactor
+	// surfaces ErrNotOwner distinctly, exitForServiceErr must regain its
+	// NotOwner branch AND a new exit-code (5) test must land alongside —
+	// changes to this test are an explicit policy decision, not silent.
+	s := startStack(t)
+
+	// Identity A creates a paste.
+	stdoutA, _, _ := s.run("", []byte("<!doctype html><p>owned by A</p>"))
+	slugA := extractSlug(stdoutA)
+	// v2 so we have something to delete by version + something to pin.
+	_, _, _ = s.run(slugA, []byte("<!doctype html><p>v2</p>"))
+
+	// Identity B (a different keyed client on the same server).
+	otherClient, _ := newKeyClient(t, s.sshAddr)
+
+	cases := []struct {
+		name string
+		cmd  string
+		body []byte
+	}{
+		{name: "Show_ForeignSlug", cmd: "show " + slugA},
+		{name: "Rename_ForeignSlug", cmd: `rename ` + slugA + ` "hijack"`},
+		{name: "Delete_ForeignSlug", cmd: "delete " + slugA},
+		{name: "DeleteVersion_ForeignSlug", cmd: "delete " + slugA + " 1"},
+		{name: "Pin_ForeignSlug", cmd: "pin " + slugA + " 1"},
+		{name: "Unpin_ForeignSlug", cmd: "unpin " + slugA},
+		{name: "Versions_ForeignSlug", cmd: "versions " + slugA},
+		{name: "Update_ForeignSlug", cmd: slugA, body: []byte("<!doctype html><p>x</p>")},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			_, stderr, exit := s.runOn(otherClient, tc.cmd, tc.body)
+			if exit != 4 {
+				t.Fatalf("foreign %s expected exit 4 (NotFound, NOT 5/NotOwner), got %d (%q)",
+					tc.name, exit, stderr)
+			}
+			// Stderr also pinned: the user-facing message is "not found",
+			// not "not your paste". Anything else would leak that the
+			// slug exists under a different identity.
+			if !strings.Contains(stderr, "not found") {
+				t.Fatalf("foreign %s expected 'not found' on stderr, got %q",
+					tc.name, stderr)
+			}
+			if strings.Contains(stderr, "not your paste") {
+				t.Fatalf("foreign %s LEAKS existence via 'not your paste' message: %q",
+					tc.name, stderr)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 16. parseUploadFlags negative paths — byte-exact stderr lines
+// ---------------------------------------------------------------------------
+
+func TestUploadFlags_NegativeCharacterization(t *testing.T) {
+	s := startStack(t)
+
+	// The parseUploadFlags path is reached when argv[0] starts with "--"
+	// OR when argv[0] is a valid slug. "put" isn't a verb in the
+	// dispatcher (no such case exists), so "put --name" actually routes
+	// through the unknown-command path with exit 2 + the help dump —
+	// NOT the parser. The parser is exercised by `--name` / `--type`
+	// in the FIRST position (no slug), which is the canonical "upload
+	// with a label, no slug" shape per docs/SPEC.md.
+
+	t.Run("DashDashNameNoValue_Exit2_ByteExactStderr", func(t *testing.T) {
+		// First arg is `--name` (flag in position 0) so the dispatcher
+		// routes straight into verbUpload → parseUploadFlags. The parser
+		// sees `--name` with nothing after it and returns the canonical
+		// "needs a value" error. The SSH layer prefixes "hostthis: " and
+		// appends "\n". Pinned byte-exact.
+		_, stderr, exit := s.run("--name", nil)
+		if exit != 2 {
+			t.Fatalf("expected exit 2, got %d (%q)", exit, stderr)
+		}
+		want := "hostthis: --name needs a value\n"
+		if stderr != want {
+			t.Fatalf("stderr drift:\n got: %q\nwant: %q", stderr, want)
+		}
+	})
+
+	t.Run("DashDashTypeNoValue_Exit2_ByteExactStderr", func(t *testing.T) {
+		_, stderr, exit := s.run("--type", nil)
+		if exit != 2 {
+			t.Fatalf("expected exit 2, got %d (%q)", exit, stderr)
+		}
+		want := "hostthis: --type needs a value\n"
+		if stderr != want {
+			t.Fatalf("stderr drift:\n got: %q\nwant: %q", stderr, want)
+		}
+	})
+
+	t.Run("UnexpectedArgument_Exit2_ByteExactStderr", func(t *testing.T) {
+		// `--name foo bar` → name=foo, then `bar` is an unexpected
+		// positional (not a slug, not a flag). Parser returns the
+		// canonical "unexpected argument" error. SSH layer prefixes
+		// "hostthis: " and appends "\n".
+		_, stderr, exit := s.run(`--name foo bar`, nil)
+		if exit != 2 {
+			t.Fatalf("expected exit 2, got %d (%q)", exit, stderr)
+		}
+		want := "hostthis: unexpected argument \"bar\"\n"
+		if stderr != want {
+			t.Fatalf("stderr drift:\n got: %q\nwant: %q", stderr, want)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// 17. Sybil gate — IPv6 (/48) subnet path via PROXY protocol v1 TCP6
+// ---------------------------------------------------------------------------
+
+// dialWithProxyV6 opens a TCP connection, writes a PROXY v1 TCP6 header
+// claiming the given IPv6 src, then runs an SSH handshake on top. Mirrors
+// dialWithProxyV1 but for IPv6 — drives the /48 mask path in ipSubnet.
+func dialWithProxyV6(t *testing.T, addr, srcIP string, srcPort int) *xssh.Client {
+	t.Helper()
+	c, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// PROXY protocol v1, IPv6 form:
+	//   PROXY TCP6 <src-ipv6> <dst-ipv6> <src-port> <dst-port>\r\n
+	// We use ::1 as the dst (the test listener is on 127.0.0.1 but PROXY
+	// v1 requires the family to agree across src + dst; ::1 satisfies
+	// the parser and is never consulted by the gate, only the src is).
+	hdr := fmt.Sprintf("PROXY TCP6 %s ::1 %d 2222\r\n", srcIP, srcPort)
+	if _, err := c.Write([]byte(hdr)); err != nil {
+		t.Fatalf("write proxy header: %v", err)
+	}
+	_, priv, err := genEd25519()
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	signer, err := xssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	cfg := &xssh.ClientConfig{
+		User:            "anyone",
+		Auth:            []xssh.AuthMethod{xssh.PublicKeys(signer)},
+		HostKeyCallback: xssh.InsecureIgnoreHostKey(),
+		Timeout:         3 * time.Second,
+	}
+	clientConn, chans, reqs, err := xssh.NewClientConn(c, addr, cfg)
+	if err != nil {
+		_ = c.Close()
+		t.Fatalf("ssh handshake (with proxy header): %v", err)
+	}
+	cli := xssh.NewClient(clientConn, chans, reqs)
+	t.Cleanup(func() { _ = cli.Close() })
+	return cli
+}
+
+func TestProxyProtocol_IPv6_SybilCharacterization(t *testing.T) {
+	// Pin the /48 masking path for IPv6 src addresses. KeyGate uses /48
+	// (per ipSubnet in server.go). Three fresh keys from the SAME /48
+	// (different lower 80 bits) must trigger the refusal on the third;
+	// a fresh key from a DIFFERENT /48 must succeed.
+	t.Run("SameSlash48_ThirdRefused_DifferentSlash48_Admitted", func(t *testing.T) {
+		p := startProxyProtoStack(t, 2)
+
+		// Three IPv6 addresses all in 2001:db8:1::/48 — only the lower
+		// 80 bits differ. ipSubnet should bucket them together.
+		c1 := dialWithProxyV6(t, p.sshAddr, "2001:db8:1::aa", 50000)
+		_, _, e1 := runCmd(t, c1, "whoami", nil)
+		if e1 != 0 {
+			t.Fatalf("first IPv6 client in 2001:db8:1::/48 should be admitted, got exit %d", e1)
+		}
+		c2 := dialWithProxyV6(t, p.sshAddr, "2001:db8:1:1234::bb", 50001)
+		_, _, e2 := runCmd(t, c2, "whoami", nil)
+		if e2 != 0 {
+			t.Fatalf("second IPv6 client in same /48 should be admitted (cap=2), got exit %d", e2)
+		}
+		// Third fresh key — different lower bits, SAME /48 — must be refused.
+		c3 := dialWithProxyV6(t, p.sshAddr, "2001:db8:1:ffff::cc", 50002)
+		_, stderr3, e3 := runCmd(t, c3, "whoami", nil)
+		if e3 != 6 {
+			t.Fatalf("third IPv6 client in full /48 should hit Sybil refusal (exit 6), got %d (%q)",
+				e3, stderr3)
+		}
+		if !strings.Contains(stderr3, "too many new keys from this network today") {
+			t.Fatalf("expected canonical sybil refusal, got %q", stderr3)
+		}
+		// The subnet detail line must name the IPv6 /48. Pin the prefix
+		// (the exact mask-canonicalization of 2001:db8:1:: depends on
+		// net.IP.Mask) — assert the "/48" suffix and the 2001:db8:1
+		// prefix appear together.
+		if !strings.Contains(stderr3, "/48") {
+			t.Fatalf("expected '/48' in IPv6 subnet detail, got %q", stderr3)
+		}
+		if !strings.Contains(stderr3, "2001:db8:1") {
+			t.Fatalf("expected '2001:db8:1' prefix in IPv6 subnet detail, got %q", stderr3)
+		}
+
+		// A fresh key from a DIFFERENT /48 (2001:db8:2::/48) gets in.
+		c4 := dialWithProxyV6(t, p.sshAddr, "2001:db8:2::dd", 50003)
+		_, _, e4 := runCmd(t, c4, "whoami", nil)
+		if e4 != 0 {
+			t.Fatalf("fresh key from a different /48 should be admitted, got exit %d (Sybil gate is per-/48)", e4)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// 18. Sybil refusal — "(b) wait until <timestamp>" line shape
+// ---------------------------------------------------------------------------
+
+func TestSybil_WaitUntilLine_Characterization(t *testing.T) {
+	// Phase A's TestSybilGate_Characterization pins the canonical refusal
+	// line via substring. This pin is sharper: the rich enrichment
+	// path emits a "(b) wait until <YYYY-MM-DD HH:MM UTC> — the oldest
+	// entry ages out then" line, and we lock in the prefix byte-exact
+	// + a regex on the formatted-time tail. The literal timestamp is
+	// time-sensitive (it's now+window), so we can't pin it exactly;
+	// the regex on the format string is what we want.
+	g := startGatedStack(t, 2)
+	c1, _ := dialKeyed(g.t, g.sshAddr)
+	_, _, _ = runCmd(g.t, c1, "whoami", nil)
+	c2, _ := dialKeyed(g.t, g.sshAddr)
+	_, _, _ = runCmd(g.t, c2, "whoami", nil)
+	c3, _ := dialKeyed(g.t, g.sshAddr)
+	_, stderr, e3 := runCmd(g.t, c3, "whoami", nil)
+	if e3 != 6 {
+		t.Fatalf("third key should be refused, got exit %d", e3)
+	}
+	// Locate the "(b) wait until ..." line. Server emits it with the
+	// fmt format "  (b) wait until %s — the oldest entry ages out then\n"
+	// where %s is now+window formatted as "2006-01-02 15:04 UTC". The
+	// indent (2 spaces) + literal prefix are byte-exact pinned.
+	const wantPrefix = "  (b) wait until "
+	idx := strings.Index(stderr, wantPrefix)
+	if idx < 0 {
+		t.Fatalf("missing '(b) wait until ' line in refusal:\n%q", stderr)
+	}
+	// Take the rest of the line after the prefix.
+	rest := stderr[idx+len(wantPrefix):]
+	nl := strings.Index(rest, "\n")
+	if nl < 0 {
+		t.Fatalf("'(b) wait until ' line is unterminated: %q", rest)
+	}
+	line := rest[:nl]
+	// Regex on the timestamp tail: YYYY-MM-DD HH:MM UTC then the
+	// trailing " — the oldest entry ages out then" sentence. The em
+	// dash is the literal character the server uses (this is the one
+	// place we don't have control over).
+	wantTail := regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC — the oldest entry ages out then$`)
+	if !wantTail.MatchString(line) {
+		t.Fatalf("'(b) wait until ' tail drift:\n got: %q\nwant pattern: %q",
+			line, wantTail.String())
 	}
 }
