@@ -199,7 +199,7 @@ func emitVerbHelp(sess gossh.Session, apex string, d verbDescriptor) {
 		fmt.Fprint(sess.Stderr(), text)
 		return
 	}
-	fmt.Fprint(sess.Stderr(), text)
+	_, _ = fmt.Fprint(sess.Stderr(), text)
 }
 
 // argvWantsHelp reports whether argv contains a `--help` or `-h` flag
