@@ -30,6 +30,22 @@ import (
 	"github.com/Zamua/hostthis/internal/service"
 )
 
+// Structured exit codes for SSH sessions. The SSH protocol carries the
+// exit status back to the local ssh client, which surfaces it as the
+// process exit code; shell scripts and CI pipelines use these to branch.
+// Keep the mapping stable: existing scripts will rely on specific codes.
+//
+// See docs/SPEC.md → "Exit codes" for the prose contract. The values
+// here are the source of truth; the spec mirrors them.
+//
+// Note: 5 is intentionally unused. It was historically reserved for an
+// ErrNotOwner path that the owner-collapse contract eliminated (the SSH
+// surface never observes ErrNotOwner — service.requireOwner collapses
+// non-owner reads to ErrNotFound so existence can't leak across
+// identities). Do not reuse 5 for a new meaning; pick the next free
+// slot to avoid retroactively changing the semantics of a code that
+// was already documented.
+
 // URLBuilder turns a slug into the URL we print on stdout.
 type URLBuilder func(domain.Slug) string
 
@@ -159,7 +175,7 @@ func (s *Server) keyRequiredMiddleware() wish.Middleware {
 				fmt.Fprintln(sess.Stderr(), "hostthis: ssh key required.")
 				fmt.Fprintln(sess.Stderr(), "  generate one (ssh-keygen -t ed25519) and add it to ssh-agent,")
 				fmt.Fprintf(sess.Stderr(), "  or pass it on the command line: ssh -i ~/.ssh/id_ed25519 %s\n", s.apex())
-				_ = sess.Exit(3)
+				_ = sess.Exit(ExitAuth)
 				return
 			}
 			next(sess)
@@ -200,18 +216,18 @@ func (s *Server) ratelimitMiddleware() wish.Middleware {
 					if frees := ref.NextSlotFreesAt(); !frees.IsZero() {
 						fmt.Fprintf(sess.Stderr(), "  (b) wait until %s — the oldest entry ages out then\n", frees.UTC().Format("2006-01-02 15:04 UTC"))
 					}
-					_ = sess.Exit(6)
+					_ = sess.Exit(ExitSybilRefuse)
 					return
 				}
 				if errors.Is(err, service.ErrSybilRateLimit) {
 					// Fallback when the rich enrichment failed.
 					fmt.Fprintln(sess.Stderr(), "hostthis: too many new keys from this network today.")
 					fmt.Fprintln(sess.Stderr(), "  try again tomorrow, or use an existing key already known to hostthis.")
-					_ = sess.Exit(6)
+					_ = sess.Exit(ExitSybilRefuse)
 					return
 				}
 				fmt.Fprintf(sess.Stderr(), "hostthis: key gate: %v\n", err)
-				_ = sess.Exit(1)
+				_ = sess.Exit(ExitErr)
 				return
 			}
 			next(sess)
@@ -272,7 +288,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 	if argvWantsHelp(argv) {
 		if d, ok := lookupVerbDescriptor(argv[0]); ok {
 			emitVerbHelp(sess, s.apex(), d)
-			_ = sess.Exit(0)
+			_ = sess.Exit(ExitOK)
 			return
 		}
 	}
@@ -313,7 +329,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 		// Matches what git, kubectl, etc. do.
 		fmt.Fprintf(sess.Stderr(), "hostthis: unknown command %q\n\n", first)
 		emitHelp(sess, s.apex())
-		_ = sess.Exit(2)
+		_ = sess.Exit(ExitUsage)
 	}
 }
 
@@ -328,7 +344,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	args, err := parseUploadFlags(argv)
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(2)
+		_ = sess.Exit(ExitUsage)
 		return
 	}
 	// Hand the live session reader to the service layer. The service
@@ -361,7 +377,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 			fmt.Fprintf(sess.Stderr(), "  ssh %s unpin %s        # always serve latest\n", s.apex(), slug)
 			fmt.Fprintf(sess.Stderr(), "  ssh %s pin %s %d       # serve this new version\n", s.apex(), slug, res.NewVer)
 		}
-		_ = sess.Exit(0)
+		_ = sess.Exit(ExitOK)
 		return
 	}
 
@@ -378,7 +394,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	} else {
 		fmt.Fprintln(sess.Stderr(), "expires in 7 days")
 	}
-	_ = sess.Exit(0)
+	_ = sess.Exit(ExitOK)
 }
 
 // -- list -------------------------------------------------------------------
@@ -391,7 +407,7 @@ func (s *Server) verbList(sess gossh.Session, owner string) {
 	}
 	if len(pastes) == 0 {
 		fmt.Fprintln(sess.Stderr(), "no active pastes")
-		_ = sess.Exit(0)
+		_ = sess.Exit(ExitOK)
 		return
 	}
 	// Header on stdout (was stderr historically — stderr ordering
@@ -411,7 +427,7 @@ func (s *Server) verbList(sess gossh.Session, owner string) {
 			p.Slug, name, humanBytes(p.Size), p.Kind,
 			humanDuration(p.ExpiresAt.Sub(now)), renderVersCol(p))
 	}
-	_ = sess.Exit(0)
+	_ = sess.Exit(ExitOK)
 }
 
 // renderVersCol renders the VERS column for `list`. Three states per spec:
@@ -437,7 +453,7 @@ func (s *Server) verbShow(sess gossh.Session, owner string, argv []string) {
 	slug, err := requireSlug(argv)
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(2)
+		_ = sess.Exit(ExitUsage)
 		return
 	}
 	_, body, err := s.Manage.Show(slug, owner)
@@ -446,7 +462,7 @@ func (s *Server) verbShow(sess gossh.Session, owner string, argv []string) {
 		return
 	}
 	_, _ = sess.Write(body)
-	_ = sess.Exit(0)
+	_ = sess.Exit(ExitOK)
 }
 
 // -- rename ------------------------------------------------------------------
@@ -454,13 +470,13 @@ func (s *Server) verbShow(sess gossh.Session, owner string, argv []string) {
 func (s *Server) verbRename(sess gossh.Session, owner string, argv []string) {
 	if len(argv) < 2 {
 		fmt.Fprintln(sess.Stderr(), `hostthis: usage: rename <slug> "<name>"  (empty string clears)`)
-		_ = sess.Exit(2)
+		_ = sess.Exit(ExitUsage)
 		return
 	}
 	slug, err := domain.ParseSlug(argv[0])
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "hostthis: invalid slug %q\n", argv[0])
-		_ = sess.Exit(2)
+		_ = sess.Exit(ExitUsage)
 		return
 	}
 	if err := s.Manage.Rename(slug, owner, argv[1]); err != nil {
@@ -468,7 +484,7 @@ func (s *Server) verbRename(sess gossh.Session, owner string, argv []string) {
 		return
 	}
 	fmt.Fprintln(sess.Stderr(), "renamed.")
-	_ = sess.Exit(0)
+	_ = sess.Exit(ExitOK)
 }
 
 // -- delete -----------------------------------------------------------------
@@ -481,13 +497,13 @@ func (s *Server) verbDelete(sess gossh.Session, owner string, argv []string) {
 	switch len(argv) {
 	case 0:
 		fmt.Fprintln(sess.Stderr(), "usage: delete <slug> [<ver>]")
-		_ = sess.Exit(2)
+		_ = sess.Exit(ExitUsage)
 		return
 	case 1:
 		slug, err := requireSlug(argv)
 		if err != nil {
 			fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-			_ = sess.Exit(2)
+			_ = sess.Exit(ExitUsage)
 			return
 		}
 		if err := s.Manage.Delete(slug, owner); err != nil {
@@ -495,39 +511,39 @@ func (s *Server) verbDelete(sess gossh.Session, owner string, argv []string) {
 			return
 		}
 		fmt.Fprintln(sess.Stderr(), "deleted.")
-		_ = sess.Exit(0)
+		_ = sess.Exit(ExitOK)
 		return
 	case 2:
 		slug, err := requireSlug(argv[:1])
 		if err != nil {
 			fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-			_ = sess.Exit(2)
+			_ = sess.Exit(ExitUsage)
 			return
 		}
 		verNum, err := parseVersionArg(argv[1])
 		if err != nil {
 			fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-			_ = sess.Exit(2)
+			_ = sess.Exit(ExitUsage)
 			return
 		}
 		res, err := s.Manage.DeleteVersion(slug, owner, verNum)
 		switch {
 		case err == nil:
 			fmt.Fprintf(sess.Stderr(), "deleted v%d. freed %s.\n", res.VerNum, humanBytes(res.FreedBytes))
-			_ = sess.Exit(0)
+			_ = sess.Exit(ExitOK)
 		case errors.Is(err, service.ErrVersionAlreadyDeleted):
 			fmt.Fprintf(sess.Stderr(), "version v%d already deleted\n", verNum)
-			_ = sess.Exit(0)
+			_ = sess.Exit(ExitOK)
 		case errors.Is(err, service.ErrVersionCurrentlyServed):
 			fmt.Fprintf(sess.Stderr(), "hostthis: v%d is currently served. pin a different version first (or `unpin` if pinning was active)\n", verNum)
-			_ = sess.Exit(2)
+			_ = sess.Exit(ExitUsage)
 		default:
 			emitServiceErr(sess, err)
 		}
 		return
 	default:
 		fmt.Fprintln(sess.Stderr(), "usage: delete <slug> [<ver>]")
-		_ = sess.Exit(2)
+		_ = sess.Exit(ExitUsage)
 		return
 	}
 }
@@ -548,7 +564,7 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 	slug, err := requireSlug(argv)
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(2)
+		_ = sess.Exit(ExitUsage)
 		return
 	}
 	vers, err := s.Manage.Versions(slug, owner)
@@ -593,14 +609,14 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 	}
 	fmt.Fprintf(sess.Stderr(), "%s. expires in %s (%s)\n",
 		pinNote, humanDuration(p.ExpiresAt.Sub(now)), p.ExpiresAt.Format("2006-01-02 15:04 UTC"))
-	_ = sess.Exit(0)
+	_ = sess.Exit(ExitOK)
 }
 
 func (s *Server) verbUnpin(sess gossh.Session, owner string, argv []string) {
 	slug, err := requireSlug(argv)
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(2)
+		_ = sess.Exit(ExitUsage)
 		return
 	}
 	if err := s.Manage.Unpin(slug, owner); err != nil {
@@ -608,26 +624,26 @@ func (s *Server) verbUnpin(sess gossh.Session, owner string, argv []string) {
 		return
 	}
 	fmt.Fprintln(sess.Stderr(), "unpinned. URL now serves the latest version.")
-	_ = sess.Exit(0)
+	_ = sess.Exit(ExitOK)
 }
 
 func (s *Server) verbPin(sess gossh.Session, owner string, argv []string) {
 	if len(argv) < 2 {
 		fmt.Fprintln(sess.Stderr(), "hostthis: usage: pin <slug> <ver-num>")
-		_ = sess.Exit(2)
+		_ = sess.Exit(ExitUsage)
 		return
 	}
 	slug, err := domain.ParseSlug(argv[0])
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "hostthis: invalid slug %q\n", argv[0])
-		_ = sess.Exit(2)
+		_ = sess.Exit(ExitUsage)
 		return
 	}
 	verStr := strings.TrimPrefix(argv[1], "v")
 	verNum, err := parseInt(verStr)
 	if err != nil || verNum < 1 {
 		fmt.Fprintf(sess.Stderr(), "hostthis: invalid version %q\n", argv[1])
-		_ = sess.Exit(2)
+		_ = sess.Exit(ExitUsage)
 		return
 	}
 	ver, err := s.Manage.Pin(slug, owner, verNum)
@@ -636,7 +652,7 @@ func (s *Server) verbPin(sess gossh.Session, owner string, argv []string) {
 		return
 	}
 	fmt.Fprintf(sess.Stderr(), "pinned v%d.\n", ver.VerNum)
-	_ = sess.Exit(0)
+	_ = sess.Exit(ExitOK)
 }
 
 // -- whoami -----------------------------------------------------------------
@@ -671,7 +687,7 @@ func (s *Server) verbWhoami(sess gossh.Session, owner string) {
 		fmt.Fprintf(sess, "  subnet budget: %d of %d fresh keys used here today\n",
 			info.Session.SubnetFreshCount, info.Session.SubnetCap)
 	}
-	_ = sess.Exit(0)
+	_ = sess.Exit(ExitOK)
 }
 
 func max0(n int) int {
@@ -694,13 +710,13 @@ func max0(n int) int {
 func (s *Server) verbHelp(sess gossh.Session, rest []string) {
 	if len(rest) == 0 {
 		emitHelp(sess, s.apex())
-		_ = sess.Exit(0)
+		_ = sess.Exit(ExitOK)
 		return
 	}
 	verb := rest[0]
 	if d, ok := lookupVerbDescriptor(verb); ok {
 		emitVerbHelp(sess, s.apex(), d)
-		_ = sess.Exit(0)
+		_ = sess.Exit(ExitOK)
 		return
 	}
 	// PTY-aware CRLF for the prefix line, matching emitHelp's discipline.
@@ -710,7 +726,7 @@ func (s *Server) verbHelp(sess gossh.Session, rest []string) {
 	}
 	fmt.Fprint(sess.Stderr(), prefix)
 	emitHelp(sess, s.apex())
-	_ = sess.Exit(0)
+	_ = sess.Exit(ExitOK)
 }
 
 // apex returns the configured apex domain. The binary refuses to
@@ -815,11 +831,11 @@ func emitServiceErr(sess gossh.Session, err error) {
 func exitForServiceErr(err error) int {
 	switch {
 	case errors.Is(err, service.ErrEmptyOwner):
-		return 3
+		return ExitAuth
 	case errors.Is(err, service.ErrNotFound):
-		return 4
+		return ExitNotFound
 	default:
-		return 1
+		return ExitErr
 	}
 }
 
