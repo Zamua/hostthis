@@ -23,6 +23,7 @@ import "bytes"
 //	identity_pastes/<id>/<slug>   -> <id>     (first segment after the prefix)
 //	identity_first_seen/<id>      -> <id>
 //	identity_bytes/<id>           -> <id>
+//	identity_reserve/<id>/<slug>  -> <id>     (reservation marker; co-shards with the counter)
 //	keygate/<subnet>/<identity>   -> <subnet> (first segment after the prefix)
 //
 // A key that matches no known family falls back to the full key as its
@@ -54,6 +55,11 @@ func shaleShardKey(key []byte) []byte {
 		return firstSegment(key[len(prefixIdentityFirstSeenAll):])
 	case bytes.HasPrefix(key, prefixIdentityBytesAll):
 		return firstSegment(key[len(prefixIdentityBytesAll):])
+	case bytes.HasPrefix(key, prefixIdentityReserveAll):
+		// identity_reserve/<id>/<slug>: shard on the id (first segment) so
+		// the reservation marker co-shards with identity_bytes/<id> and the
+		// reserve step's read-increment-mark is a single-shard CAS.
+		return firstSegment(key[len(prefixIdentityReserveAll):])
 
 	// Per-subnet Sybil-gate family. Shards on the subnet, the first
 	// segment after the prefix.
@@ -78,6 +84,7 @@ var (
 	prefixIdentityPastesAll    = []byte("identity_pastes/")
 	prefixIdentityFirstSeenAll = []byte("identity_first_seen/")
 	prefixIdentityBytesAll     = []byte("identity_bytes/")
+	prefixIdentityReserveAll   = []byte("identity_reserve/")
 	prefixKeygateAll           = []byte("keygate/")
 )
 
