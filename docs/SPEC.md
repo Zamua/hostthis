@@ -1214,16 +1214,24 @@ created-at) rather than the empty marker the single-writer layout uses.
 `ListByOwner` then scans one shard and returns rows without fanning out
 to the `{slug}` shards.
 
-`ListByOwner` **repairs on read** to absorb the eventual-consistency
-gap, applying two rules:
+`ListByOwner` **repairs on read** to absorb one half of the
+eventual-consistency gap:
 
 - **Stale index entry:** an `identity_pastes` entry whose authoritative
   `pastes/<slug>` row no longer exists is stale (the paste was deleted
   but the index update was lost). It is skipped in the result and queued
   for removal.
-- **Missing index entry:** an authoritative paste owned by the identity
-  with no `identity_pastes` entry (the index write was lost after the
-  authoritative write landed) is re-added to the index.
+
+`ListByOwner` does **not** repair a missing index entry (an
+authoritative paste owned by the identity with no `identity_pastes`
+entry, left by a crash between the authoritative write and the confirm
+step). Discovering such a paste requires a cross-shard scan of the
+authoritative `pastes/*` rows, which the single-shard list path
+deliberately avoids: `ListByOwner` only sees the index entries it can
+scan on the `{id}` shard, and an entry that was never written is not
+among them. Healing missing entries is therefore the reconciler's job,
+not `ListByOwner`'s. The reader self-heals exactly the stale entries it
+touches; the reconciler covers everything reads alone cannot.
 
 A background **reconciler** does the rest of the healing: it rebuilds
 derived indexes from the authoritative rows (adding missing entries,
