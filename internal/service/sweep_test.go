@@ -13,7 +13,7 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// TestSweep_Once — drives the sweep against a real sqlite + blob store.
+// TestSweep_Once - drives the sweep against a real sqlite + blob store.
 // Uploads two pastes, marks one expired by setting Now to the future,
 // asserts the expired one is gone and the still-active one survives.
 func TestSweep_Once(t *testing.T) {
@@ -96,7 +96,7 @@ func TestSweep_KeepsActive(t *testing.T) {
 	}
 
 	sweep := service.NewSweep(repo, blobs, log.New(io.Discard, "", 0))
-	// 1 hour later — well within retention
+	// 1 hour later - well within retention
 	pastes, _, _ := sweep.Once(now.Add(time.Hour))
 	if pastes != 0 {
 		t.Fatalf("active paste should not be swept, got %d", pastes)
@@ -184,6 +184,6 @@ func TestSweep_GuardsAgainstBuggyRepoZeroRefs(t *testing.T) {
 // surfaces unexpected calls.
 type buggyRepo struct{}
 
-func (buggyRepo) ExpiredSlugs(_ time.Time) ([]string, error)    { return nil, nil }
-func (buggyRepo) Delete(_ domain.Slug) error                    { panic("not expected") }
-func (buggyRepo) UnreferencedBlobSHAs() ([]string, error)       { return nil, nil }
+func (buggyRepo) ExpiredSlugs(_ time.Time) ([]string, error) { return nil, nil }
+func (buggyRepo) Delete(_ domain.Slug) error                 { panic("not expected") }
+func (buggyRepo) UnreferencedBlobSHAs() ([]string, error)    { return nil, nil }

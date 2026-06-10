@@ -1,5 +1,5 @@
 // Package storage holds the infrastructure adapters that back the
-// domain types — sqlite for paste metadata, content-addressed disk
+// domain types - sqlite for paste metadata, content-addressed disk
 // store for paste bytes. Domain types (internal/domain) never import
 // this package; this package imports domain. DDD layering enforced.
 package storage
@@ -48,7 +48,7 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("read migrations: %w", err)
 	}
 	// Track applied migrations in a tiny meta table so re-runs are
-	// idempotent. Single-process, single-file db — no need for a
+	// idempotent. Single-process, single-file db - no need for a
 	// migration framework.
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS _migrations (
 		filename TEXT PRIMARY KEY,

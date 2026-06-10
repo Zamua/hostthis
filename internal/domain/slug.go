@@ -1,4 +1,4 @@
-// Package domain holds pure types and rules — no I/O.
+// Package domain holds pure types and rules - no I/O.
 //
 // Nothing here imports from storage, ssh, http, render, or any
 // external SDK. Anything that needs a clock, a random source, or a
@@ -37,7 +37,7 @@ var (
 
 // ParseSlug validates that s is a well-formed slug and returns it
 // typed. Use this at every boundary where untrusted input becomes a
-// Slug — request handlers, repo reads, CLI args.
+// Slug - request handlers, repo reads, CLI args.
 func ParseSlug(s string) (Slug, error) {
 	if s == "" {
 		return "", ErrSlugEmpty

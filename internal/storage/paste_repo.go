@@ -113,7 +113,7 @@ func (r *PasteRepo) Insert(p domain.Paste) error {
 }
 
 // Get returns the paste for slug, or ErrNotFound. Expired pastes are
-// still returned by this read — the HTTP layer is responsible for
+// still returned by this read - the HTTP layer is responsible for
 // 404'ing them; the background sweep is responsible for deleting
 // them.
 func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
@@ -127,7 +127,7 @@ func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
 }
 
 // ListByOwner returns all of an owner's active pastes, ordered by
-// expires_at ascending (soonest to die first — matches what `list`
+// expires_at ascending (soonest to die first - matches what `list`
 // should show). Empty identity returns no rows.
 func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	if owner == "" {
@@ -243,11 +243,11 @@ type AppendResult struct {
 //  5. if the paste was UNPINNED (pinned_version=0), updates the
 //     denormalized head fields (kind, content_sha, size) so the public
 //     URL serves the new bytes. If the paste was PINNED to a specific
-//     version, the head fields stay pointing at that version's data —
+//     version, the head fields stay pointing at that version's data -
 //     the new version is recorded but not served until the user
 //     `unpin`s or `pin`s a different version.
 //
-// The "size" being charged is the new version's bytes — older versions
+// The "size" being charged is the new version's bytes - older versions
 // continue to count toward the identity's total until the parent paste
 // expires or is deleted.
 func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, serviceCap, userCap int64, now time.Time) (AppendResult, error) {
@@ -301,7 +301,7 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 		}
 	}
 
-	// MAX(ver_num) includes deleted rows — version numbers are NOT
+	// MAX(ver_num) includes deleted rows - version numbers are NOT
 	// reused even after a tombstone. Predictable for users who
 	// `versions` and see continuous numbering.
 	var maxVer int
@@ -330,7 +330,7 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 			return AppendResult{}, fmt.Errorf("update paste head (unpinned): %w", err)
 		}
 	} else {
-		// Pinned — only bump the clock; head fields stay pointing at
+		// Pinned - only bump the clock; head fields stay pointing at
 		// the pinned version's bytes.
 		if _, err := tx.Exec(`
 			UPDATE pastes
@@ -418,7 +418,7 @@ func (r *PasteRepo) GetVersion(slug domain.Slug, ver int) (domain.Version, error
 // active accounting.
 //
 // Returns ErrNotFound if (slug, ver) doesn't exist. Does NOT check
-// owner or served-status — service layer enforces those.
+// owner or served-status - service layer enforces those.
 func (r *PasteRepo) DeleteVersion(slug domain.Slug, ver int) error {
 	res, err := r.db.Exec(`UPDATE versions SET deleted = 1 WHERE slug = ? AND ver_num = ?`, slug.String(), ver)
 	if err != nil {
@@ -434,7 +434,7 @@ func (r *PasteRepo) DeleteVersion(slug domain.Slug, ver int) error {
 	return nil
 }
 
-// CountByOwner returns how many active pastes the owner has — used
+// CountByOwner returns how many active pastes the owner has - used
 // by whoami output.
 func (r *PasteRepo) CountByOwner(owner string) (int, error) {
 	if owner == "" {
@@ -449,7 +449,7 @@ func (r *PasteRepo) CountByOwner(owner string) (int, error) {
 }
 
 // SumActiveSizeByOwner returns the total bytes the identity currently
-// has alive — the sum of every VERSION row attached to any of its
+// has alive - the sum of every VERSION row attached to any of its
 // non-expired pastes. We sum versions, not pastes, so that update
 // history is properly accounted: each call to `update` adds a new
 // version row that persists on disk until the parent paste expires
@@ -487,7 +487,7 @@ func (r *PasteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, err
 }
 
 // OwnerFirstSeen returns the earliest CreatedAt across the owner's
-// pastes — a proxy for "when did we first see this key". Zero
+// pastes - a proxy for "when did we first see this key". Zero
 // time.Time when the owner has no pastes.
 func (r *PasteRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 	if owner == "" {
@@ -504,7 +504,7 @@ func (r *PasteRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 	return parseTime(s.String), nil
 }
 
-// scanPaste is shared by Get + ListByOwner — same column order, one
+// scanPaste is shared by Get + ListByOwner - same column order, one
 // place to update if columns shift.
 func scanPaste(s scanner) (domain.Paste, error) {
 	var p domain.Paste

@@ -66,7 +66,7 @@ func main() {
 			return nil
 		}
 		// S3 store's Put is itself idempotent (HEAD-check first), so
-		// we don't need to skip explicitly — but counting requires us
+		// we don't need to skip explicitly - but counting requires us
 		// to ask. Keep it simple: just attempt the Put; the S3 store
 		// will short-circuit if already present.
 		if err := dst.Put(sha, bytes.NewReader(body), int64(len(body))); err != nil {

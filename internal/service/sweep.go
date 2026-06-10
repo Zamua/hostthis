@@ -65,7 +65,7 @@ func (s *Sweep) Run(ctx context.Context) {
 }
 
 // tick runs one sweep pass. Errors are logged but don't stop the
-// loop — the goal is "eventual consistency," not "fail loudly."
+// loop - the goal is "eventual consistency," not "fail loudly."
 func (s *Sweep) tick() {
 	now := s.Now().UTC()
 	pasteCount, blobCount, err := s.Once(now)
@@ -116,9 +116,9 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 	// expiry pass) AND the blob store has blobs in it, something is
 	// broken (buggy repo impl, schema misalignment, partial-restore).
 	// Treating every blob as orphan and deleting them all would wipe
-	// the bucket on the next tick — refuse instead. The cost in a
+	// the bucket on the next tick - refuse instead. The cost in a
 	// legitimate "user deleted their last paste, no new uploads"
-	// edge case is leaving one orphan blob until the next upload —
+	// edge case is leaving one orphan blob until the next upload -
 	// strictly better than nuking the bucket.
 	if len(refSet) == 0 && pastesDeleted == 0 {
 		blobCount := 0
@@ -126,7 +126,7 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 			return pastesDeleted, 0, fmt.Errorf("walk blobs (guard): %w", walkErr)
 		}
 		if blobCount > 0 {
-			s.Logger.Printf("sweep: ABORTING blob GC — repo reports 0 referenced shas, no pastes were swept this tick, but blob store has %d objects; suspected repo bug. No blobs deleted.", blobCount)
+			s.Logger.Printf("sweep: ABORTING blob GC - repo reports 0 referenced shas, no pastes were swept this tick, but blob store has %d objects; suspected repo bug. No blobs deleted.", blobCount)
 			return pastesDeleted, 0, nil
 		}
 	}
@@ -146,4 +146,3 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 	}
 	return pastesDeleted, blobsGCd, nil
 }
-

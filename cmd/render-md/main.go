@@ -3,14 +3,18 @@
 package main
 
 import (
-    "fmt"
-    "io"
-    "os"
-    "github.com/Zamua/hostthis/internal/render"
+	"fmt"
+	"github.com/Zamua/hostthis/internal/render"
+	"io"
+	"os"
 )
+
 func main() {
-    src, _ := io.ReadAll(os.Stdin)
-    out, err := render.Markdown(src)
-    if err != nil { fmt.Fprintln(os.Stderr, err); os.Exit(1) }
-    os.Stdout.Write(out)
+	src, _ := io.ReadAll(os.Stdin)
+	out, err := render.Markdown(src)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Stdout.Write(out)
 }

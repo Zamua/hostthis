@@ -27,7 +27,7 @@ func (b *BlobStore) WalkBlobs(fn func(sha string) error) error {
 }
 
 // Remove deletes a blob by sha. No-op when the file is already gone
-// (treat as success — the GC may have removed it under us).
+// (treat as success - the GC may have removed it under us).
 func (b *BlobStore) Remove(sha string) error {
 	if len(sha) < 2 {
 		return nil

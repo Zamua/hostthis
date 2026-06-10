@@ -200,7 +200,7 @@ func TestVerbList_AfterUpload(t *testing.T) {
 		t.Fatalf("named paste should appear in list: %q", stdout)
 	}
 	// Header + 2 rows of tab-separated output. Header MUST be the first
-	// stdout line — pins the regression where it was emitted on stderr
+	// stdout line - pins the regression where it was emitted on stderr
 	// (which arrived AFTER the rows from the client's perspective).
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")
 	if len(lines) != 3 {
@@ -245,7 +245,7 @@ func TestVerbShow_OwnerOnly(t *testing.T) {
 		t.Fatalf("show returned wrong body: %q", body)
 	}
 	// A second keyed identity (different ssh key) trying to show the
-	// first owner's paste should get not-found / forbidden — same as
+	// first owner's paste should get not-found / forbidden - same as
 	// any unauthorized read of someone else's slug.
 	otherClient, _ := newKeyClient(t, s.sshAddr)
 	stdoutOther, stderrOther, exitOther := s.runOn(otherClient, "show "+slug, nil)

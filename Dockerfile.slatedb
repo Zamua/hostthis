@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Dockerfile.slatedb — opt-in image with the SlateDB metadata backend
+# Dockerfile.slatedb - opt-in image with the SlateDB metadata backend
 # compiled in. Coexists with the default Dockerfile (which stays
 # sqlite-only + CGO=0 + distroless/static, ~75 MB image).
 #
@@ -51,7 +51,7 @@ ENV CGO_ENABLED=1 \
     LD_LIBRARY_PATH=/usr/local/lib
 
 # Build all four binaries with -tags slatedb so the slatedb code path
-# is compiled in. The sqlite path remains AS-WELL — operator picks at
+# is compiled in. The sqlite path remains AS-WELL - operator picks at
 # runtime via HOSTTHIS_METADATA_BACKEND.
 RUN GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
         go build -tags slatedb -buildvcs=false -ldflags="-s -w" -o /out/hostthisd ./cmd/hostthisd \

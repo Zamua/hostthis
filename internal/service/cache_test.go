@@ -96,7 +96,7 @@ func TestManage_DeletePurgeErrorDoesntFailOp(t *testing.T) {
 		t.Fatalf("upload: %v", err)
 	}
 	if err := manage.Delete(res.Paste.Slug, owner); err != nil {
-		t.Fatalf("delete returned %v despite purge failure — purge errors must be swallowed", err)
+		t.Fatalf("delete returned %v despite purge failure - purge errors must be swallowed", err)
 	}
 	// And the row really is gone (delete actually succeeded, purge or no).
 	if _, err := repo.Get(res.Paste.Slug); err == nil {
@@ -167,7 +167,7 @@ func TestManage_UnpinPurgesURL(t *testing.T) {
 }
 
 func TestManage_NoCacheConfiguredIsFine(t *testing.T) {
-	// Cache and PublicURL left nil — the default. Delete must still work.
+	// Cache and PublicURL left nil - the default. Delete must still work.
 	upload, manage, _ := newStack(t)
 	owner := "key:test-id"
 	res, err := upload.Create(bytes.NewReader(htmlBody(200)), owner, "", "")

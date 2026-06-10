@@ -1,4 +1,4 @@
-# hostthis — contributor guide
+# hostthis - contributor guide
 
 Read this before doing substantive work on the project. It captures the
 conventions we've agreed on and the workflow that keeps the repo coherent
@@ -8,7 +8,7 @@ actually does.
 This project is currently private but is being written with the assumption
 it will be open-sourced. Don't put environment-specific notes, personal
 identifiers, or operator-specific configuration here or anywhere else in
-the tree — keep those in your local untracked config.
+the tree - keep those in your local untracked config.
 
 ## Workflow
 
@@ -23,7 +23,7 @@ Before any code change that adds or alters product behavior:
 3. Then write the code.
 
 In a single commit, the spec should reflect the behavior the code in that
-commit implements — not what existed before, not what we plan next. This
+commit implements - not what existed before, not what we plan next. This
 means SPEC.md is never stale relative to code, by construction. The spec
 is the source of truth for what the project does. The code is the
 implementation.
@@ -40,7 +40,7 @@ Two non-negotiable practices when writing code.
 technical layer.
 
 - The domain layer (pure types, value objects, business rules) lives in
-  its own package(s) and imports *nothing* from infrastructure — no
+  its own package(s) and imports *nothing* from infrastructure - no
   SQL, no SSH, no HTTP, no third-party SDKs. It's plain Go data + pure
   functions you can test without spinning up anything.
 - Infrastructure adapters (sqlite repo, SSH server, HTTP handlers,
@@ -52,7 +52,7 @@ technical layer.
   the response.
 - Don't reach for fancy DDD patterns (aggregates, events, unit-of-work,
   specifications) unless the type system or a concrete use case forces
-  them. The shape — domain-pure, infra-separate, services-on-top — is
+  them. The shape - domain-pure, infra-separate, services-on-top - is
   what matters; the ceremony is optional.
 
 **Test-Driven Development.** Tests are part of the same change as the
@@ -64,7 +64,7 @@ code they cover, not a follow-up.
   pins the *current* behavior first, then change the code + the test
   together. Keeps regressions visible.
 - Prefer integration tests over unit tests where the boundary is real
-  (sqlite, real SSH session via in-memory listener, etc.) — they catch
+  (sqlite, real SSH session via in-memory listener, etc.) - they catch
   more, mock less. Reserve unit tests for pure domain logic where
   there's nothing to integrate.
 - A PR that "adds a feature without tests" doesn't ship. The spec edit
@@ -154,8 +154,8 @@ there's no second config surface to maintain.
 Quick smoke from another terminal once it's live:
 
 ```
-# make run    — ssh :2222 / http :8080
-# make docker-up — ssh :12222 / http :18080 (host ports shifted to avoid common clashes)
+# make run    - ssh :2222 / http :8080
+# make docker-up - ssh :12222 / http :18080 (host ports shifted to avoid common clashes)
 
 echo '<!doctype html><h1>hi</h1>' | ssh -p 12222 -o StrictHostKeyChecking=no localhost
 # → prints a URL like http://localhost:18080/p/abc12345

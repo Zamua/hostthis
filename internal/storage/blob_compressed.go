@@ -11,7 +11,7 @@ import (
 // CompressedBlobStore wraps another BlobStore and transparently zstd-
 // encodes bytes on Put, decodes on Get. The wire/disk format adds a
 // 4-byte magic prefix `HZ\0\x01` so legacy uncompressed blobs (written
-// before this layer existed) are still readable — Get returns those
+// before this layer existed) are still readable - Get returns those
 // as-is when the magic doesn't match.
 //
 // Compression happens in the storage layer so it's transparent to the
@@ -22,7 +22,7 @@ type CompressedBlobStore struct {
 	Inner innerBlobStore
 }
 
-// innerBlobStore is the minimal contract this wrapper depends on —
+// innerBlobStore is the minimal contract this wrapper depends on -
 // avoids importing the service-layer interface and keeps things in
 // the storage package.
 type innerBlobStore interface {
@@ -33,7 +33,7 @@ type innerBlobStore interface {
 // PutPrecompressed writes a body that is ALREADY zstd-encoded with the
 // magic prefix in place. Used by the streaming upload path in the
 // service layer, which produces the encoded bytes incrementally as
-// stdin arrives — no point asking this wrapper to compress them again.
+// stdin arrives - no point asking this wrapper to compress them again.
 func (c *CompressedBlobStore) PutPrecompressed(sha string, body []byte) error {
 	return c.Inner.Put(sha, bytes.NewReader(body), int64(len(body)))
 }
@@ -49,7 +49,7 @@ func (c *CompressedBlobStore) PutPrecompressed(sha string, body []byte) error {
 // with `<` or `#` etc.) would match by accident.
 var magicV1 = [4]byte{'H', 'Z', 0x00, 0x01}
 
-// zstd level — level 3 is the SpeedDefault. Compression ratio close
+// zstd level - level 3 is the SpeedDefault. Compression ratio close
 // to the slower levels for HTML/text content; ~500 MB/s encode and
 // ~1 GB/s decode on modern hardware.
 const compressionLevel = zstd.SpeedDefault
@@ -88,7 +88,7 @@ func (c *CompressedBlobStore) Put(sha string, r io.Reader, _ int64) error {
 // Get reads bytes from the inner store, strips the magic + zstd-
 // decodes when present, and returns the UNCOMPRESSED bytes. A blob
 // without the magic header is treated as a legacy uncompressed
-// upload (pre-compression-rollout) and returned as-is — backstop for
+// upload (pre-compression-rollout) and returned as-is - backstop for
 // the rolling migration so we don't have to mass-rewrite every blob
 // before flipping the read path.
 func (c *CompressedBlobStore) Get(sha string) ([]byte, error) {
@@ -97,7 +97,7 @@ func (c *CompressedBlobStore) Get(sha string) ([]byte, error) {
 		return nil, err
 	}
 	if !hasMagicV1(body) {
-		// Legacy uncompressed — return as-is.
+		// Legacy uncompressed - return as-is.
 		return body, nil
 	}
 	dec, err := zstd.NewReader(nil)

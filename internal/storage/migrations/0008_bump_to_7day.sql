@@ -3,7 +3,7 @@
 -- to updated_at + 7 days so the live URLs keep working through the
 -- transition.
 --
--- Only touches pastes whose expires_at is still in the FUTURE —
+-- Only touches pastes whose expires_at is still in the FUTURE -
 -- past-expired rows stay 404'd; the sweep harvests them on the
 -- next tick.
 --

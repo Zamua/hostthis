@@ -29,7 +29,7 @@
 //
 // Every multi-key write opens a SlateDB transaction (SnapshotIsolation)
 // and commits all puts/deletes atomically. SlateDB's writer_epoch
-// fencing ensures only one writer is alive at once across processes —
+// fencing ensures only one writer is alive at once across processes -
 // matches our single-replica rolling-deploy model.
 //
 // # Quota math
@@ -63,7 +63,7 @@ import (
 
 // SlateConfig captures the connection parameters for the SlateDB
 // metadata store. NewSlateRepo writes these to the AWS_* process env
-// vars before calling ObjectStoreResolve — that's how the underlying
+// vars before calling ObjectStoreResolve - that's how the underlying
 // OpenDAL/object_store crate picks up S3 configuration (passing the
 // same fields via URL query params does NOT work; the crate ignores
 // them).
@@ -88,7 +88,7 @@ type SlateRepo struct {
 
 // NewSlateRepo opens a SlateDB instance backed by the configured
 // object store. Caller must Close() to flush + shut down cleanly.
-// Sets process-global AWS_* env vars from cfg — the OpenDAL crate
+// Sets process-global AWS_* env vars from cfg - the OpenDAL crate
 // SlateDB uses internally reads them. Don't run two SlateRepo
 // instances pointing at different buckets within the same process
 // (the env-var write would collide).
@@ -111,7 +111,7 @@ func NewSlateRepo(cfg SlateConfig) (*SlateRepo, error) {
 	if !cfg.UseSSL {
 		os.Setenv("AWS_ALLOW_HTTP", "true")
 	}
-	// Path-style addressing — MinIO + most non-AWS S3-compatibles
+	// Path-style addressing - MinIO + most non-AWS S3-compatibles
 	// don't support virtual-hosted-style (bucket.host) without
 	// custom DNS. Harmless on AWS proper too.
 	os.Setenv("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", "false")
@@ -462,7 +462,7 @@ func (r *SlateRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 	return total, nil
 }
 
-// sumServiceWideActiveBytes is the service-cap equivalent — sum over
+// sumServiceWideActiveBytes is the service-cap equivalent - sum over
 // EVERY paste, not just one identity. Used inside the quota check.
 // Implementation walks pastes/ then versions/<slug>/; O(active pastes)
 // + O(versions per paste). For low-volume hostthis (today: <100 active
@@ -647,7 +647,7 @@ func (r *SlateRepo) Delete(slug domain.Slug) error {
 	var p pasteRow
 	if err := r.getJSON(keyPaste(slug), &p); err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return nil // idempotent — sqlite's DELETE is also a no-op on missing rows
+			return nil // idempotent - sqlite's DELETE is also a no-op on missing rows
 		}
 		return err
 	}
@@ -804,7 +804,7 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 			return AppendResult{}, ErrOverUserQuota
 		}
 	}
-	// MAX(ver_num) INCLUDING deleted rows — version numbers are not
+	// MAX(ver_num) INCLUDING deleted rows - version numbers are not
 	// reused (matches sqlite behavior).
 	versions, err := r.scanPrefix(prefixVersions(slug))
 	if err != nil {
@@ -917,12 +917,12 @@ func (r *SlateRepo) ExpiredSlugs(now time.Time) ([]string, error) {
 	return out, nil
 }
 
-// UnreferencedBlobSHAs returns the set of REFERENCED content SHAs —
+// UnreferencedBlobSHAs returns the set of REFERENCED content SHAs -
 // note the misleading name (inherited from the sqlite impl). The
 // sweep treats the returned slice as the allow-list: any blob whose
 // sha is NOT in this slice is deleted as orphan. Returning an empty
 // slice while the bucket has blobs would tell the sweep "everything
-// is orphan" and wipe the bucket — never stub this method to nil.
+// is orphan" and wipe the bucket - never stub this method to nil.
 //
 // A sha is "referenced" if it's the head sha of an active paste OR
 // the content_sha of a non-deleted version row.
@@ -983,7 +983,7 @@ func (r *SlateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 		return true, nil
 	}
 
-	// New (identity, subnet) — count fresh keys in this subnet within window.
+	// New (identity, subnet) - count fresh keys in this subnet within window.
 	items, err := r.scanPrefix(prefixKeygateSubnet(subnet))
 	if err != nil {
 		_ = tx.Rollback()

@@ -38,7 +38,7 @@ type S3Config struct {
 
 // NewS3BlobStore builds the client and verifies the bucket exists.
 // Returns an error early if connectivity / credentials / bucket
-// presence look wrong — better to fail at startup than at first Put.
+// presence look wrong - better to fail at startup than at first Put.
 func NewS3BlobStore(cfg S3Config) (*S3BlobStore, error) {
 	if cfg.EndpointURL == "" {
 		return nil, errors.New("s3: endpoint url required")

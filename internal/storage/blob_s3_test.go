@@ -12,7 +12,7 @@ import (
 
 // TestS3BlobStore_RoundTrip exercises the full Put/Get/Walk/Remove
 // surface against a live S3-compatible endpoint. Skipped unless the
-// MINIO_TEST_ENDPOINT env var is set — usually via `make test-s3`,
+// MINIO_TEST_ENDPOINT env var is set - usually via `make test-s3`,
 // which brings up a MinIO via docker compose first.
 //
 // The test creates blobs with unique random-ish content so re-runs
@@ -99,7 +99,7 @@ func TestS3BlobStore_RoundTrip(t *testing.T) {
 	if _, err := store.Get(shaA); !errors.Is(err, ErrNotFound) {
 		// MinIO surface for unknown key: depends on driver version.
 		// We accept either ErrNotFound OR an error string containing
-		// "NoSuchKey" — both indicate the desired absent state.
+		// "NoSuchKey" - both indicate the desired absent state.
 		if err == nil || !containsString(err.Error(), "NoSuchKey") {
 			t.Fatalf("Get(A) after remove: got %v, want ErrNotFound or NoSuchKey", err)
 		}

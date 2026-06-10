@@ -13,7 +13,7 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// blobMagicV1 mirrors storage.magicV1 — kept locally so the service
+// blobMagicV1 mirrors storage.magicV1 - kept locally so the service
 // layer can produce blob bytes without importing the storage package.
 // If the two ever diverge, blob reads break with "no magic header
 // found" on freshly written blobs.
@@ -43,7 +43,7 @@ var errCompressedCapExceeded = errors.New("compressed cap exceeded")
 
 // streamUpload tees r through three sinks:
 //
-//   - a sha256 hasher (over UNCOMPRESSED bytes — content-addressability
+//   - a sha256 hasher (over UNCOMPRESSED bytes - content-addressability
 //     is by original content so dedup matches user intent)
 //   - a zstd encoder writing to an in-memory staging buffer (capped
 //     at MaxPasteBytes + a small overhead for the magic header)

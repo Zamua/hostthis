@@ -12,7 +12,7 @@ import (
 
 // newTestDB opens an isolated sqlite file in t.TempDir(). We use an
 // on-disk DB (not :memory:) so the connection pool with multiple
-// goroutines sees the same data — modernc sqlite ":memory:" creates
+// goroutines sees the same data - modernc sqlite ":memory:" creates
 // a fresh in-memory db per connection by default.
 func newTestDB(t *testing.T) (*PasteRepo, *BlobStore) {
 	t.Helper()

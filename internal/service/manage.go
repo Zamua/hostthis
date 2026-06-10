@@ -12,7 +12,7 @@ import (
 )
 
 // PasteAdmin is the persistence interface for everything except
-// "create a new paste" — list, get versions, mutate flags, delete.
+// "create a new paste" - list, get versions, mutate flags, delete.
 // internal/storage.PasteRepo satisfies it.
 type PasteAdmin interface {
 	Get(domain.Slug) (domain.Paste, error)
@@ -42,7 +42,7 @@ var ErrNotFound = errors.New("service: not found")
 
 // ErrEmptyOwner is returned when an operation requires an identified
 // owner (list, delete, rename, …) and the caller is anonymous.
-var ErrEmptyOwner = errors.New("service: anonymous — add an ssh key for this command")
+var ErrEmptyOwner = errors.New("service: anonymous - add an ssh key for this command")
 
 // ErrInvalidName is returned by Rename when the name violates the
 // length / unicode rules.
@@ -52,7 +52,7 @@ var ErrInvalidName = errors.New("service: name must be 1–60 printable Unicode 
 // (or HTTP endpoint) and is owner-gated.
 type Manage struct {
 	Repo            PasteAdmin
-	Blobs           BlobStore // for Show + Update; same interface as Upload
+	Blobs           BlobStore   // for Show + Update; same interface as Upload
 	Cache           CachePurger // never called if nil; for CDN invalidation on Update/Delete
 	PublicURL       URLBuilder  // required iff Cache is set; turns slug into purge URL
 	ServiceCapBytes int64       // 0 = no service-wide cap
@@ -66,7 +66,7 @@ func NewManage(repo PasteAdmin, blobs BlobStore) *Manage {
 
 // requireOwner returns the paste if owner matches; otherwise the
 // appropriate sentinel. Anonymous identities (no key offered) and
-// empty owners are rejected — only keyed identities (which carry
+// empty owners are rejected - only keyed identities (which carry
 // the "key:" prefix) can manage their pastes.
 func (m *Manage) requireOwner(slug domain.Slug, owner string) (domain.Paste, error) {
 	if !domain.Identity(owner).IsKeyed() {
@@ -105,7 +105,7 @@ func (m *Manage) Show(slug domain.Slug, owner string) (domain.Paste, []byte, err
 }
 
 // UpdateResult is returned from Update so the SSH layer can surface
-// the right messaging — in particular, whether the paste was pinned
+// the right messaging - in particular, whether the paste was pinned
 // before the update (in which case the new version was saved but
 // isn't being served).
 type UpdateResult struct {
@@ -119,7 +119,7 @@ type UpdateResult struct {
 // retention expiry. If the paste was UNPINNED (default), the new version
 // also becomes the served version. If it was PINNED to a specific
 // version, the pin holds and the new version is recorded but not
-// served — the SSH layer prints a note pointing at `unpin` or
+// served - the SSH layer prints a note pointing at `unpin` or
 // `pin <new ver>`.
 func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint string) (UpdateResult, error) {
 	staged, err := streamUpload(body)
@@ -171,7 +171,7 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 }
 
 // purge fires the configured CachePurger for slug's public URL.
-// Errors are swallowed — purge is best-effort and the impl is expected
+// Errors are swallowed - purge is best-effort and the impl is expected
 // to log internally. If Cache or PublicURL is nil (no CDN configured),
 // no-ops.
 func (m *Manage) purge(slug domain.Slug) {
@@ -207,7 +207,7 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 }
 
 // Versions returns the slug's full history (newest first). Includes
-// tombstoned (deleted) rows — the `versions` verb renders them with
+// tombstoned (deleted) rows - the `versions` verb renders them with
 // a `deleted` marker.
 func (m *Manage) Versions(slug domain.Slug, owner string) ([]domain.Version, error) {
 	if _, err := m.requireOwner(slug, owner); err != nil {
@@ -269,7 +269,7 @@ func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (Dele
 	if err := m.Repo.DeleteVersion(slug, verNum); err != nil {
 		return DeleteVersionResult{}, err
 	}
-	// No cache purge — the served bytes didn't change; we just freed
+	// No cache purge - the served bytes didn't change; we just freed
 	// an older version's bytes that no URL surface was exposing.
 	return DeleteVersionResult{VerNum: verNum, FreedBytes: target.Size}, nil
 }
@@ -290,11 +290,11 @@ func (m *Manage) servedVersion(slug domain.Slug, pinnedVersion int) (int, error)
 			return v.VerNum, nil
 		}
 	}
-	return 0, nil // no live versions — shouldn't happen for an active paste
+	return 0, nil // no live versions - shouldn't happen for an active paste
 }
 
 // Pin sets which version_num the public URL serves and makes it
-// sticky — subsequent `update`s won't bump the pin. Does NOT reset
+// sticky - subsequent `update`s won't bump the pin. Does NOT reset
 // the expiry clock; only Update does that.
 func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version, error) {
 	if _, err := m.requireOwner(slug, owner); err != nil {
@@ -310,7 +310,7 @@ func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version
 	if err := m.Repo.SetPinnedVersion(slug, ver); err != nil {
 		return domain.Version{}, err
 	}
-	// Pin changes the bytes served at the URL — must purge CDN/browser caches
+	// Pin changes the bytes served at the URL - must purge CDN/browser caches
 	// or stale content lingers until the 1h max-age expires. Without this,
 	// pinning to an older version "doesn't take effect" from the user's
 	// perspective until they hard-refresh.
@@ -339,14 +339,14 @@ type WhoamiInfo struct {
 	Identity   string
 	Active     int
 	FirstSeen  time.Time
-	UsedBytes  int // compressed bytes summed across active non-deleted versions
-	QuotaBytes int // domain.UserQuotaBytes — surfaced so SSH formatter doesn't import domain
+	UsedBytes  int         // compressed bytes summed across active non-deleted versions
+	QuotaBytes int         // domain.UserQuotaBytes - surfaced so SSH formatter doesn't import domain
 	Session    SessionInfo // per-session keygate state; zero value if KeyGate isn't wired
 }
 
 // Whoami populates WhoamiInfo for an owner (key fingerprint). subnet
 // may be empty when the caller doesn't have one (tests etc.); session
-// fields are then zero. KeyGate may be nil — same effect.
+// fields are then zero. KeyGate may be nil - same effect.
 func (m *Manage) Whoami(owner, subnet string) (WhoamiInfo, error) {
 	if !domain.Identity(owner).IsKeyed() {
 		return WhoamiInfo{}, ErrEmptyOwner

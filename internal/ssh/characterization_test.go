@@ -118,7 +118,7 @@ func dialKeyed(t *testing.T, addr string) (*xssh.Client, string) {
 	return newKeyClient(t, addr)
 }
 
-// runCmd is the same shape as stack.runOn — issues one ssh command,
+// runCmd is the same shape as stack.runOn - issues one ssh command,
 // returns (stdout, stderr, exit). The body argument is optional.
 func runCmd(t *testing.T, cli *xssh.Client, cmd string, stdin []byte) (string, string, int) {
 	t.Helper()
@@ -180,7 +180,7 @@ func runCmdWithPty(t *testing.T, cli *xssh.Client, cmd string) (string, string, 
 }
 
 // ---------------------------------------------------------------------------
-// 1. Upload (put) — default verb, stdin
+// 1. Upload (put) - default verb, stdin
 // ---------------------------------------------------------------------------
 
 func TestUpload_Characterization(t *testing.T) {
@@ -268,7 +268,7 @@ func TestUpload_Characterization(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Update (slug as verb) — appends a version
+// 2. Update (slug as verb) - appends a version
 // ---------------------------------------------------------------------------
 
 func TestUpdate_Characterization(t *testing.T) {
@@ -409,7 +409,7 @@ func TestShow_Characterization(t *testing.T) {
 
 	t.Run("InvalidSlug_Exit2", func(t *testing.T) {
 		s := startStack(t)
-		// "BAD" isn't 8 chars and contains uppercase — not a slug.
+		// "BAD" isn't 8 chars and contains uppercase - not a slug.
 		_, stderr, exit := s.run("show BAD", nil)
 		if exit != 2 {
 			t.Fatalf("expected exit 2 for invalid slug, got %d (%q)", exit, stderr)
@@ -776,7 +776,7 @@ func TestHelp_Characterization(t *testing.T) {
 	s := startStack(t)
 
 	t.Run("HelpVerb_NoPty_LF", func(t *testing.T) {
-		// Sessions opened with sess.Run() get no PTY by default — the
+		// Sessions opened with sess.Run() get no PTY by default - the
 		// pipe-like path. Help text emits LF-terminated lines.
 		_, stderr, exit := s.run("help", nil)
 		if exit != 0 {
@@ -880,7 +880,7 @@ func TestHelp_Characterization(t *testing.T) {
 // appends a single trailing "\n", so the golden ends with one LF after
 // the closing period. Any drift in helpTextTemplate (line addition,
 // character insertion, whitespace tweak) MUST fail the golden assertion
-// — that's the whole point of pinning the full string.
+// - that's the whole point of pinning the full string.
 const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pastes expire 7 days after last update.\n" +
 	"\n" +
 	"UPLOAD\n" +
@@ -1114,7 +1114,7 @@ func TestProxyProtocol_Characterization(t *testing.T) {
 		// stack two fresh keys would both come from 127.0.0.0/24 and
 		// the second would be rejected. With PROXY-protocol parsing
 		// enabled, claiming different src IPs in DIFFERENT /24s lets
-		// both be admitted — proving the gate sees the proxied IP.
+		// both be admitted - proving the gate sees the proxied IP.
 		p := startProxyProtoStack(t, 1)
 		c1 := dialWithProxyV1(t, p.sshAddr, "203.0.113.10", 50000)
 		_, _, e1 := runCmd(t, c1, "whoami", nil)
@@ -1127,7 +1127,7 @@ func TestProxyProtocol_Characterization(t *testing.T) {
 			t.Fatalf("second proxied client (198.51.100.0/24) should be admitted on a different subnet, got exit %d", e2)
 		}
 		// A second fresh key from the FIRST proxied subnet must now be
-		// refused — its subnet's slot is full.
+		// refused - its subnet's slot is full.
 		c3 := dialWithProxyV1(t, p.sshAddr, "203.0.113.20", 50002)
 		_, stderr, e3 := runCmd(t, c3, "whoami", nil)
 		if e3 != 6 {
@@ -1141,7 +1141,7 @@ func TestProxyProtocol_Characterization(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 12. PTY/no-PTY behavior on a second verb (list) — pinned by inspection
+// 12. PTY/no-PTY behavior on a second verb (list) - pinned by inspection
 // ---------------------------------------------------------------------------
 
 func TestPty_Characterization_List(t *testing.T) {
@@ -1266,11 +1266,11 @@ func TestExitCodes_Characterization(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 14. Edge cases — concurrent ops from the same identity
+// 14. Edge cases - concurrent ops from the same identity
 // ---------------------------------------------------------------------------
 
 // concurrentUpload runs one upload on its own session under cli and
-// returns the URL or "" + the error. It does NOT call t.Fatalf — we
+// returns the URL or "" + the error. It does NOT call t.Fatalf - we
 // want to drive this from many goroutines and aggregate failures in
 // the parent.
 func concurrentUpload(cli *xssh.Client, body []byte) (string, error) {
@@ -1300,7 +1300,7 @@ func TestConcurrent_Characterization(t *testing.T) {
 	// Why not parallel? The current implementation uses a single sqlite
 	// connection with the default modernc.org/sqlite busy timeout, and
 	// truly concurrent inserts can surface SQLITE_BUSY as a generic
-	// exit-1 to the user. That IS the current behavior — Phase B's wish
+	// exit-1 to the user. That IS the current behavior - Phase B's wish
 	// migration shouldn't change it without an explicit decision. We
 	// pin "many quick sequential uploads" as the guaranteed-no-BUSY
 	// envelope, which is the realistic workload.
@@ -1326,7 +1326,7 @@ func TestConcurrent_Characterization(t *testing.T) {
 		t.Fatalf("expected %d distinct slugs, got %d", N, len(urls))
 	}
 	// As a sanity check, `list` on the default keyed client (which
-	// uploaded nothing) shows zero pastes — every upload above was on a
+	// uploaded nothing) shows zero pastes - every upload above was on a
 	// fresh keyed identity. Pinning this confirms per-identity isolation.
 	listOut, _, _ := s.run("list", nil)
 	rows := bufio.NewScanner(strings.NewReader(listOut))
@@ -1358,7 +1358,7 @@ func TestOwnerCollapse_Characterization(t *testing.T) {
 	// therefore always exits 4 on a foreign-slug verb, never 5. This pins
 	// that collapse across every owner-gated verb. If a future refactor
 	// surfaces ErrNotOwner distinctly, exitForServiceErr must regain its
-	// NotOwner branch AND a new exit-code (5) test must land alongside —
+	// NotOwner branch AND a new exit-code (5) test must land alongside -
 	// changes to this test are an explicit policy decision, not silent.
 	s := startStack(t)
 
@@ -1410,7 +1410,7 @@ func TestOwnerCollapse_Characterization(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 16. parseUploadFlags negative paths — byte-exact stderr lines
+// 16. parseUploadFlags negative paths - byte-exact stderr lines
 // ---------------------------------------------------------------------------
 
 func TestUploadFlags_NegativeCharacterization(t *testing.T) {
@@ -1419,7 +1419,7 @@ func TestUploadFlags_NegativeCharacterization(t *testing.T) {
 	// The parseUploadFlags path is reached when argv[0] starts with "--"
 	// OR when argv[0] is a valid slug. "put" isn't a verb in the
 	// dispatcher (no such case exists), so "put --name" actually routes
-	// through the unknown-command path with exit 2 + the help dump —
+	// through the unknown-command path with exit 2 + the help dump -
 	// NOT the parser. The parser is exercised by `--name` / `--type`
 	// in the FIRST position (no slug), which is the canonical "upload
 	// with a label, no slug" shape per docs/SPEC.md.
@@ -1468,12 +1468,12 @@ func TestUploadFlags_NegativeCharacterization(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 17. Sybil gate — IPv6 (/48) subnet path via PROXY protocol v1 TCP6
+// 17. Sybil gate - IPv6 (/48) subnet path via PROXY protocol v1 TCP6
 // ---------------------------------------------------------------------------
 
 // dialWithProxyV6 opens a TCP connection, writes a PROXY v1 TCP6 header
 // claiming the given IPv6 src, then runs an SSH handshake on top. Mirrors
-// dialWithProxyV1 but for IPv6 — drives the /48 mask path in ipSubnet.
+// dialWithProxyV1 but for IPv6 - drives the /48 mask path in ipSubnet.
 func dialWithProxyV6(t *testing.T, addr, srcIP string, srcPort int) *xssh.Client {
 	t.Helper()
 	c, err := net.DialTimeout("tcp", addr, 3*time.Second)
@@ -1521,7 +1521,7 @@ func TestProxyProtocol_IPv6_SybilCharacterization(t *testing.T) {
 	t.Run("SameSlash48_ThirdRefused_DifferentSlash48_Admitted", func(t *testing.T) {
 		p := startProxyProtoStack(t, 2)
 
-		// Three IPv6 addresses all in 2001:db8:1::/48 — only the lower
+		// Three IPv6 addresses all in 2001:db8:1::/48 - only the lower
 		// 80 bits differ. ipSubnet should bucket them together.
 		c1 := dialWithProxyV6(t, p.sshAddr, "2001:db8:1::aa", 50000)
 		_, _, e1 := runCmd(t, c1, "whoami", nil)
@@ -1533,7 +1533,7 @@ func TestProxyProtocol_IPv6_SybilCharacterization(t *testing.T) {
 		if e2 != 0 {
 			t.Fatalf("second IPv6 client in same /48 should be admitted (cap=2), got exit %d", e2)
 		}
-		// Third fresh key — different lower bits, SAME /48 — must be refused.
+		// Third fresh key - different lower bits, SAME /48 - must be refused.
 		c3 := dialWithProxyV6(t, p.sshAddr, "2001:db8:1:ffff::cc", 50002)
 		_, stderr3, e3 := runCmd(t, c3, "whoami", nil)
 		if e3 != 6 {
@@ -1545,7 +1545,7 @@ func TestProxyProtocol_IPv6_SybilCharacterization(t *testing.T) {
 		}
 		// The subnet detail line must name the IPv6 /48. Pin the prefix
 		// (the exact mask-canonicalization of 2001:db8:1:: depends on
-		// net.IP.Mask) — assert the "/48" suffix and the 2001:db8:1
+		// net.IP.Mask) - assert the "/48" suffix and the 2001:db8:1
 		// prefix appear together.
 		if !strings.Contains(stderr3, "/48") {
 			t.Fatalf("expected '/48' in IPv6 subnet detail, got %q", stderr3)
@@ -1564,13 +1564,13 @@ func TestProxyProtocol_IPv6_SybilCharacterization(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 18. Sybil refusal — "(b) wait until <timestamp>" line shape
+// 18. Sybil refusal - "(b) wait until <timestamp>" line shape
 // ---------------------------------------------------------------------------
 
 func TestSybil_WaitUntilLine_Characterization(t *testing.T) {
 	// Phase A's TestSybilGate_Characterization pins the canonical refusal
 	// line via substring. This pin is sharper: the rich enrichment
-	// path emits a "(b) wait until <YYYY-MM-DD HH:MM UTC> — the oldest
+	// path emits a "(b) wait until <YYYY-MM-DD HH:MM UTC> - the oldest
 	// entry ages out then" line, and we lock in the prefix byte-exact
 	// + a regex on the formatted-time tail. The literal timestamp is
 	// time-sensitive (it's now+window), so we can't pin it exactly;
@@ -1586,7 +1586,7 @@ func TestSybil_WaitUntilLine_Characterization(t *testing.T) {
 		t.Fatalf("third key should be refused, got exit %d", e3)
 	}
 	// Locate the "(b) wait until ..." line. Server emits it with the
-	// fmt format "  (b) wait until %s — the oldest entry ages out then\n"
+	// fmt format "  (b) wait until %s - the oldest entry ages out then\n"
 	// where %s is now+window formatted as "2006-01-02 15:04 UTC". The
 	// indent (2 spaces) + literal prefix are byte-exact pinned.
 	const wantPrefix = "  (b) wait until "
@@ -1602,10 +1602,10 @@ func TestSybil_WaitUntilLine_Characterization(t *testing.T) {
 	}
 	line := rest[:nl]
 	// Regex on the timestamp tail: YYYY-MM-DD HH:MM UTC then the
-	// trailing " — the oldest entry ages out then" sentence. The em
+	// trailing " - the oldest entry ages out then" sentence. The em
 	// dash is the literal character the server uses (this is the one
 	// place we don't have control over).
-	wantTail := regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC — the oldest entry ages out then$`)
+	wantTail := regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC - the oldest entry ages out then$`)
 	if !wantTail.MatchString(line) {
 		t.Fatalf("'(b) wait until ' tail drift:\n got: %q\nwant pattern: %q",
 			line, wantTail.String())

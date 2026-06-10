@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// KeyGateRepo backs the Sybil rate limit — tracks first-seen pairs
+// KeyGateRepo backs the Sybil rate limit - tracks first-seen pairs
 // of (identity, ip-subnet) and counts how many fresh fingerprints
 // have come from a subnet recently.
 type KeyGateRepo struct {
@@ -45,7 +45,7 @@ func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitP
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Already known? Fast path — no rate-limit accounting.
+	// Already known? Fast path - no rate-limit accounting.
 	var seenAt sql.NullString
 	if err := tx.QueryRow(`SELECT first_seen_at FROM key_first_seen WHERE identity = ? AND ip_subnet = ?`, identity, subnet).Scan(&seenAt); err == nil {
 		return true, tx.Commit()
@@ -53,7 +53,7 @@ func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitP
 		return false, fmt.Errorf("lookup: %w", err)
 	}
 
-	// Fresh key — count current fresh-key rows from this subnet
+	// Fresh key - count current fresh-key rows from this subnet
 	// within the window.
 	windowStart := now.Add(-window)
 	var freshCount int
@@ -114,7 +114,7 @@ func (r *KeyGateRepo) SubnetsForIdentity(identity string, now time.Time, window 
 
 // DeleteFirstSeenOlderThan removes key_first_seen rows whose
 // first_seen_at is before cutoff. Such rows can never contribute to
-// the rate-limit count again — they're past the window — so they're
+// the rate-limit count again - they're past the window - so they're
 // safe to drop. Without this, the table grows forever.
 func (r *KeyGateRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 	res, err := r.db.Exec(`DELETE FROM key_first_seen WHERE first_seen_at < ?`, formatTime(cutoff))
@@ -130,6 +130,6 @@ func (r *KeyGateRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 var ErrTooManyNewKeys = errors.New("storage: too many new keys from this network")
 
 // txSerializable asks the modernc sqlite driver to issue
-// BEGIN IMMEDIATE — exclusive write lock at transaction start so
+// BEGIN IMMEDIATE - exclusive write lock at transaction start so
 // concurrent transactions serialize from the very first statement.
 var txSerializable = sql.TxOptions{Isolation: sql.LevelSerializable}

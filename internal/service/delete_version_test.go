@@ -24,7 +24,7 @@ func TestDeleteVersion_FreesQuota(t *testing.T) {
 	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(6_000_000)), ""); err != nil {
 		t.Fatalf("update v2: %v", err)
 	}
-	// Baseline — v3 attempt should fail before delete-version.
+	// Baseline - v3 attempt should fail before delete-version.
 	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(3_000_000)), ""); !errors.Is(err, service.ErrOverQuota) {
 		t.Fatalf("expected over-quota baseline, got %v", err)
 	}
@@ -48,7 +48,7 @@ func TestDeleteVersion_RefusesCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	// v1 is the only version — currently served. Refuse.
+	// v1 is the only version - currently served. Refuse.
 	_, err = manage.DeleteVersion(r.Paste.Slug, owner, 1)
 	if !errors.Is(err, service.ErrVersionCurrentlyServed) {
 		t.Fatalf("expected ErrVersionCurrentlyServed, got %v", err)
@@ -65,7 +65,7 @@ func TestDeleteVersion_RefusesPinnedCurrent(t *testing.T) {
 	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(1000)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	// Pin to v1 — now v1 is the served version (even though v2 is newer).
+	// Pin to v1 - now v1 is the served version (even though v2 is newer).
 	if _, err := manage.Pin(r.Paste.Slug, owner, 1); err != nil {
 		t.Fatalf("pin: %v", err)
 	}

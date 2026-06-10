@@ -28,7 +28,7 @@ CREATE INDEX idx_versions_slug ON versions (slug);
 INSERT INTO versions (slug, ver_num, kind, content_sha, size, created_at)
 SELECT slug, 1, kind, content_sha, size, created_at FROM pastes;
 
--- HTTP API tokens — issued via `ssh hostthis.dev token create`.
+-- HTTP API tokens - issued via `ssh hostthis.dev token create`.
 -- We store the sha256 of the token (NOT the token itself); the raw
 -- bytes are emitted once at creation and never persisted.
 CREATE TABLE api_tokens (

@@ -11,7 +11,7 @@ RUN go mod download
 
 COPY . .
 
-# Pure-Go sqlite (modernc.org/sqlite) means CGO=0 — static binary,
+# Pure-Go sqlite (modernc.org/sqlite) means CGO=0 - static binary,
 # trivial to drop into distroless.
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
     go build -ldflags="-s -w" -o /out/hostthisd ./cmd/hostthisd \
@@ -38,7 +38,7 @@ COPY web/landing.html /app/web/landing.html
 
 EXPOSE 2222 8080
 
-# Default config — operator overrides via flags or HOSTTHIS_* envs.
+# Default config - operator overrides via flags or HOSTTHIS_* envs.
 ENV HOSTTHIS_DATA_DIR=/var/lib/hostthis \
     HOSTTHIS_SSH_ADDR=:2222 \
     HOSTTHIS_HTTP_ADDR=:8080 \

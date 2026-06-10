@@ -3,9 +3,9 @@
 // Exits non-zero on the first mismatch.
 //
 // Because blobs are content-addressed by SHA256, "identical bytes" is
-// proven by fetching the S3 object and re-hashing — if the hash of
+// proven by fetching the S3 object and re-hashing - if the hash of
 // what we got matches the key we asked for, the bytes are correct.
-// (The disk store's filename is the SHA, so we trust it too — but
+// (The disk store's filename is the SHA, so we trust it too - but
 // we re-hash the disk bytes for symmetry and to catch on-disk bit-rot.)
 //
 // Run AFTER hostthis-blob-migrate, BEFORE flipping HOSTTHIS_BLOB_BACKEND.
@@ -54,7 +54,7 @@ func main() {
 
 	start := time.Now()
 	var (
-		checked   int
+		checked    int
 		mismatches int
 		missing    int
 		diskRot    int
@@ -69,7 +69,7 @@ func main() {
 		diskSum := sha256.Sum256(diskBytes)
 		diskHash := hex.EncodeToString(diskSum[:])
 		if diskHash != sha {
-			logger.Printf("disk ROT: file %s has hash %s — disk corruption, not an s3 issue", sha, diskHash)
+			logger.Printf("disk ROT: file %s has hash %s - disk corruption, not an s3 issue", sha, diskHash)
 			diskRot++
 			return nil
 		}
@@ -82,7 +82,7 @@ func main() {
 		s3Sum := sha256.Sum256(s3Bytes)
 		s3Hash := hex.EncodeToString(s3Sum[:])
 		if s3Hash != sha {
-			logger.Printf("S3 MISMATCH: %s — s3 returned bytes hashing to %s", sha, s3Hash)
+			logger.Printf("S3 MISMATCH: %s - s3 returned bytes hashing to %s", sha, s3Hash)
 			mismatches++
 			return nil
 		}

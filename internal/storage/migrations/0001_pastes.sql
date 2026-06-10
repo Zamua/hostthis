@@ -1,4 +1,4 @@
--- Pastes table — one row per slug. Versions table (added when we
+-- Pastes table - one row per slug. Versions table (added when we
 -- spec versioning beyond a single update) lives separately and
 -- references this row.
 

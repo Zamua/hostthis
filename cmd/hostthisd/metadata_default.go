@@ -1,4 +1,4 @@
-// metadata_default.go — stub for the slatedb branch when the binary
+// metadata_default.go - stub for the slatedb branch when the binary
 // is NOT built with -tags slatedb. The real impl is in
 // metadata_slatedb.go which has the matching build tag.
 

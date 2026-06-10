@@ -5,7 +5,7 @@
 -- Why include ip_subnet in the primary key (not just identity): a
 -- legitimate user might use the same key from home and from a
 -- coffee shop. The rate limit fires per (key, ip), not per key
--- alone — so the same key from a new network is a new "row" but
+-- alone - so the same key from a new network is a new "row" but
 -- it's identifiable as a known key.
 
 CREATE TABLE key_first_seen (

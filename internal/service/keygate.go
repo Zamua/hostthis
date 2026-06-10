@@ -15,14 +15,14 @@ type KeyGateRepo interface {
 	AdmitNewKey(identity, subnet string, now time.Time, limitPerSubnet int, window time.Duration) (knownAlready bool, err error)
 
 	// DeleteFirstSeenOlderThan removes rows past the rate-limit
-	// window — they no longer affect any future admission decision.
+	// window - they no longer affect any future admission decision.
 	// Called by the periodic sweep to keep the table from growing.
 	DeleteFirstSeenOlderThan(cutoff time.Time) (int, error)
 
 	// SubnetSnapshot returns (freshCount, oldestFirstSeen) for the
 	// (identity, subnet)-rows from this subnet within the window.
 	// freshCount is how many rows count toward the per-subnet cap;
-	// oldestFirstSeen is the earliest in-window first_seen — adding
+	// oldestFirstSeen is the earliest in-window first_seen - adding
 	// `window` to it gives the moment when the next slot frees up.
 	// Empty subnet (no rows in window) returns (0, time.Time{}).
 	// Used by Admit's refusal path + by Whoami for budget display.
@@ -70,19 +70,22 @@ var ErrSybilRateLimit = errors.New("service: too many new keys from this network
 // layer needs to print a self-diagnosing message: which subnet, how
 // full the cap is, and when the oldest in-window entry ages out.
 type SybilRefusal struct {
-	Subnet              string
-	Cap                 int
-	FreshCountInWindow  int
+	Subnet               string
+	Cap                  int
+	FreshCountInWindow   int
 	OldestEntryFirstSeen time.Time
-	Window              time.Duration
+	Window               time.Duration
 }
 
-func (e *SybilRefusal) Error() string { return ErrSybilRateLimit.Error() }
+func (e *SybilRefusal) Error() string        { return ErrSybilRateLimit.Error() }
 func (e *SybilRefusal) Is(target error) bool { return target == ErrSybilRateLimit }
+
 // NextSlotFreesAt returns the moment the oldest in-window entry ages
 // out and frees a slot. Zero time if no in-window entries.
 func (e *SybilRefusal) NextSlotFreesAt() time.Time {
-	if e.OldestEntryFirstSeen.IsZero() { return time.Time{} }
+	if e.OldestEntryFirstSeen.IsZero() {
+		return time.Time{}
+	}
 	return e.OldestEntryFirstSeen.Add(e.Window)
 }
 
@@ -115,10 +118,10 @@ func (g *KeyGate) Admit(identity, ipSubnet string) error {
 // SessionInfo is the per-session keygate state surfaced by `whoami`.
 // Filled by KeyGate.Inspect(identity, subnet); zero values are OK.
 type SessionInfo struct {
-	Subnet            string        // canonical /24 or /48 the session came from
-	SubnetFreshCount  int           // current rows in this subnet's window
-	SubnetCap         int           // configured limit per subnet
-	IdentitySubnets   int           // distinct subnets this identity has rows for
+	Subnet           string // canonical /24 or /48 the session came from
+	SubnetFreshCount int    // current rows in this subnet's window
+	SubnetCap        int    // configured limit per subnet
+	IdentitySubnets  int    // distinct subnets this identity has rows for
 }
 
 // Inspect returns the rollup KeyGate state for an admitted session.
@@ -137,10 +140,10 @@ func (g *KeyGate) Inspect(identity, ipSubnet string) (SessionInfo, error) {
 		return SessionInfo{}, err
 	}
 	return SessionInfo{
-		Subnet: ipSubnet,
+		Subnet:           ipSubnet,
 		SubnetFreshCount: subCount,
-		SubnetCap: g.MaxFreshKeysPerSubnet,
-		IdentitySubnets: idSubnets,
+		SubnetCap:        g.MaxFreshKeysPerSubnet,
+		IdentitySubnets:  idSubnets,
 	}, nil
 }
 

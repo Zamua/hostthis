@@ -72,11 +72,11 @@ func TestKeyGate_DeleteOldRowsFreesSlots(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		_, _ = r.AdmitNewKey("key:"+string(rune('a'+i)), "1.2.3.0/24", old, 20, 24*time.Hour)
 	}
-	// Limit hit at `now` even though the rows are old — but only if
+	// Limit hit at `now` even though the rows are old - but only if
 	// the window covers them.
 	_, err := r.AdmitNewKey("key:z", "1.2.3.0/24", now, 20, 24*time.Hour)
 	// Since old is 4 days before now and the window is 24h, the
-	// existing rows are OUTSIDE the window — count returns 0 → admitted.
+	// existing rows are OUTSIDE the window - count returns 0 → admitted.
 	if err != nil {
 		t.Fatalf("expected admission past old rows, got %v", err)
 	}
