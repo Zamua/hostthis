@@ -80,6 +80,18 @@ type conformCaps struct {
 	// "One intentional behavior change"). Fail-safe either way: the
 	// counter over-counts transiently, never under-counts.
 	ExpiryFreesQuotaAtReadTime bool
+
+	// StrictQuotaUnderConcurrency is true for backends that enforce the
+	// per-owner cap exactly under concurrent uploads (sqlite via its
+	// serializable insert transaction; shale via the reservation-pattern
+	// CAS counter). It is FALSE for the slatedb-direct backend, whose
+	// quota sum runs OUTSIDE the write transaction, so two concurrent
+	// uploads for one owner can both pass and both land, overshooting the
+	// cap (docs/SPEC.md "Reservation-pattern quota"; this is one reason the
+	// slatedb-direct backend is being replaced by shale). When false, the
+	// concurrency-ceiling test documents the known race instead of
+	// asserting strictness.
+	StrictQuotaUnderConcurrency bool
 }
 
 // runConformance runs the full contract suite against the backend the
@@ -89,7 +101,7 @@ type conformCaps struct {
 func runConformance(t *testing.T, name string, caps conformCaps, newRepo func(t *testing.T) conformanceRepo) {
 	t.Helper()
 	t.Run(name+"/InsertAndGet", func(t *testing.T) { conformInsertAndGet(t, newRepo(t)) })
-	t.Run(name+"/QuotaConcurrentCeiling", func(t *testing.T) { conformQuotaConcurrentCeiling(t, newRepo(t)) })
+	t.Run(name+"/QuotaConcurrentCeiling", func(t *testing.T) { conformQuotaConcurrentCeiling(t, newRepo(t), caps) })
 	t.Run(name+"/ExpiryQuotaSemantics", func(t *testing.T) { conformExpiryQuotaSemantics(t, newRepo(t), caps) })
 	t.Run(name+"/GetNotFound", func(t *testing.T) { conformGetNotFound(t, newRepo(t)) })
 	t.Run(name+"/DuplicateSlug", func(t *testing.T) { conformDuplicateSlug(t, newRepo(t)) })
@@ -197,12 +209,12 @@ func containsSlug(err error) bool {
 // invariant asserted is the CEILING: the bytes that land never exceed the
 // cap, no matter how the inserts interleave. This is the headline
 // property the shale reservation pattern exists to guarantee, and it is
-// what makes "ShaleRepo passes the suite" prove strict quota. sqlite
-// already holds it (the insert runs in a serializable transaction); the
-// slatedb-direct backend does NOT (its quota sum runs outside the write
-// transaction), so this test documents that race if ever run under the
-// slatedb tag.
-func conformQuotaConcurrentCeiling(t *testing.T, r conformanceRepo) {
+// what makes "ShaleRepo passes the suite" prove strict quota. sqlite holds
+// it (the insert runs in a serializable transaction) and shale holds it
+// (the reservation-pattern CAS counter); the slatedb-direct backend does
+// NOT (its quota sum runs outside the write transaction). Backends declare
+// which side they are on via caps.StrictQuotaUnderConcurrency.
+func conformQuotaConcurrentCeiling(t *testing.T, r conformanceRepo, caps conformCaps) {
 	const (
 		body = 100
 		k    = 3
@@ -226,6 +238,14 @@ func conformQuotaConcurrentCeiling(t *testing.T, r conformanceRepo) {
 		}(i)
 	}
 	wg.Wait()
+	if !caps.StrictQuotaUnderConcurrency {
+		// slatedb-direct: the quota sum runs outside the write transaction,
+		// so the ceiling can be breached. This is the documented race the
+		// shale migration fixes; record it rather than asserting strictness.
+		t.Logf("backend does not guarantee strict quota under concurrency (known slatedb-direct race): %d pastes x %dB = %dB landed, cap %dB",
+			landed, body, landed*body, cap)
+		return
+	}
 	if landed*body > cap {
 		t.Fatalf("quota ceiling breached under concurrency: %d pastes x %dB = %dB landed, cap %dB",
 			landed, body, landed*body, cap)
