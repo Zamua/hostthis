@@ -6,6 +6,10 @@ github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c/go.mod h1:xomTg6
 github.com/DataDog/datadog-go v3.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
+github.com/Zamua/shale v0.6.2 h1:13wWadvvBsbkgb+p9O6D0EcyKL2p9scqIGVX2YOHdbg=
+github.com/Zamua/shale v0.6.2/go.mod h1:yKvDPZXrrpebMe7QfYdOsL4rfVeE9Wp5b3bV4rWa8TA=
+github.com/Zamua/shale/backends/slate v0.6.2 h1:uPpGZJ3CqE7HXJhw8RRpj7rb0D2AN8GHo5dgX80tCks=
+github.com/Zamua/shale/backends/slate v0.6.2/go.mod h1:EByd/UM2OT94IBE0BxEfxH+X59rs5+BFTupaEHznnkA=
 github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/units v0.0.0-20151022065526-2efee857e7cf/go.mod h1:ybxpYRFXyAe+OPACYpWeL0wqObRcbAqCMya13uyzqw0=
