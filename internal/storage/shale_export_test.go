@@ -25,17 +25,12 @@ import (
 )
 
 // ClusterForTest exposes the underlying shale cluster handle so the
-// multi-node rebalance test (external storage_test package) can do the
-// three things a real deployment's process wiring would do but that
-// NewShaleRepo does not itself perform:
-//
-//   - register an rpc.Server on the node's GRPCAddr so peers can forward
-//     routed reads/writes to it (cluster.Open advertises GRPCAddr via
-//     gossip but does NOT stand up the gRPC listener; the host process
-//     owns that),
-//   - call cluster.WaitForRebalanceIdle to gate on the post-join
-//     rebalance settling,
-//   - call cluster.Members / OwnsKey to assert ring ownership moved.
+// multi-node rebalance test (external storage_test package) can drive
+// assertions a host process would not: gate on the post-join rebalance
+// settling (cluster.WaitForRebalanceIdle) and assert ring ownership moved
+// (cluster.Members / OwnsKey). The peer-forwarding rpc.Server is now stood
+// up by NewShaleRepo itself in multi-node mode (the production path), so
+// the test no longer registers one through this handle.
 //
 // Returns nil for a closed repo. Test-only; no production path reads it.
 func (r *ShaleRepo) ClusterForTest() *cluster.Cluster { return r.cluster }
