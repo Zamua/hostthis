@@ -78,6 +78,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -85,6 +86,8 @@ import (
 	"github.com/Zamua/shale/backends/slate"
 	"github.com/Zamua/shale/pkg/backend"
 	"github.com/Zamua/shale/pkg/cluster"
+	"github.com/Zamua/shale/pkg/rpc"
+	"google.golang.org/grpc"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
@@ -140,8 +143,30 @@ type ShaleConfig struct {
 // same service-layer interfaces as SlateRepo. Every operation goes
 // through the cluster handle, which routes per-shard via shaleShardKey
 // and commits single-shard writes through per-shard CAS.
+//
+// In multi-node mode (cfg.BindAddr != "") the repo ALSO owns the
+// process-level gRPC peer-forwarding server: cluster.Open advertises the
+// node's GRPCAddr via gossip but does not stand up the listener that peers
+// forward routed reads/writes/migrations to (docs/SPEC.md "Peer
+// forwarding"). NewShaleRepo binds that listener + serves the cluster's
+// rpc handlers on it; grpcSrv + grpcLis are nil in single-node mode and
+// Close gracefully stops/closes them when set.
 type ShaleRepo struct {
 	cluster *cluster.Cluster
+
+	// grpcAddr is the ACTUAL bound forwarding address advertised to peers
+	// (lis.Addr().String()), or "" in single-node mode. bindAddr mirrors
+	// the memberlist bind address a second node seeds off. Both are exposed
+	// via accessors so a peer can reference this node.
+	grpcAddr string
+	bindAddr string
+
+	// grpcSrv + grpcLis are the peer-forwarding server and its listener,
+	// set only in multi-node mode. nil single-node (the back-compat path
+	// stands up neither). Close GracefulStops the server, which drains
+	// in-flight RPCs and closes the listener.
+	grpcSrv *grpc.Server
+	grpcLis net.Listener
 }
 
 // NewShaleRepo opens a shale cluster over a fresh slate backend and
@@ -160,12 +185,42 @@ type ShaleRepo struct {
 // every key family co-locates on the shard keyed by its subject
 // (<slug> / <id> / <subnet>), which is what makes the reservation
 // counter and the per-slug authoritative rows each single-shard.
+//
+// Multi-node wiring (cfg.BindAddr != ""): NewShaleRepo binds the gRPC
+// peer-forwarding listener on cfg.GRPCAddr BEFORE opening the cluster, then
+// advertises the listener's ACTUAL bound address (lis.Addr().String()) as
+// the cluster's GRPCAddr. This matters when cfg.GRPCAddr is ":0" / an
+// OS-assigned port: the real port is only known after Listen, and a peer
+// that forwards to the advertised address must reach the address actually
+// served. After the cluster is open it registers the cluster's rpc
+// handlers on a grpc.Server and serves in a background goroutine. Close
+// gracefully stops that server + closes the listener. Single-node mode
+// (cfg.BindAddr == "") binds no listener and starts no server: the
+// back-compat path is byte-for-byte today's behavior.
 func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	if cfg.Bucket == "" {
 		return nil, fmt.Errorf("ShaleConfig.Bucket required")
 	}
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("ShaleConfig.NodeID required")
+	}
+
+	// Multi-node only: bind the peer-forwarding listener BEFORE opening the
+	// cluster so the advertised GRPCAddr is the address actually served
+	// (resolves the ":0" / OS-assigned-port case). Single-node leaves lis
+	// nil and the cluster opens with an empty GRPCAddr, exactly as before.
+	var lis net.Listener
+	advertiseGRPCAddr := cfg.GRPCAddr
+	if cfg.BindAddr != "" {
+		if cfg.GRPCAddr == "" {
+			return nil, fmt.Errorf("shale: GRPCAddr required in multi-node mode (BindAddr set)")
+		}
+		l, err := net.Listen("tcp", cfg.GRPCAddr)
+		if err != nil {
+			return nil, fmt.Errorf("shale: bind gRPC listener on %q: %w", cfg.GRPCAddr, err)
+		}
+		lis = l
+		advertiseGRPCAddr = l.Addr().String()
 	}
 
 	be, err := slate.New(slate.Config{
@@ -178,6 +233,9 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		UseSSL:    cfg.UseSSL,
 	})
 	if err != nil {
+		if lis != nil {
+			_ = lis.Close()
+		}
 		return nil, fmt.Errorf("shale: open slate backend: %w", err)
 	}
 
@@ -185,7 +243,7 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		NodeID:            cfg.NodeID,
 		Backend:           be,
 		BindAddr:          cfg.BindAddr,
-		GRPCAddr:          cfg.GRPCAddr,
+		GRPCAddr:          advertiseGRPCAddr,
 		Seeds:             cfg.Seeds,
 		ReplicationFactor: cfg.ReplicationFactor,
 		ReadConsistency:   cluster.ReadNearest,
@@ -193,19 +251,61 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	})
 	if err != nil {
 		_ = be.Close()
+		if lis != nil {
+			_ = lis.Close()
+		}
 		return nil, fmt.Errorf("shale: open cluster: %w", err)
 	}
 
-	return &ShaleRepo{cluster: cl}, nil
+	r := &ShaleRepo{
+		cluster:  cl,
+		bindAddr: cfg.BindAddr,
+		grpcAddr: advertiseGRPCAddr,
+	}
+
+	// Multi-node: stand up the peer-forwarding server the cluster advertised
+	// but does not serve itself. cluster.Open advertises GRPCAddr via gossip;
+	// this is the listener that answers it.
+	if lis != nil {
+		g := grpc.NewServer()
+		rpc.NewServer(cl).Register(g)
+		r.grpcSrv = g
+		r.grpcLis = lis
+		go func() {
+			// Serve returns when GracefulStop (in Close) closes the
+			// listener; that is a clean shutdown, not an error to surface.
+			_ = g.Serve(lis)
+		}()
+	}
+
+	return r, nil
 }
 
-// Close shuts down the cluster (and the underlying slate backend).
+// Close shuts down the peer-forwarding gRPC server (multi-node only, a
+// no-op when nil), then the cluster (and the underlying slate backend).
+// GracefulStop drains in-flight RPCs and closes the listener, so the
+// forwarding port is released with no leaked goroutine.
 func (r *ShaleRepo) Close() error {
+	if r.grpcSrv != nil {
+		r.grpcSrv.GracefulStop() // also closes r.grpcLis
+	}
 	if r.cluster != nil {
 		return r.cluster.Close()
 	}
 	return nil
 }
+
+// GRPCAddr returns this node's ACTUAL bound gRPC forwarding address (the
+// one advertised to peers), or "" in single-node mode. A second node seeds
+// off the cluster via BindAddr, but a deploy/test that needs to reference
+// the served forwarding endpoint reads it here (the configured GRPCAddr may
+// have been ":0", so the actual port is only known post-bind).
+func (r *ShaleRepo) GRPCAddr() string { return r.grpcAddr }
+
+// BindAddr returns this node's memberlist bind address, or "" in
+// single-node mode. A second node passes this as its Seeds entry to join
+// the ring this node founded.
+func (r *ShaleRepo) BindAddr() string { return r.bindAddr }
 
 // --- key builders (mirror SlateRepo's layout) ------------------------------
 
