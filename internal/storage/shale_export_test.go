@@ -115,3 +115,12 @@ func IdentityReserveKeyForTest(identity, slug string) []byte {
 // use (shale rejects empty Put values). Exposed so the migration test
 // can seed the expiry index marker exactly as the backend writes it.
 func MarkerValueForTest() []byte { return markerValue }
+
+// EncodeReservationMarkerForTest produces the exact JSON value the
+// backend stores at identity_reserve/<id>/<slug>: {"bytes":N,
+// "created_at":<RFC3339Nano>}. Exposed so the grace + leak tests can seed
+// a reservation marker stamped with a chosen created_at (within or past
+// the grace window) without going through the live reserve path.
+func EncodeReservationMarkerForTest(bytes int64, createdAt time.Time) ([]byte, error) {
+	return encodeReservationMarker(bytes, createdAt)
+}
