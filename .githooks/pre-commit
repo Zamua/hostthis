@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# pre-commit hook for shale.
+#
+# What it checks (Go-only; no-op when no .go files are staged):
+#   1. gofmt    every staged .go file is properly formatted
+#   2. go vet   the whole module passes vet
+#   3. golangci-lint (if installed) runs against the staged diff
+#
+# Activate once per clone:
+#   git config core.hooksPath .githooks
+#
+# Install golangci-lint (pinned in .githooks/README.md):
+#   brew install golangci-lint
+#   # or: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+#
+# Bypass for one commit (use sparingly):
+#   git commit --no-verify
+set -euo pipefail
+
+# Collect staged Go files (Added / Copied / Modified / Renamed).
+staged_go=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.go$' || true)
+if [ -z "$staged_go" ]; then
+  exit 0
+fi
+
+# 1. gofmt: list any staged file whose formatting is off.
+unformatted=$(printf '%s\n' "$staged_go" | xargs gofmt -l 2>/dev/null || true)
+if [ -n "$unformatted" ]; then
+  printf 'pre-commit: the following files are not gofmt-clean:\n%s\n' "$unformatted" >&2
+  printf '\nRun:\n  gofmt -w %s\n' "$unformatted" >&2
+  exit 1
+fi
+
+# 2. go vet across the whole module: fast and catches obvious issues.
+if ! go vet ./...; then
+  printf 'pre-commit: go vet failed\n' >&2
+  exit 1
+fi
+
+# 3. golangci-lint: only if installed. Skips with a warning otherwise so
+#    a contributor without the tool installed isn't blocked from committing.
+if command -v golangci-lint >/dev/null 2>&1; then
+  if ! golangci-lint run --new-from-rev HEAD --fix=false; then
+    printf 'pre-commit: golangci-lint reported issues\n' >&2
+    exit 1
+  fi
+else
+  printf 'pre-commit: golangci-lint not installed; skipping lint pass.\n' >&2
+  printf '            See .githooks/README.md for install instructions.\n' >&2
+fi
+
+exit 0
