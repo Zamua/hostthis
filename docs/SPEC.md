@@ -872,6 +872,131 @@ The blob backend (`HOSTTHIS_BLOB_BACKEND`) and the metadata backend
 Bucket-per-domain is recommended: separate IAM/credential rotation
 for metadata vs blobs.
 
+### The storage contract and its conformance suite
+
+Whatever backend is in use, the rest of the app depends on it only
+through four small Go interfaces declared in `internal/service`:
+
+- `PasteRepo` (upload): `InsertWithQuotaCheck`, `Get`.
+- `PasteAdmin` (manage): `Get`, `ListByOwner`, `Delete`, `SetName`,
+  `SetPinnedVersion`, `Unpin`, `AppendVersionWithQuotaCheck`,
+  `ListVersions`, `GetVersion`, `DeleteVersion`, `CountByOwner`,
+  `SumActiveBytesByOwner`, `OwnerFirstSeen`.
+- `SweepRepo` (sweep): `ExpiredSlugs`, `Delete`,
+  `UnreferencedBlobSHAs`.
+- `KeyGateRepo` (keygate): `AdmitNewKey`, `DeleteFirstSeenOlderThan`,
+  `SubnetSnapshot`, `SubnetsForIdentity`.
+
+Every backend implements all four identically. The observable contract
+those interfaces expose, not the storage internals, is the load-bearing
+thing: callers see the same return values, the same sentinel errors,
+and the same accounting regardless of which backend is wired. Adding a
+backend is only safe if the new backend preserves that observable
+contract.
+
+**Observable contract (what every backend must agree on).** These
+behaviors are expressed in terms of inputs and observable outputs:
+
+- **Insert / Get.** A successful `InsertWithQuotaCheck` makes the paste
+  readable by `Get` with the same field values; a missing slug returns
+  the not-found sentinel; a duplicate slug returns an error whose
+  message contains "slug" (the upload service sniffs the message to
+  retry with a fresh slug).
+- **Quota (strict, never exceeded).** `InsertWithQuotaCheck` and
+  `AppendVersionWithQuotaCheck` reject (over-quota sentinel) when
+  accepting the write would push the identity's active bytes above the
+  per-identity cap. Active bytes are summed across every non-deleted
+  version of the identity's non-expired pastes. Quota is freed by
+  `Delete` (removes the paste and all its versions) and by
+  `DeleteVersion` (tombstones one version). Per-identity quotas are
+  independent; a service-wide cap, if set, behaves the same across all
+  identities.
+- **Versions.** `AppendVersionWithQuotaCheck` assigns `MAX(ver_num)+1`,
+  counting tombstones so numbers are never reused. An unpinned paste's
+  head rolls forward to the new version; a pinned paste keeps serving
+  its pin. `AppendResult.NewVer` and `AppendResult.WasPinned` (pin
+  state before the append) are returned; both reset the retention
+  clock.
+- **Pin / unpin.** `SetPinnedVersion` makes a version sticky and rolls
+  the head to it; `Unpin` clears the pin and rolls the head back to the
+  latest non-deleted version.
+- **DeleteVersion tombstones.** Flips a version's deleted flag, leaving
+  the row so the number is not reused and history is auditable.
+  `ListVersions` returns tombstones (newest first); `GetVersion`
+  returns a tombstone too. The repo does NOT enforce
+  refuse-current / refuse-pinned-current: those guards live in
+  `Manage.DeleteVersion`, not the repo.
+- **Owner-gating is a service-layer concern.** The repos are NOT
+  owner-aware: `Get`, `Delete`, `SetName`, and so on operate on a slug
+  regardless of who owns it. IDOR protection (a cross-owner read
+  surfacing as not-found) lives in `Manage.requireOwner`. A backend
+  must NOT add owner checks; doing so would change observable behavior.
+- **Expiry.** `ExpiredSlugs(now)` returns slugs whose `expires_at` is
+  at or before `now` (inclusive boundary); not-yet-expired pastes are
+  excluded.
+- **Sweep / GC.** `UnreferencedBlobSHAs` returns the set of SHAs the
+  metadata still references (both `pastes.content_sha` and every
+  `versions.content_sha`). The sweep removes any blob NOT in that set.
+  The set must be non-empty while references exist; the sweep guards
+  against a backend that wrongly returns zero.
+- **Owner stats.** `ListByOwner` returns the owner's active pastes
+  ordered soonest-to-expire first, with `LatestVersion` populated;
+  `CountByOwner` counts them; `SumActiveBytesByOwner` matches the quota
+  math; `OwnerFirstSeen` is the earliest paste `created_at` (zero time
+  when none).
+- **KeyGate.** `AdmitNewKey` reports `knownAlready=true` for a
+  previously-seen `(identity, subnet)` pair (no accounting), admits a
+  fresh pair when the subnet is under its in-window limit, and returns
+  the too-many-new-keys sentinel at the limit. Subnets are independent;
+  rows aged past the window stop counting.
+  `DeleteFirstSeenOlderThan(cutoff)` prunes rows older than `cutoff`
+  and returns the count removed.
+
+**Conformance suite.** `internal/storage/conformance_test.go` is a
+backend-agnostic suite that pins exactly the observable contract above.
+It takes a backend through a single factory. The backend type is just
+the union of the four service interfaces (no backend-specific helpers,
+so the suite cannot accidentally pin a behavior one backend has and
+another lacks):
+
+```
+type conformanceRepo interface {
+    service.PasteRepo
+    service.PasteAdmin
+    service.SweepRepo
+    service.KeyGateRepo
+}
+
+func runConformance(t *testing.T, name string, newRepo func(t *testing.T) conformanceRepo)
+```
+
+Pastes are created through `InsertWithQuotaCheck` / `AppendVersion-
+WithQuotaCheck` with caps set to 0 (the documented "no quota
+enforcement" path), so no backend needs an extra unchecked helper.
+
+Each backend supplies a tiny factory and calls `runConformance` with
+it. The default `go test ./...` run exercises the sqlite backend (no
+build tag, no cgo, no external services). The same suite runs against
+the slatedb backend under `-tags slatedb` (which also needs cgo +
+`libslatedb` on the loader path, and a live S3 endpoint via
+`MINIO_TEST_ENDPOINT`, skipping cleanly when unset), and is the
+acceptance gate the future
+shale backend will run to prove it preserves behavior. Because the
+suite asserts only the observable contract, a backend that passes it is
+a drop-in for the service layer by construction.
+
+**Known backend divergence (not yet reconciled).** The two existing
+backends disagree on one detail of `UnreferencedBlobSHAs`: whether a
+TOMBSTONED version's content SHA stays in the referenced set. The
+sqlite backend's query has no deleted filter, so a tombstoned version's
+blob is kept until the whole paste dies; the slatedb backend filters
+deleted rows, so a tombstoned version's blob becomes GC-eligible on the
+next sweep. The conformance suite pins this divergence as a documented
+finding rather than asserting it, because there is no single value both
+backends agree on. A new backend (shale) must choose one rule
+deliberately, and the chosen rule should be made uniform across
+backends (and asserted in the suite) at that point.
+
 ---
 
 ## Shale-backed metadata storage (horizontal scale)
