@@ -1,0 +1,3 @@
+# local-dev go.work must NOT enter the image build (points shale at on-disk paths)
+go.work
+go.work.sum
