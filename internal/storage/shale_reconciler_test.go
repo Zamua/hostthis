@@ -4,22 +4,26 @@ package storage_test
 
 // Reconciler test for the shale backend.
 //
-// docs/SPEC.md "Derived indexes and repair-on-read": identity_pastes/*
-// and identity_bytes/* are DERIVED projections of the authoritative
-// pastes/* + versions/* rows. They can drift (a crash between the
-// authoritative write and the confirm step, an orphaned reservation, a
-// stale entry). The reconciler is the convergence mechanism: it
-// recomputes both families from the authoritative state and heals the
-// drift.
+// docs/SPEC.md "Running the reconciler against live traffic":
+// identity_pastes/* is a DERIVED projection of the authoritative pastes/*
+// rows and CAN be rebuilt by the reconciler (add missing, refresh stale,
+// drop entries whose paste is gone). identity_bytes/* is the strict
+// reservation COUNTER, maintained purely by read-checked CAS deltas on
+// the hot path; the reconciler NEVER recomputes it from a scan (that was
+// the structurally-racy design that was removed). The only counter write
+// the reconciler makes is the orphan-reserve-release delta, covered by
+// TestShaleReconciler_ReleasesOrphanReservation below.
 //
-// This test deliberately desyncs the derived state two ways at once,
-// then runs Reconcile and asserts the index entry and the byte counter
-// are both rebuilt to the authoritative-derived values:
+// This test pins the derived-INDEX half of the reconciler: it desyncs the
+// index (drops an identity_pastes entry whose paste still exists, the
+// "missing index entry" half repair-on-read cannot fix on its own) AND
+// corrupts the counter to a bogus value, then runs Reconcile and asserts
 //
-//   - a deleted identity_pastes entry whose paste still exists
-//     (the "missing index entry" half repair-on-read cannot fix on its
-//     own, by design),
-//   - a corrupted identity_bytes counter (set to a bogus value).
+//   - the missing index entry is rebuilt (the paste reappears in the list),
+//   - the corrupted counter is LEFT AS-IS: the reconciler never overwrites
+//     the counter from a scan, so a corrupted absolute value is NOT healed
+//     online (that is the deliberate non-goal; recovery is the offline
+//     audit tool documented in the spec, not an online recompute).
 //
 //	go test -tags slatedb -run TestShaleReconciler ./internal/storage
 //
@@ -86,7 +90,10 @@ func TestShaleReconciler_RebuildsDerivedIndexAndCounter(t *testing.T) {
 	if err := repo.DeleteRawForTest(storage.IdentityPasteKeyForTest(owner, pA.Slug.String())); err != nil {
 		t.Fatalf("delete index entry: %v", err)
 	}
-	// 2. Corrupt the identity_bytes counter to a bogus value.
+	// 2. Corrupt the identity_bytes counter to a bogus value. The reconciler
+	//    must NOT heal this (it never recomputes the counter from a scan);
+	//    we assert the corruption survives below.
+	const corruptCounter = 99999
 	if err := repo.PutRawForTest(storage.IdentityBytesKeyForTest(owner), []byte("99999")); err != nil {
 		t.Fatalf("corrupt counter: %v", err)
 	}
@@ -96,8 +103,8 @@ func TestShaleReconciler_RebuildsDerivedIndexAndCounter(t *testing.T) {
 	if got := mustCount(t, repo, owner); got != 1 {
 		t.Fatalf("post-desync count: got %d, want 1 (pA dropped from index)", got)
 	}
-	if got := mustSum(t, repo, owner, now); got != 99999 {
-		t.Fatalf("post-desync counter: got %d, want 99999 (corrupted)", got)
+	if got := mustSum(t, repo, owner, now); got != corruptCounter {
+		t.Fatalf("post-desync counter: got %d, want %d (corrupted)", got, corruptCounter)
 	}
 
 	// --- reconcile + assert convergence -----------------------------------
@@ -106,9 +113,16 @@ func TestShaleReconciler_RebuildsDerivedIndexAndCounter(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 
-	// The counter is rebuilt to the authoritative live-byte sum.
-	if got := mustSum(t, repo, owner, now); got != int(wantBytes) {
-		t.Fatalf("post-reconcile counter: got %d, want %d", got, wantBytes)
+	// The counter is NOT recomputed: the reconciler only ever moves the
+	// counter via strict CAS deltas (orphan-release), never a scan-derived
+	// overwrite, so the corrupted absolute value is deliberately left
+	// in place (docs/SPEC.md "The invariant, the residual drift, and the
+	// deliberate non-goal" - corruption recovery is the OFFLINE audit tool,
+	// never an online recompute). wantBytes is kept as documentation of the
+	// true authoritative live-byte sum the offline tool would converge to.
+	_ = wantBytes
+	if got := mustSum(t, repo, owner, now); got != corruptCounter {
+		t.Fatalf("post-reconcile counter: got %d, want %d (the reconciler must NOT recompute/heal the counter from a scan)", got, corruptCounter)
 	}
 	// The dropped index entry is rebuilt: both pastes are back in the list.
 	if got := mustCount(t, repo, owner); got != 2 {

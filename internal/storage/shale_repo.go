@@ -1464,59 +1464,52 @@ func (r *ShaleRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 
 // --- reconciler ------------------------------------------------------------
 
-// Reconcile rebuilds the derived per-identity family from the
-// authoritative pastes/* + versions/* rows and releases orphaned
-// reservations. It is the convergence mechanism the reservation pattern
-// relies on (docs/SPEC.md "Derived indexes and repair-on-read"):
+// Reconcile heals the derived per-identity family and completes the
+// reservation markers the hot path left behind. It is the convergence
+// mechanism the reservation pattern relies on (docs/SPEC.md "Running the
+// reconciler against live traffic"). It has exactly two jobs, and
+// NEITHER ever overwrites the identity_bytes counter with an absolute
+// value derived from a scan:
 //
-//   - recomputes identity_bytes/<id> from the owner's live (non-deleted)
-//     version sizes PLUS the bytes of any in-flight (within-grace)
-//     reservation markers, via a read-checked CAS that can never clobber
-//     a concurrent committed reserve/delete (recomputeCounter),
-//   - rebuilds identity_pastes/<id>/<slug> projections from the
+//   - rebuild identity_pastes/<id>/<slug> projections from the
 //     authoritative paste rows (adding missing entries, refreshing stale
-//     ones, dropping entries whose paste is gone),
-//   - releases identity_reserve/<id>/<slug> markers older than
-//     reserveGrace: both the abandoned-reservation over-count (paste never
-//     materialized) and a leaked confirm-failed marker (paste exists), so
-//     the marker family cannot grow unbounded. Markers younger than the
-//     grace are in-flight and left alone (releaseOrphanReservations).
+//     ones, dropping entries whose paste is gone). This touches only the
+//     derived index, never the counter (reconcileIndexes).
+//   - complete identity_reserve/<id>/<slug> markers older than
+//     reserveGrace: an ABANDONED reservation (paste absent) is released
+//     with a targeted, read-checked CAS that does counter -= marker.bytes
+//     AND deletes the marker atomically; a LEAKED confirm-failed marker
+//     (paste exists) is simply deleted, leaving the counter untouched
+//     because the bytes are already authoritatively counted. Markers
+//     younger than the grace are in-flight inserts and left strictly
+//     alone (releaseReservationMarkers).
+//
+// The counter is NEVER recomputed. It is maintained purely by the strict,
+// read-checked CAS deltas on the hot path (reserve adds, delete /
+// delete-version subtracts, orphan-release subtracts). An earlier
+// recompute that rebuilt the counter from a cross-shard live-byte scan
+// was structurally racy (it could under-count across the scan ->
+// tx.Get(counter) window and let an owner over-admit past the cap) and is
+// removed. See docs/SPEC.md "Why never recompute".
 //
 // It is NOT part of the SweepRepo contract: the sweep's public surface is
 // unchanged. An operator (or a sweep hook that calls this directly) runs
 // it periodically. Single-node, cross-shard via aggregate; safe to run
-// concurrently with live traffic because every write it makes is an
-// idempotent CAS that converges to the authoritative-derived value.
+// concurrently with live traffic because every write it makes is either a
+// derived-index repair or an idempotent, targeted, read-checked CAS delta
+// on a single {id} shard, never a full-scan counter overwrite.
 func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 	// Gather authoritative state across all shards.
 	pasteItems, err := r.aggregatePrefix([]byte("pastes/"))
 	if err != nil {
 		return fmt.Errorf("reconcile: scan pastes: %w", err)
 	}
-	versionItems, err := r.aggregatePrefix([]byte("versions/"))
-	if err != nil {
-		return fmt.Errorf("reconcile: scan versions: %w", err)
-	}
 
-	// Index versions by slug for per-paste live-byte sums.
-	liveBytesBySlug := make(map[string]int64)
-	for _, item := range versionItems {
-		var v versionRow
-		if err := json.Unmarshal(item.Value, &v); err != nil {
-			return fmt.Errorf("reconcile: decode %s: %w", item.Key, err)
-		}
-		if v.Deleted {
-			continue
-		}
-		slug := versionSlugFromKey(item.Key)
-		liveBytesBySlug[slug] += int64(v.Size)
-	}
-
-	// Recompute per-identity live bytes + the authoritative paste set per
-	// owner. liveBytesByOwner holds ONLY the authoritative live-version
-	// bytes; the in-grace reservation bytes are added inside the
-	// read-checked recompute below.
-	liveBytesByOwner := make(map[string]int64)
+	// The set of slugs that have an authoritative paste, used to decide
+	// whether a past-grace marker is an abandoned reservation (paste
+	// absent -> orphan-release, decrement) or a leaked confirm-failed
+	// marker (paste present -> drop without touching the counter).
+	livePasteSlugs := make(map[string]struct{}, len(pasteItems))
 	pastesByOwner := make(map[string]map[string]identityPasteRow)
 	for _, item := range pasteItems {
 		var p pasteRow
@@ -1524,7 +1517,7 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 			return fmt.Errorf("reconcile: decode %s: %w", item.Key, err)
 		}
 		slug := strings.TrimPrefix(string(item.Key), "pastes/")
-		liveBytesByOwner[p.Identity] += liveBytesBySlug[slug]
+		livePasteSlugs[slug] = struct{}{}
 		if pastesByOwner[p.Identity] == nil {
 			pastesByOwner[p.Identity] = make(map[string]identityPasteRow)
 		}
@@ -1537,38 +1530,22 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 	}
 
 	// Gather the reservation markers (cross-shard) and group them by owner.
-	// These feed both the read-checked counter recompute (in-grace markers
-	// count toward the true value) and the orphan release below.
 	markersByOwner, err := r.gatherReservationMarkers()
 	if err != nil {
 		return err
 	}
 
-	// Recompute the counter for every owner that has live bytes OR a
-	// reservation marker. A marker-only owner (all reservations in-flight,
-	// or a leftover over-count) still needs its counter reconciled.
-	owners := make(map[string]struct{}, len(liveBytesByOwner)+len(markersByOwner))
-	for owner := range liveBytesByOwner {
-		owners[owner] = struct{}{}
-	}
-	for owner := range markersByOwner {
-		owners[owner] = struct{}{}
-	}
-	for owner := range owners {
-		if err := r.recomputeCounter(owner, liveBytesByOwner[owner], markersByOwner[owner], now, reserveGrace); err != nil {
-			return fmt.Errorf("reconcile: counter %s: %w", owner, err)
-		}
-	}
-
+	// Job 1: rebuild the derived index (never touches the counter).
 	if err := r.reconcileIndexes(pastesByOwner); err != nil {
 		return err
 	}
-	return r.releaseOrphanReservations(now, reserveGrace, markersByOwner)
+	// Job 2: complete past-grace markers (orphan-release / leaked-drop).
+	return r.releaseReservationMarkers(now, reserveGrace, markersByOwner, livePasteSlugs)
 }
 
 // reservationMarkerEntry is a parsed reservation marker tagged with its
-// full identity_reserve/<id>/<slug> key, used by the reconciler for the
-// read-checked recompute and the orphan release.
+// full identity_reserve/<id>/<slug> key, used by the reconciler to
+// complete past-grace markers (orphan-release or leaked-marker drop).
 type reservationMarkerEntry struct {
 	Key    []byte
 	Marker reservationMarker
@@ -1610,72 +1587,6 @@ func markerInGrace(m reservationMarker, now time.Time, reserveGrace time.Duratio
 	return now.Sub(m.CreatedAt) <= reserveGrace
 }
 
-// recomputeCounter is the read-checked, reservation-aware counter
-// recompute (the core fix for the counter-recompute race, docs/SPEC.md
-// "Running the reconciler against live traffic"). The true counter value
-// is the authoritative live-version bytes (scanned just before this call)
-// plus the bytes of every reservation marker still within grace. The
-// write runs as a single-shard CAS that puts BOTH the counter and the
-// owner's reservation markers in its read-set, so any concurrent
-// reserve/confirm/delete (all of which touch the counter or a marker)
-// makes this CAS conflict and retry rather than clobber the concurrent
-// write. The cross-shard live-byte scan being slightly stale is harmless:
-// any version change the scan missed also moved the counter, which the
-// read-check on the counter catches. Bounded retry; if it cannot converge
-// under sustained load it leaves the counter for the next pass, never
-// blind-writing.
-func (r *ShaleRepo) recomputeCounter(owner string, liveBytes int64, markers []reservationMarkerEntry, now time.Time, reserveGrace time.Duration) error {
-	counterKey := shaleKeyIdentityBytes(owner)
-	const maxAttempts = 8
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		txErr := r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
-			cur, err := txGetCounter(tx, counterKey)
-			if err != nil {
-				return err
-			}
-			// Read every marker key INTO the read-set and re-sum the
-			// in-grace bytes from the freshly-read marker value. A
-			// concurrent reserve/confirm that changed a marker conflicts at
-			// commit; a confirm that DELETED a marker is seen as absent here
-			// and so drops out of the in-grace sum, keeping the recompute
-			// consistent with the committed state.
-			var inGrace int64
-			for _, e := range markers {
-				raw, gerr := tx.Get(e.Key)
-				if gerr != nil {
-					if errors.Is(gerr, backend.ErrNotFound) {
-						continue // consumed/released since the scan; not counted
-					}
-					return gerr
-				}
-				m, perr := parseReservationMarker(raw)
-				if perr != nil {
-					return perr
-				}
-				if markerInGrace(m, now, reserveGrace) {
-					inGrace += m.Bytes
-				}
-			}
-			want := liveBytes + inGrace
-			if cur == want {
-				return nil // already correct; no write (keeps the pass quiet)
-			}
-			return tx.Put(counterKey, formatCounter(want))
-		})
-		switch {
-		case txErr == nil:
-			return nil
-		case errors.Is(txErr, backend.ErrCASConflict):
-			continue // a concurrent reserve/delete moved the counter; retry
-		default:
-			return txErr
-		}
-	}
-	// Could not converge under sustained concurrent load this pass. Leave
-	// the counter as-is; the next reconcile pass retries. Never blind-write.
-	return nil
-}
-
 // reconcileIndexes rebuilds identity_pastes projections to match the
 // authoritative paste set per owner: adds missing, refreshes stale, drops
 // entries with no authoritative paste.
@@ -1711,48 +1622,118 @@ func txPutIndex(r *ShaleRepo, owner, slug string, row identityPasteRow) error {
 	})
 }
 
-// releaseOrphanReservations drops reservation markers that have served
-// their purpose, honoring the grace window so an in-flight insert's
-// marker is never mistaken for an orphan (docs/SPEC.md "Running the
-// reconciler against live traffic"). For each marker:
+// releaseReservationMarkers completes past-grace reservation markers,
+// honoring the grace window so an in-flight insert's marker is never
+// mistaken for an orphan (docs/SPEC.md "Grace window for reservation
+// completion"). For each marker:
 //
-//   - If it is YOUNGER than reserveGrace it is in-flight (between the
-//     reserve step and the authoritative write): skip it. Its bytes are
-//     still counted by the read-checked recompute above, so the counter
-//     stays correct while it is in flight.
-//   - If it is OLDER than reserveGrace, drop it when its paste is absent
-//     (the abandoned-reservation over-count a failed step 2 left) OR an
-//     authoritative paste exists for it (the leaked-marker case: a confirm
-//     that failed after the authoritative write succeeded leaves a marker
-//     even though the bytes are already authoritative). Either way the
-//     marker is no longer needed. The recompute already set the counter
-//     from authoritative live bytes plus only in-grace markers, so a
-//     dropped past-grace marker's bytes are correctly NOT in the counter,
-//     and deleting it does not change the counter.
+//   - YOUNGER than reserveGrace: in-flight (between the reserve step and
+//     the authoritative write). Skip it. Its bytes are already in the
+//     counter (the reserve added them) and the confirm step is expected
+//     to land shortly. The counter is never recomputed, so the marker's
+//     bytes stay correctly counted while it is in flight.
+//   - OLDER than reserveGrace, paste ABSENT (orphan-reserve-release): the
+//     insert was abandoned, so the reserved bytes never became live. This
+//     is the ONLY reconciler write that touches the counter: a targeted,
+//     read-checked CAS on the {id} shard that does counter -= marker.bytes
+//     AND deletes the marker atomically (orphanReleaseMarker). Idempotent
+//     (a concurrent confirm or a prior pass that already consumed the
+//     marker leaves nothing to release). It only ever decrements abandoned
+//     reservations whose bytes were never consumed by a live paste, so it
+//     can never under-count a live paste.
+//   - OLDER than reserveGrace, paste PRESENT (leaked-marker drop): a
+//     confirm that failed after the authoritative write succeeded left the
+//     marker behind even though the bytes are already authoritatively
+//     counted. Delete the marker WITHOUT touching the counter
+//     (decrementing here would under-count the live paste). This is what
+//     bounds the marker family: without it a confirm-failed marker for a
+//     still-live paste would leak unboundedly.
 //
-// The leaked-marker drop is what bounds the marker family: without it a
-// confirm-failed marker for a still-live paste would never be cleaned and
-// would leak unboundedly.
-func (r *ShaleRepo) releaseOrphanReservations(now time.Time, reserveGrace time.Duration, markersByOwner map[string][]reservationMarkerEntry) error {
+// An <slug>#append marker maps to the base <slug>'s paste: an append
+// targets an existing paste, so a past-grace append marker is virtually
+// always the leaked-marker case (the paste is present), which drops the
+// marker without moving the counter.
+func (r *ShaleRepo) releaseReservationMarkers(now time.Time, reserveGrace time.Duration, markersByOwner map[string][]reservationMarkerEntry, livePasteSlugs map[string]struct{}) error {
 	for _, markers := range markersByOwner {
 		for _, e := range markers {
 			if markerInGrace(e.Marker, now, reserveGrace) {
 				continue // in-flight; leave it for the confirm step to drop
 			}
-			// Past grace. Drop whether the paste is absent (abandoned
-			// reservation) or present (leaked confirm-failed marker).
-			_ = r.cluster.Delete(e.Key)
+			baseSlug := strings.TrimSuffix(markerSlugFromKey(e.Key), "#append")
+			if _, pasteExists := livePasteSlugs[baseSlug]; pasteExists {
+				// Leaked confirm-failed marker: the bytes are already
+				// authoritatively counted. Drop the marker, leave the
+				// counter alone.
+				_ = r.cluster.Delete(e.Key)
+				continue
+			}
+			// Abandoned reservation: the paste never materialized. Release
+			// the over-count with a targeted, read-checked CAS that consumes
+			// the marker atomically.
+			if err := r.orphanReleaseMarker(e.Key); err != nil {
+				return fmt.Errorf("reconcile: orphan-release %s: %w", e.Key, err)
+			}
 		}
 	}
 	return nil
 }
 
-// versionSlugFromKey extracts <slug> from a versions/<slug>/<NNNN> key.
-func versionSlugFromKey(key []byte) string {
-	rest := strings.TrimPrefix(string(key), "versions/")
-	idx := strings.Index(rest, "/")
-	if idx < 0 {
-		return rest
+// orphanReleaseMarker is the targeted, read-checked CAS that releases one
+// abandoned reservation: in a single {id}-shard Transact it reads the
+// counter and the marker, and if the marker is still present, subtracts
+// the marker's bytes from the counter AND deletes the marker, atomically.
+// It is the only counter write the reconciler ever makes, and it is a
+// strict delta (counter -= marker.bytes), never an absolute overwrite.
+//
+// Idempotent: a marker already consumed (by a concurrent confirm, a
+// release, or a prior reconcile pass) is read as absent here and the CAS
+// is a no-op, so the bytes are never double-credited. Pinning the
+// transaction on the counter key (which co-shards with the marker, both
+// keyed by {id}) makes the read of the marker and the counter, and the
+// two writes, one atomic single-shard CAS.
+func (r *ShaleRepo) orphanReleaseMarker(reserveKey []byte) error {
+	owner := markerOwnerFromKey(reserveKey)
+	counterKey := shaleKeyIdentityBytes(owner)
+	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
+		raw, err := tx.Get(reserveKey)
+		if err != nil {
+			if errors.Is(err, backend.ErrNotFound) {
+				return nil // already consumed; no-op (never double-credit)
+			}
+			return err
+		}
+		m, err := parseReservationMarker(raw)
+		if err != nil {
+			return err
+		}
+		cur, err := txGetCounter(tx, counterKey)
+		if err != nil {
+			return err
+		}
+		if err := tx.Put(counterKey, formatCounter(cur-m.Bytes)); err != nil {
+			return err
+		}
+		return tx.Delete(reserveKey)
+	})
+}
+
+// markerOwnerFromKey extracts <id> from an identity_reserve/<id>/<slug>
+// key. The <id> is everything between the prefix and the FIRST "/".
+func markerOwnerFromKey(key []byte) string {
+	rest := strings.TrimPrefix(string(key), "identity_reserve/")
+	if idx := strings.Index(rest, "/"); idx >= 0 {
+		return rest[:idx]
 	}
-	return rest[:idx]
+	return rest
+}
+
+// markerSlugFromKey extracts <slug> from an identity_reserve/<id>/<slug>
+// key. The <slug> is everything after the FIRST "/" (an identity never
+// contains a "/", and the slug segment may itself be "<slug>#append").
+func markerSlugFromKey(key []byte) string {
+	rest := strings.TrimPrefix(string(key), "identity_reserve/")
+	if idx := strings.Index(rest, "/"); idx >= 0 {
+		return rest[idx+1:]
+	}
+	return ""
 }

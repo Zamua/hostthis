@@ -68,31 +68,42 @@ func isTransientWriteConflict(err error) bool {
 // ONE identity against a per-owner cap that admits only K live pastes,
 // while a reconciler loops Reconcile concurrently. The delete-recycle
 // keeps the cap repeatedly filling and freeing, so a steady stream of
-// fresh confirms overlaps the reconciler's recompute passes - the window
-// the bug lives in.
+// fresh confirms overlaps the reconciler's passes - the window the
+// removed recompute's bug lived in.
 //
-// Two invariants are pinned:
+// Two invariants are pinned, matching the never-recompute design
+// (docs/SPEC.md "Running the reconciler against live traffic"):
 //
 //   - the per-owner quota ceiling is NEVER breached: a lossless high-water
 //     mark of concurrently-live pastes (incremented on a committed insert,
-//     decremented on a committed delete) stays <= K. The reserve CAS is a
-//     hard gate; the reconciler's recompute must never WIDEN the budget by
-//     writing a counter value below the truly-reserved total.
-//   - after the writers stop and a final reconcile, the counter equals the
-//     true authoritative live-byte sum (no under-count).
+//     decremented on a committed delete) stays <= K, AND the counter never
+//     exceeds the cap. The reserve CAS is a hard gate; the reconciler must
+//     never WIDEN the budget by writing a counter value below the
+//     truly-reserved total. This is THE guarantee, and it holds because
+//     the reconciler no longer overwrites the counter at all.
+//   - the counter NEVER UNDER-counts: after the writers stop and a final
+//     reconcile, the counter is >= the true authoritative live-byte sum.
+//     An under-count is the one failure mode the quota must never permit
+//     (it frees budget a later reserve would over-admit). An OVER-count
+//     within the cap is fail-safe and explicitly allowed: it is the
+//     documented residual from a delete whose authoritative {slug} removal
+//     committed but whose {id} counter decrement lost a transient CAS
+//     retry (docs/SPEC.md "The invariant, the residual drift, and the
+//     deliberate non-goal"). That residual is NOT healed online by design;
+//     the racy recompute that used to "heal" it is exactly what this
+//     redesign removed.
 //
-// The counter recompute must close the window in which a confirm commits
-// between the reconciler's cross-shard live-byte scan and the recompute's
-// counter write. confirm is the one authoritative step that does NOT move
-// the counter (it only consumes a marker and writes the index), so a
-// recompute that derives the true value from a snapshot scan plus the
-// surviving in-grace markers can under-count across that window: the
-// just-confirmed paste is absent from a stale snapshot AND its marker is
-// already gone, so the recompute writes a value below the truly-reserved
-// total with no read-set conflict, freeing budget a later reserve consumes
-// (a ceiling breach). A correct recompute re-derives the live bytes inside
-// the same read-set it commits, so any confirm that landed is either
-// reflected in the scan or forces a conflict-and-retry.
+// Why the old design failed here: the removed recompute derived the
+// counter from a cross-shard live-byte snapshot plus surviving in-grace
+// markers, then overwrote the counter. A confirm committing between the
+// snapshot scan and the recompute's tx.Get(counter) was invisible to both
+// (the just-confirmed paste absent from the stale snapshot, its marker
+// already consumed), so the recompute wrote a value BELOW the truly-
+// reserved total with no read-set conflict, freeing budget a later reserve
+// consumed - a ceiling breach via under-count. Removing the recompute
+// eliminates that window entirely: the counter is now only ever moved by
+// strict, read-checked CAS deltas, each individually correct under
+// concurrency.
 func TestShaleReconciler_RaceAgainstInserts(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -307,13 +318,29 @@ func TestShaleReconciler_RaceAgainstInserts(t *testing.T) {
 	if atRest > wantCeiling {
 		t.Fatalf("QUOTA CEILING BREACHED at rest: %d live bytes > %d cap", atRest, wantCeiling)
 	}
-	// Invariant (b): no under-count. After a final reconcile the counter
-	// equals the true authoritative live bytes. A low value is the
-	// under-count the blind-Put recompute caused; a high value is a leaked
-	// reserve.
-	if got := mustSum(t, repo, owner, now); got != int(atRest) {
-		t.Fatalf("post-race counter: got %d, want %d (true live authoritative bytes); a mismatch is the recompute racing live traffic - low = under-count, high = leaked reserve",
+	// Invariant (b): no UNDER-count. After a final reconcile the counter is
+	// >= the true authoritative live bytes. A value BELOW atRest is the
+	// under-count the removed blind-Put recompute caused (it frees budget a
+	// later reserve over-admits) - the one failure mode the quota must never
+	// permit. A value ABOVE atRest (but within the cap, checked just above)
+	// is the documented fail-safe residual: a delete whose authoritative
+	// {slug} removal committed but whose {id} counter decrement lost a
+	// transient CAS retry, leaving the bytes counted with the paste gone.
+	// That residual is deliberately NOT healed online (docs/SPEC.md "The
+	// invariant, the residual drift, and the deliberate non-goal"); healing
+	// it would require the scan-derived recompute this redesign removed.
+	got := mustSum(t, repo, owner, now)
+	if got < int(atRest) {
+		t.Fatalf("post-race counter UNDER-COUNT: got %d, want >= %d (true live authoritative bytes); an under-count frees budget a later reserve over-admits - the quota guarantee the reserve CAS makes",
 			got, atRest)
+	}
+	if got > int(atRest) {
+		// Fail-safe over-count: it only ever rejects a future reserve early,
+		// never admits over the cap, so any magnitude is safe. It is the
+		// documented residual from a delete whose counter decrement lost a
+		// transient CAS retry; deliberately not healed online.
+		t.Logf("post-race counter over-counts by %d (got %d, authoritative %d): the documented fail-safe residual from a delete whose counter decrement lost a transient CAS retry; not an under-count, deliberately not healed online",
+			got-int(atRest), got, atRest)
 	}
 }
 
