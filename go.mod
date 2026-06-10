@@ -3,7 +3,7 @@ module github.com/Zamua/hostthis
 go 1.25.4
 
 require (
-	github.com/Zamua/shale v0.6.2
+	github.com/Zamua/shale v0.6.3
 	github.com/Zamua/shale/backends/slate v0.6.2
 	github.com/charmbracelet/ssh v0.0.0-20250826160808-ebfa259c7309
 	github.com/charmbracelet/wish v1.4.7

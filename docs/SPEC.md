@@ -1536,6 +1536,23 @@ configured as one shale node:
   over gRPC to that owner and served from the owner's local backend; the
   caller sees a normal result and never learns the op crossed a node
   boundary. `GRPCAddr` is required whenever `BindAddr` is set.
+
+  The cluster layer advertises `GRPCAddr` via gossip but does **not** itself
+  stand up the listener that peers forward to: serving that address is the
+  host process's responsibility. In hostthis the metadata adapter owns it.
+  When `BindAddr` is non-empty the adapter binds a TCP listener, passes the
+  listener's **actual** bound address into the cluster as `GRPCAddr` (so the
+  advertised address is exactly the one served, which matters when the
+  configured port is `:0` / OS-assigned), registers the cluster's RPC
+  handlers (Put/Get/Delete/ScanPrefix/CommitCAS/MigrateRange) on a gRPC
+  server, and serves in the background. Closing the adapter gracefully stops
+  that server and closes the listener, releasing the port with no leaked
+  goroutine. When `BindAddr` is empty the adapter binds **no** listener and
+  starts **no** server: the single-node path is byte-for-byte today's
+  behavior, the back-compat guarantee. Without this serving step a
+  multi-node deployment would gossip a live-looking `GRPCAddr` that no
+  process answers, so every forwarded request would hit a dead port; the
+  rebalance safety contract below depends on the forwarding path being real.
 - **Discovery via seeds.** A joining node is given one or more `Seeds`
   (the `BindAddr` of already-running nodes) to bootstrap gossip. An empty
   seed list means "this node is the founder / seed"; the first node starts

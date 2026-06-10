@@ -22,21 +22,19 @@ package storage_test
 // owns the {id} shard (no under/over-count), and the per-owner
 // projection survives so ListByOwner stays correct.
 //
-// # What forwarding requires, and what this test wires that production
-// does not (yet)
+// # What forwarding requires, and where it is wired
 //
 // cluster.Open advertises a node's GRPCAddr via gossip but does NOT
 // stand up the gRPC listener that serves forwarded reads/writes - the
-// host PROCESS owns that (pkg/shaled/runtime.go does it for the shaled
-// binaries). storage.NewShaleRepo, and hostthisd's buildMetadataShale
-// that calls it, currently open the cluster WITHOUT registering an
-// rpc.Server, so a multi-node deploy wired only through today's code
-// would gossip + route but a forwarded request would hit a dead
-// GRPCAddr. This test stands up the gRPC server explicitly (via the
-// ClusterForTest accessor) so it exercises the REAL forwarding path; it
-// also documents, by needing to do so, that the process-level gRPC
-// serve is a prerequisite the deploy reshape must add. See the comment
-// at serveNode.
+// host PROCESS owns that. storage.NewShaleRepo now stands it up in
+// multi-node mode (cfg.BindAddr != ""): it binds the listener, advertises
+// the ACTUAL bound address, and registers the cluster's rpc handlers, so a
+// real multi-node deploy (hostthisd's buildMetadataShale calls the same
+// constructor) forwards over a live wire instead of a dead GRPCAddr. This
+// test drives that production path directly - it passes GRPCAddr
+// "127.0.0.1:0" and reads repo.GRPCAddr() back - so the lossless-read
+// assertion via the NON-owning node exercises the same forwarding server
+// production runs, not a test-only stand-up. See startRebalNode.
 //
 // # How a loss would surface
 //
@@ -62,32 +60,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Zamua/shale/pkg/rpc"
-	"google.golang.org/grpc"
-
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// rebalNode bundles one in-process node: its ShaleRepo (the public
-// surface the test drives), the cluster handle (for membership +
-// rebalance-idle waits + local key counts), and the gRPC server that
-// peers forward to.
+// rebalNode bundles one in-process node: its ShaleRepo (the public surface
+// the test drives) and the addresses peers seed off / forward to. The
+// ShaleRepo now OWNS its peer-forwarding gRPC server (NewShaleRepo stands it
+// up in multi-node mode, the production wiring); the test no longer binds a
+// listener or registers rpc.NewServer itself, so repo.Close() is the only
+// teardown needed.
 type rebalNode struct {
 	id       string
 	repo     *storage.ShaleRepo
 	bindAddr string
 	grpcAddr string
-	grpcSrv  *grpc.Server
-	serveErr chan error
 }
 
 func (n *rebalNode) close() {
 	if n.repo != nil {
-		_ = n.repo.Close()
-	}
-	if n.grpcSrv != nil {
-		n.grpcSrv.GracefulStop()
+		_ = n.repo.Close() // gracefully stops the repo's gRPC server too
 	}
 }
 
@@ -107,17 +99,21 @@ func freeTCPPort(t *testing.T) int {
 
 func loopback(port int) string { return fmt.Sprintf("127.0.0.1:%d", port) }
 
-// startRebalNode opens a multi-node ShaleRepo on a distinct DbName, then
-// stands up the gRPC server peers forward to. seedBind="" makes this the
-// founding node (Seeds=nil); a non-empty seedBind joins the existing
-// ring. R=1 is the horizontal-write-scaling shape the gate is about.
+// startRebalNode opens a multi-node ShaleRepo on a distinct DbName.
+// seedBind="" makes this the founding node (Seeds=nil); a non-empty
+// seedBind joins the existing ring. R=1 is the horizontal-write-scaling
+// shape the gate is about.
 //
-// serveNode is where this test does the work the production process must
-// also do: cluster.Open by itself only joins gossip + the ring; without
-// an rpc.Server registered on grpcAddr a peer's forwarded Get/Put/Commit
-// lands on a closed port. Registering the server here is what makes the
-// cross-node forwarding (and therefore the lossless-read assertion via
-// the NON-owning node) actually exercise the wire.
+// The gRPC peer-forwarding server is now stood up by NewShaleRepo itself
+// (the PRODUCTION wiring): cluster.Open advertises GRPCAddr via gossip but
+// does not serve it, so NewShaleRepo binds the listener + registers the
+// cluster's rpc handlers. The test passes GRPCAddr "127.0.0.1:0" (an
+// OS-assigned port) and reads the ACTUAL bound address back via
+// repo.GRPCAddr() so a sibling node could reference it - this exercises the
+// real forwarding path (and the actual-addr advertise) on the same code a
+// 2-pod deploy runs. Earlier this file bound the listener + called
+// rpc.NewServer(repo.ClusterForTest()) by hand; that manual wiring has
+// moved into the production path.
 func startRebalNode(t *testing.T, id, dbName, seedBind string) *rebalNode {
 	t.Helper()
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
@@ -126,14 +122,6 @@ func startRebalNode(t *testing.T, id, dbName, seedBind string) *rebalNode {
 	secret := envOrDefault("MINIO_TEST_SECRET_KEY", "supersecret")
 
 	bindAddr := loopback(freeTCPPort(t))
-
-	// Bind the gRPC listener BEFORE Open so the advertised grpcAddr is the
-	// one we actually serve on (the two-phase pattern shaled uses).
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("node %s: listen gRPC: %v", id, err)
-	}
-	grpcAddr := lis.Addr().String()
 
 	var seeds []string
 	if seedBind != "" {
@@ -150,27 +138,19 @@ func startRebalNode(t *testing.T, id, dbName, seedBind string) *rebalNode {
 		UseSSL:            false,
 		DbName:            dbName,
 		BindAddr:          bindAddr,
-		GRPCAddr:          grpcAddr,
+		GRPCAddr:          "127.0.0.1:0", // OS-assigned; the repo serves the actual port
 		Seeds:             seeds,
 		ReplicationFactor: 1,
 	})
 	if err != nil {
-		_ = lis.Close()
 		t.Fatalf("node %s: NewShaleRepo: %v", id, err)
 	}
-
-	grpcSrv := grpc.NewServer()
-	rpc.NewServer(repo.ClusterForTest()).Register(grpcSrv)
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- grpcSrv.Serve(lis) }()
 
 	n := &rebalNode{
 		id:       id,
 		repo:     repo,
 		bindAddr: bindAddr,
-		grpcAddr: grpcAddr,
-		grpcSrv:  grpcSrv,
-		serveErr: serveErr,
+		grpcAddr: repo.GRPCAddr(), // ACTUAL bound forwarding addr a peer would use
 	}
 	t.Cleanup(n.close)
 	return n
