@@ -1046,24 +1046,42 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 	if err != nil {
 		return err
 	}
-	// Freed bytes = sum of non-deleted version sizes (the bytes that were
-	// counted toward the owner's quota while the paste was live).
-	var freed int64
-	for _, v := range versions {
-		if !v.Deleted {
-			freed += int64(v.Size)
-		}
-	}
 	identity := p.Identity
 
-	// Authoritative removal on the {slug} shard, one CAS.
+	// Authoritative removal on the {slug} shard, one CAS. The freed bytes
+	// are computed INSIDE the transaction by re-reading each version's
+	// tombstone state, so the count matches exactly what this Delete
+	// removes. The re-read also puts every version key in the CAS read-set:
+	// a concurrent DeleteVersion that tombstoned (and already decremented)
+	// a version commits a change to that key, which conflicts this CAS and
+	// forces a retry that re-reads the now-tombstoned version and excludes
+	// it from `freed`. That closes the same-slug Delete-vs-DeleteVersion
+	// double-decrement (an under-count) the pre-transaction scan was
+	// exposed to.
+	var freed int64
 	pasteKey := shaleKeyPaste(slug)
 	err = r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
+		freed = 0 // reset: the closure re-runs on a CAS conflict
 		if err := tx.Delete(pasteKey); err != nil {
 			return err
 		}
 		for _, v := range versions {
-			if err := tx.Delete(shaleKeyVersion(slug, v.VerNum)); err != nil {
+			vKey := shaleKeyVersion(slug, v.VerNum)
+			raw, gerr := tx.Get(vKey) // read-set: detects a concurrent tombstone
+			if errors.Is(gerr, backend.ErrNotFound) {
+				continue // already gone
+			}
+			if gerr != nil {
+				return gerr
+			}
+			var vr versionRow
+			if jerr := json.Unmarshal(raw, &vr); jerr != nil {
+				return jerr
+			}
+			if !vr.Deleted {
+				freed += int64(vr.Size) // only bytes still live count toward the decrement
+			}
+			if err := tx.Delete(vKey); err != nil {
 				return err
 			}
 		}
