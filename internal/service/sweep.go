@@ -14,7 +14,12 @@ import (
 type SweepRepo interface {
 	ExpiredSlugs(now time.Time) ([]string, error)
 	Delete(slug domain.Slug) error
-	UnreferencedBlobSHAs() ([]string, error)
+	// ReferencedBlobSHAs returns the set of blob content-SHAs still
+	// referenced by a LIVE (non-deleted) version or paste head. The
+	// sweep GCs any blob NOT in this set. Returning an empty/nil set
+	// while pastes exist would delete every blob, so the sweep has an
+	// abort-on-zero-refs guard (see Once).
+	ReferencedBlobSHAs() ([]string, error)
 }
 
 // SweepBlobs is the blob-side interface for GC.
@@ -102,7 +107,7 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 
 	// GC unreferenced blobs. The repo gives us the set of SHAs we DO
 	// reference; we walk disk and remove any blob whose sha isn't in it.
-	refs, err := s.Repo.UnreferencedBlobSHAs()
+	refs, err := s.Repo.ReferencedBlobSHAs()
 	if err != nil {
 		return pastesDeleted, 0, fmt.Errorf("referenced shas: %w", err)
 	}

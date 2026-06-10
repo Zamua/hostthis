@@ -106,7 +106,7 @@ func runConformance(t *testing.T, name string, caps conformCaps, newRepo func(t 
 	t.Run(name+"/VerNumNotReusedAfterTombstone", func(t *testing.T) { conformVerNumNotReused(t, newRepo(t)) })
 	t.Run(name+"/RepoIsNotOwnerGated", func(t *testing.T) { conformRepoIsNotOwnerGated(t, newRepo(t)) })
 	t.Run(name+"/ExpiredSlugs", func(t *testing.T) { conformExpiredSlugs(t, newRepo(t)) })
-	t.Run(name+"/UnreferencedBlobSHAs", func(t *testing.T) { conformUnreferencedBlobSHAs(t, newRepo(t)) })
+	t.Run(name+"/ReferencedBlobSHAs", func(t *testing.T) { conformReferencedBlobSHAs(t, newRepo(t)) })
 	t.Run(name+"/OwnerStats", func(t *testing.T) { conformOwnerStats(t, newRepo(t)) })
 	t.Run(name+"/SetName", func(t *testing.T) { conformSetName(t, newRepo(t)) })
 	t.Run(name+"/KeyGateAdmitAndKnown", func(t *testing.T) { conformKeyGateAdmitAndKnown(t, newRepo(t)) })
@@ -567,11 +567,11 @@ func conformExpiredSlugs(t *testing.T, r conformanceRepo) {
 
 // --- contract: blob GC reference set --------------------------------
 
-func conformUnreferencedBlobSHAs(t *testing.T, r conformanceRepo) {
+func conformReferencedBlobSHAs(t *testing.T, r conformanceRepo) {
 	// Empty repo: no references. (The sweep's data-loss guard depends on
 	// distinguishing "legitimately empty" from "buggy zero": here it's
 	// legitimately empty, with no pastes.)
-	refs, err := r.UnreferencedBlobSHAs()
+	refs, err := r.ReferencedBlobSHAs()
 	if err != nil {
 		t.Fatalf("referenced shas (empty): %v", err)
 	}
@@ -580,15 +580,15 @@ func conformUnreferencedBlobSHAs(t *testing.T, r conformanceRepo) {
 	}
 
 	// One paste + one extra version → BOTH shas are referenced. The
-	// method's name says "unreferenced" but it RETURNS the referenced set
-	// (the sweep keeps everything in it). Pinned as the CURRENT contract
-	// the sweep relies on. A backend that returned an empty set here while
-	// pastes exist would trip the sweep's data-loss guard.
+	// method returns the referenced (allow-list) set the sweep keeps;
+	// any blob NOT in it is GC'd. Pinned as the CURRENT contract the
+	// sweep relies on. A backend that returned an empty set here while
+	// pastes exist would trip the sweep's abort-on-zero-refs guard.
 	insert(t, r, pasteOf("gc123456", "key:g", 10)) // v1 sha = sha-gc123456-v1
 	if _, err := r.AppendVersionWithQuotaCheck("gc123456", domain.KindHTML, "sha-gc-v2", 20, 0, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
-	refs, err = r.UnreferencedBlobSHAs()
+	refs, err = r.ReferencedBlobSHAs()
 	if err != nil {
 		t.Fatalf("referenced shas: %v", err)
 	}
@@ -602,29 +602,28 @@ func conformUnreferencedBlobSHAs(t *testing.T, r conformanceRepo) {
 		t.Fatalf("v2 sha should be referenced, got %v", refs)
 	}
 
-	// KNOWN BACKEND DIVERGENCE (pinned here so it is not silently lost,
-	// NOT asserted because the two existing backends genuinely disagree):
-	// whether a TOMBSTONED version's content sha stays in the referenced
-	// set differs between backends.
-	//   - sqlite: SELECT DISTINCT content_sha FROM versions has NO
-	//     deleted filter, so a tombstoned version's sha IS still
-	//     referenced (its blob is NOT GC'd while any tombstone points at
-	//     it). Verified empirically.
-	//   - slatedb (SlateRepo.UnreferencedBlobSHAs): filters !v.Deleted,
-	//     so a tombstoned version's sha is NOT referenced and its blob
-	//     becomes eligible for GC.
-	// The behaviors differ in whether DeleteVersion eventually frees the
-	// tombstoned blob bytes (sqlite keeps them until the whole paste
-	// dies; slatedb GCs them on the next sweep). A future ShaleRepo MUST
-	// pick one deliberately; this suite assertion is intentionally
-	// limited to NON-deleted shas, which both backends agree are always
-	// referenced. If the ShaleRepo adopts the slatedb rule, extend this
-	// suite to assert it AND update the sqlite backend (or the SPEC) so
-	// the two stop diverging.
+	// CANONICAL RULE: a TOMBSTONED version's content sha is NOT in the
+	// referenced set, so its blob is GC-able (a deleted version is
+	// app-final and content-inaccessible; freeing quota frees storage).
+	// The two existing backends still differ on this detail, so the
+	// suite pins the divergence rather than asserting a value they
+	// disagree on:
+	//   - slatedb (SlateRepo.ReferencedBlobSHAs): filters !v.Deleted, so
+	//     a tombstoned version's sha is NOT referenced and its blob
+	//     becomes eligible for GC. This is the canonical rule.
+	//   - sqlite (PasteRepo.ReferencedBlobSHAs): SELECT DISTINCT
+	//     content_sha FROM versions has NO deleted filter, so a
+	//     tombstoned version's sha IS still referenced (its blob is NOT
+	//     GC'd while any tombstone points at it). This diverges from the
+	//     canonical rule and is a known open follow-up.
+	// This suite assertion is intentionally limited to NON-deleted shas,
+	// which both backends agree are always referenced. When the sqlite
+	// backend is brought in line with the canonical rule, extend this
+	// suite to assert the tombstoned sha is absent from the set.
 	if err := r.DeleteVersion("gc123456", 2); err != nil {
 		t.Fatalf("tombstone v2: %v", err)
 	}
-	refs, err = r.UnreferencedBlobSHAs()
+	refs, err = r.ReferencedBlobSHAs()
 	if err != nil {
 		t.Fatalf("referenced shas after tombstone: %v", err)
 	}

@@ -26,10 +26,16 @@ func (r *PasteRepo) ExpiredSlugs(now time.Time) ([]string, error) {
 	return out, rows.Err()
 }
 
-// UnreferencedBlobSHAs returns sha256s whose content is not pointed
-// at by any paste OR any version row. The sweep job uses this to
-// garbage-collect orphan blobs after row deletions.
-func (r *PasteRepo) UnreferencedBlobSHAs() ([]string, error) {
+// ReferencedBlobSHAs returns the set of blob content-SHAs still
+// referenced by a live version or paste head. The sweep keeps these
+// and GCs any blob NOT in the set; returning an empty set while pastes
+// exist would delete every blob, so the sweep has an abort-on-zero-refs
+// guard. NOTE: this sqlite impl currently also keeps a TOMBSTONED
+// version's SHA referenced (its query has no deleted filter), which
+// diverges from the canonical rule that drops a tombstoned version's
+// blob. Bringing this query in line with the canonical rule is a known
+// open follow-up.
+func (r *PasteRepo) ReferencedBlobSHAs() ([]string, error) {
 	// A blob is "referenced" if it appears as a paste's content_sha
 	// OR as a version row's content_sha. The blob store only knows
 	// shas that have ever been written; the sweep walks the disk and
