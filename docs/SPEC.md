@@ -1505,6 +1505,164 @@ expectations, then runs it against production during the cutover window.
 Because it is read-only on the authoritative rows and idempotent, a
 re-run after the cutover is harmless.
 
+### Multi-node shale (horizontal write scaling)
+
+Everything above runs correctly on a single shale node: one process owns
+the whole ring, every shard resolves to the local backend, and the
+shard-key function plus the reservation pattern are already in place so
+the same code is correct at any node count. This subsection describes the
+multi-node shape that turns that single-writer-equivalent deployment into
+a horizontally write-scaled one, and the data-safety contract the cluster
+must honor when nodes join or leave.
+
+#### The two-node shape
+
+A multi-node deployment runs N identical hostthisd processes, each
+configured as one shale node:
+
+- **Its own backend.** Each node opens its own slatedb database (a
+  distinct `DbName` / object-store prefix). A key's bytes physically live
+  in exactly one node's database (at replication factor 1). No two nodes
+  share a database.
+- **Gossip membership.** Each node binds a memberlist address (`BindAddr`,
+  host:port). A **non-empty `BindAddr` is what enables multi-node mode**;
+  with it empty the node runs the single-node path described above, every
+  op local, no gossip, no ring routing. This is the back-compat guarantee:
+  an existing single-node deployment that sets none of the multi-node
+  config behaves exactly as it does today.
+- **Peer forwarding.** Each node advertises a gRPC service address
+  (`GRPCAddr`, host:port) that it broadcasts to peers as their forwarding
+  target. A request that hashes to a shard another node owns is forwarded
+  over gRPC to that owner and served from the owner's local backend; the
+  caller sees a normal result and never learns the op crossed a node
+  boundary. `GRPCAddr` is required whenever `BindAddr` is set.
+- **Discovery via seeds.** A joining node is given one or more `Seeds`
+  (the `BindAddr` of already-running nodes) to bootstrap gossip. An empty
+  seed list means "this node is the founder / seed"; the first node starts
+  with no seeds and later nodes seed off it. Once gossip converges every
+  node holds the same ring snapshot.
+
+The shard-key function (`{slug}` / `{id}` / `{subnet}` co-location) is
+unchanged across node counts: it decides which shard a key belongs to,
+and the ring decides which node owns that shard. Co-location still holds,
+so a single-family-single-subject transaction is still a single-shard CAS,
+now resolved to whichever node owns that shard.
+
+#### Where the throughput win comes from
+
+On a single node every write serializes through one backend. On N nodes
+the ring spreads shards roughly evenly across nodes, so writes to keys on
+**different shards** are committed in parallel by **different nodes'
+backends**. A workload of independent uploads (different slugs, different
+owners) fans its CAS commits across the cluster instead of queueing them
+behind one writer, and sustained write throughput scales roughly with
+node count. Writes that contend on the **same** shard (the same owner's
+quota counter, the same slug's authoritative row) still serialize, by
+design: that serialization is what keeps quota strict and the
+authoritative rows consistent. The win is on the independent-write axis,
+which is where hostthis's write load actually lives (many small uploads
+from many owners), not on hot-key contention.
+
+#### R=1 vs R=2: throughput versus availability
+
+Replication factor is a deployment choice with a direct tradeoff:
+
+- **R=1 (shard, no replica).** Each key lives on exactly one node. Maximum
+  write throughput (no replica fan-out, no last-writer-wins envelope on
+  the read path) and minimum storage. The cost is availability: if a node
+  goes down, the shards it owned are unreadable and unwritable until it
+  comes back, because there is no second copy to promote. A node-down event
+  is a gap, not data loss, **provided the node returns** with its backend
+  intact (the bytes are durable in that node's object-store database). At
+  R=1 a permanently-lost node's shards are lost.
+- **R=2 (replicate).** Each key lives on two nodes; a write is acked per
+  the write-consistency setting and reads resolve a last-writer-wins
+  winner. A single node down does not interrupt service (the surviving
+  replica serves the shard) and a permanently-lost node loses nothing.
+  The cost is that R=2 does **not** add write throughput: every write now
+  lands on two backends, so the per-write work doubles even as the node
+  count grows. R=2 buys high availability, not horizontal write scaling.
+
+The two goals (throughput, availability) pull in opposite directions; a
+deployment picks the point on that axis it needs. The horizontal-write-
+scaling deployment this section motivates is R=1. A deployment that values
+uptime over peak write rate runs R=2 and accepts that the throughput
+ceiling is the per-node ceiling.
+
+#### The rebalance safety contract (lossless data movement)
+
+The crux of multi-node operation is what happens when membership changes.
+Today (single node) all data lives in one node's backend. When a second
+node joins, the consistent-hash ring reassigns roughly half the shards to
+it, and the cluster **physically migrates** the keys of the reassigned
+shards from the old owner's backend to the new owner's backend. This is a
+live movement of authoritative data between two storage engines, the same
+class of operation as the slatedb-to-shale migration above, and it must be
+**lossless**: no key may be dropped, and no key's value may regress to a
+stale or empty state, across the transition.
+
+The contract the cluster guarantees, and that the groundwork tests below
+must demonstrate on hostthis's actual data shapes:
+
+1. **Copy-before-delete cutover.** A migrating shard is streamed from the
+   source node's backend to the destination's backend and the
+   destination's copy is verified (a checksum over the streamed
+   key/value bytes) **before** the source deletes its local copy. The
+   source keeps serving reads of the shard until the destination
+   acknowledges the stream; only after that acknowledgement does a grace
+   window elapse and the source sweep the now-foreign keys. The source
+   never deletes a key it has not confirmed the destination received.
+   A failed or interrupted stream (destination crash, checksum mismatch,
+   timeout) leaves the source's copy in place and the next evaluation
+   retries; it does not advance to the delete step.
+2. **Reads stay correct throughout.** During the window in which a shard
+   is in flight, a read that lands on the destination (because the ring
+   already names it the new owner) is transparently served from the
+   source, which still holds the authoritative copy. A reader never sees
+   not-found for a key that exists; it sees the source's value until
+   cutover completes, then the destination's identical copy.
+3. **Writes are guarded, not lost.** A write that lands on a shard
+   mid-migration is rejected with a retry-after signal rather than being
+   silently applied to a copy that is about to be superseded. The client
+   retries after the shard settles on its new owner. A write is never
+   applied to the losing side of a cutover.
+4. **The quota counter survives the move.** The per-identity
+   `identity_bytes/<id>` counter is an ordinary value-bearing key on the
+   `{id}` shard. When that shard migrates, the counter moves with it like
+   any other key, and after the move the counter is still readable (via
+   gRPC forwarding from any node) with its exact pre-move value. A quota
+   counter that under-counted after a rebalance would let an owner upload
+   past the cap; the contract is that it does not change value across the
+   move at all. The same holds for every other hostthis data shape on the
+   moving shard: paste rows, version rows, `slug_owner`, expiry index
+   entries, reservation markers, and the value-bearing `identity_pastes`
+   projections all arrive on the new owner byte-for-byte identical.
+
+This contract is the property the groundwork must **prove on real data**
+before any live multi-node deployment. The proof is an integration test
+that populates a node with the full set of hostthis data shapes, joins a
+second node, lets the ring rebalance, and asserts that every shape, the
+quota counter most pointedly, is still readable through the cluster with
+its original value after roughly half the keyspace has physically moved
+to the new node. A rebalance that loses or corrupts data fails this test;
+that failure, if it occurs, is the single most important finding of the
+groundwork and gates the deploy step below.
+
+#### Deploy shape is a separate, gated step
+
+Wiring the multi-node config into the application (the `BindAddr` /
+`GRPCAddr` / `Seeds` / replication-factor surface) and proving the
+rebalance is lossless is application-level groundwork. **Reshaping the
+deployment to actually run more than one node is a separate step, gated on
+this groundwork being green.** The intended runtime shape, when that step
+is taken, is a stable-identity replica set (a StatefulSet, each pod a node
+with a durable per-node identity and its own object-store prefix), fronted
+by a headless service for peer gossip discovery and a load balancer for
+client traffic, scaled out one node at a time so each join triggers one
+bounded rebalance. None of that orchestration is built here; this section
+specifies only the application behavior and the safety contract the
+deploy step depends on.
+
 ---
 
 ## Edge caching
