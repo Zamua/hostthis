@@ -3,8 +3,8 @@ module github.com/Zamua/hostthis
 go 1.25.4
 
 require (
-	github.com/Zamua/shale v0.0.0
-	github.com/Zamua/shale/backends/slate v0.0.0
+	github.com/Zamua/shale v0.6.2
+	github.com/Zamua/shale/backends/slate v0.6.2
 	github.com/charmbracelet/ssh v0.0.0-20250826160808-ebfa259c7309
 	github.com/charmbracelet/wish v1.4.7
 	github.com/klauspost/compress v1.18.6
@@ -27,11 +27,7 @@ require (
 // explicitly, plus the genproto pin the slate module needs transitively
 // (see backends/slate/go.mod for why the old monolithic genproto is
 // forced).
-replace (
-	github.com/Zamua/shale => /Users/zamua/Dropbox/workspace/macmini/shale
-	github.com/Zamua/shale/backends/slate => /Users/zamua/Dropbox/workspace/macmini/shale/backends/slate
-	google.golang.org/genproto => google.golang.org/genproto v0.0.0-20260608224507-4308a22a1bab
-)
+replace google.golang.org/genproto => google.golang.org/genproto v0.0.0-20260608224507-4308a22a1bab
 
 require (
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be // indirect

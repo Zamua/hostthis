@@ -17,3 +17,7 @@
 # locally-generated SSH host/test keys (never commit private keys)
 internal/ssh/id_ed25519
 internal/ssh/id_ed25519.pub
+
+# local-dev go.work (points shale at the on-disk checkout)
+go.work
+go.work.sum
