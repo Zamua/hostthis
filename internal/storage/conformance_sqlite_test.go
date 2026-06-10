@@ -23,7 +23,7 @@ type sqliteConformRepo struct {
 }
 
 func TestConformance_Sqlite(t *testing.T) {
-	runConformance(t, "sqlite", func(t *testing.T) conformanceRepo {
+	runConformance(t, "sqlite", conformCaps{ExpiryFreesQuotaAtReadTime: true}, func(t *testing.T) conformanceRepo {
 		dir := t.TempDir()
 		db, err := storage.Open(filepath.Join(dir, "conform.db"))
 		if err != nil {

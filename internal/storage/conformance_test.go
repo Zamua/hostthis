@@ -35,7 +35,10 @@ package storage_test
 
 import (
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,12 +64,33 @@ type conformanceRepo interface {
 // sub-second drift on any backend.
 var fixedNow = time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 
+// conformCaps captures the points where a backend's observable behavior
+// is allowed to differ by design. Everything NOT expressed here must be
+// identical across backends; these flags are the explicit, reviewed
+// exceptions so the suite pins each backend's intended behavior rather
+// than silently accepting either.
+type conformCaps struct {
+	// ExpiryFreesQuotaAtReadTime is true for backends that exclude an
+	// expired-but-unswept paste's bytes from the owner sum at READ time
+	// (sqlite, slatedb: their sum query filters expires_at > now), so an
+	// owner reclaims that quota the instant the paste expires. It is
+	// FALSE for the shale backend, whose monotonic identity_bytes counter
+	// only sheds the bytes when the sweep deletes the expired paste, so
+	// the quota is reclaimed at sweep time, not read time (docs/SPEC.md
+	// "One intentional behavior change"). Fail-safe either way: the
+	// counter over-counts transiently, never under-counts.
+	ExpiryFreesQuotaAtReadTime bool
+}
+
 // runConformance runs the full contract suite against the backend the
 // factory produces. `name` labels the subtests so failures identify the
-// backend. The factory returns a fresh, empty repo per call.
-func runConformance(t *testing.T, name string, newRepo func(t *testing.T) conformanceRepo) {
+// backend. The factory returns a fresh, empty repo per call. `caps`
+// declares the backend's by-design behavior exceptions.
+func runConformance(t *testing.T, name string, caps conformCaps, newRepo func(t *testing.T) conformanceRepo) {
 	t.Helper()
 	t.Run(name+"/InsertAndGet", func(t *testing.T) { conformInsertAndGet(t, newRepo(t)) })
+	t.Run(name+"/QuotaConcurrentCeiling", func(t *testing.T) { conformQuotaConcurrentCeiling(t, newRepo(t)) })
+	t.Run(name+"/ExpiryQuotaSemantics", func(t *testing.T) { conformExpiryQuotaSemantics(t, newRepo(t), caps) })
 	t.Run(name+"/GetNotFound", func(t *testing.T) { conformGetNotFound(t, newRepo(t)) })
 	t.Run(name+"/DuplicateSlug", func(t *testing.T) { conformDuplicateSlug(t, newRepo(t)) })
 	t.Run(name+"/QuotaRejectsOverCap", func(t *testing.T) { conformQuotaRejectsOverCap(t, newRepo(t)) })
@@ -166,6 +190,79 @@ func containsSlug(err error) bool {
 }
 
 // --- contract: quota -------------------------------------------------
+
+// conformQuotaConcurrentCeiling pins the strict-quota invariant under
+// concurrency: N goroutines each insert a distinct paste of `body` bytes
+// for ONE identity against a per-owner cap that admits only K. The
+// invariant asserted is the CEILING: the bytes that land never exceed the
+// cap, no matter how the inserts interleave. This is the headline
+// property the shale reservation pattern exists to guarantee, and it is
+// what makes "ShaleRepo passes the suite" prove strict quota. sqlite
+// already holds it (the insert runs in a serializable transaction); the
+// slatedb-direct backend does NOT (its quota sum runs outside the write
+// transaction), so this test documents that race if ever run under the
+// slatedb tag.
+func conformQuotaConcurrentCeiling(t *testing.T, r conformanceRepo) {
+	const (
+		body = 100
+		k    = 3
+		n    = 8
+	)
+	cap := int64(k * body) // admits exactly k pastes of `body`
+	var landed int64
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			slug := fmt.Sprintf("cc%06d", i)
+			// No service cap (0); per-owner cap admits k. A non-nil error
+			// (over-quota, or a transient backend lock) means the paste did
+			// not land; we assert only the ceiling, so the error kind does
+			// not matter.
+			if err := r.InsertWithQuotaCheck(pasteOf(slug, "key:race", body), 0, cap, fixedNow); err == nil {
+				atomic.AddInt64(&landed, 1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if landed*body > cap {
+		t.Fatalf("quota ceiling breached under concurrency: %d pastes x %dB = %dB landed, cap %dB",
+			landed, body, landed*body, cap)
+	}
+}
+
+// conformExpiryQuotaSemantics pins how an expired-but-unswept paste
+// affects the owner's quota sum: the ONE point backends are allowed to
+// differ (conformCaps.ExpiryFreesQuotaAtReadTime + docs/SPEC.md "One
+// intentional behavior change"). Insert a paste, then query
+// SumActiveBytesByOwner at a time past its expiry but before any sweep
+// has deleted it.
+func conformExpiryQuotaSemantics(t *testing.T, r conformanceRepo, caps conformCaps) {
+	p := pasteOf("xq123456", "key:xq", 500)
+	p.ExpiresAt = fixedNow.Add(time.Hour)
+	insert(t, r, p)
+
+	// Past expiry, but the sweep has NOT run (the paste row still exists).
+	after := fixedNow.Add(2 * time.Hour)
+	sum, err := r.SumActiveBytesByOwner("key:xq", after)
+	if err != nil {
+		t.Fatalf("sum: %v", err)
+	}
+	if caps.ExpiryFreesQuotaAtReadTime {
+		// Read-time exclusion (sqlite, slatedb): an expired paste stops
+		// counting the instant it expires, before any sweep.
+		if sum != 0 {
+			t.Fatalf("read-time expiry: want 0 (expired paste excluded from sum), got %d", sum)
+		}
+	} else {
+		// Sweep-time exclusion (shale, Option A): the bytes still count
+		// until the sweep deletes the paste. Fail-safe over-count.
+		if sum != 500 {
+			t.Fatalf("sweep-time expiry: want 500 (expired-unswept still counts until sweep), got %d", sum)
+		}
+	}
+}
 
 func conformQuotaRejectsOverCap(t *testing.T, r conformanceRepo) {
 	const cap = 1000
