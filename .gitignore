@@ -21,3 +21,7 @@ internal/ssh/id_ed25519.pub
 # local-dev go.work (points shale at the on-disk checkout)
 go.work
 go.work.sum
+
+# prebuilt amd64 slatedb lib (operator build workaround, never committed)
+libslatedb_uniffi.so
+Dockerfile.slatedb.local
