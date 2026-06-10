@@ -89,16 +89,18 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// ShaleConfig captures the parameters needed to open a single-node
-// shale cluster over the slate backend. The S3 connection fields mirror
-// SlateConfig (they configure the same underlying SlateDB-on-object-
-// storage engine); NodeID + the consistency knobs are the cluster-layer
-// additions.
+// ShaleConfig captures the parameters needed to open a shale cluster over
+// the slate backend. The S3 connection fields mirror SlateConfig (they
+// configure the same underlying SlateDB-on-object-storage engine); NodeID,
+// the peer-discovery fields, and the consistency knobs are the
+// cluster-layer additions.
 //
-// This phase builds at ReplicationFactor=1 (one in-process node) for the
-// conformance suite. The ShardKeyFn and the reservation pattern are
-// present and correct so the same code shards correctly at N>1; shale's
-// own tests cover multi-node routing.
+// Single-node vs multi-node is selected by BindAddr: empty keeps the
+// single-node path (every op local, no gossip, no ring routing - today's
+// behavior, the back-compat guarantee), non-empty brings up memberlist +
+// gRPC forwarding and joins the ring. The ShardKeyFn and the reservation
+// pattern are unchanged across node counts: the same code shards correctly
+// at N>1, and shale's own tests cover multi-node routing + rebalance.
 type ShaleConfig struct {
 	NodeID    string // stable node identity; required by cluster.Open
 	Endpoint  string // e.g. "http://minio:9000"; empty for AWS
@@ -109,9 +111,28 @@ type ShaleConfig struct {
 	UseSSL    bool   // false -> slate sets AWS_ALLOW_HTTP=true (MinIO dev)
 	DbName    string // logical db name within the bucket; key prefix for SlateDB files
 
+	// BindAddr is the host:port memberlist listens on. A NON-EMPTY value
+	// enables multi-node mode (gossip membership + ring routing + gRPC
+	// forwarding + rebalance on membership change). Empty keeps the
+	// single-node path: every op resolves to the local backend, no ring,
+	// no gossip. This is the back-compat switch.
+	BindAddr string
+
+	// GRPCAddr is this node's gRPC forwarding address, broadcast to peers
+	// as their forwarding target. Required whenever BindAddr is set
+	// (cluster.Open errors if BindAddr is non-empty and GRPCAddr is
+	// empty). Ignored in single-node mode.
+	GRPCAddr string
+
+	// Seeds are other nodes' BindAddrs, used to bootstrap gossip
+	// discovery. Empty means this node is the seed/founder. Ignored in
+	// single-node mode.
+	Seeds []string
+
 	// ReplicationFactor is forwarded to cluster.Config. Zero is
 	// normalized to 1 by cluster.Open (single owner per key, no
-	// replicas). This phase exercises the single-node path.
+	// replicas). R=1 is the horizontal-write-scaling shape; R>1 trades
+	// write throughput for availability (docs/SPEC.md "R=1 vs R=2").
 	ReplicationFactor int
 }
 
@@ -123,9 +144,17 @@ type ShaleRepo struct {
 	cluster *cluster.Cluster
 }
 
-// NewShaleRepo opens a single-node shale cluster over a fresh slate
-// backend and returns a ShaleRepo over it. Caller must Close() to flush
-// and shut down the cluster (which shuts down the slate backend in turn).
+// NewShaleRepo opens a shale cluster over a fresh slate backend and
+// returns a ShaleRepo over it. Caller must Close() to flush and shut down
+// the cluster (which shuts down the slate backend in turn).
+//
+// When cfg.BindAddr is empty the cluster opens single-node (today's
+// behavior: every op local, no gossip, no ring routing). When BindAddr is
+// non-empty it opens multi-node: cluster.Open brings up memberlist on
+// BindAddr, advertises GRPCAddr to peers, joins via Seeds, and rebalances
+// the ring on membership change. The peer-discovery fields are passed
+// straight through to cluster.Config; everything else (ShardKeyFn,
+// ReadConsistency, ReplicationFactor) is identical across modes.
 //
 // The cluster is opened with shaleShardKey as its ShardKeyFn so that
 // every key family co-locates on the shard keyed by its subject
@@ -155,6 +184,9 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	cl, err := cluster.Open(cluster.Config{
 		NodeID:            cfg.NodeID,
 		Backend:           be,
+		BindAddr:          cfg.BindAddr,
+		GRPCAddr:          cfg.GRPCAddr,
+		Seeds:             cfg.Seeds,
 		ReplicationFactor: cfg.ReplicationFactor,
 		ReadConsistency:   cluster.ReadNearest,
 		ShardKeyFn:        shaleShardKey,
