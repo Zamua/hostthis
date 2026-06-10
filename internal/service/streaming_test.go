@@ -46,7 +46,7 @@ func TestUpload_StreamsInChunks(t *testing.T) {
 	if res.Paste.Size <= 0 {
 		t.Fatalf("compressed size should be positive, got %d", res.Paste.Size)
 	}
-	// Floor for "definitely streamed" is generous — anything > 100
+	// Floor for "definitely streamed" is generous - anything > 100
 	// calls proves it wasn't a single io.ReadAll. Real number will
 	// be in the thousands for a 4 MiB body at 4 KiB per Read.
 	if drip.calls < 100 {
@@ -98,7 +98,7 @@ func TestUpload_PeakHeapUnderCap(t *testing.T) {
 // TestUpload_RawCapTrips fires when stdin delivers more than
 // HardRawByteCap before EOF. Needs HIGHLY COMPRESSIBLE input so the
 // raw counter hits 100 MiB before zstd output crosses the 10 MiB
-// compressed cap — otherwise ErrCompressedTooLarge fires first (which
+// compressed cap - otherwise ErrCompressedTooLarge fires first (which
 // is correct behavior for typical incompressible payloads).
 func TestUpload_RawCapTrips(t *testing.T) {
 	upload, _, _ := newStack(t)

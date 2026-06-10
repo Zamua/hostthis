@@ -14,7 +14,7 @@
 //	HOSTTHIS_METADATA_DB_NAME         (default hostthis-metadata)
 //
 // Idempotent: re-running overwrites destination rows with the same
-// data. Safe during a staged cutover. Does NOT delete source rows —
+// data. Safe during a staged cutover. Does NOT delete source rows -
 // flip HOSTTHIS_METADATA_BACKEND=slatedb to switch reads/writes, then
 // remove the source DB when confident.
 //

@@ -39,7 +39,7 @@ build:
 test:
 	go test ./...
 
-# Run locally (no container) — useful for fast iteration. Defaults to
+# Run locally (no container) - useful for fast iteration. Defaults to
 # path mode so wildcard DNS isn't required.
 dev run:
 	HOSTTHIS_URL_MODE=path \
@@ -49,7 +49,7 @@ dev run:
 	HOSTTHIS_LANDING=./web/landing.html \
 	go run ./cmd/hostthisd
 
-# Standalone smoke target — runs against whatever HOSTTHIS_HOST is set
+# Standalone smoke target - runs against whatever HOSTTHIS_HOST is set
 # to (defaults to hostthis.dev). Useful for ad-hoc verification + run
 # by the operator's deploy as a post-deploy check.
 smoke:

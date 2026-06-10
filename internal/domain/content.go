@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// ContentKind is what a paste is — the spec accepts only HTML and
+// ContentKind is what a paste is - the spec accepts only HTML and
 // Markdown in v1. Anything else is rejected at the upload boundary so
 // the sandbox + renderer never see surprising bytes.
 type ContentKind string
@@ -24,7 +24,7 @@ var ErrUnsupportedKind = errors.New(
 
 // MaxPasteBytes is the universal per-paste size cap, measured in
 // COMPRESSED bytes (post-zstd, as written to the blob store). Equals
-// the per-identity quota (UserQuotaBytes) — there's only ever one
+// the per-identity quota (UserQuotaBytes) - there's only ever one
 // number to reason about: an identity has 10 MiB of stored content
 // total. Highly redundant text (typical HTML/Markdown) compresses
 // 5–10× so users can upload ~50–100 MiB of raw text under this cap.
@@ -36,7 +36,7 @@ const MaxPasteBytes = 10 << 20 // 10 MiB
 // client IP subnet for anonymous ones; either way, the same cap.
 const UserQuotaBytes = 10 << 20 // 10 MiB
 
-// HardRawByteCap is the hard fast-fail cap on RAW input bytes — the
+// HardRawByteCap is the hard fast-fail cap on RAW input bytes - the
 // server stops reading after this many uncompressed bytes regardless
 // of how well they'd compress. Bounds the upload read so an attacker
 // can't stream an arbitrarily large payload to discover its
@@ -52,7 +52,7 @@ const HardRawByteCap = 100 << 20 // 100 MiB
 //
 // Markdown detection: text/plain (no embedded magic bytes) + at least
 // one common markdown structural cue in the first 1 KB. Pure plain
-// text gets rejected — markdown without any structure is just text,
+// text gets rejected - markdown without any structure is just text,
 // and unrendered text isn't a hostthis use case.
 //
 // The hint argument is an optional explicit content-type the caller
@@ -91,7 +91,7 @@ func DetectKind(b []byte, hint string) (ContentKind, error) {
 		return "", ErrUnsupportedKind
 	}
 
-	// No hint — pure sniffing.
+	// No hint - pure sniffing.
 	switch {
 	case strings.HasPrefix(ct, "text/html"):
 		return KindHTML, nil
@@ -107,7 +107,7 @@ func DetectKind(b []byte, hint string) (ContentKind, error) {
 
 // looksLikeMarkdown returns true when the input contains at least one
 // markdown structural cue in its first 1 KB. The cue list is deliberately
-// modest — false positives let a plain-text file render as markdown, which
+// modest - false positives let a plain-text file render as markdown, which
 // is harmless (the renderer just emits a <p>); false negatives reject a
 // real markdown doc, which is worse.
 func looksLikeMarkdown(b []byte) bool {

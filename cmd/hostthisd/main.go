@@ -28,15 +28,15 @@ import (
 
 func main() {
 	var (
-		dataDir        = flag.String("data-dir", envOr("HOSTTHIS_DATA_DIR", "./data"), "where sqlite + blobs live")
-		sshAddr        = flag.String("ssh-addr", envOr("HOSTTHIS_SSH_ADDR", ":2222"), "ssh listen address")
-		httpAddr       = flag.String("http-addr", envOr("HOSTTHIS_HTTP_ADDR", ":8080"), "http listen address")
-		apexDomain     = flag.String("apex-domain", os.Getenv("HOSTTHIS_APEX_DOMAIN"), "public apex (required; e.g. paste.example.com)")
-		urlMode        = flag.String("mode", envOr("HOSTTHIS_URL_MODE", "path"), "url mode: subdomain (prod) | path (dev)")
-		scheme         = flag.String("scheme", envOr("HOSTTHIS_PUBLIC_SCHEME", "https"), "public URL scheme (https for prod, http for local dev)")
-		landingPath    = flag.String("landing", envOr("HOSTTHIS_LANDING", "web/landing.html"), "path to apex landing HTML")
-		storageCap     = flag.Int64("storage-cap-bytes", envOrInt64("HOSTTHIS_STORAGE_CAP_BYTES", 5<<30), "service-wide cap on total active bytes (0 = unlimited)")
-		freshKeysLimit = flag.Int("fresh-keys-per-subnet", envOrInt("HOSTTHIS_FRESH_KEYS_PER_SUBNET", 20), "max distinct new key fingerprints admitted per IP subnet per window")
+		dataDir         = flag.String("data-dir", envOr("HOSTTHIS_DATA_DIR", "./data"), "where sqlite + blobs live")
+		sshAddr         = flag.String("ssh-addr", envOr("HOSTTHIS_SSH_ADDR", ":2222"), "ssh listen address")
+		httpAddr        = flag.String("http-addr", envOr("HOSTTHIS_HTTP_ADDR", ":8080"), "http listen address")
+		apexDomain      = flag.String("apex-domain", os.Getenv("HOSTTHIS_APEX_DOMAIN"), "public apex (required; e.g. paste.example.com)")
+		urlMode         = flag.String("mode", envOr("HOSTTHIS_URL_MODE", "path"), "url mode: subdomain (prod) | path (dev)")
+		scheme          = flag.String("scheme", envOr("HOSTTHIS_PUBLIC_SCHEME", "https"), "public URL scheme (https for prod, http for local dev)")
+		landingPath     = flag.String("landing", envOr("HOSTTHIS_LANDING", "web/landing.html"), "path to apex landing HTML")
+		storageCap      = flag.Int64("storage-cap-bytes", envOrInt64("HOSTTHIS_STORAGE_CAP_BYTES", 5<<30), "service-wide cap on total active bytes (0 = unlimited)")
+		freshKeysLimit  = flag.Int("fresh-keys-per-subnet", envOrInt("HOSTTHIS_FRESH_KEYS_PER_SUBNET", 20), "max distinct new key fingerprints admitted per IP subnet per window")
 		freshKeysWindow = flag.Duration("fresh-keys-window", envOrDuration("HOSTTHIS_FRESH_KEYS_WINDOW", 24*time.Hour), "rolling window for the Sybil rate limit on fresh keys")
 	)
 	flag.Parse()
@@ -239,7 +239,7 @@ func buildURL(scheme, apex, mode string, logger *log.Logger) hostssh.URLBuilder 
 			return scheme + "://" + slug.String() + "." + apex
 		}
 	case "path":
-		logger.Printf("WARN running in path mode — origin isolation is dev-only. " +
+		logger.Printf("WARN running in path mode - origin isolation is dev-only. " +
 			"Production deploys MUST use --mode subdomain.")
 		return func(slug domain.Slug) string {
 			return scheme + "://" + apex + "/p/" + slug.String()

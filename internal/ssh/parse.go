@@ -16,7 +16,7 @@ import (
 type uploadArgs struct {
 	Slug string
 	Name string
-	Type string // "html", "md", etc. — passed straight to DetectKind
+	Type string // "html", "md", etc. - passed straight to DetectKind
 }
 
 // parseUploadFlags consumes the upload argv:

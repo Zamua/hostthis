@@ -14,7 +14,7 @@ import (
 
 // Cloudflare purges paste URLs from the Cloudflare CDN edge by POSTing
 // to the zone's purge_cache endpoint. The token only needs the
-// "Cache:Purge" zone permission — narrowest scope possible.
+// "Cache:Purge" zone permission - narrowest scope possible.
 type Cloudflare struct {
 	ZoneID string
 	Token  string

@@ -1,6 +1,6 @@
 // Command hostthis-blob-compress walks every blob in the configured
 // backend (disk or s3) and re-encodes legacy uncompressed blobs as
-// `HZ\0\x01 + zstd(bytes)` — the format the runtime now writes.
+// `HZ\0\x01 + zstd(bytes)` - the format the runtime now writes.
 //
 // Idempotent: blobs that already carry the magic header are skipped.
 // Safe to re-run; safe to run while hostthisd is up (the runtime's
@@ -85,7 +85,7 @@ func main() {
 	}
 
 	if *dryRun {
-		logger.Print("DRY RUN — no writes will happen")
+		logger.Print("DRY RUN - no writes will happen")
 	}
 
 	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
@@ -126,7 +126,7 @@ func main() {
 			return nil
 		}
 		// Re-Put with the compressed body. The backends' Put is
-		// content-addressed but we want it to OVERWRITE here —
+		// content-addressed but we want it to OVERWRITE here -
 		// disk's Put is no-op when the file already exists, and
 		// S3's Put is no-op when the object already exists. So we
 		// hit a sub-API directly.
@@ -163,7 +163,7 @@ func putRawOverwrite(store rawBlobStore, sha string, body []byte) error {
 	if ow, ok := store.(overwriter); ok {
 		return ow.PutBytesOverwrite(sha, body)
 	}
-	// Fallback (shouldn't happen — both backends implement the
+	// Fallback (shouldn't happen - both backends implement the
 	// overwrite path now). Try the regular Put; if the backend is
 	// content-addressed-skip, this no-ops.
 	return store.Put(sha, bytes.NewReader(body), int64(len(body)))

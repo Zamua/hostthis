@@ -29,7 +29,7 @@ services:
       retries: 5
 
   # one-shot job that creates the test bucket so the integration test
-  # doesn't have to. Idempotent — re-running is a no-op.
+  # doesn't have to. Idempotent - re-running is a no-op.
   bucket-init:
     image: minio/mc:latest
     container_name: hostthis-dev-bucket-init

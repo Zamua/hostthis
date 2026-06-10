@@ -1,4 +1,4 @@
-// metadata_slatedb.go — slatedb-backed metadataBundle. Active only
+// metadata_slatedb.go - slatedb-backed metadataBundle. Active only
 // when the binary is built with -tags slatedb.
 //
 // Reads connection config from env vars:

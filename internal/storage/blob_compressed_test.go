@@ -81,7 +81,7 @@ func TestCompressedBlobStore_RoundTrip(t *testing.T) {
 }
 
 func TestCompressedBlobStore_StoresMagicHeader(t *testing.T) {
-	body := []byte("compressible text — repeats well " + strings.Repeat("xy", 1000))
+	body := []byte("compressible text - repeats well " + strings.Repeat("xy", 1000))
 	sha := shaOf(body)
 	inner := newFakeRawStore()
 	c := NewCompressedBlobStore(inner)
@@ -159,7 +159,7 @@ func TestCompressedBlobStore_EmptyInput(t *testing.T) {
 }
 
 func TestCompressedBlobStore_LegacyShortBodyTreatedAsLegacy(t *testing.T) {
-	// A 3-byte legacy blob can't possibly hold the magic — fallback path.
+	// A 3-byte legacy blob can't possibly hold the magic - fallback path.
 	short := []byte("hi\n")
 	sha := shaOf(short)
 	inner := newFakeRawStore()

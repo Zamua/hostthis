@@ -18,7 +18,7 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// PasteReader is the read-side interface — same shape the service
+// PasteReader is the read-side interface - same shape the service
 // layer uses, intentionally narrow (this package doesn't need
 // Insert).
 type PasteReader interface {
@@ -34,8 +34,8 @@ type BlobReader interface {
 type Server struct {
 	Pastes      PasteReader
 	Blobs       BlobReader
-	LandingHTML []byte // optional — apex landing page bytes embedded at build
-	ApexDomain  string // e.g. "hostthis.dev" — used to peel slug subdomains
+	LandingHTML []byte // optional - apex landing page bytes embedded at build
+	ApexDomain  string // e.g. "hostthis.dev" - used to peel slug subdomains
 	// Color labels the replica in blue/green deploys. Echoed in the
 	// X-Backend-Color response header on /healthz so operators can verify
 	// which backend is responding. Empty for single-replica deploys.
@@ -54,7 +54,7 @@ func (s *Server) nowOrTime() time.Time {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// 0. Health endpoint — apex only, no Host-based routing. Used by
+		// 0. Health endpoint - apex only, no Host-based routing. Used by
 		// load balancers / haproxy / nginx to decide if this backend is
 		// ready to take traffic. Cheap: just confirms the HTTP server is
 		// up. Container startup opens the db + verifies blob backend
@@ -67,7 +67,7 @@ func (s *Server) Handler() http.Handler {
 		// 1. Subdomain mode: Host like "<slug>.<apex>" → serve paste,
 		// but ONLY at path "/". Any other path on the slug subdomain
 		// (favicon.ico, /style.css, /wp-login.php, etc.) returns 404
-		// — otherwise the browser's automatic favicon fetch sees the
+		// - otherwise the browser's automatic favicon fetch sees the
 		// full paste HTML labeled text/html and keeps the loading
 		// indicator spinning in some clients.
 		if slug, ok := s.slugFromHost(r.Host); ok {
@@ -125,7 +125,7 @@ func (s *Server) slugFromHost(host string) (domain.Slug, bool) {
 	}
 	sub := strings.TrimSuffix(host, suffix)
 	if strings.Contains(sub, ".") {
-		// Multi-level subdomain (e.g. "x.y.apex") — not a slug, ignore.
+		// Multi-level subdomain (e.g. "x.y.apex") - not a slug, ignore.
 		return "", false
 	}
 	slug, err := domain.ParseSlug(sub)
@@ -137,10 +137,10 @@ func (s *Server) slugFromHost(host string) (domain.Slug, bool) {
 
 func (s *Server) serveLanding(w http.ResponseWriter, _ *http.Request) {
 	if len(s.LandingHTML) == 0 {
-		// Dev/test default — operator can override at startup with the
+		// Dev/test default - operator can override at startup with the
 		// real bytes from web/landing.html.
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintln(w, "hostthis — landing page not embedded.")
+		fmt.Fprintln(w, "hostthis - landing page not embedded.")
 		return
 	}
 	// Landing changes more often than pastes (rare edits, new copy);
@@ -185,7 +185,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	h.Set("Cache-Control", "public, max-age=3600")
 	h.Set("Last-Modified", p.UpdatedAt.UTC().Format(http.TimeFormat))
 
-	// ETag is the content SHA for HTML — content-addressed, byte-stable.
+	// ETag is the content SHA for HTML - content-addressed, byte-stable.
 	// For markdown the rendered output depends on the renderer version,
 	// so we mix that in so that a renderer bump invalidates the cache
 	// without us having to manually purge.

@@ -27,23 +27,23 @@ func (s stubBlobReader) Get(sha string) ([]byte, error) { return s.body, nil }
 func TestSlugFromHost(t *testing.T) {
 	s := &Server{ApexDomain: "paste.test"}
 	cases := []struct {
-		host    string
-		want    string // empty when expected ok=false
-		wantOK  bool
+		host   string
+		want   string // empty when expected ok=false
+		wantOK bool
 	}{
 		{"abc23456.paste.test", "abc23456", true},
 		{"abc23456.paste.test:443", "abc23456", true},
 		{"paste.test", "", false},
 		{"paste.test:443", "", false},
-		// Multi-level subdomain — ignored.
+		// Multi-level subdomain - ignored.
 		{"foo.abc23456.paste.test", "", false},
-		// Wrong apex — ignored.
+		// Wrong apex - ignored.
 		{"abc23456.example.com", "", false},
-		// Slug too short — fails ParseSlug.
+		// Slug too short - fails ParseSlug.
 		{"abc.paste.test", "", false},
-		// Slug uses uppercase — fails ParseSlug.
+		// Slug uses uppercase - fails ParseSlug.
 		{"ABC23456.paste.test", "", false},
-		// Reserved-ish but valid slug shape — accepted (apex landing
+		// Reserved-ish but valid slug shape - accepted (apex landing
 		// blocks reserved by never generating them, not by Host check).
 		{"abcdefgh.paste.test", "abcdefgh", true},
 	}
@@ -61,14 +61,14 @@ func TestSlugFromHost(t *testing.T) {
 }
 
 func TestSlugFromHost_NoApexConfigured(t *testing.T) {
-	// When ApexDomain is empty, never match — only path-mode works.
+	// When ApexDomain is empty, never match - only path-mode works.
 	s := &Server{}
 	if _, ok := s.slugFromHost("abc23456.anything.com"); ok {
 		t.Fatalf("should not match without ApexDomain")
 	}
 }
 
-// TestSubdomain_OnlyServesRoot — the bug fix that motivated this
+// TestSubdomain_OnlyServesRoot - the bug fix that motivated this
 // test: a slug subdomain must ONLY serve the paste at path "/", not
 // at /favicon.ico or any other path. Otherwise Safari's auto-favicon
 // request gets a 60 KB HTML response and the loading indicator
@@ -77,7 +77,7 @@ func TestSubdomain_OnlyServesRoot(t *testing.T) {
 	srv := &Server{ApexDomain: "paste.test"}
 	mux := srv.Handler()
 
-	// "/" on a slug subdomain — would call servePasteSlug. We don't
+	// "/" on a slug subdomain - would call servePasteSlug. We don't
 	// have a real PasteReader here so we'll get a 500 / panic. Skip
 	// this case; we only care about the path-rejection path.
 

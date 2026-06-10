@@ -21,7 +21,7 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// TestUploadAndServe — the headline end-to-end. Spin up the SSH +
+// TestUploadAndServe - the headline end-to-end. Spin up the SSH +
 // HTTP stack on real localhost ports backed by real sqlite + blobs,
 // pipe an HTML file in via a real ssh client, GET the returned URL,
 // assert the bytes round-tripped.
@@ -38,7 +38,7 @@ func TestUploadAndServe(t *testing.T) {
 		t.Fatalf("blob store: %v", err)
 	}
 	// Wrap with compression so service writes + http reads decode
-	// transparently — mirrors the production wiring in cmd/hostthisd.
+	// transparently - mirrors the production wiring in cmd/hostthisd.
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	repo := storage.NewPasteRepo(db)
 	upload := service.NewUpload(repo, blobs)
@@ -65,13 +65,13 @@ func TestUploadAndServe(t *testing.T) {
 		Logger: log.New(io.Discard, "", 0),
 	}
 	go func() {
-		// ListenAndServe blocks until we close it (or test ends — the
+		// ListenAndServe blocks until we close it (or test ends - the
 		// goroutine just stays alive).
 		_ = sshSrv.ListenAndServe()
 	}()
 	waitForSSH(t, sshAddr)
 
-	// Real ssh client. No host-key verification — we're talking to our
+	// Real ssh client. No host-key verification - we're talking to our
 	// own test server on localhost. Generate a fresh ed25519 key and
 	// authenticate with it (anonymous uploads are no longer allowed).
 	_, priv, err := genEd25519()
@@ -100,7 +100,7 @@ func TestUploadAndServe(t *testing.T) {
 	}
 	defer sess.Close()
 
-	// Wire stdin/stdout/stderr — sess.Output is a convenience that
+	// Wire stdin/stdout/stderr - sess.Output is a convenience that
 	// drains stdout into a buffer after the command completes.
 	htmlBody := []byte("<!doctype html><h1>integration ok</h1>")
 	sess.Stdin = bytes.NewReader(htmlBody)
@@ -143,7 +143,7 @@ func TestUploadAndServe(t *testing.T) {
 		t.Fatalf("content-type: got %q, want text/html…", ct)
 	}
 	// We deliberately do NOT set a Content-Security-Policy on paste
-	// reads — origin isolation is the security boundary, not CSP.
+	// reads - origin isolation is the security boundary, not CSP.
 	// Confirm the header is absent so a future "let's add a CSP back"
 	// refactor has to update this test deliberately.
 	if csp := resp.Header.Get("Content-Security-Policy"); csp != "" {

@@ -1,5 +1,5 @@
 // Package render turns user-uploaded source into safe-to-serve HTML.
-// Each renderer is a pure function — source bytes in, HTML bytes out.
+// Each renderer is a pure function - source bytes in, HTML bytes out.
 // No I/O, no caching, no global state.
 package render
 
@@ -25,14 +25,14 @@ const MarkdownRendererVersion = "md.v1"
 
 // Markdown renders source markdown into a self-contained sanitized
 // HTML document. The output is a complete <!doctype html> page with
-// inline default styling — drop it onto disk and serve it directly.
+// inline default styling - drop it onto disk and serve it directly.
 //
 // Pipeline:
 //  1. goldmark parses with GFM extensions enabled (tables, strikethrough,
 //     linkify, task lists), unsafe HTML preserved so the source can
 //     include trusted-looking markup the user wrote inline.
 //  2. bluemonday's UGCPolicy strips dangerous tags/attributes from the
-//     intermediate HTML — `<script>`, `javascript:` URLs, `onclick=`,
+//     intermediate HTML - `<script>`, `javascript:` URLs, `onclick=`,
 //     dangerous form actions, etc.
 //  3. The sanitized body is wrapped in a document with default styling
 //     so it looks like an article instead of un-styled HTML.
@@ -87,7 +87,7 @@ func sanitizer() *bluemonday.Policy {
 	p := bluemonday.UGCPolicy()
 	p.AllowAttrs("id").OnElements("h1", "h2", "h3", "h4", "h5", "h6")
 	p.AllowAttrs("class").OnElements("code", "pre", "span", "div", "table", "th", "td")
-	// GFM task list checkboxes — goldmark emits
+	// GFM task list checkboxes - goldmark emits
 	//   <input checked="" disabled="" type="checkbox">
 	// for `- [x] item`. UGCPolicy strips <input> entirely; allow it
 	// only with the safe attrs the task list extension actually uses.
@@ -98,7 +98,7 @@ func sanitizer() *bluemonday.Policy {
 }
 
 // extractTitle scans the source for the first ATX h1 (`# ...`) line.
-// Returns "markdown" as a fallback. Used only for the <title> tag —
+// Returns "markdown" as a fallback. Used only for the <title> tag -
 // the rendered body still contains the heading.
 func extractTitle(src []byte) string {
 	for _, line := range bytes.Split(src, []byte("\n")) {

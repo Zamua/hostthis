@@ -1,4 +1,4 @@
-// metadata.go — pluggable metadata backend selector.
+// metadata.go - pluggable metadata backend selector.
 //
 // Picks between the sqlite-backed PasteRepo (default, no build tag
 // required) and the SlateDB-backed SlateRepo (opt-in via the

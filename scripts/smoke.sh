@@ -21,7 +21,7 @@
 #   0  every verb passed
 #   1  any verb failed (script logs which one)
 
-set -u  # don't set -e — we want to keep going on individual failures
+set -u  # don't set -e - we want to keep going on individual failures
         # and report a summary at the end
 
 HOST="${HOSTTHIS_HOST:-hostthis.dev}"
@@ -127,7 +127,7 @@ echo "$list_out" | grep -q "$SLUG1" && echo "$list_out" | grep -q "$SLUG2" \
 
 # ---- 6. update HTML → v2 ---------------------------------------------------
 step "update HTML to v2"
-update_out=$(echo '<!doctype html><h1>smoke 1 — v2</h1>' | $SSH "$HOST" "$SLUG1" 2>&1)
+update_out=$(echo '<!doctype html><h1>smoke 1 - v2</h1>' | $SSH "$HOST" "$SLUG1" 2>&1)
 echo "$update_out" | grep -q "^v2" && ok "update creates v2" \
   || bad "update" "$update_out"
 
@@ -148,7 +148,7 @@ echo "$body" | grep -q "smoke 1" && ! echo "$body" | grep -q "v2" \
 
 # ---- 8b. update while pinned holds pin + warns -----------------------------
 step "update while pinned (pin should hold)"
-upd_pinned=$(echo '<!doctype html><h1>smoke 1 — v3 while pinned</h1>' | $SSH "$HOST" "$SLUG1" 2>&1)
+upd_pinned=$(echo '<!doctype html><h1>smoke 1 - v3 while pinned</h1>' | $SSH "$HOST" "$SLUG1" 2>&1)
 echo "$upd_pinned" | grep -q "pinned to v1" \
   && ok "update warns about active pin" \
   || bad "update while pinned (stderr warning)" "$upd_pinned"

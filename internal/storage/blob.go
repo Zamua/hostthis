@@ -26,7 +26,7 @@ func NewBlobStore(root string) (*BlobStore, error) {
 
 // Put streams r into the content-addressed location for sha. If a file
 // already exists at the destination, we trust the existing bytes
-// (content-addressed — sha collision is the only way to "overwrite"
+// (content-addressed - sha collision is the only way to "overwrite"
 // and that's not a real concern at sha256). size is the expected byte
 // length of r; passed for symmetry with S3-shaped backends that need
 // to send Content-Length up front. The disk impl doesn't strictly
@@ -41,7 +41,7 @@ func (b *BlobStore) Put(sha string, r io.Reader, size int64) error {
 	}
 	dst := filepath.Join(dir, sha)
 	if _, err := os.Stat(dst); err == nil {
-		// Already there — no-op. Content-addressed means same bytes.
+		// Already there - no-op. Content-addressed means same bytes.
 		// Drain r so a caller streaming a request body doesn't block.
 		_, _ = io.Copy(io.Discard, r)
 		return nil
@@ -54,7 +54,7 @@ func (b *BlobStore) Put(sha string, r io.Reader, size int64) error {
 		return fmt.Errorf("blob tmp create: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // safe — if rename succeeded, file no longer exists
+	defer os.Remove(tmpName) // safe - if rename succeeded, file no longer exists
 	if _, err := io.Copy(tmp, r); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("blob write: %w", err)
@@ -82,7 +82,7 @@ func (b *BlobStore) PutPrecompressed(sha string, body []byte) error {
 
 // PutBytesOverwrite forces a rewrite of the blob at sha, bypassing
 // the content-addressed skip in Put. Only the blob-compress migrator
-// uses this — Put's "already there → skip" optimization is the right
+// uses this - Put's "already there → skip" optimization is the right
 // behavior for the normal upload path, where dedup is the whole point.
 //
 // Atomic in the same way Put is: write tmp, fsync, rename.

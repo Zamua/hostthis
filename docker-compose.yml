@@ -4,7 +4,7 @@
 #   docker compose down
 #
 # Host ports avoid 2222 / 8080 because those are commonly already
-# taken. Container ports stay :2222 / :8080 — only the host-side
+# taken. Container ports stay :2222 / :8080 - only the host-side
 # mapping shifts.
 #
 # Production: drop these mappings, run with --network=host, and
@@ -21,7 +21,7 @@ services:
       - ./data:/var/lib/hostthis
     environment:
       # In dev we run path-mode so wildcard DNS + certs aren't required.
-      # Production deploys MUST set HOSTTHIS_URL_MODE=subdomain — the
+      # Production deploys MUST set HOSTTHIS_URL_MODE=subdomain - the
       # binary logs a loud warning otherwise.
       HOSTTHIS_APEX_DOMAIN: localhost:18080
       HOSTTHIS_URL_MODE: path

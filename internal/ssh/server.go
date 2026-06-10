@@ -1,4 +1,4 @@
-// Package ssh implements the SSH-pipe surface — the user's full CLI.
+// Package ssh implements the SSH-pipe surface - the user's full CLI.
 // Every session must offer a publickey; sessions without one are
 // rejected at startup. The presented key's SHA256 fingerprint becomes
 // the identity passed to the application services for quota
@@ -40,7 +40,7 @@ import (
 //
 // Note: 5 is intentionally unused. It was historically reserved for an
 // ErrNotOwner path that the owner-collapse contract eliminated (the SSH
-// surface never observes ErrNotOwner — service.requireOwner collapses
+// surface never observes ErrNotOwner - service.requireOwner collapses
 // non-owner reads to ErrNotFound so existence can't leak across
 // identities). Do not reuse 5 for a new meaning; pick the next free
 // slot to avoid retroactively changing the semantics of a code that
@@ -61,7 +61,7 @@ type Server struct {
 	Logger      *log.Logger
 }
 
-// ListenAndServe blocks. Returns whatever the listener returns —
+// ListenAndServe blocks. Returns whatever the listener returns -
 // typically nil after a clean shutdown or net.ErrClosed.
 //
 // When HOSTTHIS_SSH_PROXY_PROTOCOL=true is set in the environment,
@@ -69,7 +69,7 @@ type Server struct {
 // protocol v1/v2 headers from a TCP-level forwarder (traefik, haproxy,
 // nginx stream) are parsed and net.Conn.RemoteAddr() returns the real
 // client IP. Required when hostthis SSH is behind traefik's TCP router
-// — without it, every session looks like it's coming from the
+// - without it, every session looks like it's coming from the
 // traefik container's docker-bridge IP and the Sybil per-subnet
 // rate limit collapses to a global cap.
 //
@@ -185,8 +185,8 @@ func (s *Server) keyRequiredMiddleware() wish.Middleware {
 
 // ratelimitMiddleware enforces the Sybil per-subnet cap on the number
 // of distinct fresh fingerprints any one IP subnet can introduce in
-// the configured window. Returning users — any (key, subnet) we've
-// seen before — pass through with no accounting. When the gate is
+// the configured window. Returning users - any (key, subnet) we've
+// seen before - pass through with no accounting. When the gate is
 // nil, the middleware is a no-op.
 func (s *Server) ratelimitMiddleware() wish.Middleware {
 	return func(next gossh.Handler) gossh.Handler {
@@ -214,7 +214,7 @@ func (s *Server) ratelimitMiddleware() wish.Middleware {
 					fmt.Fprintln(sess.Stderr(), "to get in:")
 					fmt.Fprintln(sess.Stderr(), "  (a) use a key already known on this subnet")
 					if frees := ref.NextSlotFreesAt(); !frees.IsZero() {
-						fmt.Fprintf(sess.Stderr(), "  (b) wait until %s — the oldest entry ages out then\n", frees.UTC().Format("2006-01-02 15:04 UTC"))
+						fmt.Fprintf(sess.Stderr(), "  (b) wait until %s - the oldest entry ages out then\n", frees.UTC().Format("2006-01-02 15:04 UTC"))
 					}
 					_ = sess.Exit(ExitSybilRefuse)
 					return
@@ -237,7 +237,7 @@ func (s *Server) ratelimitMiddleware() wish.Middleware {
 
 // terminalMiddleware is the innermost middleware: the verb dispatcher.
 // It ignores `next` (which is wish's noop stub) because the dispatcher
-// is the terminal handler — there's nothing further in the chain.
+// is the terminal handler - there's nothing further in the chain.
 func (s *Server) terminalMiddleware() wish.Middleware {
 	return func(_ gossh.Handler) gossh.Handler {
 		return s.handleSession
@@ -249,7 +249,7 @@ func (s *Server) terminalMiddleware() wish.Middleware {
 // `sess.Command()` returns the already-shell-split arg vector (ssh
 // client does that for us). The first token is the verb. An empty
 // command means "implicit upload of whatever's on stdin." Key-required
-// and Sybil-gate refusals are handled in upstream middlewares — by
+// and Sybil-gate refusals are handled in upstream middlewares - by
 // the time we get here we know the session has a public key and the
 // gate (if configured) admitted it.
 func (s *Server) handleSession(sess gossh.Session) {
@@ -261,7 +261,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 	if len(argv) == 0 {
 		// "ssh hostthis.dev" with nothing piped in: show help and exit.
 		// We detect this by checking whether the client allocated a
-		// PTY (interactive terminal) — pipes don't get a PTY. Without
+		// PTY (interactive terminal) - pipes don't get a PTY. Without
 		// this, we'd block reading stdin from a user just typing
 		// `ssh hostthis.dev` to "see what it does."
 		if _, _, hasPty := sess.Pty(); hasPty {
@@ -273,7 +273,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 	}
 
 	// Flag in the first position (e.g. `--name "foo"`) means an upload
-	// with no slug — flow into the upload path directly. Without this
+	// with no slug - flow into the upload path directly. Without this
 	// the dispatcher tries to treat `--name` as a verb.
 	if strings.HasPrefix(argv[0], "--") && argv[0] != "--help" {
 		s.verbUpload(sess, owner, argv)
@@ -325,7 +325,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 			s.verbUpload(sess, owner, argv) // pass slug as first arg
 			return
 		}
-		// Unknown verb — print the error and the help, then exit nonzero.
+		// Unknown verb - print the error and the help, then exit nonzero.
 		// Matches what git, kubectl, etc. do.
 		fmt.Fprintf(sess.Stderr(), "hostthis: unknown command %q\n\n", first)
 		emitHelp(sess, s.apex())
@@ -350,7 +350,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	// Hand the live session reader to the service layer. The service
 	// streams bytes through hash + compress + raw-counter, capping
 	// at HardRawByteCap on the input side and MaxPasteBytes on the
-	// compressed side. We DO NOT buffer the body here — that would
+	// compressed side. We DO NOT buffer the body here - that would
 	// peak memory at HardRawByteCap per concurrent upload, which
 	// blows the VPS RAM budget at modest concurrency.
 	limited := io.LimitReader(sess, int64(domain.HardRawByteCap)+1)
@@ -410,7 +410,7 @@ func (s *Server) verbList(sess gossh.Session, owner string) {
 		_ = sess.Exit(ExitOK)
 		return
 	}
-	// Header on stdout (was stderr historically — stderr ordering
+	// Header on stdout (was stderr historically - stderr ordering
 	// vs stdout is non-deterministic over ssh, so the header could
 	// arrive AFTER the rows from the user's perspective. The spec
 	// shows the header at the top of the output; stdout + write-order
@@ -666,7 +666,7 @@ func (s *Server) verbWhoami(sess gossh.Session, owner string) {
 		emitServiceErr(sess, err)
 		return
 	}
-	// info.Identity is "key:SHA256:abcd..." — strip the prefix for
+	// info.Identity is "key:SHA256:abcd..." - strip the prefix for
 	// display so it matches `ssh-keygen -lf` style.
 	fmt.Fprintf(sess, "key:     %s\n", strings.TrimPrefix(info.Identity, domain.IdentityKeyPrefix))
 	if !info.FirstSeen.IsZero() {
@@ -704,7 +704,7 @@ func max0(n int) int {
 // arg that matches a known verb (or doc-only alias like `put` / `get`),
 // it emits verb-specific help. With one extra arg that doesn't match,
 // it prefixes an `unknown verb` line and falls back to the global
-// banner — mirroring the "unknown command" treatment for dispatch
+// banner - mirroring the "unknown command" treatment for dispatch
 // misses, but without the exit 2 (the user explicitly asked for help,
 // so we hand them help and exit 0).
 func (s *Server) verbHelp(sess gossh.Session, rest []string) {
@@ -738,7 +738,7 @@ func (s *Server) apex() string { return s.ApexDomain }
 // emitHelp writes the rendered help text to stderr, translating LF
 // to CRLF when the session has a PTY allocated. The PTY is in raw
 // mode on the client (it expects \r\n from the remote) and a bare
-// \n produces a "staircase" effect — the cursor advances a line but
+// \n produces a "staircase" effect - the cursor advances a line but
 // doesn't return to column 0, so subsequent lines start where the
 // previous one ended. An interactive `ssh <apex>` (no command)
 // defaults to allocating a PTY; `ssh <apex> help` doesn't. Same

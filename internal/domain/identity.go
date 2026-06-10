@@ -3,7 +3,7 @@ package domain
 import "strings"
 
 // Identity is the string the storage layer uses to attribute a paste
-// to a user. Always shaped as `key:<sha256-fingerprint>` — every
+// to a user. Always shaped as `key:<sha256-fingerprint>` - every
 // hostthis session must offer an ssh public key.
 //
 // Identity is the unit of quota accounting (the per-user 1 MiB cap

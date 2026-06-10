@@ -26,7 +26,7 @@ type PasteRepo interface {
 // to the backing store; size is the expected byte length (required by
 // S3-shaped backends to set Content-Length, accepted by the disk impl
 // for interface uniformity). PutPrecompressed writes a body that's
-// already magic-prefixed + zstd-encoded — used by the streaming upload
+// already magic-prefixed + zstd-encoded - used by the streaming upload
 // path so the staging buffer doesn't get re-encoded on its way down.
 // Get returns the full UNCOMPRESSED bytes in memory.
 type BlobStore interface {
@@ -79,7 +79,7 @@ var ErrServiceFull = errors.New("service: service is at capacity, try again afte
 
 // Create persists a new paste owned by the given identity.
 // The identity is a "key:<fp>" string built from the uploader's ssh
-// public key fingerprint. The identity gates quota — sum of the
+// public key fingerprint. The identity gates quota - sum of the
 // identity's active pastes plus this body cannot exceed UserQuotaBytes.
 //
 // Reads body via the streaming pipeline (single pass: hash + compress
@@ -115,7 +115,7 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		ContentSHA:    staged.SHA,
 		Size:          staged.CompressedSize,
 		Name:          name,
-		PinnedVersion: 0, // unpinned by default — public URL follows the latest version
+		PinnedVersion: 0, // unpinned by default - public URL follows the latest version
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		ExpiresAt:     now.Add(domain.RetentionWindow),
@@ -146,7 +146,7 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 
 // isSlugTaken returns true if err is any flavor of "slug already
 // exists in the repo." We sniff the error message to avoid the
-// service layer importing the storage package directly — that would
+// service layer importing the storage package directly - that would
 // invert the dependency direction (service shouldn't know which
 // concrete repo it's talking to).
 func isSlugTaken(err error) bool {
