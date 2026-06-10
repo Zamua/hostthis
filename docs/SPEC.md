@@ -1442,6 +1442,69 @@ Two compatibility details:
   once, before live quota enforcement is enabled, with no concurrent
   traffic.
 
+#### Migrating an existing slatedb-direct bucket to shale
+
+The two compatibility gaps above (the new `identity_bytes` counter and
+the value-bearing `identity_pastes` projection) are closed once, before
+cutover, by a standalone operator tool: `hostthis-shale-migrate`. It is
+built under the same `slatedb` build tag as the shale backend (cgo +
+native lib) and reads the same `HOSTTHIS_METADATA_S3_*` +
+`HOSTTHIS_METADATA_DB_NAME` env vars the backends read, so there is no
+second config surface.
+
+The tool is a one-time transform from slatedb-shape to shale-shape on the
+existing metadata bucket. It is the **only** place this transform lives:
+`ShaleRepo` itself assumes the data is already shale-shaped (counter
+present, projections value-bearing) and contains no lazy-seed,
+projection-fallback-with-backfill, or self-heal-on-read logic. Keeping
+the transform in a standalone tool, run once against a quiescent bucket,
+keeps the runtime path free of migration branches.
+
+**What it reads (authoritative, read-only).** The `pastes/*` and
+`versions/*` rows are the source of truth and are identical in both
+backends; the tool scans them and never mutates them, nor
+`slug_owner/*`, nor `expiry/*`. It groups pastes by owner identity from
+the authoritative paste rows (the `slug -> identity` mapping is on each
+`pastes/<slug>` row), not from the `identity_pastes` index, so a
+crash-truncated or empty-marker index cannot make the tool miss a paste.
+
+**What it writes.** For each identity it derives:
+
+- `identity_bytes/<id>` = the sum of `size` across every **non-deleted**
+  version row of every paste that identity owns. This matches the shale
+  counter's definition (the running total of live version bytes), **not**
+  the slatedb-direct read-time sum: an expired-but-unswept paste's bytes
+  still count here, because the shale counter sheds them at sweep time,
+  not read time (see "One intentional behavior change"). The counter must
+  **never under-count**: an under-count would let a migrated owner upload
+  past the cap. Counting from the authoritative version rows (rather than
+  any index) is what guarantees completeness.
+- `identity_pastes/<id>/<slug>` = the value-bearing projection
+  `ListByOwner` expects: the `{name, size, created_at, expires_at}`
+  denormalized from the paste head row, byte-for-byte the same projection
+  the confirm step and the reconciler write. Slatedb wrote empty markers
+  here; the tool overwrites each with the projection. (Empty markers are
+  invalid under shale, which rejects empty values.)
+
+**Idempotent.** Both writes are recomputed from authoritative truth and
+overwritten, never blindly incremented, so re-running the tool produces
+the same bytes. A partial first run followed by a full second run
+converges to the correct state.
+
+**Report-only mode.** A `--dry-run` flag computes the full plan (every
+identity's counter total and projection count) and prints it **without
+writing**, so the operator can inspect the numbers against the live
+deployment before committing. The default (no flag) performs the writes
+and prints the same summary (identities migrated, counters written,
+projections filled).
+
+**Operator concern: copy first.** The tool runs against a quiescent
+bucket with no concurrent traffic. The operator runs it against a copy of
+the production bucket first, verifies the reported counter totals match
+expectations, then runs it against production during the cutover window.
+Because it is read-only on the authoritative rows and idempotent, a
+re-run after the cutover is harmless.
+
 ---
 
 ## Edge caching
