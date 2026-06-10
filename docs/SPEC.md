@@ -874,6 +874,239 @@ for metadata vs blobs.
 
 ---
 
+## Shale-backed metadata storage (horizontal scale)
+
+The sqlite and slatedb backends above are single-writer: one process
+owns the keyspace, transactions serialize through one engine. That caps
+sustained write throughput and ties durability to one node's liveness.
+A third metadata backend, **shale**, removes both ceilings by sharding
+the keyspace across a cluster of nodes, each holding a slice, with
+optional replication for high availability.
+
+Shale is a KV cluster (consistent-hash ring over a shared object-store
+backend) that exposes per-shard compare-and-swap transactions and a
+cross-shard fan-out for admin scans. The metadata layer talks to it
+through the same service interfaces as the other two backends, so the
+domain, SSH, and HTTP layers are unaware of the choice. This section
+describes how the existing key layout maps onto shards, how quota stays
+strict across shard boundaries, and how the derived per-identity indexes
+stay correct under eventual consistency.
+
+### Same interfaces, same key names
+
+The shale backend (`ShaleRepo`) implements the same four service-layer
+interfaces every metadata backend implements: `PasteRepo` (insert +
+get on the upload path), `PasteAdmin` (list / versions / flags / delete
++ the per-owner quota and first-seen accessors), `SweepRepo` (expired
+slugs, delete, referenced-blob set), and `KeyGateRepo` (Sybil admission
++ pruning). No method signature changes; no caller changes.
+
+The key names are unchanged from the slatedb layout:
+
+```
+pastes/<slug>                      paste row
+versions/<slug>/<NNNN>             version row
+slug_owner/<slug>                  raw identity string
+expiry/<rfc3339>/<slug>            sweep index entry
+identity_pastes/<identity>/<slug>  per-owner list index (now value-bearing, see below)
+identity_first_seen/<identity>     cached first-seen timestamp
+identity_bytes/<identity>          per-owner active-bytes counter (NEW)
+keygate/<subnet>/<identity>        Sybil first-seen timestamp
+```
+
+Co-location across shards is achieved by a custom shard-key function,
+**not** by renaming keys. The cluster is opened with a `ShardKeyFn` that
+extracts a shard key from each full key per its family.
+
+### Three shard families
+
+Every key belongs to exactly one of three families. The `ShardKeyFn`
+extracts the shard key as follows:
+
+| Key family | Keys | Shard key |
+| --- | --- | --- |
+| Authoritative (per-slug) | `pastes/<slug>`, `versions/<slug>/*`, `slug_owner/<slug>`, `expiry/<date>/<slug>` | `<slug>` |
+| Derived (per-identity) | `identity_pastes/<id>/*`, `identity_first_seen/<id>`, `identity_bytes/<id>` | `<id>` |
+| Sybil gate (per-subnet) | `keygate/<subnet>/*` | `<subnet>` |
+
+The authoritative family is the source of truth for a paste's existence
+and content. The derived family is a denormalized projection of it,
+sharded by owner so that "list my pastes" and "how many bytes do I own"
+are single-shard operations rather than full-keyspace scans. The Sybil
+gate family is sharded by subnet so admission decisions for one subnet
+touch one shard.
+
+Because every key in a family hashes to the same shard key, a
+transaction that touches **only one family's keys for one subject** is
+a single-shard transaction and commits through shale's per-shard CAS
+(`Transact(pinKey, fn)`: read-modify-write under optimistic concurrency,
+retried on conflict, returning a conflict-exhausted error if it cannot
+converge). A write that spans families (a slug's authoritative row plus
+its owner's derived counter) is **not** one transaction: it is a
+sequence of single-shard transactions on different shards, and the
+design below is what keeps that sequence correct.
+
+### Reservation-pattern quota (strict, never exceeds)
+
+Per-identity quota (the 10 MiB compressed cap) must be enforced exactly:
+an upload that would push an owner over the cap is rejected, and two
+concurrent uploads can never both pass the check and both land. The
+single-writer backends get this for free (the quota sum and the insert
+happen in one transaction). Shale cannot: the bytes counter lives on the
+`{id}` shard and the paste row lives on the `{slug}` shard, two
+different transactions.
+
+The shale backend enforces quota with a **reservation pattern**: a
+three-step sequence that makes the quota decision atomic on the owner's
+shard, before any authoritative write happens.
+
+1. **Reserve** (one single-shard CAS on the `{id}` shard). Read
+   `identity_bytes/<id>`. If `counter + body > cap`, reject with the
+   over-quota error and stop. Otherwise increment the counter by `body`
+   and write a reservation marker, all in one CAS transaction. After
+   this commits, the bytes are accounted.
+2. **Authoritative write** (one single-shard CAS on the `{slug}` shard).
+   Write `pastes/<slug>`, the v1 `versions/<slug>/0001` row,
+   `slug_owner/<slug>`, and the `expiry/<date>/<slug>` index entry, all
+   in one CAS transaction. The slug-collision check (reject if
+   `pastes/<slug>` already exists) participates in this transaction.
+3. **Confirm** (one single-shard CAS on the `{id}` shard). Drop the
+   reservation marker, write the `identity_pastes/<id>/<slug>` index
+   entry (with its denormalized projection, see below), and set
+   `identity_first_seen/<id>` if absent.
+
+**Why quota can never be exceeded.** The reserve step is the only place
+the counter is read and incremented, and it is a single atomic CAS on
+one shard. Two concurrent uploads for the same identity both reach the
+reserve step; CAS serializes them, so exactly one reads the
+pre-increment value and the other reads the post-increment value. The
+second sees the larger counter and is rejected if it no longer fits. The
+counter is incremented **before** the authoritative write, so the bytes
+are committed to the budget the instant they are reserved, never after.
+There is no window in which two uploads have both passed the check but
+neither has yet incremented. Quota is therefore a hard ceiling.
+
+The failure mode is fail-safe in the over-counting direction. If step 2
+fails (CAS exhaustion, slug collision after retries, a crash between
+steps), the reservation from step 1 is left orphaned: the bytes are
+counted but no paste exists. This **over-counts**, shrinking the owner's
+available quota temporarily; it never **under-counts** (it never lets an
+owner exceed the cap). A reconciler releases orphaned reservations (see
+below). The service-wide cap, which is a property of the whole keyspace
+rather than one identity, is checked separately via a cross-shard
+aggregate (see "Cross-shard background operations") and is best-effort
+soft enforcement, the same posture it has on the single-writer backends
+where the sum is a scan, not a transaction-held invariant.
+
+This reservation counter replaces the per-insert
+`SumActiveBytesByOwner` scan the single-writer backends run inside the
+insert transaction. The `SumActiveBytesByOwner` and `CountByOwner`
+interface methods are still served, now from the `identity_bytes`
+counter and the `identity_pastes` index respectively, both single-shard
+reads on the `{id}` shard.
+
+### Derived indexes and repair-on-read
+
+The per-identity family is a derived projection. `identity_pastes`,
+`identity_first_seen`, and `identity_bytes` are not the source of truth;
+the `pastes/*` and `versions/*` rows on the `{slug}` shards are. The
+derived entries are written by the confirm step (step 3 above) and by
+the update / delete paths, in transactions separate from the
+authoritative write. They are therefore **eventually consistent**: a
+crash between the authoritative write and the index update leaves the
+index momentarily out of step with the authoritative rows.
+
+To carry "list my pastes" as a single-shard scan, each
+`identity_pastes/<id>/<slug>` entry is **value-bearing**: it stores a
+denormalized projection of the fields the list view needs (name, size,
+created-at) rather than the empty marker the single-writer layout uses.
+`ListByOwner` then scans one shard and returns rows without fanning out
+to the `{slug}` shards.
+
+`ListByOwner` **repairs on read** to absorb the eventual-consistency
+gap, applying two rules:
+
+- **Stale index entry:** an `identity_pastes` entry whose authoritative
+  `pastes/<slug>` row no longer exists is stale (the paste was deleted
+  but the index update was lost). It is skipped in the result and queued
+  for removal.
+- **Missing index entry:** an authoritative paste owned by the identity
+  with no `identity_pastes` entry (the index write was lost after the
+  authoritative write landed) is re-added to the index.
+
+Repair-on-read makes the list view self-healing for the entries a reader
+actually touches. A background **reconciler** does the rest of the
+healing that reads alone cannot: it rebuilds derived indexes from the
+authoritative rows, recomputes the `identity_bytes` counter from the
+owner's non-deleted version sizes, and releases orphaned reservations
+(a reservation marker with no corresponding authoritative paste, older
+than a safety interval, is dropped and its bytes returned to the
+counter). The reconciler is the mechanism that converges the over-count
+left by a failed step 2 back to the true value.
+
+### Cross-shard background operations
+
+Three operations are inherently cross-shard: the expiry sweep scans
+`expiry/*` across all `{slug}` shards, blob GC must collect every
+referenced content SHA across all `{slug}` shards, and the keygate prune
+deletes stale `keygate/*` rows across all `{subnet}` shards. These use
+shale's `Aggregate()` fan-out, which snapshots each node's local
+keyspace in parallel and merges the per-node results. Cost is the
+slowest node's scan plus one round-trip, bounded and appropriate for the
+periodic background loop these operations already run on.
+
+The `SweepRepo.UnreferencedBlobSHAs` contract is preserved exactly: it
+returns the set of **referenced** SHAs (the allow-list the sweep keeps),
+gathered by aggregating the head SHA of every active paste and the
+content SHA of every non-deleted version across all shards. It must
+never return an empty set while pastes exist, the same invariant the
+single-writer backends hold.
+
+### Deploy arc: replication factor 1, then scale out
+
+The backend ships at `ReplicationFactor = 1` first: one node per shard,
+no replicas, no last-write-wins envelope cost on the read path. At R=1
+a single-node cluster is functionally equivalent to the slatedb backend
+(same object store, same keys, same single owner of the keyspace), so
+the cutover is low-risk and reversible.
+
+Scaling to `N = 2` nodes with `ReplicationFactor = 2` is then a
+configuration change, not a code change. The read path uses
+`ReadNearest` (read from the owner-local replica). The reservation
+quota pattern depends on the owner-local read seeing its own committed
+writes, and shale's last-write-wins-on-write rule (a replica applies an
+incoming write only if its stamp is strictly newer) makes the
+owner-local CAS the single source of write ordering for its shard, which
+keeps `ReadNearest` sound for this access pattern.
+
+### Migration
+
+Migration is in-place: same bucket, same object store, same key names.
+The `ShardKeyFn` provides co-location by routing, so **no key is
+renamed or rewritten** on cutover. An existing slatedb deployment's keys
+are read by the shale backend as-is.
+
+Two compatibility details:
+
+- **Raw values decode as zero-stamp envelopes.** At R>1 shale wraps each
+  value in a last-write-wins envelope. A value written without an
+  envelope (every existing slatedb value) decodes as a zero-stamp
+  envelope: it loses any comparison against a stamped write and is
+  re-stamped on its next write. This is graceful, requires no offline
+  conversion, and at R=1 the envelope is not used at all.
+- **The `identity_bytes` counter needs a one-time backfill.** The
+  counter is new; existing deployments have no `identity_bytes/<id>`
+  rows. Before enabling per-identity quota on the shale backend, an
+  operator runs a one-time backfill that sums each identity's
+  non-deleted version sizes and writes the counter. This is an operator
+  step performed once at cutover, out of scope for the runtime path.
+  Until the backfill runs, the reconciler's recompute path produces the
+  same values on first touch, so the backfill is an optimization that
+  avoids a cold-start over-permit window rather than a correctness
+  requirement.
+
+---
+
 ## Edge caching
 
 hostthis has two scaling cliffs that a CDN solves:
