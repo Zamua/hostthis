@@ -46,7 +46,7 @@ func TestConformance_Shale(t *testing.T) {
 	access := envOrDefault("MINIO_TEST_ACCESS_KEY", "admin")
 	secret := envOrDefault("MINIO_TEST_SECRET_KEY", "supersecret")
 
-	runConformance(t, "shale", conformCaps{ExpiryFreesQuotaAtReadTime: false}, func(t *testing.T) conformanceRepo {
+	runConformance(t, "shale", conformCaps{ExpiryFreesQuotaAtReadTime: false, StrictQuotaUnderConcurrency: true}, func(t *testing.T) conformanceRepo {
 		// Unique per-call logical db so each subtest starts empty within
 		// the shared bucket. Run epoch (nanos) + a monotonic counter keeps
 		// concurrent CI runs from colliding.
