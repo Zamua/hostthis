@@ -883,7 +883,7 @@ through four small Go interfaces declared in `internal/service`:
   `ListVersions`, `GetVersion`, `DeleteVersion`, `CountByOwner`,
   `SumActiveBytesByOwner`, `OwnerFirstSeen`.
 - `SweepRepo` (sweep): `ExpiredSlugs`, `Delete`,
-  `UnreferencedBlobSHAs`.
+  `ReferencedBlobSHAs`.
 - `KeyGateRepo` (keygate): `AdmitNewKey`, `DeleteFirstSeenOlderThan`,
   `SubnetSnapshot`, `SubnetsForIdentity`.
 
@@ -920,12 +920,21 @@ behaviors are expressed in terms of inputs and observable outputs:
 - **Pin / unpin.** `SetPinnedVersion` makes a version sticky and rolls
   the head to it; `Unpin` clears the pin and rolls the head back to the
   latest non-deleted version.
-- **DeleteVersion tombstones.** Flips a version's deleted flag, leaving
-  the row so the number is not reused and history is auditable.
-  `ListVersions` returns tombstones (newest first); `GetVersion`
-  returns a tombstone too. The repo does NOT enforce
-  refuse-current / refuse-pinned-current: those guards live in
-  `Manage.DeleteVersion`, not the repo.
+- **DeleteVersion tombstones (content-inaccessible, blob GC-able).**
+  Flips a version's deleted flag, leaving the metadata row so the
+  number is not reused and history stays auditable. `ListVersions`
+  returns tombstones (newest first, marked `deleted`); `GetVersion`
+  returns a tombstone too (so the row is still visible for the paste's
+  lifetime). The tombstoned version's content SHA is NOT in the
+  referenced set, so the sweep reclaims its blob: a deleted version is
+  app-final and content-inaccessible, and its bytes stop counting
+  against quota. Recoverability of the dropped blob is provided beneath
+  the app by object-store versioning plus a noncurrent-version
+  lifecycle (an operator-level safety net, not an app feature). The
+  repo does NOT enforce refuse-current / refuse-pinned-current: those
+  guards live in `Manage.DeleteVersion`, not the repo. Whole-paste
+  `Delete` is a full removal (the paste leaves every listing; there is
+  nothing left to show versions of) and is unaffected by this rule.
 - **Owner-gating is a service-layer concern.** The repos are NOT
   owner-aware: `Get`, `Delete`, `SetName`, and so on operate on a slug
   regardless of who owns it. IDOR protection (a cross-owner read
@@ -934,11 +943,19 @@ behaviors are expressed in terms of inputs and observable outputs:
 - **Expiry.** `ExpiredSlugs(now)` returns slugs whose `expires_at` is
   at or before `now` (inclusive boundary); not-yet-expired pastes are
   excluded.
-- **Sweep / GC.** `UnreferencedBlobSHAs` returns the set of SHAs the
-  metadata still references (both `pastes.content_sha` and every
-  `versions.content_sha`). The sweep removes any blob NOT in that set.
-  The set must be non-empty while references exist; the sweep guards
-  against a backend that wrongly returns zero.
+- **Sweep / GC.** `ReferencedBlobSHAs` returns the set of blob
+  content-SHAs still referenced by a LIVE (non-deleted) version or
+  paste head: the head SHA of every active paste plus the content SHA
+  of every NON-DELETED version. A tombstoned version's content SHA is
+  excluded, so its blob is GC-able. The method name states what it
+  returns (the allow-list the sweep keeps), so a nil/empty return reads
+  honestly as "keep nothing" rather than the inverted "delete nothing."
+  The sweep removes any blob NOT in this set. Returning an empty set
+  while pastes exist would make the sweep treat every blob as orphan
+  and delete the whole store, so the sweep aborts the GC pass when the
+  referenced set is empty, no pastes were swept this tick, and the blob
+  store is non-empty (a fail-closed guard against a buggy backend,
+  schema misalignment, or partial restore).
 - **Owner stats.** `ListByOwner` returns the owner's active pastes
   ordered soonest-to-expire first, with `LatestVersion` populated;
   `CountByOwner` counts them; `SumActiveBytesByOwner` matches the quota
@@ -985,17 +1002,25 @@ shale backend will run to prove it preserves behavior. Because the
 suite asserts only the observable contract, a backend that passes it is
 a drop-in for the service layer by construction.
 
-**Known backend divergence (not yet reconciled).** The two existing
-backends disagree on one detail of `UnreferencedBlobSHAs`: whether a
-TOMBSTONED version's content SHA stays in the referenced set. The
-sqlite backend's query has no deleted filter, so a tombstoned version's
-blob is kept until the whole paste dies; the slatedb backend filters
-deleted rows, so a tombstoned version's blob becomes GC-eligible on the
-next sweep. The conformance suite pins this divergence as a documented
-finding rather than asserting it, because there is no single value both
-backends agree on. A new backend (shale) must choose one rule
-deliberately, and the chosen rule should be made uniform across
-backends (and asserted in the suite) at that point.
+**Canonical tombstone-GC rule (and a remaining backend divergence).**
+The chosen rule for whether a TOMBSTONED version's content SHA stays in
+the referenced set is: it does NOT. A deleted version is app-final and
+content-inaccessible, "DeleteVersion frees quota" implies the storage
+is freed too, so the blob is dropped from the referenced set and the
+sweep reclaims it. The slatedb backend already implements this rule
+(its `ReferencedBlobSHAs` filters deleted version rows). The shale
+backend adopts the same rule. The sqlite backend still diverges: its
+`SELECT DISTINCT content_sha FROM versions` has no deleted filter, so a
+tombstoned version's blob is kept until the whole paste dies. That
+divergence is a known open follow-up (bring sqlite in line with the
+canonical rule); the conformance suite asserts only the shared
+invariant both backends agree on (a still-live head SHA is always
+referenced) and pins the divergence as a documented finding rather than
+asserting a value the backends disagree on. Recoverability of a dropped
+tombstoned blob does not depend on the app keeping a reference: it is
+provided beneath the app by object-store versioning plus a
+noncurrent-version lifecycle, an operator-level safety net configured
+outside this repo.
 
 ---
 
@@ -1210,12 +1235,14 @@ keyspace in parallel and merges the per-node results. Cost is the
 slowest node's scan plus one round-trip, bounded and appropriate for the
 periodic background loop these operations already run on.
 
-The `SweepRepo.UnreferencedBlobSHAs` contract is preserved exactly: it
+The `SweepRepo.ReferencedBlobSHAs` contract is preserved exactly: it
 returns the set of **referenced** SHAs (the allow-list the sweep keeps),
 gathered by aggregating the head SHA of every active paste and the
-content SHA of every non-deleted version across all shards. It must
-never return an empty set while pastes exist, the same invariant the
-single-writer backends hold.
+content SHA of every non-deleted version across all shards. A
+tombstoned version's content SHA is excluded, the canonical rule above.
+It must never return an empty set while pastes exist, the same
+invariant the single-writer backends hold, and the sweep's
+abort-on-zero-refs guard backstops a backend that wrongly does.
 
 ### Deploy arc: replication factor 1, then scale out
 
