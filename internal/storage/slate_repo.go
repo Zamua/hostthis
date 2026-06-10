@@ -51,9 +51,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	slatedb "slatedb.io/slatedb-go/uniffi"
@@ -84,6 +86,30 @@ type SlateConfig struct {
 type SlateRepo struct {
 	db    *slatedb.Db
 	store *slatedb.ObjectStore
+
+	// quotaLocks serializes the per-identity quota-check-and-write so two
+	// concurrent same-identity uploads cannot both read the pre-upload sum,
+	// both pass the cap, and both commit. Snapshot isolation does NOT
+	// serialize them on its own: they write DIFFERENT keys (distinct slugs),
+	// so there is no write-write conflict for SI to detect; only the
+	// per-identity quota SUM is shared, and it is read outside any single
+	// key the transaction conflicts on. SlateDB is single-writer
+	// (writer-epoch fenced), so an in-process lock is sufficient: no other
+	// process can interleave a write. Striped by identity hash so different
+	// identities do not contend. The service-wide cap stays best-effort
+	// (cross-identity races on it are acceptable per the spec).
+	quotaLocks [256]sync.Mutex
+}
+
+// lockQuota acquires the per-identity quota stripe and returns the unlock.
+// Held across the quota SUM and the write transaction so the check and the
+// commit are atomic with respect to other same-identity uploads.
+func (r *SlateRepo) lockQuota(identity string) func() {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(identity))
+	m := &r.quotaLocks[h.Sum32()%uint32(len(r.quotaLocks))]
+	m.Lock()
+	return m.Unlock
 }
 
 // NewSlateRepo opens a SlateDB instance backed by the configured
@@ -551,9 +577,13 @@ func (r *SlateRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 	// the transaction window because SlateDB has no SUM operator;
 	// scanning every key during a transaction would hold tx state
 	// across many round-trips. Single-writer fencing means no other
-	// process can sneak a write in between the check and the commit;
-	// concurrent goroutines within this process are serialized by the
-	// SI transaction at commit time.
+	// PROCESS can sneak a write in between the check and the commit.
+	// Concurrent GOROUTINES in this process are NOT serialized by the
+	// SI transaction (they write different keys, so SI finds no
+	// conflict), so the per-identity quota stripe below serializes the
+	// same-identity check-and-commit: without it two concurrent uploads
+	// could both pass the cap and both land.
+	defer r.lockQuota(p.Identity.String())()
 	body := int64(p.Size)
 	if serviceCap > 0 {
 		total, err := r.sumServiceWideActiveBytes(now)
@@ -780,11 +810,15 @@ func (r *SlateRepo) Unpin(slug domain.Slug) error {
 }
 
 func (r *SlateRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, serviceCap, userCap int64, now time.Time) (AppendResult, error) {
-	// Need owner identity to do the per-user check.
+	// Need owner identity to do the per-user check. Read it first (a plain
+	// read, no lock needed), then hold the per-identity quota stripe across
+	// the sum + the append so two concurrent same-identity writes cannot
+	// both pass the cap (see InsertWithQuotaCheck + the quotaLocks doc).
 	var existing pasteRow
 	if err := r.getJSON(keyPaste(slug), &existing); err != nil {
 		return AppendResult{}, err
 	}
+	defer r.lockQuota(existing.Identity)()
 	body := int64(size)
 	if serviceCap > 0 {
 		total, err := r.sumServiceWideActiveBytes(now)
