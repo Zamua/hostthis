@@ -1124,10 +1124,18 @@ shard, before any authoritative write happens.
 1. **Reserve** (one single-shard CAS on the `{id}` shard). Read
    `identity_bytes/<id>`. If `counter + body > cap`, reject with the
    over-quota error and stop. Otherwise increment the counter by `body`
-   and write a reservation marker `identity_reserve/<id>/<slug>` (carrying
-   `body`), all in one CAS transaction. The marker key shards on `<id>`
-   like the counter, so the read-and-increment-and-mark is a single-shard
-   CAS. After this commits, the bytes are accounted.
+   and write a reservation marker `identity_reserve/<id>/<slug>`, all in
+   one CAS transaction. The marker key shards on `<id>` like the counter,
+   so the read-and-increment-and-mark is a single-shard CAS. After this
+   commits, the bytes are accounted. The marker value is a small JSON
+   object `{"bytes": <body>, "created_at": <rfc3339nano>}`: `bytes` is
+   the reserved size, and `created_at` is the `now` the reserve was
+   stamped with, so the reconciler can tell an in-flight reservation
+   (young) from an abandoned one (old) without inferring age from the
+   paste's absence. A legacy bare-number marker (a plain `body` with no
+   timestamp, as an earlier layout wrote) is still tolerated on read and
+   treated as having a zero `created_at` (very old, so always past any
+   grace window); new markers always carry the timestamp.
 2. **Authoritative write** (one single-shard CAS on the `{slug}` shard).
    Write `pastes/<slug>`, the v1 `versions/<slug>/0001` row,
    `slug_owner/<slug>`, and the `expiry/<date>/<slug>` index entry, all
@@ -1217,15 +1225,60 @@ gap, applying two rules:
   with no `identity_pastes` entry (the index write was lost after the
   authoritative write landed) is re-added to the index.
 
-Repair-on-read makes the list view self-healing for the entries a reader
-actually touches. A background **reconciler** does the rest of the
-healing that reads alone cannot: it rebuilds derived indexes from the
-authoritative rows, recomputes the `identity_bytes` counter from the
-owner's non-deleted version sizes, and releases orphaned reservations
-(a reservation marker with no corresponding authoritative paste, older
-than a safety interval, is dropped and its bytes returned to the
-counter). The reconciler is the mechanism that converges the over-count
-left by a failed step 2 back to the true value.
+A background **reconciler** does the rest of the healing: it rebuilds
+derived indexes from the authoritative rows (adding missing entries,
+refreshing stale projections, dropping entries whose paste is gone),
+recomputes the `identity_bytes` counter from the owner's non-deleted
+version sizes plus any in-flight reservations, and releases orphaned
+reservations. The reconciler is the mechanism that converges the
+over-count left by a failed step 2 back to the true value.
+
+#### Running the reconciler against live traffic
+
+The reconciler is safe to schedule while uploads and deletes are in
+flight. Two design rules make it so: a **grace window** that protects
+in-flight reservations, and a **read-checked** counter recompute that
+can never clobber a concurrent committed write.
+
+**Grace window for reservation release.** A reservation marker is only an
+orphan candidate if it is older than `reserveGrace` (computed as
+`now - created_at > reserveGrace`). A younger marker is treated as a
+genuinely in-flight insert (it is between the reserve step and the
+authoritative write) and is left alone: deleting it would un-account
+bytes that are about to land. The release rule is: drop a marker when it
+is **older than grace** AND (its paste is absent OR a confirmed index
+entry already exists for it). The first clause (absent paste) is the
+abandoned-reservation case the over-count comes from. The second clause
+(confirmed entry present) is the leaked-marker case: a confirm that
+failed after the authoritative write succeeded leaves a marker behind
+even though the bytes are already authoritative and the index entry was
+written. Such a marker has served its purpose and is dropped once it is
+past grace, so it cannot leak unbounded. The same rule covers the
+`<slug>#append` marker an `AppendVersion` reserve writes.
+
+**Read-checked, reservation-aware counter recompute.** The true counter
+value for an owner is `(sum of live non-deleted version bytes across all
+the owner's pastes) + (sum of the bytes of every reservation marker
+still within grace)`. The in-grace reservations are added because they
+are genuinely in-flight inserts whose bytes are reserved but whose
+authoritative version row has not landed yet; excluding them would
+briefly under-count and let the owner over-commit. The recompute is NOT
+a blind write. It runs as a single-shard CAS on the `{id}` counter that
+puts both the counter and the owner's reservation markers in its
+read-set, computes the true value, and writes it only if it differs.
+Because every authoritative byte change in this system also moves the
+counter (a reserve, a confirm, a delete, a delete-version, and a sweep
+all commit a counter write), the counter is effectively a version token
+for the owner's byte state. Any concurrent reserve/delete that commits
+between the reconciler's cross-shard live-byte scan and its counter CAS
+will have touched the counter (or a marker), so the read-checked CAS
+conflicts and retries with a fresh scan rather than overwriting the
+concurrent write. The cross-shard live-byte scan being slightly stale is
+therefore harmless: any version change that the stale scan missed also
+moved the counter, which the read-check catches. The recompute uses a
+bounded retry; if it cannot converge under sustained concurrent load in
+one pass it leaves the counter untouched and the next pass retries. It
+never blind-writes a recomputed value over a counter it did not read.
 
 ### Cross-shard background operations
 

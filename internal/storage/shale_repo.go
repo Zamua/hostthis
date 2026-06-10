@@ -230,6 +230,60 @@ func shalePrefixKeygateSubnet(subnet string) []byte {
 // empty values, so a one-byte marker stands in for SlateRepo's []byte{}.
 var markerValue = []byte{'1'}
 
+// defaultReserveGrace is the safety interval the reconciler uses to tell
+// an in-flight reservation (younger than the grace) from an abandoned or
+// leaked one (older than the grace). It is a var, not a const, so tests
+// can shrink it; callers pass their own value into Reconcile.
+var defaultReserveGrace = 10 * time.Minute
+
+// DefaultReserveGrace is the recommended reserveGrace to pass to
+// Reconcile: comfortably longer than the reserve->authoritative-write
+// window of a healthy insert, so the reconciler never races a live
+// upload, while short enough that an abandoned reservation's over-count
+// is reclaimed promptly. Operators scheduling Reconcile use this unless
+// they have a reason to override it.
+func DefaultReserveGrace() time.Duration { return defaultReserveGrace }
+
+// reservationMarker is the value stored at identity_reserve/<id>/<slug>.
+// Bytes is the reserved size; CreatedAt is the `now` the reserve was
+// stamped with (RFC3339Nano via time.Time JSON), so the reconciler can
+// compute the marker's age (now - created_at) and apply the grace window
+// without inferring age from the paste's absence (docs/SPEC.md
+// "Reservation-pattern quota").
+type reservationMarker struct {
+	Bytes     int64     `json:"bytes"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// encodeReservationMarker serializes a marker to its JSON value.
+func encodeReservationMarker(bytes int64, createdAt time.Time) ([]byte, error) {
+	return json.Marshal(reservationMarker{Bytes: bytes, CreatedAt: createdAt.UTC()})
+}
+
+// parseReservationMarker decodes a reservation marker value. It tolerates
+// a legacy bare-number marker (a plain decimal `body` with no timestamp,
+// as an earlier layout wrote): a legacy marker decodes to its byte count
+// with a zero CreatedAt, which reads as "very old" so it is always past
+// any grace window. New markers always carry the JSON shape.
+func parseReservationMarker(raw []byte) (reservationMarker, error) {
+	if len(raw) == 0 {
+		return reservationMarker{}, nil
+	}
+	if raw[0] == '{' {
+		var m reservationMarker
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return reservationMarker{}, fmt.Errorf("decode reservation marker: %w", err)
+		}
+		return m, nil
+	}
+	// Legacy bare-number marker: bytes only, zero (very old) created_at.
+	n, err := parseCounter(raw)
+	if err != nil {
+		return reservationMarker{}, fmt.Errorf("decode legacy reservation marker: %w", err)
+	}
+	return reservationMarker{Bytes: n}, nil
+}
+
 // --- JSON projections ------------------------------------------------------
 
 // identityPasteRow is the value-bearing projection stored at
@@ -614,9 +668,13 @@ func (r *ShaleRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 // A zero userCap means "no per-owner cap"; the counter is still
 // incremented (so SumActiveBytesByOwner stays accurate) but the check is
 // skipped.
-func (r *ShaleRepo) reserveBytes(identity, slug string, body, userCap int64) error {
+func (r *ShaleRepo) reserveBytes(identity, slug string, body, userCap int64, now time.Time) error {
 	counterKey := shaleKeyIdentityBytes(identity)
 	reserveKey := shaleKeyIdentityReserve(identity, slug)
+	markerVal, err := encodeReservationMarker(body, now)
+	if err != nil {
+		return err
+	}
 	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
 		cur, err := txGetCounter(tx, counterKey)
 		if err != nil {
@@ -628,7 +686,7 @@ func (r *ShaleRepo) reserveBytes(identity, slug string, body, userCap int64) err
 		if err := tx.Put(counterKey, formatCounter(cur+body)); err != nil {
 			return err
 		}
-		return tx.Put(reserveKey, formatCounter(body))
+		return tx.Put(reserveKey, markerVal)
 	})
 }
 
@@ -648,10 +706,11 @@ func (r *ShaleRepo) releaseBytes(identity, slug string, body int64) error {
 			}
 			return err
 		}
-		amt, err := parseCounter(marker)
+		m, err := parseReservationMarker(marker)
 		if err != nil {
 			return err
 		}
+		amt := m.Bytes
 		cur, err := txGetCounter(tx, counterKey)
 		if err != nil {
 			return err
@@ -703,8 +762,9 @@ func (r *ShaleRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 		}
 	}
 
-	// Step 1: reserve (strict per-owner quota).
-	if err := r.reserveBytes(identity, slug, body, userCap); err != nil {
+	// Step 1: reserve (strict per-owner quota). The marker is stamped with
+	// `now` so the reconciler can apply the grace window.
+	if err := r.reserveBytes(identity, slug, body, userCap, now); err != nil {
 		return err
 	}
 
@@ -833,7 +893,7 @@ func (r *ShaleRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 	// "<slug>#append" so it never collides with an insert reservation for
 	// the same slug.
 	reserveSlug := slugStr + "#append"
-	if err := r.reserveBytes(identity, reserveSlug, body, userCap); err != nil {
+	if err := r.reserveBytes(identity, reserveSlug, body, userCap, now); err != nil {
 		return AppendResult{}, err
 	}
 
@@ -1410,13 +1470,17 @@ func (r *ShaleRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 // relies on (docs/SPEC.md "Derived indexes and repair-on-read"):
 //
 //   - recomputes identity_bytes/<id> from the owner's live (non-deleted)
-//     version sizes across all of the owner's pastes,
+//     version sizes PLUS the bytes of any in-flight (within-grace)
+//     reservation markers, via a read-checked CAS that can never clobber
+//     a concurrent committed reserve/delete (recomputeCounter),
 //   - rebuilds identity_pastes/<id>/<slug> projections from the
 //     authoritative paste rows (adding missing entries, refreshing stale
 //     ones, dropping entries whose paste is gone),
 //   - releases identity_reserve/<id>/<slug> markers older than
-//     reserveGrace whose paste never materialized (the over-count left by
-//     a failed authoritative write).
+//     reserveGrace: both the abandoned-reservation over-count (paste never
+//     materialized) and a leaked confirm-failed marker (paste exists), so
+//     the marker family cannot grow unbounded. Markers younger than the
+//     grace are in-flight and left alone (releaseOrphanReservations).
 //
 // It is NOT part of the SweepRepo contract: the sweep's public surface is
 // unchanged. An operator (or a sweep hook that calls this directly) runs
@@ -1448,8 +1512,11 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 		liveBytesBySlug[slug] += int64(v.Size)
 	}
 
-	// Recompute per-identity bytes + the authoritative paste set per owner.
-	bytesByOwner := make(map[string]int64)
+	// Recompute per-identity live bytes + the authoritative paste set per
+	// owner. liveBytesByOwner holds ONLY the authoritative live-version
+	// bytes; the in-grace reservation bytes are added inside the
+	// read-checked recompute below.
+	liveBytesByOwner := make(map[string]int64)
 	pastesByOwner := make(map[string]map[string]identityPasteRow)
 	for _, item := range pasteItems {
 		var p pasteRow
@@ -1457,7 +1524,7 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 			return fmt.Errorf("reconcile: decode %s: %w", item.Key, err)
 		}
 		slug := strings.TrimPrefix(string(item.Key), "pastes/")
-		bytesByOwner[p.Identity] += liveBytesBySlug[slug]
+		liveBytesByOwner[p.Identity] += liveBytesBySlug[slug]
 		if pastesByOwner[p.Identity] == nil {
 			pastesByOwner[p.Identity] = make(map[string]identityPasteRow)
 		}
@@ -1469,19 +1536,144 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 		}
 	}
 
-	// Apply the recomputed counter + index for every owner.
-	for owner, want := range bytesByOwner {
-		counterKey := shaleKeyIdentityBytes(owner)
-		if err := r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
-			return tx.Put(counterKey, formatCounter(want))
-		}); err != nil {
+	// Gather the reservation markers (cross-shard) and group them by owner.
+	// These feed both the read-checked counter recompute (in-grace markers
+	// count toward the true value) and the orphan release below.
+	markersByOwner, err := r.gatherReservationMarkers()
+	if err != nil {
+		return err
+	}
+
+	// Recompute the counter for every owner that has live bytes OR a
+	// reservation marker. A marker-only owner (all reservations in-flight,
+	// or a leftover over-count) still needs its counter reconciled.
+	owners := make(map[string]struct{}, len(liveBytesByOwner)+len(markersByOwner))
+	for owner := range liveBytesByOwner {
+		owners[owner] = struct{}{}
+	}
+	for owner := range markersByOwner {
+		owners[owner] = struct{}{}
+	}
+	for owner := range owners {
+		if err := r.recomputeCounter(owner, liveBytesByOwner[owner], markersByOwner[owner], now, reserveGrace); err != nil {
 			return fmt.Errorf("reconcile: counter %s: %w", owner, err)
 		}
 	}
+
 	if err := r.reconcileIndexes(pastesByOwner); err != nil {
 		return err
 	}
-	return r.releaseOrphanReservations(now, reserveGrace, pastesByOwner)
+	return r.releaseOrphanReservations(now, reserveGrace, markersByOwner)
+}
+
+// reservationMarkerEntry is a parsed reservation marker tagged with its
+// full identity_reserve/<id>/<slug> key, used by the reconciler for the
+// read-checked recompute and the orphan release.
+type reservationMarkerEntry struct {
+	Key    []byte
+	Marker reservationMarker
+}
+
+// gatherReservationMarkers scans every identity_reserve marker across all
+// shards, parses each (tolerating legacy bare-number markers), and groups
+// them by owner identity.
+func (r *ShaleRepo) gatherReservationMarkers() (map[string][]reservationMarkerEntry, error) {
+	items, err := r.aggregatePrefix([]byte("identity_reserve/"))
+	if err != nil {
+		return nil, fmt.Errorf("reconcile: scan reservations: %w", err)
+	}
+	byOwner := make(map[string][]reservationMarkerEntry)
+	for _, item := range items {
+		rest := strings.TrimPrefix(string(item.Key), "identity_reserve/")
+		idx := strings.Index(rest, "/")
+		if idx < 0 {
+			continue
+		}
+		owner := rest[:idx]
+		m, err := parseReservationMarker(item.Value)
+		if err != nil {
+			return nil, fmt.Errorf("reconcile: %w", err)
+		}
+		byOwner[owner] = append(byOwner[owner], reservationMarkerEntry{
+			Key:    append([]byte(nil), item.Key...),
+			Marker: m,
+		})
+	}
+	return byOwner, nil
+}
+
+// markerInGrace reports whether a marker is still within the grace window
+// (now - created_at <= reserveGrace), i.e. a genuinely in-flight insert
+// whose bytes belong in the true counter value. A marker past grace is an
+// abandoned-or-leaked reservation excluded from the recompute.
+func markerInGrace(m reservationMarker, now time.Time, reserveGrace time.Duration) bool {
+	return now.Sub(m.CreatedAt) <= reserveGrace
+}
+
+// recomputeCounter is the read-checked, reservation-aware counter
+// recompute (the core fix for the counter-recompute race, docs/SPEC.md
+// "Running the reconciler against live traffic"). The true counter value
+// is the authoritative live-version bytes (scanned just before this call)
+// plus the bytes of every reservation marker still within grace. The
+// write runs as a single-shard CAS that puts BOTH the counter and the
+// owner's reservation markers in its read-set, so any concurrent
+// reserve/confirm/delete (all of which touch the counter or a marker)
+// makes this CAS conflict and retry rather than clobber the concurrent
+// write. The cross-shard live-byte scan being slightly stale is harmless:
+// any version change the scan missed also moved the counter, which the
+// read-check on the counter catches. Bounded retry; if it cannot converge
+// under sustained load it leaves the counter for the next pass, never
+// blind-writing.
+func (r *ShaleRepo) recomputeCounter(owner string, liveBytes int64, markers []reservationMarkerEntry, now time.Time, reserveGrace time.Duration) error {
+	counterKey := shaleKeyIdentityBytes(owner)
+	const maxAttempts = 8
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		txErr := r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
+			cur, err := txGetCounter(tx, counterKey)
+			if err != nil {
+				return err
+			}
+			// Read every marker key INTO the read-set and re-sum the
+			// in-grace bytes from the freshly-read marker value. A
+			// concurrent reserve/confirm that changed a marker conflicts at
+			// commit; a confirm that DELETED a marker is seen as absent here
+			// and so drops out of the in-grace sum, keeping the recompute
+			// consistent with the committed state.
+			var inGrace int64
+			for _, e := range markers {
+				raw, gerr := tx.Get(e.Key)
+				if gerr != nil {
+					if errors.Is(gerr, backend.ErrNotFound) {
+						continue // consumed/released since the scan; not counted
+					}
+					return gerr
+				}
+				m, perr := parseReservationMarker(raw)
+				if perr != nil {
+					return perr
+				}
+				if markerInGrace(m, now, reserveGrace) {
+					inGrace += m.Bytes
+				}
+			}
+			want := liveBytes + inGrace
+			if cur == want {
+				return nil // already correct; no write (keeps the pass quiet)
+			}
+			return tx.Put(counterKey, formatCounter(want))
+		})
+		switch {
+		case txErr == nil:
+			return nil
+		case errors.Is(txErr, backend.ErrCASConflict):
+			continue // a concurrent reserve/delete moved the counter; retry
+		default:
+			return txErr
+		}
+	}
+	// Could not converge under sustained concurrent load this pass. Leave
+	// the counter as-is; the next reconcile pass retries. Never blind-write.
+	return nil
 }
 
 // reconcileIndexes rebuilds identity_pastes projections to match the
@@ -1519,37 +1711,38 @@ func txPutIndex(r *ShaleRepo, owner, slug string, row identityPasteRow) error {
 	})
 }
 
-// releaseOrphanReservations drops reservation markers older than
-// reserveGrace whose paste never materialized, returning their bytes to
-// the counter. The reservation marker's age is inferred from the paste's
-// absence: a marker for a (owner, slug) with no authoritative paste in
-// pastesByOwner is an orphan. The grace window is honored by skipping
-// markers whose corresponding bytes were already folded into the recompute
-// above; because the recompute sets the counter from authoritative live
-// bytes (which excludes orphan-reserved bytes), the orphan markers are
-// simply deleted here so the reconciler does not re-add their bytes.
-func (r *ShaleRepo) releaseOrphanReservations(now time.Time, reserveGrace time.Duration, pastesByOwner map[string]map[string]identityPasteRow) error {
-	markers, err := r.aggregatePrefix([]byte("identity_reserve/"))
-	if err != nil {
-		return fmt.Errorf("reconcile: scan reservations: %w", err)
-	}
-	for _, item := range markers {
-		rest := strings.TrimPrefix(string(item.Key), "identity_reserve/")
-		idx := strings.Index(rest, "/")
-		if idx < 0 {
-			continue
-		}
-		owner := rest[:idx]
-		slug := strings.TrimSuffix(rest[idx+1:], "#append")
-		// An orphan is a marker whose paste does not exist authoritatively.
-		if owners, ok := pastesByOwner[owner]; ok {
-			if _, alive := owners[slug]; alive {
-				continue // paste exists; keep the marker (confirm will drop it)
+// releaseOrphanReservations drops reservation markers that have served
+// their purpose, honoring the grace window so an in-flight insert's
+// marker is never mistaken for an orphan (docs/SPEC.md "Running the
+// reconciler against live traffic"). For each marker:
+//
+//   - If it is YOUNGER than reserveGrace it is in-flight (between the
+//     reserve step and the authoritative write): skip it. Its bytes are
+//     still counted by the read-checked recompute above, so the counter
+//     stays correct while it is in flight.
+//   - If it is OLDER than reserveGrace, drop it when its paste is absent
+//     (the abandoned-reservation over-count a failed step 2 left) OR an
+//     authoritative paste exists for it (the leaked-marker case: a confirm
+//     that failed after the authoritative write succeeded leaves a marker
+//     even though the bytes are already authoritative). Either way the
+//     marker is no longer needed. The recompute already set the counter
+//     from authoritative live bytes plus only in-grace markers, so a
+//     dropped past-grace marker's bytes are correctly NOT in the counter,
+//     and deleting it does not change the counter.
+//
+// The leaked-marker drop is what bounds the marker family: without it a
+// confirm-failed marker for a still-live paste would never be cleaned and
+// would leak unboundedly.
+func (r *ShaleRepo) releaseOrphanReservations(now time.Time, reserveGrace time.Duration, markersByOwner map[string][]reservationMarkerEntry) error {
+	for _, markers := range markersByOwner {
+		for _, e := range markers {
+			if markerInGrace(e.Marker, now, reserveGrace) {
+				continue // in-flight; leave it for the confirm step to drop
 			}
+			// Past grace. Drop whether the paste is absent (abandoned
+			// reservation) or present (leaked confirm-failed marker).
+			_ = r.cluster.Delete(e.Key)
 		}
-		// The recompute already set the counter from authoritative bytes
-		// (excluding this orphan), so just drop the marker.
-		_ = r.cluster.Delete(item.Key)
 	}
 	return nil
 }
