@@ -1,8 +1,9 @@
 // metadata.go - pluggable metadata backend selector.
 //
 // Picks between the sqlite-backed PasteRepo (default, no build tag
-// required) and the SlateDB-backed SlateRepo (opt-in via the
-// `slatedb` build tag + HOSTTHIS_METADATA_BACKEND=slatedb env var).
+// required), the SlateDB-backed SlateRepo (opt-in via the `slatedb`
+// build tag + HOSTTHIS_METADATA_BACKEND=slatedb), and the shale-cluster
+// ShaleRepo (same `slatedb` build tag + HOSTTHIS_METADATA_BACKEND=shale).
 // See docs/SPEC.md "Metadata storage backends" for the model.
 
 package main
@@ -51,8 +52,10 @@ func buildMetadata(dataDir string, logger *log.Logger) (*metadataBundle, error) 
 		return buildMetadataSqlite(dataDir, logger)
 	case "slatedb":
 		return buildMetadataSlate(logger)
+	case "shale":
+		return buildMetadataShale(logger)
 	default:
-		return nil, fmt.Errorf("unknown HOSTTHIS_METADATA_BACKEND %q (want sqlite|slatedb)", backend)
+		return nil, fmt.Errorf("unknown HOSTTHIS_METADATA_BACKEND %q (want sqlite|slatedb|shale)", backend)
 	}
 }
 
