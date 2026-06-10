@@ -28,6 +28,7 @@ func TestShaleShardKey(t *testing.T) {
 		{"identity_pastes", "identity_pastes/sha256:deadbeef/abc12345", "sha256:deadbeef"},
 		{"identity_first_seen", "identity_first_seen/sha256:deadbeef", "sha256:deadbeef"},
 		{"identity_bytes", "identity_bytes/sha256:deadbeef", "sha256:deadbeef"},
+		{"identity_reserve", "identity_reserve/sha256:deadbeef/abc12345", "sha256:deadbeef"},
 
 		// Per-subnet Sybil-gate family -> shard key <subnet>.
 		{"keygate", "keygate/10.0.0.0_24/sha256:deadbeef", "10.0.0.0_24"},
@@ -70,6 +71,9 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 		"identity_pastes/" + id + "/" + slug,
 		"identity_first_seen/" + id,
 		"identity_bytes/" + id,
+		// The reservation marker MUST co-shard with identity_bytes so the
+		// reserve step's read-increment-mark is a single-shard CAS.
+		"identity_reserve/" + id + "/" + slug,
 	}
 	for _, k := range idKeys {
 		if got := string(shaleShardKey([]byte(k))); got != id {

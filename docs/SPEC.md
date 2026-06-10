@@ -1061,6 +1061,7 @@ expiry/<rfc3339>/<slug>            sweep index entry
 identity_pastes/<identity>/<slug>  per-owner list index (now value-bearing, see below)
 identity_first_seen/<identity>     cached first-seen timestamp
 identity_bytes/<identity>          per-owner active-bytes counter (NEW)
+identity_reserve/<identity>/<slug> per-owner reservation marker (NEW, see reservation pattern)
 keygate/<subnet>/<identity>        Sybil first-seen timestamp
 ```
 
@@ -1076,7 +1077,7 @@ extracts the shard key as follows:
 | Key family | Keys | Shard key |
 | --- | --- | --- |
 | Authoritative (per-slug) | `pastes/<slug>`, `versions/<slug>/*`, `slug_owner/<slug>`, `expiry/<date>/<slug>` | `<slug>` |
-| Derived (per-identity) | `identity_pastes/<id>/*`, `identity_first_seen/<id>`, `identity_bytes/<id>` | `<id>` |
+| Derived (per-identity) | `identity_pastes/<id>/*`, `identity_first_seen/<id>`, `identity_bytes/<id>`, `identity_reserve/<id>/*` | `<id>` |
 | Sybil gate (per-subnet) | `keygate/<subnet>/*` | `<subnet>` |
 
 The authoritative family is the source of truth for a paste's existence
@@ -1123,8 +1124,10 @@ shard, before any authoritative write happens.
 1. **Reserve** (one single-shard CAS on the `{id}` shard). Read
    `identity_bytes/<id>`. If `counter + body > cap`, reject with the
    over-quota error and stop. Otherwise increment the counter by `body`
-   and write a reservation marker, all in one CAS transaction. After
-   this commits, the bytes are accounted.
+   and write a reservation marker `identity_reserve/<id>/<slug>` (carrying
+   `body`), all in one CAS transaction. The marker key shards on `<id>`
+   like the counter, so the read-and-increment-and-mark is a single-shard
+   CAS. After this commits, the bytes are accounted.
 2. **Authoritative write** (one single-shard CAS on the `{slug}` shard).
    Write `pastes/<slug>`, the v1 `versions/<slug>/0001` row,
    `slug_owner/<slug>`, and the `expiry/<date>/<slug>` index entry, all
