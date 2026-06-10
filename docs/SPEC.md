@@ -1075,11 +1075,21 @@ design below is what keeps that sequence correct.
 
 Per-identity quota (the 10 MiB compressed cap) must be enforced exactly:
 an upload that would push an owner over the cap is rejected, and two
-concurrent uploads can never both pass the check and both land. The
-single-writer backends get this for free (the quota sum and the insert
-happen in one transaction). Shale cannot: the bytes counter lives on the
-`{id}` shard and the paste row lives on the `{slug}` shard, two
-different transactions.
+concurrent uploads can never both pass the check and both land.
+
+Where the single-writer backends land on this varies, and only one of
+them actually gets it right. The sqlite backend enforces it exactly: the
+quota sum and the insert run inside ONE serializable transaction, so two
+concurrent uploads serialize and the second sees the first's bytes. The
+slatedb backend does NOT: its quota sum runs before (outside) the write
+transaction, so two concurrent uploads for the same identity can both
+read the pre-upload sum, both pass, and both land, overshooting the cap.
+That is a real race in the slatedb-direct backend, not a sharding
+artifact. The reservation pattern below brings the shale backend up to
+sqlite-class strictness even though, unlike sqlite, it cannot put the sum
+and the write in one transaction: the bytes counter lives on the `{id}`
+shard and the paste row lives on the `{slug}` shard, two different
+single-shard transactions.
 
 The shale backend enforces quota with a **reservation pattern**: a
 three-step sequence that makes the quota decision atomic on the owner's
@@ -1129,6 +1139,26 @@ insert transaction. The `SumActiveBytesByOwner` and `CountByOwner`
 interface methods are still served, now from the `identity_bytes`
 counter and the `identity_pastes` index respectively, both single-shard
 reads on the `{id}` shard.
+
+**One intentional behavior change: expiry frees quota at sweep time, not
+read time.** The single-writer backends exclude an expired-but-not-yet-
+swept paste's bytes from the owner sum at READ time (their sum query
+filters `expires_at > now`), so an owner reclaims that quota the instant
+the paste expires, even before the sweep deletes it. The `identity_bytes`
+counter has no read-time expiry awareness: it is decremented only when
+the bytes actually leave, which for an expired paste is when the sweep
+deletes it. So under the shale backend an owner reclaims an expired
+paste's quota at the next sweep cycle (seconds to minutes), not the
+instant it expires. This is deliberate and fail-safe: the counter
+transiently OVER-counts an expired-unswept paste (rejecting the owner
+slightly early), and never under-counts (it never lets an owner exceed
+the cap). The divergence window is bounded by the sweep interval. No code
+above the storage boundary changes: the decrement rides the single
+`Delete` method that both the user's explicit delete and the sweep's
+expiry-delete already call, so the sweep stays unaware the counter
+exists. This is the only point where the shale backend's observable
+behavior intentionally differs from the single-writer backends; every
+other behavior the storage conformance suite pins is preserved exactly.
 
 ### Derived indexes and repair-on-read
 
