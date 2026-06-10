@@ -13,3 +13,7 @@
 /data/
 /hostthis-metadata-migrate
 /deploy/vps/
+
+# locally-generated SSH host/test keys (never commit private keys)
+internal/ssh/id_ed25519
+internal/ssh/id_ed25519.pub
