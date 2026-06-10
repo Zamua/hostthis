@@ -917,16 +917,19 @@ func (r *SlateRepo) ExpiredSlugs(now time.Time) ([]string, error) {
 	return out, nil
 }
 
-// UnreferencedBlobSHAs returns the set of REFERENCED content SHAs -
-// note the misleading name (inherited from the sqlite impl). The
-// sweep treats the returned slice as the allow-list: any blob whose
-// sha is NOT in this slice is deleted as orphan. Returning an empty
-// slice while the bucket has blobs would tell the sweep "everything
-// is orphan" and wipe the bucket - never stub this method to nil.
+// ReferencedBlobSHAs returns the set of blob content-SHAs still
+// referenced by a live version or paste head. The sweep treats the
+// returned slice as the allow-list: any blob whose sha is NOT in this
+// slice is deleted as orphan. Returning an empty slice while the bucket
+// has blobs would tell the sweep "everything is orphan" and wipe the
+// bucket, so the sweep has an abort-on-zero-refs guard; never stub this
+// method to nil.
 //
-// A sha is "referenced" if it's the head sha of an active paste OR
-// the content_sha of a non-deleted version row.
-func (r *SlateRepo) UnreferencedBlobSHAs() ([]string, error) {
+// A sha is "referenced" if it's the head sha of an active paste OR the
+// content_sha of a NON-DELETED version row. A tombstoned version's sha
+// is excluded (the canonical rule), so its blob becomes GC-eligible on
+// the next sweep.
+func (r *SlateRepo) ReferencedBlobSHAs() ([]string, error) {
 	pastes, err := r.scanPrefix([]byte("pastes/"))
 	if err != nil {
 		return nil, err

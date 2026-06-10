@@ -145,7 +145,7 @@ func TestSweep_GCsOrphanBlobOnly(t *testing.T) {
 // guard: if a buggy metadata-repo impl returns zero referenced shas
 // while blobs exist AND no pastes were just deleted, the sweep MUST
 // refuse to GC instead of wiping the bucket. We model the bug with
-// a fake repo whose UnreferencedBlobSHAs always returns nil.
+// a fake repo whose ReferencedBlobSHAs always returns nil.
 func TestSweep_GuardsAgainstBuggyRepoZeroRefs(t *testing.T) {
 	dir := t.TempDir()
 	blobs, _ := storage.NewBlobStore(filepath.Join(dir, "blobs"))
@@ -178,7 +178,7 @@ func TestSweep_GuardsAgainstBuggyRepoZeroRefs(t *testing.T) {
 }
 
 // buggyRepo simulates the failure mode this test guards against:
-// UnreferencedBlobSHAs always returns nil (i.e. "no shas are
+// ReferencedBlobSHAs always returns nil (i.e. "no shas are
 // referenced") even when paste rows exist. Only methods the sweep
 // actually invokes are stubbed; everything else panics so the test
 // surfaces unexpected calls.
@@ -186,4 +186,4 @@ type buggyRepo struct{}
 
 func (buggyRepo) ExpiredSlugs(_ time.Time) ([]string, error) { return nil, nil }
 func (buggyRepo) Delete(_ domain.Slug) error                 { panic("not expected") }
-func (buggyRepo) UnreferencedBlobSHAs() ([]string, error)    { return nil, nil }
+func (buggyRepo) ReferencedBlobSHAs() ([]string, error)      { return nil, nil }
