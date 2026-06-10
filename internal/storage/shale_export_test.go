@@ -53,6 +53,24 @@ func (r *ShaleRepo) ReconcileForTest(now time.Time, reserveGrace time.Duration) 
 	return r.Reconcile(now, reserveGrace)
 }
 
+// DecrementBytesForTest reclaims `body` bytes from an owner's counter via
+// the same single-CAS {id}-shard path Delete uses. Exposed ONLY so the
+// race test can drain the documented over-count residual: a Delete whose
+// authoritative {slug} removal committed but whose {id} counter decrement
+// lost a transient CAS retry leaves the bytes counted with the paste gone,
+// and re-calling Delete cannot heal it (the paste row is already gone, so
+// Delete early-returns without decrementing). The race test detects that
+// exact state (paste absent via Get, yet a transient was seen on the
+// recycle delete) and uses this helper to settle the counter so the
+// no-in-flight-ops END state can be asserted EXACT. It NEVER touches an
+// under-count; it only sheds bytes the authoritative truth no longer
+// holds. The reconciler itself deliberately does NOT do this online
+// (docs/SPEC.md "The invariant, the residual drift, and the deliberate
+// non-goal").
+func (r *ShaleRepo) DecrementBytesForTest(identity string, body int64) error {
+	return r.decrementBytes(identity, body)
+}
+
 // --- legacy-value builders (the slatedb on-disk shape) ---------------------
 
 // LegacyPasteKeyForTest returns the authoritative paste key for slug, the
