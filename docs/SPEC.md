@@ -851,8 +851,10 @@ Every write that touches multiple keys is committed atomically:
 - Per-version delete = (version tombstone) + (identity quota counter
   decrement). Both land or neither.
 - Whole-paste delete = (paste row delete) + (cascade to all version
-  rows) + (slug pointer delete) + (counter recompute). All land or
-  none.
+  rows) + (slug pointer delete) + (counter decrement by the freed
+  bytes). The authoritative `{slug}` deletes commit first; the `{id}`
+  counter decrement is a separate read-checked CAS (`counter -= freed`),
+  never a scan-derived recompute.
 
 sqlite enforces this via `BEGIN IMMEDIATE`; slatedb via
 `Db.begin(IsolationLevel.SnapshotIsolation)` with `WriteBatch`.
@@ -1233,60 +1235,146 @@ among them. Healing missing entries is therefore the reconciler's job,
 not `ListByOwner`'s. The reader self-heals exactly the stale entries it
 touches; the reconciler covers everything reads alone cannot.
 
-A background **reconciler** does the rest of the healing: it rebuilds
-derived indexes from the authoritative rows (adding missing entries,
-refreshing stale projections, dropping entries whose paste is gone),
-recomputes the `identity_bytes` counter from the owner's non-deleted
-version sizes plus any in-flight reservations, and releases orphaned
-reservations. The reconciler is the mechanism that converges the
-over-count left by a failed step 2 back to the true value.
+A background **reconciler** does the rest of the healing. It has exactly
+two jobs, and **neither one ever overwrites the `identity_bytes` counter
+with an absolute value derived from a scan**:
+
+1. **Rebuild derived indexes** from the authoritative rows (add missing
+   `identity_pastes` entries, refresh stale projections, drop entries
+   whose paste is gone). This touches only the derived index, never the
+   counter.
+2. **Complete reservation markers** that the hot path left behind: release
+   an abandoned reservation (decrementing the counter by exactly the
+   marker's bytes, atomic with consuming the marker) and drop a leaked
+   confirm-failed marker (without touching the counter).
+
+The counter itself is **never recomputed**. It is maintained purely by
+the strict, read-checked CAS deltas on the hot path (a reserve adds, a
+delete or delete-version subtracts, an orphan-release subtracts), each
+atomic with the marker or version state it is gated on. The reconciler
+completes markers and repairs the derived index; it does not, and must
+not, derive the counter's absolute value from a cross-shard snapshot.
+
+This design is a deliberate reversal of an earlier recompute-based
+approach. The recompute (rebuild the counter from a cross-shard live-byte
+scan plus in-grace markers, then write the absolute value under a
+read-checked CAS) was **structurally racy** and is removed. The conflict
+window it could not close was scan -> `tx.Get(counter)`, not scan ->
+commit: a reserve that committed between the reconciler's cross-shard
+scan and the moment its CAS read the counter into the read-set was
+invisible to both the stale scan and the captured markers, so the
+recompute wrote the counter **down** and a later reserve over-admitted
+past the cap. That is an under-count, the one failure mode the quota
+must never permit. A second race double-counted a marker's bytes in the
+window between the authoritative write (already in the scan) and the
+confirm that drops the marker. Both are eliminated by not recomputing at
+all: the only thing that ever moved the counter incorrectly was the
+overwrite.
 
 #### Running the reconciler against live traffic
 
 The reconciler is safe to schedule while uploads and deletes are in
-flight. Two design rules make it so: a **grace window** that protects
-in-flight reservations, and a **read-checked** counter recompute that
-can never clobber a concurrent committed write.
+flight. The reason is structural: it **never recomputes the counter**.
+The counter is only ever moved by strict, read-checked CAS deltas on the
+`{id}` shard, and every reconciler write is one such targeted delta (or a
+no-op), never a full-scan overwrite. A **grace window** protects markers
+for in-flight inserts so the reconciler does not race a reserve that has
+not yet confirmed.
 
-**Grace window for reservation release.** A reservation marker is only an
-orphan candidate if it is older than `reserveGrace` (computed as
+**Why never recompute.** Every counter change in this system is a
+read-checked CAS *delta* on the `{id}` shard, atomic with the marker or
+version state it is gated on:
+
+- **Reserve (insert / append):** `counter += body`, atomic with writing
+  the reservation marker. This is the quota guarantee. It is strict under
+  concurrency (the `QuotaConcurrentCeiling` conformance test pins it):
+  the increment commits before the authoritative write, so two concurrent
+  uploads cannot both pass the check against a stale counter.
+- **Delete / delete-version:** `counter -= bytes`, a read-checked CAS
+  gated on the version's not-already-tombstoned state. The existing
+  `freed == 0` / `!v.Deleted` guards make the decrement at-most-once, so
+  a retried or duplicated delete cannot double-decrement.
+- **Orphan-reserve-release (reconciler):** `counter -= marker.bytes`,
+  atomic with deleting the marker, in one `{id}` transaction. Idempotent:
+  the marker is consumed atomically, so a retry that finds no marker is a
+  no-op. It only ever decrements *abandoned* reservations whose bytes
+  were never consumed by a live paste, so it can never under-count a live
+  paste.
+
+Because the counter is only ever a sum of strict deltas, there is no
+absolute value to "rebuild" and nothing to overwrite. The earlier
+recompute tried to overwrite the absolute value from a cross-shard
+snapshot; that overwrite was the *only* thing that introduced a race
+(under-count and double-count, described above). Removing it leaves the
+counter maintained entirely by the deltas, which are individually correct
+under concurrency.
+
+**Grace window for reservation completion.** A reservation marker is only
+an orphan candidate if it is older than `reserveGrace` (computed as
 `now - created_at > reserveGrace`). A younger marker is treated as a
 genuinely in-flight insert (it is between the reserve step and the
-authoritative write) and is left alone: deleting it would un-account
-bytes that are about to land. The release rule is: drop a marker when it
-is **older than grace** AND (its paste is absent OR a confirmed index
-entry already exists for it). The first clause (absent paste) is the
-abandoned-reservation case the over-count comes from. The second clause
-(confirmed entry present) is the leaked-marker case: a confirm that
-failed after the authoritative write succeeded leaves a marker behind
-even though the bytes are already authoritative and the index entry was
-written. Such a marker has served its purpose and is dropped once it is
-past grace, so it cannot leak unbounded. The same rule covers the
-`<slug>#append` marker an `AppendVersion` reserve writes.
+authoritative write) and is left strictly alone: its bytes are already in
+the counter (the reserve added them) and the confirm step is expected to
+land shortly. For a marker **older than grace**, the reconciler completes
+it in one of two ways, both keyed off whether the marker's paste / version
+materialized:
 
-**Read-checked, reservation-aware counter recompute.** The true counter
-value for an owner is `(sum of live non-deleted version bytes across all
-the owner's pastes) + (sum of the bytes of every reservation marker
-still within grace)`. The in-grace reservations are added because they
-are genuinely in-flight inserts whose bytes are reserved but whose
-authoritative version row has not landed yet; excluding them would
-briefly under-count and let the owner over-commit. The recompute is NOT
-a blind write. It runs as a single-shard CAS on the `{id}` counter that
-puts both the counter and the owner's reservation markers in its
-read-set, computes the true value, and writes it only if it differs.
-Because every authoritative byte change in this system also moves the
-counter (a reserve, a confirm, a delete, a delete-version, and a sweep
-all commit a counter write), the counter is effectively a version token
-for the owner's byte state. Any concurrent reserve/delete that commits
-between the reconciler's cross-shard live-byte scan and its counter CAS
-will have touched the counter (or a marker), so the read-checked CAS
-conflicts and retries with a fresh scan rather than overwriting the
-concurrent write. The cross-shard live-byte scan being slightly stale is
-therefore harmless: any version change that the stale scan missed also
-moved the counter, which the read-check catches. The recompute uses a
-bounded retry; if it cannot converge under sustained concurrent load in
-one pass it leaves the counter untouched and the next pass retries. It
-never blind-writes a recomputed value over a counter it did not read.
+- **Orphan-reserve-release** (paste / version is **absent**): the insert
+  was abandoned, so the reserved bytes never became live. In one `{id}`
+  `Transact`, read the counter and the marker; if the marker is still
+  present, `counter -= marker.bytes` AND delete the marker, atomically.
+  This is the only reconciler write that touches the counter, and it
+  removes exactly the bytes the matching reserve added. Idempotent: a
+  concurrent confirm or a prior pass that already consumed the marker
+  leaves nothing to release.
+- **Leaked-marker drop** (paste **exists** and is confirmed): a confirm
+  that failed after the authoritative write succeeded leaves a marker
+  behind even though the bytes are already authoritatively counted and the
+  index entry was written. Delete the marker **without touching the
+  counter** (decrementing here would under-count the live paste). Dropping
+  the marker just stops the leak; the bytes stay correctly counted.
+
+The same two cases cover the `<slug>#append` marker an `AppendVersion`
+reserve writes. Both are idempotent and individually correct, so the
+reconciler is safe to run against live traffic on any cadence.
+
+#### The invariant, the residual drift, and the deliberate non-goal
+
+**The invariant that matters: the counter must never under-count.** An
+under-count would let an owner exceed the cap, which is unacceptable.
+Over-counting is fail-safe: it rejects the owner slightly early but never
+admits over the cap. So every decrement is at-most-once and happens only
+when the bytes are genuinely gone (a tombstoned version, or an abandoned
+reservation consumed atomically with its marker); increments are already
+strict.
+
+With the recompute removed, the only counter drift that can still occur
+is an **over-count** from a process crash in one narrow window: between
+the authoritative delete (the version tombstone on the `{slug}` shard)
+and its counter decrement (on the `{id}` shard) being lost to the crash.
+The bytes are gone from authoritative truth but still counted. This is
+**fail-safe** (the owner has slightly less available quota than they
+should, never more), and **rare** (it needs a crash between two writes in
+a single delete). It is deliberately **not auto-corrected online**:
+correcting it would require deriving the counter's absolute value from a
+cross-shard scan, which is precisely the racy recompute that was removed.
+We accept a rare, bounded, fail-safe over-count rather than reintroduce
+an under-count risk.
+
+Two **robustness options are documented as future enhancements, not built
+now**, and neither runs online against live traffic:
+
+1. **Crash-durable delete decrement via a symmetric release marker.**
+   Write a release marker before the authoritative tombstone, and have
+   the reconciler apply it idempotently: decrement the counter iff the
+   version is tombstoned, gated by an atomic marker-consume on the `{id}`
+   shard (the same shape as the orphan-reserve-release above). This closes
+   the crash window without any scan-derived overwrite.
+2. **An offline audit tool** that recomputes the counter from
+   authoritative truth with writes quiesced. Because it runs with no
+   concurrent traffic, the scan-then-write has no conflict window. This is
+   the only context in which recomputing an absolute value is sound, and
+   it is explicitly an offline operator step, never an online loop.
 
 ### Cross-shard background operations
 
@@ -1345,11 +1433,14 @@ Two compatibility details:
   rows. Before enabling per-identity quota on the shale backend, an
   operator runs a one-time backfill that sums each identity's
   non-deleted version sizes and writes the counter. This is an operator
-  step performed once at cutover, out of scope for the runtime path.
-  Until the backfill runs, the reconciler's recompute path produces the
-  same values on first touch, so the backfill is an optimization that
-  avoids a cold-start over-permit window rather than a correctness
-  requirement.
+  step performed once at cutover, out of scope for the runtime path, and
+  it is a **correctness requirement**, not an optimization: the runtime
+  never recomputes the counter from a scan, so an identity with no
+  `identity_bytes/<id>` row starts at zero and would over-permit until
+  enough deltas accumulated. The backfill is the only sanctioned
+  scan-to-absolute-value write, and like the offline audit above it runs
+  once, before live quota enforcement is enabled, with no concurrent
+  traffic.
 
 ---
 
