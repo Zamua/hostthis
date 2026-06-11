@@ -1981,11 +1981,17 @@ count + prune compares (the `<subnet>` itself contains a `/`, so both parsers
 strip the two trailing slash-free segments from the right to recover
 `(subnet, ts)`).
 
-The `rooms/<app-slug>/<uuid>` row is the authoritative record: the
-retention clock only (no byte/key totals are stored on it - the byte and
-key counts are computed by scanning `roomkv/<app-slug>/<uuid>/` at PUT
+The `rooms/<app-slug>/<uuid>` row is the authoritative record. On the
+**slatedb** (and sqlite) backend it holds the retention clock only: the byte
+and key counts are computed by scanning `roomkv/<app-slug>/<uuid>/` at PUT
 time, the same way the sqlite backend materializes the namespace for the
-pure `RoomKV.CanPut` cap math). A value is stored **verbatim** (not
+pure `RoomKV.CanPut` cap math, serialized by the per-room `lockQuota` stripe
+(slatedb) / the serializable tx (sqlite). The **shale** backend additionally
+stores a running `byte_total` + `key_count` on this record (the `roomRow`
+shale-only fields), because shale validates the per-room cap inside a CAS and a
+CAS read-set cannot carry a scan, so it needs a discrete in-record total the
+read-set can read-check (see "Shale reuses the layout" -> "Per-room cap
+(strict)"). A value is stored **verbatim** (not
 JSON-wrapped): hostthis never parses a room value, so `roomkv/...` holds
 the exact bytes the app PUT, and a Get returns them unchanged. The two
 marker families (`roomcreate/`, `roomexpiry/`) carry an empty value, the
@@ -2205,26 +2211,51 @@ anchoring (the trailing-slash discipline in `shaleShardKey`:
 `roomkv/` is not `rooms/`).
 
 The strict-isolation, per-room-cap, and per-app-aggregate-cap properties
-carry over from the slatedb layout unchanged. The per-room and per-app caps
-are STRICT under concurrency on shale via the reservation-pattern CAS the
-paste + site counters use, applied to a per-app room-byte counter
-(`roombytes/<app-slug>`, the per-app analogue of `identity_bytes/<id>`):
-a room PUT reserves its byte delta on the `{app-slug}` shard's room-byte
-counter before the authoritative `{app-slug}` value write, so two concurrent
-writers cannot overshoot the per-app cap (`conformCaps
-.StrictQuotaUnderConcurrency = true`). Because all four room families share
-the one `{app-slug}` shard, a room create or write is already single-shard,
-so the value write + the counter update are one CAS and the reservation's
-authoritative-write step does not span shards the way a paste / site insert
-does - the room counter is simpler than the paste counter (no cross-shard
-reserve / confirm split needed). The service-wide cap sums version bytes +
-every site's `DedupedSize` + every app's room bytes (the shale
-`sumServiceWideActiveBytes` adds the room aggregate, paralleling the slatedb
-sum), so on the paste-insert, site-deploy, AND room-write paths each kind
-sees the others' bytes. Sweep-time expiry semantics
-(`ExpiryFreesQuotaAtReadTime = false`) carry over from the paste counter:
-a room's bytes leave the per-app counter when the sweep deletes the expired
-room, not at read time, the same fail-safe over-count direction.
+carry over from the slatedb layout unchanged. Both the per-room cap and the
+per-app aggregate cap are STRICT under concurrency on shale, but they are
+enforced by two DIFFERENT read-set members of the one `{app-slug}`-shard CAS,
+because a CAS read-set is a set of discrete key checks (shale forbids
+`ScanPrefix` inside a transaction - a scanned range has no cheap phantom
+protection), so a cap whose magnitude is "the sum over a key range" must be
+backed by a discrete COUNTER the CAS can read-check, not by an in-CAS scan:
+
+- **Per-app aggregate cap (strict).** A per-app room-byte counter
+  `roombytes/<app-slug>` (the per-app analogue of `identity_bytes/<id>`) is
+  read-checked and incremented inside the `{app-slug}` value-write CAS, so two
+  concurrent writers to the SAME app cannot both pass a stale per-app sum and
+  overshoot `appCap`. Because all five room families (the four above + this
+  counter) share the one `{app-slug}` shard, a room create or write is already
+  single-shard, so the value write + the counter update are one CAS - simpler
+  than the paste counter (no cross-shard reserve / confirm split needed).
+- **Per-room cap (strict).** The per-room byte total + key count are stored ON
+  the room record (`rooms/<app-slug>/<uuid>`, the `roomRow` `byte_total` +
+  `key_count` fields, shale-only) and validated against `MaxRoomBytes` /
+  `MaxRoomKeys` INSIDE the same CAS. The room record is already read-checked in
+  the read-set (the room-exists re-check) and rewritten on every PUT / DELETE
+  (the clock touch), so two concurrent writers to DISTINCT keys of the same
+  room - which target different value keys and so would NOT conflict on the
+  value-key read-check alone - DO conflict on the shared room-record read-check:
+  the second writer's CAS conflicts after the first commits, the retry re-reads
+  the now-updated `byte_total` / `key_count`, and the per-room cap is recomputed
+  against the fresh totals. So the per-room ceiling holds no matter how the
+  writes interleave (`conformCaps.StrictQuotaUnderConcurrency = true`). The
+  totals are maintained ONLY by the shale backend (slatedb + sqlite leave them
+  unset and compute the per-room cap by materializing the namespace under a
+  serialized writer - slatedb's per-room `lockQuota` stripe, sqlite's
+  serializable tx - so they need no stored total); since a room is only ever
+  written by one backend's store, the shale-only fields are inert on the others.
+
+The service-wide cap sums version bytes + every site's `DedupedSize` + every
+app's room bytes (the shale `sumServiceWideActiveBytes` adds the room
+aggregate, paralleling the slatedb sum), so on the paste-insert, site-deploy,
+AND room-write paths each kind sees the others' bytes. Sweep-time expiry
+semantics (`ExpiryFreesQuotaAtReadTime = false`) carry over from the paste
+counter: a room's bytes leave the per-app counter when the sweep deletes the
+expired room, not at read time, the same fail-safe over-count direction. The
+`Rooms/PerRoomCapConcurrentCeiling` conformance subtest fires N concurrent
+distinct-key writes into one room against the structural `MaxRoomBytes` cap and
+asserts the persisted byte total never breaches it - the gate that pins the
+per-room strictness above on every `StrictQuotaUnderConcurrency` backend.
 
 **Empty room values on shale.** shale's `Put` rejects empty values (the
 empty payload is reserved for delete tombstones), but a room value may

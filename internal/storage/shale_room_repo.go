@@ -11,7 +11,7 @@
 //
 // # Key layout (reuses the slatedb room layout; all sharded on {app-slug})
 //
-//	rooms/<app-slug>/<uuid>                     -> {app-slug} shard  (authoritative JSON record)
+//	rooms/<app-slug>/<uuid>                     -> {app-slug} shard  (JSON record; carries the per-room byte_total + key_count for the strict per-room cap)
 //	roomkv/<app-slug>/<uuid>/<key>              -> {app-slug} shard  (raw value bytes, sentinel-prefixed)
 //	roomcreate/<app-slug>/<subnet>/<ts>/<uuid>  -> {app-slug} shard  (creation ledger marker; ts fixed-width, uuid disambiguates)
 //	roomexpiry/<ts>/<app-slug>/<uuid>           -> {app-slug} shard  (sweep index marker; ts fixed-width)
@@ -24,21 +24,32 @@
 // cap" all single-shard operations - the room repo never fans out across
 // shards on the hot path.
 //
-// # Per-app cap is STRICT (single-shard CAS, no reserve/confirm split)
+// # Both caps are STRICT (single-shard CAS, two different read-set members)
 //
-// Because the authoritative value write (roomkv/<app>/<uuid>/<key>) and the
-// per-app counter (roombytes/<app>) co-shard on {app-slug}, the value write
-// and the counter update are ONE CAS transaction. So unlike the paste / site
-// insert (which span the {id} counter shard and the {slug} authoritative
-// shard and need the three-step reserve/authoritative/confirm reservation),
-// a room PUT is a single-shard read-check-increment-write. The per-app cap is
-// strict under concurrency (conformCaps.StrictQuotaUnderConcurrency = true):
-// two concurrent same-app writers serialize through the one {app-slug} shard
-// CAS, so the per-app byte ceiling cannot be overshot. The per-ROOM cap (byte
-// + key totals) is materialized OUTSIDE the tx (ScanPrefix is not allowed
-// inside a CAS) and the decision is made race-safe by re-reading the specific
-// value key inside the CAS, the same discipline AppendVersion uses for the
-// next version number.
+// A CAS read-set is a set of discrete key checks - ScanPrefix is not allowed
+// inside a transaction (a scanned range has no cheap phantom protection) - so a
+// cap whose magnitude is "the sum over a key range" must be backed by a
+// discrete COUNTER the read-set can carry, not by an in-CAS scan. The two room
+// caps use two different such read-set members:
+//
+//   - Per-APP aggregate: the per-app counter roombytes/<app> is read-checked +
+//     incremented in the {app-slug} value-write CAS, so two concurrent same-app
+//     writers cannot both pass a stale per-app sum and overshoot appCap.
+//   - Per-ROOM byte + key total: stored ON the room record (the roomRow
+//     byte_total + key_count fields, shale-only) and validated against
+//     MaxRoomBytes / MaxRoomKeys INSIDE the CAS. The room record is already in
+//     the read-set (the room-exists re-check) and rewritten on every PUT/DELETE
+//     (the clock touch), so two concurrent writers to DISTINCT keys of the same
+//     room - which target disjoint value keys and so would NOT conflict on the
+//     value-key check alone - DO conflict on the shared room record; the loser
+//     retries against the now-updated totals. So the per-room ceiling holds no
+//     matter how the writes interleave (conformCaps.StrictQuotaUnderConcurrency
+//     = true; the Rooms/PerRoomCapConcurrentCeiling conformance subtest pins it).
+//
+// Unlike the paste / site insert (which spans the {id} counter shard and the
+// {slug} authoritative shard and needs the three-step reserve/authoritative/
+// confirm reservation), every room key co-shards on {app-slug}, so a room PUT
+// is a single-shard read-check-validate-write - no reserve/confirm split.
 //
 // # Sweep-time expiry (ExpiryFreesQuotaAtReadTime = false)
 //
@@ -287,13 +298,20 @@ func (r *ShaleRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.Room
 }
 
 // PutRoomValue writes val under key, enforcing the per-room, per-app, and
-// service-wide caps and resetting the retention clock. The per-room cap math
-// runs on a namespace materialized OUTSIDE the tx (ScanPrefix is not allowed
-// in a CAS); the authoritative write is ONE {app-slug}-shard CAS that
-// re-reads the specific value key for race-safety, checks + increments the
-// per-app counter (strict ceiling), writes the value, and moves the expiry
-// index. Because the value, the counter, and the expiry index all co-shard
-// on {app-slug}, this is single-shard - no reserve/confirm split needed.
+// service-wide caps and resetting the retention clock. The authoritative write
+// is ONE {app-slug}-shard CAS that re-reads the specific value key for the
+// byte delta, validates BOTH caps from values the CAS read-set carries - the
+// per-ROOM byte total + key count stored ON the room record, and the per-APP
+// counter (roombytes/<app>) - then writes the value and touches the room. The
+// per-room cap is strict because the room record is in the read-set (read for
+// the room-exists check, rewritten on the clock touch): two concurrent writers
+// to DISTINCT keys of the same room - which do not conflict on their disjoint
+// value keys - DO conflict on the shared room record, so the loser retries
+// against the now-updated totals. ScanPrefix is not allowed inside a CAS (no
+// phantom protection), which is why the per-room total is a discrete in-record
+// figure the read-set can carry rather than an in-CAS scan. Because the value,
+// the per-app counter, the room record, and the expiry index all co-shard on
+// {app-slug}, this is single-shard - no reserve/confirm split needed.
 //
 // Returns ErrNotFound if the room is gone, ErrRoomDataFull (413) on the
 // per-room cap, ErrAppRoomsFull (507) on the per-app aggregate, ErrServiceFull
@@ -303,62 +321,82 @@ func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 	roomKey := shaleKeyRoom(appSlug, id)
 	counterKey := shaleKeyRoomBytes(appSlug)
 
-	// Materialize the namespace for the pure per-room cap math (outside the
-	// tx). A room is capped at 256 keys / 256 KiB, so this is a small map.
-	kv, err := r.ScanRoom(appSlug, id)
-	if err != nil {
-		return err
-	}
-	if err := kv.CanPut(key, val); err != nil {
-		return ErrRoomDataFull // value-too-large is also "room full"
-	}
-	priorScan := 0
-	if existing, ok := kv.Values[key]; ok {
-		priorScan = len(existing)
+	// Stateless value-size guard (no race: depends only on len(val)). The
+	// byte-total + key-count caps are NOT checked here - they are race-prone
+	// against a stale scan, so they move INSIDE the CAS below, validated against
+	// the room record's running totals (which the CAS read-set carries).
+	if len(val) > domain.MaxRoomValueBytes {
+		return ErrRoomDataFull
 	}
 
 	// Service-wide cap: SOFT cross-shard pre-check (the same posture as the
 	// paste / site paths). The shared sumServiceWideActiveBytes counts version
 	// bytes + site bytes + room bytes, so a room PUT sees paste + site bytes.
-	if serviceCap > 0 && int64(len(val)-priorScan) > 0 {
+	// Uses the value's gross size as an upper bound on the delta for the
+	// pre-check (the exact prior is re-read in the CAS; this pre-check is soft).
+	if serviceCap > 0 {
 		total, err := r.sumServiceWideActiveBytes()
 		if err != nil {
 			return fmt.Errorf("service-wide sum: %w", err)
 		}
-		if total+int64(len(val)-priorScan) > serviceCap {
+		if total+int64(len(val)) > serviceCap {
 			return ErrServiceFull
 		}
 	}
 
 	// Authoritative single-shard CAS on {app-slug}: re-check the room exists,
 	// re-read the value key (so the byte delta is computed against the value
-	// the CAS will overwrite, race-safe even if a concurrent writer changed
-	// it since the scan), enforce the strict per-app cap, write the value,
-	// and touch the room (move the expiry index).
+	// the CAS will overwrite, race-safe even if a concurrent writer changed it),
+	// enforce the STRICT per-room cap (from the room record's running totals,
+	// which are in the read-set) and the STRICT per-app cap (the per-app
+	// counter, also in the read-set), write the value, and touch the room (move
+	// the expiry index + update the running totals).
 	return r.cluster.Transact(valueKey, func(tx backend.Transaction) error {
 		// Room-exists re-check INSIDE the write boundary so a concurrent
 		// expiry sweep cannot delete the room between the service's GetRoom
-		// and this write.
+		// and this write. This Get also puts the room record in the read-set,
+		// which is what serializes two concurrent DISTINCT-key writers to the
+		// SAME room (they would not conflict on their disjoint value keys, but
+		// they both read + rewrite the shared room record, so the second one's
+		// CAS conflicts after the first commits and re-runs against the updated
+		// per-room totals - the strict-per-room-cap mechanism).
 		var row roomRow
 		if err := shaleTxGetJSON(tx, roomKey, &row); err != nil {
 			return err // ErrNotFound if the room is gone
 		}
 
-		// Re-read the value key to compute the authoritative byte delta. This
-		// is the race-safety re-read: the CAS read-check makes a concurrent
-		// write of the same key conflict (the closure retries). The delta is
-		// computed on DECODED lengths (the sentinel prefix is not charged), so
-		// the per-app counter matches the slate byte accounting exactly.
+		// Re-read the value key to compute the authoritative byte delta. The
+		// delta is computed on DECODED lengths (the sentinel prefix is not
+		// charged), so all byte accounting matches the slate backend exactly.
 		prior := 0
+		isNewKey := true
 		if cur, err := tx.Get(valueKey); err == nil {
 			prior = shaleDecodedRoomValueLen(cur)
+			isNewKey = false
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return fmt.Errorf("re-read room value: %w", err)
 		}
 		delta := int64(len(val) - prior)
 
-		// Per-app aggregate: read-check-increment the counter in the same CAS
-		// (strict ceiling). Charge only a positive delta.
+		// STRICT per-room cap: validate the new byte total + key count against
+		// the structural caps, computed from the room record's running totals
+		// (in the read-set) + this write's delta. Mirrors domain.RoomKV.CanPut's
+		// byte + key-count checks, but against the stored totals rather than a
+		// materialized namespace, so it is race-safe under the CAS read-set.
+		newByteTotal := row.ByteTotal + delta
+		if newByteTotal > int64(domain.MaxRoomBytes) {
+			return ErrRoomDataFull
+		}
+		newKeyCount := row.KeyCount
+		if isNewKey {
+			newKeyCount++
+		}
+		if newKeyCount > domain.MaxRoomKeys {
+			return ErrRoomDataFull
+		}
+
+		// STRICT per-app aggregate: read-check-increment the per-app counter in
+		// the same CAS. Charge only a positive delta.
 		if delta != 0 || appCap > 0 {
 			cur, err := txGetCounter(tx, counterKey)
 			if err != nil {
@@ -382,7 +420,10 @@ func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 			return fmt.Errorf("put room value: %w", err)
 		}
 
-		// Touch the room: reset the clock + move the expiry index entry.
+		// Touch the room: reset the clock, move the expiry index entry, AND
+		// commit the new per-room running totals onto the record.
+		row.ByteTotal = newByteTotal
+		row.KeyCount = newKeyCount
 		return shaleTxTouchRoom(tx, appSlug, id, &row, now)
 	})
 }
@@ -390,8 +431,9 @@ func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 // DeleteRoomValue removes key and resets the retention clock (a delete is a
 // write). Idempotent: deleting an absent key succeeds. One {app-slug}-shard
 // CAS: re-check the room exists, delete the value, decrement the per-app
-// counter by the freed bytes, and touch the room. Returns ErrNotFound only
-// when the ROOM does not exist.
+// counter by the freed bytes, drop the per-room byte_total + key_count on the
+// record by the same freed bytes / one key, and touch the room. Returns
+// ErrNotFound only when the ROOM does not exist.
 func (r *ShaleRepo) DeleteRoomValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) error {
 	valueKey := shaleKeyRoomValue(appSlug, id, key)
 	roomKey := shaleKeyRoom(appSlug, id)
@@ -401,13 +443,16 @@ func (r *ShaleRepo) DeleteRoomValue(appSlug domain.Slug, id domain.RoomID, key s
 		if err := shaleTxGetJSON(tx, roomKey, &row); err != nil {
 			return err // ErrNotFound if the room is gone
 		}
-		// Read the value to learn its byte count (to credit the counter). The
-		// freed bytes are the DECODED length (the sentinel prefix was never
-		// charged), so the counter decrement matches the increment PutValue
-		// made.
+		// Read the value to learn its byte count (to credit the counter + the
+		// per-room running totals). The freed bytes are the DECODED length (the
+		// sentinel prefix was never charged), so the decrement matches the
+		// increment PutValue made. A delete of a present key also drops the
+		// per-room key count by one.
 		freed := int64(0)
+		deletedKey := false
 		if cur, err := tx.Get(valueKey); err == nil {
 			freed = int64(shaleDecodedRoomValueLen(cur))
+			deletedKey = true
 			if err := tx.Delete(valueKey); err != nil {
 				return fmt.Errorf("delete room value: %w", err)
 			}
@@ -421,6 +466,17 @@ func (r *ShaleRepo) DeleteRoomValue(appSlug domain.Slug, id domain.RoomID, key s
 			}
 			if err := tx.Put(counterKey, formatCounter(cur-freed)); err != nil {
 				return err
+			}
+		}
+		// Maintain the per-room running totals (only when a present key was
+		// actually removed; deleting an absent key changes nothing).
+		if deletedKey {
+			row.ByteTotal -= freed
+			if row.ByteTotal < 0 {
+				row.ByteTotal = 0
+			}
+			if row.KeyCount > 0 {
+				row.KeyCount--
 			}
 		}
 		return shaleTxTouchRoom(tx, appSlug, id, &row, now)
