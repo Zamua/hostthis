@@ -479,6 +479,46 @@ Nothing about the product opinions changes for sites:
   is written and the manifest is persisted; a half-uploaded site never
   serves.
 
+### Byte-identical validation harness
+
+The static-site contract is "what you upload is what is served": every
+file round-trips **byte-for-byte**, with the content-type its extension
+implies; `/` and `/<dir>/` serve that directory's `index.html`; an
+unmatched route serves the root `index.html` via the SPA fallback; and a
+genuinely-missing asset 404s. That contract is pinned by a validation
+harness that deploys **real, framework-built sites** through the SAME
+archive pipeline an `ssh` tar upload hits.
+
+The harness ships four committed site fixtures under
+`testdata/sitefixtures/`:
+
+- three **vite SPA** builds - React (`react-router-dom`), Vue
+  (`vue-router`), and Svelte (`svelte-routing`) - each with a home route
+  plus an `/about` (and `/users/:id`) client-side route that is NOT a real
+  file, so the SPA fallback is exercised against a genuine framework
+  bundle, and
+- a **plain-static** demo (hand-written `index.html` + `about.html` +
+  `css/app.css` + `js/app.js`, no framework, no build step) so the
+  round-trip is also proven for a multi-page site whose second page is a
+  real file served directly, never via the fallback.
+
+For each fixture the harness tars the build output, deploys it through the
+real `DeploySite` use case over a real sqlite repo + content-addressed
+blob store, then fetches every built file back over the real HTTP serving
+surface and asserts the served bytes are byte-identical to the fixture
+file, the content-type matches the extension, `/` serves the root
+`index.html`, the deep route serves the root `index.html` via the SPA
+fallback (200, index bytes), and a missing asset (`/assets/nope.js`) 404s.
+
+The committed build output is the **known-good snapshot**: CI byte-compares
+against it and never runs `npm`. The demo SOURCE and a `SHA256SUMS`
+manifest are committed alongside each `dist/`; `make rebuild-site-fixtures`
+regenerates both from source (`npm ci` + `vite build`, deterministic
+because vite content-hashes asset names), and a snapshot test fails loudly
+if any committed fixture file drifts from its pinned hash. `node_modules`
+is gitignored - the fixtures need no toolchain to validate, only to
+regenerate.
+
 ## Rooms (app persistence)
 
 Static sites can SHIP, but a static site has no backend: it can render,
