@@ -25,6 +25,13 @@ type PasteReader interface {
 	Get(domain.Slug) (domain.Paste, error)
 }
 
+// SiteReader is the read-side interface for static sites. Optional:
+// nil disables site serving (the slug then resolves only as a paste).
+// internal/storage.SiteRepo satisfies it.
+type SiteReader interface {
+	Get(domain.Slug) (domain.Site, error)
+}
+
 // BlobReader fetches paste bytes by content sha.
 type BlobReader interface {
 	Get(sha string) ([]byte, error)
@@ -33,6 +40,7 @@ type BlobReader interface {
 // Server bundles the dependencies.
 type Server struct {
 	Pastes      PasteReader
+	Sites       SiteReader // optional; nil disables static-site serving
 	Blobs       BlobReader
 	LandingHTML []byte // optional - apex landing page bytes embedded at build
 	ApexDomain  string // e.g. "hostthis.dev" - used to peel slug subdomains
@@ -64,13 +72,19 @@ func (s *Server) Handler() http.Handler {
 			s.serveHealthz(w, r)
 			return
 		}
-		// 1. Subdomain mode: Host like "<slug>.<apex>" → serve paste,
-		// but ONLY at path "/". Any other path on the slug subdomain
-		// (favicon.ico, /style.css, /wp-login.php, etc.) returns 404
-		// - otherwise the browser's automatic favicon fetch sees the
-		// full paste HTML labeled text/html and keeps the loading
-		// indicator spinning in some clients.
+		// 1. Subdomain mode: Host like "<slug>.<apex>".
+		//
+		// A slug can resolve to a SITE (a directory served off its whole
+		// path space) or a single-file PASTE (served only at "/"). We try
+		// the site first - if a site owns the slug, every path on the
+		// subdomain routes into its manifest. Otherwise we fall back to
+		// the paste, which serves ONLY at "/" (any other path 404s, so a
+		// browser's automatic favicon fetch doesn't get the full paste
+		// HTML labeled text/html and hang the loading indicator).
 		if slug, ok := s.slugFromHost(r.Host); ok {
+			if s.serveSiteIfExists(w, r, slug, r.URL.Path) {
+				return
+			}
 			if r.URL.Path != "/" {
 				http.NotFound(w, r)
 				return
@@ -78,11 +92,29 @@ func (s *Server) Handler() http.Handler {
 			s.servePasteSlug(w, r, slug)
 			return
 		}
-		// 2. Path mode: /p/<slug> on the apex.
+		// 2. Path mode: /p/<slug> (paste) or /p/<slug>/<path...> (site)
+		// on the apex.
 		if strings.HasPrefix(r.URL.Path, "/p/") {
-			slugStr := strings.TrimPrefix(r.URL.Path, "/p/")
+			rest := strings.TrimPrefix(r.URL.Path, "/p/")
+			// Split the first segment (the slug) from the remaining site
+			// path, if any. "/p/abc12345" → slug "abc12345", path "/".
+			// "/p/abc12345/css/x.css" → slug "abc12345", path "/css/x.css".
+			slugStr := rest
+			sitePath := "/"
+			if i := strings.IndexByte(rest, '/'); i >= 0 {
+				slugStr = rest[:i]
+				sitePath = rest[i:]
+			}
 			slug, err := domain.ParseSlug(slugStr)
 			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			if s.serveSiteIfExists(w, r, slug, sitePath) {
+				return
+			}
+			// Not a site: a paste serves only at the bare slug path.
+			if sitePath != "/" {
 				http.NotFound(w, r)
 				return
 			}
@@ -232,6 +264,78 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	default:
 		http.Error(w, "unsupported kind", http.StatusInternalServerError)
 	}
+}
+
+// serveSiteIfExists tries to serve reqPath from the static site owning
+// slug. Returns true if it handled the request (served a file, 404'd a
+// path inside an existing site, or 404'd an expired site) - the caller
+// must then return. Returns false ONLY when no site owns the slug, so
+// the caller can fall through to the paste path. This keeps the slug
+// namespace unified: one slug is either a site or a paste, never both.
+func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug domain.Slug, reqPath string) bool {
+	if s.Sites == nil {
+		return false
+	}
+	site, err := s.Sites.Get(slug)
+	if err != nil {
+		// Not a site (or a read error) - fall through to the paste path.
+		// A storage error here is indistinguishable from "no such site"
+		// on purpose: we let the paste path try, and it will surface its
+		// own 404 / 500 if the slug isn't a paste either.
+		return false
+	}
+	now := s.nowOrTime()
+	if !now.Before(site.ExpiresAt) {
+		// Expired: 404 here (we own the slug) rather than falling through.
+		http.NotFound(w, r)
+		return true
+	}
+
+	entry, ok := site.Manifest.Lookup(reqPath)
+	if !ok {
+		// A path that doesn't match any manifest entry is a clean 404.
+		// No SPA fallback in this version (an unmatched route does NOT
+		// serve the root index.html).
+		http.NotFound(w, r)
+		return true
+	}
+
+	// Same sandbox headers + cache posture as an HTML paste read: files
+	// are served RAW, secured by per-subdomain origin isolation, not by
+	// sanitizing the bytes.
+	h := w.Header()
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()")
+	h.Set("Cache-Control", "public, max-age=3600")
+	h.Set("Last-Modified", site.UpdatedAt.UTC().Format(http.TimeFormat))
+
+	// ETag is the file's content SHA - content-addressed, byte-stable.
+	etag := `"` + entry.SHA + `"`
+	h.Set("ETag", etag)
+	if etagMatches(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return true
+	}
+	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
+		if since, err := http.ParseTime(ims); err == nil && !site.UpdatedAt.UTC().Truncate(time.Second).After(since) {
+			w.WriteHeader(http.StatusNotModified)
+			return true
+		}
+	}
+
+	body, err := s.Blobs.Get(entry.SHA)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return true
+	}
+	ct := entry.ContentType
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	h.Set("Content-Type", ct)
+	_, _ = w.Write(body)
+	return true
 }
 
 // etagMatches checks if the client's If-None-Match header lists our
