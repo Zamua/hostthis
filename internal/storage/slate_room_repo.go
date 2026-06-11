@@ -110,13 +110,24 @@ func (s *SlateRoomRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
 
 // --- JSON row schema -------------------------------------------------------
 
-// roomRow is the persisted shape of a Room record: the retention clock
-// only. Byte + key totals are NOT stored (computed by scanning the value
-// subtree at PUT time, matching the sqlite materialize-then-CanPut path).
+// roomRow is the persisted shape of a Room record. CreatedAt / UpdatedAt /
+// ExpiresAt are the retention clock, maintained on every backend. ByteTotal +
+// KeyCount are the room's running per-room cap totals, maintained ONLY by the
+// SHALE backend: shale validates the per-room cap inside its single-shard CAS
+// and a CAS read-set cannot include a ScanPrefix (no phantom protection), so it
+// needs a discrete in-record total the read-set can carry. The slatedb + sqlite
+// backends leave both at zero and compute the per-room cap by materializing the
+// namespace under a serialized writer (slatedb's per-room lockQuota stripe,
+// sqlite's serializable tx), so they never read these fields. Since a room is
+// only ever written by one backend's store, the shale-only totals are inert on
+// the others. They are `omitempty` so the slatedb/sqlite-written record's JSON
+// shape is unchanged (the fields simply do not appear).
 type roomRow struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	ExpiresAt time.Time `json:"expires_at"`
+	ByteTotal int64     `json:"byte_total,omitempty"` // shale-only running per-room byte total
+	KeyCount  int       `json:"key_count,omitempty"`  // shale-only running per-room key count
 }
 
 func roomRowFromDomain(r domain.Room) roomRow {

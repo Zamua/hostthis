@@ -23,6 +23,8 @@ package storage_test
 import (
 	"bytes"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -80,6 +82,7 @@ func runRoomConformance(t *testing.T, name string, caps conformCaps, newRooms fu
 	t.Run(name+"/Rooms/NonexistentRoom404", func(t *testing.T) { conformRoomNonexistent404(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/PerRoomByteCap", func(t *testing.T) { conformRoomPerRoomByteCap(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/PerRoomKeyCap", func(t *testing.T) { conformRoomPerRoomKeyCap(t, newRooms(t).Rooms) })
+	t.Run(name+"/Rooms/PerRoomCapConcurrentCeiling", func(t *testing.T) { conformRoomPerRoomCapConcurrentCeiling(t, newRooms(t).Rooms, caps) })
 	t.Run(name+"/Rooms/PerAppAggregateCap", func(t *testing.T) { conformRoomPerAppAggregateCap(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/ServiceCapCountsAll", func(t *testing.T) { conformRoomServiceCapCountsAll(t, newRooms(t)) })
 	t.Run(name+"/Rooms/CreationRateLimitCounts", func(t *testing.T) { conformRoomCreationRateLimitCounts(t, newRooms(t).Rooms) })
@@ -294,6 +297,66 @@ func conformRoomPerRoomKeyCap(t *testing.T, rr conformanceRoomRepo) {
 	// Overwriting an EXISTING key does NOT add a key slot -> still allowed.
 	if err := rr.PutValue(room.AppSlug, room.ID, keyN(0), []byte("y"), 0, 0, fixedNow); err != nil {
 		t.Fatalf("overwrite at key cap should be allowed (no new slot): %v", err)
+	}
+}
+
+// conformRoomPerRoomCapConcurrentCeiling pins the strict-per-room-cap invariant
+// under concurrency: N goroutines each PUT a DISTINCT key of `body` bytes into
+// ONE room whose structural per-room byte cap (MaxRoomBytes) admits only K. The
+// invariant asserted is the CEILING - the bytes that land never exceed
+// MaxRoomBytes, no matter how the writes interleave. This is the room analogue
+// of conformQuotaConcurrentCeiling (the paste strict-quota gate). It pins the
+// per-room cap that the task calls out as "enforced on PUT, strictly under
+// concurrency," and it holds on every backend that declares
+// StrictQuotaUnderConcurrency: sqlite (serializable tx), slatedb (the per-room
+// lockQuota stripe held across the read+write), and shale (the single-shard CAS
+// on the value key with the per-app counter in the read-set). It FAILS if a
+// backend drops the per-room serialization (two writers both read a stale
+// namespace, both pass CanPut, and both commit, breaching MaxRoomBytes).
+func conformRoomPerRoomCapConcurrentCeiling(t *testing.T, rr conformanceRoomRepo, caps conformCaps) {
+	room := mkConformRoom(t, rr, "app12345", fixedNow)
+	// body chosen so exactly k values fit under MaxRoomBytes and the (k+1)-th
+	// would breach it; n > k writers race for the k slots.
+	const (
+		k = 3
+		n = 8
+	)
+	body := domain.MaxRoomBytes / k // floor: k*body <= MaxRoomBytes < (k+1)*body
+	var landed int64
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// Distinct key per writer (so the cap is exercised by the byte
+			// total across keys, not by overwriting one key). No per-app /
+			// service cap (0) - this isolates the per-room byte cap. A non-nil
+			// error (over-cap, or a transient backend lock) means the value did
+			// not land; we assert only the ceiling, so the error kind is moot.
+			if err := rr.PutValue(room.AppSlug, room.ID, keyN(i), make([]byte, body), 0, 0, fixedNow); err == nil {
+				atomic.AddInt64(&landed, 1)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if !caps.StrictQuotaUnderConcurrency {
+		t.Logf("backend does not guarantee strict per-room cap under concurrency: %d values x %dB = %dB landed, cap %dB",
+			landed, body, landed*int64(body), int64(domain.MaxRoomBytes))
+		return
+	}
+	if landed*int64(body) > int64(domain.MaxRoomBytes) {
+		t.Fatalf("per-room cap ceiling breached under concurrency: %d values x %dB = %dB landed, cap %dB",
+			landed, body, landed*int64(body), int64(domain.MaxRoomBytes))
+	}
+	// Sanity: the room's actual stored bytes (via a scan) also stay under cap -
+	// the ceiling holds against what's persisted, not just the success count.
+	kv, err := rr.ScanRoom(room.AppSlug, room.ID)
+	if err != nil {
+		t.Fatalf("scan after race: %v", err)
+	}
+	if kv.TotalBytes() > domain.MaxRoomBytes {
+		t.Fatalf("persisted room bytes exceed cap after race: %d > %d", kv.TotalBytes(), domain.MaxRoomBytes)
 	}
 }
 
