@@ -31,17 +31,30 @@ type Hub struct {
 	// the hub from the registry map so an empty hub does not linger. It is
 	// called at most once per "became empty" transition.
 	onEmpty func()
+	// onDrop is invoked, WITHOUT the hub lock held, once per connection the
+	// broadcast DROPS as a laggard - the one teardown path that removes a
+	// connection from the hub WITHOUT going through the registry's release
+	// (which is what does the per-app counter decrement). The Registry sets
+	// it to decApp for the dropped connection, so a laggard-dropped slot is
+	// reclaimed exactly like a cleanly-released one; the connection's own
+	// later release then finds the id already gone and is a no-op (it must
+	// NOT decApp a second time). Without this, a laggard drop removes the id
+	// from the hub map but never decrements the per-app counter, leaking a
+	// slot per dropped connection (caught by the multi-client churn test).
+	onDrop func(id uint64)
 }
 
 // newHub builds an empty hub for key with the given per-room connection
 // cap. onEmpty (may be nil in unit tests) fires when the last connection
-// leaves.
-func newHub(key RoomKey, maxConn int, onEmpty func()) *Hub {
+// leaves; onDrop (may be nil) fires once per laggard the broadcast drops so
+// the registry can reclaim its per-app slot.
+func newHub(key RoomKey, maxConn int, onEmpty func(), onDrop func(id uint64)) *Hub {
 	return &Hub{
 		key:     key,
 		maxConn: maxConn,
 		conns:   make(map[uint64]Conn),
 		onEmpty: onEmpty,
+		onDrop:  onDrop,
 	}
 }
 
@@ -104,23 +117,38 @@ func (h *Hub) broadcast(from uint64, f Frame) {
 	// lock across the Send calls is safe and keeps register / unregister
 	// serialized against this fan-out.
 	var laggards []Conn
+	var laggardIDs []uint64
 	for id, c := range h.conns {
 		if id == from {
 			continue
 		}
 		if !c.Send(f) {
 			laggards = append(laggards, c)
+			laggardIDs = append(laggardIDs, id)
 			delete(h.conns, id)
 		}
 	}
 	empty := len(h.conns) == 0
 	onEmpty := h.onEmpty
+	onDrop := h.onDrop
 	h.mu.Unlock()
 
+	// Reclaim each dropped laggard's per-app slot. This is the one teardown
+	// path that removes a connection WITHOUT routing through the registry's
+	// release, so the registry must be told to decApp here or the slot leaks.
+	// onDrop runs BEFORE Close so the slot is accounted before the
+	// connection's own (now no-op) release races in. Done outside the hub
+	// lock - the registry takes its own lock.
+	if onDrop != nil {
+		for _, id := range laggardIDs {
+			onDrop(id)
+		}
+	}
+
 	// Close the dropped laggards outside the lock: closing triggers their
-	// own lifecycle teardown (which calls unregister, a no-op now since we
-	// already removed them here). Done outside the lock so a slow Close
-	// cannot stall the room.
+	// own lifecycle teardown (which calls release -> unregister, both no-ops
+	// now since we already removed them here and onDrop did the decApp).
+	// Done outside the lock so a slow Close cannot stall the room.
 	for _, c := range laggards {
 		c.Close()
 	}
