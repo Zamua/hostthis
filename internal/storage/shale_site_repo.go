@@ -12,10 +12,14 @@
 // # Key layout (reuses the slatedb site layout; sharded per family)
 //
 //	sites/<slug>                       -> {slug} shard  (authoritative JSON row)
-//	expiry_sites/<rfc3339>/<slug>      -> {slug} shard  (sweep index, marker value)
-//	identity_sites/<id>/<slug>         -> {id}   shard  (derived index, marker value)
+//	expiry_sites/<ts>/<slug>           -> {slug} shard  (sweep index, marker value; ts is fixed-width)
 //	identity_site_bytes/<id>           -> {id}   shard  (the SITE quota counter)
 //	identity_site_reserve/<id>/<slug>  -> {id}   shard  (site reservation marker)
+//
+// Shale keeps NO identity_sites/<id>/<slug> index (the slatedb backend has
+// one, but on shale it would be write-only: the owner sum reads the
+// identity_site_bytes counter, the reconciler scans sites/, and there is no
+// ListSitesByOwner, so nothing would read it).
 //
 // # Why a dedicated site-byte counter (not the shared identity_bytes)
 //
@@ -44,8 +48,8 @@
 //  2. authoritative write on the {slug} shard (the sites/<slug> row + the
 //     expiry index, with BOTH the sites/<slug> AND pastes/<slug> collision
 //     reads in the CAS read-set),
-//  3. confirm on the {id} shard: drop the reservation marker, write the
-//     derived identity_sites index entry.
+//  3. confirm on the {id} shard: drop the reservation marker (shale keeps
+//     no per-identity site index, so nothing else is written).
 //
 // The strict-quota and sweep-time-expiry properties carry over from the
 // paste counter unchanged (conformCaps.ExpiryFreesQuotaAtReadTime = false,
@@ -111,15 +115,7 @@ func (s *ShaleSiteRepo) ReferencedSiteBlobSHAs() ([]string, error) {
 func shaleKeySite(slug domain.Slug) []byte { return []byte("sites/" + slug.String()) }
 
 func shaleKeyExpirySite(t time.Time, slug domain.Slug) []byte {
-	return []byte("expiry_sites/" + t.UTC().Format(time.RFC3339Nano) + "/" + slug.String())
-}
-
-func shaleKeyIdentitySite(identity, slug string) []byte {
-	return []byte("identity_sites/" + identity + "/" + slug)
-}
-
-func shalePrefixIdentitySites(identity string) []byte {
-	return []byte("identity_sites/" + identity + "/")
+	return []byte("expiry_sites/" + t.UTC().Format(expirySiteTimeFormat) + "/" + slug.String())
 }
 
 func shaleKeyIdentitySiteBytes(identity string) []byte {
@@ -273,16 +269,16 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, ser
 		return err
 	}
 
-	// Step 3: confirm on the {id} shard: drop the reservation marker + write
-	// the derived identity_sites index entry. The site counter is NOT touched
-	// here (the reserve already accounted the bytes).
+	// Step 3: confirm on the {id} shard: drop the reservation marker. The
+	// site counter is NOT touched here (the reserve already accounted the
+	// bytes). Shale keeps no per-identity site index, so there is nothing
+	// else to write.
 	if err := r.confirmSiteInsert(identity, slug); err != nil {
 		// The authoritative site exists + the bytes are accounted on the
-		// counter; only the derived identity_sites index lags. The owner sum
-		// reads the counter (not the index), so this lag is invisible to
-		// quota; the reconciler rebuilds the index. Surface the error so the
-		// caller knows the index lagged, but the site is durable +
-		// quota-correct.
+		// counter; only the reservation marker lingers. The owner sum reads
+		// the counter (not any index), so this is invisible to quota; the
+		// reconciler drops the leaked marker. Surface the error so the caller
+		// knows confirm lagged, but the site is durable + quota-correct.
 		return fmt.Errorf("confirm site insert: %w", err)
 	}
 	return nil
@@ -320,26 +316,21 @@ func (r *ShaleRepo) insertSiteAuthoritative(s domain.Site, dedupedSize int) erro
 	})
 }
 
-// confirmSiteInsert is step 3: drop the site reservation marker + write the
-// derived identity_sites index entry, both on the {id} shard, one CAS. The
-// index entry is a plain marker (SumActiveSiteBytesByOwner reads the
-// identity_site_bytes COUNTER, not the index, so the index needs no value);
-// it exists so the reconciler can detect a stale entry whose authoritative
-// site is gone. shale's Put rejects empty values, so it carries the one-byte
-// markerValue, the same convention the expiry index uses.
+// confirmSiteInsert is step 3: drop the site reservation marker on the {id}
+// shard, one CAS. Shale keeps no per-identity site index
+// (SumActiveSiteBytesByOwner reads the identity_site_bytes COUNTER, the
+// reconciler scans sites/, and there is no ListSitesByOwner), so the marker
+// is simply consumed with nothing else written. Idempotent on a missing
+// marker (a prior confirm or a reconciler drop already removed it).
 func (r *ShaleRepo) confirmSiteInsert(identity, slug string) error {
 	reserveKey := shaleKeyIdentitySiteReserve(identity, slug)
-	indexKey := shaleKeyIdentitySite(identity, slug)
 	return r.cluster.Transact(reserveKey, func(tx backend.Transaction) error {
-		// Drop the reservation marker (consumed into the index).
 		if _, err := tx.Get(reserveKey); err == nil {
-			if err := tx.Delete(reserveKey); err != nil {
-				return err
-			}
+			return tx.Delete(reserveKey)
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return err
 		}
-		return tx.Put(indexKey, markerValue)
+		return nil
 	})
 }
 
@@ -395,10 +386,11 @@ func (r *ShaleRepo) sumServiceWideActiveSiteBytes() (int64, error) {
 }
 
 // DeleteSite removes a site authoritative row + its expiry index on the
-// {slug} shard, then drops the derived index entry + decrements the site
-// counter by the freed bytes on the {id} shard. Idempotent: a missing row is
-// a no-op (matches the sqlite DELETE, the slate DeleteSite, and the paste
-// Delete). The sweep calls this for every expired site slug.
+// {slug} shard, then decrements the site counter by the freed bytes on the
+// {id} shard. Idempotent: a missing row is a no-op (matches the sqlite
+// DELETE, the slate DeleteSite, and the paste Delete). Shale keeps no
+// per-identity site index, so there is no index entry to clean up. The
+// sweep calls this for every expired site slug.
 func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 	var row siteRow
 	if err := r.getJSON(shaleKeySite(slug), &row); err != nil {
@@ -421,18 +413,10 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 		return err
 	}
 
-	// Derived cleanup on the {id} shard: drop the index entry + decrement the
-	// site counter by the freed bytes, one CAS (both keys co-shard on {id}).
-	indexKey := shaleKeyIdentitySite(identity, slug.String())
+	// Counter cleanup on the {id} shard: decrement the site counter by the
+	// freed bytes, one CAS.
 	counterKey := shaleKeyIdentitySiteBytes(identity)
 	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
-		if _, err := tx.Get(indexKey); err == nil {
-			if err := tx.Delete(indexKey); err != nil {
-				return err
-			}
-		} else if !errors.Is(err, backend.ErrNotFound) {
-			return err
-		}
 		cur, err := txGetCounter(tx, counterKey)
 		if err != nil {
 			return err
@@ -442,15 +426,18 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 }
 
 // ExpiredSiteSlugs fans out across all {slug} shards over expiry_sites/ and
-// returns the slugs whose timestamp is <= now (inclusive boundary,
-// RFC3339Nano lex order = time order, the same shape as the paste
-// ExpiredSlugs and the slate ExpiredSiteSlugs).
+// returns the slugs whose timestamp is <= now (inclusive boundary). The
+// site expiry keys use the fixed-width expirySiteTimeFormat, so the
+// timestamp segment's byte order is time order EXACTLY (correct even within
+// a shared whole second), unlike the variable-width time.RFC3339Nano the
+// paste ExpiredSlugs still uses. The cutoff is formatted with the SAME
+// layout so the compare stays aligned. Matches the slate ExpiredSiteSlugs.
 func (r *ShaleRepo) ExpiredSiteSlugs(now time.Time) ([]string, error) {
 	items, err := r.aggregatePrefix(prefixExpirySitesAll)
 	if err != nil {
 		return nil, err
 	}
-	cutoff := now.UTC().Format(time.RFC3339Nano)
+	cutoff := now.UTC().Format(expirySiteTimeFormat)
 	var out []string
 	for _, item := range items {
 		rest := strings.TrimPrefix(string(item.Key), "expiry_sites/")

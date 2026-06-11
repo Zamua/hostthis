@@ -607,11 +607,21 @@ func (r *SlateRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 		}
 	}
 	if userCap > 0 {
-		ownerTotal, err := r.sumActiveBytesForOwner(p.Identity.String(), now)
+		// Per-owner cap counts BOTH paste bytes AND site bytes, symmetric
+		// with InsertSiteWithQuotaCheck (which sums both for a site deploy)
+		// and matching the sqlite identityActiveBytes that spans both kinds.
+		// Without the site term a paste could be admitted while the owner's
+		// site bytes are ignored (e.g. an 800-byte site + a 300-byte paste
+		// under a 1000-byte cap would wrongly pass).
+		ownerPaste, err := r.sumActiveBytesForOwner(p.Identity.String(), now)
 		if err != nil {
-			return fmt.Errorf("identity sum: %w", err)
+			return fmt.Errorf("identity paste sum: %w", err)
 		}
-		if ownerTotal+body > userCap {
+		ownerSite, err := r.sumActiveSiteBytesForOwner(p.Identity.String(), now)
+		if err != nil {
+			return fmt.Errorf("identity site sum: %w", err)
+		}
+		if ownerPaste+ownerSite+body > userCap {
 			return ErrOverUserQuota
 		}
 	}
@@ -855,11 +865,18 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 		}
 	}
 	if userCap > 0 {
-		ownerTotal, err := r.sumActiveBytesForOwner(existing.Identity, now)
+		// Per-owner cap counts BOTH paste bytes AND site bytes (symmetric
+		// with the site deploy path + the sqlite identityActiveBytes), so an
+		// append cannot ignore the owner's existing site bytes.
+		ownerPaste, err := r.sumActiveBytesForOwner(existing.Identity, now)
 		if err != nil {
-			return AppendResult{}, fmt.Errorf("identity sum: %w", err)
+			return AppendResult{}, fmt.Errorf("identity paste sum: %w", err)
 		}
-		if ownerTotal+body > userCap {
+		ownerSite, err := r.sumActiveSiteBytesForOwner(existing.Identity, now)
+		if err != nil {
+			return AppendResult{}, fmt.Errorf("identity site sum: %w", err)
+		}
+		if ownerPaste+ownerSite+body > userCap {
 			return AppendResult{}, ErrOverUserQuota
 		}
 	}

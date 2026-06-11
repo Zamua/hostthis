@@ -26,13 +26,14 @@ import "bytes"
 //	identity_reserve/<id>/<slug>  -> <id>     (reservation marker; co-shards with the counter)
 //	keygate/<subnet>/<identity>   -> <subnet> (first segment after the prefix)
 //
-// The static-site families mirror the paste families one-for-one (sites
-// reuse the paste layout, only with a site_ flavor; see docs/SPEC.md
-// "Shale reuses the layout"):
+// The static-site families mirror the paste families (sites reuse the paste
+// layout, only with a site_ flavor; see docs/SPEC.md "Shale reuses the
+// layout"). Shale keeps NO identity_sites/<id>/<slug> index (it would be
+// write-only on shale; the slatedb backend has one but shale's owner sum
+// reads the counter instead), so there is no routing case for it:
 //
 //	sites/<slug>                       -> <slug>   (authoritative, joins the {slug} family)
-//	expiry_sites/<rfc3339>/<slug>      -> <slug>   (LAST segment, like expiry/)
-//	identity_sites/<id>/<slug>         -> <id>     (derived index, joins the {id} family)
+//	expiry_sites/<ts>/<slug>           -> <slug>   (LAST segment, like expiry/)
 //	identity_site_bytes/<id>           -> <id>     (the site quota counter)
 //	identity_site_reserve/<id>/<slug>  -> <id>     (site reservation marker; co-shards with the site counter)
 //
@@ -79,14 +80,10 @@ func shaleShardKey(key []byte) []byte {
 		// reserve step's read-increment-mark is a single-shard CAS.
 		return firstSegment(key[len(prefixIdentityReserveAll):])
 
-	// Per-identity static-site derived family. All shard on the id so the
-	// site index, the site byte counter, and the site reservation marker
-	// co-locate (the same single-shard-CAS argument as the paste {id}
-	// family). identity_site_bytes/ and identity_site_reserve/ do NOT have
-	// identity_sites/ as a prefix (the char after 'site' is 's' vs '_'), so
-	// the trailing-slash anchoring keeps the three apart.
-	case bytes.HasPrefix(key, prefixIdentitySitesAll):
-		return firstSegment(key[len(prefixIdentitySitesAll):])
+	// Per-identity static-site derived family. The site byte counter and the
+	// site reservation marker shard on the id so they co-locate (the same
+	// single-shard-CAS argument as the paste {id} family). Shale keeps no
+	// identity_sites/<id>/<slug> index, so there is no case for it.
 	case bytes.HasPrefix(key, prefixIdentitySiteBytesAll):
 		return firstSegment(key[len(prefixIdentitySiteBytesAll):])
 	case bytes.HasPrefix(key, prefixIdentitySiteReserveAll):
@@ -118,10 +115,10 @@ var (
 	prefixIdentityReserveAll   = []byte("identity_reserve/")
 	prefixKeygateAll           = []byte("keygate/")
 
-	// Static-site families (mirror the paste families).
+	// Static-site families (mirror the paste families). Shale keeps no
+	// identity_sites/ index, so there is no prefix var for it.
 	prefixSites                  = []byte("sites/")
 	prefixExpirySitesAll         = []byte("expiry_sites/")
-	prefixIdentitySitesAll       = []byte("identity_sites/")
 	prefixIdentitySiteBytesAll   = []byte("identity_site_bytes/")
 	prefixIdentitySiteReserveAll = []byte("identity_site_reserve/")
 )
