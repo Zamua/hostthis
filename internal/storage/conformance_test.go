@@ -82,15 +82,14 @@ type conformCaps struct {
 	ExpiryFreesQuotaAtReadTime bool
 
 	// StrictQuotaUnderConcurrency is true for backends that enforce the
-	// per-owner cap exactly under concurrent uploads (sqlite via its
-	// serializable insert transaction; shale via the reservation-pattern
-	// CAS counter). It is FALSE for the slatedb-direct backend, whose
-	// quota sum runs OUTSIDE the write transaction, so two concurrent
-	// uploads for one owner can both pass and both land, overshooting the
-	// cap (docs/SPEC.md "Reservation-pattern quota"; this is one reason the
-	// slatedb-direct backend is being replaced by shale). When false, the
-	// concurrency-ceiling test documents the known race instead of
-	// asserting strictness.
+	// per-owner cap exactly under concurrent uploads: sqlite (its
+	// serializable insert transaction), shale (the reservation-pattern CAS
+	// counter), and slatedb (a per-identity lockQuota stripe held across the
+	// sum + the write, valid because SlateDB is single-writer so only
+	// in-process goroutines can race). All shipping backends set it true.
+	// The false branch (where the concurrency-ceiling test documents a race
+	// instead of asserting) is retained only for a hypothetical backend that
+	// sums outside its write boundary.
 	StrictQuotaUnderConcurrency bool
 }
 

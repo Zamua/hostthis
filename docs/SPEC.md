@@ -1996,19 +1996,21 @@ Per-identity quota (the 10 MiB compressed cap) must be enforced exactly:
 an upload that would push an owner over the cap is rejected, and two
 concurrent uploads can never both pass the check and both land.
 
-Where the single-writer backends land on this varies, and only one of
-them actually gets it right. The sqlite backend enforces it exactly: the
-quota sum and the insert run inside ONE serializable transaction, so two
-concurrent uploads serialize and the second sees the first's bytes. The
-slatedb backend does NOT: its quota sum runs before (outside) the write
-transaction, so two concurrent uploads for the same identity can both
-read the pre-upload sum, both pass, and both land, overshooting the cap.
-That is a real race in the slatedb-direct backend, not a sharding
-artifact. The reservation pattern below brings the shale backend up to
-sqlite-class strictness even though, unlike sqlite, it cannot put the sum
-and the write in one transaction: the bytes counter lives on the `{id}`
-shard and the paste row lives on the `{slug}` shard, two different
-single-shard transactions.
+All three single-writer backends enforce it exactly under concurrency, by
+different means. The sqlite backend uses ONE serializable transaction: the
+quota sum and the insert serialize, so the second upload sees the first's
+bytes. The slatedb backend holds a per-identity `lockQuota(identity)`
+stripe across the sum + the write, so two concurrent same-identity uploads
+cannot both read the pre-upload sum; this is valid because SlateDB is
+single-writer / epoch-fenced, so only intra-process goroutines can race
+and the in-process lock covers them. The shale backend uses the
+reservation pattern below: it cannot put the sum and the write in one
+transaction (the bytes counter lives on the `{id}` shard and the paste row
+on the `{slug}` shard, two different single-shard transactions), so it
+reserves on the `{id}` counter via CAS first. The difference that
+motivates the reservation pattern: slatedb's lock is PROCESS-LOCAL and
+would not survive a multi-writer split, whereas shale's CAS counter holds
+across nodes.
 
 The shale backend enforces quota with a **reservation pattern**: a
 three-step sequence that makes the quota decision atomic on the owner's

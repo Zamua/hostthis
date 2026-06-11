@@ -238,11 +238,11 @@ func conformSitePerOwnerCapCountsBoth(t *testing.T, r conformanceRepo, sr confor
 // the cross-kind inserts interleave. This keeps StrictQuotaUnderConcurrency
 // honest across kinds: a backend that checked paste and site quota on
 // separate, non-serialized paths could let the combined total overshoot even
-// if each kind alone held its ceiling. sqlite holds it (serializable
-// insert tx, one identityActiveBytes spanning both kinds) and shale holds it
-// (both reserve steps CAS the same {id} shard, each reading both counters);
-// the slatedb-direct backend does NOT (its quota sums run outside the write
-// tx), so it only logs.
+// if each kind alone held its ceiling. All three backends hold it: sqlite
+// (serializable insert tx, one identityActiveBytes spanning both kinds),
+// shale (both reserve steps CAS the same {id} shard, each reading both
+// counters), and slatedb (the per-identity lockQuota stripe shared by the
+// paste and site inserts spans both kinds), so all three assert the ceiling.
 func conformSitePerOwnerCapConcurrentCeiling(t *testing.T, caps conformCaps, r conformanceRepo, sr conformanceSiteRepo) {
 	const (
 		body = 100
