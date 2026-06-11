@@ -50,12 +50,13 @@ func (r *PasteRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 	defer tx.Rollback() //nolint:errcheck
 
 	nowStr := formatTime(now)
+	siteNowStr := formatSiteExpiry(now)
 	body := int64(p.Size)
 
 	// 1. Service-wide check across BOTH pastes and sites. Tombstoned
 	// (deleted) versions contribute 0.
 	if serviceCap > 0 {
-		total, err := serviceWideActiveBytes(tx, nowStr)
+		total, err := serviceWideActiveBytes(tx, nowStr, siteNowStr)
 		if err != nil {
 			return err
 		}
@@ -66,7 +67,7 @@ func (r *PasteRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 	// 2. Per-identity check across BOTH pastes and sites. Tombstoned
 	// versions contribute 0.
 	if userCap > 0 {
-		ownerTotal, err := identityActiveBytes(tx, p.Identity.String(), nowStr)
+		ownerTotal, err := identityActiveBytes(tx, p.Identity.String(), nowStr, siteNowStr)
 		if err != nil {
 			return err
 		}
@@ -260,6 +261,7 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 	defer tx.Rollback() //nolint:errcheck
 
 	nowStr := formatTime(now)
+	siteNowStr := formatSiteExpiry(now)
 	body := int64(size)
 
 	// Look up the paste's identity + pin state.
@@ -275,7 +277,7 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 	// Service-wide check across BOTH pastes and sites. Tombstoned
 	// versions contribute 0.
 	if serviceCap > 0 {
-		total, err := serviceWideActiveBytes(tx, nowStr)
+		total, err := serviceWideActiveBytes(tx, nowStr, siteNowStr)
 		if err != nil {
 			return AppendResult{}, err
 		}
@@ -286,7 +288,7 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 	// Per-identity check across BOTH pastes and sites. Tombstoned
 	// versions contribute 0.
 	if userCap > 0 {
-		ownerTotal, err := identityActiveBytes(tx, ownerIdentity, nowStr)
+		ownerTotal, err := identityActiveBytes(tx, ownerIdentity, nowStr, siteNowStr)
 		if err != nil {
 			return AppendResult{}, err
 		}

@@ -22,6 +22,40 @@ type SiteRepo struct {
 
 func NewSiteRepo(db *sql.DB) *SiteRepo { return &SiteRepo{db: db} }
 
+// expirySiteTimeFormat is the timestamp layout the site EXPIRY clock uses
+// across every backend: the sqlite sites.expires_at column, and the
+// slatedb/shale expiry_sites/<ts>/<slug> index keys. It is RFC3339 with a
+// FIXED-WIDTH, zero-padded 9-digit nanosecond fraction, so a lexicographic
+// compare (the sqlite TEXT-column compare AND the KV key prefix scan) is
+// byte order == time order EXACTLY, including within a shared whole second.
+//
+// It is deliberately NOT time.RFC3339Nano, which drops trailing fractional
+// zeros: under that variable-width format "...00.5Z" sorts BEFORE "...00Z"
+// (because '.' < 'Z'), so a record could be swept up to ~1s before its real
+// ExpiresAt. Sites have no prod data on any backend yet, so the fixed-width
+// format is free here. The pre-existing PASTE expiry path (sqlite
+// pastes.expires_at via formatTime, and the slatedb/shale expiry/<rfc3339>/
+// index) still uses time.RFC3339Nano and carries the same latent sub-second
+// skew; it holds live prod data on slatedb, so re-keying it is a migration
+// (a format flip alone orphans old keys -> those pastes never expire) and is
+// a documented follow-up, not done here.
+const expirySiteTimeFormat = "2006-01-02T15:04:05.000000000Z07:00"
+
+// formatSiteExpiry / parseSiteExpiry are the fixed-width site-expiry
+// (de)serializers. Used for the sqlite sites.expires_at column and every
+// query that compares against it, so the stored value and the comparison
+// operand share one byte-order == time-order layout.
+func formatSiteExpiry(t time.Time) string { return t.UTC().Format(expirySiteTimeFormat) }
+func parseSiteExpiry(s string) time.Time {
+	t, err := time.Parse(expirySiteTimeFormat, s)
+	if err != nil {
+		// Tolerate a legacy RFC3339Nano value (e.g. a row written before the
+		// fixed-width switch) so a read never silently zeroes a timestamp.
+		return parseTime(s)
+	}
+	return t
+}
+
 // manifestJSON is the on-disk shape of a Manifest. Kept private so the
 // JSON representation is an internal storage concern, not a domain one:
 // the domain Manifest is the value object; this is just how we persist
@@ -84,11 +118,12 @@ func (r *SiteRepo) InsertWithQuotaCheck(s domain.Site, dedupedSize int, serviceC
 	defer tx.Rollback() //nolint:errcheck
 
 	nowStr := formatTime(now)
+	siteNowStr := formatSiteExpiry(now)
 	body := int64(dedupedSize)
 
 	// 1. Service-wide check across BOTH pastes and sites.
 	if serviceCap > 0 {
-		total, err := serviceWideActiveBytes(tx, nowStr)
+		total, err := serviceWideActiveBytes(tx, nowStr, siteNowStr)
 		if err != nil {
 			return err
 		}
@@ -98,7 +133,7 @@ func (r *SiteRepo) InsertWithQuotaCheck(s domain.Site, dedupedSize int, serviceC
 	}
 	// 2. Per-identity check across BOTH pastes and sites.
 	if userCap > 0 {
-		owned, err := identityActiveBytes(tx, s.Identity.String(), nowStr)
+		owned, err := identityActiveBytes(tx, s.Identity.String(), nowStr, siteNowStr)
 		if err != nil {
 			return err
 		}
@@ -127,7 +162,7 @@ func (r *SiteRepo) InsertWithQuotaCheck(s domain.Site, dedupedSize int, serviceC
 		                   created_at, updated_at, expires_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`, s.Slug.String(), s.Identity.String(), manStr, dedupedSize,
-		formatTime(s.CreatedAt), formatTime(s.UpdatedAt), formatTime(s.ExpiresAt)); err != nil {
+		formatTime(s.CreatedAt), formatTime(s.UpdatedAt), formatSiteExpiry(s.ExpiresAt)); err != nil {
 		if isUniqueViolation(err) {
 			return ErrSlugTaken
 		}
@@ -167,7 +202,7 @@ func (r *SiteRepo) Get(slug domain.Slug) (domain.Site, error) {
 		Manifest:  man,
 		CreatedAt: parseTime(created),
 		UpdatedAt: parseTime(updated),
-		ExpiresAt: parseTime(expires),
+		ExpiresAt: parseSiteExpiry(expires),
 	}, nil
 }
 
@@ -183,7 +218,7 @@ func (r *SiteRepo) Delete(slug domain.Slug) error {
 // before now. The sweep deletes them; the HTTP read path 404s expired-
 // but-not-yet-deleted rows inline.
 func (r *SiteRepo) ExpiredSiteSlugs(now time.Time) ([]string, error) {
-	rows, err := r.db.Query(`SELECT slug FROM sites WHERE expires_at <= ?`, formatTime(now))
+	rows, err := r.db.Query(`SELECT slug FROM sites WHERE expires_at <= ?`, formatSiteExpiry(now))
 	if err != nil {
 		return nil, fmt.Errorf("expired site slugs: %w", err)
 	}
@@ -239,7 +274,12 @@ func (r *SiteRepo) ReferencedSiteBlobSHAs() ([]string, error) {
 // room quota checks so the service-wide cap counts every kind of stored
 // content - a write of any kind sees the bytes the other kinds already
 // hold. Runs inside the caller's tx.
-func serviceWideActiveBytes(tx *sql.Tx, nowStr string) (int64, error) {
+// serviceWideActiveBytes takes TWO now-strings because the paste/room
+// expires_at columns are stored with formatTime (RFC3339Nano) while the
+// site expires_at column is stored with formatSiteExpiry (fixed-width); each
+// subquery compares its column against the matching-format operand, so a
+// cross-format lexical comparison never happens.
+func serviceWideActiveBytes(tx *sql.Tx, nowStr, siteNowStr string) (int64, error) {
 	var pasteTotal int64
 	if err := tx.QueryRow(`
 		SELECT COALESCE(SUM(v.size), 0)
@@ -252,7 +292,7 @@ func serviceWideActiveBytes(tx *sql.Tx, nowStr string) (int64, error) {
 	var siteTotal int64
 	if err := tx.QueryRow(`
 		SELECT COALESCE(SUM(deduped_size), 0) FROM sites WHERE expires_at > ?
-	`, nowStr).Scan(&siteTotal); err != nil {
+	`, siteNowStr).Scan(&siteTotal); err != nil {
 		return 0, fmt.Errorf("service-wide site sum: %w", err)
 	}
 	roomTotal, err := activeRoomBytesTx(tx, nowStr)
@@ -263,8 +303,10 @@ func serviceWideActiveBytes(tx *sql.Tx, nowStr string) (int64, error) {
 }
 
 // identityActiveBytes sums active bytes owned by one identity across
-// BOTH pastes and sites. Runs inside the caller's tx.
-func identityActiveBytes(tx *sql.Tx, identity, nowStr string) (int64, error) {
+// BOTH pastes and sites. Runs inside the caller's tx. Takes two now-strings
+// for the same reason serviceWideActiveBytes does (paste vs site column
+// timestamp formats differ).
+func identityActiveBytes(tx *sql.Tx, identity, nowStr, siteNowStr string) (int64, error) {
 	var pasteTotal int64
 	if err := tx.QueryRow(`
 		SELECT COALESCE(SUM(v.size), 0)
@@ -277,7 +319,7 @@ func identityActiveBytes(tx *sql.Tx, identity, nowStr string) (int64, error) {
 	var siteTotal int64
 	if err := tx.QueryRow(`
 		SELECT COALESCE(SUM(deduped_size), 0) FROM sites WHERE identity = ? AND expires_at > ?
-	`, identity, nowStr).Scan(&siteTotal); err != nil {
+	`, identity, siteNowStr).Scan(&siteTotal); err != nil {
 		return 0, fmt.Errorf("identity site sum: %w", err)
 	}
 	return pasteTotal + siteTotal, nil
@@ -294,7 +336,7 @@ func (r *SiteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int64, er
 	var n sql.NullInt64
 	if err := r.db.QueryRow(`
 		SELECT COALESCE(SUM(deduped_size), 0) FROM sites WHERE identity = ? AND expires_at > ?
-	`, owner, formatTime(now)).Scan(&n); err != nil {
+	`, owner, formatSiteExpiry(now)).Scan(&n); err != nil {
 		return 0, fmt.Errorf("sum active site size: %w", err)
 	}
 	return n.Int64, nil

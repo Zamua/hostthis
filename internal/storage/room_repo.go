@@ -242,7 +242,7 @@ func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string,
 	// against the whole-service active-byte total. A room write that would
 	// push the service over --storage-cap-bytes is refused, state intact.
 	if serviceCap > 0 && delta > 0 {
-		total, err := serviceWideActiveBytes(tx, formatTime(now))
+		total, err := serviceWideActiveBytes(tx, formatTime(now), formatSiteExpiry(now))
 		if err != nil {
 			return err
 		}

@@ -40,14 +40,16 @@ func TestShaleShardKey(t *testing.T) {
 		{"expiry_site", "expiry_sites/2026-06-05T12:00:00Z/abc12345", "abc12345"},
 		{"expiry_site nano", "expiry_sites/2026-06-05T12:00:00.123456789Z/abc12345", "abc12345"},
 
-		// Static-site per-identity derived family -> shard key <id>. The
-		// three families share the identity_site prefix but disambiguate on
-		// the char after 'site' ('s' for identity_sites, '_' for the other
-		// two): identity_site_bytes and identity_site_reserve do NOT route as
-		// identity_sites.
-		{"identity_sites", "identity_sites/sha256:deadbeef/abc12345", "sha256:deadbeef"},
+		// Static-site per-identity derived family -> shard key <id>. Shale
+		// keeps no identity_sites/ index; the two site {id} families are the
+		// counter and the reservation marker, which disambiguate on their
+		// distinct identity_site_bytes/ vs identity_site_reserve/ prefixes.
 		{"identity_site_bytes", "identity_site_bytes/sha256:deadbeef", "sha256:deadbeef"},
 		{"identity_site_reserve", "identity_site_reserve/sha256:deadbeef/abc12345", "sha256:deadbeef"},
+
+		// An identity_sites/ key has no routing case (shale never produces
+		// one), so it falls through to the whole-key default.
+		{"identity_sites falls through", "identity_sites/sha256:deadbeef/abc12345", "identity_sites/sha256:deadbeef/abc12345"},
 
 		// Unknown family routes by the whole key.
 		{"unknown", "weird/key/shape", "weird/key/shape"},
@@ -95,10 +97,10 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 		// The reservation marker MUST co-shard with identity_bytes so the
 		// reserve step's read-increment-mark is a single-shard CAS.
 		"identity_reserve/" + id + "/" + slug,
-		// The site index, the site byte counter, and the site reservation
-		// marker all co-shard with the identity so the site reserve step's
-		// read-increment-mark is single-shard (mirrors the paste {id} family).
-		"identity_sites/" + id + "/" + slug,
+		// The site byte counter and the site reservation marker co-shard with
+		// the identity so the site reserve step's read-increment-mark is
+		// single-shard (mirrors the paste {id} family). Shale keeps no
+		// identity_sites/ index.
 		"identity_site_bytes/" + id,
 		"identity_site_reserve/" + id + "/" + slug,
 	}

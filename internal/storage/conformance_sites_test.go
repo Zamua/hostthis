@@ -16,6 +16,9 @@ package storage_test
 
 import (
 	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -73,9 +76,12 @@ func runSiteConformance(t *testing.T, name string, caps conformCaps, newSites fu
 	t.Run(name+"/Sites/GetNotFound", func(t *testing.T) { _, sr := newSites(t); conformSiteGetNotFound(t, sr) })
 	t.Run(name+"/Sites/SumByIdentity", func(t *testing.T) { _, sr := newSites(t); conformSiteSumByIdentity(t, sr) })
 	t.Run(name+"/Sites/QuotaCountsSiteBytes", func(t *testing.T) { _, sr := newSites(t); conformSiteQuotaCountsSiteBytes(t, sr) })
+	t.Run(name+"/Sites/PerOwnerCapCountsBoth", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapCountsBoth(t, r, sr) })
+	t.Run(name+"/Sites/PerOwnerCapConcurrentCeiling", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapConcurrentCeiling(t, caps, r, sr) })
 	t.Run(name+"/Sites/ServiceCapCountsBoth", func(t *testing.T) { r, sr := newSites(t); conformSiteServiceCapCountsBoth(t, r, sr) })
 	t.Run(name+"/Sites/SlugCollisionVsPaste", func(t *testing.T) { r, sr := newSites(t); conformSiteSlugCollisionVsPaste(t, r, sr) })
 	t.Run(name+"/Sites/ExpiryAndSweep", func(t *testing.T) { _, sr := newSites(t); conformSiteExpiryAndSweep(t, caps, sr) })
+	t.Run(name+"/Sites/ExpirySubSecondOrdering", func(t *testing.T) { _, sr := newSites(t); conformSiteExpirySubSecondOrdering(t, sr) })
 	t.Run(name+"/Sites/ReferencedBlobSHAs", func(t *testing.T) { _, sr := newSites(t); conformSiteReferencedBlobSHAs(t, sr) })
 	t.Run(name+"/Sites/DedupedSizeCharged", func(t *testing.T) { _, sr := newSites(t); conformSiteDedupedSizeCharged(t, sr) })
 }
@@ -168,6 +174,110 @@ func conformSiteQuotaCountsSiteBytes(t *testing.T, sr conformanceSiteRepo) {
 	// A smaller one that keeps the sum under cap succeeds.
 	if err := sr.InsertWithQuotaCheck(siteOf("sq323456", "key:sq", 300), 300, 0, cap, fixedNow); err != nil {
 		t.Fatalf("site within cap (600+300=900): %v", err)
+	}
+}
+
+// conformSitePerOwnerCapCountsBoth pins the cross-kind PER-OWNER cap: the
+// owner's paste bytes and site bytes both count toward the same per-owner
+// cap, in BOTH directions. The headline asymmetry this guards against: a
+// site sees paste bytes but a paste must ALSO see site bytes, so a deploy of
+// either kind is rejected when the owner's COMBINED paste+site bytes plus
+// the new body would exceed userCap. The reproduced bug: an 800-byte site +
+// a 300-byte paste under a 1000-byte cap wrongly admitted the paste on the
+// KV backends (combined 1100 > 1000) while sqlite (and the symmetric site
+// direction) correctly rejected it.
+func conformSitePerOwnerCapCountsBoth(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
+	const cap = 1000
+
+	// Direction 1: a SITE fills most of the cap, then a PASTE that would
+	// overflow the COMBINED total is rejected. This is the direction the bug
+	// broke: the paste's per-owner check must count the existing site bytes.
+	if err := sr.InsertWithQuotaCheck(siteOf("pb1site1", "key:pb1", 800), 800, 0, cap, fixedNow); err != nil {
+		t.Fatalf("site 800 under cap: %v", err)
+	}
+	// 800 (site) + 300 (paste) = 1100 > 1000 -> the paste MUST be rejected.
+	if err := r.InsertWithQuotaCheck(pasteOf("pb1pst1", "key:pb1", 300), 0, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+		t.Fatalf("paste over combined cap (site bytes must count): got %v, want ErrOverUserQuota", err)
+	}
+	// A paste that keeps the combined total at/under cap fits: 800+200=1000.
+	if err := r.InsertWithQuotaCheck(pasteOf("pb1pst2", "key:pb1", 200), 0, cap, fixedNow); err != nil {
+		t.Fatalf("paste within combined cap (800+200=1000): %v", err)
+	}
+	// And now the owner is full: another byte is rejected.
+	if err := r.InsertWithQuotaCheck(pasteOf("pb1pst3", "key:pb1", 1), 0, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+		t.Fatalf("paste at full combined cap should be rejected: got %v", err)
+	}
+
+	// Direction 2 (the reverse): a PASTE fills most of the cap, then a SITE
+	// that would overflow the COMBINED total is rejected. This direction was
+	// already correct (the site path summed both), pinned here for symmetry.
+	if err := r.InsertWithQuotaCheck(pasteOf("pb2pst1", "key:pb2", 800), 0, cap, fixedNow); err != nil {
+		t.Fatalf("paste 800 under cap: %v", err)
+	}
+	// 800 (paste) + 300 (site) = 1100 > 1000 -> the site MUST be rejected.
+	if err := sr.InsertWithQuotaCheck(siteOf("pb2site1", "key:pb2", 300), 300, 0, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+		t.Fatalf("site over combined cap (paste bytes must count): got %v, want ErrOverUserQuota", err)
+	}
+	// A site that keeps the combined total at/under cap fits: 800+200=1000.
+	if err := sr.InsertWithQuotaCheck(siteOf("pb2site2", "key:pb2", 200), 200, 0, cap, fixedNow); err != nil {
+		t.Fatalf("site within combined cap (800+200=1000): %v", err)
+	}
+
+	// An append also counts site bytes: the owner is at cap, so any append is
+	// rejected (covers the AppendVersionWithQuotaCheck cross-kind path).
+	if _, err := r.AppendVersionWithQuotaCheck("pb2pst1", domain.KindHTML, "sha-pb2-v2", 1, 0, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+		t.Fatalf("append at full combined cap should be rejected (site bytes must count): got %v", err)
+	}
+}
+
+// conformSitePerOwnerCapConcurrentCeiling pins the COMBINED per-owner
+// ceiling under concurrent CROSS-KIND deploys: N goroutines each deploy a
+// distinct paste OR site of `body` bytes for ONE owner against a per-owner
+// cap that admits only K combined. The invariant is the ceiling: the bytes
+// that land (paste bytes + site bytes) never exceed the cap, no matter how
+// the cross-kind inserts interleave. This keeps StrictQuotaUnderConcurrency
+// honest across kinds: a backend that checked paste and site quota on
+// separate, non-serialized paths could let the combined total overshoot even
+// if each kind alone held its ceiling. sqlite holds it (serializable
+// insert tx, one identityActiveBytes spanning both kinds) and shale holds it
+// (both reserve steps CAS the same {id} shard, each reading both counters);
+// the slatedb-direct backend does NOT (its quota sums run outside the write
+// tx), so it only logs.
+func conformSitePerOwnerCapConcurrentCeiling(t *testing.T, caps conformCaps, r conformanceRepo, sr conformanceSiteRepo) {
+	const (
+		body = 100
+		k    = 3
+		n    = 8
+	)
+	cap := int64(k * body) // admits exactly k records of `body`, any mix of kinds
+	var landed int64
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// Alternate kinds so the race is genuinely cross-kind: even i ->
+			// paste, odd i -> site, all for the same owner "key:ccx".
+			var err error
+			if i%2 == 0 {
+				err = r.InsertWithQuotaCheck(pasteOf(fmt.Sprintf("ccp%05d", i), "key:ccx", body), 0, cap, fixedNow)
+			} else {
+				err = sr.InsertWithQuotaCheck(siteOf(fmt.Sprintf("ccs%05d", i), "key:ccx", body), body, 0, cap, fixedNow)
+			}
+			if err == nil {
+				atomic.AddInt64(&landed, 1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if !caps.StrictQuotaUnderConcurrency {
+		t.Logf("backend does not guarantee strict cross-kind quota under concurrency (known slatedb-direct race): %d records x %dB = %dB landed, cap %dB",
+			landed, body, landed*body, cap)
+		return
+	}
+	if landed*body > cap {
+		t.Fatalf("combined per-owner quota ceiling breached under cross-kind concurrency: %d records x %dB = %dB landed, cap %dB",
+			landed, body, landed*body, cap)
 	}
 }
 
@@ -298,6 +408,73 @@ func conformSiteExpiryAndSweep(t *testing.T, caps conformCaps, sr conformanceSit
 	}
 	if used != 100 {
 		t.Fatalf("post-delete site sum: got %d, want 100", used)
+	}
+}
+
+// conformSiteExpirySubSecondOrdering pins that the site expiry index orders
+// by TIME within a shared whole second: the expiry-index key's byte order
+// must equal time order even when ExpiresAt carries a sub-second fraction.
+//
+// This is the regression guard for the variable-width-timestamp bug: with
+// time.RFC3339Nano (trailing fractional zeros dropped) a key at "...00.5Z"
+// sorts BEFORE a whole-second cutoff "...00Z" (because '.' < 'Z'), so a
+// site that expires LATER in the second (e.g. .5s) would be reported expired
+// at a cutoff EARLIER in the same second (.0s) - swept up to ~1s early. The
+// fixed-width format (zero-padded 9-digit nanos) makes byte order == time
+// order, so this subtest fails on the unfixed key format and passes on the
+// fixed one.
+func conformSiteExpirySubSecondOrdering(t *testing.T, sr conformanceSiteRepo) {
+	base := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+
+	// A site that expires HALF A SECOND into the whole second.
+	late := siteOf("essLate1", "key:ess", 100)
+	late.ExpiresAt = base.Add(500 * time.Millisecond) // 12:00:00.5
+	insertSite(t, sr, late)
+
+	// A site that expires at the START of the same whole second.
+	early := siteOf("essEarly", "key:ess", 100)
+	early.ExpiresAt = base // 12:00:00.0
+	insertSite(t, sr, early)
+
+	// Cutoff at the start of the whole second (.0s): the .5s site has NOT
+	// expired yet, the .0s site has (inclusive boundary). Under the buggy
+	// variable-width format the .5s key would sort before this cutoff and be
+	// wrongly reported expired.
+	atStart := base // 12:00:00.0
+	slugs, err := sr.ExpiredSiteSlugs(atStart)
+	if err != nil {
+		t.Fatalf("expired site slugs at .0s: %v", err)
+	}
+	if sliceHas(slugs, "essLate1") {
+		t.Fatalf("site expiring at .5s must NOT be expired at a .0s cutoff (sub-second ordering bug), got %v", slugs)
+	}
+	if !sliceHas(slugs, "essEarly") {
+		t.Fatalf("site expiring at .0s should be inclusive-expired at a .0s cutoff, got %v", slugs)
+	}
+
+	// Cutoff at .5s: now BOTH are expired (the .5s site is at the inclusive
+	// boundary, the .0s site is past it).
+	atHalf := base.Add(500 * time.Millisecond) // 12:00:00.5
+	slugs, err = sr.ExpiredSiteSlugs(atHalf)
+	if err != nil {
+		t.Fatalf("expired site slugs at .5s: %v", err)
+	}
+	if !sliceHas(slugs, "essLate1") {
+		t.Fatalf("site expiring at .5s should be inclusive-expired at a .5s cutoff, got %v", slugs)
+	}
+	if !sliceHas(slugs, "essEarly") {
+		t.Fatalf("site expiring at .0s should still be expired at a .5s cutoff, got %v", slugs)
+	}
+
+	// And a cutoff just BELOW the .5s site (e.g. .4s) leaves it unexpired,
+	// proving the boundary is real sub-second time, not whole-second rounding.
+	atBelow := base.Add(400 * time.Millisecond) // 12:00:00.4
+	slugs, err = sr.ExpiredSiteSlugs(atBelow)
+	if err != nil {
+		t.Fatalf("expired site slugs at .4s: %v", err)
+	}
+	if sliceHas(slugs, "essLate1") {
+		t.Fatalf("site expiring at .5s must NOT be expired at a .4s cutoff, got %v", slugs)
 	}
 }
 

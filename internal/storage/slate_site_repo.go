@@ -135,7 +135,7 @@ func prefixIdentitySites(identity string) []byte {
 }
 
 func keyExpirySite(t time.Time, slug domain.Slug) []byte {
-	return []byte("expiry_sites/" + t.UTC().Format(time.RFC3339Nano) + "/" + slug.String())
+	return []byte("expiry_sites/" + t.UTC().Format(expirySiteTimeFormat) + "/" + slug.String())
 }
 
 func prefixExpirySites() []byte { return []byte("expiry_sites/") }
@@ -338,14 +338,18 @@ func (r *SlateRepo) DeleteSite(slug domain.Slug) error {
 }
 
 // ExpiredSiteSlugs returns the slugs of sites whose ExpiresAt is at or
-// before now. Inclusive boundary, RFC3339Nano lex order = time order
-// (the same shape as the paste ExpiredSlugs).
+// before now (inclusive boundary). The site expiry keys use the
+// fixed-width expirySiteTimeFormat, so the timestamp segment's byte order
+// is time order EXACTLY (a string compare is correct even within a shared
+// whole second) - unlike the variable-width time.RFC3339Nano the paste
+// ExpiredSlugs still uses. The cutoff is formatted with the SAME layout so
+// the compare stays aligned.
 func (r *SlateRepo) ExpiredSiteSlugs(now time.Time) ([]string, error) {
 	items, err := r.scanPrefix(prefixExpirySites())
 	if err != nil {
 		return nil, err
 	}
-	cutoff := now.UTC().Format(time.RFC3339Nano)
+	cutoff := now.UTC().Format(expirySiteTimeFormat)
 	var out []string
 	for _, item := range items {
 		rest := strings.TrimPrefix(string(item.Key), "expiry_sites/")

@@ -789,19 +789,30 @@ func (r *ShaleRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 
 // reserveBytes is step 1 of the reservation pattern: a single-shard CAS on
 // the {id} shard that atomically checks the per-owner cap and increments
-// the identity_bytes counter by `body`, plus writes a reservation marker
-// keyed by slug. Returns ErrOverUserQuota if counter+body would exceed
-// cap. The increment + the check are one atomic CAS, so two concurrent
-// reservers serialize: exactly one reads the pre-increment counter, the
-// other reads the post-increment value and is rejected if it no longer
-// fits. Quota is therefore a hard ceiling (docs/SPEC.md "Why quota can
-// never be exceeded").
+// the identity_bytes (PASTE) counter by `body`, plus writes a reservation
+// marker keyed by slug. Returns ErrOverUserQuota if the owner's COMBINED
+// paste + site bytes plus `body` would exceed cap. The increment + the
+// check are one atomic CAS, so two concurrent reservers serialize: exactly
+// one reads the pre-increment counter, the other reads the post-increment
+// value and is rejected if it no longer fits. Quota is therefore a hard
+// ceiling (docs/SPEC.md "Why quota can never be exceeded").
 //
-// A zero userCap means "no per-owner cap"; the counter is still
+// The cap check sums BOTH the paste counter AND the site counter, so a
+// paste insert is rejected if the owner's combined paste+site bytes would
+// exceed userCap, the SYMMETRIC twin of reserveSiteBytes (which reads the
+// paste counter for the site direction) and matching the sqlite
+// identityActiveBytes that spans both kinds. The site counter
+// (identity_site_bytes/<id>) co-shards on {id} with the paste counter, so
+// reading it inside this CAS is a same-shard read. Only the paste counter
+// is incremented here; the site counter is read for the cap but never
+// written.
+//
+// A zero userCap means "no per-owner cap"; the paste counter is still
 // incremented (so SumActiveBytesByOwner stays accurate) but the check is
 // skipped.
 func (r *ShaleRepo) reserveBytes(identity, slug string, body, userCap int64, now time.Time) error {
 	counterKey := shaleKeyIdentityBytes(identity)
+	siteCounterKey := shaleKeyIdentitySiteBytes(identity)
 	reserveKey := shaleKeyIdentityReserve(identity, slug)
 	markerVal, err := encodeReservationMarker(body, now)
 	if err != nil {
@@ -812,8 +823,14 @@ func (r *ShaleRepo) reserveBytes(identity, slug string, body, userCap int64, now
 		if err != nil {
 			return err
 		}
-		if userCap > 0 && cur+body > userCap {
-			return ErrOverUserQuota
+		if userCap > 0 {
+			siteCur, err := txGetCounter(tx, siteCounterKey)
+			if err != nil {
+				return err
+			}
+			if cur+siteCur+body > userCap {
+				return ErrOverUserQuota
+			}
 		}
 		if err := tx.Put(counterKey, formatCounter(cur+body)); err != nil {
 			return err

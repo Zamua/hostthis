@@ -1685,14 +1685,17 @@ and the sweep path's interface is:
 Sites mirror the paste key families. The names are new but the shapes are
 the established ones (`sites/<slug>` parallels `pastes/<slug>`,
 `identity_sites/<id>/<slug>` parallels `identity_pastes/<id>/<slug>`,
-`expiry_sites/<rfc3339>/<slug>` parallels `expiry/<rfc3339>/<slug>`).
-Values are JSON unless noted; all keys are UTF-8 strings cast to bytes,
-the same as the paste layout:
+`expiry_sites/<ts>/<slug>` parallels `expiry/<rfc3339>/<slug>` in role).
+The site expiry timestamp is fixed-width (zero-padded 9-digit nanos,
+`2006-01-02T15:04:05.000000000Z07:00`) so its byte order is time order
+exactly; it does NOT reuse the paste index's variable-width `RFC3339Nano`
+(see `ExpiredSiteSlugs` above for why). Values are JSON unless noted; all
+keys are UTF-8 strings cast to bytes, the same as the paste layout:
 
 ```
 sites/<slug>                       JSON {Identity, Manifest, DedupedSize, CreatedAt, UpdatedAt, ExpiresAt}
 identity_sites/<identity>/<slug>   empty value (for "list/sum sites by identity" prefix scan)
-expiry_sites/<rfc3339>/<slug>      empty value (for sweep prefix scan to find sites whose expires_at <= now)
+expiry_sites/<ts>/<slug>           empty value (for sweep prefix scan to find sites whose expires_at <= now; ts is fixed-width)
 ```
 
 The `sites/<slug>` row is the authoritative record. The `Manifest` is
@@ -1760,9 +1763,22 @@ enumerates every site exactly as `pastes/` enumerates every paste.
 #### Expiry + sweep -> KV mapping
 
 - **`ExpiredSiteSlugs(now)`.** Prefix-scan `expiry_sites/`; for each
-  `expiry_sites/<rfc3339>/<slug>` key, parse the timestamp segment and
-  return `<slug>` when `ts <= now` (inclusive boundary, RFC3339Nano lex
-  order is time order, exactly the paste `ExpiredSlugs` shape).
+  `expiry_sites/<ts>/<slug>` key, compare the timestamp segment and return
+  `<slug>` when `ts <= now` (inclusive boundary). The site expiry timestamp
+  is a FIXED-WIDTH RFC3339 with a zero-padded 9-digit nanosecond fraction
+  (`2006-01-02T15:04:05.000000000Z07:00`), so a string compare on the key is
+  byte order == time order EXACTLY, including within a shared whole second.
+  This is NOT `time.RFC3339Nano`: that format drops trailing fractional
+  zeros (so `...00.5Z` sorts BEFORE `...00Z` because `.` < `Z`), which would
+  let a record be swept up to ~1s before its real `ExpiresAt`. The
+  fixed-width format is free here because sites have no prod data yet; the
+  pre-existing PASTE expiry index (`expiry/<rfc3339>/<slug>`) still uses
+  `time.RFC3339Nano` and carries the same latent sub-second sweep skew, but
+  it holds live prod data on slatedb so changing its key format is a
+  migration (re-keying every `expiry/` entry; a format flip alone would
+  orphan the old keys so those pastes would never expire). That migration is
+  a documented follow-up; until then the paste path keeps its current key
+  format unchanged.
 - **`Delete(slug)`.** Read `sites/<slug>` for its identity + expiry (to
   clean up both index entries), then in one transaction delete
   `sites/<slug>`, `identity_sites/<id>/<slug>`, and
@@ -1784,38 +1800,44 @@ enumerates every site exactly as `pastes/` enumerates every paste.
 
 The shale backend reuses the slatedb site key names + JSON row schema (the
 same way it reuses the paste layout: co-location is by `ShardKeyFn`, not by
-renaming keys). It adds two `{id}` families the slatedb-direct backend does
-not need, because shale accounts per-owner bytes through a monotonic
-counter (the reservation pattern) rather than a read-time scan. The full
-site shard map:
+renaming keys). It replaces the slatedb `identity_sites/<id>/<slug>` index
+with a monotonic `{id}` byte counter (the reservation pattern), because
+shale accounts per-owner bytes through that counter rather than a read-time
+scan over a per-identity index. The full site shard map:
 
 | Key family | Keys | Shard key |
 | --- | --- | --- |
 | Authoritative (per-slug) | `sites/<slug>` | `<slug>` |
-| Expiry index (per-slug) | `expiry_sites/<date>/<slug>` | `<slug>` (slug is the LAST segment) |
-| Derived index (per-identity) | `identity_sites/<id>/<slug>` | `<id>` |
+| Expiry index (per-slug) | `expiry_sites/<ts>/<slug>` | `<slug>` (slug is the LAST segment) |
 | Site byte counter (per-identity) | `identity_site_bytes/<id>` | `<id>` |
 | Site reservation marker (per-identity) | `identity_site_reserve/<id>/<slug>` | `<id>` |
 
 `sites/<slug>` joins the authoritative `{slug}` family (alongside
-`pastes/<slug>`), `expiry_sites/<date>/<slug>` shards on its trailing slug
-like `expiry/<date>/<slug>`, and the three `identity_site*` families join
-the derived `{id}` family so they co-shard with each other (a site reserve
+`pastes/<slug>`), `expiry_sites/<ts>/<slug>` shards on its trailing slug
+like `expiry/<date>/<slug>`, and the two `identity_site_*` families join the
+derived `{id}` family so they co-shard with each other (a site reserve
 step's read-increment-mark is single-shard, exactly like the paste reserve).
 The `_sites`/`_site_` suffixes keep these from matching the bare `expiry/`
-and `identity_sites/` prefixes (the trailing-slash anchoring in
-`shaleShardKey`): `expiry_sites/` is not `expiry/`, and `identity_site_bytes`
-/ `identity_site_reserve` are not `identity_sites/`.
+and `identity_*` prefixes (the trailing-slash anchoring in `shaleShardKey`):
+`expiry_sites/` is not `expiry/`.
+
+Shale does NOT keep an `identity_sites/<id>/<slug>` index. The slatedb
+backend needs it (its `SumActiveSiteBytesByOwner` scans the per-identity
+index, decodes each row, and filters by expiry), but shale's owner sum is a
+single read of the `identity_site_bytes/<id>` counter, the reconciler scans
+`sites/` (not a per-identity index), and there is no `ListSitesByOwner` on
+the site interface. A per-identity site index on shale would therefore be
+write-only with no reader, so it is omitted entirely (no `identity_sites/`
+write on deploy, no delete on `DeleteSite`, no `shaleShardKey` routing case).
 
 A site deploy spans the `{slug}` shard (the authoritative `sites/<slug>`
 write + the cross-family paste-slug collision read) and the `{id}` shard
 (the per-identity byte counter), which cannot be one CAS, so on shale a site
 deploy uses the SAME three-step reservation pattern paste inserts use:
 reserve the `DedupedSize` on the `{id}` site counter, perform the
-authoritative `{slug}` write, then confirm (drop the marker + write the
-derived `identity_sites` index). The strict-quota and sweep-time-expiry
-properties carry over from the paste counter unchanged
-(`conformCaps.ExpiryFreesQuotaAtReadTime = false`,
+authoritative `{slug}` write, then confirm (drop the reservation marker).
+The strict-quota and sweep-time-expiry properties carry over from the paste
+counter unchanged (`conformCaps.ExpiryFreesQuotaAtReadTime = false`,
 `StrictQuotaUnderConcurrency = true`).
 
 **Why a dedicated `identity_site_bytes` counter (not the shared
@@ -1826,13 +1848,29 @@ sum from `identity_bytes/<id>`, the site sum from a distinct
 `identity_site_bytes/<id>`. Folding sites into `identity_bytes` would
 double-count (the budget would subtract the same site bytes twice). The
 dedicated counter keeps `SumActiveSiteBytesByOwner` site-only (the
-conformance contract: a site-only owner sum), while the per-owner CAP check
-in the reserve step still sums BOTH counters (paste + site) against the cap,
-exactly like the sqlite `identityActiveBytes` and the slatedb per-identity
-check. The service-wide cap sums version bytes AND every site's
-`DedupedSize` (the shale `sumServiceWideActiveBytes` now adds the site
-aggregate, paralleling the slatedb sum), so on BOTH the paste-insert and the
-site-deploy paths a paste sees site bytes and a site sees paste bytes.
+conformance contract: a site-only owner sum).
+
+The per-owner cap is SYMMETRIC across both kinds: a deploy of EITHER kind
+checks the owner's COMBINED paste + site bytes against `userCap`, so the
+ceiling holds no matter how an owner splits their quota between pastes and
+sites. This matches the sqlite `identityActiveBytes`, which sums both kinds
+and is read by BOTH the paste insert and the site deploy. Concretely:
+  - a SITE deploy's reserve step reads the paste counter alongside the site
+    counter and checks `paste + site + deduped <= userCap`, and
+  - a PASTE insert / append's reserve step reads the site counter alongside
+    the paste counter and checks `paste + site + body <= userCap`.
+Without the second of those, a paste could be accepted while the owner's
+site bytes were ignored: e.g. an 800-byte site plus a 300-byte paste under a
+1000-byte cap would wrongly admit the paste (combined 1100 > 1000) even
+though the symmetric site direction correctly rejects it. The
+`Sites/PerOwnerCapCountsBoth` conformance subtest pins both directions, and
+`StrictQuotaUnderConcurrency` pins the combined ceiling under concurrent
+cross-kind deploys.
+
+The service-wide cap sums version bytes AND every site's `DedupedSize` (the
+shale `sumServiceWideActiveBytes` now adds the site aggregate, paralleling
+the slatedb sum), so on BOTH the paste-insert and the site-deploy paths a
+paste sees site bytes and a site sees paste bytes.
 
 The cross-family paste-slug collision read is added to the site
 authoritative write (reject a slug a paste owns), and the paste
