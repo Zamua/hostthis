@@ -101,7 +101,12 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 	return &metadataBundle{
 		Repo:    repo,
 		KeyGate: repo,
-		Close:   repo.Close,
+		// Static-site hosting on shale: the ShaleSiteRepo adapter shares the
+		// same shale cluster (shard routing + per-shard CAS) as the paste
+		// repo, so a non-nil Sites lights up archive hosting on shale, the
+		// same way it does on slatedb.
+		Sites: storage.NewShaleSiteRepo(repo),
+		Close: repo.Close,
 	}, nil
 }
 

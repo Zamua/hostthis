@@ -1782,45 +1782,76 @@ enumerates every site exactly as `pastes/` enumerates every paste.
 
 #### Shale reuses the layout
 
-The shale backend reuses these exact key names and JSON row schemas (the
+The shale backend reuses the slatedb site key names + JSON row schema (the
 same way it reuses the paste layout: co-location is by `ShardKeyFn`, not by
-renaming keys). The three site families add to the shard map:
+renaming keys). It adds two `{id}` families the slatedb-direct backend does
+not need, because shale accounts per-owner bytes through a monotonic
+counter (the reservation pattern) rather than a read-time scan. The full
+site shard map:
 
 | Key family | Keys | Shard key |
 | --- | --- | --- |
 | Authoritative (per-slug) | `sites/<slug>` | `<slug>` |
-| Derived (per-identity) | `identity_sites/<id>/*` | `<id>` |
 | Expiry index (per-slug) | `expiry_sites/<date>/<slug>` | `<slug>` (slug is the LAST segment) |
+| Derived index (per-identity) | `identity_sites/<id>/<slug>` | `<id>` |
+| Site byte counter (per-identity) | `identity_site_bytes/<id>` | `<id>` |
+| Site reservation marker (per-identity) | `identity_site_reserve/<id>/<slug>` | `<id>` |
 
 `sites/<slug>` joins the authoritative `{slug}` family (alongside
-`pastes/<slug>`), `identity_sites/<id>/*` joins the derived `{id}` family,
-and `expiry_sites/<date>/<slug>` shards on its trailing slug like
-`expiry/<date>/<slug>`. The site insert therefore spans the `{slug}` shard
-(the authoritative `sites/<slug>` write + the cross-family paste-slug
-collision read) and the `{id}` shard (the per-identity byte accounting), so
-on shale a site deploy uses the same reservation pattern paste inserts use:
-reserve the `DedupedSize` on the `{id}` `identity_bytes` counter, perform
-the authoritative `{slug}` write, then confirm. With sites accounted on the
-same `identity_bytes` counter, the counter measures combined paste+site
-bytes and the strict-quota and sweep-time-expiry properties carry over
-unchanged. The reservation markers a site deploy / delete leaves are
-completed by the same reconciler that completes paste markers (a site
-reserve marker is an orphan candidate by exactly the same grace-window
-rule), and the cross-family paste-slug collision read is added to the paste
-authoritative write so a paste cannot take a slug a site owns.
+`pastes/<slug>`), `expiry_sites/<date>/<slug>` shards on its trailing slug
+like `expiry/<date>/<slug>`, and the three `identity_site*` families join
+the derived `{id}` family so they co-shard with each other (a site reserve
+step's read-increment-mark is single-shard, exactly like the paste reserve).
+The `_sites`/`_site_` suffixes keep these from matching the bare `expiry/`
+and `identity_sites/` prefixes (the trailing-slash anchoring in
+`shaleShardKey`): `expiry_sites/` is not `expiry/`, and `identity_site_bytes`
+/ `identity_site_reserve` are not `identity_sites/`.
 
-**Status: slatedb is the must-have and is implemented + conformance-tested;
-shale sites are the documented next step, not yet wired.** Prod runs the
-slatedb-direct backend, so the slatedb site impl above is the load-bearing
-deliverable. The shale site impl is the same layout over the reservation
-pattern (the substantive new surface is the `identity_bytes` reservation
-for `DedupedSize`, the cross-family collision read in the paste
-authoritative write, and the reconciler's awareness of site markers); it is
-deferred so the prod-critical slatedb path lands first, fully tested. When
-the shale site impl is wired, the conformance suite's site subtests run
-against it under the same factory, the same way they run against sqlite and
-slatedb today, and shale becomes a drop-in for static-site hosting by the
-same construction.
+A site deploy spans the `{slug}` shard (the authoritative `sites/<slug>`
+write + the cross-family paste-slug collision read) and the `{id}` shard
+(the per-identity byte counter), which cannot be one CAS, so on shale a site
+deploy uses the SAME three-step reservation pattern paste inserts use:
+reserve the `DedupedSize` on the `{id}` site counter, perform the
+authoritative `{slug}` write, then confirm (drop the marker + write the
+derived `identity_sites` index). The strict-quota and sweep-time-expiry
+properties carry over from the paste counter unchanged
+(`conformCaps.ExpiryFreesQuotaAtReadTime = false`,
+`StrictQuotaUnderConcurrency = true`).
+
+**Why a dedicated `identity_site_bytes` counter (not the shared
+`identity_bytes`).** The deploy service computes the per-owner budget as
+`UserQuota - paste_bytes - site_bytes`, reading the paste sum and the site
+sum SEPARATELY and adding them, so the two sums MUST be disjoint: the paste
+sum from `identity_bytes/<id>`, the site sum from a distinct
+`identity_site_bytes/<id>`. Folding sites into `identity_bytes` would
+double-count (the budget would subtract the same site bytes twice). The
+dedicated counter keeps `SumActiveSiteBytesByOwner` site-only (the
+conformance contract: a site-only owner sum), while the per-owner CAP check
+in the reserve step still sums BOTH counters (paste + site) against the cap,
+exactly like the sqlite `identityActiveBytes` and the slatedb per-identity
+check. The service-wide cap sums version bytes AND every site's
+`DedupedSize` (the shale `sumServiceWideActiveBytes` now adds the site
+aggregate, paralleling the slatedb sum), so on BOTH the paste-insert and the
+site-deploy paths a paste sees site bytes and a site sees paste bytes.
+
+The cross-family paste-slug collision read is added to the site
+authoritative write (reject a slug a paste owns), and the paste
+authoritative write already rejects a slug a paste owns; the site insert
+also rejects a slug another site owns, so a slug is EITHER a site or a
+paste, never both, in both directions. The reservation markers a site deploy
+/ delete leaves are completed by the same reconciler that completes paste
+markers: a Job 3 applies the identical grace-window orphan-release /
+leaked-marker-drop rule to `identity_site_reserve/` markers against the site
+counter (`reconcileSiteReservations` in `shale_site_repo.go`).
+
+**Status: slatedb AND shale are both implemented + conformance-tested.**
+Prod runs the slatedb-direct backend, so the slatedb site impl is the
+load-bearing deliverable; the shale site impl is the same layout over the
+reservation pattern (the new surface is the dedicated site counter +
+reservation, the cross-family collision read, the service-wide-sum site
+fold, and the reconciler's Job 3 for site markers). Both run the SAME
+conformance site subtests under the SAME factory the way sqlite and slatedb
+do, so each backend is a drop-in for static-site hosting by construction.
 
 #### Wiring: widen the metadata bundle's `Sites` field
 
