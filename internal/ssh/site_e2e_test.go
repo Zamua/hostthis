@@ -165,14 +165,35 @@ func TestDeploySiteAndServe(t *testing.T) {
 		}
 	}
 
-	// A path not in the manifest 404s (no SPA fallback).
-	resp, err := http.Get(base + "/does-not-exist.html")
+	// SPA fallback through the real upload pipe: a route-shaped miss
+	// (no extension or ".html") serves the ROOT index.html with a 200 so
+	// a client-side router can render the route. A path that looks like a
+	// missing static ASSET still 404s.
+	rootIndex := "<!doctype html><h1>home</h1>"
+	routeChecks := []string{"/about-page", "/does-not-exist.html", "/users/42"}
+	for _, p := range routeChecks {
+		resp, err := http.Get(base + p)
+		if err != nil {
+			t.Fatalf("GET route %s: %v", p, err)
+		}
+		got, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("GET route %s: status %d, want 200 (SPA fallback)", p, resp.StatusCode)
+		}
+		if string(got) != rootIndex {
+			t.Fatalf("GET route %s body: got %q, want root index %q", p, got, rootIndex)
+		}
+	}
+
+	// A genuinely-missing asset still 404s (no silent index.html-as-JS).
+	resp, err := http.Get(base + "/assets/nope.js")
 	if err != nil {
-		t.Fatalf("GET missing: %v", err)
+		t.Fatalf("GET missing asset: %v", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != 404 {
-		t.Fatalf("missing path: got %d, want 404", resp.StatusCode)
+		t.Fatalf("missing asset: got %d, want 404", resp.StatusCode)
 	}
 }
 

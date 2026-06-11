@@ -136,6 +136,77 @@ func (m Manifest) Lookup(reqPath string) (ManifestEntry, bool) {
 	return ManifestEntry{}, false
 }
 
+// assetExtensions is the set of file extensions the SPA fallback treats
+// as REAL static assets. A request that misses the manifest and ends in
+// one of these is a genuinely-missing asset and 404s; a miss with any
+// other extension (or none, or ".html") is treated as a client-side
+// ROUTE and gets the root index.html fallback. See LookupWithSPAFallback
+// and SPEC.md "SPA fallback (route vs. asset)".
+//
+// This is intentionally the deny-list: the asset set is enumerated and
+// everything else falls back, so a novel route shape (no extension, an
+// app-specific extension) defaults to the SPA index, never a 404. ".html"
+// is deliberately NOT here - a missing ".html" path is a pre-rendered
+// route the build did not emit, so it routes through the SPA too.
+var assetExtensions = map[string]struct{}{
+	".js": {}, ".mjs": {}, ".css": {}, ".json": {}, ".map": {},
+	".xml": {}, ".txt": {}, ".pdf": {}, ".wasm": {}, ".webmanifest": {},
+	".png": {}, ".jpg": {}, ".jpeg": {}, ".gif": {}, ".webp": {},
+	".avif": {}, ".svg": {}, ".ico": {},
+	".woff": {}, ".woff2": {}, ".ttf": {}, ".otf": {}, ".eot": {},
+}
+
+// looksLikeAsset reports whether reqPath's LAST segment has a known
+// static-asset extension. Pure: a decision on the name only, no I/O.
+// Only the final segment's extension matters, so "/users/123/edit" (no
+// trailing extension) is a route and "/img/logo.png" is an asset.
+func looksLikeAsset(reqPath string) bool {
+	ext := strings.ToLower(path.Ext(path.Base(reqPath)))
+	_, ok := assetExtensions[ext]
+	return ok
+}
+
+// LookupWithSPAFallback resolves reqPath like Lookup, but on a miss it
+// applies the SPA fallback: a path that looks like a client-side ROUTE
+// (no extension or a ".html" extension on its last segment) resolves to
+// the site's ROOT index.html, while a path that looks like a missing
+// static ASSET (a known asset extension) stays a miss the HTTP layer
+// 404s.
+//
+// Returns:
+//   - (entry, false): a direct manifest hit (a real file or directory
+//     index). false means "not via fallback" - serve it normally.
+//   - (rootIndex, true): a fallback hit. true means "this is the root
+//     index.html served for a client-side route" - the HTTP layer should
+//     still respond 200 with the index bytes, exactly as if "/" were
+//     requested.
+//   - (zero, false) with second return also distinguished by the third:
+//     a genuine miss (a missing asset, OR a route with no root index.html
+//     to fall back to) the HTTP layer 404s.
+//
+// The three outcomes are encoded in two bools (hit, viaFallback):
+//   - hit && !viaFallback: direct manifest entry
+//   - hit &&  viaFallback: root index.html via SPA fallback
+//   - !hit: 404 (viaFallback is always false here)
+//
+// Pure, I/O-free: it only consults the in-memory manifest.
+func (m Manifest) LookupWithSPAFallback(reqPath string) (entry ManifestEntry, hit, viaFallback bool) {
+	if e, ok := m.Lookup(reqPath); ok {
+		return e, true, false
+	}
+	// A miss that looks like a real asset stays a 404.
+	if looksLikeAsset(reqPath) {
+		return ManifestEntry{}, false, false
+	}
+	// A miss that looks like a route falls back to the root index.html,
+	// if the site has one. A site with no root index.html (e.g. only
+	// nested-dir indexes) cannot SPA-fall-back, so it 404s instead.
+	if e, ok := m.Files["index.html"]; ok {
+		return e, true, true
+	}
+	return ManifestEntry{}, false, false
+}
+
 // HasWebContent reports whether the manifest holds at least one piece
 // of web content: an index.html anywhere, or any .html / .css / .js
 // file. An archive with none of these is not a site (see ErrNoWebContent).

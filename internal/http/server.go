@@ -307,11 +307,17 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 		return true
 	}
 
-	entry, ok := site.Manifest.Lookup(reqPath)
-	if !ok {
-		// A path that doesn't match any manifest entry is a clean 404.
-		// No SPA fallback in this version (an unmatched route does NOT
-		// serve the root index.html).
+	// SPA fallback: a direct manifest hit serves that file; a miss that
+	// looks like a client-side ROUTE (no extension or ".html") serves the
+	// site's ROOT index.html with a 200 so the SPA's JS loads and routes;
+	// a miss that looks like a missing static ASSET (a known asset
+	// extension) stays a 404. The decision is a pure domain function -
+	// see domain.Manifest.LookupWithSPAFallback + SPEC.md "SPA fallback
+	// (route vs. asset)". A fallback hit is served byte-identically to
+	// requesting "/" (same root index.html bytes, content-type, ETag, and
+	// 200 status); only the request path differs.
+	entry, hit, _ := site.Manifest.LookupWithSPAFallback(reqPath)
+	if !hit {
 		http.NotFound(w, r)
 		return true
 	}

@@ -73,7 +73,10 @@ func TestSite_ServesFilesAndIndex(t *testing.T) {
 		{"/blog/", 200, "<h1>blog</h1>", "text/html; charset=utf-8"},
 		{"/blog", 200, "<h1>blog</h1>", "text/html; charset=utf-8"},
 		{"/data.bin", 200, "\x00\x01\x02", "application/octet-stream"},
-		{"/missing.html", 404, "", ""},
+		// SPA fallback: a ".html" miss is a client-side route, so it serves
+		// the root index.html (200). A ".css" miss is a real missing asset,
+		// so it stays a 404. See domain.Manifest.LookupWithSPAFallback.
+		{"/missing.html", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
 		{"/blog/missing.css", 404, "", ""},
 	}
 	for _, c := range cases {
@@ -95,6 +98,98 @@ func TestSite_ServesFilesAndIndex(t *testing.T) {
 				t.Fatalf("content-type: got %q, want %q", ct, c.ctype)
 			}
 		})
+	}
+}
+
+// TestSite_SPAFallback pins the route-vs-asset behavior end-to-end over
+// the real HTTP handler: a route-shaped miss serves the ROOT index.html
+// (200, index bytes, same headers as serving "/" directly), while an
+// asset-shaped miss stays a 404. Real files and directory indexes are
+// unaffected.
+func TestSite_SPAFallback(t *testing.T) {
+	srv := buildSiteServer(t)
+	mux := srv.Handler()
+
+	cases := []struct {
+		name  string
+		path  string
+		code  int
+		body  string // checked only on 200
+		ctype string // checked only on 200
+	}{
+		// Real files / indexes still resolve directly (no fallback).
+		{"root", "/", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
+		{"dir index", "/blog/", 200, "<h1>blog</h1>", "text/html; charset=utf-8"},
+		{"real file", "/css/style.css", 200, "body{}", "text/css; charset=utf-8"},
+
+		// Route-shaped misses serve the ROOT index.html via the fallback.
+		{"no-ext route", "/about", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
+		{"deep route", "/users/123", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
+		{"nested route", "/users/123/edit", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
+		{"html route", "/about.html", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
+
+		// Asset-shaped misses 404 (a genuinely-missing asset).
+		{"missing js", "/assets/nope.js", 404, "", ""},
+		{"missing css", "/styles/gone.css", 404, "", ""},
+		{"missing png", "/img/missing.png", 404, "", ""},
+		{"missing woff2", "/fonts/x.woff2", 404, "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", c.path, nil)
+			r.Host = "abc23456.paste.test"
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, r)
+			if w.Code != c.code {
+				t.Fatalf("code: got %d, want %d", w.Code, c.code)
+			}
+			if c.code != 200 {
+				return
+			}
+			if w.Body.String() != c.body {
+				t.Fatalf("body: got %q, want %q", w.Body.String(), c.body)
+			}
+			if ct := w.Header().Get("Content-Type"); ct != c.ctype {
+				t.Fatalf("content-type: got %q, want %q", ct, c.ctype)
+			}
+		})
+	}
+}
+
+// TestSite_SPAFallback_SameHeadersAsRoot proves a fallback response is
+// byte-identical to requesting "/": same body, content-type, sandbox
+// headers, and ETag (the root index.html's content SHA).
+func TestSite_SPAFallback_SameHeadersAsRoot(t *testing.T) {
+	srv := buildSiteServer(t)
+	mux := srv.Handler()
+
+	get := func(p string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", p, nil)
+		r.Host = "abc23456.paste.test"
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w
+	}
+	root := get("/")
+	route := get("/about")
+
+	if route.Code != 200 || root.Code != 200 {
+		t.Fatalf("codes: root=%d route=%d, want both 200", root.Code, route.Code)
+	}
+	if route.Body.String() != root.Body.String() {
+		t.Fatalf("body mismatch: route=%q root=%q", route.Body.String(), root.Body.String())
+	}
+	for _, hdr := range []string{
+		"Content-Type", "X-Frame-Options", "Referrer-Policy",
+		"Permissions-Policy", "Cache-Control", "ETag",
+	} {
+		if route.Header().Get(hdr) != root.Header().Get(hdr) {
+			t.Fatalf("header %s: route=%q root=%q", hdr,
+				route.Header().Get(hdr), root.Header().Get(hdr))
+		}
+	}
+	if route.Header().Get("ETag") != `"sha-index"` {
+		t.Fatalf("fallback etag: got %q, want %q", route.Header().Get("ETag"), `"sha-index"`)
 	}
 }
 
@@ -132,7 +227,10 @@ func TestSite_PathMode(t *testing.T) {
 		{"/p/abc23456", 200, "<h1>root</h1>"},
 		{"/p/abc23456/css/style.css", 200, "body{}"},
 		{"/p/abc23456/blog/", 200, "<h1>blog</h1>"},
-		{"/p/abc23456/missing.html", 404, ""},
+		// SPA fallback also applies in path mode: a ".html" miss serves the
+		// root index.html (200), a ".js" miss stays a 404.
+		{"/p/abc23456/missing.html", 200, "<h1>root</h1>"},
+		{"/p/abc23456/missing.js", 404, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.path, func(t *testing.T) {
