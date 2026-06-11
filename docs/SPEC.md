@@ -235,6 +235,177 @@ With* options. Refusal behavior is pinned by
   for older uncompressed blobs (rolling-migration support; no flag
   day).
 
+## Static site archives
+
+A single renderable file is the common case, but the same upload pipe
+also accepts a **gzip-tar archive of a static site** (HTML / CSS / JS).
+Pipe the tarball exactly the way you pipe any file:
+
+```
+$ tar czf - mysite/ | ssh hostthis.dev
+https://abc12345.hostthis.dev
+```
+
+There is no new verb and no flag. hostthis DETECTS the archive the same
+way it detects Markdown vs HTML (by sniffing the upload), safe-untars
+it, stores each file as a content-addressed blob plus a manifest, and
+serves the directory at `<slug>.hostthis.dev/<path>`. Everything else -
+identity, quota, the 7-day expiry, versioning, the security model - is
+identical to a single-file paste. A static site is just "a paste that
+happens to be a directory."
+
+This is the now-real form of the "Static directory hosting" bullet
+under "Future directions"; the persistence-API bullet there stays a
+proposal.
+
+### Detection: gzip-tar as a format
+
+The format gate (`DetectKind`, see "File handling → Format gate") gains
+one branch. After the existing HTML / Markdown sniffing, the detector
+checks the captured upload prefix for the **gzip magic** (`0x1f 0x8b`),
+and if present, peeks one tar header out of the decompressed stream to
+confirm a tar inside (a gzip-tar = `.tar.gz` / `.tgz`). The detection
+is by content, never by filename - the SSH pipe carries no filename, so
+this matches how every other format is recognized.
+
+A gzip-tar that survives the safe-untar (below) AND contains web
+content (an `index.html`, or at least one `.html` / `.css` / `.js`
+file) routes to the **site** path. A gzip-tar with no web content is
+**rejected** as unsupported, the same outcome as any unsupported
+upload today (see the "Supported formats" rejection). This keeps the
+scope narrow on purpose: hostthis hosts renderable web content, not
+arbitrary file trees.
+
+Scope for this version is **gzip-tar only**. Plain (uncompressed) tar
+and zip are natural follow-ons but out of scope here; an upload that
+sniffs as zip or bare tar is rejected like any other unsupported type.
+
+### Safe-untar (security-critical)
+
+Untarring attacker-controlled bytes is the load-bearing risk, so the
+extractor enforces three guards while it STREAMS the archive (never
+"decompress fully, then validate"):
+
+- **Path safety (zip-slip / tar traversal guard).** Every tar entry
+  must be a regular file or a directory; symlinks, hardlinks, devices,
+  FIFOs, and every other type are rejected outright (no following a
+  symlink out of the site root, no hardlink games). Each entry's path
+  is cleaned and rejected if it is absolute, contains a `..` segment,
+  or otherwise escapes the site root. The manifest only ever holds
+  safe, site-root-relative paths.
+- **Decompression-bomb guard.** Total UNCOMPRESSED bytes are tracked as
+  the tar is streamed, and extraction ABORTS the instant the running
+  total would exceed the identity's available quota (and a max-site-size
+  cap). A tiny archive can expand to gigabytes, so the check is on the
+  bytes as they are read out, never on the post-decompression result.
+  The aborted upload writes nothing durable.
+- **File-count and manifest-size caps.** The number of entries is
+  capped (a few thousand) and the manifest size is bounded, so a
+  "million tiny files" archive cannot exhaust file descriptors,
+  inodes, or metadata-store space even though each file is small.
+
+Any guard tripping aborts the whole deploy: a half-extracted site is
+never persisted and never served (deploys are atomic - see Versioning
+below).
+
+### The Site + Manifest model
+
+A **Site** is a new domain aggregate that lives alongside `Paste`:
+
+- `Slug` - the same 8-char slug shape pastes use, drawn from the same
+  alphabet, so a site and a paste are indistinguishable from the URL.
+- `Identity` - the owner, the uploader's SSH key fingerprint, exactly
+  as for a paste.
+- `Manifest` - the value object mapping each safe relative path to the
+  SHA256 of its blob, plus per-file size and a content-type derived
+  from the file extension.
+- `CreatedAt` / `UpdatedAt` / `ExpiresAt` - the same fields and the
+  same 7-day retention clock a paste carries.
+
+The `Manifest` is a pure value object: building it from extracted
+entries, looking a path up in it, and computing each file's
+content-type-by-extension are I/O-free domain operations with no
+storage or HTTP dependency, matching the domain-purity rule.
+
+### Storage
+
+Sites reuse the existing content-addressed `BlobStore` for their files:
+each extracted file is `Put` under its SHA256 key, so identical files
+across deploys (and across different sites) **dedupe for free** - the
+same vendored `react.min.js` in ten deploys is stored once. The blob
+layer is unchanged; a site is just many blob writes plus one manifest.
+
+A new **SiteRepo** persists / gets / deletes Site records (slug ->
+owner + manifest + timestamps) next to the existing paste repo,
+behind a small service-layer interface the same way the paste repos
+are. It carries `Identity` on every record and is queried by slug,
+so the same owner-gating and not-found-on-cross-owner behavior the
+pastes get applies to sites.
+
+### Serving a directory
+
+A site is served by the same HTTP surface that serves pastes, with the
+same origin-isolation property: `<slug>.hostthis.dev/<path>` resolves
+the slug to its Site, looks `<path>` up in the manifest, and streams
+the referenced blob with the content-type derived from the path's
+extension. Directory handling:
+
+- `/` and any `/<dir>/` serve that directory's `index.html` if one
+  exists in the manifest.
+- A path that maps to a manifest entry serves that file.
+- An unmatched path returns **404**. There is no SPA fallback in this
+  version (an unmatched route does NOT serve the root `index.html`);
+  that is a possible follow-on, called out in the open questions.
+
+Unlike a single-file paste - which serves only at `/` on its subdomain
+and 404s every other path - a site serves its whole path space off the
+subdomain root, because a site is a directory by definition.
+
+Site reads carry the **same sandbox headers** as HTML paste reads
+(`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
+`Permissions-Policy: ...`) and the same cache posture. Files are served
+**raw**: the site's own HTML/CSS/JS runs exactly as uploaded, secured
+by per-subdomain origin isolation, not by sanitizing the bytes.
+
+### Same security model as HTML pastes (not a new posture)
+
+A static site introduces **no new security posture**. An HTML paste is
+already served RAW (its JS runs) and is secured by **origin isolation**:
+each paste gets its own subdomain, its own browser origin, and the same
+response headers (see "HTML sandboxing"). Only the Markdown path is
+sanitized, because Markdown is rendered server-side; raw HTML never is.
+
+A static site is the SAME model: raw files, its own subdomain, the same
+headers, the same origin isolation between sites and against the apex.
+So this feature is not a new trust boundary - it is the existing
+"raw HTML on an isolated origin" boundary applied to a directory of
+files instead of one file. As with any hostthis URL, treat a site as
+untrusted user content, the way you would a CodePen or a `github.io`
+page. Path mode (`--mode path`, dev-only) collapses every site onto
+the shared apex origin and breaks this isolation exactly as it does for
+pastes; production runs subdomain mode.
+
+### Reuse: identity, quota, retention, versioning
+
+Nothing about the product opinions changes for sites:
+
+- **Identity** is the SSH key fingerprint, the same account a paste
+  upload uses, gated by the same Sybil per-subnet admission.
+- **Quota** counts the manifest's DEDUPED total blob size against the
+  SAME per-identity cap (see "Limits → Per-identity quota"). The
+  decompression-bomb guard aborts the untar the instant the running
+  total would push the owner over that cap, so a site can never be
+  persisted over-quota.
+- **Retention** is the same fixed 7-day expiry from last update; a site
+  evicts itself exactly like a paste, no per-site control.
+- **Versioning** reuses the paste-versioning shape where it is low-cost:
+  each deploy to a slug is a new immutable manifest, so rollback /
+  history ride the existing machinery; otherwise a deploy lands as a
+  fresh slug, matching whatever pastes do. Either way a deploy is
+  ATOMIC - the new manifest only becomes the served one once every blob
+  is written and the manifest is persisted; a half-uploaded site never
+  serves.
+
 ## Retention
 
 **Every paste lives for 7 days from its last update**, then it's
@@ -1942,39 +2113,35 @@ ceiling is much higher.
 ## Future directions (proposed, not built)
 
 These are bigger bets that would grow hostthis from "host a renderable file
-for 7 days" toward "deploy a small real app over SSH, no account." They are
-PROPOSALS; the spec above describes what hostthis does today. Each would
-deliberately revisit some of the v1 Non-goals below (a scope expansion, not
-an accident). The throughline: shale (the distributed K-V) is the
-persistence layer for both, and the differentiator across both is the
-SSH-native, no-account, your-key-is-your-identity model.
+for 7 days" toward "deploy a small real app over SSH, no account." The first
+of them (static directory hosting) has SHIPPED - see "Static site archives"
+above; the persistence API remains a PROPOSAL. Each deliberately revisits
+some of the v1 Non-goals below (a scope expansion, not an accident). The
+throughline: shale (the distributed K-V) is the persistence layer for both,
+and the differentiator across both is the SSH-native, no-account,
+your-key-is-your-identity model.
 
 ### Static directory hosting (serve a whole site)
 
-Today a paste is a single renderable file. The natural expansion: accept a
-DIRECTORY and serve it as a site.
+**This is now SHIPPED - see "Static site archives" above.** What was a
+proposal here is real: a gzip-tar of a static site, piped over the
+existing SSH upload surface (no new verb), is detected, safe-untarred,
+stored as content-addressed blobs plus a manifest, and served at
+`<slug>.hostthis.dev/<path>` under the same identity, quota, 7-day
+expiry, and origin-isolation model as an HTML paste. The "Static site
+archives" section is the authoritative description; this bullet is kept
+only as the pointer from the future-directions framing it grew out of.
 
-- **Upload**: a tarball over the existing SSH surface, e.g.
-  `tar czf - mysite/ | ssh hostthis.dev deploy`. Each file becomes a
-  content-addressed blob (the existing blob store); identical files across
-  deploys dedupe for free.
-- **The site** is a MANIFEST (path -> blob sha) in the metadata layer, a
-  new record type alongside pastes/versions, naturally shale-backed.
-- **Serving**: `<slug>.hostthis.dev/path/to/file` resolves the manifest to
-  the blob, with content-type by extension, `index.html` at directory
-  roots, and an optional SPA fallback (serve `index.html` on unmatched
-  routes). A 404 for genuinely-missing paths.
-- **Versioning** is free: each deploy is a new immutable manifest, so
-  rollback reuses the existing paste-versioning machinery. Deploys must be
-  ATOMIC (a half-uploaded site never serves).
-- **Security** is the load-bearing concern: serving arbitrary user JS/HTML
-  is an abuse vector (phishing, malware, miners on our domain). Each site
-  MUST be origin-isolated on its own subdomain, behind a strict CSP, under
-  the existing identity + quota + Sybil limits. See "HTML sandboxing".
+What shipped vs the original sketch: detection is gzip-tar only (plain
+tar and zip stay out of scope); the SPA fallback is deliberately NOT
+included (an unmatched path 404s); and the security story is the
+existing origin-isolation boundary (raw files on their own subdomain),
+not a "strict CSP" - the same posture HTML pastes already have, so no
+new trust boundary was introduced.
 
-This is "Surge.sh / Netlify-drop", but SSH-native and no-signup. Revisits
-the "Binary / non-renderable file hosting" non-goal (a site is still
-renderable content, just multi-file).
+This is "Surge.sh / Netlify-drop", but SSH-native and no-signup. It
+revisited the "Binary / non-renderable file hosting" non-goal (a site
+is still renderable content, just multi-file).
 
 ### A persistence API (a backend for small apps)
 
@@ -2044,10 +2211,13 @@ static pages. The engine already exists: shale.
 Revisits the "Comments / threaded discussion" non-goal: we would not build
 comments, but the persistence API lets a USER build them.
 
-**Open design questions before either ships:**
+**Open design questions:**
 
-- Static: deploy atomicity; per-site vs per-identity quota; custom
-  subdomains.
+- Static (now shipped; these are remaining refinements, not blockers):
+  an opt-in SPA fallback (serve the root `index.html` on unmatched
+  paths instead of 404); custom subdomains. Deploy atomicity and the
+  per-identity (rather than per-site) quota are already settled - see
+  "Static site archives".
 - Persistence: the rule model (identity + ownership constraints evaluated
   server-side); the JWT-verifying resource-server design + the turnkey-vs-BYO
   issuer config + the browser-keypair signature path; per-app namespacing;
