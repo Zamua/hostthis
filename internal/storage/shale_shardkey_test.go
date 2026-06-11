@@ -51,6 +51,19 @@ func TestShaleShardKey(t *testing.T) {
 		// one), so it falls through to the whole-key default.
 		{"identity_sites falls through", "identity_sites/sha256:deadbeef/abc12345", "identity_sites/sha256:deadbeef/abc12345"},
 
+		// Room families -> shard key <app-slug>. All four families (+ the
+		// per-app byte counter) shard on the app slug, the FIRST segment after
+		// the prefix for rooms/ + roomkv/ + roomcreate/, and the SECOND-to-last
+		// segment for roomexpiry/ (between the <ts> and the trailing <uuid>).
+		// The trailing-slash discipline keeps roomkv/ from matching rooms/.
+		{"room record", "rooms/app12345/9f8e7d6c-1234-4abc-89de-0123456789ab", "app12345"},
+		{"room value", "roomkv/app12345/9f8e7d6c-1234-4abc-89de-0123456789ab/card/1", "app12345"},
+		{"room create", "roomcreate/app12345/10.0.0.0_24/2026-06-05T12:00:00.000000000Z/9f8e7d6c-1234-4abc-89de-0123456789ab", "app12345"},
+		{"room bytes", "roombytes/app12345", "app12345"},
+		// roomexpiry: app slug is the second-to-last segment, behind a
+		// fixed-width <ts> (contains ':' + '-' + '.', no '/').
+		{"room expiry", "roomexpiry/2026-06-05T12:00:00.000000000Z/app12345/9f8e7d6c-1234-4abc-89de-0123456789ab", "app12345"},
+
 		// Unknown family routes by the whole key.
 		{"unknown", "weird/key/shape", "weird/key/shape"},
 		{"no slash", "bareword", "bareword"},
@@ -115,5 +128,30 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 	// distinct prefixes mean keygate/<subnet> never aliases a slug.
 	if got := string(shaleShardKey([]byte("keygate/" + slug + "/" + id))); got != slug {
 		t.Fatalf("keygate subnet extraction = %q, want %q", got, slug)
+	}
+
+	// All FOUR room families + the per-app byte counter co-shard on the app
+	// slug, so a room create / write / count / cap-check is single-shard. If
+	// any regresses to a different shard key, those become cross-shard and the
+	// per-app cap's single-shard CAS invariant breaks.
+	app := "app77777"
+	uuid := "9f8e7d6c-1234-4abc-89de-0123456789ab"
+	roomKeys := []string{
+		"rooms/" + app + "/" + uuid,
+		"roomkv/" + app + "/" + uuid + "/some/nested/key",
+		"roomcreate/" + app + "/10.0.0.0_24/2026-06-05T12:00:00.000000000Z/" + uuid,
+		"roombytes/" + app,
+		"roomexpiry/2026-06-05T12:00:00.000000000Z/" + app + "/" + uuid,
+	}
+	for _, k := range roomKeys {
+		if got := string(shaleShardKey([]byte(k))); got != app {
+			t.Fatalf("room key %q sharded to %q, want %q (co-location broken)", k, got, app)
+		}
+	}
+	// roomkv/ must NOT alias rooms/: the trailing-slash discipline keeps them
+	// distinct families (both still shard on the app slug, but via different
+	// cases - a regression that collapsed them would be a latent bug).
+	if got := string(shaleShardKey([]byte("roomkv/" + app + "/" + uuid + "/k"))); got != app {
+		t.Fatalf("roomkv key sharded to %q, want %q", got, app)
 	}
 }

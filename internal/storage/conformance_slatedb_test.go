@@ -67,7 +67,18 @@ func TestConformance_Slate(t *testing.T) {
 		repo := newSlate(t)
 		return repo, storage.NewSlateSiteRepo(repo)
 	}
-	runConformanceWithSites(t, "slatedb", caps, newRepo, newSites)
+	// The room repo (SlateRoomRepo), the paste repo, and the site repo all wrap
+	// the SAME SlateRepo, so the cross-kind service-wide cap room subtest
+	// exercises the real interaction in one SlateDB instance.
+	newRooms := func(t *testing.T) roomConformanceStores {
+		repo := newSlate(t)
+		return roomConformanceStores{
+			Rooms: storage.NewSlateRoomRepo(repo),
+			Paste: repo,
+			Site:  storage.NewSlateSiteRepo(repo),
+		}
+	}
+	runConformanceWithSites(t, "slatedb", caps, newRepo, newSites, newRooms)
 }
 
 func envOrDefault(key, fallback string) string {

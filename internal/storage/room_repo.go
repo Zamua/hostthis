@@ -85,7 +85,7 @@ func (r *RoomKVRepo) CreateRoom(room domain.Room, subnet string, appCap int64, n
 		INSERT INTO rooms (app_slug, room_id, created_at, updated_at, expires_at)
 		VALUES (?, ?, ?, ?, ?)
 	`, room.AppSlug.String(), room.ID.String(),
-		formatTime(room.CreatedAt), formatTime(room.UpdatedAt), formatTime(room.ExpiresAt)); err != nil {
+		formatTime(room.CreatedAt), formatTime(room.UpdatedAt), formatSiteExpiry(room.ExpiresAt)); err != nil {
 		if isUniqueViolation(err) {
 			return ErrSlugTaken
 		}
@@ -122,7 +122,7 @@ func (r *RoomKVRepo) GetRoom(appSlug domain.Slug, id domain.RoomID) (domain.Room
 		ID:        domain.RoomID(idStr),
 		CreatedAt: parseTime(created),
 		UpdatedAt: parseTime(updated),
-		ExpiresAt: parseTime(expires),
+		ExpiresAt: parseSiteExpiry(expires), // fixed-width column
 	}, nil
 }
 
@@ -331,7 +331,7 @@ func (r *RoomKVRepo) AppRoomBytes(appSlug domain.Slug) (int64, error) {
 func (r *RoomKVRepo) ExpiredRoomKeys(now time.Time) ([]domain.RoomRef, error) {
 	rows, err := r.db.Query(`
 		SELECT app_slug, room_id FROM rooms WHERE expires_at <= ?
-	`, formatTime(now))
+	`, formatSiteExpiry(now))
 	if err != nil {
 		return nil, fmt.Errorf("expired room keys: %w", err)
 	}
@@ -386,7 +386,7 @@ func (r *RoomKVRepo) SumActiveRoomBytes(now time.Time) (int64, error) {
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
-	total, err := activeRoomBytesTx(tx, formatTime(now))
+	total, err := activeRoomBytesTx(tx, formatSiteExpiry(now))
 	if err != nil {
 		return 0, err
 	}
@@ -397,7 +397,9 @@ func (r *RoomKVRepo) SumActiveRoomBytes(now time.Time) (int64, error) {
 // rooms inside the caller's tx. Shared by SumActiveRoomBytes and by the
 // service-wide cap check (serviceWideActiveBytes), so a room PUT, a paste
 // insert, and a site deploy all see the same room-bytes figure within
-// their serializable boundary.
+// their serializable boundary. The room expires_at column is fixed-width
+// (formatSiteExpiry), so nowStr must be the fixed-width form, matching the
+// stored column's byte-order == time-order layout.
 func activeRoomBytesTx(tx *sql.Tx, nowStr string) (int64, error) {
 	var n sql.NullInt64
 	if err := tx.QueryRow(`
@@ -473,7 +475,7 @@ func touchRoomTx(tx *sql.Tx, appSlug domain.Slug, id domain.RoomID, now time.Tim
 	if _, err := tx.Exec(`
 		UPDATE rooms SET updated_at = ?, expires_at = ?
 		WHERE app_slug = ? AND room_id = ?
-	`, formatTime(now), formatTime(expires), appSlug.String(), id.String()); err != nil {
+	`, formatTime(now), formatSiteExpiry(expires), appSlug.String(), id.String()); err != nil {
 		return fmt.Errorf("touch room: %w", err)
 	}
 	return nil

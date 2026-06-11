@@ -1963,11 +1963,23 @@ room's values. All keys are UTF-8 strings cast to bytes; values are JSON
 unless noted:
 
 ```
-rooms/<app-slug>/<uuid>                 JSON {CreatedAt, UpdatedAt, ExpiresAt} (the room record)
-roomkv/<app-slug>/<uuid>/<key>          raw value bytes (the stored KV pair, verbatim; not JSON)
-roomcreate/<app-slug>/<subnet>/<ts>     empty value (one per room created; ts is fixed-width, see below)
-roomexpiry/<ts>/<app-slug>/<uuid>       empty value (sweep prefix scan to find rooms whose ExpiresAt <= now; ts is fixed-width)
+rooms/<app-slug>/<uuid>                    JSON {CreatedAt, UpdatedAt, ExpiresAt} (the room record)
+roomkv/<app-slug>/<uuid>/<key>             raw value bytes (the stored KV pair, verbatim; not JSON)
+roomcreate/<app-slug>/<subnet>/<ts>/<uuid> empty value (one per room created; ts is fixed-width; the trailing uuid disambiguates two rooms created at the same ts, see below)
+roomexpiry/<ts>/<app-slug>/<uuid>          empty value (sweep prefix scan to find rooms whose ExpiresAt <= now; ts is fixed-width)
 ```
+
+The `roomcreate` key carries the created room's `<uuid>` as a trailing
+segment: the sqlite backend stores creation accounting as table ROWS (a
+`room_creates` table that permits duplicates), but a KV key is unique, so
+without the `<uuid>` two rooms created under the same `(app, subnet)` within
+the same fixed-width `<ts>` (the same nanosecond, common when a test or a
+script mints rooms in a tight loop) would collide on one key and overwrite,
+undercounting the rate-limit ledger. The `<uuid>` makes each creation a
+distinct key. The `<ts>` is then the SECOND-to-last segment for the windowed
+count + prune compares (the `<subnet>` itself contains a `/`, so both parsers
+strip the two trailing slash-free segments from the right to recover
+`(subnet, ts)`).
 
 The `rooms/<app-slug>/<uuid>` row is the authoritative record: the
 retention clock only (no byte/key totals are stored on it - the byte and
@@ -2088,12 +2100,18 @@ rely on.
   touch the room (a delete is a write, so it resets the clock + the expiry
   index entry).
 - **Per-app room bytes / creation count.** The per-app aggregate sum is a
-  `ScanPrefix roomkv/<app-slug>/` filtered to non-expired rooms;
-  `CountRoomCreates` scans `roomcreate/<app-slug>/` (per-app) and
-  `roomcreate/.../<subnet>/` is not directly scannable as a flat prefix, so
-  the per-subnet count walks the `roomcreate/` family and matches the
-  `<subnet>` segment (the same way the slatedb `SubnetsForIdentity` walks
-  `keygate/`), counting rows whose fixed-width `<ts>` is within the window.
+  `ScanPrefix roomkv/<app-slug>/` summing value lengths, with NO read-time
+  expiry filter: the per-app room aggregate is the room-tier analogue of the
+  sqlite `room_kv`-grouped-by-app sum (`appRoomBytesTx`), which has no expiry
+  predicate, so an expired-but-unswept room's bytes still count toward the
+  per-app cap until the sweep deletes the room - on EVERY backend
+  (sweep-time per-app expiry, distinct from the per-identity paste/site quota
+  that sqlite + slatedb free at read time). `CountRoomCreates` scans
+  `roomcreate/<app-slug>/` (per-app), and the per-subnet count walks the same
+  per-app family and matches the `<subnet>` segment (the same way the slatedb
+  `SubnetsForIdentity` walks `keygate/`), counting markers whose fixed-width
+  `<ts>` (the second-to-last segment, before the trailing disambiguator
+  `<uuid>`) is within the window.
 
 #### Service-wide cap is SYMMETRIC: room bytes count both ways
 
@@ -2129,9 +2147,16 @@ conformance subtest pins all three directions.
   let a room be swept up to ~1s before its real `ExpiresAt`. The room
   expiry index is new, with no prod data, so it adopts the fixed-width
   format from the start - the same lesson the site expiry index learned, not
-  repeated here. The `roomcreate/<app-slug>/<subnet>/<ts>` rate-limit ledger
-  uses the SAME fixed-width `<ts>` so a windowed `ts >= cutoff` comparison
-  is a correct lexical compare too.
+  repeated here. The `roomcreate/<app-slug>/<subnet>/<ts>/<uuid>` rate-limit
+  ledger uses the SAME fixed-width `<ts>` so a windowed `ts >= cutoff`
+  comparison is a correct lexical compare too. The **sqlite** backend's
+  `rooms.expires_at` column adopts the SAME fixed-width format
+  (`formatSiteExpiry`, matching its `sites.expires_at` column), and every
+  query that compares against it (`ExpiredRoomKeys`, the service-wide room
+  sum) uses the fixed-width operand, so the sweep's inclusive-boundary
+  sub-second ordering is correct on sqlite too - the `Rooms
+  /ExpirySubSecondOrdering` conformance subtest pins this identically across
+  all three backends.
 - **`DeleteRoom(appSlug, id)`.** Read `rooms/<app>/<uuid>` for its
   `ExpiresAt` (to clean up the matching `roomexpiry/` entry), then in one
   transaction delete the room record, the `roomexpiry/<ExpiresAt>/<app>/
@@ -2144,8 +2169,9 @@ conformance subtest pins all three directions.
   never add to the keep-alive set, but a room expiry is still a "record
   expired this tick").
 - **`PruneOldRoomCreates(cutoff)`.** Prefix-scan `roomcreate/`, delete every
-  marker whose `<ts>` is before `cutoff` (`now - RoomCreateWindow`). Past
-  the window a ledger row can never change a future rate-limit decision, so
+  marker whose `<ts>` (the second-to-last segment, before the trailing
+  disambiguator `<uuid>`) is before `cutoff` (`now - RoomCreateWindow`). Past
+  the window a ledger marker can never change a future rate-limit decision, so
   the sweep drops it each tick to keep the family bounded - the same
   discipline the key-gate prune (`DeleteFirstSeenOlderThan`) and the sqlite
   `room_creates` prune use.
@@ -2161,7 +2187,7 @@ single-shard operation. The room shard map:
 | --- | --- | --- |
 | Room record (per-app) | `rooms/<app-slug>/<uuid>` | `<app-slug>` |
 | Room value (per-app) | `roomkv/<app-slug>/<uuid>/<key>` | `<app-slug>` |
-| Room-create ledger (per-app) | `roomcreate/<app-slug>/<subnet>/<ts>` | `<app-slug>` |
+| Room-create ledger (per-app) | `roomcreate/<app-slug>/<subnet>/<ts>/<uuid>` | `<app-slug>` |
 | Room expiry index (per-app) | `roomexpiry/<ts>/<app-slug>/<uuid>` | `<app-slug>` |
 
 All four families shard on `<app-slug>`, co-locating an app's rooms, all
@@ -2199,6 +2225,19 @@ sees the others' bytes. Sweep-time expiry semantics
 (`ExpiryFreesQuotaAtReadTime = false`) carry over from the paste counter:
 a room's bytes leave the per-app counter when the sweep deletes the expired
 room, not at read time, the same fail-safe over-count direction.
+
+**Empty room values on shale.** shale's `Put` rejects empty values (the
+empty payload is reserved for delete tombstones), but a room value may
+legitimately be the empty byte string (`PUT`ting `""` is valid app state on
+sqlite + slatedb). To keep the verbatim-round-trip contract IDENTICAL across
+all three backends, a stored shale room value is prefixed with one sentinel
+byte; the decode strips it to return the app's exact bytes (including the
+empty string). All room BYTE accounting (the per-app counter, the per-room
+cap, the service-wide sum) charges the DECODED length, so the byte totals
+match slatedb exactly - an empty value counts as 0 bytes. This is a
+shale-internal encoding detail; the observable Get/Scan contract is the same
+verbatim bytes on every backend, and the conformance `Rooms/RoundTrip`
+subtest exercises an empty value to pin it.
 
 **Status: slatedb AND shale are both implemented + conformance-tested.**
 Prod runs the slatedb-direct backend, so the slatedb room impl is the

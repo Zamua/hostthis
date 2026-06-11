@@ -1477,20 +1477,20 @@ func (r *ShaleRepo) ReferencedBlobSHAs() ([]string, error) {
 }
 
 // sumServiceWideActiveBytes sums the non-deleted version sizes AND every
-// site's DedupedSize across the whole keyspace via cross-shard aggregates.
-// Best-effort, used for the SOFT service-wide cap pre-check on BOTH the
-// paste-insert and the site-deploy paths (the per-owner cap is the strict
-// one). O(active versions + sites); for low-volume hostthis this is a
-// sub-millisecond fan-out.
+// site's DedupedSize AND every app's room bytes across the whole keyspace via
+// cross-shard aggregates. Best-effort, used for the SOFT service-wide cap
+// pre-check on the paste-insert, site-deploy, AND room-write paths (the
+// per-owner / per-app cap is the strict one). O(active versions + sites + app
+// room counters); for low-volume hostthis this is a sub-millisecond fan-out.
 //
-// Including site bytes here is the parity change for static-site hosting on
-// shale: a paste upload sees the bytes sites already hold and a site deploy
-// sees the bytes pastes already hold, so the service-wide cap counts every
-// kind of stored content (parallels the slatedb sumServiceWideActiveBytes,
-// which adds the site total, and the sqlite serviceWideActiveBytes, which
-// sums pastes + sites + rooms). When the shale backend has no site impl
-// wired (no sites/ keys exist) the site aggregate is empty and this reduces
-// to the pure version sum.
+// Including site AND room bytes here keeps the service-wide cap SYMMETRIC
+// across all three content kinds: a paste upload sees the bytes sites + rooms
+// already hold, a site deploy sees paste + room bytes, and a room PUT sees
+// paste + site bytes (parallels the slatedb sumServiceWideActiveBytes, which
+// adds the site + room totals, and the sqlite serviceWideActiveBytes, which
+// sums pastes + sites + rooms). When the shale backend has no site / room impl
+// wired (no sites/ or roombytes/ keys exist) those aggregates are empty and
+// this reduces to the pure version sum.
 func (r *ShaleRepo) sumServiceWideActiveBytes() (int64, error) {
 	versions, err := r.aggregatePrefix([]byte("versions/"))
 	if err != nil {
@@ -1511,7 +1511,16 @@ func (r *ShaleRepo) sumServiceWideActiveBytes() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return total + siteTotal, nil
+	// Room bytes fold into the same service-wide sum (from the per-app
+	// roombytes/ counters) so the cap is SYMMETRIC across all three content
+	// kinds: a room PUT sees paste+site bytes (it calls this), and a paste
+	// insert / site deploy sees room bytes (here). When no rooms exist the
+	// counter aggregate is empty and this reduces to versions + sites.
+	roomTotal, err := r.SumActiveRoomBytes()
+	if err != nil {
+		return 0, err
+	}
+	return total + siteTotal + roomTotal, nil
 }
 
 // --- KeyGateRepo (Sybil rate limit) ----------------------------------------
