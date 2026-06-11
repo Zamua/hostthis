@@ -192,7 +192,8 @@ func TestArchiveAndPasteCoexist(t *testing.T) {
 			t.Fatalf("GET %s ctype: got %q want %q", c.path, ct, c.ctype)
 		}
 	}
-	// Unmatched path 404s (no SPA fallback).
+	// A missing ASSET (a known asset extension) still 404s under the SPA
+	// fallback - only route-shaped misses serve the root index.html.
 	resp, err := http.Get(base + "/nope/missing.js")
 	if err != nil {
 		t.Fatalf("GET missing: %v", err)

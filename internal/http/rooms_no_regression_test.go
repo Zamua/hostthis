@@ -98,8 +98,8 @@ func TestRoomsHTTP_NoRegression_PasteUnchanged(t *testing.T) {
 
 // TestRoomsHTTP_NoRegression_SiteUnchanged confirms that with rooms wired,
 // a static-site archive still serves its files via the manifest with the
-// recorded content types, the index fallback still works, and an unmatched
-// path still 404s with no SPA fallback. The rooms carve-out does not
+// recorded content types, the index fallback still works, and a missing
+// ASSET still 404s under the SPA fallback. The rooms carve-out does not
 // intercept ordinary site paths.
 func TestRoomsHTTP_NoRegression_SiteUnchanged(t *testing.T) {
 	srv := buildFullStackServer(t)
@@ -123,7 +123,7 @@ func TestRoomsHTTP_NoRegression_SiteUnchanged(t *testing.T) {
 			t.Fatalf("site %s ctype: got %q want %q", c.path, ct, c.ctype)
 		}
 	}
-	// An unmatched site path 404s (no SPA fallback) - unchanged by rooms.
+	// A missing ASSET still 404s under the SPA fallback - unchanged by rooms.
 	if w := req(t, srv, http.MethodGet, "sitewxyz", "/nope/missing.js", nil); w.Code != http.StatusNotFound {
 		t.Fatalf("missing site path: code %d, want 404", w.Code)
 	}

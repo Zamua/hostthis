@@ -354,9 +354,9 @@ extension. Directory handling:
 - `/` and any `/<dir>/` serve that directory's `index.html` if one
   exists in the manifest.
 - A path that maps to a manifest entry serves that file.
-- An unmatched path returns **404**. There is no SPA fallback in this
-  version (an unmatched route does NOT serve the root `index.html`);
-  that is a possible follow-on, called out in the open questions.
+- An unmatched path is resolved by the **SPA fallback** (below): a path
+  that looks like a client-side ROUTE serves the root `index.html`, while
+  a path that looks like a genuinely-missing ASSET returns **404**.
 
 Unlike a single-file paste - which serves only at `/` on its subdomain
 and 404s every other path - a site serves its whole path space off the
@@ -366,6 +366,65 @@ table first and falls back to the paste table, and slug generation
 checks both tables for collisions. The bare directory name `/<dir>`
 (no trailing slash) also resolves to `/<dir>/index.html` so links work
 with or without the slash.
+
+### SPA fallback (route vs. asset)
+
+A built single-page app (React Router, Vue Router, SvelteKit in SPA
+mode) uses client-side routes like `/about` or `/users/123` that are NOT
+real files on disk. Landing at `/` works - the server serves the root
+`index.html`, the bundle boots, and the router takes over. But a DIRECT
+link to `/about`, or a REFRESH while on `/about`, hits the server for a
+path with no manifest entry. Without a fallback the server 404s and the
+app never loads.
+
+The fix: when a request misses the manifest (it is neither a file nor a
+directory index), the server serves the site's **root `index.html`** so
+the SPA's JS loads and its router can render the route client-side -
+*unless* the path looks like a real, missing static asset, in which case
+it stays a **404**. Distinguishing the two is a pure, I/O-free decision
+on the request path's last segment:
+
+- **Looks like a ROUTE -> serve root `index.html` (HTTP 200).** The last
+  path segment has **no extension** (`/about`, `/users/123`) or an
+  **`.html` extension** (`/about.html` for a pre-rendered route that the
+  build did not emit as a file). These are how client-side routers spell
+  locations.
+- **Looks like a missing ASSET -> 404.** The last path segment has a
+  known **static-asset extension** (`.js`, `.mjs`, `.css`, `.json`,
+  `.map`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.avif`, `.svg`,
+  `.ico`, `.woff`, `.woff2`, `.ttf`, `.otf`, `.eot`, `.wasm`, `.xml`,
+  `.txt`, `.pdf`, `.webmanifest`, ...). A bundle that requests
+  `/assets/app-deadbeef.js` and gets back `index.html` with a `200` and
+  a `text/html` content-type would be a silent, confusing failure (the
+  browser tries to execute HTML as a script); a clean `404` is the
+  correct, debuggable answer for a genuinely-absent asset.
+
+The heuristic is **extension-based on the last segment only**, never on
+intermediate path components, so `/users/123/edit` (no trailing
+extension) is a route and `/img/logo.png` (asset extension) is an asset.
+An unknown extension (one not in the asset set and not `.html`) is
+treated as a route and gets the `index.html` fallback - the asset set is
+the deny-list; everything else falls back. The root `index.html` served
+by the fallback carries the **same sandbox headers, cache posture, and
+`200` status** as serving `index.html` directly; only the request path
+differs.
+
+The fallback is **default-on for every site**, not an opt-in flag. Two
+reasons. First, the upload pipe is flagless by design
+(`tar czf - site/ | ssh hostthis.dev` carries no filename and no
+options), so there is no clean place for a user to signal opt-in at
+upload time; a per-site flag would need a new column, new
+deploy-time plumbing, and a new way to set it, for no UX win. Second,
+the heuristic is **safe for plain static sites too**: a hand-written
+multi-page site never requests a no-extension/`.html` path that isn't a
+real file during normal navigation (its links point at real `.html`
+files or real directories, which the manifest lookup already resolves),
+and any asset it does request still 404s correctly when absent. So
+default-on costs a plain static site nothing and saves every SPA the
+broken-on-refresh experience. If a future need for opt-OUT appears
+(e.g. a site that wants hard 404s on unknown routes), it can be added as
+a flag then; until a concrete second case shows up, the simpler
+default-on shape wins.
 
 Content-type is derived purely from the path's extension (an I/O-free
 domain decision). An unknown extension is served as
@@ -2486,11 +2545,12 @@ archives" section is the authoritative description; this bullet is kept
 only as the pointer from the future-directions framing it grew out of.
 
 What shipped vs the original sketch: detection is gzip-tar only (plain
-tar and zip stay out of scope); the SPA fallback is deliberately NOT
-included (an unmatched path 404s); and the security story is the
-existing origin-isolation boundary (raw files on their own subdomain),
-not a "strict CSP" - the same posture HTML pastes already have, so no
-new trust boundary was introduced.
+tar and zip stay out of scope); a default-on SPA fallback serves the
+root `index.html` for an unmatched ROUTE while a missing ASSET still
+404s (see "SPA fallback (route vs. asset)"); and the security story is
+the existing origin-isolation boundary (raw files on their own
+subdomain), not a "strict CSP" - the same posture HTML pastes already
+have, so no new trust boundary was introduced.
 
 This is "Surge.sh / Netlify-drop", but SSH-native and no-signup. It
 revisited the "Binary / non-renderable file hosting" non-goal (a site
@@ -2580,10 +2640,12 @@ comments, but the persistence API lets a USER build them.
 **Open design questions:**
 
 - Static (now shipped; these are remaining refinements, not blockers):
-  an opt-in SPA fallback (serve the root `index.html` on unmatched
-  paths instead of 404); custom subdomains. Deploy atomicity and the
-  per-identity (rather than per-site) quota are already settled - see
-  "Static site archives".
+  the SPA fallback has SHIPPED default-on (serve the root `index.html`
+  for an unmatched route, 404 a missing asset - see "SPA fallback
+  (route vs. asset)"); what remains open is custom subdomains, and a
+  per-site opt-OUT flag if a site ever wants hard 404s on unknown
+  routes. Deploy atomicity and the per-identity (rather than per-site)
+  quota are already settled - see "Static site archives".
 - Persistence: the no-auth Rooms tier has SHIPPED (see "Rooms (app
   persistence)"), which settles per-app namespacing, rate-limiting + abuse
   on the writable public API, and quota accounting for app data vs paste
