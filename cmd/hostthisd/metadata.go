@@ -27,10 +27,12 @@ import (
 type metadataBundle struct {
 	Repo    metadataRepo
 	KeyGate service.KeyGateRepo
-	// Sites is the static-site repo. Only the sqlite backend supplies it
-	// today; the slatedb / shale backends leave it nil and static-site
-	// archive uploads are disabled there. nil-safe throughout.
-	Sites *storage.SiteRepo
+	// Sites is the static-site repo. The sqlite, slatedb, and shale
+	// backends each supply an implementation; a backend that leaves it nil
+	// disables static-site archive uploads there. nil-safe throughout. The
+	// field is the siteStore interface (not the concrete sqlite
+	// *storage.SiteRepo) so any backend's site impl can be assigned.
+	Sites siteStore
 	// Rooms is the room-KV repo (the no-auth app-persistence tier). Only
 	// the sqlite backend supplies it today; the slatedb / shale backends
 	// leave it nil and the /api/rooms surface is disabled there. The spec
@@ -49,6 +51,19 @@ type metadataRepo interface {
 	service.PasteAdmin
 	service.SweepRepo
 	httpapi.PasteReader
+}
+
+// siteStore is the union of every site-side interface the service / http
+// layers consume: the deploy view (service.SiteRepo), the sweep view
+// (service.SweepSites), and the read view (httpapi.SiteReader). The sqlite
+// *storage.SiteRepo and the slatedb *storage.SlateSiteRepo both satisfy it.
+// Holding the bundle field as this interface (rather than the concrete
+// sqlite type) is what lets the slatedb / shale backends supply their own
+// site impl. nil disables static-site hosting for that backend.
+type siteStore interface {
+	service.SiteRepo
+	service.SweepSites
+	httpapi.SiteReader
 }
 
 // buildMetadata reads HOSTTHIS_METADATA_BACKEND and returns the

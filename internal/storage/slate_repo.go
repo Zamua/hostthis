@@ -489,10 +489,18 @@ func (r *SlateRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 }
 
 // sumServiceWideActiveBytes is the service-cap equivalent - sum over
-// EVERY paste, not just one identity. Used inside the quota check.
+// EVERY paste AND every site, not just one identity. Used inside the
+// quota check on BOTH the paste-insert and the site-deploy paths.
 // Implementation walks pastes/ then versions/<slug>/; O(active pastes)
-// + O(versions per paste). For low-volume hostthis (today: <100 active
-// pastes, <500 versions total) this is sub-millisecond.
+// + O(versions per paste), then adds the site total (one sites/ scan).
+// For low-volume hostthis (today: <100 active pastes, <500 versions
+// total) this is sub-millisecond.
+//
+// Including site bytes here is the load-bearing change for static-site
+// hosting on slatedb: a paste upload sees the bytes sites already hold
+// and a site deploy sees the bytes pastes already hold, so the
+// service-wide cap counts every kind of stored content (parallels the
+// sqlite serviceWideActiveBytes, which sums pastes + sites + rooms).
 func (r *SlateRepo) sumServiceWideActiveBytes(now time.Time) (int64, error) {
 	pastes, err := r.scanPrefix([]byte("pastes/"))
 	if err != nil {
@@ -523,7 +531,11 @@ func (r *SlateRepo) sumServiceWideActiveBytes(now time.Time) (int64, error) {
 			total += int64(v.Size)
 		}
 	}
-	return total, nil
+	siteTotal, err := r.sumServiceWideActiveSiteBytes(now)
+	if err != nil {
+		return 0, err
+	}
+	return total + siteTotal, nil
 }
 
 func (r *SlateRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
@@ -618,6 +630,19 @@ func (r *SlateRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 		return fmt.Errorf("tx slug check: %w", err)
 	}
 	if existing != nil {
+		_ = tx.Rollback()
+		return ErrSlugTaken
+	}
+	// A slug must be unique across sites too (a read resolves a slug in
+	// either family). The site insert already checks the paste key;
+	// mirror it here so a paste cannot take a slug a site owns. Matches
+	// the sqlite paste insert's `SELECT COUNT(1) FROM sites` guard.
+	existingSite, err := tx.Get(keySite(p.Slug))
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("tx site slug check: %w", err)
+	}
+	if existingSite != nil {
 		_ = tx.Rollback()
 		return ErrSlugTaken
 	}

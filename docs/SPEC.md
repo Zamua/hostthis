@@ -341,7 +341,11 @@ owner + manifest + timestamps) next to the existing paste repo,
 behind a small service-layer interface the same way the paste repos
 are. It carries `Identity` on every record and is queried by slug,
 so the same owner-gating and not-found-on-cross-owner behavior the
-pastes get applies to sites.
+pastes get applies to sites. The repo is implemented on every metadata
+backend (sqlite as a `sites` table, slatedb / shale as a `sites/<slug>`
+KV layout), so static-site hosting runs no matter which backend is wired;
+see "Static-site storage on the slatedb (and shale) backend" under
+"Metadata storage backends" for the KV layout.
 
 ### Serving a directory
 
@@ -1644,6 +1648,203 @@ tombstoned blob does not depend on the app keeping a reference: it is
 provided beneath the app by object-store versioning plus a
 noncurrent-version lifecycle, an operator-level safety net configured
 outside this repo.
+
+### Static-site storage on the slatedb (and shale) backend
+
+The "Static site archives" feature persists a **Site** (slug -> owner +
+Manifest + timestamps) the same way a paste persists, through a small
+`SiteRepo` service-layer interface. The sqlite backend implements it as a
+`sites` table; this section specifies the **KV layout** the slatedb and
+shale backends use so static-site hosting runs on those backends too,
+not only on sqlite. The blobs a site references are unchanged: each
+extracted file is `Put` under its SHA256 into the content-addressed
+`BlobStore`, exactly as on sqlite. **Only the manifest plus the site
+metadata live in the metadata backend.** Identical files dedupe at the
+blob layer regardless of which metadata backend is wired.
+
+**The `SiteRepo` and `SweepSites` interfaces are the contract.** Both are
+already interfaces in `internal/service` (`deploy_site.go`, `sweep.go`),
+satisfied by the sqlite `*storage.SiteRepo` today. The slatedb and shale
+backends add types that ALSO satisfy them; the domain layer (`Site`,
+`Manifest`, the safe-untar guards) is backend-agnostic and unchanged.
+The deploy path's interface is:
+
+- `InsertWithQuotaCheck(s Site, dedupedSize int, serviceCap, userCap, now)`
+- `Get(slug) (Site, error)`
+- `SumActiveBytesByOwner(owner, now) (int64, error)` (the identity's
+  active SITE bytes only; the deploy path adds the paste-side sum)
+
+and the sweep path's interface is:
+
+- `ExpiredSiteSlugs(now) ([]string, error)`
+- `Delete(slug) error`
+- `ReferencedSiteBlobSHAs() ([]string, error)`
+
+#### Site key layout (slatedb)
+
+Sites mirror the paste key families. The names are new but the shapes are
+the established ones (`sites/<slug>` parallels `pastes/<slug>`,
+`identity_sites/<id>/<slug>` parallels `identity_pastes/<id>/<slug>`,
+`expiry_sites/<rfc3339>/<slug>` parallels `expiry/<rfc3339>/<slug>`).
+Values are JSON unless noted; all keys are UTF-8 strings cast to bytes,
+the same as the paste layout:
+
+```
+sites/<slug>                       JSON {Identity, Manifest, DedupedSize, CreatedAt, UpdatedAt, ExpiresAt}
+identity_sites/<identity>/<slug>   empty value (for "list/sum sites by identity" prefix scan)
+expiry_sites/<rfc3339>/<slug>      empty value (for sweep prefix scan to find sites whose expires_at <= now)
+```
+
+The `sites/<slug>` row is the authoritative record. The `Manifest` is
+encoded as the same compact `{"files": {"<path>": {"sha","size","ct"}}}`
+JSON the sqlite backend stores in its `manifest` column, so the on-wire
+manifest shape is identical across backends (path -> sha + size +
+content-type). `DedupedSize` is stored on the row (not recomputed on
+read) so the quota scans never have to decode every manifest just to sum
+bytes; it is `Manifest.DedupedSize()` at deploy time, the distinct-blob
+total, the number charged against quota. The two index families carry an
+empty value (the slatedb convention for marker keys, mirroring
+`identity_pastes` and `expiry`).
+
+The site keys live in the SAME keyspace and the SAME SlateDB instance as
+the paste keys, so a single `Db.begin(SnapshotIsolation)` transaction can
+touch both families atomically and a single prefix scan over `sites/`
+enumerates every site exactly as `pastes/` enumerates every paste.
+
+#### Operations -> KV mapping
+
+- **Deploy (`InsertWithQuotaCheck`).** Holds the per-identity quota
+  stripe (the same `lockQuota(identity)` the paste insert uses, so two
+  concurrent same-identity deploys cannot both pass the cap), then:
+  1. **Service-wide cap pre-check.** If `serviceCap > 0`, sum service-wide
+     active bytes across BOTH pastes AND sites (and any other byte-holding
+     family), reject with the service-full sentinel if `total + deduped`
+     exceeds it. This is the load-bearing change to the slatedb
+     service-wide sum: it previously summed only `pastes/* + versions/*`;
+     it MUST now also add every non-expired `sites/<slug>` row's
+     `DedupedSize`, so a site deploy sees the bytes pastes already hold and
+     a paste upload sees the bytes sites already hold. (Parallels the
+     sqlite `serviceWideActiveBytes`, which sums pastes + sites + rooms.)
+  2. **Per-identity cap pre-check.** If `userCap > 0`, sum the owner's
+     active paste bytes (`identity_pastes/<id>/*` -> non-deleted versions
+     of non-expired pastes) PLUS the owner's active site bytes
+     (`identity_sites/<id>/*` -> `DedupedSize` of non-expired sites),
+     reject with the over-quota sentinel if `owned + deduped` exceeds the
+     cap. (Parallels the sqlite `identityActiveBytes`.)
+  3. **Slug-collision check, BOTH directions.** Inside the transaction,
+     read `sites/<slug>` AND `pastes/<slug>`; if either exists, reject with
+     the slug-taken sentinel (whose message contains "slug" so the deploy
+     service retries with a fresh slug). A slug is EITHER a site or a
+     paste, never both, in either backend: the site insert rejects a slug a
+     paste already owns, and the paste insert (unchanged) already rejects a
+     slug another paste owns. The read participates in snapshot-isolation
+     conflict detection.
+  4. **Atomic write.** In one transaction, `Put sites/<slug>` (the JSON
+     row), `Put identity_sites/<id>/<slug>` (empty marker), and
+     `Put expiry_sites/<ExpiresAt>/<slug>` (empty marker). All three land
+     or none.
+- **Read (`Get`).** Single `Get sites/<slug>`, decode the JSON row,
+  decode the manifest. Returns the not-found sentinel for a missing slug,
+  and (like the paste `Get` and the sqlite site `Get`) returns
+  expired-but-unswept rows too: the HTTP layer 404s them, the sweep
+  deletes them.
+- **Per-identity site bytes (`SumActiveBytesByOwner`).** Scan
+  `identity_sites/<id>/`, `Get` each `sites/<slug>`, sum `DedupedSize` of
+  the rows whose `ExpiresAt > now`. Site-only (the service layer adds the
+  paste sum), matching the sqlite `SiteRepo.SumActiveBytesByOwner`.
+  Read-time expiry filtering (`expires_at > now`) means an expired-unswept
+  site stops counting the instant it expires, the same read-time semantics
+  the slatedb paste sum has (`conformCaps.ExpiryFreesQuotaAtReadTime =
+  true`).
+
+#### Expiry + sweep -> KV mapping
+
+- **`ExpiredSiteSlugs(now)`.** Prefix-scan `expiry_sites/`; for each
+  `expiry_sites/<rfc3339>/<slug>` key, parse the timestamp segment and
+  return `<slug>` when `ts <= now` (inclusive boundary, RFC3339Nano lex
+  order is time order, exactly the paste `ExpiredSlugs` shape).
+- **`Delete(slug)`.** Read `sites/<slug>` for its identity + expiry (to
+  clean up both index entries), then in one transaction delete
+  `sites/<slug>`, `identity_sites/<id>/<slug>`, and
+  `expiry_sites/<ExpiresAt>/<slug>`. Idempotent: a missing row is a no-op,
+  matching the sqlite `DELETE ... WHERE slug = ?` and the paste `Delete`.
+  The sweep calls this for every slug `ExpiredSiteSlugs` returns; the
+  per-record count it contributes makes the sweep's abort-on-zero-refs
+  data-loss guard not misfire on a tick where only sites expired.
+- **`ReferencedSiteBlobSHAs()`.** Prefix-scan `sites/`, decode each
+  manifest, union every distinct `sha` it references. The sweep unions
+  this with the paste-side `ReferencedBlobSHAs` so a blob shared between a
+  site and a paste (or two sites) survives as long as ANY live record
+  references it. A site manifest references a blob unconditionally (a site
+  has no per-file tombstone), so a live site always contributes a non-empty
+  set when it holds files, which keeps the sweep's abort-on-zero-refs guard
+  honest.
+
+#### Shale reuses the layout
+
+The shale backend reuses these exact key names and JSON row schemas (the
+same way it reuses the paste layout: co-location is by `ShardKeyFn`, not by
+renaming keys). The three site families add to the shard map:
+
+| Key family | Keys | Shard key |
+| --- | --- | --- |
+| Authoritative (per-slug) | `sites/<slug>` | `<slug>` |
+| Derived (per-identity) | `identity_sites/<id>/*` | `<id>` |
+| Expiry index (per-slug) | `expiry_sites/<date>/<slug>` | `<slug>` (slug is the LAST segment) |
+
+`sites/<slug>` joins the authoritative `{slug}` family (alongside
+`pastes/<slug>`), `identity_sites/<id>/*` joins the derived `{id}` family,
+and `expiry_sites/<date>/<slug>` shards on its trailing slug like
+`expiry/<date>/<slug>`. The site insert therefore spans the `{slug}` shard
+(the authoritative `sites/<slug>` write + the cross-family paste-slug
+collision read) and the `{id}` shard (the per-identity byte accounting), so
+on shale a site deploy uses the same reservation pattern paste inserts use:
+reserve the `DedupedSize` on the `{id}` `identity_bytes` counter, perform
+the authoritative `{slug}` write, then confirm. With sites accounted on the
+same `identity_bytes` counter, the counter measures combined paste+site
+bytes and the strict-quota and sweep-time-expiry properties carry over
+unchanged. The reservation markers a site deploy / delete leaves are
+completed by the same reconciler that completes paste markers (a site
+reserve marker is an orphan candidate by exactly the same grace-window
+rule), and the cross-family paste-slug collision read is added to the paste
+authoritative write so a paste cannot take a slug a site owns.
+
+**Status: slatedb is the must-have and is implemented + conformance-tested;
+shale sites are the documented next step, not yet wired.** Prod runs the
+slatedb-direct backend, so the slatedb site impl above is the load-bearing
+deliverable. The shale site impl is the same layout over the reservation
+pattern (the substantive new surface is the `identity_bytes` reservation
+for `DedupedSize`, the cross-family collision read in the paste
+authoritative write, and the reconciler's awareness of site markers); it is
+deferred so the prod-critical slatedb path lands first, fully tested. When
+the shale site impl is wired, the conformance suite's site subtests run
+against it under the same factory, the same way they run against sqlite and
+slatedb today, and shale becomes a drop-in for static-site hosting by the
+same construction.
+
+#### Wiring: widen the metadata bundle's `Sites` field
+
+`cmd/hostthisd/metadata.go` holds `Sites` as the concrete
+`*storage.SiteRepo` (sqlite) type, which the slatedb/shale repos cannot be
+assigned to. The field is widened to the `service.SiteRepo` interface (the
+deploy view) plus the `service.SweepSites` view (the sweep view), so any
+backend's site impl can be assigned. The bundle stays nil-safe: a backend
+that does not supply a site impl leaves the field nil and static-site
+hosting stays disabled there, exactly as before; once slatedb (and shale)
+supply a non-nil value, archive hosting lights up on those backends.
+
+#### Conformance
+
+The backend-agnostic conformance suite is extended with site operations so
+sqlite, slatedb, and shale are pinned to behave IDENTICALLY for sites, the
+same way they are pinned for pastes. The site contract the suite asserts:
+deploy a site and read every path back byte-identically (manifest
+round-trip), list/sum a site's bytes by identity, the per-identity AND
+service-wide quota counts SITE bytes (a site fills quota a paste then sees,
+and vice versa), the slug-collision rejects a slug a paste already owns
+(and a paste rejects a slug a site owns), and `ExpiredSiteSlugs` +
+`Delete` + `ReferencedSiteBlobSHAs` drive the sweep. A backend that passes
+the extended suite is a drop-in for static-site hosting by construction.
 
 ---
 

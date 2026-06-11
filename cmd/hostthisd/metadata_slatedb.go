@@ -55,6 +55,9 @@ func buildMetadataSlate(logger *log.Logger) (*metadataBundle, error) {
 	return &metadataBundle{
 		Repo:    repo,
 		KeyGate: repo,
-		Close:   repo.Close,
+		// Static-site hosting on slatedb: the SlateSiteRepo adapter shares
+		// the same SlateDB instance + quota accounting as the paste repo.
+		Sites: storage.NewSlateSiteRepo(repo),
+		Close: repo.Close,
 	}, nil
 }
