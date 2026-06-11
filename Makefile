@@ -1,6 +1,6 @@
 .PHONY: help build test smoke dev run docker-build docker-up docker-down \
         dev-minio-up dev-minio-down test-s3 blob-migrate blob-verify \
-        fmt vet clean data-dir-perms
+        fmt vet clean data-dir-perms rebuild-site-fixtures
 
 # Default goal: show the help text rather than silently no-op.
 .DEFAULT_GOAL := help
@@ -26,6 +26,7 @@ help:
 	@echo "  make blob-migrate  copy disk blobs into the configured S3 backend"
 	@echo "  make blob-verify   verify every disk blob round-trips against S3"
 	@echo "  make fmt / vet     gofmt / go vet"
+	@echo "  make rebuild-site-fixtures  rebuild the vite SPA test fixtures (needs npm)"
 	@echo "  make clean         remove ./bin and ./data"
 	@echo
 	@echo "Deploy targets live in the operator's private infra repo:"
@@ -60,6 +61,15 @@ fmt:
 
 vet:
 	go vet ./...
+
+# Regenerate the committed site-fixture dist/ trees from the demo source
+# (npm ci + vite build for the three framework demos; the plain-static
+# demo's dist/ is hand-written and left as-is). The validation harness
+# (internal/sitevalidation) byte-compares the served bytes against these
+# committed snapshots WITHOUT running npm, so CI needs no Node toolchain;
+# this target is the developer-side way to refresh the snapshots.
+rebuild-site-fixtures:
+	./testdata/sitefixtures/rebuild.sh
 
 # -- containers (local dev) --------------------------------------------------
 
