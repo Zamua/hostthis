@@ -87,6 +87,7 @@ func main() {
 	var roomsSvc *service.Rooms
 	if roomRepo != nil {
 		roomsSvc = service.NewRooms(roomRepo)
+		roomsSvc.ServiceCapBytes = *storageCap
 	}
 
 	// CDN cache purger. Default is noop (no CDN in front); when CF is

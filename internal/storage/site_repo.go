@@ -233,10 +233,12 @@ func (r *SiteRepo) ReferencedSiteBlobSHAs() ([]string, error) {
 	return out, nil
 }
 
-// serviceWideActiveBytes sums active bytes across BOTH pastes (live,
-// non-deleted versions) and sites (deduped_size of non-expired sites).
-// Shared by the paste and site quota checks so the service-wide cap
-// counts every kind of stored content. Runs inside the caller's tx.
+// serviceWideActiveBytes sums active bytes across pastes (live,
+// non-deleted versions), sites (deduped_size of non-expired sites), AND
+// rooms (value bytes of non-expired rooms). Shared by the paste, site, and
+// room quota checks so the service-wide cap counts every kind of stored
+// content - a write of any kind sees the bytes the other kinds already
+// hold. Runs inside the caller's tx.
 func serviceWideActiveBytes(tx *sql.Tx, nowStr string) (int64, error) {
 	var pasteTotal int64
 	if err := tx.QueryRow(`
@@ -253,7 +255,11 @@ func serviceWideActiveBytes(tx *sql.Tx, nowStr string) (int64, error) {
 	`, nowStr).Scan(&siteTotal); err != nil {
 		return 0, fmt.Errorf("service-wide site sum: %w", err)
 	}
-	return pasteTotal + siteTotal, nil
+	roomTotal, err := activeRoomBytesTx(tx, nowStr)
+	if err != nil {
+		return 0, err
+	}
+	return pasteTotal + siteTotal + roomTotal, nil
 }
 
 // identityActiveBytes sums active bytes owned by one identity across

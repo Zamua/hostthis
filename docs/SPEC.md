@@ -442,10 +442,20 @@ shared list, a poll, a retro board.
 Three nouns, in a strict containment hierarchy:
 
 - An **app** is a deployed static site (the "Static site archives"
-  feature above). It is identified by its **site slug** - the same 8-char
-  slug the site is served at - so `<slug>.hostthis.dev` is both where the
-  app's files live and where its rooms API is served. An app's identity is
-  the site slug; there is no second registration step.
+  feature above) or a paste. It is identified by its **slug** - the same
+  8-char slug the site/paste is served at - so `<slug>.hostthis.dev` is
+  both where the app's files live and where its rooms API is served. An
+  app's identity is that slug; there is no second registration step. There
+  IS, however, an existence requirement: the slug must name a live (non
+  expired) site or paste. `POST /api/rooms` against a slug that names no
+  live app is a **404**, so rooms can only ever be created under a slug an
+  operator-facing upload actually provisioned. This ties the per-app
+  caps (creation rate limit + aggregate byte cap) to a finite, provisioned
+  set of apps: an attacker cannot rotate through the ~10^12 well-formed
+  slug space to mint a fresh per-app budget under each one, because almost
+  all of those slugs name nothing. The read/write verbs do NOT repeat this
+  check - a room only exists under a slug that passed it at creation time,
+  and the per-room UUID is the access capability from there on.
 - A **room** is a `(app, UUIDv4, KV namespace)` triple created under an
   app. The UUIDv4 is minted server-side on creation and is the room's
   **capability**: holding it grants full read / write / delete to that
@@ -488,11 +498,21 @@ isolation guarantees that fall out of that key shape:
   string under a different app addresses a different keyspace. (Room UUIDs
   are unique in practice, but the app segment makes the isolation
   structural, not probabilistic.)
-- **Existence is not leaked**: a request to a *well-formed-but-nonexistent*
-  room UUID returns **404**, the same shape as a request for a missing
-  key, so an attacker cannot probe whether a given UUID names a real room.
-  This mirrors the paste / site rule where a cross-owner read surfaces as
-  not-found rather than forbidden.
+- **Existence is not leaked on the per-key path**: a *per-key* request
+  (`GET`/`PUT`/`DELETE /api/rooms/<uuid>/<key>`) to a
+  well-formed-but-nonexistent room UUID returns **404**, the same shape as
+  a request for a missing key in a real room, so a per-key probe cannot
+  distinguish "no such room" from "no such key in this room." This mirrors
+  the paste / site rule where a cross-owner read surfaces as not-found
+  rather than forbidden. The *whole-room scan* (`GET /api/rooms/<uuid>`)
+  does draw a 200-vs-404 line: an existing-but-empty room scans to `200 {}`
+  while a nonexistent room scans to `404`. That distinction is an
+  intentional existence signal scoped to a party who *already holds* the
+  122-bit UUID - it is not a probing oracle, since guessing a live UUID is
+  computationally infeasible and the per-key path (the only surface a
+  brute-force scan would hammer) never leaks the distinction. A holder of a
+  real UUID learning "this room exists but is empty" reveals nothing they
+  could not already write into existence.
 
 This is the same posture as the rest of hostthis: an unguessable
 identifier is the capability, and the storage layer enforces the namespace
@@ -642,6 +662,23 @@ informs them):
   below rather than this gate; a reverse-proxy per-IP request limit is the
   right layer for raw request-rate abuse, the same division of labor the
   paste threat model already documents.)
+
+  **Trusted source-IP derivation.** The per-IP bucket is derived from the
+  TCP `RemoteAddr` by default, NOT from any client-supplied header. A
+  client-controlled `X-Forwarded-For` is ignored unless the operator
+  explicitly opts in by setting `HOSTTHIS_HTTP_TRUST_XFF=true` - the same
+  discipline the SSH side uses for `HOSTTHIS_SSH_PROXY_PROTOCOL`. Trusting
+  a client header by default is a rate-limit bypass: an attacker would set
+  a fresh `X-Forwarded-For` per `POST` and land in a new per-IP bucket each
+  time. When `HOSTTHIS_HTTP_TRUST_XFF=true` is set (because hostthis sits
+  behind a reverse proxy that appends the real client IP), the gate reads
+  the **right-most** value of the `X-Forwarded-For` list - the hop the
+  trusted proxy itself recorded, which the client cannot forge past the
+  proxy - not the left-most value, which is fully attacker-controlled. An
+  operator who terminates TLS at a proxy MUST set this flag (otherwise
+  every request's `RemoteAddr` is the proxy's own IP and the per-IP gate
+  collapses to a single global bucket); an operator with hostthis directly
+  on the public internet MUST leave it unset.
 - **Per-room data cap.** A single room cannot store unbounded data:
   **default 256 KiB total value bytes** and **default 256 keys** per room.
   A `PUT` that would push the room past either cap is rejected (**413**)
@@ -657,13 +694,21 @@ informs them):
   quota: it stops one app from consuming the whole service. It is flagged
   as a starting default - an operator running many apps may want it lower,
   a single-app operator higher.
-- **Service-wide consideration.** Room data counts toward the same
-  service-wide storage posture pastes and sites do; an operator who has
-  set `--storage-cap-bytes` sees room bytes contribute to it. Rooms add a
-  new writable surface, so this is flagged explicitly: the per-app
-  aggregate is the primary structural bound, the service-wide cap is the
-  backstop, and a reverse-proxy per-IP rate limit remains the appropriate
-  layer for raw request-rate abuse, exactly as for the paste path.
+- **Service-wide cap.** Room data counts toward the same `--storage-cap-bytes`
+  service-wide cap pastes and sites do, in BOTH directions:
+  - A room `PUT` that would push *total active service bytes* (pastes +
+    sites + rooms) over the cap is refused (**507**), the prior value left
+    intact - the room write participates in the same serializable cap check
+    the paste insert and site deploy already perform.
+  - Room bytes are included in the total the paste-upload and site-deploy
+    quota checks compute, so a service already near the cap from room data
+    correctly refuses new pastes and sites.
+
+  Rooms add a new writable surface, so this is flagged explicitly: the
+  per-app aggregate is the primary structural bound, the service-wide cap
+  is the backstop that no single content kind can evade, and a
+  reverse-proxy per-IP rate limit remains the appropriate layer for raw
+  request-rate abuse, exactly as for the paste path.
 
 ### Retention
 
@@ -707,8 +752,9 @@ it, each a later tier with its own design:
 Rooms are **additive**: they introduce no change to the paste or the
 site/archive read-and-write behavior. A slug that owns a site keeps
 serving its files; the `/api/rooms` prefix is the only new surface on that
-subdomain, and a paste-only slug (no site) simply has no app to host rooms
-under.
+subdomain. A live paste's slug is also a valid app to host rooms under (a
+paste is an app per the "an app" definition above); a slug that names no
+live site or paste names no app, so room creation under it is a 404.
 
 ## Retention
 

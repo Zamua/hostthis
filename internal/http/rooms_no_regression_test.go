@@ -136,8 +136,11 @@ func TestRoomsHTTP_NoRegression_SiteUnchanged(t *testing.T) {
 func TestRoomsHTTP_NoRegression_RoomsLiveAlongsidePasteAndSite(t *testing.T) {
 	srv := buildFullStackServer(t)
 
-	// Rooms work under a fresh app slug.
-	const appSlug = "appz9999"
+	// Rooms work under the PROVISIONED static-site slug. Room creation now
+	// requires the slug to name a live app (the existence gate), so we host
+	// the room under the site the fixture deployed rather than an
+	// unprovisioned slug.
+	const appSlug = "sitewxyz"
 	id := createRoomID(t, srv, appSlug)
 	if w := req(t, srv, http.MethodPut, appSlug, "/api/rooms/"+id+"/k", []byte("v")); w.Code != http.StatusNoContent {
 		t.Fatalf("room put: code %d", w.Code)

@@ -45,10 +45,18 @@ func NewRoomKVRepo(db *sql.DB) *RoomKVRepo { return &RoomKVRepo{db: db} }
 //  3. inserts the creation-accounting row (app, subnet, now)
 //
 // The rate-limit DECISION (count in-window creations) is made by the
-// service layer via CountRoomCreates before this call; CreateRoom only
-// records the accounting row so the count is accurate for the next
-// caller. The two run in the same serializable boundary as the rest of
-// the writes so concurrent creates cannot both pass a stale count.
+// service layer via CountRoomCreates BEFORE this call, OUTSIDE this
+// transaction; CreateRoom only records the accounting row so the count is
+// accurate for the next caller. Because the count runs outside the tx, the
+// creation rate limit is a SOFT bound, not a strictly-serialized one: N
+// concurrent creators can each read the same in-window count and all pass
+// before any of their accounting rows commit, so the cap can be slightly
+// overshot under concurrency. This is an accepted trade - the creation
+// gate is a coarse abuse bound (60/IP/hr, 300/app/hr), not a precise
+// quota, and the per-app aggregate BYTE cap below (which IS enforced
+// inside this serializable tx) is the hard structural bound on how much an
+// app can actually store. The per-room and service-wide byte caps on
+// PutValue are likewise hard-enforced inside their own serializable tx.
 //
 // Returns ErrSlugTaken if the (app, id) pair already exists - the
 // service retries with a fresh id (astronomically unlikely for a v4).
@@ -177,13 +185,17 @@ func (r *RoomKVRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.Roo
 //     CanPut math against the room's current state -> ErrRoomDataFull
 //  3. enforces the per-app aggregate byte cap on the post-write delta ->
 //     ErrAppRoomsFull
-//  4. upserts the value row
-//  5. resets the room's retention clock (updated_at + expires_at)
+//  4. enforces the service-wide cap (pastes + sites + rooms) on the
+//     post-write delta -> ErrServiceFull, so room writes participate in
+//     --storage-cap-bytes the same way paste inserts and site deploys do
+//  5. upserts the value row
+//  6. resets the room's retention clock (updated_at + expires_at)
 //
 // The whole thing is one serializable transaction so two concurrent
 // writes to the same room cannot both pass a stale cap check and both
-// commit.
-func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) error {
+// commit, and so the service-wide total this write is checked against
+// cannot shift under a concurrent paste/site/room write.
+func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap, serviceCap int64, now time.Time) error {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -207,22 +219,35 @@ func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string,
 		return ErrRoomDataFull
 	}
 
-	// Per-app aggregate: charge only the byte DELTA this write adds
-	// (replacing an existing key frees its old bytes).
-	if appCap > 0 {
-		prior := 0
-		if existing, ok := kv.Values[key]; ok {
-			prior = len(existing)
+	// The byte DELTA this write adds (replacing an existing key frees its
+	// old bytes). Shared by the per-app and service-wide aggregate checks.
+	prior := 0
+	if existing, ok := kv.Values[key]; ok {
+		prior = len(existing)
+	}
+	delta := int64(len(val) - prior)
+
+	// Per-app aggregate: charge only the delta.
+	if appCap > 0 && delta > 0 {
+		total, err := appRoomBytesTx(tx, appSlug.String())
+		if err != nil {
+			return err
 		}
-		delta := int64(len(val) - prior)
-		if delta > 0 {
-			total, err := appRoomBytesTx(tx, appSlug.String())
-			if err != nil {
-				return err
-			}
-			if total+delta > appCap {
-				return ErrAppRoomsFull
-			}
+		if total+delta > appCap {
+			return ErrAppRoomsFull
+		}
+	}
+
+	// Service-wide cap (pastes + sites + rooms): charge the same delta
+	// against the whole-service active-byte total. A room write that would
+	// push the service over --storage-cap-bytes is refused, state intact.
+	if serviceCap > 0 && delta > 0 {
+		total, err := serviceWideActiveBytes(tx, formatTime(now))
+		if err != nil {
+			return err
+		}
+		if total+delta > serviceCap {
+			return ErrServiceFull
 		}
 	}
 
@@ -352,16 +377,36 @@ func (r *RoomKVRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
 // SumActiveRoomBytes returns the total stored value bytes across every
 // app's non-expired rooms. The sweep / quota accounting unions this into
 // the service-wide storage posture so room bytes count toward
-// --storage-cap-bytes alongside pastes and sites.
+// --storage-cap-bytes alongside pastes and sites. Shares its query with
+// the tx-scoped activeRoomBytesTx that the paste/site/room quota checks
+// call inside their serializable transactions.
 func (r *RoomKVRepo) SumActiveRoomBytes(now time.Time) (int64, error) {
+	tx, err := r.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	total, err := activeRoomBytesTx(tx, formatTime(now))
+	if err != nil {
+		return 0, err
+	}
+	return total, tx.Commit()
+}
+
+// activeRoomBytesTx sums stored value bytes across every app's non-expired
+// rooms inside the caller's tx. Shared by SumActiveRoomBytes and by the
+// service-wide cap check (serviceWideActiveBytes), so a room PUT, a paste
+// insert, and a site deploy all see the same room-bytes figure within
+// their serializable boundary.
+func activeRoomBytesTx(tx *sql.Tx, nowStr string) (int64, error) {
 	var n sql.NullInt64
-	if err := r.db.QueryRow(`
+	if err := tx.QueryRow(`
 		SELECT COALESCE(SUM(kv.val_size), 0)
 		FROM room_kv kv
 		JOIN rooms ro ON ro.app_slug = kv.app_slug AND ro.room_id = kv.room_id
 		WHERE ro.expires_at > ?
-	`, formatTime(now)).Scan(&n); err != nil {
-		return 0, fmt.Errorf("sum active room bytes: %w", err)
+	`, nowStr).Scan(&n); err != nil {
+		return 0, fmt.Errorf("sum active room bytes (tx): %w", err)
 	}
 	return n.Int64, nil
 }
