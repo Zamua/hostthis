@@ -1,5 +1,6 @@
 .PHONY: help build test smoke dev run docker-build docker-up docker-down \
-        dev-minio-up dev-minio-down test-s3 blob-migrate blob-verify \
+        dev-minio-up dev-minio-down test-s3 test-conformance-kv \
+        blob-migrate blob-verify \
         fmt vet clean data-dir-perms rebuild-site-fixtures
 
 # Default goal: show the help text rather than silently no-op.
@@ -23,6 +24,7 @@ help:
 	@echo "  make docker-down   tear it down"
 	@echo "  make dev-minio-up  start local MinIO for the S3 backend test"
 	@echo "  make test-s3       run the S3 round-trip integration test"
+	@echo "  make test-conformance-kv  run slatedb+shale conformance (needs -tags slatedb + MinIO)"
 	@echo "  make blob-migrate  copy disk blobs into the configured S3 backend"
 	@echo "  make blob-verify   verify every disk blob round-trips against S3"
 	@echo "  make fmt / vet     gofmt / go vet"
@@ -88,7 +90,7 @@ docker-down:
 dev-minio-up:
 	docker compose -f deploy/dev/docker-compose.yml up -d
 	@echo "minio: http://localhost:9000 (s3 api)  http://localhost:9001 (console: admin/supersecret)"
-	@echo "bucket 'hostthis-blobs' is auto-created by the init container"
+	@echo "buckets 'hostthis-blobs' + 'hostthis-metadata' are auto-created by the init container"
 
 dev-minio-down:
 	docker compose -f deploy/dev/docker-compose.yml down -v
@@ -101,6 +103,24 @@ test-s3:
 	MINIO_TEST_ACCESS_KEY=admin \
 	MINIO_TEST_SECRET_KEY=supersecret \
 	go test -v -count=1 ./internal/storage -run TestS3BlobStore
+
+# Runs the slatedb + shale backend conformance suites against the local
+# MinIO (hostthis-metadata bucket). Needs the slatedb build tag, cgo, and
+# libslatedb_uniffi on the loader path. SLATEDB_LIB_DIR defaults to
+# $HOME/.local/lib but is overridable for a different install location.
+# Assumes dev-minio-up has already been run (it provisions both buckets).
+SLATEDB_LIB_DIR ?= $(HOME)/.local/lib
+test-conformance-kv:
+	CGO_ENABLED=1 \
+	CGO_LDFLAGS="-L$(SLATEDB_LIB_DIR)" \
+	DYLD_LIBRARY_PATH="$(SLATEDB_LIB_DIR)" \
+	LD_LIBRARY_PATH="$(SLATEDB_LIB_DIR)" \
+	MINIO_TEST_ENDPOINT=http://localhost:9000 \
+	MINIO_TEST_METADATA_BUCKET=hostthis-metadata \
+	MINIO_TEST_ACCESS_KEY=admin \
+	MINIO_TEST_SECRET_KEY=supersecret \
+	go test -tags slatedb -count=1 ./internal/storage \
+		-run 'TestConformance_Slate|TestConformance_Shale'
 
 # -- Blob migration helpers (disk → s3) -------------------------------------
 
