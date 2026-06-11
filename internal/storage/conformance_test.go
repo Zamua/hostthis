@@ -103,24 +103,29 @@ type conformCaps struct {
 // paste contract) needs no extra argument.
 func runConformance(t *testing.T, name string, caps conformCaps, newRepo func(t *testing.T) conformanceRepo) {
 	t.Helper()
-	runConformanceWithSites(t, name, caps, newRepo, nil)
+	runConformanceWithSites(t, name, caps, newRepo, nil, nil)
 }
 
 // runConformanceWithSites runs the paste contract suite (via newRepo) and,
-// when newSites is non-nil, the site contract suite too. The site factory
-// produces a fresh site repo that MUST share the same backing store as the
-// paste repo from the same factory call, so the cross-quota and
-// cross-family slug-collision site subtests exercise the real interaction.
+// when newSites is non-nil, the site contract suite too, and when newRooms is
+// non-nil, the room contract suite too. The site + room factories produce
+// fresh repos that MUST share the same backing store as the paste repo from
+// the same factory call, so the cross-quota and cross-family / cross-kind
+// subtests exercise the real interaction.
 func runConformanceWithSites(
 	t *testing.T,
 	name string,
 	caps conformCaps,
 	newRepo func(t *testing.T) conformanceRepo,
 	newSites func(t *testing.T) (conformanceRepo, conformanceSiteRepo),
+	newRooms func(t *testing.T) roomConformanceStores,
 ) {
 	t.Helper()
 	if newSites != nil {
 		runSiteConformance(t, name, caps, newSites)
+	}
+	if newRooms != nil {
+		runRoomConformance(t, name, caps, newRooms)
 	}
 	t.Run(name+"/InsertAndGet", func(t *testing.T) { conformInsertAndGet(t, newRepo(t)) })
 	t.Run(name+"/QuotaConcurrentCeiling", func(t *testing.T) { conformQuotaConcurrentCeiling(t, newRepo(t), caps) })

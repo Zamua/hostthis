@@ -33,12 +33,13 @@ type metadataBundle struct {
 	// field is the siteStore interface (not the concrete sqlite
 	// *storage.SiteRepo) so any backend's site impl can be assigned.
 	Sites siteStore
-	// Rooms is the room-KV repo (the no-auth app-persistence tier). Only
-	// the sqlite backend supplies it today; the slatedb / shale backends
-	// leave it nil and the /api/rooms surface is disabled there. The spec
-	// documents the shale shard-family shape for a future shale-backed
-	// implementation. nil-safe throughout.
-	Rooms *storage.RoomKVRepo
+	// Rooms is the room-KV repo (the no-auth app-persistence tier). The
+	// sqlite, slatedb, and shale backends each supply an implementation; a
+	// backend that leaves it nil disables the /api/rooms surface there.
+	// nil-safe throughout. The field is the roomStore interface (not the
+	// concrete sqlite *storage.RoomKVRepo) so any backend's room impl can be
+	// assigned - mirroring how Sites was widened to siteStore.
+	Rooms roomStore
 	Close func() error
 }
 
@@ -64,6 +65,19 @@ type siteStore interface {
 	service.SiteRepo
 	service.SweepSites
 	httpapi.SiteReader
+}
+
+// roomStore is the union of every room-side interface the service / sweep
+// layers consume: the room write/read view (service.RoomRepo) and the sweep
+// view (service.SweepRooms). The sqlite *storage.RoomKVRepo, the slatedb
+// *storage.SlateRoomRepo, and the shale *storage.ShaleRoomRepo all satisfy
+// it. Holding the bundle field as this interface (rather than the concrete
+// sqlite type) is what lets the slatedb / shale backends supply their own
+// room impl, so the /api/rooms surface lights up on the slatedb-direct prod
+// deploy. nil disables the room-persistence tier for that backend.
+type roomStore interface {
+	service.RoomRepo
+	service.SweepRooms
 }
 
 // buildMetadata reads HOSTTHIS_METADATA_BACKEND and returns the

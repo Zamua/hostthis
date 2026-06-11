@@ -106,6 +106,10 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		// repo, so a non-nil Sites lights up archive hosting on shale, the
 		// same way it does on slatedb.
 		Sites: storage.NewShaleSiteRepo(repo),
+		// Room persistence on shale: the ShaleRoomRepo adapter shares the same
+		// shale cluster, co-locating every room family on the {app-slug} shard
+		// so the room tier runs on shale clusters too.
+		Rooms: storage.NewShaleRoomRepo(repo),
 		Close: repo.Close,
 	}, nil
 }

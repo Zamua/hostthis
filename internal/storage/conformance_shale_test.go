@@ -43,6 +43,12 @@ var _ conformanceRepo = (*storage.ShaleRepo)(nil)
 // subtests the same way sqlite + slatedb do.
 var _ conformanceSiteRepo = (*storage.ShaleSiteRepo)(nil)
 
+// Compile-time assertion that *ShaleRoomRepo satisfies the room conformance
+// interface (service.RoomRepo + service.SweepRooms), so the shale backend can
+// supply a non-nil bundle Rooms and run the room subtests the same way sqlite
+// + slatedb do.
+var _ conformanceRoomRepo = (*storage.ShaleRoomRepo)(nil)
+
 func TestConformance_Shale(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -87,5 +93,16 @@ func TestConformance_Shale(t *testing.T) {
 		repo := newShale(t)
 		return repo, storage.NewShaleSiteRepo(repo)
 	}
-	runConformanceWithSites(t, "shale", caps, newRepo, newSites)
+	// The room repo (ShaleRoomRepo), the paste repo, and the site repo all wrap
+	// the SAME ShaleRepo (one cluster handle + shard routing), so the cross-kind
+	// service-wide cap room subtest exercises the real interaction.
+	newRooms := func(t *testing.T) roomConformanceStores {
+		repo := newShale(t)
+		return roomConformanceStores{
+			Rooms: storage.NewShaleRoomRepo(repo),
+			Paste: repo,
+			Site:  storage.NewShaleSiteRepo(repo),
+		}
+	}
+	runConformanceWithSites(t, "shale", caps, newRepo, newSites, newRooms)
 }

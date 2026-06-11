@@ -489,18 +489,20 @@ func (r *SlateRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 }
 
 // sumServiceWideActiveBytes is the service-cap equivalent - sum over
-// EVERY paste AND every site, not just one identity. Used inside the
-// quota check on BOTH the paste-insert and the site-deploy paths.
-// Implementation walks pastes/ then versions/<slug>/; O(active pastes)
-// + O(versions per paste), then adds the site total (one sites/ scan).
-// For low-volume hostthis (today: <100 active pastes, <500 versions
+// EVERY paste AND every site AND every app's rooms, not just one identity.
+// Used inside the quota check on the paste-insert, site-deploy, AND
+// room-write paths. Implementation walks pastes/ then versions/<slug>/;
+// O(active pastes) + O(versions per paste), then adds the site total (one
+// sites/ scan) and the room total (one rooms/ scan + per-live-room value
+// scan). For low-volume hostthis (today: <100 active pastes, <500 versions
 // total) this is sub-millisecond.
 //
-// Including site bytes here is the load-bearing change for static-site
-// hosting on slatedb: a paste upload sees the bytes sites already hold
-// and a site deploy sees the bytes pastes already hold, so the
-// service-wide cap counts every kind of stored content (parallels the
-// sqlite serviceWideActiveBytes, which sums pastes + sites + rooms).
+// Including site AND room bytes here keeps the service-wide cap SYMMETRIC
+// across all three content kinds: a paste upload sees the bytes sites and
+// rooms already hold, a site deploy sees paste + room bytes, and a room PUT
+// sees paste + site bytes (parallels the sqlite serviceWideActiveBytes,
+// which sums pastes + sites + rooms). Do NOT regress any kind's writer to
+// ignore another kind's bytes.
 func (r *SlateRepo) sumServiceWideActiveBytes(now time.Time) (int64, error) {
 	pastes, err := r.scanPrefix([]byte("pastes/"))
 	if err != nil {
@@ -535,7 +537,16 @@ func (r *SlateRepo) sumServiceWideActiveBytes(now time.Time) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return total + siteTotal, nil
+	// Room bytes fold into the same service-wide sum so the cap is SYMMETRIC
+	// across all three content kinds: a room PUT sees paste+site bytes (here),
+	// and a paste insert / site deploy sees room bytes (they call this sum).
+	// Do NOT regress this to an asymmetry (the sites-on-slate P0 lesson,
+	// extended to the third kind).
+	roomTotal, err := r.SumActiveRoomBytes(now)
+	if err != nil {
+		return 0, err
+	}
+	return total + siteTotal + roomTotal, nil
 }
 
 func (r *SlateRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {

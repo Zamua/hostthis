@@ -52,5 +52,23 @@ func TestConformance_Sqlite(t *testing.T) {
 		}
 		return r, storage.NewSiteRepo(db)
 	}
-	runConformanceWithSites(t, "sqlite", caps, newRepo, newSites)
+	// The room repo shares the same *sql.DB as the paste + site repos, so the
+	// cross-kind service-wide cap room subtest exercises the real interaction.
+	newRooms := func(t *testing.T) roomConformanceStores {
+		dir := t.TempDir()
+		db, err := storage.Open(filepath.Join(dir, "conform.db"))
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return roomConformanceStores{
+			Rooms: storage.NewRoomKVRepo(db),
+			Paste: sqliteConformRepo{
+				PasteRepo:   storage.NewPasteRepo(db),
+				KeyGateRepo: storage.NewKeyGateRepo(db),
+			},
+			Site: storage.NewSiteRepo(db),
+		}
+	}
+	runConformanceWithSites(t, "sqlite", caps, newRepo, newSites, newRooms)
 }

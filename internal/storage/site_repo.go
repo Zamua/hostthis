@@ -274,11 +274,13 @@ func (r *SiteRepo) ReferencedSiteBlobSHAs() ([]string, error) {
 // room quota checks so the service-wide cap counts every kind of stored
 // content - a write of any kind sees the bytes the other kinds already
 // hold. Runs inside the caller's tx.
-// serviceWideActiveBytes takes TWO now-strings because the paste/room
-// expires_at columns are stored with formatTime (RFC3339Nano) while the
-// site expires_at column is stored with formatSiteExpiry (fixed-width); each
-// subquery compares its column against the matching-format operand, so a
-// cross-format lexical comparison never happens.
+// serviceWideActiveBytes takes the now-string in BOTH formats because the
+// paste expires_at column is stored with formatTime (RFC3339Nano) while the
+// site AND room expires_at columns are stored with formatSiteExpiry
+// (fixed-width); each subquery compares its column against the
+// matching-format operand, so a cross-format lexical comparison never
+// happens. (The room expiry column adopted the fixed-width format so the
+// sweep's sub-second ordering is correct, matching the site column.)
 func serviceWideActiveBytes(tx *sql.Tx, nowStr, siteNowStr string) (int64, error) {
 	var pasteTotal int64
 	if err := tx.QueryRow(`
@@ -295,7 +297,9 @@ func serviceWideActiveBytes(tx *sql.Tx, nowStr, siteNowStr string) (int64, error
 	`, siteNowStr).Scan(&siteTotal); err != nil {
 		return 0, fmt.Errorf("service-wide site sum: %w", err)
 	}
-	roomTotal, err := activeRoomBytesTx(tx, nowStr)
+	// The room expires_at is fixed-width (formatSiteExpiry), the same as the
+	// site column, so it takes siteNowStr.
+	roomTotal, err := activeRoomBytesTx(tx, siteNowStr)
 	if err != nil {
 		return 0, err
 	}
