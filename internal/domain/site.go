@@ -149,11 +149,16 @@ func (m Manifest) Lookup(reqPath string) (ManifestEntry, bool) {
 // is deliberately NOT here - a missing ".html" path is a pre-rendered
 // route the build did not emit, so it routes through the SPA too.
 var assetExtensions = map[string]struct{}{
-	".js": {}, ".mjs": {}, ".css": {}, ".json": {}, ".map": {},
-	".xml": {}, ".txt": {}, ".pdf": {}, ".wasm": {}, ".webmanifest": {},
+	".js": {}, ".mjs": {}, ".cjs": {}, ".css": {}, ".json": {}, ".map": {},
+	".xml": {}, ".txt": {}, ".csv": {}, ".pdf": {}, ".wasm": {}, ".webmanifest": {},
 	".png": {}, ".jpg": {}, ".jpeg": {}, ".gif": {}, ".webp": {},
-	".avif": {}, ".svg": {}, ".ico": {},
+	".avif": {}, ".svg": {}, ".ico": {}, ".bmp": {},
 	".woff": {}, ".woff2": {}, ".ttf": {}, ".otf": {}, ".eot": {},
+	// Media: a missing one must 404, not get served the index.html as text/html.
+	".mp4": {}, ".webm": {}, ".mov": {}, ".m4v": {}, ".ogv": {},
+	".mp3": {}, ".wav": {}, ".ogg": {}, ".flac": {}, ".m4a": {}, ".aac": {},
+	// Pre-compressed bundles + common data/binary assets.
+	".gz": {}, ".br": {}, ".zip": {}, ".bin": {}, ".dat": {},
 }
 
 // looksLikeAsset reports whether reqPath's LAST segment has a known

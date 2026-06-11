@@ -393,7 +393,8 @@ on the request path's last segment:
   known **static-asset extension** (`.js`, `.mjs`, `.css`, `.json`,
   `.map`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.avif`, `.svg`,
   `.ico`, `.woff`, `.woff2`, `.ttf`, `.otf`, `.eot`, `.wasm`, `.xml`,
-  `.txt`, `.pdf`, `.webmanifest`, ...). A bundle that requests
+  `.txt`, `.pdf`, `.webmanifest`, media such as `.mp4` / `.webm` /
+  `.mp3`, pre-compressed `.gz` / `.br`, ...). A bundle that requests
   `/assets/app-deadbeef.js` and gets back `index.html` with a `200` and
   a `text/html` content-type would be a silent, confusing failure (the
   browser tries to execute HTML as a script); a clean `404` is the
