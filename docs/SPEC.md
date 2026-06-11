@@ -299,10 +299,11 @@ extractor enforces three guards while it STREAMS the archive (never
   cap). A tiny archive can expand to gigabytes, so the check is on the
   bytes as they are read out, never on the post-decompression result.
   The aborted upload writes nothing durable.
-- **File-count and manifest-size caps.** The number of entries is
-  capped (a few thousand) and the manifest size is bounded, so a
-  "million tiny files" archive cannot exhaust file descriptors,
-  inodes, or metadata-store space even though each file is small.
+- **File-count and manifest-size caps.** The number of regular-file
+  entries is capped (5000) and the total manifest path text is bounded
+  (1 MiB), with a per-path length cap (1 KiB), so a "million tiny files"
+  archive cannot exhaust file descriptors, inodes, or metadata-store
+  space even though each file is small.
 
 Any guard tripping aborts the whole deploy: a half-extracted site is
 never persisted and never served (deploys are atomic - see Versioning
@@ -359,7 +360,20 @@ extension. Directory handling:
 
 Unlike a single-file paste - which serves only at `/` on its subdomain
 and 404s every other path - a site serves its whole path space off the
-subdomain root, because a site is a directory by definition.
+subdomain root, because a site is a directory by definition. A slug is
+EITHER a site or a paste, never both: the read path tries the site
+table first and falls back to the paste table, and slug generation
+checks both tables for collisions. The bare directory name `/<dir>`
+(no trailing slash) also resolves to `/<dir>/index.html` so links work
+with or without the slash.
+
+Content-type is derived purely from the path's extension (an I/O-free
+domain decision). An unknown extension is served as
+`application/octet-stream` - never mislabeled as `text/html`, so an
+unexpected file can't be coerced into running as script on the origin.
+A `.md` / `.txt` file in a site is served raw as `text/plain` (NOT
+rendered - server-side Markdown rendering is the single-file paste
+path, not the site path).
 
 Site reads carry the **same sandbox headers** as HTML paste reads
 (`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
