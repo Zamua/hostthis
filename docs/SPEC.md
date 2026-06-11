@@ -463,6 +463,18 @@ Three nouns, in a strict containment hierarchy:
 There is no login, no password, no per-user account anywhere in this
 tier. Possession of the room UUID is the whole access model.
 
+**Collaborative on refresh.** Because a room is one shared namespace keyed
+by `(app, room-uuid)` and every participant addresses that same namespace,
+two participants who hold the same room link see each other's writes on
+their next read: A writes a value, B scans the room (its "join") and
+observes it, B writes back, and A sees that on its next scan. This is the
+consistency model the tier ships - request/response KV, so the propagation
+is "on the next read," not pushed in real time (live push is a later tier;
+see "Scope fence"). An app that wants near-real-time re-scans on an
+interval. The names participants attach to their writes are cosmetic
+attribution, not access control (see "In-room identity" below): any holder
+of the UUID can write under any key.
+
 ### Strict room isolation (the security property)
 
 Every value is namespaced by the triple `(app-slug, room-uuid, key)`. The

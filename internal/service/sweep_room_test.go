@@ -79,6 +79,71 @@ func TestSweep_ExpiresRoomsAndCascades(t *testing.T) {
 	}
 }
 
+// TestSweep_ExpiredRoom404sThroughServiceAfterSweep ties the retention
+// lifecycle to the read surface: a room past its TTL is swept, and AFTER
+// the sweep every service-level verb (get / scan / put / delete) on that
+// room returns ErrRoomNotFound - the existence-not-leaked 404. This is the
+// end-state a client sees: once the room is gone, addressing it is
+// indistinguishable from a never-existed room.
+func TestSweep_ExpiredRoom404sThroughServiceAfterSweep(t *testing.T) {
+	dir := t.TempDir()
+	db, err := storage.Open(filepath.Join(dir, "sweep.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	disk, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
+	if err != nil {
+		t.Fatalf("blobs: %v", err)
+	}
+	pastes := storage.NewPasteRepo(db)
+	rooms := storage.NewRoomKVRepo(db)
+
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	roomsSvc := service.NewRooms(rooms)
+	roomsSvc.Now = func() time.Time { return now }
+	room, err := roomsSvc.Create("appz2345", "203.0.113.0/24")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	if err := roomsSvc.Put(room.AppSlug, room.ID, "state", []byte(`{"votes":3}`)); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	// Before expiry the room reads fine.
+	if _, err := roomsSvc.Get(room.AppSlug, room.ID, "state"); err != nil {
+		t.Fatalf("pre-expiry get: %v", err)
+	}
+
+	// Sweep PAST the 30-day inactivity window: the room is deleted.
+	logger := log.New(io.Discard, "", 0)
+	sweep := service.NewSweep(pastes, disk, logger)
+	sweep.Rooms = rooms
+	future := now.Add(domain.RoomRetentionWindow + time.Hour)
+	roomsSvc.Now = func() time.Time { return future }
+	deleted, _, err := sweep.Once(future)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected 1 room swept, got %d", deleted)
+	}
+
+	// AFTER the sweep, the service 404s the room on every verb - the same
+	// not-found shape a never-existed room gets.
+	if _, err := roomsSvc.Get(room.AppSlug, room.ID, "state"); !errors.Is(err, service.ErrRoomNotFound) {
+		t.Fatalf("get swept room = %v, want ErrRoomNotFound", err)
+	}
+	if _, err := roomsSvc.Scan(room.AppSlug, room.ID); !errors.Is(err, service.ErrRoomNotFound) {
+		t.Fatalf("scan swept room = %v, want ErrRoomNotFound", err)
+	}
+	if err := roomsSvc.Put(room.AppSlug, room.ID, "state", []byte("x")); !errors.Is(err, service.ErrRoomNotFound) {
+		t.Fatalf("put swept room = %v, want ErrRoomNotFound", err)
+	}
+	if err := roomsSvc.Delete(room.AppSlug, room.ID, "state"); !errors.Is(err, service.ErrRoomNotFound) {
+		t.Fatalf("delete swept room = %v, want ErrRoomNotFound", err)
+	}
+}
+
 // TestSweep_PrunesRoomCreates confirms the sweep prunes the bounded
 // room-creation rate-limit table once rows fall past the window.
 func TestSweep_PrunesRoomCreates(t *testing.T) {
