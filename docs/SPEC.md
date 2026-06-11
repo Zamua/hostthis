@@ -582,10 +582,12 @@ by `(app, room-uuid)` and every participant addresses that same namespace,
 two participants who hold the same room link see each other's writes on
 their next read: A writes a value, B scans the room (its "join") and
 observes it, B writes back, and A sees that on its next scan. This is the
-consistency model the tier ships - request/response KV, so the propagation
-is "on the next read," not pushed in real time (live push is a later tier;
-see "Scope fence"). An app that wants near-real-time re-scans on an
-interval. The names participants attach to their writes are cosmetic
+consistency model the KV verbs ship - request/response KV, so the
+propagation is "on the next read," not pushed by the KV path itself. An
+app that wants near-real-time either re-scans on an interval OR opens the
+room's WebSocket relay (see "Real-time room relay (WebSocket)" below),
+which pushes one participant's message to the others live. The names
+participants attach to their writes are cosmetic
 attribution, not access control (see "In-room identity" below): any holder
 of the UUID can write under any key.
 
@@ -828,13 +830,11 @@ window it is a product opinion, not an operator config.
 
 ### Scope fence
 
-This tier is **KV persistence only**. Three things are explicitly NOT in
-it, each a later tier with its own design:
+This tier is **KV persistence plus a real-time relay**. The KV verbs
+above are the durable surface; the WebSocket relay below adds live push
+on top of the SAME room. Two things are still explicitly NOT in it, each
+a later tier with its own design:
 
-- **NO WebSocket / real-time.** Rooms are request/response KV. Live
-  multiplayer (a room broadcast relay that pushes one participant's write
-  to the others) is the next tier and its own project; it is not built
-  here. An app that wants near-real-time today polls `GET /api/rooms/<uuid>`.
 - **NO per-user auth / JWT / "Sign in with hostthis."** The room UUID IS
   the access capability; there are no accounts, no roles, no token
   verification in this tier. The "A persistence API" future-directions
@@ -856,6 +856,482 @@ serving its files; the `/api/rooms` prefix is the only new surface on that
 subdomain. A live paste's slug is also a valid app to host rooms under (a
 paste is an app per the "an app" definition above); a slug that names no
 live site or paste names no app, so room creation under it is a 404.
+
+## Real-time room relay (WebSocket)
+
+The KV verbs above make a room **collaborative on refresh**: a participant
+sees another's writes on the next read. That is enough for a poll or a
+shared list, but not for the headline app this tier exists to unlock - a
+**when2meet** where everyone paints a calendar and watches each other's
+availability fill in LIVE. Polling `GET /api/rooms/<uuid>` on an interval
+is the workaround and it is bad: too slow to feel live, too chatty to
+scale, and it never catches the moment between two polls.
+
+The real-time relay closes that gap with **one generic per-room WebSocket
+endpoint** layered on the SAME room. hostthis runs **no app-specific
+server logic**: it is a dumb live channel. A message from one client in a
+room is fanned out, verbatim, to every OTHER client in that same room.
+The clients hold all the app logic (the when2meet's grid, the retro
+board's cards); hostthis is the live wire plus the durable backing store.
+This is the deliberately-client-authoritative model the "A persistence
+API" future-directions bullet describes ("no reactive subscriptions" was
+the line drawn against a FaaS - a generic broadcast relay is NOT app code,
+so it sits on the right side of that line), made real for the no-auth
+capability tier.
+
+### The endpoint and the room-UUID capability
+
+The relay is served by the same HTTP surface that serves the KV verbs,
+under the app's own subdomain, at a reserved `/api/rooms/<uuid>/ws` path:
+
+```
+GET (Upgrade: websocket)   /api/rooms/<uuid>/ws
+```
+
+- Production (subdomain mode): `wss://<app-slug>.hostthis.dev/api/rooms/<uuid>/ws`.
+- Dev (path mode): `ws://<apex>/p/<app-slug>/api/rooms/<uuid>/ws`.
+
+The path lives under the existing `/api/rooms` carve-out, so it is never
+shadowed by a manifest file, and `/ws` is a reserved trailing segment a
+room KEY can never name (a key path is `/api/rooms/<uuid>/<key>`; the
+relay claims `<key> == "ws"` for the upgrade, the one key the KV verbs do
+not serve as data). Because the relay shares the app's origin, the app's
+own JavaScript opens it same-origin with no CORS dance.
+
+**The room UUID is the entire access model, exactly as it is for the KV
+verbs.** Holding the UUID lets you join that room's relay; nothing else
+grants it. On upgrade the server validates two things and rejects
+otherwise, BEFORE completing the WebSocket handshake:
+
+- **The app slug names a LIVE app.** The same existence requirement room
+  creation rides: the slug must name a non-expired site or paste (checked
+  via the site + paste readers the router already holds). An upgrade under
+  an unprovisioned slug is refused, so the relay cannot be opened under one
+  of the ~10^12 well-formed-but-empty slugs. This ties the relay's per-app
+  connection caps to the same finite, provisioned set of apps the KV caps
+  are tied to.
+- **The UUID is a canonical UUIDv4 that names an existing room.** A
+  malformed id is refused at the boundary (the same `ParseRoomID` the KV
+  path uses); a well-formed-but-nonexistent room is refused too (a relay to
+  a room that was never created has nothing to back its late-join snapshot).
+  A holder of a real UUID is the only party who can open the channel.
+
+A rejected upgrade is refused with a normal HTTP status (not a 101), so a
+client's WebSocket open fails cleanly: a malformed UUID is a **400**, an
+unknown app slug or nonexistent room is a **404** (the
+existence-not-leaked shape, same as the KV path), an over-limit room or
+app is a **429**, and a non-Upgrade request to the `/ws` path is a **426
+Upgrade Required**. No relay is ever stood up for a request that fails
+validation, so a forged or guessed id reaches no hub.
+
+### Strict isolation: a connection joins exactly one room
+
+A WebSocket connection is bound at upgrade time to the **one** room whose
+`(app-slug, room-uuid)` it connected with, and it can never affect any
+other. The isolation is the same structural property the KV key shape
+gives the durable tier, lifted to the live tier:
+
+- **A message never crosses to another room.** The connection is
+  registered in exactly one per-room hub (keyed by `(app-slug, room-uuid)`);
+  a broadcast is fanned out only to the other members of THAT hub. There is
+  no cross-hub path - a client cannot address, subscribe to, or leak into
+  another room even within the same app.
+- **A message never crosses to another app.** The hub key's outermost
+  segment is the app slug, so an identical room-UUID-shaped string under a
+  different app resolves to a different hub. One app's live traffic is
+  disjoint from another's, structurally, not by a filter a handler could
+  forget.
+- **The relay carries no cross-room addressing in its payload.** hostthis
+  does not interpret the message, so there is no "target room" field a
+  client could set; the connection's bound room is the only destination,
+  fixed at upgrade and immutable for the connection's life.
+
+hostthis does not parse the relayed payload at all: it is opaque bytes /
+JSON the app chose, fanned out verbatim. The only server-side
+interpretation is the connection-lifecycle control frames (ping/pong, the
+late-join snapshot framing, and the optional durable-write convention
+below), never the app's message contents.
+
+### Persistence and late-join: the KV is the durable state, the relay is the live delta
+
+This is the crux of "no gap, no dup." The relay integrates with the room
+KV (the durable tier specified above) so a client that JOINS - including a
+client that reloaded the page mid-session - is caught up to the current
+state and then sees every subsequent change exactly once.
+
+**The model: snapshot-then-stream, with the snapshot read inside the
+join.** On a successful upgrade, before the connection is added to the
+hub's broadcast set, the server:
+
+1. **Reads the room KV snapshot** (`RoomRepo.ScanRoom`) and sends it to
+   the joining client as the first frame, tagged as the snapshot (a
+   control envelope the client distinguishes from a relayed peer message).
+   This is the late-joiner's full current state - byte-identical to what
+   `GET /api/rooms/<uuid>` returns, so the same client code that loads
+   state on a cold start consumes it.
+2. **Then registers the connection in the hub** and begins streaming live
+   messages.
+
+The ordering - snapshot read THEN hub-join, both holding the hub's
+registration lock so no broadcast can interleave between them - is what
+makes late-join correct:
+
+- **No gap.** The snapshot is taken and the connection is registered
+  without releasing the lock that serializes "a message arrives at the
+  hub" against "a connection joins the hub." A durable write that lands
+  AFTER the snapshot is read will, because the connection is already in
+  the broadcast set by the time the lock is released, be delivered as a
+  live message. There is no window where a change is neither in the
+  snapshot nor in the stream.
+- **No dup.** A durable write that landed BEFORE the snapshot is reflected
+  in the snapshot; the connection was not yet in the broadcast set when
+  that write was relayed, so it did not also receive it as a live message.
+  Every change is in exactly one of {snapshot, stream}, never both. (The
+  cheap client-side backstop, for an app that wants belt-and-suspenders:
+  the snapshot is a full keyed state, so applying a live message that
+  re-sets a key the snapshot already carried is idempotent - last-writer
+  wins on that key. The server guarantee is no-dup; the keyed-state shape
+  makes a stray dup harmless anyway.)
+
+**What persists vs what is ephemeral.** The relay separates two message
+flavors, and this is the abuse + correctness lever:
+
+- **Ephemeral (broadcast only, NOT persisted).** High-frequency live
+  signals: a cursor position, a stroke-in-progress, a "user is dragging
+  the selection." These are fanned out to peers and never written to the
+  KV. They are the live texture of the session; a client that joins later
+  does not need them (they are stale the instant they are sent), so they
+  cost zero KV writes. This is what keeps the relay from forcing a durable
+  write per frame at 60 Hz - the thing that would make the KV the
+  bottleneck and blow the per-room cap in seconds.
+- **Durable (broadcast AND persisted to the KV).** The committed state: a
+  finished availability cell, a placed retro card, a final vote. The
+  durable set is what a late joiner must see, so it must survive a full
+  disconnect + reload, so it lands in the room KV via the SAME
+  `RoomRepo.PutValue` / `DeleteValue` the HTTP verbs use - which means it
+  rides the SAME per-room / per-app / service-wide caps and resets the
+  SAME retention clock. A durable mutation is therefore consistent whether
+  it arrives over the relay or over `PUT /api/rooms/<uuid>/<key>`: both
+  funnel through the one room repo, so the snapshot a future joiner reads
+  reflects it identically.
+
+**How a client signals which flavor a message is.** hostthis stays generic
+by NOT inventing an app protocol, but it must know which messages to
+persist. The chosen convention: the durable path is the EXISTING HTTP KV
+verb, and the relay is broadcast-only by default. An app that wants a
+change to be both durable AND pushed live does the durable write with `PUT
+/api/rooms/<uuid>/<key>` (which the server, holding the hub lock for that
+room, ALSO fans out to the room's connected clients as a live message
+tagged with the key), and uses raw relay frames only for ephemeral
+signals. This keeps the relay payload-opaque (no reserved fields in the
+app's bytes), makes the durable write go through the one audited cap-
+checked path, and gives the live fan-out of a committed change for free.
+
+  Why route durable writes through the HTTP verb rather than a
+  message-type tag inside the relayed bytes: a tag inside the payload would
+  force hostthis to parse the app's message (breaking the payload-opaque
+  property and the isolation argument that rests on it), and it would
+  duplicate the cap-check / retention-clock logic on a second code path. A
+  `PUT` that the server mirrors to the hub reuses the entire durable path
+  unchanged and adds only the fan-out. The relay's own frames stay pure
+  ephemeral broadcast - the server never persists a raw relay frame, so a
+  flood of relay frames can never grow the durable store (see "Limits").
+  An app whose every change is durable simply does every change as a `PUT`
+  and uses the relay only to LOWER its latency (the live mirror), or not at
+  all; an app with a lot of ephemeral motion uses raw relay frames for the
+  motion and `PUT`s only the committed deltas.
+
+**Reconnect is just join again.** A reconnecting client - the canonical
+case is a page reload or a backgrounded PWA resuming - opens a fresh
+WebSocket, gets a fresh snapshot-then-stream, and is caught up with no gap
+and no dup by the exact same mechanism as a first-time joiner. The server
+holds no per-client durable session state across a disconnect: a
+connection is not assumed unique or permanent, and a client may have zero,
+one, or several live connections to the same room at once (two tabs).
+Re-syncing from the KV snapshot on every (re)connect is what makes the
+relay reconnect-friendly - there is no incremental "catch me up from
+sequence N" replay to get wrong, because the durable KV is always the
+authoritative full state and a fresh scan is always correct.
+
+### Connection lifecycle (the finicky core)
+
+This is what separates a relay that feels solid from one that drops
+messages and leaks goroutines. The server side and the client side each
+own four pieces; they interlock.
+
+**Server side.**
+
+- **Per-room hub.** A hub is the in-memory registry for one room's live
+  connections, keyed by `(app-slug, room-uuid)`. It owns the set of
+  connected clients, the register / unregister path, and the broadcast
+  fan-out. A hub is created lazily on the first connection to a room and
+  torn down when its last connection leaves (no idle empty hubs linger).
+  The hub registry (the map of room-key -> hub) and each hub's client set
+  are the two in-memory structures, and BOTH are bounded (see "Limits").
+- **Server heartbeat (ping/pong) to reap dead connections.** The server
+  sends a WebSocket ping to each connection on a fixed interval and expects
+  a pong back within a deadline; a connection that misses the pong deadline
+  is considered dead and is closed and unregistered. This is what detects a
+  client that vanished without a clean close (a killed PWA, a dropped
+  mobile link, a yanked cable) - TCP alone can take minutes to notice, and
+  an idle proxy will cut the connection silently. The server ping interval
+  is chosen UNDER the proxy idle timeout (the relay runs behind traefik /
+  nginx, whose idle defaults are 60-120 s), so the heartbeat also keeps a
+  legitimately-quiet connection alive through the proxy. The server both
+  SENDS its own pings AND tolerates client-initiated pings (responds with a
+  pong, treated as a liveness no-op) - the client lifecycle below pings on
+  its own ~25 s cadence and the server must not punish it for that.
+- **Backpressure: a slow client must never block the room.** Each
+  connection has a **bounded per-client send buffer**. The broadcast path
+  writes to each connection's buffer and returns immediately; a dedicated
+  per-connection writer goroutine drains the buffer to the socket. If a
+  client is slow or stuck and its buffer is FULL when a broadcast tries to
+  enqueue, the server does NOT block the broadcast waiting for that one
+  client (head-of-line blocking the whole room on the slowest member) - it
+  **drops that client**: closes the connection and unregisters it. A
+  laggard is ejected, never tolerated at the cost of everyone else's
+  latency. The bound is small (a handful of frames): a client that cannot
+  keep up with a handful of buffered frames is not a viable live
+  participant and is better off reconnecting (which re-syncs it from the
+  KV snapshot cleanly). The broadcast is therefore wait-free with respect
+  to any individual client.
+- **Clean disconnect handling.** Every connection close - clean client
+  close, heartbeat-timeout reap, slow-client drop, server shutdown -
+  unregisters the connection from its hub and stops its reader and writer
+  goroutines, with no leaked goroutine and no dangling map entry. The last
+  connection leaving a room tears the hub down. Server shutdown closes all
+  connections with a normal-closure status so clients reconnect on the
+  client backoff schedule rather than hammering instantly.
+- **Read bound.** The reader applies a max message size per inbound frame
+  (see "Limits") and a read deadline reset by each successful read /
+  pong, so a connection that goes silent past the heartbeat deadline is
+  closed by the read path even if the ping path is starved.
+
+**Client side (the relay must SUPPORT this; the POC implements it).** The
+server is built so the canonical 4-piece client lifecycle works against
+it. This is the same lifecycle every production WebSocket client needs;
+the relay's job is to not fight it:
+
+1. **Heartbeat ping every ~25 s** (under the proxy idle default). The
+   server treats a client ping as a liveness no-op and pongs it. A quiet
+   connection stays alive across an idle network and a suspended PWA.
+2. **Auto-reconnect with exponential backoff + jitter** on close. Start
+   ~500 ms, double each attempt, cap ~30 s, jitter to avoid a thundering
+   herd if many clients reconnect at once (a server restart drops every
+   connection in a room simultaneously). The server is reconnect-friendly:
+   a reconnecting client re-syncs from the KV snapshot, so backoff costs a
+   little latency, never correctness.
+3. **`visibilitychange` recovery.** When a tab / PWA returns to the
+   foreground, force-reconnect immediately rather than waiting out the
+   backoff - iOS aggressively suspends backgrounded WebSockets, and the
+   snapshot-then-stream rejoin catches the client up on whatever it missed.
+4. **Send buffer (client-side).** Queue actions submitted while
+   disconnected (capped), flush them on the next reconnect after the
+   snapshot handshake. Durable actions a client took offline are `PUT`s
+   that retry on reconnect; ephemeral signals taken offline are simply
+   dropped (they are stale).
+
+The server makes no assumption that a connection is unique or permanent,
+so all four client pieces are safe: a reconnect is a new join, a duplicate
+connection from the same client is just another hub member, and a missed
+heartbeat is reaped without corrupting room state (the durable state lives
+in the KV, untouched by a connection dying).
+
+### Limits and abuse posture
+
+The relay is a new always-open, push-capable surface, so every in-memory
+structure is bounded and the abuse posture is the room-UUID capability
+plus these caps - **no new auth**, consistent with the rest of the tier.
+Each limit has a concrete default flagged as a starting point (tunable as
+real usage informs it):
+
+- **Max concurrent connections per room** (default **64**). A room is a
+  small collaborative session (a team's retro, a friend group's
+  when2meet); past this, new upgrades to that room are refused **429**.
+  This bounds one hub's client-set size and one room's fan-out cost (a
+  broadcast is O(connections)).
+- **Max concurrent connections per app** (default **1024**). Bounds the
+  total live connections any one app's rooms hold open in aggregate, the
+  live-tier analogue of the per-app aggregate byte cap. Past it, new
+  upgrades under that app are refused **429**.
+- **Cap on total active relay rooms** (a service-wide bound on the number
+  of live hubs, default sized to the node's memory budget). Bounds the hub
+  registry itself so the count of distinct live rooms cannot grow
+  unbounded. Past it, an upgrade that would create a NEW hub is refused
+  **503**; joins to already-live rooms still succeed.
+- **Max message size per inbound frame** (default **32 KiB**). An app's
+  live message is small (a cursor, a cell, a card); a frame over the cap
+  closes the connection. This bounds per-frame memory and stops a single
+  giant frame from being a memory-amplification vector. (It is independent
+  of the per-room DURABLE byte cap, which the `PUT` path enforces; a relay
+  frame is never persisted, so it is bounded for memory, not for storage.)
+- **Per-connection send rate limit** (default a small frames-per-second
+  ceiling, e.g. **120 msg/s**). A client that exceeds its inbound rate is
+  throttled or dropped, so one hostile connection cannot saturate a room's
+  fan-out (every inbound frame is multiplied by the room's connection
+  count on the way out). This is the relay's analogue of the room-creation
+  rate limit on the KV side.
+
+The bounded per-client send buffer (the backpressure mechanism above) is
+itself a per-connection memory bound. Together these cap connections,
+rooms, per-frame bytes, in-flight buffered bytes, and message rate - every
+axis a hostile client could push on. A reverse-proxy per-IP connection
+limit remains the appropriate outer layer for raw connection-flood abuse,
+exactly the division of labor the KV path documents for request-rate
+abuse. Durable mutations made over the relay ride the EXISTING per-room /
+per-app / service-wide byte caps unchanged (they go through `PutValue`),
+so the relay opens no new path to grow the durable store past its caps.
+
+The relay adds NO state that survives a room's expiry: when a room is
+swept (its KV deleted after the retention window), any still-open
+connections to it are connections to a now-empty room, and the next
+durable read returns an empty snapshot. Live hubs are pure in-memory
+state, GC'd when the last connection leaves; they are never persisted and
+never participate in the sweep.
+
+### Single-node now, multi-node later (sticky-by-room)
+
+**The MVP relay is single-node, and that is correct for today's deploy.**
+Production hostthis runs as a single pod on the slatedb-direct backend, so
+all of a room's WebSocket connections terminate on the one process, the
+per-room hubs are in-memory on that process, and a broadcast reaches every
+connection because every connection is local. A single-node relay is
+complete and correct for a single-pod deploy; nothing about the model
+above needs a second node to be right.
+
+The multi-node path is **documented, not built**, and the design boundary
+is already laid by the existing shale ring:
+
+- **The problem multi-node introduces.** With N hostthisd pods behind a
+  load balancer, two clients in the same room can land on DIFFERENT pods.
+  An in-memory hub on pod A does not see a connection on pod B, so a
+  broadcast on A would not reach B's client - the room would silently
+  split. The relay needs every connection in one room to share one
+  broadcast domain.
+- **The chosen future shape: sticky-by-room via shale's ring.** The shale
+  shard-key function already routes every key of a room
+  (`rooms/<app-slug>/<uuid>`, `roomkv/<app-slug>/<uuid>/...`, the ledger,
+  the expiry index) to the SAME shard, owned by ONE node, by sharding on
+  `<app-slug>` (see "Three shard families" / "Shale reuses the layout").
+  The relay reuses that exact routing: a room's WebSocket connections are
+  made sticky to the node that owns the room's shard. The load balancer (or
+  a thin upgrade-time redirect / internal forward) routes
+  `/api/rooms/<uuid>/ws` to the shard owner the ring resolves for
+  `<app-slug>`, so all of a room's connections terminate on the one node
+  that also owns the room's durable data. That node's in-memory hub is then
+  the whole room, exactly as in the single-node case, and the
+  snapshot-then-stream join reads the local backend. Co-locating the live
+  hub with the durable shard is the clean property: the node that pushes
+  the live delta is the node that commits the durable write, so there is no
+  cross-node coordination on the hot path.
+- **The alternative considered and deferred: a pub/sub backplane.** Instead
+  of pinning connections to the owning node, every node could host any
+  room's connections and publish each broadcast to a shared bus (Redis
+  pub/sub, NATS) that every node subscribes to, fanning a broadcast out to
+  peers' local connections. This decouples connection placement from shard
+  ownership but adds a second distributed system, a per-message network hop
+  on the broadcast hot path, and a new ordering surface (two pods' views of
+  one room's stream). Sticky-by-room reuses infrastructure hostthis already
+  has (the ring) and keeps the live hub and the durable shard on one node,
+  so it is the preferred future shape; the backplane is the fallback if a
+  single room's connection count ever exceeds one node's capacity (sticky
+  caps a room at one node's connection budget, which the per-room
+  connection cap already bounds well under that). Either way, the
+  cross-pod design is a LATER tier; the MVP ships single-node and names
+  this boundary so the multi-node path is known, not discovered.
+
+This mirrors the "single shale node now, gossip + ring multi-node later"
+boundary the metadata tier already documents: the same code is correct at
+one node, and the ring is the routing primitive the scale-out reuses.
+
+### Sandbox and security posture
+
+The relay introduces no new trust boundary beyond the room-UUID
+capability and the origin isolation the rest of hostthis relies on:
+
+- **Origin isolation is unchanged.** The WebSocket is served on the app's
+  own subdomain (`<app-slug>.hostthis.dev`), the same origin as the app's
+  files and its KV API. A browser's same-origin policy keeps one app's
+  relay unreachable as a cross-origin target from another paste's JS in the
+  normal way; the relay rides the per-subdomain origin boundary that
+  already separates pastes and sites. (Path mode collapses origins for dev,
+  the same documented caveat the rest of hostthis carries - path mode is
+  dev-only and breaks origin isolation; a production relay deploy runs
+  subdomain mode.)
+- **Origin / Host checks on upgrade.** The WebSocket upgrade validates that
+  the request's `Host` resolves to a real app slug (the existence check
+  above) and applies an Origin policy appropriate to a same-origin app API:
+  cross-origin upgrade attempts that a browser would gate by CORS are
+  refused, so a third-party page cannot open a victim app's relay from a
+  visitor's browser. The room UUID remains the capability for any party who
+  legitimately holds it (the app's own JS, a shared link), exactly as the
+  KV verbs treat it.
+- **The payload is opaque and never executed.** hostthis relays bytes; it
+  never renders, parses, or runs a relayed message. A relayed frame is data
+  fanned out to peers' JavaScript, which the app's own code interprets
+  inside its own origin - the same "treat any URL on hostthis.dev as
+  untrusted user content" posture the HTML-sandboxing section sets, now
+  extended to "treat any relayed message as untrusted app data," handled
+  entirely by the app's client code, never by hostthis.
+- **No amplification past the caps.** The per-frame size cap, the
+  per-connection rate limit, the per-room / per-app connection caps, and
+  the bounded send buffer together bound the fan-out amplification (one
+  inbound frame -> N outbound frames) so the relay cannot be turned into a
+  DoS multiplier. A relay frame is never persisted, so it cannot grow the
+  durable store; a durable write over the relay rides the existing byte
+  caps; the capability + the caps are the whole abuse posture, no new auth.
+
+### DDD shape: the hub as a bounded context
+
+The relay is its own bounded context, kept thin at the edges and pure
+where it can be, matching the domain-pure / infra-separate / services-on-
+top discipline the rest of the codebase follows:
+
+- **The hub / relay service is the bounded context** (connection registry,
+  broadcast fan-out, lifecycle). It depends on the room KV ONLY through the
+  existing small `service.RoomRepo` interface - the same snapshot
+  (`ScanRoom`) and durable-write (`PutValue` / `DeleteValue`) verbs the
+  HTTP KV handlers use - so the relay reuses the durable tier's caps and
+  retention without re-implementing them.
+- **The connection is an interface, not a concrete socket.** The hub talks
+  to a connection abstraction (send a frame, close, identity) so the hub
+  logic - register, broadcast, drop-a-laggard, reap-on-heartbeat-timeout,
+  tear-down-the-empty-hub - is unit-testable WITHOUT real sockets, with a
+  fake connection that records what it received and can be made to block /
+  fill its buffer to exercise the backpressure path. The pure hub logic is
+  the testable core; the real `coder/websocket` connection is one adapter.
+- **The HTTP WS-upgrade handler is thin.** It authenticates the room
+  (validate slug exists + UUID parses + room exists, the same checks the KV
+  path runs), enforces the connection caps, performs the upgrade, and hands
+  the connection to the hub. It carries no app logic and no relay state of
+  its own. This is the same translation-layer-only shape the existing
+  `/api/rooms` handlers have.
+- **The library.** The relay uses a maintained, context-native Go
+  WebSocket library - **`coder/websocket`** (the maintained successor to
+  `nhooyr.io/websocket`), whose `context.Context`-first read/write API and
+  built-in ping/pong fit the lifecycle above and the codebase's
+  context-aware shape. It is added via `go.mod`. (The long-lived WebSocket
+  connection is hijacked out from under the `http.Server`'s
+  `ReadTimeout` / `WriteTimeout`, which bound the short request/response
+  paths and must NOT reap a live relay connection; the relay manages its
+  own per-connection read/write deadlines via the heartbeat instead.)
+
+### Testing: the multi-client harness is the gate
+
+Per the TDD discipline, the relay does not ship without the integration
+test that pins the spec'd behavior. The gate is a **multi-client harness**:
+two or more clients join one room and the test asserts the observable
+contract end to end - a message from one client reaches the others and not
+itself; a late joiner gets the snapshot then the live stream with no gap
+and no dup; a reconnecting client re-syncs cleanly; a slow client is
+dropped without stalling the room's broadcast to the others; a heartbeat-
+timeout connection is reaped; strict isolation holds (a connection in room
+A never sees room B's or another app's traffic); and the connection / room
+/ frame-size / rate limits each reject past their bound. The pure hub
+logic is additionally unit-tested against a fake connection (no real
+socket) for the register / broadcast / backpressure / reap / teardown
+paths. The WebSocket tests run under `-race` so a data race in the hub's
+concurrent register / broadcast / unregister path fails the build.
 
 ## Retention
 
