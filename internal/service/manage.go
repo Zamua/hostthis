@@ -142,6 +142,11 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 	if err != nil {
 		return UpdateResult{}, err
 	}
+	// KindSite (a gzip-tar archive) is not a paste; updating a paste with
+	// archive content must not skip the deploy pipeline's safe-untar guards.
+	if kind == domain.KindSite {
+		return UpdateResult{}, domain.ErrUnsupportedKind
+	}
 	now := m.Now().UTC()
 	if err := m.Blobs.PutPrecompressed(staged.SHA, staged.Body); err != nil {
 		return UpdateResult{}, fmt.Errorf("blob write: %w", err)

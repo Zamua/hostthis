@@ -105,6 +105,13 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	if err != nil {
 		return Result{}, err
 	}
+	// KindSite (a gzip-tar archive) is NOT a paste: it must go through the
+	// deploy pipeline (which runs the safe-untar guards). Reaching the
+	// single-file paste path with KindSite would persist the raw gzip as a
+	// paste and skip every untar guard, so reject it here.
+	if kind == domain.KindSite {
+		return Result{}, domain.ErrUnsupportedKind
+	}
 	now := u.Now().UTC()
 	if err := u.Blobs.PutPrecompressed(staged.SHA, staged.Body); err != nil {
 		return Result{}, fmt.Errorf("blob write: %w", err)
