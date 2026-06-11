@@ -715,13 +715,12 @@ pattern exactly the way the paste repo and the shale `ShaleRepo` do:
   namespaced keys and is queried by `(app-slug, room-uuid)`, behind a
   small service-layer interface (a `RoomRepo` declared in
   `internal/service`, the same way `PasteRepo` / `PasteAdmin` /
-  `SweepRepo` / `KeyGateRepo` are). The **sqlite** backend implements it
-  today; the domain, HTTP, and service layers stay unaware of which
-  backend is wired. This mirrors the static-site repo exactly: rooms ship
-  on the single-host sqlite metadata backend first, and the
-  object-store-backed backends (slatedb / shale) leave the room repo nil -
-  on those, the `/api/rooms` surface is simply not served - until the
-  shale-backed implementation lands.
+  `SweepRepo` / `KeyGateRepo` are; the sweep-side view is `SweepRooms`).
+  All three metadata backends implement it - **sqlite** (single-host),
+  **slatedb** (object-store-backed), and **shale** (horizontally-scaled
+  cluster) - so the `/api/rooms` surface runs on every backend hostthis can
+  be deployed on, including the slatedb-direct backend prod runs. The
+  domain, HTTP, and service layers stay unaware of which backend is wired.
 - The sqlite backend stores rooms in two tables, `rooms`
   (`(app_slug, room_id)` primary key + the retention clock) and `room_kv`
   (`(app_slug, room_id, key)` primary key + the opaque value, FK-cascade
@@ -729,24 +728,22 @@ pattern exactly the way the paste repo and the shale `ShaleRepo` do:
   limit. Every read and write is scoped by the `(app_slug, room_id)` pair,
   so the namespace boundary is enforced by the key, not by a filter a
   caller could forget.
-- The forward design for the **shale** backend: the room keys join the
-  existing shard-family scheme as a fourth, per-app family so a room read
-  or write is a single-shard operation. The key shape and its shard key:
-
-  ```
-  rooms/<app-slug>/<room-uuid>          room record (created_at, updated_at, expires_at)
-  room_kv/<app-slug>/<room-uuid>/<key>  one stored value
-  ```
-
-  Both shard on `<app-slug>` (the first segment after the family prefix),
-  co-locating an app's rooms and all their values on one shard, the same
-  co-location discipline the `{slug}` / `{id}` / `{subnet}` families use.
-  This keeps "load the whole room" and "write one key" single-shard CAS
-  operations rather than cross-shard fan-outs. The single-writer backends
+- The slatedb and shale backends model the same logical rows as a set of
+  room key families co-located in the one metadata keyspace, so a room
+  read or write is a single transaction / prefix scan. The full layout,
+  the cap + isolation + rate-limit + TTL mapping onto KV ops, and the
+  fixed-width TTL timestamp are specified under **"Room storage on the
+  slatedb (and shale) backend"** below (near the metadata-backend section,
+  alongside the parallel static-site layout). The single-writer backends
   store the same logical rows; the observable contract is identical across
-  backends, the way it is for the paste families. This shape is the
-  documented target for the shale port, not yet wired - exactly the
-  staging the static-site feature followed.
+  backends, the way it is for the paste and site families, and the
+  backend-agnostic conformance suite pins them identical.
+
+The slug-must-name-a-live-app **existence requirement** is enforced at the
+HTTP layer (it reads the site + paste readers the router already holds),
+NOT inside the room repo, so it holds identically across backends without
+the room repo needing a separate existence reader: room creation 404s a
+slug that names no live site or paste on every backend.
 
 ### Quota and abuse
 
@@ -1914,6 +1911,356 @@ and vice versa), the slug-collision rejects a slug a paste already owns
 (and a paste rejects a slug a site owns), and `ExpiredSiteSlugs` +
 `Delete` + `ReferencedSiteBlobSHAs` drive the sweep. A backend that passes
 the extended suite is a drop-in for static-site hosting by construction.
+
+### Room storage on the slatedb (and shale) backend
+
+The "Rooms (app persistence)" feature persists a **Room** (the owning
+app's slug + a UUIDv4 + a flat key-value namespace) plus a retention clock,
+a creation-rate ledger, and an expiry index. The sqlite backend implements
+it as the `rooms` / `room_kv` / `room_creates` tables; this section
+specifies the **KV layout** the slatedb and shale backends use so the
+no-auth room-persistence tier runs on those backends too, not only on
+sqlite. Rooms hold no blobs: a room value is small, mutable app STATE that
+lives entirely in the metadata backend (the content-addressed `BlobStore`
+is untouched), so unlike pastes and sites a room contributes nothing to the
+blob-GC keep-alive set.
+
+**The `RoomRepo` and `SweepRooms` interfaces are the contract.** Both are
+already interfaces in `internal/service` (`rooms.go`, `sweep.go`),
+satisfied by the sqlite `*storage.RoomKVRepo` today. The slatedb and shale
+backends add types that ALSO satisfy them; the domain layer (`Room`,
+`RoomID`, the pure `RoomKV` cap math, `RoomRef`) is backend-agnostic and
+unchanged - only the storage layer is backend-specific. The room-write /
+read interface is:
+
+- `CreateRoom(room Room, subnet, appCap, now)` (mint an empty room, record
+  the creation-accounting row, enforce the per-app aggregate cap; the
+  creation rate-limit DECISION is made by the service via
+  `CountRoomCreates` BEFORE this call, so the gate is a soft bound while the
+  per-app byte cap is a hard one)
+- `GetRoom(appSlug, id) (Room, error)`
+- `GetValue(appSlug, id, key) ([]byte, error)`
+- `ScanRoom(appSlug, id) (RoomKV, error)`
+- `PutValue(appSlug, id, key, val, appCap, serviceCap, now)` (per-room +
+  per-app + service-wide caps; resets the retention clock)
+- `DeleteValue(appSlug, id, key, now)` (idempotent; resets the clock)
+- `CountRoomCreates(appSlug, subnet, now, window) (perSubnet, perApp, err)`
+
+and the sweep-side interface is:
+
+- `ExpiredRoomKeys(now) ([]RoomRef, error)`
+- `DeleteRoom(appSlug, id) error`
+- `PruneOldRoomCreates(cutoff) (int, error)`
+
+#### Room key families (slatedb)
+
+Rooms have MORE key families than sites because they carry per-key values,
+a creation-rate ledger, and an expiry index. Each is co-located in the SAME
+SlateDB instance and the SAME keyspace as the paste + site keys, so a room
+create or write is one `Db.begin(SnapshotIsolation)` transaction and a
+per-app prefix scan over `roomkv/<app-slug>/<uuid>/` enumerates exactly one
+room's values. All keys are UTF-8 strings cast to bytes; values are JSON
+unless noted:
+
+```
+rooms/<app-slug>/<uuid>                 JSON {CreatedAt, UpdatedAt, ExpiresAt} (the room record)
+roomkv/<app-slug>/<uuid>/<key>          raw value bytes (the stored KV pair, verbatim; not JSON)
+roomcreate/<app-slug>/<subnet>/<ts>     empty value (one per room created; ts is fixed-width, see below)
+roomexpiry/<ts>/<app-slug>/<uuid>       empty value (sweep prefix scan to find rooms whose ExpiresAt <= now; ts is fixed-width)
+```
+
+The `rooms/<app-slug>/<uuid>` row is the authoritative record: the
+retention clock only (no byte/key totals are stored on it - the byte and
+key counts are computed by scanning `roomkv/<app-slug>/<uuid>/` at PUT
+time, the same way the sqlite backend materializes the namespace for the
+pure `RoomKV.CanPut` cap math). A value is stored **verbatim** (not
+JSON-wrapped): hostthis never parses a room value, so `roomkv/...` holds
+the exact bytes the app PUT, and a Get returns them unchanged. The two
+marker families (`roomcreate/`, `roomexpiry/`) carry an empty value, the
+slatedb convention for index keys (mirroring `identity_pastes` /
+`expiry_sites`).
+
+The `<key>` in `roomkv/<app-slug>/<uuid>/<key>` is the app-chosen key
+validated by `ValidateRoomKey` (non-empty, `<= MaxRoomKeyLen`); the
+`<uuid>` is the canonical lowercase 8-4-4-4-12 form `ParseRoomID` returns,
+so a forged or wrong-version id is rejected at the HTTP boundary before it
+can ever reach a key builder. The `<app-slug>` is the validated 8-char
+slug. None of these three segments can contain a `/` that would let one
+room's key prefix collide with another's (see Strict isolation below).
+
+#### Strict isolation is structural in the key shape
+
+Every value key is `roomkv/<app-slug>/<uuid>/<key>`, the namespacing
+triple `(app-slug, room-uuid, key)` in path order. The isolation
+guarantees fall out of the key shape, not a runtime filter:
+
+- **Cross-room.** A Get / Put / Delete builds the key from the
+  request's own `<uuid>`, so a request carrying room A's UUID can only ever
+  address keys under `roomkv/<app>/A/`; it cannot read or write
+  `roomkv/<app>/B/...`. A whole-room scan is `ScanPrefix
+  roomkv/<app-slug>/<uuid>/` - bounded to exactly one room's subtree, so it
+  cannot enumerate another room.
+- **Cross-app.** The app slug is the outermost variable segment, so
+  `roomkv/app1/<uuid>/...` and `roomkv/app2/<uuid>/...` are disjoint
+  subtrees even for an identical UUID. The per-app prefix scans
+  (`roomkv/<app-slug>/`, `roomcreate/<app-slug>/`) are anchored at the app
+  segment, so one app's aggregate / creation count never sees another's.
+- **Nonexistent-room 404, no existence leak on the per-key path.** A
+  per-key Get is a single `Get roomkv/<app>/<uuid>/<key>`: a missing key
+  in a real room and a key under a nonexistent room both return the
+  not-found sentinel (the same `ErrNotFound` the slatedb paste / site Get
+  returns), so the per-key path cannot distinguish "no such room" from "no
+  such key." The service layer does the `GetRoom` existence check
+  separately where it needs the whole-room-scan 200-vs-404 distinction
+  (the existence signal scoped to a holder of the 122-bit UUID, per the
+  Strict-isolation section above).
+
+Because the UUID is validated up front and the segments are slash-free,
+there is no key whose prefix is another room's, and a guessed or forged id
+addresses an empty subtree - the same "the identifier IS the capability,
+the storage layer enforces the namespace boundary" posture pastes and sites
+rely on.
+
+#### Operations -> KV mapping
+
+- **Create (`CreateRoom`).** Holds the **per-app** quota stripe (the
+  `lockQuota(app-slug)` analogue of the paste / site per-identity stripe,
+  here keyed on the app slug because the room aggregate cap is per-app, not
+  per-identity), then in one transaction:
+  1. **Per-app aggregate pre-check.** If `appCap > 0`, sum the app's
+     current room bytes (scan `roomkv/<app-slug>/`, sum value lengths of
+     non-expired rooms) and refuse a new room with the app-rooms-full
+     sentinel once the app is already at its byte cap. (A brand-new room is
+     empty, but bounding creation here keeps a full app from accumulating
+     unbounded empty rooms, mirroring the sqlite `CreateRoom`.)
+  2. **Collision check.** Read `rooms/<app-slug>/<uuid>`; an existing row
+     surfaces the slug-taken sentinel so the service retries with a fresh
+     UUID (astronomically unlikely for a v4).
+  3. **Atomic write.** `Put rooms/<app-slug>/<uuid>` (the JSON record:
+     `CreatedAt = UpdatedAt = now`, `ExpiresAt = now + RoomRetentionWindow`),
+     `Put roomcreate/<app-slug>/<subnet>/<ts>` (empty marker, the
+     rate-limit ledger row), and `Put roomexpiry/<ExpiresAt>/<app-slug>/
+     <uuid>` (empty marker, the sweep index). All land or none.
+  The creation rate-limit COUNT is read by the service via
+  `CountRoomCreates` OUTSIDE this transaction, exactly as on sqlite, so the
+  creation gate stays a SOFT bound (N concurrent creators can each read the
+  same in-window count and all pass) while the per-app byte cap is the hard
+  structural bound enforced inside the tx.
+- **Per-key read (`GetValue`).** Single `Get roomkv/<app>/<uuid>/<key>`,
+  return the bytes verbatim or the not-found sentinel.
+- **Whole-room scan (`ScanRoom`).** `ScanPrefix roomkv/<app>/<uuid>/`,
+  rebuild the `RoomKV` map (strip the key prefix to recover each app-chosen
+  `<key>`). An existing room with no values scans to an empty (non-nil)
+  namespace; the service layer's prior `GetRoom` is what turns a
+  nonexistent room into a 404 rather than an empty 200.
+- **Write (`PutValue`).** Holds the **per-room** quota stripe
+  (`lockQuota(app-slug + "/" + uuid)`) across the read + write, so two
+  concurrent writes to the SAME room cannot both pass a stale cap check and
+  both commit (valid because SlateDB is single-writer: only in-process
+  goroutines can race, and the stripe serializes same-room writers). Then,
+  inside one transaction:
+  1. **Room-exists re-check.** `Get rooms/<app>/<uuid>`; the not-found
+     sentinel if the room is gone (re-checked inside the write boundary so
+     a concurrent expiry sweep cannot delete the room between the service's
+     `GetRoom` and this write).
+  2. **Per-room cap.** Scan `roomkv/<app>/<uuid>/`, materialize the
+     `RoomKV`, run the pure domain `CanPut` (byte total `<= MaxRoomBytes`,
+     key count `<= MaxRoomKeys`, value `<= MaxRoomValueBytes`); reject with
+     the room-data-full sentinel (413) on a fail, prior value intact.
+  3. **Per-app aggregate cap.** Charge only the byte DELTA (replacing a key
+     frees its old bytes). If `appCap > 0` and the delta is positive, sum
+     the app's room bytes and reject with the app-rooms-full sentinel (507)
+     if `total + delta` exceeds `appCap`.
+  4. **Service-wide cap.** If `serviceCap > 0` and the delta is positive,
+     sum service-wide active bytes (pastes + sites + rooms; see below) and
+     reject with the service-full sentinel if `total + delta` exceeds the
+     cap - so a room write participates in `--storage-cap-bytes` exactly as
+     a paste insert and a site deploy do.
+  5. **Upsert + touch.** `Put roomkv/<app>/<uuid>/<key>` (the new value),
+     then reset the retention clock: read the room record, delete the old
+     `roomexpiry/<oldExpiresAt>/...` index entry, write the record with
+     `UpdatedAt = now`, `ExpiresAt = now + RoomRetentionWindow`, and the new
+     `roomexpiry/<newExpiresAt>/...` entry (the same remove-and-re-add the
+     paste expiry index does on append).
+- **Delete (`DeleteValue`).** Re-check the room exists (not-found if gone),
+  `Delete roomkv/<app>/<uuid>/<key>` (idempotent: a missing key is a
+  no-op - the post-condition "the key is gone" holds either way), then
+  touch the room (a delete is a write, so it resets the clock + the expiry
+  index entry).
+- **Per-app room bytes / creation count.** The per-app aggregate sum is a
+  `ScanPrefix roomkv/<app-slug>/` filtered to non-expired rooms;
+  `CountRoomCreates` scans `roomcreate/<app-slug>/` (per-app) and
+  `roomcreate/.../<subnet>/` is not directly scannable as a flat prefix, so
+  the per-subnet count walks the `roomcreate/` family and matches the
+  `<subnet>` segment (the same way the slatedb `SubnetsForIdentity` walks
+  `keygate/`), counting rows whose fixed-width `<ts>` is within the window.
+
+#### Service-wide cap is SYMMETRIC: room bytes count both ways
+
+Room value bytes fold into `sumServiceWideActiveBytes` (the slatedb
+service-wide sum that already adds `pastes/* + versions/* + sites/*`), so
+the cap counts every stored content kind in BOTH directions:
+
+- a room PUT's service-wide pre-check sees the bytes pastes and sites
+  already hold, and
+- a paste upload's / site deploy's service-wide pre-check sees the bytes
+  rooms already hold (the room aggregate is added to the same sum the paste
+  insert and site deploy read).
+
+This is the exact symmetry the sites-on-slate P0 fix established for
+paste-vs-site, extended to the third kind: do NOT regress it to an
+asymmetry where one kind's writer ignores another kind's bytes. The sqlite
+`serviceWideActiveBytes` already sums pastes + sites + rooms; the slatedb
+sum gains the room term to match, and the `Rooms/ServiceCapCountsAll`
+conformance subtest pins all three directions.
+
+#### Expiry + sweep -> KV mapping; the fixed-width TTL timestamp
+
+- **`ExpiredRoomKeys(now)`.** Prefix-scan `roomexpiry/`; for each
+  `roomexpiry/<ts>/<app-slug>/<uuid>` key, compare the timestamp segment
+  and return the `RoomRef{app-slug, uuid}` when `ts <= now` (inclusive
+  boundary). The room expiry timestamp is a **FIXED-WIDTH** RFC3339 with a
+  zero-padded 9-digit nanosecond fraction (`expirySiteTimeFormat`,
+  `2006-01-02T15:04:05.000000000Z07:00`), the SAME format the site expiry
+  index uses, so a string compare on the key is byte order == time order
+  EXACTLY, including within a shared whole second. This is NOT
+  `time.RFC3339Nano`: that variable-width format drops trailing fractional
+  zeros (so `...00.5Z` sorts BEFORE `...00Z` because `.` < `Z`), which would
+  let a room be swept up to ~1s before its real `ExpiresAt`. The room
+  expiry index is new, with no prod data, so it adopts the fixed-width
+  format from the start - the same lesson the site expiry index learned, not
+  repeated here. The `roomcreate/<app-slug>/<subnet>/<ts>` rate-limit ledger
+  uses the SAME fixed-width `<ts>` so a windowed `ts >= cutoff` comparison
+  is a correct lexical compare too.
+- **`DeleteRoom(appSlug, id)`.** Read `rooms/<app>/<uuid>` for its
+  `ExpiresAt` (to clean up the matching `roomexpiry/` entry), then in one
+  transaction delete the room record, the `roomexpiry/<ExpiresAt>/<app>/
+  <uuid>` index entry, and EVERY `roomkv/<app>/<uuid>/` value (the slatedb
+  analogue of the sqlite FK cascade: enumerate the value subtree, delete
+  each in the tx). Idempotent: a missing room is a no-op. The sweep calls
+  this for each `RoomRef` `ExpiredRoomKeys` returns; the per-record count it
+  contributes keeps the sweep's abort-on-zero-refs blob-GC guard from
+  misfiring on a tick where only rooms expired (rooms hold no blobs, so they
+  never add to the keep-alive set, but a room expiry is still a "record
+  expired this tick").
+- **`PruneOldRoomCreates(cutoff)`.** Prefix-scan `roomcreate/`, delete every
+  marker whose `<ts>` is before `cutoff` (`now - RoomCreateWindow`). Past
+  the window a ledger row can never change a future rate-limit decision, so
+  the sweep drops it each tick to keep the family bounded - the same
+  discipline the key-gate prune (`DeleteFirstSeenOlderThan`) and the sqlite
+  `room_creates` prune use.
+
+#### Shale reuses the layout
+
+The shale backend reuses the slatedb room key names + JSON record schema
+(co-location is by `shaleShardKey`, not by renaming keys), joining the room
+families to the existing shard-family scheme so a room read or write is a
+single-shard operation. The room shard map:
+
+| Key family | Keys | Shard key |
+| --- | --- | --- |
+| Room record (per-app) | `rooms/<app-slug>/<uuid>` | `<app-slug>` |
+| Room value (per-app) | `roomkv/<app-slug>/<uuid>/<key>` | `<app-slug>` |
+| Room-create ledger (per-app) | `roomcreate/<app-slug>/<subnet>/<ts>` | `<app-slug>` |
+| Room expiry index (per-app) | `roomexpiry/<ts>/<app-slug>/<uuid>` | `<app-slug>` |
+
+All four families shard on `<app-slug>`, co-locating an app's rooms, all
+their values, its creation ledger, and its expiry entries on ONE shard -
+the same co-location discipline the `{slug}` / `{id}` / `{subnet}` families
+use, and the reason "load the whole room," "write one key," and "count this
+app's creations" are each single-shard operations rather than cross-shard
+fan-outs. The room-create and room-expiry families take their app slug from
+a non-leading segment, so `shaleShardKey` extracts it by family-aware
+parsing (the expiry key's app slug is its second-to-last segment, between
+the `<ts>` and the trailing `<uuid>`), exactly as it pulls the trailing
+slug out of `expiry/<date>/<slug>` today. The `room`-prefixed family names
+do not collide with the `pastes/` / `sites/` / `rooms`-vs-`roomkv`
+anchoring (the trailing-slash discipline in `shaleShardKey`:
+`roomkv/` is not `rooms/`).
+
+The strict-isolation, per-room-cap, and per-app-aggregate-cap properties
+carry over from the slatedb layout unchanged. The per-room and per-app caps
+are STRICT under concurrency on shale via the reservation-pattern CAS the
+paste + site counters use, applied to a per-app room-byte counter
+(`roombytes/<app-slug>`, the per-app analogue of `identity_bytes/<id>`):
+a room PUT reserves its byte delta on the `{app-slug}` shard's room-byte
+counter before the authoritative `{app-slug}` value write, so two concurrent
+writers cannot overshoot the per-app cap (`conformCaps
+.StrictQuotaUnderConcurrency = true`). Because all four room families share
+the one `{app-slug}` shard, a room create or write is already single-shard,
+so the value write + the counter update are one CAS and the reservation's
+authoritative-write step does not span shards the way a paste / site insert
+does - the room counter is simpler than the paste counter (no cross-shard
+reserve / confirm split needed). The service-wide cap sums version bytes +
+every site's `DedupedSize` + every app's room bytes (the shale
+`sumServiceWideActiveBytes` adds the room aggregate, paralleling the slatedb
+sum), so on the paste-insert, site-deploy, AND room-write paths each kind
+sees the others' bytes. Sweep-time expiry semantics
+(`ExpiryFreesQuotaAtReadTime = false`) carry over from the paste counter:
+a room's bytes leave the per-app counter when the sweep deletes the expired
+room, not at read time, the same fail-safe over-count direction.
+
+**Status: slatedb AND shale are both implemented + conformance-tested.**
+Prod runs the slatedb-direct backend, so the slatedb room impl is the
+load-bearing deliverable that lights up `/api/rooms` on prod; the shale room
+impl is the same layout co-located on the per-app shard. Both run the SAME
+conformance room subtests under the SAME factory the way sqlite, slatedb,
+and shale already do for pastes and sites, so each backend is a drop-in for
+the room-persistence tier by construction.
+
+#### Wiring: widen the metadata bundle's `Rooms` field
+
+`cmd/hostthisd/metadata.go` holds `Rooms` as the concrete
+`*storage.RoomKVRepo` (sqlite) type, which the slatedb / shale room repos
+cannot be assigned to. The field is widened to a `roomStore` interface (the
+`service.RoomRepo` write/read view plus the `service.SweepRooms` sweep view,
+the union the service + sweep layers consume), so any backend's room impl
+can be assigned - mirroring exactly how the `Sites` field was widened from
+`*storage.SiteRepo` to the `siteStore` interface. The bundle stays nil-safe:
+a backend that does not supply a room impl leaves the field nil and the
+`/api/rooms` surface stays disabled there, as before; once slatedb (and
+shale) supply a non-nil value, room persistence lights up on those backends,
+so the slatedb-direct prod deploy serves `/api/rooms`.
+
+#### Conformance
+
+The backend-agnostic conformance suite is extended with room operations so
+sqlite, slatedb, and shale are pinned to behave IDENTICALLY for rooms, the
+same way they are pinned for pastes and sites. The room contract the suite
+asserts (each subtest must FAIL on intentionally-weakened code, the TDD
+gate):
+
+- **Round-trip.** Create a room, PUT values under several keys, GET each
+  back byte-identically, SCAN the whole namespace and observe every pair.
+- **Cross-room + cross-app ISOLATION.** A second room's UUID (and an
+  identical-UUID-shaped string under a second app) cannot read, write, or
+  scan the first room's data; a scan is bounded to exactly one room's
+  subtree. This subtest must FAIL if the namespacing is weakened (a key
+  builder that dropped the app or room segment, a scan whose prefix was
+  broadened).
+- **Nonexistent-room 404.** A per-key GET / PUT / DELETE on a well-formed
+  but nonexistent room returns the not-found sentinel - the same shape as a
+  missing key in a real room (no per-key existence leak).
+- **Per-room cap.** A PUT that would push the room past `MaxRoomBytes` or
+  `MaxRoomKeys` is rejected, prior value intact.
+- **Service-wide cross-kind cap.** Room bytes fill the service cap a paste
+  / site then sees, and paste / site bytes fill the cap a room PUT then
+  sees - the symmetric `Rooms/ServiceCapCountsAll` directions.
+- **Creation rate limit.** The per-subnet and per-app in-window counts the
+  service gates on are accurate after N creations, and a windowed prune
+  drops past-window ledger rows.
+- **App-existence 404.** (Pinned at the HTTP layer, where the existence
+  gate lives - the room repo itself is not app-existence-gated, the same
+  way the paste repo is not owner-gated; the repo-level conformance pins
+  that room creation under any slug succeeds, and the HTTP-layer test pins
+  the 404 for a slug that names no live app.)
+- **TTL / sweep.** `ExpiredRoomKeys` returns rooms whose `ExpiresAt <= now`
+  (inclusive boundary, correct sub-second ordering via the fixed-width
+  timestamp), `DeleteRoom` removes the room and cascades to its values, and
+  the sweep reclaims them.
+
+A backend that passes the extended suite is a drop-in for the
+room-persistence tier by construction.
 
 ---
 
