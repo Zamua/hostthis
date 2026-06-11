@@ -15,9 +15,32 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
+// liveAppSiteReader is a test SiteReader that treats EVERY parseable slug
+// as a live (non-expired) site. It stands in for "the operator has
+// provisioned an app at this slug," which is the precondition room
+// creation now requires (see createRoom's appExists gate). Tests that
+// exercise room behavior under a provisioned app wire this so the slug
+// they POST under resolves to a live app; the unknown-app 404 path has
+// its own dedicated test that does NOT wire it.
+type liveAppSiteReader struct{}
+
+func (liveAppSiteReader) Get(slug domain.Slug) (domain.Site, error) {
+	now := time.Now().UTC()
+	return domain.Site{
+		Slug:      slug,
+		Identity:  "key:test",
+		Manifest:  domain.NewManifest(),
+		CreatedAt: now,
+		UpdatedAt: now,
+		ExpiresAt: now.Add(domain.RetentionWindow),
+	}, nil
+}
+
 // buildRoomServer wires a Server with the real Rooms service over a real
 // sqlite repo, in subdomain mode. End-to-end: a request through the mux
-// hits the service hits the storage layer.
+// hits the service hits the storage layer. A liveAppSiteReader is wired so
+// any slug the test creates rooms under resolves to a live app (the
+// existence precondition room creation requires).
 func buildRoomServer(t *testing.T) *Server {
 	t.Helper()
 	dir := t.TempDir()
@@ -30,6 +53,7 @@ func buildRoomServer(t *testing.T) *Server {
 	return &Server{
 		ApexDomain: "hostthis.test",
 		Rooms:      rooms,
+		Sites:      liveAppSiteReader{},
 	}
 }
 

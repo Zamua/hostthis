@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -62,10 +63,11 @@ func roomAPIPath(reqPath string) (rest string, ok bool) {
 // request; the caller must then return.
 //
 // The router calls this BEFORE the static-site lookup so the API prefix
-// is never shadowed by a manifest file. A request whose app slug owns no
-// site still gets the rooms API (a paste-only slug can host rooms too,
-// though the spec notes a slug with no app has nothing to host under -
-// the create path simply records rooms keyed by that slug).
+// is never shadowed by a manifest file. A request whose app slug owns a
+// site OR a live paste gets the rooms API (both are valid apps); room
+// CREATION additionally requires the slug to name a live app (see
+// createRoom's existence gate) so an unprovisioned slug 404s rather than
+// minting a fresh per-app budget.
 func (s *Server) handleRoomsAPI(w http.ResponseWriter, r *http.Request, appSlug domain.Slug, apiPath string) bool {
 	if s.Rooms == nil {
 		// Rooms not wired on this backend: 404 the whole prefix.
@@ -128,6 +130,17 @@ func (s *Server) handleRoomsAPI(w http.ResponseWriter, r *http.Request, appSlug 
 }
 
 func (s *Server) createRoom(w http.ResponseWriter, r *http.Request, appSlug domain.Slug) {
+	// The slug must name a LIVE app (a non-expired site or paste) before a
+	// room can be created under it. Without this, any well-formed 8-char
+	// slug (~10^12 of them) could host rooms, each getting its own
+	// per-app creation + byte budget - so an attacker rotating slugs would
+	// defeat both per-app caps. Tying creation to an operator-provisioned
+	// app bounds the per-app caps to a finite set. An unknown slug 404s,
+	// the same existence-not-leaked shape a missing room gets.
+	if !s.appExists(appSlug) {
+		http.NotFound(w, r)
+		return
+	}
 	subnet := clientSubnet(r)
 	room, err := s.Rooms.Create(appSlug, subnet)
 	if err != nil {
@@ -139,6 +152,27 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request, appSlug doma
 	_ = json.NewEncoder(w).Encode(struct {
 		ID string `json:"id"`
 	}{ID: room.ID.String()})
+}
+
+// appExists reports whether appSlug names a LIVE (non-expired) site or
+// paste - the existence requirement room creation rides on. A read error
+// or a not-found from either reader is "no such app." An expired site /
+// paste is treated as gone (the same line the read handlers draw). When
+// neither reader is wired, no app can be resolved, so creation is refused
+// (404) rather than allowed unbounded.
+func (s *Server) appExists(appSlug domain.Slug) bool {
+	now := s.nowOrTime()
+	if s.Sites != nil {
+		if site, err := s.Sites.Get(appSlug); err == nil && now.Before(site.ExpiresAt) {
+			return true
+		}
+	}
+	if s.Pastes != nil {
+		if paste, err := s.Pastes.Get(appSlug); err == nil && now.Before(paste.ExpiresAt) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) scanRoom(w http.ResponseWriter, r *http.Request, appSlug domain.Slug, id domain.RoomID) {
@@ -245,19 +279,44 @@ func roomMethodNotAllowed(w http.ResponseWriter, allowed ...string) {
 	http.Error(w, "method not allowed\n", http.StatusMethodNotAllowed)
 }
 
+// trustXFFEnv reports whether the operator has opted into trusting the
+// X-Forwarded-For header for client-IP derivation. Read fresh from the
+// environment so tests can flip it per-case via t.Setenv. Mirrors the SSH
+// side's HOSTTHIS_SSH_PROXY_PROTOCOL discipline: a client-supplied header
+// is NEVER trusted by default, only when an operator behind a reverse
+// proxy explicitly enables it.
+func trustXFFEnv() bool {
+	return strings.EqualFold(os.Getenv("HOSTTHIS_HTTP_TRUST_XFF"), "true")
+}
+
 // clientSubnet derives the canonical /24 (IPv4) or /48 (IPv6) subnet of
-// the requester, mirroring the shape the SSH Sybil gate uses. It honors
-// a single X-Forwarded-For hop (the reverse proxy in front of hostthis)
-// when present, else the raw RemoteAddr. An unparseable address becomes
-// the stable "unknown" bucket rather than crashing.
+// the requester for the per-IP room-creation rate limit, mirroring the
+// shape the SSH Sybil gate uses.
+//
+// By DEFAULT the address comes from the TCP RemoteAddr only - a
+// client-supplied X-Forwarded-For is ignored. Trusting XFF by default
+// would be a rate-limit bypass: an attacker could set a fresh
+// X-Forwarded-For per POST and land in a new per-IP bucket each time,
+// exactly the inconsistency the SSH Sybil gate avoids by using only the
+// real RemoteAddr (or an env-gated PROXY-protocol header).
+//
+// When the operator sets HOSTTHIS_HTTP_TRUST_XFF=true (because hostthis
+// sits behind a reverse proxy that appends the real client IP), the
+// RIGHT-MOST X-Forwarded-For value is used - the hop the trusted proxy
+// itself recorded, which the client cannot forge past the proxy - not the
+// left-most value, which is fully attacker-controlled. An unparseable
+// address becomes the stable "unknown" bucket rather than crashing.
 func clientSubnet(r *http.Request) string {
 	host := ""
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the FIRST hop (the original client) per convention.
-		if i := strings.IndexByte(xff, ','); i >= 0 {
-			host = strings.TrimSpace(xff[:i])
-		} else {
-			host = strings.TrimSpace(xff)
+	if trustXFFEnv() {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// Take the RIGHT-MOST hop: behind a trusted proxy, the proxy
+			// appends the real client IP as the last entry, so the right-most
+			// value is the proxy's own view of the client. The left-most
+			// entries are whatever the client chose to send and must not be
+			// trusted.
+			parts := strings.Split(xff, ",")
+			host = strings.TrimSpace(parts[len(parts)-1])
 		}
 	}
 	if host == "" {
