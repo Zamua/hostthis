@@ -420,6 +420,271 @@ Nothing about the product opinions changes for sites:
   is written and the manifest is persisted; a half-uploaded site never
   serves.
 
+## Rooms (app persistence)
+
+Static sites can SHIP, but a static site has no backend: it can render,
+not remember. **Rooms** add the missing piece - a small persistence tier
+so a deployed static-site app can store and load state without an account
+system and without any server-side app code. This is the first real cut
+of the "A persistence API" bullet under "Future directions"; that bullet
+called for a per-app KV store fronted by a thin HTTP layer over shale,
+and this section makes the no-auth, capability-based form of it real.
+
+The deliberately-scoped commitment for this tier: **a key-value store
+keyed by an unguessable room UUID, with strict per-room isolation, served
+under the deployed app's own subdomain.** No accounts, no JWT, no
+WebSockets - those are later tiers (see "Scope fence" below). What ships
+is enough to build a collaborative app with no signup: a when2meet, a
+shared list, a poll, a retro board.
+
+### The model: an app, a room, a namespace
+
+Three nouns, in a strict containment hierarchy:
+
+- An **app** is a deployed static site (the "Static site archives"
+  feature above). It is identified by its **site slug** - the same 8-char
+  slug the site is served at - so `<slug>.hostthis.dev` is both where the
+  app's files live and where its rooms API is served. An app's identity is
+  the site slug; there is no second registration step.
+- A **room** is a `(app, UUIDv4, KV namespace)` triple created under an
+  app. The UUIDv4 is minted server-side on creation and is the room's
+  **capability**: holding it grants full read / write / delete to that
+  room's data, and nothing else grants it. UUIDv4 is 122 bits of
+  randomness, computationally infeasible to guess, so a room is private to
+  whoever has the link - exactly the same "the identifier IS the secret"
+  property the 8-char paste slug already relies on, scaled up to a UUID
+  because room URLs are shared more widely and held longer than a paste
+  link.
+- A **namespace** is the room's flat key-value space. A value is a small
+  opaque blob (JSON or bytes the app chose); a key is an app-chosen
+  string. hostthis never parses the value - it is app STATE, stored and
+  returned verbatim.
+
+There is no login, no password, no per-user account anywhere in this
+tier. Possession of the room UUID is the whole access model.
+
+### Strict room isolation (the security property)
+
+Every value is namespaced by the triple `(app-slug, room-uuid, key)`. The
+isolation guarantees that fall out of that key shape:
+
+- **Cross-room**: one room's UUID can never read or write another room's
+  data, even within the same app. The UUID is part of the key, so a
+  request carrying room A's UUID can only ever address keys under room A.
+- **Cross-app**: one app's rooms are separate from another app's. The app
+  slug is the outermost key segment, so even an identical room-UUID-shaped
+  string under a different app addresses a different keyspace. (Room UUIDs
+  are unique in practice, but the app segment makes the isolation
+  structural, not probabilistic.)
+- **Existence is not leaked**: a request to a *well-formed-but-nonexistent*
+  room UUID returns **404**, the same shape as a request for a missing
+  key, so an attacker cannot probe whether a given UUID names a real room.
+  This mirrors the paste / site rule where a cross-owner read surfaces as
+  not-found rather than forbidden.
+
+This is the same posture as the rest of hostthis: an unguessable
+identifier is the capability, and the storage layer enforces the namespace
+boundary so a forged or guessed identifier addresses nothing.
+
+### In-room identity is the APP's concern, not hostthis's
+
+hostthis does **not** authenticate participants in a room. There is no
+notion of "user A" versus "user B" at the storage layer - only "whoever
+holds the room UUID." If an app wants participant names (a when2meet needs
+to label availability by person; a retro board needs to attribute cards),
+the app stores those names AS room data: a `participants` key, or
+per-participant keys like `participant/<browser-id>`. The browser
+generates or types the name, keeps it in `localStorage`, and writes it
+into the room like any other value.
+
+This is **cosmetic attribution, not access control**. Anyone with the room
+UUID can write under any participant key, so the names are a display
+convenience, not an identity boundary. That is the correct trade for this
+tier: the room UUID is the access boundary, and finer-grained per-user
+access control (one participant cannot overwrite another's record) is the
+job of the LATER auth tier (see "Scope fence"), which adds verifiable
+end-user identity on top. Until then, a room is a shared space where the
+link is the key, exactly like a shared Google Doc link.
+
+### The HTTP API
+
+Rooms are served by the same HTTP surface that serves pastes and sites,
+under the app's own subdomain (`<app-slug>.hostthis.dev`), at the
+reserved `/api/rooms` path prefix. Because the app and its API share an
+origin, the app's own JavaScript can call the API with same-origin fetch
+and no CORS dance. The `/api/` prefix is carved out of the site's path
+space: a site's manifest lookup never serves a file at `/api/rooms/...`,
+so the API path and the static-file path do not collide. (In dev path
+mode the same routes live under `<apex>/p/<app-slug>/api/rooms/...`.)
+
+```
+POST   /api/rooms                  mint a UUIDv4, create the room, return { "id": "<uuid>" }
+GET    /api/rooms/<uuid>           list/scan every key+value pair in the room (load full state on join)
+GET    /api/rooms/<uuid>/<key>     read one value (404 if absent)
+PUT    /api/rooms/<uuid>/<key>     write one value (request body is the value)
+DELETE /api/rooms/<uuid>/<key>     delete one value
+```
+
+Behavior, endpoint by endpoint:
+
+- **POST /api/rooms** generates a fresh UUIDv4, creates an empty room
+  under the requesting app slug, and returns `{"id": "<uuid>"}` (HTTP
+  201). The app stores that id (in the URL hash, in `localStorage`, in a
+  share link) and uses it for every subsequent call. Creation is subject
+  to the room-creation rate limit (see "Quota and abuse").
+- **GET /api/rooms/<uuid>** scans and returns every key+value pair in the
+  room as a single JSON object, so an app loads the full room state in one
+  request on join. A well-formed UUID that names no room returns **404**.
+- **GET /api/rooms/<uuid>/<key>** returns the stored value verbatim with a
+  conservative content type (`application/octet-stream` unless the app
+  stored a recognizable JSON value, which is served `application/json`). A
+  missing key returns **404**; a missing room returns the same **404**.
+- **PUT /api/rooms/<uuid>/<key>** writes the request body as the value for
+  `<key>`, creating or overwriting. Subject to the per-room data cap (see
+  "Quota and abuse"); a write that would push the room over the cap is
+  rejected (HTTP 413) and the prior value is left intact. A successful
+  write resets the room's retention clock (see "Retention").
+- **DELETE /api/rooms/<uuid>/<key>** removes the value. Idempotent:
+  deleting an absent key is a success (the post-condition - "the key is
+  gone" - holds either way). A delete also resets the retention clock,
+  since it is a write to the room.
+
+A malformed UUID (not a parseable UUIDv4) is a **400**, distinct from the
+**404** a well-formed-but-nonexistent room gets: a 400 says "this is not a
+room id at all," a 404 says "no room here," and neither confirms the
+existence of any specific room.
+
+### Storage: a room-namespaced KV over the metadata backend
+
+Room data is small JSON/bytes blobs - app STATE, not files - so it lives
+in the **metadata backend** hostthis already runs (the configurable
+metadata store: sqlite for single-host, slatedb / shale for the
+object-store-backed and horizontally-scaled deploys), NOT in the
+content-addressed BlobStore. The BlobStore is for the larger,
+dedupe-worthy file bytes of pastes and sites; room values are small,
+mutable, and per-room, so they belong with the metadata. Large blobs are
+explicitly out of scope for rooms - an app that needs to host files uses
+the archive/site feature, not a room value.
+
+The implementation follows the existing repo-behind-a-service-interface
+pattern exactly the way the paste repo and the shale `ShaleRepo` do:
+
+- A new domain aggregate, **`Room`** (slug-of-the-owning-app + room id +
+  the key-value namespace as a value object), lives in `internal/domain`
+  alongside `Paste` and `Site` and imports nothing from infrastructure.
+  The namespace is a pure value object: putting, getting, deleting, and
+  scanning keys, plus computing the room's total byte size and key count
+  for the cap check, are all I/O-free domain operations.
+- A new **`RoomKV`** repo in `internal/storage` persists rooms with
+  namespaced keys and is queried by `(app-slug, room-uuid)`, behind a
+  small service-layer interface (a `RoomRepo` declared in
+  `internal/service`, the same way `PasteRepo` / `PasteAdmin` /
+  `SweepRepo` / `KeyGateRepo` are). The metadata backends implement it;
+  the domain, HTTP, and SSH layers stay unaware of which backend is wired.
+- Under the **shale** backend the room keys join the existing shard-family
+  scheme as a fourth, per-app family so a room read or write is a
+  single-shard operation. The new key shape and its shard key:
+
+  ```
+  rooms/<app-slug>/<room-uuid>          room record (created_at, updated_at, expires_at)
+  room_kv/<app-slug>/<room-uuid>/<key>  one stored value
+  ```
+
+  Both shard on `<app-slug>` (the first segment after the family prefix),
+  co-locating an app's rooms and all their values on one shard, the same
+  co-location discipline the `{slug}` / `{id}` / `{subnet}` families use.
+  This keeps "load the whole room" and "write one key" single-shard CAS
+  operations rather than cross-shard fan-outs. The single-writer backends
+  (sqlite, slatedb) store the same logical rows in their own tables /
+  key-prefixes; the observable contract is identical across backends, the
+  way it is for the paste families.
+
+### Quota and abuse
+
+A writable, no-auth, public API needs the abuse surface bounded as
+deliberately as the paste upload path is. Four controls, each with a
+concrete default flagged as a starting point (tunable as real usage
+informs them):
+
+- **Room-creation rate limit.** `POST /api/rooms` is gated per source IP
+  AND per app: **default 60 rooms per IP per hour** and **default 300
+  rooms per app per hour**, so a script cannot spam rooms into existence.
+  The per-IP gate reuses the subnet-derivation the SSH Sybil gate already
+  computes (`/24` for IPv4, `/48` for IPv6); the per-app gate bounds a
+  single popular app's blast radius. Over the limit returns **429** with a
+  `Retry-After`. (The HTTP read/write verbs - GET / PUT / DELETE on an
+  existing room - are NOT room-creation and ride the per-room data cap
+  below rather than this gate; a reverse-proxy per-IP request limit is the
+  right layer for raw request-rate abuse, the same division of labor the
+  paste threat model already documents.)
+- **Per-room data cap.** A single room cannot store unbounded data:
+  **default 256 KiB total value bytes** and **default 256 keys** per room.
+  A `PUT` that would push the room past either cap is rejected (**413**)
+  and the prior state is unchanged. The cap is sized for app STATE
+  (a poll's votes, a retro board's cards, a when2meet's availability grid)
+  - generous for those, tight enough that a room cannot be turned into a
+  free file host.
+- **Per-app aggregate.** A popular app's rooms in aggregate are bounded by
+  **default 64 MiB of room data per app** (and the room-creation rate
+  limit caps the growth rate). Past the per-app aggregate, new room
+  creation and new writes for that app return **507** until rooms expire
+  and free space. This is the room-tier analogue of the per-identity paste
+  quota: it stops one app from consuming the whole service. It is flagged
+  as a starting default - an operator running many apps may want it lower,
+  a single-app operator higher.
+- **Service-wide consideration.** Room data counts toward the same
+  service-wide storage posture pastes and sites do; an operator who has
+  set `--storage-cap-bytes` sees room bytes contribute to it. Rooms add a
+  new writable surface, so this is flagged explicitly: the per-app
+  aggregate is the primary structural bound, the service-wide cap is the
+  backstop, and a reverse-proxy per-IP rate limit remains the appropriate
+  layer for raw request-rate abuse, exactly as for the paste path.
+
+### Retention
+
+Rooms are ephemeral, consistent with hostthis's whole ethos. **A room
+expires after a fixed window of inactivity: default 30 days since its last
+write** (a `PUT` or `DELETE`; a read does not extend it). On expiry the
+room record and every value in its namespace are deleted by the **same
+periodic sweep** that expires pastes and sites - one more record kind the
+sweep walks, GC'd through the existing expiry-index machinery. The TTL is
+longer than the 7-day paste window on purpose: a paste is "share this link
+this week," but a room backs a live app whose participants may return over
+several weeks (a poll open for a month, a retro board a team revisits).
+Still finite, still no user-facing knob, still swept automatically - the
+default is flagged as a starting point, not a contract, and like the paste
+window it is a product opinion, not an operator config.
+
+### Scope fence
+
+This tier is **KV persistence only**. Three things are explicitly NOT in
+it, each a later tier with its own design:
+
+- **NO WebSocket / real-time.** Rooms are request/response KV. Live
+  multiplayer (a room broadcast relay that pushes one participant's write
+  to the others) is the next tier and its own project; it is not built
+  here. An app that wants near-real-time today polls `GET /api/rooms/<uuid>`.
+- **NO per-user auth / JWT / "Sign in with hostthis."** The room UUID IS
+  the access capability; there are no accounts, no roles, no token
+  verification in this tier. The "A persistence API" future-directions
+  bullet describes a richer end-user identity spectrum (capability token,
+  browser keypair, JWT-verifying resource server with a turnkey-or-BYO
+  issuer) that lets an app enforce `request.user == resource.owner`
+  rules - that is a deliberately-separate LATER tier layered on top of
+  this one, not a prerequisite for it. Rooms ship the no-auth, capability
+  form first because it unlocks real apps with zero account machinery.
+- **NO server-side app functions.** hostthis stores what the room writes;
+  it never runs app logic. This is not a FaaS, and the data-integrity
+  problem ("is this score real?") stays unsolvable client-side, exactly as
+  the future-directions bullet notes - an app either accepts that
+  (fine for a casual leaderboard or a shared list) or is not a fit.
+
+Rooms are **additive**: they introduce no change to the paste or the
+site/archive read-and-write behavior. A slug that owns a site keeps
+serving its files; the `/api/rooms` prefix is the only new surface on that
+subdomain, and a paste-only slug (no site) simply has no app to host rooms
+under.
+
 ## Retention
 
 **Every paste lives for 7 days from its last update**, then it's
@@ -2129,11 +2394,14 @@ ceiling is much higher.
 These are bigger bets that would grow hostthis from "host a renderable file
 for 7 days" toward "deploy a small real app over SSH, no account." The first
 of them (static directory hosting) has SHIPPED - see "Static site archives"
-above; the persistence API remains a PROPOSAL. Each deliberately revisits
-some of the v1 Non-goals below (a scope expansion, not an accident). The
-throughline: shale (the distributed K-V) is the persistence layer for both,
-and the differentiator across both is the SSH-native, no-account,
-your-key-is-your-identity model.
+above. The persistence API has now shipped its FIRST CUT too - the no-auth,
+capability-based **Rooms** KV store - see "Rooms (app persistence)" above;
+what remains a PROPOSAL here is the richer end-user AUTH model layered on
+top of rooms (the JWT-verifying / browser-keypair identity spectrum below).
+Each deliberately revisits some of the v1 Non-goals below (a scope
+expansion, not an accident). The throughline: shale (the distributed K-V)
+is the persistence layer for both, and the differentiator across both is
+the SSH-native, no-account, your-key-is-your-identity model.
 
 ### Static directory hosting (serve a whole site)
 
@@ -2162,11 +2430,24 @@ is still renderable content, just multi-file).
 Pair static hosting with a small backend so users host REAL apps, not just
 static pages. The engine already exists: shale.
 
+**The no-auth first cut of this has SHIPPED as Rooms - see "Rooms (app
+persistence)" above.** That section is the authoritative description of the
+shipped shape: a per-app KV store keyed by an unguessable room UUID
+(`<app>.hostthis.dev/api/rooms/<uuid>/<key>`, GET/PUT/DELETE), with strict
+per-room isolation, no accounts, persisted over the metadata backend. The
+bullets below are the REMAINING proposal - the richer end-user AUTH model
+that would layer verifiable identity on top of rooms (so an app can enforce
+"user A cannot overwrite user B's record," which the capability-only Rooms
+tier deliberately does not). The shape and trust model here describe that
+later tier; the Rooms section is what is real today.
+
 - **Shape**: a per-app KV / document store. An app gets a namespace (a key
   prefix) in shale; its frontend hits `<app>.hostthis.dev/api/kv/<key>`
   (GET/PUT/DELETE), persisted in shale. A thin HTTP layer over the K-V. No
   server-side functions and no reactive subscriptions: running arbitrary
   user code is a sandboxing + security cliff, so this is NOT a FaaS.
+  (The shipped Rooms tier is this shape with the room UUID as the access
+  capability; the auth model below is what it gains next.)
 - **The trust model (the thing that actually matters).** You cannot trust
   the client: any value the browser sends can be forged (edit the JS, or
   curl the API directly). Two DIFFERENT problems fall out, with different
@@ -2232,12 +2513,14 @@ comments, but the persistence API lets a USER build them.
   paths instead of 404); custom subdomains. Deploy atomicity and the
   per-identity (rather than per-site) quota are already settled - see
   "Static site archives".
-- Persistence: the rule model (identity + ownership constraints evaluated
-  server-side); the JWT-verifying resource-server design + the turnkey-vs-BYO
-  issuer config + the browser-keypair signature path; per-app namespacing;
-  rate-limiting + abuse on a writable public API; quota accounting for app
-  data vs paste data; who pays for a turnkey "Sign in with hostthis" tier
-  (the ecosystem-vs-host product call).
+- Persistence: the no-auth Rooms tier has SHIPPED (see "Rooms (app
+  persistence)"), which settles per-app namespacing, rate-limiting + abuse
+  on the writable public API, and quota accounting for app data vs paste
+  data. What remains open is the AUTH tier on top of it: the rule model
+  (identity + ownership constraints evaluated server-side); the
+  JWT-verifying resource-server design + the turnkey-vs-BYO issuer config +
+  the browser-keypair signature path; and who pays for a turnkey "Sign in
+  with hostthis" tier (the ecosystem-vs-host product call).
 
 ---
 
