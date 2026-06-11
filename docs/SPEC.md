@@ -575,15 +575,27 @@ pattern exactly the way the paste repo and the shale `ShaleRepo` do:
   The namespace is a pure value object: putting, getting, deleting, and
   scanning keys, plus computing the room's total byte size and key count
   for the cap check, are all I/O-free domain operations.
-- A new **`RoomKV`** repo in `internal/storage` persists rooms with
+- A new **`RoomKVRepo`** in `internal/storage` persists rooms with
   namespaced keys and is queried by `(app-slug, room-uuid)`, behind a
   small service-layer interface (a `RoomRepo` declared in
   `internal/service`, the same way `PasteRepo` / `PasteAdmin` /
-  `SweepRepo` / `KeyGateRepo` are). The metadata backends implement it;
-  the domain, HTTP, and SSH layers stay unaware of which backend is wired.
-- Under the **shale** backend the room keys join the existing shard-family
-  scheme as a fourth, per-app family so a room read or write is a
-  single-shard operation. The new key shape and its shard key:
+  `SweepRepo` / `KeyGateRepo` are). The **sqlite** backend implements it
+  today; the domain, HTTP, and service layers stay unaware of which
+  backend is wired. This mirrors the static-site repo exactly: rooms ship
+  on the single-host sqlite metadata backend first, and the
+  object-store-backed backends (slatedb / shale) leave the room repo nil -
+  on those, the `/api/rooms` surface is simply not served - until the
+  shale-backed implementation lands.
+- The sqlite backend stores rooms in two tables, `rooms`
+  (`(app_slug, room_id)` primary key + the retention clock) and `room_kv`
+  (`(app_slug, room_id, key)` primary key + the opaque value, FK-cascade
+  on the room), plus a bounded `room_creates` table for the creation rate
+  limit. Every read and write is scoped by the `(app_slug, room_id)` pair,
+  so the namespace boundary is enforced by the key, not by a filter a
+  caller could forget.
+- The forward design for the **shale** backend: the room keys join the
+  existing shard-family scheme as a fourth, per-app family so a room read
+  or write is a single-shard operation. The key shape and its shard key:
 
   ```
   rooms/<app-slug>/<room-uuid>          room record (created_at, updated_at, expires_at)
@@ -595,9 +607,10 @@ pattern exactly the way the paste repo and the shale `ShaleRepo` do:
   co-location discipline the `{slug}` / `{id}` / `{subnet}` families use.
   This keeps "load the whole room" and "write one key" single-shard CAS
   operations rather than cross-shard fan-outs. The single-writer backends
-  (sqlite, slatedb) store the same logical rows in their own tables /
-  key-prefixes; the observable contract is identical across backends, the
-  way it is for the paste families.
+  store the same logical rows; the observable contract is identical across
+  backends, the way it is for the paste families. This shape is the
+  documented target for the shale port, not yet wired - exactly the
+  staging the static-site feature followed.
 
 ### Quota and abuse
 

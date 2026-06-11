@@ -40,7 +40,8 @@ type BlobReader interface {
 // Server bundles the dependencies.
 type Server struct {
 	Pastes      PasteReader
-	Sites       SiteReader // optional; nil disables static-site serving
+	Sites       SiteReader  // optional; nil disables static-site serving
+	Rooms       RoomService // optional; nil disables the /api/rooms surface
 	Blobs       BlobReader
 	LandingHTML []byte // optional - apex landing page bytes embedded at build
 	ApexDomain  string // e.g. "hostthis.dev" - used to peel slug subdomains
@@ -82,6 +83,14 @@ func (s *Server) Handler() http.Handler {
 		// browser's automatic favicon fetch doesn't get the full paste
 		// HTML labeled text/html and hang the loading indicator).
 		if slug, ok := s.slugFromHost(r.Host); ok {
+			// The /api/rooms surface is carved out of the site's path space
+			// and handled BEFORE the static-file lookup, so a manifest file
+			// can never shadow the API (and the API is served even for a
+			// paste-only slug that owns no site).
+			if rest, ok := roomAPIPath(r.URL.Path); ok {
+				s.handleRoomsAPI(w, r, slug, rest)
+				return
+			}
 			if s.serveSiteIfExists(w, r, slug, r.URL.Path) {
 				return
 			}
@@ -108,6 +117,13 @@ func (s *Server) Handler() http.Handler {
 			slug, err := domain.ParseSlug(slugStr)
 			if err != nil {
 				http.NotFound(w, r)
+				return
+			}
+			// Dev path mode mirrors the subdomain carve-out: the rooms API
+			// lives under /p/<slug>/api/rooms/... and is handled before the
+			// static-file lookup so a manifest file never shadows it.
+			if rest, ok := roomAPIPath(sitePath); ok {
+				s.handleRoomsAPI(w, r, slug, rest)
 				return
 			}
 			if s.serveSiteIfExists(w, r, slug, sitePath) {
