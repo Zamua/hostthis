@@ -74,6 +74,16 @@ func (r *PasteRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 			return ErrOverUserQuota
 		}
 	}
+	// A slug must be unique across sites too (a read resolves a slug in
+	// either table). The SiteRepo already checks the pastes table on insert;
+	// mirror it here so a paste cannot take a slug a site owns.
+	var siteExists int
+	if err := tx.QueryRow(`SELECT COUNT(1) FROM sites WHERE slug = ?`, p.Slug.String()).Scan(&siteExists); err != nil {
+		return fmt.Errorf("check site slug collision: %w", err)
+	}
+	if siteExists > 0 {
+		return ErrSlugTaken
+	}
 	// 3. Insert.
 	if _, err := tx.Exec(`
 		INSERT INTO pastes (slug, identity, kind, content_sha, size, name,

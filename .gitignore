@@ -25,3 +25,6 @@ go.work.sum
 # prebuilt amd64 slatedb lib (operator build workaround, never committed)
 libslatedb_uniffi.so
 Dockerfile.slatedb.local
+
+# built binary
+/hostthisd

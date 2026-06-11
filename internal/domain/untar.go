@@ -84,6 +84,7 @@ func SafeUntar(src io.Reader, sink FileSink, quotaBudget int64) (Manifest, error
 	tr := tar.NewReader(gz)
 	var running int64
 	var fileCount int
+	var entries int
 
 	for {
 		hdr, err := tr.Next()
@@ -92,6 +93,16 @@ func SafeUntar(src io.Reader, sink FileSink, quotaBudget int64) (Manifest, error
 		}
 		if err != nil {
 			return Manifest{}, fmt.Errorf("%w: corrupt tar: %v", ErrUnsupportedKind, err)
+		}
+
+		// Bound the TOTAL entries iterated, not just regular files: a
+		// directory entry (TypeDir) and an entry whose path cleans to ""
+		// both `continue` before the file-count check below, so counting
+		// only files would let a million-directories archive run the loop
+		// unbounded. Cap every header read.
+		entries++
+		if entries > MaxSiteFiles {
+			return Manifest{}, fmt.Errorf("%w: more than %d archive entries", ErrTooManyFiles, MaxSiteFiles)
 		}
 
 		// 1. Type safety: only regular files and directories are allowed.
