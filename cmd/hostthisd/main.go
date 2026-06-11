@@ -65,6 +65,7 @@ func main() {
 	}
 
 	siteRepo := metadata.Sites
+	roomRepo := metadata.Rooms
 
 	uploadSvc := service.NewUpload(pasteRepo, blobs)
 	uploadSvc.ServiceCapBytes = *storageCap
@@ -78,6 +79,14 @@ func main() {
 	if siteRepo != nil {
 		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobs)
 		deploySvc.ServiceCapBytes = *storageCap
+	}
+
+	// Rooms: the no-auth, capability-based app-persistence tier
+	// (POST/GET/PUT/DELETE under /api/rooms on an app subdomain). Reuses
+	// the same metadata backend; nil-safe if the backend has no room repo.
+	var roomsSvc *service.Rooms
+	if roomRepo != nil {
+		roomsSvc = service.NewRooms(roomRepo)
 	}
 
 	// CDN cache purger. Default is noop (no CDN in front); when CF is
@@ -94,6 +103,11 @@ func main() {
 	if siteRepo != nil {
 		// Wire site expiry + site-blob GC protection into the sweep.
 		sweepSvc.Sites = siteRepo
+	}
+	if roomRepo != nil {
+		// Wire room expiry (30-day inactivity TTL) + the room-create
+		// rate-limit prune into the sweep.
+		sweepSvc.Rooms = roomRepo
 	}
 
 	// HOSTTHIS_SWEEP_DISABLED=true skips the periodic sweep entirely
@@ -148,6 +162,9 @@ func main() {
 	}
 	if siteRepo != nil {
 		httpServer.Sites = siteRepo
+	}
+	if roomsSvc != nil {
+		httpServer.Rooms = roomsSvc
 	}
 	httpSrv := &http.Server{
 		Addr:    *httpAddr,

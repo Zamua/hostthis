@@ -31,6 +31,12 @@ type metadataBundle struct {
 	// today; the slatedb / shale backends leave it nil and static-site
 	// archive uploads are disabled there. nil-safe throughout.
 	Sites *storage.SiteRepo
+	// Rooms is the room-KV repo (the no-auth app-persistence tier). Only
+	// the sqlite backend supplies it today; the slatedb / shale backends
+	// leave it nil and the /api/rooms surface is disabled there. The spec
+	// documents the shale shard-family shape for a future shale-backed
+	// implementation. nil-safe throughout.
+	Rooms *storage.RoomKVRepo
 	Close func() error
 }
 
@@ -78,6 +84,7 @@ func buildMetadataSqlite(dataDir string, logger *log.Logger) (*metadataBundle, e
 		Repo:    storage.NewPasteRepo(db),
 		KeyGate: storage.NewKeyGateRepo(db),
 		Sites:   storage.NewSiteRepo(db),
+		Rooms:   storage.NewRoomKVRepo(db),
 		Close:   db.Close,
 	}, nil
 }

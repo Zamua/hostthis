@@ -39,6 +39,20 @@ type SweepSites interface {
 	ReferencedSiteBlobSHAs() ([]string, error)
 }
 
+// SweepRooms is the optional room-side interface. When wired, the sweep
+// also expires rooms (whose 30-day inactivity window has passed),
+// deleting each room and - via the storage FK cascade - every value in
+// its namespace, and prunes the bounded room-creation rate-limit table.
+// Rooms hold no blobs (their values live in the metadata store, not the
+// content-addressed BlobStore), so they contribute nothing to the
+// blob-GC keep-alive set. internal/storage.RoomKVRepo satisfies it. Nil
+// disables room sweeping.
+type SweepRooms interface {
+	ExpiredRoomKeys(now time.Time) ([]domain.RoomRef, error)
+	DeleteRoom(appSlug domain.Slug, id domain.RoomID) error
+	PruneOldRoomCreates(cutoff time.Time) (int, error)
+}
+
 // Sweep runs the periodic expiry job: deletes pastes (and sites) whose
 // expires_at has passed, garbage-collects any blob files no longer
 // referenced, and prunes stale rate-limit rows from the key gate.
@@ -46,6 +60,7 @@ type Sweep struct {
 	Repo     SweepRepo
 	Blobs    SweepBlobs
 	Sites    SweepSites // optional; nil disables site expiry + site-ref GC protection
+	Rooms    SweepRooms // optional; nil disables room expiry + room-create prune
 	KeyGate  *KeyGate   // optional; nil disables the key_first_seen prune
 	Interval time.Duration
 	Logger   *log.Logger
@@ -97,9 +112,20 @@ func (s *Sweep) tick() {
 		}
 		prunedKeys = n
 	}
-	if pasteCount > 0 || blobCount > 0 || prunedKeys > 0 {
-		s.Logger.Printf("sweep: deleted %d expired paste(s), gc'd %d blob(s), pruned %d key-gate row(s)",
-			pasteCount, blobCount, prunedKeys)
+	// Prune the bounded room-creation rate-limit table. Rows past the
+	// creation window can never affect a future decision, so they're
+	// safe to drop on every tick (the same discipline as the key gate).
+	var prunedCreates int
+	if s.Rooms != nil {
+		n, err := s.Rooms.PruneOldRoomCreates(now.Add(-domain.RoomCreateWindow))
+		if err != nil {
+			s.Logger.Printf("sweep: prune room_creates: %v", err)
+		}
+		prunedCreates = n
+	}
+	if pasteCount > 0 || blobCount > 0 || prunedKeys > 0 || prunedCreates > 0 {
+		s.Logger.Printf("sweep: deleted %d expired record(s), gc'd %d blob(s), pruned %d key-gate row(s), %d room-create row(s)",
+			pasteCount, blobCount, prunedKeys, prunedCreates)
 	}
 }
 
@@ -128,6 +154,25 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 		for _, slugStr := range siteSlugs {
 			if err := s.Sites.Delete(domain.Slug(slugStr)); err != nil {
 				return pastesDeleted, blobsGCd, fmt.Errorf("delete site %q: %w", slugStr, err)
+			}
+			pastesDeleted++
+		}
+	}
+
+	// Expire rooms too, when the room sweeper is wired. Deleting a room
+	// cascades (in storage) to every value in its namespace. Rooms hold
+	// no blobs, so this does not touch the keep-alive set - but a room
+	// expiry still counts as a "record expired this tick" so the
+	// data-loss guard below doesn't misfire on a tick where only rooms
+	// expired.
+	if s.Rooms != nil {
+		expiredRooms, err := s.Rooms.ExpiredRoomKeys(now)
+		if err != nil {
+			return pastesDeleted, 0, fmt.Errorf("expired room keys: %w", err)
+		}
+		for _, ref := range expiredRooms {
+			if err := s.Rooms.DeleteRoom(ref.AppSlug, ref.ID); err != nil {
+				return pastesDeleted, blobsGCd, fmt.Errorf("delete room %s/%s: %w", ref.AppSlug, ref.ID, err)
 			}
 			pastesDeleted++
 		}
