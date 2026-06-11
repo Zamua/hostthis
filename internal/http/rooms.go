@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/relay"
 	"github.com/Zamua/hostthis/internal/service"
 )
 
@@ -112,6 +113,15 @@ func (s *Server) handleRoomsAPI(w http.ResponseWriter, r *http.Request, appSlug 
 			return true
 		}
 		s.scanRoom(w, r, appSlug, id)
+		return true
+	}
+
+	// Reserved /<uuid>/ws path: the real-time relay upgrade. "ws" is the
+	// one key the KV verbs do not serve as data, so it is carved out here
+	// BEFORE the value verbs. A non-Upgrade GET to this path is refused by
+	// websocket.Accept (a 426/400); the KV value verbs never see it.
+	if key == wsKey {
+		s.handleRoomWS(w, r, appSlug, id)
 		return true
 	}
 
@@ -234,6 +244,15 @@ func (s *Server) putRoomValue(w http.ResponseWriter, r *http.Request, appSlug do
 		s.writeRoomError(w, r, err)
 		return
 	}
+	// Mirror the committed durable write to the room's live relay hub, so
+	// connected clients see the change live in addition to it landing in
+	// the durable KV. The relay never PERSISTS a frame; this is the live
+	// fan-out of a change that has ALREADY committed through the one
+	// cap-checked PutValue path. A nil relay (relay disabled on this
+	// backend) makes this a no-op.
+	if s.Relay != nil {
+		s.Relay.MirrorDurable(relay.RoomKey{App: appSlug, ID: id}, relay.EncodePut(key, body))
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -245,6 +264,12 @@ func (s *Server) deleteRoomValue(w http.ResponseWriter, r *http.Request, appSlug
 	if err := s.Rooms.Delete(appSlug, id, key); err != nil {
 		s.writeRoomError(w, r, err)
 		return
+	}
+	// Mirror the committed durable delete to the room's live relay hub (see
+	// putRoomValue for why this is broadcast-only, never persisted). A nil
+	// relay makes this a no-op.
+	if s.Relay != nil {
+		s.Relay.MirrorDurable(relay.RoomKey{App: appSlug, ID: id}, relay.EncodeDelete(key))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
