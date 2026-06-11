@@ -64,10 +64,21 @@ func main() {
 		logger.Fatalf("blob store: %v", err)
 	}
 
+	siteRepo := metadata.Sites
+
 	uploadSvc := service.NewUpload(pasteRepo, blobs)
 	uploadSvc.ServiceCapBytes = *storageCap
 	manageSvc := service.NewManage(pasteRepo, blobs)
 	manageSvc.ServiceCapBytes = *storageCap
+
+	// Static-site archive deploys. Reuses the same blob store + the same
+	// per-identity quota as pastes; nil-safe if the metadata backend
+	// doesn't expose a site repo.
+	var deploySvc *service.DeploySite
+	if siteRepo != nil {
+		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobs)
+		deploySvc.ServiceCapBytes = *storageCap
+	}
 
 	// CDN cache purger. Default is noop (no CDN in front); when CF is
 	// configured we wire it up so Update/Delete invalidate the edge
@@ -80,6 +91,10 @@ func main() {
 	manageSvc.KeyGate = keyGate
 	sweepSvc := service.NewSweep(pasteRepo, blobsSweep, logger)
 	sweepSvc.KeyGate = keyGate
+	if siteRepo != nil {
+		// Wire site expiry + site-blob GC protection into the sweep.
+		sweepSvc.Sites = siteRepo
+	}
 
 	// HOSTTHIS_SWEEP_DISABLED=true skips the periodic sweep entirely
 	// for the lifetime of the process. Operator handle for cutover
@@ -117,6 +132,7 @@ func main() {
 		HostKeyPath: filepath.Join(*dataDir, "ssh_host_ed25519_key"),
 		ApexDomain:  *apexDomain,
 		Upload:      uploadSvc,
+		Deploy:      deploySvc, // nil when the backend has no site repo
 		Manage:      manageSvc,
 		KeyGate:     keyGate,
 		BuildURL:    build,
@@ -129,6 +145,9 @@ func main() {
 		LandingHTML: landing,
 		ApexDomain:  *apexDomain,
 		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),
+	}
+	if siteRepo != nil {
+		httpServer.Sites = siteRepo
 	}
 	httpSrv := &http.Server{
 		Addr:    *httpAddr,
