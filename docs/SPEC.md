@@ -1983,33 +1983,63 @@ static pages. The engine already exists: shale.
 
 - **Shape**: a per-app KV / document store. An app gets a namespace (a key
   prefix) in shale; its frontend hits `<app>.hostthis.dev/api/kv/<key>`
-  (GET/PUT/DELETE), persisted in shale. A thin HTTP layer over the K-V.
-- **NOT just dumb KV, and explicitly NOT a FaaS.** Running arbitrary
-  user code server-side is a sandboxing + security cliff, so there are no
-  server-side functions or reactive subscriptions (Convex/Firebase-tier).
-  BUT a pure client-writes-to-KV store is unusable for anything real,
-  because **you cannot trust the client**: any value the browser sends can
-  be forged (edit the JS, or curl the API directly). So the API is
-  **KV + a declarative, server-enforced RULE layer** (Firebase Security
-  Rules in shape): per-namespace rules that constrain who may write and
-  what a write must satisfy, evaluated server-side, with no arbitrary code.
-  e.g. `allow write scores/<id> if value.score is number and
-  value.score <= MAX and request.identity == resource.owner`. The rule
-  model is the real design work and the thing that makes this usable.
+  (GET/PUT/DELETE), persisted in shale. A thin HTTP layer over the K-V. No
+  server-side functions and no reactive subscriptions: running arbitrary
+  user code is a sandboxing + security cliff, so this is NOT a FaaS.
+- **The trust model (the thing that actually matters).** You cannot trust
+  the client: any value the browser sends can be forged (edit the JS, or
+  curl the API directly). Two DIFFERENT problems fall out, with different
+  answers:
+  - **Data integrity** ("is this score real?") is UNSOLVABLE client-side.
+    No rule or auth fixes it; only re-running the app's logic on an
+    authoritative server does, which is a full backend and out of scope.
+    True of every client-side app: a hostthis-backed app either accepts it
+    (fine for a casual leaderboard) or is not a fit.
+  - **Access control** ("who may write WHOSE record?") IS solvable, and is
+    the real job of the API's rules: user A cannot overwrite user B's
+    record. The rules are about IDENTITY + OWNERSHIP, not value validation
+    (a `score <= MAX` bound is a weak band-aid; `request.user ==
+    resource.owner` is the load-bearing rule). This stops cross-user
+    tampering even though it cannot stop A faking A's own value.
+- **Identity** (two separate identities, do not conflate them):
+  - **Creator** (who deploys) = the SSH key, as today. Optionally a linked
+    account (e.g. Clerk) that groups a developer's many SSH keys into one
+    identity with recovery; the SSH key stays the auth mechanism, the
+    account is an opt-in management layer, the no-account path stays default.
+  - **App end-user** (who plays / comments) is a per-app choice on a
+    spectrum:
+    1. NONE: anonymous + rate-limit (guestbook, public poll).
+    2. CAPABILITY TOKEN: an unguessable per-record link; no accounts.
+    3. BROWSER KEYPAIR: the user's browser generates a keypair (WebCrypto),
+       the public key IS the identity, the app signs writes, hostthis
+       verifies. Passwordless, accountless, no third party, no cost. No
+       recovery / no cross-device without exporting the key (casual fit).
+    4. REAL ACCOUNTS via JWT: the KV API is a JWT-VERIFYING resource server
+       with a CONFIGURABLE issuer. The app sends the user's JWT; hostthis
+       verifies it against the configured issuer's JWKS and keys the rules
+       off the token claims (`sub` = user id). The issuer is either TURNKEY
+       ("Sign in with hostthis", a hostthis-hosted issuer with Clerk under
+       the hood: zero setup) or BYO (the developer points hostthis at their
+       OWN issuer's JWKS: they own their users, pay their own auth, no
+       lock-in). This is exactly how Supabase / Firebase / Hasura accept
+       external auth: a JWT-verifying resource server.
+  - The single hard commitment is the boring-correct foundation: the KV API
+    verifies a JWT (or a keypair signature) and the rules read its claims.
+    Same verification path for turnkey and BYO; the developer picks per app.
 - **What it unlocks** (apps someone would actually ship): a self-hosted
   comments / guestbook widget (a Disqus replacement); a poll / voting app
   (the reservation-pattern CAS already does atomic counts); a high-score /
   save-state for browser games; a form backend ("Formspree over SSH"); URL
   shorteners, visitor counters, feature flags.
-- **The honest limit**: declarative rules stop GROSS abuse (impossible
-  values, wrong-owner writes, malformed data). They do NOT stop a cheater
-  who submits a plausible-but-unearned value within the rules; catching
-  that needs a server-authoritative replay of the app's logic (a full
-  backend), which is true of every client-side app and out of scope here.
-  The fit is apps where data is simple AND the rules can express the
-  integrity you need: developer-only writes, public-append-with-rate-limit,
-  share-via-unguessable-link, or bounded/owned records. Complex multi-user
-  access control is the line where this stops being simple.
+- **The product fork to decide first.** Offering "Sign in with hostthis"
+  (the turnkey issuer) makes hostthis an identity provider + ECOSYSTEM: a
+  shared user identity across all hostthis apps, a sticky network effect,
+  but a walled garden hostthis pays for and that couples apps to it.
+  Supporting only BYO keeps hostthis a HOST: apps are standalone, the
+  developer owns their users. The configurable-issuer design lets hostthis
+  ship the turnkey option AS the low-friction default without forcing the
+  walled garden, because BYO is always the escape hatch. Leaning ecosystem
+  vs host is a product call, bigger than the mechanism.
 
 Revisits the "Comments / threaded discussion" non-goal: we would not build
 comments, but the persistence API lets a USER build them.
@@ -2018,11 +2048,12 @@ comments, but the persistence API lets a USER build them.
 
 - Static: deploy atomicity; per-site vs per-identity quota; custom
   subdomains.
-- Persistence: the declarative rule language + its evaluation model (the
-  core work); per-app namespace + token issuance derived from the SSH-key
-  identity; rate-limiting + abuse on a writable public API; quota
-  accounting for app data vs paste data; end-user identity (does the app's
-  own users need identities, or only the developer + anonymous-with-rules?).
+- Persistence: the rule model (identity + ownership constraints evaluated
+  server-side); the JWT-verifying resource-server design + the turnkey-vs-BYO
+  issuer config + the browser-keypair signature path; per-app namespacing;
+  rate-limiting + abuse on a writable public API; quota accounting for app
+  data vs paste data; who pays for a turnkey "Sign in with hostthis" tier
+  (the ecosystem-vs-host product call).
 
 ---
 
