@@ -1094,14 +1094,23 @@ own four pieces; they interlock.
   keep up with a handful of buffered frames is not a viable live
   participant and is better off reconnecting (which re-syncs it from the
   KV snapshot cleanly). The broadcast is therefore wait-free with respect
-  to any individual client.
+  to any individual client. Dropping a laggard reclaims its connection
+  accounting (the per-room hub slot AND the per-app aggregate counter) the
+  same way a clean leave does - the drop path is a real disconnect, not a
+  shortcut that forgets the counters, so a room that drops laggards under
+  load does not slowly leak its per-app connection budget.
 - **Clean disconnect handling.** Every connection close - clean client
   close, heartbeat-timeout reap, slow-client drop, server shutdown -
-  unregisters the connection from its hub and stops its reader and writer
-  goroutines, with no leaked goroutine and no dangling map entry. The last
-  connection leaving a room tears the hub down. Server shutdown closes all
-  connections with a normal-closure status so clients reconnect on the
-  client backoff schedule rather than hammering instantly.
+  unregisters the connection from its hub, decrements the per-app
+  connection counter exactly once, and stops its reader and writer
+  goroutines, with no leaked goroutine, no dangling map entry, and no
+  leaked connection-count slot. Each disconnect decrements the per-app
+  counter exactly once regardless of which path tore the connection down
+  (a clean unregister and a backpressure drop must not BOTH decrement, and
+  neither must SKIP it). The last connection leaving a room tears the hub
+  down. Server shutdown closes all connections with a normal-closure status
+  so clients reconnect on the client backoff schedule rather than hammering
+  instantly.
 - **Read bound.** The reader applies a max message size per inbound frame
   (see "Limits") and a read deadline reset by each successful read /
   pong, so a connection that goes silent past the heartbeat deadline is

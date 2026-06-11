@@ -140,3 +140,49 @@ func TestRegistry_ReleaseIsIdempotent(t *testing.T) {
 		t.Fatalf("per-app count = %d after double release, want 0", r.AppConns(key.App))
 	}
 }
+
+// TestRegistry_LaggardDropReclaimsAppSlotWithSurvivor pins the no-leak fix:
+// when broadcast DROPS a laggard while a survivor keeps the hub alive, the
+// laggard's per-app slot must be reclaimed (via the hub's onDrop -> decApp),
+// AND the laggard's own later release must NOT decrement a second time. The
+// bug this guards: release keyed its decApp off "is the id still in the hub,"
+// which a laggard drop has already cleared, so the per-app counter leaked one
+// slot per dropped connection. The multi-client churn integration test
+// surfaced it; this is its deterministic unit pin.
+func TestRegistry_LaggardDropReclaimsAppSlotWithSurvivor(t *testing.T) {
+	lim := NewLimits()
+	lim.SendBuffer = 1 // not used by fakeConn, but keep the intent explicit
+	r := NewRegistry(lim)
+	key := testKey()
+
+	lag, lagID := bindFake(t, r, key)
+	_, survID := bindFake(t, r, key) // survivor keeps the hub from being torn down
+	if r.AppConns(key.App) != 2 {
+		t.Fatalf("after two joins AppConns = %d, want 2", r.AppConns(key.App))
+	}
+
+	// Make lag a laggard and broadcast: lag is dropped (removed from the hub
+	// + closed) and onDrop reclaims its per-app slot. The survivor remains, so
+	// the hub is NOT removed - exactly the case the buggy release mishandled.
+	lag.setFull(true)
+	r.hub(key).broadcast(0, Frame{Data: []byte("x")})
+	if r.AppConns(key.App) != 1 {
+		t.Fatalf("after laggard drop AppConns = %d, want 1 (survivor only)", r.AppConns(key.App))
+	}
+
+	// The dropped connection's own teardown now calls release - it must be a
+	// no-op for accounting (onDrop already did the decApp).
+	r.release(key, lagID)
+	if r.AppConns(key.App) != 1 {
+		t.Fatalf("after the dropped conn's release AppConns = %d, want 1 (no double-decrement)", r.AppConns(key.App))
+	}
+
+	// The survivor leaving returns the room to zero, no leak.
+	r.release(key, survID)
+	if r.AppConns(key.App) != 0 {
+		t.Fatalf("after survivor release AppConns = %d, want 0", r.AppConns(key.App))
+	}
+	if r.Rooms() != 0 {
+		t.Fatalf("rooms = %d after all leave, want 0 (empty hub leaked)", r.Rooms())
+	}
+}

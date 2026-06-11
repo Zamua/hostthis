@@ -164,9 +164,15 @@ func (r *Registry) admit(key RoomKey) (h *Hub, id uint64, err error) {
 	}
 
 	// Lazily create the hub on the first connection to a room. The onEmpty
-	// callback drops it from the registry when its last connection leaves.
+	// callback drops it from the registry when its last connection leaves;
+	// the onDrop callback reclaims a laggard-dropped connection's per-app
+	// slot (the broadcast-drop path does not route through release, so the
+	// decApp must happen here or the slot leaks).
 	if !exists {
-		hub = newHub(key, r.limits.MaxConnsPerRoom, func() { r.removeHub(key) })
+		hub = newHub(key, r.limits.MaxConnsPerRoom,
+			func() { r.removeHub(key) },
+			func(uint64) { r.decApp(key.App) },
+		)
 		r.hubs[key] = hub
 	}
 
@@ -268,13 +274,20 @@ func (r *Registry) release(key RoomKey, id uint64) {
 	hub := r.hubs[key]
 	r.mu.Unlock()
 	if hub == nil {
-		// Hub already gone (last-conn teardown raced us). Still decrement
-		// the per-app counter for this connection.
-		r.decApp(key.App)
+		// Hub already gone. The only ways a hub disappears are (a) this
+		// connection's own unregister emptied it (then its decApp already ran
+		// below), (b) a laggard drop emptied it (then onDrop already did this
+		// connection's decApp), or (c) shutdown discarded the registry. In
+		// every case the per-app slot for this id was already reclaimed by the
+		// path that removed the hub, so release must NOT decApp again here - a
+		// second decrement would under-count a sibling connection of the same
+		// app. A hub vanishing is therefore a no-op for accounting.
 		return
 	}
-	// Only decrement the app counter if the hub actually held this id (so a
-	// double release does not over-decrement).
+	// Decrement the app counter ONLY if the hub still holds this id - i.e.
+	// this release is the one performing the unregister. If the id is already
+	// gone (a double release, or a laggard drop that ran onDrop), the decApp
+	// was already done by whoever removed it, so this is a no-op.
 	hub.mu.Lock()
 	_, held := hub.conns[id]
 	hub.mu.Unlock()

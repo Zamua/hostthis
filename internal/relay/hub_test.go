@@ -64,7 +64,7 @@ func testKey() RoomKey {
 }
 
 func TestHub_BroadcastReachesOthersNotSender(t *testing.T) {
-	h := newHub(testKey(), 0, nil)
+	h := newHub(testKey(), 0, nil, nil)
 	a, b, c := newFakeConn(1), newFakeConn(2), newFakeConn(3)
 	for _, conn := range []*fakeConn{a, b, c} {
 		if !h.register(conn) {
@@ -86,7 +86,7 @@ func TestHub_BroadcastReachesOthersNotSender(t *testing.T) {
 }
 
 func TestHub_ServerOriginatedBroadcastReachesEveryone(t *testing.T) {
-	h := newHub(testKey(), 0, nil)
+	h := newHub(testKey(), 0, nil, nil)
 	a, b := newFakeConn(1), newFakeConn(2)
 	h.register(a)
 	h.register(b)
@@ -100,7 +100,7 @@ func TestHub_ServerOriginatedBroadcastReachesEveryone(t *testing.T) {
 }
 
 func TestHub_RegisterRespectsPerRoomCap(t *testing.T) {
-	h := newHub(testKey(), 2, nil)
+	h := newHub(testKey(), 2, nil, nil)
 	if !h.register(newFakeConn(1)) {
 		t.Fatal("first register should pass")
 	}
@@ -116,7 +116,12 @@ func TestHub_RegisterRespectsPerRoomCap(t *testing.T) {
 }
 
 func TestHub_SlowClientDroppedWithoutBlockingRoom(t *testing.T) {
-	h := newHub(testKey(), 0, nil)
+	// onDrop must fire exactly once, for the dropped laggard's id, so the
+	// registry can reclaim its per-app slot (the leak the multi-client churn
+	// test surfaced: a laggard drop that never decremented the per-app
+	// counter). A non-laggard recipient never triggers onDrop.
+	var dropped []uint64
+	h := newHub(testKey(), 0, nil, func(id uint64) { dropped = append(dropped, id) })
 	slow, fast := newFakeConn(1), newFakeConn(2)
 	h.register(slow)
 	h.register(fast)
@@ -136,6 +141,11 @@ func TestHub_SlowClientDroppedWithoutBlockingRoom(t *testing.T) {
 	if h.len() != 1 {
 		t.Fatalf("hub len = %d after dropping laggard, want 1", h.len())
 	}
+	// onDrop fired once, for the slow client's id only (so the registry decApps
+	// the dropped slot - and exactly once).
+	if len(dropped) != 1 || dropped[0] != slow.id {
+		t.Fatalf("onDrop fired with %v, want exactly [%d] (the dropped laggard)", dropped, slow.id)
+	}
 }
 
 func TestHub_UnregisterFiresOnEmpty(t *testing.T) {
@@ -145,7 +155,7 @@ func TestHub_UnregisterFiresOnEmpty(t *testing.T) {
 		mu.Lock()
 		emptied++
 		mu.Unlock()
-	})
+	}, nil)
 	a, b := newFakeConn(1), newFakeConn(2)
 	h.register(a)
 	h.register(b)
@@ -173,15 +183,17 @@ func TestHub_UnregisterFiresOnEmpty(t *testing.T) {
 	mu.Unlock()
 }
 
-func TestHub_DroppingLastLaggardFiresOnEmpty(t *testing.T) {
+func TestHub_DroppingLastLaggardFiresOnEmptyAndOnDrop(t *testing.T) {
 	var emptied int
-	h := newHub(testKey(), 0, func() { emptied++ })
+	var dropped []uint64
+	h := newHub(testKey(), 0, func() { emptied++ }, func(id uint64) { dropped = append(dropped, id) })
 	only := newFakeConn(1)
 	h.register(only)
 	only.setFull(true)
 
 	// A server-originated broadcast to the one full client drops it, which
-	// empties the hub and must fire onEmpty.
+	// empties the hub and must fire BOTH onDrop (reclaim its per-app slot) and
+	// onEmpty (tear the now-empty hub down).
 	h.broadcast(0, Frame{Data: []byte("x")})
 	if !only.isClosed() {
 		t.Fatal("the only (laggard) client was not closed")
@@ -192,12 +204,15 @@ func TestHub_DroppingLastLaggardFiresOnEmpty(t *testing.T) {
 	if emptied != 1 {
 		t.Fatalf("onEmpty fired %d times, want 1", emptied)
 	}
+	if len(dropped) != 1 || dropped[0] != only.id {
+		t.Fatalf("onDrop fired with %v, want exactly [%d]", dropped, only.id)
+	}
 }
 
 func TestHub_ConcurrentRegisterBroadcastUnregisterRace(t *testing.T) {
 	// Run under -race: hammer register / broadcast / unregister from many
 	// goroutines to catch a data race in the hub's concurrent paths.
-	h := newHub(testKey(), 0, nil)
+	h := newHub(testKey(), 0, nil, nil)
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
