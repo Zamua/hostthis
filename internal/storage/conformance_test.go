@@ -98,8 +98,31 @@ type conformCaps struct {
 // factory produces. `name` labels the subtests so failures identify the
 // backend. The factory returns a fresh, empty repo per call. `caps`
 // declares the backend's by-design behavior exceptions.
+//
+// It is a thin wrapper over runConformanceWithSites with no site repo, kept
+// so a backend with no static-site impl (or a caller that only wants the
+// paste contract) needs no extra argument.
 func runConformance(t *testing.T, name string, caps conformCaps, newRepo func(t *testing.T) conformanceRepo) {
 	t.Helper()
+	runConformanceWithSites(t, name, caps, newRepo, nil)
+}
+
+// runConformanceWithSites runs the paste contract suite (via newRepo) and,
+// when newSites is non-nil, the site contract suite too. The site factory
+// produces a fresh site repo that MUST share the same backing store as the
+// paste repo from the same factory call, so the cross-quota and
+// cross-family slug-collision site subtests exercise the real interaction.
+func runConformanceWithSites(
+	t *testing.T,
+	name string,
+	caps conformCaps,
+	newRepo func(t *testing.T) conformanceRepo,
+	newSites func(t *testing.T) (conformanceRepo, conformanceSiteRepo),
+) {
+	t.Helper()
+	if newSites != nil {
+		runSiteConformance(t, name, caps, newSites)
+	}
 	t.Run(name+"/InsertAndGet", func(t *testing.T) { conformInsertAndGet(t, newRepo(t)) })
 	t.Run(name+"/QuotaConcurrentCeiling", func(t *testing.T) { conformQuotaConcurrentCeiling(t, newRepo(t), caps) })
 	t.Run(name+"/ExpiryQuotaSemantics", func(t *testing.T) { conformExpiryQuotaSemantics(t, newRepo(t), caps) })
