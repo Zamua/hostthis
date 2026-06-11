@@ -27,7 +27,11 @@ import (
 type metadataBundle struct {
 	Repo    metadataRepo
 	KeyGate service.KeyGateRepo
-	Close   func() error
+	// Sites is the static-site repo. Only the sqlite backend supplies it
+	// today; the slatedb / shale backends leave it nil and static-site
+	// archive uploads are disabled there. nil-safe throughout.
+	Sites *storage.SiteRepo
+	Close func() error
 }
 
 // metadataRepo is the union of every service-layer / http-layer
@@ -73,6 +77,7 @@ func buildMetadataSqlite(dataDir string, logger *log.Logger) (*metadataBundle, e
 	return &metadataBundle{
 		Repo:    storage.NewPasteRepo(db),
 		KeyGate: storage.NewKeyGateRepo(db),
+		Sites:   storage.NewSiteRepo(db),
 		Close:   db.Close,
 	}, nil
 }
