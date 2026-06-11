@@ -28,13 +28,25 @@ type SweepBlobs interface {
 	Remove(sha string) error
 }
 
-// Sweep runs the periodic expiry job: deletes pastes whose
+// SweepSites is the optional site-side interface. When wired, the sweep
+// also expires sites and unions the blob SHAs their manifests reference
+// into the keep-alive set, so a blob shared between a site and a paste
+// (or two sites) survives as long as ANY live record references it.
+// internal/storage.SiteRepo satisfies it. Nil disables site sweeping.
+type SweepSites interface {
+	ExpiredSiteSlugs(now time.Time) ([]string, error)
+	Delete(slug domain.Slug) error
+	ReferencedSiteBlobSHAs() ([]string, error)
+}
+
+// Sweep runs the periodic expiry job: deletes pastes (and sites) whose
 // expires_at has passed, garbage-collects any blob files no longer
 // referenced, and prunes stale rate-limit rows from the key gate.
 type Sweep struct {
 	Repo     SweepRepo
 	Blobs    SweepBlobs
-	KeyGate  *KeyGate // optional; nil disables the key_first_seen prune
+	Sites    SweepSites // optional; nil disables site expiry + site-ref GC protection
+	KeyGate  *KeyGate   // optional; nil disables the key_first_seen prune
 	Interval time.Duration
 	Logger   *log.Logger
 	Now      func() time.Time
@@ -92,7 +104,9 @@ func (s *Sweep) tick() {
 }
 
 // Once runs a single sweep pass and returns the counts. Exposed so
-// tests can drive it deterministically.
+// tests can drive it deterministically. The pastesDeleted count
+// includes expired sites - both are "records expired this tick" for
+// the purpose of the data-loss guard below.
 func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 	slugs, err := s.Repo.ExpiredSlugs(now)
 	if err != nil {
@@ -105,8 +119,25 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 		pastesDeleted++
 	}
 
+	// Expire sites too, when the site sweeper is wired.
+	if s.Sites != nil {
+		siteSlugs, err := s.Sites.ExpiredSiteSlugs(now)
+		if err != nil {
+			return pastesDeleted, 0, fmt.Errorf("expired site slugs: %w", err)
+		}
+		for _, slugStr := range siteSlugs {
+			if err := s.Sites.Delete(domain.Slug(slugStr)); err != nil {
+				return pastesDeleted, blobsGCd, fmt.Errorf("delete site %q: %w", slugStr, err)
+			}
+			pastesDeleted++
+		}
+	}
+
 	// GC unreferenced blobs. The repo gives us the set of SHAs we DO
 	// reference; we walk disk and remove any blob whose sha isn't in it.
+	// The keep-alive set is the UNION of paste-referenced and site-
+	// referenced SHAs so a blob shared across record kinds survives as
+	// long as ANY live record references it.
 	refs, err := s.Repo.ReferencedBlobSHAs()
 	if err != nil {
 		return pastesDeleted, 0, fmt.Errorf("referenced shas: %w", err)
@@ -114,6 +145,15 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 	refSet := make(map[string]struct{}, len(refs))
 	for _, sha := range refs {
 		refSet[sha] = struct{}{}
+	}
+	if s.Sites != nil {
+		siteRefs, err := s.Sites.ReferencedSiteBlobSHAs()
+		if err != nil {
+			return pastesDeleted, 0, fmt.Errorf("referenced site shas: %w", err)
+		}
+		for _, sha := range siteRefs {
+			refSet[sha] = struct{}{}
+		}
 	}
 	// Belt-and-suspenders DATA-LOSS guard: if the repo says zero shas
 	// are referenced AND we didn't just delete any pastes (so an
