@@ -21,6 +21,7 @@ import (
 	"github.com/Zamua/hostthis/internal/cache"
 	"github.com/Zamua/hostthis/internal/domain"
 	httpapi "github.com/Zamua/hostthis/internal/http"
+	"github.com/Zamua/hostthis/internal/relay"
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
@@ -88,6 +89,17 @@ func main() {
 	if roomRepo != nil {
 		roomsSvc = service.NewRooms(roomRepo)
 		roomsSvc.ServiceCapBytes = *storageCap
+	}
+
+	// Relay: the real-time per-room WebSocket relay layered on the rooms
+	// tier (see SPEC.md "Real-time room relay (WebSocket)"). It depends on
+	// the rooms service only for the late-join snapshot (the Scan verb) and
+	// reuses the durable KV for persistence via the HTTP PUT/DELETE mirror.
+	// Single-node, in-memory per-room hubs; nil-safe when rooms are not
+	// wired (no relay surface on a backend without a room repo).
+	var roomRelay *relay.Relay
+	if roomsSvc != nil {
+		roomRelay = relay.NewRelay(roomsSvc, relay.NewLimits())
 	}
 
 	// CDN cache purger. Default is noop (no CDN in front); when CF is
@@ -167,6 +179,9 @@ func main() {
 	if roomsSvc != nil {
 		httpServer.Rooms = roomsSvc
 	}
+	if roomRelay != nil {
+		httpServer.Relay = roomRelay
+	}
 	httpSrv := &http.Server{
 		Addr:    *httpAddr,
 		Handler: httpServer.Handler(),
@@ -203,6 +218,14 @@ func main() {
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Printf("server error: %v", err)
 		}
+	}
+
+	// Close all live relay connections first: a hijacked WebSocket is not
+	// tracked by http.Server.Shutdown, so closing them here (with a normal
+	// closure) unblocks their request goroutines and lets clients reconnect
+	// on their backoff schedule rather than hammering instantly.
+	if roomRelay != nil {
+		roomRelay.Registry().CloseAll()
 	}
 
 	shutdownCtx, scancel := context.WithTimeout(context.Background(), 5*time.Second)

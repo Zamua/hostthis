@@ -42,6 +42,7 @@ type Server struct {
 	Pastes      PasteReader
 	Sites       SiteReader  // optional; nil disables static-site serving
 	Rooms       RoomService // optional; nil disables the /api/rooms surface
+	Relay       RoomRelay   // optional; nil disables the /api/rooms/<uuid>/ws relay
 	Blobs       BlobReader
 	LandingHTML []byte // optional - apex landing page bytes embedded at build
 	ApexDomain  string // e.g. "hostthis.dev" - used to peel slug subdomains
