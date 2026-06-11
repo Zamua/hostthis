@@ -26,6 +26,16 @@ import "bytes"
 //	identity_reserve/<id>/<slug>  -> <id>     (reservation marker; co-shards with the counter)
 //	keygate/<subnet>/<identity>   -> <subnet> (first segment after the prefix)
 //
+// The static-site families mirror the paste families one-for-one (sites
+// reuse the paste layout, only with a site_ flavor; see docs/SPEC.md
+// "Shale reuses the layout"):
+//
+//	sites/<slug>                       -> <slug>   (authoritative, joins the {slug} family)
+//	expiry_sites/<rfc3339>/<slug>      -> <slug>   (LAST segment, like expiry/)
+//	identity_sites/<id>/<slug>         -> <id>     (derived index, joins the {id} family)
+//	identity_site_bytes/<id>           -> <id>     (the site quota counter)
+//	identity_site_reserve/<id>/<slug>  -> <id>     (site reservation marker; co-shards with the site counter)
+//
 // A key that matches no known family falls back to the full key as its
 // own shard key (the safe default: it routes deterministically and never
 // collides families). This mirrors shale's default hash-tagged identity
@@ -47,6 +57,14 @@ func shaleShardKey(key []byte) []byte {
 		// the date from the slug unambiguously.
 		return lastSegment(key[len(prefixExpiryAll):])
 
+	// Per-slug static-site authoritative family (mirrors pastes/ + expiry/).
+	case bytes.HasPrefix(key, prefixSites):
+		return firstSegment(key[len(prefixSites):])
+	case bytes.HasPrefix(key, prefixExpirySitesAll):
+		// expiry_sites/<rfc3339>/<slug>: slug is the LAST segment, same as
+		// expiry/. The '_sites' suffix keeps it from matching expiry/.
+		return lastSegment(key[len(prefixExpirySitesAll):])
+
 	// Per-identity derived family. All shard on the id, the first segment
 	// after the family prefix.
 	case bytes.HasPrefix(key, prefixIdentityPastesAll):
@@ -60,6 +78,19 @@ func shaleShardKey(key []byte) []byte {
 		// the reservation marker co-shards with identity_bytes/<id> and the
 		// reserve step's read-increment-mark is a single-shard CAS.
 		return firstSegment(key[len(prefixIdentityReserveAll):])
+
+	// Per-identity static-site derived family. All shard on the id so the
+	// site index, the site byte counter, and the site reservation marker
+	// co-locate (the same single-shard-CAS argument as the paste {id}
+	// family). identity_site_bytes/ and identity_site_reserve/ do NOT have
+	// identity_sites/ as a prefix (the char after 'site' is 's' vs '_'), so
+	// the trailing-slash anchoring keeps the three apart.
+	case bytes.HasPrefix(key, prefixIdentitySitesAll):
+		return firstSegment(key[len(prefixIdentitySitesAll):])
+	case bytes.HasPrefix(key, prefixIdentitySiteBytesAll):
+		return firstSegment(key[len(prefixIdentitySiteBytesAll):])
+	case bytes.HasPrefix(key, prefixIdentitySiteReserveAll):
+		return firstSegment(key[len(prefixIdentitySiteReserveAll):])
 
 	// Per-subnet Sybil-gate family. Shards on the subnet, the first
 	// segment after the prefix.
@@ -86,6 +117,13 @@ var (
 	prefixIdentityBytesAll     = []byte("identity_bytes/")
 	prefixIdentityReserveAll   = []byte("identity_reserve/")
 	prefixKeygateAll           = []byte("keygate/")
+
+	// Static-site families (mirror the paste families).
+	prefixSites                  = []byte("sites/")
+	prefixExpirySitesAll         = []byte("expiry_sites/")
+	prefixIdentitySitesAll       = []byte("identity_sites/")
+	prefixIdentitySiteBytesAll   = []byte("identity_site_bytes/")
+	prefixIdentitySiteReserveAll = []byte("identity_site_reserve/")
 )
 
 // firstSegment returns the bytes up to (but not including) the first '/'

@@ -33,6 +33,22 @@ func TestShaleShardKey(t *testing.T) {
 		// Per-subnet Sybil-gate family -> shard key <subnet>.
 		{"keygate", "keygate/10.0.0.0_24/sha256:deadbeef", "10.0.0.0_24"},
 
+		// Static-site per-slug authoritative family -> shard key <slug>.
+		{"site", "sites/abc12345", "abc12345"},
+		// expiry_sites' slug is the LAST segment (like expiry/), and the
+		// '_sites' suffix must NOT make it route as a plain expiry/ key.
+		{"expiry_site", "expiry_sites/2026-06-05T12:00:00Z/abc12345", "abc12345"},
+		{"expiry_site nano", "expiry_sites/2026-06-05T12:00:00.123456789Z/abc12345", "abc12345"},
+
+		// Static-site per-identity derived family -> shard key <id>. The
+		// three families share the identity_site prefix but disambiguate on
+		// the char after 'site' ('s' for identity_sites, '_' for the other
+		// two): identity_site_bytes and identity_site_reserve do NOT route as
+		// identity_sites.
+		{"identity_sites", "identity_sites/sha256:deadbeef/abc12345", "sha256:deadbeef"},
+		{"identity_site_bytes", "identity_site_bytes/sha256:deadbeef", "sha256:deadbeef"},
+		{"identity_site_reserve", "identity_site_reserve/sha256:deadbeef/abc12345", "sha256:deadbeef"},
+
 		// Unknown family routes by the whole key.
 		{"unknown", "weird/key/shape", "weird/key/shape"},
 		{"no slash", "bareword", "bareword"},
@@ -59,6 +75,11 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 		"versions/" + slug + "/0009",
 		"slug_owner/" + slug,
 		"expiry/2026-06-05T12:00:00Z/" + slug,
+		// A site's authoritative + expiry keys co-shard with the same slug,
+		// so the cross-family paste-slug collision read in the site insert is
+		// single-shard with the authoritative site write.
+		"sites/" + slug,
+		"expiry_sites/2026-06-05T12:00:00Z/" + slug,
 	}
 	for _, k := range slugKeys {
 		if got := string(shaleShardKey([]byte(k))); got != slug {
@@ -74,6 +95,12 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 		// The reservation marker MUST co-shard with identity_bytes so the
 		// reserve step's read-increment-mark is a single-shard CAS.
 		"identity_reserve/" + id + "/" + slug,
+		// The site index, the site byte counter, and the site reservation
+		// marker all co-shard with the identity so the site reserve step's
+		// read-increment-mark is single-shard (mirrors the paste {id} family).
+		"identity_sites/" + id + "/" + slug,
+		"identity_site_bytes/" + id,
+		"identity_site_reserve/" + id + "/" + slug,
 	}
 	for _, k := range idKeys {
 		if got := string(shaleShardKey([]byte(k))); got != id {

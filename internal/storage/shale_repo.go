@@ -926,9 +926,9 @@ func (r *ShaleRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 
 // insertAuthoritative writes the {slug}-shard authoritative rows in one
 // CAS transaction: the paste row, the v1 version row, slug_owner, and the
-// expiry index. The slug-collision check (reject if pastes/<slug> already
-// exists) participates in the transaction's read-set so a racing insert of
-// the same slug conflicts.
+// expiry index. The slug-collision check (reject if pastes/<slug> OR
+// sites/<slug> already exists) participates in the transaction's read-set so
+// a racing insert of the same slug (as a paste OR a site) conflicts.
 func (r *ShaleRepo) insertAuthoritative(p domain.Paste) error {
 	pasteKey := shaleKeyPaste(p.Slug)
 	err := r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
@@ -938,6 +938,16 @@ func (r *ShaleRepo) insertAuthoritative(p domain.Paste) error {
 			return ErrSlugTaken
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return fmt.Errorf("slug check: %w", err)
+		}
+		// A slug must be unique across sites too: reject if a site already
+		// owns it. sites/<slug> co-shards with pastes/<slug> on {slug}, so
+		// this is a same-shard read inside the CAS. Mirrors the site insert's
+		// reciprocal paste-key check and the slatedb paste insert's site-key
+		// guard, so a slug is EITHER a paste or a site in both directions.
+		if _, err := tx.Get(shaleKeySite(p.Slug)); err == nil {
+			return ErrSlugTaken
+		} else if !errors.Is(err, backend.ErrNotFound) {
+			return fmt.Errorf("site slug check: %w", err)
 		}
 		if err := shaleTxPutJSON(tx, pasteKey, pasteFromDomain(p)); err != nil {
 			return err
@@ -1443,11 +1453,21 @@ func (r *ShaleRepo) ReferencedBlobSHAs() ([]string, error) {
 	return out, nil
 }
 
-// sumServiceWideActiveBytes sums the non-deleted version sizes across the
-// whole keyspace via a cross-shard aggregate, counting only pastes that
-// have not expired. Best-effort, used for the SOFT service-wide cap
-// pre-check (the per-owner cap is the strict one). O(active versions); for
-// low-volume hostthis this is a sub-millisecond fan-out.
+// sumServiceWideActiveBytes sums the non-deleted version sizes AND every
+// site's DedupedSize across the whole keyspace via cross-shard aggregates.
+// Best-effort, used for the SOFT service-wide cap pre-check on BOTH the
+// paste-insert and the site-deploy paths (the per-owner cap is the strict
+// one). O(active versions + sites); for low-volume hostthis this is a
+// sub-millisecond fan-out.
+//
+// Including site bytes here is the parity change for static-site hosting on
+// shale: a paste upload sees the bytes sites already hold and a site deploy
+// sees the bytes pastes already hold, so the service-wide cap counts every
+// kind of stored content (parallels the slatedb sumServiceWideActiveBytes,
+// which adds the site total, and the sqlite serviceWideActiveBytes, which
+// sums pastes + sites + rooms). When the shale backend has no site impl
+// wired (no sites/ keys exist) the site aggregate is empty and this reduces
+// to the pure version sum.
 func (r *ShaleRepo) sumServiceWideActiveBytes() (int64, error) {
 	versions, err := r.aggregatePrefix([]byte("versions/"))
 	if err != nil {
@@ -1464,7 +1484,11 @@ func (r *ShaleRepo) sumServiceWideActiveBytes() (int64, error) {
 		}
 		total += int64(v.Size)
 	}
-	return total, nil
+	siteTotal, err := r.sumServiceWideActiveSiteBytes()
+	if err != nil {
+		return 0, err
+	}
+	return total + siteTotal, nil
 }
 
 // --- KeyGateRepo (Sybil rate limit) ----------------------------------------
@@ -1689,8 +1713,16 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 	if err := r.reconcileIndexes(pastesByOwner); err != nil {
 		return err
 	}
-	// Job 2: complete past-grace markers (orphan-release / leaked-drop).
-	return r.releaseReservationMarkers(now, reserveGrace, markersByOwner, livePasteSlugs)
+	// Job 2: complete past-grace paste markers (orphan-release / leaked-drop).
+	if err := r.releaseReservationMarkers(now, reserveGrace, markersByOwner, livePasteSlugs); err != nil {
+		return err
+	}
+	// Job 3: complete past-grace SITE markers, the exact same orphan-release /
+	// leaked-drop rule applied to identity_site_reserve/ against the SITE
+	// counter (shale_site_repo.go). It is the backstop for a deploy that
+	// crashed between the site reserve and the authoritative write (the hot
+	// path's release covers a failed write; the reconciler covers a crash).
+	return r.reconcileSiteReservations(now, reserveGrace)
 }
 
 // reservationMarkerEntry is a parsed reservation marker tagged with its
