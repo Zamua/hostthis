@@ -1400,7 +1400,13 @@ func (r *ShaleRepo) Unpin(slug domain.Slug) error {
 // ExpiredSlugs fans out across all {slug} shards (cluster.Aggregate) over
 // the expiry/* index and returns the slugs whose expiry timestamp is <=
 // now. The timestamp is the middle segment of expiry/<rfc3339>/<slug>;
-// RFC3339Nano sorts lexicographically so a string compare is correct.
+// RFC3339Nano sorts lexicographically so a string compare is correct at
+// whole-second granularity. NOTE: RFC3339Nano is variable-width (a
+// fractional ".5Z" sorts before a bare "Z" within one whole second), so
+// this paste index carries the same latent sub-second skew documented for
+// the paste expiry path; fixing it is a key-format migration left as a
+// follow-up. The site expiry index uses a fixed-width format
+// (expirySiteTimeFormat) and has no such skew.
 func (r *ShaleRepo) ExpiredSlugs(now time.Time) ([]string, error) {
 	items, err := r.aggregatePrefix([]byte("expiry/"))
 	if err != nil {
