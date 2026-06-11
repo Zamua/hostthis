@@ -1939,6 +1939,93 @@ ceiling is much higher.
 
 ---
 
+## Future directions (proposed, not built)
+
+These are bigger bets that would grow hostthis from "host a renderable file
+for 7 days" toward "deploy a small real app over SSH, no account." They are
+PROPOSALS; the spec above describes what hostthis does today. Each would
+deliberately revisit some of the v1 Non-goals below (a scope expansion, not
+an accident). The throughline: shale (the distributed K-V) is the
+persistence layer for both, and the differentiator across both is the
+SSH-native, no-account, your-key-is-your-identity model.
+
+### Static directory hosting (serve a whole site)
+
+Today a paste is a single renderable file. The natural expansion: accept a
+DIRECTORY and serve it as a site.
+
+- **Upload**: a tarball over the existing SSH surface, e.g.
+  `tar czf - mysite/ | ssh hostthis.dev deploy`. Each file becomes a
+  content-addressed blob (the existing blob store); identical files across
+  deploys dedupe for free.
+- **The site** is a MANIFEST (path -> blob sha) in the metadata layer, a
+  new record type alongside pastes/versions, naturally shale-backed.
+- **Serving**: `<slug>.hostthis.dev/path/to/file` resolves the manifest to
+  the blob, with content-type by extension, `index.html` at directory
+  roots, and an optional SPA fallback (serve `index.html` on unmatched
+  routes). A 404 for genuinely-missing paths.
+- **Versioning** is free: each deploy is a new immutable manifest, so
+  rollback reuses the existing paste-versioning machinery. Deploys must be
+  ATOMIC (a half-uploaded site never serves).
+- **Security** is the load-bearing concern: serving arbitrary user JS/HTML
+  is an abuse vector (phishing, malware, miners on our domain). Each site
+  MUST be origin-isolated on its own subdomain, behind a strict CSP, under
+  the existing identity + quota + Sybil limits. See "HTML sandboxing".
+
+This is "Surge.sh / Netlify-drop", but SSH-native and no-signup. Revisits
+the "Binary / non-renderable file hosting" non-goal (a site is still
+renderable content, just multi-file).
+
+### A persistence API (a backend for small apps)
+
+Pair static hosting with a small backend so users host REAL apps, not just
+static pages. The engine already exists: shale.
+
+- **Shape**: a per-app KV / document store. An app gets a namespace (a key
+  prefix) in shale; its frontend hits `<app>.hostthis.dev/api/kv/<key>`
+  (GET/PUT/DELETE), persisted in shale. A thin HTTP layer over the K-V.
+- **NOT just dumb KV, and explicitly NOT a FaaS.** Running arbitrary
+  user code server-side is a sandboxing + security cliff, so there are no
+  server-side functions or reactive subscriptions (Convex/Firebase-tier).
+  BUT a pure client-writes-to-KV store is unusable for anything real,
+  because **you cannot trust the client**: any value the browser sends can
+  be forged (edit the JS, or curl the API directly). So the API is
+  **KV + a declarative, server-enforced RULE layer** (Firebase Security
+  Rules in shape): per-namespace rules that constrain who may write and
+  what a write must satisfy, evaluated server-side, with no arbitrary code.
+  e.g. `allow write scores/<id> if value.score is number and
+  value.score <= MAX and request.identity == resource.owner`. The rule
+  model is the real design work and the thing that makes this usable.
+- **What it unlocks** (apps someone would actually ship): a self-hosted
+  comments / guestbook widget (a Disqus replacement); a poll / voting app
+  (the reservation-pattern CAS already does atomic counts); a high-score /
+  save-state for browser games; a form backend ("Formspree over SSH"); URL
+  shorteners, visitor counters, feature flags.
+- **The honest limit**: declarative rules stop GROSS abuse (impossible
+  values, wrong-owner writes, malformed data). They do NOT stop a cheater
+  who submits a plausible-but-unearned value within the rules; catching
+  that needs a server-authoritative replay of the app's logic (a full
+  backend), which is true of every client-side app and out of scope here.
+  The fit is apps where data is simple AND the rules can express the
+  integrity you need: developer-only writes, public-append-with-rate-limit,
+  share-via-unguessable-link, or bounded/owned records. Complex multi-user
+  access control is the line where this stops being simple.
+
+Revisits the "Comments / threaded discussion" non-goal: we would not build
+comments, but the persistence API lets a USER build them.
+
+**Open design questions before either ships:**
+
+- Static: deploy atomicity; per-site vs per-identity quota; custom
+  subdomains.
+- Persistence: the declarative rule language + its evaluation model (the
+  core work); per-app namespace + token issuance derived from the SSH-key
+  identity; rate-limiting + abuse on a writable public API; quota
+  accounting for app data vs paste data; end-user identity (does the app's
+  own users need identities, or only the developer + anonymous-with-rules?).
+
+---
+
 ## Non-goals (explicitly out of v1 scope)
 
 These are interesting but expand the product beyond "host renderable
