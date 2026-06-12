@@ -1110,6 +1110,28 @@ own four pieces; they interlock.
   (which holds that room's hub lock for the KV write's duration) never
   stalls a concurrent upgrade to a DIFFERENT room. One room's contention
   stays local to that room.
+
+  Decoupling admission from the global lock opens a window: between an
+  admission reserving its per-app slot (and releasing the global lock) and
+  registering its reservation into the hub, the hub is momentarily empty
+  from the perspective of any other goroutine. A concurrent durable write to
+  the SAME room with no live connections creates a transient hub, commits,
+  mirrors, and then tears that hub down if it is "still empty" - and would,
+  in that window, remove the very hub the admission is about to register
+  into, orphaning the registration (it lands in a hub no longer in the map,
+  so it misses live frames) and leaking its per-app slot (a later release
+  finds no hub and skips the decrement). A PENDING-ADMIT guard closes this:
+  the registry tracks a per-room count of in-flight admissions, incremented
+  under the global lock when the slot is reserved (before the lock is
+  released) and decremented under it once the register has run. Every
+  hub-removal path - the empty-hub teardown the last leave fires, the
+  transient-hub cleanup a durable write runs, and an admission's own
+  per-room-cap rollback - removes a hub only when it is empty AND has zero
+  in-flight admissions, so a hub an admission is about to register into is
+  never torn out. The guard keeps the admission decoupled (it still holds no
+  global lock while taking the hub lock to register), so the per-room
+  isolation above is preserved; it only narrows "the hub is idle" to also
+  mean "no admission is mid-flight into it."
 - **Server heartbeat (ping/pong) to reap dead connections.** The server
   sends a WebSocket ping to each connection on a fixed interval and expects
   a pong back within a deadline; a connection that misses the pong deadline
