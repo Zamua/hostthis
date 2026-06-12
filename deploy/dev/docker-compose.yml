@@ -28,8 +28,14 @@ services:
       timeout: 3s
       retries: 5
 
-  # one-shot job that creates the test bucket so the integration test
-  # doesn't have to. Idempotent - re-running is a no-op.
+  # one-shot job that creates the test buckets so the integration tests
+  # don't have to. Idempotent - re-running is a no-op. Two buckets:
+  #   - hostthis-blobs:    the S3 blob backend (TestS3BlobStore_RoundTrip)
+  #   - hostthis-metadata: the SlateDB state the slate/shale conformance
+  #     runs write (NewSlateRepo / NewShaleRepo). SlateDB does NOT
+  #     auto-create its bucket, so without this the slatedb + shale
+  #     conformance fails on a fresh dev-minio-up until the bucket is made
+  #     by hand.
   bucket-init:
     image: minio/mc:latest
     container_name: hostthis-dev-bucket-init
@@ -39,7 +45,8 @@ services:
     entrypoint: >
       sh -c '
         mc alias set local http://minio:9000 admin supersecret &&
-        (mc mb --ignore-existing local/hostthis-blobs)
+        mc mb --ignore-existing local/hostthis-blobs &&
+        mc mb --ignore-existing local/hostthis-metadata
       '
 
 volumes:

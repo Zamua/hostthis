@@ -15,6 +15,14 @@
 // Plus the cluster-layer additions:
 //   HOSTTHIS_NODE_ID                  (default os.Hostname(), or "hostthis-1")
 //   HOSTTHIS_SHALE_REPLICATION_FACTOR (default 1)
+//   HOSTTHIS_SHALE_BIND_ADDR          (host:port; NON-EMPTY enables multi-node mode)
+//   HOSTTHIS_SHALE_GRPC_ADDR          (host:port; required when BIND_ADDR is set)
+//   HOSTTHIS_SHALE_SEEDS              (comma-separated peer BIND_ADDRs; empty = seed node)
+//
+// With HOSTTHIS_SHALE_BIND_ADDR unset (the default) the node runs the
+// single-node path exactly as before: no gossip, no ring routing, every
+// op local. Setting it brings up memberlist + gRPC forwarding and joins
+// the ring (docs/SPEC.md "Multi-node shale").
 //
 // ReadConsistency is fixed at cluster.ReadNearest inside
 // storage.NewShaleRepo (ShaleConfig exposes no knob for it), so there is
@@ -53,6 +61,12 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 	}
 	replicationFactor := envOrInt("HOSTTHIS_SHALE_REPLICATION_FACTOR", 1)
 
+	// Multi-node peer-discovery config. A non-empty bind addr is the
+	// switch that takes the cluster out of the single-node path.
+	bindAddr := strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_BIND_ADDR"))
+	grpcAddr := strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_GRPC_ADDR"))
+	seeds := parseSeeds(os.Getenv("HOSTTHIS_SHALE_SEEDS"))
+
 	if bucket == "" {
 		return nil, fmt.Errorf("HOSTTHIS_METADATA_S3_BUCKET is required for shale backend")
 	}
@@ -69,15 +83,52 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		SecretKey:         secretKey,
 		UseSSL:            useSSL,
 		DbName:            dbName,
+		BindAddr:          bindAddr,
+		GRPCAddr:          grpcAddr,
+		Seeds:             seeds,
 		ReplicationFactor: replicationFactor,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open shale: %w", err)
 	}
-	logger.Printf("metadata: shale bucket=%s db=%s rf=%d endpoint=%s", bucket, dbName, replicationFactor, endpoint)
+	if bindAddr == "" {
+		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d endpoint=%s",
+			nodeID, bucket, dbName, replicationFactor, endpoint)
+	} else {
+		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d bucket=%s db=%s endpoint=%s",
+			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, bucket, dbName, endpoint)
+	}
 	return &metadataBundle{
 		Repo:    repo,
 		KeyGate: repo,
-		Close:   repo.Close,
+		// Static-site hosting on shale: the ShaleSiteRepo adapter shares the
+		// same shale cluster (shard routing + per-shard CAS) as the paste
+		// repo, so a non-nil Sites lights up archive hosting on shale, the
+		// same way it does on slatedb.
+		Sites: storage.NewShaleSiteRepo(repo),
+		// Room persistence on shale: the ShaleRoomRepo adapter shares the same
+		// shale cluster, co-locating every room family on the {app-slug} shard
+		// so the room tier runs on shale clusters too.
+		Rooms: storage.NewShaleRoomRepo(repo),
+		Close: repo.Close,
 	}, nil
+}
+
+// parseSeeds splits a comma-separated HOSTTHIS_SHALE_SEEDS value into peer
+// bind addresses, trimming whitespace around each entry and dropping empty
+// ones (so a trailing comma or an all-whitespace value yields nil, which
+// cluster.Open reads as "this node is the seed"). Returns nil for an empty
+// input so the single-node path sees a nil Seeds slice unchanged.
+func parseSeeds(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if s := strings.TrimSpace(part); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

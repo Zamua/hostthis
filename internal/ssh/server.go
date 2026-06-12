@@ -6,6 +6,7 @@
 package ssh
 
 import (
+	"bufio"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -55,6 +56,7 @@ type Server struct {
 	HostKeyPath string
 	ApexDomain  string // used in user-visible messages (help text, error hints).
 	Upload      *service.Upload
+	Deploy      *service.DeploySite // optional; nil disables static-site archive uploads
 	Manage      *service.Manage
 	KeyGate     *service.KeyGate // optional; nil disables the Sybil rate limit
 	BuildURL    URLBuilder
@@ -381,8 +383,21 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		return
 	}
 
-	// Create path.
-	res, err := s.Upload.Create(limited, owner, args.Name, args.Type)
+	// Create path. Peek the leading bytes to detect a gzip-tar static-
+	// site archive the same way the format gate detects HTML vs Markdown.
+	// A gzip magic prefix (and no explicit text type hint) routes to the
+	// site-deploy path; everything else is a single-file paste. The peek
+	// is non-destructive: the buffered reader replays the prefix to the
+	// downstream service.
+	peeked := bufio.NewReaderSize(limited, 512)
+	if s.Deploy != nil && args.Type == "" {
+		if head, _ := peeked.Peek(2); domain.HasGzipMagic(head) {
+			s.deploySite(sess, owner, peeked)
+			return
+		}
+	}
+
+	res, err := s.Upload.Create(peeked, owner, args.Name, args.Type)
 	if err != nil {
 		emitServiceErr(sess, err)
 		return
@@ -394,6 +409,23 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	} else {
 		fmt.Fprintln(sess.Stderr(), "expires in 7 days")
 	}
+	_ = sess.Exit(ExitOK)
+}
+
+// deploySite runs the static-site archive path: safe-untar the gzip-tar
+// stream, store each file as a blob, build the manifest, persist the
+// Site. Returns the same shape of URL response a single-file upload
+// does - no new verb, no extra flags - so `tar czf - site/ | ssh apex`
+// just works.
+func (s *Server) deploySite(sess gossh.Session, owner string, body io.Reader) {
+	res, err := s.Deploy.Deploy(body, owner)
+	if err != nil {
+		emitServiceErr(sess, err)
+		return
+	}
+	url := s.BuildURL(res.Site.Slug)
+	fmt.Fprintln(sess, url)
+	fmt.Fprintf(sess.Stderr(), "site: %d file(s). expires in 7 days\n", len(res.Site.Manifest.Files))
 	_ = sess.Exit(ExitOK)
 }
 
@@ -815,6 +847,12 @@ func emitServiceErr(sess gossh.Session, err error) {
 		fmt.Fprintln(sess.Stderr(), "hostthis: name must be 1–60 printable chars, no newlines")
 	case errors.Is(err, domain.ErrUnsupportedKind):
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrUnsupportedKind.Error())
+	case errors.Is(err, domain.ErrNoWebContent):
+		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrNoWebContent.Error())
+	case errors.Is(err, domain.ErrUnsafeArchive):
+		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrUnsafeArchive.Error())
+	case errors.Is(err, domain.ErrTooManyFiles):
+		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrTooManyFiles.Error())
 	default:
 		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
 	}

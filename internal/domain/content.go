@@ -14,6 +14,12 @@ type ContentKind string
 const (
 	KindHTML     ContentKind = "html"
 	KindMarkdown ContentKind = "markdown"
+	// KindSite is a gzip-tar archive of a static site (HTML/CSS/JS). It
+	// is detected by the gzip magic in the upload prefix; the archive's
+	// contents (a tar inside, and at least one piece of web content) are
+	// confirmed by the safe-untar, not by the format gate. A site is
+	// served as a directory off its slug, not as a single rendered file.
+	KindSite ContentKind = "site"
 )
 
 // ErrUnsupportedKind is returned when content sniffs to something
@@ -65,6 +71,21 @@ const HardRawByteCap = 100 << 20 // 100 MiB
 // Pass "" to skip the hint and rely purely on sniffing.
 func DetectKind(b []byte, hint string) (ContentKind, error) {
 	hint = strings.ToLower(strings.TrimSpace(hint))
+
+	// Archive branch: a gzip magic prefix routes to the static-site path.
+	// This is by content, never by filename (the SSH pipe carries no
+	// filename), matching how every other format is recognized. The
+	// hint, when given, must not be a text hint - a user can't relabel a
+	// gzip stream as HTML to smuggle it through, just as the textual
+	// branches reject binary bytes under a text hint. We accept gzip
+	// detection only on no hint or an explicit archive hint; the actual
+	// "is there a tar inside, and does it hold web content" check happens
+	// in the safe-untar, not here.
+	if HasGzipMagic(b) && (hint == "" || hint == "tgz" || hint == "tar.gz" ||
+		strings.HasPrefix(hint, "application/gzip") || strings.HasPrefix(hint, "application/x-gzip")) {
+		return KindSite, nil
+	}
+
 	sniff := b
 	if len(sniff) > 512 {
 		sniff = sniff[:512]

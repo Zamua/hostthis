@@ -38,7 +38,8 @@ func TestConformance_Slate(t *testing.T) {
 	access := envOrDefault("MINIO_TEST_ACCESS_KEY", "admin")
 	secret := envOrDefault("MINIO_TEST_SECRET_KEY", "supersecret")
 
-	runConformance(t, "slatedb", conformCaps{ExpiryFreesQuotaAtReadTime: true, StrictQuotaUnderConcurrency: true}, func(t *testing.T) conformanceRepo {
+	caps := conformCaps{ExpiryFreesQuotaAtReadTime: true, StrictQuotaUnderConcurrency: true}
+	newSlate := func(t *testing.T) *storage.SlateRepo {
 		// Unique per-call logical db so each subtest starts empty within
 		// the shared bucket. Run epoch (nanos) + a monotonic counter keeps
 		// concurrent CI runs from colliding.
@@ -57,7 +58,27 @@ func TestConformance_Slate(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = repo.Close() })
 		return repo
-	})
+	}
+	newRepo := func(t *testing.T) conformanceRepo { return newSlate(t) }
+	// The site repo (SlateSiteRepo) wraps the SAME SlateRepo, so the
+	// cross-quota + cross-family-slug site subtests exercise the real
+	// interaction in one SlateDB instance.
+	newSites := func(t *testing.T) (conformanceRepo, conformanceSiteRepo) {
+		repo := newSlate(t)
+		return repo, storage.NewSlateSiteRepo(repo)
+	}
+	// The room repo (SlateRoomRepo), the paste repo, and the site repo all wrap
+	// the SAME SlateRepo, so the cross-kind service-wide cap room subtest
+	// exercises the real interaction in one SlateDB instance.
+	newRooms := func(t *testing.T) roomConformanceStores {
+		repo := newSlate(t)
+		return roomConformanceStores{
+			Rooms: storage.NewSlateRoomRepo(repo),
+			Paste: repo,
+			Site:  storage.NewSlateSiteRepo(repo),
+		}
+	}
+	runConformanceWithSites(t, "slatedb", caps, newRepo, newSites, newRooms)
 }
 
 func envOrDefault(key, fallback string) string {

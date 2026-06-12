@@ -21,6 +21,7 @@ import (
 	"github.com/Zamua/hostthis/internal/cache"
 	"github.com/Zamua/hostthis/internal/domain"
 	httpapi "github.com/Zamua/hostthis/internal/http"
+	"github.com/Zamua/hostthis/internal/relay"
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
@@ -64,10 +65,42 @@ func main() {
 		logger.Fatalf("blob store: %v", err)
 	}
 
+	siteRepo := metadata.Sites
+	roomRepo := metadata.Rooms
+
 	uploadSvc := service.NewUpload(pasteRepo, blobs)
 	uploadSvc.ServiceCapBytes = *storageCap
 	manageSvc := service.NewManage(pasteRepo, blobs)
 	manageSvc.ServiceCapBytes = *storageCap
+
+	// Static-site archive deploys. Reuses the same blob store + the same
+	// per-identity quota as pastes; nil-safe if the metadata backend
+	// doesn't expose a site repo.
+	var deploySvc *service.DeploySite
+	if siteRepo != nil {
+		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobs)
+		deploySvc.ServiceCapBytes = *storageCap
+	}
+
+	// Rooms: the no-auth, capability-based app-persistence tier
+	// (POST/GET/PUT/DELETE under /api/rooms on an app subdomain). Reuses
+	// the same metadata backend; nil-safe if the backend has no room repo.
+	var roomsSvc *service.Rooms
+	if roomRepo != nil {
+		roomsSvc = service.NewRooms(roomRepo)
+		roomsSvc.ServiceCapBytes = *storageCap
+	}
+
+	// Relay: the real-time per-room WebSocket relay layered on the rooms
+	// tier (see SPEC.md "Real-time room relay (WebSocket)"). It depends on
+	// the rooms service only for the late-join snapshot (the Scan verb) and
+	// reuses the durable KV for persistence via the HTTP PUT/DELETE mirror.
+	// Single-node, in-memory per-room hubs; nil-safe when rooms are not
+	// wired (no relay surface on a backend without a room repo).
+	var roomRelay *relay.Relay
+	if roomsSvc != nil {
+		roomRelay = relay.NewRelay(roomsSvc, relay.NewLimits())
+	}
 
 	// CDN cache purger. Default is noop (no CDN in front); when CF is
 	// configured we wire it up so Update/Delete invalidate the edge
@@ -80,6 +113,15 @@ func main() {
 	manageSvc.KeyGate = keyGate
 	sweepSvc := service.NewSweep(pasteRepo, blobsSweep, logger)
 	sweepSvc.KeyGate = keyGate
+	if siteRepo != nil {
+		// Wire site expiry + site-blob GC protection into the sweep.
+		sweepSvc.Sites = siteRepo
+	}
+	if roomRepo != nil {
+		// Wire room expiry (30-day inactivity TTL) + the room-create
+		// rate-limit prune into the sweep.
+		sweepSvc.Rooms = roomRepo
+	}
 
 	// HOSTTHIS_SWEEP_DISABLED=true skips the periodic sweep entirely
 	// for the lifetime of the process. Operator handle for cutover
@@ -117,6 +159,7 @@ func main() {
 		HostKeyPath: filepath.Join(*dataDir, "ssh_host_ed25519_key"),
 		ApexDomain:  *apexDomain,
 		Upload:      uploadSvc,
+		Deploy:      deploySvc, // nil when the backend has no site repo
 		Manage:      manageSvc,
 		KeyGate:     keyGate,
 		BuildURL:    build,
@@ -129,6 +172,15 @@ func main() {
 		LandingHTML: landing,
 		ApexDomain:  *apexDomain,
 		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),
+	}
+	if siteRepo != nil {
+		httpServer.Sites = siteRepo
+	}
+	if roomsSvc != nil {
+		httpServer.Rooms = roomsSvc
+	}
+	if roomRelay != nil {
+		httpServer.Relay = roomRelay
 	}
 	httpSrv := &http.Server{
 		Addr:    *httpAddr,
@@ -166,6 +218,14 @@ func main() {
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Printf("server error: %v", err)
 		}
+	}
+
+	// Close all live relay connections first: a hijacked WebSocket is not
+	// tracked by http.Server.Shutdown, so closing them here (with a normal
+	// closure) unblocks their request goroutines and lets clients reconnect
+	// on their backoff schedule rather than hammering instantly.
+	if roomRelay != nil {
+		roomRelay.Registry().CloseAll()
 	}
 
 	shutdownCtx, scancel := context.WithTimeout(context.Background(), 5*time.Second)

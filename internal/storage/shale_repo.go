@@ -78,6 +78,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -85,20 +86,24 @@ import (
 	"github.com/Zamua/shale/backends/slate"
 	"github.com/Zamua/shale/pkg/backend"
 	"github.com/Zamua/shale/pkg/cluster"
+	"github.com/Zamua/shale/pkg/rpc"
+	"google.golang.org/grpc"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// ShaleConfig captures the parameters needed to open a single-node
-// shale cluster over the slate backend. The S3 connection fields mirror
-// SlateConfig (they configure the same underlying SlateDB-on-object-
-// storage engine); NodeID + the consistency knobs are the cluster-layer
-// additions.
+// ShaleConfig captures the parameters needed to open a shale cluster over
+// the slate backend. The S3 connection fields mirror SlateConfig (they
+// configure the same underlying SlateDB-on-object-storage engine); NodeID,
+// the peer-discovery fields, and the consistency knobs are the
+// cluster-layer additions.
 //
-// This phase builds at ReplicationFactor=1 (one in-process node) for the
-// conformance suite. The ShardKeyFn and the reservation pattern are
-// present and correct so the same code shards correctly at N>1; shale's
-// own tests cover multi-node routing.
+// Single-node vs multi-node is selected by BindAddr: empty keeps the
+// single-node path (every op local, no gossip, no ring routing - today's
+// behavior, the back-compat guarantee), non-empty brings up memberlist +
+// gRPC forwarding and joins the ring. The ShardKeyFn and the reservation
+// pattern are unchanged across node counts: the same code shards correctly
+// at N>1, and shale's own tests cover multi-node routing + rebalance.
 type ShaleConfig struct {
 	NodeID    string // stable node identity; required by cluster.Open
 	Endpoint  string // e.g. "http://minio:9000"; empty for AWS
@@ -109,9 +114,28 @@ type ShaleConfig struct {
 	UseSSL    bool   // false -> slate sets AWS_ALLOW_HTTP=true (MinIO dev)
 	DbName    string // logical db name within the bucket; key prefix for SlateDB files
 
+	// BindAddr is the host:port memberlist listens on. A NON-EMPTY value
+	// enables multi-node mode (gossip membership + ring routing + gRPC
+	// forwarding + rebalance on membership change). Empty keeps the
+	// single-node path: every op resolves to the local backend, no ring,
+	// no gossip. This is the back-compat switch.
+	BindAddr string
+
+	// GRPCAddr is this node's gRPC forwarding address, broadcast to peers
+	// as their forwarding target. Required whenever BindAddr is set
+	// (cluster.Open errors if BindAddr is non-empty and GRPCAddr is
+	// empty). Ignored in single-node mode.
+	GRPCAddr string
+
+	// Seeds are other nodes' BindAddrs, used to bootstrap gossip
+	// discovery. Empty means this node is the seed/founder. Ignored in
+	// single-node mode.
+	Seeds []string
+
 	// ReplicationFactor is forwarded to cluster.Config. Zero is
 	// normalized to 1 by cluster.Open (single owner per key, no
-	// replicas). This phase exercises the single-node path.
+	// replicas). R=1 is the horizontal-write-scaling shape; R>1 trades
+	// write throughput for availability (docs/SPEC.md "R=1 vs R=2").
 	ReplicationFactor int
 }
 
@@ -119,24 +143,84 @@ type ShaleConfig struct {
 // same service-layer interfaces as SlateRepo. Every operation goes
 // through the cluster handle, which routes per-shard via shaleShardKey
 // and commits single-shard writes through per-shard CAS.
+//
+// In multi-node mode (cfg.BindAddr != "") the repo ALSO owns the
+// process-level gRPC peer-forwarding server: cluster.Open advertises the
+// node's GRPCAddr via gossip but does not stand up the listener that peers
+// forward routed reads/writes/migrations to (docs/SPEC.md "Peer
+// forwarding"). NewShaleRepo binds that listener + serves the cluster's
+// rpc handlers on it; grpcSrv + grpcLis are nil in single-node mode and
+// Close gracefully stops/closes them when set.
 type ShaleRepo struct {
 	cluster *cluster.Cluster
+
+	// grpcAddr is the ACTUAL bound forwarding address advertised to peers
+	// (lis.Addr().String()), or "" in single-node mode. bindAddr mirrors
+	// the memberlist bind address a second node seeds off. Both are exposed
+	// via accessors so a peer can reference this node.
+	grpcAddr string
+	bindAddr string
+
+	// grpcSrv + grpcLis are the peer-forwarding server and its listener,
+	// set only in multi-node mode. nil single-node (the back-compat path
+	// stands up neither). Close GracefulStops the server, which drains
+	// in-flight RPCs and closes the listener.
+	grpcSrv *grpc.Server
+	grpcLis net.Listener
 }
 
-// NewShaleRepo opens a single-node shale cluster over a fresh slate
-// backend and returns a ShaleRepo over it. Caller must Close() to flush
-// and shut down the cluster (which shuts down the slate backend in turn).
+// NewShaleRepo opens a shale cluster over a fresh slate backend and
+// returns a ShaleRepo over it. Caller must Close() to flush and shut down
+// the cluster (which shuts down the slate backend in turn).
+//
+// When cfg.BindAddr is empty the cluster opens single-node (today's
+// behavior: every op local, no gossip, no ring routing). When BindAddr is
+// non-empty it opens multi-node: cluster.Open brings up memberlist on
+// BindAddr, advertises GRPCAddr to peers, joins via Seeds, and rebalances
+// the ring on membership change. The peer-discovery fields are passed
+// straight through to cluster.Config; everything else (ShardKeyFn,
+// ReadConsistency, ReplicationFactor) is identical across modes.
 //
 // The cluster is opened with shaleShardKey as its ShardKeyFn so that
 // every key family co-locates on the shard keyed by its subject
 // (<slug> / <id> / <subnet>), which is what makes the reservation
 // counter and the per-slug authoritative rows each single-shard.
+//
+// Multi-node wiring (cfg.BindAddr != ""): NewShaleRepo binds the gRPC
+// peer-forwarding listener on cfg.GRPCAddr BEFORE opening the cluster, then
+// advertises the listener's ACTUAL bound address (lis.Addr().String()) as
+// the cluster's GRPCAddr. This matters when cfg.GRPCAddr is ":0" / an
+// OS-assigned port: the real port is only known after Listen, and a peer
+// that forwards to the advertised address must reach the address actually
+// served. After the cluster is open it registers the cluster's rpc
+// handlers on a grpc.Server and serves in a background goroutine. Close
+// gracefully stops that server + closes the listener. Single-node mode
+// (cfg.BindAddr == "") binds no listener and starts no server: the
+// back-compat path is byte-for-byte today's behavior.
 func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	if cfg.Bucket == "" {
 		return nil, fmt.Errorf("ShaleConfig.Bucket required")
 	}
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("ShaleConfig.NodeID required")
+	}
+
+	// Multi-node only: bind the peer-forwarding listener BEFORE opening the
+	// cluster so the advertised GRPCAddr is the address actually served
+	// (resolves the ":0" / OS-assigned-port case). Single-node leaves lis
+	// nil and the cluster opens with an empty GRPCAddr, exactly as before.
+	var lis net.Listener
+	advertiseGRPCAddr := cfg.GRPCAddr
+	if cfg.BindAddr != "" {
+		if cfg.GRPCAddr == "" {
+			return nil, fmt.Errorf("shale: GRPCAddr required in multi-node mode (BindAddr set)")
+		}
+		l, err := net.Listen("tcp", cfg.GRPCAddr)
+		if err != nil {
+			return nil, fmt.Errorf("shale: bind gRPC listener on %q: %w", cfg.GRPCAddr, err)
+		}
+		lis = l
+		advertiseGRPCAddr = l.Addr().String()
 	}
 
 	be, err := slate.New(slate.Config{
@@ -149,31 +233,79 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		UseSSL:    cfg.UseSSL,
 	})
 	if err != nil {
+		if lis != nil {
+			_ = lis.Close()
+		}
 		return nil, fmt.Errorf("shale: open slate backend: %w", err)
 	}
 
 	cl, err := cluster.Open(cluster.Config{
 		NodeID:            cfg.NodeID,
 		Backend:           be,
+		BindAddr:          cfg.BindAddr,
+		GRPCAddr:          advertiseGRPCAddr,
+		Seeds:             cfg.Seeds,
 		ReplicationFactor: cfg.ReplicationFactor,
 		ReadConsistency:   cluster.ReadNearest,
 		ShardKeyFn:        shaleShardKey,
 	})
 	if err != nil {
 		_ = be.Close()
+		if lis != nil {
+			_ = lis.Close()
+		}
 		return nil, fmt.Errorf("shale: open cluster: %w", err)
 	}
 
-	return &ShaleRepo{cluster: cl}, nil
+	r := &ShaleRepo{
+		cluster:  cl,
+		bindAddr: cfg.BindAddr,
+		grpcAddr: advertiseGRPCAddr,
+	}
+
+	// Multi-node: stand up the peer-forwarding server the cluster advertised
+	// but does not serve itself. cluster.Open advertises GRPCAddr via gossip;
+	// this is the listener that answers it.
+	if lis != nil {
+		g := grpc.NewServer()
+		rpc.NewServer(cl).Register(g)
+		r.grpcSrv = g
+		r.grpcLis = lis
+		go func() {
+			// Serve returns when GracefulStop (in Close) closes the
+			// listener; that is a clean shutdown, not an error to surface.
+			_ = g.Serve(lis)
+		}()
+	}
+
+	return r, nil
 }
 
-// Close shuts down the cluster (and the underlying slate backend).
+// Close shuts down the peer-forwarding gRPC server (multi-node only, a
+// no-op when nil), then the cluster (and the underlying slate backend).
+// GracefulStop drains in-flight RPCs and closes the listener, so the
+// forwarding port is released with no leaked goroutine.
 func (r *ShaleRepo) Close() error {
+	if r.grpcSrv != nil {
+		r.grpcSrv.GracefulStop() // also closes r.grpcLis
+	}
 	if r.cluster != nil {
 		return r.cluster.Close()
 	}
 	return nil
 }
+
+// GRPCAddr returns this node's ACTUAL bound gRPC forwarding address (the
+// one advertised to peers), or "" in single-node mode. A second node seeds
+// off the cluster via BindAddr, but a deploy/test that needs to reference
+// the served forwarding endpoint reads it here (the configured GRPCAddr may
+// have been ":0", so the actual port is only known post-bind).
+func (r *ShaleRepo) GRPCAddr() string { return r.grpcAddr }
+
+// BindAddr returns this node's memberlist bind address, or "" in
+// single-node mode. A second node passes this as its Seeds entry to join
+// the ring this node founded.
+func (r *ShaleRepo) BindAddr() string { return r.bindAddr }
 
 // --- key builders (mirror SlateRepo's layout) ------------------------------
 
@@ -657,19 +789,30 @@ func (r *ShaleRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 
 // reserveBytes is step 1 of the reservation pattern: a single-shard CAS on
 // the {id} shard that atomically checks the per-owner cap and increments
-// the identity_bytes counter by `body`, plus writes a reservation marker
-// keyed by slug. Returns ErrOverUserQuota if counter+body would exceed
-// cap. The increment + the check are one atomic CAS, so two concurrent
-// reservers serialize: exactly one reads the pre-increment counter, the
-// other reads the post-increment value and is rejected if it no longer
-// fits. Quota is therefore a hard ceiling (docs/SPEC.md "Why quota can
-// never be exceeded").
+// the identity_bytes (PASTE) counter by `body`, plus writes a reservation
+// marker keyed by slug. Returns ErrOverUserQuota if the owner's COMBINED
+// paste + site bytes plus `body` would exceed cap. The increment + the
+// check are one atomic CAS, so two concurrent reservers serialize: exactly
+// one reads the pre-increment counter, the other reads the post-increment
+// value and is rejected if it no longer fits. Quota is therefore a hard
+// ceiling (docs/SPEC.md "Why quota can never be exceeded").
 //
-// A zero userCap means "no per-owner cap"; the counter is still
+// The cap check sums BOTH the paste counter AND the site counter, so a
+// paste insert is rejected if the owner's combined paste+site bytes would
+// exceed userCap, the SYMMETRIC twin of reserveSiteBytes (which reads the
+// paste counter for the site direction) and matching the sqlite
+// identityActiveBytes that spans both kinds. The site counter
+// (identity_site_bytes/<id>) co-shards on {id} with the paste counter, so
+// reading it inside this CAS is a same-shard read. Only the paste counter
+// is incremented here; the site counter is read for the cap but never
+// written.
+//
+// A zero userCap means "no per-owner cap"; the paste counter is still
 // incremented (so SumActiveBytesByOwner stays accurate) but the check is
 // skipped.
 func (r *ShaleRepo) reserveBytes(identity, slug string, body, userCap int64, now time.Time) error {
 	counterKey := shaleKeyIdentityBytes(identity)
+	siteCounterKey := shaleKeyIdentitySiteBytes(identity)
 	reserveKey := shaleKeyIdentityReserve(identity, slug)
 	markerVal, err := encodeReservationMarker(body, now)
 	if err != nil {
@@ -680,8 +823,14 @@ func (r *ShaleRepo) reserveBytes(identity, slug string, body, userCap int64, now
 		if err != nil {
 			return err
 		}
-		if userCap > 0 && cur+body > userCap {
-			return ErrOverUserQuota
+		if userCap > 0 {
+			siteCur, err := txGetCounter(tx, siteCounterKey)
+			if err != nil {
+				return err
+			}
+			if cur+siteCur+body > userCap {
+				return ErrOverUserQuota
+			}
 		}
 		if err := tx.Put(counterKey, formatCounter(cur+body)); err != nil {
 			return err
@@ -794,9 +943,9 @@ func (r *ShaleRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 
 // insertAuthoritative writes the {slug}-shard authoritative rows in one
 // CAS transaction: the paste row, the v1 version row, slug_owner, and the
-// expiry index. The slug-collision check (reject if pastes/<slug> already
-// exists) participates in the transaction's read-set so a racing insert of
-// the same slug conflicts.
+// expiry index. The slug-collision check (reject if pastes/<slug> OR
+// sites/<slug> already exists) participates in the transaction's read-set so
+// a racing insert of the same slug (as a paste OR a site) conflicts.
 func (r *ShaleRepo) insertAuthoritative(p domain.Paste) error {
 	pasteKey := shaleKeyPaste(p.Slug)
 	err := r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
@@ -806,6 +955,16 @@ func (r *ShaleRepo) insertAuthoritative(p domain.Paste) error {
 			return ErrSlugTaken
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return fmt.Errorf("slug check: %w", err)
+		}
+		// A slug must be unique across sites too: reject if a site already
+		// owns it. sites/<slug> co-shards with pastes/<slug> on {slug}, so
+		// this is a same-shard read inside the CAS. Mirrors the site insert's
+		// reciprocal paste-key check and the slatedb paste insert's site-key
+		// guard, so a slug is EITHER a paste or a site in both directions.
+		if _, err := tx.Get(shaleKeySite(p.Slug)); err == nil {
+			return ErrSlugTaken
+		} else if !errors.Is(err, backend.ErrNotFound) {
+			return fmt.Errorf("site slug check: %w", err)
 		}
 		if err := shaleTxPutJSON(tx, pasteKey, pasteFromDomain(p)); err != nil {
 			return err
@@ -1241,7 +1400,13 @@ func (r *ShaleRepo) Unpin(slug domain.Slug) error {
 // ExpiredSlugs fans out across all {slug} shards (cluster.Aggregate) over
 // the expiry/* index and returns the slugs whose expiry timestamp is <=
 // now. The timestamp is the middle segment of expiry/<rfc3339>/<slug>;
-// RFC3339Nano sorts lexicographically so a string compare is correct.
+// RFC3339Nano sorts lexicographically so a string compare is correct at
+// whole-second granularity. NOTE: RFC3339Nano is variable-width (a
+// fractional ".5Z" sorts before a bare "Z" within one whole second), so
+// this paste index carries the same latent sub-second skew documented for
+// the paste expiry path; fixing it is a key-format migration left as a
+// follow-up. The site expiry index uses a fixed-width format
+// (expirySiteTimeFormat) and has no such skew.
 func (r *ShaleRepo) ExpiredSlugs(now time.Time) ([]string, error) {
 	items, err := r.aggregatePrefix([]byte("expiry/"))
 	if err != nil {
@@ -1311,11 +1476,21 @@ func (r *ShaleRepo) ReferencedBlobSHAs() ([]string, error) {
 	return out, nil
 }
 
-// sumServiceWideActiveBytes sums the non-deleted version sizes across the
-// whole keyspace via a cross-shard aggregate, counting only pastes that
-// have not expired. Best-effort, used for the SOFT service-wide cap
-// pre-check (the per-owner cap is the strict one). O(active versions); for
-// low-volume hostthis this is a sub-millisecond fan-out.
+// sumServiceWideActiveBytes sums the non-deleted version sizes AND every
+// site's DedupedSize AND every app's room bytes across the whole keyspace via
+// cross-shard aggregates. Best-effort, used for the SOFT service-wide cap
+// pre-check on the paste-insert, site-deploy, AND room-write paths (the
+// per-owner / per-app cap is the strict one). O(active versions + sites + app
+// room counters); for low-volume hostthis this is a sub-millisecond fan-out.
+//
+// Including site AND room bytes here keeps the service-wide cap SYMMETRIC
+// across all three content kinds: a paste upload sees the bytes sites + rooms
+// already hold, a site deploy sees paste + room bytes, and a room PUT sees
+// paste + site bytes (parallels the slatedb sumServiceWideActiveBytes, which
+// adds the site + room totals, and the sqlite serviceWideActiveBytes, which
+// sums pastes + sites + rooms). When the shale backend has no site / room impl
+// wired (no sites/ or roombytes/ keys exist) those aggregates are empty and
+// this reduces to the pure version sum.
 func (r *ShaleRepo) sumServiceWideActiveBytes() (int64, error) {
 	versions, err := r.aggregatePrefix([]byte("versions/"))
 	if err != nil {
@@ -1332,7 +1507,20 @@ func (r *ShaleRepo) sumServiceWideActiveBytes() (int64, error) {
 		}
 		total += int64(v.Size)
 	}
-	return total, nil
+	siteTotal, err := r.sumServiceWideActiveSiteBytes()
+	if err != nil {
+		return 0, err
+	}
+	// Room bytes fold into the same service-wide sum (from the per-app
+	// roombytes/ counters) so the cap is SYMMETRIC across all three content
+	// kinds: a room PUT sees paste+site bytes (it calls this), and a paste
+	// insert / site deploy sees room bytes (here). When no rooms exist the
+	// counter aggregate is empty and this reduces to versions + sites.
+	roomTotal, err := r.SumActiveRoomBytes()
+	if err != nil {
+		return 0, err
+	}
+	return total + siteTotal + roomTotal, nil
 }
 
 // --- KeyGateRepo (Sybil rate limit) ----------------------------------------
@@ -1557,8 +1745,16 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 	if err := r.reconcileIndexes(pastesByOwner); err != nil {
 		return err
 	}
-	// Job 2: complete past-grace markers (orphan-release / leaked-drop).
-	return r.releaseReservationMarkers(now, reserveGrace, markersByOwner, livePasteSlugs)
+	// Job 2: complete past-grace paste markers (orphan-release / leaked-drop).
+	if err := r.releaseReservationMarkers(now, reserveGrace, markersByOwner, livePasteSlugs); err != nil {
+		return err
+	}
+	// Job 3: complete past-grace SITE markers, the exact same orphan-release /
+	// leaked-drop rule applied to identity_site_reserve/ against the SITE
+	// counter (shale_site_repo.go). It is the backstop for a deploy that
+	// crashed between the site reserve and the authoritative write (the hot
+	// path's release covers a failed write; the reconciler covers a crash).
+	return r.reconcileSiteReservations(now, reserveGrace)
 }
 
 // reservationMarkerEntry is a parsed reservation marker tagged with its

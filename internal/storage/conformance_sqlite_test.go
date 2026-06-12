@@ -23,7 +23,8 @@ type sqliteConformRepo struct {
 }
 
 func TestConformance_Sqlite(t *testing.T) {
-	runConformance(t, "sqlite", conformCaps{ExpiryFreesQuotaAtReadTime: true, StrictQuotaUnderConcurrency: true}, func(t *testing.T) conformanceRepo {
+	caps := conformCaps{ExpiryFreesQuotaAtReadTime: true, StrictQuotaUnderConcurrency: true}
+	newRepo := func(t *testing.T) conformanceRepo {
 		dir := t.TempDir()
 		db, err := storage.Open(filepath.Join(dir, "conform.db"))
 		if err != nil {
@@ -34,5 +35,40 @@ func TestConformance_Sqlite(t *testing.T) {
 			PasteRepo:   storage.NewPasteRepo(db),
 			KeyGateRepo: storage.NewKeyGateRepo(db),
 		}
-	})
+	}
+	// The site repo shares the same *sql.DB as the paste repo, so the
+	// cross-quota + cross-family-slug site subtests exercise the real
+	// interaction.
+	newSites := func(t *testing.T) (conformanceRepo, conformanceSiteRepo) {
+		dir := t.TempDir()
+		db, err := storage.Open(filepath.Join(dir, "conform.db"))
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		r := sqliteConformRepo{
+			PasteRepo:   storage.NewPasteRepo(db),
+			KeyGateRepo: storage.NewKeyGateRepo(db),
+		}
+		return r, storage.NewSiteRepo(db)
+	}
+	// The room repo shares the same *sql.DB as the paste + site repos, so the
+	// cross-kind service-wide cap room subtest exercises the real interaction.
+	newRooms := func(t *testing.T) roomConformanceStores {
+		dir := t.TempDir()
+		db, err := storage.Open(filepath.Join(dir, "conform.db"))
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return roomConformanceStores{
+			Rooms: storage.NewRoomKVRepo(db),
+			Paste: sqliteConformRepo{
+				PasteRepo:   storage.NewPasteRepo(db),
+				KeyGateRepo: storage.NewKeyGateRepo(db),
+			},
+			Site: storage.NewSiteRepo(db),
+		}
+	}
+	runConformanceWithSites(t, "sqlite", caps, newRepo, newSites, newRooms)
 }

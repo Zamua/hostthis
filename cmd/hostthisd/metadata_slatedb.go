@@ -55,6 +55,14 @@ func buildMetadataSlate(logger *log.Logger) (*metadataBundle, error) {
 	return &metadataBundle{
 		Repo:    repo,
 		KeyGate: repo,
-		Close:   repo.Close,
+		// Static-site hosting on slatedb: the SlateSiteRepo adapter shares
+		// the same SlateDB instance + quota accounting as the paste repo.
+		Sites: storage.NewSlateSiteRepo(repo),
+		// Room persistence (the no-auth /api/rooms tier) on slatedb: the
+		// SlateRoomRepo adapter shares the same SlateDB instance + service-wide
+		// quota accounting as the paste + site repos, so the room tier runs on
+		// the slatedb-direct backend prod runs.
+		Rooms: storage.NewSlateRoomRepo(repo),
+		Close: repo.Close,
 	}, nil
 }
