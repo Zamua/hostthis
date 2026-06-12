@@ -477,12 +477,50 @@ Nothing about the product opinions changes for sites:
 - **Retention** is the same fixed 7-day expiry from last update; a site
   evicts itself exactly like a paste, no per-site control.
 - **Versioning** reuses the paste-versioning shape where it is low-cost:
-  each deploy to a slug is a new immutable manifest, so rollback /
-  history ride the existing machinery; otherwise a deploy lands as a
-  fresh slug, matching whatever pastes do. Either way a deploy is
-  ATOMIC - the new manifest only becomes the served one once every blob
-  is written and the manifest is persisted; a half-uploaded site never
-  serves.
+  a deploy to an OWNED site slug re-deploys the site in place (same slug,
+  same URL, new immutable manifest), so rollback / history ride the
+  existing machinery; otherwise a deploy lands as a fresh slug, matching
+  whatever pastes do. Either way a deploy is ATOMIC - the new manifest
+  only becomes the served one once every blob is written and the
+  manifest is persisted; a half-uploaded site never serves.
+
+#### Deploy to an existing site slug (re-deploy in place)
+
+Piping a gzip-tar archive to a slug positional arg
+(`tar czf - -C site . | ssh hostthis.dev <slug>`) re-deploys the SITE
+at that slug, in place, when the slug names a site the connecting key
+owns. The slug and its URL are unchanged: the same `<slug>` serves the
+new content. This is the static-site analogue of "Upload (update an
+existing slug)" for pastes - the format gate (gzip magic) decides
+site-vs-paste, the slug decides new-vs-update.
+
+- **Ownership-gated, no existence leak.** A slug that names a site
+  owned by a DIFFERENT key, or that does not exist as a site at all,
+  returns *not found* (exit 4) - byte-for-byte the SAME shape as any
+  other not-found, so a non-owner cannot probe for which slugs exist
+  or who owns them. This matches the paste-update ownership posture
+  exactly (see "Upload (update an existing slug)").
+- **Atomic replace.** The new manifest's blobs are all written first;
+  then a single transaction swaps the `sites/<slug>` row (new manifest,
+  new `DedupedSize`, refreshed `UpdatedAt` + `ExpiresAt`) and re-keys
+  the expiry index. The URL keeps serving the OLD manifest until that
+  swap lands, and serves the new one immediately after; a half-finished
+  re-deploy never serves a partial site.
+- **Quota is the replace DELTA.** The owner is charged the new site's
+  deduped bytes and credited the old site's deduped bytes in the SAME
+  atomic check, so re-deploying a same-size site does not double-count,
+  and a smaller re-deploy frees the difference. The per-identity cap is
+  evaluated against `existing_owned - old_deduped + new_deduped`. The
+  mid-untar decompression-bomb guard still bounds extraction against the
+  remaining budget so an over-quota archive is rejected before any blob
+  lands.
+- **Retention resets.** Like a paste update, the 7-day expiry clock
+  restarts from the re-deploy time.
+
+A re-deploy to an existing slug NEVER lands as a fresh slug: the slug is
+the explicit target. The fresh-random-slug path is only the no-slug
+create case. The expiry-window `EnsureUnique` slug collision dance (the
+random-slug retry loop) does NOT apply to a targeted re-deploy.
 
 ### Byte-identical validation harness
 
@@ -1480,8 +1518,12 @@ https://abc12345.hostthis.dev
 v2 saved - expires in 7 days
 ```
 Slug as positional arg means "update this one". Server checks ownership
-against the key fingerprint. Failure modes (exit codes; SSH stderr message
-in italics):
+against the key fingerprint. The same format gate the create path uses
+decides paste-vs-site: a gzip-tar archive piped to an OWNED site slug
+re-deploys that SITE in place (see "Static site archives → Reuse →
+Deploy to an existing site slug"); anything else updates a paste as
+described here. The slug and URL are unchanged either way. Failure modes
+(exit codes; SSH stderr message in italics):
 
 - *not found* (exit 4): slug doesn't exist OR exists but the connecting
   ssh key isn't its owner. Indistinguishable on purpose - the owner-check
@@ -2221,6 +2263,8 @@ backends add types that ALSO satisfy them; the domain layer (`Site`,
 The deploy path's interface is:
 
 - `InsertWithQuotaCheck(s Site, dedupedSize int, serviceCap, userCap, now)`
+- `UpdateWithQuotaCheck(s Site, oldDeduped, newDeduped int, serviceCap, userCap, now)`
+  - re-deploy to an OWNED slug in place; charges the replace delta
 - `Get(slug) (Site, error)`
 - `SumActiveBytesByOwner(owner, now) (int64, error)` (the identity's
   active SITE bytes only; the deploy path adds the paste-side sum)
@@ -2297,6 +2341,28 @@ enumerates every site exactly as `pastes/` enumerates every paste.
      row), `Put identity_sites/<id>/<slug>` (empty marker), and
      `Put expiry_sites/<ExpiresAt>/<slug>` (empty marker). All three land
      or none.
+- **Re-deploy (`UpdateWithQuotaCheck`).** Re-deploy to a slug the caller
+  already owns. Holds the same per-identity quota stripe, then inside one
+  transaction:
+  1. **Read `sites/<slug>`.** If missing, OR present but owned by a
+     different identity, return the not-found sentinel (the service layer
+     surfaces it as *not found*, exit 4, no existence leak). The read
+     participates in snapshot-isolation conflict detection.
+  2. **Quota pre-checks on the DELTA.** The service-wide and per-identity
+     sums subtract the OLD row's `DedupedSize` and add the new manifest's
+     `DedupedSize`, so an in-place re-deploy is charged only the delta
+     (a same-size re-deploy is a no-op against quota; a smaller one frees
+     bytes). Reject with the matching sentinel if the post-delta total
+     exceeds a cap.
+  3. **Atomic swap.** `Put sites/<slug>` (new manifest, new `DedupedSize`,
+     refreshed `UpdatedAt` + `ExpiresAt`), leave `identity_sites/<id>/<slug>`
+     in place (owner unchanged), and re-key the expiry marker: `Delete`
+     the old `expiry_sites/<oldExpiresAt>/<slug>` and `Put` the new
+     `expiry_sites/<newExpiresAt>/<slug>`. All of it lands or none; the
+     old manifest serves until the swap commits. Blobs the old manifest
+     referenced are NOT eagerly deleted here - the sweep's
+     reference-counted GC reclaims any now-unreferenced blob, exactly as
+     it does after a paste version churns.
 - **Read (`Get`).** Single `Get sites/<slug>`, decode the JSON row,
   decode the manifest. Returns the not-found sentinel for a missing slug,
   and (like the paste `Get` and the sqlite site `Get`) returns
