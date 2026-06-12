@@ -96,6 +96,9 @@ func NewShaleSiteRepo(repo *ShaleRepo) *ShaleSiteRepo { return &ShaleSiteRepo{re
 func (s *ShaleSiteRepo) InsertWithQuotaCheck(site domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
 	return s.repo.InsertSiteWithQuotaCheck(site, dedupedSize, serviceCap, userCap, now)
 }
+func (s *ShaleSiteRepo) ReplaceWithQuotaCheck(site domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
+	return s.repo.ReplaceSiteWithQuotaCheck(site, dedupedSize, serviceCap, userCap, now)
+}
 func (s *ShaleSiteRepo) Get(slug domain.Slug) (domain.Site, error) { return s.repo.GetSite(slug) }
 func (s *ShaleSiteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int64, error) {
 	return s.repo.SumActiveSiteBytesByOwner(owner, now)
@@ -224,6 +227,55 @@ func (r *ShaleRepo) releaseSiteBytes(identity, slug string) error {
 	})
 }
 
+// reserveSiteReplaceBytes is the replace-path twin of reserveSiteBytes: a
+// single {id}-shard CAS that atomically checks the per-owner cap and adjusts
+// the SITE counter by the REPLACE DELTA (newBody - oldBody), plus stamps a
+// site reservation marker recording that delta. Because the old row's bytes
+// are ALREADY in the site counter, applying the delta moves the counter to
+// the post-replace total in one step.
+//
+// The cap check sums BOTH the paste counter AND the post-delta site counter
+// (pasteCur + siteCur - oldBody + newBody), so a re-deploy is rejected only
+// if the owner's COMBINED post-swap bytes would exceed userCap. A same-size
+// re-deploy nets zero against the cap; a smaller one frees the difference.
+// The check + the adjust are one atomic CAS so two concurrent reservers
+// serialize (the strict ceiling carries over from the insert path).
+//
+// The marker records the delta (which may be negative), so a rollback
+// (releaseSiteBytes) and the reconciler's orphan-release both subtract the
+// SAME delta to undo the adjustment exactly. userCap == 0 means "no per-owner
+// cap": the counter is still adjusted (so SumActiveSiteBytesByOwner stays
+// accurate) but the check is skipped.
+func (r *ShaleRepo) reserveSiteReplaceBytes(identity, slug string, oldBody, newBody, userCap int64, now time.Time) error {
+	siteCounterKey := shaleKeyIdentitySiteBytes(identity)
+	pasteCounterKey := shaleKeyIdentityBytes(identity)
+	reserveKey := shaleKeyIdentitySiteReserve(identity, slug)
+	delta := newBody - oldBody
+	markerVal, err := encodeReservationMarker(delta, now)
+	if err != nil {
+		return err
+	}
+	return r.cluster.Transact(siteCounterKey, func(tx backend.Transaction) error {
+		siteCur, err := txGetCounter(tx, siteCounterKey)
+		if err != nil {
+			return err
+		}
+		if userCap > 0 {
+			pasteCur, err := txGetCounter(tx, pasteCounterKey)
+			if err != nil {
+				return err
+			}
+			if pasteCur+siteCur+delta > userCap {
+				return ErrOverUserQuota
+			}
+		}
+		if err := tx.Put(siteCounterKey, formatCounter(siteCur+delta)); err != nil {
+			return err
+		}
+		return tx.Put(reserveKey, markerVal)
+	})
+}
+
 // --- Site KV operations (on ShaleRepo) -------------------------------------
 
 // InsertSiteWithQuotaCheck deploys a site via the three-step reservation
@@ -282,6 +334,143 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, ser
 		return fmt.Errorf("confirm site insert: %w", err)
 	}
 	return nil
+}
+
+// ReplaceSiteWithQuotaCheck re-deploys an existing OWNED site in place via a
+// three-step sequence that mirrors InsertSiteWithQuotaCheck, charging the
+// REPLACE DELTA rather than the full new size:
+//
+//  1. reserve the delta (newBody - oldBody) on the {id} site counter
+//     (STRICT per-owner cap, the adjust + the combined paste+site check are
+//     one atomic CAS) and stamp a site reservation marker recording the
+//     delta,
+//  2. authoritative swap on the {slug} shard (re-read sites/<slug> in the
+//     CAS read-set for ownership + the old expiry key, overwrite the row,
+//     re-key the expiry index),
+//  3. confirm on the {id} shard: drop the reservation marker.
+//
+// Ownership/existence: the slug must already be a site owned by s.Identity.
+// A missing row OR a foreign-owned row both collapse to ErrNotFound (the SAME
+// sentinel a missing slug yields), so existence/ownership never leaks. The
+// gate is enforced TWICE: an up-front Get to size the delta (read oldBody +
+// reject a foreign/missing row before touching the counter), and again INSIDE
+// the authoritative CAS so a concurrent delete/re-deploy conflicts.
+//
+// The service-wide cap is a SOFT cross-shard pre-check (same posture as the
+// insert path), evaluated against (total - oldBody + newBody) since the
+// shared sum already counts the old row.
+//
+// Reconciler interplay: a replace's authoritative row is ALWAYS present (it
+// is a pre-existing site), so a confirm that fails leaves a marker the
+// reconciler classifies as a leaked-marker drop (delete the marker, do NOT
+// touch the counter) - correct, because the delta was applied during reserve
+// and the swap succeeded. If instead the authoritative write FAILS, step 2's
+// caller releases the reservation (subtracting the delta back); only a crash
+// between the failed write and that release leaves the counter off by the
+// delta (a bounded over/under-count the reconciler cannot distinguish from a
+// landed replace, the same window the insert path accepts).
+//
+// Returns nil / ErrNotFound / ErrServiceFull / ErrOverUserQuota.
+func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
+	identity := s.Identity.String()
+	slug := s.Slug.String()
+	newBody := int64(dedupedSize)
+
+	// Up-front ownership + existence gate. Sizes the delta (oldBody) and
+	// rejects a missing/foreign row BEFORE the counter is touched. A missing
+	// row and a foreign-owned row both collapse to ErrNotFound.
+	var existing siteRow
+	if err := r.getJSON(shaleKeySite(s.Slug), &existing); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if existing.Identity != identity {
+		return ErrNotFound
+	}
+	oldBody := int64(existing.DedupedSize)
+
+	// Service-wide cap: SOFT cross-shard pre-check against the post-swap
+	// total. The shared sum already counts the old row, so credit it back.
+	if serviceCap > 0 {
+		total, err := r.sumServiceWideActiveBytes()
+		if err != nil {
+			return fmt.Errorf("service-wide sum: %w", err)
+		}
+		if total-oldBody+newBody > serviceCap {
+			return ErrServiceFull
+		}
+	}
+
+	// Step 1: reserve the delta (STRICT per-owner quota, combined paste+site).
+	if err := r.reserveSiteReplaceBytes(identity, slug, oldBody, newBody, userCap, now); err != nil {
+		return err
+	}
+
+	// Step 2: authoritative {slug}-shard swap. On any failure, release the
+	// reservation so the delta is undone (over/under-count bounded to the
+	// failure window + the reconciler).
+	if err := r.replaceSiteAuthoritative(s, dedupedSize); err != nil {
+		_ = r.releaseSiteBytes(identity, slug)
+		return err
+	}
+
+	// Step 3: confirm on the {id} shard: drop the reservation marker. The
+	// counter is NOT touched here (the reserve already applied the delta).
+	if err := r.confirmSiteInsert(identity, slug); err != nil {
+		// The authoritative row is swapped + the delta is accounted on the
+		// counter; only the reservation marker lingers. The owner sum reads the
+		// counter (not the marker), so this is invisible to quota; the
+		// reconciler drops the leaked marker. Surface the error so the caller
+		// knows confirm lagged, but the replace is durable + quota-correct.
+		return fmt.Errorf("confirm site replace: %w", err)
+	}
+	return nil
+}
+
+// replaceSiteAuthoritative swaps the {slug}-shard authoritative rows in one
+// CAS: re-read sites/<slug> (ownership re-check INSIDE the read-set so a
+// racing delete/re-deploy conflicts), overwrite it with the new row, and
+// re-key the expiry index (delete the old (oldExpiresAt, slug) marker, write
+// the new one) so the sweep sees the restarted retention clock. A missing or
+// foreign-owned row inside the CAS collapses to ErrNotFound.
+func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int) error {
+	row, err := shaleSiteRowFromDomain(s, dedupedSize)
+	if err != nil {
+		return err
+	}
+	siteKey := shaleKeySite(s.Slug)
+	return r.cluster.Transact(siteKey, func(tx backend.Transaction) error {
+		var cur siteRow
+		if err := shaleTxGetJSON(tx, siteKey, &cur); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return ErrNotFound // vanished between the gate and the swap
+			}
+			return err
+		}
+		if cur.Identity != s.Identity.String() {
+			return ErrNotFound // re-deployed to a different owner; treat as gone
+		}
+		// created_at is the slug's birth time: STRUCTURALLY immutable across a
+		// re-deploy, matching the sqlite UPDATE which never touches the column.
+		// Pin it from the current row so a caller cannot move it via the new row
+		// (the service layer forwards existing.CreatedAt, but the storage
+		// contract must not trust the caller).
+		row.CreatedAt = cur.CreatedAt
+		if err := shaleTxPutJSON(tx, siteKey, row); err != nil {
+			return err
+		}
+		// Re-key the expiry index off the CURRENT row's ExpiresAt (read in this
+		// CAS), so a concurrent re-deploy that changed it can't orphan a stale
+		// marker. Skip the delete when the timestamp is unchanged.
+		if !cur.ExpiresAt.Equal(s.ExpiresAt) {
+			if err := tx.Delete(shaleKeyExpirySite(cur.ExpiresAt, s.Slug)); err != nil {
+				return err
+			}
+		}
+		return tx.Put(shaleKeyExpirySite(s.ExpiresAt, s.Slug), markerValue)
+	})
 }
 
 // insertSiteAuthoritative writes the {slug}-shard authoritative rows in one

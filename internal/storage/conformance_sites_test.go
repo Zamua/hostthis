@@ -56,6 +56,27 @@ func siteOf(slug, identity string, size int) domain.Site {
 	}
 }
 
+// siteOfV is siteOf with a version tag folded into the file's SHA, so two
+// deploys of the SAME slug at different v produce DISTINCT manifests (a fresh
+// content SHA). Used by the replace conformance to prove the row's manifest
+// actually swaps, not just its timestamps.
+func siteOfV(slug, identity string, size int, v string) domain.Site {
+	man := domain.NewManifest()
+	man.Add("index.html", domain.ManifestEntry{
+		SHA:         "sha-" + slug + "-" + v,
+		Size:        size,
+		ContentType: "text/html; charset=utf-8",
+	})
+	return domain.Site{
+		Slug:      domain.Slug(slug),
+		Identity:  domain.Identity(identity),
+		Manifest:  man,
+		CreatedAt: fixedNow,
+		UpdatedAt: fixedNow,
+		ExpiresAt: fixedNow.Add(domain.RetentionWindow),
+	}
+}
+
 // insertSite deploys a site with no caps (caps=0 -> no quota enforcement).
 func insertSite(t *testing.T, sr conformanceSiteRepo, s domain.Site) {
 	t.Helper()
@@ -84,6 +105,166 @@ func runSiteConformance(t *testing.T, name string, caps conformCaps, newSites fu
 	t.Run(name+"/Sites/ExpirySubSecondOrdering", func(t *testing.T) { _, sr := newSites(t); conformSiteExpirySubSecondOrdering(t, sr) })
 	t.Run(name+"/Sites/ReferencedBlobSHAs", func(t *testing.T) { _, sr := newSites(t); conformSiteReferencedBlobSHAs(t, sr) })
 	t.Run(name+"/Sites/DedupedSizeCharged", func(t *testing.T) { _, sr := newSites(t); conformSiteDedupedSizeCharged(t, sr) })
+	t.Run(name+"/Sites/ReplaceInPlace", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceInPlace(t, sr) })
+	t.Run(name+"/Sites/ReplaceNotFoundShape", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceNotFoundShape(t, r, sr) })
+	t.Run(name+"/Sites/ReplaceDeltaQuota", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceDeltaQuota(t, sr) })
+	t.Run(name+"/Sites/ReplaceRestartsExpiry", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceRestartsExpiry(t, sr) })
+}
+
+// conformSiteReplaceInPlace pins the core re-deploy contract: replacing an
+// existing owned site swaps the manifest (new content SHA) while keeping the
+// slug + created_at stable, so rollback/history ride the same identity.
+func conformSiteReplaceInPlace(t *testing.T, sr conformanceSiteRepo) {
+	const slug = "rp123456"
+	v1 := siteOfV(slug, "key:rp", 100, "v1")
+	insertSite(t, sr, v1)
+
+	// Re-deploy the SAME slug with distinct content at a later updated_at.
+	later := fixedNow.Add(2 * time.Hour)
+	v2 := siteOfV(slug, "key:rp", 250, "v2")
+	v2.CreatedAt = later // a hostile caller can't move created_at via the row
+	v2.UpdatedAt = later
+	v2.ExpiresAt = later.Add(domain.RetentionWindow)
+	if err := sr.ReplaceWithQuotaCheck(v2, v2.Manifest.DedupedSize(), 0, 0, later); err != nil {
+		t.Fatalf("replace in place: %v", err)
+	}
+
+	got, err := sr.Get(slug)
+	if err != nil {
+		t.Fatalf("get after replace: %v", err)
+	}
+	// The manifest swapped to v2's content.
+	e, ok := got.Manifest.Files["index.html"]
+	if !ok || e.SHA != "sha-"+slug+"-v2" || e.Size != 250 {
+		t.Fatalf("manifest not swapped: got %+v", got.Manifest.Files)
+	}
+	// created_at is the slug's birth time, unchanged by the re-deploy.
+	if !got.CreatedAt.Equal(fixedNow) {
+		t.Fatalf("created_at must be stable across re-deploy: got %v, want %v", got.CreatedAt, fixedNow)
+	}
+	// updated_at + expires_at restarted from the re-deploy.
+	if !got.UpdatedAt.Equal(later) {
+		t.Fatalf("updated_at should be the re-deploy time: got %v, want %v", got.UpdatedAt, later)
+	}
+	if !got.ExpiresAt.Equal(later.Add(domain.RetentionWindow)) {
+		t.Fatalf("expires_at should restart from re-deploy: got %v", got.ExpiresAt)
+	}
+	// The owner's live site bytes reflect the NEW size only (250), not 100+250.
+	used, err := sr.SumActiveBytesByOwner("key:rp", later)
+	if err != nil {
+		t.Fatalf("sum after replace: %v", err)
+	}
+	if used != 250 {
+		t.Fatalf("replace must not double-count: owner sum got %d, want 250", used)
+	}
+}
+
+// conformSiteReplaceNotFoundShape pins that a replace targeting a slug the
+// identity does not own collapses to ErrNotFound - the SAME sentinel a
+// missing slug yields - for both the foreign-owner and the missing-row cases,
+// AND for a slug that exists only as a PASTE (never a site). No existence or
+// ownership leak.
+func conformSiteReplaceNotFoundShape(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
+	// Missing slug: never deployed.
+	miss := siteOfV("rmiss123", "key:owner", 50, "v1")
+	if err := sr.ReplaceWithQuotaCheck(miss, miss.Manifest.DedupedSize(), 0, 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("replace of missing slug: got %v, want ErrNotFound", err)
+	}
+
+	// Foreign-owned: owned by key:alice, a replace as key:mallory is NotFound.
+	insertSite(t, sr, siteOfV("rfor1234", "key:alice", 100, "v1"))
+	foreign := siteOfV("rfor1234", "key:mallory", 100, "v2")
+	if err := sr.ReplaceWithQuotaCheck(foreign, foreign.Manifest.DedupedSize(), 0, 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("replace of foreign-owned site: got %v, want ErrNotFound (no ownership leak)", err)
+	}
+	// The legitimate owner's site is untouched by the rejected foreign replace.
+	got, err := sr.Get("rfor1234")
+	if err != nil {
+		t.Fatalf("owner's site after rejected foreign replace: %v", err)
+	}
+	if e := got.Manifest.Files["index.html"]; e.SHA != "sha-rfor1234-v1" {
+		t.Fatalf("foreign replace must not mutate the owner's row: got %+v", got.Manifest.Files)
+	}
+
+	// Slug that exists only as a PASTE: a site replace must not find it.
+	if err := r.InsertWithQuotaCheck(pasteOf("rpaste12", "key:owner", 10), 0, 0, fixedNow); err != nil {
+		t.Fatalf("seed paste: %v", err)
+	}
+	asPaste := siteOfV("rpaste12", "key:owner", 10, "v1")
+	if err := sr.ReplaceWithQuotaCheck(asPaste, asPaste.Manifest.DedupedSize(), 0, 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("replace targeting a paste-only slug: got %v, want ErrNotFound", err)
+	}
+}
+
+// conformSiteReplaceDeltaQuota pins that the replace charges the DELTA, not
+// the full new size: a same-size re-deploy nets zero against the cap, a
+// smaller one frees the difference (admitting a follow-up that the original
+// size would have blocked), and a larger one is rejected when the post-swap
+// total would breach the cap (the old bytes credited, the new charged).
+func conformSiteReplaceDeltaQuota(t *testing.T, sr conformanceSiteRepo) {
+	const cap = 1000
+	// Owner sits at 800 of a 1000 cap.
+	if err := sr.InsertWithQuotaCheck(siteOfV("rq123456", "key:rq", 800, "v1"), 800, 0, cap, fixedNow); err != nil {
+		t.Fatalf("seed 800 under cap: %v", err)
+	}
+	// Same-size re-deploy nets zero: 800 - 800 + 800 = 800 <= 1000 -> ok.
+	if err := sr.ReplaceWithQuotaCheck(siteOfV("rq123456", "key:rq", 800, "v2"), 800, 0, cap, fixedNow); err != nil {
+		t.Fatalf("same-size re-deploy should net zero: %v", err)
+	}
+	// A LARGER re-deploy that would breach the cap is rejected: 800 - 800 +
+	// 1100 = 1100 > 1000. The old bytes are credited and the new charged.
+	if err := sr.ReplaceWithQuotaCheck(siteOfV("rq123456", "key:rq", 1100, "v3"), 1100, 0, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+		t.Fatalf("over-cap re-deploy: got %v, want ErrOverUserQuota", err)
+	}
+	// The rejected replace left the row at v2/800 (no partial mutation).
+	used, err := sr.SumActiveBytesByOwner("key:rq", fixedNow)
+	if err != nil {
+		t.Fatalf("sum after rejected replace: %v", err)
+	}
+	if used != 800 {
+		t.Fatalf("rejected over-cap replace must not change bytes: got %d, want 800", used)
+	}
+	// A SMALLER re-deploy frees the diff: 800 - 800 + 300 = 300, then a fresh
+	// 600-byte site fits (300 + 600 = 900 <= 1000) where it would NOT have at
+	// the original 800 (800 + 600 = 1400 > 1000).
+	if err := sr.ReplaceWithQuotaCheck(siteOfV("rq123456", "key:rq", 300, "v4"), 300, 0, cap, fixedNow); err != nil {
+		t.Fatalf("smaller re-deploy should free the diff: %v", err)
+	}
+	if err := sr.InsertWithQuotaCheck(siteOfV("rq223456", "key:rq", 600, "v1"), 600, 0, cap, fixedNow); err != nil {
+		t.Fatalf("follow-up 600 should fit after the shrink (300+600=900): %v", err)
+	}
+}
+
+// conformSiteReplaceRestartsExpiry pins that a re-deploy re-keys the expiry
+// index: after a replace at a later clock, the site is NOT reported expired at
+// a cutoff the ORIGINAL expires_at would have crossed, and the OLD expiry key
+// no longer fires the sweep.
+func conformSiteReplaceRestartsExpiry(t *testing.T, sr conformanceSiteRepo) {
+	const slug = "re123456"
+	v1 := siteOfV(slug, "key:re", 100, "v1")
+	v1.ExpiresAt = fixedNow.Add(time.Hour) // expires soon
+	insertSite(t, sr, v1)
+
+	// Re-deploy at +30m, pushing expiry a full retention window past that.
+	at := fixedNow.Add(30 * time.Minute)
+	v2 := siteOfV(slug, "key:re", 100, "v2")
+	v2.CreatedAt = fixedNow
+	v2.UpdatedAt = at
+	v2.ExpiresAt = at.Add(domain.RetentionWindow)
+	if err := sr.ReplaceWithQuotaCheck(v2, v2.Manifest.DedupedSize(), 0, 0, at); err != nil {
+		t.Fatalf("replace restarting expiry: %v", err)
+	}
+
+	// At +2h (past the ORIGINAL +1h expiry, before the new one) the site must
+	// NOT be swept: the old expiry key was re-keyed, not left dangling.
+	cutoff := fixedNow.Add(2 * time.Hour)
+	slugs, err := sr.ExpiredSiteSlugs(cutoff)
+	if err != nil {
+		t.Fatalf("expired site slugs: %v", err)
+	}
+	if sliceHas(slugs, slug) {
+		t.Fatalf("re-deployed site must NOT be expired at %v (expiry restarted): got %v", cutoff, slugs)
+	}
 }
 
 // conformSiteDeployAndReadBack deploys a multi-file site and reads every
