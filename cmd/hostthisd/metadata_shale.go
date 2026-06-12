@@ -24,9 +24,11 @@
 // op local. Setting it brings up memberlist + gRPC forwarding and joins
 // the ring (docs/SPEC.md "Multi-node shale").
 //
-// ReadConsistency is fixed at cluster.ReadNearest inside
+// ReadConsistency is fixed at cluster.ReadQuorum inside
 // storage.NewShaleRepo (ShaleConfig exposes no knob for it), so there is
-// no env var for it here.
+// no env var for it here. Quorum is required at R>1 (ReadNearest could
+// return a still-backfilling replica's NotFound for live data); at R=1 a
+// quorum is the single replica, so it is behavior-identical there.
 
 //go:build slatedb
 
