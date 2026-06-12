@@ -63,6 +63,9 @@ func NewSlateSiteRepo(repo *SlateRepo) *SlateSiteRepo { return &SlateSiteRepo{re
 func (s *SlateSiteRepo) InsertWithQuotaCheck(site domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
 	return s.repo.InsertSiteWithQuotaCheck(site, dedupedSize, serviceCap, userCap, now)
 }
+func (s *SlateSiteRepo) ReplaceWithQuotaCheck(site domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
+	return s.repo.ReplaceSiteWithQuotaCheck(site, dedupedSize, serviceCap, userCap, now)
+}
 func (s *SlateSiteRepo) Get(slug domain.Slug) (domain.Site, error) { return s.repo.GetSite(slug) }
 func (s *SlateSiteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int64, error) {
 	return s.repo.SumActiveSiteBytesByOwner(owner, now)
@@ -230,6 +233,130 @@ func (r *SlateRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, ser
 	}
 	if _, err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit site insert %q: %w", s.Slug, err)
+	}
+	return nil
+}
+
+// ReplaceSiteWithQuotaCheck re-deploys an existing OWNED site in place,
+// swapping its row (manifest, deduped size, updated_at, expires_at) and
+// re-keying its expiry index, while enforcing the per-identity and
+// service caps against the REPLACE DELTA.
+//
+// The slug must already exist as a site AND be owned by s.Identity. A
+// missing row OR a foreign-owned row both collapse to ErrNotFound (the
+// SAME sentinel a missing slug yields), so existence/ownership never
+// leaks. Mirrors the sqlite SiteRepo.ReplaceWithQuotaCheck contract.
+//
+// Quota: the per-identity sum and the service-wide sum BOTH already
+// include the old row (it is a live, non-expired site), so the post-swap
+// totals are (total - oldDeduped + body). A same-size re-deploy nets zero;
+// a smaller one frees the difference.
+//
+// Concurrency: the per-identity quota stripe is held across the sum + the
+// swap (matching InsertSiteWithQuotaCheck), and the row read + the writes
+// run in one snapshot-isolation tx whose read of sites/<slug> participates
+// in SI conflict detection, so a racing re-deploy / delete of the same
+// slug conflicts.
+//
+// Returns:
+//   - nil on success
+//   - ErrNotFound if the slug isn't a site owned by s.Identity
+//   - ErrServiceFull if accepting would exceed serviceCap
+//   - ErrOverUserQuota if accepting would exceed userCap
+func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
+	defer r.lockQuota(s.Identity.String())()
+	body := int64(dedupedSize)
+
+	// Ownership + existence gate (outside the tx, but under the quota lock).
+	// A missing row and a foreign-owned row both collapse to ErrNotFound.
+	var existing siteRow
+	if err := r.getJSON(keySite(s.Slug), &existing); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if existing.Identity != s.Identity.String() {
+		return ErrNotFound
+	}
+	oldDeduped := int64(existing.DedupedSize)
+
+	// Quota: the sums below include the OLD row, so subtract its deduped
+	// bytes and add the new to evaluate the post-swap totals.
+	if serviceCap > 0 {
+		total, err := r.sumServiceWideActiveBytes(now)
+		if err != nil {
+			return fmt.Errorf("service-wide sum: %w", err)
+		}
+		if total-oldDeduped+body > serviceCap {
+			return ErrServiceFull
+		}
+	}
+	if userCap > 0 {
+		ownerPaste, err := r.sumActiveBytesForOwner(s.Identity.String(), now)
+		if err != nil {
+			return fmt.Errorf("identity paste sum: %w", err)
+		}
+		ownerSite, err := r.sumActiveSiteBytesForOwner(s.Identity.String(), now)
+		if err != nil {
+			return fmt.Errorf("identity site sum: %w", err)
+		}
+		if ownerPaste+ownerSite-oldDeduped+body > userCap {
+			return ErrOverUserQuota
+		}
+	}
+
+	row, err := r.siteRowFromDomain(s, dedupedSize)
+	if err != nil {
+		return err
+	}
+
+	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+
+	// Re-read the row inside the tx so its presence + ownership participate
+	// in SI conflict detection (a concurrent delete/re-deploy conflicts).
+	var inTx siteRow
+	if err := txGetJSON(tx, keySite(s.Slug), &inTx); err != nil {
+		_ = tx.Rollback()
+		if errors.Is(err, ErrNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if inTx.Identity != s.Identity.String() {
+		_ = tx.Rollback()
+		return ErrNotFound
+	}
+	// created_at is the slug's birth time: it is STRUCTURALLY immutable across
+	// a re-deploy, matching the sqlite UPDATE which never touches the column.
+	// Pin it from the existing row so a caller cannot move it via the new row
+	// (the service layer already forwards existing.CreatedAt, but the storage
+	// contract must not trust the caller).
+	row.CreatedAt = inTx.CreatedAt
+
+	// Swap the authoritative row in place. The identity-site index key is
+	// keyed by (identity, slug) - both unchanged - so it needs no rewrite.
+	if err := txPutJSON(tx, keySite(s.Slug), row); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	// Re-key the expiry index: drop the old (oldExpiresAt, slug) marker and
+	// write the new one, so the sweep sees the restarted 7-day clock.
+	if !inTx.ExpiresAt.Equal(s.ExpiresAt) {
+		if err := tx.Delete(keyExpirySite(inTx.ExpiresAt, s.Slug)); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("delete old site expiry index: %w", err)
+		}
+	}
+	if err := tx.Put(keyExpirySite(s.ExpiresAt, s.Slug), []byte{}); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("put site expiry index: %w", err)
+	}
+	if _, err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit site replace %q: %w", s.Slug, err)
 	}
 	return nil
 }
