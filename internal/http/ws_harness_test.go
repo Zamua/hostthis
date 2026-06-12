@@ -142,12 +142,13 @@ func (c *wsClient) nextFrame(ctx context.Context, d time.Duration) []byte {
 	}
 }
 
-// drainPuts collects every inbound frame that arrives within a quiet window
+// drainFrames collects every inbound frame that arrives within a quiet window
 // of d (the window restarts on each frame), returning them all. Used by the
-// no-dup race to gather all live mirror frames the joiner received for a
-// round so a per-key occurrence count can be asserted. It does NOT fail on
-// timeout - the absence of frames is itself an assertion the caller makes.
-func (c *wsClient) drainPuts(ctx context.Context, d time.Duration) [][]byte {
+// no-dup race to gather all live mirror frames (put OR delete) the joiner
+// received for a round so a per-key occurrence count can be asserted. It does
+// NOT fail on timeout - the absence of frames is itself an assertion the
+// caller makes.
+func (c *wsClient) drainFrames(ctx context.Context, d time.Duration) [][]byte {
 	c.t.Helper()
 	var out [][]byte
 	for {
@@ -454,14 +455,113 @@ func TestRelayHarness_LateJoinConsistentWithRoomThenLive(t *testing.T) {
 // timing-dependent - the dup reproduces within a handful of rounds when the
 // commit and mirror are not atomic.
 //
-// WEAKEN DEMO: split putRoomValue back into a non-atomic `s.Rooms.Put()` then
-// `s.Relay.MirrorDurable()` (two separate hub-lock acquisitions) in
-// http/rooms.go. Demonstrated RED: within ~6 rounds a joiner reports
+// WEAKEN DEMO: in http/rooms.go's putRoomValue, replace the single
+// `s.Relay.CommitAndMirror(key, commit, EncodePut(...))` call (which runs the
+// KV commit and the live mirror under ONE acquisition of the room's hub lock)
+// with the commit and the mirror as two separate steps - `commit()` then a
+// standalone hub broadcast - so a join can take the hub lock between them.
+// Demonstrated RED: within ~6 rounds a joiner reports
 // `key "<round-key>" appeared 2x (dup) across snapshot+stream`. Restoring the
-// atomic commit+mirror under the room hub lock is green.
+// single atomic commit-and-mirror critical section is green.
 // ---------------------------------------------------------------------------
 
 func TestRelayHarness_ConcurrentPutAndJoinNoDupNoGap(t *testing.T) {
+	runConcurrentMutateAndJoinNoDupNoGap(t, "put",
+		// mutate: PUT this round's key.
+		func(ts *httptest.Server, slug, id, key string, round int) {
+			val := fmt.Sprintf("%q", fmt.Sprintf("v%d", round))
+			httpPut(t, ts, slug, id, key, []byte(val))
+		},
+		// occurrences: the PUT is reflected once in the snapshot if its key+value
+		// is present, and once per live TypePut frame for the key. Exactly one
+		// total: 0 is a gap (the write was lost), 2 a dup (snapshotted AND
+		// streamed).
+		func(snap []byte, live [][]byte, key string, round int) int {
+			val := fmt.Sprintf("%q", fmt.Sprintf("v%d", round))
+			count := 0
+			if containsSub(snap, fmt.Sprintf("%q:%s", key, val)) {
+				count++
+			}
+			for _, f := range live {
+				if hasType(f, relay.TypePut) && containsSub(f, fmt.Sprintf(`"key":%q`, key)) {
+					count++
+				}
+			}
+			return count
+		},
+		nil, // no per-round seed for the PUT variant
+	)
+}
+
+// TestRelayHarness_ConcurrentDeleteAndJoinNoDupNoGap is the DELETE twin of the
+// PUT no-dup gate. The durable DELETE path (deleteRoomValue ->
+// CommitAndMirror with EncodeDelete) goes through the IDENTICAL atomic
+// commit-and-mirror critical section the PUT path does, so it is structurally
+// covered - but this pins it directly: per round it SEEDS a key, then races a
+// DELETE of that key against a fresh join, and asserts the joiner observes the
+// deletion in EXACTLY ONE of {snapshot reflects it (key absent), live stream
+// carries the delete frame}. The deletion is "reflected in the snapshot" when
+// the key is ABSENT (the commit landed before the snapshot read) and
+// "reflected in the stream" when a TypeDelete frame for the key arrives. Zero
+// is a gap (the key is still present AND no delete frame: the delete was lost);
+// two is a dup (the key is absent in the snapshot AND a delete frame also
+// arrived: the delete was both applied to the snapshot and streamed live to a
+// joiner that already saw it gone). A dup matters because hostthis is
+// payload-opaque and an app may treat a delete as a state transition.
+//
+// WEAKEN DEMO: in http/rooms.go's deleteRoomValue, run the commit WITHOUT the
+// hub lock and mirror it separately - `commit()` then a standalone
+// `s.Relay.CommitAndMirror(rk, func() error { return nil }, EncodeDelete(key))`
+// - so a join can read a post-commit snapshot (key absent) and register before
+// the separate mirror broadcast. Demonstrated RED: within ~5 rounds a joiner
+// reports `key "<round-key>" appeared 2x (DUP) across snapshot+stream`.
+// Restoring the single atomic commit-and-mirror is green.
+func TestRelayHarness_ConcurrentDeleteAndJoinNoDupNoGap(t *testing.T) {
+	runConcurrentMutateAndJoinNoDupNoGap(t, "delete",
+		// mutate: DELETE this round's (pre-seeded) key.
+		func(ts *httptest.Server, slug, id, key string, round int) {
+			httpDelete(t, ts, slug, id, key)
+		},
+		// occurrences: the deletion is reflected once in the snapshot when the
+		// key is ABSENT, and once per live TypeDelete frame. Exactly one total.
+		func(snap []byte, live [][]byte, key string, round int) int {
+			count := 0
+			if !containsSub(snap, fmt.Sprintf(`%q:`, key)) {
+				count++ // key absent from the snapshot: the delete is reflected there
+			}
+			for _, f := range live {
+				if hasType(f, relay.TypeDelete) && containsSub(f, fmt.Sprintf(`"key":%q`, key)) {
+					count++
+				}
+			}
+			return count
+		},
+		// seed: write the key BEFORE the round's race so there is something to
+		// delete and so it would appear in a snapshot read before the commit.
+		func(ts *httptest.Server, slug, id, key string, round int) {
+			httpPut(t, ts, slug, id, key, []byte(fmt.Sprintf("%q", fmt.Sprintf("seed%d", round))))
+		},
+	)
+}
+
+// runConcurrentMutateAndJoinNoDupNoGap is the shared body of the PUT and DELETE
+// no-dup gates. Per round it (optionally) seeds the round's key, then races
+// `mutate` (a durable PUT or DELETE through the HTTP verb, which the server
+// commits-and-mirrors under the room hub lock) against a fresh WebSocket join,
+// and asserts `occurrences` (the count of the mutation across the joiner's
+// {snapshot, live frames}) is EXACTLY ONE - never 0 (a gap: the change was
+// neither snapshotted nor streamed) and never >1 (a dup: it was both). Many
+// rounds run because the dup-producing interleave is timing-dependent; it
+// reproduces within a handful of rounds when the commit and mirror are not
+// atomic w.r.t. the join.
+func runConcurrentMutateAndJoinNoDupNoGap(
+	t *testing.T,
+	kind string,
+	mutate func(ts *httptest.Server, slug, id, key string, round int),
+	occurrences func(snap []byte, live [][]byte, key string, round int) int,
+	seed func(ts *httptest.Server, slug, id, key string, round int),
+) {
+	t.Helper()
 	ts, rooms, _ := wsTestServer(t, relay.NewLimits())
 	const slug = "appz2345"
 	id := mkRoom(t, rooms, slug)
@@ -479,46 +579,42 @@ func TestRelayHarness_ConcurrentPutAndJoinNoDupNoGap(t *testing.T) {
 	const rounds = 40
 	for round := 0; round < rounds; round++ {
 		key := fmt.Sprintf("cell/%d", round)
-		val := fmt.Sprintf("%q", fmt.Sprintf("v%d", round))
 
-		// Race a durable PUT of this round's key against a fresh join.
+		// Seed the round's key BEFORE the race, if the variant needs a starting
+		// value (the DELETE variant deletes a pre-existing key; the keepalive
+		// client's frame for the seed is drained on the next round's quiet wait).
+		if seed != nil {
+			seed(ts, slug, id, key, round)
+		}
+
+		// Race the durable mutation of this round's key against a fresh join.
 		var wg sync.WaitGroup
 		wg.Add(2)
 
 		joinerCh := make(chan *wsClient, 1)
 		go func() {
 			defer wg.Done()
-			httpPut(t, ts, slug, id, key, []byte(val))
+			mutate(ts, slug, id, key, round)
 		}()
 		go func() {
 			defer wg.Done()
-			joinerCh <- newWSClient(t, ctx, ts, fmt.Sprintf("joiner-%d", round), slug, id)
+			joinerCh <- newWSClient(t, ctx, ts, fmt.Sprintf("joiner-%s-%d", kind, round), slug, id)
 		}()
 		wg.Wait()
 		joiner := <-joinerCh
 
 		// The joiner's first frame is its snapshot (may or may not reflect this
-		// round's key, depending on whether the commit landed before the join's
-		// snapshot read). Then drain every live frame for a short settle window.
+		// round's mutation, depending on whether the commit landed before the
+		// join's snapshot read). Then drain every live frame for a short window.
 		snap := joiner.expectSnapshotFrame(ctx)
-		live := joiner.drainPuts(ctx, 250*time.Millisecond)
+		live := joiner.drainFrames(ctx, 250*time.Millisecond)
 
-		// Count occurrences of THIS round's key across snapshot + live frames.
-		count := 0
-		if containsSub(snap, fmt.Sprintf("%q:%s", key, val)) {
-			count++
-		}
-		for _, f := range live {
-			if hasType(f, relay.TypePut) && containsSub(f, fmt.Sprintf(`"key":%q`, key)) {
-				count++
-			}
-		}
-
+		count := occurrences(snap, live, key, round)
 		switch {
 		case count == 0:
-			t.Fatalf("round %d: key %q appeared 0x (GAP) across snapshot+stream - the write was neither snapshotted nor mirrored live", round, key)
+			t.Fatalf("round %d (%s): key %q appeared 0x (GAP) across snapshot+stream - the change was neither snapshotted nor mirrored live", round, kind, key)
 		case count > 1:
-			t.Fatalf("round %d: key %q appeared %dx (DUP) across snapshot+stream - the commit and the live mirror were not atomic w.r.t. the join", round, key, count)
+			t.Fatalf("round %d (%s): key %q appeared %dx (DUP) across snapshot+stream - the commit and the live mirror were not atomic w.r.t. the join", round, kind, key, count)
 		}
 
 		joiner.close()

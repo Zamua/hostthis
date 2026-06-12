@@ -172,6 +172,27 @@ func httpPut(t *testing.T, ts *httptest.Server, slug, id, key string, body []byt
 	}
 }
 
+// httpDelete issues an HTTP DELETE of a room value through the live httptest
+// server, so the relay's durable-delete mirror path (CommitAndMirror with an
+// EncodeDelete frame) fires on the real wired relay - the DELETE twin of
+// httpPut. Deleting a present or absent key both return 204 (idempotent).
+func httpDelete(t *testing.T, ts *httptest.Server, slug, id, key string) {
+	t.Helper()
+	req, err := nethttp.NewRequest("DELETE", ts.URL+"/api/rooms/"+id+"/"+key, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Host = slug + "." + wsTestApex
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("http delete: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != nethttp.StatusNoContent {
+		t.Fatalf("http delete status = %d, want 204", resp.StatusCode)
+	}
+}
+
 func TestRelay_LateJoinSnapshotThenStreamNoGapNoDup(t *testing.T) {
 	ts, rooms, _ := wsTestServer(t, relay.NewLimits())
 	const slug = "appz2345"
