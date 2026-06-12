@@ -133,6 +133,48 @@ func (s *S3BlobStore) PutBytesOverwrite(sha string, body []byte) error {
 	return nil
 }
 
+// GetReader returns a streaming reader over the object for sha. The
+// underlying *minio.Object is already a lazy streaming body, so we hand
+// it back directly instead of draining it into a buffer the way Get
+// does. The caller MUST Close the returned reader. The int64 is the
+// stored object size (the compressed length when wrapped by
+// CompressedBlobStore), or -1 if the stat is unavailable; the serve
+// path does not rely on it. A missing object surfaces as ErrNotFound -
+// minio defers the HEAD until first read/stat, so we stat up front to
+// turn a missing key into ErrNotFound before returning the reader.
+func (s *S3BlobStore) GetReader(sha string) (io.ReadCloser, int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	obj, err := s.client.GetObject(ctx, s.bucket, sha, minio.GetObjectOptions{})
+	if err != nil {
+		cancel()
+		return nil, 0, fmt.Errorf("s3 get %s: %w", sha, err)
+	}
+	info, err := obj.Stat()
+	if err != nil {
+		_ = obj.Close()
+		cancel()
+		if isS3NotFound(err) {
+			return nil, 0, ErrNotFound
+		}
+		return nil, 0, fmt.Errorf("s3 stat %s: %w", sha, err)
+	}
+	// Wrap so closing the reader also cancels the request context.
+	return &ctxReadCloser{ReadCloser: obj, cancel: cancel}, info.Size, nil
+}
+
+// ctxReadCloser ties a context cancel func to the lifetime of a reader
+// so Close releases the request context as well as the body.
+type ctxReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *ctxReadCloser) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
+}
+
 func (s *S3BlobStore) Get(sha string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
