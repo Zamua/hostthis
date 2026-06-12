@@ -132,34 +132,52 @@ func (r *Registry) nextConnID() uint64 {
 // connection ends so the counter is decremented (the relay does this in
 // the connection's deferred teardown).
 //
-// The order of checks matters: per-room is checked against the existing
-// hub's size; per-app against the running aggregate; the room cap only
-// against the case where this upgrade would create a NEW hub. A join to an
-// already-live room is never refused by the room cap.
+// Per-room isolation in the admission path: admit must NOT hold the global
+// registry lock across any hub-lock work, so a join to ANY room never
+// stalls a concurrent join to (or durable commit on) a DIFFERENT room
+// behind that room's hub mutex. It therefore does the per-app + total-rooms
+// accounting and the lazy hub create (the fast, map-only work the global
+// lock must serialize) UNDER r.mu, RELEASES r.mu, and only then takes the
+// target hub's lock for the per-room cap check + register. admit never holds
+// r.mu and hub.mu at once, so it cannot stall on a concurrent
+// commitAndMirror that is holding the same hub's lock across a slow KV
+// commit; and since the two never overlap their lock holds in admit, there
+// is no lock-order cycle to deadlock on.
+//
+// The transient empty hub admit creates here is safe to register into after
+// r.mu is released: the only paths that remove a hub are onEmpty (fires only
+// when a connection LEAVES, and none has joined this hub yet), admit's own
+// rollback, and commitAndMirror's transient cleanup (which removes ONLY a hub
+// IT created - it finds this one already in the map, so created=false for it
+// and it leaves it alone). So no concurrent path tears this hub out from under
+// the register.
+//
+// The order of checks: the total-rooms cap (an upgrade creating a NEW hub)
+// and the per-app aggregate are checked under r.mu; the per-room cap is
+// enforced inside hub.register under hub.mu. When a room is at its
+// per-room cap AND its app is at the per-app cap at once, the per-app
+// refusal wins (it is checked first, under r.mu) - a precedence the prior
+// global-lock version reversed, but no contract pins which 429 a
+// doubly-capped upgrade returns, and decoupling the hubs is worth it.
 func (r *Registry) admit(key RoomKey) (h *Hub, id uint64, err error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.closing {
+		r.mu.Unlock()
 		return nil, 0, ErrTooManyRooms
 	}
 
-	hub, exists := r.hubs[key]
+	_, exists := r.hubs[key]
 
 	// Service-wide live-room cap: only an upgrade that would create a NEW
 	// hub is refused; joins to already-live rooms still succeed.
 	if !exists && r.limits.MaxRooms > 0 && len(r.hubs) >= r.limits.MaxRooms {
+		r.mu.Unlock()
 		return nil, 0, ErrTooManyRooms
 	}
 
-	// Per-room connection cap: checked against the existing hub size. A
-	// not-yet-existing hub has zero connections, so a first connection
-	// always passes this (assuming a positive cap).
-	if exists && r.limits.MaxConnsPerRoom > 0 && hub.len() >= r.limits.MaxConnsPerRoom {
-		return nil, 0, ErrRoomFull
-	}
-
-	// Per-app aggregate connection cap.
+	// Per-app aggregate connection cap (map-only, so it stays under r.mu).
 	if r.limits.MaxConnsPerApp > 0 && r.perApp[key.App] >= r.limits.MaxConnsPerApp {
+		r.mu.Unlock()
 		return nil, 0, ErrAppFull
 	}
 
@@ -168,25 +186,30 @@ func (r *Registry) admit(key RoomKey) (h *Hub, id uint64, err error) {
 	// the onDrop callback reclaims a laggard-dropped connection's per-app
 	// slot (the broadcast-drop path does not route through release, so the
 	// decApp must happen here or the slot leaks).
-	if !exists {
-		hub = newHub(key, r.limits.MaxConnsPerRoom,
-			func() { r.removeHub(key) },
-			func(uint64) { r.decApp(key.App) },
-		)
-		r.hubs[key] = hub
-	}
+	hub, created := r.getOrCreateHubLocked(key)
 
+	// Reserve the per-app slot optimistically, while still under r.mu, so the
+	// cap check above and this increment are atomic against a concurrent
+	// admit. If the per-room register below fails, the rollback path
+	// (decApp + transient-hub teardown) undoes it.
 	id = r.nextConnID()
+	r.perApp[key.App]++
+	r.mu.Unlock()
+
+	// Per-room cap check + register, under hub.mu ALONE (r.mu already
+	// released). The per-room cap is enforced HERE, so it is strict no matter
+	// how concurrent same-hub admits interleave.
 	if !hub.register(newReservation(id)) {
-		// Lost a race to the per-room cap between the size check and the
-		// register (another acquire filled the last slot). Roll back a hub
-		// we just created so we do not leak an empty hub.
-		if !exists {
-			delete(r.hubs, key)
+		// At the per-room cap. Roll back the optimistic per-app reservation and
+		// tear down a hub we created transiently (removeHub re-checks emptiness
+		// under r.mu, so a real connection that joined it in the meantime keeps
+		// it). decApp + removeHub each take r.mu themselves.
+		r.decApp(key.App)
+		if created {
+			r.removeHub(key)
 		}
 		return nil, 0, ErrRoomFull
 	}
-	r.perApp[key.App]++
 	return hub, id, nil
 }
 
@@ -216,7 +239,7 @@ func (r reservation) ID() uint64    { return r.id }
 //   - snapshot is built (via the readSnapshot callback) and queued onto c
 //     as the FIRST frame, then the reservation placeholder is swapped for
 //     the real c (c enters the broadcast set) - all while h.mu is held, so
-//     a concurrent MirrorDurable broadcast on this room is serialized
+//     a concurrent commit-and-mirror broadcast on this room is serialized
 //     against it.
 //   - A durable write whose broadcast already ran (before this lock was
 //     acquired) committed to the KV before this snapshot read (which is

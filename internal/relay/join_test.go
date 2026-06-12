@@ -53,7 +53,7 @@ func TestJoinWithSnapshot_NoGapNoDupUnderConcurrentBroadcast(t *testing.T) {
 		wg.Add(2)
 
 		// Goroutine A: the durable write. Commit to the store, THEN broadcast
-		// the live mirror (the order MirrorDurable uses).
+		// the live mirror (the order commit-and-mirror uses).
 		go func() {
 			defer wg.Done()
 			storeMu.Lock()
