@@ -986,12 +986,32 @@ makes late-join correct:
 - **No dup.** A durable write that landed BEFORE the snapshot is reflected
   in the snapshot; the connection was not yet in the broadcast set when
   that write was relayed, so it did not also receive it as a live message.
-  Every change is in exactly one of {snapshot, stream}, never both. (The
-  cheap client-side backstop, for an app that wants belt-and-suspenders:
-  the snapshot is a full keyed state, so applying a live message that
-  re-sets a key the snapshot already carried is idempotent - last-writer
-  wins on that key. The server guarantee is no-dup; the keyed-state shape
-  makes a stray dup harmless anyway.)
+  Every change is in exactly one of {snapshot, stream}, never both.
+
+  The no-dup half is what forces the commit and its live mirror to be
+  atomic with respect to a join. A durable write is two events - the KV
+  COMMIT (so a future snapshot reflects it) and the live MIRROR broadcast
+  (so already-connected clients see it). If those run as two separate
+  steps, a join can slip between them: the commit lands, a joiner takes the
+  hub lock and reads a snapshot that ALREADY reflects the commit, registers,
+  releases - and THEN the mirror broadcast finds the now-registered joiner
+  and delivers the same key live. The joiner has the key in BOTH its
+  snapshot and a live frame: a dup. hostthis is payload-opaque and makes no
+  idempotency assumption about the app's bytes, so a dup is a real defect (an
+  app that treats a live mirror as a delta / increment / append corrupts on
+  it). The relay therefore runs **the commit and the mirror under the room's
+  hub lock as one critical section**: a join's snapshot-read + register
+  cannot interleave between them, so the write is in exactly one of
+  {snapshot, stream}. The lock is per-room (the hub's own mutex), so one
+  room's durable write never stalls another room. The cost is that the room's
+  live broadcasts wait on the durable KV write (object-storage I/O) for that
+  write's duration - acceptable because the durable path is the LOW-frequency
+  one (a finished availability cell, a placed card, a final vote); the
+  high-frequency live texture (cursors, strokes-in-progress at 60 Hz) rides
+  ephemeral raw relay frames that never take this path and never pay this
+  cost. An app with high-frequency DURABLE writes is the one case this
+  latency characteristic matters for, and that app should batch its commits
+  or move motion to ephemeral frames.
 
 **What persists vs what is ephemeral.** The relay separates two message
 flavors, and this is the abuse + correctness lever:
@@ -1020,10 +1040,11 @@ by NOT inventing an app protocol, but it must know which messages to
 persist. The chosen convention: the durable path is the EXISTING HTTP KV
 verb, and the relay is broadcast-only by default. An app that wants a
 change to be both durable AND pushed live does the durable write with `PUT
-/api/rooms/<uuid>/<key>` (which the server, holding the hub lock for that
-room, ALSO fans out to the room's connected clients as a live message
-tagged with the key), and uses raw relay frames only for ephemeral
-signals. This keeps the relay payload-opaque (no reserved fields in the
+/api/rooms/<uuid>/<key>` (which the server, holding the room's hub lock
+across BOTH the KV commit AND the live fan-out so a concurrent join cannot
+slip between them - the no-dup atomicity above - mirrors the committed
+write to the room's connected clients as a live message tagged with the
+key), and uses raw relay frames only for ephemeral signals. This keeps the relay payload-opaque (no reserved fields in the
 app's bytes), makes the durable write go through the one audited cap-
 checked path, and gives the live fan-out of a committed change for free.
 

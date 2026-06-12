@@ -142,6 +142,23 @@ func (c *wsClient) nextFrame(ctx context.Context, d time.Duration) []byte {
 	}
 }
 
+// drainPuts collects every inbound frame that arrives within a quiet window
+// of d (the window restarts on each frame), returning them all. Used by the
+// no-dup race to gather all live mirror frames the joiner received for a
+// round so a per-key occurrence count can be asserted. It does NOT fail on
+// timeout - the absence of frames is itself an assertion the caller makes.
+func (c *wsClient) drainPuts(ctx context.Context, d time.Duration) [][]byte {
+	c.t.Helper()
+	var out [][]byte
+	for {
+		f := c.nextFrame(ctx, d)
+		if f == nil {
+			return out
+		}
+		out = append(out, f)
+	}
+}
+
 // expectFrame asserts a frame matching pred arrives within d; fails otherwise.
 func (c *wsClient) expectFrame(ctx context.Context, d time.Duration, what string, pred func([]byte) bool) []byte {
 	c.t.Helper()
@@ -415,6 +432,96 @@ func TestRelayHarness_LateJoinConsistentWithRoomThenLive(t *testing.T) {
 		})
 		// No dup of that single PUT.
 		c.expectSilence(ctx, 200*time.Millisecond, "no dup of the single cell/4 PUT")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NO-DUP under a concurrent PUT || join race. This is the gate for the
+// spec's "every change is in exactly one of {snapshot, stream}, never both"
+// guarantee, asserted at the level the bug actually lives: an HTTP durable
+// PUT racing a fresh WebSocket join. The durable write is two events - the
+// KV COMMIT (so a snapshot reflects it) and the live MIRROR broadcast (so
+// connected clients see it). If those are not atomic with respect to the
+// join's snapshot-read + register, a joiner can observe the SAME key in BOTH
+// its snapshot AND a live mirror frame: a dup. hostthis is payload-opaque
+// and makes no idempotency assumption, so a dup is a real defect.
+//
+// The test fires, per round, a PUT of a round-unique key concurrently with a
+// fresh join, then drains the joiner's snapshot + live frames and asserts the
+// key appears EXACTLY ONCE across {snapshot state, live put frames}. Zero is
+// a gap (the write was lost); two is a dup (the write was both snapshotted
+// and mirrored live). Many rounds are run because the interleave that dups is
+// timing-dependent - the dup reproduces within a handful of rounds when the
+// commit and mirror are not atomic.
+//
+// WEAKEN DEMO: split putRoomValue back into a non-atomic `s.Rooms.Put()` then
+// `s.Relay.MirrorDurable()` (two separate hub-lock acquisitions) in
+// http/rooms.go. Demonstrated RED: within ~6 rounds a joiner reports
+// `key "<round-key>" appeared 2x (dup) across snapshot+stream`. Restoring the
+// atomic commit+mirror under the room hub lock is green.
+// ---------------------------------------------------------------------------
+
+func TestRelayHarness_ConcurrentPutAndJoinNoDupNoGap(t *testing.T) {
+	ts, rooms, _ := wsTestServer(t, relay.NewLimits())
+	const slug = "appz2345"
+	id := mkRoom(t, rooms, slug)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// An established client keeps the hub alive across all rounds so a fresh
+	// joiner each round is racing against a live hub (the broadcast set is
+	// non-empty), which is the configuration the dup needs: the mirror has a
+	// hub to fan out to, and the joiner can register into it.
+	keepalive := newWSClient(t, ctx, ts, "keepalive", slug, id)
+	defer keepalive.close()
+	keepalive.expectSnapshotFrame(ctx)
+
+	const rounds = 40
+	for round := 0; round < rounds; round++ {
+		key := fmt.Sprintf("cell/%d", round)
+		val := fmt.Sprintf("%q", fmt.Sprintf("v%d", round))
+
+		// Race a durable PUT of this round's key against a fresh join.
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		joinerCh := make(chan *wsClient, 1)
+		go func() {
+			defer wg.Done()
+			httpPut(t, ts, slug, id, key, []byte(val))
+		}()
+		go func() {
+			defer wg.Done()
+			joinerCh <- newWSClient(t, ctx, ts, fmt.Sprintf("joiner-%d", round), slug, id)
+		}()
+		wg.Wait()
+		joiner := <-joinerCh
+
+		// The joiner's first frame is its snapshot (may or may not reflect this
+		// round's key, depending on whether the commit landed before the join's
+		// snapshot read). Then drain every live frame for a short settle window.
+		snap := joiner.expectSnapshotFrame(ctx)
+		live := joiner.drainPuts(ctx, 250*time.Millisecond)
+
+		// Count occurrences of THIS round's key across snapshot + live frames.
+		count := 0
+		if containsSub(snap, fmt.Sprintf("%q:%s", key, val)) {
+			count++
+		}
+		for _, f := range live {
+			if hasType(f, relay.TypePut) && containsSub(f, fmt.Sprintf(`"key":%q`, key)) {
+				count++
+			}
+		}
+
+		switch {
+		case count == 0:
+			t.Fatalf("round %d: key %q appeared 0x (GAP) across snapshot+stream - the write was neither snapshotted nor mirrored live", round, key)
+		case count > 1:
+			t.Fatalf("round %d: key %q appeared %dx (DUP) across snapshot+stream - the commit and the live mirror were not atomic w.r.t. the join", round, key, count)
+		}
+
+		joiner.close()
 	}
 }
 

@@ -318,6 +318,82 @@ func (r *Registry) hub(key RoomKey) *Hub {
 	return r.hubs[key]
 }
 
+// getOrCreateHubLocked returns key's hub, creating an empty one (with the
+// standard onEmpty / onDrop wiring) if none exists. created reports whether
+// this call made it, so the commit-and-mirror path can tear down a hub it
+// created transiently for a room with no live connections. Caller holds r.mu.
+func (r *Registry) getOrCreateHubLocked(key RoomKey) (hub *Hub, created bool) {
+	if hub = r.hubs[key]; hub != nil {
+		return hub, false
+	}
+	hub = newHub(key, r.limits.MaxConnsPerRoom,
+		func() { r.removeHub(key) },
+		func(uint64) { r.decApp(key.App) },
+	)
+	r.hubs[key] = hub
+	return hub, true
+}
+
+// commitAndMirror runs a durable write's KV COMMIT and its live MIRROR
+// broadcast as ONE critical section under the room's hub lock, so a
+// concurrent join's snapshot-read + register cannot interleave between them.
+// This is the no-dup atomicity the spec requires (see SPEC.md "Persistence
+// and late-join"): a durable write ends up in EXACTLY ONE of {a joiner's
+// snapshot, a joiner's live stream}, never both (dup) and never neither
+// (gap).
+//
+//   - commit performs the durable KV write (it is the service-layer Put /
+//     Delete). It runs UNDER the hub lock, so the room's live broadcasts wait
+//     on it for its duration. This is the latency characteristic design (a)
+//     accepts: the durable path is low-frequency, so the stall is acceptable;
+//     high-frequency live motion rides ephemeral raw relay frames that never
+//     take this path. The lock is the per-room hub mutex (not a global lock),
+//     so one room's durable write never stalls another room.
+//   - mirror is the live frame to fan out after a successful commit. It is
+//     broadcast under the SAME hub-lock acquisition (broadcastLocked), so a
+//     join serialized on this hub either snapshots after the commit (key in
+//     snapshot, and it registered after the mirror so it is NOT also live) or
+//     before it (key not yet in snapshot, but it registered before the mirror
+//     so it DOES receive it live) - exactly one.
+//
+// If commit fails, the error is returned and nothing is mirrored. A hub is
+// created transiently for a room with no live connections (so the commit
+// still serializes against a join that is admitting concurrently, closing the
+// gap that a "skip the mirror when no hub" check would open); it is removed
+// again if it is still empty afterward, so an empty hub never lingers.
+func (r *Registry) commitAndMirror(key RoomKey, commit func() error, mirror Frame) error {
+	r.mu.Lock()
+	hub, created := r.getOrCreateHubLocked(key)
+	// Take the hub lock BEFORE releasing the registry lock (lock order
+	// r.mu -> hub.mu, the same order admit uses), so no concurrent join can
+	// slip its snapshot-read + register between our commit and our mirror.
+	hub.mu.Lock()
+	r.mu.Unlock()
+
+	err := commit()
+	if err != nil {
+		hub.mu.Unlock()
+		// removeHub is a no-op unless the hub is still empty, so a real
+		// connection that joined the transient hub during the commit keeps it.
+		if created {
+			r.removeHub(key)
+		}
+		return err
+	}
+	drops := hub.broadcastLocked(0, mirror)
+	hub.mu.Unlock()
+	drops.run()
+
+	// Tear down a hub THIS commit created transiently for a room with no live
+	// connections, IF it is still empty (removeHub re-checks emptiness, so a
+	// connection that joined during the commit keeps the hub). A pre-existing
+	// hub is owned by its connections' own teardown.
+	if created {
+		r.removeHub(key)
+	}
+	return nil
+}
+
 // removeHub deletes key's hub from the registry IF it is empty. It is the
 // onEmpty callback the hub fires when its last connection leaves. The
 // emptiness is re-checked under the registry lock so a connection that

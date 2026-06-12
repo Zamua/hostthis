@@ -240,18 +240,22 @@ func (s *Server) putRoomValue(w http.ResponseWriter, r *http.Request, appSlug do
 		http.Error(w, "read body\n", http.StatusBadRequest)
 		return
 	}
-	if err := s.Rooms.Put(appSlug, id, key, body); err != nil {
+	// Commit the durable write and mirror it to the room's live relay hub as
+	// ONE atomic step under the room's hub lock, so a join racing this PUT
+	// cannot observe the key in BOTH its snapshot and a live frame (the
+	// no-dup guarantee - see SPEC.md "Persistence and late-join"). The relay
+	// never PERSISTS a frame; the mirror is the live fan-out of a change that
+	// commits through the one cap-checked PutValue path. With no relay (relay
+	// disabled on this backend), the commit runs on its own.
+	commit := func() error { return s.Rooms.Put(appSlug, id, key, body) }
+	if s.Relay != nil {
+		err = s.Relay.CommitAndMirror(relay.RoomKey{App: appSlug, ID: id}, commit, relay.EncodePut(key, body))
+	} else {
+		err = commit()
+	}
+	if err != nil {
 		s.writeRoomError(w, r, err)
 		return
-	}
-	// Mirror the committed durable write to the room's live relay hub, so
-	// connected clients see the change live in addition to it landing in
-	// the durable KV. The relay never PERSISTS a frame; this is the live
-	// fan-out of a change that has ALREADY committed through the one
-	// cap-checked PutValue path. A nil relay (relay disabled on this
-	// backend) makes this a no-op.
-	if s.Relay != nil {
-		s.Relay.MirrorDurable(relay.RoomKey{App: appSlug, ID: id}, relay.EncodePut(key, body))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -261,15 +265,20 @@ func (s *Server) deleteRoomValue(w http.ResponseWriter, r *http.Request, appSlug
 		http.Error(w, "invalid key\n", http.StatusBadRequest)
 		return
 	}
-	if err := s.Rooms.Delete(appSlug, id, key); err != nil {
+	// Commit the durable delete and mirror it to the room's live relay hub
+	// atomically under the room's hub lock (see putRoomValue for why the
+	// commit + mirror are one critical section: the no-dup guarantee). A nil
+	// relay runs the commit on its own.
+	commit := func() error { return s.Rooms.Delete(appSlug, id, key) }
+	var err error
+	if s.Relay != nil {
+		err = s.Relay.CommitAndMirror(relay.RoomKey{App: appSlug, ID: id}, commit, relay.EncodeDelete(key))
+	} else {
+		err = commit()
+	}
+	if err != nil {
 		s.writeRoomError(w, r, err)
 		return
-	}
-	// Mirror the committed durable delete to the room's live relay hub (see
-	// putRoomValue for why this is broadcast-only, never persisted). A nil
-	// relay makes this a no-op.
-	if s.Relay != nil {
-		s.Relay.MirrorDurable(relay.RoomKey{App: appSlug, ID: id}, relay.EncodeDelete(key))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
