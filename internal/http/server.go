@@ -323,14 +323,22 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 		return true
 	}
 
-	// Same sandbox headers + cache posture as an HTML paste read: files
-	// are served RAW, secured by per-subdomain origin isolation, not by
-	// sanitizing the bytes.
+	// Same sandbox headers as an HTML paste read (files served RAW, secured
+	// by per-subdomain origin isolation, not by sanitizing the bytes).
+	//
+	// Cache posture differs from a single-file paste: a site is multi-file,
+	// and a browser serves a site's sub-resources (its js/css) from cache
+	// without revalidating while they are fresh under max-age - so a
+	// re-deploy would not show until each asset's max-age expired (the
+	// classic SPA "stale bundle after deploy" trap). no-cache makes every
+	// site file revalidate via its content-SHA ETag on each load: a cheap
+	// 304 when the SHA is unchanged, fresh bytes when it changed. So a
+	// re-deploy is visible on the next normal reload, with no version-busting.
 	h := w.Header()
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()")
-	h.Set("Cache-Control", "public, max-age=3600")
+	h.Set("Cache-Control", "public, no-cache")
 	h.Set("Last-Modified", site.UpdatedAt.UTC().Format(http.TimeFormat))
 
 	// ETag is the file's content SHA - content-addressed, byte-stable.
