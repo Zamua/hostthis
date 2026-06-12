@@ -227,6 +227,166 @@ func TestRegistry_AdmitDoesNotCoupleAcrossRoomsDuringSlowCommit(t *testing.T) {
 	admitAWG.Wait()
 }
 
+// TestRegistry_DurableWriteOnEmptyRoomDoesNotLeakSlotAgainstJoin closes the
+// transient-hub slot-leak race: a durable commit on a room with NO live
+// connections creates a transient hub, commits + mirrors, then removes the hub
+// if it is "still empty" - while a concurrent join to the SAME empty room has
+// reserved its per-app slot (under r.mu) but has not yet registered into the
+// hub (it released r.mu before taking hub.mu). If the transient cleanup deletes
+// the hub in that window, the join registers into an orphaned (unmapped) hub:
+//
+//   - The per-app slot is leaked: when the connection releases, release looks
+//     up r.hubs[key], finds nil, and takes the "hub gone -> no decApp" branch,
+//     so the slot reserved in admit is never freed. It accumulates silently and
+//     erodes MaxConnsPerApp until the process restarts.
+//   - The register is orphaned: the connection sits in a hub that is no longer
+//     in r.hubs, so a later commitAndMirror / mirror fan-out (which looks up
+//     r.hubs[key]) never reaches it - it silently misses live frames.
+//
+// The fix is the pending-admit guard: admit increments a per-key in-flight
+// count under r.mu before releasing it, and decrements it under r.mu after
+// register returns; removeHub / commitAndMirror's transient cleanup / onEmpty
+// only delete a hub when it is empty AND has zero pending admits, so a hub a
+// join is about to register into is never torn out.
+//
+// RED on the pre-guard code: across enough rounds the transient cleanup wins
+// the race, the slot leaks (AppConns stays > 0 after every connection released)
+// and/or the joined connection is in an orphaned hub a subsequent broadcast
+// cannot reach. GREEN with the guard: AppConns returns to 0 every round and the
+// connection always lands in the live mapped hub and receives the broadcast.
+// runDurableWriteVsJoinRound drives ONE deterministic occurrence of the
+// transient-hub race for a fresh empty room and asserts no slot leaks and the
+// join lands in the live mapped hub. It pins the exact interleaving the
+// natural-timing race hits only rarely, in the faithful direction (the durable
+// commit CREATES the transient hub, the join finds it second):
+//
+//  1. The durable commit creates the transient hub (created=true), takes its
+//     hub lock, and parks inside its commit() callback.
+//  2. The join's admit then finds that hub (created=false), reserves its
+//     per-app slot + pending guard, releases r.mu, and parks in the
+//     afterAdmitReserve seam - reserved but not yet registered.
+//  3. The seam releases the commit, which finishes its broadcast and runs its
+//     transient cleanup (removeHub) while the join is still parked. On the
+//     pre-guard code that cleanup sees len()==0 and deletes the hub the join is
+//     about to register into; with the pending-admit guard pending>0 keeps it.
+//  4. The seam returns and the join registers, then completes its
+//     joinWithSnapshot.
+func runDurableWriteVsJoinRound(t *testing.T, round int) {
+	t.Helper()
+	r := NewRegistry(NewLimits())
+	key := testKey()
+
+	commitEntered := make(chan struct{}) // commit created the hub + is in commit()
+	releaseCommit := make(chan struct{}) // let the parked commit finish
+	commitDone := make(chan struct{})    // commit + its transient cleanup ran
+
+	// Step 1: a durable commit on the EMPTY room. getOrCreateHubLocked creates a
+	// transient hub (created=true); we park inside commit() so admit below finds
+	// the hub already in the map.
+	go func() {
+		_ = r.commitAndMirror(key, func() error {
+			close(commitEntered)
+			<-releaseCommit
+			return nil
+		}, Frame{Data: []byte("durable")})
+		close(commitDone)
+	}()
+	<-commitEntered // the transient hub now exists; the commit holds its hub lock
+
+	// Step 3 (fired from inside admit's reserved-but-not-registered window):
+	// release the parked commit and wait for its transient cleanup (removeHub)
+	// to run. This is the worst-case interleaving for the leak.
+	r.afterAdmitReserve = func(k RoomKey) {
+		close(releaseCommit)
+		<-commitDone
+	}
+
+	// Step 2 + 4: admit finds the existing hub, reserves, parks in the seam,
+	// then registers.
+	_, id, admitErr := r.admit(key)
+	if admitErr != nil {
+		t.Fatalf("round %d: admit: %v", round, admitErr)
+	}
+
+	c := newFakeConn(id)
+	joinErr := r.joinWithSnapshot(key, c,
+		func() (Frame, error) { return Frame{Data: []byte("snap")}, nil },
+		func(f Frame) bool { return c.Send(f) },
+	)
+
+	// If the join failed (errHubGone on the buggy code: the hub was torn out),
+	// the relay's deferred teardown still calls release - which must reclaim the
+	// slot. On the buggy code release finds r.hubs[key] nil and skips decApp, so
+	// AppConns stays at 1: the leak.
+	if joinErr != nil {
+		r.release(key, id)
+		if got := r.AppConns(key.App); got != 0 {
+			t.Fatalf("round %d: join failed (%v) but AppConns = %d after release, want 0 (leaked per-app slot via the transient-hub race)", round, joinErr, got)
+		}
+		t.Fatalf("round %d: join returned %v - the hub was orphaned by the transient cleanup", round, joinErr)
+	}
+
+	// The join succeeded. The connection must be in the LIVE mapped hub: a
+	// broadcast through r.hub(key) must reach it. If the hub was orphaned,
+	// r.hub(key) is nil and the frame never arrives.
+	c.mu.Lock()
+	c.received = nil
+	c.mu.Unlock()
+	if h := r.hub(key); h != nil {
+		h.broadcast(0, Frame{Data: []byte("live")})
+	} else {
+		t.Fatalf("round %d: r.hub(key) is nil for a joined connection - the hub was orphaned by the transient cleanup", round)
+	}
+	gotLive := false
+	for _, f := range c.recv() {
+		if string(f.Data) == "live" {
+			gotLive = true
+		}
+	}
+	if !gotLive {
+		t.Fatalf("round %d: joined connection did not receive the broadcast - it is registered into an orphaned (unmapped) hub", round)
+	}
+
+	// Release the connection. The per-app slot must return to 0 - if the hub
+	// was orphaned, release finds r.hubs[key] nil and skips decApp, leaking.
+	r.release(key, id)
+	if got := r.AppConns(key.App); got != 0 {
+		t.Fatalf("round %d: AppConns = %d after release, want 0 (leaked per-app slot via the transient-hub race)", round, got)
+	}
+}
+
+// TestRegistry_DurableWriteOnEmptyRoomDoesNotLeakSlotAgainstJoin closes the
+// transient-hub slot-leak race: a durable commit on a room with NO live
+// connections creates a transient hub, commits + mirrors, then removes the hub
+// if it is "still empty" - while a concurrent join to the SAME empty room has
+// reserved its per-app slot (under r.mu) but has not yet registered its
+// reservation into the hub (it released r.mu before taking hub.mu). If the
+// transient cleanup deletes the hub in that window, the join registers into an
+// orphaned (unmapped) hub:
+//
+//   - The per-app slot is leaked: when the connection releases, release looks
+//     up r.hubs[key], finds nil, and takes the "hub gone -> no decApp" branch,
+//     so the slot reserved in admit is never freed. It accumulates silently and
+//     erodes MaxConnsPerApp until the process restarts.
+//   - The register is orphaned: the connection sits in a hub no longer in
+//     r.hubs, so a later commitAndMirror / mirror fan-out (which looks up
+//     r.hubs[key]) never reaches it - it silently misses live frames.
+//
+// The fix is the pending-admit guard: admit increments r.pending[key] under
+// r.mu before releasing it and decrements it after register returns; removeHub
+// (and so commitAndMirror's transient cleanup + the onEmpty callback) deletes a
+// hub only when it is empty AND has zero pending admits, so a hub a join is
+// about to register into is never torn out. RED on the pre-guard code (the join
+// fails / the slot leaks / the broadcast is missed); GREEN with the guard. Run
+// under -race; many rounds, each a fresh room, to also catch any data race the
+// guard's bookkeeping might introduce.
+func TestRegistry_DurableWriteOnEmptyRoomDoesNotLeakSlotAgainstJoin(t *testing.T) {
+	const rounds = 500
+	for i := 0; i < rounds; i++ {
+		runDurableWriteVsJoinRound(t, i)
+	}
+}
+
 func TestRegistry_LaggardDropReclaimsAppSlotWithSurvivor(t *testing.T) {
 	lim := NewLimits()
 	lim.SendBuffer = 1 // not used by fakeConn, but keep the intent explicit

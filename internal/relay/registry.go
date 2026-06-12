@@ -100,16 +100,26 @@ type Registry struct {
 	mu      sync.Mutex
 	hubs    map[RoomKey]*Hub
 	perApp  map[domain.Slug]int // live connection count per app
+	pending map[RoomKey]int     // in-flight admits per room (the pending-admit guard)
 	nextID  uint64              // monotonic per-connection id source
 	closing bool                // set by CloseAll; refuses new acquires
+
+	// afterAdmitReserve is a test-only seam fired by admit AFTER it has
+	// reserved the per-app slot + the pending-admit guard and released r.mu,
+	// but BEFORE it takes the hub lock to register the reservation. It is nil
+	// in production (the field is set only by tests that need to drive the
+	// admit-reserved-but-not-registered window deterministically), so the
+	// production path is unchanged. See the transient-hub race test.
+	afterAdmitReserve func(key RoomKey)
 }
 
 // NewRegistry builds an empty registry with the given limits.
 func NewRegistry(limits Limits) *Registry {
 	return &Registry{
-		limits: limits,
-		hubs:   make(map[RoomKey]*Hub),
-		perApp: make(map[domain.Slug]int),
+		limits:  limits,
+		hubs:    make(map[RoomKey]*Hub),
+		perApp:  make(map[domain.Slug]int),
+		pending: make(map[RoomKey]int),
 	}
 }
 
@@ -144,13 +154,20 @@ func (r *Registry) nextConnID() uint64 {
 // commit; and since the two never overlap their lock holds in admit, there
 // is no lock-order cycle to deadlock on.
 //
-// The transient empty hub admit creates here is safe to register into after
-// r.mu is released: the only paths that remove a hub are onEmpty (fires only
-// when a connection LEAVES, and none has joined this hub yet), admit's own
-// rollback, and commitAndMirror's transient cleanup (which removes ONLY a hub
-// IT created - it finds this one already in the map, so created=false for it
-// and it leaves it alone). So no concurrent path tears this hub out from under
-// the register.
+// The hub admit is about to register into is kept alive across the r.mu gap by
+// the PENDING-ADMIT guard, not by emptiness. admit increments r.pending[key]
+// under r.mu (alongside perApp++ and the id reservation) BEFORE it releases
+// r.mu, and decrements it under r.mu AFTER hub.register returns (success OR
+// rollback). Every hub-removal path - removeHub (the onEmpty callback),
+// commitAndMirror's transient cleanup, and admit's own rollback - deletes a hub
+// only when it is empty AND has zero pending admits. So a hub an admit has
+// reserved a slot for but not yet registered into is never torn out from under
+// the register, even by a concurrent commitAndMirror that CREATED a transient
+// hub for the same empty room and would otherwise remove it as "still empty."
+// This closes the transient-hub slot-leak race while keeping admit decoupled
+// from r.mu across hub.register: admit still holds NO global lock while it takes
+// the hub lock to register, so a join to one room never stalls on another
+// room's hub contention.
 //
 // The order of checks: the total-rooms cap (an upgrade creating a NEW hub)
 // and the per-app aggregate are checked under r.mu; the per-room cap is
@@ -188,22 +205,40 @@ func (r *Registry) admit(key RoomKey) (h *Hub, id uint64, err error) {
 	// decApp must happen here or the slot leaks).
 	hub, created := r.getOrCreateHubLocked(key)
 
-	// Reserve the per-app slot optimistically, while still under r.mu, so the
-	// cap check above and this increment are atomic against a concurrent
-	// admit. If the per-room register below fails, the rollback path
-	// (decApp + transient-hub teardown) undoes it.
+	// Reserve the per-app slot optimistically AND register this admit as
+	// in-flight (the pending-admit guard), both while still under r.mu, so the
+	// cap check above and these increments are atomic against a concurrent
+	// admit. The pending count keeps the hub from being torn out between here
+	// and the register below (a concurrent commitAndMirror on this empty room
+	// would otherwise remove the transient hub it created as "still empty").
+	// If the per-room register below fails, the rollback path (decApp +
+	// pending-- + transient-hub teardown) undoes it.
 	id = r.nextConnID()
 	r.perApp[key.App]++
+	r.pending[key]++
 	r.mu.Unlock()
+
+	// Test-only seam: lets a test drive the admit-reserved-but-not-registered
+	// window deterministically. nil in production.
+	if r.afterAdmitReserve != nil {
+		r.afterAdmitReserve(key)
+	}
 
 	// Per-room cap check + register, under hub.mu ALONE (r.mu already
 	// released). The per-room cap is enforced HERE, so it is strict no matter
 	// how concurrent same-hub admits interleave.
-	if !hub.register(newReservation(id)) {
+	ok := hub.register(newReservation(id))
+
+	// Drop the pending-admit guard now that the register has run (whether it
+	// succeeded or hit the per-room cap), under r.mu.
+	r.clearPending(key)
+
+	if !ok {
 		// At the per-room cap. Roll back the optimistic per-app reservation and
 		// tear down a hub we created transiently (removeHub re-checks emptiness
-		// under r.mu, so a real connection that joined it in the meantime keeps
-		// it). decApp + removeHub each take r.mu themselves.
+		// AND pending == 0 under r.mu, so a real connection that joined it in
+		// the meantime - or another in-flight admit - keeps it). decApp +
+		// removeHub each take r.mu themselves.
 		r.decApp(key.App)
 		if created {
 			r.removeHub(key)
@@ -211,6 +246,21 @@ func (r *Registry) admit(key RoomKey) (h *Hub, id uint64, err error) {
 		return nil, 0, ErrRoomFull
 	}
 	return hub, id, nil
+}
+
+// clearPending drops one in-flight admit for key (the pending-admit guard),
+// pruning the map entry at zero so it does not grow unbounded. admit calls it
+// after hub.register returns. Lock order: it takes r.mu itself, so admit must
+// NOT hold r.mu (or hub.mu) when calling it.
+func (r *Registry) clearPending(key RoomKey) {
+	r.mu.Lock()
+	if r.pending[key] > 0 {
+		r.pending[key]--
+	}
+	if r.pending[key] == 0 {
+		delete(r.pending, key)
+	}
+	r.mu.Unlock()
 }
 
 // reservation is a placeholder Conn that admit registers into the hub to
@@ -417,15 +467,19 @@ func (r *Registry) commitAndMirror(key RoomKey, commit func() error, mirror Fram
 	return nil
 }
 
-// removeHub deletes key's hub from the registry IF it is empty. It is the
-// onEmpty callback the hub fires when its last connection leaves. The
-// emptiness is re-checked under the registry lock so a connection that
-// joined between the hub's "I am empty" signal and this call is not torn
-// out from under.
+// removeHub deletes key's hub from the registry IF it is empty AND has no
+// in-flight admit (the pending-admit guard). It is the onEmpty callback the hub
+// fires when its last connection leaves, and the transient-cleanup path
+// commitAndMirror / admit-rollback use. Both conditions are re-checked under
+// the registry lock so neither a connection that joined between the hub's "I am
+// empty" signal and this call, NOR an admit that has reserved a slot but not
+// yet registered its reservation into the hub, is torn out from under. The
+// pending check is what closes the transient-hub slot-leak race: a hub an admit
+// is about to register into is never removed.
 func (r *Registry) removeHub(key RoomKey) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if h, ok := r.hubs[key]; ok && h.len() == 0 {
+	if h, ok := r.hubs[key]; ok && h.len() == 0 && r.pending[key] == 0 {
 		delete(r.hubs, key)
 	}
 }
