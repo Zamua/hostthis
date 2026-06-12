@@ -246,8 +246,16 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		GRPCAddr:          advertiseGRPCAddr,
 		Seeds:             cfg.Seeds,
 		ReplicationFactor: cfg.ReplicationFactor,
-		ReadConsistency:   cluster.ReadNearest,
-		ShardKeyFn:        shaleShardKey,
+		// ReadQuorum, not ReadNearest: at R>1 ReadNearest decides on the
+		// first replica to answer and treats a NotFound as usable, so a read
+		// served by a still-backfilling replica (a freshly joined node) could
+		// return NotFound for a key that exists on the other replica.
+		// ReadQuorum reads a quorum and the present value wins on LWW. At R=1 a
+		// quorum is the single replica, so this is behavior-identical to
+		// ReadNearest there (one read, no extra hop). See docs/SPEC.md
+		// "Deploy arc: replication factor 1, then scale out".
+		ReadConsistency: cluster.ReadQuorum,
+		ShardKeyFn:      shaleShardKey,
 	})
 	if err != nil {
 		_ = be.Close()

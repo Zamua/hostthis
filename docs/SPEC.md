@@ -3336,12 +3336,20 @@ the cutover is low-risk and reversible.
 
 Scaling to `N = 2` nodes with `ReplicationFactor = 2` is then a
 configuration change, not a code change. The read path uses
-`ReadNearest` (read from the owner-local replica). The reservation
-quota pattern depends on the owner-local read seeing its own committed
-writes, and shale's last-write-wins-on-write rule (a replica applies an
-incoming write only if its stamp is strictly newer) makes the
-owner-local CAS the single source of write ordering for its shard, which
-keeps `ReadNearest` sound for this access pattern.
+`ReadQuorum`: a read collects a quorum of replicas (both, at R=2) and
+resolves by last-write-wins, preferring a present value over a
+`NotFound`. This is required at R>1: `ReadNearest` decides on the FIRST
+replica to answer and treats a `NotFound` as a usable answer, so a read
+served by a replica that is still backfilling (a freshly joined node,
+before its rebalance pull completes) could return `NotFound` for a key
+that demonstrably exists on the other replica. `ReadQuorum` reads both
+and the present value wins. The reservation quota pattern is unaffected:
+shale's last-write-wins-on-write rule (a replica applies an incoming
+write only if its stamp is strictly newer) still makes the owner-local
+CAS the single source of write ordering for its shard. At `R = 1` a
+quorum IS the single replica, so `ReadQuorum` reads exactly what
+`ReadNearest` would (one read, no extra hop, no envelope comparison) -
+the change is behavior-identical at R=1 and only takes effect at R>1.
 
 ### Migration
 
