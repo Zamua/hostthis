@@ -45,6 +45,17 @@ func (f *fakeRawStore) Get(sha string) ([]byte, error) {
 	return append([]byte(nil), body...), nil
 }
 
+func (f *fakeRawStore) GetReader(sha string) (io.ReadCloser, int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	body, ok := f.store[sha]
+	if !ok {
+		return nil, 0, ErrNotFound
+	}
+	b := append([]byte(nil), body...)
+	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
+}
+
 func (f *fakeRawStore) rawSize(sha string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -172,4 +183,70 @@ func TestCompressedBlobStore_LegacyShortBodyTreatedAsLegacy(t *testing.T) {
 	if !bytes.Equal(got, short) {
 		t.Fatalf("short legacy roundtrip mismatch: want %q got %q", short, got)
 	}
+}
+
+// TestCompressedBlobStore_GetReaderMatchesGet pins the behavior-
+// preservation contract for FIX #1: the streaming GetReader must yield
+// byte-identical output to the buffered Get for every blob shape
+// (compressed, empty, legacy-uncompressed, short-legacy). The HTML and
+// site-file serve paths switched from Get+Write to GetReader+io.Copy;
+// this guards that the bytes on the wire did not change.
+func TestCompressedBlobStore_GetReaderMatchesGet(t *testing.T) {
+	cases := map[string]struct {
+		body   []byte
+		legacy bool
+	}{
+		"compressible": {body: bytes.Repeat([]byte("the quick brown fox\n"), 5000)},
+		"tiny":         {body: []byte("<h1>hi</h1>")},
+		"empty":        {body: nil},
+		"legacy":       {body: []byte("<!doctype html><h1>legacy</h1>"), legacy: true},
+		"legacy-short": {body: []byte("hi\n"), legacy: true},
+		"binary":       {body: []byte{0x00, 0x01, 0x02, 0xff, 0xfe, 'H', 'Z', 0x00}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			sha := shaOf(tc.body)
+			inner := newFakeRawStore()
+			c := NewCompressedBlobStore(inner)
+			if tc.legacy {
+				inner.putRawForLegacyTest(sha, tc.body)
+			} else if err := c.Put(sha, bytes.NewReader(tc.body), int64(len(tc.body))); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+
+			want, err := c.Get(sha)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			rc, _, err := c.GetReader(sha)
+			if err != nil {
+				t.Fatalf("GetReader: %v", err)
+			}
+			defer rc.Close()
+			got, err := io.ReadAll(rc)
+			if err != nil {
+				t.Fatalf("ReadAll: %v", err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("GetReader != Get: want %d bytes %q, got %d bytes %q",
+					len(want), truncForLog(want), len(got), truncForLog(got))
+			}
+		})
+	}
+}
+
+func TestCompressedBlobStore_GetReaderPropagatesNotFound(t *testing.T) {
+	inner := newFakeRawStore()
+	c := NewCompressedBlobStore(inner)
+	_, _, err := c.GetReader(shaOf([]byte("missing")))
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func truncForLog(b []byte) []byte {
+	if len(b) > 32 {
+		return b[:32]
+	}
+	return b
 }

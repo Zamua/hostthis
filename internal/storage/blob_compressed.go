@@ -28,6 +28,7 @@ type CompressedBlobStore struct {
 type innerBlobStore interface {
 	Put(sha string, r io.Reader, size int64) error
 	Get(sha string) ([]byte, error)
+	GetReader(sha string) (io.ReadCloser, int64, error)
 }
 
 // PutPrecompressed writes a body that is ALREADY zstd-encoded with the
@@ -110,6 +111,82 @@ func (c *CompressedBlobStore) Get(sha string) ([]byte, error) {
 		return nil, fmt.Errorf("compressed blob decode %s: %w", sha, err)
 	}
 	return out, nil
+}
+
+// GetReader streams the UNCOMPRESSED bytes for sha without buffering
+// the whole blob into memory the way Get does. It reads the inner
+// stored bytes lazily: peeks the 4-byte magic header, and either
+//
+//   - returns the remaining stream wrapped in a streaming zstd decoder
+//     (the normal compressed case), or
+//   - returns the bytes as-is (legacy uncompressed blobs without the
+//     magic, same backstop Get applies).
+//
+// The returned reader yields byte-identical output to Get(sha) - a
+// streaming zstd decode produces the same bytes as DecodeAll. The
+// caller MUST Close it; Close releases both the zstd decoder and the
+// underlying inner reader. The int64 is the inner (compressed) byte
+// length reported by the inner store, not the decoded length, so the
+// serve path does not use it for Content-Length.
+func (c *CompressedBlobStore) GetReader(sha string) (io.ReadCloser, int64, error) {
+	inner, size, err := c.Inner.GetReader(sha)
+	if err != nil {
+		return nil, 0, err
+	}
+	// Peek the magic header to decide compressed vs legacy. Read exactly
+	// len(magicV1) bytes (or fewer if the blob is shorter); io.ReadFull
+	// handles short blobs via ErrUnexpectedEOF / EOF.
+	hdr := make([]byte, len(magicV1))
+	n, rerr := io.ReadFull(inner, hdr)
+	if rerr != nil && rerr != io.ErrUnexpectedEOF && rerr != io.EOF {
+		_ = inner.Close()
+		return nil, 0, fmt.Errorf("compressed blob read header %s: %w", sha, rerr)
+	}
+	hdr = hdr[:n]
+	if !hasMagicV1(hdr) {
+		// Legacy uncompressed - return the peeked header prepended to the
+		// rest of the inner stream, unwrapped.
+		return newPrefixReadCloser(hdr, inner), size, nil
+	}
+	// Compressed: the magic is consumed; decode the remaining stream.
+	dec, err := zstd.NewReader(inner)
+	if err != nil {
+		_ = inner.Close()
+		return nil, 0, fmt.Errorf("compressed blob: zstd reader: %w", err)
+	}
+	return &zstdReadCloser{dec: dec, inner: inner}, size, nil
+}
+
+// prefixReadCloser serves a small in-memory prefix (the peeked magic
+// header) before continuing from the underlying reader. Used for legacy
+// uncompressed blobs where the peeked bytes are real content.
+type prefixReadCloser struct {
+	r      io.Reader
+	closer io.Closer
+}
+
+func newPrefixReadCloser(prefix []byte, rc io.ReadCloser) *prefixReadCloser {
+	return &prefixReadCloser{
+		r:      io.MultiReader(bytes.NewReader(prefix), rc),
+		closer: rc,
+	}
+}
+
+func (p *prefixReadCloser) Read(b []byte) (int, error) { return p.r.Read(b) }
+func (p *prefixReadCloser) Close() error               { return p.closer.Close() }
+
+// zstdReadCloser couples a streaming zstd decoder to its underlying
+// inner reader so Close releases both.
+type zstdReadCloser struct {
+	dec   *zstd.Decoder
+	inner io.ReadCloser
+}
+
+func (z *zstdReadCloser) Read(b []byte) (int, error) { return z.dec.Read(b) }
+
+func (z *zstdReadCloser) Close() error {
+	z.dec.Close() // returns no error
+	return z.inner.Close()
 }
 
 func hasMagicV1(b []byte) bool {

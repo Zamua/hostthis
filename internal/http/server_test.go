@@ -1,6 +1,8 @@
 package http
 
 import (
+	"bytes"
+	"io"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -23,6 +25,9 @@ func (s stubPasteReader) Get(slug domain.Slug) (domain.Paste, error) {
 type stubBlobReader struct{ body []byte }
 
 func (s stubBlobReader) Get(sha string) ([]byte, error) { return s.body, nil }
+func (s stubBlobReader) GetReader(sha string) (io.ReadCloser, int64, error) {
+	return io.NopCloser(bytes.NewReader(s.body)), int64(len(s.body)), nil
+}
 
 func TestSlugFromHost(t *testing.T) {
 	s := &Server{ApexDomain: "paste.test"}
