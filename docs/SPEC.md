@@ -796,7 +796,17 @@ informs them):
   and free space. This is the room-tier analogue of the per-identity paste
   quota: it stops one app from consuming the whole service. It is flagged
   as a starting default - an operator running many apps may want it lower,
-  a single-app operator higher.
+  a single-app operator higher. **The per-app aggregate is counted at SWEEP
+  time, not read time, on every backend:** an expired-but-not-yet-swept
+  room's bytes still count toward the app's cap until the periodic sweep
+  deletes the room (which cascades its values). This is a deliberate
+  fail-safe choice - the cap can transiently OVER-count an expired-unswept
+  room (rejecting a write slightly early, which the client retries after the
+  sweep) but never UNDER-counts (admitting a write past the real cap). It
+  differs from the per-IDENTITY paste/site quota, which the sqlite + slatedb
+  backends free at READ time; the per-app room aggregate is uniformly
+  sweep-time so the cap behaves identically across sqlite, slatedb, and
+  shale.
 - **Service-wide cap.** Room data counts toward the same `--storage-cap-bytes`
   service-wide cap pastes and sites do, in BOTH directions:
   - A room `PUT` that would push *total active service bytes* (pastes +
