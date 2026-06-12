@@ -37,6 +37,18 @@ var shaleConformSeq atomic.Int64
 // an opaque type error inside the factory closure below.
 var _ conformanceRepo = (*storage.ShaleRepo)(nil)
 
+// Compile-time assertion that *ShaleSiteRepo satisfies the site
+// conformance interface (service.SiteRepo + service.SweepSites), so the
+// shale backend can supply a non-nil bundle Sites and run the site
+// subtests the same way sqlite + slatedb do.
+var _ conformanceSiteRepo = (*storage.ShaleSiteRepo)(nil)
+
+// Compile-time assertion that *ShaleRoomRepo satisfies the room conformance
+// interface (service.RoomRepo + service.SweepRooms), so the shale backend can
+// supply a non-nil bundle Rooms and run the room subtests the same way sqlite
+// + slatedb do.
+var _ conformanceRoomRepo = (*storage.ShaleRoomRepo)(nil)
+
 func TestConformance_Shale(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -46,7 +58,7 @@ func TestConformance_Shale(t *testing.T) {
 	access := envOrDefault("MINIO_TEST_ACCESS_KEY", "admin")
 	secret := envOrDefault("MINIO_TEST_SECRET_KEY", "supersecret")
 
-	runConformance(t, "shale", conformCaps{ExpiryFreesQuotaAtReadTime: false, StrictQuotaUnderConcurrency: true}, func(t *testing.T) conformanceRepo {
+	newShale := func(t *testing.T) *storage.ShaleRepo {
 		// Unique per-call logical db so each subtest starts empty within
 		// the shared bucket. Run epoch (nanos) + a monotonic counter keeps
 		// concurrent CI runs from colliding.
@@ -71,5 +83,26 @@ func TestConformance_Shale(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = repo.Close() })
 		return repo
-	})
+	}
+	caps := conformCaps{ExpiryFreesQuotaAtReadTime: false, StrictQuotaUnderConcurrency: true}
+	newRepo := func(t *testing.T) conformanceRepo { return newShale(t) }
+	// The site repo (ShaleSiteRepo) wraps the SAME ShaleRepo (same cluster
+	// handle + shard routing), so the cross-quota + cross-family-slug site
+	// subtests exercise the real interaction in one shale cluster.
+	newSites := func(t *testing.T) (conformanceRepo, conformanceSiteRepo) {
+		repo := newShale(t)
+		return repo, storage.NewShaleSiteRepo(repo)
+	}
+	// The room repo (ShaleRoomRepo), the paste repo, and the site repo all wrap
+	// the SAME ShaleRepo (one cluster handle + shard routing), so the cross-kind
+	// service-wide cap room subtest exercises the real interaction.
+	newRooms := func(t *testing.T) roomConformanceStores {
+		repo := newShale(t)
+		return roomConformanceStores{
+			Rooms: storage.NewShaleRoomRepo(repo),
+			Paste: repo,
+			Site:  storage.NewShaleSiteRepo(repo),
+		}
+	}
+	runConformanceWithSites(t, "shale", caps, newRepo, newSites, newRooms)
 }

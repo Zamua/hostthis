@@ -235,6 +235,1182 @@ With* options. Refusal behavior is pinned by
   for older uncompressed blobs (rolling-migration support; no flag
   day).
 
+## Static site archives
+
+A single renderable file is the common case, but the same upload pipe
+also accepts a **gzip-tar archive of a static site** (HTML / CSS / JS).
+Pipe the tarball exactly the way you pipe any file:
+
+```
+$ tar czf - mysite/ | ssh hostthis.dev
+https://abc12345.hostthis.dev
+```
+
+There is no new verb and no flag. hostthis DETECTS the archive the same
+way it detects Markdown vs HTML (by sniffing the upload), safe-untars
+it, stores each file as a content-addressed blob plus a manifest, and
+serves the directory at `<slug>.hostthis.dev/<path>`. Everything else -
+identity, quota, the 7-day expiry, versioning, the security model - is
+identical to a single-file paste. A static site is just "a paste that
+happens to be a directory."
+
+This is the now-real form of the "Static directory hosting" bullet
+under "Future directions"; the persistence-API bullet there stays a
+proposal.
+
+### Detection: gzip-tar as a format
+
+The format gate (`DetectKind`, see "File handling → Format gate") gains
+one branch. After the existing HTML / Markdown sniffing, the detector
+checks the captured upload prefix for the **gzip magic** (`0x1f 0x8b`),
+and if present, peeks one tar header out of the decompressed stream to
+confirm a tar inside (a gzip-tar = `.tar.gz` / `.tgz`). The detection
+is by content, never by filename - the SSH pipe carries no filename, so
+this matches how every other format is recognized.
+
+A gzip-tar that survives the safe-untar (below) AND contains web
+content (an `index.html`, or at least one `.html` / `.css` / `.js`
+file) routes to the **site** path. A gzip-tar with no web content is
+**rejected** as unsupported, the same outcome as any unsupported
+upload today (see the "Supported formats" rejection). This keeps the
+scope narrow on purpose: hostthis hosts renderable web content, not
+arbitrary file trees.
+
+Scope for this version is **gzip-tar only**. Plain (uncompressed) tar
+and zip are natural follow-ons but out of scope here; an upload that
+sniffs as zip or bare tar is rejected like any other unsupported type.
+
+### Safe-untar (security-critical)
+
+Untarring attacker-controlled bytes is the load-bearing risk, so the
+extractor enforces three guards while it STREAMS the archive (never
+"decompress fully, then validate"):
+
+- **Path safety (zip-slip / tar traversal guard).** Every tar entry
+  must be a regular file or a directory; symlinks, hardlinks, devices,
+  FIFOs, and every other type are rejected outright (no following a
+  symlink out of the site root, no hardlink games). Each entry's path
+  is cleaned and rejected if it is absolute, contains a `..` segment,
+  or otherwise escapes the site root. The manifest only ever holds
+  safe, site-root-relative paths.
+- **Decompression-bomb guard.** Total UNCOMPRESSED bytes are tracked as
+  the tar is streamed, and extraction ABORTS the instant the running
+  total would exceed the identity's available quota (and a max-site-size
+  cap). A tiny archive can expand to gigabytes, so the check is on the
+  bytes as they are read out, never on the post-decompression result.
+  The aborted upload writes nothing durable.
+- **File-count and manifest-size caps.** The number of regular-file
+  entries is capped (5000) and the total manifest path text is bounded
+  (1 MiB), with a per-path length cap (1 KiB), so a "million tiny files"
+  archive cannot exhaust file descriptors, inodes, or metadata-store
+  space even though each file is small.
+
+Any guard tripping aborts the whole deploy: a half-extracted site is
+never persisted and never served (deploys are atomic - see Versioning
+below).
+
+### The Site + Manifest model
+
+A **Site** is a new domain aggregate that lives alongside `Paste`:
+
+- `Slug` - the same 8-char slug shape pastes use, drawn from the same
+  alphabet, so a site and a paste are indistinguishable from the URL.
+- `Identity` - the owner, the uploader's SSH key fingerprint, exactly
+  as for a paste.
+- `Manifest` - the value object mapping each safe relative path to the
+  SHA256 of its blob, plus per-file size and a content-type derived
+  from the file extension.
+- `CreatedAt` / `UpdatedAt` / `ExpiresAt` - the same fields and the
+  same 7-day retention clock a paste carries.
+
+The `Manifest` is a pure value object: building it from extracted
+entries, looking a path up in it, and computing each file's
+content-type-by-extension are I/O-free domain operations with no
+storage or HTTP dependency, matching the domain-purity rule.
+
+### Storage
+
+Sites reuse the existing content-addressed `BlobStore` for their files:
+each extracted file is `Put` under its SHA256 key, so identical files
+across deploys (and across different sites) **dedupe for free** - the
+same vendored `react.min.js` in ten deploys is stored once. The blob
+layer is unchanged; a site is just many blob writes plus one manifest.
+
+A new **SiteRepo** persists / gets / deletes Site records (slug ->
+owner + manifest + timestamps) next to the existing paste repo,
+behind a small service-layer interface the same way the paste repos
+are. It carries `Identity` on every record and is queried by slug,
+so the same owner-gating and not-found-on-cross-owner behavior the
+pastes get applies to sites. The repo is implemented on every metadata
+backend (sqlite as a `sites` table, slatedb / shale as a `sites/<slug>`
+KV layout), so static-site hosting runs no matter which backend is wired;
+see "Static-site storage on the slatedb (and shale) backend" under
+"Metadata storage backends" for the KV layout.
+
+### Serving a directory
+
+A site is served by the same HTTP surface that serves pastes, with the
+same origin-isolation property: `<slug>.hostthis.dev/<path>` resolves
+the slug to its Site, looks `<path>` up in the manifest, and streams
+the referenced blob with the content-type derived from the path's
+extension. Directory handling:
+
+- `/` and any `/<dir>/` serve that directory's `index.html` if one
+  exists in the manifest.
+- A path that maps to a manifest entry serves that file.
+- An unmatched path is resolved by the **SPA fallback** (below): a path
+  that looks like a client-side ROUTE serves the root `index.html`, while
+  a path that looks like a genuinely-missing ASSET returns **404**.
+
+Unlike a single-file paste - which serves only at `/` on its subdomain
+and 404s every other path - a site serves its whole path space off the
+subdomain root, because a site is a directory by definition. A slug is
+EITHER a site or a paste, never both: the read path tries the site
+table first and falls back to the paste table, and slug generation
+checks both tables for collisions. The bare directory name `/<dir>`
+(no trailing slash) also resolves to `/<dir>/index.html` so links work
+with or without the slash.
+
+### SPA fallback (route vs. asset)
+
+A built single-page app (React Router, Vue Router, SvelteKit in SPA
+mode) uses client-side routes like `/about` or `/users/123` that are NOT
+real files on disk. Landing at `/` works - the server serves the root
+`index.html`, the bundle boots, and the router takes over. But a DIRECT
+link to `/about`, or a REFRESH while on `/about`, hits the server for a
+path with no manifest entry. Without a fallback the server 404s and the
+app never loads.
+
+The fix: when a request misses the manifest (it is neither a file nor a
+directory index), the server serves the site's **root `index.html`** so
+the SPA's JS loads and its router can render the route client-side -
+*unless* the path looks like a real, missing static asset, in which case
+it stays a **404**. Distinguishing the two is a pure, I/O-free decision
+on the request path's last segment:
+
+- **Looks like a ROUTE -> serve root `index.html` (HTTP 200).** The last
+  path segment has **no extension** (`/about`, `/users/123`) or an
+  **`.html` extension** (`/about.html` for a pre-rendered route that the
+  build did not emit as a file). These are how client-side routers spell
+  locations.
+- **Looks like a missing ASSET -> 404.** The last path segment has a
+  known **static-asset extension** (`.js`, `.mjs`, `.css`, `.json`,
+  `.map`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.avif`, `.svg`,
+  `.ico`, `.woff`, `.woff2`, `.ttf`, `.otf`, `.eot`, `.wasm`, `.xml`,
+  `.txt`, `.pdf`, `.webmanifest`, media such as `.mp4` / `.webm` /
+  `.mp3`, pre-compressed `.gz` / `.br`, ...). A bundle that requests
+  `/assets/app-deadbeef.js` and gets back `index.html` with a `200` and
+  a `text/html` content-type would be a silent, confusing failure (the
+  browser tries to execute HTML as a script); a clean `404` is the
+  correct, debuggable answer for a genuinely-absent asset.
+
+The heuristic is **extension-based on the last segment only**, never on
+intermediate path components, so `/users/123/edit` (no trailing
+extension) is a route and `/img/logo.png` (asset extension) is an asset.
+An unknown extension (one not in the asset set and not `.html`) is
+treated as a route and gets the `index.html` fallback - the asset set is
+the deny-list; everything else falls back. The root `index.html` served
+by the fallback carries the **same sandbox headers, cache posture, and
+`200` status** as serving `index.html` directly; only the request path
+differs.
+
+The fallback is **default-on for every site**, not an opt-in flag. Two
+reasons. First, the upload pipe is flagless by design
+(`tar czf - site/ | ssh hostthis.dev` carries no filename and no
+options), so there is no clean place for a user to signal opt-in at
+upload time; a per-site flag would need a new column, new
+deploy-time plumbing, and a new way to set it, for no UX win. Second,
+the heuristic is **safe for plain static sites too**: a hand-written
+multi-page site never requests a no-extension/`.html` path that isn't a
+real file during normal navigation (its links point at real `.html`
+files or real directories, which the manifest lookup already resolves),
+and any asset it does request still 404s correctly when absent. So
+default-on costs a plain static site nothing and saves every SPA the
+broken-on-refresh experience. If a future need for opt-OUT appears
+(e.g. a site that wants hard 404s on unknown routes), it can be added as
+a flag then; until a concrete second case shows up, the simpler
+default-on shape wins.
+
+Content-type is derived purely from the path's extension (an I/O-free
+domain decision). An unknown extension is served as
+`application/octet-stream` - never mislabeled as `text/html`, so an
+unexpected file can't be coerced into running as script on the origin.
+A `.md` / `.txt` file in a site is served raw as `text/plain` (NOT
+rendered - server-side Markdown rendering is the single-file paste
+path, not the site path).
+
+Site reads carry the **same sandbox headers** as HTML paste reads
+(`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
+`Permissions-Policy: ...`) and the same cache posture. Files are served
+**raw**: the site's own HTML/CSS/JS runs exactly as uploaded, secured
+by per-subdomain origin isolation, not by sanitizing the bytes.
+
+### Same security model as HTML pastes (not a new posture)
+
+A static site introduces **no new security posture**. An HTML paste is
+already served RAW (its JS runs) and is secured by **origin isolation**:
+each paste gets its own subdomain, its own browser origin, and the same
+response headers (see "HTML sandboxing"). Only the Markdown path is
+sanitized, because Markdown is rendered server-side; raw HTML never is.
+
+A static site is the SAME model: raw files, its own subdomain, the same
+headers, the same origin isolation between sites and against the apex.
+So this feature is not a new trust boundary - it is the existing
+"raw HTML on an isolated origin" boundary applied to a directory of
+files instead of one file. As with any hostthis URL, treat a site as
+untrusted user content, the way you would a CodePen or a `github.io`
+page. Path mode (`--mode path`, dev-only) collapses every site onto
+the shared apex origin and breaks this isolation exactly as it does for
+pastes; production runs subdomain mode.
+
+### Reuse: identity, quota, retention, versioning
+
+Nothing about the product opinions changes for sites:
+
+- **Identity** is the SSH key fingerprint, the same account a paste
+  upload uses, gated by the same Sybil per-subnet admission.
+- **Quota** counts the manifest's DEDUPED total blob size against the
+  SAME per-identity cap (see "Limits → Per-identity quota"). The
+  decompression-bomb guard aborts the untar the instant the running
+  total would push the owner over that cap, so a site can never be
+  persisted over-quota.
+- **Retention** is the same fixed 7-day expiry from last update; a site
+  evicts itself exactly like a paste, no per-site control.
+- **Versioning** reuses the paste-versioning shape where it is low-cost:
+  each deploy to a slug is a new immutable manifest, so rollback /
+  history ride the existing machinery; otherwise a deploy lands as a
+  fresh slug, matching whatever pastes do. Either way a deploy is
+  ATOMIC - the new manifest only becomes the served one once every blob
+  is written and the manifest is persisted; a half-uploaded site never
+  serves.
+
+### Byte-identical validation harness
+
+The static-site contract is "what you upload is what is served": every
+file round-trips **byte-for-byte**, with the content-type its extension
+implies; `/` and `/<dir>/` serve that directory's `index.html`; an
+unmatched route serves the root `index.html` via the SPA fallback; and a
+genuinely-missing asset 404s. That contract is pinned by a validation
+harness that deploys **real, framework-built sites** through the SAME
+archive pipeline an `ssh` tar upload hits.
+
+The harness ships four committed site fixtures under
+`testdata/sitefixtures/`:
+
+- three **vite SPA** builds - React (`react-router-dom`), Vue
+  (`vue-router`), and Svelte (`svelte-routing`) - each with a home route
+  plus an `/about` (and `/users/:id`) client-side route that is NOT a real
+  file, so the SPA fallback is exercised against a genuine framework
+  bundle, and
+- a **plain-static** demo (hand-written `index.html` + `about.html` +
+  `css/app.css` + `js/app.js`, no framework, no build step) so the
+  round-trip is also proven for a multi-page site whose second page is a
+  real file served directly, never via the fallback.
+
+For each fixture the harness tars the build output, deploys it through the
+real `DeploySite` use case over a real sqlite repo + content-addressed
+blob store, then fetches every built file back over the real HTTP serving
+surface and asserts the served bytes are byte-identical to the fixture
+file, the content-type matches the extension, `/` serves the root
+`index.html`, the deep route serves the root `index.html` via the SPA
+fallback (200, index bytes), and a missing asset (`/assets/nope.js`) 404s.
+
+The committed build output is the **known-good snapshot**: CI byte-compares
+against it and never runs `npm`. The demo SOURCE and a `SHA256SUMS`
+manifest are committed alongside each `dist/`; `make rebuild-site-fixtures`
+regenerates both from source (`npm ci` + `vite build`, deterministic
+because vite content-hashes asset names), and a snapshot test fails loudly
+if any committed fixture file drifts from its pinned hash. `node_modules`
+is gitignored - the fixtures need no toolchain to validate, only to
+regenerate.
+
+## Rooms (app persistence)
+
+Static sites can SHIP, but a static site has no backend: it can render,
+not remember. **Rooms** add the missing piece - a small persistence tier
+so a deployed static-site app can store and load state without an account
+system and without any server-side app code. This is the first real cut
+of the "A persistence API" bullet under "Future directions"; that bullet
+called for a per-app KV store fronted by a thin HTTP layer over shale,
+and this section makes the no-auth, capability-based form of it real.
+
+The deliberately-scoped commitment for this tier: **a key-value store
+keyed by an unguessable room UUID, with strict per-room isolation, served
+under the deployed app's own subdomain.** No accounts, no JWT, no
+WebSockets - those are later tiers (see "Scope fence" below). What ships
+is enough to build a collaborative app with no signup: a when2meet, a
+shared list, a poll, a retro board.
+
+### The model: an app, a room, a namespace
+
+Three nouns, in a strict containment hierarchy:
+
+- An **app** is a deployed static site (the "Static site archives"
+  feature above) or a paste. It is identified by its **slug** - the same
+  8-char slug the site/paste is served at - so `<slug>.hostthis.dev` is
+  both where the app's files live and where its rooms API is served. An
+  app's identity is that slug; there is no second registration step. There
+  IS, however, an existence requirement: the slug must name a live (non
+  expired) site or paste. `POST /api/rooms` against a slug that names no
+  live app is a **404**, so rooms can only ever be created under a slug an
+  operator-facing upload actually provisioned. This ties the per-app
+  caps (creation rate limit + aggregate byte cap) to a finite, provisioned
+  set of apps: an attacker cannot rotate through the ~10^12 well-formed
+  slug space to mint a fresh per-app budget under each one, because almost
+  all of those slugs name nothing. The read/write verbs do NOT repeat this
+  check - a room only exists under a slug that passed it at creation time,
+  and the per-room UUID is the access capability from there on.
+- A **room** is a `(app, UUIDv4, KV namespace)` triple created under an
+  app. The UUIDv4 is minted server-side on creation and is the room's
+  **capability**: holding it grants full read / write / delete to that
+  room's data, and nothing else grants it. UUIDv4 is 122 bits of
+  randomness, computationally infeasible to guess, so a room is private to
+  whoever has the link - exactly the same "the identifier IS the secret"
+  property the 8-char paste slug already relies on, scaled up to a UUID
+  because room URLs are shared more widely and held longer than a paste
+  link.
+- A **namespace** is the room's flat key-value space. A value is a small
+  opaque blob (JSON or bytes the app chose); a key is an app-chosen
+  string. hostthis never parses the value - it is app STATE, stored and
+  returned verbatim.
+
+There is no login, no password, no per-user account anywhere in this
+tier. Possession of the room UUID is the whole access model.
+
+**Collaborative on refresh.** Because a room is one shared namespace keyed
+by `(app, room-uuid)` and every participant addresses that same namespace,
+two participants who hold the same room link see each other's writes on
+their next read: A writes a value, B scans the room (its "join") and
+observes it, B writes back, and A sees that on its next scan. This is the
+consistency model the KV verbs ship - request/response KV, so the
+propagation is "on the next read," not pushed by the KV path itself. An
+app that wants near-real-time either re-scans on an interval OR opens the
+room's WebSocket relay (see "Real-time room relay (WebSocket)" below),
+which pushes one participant's message to the others live. The names
+participants attach to their writes are cosmetic
+attribution, not access control (see "In-room identity" below): any holder
+of the UUID can write under any key.
+
+### Strict room isolation (the security property)
+
+Every value is namespaced by the triple `(app-slug, room-uuid, key)`. The
+isolation guarantees that fall out of that key shape:
+
+- **Cross-room**: one room's UUID can never read or write another room's
+  data, even within the same app. The UUID is part of the key, so a
+  request carrying room A's UUID can only ever address keys under room A.
+- **Cross-app**: one app's rooms are separate from another app's. The app
+  slug is the outermost key segment, so even an identical room-UUID-shaped
+  string under a different app addresses a different keyspace. (Room UUIDs
+  are unique in practice, but the app segment makes the isolation
+  structural, not probabilistic.)
+- **Existence is not leaked on the per-key path**: a *per-key* request
+  (`GET`/`PUT`/`DELETE /api/rooms/<uuid>/<key>`) to a
+  well-formed-but-nonexistent room UUID returns **404**, the same shape as
+  a request for a missing key in a real room, so a per-key probe cannot
+  distinguish "no such room" from "no such key in this room." This mirrors
+  the paste / site rule where a cross-owner read surfaces as not-found
+  rather than forbidden. The *whole-room scan* (`GET /api/rooms/<uuid>`)
+  does draw a 200-vs-404 line: an existing-but-empty room scans to `200 {}`
+  while a nonexistent room scans to `404`. That distinction is an
+  intentional existence signal scoped to a party who *already holds* the
+  122-bit UUID - it is not a probing oracle, since guessing a live UUID is
+  computationally infeasible and the per-key path (the only surface a
+  brute-force scan would hammer) never leaks the distinction. A holder of a
+  real UUID learning "this room exists but is empty" reveals nothing they
+  could not already write into existence.
+
+This is the same posture as the rest of hostthis: an unguessable
+identifier is the capability, and the storage layer enforces the namespace
+boundary so a forged or guessed identifier addresses nothing.
+
+### In-room identity is the APP's concern, not hostthis's
+
+hostthis does **not** authenticate participants in a room. There is no
+notion of "user A" versus "user B" at the storage layer - only "whoever
+holds the room UUID." If an app wants participant names (a when2meet needs
+to label availability by person; a retro board needs to attribute cards),
+the app stores those names AS room data: a `participants` key, or
+per-participant keys like `participant/<browser-id>`. The browser
+generates or types the name, keeps it in `localStorage`, and writes it
+into the room like any other value.
+
+This is **cosmetic attribution, not access control**. Anyone with the room
+UUID can write under any participant key, so the names are a display
+convenience, not an identity boundary. That is the correct trade for this
+tier: the room UUID is the access boundary, and finer-grained per-user
+access control (one participant cannot overwrite another's record) is the
+job of the LATER auth tier (see "Scope fence"), which adds verifiable
+end-user identity on top. Until then, a room is a shared space where the
+link is the key, exactly like a shared Google Doc link.
+
+### The HTTP API
+
+Rooms are served by the same HTTP surface that serves pastes and sites,
+under the app's own subdomain (`<app-slug>.hostthis.dev`), at the
+reserved `/api/rooms` path prefix. Because the app and its API share an
+origin, the app's own JavaScript can call the API with same-origin fetch
+and no CORS dance. The `/api/` prefix is carved out of the site's path
+space: a site's manifest lookup never serves a file at `/api/rooms/...`,
+so the API path and the static-file path do not collide. (In dev path
+mode the same routes live under `<apex>/p/<app-slug>/api/rooms/...`.)
+
+```
+POST   /api/rooms                  mint a UUIDv4, create the room, return { "id": "<uuid>" }
+GET    /api/rooms/<uuid>           list/scan every key+value pair in the room (load full state on join)
+GET    /api/rooms/<uuid>/<key>     read one value (404 if absent)
+PUT    /api/rooms/<uuid>/<key>     write one value (request body is the value)
+DELETE /api/rooms/<uuid>/<key>     delete one value
+```
+
+Behavior, endpoint by endpoint:
+
+- **POST /api/rooms** generates a fresh UUIDv4, creates an empty room
+  under the requesting app slug, and returns `{"id": "<uuid>"}` (HTTP
+  201). The app stores that id (in the URL hash, in `localStorage`, in a
+  share link) and uses it for every subsequent call. Creation is subject
+  to the room-creation rate limit (see "Quota and abuse").
+- **GET /api/rooms/<uuid>** scans and returns every key+value pair in the
+  room as a single JSON object, so an app loads the full room state in one
+  request on join. A well-formed UUID that names no room returns **404**.
+- **GET /api/rooms/<uuid>/<key>** returns the stored value verbatim with a
+  conservative content type (`application/octet-stream` unless the app
+  stored a recognizable JSON value, which is served `application/json`). A
+  missing key returns **404**; a missing room returns the same **404**.
+- **PUT /api/rooms/<uuid>/<key>** writes the request body as the value for
+  `<key>`, creating or overwriting. Subject to the per-room data cap (see
+  "Quota and abuse"); a write that would push the room over the cap is
+  rejected (HTTP 413) and the prior value is left intact. A successful
+  write resets the room's retention clock (see "Retention").
+- **DELETE /api/rooms/<uuid>/<key>** removes the value. Idempotent:
+  deleting an absent key is a success (the post-condition - "the key is
+  gone" - holds either way). A delete also resets the retention clock,
+  since it is a write to the room.
+
+A malformed UUID (not a parseable UUIDv4) is a **400**, distinct from the
+**404** a well-formed-but-nonexistent room gets: a 400 says "this is not a
+room id at all," a 404 says "no room here," and neither confirms the
+existence of any specific room.
+
+### Storage: a room-namespaced KV over the metadata backend
+
+Room data is small JSON/bytes blobs - app STATE, not files - so it lives
+in the **metadata backend** hostthis already runs (the configurable
+metadata store: sqlite for single-host, slatedb / shale for the
+object-store-backed and horizontally-scaled deploys), NOT in the
+content-addressed BlobStore. The BlobStore is for the larger,
+dedupe-worthy file bytes of pastes and sites; room values are small,
+mutable, and per-room, so they belong with the metadata. Large blobs are
+explicitly out of scope for rooms - an app that needs to host files uses
+the archive/site feature, not a room value.
+
+The implementation follows the existing repo-behind-a-service-interface
+pattern exactly the way the paste repo and the shale `ShaleRepo` do:
+
+- A new domain aggregate, **`Room`** (slug-of-the-owning-app + room id +
+  the key-value namespace as a value object), lives in `internal/domain`
+  alongside `Paste` and `Site` and imports nothing from infrastructure.
+  The namespace is a pure value object: putting, getting, deleting, and
+  scanning keys, plus computing the room's total byte size and key count
+  for the cap check, are all I/O-free domain operations.
+- A new **`RoomKVRepo`** in `internal/storage` persists rooms with
+  namespaced keys and is queried by `(app-slug, room-uuid)`, behind a
+  small service-layer interface (a `RoomRepo` declared in
+  `internal/service`, the same way `PasteRepo` / `PasteAdmin` /
+  `SweepRepo` / `KeyGateRepo` are; the sweep-side view is `SweepRooms`).
+  All three metadata backends implement it - **sqlite** (single-host),
+  **slatedb** (object-store-backed), and **shale** (horizontally-scaled
+  cluster) - so the `/api/rooms` surface runs on every backend hostthis can
+  be deployed on, including the slatedb-direct backend prod runs. The
+  domain, HTTP, and service layers stay unaware of which backend is wired.
+- The sqlite backend stores rooms in two tables, `rooms`
+  (`(app_slug, room_id)` primary key + the retention clock) and `room_kv`
+  (`(app_slug, room_id, key)` primary key + the opaque value, FK-cascade
+  on the room), plus a bounded `room_creates` table for the creation rate
+  limit. Every read and write is scoped by the `(app_slug, room_id)` pair,
+  so the namespace boundary is enforced by the key, not by a filter a
+  caller could forget.
+- The slatedb and shale backends model the same logical rows as a set of
+  room key families co-located in the one metadata keyspace, so a room
+  read or write is a single transaction / prefix scan. The full layout,
+  the cap + isolation + rate-limit + TTL mapping onto KV ops, and the
+  fixed-width TTL timestamp are specified under **"Room storage on the
+  slatedb (and shale) backend"** below (near the metadata-backend section,
+  alongside the parallel static-site layout). The single-writer backends
+  store the same logical rows; the observable contract is identical across
+  backends, the way it is for the paste and site families, and the
+  backend-agnostic conformance suite pins them identical.
+
+The slug-must-name-a-live-app **existence requirement** is enforced at the
+HTTP layer (it reads the site + paste readers the router already holds),
+NOT inside the room repo, so it holds identically across backends without
+the room repo needing a separate existence reader: room creation 404s a
+slug that names no live site or paste on every backend.
+
+### Quota and abuse
+
+A writable, no-auth, public API needs the abuse surface bounded as
+deliberately as the paste upload path is. Four controls, each with a
+concrete default flagged as a starting point (tunable as real usage
+informs them):
+
+- **Room-creation rate limit.** `POST /api/rooms` is gated per source IP
+  AND per app: **default 60 rooms per IP per hour** and **default 300
+  rooms per app per hour**, so a script cannot spam rooms into existence.
+  The per-IP gate reuses the subnet-derivation the SSH Sybil gate already
+  computes (`/24` for IPv4, `/48` for IPv6); the per-app gate bounds a
+  single popular app's blast radius. Over the limit returns **429** with a
+  `Retry-After`. (The HTTP read/write verbs - GET / PUT / DELETE on an
+  existing room - are NOT room-creation and ride the per-room data cap
+  below rather than this gate; a reverse-proxy per-IP request limit is the
+  right layer for raw request-rate abuse, the same division of labor the
+  paste threat model already documents.)
+
+  **Trusted source-IP derivation.** The per-IP bucket is derived from the
+  TCP `RemoteAddr` by default, NOT from any client-supplied header. A
+  client-controlled `X-Forwarded-For` is ignored unless the operator
+  explicitly opts in by setting `HOSTTHIS_HTTP_TRUST_XFF=true` - the same
+  discipline the SSH side uses for `HOSTTHIS_SSH_PROXY_PROTOCOL`. Trusting
+  a client header by default is a rate-limit bypass: an attacker would set
+  a fresh `X-Forwarded-For` per `POST` and land in a new per-IP bucket each
+  time. When `HOSTTHIS_HTTP_TRUST_XFF=true` is set (because hostthis sits
+  behind a reverse proxy that appends the real client IP), the gate reads
+  the **right-most** value of the `X-Forwarded-For` list - the hop the
+  trusted proxy itself recorded, which the client cannot forge past the
+  proxy - not the left-most value, which is fully attacker-controlled. An
+  operator who terminates TLS at a proxy MUST set this flag (otherwise
+  every request's `RemoteAddr` is the proxy's own IP and the per-IP gate
+  collapses to a single global bucket); an operator with hostthis directly
+  on the public internet MUST leave it unset.
+- **Per-room data cap.** A single room cannot store unbounded data:
+  **default 256 KiB total value bytes** and **default 256 keys** per room.
+  A `PUT` that would push the room past either cap is rejected (**413**)
+  and the prior state is unchanged. The cap is sized for app STATE
+  (a poll's votes, a retro board's cards, a when2meet's availability grid)
+  - generous for those, tight enough that a room cannot be turned into a
+  free file host.
+- **Per-app aggregate.** A popular app's rooms in aggregate are bounded by
+  **default 64 MiB of room data per app** (and the room-creation rate
+  limit caps the growth rate). Past the per-app aggregate, new room
+  creation and new writes for that app return **507** until rooms expire
+  and free space. This is the room-tier analogue of the per-identity paste
+  quota: it stops one app from consuming the whole service. It is flagged
+  as a starting default - an operator running many apps may want it lower,
+  a single-app operator higher. **The per-app aggregate is counted at SWEEP
+  time, not read time, on every backend:** an expired-but-not-yet-swept
+  room's bytes still count toward the app's cap until the periodic sweep
+  deletes the room (which cascades its values). This is a deliberate
+  fail-safe choice - the cap can transiently OVER-count an expired-unswept
+  room (rejecting a write slightly early, which the client retries after the
+  sweep) but never UNDER-counts (admitting a write past the real cap). It
+  differs from the per-IDENTITY paste/site quota, which the sqlite + slatedb
+  backends free at READ time; the per-app room aggregate is uniformly
+  sweep-time so the cap behaves identically across sqlite, slatedb, and
+  shale.
+- **Service-wide cap.** Room data counts toward the same `--storage-cap-bytes`
+  service-wide cap pastes and sites do, in BOTH directions:
+  - A room `PUT` that would push *total active service bytes* (pastes +
+    sites + rooms) over the cap is refused (**507**), the prior value left
+    intact - the room write participates in the same serializable cap check
+    the paste insert and site deploy already perform.
+  - Room bytes are included in the total the paste-upload and site-deploy
+    quota checks compute, so a service already near the cap from room data
+    correctly refuses new pastes and sites.
+
+  Rooms add a new writable surface, so this is flagged explicitly: the
+  per-app aggregate is the primary structural bound, the service-wide cap
+  is the backstop that no single content kind can evade, and a
+  reverse-proxy per-IP rate limit remains the appropriate layer for raw
+  request-rate abuse, exactly as for the paste path.
+
+### Retention
+
+Rooms are ephemeral, consistent with hostthis's whole ethos. **A room
+expires after a fixed window of inactivity: default 30 days since its last
+write** (a `PUT` or `DELETE`; a read does not extend it). On expiry the
+room record and every value in its namespace are deleted by the **same
+periodic sweep** that expires pastes and sites - one more record kind the
+sweep walks, GC'd through the existing expiry-index machinery. The TTL is
+longer than the 7-day paste window on purpose: a paste is "share this link
+this week," but a room backs a live app whose participants may return over
+several weeks (a poll open for a month, a retro board a team revisits).
+Still finite, still no user-facing knob, still swept automatically - the
+default is flagged as a starting point, not a contract, and like the paste
+window it is a product opinion, not an operator config.
+
+### Scope fence
+
+This tier is **KV persistence plus a real-time relay**. The KV verbs
+above are the durable surface; the WebSocket relay below adds live push
+on top of the SAME room. Two things are still explicitly NOT in it, each
+a later tier with its own design:
+
+- **NO per-user auth / JWT / "Sign in with hostthis."** The room UUID IS
+  the access capability; there are no accounts, no roles, no token
+  verification in this tier. The "A persistence API" future-directions
+  bullet describes a richer end-user identity spectrum (capability token,
+  browser keypair, JWT-verifying resource server with a turnkey-or-BYO
+  issuer) that lets an app enforce `request.user == resource.owner`
+  rules - that is a deliberately-separate LATER tier layered on top of
+  this one, not a prerequisite for it. Rooms ship the no-auth, capability
+  form first because it unlocks real apps with zero account machinery.
+- **NO server-side app functions.** hostthis stores what the room writes;
+  it never runs app logic. This is not a FaaS, and the data-integrity
+  problem ("is this score real?") stays unsolvable client-side, exactly as
+  the future-directions bullet notes - an app either accepts that
+  (fine for a casual leaderboard or a shared list) or is not a fit.
+
+Rooms are **additive**: they introduce no change to the paste or the
+site/archive read-and-write behavior. A slug that owns a site keeps
+serving its files; the `/api/rooms` prefix is the only new surface on that
+subdomain. A live paste's slug is also a valid app to host rooms under (a
+paste is an app per the "an app" definition above); a slug that names no
+live site or paste names no app, so room creation under it is a 404.
+
+## Real-time room relay (WebSocket)
+
+The KV verbs above make a room **collaborative on refresh**: a participant
+sees another's writes on the next read. That is enough for a poll or a
+shared list, but not for the headline app this tier exists to unlock - a
+**when2meet** where everyone paints a calendar and watches each other's
+availability fill in LIVE. Polling `GET /api/rooms/<uuid>` on an interval
+is the workaround and it is bad: too slow to feel live, too chatty to
+scale, and it never catches the moment between two polls.
+
+The real-time relay closes that gap with **one generic per-room WebSocket
+endpoint** layered on the SAME room. hostthis runs **no app-specific
+server logic**: it is a dumb live channel. A message from one client in a
+room is fanned out, verbatim, to every OTHER client in that same room.
+The clients hold all the app logic (the when2meet's grid, the retro
+board's cards); hostthis is the live wire plus the durable backing store.
+This is the deliberately-client-authoritative model the "A persistence
+API" future-directions bullet describes ("no reactive subscriptions" was
+the line drawn against a FaaS - a generic broadcast relay is NOT app code,
+so it sits on the right side of that line), made real for the no-auth
+capability tier.
+
+### The endpoint and the room-UUID capability
+
+The relay is served by the same HTTP surface that serves the KV verbs,
+under the app's own subdomain, at a reserved `/api/rooms/<uuid>/ws` path:
+
+```
+GET (Upgrade: websocket)   /api/rooms/<uuid>/ws
+```
+
+- Production (subdomain mode): `wss://<app-slug>.hostthis.dev/api/rooms/<uuid>/ws`.
+- Dev (path mode): `ws://<apex>/p/<app-slug>/api/rooms/<uuid>/ws`.
+
+The path lives under the existing `/api/rooms` carve-out, so it is never
+shadowed by a manifest file, and `/ws` is a reserved trailing segment a
+room KEY can never name (a key path is `/api/rooms/<uuid>/<key>`; the
+relay claims `<key> == "ws"` for the upgrade, the one key the KV verbs do
+not serve as data). Because the relay shares the app's origin, the app's
+own JavaScript opens it same-origin with no CORS dance.
+
+**The room UUID is the entire access model, exactly as it is for the KV
+verbs.** Holding the UUID lets you join that room's relay; nothing else
+grants it. On upgrade the server validates two things and rejects
+otherwise, BEFORE completing the WebSocket handshake:
+
+- **The app slug names a LIVE app.** The same existence requirement room
+  creation rides: the slug must name a non-expired site or paste (checked
+  via the site + paste readers the router already holds). An upgrade under
+  an unprovisioned slug is refused, so the relay cannot be opened under one
+  of the ~10^12 well-formed-but-empty slugs. This ties the relay's per-app
+  connection caps to the same finite, provisioned set of apps the KV caps
+  are tied to.
+- **The UUID is a canonical UUIDv4 that names an existing room.** A
+  malformed id is refused at the boundary (the same `ParseRoomID` the KV
+  path uses); a well-formed-but-nonexistent room is refused too (a relay to
+  a room that was never created has nothing to back its late-join snapshot).
+  A holder of a real UUID is the only party who can open the channel.
+
+A rejected upgrade is refused with a normal HTTP status (not a 101), so a
+client's WebSocket open fails cleanly: a malformed UUID is a **400**, an
+unknown app slug or nonexistent room is a **404** (the
+existence-not-leaked shape, same as the KV path), an over-limit room or
+app is a **429**, and a non-Upgrade request to the `/ws` path is a **426
+Upgrade Required**. No relay is ever stood up for a request that fails
+validation, so a forged or guessed id reaches no hub.
+
+### Strict isolation: a connection joins exactly one room
+
+A WebSocket connection is bound at upgrade time to the **one** room whose
+`(app-slug, room-uuid)` it connected with, and it can never affect any
+other. The isolation is the same structural property the KV key shape
+gives the durable tier, lifted to the live tier:
+
+- **A message never crosses to another room.** The connection is
+  registered in exactly one per-room hub (keyed by `(app-slug, room-uuid)`);
+  a broadcast is fanned out only to the other members of THAT hub. There is
+  no cross-hub path - a client cannot address, subscribe to, or leak into
+  another room even within the same app.
+- **A message never crosses to another app.** The hub key's outermost
+  segment is the app slug, so an identical room-UUID-shaped string under a
+  different app resolves to a different hub. One app's live traffic is
+  disjoint from another's, structurally, not by a filter a handler could
+  forget.
+- **The relay carries no cross-room addressing in its payload.** hostthis
+  does not interpret the message, so there is no "target room" field a
+  client could set; the connection's bound room is the only destination,
+  fixed at upgrade and immutable for the connection's life.
+
+hostthis does not parse the relayed payload at all: it is opaque bytes /
+JSON the app chose, fanned out verbatim. The only server-side
+interpretation is the connection-lifecycle control frames (ping/pong, the
+late-join snapshot framing, and the optional durable-write convention
+below), never the app's message contents.
+
+### Persistence and late-join: the KV is the durable state, the relay is the live delta
+
+This is the crux of "no gap, no dup." The relay integrates with the room
+KV (the durable tier specified above) so a client that JOINS - including a
+client that reloaded the page mid-session - is caught up to the current
+state and then sees every subsequent change exactly once.
+
+**The model: snapshot-then-stream, with the snapshot read inside the
+join.** On a successful upgrade, before the connection is added to the
+hub's broadcast set, the server:
+
+1. **Reads the room KV snapshot** (`RoomRepo.ScanRoom`) and sends it to
+   the joining client as the first frame, tagged as the snapshot (a
+   control envelope the client distinguishes from a relayed peer message).
+   This is the late-joiner's full current state - byte-identical to what
+   `GET /api/rooms/<uuid>` returns, so the same client code that loads
+   state on a cold start consumes it.
+2. **Then registers the connection in the hub** and begins streaming live
+   messages.
+
+The ordering - snapshot read THEN hub-join, both holding the hub's
+registration lock so no broadcast can interleave between them - is what
+makes late-join correct:
+
+- **No gap.** The snapshot is taken and the connection is registered
+  without releasing the lock that serializes "a message arrives at the
+  hub" against "a connection joins the hub." A durable write that lands
+  AFTER the snapshot is read will, because the connection is already in
+  the broadcast set by the time the lock is released, be delivered as a
+  live message. There is no window where a change is neither in the
+  snapshot nor in the stream.
+- **No dup.** A durable write that landed BEFORE the snapshot is reflected
+  in the snapshot; the connection was not yet in the broadcast set when
+  that write was relayed, so it did not also receive it as a live message.
+  Every change is in exactly one of {snapshot, stream}, never both.
+
+  The no-dup half is what forces the commit and its live mirror to be
+  atomic with respect to a join. A durable write is two events - the KV
+  COMMIT (so a future snapshot reflects it) and the live MIRROR broadcast
+  (so already-connected clients see it). If those run as two separate
+  steps, a join can slip between them: the commit lands, a joiner takes the
+  hub lock and reads a snapshot that ALREADY reflects the commit, registers,
+  releases - and THEN the mirror broadcast finds the now-registered joiner
+  and delivers the same key live. The joiner has the key in BOTH its
+  snapshot and a live frame: a dup. hostthis is payload-opaque and makes no
+  idempotency assumption about the app's bytes, so a dup is a real defect (an
+  app that treats a live mirror as a delta / increment / append corrupts on
+  it). The relay therefore runs **the commit and the mirror under the room's
+  hub lock as one critical section**: a join's snapshot-read + register
+  cannot interleave between them, so the write is in exactly one of
+  {snapshot, stream}. The lock is per-room (the hub's own mutex), so one
+  room's durable write never stalls another room. The cost is that the room's
+  live broadcasts wait on the durable KV write (object-storage I/O) for that
+  write's duration - acceptable because the durable path is the LOW-frequency
+  one (a finished availability cell, a placed card, a final vote); the
+  high-frequency live texture (cursors, strokes-in-progress at 60 Hz) rides
+  ephemeral raw relay frames that never take this path and never pay this
+  cost. An app with high-frequency DURABLE writes is the one case this
+  latency characteristic matters for, and that app should batch its commits
+  or move motion to ephemeral frames.
+
+**What persists vs what is ephemeral.** The relay separates two message
+flavors, and this is the abuse + correctness lever:
+
+- **Ephemeral (broadcast only, NOT persisted).** High-frequency live
+  signals: a cursor position, a stroke-in-progress, a "user is dragging
+  the selection." These are fanned out to peers and never written to the
+  KV. They are the live texture of the session; a client that joins later
+  does not need them (they are stale the instant they are sent), so they
+  cost zero KV writes. This is what keeps the relay from forcing a durable
+  write per frame at 60 Hz - the thing that would make the KV the
+  bottleneck and blow the per-room cap in seconds.
+- **Durable (broadcast AND persisted to the KV).** The committed state: a
+  finished availability cell, a placed retro card, a final vote. The
+  durable set is what a late joiner must see, so it must survive a full
+  disconnect + reload, so it lands in the room KV via the SAME
+  `RoomRepo.PutValue` / `DeleteValue` the HTTP verbs use - which means it
+  rides the SAME per-room / per-app / service-wide caps and resets the
+  SAME retention clock. A durable mutation is therefore consistent whether
+  it arrives over the relay or over `PUT /api/rooms/<uuid>/<key>`: both
+  funnel through the one room repo, so the snapshot a future joiner reads
+  reflects it identically.
+
+**How a client signals which flavor a message is.** hostthis stays generic
+by NOT inventing an app protocol, but it must know which messages to
+persist. The chosen convention: the durable path is the EXISTING HTTP KV
+verb, and the relay is broadcast-only by default. An app that wants a
+change to be both durable AND pushed live does the durable write with `PUT
+/api/rooms/<uuid>/<key>` (which the server, holding the room's hub lock
+across BOTH the KV commit AND the live fan-out so a concurrent join cannot
+slip between them - the no-dup atomicity above - mirrors the committed
+write to the room's connected clients as a live message tagged with the
+key), and uses raw relay frames only for ephemeral signals. This keeps the relay payload-opaque (no reserved fields in the
+app's bytes), makes the durable write go through the one audited cap-
+checked path, and gives the live fan-out of a committed change for free.
+
+  Why route durable writes through the HTTP verb rather than a
+  message-type tag inside the relayed bytes: a tag inside the payload would
+  force hostthis to parse the app's message (breaking the payload-opaque
+  property and the isolation argument that rests on it), and it would
+  duplicate the cap-check / retention-clock logic on a second code path. A
+  `PUT` that the server mirrors to the hub reuses the entire durable path
+  unchanged and adds only the fan-out. The relay's own frames stay pure
+  ephemeral broadcast - the server never persists a raw relay frame, so a
+  flood of relay frames can never grow the durable store (see "Limits").
+  An app whose every change is durable simply does every change as a `PUT`
+  and uses the relay only to LOWER its latency (the live mirror), or not at
+  all; an app with a lot of ephemeral motion uses raw relay frames for the
+  motion and `PUT`s only the committed deltas.
+
+**Reconnect is just join again.** A reconnecting client - the canonical
+case is a page reload or a backgrounded PWA resuming - opens a fresh
+WebSocket, gets a fresh snapshot-then-stream, and is caught up with no gap
+and no dup by the exact same mechanism as a first-time joiner. The server
+holds no per-client durable session state across a disconnect: a
+connection is not assumed unique or permanent, and a client may have zero,
+one, or several live connections to the same room at once (two tabs).
+Re-syncing from the KV snapshot on every (re)connect is what makes the
+relay reconnect-friendly - there is no incremental "catch me up from
+sequence N" replay to get wrong, because the durable KV is always the
+authoritative full state and a fresh scan is always correct.
+
+### Connection lifecycle (the finicky core)
+
+This is what separates a relay that feels solid from one that drops
+messages and leaks goroutines. The server side and the client side each
+own four pieces; they interlock.
+
+**Server side.**
+
+- **Per-room hub.** A hub is the in-memory registry for one room's live
+  connections, keyed by `(app-slug, room-uuid)`. It owns the set of
+  connected clients, the register / unregister path, and the broadcast
+  fan-out. A hub is created lazily on the first connection to a room and
+  torn down when its last connection leaves (no idle empty hubs linger).
+  The hub registry (the map of room-key -> hub) and each hub's client set
+  are the two in-memory structures, and BOTH are bounded (see "Limits").
+  These are two separate locks - the global registry lock (the hub map plus
+  the per-app + total-rooms counters) and each hub's own lock (its client
+  set) - and the per-room isolation is a LATENCY property as well as a
+  correctness one: an upgrade's admission does the global-lock work (the
+  per-app / total-rooms cap check, the lazy hub-create) and then RELEASES
+  the global lock BEFORE it takes the target hub's lock for the per-room cap
+  check + register. So a join to one room never holds the global lock while
+  waiting on another room's hub lock, and a slow durable commit on one room
+  (which holds that room's hub lock for the KV write's duration) never
+  stalls a concurrent upgrade to a DIFFERENT room. One room's contention
+  stays local to that room.
+
+  Decoupling admission from the global lock opens a window: between an
+  admission reserving its per-app slot (and releasing the global lock) and
+  registering its reservation into the hub, the hub is momentarily empty
+  from the perspective of any other goroutine. A concurrent durable write to
+  the SAME room with no live connections creates a transient hub, commits,
+  mirrors, and then tears that hub down if it is "still empty" - and would,
+  in that window, remove the very hub the admission is about to register
+  into, orphaning the registration (it lands in a hub no longer in the map,
+  so it misses live frames) and leaking its per-app slot (a later release
+  finds no hub and skips the decrement). A PENDING-ADMIT guard closes this:
+  the registry tracks a per-room count of in-flight admissions, incremented
+  under the global lock when the slot is reserved (before the lock is
+  released) and decremented under it once the register has run. Every
+  hub-removal path - the empty-hub teardown the last leave fires, the
+  transient-hub cleanup a durable write runs, and an admission's own
+  per-room-cap rollback - removes a hub only when it is empty AND has zero
+  in-flight admissions, so a hub an admission is about to register into is
+  never torn out. The guard keeps the admission decoupled (it still holds no
+  global lock while taking the hub lock to register), so the per-room
+  isolation above is preserved; it only narrows "the hub is idle" to also
+  mean "no admission is mid-flight into it."
+- **Server heartbeat (ping/pong) to reap dead connections.** The server
+  sends a WebSocket ping to each connection on a fixed interval and expects
+  a pong back within a deadline; a connection that misses the pong deadline
+  is considered dead and is closed and unregistered. This is what detects a
+  client that vanished without a clean close (a killed PWA, a dropped
+  mobile link, a yanked cable) - TCP alone can take minutes to notice, and
+  an idle proxy will cut the connection silently. The server ping interval
+  is chosen UNDER the proxy idle timeout (the relay runs behind traefik /
+  nginx, whose idle defaults are 60-120 s), so the heartbeat also keeps a
+  legitimately-quiet connection alive through the proxy. The server both
+  SENDS its own pings AND tolerates client-initiated pings (responds with a
+  pong, treated as a liveness no-op) - the client lifecycle below pings on
+  its own ~25 s cadence and the server must not punish it for that.
+- **Backpressure: a slow client must never block the room.** Each
+  connection has a **bounded per-client send buffer**. The broadcast path
+  writes to each connection's buffer and returns immediately; a dedicated
+  per-connection writer goroutine drains the buffer to the socket. If a
+  client is slow or stuck and its buffer is FULL when a broadcast tries to
+  enqueue, the server does NOT block the broadcast waiting for that one
+  client (head-of-line blocking the whole room on the slowest member) - it
+  **drops that client**: closes the connection and unregisters it. A
+  laggard is ejected, never tolerated at the cost of everyone else's
+  latency. The bound is small (a handful of frames): a client that cannot
+  keep up with a handful of buffered frames is not a viable live
+  participant and is better off reconnecting (which re-syncs it from the
+  KV snapshot cleanly). The broadcast is therefore wait-free with respect
+  to any individual client. Dropping a laggard reclaims its connection
+  accounting (the per-room hub slot AND the per-app aggregate counter) the
+  same way a clean leave does - the drop path is a real disconnect, not a
+  shortcut that forgets the counters, so a room that drops laggards under
+  load does not slowly leak its per-app connection budget.
+- **Clean disconnect handling.** Every connection close - clean client
+  close, heartbeat-timeout reap, slow-client drop, server shutdown -
+  unregisters the connection from its hub, decrements the per-app
+  connection counter exactly once, and stops its reader and writer
+  goroutines, with no leaked goroutine, no dangling map entry, and no
+  leaked connection-count slot. Each disconnect decrements the per-app
+  counter exactly once regardless of which path tore the connection down
+  (a clean unregister and a backpressure drop must not BOTH decrement, and
+  neither must SKIP it). The last connection leaving a room tears the hub
+  down. Server shutdown closes all connections with a normal-closure status
+  so clients reconnect on the client backoff schedule rather than hammering
+  instantly.
+- **Read bound.** The reader applies a max message size per inbound frame
+  (see "Limits"); a frame over the cap closes the connection. Liveness is
+  the heartbeat's job, not the reader's: the server's ping/pong loop is the
+  sole reaper, and it cannot be starved (it runs in its own goroutine on a
+  fixed ticker, independent of whether the reader is blocked on a quiet
+  socket). A connection that goes silent is therefore reaped by the missed
+  pong, so the reader needs no separate per-read deadline as a backstop -
+  one reaper, sufficient, with no second timeout to keep consistent with the
+  heartbeat window.
+
+**Client side (the relay must SUPPORT this; the POC implements it).** The
+server is built so the canonical 4-piece client lifecycle works against
+it. This is the same lifecycle every production WebSocket client needs;
+the relay's job is to not fight it:
+
+1. **Heartbeat ping every ~25 s** (under the proxy idle default). The
+   server treats a client ping as a liveness no-op and pongs it. A quiet
+   connection stays alive across an idle network and a suspended PWA.
+2. **Auto-reconnect with exponential backoff + jitter** on close. Start
+   ~500 ms, double each attempt, cap ~30 s, jitter to avoid a thundering
+   herd if many clients reconnect at once (a server restart drops every
+   connection in a room simultaneously). The server is reconnect-friendly:
+   a reconnecting client re-syncs from the KV snapshot, so backoff costs a
+   little latency, never correctness.
+3. **`visibilitychange` recovery.** When a tab / PWA returns to the
+   foreground, force-reconnect immediately rather than waiting out the
+   backoff - iOS aggressively suspends backgrounded WebSockets, and the
+   snapshot-then-stream rejoin catches the client up on whatever it missed.
+4. **Send buffer (client-side).** Queue actions submitted while
+   disconnected (capped), flush them on the next reconnect after the
+   snapshot handshake. Durable actions a client took offline are `PUT`s
+   that retry on reconnect; ephemeral signals taken offline are simply
+   dropped (they are stale).
+
+The server makes no assumption that a connection is unique or permanent,
+so all four client pieces are safe: a reconnect is a new join, a duplicate
+connection from the same client is just another hub member, and a missed
+heartbeat is reaped without corrupting room state (the durable state lives
+in the KV, untouched by a connection dying).
+
+### Limits and abuse posture
+
+The relay is a new always-open, push-capable surface, so every in-memory
+structure is bounded and the abuse posture is the room-UUID capability
+plus these caps - **no new auth**, consistent with the rest of the tier.
+Each limit has a concrete default flagged as a starting point (tunable as
+real usage informs it):
+
+- **Max concurrent connections per room** (default **64**). A room is a
+  small collaborative session (a team's retro, a friend group's
+  when2meet); past this, new upgrades to that room are refused **429**.
+  This bounds one hub's client-set size and one room's fan-out cost (a
+  broadcast is O(connections)).
+- **Max concurrent connections per app** (default **1024**). Bounds the
+  total live connections any one app's rooms hold open in aggregate, the
+  live-tier analogue of the per-app aggregate byte cap. Past it, new
+  upgrades under that app are refused **429**.
+- **Cap on total active relay rooms** (a service-wide bound on the number
+  of live hubs, default sized to the node's memory budget). Bounds the hub
+  registry itself so the count of distinct live rooms cannot grow
+  unbounded. Past it, an upgrade that would create a NEW hub is refused
+  **503**; joins to already-live rooms still succeed.
+- **Max message size per inbound frame** (default **32 KiB**). An app's
+  live message is small (a cursor, a cell, a card); a frame over the cap
+  closes the connection. This bounds per-frame memory and stops a single
+  giant frame from being a memory-amplification vector. (It is independent
+  of the per-room DURABLE byte cap, which the `PUT` path enforces; a relay
+  frame is never persisted, so it is bounded for memory, not for storage.)
+- **Per-connection send rate limit** (default a small frames-per-second
+  ceiling, e.g. **120 msg/s**). A client that exceeds its inbound rate is
+  throttled or dropped, so one hostile connection cannot saturate a room's
+  fan-out (every inbound frame is multiplied by the room's connection
+  count on the way out). This is the relay's analogue of the room-creation
+  rate limit on the KV side.
+
+The bounded per-client send buffer (the backpressure mechanism above) is
+itself a per-connection memory bound. Together these cap connections,
+rooms, per-frame bytes, in-flight buffered bytes, and message rate - every
+axis a hostile client could push on. A reverse-proxy per-IP connection
+limit remains the appropriate outer layer for raw connection-flood abuse,
+exactly the division of labor the KV path documents for request-rate
+abuse. Durable mutations made over the relay ride the EXISTING per-room /
+per-app / service-wide byte caps unchanged (they go through `PutValue`),
+so the relay opens no new path to grow the durable store past its caps.
+
+The relay adds NO state that survives a room's expiry: when a room is
+swept (its KV deleted after the retention window), any still-open
+connections to it are connections to a now-empty room, and the next
+durable read returns an empty snapshot. Live hubs are pure in-memory
+state, GC'd when the last connection leaves; they are never persisted and
+never participate in the sweep.
+
+### Single-node now, multi-node later (sticky-by-room)
+
+**The MVP relay is single-node, and that is correct for today's deploy.**
+Production hostthis runs as a single pod on the slatedb-direct backend, so
+all of a room's WebSocket connections terminate on the one process, the
+per-room hubs are in-memory on that process, and a broadcast reaches every
+connection because every connection is local. A single-node relay is
+complete and correct for a single-pod deploy; nothing about the model
+above needs a second node to be right.
+
+The multi-node path is **documented, not built**, and the design boundary
+is already laid by the existing shale ring:
+
+- **The problem multi-node introduces.** With N hostthisd pods behind a
+  load balancer, two clients in the same room can land on DIFFERENT pods.
+  An in-memory hub on pod A does not see a connection on pod B, so a
+  broadcast on A would not reach B's client - the room would silently
+  split. The relay needs every connection in one room to share one
+  broadcast domain.
+- **The chosen future shape: sticky-by-room via shale's ring.** The shale
+  shard-key function already routes every key of a room
+  (`rooms/<app-slug>/<uuid>`, `roomkv/<app-slug>/<uuid>/...`, the ledger,
+  the expiry index) to the SAME shard, owned by ONE node, by sharding on
+  `<app-slug>` (see "Three shard families" / "Shale reuses the layout").
+  The relay reuses that exact routing: a room's WebSocket connections are
+  made sticky to the node that owns the room's shard. The load balancer (or
+  a thin upgrade-time redirect / internal forward) routes
+  `/api/rooms/<uuid>/ws` to the shard owner the ring resolves for
+  `<app-slug>`, so all of a room's connections terminate on the one node
+  that also owns the room's durable data. That node's in-memory hub is then
+  the whole room, exactly as in the single-node case, and the
+  snapshot-then-stream join reads the local backend. Co-locating the live
+  hub with the durable shard is the clean property: the node that pushes
+  the live delta is the node that commits the durable write, so there is no
+  cross-node coordination on the hot path.
+- **The alternative considered and deferred: a pub/sub backplane.** Instead
+  of pinning connections to the owning node, every node could host any
+  room's connections and publish each broadcast to a shared bus (Redis
+  pub/sub, NATS) that every node subscribes to, fanning a broadcast out to
+  peers' local connections. This decouples connection placement from shard
+  ownership but adds a second distributed system, a per-message network hop
+  on the broadcast hot path, and a new ordering surface (two pods' views of
+  one room's stream). Sticky-by-room reuses infrastructure hostthis already
+  has (the ring) and keeps the live hub and the durable shard on one node,
+  so it is the preferred future shape; the backplane is the fallback if a
+  single room's connection count ever exceeds one node's capacity (sticky
+  caps a room at one node's connection budget, which the per-room
+  connection cap already bounds well under that). Either way, the
+  cross-pod design is a LATER tier; the MVP ships single-node and names
+  this boundary so the multi-node path is known, not discovered.
+
+This mirrors the "single shale node now, gossip + ring multi-node later"
+boundary the metadata tier already documents: the same code is correct at
+one node, and the ring is the routing primitive the scale-out reuses.
+
+### Sandbox and security posture
+
+The relay introduces no new trust boundary beyond the room-UUID
+capability and the origin isolation the rest of hostthis relies on:
+
+- **Origin isolation is unchanged.** The WebSocket is served on the app's
+  own subdomain (`<app-slug>.hostthis.dev`), the same origin as the app's
+  files and its KV API. A browser's same-origin policy keeps one app's
+  relay unreachable as a cross-origin target from another paste's JS in the
+  normal way; the relay rides the per-subdomain origin boundary that
+  already separates pastes and sites. (Path mode collapses origins for dev,
+  the same documented caveat the rest of hostthis carries - path mode is
+  dev-only and breaks origin isolation; a production relay deploy runs
+  subdomain mode.)
+- **Origin / Host checks on upgrade.** The WebSocket upgrade validates that
+  the request's `Host` resolves to a real app slug (the existence check
+  above) and applies an Origin policy appropriate to a same-origin app API:
+  cross-origin upgrade attempts that a browser would gate by CORS are
+  refused, so a third-party page cannot open a victim app's relay from a
+  visitor's browser. The room UUID remains the capability for any party who
+  legitimately holds it (the app's own JS, a shared link), exactly as the
+  KV verbs treat it.
+- **The payload is opaque and never executed.** hostthis relays bytes; it
+  never renders, parses, or runs a relayed message. A relayed frame is data
+  fanned out to peers' JavaScript, which the app's own code interprets
+  inside its own origin - the same "treat any URL on hostthis.dev as
+  untrusted user content" posture the HTML-sandboxing section sets, now
+  extended to "treat any relayed message as untrusted app data," handled
+  entirely by the app's client code, never by hostthis.
+- **No amplification past the caps.** The per-frame size cap, the
+  per-connection rate limit, the per-room / per-app connection caps, and
+  the bounded send buffer together bound the fan-out amplification (one
+  inbound frame -> N outbound frames) so the relay cannot be turned into a
+  DoS multiplier. A relay frame is never persisted, so it cannot grow the
+  durable store; a durable write over the relay rides the existing byte
+  caps; the capability + the caps are the whole abuse posture, no new auth.
+
+### DDD shape: the hub as a bounded context
+
+The relay is its own bounded context, kept thin at the edges and pure
+where it can be, matching the domain-pure / infra-separate / services-on-
+top discipline the rest of the codebase follows:
+
+- **The hub / relay service is the bounded context** (connection registry,
+  broadcast fan-out, lifecycle). It depends on the room KV ONLY through the
+  existing small `service.RoomRepo` interface - the same snapshot
+  (`ScanRoom`) and durable-write (`PutValue` / `DeleteValue`) verbs the
+  HTTP KV handlers use - so the relay reuses the durable tier's caps and
+  retention without re-implementing them.
+- **The connection is an interface, not a concrete socket.** The hub talks
+  to a connection abstraction (send a frame, close, identity) so the hub
+  logic - register, broadcast, drop-a-laggard, reap-on-heartbeat-timeout,
+  tear-down-the-empty-hub - is unit-testable WITHOUT real sockets, with a
+  fake connection that records what it received and can be made to block /
+  fill its buffer to exercise the backpressure path. The pure hub logic is
+  the testable core; the real `coder/websocket` connection is one adapter.
+- **The HTTP WS-upgrade handler is thin.** It authenticates the room
+  (validate slug exists + UUID parses + room exists, the same checks the KV
+  path runs), enforces the connection caps, performs the upgrade, and hands
+  the connection to the hub. It carries no app logic and no relay state of
+  its own. This is the same translation-layer-only shape the existing
+  `/api/rooms` handlers have.
+- **The library.** The relay uses a maintained, context-native Go
+  WebSocket library - **`coder/websocket`** (the maintained successor to
+  `nhooyr.io/websocket`), whose `context.Context`-first read/write API and
+  built-in ping/pong fit the lifecycle above and the codebase's
+  context-aware shape. It is added via `go.mod`. (The long-lived WebSocket
+  connection is hijacked out from under the `http.Server`'s
+  `ReadTimeout` / `WriteTimeout`, which bound the short request/response
+  paths and must NOT reap a live relay connection; the relay manages its
+  own per-connection read/write deadlines via the heartbeat instead.)
+
+### Testing: the multi-client harness is the gate
+
+Per the TDD discipline, the relay does not ship without the integration
+test that pins the spec'd behavior. The gate is a **multi-client harness**:
+two or more clients join one room and the test asserts the observable
+contract end to end - a message from one client reaches the others and not
+itself; a late joiner gets the snapshot then the live stream with no gap
+and no dup; a reconnecting client re-syncs cleanly; a slow client is
+dropped without stalling the room's broadcast to the others; a heartbeat-
+timeout connection is reaped; strict isolation holds (a connection in room
+A never sees room B's or another app's traffic); and the connection / room
+/ frame-size / rate limits each reject past their bound. The pure hub
+logic is additionally unit-tested against a fake connection (no real
+socket) for the register / broadcast / backpressure / reap / teardown
+paths. The WebSocket tests run under `-race` so a data race in the hub's
+concurrent register / broadcast / unregister path fails the build.
+
 ## Retention
 
 **Every paste lives for 7 days from its last update**, then it's
@@ -1024,6 +2200,692 @@ provided beneath the app by object-store versioning plus a
 noncurrent-version lifecycle, an operator-level safety net configured
 outside this repo.
 
+### Static-site storage on the slatedb (and shale) backend
+
+The "Static site archives" feature persists a **Site** (slug -> owner +
+Manifest + timestamps) the same way a paste persists, through a small
+`SiteRepo` service-layer interface. The sqlite backend implements it as a
+`sites` table; this section specifies the **KV layout** the slatedb and
+shale backends use so static-site hosting runs on those backends too,
+not only on sqlite. The blobs a site references are unchanged: each
+extracted file is `Put` under its SHA256 into the content-addressed
+`BlobStore`, exactly as on sqlite. **Only the manifest plus the site
+metadata live in the metadata backend.** Identical files dedupe at the
+blob layer regardless of which metadata backend is wired.
+
+**The `SiteRepo` and `SweepSites` interfaces are the contract.** Both are
+already interfaces in `internal/service` (`deploy_site.go`, `sweep.go`),
+satisfied by the sqlite `*storage.SiteRepo` today. The slatedb and shale
+backends add types that ALSO satisfy them; the domain layer (`Site`,
+`Manifest`, the safe-untar guards) is backend-agnostic and unchanged.
+The deploy path's interface is:
+
+- `InsertWithQuotaCheck(s Site, dedupedSize int, serviceCap, userCap, now)`
+- `Get(slug) (Site, error)`
+- `SumActiveBytesByOwner(owner, now) (int64, error)` (the identity's
+  active SITE bytes only; the deploy path adds the paste-side sum)
+
+and the sweep path's interface is:
+
+- `ExpiredSiteSlugs(now) ([]string, error)`
+- `Delete(slug) error`
+- `ReferencedSiteBlobSHAs() ([]string, error)`
+
+#### Site key layout (slatedb)
+
+Sites mirror the paste key families. The names are new but the shapes are
+the established ones (`sites/<slug>` parallels `pastes/<slug>`,
+`identity_sites/<id>/<slug>` parallels `identity_pastes/<id>/<slug>`,
+`expiry_sites/<ts>/<slug>` parallels `expiry/<rfc3339>/<slug>` in role).
+The site expiry timestamp is fixed-width (zero-padded 9-digit nanos,
+`2006-01-02T15:04:05.000000000Z07:00`) so its byte order is time order
+exactly; it does NOT reuse the paste index's variable-width `RFC3339Nano`
+(see `ExpiredSiteSlugs` above for why). Values are JSON unless noted; all
+keys are UTF-8 strings cast to bytes, the same as the paste layout:
+
+```
+sites/<slug>                       JSON {Identity, Manifest, DedupedSize, CreatedAt, UpdatedAt, ExpiresAt}
+identity_sites/<identity>/<slug>   empty value (for "list/sum sites by identity" prefix scan)
+expiry_sites/<ts>/<slug>           empty value (for sweep prefix scan to find sites whose expires_at <= now; ts is fixed-width)
+```
+
+The `sites/<slug>` row is the authoritative record. The `Manifest` is
+encoded as the same compact `{"files": {"<path>": {"sha","size","ct"}}}`
+JSON the sqlite backend stores in its `manifest` column, so the on-wire
+manifest shape is identical across backends (path -> sha + size +
+content-type). `DedupedSize` is stored on the row (not recomputed on
+read) so the quota scans never have to decode every manifest just to sum
+bytes; it is `Manifest.DedupedSize()` at deploy time, the distinct-blob
+total, the number charged against quota. The two index families carry an
+empty value (the slatedb convention for marker keys, mirroring
+`identity_pastes` and `expiry`).
+
+The site keys live in the SAME keyspace and the SAME SlateDB instance as
+the paste keys, so a single `Db.begin(SnapshotIsolation)` transaction can
+touch both families atomically and a single prefix scan over `sites/`
+enumerates every site exactly as `pastes/` enumerates every paste.
+
+#### Operations -> KV mapping
+
+- **Deploy (`InsertWithQuotaCheck`).** Holds the per-identity quota
+  stripe (the same `lockQuota(identity)` the paste insert uses, so two
+  concurrent same-identity deploys cannot both pass the cap), then:
+  1. **Service-wide cap pre-check.** If `serviceCap > 0`, sum service-wide
+     active bytes across BOTH pastes AND sites (and any other byte-holding
+     family), reject with the service-full sentinel if `total + deduped`
+     exceeds it. This is the load-bearing change to the slatedb
+     service-wide sum: it previously summed only `pastes/* + versions/*`;
+     it MUST now also add every non-expired `sites/<slug>` row's
+     `DedupedSize`, so a site deploy sees the bytes pastes already hold and
+     a paste upload sees the bytes sites already hold. (Parallels the
+     sqlite `serviceWideActiveBytes`, which sums pastes + sites + rooms.)
+  2. **Per-identity cap pre-check.** If `userCap > 0`, sum the owner's
+     active paste bytes (`identity_pastes/<id>/*` -> non-deleted versions
+     of non-expired pastes) PLUS the owner's active site bytes
+     (`identity_sites/<id>/*` -> `DedupedSize` of non-expired sites),
+     reject with the over-quota sentinel if `owned + deduped` exceeds the
+     cap. (Parallels the sqlite `identityActiveBytes`.)
+  3. **Slug-collision check, BOTH directions.** Inside the transaction,
+     read `sites/<slug>` AND `pastes/<slug>`; if either exists, reject with
+     the slug-taken sentinel (whose message contains "slug" so the deploy
+     service retries with a fresh slug). A slug is EITHER a site or a
+     paste, never both, in either backend: the site insert rejects a slug a
+     paste already owns, and the paste insert (unchanged) already rejects a
+     slug another paste owns. The read participates in snapshot-isolation
+     conflict detection.
+  4. **Atomic write.** In one transaction, `Put sites/<slug>` (the JSON
+     row), `Put identity_sites/<id>/<slug>` (empty marker), and
+     `Put expiry_sites/<ExpiresAt>/<slug>` (empty marker). All three land
+     or none.
+- **Read (`Get`).** Single `Get sites/<slug>`, decode the JSON row,
+  decode the manifest. Returns the not-found sentinel for a missing slug,
+  and (like the paste `Get` and the sqlite site `Get`) returns
+  expired-but-unswept rows too: the HTTP layer 404s them, the sweep
+  deletes them.
+- **Per-identity site bytes (`SumActiveBytesByOwner`).** Scan
+  `identity_sites/<id>/`, `Get` each `sites/<slug>`, sum `DedupedSize` of
+  the rows whose `ExpiresAt > now`. Site-only (the service layer adds the
+  paste sum), matching the sqlite `SiteRepo.SumActiveBytesByOwner`.
+  Read-time expiry filtering (`expires_at > now`) means an expired-unswept
+  site stops counting the instant it expires, the same read-time semantics
+  the slatedb paste sum has (`conformCaps.ExpiryFreesQuotaAtReadTime =
+  true`).
+
+#### Expiry + sweep -> KV mapping
+
+- **`ExpiredSiteSlugs(now)`.** Prefix-scan `expiry_sites/`; for each
+  `expiry_sites/<ts>/<slug>` key, compare the timestamp segment and return
+  `<slug>` when `ts <= now` (inclusive boundary). The site expiry timestamp
+  is a FIXED-WIDTH RFC3339 with a zero-padded 9-digit nanosecond fraction
+  (`2006-01-02T15:04:05.000000000Z07:00`), so a string compare on the key is
+  byte order == time order EXACTLY, including within a shared whole second.
+  This is NOT `time.RFC3339Nano`: that format drops trailing fractional
+  zeros (so `...00.5Z` sorts BEFORE `...00Z` because `.` < `Z`), which would
+  let a record be swept up to ~1s before its real `ExpiresAt`. The
+  fixed-width format is free here because sites have no prod data yet; the
+  pre-existing PASTE expiry index (`expiry/<rfc3339>/<slug>`) still uses
+  `time.RFC3339Nano` and carries the same latent sub-second sweep skew, but
+  it holds live prod data on slatedb so changing its key format is a
+  migration (re-keying every `expiry/` entry; a format flip alone would
+  orphan the old keys so those pastes would never expire). That migration is
+  a documented follow-up; until then the paste path keeps its current key
+  format unchanged.
+- **`Delete(slug)`.** Read `sites/<slug>` for its identity + expiry (to
+  clean up both index entries), then in one transaction delete
+  `sites/<slug>`, `identity_sites/<id>/<slug>`, and
+  `expiry_sites/<ExpiresAt>/<slug>`. Idempotent: a missing row is a no-op,
+  matching the sqlite `DELETE ... WHERE slug = ?` and the paste `Delete`.
+  The sweep calls this for every slug `ExpiredSiteSlugs` returns; the
+  per-record count it contributes makes the sweep's abort-on-zero-refs
+  data-loss guard not misfire on a tick where only sites expired.
+- **`ReferencedSiteBlobSHAs()`.** Prefix-scan `sites/`, decode each
+  manifest, union every distinct `sha` it references. The sweep unions
+  this with the paste-side `ReferencedBlobSHAs` so a blob shared between a
+  site and a paste (or two sites) survives as long as ANY live record
+  references it. A site manifest references a blob unconditionally (a site
+  has no per-file tombstone), so a live site always contributes a non-empty
+  set when it holds files, which keeps the sweep's abort-on-zero-refs guard
+  honest.
+
+#### Shale reuses the layout
+
+The shale backend reuses the slatedb site key names + JSON row schema (the
+same way it reuses the paste layout: co-location is by `ShardKeyFn`, not by
+renaming keys). It replaces the slatedb `identity_sites/<id>/<slug>` index
+with a monotonic `{id}` byte counter (the reservation pattern), because
+shale accounts per-owner bytes through that counter rather than a read-time
+scan over a per-identity index. The full site shard map:
+
+| Key family | Keys | Shard key |
+| --- | --- | --- |
+| Authoritative (per-slug) | `sites/<slug>` | `<slug>` |
+| Expiry index (per-slug) | `expiry_sites/<ts>/<slug>` | `<slug>` (slug is the LAST segment) |
+| Site byte counter (per-identity) | `identity_site_bytes/<id>` | `<id>` |
+| Site reservation marker (per-identity) | `identity_site_reserve/<id>/<slug>` | `<id>` |
+
+`sites/<slug>` joins the authoritative `{slug}` family (alongside
+`pastes/<slug>`), `expiry_sites/<ts>/<slug>` shards on its trailing slug
+like `expiry/<date>/<slug>`, and the two `identity_site_*` families join the
+derived `{id}` family so they co-shard with each other (a site reserve
+step's read-increment-mark is single-shard, exactly like the paste reserve).
+The `_sites`/`_site_` suffixes keep these from matching the bare `expiry/`
+and `identity_*` prefixes (the trailing-slash anchoring in `shaleShardKey`):
+`expiry_sites/` is not `expiry/`.
+
+Shale does NOT keep an `identity_sites/<id>/<slug>` index. The slatedb
+backend needs it (its `SumActiveSiteBytesByOwner` scans the per-identity
+index, decodes each row, and filters by expiry), but shale's owner sum is a
+single read of the `identity_site_bytes/<id>` counter, the reconciler scans
+`sites/` (not a per-identity index), and there is no `ListSitesByOwner` on
+the site interface. A per-identity site index on shale would therefore be
+write-only with no reader, so it is omitted entirely (no `identity_sites/`
+write on deploy, no delete on `DeleteSite`, no `shaleShardKey` routing case).
+
+A site deploy spans the `{slug}` shard (the authoritative `sites/<slug>`
+write + the cross-family paste-slug collision read) and the `{id}` shard
+(the per-identity byte counter), which cannot be one CAS, so on shale a site
+deploy uses the SAME three-step reservation pattern paste inserts use:
+reserve the `DedupedSize` on the `{id}` site counter, perform the
+authoritative `{slug}` write, then confirm (drop the reservation marker).
+The strict-quota and sweep-time-expiry properties carry over from the paste
+counter unchanged (`conformCaps.ExpiryFreesQuotaAtReadTime = false`,
+`StrictQuotaUnderConcurrency = true`).
+
+**Why a dedicated `identity_site_bytes` counter (not the shared
+`identity_bytes`).** The deploy service computes the per-owner budget as
+`UserQuota - paste_bytes - site_bytes`, reading the paste sum and the site
+sum SEPARATELY and adding them, so the two sums MUST be disjoint: the paste
+sum from `identity_bytes/<id>`, the site sum from a distinct
+`identity_site_bytes/<id>`. Folding sites into `identity_bytes` would
+double-count (the budget would subtract the same site bytes twice). The
+dedicated counter keeps `SumActiveSiteBytesByOwner` site-only (the
+conformance contract: a site-only owner sum).
+
+The per-owner cap is SYMMETRIC across both kinds: a deploy of EITHER kind
+checks the owner's COMBINED paste + site bytes against `userCap`, so the
+ceiling holds no matter how an owner splits their quota between pastes and
+sites. This matches the sqlite `identityActiveBytes`, which sums both kinds
+and is read by BOTH the paste insert and the site deploy. Concretely:
+  - a SITE deploy's reserve step reads the paste counter alongside the site
+    counter and checks `paste + site + deduped <= userCap`, and
+  - a PASTE insert / append's reserve step reads the site counter alongside
+    the paste counter and checks `paste + site + body <= userCap`.
+Without the second of those, a paste could be accepted while the owner's
+site bytes were ignored: e.g. an 800-byte site plus a 300-byte paste under a
+1000-byte cap would wrongly admit the paste (combined 1100 > 1000) even
+though the symmetric site direction correctly rejects it. The
+`Sites/PerOwnerCapCountsBoth` conformance subtest pins both directions, and
+`StrictQuotaUnderConcurrency` pins the combined ceiling under concurrent
+cross-kind deploys.
+
+The service-wide cap sums version bytes AND every site's `DedupedSize` (the
+shale `sumServiceWideActiveBytes` now adds the site aggregate, paralleling
+the slatedb sum), so on BOTH the paste-insert and the site-deploy paths a
+paste sees site bytes and a site sees paste bytes.
+
+The cross-family paste-slug collision read is added to the site
+authoritative write (reject a slug a paste owns), and the paste
+authoritative write already rejects a slug a paste owns; the site insert
+also rejects a slug another site owns, so a slug is EITHER a site or a
+paste, never both, in both directions. The reservation markers a site deploy
+/ delete leaves are completed by the same reconciler that completes paste
+markers: a Job 3 applies the identical grace-window orphan-release /
+leaked-marker-drop rule to `identity_site_reserve/` markers against the site
+counter (`reconcileSiteReservations` in `shale_site_repo.go`).
+
+**Status: slatedb AND shale are both implemented + conformance-tested.**
+Prod runs the slatedb-direct backend, so the slatedb site impl is the
+load-bearing deliverable; the shale site impl is the same layout over the
+reservation pattern (the new surface is the dedicated site counter +
+reservation, the cross-family collision read, the service-wide-sum site
+fold, and the reconciler's Job 3 for site markers). Both run the SAME
+conformance site subtests under the SAME factory the way sqlite and slatedb
+do, so each backend is a drop-in for static-site hosting by construction.
+
+#### Wiring: widen the metadata bundle's `Sites` field
+
+`cmd/hostthisd/metadata.go` holds `Sites` as the concrete
+`*storage.SiteRepo` (sqlite) type, which the slatedb/shale repos cannot be
+assigned to. The field is widened to the `service.SiteRepo` interface (the
+deploy view) plus the `service.SweepSites` view (the sweep view), so any
+backend's site impl can be assigned. The bundle stays nil-safe: a backend
+that does not supply a site impl leaves the field nil and static-site
+hosting stays disabled there, exactly as before; once slatedb (and shale)
+supply a non-nil value, archive hosting lights up on those backends.
+
+#### Conformance
+
+The backend-agnostic conformance suite is extended with site operations so
+sqlite, slatedb, and shale are pinned to behave IDENTICALLY for sites, the
+same way they are pinned for pastes. The site contract the suite asserts:
+deploy a site and read every path back byte-identically (manifest
+round-trip), list/sum a site's bytes by identity, the per-identity AND
+service-wide quota counts SITE bytes (a site fills quota a paste then sees,
+and vice versa), the slug-collision rejects a slug a paste already owns
+(and a paste rejects a slug a site owns), and `ExpiredSiteSlugs` +
+`Delete` + `ReferencedSiteBlobSHAs` drive the sweep. A backend that passes
+the extended suite is a drop-in for static-site hosting by construction.
+
+### Room storage on the slatedb (and shale) backend
+
+The "Rooms (app persistence)" feature persists a **Room** (the owning
+app's slug + a UUIDv4 + a flat key-value namespace) plus a retention clock,
+a creation-rate ledger, and an expiry index. The sqlite backend implements
+it as the `rooms` / `room_kv` / `room_creates` tables; this section
+specifies the **KV layout** the slatedb and shale backends use so the
+no-auth room-persistence tier runs on those backends too, not only on
+sqlite. Rooms hold no blobs: a room value is small, mutable app STATE that
+lives entirely in the metadata backend (the content-addressed `BlobStore`
+is untouched), so unlike pastes and sites a room contributes nothing to the
+blob-GC keep-alive set.
+
+**The `RoomRepo` and `SweepRooms` interfaces are the contract.** Both are
+already interfaces in `internal/service` (`rooms.go`, `sweep.go`),
+satisfied by the sqlite `*storage.RoomKVRepo` today. The slatedb and shale
+backends add types that ALSO satisfy them; the domain layer (`Room`,
+`RoomID`, the pure `RoomKV` cap math, `RoomRef`) is backend-agnostic and
+unchanged - only the storage layer is backend-specific. The room-write /
+read interface is:
+
+- `CreateRoom(room Room, subnet, appCap, now)` (mint an empty room, record
+  the creation-accounting row, enforce the per-app aggregate cap; the
+  creation rate-limit DECISION is made by the service via
+  `CountRoomCreates` BEFORE this call, so the gate is a soft bound while the
+  per-app byte cap is a hard one)
+- `GetRoom(appSlug, id) (Room, error)`
+- `GetValue(appSlug, id, key) ([]byte, error)`
+- `ScanRoom(appSlug, id) (RoomKV, error)`
+- `PutValue(appSlug, id, key, val, appCap, serviceCap, now)` (per-room +
+  per-app + service-wide caps; resets the retention clock)
+- `DeleteValue(appSlug, id, key, now)` (idempotent; resets the clock)
+- `CountRoomCreates(appSlug, subnet, now, window) (perSubnet, perApp, err)`
+
+and the sweep-side interface is:
+
+- `ExpiredRoomKeys(now) ([]RoomRef, error)`
+- `DeleteRoom(appSlug, id) error`
+- `PruneOldRoomCreates(cutoff) (int, error)`
+
+#### Room key families (slatedb)
+
+Rooms have MORE key families than sites because they carry per-key values,
+a creation-rate ledger, and an expiry index. Each is co-located in the SAME
+SlateDB instance and the SAME keyspace as the paste + site keys, so a room
+create or write is one `Db.begin(SnapshotIsolation)` transaction and a
+per-app prefix scan over `roomkv/<app-slug>/<uuid>/` enumerates exactly one
+room's values. All keys are UTF-8 strings cast to bytes; values are JSON
+unless noted:
+
+```
+rooms/<app-slug>/<uuid>                    JSON {CreatedAt, UpdatedAt, ExpiresAt} (the room record)
+roomkv/<app-slug>/<uuid>/<key>             raw value bytes (the stored KV pair, verbatim; not JSON)
+roomcreate/<app-slug>/<subnet>/<ts>/<uuid> empty value (one per room created; ts is fixed-width; the trailing uuid disambiguates two rooms created at the same ts, see below)
+roomexpiry/<ts>/<app-slug>/<uuid>          empty value (sweep prefix scan to find rooms whose ExpiresAt <= now; ts is fixed-width)
+```
+
+The `roomcreate` key carries the created room's `<uuid>` as a trailing
+segment: the sqlite backend stores creation accounting as table ROWS (a
+`room_creates` table that permits duplicates), but a KV key is unique, so
+without the `<uuid>` two rooms created under the same `(app, subnet)` within
+the same fixed-width `<ts>` (the same nanosecond, common when a test or a
+script mints rooms in a tight loop) would collide on one key and overwrite,
+undercounting the rate-limit ledger. The `<uuid>` makes each creation a
+distinct key. The `<ts>` is then the SECOND-to-last segment for the windowed
+count + prune compares (the `<subnet>` itself contains a `/`, so both parsers
+strip the two trailing slash-free segments from the right to recover
+`(subnet, ts)`).
+
+The `rooms/<app-slug>/<uuid>` row is the authoritative record. On the
+**slatedb** (and sqlite) backend it holds the retention clock only: the byte
+and key counts are computed by scanning `roomkv/<app-slug>/<uuid>/` at PUT
+time, the same way the sqlite backend materializes the namespace for the
+pure `RoomKV.CanPut` cap math, serialized by the per-room `lockQuota` stripe
+(slatedb) / the serializable tx (sqlite). The **shale** backend additionally
+stores a running `byte_total` + `key_count` on this record (the `roomRow`
+shale-only fields), because shale validates the per-room cap inside a CAS and a
+CAS read-set cannot carry a scan, so it needs a discrete in-record total the
+read-set can read-check (see "Shale reuses the layout" -> "Per-room cap
+(strict)"). A value is stored **verbatim** (not
+JSON-wrapped): hostthis never parses a room value, so `roomkv/...` holds
+the exact bytes the app PUT, and a Get returns them unchanged. The two
+marker families (`roomcreate/`, `roomexpiry/`) carry an empty value, the
+slatedb convention for index keys (mirroring `identity_pastes` /
+`expiry_sites`).
+
+The `<key>` in `roomkv/<app-slug>/<uuid>/<key>` is the app-chosen key
+validated by `ValidateRoomKey` (non-empty, `<= MaxRoomKeyLen`); the
+`<uuid>` is the canonical lowercase 8-4-4-4-12 form `ParseRoomID` returns,
+so a forged or wrong-version id is rejected at the HTTP boundary before it
+can ever reach a key builder. The `<app-slug>` is the validated 8-char
+slug. None of these three segments can contain a `/` that would let one
+room's key prefix collide with another's (see Strict isolation below).
+
+#### Strict isolation is structural in the key shape
+
+Every value key is `roomkv/<app-slug>/<uuid>/<key>`, the namespacing
+triple `(app-slug, room-uuid, key)` in path order. The isolation
+guarantees fall out of the key shape, not a runtime filter:
+
+- **Cross-room.** A Get / Put / Delete builds the key from the
+  request's own `<uuid>`, so a request carrying room A's UUID can only ever
+  address keys under `roomkv/<app>/A/`; it cannot read or write
+  `roomkv/<app>/B/...`. A whole-room scan is `ScanPrefix
+  roomkv/<app-slug>/<uuid>/` - bounded to exactly one room's subtree, so it
+  cannot enumerate another room.
+- **Cross-app.** The app slug is the outermost variable segment, so
+  `roomkv/app1/<uuid>/...` and `roomkv/app2/<uuid>/...` are disjoint
+  subtrees even for an identical UUID. The per-app prefix scans
+  (`roomkv/<app-slug>/`, `roomcreate/<app-slug>/`) are anchored at the app
+  segment, so one app's aggregate / creation count never sees another's.
+- **Nonexistent-room 404, no existence leak on the per-key path.** A
+  per-key Get is a single `Get roomkv/<app>/<uuid>/<key>`: a missing key
+  in a real room and a key under a nonexistent room both return the
+  not-found sentinel (the same `ErrNotFound` the slatedb paste / site Get
+  returns), so the per-key path cannot distinguish "no such room" from "no
+  such key." The service layer does the `GetRoom` existence check
+  separately where it needs the whole-room-scan 200-vs-404 distinction
+  (the existence signal scoped to a holder of the 122-bit UUID, per the
+  Strict-isolation section above).
+
+Because the UUID is validated up front and the segments are slash-free,
+there is no key whose prefix is another room's, and a guessed or forged id
+addresses an empty subtree - the same "the identifier IS the capability,
+the storage layer enforces the namespace boundary" posture pastes and sites
+rely on.
+
+#### Operations -> KV mapping
+
+- **Create (`CreateRoom`).** Holds the **per-app** quota stripe (the
+  `lockQuota(app-slug)` analogue of the paste / site per-identity stripe,
+  here keyed on the app slug because the room aggregate cap is per-app, not
+  per-identity), then in one transaction:
+  1. **Per-app aggregate pre-check.** If `appCap > 0`, sum the app's
+     current room bytes (scan `roomkv/<app-slug>/`, sum value lengths of
+     non-expired rooms) and refuse a new room with the app-rooms-full
+     sentinel once the app is already at its byte cap. (A brand-new room is
+     empty, but bounding creation here keeps a full app from accumulating
+     unbounded empty rooms, mirroring the sqlite `CreateRoom`.)
+  2. **Collision check.** Read `rooms/<app-slug>/<uuid>`; an existing row
+     surfaces the slug-taken sentinel so the service retries with a fresh
+     UUID (astronomically unlikely for a v4).
+  3. **Atomic write.** `Put rooms/<app-slug>/<uuid>` (the JSON record:
+     `CreatedAt = UpdatedAt = now`, `ExpiresAt = now + RoomRetentionWindow`),
+     `Put roomcreate/<app-slug>/<subnet>/<ts>` (empty marker, the
+     rate-limit ledger row), and `Put roomexpiry/<ExpiresAt>/<app-slug>/
+     <uuid>` (empty marker, the sweep index). All land or none.
+  The creation rate-limit COUNT is read by the service via
+  `CountRoomCreates` OUTSIDE this transaction, exactly as on sqlite, so the
+  creation gate stays a SOFT bound (N concurrent creators can each read the
+  same in-window count and all pass) while the per-app byte cap is the hard
+  structural bound enforced inside the tx.
+- **Per-key read (`GetValue`).** Single `Get roomkv/<app>/<uuid>/<key>`,
+  return the bytes verbatim or the not-found sentinel.
+- **Whole-room scan (`ScanRoom`).** `ScanPrefix roomkv/<app>/<uuid>/`,
+  rebuild the `RoomKV` map (strip the key prefix to recover each app-chosen
+  `<key>`). An existing room with no values scans to an empty (non-nil)
+  namespace; the service layer's prior `GetRoom` is what turns a
+  nonexistent room into a 404 rather than an empty 200.
+- **Write (`PutValue`).** Holds the **per-room** quota stripe
+  (`lockQuota(app-slug + "/" + uuid)`) across the read + write, so two
+  concurrent writes to the SAME room cannot both pass a stale cap check and
+  both commit (valid because SlateDB is single-writer: only in-process
+  goroutines can race, and the stripe serializes same-room writers). Then,
+  inside one transaction:
+  1. **Room-exists re-check.** `Get rooms/<app>/<uuid>`; the not-found
+     sentinel if the room is gone (re-checked inside the write boundary so
+     a concurrent expiry sweep cannot delete the room between the service's
+     `GetRoom` and this write).
+  2. **Per-room cap.** Scan `roomkv/<app>/<uuid>/`, materialize the
+     `RoomKV`, run the pure domain `CanPut` (byte total `<= MaxRoomBytes`,
+     key count `<= MaxRoomKeys`, value `<= MaxRoomValueBytes`); reject with
+     the room-data-full sentinel (413) on a fail, prior value intact.
+  3. **Per-app aggregate cap.** Charge only the byte DELTA (replacing a key
+     frees its old bytes). If `appCap > 0` and the delta is positive, sum
+     the app's room bytes and reject with the app-rooms-full sentinel (507)
+     if `total + delta` exceeds `appCap`.
+  4. **Service-wide cap.** If `serviceCap > 0` and the delta is positive,
+     sum service-wide active bytes (pastes + sites + rooms; see below) and
+     reject with the service-full sentinel if `total + delta` exceeds the
+     cap - so a room write participates in `--storage-cap-bytes` exactly as
+     a paste insert and a site deploy do.
+  5. **Upsert + touch.** `Put roomkv/<app>/<uuid>/<key>` (the new value),
+     then reset the retention clock: read the room record, delete the old
+     `roomexpiry/<oldExpiresAt>/...` index entry, write the record with
+     `UpdatedAt = now`, `ExpiresAt = now + RoomRetentionWindow`, and the new
+     `roomexpiry/<newExpiresAt>/...` entry (the same remove-and-re-add the
+     paste expiry index does on append).
+- **Delete (`DeleteValue`).** Re-check the room exists (not-found if gone),
+  `Delete roomkv/<app>/<uuid>/<key>` (idempotent: a missing key is a
+  no-op - the post-condition "the key is gone" holds either way), then
+  touch the room (a delete is a write, so it resets the clock + the expiry
+  index entry).
+- **Per-app room bytes / creation count.** The per-app aggregate sum is a
+  `ScanPrefix roomkv/<app-slug>/` summing value lengths, with NO read-time
+  expiry filter: the per-app room aggregate is the room-tier analogue of the
+  sqlite `room_kv`-grouped-by-app sum (`appRoomBytesTx`), which has no expiry
+  predicate, so an expired-but-unswept room's bytes still count toward the
+  per-app cap until the sweep deletes the room - on EVERY backend
+  (sweep-time per-app expiry, distinct from the per-identity paste/site quota
+  that sqlite + slatedb free at read time). `CountRoomCreates` scans
+  `roomcreate/<app-slug>/` (per-app), and the per-subnet count walks the same
+  per-app family and matches the `<subnet>` segment (the same way the slatedb
+  `SubnetsForIdentity` walks `keygate/`), counting markers whose fixed-width
+  `<ts>` (the second-to-last segment, before the trailing disambiguator
+  `<uuid>`) is within the window.
+
+#### Service-wide cap is SYMMETRIC: room bytes count both ways
+
+Room value bytes fold into `sumServiceWideActiveBytes` (the slatedb
+service-wide sum that already adds `pastes/* + versions/* + sites/*`), so
+the cap counts every stored content kind in BOTH directions:
+
+- a room PUT's service-wide pre-check sees the bytes pastes and sites
+  already hold, and
+- a paste upload's / site deploy's service-wide pre-check sees the bytes
+  rooms already hold (the room aggregate is added to the same sum the paste
+  insert and site deploy read).
+
+This is the exact symmetry the sites-on-slate P0 fix established for
+paste-vs-site, extended to the third kind: do NOT regress it to an
+asymmetry where one kind's writer ignores another kind's bytes. The sqlite
+`serviceWideActiveBytes` already sums pastes + sites + rooms; the slatedb
+sum gains the room term to match, and the `Rooms/ServiceCapCountsAll`
+conformance subtest pins all three directions.
+
+#### Expiry + sweep -> KV mapping; the fixed-width TTL timestamp
+
+- **`ExpiredRoomKeys(now)`.** Prefix-scan `roomexpiry/`; for each
+  `roomexpiry/<ts>/<app-slug>/<uuid>` key, compare the timestamp segment
+  and return the `RoomRef{app-slug, uuid}` when `ts <= now` (inclusive
+  boundary). The room expiry timestamp is a **FIXED-WIDTH** RFC3339 with a
+  zero-padded 9-digit nanosecond fraction (`expirySiteTimeFormat`,
+  `2006-01-02T15:04:05.000000000Z07:00`), the SAME format the site expiry
+  index uses, so a string compare on the key is byte order == time order
+  EXACTLY, including within a shared whole second. This is NOT
+  `time.RFC3339Nano`: that variable-width format drops trailing fractional
+  zeros (so `...00.5Z` sorts BEFORE `...00Z` because `.` < `Z`), which would
+  let a room be swept up to ~1s before its real `ExpiresAt`. The room
+  expiry index is new, with no prod data, so it adopts the fixed-width
+  format from the start - the same lesson the site expiry index learned, not
+  repeated here. The `roomcreate/<app-slug>/<subnet>/<ts>/<uuid>` rate-limit
+  ledger uses the SAME fixed-width `<ts>` so a windowed `ts >= cutoff`
+  comparison is a correct lexical compare too. The **sqlite** backend's
+  `rooms.expires_at` column adopts the SAME fixed-width format
+  (`formatSiteExpiry`, matching its `sites.expires_at` column), and every
+  query that compares against it (`ExpiredRoomKeys`, the service-wide room
+  sum) uses the fixed-width operand, so the sweep's inclusive-boundary
+  sub-second ordering is correct on sqlite too - the `Rooms
+  /ExpirySubSecondOrdering` conformance subtest pins this identically across
+  all three backends.
+- **`DeleteRoom(appSlug, id)`.** Read `rooms/<app>/<uuid>` for its
+  `ExpiresAt` (to clean up the matching `roomexpiry/` entry), then in one
+  transaction delete the room record, the `roomexpiry/<ExpiresAt>/<app>/
+  <uuid>` index entry, and EVERY `roomkv/<app>/<uuid>/` value (the slatedb
+  analogue of the sqlite FK cascade: enumerate the value subtree, delete
+  each in the tx). Idempotent: a missing room is a no-op. The sweep calls
+  this for each `RoomRef` `ExpiredRoomKeys` returns; the per-record count it
+  contributes keeps the sweep's abort-on-zero-refs blob-GC guard from
+  misfiring on a tick where only rooms expired (rooms hold no blobs, so they
+  never add to the keep-alive set, but a room expiry is still a "record
+  expired this tick").
+- **`PruneOldRoomCreates(cutoff)`.** Prefix-scan `roomcreate/`, delete every
+  marker whose `<ts>` (the second-to-last segment, before the trailing
+  disambiguator `<uuid>`) is before `cutoff` (`now - RoomCreateWindow`). Past
+  the window a ledger marker can never change a future rate-limit decision, so
+  the sweep drops it each tick to keep the family bounded - the same
+  discipline the key-gate prune (`DeleteFirstSeenOlderThan`) and the sqlite
+  `room_creates` prune use.
+
+#### Shale reuses the layout
+
+The shale backend reuses the slatedb room key names + JSON record schema
+(co-location is by `shaleShardKey`, not by renaming keys), joining the room
+families to the existing shard-family scheme so a room read or write is a
+single-shard operation. The room shard map:
+
+| Key family | Keys | Shard key |
+| --- | --- | --- |
+| Room record (per-app) | `rooms/<app-slug>/<uuid>` | `<app-slug>` |
+| Room value (per-app) | `roomkv/<app-slug>/<uuid>/<key>` | `<app-slug>` |
+| Room-create ledger (per-app) | `roomcreate/<app-slug>/<subnet>/<ts>/<uuid>` | `<app-slug>` |
+| Room expiry index (per-app) | `roomexpiry/<ts>/<app-slug>/<uuid>` | `<app-slug>` |
+
+All four families shard on `<app-slug>`, co-locating an app's rooms, all
+their values, its creation ledger, and its expiry entries on ONE shard -
+the same co-location discipline the `{slug}` / `{id}` / `{subnet}` families
+use, and the reason "load the whole room," "write one key," and "count this
+app's creations" are each single-shard operations rather than cross-shard
+fan-outs. The room-create and room-expiry families take their app slug from
+a non-leading segment, so `shaleShardKey` extracts it by family-aware
+parsing (the expiry key's app slug is its second-to-last segment, between
+the `<ts>` and the trailing `<uuid>`), exactly as it pulls the trailing
+slug out of `expiry/<date>/<slug>` today. The `room`-prefixed family names
+do not collide with the `pastes/` / `sites/` / `rooms`-vs-`roomkv`
+anchoring (the trailing-slash discipline in `shaleShardKey`:
+`roomkv/` is not `rooms/`).
+
+The strict-isolation, per-room-cap, and per-app-aggregate-cap properties
+carry over from the slatedb layout unchanged. Both the per-room cap and the
+per-app aggregate cap are STRICT under concurrency on shale, but they are
+enforced by two DIFFERENT read-set members of the one `{app-slug}`-shard CAS,
+because a CAS read-set is a set of discrete key checks (shale forbids
+`ScanPrefix` inside a transaction - a scanned range has no cheap phantom
+protection), so a cap whose magnitude is "the sum over a key range" must be
+backed by a discrete COUNTER the CAS can read-check, not by an in-CAS scan:
+
+- **Per-app aggregate cap (strict).** A per-app room-byte counter
+  `roombytes/<app-slug>` (the per-app analogue of `identity_bytes/<id>`) is
+  read-checked and incremented inside the `{app-slug}` value-write CAS, so two
+  concurrent writers to the SAME app cannot both pass a stale per-app sum and
+  overshoot `appCap`. Because all five room families (the four above + this
+  counter) share the one `{app-slug}` shard, a room create or write is already
+  single-shard, so the value write + the counter update are one CAS - simpler
+  than the paste counter (no cross-shard reserve / confirm split needed).
+- **Per-room cap (strict).** The per-room byte total + key count are stored ON
+  the room record (`rooms/<app-slug>/<uuid>`, the `roomRow` `byte_total` +
+  `key_count` fields, shale-only) and validated against `MaxRoomBytes` /
+  `MaxRoomKeys` INSIDE the same CAS. The room record is already read-checked in
+  the read-set (the room-exists re-check) and rewritten on every PUT / DELETE
+  (the clock touch), so two concurrent writers to DISTINCT keys of the same
+  room - which target different value keys and so would NOT conflict on the
+  value-key read-check alone - DO conflict on the shared room-record read-check:
+  the second writer's CAS conflicts after the first commits, the retry re-reads
+  the now-updated `byte_total` / `key_count`, and the per-room cap is recomputed
+  against the fresh totals. So the per-room ceiling holds no matter how the
+  writes interleave (`conformCaps.StrictQuotaUnderConcurrency = true`). The
+  totals are maintained ONLY by the shale backend (slatedb + sqlite leave them
+  unset and compute the per-room cap by materializing the namespace under a
+  serialized writer - slatedb's per-room `lockQuota` stripe, sqlite's
+  serializable tx - so they need no stored total); since a room is only ever
+  written by one backend's store, the shale-only fields are inert on the others.
+
+The service-wide cap sums version bytes + every site's `DedupedSize` + every
+app's room bytes (the shale `sumServiceWideActiveBytes` adds the room
+aggregate, paralleling the slatedb sum), so on the paste-insert, site-deploy,
+AND room-write paths each kind sees the others' bytes. Sweep-time expiry
+semantics (`ExpiryFreesQuotaAtReadTime = false`) carry over from the paste
+counter: a room's bytes leave the per-app counter when the sweep deletes the
+expired room, not at read time, the same fail-safe over-count direction. The
+`Rooms/PerRoomCapConcurrentCeiling` conformance subtest fires N concurrent
+distinct-key writes into one room against the structural `MaxRoomBytes` cap and
+asserts the persisted byte total never breaches it - the gate that pins the
+per-room strictness above on every `StrictQuotaUnderConcurrency` backend.
+
+**Empty room values on shale.** shale's `Put` rejects empty values (the
+empty payload is reserved for delete tombstones), but a room value may
+legitimately be the empty byte string (`PUT`ting `""` is valid app state on
+sqlite + slatedb). To keep the verbatim-round-trip contract IDENTICAL across
+all three backends, a stored shale room value is prefixed with one sentinel
+byte; the decode strips it to return the app's exact bytes (including the
+empty string). All room BYTE accounting (the per-app counter, the per-room
+cap, the service-wide sum) charges the DECODED length, so the byte totals
+match slatedb exactly - an empty value counts as 0 bytes. This is a
+shale-internal encoding detail; the observable Get/Scan contract is the same
+verbatim bytes on every backend, and the conformance `Rooms/RoundTrip`
+subtest exercises an empty value to pin it.
+
+**Status: slatedb AND shale are both implemented + conformance-tested.**
+Prod runs the slatedb-direct backend, so the slatedb room impl is the
+load-bearing deliverable that lights up `/api/rooms` on prod; the shale room
+impl is the same layout co-located on the per-app shard. Both run the SAME
+conformance room subtests under the SAME factory the way sqlite, slatedb,
+and shale already do for pastes and sites, so each backend is a drop-in for
+the room-persistence tier by construction.
+
+#### Wiring: widen the metadata bundle's `Rooms` field
+
+`cmd/hostthisd/metadata.go` holds `Rooms` as the concrete
+`*storage.RoomKVRepo` (sqlite) type, which the slatedb / shale room repos
+cannot be assigned to. The field is widened to a `roomStore` interface (the
+`service.RoomRepo` write/read view plus the `service.SweepRooms` sweep view,
+the union the service + sweep layers consume), so any backend's room impl
+can be assigned - mirroring exactly how the `Sites` field was widened from
+`*storage.SiteRepo` to the `siteStore` interface. The bundle stays nil-safe:
+a backend that does not supply a room impl leaves the field nil and the
+`/api/rooms` surface stays disabled there, as before; once slatedb (and
+shale) supply a non-nil value, room persistence lights up on those backends,
+so the slatedb-direct prod deploy serves `/api/rooms`.
+
+#### Conformance
+
+The backend-agnostic conformance suite is extended with room operations so
+sqlite, slatedb, and shale are pinned to behave IDENTICALLY for rooms, the
+same way they are pinned for pastes and sites. The room contract the suite
+asserts (each subtest must FAIL on intentionally-weakened code, the TDD
+gate):
+
+- **Round-trip.** Create a room, PUT values under several keys, GET each
+  back byte-identically, SCAN the whole namespace and observe every pair.
+- **Cross-room + cross-app ISOLATION.** A second room's UUID (and an
+  identical-UUID-shaped string under a second app) cannot read, write, or
+  scan the first room's data; a scan is bounded to exactly one room's
+  subtree. This subtest must FAIL if the namespacing is weakened (a key
+  builder that dropped the app or room segment, a scan whose prefix was
+  broadened).
+- **Nonexistent-room 404.** A per-key GET / PUT / DELETE on a well-formed
+  but nonexistent room returns the not-found sentinel - the same shape as a
+  missing key in a real room (no per-key existence leak).
+- **Per-room cap.** A PUT that would push the room past `MaxRoomBytes` or
+  `MaxRoomKeys` is rejected, prior value intact.
+- **Service-wide cross-kind cap.** Room bytes fill the service cap a paste
+  / site then sees, and paste / site bytes fill the cap a room PUT then
+  sees - the symmetric `Rooms/ServiceCapCountsAll` directions.
+- **Creation rate limit.** The per-subnet and per-app in-window counts the
+  service gates on are accurate after N creations, and a windowed prune
+  drops past-window ledger rows.
+- **App-existence 404.** (Pinned at the HTTP layer, where the existence
+  gate lives - the room repo itself is not app-existence-gated, the same
+  way the paste repo is not owner-gated; the repo-level conformance pins
+  that room creation under any slug succeeds, and the HTTP-layer test pins
+  the 404 for a slug that names no live app.)
+- **TTL / sweep.** `ExpiredRoomKeys` returns rooms whose `ExpiresAt <= now`
+  (inclusive boundary, correct sub-second ordering via the fixed-width
+  timestamp), `DeleteRoom` removes the room and cascades to its values, and
+  the sweep reclaims them.
+
+A backend that passes the extended suite is a drop-in for the
+room-persistence tier by construction.
+
 ---
 
 ## Shale-backed metadata storage (horizontal scale)
@@ -1105,19 +2967,21 @@ Per-identity quota (the 10 MiB compressed cap) must be enforced exactly:
 an upload that would push an owner over the cap is rejected, and two
 concurrent uploads can never both pass the check and both land.
 
-Where the single-writer backends land on this varies, and only one of
-them actually gets it right. The sqlite backend enforces it exactly: the
-quota sum and the insert run inside ONE serializable transaction, so two
-concurrent uploads serialize and the second sees the first's bytes. The
-slatedb backend does NOT: its quota sum runs before (outside) the write
-transaction, so two concurrent uploads for the same identity can both
-read the pre-upload sum, both pass, and both land, overshooting the cap.
-That is a real race in the slatedb-direct backend, not a sharding
-artifact. The reservation pattern below brings the shale backend up to
-sqlite-class strictness even though, unlike sqlite, it cannot put the sum
-and the write in one transaction: the bytes counter lives on the `{id}`
-shard and the paste row lives on the `{slug}` shard, two different
-single-shard transactions.
+All three single-writer backends enforce it exactly under concurrency, by
+different means. The sqlite backend uses ONE serializable transaction: the
+quota sum and the insert serialize, so the second upload sees the first's
+bytes. The slatedb backend holds a per-identity `lockQuota(identity)`
+stripe across the sum + the write, so two concurrent same-identity uploads
+cannot both read the pre-upload sum; this is valid because SlateDB is
+single-writer / epoch-fenced, so only intra-process goroutines can race
+and the in-process lock covers them. The shale backend uses the
+reservation pattern below: it cannot put the sum and the write in one
+transaction (the bytes counter lives on the `{id}` shard and the paste row
+on the `{slug}` shard, two different single-shard transactions), so it
+reserves on the `{id}` counter via CAS first. The difference that
+motivates the reservation pattern: slatedb's lock is PROCESS-LOCAL and
+would not survive a multi-writer split, whereas shale's CAS counter holds
+across nodes.
 
 The shale backend enforces quota with a **reservation pattern**: a
 three-step sequence that makes the quota decision atomic on the owner's
@@ -1505,6 +3369,181 @@ expectations, then runs it against production during the cutover window.
 Because it is read-only on the authoritative rows and idempotent, a
 re-run after the cutover is harmless.
 
+### Multi-node shale (horizontal write scaling)
+
+Everything above runs correctly on a single shale node: one process owns
+the whole ring, every shard resolves to the local backend, and the
+shard-key function plus the reservation pattern are already in place so
+the same code is correct at any node count. This subsection describes the
+multi-node shape that turns that single-writer-equivalent deployment into
+a horizontally write-scaled one, and the data-safety contract the cluster
+must honor when nodes join or leave.
+
+#### The two-node shape
+
+A multi-node deployment runs N identical hostthisd processes, each
+configured as one shale node:
+
+- **Its own backend.** Each node opens its own slatedb database (a
+  distinct `DbName` / object-store prefix). A key's bytes physically live
+  in exactly one node's database (at replication factor 1). No two nodes
+  share a database.
+- **Gossip membership.** Each node binds a memberlist address (`BindAddr`,
+  host:port). A **non-empty `BindAddr` is what enables multi-node mode**;
+  with it empty the node runs the single-node path described above, every
+  op local, no gossip, no ring routing. This is the back-compat guarantee:
+  an existing single-node deployment that sets none of the multi-node
+  config behaves exactly as it does today.
+- **Peer forwarding.** Each node advertises a gRPC service address
+  (`GRPCAddr`, host:port) that it broadcasts to peers as their forwarding
+  target. A request that hashes to a shard another node owns is forwarded
+  over gRPC to that owner and served from the owner's local backend; the
+  caller sees a normal result and never learns the op crossed a node
+  boundary. `GRPCAddr` is required whenever `BindAddr` is set.
+
+  The cluster layer advertises `GRPCAddr` via gossip but does **not** itself
+  stand up the listener that peers forward to: serving that address is the
+  host process's responsibility. In hostthis the metadata adapter owns it.
+  When `BindAddr` is non-empty the adapter binds a TCP listener, passes the
+  listener's **actual** bound address into the cluster as `GRPCAddr` (so the
+  advertised address is exactly the one served, which matters when the
+  configured port is `:0` / OS-assigned), registers the cluster's RPC
+  handlers (Put/Get/Delete/ScanPrefix/CommitCAS/MigrateRange) on a gRPC
+  server, and serves in the background. Closing the adapter gracefully stops
+  that server and closes the listener, releasing the port with no leaked
+  goroutine. When `BindAddr` is empty the adapter binds **no** listener and
+  starts **no** server: the single-node path is byte-for-byte today's
+  behavior, the back-compat guarantee. Without this serving step a
+  multi-node deployment would gossip a live-looking `GRPCAddr` that no
+  process answers, so every forwarded request would hit a dead port; the
+  rebalance safety contract below depends on the forwarding path being real.
+- **Discovery via seeds.** A joining node is given one or more `Seeds`
+  (the `BindAddr` of already-running nodes) to bootstrap gossip. An empty
+  seed list means "this node is the founder / seed"; the first node starts
+  with no seeds and later nodes seed off it. Once gossip converges every
+  node holds the same ring snapshot.
+
+The shard-key function (`{slug}` / `{id}` / `{subnet}` co-location) is
+unchanged across node counts: it decides which shard a key belongs to,
+and the ring decides which node owns that shard. Co-location still holds,
+so a single-family-single-subject transaction is still a single-shard CAS,
+now resolved to whichever node owns that shard.
+
+#### Where the throughput win comes from
+
+On a single node every write serializes through one backend. On N nodes
+the ring spreads shards roughly evenly across nodes, so writes to keys on
+**different shards** are committed in parallel by **different nodes'
+backends**. A workload of independent uploads (different slugs, different
+owners) fans its CAS commits across the cluster instead of queueing them
+behind one writer, and sustained write throughput scales roughly with
+node count. Writes that contend on the **same** shard (the same owner's
+quota counter, the same slug's authoritative row) still serialize, by
+design: that serialization is what keeps quota strict and the
+authoritative rows consistent. The win is on the independent-write axis,
+which is where hostthis's write load actually lives (many small uploads
+from many owners), not on hot-key contention.
+
+#### R=1 vs R=2: throughput versus availability
+
+Replication factor is a deployment choice with a direct tradeoff:
+
+- **R=1 (shard, no replica).** Each key lives on exactly one node. Maximum
+  write throughput (no replica fan-out, no last-writer-wins envelope on
+  the read path) and minimum storage. The cost is availability: if a node
+  goes down, the shards it owned are unreadable and unwritable until it
+  comes back, because there is no second copy to promote. A node-down event
+  is a gap, not data loss, **provided the node returns** with its backend
+  intact (the bytes are durable in that node's object-store database). At
+  R=1 a permanently-lost node's shards are lost.
+- **R=2 (replicate).** Each key lives on two nodes; a write is acked per
+  the write-consistency setting and reads resolve a last-writer-wins
+  winner. A single node down does not interrupt service (the surviving
+  replica serves the shard) and a permanently-lost node loses nothing.
+  The cost is that R=2 does **not** add write throughput: every write now
+  lands on two backends, so the per-write work doubles even as the node
+  count grows. R=2 buys high availability, not horizontal write scaling.
+
+The two goals (throughput, availability) pull in opposite directions; a
+deployment picks the point on that axis it needs. The horizontal-write-
+scaling deployment this section motivates is R=1. A deployment that values
+uptime over peak write rate runs R=2 and accepts that the throughput
+ceiling is the per-node ceiling.
+
+#### The rebalance safety contract (lossless data movement)
+
+The crux of multi-node operation is what happens when membership changes.
+Today (single node) all data lives in one node's backend. When a second
+node joins, the consistent-hash ring reassigns roughly half the shards to
+it, and the cluster **physically migrates** the keys of the reassigned
+shards from the old owner's backend to the new owner's backend. This is a
+live movement of authoritative data between two storage engines, the same
+class of operation as the slatedb-to-shale migration above, and it must be
+**lossless**: no key may be dropped, and no key's value may regress to a
+stale or empty state, across the transition.
+
+The contract the cluster guarantees, and that the groundwork tests below
+must demonstrate on hostthis's actual data shapes:
+
+1. **Copy-before-delete cutover.** A migrating shard is streamed from the
+   source node's backend to the destination's backend and the
+   destination's copy is verified (a checksum over the streamed
+   key/value bytes) **before** the source deletes its local copy. The
+   source keeps serving reads of the shard until the destination
+   acknowledges the stream; only after that acknowledgement does a grace
+   window elapse and the source sweep the now-foreign keys. The source
+   never deletes a key it has not confirmed the destination received.
+   A failed or interrupted stream (destination crash, checksum mismatch,
+   timeout) leaves the source's copy in place and the next evaluation
+   retries; it does not advance to the delete step.
+2. **Reads stay correct throughout.** During the window in which a shard
+   is in flight, a read that lands on the destination (because the ring
+   already names it the new owner) is transparently served from the
+   source, which still holds the authoritative copy. A reader never sees
+   not-found for a key that exists; it sees the source's value until
+   cutover completes, then the destination's identical copy.
+3. **Writes are guarded, not lost.** A write that lands on a shard
+   mid-migration is rejected with a retry-after signal rather than being
+   silently applied to a copy that is about to be superseded. The client
+   retries after the shard settles on its new owner. A write is never
+   applied to the losing side of a cutover.
+4. **The quota counter survives the move.** The per-identity
+   `identity_bytes/<id>` counter is an ordinary value-bearing key on the
+   `{id}` shard. When that shard migrates, the counter moves with it like
+   any other key, and after the move the counter is still readable (via
+   gRPC forwarding from any node) with its exact pre-move value. A quota
+   counter that under-counted after a rebalance would let an owner upload
+   past the cap; the contract is that it does not change value across the
+   move at all. The same holds for every other hostthis data shape on the
+   moving shard: paste rows, version rows, `slug_owner`, expiry index
+   entries, reservation markers, and the value-bearing `identity_pastes`
+   projections all arrive on the new owner byte-for-byte identical.
+
+This contract is the property the groundwork must **prove on real data**
+before any live multi-node deployment. The proof is an integration test
+that populates a node with the full set of hostthis data shapes, joins a
+second node, lets the ring rebalance, and asserts that every shape, the
+quota counter most pointedly, is still readable through the cluster with
+its original value after roughly half the keyspace has physically moved
+to the new node. A rebalance that loses or corrupts data fails this test;
+that failure, if it occurs, is the single most important finding of the
+groundwork and gates the deploy step below.
+
+#### Deploy shape is a separate, gated step
+
+Wiring the multi-node config into the application (the `BindAddr` /
+`GRPCAddr` / `Seeds` / replication-factor surface) and proving the
+rebalance is lossless is application-level groundwork. **Reshaping the
+deployment to actually run more than one node is a separate step, gated on
+this groundwork being green.** The intended runtime shape, when that step
+is taken, is a stable-identity replica set (a StatefulSet, each pod a node
+with a durable per-node identity and its own object-store prefix), fronted
+by a headless service for peer gossip discovery and a load balancer for
+client traffic, scaled out one node at a time so each join triggers one
+bounded rebalance. None of that orchestration is built here; this section
+specifies only the application behavior and the safety contract the
+deploy step depends on.
+
 ---
 
 ## Edge caching
@@ -1761,6 +3800,144 @@ default 5 GiB at the 10 MiB / identity / 7-day shape, that's room
 for ~500 actively-uploading identities at full quota; in practice
 most identities use a small fraction of their cap so the real
 ceiling is much higher.
+
+---
+
+## Future directions (proposed, not built)
+
+These are bigger bets that would grow hostthis from "host a renderable file
+for 7 days" toward "deploy a small real app over SSH, no account." The first
+of them (static directory hosting) has SHIPPED - see "Static site archives"
+above. The persistence API has now shipped its FIRST CUT too - the no-auth,
+capability-based **Rooms** KV store - see "Rooms (app persistence)" above;
+what remains a PROPOSAL here is the richer end-user AUTH model layered on
+top of rooms (the JWT-verifying / browser-keypair identity spectrum below).
+Each deliberately revisits some of the v1 Non-goals below (a scope
+expansion, not an accident). The throughline: shale (the distributed K-V)
+is the persistence layer for both, and the differentiator across both is
+the SSH-native, no-account, your-key-is-your-identity model.
+
+### Static directory hosting (serve a whole site)
+
+**This is now SHIPPED - see "Static site archives" above.** What was a
+proposal here is real: a gzip-tar of a static site, piped over the
+existing SSH upload surface (no new verb), is detected, safe-untarred,
+stored as content-addressed blobs plus a manifest, and served at
+`<slug>.hostthis.dev/<path>` under the same identity, quota, 7-day
+expiry, and origin-isolation model as an HTML paste. The "Static site
+archives" section is the authoritative description; this bullet is kept
+only as the pointer from the future-directions framing it grew out of.
+
+What shipped vs the original sketch: detection is gzip-tar only (plain
+tar and zip stay out of scope); a default-on SPA fallback serves the
+root `index.html` for an unmatched ROUTE while a missing ASSET still
+404s (see "SPA fallback (route vs. asset)"); and the security story is
+the existing origin-isolation boundary (raw files on their own
+subdomain), not a "strict CSP" - the same posture HTML pastes already
+have, so no new trust boundary was introduced.
+
+This is "Surge.sh / Netlify-drop", but SSH-native and no-signup. It
+revisited the "Binary / non-renderable file hosting" non-goal (a site
+is still renderable content, just multi-file).
+
+### A persistence API (a backend for small apps)
+
+Pair static hosting with a small backend so users host REAL apps, not just
+static pages. The engine already exists: shale.
+
+**The no-auth first cut of this has SHIPPED as Rooms - see "Rooms (app
+persistence)" above.** That section is the authoritative description of the
+shipped shape: a per-app KV store keyed by an unguessable room UUID
+(`<app>.hostthis.dev/api/rooms/<uuid>/<key>`, GET/PUT/DELETE), with strict
+per-room isolation, no accounts, persisted over the metadata backend. The
+bullets below are the REMAINING proposal - the richer end-user AUTH model
+that would layer verifiable identity on top of rooms (so an app can enforce
+"user A cannot overwrite user B's record," which the capability-only Rooms
+tier deliberately does not). The shape and trust model here describe that
+later tier; the Rooms section is what is real today.
+
+- **Shape**: a per-app KV / document store. An app gets a namespace (a key
+  prefix) in shale; its frontend hits `<app>.hostthis.dev/api/kv/<key>`
+  (GET/PUT/DELETE), persisted in shale. A thin HTTP layer over the K-V. No
+  server-side functions and no reactive subscriptions: running arbitrary
+  user code is a sandboxing + security cliff, so this is NOT a FaaS.
+  (The shipped Rooms tier is this shape with the room UUID as the access
+  capability; the auth model below is what it gains next.)
+- **The trust model (the thing that actually matters).** You cannot trust
+  the client: any value the browser sends can be forged (edit the JS, or
+  curl the API directly). Two DIFFERENT problems fall out, with different
+  answers:
+  - **Data integrity** ("is this score real?") is UNSOLVABLE client-side.
+    No rule or auth fixes it; only re-running the app's logic on an
+    authoritative server does, which is a full backend and out of scope.
+    True of every client-side app: a hostthis-backed app either accepts it
+    (fine for a casual leaderboard) or is not a fit.
+  - **Access control** ("who may write WHOSE record?") IS solvable, and is
+    the real job of the API's rules: user A cannot overwrite user B's
+    record. The rules are about IDENTITY + OWNERSHIP, not value validation
+    (a `score <= MAX` bound is a weak band-aid; `request.user ==
+    resource.owner` is the load-bearing rule). This stops cross-user
+    tampering even though it cannot stop A faking A's own value.
+- **Identity** (two separate identities, do not conflate them):
+  - **Creator** (who deploys) = the SSH key, as today. Optionally a linked
+    account (e.g. Clerk) that groups a developer's many SSH keys into one
+    identity with recovery; the SSH key stays the auth mechanism, the
+    account is an opt-in management layer, the no-account path stays default.
+  - **App end-user** (who plays / comments) is a per-app choice on a
+    spectrum:
+    1. NONE: anonymous + rate-limit (guestbook, public poll).
+    2. CAPABILITY TOKEN: an unguessable per-record link; no accounts.
+    3. BROWSER KEYPAIR: the user's browser generates a keypair (WebCrypto),
+       the public key IS the identity, the app signs writes, hostthis
+       verifies. Passwordless, accountless, no third party, no cost. No
+       recovery / no cross-device without exporting the key (casual fit).
+    4. REAL ACCOUNTS via JWT: the KV API is a JWT-VERIFYING resource server
+       with a CONFIGURABLE issuer. The app sends the user's JWT; hostthis
+       verifies it against the configured issuer's JWKS and keys the rules
+       off the token claims (`sub` = user id). The issuer is either TURNKEY
+       ("Sign in with hostthis", a hostthis-hosted issuer with Clerk under
+       the hood: zero setup) or BYO (the developer points hostthis at their
+       OWN issuer's JWKS: they own their users, pay their own auth, no
+       lock-in). This is exactly how Supabase / Firebase / Hasura accept
+       external auth: a JWT-verifying resource server.
+  - The single hard commitment is the boring-correct foundation: the KV API
+    verifies a JWT (or a keypair signature) and the rules read its claims.
+    Same verification path for turnkey and BYO; the developer picks per app.
+- **What it unlocks** (apps someone would actually ship): a self-hosted
+  comments / guestbook widget (a Disqus replacement); a poll / voting app
+  (the reservation-pattern CAS already does atomic counts); a high-score /
+  save-state for browser games; a form backend ("Formspree over SSH"); URL
+  shorteners, visitor counters, feature flags.
+- **The product fork to decide first.** Offering "Sign in with hostthis"
+  (the turnkey issuer) makes hostthis an identity provider + ECOSYSTEM: a
+  shared user identity across all hostthis apps, a sticky network effect,
+  but a walled garden hostthis pays for and that couples apps to it.
+  Supporting only BYO keeps hostthis a HOST: apps are standalone, the
+  developer owns their users. The configurable-issuer design lets hostthis
+  ship the turnkey option AS the low-friction default without forcing the
+  walled garden, because BYO is always the escape hatch. Leaning ecosystem
+  vs host is a product call, bigger than the mechanism.
+
+Revisits the "Comments / threaded discussion" non-goal: we would not build
+comments, but the persistence API lets a USER build them.
+
+**Open design questions:**
+
+- Static (now shipped; these are remaining refinements, not blockers):
+  the SPA fallback has SHIPPED default-on (serve the root `index.html`
+  for an unmatched route, 404 a missing asset - see "SPA fallback
+  (route vs. asset)"); what remains open is custom subdomains, and a
+  per-site opt-OUT flag if a site ever wants hard 404s on unknown
+  routes. Deploy atomicity and the per-identity (rather than per-site)
+  quota are already settled - see "Static site archives".
+- Persistence: the no-auth Rooms tier has SHIPPED (see "Rooms (app
+  persistence)"), which settles per-app namespacing, rate-limiting + abuse
+  on the writable public API, and quota accounting for app data vs paste
+  data. What remains open is the AUTH tier on top of it: the rule model
+  (identity + ownership constraints evaluated server-side); the
+  JWT-verifying resource-server design + the turnkey-vs-BYO issuer config +
+  the browser-keypair signature path; and who pays for a turnkey "Sign in
+  with hostthis" tier (the ecosystem-vs-host product call).
 
 ---
 

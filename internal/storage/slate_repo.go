@@ -489,10 +489,20 @@ func (r *SlateRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 }
 
 // sumServiceWideActiveBytes is the service-cap equivalent - sum over
-// EVERY paste, not just one identity. Used inside the quota check.
-// Implementation walks pastes/ then versions/<slug>/; O(active pastes)
-// + O(versions per paste). For low-volume hostthis (today: <100 active
-// pastes, <500 versions total) this is sub-millisecond.
+// EVERY paste AND every site AND every app's rooms, not just one identity.
+// Used inside the quota check on the paste-insert, site-deploy, AND
+// room-write paths. Implementation walks pastes/ then versions/<slug>/;
+// O(active pastes) + O(versions per paste), then adds the site total (one
+// sites/ scan) and the room total (one rooms/ scan + per-live-room value
+// scan). For low-volume hostthis (today: <100 active pastes, <500 versions
+// total) this is sub-millisecond.
+//
+// Including site AND room bytes here keeps the service-wide cap SYMMETRIC
+// across all three content kinds: a paste upload sees the bytes sites and
+// rooms already hold, a site deploy sees paste + room bytes, and a room PUT
+// sees paste + site bytes (parallels the sqlite serviceWideActiveBytes,
+// which sums pastes + sites + rooms). Do NOT regress any kind's writer to
+// ignore another kind's bytes.
 func (r *SlateRepo) sumServiceWideActiveBytes(now time.Time) (int64, error) {
 	pastes, err := r.scanPrefix([]byte("pastes/"))
 	if err != nil {
@@ -523,7 +533,20 @@ func (r *SlateRepo) sumServiceWideActiveBytes(now time.Time) (int64, error) {
 			total += int64(v.Size)
 		}
 	}
-	return total, nil
+	siteTotal, err := r.sumServiceWideActiveSiteBytes(now)
+	if err != nil {
+		return 0, err
+	}
+	// Room bytes fold into the same service-wide sum so the cap is SYMMETRIC
+	// across all three content kinds: a room PUT sees paste+site bytes (here),
+	// and a paste insert / site deploy sees room bytes (they call this sum).
+	// Do NOT regress this to an asymmetry (the sites-on-slate P0 lesson,
+	// extended to the third kind).
+	roomTotal, err := r.SumActiveRoomBytes(now)
+	if err != nil {
+		return 0, err
+	}
+	return total + siteTotal + roomTotal, nil
 }
 
 func (r *SlateRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
@@ -595,11 +618,21 @@ func (r *SlateRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 		}
 	}
 	if userCap > 0 {
-		ownerTotal, err := r.sumActiveBytesForOwner(p.Identity.String(), now)
+		// Per-owner cap counts BOTH paste bytes AND site bytes, symmetric
+		// with InsertSiteWithQuotaCheck (which sums both for a site deploy)
+		// and matching the sqlite identityActiveBytes that spans both kinds.
+		// Without the site term a paste could be admitted while the owner's
+		// site bytes are ignored (e.g. an 800-byte site + a 300-byte paste
+		// under a 1000-byte cap would wrongly pass).
+		ownerPaste, err := r.sumActiveBytesForOwner(p.Identity.String(), now)
 		if err != nil {
-			return fmt.Errorf("identity sum: %w", err)
+			return fmt.Errorf("identity paste sum: %w", err)
 		}
-		if ownerTotal+body > userCap {
+		ownerSite, err := r.sumActiveSiteBytesForOwner(p.Identity.String(), now)
+		if err != nil {
+			return fmt.Errorf("identity site sum: %w", err)
+		}
+		if ownerPaste+ownerSite+body > userCap {
 			return ErrOverUserQuota
 		}
 	}
@@ -618,6 +651,19 @@ func (r *SlateRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 		return fmt.Errorf("tx slug check: %w", err)
 	}
 	if existing != nil {
+		_ = tx.Rollback()
+		return ErrSlugTaken
+	}
+	// A slug must be unique across sites too (a read resolves a slug in
+	// either family). The site insert already checks the paste key;
+	// mirror it here so a paste cannot take a slug a site owns. Matches
+	// the sqlite paste insert's `SELECT COUNT(1) FROM sites` guard.
+	existingSite, err := tx.Get(keySite(p.Slug))
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("tx site slug check: %w", err)
+	}
+	if existingSite != nil {
 		_ = tx.Rollback()
 		return ErrSlugTaken
 	}
@@ -830,11 +876,18 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 		}
 	}
 	if userCap > 0 {
-		ownerTotal, err := r.sumActiveBytesForOwner(existing.Identity, now)
+		// Per-owner cap counts BOTH paste bytes AND site bytes (symmetric
+		// with the site deploy path + the sqlite identityActiveBytes), so an
+		// append cannot ignore the owner's existing site bytes.
+		ownerPaste, err := r.sumActiveBytesForOwner(existing.Identity, now)
 		if err != nil {
-			return AppendResult{}, fmt.Errorf("identity sum: %w", err)
+			return AppendResult{}, fmt.Errorf("identity paste sum: %w", err)
 		}
-		if ownerTotal+body > userCap {
+		ownerSite, err := r.sumActiveSiteBytesForOwner(existing.Identity, now)
+		if err != nil {
+			return AppendResult{}, fmt.Errorf("identity site sum: %w", err)
+		}
+		if ownerPaste+ownerSite+body > userCap {
 			return AppendResult{}, ErrOverUserQuota
 		}
 	}

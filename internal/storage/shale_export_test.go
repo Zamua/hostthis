@@ -15,11 +15,72 @@ package storage
 // ShaleRepo), so the default build never sees them.
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
+	"github.com/Zamua/shale/pkg/cluster"
+
 	"github.com/Zamua/hostthis/internal/domain"
 )
+
+// ClusterForTest exposes the underlying shale cluster handle so the
+// multi-node rebalance test (external storage_test package) can drive
+// assertions a host process would not: gate on the post-join rebalance
+// settling (cluster.WaitForRebalanceIdle) and assert ring ownership moved
+// (cluster.Members / OwnsKey). The peer-forwarding rpc.Server is now stood
+// up by NewShaleRepo itself in multi-node mode (the production path), so
+// the test no longer registers one through this handle.
+//
+// Returns nil for a closed repo. Test-only; no production path reads it.
+func (r *ShaleRepo) ClusterForTest() *cluster.Cluster { return r.cluster }
+
+// LocalKeyCountForTest counts the keys with the given prefix physically
+// resident on THIS node's local backend, bypassing ring routing
+// (cluster.LocalScanPrefix). The rebalance test uses it to prove keys
+// were redistributed: after a 2-node join, node B's local backend must
+// hold some of the metadata keys (the ring moved roughly half of them),
+// not zero. Pass nil prefix to count every local key.
+func (r *ShaleRepo) LocalKeyCountForTest(prefix []byte) (int, error) {
+	it, err := r.cluster.LocalScanPrefix(prefix)
+	if err != nil {
+		return 0, err
+	}
+	defer it.Close() //nolint:errcheck
+	n := 0
+	for {
+		k, _, err := it.Next()
+		if err != nil {
+			return 0, err
+		}
+		if k == nil {
+			return n, nil
+		}
+		n++
+	}
+}
+
+// WaitForRebalanceIdleForTest blocks until every in-flight migration on
+// this node has reached a terminal state or ctx is canceled. Thin
+// pass-through to cluster.WaitForRebalanceIdle so the test does not need
+// the cluster handle's full surface.
+func (r *ShaleRepo) WaitForRebalanceIdleForTest(ctx context.Context) error {
+	return r.cluster.WaitForRebalanceIdle(ctx)
+}
+
+// OwnsKeyForTest reports whether THIS node is the ring owner of key.
+// Diagnostic-only: lets the rebalance test pinpoint which node a routed
+// op resolves to when a read unexpectedly fails.
+func (r *ShaleRepo) OwnsKeyForTest(key []byte) bool { return r.cluster.OwnsKey(key) }
+
+// LocalGetPresentForTest reports whether key is physically present on
+// THIS node's local backend (bypassing routing), independent of whether
+// the ring says this node owns it. Used to diagnose a handoff that moved
+// the ring pointer but not (or wrongly) the bytes.
+func (r *ShaleRepo) LocalGetPresentForTest(key []byte) bool {
+	v, err := r.cluster.LocalGet(key)
+	return err == nil && v != nil
+}
 
 // PutRawForTest writes value under key straight through the cluster's
 // Put path. At ReplicationFactor=1 that path calls backend.Put verbatim

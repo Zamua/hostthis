@@ -50,37 +50,40 @@ func (r *PasteRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 	defer tx.Rollback() //nolint:errcheck
 
 	nowStr := formatTime(now)
+	siteNowStr := formatSiteExpiry(now)
 	body := int64(p.Size)
 
-	// 1. Service-wide check. Tombstoned (deleted) versions contribute 0.
+	// 1. Service-wide check across BOTH pastes and sites. Tombstoned
+	// (deleted) versions contribute 0.
 	if serviceCap > 0 {
-		var total int64
-		if err := tx.QueryRow(`
-			SELECT COALESCE(SUM(v.size), 0)
-			FROM versions v
-			JOIN pastes pp ON pp.slug = v.slug
-			WHERE pp.expires_at > ? AND v.deleted = 0
-		`, nowStr).Scan(&total); err != nil {
-			return fmt.Errorf("service-wide sum: %w", err)
+		total, err := serviceWideActiveBytes(tx, nowStr, siteNowStr)
+		if err != nil {
+			return err
 		}
 		if total+body > serviceCap {
 			return ErrServiceFull
 		}
 	}
-	// 2. Per-identity check. Tombstoned versions contribute 0.
+	// 2. Per-identity check across BOTH pastes and sites. Tombstoned
+	// versions contribute 0.
 	if userCap > 0 {
-		var ownerTotal int64
-		if err := tx.QueryRow(`
-			SELECT COALESCE(SUM(v.size), 0)
-			FROM versions v
-			JOIN pastes pp ON pp.slug = v.slug
-			WHERE pp.identity = ? AND pp.expires_at > ? AND v.deleted = 0
-		`, p.Identity.String(), nowStr).Scan(&ownerTotal); err != nil {
-			return fmt.Errorf("identity sum: %w", err)
+		ownerTotal, err := identityActiveBytes(tx, p.Identity.String(), nowStr, siteNowStr)
+		if err != nil {
+			return err
 		}
 		if ownerTotal+body > userCap {
 			return ErrOverUserQuota
 		}
+	}
+	// A slug must be unique across sites too (a read resolves a slug in
+	// either table). The SiteRepo already checks the pastes table on insert;
+	// mirror it here so a paste cannot take a slug a site owns.
+	var siteExists int
+	if err := tx.QueryRow(`SELECT COUNT(1) FROM sites WHERE slug = ?`, p.Slug.String()).Scan(&siteExists); err != nil {
+		return fmt.Errorf("check site slug collision: %w", err)
+	}
+	if siteExists > 0 {
+		return ErrSlugTaken
 	}
 	// 3. Insert.
 	if _, err := tx.Exec(`
@@ -258,6 +261,7 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 	defer tx.Rollback() //nolint:errcheck
 
 	nowStr := formatTime(now)
+	siteNowStr := formatSiteExpiry(now)
 	body := int64(size)
 
 	// Look up the paste's identity + pin state.
@@ -270,31 +274,23 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 		return AppendResult{}, fmt.Errorf("lookup paste identity: %w", err)
 	}
 
-	// Service-wide check. Tombstoned versions contribute 0.
+	// Service-wide check across BOTH pastes and sites. Tombstoned
+	// versions contribute 0.
 	if serviceCap > 0 {
-		var total int64
-		if err := tx.QueryRow(`
-			SELECT COALESCE(SUM(v.size), 0)
-			FROM versions v
-			JOIN pastes pp ON pp.slug = v.slug
-			WHERE pp.expires_at > ? AND v.deleted = 0
-		`, nowStr).Scan(&total); err != nil {
-			return AppendResult{}, fmt.Errorf("service-wide sum: %w", err)
+		total, err := serviceWideActiveBytes(tx, nowStr, siteNowStr)
+		if err != nil {
+			return AppendResult{}, err
 		}
 		if total+body > serviceCap {
 			return AppendResult{}, ErrServiceFull
 		}
 	}
-	// Per-identity check. Tombstoned versions contribute 0.
+	// Per-identity check across BOTH pastes and sites. Tombstoned
+	// versions contribute 0.
 	if userCap > 0 {
-		var ownerTotal int64
-		if err := tx.QueryRow(`
-			SELECT COALESCE(SUM(v.size), 0)
-			FROM versions v
-			JOIN pastes pp ON pp.slug = v.slug
-			WHERE pp.identity = ? AND pp.expires_at > ? AND v.deleted = 0
-		`, ownerIdentity, nowStr).Scan(&ownerTotal); err != nil {
-			return AppendResult{}, fmt.Errorf("identity sum: %w", err)
+		ownerTotal, err := identityActiveBytes(tx, ownerIdentity, nowStr, siteNowStr)
+		if err != nil {
+			return AppendResult{}, err
 		}
 		if ownerTotal+body > userCap {
 			return AppendResult{}, ErrOverUserQuota

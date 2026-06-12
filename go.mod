@@ -3,16 +3,18 @@ module github.com/Zamua/hostthis
 go 1.25.4
 
 require (
-	github.com/Zamua/shale v0.6.2
+	github.com/Zamua/shale v0.6.3
 	github.com/Zamua/shale/backends/slate v0.6.2
 	github.com/charmbracelet/ssh v0.0.0-20250826160808-ebfa259c7309
 	github.com/charmbracelet/wish v1.4.7
+	github.com/coder/websocket v1.8.14
 	github.com/klauspost/compress v1.18.6
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/minio/minio-go/v7 v7.2.0
 	github.com/pires/go-proxyproto v0.12.0
 	github.com/yuin/goldmark v1.8.2
 	golang.org/x/crypto v0.51.0
+	google.golang.org/grpc v1.81.1
 	modernc.org/sqlite v1.51.0
 	slatedb.io/slatedb-go v0.13.1
 )
@@ -94,7 +96,6 @@ require (
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
-	google.golang.org/grpc v1.81.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/ini.v1 v1.67.2 // indirect
 	modernc.org/libc v1.72.3 // indirect
