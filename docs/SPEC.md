@@ -1133,9 +1133,14 @@ own four pieces; they interlock.
   so clients reconnect on the client backoff schedule rather than hammering
   instantly.
 - **Read bound.** The reader applies a max message size per inbound frame
-  (see "Limits") and a read deadline reset by each successful read /
-  pong, so a connection that goes silent past the heartbeat deadline is
-  closed by the read path even if the ping path is starved.
+  (see "Limits"); a frame over the cap closes the connection. Liveness is
+  the heartbeat's job, not the reader's: the server's ping/pong loop is the
+  sole reaper, and it cannot be starved (it runs in its own goroutine on a
+  fixed ticker, independent of whether the reader is blocked on a quiet
+  socket). A connection that goes silent is therefore reaped by the missed
+  pong, so the reader needs no separate per-read deadline as a backstop -
+  one reaper, sufficient, with no second timeout to keep consistent with the
+  heartbeat window.
 
 **Client side (the relay must SUPPORT this; the POC implements it).** The
 server is built so the canonical 4-piece client lifecycle works against
