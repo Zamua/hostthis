@@ -17,6 +17,28 @@ import (
 // services need. internal/storage.SiteRepo satisfies it.
 type SiteRepo interface {
 	InsertWithQuotaCheck(s domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error
+	// ReplaceWithQuotaCheck re-deploys an EXISTING owned site in place,
+	// atomically swapping its manifest for s.Manifest under the same
+	// serializable boundary InsertWithQuotaCheck uses. s.Slug names the
+	// target; s.Identity is the connecting key. Behavior:
+	//
+	//   - The slug MUST already exist as a site AND be owned by s.Identity.
+	//     If it does not exist as a site, OR exists but is owned by another
+	//     identity, return storage.ErrNotFound - the SAME sentinel a
+	//     missing slug yields, so the caller cannot distinguish "not yours"
+	//     from "does not exist" (no existence leak).
+	//   - The quota check is the REPLACE DELTA: the per-identity cap is
+	//     evaluated against (existing_owned - old_deduped + dedupedSize),
+	//     i.e. the old site's deduped bytes are credited back and the new
+	//     ones charged in the SAME critical section as the swap. A same-size
+	//     re-deploy does not double-count; a smaller one frees the diff.
+	//     ErrServiceFull / ErrOverUserQuota on overflow.
+	//   - On success the row's manifest, deduped_size, updated_at, and
+	//     expires_at are all replaced from s (the 7-day clock restarts),
+	//     and the expiry index is re-keyed. The slug and created_at are
+	//     unchanged. The swap is a single transaction: the URL serves the
+	//     OLD manifest until it lands, the new one immediately after.
+	ReplaceWithQuotaCheck(s domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Site, error)
 	// SumActiveBytesByOwner returns the identity's active SITE bytes.
 	// The deploy path adds the paste-side sum to compute the remaining
@@ -150,6 +172,110 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		}
 	}
 	return SiteResult{}, SlugTakenErr
+}
+
+// DeployToSlug re-deploys a SITE at an existing owned slug in place. It
+// mirrors Deploy - same safe-untar, blob-store, manifest-build pipeline -
+// but targets slug instead of minting a fresh random one, and charges the
+// REPLACE DELTA against the owner's quota rather than the full new size.
+//
+// Ownership is verified up front (Get + identity compare); a slug that is
+// not a site, or is a site owned by someone else, returns ErrNotFound -
+// the SAME shape any not-found yields, so a non-owner cannot probe which
+// slugs exist or who owns them. The mid-untar budget EXCLUDES this site's
+// current deduped bytes (we are replacing them), so a same-size re-deploy
+// has the same headroom the original deploy did; the persistence-time
+// ReplaceWithQuotaCheck applies the precise replace-delta atomically.
+//
+// Returns:
+//   - ErrEmptyOwner               - anonymous / empty identity
+//   - ErrNotFound                 - slug is not a site owned by owner
+//   - domain.ErrUnsupportedKind / domain.ErrNoWebContent - not web content
+//   - ErrOverQuota / ErrServiceFull - over the per-identity / service cap
+//   - ErrEmptySite                - the archive safe-untars to zero files
+func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string) (SiteResult, error) {
+	if owner == "" {
+		return SiteResult{}, ErrEmptyOwner
+	}
+	now := d.Now().UTC()
+
+	// Verify the slug names a site this identity owns BEFORE reading the
+	// body. A non-site slug (Get -> ErrNotFound) and a foreign-owned site
+	// both collapse to ErrNotFound so existence/ownership never leaks.
+	existing, err := d.Sites.Get(slug)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return SiteResult{}, ErrNotFound
+		}
+		return SiteResult{}, fmt.Errorf("get site: %w", err)
+	}
+	if existing.Identity.String() != owner {
+		return SiteResult{}, ErrNotFound
+	}
+
+	// Remaining quota budget for the untar's decompression-bomb guard. We
+	// are REPLACING this site, so credit its current deduped bytes back:
+	// the budget is the per-identity cap minus everything else the owner
+	// holds (all pastes + all OTHER sites). usedSite includes the target
+	// site, so subtract its deduped bytes to exclude it.
+	usedPaste, err := d.Pastes.SumActiveBytesByOwner(owner, now)
+	if err != nil {
+		return SiteResult{}, fmt.Errorf("sum paste bytes: %w", err)
+	}
+	usedSite, err := d.Sites.SumActiveBytesByOwner(owner, now)
+	if err != nil {
+		return SiteResult{}, fmt.Errorf("sum site bytes: %w", err)
+	}
+	oldDeduped := int64(existing.Manifest.DedupedSize())
+	budget := int64(domain.UserQuotaBytes) - int64(usedPaste) - (usedSite - oldDeduped)
+	if budget < 0 {
+		budget = 0
+	}
+
+	sink := &blobSink{blobs: d.Blobs}
+	man, err := domain.SafeUntar(body, sink, budget)
+	switch {
+	case errors.Is(err, domain.ErrArchiveTooLarge):
+		return SiteResult{}, ErrOverQuota
+	case errors.Is(err, domain.ErrUnsupportedKind):
+		return SiteResult{}, domain.ErrUnsupportedKind
+	case err != nil:
+		return SiteResult{}, err
+	}
+
+	if len(man.Files) == 0 {
+		return SiteResult{}, ErrEmptySite
+	}
+	if !man.HasWebContent() {
+		return SiteResult{}, domain.ErrNoWebContent
+	}
+
+	site := domain.Site{
+		Slug:      slug,
+		Identity:  domain.Identity(owner),
+		Manifest:  man,
+		CreatedAt: existing.CreatedAt, // preserved across re-deploys
+		UpdatedAt: now,
+		ExpiresAt: now.Add(domain.RetentionWindow),
+	}
+	deduped := man.DedupedSize()
+
+	err = d.Sites.ReplaceWithQuotaCheck(site, deduped, d.ServiceCapBytes, int64(domain.UserQuotaBytes), now)
+	switch {
+	case err == nil:
+		return SiteResult{Site: site}, nil
+	case errors.Is(err, storage.ErrNotFound):
+		// The site was deleted/expired-swept between the ownership check and
+		// the swap. Surface as not-found, the same shape the up-front check
+		// would have yielded.
+		return SiteResult{}, ErrNotFound
+	case errors.Is(err, storage.ErrServiceFull):
+		return SiteResult{}, ErrServiceFull
+	case errors.Is(err, storage.ErrOverUserQuota):
+		return SiteResult{}, ErrOverQuota
+	default:
+		return SiteResult{}, err
+	}
 }
 
 // blobSink implements domain.FileSink: it buffers one file's bytes,

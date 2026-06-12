@@ -360,6 +360,24 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	if args.Slug != "" {
 		// Update path.
 		slug, _ := domain.ParseSlug(args.Slug)
+
+		// A gzip-tar archive piped to an OWNED site slug re-deploys that
+		// site in place (same slug, same URL, new manifest), the static-
+		// site analogue of a paste update. The format gate (gzip magic)
+		// decides site-vs-paste exactly as the create path does; the slug
+		// positional decides new-vs-update. Peek non-destructively - the
+		// buffered reader replays the prefix downstream - and only when no
+		// explicit text type was forced. Anything else falls through to the
+		// paste-update path UNCHANGED.
+		if s.Deploy != nil && args.Type == "" {
+			peeked := bufio.NewReaderSize(limited, 512)
+			if head, _ := peeked.Peek(2); domain.HasGzipMagic(head) {
+				s.deploySiteToSlug(sess, owner, slug, peeked)
+				return
+			}
+			limited = peeked
+		}
+
 		res, err := s.Manage.Update(slug, owner, limited, args.Type)
 		if err != nil {
 			fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
@@ -426,6 +444,27 @@ func (s *Server) deploySite(sess gossh.Session, owner string, body io.Reader) {
 	url := s.BuildURL(res.Site.Slug)
 	fmt.Fprintln(sess, url)
 	fmt.Fprintf(sess.Stderr(), "site: %d file(s). expires in 7 days\n", len(res.Site.Manifest.Files))
+	_ = sess.Exit(ExitOK)
+}
+
+// deploySiteToSlug re-deploys a static-site archive at an existing OWNED
+// slug in place: safe-untar the gzip-tar stream, store each file as a
+// blob, build the manifest, and atomically swap the site row at slug. The
+// slug and URL are unchanged; the same URL serves the new content. A slug
+// that names a foreign-owned site, or that is not a site at all, maps
+// through emitServiceErr to a not-found exit - byte-for-byte the same
+// shape as any not-found, so a non-owner can't probe existence/ownership.
+// Sites have no name field, so a --name flag (if any) is ignored here, the
+// same as the create-path deploySite.
+func (s *Server) deploySiteToSlug(sess gossh.Session, owner string, slug domain.Slug, body io.Reader) {
+	res, err := s.Deploy.DeployToSlug(slug, body, owner)
+	if err != nil {
+		emitServiceErr(sess, err)
+		return
+	}
+	url := s.BuildURL(res.Site.Slug)
+	_, _ = fmt.Fprintln(sess, url)
+	_, _ = fmt.Fprintf(sess.Stderr(), "site: %d file(s). expires in 7 days\n", len(res.Site.Manifest.Files))
 	_ = sess.Exit(ExitOK)
 }
 

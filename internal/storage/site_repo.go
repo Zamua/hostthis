@@ -171,6 +171,104 @@ func (r *SiteRepo) InsertWithQuotaCheck(s domain.Site, dedupedSize int, serviceC
 	return tx.Commit()
 }
 
+// ReplaceWithQuotaCheck re-deploys an existing owned site in place,
+// atomically (under the serializable tx) swapping its manifest, deduped
+// size, updated_at, and expires_at, while enforcing the per-identity and
+// service caps against the REPLACE DELTA.
+//
+// The slug must already exist as a site AND be owned by s.Identity. If it
+// is missing, OR owned by a different identity, this returns ErrNotFound -
+// the SAME sentinel a missing row yields, so the caller can't distinguish
+// "not yours" from "doesn't exist" (no existence leak).
+//
+// The quota check credits the OLD row's deduped bytes and charges the new
+// dedupedSize: the identity-active and service-wide sums computed inside
+// the tx already include the old row, so the new totals subtract the old
+// deduped bytes and add the new (total - oldDeduped + body). A same-size
+// re-deploy nets zero; a smaller one frees the difference.
+//
+// Returns:
+//   - nil on success
+//   - ErrNotFound if the slug isn't a site owned by s.Identity
+//   - ErrServiceFull if accepting would exceed serviceCap
+//   - ErrOverUserQuota if accepting would exceed userCap
+func (r *SiteRepo) ReplaceWithQuotaCheck(s domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
+	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	nowStr := formatTime(now)
+	siteNowStr := formatSiteExpiry(now)
+	body := int64(dedupedSize)
+
+	// Ownership + existence gate, inside the tx so a concurrent delete /
+	// re-deploy can't race the swap. A missing row and a foreign-owned row
+	// both collapse to ErrNotFound.
+	var ownerStr string
+	var oldDeduped int64
+	err = tx.QueryRow(`SELECT identity, deduped_size FROM sites WHERE slug = ?`, s.Slug.String()).
+		Scan(&ownerStr, &oldDeduped)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("load site for replace: %w", err)
+	}
+	if ownerStr != s.Identity.String() {
+		return ErrNotFound
+	}
+
+	// Quota: the active sums below include the OLD row, so subtract its
+	// deduped bytes and add the new to evaluate the post-swap totals.
+	if serviceCap > 0 {
+		total, err := serviceWideActiveBytes(tx, nowStr, siteNowStr)
+		if err != nil {
+			return err
+		}
+		if total-oldDeduped+body > serviceCap {
+			return ErrServiceFull
+		}
+	}
+	if userCap > 0 {
+		owned, err := identityActiveBytes(tx, s.Identity.String(), nowStr, siteNowStr)
+		if err != nil {
+			return err
+		}
+		if owned-oldDeduped+body > userCap {
+			return ErrOverUserQuota
+		}
+	}
+
+	manStr, err := encodeManifest(s.Manifest)
+	if err != nil {
+		return err
+	}
+
+	// Swap in place: created_at is left untouched (the slug's birth time is
+	// stable across re-deploys); updated_at + expires_at restart the clock.
+	res, err := tx.Exec(`
+		UPDATE sites
+		SET manifest = ?, deduped_size = ?, updated_at = ?, expires_at = ?
+		WHERE slug = ? AND identity = ?
+	`, manStr, dedupedSize, formatTime(s.UpdatedAt), formatSiteExpiry(s.ExpiresAt),
+		s.Slug.String(), s.Identity.String())
+	if err != nil {
+		return fmt.Errorf("replace site %q: %w", s.Slug, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("replace site rows affected: %w", err)
+	}
+	if n == 0 {
+		// Row vanished between the gate and the UPDATE (shouldn't happen
+		// under the serializable tx, but fail closed as not-found).
+		return ErrNotFound
+	}
+	return tx.Commit()
+}
+
 // Insert is the simple variant used by tests + callers that don't need
 // quota enforcement.
 func (r *SiteRepo) Insert(s domain.Site) error {
