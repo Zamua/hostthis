@@ -332,15 +332,31 @@ func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 	// Service-wide cap: SOFT cross-shard pre-check (the same posture as the
 	// paste / site paths). The shared sumServiceWideActiveBytes counts version
 	// bytes + site bytes + room bytes, so a room PUT sees paste + site bytes.
-	// Uses the value's gross size as an upper bound on the delta for the
-	// pre-check (the exact prior is re-read in the CAS; this pre-check is soft).
+	// Charge the POST-WRITE DELTA, not the gross len(val): overwriting an
+	// existing key only adds (new - prior) bytes to the service total, so a
+	// replace near the cap must not be spuriously soft-rejected when the delta
+	// fits. The prior is a single-key read on the value's own (already-routed)
+	// {app-slug} shard, so it is cheap; the authoritative delta is still
+	// re-read inside the CAS, so this pre-check stays soft (the hard check is
+	// the in-tx one). A delete-then-grow on the SAME shard between this read and
+	// the CAS is the usual soft-pre-check slack: it can early-reject once, the
+	// client retries.
 	if serviceCap > 0 {
-		total, err := r.sumServiceWideActiveBytes()
-		if err != nil {
-			return fmt.Errorf("service-wide sum: %w", err)
+		prior := int64(0)
+		if cur, err := r.getRaw(valueKey); err != nil {
+			return fmt.Errorf("re-read room value (soft pre-check): %w", err)
+		} else if cur != nil {
+			prior = int64(shaleDecodedRoomValueLen(cur))
 		}
-		if total+int64(len(val)) > serviceCap {
-			return ErrServiceFull
+		delta := int64(len(val)) - prior
+		if delta > 0 {
+			total, err := r.sumServiceWideActiveBytes()
+			if err != nil {
+				return fmt.Errorf("service-wide sum: %w", err)
+			}
+			if total+delta > serviceCap {
+				return ErrServiceFull
+			}
 		}
 	}
 

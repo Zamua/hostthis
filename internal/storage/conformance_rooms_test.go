@@ -84,7 +84,9 @@ func runRoomConformance(t *testing.T, name string, caps conformCaps, newRooms fu
 	t.Run(name+"/Rooms/PerRoomKeyCap", func(t *testing.T) { conformRoomPerRoomKeyCap(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/PerRoomCapConcurrentCeiling", func(t *testing.T) { conformRoomPerRoomCapConcurrentCeiling(t, newRooms(t).Rooms, caps) })
 	t.Run(name+"/Rooms/PerAppAggregateCap", func(t *testing.T) { conformRoomPerAppAggregateCap(t, newRooms(t).Rooms) })
+	t.Run(name+"/Rooms/DeleteFreesCap", func(t *testing.T) { conformRoomDeleteFreesCap(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/ServiceCapCountsAll", func(t *testing.T) { conformRoomServiceCapCountsAll(t, newRooms(t)) })
+	t.Run(name+"/Rooms/ServiceCapChargesDeltaOnReplace", func(t *testing.T) { conformRoomServiceCapChargesDeltaOnReplace(t, newRooms(t)) })
 	t.Run(name+"/Rooms/CreationRateLimitCounts", func(t *testing.T) { conformRoomCreationRateLimitCounts(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/CreationLedgerPrune", func(t *testing.T) { conformRoomCreationLedgerPrune(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/AppExistenceNotRepoGated", func(t *testing.T) { conformRoomAppExistenceNotRepoGated(t, newRooms(t).Rooms) })
@@ -389,6 +391,67 @@ func conformRoomPerAppAggregateCap(t *testing.T, rr conformanceRoomRepo) {
 	}
 }
 
+// conformRoomDeleteFreesCap: a DeleteValue frees per-room AND per-app cap
+// capacity for a subsequent PutValue. Fills a room to the per-room byte cap
+// (under a per-app cap set to exactly that fill, so BOTH caps are at their
+// ceiling), confirms a fresh write is rejected by each, DELETEs a value, then
+// asserts a PutValue of the freed size now succeeds - so the delete returned
+// the bytes to both budgets. FAILS if a delete does not credit the per-room
+// total (the re-PUT still 413s) or the per-app counter (the re-PUT still 507s).
+func conformRoomDeleteFreesCap(t *testing.T, rr conformanceRoomRepo) {
+	const app = "app12345"
+	room := mkConformRoom(t, rr, app, fixedNow)
+
+	// Two values fill the room to EXACTLY MaxRoomBytes: a big anchor and a
+	// smaller "doomed" cell we will delete to free its bytes. appCap is set to
+	// MaxRoomBytes too, so the per-app aggregate sits at its ceiling alongside
+	// the per-room cap.
+	const doomed = 1000
+	anchor := domain.MaxRoomBytes - doomed
+	appCap := int64(domain.MaxRoomBytes)
+	if err := rr.PutValue(room.AppSlug, room.ID, "anchor", make([]byte, anchor), appCap, 0, fixedNow); err != nil {
+		t.Fatalf("seed anchor (%d bytes): %v", anchor, err)
+	}
+	if err := rr.PutValue(room.AppSlug, room.ID, "doomed", make([]byte, doomed), appCap, 0, fixedNow); err != nil {
+		t.Fatalf("seed doomed (%d bytes): %v", doomed, err)
+	}
+
+	// The room is now full on BOTH axes: a new value is rejected. (A new key of
+	// `doomed` bytes overflows the per-room byte cap; the same write also
+	// overflows the per-app counter, which is at MaxRoomBytes.)
+	if err := rr.PutValue(room.AppSlug, room.ID, "extra", make([]byte, doomed), appCap, 0, fixedNow); err == nil {
+		t.Fatalf("write into a full room should be rejected (per-room + per-app both at cap), got nil")
+	} else if !errors.Is(err, storage.ErrRoomDataFull) && !errors.Is(err, storage.ErrAppRoomsFull) {
+		t.Fatalf("full-room write err = %v, want ErrRoomDataFull or ErrAppRoomsFull", err)
+	}
+
+	// Delete the doomed cell: its `doomed` bytes return to BOTH the per-room
+	// total and the per-app counter.
+	if err := rr.DeleteValue(room.AppSlug, room.ID, "doomed", fixedNow); err != nil {
+		t.Fatalf("delete doomed: %v", err)
+	}
+
+	// A fresh value of exactly the freed size now fits - the delete credited
+	// both caps. (A NEW key, so it adds a key slot AND `doomed` bytes; the room
+	// is back to anchor + doomed = MaxRoomBytes, and the per-app counter is
+	// likewise back to MaxRoomBytes == appCap, both at-but-not-over.)
+	if err := rr.PutValue(room.AppSlug, room.ID, "reclaimed", make([]byte, doomed), appCap, 0, fixedNow); err != nil {
+		t.Fatalf("re-PUT of the freed size should succeed after a delete frees capacity: %v", err)
+	}
+	// And the freed-then-refilled state is correct: the room holds anchor +
+	// reclaimed (doomed is gone), exactly MaxRoomBytes.
+	kv, err := rr.ScanRoom(room.AppSlug, room.ID)
+	if err != nil {
+		t.Fatalf("scan after reclaim: %v", err)
+	}
+	if _, ok := kv.Values["doomed"]; ok {
+		t.Fatalf("deleted key 'doomed' is still present after delete + reclaim")
+	}
+	if kv.TotalBytes() != domain.MaxRoomBytes {
+		t.Fatalf("room bytes after reclaim = %d, want %d (anchor + reclaimed)", kv.TotalBytes(), domain.MaxRoomBytes)
+	}
+}
+
 // conformRoomServiceCapCountsAll: room bytes fill the service-wide cap a paste
 // / site then sees, AND paste / site bytes fill the cap a room PUT then sees -
 // the symmetric directions. FAILS if room bytes are dropped from the sum in
@@ -425,6 +488,54 @@ func conformRoomServiceCapCountsAll(t *testing.T, st roomConformanceStores) {
 	// bytes.
 	if err := sr.InsertWithQuotaCheck(siteOf("rss22345", "key:d", 200), 200, svcCap, 0, fixedNow); !errors.Is(err, storage.ErrServiceFull) {
 		t.Fatalf("site over service cap (room bytes must count): got %v, want ErrServiceFull", err)
+	}
+}
+
+// conformRoomServiceCapChargesDeltaOnReplace pins that the service-wide cap
+// charges the POST-WRITE DELTA, not the gross value size: replacing an existing
+// key near the service cap with a value whose delta fits must SUCCEED, even
+// when total + gross-len would exceed the cap. This is the room twin of how the
+// paste append charges only the deduped delta. FAILS on a backend whose
+// service-wide pre-check charges total + len(val) (gross) instead of the delta
+// (the shale soft pre-check was the offender): a same-size replace double-counts
+// the room's current bytes and spuriously rejects.
+func conformRoomServiceCapChargesDeltaOnReplace(t *testing.T, st roomConformanceStores) {
+	const svcCap = 1000
+	rr, pr := st.Rooms, st.Paste
+	room := mkConformRoom(t, rr, "app12345", fixedNow)
+
+	// Fill the service total to 900: a 600-byte paste + a 300-byte room value.
+	if err := pr.InsertWithQuotaCheck(pasteOf("rsp12345", "key:a", 600), svcCap, 0, fixedNow); err != nil {
+		t.Fatalf("paste 600 under svc cap: %v", err)
+	}
+	if err := rr.PutValue(room.AppSlug, room.ID, "k", make([]byte, 300), 0, svcCap, fixedNow); err != nil {
+		t.Fatalf("room 300 under svc cap (900 total): %v", err)
+	}
+
+	// REPLACE the room key with the SAME size (300). The delta is 0, so the
+	// service total stays 900 <= 1000: the write must succeed. A gross pre-check
+	// would compute 900 + 300 = 1200 > 1000 and wrongly reject.
+	if err := rr.PutValue(room.AppSlug, room.ID, "k", make([]byte, 300), 0, svcCap, fixedNow); err != nil {
+		t.Fatalf("same-size replace near service cap must succeed (delta=0, total stays 900): %v", err)
+	}
+
+	// SHRINK the room key to 100 bytes (delta -200, total -> 700). Also a
+	// no-charge write; must succeed.
+	if err := rr.PutValue(room.AppSlug, room.ID, "k", make([]byte, 100), 0, svcCap, fixedNow); err != nil {
+		t.Fatalf("shrinking replace near service cap must succeed (negative delta): %v", err)
+	}
+
+	// GROW the key by a delta that still fits: from 100 to 350 is +250; total
+	// 700 + 250 = 950 <= 1000. Succeeds (the delta, not the gross 350, is
+	// charged - though here gross would also fit; the point is the delta path).
+	if err := rr.PutValue(room.AppSlug, room.ID, "k", make([]byte, 350), 0, svcCap, fixedNow); err != nil {
+		t.Fatalf("growing replace within the delta budget must succeed (700+250=950): %v", err)
+	}
+
+	// A grow whose DELTA overflows is still rejected (the cap is real): from 350
+	// to 800 is +450; total 950 + 450 = 1400 > 1000. ErrServiceFull.
+	if err := rr.PutValue(room.AppSlug, room.ID, "k", make([]byte, 800), 0, svcCap, fixedNow); !errors.Is(err, storage.ErrServiceFull) {
+		t.Fatalf("a replace whose delta overflows the service cap must reject: got %v, want ErrServiceFull", err)
 	}
 }
 

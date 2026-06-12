@@ -457,7 +457,17 @@ func scanRoomTx(tx *sql.Tx, appSlug domain.Slug, id domain.RoomID) (domain.RoomK
 	return kv, rows.Err()
 }
 
-// appRoomBytesTx sums an app's stored value bytes inside the caller's tx.
+// appRoomBytesTx sums an app's stored value bytes inside the caller's tx,
+// with NO expiry predicate: every room_kv row under the app counts, including
+// rows of an expired-but-not-yet-swept room. This is DELIBERATE and consistent
+// across all three backends (the slatedb sumAppRoomBytes and the shale per-app
+// roombytes/<app> counter do the same) - the per-app room aggregate is
+// sweep-time, distinct from the per-identity paste/site quota that sqlite +
+// slatedb free at read time. The effect is fail-safe: an expired-unswept room's
+// bytes are counted until the sweep deletes the room (DeleteRoom cascades its
+// values), so the cap can transiently OVER-count (reject a write slightly
+// early) but never UNDER-counts (admit past the real cap). The sweep runs on a
+// short cadence, so the over-count window is small and self-correcting.
 func appRoomBytesTx(tx *sql.Tx, appSlug string) (int64, error) {
 	var n sql.NullInt64
 	if err := tx.QueryRow(`
