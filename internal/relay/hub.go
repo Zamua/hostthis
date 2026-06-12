@@ -112,10 +112,58 @@ func (h *Hub) unregister(id uint64) {
 // The broadcast is therefore O(connections) and wait-free per client.
 func (h *Hub) broadcast(from uint64, f Frame) {
 	h.mu.Lock()
-	// Snapshot the recipient set under the lock, then Send outside the map
-	// iteration's mutation window. Send itself never blocks, so holding the
-	// lock across the Send calls is safe and keeps register / unregister
-	// serialized against this fan-out.
+	cleanup := h.broadcastLocked(from, f)
+	h.mu.Unlock()
+	cleanup.run()
+}
+
+// broadcastDrops carries the post-broadcast cleanup that must run OUTSIDE
+// the hub lock: reclaiming each dropped laggard's per-app slot, closing the
+// dropped connections, and (if the drops emptied the hub) firing onEmpty.
+// broadcastLocked builds it under the lock; the caller runs it after
+// releasing the lock, so a slow Close or a registry-lock acquisition never
+// stalls the room while the hub lock is held.
+type broadcastDrops struct {
+	laggards   []Conn
+	laggardIDs []uint64
+	onDrop     func(id uint64)
+	onEmpty    func()
+	empty      bool
+}
+
+func (d broadcastDrops) run() {
+	// Reclaim each dropped laggard's per-app slot. This is the one teardown
+	// path that removes a connection WITHOUT routing through the registry's
+	// release, so the registry must be told to decApp here or the slot leaks.
+	// onDrop runs BEFORE Close so the slot is accounted before the
+	// connection's own (now no-op) release races in.
+	if d.onDrop != nil {
+		for _, id := range d.laggardIDs {
+			d.onDrop(id)
+		}
+	}
+	// Close the dropped laggards: closing triggers their own lifecycle
+	// teardown (which calls release -> unregister, both no-ops now since we
+	// already removed them and onDrop did the decApp).
+	for _, c := range d.laggards {
+		c.Close()
+	}
+	if len(d.laggards) > 0 && d.empty && d.onEmpty != nil {
+		// Dropping the last connection(s) emptied the hub; tear it down.
+		d.onEmpty()
+	}
+}
+
+// broadcastLocked is the fan-out body; the caller MUST already hold h.mu. It
+// snapshots the recipient set, Sends to each (Send never blocks, so holding
+// the lock across the Sends is safe and keeps register / unregister
+// serialized against this fan-out), removes laggards from the map, and
+// returns the cleanup the caller runs after releasing the lock. It exists as
+// a separate method so the commit-and-mirror path (registry.commitAndMirror)
+// can fan out the live mirror under the SAME hub-lock acquisition that the
+// durable commit runs in, making the two atomic against a join's
+// snapshot-read + register.
+func (h *Hub) broadcastLocked(from uint64, f Frame) broadcastDrops {
 	var laggards []Conn
 	var laggardIDs []uint64
 	for id, c := range h.conns {
@@ -128,33 +176,12 @@ func (h *Hub) broadcast(from uint64, f Frame) {
 			delete(h.conns, id)
 		}
 	}
-	empty := len(h.conns) == 0
-	onEmpty := h.onEmpty
-	onDrop := h.onDrop
-	h.mu.Unlock()
-
-	// Reclaim each dropped laggard's per-app slot. This is the one teardown
-	// path that removes a connection WITHOUT routing through the registry's
-	// release, so the registry must be told to decApp here or the slot leaks.
-	// onDrop runs BEFORE Close so the slot is accounted before the
-	// connection's own (now no-op) release races in. Done outside the hub
-	// lock - the registry takes its own lock.
-	if onDrop != nil {
-		for _, id := range laggardIDs {
-			onDrop(id)
-		}
-	}
-
-	// Close the dropped laggards outside the lock: closing triggers their
-	// own lifecycle teardown (which calls release -> unregister, both no-ops
-	// now since we already removed them here and onDrop did the decApp).
-	// Done outside the lock so a slow Close cannot stall the room.
-	for _, c := range laggards {
-		c.Close()
-	}
-	if len(laggards) > 0 && empty && onEmpty != nil {
-		// Dropping the last connection(s) emptied the hub; tear it down.
-		onEmpty()
+	return broadcastDrops{
+		laggards:   laggards,
+		laggardIDs: laggardIDs,
+		onDrop:     h.onDrop,
+		onEmpty:    h.onEmpty,
+		empty:      len(h.conns) == 0,
 	}
 }
 

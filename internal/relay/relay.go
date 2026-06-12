@@ -91,19 +91,21 @@ func (rl *Relay) Release(key RoomKey, id uint64) {
 	rl.reg.release(key, id)
 }
 
-// MirrorDurable fans a committed durable change out to the room's live
-// hub, if one exists. It is called by the HTTP KV PUT/DELETE handlers
-// AFTER the write commits, so a client that did the PUT and its peers all
-// see the change live, in addition to it landing in the snapshot a future
-// joiner reads. It broadcasts with from == 0 (no originating websocket to
-// exclude, since the write arrived over HTTP), so EVERY connected client
-// receives it. The frame is a server-originated control envelope (JSON
-// text) the client distinguishes by structure; hostthis never persists a
-// raw relay frame, only this mirror of an already-committed PUT.
-func (rl *Relay) MirrorDurable(key RoomKey, f Frame) {
-	if h := rl.reg.hub(key); h != nil {
-		h.broadcast(0, f)
-	}
+// CommitAndMirror runs a durable write's KV commit and its live mirror
+// broadcast atomically under the room's hub lock, so a concurrent join's
+// snapshot-read + register cannot interleave between them. This is the
+// no-dup / no-gap guarantee the spec requires: the write lands in EXACTLY
+// ONE of {a joiner's snapshot, a joiner's live stream}, never both and
+// never neither. The HTTP KV PUT/DELETE handlers call it instead of doing
+// the commit and the mirror as two separate steps (which let a join slip
+// between them and observe the write in both its snapshot and a live frame).
+//
+// commit performs the durable KV write (the service-layer Put / Delete) and
+// runs UNDER the hub lock; mirror is the server-originated control frame
+// (from == 0, so EVERY connected client receives it) fanned out after a
+// successful commit. A failed commit mirrors nothing and returns the error.
+func (rl *Relay) CommitAndMirror(key RoomKey, commit func() error, mirror Frame) error {
+	return rl.reg.commitAndMirror(key, commit, mirror)
 }
 
 // wsConn is the real connection adapter: it wraps a coder/websocket
