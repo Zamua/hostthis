@@ -33,3 +33,6 @@ Dockerfile.slatedb.local
 # The demo SOURCE and the built dist/ ARE committed; node_modules is not.
 testdata/sitefixtures/*/node_modules/
 testdata/sitefixtures/*/.vite/
+
+# local POC apps (black-box dogfooding against the public surface; not shipped)
+pocs/
