@@ -114,6 +114,32 @@ func (b *BlobStore) PutBytesOverwrite(sha string, body []byte) error {
 	return os.Rename(tmpName, filepath.Join(dir, sha))
 }
 
+// GetReader returns a streaming reader over the bytes for sha, or
+// ErrNotFound. The caller MUST Close the returned reader. The int64 is
+// the on-disk byte length (the raw stored bytes; for blobs wrapped by
+// CompressedBlobStore this is the compressed length, not the decoded
+// length). Streaming avoids buffering the whole blob into memory the
+// way Get does - the serve path io.Copy's straight to the client.
+func (b *BlobStore) GetReader(sha string) (io.ReadCloser, int64, error) {
+	if len(sha) < 2 {
+		return nil, 0, fmt.Errorf("blob: sha too short")
+	}
+	dst := filepath.Join(b.root, sha[:2], sha)
+	f, err := os.Open(dst) //nolint:gosec // path derived from validated sha
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, 0, ErrNotFound
+		}
+		return nil, 0, fmt.Errorf("blob open %q: %w", sha, err)
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, 0, fmt.Errorf("blob stat %q: %w", sha, err)
+	}
+	return f, fi.Size(), nil
+}
+
 // Get returns the bytes for sha, or ErrNotFound.
 func (b *BlobStore) Get(sha string) ([]byte, error) {
 	if len(sha) < 2 {

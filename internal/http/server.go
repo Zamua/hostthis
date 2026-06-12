@@ -9,6 +9,7 @@ package http
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -32,9 +33,14 @@ type SiteReader interface {
 	Get(domain.Slug) (domain.Site, error)
 }
 
-// BlobReader fetches paste bytes by content sha.
+// BlobReader fetches paste bytes by content sha. Get buffers the whole
+// blob (needed by the markdown render path, which renders the full
+// document); GetReader streams the bytes so the HTML / site-file serve
+// paths can io.Copy straight to the client without a full-payload
+// allocation per GET.
 type BlobReader interface {
 	Get(sha string) ([]byte, error)
+	GetReader(sha string) (io.ReadCloser, int64, error)
 }
 
 // Server bundles the dependencies.
@@ -256,21 +262,31 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		}
 	}
 
-	body, err := s.Blobs.Get(p.ContentSHA)
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
 	switch p.Kind {
 	case domain.KindHTML:
+		// Stream the (decompressed) blob straight to the client. Avoids
+		// buffering up to ~10 MiB per GET; the spike scaled with
+		// concurrency on the small VPS. Headers above are already set;
+		// the body is byte-identical to a buffered Get + Write.
+		rc, _, err := s.Blobs.GetReader(p.ContentSHA)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		defer rc.Close()
 		h.Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(body)
+		_, _ = io.Copy(w, rc)
 	case domain.KindMarkdown:
 		// Render markdown → sanitized HTML on every read. The render
 		// is pure and cheap (~1ms for typical docs); a cache keyed
 		// on (ContentSHA, render.MarkdownRendererVersion) can land
-		// later if cold renders become hot.
+		// later if cold renders become hot. Markdown needs the whole
+		// document buffered, so it keeps the buffered Get.
+		body, err := s.Blobs.Get(p.ContentSHA)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 		rendered, err := render.Markdown(body)
 		if err != nil {
 			http.Error(w, "render error", http.StatusInternalServerError)
@@ -355,17 +371,21 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 		}
 	}
 
-	body, err := s.Blobs.Get(entry.SHA)
+	// Stream the (decompressed) site file straight to the client rather
+	// than buffering the whole asset per GET. Headers above are already
+	// set; the body is byte-identical to a buffered Get + Write.
+	rc, _, err := s.Blobs.GetReader(entry.SHA)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return true
 	}
+	defer rc.Close()
 	ct := entry.ContentType
 	if ct == "" {
 		ct = "application/octet-stream"
 	}
 	h.Set("Content-Type", ct)
-	_, _ = w.Write(body)
+	_, _ = io.Copy(w, rc)
 	return true
 }
 
