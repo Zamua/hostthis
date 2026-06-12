@@ -208,8 +208,9 @@ func (r *SiteRepo) ReplaceWithQuotaCheck(s domain.Site, dedupedSize int, service
 	// both collapse to ErrNotFound.
 	var ownerStr string
 	var oldDeduped int64
-	err = tx.QueryRow(`SELECT identity, deduped_size FROM sites WHERE slug = ?`, s.Slug.String()).
-		Scan(&ownerStr, &oldDeduped)
+	var oldLive bool
+	err = tx.QueryRow(`SELECT identity, deduped_size, expires_at > ? FROM sites WHERE slug = ?`, siteNowStr, s.Slug.String()).
+		Scan(&ownerStr, &oldDeduped, &oldLive)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -220,14 +221,23 @@ func (r *SiteRepo) ReplaceWithQuotaCheck(s domain.Site, dedupedSize int, service
 		return ErrNotFound
 	}
 
-	// Quota: the active sums below include the OLD row, so subtract its
-	// deduped bytes and add the new to evaluate the post-swap totals.
+	// Credit the old bytes back ONLY if the old row is still live: the active
+	// sums below filter on expiry, so an expired-but-unswept old row is NOT
+	// in them. Crediting it would under-count and admit an over-quota
+	// re-deploy (resurrecting an expired site must charge the full new size).
+	creditOld := int64(0)
+	if oldLive {
+		creditOld = oldDeduped
+	}
+
+	// Quota: the active sums below include the OLD (live) row, so subtract
+	// its credited deduped bytes and add the new to evaluate post-swap totals.
 	if serviceCap > 0 {
 		total, err := serviceWideActiveBytes(tx, nowStr, siteNowStr)
 		if err != nil {
 			return err
 		}
-		if total-oldDeduped+body > serviceCap {
+		if total-creditOld+body > serviceCap {
 			return ErrServiceFull
 		}
 	}
@@ -236,7 +246,7 @@ func (r *SiteRepo) ReplaceWithQuotaCheck(s domain.Site, dedupedSize int, service
 		if err != nil {
 			return err
 		}
-		if owned-oldDeduped+body > userCap {
+		if owned-creditOld+body > userCap {
 			return ErrOverUserQuota
 		}
 	}

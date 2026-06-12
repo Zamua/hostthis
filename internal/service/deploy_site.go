@@ -226,8 +226,16 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	if err != nil {
 		return SiteResult{}, fmt.Errorf("sum site bytes: %w", err)
 	}
-	oldDeduped := int64(existing.Manifest.DedupedSize())
-	budget := int64(domain.UserQuotaBytes) - int64(usedPaste) - (usedSite - oldDeduped)
+	// Credit the target site's current bytes back into the budget ONLY if
+	// it is still live. usedSite already excludes an expired-but-unswept
+	// row, so crediting an expired one would under-count and let the owner
+	// extract past the cap. (ReplaceWithQuotaCheck applies the same gate at
+	// persistence time, authoritatively.)
+	creditOld := int64(existing.Manifest.DedupedSize())
+	if !existing.ExpiresAt.After(now) {
+		creditOld = 0
+	}
+	budget := int64(domain.UserQuotaBytes) - int64(usedPaste) - (usedSite - creditOld)
 	if budget < 0 {
 		budget = 0
 	}
