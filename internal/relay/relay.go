@@ -119,21 +119,32 @@ type wsConn struct {
 	ws   *websocket.Conn
 	send chan Frame
 
+	// writeTimeout bounds each socket write. It is set from the relay's
+	// CONFIGURED ping timeout (rl.pingTimeout), not the package constant, so
+	// SetHeartbeat shortens the write reap window in lockstep with the ping
+	// reap window: a write that does not complete within the timeout is a
+	// dead socket, reaped on the same clock as a missed pong.
+	writeTimeout time.Duration
+
 	closeOnce sync.Once
 	// closed is closed exactly once to stop the writer goroutine and signal
 	// the lifecycle to tear down. The reader/heartbeat select on it.
 	closed chan struct{}
 }
 
-func newWSConn(id uint64, ws *websocket.Conn, buffer int) *wsConn {
+func newWSConn(id uint64, ws *websocket.Conn, buffer int, writeTimeout time.Duration) *wsConn {
 	if buffer < 1 {
 		buffer = 1
 	}
+	if writeTimeout <= 0 {
+		writeTimeout = PingTimeout
+	}
 	return &wsConn{
-		id:     id,
-		ws:     ws,
-		send:   make(chan Frame, buffer),
-		closed: make(chan struct{}),
+		id:           id,
+		ws:           ws,
+		send:         make(chan Frame, buffer),
+		writeTimeout: writeTimeout,
+		closed:       make(chan struct{}),
 	}
 }
 
@@ -195,7 +206,7 @@ func (rl *Relay) Serve(ctx context.Context, key RoomKey, id uint64, ws *websocke
 	limits := rl.reg.limits
 	ws.SetReadLimit(limits.MaxMessageBytes)
 
-	c := newWSConn(id, ws, limits.SendBuffer)
+	c := newWSConn(id, ws, limits.SendBuffer, rl.pingTimeout)
 
 	// Teardown: unregister from the hub + release the per-app slot exactly
 	// once, and stop the writer. Done on every exit path (clean close,
@@ -261,7 +272,7 @@ func (c *wsConn) writeLoop(ctx context.Context) {
 			if f.Binary {
 				typ = websocket.MessageBinary
 			}
-			wctx, cancel := context.WithTimeout(ctx, PingTimeout)
+			wctx, cancel := context.WithTimeout(ctx, c.writeTimeout)
 			err := c.ws.Write(wctx, typ, f.Data)
 			cancel()
 			if err != nil {

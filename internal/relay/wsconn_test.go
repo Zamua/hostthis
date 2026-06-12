@@ -2,6 +2,7 @@ package relay
 
 import (
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -22,7 +23,7 @@ func TestWSConn_SendBufferBoundsAndDropSignal(t *testing.T) {
 	// A nil *websocket.Conn is fine: this test never starts the writer and
 	// never calls a method that touches the socket (Send is pure channel
 	// logic; Close on a nil conn is guarded below).
-	c := newWSConn(1, &websocket.Conn{}, buf)
+	c := newWSConn(1, &websocket.Conn{}, buf, 0)
 
 	for i := 0; i < buf; i++ {
 		if !c.Send(Frame{Data: []byte("x")}) {
@@ -37,7 +38,7 @@ func TestWSConn_SendBufferBoundsAndDropSignal(t *testing.T) {
 }
 
 func TestWSConn_SendAfterCloseReturnsFalse(t *testing.T) {
-	c := newWSConn(1, &websocket.Conn{}, 4)
+	c := newWSConn(1, &websocket.Conn{}, 4, 0)
 	// Close the connection abstraction. CloseNow on a zero-value Conn is a
 	// no-op-ish abort; we only assert the post-close Send contract.
 	func() {
@@ -51,8 +52,31 @@ func TestWSConn_SendAfterCloseReturnsFalse(t *testing.T) {
 
 // TestWSConn_IDStable confirms the connection id is the stable hub map key.
 func TestWSConn_IDStable(t *testing.T) {
-	c := newWSConn(42, &websocket.Conn{}, 1)
+	c := newWSConn(42, &websocket.Conn{}, 1, 0)
 	if c.ID() != 42 {
 		t.Fatalf("ID() = %d, want 42", c.ID())
+	}
+}
+
+// TestWSConn_WriteTimeoutFromConfiguredPingTimeout pins the P3 fix: the
+// write reap window comes from the relay's CONFIGURED ping timeout (which
+// SetHeartbeat shortens), not the package constant. Before the fix,
+// writeLoop bounded each write with the const PingTimeout, so SetHeartbeat
+// (tests / operators) shortened the PING reap window but NOT the WRITE reap
+// window, leaving the two inconsistent. Serve builds the wsConn with
+// rl.pingTimeout, so the connection carries the shortened write timeout.
+func TestWSConn_WriteTimeoutFromConfiguredPingTimeout(t *testing.T) {
+	rl := NewRelay(nil, NewLimits())
+	const short = 7 * time.Millisecond
+	rl.SetHeartbeat(3*time.Millisecond, short)
+
+	// Serve threads rl.pingTimeout into newWSConn; assert the resulting
+	// connection's write timeout tracks the configured value, not PingTimeout.
+	c := newWSConn(1, &websocket.Conn{}, rl.reg.limits.SendBuffer, rl.pingTimeout)
+	if c.writeTimeout != short {
+		t.Fatalf("writeTimeout = %v, want the configured %v (SetHeartbeat must shorten the write reap window too)", c.writeTimeout, short)
+	}
+	if c.writeTimeout == PingTimeout {
+		t.Fatalf("writeTimeout fell back to the package constant %v; SetHeartbeat did not reach the write deadline", PingTimeout)
 	}
 }
