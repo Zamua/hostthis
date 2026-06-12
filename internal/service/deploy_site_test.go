@@ -270,6 +270,38 @@ func TestDeployToSlug_FreesOldChargesNewDelta(t *testing.T) {
 	}
 }
 
+// TestDeployToSlug_ExpiredOldRowNotCredited pins the replace-delta quota
+// against an EXPIRED-but-unswept site. Re-deploying such a site resurrects
+// it, but the old bytes are already excluded from the owner's active sum,
+// so they must NOT be credited back: an over-cap re-deploy must be rejected
+// exactly as a fresh deploy would be. Crediting the stale bytes would let
+// the owner exceed the per-identity cap by the old site's size.
+func TestDeployToSlug_ExpiredOldRowNotCredited(t *testing.T) {
+	d, _, _ := deployFixture(t)
+	owner := "key:expired"
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	d.Now = func() time.Time { return base }
+
+	// A modest site, comfortably under the cap.
+	old := gzipTar(t, map[string]string{"index.html": string(bytes.Repeat([]byte("A"), 4000))})
+	r, err := d.Deploy(bytes.NewReader(old), owner)
+	if err != nil {
+		t.Fatalf("initial deploy: %v", err)
+	}
+
+	// Advance past the site's retention window: it is now expired but not
+	// yet swept (still present, still owned, Get still returns it).
+	d.Now = func() time.Time { return base.Add(domain.RetentionWindow + time.Hour) }
+
+	// Re-deploy at a size OVER the cap. With the expired old bytes correctly
+	// NOT credited, the budget is the full empty cap and a >cap archive is
+	// rejected. The buggy path credited the 4000 stale bytes and admitted it.
+	big := gzipTar(t, map[string]string{"index.html": string(bytes.Repeat([]byte("B"), int(domain.UserQuotaBytes)+2000))})
+	if _, err := d.DeployToSlug(r.Site.Slug, bytes.NewReader(big), owner); !errors.Is(err, ErrOverQuota) {
+		t.Fatalf("re-deploy of an EXPIRED site over the cap must be rejected (stale bytes must not be credited): got %v, want ErrOverQuota", err)
+	}
+}
+
 // TestDeployToSlug_NonexistentSlug pins that re-deploying to a slug that
 // was never deployed returns ErrNotFound (the same "service: not found"
 // the SSH layer maps to exit 4) - never silently creating it.

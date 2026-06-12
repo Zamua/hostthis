@@ -279,16 +279,23 @@ func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, se
 	if existing.Identity != s.Identity.String() {
 		return ErrNotFound
 	}
-	oldDeduped := int64(existing.DedupedSize)
+	// Credit the old bytes back ONLY if the old row is still live: the sums
+	// below filter on expiry, so an expired-but-unswept old row is NOT in
+	// them. Crediting it would under-count and admit an over-quota re-deploy
+	// (resurrecting an expired site must charge the full new size).
+	creditOld := int64(0)
+	if existing.ExpiresAt.After(now) {
+		creditOld = int64(existing.DedupedSize)
+	}
 
-	// Quota: the sums below include the OLD row, so subtract its deduped
-	// bytes and add the new to evaluate the post-swap totals.
+	// Quota: the sums below include the OLD (live) row, so subtract its
+	// credited deduped bytes and add the new to evaluate post-swap totals.
 	if serviceCap > 0 {
 		total, err := r.sumServiceWideActiveBytes(now)
 		if err != nil {
 			return fmt.Errorf("service-wide sum: %w", err)
 		}
-		if total-oldDeduped+body > serviceCap {
+		if total-creditOld+body > serviceCap {
 			return ErrServiceFull
 		}
 	}
@@ -301,7 +308,7 @@ func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, se
 		if err != nil {
 			return fmt.Errorf("identity site sum: %w", err)
 		}
-		if ownerPaste+ownerSite-oldDeduped+body > userCap {
+		if ownerPaste+ownerSite-creditOld+body > userCap {
 			return ErrOverUserQuota
 		}
 	}
