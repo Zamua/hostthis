@@ -237,7 +237,7 @@ func main() {
 // configured BlobStore + SweepBlobs (same type, narrowed via two
 // interfaces). The disk backend is the default; "s3" picks up an
 // S3-compatible endpoint via HOSTTHIS_S3_* env vars.
-func buildBlobStore(dataDir string, logger *log.Logger) (service.BlobStore, service.SweepBlobs, error) {
+func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, service.SweepBlobs, error) {
 	backend := strings.ToLower(envOr("HOSTTHIS_BLOB_BACKEND", "disk"))
 	switch backend {
 	case "", "disk":

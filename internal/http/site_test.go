@@ -1,6 +1,8 @@
 package http
 
 import (
+	"bytes"
+	"io"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -28,6 +30,14 @@ func (b stubBlobMap) Get(sha string) ([]byte, error) {
 		return nil, storage.ErrNotFound
 	}
 	return body, nil
+}
+
+func (b stubBlobMap) GetReader(sha string) (io.ReadCloser, int64, error) {
+	body, ok := b.m[sha]
+	if !ok {
+		return nil, 0, storage.ErrNotFound
+	}
+	return io.NopCloser(bytes.NewReader(body)), int64(len(body)), nil
 }
 
 func buildSiteServer(t *testing.T) *Server {
