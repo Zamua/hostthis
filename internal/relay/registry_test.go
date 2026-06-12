@@ -2,7 +2,9 @@ package relay
 
 import (
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
@@ -103,7 +105,10 @@ func TestRegistry_TotalRoomsCapRefusesNewHubButAllowsJoin(t *testing.T) {
 	}
 }
 
-func TestRegistry_MirrorDurableReachesHub(t *testing.T) {
+// TestRegistry_HubLookupBroadcastReachesBoundConn pins the live-mirror fan-out
+// path: a durable write's mirror reaches a room's bound connection via
+// r.hub(key) + broadcast (the fan-out commitAndMirror performs after a commit).
+func TestRegistry_HubLookupBroadcastReachesBoundConn(t *testing.T) {
 	r := NewRegistry(NewLimits())
 	key := testKey()
 	c, _ := bindFake(t, r, key)
@@ -149,6 +154,79 @@ func TestRegistry_ReleaseIsIdempotent(t *testing.T) {
 // which a laggard drop has already cleared, so the per-app counter leaked one
 // slot per dropped connection. The multi-client churn integration test
 // surfaced it; this is its deterministic unit pin.
+// TestRegistry_AdmitDoesNotCoupleAcrossRoomsDuringSlowCommit pins the per-room
+// isolation the admission path must deliver: a join to one room (blocked behind
+// that room's hub lock because a slow durable commit on it is in flight) must
+// NOT stall a concurrent join to a DIFFERENT room. The slow path is
+// commitAndMirror on room A, which holds A's hub lock across the (here,
+// blocking) commit; a second admit to A then blocks on A's hub lock; the test
+// asserts an admit to room B completes promptly anyway.
+//
+// WEAKEN DEMO: hold r.mu across the whole admit body (defer r.mu.Unlock() + the
+// hub.register call under it, the pre-W-P2 shape). RED: admit(B) blocks on r.mu
+// behind admit(A), which is itself blocked on A's hub lock behind the slow
+// commit, so admit(B) does not return within the deadline. The fix - releasing
+// r.mu before the per-room register - is green: admit(B) returns immediately.
+func TestRegistry_AdmitDoesNotCoupleAcrossRoomsDuringSlowCommit(t *testing.T) {
+	r := NewRegistry(NewLimits())
+	keyA := testKey()
+	keyB := testKey()
+
+	// Bind a connection to room A so its hub exists and a second admit to A
+	// must contend on A's hub lock.
+	bindFake(t, r, keyA)
+
+	// Start a commitAndMirror on A whose commit blocks until we release it. It
+	// holds A's hub lock for the whole (blocked) commit, the slow-durable-write
+	// critical section.
+	commitEntered := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	var commitWG sync.WaitGroup
+	commitWG.Add(1)
+	go func() {
+		defer commitWG.Done()
+		_ = r.commitAndMirror(keyA, func() error {
+			close(commitEntered)
+			<-releaseCommit
+			return nil
+		}, Frame{Data: []byte("mirror")})
+	}()
+	<-commitEntered // A's hub lock is now held by the in-flight slow commit.
+
+	// A second admit to room A will block on A's hub lock (held by the commit).
+	var admitAWG sync.WaitGroup
+	admitAWG.Add(1)
+	go func() {
+		defer admitAWG.Done()
+		_, _, _ = r.admit(keyA)
+	}()
+
+	// Give admit(A) a moment to reach (and block on) A's hub lock. It must be
+	// blocked there with r.mu NOT held, so admit(B) below is free.
+	time.Sleep(20 * time.Millisecond)
+
+	// The isolation assertion: an admit to a DIFFERENT room must complete
+	// promptly, not stall behind A's slow commit + the blocked admit(A).
+	doneB := make(chan error, 1)
+	go func() {
+		_, _, err := r.admit(keyB)
+		doneB <- err
+	}()
+	select {
+	case err := <-doneB:
+		if err != nil {
+			t.Fatalf("admit(B) returned an error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("admit(B) did not complete while a slow commit on room A held A's hub lock: the admission path couples rooms via the global registry lock")
+	}
+
+	// Release the slow commit; both A-side goroutines now unblock.
+	close(releaseCommit)
+	commitWG.Wait()
+	admitAWG.Wait()
+}
+
 func TestRegistry_LaggardDropReclaimsAppSlotWithSurvivor(t *testing.T) {
 	lim := NewLimits()
 	lim.SendBuffer = 1 // not used by fakeConn, but keep the intent explicit

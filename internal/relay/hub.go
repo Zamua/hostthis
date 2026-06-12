@@ -63,7 +63,11 @@ func newHub(key RoomKey, maxConn int, onEmpty func(), onDrop func(id uint64)) *H
 // upgrade (HTTP 429). The add is done under the lock so a concurrent
 // broadcast either sees c (and delivers to it) or does not (and the caller
 // will deliver the snapshot that already reflects that write) - the
-// no-gap / no-dup ordering the snapshot-then-stream join relies on.
+// no-gap / no-dup ordering the snapshot-then-stream join relies on. The
+// per-room cap is enforced HERE, under h.mu, so it is strict no matter how
+// concurrent admits to the same hub interleave (the registry's admit path
+// holds NO global lock across this call, so a register on one hub never
+// stalls a concurrent admit to a different room).
 func (h *Hub) register(c Conn) (ok bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

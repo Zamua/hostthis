@@ -1089,6 +1089,17 @@ own four pieces; they interlock.
   torn down when its last connection leaves (no idle empty hubs linger).
   The hub registry (the map of room-key -> hub) and each hub's client set
   are the two in-memory structures, and BOTH are bounded (see "Limits").
+  These are two separate locks - the global registry lock (the hub map plus
+  the per-app + total-rooms counters) and each hub's own lock (its client
+  set) - and the per-room isolation is a LATENCY property as well as a
+  correctness one: an upgrade's admission does the global-lock work (the
+  per-app / total-rooms cap check, the lazy hub-create) and then RELEASES
+  the global lock BEFORE it takes the target hub's lock for the per-room cap
+  check + register. So a join to one room never holds the global lock while
+  waiting on another room's hub lock, and a slow durable commit on one room
+  (which holds that room's hub lock for the KV write's duration) never
+  stalls a concurrent upgrade to a DIFFERENT room. One room's contention
+  stays local to that room.
 - **Server heartbeat (ping/pong) to reap dead connections.** The server
   sends a WebSocket ping to each connection on a fixed interval and expects
   a pong back within a deadline; a connection that misses the pong deadline

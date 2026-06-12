@@ -66,10 +66,11 @@ func encodeSnapshot(kv domain.RoomKV) Frame {
 	return Frame{Binary: false, Data: data}
 }
 
-// EncodePut builds the live-mirror frame for a committed durable PUT of
-// (key, val). The HTTP PUT handler calls it after the write commits and
-// passes the frame to Relay.MirrorDurable so the room's connected clients
-// see the change live, in addition to it landing in the durable KV.
+// EncodePut builds the live-mirror frame for a durable PUT of (key, val).
+// The HTTP PUT handler passes this frame to Relay.CommitAndMirror alongside
+// the commit closure, so the KV write and this live fan-out run under the
+// room's hub lock as one critical section - the room's connected clients see
+// the change live exactly when it lands in the durable KV.
 func EncodePut(key string, val []byte) Frame {
 	env := durableEnvelope{Type: TypePut, Key: key, Value: jsonValue(val)}
 	data, err := json.Marshal(env)
