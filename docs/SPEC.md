@@ -3643,6 +3643,21 @@ Apex landing page is `Cache-Control: public, max-age=300` (5 min) so
 content updates propagate quickly without becoming a no-cache origin
 hammer.
 
+Static sites (multi-file) set `Cache-Control: public, no-cache` instead
+of `max-age`. A single-file paste is the top-level document, which a
+browser revalidates on every reload, so a `max-age` window never hides a
+paste update. A site is different: its `index.html` loads sub-resources
+(its js/css), and a browser serves those from cache WITHOUT revalidating
+while they are fresh under `max-age` - so a re-deploy would not show until
+each asset's `max-age` expired (the classic SPA "stale bundle after
+deploy" trap). `no-cache` makes every site file revalidate against its
+content-SHA ETag on each load: a 304 when the SHA is unchanged (cheap, no
+body bytes) and fresh bytes when it changed, so a re-deploy is visible on
+the next normal reload with no filename-hashing or version query. The
+edge-cache benefit is preserved: a CDN still stores the bytes and serves
+them after a 304, so egress stays absorbed; only a cheap revalidation
+request reaches origin.
+
 ### Active invalidation: CachePurger interface
 
 When the bytes served at a paste's URL change, the cached version at

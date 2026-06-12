@@ -191,6 +191,12 @@ func TestSite_SPAFallback_SameHeadersAsRoot(t *testing.T) {
 	if route.Header().Get("ETag") != `"sha-index"` {
 		t.Fatalf("fallback etag: got %q, want %q", route.Header().Get("ETag"), `"sha-index"`)
 	}
+	// Sites serve no-cache: a re-deploy must be visible on the next normal
+	// reload. Under max-age a browser would keep serving a site's cached
+	// js/css sub-resources without revalidating, so updates would not show.
+	if got := root.Header().Get("Cache-Control"); got != "public, no-cache" {
+		t.Fatalf("site Cache-Control: got %q, want public, no-cache", got)
+	}
 }
 
 func TestSite_SandboxHeaders(t *testing.T) {
