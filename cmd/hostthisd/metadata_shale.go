@@ -89,6 +89,7 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		GRPCAddr:          grpcAddr,
 		Seeds:             seeds,
 		ReplicationFactor: replicationFactor,
+		Logger:            logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open shale: %w", err)
