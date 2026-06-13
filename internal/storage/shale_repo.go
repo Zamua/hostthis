@@ -89,6 +89,7 @@ import (
 	"github.com/Zamua/shale/pkg/cluster"
 	"github.com/Zamua/shale/pkg/rpc"
 	"google.golang.org/grpc"
+	slatedb "slatedb.io/slatedb-go/uniffi"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
@@ -138,6 +139,24 @@ type ShaleConfig struct {
 	// replicas). R=1 is the horizontal-write-scaling shape; R>1 trades
 	// write throughput for availability (docs/SPEC.md "R=1 vs R=2").
 	ReplicationFactor int
+
+	// RelaxedDurability selects the slate backend's write-durability mode.
+	// The zero value (false) is the SAFE DEFAULT: durable writes, acked only
+	// after the object-store flush, the byte-exact path slate took before this
+	// knob existed - so a ShaleConfig built without setting this field (tests,
+	// the migration tool) stays durable. Setting it true enables relaxed
+	// durability (fast-ack at the memtable, background flush) - the largest
+	// write-throughput win, removing the per-commit flush round-trip from the
+	// hot path. ONLY safe at ReplicationFactor >= 2 across anti-affinity-
+	// separated nodes (a replica holds the write through the flush window);
+	// relaxed durability at R=1 loses un-flushed writes on a single crash. See
+	// docs/SPEC.md "Relaxed durability: fast-ack at the memtable". Threaded to
+	// the slate backend's WriteOptions; false leaves WriteOptions nil.
+	//
+	// NB the operator-facing env var is HOSTTHIS_METADATA_AWAIT_DURABLE (the
+	// inverse, default true), matching slatedb's own AwaitDurable terminology;
+	// the field is inverted here so the struct's zero value is the safe one.
+	RelaxedDurability bool
 
 	// Logger receives the skip lines from the tolerant background scans
 	// (expiry / reconcile) when they hit an undecodable record. Optional:
@@ -196,6 +215,30 @@ func (r *ShaleRepo) repoLog() *log.Logger {
 	return log.Default()
 }
 
+// slateConfigFromShale maps a ShaleConfig to the slate.Config used to open
+// the per-node backend. Pure (no I/O), so the WriteOptions wiring is unit-
+// testable without a live object store. The S3 fields are a straight
+// copy-through; the only logic is the durability knob: RelaxedDurability=true
+// sets slate's per-write WriteOptions to fast-ack, while the default (false)
+// leaves WriteOptions nil - the byte-exact durable path slate took before the
+// knob existed (slate treats nil WriteOptions as AwaitDurable=true). See
+// docs/SPEC.md "Relaxed durability: fast-ack at the memtable".
+func slateConfigFromShale(cfg ShaleConfig) slate.Config {
+	sc := slate.Config{
+		Bucket:    cfg.Bucket,
+		DbName:    cfg.DbName,
+		Endpoint:  cfg.Endpoint,
+		Region:    cfg.Region,
+		AccessKey: cfg.AccessKey,
+		SecretKey: cfg.SecretKey,
+		UseSSL:    cfg.UseSSL,
+	}
+	if cfg.RelaxedDurability {
+		sc.WriteOptions = &slatedb.WriteOptions{AwaitDurable: false}
+	}
+	return sc
+}
+
 // NewShaleRepo opens a shale cluster over a fresh slate backend and
 // returns a ShaleRepo over it. Caller must Close() to flush and shut down
 // the cluster (which shuts down the slate backend in turn).
@@ -250,15 +293,7 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		advertiseGRPCAddr = l.Addr().String()
 	}
 
-	be, err := slate.New(slate.Config{
-		Bucket:    cfg.Bucket,
-		DbName:    cfg.DbName,
-		Endpoint:  cfg.Endpoint,
-		Region:    cfg.Region,
-		AccessKey: cfg.AccessKey,
-		SecretKey: cfg.SecretKey,
-		UseSSL:    cfg.UseSSL,
-	})
+	be, err := slate.New(slateConfigFromShale(cfg))
 	if err != nil {
 		if lis != nil {
 			_ = lis.Close()
