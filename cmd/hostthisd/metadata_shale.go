@@ -18,6 +18,8 @@
 //   HOSTTHIS_SHALE_BIND_ADDR          (host:port; NON-EMPTY enables multi-node mode)
 //   HOSTTHIS_SHALE_GRPC_ADDR          (host:port; required when BIND_ADDR is set)
 //   HOSTTHIS_SHALE_SEEDS              (comma-separated peer BIND_ADDRs; empty = seed node)
+//   HOSTTHIS_METADATA_AWAIT_DURABLE   (true|false; default true; false = relaxed
+//                                      durability/fast-ack, only safe at RF>=2)
 //
 // With HOSTTHIS_SHALE_BIND_ADDR unset (the default) the node runs the
 // single-node path exactly as before: no gossip, no ring routing, every
@@ -62,6 +64,11 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		}
 	}
 	replicationFactor := envOrInt("HOSTTHIS_SHALE_REPLICATION_FACTOR", 1)
+	// Durability mode: default true (ack after the durable object-store
+	// flush). false = relaxed durability (fast-ack at the memtable), the big
+	// write-throughput win; only safe at RF>=2 on separate nodes. See
+	// docs/SPEC.md "Relaxed durability: fast-ack at the memtable".
+	awaitDurable := strings.EqualFold(envOr("HOSTTHIS_METADATA_AWAIT_DURABLE", "true"), "true")
 
 	// Multi-node peer-discovery config. A non-empty bind addr is the
 	// switch that takes the cluster out of the single-node path.
@@ -89,17 +96,18 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		GRPCAddr:          grpcAddr,
 		Seeds:             seeds,
 		ReplicationFactor: replicationFactor,
+		RelaxedDurability: !awaitDurable,
 		Logger:            logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open shale: %w", err)
 	}
 	if bindAddr == "" {
-		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d endpoint=%s",
-			nodeID, bucket, dbName, replicationFactor, endpoint)
+		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d awaitDurable=%t endpoint=%s",
+			nodeID, bucket, dbName, replicationFactor, awaitDurable, endpoint)
 	} else {
-		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d bucket=%s db=%s endpoint=%s",
-			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, bucket, dbName, endpoint)
+		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d awaitDurable=%t bucket=%s db=%s endpoint=%s",
+			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, awaitDurable, bucket, dbName, endpoint)
 	}
 	return &metadataBundle{
 		Repo:    repo,

@@ -3687,6 +3687,34 @@ scaling deployment this section motivates is R=1. A deployment that values
 uptime over peak write rate runs R=2 and accepts that the throughput
 ceiling is the per-node ceiling.
 
+#### Relaxed durability: fast-ack at the memtable
+
+Durability is a *backend* concern: the shale cluster layer is durability-
+agnostic, and the slate backend decides when a write is acked. By default a
+write is acked only after the underlying slatedb flushes it durably to
+object storage (`AwaitDurable=true`), which adds a flush round-trip
+(~100ms) to every commit. Since a single paste upload is several commits,
+that durable-flush latency, not the sharding, is the dominant write-
+throughput ceiling.
+
+`HOSTTHIS_METADATA_AWAIT_DURABLE` (default `true`) exposes the slate
+backend's relaxed-durability mode. Set it to `false` and the backend acks
+at memtable insert (microseconds) and flushes to object storage in the
+background, removing the per-commit object-store round-trip from the hot
+path. This is the largest single write-throughput win available, larger
+than the horizontal sharding gain.
+
+The tradeoff is a bounded loss window: a write that has been acked but not
+yet background-flushed is lost if its node crashes before the flush. This
+is **only safe paired with R>=2 on anti-affinity-separated nodes**: a
+second replica holds the write through the flush window, so the write
+survives unless *every* replica crashes inside the same flush interval (a
+correlated failure). Relaxed durability at R=1 is unsafe - a single crash
+loses un-flushed writes with no second copy - so the knob is intended for
+the same HA deployment that runs R=2 across distinct nodes. The flag is
+threaded to the slate backend's per-write `WriteOptions`; leaving it at the
+default keeps the byte-exact durable path.
+
 #### The value envelope and the strip-on-read invariant
 
 At R>1 shale wraps every stored value in a last-writer-wins envelope (a
