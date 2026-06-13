@@ -88,6 +88,7 @@ func TestManageUpdate_BlobQuotaSurfacesServiceFull(t *testing.T) {
 	}
 	seedBlobs := storage.NewCompressedBlobStore(disk)
 	up := NewUpload(repo, seedBlobs)
+	t.Cleanup(up.WaitFinalize)
 	res, err := up.Create(bytes.NewReader([]byte("<!doctype html><p>v1</p>")), "key:owner", "demo", "")
 	if err != nil {
 		t.Fatalf("seed create: %v", err)
