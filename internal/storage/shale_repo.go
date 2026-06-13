@@ -1780,6 +1780,16 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 			// every healthy owner); the next tick retries it. See docs/SPEC.md
 			// "Decode tolerance is per-scan-semantics", Policy 1.
 			r.repoLog().Printf("reconcile: skip undecodable paste %s: %v", item.Key, err)
+			// The row PHYSICALLY exists (we just cannot decode it), so mark
+			// its slug LIVE before continuing. Otherwise a past-grace
+			// reservation marker for this slug would be classified as an
+			// abandoned reservation (paste absent -> orphan-release ->
+			// decrement the owner's byte counter) for a paste that still
+			// exists, UNDER-COUNTING the owner's quota. Treating it as present
+			// makes a lingering marker a leaked-confirm (dropped, counter
+			// untouched). We still skip THIS slug's derived-index rebuild
+			// (we cannot read the row), which the next tick retries.
+			livePasteSlugs[strings.TrimPrefix(string(item.Key), "pastes/")] = struct{}{}
 			continue
 		}
 		slug := strings.TrimPrefix(string(item.Key), "pastes/")
