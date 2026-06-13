@@ -78,6 +78,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -137,6 +138,12 @@ type ShaleConfig struct {
 	// replicas). R=1 is the horizontal-write-scaling shape; R>1 trades
 	// write throughput for availability (docs/SPEC.md "R=1 vs R=2").
 	ReplicationFactor int
+
+	// Logger receives the skip lines from the tolerant background scans
+	// (expiry / reconcile) when they hit an undecodable record. Optional:
+	// nil falls back to log.Default(). It never affects the blob-GC ref-set
+	// scans, which fail closed rather than skip+log.
+	Logger *log.Logger
 }
 
 // ShaleRepo is the shale-cluster-backed metadata store. It satisfies the
@@ -154,6 +161,15 @@ type ShaleConfig struct {
 type ShaleRepo struct {
 	cluster *cluster.Cluster
 
+	// logger records skipped records in the tolerant background scans
+	// (the expiry/reconcile family). A nil logger falls back to
+	// log.Default() via repoLog, so a repo built without one still emits
+	// the skip lines an operator needs to spot a persistently-bad row.
+	// The blob-GC ref-set scans never use this: they fail closed (abort +
+	// return the decode error) rather than skip, so there is nothing to
+	// log-and-continue there.
+	logger *log.Logger
+
 	// grpcAddr is the ACTUAL bound forwarding address advertised to peers
 	// (lis.Addr().String()), or "" in single-node mode. bindAddr mirrors
 	// the memberlist bind address a second node seeds off. Both are exposed
@@ -167,6 +183,17 @@ type ShaleRepo struct {
 	// in-flight RPCs and closes the listener.
 	grpcSrv *grpc.Server
 	grpcLis net.Listener
+}
+
+// repoLog returns the repo's logger, falling back to the process default
+// when none was wired. The tolerant background scans (expiry / reconcile)
+// log each skipped undecodable record through this so a persistently-bad
+// row is visible to an operator instead of being silently swallowed.
+func (r *ShaleRepo) repoLog() *log.Logger {
+	if r.logger != nil {
+		return r.logger
+	}
+	return log.Default()
 }
 
 // NewShaleRepo opens a shale cluster over a fresh slate backend and
@@ -267,6 +294,7 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 
 	r := &ShaleRepo{
 		cluster:  cl,
+		logger:   cfg.Logger,
 		bindAddr: cfg.BindAddr,
 		grpcAddr: advertiseGRPCAddr,
 	}
@@ -1518,6 +1546,13 @@ func (r *ShaleRepo) ReferencedBlobSHAs() ([]string, error) {
 	for _, item := range pastes {
 		var p pasteRow
 		if err := json.Unmarshal(item.Value, &p); err != nil {
+			// FAIL CLOSED, never skip. This is the blob-GC keep-set: skipping
+			// an undecodable row would UNDER-COUNT references, so a blob the
+			// row still references would look orphaned and be deleted
+			// (irreversible). Abort the whole pass with the error; the sweep
+			// caller treats any error here as "delete nothing this pass". The
+			// opposite of the Reconcile/expiry skip+log policy by design. See
+			// docs/SPEC.md "Decode tolerance is per-scan-semantics", Policy 2.
 			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
 		}
 		if p.ContentSHA != "" {
@@ -1527,6 +1562,8 @@ func (r *ShaleRepo) ReferencedBlobSHAs() ([]string, error) {
 	for _, item := range versions {
 		var v versionRow
 		if err := json.Unmarshal(item.Value, &v); err != nil {
+			// FAIL CLOSED, never skip (same reasoning as the paste loop
+			// above): an under-counted ref-set deletes a live blob. Policy 2.
 			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
 		}
 		if v.ContentSHA != "" && !v.Deleted {
@@ -1737,7 +1774,23 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 	for _, item := range pasteItems {
 		var p pasteRow
 		if err := json.Unmarshal(item.Value, &p); err != nil {
-			return fmt.Errorf("reconcile: decode %s: %w", item.Key, err)
+			// Idempotent reconcile: skip + log the undecodable row and
+			// continue. One poisoned paste must not stall the whole pass
+			// (which would freeze index rebuild + reservation release for
+			// every healthy owner); the next tick retries it. See docs/SPEC.md
+			// "Decode tolerance is per-scan-semantics", Policy 1.
+			r.repoLog().Printf("reconcile: skip undecodable paste %s: %v", item.Key, err)
+			// The row PHYSICALLY exists (we just cannot decode it), so mark
+			// its slug LIVE before continuing. Otherwise a past-grace
+			// reservation marker for this slug would be classified as an
+			// abandoned reservation (paste absent -> orphan-release ->
+			// decrement the owner's byte counter) for a paste that still
+			// exists, UNDER-COUNTING the owner's quota. Treating it as present
+			// makes a lingering marker a leaked-confirm (dropped, counter
+			// untouched). We still skip THIS slug's derived-index rebuild
+			// (we cannot read the row), which the next tick retries.
+			livePasteSlugs[strings.TrimPrefix(string(item.Key), "pastes/")] = struct{}{}
+			continue
 		}
 		slug := strings.TrimPrefix(string(item.Key), "pastes/")
 		livePasteSlugs[slug] = struct{}{}
@@ -1800,7 +1853,13 @@ func (r *ShaleRepo) gatherReservationMarkers() (map[string][]reservationMarkerEn
 		owner := rest[:idx]
 		m, err := parseReservationMarker(item.Value)
 		if err != nil {
-			return nil, fmt.Errorf("reconcile: %w", err)
+			// Idempotent reconcile: skip + log the undecodable marker and
+			// continue. A single poisoned reservation marker must not stall
+			// the reconciler pass for every other owner; the next tick
+			// retries it. See docs/SPEC.md "Decode tolerance is
+			// per-scan-semantics", Policy 1.
+			r.repoLog().Printf("reconcile: skip undecodable reservation marker %s: %v", item.Key, err)
+			continue
 		}
 		byOwner[owner] = append(byOwner[owner], reservationMarkerEntry{
 			Key:    append([]byte(nil), item.Key...),

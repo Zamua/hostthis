@@ -635,7 +635,12 @@ func (r *ShaleRepo) reconcileSiteReservations(now time.Time, reserveGrace time.D
 	for _, item := range markers {
 		m, err := parseReservationMarker(item.Value)
 		if err != nil {
-			return fmt.Errorf("reconcile sites: %w", err)
+			// Idempotent reconcile: skip + log the undecodable site marker and
+			// continue. One poisoned site-reservation marker must not stall the
+			// whole site-reconcile pass; the next tick retries it. See
+			// docs/SPEC.md "Decode tolerance is per-scan-semantics", Policy 1.
+			r.repoLog().Printf("reconcile sites: skip undecodable reservation marker %s: %v", item.Key, err)
+			continue
 		}
 		if markerInGrace(m, now, reserveGrace) {
 			continue // in-flight; leave it for the confirm step to drop
@@ -725,6 +730,13 @@ func (r *ShaleRepo) ReferencedSiteBlobSHAs() ([]string, error) {
 	for _, item := range sites {
 		var row siteRow
 		if err := json.Unmarshal(item.Value, &row); err != nil {
+			// FAIL CLOSED, never skip. Site sibling of the paste ref-set scan:
+			// skipping an undecodable site row would under-count the blob
+			// keep-set, so a blob the site's manifest still references would
+			// look orphaned and be deleted (irreversible). Abort the pass with
+			// the error; the sweep treats any error here as "delete nothing
+			// this pass". See docs/SPEC.md "Decode tolerance is
+			// per-scan-semantics", Policy 2.
 			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
 		}
 		man, err := decodeManifest(row.Manifest)
