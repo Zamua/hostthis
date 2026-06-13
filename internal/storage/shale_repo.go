@@ -447,6 +447,15 @@ var defaultReserveGrace = 10 * time.Minute
 // they have a reason to override it.
 func DefaultReserveGrace() time.Duration { return defaultReserveGrace }
 
+// PendingPasteTimeout is how old a status=pending paste may be before the
+// reconciler ages it to failed (the pod-death backstop: its in-memory
+// bytes never reached the blob store). It is comfortably longer than a
+// healthy blob write (~250 ms) plus retries, so the reconciler never
+// races a live finalizer, while short enough that a lost-bytes paste
+// self-heals out of the loading screen within a sweep tick or two. A var,
+// not a const, so tests can shrink it.
+var PendingPasteTimeout = 2 * time.Minute
+
 // reservationMarker is the value stored at identity_reserve/<id>/<slug>.
 // Bytes is the reserved size; CreatedAt is the `now` the reserve was
 // stamped with (RFC3339Nano via time.Time JSON), so the reconciler can
@@ -1156,6 +1165,111 @@ func (r *ShaleRepo) confirmInsert(p domain.Paste) error {
 	})
 }
 
+// MarkReady flips a paste's status pending -> ready on the {slug} shard,
+// the background finalizer's success transition once the blob landed.
+// Guarded: it only advances a paste that is still pending, so a late
+// finalizer cannot resurrect a paste the reconciler already failed. A
+// paste that is already ready is a no-op (idempotent); a paste that is
+// failed (or absent) returns without changing anything. See docs/SPEC.md
+// "Paste lifecycle status (async blob write)".
+func (r *ShaleRepo) MarkReady(slug domain.Slug) error {
+	pasteKey := shaleKeyPaste(slug)
+	return r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
+		raw, err := tx.Get(pasteKey)
+		if errors.Is(err, backend.ErrNotFound) {
+			return nil // nothing to advance
+		}
+		if err != nil {
+			return err
+		}
+		payload, err := stripEnvelope(raw)
+		if err != nil {
+			return err
+		}
+		var p pasteRow
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return err
+		}
+		if domain.NormalizeStatus(p.Status) != domain.PasteStatusPending {
+			return nil // already ready, or failed; do not transition
+		}
+		p.Status = string(domain.PasteStatusReady)
+		return shaleTxPutJSON(tx, pasteKey, p)
+	})
+}
+
+// MarkFailed flips a paste's status pending -> failed and releases its
+// reservation (sheds the charged bytes + drops the index entry), the
+// background finalizer's failure transition AND the reconciler's
+// age-out. The paste ROW stays (flipped to failed) so a read can serve
+// an error page; only its byte accounting is undone. Guarded: only a
+// still-pending paste transitions, so this never un-counts a ready
+// paste. Idempotent on re-call (a failed paste no longer has its index
+// entry, so the decrement does not double-apply). See docs/SPEC.md
+// "Paste lifecycle status (async blob write)".
+func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
+	pasteKey := shaleKeyPaste(slug)
+	// Step 1: flip the {slug}-shard status pending -> failed. Capture the
+	// owner + size so step 2 can shed the bytes. If the paste isn't pending
+	// (already failed/ready, or absent) there's nothing to release.
+	var identity string
+	var size int64
+	var transitioned bool
+	err := r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
+		transitioned = false // reset on CAS retry
+		raw, err := tx.Get(pasteKey)
+		if errors.Is(err, backend.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		payload, err := stripEnvelope(raw)
+		if err != nil {
+			return err
+		}
+		var p pasteRow
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return err
+		}
+		if domain.NormalizeStatus(p.Status) != domain.PasteStatusPending {
+			return nil // only a pending paste transitions
+		}
+		identity = p.Identity
+		size = int64(p.Size)
+		p.Status = string(domain.PasteStatusFailed)
+		if err := shaleTxPutJSON(tx, pasteKey, p); err != nil {
+			return err
+		}
+		transitioned = true
+		return nil
+	})
+	if err != nil || !transitioned {
+		return err
+	}
+	// Step 2: shed the charged bytes on the {id} shard - drop the index
+	// entry + decrement the counter. Mirrors Delete's {id}-shard cleanup.
+	// The index-entry presence guards against a double-decrement: a second
+	// MarkFailed finds the row already failed in step 1 and never reaches
+	// here.
+	indexKey := shaleKeyIdentityPaste(identity, slug.String())
+	counterKey := shaleKeyIdentityBytes(identity)
+	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
+		if _, err := tx.Get(indexKey); err == nil {
+			if err := tx.Delete(indexKey); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, backend.ErrNotFound) {
+			return err
+		}
+		cur, err := txGetCounter(tx, counterKey)
+		if err != nil {
+			return err
+		}
+		return tx.Put(counterKey, formatCounter(cur-size))
+	})
+}
+
 // AppendVersionWithQuotaCheck appends a new version via the reservation
 // pattern. The new version's bytes are reserved on the {id} shard
 // (strict per-owner quota), then the version row is written + the expiry
@@ -1806,6 +1920,13 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 	// marker (paste present -> drop without touching the counter).
 	livePasteSlugs := make(map[string]struct{}, len(pasteItems))
 	pastesByOwner := make(map[string]map[string]identityPasteRow)
+	// stalePending collects slugs whose status is pending and whose
+	// created_at is older than the pending timeout: the pod-death backstop
+	// (the in-memory bytes are gone, no finalizer will ever run). They are
+	// aged to failed AFTER the scan + index rebuild so a too-old pending's
+	// index entry does not get re-projected by reconcileIndexes on the same
+	// pass. See docs/SPEC.md "Reconciler: age out stuck pendings".
+	var stalePending []domain.Slug
 	for _, item := range pasteItems {
 		var p pasteRow
 		if err := json.Unmarshal(item.Value, &p); err != nil {
@@ -1838,6 +1959,13 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 			CreatedAt: p.CreatedAt,
 			ExpiresAt: p.ExpiresAt,
 		}
+		// Age-out check: a pending paste older than the timeout is a
+		// pod-death casualty (its in-memory bytes never reached the blob
+		// store). Defer the transition until after the index rebuild.
+		if domain.NormalizeStatus(p.Status) == domain.PasteStatusPending &&
+			now.Sub(p.CreatedAt) > PendingPasteTimeout {
+			stalePending = append(stalePending, domain.Slug(slug))
+		}
 	}
 
 	// Gather the reservation markers (cross-shard) and group them by owner.
@@ -1849,6 +1977,15 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 	// Job 1: rebuild the derived index (never touches the counter).
 	if err := r.reconcileIndexes(pastesByOwner); err != nil {
 		return err
+	}
+	// Job 1b: age out stuck pending pastes (pod-death backstop). Each
+	// MarkFailed is independent + idempotent; a failure on one slug is
+	// logged and skipped so it cannot stall the rest of the pass (the next
+	// tick retries it), the same per-row discipline the other jobs use.
+	for _, slug := range stalePending {
+		if err := r.MarkFailed(slug); err != nil {
+			r.repoLog().Printf("reconcile: age-out pending %s: %v", slug, err)
+		}
 	}
 	// Job 2: complete past-grace paste markers (orphan-release / leaked-drop).
 	if err := r.releaseReservationMarkers(now, reserveGrace, markersByOwner, livePasteSlugs); err != nil {

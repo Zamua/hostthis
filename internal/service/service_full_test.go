@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
@@ -36,19 +37,34 @@ func realBlobs(t *testing.T) BlobStore {
 	return storage.NewCompressedBlobStore(disk)
 }
 
-// TestUpload_BlobQuotaSurfacesServiceFull pins the new ceiling contract:
-// when the blob Put is rejected by the object-store bucket quota
-// (storage.ErrServiceFull), Upload.Create returns the graceful service-level
-// ErrServiceFull, NOT a wrapped 500-style error. This is the only place the
-// durable total-bytes ceiling is enforced now that the app runs no
-// service-wide byte scan (see SPEC "Limits -> Durable total-bytes ceiling").
-func TestUpload_BlobQuotaSurfacesServiceFull(t *testing.T) {
-	u := newRealStack(t)
-	u.Blobs = fullBlobStore{real: realBlobs(t)}
+// TestUpload_BlobQuotaDrivesFinalizeToFailed pins the create-path ceiling
+// contract under the ASYNC blob write: Create returns a pending paste (the
+// URL is handed out before the blob is attempted), then the background
+// finalizer's blob Put is rejected by the object-store bucket quota
+// (storage.ErrServiceFull) and the paste transitions to failed. The
+// durable-ceiling rejection can no longer be a synchronous Create error on
+// this path - the bytes are written in the background - so the failure
+// surfaces as the paste's failed status + a released reservation (see SPEC
+// "Paste lifecycle status -> Finalize: the asynchronous half"). The Update
+// and DeploySite paths remain synchronous and still return ErrServiceFull
+// directly (their tests below).
+func TestUpload_BlobQuotaDrivesFinalizeToFailed(t *testing.T) {
+	u, repo, done := newStackWithBlobs(t, fullBlobStore{real: realBlobs(t)})
 
-	_, err := u.Create(bytes.NewReader([]byte("<!doctype html><p>hi</p>")), "key:owner", "demo", "")
-	if !errors.Is(err, ErrServiceFull) {
-		t.Fatalf("blob-quota upload = %v, want service.ErrServiceFull", err)
+	res, err := u.Create(bytes.NewReader([]byte("<!doctype html><p>hi</p>")), "key:owner", "demo", "")
+	if err != nil {
+		t.Fatalf("create should succeed (pending) before the async blob write: %v", err)
+	}
+	if res.Paste.Status != domain.PasteStatusPending {
+		t.Fatalf("status: got %q, want pending", res.Paste.Status)
+	}
+	waitFinalize(t, done)
+	got, err := repo.Get(res.Paste.Slug)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != domain.PasteStatusFailed {
+		t.Fatalf("status after blob-quota failure: got %q, want failed", got.Status)
 	}
 }
 
@@ -76,6 +92,7 @@ func TestManageUpdate_BlobQuotaSurfacesServiceFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed create: %v", err)
 	}
+	up.WaitFinalize() // drain the seed's async blob write before Update
 
 	m := NewManage(repo, fullBlobStore{real: realBlobs(t)})
 	_, err = m.Update(res.Paste.Slug, "key:owner", bytes.NewReader([]byte("<!doctype html><p>v2</p>")), "")

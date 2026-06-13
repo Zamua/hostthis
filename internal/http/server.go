@@ -228,6 +228,20 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		return
 	}
 
+	// Lifecycle status gate (docs/SPEC.md "Paste lifecycle status"). A
+	// pending paste's blob has not landed yet: serve a loading page that
+	// auto-refreshes until the finalizer flips it to ready. A failed paste
+	// serves an error page. Only a ready paste falls through to the normal
+	// content serve below.
+	switch p.Status {
+	case domain.PasteStatusPending:
+		s.servePending(w, r)
+		return
+	case domain.PasteStatusFailed:
+		s.serveFailed(w, r)
+		return
+	}
+
 	// Sandboxing headers per SPEC.md HTML-sandboxing section.
 	h := w.Header()
 	h.Set("X-Frame-Options", "DENY")
@@ -297,6 +311,108 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	default:
 		http.Error(w, "unsupported kind", http.StatusInternalServerError)
 	}
+}
+
+// loadingPageHTML is the body served for a pending paste. It
+// auto-refreshes every second (meta refresh, no JS required) until the
+// finalizer flips the paste to ready and a refresh lands on the content.
+// Kept tiny + on-brand: a centered monospace "preparing your paste" with
+// a subtle pulse. The 200 status + no-store cache make every refresh hit
+// the origin so the transition is seen promptly.
+const loadingPageHTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="1">
+<title>preparing your paste</title>
+<style>
+  :root { color-scheme: light dark; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #0e0e10; color: #e6e6e6;
+  }
+  .card { text-align: center; padding: 2rem; }
+  .dot {
+    display: inline-block; width: .6rem; height: .6rem; margin: 0 .15rem;
+    border-radius: 50%; background: currentColor; opacity: .25;
+    animation: pulse 1s infinite ease-in-out;
+  }
+  .dot:nth-child(2) { animation-delay: .15s; }
+  .dot:nth-child(3) { animation-delay: .3s; }
+  @keyframes pulse { 0%,100% { opacity: .25; } 50% { opacity: 1; } }
+  .muted { color: #8a8a8a; margin-top: .75rem; font-size: 13px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+    <p>preparing your paste</p>
+    <p class="muted">this page refreshes automatically</p>
+  </div>
+</body>
+</html>
+`
+
+// failedPageHTML is the body served for a failed paste (the blob write
+// did not complete - object-store error or pod death mid-write). Same
+// on-brand monospace shell as the loading page, no auto-refresh.
+const failedPageHTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>paste unavailable</title>
+<style>
+  :root { color-scheme: light dark; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #0e0e10; color: #e6e6e6;
+  }
+  .card { text-align: center; padding: 2rem; max-width: 28rem; }
+  h1 { font-size: 1.1rem; margin: 0 0 .5rem; }
+  .muted { color: #8a8a8a; font-size: 13px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>this paste could not be saved</h1>
+    <p class="muted">the upload did not finish writing to storage. try uploading it again.</p>
+  </div>
+</body>
+</html>
+`
+
+// servePending serves the loading page for a pending paste. 200 + no-store
+// so the meta-refresh always re-checks the origin (a cached 200 would
+// freeze the loading screen even after the paste went ready).
+func (s *Server) servePending(w http.ResponseWriter, _ *http.Request) {
+	h := w.Header()
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+	h.Set("Retry-After", "1")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, loadingPageHTML)
+}
+
+// serveFailed serves the error page for a failed paste. 410 Gone: the
+// slug existed but its content will never arrive, which is exactly what
+// Gone means, and it keeps the failed paste out of any naive success
+// cache. no-store so a later re-upload to a (different) slug is unaffected.
+func (s *Server) serveFailed(w http.ResponseWriter, _ *http.Request) {
+	h := w.Header()
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusGone)
+	_, _ = io.WriteString(w, failedPageHTML)
 }
 
 // serveSiteIfExists tries to serve reqPath from the static site owning

@@ -70,6 +70,7 @@ func main() {
 	roomRepo := metadata.Rooms
 
 	uploadSvc := service.NewUpload(pasteRepo, blobs)
+	uploadSvc.Logger = logger // record background blob-finalize outcomes
 	manageSvc := service.NewManage(pasteRepo, blobs)
 
 	// Static-site archive deploys. Reuses the same blob store + the same

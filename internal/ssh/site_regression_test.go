@@ -28,6 +28,7 @@ import (
 type siteStack struct {
 	httpURL string
 	sshAddr string
+	upload  *service.Upload
 }
 
 func newSiteStack(t *testing.T) *siteStack {
@@ -55,10 +56,11 @@ func newSiteStack(t *testing.T) *siteStack {
 	addr := l.Addr().String()
 	_ = l.Close()
 
+	upload := service.NewUpload(repo, blobs)
 	sshSrv := &hostssh.Server{
 		Addr:       addr,
 		ApexDomain: "paste.test",
-		Upload:     service.NewUpload(repo, blobs),
+		Upload:     upload,
 		Manage:     service.NewManage(repo, blobs),
 		Deploy:     service.NewDeploySite(sites, repo, blobs),
 		BuildURL:   func(s domain.Slug) string { return httpSrv.URL + "/p/" + s.String() },
@@ -67,7 +69,7 @@ func newSiteStack(t *testing.T) *siteStack {
 	go func() { _ = sshSrv.ListenAndServe() }()
 	waitForSSH(t, addr)
 
-	return &siteStack{httpURL: httpSrv.URL, sshAddr: addr}
+	return &siteStack{httpURL: httpSrv.URL, sshAddr: addr, upload: upload}
 }
 
 // runUpload pipes body over a real ssh client (empty command = upload)
@@ -103,6 +105,11 @@ func (s *siteStack) runUpload(t *testing.T, body []byte) (string, string) {
 	sess.Stderr = &stderr
 	if err := sess.Run(""); err != nil {
 		t.Fatalf("ssh run: %v\nstderr: %s", err, stderr.String())
+	}
+	// Drain the background blob finalizer so a subsequent GET sees a ready
+	// paste rather than the loading page.
+	if s.upload != nil {
+		s.upload.WaitFinalize()
 	}
 	return stdout.String(), stderr.String()
 }

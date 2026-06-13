@@ -27,7 +27,12 @@ func newRealStack(t *testing.T) *Upload {
 		t.Fatalf("blobs: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
-	return NewUpload(storage.NewPasteRepo(db), blobs)
+	u := NewUpload(storage.NewPasteRepo(db), blobs)
+	// The blob write now finalizes in a background goroutine. Drain any
+	// in-flight finalizers before the TempDir is torn down so the async
+	// write does not race the cleanup (and so blob assertions are stable).
+	t.Cleanup(u.WaitFinalize)
+	return u
 }
 
 func TestUpload_Create_HTML(t *testing.T) {

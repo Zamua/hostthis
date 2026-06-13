@@ -173,6 +173,7 @@ func (r *SlateRepo) Close() error {
 
 type pasteRow struct {
 	Identity      string    `json:"identity"`
+	Status        string    `json:"status,omitempty"` // pending|ready|failed; "" (legacy) reads as ready
 	Kind          string    `json:"kind"`
 	ContentSHA    string    `json:"content_sha"`
 	Size          int       `json:"size"`
@@ -196,6 +197,7 @@ func (p pasteRow) toDomain(slug domain.Slug) domain.Paste {
 	return domain.Paste{
 		Slug:          slug,
 		Identity:      domain.Identity(p.Identity),
+		Status:        domain.NormalizeStatus(p.Status),
 		Kind:          domain.ContentKind(p.Kind),
 		ContentSHA:    p.ContentSHA,
 		Size:          p.Size,
@@ -210,6 +212,7 @@ func (p pasteRow) toDomain(slug domain.Slug) domain.Paste {
 func pasteFromDomain(p domain.Paste) pasteRow {
 	return pasteRow{
 		Identity:      p.Identity.String(),
+		Status:        string(domain.NormalizeStatus(string(p.Status))),
 		Kind:          string(p.Kind),
 		ContentSHA:    p.ContentSHA,
 		Size:          p.Size,
@@ -714,6 +717,80 @@ func (r *SlateRepo) SetName(slug domain.Slug, name string) error {
 	}
 	if _, err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit set name %q: %w", slug, err)
+	}
+	return nil
+}
+
+// MarkReady flips a paste's status pending -> ready. Guarded: only a
+// still-pending paste transitions, so a late finalizer cannot resurrect
+// a failed paste. A missing paste, or one already ready/failed, is a
+// no-op. See docs/SPEC.md "Paste lifecycle status (async blob write)".
+func (r *SlateRepo) MarkReady(slug domain.Slug) error {
+	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	var p pasteRow
+	if err := txGetJSON(tx, keyPaste(slug), &p); err != nil {
+		_ = tx.Rollback()
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if domain.NormalizeStatus(p.Status) != domain.PasteStatusPending {
+		_ = tx.Rollback()
+		return nil
+	}
+	p.Status = string(domain.PasteStatusReady)
+	if err := txPutJSON(tx, keyPaste(slug), p); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit mark ready %q: %w", slug, err)
+	}
+	return nil
+}
+
+// MarkFailed flips a paste's status pending -> failed and releases its
+// quota by deleting the identity_pastes index entry (the slate quota SUM
+// walks that index, so dropping it is the byte release). The paste row
+// stays (flipped to failed) so a read can serve an error page. Guarded:
+// only a still-pending paste transitions, so a ready paste is never
+// un-counted. Idempotent: a second call finds the row already failed and
+// does nothing. See docs/SPEC.md "Paste lifecycle status (async blob
+// write)".
+func (r *SlateRepo) MarkFailed(slug domain.Slug) error {
+	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	var p pasteRow
+	if err := txGetJSON(tx, keyPaste(slug), &p); err != nil {
+		_ = tx.Rollback()
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if domain.NormalizeStatus(p.Status) != domain.PasteStatusPending {
+		_ = tx.Rollback()
+		return nil
+	}
+	p.Status = string(domain.PasteStatusFailed)
+	if err := txPutJSON(tx, keyPaste(slug), p); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	// Release the reservation: drop the index entry so the quota SUM no
+	// longer counts this paste's bytes.
+	if err := tx.Delete(keyIdentityPaste(p.Identity, slug.String())); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("delete identity-paste index: %w", err)
+	}
+	if _, err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit mark failed %q: %w", slug, err)
 	}
 	return nil
 }

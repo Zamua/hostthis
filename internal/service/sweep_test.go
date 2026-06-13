@@ -41,6 +41,9 @@ func TestSweep_Once(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upload 2: %v", err)
 	}
+	// The blob writes finalize in the background; drain them so both blobs
+	// are on disk before the sweep walks them.
+	upload.WaitFinalize()
 
 	logger := log.New(io.Discard, "", 0)
 	sweep := service.NewSweep(repo, blobs, logger)
