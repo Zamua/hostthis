@@ -179,6 +179,10 @@ func TestShaleReconciler_RaceAgainstInserts(t *testing.T) {
 	// bytes straight from the authoritative pastes/versions, independent of
 	// the derived counter. Used only for the at-rest end-of-run checks.
 	authoritativeLiveBytes := func() int64 {
+		// Inserts confirm their identity_pastes index entry in a deferred
+		// goroutine; drain so ListByOwner sees every just-inserted paste and
+		// atRest does not under-report.
+		repo.WaitPendingConfirms()
 		list, err := repo.ListByOwner(owner)
 		if err != nil {
 			return -1
@@ -498,6 +502,11 @@ func TestShaleReconciler_GraceProtectsInflightReservation(t *testing.T) {
 	if err := repo.InsertWithQuotaCheck(p, 0, now); err != nil {
 		t.Fatalf("insert real paste: %v", err)
 	}
+	// Drain the deferred confirm so the insert's OWN reservation marker is
+	// consumed before we seed + reconcile: otherwise a not-yet-run confirm
+	// would leave gracerea's marker behind for the past-grace reconcile to
+	// release, decrementing the counter and corrupting this test's premise.
+	repo.WaitPendingConfirms()
 
 	// Seed an in-flight reservation: a marker stamped `now` (age 0, well
 	// within grace) for a slug with NO authoritative paste, and fold its
@@ -579,6 +588,9 @@ func TestShaleReconciler_LeakedAppendMarker(t *testing.T) {
 	if err := repo.InsertWithQuotaCheck(p, 0, now); err != nil {
 		t.Fatalf("insert paste: %v", err)
 	}
+	// Drain the deferred confirm so the insert's reservation marker is gone
+	// before we seed the leaked append marker + reconcile.
+	repo.WaitPendingConfirms()
 	if _, err := repo.AppendVersionWithQuotaCheck(slug, domain.KindHTML, "sha-leak-v2", 150, 0, now); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}

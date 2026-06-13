@@ -3324,6 +3324,34 @@ shard, before any authoritative write happens.
    entry (with its denormalized projection, see below), and set
    `identity_first_seen/<id>` if absent.
 
+   The confirm step is **deferred off the response path**:
+   `InsertWithQuotaCheck` returns success as soon as steps 1 and 2 commit
+   (the bytes are reserved and the authoritative paste row exists), and
+   runs the confirm CAS in a background goroutine. This is the metadata
+   analogue of the async blob write described under "Paste lifecycle
+   status": just as the blob `Put` is moved off the response path, so is
+   the derived-index write, leaving the synchronous upload path with only
+   the reserve + authoritative-`pending` commit before it hands back the
+   URL. Confirm only writes the derived `identity_pastes` index entry and
+   first-seen, both of which are eventually-consistent projections the
+   reconciler already heals if the goroutine is lost (it was already a
+   non-fatal step whose failure left the index to the reconciler). The
+   observable effect is that a freshly-inserted paste is `Get`-readable
+   immediately (the authoritative `pastes/<slug>` row exists, so the URL
+   resolves to the paste - serving its content once `ready`, or the
+   loading page while still `pending` - and never 404s on a missing row)
+   but may take a beat (the goroutine, or worst case the next reconciler
+   pass) to appear in the owner's `list`. Quota is unaffected: the bytes
+   were committed by the reserve in step 1, before the response, so the
+   deferred confirm never moves the counter and the strict-ceiling
+   guarantee is untouched. The marker left un-dropped by an in-flight or
+   lost confirm is exactly the "leaked-marker" case the reconciler's
+   grace-windowed pass already handles. Shutdown does not strand a
+   confirm: `Close` drains the in-flight confirm goroutines before tearing
+   the cluster down, and an operator or test that needs the index to
+   reflect a just-inserted paste synchronously can drain on demand
+   (`WaitPendingConfirms`) rather than wait for a reconciler pass.
+
 **Why quota can never be exceeded.** The reserve step is the only place
 the counter is read and incremented, and it is a single atomic CAS on
 one shard. Two concurrent uploads for the same identity both reach the
