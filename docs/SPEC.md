@@ -1507,6 +1507,45 @@ An ssh key is required on every session - there is no anonymous mode.
 A session opened without a key gets `ssh key required` on stderr and
 exit code 3. See the `Identity` section above.
 
+### Write-path concurrency
+
+The blob `Put` and the metadata write are the two durable side effects of
+an upload, and they are independent: the blob is content-addressed by the
+SHA, which is known after the in-memory stage (hash + zstd) and before any
+metadata key is touched, so neither write needs the other's result. The
+upload service therefore runs them **concurrently** rather than strictly
+sequentially. The blob `Put` (the ~250 ms bottleneck against the object
+store) overlaps the metadata reserve + authoritative writes (~10-15 ms),
+so the wall-clock cost of an upload is the slower of the two, not their
+sum.
+
+Both must succeed before the URL is returned: the returned URL means
+"durably saved" exactly as before. The failure handling preserves the
+sequential path's guarantees:
+
+- **Blob fails, metadata succeeded.** The metadata insert is rolled back
+  with `Delete(slug)` (which removes the paste, its versions, the
+  slug-owner and expiry index, and releases the reserved bytes). A failed
+  blob therefore never leaves a usable paste: a read would 500 on the
+  missing blob, so the paste must not exist. The translated blob error
+  (e.g. `ErrServiceFull` for a bucket-quota rejection) is returned. The
+  rollback is best-effort; if it fails, the orphaned paste is a
+  blob-less row the sweep removes at expiry and the blob-GC ref-set keeps
+  the (absent) blob accounted - the same fail-safe direction the rest of
+  the write path takes.
+- **Metadata fails, blob succeeded.** The blob is an orphan keyed by a
+  SHA no paste references; the blob-GC ref-set scan reclaims it on the
+  next sweep, exactly as a blob written for a paste that later failed to
+  insert always was. The metadata error (over-quota, slug-taken after
+  retries, service-full) is returned unchanged.
+- **Slug collision.** The blob is content-addressed and slug-independent,
+  so it is `Put` once; the metadata slug-collision retry re-rolls the slug
+  and re-runs only the metadata insert, never re-`Put`ting the blob.
+
+This is purely a latency optimization of an already-durable write: the
+set of durable states the upload can end in is unchanged, only the order
+the two writes are issued in.
+
 ### Upload (update an existing slug)
 ```
 cat v2.html | ssh hostthis.dev abc12345
@@ -2148,7 +2187,11 @@ for metadata vs blobs.
 Whatever backend is in use, the rest of the app depends on it only
 through four small Go interfaces declared in `internal/service`:
 
-- `PasteRepo` (upload): `InsertWithQuotaCheck`, `Get`.
+- `PasteRepo` (upload): `InsertWithQuotaCheck`, `Get`, `Delete`. `Delete`
+  is used by the upload service only to roll back a metadata insert that
+  committed while its parallel blob `Put` failed (see "Write-path
+  concurrency" below); it is the same `Delete` the manage / sweep paths
+  use.
 - `PasteAdmin` (manage): `Get`, `ListByOwner`, `Delete`, `SetName`,
   `SetPinnedVersion`, `Unpin`, `AppendVersionWithQuotaCheck`,
   `ListVersions`, `GetVersion`, `DeleteVersion`, `CountByOwner`,
@@ -3123,6 +3166,27 @@ shard, before any authoritative write happens.
    reservation marker, write the `identity_pastes/<id>/<slug>` index
    entry (with its denormalized projection, see below), and set
    `identity_first_seen/<id>` if absent.
+
+   The confirm step is **deferred off the response path**:
+   `InsertWithQuotaCheck` returns success as soon as steps 1 and 2 commit
+   (the bytes are reserved and the authoritative paste row exists, so the
+   URL never 404s), and runs the confirm CAS in a background goroutine.
+   Confirm only writes the derived `identity_pastes` index entry and
+   first-seen, both of which are eventually-consistent projections the
+   reconciler already heals if the goroutine is lost (it was already a
+   non-fatal step whose failure left the index to the reconciler). The
+   observable effect is that a freshly-inserted paste is `Get`-readable
+   immediately but may take a beat (the goroutine, or worst case the next
+   reconciler pass) to appear in the owner's `list`. Quota is unaffected:
+   the bytes were committed by the reserve in step 1, before the
+   response, so the deferred confirm never moves the counter and the
+   strict-ceiling guarantee is untouched. The marker left un-dropped by an
+   in-flight or lost confirm is exactly the "leaked-marker" case the
+   reconciler's grace-windowed pass already handles. Shutdown does not
+   strand a confirm: `Close` drains the in-flight confirm goroutines before
+   tearing the cluster down, and an operator or test that needs the index
+   to reflect a just-inserted paste synchronously can drain on demand
+   rather than wait for a reconciler pass.
 
 **Why quota can never be exceeded.** The reserve step is the only place
 the counter is read and incremented, and it is a single atomic CAS on

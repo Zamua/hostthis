@@ -16,10 +16,15 @@ import (
 )
 
 // PasteRepo is the persistence interface the upload service needs.
-// internal/storage.PasteRepo satisfies it.
+// internal/storage.PasteRepo satisfies it. Delete is used only to roll
+// back a metadata insert that committed while its concurrent blob Put
+// failed (see Create): without it a failed blob would leave a usable
+// paste whose read 500s on the missing blob. All three backends already
+// expose Delete (it backs the manage / sweep paths).
 type PasteRepo interface {
 	InsertWithQuotaCheck(p domain.Paste, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Paste, error)
+	Delete(domain.Slug) error
 }
 
 // BlobStore writes and reads content-addressed bytes. Put streams r
@@ -116,17 +121,19 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		return Result{}, domain.ErrUnsupportedKind
 	}
 	now := u.Now().UTC()
-	if err := u.Blobs.PutPrecompressed(staged.SHA, staged.Body); err != nil {
-		// A blob Put rejected by the object store's bucket quota surfaces
-		// storage.ErrServiceFull (the durable total-bytes ceiling, see SPEC
-		// "Limits -> Durable total-bytes ceiling: an object-store quota").
-		// Translate it into the graceful "service is at capacity" response
-		// instead of a generic 500.
-		if errors.Is(err, storage.ErrServiceFull) {
-			return Result{}, ErrServiceFull
-		}
-		return Result{}, fmt.Errorf("blob write: %w", err)
-	}
+
+	// The blob Put (the ~250 ms object-store bottleneck) and the metadata
+	// writes (~10-15 ms) are independent: the content SHA is known here,
+	// before any metadata key is touched, and the blob is addressed by it.
+	// Run them CONCURRENTLY so the wall-clock cost is the slower of the
+	// two, not their sum (SPEC "Write-path concurrency"). The blob is
+	// content-addressed and slug-independent, so it is Put exactly once
+	// even when the metadata path re-rolls the slug on a collision.
+	blobErrCh := make(chan error, 1)
+	go func() {
+		blobErrCh <- u.Blobs.PutPrecompressed(staged.SHA, staged.Body)
+	}()
+
 	p := domain.Paste{
 		Identity:      domain.Identity(owner),
 		Kind:          kind,
@@ -141,25 +148,77 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	// Retry on slug collision. SlugAlphabet has 32^8 ≈ 1.1e12 distinct
 	// slugs; collisions inside 5 retries are vanishingly unlikely.
 	// The quota checks live inside InsertWithQuotaCheck so concurrent
-	// uploads can't both pass and both insert.
+	// uploads can't both pass and both insert. This loop runs in the
+	// foreground, overlapping the in-flight blob Put above.
 	const maxRetries = 5
+	var metaErr error
+	inserted := false
 	for range maxRetries {
 		p.Slug = domain.NewRandomSlug()
 		err := u.Repo.InsertWithQuotaCheck(p, int64(domain.UserQuotaBytes), now)
 		switch {
 		case err == nil:
-			return Result{Paste: p}, nil
-		case errors.Is(err, storage.ErrServiceFull):
-			return Result{}, ErrServiceFull
-		case errors.Is(err, storage.ErrOverUserQuota):
-			return Result{}, ErrOverQuota
+			inserted = true
 		case isSlugTaken(err):
 			continue
 		default:
-			return Result{}, err
+			metaErr = err
 		}
+		break
 	}
-	return Result{}, SlugTakenErr
+	if !inserted && metaErr == nil {
+		// All retries collided on a slug.
+		metaErr = SlugTakenErr
+	}
+
+	// Join the blob Put. Both writes must succeed before the URL is
+	// returned: the returned URL means "durably saved" exactly as before.
+	blobErr := <-blobErrCh
+
+	switch {
+	case metaErr == nil && blobErr == nil:
+		// Both durable: the paste is readable and its blob exists.
+		return Result{Paste: p}, nil
+
+	case metaErr == nil && blobErr != nil:
+		// The metadata committed but the blob did not. A read would 500 on
+		// the missing blob, so the paste must not survive: roll back the
+		// insert (Delete removes the paste + versions + indexes and
+		// releases the reserved bytes). Best-effort - a failed rollback
+		// leaves a blob-less row the sweep removes at expiry, the same
+		// fail-safe direction the rest of the write path takes.
+		_ = u.Repo.Delete(p.Slug)
+		return Result{}, translateBlobErr(blobErr)
+
+	default:
+		// metaErr != nil. Any blob written is now an orphan keyed by a SHA
+		// no paste references; the blob-GC ref-set reclaims it on the next
+		// sweep, exactly as before. Surface the metadata error.
+		return Result{}, translateMetaErr(metaErr)
+	}
+}
+
+// translateBlobErr maps a blob Put failure to the service-level sentinel.
+// A bucket-quota rejection (storage.ErrServiceFull) becomes the graceful
+// "service is at capacity" response; anything else is wrapped.
+func translateBlobErr(err error) error {
+	if errors.Is(err, storage.ErrServiceFull) {
+		return ErrServiceFull
+	}
+	return fmt.Errorf("blob write: %w", err)
+}
+
+// translateMetaErr maps an InsertWithQuotaCheck failure to the
+// service-level sentinel, preserving the sequential path's mapping.
+func translateMetaErr(err error) error {
+	switch {
+	case errors.Is(err, storage.ErrServiceFull):
+		return ErrServiceFull
+	case errors.Is(err, storage.ErrOverUserQuota):
+		return ErrOverQuota
+	default:
+		return err
+	}
 }
 
 // isSlugTaken returns true if err is any flavor of "slug already

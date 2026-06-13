@@ -74,6 +74,9 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 	if err := repo.InsertWithQuotaCheck(good, 0, now); err != nil {
 		t.Fatalf("insert good paste: %v", err)
 	}
+	// Drain the deferred confirm before we manually desync the index below:
+	// a not-yet-run confirm would re-write the index entry we delete.
+	repo.WaitPendingConfirms()
 
 	// Poison #1: an undecodable authoritative pastes/ row. A second slug so
 	// its key sorts into the same aggregate scan Reconcile walks.
