@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -59,10 +60,11 @@ func main() {
 
 	pasteRepo := metadata.Repo
 	keyGateRepo := metadata.KeyGate
-	blobs, blobsSweep, err := buildBlobStore(*dataDir, logger)
+	blobs, blobsSweep, blobsCleanup, err := buildBlobStore(*dataDir, logger)
 	if err != nil {
 		logger.Fatalf("blob store: %v", err)
 	}
+	defer blobsCleanup()
 
 	siteRepo := metadata.Sites
 	roomRepo := metadata.Rooms
@@ -232,19 +234,23 @@ func main() {
 // configured BlobStore + SweepBlobs (same type, narrowed via two
 // interfaces). The disk backend is the default; "s3" picks up an
 // S3-compatible endpoint via HOSTTHIS_S3_* env vars.
-func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, service.SweepBlobs, error) {
+func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, service.SweepBlobs, func(), error) {
 	backend := strings.ToLower(envOr("HOSTTHIS_BLOB_BACKEND", "disk"))
 	switch backend {
 	case "", "disk":
 		bs, err := storage.NewBlobStore(filepath.Join(dataDir, "blobs"))
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		logger.Printf("blobs: disk backend at %s/blobs (zstd-compressed at rest)", dataDir)
 		// Wrap with the compression layer for Put/Get used by upload + manage.
 		// Sweep uses WalkBlobs + Remove which are sha-only (no body access),
 		// so it bypasses the wrapper and talks to the raw backend.
-		return storage.NewCompressedBlobStore(bs), bs, nil
+		inner, sweep, cleanup, err := maybeWrapWriteBack(bs, dataDir, logger)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return storage.NewCompressedBlobStore(inner), sweep, cleanup, nil
 	case "s3":
 		cfg := storage.S3Config{
 			EndpointURL: os.Getenv("HOSTTHIS_S3_ENDPOINT"),
@@ -256,13 +262,52 @@ func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlob
 		}
 		bs, err := storage.NewS3BlobStore(cfg)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		logger.Printf("blobs: s3 backend at %s bucket=%s (zstd-compressed at rest)", cfg.EndpointURL, cfg.Bucket)
-		return storage.NewCompressedBlobStore(bs), bs, nil
+		inner, sweep, cleanup, err := maybeWrapWriteBack(bs, dataDir, logger)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return storage.NewCompressedBlobStore(inner), sweep, cleanup, nil
 	default:
-		return nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|s3)", backend)
+		return nil, nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|s3)", backend)
 	}
+}
+
+// writeBackInner is the contract maybeWrapWriteBack needs of a durable
+// backend: the inner Put/Get/GetReader the compression layer wraps, plus
+// the WalkBlobs/Remove the sweep uses. Both *storage.BlobStore and
+// *storage.S3BlobStore satisfy it.
+type writeBackInner interface {
+	Put(sha string, r io.Reader, size int64) error
+	Get(sha string) ([]byte, error)
+	GetReader(sha string) (io.ReadCloser, int64, error)
+	WalkBlobs(fn func(sha string) error) error
+	Remove(sha string) error
+}
+
+// maybeWrapWriteBack optionally fronts the durable backend with the
+// local-disk write-back cache when HOSTTHIS_BLOB_WRITEBACK=true. When
+// disabled (the default), the durable backend is returned unchanged so
+// today's strict durable-before-ack behavior is preserved. Returns the
+// store to wrap with compression, the sweep interface, and a cleanup
+// func (stops the uploaders; no-op when disabled).
+func maybeWrapWriteBack(durable writeBackInner, dataDir string, logger *log.Logger) (storage.InnerBlobStore, service.SweepBlobs, func(), error) {
+	if strings.ToLower(envOr("HOSTTHIS_BLOB_WRITEBACK", "false")) != "true" {
+		return durable, durable, func() {}, nil
+	}
+	cfg := storage.WriteBackConfig{
+		Dir:      envOr("HOSTTHIS_BLOB_WRITEBACK_DIR", filepath.Join(dataDir, "blob-cache")),
+		MaxBytes: envOrInt64("HOSTTHIS_BLOB_WRITEBACK_MAX_BYTES", 1<<30),
+		Logger:   logger,
+	}
+	wb, err := storage.NewWriteBackBlobStore(durable, cfg)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("blob write-back cache: %w", err)
+	}
+	logger.Printf("blobs: write-back cache ENABLED at %s (max %d bytes); durability window applies, see SPEC", cfg.Dir, cfg.MaxBytes)
+	return wb, wb, wb.Close, nil
 }
 
 // buildCachePurger reads HOSTTHIS_CACHE_BACKEND and returns the
@@ -315,6 +360,15 @@ func envOr(key, fallback string) string {
 func envOrInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func envOrInt64(key string, fallback int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			return n
 		}
 	}
