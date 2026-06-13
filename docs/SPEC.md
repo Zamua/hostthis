@@ -3544,6 +3544,39 @@ scaling deployment this section motivates is R=1. A deployment that values
 uptime over peak write rate runs R=2 and accepts that the throughput
 ceiling is the per-node ceiling.
 
+#### The value envelope and the strip-on-read invariant
+
+At R>1 shale wraps every stored value in a last-writer-wins envelope (a
+magic byte + a (timestamp, node-id) stamp + the opaque payload) so the read
+fan-out can pick a winner across replicas. The cluster layer adds the
+envelope on write and removes it on exactly ONE read path: the single-key
+**replicated** Get. Every other read primitive `ShaleRepo` uses returns the
+**raw stored bytes**, envelope included:
+
+- a cross-shard aggregate scan (`aggregatePrefix`),
+- a single-shard prefix scan (`scanPrefix`),
+- a CAS transaction's `tx.Get` (counters, markers, JSON reads), and
+- even a single-key Get on an R=1 or multi-backend node (the cluster only
+  unwraps in the replicated-Get path, not the plain backend read).
+
+`ShaleRepo` therefore treats every raw read as potentially-enveloped and
+strips the envelope before decoding it, via a single `stripEnvelope` step
+that is a **no-op for raw / pre-envelope values** (they carry no magic byte,
+so they pass through unchanged). This invariant holds at every decode site:
+both scan helpers, the per-owner and room-byte counters, the reservation
+markers, the JSON CAS reads, the room values, and the single-key paste /
+version reads. No hostthis payload begins with the envelope magic byte (JSON
+rows begin `{`, counters are ASCII digits, markers / timestamps / the
+`slug_owner` pointer are text, room values carry a `v` sentinel), so the
+strip never misfires on a legitimate raw value.
+
+The invariant is **not optional even on an R=1 deployment**: a value written
+while the cluster briefly ran at R>1 stays enveloped on disk until it is next
+overwritten, and an R=1 reader must still decode it. Stripping on every read
+path is what makes a mixed R=1 / R>1 value population transparent to every
+consumer, so a deployment can change replication factor without an offline
+rewrite of existing values.
+
 #### The rebalance safety contract (lossless data movement)
 
 The crux of multi-node operation is what happens when membership changes.

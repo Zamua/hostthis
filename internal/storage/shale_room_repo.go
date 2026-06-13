@@ -190,6 +190,11 @@ func shaleEncodeRoomValue(val []byte) []byte {
 // bytes. A legacy / malformed stored value with no prefix is returned as-is so
 // a read never fails on it (defensive; the encoder always writes the prefix).
 func shaleDecodeRoomValue(stored []byte) []byte {
+	// Strip the LWW envelope first (see shaleDecodedRoomValueLen): raw CAS
+	// reads at R>1 are wrapped. Idempotent for R=1 / already-stripped values.
+	if payload, err := stripEnvelope(stored); err == nil {
+		stored = payload
+	}
 	if len(stored) > 0 && stored[0] == shaleRoomValuePrefix {
 		return append([]byte(nil), stored[1:]...)
 	}
@@ -200,6 +205,12 @@ func shaleDecodeRoomValue(stored []byte) []byte {
 // value (the figure all room byte accounting charges), accounting for the
 // sentinel prefix the encoder adds.
 func shaleDecodedRoomValueLen(stored []byte) int {
+	// Strip the LWW envelope first: R>1 writes are wrapped, and the CAS
+	// tx.Get sites that call this hand back the RAW stored bytes (only
+	// cluster.Get unwraps). Idempotent for R=1 / already-stripped values.
+	if payload, err := stripEnvelope(stored); err == nil {
+		stored = payload
+	}
 	if len(stored) > 0 && stored[0] == shaleRoomValuePrefix {
 		return len(stored) - 1
 	}
