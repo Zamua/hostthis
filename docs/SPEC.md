@@ -2226,7 +2226,17 @@ behaviors are expressed in terms of inputs and observable outputs:
   and delete the whole store, so the sweep aborts the GC pass when the
   referenced set is empty, no pastes were swept this tick, and the blob
   store is non-empty (a fail-closed guard against a buggy backend,
-  schema misalignment, or partial restore).
+  schema misalignment, or partial restore). `ReferencedBlobSHAs` is
+  ALSO fail-closed against an undecodable record: a row it cannot
+  decode aborts the whole scan with an error and the method returns
+  that error (never a partial set). It must NEVER skip a bad record and
+  keep going, because a skipped row under-counts references - a blob a
+  skipped row still pointed at would look unreferenced and be deleted,
+  irreversible data loss. The blob sweep treats any error from
+  `ReferencedBlobSHAs` as "delete nothing this pass." See "Decode
+  tolerance is per-scan-semantics" below for why this scan is the one
+  exception to the skip-and-continue rule the other background scans
+  follow.
 - **Owner stats.** `ListByOwner` returns the owner's active pastes
   ordered soonest-to-expire first, with `LatestVersion` populated;
   `CountByOwner` counts them; `SumActiveBytesByOwner` matches the quota
@@ -3363,6 +3373,101 @@ tombstoned version's content SHA is excluded, the canonical rule above.
 It must never return an empty set while pastes exist, the same
 invariant the single-writer backends hold, and the sweep's
 abort-on-zero-refs guard backstops a backend that wrongly does.
+
+### Decode tolerance is per-scan-semantics
+
+Every background scan that walks the metadata keyspace decodes each row
+it visits, and any row can in principle be corrupt or undecodable (a
+truncated value from a partial restore, a schema-version it cannot read,
+a torn write). How a scan reacts to one undecodable row is NOT uniform:
+it is dictated by the scan's SEMANTICS, because the safe failure
+direction differs per scan. There are exactly three policies, and which
+one a given scan uses is load-bearing for correctness.
+
+**The invariant that ranks all three: no decode-tolerance path may ever
+cause a referenced blob to be deleted or a quota to be under-counted.**
+A scan may do less work this pass (skip a row, retry next pass) or refuse
+to act at all (abort the pass), but it may never take an action that
+deletes live content or admits a write past the real cap. Every policy
+below is chosen to satisfy that invariant; where two policies would both
+satisfy availability, the one that also satisfies the invariant wins.
+
+**Policy 1 - idempotent background sweeps and the reconciler: SKIP +
+LOG, continue.** The expiry sweep (`ExpiredSlugs` / `ExpiredRoomKeys`
+and the site-expiry index walk), the keygate prune
+(`DeleteFirstSeenOlderThan` / `PruneOldRoomCreates`), and the reconciler
+(`Reconcile` - rebuild derived indexes and complete reservation markers
+- including `reconcileSiteReservations`) all treat an undecodable row as
+SKIP + LOG and CONTINUE the pass. The consequence of skipping is bounded
+and self-correcting: that one record is simply not processed THIS pass;
+the next pass (the periodic loop re-runs, e.g. ~10 min later) retries it.
+This is safe ONLY because these operations are idempotent and re-run:
+expiring a slug, pruning a stale keygate marker, releasing an abandoned
+reservation, and rebuilding a derived index all produce the same end
+state whether they run once or many times, so deferring one record to a
+later pass costs at most latency, never correctness. A single corrupt row
+must NOT be allowed to abort the whole pass: a hard-fail there would stall
+expiry (pastes/sites/rooms stop being reclaimed), stall the keygate prune
+(the Sybil ledger grows unbounded), and stall the reconciler (drift stops
+being healed) for every healthy record too, until an operator hand-fixes
+the one bad row. The blast radius of one poisoned row must stay one row.
+This mirrors the keygate admission-count scan, which already does the
+right thing for an idempotent counter (a tolerant parse that skip +
+continues on a bad row). The skip is LOGGED (record key + decode error)
+so a persistently-bad row is visible to an operator, not silently
+swallowed forever.
+
+  Each skip-and-continue pass is therefore PARTIAL by design: it did the
+  work for every decodable record and deferred the undecodable ones. A
+  partial expiry pass leaves an expired-but-unswept record (already a
+  tolerated transient state - the per-app room aggregate, for instance,
+  counts expired-unswept bytes until the sweep catches up, fail-safe in
+  the over-count direction). A partial reconciler pass heals what it could
+  and re-attempts the rest next tick. Neither partiality can delete live
+  content or under-count a quota, so both satisfy the ranking invariant.
+
+**Policy 2 - the blob-GC ref-set scan: FAIL CLOSED, abort, never skip.**
+`ReferencedBlobSHAs` (and its site sibling `ReferencedSiteBlobSHAs`) is
+the one background scan that must NOT skip a bad record. Its output is
+the ALLOW-LIST of blobs the sweep keeps; the sweep deletes every blob NOT
+in the returned set. Skipping an undecodable row here UNDER-COUNTS
+references: a blob that the skipped row still referenced is now absent
+from the keep-set, looks unreferenced, and gets DELETED - irreversible
+data loss, the exact failure the ranking invariant forbids. So a decode
+error in the ref-set scan FAILS CLOSED: it aborts the GC pass and returns
+the error, never a partial set, never a skipped row. The blob sweep
+treats that error (like the existing zero-refs guard) as "do not delete
+ANYTHING this pass." This reinforces, and is the decode-side companion
+to, the existing abort-on-zero-refs guard: both guarantee the sweep never
+deletes a blob on the basis of an incomplete reference picture. A corrupt
+row here costs a deferred GC pass (storage is reclaimed a tick late, once
+the bad row is fixed or ages out), which is always preferable to deleting
+a live blob. The asymmetry with Policy 1 is the whole point: an expiry
+sweep that skips a row under-DELETES (leaves a record alive one pass too
+long - safe, self-correcting), while a ref-set scan that skips a row
+over-DELETES (drops a live blob - unsafe, irreversible). Same mechanical
+"skip," opposite safety direction, so the ref-set scan gets the opposite
+policy.
+
+**Policy 3 - user-facing reads: UNCHANGED, keep hard-failing.** The
+per-request read paths (`Get`, `ListByOwner` / `ListVersions`,
+`GetVersion`, the site manifest read, the room scan / per-key read) are
+NOT made tolerant. A user read that hits a corrupt record SHOULD surface
+an error to that user, not silently skip the record and return a
+plausible-looking-but-incomplete result. These paths are synchronous,
+user-observed, and not idempotent retries of a background loop, so the
+right behavior is to fail loudly on the one request that touched the bad
+row - the user (or operator) sees a real error rather than silent data
+loss in the response body. Tolerance is a property of the BACKGROUND
+loops only; the foreground read surface is unchanged.
+
+The three policies, side by side:
+
+| Scan kind | Examples | On a bad record | Why |
+| --- | --- | --- | --- |
+| Idempotent background sweep / reconciler | `ExpiredSlugs`, `ExpiredRoomKeys`, site-expiry walk, `DeleteFirstSeenOlderThan`, `PruneOldRoomCreates`, `Reconcile` + `reconcileSiteReservations` | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
+| Blob-GC reference set | `ReferencedBlobSHAs`, `ReferencedSiteBlobSHAs` | FAIL CLOSED - abort the GC pass, return error, delete nothing; NEVER skip | skipping under-counts refs -> a live blob looks orphaned and is deleted (irreversible) |
+| User-facing read | `Get`, `ListByOwner`, `ListVersions`, `GetVersion`, site manifest read, room scan / per-key read | HARD-FAIL (unchanged) | a user read of corrupt data should surface an error, not silently skip |
 
 ### Deploy arc: replication factor 1, then scale out
 
