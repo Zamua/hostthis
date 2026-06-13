@@ -56,3 +56,18 @@ func TestNewRandomSlug_Uniqueness(t *testing.T) {
 		seen[s] = struct{}{}
 	}
 }
+
+func TestNormalizeStatus(t *testing.T) {
+	cases := map[string]PasteStatus{
+		"pending": PasteStatusPending,
+		"ready":   PasteStatusReady,
+		"failed":  PasteStatusFailed,
+		"":        PasteStatusReady, // legacy row with no status field
+		"bogus":   PasteStatusReady, // unknown value falls back to ready
+	}
+	for in, want := range cases {
+		if got := NormalizeStatus(in); got != want {
+			t.Errorf("NormalizeStatus(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

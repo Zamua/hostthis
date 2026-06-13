@@ -123,6 +123,10 @@ func TestUploadAndServe(t *testing.T) {
 		t.Fatalf("stderr should mention expiry, got %q", stderr.String())
 	}
 
+	// The blob write + status flip to ready now happen in a background
+	// finalizer; wait for it before reading so the GET sees a ready paste.
+	upload.WaitFinalize()
+
 	// Now GET the URL and assert the bytes round-trip.
 	resp, err := http.Get(url)
 	if err != nil {

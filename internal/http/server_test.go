@@ -255,3 +255,106 @@ func TestPasteRead_IfModifiedSince304(t *testing.T) {
 		t.Fatalf("status: got %d, want 304", w.Code)
 	}
 }
+
+// TestPasteRead_PendingServesLoadingPage pins the pending lifecycle state:
+// a GET on a pending paste serves the auto-refreshing loading page (200,
+// no-store, meta-refresh) instead of the content. See docs/SPEC.md "Paste
+// lifecycle status".
+func TestPasteRead_PendingServesLoadingPage(t *testing.T) {
+	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
+	paste := domain.Paste{
+		Slug:      "abc23456",
+		Status:    domain.PasteStatusPending,
+		Kind:      domain.KindHTML,
+		ExpiresAt: now.Add(7 * 24 * time.Hour),
+	}
+	srv := &Server{
+		Pastes:     stubPasteReader{p: paste},
+		Blobs:      stubBlobReader{body: []byte("should not be served")},
+		ApexDomain: "paste.test",
+		Now:        func() time.Time { return now },
+	}
+	r := httptest.NewRequest("GET", "/p/abc23456", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code != 200 {
+		t.Fatalf("status: got %d, want 200", w.Code)
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control: got %q, want no-store", got)
+	}
+	bodyStr := w.Body.String()
+	if !strings.Contains(bodyStr, "http-equiv=\"refresh\"") {
+		t.Errorf("loading page missing meta-refresh: %q", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "preparing your paste") {
+		t.Errorf("loading page missing expected copy")
+	}
+	if strings.Contains(bodyStr, "should not be served") {
+		t.Errorf("pending paste leaked content bytes")
+	}
+}
+
+// TestPasteRead_FailedServesErrorPage pins the failed lifecycle state: a
+// GET on a failed paste serves the error page (410 Gone, no-store), never
+// the content.
+func TestPasteRead_FailedServesErrorPage(t *testing.T) {
+	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
+	paste := domain.Paste{
+		Slug:      "abc23456",
+		Status:    domain.PasteStatusFailed,
+		Kind:      domain.KindHTML,
+		ExpiresAt: now.Add(7 * 24 * time.Hour),
+	}
+	srv := &Server{
+		Pastes:     stubPasteReader{p: paste},
+		Blobs:      stubBlobReader{body: []byte("should not be served")},
+		ApexDomain: "paste.test",
+		Now:        func() time.Time { return now },
+	}
+	r := httptest.NewRequest("GET", "/p/abc23456", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code != 410 {
+		t.Fatalf("status: got %d, want 410", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "could not be saved") {
+		t.Errorf("error page missing expected copy: %q", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "should not be served") {
+		t.Errorf("failed paste leaked content bytes")
+	}
+}
+
+// TestPasteRead_ReadyServesContent confirms an explicit ready status still
+// serves the content normally (the terminal success state).
+func TestPasteRead_ReadyServesContent(t *testing.T) {
+	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
+	body := []byte("<!doctype html><h1>ready</h1>")
+	paste := domain.Paste{
+		Slug:       "abc23456",
+		Status:     domain.PasteStatusReady,
+		Kind:       domain.KindHTML,
+		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
+		UpdatedAt:  now,
+		ExpiresAt:  now.Add(7 * 24 * time.Hour),
+	}
+	srv := &Server{
+		Pastes:     stubPasteReader{p: paste},
+		Blobs:      stubBlobReader{body: body},
+		ApexDomain: "paste.test",
+		Now:        func() time.Time { return now.Add(time.Hour) },
+	}
+	r := httptest.NewRequest("GET", "/p/abc23456", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code != 200 {
+		t.Fatalf("status: got %d, want 200", w.Code)
+	}
+	if got := w.Body.String(); got != string(body) {
+		t.Errorf("body: got %q, want %q", got, body)
+	}
+}

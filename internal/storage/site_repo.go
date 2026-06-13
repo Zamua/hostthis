@@ -375,6 +375,7 @@ func identityActiveBytes(tx *sql.Tx, identity, nowStr, siteNowStr string) (int64
 		FROM versions v
 		JOIN pastes pp ON pp.slug = v.slug
 		WHERE pp.identity = ? AND pp.expires_at > ? AND v.deleted = 0
+		  AND pp.status != 'failed'
 	`, identity, nowStr).Scan(&pasteTotal); err != nil {
 		return 0, fmt.Errorf("identity paste sum: %w", err)
 	}

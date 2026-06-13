@@ -7,6 +7,46 @@ import (
 	"time"
 )
 
+// PasteStatus is the lifecycle state of a paste's content blob. It
+// exists so the slow blob write (to object storage) can run in the
+// background after the metadata is committed: Create returns the URL
+// while the paste is still PasteStatusPending, a background finalizer
+// flips it to PasteStatusReady once the bytes land (or
+// PasteStatusFailed if the write fails). See docs/SPEC.md "Paste
+// lifecycle status (async blob write)".
+type PasteStatus string
+
+const (
+	// PasteStatusPending: metadata is committed (slug reserved, quota
+	// charged) but the content blob has not finished landing in the
+	// object store. A read serves a loading page.
+	PasteStatusPending PasteStatus = "pending"
+	// PasteStatusReady: the blob write succeeded; the paste serves its
+	// content normally. Terminal success state.
+	PasteStatusReady PasteStatus = "ready"
+	// PasteStatusFailed: the background blob write failed (or the
+	// handling pod died mid-write and the reconciler aged the paste
+	// out). A read serves an error page; the reservation is released.
+	PasteStatusFailed PasteStatus = "failed"
+)
+
+// NormalizeStatus maps a persisted status string to a PasteStatus,
+// defaulting an empty value to PasteStatusReady. A row written before
+// the lifecycle existed has no status field; "absent" means "written
+// before the lifecycle, therefore complete." This keeps the status a
+// pure additive migration with no flag day.
+func NormalizeStatus(s string) PasteStatus {
+	switch PasteStatus(s) {
+	case PasteStatusPending:
+		return PasteStatusPending
+	case PasteStatusFailed:
+		return PasteStatusFailed
+	default:
+		// "" (legacy row) or any unknown value -> ready.
+		return PasteStatusReady
+	}
+}
+
 // Paste is the unit a user uploads. The "currently served" bytes are
 // addressed by ContentSHA + Kind. Older versions live in a parallel
 // versions table, addressed by (Slug, VerNum).
@@ -18,6 +58,7 @@ import (
 type Paste struct {
 	Slug          Slug
 	Identity      Identity    // "key:<fp>" or "ip:<subnet>" - quota AND capability gate
+	Status        PasteStatus // pending | ready | failed (blob-write lifecycle)
 	Kind          ContentKind // html | markdown of the currently-served version
 	ContentSHA    string      // sha256 of the currently-served bytes
 	Size          int         // bytes (currently-served)

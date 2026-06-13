@@ -28,6 +28,7 @@ type stack struct {
 	sshAddr     string
 	repo        *storage.PasteRepo
 	blobs       *storage.CompressedBlobStore
+	upload      *service.Upload
 	keyedClient *xssh.Client
 	keyedOwner  string
 	anonClient  *xssh.Client
@@ -128,6 +129,7 @@ func startStack(t *testing.T) *stack {
 		sshAddr:     addr,
 		repo:        repo,
 		blobs:       blobs,
+		upload:      upload,
 		keyedClient: keyedClient,
 		keyedOwner:  keyedOwner,
 		anonClient:  anonClient,
@@ -165,6 +167,13 @@ func (s *stack) runOn(cli *xssh.Client, cmd string, stdin []byte) (string, strin
 		} else {
 			s.t.Fatalf("run %q: %v\nstderr: %s", cmd, err, stderr.String())
 		}
+	}
+	// An upload's blob write + status flip to ready now finalize in a
+	// background goroutine. Drain them before returning so a subsequent
+	// read (show / GET / list) in the same test sees a ready paste rather
+	// than racing the finalizer. A no-op when the command did not upload.
+	if s.upload != nil {
+		s.upload.WaitFinalize()
 	}
 	return stdout.String(), stderr.String(), exit
 }

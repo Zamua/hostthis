@@ -80,11 +80,12 @@ func (r *PasteRepo) InsertWithQuotaCheck(p domain.Paste, userCap int64, now time
 	}
 	// 3. Insert.
 	if _, err := tx.Exec(`
-		INSERT INTO pastes (slug, identity, kind, content_sha, size, name,
+		INSERT INTO pastes (slug, identity, status, kind, content_sha, size, name,
 		                    pinned_version,
 		                    created_at, updated_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, p.Slug.String(), p.Identity.String(), string(p.Kind), p.ContentSHA, p.Size, p.Name,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, p.Slug.String(), p.Identity.String(), string(domain.NormalizeStatus(string(p.Status))),
+		string(p.Kind), p.ContentSHA, p.Size, p.Name,
 		p.PinnedVersion,
 		formatTime(p.CreatedAt), formatTime(p.UpdatedAt), formatTime(p.ExpiresAt)); err != nil {
 		if isUniqueViolation(err) {
@@ -114,7 +115,7 @@ func (r *PasteRepo) Insert(p domain.Paste) error {
 // them.
 func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
 	row := r.db.QueryRow(`
-		SELECT slug, identity, kind, content_sha, size, name,
+		SELECT slug, identity, status, kind, content_sha, size, name,
 		       pinned_version,
 		       created_at, updated_at, expires_at
 		FROM pastes WHERE slug = ?
@@ -134,7 +135,7 @@ func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	// have been simpler but the active-pastes-per-owner count is small
 	// enough that one join in one statement is the right shape.
 	rows, err := r.db.Query(`
-		SELECT p.slug, p.identity, p.kind, p.content_sha, p.size, p.name,
+		SELECT p.slug, p.identity, p.status, p.kind, p.content_sha, p.size, p.name,
 		       p.pinned_version,
 		       p.created_at, p.updated_at, p.expires_at,
 		       COALESCE((SELECT MAX(ver_num) FROM versions v WHERE v.slug = p.slug AND v.deleted = 0), 1) AS latest_version
@@ -171,6 +172,39 @@ func (r *PasteRepo) SetName(slug domain.Slug, name string) error {
 	_, err := r.db.Exec(`UPDATE pastes SET name = ? WHERE slug = ?`, name, slug.String())
 	if err != nil {
 		return fmt.Errorf("set name: %w", err)
+	}
+	return nil
+}
+
+// MarkReady flips a paste's status pending -> ready (the finalizer's
+// success transition once the blob landed). Guarded by the WHERE clause:
+// only a still-pending row is advanced, so a late finalizer cannot
+// resurrect a failed paste. A missing or non-pending row is a no-op. See
+// docs/SPEC.md "Paste lifecycle status (async blob write)".
+func (r *PasteRepo) MarkReady(slug domain.Slug) error {
+	_, err := r.db.Exec(
+		`UPDATE pastes SET status = 'ready' WHERE slug = ? AND status = 'pending'`,
+		slug.String())
+	if err != nil {
+		return fmt.Errorf("mark ready %q: %w", slug, err)
+	}
+	return nil
+}
+
+// MarkFailed flips a paste's status pending -> failed (the finalizer's
+// failure transition AND the reconciler's age-out). The row stays so a
+// read can serve an error page; the quota SUM excludes failed pastes
+// (see identityActiveBytes), so flipping the status IS the byte release -
+// no separate index to drop on sqlite. Guarded by the WHERE clause: only
+// a still-pending row transitions, so a ready paste is never un-counted.
+// Idempotent: a re-call finds the row already failed and changes nothing.
+// See docs/SPEC.md "Paste lifecycle status (async blob write)".
+func (r *PasteRepo) MarkFailed(slug domain.Slug) error {
+	_, err := r.db.Exec(
+		`UPDATE pastes SET status = 'failed' WHERE slug = ? AND status = 'pending'`,
+		slug.String())
+	if err != nil {
+		return fmt.Errorf("mark failed %q: %w", slug, err)
 	}
 	return nil
 }
@@ -445,6 +479,7 @@ func (r *PasteRepo) SumActiveSizeByOwner(owner string, now time.Time) (int64, er
 		FROM versions v
 		JOIN pastes p ON p.slug = v.slug
 		WHERE p.identity = ? AND p.expires_at > ? AND v.deleted = 0
+		  AND p.status != 'failed'
 	`, owner, formatTime(now)).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("sum active size: %w", err)
@@ -485,8 +520,8 @@ func (r *PasteRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 // place to update if columns shift.
 func scanPaste(s scanner) (domain.Paste, error) {
 	var p domain.Paste
-	var slugStr, identStr, kind, created, updated, expires string
-	if err := s.Scan(&slugStr, &identStr, &kind, &p.ContentSHA, &p.Size, &p.Name,
+	var slugStr, identStr, status, kind, created, updated, expires string
+	if err := s.Scan(&slugStr, &identStr, &status, &kind, &p.ContentSHA, &p.Size, &p.Name,
 		&p.PinnedVersion,
 		&created, &updated, &expires); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -496,6 +531,7 @@ func scanPaste(s scanner) (domain.Paste, error) {
 	}
 	p.Slug = domain.Slug(slugStr)
 	p.Identity = domain.Identity(identStr)
+	p.Status = domain.NormalizeStatus(status)
 	p.Kind = domain.ContentKind(kind)
 	p.CreatedAt = parseTime(created)
 	p.UpdatedAt = parseTime(updated)
@@ -507,8 +543,8 @@ func scanPaste(s scanner) (domain.Paste, error) {
 // by ListByOwner; one extra COALESCE'd subquery in the SELECT.
 func scanPasteWithLatest(s scanner) (domain.Paste, error) {
 	var p domain.Paste
-	var slugStr, identStr, kind, created, updated, expires string
-	if err := s.Scan(&slugStr, &identStr, &kind, &p.ContentSHA, &p.Size, &p.Name,
+	var slugStr, identStr, status, kind, created, updated, expires string
+	if err := s.Scan(&slugStr, &identStr, &status, &kind, &p.ContentSHA, &p.Size, &p.Name,
 		&p.PinnedVersion,
 		&created, &updated, &expires,
 		&p.LatestVersion); err != nil {
@@ -519,6 +555,7 @@ func scanPasteWithLatest(s scanner) (domain.Paste, error) {
 	}
 	p.Slug = domain.Slug(slugStr)
 	p.Identity = domain.Identity(identStr)
+	p.Status = domain.NormalizeStatus(status)
 	p.Kind = domain.ContentKind(kind)
 	p.CreatedAt = parseTime(created)
 	p.UpdatedAt = parseTime(updated)
