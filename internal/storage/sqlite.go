@@ -31,6 +31,15 @@ func Open(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
+	// Serialize all access through a single connection. sqlite has one
+	// writer regardless; an unbounded pool lets concurrent writers race
+	// into the WAL write-lock upgrade deadlock, which busy_timeout cannot
+	// resolve (it returns SQLITE_BUSY immediately). One connection removes
+	// the contention entirely - correct for the single-host, low-volume
+	// sqlite mode (prod metadata runs on shale, not sqlite). Especially
+	// needed now that the async-blob finalizer issues a second write (the
+	// status flip) concurrent with the insert.
+	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping sqlite %q: %w", path, err)
