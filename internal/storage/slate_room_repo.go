@@ -2,9 +2,7 @@
 //
 // SlateDB-backed twin of room_repo.go (the sqlite RoomKVRepo). Adds the
 // room key families to the SAME SlateDB instance the paste + site keys
-// live in, so a room create/write commits in one transaction and the
-// service-wide quota sum (sumServiceWideActiveBytes in slate_repo.go) can
-// include room bytes alongside paste + site bytes.
+// live in, so a room create/write commits in one transaction.
 //
 // The room interface method names (GetRoom, GetValue, ScanRoom, PutValue,
 // DeleteValue, CreateRoom, CountRoomCreates, plus the sweep-side
@@ -87,8 +85,8 @@ func (s *SlateRoomRepo) GetValue(appSlug domain.Slug, id domain.RoomID, key stri
 func (s *SlateRoomRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error) {
 	return s.repo.ScanRoom(appSlug, id)
 }
-func (s *SlateRoomRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap, serviceCap int64, now time.Time) error {
-	return s.repo.PutRoomValue(appSlug, id, key, val, appCap, serviceCap, now)
+func (s *SlateRoomRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) error {
+	return s.repo.PutRoomValue(appSlug, id, key, val, appCap, now)
 }
 func (s *SlateRoomRepo) DeleteValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) error {
 	return s.repo.DeleteRoomValue(appSlug, id, key, now)
@@ -302,21 +300,24 @@ func (r *SlateRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.Room
 }
 
 // PutRoomValue writes val under key in room (appSlug, id), enforcing the
-// per-room, per-app, and service-wide caps and resetting the retention
-// clock. Holds the per-ROOM quota stripe (lockQuota on app-slug + "/" +
-// uuid) across the scan + the write so two concurrent writes to the SAME
-// room cannot both pass a stale cap and both commit (valid because SlateDB
-// is single-writer: only in-process goroutines can race, and the stripe
-// serializes same-room writers). All the cap checks + the upsert + the
-// clock reset are one snapshot-isolation transaction.
+// per-room and per-app caps and resetting the retention clock. Holds the
+// per-ROOM quota stripe (lockQuota on app-slug + "/" + uuid) across the scan
+// + the write so two concurrent writes to the SAME room cannot both pass a
+// stale cap and both commit (valid because SlateDB is single-writer: only
+// in-process goroutines can race, and the stripe serializes same-room
+// writers). All the cap checks + the upsert + the clock reset are one
+// snapshot-isolation transaction.
+//
+// Rooms hold no blobs, so a room write touches no object-store quota and has
+// no service-wide byte cap on this path (see SPEC "Rooms -> Quota and abuse
+// -> Durable total-bytes ceiling").
 //
 // Returns ErrNotFound if the room is gone, ErrRoomDataFull (413) on the
-// per-room cap, ErrAppRoomsFull (507) on the per-app aggregate, ErrServiceFull
-// on the service-wide cap.
-func (r *SlateRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap, serviceCap int64, now time.Time) error {
+// per-room cap, ErrAppRoomsFull (507) on the per-app aggregate.
+func (r *SlateRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) error {
 	// The per-room stripe serializes same-room writers (so the materialized
 	// namespace the CanPut math runs against is not stale by commit time).
-	// The per-app + service-wide pre-checks happen under the same stripe.
+	// The per-app pre-check happens under the same stripe.
 	defer r.lockQuota(appSlug.String() + "/" + id.String())()
 
 	// Materialize the current namespace for the pure cap math (a room is
@@ -349,20 +350,6 @@ func (r *SlateRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 		}
 		if total+delta > appCap {
 			return ErrAppRoomsFull
-		}
-	}
-
-	// Service-wide cap (pastes + sites + rooms): charge the same delta
-	// against the whole-service active-byte total, so a room write
-	// participates in --storage-cap-bytes exactly as a paste insert / site
-	// deploy does.
-	if serviceCap > 0 && delta > 0 {
-		total, err := r.sumServiceWideActiveBytes(now)
-		if err != nil {
-			return fmt.Errorf("service-wide sum: %w", err)
-		}
-		if total+delta > serviceCap {
-			return ErrServiceFull
 		}
 	}
 
@@ -500,8 +487,9 @@ func splitRoomCreateRest(rest string) (subnet, ts string, ok bool) {
 }
 
 // SumActiveRoomBytes returns the total stored value bytes across EVERY app's
-// non-expired rooms. Called by sumServiceWideActiveBytes (slate_repo.go) so
-// room bytes count toward --storage-cap-bytes alongside pastes and sites.
+// non-expired rooms. Exposed for observability and tests; the durable
+// total-bytes ceiling lives at the object store (the blob bucket quota),
+// not in an app-level sum of room bytes.
 func (r *SlateRepo) SumActiveRoomBytes(now time.Time) (int64, error) {
 	// Walk every room record to learn which are non-expired, then sum each
 	// live room's value bytes.

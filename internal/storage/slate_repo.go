@@ -488,67 +488,6 @@ func (r *SlateRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 	return total, nil
 }
 
-// sumServiceWideActiveBytes is the service-cap equivalent - sum over
-// EVERY paste AND every site AND every app's rooms, not just one identity.
-// Used inside the quota check on the paste-insert, site-deploy, AND
-// room-write paths. Implementation walks pastes/ then versions/<slug>/;
-// O(active pastes) + O(versions per paste), then adds the site total (one
-// sites/ scan) and the room total (one rooms/ scan + per-live-room value
-// scan). For low-volume hostthis (today: <100 active pastes, <500 versions
-// total) this is sub-millisecond.
-//
-// Including site AND room bytes here keeps the service-wide cap SYMMETRIC
-// across all three content kinds: a paste upload sees the bytes sites and
-// rooms already hold, a site deploy sees paste + room bytes, and a room PUT
-// sees paste + site bytes (parallels the sqlite serviceWideActiveBytes,
-// which sums pastes + sites + rooms). Do NOT regress any kind's writer to
-// ignore another kind's bytes.
-func (r *SlateRepo) sumServiceWideActiveBytes(now time.Time) (int64, error) {
-	pastes, err := r.scanPrefix([]byte("pastes/"))
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	for _, item := range pastes {
-		var p pasteRow
-		if err := json.Unmarshal(item.Value, &p); err != nil {
-			return 0, fmt.Errorf("decode %s: %w", item.Key, err)
-		}
-		if !p.ExpiresAt.After(now) {
-			continue
-		}
-		slugStr := strings.TrimPrefix(string(item.Key), "pastes/")
-		versions, err := r.scanPrefix(prefixVersions(domain.Slug(slugStr)))
-		if err != nil {
-			return 0, err
-		}
-		for _, vit := range versions {
-			var v versionRow
-			if err := json.Unmarshal(vit.Value, &v); err != nil {
-				return 0, fmt.Errorf("decode %s: %w", vit.Key, err)
-			}
-			if v.Deleted {
-				continue
-			}
-			total += int64(v.Size)
-		}
-	}
-	siteTotal, err := r.sumServiceWideActiveSiteBytes(now)
-	if err != nil {
-		return 0, err
-	}
-	// Room bytes fold into the same service-wide sum so the cap is SYMMETRIC
-	// across all three content kinds: a room PUT sees paste+site bytes (here),
-	// and a paste insert / site deploy sees room bytes (they call this sum).
-	// Do NOT regress this to an asymmetry (the sites-on-slate P0 lesson,
-	// extended to the third kind).
-	roomTotal, err := r.SumActiveRoomBytes(now)
-	if err != nil {
-		return 0, err
-	}
-	return total + siteTotal + roomTotal, nil
-}
-
 func (r *SlateRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	items, err := r.scanPrefix(prefixVersions(slug))
 	if err != nil {
@@ -595,28 +534,21 @@ func (r *SlateRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 
 // --- Writes (each opens a SlateDB transaction) -----------------------------
 
-func (r *SlateRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int64, now time.Time) error {
-	// Service-wide cap + per-identity cap pre-checks happen OUTSIDE
-	// the transaction window because SlateDB has no SUM operator;
-	// scanning every key during a transaction would hold tx state
-	// across many round-trips. Single-writer fencing means no other
-	// PROCESS can sneak a write in between the check and the commit.
-	// Concurrent GOROUTINES in this process are NOT serialized by the
-	// SI transaction (they write different keys, so SI finds no
-	// conflict), so the per-identity quota stripe below serializes the
-	// same-identity check-and-commit: without it two concurrent uploads
-	// could both pass the cap and both land.
+func (r *SlateRepo) InsertWithQuotaCheck(p domain.Paste, userCap int64, now time.Time) error {
+	// The per-identity cap pre-check happens OUTSIDE the transaction window
+	// because SlateDB has no SUM operator; scanning every key during a
+	// transaction would hold tx state across many round-trips. Single-writer
+	// fencing means no other PROCESS can sneak a write in between the check
+	// and the commit. Concurrent GOROUTINES in this process are NOT
+	// serialized by the SI transaction (they write different keys, so SI
+	// finds no conflict), so the per-identity quota stripe below serializes
+	// the same-identity check-and-commit: without it two concurrent uploads
+	// could both pass the cap and both land. The durable total-bytes ceiling
+	// is NOT checked here: it is the object-store bucket quota, enforced when
+	// the blob Put is rejected (see SPEC "Limits -> Durable total-bytes
+	// ceiling: an object-store quota").
 	defer r.lockQuota(p.Identity.String())()
 	body := int64(p.Size)
-	if serviceCap > 0 {
-		total, err := r.sumServiceWideActiveBytes(now)
-		if err != nil {
-			return fmt.Errorf("service-wide sum: %w", err)
-		}
-		if total+body > serviceCap {
-			return ErrServiceFull
-		}
-	}
 	if userCap > 0 {
 		// Per-owner cap counts BOTH paste bytes AND site bytes, symmetric
 		// with InsertSiteWithQuotaCheck (which sums both for a site deploy)
@@ -855,26 +787,19 @@ func (r *SlateRepo) Unpin(slug domain.Slug) error {
 	return nil
 }
 
-func (r *SlateRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, serviceCap, userCap int64, now time.Time) (AppendResult, error) {
+func (r *SlateRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (AppendResult, error) {
 	// Need owner identity to do the per-user check. Read it first (a plain
 	// read, no lock needed), then hold the per-identity quota stripe across
 	// the sum + the append so two concurrent same-identity writes cannot
-	// both pass the cap (see InsertWithQuotaCheck + the quotaLocks doc).
+	// both pass the cap (see InsertWithQuotaCheck + the quotaLocks doc). The
+	// durable total-bytes ceiling is NOT checked here (it is the object-store
+	// bucket quota).
 	var existing pasteRow
 	if err := r.getJSON(keyPaste(slug), &existing); err != nil {
 		return AppendResult{}, err
 	}
 	defer r.lockQuota(existing.Identity)()
 	body := int64(size)
-	if serviceCap > 0 {
-		total, err := r.sumServiceWideActiveBytes(now)
-		if err != nil {
-			return AppendResult{}, fmt.Errorf("service-wide sum: %w", err)
-		}
-		if total+body > serviceCap {
-			return AppendResult{}, ErrServiceFull
-		}
-	}
 	if userCap > 0 {
 		// Per-owner cap counts BOTH paste bytes AND site bytes (symmetric
 		// with the site deploy path + the sqlite identityActiveBytes), so an

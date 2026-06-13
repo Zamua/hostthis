@@ -67,10 +67,10 @@ func TestRoom_KVRoundTripAndScan(t *testing.T) {
 	now := time.Now().UTC()
 	room := mkRoom(repo, t, "app12345", now)
 
-	if err := repo.PutValue(room.AppSlug, room.ID, "name", []byte("alice"), 0, 0, now); err != nil {
+	if err := repo.PutValue(room.AppSlug, room.ID, "name", []byte("alice"), 0, now); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	if err := repo.PutValue(room.AppSlug, room.ID, "votes", []byte(`{"a":3}`), 0, 0, now); err != nil {
+	if err := repo.PutValue(room.AppSlug, room.ID, "votes", []byte(`{"a":3}`), 0, now); err != nil {
 		t.Fatalf("put 2: %v", err)
 	}
 
@@ -104,10 +104,10 @@ func TestRoom_Overwrite(t *testing.T) {
 	repo := newRoomTestRepo(t)
 	now := time.Now().UTC()
 	room := mkRoom(repo, t, "app12345", now)
-	if err := repo.PutValue(room.AppSlug, room.ID, "k", []byte("v1"), 0, 0, now); err != nil {
+	if err := repo.PutValue(room.AppSlug, room.ID, "k", []byte("v1"), 0, now); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	if err := repo.PutValue(room.AppSlug, room.ID, "k", []byte("v2-longer"), 0, 0, now); err != nil {
+	if err := repo.PutValue(room.AppSlug, room.ID, "k", []byte("v2-longer"), 0, now); err != nil {
 		t.Fatalf("overwrite: %v", err)
 	}
 	v, _ := repo.GetValue(room.AppSlug, room.ID, "k")
@@ -124,7 +124,7 @@ func TestRoom_DeleteIsIdempotent(t *testing.T) {
 	repo := newRoomTestRepo(t)
 	now := time.Now().UTC()
 	room := mkRoom(repo, t, "app12345", now)
-	_ = repo.PutValue(room.AppSlug, room.ID, "k", []byte("v"), 0, 0, now)
+	_ = repo.PutValue(room.AppSlug, room.ID, "k", []byte("v"), 0, now)
 	if err := repo.DeleteValue(room.AppSlug, room.ID, "k", now); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestRoom_DeleteIsIdempotent(t *testing.T) {
 func TestRoom_WriteToNonexistentRoomIsNotFound(t *testing.T) {
 	repo := newRoomTestRepo(t)
 	now := time.Now().UTC()
-	if err := repo.PutValue("app12345", domain.NewRoomID(), "k", []byte("v"), 0, 0, now); !errors.Is(err, ErrNotFound) {
+	if err := repo.PutValue("app12345", domain.NewRoomID(), "k", []byte("v"), 0, now); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("put to missing room = %v, want ErrNotFound", err)
 	}
 	if err := repo.DeleteValue("app12345", domain.NewRoomID(), "k", now); !errors.Is(err, ErrNotFound) {
@@ -156,7 +156,7 @@ func TestRoom_CrossRoomIsolation(t *testing.T) {
 	a := mkRoom(repo, t, "app12345", now)
 	b := mkRoom(repo, t, "app12345", now)
 
-	if err := repo.PutValue(a.AppSlug, a.ID, "secret", []byte("from-A"), 0, 0, now); err != nil {
+	if err := repo.PutValue(a.AppSlug, a.ID, "secret", []byte("from-A"), 0, now); err != nil {
 		t.Fatalf("put A: %v", err)
 	}
 	// Room B's UUID addresses a DIFFERENT keyspace - the key is absent.
@@ -191,7 +191,7 @@ func TestRoom_CrossAppIsolation(t *testing.T) {
 			t.Fatalf("create %s: %v", app, err)
 		}
 	}
-	if err := repo.PutValue("app11111", id, "k", []byte("app1-data"), 0, 0, now); err != nil {
+	if err := repo.PutValue("app11111", id, "k", []byte("app1-data"), 0, now); err != nil {
 		t.Fatalf("put app1: %v", err)
 	}
 	// app2's same-id room does NOT see app1's value.
@@ -206,11 +206,11 @@ func TestRoom_PerRoomByteCap(t *testing.T) {
 	room := mkRoom(repo, t, "app12345", now)
 	// One value at the cap fits.
 	atCap := make([]byte, domain.MaxRoomBytes)
-	if err := repo.PutValue(room.AppSlug, room.ID, "big", atCap, 0, 0, now); err != nil {
+	if err := repo.PutValue(room.AppSlug, room.ID, "big", atCap, 0, now); err != nil {
 		t.Fatalf("value at cap rejected: %v", err)
 	}
 	// Another byte over the cap is rejected; the prior value stays intact.
-	if err := repo.PutValue(room.AppSlug, room.ID, "more", []byte("x"), 0, 0, now); !errors.Is(err, ErrRoomDataFull) {
+	if err := repo.PutValue(room.AppSlug, room.ID, "more", []byte("x"), 0, now); !errors.Is(err, ErrRoomDataFull) {
 		t.Fatalf("over-cap put = %v, want ErrRoomDataFull", err)
 	}
 	v, err := repo.GetValue(room.AppSlug, room.ID, "big")
@@ -225,11 +225,11 @@ func TestRoom_PerRoomKeyCap(t *testing.T) {
 	room := mkRoom(repo, t, "app12345", now)
 	for i := 0; i < domain.MaxRoomKeys; i++ {
 		k := keyName(i)
-		if err := repo.PutValue(room.AppSlug, room.ID, k, []byte("v"), 0, 0, now); err != nil {
+		if err := repo.PutValue(room.AppSlug, room.ID, k, []byte("v"), 0, now); err != nil {
 			t.Fatalf("key %d under cap rejected: %v", i, err)
 		}
 	}
-	if err := repo.PutValue(room.AppSlug, room.ID, "overflow", []byte("v"), 0, 0, now); !errors.Is(err, ErrRoomDataFull) {
+	if err := repo.PutValue(room.AppSlug, room.ID, "overflow", []byte("v"), 0, now); !errors.Is(err, ErrRoomDataFull) {
 		t.Fatalf("over-key-cap put = %v, want ErrRoomDataFull", err)
 	}
 }
@@ -242,12 +242,12 @@ func TestRoom_PerAppAggregateCap(t *testing.T) {
 	r1 := mkRoom(repo, t, "app12345", now)
 	r2 := mkRoom(repo, t, "app12345", now)
 
-	if err := repo.PutValue(r1.AppSlug, r1.ID, "k", []byte("123456"), appCap, 0, now); err != nil {
+	if err := repo.PutValue(r1.AppSlug, r1.ID, "k", []byte("123456"), appCap, now); err != nil {
 		t.Fatalf("first write under app cap rejected: %v", err)
 	}
 	// A second write in a DIFFERENT room of the SAME app pushes the app
 	// aggregate over -> ErrAppRoomsFull.
-	if err := repo.PutValue(r2.AppSlug, r2.ID, "k", []byte("78901"), appCap, 0, now); !errors.Is(err, ErrAppRoomsFull) {
+	if err := repo.PutValue(r2.AppSlug, r2.ID, "k", []byte("78901"), appCap, now); !errors.Is(err, ErrAppRoomsFull) {
 		t.Fatalf("over-app-cap write = %v, want ErrAppRoomsFull", err)
 	}
 }
@@ -258,7 +258,7 @@ func TestRoom_WriteResetsRetentionClock(t *testing.T) {
 	room := mkRoom(repo, t, "app12345", created)
 
 	later := created.Add(5 * 24 * time.Hour)
-	if err := repo.PutValue(room.AppSlug, room.ID, "k", []byte("v"), 0, 0, later); err != nil {
+	if err := repo.PutValue(room.AppSlug, room.ID, "k", []byte("v"), 0, later); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	got, _ := repo.GetRoom(room.AppSlug, room.ID)
@@ -281,7 +281,7 @@ func TestRoom_ExpiryAndCascade(t *testing.T) {
 	repo := newRoomTestRepo(t)
 	now := time.Now().UTC()
 	room := mkRoom(repo, t, "app12345", now)
-	_ = repo.PutValue(room.AppSlug, room.ID, "k", []byte("v"), 0, 0, now)
+	_ = repo.PutValue(room.AppSlug, room.ID, "k", []byte("v"), 0, now)
 
 	// Nothing expired yet.
 	expired, err := repo.ExpiredRoomKeys(now)
@@ -351,8 +351,8 @@ func TestRoom_SumActiveRoomBytes(t *testing.T) {
 	now := time.Now().UTC()
 	a := mkRoom(repo, t, "app11111", now)
 	b := mkRoom(repo, t, "app22222", now)
-	_ = repo.PutValue(a.AppSlug, a.ID, "k", []byte("12345"), 0, 0, now)
-	_ = repo.PutValue(b.AppSlug, b.ID, "k", []byte("678"), 0, 0, now)
+	_ = repo.PutValue(a.AppSlug, a.ID, "k", []byte("12345"), 0, now)
+	_ = repo.PutValue(b.AppSlug, b.ID, "k", []byte("678"), 0, now)
 	total, err := repo.SumActiveRoomBytes(now)
 	if err != nil {
 		t.Fatalf("sum: %v", err)

@@ -23,11 +23,13 @@ type RoomRepo interface {
 	GetValue(appSlug domain.Slug, id domain.RoomID, key string) ([]byte, error)
 	// ScanRoom returns the whole namespace.
 	ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error)
-	// PutValue writes one value, enforcing per-room + per-app + service-wide
-	// caps and resetting the retention clock. storage.ErrNotFound if the
-	// room is gone, storage.ErrRoomDataFull / storage.ErrAppRoomsFull /
-	// storage.ErrServiceFull on caps.
-	PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap, serviceCap int64, now time.Time) error
+	// PutValue writes one value, enforcing the per-room + per-app caps and
+	// resetting the retention clock. storage.ErrNotFound if the room is gone,
+	// storage.ErrRoomDataFull / storage.ErrAppRoomsFull on caps. Rooms hold
+	// no blobs, so a room write touches no object-store quota: there is no
+	// service-wide byte cap on this path (see SPEC "Rooms -> Quota and
+	// abuse -> Durable total-bytes ceiling").
+	PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) error
 	// DeleteValue removes one value (idempotent) and resets the clock.
 	DeleteValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) error
 	// CountRoomCreates returns in-window creation counts (perSubnet, perApp)
@@ -44,11 +46,10 @@ type Rooms struct {
 	Repo RoomRepo
 
 	// Tunables, defaulted by NewRooms; main can override from flags/env.
-	MaxRoomsPerIP   int           // per source-IP-subnet creation cap per CreateWindow
-	MaxRoomsPerApp  int           // per app creation cap per CreateWindow
-	CreateWindow    time.Duration // rolling window for the creation limits
-	PerAppByteCap   int64         // per-app aggregate byte cap (0 = unlimited)
-	ServiceCapBytes int64         // service-wide cap on total active bytes (0 = unlimited)
+	MaxRoomsPerIP  int           // per source-IP-subnet creation cap per CreateWindow
+	MaxRoomsPerApp int           // per app creation cap per CreateWindow
+	CreateWindow   time.Duration // rolling window for the creation limits
+	PerAppByteCap  int64         // per-app aggregate byte cap (0 = unlimited)
 
 	Now func() time.Time
 }
@@ -177,15 +178,16 @@ func (s *Rooms) Scan(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, erro
 	return kv, nil
 }
 
-// Put writes val under key, enforcing the per-room data cap (in the repo),
-// the per-app aggregate, and the service-wide cap. Returns ErrRoomNotFound
-// if the room is gone, ErrRoomDataCap (413) on the per-room cap,
-// ErrAppRoomsCap (507) on the per-app aggregate OR the service-wide cap
-// (both are "no room to store this" - a 507). key must already be
-// validated by the caller.
+// Put writes val under key, enforcing the per-room data cap (in the repo)
+// and the per-app aggregate. Returns ErrRoomNotFound if the room is gone,
+// ErrRoomDataCap (413) on the per-room cap, ErrAppRoomsCap (507) on the
+// per-app aggregate. Rooms hold no blobs, so a room write touches no
+// object-store quota and has no service-wide byte cap on this path (see
+// SPEC "Rooms -> Quota and abuse -> Durable total-bytes ceiling"). key
+// must already be validated by the caller.
 func (s *Rooms) Put(appSlug domain.Slug, id domain.RoomID, key string, val []byte) error {
 	now := s.now()
-	err := s.Repo.PutValue(appSlug, id, key, val, s.PerAppByteCap, s.ServiceCapBytes, now)
+	err := s.Repo.PutValue(appSlug, id, key, val, s.PerAppByteCap, now)
 	switch {
 	case err == nil:
 		return nil
@@ -194,10 +196,6 @@ func (s *Rooms) Put(appSlug domain.Slug, id domain.RoomID, key string, val []byt
 	case errors.Is(err, storage.ErrRoomDataFull):
 		return ErrRoomDataCap
 	case errors.Is(err, storage.ErrAppRoomsFull):
-		return ErrAppRoomsCap
-	case errors.Is(err, storage.ErrServiceFull):
-		// The service-wide cap is the same "no capacity to store this"
-		// shape as the per-app aggregate from the writer's view: a 507.
 		return ErrAppRoomsCap
 	default:
 		return err

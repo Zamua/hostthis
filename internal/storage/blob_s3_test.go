@@ -5,9 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"net/http"
 	"os"
 	"sort"
 	"testing"
+
+	"github.com/minio/minio-go/v7"
 )
 
 // TestS3BlobStore_RoundTrip exercises the full Put/Get/Walk/Remove
@@ -130,4 +134,35 @@ func contains(s []string, target string) bool {
 
 func containsString(haystack, needle string) bool {
 	return len(needle) > 0 && len(haystack) >= len(needle) && bytes.Contains([]byte(haystack), []byte(needle))
+}
+
+// TestIsS3QuotaExceeded pins the robust detection of an object-store
+// bucket-quota rejection. The blob Put maps these to storage.ErrServiceFull
+// (the durable total-bytes ceiling), so the matcher must catch every spelling
+// a backend uses: the 507 status AND the MinIO XMinioStorageFull /
+// QuotaExceeded error-code family. A genuine not-found / generic error must
+// NOT be mistaken for a quota rejection.
+func TestIsS3QuotaExceeded(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"507 status", minio.ErrorResponse{StatusCode: http.StatusInsufficientStorage}, true},
+		{"XMinioStorageFull code", minio.ErrorResponse{Code: "XMinioStorageFull", StatusCode: 507}, true},
+		{"QuotaExceeded code", minio.ErrorResponse{Code: "QuotaExceeded", StatusCode: 400}, true},
+		{"admin bucket quota code", minio.ErrorResponse{Code: "XMinioAdminBucketQuotaExceeded", StatusCode: 400}, true},
+		{"wrapped 507", fmt.Errorf("s3 put abc: %w", minio.ErrorResponse{StatusCode: http.StatusInsufficientStorage}), true},
+		{"not found is not quota", minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}, false},
+		{"generic error is not quota", errors.New("connection reset"), false},
+		{"access denied is not quota", minio.ErrorResponse{Code: "AccessDenied", StatusCode: 403}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isS3QuotaExceeded(tc.err); got != tc.want {
+				t.Fatalf("isS3QuotaExceeded(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
 }

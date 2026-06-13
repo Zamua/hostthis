@@ -18,7 +18,7 @@ import (
 // PasteRepo is the persistence interface the upload service needs.
 // internal/storage.PasteRepo satisfies it.
 type PasteRepo interface {
-	InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int64, now time.Time) error
+	InsertWithQuotaCheck(p domain.Paste, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Paste, error)
 }
 
@@ -42,14 +42,12 @@ var SlugTakenErr = errors.New("service: slug taken (after retries)")
 
 // Upload is the application service for new paste creation.
 type Upload struct {
-	Repo            PasteRepo
-	Blobs           BlobStore
-	ServiceCapBytes int64 // 0 = no service-wide cap
-	Now             func() time.Time
+	Repo  PasteRepo
+	Blobs BlobStore
+	Now   func() time.Time
 }
 
-// NewUpload wires defaults. ServiceCap defaults to 0 (no cap); main
-// flips it to the operator value.
+// NewUpload wires defaults.
 func NewUpload(repo PasteRepo, blobs BlobStore) *Upload {
 	return &Upload{Repo: repo, Blobs: blobs, Now: time.Now}
 }
@@ -74,7 +72,12 @@ var ErrRawTooLarge = errors.New("service: upload too large to consider (raw inpu
 // compressed-size number to the user; see Upload.Create.
 var ErrCompressedTooLarge = errors.New("service: upload exceeds 10 MiB compressed cap")
 
-// ErrServiceFull is returned when the service-wide disk cap is hit.
+// ErrServiceFull is returned when the durable total-bytes ceiling is hit:
+// the object store rejects a blob Put because the bucket is at its
+// configured hard quota (see SPEC "Limits -> Durable total-bytes ceiling:
+// an object-store quota"). The blob store surfaces storage.ErrServiceFull,
+// and the upload / deploy services translate it into this graceful
+// "service is at capacity" response.
 var ErrServiceFull = errors.New("service: service is at capacity, try again after the next expiry")
 
 // Create persists a new paste owned by the given identity.
@@ -114,6 +117,14 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	}
 	now := u.Now().UTC()
 	if err := u.Blobs.PutPrecompressed(staged.SHA, staged.Body); err != nil {
+		// A blob Put rejected by the object store's bucket quota surfaces
+		// storage.ErrServiceFull (the durable total-bytes ceiling, see SPEC
+		// "Limits -> Durable total-bytes ceiling: an object-store quota").
+		// Translate it into the graceful "service is at capacity" response
+		// instead of a generic 500.
+		if errors.Is(err, storage.ErrServiceFull) {
+			return Result{}, ErrServiceFull
+		}
 		return Result{}, fmt.Errorf("blob write: %w", err)
 	}
 	p := domain.Paste{
@@ -134,7 +145,7 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	const maxRetries = 5
 	for range maxRetries {
 		p.Slug = domain.NewRandomSlug()
-		err := u.Repo.InsertWithQuotaCheck(p, u.ServiceCapBytes, int64(domain.UserQuotaBytes), now)
+		err := u.Repo.InsertWithQuotaCheck(p, int64(domain.UserQuotaBytes), now)
 		switch {
 		case err == nil:
 			return Result{Paste: p}, nil
