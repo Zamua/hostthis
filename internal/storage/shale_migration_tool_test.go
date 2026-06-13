@@ -308,6 +308,10 @@ func TestShaleMigrationTool_QuotaSafeAndListable(t *testing.T) {
 		t.Fatalf("second over-cap insert: got err=%v; want ErrOverUserQuota (690+40 > 700)", err)
 	}
 
+	// The just-inserted paste's identity_pastes index entry is written by
+	// the deferred confirm goroutine; drain it so ListByOwner observes it.
+	repo.WaitPendingConfirms()
+
 	// LISTBYOWNER returns the correct rows for the migrated pastes (the
 	// projections were filled by the transform). It also includes the one
 	// paste we just inserted, so expect len(pastes)+1.

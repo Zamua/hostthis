@@ -82,6 +82,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Zamua/shale/backends/slate"
@@ -202,7 +203,26 @@ type ShaleRepo struct {
 	// in-flight RPCs and closes the listener.
 	grpcSrv *grpc.Server
 	grpcLis net.Listener
+
+	// confirmWG tracks in-flight deferred confirm-insert goroutines (the
+	// step-3 index write moved off the upload response path, see
+	// InsertWithQuotaCheck). Close waits on it so a shutdown does not drop a
+	// pending confirm (the reconciler would otherwise have to heal it), and
+	// WaitPendingConfirms lets a test or operator block until every deferred
+	// confirm has run so a subsequent ListByOwner is deterministic.
+	confirmWG sync.WaitGroup
 }
+
+// WaitPendingConfirms blocks until every deferred confirm-insert goroutine
+// launched by InsertWithQuotaCheck has finished. The confirm step (writing
+// the derived identity_pastes index entry + first-seen) runs in the
+// background so it stays off the upload response path; a freshly-inserted
+// paste is Get-readable immediately but may take a beat to appear in
+// ListByOwner. Callers that need the list to reflect a just-inserted paste
+// synchronously (tests, an operator draining before a snapshot) call this.
+// It does not stop new confirms from being launched; it drains the ones
+// outstanding at the moment of the call's WaitGroup snapshot.
+func (r *ShaleRepo) WaitPendingConfirms() { r.confirmWG.Wait() }
 
 // repoLog returns the repo's logger, falling back to the process default
 // when none was wired. The tolerant background scans (expiry / reconcile)
@@ -357,6 +377,10 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 // GracefulStop drains in-flight RPCs and closes the listener, so the
 // forwarding port is released with no leaked goroutine.
 func (r *ShaleRepo) Close() error {
+	// Drain in-flight deferred confirms before tearing down the cluster, so
+	// a shutdown does not strand a confirm mid-flight (which would leave the
+	// reconciler to heal an index entry we could have written cleanly).
+	r.confirmWG.Wait()
 	if r.grpcSrv != nil {
 		r.grpcSrv.GracefulStop() // also closes r.grpcLis
 	}
@@ -1072,15 +1096,37 @@ func (r *ShaleRepo) InsertWithQuotaCheck(p domain.Paste, userCap int64, now time
 	// counter is NOT touched here (the reserve already accounted the
 	// bytes); confirm just consumes the marker so the reconciler doesn't
 	// later mistake it for an orphan.
-	if err := r.confirmInsert(p); err != nil {
-		// The authoritative paste exists + the bytes are accounted; the
-		// only missing piece is the derived index, which the reconciler
-		// (and repair-on-read for the index it can see) heals. Surface the
-		// error so the caller knows the index lagged, but the paste is
-		// durable + quota-correct.
-		return fmt.Errorf("confirm insert: %w", err)
-	}
+	//
+	// Deferred off the response path (SPEC "Reservation-pattern quota",
+	// step 3). The authoritative paste row already exists, so the paste is
+	// Get-readable and its URL never 404s; the bytes were reserved in step
+	// 1, so quota is already strict. Confirm only writes the eventually-
+	// consistent derived index entry + first-seen, both of which the
+	// reconciler heals if this goroutine is lost (confirm was already a
+	// non-fatal step whose failure left the index to the reconciler). So
+	// InsertWithQuotaCheck returns success now and runs confirm in the
+	// background; a lost confirm leaves a "leaked marker" the grace-
+	// windowed reconciler pass drops and a missing index entry the
+	// reconciler rebuilds, exactly as a synchronous confirm failure did.
+	r.confirmWG.Add(1)
+	go r.deferredConfirmInsert(p)
 	return nil
+}
+
+// deferredConfirmInsert runs the confirm CAS off the upload's response
+// path. It is launched in a WaitGroup-tracked goroutine by
+// InsertWithQuotaCheck after the authoritative write commits, so the
+// response does not wait on the derived-index write. A failure is
+// non-fatal: the reservation marker it would have dropped becomes a leaked
+// marker the reconciler's grace-windowed pass cleans, and the index entry
+// it would have written is one the reconciler rebuilds from the
+// authoritative rows. It is logged (not returned) because no caller is
+// waiting on it. Close / WaitPendingConfirms join on confirmWG.
+func (r *ShaleRepo) deferredConfirmInsert(p domain.Paste) {
+	defer r.confirmWG.Done()
+	if err := r.confirmInsert(p); err != nil {
+		r.repoLog().Printf("shale: deferred confirm insert for %s: %v (index lag; reconciler will heal)", p.Slug, err)
+	}
 }
 
 // insertAuthoritative writes the {slug}-shard authoritative rows in one

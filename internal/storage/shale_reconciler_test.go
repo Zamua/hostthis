@@ -186,6 +186,10 @@ func TestShaleReconciler_ReleasesOrphanReservation(t *testing.T) {
 	if err := repo.InsertWithQuotaCheck(p, 0, now); err != nil {
 		t.Fatalf("insert paste: %v", err)
 	}
+	// Drain the deferred confirm so the insert's own reservation marker is
+	// consumed before the grace=0 reconcile below, which would otherwise
+	// release it and shed the real paste's 300 bytes too.
+	repo.WaitPendingConfirms()
 
 	// Simulate a crashed reservation: an identity_reserve marker for a
 	// slug that has NO authoritative paste, plus the over-counted bytes
@@ -236,6 +240,10 @@ func mustSum(t *testing.T, repo *storage.ShaleRepo, owner string, now time.Time)
 
 func mustCount(t *testing.T, repo *storage.ShaleRepo, owner string) int {
 	t.Helper()
+	// CountByOwner reads the identity_pastes index, which InsertWithQuotaCheck
+	// writes via a deferred confirm goroutine. Drain so the count is
+	// deterministic; a no-op when nothing is pending.
+	repo.WaitPendingConfirms()
 	n, err := repo.CountByOwner(owner)
 	if err != nil {
 		t.Fatalf("count by owner: %v", err)
