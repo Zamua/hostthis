@@ -721,7 +721,22 @@ func waitForRooms(t *testing.T, rl *relay.Relay, want int, d time.Duration) {
 
 func TestRelayHarness_HealthyClientSurvivesIdleAcrossHeartbeats(t *testing.T) {
 	ts, rooms, rl := wsTestServer(t, relay.NewLimits())
-	rl.SetHeartbeat(60*time.Millisecond, 80*time.Millisecond)
+	// What this test verifies: a healthy reading client is NOT reaped while it
+	// keeps answering pings across MANY heartbeat intervals. The load-bearing
+	// knob is the ping INTERVAL being short relative to the idle window (so the
+	// window genuinely spans many heartbeats, not one). The pong TIMEOUT is the
+	// reap budget; making it tight does NOT strengthen this test (it only asserts
+	// the live client survives, never that a slow pong is reaped - that is the
+	// separate negative half, TestRelay_HeartbeatReapsDeadConnection). A tight
+	// 80ms budget instead introduced a flake: under load / -race the pong
+	// round-trip (server Ping -> client readPump goroutine schedules -> auto-pong
+	// -> server reads it) is gated by goroutine scheduling, which can exceed 80ms
+	// on a busy machine and falsely reap a genuinely healthy client. So use a
+	// short interval (the property under test) with a generous reap budget well
+	// above any realistic scheduling delay (jitter is microseconds-to-low-ms; 2s
+	// has orders of magnitude of headroom) so jitter can never reap a live peer.
+	const hbInterval = 50 * time.Millisecond
+	rl.SetHeartbeat(hbInterval, 2*time.Second)
 	const slug = "appz2345"
 	id := mkRoom(t, rooms, slug)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -734,8 +749,10 @@ func TestRelayHarness_HealthyClientSurvivesIdleAcrossHeartbeats(t *testing.T) {
 	defer c.close()
 	c.expectSnapshotFrame(ctx)
 
-	// Span many heartbeat intervals (60ms each) over ~1s of pure idle.
-	deadline := time.Now().Add(1 * time.Second)
+	// Span many heartbeat intervals (idleWindow / hbInterval = ~20) over ~1s of
+	// pure idle, so the survival is asserted across MANY heartbeats, not one.
+	const idleWindow = 1 * time.Second
+	deadline := time.Now().Add(idleWindow)
 	for time.Now().Before(deadline) {
 		select {
 		case err := <-c.readErr:
