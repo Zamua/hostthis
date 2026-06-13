@@ -36,7 +36,6 @@ func main() {
 		urlMode         = flag.String("mode", envOr("HOSTTHIS_URL_MODE", "path"), "url mode: subdomain (prod) | path (dev)")
 		scheme          = flag.String("scheme", envOr("HOSTTHIS_PUBLIC_SCHEME", "https"), "public URL scheme (https for prod, http for local dev)")
 		landingPath     = flag.String("landing", envOr("HOSTTHIS_LANDING", "web/landing.html"), "path to apex landing HTML")
-		storageCap      = flag.Int64("storage-cap-bytes", envOrInt64("HOSTTHIS_STORAGE_CAP_BYTES", 5<<30), "service-wide cap on total active bytes (0 = unlimited)")
 		freshKeysLimit  = flag.Int("fresh-keys-per-subnet", envOrInt("HOSTTHIS_FRESH_KEYS_PER_SUBNET", 20), "max distinct new key fingerprints admitted per IP subnet per window")
 		freshKeysWindow = flag.Duration("fresh-keys-window", envOrDuration("HOSTTHIS_FRESH_KEYS_WINDOW", 24*time.Hour), "rolling window for the Sybil rate limit on fresh keys")
 	)
@@ -69,9 +68,7 @@ func main() {
 	roomRepo := metadata.Rooms
 
 	uploadSvc := service.NewUpload(pasteRepo, blobs)
-	uploadSvc.ServiceCapBytes = *storageCap
 	manageSvc := service.NewManage(pasteRepo, blobs)
-	manageSvc.ServiceCapBytes = *storageCap
 
 	// Static-site archive deploys. Reuses the same blob store + the same
 	// per-identity quota as pastes; nil-safe if the metadata backend
@@ -79,7 +76,6 @@ func main() {
 	var deploySvc *service.DeploySite
 	if siteRepo != nil {
 		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobs)
-		deploySvc.ServiceCapBytes = *storageCap
 	}
 
 	// Rooms: the no-auth, capability-based app-persistence tier
@@ -88,7 +84,6 @@ func main() {
 	var roomsSvc *service.Rooms
 	if roomRepo != nil {
 		roomsSvc = service.NewRooms(roomRepo)
-		roomsSvc.ServiceCapBytes = *storageCap
 	}
 
 	// Relay: the real-time per-room WebSocket relay layered on the rooms
@@ -134,8 +129,8 @@ func main() {
 		logger.Printf("sweep: DISABLED via HOSTTHIS_SWEEP_DISABLED=true (no periodic expiry / blob GC / key-gate prune this process lifetime)")
 	}
 
-	logger.Printf("config: storage_cap=%d bytes, fresh_keys/subnet=%d per %s",
-		*storageCap, *freshKeysLimit, *freshKeysWindow)
+	logger.Printf("config: fresh_keys/subnet=%d per %s (durable total-bytes ceiling is the object-store bucket quota)",
+		*freshKeysLimit, *freshKeysWindow)
 
 	landing, err := os.ReadFile(*landingPath)
 	if err != nil {
@@ -313,15 +308,6 @@ func buildURL(scheme, apex, mode string, logger *log.Logger) hostssh.URLBuilder 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
-	}
-	return fallback
-}
-
-func envOrInt64(key string, fallback int64) int64 {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			return n
-		}
 	}
 	return fallback
 }

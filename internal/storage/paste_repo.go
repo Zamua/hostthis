@@ -11,9 +11,13 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// ErrServiceFull is returned when accepting a write would push total
-// active bytes (across all identities) past the operator-configured
-// service-wide cap. Caller surfaces a "try again later" message.
+// ErrServiceFull is returned when the durable total-bytes ceiling is hit:
+// the object store rejects a blob Put because the bucket is at its
+// configured hard quota (see SPEC "Limits -> Durable total-bytes ceiling:
+// an object-store quota"). The blob store surfaces it; the service layer
+// translates it into a graceful "try again later" response. The metadata
+// repos no longer run a service-wide byte scan, so this never originates
+// from a quota pre-check on the write path.
 var ErrServiceFull = errors.New("storage: service is at capacity")
 
 // ErrOverUserQuota is returned when accepting a write would push an
@@ -28,21 +32,21 @@ type PasteRepo struct {
 func NewPasteRepo(db *sql.DB) *PasteRepo { return &PasteRepo{db: db} }
 
 // InsertWithQuotaCheck atomically (under BEGIN IMMEDIATE):
-//  1. checks service-wide active bytes + p.Size against serviceCap (0 → no cap)
-//  2. checks identity active bytes + p.Size against userCap
-//  3. inserts the paste row + its v1 version row
+//  1. checks identity active bytes + p.Size against userCap
+//  2. inserts the paste row + its v1 version row
 //
 // Concurrent calls serialize at the transaction boundary, so two
 // uploads from the same identity can't both pass the user-cap check
-// and both insert. Same for two uploads in different identities
-// fighting over the last bytes of the service-wide cap.
+// and both insert. The durable total-bytes ceiling is NOT checked here:
+// it is the object-store bucket quota, enforced when the blob Put is
+// rejected (see SPEC "Limits -> Durable total-bytes ceiling: an
+// object-store quota").
 //
 // Returns:
 //   - nil on success
 //   - ErrSlugTaken if p.Slug is already in use (caller retries with a fresh slug)
-//   - ErrServiceFull if accepting would exceed serviceCap
 //   - ErrOverUserQuota if accepting would exceed userCap
-func (r *PasteRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int64, now time.Time) error {
+func (r *PasteRepo) InsertWithQuotaCheck(p domain.Paste, userCap int64, now time.Time) error {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -53,18 +57,7 @@ func (r *PasteRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 	siteNowStr := formatSiteExpiry(now)
 	body := int64(p.Size)
 
-	// 1. Service-wide check across BOTH pastes and sites. Tombstoned
-	// (deleted) versions contribute 0.
-	if serviceCap > 0 {
-		total, err := serviceWideActiveBytes(tx, nowStr, siteNowStr)
-		if err != nil {
-			return err
-		}
-		if total+body > serviceCap {
-			return ErrServiceFull
-		}
-	}
-	// 2. Per-identity check across BOTH pastes and sites. Tombstoned
+	// Per-identity check across BOTH pastes and sites. Tombstoned
 	// versions contribute 0.
 	if userCap > 0 {
 		ownerTotal, err := identityActiveBytes(tx, p.Identity.String(), nowStr, siteNowStr)
@@ -112,7 +105,7 @@ func (r *PasteRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int
 // doesn't need quota enforcement. Production paths use
 // InsertWithQuotaCheck.
 func (r *PasteRepo) Insert(p domain.Paste) error {
-	return r.InsertWithQuotaCheck(p, 0, 0, p.CreatedAt)
+	return r.InsertWithQuotaCheck(p, 0, p.CreatedAt)
 }
 
 // Get returns the paste for slug, or ErrNotFound. Expired pastes are
@@ -239,11 +232,10 @@ type AppendResult struct {
 }
 
 // AppendVersionWithQuotaCheck atomically (under BEGIN IMMEDIATE):
-//  1. checks service-wide active bytes + size against serviceCap
-//  2. checks identity (the existing paste's owner) active bytes + size against userCap
-//  3. inserts a new version row
-//  4. resets the retention clock (updated_at + expires_at)
-//  5. if the paste was UNPINNED (pinned_version=0), updates the
+//  1. checks identity (the existing paste's owner) active bytes + size against userCap
+//  2. inserts a new version row
+//  3. resets the retention clock (updated_at + expires_at)
+//  4. if the paste was UNPINNED (pinned_version=0), updates the
 //     denormalized head fields (kind, content_sha, size) so the public
 //     URL serves the new bytes. If the paste was PINNED to a specific
 //     version, the head fields stay pointing at that version's data -
@@ -253,7 +245,7 @@ type AppendResult struct {
 // The "size" being charged is the new version's bytes - older versions
 // continue to count toward the identity's total until the parent paste
 // expires or is deleted.
-func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, serviceCap, userCap int64, now time.Time) (AppendResult, error) {
+func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (AppendResult, error) {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
 		return AppendResult{}, fmt.Errorf("begin tx: %w", err)
@@ -274,17 +266,6 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 		return AppendResult{}, fmt.Errorf("lookup paste identity: %w", err)
 	}
 
-	// Service-wide check across BOTH pastes and sites. Tombstoned
-	// versions contribute 0.
-	if serviceCap > 0 {
-		total, err := serviceWideActiveBytes(tx, nowStr, siteNowStr)
-		if err != nil {
-			return AppendResult{}, err
-		}
-		if total+body > serviceCap {
-			return AppendResult{}, ErrServiceFull
-		}
-	}
 	// Per-identity check across BOTH pastes and sites. Tombstoned
 	// versions contribute 0.
 	if userCap > 0 {
@@ -346,7 +327,7 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 // AppendVersion is the simple variant used by tests + any caller that
 // doesn't need quota enforcement.
 func (r *PasteRepo) AppendVersion(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, now time.Time) (int, error) {
-	res, err := r.AppendVersionWithQuotaCheck(slug, kind, contentSHA, size, 0, 0, now)
+	res, err := r.AppendVersionWithQuotaCheck(slug, kind, contentSHA, size, 0, now)
 	return res.NewVer, err
 }
 

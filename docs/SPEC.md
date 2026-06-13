@@ -845,21 +845,17 @@ informs them):
   backends free at READ time; the per-app room aggregate is uniformly
   sweep-time so the cap behaves identically across sqlite, slatedb, and
   shale.
-- **Service-wide cap.** Room data counts toward the same `--storage-cap-bytes`
-  service-wide cap pastes and sites do, in BOTH directions:
-  - A room `PUT` that would push *total active service bytes* (pastes +
-    sites + rooms) over the cap is refused (**507**), the prior value left
-    intact - the room write participates in the same serializable cap check
-    the paste insert and site deploy already perform.
-  - Room bytes are included in the total the paste-upload and site-deploy
-    quota checks compute, so a service already near the cap from room data
-    correctly refuses new pastes and sites.
-
-  Rooms add a new writable surface, so this is flagged explicitly: the
-  per-app aggregate is the primary structural bound, the service-wide cap
-  is the backstop that no single content kind can evade, and a
-  reverse-proxy per-IP rate limit remains the appropriate layer for raw
-  request-rate abuse, exactly as for the paste path.
+- **Durable total-bytes ceiling.** Room data does NOT carry its own
+  service-wide byte scan. Rooms hold no blobs (a room value lives entirely
+  in the metadata backend, not the content-addressed `BlobStore`), so a
+  room write touches no object-store quota directly and is bounded by the
+  per-room and per-app caps above. The service's durable total-bytes
+  ceiling is enforced at the object store for the blob-holding kinds
+  (pastes + sites); see "Limits → Durable total-bytes ceiling: an
+  object-store quota". The per-app aggregate is therefore the primary
+  structural bound on a room's growth, and a reverse-proxy per-IP rate
+  limit remains the appropriate layer for raw request-rate abuse, exactly
+  as for the paste path.
 
 ### Retention
 
@@ -1077,7 +1073,7 @@ flavors, and this is the abuse + correctness lever:
   durable set is what a late joiner must see, so it must survive a full
   disconnect + reload, so it lands in the room KV via the SAME
   `RoomRepo.PutValue` / `DeleteValue` the HTTP verbs use - which means it
-  rides the SAME per-room / per-app / service-wide caps and resets the
+  rides the SAME per-room and per-app caps and resets the
   SAME retention clock. A durable mutation is therefore consistent whether
   it arrives over the relay or over `PUT /api/rooms/<uuid>/<key>`: both
   funnel through the one room repo, so the snapshot a future joiner reads
@@ -1294,8 +1290,8 @@ rooms, per-frame bytes, in-flight buffered bytes, and message rate - every
 axis a hostile client could push on. A reverse-proxy per-IP connection
 limit remains the appropriate outer layer for raw connection-flood abuse,
 exactly the division of labor the KV path documents for request-rate
-abuse. Durable mutations made over the relay ride the EXISTING per-room /
-per-app / service-wide byte caps unchanged (they go through `PutValue`),
+abuse. Durable mutations made over the relay ride the EXISTING per-room
+and per-app byte caps unchanged (they go through `PutValue`),
 so the relay opens no new path to grow the durable store past its caps.
 
 The relay adds NO state that survives a room's expiry: when a room is
@@ -1768,7 +1764,10 @@ no external assets.
 
 ## Limits
 
-Three caps and an SSH-handshake gate, each enforced atomically.
+A per-identity quota and an SSH-handshake gate, each enforced atomically
+at the app layer, plus a durable total-bytes ceiling enforced one layer
+down at the object store (see "Durable total-bytes ceiling: an
+object-store quota" below).
 
 ### Per-identity quota: 10 MiB (compressed)
 
@@ -1789,17 +1788,51 @@ Deleted versions (via `delete <slug> <ver>`) contribute zero bytes to the
 quota even though the metadata row remains as a tombstone - only the
 blob bytes are gone.
 
-### Service-wide storage cap: default 5 GiB
+### Durable total-bytes ceiling: an object-store quota
 
-`--storage-cap-bytes` / `HOSTTHIS_STORAGE_CAP_BYTES` bounds total
-active LOGICAL bytes across every identity. Default 5 GiB; 0 disables
-the check. Past the cap, new uploads get `service is at capacity; try
-again after the next expiry`. The system recovers as old pastes
-expire.
+The total durable bytes the whole service can hold are bounded at the
+**object store**, not by an app-level scan on the write path. The
+operator sets a hard quota on the blob bucket (e.g. a MinIO bucket
+quota); the storage layer never adds the bytes up itself. When a blob
+`Put` is rejected by the object store because the bucket is at its
+quota, the blob store surfaces the `ErrServiceFull` sentinel, and the
+upload / site-deploy services translate it into a graceful
+"service is at capacity; try again after the next expiry" response.
+Rooms hold no blobs, so a room write never produces `ErrServiceFull`;
+the system recovers as old pastes, sites, and rooms expire and the
+sweep reclaims their bytes, freeing room under the quota.
 
-The cap counts UNCOMPRESSED bytes (the size users perceive); actual
-on-disk / object-store usage is typically 5–10× smaller because of
-zstd compression in the blob layer.
+**Why this lives at the object store, not in the app.** hostthis
+previously enforced the ceiling with an app-level pre-check: before
+accepting any paste / site / room write it summed the active bytes
+across the entire metadata keyspace (every `versions/*`, every site's
+`DedupedSize`, every app's room bytes) and rejected the write if the
+total exceeded a configured cap. That design had three problems an
+object-store quota fixes:
+
+- **It was O(active rows) on every write.** The sum was a full scan of
+  the byte-holding keyspace (a cross-shard aggregate on the sharded
+  backend), recomputed on the hot path of every single upload. The
+  cost grew with the amount of stored content, so the busiest service
+  paid the highest per-write tax.
+- **One bad record poisoned every write.** Because the sum had to decode
+  every byte-holding row, a single undecodable / corrupt record made the
+  aggregate fail, and that failure rejected EVERY write service-wide -
+  not just a write touching the bad record. The blast radius of one
+  poisoned row was the whole service.
+- **It counted the wrong number.** The scan summed LOGICAL
+  (uncompressed, pre-dedup) bytes, an estimate of disk pressure that
+  could be 5–10× larger than reality after zstd compression and
+  content-addressed dedup. A bucket quota counts the REAL physical bytes
+  the object store actually holds (post-compression, post-dedup), so the
+  ceiling tracks true storage rather than a worst-case overestimate.
+
+A bucket quota is a HARD ceiling enforced durably by the storage layer
+with no blast radius: a rejected `Put` fails only that one write, the
+quota is always exact, and there is no per-write scan to run or corrupt
+record to trip over. Operators worried about disk pressure set the
+bucket quota (and can tune the blob backend's storage class / lifecycle
+independently); hostthis carries no `--storage-cap-bytes` knob.
 
 ### Sybil rate limit: fresh keys per IP subnet per 24h
 
@@ -1827,9 +1860,12 @@ this is the trade-off.
 
 ### Atomicity
 
-All three caps and the Sybil admit run inside a single atomic
-transaction so concurrent writers serialize at the transaction
-boundary instead of racing a stale SUM check. The underlying
+The per-identity quota check and the Sybil admit run inside a single
+atomic transaction so concurrent writers serialize at the transaction
+boundary instead of racing a stale SUM check. (The durable total-bytes
+ceiling is NOT part of this transaction: it lives at the object store as
+a bucket quota and surfaces as `ErrServiceFull` from the blob `Put`, off
+the metadata write path entirely.) The underlying
 mechanism depends on the metadata backend in use:
 
 - **sqlite backend** - `BEGIN IMMEDIATE` (via `database/sql`
@@ -1851,8 +1887,10 @@ no half-applied state visible to readers."
 - One ssh key → 10 MiB of active LOGICAL bytes, ever
 - One IP subnet → ~20 fresh keys × 10 MiB = ~200 MiB/day logical
   (~20–40 MiB/day actual storage after zstd)
-- All identities combined → 5 GiB logical (~500 MiB–1 GiB actual)
-- Concurrent SUM-check races → atomic transactions
+- All identities combined → the object-store bucket quota on real
+  physical bytes (post-compression, post-dedup), enforced by the storage
+  layer, not an app-level scan
+- Concurrent per-identity quota races → atomic transactions
 - 7-day retention as the long-term release valve
 
 *Not bounded by the protocol* (operator-layer concerns):
@@ -1894,6 +1932,19 @@ type SweepBlobs interface {
 The service layer never imports a specific backend - it depends only on
 those four methods. Backends are swapped via the
 `HOSTTHIS_BLOB_BACKEND` env var at startup.
+
+**`Put` and the `ErrServiceFull` sentinel.** When the underlying object
+store rejects a `Put` because the bucket is at its configured quota (an
+S3 `507 Insufficient Storage` / quota-exceeded response from MinIO or an
+equivalent backend), the blob store maps that rejection to the
+`ErrServiceFull` sentinel rather than a generic 500. This is the single
+place the durable total-bytes ceiling is enforced (see "Limits →
+Durable total-bytes ceiling: an object-store quota"): the app runs no
+service-wide byte scan, so `ErrServiceFull` originates from the storage
+layer's rejection, and the upload / site-deploy services translate it
+into the graceful "service is at capacity" response. A backend with no
+quota concept (the local `disk` backend) never returns it; the ceiling
+is then whatever the host filesystem allows, an operator concern.
 
 ### Available backends
 
@@ -2129,8 +2180,8 @@ behaviors are expressed in terms of inputs and observable outputs:
   version of the identity's non-expired pastes. Quota is freed by
   `Delete` (removes the paste and all its versions) and by
   `DeleteVersion` (tombstones one version). Per-identity quotas are
-  independent; a service-wide cap, if set, behaves the same across all
-  identities.
+  independent of each other; the durable total-bytes ceiling is a
+  separate concern enforced at the object store, not by this repo.
 - **Versions.** `AppendVersionWithQuotaCheck` assigns `MAX(ver_num)+1`,
   counting tombstones so numbers are never reused. An unpinned paste's
   head rolls forward to the new version; a pinned paste keeps serving
@@ -2262,8 +2313,8 @@ backends add types that ALSO satisfy them; the domain layer (`Site`,
 `Manifest`, the safe-untar guards) is backend-agnostic and unchanged.
 The deploy path's interface is:
 
-- `InsertWithQuotaCheck(s Site, dedupedSize int, serviceCap, userCap, now)`
-- `UpdateWithQuotaCheck(s Site, oldDeduped, newDeduped int, serviceCap, userCap, now)`
+- `InsertWithQuotaCheck(s Site, dedupedSize int, userCap, now)`
+- `UpdateWithQuotaCheck(s Site, oldDeduped, newDeduped int, userCap, now)`
   - re-deploy to an OWNED slug in place; charges the replace delta
 - `Get(slug) (Site, error)`
 - `SumActiveBytesByOwner(owner, now) (int64, error)` (the identity's
@@ -2314,22 +2365,16 @@ enumerates every site exactly as `pastes/` enumerates every paste.
 - **Deploy (`InsertWithQuotaCheck`).** Holds the per-identity quota
   stripe (the same `lockQuota(identity)` the paste insert uses, so two
   concurrent same-identity deploys cannot both pass the cap), then:
-  1. **Service-wide cap pre-check.** If `serviceCap > 0`, sum service-wide
-     active bytes across BOTH pastes AND sites (and any other byte-holding
-     family), reject with the service-full sentinel if `total + deduped`
-     exceeds it. This is the load-bearing change to the slatedb
-     service-wide sum: it previously summed only `pastes/* + versions/*`;
-     it MUST now also add every non-expired `sites/<slug>` row's
-     `DedupedSize`, so a site deploy sees the bytes pastes already hold and
-     a paste upload sees the bytes sites already hold. (Parallels the
-     sqlite `serviceWideActiveBytes`, which sums pastes + sites + rooms.)
-  2. **Per-identity cap pre-check.** If `userCap > 0`, sum the owner's
+  1. **Per-identity cap pre-check.** If `userCap > 0`, sum the owner's
      active paste bytes (`identity_pastes/<id>/*` -> non-deleted versions
      of non-expired pastes) PLUS the owner's active site bytes
      (`identity_sites/<id>/*` -> `DedupedSize` of non-expired sites),
      reject with the over-quota sentinel if `owned + deduped` exceeds the
-     cap. (Parallels the sqlite `identityActiveBytes`.)
-  3. **Slug-collision check, BOTH directions.** Inside the transaction,
+     cap. (Parallels the sqlite `identityActiveBytes`.) There is no
+     service-wide byte scan here: the durable total-bytes ceiling is the
+     object-store bucket quota (see "Limits"), surfaced as `ErrServiceFull`
+     from the blob `Put` when a deploy's blobs would overrun it.
+  2. **Slug-collision check, BOTH directions.** Inside the transaction,
      read `sites/<slug>` AND `pastes/<slug>`; if either exists, reject with
      the slug-taken sentinel (whose message contains "slug" so the deploy
      service retries with a fresh slug). A slug is EITHER a site or a
@@ -2337,7 +2382,7 @@ enumerates every site exactly as `pastes/` enumerates every paste.
      paste already owns, and the paste insert (unchanged) already rejects a
      slug another paste owns. The read participates in snapshot-isolation
      conflict detection.
-  4. **Atomic write.** In one transaction, `Put sites/<slug>` (the JSON
+  3. **Atomic write.** In one transaction, `Put sites/<slug>` (the JSON
      row), `Put identity_sites/<id>/<slug>` (empty marker), and
      `Put expiry_sites/<ExpiresAt>/<slug>` (empty marker). All three land
      or none.
@@ -2348,12 +2393,13 @@ enumerates every site exactly as `pastes/` enumerates every paste.
      different identity, return the not-found sentinel (the service layer
      surfaces it as *not found*, exit 4, no existence leak). The read
      participates in snapshot-isolation conflict detection.
-  2. **Quota pre-checks on the DELTA.** The service-wide and per-identity
-     sums subtract the OLD row's `DedupedSize` and add the new manifest's
-     `DedupedSize`, so an in-place re-deploy is charged only the delta
-     (a same-size re-deploy is a no-op against quota; a smaller one frees
-     bytes). Reject with the matching sentinel if the post-delta total
-     exceeds a cap.
+  2. **Quota pre-check on the DELTA.** The per-identity sum subtracts the
+     OLD row's `DedupedSize` and adds the new manifest's `DedupedSize`, so
+     an in-place re-deploy is charged only the delta (a same-size re-deploy
+     is a no-op against quota; a smaller one frees bytes). Reject with the
+     over-quota sentinel if the post-delta total exceeds the per-identity
+     cap. The durable total-bytes ceiling stays the object-store quota,
+     surfaced as `ErrServiceFull` from the blob `Put`.
   3. **Atomic swap.** `Put sites/<slug>` (new manifest, new `DedupedSize`,
      refreshed `UpdatedAt` + `ExpiresAt`), leave `identity_sites/<id>/<slug>`
      in place (owner unchanged), and re-key the expiry marker: `Delete`
@@ -2484,10 +2530,11 @@ though the symmetric site direction correctly rejects it. The
 `StrictQuotaUnderConcurrency` pins the combined ceiling under concurrent
 cross-kind deploys.
 
-The service-wide cap sums version bytes AND every site's `DedupedSize` (the
-shale `sumServiceWideActiveBytes` now adds the site aggregate, paralleling
-the slatedb sum), so on BOTH the paste-insert and the site-deploy paths a
-paste sees site bytes and a site sees paste bytes.
+The durable total-bytes ceiling is NOT a shale aggregate scan: it is the
+object-store bucket quota (see "Limits → Durable total-bytes ceiling"),
+surfaced as `ErrServiceFull` from the blob `Put`. The shale site repo runs
+no service-wide byte sum on the deploy path; only the per-identity counter
+(below) gates a deploy at the app layer.
 
 The cross-family paste-slug collision read is added to the site
 authoritative write (reject a slug a paste owns), and the paste
@@ -2503,8 +2550,8 @@ counter (`reconcileSiteReservations` in `shale_site_repo.go`).
 Prod runs the slatedb-direct backend, so the slatedb site impl is the
 load-bearing deliverable; the shale site impl is the same layout over the
 reservation pattern (the new surface is the dedicated site counter +
-reservation, the cross-family collision read, the service-wide-sum site
-fold, and the reconciler's Job 3 for site markers). Both run the SAME
+reservation, the cross-family collision read, and the reconciler's Job 3
+for site markers). Both run the SAME
 conformance site subtests under the SAME factory the way sqlite and slatedb
 do, so each backend is a drop-in for static-site hosting by construction.
 
@@ -2525,9 +2572,9 @@ The backend-agnostic conformance suite is extended with site operations so
 sqlite, slatedb, and shale are pinned to behave IDENTICALLY for sites, the
 same way they are pinned for pastes. The site contract the suite asserts:
 deploy a site and read every path back byte-identically (manifest
-round-trip), list/sum a site's bytes by identity, the per-identity AND
-service-wide quota counts SITE bytes (a site fills quota a paste then sees,
-and vice versa), the slug-collision rejects a slug a paste already owns
+round-trip), list/sum a site's bytes by identity, the per-identity quota
+counts SITE bytes (a site fills the owner's quota a paste then sees, and
+vice versa), the slug-collision rejects a slug a paste already owns
 (and a paste rejects a slug a site owns), and `ExpiredSiteSlugs` +
 `Delete` + `ReferencedSiteBlobSHAs` drive the sweep. A backend that passes
 the extended suite is a drop-in for static-site hosting by construction.
@@ -2561,8 +2608,8 @@ read interface is:
 - `GetRoom(appSlug, id) (Room, error)`
 - `GetValue(appSlug, id, key) ([]byte, error)`
 - `ScanRoom(appSlug, id) (RoomKV, error)`
-- `PutValue(appSlug, id, key, val, appCap, serviceCap, now)` (per-room +
-  per-app + service-wide caps; resets the retention clock)
+- `PutValue(appSlug, id, key, val, appCap, now)` (per-room +
+  per-app caps; resets the retention clock)
 - `DeleteValue(appSlug, id, key, now)` (idempotent; resets the clock)
 - `CountRoomCreates(appSlug, subnet, now, window) (perSubnet, perApp, err)`
 
@@ -2709,12 +2756,7 @@ rely on.
      frees its old bytes). If `appCap > 0` and the delta is positive, sum
      the app's room bytes and reject with the app-rooms-full sentinel (507)
      if `total + delta` exceeds `appCap`.
-  4. **Service-wide cap.** If `serviceCap > 0` and the delta is positive,
-     sum service-wide active bytes (pastes + sites + rooms; see below) and
-     reject with the service-full sentinel if `total + delta` exceeds the
-     cap - so a room write participates in `--storage-cap-bytes` exactly as
-     a paste insert and a site deploy do.
-  5. **Upsert + touch.** `Put roomkv/<app>/<uuid>/<key>` (the new value),
+  4. **Upsert + touch.** `Put roomkv/<app>/<uuid>/<key>` (the new value),
      then reset the retention clock: read the room record, delete the old
      `roomexpiry/<oldExpiresAt>/...` index entry, write the record with
      `UpdatedAt = now`, `ExpiresAt = now + RoomRetentionWindow`, and the new
@@ -2739,24 +2781,17 @@ rely on.
   `<ts>` (the second-to-last segment, before the trailing disambiguator
   `<uuid>`) is within the window.
 
-#### Service-wide cap is SYMMETRIC: room bytes count both ways
+#### No service-wide byte scan on the room path
 
-Room value bytes fold into `sumServiceWideActiveBytes` (the slatedb
-service-wide sum that already adds `pastes/* + versions/* + sites/*`), so
-the cap counts every stored content kind in BOTH directions:
-
-- a room PUT's service-wide pre-check sees the bytes pastes and sites
-  already hold, and
-- a paste upload's / site deploy's service-wide pre-check sees the bytes
-  rooms already hold (the room aggregate is added to the same sum the paste
-  insert and site deploy read).
-
-This is the exact symmetry the sites-on-slate P0 fix established for
-paste-vs-site, extended to the third kind: do NOT regress it to an
-asymmetry where one kind's writer ignores another kind's bytes. The sqlite
-`serviceWideActiveBytes` already sums pastes + sites + rooms; the slatedb
-sum gains the room term to match, and the `Rooms/ServiceCapCountsAll`
-conformance subtest pins all three directions.
+Rooms run NO service-wide byte sum. The room write path is gated only by
+the per-room cap and the per-app aggregate; a room holds no blobs, so it
+touches no object-store quota, and the durable total-bytes ceiling (the
+object-store bucket quota, see "Limits → Durable total-bytes ceiling")
+bounds only the blob-holding kinds (pastes + sites). The removed
+`sumServiceWideActiveBytes` aggregate - which the room path once
+participated in alongside pastes and sites - no longer exists on any
+backend, so there is no cross-kind byte scan for a room PUT to run or to
+fold its bytes into.
 
 #### Expiry + sweep -> KV mapping; the fixed-width TTL timestamp
 
@@ -2778,8 +2813,8 @@ conformance subtest pins all three directions.
   comparison is a correct lexical compare too. The **sqlite** backend's
   `rooms.expires_at` column adopts the SAME fixed-width format
   (`formatSiteExpiry`, matching its `sites.expires_at` column), and every
-  query that compares against it (`ExpiredRoomKeys`, the service-wide room
-  sum) uses the fixed-width operand, so the sweep's inclusive-boundary
+  query that compares against it (`ExpiredRoomKeys`) uses the fixed-width
+  operand, so the sweep's inclusive-boundary
   sub-second ordering is correct on sqlite too - the `Rooms
   /ExpirySubSecondOrdering` conformance subtest pins this identically across
   all three backends.
@@ -2865,10 +2900,10 @@ backed by a discrete COUNTER the CAS can read-check, not by an in-CAS scan:
   serializable tx - so they need no stored total); since a room is only ever
   written by one backend's store, the shale-only fields are inert on the others.
 
-The service-wide cap sums version bytes + every site's `DedupedSize` + every
-app's room bytes (the shale `sumServiceWideActiveBytes` adds the room
-aggregate, paralleling the slatedb sum), so on the paste-insert, site-deploy,
-AND room-write paths each kind sees the others' bytes. Sweep-time expiry
+The shale room path runs NO service-wide byte sum either: the durable
+total-bytes ceiling is the object-store bucket quota, and a room holds no
+blobs, so the room write is bounded only by the per-room and per-app caps.
+Sweep-time expiry
 semantics (`ExpiryFreesQuotaAtReadTime = false`) carry over from the paste
 counter: a room's bytes leave the per-app counter when the sweep deletes the
 expired room, not at read time, the same fail-safe over-count direction. The
@@ -2884,7 +2919,7 @@ sqlite + slatedb). To keep the verbatim-round-trip contract IDENTICAL across
 all three backends, a stored shale room value is prefixed with one sentinel
 byte; the decode strips it to return the app's exact bytes (including the
 empty string). All room BYTE accounting (the per-app counter, the per-room
-cap, the service-wide sum) charges the DECODED length, so the byte totals
+cap) charges the DECODED length, so the byte totals
 match slatedb exactly - an empty value counts as 0 bytes. This is a
 shale-internal encoding detail; the observable Get/Scan contract is the same
 verbatim bytes on every backend, and the conformance `Rooms/RoundTrip`
@@ -2933,9 +2968,10 @@ gate):
   missing key in a real room (no per-key existence leak).
 - **Per-room cap.** A PUT that would push the room past `MaxRoomBytes` or
   `MaxRoomKeys` is rejected, prior value intact.
-- **Service-wide cross-kind cap.** Room bytes fill the service cap a paste
-  / site then sees, and paste / site bytes fill the cap a room PUT then
-  sees - the symmetric `Rooms/ServiceCapCountsAll` directions.
+- **Per-app aggregate cap.** A PUT that would push the app's total room
+  bytes past `appCap` is rejected (the per-app structural bound; rooms run
+  no service-wide byte scan, the durable ceiling being the object-store
+  bucket quota).
 - **Creation rate limit.** The per-subnet and per-app in-window counts the
   service gates on are accurate after N creations, and a windowed prune
   drops past-window ledger rows.
@@ -3095,11 +3131,13 @@ steps), the reservation from step 1 is left orphaned: the bytes are
 counted but no paste exists. This **over-counts**, shrinking the owner's
 available quota temporarily; it never **under-counts** (it never lets an
 owner exceed the cap). A reconciler releases orphaned reservations (see
-below). The service-wide cap, which is a property of the whole keyspace
-rather than one identity, is checked separately via a cross-shard
-aggregate (see "Cross-shard background operations") and is best-effort
-soft enforcement, the same posture it has on the single-writer backends
-where the sum is a scan, not a transaction-held invariant.
+below). The durable total-bytes ceiling is NOT a property this counter or
+any cross-shard aggregate enforces: it is the object-store bucket quota
+(see "Limits → Durable total-bytes ceiling"), surfaced as `ErrServiceFull`
+from the blob `Put`. The shale backend runs no service-wide byte scan on
+the write path - the removed cross-shard aggregate that once summed the
+whole keyspace per write is exactly the O(active rows), single-bad-record-
+poisons-everything design the bucket quota replaces.
 
 This reservation counter replaces the per-insert
 `SumActiveBytesByOwner` scan the single-writer backends run inside the
@@ -3868,7 +3906,6 @@ file). Defaults in parens:
 --scheme                 / HOSTTHIS_PUBLIC_SCHEME           https | http                            (https)
 --data-dir               / HOSTTHIS_DATA_DIR                where sqlite + blobs live               (./data)
 --landing                / HOSTTHIS_LANDING                 path to landing.html                    (web/landing.html)
---storage-cap-bytes      / HOSTTHIS_STORAGE_CAP_BYTES       service-wide cap (0 disables)           (5 GiB)
 --fresh-keys-per-subnet  / HOSTTHIS_FRESH_KEYS_PER_SUBNET   sybil-gate threshold                    (20)
 --fresh-keys-window      / HOSTTHIS_FRESH_KEYS_WINDOW       sybil-gate rolling window               (24h)
 
@@ -3907,7 +3944,10 @@ sample production compose.
 - Listen addresses (`--ssh-addr`, `--http-addr`)
 - Public surface (`--apex-domain`, `--mode`, `--scheme`)
 - Data location (`--data-dir`, `--landing`)
-- Service-wide storage cap (`--storage-cap-bytes`, set to 0 to disable)
+- Durable total-bytes ceiling: a quota on the blob bucket at the object
+  store (e.g. a MinIO bucket quota), NOT an app flag - hostthis carries
+  no `--storage-cap-bytes` knob (see "Limits → Durable total-bytes
+  ceiling")
 - Sybil gate (`--fresh-keys-per-subnet`, `--fresh-keys-window`,
   both can be tightened or relaxed for the operator's threat model)
 - Blob backend (`HOSTTHIS_BLOB_BACKEND=disk|s3`) and its connection
@@ -3915,13 +3955,13 @@ sample production compose.
 - CDN cache purger (`HOSTTHIS_CACHE_BACKEND=noop|cloudflare`) and its
   credential (`HOSTTHIS_CF_PURGE_TOKEN`)
 
-Operators worried about disk pressure can either tune
-`--storage-cap-bytes` down or put hostthis behind a reverse proxy
-that adds per-IP rate limiting on top of the Sybil gate. With the
-default 5 GiB at the 10 MiB / identity / 7-day shape, that's room
-for ~500 actively-uploading identities at full quota; in practice
-most identities use a small fraction of their cap so the real
-ceiling is much higher.
+Operators worried about disk pressure set the blob bucket's quota at the
+object store (a hard, exact ceiling on real physical post-compression /
+post-dedup bytes) and can put hostthis behind a reverse proxy that adds
+per-IP rate limiting on top of the Sybil gate. A rejected `Put` past the
+bucket quota surfaces to the user as a graceful "service is at capacity"
+response, and the system recovers as 7-day expiry + the sweep reclaim
+bytes back under the quota.
 
 ---
 
@@ -4091,9 +4131,10 @@ content for 7 days." Keep the surface small.
 - **GitHub (or any third-party) account linking / OAuth**. ssh keys
   alone carry identity; we don't need a second source of trust.
 - **Operator-configurable per-paste / per-identity caps + retention**.
-  Those three are hardcoded as product opinions. The service-wide
-  storage cap and the Sybil gate ARE operator-tunable - see "Limits"
-  and the self-hosting flag table.
+  Those three are hardcoded as product opinions. The Sybil gate IS
+  operator-tunable, and the durable total-bytes ceiling is an
+  object-store bucket quota the operator sets at the storage layer (not
+  an app flag) - see "Limits" and the self-hosting flag table.
 
 If real demand surfaces for any of these later, they can be added
 without breaking v1 semantics. These are explicit no's, not oversights.

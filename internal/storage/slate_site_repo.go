@@ -2,15 +2,13 @@
 //
 // SlateDB-backed twin of site_repo.go (the sqlite SiteRepo). Adds the
 // site key families to the SAME SlateDB instance the paste keys live in,
-// so a site insert + its indexes commit in one transaction and the
-// service-wide quota sum (sumServiceWideActiveBytes in slate_repo.go)
-// can include site bytes alongside paste bytes.
+// so a site insert + its indexes commit in one transaction.
 //
 // The site interface method names (Get, Delete, SumActiveBytesByOwner,
 // InsertWithQuotaCheck) collide with the paste method names on SlateRepo
 // with different signatures, so they cannot both live on SlateRepo. The
-// KV operations live on SlateRepo as `...Site` methods (sharing db,
-// lockQuota, and the service-wide sum), and a thin SlateSiteRepo adapter
+// KV operations live on SlateRepo as `...Site` methods (sharing db and
+// lockQuota), and a thin SlateSiteRepo adapter
 // exposes them under the service.SiteRepo + service.SweepSites interface
 // names by delegating. NewSlateSiteRepo(repo) builds the adapter.
 //
@@ -60,11 +58,11 @@ type SlateSiteRepo struct {
 func NewSlateSiteRepo(repo *SlateRepo) *SlateSiteRepo { return &SlateSiteRepo{repo: repo} }
 
 // service.SiteRepo
-func (s *SlateSiteRepo) InsertWithQuotaCheck(site domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
-	return s.repo.InsertSiteWithQuotaCheck(site, dedupedSize, serviceCap, userCap, now)
+func (s *SlateSiteRepo) InsertWithQuotaCheck(site domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+	return s.repo.InsertSiteWithQuotaCheck(site, dedupedSize, userCap, now)
 }
-func (s *SlateSiteRepo) ReplaceWithQuotaCheck(site domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
-	return s.repo.ReplaceSiteWithQuotaCheck(site, dedupedSize, serviceCap, userCap, now)
+func (s *SlateSiteRepo) ReplaceWithQuotaCheck(site domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+	return s.repo.ReplaceSiteWithQuotaCheck(site, dedupedSize, userCap, now)
 }
 func (s *SlateSiteRepo) Get(slug domain.Slug) (domain.Site, error) { return s.repo.GetSite(slug) }
 func (s *SlateSiteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int64, error) {
@@ -145,34 +143,27 @@ func prefixExpirySites() []byte { return []byte("expiry_sites/") }
 
 // --- Site KV operations (on SlateRepo) -------------------------------------
 
-// InsertSiteWithQuotaCheck atomically checks the deploying identity's quota
-// (per-identity AND service-wide, BOTH counting site bytes alongside paste
-// bytes), rejects a slug already taken by a paste OR a site, and writes the
-// site row + its two index entries in one transaction.
+// InsertSiteWithQuotaCheck atomically checks the deploying identity's
+// per-identity quota (counting site bytes alongside paste bytes), rejects a
+// slug already taken by a paste OR a site, and writes the site row + its two
+// index entries in one transaction.
 //
 // The deduped size charged is dedupedSize (distinct blobs only), the same
 // figure the sqlite backend charges. The per-identity quota stripe is held
 // across the sum + the write so two concurrent same-identity deploys cannot
-// both pass the cap (mirrors SlateRepo.InsertWithQuotaCheck for pastes).
+// both pass the cap (mirrors SlateRepo.InsertWithQuotaCheck for pastes). The
+// durable total-bytes ceiling is NOT checked here: it is the object-store
+// bucket quota, enforced when a blob Put is rejected (see SPEC "Limits ->
+// Durable total-bytes ceiling: an object-store quota").
 //
 // Returns:
 //   - nil on success
 //   - ErrSlugTaken if the slug already exists (in sites OR pastes)
-//   - ErrServiceFull if accepting would exceed serviceCap
 //   - ErrOverUserQuota if accepting would exceed userCap
-func (r *SlateRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
+func (r *SlateRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	defer r.lockQuota(s.Identity.String())()
 	body := int64(dedupedSize)
 
-	if serviceCap > 0 {
-		total, err := r.sumServiceWideActiveBytes(now)
-		if err != nil {
-			return fmt.Errorf("service-wide sum: %w", err)
-		}
-		if total+body > serviceCap {
-			return ErrServiceFull
-		}
-	}
 	if userCap > 0 {
 		ownerPaste, err := r.sumActiveBytesForOwner(s.Identity.String(), now)
 		if err != nil {
@@ -239,18 +230,19 @@ func (r *SlateRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, ser
 
 // ReplaceSiteWithQuotaCheck re-deploys an existing OWNED site in place,
 // swapping its row (manifest, deduped size, updated_at, expires_at) and
-// re-keying its expiry index, while enforcing the per-identity and
-// service caps against the REPLACE DELTA.
+// re-keying its expiry index, while enforcing the per-identity cap against
+// the REPLACE DELTA.
 //
 // The slug must already exist as a site AND be owned by s.Identity. A
 // missing row OR a foreign-owned row both collapse to ErrNotFound (the
 // SAME sentinel a missing slug yields), so existence/ownership never
 // leaks. Mirrors the sqlite SiteRepo.ReplaceWithQuotaCheck contract.
 //
-// Quota: the per-identity sum and the service-wide sum BOTH already
-// include the old row (it is a live, non-expired site), so the post-swap
-// totals are (total - oldDeduped + body). A same-size re-deploy nets zero;
-// a smaller one frees the difference.
+// Quota: the per-identity sum already includes the old row (it is a live,
+// non-expired site), so the post-swap total is (owned - oldDeduped + body).
+// A same-size re-deploy nets zero; a smaller one frees the difference. The
+// durable total-bytes ceiling is NOT checked here (it is the object-store
+// bucket quota).
 //
 // Concurrency: the per-identity quota stripe is held across the sum + the
 // swap (matching InsertSiteWithQuotaCheck), and the row read + the writes
@@ -261,9 +253,8 @@ func (r *SlateRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, ser
 // Returns:
 //   - nil on success
 //   - ErrNotFound if the slug isn't a site owned by s.Identity
-//   - ErrServiceFull if accepting would exceed serviceCap
 //   - ErrOverUserQuota if accepting would exceed userCap
-func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
+func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	defer r.lockQuota(s.Identity.String())()
 	body := int64(dedupedSize)
 
@@ -288,17 +279,8 @@ func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, se
 		creditOld = int64(existing.DedupedSize)
 	}
 
-	// Quota: the sums below include the OLD (live) row, so subtract its
-	// credited deduped bytes and add the new to evaluate post-swap totals.
-	if serviceCap > 0 {
-		total, err := r.sumServiceWideActiveBytes(now)
-		if err != nil {
-			return fmt.Errorf("service-wide sum: %w", err)
-		}
-		if total-creditOld+body > serviceCap {
-			return ErrServiceFull
-		}
-	}
+	// Quota: the sum below includes the OLD (live) row, so subtract its
+	// credited deduped bytes and add the new to evaluate the post-swap total.
 	if userCap > 0 {
 		ownerPaste, err := r.sumActiveBytesForOwner(s.Identity.String(), now)
 		if err != nil {
@@ -408,28 +390,6 @@ func (r *SlateRepo) sumActiveSiteBytesForOwner(owner string, now time.Time) (int
 				continue // stale index entry
 			}
 			return 0, err
-		}
-		if !row.ExpiresAt.After(now) {
-			continue
-		}
-		total += int64(row.DedupedSize)
-	}
-	return total, nil
-}
-
-// sumServiceWideActiveSiteBytes sums DedupedSize across every non-expired
-// site. Called by sumServiceWideActiveBytes (slate_repo.go) so the
-// service-wide cap counts site bytes alongside paste bytes.
-func (r *SlateRepo) sumServiceWideActiveSiteBytes(now time.Time) (int64, error) {
-	sites, err := r.scanPrefix([]byte("sites/"))
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	for _, item := range sites {
-		var row siteRow
-		if err := json.Unmarshal(item.Value, &row); err != nil {
-			return 0, fmt.Errorf("decode %s: %w", item.Key, err)
 		}
 		if !row.ExpiresAt.After(now) {
 			continue

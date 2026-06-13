@@ -55,8 +55,8 @@ func NewRoomKVRepo(db *sql.DB) *RoomKVRepo { return &RoomKVRepo{db: db} }
 // gate is a coarse abuse bound (60/IP/hr, 300/app/hr), not a precise
 // quota, and the per-app aggregate BYTE cap below (which IS enforced
 // inside this serializable tx) is the hard structural bound on how much an
-// app can actually store. The per-room and service-wide byte caps on
-// PutValue are likewise hard-enforced inside their own serializable tx.
+// app can actually store. The per-room byte cap on PutValue is likewise
+// hard-enforced inside its own serializable tx.
 //
 // Returns ErrSlugTaken if the (app, id) pair already exists - the
 // service retries with a fresh id (astronomically unlikely for a v4).
@@ -185,17 +185,15 @@ func (r *RoomKVRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.Roo
 //     CanPut math against the room's current state -> ErrRoomDataFull
 //  3. enforces the per-app aggregate byte cap on the post-write delta ->
 //     ErrAppRoomsFull
-//  4. enforces the service-wide cap (pastes + sites + rooms) on the
-//     post-write delta -> ErrServiceFull, so room writes participate in
-//     --storage-cap-bytes the same way paste inserts and site deploys do
-//  5. upserts the value row
-//  6. resets the room's retention clock (updated_at + expires_at)
+//  4. upserts the value row
+//  5. resets the room's retention clock (updated_at + expires_at)
 //
-// The whole thing is one serializable transaction so two concurrent
-// writes to the same room cannot both pass a stale cap check and both
-// commit, and so the service-wide total this write is checked against
-// cannot shift under a concurrent paste/site/room write.
-func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap, serviceCap int64, now time.Time) error {
+// Rooms hold no blobs, so a room write touches no object-store quota and
+// there is no service-wide byte cap on this path (see SPEC "Rooms ->
+// Quota and abuse -> Durable total-bytes ceiling"). The whole thing is one
+// serializable transaction so two concurrent writes to the same room
+// cannot both pass a stale cap check and both commit.
+func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) error {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -220,7 +218,7 @@ func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string,
 	}
 
 	// The byte DELTA this write adds (replacing an existing key frees its
-	// old bytes). Shared by the per-app and service-wide aggregate checks.
+	// old bytes). Used by the per-app aggregate check.
 	prior := 0
 	if existing, ok := kv.Values[key]; ok {
 		prior = len(existing)
@@ -235,19 +233,6 @@ func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string,
 		}
 		if total+delta > appCap {
 			return ErrAppRoomsFull
-		}
-	}
-
-	// Service-wide cap (pastes + sites + rooms): charge the same delta
-	// against the whole-service active-byte total. A room write that would
-	// push the service over --storage-cap-bytes is refused, state intact.
-	if serviceCap > 0 && delta > 0 {
-		total, err := serviceWideActiveBytes(tx, formatTime(now), formatSiteExpiry(now))
-		if err != nil {
-			return err
-		}
-		if total+delta > serviceCap {
-			return ErrServiceFull
 		}
 	}
 
@@ -375,11 +360,9 @@ func (r *RoomKVRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
 }
 
 // SumActiveRoomBytes returns the total stored value bytes across every
-// app's non-expired rooms. The sweep / quota accounting unions this into
-// the service-wide storage posture so room bytes count toward
-// --storage-cap-bytes alongside pastes and sites. Shares its query with
-// the tx-scoped activeRoomBytesTx that the paste/site/room quota checks
-// call inside their serializable transactions.
+// app's non-expired rooms. Exposed for observability and tests; the
+// durable total-bytes ceiling lives at the object store (the blob bucket
+// quota), not in an app-level sum of room bytes.
 func (r *RoomKVRepo) SumActiveRoomBytes(now time.Time) (int64, error) {
 	tx, err := r.db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -394,12 +377,10 @@ func (r *RoomKVRepo) SumActiveRoomBytes(now time.Time) (int64, error) {
 }
 
 // activeRoomBytesTx sums stored value bytes across every app's non-expired
-// rooms inside the caller's tx. Shared by SumActiveRoomBytes and by the
-// service-wide cap check (serviceWideActiveBytes), so a room PUT, a paste
-// insert, and a site deploy all see the same room-bytes figure within
-// their serializable boundary. The room expires_at column is fixed-width
-// (formatSiteExpiry), so nowStr must be the fixed-width form, matching the
-// stored column's byte-order == time-order layout.
+// rooms inside the caller's tx. Used by SumActiveRoomBytes. The room
+// expires_at column is fixed-width (formatSiteExpiry), so nowStr must be
+// the fixed-width form, matching the stored column's byte-order ==
+// time-order layout.
 func activeRoomBytesTx(tx *sql.Tx, nowStr string) (int64, error) {
 	var n sql.NullInt64
 	if err := tx.QueryRow(`

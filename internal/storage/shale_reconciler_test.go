@@ -61,14 +61,14 @@ func TestShaleReconciler_RebuildsDerivedIndexAndCounter(t *testing.T) {
 		Kind: domain.KindHTML, ContentSHA: "sha-recon2", Size: 200,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(pA, 0, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(pA, 0, now); err != nil {
 		t.Fatalf("insert pA: %v", err)
 	}
-	if err := repo.InsertWithQuotaCheck(pB, 0, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(pB, 0, now); err != nil {
 		t.Fatalf("insert pB: %v", err)
 	}
 	// Append a second version to pA so the counter must sum across versions.
-	if _, err := repo.AppendVersionWithQuotaCheck(pA.Slug, domain.KindHTML, "sha-recon1-v2", 100, 0, 0, now); err != nil {
+	if _, err := repo.AppendVersionWithQuotaCheck(pA.Slug, domain.KindHTML, "sha-recon1-v2", 100, 0, now); err != nil {
 		t.Fatalf("append pA v2: %v", err)
 	}
 
@@ -183,7 +183,7 @@ func TestShaleReconciler_ReleasesOrphanReservation(t *testing.T) {
 		Kind: domain.KindHTML, ContentSHA: "sha-orphan", Size: 300,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(p, 0, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(p, 0, now); err != nil {
 		t.Fatalf("insert paste: %v", err)
 	}
 

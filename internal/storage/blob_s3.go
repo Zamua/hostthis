@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -106,6 +107,14 @@ func (s *S3BlobStore) Put(sha string, r io.Reader, size int64) error {
 		ContentType: "application/octet-stream",
 	})
 	if err != nil {
+		if isS3QuotaExceeded(err) {
+			// The bucket is at its configured hard quota: the durable
+			// total-bytes ceiling lives here (see SPEC "Limits -> Durable
+			// total-bytes ceiling: an object-store quota"). Surface the
+			// sentinel so the upload / deploy services translate it into a
+			// graceful "service is at capacity" response instead of a 500.
+			return ErrServiceFull
+		}
 		return fmt.Errorf("s3 put %s: %w", sha, err)
 	}
 	return nil
@@ -230,6 +239,34 @@ func isS3NotFound(err error) bool {
 	var resp minio.ErrorResponse
 	if errors.As(err, &resp) {
 		return resp.Code == "NoSuchKey" || resp.StatusCode == 404
+	}
+	return false
+}
+
+// isS3QuotaExceeded reports whether err is the object store rejecting a Put
+// because the bucket is at its configured hard quota. This is matched
+// robustly because backends spell the rejection differently: MinIO returns
+// HTTP 507 Insufficient Storage with an error code in the XMinioStorageFull
+// / QuotaExceeded family, and S3-compatible backends vary the exact code.
+// We therefore key on BOTH the 507 status AND the known quota error codes,
+// so a novel-but-equivalent rejection still maps to ErrServiceFull rather
+// than leaking through as a generic 500.
+func isS3QuotaExceeded(err error) bool {
+	if err == nil {
+		return false
+	}
+	var resp minio.ErrorResponse
+	if errors.As(err, &resp) {
+		if resp.StatusCode == http.StatusInsufficientStorage { // 507
+			return true
+		}
+		code := resp.Code
+		// MinIO bucket-quota / disk-full codes; the substring match catches
+		// the admin (XMinioAdminBucketQuotaExceeded) and object-write
+		// (QuotaExceeded / XMinioStorageFull) spellings alike.
+		if strings.Contains(code, "QuotaExceeded") || strings.Contains(code, "StorageFull") {
+			return true
+		}
 	}
 	return false
 }

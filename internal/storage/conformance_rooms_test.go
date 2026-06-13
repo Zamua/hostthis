@@ -85,8 +85,6 @@ func runRoomConformance(t *testing.T, name string, caps conformCaps, newRooms fu
 	t.Run(name+"/Rooms/PerRoomCapConcurrentCeiling", func(t *testing.T) { conformRoomPerRoomCapConcurrentCeiling(t, newRooms(t).Rooms, caps) })
 	t.Run(name+"/Rooms/PerAppAggregateCap", func(t *testing.T) { conformRoomPerAppAggregateCap(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/DeleteFreesCap", func(t *testing.T) { conformRoomDeleteFreesCap(t, newRooms(t).Rooms) })
-	t.Run(name+"/Rooms/ServiceCapCountsAll", func(t *testing.T) { conformRoomServiceCapCountsAll(t, newRooms(t)) })
-	t.Run(name+"/Rooms/ServiceCapChargesDeltaOnReplace", func(t *testing.T) { conformRoomServiceCapChargesDeltaOnReplace(t, newRooms(t)) })
 	t.Run(name+"/Rooms/CreationRateLimitCounts", func(t *testing.T) { conformRoomCreationRateLimitCounts(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/CreationLedgerPrune", func(t *testing.T) { conformRoomCreationLedgerPrune(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/AppExistenceNotRepoGated", func(t *testing.T) { conformRoomAppExistenceNotRepoGated(t, newRooms(t).Rooms) })
@@ -105,7 +103,7 @@ func conformRoomRoundTrip(t *testing.T, rr conformanceRoomRepo) {
 		"empty":           {},                             // empty value must round-trip
 	}
 	for k, v := range pairs {
-		if err := rr.PutValue(room.AppSlug, room.ID, k, v, 0, 0, fixedNow); err != nil {
+		if err := rr.PutValue(room.AppSlug, room.ID, k, v, 0, fixedNow); err != nil {
 			t.Fatalf("put %q: %v", k, err)
 		}
 	}
@@ -164,7 +162,7 @@ func conformRoomCrossRoomIsolation(t *testing.T, rr conformanceRoomRepo) {
 	roomA := mkConformRoom(t, rr, app, fixedNow)
 	roomB := mkConformRoom(t, rr, app, fixedNow)
 
-	if err := rr.PutValue(roomA.AppSlug, roomA.ID, "secret", []byte("A-only"), 0, 0, fixedNow); err != nil {
+	if err := rr.PutValue(roomA.AppSlug, roomA.ID, "secret", []byte("A-only"), 0, fixedNow); err != nil {
 		t.Fatalf("put in A: %v", err)
 	}
 	// B cannot read A's key.
@@ -180,7 +178,7 @@ func conformRoomCrossRoomIsolation(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("room B scan leaked %d keys from room A (isolation broken): %v", kvB.KeyCount(), kvB.Values)
 	}
 	// B writes its own key; A does not see it.
-	if err := rr.PutValue(app, roomB.ID, "secret", []byte("B-only"), 0, 0, fixedNow); err != nil {
+	if err := rr.PutValue(app, roomB.ID, "secret", []byte("B-only"), 0, fixedNow); err != nil {
 		t.Fatalf("put in B: %v", err)
 	}
 	gotA, err := rr.GetValue(app, roomA.ID, "secret")
@@ -209,7 +207,7 @@ func conformRoomCrossAppIsolation(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("create room under app2 (same uuid): %v", err)
 	}
 
-	if err := rr.PutValue(roomA.AppSlug, id, "k", []byte("app1-data"), 0, 0, now); err != nil {
+	if err := rr.PutValue(roomA.AppSlug, id, "k", []byte("app1-data"), 0, now); err != nil {
 		t.Fatalf("put under app1: %v", err)
 	}
 	// app2's same-UUID room does not see app1's value.
@@ -241,7 +239,7 @@ func conformRoomNonexistent404(t *testing.T, rr conformanceRoomRepo) {
 	}
 	// PUT to a gone room is ErrNotFound (the room existence is re-checked
 	// inside the write boundary).
-	if err := rr.PutValue(app, ghost, "k", []byte("x"), 0, 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
+	if err := rr.PutValue(app, ghost, "k", []byte("x"), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("PutValue on nonexistent room: got %v, want ErrNotFound", err)
 	}
 	// DELETE to a gone room is ErrNotFound (only the ROOM-missing case errors;
@@ -264,11 +262,11 @@ func conformRoomPerRoomByteCap(t *testing.T, rr conformanceRoomRepo) {
 	room := mkConformRoom(t, rr, "app12345", fixedNow)
 	// Fill the room to exactly the byte cap with one value.
 	full := make([]byte, domain.MaxRoomBytes)
-	if err := rr.PutValue(room.AppSlug, room.ID, "big", full, 0, 0, fixedNow); err != nil {
+	if err := rr.PutValue(room.AppSlug, room.ID, "big", full, 0, fixedNow); err != nil {
 		t.Fatalf("put at byte cap: %v", err)
 	}
 	// One more byte (a new key) exceeds MaxRoomBytes -> rejected.
-	if err := rr.PutValue(room.AppSlug, room.ID, "more", []byte("x"), 0, 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
+	if err := rr.PutValue(room.AppSlug, room.ID, "more", []byte("x"), 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
 		t.Fatalf("over-byte-cap put: got %v, want ErrRoomDataFull", err)
 	}
 	// The rejected key was NOT written (prior state intact).
@@ -276,7 +274,7 @@ func conformRoomPerRoomByteCap(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("rejected key was written anyway: %v", err)
 	}
 	// A value larger than the whole-room budget is rejected up front too.
-	if err := rr.PutValue(room.AppSlug, room.ID, "huge", make([]byte, domain.MaxRoomValueBytes+1), 0, 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
+	if err := rr.PutValue(room.AppSlug, room.ID, "huge", make([]byte, domain.MaxRoomValueBytes+1), 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
 		t.Fatalf("over-value-cap put: got %v, want ErrRoomDataFull", err)
 	}
 }
@@ -288,16 +286,16 @@ func conformRoomPerRoomKeyCap(t *testing.T, rr conformanceRoomRepo) {
 	// Fill the room to exactly MaxRoomKeys with one-byte values.
 	for i := 0; i < domain.MaxRoomKeys; i++ {
 		k := keyN(i)
-		if err := rr.PutValue(room.AppSlug, room.ID, k, []byte("x"), 0, 0, fixedNow); err != nil {
+		if err := rr.PutValue(room.AppSlug, room.ID, k, []byte("x"), 0, fixedNow); err != nil {
 			t.Fatalf("put key %d: %v", i, err)
 		}
 	}
 	// One more distinct key exceeds MaxRoomKeys -> rejected.
-	if err := rr.PutValue(room.AppSlug, room.ID, "overflow", []byte("x"), 0, 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
+	if err := rr.PutValue(room.AppSlug, room.ID, "overflow", []byte("x"), 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
 		t.Fatalf("over-key-cap put: got %v, want ErrRoomDataFull", err)
 	}
 	// Overwriting an EXISTING key does NOT add a key slot -> still allowed.
-	if err := rr.PutValue(room.AppSlug, room.ID, keyN(0), []byte("y"), 0, 0, fixedNow); err != nil {
+	if err := rr.PutValue(room.AppSlug, room.ID, keyN(0), []byte("y"), 0, fixedNow); err != nil {
 		t.Fatalf("overwrite at key cap should be allowed (no new slot): %v", err)
 	}
 }
@@ -335,7 +333,7 @@ func conformRoomPerRoomCapConcurrentCeiling(t *testing.T, rr conformanceRoomRepo
 			// service cap (0) - this isolates the per-room byte cap. A non-nil
 			// error (over-cap, or a transient backend lock) means the value did
 			// not land; we assert only the ceiling, so the error kind is moot.
-			if err := rr.PutValue(room.AppSlug, room.ID, keyN(i), make([]byte, body), 0, 0, fixedNow); err == nil {
+			if err := rr.PutValue(room.AppSlug, room.ID, keyN(i), make([]byte, body), 0, fixedNow); err == nil {
 				atomic.AddInt64(&landed, 1)
 			}
 		}(i)
@@ -369,7 +367,7 @@ func conformRoomPerAppAggregateCap(t *testing.T, rr conformanceRoomRepo) {
 	const appCap = 100
 	roomA := mkConformRoom(t, rr, app, fixedNow)
 	// Fill 90 of the 100 app-cap bytes via room A.
-	if err := rr.PutValue(roomA.AppSlug, roomA.ID, "k", make([]byte, 90), 0 /*per-room: unused here, appCap below*/, 0, fixedNow); err != nil {
+	if err := rr.PutValue(roomA.AppSlug, roomA.ID, "k", make([]byte, 90), 0 /*per-room: unused here, appCap below*/, fixedNow); err != nil {
 		// per-room cap unused (the appCap is what we test); pass appCap on the
 		// next writes.
 		t.Fatalf("seed 90 app bytes: %v", err)
@@ -377,16 +375,16 @@ func conformRoomPerAppAggregateCap(t *testing.T, rr conformanceRoomRepo) {
 	// A second room under the SAME app: a 20-byte write pushes the app
 	// aggregate to 110 > 100 -> rejected (the per-app sum counts BOTH rooms).
 	roomB := mkConformRoom(t, rr, app, fixedNow)
-	if err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 20), appCap, 0, fixedNow); !errors.Is(err, storage.ErrAppRoomsFull) {
+	if err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 20), appCap, fixedNow); !errors.Is(err, storage.ErrAppRoomsFull) {
 		t.Fatalf("over-app-cap write (must count both rooms): got %v, want ErrAppRoomsFull", err)
 	}
 	// A 10-byte write fits (90 + 10 = 100).
-	if err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 10), appCap, 0, fixedNow); err != nil {
+	if err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 10), appCap, fixedNow); err != nil {
 		t.Fatalf("write within app cap (90+10=100): %v", err)
 	}
 	// A DIFFERENT app has its own untouched budget.
 	roomC := mkConformRoom(t, rr, "app99999", fixedNow)
-	if err := rr.PutValue(roomC.AppSlug, roomC.ID, "k", make([]byte, 90), appCap, 0, fixedNow); err != nil {
+	if err := rr.PutValue(roomC.AppSlug, roomC.ID, "k", make([]byte, 90), appCap, fixedNow); err != nil {
 		t.Fatalf("different app should have its own budget: %v", err)
 	}
 }
@@ -409,17 +407,17 @@ func conformRoomDeleteFreesCap(t *testing.T, rr conformanceRoomRepo) {
 	const doomed = 1000
 	anchor := domain.MaxRoomBytes - doomed
 	appCap := int64(domain.MaxRoomBytes)
-	if err := rr.PutValue(room.AppSlug, room.ID, "anchor", make([]byte, anchor), appCap, 0, fixedNow); err != nil {
+	if err := rr.PutValue(room.AppSlug, room.ID, "anchor", make([]byte, anchor), appCap, fixedNow); err != nil {
 		t.Fatalf("seed anchor (%d bytes): %v", anchor, err)
 	}
-	if err := rr.PutValue(room.AppSlug, room.ID, "doomed", make([]byte, doomed), appCap, 0, fixedNow); err != nil {
+	if err := rr.PutValue(room.AppSlug, room.ID, "doomed", make([]byte, doomed), appCap, fixedNow); err != nil {
 		t.Fatalf("seed doomed (%d bytes): %v", doomed, err)
 	}
 
 	// The room is now full on BOTH axes: a new value is rejected. (A new key of
 	// `doomed` bytes overflows the per-room byte cap; the same write also
 	// overflows the per-app counter, which is at MaxRoomBytes.)
-	if err := rr.PutValue(room.AppSlug, room.ID, "extra", make([]byte, doomed), appCap, 0, fixedNow); err == nil {
+	if err := rr.PutValue(room.AppSlug, room.ID, "extra", make([]byte, doomed), appCap, fixedNow); err == nil {
 		t.Fatalf("write into a full room should be rejected (per-room + per-app both at cap), got nil")
 	} else if !errors.Is(err, storage.ErrRoomDataFull) && !errors.Is(err, storage.ErrAppRoomsFull) {
 		t.Fatalf("full-room write err = %v, want ErrRoomDataFull or ErrAppRoomsFull", err)
@@ -435,7 +433,7 @@ func conformRoomDeleteFreesCap(t *testing.T, rr conformanceRoomRepo) {
 	// both caps. (A NEW key, so it adds a key slot AND `doomed` bytes; the room
 	// is back to anchor + doomed = MaxRoomBytes, and the per-app counter is
 	// likewise back to MaxRoomBytes == appCap, both at-but-not-over.)
-	if err := rr.PutValue(room.AppSlug, room.ID, "reclaimed", make([]byte, doomed), appCap, 0, fixedNow); err != nil {
+	if err := rr.PutValue(room.AppSlug, room.ID, "reclaimed", make([]byte, doomed), appCap, fixedNow); err != nil {
 		t.Fatalf("re-PUT of the freed size should succeed after a delete frees capacity: %v", err)
 	}
 	// And the freed-then-refilled state is correct: the room holds anchor +
@@ -449,93 +447,6 @@ func conformRoomDeleteFreesCap(t *testing.T, rr conformanceRoomRepo) {
 	}
 	if kv.TotalBytes() != domain.MaxRoomBytes {
 		t.Fatalf("room bytes after reclaim = %d, want %d (anchor + reclaimed)", kv.TotalBytes(), domain.MaxRoomBytes)
-	}
-}
-
-// conformRoomServiceCapCountsAll: room bytes fill the service-wide cap a paste
-// / site then sees, AND paste / site bytes fill the cap a room PUT then sees -
-// the symmetric directions. FAILS if room bytes are dropped from the sum in
-// either direction.
-func conformRoomServiceCapCountsAll(t *testing.T, st roomConformanceStores) {
-	const svcCap = 1000
-	rr, pr, sr := st.Rooms, st.Paste, st.Site
-	room := mkConformRoom(t, rr, "app12345", fixedNow)
-
-	// 1. A room PUT sees paste + site bytes already held. A paste (400) + a
-	// site (300) hold 700; a room write of 400 would push to 1100 -> reject.
-	if err := pr.InsertWithQuotaCheck(pasteOf("rsp12345", "key:a", 400), svcCap, 0, fixedNow); err != nil {
-		t.Fatalf("paste 400 under svc cap: %v", err)
-	}
-	if err := sr.InsertWithQuotaCheck(siteOf("rss12345", "key:b", 300), 300, svcCap, 0, fixedNow); err != nil {
-		t.Fatalf("site 300 under svc cap: %v", err)
-	}
-	if err := rr.PutValue(room.AppSlug, room.ID, "k", make([]byte, 400), 0, svcCap, fixedNow); !errors.Is(err, storage.ErrServiceFull) {
-		t.Fatalf("room PUT over service cap (paste+site bytes must count): got %v, want ErrServiceFull", err)
-	}
-	// A room write of 200 fits (700 + 200 = 900 <= 1000).
-	if err := rr.PutValue(room.AppSlug, room.ID, "k", make([]byte, 200), 0, svcCap, fixedNow); err != nil {
-		t.Fatalf("room write within service cap (700+200=900): %v", err)
-	}
-
-	// 2. Now a paste sees room bytes: total is 400(paste)+300(site)+200(room)
-	// = 900. A new paste of 200 would push to 1100 -> reject. This proves the
-	// PASTE upload's service-wide sum INCLUDES room bytes.
-	if err := pr.InsertWithQuotaCheck(pasteOf("rsp22345", "key:c", 200), svcCap, 0, fixedNow); !errors.Is(err, storage.ErrServiceFull) {
-		t.Fatalf("paste over service cap (room bytes must count): got %v, want ErrServiceFull", err)
-	}
-	// 3. And a site sees room bytes too (the same 900 total; a 200-byte site
-	// overflows). This proves the SITE deploy's service-wide sum includes room
-	// bytes.
-	if err := sr.InsertWithQuotaCheck(siteOf("rss22345", "key:d", 200), 200, svcCap, 0, fixedNow); !errors.Is(err, storage.ErrServiceFull) {
-		t.Fatalf("site over service cap (room bytes must count): got %v, want ErrServiceFull", err)
-	}
-}
-
-// conformRoomServiceCapChargesDeltaOnReplace pins that the service-wide cap
-// charges the POST-WRITE DELTA, not the gross value size: replacing an existing
-// key near the service cap with a value whose delta fits must SUCCEED, even
-// when total + gross-len would exceed the cap. This is the room twin of how the
-// paste append charges only the deduped delta. FAILS on a backend whose
-// service-wide pre-check charges total + len(val) (gross) instead of the delta
-// (the shale soft pre-check was the offender): a same-size replace double-counts
-// the room's current bytes and spuriously rejects.
-func conformRoomServiceCapChargesDeltaOnReplace(t *testing.T, st roomConformanceStores) {
-	const svcCap = 1000
-	rr, pr := st.Rooms, st.Paste
-	room := mkConformRoom(t, rr, "app12345", fixedNow)
-
-	// Fill the service total to 900: a 600-byte paste + a 300-byte room value.
-	if err := pr.InsertWithQuotaCheck(pasteOf("rsp12345", "key:a", 600), svcCap, 0, fixedNow); err != nil {
-		t.Fatalf("paste 600 under svc cap: %v", err)
-	}
-	if err := rr.PutValue(room.AppSlug, room.ID, "k", make([]byte, 300), 0, svcCap, fixedNow); err != nil {
-		t.Fatalf("room 300 under svc cap (900 total): %v", err)
-	}
-
-	// REPLACE the room key with the SAME size (300). The delta is 0, so the
-	// service total stays 900 <= 1000: the write must succeed. A gross pre-check
-	// would compute 900 + 300 = 1200 > 1000 and wrongly reject.
-	if err := rr.PutValue(room.AppSlug, room.ID, "k", make([]byte, 300), 0, svcCap, fixedNow); err != nil {
-		t.Fatalf("same-size replace near service cap must succeed (delta=0, total stays 900): %v", err)
-	}
-
-	// SHRINK the room key to 100 bytes (delta -200, total -> 700). Also a
-	// no-charge write; must succeed.
-	if err := rr.PutValue(room.AppSlug, room.ID, "k", make([]byte, 100), 0, svcCap, fixedNow); err != nil {
-		t.Fatalf("shrinking replace near service cap must succeed (negative delta): %v", err)
-	}
-
-	// GROW the key by a delta that still fits: from 100 to 350 is +250; total
-	// 700 + 250 = 950 <= 1000. Succeeds (the delta, not the gross 350, is
-	// charged - though here gross would also fit; the point is the delta path).
-	if err := rr.PutValue(room.AppSlug, room.ID, "k", make([]byte, 350), 0, svcCap, fixedNow); err != nil {
-		t.Fatalf("growing replace within the delta budget must succeed (700+250=950): %v", err)
-	}
-
-	// A grow whose DELTA overflows is still rejected (the cap is real): from 350
-	// to 800 is +450; total 950 + 450 = 1400 > 1000. ErrServiceFull.
-	if err := rr.PutValue(room.AppSlug, room.ID, "k", make([]byte, 800), 0, svcCap, fixedNow); !errors.Is(err, storage.ErrServiceFull) {
-		t.Fatalf("a replace whose delta overflows the service cap must reject: got %v, want ErrServiceFull", err)
 	}
 }
 
@@ -661,11 +572,11 @@ func conformRoomExpiryAndSweep(t *testing.T, rr conformanceRoomRepo) {
 	// Backdate `soon`'s clock by writing at a time whose window lands an hour
 	// out: write at (fixedNow - window + hour) so ExpiresAt = fixedNow + hour.
 	writeAt := fixedNow.Add(-domain.RoomRetentionWindow).Add(time.Hour)
-	if err := rr.PutValue(soon.AppSlug, soon.ID, "k", []byte("v"), 0, 0, writeAt); err != nil {
+	if err := rr.PutValue(soon.AppSlug, soon.ID, "k", []byte("v"), 0, writeAt); err != nil {
 		t.Fatalf("put to set soon expiry: %v", err)
 	}
 	far := mkConformRoom(t, rr, app, fixedNow)
-	if err := rr.PutValue(far.AppSlug, far.ID, "k", []byte("v"), 0, 0, fixedNow); err != nil {
+	if err := rr.PutValue(far.AppSlug, far.ID, "k", []byte("v"), 0, fixedNow); err != nil {
 		t.Fatalf("put to set far expiry: %v", err)
 	}
 
@@ -727,13 +638,13 @@ func conformRoomExpirySubSecondOrdering(t *testing.T, rr conformanceRoomRepo) {
 	// (base - window + 0.5s) so ExpiresAt = base + 0.5s.
 	late := mkConformRoom(t, rr, app, base)
 	lateWriteAt := base.Add(-domain.RoomRetentionWindow).Add(500 * time.Millisecond)
-	if err := rr.PutValue(late.AppSlug, late.ID, "k", []byte("v"), 0, 0, lateWriteAt); err != nil {
+	if err := rr.PutValue(late.AppSlug, late.ID, "k", []byte("v"), 0, lateWriteAt); err != nil {
 		t.Fatalf("put to set late (.5s) expiry: %v", err)
 	}
 	// A room that expires at the START of the same whole second.
 	early := mkConformRoom(t, rr, app, base)
 	earlyWriteAt := base.Add(-domain.RoomRetentionWindow)
-	if err := rr.PutValue(early.AppSlug, early.ID, "k", []byte("v"), 0, 0, earlyWriteAt); err != nil {
+	if err := rr.PutValue(early.AppSlug, early.ID, "k", []byte("v"), 0, earlyWriteAt); err != nil {
 		t.Fatalf("put to set early (.0s) expiry: %v", err)
 	}
 

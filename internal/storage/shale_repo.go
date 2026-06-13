@@ -971,24 +971,15 @@ func (r *ShaleRepo) decrementBytes(identity string, body int64) error {
 
 // InsertWithQuotaCheck creates a paste via the three-step reservation
 // pattern: reserve on {id}, authoritative write on {slug}, confirm on
-// {id}. The service-wide cap is a cross-shard aggregate pre-check (soft,
-// best-effort, the same posture as the single-writer backends); the
-// per-owner cap is enforced strictly by the reserve step's atomic CAS.
-func (r *ShaleRepo) InsertWithQuotaCheck(p domain.Paste, serviceCap, userCap int64, now time.Time) error {
+// {id}. The per-owner cap is enforced strictly by the reserve step's
+// atomic CAS. The durable total-bytes ceiling is NOT checked here: it is
+// the object-store bucket quota, enforced when the blob Put is rejected
+// (see SPEC "Limits -> Durable total-bytes ceiling: an object-store
+// quota"); the metadata backend runs no cross-shard byte scan.
+func (r *ShaleRepo) InsertWithQuotaCheck(p domain.Paste, userCap int64, now time.Time) error {
 	identity := p.Identity.String()
 	slug := p.Slug.String()
 	body := int64(p.Size)
-
-	// Service-wide cap: best-effort cross-shard pre-check (soft).
-	if serviceCap > 0 {
-		total, err := r.sumServiceWideActiveBytes()
-		if err != nil {
-			return fmt.Errorf("service-wide sum: %w", err)
-		}
-		if total+body > serviceCap {
-			return ErrServiceFull
-		}
-	}
 
 	// Step 1: reserve (strict per-owner quota). The marker is stamped with
 	// `now` so the reconciler can apply the grace window.
@@ -1107,7 +1098,7 @@ func (r *ShaleRepo) confirmInsert(p domain.Paste) error {
 // (strict per-owner quota), then the version row is written + the expiry
 // clock reset on the {slug} shard, then the index projection is refreshed
 // on the {id} shard.
-func (r *ShaleRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, serviceCap, userCap int64, now time.Time) (AppendResult, error) {
+func (r *ShaleRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (AppendResult, error) {
 	// Resolve the owner identity + pin state from the authoritative paste.
 	var existing pasteRow
 	if err := r.getJSON(shaleKeyPaste(slug), &existing); err != nil {
@@ -1116,16 +1107,6 @@ func (r *ShaleRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 	identity := existing.Identity
 	body := int64(size)
 	slugStr := slug.String()
-
-	if serviceCap > 0 {
-		total, err := r.sumServiceWideActiveBytes()
-		if err != nil {
-			return AppendResult{}, fmt.Errorf("service-wide sum: %w", err)
-		}
-		if total+body > serviceCap {
-			return AppendResult{}, ErrServiceFull
-		}
-	}
 
 	// Step 1: reserve. The reservation marker is keyed by a synthetic
 	// "<slug>#append" so it never collides with an insert reservation for
@@ -1557,53 +1538,6 @@ func (r *ShaleRepo) ReferencedBlobSHAs() ([]string, error) {
 		out = append(out, sha)
 	}
 	return out, nil
-}
-
-// sumServiceWideActiveBytes sums the non-deleted version sizes AND every
-// site's DedupedSize AND every app's room bytes across the whole keyspace via
-// cross-shard aggregates. Best-effort, used for the SOFT service-wide cap
-// pre-check on the paste-insert, site-deploy, AND room-write paths (the
-// per-owner / per-app cap is the strict one). O(active versions + sites + app
-// room counters); for low-volume hostthis this is a sub-millisecond fan-out.
-//
-// Including site AND room bytes here keeps the service-wide cap SYMMETRIC
-// across all three content kinds: a paste upload sees the bytes sites + rooms
-// already hold, a site deploy sees paste + room bytes, and a room PUT sees
-// paste + site bytes (parallels the slatedb sumServiceWideActiveBytes, which
-// adds the site + room totals, and the sqlite serviceWideActiveBytes, which
-// sums pastes + sites + rooms). When the shale backend has no site / room impl
-// wired (no sites/ or roombytes/ keys exist) those aggregates are empty and
-// this reduces to the pure version sum.
-func (r *ShaleRepo) sumServiceWideActiveBytes() (int64, error) {
-	versions, err := r.aggregatePrefix([]byte("versions/"))
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	for _, item := range versions {
-		var v versionRow
-		if err := json.Unmarshal(item.Value, &v); err != nil {
-			return 0, fmt.Errorf("decode %s: %w", item.Key, err)
-		}
-		if v.Deleted {
-			continue
-		}
-		total += int64(v.Size)
-	}
-	siteTotal, err := r.sumServiceWideActiveSiteBytes()
-	if err != nil {
-		return 0, err
-	}
-	// Room bytes fold into the same service-wide sum (from the per-app
-	// roombytes/ counters) so the cap is SYMMETRIC across all three content
-	// kinds: a room PUT sees paste+site bytes (it calls this), and a paste
-	// insert / site deploy sees room bytes (here). When no rooms exist the
-	// counter aggregate is empty and this reduces to versions + sites.
-	roomTotal, err := r.SumActiveRoomBytes()
-	if err != nil {
-		return 0, err
-	}
-	return total + siteTotal + roomTotal, nil
 }
 
 // --- KeyGateRepo (Sybil rate limit) ----------------------------------------

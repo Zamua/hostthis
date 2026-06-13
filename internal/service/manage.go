@@ -21,7 +21,7 @@ type PasteAdmin interface {
 	SetName(domain.Slug, string) error
 	SetPinnedVersion(domain.Slug, domain.Version) error
 	Unpin(domain.Slug) error
-	AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, serviceCap, userCap int64, now time.Time) (storage.AppendResult, error)
+	AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (storage.AppendResult, error)
 	ListVersions(domain.Slug) ([]domain.Version, error)
 	GetVersion(domain.Slug, int) (domain.Version, error)
 	DeleteVersion(domain.Slug, int) error
@@ -51,13 +51,12 @@ var ErrInvalidName = errors.New("service: name must be 1–60 printable Unicode 
 // Manage is the verb-level service. Each method maps to one ssh verb
 // (or HTTP endpoint) and is owner-gated.
 type Manage struct {
-	Repo            PasteAdmin
-	Blobs           BlobStore   // for Show + Update; same interface as Upload
-	Cache           CachePurger // never called if nil; for CDN invalidation on Update/Delete
-	PublicURL       URLBuilder  // required iff Cache is set; turns slug into purge URL
-	ServiceCapBytes int64       // 0 = no service-wide cap
-	KeyGate         *KeyGate    // optional; populates WhoamiInfo.Session when set
-	Now             func() time.Time
+	Repo      PasteAdmin
+	Blobs     BlobStore   // for Show + Update; same interface as Upload
+	Cache     CachePurger // never called if nil; for CDN invalidation on Update/Delete
+	PublicURL URLBuilder  // required iff Cache is set; turns slug into purge URL
+	KeyGate   *KeyGate    // optional; populates WhoamiInfo.Session when set
+	Now       func() time.Time
 }
 
 func NewManage(repo PasteAdmin, blobs BlobStore) *Manage {
@@ -149,9 +148,15 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 	}
 	now := m.Now().UTC()
 	if err := m.Blobs.PutPrecompressed(staged.SHA, staged.Body); err != nil {
+		// A blob Put rejected by the object store's bucket quota surfaces
+		// storage.ErrServiceFull (the durable total-bytes ceiling). Translate
+		// it into the graceful "service is at capacity" response.
+		if errors.Is(err, storage.ErrServiceFull) {
+			return UpdateResult{}, ErrServiceFull
+		}
 		return UpdateResult{}, fmt.Errorf("blob write: %w", err)
 	}
-	res, err := m.Repo.AppendVersionWithQuotaCheck(slug, kind, staged.SHA, staged.CompressedSize, m.ServiceCapBytes, int64(domain.UserQuotaBytes), now)
+	res, err := m.Repo.AppendVersionWithQuotaCheck(slug, kind, staged.SHA, staged.CompressedSize, int64(domain.UserQuotaBytes), now)
 	if err != nil {
 		switch {
 		case errors.Is(err, storage.ErrServiceFull):

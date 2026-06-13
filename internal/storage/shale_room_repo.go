@@ -102,8 +102,8 @@ func (s *ShaleRoomRepo) GetValue(appSlug domain.Slug, id domain.RoomID, key stri
 func (s *ShaleRoomRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error) {
 	return s.repo.ScanRoom(appSlug, id)
 }
-func (s *ShaleRoomRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap, serviceCap int64, now time.Time) error {
-	return s.repo.PutRoomValue(appSlug, id, key, val, appCap, serviceCap, now)
+func (s *ShaleRoomRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) error {
+	return s.repo.PutRoomValue(appSlug, id, key, val, appCap, now)
 }
 func (s *ShaleRoomRepo) DeleteValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) error {
 	return s.repo.DeleteRoomValue(appSlug, id, key, now)
@@ -175,7 +175,7 @@ func shaleKeyRoomBytes(appSlug domain.Slug) []byte {
 // shaleRoomValuePrefix + the app's exact bytes. The prefix guarantees the
 // stored value is never empty (so Put accepts an empty room value), and the
 // decode strips it to return the app's exact bytes. All room BYTE accounting
-// (the per-app counter, the per-room cap, the service-wide sum) operates on
+// (the per-app counter and the per-room cap) operates on
 // the DECODED length, so the byte totals match slate exactly (an empty value
 // counts as 0 bytes, a 10-byte value as 10).
 const shaleRoomValuePrefix = 'v'
@@ -308,8 +308,8 @@ func (r *ShaleRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.Room
 	return kv, nil
 }
 
-// PutRoomValue writes val under key, enforcing the per-room, per-app, and
-// service-wide caps and resetting the retention clock. The authoritative write
+// PutRoomValue writes val under key, enforcing the per-room and per-app caps
+// and resetting the retention clock. The authoritative write
 // is ONE {app-slug}-shard CAS that re-reads the specific value key for the
 // byte delta, validates BOTH caps from values the CAS read-set carries - the
 // per-ROOM byte total + key count stored ON the room record, and the per-APP
@@ -325,9 +325,11 @@ func (r *ShaleRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.Room
 // {app-slug}, this is single-shard - no reserve/confirm split needed.
 //
 // Returns ErrNotFound if the room is gone, ErrRoomDataFull (413) on the
-// per-room cap, ErrAppRoomsFull (507) on the per-app aggregate, ErrServiceFull
-// on the service-wide cap.
-func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap, serviceCap int64, now time.Time) error {
+// per-room cap, ErrAppRoomsFull (507) on the per-app aggregate. Rooms hold
+// no blobs, so a room write touches no object-store quota and has no
+// service-wide byte cap on this path (see SPEC "Rooms -> Quota and abuse ->
+// Durable total-bytes ceiling").
+func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) error {
 	valueKey := shaleKeyRoomValue(appSlug, id, key)
 	roomKey := shaleKeyRoom(appSlug, id)
 	counterKey := shaleKeyRoomBytes(appSlug)
@@ -338,37 +340,6 @@ func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 	// the room record's running totals (which the CAS read-set carries).
 	if len(val) > domain.MaxRoomValueBytes {
 		return ErrRoomDataFull
-	}
-
-	// Service-wide cap: SOFT cross-shard pre-check (the same posture as the
-	// paste / site paths). The shared sumServiceWideActiveBytes counts version
-	// bytes + site bytes + room bytes, so a room PUT sees paste + site bytes.
-	// Charge the POST-WRITE DELTA, not the gross len(val): overwriting an
-	// existing key only adds (new - prior) bytes to the service total, so a
-	// replace near the cap must not be spuriously soft-rejected when the delta
-	// fits. The prior is a single-key read on the value's own (already-routed)
-	// {app-slug} shard, so it is cheap; the authoritative delta is still
-	// re-read inside the CAS, so this pre-check stays soft (the hard check is
-	// the in-tx one). A delete-then-grow on the SAME shard between this read and
-	// the CAS is the usual soft-pre-check slack: it can early-reject once, the
-	// client retries.
-	if serviceCap > 0 {
-		prior := int64(0)
-		if cur, err := r.getRaw(valueKey); err != nil {
-			return fmt.Errorf("re-read room value (soft pre-check): %w", err)
-		} else if cur != nil {
-			prior = int64(shaleDecodedRoomValueLen(cur))
-		}
-		delta := int64(len(val)) - prior
-		if delta > 0 {
-			total, err := r.sumServiceWideActiveBytes()
-			if err != nil {
-				return fmt.Errorf("service-wide sum: %w", err)
-			}
-			if total+delta > serviceCap {
-				return ErrServiceFull
-			}
-		}
 	}
 
 	// Authoritative single-shard CAS on {app-slug}: re-check the room exists,
@@ -561,11 +532,11 @@ func (r *ShaleRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now tim
 
 // SumActiveRoomBytes returns the total room value bytes across EVERY app,
 // served from the per-app roombytes/ counters via a cross-shard aggregate
-// (one read per app counter). Best-effort, used for the SOFT service-wide cap
-// pre-check. Like the shale paste + site counters it has NO read-time expiry
-// awareness: an expired-unswept room's bytes leave the counter at sweep time
-// (DeleteRoom), not read time, so this over-counts transiently but never
-// under-counts (conformCaps.ExpiryFreesQuotaAtReadTime = false on shale).
+// (one read per app counter). Exposed for observability and tests; the
+// durable total-bytes ceiling lives at the object store (the blob bucket
+// quota), not in an app-level sum of room bytes. Like the shale paste + site
+// counters it has NO read-time expiry awareness: an expired-unswept room's
+// bytes leave the counter at sweep time (DeleteRoom), not read time.
 func (r *ShaleRepo) SumActiveRoomBytes() (int64, error) {
 	counters, err := r.aggregatePrefix(prefixRoomBytes)
 	if err != nil {

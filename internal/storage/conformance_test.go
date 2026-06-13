@@ -137,7 +137,6 @@ func runConformanceWithSites(
 	t.Run(name+"/QuotaFreedByDelete", func(t *testing.T) { conformQuotaFreedByDelete(t, newRepo(t)) })
 	t.Run(name+"/QuotaFreedByDeleteVersion", func(t *testing.T) { conformQuotaFreedByDeleteVersion(t, newRepo(t)) })
 	t.Run(name+"/QuotaPerIdentityIndependent", func(t *testing.T) { conformQuotaPerIdentityIndependent(t, newRepo(t)) })
-	t.Run(name+"/ServiceCapAcrossIdentities", func(t *testing.T) { conformServiceCapAcrossIdentities(t, newRepo(t)) })
 	t.Run(name+"/AppendBumpsVersion", func(t *testing.T) { conformAppendBumpsVersion(t, newRepo(t)) })
 	t.Run(name+"/PinUnpinRollsHead", func(t *testing.T) { conformPinUnpinRollsHead(t, newRepo(t)) })
 	t.Run(name+"/AppendRespectsPin", func(t *testing.T) { conformAppendRespectsPin(t, newRepo(t)) })
@@ -178,7 +177,7 @@ func pasteOf(slug, identity string, size int) domain.Paste {
 // Fails the test on error.
 func insert(t *testing.T, r conformanceRepo, p domain.Paste) {
 	t.Helper()
-	if err := r.InsertWithQuotaCheck(p, 0, 0, fixedNow); err != nil {
+	if err := r.InsertWithQuotaCheck(p, 0, fixedNow); err != nil {
 		t.Fatalf("insert %q: %v", p.Slug, err)
 	}
 }
@@ -212,7 +211,7 @@ func conformGetNotFound(t *testing.T, r conformanceRepo) {
 func conformDuplicateSlug(t *testing.T, r conformanceRepo) {
 	p := pasteOf("dup23456", "key:alice", 10)
 	insert(t, r, p)
-	err := r.InsertWithQuotaCheck(p, 0, 0, fixedNow)
+	err := r.InsertWithQuotaCheck(p, 0, fixedNow)
 	if err == nil {
 		t.Fatalf("duplicate insert should error")
 	}
@@ -259,7 +258,7 @@ func conformQuotaConcurrentCeiling(t *testing.T, r conformanceRepo, caps conform
 			// (over-quota, or a transient backend lock) means the paste did
 			// not land; we assert only the ceiling, so the error kind does
 			// not matter.
-			if err := r.InsertWithQuotaCheck(pasteOf(slug, "key:race", body), 0, cap, fixedNow); err == nil {
+			if err := r.InsertWithQuotaCheck(pasteOf(slug, "key:race", body), cap, fixedNow); err == nil {
 				atomic.AddInt64(&landed, 1)
 			}
 		}(i)
@@ -314,11 +313,11 @@ func conformExpiryQuotaSemantics(t *testing.T, r conformanceRepo, caps conformCa
 func conformQuotaRejectsOverCap(t *testing.T, r conformanceRepo) {
 	const cap = 1000
 	// First paste fits exactly at 600.
-	if err := r.InsertWithQuotaCheck(pasteOf("q1234567", "key:q", 600), 0, cap, fixedNow); err != nil {
+	if err := r.InsertWithQuotaCheck(pasteOf("q1234567", "key:q", 600), cap, fixedNow); err != nil {
 		t.Fatalf("first insert (600 under 1000): %v", err)
 	}
 	// Second would be 600+500=1100 > 1000 → reject.
-	err := r.InsertWithQuotaCheck(pasteOf("q2234567", "key:q", 500), 0, cap, fixedNow)
+	err := r.InsertWithQuotaCheck(pasteOf("q2234567", "key:q", 500), cap, fixedNow)
 	if !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("over-cap insert: got %v, want ErrOverUserQuota", err)
 	}
@@ -327,49 +326,49 @@ func conformQuotaRejectsOverCap(t *testing.T, r conformanceRepo) {
 func conformQuotaCountsAllVersions(t *testing.T, r conformanceRepo) {
 	const cap = 1000
 	// v1 = 600 fits.
-	if err := r.InsertWithQuotaCheck(pasteOf("v1234567", "key:v", 600), 0, cap, fixedNow); err != nil {
+	if err := r.InsertWithQuotaCheck(pasteOf("v1234567", "key:v", 600), cap, fixedNow); err != nil {
 		t.Fatalf("v1 insert: %v", err)
 	}
 	// Append v2 = 600 → total 1200 > 1000 → reject. Pins "all non-deleted
 	// versions count toward quota," not just the head.
-	_, err := r.AppendVersionWithQuotaCheck("v1234567", domain.KindHTML, "sha-v-v2", 600, 0, cap, fixedNow)
+	_, err := r.AppendVersionWithQuotaCheck("v1234567", domain.KindHTML, "sha-v-v2", 600, cap, fixedNow)
 	if !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("append over cap: got %v, want ErrOverUserQuota", err)
 	}
 	// A smaller append that keeps the sum under cap succeeds.
-	if _, err := r.AppendVersionWithQuotaCheck("v1234567", domain.KindHTML, "sha-v-v2b", 300, 0, cap, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck("v1234567", domain.KindHTML, "sha-v-v2b", 300, cap, fixedNow); err != nil {
 		t.Fatalf("append within cap (600+300=900): %v", err)
 	}
 }
 
 func conformQuotaFreedByDelete(t *testing.T, r conformanceRepo) {
 	const cap = 1000
-	if err := r.InsertWithQuotaCheck(pasteOf("d1234567", "key:d", 900), 0, cap, fixedNow); err != nil {
+	if err := r.InsertWithQuotaCheck(pasteOf("d1234567", "key:d", 900), cap, fixedNow); err != nil {
 		t.Fatalf("insert 900: %v", err)
 	}
 	// 900 used → 300 more would exceed.
-	if err := r.InsertWithQuotaCheck(pasteOf("d2234567", "key:d", 300), 0, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+	if err := r.InsertWithQuotaCheck(pasteOf("d2234567", "key:d", 300), cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("pre-delete 300 should be over quota: %v", err)
 	}
 	// Delete the 900 paste, freeing all its bytes.
 	if err := r.Delete("d1234567"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if err := r.InsertWithQuotaCheck(pasteOf("d2234567", "key:d", 300), 0, cap, fixedNow); err != nil {
+	if err := r.InsertWithQuotaCheck(pasteOf("d2234567", "key:d", 300), cap, fixedNow); err != nil {
 		t.Fatalf("post-delete 300 should fit: %v", err)
 	}
 }
 
 func conformQuotaFreedByDeleteVersion(t *testing.T, r conformanceRepo) {
 	const cap = 1000
-	if err := r.InsertWithQuotaCheck(pasteOf("dv123456", "key:dv", 300), 0, cap, fixedNow); err != nil {
+	if err := r.InsertWithQuotaCheck(pasteOf("dv123456", "key:dv", 300), cap, fixedNow); err != nil {
 		t.Fatalf("v1 insert 300: %v", err)
 	}
-	if _, err := r.AppendVersionWithQuotaCheck("dv123456", domain.KindHTML, "sha-dv-v2", 600, 0, cap, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck("dv123456", domain.KindHTML, "sha-dv-v2", 600, cap, fixedNow); err != nil {
 		t.Fatalf("v2 append 600 (total 900): %v", err)
 	}
 	// v3 = 300 would be 1200 > 1000.
-	if _, err := r.AppendVersionWithQuotaCheck("dv123456", domain.KindHTML, "sha-dv-v3", 300, 0, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+	if _, err := r.AppendVersionWithQuotaCheck("dv123456", domain.KindHTML, "sha-dv-v3", 300, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("v3 pre-tombstone should be over quota: %v", err)
 	}
 	// Tombstone v1 (300), freeing those bytes.
@@ -377,35 +376,23 @@ func conformQuotaFreedByDeleteVersion(t *testing.T, r conformanceRepo) {
 		t.Fatalf("delete version 1: %v", err)
 	}
 	// Now 600 used → v3 of 300 fits.
-	if _, err := r.AppendVersionWithQuotaCheck("dv123456", domain.KindHTML, "sha-dv-v3b", 300, 0, cap, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck("dv123456", domain.KindHTML, "sha-dv-v3b", 300, cap, fixedNow); err != nil {
 		t.Fatalf("v3 post-tombstone should fit: %v", err)
 	}
 }
 
 func conformQuotaPerIdentityIndependent(t *testing.T, r conformanceRepo) {
 	const cap = 1000
-	if err := r.InsertWithQuotaCheck(pasteOf("ia123456", "key:alice", 900), 0, cap, fixedNow); err != nil {
+	if err := r.InsertWithQuotaCheck(pasteOf("ia123456", "key:alice", 900), cap, fixedNow); err != nil {
 		t.Fatalf("alice insert: %v", err)
 	}
 	// Bob has his own budget: his 900 is unaffected by alice.
-	if err := r.InsertWithQuotaCheck(pasteOf("ib123456", "key:bob", 900), 0, cap, fixedNow); err != nil {
+	if err := r.InsertWithQuotaCheck(pasteOf("ib123456", "key:bob", 900), cap, fixedNow); err != nil {
 		t.Fatalf("bob insert: %v", err)
 	}
 	// Alice still can't add more.
-	if err := r.InsertWithQuotaCheck(pasteOf("ia223456", "key:alice", 200), 0, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+	if err := r.InsertWithQuotaCheck(pasteOf("ia223456", "key:alice", 200), cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("alice second should be over quota: %v", err)
-	}
-}
-
-func conformServiceCapAcrossIdentities(t *testing.T, r conformanceRepo) {
-	const svcCap = 1000
-	// Two different identities share the service-wide cap.
-	if err := r.InsertWithQuotaCheck(pasteOf("sa123456", "key:alice", 700), svcCap, 0, fixedNow); err != nil {
-		t.Fatalf("alice 700 under svc cap: %v", err)
-	}
-	// Bob's 400 would push service total to 1100 > 1000 → ErrServiceFull.
-	if err := r.InsertWithQuotaCheck(pasteOf("sb123456", "key:bob", 400), svcCap, 0, fixedNow); !errors.Is(err, storage.ErrServiceFull) {
-		t.Fatalf("bob over service cap: got %v, want ErrServiceFull", err)
 	}
 }
 
@@ -413,7 +400,7 @@ func conformServiceCapAcrossIdentities(t *testing.T, r conformanceRepo) {
 
 func conformAppendBumpsVersion(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("ab123456", "key:a", 10))
-	res, err := r.AppendVersionWithQuotaCheck("ab123456", domain.KindMarkdown, "sha-ab-v2", 20, 0, 0, fixedNow)
+	res, err := r.AppendVersionWithQuotaCheck("ab123456", domain.KindMarkdown, "sha-ab-v2", 20, 0, fixedNow)
 	if err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
@@ -439,7 +426,7 @@ func conformAppendBumpsVersion(t *testing.T, r conformanceRepo) {
 
 func conformPinUnpinRollsHead(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("pu123456", "key:p", 10))
-	if _, err := r.AppendVersionWithQuotaCheck("pu123456", domain.KindHTML, "sha-pu-v2", 20, 0, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck("pu123456", domain.KindHTML, "sha-pu-v2", 20, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
 	// Pin to v1: head rolls back to v1's bytes.
@@ -466,7 +453,7 @@ func conformPinUnpinRollsHead(t *testing.T, r conformanceRepo) {
 
 func conformAppendRespectsPin(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("ap123456", "key:a", 10))
-	if _, err := r.AppendVersionWithQuotaCheck("ap123456", domain.KindHTML, "sha-ap-v2", 20, 0, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck("ap123456", domain.KindHTML, "sha-ap-v2", 20, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
 	v1, _ := r.GetVersion("ap123456", 1)
@@ -474,7 +461,7 @@ func conformAppendRespectsPin(t *testing.T, r conformanceRepo) {
 		t.Fatalf("pin v1: %v", err)
 	}
 	// Append v3 while pinned: WasPinned=true, head stays on v1.
-	res, err := r.AppendVersionWithQuotaCheck("ap123456", domain.KindHTML, "sha-ap-v3", 30, 0, 0, fixedNow)
+	res, err := r.AppendVersionWithQuotaCheck("ap123456", domain.KindHTML, "sha-ap-v3", 30, 0, fixedNow)
 	if err != nil {
 		t.Fatalf("append v3 (pinned): %v", err)
 	}
@@ -489,7 +476,7 @@ func conformAppendRespectsPin(t *testing.T, r conformanceRepo) {
 
 func conformDeleteVersionTombstones(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("dt123456", "key:d", 10))
-	if _, err := r.AppendVersionWithQuotaCheck("dt123456", domain.KindHTML, "sha-dt-v2", 20, 0, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck("dt123456", domain.KindHTML, "sha-dt-v2", 20, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
 	if err := r.DeleteVersion("dt123456", 1); err != nil {
@@ -535,7 +522,7 @@ func conformDeleteVersionTombstones(t *testing.T, r conformanceRepo) {
 
 func conformVerNumNotReused(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("vn123456", "key:v", 10))
-	if _, err := r.AppendVersionWithQuotaCheck("vn123456", domain.KindHTML, "sha-vn-v2", 10, 0, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck("vn123456", domain.KindHTML, "sha-vn-v2", 10, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
 	// Tombstone v2, then append again: next number must be 3, not a
@@ -543,7 +530,7 @@ func conformVerNumNotReused(t *testing.T, r conformanceRepo) {
 	if err := r.DeleteVersion("vn123456", 2); err != nil {
 		t.Fatalf("delete v2: %v", err)
 	}
-	res, err := r.AppendVersionWithQuotaCheck("vn123456", domain.KindHTML, "sha-vn-v3", 10, 0, 0, fixedNow)
+	res, err := r.AppendVersionWithQuotaCheck("vn123456", domain.KindHTML, "sha-vn-v3", 10, 0, fixedNow)
 	if err != nil {
 		t.Fatalf("append after tombstone: %v", err)
 	}
@@ -632,7 +619,7 @@ func conformReferencedBlobSHAs(t *testing.T, r conformanceRepo) {
 	// sweep relies on. A backend that returned an empty set here while
 	// pastes exist would trip the sweep's abort-on-zero-refs guard.
 	insert(t, r, pasteOf("gc123456", "key:g", 10)) // v1 sha = sha-gc123456-v1
-	if _, err := r.AppendVersionWithQuotaCheck("gc123456", domain.KindHTML, "sha-gc-v2", 20, 0, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck("gc123456", domain.KindHTML, "sha-gc-v2", 20, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
 	refs, err = r.ReferencedBlobSHAs()

@@ -16,7 +16,7 @@ import (
 // SiteRepo is the persistence interface the site-deploy + site-read
 // services need. internal/storage.SiteRepo satisfies it.
 type SiteRepo interface {
-	InsertWithQuotaCheck(s domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error
+	InsertWithQuotaCheck(s domain.Site, dedupedSize int, userCap int64, now time.Time) error
 	// ReplaceWithQuotaCheck re-deploys an EXISTING owned site in place,
 	// atomically swapping its manifest for s.Manifest under the same
 	// serializable boundary InsertWithQuotaCheck uses. s.Slug names the
@@ -38,7 +38,7 @@ type SiteRepo interface {
 	//     and the expiry index is re-keyed. The slug and created_at are
 	//     unchanged. The swap is a single transaction: the URL serves the
 	//     OLD manifest until it lands, the new one immediately after.
-	ReplaceWithQuotaCheck(s domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error
+	ReplaceWithQuotaCheck(s domain.Site, dedupedSize int, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Site, error)
 	// SumActiveBytesByOwner returns the identity's active SITE bytes.
 	// The deploy path adds the paste-side sum to compute the remaining
@@ -59,11 +59,10 @@ type PasteByteSummer interface {
 // per-identity quota BOTH mid-untar (the decompression-bomb guard) AND
 // at persistence time (the atomic check in InsertWithQuotaCheck).
 type DeploySite struct {
-	Sites           SiteRepo
-	Pastes          PasteByteSummer
-	Blobs           BlobStore
-	ServiceCapBytes int64 // 0 = no service-wide cap
-	Now             func() time.Time
+	Sites  SiteRepo
+	Pastes PasteByteSummer
+	Blobs  BlobStore
+	Now    func() time.Time
 }
 
 // NewDeploySite wires defaults.
@@ -126,6 +125,11 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		return SiteResult{}, ErrOverQuota
 	case errors.Is(err, domain.ErrUnsupportedKind):
 		return SiteResult{}, domain.ErrUnsupportedKind
+	case errors.Is(err, storage.ErrServiceFull):
+		// A blob Put rejected by the object store's bucket quota propagates
+		// through the sink (the durable total-bytes ceiling). Translate it
+		// into the graceful "service is at capacity" response.
+		return SiteResult{}, ErrServiceFull
 	case err != nil:
 		// ErrUnsafeArchive / ErrTooManyFiles / ErrNoWebContent surface
 		// verbatim so the SSH layer can message them precisely.
@@ -157,7 +161,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	const maxRetries = 5
 	for range maxRetries {
 		site.Slug = domain.NewRandomSlug()
-		err := d.Sites.InsertWithQuotaCheck(site, deduped, d.ServiceCapBytes, int64(domain.UserQuotaBytes), now)
+		err := d.Sites.InsertWithQuotaCheck(site, deduped, int64(domain.UserQuotaBytes), now)
 		switch {
 		case err == nil:
 			return SiteResult{Site: site}, nil
@@ -247,6 +251,9 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		return SiteResult{}, ErrOverQuota
 	case errors.Is(err, domain.ErrUnsupportedKind):
 		return SiteResult{}, domain.ErrUnsupportedKind
+	case errors.Is(err, storage.ErrServiceFull):
+		// Object-store bucket quota rejection propagated through the sink.
+		return SiteResult{}, ErrServiceFull
 	case err != nil:
 		return SiteResult{}, err
 	}
@@ -268,7 +275,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	}
 	deduped := man.DedupedSize()
 
-	err = d.Sites.ReplaceWithQuotaCheck(site, deduped, d.ServiceCapBytes, int64(domain.UserQuotaBytes), now)
+	err = d.Sites.ReplaceWithQuotaCheck(site, deduped, int64(domain.UserQuotaBytes), now)
 	switch {
 	case err == nil:
 		return SiteResult{Site: site}, nil

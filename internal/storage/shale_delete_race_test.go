@@ -53,16 +53,16 @@ func TestShaleDelete_VsDeleteVersionSameSlug_NoUnderCount(t *testing.T) {
 
 		keep := pasteOf(keeper.String(), owner, keeperBytes)
 		keep.ExpiresAt = now.Add(domain.RetentionWindow)
-		if err := repo.InsertWithQuotaCheck(keep, 0, userCap, now); err != nil {
+		if err := repo.InsertWithQuotaCheck(keep, userCap, now); err != nil {
 			t.Fatalf("iter %d keeper insert: %v", i, err)
 		}
 
 		vic := pasteOf(victim.String(), owner, v1Bytes)
 		vic.ExpiresAt = now.Add(domain.RetentionWindow)
-		if err := repo.InsertWithQuotaCheck(vic, 0, userCap, now); err != nil {
+		if err := repo.InsertWithQuotaCheck(vic, userCap, now); err != nil {
 			t.Fatalf("iter %d victim insert: %v", i, err)
 		}
-		if _, err := repo.AppendVersionWithQuotaCheck(victim, domain.KindHTML, "sha-"+victim.String()+"-v2", v2Bytes, 0, userCap, now); err != nil {
+		if _, err := repo.AppendVersionWithQuotaCheck(victim, domain.KindHTML, "sha-"+victim.String()+"-v2", v2Bytes, userCap, now); err != nil {
 			t.Fatalf("iter %d victim append: %v", i, err)
 		}
 		// counter == keeperBytes + v1Bytes + v2Bytes for this owner.

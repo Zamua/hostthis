@@ -93,11 +93,11 @@ type ShaleSiteRepo struct {
 func NewShaleSiteRepo(repo *ShaleRepo) *ShaleSiteRepo { return &ShaleSiteRepo{repo: repo} }
 
 // service.SiteRepo
-func (s *ShaleSiteRepo) InsertWithQuotaCheck(site domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
-	return s.repo.InsertSiteWithQuotaCheck(site, dedupedSize, serviceCap, userCap, now)
+func (s *ShaleSiteRepo) InsertWithQuotaCheck(site domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+	return s.repo.InsertSiteWithQuotaCheck(site, dedupedSize, userCap, now)
 }
-func (s *ShaleSiteRepo) ReplaceWithQuotaCheck(site domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
-	return s.repo.ReplaceSiteWithQuotaCheck(site, dedupedSize, serviceCap, userCap, now)
+func (s *ShaleSiteRepo) ReplaceWithQuotaCheck(site domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+	return s.repo.ReplaceSiteWithQuotaCheck(site, dedupedSize, userCap, now)
 }
 func (s *ShaleSiteRepo) Get(slug domain.Slug) (domain.Site, error) { return s.repo.GetSite(slug) }
 func (s *ShaleSiteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int64, error) {
@@ -282,31 +282,19 @@ func (r *ShaleRepo) reserveSiteReplaceBytes(identity, slug string, oldBody, newB
 // pattern (reserve on {id}, authoritative write on {slug}, confirm on {id}),
 // mirroring InsertWithQuotaCheck for pastes:
 //
-//   - the service-wide cap is a SOFT cross-shard aggregate pre-check (the
-//     same posture as the paste path), summing version bytes AND site bytes,
 //   - the per-owner cap is STRICT via the reserve step's atomic CAS,
 //   - the slug-collision check is BOTH directions inside the authoritative
 //     CAS (reject if a site OR a paste already owns the slug).
 //
-// Returns nil / ErrSlugTaken / ErrServiceFull / ErrOverUserQuota.
-func (r *ShaleRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
+// The durable total-bytes ceiling is NOT checked here: it is the
+// object-store bucket quota, enforced when a blob Put is rejected (see SPEC
+// "Limits -> Durable total-bytes ceiling: an object-store quota").
+//
+// Returns nil / ErrSlugTaken / ErrOverUserQuota.
+func (r *ShaleRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	identity := s.Identity.String()
 	slug := s.Slug.String()
 	body := int64(dedupedSize)
-
-	// Service-wide cap: best-effort cross-shard pre-check (SOFT). The shared
-	// sumServiceWideActiveBytes already counts BOTH version bytes and site
-	// bytes, so a site deploy sees the bytes pastes already hold and a paste
-	// upload sees the bytes sites hold.
-	if serviceCap > 0 {
-		total, err := r.sumServiceWideActiveBytes()
-		if err != nil {
-			return fmt.Errorf("service-wide sum: %w", err)
-		}
-		if total+body > serviceCap {
-			return ErrServiceFull
-		}
-	}
 
 	// Step 1: reserve (STRICT per-owner quota, combined paste+site).
 	if err := r.reserveSiteBytes(identity, slug, body, userCap, now); err != nil {
@@ -356,9 +344,9 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, ser
 // reject a foreign/missing row before touching the counter), and again INSIDE
 // the authoritative CAS so a concurrent delete/re-deploy conflicts.
 //
-// The service-wide cap is a SOFT cross-shard pre-check (same posture as the
-// insert path), evaluated against (total - oldBody + newBody) since the
-// shared sum already counts the old row.
+// The durable total-bytes ceiling is NOT checked here: it is the
+// object-store bucket quota, enforced when a blob Put is rejected (see SPEC
+// "Limits -> Durable total-bytes ceiling: an object-store quota").
 //
 // Reconciler interplay: a replace's authoritative row is ALWAYS present (it
 // is a pre-existing site), so a confirm that fails leaves a marker the
@@ -370,8 +358,8 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, ser
 // delta (a bounded over/under-count the reconciler cannot distinguish from a
 // landed replace, the same window the insert path accepts).
 //
-// Returns nil / ErrNotFound / ErrServiceFull / ErrOverUserQuota.
-func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
+// Returns nil / ErrNotFound / ErrOverUserQuota.
+func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	identity := s.Identity.String()
 	slug := s.Slug.String()
 	newBody := int64(dedupedSize)
@@ -390,18 +378,6 @@ func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, se
 		return ErrNotFound
 	}
 	oldBody := int64(existing.DedupedSize)
-
-	// Service-wide cap: SOFT cross-shard pre-check against the post-swap
-	// total. The shared sum already counts the old row, so credit it back.
-	if serviceCap > 0 {
-		total, err := r.sumServiceWideActiveBytes()
-		if err != nil {
-			return fmt.Errorf("service-wide sum: %w", err)
-		}
-		if total-oldBody+newBody > serviceCap {
-			return ErrServiceFull
-		}
-	}
 
 	// Step 1: reserve the delta (STRICT per-owner quota, combined paste+site).
 	if err := r.reserveSiteReplaceBytes(identity, slug, oldBody, newBody, userCap, now); err != nil {
@@ -551,27 +527,6 @@ func (r *ShaleRepo) SumActiveSiteBytesByOwner(owner string, now time.Time) (int6
 		return 0, err
 	}
 	return parseCounter(raw)
-}
-
-// sumServiceWideActiveSiteBytes sums DedupedSize across every site via a
-// cross-shard aggregate over sites/. Best-effort, used for the SOFT
-// service-wide cap pre-check. Counts expired-unswept sites too (no read-time
-// expiry filter), matching the shale paste service-wide sum's sweep-time
-// semantics; the over-count is fail-safe.
-func (r *ShaleRepo) sumServiceWideActiveSiteBytes() (int64, error) {
-	sites, err := r.aggregatePrefix(prefixSites)
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	for _, item := range sites {
-		var row siteRow
-		if err := json.Unmarshal(item.Value, &row); err != nil {
-			return 0, fmt.Errorf("decode %s: %w", item.Key, err)
-		}
-		total += int64(row.DedupedSize)
-	}
-	return total, nil
 }
 
 // DeleteSite removes a site authoritative row + its expiry index on the

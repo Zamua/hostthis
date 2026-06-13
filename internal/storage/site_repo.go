@@ -108,9 +108,12 @@ func decodeManifest(s string) (domain.Manifest, error) {
 // Returns:
 //   - nil on success
 //   - ErrSlugTaken if the slug already exists (in sites OR pastes)
-//   - ErrServiceFull if accepting would exceed serviceCap
 //   - ErrOverUserQuota if accepting would exceed userCap
-func (r *SiteRepo) InsertWithQuotaCheck(s domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
+//
+// The durable total-bytes ceiling is NOT checked here: it is the
+// object-store bucket quota, enforced when a blob Put is rejected (see
+// SPEC "Limits -> Durable total-bytes ceiling: an object-store quota").
+func (r *SiteRepo) InsertWithQuotaCheck(s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -121,17 +124,7 @@ func (r *SiteRepo) InsertWithQuotaCheck(s domain.Site, dedupedSize int, serviceC
 	siteNowStr := formatSiteExpiry(now)
 	body := int64(dedupedSize)
 
-	// 1. Service-wide check across BOTH pastes and sites.
-	if serviceCap > 0 {
-		total, err := serviceWideActiveBytes(tx, nowStr, siteNowStr)
-		if err != nil {
-			return err
-		}
-		if total+body > serviceCap {
-			return ErrServiceFull
-		}
-	}
-	// 2. Per-identity check across BOTH pastes and sites.
+	// Per-identity check across BOTH pastes and sites.
 	if userCap > 0 {
 		owned, err := identityActiveBytes(tx, s.Identity.String(), nowStr, siteNowStr)
 		if err != nil {
@@ -173,8 +166,8 @@ func (r *SiteRepo) InsertWithQuotaCheck(s domain.Site, dedupedSize int, serviceC
 
 // ReplaceWithQuotaCheck re-deploys an existing owned site in place,
 // atomically (under the serializable tx) swapping its manifest, deduped
-// size, updated_at, and expires_at, while enforcing the per-identity and
-// service caps against the REPLACE DELTA.
+// size, updated_at, and expires_at, while enforcing the per-identity cap
+// against the REPLACE DELTA.
 //
 // The slug must already exist as a site AND be owned by s.Identity. If it
 // is missing, OR owned by a different identity, this returns ErrNotFound -
@@ -182,17 +175,17 @@ func (r *SiteRepo) InsertWithQuotaCheck(s domain.Site, dedupedSize int, serviceC
 // "not yours" from "doesn't exist" (no existence leak).
 //
 // The quota check credits the OLD row's deduped bytes and charges the new
-// dedupedSize: the identity-active and service-wide sums computed inside
-// the tx already include the old row, so the new totals subtract the old
-// deduped bytes and add the new (total - oldDeduped + body). A same-size
-// re-deploy nets zero; a smaller one frees the difference.
+// dedupedSize: the identity-active sum computed inside the tx already
+// includes the old row, so the new total subtracts the old deduped bytes
+// and adds the new (owned - oldDeduped + body). A same-size re-deploy nets
+// zero; a smaller one frees the difference. The durable total-bytes ceiling
+// is NOT checked here (it is the object-store bucket quota).
 //
 // Returns:
 //   - nil on success
 //   - ErrNotFound if the slug isn't a site owned by s.Identity
-//   - ErrServiceFull if accepting would exceed serviceCap
 //   - ErrOverUserQuota if accepting would exceed userCap
-func (r *SiteRepo) ReplaceWithQuotaCheck(s domain.Site, dedupedSize int, serviceCap, userCap int64, now time.Time) error {
+func (r *SiteRepo) ReplaceWithQuotaCheck(s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -230,17 +223,9 @@ func (r *SiteRepo) ReplaceWithQuotaCheck(s domain.Site, dedupedSize int, service
 		creditOld = oldDeduped
 	}
 
-	// Quota: the active sums below include the OLD (live) row, so subtract
-	// its credited deduped bytes and add the new to evaluate post-swap totals.
-	if serviceCap > 0 {
-		total, err := serviceWideActiveBytes(tx, nowStr, siteNowStr)
-		if err != nil {
-			return err
-		}
-		if total-creditOld+body > serviceCap {
-			return ErrServiceFull
-		}
-	}
+	// Quota: the active sum below includes the OLD (live) row, so subtract
+	// its credited deduped bytes and add the new to evaluate the post-swap
+	// total.
 	if userCap > 0 {
 		owned, err := identityActiveBytes(tx, s.Identity.String(), nowStr, siteNowStr)
 		if err != nil {
@@ -282,7 +267,7 @@ func (r *SiteRepo) ReplaceWithQuotaCheck(s domain.Site, dedupedSize int, service
 // Insert is the simple variant used by tests + callers that don't need
 // quota enforcement.
 func (r *SiteRepo) Insert(s domain.Site) error {
-	return r.InsertWithQuotaCheck(s, s.Manifest.DedupedSize(), 0, 0, s.CreatedAt)
+	return r.InsertWithQuotaCheck(s, s.Manifest.DedupedSize(), 0, s.CreatedAt)
 }
 
 // Get returns the site for slug, or ErrNotFound. Like PasteRepo.Get it
@@ -376,48 +361,13 @@ func (r *SiteRepo) ReferencedSiteBlobSHAs() ([]string, error) {
 	return out, nil
 }
 
-// serviceWideActiveBytes sums active bytes across pastes (live,
-// non-deleted versions), sites (deduped_size of non-expired sites), AND
-// rooms (value bytes of non-expired rooms). Shared by the paste, site, and
-// room quota checks so the service-wide cap counts every kind of stored
-// content - a write of any kind sees the bytes the other kinds already
-// hold. Runs inside the caller's tx.
-// serviceWideActiveBytes takes the now-string in BOTH formats because the
-// paste expires_at column is stored with formatTime (RFC3339Nano) while the
-// site AND room expires_at columns are stored with formatSiteExpiry
-// (fixed-width); each subquery compares its column against the
-// matching-format operand, so a cross-format lexical comparison never
-// happens. (The room expiry column adopted the fixed-width format so the
-// sweep's sub-second ordering is correct, matching the site column.)
-func serviceWideActiveBytes(tx *sql.Tx, nowStr, siteNowStr string) (int64, error) {
-	var pasteTotal int64
-	if err := tx.QueryRow(`
-		SELECT COALESCE(SUM(v.size), 0)
-		FROM versions v
-		JOIN pastes pp ON pp.slug = v.slug
-		WHERE pp.expires_at > ? AND v.deleted = 0
-	`, nowStr).Scan(&pasteTotal); err != nil {
-		return 0, fmt.Errorf("service-wide paste sum: %w", err)
-	}
-	var siteTotal int64
-	if err := tx.QueryRow(`
-		SELECT COALESCE(SUM(deduped_size), 0) FROM sites WHERE expires_at > ?
-	`, siteNowStr).Scan(&siteTotal); err != nil {
-		return 0, fmt.Errorf("service-wide site sum: %w", err)
-	}
-	// The room expires_at is fixed-width (formatSiteExpiry), the same as the
-	// site column, so it takes siteNowStr.
-	roomTotal, err := activeRoomBytesTx(tx, siteNowStr)
-	if err != nil {
-		return 0, err
-	}
-	return pasteTotal + siteTotal + roomTotal, nil
-}
-
 // identityActiveBytes sums active bytes owned by one identity across
 // BOTH pastes and sites. Runs inside the caller's tx. Takes two now-strings
-// for the same reason serviceWideActiveBytes does (paste vs site column
-// timestamp formats differ).
+// because the paste expires_at column is stored with formatTime
+// (RFC3339Nano) while the site expires_at column is stored with
+// formatSiteExpiry (fixed-width); each subquery compares its column against
+// the matching-format operand, so a cross-format lexical compare never
+// happens.
 func identityActiveBytes(tx *sql.Tx, identity, nowStr, siteNowStr string) (int64, error) {
 	var pasteTotal int64
 	if err := tx.QueryRow(`
