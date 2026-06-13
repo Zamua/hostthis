@@ -182,24 +182,20 @@ func TestRegistry_AdmitDoesNotCoupleAcrossRoomsDuringSlowCommit(t *testing.T) {
 	commitEntered := make(chan struct{})
 	releaseCommit := make(chan struct{})
 	var commitWG sync.WaitGroup
-	commitWG.Add(1)
-	go func() {
-		defer commitWG.Done()
+	commitWG.Go(func() {
 		_ = r.commitAndMirror(keyA, func() error {
 			close(commitEntered)
 			<-releaseCommit
 			return nil
 		}, Frame{Data: []byte("mirror")})
-	}()
+	})
 	<-commitEntered // A's hub lock is now held by the in-flight slow commit.
 
 	// A second admit to room A will block on A's hub lock (held by the commit).
 	var admitAWG sync.WaitGroup
-	admitAWG.Add(1)
-	go func() {
-		defer admitAWG.Done()
+	admitAWG.Go(func() {
 		_, _, _ = r.admit(keyA)
-	}()
+	})
 
 	// Give admit(A) a moment to reach (and block on) A's hub lock. It must be
 	// blocked there with r.mu NOT held, so admit(B) below is free.
@@ -382,7 +378,7 @@ func runDurableWriteVsJoinRound(t *testing.T, round int) {
 // guard's bookkeeping might introduce.
 func TestRegistry_DurableWriteOnEmptyRoomDoesNotLeakSlotAgainstJoin(t *testing.T) {
 	const rounds = 500
-	for i := 0; i < rounds; i++ {
+	for i := range rounds {
 		runDurableWriteVsJoinRound(t, i)
 	}
 }

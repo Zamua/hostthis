@@ -113,10 +113,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	if err != nil {
 		return SiteResult{}, fmt.Errorf("sum site bytes: %w", err)
 	}
-	budget := int64(domain.UserQuotaBytes) - int64(usedPaste) - usedSite
-	if budget < 0 {
-		budget = 0
-	}
+	budget := max(int64(domain.UserQuotaBytes)-int64(usedPaste)-usedSite, 0)
 
 	sink := &blobSink{blobs: d.Blobs}
 	man, err := domain.SafeUntar(body, sink, budget)
@@ -239,10 +236,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	if !existing.ExpiresAt.After(now) {
 		creditOld = 0
 	}
-	budget := int64(domain.UserQuotaBytes) - int64(usedPaste) - (usedSite - creditOld)
-	if budget < 0 {
-		budget = 0
-	}
+	budget := max(int64(domain.UserQuotaBytes)-int64(usedPaste)-(usedSite-creditOld), 0)
 
 	sink := &blobSink{blobs: d.Blobs}
 	man, err := domain.SafeUntar(body, sink, budget)

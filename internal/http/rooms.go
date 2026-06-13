@@ -92,9 +92,9 @@ func (s *Server) handleRoomsAPI(w http.ResponseWriter, r *http.Request, appSlug 
 	// /<uuid>/<key...>   -> one value (GET / PUT / DELETE)
 	idStr := rest
 	key := ""
-	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		idStr = rest[:i]
-		key = rest[i+1:]
+	if before, after, ok := strings.Cut(rest, "/"); ok {
+		idStr = before
+		key = after
 	}
 
 	id, err := domain.ParseRoomID(idStr)

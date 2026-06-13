@@ -136,7 +136,7 @@ func parseSeeds(raw string) []string {
 		return nil
 	}
 	var out []string
-	for _, part := range strings.Split(raw, ",") {
+	for part := range strings.SplitSeq(raw, ",") {
 		if s := strings.TrimSpace(part); s != "" {
 			out = append(out, s)
 		}

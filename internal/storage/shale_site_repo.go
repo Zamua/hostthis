@@ -697,8 +697,8 @@ func (r *ShaleRepo) orphanReleaseSiteMarker(reserveKey []byte) error {
 // the FIRST '/').
 func siteMarkerOwnerFromKey(key []byte) string {
 	rest := strings.TrimPrefix(string(key), "identity_site_reserve/")
-	if idx := strings.Index(rest, "/"); idx >= 0 {
-		return rest[:idx]
+	if before, _, ok := strings.Cut(rest, "/"); ok {
+		return before
 	}
 	return rest
 }
@@ -708,8 +708,8 @@ func siteMarkerOwnerFromKey(key []byte) string {
 // identity never contains a '/').
 func siteMarkerSlugFromKey(key []byte) string {
 	rest := strings.TrimPrefix(string(key), "identity_site_reserve/")
-	if idx := strings.Index(rest, "/"); idx >= 0 {
-		return rest[idx+1:]
+	if _, after, ok := strings.Cut(rest, "/"); ok {
+		return after
 	}
 	return ""
 }

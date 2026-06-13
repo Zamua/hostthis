@@ -203,9 +203,7 @@ func TestShaleReconciler_RaceAgainstInserts(t *testing.T) {
 	}
 
 	// Reconciler loop: the live-traffic adversary.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for !stop.Load() {
 			if err := repo.ReconcileForTest(now, reserveGrace); err != nil {
 				reconcileErr.Store(true)
@@ -213,7 +211,7 @@ func TestShaleReconciler_RaceAgainstInserts(t *testing.T) {
 			}
 			reconcilePasses.Add(1)
 		}
-	}()
+	})
 
 	// pasteState tracks, for a landed paste, how many bytes the test still
 	// believes are live for it: pasteSz when both versions are live, v1Bytes
@@ -287,7 +285,7 @@ func TestShaleReconciler_RaceAgainstInserts(t *testing.T) {
 	}
 
 	var writersWG sync.WaitGroup
-	for w := 0; w < writers; w++ {
+	for w := range writers {
 		writersWG.Add(1)
 		go func(w int) {
 			defer writersWG.Done()

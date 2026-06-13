@@ -110,8 +110,8 @@ func (s *Server) Handler() http.Handler {
 		}
 		// 2. Path mode: /p/<slug> (paste) or /p/<slug>/<path...> (site)
 		// on the apex.
-		if strings.HasPrefix(r.URL.Path, "/p/") {
-			rest := strings.TrimPrefix(r.URL.Path, "/p/")
+		if after, ok := strings.CutPrefix(r.URL.Path, "/p/"); ok {
+			rest := after
 			// Split the first segment (the slug) from the remaining site
 			// path, if any. "/p/abc12345" → slug "abc12345", path "/".
 			// "/p/abc12345/css/x.css" → slug "abc12345", path "/css/x.css".
@@ -514,7 +514,7 @@ func etagMatches(ifNoneMatch, etag string) bool {
 	if strings.TrimSpace(ifNoneMatch) == "*" {
 		return true
 	}
-	for _, candidate := range strings.Split(ifNoneMatch, ",") {
+	for candidate := range strings.SplitSeq(ifNoneMatch, ",") {
 		if strings.TrimSpace(candidate) == etag {
 			return true
 		}

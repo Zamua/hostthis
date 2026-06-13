@@ -461,7 +461,7 @@ func TestRelay_RateLimitDropsFloodingClient(t *testing.T) {
 
 	// Send a burst well past the per-second ceiling as fast as possible. The
 	// server drops the connection once the bucket empties.
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		if err := flooder.Write(ctx, websocket.MessageText, []byte("x")); err != nil {
 			break
 		}

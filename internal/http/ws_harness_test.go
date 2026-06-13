@@ -539,7 +539,7 @@ func TestRelayHarness_ConcurrentDeleteAndJoinNoDupNoGap(t *testing.T) {
 		// seed: write the key BEFORE the round's race so there is something to
 		// delete and so it would appear in a snapshot read before the commit.
 		func(ts *httptest.Server, slug, id, key string, round int) {
-			httpPut(t, ts, slug, id, key, []byte(fmt.Sprintf("%q", fmt.Sprintf("seed%d", round))))
+			httpPut(t, ts, slug, id, key, fmt.Appendf(nil, "%q", fmt.Sprintf("seed%d", round)))
 		},
 	)
 }
@@ -577,7 +577,7 @@ func runConcurrentMutateAndJoinNoDupNoGap(
 	keepalive.expectSnapshotFrame(ctx)
 
 	const rounds = 40
-	for round := 0; round < rounds; round++ {
+	for round := range rounds {
 		key := fmt.Sprintf("cell/%d", round)
 
 		// Seed the round's key BEFORE the race, if the variant needs a starting
@@ -1009,14 +1009,14 @@ func TestRelayHarness_ConcurrentConnectSendDisconnectRace(t *testing.T) {
 	type roomRef struct{ slug, id string }
 	rooms2 := []roomRef{}
 	for _, slug := range []string{"appz2345", "bcde2345"} {
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			rooms2 = append(rooms2, roomRef{slug: slug, id: mkRoom(t, rooms, slug)})
 		}
 	}
 
 	const workers = 40
 	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
@@ -1028,8 +1028,8 @@ func TestRelayHarness_ConcurrentConnectSendDisconnectRace(t *testing.T) {
 			_, _, _ = conn.Read(rctx)
 			rcancel()
 			// Send a few frames (fans out to whoever else is in this room).
-			for i := 0; i < 5; i++ {
-				if err := conn.Write(ctx, websocket.MessageText, []byte(fmt.Sprintf("w%d-%d", w, i))); err != nil {
+			for i := range 5 {
+				if err := conn.Write(ctx, websocket.MessageText, fmt.Appendf(nil, "w%d-%d", w, i)); err != nil {
 					break
 				}
 			}

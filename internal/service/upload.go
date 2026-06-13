@@ -202,14 +202,12 @@ func (u *Upload) WaitFinalize() { finalizeWG.Wait() }
 // then flip the paste's status. It owns the goroutine so the SSH/HTTP
 // caller never blocks on the ~250 ms blob write.
 func (u *Upload) startFinalize(slug domain.Slug, sha string, body []byte) {
-	finalizeWG.Add(1)
-	go func() {
-		defer finalizeWG.Done()
+	finalizeWG.Go(func() {
 		u.finalize(slug, sha, body)
 		if u.onFinalizeDone != nil {
 			u.onFinalizeDone()
 		}
-	}()
+	})
 }
 
 // finalize writes the held bytes to the blob store and transitions the

@@ -128,7 +128,7 @@ func TestGuard_DeployManifestSizeCapStoresNothing(t *testing.T) {
 	// (1 MiB) well before MaxSiteFiles (5000).
 	files := map[string]string{"index.html": "<h1>ok</h1>"}
 	stem := bytes.Repeat([]byte("a"), 900-len("dir000000.html"))
-	for i := 0; i < 2000; i++ {
+	for i := range 2000 {
 		name := "dir" + pad6svc(i) + string(stem) + ".html"
 		files[name] = "x"
 	}

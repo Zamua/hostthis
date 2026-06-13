@@ -100,7 +100,7 @@ func TestRoomsSvc_PerIPRateLimit(t *testing.T) {
 	svc.MaxRoomsPerIP = 3
 	svc.MaxRoomsPerApp = 1000 // keep the app cap out of the way
 	const subnet = "203.0.113.0/24"
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, err := svc.Create("app12345", subnet); err != nil {
 			t.Fatalf("create %d under IP limit: %v", i, err)
 		}

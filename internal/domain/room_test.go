@@ -8,7 +8,7 @@ import (
 )
 
 func TestNewRoomID_IsValidV4(t *testing.T) {
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		id := NewRoomID()
 		// Must parse cleanly as its own canonical form.
 		got, err := ParseRoomID(id.String())
@@ -34,7 +34,7 @@ func TestNewRoomID_IsValidV4(t *testing.T) {
 
 func TestNewRoomID_Unique(t *testing.T) {
 	seen := make(map[RoomID]struct{}, 1000)
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		id := NewRoomID()
 		if _, dup := seen[id]; dup {
 			t.Fatalf("collision after %d ids: %q", i, id)
@@ -148,7 +148,7 @@ func TestRoomKV_CanPut_ValueTooLarge(t *testing.T) {
 
 func TestRoomKV_CanPut_KeyCountCap(t *testing.T) {
 	kv := NewRoomKV()
-	for i := 0; i < MaxRoomKeys; i++ {
+	for i := range MaxRoomKeys {
 		k := keyN(i)
 		if err := kv.CanPut(k, []byte("v")); err != nil {
 			t.Fatalf("key %d rejected under cap: %v", i, err)

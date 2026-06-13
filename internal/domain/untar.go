@@ -65,13 +65,7 @@ type FileSink interface {
 func SafeUntar(src io.Reader, sink FileSink, quotaBudget int64) (Manifest, error) {
 	man := NewManifest()
 
-	cap := int64(MaxSiteBytes)
-	if quotaBudget < cap {
-		cap = quotaBudget
-	}
-	if cap < 0 {
-		cap = 0
-	}
+	cap := max(min(quotaBudget, int64(MaxSiteBytes)), 0)
 
 	gz, err := gzip.NewReader(src)
 	if err != nil {

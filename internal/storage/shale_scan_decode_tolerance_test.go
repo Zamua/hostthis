@@ -34,6 +34,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -340,12 +341,7 @@ func (b *fakeBlobs) snapshot() []string {
 }
 
 func shaContains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(haystack, needle)
 }
 
 func containsAllSHAs(haystack []string, needles ...string) bool {

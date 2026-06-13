@@ -25,7 +25,7 @@ func TestWSConn_SendBufferBoundsAndDropSignal(t *testing.T) {
 	// logic; Close on a nil conn is guarded below).
 	c := newWSConn(1, &websocket.Conn{}, buf, 0)
 
-	for i := 0; i < buf; i++ {
+	for i := range buf {
 		if !c.Send(Frame{Data: []byte("x")}) {
 			t.Fatalf("Send %d returned false within the buffer bound %d", i, buf)
 		}

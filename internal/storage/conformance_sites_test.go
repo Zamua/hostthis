@@ -432,7 +432,7 @@ func conformSitePerOwnerCapConcurrentCeiling(t *testing.T, caps conformCaps, r c
 	cap := int64(k * body) // admits exactly k records of `body`, any mix of kinds
 	var landed int64
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

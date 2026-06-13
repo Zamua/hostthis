@@ -1381,7 +1381,7 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKin
 	pasteKey := shaleKeyPaste(slug)
 	newExpiry := now.Add(domain.RetentionWindow)
 	const maxRenumberAttempts = 16
-	for attempt := 0; attempt < maxRenumberAttempts; attempt++ {
+	for range maxRenumberAttempts {
 		versions, err := r.scanVersions(slug)
 		if err != nil {
 			return AppendResult{}, err
@@ -2064,11 +2064,11 @@ func (r *ShaleRepo) gatherReservationMarkers() (map[string][]reservationMarkerEn
 	byOwner := make(map[string][]reservationMarkerEntry)
 	for _, item := range items {
 		rest := strings.TrimPrefix(string(item.Key), "identity_reserve/")
-		idx := strings.Index(rest, "/")
-		if idx < 0 {
+		before, _, ok := strings.Cut(rest, "/")
+		if !ok {
 			continue
 		}
-		owner := rest[:idx]
+		owner := before
 		m, err := parseReservationMarker(item.Value)
 		if err != nil {
 			// Idempotent reconcile: skip + log the undecodable marker and
@@ -2229,8 +2229,8 @@ func (r *ShaleRepo) orphanReleaseMarker(reserveKey []byte) error {
 // key. The <id> is everything between the prefix and the FIRST "/".
 func markerOwnerFromKey(key []byte) string {
 	rest := strings.TrimPrefix(string(key), "identity_reserve/")
-	if idx := strings.Index(rest, "/"); idx >= 0 {
-		return rest[:idx]
+	if before, _, ok := strings.Cut(rest, "/"); ok {
+		return before
 	}
 	return rest
 }
@@ -2240,8 +2240,8 @@ func markerOwnerFromKey(key []byte) string {
 // contains a "/", and the slug segment may itself be "<slug>#append").
 func markerSlugFromKey(key []byte) string {
 	rest := strings.TrimPrefix(string(key), "identity_reserve/")
-	if idx := strings.Index(rest, "/"); idx >= 0 {
-		return rest[idx+1:]
+	if _, after, ok := strings.Cut(rest, "/"); ok {
+		return after
 	}
 	return ""
 }

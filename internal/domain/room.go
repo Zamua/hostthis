@@ -135,7 +135,7 @@ func ParseRoomID(s string) (RoomID, error) {
 	// Hyphens at the fixed positions; hex everywhere else.
 	var raw [16]byte
 	ri := 0
-	for i := 0; i < 36; i++ {
+	for i := range 36 {
 		c := s[i]
 		if i == 8 || i == 13 || i == 18 || i == 23 {
 			if c != '-' {

@@ -570,23 +570,23 @@ func (r *SlateRepo) ExpiredRoomKeys(now time.Time) ([]domain.RoomRef, error) {
 		// key shape: roomexpiry/<ts>/<app-slug>/<uuid>
 		rest := strings.TrimPrefix(string(item.Key), "roomexpiry/")
 		// Split off the leading <ts> (fixed-width, no '/').
-		tsEnd := strings.IndexByte(rest, '/')
-		if tsEnd < 0 {
+		before, after, ok := strings.Cut(rest, "/")
+		if !ok {
 			continue
 		}
-		ts := rest[:tsEnd]
-		appAndID := rest[tsEnd+1:]
+		ts := before
+		appAndID := after
 		// <app-slug>/<uuid>: slug + uuid are both slash-free, so split on '/'.
-		sep := strings.IndexByte(appAndID, '/')
-		if sep < 0 {
+		before, after, ok = strings.Cut(appAndID, "/")
+		if !ok {
 			continue
 		}
 		if ts > cutoff {
 			continue
 		}
 		out = append(out, domain.RoomRef{
-			AppSlug: domain.Slug(appAndID[:sep]),
-			ID:      domain.RoomID(appAndID[sep+1:]),
+			AppSlug: domain.Slug(before),
+			ID:      domain.RoomID(after),
 		})
 	}
 	return out, nil
@@ -690,9 +690,9 @@ func (r *SlateRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
 // rooms/<app-slug>/<uuid> key. Both segments are slash-free.
 func parseRoomRecordKey(key []byte) (domain.Slug, domain.RoomID, bool) {
 	rest := strings.TrimPrefix(string(key), "rooms/")
-	idx := strings.IndexByte(rest, '/')
-	if idx < 0 {
+	before, after, ok := strings.Cut(rest, "/")
+	if !ok {
 		return "", "", false
 	}
-	return domain.Slug(rest[:idx]), domain.RoomID(rest[idx+1:]), true
+	return domain.Slug(before), domain.RoomID(after), true
 }

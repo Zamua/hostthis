@@ -224,7 +224,7 @@ func TestSafeUntar_RunningTotalAcrossEntries(t *testing.T) {
 func TestSafeUntar_FileCountCap(t *testing.T) {
 	entries := make([]tarEntry, 0, MaxSiteFiles+2)
 	entries = append(entries, tarEntry{name: "index.html", body: "x"})
-	for i := 0; i < MaxSiteFiles+1; i++ {
+	for i := range MaxSiteFiles + 1 {
 		entries = append(entries, tarEntry{name: "f" + itoa(i) + ".txt", body: "y"})
 	}
 	_, err := SafeUntar(bytes.NewReader(makeGzipTar(t, entries)), newRecordingSink(), UserQuotaBytes)
