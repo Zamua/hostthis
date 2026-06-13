@@ -53,6 +53,7 @@ func TestSweep_ExpiresSitesAndProtectsSharedBlobs(t *testing.T) {
 	// share a blob.
 	shared := "<!doctype html><h1>shared bytes</h1>"
 	upload := service.NewUpload(pastes, blobs)
+	t.Cleanup(upload.WaitFinalize)
 	upload.Now = func() time.Time { return now }
 	if _, err := upload.Create(bytes.NewReader([]byte(shared)), "key:paste-owner", "", ""); err != nil {
 		t.Fatalf("paste upload: %v", err)

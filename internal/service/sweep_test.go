@@ -30,6 +30,7 @@ func TestSweep_Once(t *testing.T) {
 	repo := storage.NewPasteRepo(db)
 
 	upload := service.NewUpload(repo, blobs)
+	t.Cleanup(upload.WaitFinalize)
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	upload.Now = func() time.Time { return now }
 
@@ -90,6 +91,7 @@ func TestSweep_KeepsActive(t *testing.T) {
 	repo := storage.NewPasteRepo(db)
 
 	upload := service.NewUpload(repo, blobs)
+	t.Cleanup(upload.WaitFinalize)
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	upload.Now = func() time.Time { return now }
 
@@ -118,6 +120,7 @@ func TestSweep_GCsOrphanBlobOnly(t *testing.T) {
 
 	// Write a referenced blob via the upload path.
 	upload := service.NewUpload(repo, blobs)
+	t.Cleanup(upload.WaitFinalize)
 	upload.Now = func() time.Time { return time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC) }
 	_, err := upload.Create(bytes.NewReader([]byte("<!doctype html><p>ref</p>")), "owner", "", "")
 	if err != nil {

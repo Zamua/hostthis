@@ -55,6 +55,7 @@ func TestDeploySiteAndServe(t *testing.T) {
 	repo := storage.NewPasteRepo(db)
 	sites := storage.NewSiteRepo(db)
 	upload := service.NewUpload(repo, blobs)
+	t.Cleanup(upload.WaitFinalize)
 	deploy := service.NewDeploySite(sites, repo, blobs)
 
 	httpSrv := httptest.NewServer((&httpapi.Server{
@@ -218,10 +219,12 @@ func TestDeploySite_NoWebContentRejected(t *testing.T) {
 	sshAddr := sshListener.Addr().String()
 	_ = sshListener.Close()
 
+	upload := service.NewUpload(repo, blobs)
+	t.Cleanup(upload.WaitFinalize)
 	sshSrv := &hostssh.Server{
 		Addr:       sshAddr,
 		ApexDomain: "paste.test",
-		Upload:     service.NewUpload(repo, blobs),
+		Upload:     upload,
 		Deploy:     service.NewDeploySite(sites, repo, blobs),
 		BuildURL:   func(s domain.Slug) string { return "http://x/p/" + s.String() },
 		Logger:     log.New(io.Discard, "", 0),

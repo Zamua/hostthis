@@ -42,6 +42,7 @@ func TestUploadAndServe(t *testing.T) {
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	repo := storage.NewPasteRepo(db)
 	upload := service.NewUpload(repo, blobs)
+	t.Cleanup(upload.WaitFinalize)
 
 	// HTTP server on a real port via httptest.
 	httpSrv := httptest.NewServer((&httpapi.Server{Pastes: repo, Blobs: blobs}).Handler())

@@ -59,10 +59,12 @@ func newUpdateStack(t *testing.T) *updateStack {
 	addr := l.Addr().String()
 	_ = l.Close()
 
+	upload := service.NewUpload(repo, blobs)
+	t.Cleanup(upload.WaitFinalize)
 	sshSrv := &hostssh.Server{
 		Addr:       addr,
 		ApexDomain: "paste.test",
-		Upload:     service.NewUpload(repo, blobs),
+		Upload:     upload,
 		Manage:     service.NewManage(repo, blobs),
 		Deploy:     service.NewDeploySite(sites, repo, blobs),
 		BuildURL:   func(s domain.Slug) string { return httpSrv.URL + "/p/" + s.String() },

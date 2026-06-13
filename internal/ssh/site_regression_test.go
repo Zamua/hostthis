@@ -57,6 +57,7 @@ func newSiteStack(t *testing.T) *siteStack {
 	_ = l.Close()
 
 	upload := service.NewUpload(repo, blobs)
+	t.Cleanup(upload.WaitFinalize)
 	sshSrv := &hostssh.Server{
 		Addr:       addr,
 		ApexDomain: "paste.test",

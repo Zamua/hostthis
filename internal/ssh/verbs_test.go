@@ -98,6 +98,7 @@ func startStack(t *testing.T) *stack {
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	repo := storage.NewPasteRepo(db)
 	upload := service.NewUpload(repo, blobs)
+	t.Cleanup(upload.WaitFinalize)
 	manage := service.NewManage(repo, blobs)
 
 	httpSrv := httptest.NewServer((&httpapi.Server{Pastes: repo, Blobs: blobs}).Handler())
