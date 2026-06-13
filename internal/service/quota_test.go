@@ -26,6 +26,11 @@ func newStack(t *testing.T) (*service.Upload, *service.Manage, *storage.PasteRep
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	repo := storage.NewPasteRepo(db)
 	upload := service.NewUpload(repo, blobs)
+	// Optimization A writes blobs in a background finalizer goroutine.
+	// Drain it before the t.TempDir() cleanup (registered above, so it
+	// runs LATER under LIFO) tries to RemoveAll the blob dir out from
+	// under an in-flight finalize.
+	t.Cleanup(upload.WaitFinalize)
 	manage := service.NewManage(repo, blobs)
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	upload.Now = func() time.Time { return now }
