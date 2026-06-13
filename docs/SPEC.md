@@ -235,6 +235,116 @@ With* options. Refusal behavior is pinned by
   for older uncompressed blobs (rolling-migration support; no flag
   day).
 
+## Paste lifecycle status (async blob write)
+
+A paste has a **status**: `pending`, `ready`, or `failed`. The status
+exists to hide the slow part of `Create` (the blob write to object
+storage, ~250 ms of a ~400 ms paste) behind a fast metadata-only
+acknowledgement, so the uploader gets a URL back as soon as the paste is
+durably reserved + named, not after the bytes finish landing in the
+object store.
+
+### Why it exists
+
+The original `Create` ran strictly synchronously: stream + hash +
+compress (in memory, ~3 ms), then `PutPrecompressed` the blob to the
+object store (~250 ms, the bottleneck), then the metadata insert
+(~20 ms). The uploader waited for all three before seeing the URL.
+
+The blob bytes are content-addressed and immutable, and the metadata
+insert already runs through a quota-enforcing reservation. So we can
+return the URL right after the metadata is committed and finish the
+blob write in the background. The cost is a window where the URL exists
+but the bytes do not yet, which the status models explicitly.
+
+### The three states
+
+- **`pending`**: the metadata is committed (slug reserved, quota charged,
+  paste row written) but the content blob has not finished landing in
+  the object store. A GET on a pending paste serves a lightweight
+  **loading page** that auto-refreshes (a `<meta http-equiv="refresh">`
+  ~1 s poll) until the paste resolves. The reservation already holds the
+  uploader's quota, so a pending paste counts against quota exactly like
+  a ready one.
+- **`ready`**: the blob write succeeded and the status was flipped
+  `pending -> ready` by the background finalizer. A GET serves the
+  content exactly as before this feature existed. This is the terminal
+  success state.
+- **`failed`**: the background blob write failed (object store error,
+  or the handling pod died before the write completed and the
+  reconciler aged the paste out, see below). A GET serves a small
+  **error page**. The reservation is released as part of the transition
+  so the failed paste no longer charges quota.
+
+A paste that predates this feature (a row with no persisted status) is
+read as **`ready`**: the absence of a status means "written before the
+lifecycle existed, therefore complete." This keeps the change a pure
+additive migration with no flag day.
+
+### Create: the synchronous half
+
+`Create` now does, synchronously, before returning the URL:
+
+1. stream + hash + compress (hold the compressed body in the handling
+   pod's memory),
+2. detect the content kind,
+3. **reserve quota + write the authoritative paste row with
+   `status=pending`** (the fast metadata path, ~20 ms),
+4. return the URL.
+
+Quota is enforced HERE, synchronously, by the same reservation CAS used
+before. An over-quota upload is rejected before any URL is handed out:
+the async split does not weaken the quota gate.
+
+### Finalize: the asynchronous half
+
+After `Create` returns the URL, a background goroutine (owned by the
+upload service) runs the finalizer:
+
+1. `PutPrecompressed` the held bytes to the object store,
+2. on success: flip the paste `pending -> ready` (a small metadata CAS),
+3. on failure: flip the paste `pending -> failed` AND release the
+   reservation (return the charged bytes).
+
+The transitions are guarded: the finalizer only advances a paste that is
+still `pending`. If the reconciler already aged the paste to `failed`
+(pod-death case), a late-arriving finalize that then finds the bytes did
+land is a no-op against a non-pending row: it does not resurrect a
+failed paste.
+
+### Durability trade (read this)
+
+The compressed bytes live ONLY in the handling pod's memory between the
+synchronous metadata commit and the background blob write. **If the pod
+crashes in that window, those bytes are lost**: the metadata says
+`pending` but no blob will ever arrive. This is the one durability
+regression the feature introduces, and it is bounded:
+
+- The window is the blob-write latency (~250 ms), not the whole request.
+- A paste stuck `pending` past a timeout (default: a small multiple of
+  the expected blob-write latency, well under a minute) is aged to
+  `failed` by the reconciler, which also releases its reservation. So a
+  lost-bytes paste self-heals into a clean `failed` rather than a
+  permanent loading screen.
+- Nothing that was previously durable becomes less durable: a `ready`
+  paste is exactly as durable as before (blob in object store, metadata
+  committed). Only the brief pending window is at-risk, and only for
+  bytes the uploader has not yet been told are permanent.
+
+This is an explicit, documented trade: a ~250 ms at-risk window on the
+freshest uploads, in exchange for hiding the ~250 ms blob-write latency
+from every uploader. The reconciler's age-out makes the failure mode
+observable + self-correcting rather than silent.
+
+### Reconciler: age out stuck pendings
+
+The metadata reconciler gains one job: a paste whose `status=pending`
+and whose `created_at` is older than the pending timeout is transitioned
+to `failed` and its reservation released. This is the backstop for the
+pod-death case (the bytes are gone, no finalizer will ever run). It uses
+the same idempotent, decode-tolerant per-row discipline the reconciler's
+other jobs use: one poisoned row never stalls the pass.
+
 ## Static site archives
 
 A single renderable file is the common case, but the same upload pipe
@@ -2054,6 +2164,96 @@ HOSTTHIS_BLOB_BACKEND=s3       # restart hostthis pointing at S3
 # wait one safe interval, confirm everything still works
 rm -rf data/blobs              # reclaim disk space
 ```
+
+### Local-disk write-back cache (optional, opt-in)
+
+The blob `Put` against a remote object store dominates upload latency: a
+single paste spends most of its wall-clock time inside the `PutObject`
+call to MinIO/S3 (hundreds of ms), while the local hashing + compression
+and the metadata writes are each a few ms. For deploys that can tolerate
+a small durability window in exchange for a fast upload ack, an optional
+**local-disk write-back cache** sits in front of the durable backend.
+
+It is **off by default**. The strict, ship-it-durable-before-ack
+behavior described above is unchanged unless an operator opts in with:
+
+```
+HOSTTHIS_BLOB_WRITEBACK=true            # enable the write-back cache (default false)
+HOSTTHIS_BLOB_WRITEBACK_DIR=<path>      # local cache dir (default <data-dir>/blob-cache)
+HOSTTHIS_BLOB_WRITEBACK_MAX_BYTES=<n>   # soft cap on cache size in bytes (default 1 GiB)
+```
+
+When enabled, the cache wraps the configured durable backend (`disk` or
+`s3`) and changes the blob path as follows:
+
+- **`Put` writes locally first, uploads asynchronously.** The bytes (the
+  already-compressed, magic-prefixed stored representation) are written
+  to the local cache directory with the same atomic tmp-write + fsync +
+  rename the disk store uses, then the SHA is enqueued for a background
+  uploader. `Put` returns as soon as the local write is durable on the
+  pod's disk - typically a few ms - without waiting for the object store.
+  The content-addressed skip still applies: if the durable backend
+  already has the object (checked cheaply), the local write and the
+  enqueue are skipped.
+
+- **A background uploader drains the queue to the durable backend.** A
+  small pool of workers pops SHAs, reads the bytes back from the local
+  cache, and `Put`s them to the durable backend with bounded retry and
+  exponential backoff. On a successful durable upload the cache entry is
+  marked uploaded (eligible for eviction). A failed upload is re-enqueued
+  after backoff so a transient object-store outage doesn't lose the blob;
+  it just extends the durability window.
+
+- **`Get` / `GetReader` read the cache first, fall back to the durable
+  backend.** A blob that is still local (uploaded or not) serves from the
+  pod's disk. A blob that has been evicted (or was never cached, e.g.
+  written by a different pod or before the cache was enabled) is fetched
+  from the durable backend transparently. Reads are therefore always
+  correct regardless of upload state.
+
+- **Startup re-scan re-enqueues pending uploads.** On boot the cache
+  walks its directory and re-enqueues every entry that has not been
+  confirmed uploaded to the durable backend. This makes the uploader
+  durable across a process restart: a crash or redeploy that leaves
+  un-uploaded blobs on a surviving disk recovers them on the next boot
+  rather than stranding them. (Whether the disk survives a restart is the
+  deploy's concern; see the durability caveat below.)
+
+- **Bounded cache with eviction.** The cache tracks its on-disk size and,
+  once it exceeds `HOSTTHIS_BLOB_WRITEBACK_MAX_BYTES`, evicts
+  already-uploaded entries oldest-first until it is back under the cap. An
+  entry that has not yet been confirmed uploaded is NEVER evicted - that
+  would lose the only copy of a not-yet-durable blob. The cap is therefore
+  a soft cap: a burst of uploads that outruns the uploader can push the
+  cache temporarily over the cap, and it drains back down as uploads
+  complete.
+
+**Durability caveat (operator-facing, read before enabling).** With the
+write-back cache on, a blob is durable on the pod's local disk
+immediately but NOT durable in the object store until the async upload
+completes. If the pod's local disk does not survive a restart - the
+production deploy uses an ephemeral `emptyDir`-class volume, so it does
+not - then a pod loss between the `Put` ack and the async upload loses
+any blob still in flight. The object-store copy is the only cross-pod
+durable copy. This is the same narrow durability window class as a
+fast-ack metadata write: the ack is honored locally and the durable copy
+follows shortly after. The startup re-scan closes the window for a clean
+restart (the disk is still there) but NOT for a reschedule onto a fresh
+node with an empty volume. Operators who cannot tolerate that window must
+leave the cache off (the default), which preserves today's
+durable-before-ack guarantee. Operators who enable it on a deploy with a
+persistent local volume get the latency win with no durability loss for
+process restarts, only for total volume loss.
+
+**Where it sits in the stack.** The cache is a storage adapter that
+implements the same inner contract the compression layer wraps
+(`Put` / `Get` / `GetReader`) plus the sweep contract
+(`WalkBlobs` / `Remove`). It is wired between the compression layer and
+the durable backend, so it sees the compressed stored bytes and is
+invisible to the upload service, which still depends only on the
+`BlobStore` interface. Sweep GC walks the DURABLE backend (authoritative
+for what blobs exist), and `Remove` deletes from both the durable backend
+and the local cache.
 
 ---
 

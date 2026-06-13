@@ -31,6 +31,12 @@ type innerBlobStore interface {
 	GetReader(sha string) (io.ReadCloser, int64, error)
 }
 
+// InnerBlobStore is the exported alias of innerBlobStore so wiring code
+// in other packages (cmd/) can name the type the compression layer
+// wraps. The write-back cache satisfies it, so it can be slotted between
+// the compression layer and the durable backend.
+type InnerBlobStore = innerBlobStore
+
 // PutPrecompressed writes a body that is ALREADY zstd-encoded with the
 // magic prefix in place. Used by the streaming upload path in the
 // service layer, which produces the encoded bytes incrementally as
