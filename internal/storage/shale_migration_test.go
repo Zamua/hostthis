@@ -25,6 +25,7 @@ package storage_test
 
 import (
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -151,10 +152,5 @@ func mustPutRaw(t *testing.T, repo *storage.ShaleRepo, key, value []byte) {
 }
 
 func sliceHasMig(ss []string, want string) bool {
-	for _, s := range ss {
-		if s == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ss, want)
 }

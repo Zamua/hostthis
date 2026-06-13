@@ -247,7 +247,7 @@ func TestWriteBack_PinnedNotEvicted(t *testing.T) {
 	wb := newTestWriteBack(t, durable, WriteBackConfig{MaxBytes: 64})
 
 	var shas []string
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		body := bytes.Repeat([]byte{byte('a' + i)}, 40) // ~200 bytes total, over 64
 		sha := wbShaOf(body)
 		shas = append(shas, sha)
@@ -272,7 +272,7 @@ func TestWriteBack_EvictionAfterUpload(t *testing.T) {
 	wb := newTestWriteBack(t, durable, WriteBackConfig{MaxBytes: 64})
 
 	var shas []string
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		body := bytes.Repeat([]byte{byte('a' + i)}, 40)
 		sha := wbShaOf(body)
 		shas = append(shas, sha)

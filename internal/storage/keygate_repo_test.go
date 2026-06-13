@@ -41,7 +41,7 @@ func TestKeyGate_FirstSeenAndKnown(t *testing.T) {
 func TestKeyGate_LimitFires(t *testing.T) {
 	r := newKeyGateRepo(t)
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		_, err := r.AdmitNewKey("key:"+string(rune('a'+i)), "1.2.3.0/24", now, 20, 24*time.Hour)
 		if err != nil {
 			t.Fatalf("admit %d: %v", i, err)
@@ -56,7 +56,7 @@ func TestKeyGate_LimitFires(t *testing.T) {
 func TestKeyGate_OtherSubnetsUnaffected(t *testing.T) {
 	r := newKeyGateRepo(t)
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		_, _ = r.AdmitNewKey("key:"+string(rune('a'+i)), "1.2.3.0/24", now, 20, 24*time.Hour)
 	}
 	// A different subnet still has its own bucket.
@@ -69,7 +69,7 @@ func TestKeyGate_DeleteOldRowsFreesSlots(t *testing.T) {
 	r := newKeyGateRepo(t)
 	old := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) // 4 days ago
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		_, _ = r.AdmitNewKey("key:"+string(rune('a'+i)), "1.2.3.0/24", old, 20, 24*time.Hour)
 	}
 	// Limit hit at `now` even though the rows are old - but only if

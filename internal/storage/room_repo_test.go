@@ -223,7 +223,7 @@ func TestRoom_PerRoomKeyCap(t *testing.T) {
 	repo := newRoomTestRepo(t)
 	now := time.Now().UTC()
 	room := mkRoom(repo, t, "app12345", now)
-	for i := 0; i < domain.MaxRoomKeys; i++ {
+	for i := range domain.MaxRoomKeys {
 		k := keyName(i)
 		if err := repo.PutValue(room.AppSlug, room.ID, k, []byte("v"), 0, now); err != nil {
 			t.Fatalf("key %d under cap rejected: %v", i, err)
@@ -315,7 +315,7 @@ func TestRoom_CreationRateAccounting(t *testing.T) {
 	repo := newRoomTestRepo(t)
 	now := time.Now().UTC()
 	// Two creations from one subnet under one app.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		room := domain.Room{
 			AppSlug: "app12345", ID: domain.NewRoomID(),
 			CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RoomRetentionWindow),

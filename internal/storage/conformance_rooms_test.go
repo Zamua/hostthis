@@ -284,7 +284,7 @@ func conformRoomPerRoomByteCap(t *testing.T, rr conformanceRoomRepo) {
 func conformRoomPerRoomKeyCap(t *testing.T, rr conformanceRoomRepo) {
 	room := mkConformRoom(t, rr, "app12345", fixedNow)
 	// Fill the room to exactly MaxRoomKeys with one-byte values.
-	for i := 0; i < domain.MaxRoomKeys; i++ {
+	for i := range domain.MaxRoomKeys {
 		k := keyN(i)
 		if err := rr.PutValue(room.AppSlug, room.ID, k, []byte("x"), 0, fixedNow); err != nil {
 			t.Fatalf("put key %d: %v", i, err)
@@ -324,7 +324,7 @@ func conformRoomPerRoomCapConcurrentCeiling(t *testing.T, rr conformanceRoomRepo
 	body := domain.MaxRoomBytes / k // floor: k*body <= MaxRoomBytes < (k+1)*body
 	var landed int64
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -459,13 +459,13 @@ func conformRoomCreationRateLimitCounts(t *testing.T, rr conformanceRoomRepo) {
 	subnetB := "9.9.9.0/24"
 
 	// Create 3 rooms from subnet A and 2 from subnet B, all under one app.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		room := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.RoomRetentionWindow)}
 		if err := rr.CreateRoom(room, subnetA, 0, fixedNow); err != nil {
 			t.Fatalf("create A%d: %v", i, err)
 		}
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		room := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.RoomRetentionWindow)}
 		if err := rr.CreateRoom(room, subnetB, 0, fixedNow); err != nil {
 			t.Fatalf("create B%d: %v", i, err)
@@ -515,7 +515,7 @@ func conformRoomCreationLedgerPrune(t *testing.T, rr conformanceRoomRepo) {
 
 	// Two old creations (outside the window) + one fresh one.
 	old := fixedNow.Add(-2 * window)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		room := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: old, UpdatedAt: old, ExpiresAt: old.Add(domain.RoomRetentionWindow)}
 		if err := rr.CreateRoom(room, subnet, 0, old); err != nil {
 			t.Fatalf("create old %d: %v", i, err)

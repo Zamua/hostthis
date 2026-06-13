@@ -569,22 +569,22 @@ func (r *ShaleRepo) ExpiredRoomKeys(now time.Time) ([]domain.RoomRef, error) {
 	for _, item := range items {
 		// key shape: roomexpiry/<ts>/<app-slug>/<uuid>
 		rest := strings.TrimPrefix(string(item.Key), "roomexpiry/")
-		tsEnd := strings.IndexByte(rest, '/')
-		if tsEnd < 0 {
+		before, after, ok := strings.Cut(rest, "/")
+		if !ok {
 			continue
 		}
-		ts := rest[:tsEnd]
-		appAndID := rest[tsEnd+1:]
-		sep := strings.IndexByte(appAndID, '/')
-		if sep < 0 {
+		ts := before
+		appAndID := after
+		before, after, ok = strings.Cut(appAndID, "/")
+		if !ok {
 			continue
 		}
 		if ts > cutoff {
 			continue
 		}
 		out = append(out, domain.RoomRef{
-			AppSlug: domain.Slug(appAndID[:sep]),
-			ID:      domain.RoomID(appAndID[sep+1:]),
+			AppSlug: domain.Slug(before),
+			ID:      domain.RoomID(after),
 		})
 	}
 	return out, nil

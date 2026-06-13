@@ -1243,7 +1243,6 @@ func TestExitCodes_Characterization(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			var (
 				stdout, stderr string
@@ -1307,8 +1306,8 @@ func TestConcurrent_Characterization(t *testing.T) {
 	s := startStack(t)
 	const N = 6
 	urls := map[string]struct{}{}
-	for i := 0; i < N; i++ {
-		body := []byte(fmt.Sprintf("<!doctype html><p>seq %d</p>", i))
+	for i := range N {
+		body := fmt.Appendf(nil, "<!doctype html><p>seq %d</p>", i)
 		cli, _ := newKeyClient(t, s.sshAddr)
 		url, err := concurrentUpload(cli, body)
 		if err != nil {
@@ -1387,7 +1386,6 @@ func TestOwnerCollapse_Characterization(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			_, stderr, exit := s.runOn(otherClient, tc.cmd, tc.body)
 			if exit != 4 {
@@ -1590,12 +1588,12 @@ func TestSybil_WaitUntilLine_Characterization(t *testing.T) {
 	// where %s is now+window formatted as "2006-01-02 15:04 UTC". The
 	// indent (2 spaces) + literal prefix are byte-exact pinned.
 	const wantPrefix = "  (b) wait until "
-	idx := strings.Index(stderr, wantPrefix)
-	if idx < 0 {
+	_, after, ok := strings.Cut(stderr, wantPrefix)
+	if !ok {
 		t.Fatalf("missing '(b) wait until ' line in refusal:\n%q", stderr)
 	}
 	// Take the rest of the line after the prefix.
-	rest := stderr[idx+len(wantPrefix):]
+	rest := after
 	nl := strings.Index(rest, "\n")
 	if nl < 0 {
 		t.Fatalf("'(b) wait until ' line is unterminated: %q", rest)

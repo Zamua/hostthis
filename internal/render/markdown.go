@@ -101,7 +101,7 @@ func sanitizer() *bluemonday.Policy {
 // Returns "markdown" as a fallback. Used only for the <title> tag -
 // the rendered body still contains the heading.
 func extractTitle(src []byte) string {
-	for _, line := range bytes.Split(src, []byte("\n")) {
+	for line := range bytes.SplitSeq(src, []byte("\n")) {
 		trimmed := bytes.TrimSpace(line)
 		if bytes.HasPrefix(trimmed, []byte("# ")) {
 			return strings.TrimSpace(string(trimmed[2:]))

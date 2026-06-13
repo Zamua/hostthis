@@ -58,8 +58,8 @@ func shouldColor(sess colorContext) bool {
 // splitEnv splits a "KEY=VALUE" pair as exposed by Session.Environ().
 // Returns (key, value); when the entry has no "=", returns (entry, "").
 func splitEnv(kv string) (string, string) {
-	if i := strings.IndexByte(kv, '='); i >= 0 {
-		return kv[:i], kv[i+1:]
+	if before, after, ok := strings.Cut(kv, "="); ok {
+		return before, after
 	}
 	return kv, ""
 }

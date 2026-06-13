@@ -36,6 +36,7 @@ package storage_test
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -269,7 +270,7 @@ func conformQuotaConcurrentCeiling(t *testing.T, r conformanceRepo, caps conform
 	cap := int64(k * body) // admits exactly k pastes of `body`
 	var landed int64
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -803,7 +804,7 @@ func conformKeyGateSubnetLimit(t *testing.T, r conformanceRepo) {
 		window = 24 * time.Hour
 		limit  = 5
 	)
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		if _, err := r.AdmitNewKey("key:"+string(rune('a'+i)), "9.9.9.0/24", fixedNow, limit, window); err != nil {
 			t.Fatalf("admit %d under limit: %v", i, err)
 		}
@@ -819,7 +820,7 @@ func conformKeyGateSubnetsIndependent(t *testing.T, r conformanceRepo) {
 		window = 24 * time.Hour
 		limit  = 3
 	)
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		if _, err := r.AdmitNewKey("key:"+string(rune('a'+i)), "10.0.0.0/24", fixedNow, limit, window); err != nil {
 			t.Fatalf("fill subnet A %d: %v", i, err)
 		}
@@ -836,7 +837,7 @@ func conformKeyGateWindowAges(t *testing.T, r conformanceRepo) {
 		limit  = 2
 	)
 	old := fixedNow.Add(-48 * time.Hour) // outside the 24h window
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		if _, err := r.AdmitNewKey("key:"+string(rune('a'+i)), "11.0.0.0/24", old, limit, window); err != nil {
 			t.Fatalf("old admit %d: %v", i, err)
 		}
@@ -852,7 +853,7 @@ func conformKeyGateWindowAges(t *testing.T, r conformanceRepo) {
 func conformKeyGatePruneOld(t *testing.T, r conformanceRepo) {
 	const window = 24 * time.Hour
 	old := fixedNow.Add(-48 * time.Hour)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, err := r.AdmitNewKey("key:"+string(rune('a'+i)), "12.0.0.0/24", old, 20, window); err != nil {
 			t.Fatalf("old admit %d: %v", i, err)
 		}
@@ -886,10 +887,5 @@ func conformKeyGatePruneOld(t *testing.T, r conformanceRepo) {
 // with the s3 blob test's contains/containsString helpers, which live
 // in the same test package with different signatures.)
 func sliceHas(ss []string, want string) bool {
-	for _, s := range ss {
-		if s == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ss, want)
 }

@@ -145,10 +145,7 @@ func (w *rawCountWriter) Write(p []byte) (int, error) {
 	if w.n+len(p) > w.limit {
 		// Accept what fits up to the limit before aborting so
 		// downstream writers see the same prefix bytes.
-		remaining := w.limit - w.n
-		if remaining < 0 {
-			remaining = 0
-		}
+		remaining := max(w.limit-w.n, 0)
 		w.n = w.limit
 		_ = remaining // accounting only; the actual write is what's reported
 		return 0, errRawCapExceeded

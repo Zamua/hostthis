@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"testing"
 
@@ -124,12 +125,7 @@ func envOr(t *testing.T, key, fallback string) string {
 }
 
 func contains(s []string, target string) bool {
-	for _, v := range s {
-		if v == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s, target)
 }
 
 func containsString(haystack, needle string) bool {

@@ -34,7 +34,6 @@ var verbHelpVerbs = []string{
 func TestHelpVerb_HelpSpaceVerb(t *testing.T) {
 	s := startStack(t)
 	for _, v := range verbHelpVerbs {
-		v := v
 		t.Run("help_"+v, func(t *testing.T) {
 			_, stderr, exit := s.run("help "+v, nil)
 			if exit != 0 {
@@ -63,7 +62,6 @@ func TestHelpVerb_HelpSpaceVerb(t *testing.T) {
 func TestHelpVerb_VerbDashDashHelp(t *testing.T) {
 	s := startStack(t)
 	for _, v := range verbHelpVerbs {
-		v := v
 		t.Run(v+"_dashdash_help", func(t *testing.T) {
 			if v == "help" {
 				// `help --help` is degenerate: the dispatcher's `help`
@@ -95,7 +93,6 @@ func TestHelpVerb_VerbDashDashHelp(t *testing.T) {
 func TestHelpVerb_VerbDashH(t *testing.T) {
 	s := startStack(t)
 	for _, v := range verbHelpVerbs {
-		v := v
 		t.Run(v+"_dash_h", func(t *testing.T) {
 			if v == "help" {
 				t.Skip("help -h has bespoke unknown-verb shape covered elsewhere")
@@ -221,7 +218,6 @@ func TestHelpVerb_VerbBodyMentionsVerb(t *testing.T) {
 		"whoami":   "whoami",
 	}
 	for verb, needle := range cases {
-		verb, needle := verb, needle
 		t.Run(verb, func(t *testing.T) {
 			_, stderr, exit := s.run("help "+verb, nil)
 			if exit != 0 {

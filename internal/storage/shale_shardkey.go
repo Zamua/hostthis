@@ -127,8 +127,8 @@ func shaleShardKey(key []byte) []byte {
 		// + uuid are slash-free, so strip the leading <ts> then take the
 		// first of the remaining "<app-slug>/<uuid>".
 		rest := key[len(prefixRoomExpiryAll):]
-		if i := bytes.IndexByte(rest, '/'); i >= 0 {
-			return firstSegment(rest[i+1:])
+		if _, after, ok := bytes.Cut(rest, []byte{'/'}); ok {
+			return firstSegment(after)
 		}
 		return rest
 
@@ -180,8 +180,8 @@ var (
 // in s, or all of s if there is no '/'. Used to pull the leading shard
 // subject out of the remainder after a family prefix has been stripped.
 func firstSegment(s []byte) []byte {
-	if i := bytes.IndexByte(s, '/'); i >= 0 {
-		return s[:i]
+	if before, _, ok := bytes.Cut(s, []byte{'/'}); ok {
+		return before
 	}
 	return s
 }

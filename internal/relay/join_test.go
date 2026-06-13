@@ -24,7 +24,7 @@ import (
 // the written key.
 func TestJoinWithSnapshot_NoGapNoDupUnderConcurrentBroadcast(t *testing.T) {
 	const iterations = 200
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		r := NewRegistry(NewLimits())
 		key := testKey()
 

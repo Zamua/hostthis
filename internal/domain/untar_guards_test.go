@@ -138,7 +138,7 @@ func TestGuard_ManifestPathTextCapRejected(t *testing.T) {
 	stem := strings.Repeat("a", pathLen-len(".html")-6) // leave room for index + ext
 	entries := make([]tarEntry, 0, 2001)
 	entries = append(entries, tarEntry{name: "index.html", body: "<h1>ok</h1>"})
-	for i := 0; i < 2000; i++ {
+	for i := range 2000 {
 		// dir/<6-digit>aaaa....html, each cleaned path ~pathLen bytes.
 		name := "dir" + pad6(i) + stem + ".html"
 		entries = append(entries, tarEntry{name: name, body: "x"})

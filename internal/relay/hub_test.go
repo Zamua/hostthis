@@ -214,7 +214,7 @@ func TestHub_ConcurrentRegisterBroadcastUnregisterRace(t *testing.T) {
 	// goroutines to catch a data race in the hub's concurrent paths.
 	h := newHub(testKey(), 0, nil, nil)
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		wg.Add(1)
 		go func(id uint64) {
 			defer wg.Done()

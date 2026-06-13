@@ -46,7 +46,7 @@ func TestShaleDelete_VsDeleteVersionSameSlug_NoUnderCount(t *testing.T) {
 		iters       = 40 // enough rounds to land in the race window on slate-on-MinIO
 	)
 
-	for i := 0; i < iters; i++ {
+	for i := range iters {
 		owner := fmt.Sprintf("key:delrace-%d", i) // fresh owner: counter starts at 0
 		keeper := domain.Slug(fmt.Sprintf("kp%06d", i))
 		victim := domain.Slug(fmt.Sprintf("vc%06d", i))

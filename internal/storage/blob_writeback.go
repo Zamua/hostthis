@@ -285,7 +285,7 @@ func (w *WriteBackBlobStore) handleUpload(sha string) {
 	}()
 	backoff := w.baseBackoff
 	const maxAttempts = 8
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		if err := w.uploadOnce(sha); err == nil {
 			return
 		} else {
