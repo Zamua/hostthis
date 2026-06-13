@@ -37,7 +37,18 @@ if ! go vet ./...; then
   exit 1
 fi
 
-# 3. golangci-lint: only if installed. Skips with a warning otherwise so
+# 3. go fix modernize check: in Go 1.26 'go fix' is the modernizer suite.
+#    '-diff' prints pending modernizations without applying; non-empty output
+#    means un-modernized idioms are staged. (Default tags only; the cdylib
+#    isn't assumed present, so slatedb-tagged files are checked by running
+#    'go fix ./...' manually + the future slatedb CI job.)
+fix_pending=$(go fix -diff ./... 2>/dev/null || true)
+if [ -n "$fix_pending" ]; then
+  printf 'pre-commit: pending Go modernizations. Run:\n  go fix ./...\nthen re-stage and re-commit.\n' >&2
+  exit 1
+fi
+
+# 4. golangci-lint: only if installed. Skips with a warning otherwise so
 #    a contributor without the tool installed isn't blocked from committing.
 if command -v golangci-lint >/dev/null 2>&1; then
   if ! golangci-lint run --new-from-rev HEAD --fix=false; then

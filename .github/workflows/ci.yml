@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # Formatting: every file must be gofmt-clean.
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "These files are not gofmt-clean (run 'gofmt -w .'):"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # Modernize check: in Go 1.26 'go fix' is the modernizer suite (same
+      # analysis framework as vet). '-diff' prints pending modernizations
+      # without applying; a non-empty diff means the tree has un-modernized
+      # idioms. Run 'go fix ./...' locally and commit to satisfy this.
+      - name: go fix (modernize check)
+        run: |
+          out=$(go fix -diff ./... 2>/dev/null)
+          if [ -n "$out" ]; then
+            echo "Pending modernizations (run 'go fix ./...' and commit):"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: build
+        run: go build ./...
+
+      - name: test
+        run: go test ./...
+
+  # NOTE: this job covers the DEFAULT (sqlite) build tag only. The slatedb /
+  # shale metadata backend (build tag 'slatedb') needs the libslatedb_uniffi
+  # cdylib (cgo) + a MinIO service container to build and test, so it is not
+  # run here yet. Follow-up: add a 'go-slatedb' job that stages the cdylib
+  # (release asset or Rust build) + a minio service, then runs
+  #   go build -tags slatedb ./...
+  #   go vet  -tags slatedb ./...
+  #   go fix -diff -tags slatedb ./...   # modernize-check the tagged files too
+  #   go test -tags slatedb ./internal/storage/   # against the minio service
