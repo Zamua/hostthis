@@ -406,6 +406,13 @@ func encodeReservationMarker(bytes int64, createdAt time.Time) ([]byte, error) {
 // with a zero CreatedAt, which reads as "very old" so it is always past
 // any grace window. New markers always carry the JSON shape.
 func parseReservationMarker(raw []byte) (reservationMarker, error) {
+	// Strip the LWW envelope first: at R>1 the raw CAS tx.Get marker is
+	// wrapped, so the '{' JSON sniff below would miss and misroute it to the
+	// legacy bare-number path. Idempotent for R=1 / already-stripped values.
+	raw, err := stripEnvelope(raw)
+	if err != nil {
+		return reservationMarker{}, fmt.Errorf("strip reservation marker envelope: %w", err)
+	}
 	if len(raw) == 0 {
 		return reservationMarker{}, nil
 	}
@@ -452,13 +459,24 @@ func (r *ShaleRepo) getJSON(key []byte, out any) error {
 		}
 		return fmt.Errorf("get %s: %w", key, err)
 	}
-	if err := json.Unmarshal(raw, out); err != nil {
+	// cluster.Get only unwraps the LWW envelope on the getReplicated (R>1,
+	// non-multi) path; the single-node R=1 backend read and the multi-backend
+	// read hand back the RAW stored bytes. A record left enveloped by an R>1
+	// write therefore reaches here wrapped, so strip before decoding.
+	// Idempotent for R=1 raw / already-unwrapped values.
+	payload, serr := stripEnvelope(raw)
+	if serr != nil {
+		return fmt.Errorf("strip %s: %w", key, serr)
+	}
+	if err := json.Unmarshal(payload, out); err != nil {
 		return fmt.Errorf("decode %s: %w", key, err)
 	}
 	return nil
 }
 
-// getRaw reads a value via routed Get, returning (nil, nil) when absent.
+// getRaw reads a value via routed Get, returning (nil, nil) when absent. Like
+// getJSON it strips the LWW envelope cluster.Get leaves on at R=1 / multi
+// (idempotent for raw values) so callers see the payload, not the wrapper.
 func (r *ShaleRepo) getRaw(key []byte) ([]byte, error) {
 	raw, err := r.cluster.Get(key)
 	if err != nil {
@@ -467,7 +485,11 @@ func (r *ShaleRepo) getRaw(key []byte) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("get %s: %w", key, err)
 	}
-	return raw, nil
+	payload, serr := stripEnvelope(raw)
+	if serr != nil {
+		return nil, fmt.Errorf("strip %s: %w", key, serr)
+	}
+	return payload, nil
 }
 
 // scanPrefix collects all (key, value) pairs whose key starts with prefix
@@ -489,9 +511,18 @@ func (r *ShaleRepo) scanPrefix(prefix []byte) ([]scanItem, error) {
 		if k == nil && v == nil {
 			break
 		}
+		// cluster.ScanPrefix, like the backend scan under aggregatePrefix,
+		// returns the RAW stored value - an LWW envelope at R>1. Strip it so
+		// consumers (keygate timestamps, version rows, owner pastes) decode
+		// the payload exactly as cluster.Get hands it to them. Idempotent for
+		// R=1 / pre-envelope values; a truncated envelope surfaces as an error.
+		payload, derr := stripEnvelope(v)
+		if derr != nil {
+			return nil, fmt.Errorf("scan strip %s: %w", prefix, derr)
+		}
 		out = append(out, scanItem{
 			Key:   append([]byte(nil), k...),
-			Value: append([]byte(nil), v...),
+			Value: append([]byte(nil), payload...),
 		})
 	}
 	return out, nil
@@ -519,9 +550,24 @@ func (r *ShaleRepo) aggregatePrefix(prefix []byte) ([]scanItem, error) {
 			if k == nil && v == nil {
 				break
 			}
+			// ScanPrefix returns the RAW backend value, which for an
+			// R>1 write is an LWW Envelope (the cluster layer wraps on
+			// Put and unwraps on Get, but the Backend - and therefore
+			// this raw scan - sees the envelope). The aggregate
+			// consumers (quota sum, blob-ref set, expiry sweep) expect
+			// the decoded payload, exactly as cluster.Get hands them.
+			// cluster.Decode is the universal strip: a magic-prefixed
+			// envelope yields its payload; a pre-envelope / R=1 raw
+			// value passes through unchanged (zero-Stamp payload). A
+			// decode error means a truncated envelope (corruption) and
+			// is surfaced, not swallowed.
+			env, derr := cluster.Decode(v)
+			if derr != nil {
+				return fmt.Errorf("decode envelope for %q: %w", k, derr)
+			}
 			local = append(local, scanItem{
 				Key:   append([]byte(nil), k...),
-				Value: append([]byte(nil), v...),
+				Value: append([]byte(nil), env.Payload...),
 			})
 		}
 		return local
@@ -602,11 +648,32 @@ func latestActiveVerNum(versions []versionRow) int {
 
 // --- counter helpers -------------------------------------------------------
 
-func parseCounter(raw []byte) (int64, error) {
-	if len(raw) == 0 {
-		return 0, nil
+// stripEnvelope returns the LWW-envelope payload of a RAW backend value.
+// At R>1 every stored value is wrapped (magic + Stamp + payload); the cluster
+// layer unwraps on cluster.Get/Delete, but the low-level paths - CAS tx.Get
+// and the backend ScanPrefix used by aggregatePrefix - hand back the raw
+// stored bytes. Any caller that DECODES such a raw read (parseCounter,
+// json.Unmarshal, room-value length) must strip first or it will choke on the
+// binary envelope header. Idempotent for R=1 / already-stripped values: bytes
+// with no magic prefix pass through unchanged (cluster.Decode's v0.3-compat
+// path). A truncated envelope is corruption and surfaces as an error.
+func stripEnvelope(raw []byte) ([]byte, error) {
+	env, err := cluster.Decode(raw)
+	if err != nil {
+		return nil, err
 	}
-	n, err := strconv.ParseInt(string(raw), 10, 64)
+	return env.Payload, nil
+}
+
+func parseCounter(raw []byte) (int64, error) {
+	payload, err := stripEnvelope(raw)
+	if err != nil {
+		return 0, fmt.Errorf("decode counter envelope: %w", err)
+	}
+	if len(payload) == 0 {
+		return 0, nil // absent or an empty-payload (tombstone) envelope
+	}
+	n, err := strconv.ParseInt(string(payload), 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("decode counter: %w", err)
 	}
@@ -643,7 +710,11 @@ func shaleTxGetJSON(tx backend.Transaction, key []byte, out any) error {
 		}
 		return fmt.Errorf("tx get %s: %w", key, err)
 	}
-	if err := json.Unmarshal(raw, out); err != nil {
+	payload, err := stripEnvelope(raw)
+	if err != nil {
+		return fmt.Errorf("tx strip %s: %w", key, err)
+	}
+	if err := json.Unmarshal(payload, out); err != nil {
 		return fmt.Errorf("tx decode %s: %w", key, err)
 	}
 	return nil
@@ -1241,8 +1312,12 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 			if gerr != nil {
 				return gerr
 			}
+			payload, serr := stripEnvelope(raw)
+			if serr != nil {
+				return serr
+			}
 			var vr versionRow
-			if jerr := json.Unmarshal(raw, &vr); jerr != nil {
+			if jerr := json.Unmarshal(payload, &vr); jerr != nil {
 				return jerr
 			}
 			if !vr.Deleted {
