@@ -64,6 +64,13 @@ type Upload struct {
 	// finalize completes (success or failure). Test seam so a test can
 	// wait for the async half deterministically; nil in production.
 	onFinalizeDone func()
+	// SyncBlob, when true, restores the pre-async behavior: Create writes
+	// the paste row as ready + writes the blob INLINE (on the ack path) and
+	// skips the pending/MarkReady status flip - so one metadata write + one
+	// blob write, both synchronous. This is a BENCHMARK TOGGLE (env
+	// HOSTTHIS_BLOB_SYNC) to A/B sync vs async on one binary; not a normal
+	// production mode. Default false = the async path.
+	SyncBlob bool
 }
 
 // NewUpload wires defaults.
@@ -147,9 +154,16 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	// bytes (staged.Body) live in this pod's memory until the finalizer
 	// flushes them; a crash in that window loses them and the reconciler
 	// ages the stuck pending to failed (docs/SPEC.md "Durability trade").
+	// SyncBlob (benchmark toggle) commits the row as ready and writes the
+	// blob inline below; the async path commits pending and finalizes in
+	// the background.
+	initialStatus := domain.PasteStatusPending
+	if u.SyncBlob {
+		initialStatus = domain.PasteStatusReady
+	}
 	p := domain.Paste{
 		Identity:      domain.Identity(owner),
-		Status:        domain.PasteStatusPending,
+		Status:        initialStatus,
 		Kind:          kind,
 		ContentSHA:    staged.SHA,
 		Size:          staged.CompressedSize,
@@ -171,6 +185,16 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		err := u.Repo.InsertWithQuotaCheck(p, int64(domain.UserQuotaBytes), now)
 		switch {
 		case err == nil:
+			if u.SyncBlob {
+				// Benchmark sync path: row already committed as ready; write
+				// the blob INLINE (on the ack path), no pending/MarkReady flip.
+				// One metadata write + one blob write, both synchronous - the
+				// pre-async shape.
+				if berr := u.Blobs.PutPrecompressed(staged.SHA, staged.Body); berr != nil {
+					u.logf("upload: sync blob write %s: %v", p.Slug, berr)
+				}
+				return Result{Paste: p}, nil
+			}
 			// Metadata committed as pending. Hand the URL back immediately
 			// and finish the blob write in the background.
 			u.startFinalize(p.Slug, staged.SHA, staged.Body)
