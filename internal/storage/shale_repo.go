@@ -159,6 +159,14 @@ type ShaleConfig struct {
 	// the field is inverted here so the struct's zero value is the safe one.
 	RelaxedDurability bool
 
+	// CacheBytes sizes the slatedb SST block + metadata cache (a Moka
+	// in-memory cache) the slate backend is given. Zero disables it (slatedb
+	// default: no block cache, every read re-fetches SST blocks from the
+	// object store - pathological on a distributed-MinIO backend). A few
+	// hundred MiB holds the hot SST working set in RAM. Operator-facing env
+	// var: HOSTTHIS_METADATA_CACHE_BYTES.
+	CacheBytes uint64
+
 	// Logger receives the skip lines from the tolerant background scans
 	// (expiry / reconcile) when they hit an undecodable record. Optional:
 	// nil falls back to log.Default(). It never affects the blob-GC ref-set
@@ -211,6 +219,11 @@ type ShaleRepo struct {
 	// WaitPendingConfirms lets a test or operator block until every deferred
 	// confirm has run so a subsequent ListByOwner is deterministic.
 	confirmWG sync.WaitGroup
+
+	// cache is the slatedb SST block + metadata cache shared by the slate
+	// backend (nil when CacheBytes==0). Operator-owned uniffi handle; Close
+	// Destroys it after the cluster (and its backend) have shut down.
+	cache *slatedb.DbCache
 }
 
 // WaitPendingConfirms blocks until every deferred confirm-insert goroutine
@@ -313,8 +326,31 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		advertiseGRPCAddr = l.Addr().String()
 	}
 
-	be, err := slate.New(slateConfigFromShale(cfg))
+	sc := slateConfigFromShale(cfg)
+	// Block cache: without one, slatedb re-fetches SST blocks from the
+	// object store on every read, which on a distributed-MinIO backend is a
+	// steady self-inflicted read storm (the same hot SSTs fetched hundreds
+	// of times a second). A modest in-memory Moka cache holds the hot SST
+	// working set in RAM and eliminates ~all of those object reads. Operator
+	// owns the handle; Close Destroys it after the cluster shuts down.
+	var cache *slatedb.DbCache
+	if cfg.CacheBytes > 0 {
+		c, cerr := slatedb.DbCacheNewMokaCache(slatedb.MokaCacheOptions{MaxCapacity: cfg.CacheBytes})
+		if cerr != nil {
+			if lis != nil {
+				_ = lis.Close()
+			}
+			return nil, fmt.Errorf("shale: build slatedb block cache: %w", cerr)
+		}
+		sc.Cache = c
+		cache = c
+	}
+
+	be, err := slate.New(sc)
 	if err != nil {
+		if cache != nil {
+			cache.Destroy()
+		}
 		if lis != nil {
 			_ = lis.Close()
 		}
@@ -341,6 +377,9 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	})
 	if err != nil {
 		_ = be.Close()
+		if cache != nil {
+			cache.Destroy()
+		}
 		if lis != nil {
 			_ = lis.Close()
 		}
@@ -352,6 +391,7 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		logger:   cfg.Logger,
 		bindAddr: cfg.BindAddr,
 		grpcAddr: advertiseGRPCAddr,
+		cache:    cache,
 	}
 
 	// Multi-node: stand up the peer-forwarding server the cluster advertised
@@ -384,10 +424,17 @@ func (r *ShaleRepo) Close() error {
 	if r.grpcSrv != nil {
 		r.grpcSrv.GracefulStop() // also closes r.grpcLis
 	}
+	var err error
 	if r.cluster != nil {
-		return r.cluster.Close()
+		err = r.cluster.Close()
 	}
-	return nil
+	// Destroy the cache AFTER the cluster (and its slate backend) have shut
+	// down, so no in-flight read still references it.
+	if r.cache != nil {
+		r.cache.Destroy()
+		r.cache = nil
+	}
+	return err
 }
 
 // GRPCAddr returns this node's ACTUAL bound gRPC forwarding address (the
