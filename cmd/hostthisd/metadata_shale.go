@@ -43,9 +43,41 @@ import (
 	"strings"
 
 	"github.com/Zamua/hostthis/internal/storage"
+	slatedb "slatedb.io/slatedb-go/uniffi"
 )
 
+// slatedbLogLevel maps HOSTTHIS_SLATEDB_LOG_LEVEL to a slatedb LogLevel.
+// Empty / "off" => no slatedb tracing (the default). Diagnostic only:
+// enabling debug/trace is verbose and meant for short-lived investigation.
+func slatedbLogLevel(s string) (slatedb.LogLevel, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "off":
+		return 0, false
+	case "error":
+		return slatedb.LogLevelError, true
+	case "warn":
+		return slatedb.LogLevelWarn, true
+	case "info":
+		return slatedb.LogLevelInfo, true
+	case "debug":
+		return slatedb.LogLevelDebug, true
+	case "trace":
+		return slatedb.LogLevelTrace, true
+	default:
+		return slatedb.LogLevelInfo, true
+	}
+}
+
 func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
+	// Optional slatedb tracing (to stderr) for diagnosing the SST-read
+	// pattern. Off unless HOSTTHIS_SLATEDB_LOG_LEVEL is set.
+	if lvl, on := slatedbLogLevel(os.Getenv("HOSTTHIS_SLATEDB_LOG_LEVEL")); on {
+		if err := slatedb.InitLogging(lvl, nil); err != nil {
+			logger.Printf("metadata: slatedb InitLogging failed: %v", err)
+		} else {
+			logger.Printf("metadata: slatedb tracing enabled at %v", os.Getenv("HOSTTHIS_SLATEDB_LOG_LEVEL"))
+		}
+	}
 	endpoint := strings.TrimSpace(os.Getenv("HOSTTHIS_METADATA_S3_ENDPOINT"))
 	bucket := strings.TrimSpace(os.Getenv("HOSTTHIS_METADATA_S3_BUCKET"))
 	region := envOr("HOSTTHIS_METADATA_S3_REGION", "us-east-1")
