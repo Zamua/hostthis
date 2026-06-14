@@ -69,6 +69,14 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 	// write-throughput win; only safe at RF>=2 on separate nodes. See
 	// docs/SPEC.md "Relaxed durability: fast-ack at the memtable".
 	awaitDurable := strings.EqualFold(envOr("HOSTTHIS_METADATA_AWAIT_DURABLE", "true"), "true")
+	// Block cache for the slatedb metadata layer (Moka in-memory). Without it
+	// slatedb has NO block cache and re-fetches SST blocks from MinIO on every
+	// read - a steady self-inflicted read storm against the object store.
+	// Default 128 MiB; set 0 to disable. Tunable on the RAM-tight boxes.
+	cacheBytes := envOrInt("HOSTTHIS_METADATA_CACHE_BYTES", 128<<20)
+	if cacheBytes < 0 {
+		cacheBytes = 0
+	}
 
 	// Multi-node peer-discovery config. A non-empty bind addr is the
 	// switch that takes the cluster out of the single-node path.
@@ -97,6 +105,7 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		Seeds:             seeds,
 		ReplicationFactor: replicationFactor,
 		RelaxedDurability: !awaitDurable,
+		CacheBytes:        uint64(cacheBytes),
 		Logger:            logger,
 	})
 	if err != nil {
