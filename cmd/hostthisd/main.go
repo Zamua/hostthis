@@ -71,6 +71,13 @@ func main() {
 
 	uploadSvc := service.NewUpload(pasteRepo, blobs)
 	uploadSvc.Logger = logger // record background blob-finalize outcomes
+	// HOSTTHIS_BLOB_SYNC is a BENCHMARK toggle (sync vs async A/B on one
+	// binary): when true, Create writes the blob inline on the ack path
+	// (the pre-async shape) instead of finalizing in the background.
+	if strings.EqualFold(os.Getenv("HOSTTHIS_BLOB_SYNC"), "true") {
+		uploadSvc.SyncBlob = true
+		logger.Printf("upload: HOSTTHIS_BLOB_SYNC=true (inline blob write; benchmark mode)")
+	}
 	manageSvc := service.NewManage(pasteRepo, blobs)
 
 	// Static-site archive deploys. Reuses the same blob store + the same
