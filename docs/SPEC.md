@@ -3722,6 +3722,39 @@ quorum IS the single replica, so `ReadQuorum` reads exactly what
 `ReadNearest` would (one read, no extra hop, no envelope comparison) -
 the change is behavior-identical at R=1 and only takes effect at R>1.
 
+#### Sharded metadata (multi-backend mode)
+
+By default (`UnitCount = 0`) the shale backend opens a SINGLE slatedb
+database per node (the deploy arc above). Setting `UnitCount = N` (a power
+of two) selects MULTI-BACKEND mode: the keyspace is partitioned into N
+units, each a SEPARATE slatedb database, and a key routes to
+`UnitForHash(ShardKeyFn(key), N)`. Units distribute across the cluster's
+nodes by the consistent-hash ring; at `R > 1` each unit is replicated to R
+nodes. Co-location is preserved: the `ShardKeyFn` routes a whole `{tag}`
+set's keys to one unit, so a single-shard CAS stays in one database.
+
+The trade-off is concrete: each unit is a full slatedb instance (its own
+memtable, WAL, manifest, compaction goroutines) per owning replica, so N
+units at R replicas is up to N*R slatedb instances spread across the nodes.
+On small deployments keep N small; the cost of a large fixed N is real RAM
++ goroutines, not just on-disk layout. `UnitCount = 0` (single-backend)
+stays the default and is byte-for-byte the prior behavior. The mode is
+selected per deployment via the operator env `HOSTTHIS_SHALE_UNIT_COUNT`
+(`0` = single-backend; a power of two = that many shards). It composes with
+replication + relaxed durability unchanged: `ReplicationFactor`,
+`ReadQuorum`, and the relaxed-durability knob apply per unit exactly as
+they do for the single backend.
+
+Migration to sharded mode is NOT in-place. Unlike the single-backend
+cutover (same bucket, same key names), the multi-backend layout stores each
+unit under its own object-store prefix, so an existing single-backend
+deployment's data must be COPIED into the sharded layout once. That copy is
+a one-time operator step (read the source keys, write them into a fresh
+sharded cluster whose normal routing shards them) performed with a brief
+downtime; it lives in the operator's infra tooling, NOT in this app. The
+runtime + repo carry no migration logic - they only select the mode from
+`UnitCount`.
+
 ### Migration
 
 Migration is in-place: same bucket, same object store, same key names.

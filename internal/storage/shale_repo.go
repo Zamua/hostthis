@@ -89,6 +89,7 @@ import (
 	"github.com/Zamua/shale/pkg/backend"
 	"github.com/Zamua/shale/pkg/cluster"
 	"github.com/Zamua/shale/pkg/rpc"
+	"github.com/Zamua/shale/pkg/storageunit"
 	"google.golang.org/grpc"
 	slatedb "slatedb.io/slatedb-go/uniffi"
 
@@ -116,6 +117,20 @@ type ShaleConfig struct {
 	SecretKey string
 	UseSSL    bool   // false -> slate sets AWS_ALLOW_HTTP=true (MinIO dev)
 	DbName    string // logical db name within the bucket; key prefix for SlateDB files
+
+	// UnitCount selects the backend SHAPE. Zero (the default) opens the
+	// single-backend path: one slatedb database per node, today's behavior
+	// byte-for-byte. A value >= 1 (which MUST be a power of two) selects
+	// MULTI-BACKEND (sharded) mode: the keyspace is partitioned into UnitCount
+	// units, each its own slatedb database, distributed across the cluster's
+	// nodes by the ring and routed per key by ShardKeyFn -> UnitForHash. Each
+	// unit is a full slatedb instance (memtable, WAL, compaction) per owning
+	// replica, so keep this small on small deployments. The multi-backend layout
+	// is NOT on-disk-compatible with single-backend, so switching modes on an
+	// existing deployment is a one-time operator data copy, not in-place (see
+	// docs/SPEC.md "Sharded metadata (multi-backend mode)"). Operator env:
+	// HOSTTHIS_SHALE_UNIT_COUNT.
+	UnitCount int
 
 	// BindAddr is the host:port memberlist listens on. A NON-EMPTY value
 	// enables multi-node mode (gossip membership + ring routing + gRPC
@@ -224,6 +239,13 @@ type ShaleRepo struct {
 	// backend (nil when CacheBytes==0). Operator-owned uniffi handle; Close
 	// Destroys it after the cluster (and its backend) have shut down.
 	cache *slatedb.DbCache
+
+	// closeFactory releases the multi-backend slate Backing after the cluster
+	// shuts down (cluster.Close closes the mounted unit databases; this is the
+	// backing-level safety net that flushes/closes anything left, mirroring
+	// shaled-slate's CloseFactory). Nil in single-backend mode, where
+	// cluster.Close owns closing the single backend.
+	closeFactory func() error
 }
 
 // WaitPendingConfirms blocks until every deferred confirm-insert goroutine
@@ -346,52 +368,93 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		cache = c
 	}
 
-	be, err := slate.New(sc)
-	if err != nil {
+	cleanup := func() {
 		if cache != nil {
 			cache.Destroy()
 		}
 		if lis != nil {
 			_ = lis.Close()
 		}
-		return nil, fmt.Errorf("shale: open slate backend: %w", err)
 	}
 
-	cl, err := cluster.Open(cluster.Config{
+	// Backend SHAPE: single-backend (UnitCount 0, today's path) or multi-backend
+	// sharded (UnitCount a power of two). The cluster.Config differs only in
+	// Backend vs BackendFactory+UnitCount; the peer-discovery + read-quorum +
+	// shard-key fields are identical.
+	clusterCfg := cluster.Config{
 		NodeID:            cfg.NodeID,
-		Backend:           be,
 		BindAddr:          cfg.BindAddr,
 		GRPCAddr:          advertiseGRPCAddr,
 		Seeds:             cfg.Seeds,
 		ReplicationFactor: cfg.ReplicationFactor,
-		// ReadQuorum, not ReadNearest: at R>1 ReadNearest decides on the
-		// first replica to answer and treats a NotFound as usable, so a read
-		// served by a still-backfilling replica (a freshly joined node) could
-		// return NotFound for a key that exists on the other replica.
-		// ReadQuorum reads a quorum and the present value wins on LWW. At R=1 a
-		// quorum is the single replica, so this is behavior-identical to
-		// ReadNearest there (one read, no extra hop). See docs/SPEC.md
-		// "Deploy arc: replication factor 1, then scale out".
+		// ReadQuorum, not ReadNearest: at R>1 ReadNearest decides on the first
+		// replica to answer and treats a NotFound as usable, so a read served by a
+		// still-backfilling replica (a freshly joined node) could return NotFound
+		// for a key that exists on the other replica. ReadQuorum reads a quorum and
+		// the present value wins on LWW. At R=1 a quorum is the single replica, so
+		// this is behavior-identical to ReadNearest there (one read, no extra hop).
+		// See docs/SPEC.md "Deploy arc: replication factor 1, then scale out".
 		ReadConsistency: cluster.ReadQuorum,
 		ShardKeyFn:      shaleShardKey,
-	})
+	}
+
+	var closeFactory func() error
+	if cfg.UnitCount > 0 {
+		// MULTI-BACKEND (sharded): UnitCount independent slatedb unit databases
+		// under cfg.DbName as the shared key-prefix, distributed across the ring
+		// and routed per key by ShardKeyFn. See docs/SPEC.md "Sharded metadata".
+		uc, ucErr := storageunit.NewUnitCount(cfg.UnitCount)
+		if ucErr != nil {
+			cleanup()
+			return nil, fmt.Errorf("shale: invalid UnitCount %d (must be a power of two): %w", cfg.UnitCount, ucErr)
+		}
+		backing, bErr := slate.NewBacking(slate.BackingConfig{
+			Bucket:                   cfg.Bucket,
+			Endpoint:                 cfg.Endpoint,
+			Region:                   cfg.Region,
+			AccessKey:                cfg.AccessKey,
+			SecretKey:                cfg.SecretKey,
+			UseSSL:                   cfg.UseSSL,
+			KeyPrefix:                cfg.DbName,
+			Cache:                    cache,
+			RelaxedReplicaDurability: cfg.RelaxedDurability,
+		})
+		if bErr != nil {
+			cleanup()
+			return nil, fmt.Errorf("shale: open slate backing: %w", bErr)
+		}
+		handle := backing.Handle()
+		clusterCfg.BackendFactory = handle
+		clusterCfg.UnitCount = uc
+		closeFactory = handle.Close
+	} else {
+		// SINGLE-BACKEND (default): one slatedb database, today's behavior.
+		be, beErr := slate.New(sc)
+		if beErr != nil {
+			cleanup()
+			return nil, fmt.Errorf("shale: open slate backend: %w", beErr)
+		}
+		clusterCfg.Backend = be
+	}
+
+	cl, err := cluster.Open(clusterCfg)
 	if err != nil {
-		_ = be.Close()
-		if cache != nil {
-			cache.Destroy()
+		if closeFactory != nil {
+			_ = closeFactory()
+		} else if clusterCfg.Backend != nil {
+			_ = clusterCfg.Backend.Close()
 		}
-		if lis != nil {
-			_ = lis.Close()
-		}
+		cleanup()
 		return nil, fmt.Errorf("shale: open cluster: %w", err)
 	}
 
 	r := &ShaleRepo{
-		cluster:  cl,
-		logger:   cfg.Logger,
-		bindAddr: cfg.BindAddr,
-		grpcAddr: advertiseGRPCAddr,
-		cache:    cache,
+		cluster:      cl,
+		logger:       cfg.Logger,
+		bindAddr:     cfg.BindAddr,
+		grpcAddr:     advertiseGRPCAddr,
+		cache:        cache,
+		closeFactory: closeFactory,
 	}
 
 	// Multi-node: stand up the peer-forwarding server the cluster advertised
@@ -427,6 +490,14 @@ func (r *ShaleRepo) Close() error {
 	var err error
 	if r.cluster != nil {
 		err = r.cluster.Close()
+	}
+	// Multi-backend: release the slate Backing after the cluster closed its
+	// mounted units (the backing-level flush/close safety net). No-op in
+	// single-backend mode, where cluster.Close owns the single backend.
+	if r.closeFactory != nil {
+		if ferr := r.closeFactory(); ferr != nil && err == nil {
+			err = ferr
+		}
 	}
 	// Destroy the cache AFTER the cluster (and its slate backend) have shut
 	// down, so no in-flight read still references it.
