@@ -96,6 +96,15 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		}
 	}
 	replicationFactor := envOrInt("HOSTTHIS_SHALE_REPLICATION_FACTOR", 1)
+	// Backend shape: 0 (default) = single slatedb DB per node (today). A power
+	// of two = MULTI-BACKEND sharded mode: that many slatedb units distributed
+	// across the ring, routed per key. Each unit is a full slatedb instance per
+	// owning replica, so keep small on the RAM-tight boxes. See docs/SPEC.md
+	// "Sharded metadata (multi-backend mode)".
+	unitCount := envOrInt("HOSTTHIS_SHALE_UNIT_COUNT", 0)
+	if unitCount < 0 {
+		unitCount = 0
+	}
 	// Durability mode: default true (ack after the durable object-store
 	// flush). false = relaxed durability (fast-ack at the memtable), the big
 	// write-throughput win; only safe at RF>=2 on separate nodes. See
@@ -137,6 +146,7 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		Seeds:             seeds,
 		ReplicationFactor: replicationFactor,
 		RelaxedDurability: !awaitDurable,
+		UnitCount:         unitCount,
 		CacheBytes:        uint64(cacheBytes),
 		Logger:            logger,
 	})
@@ -144,11 +154,11 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		return nil, fmt.Errorf("open shale: %w", err)
 	}
 	if bindAddr == "" {
-		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d awaitDurable=%t endpoint=%s",
-			nodeID, bucket, dbName, replicationFactor, awaitDurable, endpoint)
+		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d shards=%d awaitDurable=%t endpoint=%s",
+			nodeID, bucket, dbName, replicationFactor, unitCount, awaitDurable, endpoint)
 	} else {
-		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d awaitDurable=%t bucket=%s db=%s endpoint=%s",
-			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, awaitDurable, bucket, dbName, endpoint)
+		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d shards=%d awaitDurable=%t bucket=%s db=%s endpoint=%s",
+			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, unitCount, awaitDurable, bucket, dbName, endpoint)
 	}
 	return &metadataBundle{
 		Repo:    repo,
