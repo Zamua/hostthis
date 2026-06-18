@@ -128,15 +128,19 @@ func main() {
 		sweepSvc.Rooms = roomRepo
 	}
 
-	// HOSTTHIS_SWEEP_DISABLED=true skips the periodic sweep entirely
-	// for the lifetime of the process. Operator handle for cutover
-	// windows where blob GC must NOT run (e.g. switching the
-	// metadata backend before the new backend's view of "referenced
-	// shas" has caught up with the bucket). Unset / "false" leaves
-	// the default 10-min sweep on.
-	sweepDisabled := strings.EqualFold(envOr("HOSTTHIS_SWEEP_DISABLED", "false"), "true")
-	if sweepDisabled {
-		logger.Printf("sweep: DISABLED via HOSTTHIS_SWEEP_DISABLED=true (no periodic expiry / blob GC / key-gate prune this process lifetime)")
+	// HOSTTHIS_SWEEP_DISABLED toggles the sweep between DRY-RUN and LIVE -
+	// it is NOT an on/off switch and a "disabled" sweep is never a no-op.
+	// true (the default-safe operator handle for a cutover/nervous window):
+	// the sweep still runs every interval, computing + LOGGING what it WOULD
+	// expire/GC, but mutating nothing. false: live cleanup. So an operator
+	// can deploy a risky change, watch the dry-run log confirm the sweep
+	// would clean only what's expected, then flip to false. See docs/SPEC.md
+	// "Dry-run (observability)".
+	sweepSvc.DryRun = strings.EqualFold(envOr("HOSTTHIS_SWEEP_DISABLED", "false"), "true")
+	if sweepSvc.DryRun {
+		logger.Printf("sweep: DRY-RUN via HOSTTHIS_SWEEP_DISABLED=true - runs every %s, LOGS what it would expire/GC, deletes nothing. Set false to enable live cleanup.", sweepSvc.Interval)
+	} else {
+		logger.Printf("sweep: LIVE - periodic expiry + blob GC + key-gate prune every %s", sweepSvc.Interval)
 	}
 
 	logger.Printf("config: fresh_keys/subnet=%d per %s (durable total-bytes ceiling is the object-store bucket quota)",
@@ -212,9 +216,10 @@ func main() {
 		logger.Printf("http: listening on %s", *httpAddr)
 		errs <- httpSrv.ListenAndServe()
 	}()
-	if !sweepDisabled {
-		go sweepSvc.Run(ctx)
-	}
+	// Always run the sweep loop; HOSTTHIS_SWEEP_DISABLED selects dry-run vs
+	// live (sweepSvc.DryRun), it does not gate the goroutine - a dry-run
+	// sweep must still run to log what it would clean.
+	go sweepSvc.Run(ctx)
 
 	select {
 	case <-ctx.Done():

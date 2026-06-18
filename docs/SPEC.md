@@ -2437,6 +2437,20 @@ behaviors are expressed in terms of inputs and observable outputs:
   tolerance is per-scan-semantics" below for why this scan is the one
   exception to the skip-and-continue rule the other background scans
   follow.
+- **Dry-run (observability).** The sweep has two modes, selected by the
+  operator's disable flag, and a "disabled" sweep is NEVER a no-op. In
+  DRY-RUN mode it runs the full computation (which pastes/sites/rooms would
+  expire, which blobs are orphaned) and LOGS each would-be deletion, but
+  mutates nothing - no record deleted, no blob removed, no rate-limit row
+  pruned. In LIVE mode it performs the deletions. Both fail-closed guards
+  apply in dry-run too: a dry run against a store with an undecodable
+  record logs that the blob GC WOULD abort, surfacing the bad record
+  without touching anything. Dry-run is how an operator earns confidence
+  before trusting a sweep: deploy a change, watch the dry-run log confirm
+  it would clean only what's expected, then flip to live. There is no
+  third mode - the disable flag toggles dry-run vs live, and the safety net
+  for a live over-deletion is the object store's versioning/soft-delete (a
+  wrongly-removed blob is a recoverable prior version, not a hard loss).
 - **Owner stats.** `ListByOwner` returns the owner's active pastes
   ordered soonest-to-expire first, with `LatestVersion` populated;
   `CountByOwner` counts them; `SumActiveBytesByOwner` matches the quota
