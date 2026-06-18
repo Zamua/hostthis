@@ -65,6 +65,12 @@ type Sweep struct {
 	Interval time.Duration
 	Logger   *log.Logger
 	Now      func() time.Time
+	// DryRun, when true, makes the sweep COMPUTE + LOG what it would expire
+	// and GC but mutate nothing (no Delete, no Remove, no prune). It gives
+	// operators visibility before trusting a live sweep. A "disabled" sweep
+	// runs in this mode - it is never a silent no-op. See docs/SPEC.md
+	// "Dry-run (observability)".
+	DryRun bool
 }
 
 // NewSweep wires defaults: 10-minute interval.
@@ -102,26 +108,38 @@ func (s *Sweep) tick() {
 	now := s.Now().UTC()
 	pasteCount, blobCount, err := s.Once(now)
 	if err != nil {
+		// In dry-run this surfaces what WOULD block a live sweep (e.g. the
+		// fail-closed blob GC aborting on an undecodable record) without
+		// having touched anything - exactly the visibility dry-run is for.
 		s.Logger.Printf("sweep: %v", err)
 	}
-	var prunedKeys int
-	if s.KeyGate != nil {
-		n, err := s.KeyGate.PruneOldRows(now)
-		if err != nil {
-			s.Logger.Printf("sweep: prune key_first_seen: %v", err)
+	// The rate-limit prunes mutate, so they're skipped in dry-run.
+	var prunedKeys, prunedCreates int
+	if !s.DryRun {
+		if s.KeyGate != nil {
+			n, err := s.KeyGate.PruneOldRows(now)
+			if err != nil {
+				s.Logger.Printf("sweep: prune key_first_seen: %v", err)
+			}
+			prunedKeys = n
 		}
-		prunedKeys = n
+		// Prune the bounded room-creation rate-limit table. Rows past the
+		// creation window can never affect a future decision, so they're
+		// safe to drop on every tick (the same discipline as the key gate).
+		if s.Rooms != nil {
+			n, err := s.Rooms.PruneOldRoomCreates(now.Add(-domain.RoomCreateWindow))
+			if err != nil {
+				s.Logger.Printf("sweep: prune room_creates: %v", err)
+			}
+			prunedCreates = n
+		}
 	}
-	// Prune the bounded room-creation rate-limit table. Rows past the
-	// creation window can never affect a future decision, so they're
-	// safe to drop on every tick (the same discipline as the key gate).
-	var prunedCreates int
-	if s.Rooms != nil {
-		n, err := s.Rooms.PruneOldRoomCreates(now.Add(-domain.RoomCreateWindow))
-		if err != nil {
-			s.Logger.Printf("sweep: prune room_creates: %v", err)
-		}
-		prunedCreates = n
+	if s.DryRun {
+		// Always log in dry-run so the operator sees the sweep ran + what it
+		// found, even on a clean (zero) tick.
+		s.Logger.Printf("sweep[dry-run]: WOULD delete %d expired record(s) + gc %d blob(s); deleted nothing (key-gate/room-create prune skipped). Set HOSTTHIS_SWEEP_DISABLED=false to enable live cleanup.",
+			pasteCount, blobCount)
+		return
 	}
 	if pasteCount > 0 || blobCount > 0 || prunedKeys > 0 || prunedCreates > 0 {
 		s.Logger.Printf("sweep: deleted %d expired record(s), gc'd %d blob(s), pruned %d key-gate row(s), %d room-create row(s)",
@@ -139,7 +157,9 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 		return 0, 0, fmt.Errorf("expired slugs: %w", err)
 	}
 	for _, slugStr := range slugs {
-		if err := s.Repo.Delete(domain.Slug(slugStr)); err != nil {
+		if s.DryRun {
+			s.Logger.Printf("sweep[dry-run]: would expire paste %q", slugStr)
+		} else if err := s.Repo.Delete(domain.Slug(slugStr)); err != nil {
 			return pastesDeleted, blobsGCd, fmt.Errorf("delete %q: %w", slugStr, err)
 		}
 		pastesDeleted++
@@ -152,7 +172,9 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 			return pastesDeleted, 0, fmt.Errorf("expired site slugs: %w", err)
 		}
 		for _, slugStr := range siteSlugs {
-			if err := s.Sites.Delete(domain.Slug(slugStr)); err != nil {
+			if s.DryRun {
+				s.Logger.Printf("sweep[dry-run]: would expire site %q", slugStr)
+			} else if err := s.Sites.Delete(domain.Slug(slugStr)); err != nil {
 				return pastesDeleted, blobsGCd, fmt.Errorf("delete site %q: %w", slugStr, err)
 			}
 			pastesDeleted++
@@ -171,7 +193,9 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 			return pastesDeleted, 0, fmt.Errorf("expired room keys: %w", err)
 		}
 		for _, ref := range expiredRooms {
-			if err := s.Rooms.DeleteRoom(ref.AppSlug, ref.ID); err != nil {
+			if s.DryRun {
+				s.Logger.Printf("sweep[dry-run]: would expire room %s/%s", ref.AppSlug, ref.ID)
+			} else if err := s.Rooms.DeleteRoom(ref.AppSlug, ref.ID); err != nil {
 				return pastesDeleted, blobsGCd, fmt.Errorf("delete room %s/%s: %w", ref.AppSlug, ref.ID, err)
 			}
 			pastesDeleted++
@@ -222,6 +246,11 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 	}
 	walkErr := s.Blobs.WalkBlobs(func(sha string) error {
 		if _, ok := refSet[sha]; ok {
+			return nil
+		}
+		if s.DryRun {
+			s.Logger.Printf("sweep[dry-run]: would gc orphan blob %q", sha)
+			blobsGCd++
 			return nil
 		}
 		if err := s.Blobs.Remove(sha); err != nil {

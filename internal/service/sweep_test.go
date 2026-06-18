@@ -193,3 +193,80 @@ type buggyRepo struct{}
 func (buggyRepo) ExpiredSlugs(_ time.Time) ([]string, error) { return nil, nil }
 func (buggyRepo) Delete(_ domain.Slug) error                 { panic("not expected") }
 func (buggyRepo) ReferencedBlobSHAs() ([]string, error)      { return nil, nil }
+
+// TestSweep_DryRun - in dry-run the sweep COMPUTES + LOGS what it would
+// expire/GC but mutates nothing: the expired record and every blob survive.
+// This is the "disabled = log what it would clean" mode. (The blob-GC count
+// reflects blobs already orphaned, e.g. by a prior delete; a blob freed only
+// by THIS tick's would-be expiry stays referenced because dry-run doesn't
+// actually delete the paste - it's counted once the expiry is live.)
+func TestSweep_DryRun(t *testing.T) {
+	dir := t.TempDir()
+	db, err := storage.Open(filepath.Join(dir, "sweep.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	blobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
+	if err != nil {
+		t.Fatalf("blobs: %v", err)
+	}
+	repo := storage.NewPasteRepo(db)
+
+	upload := service.NewUpload(repo, blobs)
+	t.Cleanup(upload.WaitFinalize)
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	upload.Now = func() time.Time { return now }
+
+	rA, err := upload.Create(bytes.NewReader([]byte("<!doctype html><p>a</p>")), "owner-a", "", "")
+	if err != nil {
+		t.Fatalf("upload A: %v", err)
+	}
+	rB, err := upload.Create(bytes.NewReader([]byte("<!doctype html><p>b</p>")), "owner-b", "", "")
+	if err != nil {
+		t.Fatalf("upload B: %v", err)
+	}
+	upload.WaitFinalize()
+
+	// Delete B so its blob is already orphaned (a blob the GC would reclaim).
+	if err := repo.Delete(rB.Paste.Slug); err != nil {
+		t.Fatalf("delete B: %v", err)
+	}
+
+	var logbuf bytes.Buffer
+	sweep := service.NewSweep(repo, blobs, log.New(&logbuf, "", 0))
+	sweep.DryRun = true
+
+	// 8 days later A has expired (retention 7d). Dry-run: A would expire, B's
+	// blob would be GC'd - but nothing is actually touched.
+	future := now.Add(8 * 24 * time.Hour)
+	pastes, gcBlobs, err := sweep.Once(future)
+	if err != nil {
+		t.Fatalf("dry-run sweep: %v", err)
+	}
+	if pastes != 1 {
+		t.Fatalf("dry-run should report 1 would-expire record, got %d", pastes)
+	}
+	if gcBlobs != 1 {
+		t.Fatalf("dry-run should report 1 would-gc orphan blob, got %d", gcBlobs)
+	}
+
+	// NOTHING was mutated: A still exists, and BOTH blobs survive on disk.
+	if _, err := repo.Get(rA.Paste.Slug); err != nil {
+		t.Fatalf("dry-run must NOT delete the expired paste; Get err %v", err)
+	}
+	blobCount := 0
+	if err := blobs.WalkBlobs(func(string) error { blobCount++; return nil }); err != nil {
+		t.Fatalf("walk blobs: %v", err)
+	}
+	if blobCount != 2 {
+		t.Fatalf("dry-run must NOT remove any blob; want 2 on disk, got %d", blobCount)
+	}
+	// And it logged what it WOULD do.
+	if !bytes.Contains(logbuf.Bytes(), []byte("would expire paste")) {
+		t.Fatalf("dry-run should log 'would expire paste'; got:\n%s", logbuf.String())
+	}
+	if !bytes.Contains(logbuf.Bytes(), []byte("would gc orphan blob")) {
+		t.Fatalf("dry-run should log 'would gc orphan blob'; got:\n%s", logbuf.String())
+	}
+}
