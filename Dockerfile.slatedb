@@ -60,10 +60,6 @@ RUN GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
  && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
         go build -tags slatedb -buildvcs=false -ldflags="-s -w" -o /out/hostthis-shale-migrate ./cmd/hostthis-shale-migrate \
  && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-        go build -buildvcs=false -ldflags="-s -w" -o /out/hostthis-blob-migrate ./cmd/hostthis-blob-migrate \
- && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-        go build -buildvcs=false -ldflags="-s -w" -o /out/hostthis-blob-verify ./cmd/hostthis-blob-verify \
- && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
         go build -buildvcs=false -ldflags="-s -w" -o /out/hostthis-blob-compress ./cmd/hostthis-blob-compress
 
 # ---- runtime stage ----------------------------------------------------------
@@ -76,8 +72,6 @@ COPY --from=uniffi-build /src/target/release/libslatedb_uniffi.so /usr/local/lib
 COPY --from=go-build /out/hostthisd /app/hostthisd
 COPY --from=go-build /out/hostthis-metadata-migrate /app/hostthis-metadata-migrate
 COPY --from=go-build /out/hostthis-shale-migrate /app/hostthis-shale-migrate
-COPY --from=go-build /out/hostthis-blob-migrate /app/hostthis-blob-migrate
-COPY --from=go-build /out/hostthis-blob-verify /app/hostthis-blob-verify
 COPY --from=go-build /out/hostthis-blob-compress /app/hostthis-blob-compress
 COPY web/landing.html /app/web/landing.html
 
