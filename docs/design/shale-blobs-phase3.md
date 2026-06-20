@@ -755,3 +755,296 @@ Spec-first per step (hostthis CLAUDE.md). Each step is its own change + tests.
    OTHER hostthis code imports it (the migration tool that does lives in
    `infra/`, not the repo). If clean, drop `github.com/minio/minio-go/v7` from
    `go.mod`. Cannot fully verify without the retire-S3 decision (Q3).
+
+## 10. Re-grounding against main (implementation base)
+
+Sections 1-9 above were written against the SUPERSEDED `feat/slug-scoped-blobs`
+branch. This phase is implemented on `feat/shale-blobs`, based off `main`
+(= prod `v0.44.0`). The blob model on main is materially DIFFERENT from the
+slug-scoped branch the doc assumed: the blob plane and the metadata plane are
+FULLY DECOUPLED on main. A SINGLE content-addressed `*storage.CompressedBlobStore`
+(the `blobs` var) is passed to EVERY service (upload, manage, deploy_site, http
+read, sweep) regardless of which metadata backend (sqlite / slatedb / shale) is
+selected; blobs are keyed by the content sha alone (NOT slug-scoped), and the
+ONLY blob-GC is the global content-addressed `service.Sweep` (ReferencedBlobSHAs
++ WalkBlobs + abort-on-zero guard). There is NO crash-orphan reconcile, NO
+slug-scoped per-owner blob keying, NO site reservation. This section is the
+authoritative construct-map + corrected deletion-delta; later phases read THIS
+section, not sections 1-9, where the two disagree.
+
+### 10.1 Construct-map of main's current blob surface
+
+**(a) Service-layer blob interfaces.** Three small interfaces in `internal/service`,
+all satisfied by `*storage.CompressedBlobStore` (and, narrowed, by the raw disk /
+S3 stores):
+
+- `service.BlobStore` (`upload.go:42`) - the write+read interface upload/manage/
+  deploy hold. Method set: `Put(sha string, r io.Reader, size int64) error`,
+  `PutPrecompressed(sha string, body []byte) error`, `Get(sha string) ([]byte, error)`.
+  Get returns the FULL UNCOMPRESSED bytes in memory. Keyed by content sha ONLY -
+  no slug, no owner.
+- `service.SweepBlobs` (`sweep.go:26`) - the GC-side interface. Method set:
+  `WalkBlobs(fn func(sha string) error) error`, `Remove(sha string) error`. That
+  is the WHOLE delete surface on main: a content-addressed `Remove(sha)` plus a
+  `WalkBlobs` enumerator. There is NO `RemoveOwner`, NO `WalkOwners`,
+  NO `BlobDeleter` interface on main.
+- `http.BlobReader` (`http/server.go:41`) - the read interface the http server
+  holds. Method set: `Get(sha string) ([]byte, error)` (buffered, for the
+  markdown render path) + `GetReader(sha string) (io.ReadCloser, int64, error)`
+  (streaming, for HTML/site-file serve). Keyed by content sha.
+
+  Where the wrapping happens: `*storage.CompressedBlobStore` (`blob_compressed.go`)
+  wraps an `innerBlobStore` (`Put`/`Get`/`GetReader`) - either `*storage.BlobStore`
+  (disk, `blob.go`) or `*storage.S3BlobStore` (`blob_s3.go`), optionally behind
+  the write-back cache (`blob_writeback.go`). It transparently zstd-encodes on
+  Put (4-byte `HZ\0\x01` magic prefix + zstd) and decodes on Get/GetReader.
+  `PutPrecompressed` writes the already-magic+zstd-encoded staging body straight
+  through (no re-encode). `buildBlobStore` (`cmd/hostthisd/main.go:250`) builds it
+  from `HOSTTHIS_BLOB_BACKEND` (`disk` default | `s3`) and returns
+  `(*CompressedBlobStore, service.SweepBlobs, cleanup, error)` - the SweepBlobs is
+  the RAW backend (disk/S3), bypassing the compression wrapper because the sweep
+  only needs sha-level `WalkBlobs`+`Remove` (no body access). The disk store
+  shards bytes at `<root>/<sha[:2]>/<sha>`; the S3 store keys objects at bare
+  `<sha>` (NO slug prefix).
+
+**(b) Upload / create flow + the PENDING/FINALIZER model (`upload.go`).** The
+streaming tee `streamUpload(body)` (`compress.go`) produces a `staged` struct:
+`{SHA, RawSize, CompressedSize, Prefix (512B for type detect), Body (magic+zstd
+in-memory)}` in one pass, peak memory ~MaxPasteBytes. `Upload.Create`:
+quota+kind checks -> set `initialStatus` (`domain.PasteStatusPending` async, or
+`PasteStatusReady` if `u.SyncBlob`) -> build `domain.Paste` -> retry-on-collision
+loop calling `Repo.InsertWithQuotaCheck(p, cap, now)` -> on success, ASYNC path:
+`u.startFinalize(slug, sha, body)` returns the URL immediately. The finalizer
+machinery: `finalizeWG sync.WaitGroup` (package var), `WaitFinalize()`,
+`startFinalize` (launches `finalizeWG.Go`), `finalize` (calls
+`Blobs.PutPrecompressed(sha, body)` then `Repo.MarkReady(slug)`; on blob error
+`Repo.MarkFailed(slug)`). `onFinalizeDone` is a test seam. The `SyncBlob` toggle
+(`HOSTTHIS_BLOB_SYNC` env, benchmark only - `main.go:77`) commits the row READY
+and writes the blob INLINE on the ack path, skipping the pending/MarkReady flip.
+**Write ordering: metadata-first.** The authoritative paste ROW commits (as
+pending) BEFORE the blob bytes are written - the finalizer flushes bytes after.
+`PasteRepo.MarkReady`/`MarkFailed` are on the service `PasteRepo` interface
+(`upload.go:31`) and implemented on `ShaleRepo` (`shale_repo.go:1339` MarkReady).
+
+**(c) Read / serve (`http/server.go`).** `servePasteSlug` -> `s.Pastes.Get(slug)`
+yields `domain.Paste` carrying `ContentSHA`. Status gate (`server.go:236`): a
+`PasteStatusPending` paste serves `servePending` (the `loadingPageHTML`,
+200 + no-store + meta-refresh); a `PasteStatusFailed` paste serves `serveFailed`
+(`failedPageHTML`, 410 Gone); a ready paste falls through. HTML -> stream via
+`s.Blobs.GetReader(p.ContentSHA)` + `io.Copy`; Markdown -> buffered
+`s.Blobs.Get(p.ContentSHA)` -> `render.Markdown`. Site files -> `serveSiteIfExists`
+-> `entry.SHA` -> `s.Blobs.GetReader(entry.SHA)`. The compression wrapper's
+`GetReader` (`blob_compressed.go:137`) does the magic-peek + streaming
+`zstd.NewReader` decode (the `zstdReadCloser` / `prefixReadCloser` types); the S3
+store's `GetReader` uses `ctxReadCloser` (`blob_s3.go:176`) to tie ctx cancel to
+Close - the model section 4.2 of this doc references for the shale `Read`.
+
+**(d) Versions / DeleteVersion (`manage.go` + `shale_repo.go`).** `Manage.Update`
+(`manage.go:123`): `streamUpload` -> `m.Blobs.PutPrecompressed(staged.SHA, staged.Body)`
+(blob FIRST) -> `m.Repo.AppendVersionWithQuotaCheck(...)` (metadata after). NB
+this is blob-before-metadata for an update (NOT pending-gated; updates have no
+pending status). `Manage.DeleteVersion` (`manage.go:255`): owner+served-version
+guards, then `m.Repo.DeleteVersion(slug, verNum)` - that is ALL it does on the
+blob side: NOTHING. The version's blob is freed implicitly by the GLOBAL sweep
+when no live row references its sha. `ShaleRepo.DeleteVersion` (`shale_repo.go:1688`)
+TOMBSTONES the version row (sets `Deleted=true`) + decrements the `{id}` byte
+counter; it does NOT touch any blob and does NOT do a within-record `shaStillReferenced`
+check (there is NO such method on main - the per-record ref check the doc's
+section 4.4 assumes does not exist; reference-counting is done globally by the
+sweep's `ReferencedBlobSHAs` excluding tombstoned versions). `pasteRow` /
+`versionRow` (`slate_repo.go:174` / `:187`) both carry `ContentSHA string
+json:"content_sha"` - that is where the blob is referenced; `pasteRow` also
+carries `Status string json:"status,omitempty"` (the pending/ready/failed
+lifecycle field). `pasteFromDomain` (`slate_repo.go:212`) builds the row.
+
+**(e) Sites / deploy (`deploy_site.go` + `shale_repo.go`/`shale_site_repo.go`).**
+`DeploySite.Deploy` (`deploy_site.go:97`): compute remaining quota budget ->
+`domain.SafeUntar(body, sink, budget)` where `sink` is a `blobSink` whose `Store`
+(`deploy_site.go:303`) buffers one file, hashes it, and `s.blobs.Put(sha,
+reader, size)`s it (so EVERY file blob is written DURING the untar, before any
+metadata) -> build manifest -> retry-on-collision loop calling
+`Sites.InsertWithQuotaCheck(site, deduped, cap, now)` (the manifest row, written
+AFTER all blobs). `DeployToSlug` (`deploy_site.go:197`) is the in-place redeploy:
+ownership check -> SafeUntar (same blob-during-untar) ->
+`Sites.ReplaceWithQuotaCheck(...)` (atomic manifest swap). **CONFIRMED: there is
+NO `reserveSlug`, NO `cleanupReservation`, NO pre-untar empty-manifest
+reservation on main.** A slug collision is resolved by the authoritative
+insert's existence read-check (`insertAuthoritative` / the site insert's
+collision retry), AFTER the untar consumed the stream - exactly the "collision
+detected only at commit" situation section 4.4 raises as a NEW concern, except
+on main it is already the status quo (the slug-scoped branch's reservation was
+the thing that pre-resolved it; main never had it). **There is NO
+`reclaimDroppedFiles` on main** - a redeploy does not unbind/remove dropped
+files; their blobs are reclaimed by the global sweep when no live manifest
+references their shas. (The doc's section 4.4 "reclaimDroppedFiles set-difference"
+is a slug-scoped-branch construct that does not exist here.)
+
+**(f) Sweep (`sweep.go` + `shale_repo.go`).** The GLOBAL content-addressed GC is
+the ONLY blob-GC on main. `Sweep.Once` (`sweep.go:154`): delete expired pastes
+(`Repo.ExpiredSlugs` -> `Repo.Delete`), expired sites (`Sites.ExpiredSiteSlugs`
+-> `Sites.Delete`), expired rooms; then build the keep-set
+`refSet = Repo.ReferencedBlobSHAs() UNION Sites.ReferencedSiteBlobSHAs()`;
+ABORT-ON-ZERO guard (`sweep.go:237`: if `len(refSet)==0 && pastesDeleted==0` and
+the store has objects, refuse to GC - prevents wiping the bucket on a buggy
+ref-set); then `Blobs.WalkBlobs` and `Blobs.Remove(sha)` every sha NOT in refSet.
+`ShaleRepo.ReferencedBlobSHAs` (`shale_repo.go:1849`) aggregates `pastes/` +
+`versions/` across all shards (FAIL-CLOSED on a decode error - never skips, so an
+under-counted set can't delete a live blob) and excludes tombstoned versions.
+**CONFIRMED: there is NO `reconcileOrphans`, NO `recordExists`, NO `WalkOwners`,
+NO `SlugExists` anywhere in the tree.** The crash-orphan cross-store reconcile the
+doc's sections 4.3/5 assume DELETING does not exist on main - main never coupled
+the two stores that way; metadata-first ordering + the global content-addressed
+sweep is the entire coordination model.
+
+**(g) ShaleRepo (`internal/storage/shale_repo.go`, `-tags slatedb`).** Holds
+`cluster *cluster.Cluster` DIRECTLY (`shale_repo.go:205`) - a bare `*Cluster`,
+NOT a `*BlobKV`. Cluster methods it calls (the COMPLETE set, verified):
+`r.cluster.Get`, `r.cluster.Delete`, `r.cluster.Transact`, `r.cluster.ScanPrefix`,
+`r.cluster.Aggregate`, `r.cluster.Close`. It does NOT call `LocalScanPrefix` or
+`MountedUnits` (those are not used by hostthis on main). The repo stands up its
+OWN peer-forwarding gRPC server in multi-node mode: `cluster.Open(clusterCfg)`
+(`shale_repo.go:440`) then, if a listener was bound, `grpc.NewServer()` +
+`rpc.NewServer(cl).Register(g)` (`shale_repo.go:464`). `ClusterForTest()`
+(`shale_export_test.go:36`, test-only) returns `r.cluster`.
+
+  The RESERVATION PATTERN (the load-bearing wrinkle in section 2.2 - confirmed
+  exactly as the doc describes, this is the QUOTA byte-counter reservation, NOT a
+  slug/blob reservation): `InsertWithQuotaCheck` (`shale_repo.go:1193`) is a
+  3-step SEQUENCE:
+  1. `reserveBytes(identity, slug, body, cap, now)` - strict per-owner quota CAS
+     on the `{id}` shard (writes `identity_bytes/<id>` counter + a
+     `identity_reserve/<id>/<slug>` marker). `r.cluster.Transact(counterKey, ...)`.
+  2. `insertAuthoritative(p)` (`shale_repo.go:1255`) - THE authoritative `{slug}`
+     write. `r.cluster.Transact(pasteKey, func(tx backend.Transaction) error)`:
+     collision read-checks (paste key + site key both ExpectAbsent), then
+     `tx.Put(pastes/<slug>, ...)`, `tx.Put(versions/<slug>/0001, v1)`,
+     `tx.Put(slug_owner/<slug>, identity)`, `tx.Put(expiry/<ts>/<slug>, marker)`.
+     **THIS is where `BindBlob` co-commits** (phase 3 adds a `BlobRef` param + a
+     `tx.BindBlob(ref)` here, switching this ONE closure to
+     `r.kv.Transact(slug, func(tx *cluster.BlobTx))`).
+  3. `deferredConfirmInsert(p)` (`shale_repo.go:1243`, run in a `confirmWG`
+     goroutine) -> `confirmInsert` (`:1299`) - `{id}`-shard CAS: drop the reserve
+     marker, write the `identity_pastes/<id>/<slug>` derived index entry, set
+     first-seen.
+
+  `AppendVersionWithQuotaCheck` (`:1442`) mirrors it: `reserveBytes` (with a
+  `<slug>#append` marker key) -> `appendAuthoritative` (`:1498`, the `{slug}` CAS
+  that writes `versions/<slug>/<NNNN>` + bumps the paste head + moves the expiry
+  index - phase 3 adds the version's `BlobRef` bind HERE) -> `confirmAppend`
+  (`:1570`). `ShaleRepo.Delete` (`:1597`): reads the paste + versions, then ONE
+  `{slug}` CAS `r.cluster.Transact(pasteKey, ...)` that `tx.Delete`s the paste row,
+  every version row, `slug_owner`, and the expiry index (computing freed bytes
+  in-tx) - **phase 3 folds `tx.UnbindBlob(ref)` for each version's blob INTO this
+  closure**; then a separate `{id}` CAS drops the index entry + decrements the
+  counter. **Row schemas:** `pasteRow`/`versionRow` (`slate_repo.go:174`/`:187`)
+  carry `ContentSHA`; phase 3 adds a `BlobID string json:"blob_id,omitempty"`
+  field to both (omitempty keeps it forward/backward-compatible - a legacy row
+  with no blob_id falls back to sha-keying during migration). `pasteFromDomain`
+  (`slate_repo.go:212`) and the domain `Paste`/`Version` carry-through must thread
+  the new field. NB the LOW-LEVEL transaction form on main is
+  `r.cluster.Transact(pinKey, func(tx backend.Transaction) error)` (the raw
+  `backend.Transaction`, NOT the `*KV` wrapper's `func(*Tx)`); only the step-2
+  authoritative paths that need `BindBlob`/`UnbindBlob` switch to
+  `r.kv.Transact(slug, func(tx *cluster.BlobTx))`. The reserve/confirm/counter
+  CAS closures KEEP using `r.kv.Cluster().Transact(..., func(tx backend.Transaction))`
+  unchanged (after the field rename `r.cluster` -> `r.kv.Cluster()` for the
+  cluster-only methods; `Get`/`Transact`/`Delete` that `*KV`/`*BlobKV` re-expose
+  can be `r.kv.*`).
+
+**(h) shaleShardKey (`internal/storage/shale_shardkey.go`).** Pure + import-free
+on main (only imports `bytes`). The switch covers prefixes: `pastes/`,
+`versions/`, `slug_owner/`, `expiry/`, `sites/`, `expiry_sites/`,
+`identity_pastes/`, `identity_first_seen/`, `identity_bytes/`,
+`identity_reserve/`, `identity_site_bytes/`, `identity_site_reserve/`, `rooms/`,
+`roomkv/`, `roomcreate/`, `roombytes/`, `roomexpiry/`, `keygate/`; unknown ->
+whole key. Phase 3 adds ONE leading `bref/` case that defers to
+`ring.ShardKey(key)` (extracts the `{...}` hash tag), so the blob pointer
+`bref/{<slug>}/<unit>/<blobid>` co-routes with `pastes/<slug>`. This adds the
+`github.com/Zamua/shale/pkg/ring` import to the file (confirmed exported +
+present in the optionb worktree at `pkg/ring/ring.go:260`); `pkg/ring` is a pure,
+cgo-free, slatedb-free package so the file stays buildable on the untagged
+default build (only its import-free property is lost, which is acceptable per
+section 3.2).
+
+### 10.2 Corrected deletion-delta (what phase 3 truly replaces ON MAIN)
+
+The doc's section 5 lists constructs to delete that were written against the
+slug-scoped branch. The corrected status against MAIN:
+
+| Construct (per section 5) | Exists on main? | Main's actual equivalent |
+| --- | --- | --- |
+| `service/sweep.go reconcileOrphans` + `recordExists` | NO | No crash-orphan reconcile exists. The global content-addressed `Sweep.Once` (ReferencedBlobSHAs + WalkBlobs + abort-on-zero) is the only blob-GC. Phase 3 SCHEDULES `BlobKV.SweepOrphans` IN ADDITION for the shale path (to reclaim staged-but-unbound objects); the global Sweep STAYS for the standalone disk/S3 backends. |
+| `SweepBlobs.WalkOwners` | NO | No such method. `service.SweepBlobs` is `WalkBlobs`+`Remove` (sha-only). Nothing to delete; nothing references it. |
+| `S3BlobStore.WalkOwners` / `RemoveOwner` | NO | `S3BlobStore` (`blob_s3.go`) has `WalkBlobs`/`Remove`/`Put`/`Get`/`GetReader`/`PutPrecompressed`/`PutBytesOverwrite` - NO `WalkOwners`, NO `RemoveOwner`. Slug-scoped owner ops never existed on main. |
+| `deploy_site.go reserveSlug` + `cleanupReservation` | NO | No site reservation. The collision is resolved at the authoritative `InsertWithQuotaCheck` commit (post-untar) - already the main behavior. Phase 3's "single bind-all transaction" REPLACES the post-untar `InsertWithQuotaCheck` row write (adds `BindBlob` per file), it does not "remove a reservation" (there is none). The doc's section 4.4 open-question about a cheap metadata-only `slug_owner` pre-claim is a NET-NEW design choice for main, not a removal. |
+| `service.BlobDeleter` (`RemoveOwner`/`Remove`) seam | PARTIAL | No `BlobDeleter` interface exists. The delete surface is `SweepBlobs.Remove(sha)` (content-addressed, sweep-only). The seam's `UnbindOnDelete` (section 2.1) on the STANDALONE path is a NO-OP (the global sweep reclaims), NOT a `RemoveOwner` call - main never had per-owner removal. |
+| pending/finalizer (`startFinalize`/`finalize`/`finalizeWG`/`WaitFinalize`/`MarkReady`/`MarkFailed`/`PasteStatusPending`/`Failed`/`servePending`/`serveFailed`) | YES | EXISTS exactly as section 4.1 describes (`upload.go` + `http/server.go` + `shale_repo.go` MarkReady/MarkFailed + the reconciler's pending age-out). Phase 3's READY-direct collapse on the shale path applies; KEPT for the standalone path. This is the one deletion-delta construct that IS present on main. |
+| `reconcileOrphans` "stays for sqlite/slatedb" (section 5 note) | N/A | Nothing to keep - it never existed for ANY backend on main. The standalone path's coordination IS the global content-addressed sweep, which already serves sqlite/slatedb/disk/S3. |
+
+### 10.3 Design steps that change because main differs
+
+1. **No site reservation to remove (section 4.4 / 5).** Phase 3 does NOT delete a
+   `reserveSlug`/`cleanupReservation` (they don't exist). It CHANGES the
+   post-untar `Sites.InsertWithQuotaCheck` authoritative write to additionally
+   `BindBlob` each staged file in the same `{slug}` transaction. The
+   collision-without-reservation concern (section 4.4 open question Q1) is the
+   STATUS QUO on main, not a regression introduced by removing a reservation - so
+   the recommended cheap metadata-only `slug_owner` pre-claim is an OPTIONAL
+   improvement, not a required compensation. Treat it as net-new, lower-priority.
+
+2. **The global Sweep STAYS; `SweepOrphans` is ADDED only on the shale path
+   (section 4.3 / 5).** Main's `service.Sweep` (ReferencedBlobSHAs + WalkBlobs +
+   abort-on-zero) is the GC for the standalone disk/S3 backends and is NOT
+   deleted. On the shale path the metadata-delete co-unbinds (folded into
+   `ShaleRepo.Delete`), and orphan BYTES (staged-not-bound) are reclaimed by
+   `BlobKV.SweepOrphans`, which hostthis schedules in the sweep loop. So
+   post-phase-3 there are TWO GC mechanisms coexisting: the global
+   content-addressed sweep (standalone backends) and `SweepOrphans` +
+   transactional unbind (shale backend). The `Sweep`'s blob-GC branch should be
+   GATED to the standalone path (skip `WalkBlobs`/`Remove` when the shale
+   `*BlobKV` owns the blobs), OR the shale path supplies a `SweepBlobs` whose
+   `WalkBlobs` is empty so the global sweep is a no-op there - the seam wiring
+   (section 2.1) decides which; the cleaner shape is to NOT wire `Blobs`/`Sites`
+   blob-GC into the sweep on the shale path and instead schedule `SweepOrphans`.
+
+3. **No within-record `shaStillReferenced` / `reclaimDroppedFiles` to convert
+   (section 4.4 / 4.5).** Main's `DeleteVersion` and redeploy do NO blob removal -
+   the global sweep reclaims by content sha excluding tombstones. So section 4.4's
+   "instead of `shaStillReferenced` + `Remove(slug, sha)`, the tombstone
+   transaction UnbindBlobs IF no live sibling references the blobid" describes
+   work that, on main, currently has NO blob-side counterpart at all. On the shale
+   path phase 3 ADDS the unbind (folded into the tombstone / delete transaction);
+   the "if no live sibling references the same blobid" check is net-new logic the
+   shale `Delete`/`DeleteVersion` must compute from the version rows on the
+   `{slug}` shard (a same-shard read, cheap). For the standalone path,
+   `UnbindOnDelete` stays a no-op (global sweep handles it).
+
+4. **The single decoupled `blobs` var is the integration seam (section 2.1).**
+   Because main passes ONE `*CompressedBlobStore` to all five services regardless
+   of backend, introducing `service.BlobUnit` is a refactor that threads the seam
+   through `Upload`/`Manage`/`DeploySite`/`http.Server`/`Sweep`. The
+   `StandaloneBlobUnit` wraps today's `blobs` (Stage=`PutPrecompressed`,
+   Read=`GetReader`, Commit=the metadata write, UnbindOnDelete=no-op). The
+   `ShaleBlobUnit` wraps `r.kv`. Wiring picks the impl by backend in
+   `cmd/hostthisd` (the shale `metadata_shale.go` path supplies the
+   `ShaleBlobUnit`; the default/slatedb paths supply the `StandaloneBlobUnit`).
+
+5. **ShaleRepo field rename + cluster construction (section 3.1).** On main the
+   field is `cluster *cluster.Cluster` and the call is `cluster.Open(clusterCfg)`
+   (`shale_repo.go:440`). Phase 3 changes it to `kv *cluster.BlobKV` via
+   `cluster.NewBlobKV(clusterCfg)` (after `clusterCfg.BlobStore = <MinIO
+   blob.Store>`); the six existing `r.cluster.*` call sites become
+   `r.kv.Cluster().ScanPrefix/Aggregate/Close` (cluster-only) and `r.kv.Get/Delete/Transact`
+   (re-exposed by `*KV`). The own-gRPC-server block (`rpc.NewServer(cl)`) takes
+   `r.kv.Cluster()`. `ClusterForTest()` returns `r.kv.Cluster()`.
+
+6. **No `HOSTTHIS_BLOB_BACKEND=s3` coupling to the shale path.** On main `s3` is a
+   STANDALONE blob backend (a detached `S3BlobStore`) selected independently of
+   the metadata backend - prod runs shale-metadata + an s3 (MinIO) detached blob
+   store TODAY via the single `blobs` var. Phase 3's shale path replaces that
+   detached store with the shale-managed `*BlobKV` MinIO objects, so the
+   `HOSTTHIS_BLOB_BACKEND` switch becomes irrelevant on the shale path (the blob
+   store is constructed inside `NewShaleRepo`, not by `buildBlobStore`). The S3
+   standalone retirement (doc Q3) is then about whether `buildBlobStore` keeps the
+   `s3` branch for non-shale dev - recommend keep `disk` for dev, the shale path
+   owns its own MinIO `blob.Store`.
