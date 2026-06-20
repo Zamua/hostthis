@@ -93,5 +93,11 @@ func (u *StandaloneBlobUnit) UnbindOnDelete(_ context.Context, _ string, _ []str
 	return nil
 }
 
+// IsTransactional is false: the standalone path writes bytes to a detached
+// content-addressed store AFTER (or before) the metadata, with no co-commit.
+// Upload.Create therefore keeps the pending/finalizer model on this path -
+// commit a PENDING row, write the bytes in the background, flip to ready.
+func (u *StandaloneBlobUnit) IsTransactional() bool { return false }
+
 // Ensure StandaloneBlobUnit satisfies the seam.
 var _ BlobUnit = (*StandaloneBlobUnit)(nil)

@@ -154,7 +154,17 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		return Result{}, domain.ErrUnsupportedKind
 	}
 	now := u.Now().UTC()
-	// The blob write (the ~250 ms bottleneck) is deferred to a background
+	if u.Blob.IsTransactional() {
+		// Shale-collocated path: stage the bytes durably, then co-commit a
+		// READY paste row with the blob bind in ONE transaction. No pending
+		// window, no background finalizer - the row and its bytes become
+		// visible together (docs/SPEC.md "Pending-collapse: a shale-collocated
+		// paste commits READY directly"). On a staging failure the row never
+		// commits and the SSH client gets the error.
+		return u.createTransactional(staged, owner, name, kind, now)
+	}
+	// Detached-store path (sqlite / slatedb / shale-without-a-blob-bucket):
+	// the blob write (the ~250 ms bottleneck) is deferred to a background
 	// finalizer. Synchronously we only reserve quota + write the
 	// authoritative paste row as PENDING, then return the URL. The held
 	// bytes (staged.Body) live in this pod's memory until the finalizer
@@ -210,6 +220,71 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		case errors.Is(err, storage.ErrOverUserQuota):
 			return Result{}, ErrOverQuota
 		case isSlugTaken(err):
+			continue
+		default:
+			return Result{}, err
+		}
+	}
+	return Result{}, SlugTakenErr
+}
+
+// createTransactional is the shale-collocated Create: stage the (already
+// magic+zstd) body, then commit the paste row as READY with the blob bound
+// in the SAME transaction (Stage->Commit). There is no pending status, no
+// async finalizer, and no SyncBlob toggle on this path - the staged bytes are
+// durable BEFORE the metadata commit and the bind makes them visible together,
+// so a reader never sees a row without its blob.
+//
+// The blob is staged INSIDE the retry loop with the chosen slug: the staged
+// ref's route shard is captured from the slug at stage time, so the bind
+// co-commits with the row only when both use the SAME slug. A (vanishingly
+// rare) slug collision re-mints the slug and re-stages; the first staged-but-
+// unbound object is reclaimed by the orphan sweep.
+func (u *Upload) createTransactional(staged stagedUpload, owner, name string, kind domain.ContentKind, now time.Time) (Result, error) {
+	p := domain.Paste{
+		Identity:      domain.Identity(owner),
+		Status:        domain.PasteStatusReady, // co-committed with the bind; no pending window
+		Kind:          kind,
+		ContentSHA:    staged.SHA,
+		Size:          staged.CompressedSize,
+		Name:          name,
+		PinnedVersion: 0, // unpinned by default - public URL follows the latest version
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		ExpiresAt:     now.Add(domain.RetentionWindow),
+	}
+	ctx := context.Background()
+	const maxRetries = 5
+	for range maxRetries {
+		p.Slug = domain.NewRandomSlug()
+		// Stage with the chosen slug so the ref co-routes to its shard, then
+		// Commit binds it in the authoritative {slug} transaction. Staging
+		// before the insert means a staging failure aborts WITHOUT a metadata
+		// row (no quota charged), and the insert's quota reserve still runs
+		// inside InsertWithQuotaCheck so an over-quota upload is rejected.
+		handle, err := u.Blob.Stage(ctx, string(p.Slug), staged.SHA, staged.Body)
+		if err != nil {
+			// A blob Put rejected by the object store's bucket quota surfaces
+			// storage.ErrServiceFull (the durable total-bytes ceiling).
+			if errors.Is(err, storage.ErrServiceFull) {
+				return Result{}, ErrServiceFull
+			}
+			return Result{}, fmt.Errorf("blob write: %w", err)
+		}
+		err = u.Blob.Commit(ctx, []BlobHandle{handle}, func(ctx context.Context) error {
+			return u.Repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
+		})
+		switch {
+		case err == nil:
+			return Result{Paste: p}, nil
+		case errors.Is(err, storage.ErrServiceFull):
+			return Result{}, ErrServiceFull
+		case errors.Is(err, storage.ErrOverUserQuota):
+			return Result{}, ErrOverQuota
+		case isSlugTaken(err):
+			// Re-mint the slug and re-stage so the new ref co-routes to the
+			// new slug's shard; the prior staged object ages out via the
+			// orphan sweep.
 			continue
 		default:
 			return Result{}, err
