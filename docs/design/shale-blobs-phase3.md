@@ -721,14 +721,20 @@ Spec-first per step (hostthis CLAUDE.md). Each step is its own change + tests.
 ## 9. Open questions (could not resolve from the code)
 
 1. **Site-deploy slug collision without the pre-untar reservation (section
-   4.4).** Removing the blob reservation means a collision is detected only at
-   the authoritative `Transact`, AFTER the untar consumed the (one-shot) stream.
-   Recommend a cheap metadata-only `slug_owner/<slug>` existence claim before the
-   untar (NOT a blob reservation - it is single-shard metadata, no two-store
-   coordination), so a collision is still resolved cheaply pre-stream. Needs
-   confirming this does not re-introduce the in-flight-blob-protection coupling
-   the reservation had (it should not: there is no reconcile to protect from
-   anymore). Pin with a test.
+   4.4). RESOLVED - implemented the recommended pre-claim.** Beyond the
+   collision concern this raised, the deeper issue was that a first deploy MUST
+   know its slug BEFORE staging files (a file's `bref/{<slug>}/...` pointer must
+   co-route with the manifest's `{slug}` shard, or the bind cross-shards). The
+   fix mints + pre-claims the slug before the untar via a cheap metadata-only
+   `slug_owner/<slug>` single-shard claim (`ShaleRepo.PreClaimSiteSlug`, surfaced
+   through the `service.SiteRepo.PreClaimSlug` seam; a no-op on the detached-store
+   backends, where the slug routes no blob), then stages every file under it. It
+   does NOT re-introduce the in-flight-blob-protection coupling (there is no
+   reconcile to protect from; the files are staged reader-invisible and the bind
+   co-commits with the manifest). Pinned by the service-level `internal/shaleblob`
+   deploy tests (a first deploy reads a file back; a redeploy drops the removed
+   file; the pre-claim rejects a taken slug). See docs/SPEC.md "Shale-collocated
+   blobs - A site deploy stages every file under a pre-claimed slug".
 
 2. **Synchronous StageBlob latency vs the loading-page UX (section 4.1).** The
    collapsed READY-direct model puts the ~2s prod blob PUT on the ack path. Is
