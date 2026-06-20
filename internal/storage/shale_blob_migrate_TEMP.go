@@ -20,13 +20,162 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/Zamua/shale/pkg/cluster"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
+
+// LegacyBlobRecord names ONE legacy record-blob the migrator must re-key: a
+// (slug, kind, contentSHA) triple plus whether the metadata already carries a
+// shale blob id for it. The migrate loop stages the old <sha> bytes, then calls
+// RebindLegacyBlob(slug, kind, contentSHA, ref); the dry-run/verify passes use
+// the same triple. HasBlobID lets the loop's idempotency pre-check skip an
+// already-rebound record BEFORE staging (so a re-run never mints a fresh blobid
+// and leaks the newly-staged object).
+type LegacyBlobRecord struct {
+	Slug       domain.Slug
+	Kind       LegacyBlobKind
+	ContentSHA string
+	HasBlobID  bool   // the row/side-table already carries a non-empty blob id for this sha
+	BlobID     string // the existing blob id when HasBlobID (used by verify to read it back)
+}
+
+// ScanLegacyBlobs enumerates every record-blob across the cluster - one per
+// paste head, one per non-deleted version row, one per distinct site-file sha -
+// as the migrate/dry-run/verify input set. It REUSES the same cross-shard
+// aggregatePrefix scan ReferencedBlobSHAs / ReferencedSiteBlobSHAs use (no
+// re-implemented keyspace) and the existing pasteRow/versionRow/siteRow structs
+// + decodeManifest, so the enumeration sees exactly the rows the read path
+// resolves.
+//
+// Per record it reports HasBlobID = "the row/side-table already carries a
+// non-empty blob id for this sha" so the migrate loop can skip an
+// already-rebound record before staging (idempotency). A record with an EMPTY
+// content sha is skipped (a paste with no body, never a blob); a deleted version
+// is skipped (its blob is GC-eligible, the same exclusion ReferencedBlobSHAs
+// applies). FAIL-CLOSED on any undecodable row: an under-enumerated set would
+// silently leave a legacy blob un-migrated, so a decode error aborts the whole
+// scan rather than skipping the row.
+//
+// The paste head and its serving version (the version whose ContentSHA == the
+// head's) describe the SAME blob; this returns the head record (kind
+// LegacyBlobPaste) for that sha and a per-version record only for versions whose
+// sha differs from the head (a pinned / Show'd older version). RebindLegacyBlob
+// for the head stamps BOTH the head and its serving version, mirroring
+// insertAuthoritative; the per-version records cover the non-head versions.
+func (r *ShaleRepo) ScanLegacyBlobs() ([]LegacyBlobRecord, error) {
+	pasteItems, err := r.aggregatePrefix([]byte("pastes/"))
+	if err != nil {
+		return nil, fmt.Errorf("scan pastes: %w", err)
+	}
+	versionItems, err := r.aggregatePrefix([]byte("versions/"))
+	if err != nil {
+		return nil, fmt.Errorf("scan versions: %w", err)
+	}
+	siteItems, err := r.aggregatePrefix(prefixSites)
+	if err != nil {
+		return nil, fmt.Errorf("scan sites: %w", err)
+	}
+
+	var out []LegacyBlobRecord
+
+	// Paste heads. headSHA[slug] = the head's served sha, so the version loop
+	// can skip the serving version (the head record already covers that blob).
+	headSHA := make(map[string]string, len(pasteItems))
+	for _, item := range pasteItems {
+		var p pasteRow
+		if err := json.Unmarshal(item.Value, &p); err != nil {
+			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
+		}
+		slug := strings.TrimPrefix(string(item.Key), "pastes/")
+		headSHA[slug] = p.ContentSHA
+		if p.ContentSHA == "" {
+			continue // bodyless paste: no blob to re-key
+		}
+		out = append(out, LegacyBlobRecord{
+			Slug:       domain.Slug(slug),
+			Kind:       LegacyBlobPaste,
+			ContentSHA: p.ContentSHA,
+			HasBlobID:  p.BlobID != "",
+			BlobID:     p.BlobID,
+		})
+	}
+
+	// Version rows. Skip the serving version (its sha == the head's; the head
+	// record covers it) and tombstoned versions (GC-eligible, excluded exactly
+	// as ReferencedBlobSHAs does). versions/<slug>/<NNNN>: trim "versions/" then
+	// cut the trailing "/<NNNN>" to recover the slug (extractSlug would return
+	// the NNNN segment, so parse explicitly here).
+	for _, item := range versionItems {
+		var v versionRow
+		if err := json.Unmarshal(item.Value, &v); err != nil {
+			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
+		}
+		rest := strings.TrimPrefix(string(item.Key), "versions/")
+		slug, _, ok := strings.Cut(rest, "/")
+		if !ok || slug == "" {
+			return nil, fmt.Errorf("scan: malformed version key %q", item.Key)
+		}
+		if v.Deleted || v.ContentSHA == "" {
+			continue
+		}
+		if v.ContentSHA == headSHA[slug] {
+			continue // the head record (or its rebind) covers the serving version
+		}
+		out = append(out, LegacyBlobRecord{
+			Slug:       domain.Slug(slug),
+			Kind:       LegacyBlobVersion,
+			ContentSHA: v.ContentSHA,
+			HasBlobID:  v.BlobID != "",
+			BlobID:     v.BlobID,
+		})
+	}
+
+	// Site files. One record per DISTINCT file sha in the manifest; HasBlobID
+	// from the FileBlobs side-table.
+	for _, item := range siteItems {
+		var row siteRow
+		if err := json.Unmarshal(item.Value, &row); err != nil {
+			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
+		}
+		slug := strings.TrimPrefix(string(item.Key), "sites/")
+		man, mErr := decodeManifest(row.Manifest)
+		if mErr != nil {
+			return nil, fmt.Errorf("decode manifest %s: %w", item.Key, mErr)
+		}
+		for _, sha := range man.SHASet() {
+			if sha == "" {
+				continue
+			}
+			existing := row.FileBlobs[sha]
+			out = append(out, LegacyBlobRecord{
+				Slug:       domain.Slug(slug),
+				Kind:       LegacyBlobSiteFile,
+				ContentSHA: sha,
+				HasBlobID:  existing != "",
+				BlobID:     existing,
+			})
+		}
+	}
+
+	return out, nil
+}
+
+// MemberCount returns the number of nodes in the cluster's current ring
+// membership snapshot - the founder's readiness gate before it drives the R=2
+// re-key loop. It wraps cluster.Members() (the same membership snapshot the
+// rebalance + routing read). In single-node mode this is 1. The migrate binary
+// polls it so the founder waits for the FULL ring (all migrate pods joined)
+// before any RebindLegacyBlob, so every co-commit fans to both replica
+// positions; with a one-member ring an R=2 write would land only one replica.
+func (r *ShaleRepo) MemberCount() int {
+	return len(r.cluster.Members())
+}
 
 // LegacyBlobKind names which legacy record-blob a RebindLegacyBlob call
 // re-keys: the paste head, a specific version, or a site file. The migrate

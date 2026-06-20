@@ -60,7 +60,10 @@ RUN GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
  && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
         go build -tags slatedb -buildvcs=false -ldflags="-s -w" -o /out/hostthis-shale-migrate ./cmd/hostthis-shale-migrate \
  && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-        go build -buildvcs=false -ldflags="-s -w" -o /out/hostthis-blob-compress ./cmd/hostthis-blob-compress
+        go build -buildvcs=false -ldflags="-s -w" -o /out/hostthis-blob-compress ./cmd/hostthis-blob-compress \
+ && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+        go build -tags slatedb -buildvcs=false -ldflags="-s -w" -o /out/hostthis-blob-migrate ./cmd/hostthis-blob-migrate
+# TEMP: phase-4 blob migration binary - remove after migration (see docs/design/shale-blobs-phase4-migration.md)
 
 # ---- runtime stage ----------------------------------------------------------
 # distroless/cc has glibc + dynamic loader. distroless/static doesn't.
@@ -73,6 +76,8 @@ COPY --from=go-build /out/hostthisd /app/hostthisd
 COPY --from=go-build /out/hostthis-metadata-migrate /app/hostthis-metadata-migrate
 COPY --from=go-build /out/hostthis-shale-migrate /app/hostthis-shale-migrate
 COPY --from=go-build /out/hostthis-blob-compress /app/hostthis-blob-compress
+# TEMP: phase-4 blob migration binary - remove after migration (see docs/design/shale-blobs-phase4-migration.md)
+COPY --from=go-build /out/hostthis-blob-migrate /app/hostthis-blob-migrate
 COPY web/landing.html /app/web/landing.html
 
 EXPOSE 2222 8080
