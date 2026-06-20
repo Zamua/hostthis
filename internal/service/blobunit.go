@@ -77,9 +77,9 @@ type BlobUnit interface {
 
 // BlobHandle is the opaque token Stage / StageStream return and Commit
 // consumes. The service threads it from one to the other without inspecting
-// it. The standalone path carries (slug, sha); the shale path (a later
-// phase) carries a cluster blob reference. A zero BlobHandle is meaningless
-// to the seam - only handles a Stage call produced are valid to Commit.
+// it. The standalone path carries (slug, sha); the shale path carries a
+// cluster blob reference in Ref. A zero BlobHandle is meaningless to the
+// seam - only handles a Stage call produced are valid to Commit.
 type BlobHandle struct {
 	// Slug + SHA identify the staged blob on the standalone path. Other
 	// implementations populate their own fields; the field set is internal
@@ -87,4 +87,12 @@ type BlobHandle struct {
 	// pass handles back into Commit.
 	Slug string
 	SHA  string
+
+	// Ref is the OPAQUE, implementation-private staged-blob reference the
+	// transactional shale path threads from Stage/StageStream into Commit.
+	// It holds a cluster.BlobRef (typed as any so the service package stays
+	// free of the shale/cluster dependency and its cgo/slatedb build tag).
+	// The standalone path leaves it nil; the services never inspect it. The
+	// ShaleBlobUnit type-asserts it back to a cluster.BlobRef in Commit.
+	Ref any
 }

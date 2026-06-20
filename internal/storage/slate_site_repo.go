@@ -91,6 +91,15 @@ type siteRow struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	ExpiresAt   time.Time `json:"expires_at"`
+
+	// FileBlobs maps a file's content sha to the shale-blob id that file's
+	// bytes were staged under (the transactional shale-blob path only). A site
+	// stores each file as its own blob bound under the {slug} shard; the
+	// manifest references files by sha, so this side-table is how the read path
+	// resolves sha -> blobid for GetBlob. Empty on the standalone path (sqlite /
+	// slatedb / disk), where files are content-addressed by sha alone. omitempty
+	// keeps a standalone row byte-identical to before this field existed.
+	FileBlobs map[string]string `json:"file_blobs,omitempty"`
 }
 
 func (r *SlateRepo) siteRowFromDomain(s domain.Site, dedupedSize int) (siteRow, error) {
