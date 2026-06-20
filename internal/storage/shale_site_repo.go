@@ -524,10 +524,13 @@ func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int, ref
 // for its collision (NOT slug_owner), so the deploy's own InsertSiteWithQuota
 // Check does not reject the claim it just made. A crash after a successful claim
 // but before the deploy commits leaves a slug_owner/<slug> marker with no
-// authoritative site row: a harmless metadata leak (the owner sum reads the
-// counter, the site reconciler scans sites/, and a later paste insert overwrites
-// slug_owner/<slug> unconditionally), reclaimed by the slug_owner sweep the same
-// way an abandoned paste reservation marker is.
+// authoritative site row: a harmless metadata leak. There is NO dedicated
+// slug_owner sweep - the marker self-heals because a later paste insert that
+// mints that slug overwrites slug_owner/<slug> unconditionally (insertAuthoritative
+// Puts it and checks only pastes/<slug> + sites/<slug> for its collision). Until
+// such a paste reuses it, the only effect is that one slug staying un-pre-claimable
+// for a future SITE deploy, in a 32^8 space (the owner sum reads the counter and
+// the site reconciler scans sites/; neither touches slug_owner).
 //
 // owner + now are accepted for symmetry with the seam and to value the marker;
 // the claim itself does not charge quota (it is not a byte reservation).

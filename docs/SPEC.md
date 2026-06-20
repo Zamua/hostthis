@@ -3734,8 +3734,10 @@ reader-invisible and the bind co-commits with the manifest). A collision re-mint
 a fresh slug before the stream is consumed; the authoritative insert remains the
 final collision authority. A crash after a successful claim but before the commit
 leaves a `slug_owner/<slug>` marker with no site row - a harmless metadata leak
-(a later paste insert overwrites the key; the sweep reclaims it), never an
-unreadable site. A redeploy (`DeployToSlug`) already targets a known existing
+that self-heals when a later paste insert that mints that slug overwrites the key
+(there is NO dedicated slug_owner sweep; until such a paste reuses it, the only
+effect is that one slug staying un-pre-claimable for a future site deploy, in a
+32^8 space), never an unreadable site. A redeploy (`DeployToSlug`) already targets a known existing
 slug, so it stages under the real slug directly and needs no pre-claim. On the
 detached-store path the slug routes no blob (blobs are content-sha-keyed), so no
 pre-claim runs: the slug is minted in the post-untar insert retry loop where the
