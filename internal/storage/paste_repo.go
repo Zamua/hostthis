@@ -46,7 +46,11 @@ func NewPasteRepo(db *sql.DB) *PasteRepo { return &PasteRepo{db: db} }
 //   - nil on success
 //   - ErrSlugTaken if p.Slug is already in use (caller retries with a fresh slug)
 //   - ErrOverUserQuota if accepting would exceed userCap
-func (r *PasteRepo) InsertWithQuotaCheck(p domain.Paste, userCap int64, now time.Time) error {
+//
+// ctx is accepted to satisfy the service.PasteRepo interface (the shale
+// backend carries staged blob refs on it); the sqlite path has no shale-blob
+// plane, so it ignores ctx and uses its own serializable-tx context.
+func (r *PasteRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, userCap int64, now time.Time) error {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -106,7 +110,7 @@ func (r *PasteRepo) InsertWithQuotaCheck(p domain.Paste, userCap int64, now time
 // doesn't need quota enforcement. Production paths use
 // InsertWithQuotaCheck.
 func (r *PasteRepo) Insert(p domain.Paste) error {
-	return r.InsertWithQuotaCheck(p, 0, p.CreatedAt)
+	return r.InsertWithQuotaCheck(context.Background(), p, 0, p.CreatedAt)
 }
 
 // Get returns the paste for slug, or ErrNotFound. Expired pastes are
@@ -279,7 +283,10 @@ type AppendResult struct {
 // The "size" being charged is the new version's bytes - older versions
 // continue to count toward the identity's total until the parent paste
 // expires or is deleted.
-func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (AppendResult, error) {
+// ctx is accepted to satisfy the service.PasteAdmin interface; the sqlite
+// path ignores it (no shale-blob plane) and uses its own serializable-tx
+// context.
+func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (AppendResult, error) {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
 		return AppendResult{}, fmt.Errorf("begin tx: %w", err)
@@ -361,7 +368,7 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 // AppendVersion is the simple variant used by tests + any caller that
 // doesn't need quota enforcement.
 func (r *PasteRepo) AppendVersion(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, now time.Time) (int, error) {
-	res, err := r.AppendVersionWithQuotaCheck(slug, kind, contentSHA, size, 0, now)
+	res, err := r.AppendVersionWithQuotaCheck(context.Background(), slug, kind, contentSHA, size, 0, now)
 	return res.NewVer, err
 }
 

@@ -21,7 +21,7 @@ import (
 // PasteRepo is the persistence interface the upload service needs.
 // internal/storage.PasteRepo satisfies it.
 type PasteRepo interface {
-	InsertWithQuotaCheck(p domain.Paste, userCap int64, now time.Time) error
+	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Paste, error)
 	// MarkReady flips a pending paste to ready once its blob has landed.
 	// MarkFailed flips a pending paste to failed and releases its
@@ -188,7 +188,7 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	const maxRetries = 5
 	for range maxRetries {
 		p.Slug = domain.NewRandomSlug()
-		err := u.Repo.InsertWithQuotaCheck(p, int64(domain.UserQuotaBytes), now)
+		err := u.Repo.InsertWithQuotaCheck(context.Background(), p, int64(domain.UserQuotaBytes), now)
 		switch {
 		case err == nil:
 			if u.SyncBlob {

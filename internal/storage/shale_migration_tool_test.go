@@ -27,6 +27,7 @@ package storage_test
 // Skips cleanly unless MINIO_TEST_ENDPOINT is set.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -278,7 +279,7 @@ func TestShaleMigrationTool_QuotaSafeAndListable(t *testing.T) {
 		ContentSHA: "sha-overflow", Size: 100, Name: "overflow",
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(overflow, cap, now); !errors.Is(err, storage.ErrOverUserQuota) {
+	if err := repo.InsertWithQuotaCheck(context.Background(), overflow, cap, now); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("over-cap insert: got err=%v; want ErrOverUserQuota (650+100 > 700)", err)
 	}
 	if sumAfter, _ := repo.SumActiveBytesByOwner(seededIdentity, now); int64(sumAfter) != trueLiveTotal {
@@ -291,7 +292,7 @@ func TestShaleMigrationTool_QuotaSafeAndListable(t *testing.T) {
 		ContentSHA: "sha-fits", Size: 40, Name: "fits",
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(fits, cap, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(context.Background(), fits, cap, now); err != nil {
 		t.Fatalf("fitting insert (650+40 <= 700): %v", err)
 	}
 	if sumAfter, _ := repo.SumActiveBytesByOwner(seededIdentity, now); int64(sumAfter) != trueLiveTotal+40 {
@@ -304,7 +305,7 @@ func TestShaleMigrationTool_QuotaSafeAndListable(t *testing.T) {
 		ContentSHA: "sha-toomuch", Size: 40, Name: "toomuch",
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(tooMuch, cap, now); !errors.Is(err, storage.ErrOverUserQuota) {
+	if err := repo.InsertWithQuotaCheck(context.Background(), tooMuch, cap, now); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("second over-cap insert: got err=%v; want ErrOverUserQuota (690+40 > 700)", err)
 	}
 
@@ -388,7 +389,7 @@ func TestShaleMigrationTool_WithoutToolFails(t *testing.T) {
 		ContentSHA: "sha-overflow", Size: 100, Name: "overflow",
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	err = repo.InsertWithQuotaCheck(overflow, cap, now)
+	err = repo.InsertWithQuotaCheck(context.Background(), overflow, cap, now)
 	if err != nil {
 		t.Fatalf("pre-transform expectation: over-cap insert should WRONGLY succeed (counter=0), but got err=%v", err)
 	}

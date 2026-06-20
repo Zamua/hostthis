@@ -15,6 +15,7 @@ package storage_test
 // subtest exercise the real interaction, not two independent stores.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -80,7 +81,7 @@ func siteOfV(slug, identity string, size int, v string) domain.Site {
 // insertSite deploys a site with no caps (caps=0 -> no quota enforcement).
 func insertSite(t *testing.T, sr conformanceSiteRepo, s domain.Site) {
 	t.Helper()
-	if err := sr.InsertWithQuotaCheck(s, s.Manifest.DedupedSize(), 0, fixedNow); err != nil {
+	if err := sr.InsertWithQuotaCheck(context.Background(), s, s.Manifest.DedupedSize(), 0, fixedNow); err != nil {
 		t.Fatalf("insert site %q: %v", s.Slug, err)
 	}
 }
@@ -124,7 +125,7 @@ func conformSiteReplaceInPlace(t *testing.T, sr conformanceSiteRepo) {
 	v2.CreatedAt = later // a hostile caller can't move created_at via the row
 	v2.UpdatedAt = later
 	v2.ExpiresAt = later.Add(domain.RetentionWindow)
-	if err := sr.ReplaceWithQuotaCheck(v2, v2.Manifest.DedupedSize(), 0, later); err != nil {
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), v2, v2.Manifest.DedupedSize(), 0, later); err != nil {
 		t.Fatalf("replace in place: %v", err)
 	}
 
@@ -166,14 +167,14 @@ func conformSiteReplaceInPlace(t *testing.T, sr conformanceSiteRepo) {
 func conformSiteReplaceNotFoundShape(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	// Missing slug: never deployed.
 	miss := siteOfV("rmiss123", "key:owner", 50, "v1")
-	if err := sr.ReplaceWithQuotaCheck(miss, miss.Manifest.DedupedSize(), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), miss, miss.Manifest.DedupedSize(), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("replace of missing slug: got %v, want ErrNotFound", err)
 	}
 
 	// Foreign-owned: owned by key:alice, a replace as key:mallory is NotFound.
 	insertSite(t, sr, siteOfV("rfor1234", "key:alice", 100, "v1"))
 	foreign := siteOfV("rfor1234", "key:mallory", 100, "v2")
-	if err := sr.ReplaceWithQuotaCheck(foreign, foreign.Manifest.DedupedSize(), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), foreign, foreign.Manifest.DedupedSize(), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("replace of foreign-owned site: got %v, want ErrNotFound (no ownership leak)", err)
 	}
 	// The legitimate owner's site is untouched by the rejected foreign replace.
@@ -186,11 +187,11 @@ func conformSiteReplaceNotFoundShape(t *testing.T, r conformanceRepo, sr conform
 	}
 
 	// Slug that exists only as a PASTE: a site replace must not find it.
-	if err := r.InsertWithQuotaCheck(pasteOf("rpaste12", "key:owner", 10), 0, fixedNow); err != nil {
+	if err := r.InsertWithQuotaCheck(context.Background(), pasteOf("rpaste12", "key:owner", 10), 0, fixedNow); err != nil {
 		t.Fatalf("seed paste: %v", err)
 	}
 	asPaste := siteOfV("rpaste12", "key:owner", 10, "v1")
-	if err := sr.ReplaceWithQuotaCheck(asPaste, asPaste.Manifest.DedupedSize(), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), asPaste, asPaste.Manifest.DedupedSize(), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("replace targeting a paste-only slug: got %v, want ErrNotFound", err)
 	}
 }
@@ -203,16 +204,16 @@ func conformSiteReplaceNotFoundShape(t *testing.T, r conformanceRepo, sr conform
 func conformSiteReplaceDeltaQuota(t *testing.T, sr conformanceSiteRepo) {
 	const cap = 1000
 	// Owner sits at 800 of a 1000 cap.
-	if err := sr.InsertWithQuotaCheck(siteOfV("rq123456", "key:rq", 800, "v1"), 800, cap, fixedNow); err != nil {
+	if err := sr.InsertWithQuotaCheck(context.Background(), siteOfV("rq123456", "key:rq", 800, "v1"), 800, cap, fixedNow); err != nil {
 		t.Fatalf("seed 800 under cap: %v", err)
 	}
 	// Same-size re-deploy nets zero: 800 - 800 + 800 = 800 <= 1000 -> ok.
-	if err := sr.ReplaceWithQuotaCheck(siteOfV("rq123456", "key:rq", 800, "v2"), 800, cap, fixedNow); err != nil {
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), siteOfV("rq123456", "key:rq", 800, "v2"), 800, cap, fixedNow); err != nil {
 		t.Fatalf("same-size re-deploy should net zero: %v", err)
 	}
 	// A LARGER re-deploy that would breach the cap is rejected: 800 - 800 +
 	// 1100 = 1100 > 1000. The old bytes are credited and the new charged.
-	if err := sr.ReplaceWithQuotaCheck(siteOfV("rq123456", "key:rq", 1100, "v3"), 1100, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), siteOfV("rq123456", "key:rq", 1100, "v3"), 1100, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("over-cap re-deploy: got %v, want ErrOverUserQuota", err)
 	}
 	// The rejected replace left the row at v2/800 (no partial mutation).
@@ -226,10 +227,10 @@ func conformSiteReplaceDeltaQuota(t *testing.T, sr conformanceSiteRepo) {
 	// A SMALLER re-deploy frees the diff: 800 - 800 + 300 = 300, then a fresh
 	// 600-byte site fits (300 + 600 = 900 <= 1000) where it would NOT have at
 	// the original 800 (800 + 600 = 1400 > 1000).
-	if err := sr.ReplaceWithQuotaCheck(siteOfV("rq123456", "key:rq", 300, "v4"), 300, cap, fixedNow); err != nil {
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), siteOfV("rq123456", "key:rq", 300, "v4"), 300, cap, fixedNow); err != nil {
 		t.Fatalf("smaller re-deploy should free the diff: %v", err)
 	}
-	if err := sr.InsertWithQuotaCheck(siteOfV("rq223456", "key:rq", 600, "v1"), 600, cap, fixedNow); err != nil {
+	if err := sr.InsertWithQuotaCheck(context.Background(), siteOfV("rq223456", "key:rq", 600, "v1"), 600, cap, fixedNow); err != nil {
 		t.Fatalf("follow-up 600 should fit after the shrink (300+600=900): %v", err)
 	}
 }
@@ -250,7 +251,7 @@ func conformSiteReplaceRestartsExpiry(t *testing.T, sr conformanceSiteRepo) {
 	v2.CreatedAt = fixedNow
 	v2.UpdatedAt = at
 	v2.ExpiresAt = at.Add(domain.RetentionWindow)
-	if err := sr.ReplaceWithQuotaCheck(v2, v2.Manifest.DedupedSize(), 0, at); err != nil {
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), v2, v2.Manifest.DedupedSize(), 0, at); err != nil {
 		t.Fatalf("replace restarting expiry: %v", err)
 	}
 
@@ -343,16 +344,16 @@ func conformSiteSumByIdentity(t *testing.T, sr conformanceSiteRepo) {
 func conformSiteQuotaCountsSiteBytes(t *testing.T, sr conformanceSiteRepo) {
 	const cap = 1000
 	// First site fits at 600.
-	if err := sr.InsertWithQuotaCheck(siteOf("sq123456", "key:sq", 600), 600, cap, fixedNow); err != nil {
+	if err := sr.InsertWithQuotaCheck(context.Background(), siteOf("sq123456", "key:sq", 600), 600, cap, fixedNow); err != nil {
 		t.Fatalf("first site (600 under 1000): %v", err)
 	}
 	// Second would be 600+500=1100 > 1000 -> reject.
-	err := sr.InsertWithQuotaCheck(siteOf("sq223456", "key:sq", 500), 500, cap, fixedNow)
+	err := sr.InsertWithQuotaCheck(context.Background(), siteOf("sq223456", "key:sq", 500), 500, cap, fixedNow)
 	if !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("over-cap site deploy: got %v, want ErrOverUserQuota", err)
 	}
 	// A smaller one that keeps the sum under cap succeeds.
-	if err := sr.InsertWithQuotaCheck(siteOf("sq323456", "key:sq", 300), 300, cap, fixedNow); err != nil {
+	if err := sr.InsertWithQuotaCheck(context.Background(), siteOf("sq323456", "key:sq", 300), 300, cap, fixedNow); err != nil {
 		t.Fatalf("site within cap (600+300=900): %v", err)
 	}
 }
@@ -372,40 +373,40 @@ func conformSitePerOwnerCapCountsBoth(t *testing.T, r conformanceRepo, sr confor
 	// Direction 1: a SITE fills most of the cap, then a PASTE that would
 	// overflow the COMBINED total is rejected. This is the direction the bug
 	// broke: the paste's per-owner check must count the existing site bytes.
-	if err := sr.InsertWithQuotaCheck(siteOf("pb1site1", "key:pb1", 800), 800, cap, fixedNow); err != nil {
+	if err := sr.InsertWithQuotaCheck(context.Background(), siteOf("pb1site1", "key:pb1", 800), 800, cap, fixedNow); err != nil {
 		t.Fatalf("site 800 under cap: %v", err)
 	}
 	// 800 (site) + 300 (paste) = 1100 > 1000 -> the paste MUST be rejected.
-	if err := r.InsertWithQuotaCheck(pasteOf("pb1pst1", "key:pb1", 300), cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+	if err := r.InsertWithQuotaCheck(context.Background(), pasteOf("pb1pst1", "key:pb1", 300), cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("paste over combined cap (site bytes must count): got %v, want ErrOverUserQuota", err)
 	}
 	// A paste that keeps the combined total at/under cap fits: 800+200=1000.
-	if err := r.InsertWithQuotaCheck(pasteOf("pb1pst2", "key:pb1", 200), cap, fixedNow); err != nil {
+	if err := r.InsertWithQuotaCheck(context.Background(), pasteOf("pb1pst2", "key:pb1", 200), cap, fixedNow); err != nil {
 		t.Fatalf("paste within combined cap (800+200=1000): %v", err)
 	}
 	// And now the owner is full: another byte is rejected.
-	if err := r.InsertWithQuotaCheck(pasteOf("pb1pst3", "key:pb1", 1), cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+	if err := r.InsertWithQuotaCheck(context.Background(), pasteOf("pb1pst3", "key:pb1", 1), cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("paste at full combined cap should be rejected: got %v", err)
 	}
 
 	// Direction 2 (the reverse): a PASTE fills most of the cap, then a SITE
 	// that would overflow the COMBINED total is rejected. This direction was
 	// already correct (the site path summed both), pinned here for symmetry.
-	if err := r.InsertWithQuotaCheck(pasteOf("pb2pst1", "key:pb2", 800), cap, fixedNow); err != nil {
+	if err := r.InsertWithQuotaCheck(context.Background(), pasteOf("pb2pst1", "key:pb2", 800), cap, fixedNow); err != nil {
 		t.Fatalf("paste 800 under cap: %v", err)
 	}
 	// 800 (paste) + 300 (site) = 1100 > 1000 -> the site MUST be rejected.
-	if err := sr.InsertWithQuotaCheck(siteOf("pb2site1", "key:pb2", 300), 300, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+	if err := sr.InsertWithQuotaCheck(context.Background(), siteOf("pb2site1", "key:pb2", 300), 300, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("site over combined cap (paste bytes must count): got %v, want ErrOverUserQuota", err)
 	}
 	// A site that keeps the combined total at/under cap fits: 800+200=1000.
-	if err := sr.InsertWithQuotaCheck(siteOf("pb2site2", "key:pb2", 200), 200, cap, fixedNow); err != nil {
+	if err := sr.InsertWithQuotaCheck(context.Background(), siteOf("pb2site2", "key:pb2", 200), 200, cap, fixedNow); err != nil {
 		t.Fatalf("site within combined cap (800+200=1000): %v", err)
 	}
 
 	// An append also counts site bytes: the owner is at cap, so any append is
 	// rejected (covers the AppendVersionWithQuotaCheck cross-kind path).
-	if _, err := r.AppendVersionWithQuotaCheck("pb2pst1", domain.KindHTML, "sha-pb2-v2", 1, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "pb2pst1", domain.KindHTML, "sha-pb2-v2", 1, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("append at full combined cap should be rejected (site bytes must count): got %v", err)
 	}
 }
@@ -440,9 +441,9 @@ func conformSitePerOwnerCapConcurrentCeiling(t *testing.T, caps conformCaps, r c
 			// paste, odd i -> site, all for the same owner "key:ccx".
 			var err error
 			if i%2 == 0 {
-				err = r.InsertWithQuotaCheck(pasteOf(fmt.Sprintf("ccp%05d", i), "key:ccx", body), cap, fixedNow)
+				err = r.InsertWithQuotaCheck(context.Background(), pasteOf(fmt.Sprintf("ccp%05d", i), "key:ccx", body), cap, fixedNow)
 			} else {
-				err = sr.InsertWithQuotaCheck(siteOf(fmt.Sprintf("ccs%05d", i), "key:ccx", body), body, cap, fixedNow)
+				err = sr.InsertWithQuotaCheck(context.Background(), siteOf(fmt.Sprintf("ccs%05d", i), "key:ccx", body), body, cap, fixedNow)
 			}
 			if err == nil {
 				atomic.AddInt64(&landed, 1)
@@ -466,7 +467,7 @@ func conformSitePerOwnerCapConcurrentCeiling(t *testing.T, caps conformCaps, r c
 func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	// A paste owns "col12345"; a site deploy onto the same slug is rejected.
 	insert(t, r, pasteOf("col12345", "key:c", 10))
-	err := sr.InsertWithQuotaCheck(siteOf("col12345", "key:c", 10), 10, 0, fixedNow)
+	err := sr.InsertWithQuotaCheck(context.Background(), siteOf("col12345", "key:c", 10), 10, 0, fixedNow)
 	if err == nil {
 		t.Fatalf("site deploy onto a paste's slug must be rejected")
 	}
@@ -476,7 +477,7 @@ func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conform
 
 	// A site owns "col22345"; a paste insert onto the same slug is rejected.
 	insertSite(t, sr, siteOf("col22345", "key:c", 10))
-	perr := r.InsertWithQuotaCheck(pasteOf("col22345", "key:c", 10), 0, fixedNow)
+	perr := r.InsertWithQuotaCheck(context.Background(), pasteOf("col22345", "key:c", 10), 0, fixedNow)
 	if perr == nil {
 		t.Fatalf("paste insert onto a site's slug must be rejected")
 	}
@@ -486,7 +487,7 @@ func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conform
 
 	// Two sites cannot share a slug either.
 	insertSite(t, sr, siteOf("col32345", "key:c", 10))
-	derr := sr.InsertWithQuotaCheck(siteOf("col32345", "key:c", 10), 10, 0, fixedNow)
+	derr := sr.InsertWithQuotaCheck(context.Background(), siteOf("col32345", "key:c", 10), 10, 0, fixedNow)
 	if derr == nil {
 		t.Fatalf("duplicate site slug must be rejected")
 	}

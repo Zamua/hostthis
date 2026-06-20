@@ -227,17 +227,6 @@ type ShaleRepo struct {
 	// (cfg.BlobStore nil) - the back-compat shape.
 	kv *cluster.BlobKV
 
-	// pendingBinds holds the staged blob refs a ShaleBlobUnit.Commit handed
-	// off for the slug it is about to write, keyed by slug. The authoritative
-	// {slug} write (insertAuthoritative / appendAuthoritative /
-	// insertSiteAuthoritative / replaceSiteAuthoritative) pops this slug's refs
-	// inside its transaction and BindBlobs them, so the pointer co-commits with
-	// the row WITHOUT changing the service-layer metadata-write signature. The
-	// stash is per-slug and guarded by pendingMu; Commit clears it after the
-	// write. nil on the metadata-only path.
-	pendingMu    sync.Mutex
-	pendingBinds map[string][]cluster.BlobRef
-
 	// logger records skipped records in the tolerant background scans
 	// (the expiry/reconcile family). A nil logger falls back to
 	// log.Default() via repoLog, so a repo built without one still emits
@@ -519,9 +508,6 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		grpcAddr:     advertiseGRPCAddr,
 		cache:        cache,
 		closeFactory: closeFactory,
-	}
-	if kv != nil {
-		r.pendingBinds = make(map[string][]cluster.BlobRef)
 	}
 
 	// Multi-node: stand up the peer-forwarding server the cluster advertised
@@ -1250,56 +1236,48 @@ func (r *ShaleRepo) decrementBytes(identity string, body int64) error {
 
 // --- Shale-blob pointer binding (the transactional shale-blob path) --------
 //
-// These helpers let a ShaleBlobUnit.Commit thread a staged blob's BlobRef into
-// the authoritative {slug} write WITHOUT changing the service-layer metadata-
-// write signature. Commit stashes the refs for the slug it is about to write
-// (StashBinds), then runs the repo's existing metadata write (Insert /
-// AppendVersion / site insert); that write pops the slug's refs INSIDE its
-// {slug} transaction (popBinds) and BindBlobs each one, so the pointer co-
-// commits with the row. Commit clears the stash afterward (ClearBinds).
+// A ShaleBlobUnit.Commit threads a staged blob's BlobRef into the authoritative
+// {slug} write through the PER-CALL context.Context, NOT a shared per-repo
+// stash. Commit derives a child context carrying THIS call's refs
+// (WithPendingBinds) and hands it to the metadata-write closure; the public
+// WithQuotaCheck method forwards that context to the authoritative {slug}
+// transaction, which reads the refs (pendingBindsFromContext) and BindBlobs
+// each one, so the pointer co-commits with the row.
 //
-// The mechanism is per-slug + mutex-guarded. It is only ever populated on the
-// blob-capable path (r.kv != nil): on the metadata-only path popBinds always
-// returns nil (the map is nil), so the authoritative writes take the unchanged
-// no-bind branch.
+// The refs ride the context value, so two concurrent same-slug writes (two
+// updates, an update vs a delete, two DeployToSlug) each carry their OWN refs
+// and cannot observe or clobber each other's binds: there is no shared mutable
+// state keyed by slug. A retry-on-collision loop reuses the same context, so
+// every attempt of one call binds the same refs (BindBlob is an idempotent
+// tx.Put of the bref key). On the metadata-only path the context carries no
+// refs and the authoritative writes take the unchanged no-bind branch.
 
-// StashBinds records the staged blob refs Commit will bind alongside the next
-// authoritative write for slug. It REPLACES any prior stash for the slug (a
-// retry-on-collision loop re-stashes before each attempt). No-op when the repo
-// is metadata-only.
-func (r *ShaleRepo) StashBinds(slug string, refs []cluster.BlobRef) {
-	if r.kv == nil {
-		return
+// pendingBindsKey is the unexported context key the staged refs ride under. A
+// dedicated unexported type avoids collisions with any other package's context
+// values (the standard context-key idiom).
+type pendingBindsKey struct{}
+
+// WithPendingBinds returns a child context carrying refs for the next
+// authoritative {slug} write triggered under it. ShaleBlobUnit.Commit installs
+// the staged refs here and passes the returned context to the metadata-write
+// closure; the public WithQuotaCheck method forwards it to the authoritative
+// transaction. nil/empty refs return the parent unchanged (the no-bind path).
+func WithPendingBinds(ctx context.Context, refs []cluster.BlobRef) context.Context {
+	if len(refs) == 0 {
+		return ctx
 	}
-	r.pendingMu.Lock()
-	r.pendingBinds[slug] = refs
-	r.pendingMu.Unlock()
+	return context.WithValue(ctx, pendingBindsKey{}, refs)
 }
 
-// ClearBinds drops any stashed refs for slug. Commit defers it so a metadata
-// write that returned an error (slug collision, quota) does not leave a stale
-// stash that a later same-slug write would wrongly bind.
-func (r *ShaleRepo) ClearBinds(slug string) {
-	if r.kv == nil {
-		return
-	}
-	r.pendingMu.Lock()
-	delete(r.pendingBinds, slug)
-	r.pendingMu.Unlock()
-}
-
-// popBinds returns the stashed refs for slug (or nil). It does NOT delete them:
-// the {slug} authoritative transaction may re-run on a CAS conflict, and each
-// run must bind the same refs (BindBlob is an idempotent tx.Put of the bref
-// key). ClearBinds (deferred by Commit) removes the stash once the write
-// completes. Returns nil on the metadata-only path.
-func (r *ShaleRepo) popBinds(slug string) []cluster.BlobRef {
-	if r.kv == nil {
+// pendingBindsFromContext returns the staged refs carried by ctx (or nil). The
+// authoritative {slug} writes read it INSIDE the public WithQuotaCheck method
+// and pass the refs down to the private authoritative helper, which binds them
+// in the same transaction the metadata commits in.
+func pendingBindsFromContext(ctx context.Context) []cluster.BlobRef {
+	if ctx == nil {
 		return nil
 	}
-	r.pendingMu.Lock()
-	refs := r.pendingBinds[slug]
-	r.pendingMu.Unlock()
+	refs, _ := ctx.Value(pendingBindsKey{}).([]cluster.BlobRef)
 	return refs
 }
 
@@ -1445,10 +1423,15 @@ func (r *ShaleRepo) blobRefFor(routeKey []byte, blobID string) cluster.BlobRef {
 // the object-store bucket quota, enforced when the blob Put is rejected
 // (see SPEC "Limits -> Durable total-bytes ceiling: an object-store
 // quota"); the metadata backend runs no cross-shard byte scan.
-func (r *ShaleRepo) InsertWithQuotaCheck(p domain.Paste, userCap int64, now time.Time) error {
+func (r *ShaleRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error {
 	identity := p.Identity.String()
 	slug := p.Slug.String()
 	body := int64(p.Size)
+
+	// The staged blob refs (if any) ride this call's context, isolated from
+	// any concurrent same-slug write. Read once here and pass them down so the
+	// authoritative {slug} transaction binds exactly this call's blobs.
+	binds := pendingBindsFromContext(ctx)
 
 	// Step 1: reserve (strict per-owner quota). The marker is stamped with
 	// `now` so the reconciler can apply the grace window.
@@ -1459,7 +1442,7 @@ func (r *ShaleRepo) InsertWithQuotaCheck(p domain.Paste, userCap int64, now time
 	// Step 2: authoritative write on the {slug} shard. On any failure
 	// here, release the reservation so the bytes are returned (the
 	// over-count is bounded to the failure window + the reconciler).
-	if err := r.insertAuthoritative(p); err != nil {
+	if err := r.insertAuthoritative(p, binds); err != nil {
 		_ = r.releaseBytes(identity, slug, body)
 		return err
 	}
@@ -1547,13 +1530,13 @@ func (r *ShaleRepo) runAuthoritative(pinKey []byte, refs []cluster.BlobRef, body
 // sites/<slug> already exists) participates in the transaction's read-set so
 // a racing insert of the same slug (as a paste OR a site) conflicts.
 //
-// On the transactional shale-blob path the paste's staged blob (stashed by
-// ShaleBlobUnit.Commit and popped here) is BOUND in this same transaction, so
-// the pointer co-commits with the row, and the blob id lands on both the paste
-// head row and the v1 version row.
-func (r *ShaleRepo) insertAuthoritative(p domain.Paste) error {
+// On the transactional shale-blob path the paste's staged blob (passed in via
+// refs, carried on the call's context by ShaleBlobUnit.Commit) is BOUND in this
+// same transaction, so the pointer co-commits with the row, and the blob id
+// lands on both the paste head row and the v1 version row. refs is nil on the
+// metadata-only path (no blob plane) or when no blob was staged.
+func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef) error {
 	pasteKey := shaleKeyPaste(p.Slug)
-	refs := r.popBinds(p.Slug.String())
 	blobID := firstBlobID(refs)
 	return r.runAuthoritative(pasteKey, refs, func(tx shaleKVTx, bind func() error) error {
 		// Collision check: a found paste is ErrSlugTaken. The ExpectAbsent
@@ -1776,7 +1759,11 @@ func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
 // (strict per-owner quota), then the version row is written + the expiry
 // clock reset on the {slug} shard, then the index projection is refreshed
 // on the {id} shard.
-func (r *ShaleRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (AppendResult, error) {
+func (r *ShaleRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (AppendResult, error) {
+	// The new version's staged blob ref (if any) rides this call's context,
+	// isolated from any concurrent same-slug append. Read once and pass it down.
+	binds := pendingBindsFromContext(ctx)
+
 	// Resolve the owner identity + pin state from the authoritative paste.
 	var existing pasteRow
 	if err := r.getJSON(shaleKeyPaste(slug), &existing); err != nil {
@@ -1797,7 +1784,7 @@ func (r *ShaleRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.Co
 	// Determine the next version number from a scan (outside the tx). The
 	// authoritative tx re-reads the candidate version key as ExpectAbsent,
 	// so a racing append that took the same number conflicts + retries.
-	res, err := r.appendAuthoritative(slug, kind, contentSHA, size, now)
+	res, err := r.appendAuthoritative(slug, kind, contentSHA, size, now, binds)
 	if err != nil {
 		_ = r.releaseBytes(identity, reserveSlug, body)
 		return AppendResult{}, err
@@ -1832,14 +1819,14 @@ var errVerTaken = errors.New("shale: candidate version number already taken")
 //     which we catch + re-number.
 //
 // MAX(ver_num) counts tombstones, so version numbers are never reused.
-func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, now time.Time) (AppendResult, error) {
+func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, now time.Time, refs []cluster.BlobRef) (AppendResult, error) {
 	pasteKey := shaleKeyPaste(slug)
 	newExpiry := now.Add(domain.RetentionWindow)
-	// The new version's staged blob (if any) was stashed by Commit; it binds in
-	// the SAME {slug} transaction as the version row. The blob id lands on the
-	// new version row and, when the head is unpinned (so the public URL follows
-	// this version), on the paste head row too.
-	refs := r.popBinds(slug.String())
+	// The new version's staged blob (if any) was passed in via refs (carried on
+	// the call's context by Commit); it binds in the SAME {slug} transaction as
+	// the version row. The blob id lands on the new version row and, when the
+	// head is unpinned (so the public URL follows this version), on the paste
+	// head row too.
 	blobID := firstBlobID(refs)
 	const maxRenumberAttempts = 16
 	for range maxRenumberAttempts {

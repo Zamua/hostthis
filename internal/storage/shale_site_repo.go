@@ -61,6 +61,7 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -94,11 +95,11 @@ type ShaleSiteRepo struct {
 func NewShaleSiteRepo(repo *ShaleRepo) *ShaleSiteRepo { return &ShaleSiteRepo{repo: repo} }
 
 // service.SiteRepo
-func (s *ShaleSiteRepo) InsertWithQuotaCheck(site domain.Site, dedupedSize int, userCap int64, now time.Time) error {
-	return s.repo.InsertSiteWithQuotaCheck(site, dedupedSize, userCap, now)
+func (s *ShaleSiteRepo) InsertWithQuotaCheck(ctx context.Context, site domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+	return s.repo.InsertSiteWithQuotaCheck(ctx, site, dedupedSize, userCap, now)
 }
-func (s *ShaleSiteRepo) ReplaceWithQuotaCheck(site domain.Site, dedupedSize int, userCap int64, now time.Time) error {
-	return s.repo.ReplaceSiteWithQuotaCheck(site, dedupedSize, userCap, now)
+func (s *ShaleSiteRepo) ReplaceWithQuotaCheck(ctx context.Context, site domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+	return s.repo.ReplaceSiteWithQuotaCheck(ctx, site, dedupedSize, userCap, now)
 }
 func (s *ShaleSiteRepo) Get(slug domain.Slug) (domain.Site, error) { return s.repo.GetSite(slug) }
 func (s *ShaleSiteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int64, error) {
@@ -292,10 +293,15 @@ func (r *ShaleRepo) reserveSiteReplaceBytes(identity, slug string, oldBody, newB
 // "Limits -> Durable total-bytes ceiling: an object-store quota").
 //
 // Returns nil / ErrSlugTaken / ErrOverUserQuota.
-func (r *ShaleRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+func (r *ShaleRepo) InsertSiteWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	identity := s.Identity.String()
 	slug := s.Slug.String()
 	body := int64(dedupedSize)
+
+	// The deploy's staged file refs (if any) ride this call's context, isolated
+	// from any concurrent same-slug write. Read once and pass them down so the
+	// authoritative {slug} transaction binds exactly this call's blobs.
+	binds := pendingBindsFromContext(ctx)
 
 	// Step 1: reserve (STRICT per-owner quota, combined paste+site).
 	if err := r.reserveSiteBytes(identity, slug, body, userCap, now); err != nil {
@@ -305,7 +311,7 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, use
 	// Step 2: authoritative {slug}-shard write. On any failure, release the
 	// reservation so the bytes are returned (over-count bounded to the
 	// failure window + the reconciler).
-	if err := r.insertSiteAuthoritative(s, dedupedSize); err != nil {
+	if err := r.insertSiteAuthoritative(s, dedupedSize, binds); err != nil {
 		_ = r.releaseSiteBytes(identity, slug)
 		return err
 	}
@@ -360,10 +366,14 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, use
 // landed replace, the same window the insert path accepts).
 //
 // Returns nil / ErrNotFound / ErrOverUserQuota.
-func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	identity := s.Identity.String()
 	slug := s.Slug.String()
 	newBody := int64(dedupedSize)
+
+	// The redeploy's staged file refs (if any) ride this call's context,
+	// isolated from any concurrent same-slug write. Read once and pass down.
+	binds := pendingBindsFromContext(ctx)
 
 	// Up-front ownership + existence gate. Sizes the delta (oldBody) and
 	// rejects a missing/foreign row BEFORE the counter is touched. A missing
@@ -388,7 +398,7 @@ func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, us
 	// Step 2: authoritative {slug}-shard swap. On any failure, release the
 	// reservation so the delta is undone (over/under-count bounded to the
 	// failure window + the reconciler).
-	if err := r.replaceSiteAuthoritative(s, dedupedSize); err != nil {
+	if err := r.replaceSiteAuthoritative(s, dedupedSize, binds); err != nil {
 		_ = r.releaseSiteBytes(identity, slug)
 		return err
 	}
@@ -412,21 +422,21 @@ func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, us
 // re-key the expiry index (delete the old (oldExpiresAt, slug) marker, write
 // the new one) so the sweep sees the restarted retention clock. A missing or
 // foreign-owned row inside the CAS collapses to ErrNotFound.
-func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int) error {
+func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int, refs []cluster.BlobRef) error {
 	row, err := shaleSiteRowFromDomain(s, dedupedSize)
 	if err != nil {
 		return err
 	}
 	siteKey := shaleKeySite(s.Slug)
-	// On the transactional shale-blob path the redeploy's staged files (stashed
-	// by Commit, popped here) bind in this swap transaction, and EVERY blob the
-	// OLD row referenced is unbound in the same transaction. So a file carried
-	// across the redeploy is re-staged under a fresh blob id and bound, while its
-	// OLD blob (and every truly-dropped file's blob) is unbound; the bytes go
-	// unreferenced and SweepOrphans reclaims them. This re-uploads unchanged
-	// bytes (no within-record byte dedup in this phase) but never leaks. The new
-	// FileBlobs side-table is authoritative for the read path.
-	refs := r.popBinds(s.Slug.String())
+	// On the transactional shale-blob path the redeploy's staged files (passed
+	// in via refs, carried on the call's context by Commit) bind in this swap
+	// transaction, and EVERY blob the OLD row referenced is unbound in the same
+	// transaction. So a file carried across the redeploy is re-staged under a
+	// fresh blob id and bound, while its OLD blob (and every truly-dropped
+	// file's blob) is unbound; the bytes go unreferenced and SweepOrphans
+	// reclaims them. This re-uploads unchanged bytes (no within-record byte
+	// dedup in this phase) but never leaks. The new FileBlobs side-table is
+	// authoritative for the read path.
 	row.FileBlobs = fileBlobsFromRefs(refs)
 	swapBody := func(tx shaleKVTx, bindAll func() error, unbind func(blobID string) error) error {
 		var cur siteRow
@@ -498,19 +508,18 @@ func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int) err
 // check is BOTH directions (sites/<slug> AND pastes/<slug>), and both reads
 // participate in the CAS read-set so a racing insert of the same slug (as a
 // site OR a paste) conflicts.
-func (r *ShaleRepo) insertSiteAuthoritative(s domain.Site, dedupedSize int) error {
+func (r *ShaleRepo) insertSiteAuthoritative(s domain.Site, dedupedSize int, refs []cluster.BlobRef) error {
 	row, err := shaleSiteRowFromDomain(s, dedupedSize)
 	if err != nil {
 		return err
 	}
 	siteKey := shaleKeySite(s.Slug)
-	// On the transactional shale-blob path the deploy's staged files (stashed by
-	// ShaleBlobUnit.Commit, popped here) are ALL bound in this one {slug}
-	// transaction with the manifest - no reservation needed (the files are
-	// reader-invisible until the bind co-commits with the manifest row). The
-	// sha -> blob-id side-table lands on the row so the read path resolves a
-	// manifest sha to the blob id GetBlob needs.
-	refs := r.popBinds(s.Slug.String())
+	// On the transactional shale-blob path the deploy's staged files (passed in
+	// via refs, carried on the call's context by ShaleBlobUnit.Commit) are ALL
+	// bound in this one {slug} transaction with the manifest - no reservation
+	// needed (the files are reader-invisible until the bind co-commits with the
+	// manifest row). The sha -> blob-id side-table lands on the row so the read
+	// path resolves a manifest sha to the blob id GetBlob needs.
 	row.FileBlobs = fileBlobsFromRefs(refs)
 	return r.runAuthoritative(siteKey, refs, func(tx shaleKVTx, bind func() error) error {
 		// Collision check, both directions. A found site OR paste is

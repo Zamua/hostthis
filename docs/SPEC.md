@@ -3712,7 +3712,11 @@ tag `{<slug>}` routes the pointer to the SAME shard as `pastes/<slug>` (the
 custom `ShardKeyFn` honors it), so the bind and the metadata write commit
 together in one CAS. The row carries the staged `blob_id` (a paste/version row's
 `blob_id` field; a site row's `file_blobs` sha->id side-table) so a read
-resolves the blob to fetch.
+resolves the blob to fetch. Each write's staged refs are scoped to that single
+call (carried on its own context, not a shared per-slug stash), so two
+concurrent writes on one slug - two updates, an update vs a delete, two
+redeploys - each bind their OWN blob; one call can never bind another's bytes
+or commit a row with no bind.
 
 **Reader-atomic create + atomic delete.** A reader sees a row WITH its blob or
 neither - never a row pointing at bytes that are not there, and never bytes a

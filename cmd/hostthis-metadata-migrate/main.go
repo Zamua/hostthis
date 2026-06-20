@@ -26,6 +26,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"flag"
 	"fmt"
@@ -129,7 +130,7 @@ func main() {
 					versionCount++
 					continue
 				}
-				if _, err := dst.AppendVersionWithQuotaCheck(p.Slug, v.Kind, v.ContentSHA, v.Size, 0, v.CreatedAt); err != nil {
+				if _, err := dst.AppendVersionWithQuotaCheck(context.Background(), p.Slug, v.Kind, v.ContentSHA, v.Size, 0, v.CreatedAt); err != nil {
 					logger.Fatalf("append v%d of %s: %v", v.VerNum, p.Slug, err)
 				}
 				if v.Deleted {
@@ -172,7 +173,7 @@ func main() {
 }
 
 func insertPasteIdempotent(dst *storage.SlateRepo, p domain.Paste) error {
-	err := dst.InsertWithQuotaCheck(p, 0, p.CreatedAt)
+	err := dst.InsertWithQuotaCheck(context.Background(), p, 0, p.CreatedAt)
 	if err == nil {
 		return nil
 	}

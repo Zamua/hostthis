@@ -31,6 +31,7 @@ package storage_test
 // All three skip cleanly unless MINIO_TEST_ENDPOINT is set.
 
 import (
+	"context"
 	"io"
 	"log"
 	"os"
@@ -72,7 +73,7 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 		Kind: domain.KindHTML, ContentSHA: "sha-good", Size: 100,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(good, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(context.Background(), good, 0, now); err != nil {
 		t.Fatalf("insert good paste: %v", err)
 	}
 	// Drain the deferred confirm before we manually desync the index below:
@@ -205,10 +206,10 @@ func TestShaleDecodeTolerance_BlobGCFailsClosed(t *testing.T) {
 		Kind: domain.KindHTML, ContentSHA: "sha-keep-poisoned", Size: 100,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(keep, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(context.Background(), keep, 0, now); err != nil {
 		t.Fatalf("insert keep paste: %v", err)
 	}
-	if err := repo.InsertWithQuotaCheck(poisoned, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(context.Background(), poisoned, 0, now); err != nil {
 		t.Fatalf("insert poisoned paste: %v", err)
 	}
 
@@ -304,7 +305,7 @@ func TestShaleDecodeTolerance_UserReadHardFails(t *testing.T) {
 		Kind: domain.KindHTML, ContentSHA: "sha-read", Size: 100,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(p, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert paste: %v", err)
 	}
 

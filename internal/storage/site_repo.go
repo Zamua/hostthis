@@ -113,7 +113,10 @@ func decodeManifest(s string) (domain.Manifest, error) {
 // The durable total-bytes ceiling is NOT checked here: it is the
 // object-store bucket quota, enforced when a blob Put is rejected (see
 // SPEC "Limits -> Durable total-bytes ceiling: an object-store quota").
-func (r *SiteRepo) InsertWithQuotaCheck(s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+// ctx is accepted to satisfy the service.SiteRepo interface (the shale backend
+// carries staged blob refs on it); the sqlite path has no shale-blob plane, so
+// it ignores ctx and uses its own serializable-tx context.
+func (r *SiteRepo) InsertWithQuotaCheck(_ context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -185,7 +188,10 @@ func (r *SiteRepo) InsertWithQuotaCheck(s domain.Site, dedupedSize int, userCap 
 //   - nil on success
 //   - ErrNotFound if the slug isn't a site owned by s.Identity
 //   - ErrOverUserQuota if accepting would exceed userCap
-func (r *SiteRepo) ReplaceWithQuotaCheck(s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+//
+// ctx is accepted to satisfy the service.SiteRepo interface; the sqlite path
+// ignores it (no shale-blob plane) and uses its own serializable-tx context.
+func (r *SiteRepo) ReplaceWithQuotaCheck(_ context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -267,7 +273,7 @@ func (r *SiteRepo) ReplaceWithQuotaCheck(s domain.Site, dedupedSize int, userCap
 // Insert is the simple variant used by tests + callers that don't need
 // quota enforcement.
 func (r *SiteRepo) Insert(s domain.Site) error {
-	return r.InsertWithQuotaCheck(s, s.Manifest.DedupedSize(), 0, s.CreatedAt)
+	return r.InsertWithQuotaCheck(context.Background(), s, s.Manifest.DedupedSize(), 0, s.CreatedAt)
 }
 
 // Get returns the site for slug, or ErrNotFound. Like PasteRepo.Get it

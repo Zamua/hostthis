@@ -22,7 +22,7 @@ type PasteAdmin interface {
 	SetName(domain.Slug, string) error
 	SetPinnedVersion(domain.Slug, domain.Version) error
 	Unpin(domain.Slug) error
-	AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (storage.AppendResult, error)
+	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (storage.AppendResult, error)
 	ListVersions(domain.Slug) ([]domain.Version, error)
 	GetVersion(domain.Slug, int) (domain.Version, error)
 	DeleteVersion(domain.Slug, int) error
@@ -164,9 +164,9 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 		return UpdateResult{}, fmt.Errorf("blob write: %w", err)
 	}
 	var res storage.AppendResult
-	err = m.Blob.Commit(ctx, []BlobHandle{handle}, func() error {
+	err = m.Blob.Commit(ctx, []BlobHandle{handle}, func(ctx context.Context) error {
 		var aerr error
-		res, aerr = m.Repo.AppendVersionWithQuotaCheck(slug, kind, staged.SHA, staged.CompressedSize, int64(domain.UserQuotaBytes), now)
+		res, aerr = m.Repo.AppendVersionWithQuotaCheck(ctx, slug, kind, staged.SHA, staged.CompressedSize, int64(domain.UserQuotaBytes), now)
 		return aerr
 	})
 	if err != nil {

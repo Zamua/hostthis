@@ -449,14 +449,14 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 
 func mustInsert(t *testing.T, repo *storage.ShaleRepo, p domain.Paste, cap int64) {
 	t.Helper()
-	if err := repo.InsertWithQuotaCheck(p, cap, p.CreatedAt); err != nil {
+	if err := repo.InsertWithQuotaCheck(context.Background(), p, cap, p.CreatedAt); err != nil {
 		t.Fatalf("InsertWithQuotaCheck(%s): %v", p.Slug, err)
 	}
 }
 
 func mustAppend(t *testing.T, repo *storage.ShaleRepo, slug string, kind domain.ContentKind, sha string, size int, cap int64, now time.Time) {
 	t.Helper()
-	if _, err := repo.AppendVersionWithQuotaCheck(domain.Slug(slug), kind, sha, size, cap, now); err != nil {
+	if _, err := repo.AppendVersionWithQuotaCheck(context.Background(), domain.Slug(slug), kind, sha, size, cap, now); err != nil {
 		t.Fatalf("AppendVersionWithQuotaCheck(%s): %v", slug, err)
 	}
 }

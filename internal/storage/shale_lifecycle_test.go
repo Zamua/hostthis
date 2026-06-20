@@ -11,6 +11,7 @@ package storage_test
 // Skips cleanly unless MINIO_TEST_ENDPOINT is set.
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func insertPending(t *testing.T, repo *storage.ShaleRepo, owner, slug string, si
 		Size:       size,
 		CreatedAt:  now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(p, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert pending %s: %v", slug, err)
 	}
 	got, err := repo.Get(p.Slug)

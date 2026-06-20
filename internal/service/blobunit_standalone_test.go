@@ -103,7 +103,7 @@ func TestStandalone_Commit_RunsMetaWrite(t *testing.T) {
 
 	// Success: metaWrite runs, nil error.
 	calls := 0
-	if err := u.Commit(context.Background(), []BlobHandle{h}, func() error {
+	if err := u.Commit(context.Background(), []BlobHandle{h}, func(context.Context) error {
 		calls++
 		return nil
 	}); err != nil {
@@ -115,7 +115,7 @@ func TestStandalone_Commit_RunsMetaWrite(t *testing.T) {
 
 	// Failure: Commit returns metaWrite's error unchanged.
 	sentinel := errors.New("metadata write failed")
-	if err := u.Commit(context.Background(), []BlobHandle{h}, func() error {
+	if err := u.Commit(context.Background(), []BlobHandle{h}, func(context.Context) error {
 		return sentinel
 	}); !errors.Is(err, sentinel) {
 		t.Fatalf("Commit (err): got %v, want %v", err, sentinel)
