@@ -75,9 +75,11 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strconv"
@@ -87,6 +89,7 @@ import (
 
 	"github.com/Zamua/shale/backends/slate"
 	"github.com/Zamua/shale/pkg/backend"
+	"github.com/Zamua/shale/pkg/blob"
 	"github.com/Zamua/shale/pkg/cluster"
 	"github.com/Zamua/shale/pkg/rpc"
 	"github.com/Zamua/shale/pkg/storageunit"
@@ -187,6 +190,17 @@ type ShaleConfig struct {
 	// nil falls back to log.Default(). It never affects the blob-GC ref-set
 	// scans, which fail closed rather than skip+log.
 	Logger *log.Logger
+
+	// BlobStore is the OPTIONAL streaming blob byte plane. When set, the repo
+	// opens its cluster via cluster.NewBlobKV (the blob-capable surface), so a
+	// staged blob's pointer co-commits with the metadata on the owning shard
+	// (the transactional shale-blob path, docs/SPEC.md "Shale-collocated
+	// blobs"). Prod wires the MinIO blob.Store adapter here (a DISTINCT blob
+	// bucket from the metadata's object store); tests inject blobmem.New(). A
+	// nil BlobStore keeps the metadata-only path (cluster.Open, no *BlobKV) -
+	// the back-compat shape every shale test that does not exercise blobs
+	// uses, and the shape ShaleBlobUnit is simply not wired for.
+	BlobStore blob.Store
 }
 
 // ShaleRepo is the shale-cluster-backed metadata store. It satisfies the
@@ -203,6 +217,26 @@ type ShaleConfig struct {
 // Close gracefully stops/closes them when set.
 type ShaleRepo struct {
 	cluster *cluster.Cluster
+
+	// kv is the blob-capable cluster surface, set ONLY when cfg.BlobStore is
+	// non-nil (the transactional shale-blob path). It wraps the SAME *Cluster
+	// as `cluster` (kv.Cluster() == cluster), so every existing r.cluster.*
+	// call site is unchanged; only the step-2 authoritative writes that bind a
+	// staged blob switch to r.kv.Transact(slug, func(*cluster.BlobTx)) so the
+	// BindBlob co-commits with the metadata. nil on the metadata-only path
+	// (cfg.BlobStore nil) - the back-compat shape.
+	kv *cluster.BlobKV
+
+	// pendingBinds holds the staged blob refs a ShaleBlobUnit.Commit handed
+	// off for the slug it is about to write, keyed by slug. The authoritative
+	// {slug} write (insertAuthoritative / appendAuthoritative /
+	// insertSiteAuthoritative / replaceSiteAuthoritative) pops this slug's refs
+	// inside its transaction and BindBlobs them, so the pointer co-commits with
+	// the row WITHOUT changing the service-layer metadata-write signature. The
+	// stash is per-slug and guarded by pendingMu; Commit clears it after the
+	// write. nil on the metadata-only path.
+	pendingMu    sync.Mutex
+	pendingBinds map[string][]cluster.BlobRef
 
 	// logger records skipped records in the tolerant background scans
 	// (the expiry/reconcile family). A nil logger falls back to
@@ -396,6 +430,10 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		// See docs/SPEC.md "Deploy arc: replication factor 1, then scale out".
 		ReadConsistency: cluster.ReadQuorum,
 		ShardKeyFn:      shaleShardKey,
+		// Optional streaming blob plane. When set, cluster.NewBlobKV opens the
+		// blob-capable surface so a staged blob's pointer co-commits with the
+		// metadata; when nil, cluster.Open opens the metadata-only path.
+		BlobStore: cfg.BlobStore,
 	}
 
 	var closeFactory func() error
@@ -437,24 +475,53 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		clusterCfg.Backend = be
 	}
 
-	cl, err := cluster.Open(clusterCfg)
-	if err != nil {
-		if closeFactory != nil {
-			_ = closeFactory()
-		} else if clusterCfg.Backend != nil {
-			_ = clusterCfg.Backend.Close()
+	// Open the cluster. With a blob store configured, open the blob-capable
+	// surface (cluster.NewBlobKV) so staged-blob pointers can co-commit with
+	// the metadata; without one, the metadata-only path (cluster.Open). Both
+	// hold the SAME underlying *Cluster, so r.cluster is set either way and
+	// every existing routed op is unchanged.
+	var (
+		cl *cluster.Cluster
+		kv *cluster.BlobKV
+	)
+	if cfg.BlobStore != nil {
+		bkv, berr := cluster.NewBlobKV(clusterCfg)
+		if berr != nil {
+			if closeFactory != nil {
+				_ = closeFactory()
+			} else if clusterCfg.Backend != nil {
+				_ = clusterCfg.Backend.Close()
+			}
+			cleanup()
+			return nil, fmt.Errorf("shale: open blob cluster: %w", berr)
 		}
-		cleanup()
-		return nil, fmt.Errorf("shale: open cluster: %w", err)
+		kv = bkv
+		cl = bkv.Cluster()
+	} else {
+		c, oerr := cluster.Open(clusterCfg)
+		if oerr != nil {
+			if closeFactory != nil {
+				_ = closeFactory()
+			} else if clusterCfg.Backend != nil {
+				_ = clusterCfg.Backend.Close()
+			}
+			cleanup()
+			return nil, fmt.Errorf("shale: open cluster: %w", oerr)
+		}
+		cl = c
 	}
 
 	r := &ShaleRepo{
 		cluster:      cl,
+		kv:           kv,
 		logger:       cfg.Logger,
 		bindAddr:     cfg.BindAddr,
 		grpcAddr:     advertiseGRPCAddr,
 		cache:        cache,
 		closeFactory: closeFactory,
+	}
+	if kv != nil {
+		r.pendingBinds = make(map[string][]cluster.BlobRef)
 	}
 
 	// Multi-node: stand up the peer-forwarding server the cluster advertised
@@ -903,7 +970,7 @@ func formatCounter(n int64) []byte {
 
 // txGetCounter reads the identity_bytes counter inside a CAS tx, recording
 // the read-check. Absent reads as 0 (and an ExpectAbsent check).
-func txGetCounter(tx backend.Transaction, key []byte) (int64, error) {
+func txGetCounter(tx shaleKVTx, key []byte) (int64, error) {
 	raw, err := tx.Get(key)
 	if err != nil {
 		if errors.Is(err, backend.ErrNotFound) {
@@ -916,7 +983,7 @@ func txGetCounter(tx backend.Transaction, key []byte) (int64, error) {
 
 // shaleTxGetJSON reads + decodes inside a CAS tx, returning storage.ErrNotFound
 // when absent so the closure can branch on existence.
-func shaleTxGetJSON(tx backend.Transaction, key []byte, out any) error {
+func shaleTxGetJSON(tx shaleKVTx, key []byte, out any) error {
 	raw, err := tx.Get(key)
 	if err != nil {
 		if errors.Is(err, backend.ErrNotFound) {
@@ -935,7 +1002,7 @@ func shaleTxGetJSON(tx backend.Transaction, key []byte, out any) error {
 }
 
 // shaleTxPutJSON encodes + buffers a Put inside a CAS tx.
-func shaleTxPutJSON(tx backend.Transaction, key []byte, v any) error {
+func shaleTxPutJSON(tx shaleKVTx, key []byte, v any) error {
 	body, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", key, err)
@@ -1181,6 +1248,194 @@ func (r *ShaleRepo) decrementBytes(identity string, body int64) error {
 	})
 }
 
+// --- Shale-blob pointer binding (the transactional shale-blob path) --------
+//
+// These helpers let a ShaleBlobUnit.Commit thread a staged blob's BlobRef into
+// the authoritative {slug} write WITHOUT changing the service-layer metadata-
+// write signature. Commit stashes the refs for the slug it is about to write
+// (StashBinds), then runs the repo's existing metadata write (Insert /
+// AppendVersion / site insert); that write pops the slug's refs INSIDE its
+// {slug} transaction (popBinds) and BindBlobs each one, so the pointer co-
+// commits with the row. Commit clears the stash afterward (ClearBinds).
+//
+// The mechanism is per-slug + mutex-guarded. It is only ever populated on the
+// blob-capable path (r.kv != nil): on the metadata-only path popBinds always
+// returns nil (the map is nil), so the authoritative writes take the unchanged
+// no-bind branch.
+
+// StashBinds records the staged blob refs Commit will bind alongside the next
+// authoritative write for slug. It REPLACES any prior stash for the slug (a
+// retry-on-collision loop re-stashes before each attempt). No-op when the repo
+// is metadata-only.
+func (r *ShaleRepo) StashBinds(slug string, refs []cluster.BlobRef) {
+	if r.kv == nil {
+		return
+	}
+	r.pendingMu.Lock()
+	r.pendingBinds[slug] = refs
+	r.pendingMu.Unlock()
+}
+
+// ClearBinds drops any stashed refs for slug. Commit defers it so a metadata
+// write that returned an error (slug collision, quota) does not leave a stale
+// stash that a later same-slug write would wrongly bind.
+func (r *ShaleRepo) ClearBinds(slug string) {
+	if r.kv == nil {
+		return
+	}
+	r.pendingMu.Lock()
+	delete(r.pendingBinds, slug)
+	r.pendingMu.Unlock()
+}
+
+// popBinds returns the stashed refs for slug (or nil). It does NOT delete them:
+// the {slug} authoritative transaction may re-run on a CAS conflict, and each
+// run must bind the same refs (BindBlob is an idempotent tx.Put of the bref
+// key). ClearBinds (deferred by Commit) removes the stash once the write
+// completes. Returns nil on the metadata-only path.
+func (r *ShaleRepo) popBinds(slug string) []cluster.BlobRef {
+	if r.kv == nil {
+		return nil
+	}
+	r.pendingMu.Lock()
+	refs := r.pendingBinds[slug]
+	r.pendingMu.Unlock()
+	return refs
+}
+
+// StageBlobStream streams an already-encoded body to the final object via the
+// blob-capable cluster (BlobKV.StageBlob), returning the BlobRef the binding
+// transaction consumes. It is the repo entry the ShaleBlobUnit.Stage path calls
+// (the unit holds *ShaleRepo, not the raw *BlobKV, so the cluster handle stays
+// encapsulated). routeKey is the metadata key whose shard the blob co-locates
+// with (pastes/<slug> or sites/<slug> - both route to the same unit).
+// contentHash is the file's content sha, carried on the ref (BlobRef.ContentHash
+// -> the persisted blob.Pointer) and used by the site read path's sha -> blob-id
+// side-table.
+func (r *ShaleRepo) StageBlobStream(ctx context.Context, routeKey []byte, body io.Reader, size int64, contentHash string) (cluster.BlobRef, error) {
+	if r.kv == nil {
+		return cluster.BlobRef{}, errors.New("shale: StageBlobStream requires a blob-configured cluster (cfg.BlobStore was nil)")
+	}
+	ref, err := r.kv.StageBlob(ctx, routeKey, body, size)
+	if err != nil {
+		return cluster.BlobRef{}, err
+	}
+	ref.ContentHash = contentHash
+	return ref, nil
+}
+
+// GetBlobStream streams the bytes for blobid under routeKey's shard (GetBlob).
+// The returned stream is the stored (compressed) body; the ShaleBlobUnit.Read
+// wraps it in the magic-peek + zstd decode so the read path sees decompressed
+// bytes, exactly as the standalone GetReader does. ctx MUST outlive the
+// returned reader (it drives the lazy object-store stream). A blob whose pointer
+// is gone (unbound/deleted) yields blob.ErrNotFound.
+func (r *ShaleRepo) GetBlobStream(ctx context.Context, routeKey []byte, blobid string) (io.ReadCloser, int64, error) {
+	if r.kv == nil {
+		return nil, 0, errors.New("shale: GetBlobStream requires a blob-configured cluster (cfg.BlobStore was nil)")
+	}
+	return r.kv.GetBlob(ctx, routeKey, blobid)
+}
+
+// SweepBlobOrphans reclaims staged-but-unbound blob objects under this node's
+// mounted units, age-gated by grace (SweepOrphans). hostthis schedules it in
+// the sweep loop on the shale-blob path. Returns nil (a no-op) on the
+// metadata-only path; the caller gates on HasBlobPlane.
+func (r *ShaleRepo) SweepBlobOrphans(ctx context.Context, now time.Time, grace time.Duration) error {
+	if r.kv == nil {
+		return nil
+	}
+	return r.kv.SweepOrphans(ctx, now, grace)
+}
+
+// HasBlobPlane reports whether this repo runs the transactional shale-blob path
+// (a blob store was configured). The cmd wiring uses it to pick ShaleBlobUnit
+// over StandaloneBlobUnit and to schedule SweepOrphans.
+func (r *ShaleRepo) HasBlobPlane() bool { return r.kv != nil }
+
+// RouteKeyForSlug returns the canonical metadata route key a slug's blobs co-
+// locate with: pastes/<slug>. pastes/<slug> and sites/<slug> both shard on
+// <slug>, so they resolve to the SAME unit and the SAME bref key; the blob unit
+// uses this one route key for staging, reading, and the unbind-key derivation
+// whether the record is a paste or a site. Exposed because shaleKeyPaste is
+// unexported and the ShaleBlobUnit (a separate adapter package) needs it.
+func (r *ShaleRepo) RouteKeyForSlug(slug string) []byte {
+	return shaleKeyPaste(domain.Slug(slug))
+}
+
+// ResolveBlobID maps a (slug, contentSHA) the read path holds back to the
+// shale blob id GetBlob needs. The metadata carries the blob id (the row's
+// BlobID for a paste/version, the site row's FileBlobs side-table for a site
+// file); the http/manage read seam only has the content sha, so this routed
+// lookup bridges the two. It checks, in order:
+//
+//  1. the paste head row: its served ContentSHA -> its BlobID (the common
+//     path - an HTML/markdown paste read passes the head's ContentSHA),
+//  2. the paste's version rows: a non-head (pinned or Show'd) version whose
+//     ContentSHA matches -> that version's BlobID,
+//  3. the site row's FileBlobs[sha] (a static-site file read).
+//
+// Returns ("", ErrNotFound) when no metadata references the sha (a deleted /
+// unbound blob), which the seam maps to blob.ErrNotFound, the same not-found
+// shape a missing object yields. Legacy rows with an empty BlobID return ""
+// here; the seam treats "" as "sha-keyed" (no shale blob id), which during a
+// migration window means the read falls back - but on a pure shale-blob
+// deployment every row carries a BlobID.
+func (r *ShaleRepo) ResolveBlobID(slug domain.Slug, contentSHA string) (string, error) {
+	// Paste head first (one routed Get).
+	var p pasteRow
+	perr := r.getJSON(shaleKeyPaste(slug), &p)
+	if perr == nil {
+		if p.ContentSHA == contentSHA && p.BlobID != "" {
+			return p.BlobID, nil
+		}
+		// Not the head's served sha - scan this slug's versions for a match
+		// (a pinned version, or manage Show of a specific version).
+		versions, verr := r.scanVersions(slug)
+		if verr != nil {
+			return "", verr
+		}
+		for _, v := range versions {
+			if v.ContentSHA == contentSHA && v.BlobID != "" {
+				return v.BlobID, nil
+			}
+		}
+		return "", ErrNotFound
+	}
+	if !errors.Is(perr, ErrNotFound) {
+		return "", perr
+	}
+	// Not a paste - try a site file.
+	var sr siteRow
+	serr := r.getJSON(shaleKeySite(slug), &sr)
+	if serr != nil {
+		if errors.Is(serr, ErrNotFound) {
+			return "", ErrNotFound
+		}
+		return "", serr
+	}
+	if id, ok := sr.FileBlobs[contentSHA]; ok && id != "" {
+		return id, nil
+	}
+	return "", ErrNotFound
+}
+
+// blobRefFor reconstructs the BlobRef that unbinds blobid's pointer under
+// routeKey's shard. UnbindBlob (a tx.Delete of brefKey(ref)) needs only the
+// route shard + unit + blob id, all derivable from routeKey purely (the same
+// derivation StageBlob/GetBlob use): Unit = RoutedUnitToken(routeKey),
+// RouteShard = shaleShardKey(routeKey). Size/ContentHash are irrelevant to the
+// bref key, so they stay zero. routeKey is pastes/<slug> (or sites/<slug>); the
+// pointer co-shards there, so the unbind tx.Delete lands in the same {slug}
+// transaction as the metadata delete.
+func (r *ShaleRepo) blobRefFor(routeKey []byte, blobID string) cluster.BlobRef {
+	return cluster.BlobRef{
+		Unit:       r.kv.Cluster().RoutedUnitToken(routeKey),
+		RouteShard: shaleShardKey(routeKey),
+		BlobID:     blobID,
+	}
+}
+
 // --- PasteRepo / PasteAdmin writes -----------------------------------------
 
 // InsertWithQuotaCheck creates a paste via the three-step reservation
@@ -1247,14 +1502,60 @@ func (r *ShaleRepo) deferredConfirmInsert(p domain.Paste) {
 	}
 }
 
+// shaleKVTx is the minimal transaction surface insertAuthoritative (and the
+// other authoritative writes) need: the buffered Get/Put/Delete every shale
+// transaction type exposes. BOTH backend.Transaction (the metadata-only path)
+// and *cluster.BlobTx (the blob-binding path) satisfy it, so one body serves
+// both: the closure runs against backend.Transaction when no blob is bound, and
+// against the *BlobTx when a staged blob must co-commit (see runAuthoritative).
+type shaleKVTx interface {
+	Get(key []byte) ([]byte, error)
+	Put(key, value []byte) error
+	Delete(key []byte) error
+}
+
+// runAuthoritative runs body in a {slug}-pinned single-shard CAS transaction.
+// When refs is empty (the metadata-only path, or no blob staged) it routes
+// through the plain cluster transaction; when refs is non-empty (a staged blob
+// must co-commit) it routes through the blob-capable r.kv.Transact so body can
+// BindBlob each ref in the SAME transaction. body takes the tx AND a bind
+// callback: on the no-bind path bind is a no-op; on the blob path bind issues
+// the BindBlobs. This keeps the authoritative-write bodies identical across the
+// two paths (the only divergence is whether the binds fire), so the carefully-
+// reasoned collision/read-set logic is written once.
+func (r *ShaleRepo) runAuthoritative(pinKey []byte, refs []cluster.BlobRef, body func(tx shaleKVTx, bind func() error) error) error {
+	if len(refs) == 0 || r.kv == nil {
+		return r.cluster.Transact(pinKey, func(tx backend.Transaction) error {
+			return body(tx, func() error { return nil })
+		})
+	}
+	return r.kv.Transact(pinKey, func(tx *cluster.BlobTx) error {
+		return body(tx, func() error {
+			for _, ref := range refs {
+				if err := tx.BindBlob(ref); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	})
+}
+
 // insertAuthoritative writes the {slug}-shard authoritative rows in one
 // CAS transaction: the paste row, the v1 version row, slug_owner, and the
 // expiry index. The slug-collision check (reject if pastes/<slug> OR
 // sites/<slug> already exists) participates in the transaction's read-set so
 // a racing insert of the same slug (as a paste OR a site) conflicts.
+//
+// On the transactional shale-blob path the paste's staged blob (stashed by
+// ShaleBlobUnit.Commit and popped here) is BOUND in this same transaction, so
+// the pointer co-commits with the row, and the blob id lands on both the paste
+// head row and the v1 version row.
 func (r *ShaleRepo) insertAuthoritative(p domain.Paste) error {
 	pasteKey := shaleKeyPaste(p.Slug)
-	err := r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
+	refs := r.popBinds(p.Slug.String())
+	blobID := firstBlobID(refs)
+	return r.runAuthoritative(pasteKey, refs, func(tx shaleKVTx, bind func() error) error {
 		// Collision check: a found paste is ErrSlugTaken. The ExpectAbsent
 		// read-check makes a concurrent insert of the same slug conflict.
 		if _, err := tx.Get(pasteKey); err == nil {
@@ -1272,13 +1573,16 @@ func (r *ShaleRepo) insertAuthoritative(p domain.Paste) error {
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return fmt.Errorf("site slug check: %w", err)
 		}
-		if err := shaleTxPutJSON(tx, pasteKey, pasteFromDomain(p)); err != nil {
+		pr := pasteFromDomain(p)
+		pr.BlobID = blobID
+		if err := shaleTxPutJSON(tx, pasteKey, pr); err != nil {
 			return err
 		}
 		v1 := versionRow{
 			VerNum:     1,
 			Kind:       string(p.Kind),
 			ContentSHA: p.ContentSHA,
+			BlobID:     blobID,
 			Size:       p.Size,
 			CreatedAt:  p.CreatedAt,
 		}
@@ -1288,9 +1592,42 @@ func (r *ShaleRepo) insertAuthoritative(p domain.Paste) error {
 		if err := tx.Put(shaleKeySlugOwner(p.Slug), []byte(p.Identity.String())); err != nil {
 			return err
 		}
-		return tx.Put(shaleKeyExpiry(p.ExpiresAt, p.Slug), markerValue)
+		if err := tx.Put(shaleKeyExpiry(p.ExpiresAt, p.Slug), markerValue); err != nil {
+			return err
+		}
+		// Bind the staged blob pointer LAST so it co-commits with the rows.
+		return bind()
 	})
-	return err
+}
+
+// firstBlobID returns the BlobID of the first ref, or "" when there are none.
+// A paste/version has exactly one blob, so the single-blob authoritative writes
+// take the head ref's id.
+func firstBlobID(refs []cluster.BlobRef) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	return refs[0].BlobID
+}
+
+// fileBlobsFromRefs builds the site row's sha -> blob-id side-table from the
+// staged file refs. Each ref's ContentHash is the file's content sha (set by
+// StageBlobStream) and BlobID is the staged blob id, so the read path resolves a
+// manifest sha to the blob id GetBlob needs. A site dedups identical files, so
+// two manifest paths sharing a sha map to one ref/one blob id - the map keys on
+// sha, so duplicates collapse correctly. Returns nil for no refs (omitempty
+// keeps the row clean on the no-blob path).
+func fileBlobsFromRefs(refs []cluster.BlobRef) map[string]string {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(refs))
+	for _, ref := range refs {
+		if ref.ContentHash != "" {
+			out[ref.ContentHash] = ref.BlobID
+		}
+	}
+	return out
 }
 
 // confirmInsert is step 3: drop the reservation marker, write the
@@ -1498,6 +1835,12 @@ var errVerTaken = errors.New("shale: candidate version number already taken")
 func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, now time.Time) (AppendResult, error) {
 	pasteKey := shaleKeyPaste(slug)
 	newExpiry := now.Add(domain.RetentionWindow)
+	// The new version's staged blob (if any) was stashed by Commit; it binds in
+	// the SAME {slug} transaction as the version row. The blob id lands on the
+	// new version row and, when the head is unpinned (so the public URL follows
+	// this version), on the paste head row too.
+	refs := r.popBinds(slug.String())
+	blobID := firstBlobID(refs)
 	const maxRenumberAttempts = 16
 	for range maxRenumberAttempts {
 		versions, err := r.scanVersions(slug)
@@ -1508,7 +1851,7 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKin
 		verKey := shaleKeyVersion(slug, newVer)
 
 		var wasPinned bool
-		txErr := r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
+		txErr := r.runAuthoritative(pasteKey, refs, func(tx shaleKVTx, bind func() error) error {
 			var p pasteRow
 			if err := shaleTxGetJSON(tx, pasteKey, &p); err != nil {
 				return err
@@ -1528,6 +1871,7 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKin
 				VerNum:     newVer,
 				Kind:       string(kind),
 				ContentSHA: contentSHA,
+				BlobID:     blobID,
 				Size:       size,
 				CreatedAt:  now,
 			}
@@ -1543,12 +1887,17 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKin
 			if p.PinnedVersion == 0 {
 				p.Kind = string(kind)
 				p.ContentSHA = contentSHA
+				p.BlobID = blobID
 				p.Size = size
 			}
 			if err := shaleTxPutJSON(tx, pasteKey, p); err != nil {
 				return err
 			}
-			return tx.Put(shaleKeyExpiry(p.ExpiresAt, slug), markerValue)
+			if err := tx.Put(shaleKeyExpiry(p.ExpiresAt, slug), markerValue); err != nil {
+				return err
+			}
+			// Bind the new version's blob pointer, co-committed with the rows.
+			return bind()
 		})
 		switch {
 		case txErr == nil:
@@ -1620,7 +1969,12 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 	// exposed to.
 	var freed int64
 	pasteKey := shaleKeyPaste(slug)
-	err = r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
+	// On the transactional shale-blob path the paste's blobs are unbound in the
+	// SAME {slug} transaction (atomic delete): each live version's pointer is
+	// removed via unbind, so the bytes go unreferenced exactly when the rows
+	// vanish, and SweepOrphans reclaims them after the grace. unbind is a no-op
+	// on the metadata-only path (the global content-addressed sweep reclaims).
+	delBody := func(tx shaleKVTx, unbind func(blobID string) error) error {
 		freed = 0 // reset: the closure re-runs on a CAS conflict
 		if err := tx.Delete(pasteKey); err != nil {
 			return err
@@ -1645,6 +1999,17 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 			if !vr.Deleted {
 				freed += int64(vr.Size) // only bytes still live count toward the decrement
 			}
+			// Unbind this version's blob (the bref pointer) so its bytes go
+			// unreferenced. A tombstoned version's pointer was already unbound
+			// by DeleteVersion, so re-unbinding (an idempotent tx.Delete of a
+			// missing key) is harmless. Only the BlobID-carrying rows (the
+			// shale-blob path) have a pointer; legacy rows carry no BlobID and
+			// unbind is skipped.
+			if vr.BlobID != "" {
+				if err := unbind(vr.BlobID); err != nil {
+					return err
+				}
+			}
 			if err := tx.Delete(vKey); err != nil {
 				return err
 			}
@@ -1653,7 +2018,18 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 			return err
 		}
 		return tx.Delete(shaleKeyExpiry(p.ExpiresAt, slug))
-	})
+	}
+	if r.kv != nil {
+		err = r.kv.Transact(pasteKey, func(tx *cluster.BlobTx) error {
+			return delBody(tx, func(blobID string) error {
+				return tx.UnbindBlob(r.blobRefFor(pasteKey, blobID))
+			})
+		})
+	} else {
+		err = r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
+			return delBody(tx, func(string) error { return nil })
+		})
+	}
 	if err != nil {
 		return err
 	}
@@ -1693,9 +2069,18 @@ func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 	}
 	identity := p.Identity
 	verKey := shaleKeyVersion(slug, ver)
+	// The tombstone tx pins on verKey, but the blob pointer (bref) routes on the
+	// {slug} shard - the SAME unit verKey routes to (versions/<slug>/<NNNN> and
+	// pastes/<slug> both shard on <slug>), so the unbind co-commits with the
+	// tombstone in one single-shard transaction. Each version's blob has a
+	// unique stage-minted blob id (no within-record dedup in this phase), so a
+	// tombstoned version's blob is referenced by no live sibling and is safe to
+	// unbind unconditionally; the served (head) version cannot be deleted (the
+	// service guards it), so the head row's blob id is never the one unbound here.
+	pasteKey := shaleKeyPaste(slug)
 
 	var freed int64
-	err := r.cluster.Transact(verKey, func(tx backend.Transaction) error {
+	verBody := func(tx shaleKVTx, unbind func(blobID string) error) error {
 		var v versionRow
 		if err := shaleTxGetJSON(tx, verKey, &v); err != nil {
 			return err
@@ -1706,8 +2091,26 @@ func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 		}
 		freed = int64(v.Size)
 		v.Deleted = true
-		return shaleTxPutJSON(tx, verKey, v)
-	})
+		if err := shaleTxPutJSON(tx, verKey, v); err != nil {
+			return err
+		}
+		if v.BlobID != "" {
+			return unbind(v.BlobID)
+		}
+		return nil
+	}
+	var err error
+	if r.kv != nil {
+		err = r.kv.Transact(verKey, func(tx *cluster.BlobTx) error {
+			return verBody(tx, func(blobID string) error {
+				return tx.UnbindBlob(r.blobRefFor(pasteKey, blobID))
+			})
+		})
+	} else {
+		err = r.cluster.Transact(verKey, func(tx backend.Transaction) error {
+			return verBody(tx, func(string) error { return nil })
+		})
+	}
 	if err != nil {
 		return err
 	}

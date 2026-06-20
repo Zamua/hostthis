@@ -68,6 +68,7 @@ import (
 	"time"
 
 	"github.com/Zamua/shale/pkg/backend"
+	"github.com/Zamua/shale/pkg/cluster"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
@@ -417,7 +418,17 @@ func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int) err
 		return err
 	}
 	siteKey := shaleKeySite(s.Slug)
-	return r.cluster.Transact(siteKey, func(tx backend.Transaction) error {
+	// On the transactional shale-blob path the redeploy's staged files (stashed
+	// by Commit, popped here) bind in this swap transaction, and EVERY blob the
+	// OLD row referenced is unbound in the same transaction. So a file carried
+	// across the redeploy is re-staged under a fresh blob id and bound, while its
+	// OLD blob (and every truly-dropped file's blob) is unbound; the bytes go
+	// unreferenced and SweepOrphans reclaims them. This re-uploads unchanged
+	// bytes (no within-record byte dedup in this phase) but never leaks. The new
+	// FileBlobs side-table is authoritative for the read path.
+	refs := r.popBinds(s.Slug.String())
+	row.FileBlobs = fileBlobsFromRefs(refs)
+	swapBody := func(tx shaleKVTx, bindAll func() error, unbind func(blobID string) error) error {
 		var cur siteRow
 		if err := shaleTxGetJSON(tx, siteKey, &cur); err != nil {
 			if errors.Is(err, ErrNotFound) {
@@ -445,7 +456,40 @@ func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int) err
 				return err
 			}
 		}
-		return tx.Put(shaleKeyExpirySite(s.ExpiresAt, s.Slug), markerValue)
+		if err := tx.Put(shaleKeyExpirySite(s.ExpiresAt, s.Slug), markerValue); err != nil {
+			return err
+		}
+		// Unbind every blob the OLD row referenced (its FileBlobs side-table);
+		// the new manifest's files are freshly staged + bound below, so a file
+		// carried across re-deploys is re-staged under a new id and the old id is
+		// dropped. This frees the dropped files' bytes (and the unchanged files'
+		// old bytes); SweepOrphans reclaims them after the grace.
+		for _, oldBlobID := range cur.FileBlobs {
+			if err := unbind(oldBlobID); err != nil {
+				return err
+			}
+		}
+		return bindAll()
+	}
+	if r.kv != nil {
+		return r.kv.Transact(siteKey, func(tx *cluster.BlobTx) error {
+			return swapBody(tx,
+				func() error {
+					for _, ref := range refs {
+						if err := tx.BindBlob(ref); err != nil {
+							return err
+						}
+					}
+					return nil
+				},
+				func(blobID string) error {
+					return tx.UnbindBlob(r.blobRefFor(siteKey, blobID))
+				},
+			)
+		})
+	}
+	return r.cluster.Transact(siteKey, func(tx backend.Transaction) error {
+		return swapBody(tx, func() error { return nil }, func(string) error { return nil })
 	})
 }
 
@@ -460,7 +504,15 @@ func (r *ShaleRepo) insertSiteAuthoritative(s domain.Site, dedupedSize int) erro
 		return err
 	}
 	siteKey := shaleKeySite(s.Slug)
-	return r.cluster.Transact(siteKey, func(tx backend.Transaction) error {
+	// On the transactional shale-blob path the deploy's staged files (stashed by
+	// ShaleBlobUnit.Commit, popped here) are ALL bound in this one {slug}
+	// transaction with the manifest - no reservation needed (the files are
+	// reader-invisible until the bind co-commits with the manifest row). The
+	// sha -> blob-id side-table lands on the row so the read path resolves a
+	// manifest sha to the blob id GetBlob needs.
+	refs := r.popBinds(s.Slug.String())
+	row.FileBlobs = fileBlobsFromRefs(refs)
+	return r.runAuthoritative(siteKey, refs, func(tx shaleKVTx, bind func() error) error {
 		// Collision check, both directions. A found site OR paste is
 		// ErrSlugTaken; the ExpectAbsent read-checks make a concurrent insert
 		// of the same slug conflict.
@@ -477,7 +529,11 @@ func (r *ShaleRepo) insertSiteAuthoritative(s domain.Site, dedupedSize int) erro
 		if err := shaleTxPutJSON(tx, siteKey, row); err != nil {
 			return err
 		}
-		return tx.Put(shaleKeyExpirySite(s.ExpiresAt, s.Slug), markerValue)
+		if err := tx.Put(shaleKeyExpirySite(s.ExpiresAt, s.Slug), markerValue); err != nil {
+			return err
+		}
+		// Bind every staged file's pointer, co-committed with the manifest.
+		return bind()
 	})
 }
 
@@ -546,15 +602,39 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 	identity := row.Identity
 	freed := int64(row.DedupedSize)
 
-	// Authoritative removal on the {slug} shard, one CAS.
+	// Authoritative removal on the {slug} shard, one CAS. On the transactional
+	// shale-blob path every file blob the row referenced is unbound in the SAME
+	// transaction (atomic delete), so the bytes go unreferenced exactly when the
+	// manifest vanishes; SweepOrphans reclaims them after the grace.
 	siteKey := shaleKeySite(slug)
-	if err := r.cluster.Transact(siteKey, func(tx backend.Transaction) error {
+	delSiteBody := func(tx shaleKVTx, unbind func(blobID string) error) error {
 		if err := tx.Delete(siteKey); err != nil {
 			return err
 		}
-		return tx.Delete(shaleKeyExpirySite(row.ExpiresAt, slug))
-	}); err != nil {
-		return err
+		if err := tx.Delete(shaleKeyExpirySite(row.ExpiresAt, slug)); err != nil {
+			return err
+		}
+		for _, blobID := range row.FileBlobs {
+			if err := unbind(blobID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	var delErr error
+	if r.kv != nil {
+		delErr = r.kv.Transact(siteKey, func(tx *cluster.BlobTx) error {
+			return delSiteBody(tx, func(blobID string) error {
+				return tx.UnbindBlob(r.blobRefFor(siteKey, blobID))
+			})
+		})
+	} else {
+		delErr = r.cluster.Transact(siteKey, func(tx backend.Transaction) error {
+			return delSiteBody(tx, func(string) error { return nil })
+		})
+	}
+	if delErr != nil {
+		return delErr
 	}
 
 	// Counter cleanup on the {id} shard: decrement the site counter by the

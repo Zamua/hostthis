@@ -66,11 +66,15 @@ func main() {
 	}
 	defer blobsCleanup()
 
-	// The per-record blob seam. Today every metadata backend uses the
-	// standalone adapter over the detached content-addressed store, so the
-	// services run one shape regardless of backend (a later phase supplies a
-	// transactional shale unit on the shale path).
-	blobUnit := service.NewStandaloneBlobUnit(blobs)
+	// The per-record blob seam. A shale backend with a blob store configured
+	// supplies a transactional shaleblob.Unit (the metadata co-commits the blob
+	// pointer); every other backend uses the standalone adapter over the
+	// detached content-addressed store. Either way the services run one shape.
+	var blobUnit service.BlobUnit = service.NewStandaloneBlobUnit(blobs)
+	if metadata.BlobUnit != nil {
+		blobUnit = metadata.BlobUnit
+		logger.Printf("blobs: transactional shale-collocated blob plane (pointer co-commits with metadata)")
+	}
 
 	siteRepo := metadata.Sites
 	roomRepo := metadata.Rooms
@@ -124,6 +128,16 @@ func main() {
 	manageSvc.KeyGate = keyGate
 	sweepSvc := service.NewSweep(pasteRepo, blobsSweep, logger)
 	sweepSvc.KeyGate = keyGate
+	// On the transactional shale-blob path the cluster owns the blobs: a delete
+	// unbinds the pointer in the metadata-delete transaction, so the global
+	// content-addressed GC over the detached store is skipped (Blobs=nil) and
+	// orphan BYTES are reclaimed by SweepOrphans instead. The detached store is
+	// not the blob backend on that path.
+	if metadata.BlobOrphanSweeper != nil {
+		sweepSvc.Blobs = nil
+		sweepSvc.BlobOrphans = metadata.BlobOrphanSweeper
+		logger.Printf("sweep: shale-blob path - global content-addressed blob GC disabled; SweepOrphans reclaims staged-but-unbound objects (grace %s)", service.DefaultOrphanGrace)
+	}
 	if siteRepo != nil {
 		// Wire site expiry + site-blob GC protection into the sweep.
 		sweepSvc.Sites = siteRepo

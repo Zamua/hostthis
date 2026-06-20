@@ -95,6 +95,12 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 		// single-shard with the authoritative site write.
 		"sites/" + slug,
 		"expiry_sites/2026-06-05T12:00:00Z/" + slug,
+		// A blob pointer's bref key carries the route shard in its {...} hash
+		// tag, so it co-shards with the metadata it references: the BindBlob
+		// co-commits with the authoritative {slug} write in one single-shard
+		// transaction. (The <unit>/<blobid> tail does not affect routing.)
+		"bref/{" + slug + "}/0-3/deadbeefcafe",
+		"bref/{" + slug + "}/legacy/0123456789ab",
 	}
 	for _, k := range slugKeys {
 		if got := string(shaleShardKey([]byte(k))); got != slug {
@@ -153,5 +159,32 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 	// cases - a regression that collapsed them would be a latent bug).
 	if got := string(shaleShardKey([]byte("roomkv/" + app + "/" + uuid + "/k"))); got != app {
 		t.Fatalf("roomkv key sharded to %q, want %q", got, app)
+	}
+}
+
+// TestShaleShardKeyBrefCoRoutes pins the one wiring requirement the shale-blob
+// path imposes (blob-values.md 11.5): a blob pointer's bref key MUST route to
+// the SAME shard as the metadata it references, so BindBlob co-commits with the
+// authoritative {slug} write. The bref key carries the route shard in its {...}
+// hash tag; shaleShardKey's bref/ case defers to ring.ShardKey, which extracts
+// it. A regression (the bref/ case dropped, or a later family prefix shadowing
+// it) would scatter the pointer off the metadata's shard and break the co-
+// commit, so this asserts strict equality with BOTH pastes/<slug> and
+// sites/<slug> (pastes and sites co-shard, so a blob staged for either routes
+// the same).
+func TestShaleShardKeyBrefCoRoutes(t *testing.T) {
+	for _, slug := range []string{"abc12345", "z9y8x7w6", "00000000"} {
+		pasteShard := string(shaleShardKey([]byte("pastes/" + slug)))
+		siteShard := string(shaleShardKey([]byte("sites/" + slug)))
+		brefShard := string(shaleShardKey([]byte("bref/{" + slug + "}/0-7/anyblobid")))
+		if brefShard != slug {
+			t.Fatalf("bref shard for %q = %q, want %q", slug, brefShard, slug)
+		}
+		if brefShard != pasteShard {
+			t.Fatalf("bref shard %q != paste shard %q (pointer would not co-route with the paste)", brefShard, pasteShard)
+		}
+		if brefShard != siteShard {
+			t.Fatalf("bref shard %q != site shard %q (pointer would not co-route with the site)", brefShard, siteShard)
+		}
 	}
 }

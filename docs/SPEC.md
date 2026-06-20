@@ -244,6 +244,14 @@ acknowledgement, so the uploader gets a URL back as soon as the paste is
 durably reserved + named, not after the bytes finish landing in the
 object store.
 
+This whole section describes the DETACHED-store path (the default - sqlite,
+slatedb, and shale-without-a-blob-bucket), where the blob write happens after
+the metadata commit. On the shale-collocated blob path (`HOSTTHIS_SHALE_BLOB_BUCKET`
+set, see "Shale-collocated blobs") this model COLLAPSES: the bytes are staged
+durably before the metadata commits and the pointer co-commits with the row, so
+there is no window between row and bytes - a shale-collocated paste commits
+`ready` directly and the pending machinery below does not run for it.
+
 ### Why it exists
 
 The original `Create` ran strictly synchronously: stream + hash +
@@ -3710,6 +3718,71 @@ The three policies, side by side:
 | Idempotent background sweep / reconciler | `ExpiredSlugs`, `ExpiredRoomKeys`, site-expiry walk, `DeleteFirstSeenOlderThan`, `PruneOldRoomCreates`, `Reconcile` + `reconcileSiteReservations` | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
 | Blob-GC reference set | `ReferencedBlobSHAs`, `ReferencedSiteBlobSHAs` | FAIL CLOSED - abort the GC pass, return error, delete nothing; NEVER skip | skipping under-counts refs -> a live blob looks orphaned and is deleted (irreversible) |
 | User-facing read | `Get`, `ListByOwner`, `ListVersions`, `GetVersion`, site manifest read, room scan / per-key read | HARD-FAIL (unchanged) | a user read of corrupt data should surface an error, not silently skip |
+
+### Shale-collocated blobs (transactional blob plane)
+
+By default the blob bytes live in a detached content-addressed store (disk or
+S3) decoupled from the metadata: every backend (sqlite, slatedb, shale) shares
+one `BlobStore`, blobs are keyed by content sha alone, and the only blob-GC is
+the global content-addressed sweep (`ReferencedBlobSHAs` + `WalkBlobs` +
+abort-on-zero). That is the model the rest of this spec describes.
+
+A shale backend can OPTIONALLY route its blobs THROUGH the cluster, collocated
+with the metadata on the owning shard and transactionally co-committed. It is
+enabled by `HOSTTHIS_SHALE_BLOB_BUCKET` (a distinct blob bucket on the same
+object store the metadata uses); unset keeps the detached-store model.
+
+**The byte plane goes node -> object store directly.** A blob is staged by
+streaming its bytes to a final, unit-keyed object OUTSIDE any transaction (no
+shard lease held for the multi-second upload). The bytes never cross the cluster
+RPC boundary - only a small pointer routes through the ring. After staging, the
+bytes are durable but UNREFERENCED: no reader can reach them until a pointer is
+bound.
+
+**The pointer co-commits with the metadata.** A staged blob is bound by writing
+its pointer at an internal `bref/{<slug>}/<unit>/<blobid>` key in the SAME
+single-shard transaction that writes the paste / version / site row. The hash
+tag `{<slug>}` routes the pointer to the SAME shard as `pastes/<slug>` (the
+custom `ShardKeyFn` honors it), so the bind and the metadata write commit
+together in one CAS. The row carries the staged `blob_id` (a paste/version row's
+`blob_id` field; a site row's `file_blobs` sha->id side-table) so a read
+resolves the blob to fetch.
+
+**Reader-atomic create + atomic delete.** A reader sees a row WITH its blob or
+neither - never a row pointing at bytes that are not there, and never bytes a
+reader can reach without a committed row. A delete unbinds the pointer in the
+SAME transaction that removes the metadata, so the bytes go unreferenced exactly
+when the row vanishes. (A delete of a paste unbinds every version's blob; a
+version tombstone unbinds that version's blob; a site delete or a redeploy
+unbinds the dropped files' blobs - all folded into the authoritative `{slug}`
+transaction.)
+
+**Pending-collapse: a shale-collocated paste commits READY directly.** The
+async pending/finalizer model (below, "Paste lifecycle status") exists because
+the detached-store blob write happens AFTER the metadata commits, leaving a
+window where the row is live but the bytes are not yet written. On the shale-
+collocated path that window does not exist: the bytes are durable (staged)
+BEFORE the metadata commit, and the bind makes them visible together. So the
+paste commits READY directly - no pending row, no loading page, no background
+finalizer, no `MarkReady`/`MarkFailed` flip. If staging fails the row never
+commits (the SSH client gets the error, the quota reservation is released); if
+it succeeds the bind + row co-commit or neither lands. The pending model is KEPT
+unchanged for the detached-store path (sqlite / slatedb / shale-without-a-blob-
+bucket), where it is still correct.
+
+**Orphan-bytes reclamation.** A crash between staging and the bind leaves a
+staged-but-unbound object (a unit-local orphan). On this path the global
+content-addressed sweep is NOT run (the cluster owns the blobs); instead an
+age-gated, mounted-unit-local `SweepOrphans` pass reclaims orphan objects whose
+object-store ModTime is older than a generous grace (default one hour, which
+exceeds the longest stage->commit window so an in-flight upload's object is never
+swept). hostthis schedules it in the same periodic sweep loop, per node.
+
+**Within-record byte dedup is deferred.** A blob is staged under a fresh random
+blob id each time, so an unchanged file re-staged on a redeploy (or a paste
+reverting to prior content) gets a NEW object and the old one is unbound + swept.
+This is correct (no leak) but re-uploads unchanged bytes; true content-sha-keyed
+dedup is a later follow-up.
 
 ### Deploy arc: replication factor 1, then scale out
 

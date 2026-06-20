@@ -42,6 +42,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Zamua/shale/backends/slate/blobstore"
+	"github.com/Zamua/shale/pkg/blob"
+
+	"github.com/Zamua/hostthis/internal/shaleblob"
 	"github.com/Zamua/hostthis/internal/storage"
 	slatedb "slatedb.io/slatedb-go/uniffi"
 )
@@ -132,6 +136,28 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		return nil, fmt.Errorf("HOSTTHIS_METADATA_S3_ACCESS_KEY + HOSTTHIS_METADATA_S3_SECRET_KEY are required")
 	}
 
+	// Optional transactional shale-blob plane. When HOSTTHIS_SHALE_BLOB_BUCKET
+	// is set, blobs go THROUGH shale (the pointer co-commits with the metadata
+	// on the owning shard) over a MinIO blob.Store pointed at that DISTINCT blob
+	// bucket on the SAME object store the metadata uses. Unset keeps the
+	// metadata-only path (the detached content-addressed store via
+	// buildBlobStore stays the blob backend).
+	var blobStore blob.Store
+	blobBucket := strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_BLOB_BUCKET"))
+	if blobBucket != "" {
+		bs, bsErr := blobstore.New(blobstore.Config{
+			EndpointHost: stripScheme(endpoint),
+			AccessKey:    accessKey,
+			SecretKey:    secretKey,
+			UseSSL:       useSSL,
+			Bucket:       blobBucket,
+		})
+		if bsErr != nil {
+			return nil, fmt.Errorf("open shale blob store: %w", bsErr)
+		}
+		blobStore = bs
+	}
+
 	repo, err := storage.NewShaleRepo(storage.ShaleConfig{
 		NodeID:            nodeID,
 		Endpoint:          endpoint,
@@ -149,18 +175,19 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		UnitCount:         unitCount,
 		CacheBytes:        uint64(cacheBytes),
 		Logger:            logger,
+		BlobStore:         blobStore,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open shale: %w", err)
 	}
 	if bindAddr == "" {
-		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d shards=%d awaitDurable=%t endpoint=%s",
-			nodeID, bucket, dbName, replicationFactor, unitCount, awaitDurable, endpoint)
+		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d shards=%d awaitDurable=%t blobBucket=%q endpoint=%s",
+			nodeID, bucket, dbName, replicationFactor, unitCount, awaitDurable, blobBucket, endpoint)
 	} else {
-		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d shards=%d awaitDurable=%t bucket=%s db=%s endpoint=%s",
-			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, unitCount, awaitDurable, bucket, dbName, endpoint)
+		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d shards=%d awaitDurable=%t blobBucket=%q bucket=%s db=%s endpoint=%s",
+			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, unitCount, awaitDurable, blobBucket, bucket, dbName, endpoint)
 	}
-	return &metadataBundle{
+	bundle := &metadataBundle{
 		Repo:    repo,
 		KeyGate: repo,
 		// Static-site hosting on shale: the ShaleSiteRepo adapter shares the
@@ -173,7 +200,32 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		// so the room tier runs on shale clusters too.
 		Rooms: storage.NewShaleRoomRepo(repo),
 		Close: repo.Close,
-	}, nil
+	}
+	// Transactional shale-blob seam: when the repo opened a blob plane, supply
+	// the shaleblob.Unit (pointer co-commits with metadata) + schedule
+	// SweepOrphans for orphan-bytes reclamation. main picks these over the
+	// standalone unit + the global content-addressed sweep.
+	if repo.HasBlobPlane() {
+		unit, uErr := shaleblob.New(repo)
+		if uErr != nil {
+			_ = repo.Close()
+			return nil, fmt.Errorf("build shale blob unit: %w", uErr)
+		}
+		bundle.BlobUnit = unit
+		bundle.BlobOrphanSweeper = repo
+	}
+	return bundle, nil
+}
+
+// stripScheme removes a leading http:// or https:// from a metadata S3 endpoint
+// so the blobstore.Config gets the bare host:port it wants (the metadata config
+// carries the full URL; the blobstore adapter takes EndpointHost + a UseSSL
+// flag separately). A scheme-less endpoint is returned unchanged.
+func stripScheme(endpoint string) string {
+	s := strings.TrimSpace(endpoint)
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	return strings.TrimSuffix(s, "/")
 }
 
 // parseSeeds splits a comma-separated HOSTTHIS_SHALE_SEEDS value into peer

@@ -72,24 +72,38 @@ func NewCompressedBlobStore(inner innerBlobStore) *CompressedBlobStore {
 // pass an UNCOMPRESSED estimate (e.g. S3 wanting Content-Length) get
 // the right number for what's actually being uploaded.
 func (c *CompressedBlobStore) Put(sha string, r io.Reader, _ int64) error {
+	body, err := EncodeCompressedBody(r)
+	if err != nil {
+		return err
+	}
+	return c.Inner.Put(sha, bytes.NewReader(body), int64(len(body)))
+}
+
+// EncodeCompressedBody reads UNCOMPRESSED bytes from r and returns the
+// `magic + zstd(bytes)` body buffered in memory - the exact at-rest format Put
+// writes and DecodeCompressedStream reads. Factored out so the shale-blob stage
+// path (which streams to BlobKV.StageBlob, NOT through CompressedBlobStore.Put)
+// stores files in the SAME compressed format, so a site file read on the shale
+// path decodes identically to a paste read and to the standalone path. The body
+// is bounded by one file (the untar's per-file cap), so buffering is safe.
+func EncodeCompressedBody(r io.Reader) ([]byte, error) {
 	var buf bytes.Buffer
-	buf.Grow(int(estimatedCompressedSize(0))) // tiny header bump
+	buf.Grow(int(estimatedCompressedSize(0)))
 	if _, err := buf.Write(magicV1[:]); err != nil {
-		return fmt.Errorf("compressed blob write magic: %w", err)
+		return nil, fmt.Errorf("compressed blob write magic: %w", err)
 	}
 	enc, err := zstd.NewWriter(&buf, zstd.WithEncoderLevel(compressionLevel))
 	if err != nil {
-		return fmt.Errorf("compressed blob: zstd writer: %w", err)
+		return nil, fmt.Errorf("compressed blob: zstd writer: %w", err)
 	}
 	if _, err := io.Copy(enc, r); err != nil {
 		_ = enc.Close()
-		return fmt.Errorf("compressed blob encode: %w", err)
+		return nil, fmt.Errorf("compressed blob encode: %w", err)
 	}
 	if err := enc.Close(); err != nil {
-		return fmt.Errorf("compressed blob close encoder: %w", err)
+		return nil, fmt.Errorf("compressed blob close encoder: %w", err)
 	}
-	body := buf.Bytes()
-	return c.Inner.Put(sha, bytes.NewReader(body), int64(len(body)))
+	return buf.Bytes(), nil
 }
 
 // Get reads bytes from the inner store, strips the magic + zstd-
@@ -139,28 +153,43 @@ func (c *CompressedBlobStore) GetReader(sha string) (io.ReadCloser, int64, error
 	if err != nil {
 		return nil, 0, err
 	}
+	dec, derr := DecodeCompressedStream(inner, sha)
+	if derr != nil {
+		return nil, 0, derr
+	}
+	return dec, size, nil
+}
+
+// DecodeCompressedStream wraps a raw stored blob stream (the magic+zstd body,
+// or a legacy uncompressed blob) in a reader that yields the DECOMPRESSED bytes,
+// closing the underlying reader on Close. It peeks the magic header to decide
+// compressed vs legacy, exactly as GetReader did inline; factored out so the
+// shale-blob read path (which streams GetBlob's raw object) reuses the SAME
+// decode as the standalone GetReader. On any error it closes rc and returns the
+// error. label names the blob in error messages (a sha or a blob id).
+func DecodeCompressedStream(rc io.ReadCloser, label string) (io.ReadCloser, error) {
 	// Peek the magic header to decide compressed vs legacy. Read exactly
 	// len(magicV1) bytes (or fewer if the blob is shorter); io.ReadFull
 	// handles short blobs via ErrUnexpectedEOF / EOF.
 	hdr := make([]byte, len(magicV1))
-	n, rerr := io.ReadFull(inner, hdr)
+	n, rerr := io.ReadFull(rc, hdr)
 	if rerr != nil && rerr != io.ErrUnexpectedEOF && rerr != io.EOF {
-		_ = inner.Close()
-		return nil, 0, fmt.Errorf("compressed blob read header %s: %w", sha, rerr)
+		_ = rc.Close()
+		return nil, fmt.Errorf("compressed blob read header %s: %w", label, rerr)
 	}
 	hdr = hdr[:n]
 	if !hasMagicV1(hdr) {
 		// Legacy uncompressed - return the peeked header prepended to the
 		// rest of the inner stream, unwrapped.
-		return newPrefixReadCloser(hdr, inner), size, nil
+		return newPrefixReadCloser(hdr, rc), nil
 	}
 	// Compressed: the magic is consumed; decode the remaining stream.
-	dec, err := zstd.NewReader(inner)
+	dec, err := zstd.NewReader(rc)
 	if err != nil {
-		_ = inner.Close()
-		return nil, 0, fmt.Errorf("compressed blob: zstd reader: %w", err)
+		_ = rc.Close()
+		return nil, fmt.Errorf("compressed blob %s: zstd reader: %w", label, err)
 	}
-	return &zstdReadCloser{dec: dec, inner: inner}, size, nil
+	return &zstdReadCloser{dec: dec, inner: rc}, nil
 }
 
 // prefixReadCloser serves a small in-memory prefix (the peeked magic

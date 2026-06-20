@@ -176,6 +176,7 @@ type pasteRow struct {
 	Status        string    `json:"status,omitempty"` // pending|ready|failed; "" (legacy) reads as ready
 	Kind          string    `json:"kind"`
 	ContentSHA    string    `json:"content_sha"`
+	BlobID        string    `json:"blob_id,omitempty"` // shale-blob path: the staged blob id GetBlob needs; "" on the standalone path (sha-keyed)
 	Size          int       `json:"size"`
 	Name          string    `json:"name"`
 	PinnedVersion int       `json:"pinned_version"`
@@ -188,6 +189,7 @@ type versionRow struct {
 	VerNum     int       `json:"ver_num"`
 	Kind       string    `json:"kind"`
 	ContentSHA string    `json:"content_sha"`
+	BlobID     string    `json:"blob_id,omitempty"` // shale-blob path: the staged blob id GetBlob needs; "" on the standalone path
 	Size       int       `json:"size"`
 	CreatedAt  time.Time `json:"created_at"`
 	Deleted    bool      `json:"deleted"`

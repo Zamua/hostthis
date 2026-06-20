@@ -1,6 +1,10 @@
 package storage
 
-import "bytes"
+import (
+	"bytes"
+
+	"github.com/Zamua/shale/pkg/ring"
+)
 
 // shaleShardKey is the ShardKeyFn the shale cluster is opened with. It
 // extracts the routing shard key from a full metadata key by parsing its
@@ -8,11 +12,14 @@ import "bytes"
 // (<slug> / <id> / <subnet>) co-locates on one shard WITHOUT renaming any
 // key. See docs/SPEC.md "Three shard families".
 //
-// It is pure and import-free (no cluster / slate deps) so it lives in an
-// untagged file and is unit-testable on the default build. The tagged
-// shale_repo.go references it as cluster.Config.ShardKeyFn.
+// It lives in an untagged file and is unit-testable on the default build
+// (the one shale dependency it pulls in, pkg/ring, is a pure, cgo-free,
+// slatedb-free helper, so the file still builds with plain `go build`). The
+// tagged shale_repo.go references it as cluster.Config.ShardKeyFn.
 //
 // Family -> shard key:
+//
+//	bref/{<routeShard>}/<unit>/<blobid> -> <routeShard> (the {...} hash tag)
 //
 //	pastes/<slug>                 -> <slug>   (segment after the first '/')
 //	versions/<slug>/<NNNN>        -> <slug>   (first segment after the prefix)
@@ -53,6 +60,16 @@ import "bytes"
 // for unrecognized shapes.
 func shaleShardKey(key []byte) []byte {
 	switch {
+	// Blob-pointer keys (shale-internal). The route shard key lives in the
+	// Redis-style hash tag {<routeShard>} that brefKey writes, so the pointer
+	// co-routes with the app metadata under the SAME unit (a paste's bref/
+	// pointer lands on the {slug} shard, exactly where pastes/<slug> is). Defer
+	// to the default hash-tag extractor, which returns the bytes between the
+	// first '{' and '}'. This MUST be the leading case so a bref/ key is never
+	// mis-classified by a later family prefix. See blob-values.md section 11.5.
+	case bytes.HasPrefix(key, prefixBref):
+		return ring.ShardKey(key)
+
 	// Per-slug authoritative family. All shard on the slug, which is the
 	// FIRST segment after the family prefix for every member except
 	// expiry, whose date segment sits between the prefix and the slug.
@@ -148,6 +165,12 @@ func shaleShardKey(key []byte) []byte {
 // The trailing '/' is intentional: it anchors each prefix to a full path
 // segment so e.g. "identity_pastes/" never matches "identity_bytes/".
 var (
+	// prefixBref matches shale's internal blob-pointer keys
+	// (bref/{<routeShard>}/<unit>/<blobid>). The route shard key sits in the
+	// {...} hash tag, so ring.ShardKey extracts it and the pointer co-routes
+	// with the metadata it references.
+	prefixBref = []byte("bref/")
+
 	prefixPastes               = []byte("pastes/")
 	prefixVersionsAll          = []byte("versions/")
 	prefixSlugOwner            = []byte("slug_owner/")

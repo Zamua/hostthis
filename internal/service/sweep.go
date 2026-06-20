@@ -22,10 +22,26 @@ type SweepRepo interface {
 	ReferencedBlobSHAs() ([]string, error)
 }
 
-// SweepBlobs is the blob-side interface for GC.
+// SweepBlobs is the blob-side interface for the global content-addressed GC
+// (the standalone disk/S3 path). On the transactional shale-blob path the blobs
+// live in the cluster and a delete unbinds the pointer in the metadata-delete
+// transaction, so this global GC is NOT wired there (Blobs is nil); orphan
+// BYTES are reclaimed by BlobOrphanSweeper instead.
 type SweepBlobs interface {
 	WalkBlobs(fn func(sha string) error) error
 	Remove(sha string) error
+}
+
+// BlobOrphanSweeper reclaims staged-but-unbound blob objects (the shale-blob
+// path's SweepOrphans). A blob that was staged but whose binding transaction
+// never committed (a crash between StageBlob and the metadata commit) leaves a
+// unit-local orphan object; this age-gated, mounted-unit-local pass reclaims it.
+// storage.ShaleRepo.SweepBlobOrphans satisfies it. Nil on every path except the
+// shale-blob one, where the metadata-delete already unbinds bound blobs and this
+// only mops up the never-bound stragglers. The grace MUST exceed the longest
+// stage->commit window so an in-flight upload's object is never swept.
+type BlobOrphanSweeper interface {
+	SweepBlobOrphans(ctx context.Context, now time.Time, grace time.Duration) error
 }
 
 // SweepSites is the optional site-side interface. When wired, the sweep
@@ -57,14 +73,26 @@ type SweepRooms interface {
 // expires_at has passed, garbage-collects any blob files no longer
 // referenced, and prunes stale rate-limit rows from the key gate.
 type Sweep struct {
-	Repo     SweepRepo
-	Blobs    SweepBlobs
-	Sites    SweepSites // optional; nil disables site expiry + site-ref GC protection
-	Rooms    SweepRooms // optional; nil disables room expiry + room-create prune
-	KeyGate  *KeyGate   // optional; nil disables the key_first_seen prune
-	Interval time.Duration
-	Logger   *log.Logger
-	Now      func() time.Time
+	Repo  SweepRepo
+	Blobs SweepBlobs // optional; nil on the shale-blob path (the cluster owns the blobs; see BlobOrphans)
+	Sites SweepSites // optional; nil disables site expiry + site-ref GC protection
+	Rooms SweepRooms // optional; nil disables room expiry + room-create prune
+	// BlobOrphans is the shale-blob path's orphan-bytes reclaimer (SweepOrphans).
+	// Optional + nil on the standalone path (the global content-addressed GC via
+	// Blobs is the GC there). When set, each tick runs an age-gated, mounted-
+	// unit-local orphan sweep; Blobs is left nil on that path (the metadata
+	// delete already unbinds bound blobs, so there is no whole-store content-
+	// addressed GC to run).
+	BlobOrphans BlobOrphanSweeper
+	// OrphanGrace is the age a staged-but-unbound blob object must exceed before
+	// the orphan sweep reclaims it. It MUST exceed the longest stage->commit
+	// window so an in-flight upload's object is never swept. Zero falls back to
+	// DefaultOrphanGrace.
+	OrphanGrace time.Duration
+	KeyGate     *KeyGate // optional; nil disables the key_first_seen prune
+	Interval    time.Duration
+	Logger      *log.Logger
+	Now         func() time.Time
 	// DryRun, when true, makes the sweep COMPUTE + LOG what it would expire
 	// and GC but mutate nothing (no Delete, no Remove, no prune). It gives
 	// operators visibility before trusting a live sweep. A "disabled" sweep
@@ -72,6 +100,12 @@ type Sweep struct {
 	// "Dry-run (observability)".
 	DryRun bool
 }
+
+// DefaultOrphanGrace is the fallback age a staged-but-unbound shale blob object
+// must exceed before the orphan sweep reclaims it (used when Sweep.OrphanGrace
+// is zero). One hour comfortably exceeds the longest stage->commit window (a
+// multi-second blob upload), so an in-flight upload's object is never swept.
+const DefaultOrphanGrace = time.Hour
 
 // NewSweep wires defaults: 10-minute interval.
 func NewSweep(repo SweepRepo, blobs SweepBlobs, logger *log.Logger) *Sweep {
@@ -132,6 +166,20 @@ func (s *Sweep) tick() {
 				s.Logger.Printf("sweep: prune room_creates: %v", err)
 			}
 			prunedCreates = n
+		}
+		// Reclaim orphan blob BYTES on the shale-blob path (staged-but-never-
+		// bound objects from a crash between StageBlob and the metadata commit).
+		// Age-gated + mounted-unit-local, so it slots into the per-node sweep.
+		// nil on every other path (the global content-addressed GC in Once is
+		// the reclaimer there).
+		if s.BlobOrphans != nil {
+			grace := s.OrphanGrace
+			if grace <= 0 {
+				grace = DefaultOrphanGrace
+			}
+			if err := s.BlobOrphans.SweepBlobOrphans(context.Background(), now, grace); err != nil {
+				s.Logger.Printf("sweep: orphan blob sweep: %v", err)
+			}
 		}
 	}
 	if s.DryRun {
@@ -202,11 +250,19 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 		}
 	}
 
-	// GC unreferenced blobs. The repo gives us the set of SHAs we DO
-	// reference; we walk disk and remove any blob whose sha isn't in it.
-	// The keep-alive set is the UNION of paste-referenced and site-
-	// referenced SHAs so a blob shared across record kinds survives as
-	// long as ANY live record references it.
+	// GC unreferenced blobs. On the transactional shale-blob path the cluster
+	// owns the blobs and a delete unbinds the pointer in the metadata-delete
+	// transaction, so there is NO whole-store content-addressed GC to run here
+	// (Blobs is nil); orphan BYTES (staged-but-never-bound) are reclaimed by the
+	// BlobOrphans sweep in tick(). Skip the global GC entirely on that path.
+	if s.Blobs == nil {
+		return pastesDeleted, 0, nil
+	}
+
+	// The repo gives us the set of SHAs we DO reference; we walk disk and remove
+	// any blob whose sha isn't in it. The keep-alive set is the UNION of paste-
+	// referenced and site-referenced SHAs so a blob shared across record kinds
+	// survives as long as ANY live record references it.
 	refs, err := s.Repo.ReferencedBlobSHAs()
 	if err != nil {
 		return pastesDeleted, 0, fmt.Errorf("referenced shas: %w", err)

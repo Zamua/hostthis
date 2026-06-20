@@ -40,7 +40,20 @@ type metadataBundle struct {
 	// concrete sqlite *storage.RoomKVRepo) so any backend's room impl can be
 	// assigned - mirroring how Sites was widened to siteStore.
 	Rooms roomStore
-	Close func() error
+	// BlobUnit is an OPTIONAL backend-supplied blob seam. The shale backend
+	// (with a blob store configured) supplies the transactional shaleblob.Unit,
+	// which routes blobs through the cluster and co-commits the pointer with the
+	// metadata. When nil (sqlite, slatedb, shale-without-a-blob-store), main
+	// falls back to the standalone detached-store blob unit, so the blob plane
+	// stays decoupled from the metadata plane on those paths. See docs/SPEC.md
+	// "Shale-collocated blobs".
+	BlobUnit service.BlobUnit
+	// BlobOrphanSweeper is an OPTIONAL backend-supplied orphan-bytes reclaimer.
+	// On the shale-blob path it is SweepOrphans (staged-but-unbound objects,
+	// age-gated, mounted-unit-local); main schedules it in the sweep loop. nil
+	// on every other path (the global content-addressed sweep is the GC there).
+	BlobOrphanSweeper service.BlobOrphanSweeper
+	Close             func() error
 }
 
 // metadataRepo is the union of every service-layer / http-layer
