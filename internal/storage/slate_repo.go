@@ -48,6 +48,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -539,7 +540,10 @@ func (r *SlateRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 
 // --- Writes (each opens a SlateDB transaction) -----------------------------
 
-func (r *SlateRepo) InsertWithQuotaCheck(p domain.Paste, userCap int64, now time.Time) error {
+// ctx is accepted to satisfy the service.PasteRepo interface (the shale
+// backend carries staged blob refs on it); the direct slate path has no
+// shale-blob plane, so it ignores ctx.
+func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, userCap int64, now time.Time) error {
 	// The per-identity cap pre-check happens OUTSIDE the transaction window
 	// because SlateDB has no SUM operator; scanning every key during a
 	// transaction would hold tx state across many round-trips. Single-writer
@@ -866,7 +870,9 @@ func (r *SlateRepo) Unpin(slug domain.Slug) error {
 	return nil
 }
 
-func (r *SlateRepo) AppendVersionWithQuotaCheck(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (AppendResult, error) {
+// ctx is accepted to satisfy the service.PasteAdmin interface; the direct
+// slate path ignores it (no shale-blob plane).
+func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (AppendResult, error) {
 	// Need owner identity to do the per-user check. Read it first (a plain
 	// read, no lock needed), then hold the per-identity quota stripe across
 	// the sum + the append so two concurrent same-identity writes cannot

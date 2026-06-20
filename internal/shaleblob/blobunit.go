@@ -106,17 +106,24 @@ func (u *Unit) StageStream(ctx context.Context, slug, sha string, r io.Reader, _
 	return service.BlobHandle{Slug: slug, SHA: sha, Ref: ref}, nil
 }
 
-// Commit stashes the staged refs by slug, runs the repo's metadata write (which
-// binds them inside the authoritative {slug} transaction), then clears the
-// stash. metaWrite returns the slug-collision / quota error verbatim, so the
-// caller's retry switch is unchanged. On a metaWrite error nothing is bound (the
-// authoritative transaction committed both the row and the binds or neither),
-// and any staged-but-unbound objects age out via SweepOrphans.
-func (u *Unit) Commit(_ context.Context, handles []service.BlobHandle, metaWrite func() error) error {
+// Commit carries the staged refs on a PER-CALL child context and runs the
+// repo's metadata write under it; the authoritative {slug} write reads the refs
+// off that context and binds them in the same transaction the row commits in.
+// Because the refs ride the context (not a shared per-repo stash keyed by slug),
+// two concurrent same-slug Commits each bind their OWN blobs - there is no
+// window where one call's refs clobber or are clobbered by another's. metaWrite
+// returns the slug-collision / quota error verbatim, so the caller's retry
+// switch is unchanged. On a metaWrite error nothing is bound (the authoritative
+// transaction committed both the row and the binds or neither), and any
+// staged-but-unbound objects age out via SweepOrphans.
+//
+// The caller's metaWrite closure MUST thread the context it is handed into the
+// repo's metadata-write method (the seam contract); passing a different context
+// drops the binds.
+func (u *Unit) Commit(ctx context.Context, handles []service.BlobHandle, metaWrite func(context.Context) error) error {
 	if len(handles) == 0 {
-		return metaWrite()
+		return metaWrite(ctx)
 	}
-	slug := handles[0].Slug
 	refs := make([]cluster.BlobRef, 0, len(handles))
 	for _, h := range handles {
 		ref, ok := h.Ref.(cluster.BlobRef)
@@ -125,9 +132,7 @@ func (u *Unit) Commit(_ context.Context, handles []service.BlobHandle, metaWrite
 		}
 		refs = append(refs, ref)
 	}
-	u.repo.StashBinds(slug, refs)
-	defer u.repo.ClearBinds(slug)
-	return metaWrite()
+	return metaWrite(storage.WithPendingBinds(ctx, refs))
 }
 
 // Read resolves the blob id for (slug, sha) from the metadata, streams the

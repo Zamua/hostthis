@@ -47,13 +47,22 @@ type BlobUnit interface {
 	// StageStream, so a bind is a no-op and Commit simply runs metaWrite -
 	// byte-identical to the service calling the repo directly after the blob
 	// write, which is exactly the pre-seam blob-first ordering for updates
-	// and deploys. On the transactional shale path (a later phase) Commit
-	// binds the handles in the SAME transaction metaWrite's writes commit in.
+	// and deploys. On the transactional shale path Commit binds the handles
+	// in the SAME transaction metaWrite's writes commit in.
+	//
+	// metaWrite receives a context.Context, NOT the ambient one: the shale
+	// path derives a per-Commit child context carrying THIS call's staged
+	// refs and hands it to metaWrite, so the metadata write it triggers binds
+	// exactly this call's blobs even when two same-slug Commits run
+	// concurrently. The closure MUST thread the context it is given into the
+	// repo's metadata-write method (so the refs reach the authoritative
+	// transaction); passing a different context drops the binds. On the
+	// standalone path the context is the ambient one and carries no refs.
 	//
 	// metaWrite is the source of truth for slug-collision retries and quota
 	// errors: Commit returns metaWrite's error verbatim so the caller's
 	// existing retry/translate switch is unchanged.
-	Commit(ctx context.Context, handles []BlobHandle, metaWrite func() error) error
+	Commit(ctx context.Context, handles []BlobHandle, metaWrite func(context.Context) error) error
 
 	// Read streams a record's blob bytes, DECOMPRESSED, with the inner
 	// (stored) byte length. The caller MUST Close the returned reader. This

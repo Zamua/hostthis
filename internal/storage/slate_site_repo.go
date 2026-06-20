@@ -33,6 +33,7 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,10 +59,14 @@ type SlateSiteRepo struct {
 func NewSlateSiteRepo(repo *SlateRepo) *SlateSiteRepo { return &SlateSiteRepo{repo: repo} }
 
 // service.SiteRepo
-func (s *SlateSiteRepo) InsertWithQuotaCheck(site domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+//
+// ctx is accepted to satisfy the service.SiteRepo interface (the shale backend
+// carries staged blob refs on it); the direct slate path has no shale-blob
+// plane, so it ignores ctx.
+func (s *SlateSiteRepo) InsertWithQuotaCheck(_ context.Context, site domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	return s.repo.InsertSiteWithQuotaCheck(site, dedupedSize, userCap, now)
 }
-func (s *SlateSiteRepo) ReplaceWithQuotaCheck(site domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+func (s *SlateSiteRepo) ReplaceWithQuotaCheck(_ context.Context, site domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	return s.repo.ReplaceSiteWithQuotaCheck(site, dedupedSize, userCap, now)
 }
 func (s *SlateSiteRepo) Get(slug domain.Slug) (domain.Site, error) { return s.repo.GetSite(slug) }

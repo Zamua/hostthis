@@ -70,8 +70,10 @@ func (u *StandaloneBlobUnit) StageStream(_ context.Context, slug, sha string, r 
 // Commit runs the record's metadata write. The staged bytes are already
 // durable, so there is nothing to bind: Commit returns metaWrite's error
 // verbatim (preserving the caller's slug-collision / quota error handling).
-func (u *StandaloneBlobUnit) Commit(_ context.Context, _ []BlobHandle, metaWrite func() error) error {
-	return metaWrite()
+// The ambient context is forwarded to metaWrite unchanged - the standalone
+// path carries no per-call binds.
+func (u *StandaloneBlobUnit) Commit(ctx context.Context, _ []BlobHandle, metaWrite func(context.Context) error) error {
+	return metaWrite(ctx)
 }
 
 // Read streams the decompressed bytes for sha (slug is unused on this path -

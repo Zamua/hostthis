@@ -17,7 +17,7 @@ import (
 // SiteRepo is the persistence interface the site-deploy + site-read
 // services need. internal/storage.SiteRepo satisfies it.
 type SiteRepo interface {
-	InsertWithQuotaCheck(s domain.Site, dedupedSize int, userCap int64, now time.Time) error
+	InsertWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error
 	// ReplaceWithQuotaCheck re-deploys an EXISTING owned site in place,
 	// atomically swapping its manifest for s.Manifest under the same
 	// serializable boundary InsertWithQuotaCheck uses. s.Slug names the
@@ -39,7 +39,7 @@ type SiteRepo interface {
 	//     and the expiry index is re-keyed. The slug and created_at are
 	//     unchanged. The swap is a single transaction: the URL serves the
 	//     OLD manifest until it lands, the new one immediately after.
-	ReplaceWithQuotaCheck(s domain.Site, dedupedSize int, userCap int64, now time.Time) error
+	ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Site, error)
 	// SumActiveBytesByOwner returns the identity's active SITE bytes.
 	// The deploy path adds the paste-side sum to compute the remaining
@@ -166,8 +166,8 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	const maxRetries = 5
 	for range maxRetries {
 		site.Slug = domain.NewRandomSlug()
-		err := d.Blob.Commit(ctx, sink.handles, func() error {
-			return d.Sites.InsertWithQuotaCheck(site, deduped, int64(domain.UserQuotaBytes), now)
+		err := d.Blob.Commit(ctx, sink.handles, func(ctx context.Context) error {
+			return d.Sites.InsertWithQuotaCheck(ctx, site, deduped, int64(domain.UserQuotaBytes), now)
 		})
 		switch {
 		case err == nil:
@@ -282,8 +282,8 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	// Commit the swapped manifest + bind the staged files as one unit. On the
 	// standalone path the files are already durable from the sink; Commit
 	// just runs the atomic ReplaceWithQuotaCheck swap.
-	err = d.Blob.Commit(context.Background(), sink.handles, func() error {
-		return d.Sites.ReplaceWithQuotaCheck(site, deduped, int64(domain.UserQuotaBytes), now)
+	err = d.Blob.Commit(context.Background(), sink.handles, func(ctx context.Context) error {
+		return d.Sites.ReplaceWithQuotaCheck(ctx, site, deduped, int64(domain.UserQuotaBytes), now)
 	})
 	switch {
 	case err == nil:

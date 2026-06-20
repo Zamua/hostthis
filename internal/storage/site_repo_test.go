@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -93,14 +94,14 @@ func TestSiteRepo_QuotaCountsAcrossPastesAndSites(t *testing.T) {
 		ContentSHA: "sha-p", Size: int(cap) - 100, // leaves 100 bytes
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := pastes.InsertWithQuotaCheck(p, cap, now); err != nil {
+	if err := pastes.InsertWithQuotaCheck(context.Background(), p, cap, now); err != nil {
 		t.Fatalf("insert paste: %v", err)
 	}
 
 	// A site whose deduped size (150) exceeds the remaining 100 bytes must
 	// be rejected - the quota check sums BOTH pastes and sites.
 	s := sampleSite("site2345", owner, now) // deduped 150
-	err := sites.InsertWithQuotaCheck(s, s.Manifest.DedupedSize(), cap, now)
+	err := sites.InsertWithQuotaCheck(context.Background(), s, s.Manifest.DedupedSize(), cap, now)
 	if !errors.Is(err, ErrOverUserQuota) {
 		t.Fatalf("site over combined quota: got %v, want ErrOverUserQuota", err)
 	}
@@ -112,7 +113,7 @@ func TestSiteRepo_QuotaCountsAcrossPastesAndSites(t *testing.T) {
 		ContentSHA: "sha-p2", Size: 200, // 200 > remaining 100
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := pastes.InsertWithQuotaCheck(p2, cap, now); !errors.Is(err, ErrOverUserQuota) {
+	if err := pastes.InsertWithQuotaCheck(context.Background(), p2, cap, now); !errors.Is(err, ErrOverUserQuota) {
 		t.Fatalf("paste over quota with paste present: got %v, want ErrOverUserQuota", err)
 	}
 }

@@ -24,6 +24,7 @@ package storage_test
 // Skips cleanly unless MINIO_TEST_ENDPOINT is set.
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ func TestShaleDeferredConfirm_ReadableImmediately_IndexAppearsAfterDrain(t *test
 		Kind: domain.KindHTML, ContentSHA: "sha-deferred", Size: 300,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(p, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
@@ -114,7 +115,7 @@ func TestShaleDeferredConfirm_ReconcilerHealsLostConfirm(t *testing.T) {
 		Kind: domain.KindHTML, ContentSHA: "sha-lostconfirm", Size: 250,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(p, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	repo.WaitPendingConfirms()

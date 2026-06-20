@@ -30,6 +30,7 @@ package storage_test
 // Skips cleanly unless MINIO_TEST_ENDPOINT is set.
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -61,14 +62,14 @@ func TestShaleReconciler_RebuildsDerivedIndexAndCounter(t *testing.T) {
 		Kind: domain.KindHTML, ContentSHA: "sha-recon2", Size: 200,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(pA, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(context.Background(), pA, 0, now); err != nil {
 		t.Fatalf("insert pA: %v", err)
 	}
-	if err := repo.InsertWithQuotaCheck(pB, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(context.Background(), pB, 0, now); err != nil {
 		t.Fatalf("insert pB: %v", err)
 	}
 	// Append a second version to pA so the counter must sum across versions.
-	if _, err := repo.AppendVersionWithQuotaCheck(pA.Slug, domain.KindHTML, "sha-recon1-v2", 100, 0, now); err != nil {
+	if _, err := repo.AppendVersionWithQuotaCheck(context.Background(), pA.Slug, domain.KindHTML, "sha-recon1-v2", 100, 0, now); err != nil {
 		t.Fatalf("append pA v2: %v", err)
 	}
 
@@ -183,7 +184,7 @@ func TestShaleReconciler_ReleasesOrphanReservation(t *testing.T) {
 		Kind: domain.KindHTML, ContentSHA: "sha-orphan", Size: 300,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(p, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert paste: %v", err)
 	}
 	// Drain the deferred confirm so the insert's own reservation marker is

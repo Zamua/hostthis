@@ -142,8 +142,8 @@ func TestReaderAtomicCreate(t *testing.T) {
 
 	// Commit: the metadata row + the bind co-commit.
 	p := mkPaste("atomicslug", "owner-a", sha, len(body), now)
-	if err := unit.Commit(ctx, []service.BlobHandle{h}, func() error {
-		return repo.InsertWithQuotaCheck(p, int64(domain.UserQuotaBytes), now)
+	if err := unit.Commit(ctx, []service.BlobHandle{h}, func(ctx context.Context) error {
+		return repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
 	}); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
@@ -182,8 +182,8 @@ func TestAtomicDelete(t *testing.T) {
 		t.Fatalf("Stage: %v", err)
 	}
 	p := mkPaste("delslug", "owner-d", sha, len(body), now)
-	if err := unit.Commit(ctx, []service.BlobHandle{h}, func() error {
-		return repo.InsertWithQuotaCheck(p, int64(domain.UserQuotaBytes), now)
+	if err := unit.Commit(ctx, []service.BlobHandle{h}, func(ctx context.Context) error {
+		return repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
 	}); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
@@ -258,8 +258,8 @@ func TestVersions_BindAndRead(t *testing.T) {
 		t.Fatalf("Stage v1: %v", err)
 	}
 	p := mkPaste("verslug", "owner-v", shaV1, len(bodyV1), now)
-	if err := unit.Commit(ctx, []service.BlobHandle{h1}, func() error {
-		return repo.InsertWithQuotaCheck(p, int64(domain.UserQuotaBytes), now)
+	if err := unit.Commit(ctx, []service.BlobHandle{h1}, func(ctx context.Context) error {
+		return repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
 	}); err != nil {
 		t.Fatalf("Commit v1: %v", err)
 	}
@@ -272,8 +272,8 @@ func TestVersions_BindAndRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stage v2: %v", err)
 	}
-	if err := unit.Commit(ctx, []service.BlobHandle{h2}, func() error {
-		_, aerr := repo.AppendVersionWithQuotaCheck(domain.Slug("verslug"), domain.KindHTML, shaV2, len(bodyV2), int64(domain.UserQuotaBytes), now)
+	if err := unit.Commit(ctx, []service.BlobHandle{h2}, func(ctx context.Context) error {
+		_, aerr := repo.AppendVersionWithQuotaCheck(ctx, domain.Slug("verslug"), domain.KindHTML, shaV2, len(bodyV2), int64(domain.UserQuotaBytes), now)
 		return aerr
 	}); err != nil {
 		t.Fatalf("Commit v2: %v", err)
@@ -327,8 +327,8 @@ func TestSites_BindAllAndRedeployDrops(t *testing.T) {
 		UpdatedAt: now,
 		ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := unit.Commit(ctx, []service.BlobHandle{h1, h2}, func() error {
-		return repo.InsertSiteWithQuotaCheck(site, man.DedupedSize(), int64(domain.UserQuotaBytes), now)
+	if err := unit.Commit(ctx, []service.BlobHandle{h1, h2}, func(ctx context.Context) error {
+		return repo.InsertSiteWithQuotaCheck(ctx, site, man.DedupedSize(), int64(domain.UserQuotaBytes), now)
 	}); err != nil {
 		t.Fatalf("Commit site v1: %v", err)
 	}
@@ -358,8 +358,8 @@ func TestSites_BindAllAndRedeployDrops(t *testing.T) {
 	site2.Manifest = man2
 	site2.UpdatedAt = now2
 	site2.ExpiresAt = now2.Add(domain.RetentionWindow)
-	if err := unit.Commit(ctx, []service.BlobHandle{n1, n2}, func() error {
-		return repo.ReplaceSiteWithQuotaCheck(site2, man2.DedupedSize(), int64(domain.UserQuotaBytes), now2)
+	if err := unit.Commit(ctx, []service.BlobHandle{n1, n2}, func(ctx context.Context) error {
+		return repo.ReplaceSiteWithQuotaCheck(ctx, site2, man2.DedupedSize(), int64(domain.UserQuotaBytes), now2)
 	}); err != nil {
 		t.Fatalf("Commit site v2 (redeploy): %v", err)
 	}

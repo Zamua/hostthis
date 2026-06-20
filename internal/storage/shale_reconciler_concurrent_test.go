@@ -27,6 +27,7 @@ package storage_test
 //	go test -tags slatedb -run TestShaleReconciler_LeakedAppendMarker ./internal/storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -360,7 +361,7 @@ func TestShaleReconciler_RaceAgainstInserts(t *testing.T) {
 					Kind: domain.KindHTML, ContentSHA: fmt.Sprintf("sha-%d", n), Size: v1Bytes,
 					CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 				}
-				err := repo.InsertWithQuotaCheck(p, userCap, now)
+				err := repo.InsertWithQuotaCheck(context.Background(), p, userCap, now)
 				switch {
 				case err == nil:
 					admitted.Add(1)
@@ -368,7 +369,7 @@ func TestShaleReconciler_RaceAgainstInserts(t *testing.T) {
 					st := &pasteState{slug: slug, liveBytes: v1Bytes}
 					// Append a second version. Counts toward the SAME cap, so
 					// it may be over-quota'd or CAS-conflicted - both benign.
-					_, aerr := repo.AppendVersionWithQuotaCheck(slug, domain.KindHTML, fmt.Sprintf("sha-%d-v2", n), v2Bytes, userCap, now)
+					_, aerr := repo.AppendVersionWithQuotaCheck(context.Background(), slug, domain.KindHTML, fmt.Sprintf("sha-%d-v2", n), v2Bytes, userCap, now)
 					switch {
 					case aerr == nil:
 						appended.Add(1)
@@ -497,7 +498,7 @@ func TestShaleReconciler_GraceProtectsInflightReservation(t *testing.T) {
 		Kind: domain.KindHTML, ContentSHA: "sha-grace", Size: 300,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(p, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert real paste: %v", err)
 	}
 	// Drain the deferred confirm so the insert's OWN reservation marker is
@@ -583,13 +584,13 @@ func TestShaleReconciler_LeakedAppendMarker(t *testing.T) {
 		Kind: domain.KindHTML, ContentSHA: "sha-leak-v1", Size: 300,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(p, 0, now); err != nil {
+	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert paste: %v", err)
 	}
 	// Drain the deferred confirm so the insert's reservation marker is gone
 	// before we seed the leaked append marker + reconcile.
 	repo.WaitPendingConfirms()
-	if _, err := repo.AppendVersionWithQuotaCheck(slug, domain.KindHTML, "sha-leak-v2", 150, 0, now); err != nil {
+	if _, err := repo.AppendVersionWithQuotaCheck(context.Background(), slug, domain.KindHTML, "sha-leak-v2", 150, 0, now); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
 	const wantBytes = 450 // 300 + 150, both live + authoritative
