@@ -188,6 +188,14 @@ func (u *Unit) UnbindOnDelete(_ context.Context, _ string, _ []string) error {
 	return nil
 }
 
+// IsTransactional is true: a staged blob's pointer co-commits with the metadata
+// in one {slug}-shard transaction (BindBlob inside the authoritative write), so
+// a Stage->Commit makes the row and its bytes visible together. Upload.Create
+// uses this to commit a paste READY directly (no pending row, no finalizer); the
+// pending/finalizer model is collapsed on this path (docs/SPEC.md
+// "Pending-collapse: a shale-collocated paste commits READY directly").
+func (u *Unit) IsTransactional() bool { return true }
+
 // ctxCancelReadCloser ties a context cancel to the reader's Close, so the
 // GetBlob stream's bound ctx is canceled exactly when the caller is done piping
 // the bytes (the LIFETIME contract on BlobKV.GetBlob). Close closes the inner

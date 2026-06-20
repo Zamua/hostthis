@@ -82,6 +82,21 @@ type BlobUnit interface {
 	// the transactional shale path (a later phase) unbinds the pointers in
 	// the metadata-delete transaction.
 	UnbindOnDelete(ctx context.Context, slug string, shas []string) error
+
+	// IsTransactional reports whether this unit binds a record's blob inside
+	// the SAME transaction the metadata commits in (the shale-collocated
+	// path), so a Stage->Commit makes the row and its bytes visible together.
+	//
+	// It is the one place a service path varies by backend capability:
+	// Upload.Create uses it to decide between READY-direct (stage the bytes,
+	// then co-commit a READY row with the bind - no pending window, no
+	// finalizer) and the detached-store pending/finalizer model (commit a
+	// PENDING row first, write the bytes in the background, flip to ready).
+	// A transactional unit MUST be able to honor the bind metaWrite threads
+	// off the Commit context; a non-transactional unit's Commit is a no-op
+	// bind (the bytes were already durable from Stage). See docs/SPEC.md
+	// "Pending-collapse: a shale-collocated paste commits READY directly".
+	IsTransactional() bool
 }
 
 // BlobHandle is the opaque token Stage / StageStream return and Commit
