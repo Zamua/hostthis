@@ -892,6 +892,12 @@ func emitServiceErr(sess gossh.Session, err error) {
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrUnsafeArchive.Error())
 	case errors.Is(err, domain.ErrTooManyFiles):
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrTooManyFiles.Error())
+	case errors.Is(err, service.ErrDeployFailed):
+		// A site deploy hit an unexpected backend error (defensively translated,
+		// e.g. a cross-shard bind that the slug pre-claim is designed to prevent).
+		// Show the user a clean retryable message, NOT the raw backend sentinel
+		// the wrapped cause carries.
+		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: site deploy failed, please retry")
 	default:
 		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
 	}

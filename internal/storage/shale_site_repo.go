@@ -105,6 +105,9 @@ func (s *ShaleSiteRepo) Get(slug domain.Slug) (domain.Site, error) { return s.re
 func (s *ShaleSiteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int64, error) {
 	return s.repo.SumActiveSiteBytesByOwner(owner, now)
 }
+func (s *ShaleSiteRepo) PreClaimSlug(ctx context.Context, slug domain.Slug, owner string, now time.Time) error {
+	return s.repo.PreClaimSiteSlug(ctx, slug, owner, now)
+}
 
 // service.SweepSites
 func (s *ShaleSiteRepo) Delete(slug domain.Slug) error { return s.repo.DeleteSite(slug) }
@@ -500,6 +503,60 @@ func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int, ref
 	}
 	return r.cluster.Transact(siteKey, func(tx backend.Transaction) error {
 		return swapBody(tx, func() error { return nil }, func(string) error { return nil })
+	})
+}
+
+// PreClaimSiteSlug stakes a metadata-only claim on slug BEFORE a transactional
+// (shale-collocated blob) site deploy consumes its untar stream, so every file
+// stages under slug's {slug} shard and the pointers co-bind with the manifest
+// at commit. It is the cheap existence stake the site-deploy service needs: a
+// single {slug}-shard CAS that writes slug_owner/<slug> = owner IFF the slug is
+// free in BOTH directions (no pastes/<slug>, no sites/<slug>) AND not already
+// pre-claimed (no slug_owner/<slug>). All three reads join the CAS read-set, so
+// two concurrent claims of the same slug serialize and one loses.
+//
+// It returns ErrSlugTaken on any collision (the caller re-mints + re-claims a
+// fresh slug before reading the body), nil on a successful claim.
+//
+// The slug_owner/<slug> family is the SAME key a paste insert writes (it co-
+// shards on {slug}); a site claim parks a marker there without conflicting with
+// the site authoritative insert, which checks only sites/<slug> + pastes/<slug>
+// for its collision (NOT slug_owner), so the deploy's own InsertSiteWithQuota
+// Check does not reject the claim it just made. A crash after a successful claim
+// but before the deploy commits leaves a slug_owner/<slug> marker with no
+// authoritative site row: a harmless metadata leak (the owner sum reads the
+// counter, the site reconciler scans sites/, and a later paste insert overwrites
+// slug_owner/<slug> unconditionally), reclaimed by the slug_owner sweep the same
+// way an abandoned paste reservation marker is.
+//
+// owner + now are accepted for symmetry with the seam and to value the marker;
+// the claim itself does not charge quota (it is not a byte reservation).
+func (r *ShaleRepo) PreClaimSiteSlug(_ context.Context, slug domain.Slug, owner string, _ time.Time) error {
+	pasteKey := shaleKeyPaste(slug)
+	siteKey := shaleKeySite(slug)
+	ownerKey := shaleKeySlugOwner(slug)
+	return r.cluster.Transact(siteKey, func(tx backend.Transaction) error {
+		// Free in both directions? A present paste OR site row means the slug is
+		// taken. Each Get joins the CAS read-set so a racing insert conflicts.
+		if _, err := tx.Get(pasteKey); err == nil {
+			return ErrSlugTaken
+		} else if !errors.Is(err, backend.ErrNotFound) {
+			return fmt.Errorf("preclaim paste check: %w", err)
+		}
+		if _, err := tx.Get(siteKey); err == nil {
+			return ErrSlugTaken
+		} else if !errors.Is(err, backend.ErrNotFound) {
+			return fmt.Errorf("preclaim site check: %w", err)
+		}
+		// Already pre-claimed by another in-flight deploy? slug_owner present
+		// means a paste owns it OR a concurrent site deploy claimed it first;
+		// either way the slug is taken.
+		if _, err := tx.Get(ownerKey); err == nil {
+			return ErrSlugTaken
+		} else if !errors.Is(err, backend.ErrNotFound) {
+			return fmt.Errorf("preclaim slug_owner check: %w", err)
+		}
+		return tx.Put(ownerKey, []byte(owner))
 	})
 }
 

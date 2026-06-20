@@ -74,6 +74,15 @@ func (s *SlateSiteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int6
 	return s.repo.SumActiveSiteBytesByOwner(owner, now)
 }
 
+// PreClaimSlug is a NO-OP on the direct slatedb backend: its blobs live in a
+// detached content-sha-keyed store, so a deploy's files do not route by slug
+// and the slug is minted in the post-untar insert retry loop. Only the
+// transactional shale-collocated blob path pre-claims (so files stage under the
+// manifest's shard). Accepted to satisfy the service.SiteRepo seam.
+func (s *SlateSiteRepo) PreClaimSlug(_ context.Context, _ domain.Slug, _ string, _ time.Time) error {
+	return nil
+}
+
 // service.SweepSites
 func (s *SlateSiteRepo) Delete(slug domain.Slug) error { return s.repo.DeleteSite(slug) }
 func (s *SlateSiteRepo) ExpiredSiteSlugs(now time.Time) ([]string, error) {

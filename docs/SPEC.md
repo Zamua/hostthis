@@ -3718,6 +3718,29 @@ concurrent writes on one slug - two updates, an update vs a delete, two
 redeploys - each bind their OWN blob; one call can never bind another's bytes
 or commit a row with no bind.
 
+**A site deploy stages every file under a pre-claimed slug.** Because a file's
+pointer co-commits with the manifest on the manifest's `{slug}` shard, every
+file must be STAGED under that same slug's route key, or its `bref/{<slug>}/...`
+hash tag routes to a different shard than the manifest pins and the bind is
+rejected by the cross-shard guard. A paste / version already knows its slug when
+it stages; a FIRST-time site deploy does not (the slug is random) and the untar
+stream is one-shot (it cannot be re-read to re-route). So a first deploy mints
+and pre-claims its slug BEFORE the untar, via a metadata-only single-shard claim
+(`slug_owner/<slug>` written iff the slug is free as a paste AND a site AND not
+already claimed), then stages every file under it. The pre-claim is a cheap
+existence stake, NOT a blob reservation: no two-store coupling, no quota charge,
+no in-flight-blob protection (there is none to protect - the files are staged
+reader-invisible and the bind co-commits with the manifest). A collision re-mints
+a fresh slug before the stream is consumed; the authoritative insert remains the
+final collision authority. A crash after a successful claim but before the commit
+leaves a `slug_owner/<slug>` marker with no site row - a harmless metadata leak
+(a later paste insert overwrites the key; the sweep reclaims it), never an
+unreadable site. A redeploy (`DeployToSlug`) already targets a known existing
+slug, so it stages under the real slug directly and needs no pre-claim. On the
+detached-store path the slug routes no blob (blobs are content-sha-keyed), so no
+pre-claim runs: the slug is minted in the post-untar insert retry loop where the
+authoritative insert is the collision authority.
+
 **Reader-atomic create + atomic delete.** A reader sees a row WITH its blob or
 neither - never a row pointing at bytes that are not there, and never bytes a
 reader can reach without a committed row. A delete unbinds the pointer in the

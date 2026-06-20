@@ -410,3 +410,13 @@ func (r *SiteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int64, er
 	}
 	return n.Int64, nil
 }
+
+// PreClaimSlug is a NO-OP on the sqlite backend: its blobs are content-sha-keyed
+// in a detached store, so a deploy's files do not route by slug and the slug is
+// minted in the post-untar insert retry loop (where InsertWithQuotaCheck's
+// collision check is the authority). The transactional shale path is the only
+// one that pre-claims (so files stage under the right shard). ctx/slug/owner/now
+// are accepted to satisfy the service.SiteRepo seam.
+func (r *SiteRepo) PreClaimSlug(_ context.Context, _ domain.Slug, _ string, _ time.Time) error {
+	return nil
+}

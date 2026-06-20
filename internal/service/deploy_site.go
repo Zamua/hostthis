@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -45,6 +46,20 @@ type SiteRepo interface {
 	// The deploy path adds the paste-side sum to compute the remaining
 	// quota budget the untar may fill before the persistence-time check.
 	SumActiveBytesByOwner(owner string, now time.Time) (int64, error)
+	// PreClaimSlug stakes a metadata-only single-shard claim on slug BEFORE
+	// the deploy consumes the (one-shot) untar stream, so a transactional
+	// blob path can stage every file under slug's shard (the manifest and the
+	// blob pointers then co-route to the SAME shard at commit). It is a cheap
+	// existence claim, NOT a blob reservation: no two-store coupling, no quota
+	// charge. It returns storage.ErrSlugTaken if slug is already a paste or a
+	// site (so the caller re-mints and re-claims a fresh slug before reading
+	// the body), nil if the claim succeeded.
+	//
+	// On the standalone (non-transactional) blob path the slug never routes a
+	// blob, so this is a no-op returning nil: the caller mints the slug in the
+	// post-untar insert retry loop instead, where the authoritative insert is
+	// the collision authority. Only the transactional shale path calls it.
+	PreClaimSlug(ctx context.Context, slug domain.Slug, owner string, now time.Time) error
 }
 
 // PasteByteSummer is the slice of the paste repo the deploy path needs:
@@ -78,6 +93,21 @@ type SiteResult struct {
 
 // ErrEmptySite is returned when an archive safe-untars to zero files.
 var ErrEmptySite = errors.New("service: archive contains no files")
+
+// ErrDeployFailed is the generic site-deploy failure surfaced when the
+// authoritative write returns an unexpected backend error the deploy path
+// cannot translate to a specific cause. It exists chiefly as a DEFENSIVE
+// guard: with the pre-claim staging files under the manifest's own shard, a
+// staged blob's pointer always co-routes with the row, so a cross-shard bind
+// can no longer fire. Should one ever surface (a routing regression), this
+// keeps the raw backend sentinel (e.g. shale's cross-shard guard error) from
+// reaching the SSH client as an opaque internal string; the operator sees the
+// real error in the logs.
+var ErrDeployFailed = errors.New("service: site deploy failed")
+
+// maxDeployRetries bounds the slug-mint retry budget for both the pre-claim
+// loop (transactional path) and the post-untar insert loop (standalone path).
+const maxDeployRetries = 5
 
 // Deploy reads a gzip-tar archive from body, untars it safely, stores
 // the files, and persists a new Site owned by owner.
@@ -116,9 +146,31 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	}
 	budget := max(int64(domain.UserQuotaBytes)-int64(usedPaste)-usedSite, 0)
 
-	// The slug is minted in the insert retry loop below; the standalone seam
-	// keys blobs by content sha alone, so the sink stages files without it.
-	sink := &blobSink{blob: d.Blob}
+	ctx := context.Background()
+
+	// Mint the slug. On the TRANSACTIONAL blob path (shale-collocated) a file's
+	// blob pointer co-commits with the manifest on the manifest's {slug} shard,
+	// so every file MUST stage under the real slug or the bind cross-shards.
+	// The slug is therefore pre-claimed BEFORE the untar (the stream is one-shot;
+	// we cannot re-untar to re-route), and the files stage under it. On the
+	// standalone path the slug routes no blob (blobs are content-sha-keyed), so
+	// it stays empty here and is minted in the post-untar insert retry loop where
+	// the authoritative insert is the collision authority - byte-identical to the
+	// pre-seam behavior.
+	var slug domain.Slug
+	if d.Blob.IsTransactional() {
+		s, err := d.preClaimSlug(ctx, owner, now)
+		if err != nil {
+			return SiteResult{}, err
+		}
+		slug = s
+	}
+
+	// The sink stages each file under slug. On the transactional path slug is the
+	// pre-claimed real slug, so the staged BlobRef's route shard matches the
+	// manifest's {slug} shard and the bind co-commits. On the standalone path
+	// slug is empty and unused (content-sha keying).
+	sink := &blobSink{blob: d.Blob, slug: string(slug)}
 	man, err := domain.SafeUntar(body, sink, budget)
 	switch {
 	case errors.Is(err, domain.ErrArchiveTooLarge):
@@ -146,6 +198,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	}
 
 	site := domain.Site{
+		Slug:      slug, // empty on the standalone path; set below in the loop
 		Identity:  domain.Identity(owner),
 		Manifest:  man,
 		CreatedAt: now,
@@ -154,17 +207,27 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	}
 	deduped := man.DedupedSize()
 
-	// Persist with the atomic quota check. The mid-untar guard already
-	// bounded the bytes, but the persistence-time check closes the race
-	// where two concurrent deploys from the same identity each pass the
-	// pre-untar budget read and then both insert.
-	// Commit the manifest + bind the staged files as one unit. On the
-	// standalone path the files are already durable from the sink's
-	// StageStream, so Commit just runs the InsertWithQuotaCheck - the same
-	// blob-before-metadata ordering the deploy always used.
-	ctx := context.Background()
-	const maxRetries = 5
-	for range maxRetries {
+	// Transactional path: the slug is pre-claimed and the files staged under it,
+	// so the authoritative insert co-binds every pointer on the {slug} shard in
+	// one CAS. The pre-claim holds the slot, so a commit-time collision is
+	// effectively impossible; a single attempt suffices. (The body is consumed,
+	// so a true collision here cannot re-untar - it surfaces, but the pre-claim
+	// makes it astronomically unlikely.)
+	if d.Blob.IsTransactional() {
+		err := d.Blob.Commit(ctx, sink.handles, func(ctx context.Context) error {
+			return d.Sites.InsertWithQuotaCheck(ctx, site, deduped, int64(domain.UserQuotaBytes), now)
+		})
+		return finalizeDeploy(site, err)
+	}
+
+	// Standalone path: persist with the atomic quota check, minting the slug in a
+	// retry loop. The mid-untar guard already bounded the bytes, but the
+	// persistence-time check closes the race where two concurrent deploys from the
+	// same identity each pass the pre-untar budget read and then both insert. The
+	// files are already durable from the sink's StageStream (content-sha-keyed,
+	// slug-independent), so re-minting the slug on a collision needs no re-untar;
+	// Commit just runs the InsertWithQuotaCheck.
+	for range maxDeployRetries {
 		site.Slug = domain.NewRandomSlug()
 		err := d.Blob.Commit(ctx, sink.handles, func(ctx context.Context) error {
 			return d.Sites.InsertWithQuotaCheck(ctx, site, deduped, int64(domain.UserQuotaBytes), now)
@@ -183,6 +246,61 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		}
 	}
 	return SiteResult{}, SlugTakenErr
+}
+
+// preClaimSlug mints a fresh random slug and stakes a metadata-only claim on
+// it, retrying on a collision until it lands a free slug (or exhausts the
+// budget). It is the BEFORE-untar half of the transactional deploy: the
+// returned slug is the shard every file stages under. The claim is the cheap
+// existence stake (no blob reservation, no quota charge); the authoritative
+// insert remains the final collision authority.
+func (d *DeploySite) preClaimSlug(ctx context.Context, owner string, now time.Time) (domain.Slug, error) {
+	for range maxDeployRetries {
+		slug := domain.NewRandomSlug()
+		err := d.Sites.PreClaimSlug(ctx, slug, owner, now)
+		switch {
+		case err == nil:
+			return slug, nil
+		case isSlugTaken(err):
+			continue
+		default:
+			return "", err
+		}
+	}
+	return "", SlugTakenErr
+}
+
+// finalizeDeploy translates the transactional insert's error into the deploy
+// service's vocabulary. A cross-shard bind error (which the pre-claim is
+// designed to prevent) is caught defensively and mapped to ErrDeployFailed so a
+// raw backend sentinel never reaches the SSH client.
+func finalizeDeploy(site domain.Site, err error) (SiteResult, error) {
+	switch {
+	case err == nil:
+		return SiteResult{Site: site}, nil
+	case errors.Is(err, storage.ErrServiceFull):
+		return SiteResult{}, ErrServiceFull
+	case errors.Is(err, storage.ErrOverUserQuota):
+		return SiteResult{}, ErrOverQuota
+	case isSlugTaken(err):
+		// The pre-claim holds the slot, so this is effectively unreachable; the
+		// stream is consumed and cannot re-untar, so surface a clean failure.
+		return SiteResult{}, SlugTakenErr
+	case isCrossShard(err):
+		return SiteResult{}, fmt.Errorf("%w: %v", ErrDeployFailed, err)
+	default:
+		return SiteResult{}, err
+	}
+}
+
+// isCrossShard sniffs a backend cross-shard-guard error WITHOUT importing the
+// backend package (the same dependency-direction discipline isSlugTaken keeps:
+// the service layer must not know which concrete backend it talks to). Shale's
+// cross-shard guard error message contains "cross-shard"; this is a defensive
+// last line - with the pre-claim in place a deploy's binds always co-route, so
+// it should never match.
+func isCrossShard(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "cross-shard")
 }
 
 // DeployToSlug re-deploys a SITE at an existing owned slug in place. It
