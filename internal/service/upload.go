@@ -5,6 +5,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -52,9 +53,14 @@ var SlugTakenErr = errors.New("service: slug taken (after retries)")
 
 // Upload is the application service for new paste creation.
 type Upload struct {
-	Repo  PasteRepo
-	Blobs BlobStore
-	Now   func() time.Time
+	Repo PasteRepo
+	// Blob is the per-record blob lifecycle seam (Stage/Commit/Read/
+	// UnbindOnDelete). Upload uses Stage to write the paste's bytes; the
+	// metadata row is committed via Repo (the pending model is preserved on
+	// the standalone path: the row commits first, the finalizer Stages the
+	// bytes in the background).
+	Blob BlobUnit
+	Now  func() time.Time
 	// Logger records background-finalize outcomes. The blob write runs
 	// after Create has returned the URL, so a failure there cannot be
 	// returned to the caller; it is logged + reflected in the paste
@@ -74,8 +80,8 @@ type Upload struct {
 }
 
 // NewUpload wires defaults.
-func NewUpload(repo PasteRepo, blobs BlobStore) *Upload {
-	return &Upload{Repo: repo, Blobs: blobs, Now: time.Now}
+func NewUpload(repo PasteRepo, blob BlobUnit) *Upload {
+	return &Upload{Repo: repo, Blob: blob, Now: time.Now}
 }
 
 func (u *Upload) logf(format string, args ...any) {
@@ -190,7 +196,7 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 				// the blob INLINE (on the ack path), no pending/MarkReady flip.
 				// One metadata write + one blob write, both synchronous - the
 				// pre-async shape.
-				if berr := u.Blobs.PutPrecompressed(staged.SHA, staged.Body); berr != nil {
+				if _, berr := u.Blob.Stage(context.Background(), string(p.Slug), staged.SHA, staged.Body); berr != nil {
 					u.logf("upload: sync blob write %s: %v", p.Slug, berr)
 				}
 				return Result{Paste: p}, nil
@@ -240,7 +246,7 @@ func (u *Upload) startFinalize(slug domain.Slug, sha string, body []byte) {
 // races the reconciler's age-out cannot resurrect a failed paste. Errors
 // are logged, not returned: the caller already has its URL.
 func (u *Upload) finalize(slug domain.Slug, sha string, body []byte) {
-	if err := u.Blobs.PutPrecompressed(sha, body); err != nil {
+	if _, err := u.Blob.Stage(context.Background(), string(slug), sha, body); err != nil {
 		// Blob write failed (object-store error, bucket quota, etc.). Flip
 		// the paste to failed + release its reservation so it stops charging
 		// quota and a read serves the error page.

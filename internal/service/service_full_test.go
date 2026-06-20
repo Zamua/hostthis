@@ -11,12 +11,14 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// fullBlobStore is a BlobStore whose writes always fail with
+// fullBlobStore is a blob store whose writes always fail with
 // storage.ErrServiceFull, simulating the object store rejecting a Put
 // because its bucket is at the configured hard quota (the durable
 // total-bytes ceiling). Reads delegate to a real disk store so the Manage
-// show path (if exercised) still works.
-type fullBlobStore struct{ real BlobStore }
+// show path (if exercised) still works. It carries the full read+write
+// surface (Get/GetReader as well as the writes) so it can back a
+// StandaloneBlobUnit.
+type fullBlobStore struct{ real *storage.CompressedBlobStore }
 
 func (f fullBlobStore) Put(sha string, r io.Reader, size int64) error {
 	_, _ = io.Copy(io.Discard, r)
@@ -26,9 +28,19 @@ func (f fullBlobStore) PutPrecompressed(sha string, body []byte) error {
 	return storage.ErrServiceFull
 }
 func (f fullBlobStore) Get(sha string) ([]byte, error) { return f.real.Get(sha) }
+func (f fullBlobStore) GetReader(sha string) (io.ReadCloser, int64, error) {
+	return f.real.GetReader(sha)
+}
+
+// fullBlobUnit wraps fullBlobStore as the BlobUnit seam (Stage fails, reads
+// delegate). Used where a service now takes a BlobUnit.
+func fullBlobUnit(t *testing.T) *StandaloneBlobUnit {
+	t.Helper()
+	return NewStandaloneBlobUnit(fullBlobStore{real: realBlobs(t)})
+}
 
 // realBlobs builds a real compressed disk blob store for the read side.
-func realBlobs(t *testing.T) BlobStore {
+func realBlobs(t *testing.T) *storage.CompressedBlobStore {
 	t.Helper()
 	disk, err := storage.NewBlobStore(filepath.Join(t.TempDir(), "blobs"))
 	if err != nil {
@@ -87,7 +99,7 @@ func TestManageUpdate_BlobQuotaSurfacesServiceFull(t *testing.T) {
 		t.Fatalf("seed blobs: %v", err)
 	}
 	seedBlobs := storage.NewCompressedBlobStore(disk)
-	up := NewUpload(repo, seedBlobs)
+	up := NewUpload(repo, NewStandaloneBlobUnit(seedBlobs))
 	t.Cleanup(up.WaitFinalize)
 	res, err := up.Create(bytes.NewReader([]byte("<!doctype html><p>v1</p>")), "key:owner", "demo", "")
 	if err != nil {
@@ -95,7 +107,7 @@ func TestManageUpdate_BlobQuotaSurfacesServiceFull(t *testing.T) {
 	}
 	up.WaitFinalize() // drain the seed's async blob write before Update
 
-	m := NewManage(repo, fullBlobStore{real: realBlobs(t)})
+	m := NewManage(repo, fullBlobUnit(t))
 	_, err = m.Update(res.Paste.Slug, "key:owner", bytes.NewReader([]byte("<!doctype html><p>v2</p>")), "")
 	if !errors.Is(err, ErrServiceFull) {
 		t.Fatalf("blob-quota update = %v, want service.ErrServiceFull", err)
@@ -114,7 +126,7 @@ func TestDeploySite_BlobQuotaSurfacesServiceFull(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	sites := storage.NewSiteRepo(db)
 	pastes := storage.NewPasteRepo(db)
-	d := NewDeploySite(sites, pastes, fullBlobStore{real: realBlobs(t)})
+	d := NewDeploySite(sites, pastes, fullBlobUnit(t))
 
 	arc := gzipTar(t, map[string]string{"index.html": "<!doctype html><h1>hi</h1>"})
 	_, err = d.Deploy(bytes.NewReader(arc), "key:owner")

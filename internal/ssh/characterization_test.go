@@ -74,16 +74,17 @@ func startGatedStack(t *testing.T, freshKeysPerSubnet int) *gatedStack {
 		t.Fatalf("blobs: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
+	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	repo := storage.NewPasteRepo(db)
-	upload := service.NewUpload(repo, blobs)
+	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
-	manage := service.NewManage(repo, blobs)
+	manage := service.NewManage(repo, blobUnit)
 	kgRepo := storage.NewKeyGateRepo(db)
 	keyGate := service.NewKeyGate(kgRepo)
 	keyGate.MaxFreshKeysPerSubnet = freshKeysPerSubnet
 	manage.KeyGate = keyGate
 
-	httpSrv := httptest.NewServer((&httpapi.Server{Pastes: repo, Blobs: blobs}).Handler())
+	httpSrv := httptest.NewServer((&httpapi.Server{Pastes: repo, Blobs: blobUnit}).Handler())
 	t.Cleanup(httpSrv.Close)
 
 	l := mustListen(t)
@@ -1040,16 +1041,17 @@ func startProxyProtoStack(t *testing.T, freshKeysPerSubnet int) *proxyProtoStack
 		t.Fatalf("blobs: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
+	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	repo := storage.NewPasteRepo(db)
-	upload := service.NewUpload(repo, blobs)
+	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
-	manage := service.NewManage(repo, blobs)
+	manage := service.NewManage(repo, blobUnit)
 	kgRepo := storage.NewKeyGateRepo(db)
 	kg := service.NewKeyGate(kgRepo)
 	kg.MaxFreshKeysPerSubnet = freshKeysPerSubnet
 	manage.KeyGate = kg
 
-	httpSrv := httptest.NewServer((&httpapi.Server{Pastes: repo, Blobs: blobs}).Handler())
+	httpSrv := httptest.NewServer((&httpapi.Server{Pastes: repo, Blobs: blobUnit}).Handler())
 	t.Cleanup(httpSrv.Close)
 
 	l := mustListen(t)

@@ -52,14 +52,15 @@ func TestDeploySiteAndServe(t *testing.T) {
 		t.Fatalf("blob store: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
+	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	repo := storage.NewPasteRepo(db)
 	sites := storage.NewSiteRepo(db)
-	upload := service.NewUpload(repo, blobs)
+	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
-	deploy := service.NewDeploySite(sites, repo, blobs)
+	deploy := service.NewDeploySite(sites, repo, blobUnit)
 
 	httpSrv := httptest.NewServer((&httpapi.Server{
-		Pastes: repo, Sites: sites, Blobs: blobs, ApexDomain: "paste.test",
+		Pastes: repo, Sites: sites, Blobs: blobUnit, ApexDomain: "paste.test",
 	}).Handler())
 	t.Cleanup(httpSrv.Close)
 
@@ -212,6 +213,7 @@ func TestDeploySite_NoWebContentRejected(t *testing.T) {
 		t.Fatalf("blobs: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
+	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	repo := storage.NewPasteRepo(db)
 	sites := storage.NewSiteRepo(db)
 
@@ -219,13 +221,13 @@ func TestDeploySite_NoWebContentRejected(t *testing.T) {
 	sshAddr := sshListener.Addr().String()
 	_ = sshListener.Close()
 
-	upload := service.NewUpload(repo, blobs)
+	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 	sshSrv := &hostssh.Server{
 		Addr:       sshAddr,
 		ApexDomain: "paste.test",
 		Upload:     upload,
-		Deploy:     service.NewDeploySite(sites, repo, blobs),
+		Deploy:     service.NewDeploySite(sites, repo, blobUnit),
 		BuildURL:   func(s domain.Slug) string { return "http://x/p/" + s.String() },
 		Logger:     log.New(io.Discard, "", 0),
 	}

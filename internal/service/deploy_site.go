@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -61,13 +62,13 @@ type PasteByteSummer interface {
 type DeploySite struct {
 	Sites  SiteRepo
 	Pastes PasteByteSummer
-	Blobs  BlobStore
+	Blob   BlobUnit
 	Now    func() time.Time
 }
 
 // NewDeploySite wires defaults.
-func NewDeploySite(sites SiteRepo, pastes PasteByteSummer, blobs BlobStore) *DeploySite {
-	return &DeploySite{Sites: sites, Pastes: pastes, Blobs: blobs, Now: time.Now}
+func NewDeploySite(sites SiteRepo, pastes PasteByteSummer, blob BlobUnit) *DeploySite {
+	return &DeploySite{Sites: sites, Pastes: pastes, Blob: blob, Now: time.Now}
 }
 
 // SiteResult is what Deploy produced for the SSH layer to format.
@@ -115,7 +116,9 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	}
 	budget := max(int64(domain.UserQuotaBytes)-int64(usedPaste)-usedSite, 0)
 
-	sink := &blobSink{blobs: d.Blobs}
+	// The slug is minted in the insert retry loop below; the standalone seam
+	// keys blobs by content sha alone, so the sink stages files without it.
+	sink := &blobSink{blob: d.Blob}
 	man, err := domain.SafeUntar(body, sink, budget)
 	switch {
 	case errors.Is(err, domain.ErrArchiveTooLarge):
@@ -155,10 +158,17 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	// bounded the bytes, but the persistence-time check closes the race
 	// where two concurrent deploys from the same identity each pass the
 	// pre-untar budget read and then both insert.
+	// Commit the manifest + bind the staged files as one unit. On the
+	// standalone path the files are already durable from the sink's
+	// StageStream, so Commit just runs the InsertWithQuotaCheck - the same
+	// blob-before-metadata ordering the deploy always used.
+	ctx := context.Background()
 	const maxRetries = 5
 	for range maxRetries {
 		site.Slug = domain.NewRandomSlug()
-		err := d.Sites.InsertWithQuotaCheck(site, deduped, int64(domain.UserQuotaBytes), now)
+		err := d.Blob.Commit(ctx, sink.handles, func() error {
+			return d.Sites.InsertWithQuotaCheck(site, deduped, int64(domain.UserQuotaBytes), now)
+		})
 		switch {
 		case err == nil:
 			return SiteResult{Site: site}, nil
@@ -238,7 +248,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	}
 	budget := max(int64(domain.UserQuotaBytes)-int64(usedPaste)-(usedSite-creditOld), 0)
 
-	sink := &blobSink{blobs: d.Blobs}
+	sink := &blobSink{blob: d.Blob, slug: string(slug)}
 	man, err := domain.SafeUntar(body, sink, budget)
 	switch {
 	case errors.Is(err, domain.ErrArchiveTooLarge):
@@ -269,7 +279,12 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	}
 	deduped := man.DedupedSize()
 
-	err = d.Sites.ReplaceWithQuotaCheck(site, deduped, int64(domain.UserQuotaBytes), now)
+	// Commit the swapped manifest + bind the staged files as one unit. On the
+	// standalone path the files are already durable from the sink; Commit
+	// just runs the atomic ReplaceWithQuotaCheck swap.
+	err = d.Blob.Commit(context.Background(), sink.handles, func() error {
+		return d.Sites.ReplaceWithQuotaCheck(site, deduped, int64(domain.UserQuotaBytes), now)
+	})
 	switch {
 	case err == nil:
 		return SiteResult{Site: site}, nil
@@ -289,15 +304,19 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 
 // blobSink implements domain.FileSink: it buffers one file's bytes,
 // hashes them (content-addressing is by the file's uncompressed bytes,
-// matching the rest of the store), writes them to the content-addressed
-// BlobStore, and returns the SHA the manifest references. Identical
-// files across deploys/sites dedupe for free at the blob layer.
+// matching the rest of the store), stages them through the blob seam, and
+// returns the SHA the manifest references. Identical files across
+// deploys/sites dedupe for free at the blob layer.
 //
-// The bytes flow through the compressing BlobStore.Put (one file at a
-// time), so a site's files are zstd-compressed at rest exactly like a
-// paste's bytes.
+// The bytes flow through the seam's StageStream (one file at a time), which
+// on the standalone path is the compressing BlobStore.Put, so a site's
+// files are zstd-compressed at rest exactly like a paste's bytes. The sink
+// collects each staged handle so the deploy can Commit the manifest + binds
+// as one unit after the untar.
 type blobSink struct {
-	blobs BlobStore
+	blob    BlobUnit
+	slug    string
+	handles []BlobHandle
 }
 
 func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, error) {
@@ -317,8 +336,10 @@ func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, error) {
 	bodyBytes := buf.Bytes()
 	sum := sha256.Sum256(bodyBytes)
 	sha := hex.EncodeToString(sum[:])
-	if err := s.blobs.Put(sha, bytes.NewReader(bodyBytes), int64(len(bodyBytes))); err != nil {
+	handle, err := s.blob.StageStream(context.Background(), s.slug, sha, bytes.NewReader(bodyBytes), int64(len(bodyBytes)))
+	if err != nil {
 		return "", fmt.Errorf("blob put %q: %w", p, err)
 	}
+	s.handles = append(s.handles, handle)
 	return sha, nil
 }

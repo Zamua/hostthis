@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -24,8 +25,8 @@ func (s stubPasteReader) Get(slug domain.Slug) (domain.Paste, error) {
 
 type stubBlobReader struct{ body []byte }
 
-func (s stubBlobReader) Get(sha string) ([]byte, error) { return s.body, nil }
-func (s stubBlobReader) GetReader(sha string) (io.ReadCloser, int64, error) {
+func (s stubBlobReader) ReadAll(_ context.Context, _, _ string) ([]byte, error) { return s.body, nil }
+func (s stubBlobReader) Read(_ context.Context, _, _ string) (io.ReadCloser, int64, error) {
 	return io.NopCloser(bytes.NewReader(s.body)), int64(len(s.body)), nil
 }
 

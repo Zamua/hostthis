@@ -96,12 +96,13 @@ func startStack(t *testing.T) *stack {
 	// Same wrapping as production cmd/hostthisd: service + http surface
 	// both go through the compression layer; only the sweep talks raw.
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
+	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	repo := storage.NewPasteRepo(db)
-	upload := service.NewUpload(repo, blobs)
+	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
-	manage := service.NewManage(repo, blobs)
+	manage := service.NewManage(repo, blobUnit)
 
-	httpSrv := httptest.NewServer((&httpapi.Server{Pastes: repo, Blobs: blobs}).Handler())
+	httpSrv := httptest.NewServer((&httpapi.Server{Pastes: repo, Blobs: blobUnit}).Handler())
 	t.Cleanup(httpSrv.Close)
 
 	l := mustListen(t)

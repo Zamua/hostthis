@@ -30,7 +30,7 @@ func deployFixture(t *testing.T) (*DeploySite, *storage.SiteRepo, *storage.Compr
 	blobs := storage.NewCompressedBlobStore(disk)
 	sites := storage.NewSiteRepo(db)
 	pastes := storage.NewPasteRepo(db)
-	d := NewDeploySite(sites, pastes, blobs)
+	d := NewDeploySite(sites, pastes, NewStandaloneBlobUnit(blobs))
 	return d, sites, blobs
 }
 
