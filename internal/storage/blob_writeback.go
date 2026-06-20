@@ -16,10 +16,9 @@ import (
 )
 
 // durableBlobStore is the contract the write-back cache requires of the
-// backend it fronts (disk or S3). Both *BlobStore and *S3BlobStore
-// satisfy it. The cache reads/writes the COMPRESSED stored bytes - it
-// sits below the compression layer - so it deals only in opaque bytes
-// keyed by sha.
+// backend it fronts. *BlobStore (the disk store) satisfies it. The cache
+// reads/writes the COMPRESSED stored bytes - it sits below the compression
+// layer - so it deals only in opaque bytes keyed by sha.
 type durableBlobStore interface {
 	Put(sha string, r io.Reader, size int64) error
 	Get(sha string) ([]byte, error)

@@ -2048,12 +2048,12 @@ type SweepBlobs interface {
 ```
 
 The service layer never imports a specific backend - it depends only on
-those four methods. Backends are swapped via the
+those four methods. The standalone backend is selected via the
 `HOSTTHIS_BLOB_BACKEND` env var at startup.
 
-**`Put` and the `ErrServiceFull` sentinel.** When the underlying object
-store rejects a `Put` because the bucket is at its configured quota (an
-S3 `507 Insufficient Storage` / quota-exceeded response from MinIO or an
+**`Put` and the `ErrServiceFull` sentinel.** When an underlying object
+store rejects a `Put` because the bucket is at its configured quota (a
+`507 Insufficient Storage` / quota-exceeded response from MinIO or an
 equivalent backend), the blob store maps that rejection to the
 `ErrServiceFull` sentinel rather than a generic 500. This is the single
 place the durable total-bytes ceiling is enforced (see "Limits →
@@ -2066,34 +2066,19 @@ is then whatever the host filesystem allows, an operator concern.
 
 ### Available backends
 
-`disk` (default): bytes live on local disk under
-`<data-dir>/blobs/<sha256[:2]>/<sha256>`. Two-character sharding keeps
+`disk` (default, the only standalone backend): bytes live on local disk
+under `<data-dir>/blobs/<sha256[:2]>/<sha256>`. Two-character sharding keeps
 any single directory's entry count manageable. Linux page cache absorbs
 hot blob reads. Fine up to a few tens of GB and a few thousand
-identities.
+identities. This is the dev/test standalone backend.
 
-`s3` (S3-compatible): bytes live in an S3-compatible object store
-addressed by SHA256 keys. Works against any S3-protocol backend:
-
-| Provider | Notes |
-| --- | --- |
-| MinIO  | Self-hosted, OSS. The reference target. Free. |
-| Storj  | 25 GB free tier, no payment method. |
-| Backblaze B2 | 10 GB free tier, payment method required for free. |
-| Cloudflare R2 | 10 GB free + free egress, *payment method required*. |
-| AWS S3 | Reference protocol; expensive on egress. |
-| Wasabi / Vultr / Tigris / SeaweedFS | All work; details vary. |
-
-Env vars when `HOSTTHIS_BLOB_BACKEND=s3`:
-
-```
-HOSTTHIS_S3_ENDPOINT     URL of the S3 endpoint (e.g. https://minio.local:9000)
-HOSTTHIS_S3_BUCKET       bucket name (must exist before startup)
-HOSTTHIS_S3_REGION       region label (some providers care, some don't; default 'us-east-1')
-HOSTTHIS_S3_ACCESS_KEY   access key id
-HOSTTHIS_S3_SECRET_KEY   secret access key
-HOSTTHIS_S3_USE_SSL      'true' or 'false' (default true)
-```
+Production runs the shale metadata backend, whose blobs go through the
+**shale-collocated blob plane** (the cluster owns a MinIO/S3 object store
+directly; see "Shale-collocated blobs"), not through this standalone
+`BlobStore` at all. A detached standalone `s3` backend used to exist as a
+third option; it was retired once the shale-collocated path subsumed the
+only production use of a cloud object store for blobs. The standalone path
+is now disk-only (dev/test); cloud blobs are the shale cluster's concern.
 
 ### On-disk format
 
@@ -2120,67 +2105,44 @@ Writes:
   emitted by the current binary.
 
 Object/file naming is the sha256 of the ORIGINAL (uncompressed)
-bytes for both backends - dedup happens on logical content, not on
-the compressed representation. Two pastes with identical bytes share
-one stored object.
+bytes - dedup happens on logical content, not on the compressed
+representation. Two pastes with identical bytes share one stored object.
+The same magic+zstd format is used by the shale-collocated blob plane, so
+a blob's stored bytes are identical whichever path wrote them.
 
-Migrating legacy blobs (one-shot) is a follow-up runbook in the
-repo; not required for correctness (legacy reads continue to work)
-but reduces storage by 5–10× when run.
+Migrating legacy uncompressed blobs to the magic+zstd format (one-shot)
+is the `hostthis-blob-compress` helper in `cmd/`: it walks the on-disk
+store, skips blobs that already carry the magic header, and re-encodes the
+rest. Not required for correctness (legacy reads continue to work) but
+reduces storage by 5-10x when run.
 
-### Switching backends
+### One standalone backend (disk)
 
-The default is `disk`. To switch to S3 (against a provider you've
-already provisioned a bucket on):
-
-1. Set the env vars above.
-2. Set `HOSTTHIS_BLOB_BACKEND=s3`.
-3. Restart hostthis.
-
-What happens to existing on-disk blobs after the switch:
-
-- The 7-day retention guarantee means everything on disk expires within
-  a week of the switch with no action.
-- During that week, new pastes go to S3; older pastes remain on disk and
-  continue to serve from there only if the operator runs hostthis with
-  a one-shot migration helper OR uses a compound backend (not shipped;
-  trivial to add).
-- The simplest path for hostthis at any realistic scale: flip the
-  switch, accept that pastes uploaded before the switch live their last
-  7 days on disk, then delete the old `data/blobs/` directory.
-
-For operators who can't tolerate the 7-day overlap, two small
-helpers ship in `cmd/`:
-
-- `hostthis-blob-migrate` walks `<data-dir>/blobs/` and `Put`s every
-  blob to the configured S3 endpoint. Idempotent - skips blobs already
-  present in S3 (HEAD-checks by SHA256 key first). Run before flipping
-  the env var.
-- `hostthis-blob-verify` walks the disk store and, for every blob,
-  fetches the corresponding object from S3 and asserts byte-for-byte
-  equality (in practice: hash check, since the SHA *is* the address).
-  Exits non-zero if anything is missing or mismatched. Run after the
-  migrator, before deleting `data/blobs/`.
-
-Together they let an operator do a zero-loss migration:
-
-```
-HOSTTHIS_BLOB_BACKEND=disk    # still serving from disk
-hostthis-blob-migrate          # copy all blobs to S3
-hostthis-blob-verify           # confirm parity
-HOSTTHIS_BLOB_BACKEND=s3       # restart hostthis pointing at S3
-# wait one safe interval, confirm everything still works
-rm -rf data/blobs              # reclaim disk space
-```
+The standalone blob path ships exactly one backend, `disk`, which is also
+the default - there is no backend to switch between. A detached `s3`
+standalone backend (and its disk->S3 migration helpers) used to exist; it
+was retired once the shale-collocated blob plane became the production
+path for cloud object storage. Production blobs live in the shale cluster's
+own object store (see "Shale-collocated blobs"), reached through the
+metadata backend, not through this standalone `BlobStore`.
 
 ### Local-disk write-back cache (optional, opt-in)
 
-The blob `Put` against a remote object store dominates upload latency: a
-single paste spends most of its wall-clock time inside the `PutObject`
-call to MinIO/S3 (hundreds of ms), while the local hashing + compression
-and the metadata writes are each a few ms. For deploys that can tolerate
-a small durability window in exchange for a fast upload ack, an optional
-**local-disk write-back cache** sits in front of the durable backend.
+A blob `Put` against a remote object store dominates upload latency: most
+of a paste's wall-clock time is spent inside the `PutObject` call (hundreds
+of ms), while the local hashing + compression and the metadata writes are
+each a few ms. For deploys that can tolerate a small durability window in
+exchange for a fast upload ack, an optional **local-disk write-back cache**
+sits in front of the durable backend.
+
+NB this cache existed to hide the latency of the *detached cloud* standalone
+backend, which has been retired - the standalone path is now disk-only, so
+its `Put` is already local and the cache is effectively dormant there. The
+production blob path (shale-collocated) instead hides the slow object-store
+`Put` by STAGING the bytes durably before the metadata commits (it does not
+use this cache). The machinery below is retained for any future remote
+standalone backend; it is correct but currently has no remote `Put` to
+front.
 
 It is **off by default**. The strict, ship-it-durable-before-ack
 behavior described above is unchanged unless an operator opts in with:
@@ -2191,8 +2153,8 @@ HOSTTHIS_BLOB_WRITEBACK_DIR=<path>      # local cache dir (default <data-dir>/bl
 HOSTTHIS_BLOB_WRITEBACK_MAX_BYTES=<n>   # soft cap on cache size in bytes (default 1 GiB)
 ```
 
-When enabled, the cache wraps the configured durable backend (`disk` or
-`s3`) and changes the blob path as follows:
+When enabled, the cache wraps the configured durable backend (`disk`) and
+changes the blob path as follows:
 
 - **`Put` writes locally first, uploads asynchronously.** The bytes (the
   already-compressed, magic-prefixed stored representation) are written
@@ -2338,18 +2300,22 @@ sqlite enforces this via `BEGIN IMMEDIATE`; slatedb via
 
 ### Compose & operator config
 
-The blob backend (`HOSTTHIS_BLOB_BACKEND`) and the metadata backend
-(`HOSTTHIS_METADATA_BACKEND`) are independent. Reasonable combos:
+The standalone blob backend (`HOSTTHIS_BLOB_BACKEND`, disk-only) and the
+metadata backend (`HOSTTHIS_METADATA_BACKEND`) are independent. Reasonable
+combos:
 
 | metadata | blob | shape |
 | --- | --- | --- |
-| sqlite | disk | single-host, no cloud deps |
-| sqlite | s3 | single-host metadata + cloud blobs (today's prod) |
-| slatedb | s3 | fully stateless container; one MinIO/R2 bucket each |
-| slatedb | s3 (same bucket) | same - uses key prefixes `metadata/` and `blobs/` |
+| sqlite | disk | single-host, no cloud deps (dev) |
+| slatedb | disk | stateless metadata in the cloud, local-disk blobs (dev/test) |
+| shale | shale-collocated | production: blobs live IN the shale cluster's object store, co-committed with metadata (see "Shale-collocated blobs"); the standalone `BlobStore` is bypassed |
 
-Bucket-per-domain is recommended: separate IAM/credential rotation
-for metadata vs blobs.
+The detached cloud (`s3`) standalone blob backend was retired; production's
+cloud blobs are the shale cluster's concern, reached through the metadata
+backend, not a separate `HOSTTHIS_BLOB_BACKEND` selection. Bucket-per-domain
+is still recommended on the shale path: the metadata bucket and the
+collocated blob bucket (`HOSTTHIS_SHALE_BLOB_BUCKET`) are distinct, so
+IAM/credential rotation can differ for metadata vs blobs.
 
 ### The storage contract and its conformance suite
 
@@ -4390,14 +4356,10 @@ file). Defaults in parens:
 --fresh-keys-per-subnet  / HOSTTHIS_FRESH_KEYS_PER_SUBNET   sybil-gate threshold                    (20)
 --fresh-keys-window      / HOSTTHIS_FRESH_KEYS_WINDOW       sybil-gate rolling window               (24h)
 
-# Blob backend
-                         / HOSTTHIS_BLOB_BACKEND            disk | s3                               (disk)
-                         / HOSTTHIS_S3_ENDPOINT             S3 endpoint URL                         (required if s3)
-                         / HOSTTHIS_S3_BUCKET               bucket name                             (required if s3)
-                         / HOSTTHIS_S3_REGION               region label                            (us-east-1)
-                         / HOSTTHIS_S3_ACCESS_KEY           access key id                           (required if s3)
-                         / HOSTTHIS_S3_SECRET_KEY           secret access key                       (required if s3)
-                         / HOSTTHIS_S3_USE_SSL              true | false                            (true)
+# Standalone blob backend (dev/test; disk-only)
+                         / HOSTTHIS_BLOB_BACKEND            disk                                    (disk)
+# Production blobs go through the shale-collocated plane instead:
+                         / HOSTTHIS_SHALE_BLOB_BUCKET       blob bucket on the metadata object store (unset = detached store)
 
 # CDN / cache purger
                          / HOSTTHIS_CACHE_BACKEND           noop | cloudflare                       (noop)
@@ -4431,8 +4393,9 @@ sample production compose.
   ceiling")
 - Sybil gate (`--fresh-keys-per-subnet`, `--fresh-keys-window`,
   both can be tightened or relaxed for the operator's threat model)
-- Blob backend (`HOSTTHIS_BLOB_BACKEND=disk|s3`) and its connection
-  config (endpoint, bucket, credentials)
+- Standalone blob backend (`HOSTTHIS_BLOB_BACKEND=disk`, disk-only;
+  production uses the shale-collocated blob plane via
+  `HOSTTHIS_SHALE_BLOB_BUCKET`, not a standalone backend)
 - CDN cache purger (`HOSTTHIS_CACHE_BACKEND=noop|cloudflare`) and its
   credential (`HOSTTHIS_CF_PURGE_TOKEN`)
 
