@@ -170,9 +170,10 @@ func deployFixture(t *testing.T, demo string) ([]distFile, deployedSite) {
 		t.Fatalf("blob store: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
+	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	pastes := storage.NewPasteRepo(db)
 	sites := storage.NewSiteRepo(db)
-	deploy := service.NewDeploySite(sites, pastes, blobs)
+	deploy := service.NewDeploySite(sites, pastes, blobUnit)
 
 	files := readDist(t, fixtureDist(t, demo))
 	arc := tarDist(t, files)
@@ -185,7 +186,7 @@ func deployFixture(t *testing.T, demo string) ([]distFile, deployedSite) {
 	httpSrv := httptest.NewServer((&httpapi.Server{
 		Pastes:     pastes,
 		Sites:      sites,
-		Blobs:      blobs,
+		Blobs:      blobUnit,
 		ApexDomain: apexDomain,
 	}).Handler())
 	t.Cleanup(httpSrv.Close)

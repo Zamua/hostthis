@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -52,15 +53,15 @@ var ErrInvalidName = errors.New("service: name must be 1–60 printable Unicode 
 // (or HTTP endpoint) and is owner-gated.
 type Manage struct {
 	Repo      PasteAdmin
-	Blobs     BlobStore   // for Show + Update; same interface as Upload
+	Blob      BlobUnit    // for Show (ReadAll) + Update (Stage+Commit) + Delete (UnbindOnDelete)
 	Cache     CachePurger // never called if nil; for CDN invalidation on Update/Delete
 	PublicURL URLBuilder  // required iff Cache is set; turns slug into purge URL
 	KeyGate   *KeyGate    // optional; populates WhoamiInfo.Session when set
 	Now       func() time.Time
 }
 
-func NewManage(repo PasteAdmin, blobs BlobStore) *Manage {
-	return &Manage{Repo: repo, Blobs: blobs, Now: time.Now}
+func NewManage(repo PasteAdmin, blob BlobUnit) *Manage {
+	return &Manage{Repo: repo, Blob: blob, Now: time.Now}
 }
 
 // requireOwner returns the paste if owner matches; otherwise the
@@ -96,7 +97,7 @@ func (m *Manage) Show(slug domain.Slug, owner string) (domain.Paste, []byte, err
 	if err != nil {
 		return domain.Paste{}, nil, err
 	}
-	body, err := m.Blobs.Get(p.ContentSHA)
+	body, err := m.Blob.ReadAll(context.Background(), string(slug), p.ContentSHA)
 	if err != nil {
 		return domain.Paste{}, nil, fmt.Errorf("blob: %w", err)
 	}
@@ -147,7 +148,13 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 		return UpdateResult{}, domain.ErrUnsupportedKind
 	}
 	now := m.Now().UTC()
-	if err := m.Blobs.PutPrecompressed(staged.SHA, staged.Body); err != nil {
+	ctx := context.Background()
+	// Stage the version's bytes, then Commit binds the staged blob with the
+	// AppendVersion metadata write. On the standalone path Stage writes the
+	// bytes and Commit just runs the metadata write - the same blob-first
+	// ordering this path always used.
+	handle, err := m.Blob.Stage(ctx, string(slug), staged.SHA, staged.Body)
+	if err != nil {
 		// A blob Put rejected by the object store's bucket quota surfaces
 		// storage.ErrServiceFull (the durable total-bytes ceiling). Translate
 		// it into the graceful "service is at capacity" response.
@@ -156,7 +163,12 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 		}
 		return UpdateResult{}, fmt.Errorf("blob write: %w", err)
 	}
-	res, err := m.Repo.AppendVersionWithQuotaCheck(slug, kind, staged.SHA, staged.CompressedSize, int64(domain.UserQuotaBytes), now)
+	var res storage.AppendResult
+	err = m.Blob.Commit(ctx, []BlobHandle{handle}, func() error {
+		var aerr error
+		res, aerr = m.Repo.AppendVersionWithQuotaCheck(slug, kind, staged.SHA, staged.CompressedSize, int64(domain.UserQuotaBytes), now)
+		return aerr
+	})
 	if err != nil {
 		switch {
 		case errors.Is(err, storage.ErrServiceFull):
@@ -206,12 +218,20 @@ func (m *Manage) Rename(slug domain.Slug, owner, name string) error {
 
 // Delete removes a paste and its versions (FK cascade).
 func (m *Manage) Delete(slug domain.Slug, owner string) error {
-	if _, err := m.requireOwner(slug, owner); err != nil {
+	p, err := m.requireOwner(slug, owner)
+	if err != nil {
 		return err
 	}
 	if err := m.Repo.Delete(slug); err != nil {
 		return err
 	}
+	// Unbind the paste's blob references. On the standalone path this is a
+	// no-op (the global sweep reclaims unreferenced content-addressed blobs);
+	// it names the delete-side lifecycle so the call is uniform across
+	// backends. A failure here is logged-by-impl, not fatal - the metadata is
+	// already gone and the sweep is the backstop - so the error is swallowed
+	// like the cache purge below.
+	_ = m.Blob.UnbindOnDelete(context.Background(), string(slug), []string{p.ContentSHA})
 	m.purge(slug)
 	return nil
 }

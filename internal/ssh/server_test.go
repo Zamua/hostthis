@@ -40,12 +40,13 @@ func TestUploadAndServe(t *testing.T) {
 	// Wrap with compression so service writes + http reads decode
 	// transparently - mirrors the production wiring in cmd/hostthisd.
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
+	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	repo := storage.NewPasteRepo(db)
-	upload := service.NewUpload(repo, blobs)
+	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 
 	// HTTP server on a real port via httptest.
-	httpSrv := httptest.NewServer((&httpapi.Server{Pastes: repo, Blobs: blobs}).Handler())
+	httpSrv := httptest.NewServer((&httpapi.Server{Pastes: repo, Blobs: blobUnit}).Handler())
 	t.Cleanup(httpSrv.Close)
 
 	// SSH server on a fresh port. ":0" reserves one for us.

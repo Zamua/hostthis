@@ -41,12 +41,15 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// delayBlob wraps a BlobStore and sleeps before each write to simulate a
+// delayBlob wraps a blob store and sleeps before each write to simulate a
 // slow/variable blob store (e.g. the prod distributed-MinIO PUT tail,
 // ~110ms-1.5s). The write path is what the async work moved off the ack,
-// so this is the knob that decides whether async earns its keep.
+// so this is the knob that decides whether async earns its keep. It holds
+// the concrete compressed store so it satisfies the full read+write surface
+// the StandaloneBlobUnit seam needs (Get/GetReader as well as the writes),
+// delaying only the writes.
 type delayBlob struct {
-	inner service.BlobStore
+	inner *storage.CompressedBlobStore
 	d     time.Duration
 }
 
@@ -59,6 +62,9 @@ func (b delayBlob) PutPrecompressed(sha string, body []byte) error {
 	return b.inner.PutPrecompressed(sha, body)
 }
 func (b delayBlob) Get(sha string) ([]byte, error) { return b.inner.Get(sha) }
+func (b delayBlob) GetReader(sha string) (io.ReadCloser, int64, error) {
+	return b.inner.GetReader(sha)
+}
 
 func env(k, def string) string {
 	if v := os.Getenv(k); v != "" {
@@ -116,12 +122,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("NewS3BlobStore: %v", err)
 	}
-	var blobStore service.BlobStore = storage.NewCompressedBlobStore(s3)
+	compressed := storage.NewCompressedBlobStore(s3)
+	// blobUnit is the read+write surface the StandaloneBlobUnit seam needs.
+	// When a write delay is configured, wrap the compressed store so the
+	// writes (the ack-path bottleneck the benchmark exercises) sleep first.
+	blobUnit := service.NewStandaloneBlobUnit(compressed)
 	if *blobMs > 0 {
-		blobStore = delayBlob{inner: blobStore, d: time.Duration(*blobMs) * time.Millisecond}
+		blobUnit = service.NewStandaloneBlobUnit(delayBlob{inner: compressed, d: time.Duration(*blobMs) * time.Millisecond})
 	}
 
-	up := &service.Upload{Repo: repo, Blobs: blobStore, Now: time.Now, SyncBlob: *syncMode}
+	up := &service.Upload{Repo: repo, Blob: blobUnit, Now: time.Now, SyncBlob: *syncMode}
 
 	// Pre-generate distinct, incompressible payloads (one per op) so no
 	// blob dedup makes a write free. Each op's owner is round-robined.

@@ -66,10 +66,16 @@ func main() {
 	}
 	defer blobsCleanup()
 
+	// The per-record blob seam. Today every metadata backend uses the
+	// standalone adapter over the detached content-addressed store, so the
+	// services run one shape regardless of backend (a later phase supplies a
+	// transactional shale unit on the shale path).
+	blobUnit := service.NewStandaloneBlobUnit(blobs)
+
 	siteRepo := metadata.Sites
 	roomRepo := metadata.Rooms
 
-	uploadSvc := service.NewUpload(pasteRepo, blobs)
+	uploadSvc := service.NewUpload(pasteRepo, blobUnit)
 	uploadSvc.Logger = logger // record background blob-finalize outcomes
 	// HOSTTHIS_BLOB_SYNC is a BENCHMARK toggle (sync vs async A/B on one
 	// binary): when true, Create writes the blob inline on the ack path
@@ -78,14 +84,14 @@ func main() {
 		uploadSvc.SyncBlob = true
 		logger.Printf("upload: HOSTTHIS_BLOB_SYNC=true (inline blob write; benchmark mode)")
 	}
-	manageSvc := service.NewManage(pasteRepo, blobs)
+	manageSvc := service.NewManage(pasteRepo, blobUnit)
 
 	// Static-site archive deploys. Reuses the same blob store + the same
 	// per-identity quota as pastes; nil-safe if the metadata backend
 	// doesn't expose a site repo.
 	var deploySvc *service.DeploySite
 	if siteRepo != nil {
-		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobs)
+		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobUnit)
 	}
 
 	// Rooms: the no-auth, capability-based app-persistence tier
@@ -177,7 +183,7 @@ func main() {
 
 	httpServer := &httpapi.Server{
 		Pastes:      pasteRepo,
-		Blobs:       blobs,
+		Blobs:       blobUnit,
 		LandingHTML: landing,
 		ApexDomain:  *apexDomain,
 		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),

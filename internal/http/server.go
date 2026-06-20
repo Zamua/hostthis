@@ -7,6 +7,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -33,14 +34,17 @@ type SiteReader interface {
 	Get(domain.Slug) (domain.Site, error)
 }
 
-// BlobReader fetches paste bytes by content sha. Get buffers the whole
-// blob (needed by the markdown render path, which renders the full
-// document); GetReader streams the bytes so the HTML / site-file serve
-// paths can io.Copy straight to the client without a full-payload
-// allocation per GET.
+// BlobReader is the read side of the per-record blob seam, narrowed to
+// what the http serve paths need. ReadAll buffers the whole blob (needed by
+// the markdown render path, which renders the full document); Read streams
+// the bytes so the HTML / site-file serve paths can io.Copy straight to the
+// client without a full-payload allocation per GET. Both take the record's
+// slug (the route key) + its content sha; the standalone backend keys by
+// sha alone and ignores the slug, the transactional shale backend (a later
+// phase) uses the slug to route. service.BlobUnit satisfies this.
 type BlobReader interface {
-	Get(sha string) ([]byte, error)
-	GetReader(sha string) (io.ReadCloser, int64, error)
+	ReadAll(ctx context.Context, slug, sha string) ([]byte, error)
+	Read(ctx context.Context, slug, sha string) (io.ReadCloser, int64, error)
 }
 
 // Server bundles the dependencies.
@@ -282,7 +286,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		// buffering up to ~10 MiB per GET; the spike scaled with
 		// concurrency on the small VPS. Headers above are already set;
 		// the body is byte-identical to a buffered Get + Write.
-		rc, _, err := s.Blobs.GetReader(p.ContentSHA)
+		rc, _, err := s.Blobs.Read(r.Context(), string(slug), p.ContentSHA)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -296,7 +300,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		// on (ContentSHA, render.MarkdownRendererVersion) can land
 		// later if cold renders become hot. Markdown needs the whole
 		// document buffered, so it keeps the buffered Get.
-		body, err := s.Blobs.Get(p.ContentSHA)
+		body, err := s.Blobs.ReadAll(r.Context(), string(slug), p.ContentSHA)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -490,7 +494,7 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 	// Stream the (decompressed) site file straight to the client rather
 	// than buffering the whole asset per GET. Headers above are already
 	// set; the body is byte-identical to a buffered Get + Write.
-	rc, _, err := s.Blobs.GetReader(entry.SHA)
+	rc, _, err := s.Blobs.Read(r.Context(), string(slug), entry.SHA)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return true

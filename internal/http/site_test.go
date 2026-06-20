@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http/httptest"
 	"testing"
@@ -21,10 +22,11 @@ func (r stubSiteReader) Get(slug domain.Slug) (domain.Site, error) {
 	return r.s, nil
 }
 
-// stubBlobMap returns bytes by sha.
+// stubBlobMap returns bytes by sha (the slug is ignored, as on the
+// standalone content-addressed path).
 type stubBlobMap struct{ m map[string][]byte }
 
-func (b stubBlobMap) Get(sha string) ([]byte, error) {
+func (b stubBlobMap) ReadAll(_ context.Context, _, sha string) ([]byte, error) {
 	body, ok := b.m[sha]
 	if !ok {
 		return nil, storage.ErrNotFound
@@ -32,7 +34,7 @@ func (b stubBlobMap) Get(sha string) ([]byte, error) {
 	return body, nil
 }
 
-func (b stubBlobMap) GetReader(sha string) (io.ReadCloser, int64, error) {
+func (b stubBlobMap) Read(_ context.Context, _, sha string) (io.ReadCloser, int64, error) {
 	body, ok := b.m[sha]
 	if !ok {
 		return nil, 0, storage.ErrNotFound

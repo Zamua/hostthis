@@ -52,14 +52,14 @@ func TestSweep_ExpiresSitesAndProtectsSharedBlobs(t *testing.T) {
 	// Identical bytes uploaded as a paste AND deployed as a site so they
 	// share a blob.
 	shared := "<!doctype html><h1>shared bytes</h1>"
-	upload := service.NewUpload(pastes, blobs)
+	upload := service.NewUpload(pastes, service.NewStandaloneBlobUnit(blobs))
 	t.Cleanup(upload.WaitFinalize)
 	upload.Now = func() time.Time { return now }
 	if _, err := upload.Create(bytes.NewReader([]byte(shared)), "key:paste-owner", "", ""); err != nil {
 		t.Fatalf("paste upload: %v", err)
 	}
 
-	deploy := service.NewDeploySite(sites, pastes, blobs)
+	deploy := service.NewDeploySite(sites, pastes, service.NewStandaloneBlobUnit(blobs))
 	deploy.Now = func() time.Time { return now }
 	res, err := deploy.Deploy(bytes.NewReader(gzTar(t, map[string]string{"index.html": shared})), "key:site-owner")
 	if err != nil {
@@ -136,7 +136,7 @@ func TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt(t *testing.T) {
 	shared := "<!doctype html><h1>two sites share me</h1>"
 
 	// Site A at t0 (expires t0+7d).
-	deployA := service.NewDeploySite(sites, pastes, blobs)
+	deployA := service.NewDeploySite(sites, pastes, service.NewStandaloneBlobUnit(blobs))
 	deployA.Now = func() time.Time { return t0 }
 	resA, err := deployA.Deploy(bytes.NewReader(gzTar(t, map[string]string{"index.html": shared})), "key:a")
 	if err != nil {
@@ -146,7 +146,7 @@ func TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt(t *testing.T) {
 	// Site B deployed 3 days later (expires t0+3d+7d = t0+10d) - still alive
 	// when A expires at t0+7d.
 	t1 := t0.Add(3 * 24 * time.Hour)
-	deployB := service.NewDeploySite(sites, pastes, blobs)
+	deployB := service.NewDeploySite(sites, pastes, service.NewStandaloneBlobUnit(blobs))
 	deployB.Now = func() time.Time { return t1 }
 	if _, err := deployB.Deploy(bytes.NewReader(gzTar(t, map[string]string{"index.html": shared})), "key:b"); err != nil {
 		t.Fatalf("deploy B: %v", err)

@@ -54,6 +54,14 @@ func (f *fakeBlobs) Get(sha string) ([]byte, error) {
 	return b, nil
 }
 
+func (f *fakeBlobs) GetReader(sha string) (io.ReadCloser, int64, error) {
+	b, err := f.Get(sha)
+	if err != nil {
+		return nil, 0, err
+	}
+	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
+}
+
 func (f *fakeBlobs) has(sha string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -61,9 +69,18 @@ func (f *fakeBlobs) has(sha string) bool {
 	return ok
 }
 
+// testBlobStore is the combined read+write surface a StandaloneBlobUnit
+// needs, satisfied by the test fakes (fakeBlobs, fullBlobStore) and by
+// *storage.CompressedBlobStore.
+type testBlobStore interface {
+	BlobStore
+	blobReadStore
+}
+
 // newStackWithBlobs wires the real sqlite repo with a caller-supplied
-// blob store + a finalize-done signal so tests can wait deterministically.
-func newStackWithBlobs(t *testing.T, blobs BlobStore) (*Upload, *storage.PasteRepo, chan struct{}) {
+// blob store (wrapped in the StandaloneBlobUnit seam) + a finalize-done
+// signal so tests can wait deterministically.
+func newStackWithBlobs(t *testing.T, blobs testBlobStore) (*Upload, *storage.PasteRepo, chan struct{}) {
 	t.Helper()
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "test.db"))
@@ -72,7 +89,7 @@ func newStackWithBlobs(t *testing.T, blobs BlobStore) (*Upload, *storage.PasteRe
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	repo := storage.NewPasteRepo(db)
-	u := NewUpload(repo, blobs)
+	u := NewUpload(repo, NewStandaloneBlobUnit(blobs))
 	done := make(chan struct{}, 8)
 	u.onFinalizeDone = func() { done <- struct{}{} }
 	t.Cleanup(u.WaitFinalize)

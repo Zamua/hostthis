@@ -44,11 +44,12 @@ func newSiteStack(t *testing.T) *siteStack {
 		t.Fatalf("blob store: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
+	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	repo := storage.NewPasteRepo(db)
 	sites := storage.NewSiteRepo(db)
 
 	httpSrv := httptest.NewServer((&httpapi.Server{
-		Pastes: repo, Sites: sites, Blobs: blobs, ApexDomain: "paste.test",
+		Pastes: repo, Sites: sites, Blobs: blobUnit, ApexDomain: "paste.test",
 	}).Handler())
 	t.Cleanup(httpSrv.Close)
 
@@ -56,14 +57,14 @@ func newSiteStack(t *testing.T) *siteStack {
 	addr := l.Addr().String()
 	_ = l.Close()
 
-	upload := service.NewUpload(repo, blobs)
+	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 	sshSrv := &hostssh.Server{
 		Addr:       addr,
 		ApexDomain: "paste.test",
 		Upload:     upload,
-		Manage:     service.NewManage(repo, blobs),
-		Deploy:     service.NewDeploySite(sites, repo, blobs),
+		Manage:     service.NewManage(repo, blobUnit),
+		Deploy:     service.NewDeploySite(sites, repo, blobUnit),
 		BuildURL:   func(s domain.Slug) string { return httpSrv.URL + "/p/" + s.String() },
 		Logger:     log.New(io.Discard, "", 0),
 	}

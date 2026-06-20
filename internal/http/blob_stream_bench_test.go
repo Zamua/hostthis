@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
@@ -30,17 +32,19 @@ func (d *discardResponseWriter) Header() http.Header         { return d.h }
 func (d *discardResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (d *discardResponseWriter) WriteHeader(int)             {}
 
-// bufferingBlobReader forces the OLD serve behavior: GetReader buffers
-// the whole decompressed blob into memory (via Get) and hands back an
-// in-memory reader. This is the "before" baseline for the benchmark -
-// it reproduces the full-payload per-GET allocation that FIX #1
-// removes. The "after" path uses the real *storage.CompressedBlobStore,
-// whose GetReader streams.
+// bufferingBlobReader forces the OLD serve behavior: Read buffers the
+// whole decompressed blob into memory (via ReadAll) and hands back an
+// in-memory reader. This is the "before" baseline for the benchmark - it
+// reproduces the full-payload per-GET allocation that FIX #1 removes. The
+// "after" path uses the real seam over *storage.CompressedBlobStore, whose
+// Read streams.
 type bufferingBlobReader struct{ inner BlobReader }
 
-func (b bufferingBlobReader) Get(sha string) ([]byte, error) { return b.inner.Get(sha) }
-func (b bufferingBlobReader) GetReader(sha string) (io.ReadCloser, int64, error) {
-	body, err := b.inner.Get(sha)
+func (b bufferingBlobReader) ReadAll(ctx context.Context, slug, sha string) ([]byte, error) {
+	return b.inner.ReadAll(ctx, slug, sha)
+}
+func (b bufferingBlobReader) Read(ctx context.Context, slug, sha string) (io.ReadCloser, int64, error) {
+	body, err := b.inner.ReadAll(ctx, slug, sha)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -108,7 +112,7 @@ func runConcurrentGETs(b *testing.B, srv *Server, r *http.Request) {
 // allocs/op + B/op; compare against the buffered baseline below.
 func BenchmarkServePaste_StreamedGetReader(b *testing.B) {
 	store, sha := newBenchBlobStore(b)
-	srv, r := benchServer(b, store, sha, time.Now().UTC())
+	srv, r := benchServer(b, service.NewStandaloneBlobUnit(store), sha, time.Now().UTC())
 	b.ReportAllocs()
 	runConcurrentGETs(b, srv, r)
 }
@@ -119,7 +123,7 @@ func BenchmarkServePaste_StreamedGetReader(b *testing.B) {
 // full-payload spike that scaled with concurrency on the small VPS.
 func BenchmarkServePaste_BufferedGet(b *testing.B) {
 	store, sha := newBenchBlobStore(b)
-	srv, r := benchServer(b, bufferingBlobReader{inner: store}, sha, time.Now().UTC())
+	srv, r := benchServer(b, bufferingBlobReader{inner: service.NewStandaloneBlobUnit(store)}, sha, time.Now().UTC())
 	b.ReportAllocs()
 	runConcurrentGETs(b, srv, r)
 }
