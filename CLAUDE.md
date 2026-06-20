@@ -114,42 +114,29 @@ make docker-up     # docker compose up; same ports; data persists in ./data
 make docker-down   # tear down
 ```
 
-### Testing the S3 blob backend locally
+### Blob backends: disk standalone + shale-collocated
 
-The S3-compatible backend (`HOSTTHIS_BLOB_BACKEND=s3`) is exercised by an
-integration test that needs a live S3 endpoint. The dev compose at
-`deploy/dev/docker-compose.yml` brings up a local MinIO + auto-creates
-the test bucket.
+There is ONE standalone blob backend, `disk` (the default), used for dev/
+test. The detached `s3` standalone backend (and its disk->S3 migration
+binaries) was retired once the shale-collocated blob plane became the
+production cloud-blob path - see `docs/SPEC.md` "Shale-collocated blobs".
 
-```
-make dev-minio-up  # starts MinIO at :9000 (s3) + :9001 (console)
-make test-s3       # runs ./internal/storage TestS3BlobStore_RoundTrip
-make dev-minio-down  # teardown (with volume wipe)
-```
-
-The default `make test` skips this test if `MINIO_TEST_ENDPOINT` is unset,
-so CI runs that don't have Docker available don't fail.
-
-### Migrating live blobs from disk to S3
-
-Two operator binaries handle the one-way disk → S3 migration:
+Production blobs go THROUGH the shale cluster (the metadata's object store,
+a distinct blob bucket via `HOSTTHIS_SHALE_BLOB_BUCKET`), co-committed with
+the metadata. Its tests use a real shale metadata cluster (MinIO) for the
+metadata plane and a pure-Go in-memory `blob.Store` (`blobmem`) for the byte
+plane, so no live blob object store is needed:
 
 ```
-# 1. Copy blobs (idempotent: re-Putting an existing key is a no-op).
-HOSTTHIS_DATA_DIR=/path/to/data \
-HOSTTHIS_S3_ENDPOINT=https://… HOSTTHIS_S3_BUCKET=… \
-HOSTTHIS_S3_ACCESS_KEY=… HOSTTHIS_S3_SECRET_KEY=… \
-make blob-migrate
-
-# 2. Verify byte-for-byte (re-hashes every S3 object).
-make blob-verify   # exits non-zero on any mismatch / missing object
-
-# 3. Flip the env var on the deploy and restart.
-HOSTTHIS_BLOB_BACKEND=s3
+make dev-minio-up         # MinIO at :9000 (metadata bucket hostthis-metadata)
+make test-conformance-kv  # slatedb + shale metadata conformance (needs -tags slatedb + MinIO)
+make dev-minio-down       # teardown (with volume wipe)
 ```
 
-Both binaries read the same `HOSTTHIS_S3_*` env vars hostthisd does, so
-there's no second config surface to maintain.
+The shale-blob seam tests live in `internal/shaleblob` (-tags slatedb;
+skipped unless `MINIO_TEST_ENDPOINT` is set). `hostthis-blob-compress`
+(`cmd/`) re-encodes legacy uncompressed on-disk blobs to the magic+zstd
+format; it is disk-only.
 
 Quick smoke from another terminal once it's live:
 

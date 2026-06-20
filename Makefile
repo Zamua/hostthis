@@ -1,6 +1,5 @@
 .PHONY: help build test smoke dev run docker-build docker-up docker-down \
-        dev-minio-up dev-minio-down test-s3 test-conformance-kv \
-        blob-migrate blob-verify \
+        dev-minio-up dev-minio-down test-conformance-kv \
         fmt vet clean data-dir-perms rebuild-site-fixtures
 
 # Default goal: show the help text rather than silently no-op.
@@ -22,11 +21,8 @@ help:
 	@echo "  make docker-build  build the container image (tag hostthis:dev)"
 	@echo "  make docker-up     bring up local compose stack"
 	@echo "  make docker-down   tear it down"
-	@echo "  make dev-minio-up  start local MinIO for the S3 backend test"
-	@echo "  make test-s3       run the S3 round-trip integration test"
+	@echo "  make dev-minio-up  start local MinIO for the slatedb/shale metadata + shale-blob tests"
 	@echo "  make test-conformance-kv  run slatedb+shale conformance (needs -tags slatedb + MinIO)"
-	@echo "  make blob-migrate  copy disk blobs into the configured S3 backend"
-	@echo "  make blob-verify   verify every disk blob round-trips against S3"
 	@echo "  make fmt / vet     gofmt / go vet"
 	@echo "  make rebuild-site-fixtures  rebuild the vite SPA test fixtures (needs npm)"
 	@echo "  make clean         remove ./bin and ./data"
@@ -85,24 +81,15 @@ docker-up: data-dir-perms
 docker-down:
 	docker compose down
 
-# -- Dev MinIO (for the S3 backend integration test) ------------------------
+# -- Dev MinIO (for the slatedb/shale metadata + shale-blob tests) ----------
 
 dev-minio-up:
 	docker compose -f deploy/dev/docker-compose.yml up -d
 	@echo "minio: http://localhost:9000 (s3 api)  http://localhost:9001 (console: admin/supersecret)"
-	@echo "buckets 'hostthis-blobs' + 'hostthis-metadata' are auto-created by the init container"
+	@echo "buckets 'hostthis-metadata' (+ 'hostthis-blobs' for the shale-blob byte plane) are auto-created by the init container"
 
 dev-minio-down:
 	docker compose -f deploy/dev/docker-compose.yml down -v
-
-# Runs the S3 round-trip test against the local MinIO. Assumes
-# dev-minio-up has already been run.
-test-s3:
-	MINIO_TEST_ENDPOINT=http://localhost:9000 \
-	MINIO_TEST_BUCKET=hostthis-blobs \
-	MINIO_TEST_ACCESS_KEY=admin \
-	MINIO_TEST_SECRET_KEY=supersecret \
-	go test -v -count=1 ./internal/storage -run TestS3BlobStore
 
 # Runs the slatedb + shale backend conformance suites against the local
 # MinIO (hostthis-metadata bucket). Needs the slatedb build tag, cgo, and
@@ -121,19 +108,6 @@ test-conformance-kv:
 	MINIO_TEST_SECRET_KEY=supersecret \
 	go test -tags slatedb -count=1 ./internal/storage \
 		-run 'TestConformance_Slate|TestConformance_Shale'
-
-# -- Blob migration helpers (disk → s3) -------------------------------------
-
-# One-shot: copy every blob under HOSTTHIS_DATA_DIR/blobs into the configured
-# S3 backend. Reads the same HOSTTHIS_S3_* env vars hostthisd does.
-blob-migrate:
-	go run ./cmd/hostthis-blob-migrate
-
-# Verify: every disk blob is present in S3 with identical bytes.
-# Exits non-zero on any mismatch; safe to run before flipping the
-# HOSTTHIS_BLOB_BACKEND env var.
-blob-verify:
-	go run ./cmd/hostthis-blob-verify
 
 # Compose mounts ./data into the container under distroless's nonroot uid
 # (65532). Make sure the host dir is writable by that uid.

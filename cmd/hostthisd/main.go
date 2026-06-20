@@ -263,10 +263,13 @@ func main() {
 	_ = httpSrv.Shutdown(shutdownCtx)
 }
 
-// buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the
-// configured BlobStore + SweepBlobs (same type, narrowed via two
-// interfaces). The disk backend is the default; "s3" picks up an
-// S3-compatible endpoint via HOSTTHIS_S3_* env vars.
+// buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured
+// BlobStore + SweepBlobs (same type, narrowed via two interfaces). The disk
+// backend is the only standalone backend (dev/test); production runs the shale
+// metadata backend, whose ShaleRepo owns its OWN shale-managed MinIO blob plane
+// (cluster.BlobKV) constructed in NewShaleRepo - it does NOT go through this
+// detached store. The detached S3 standalone backend was retired with the
+// shale-collocated blob work (the shale path made it redundant; dev uses disk).
 func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, service.SweepBlobs, func(), error) {
 	backend := strings.ToLower(envOr("HOSTTHIS_BLOB_BACKEND", "disk"))
 	switch backend {
@@ -284,34 +287,15 @@ func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlob
 			return nil, nil, nil, err
 		}
 		return storage.NewCompressedBlobStore(inner), sweep, cleanup, nil
-	case "s3":
-		cfg := storage.S3Config{
-			EndpointURL: os.Getenv("HOSTTHIS_S3_ENDPOINT"),
-			Bucket:      os.Getenv("HOSTTHIS_S3_BUCKET"),
-			Region:      envOr("HOSTTHIS_S3_REGION", "us-east-1"),
-			AccessKey:   os.Getenv("HOSTTHIS_S3_ACCESS_KEY"),
-			SecretKey:   os.Getenv("HOSTTHIS_S3_SECRET_KEY"),
-			UseSSL:      strings.ToLower(envOr("HOSTTHIS_S3_USE_SSL", "true")) != "false",
-		}
-		bs, err := storage.NewS3BlobStore(cfg)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		logger.Printf("blobs: s3 backend at %s bucket=%s (zstd-compressed at rest)", cfg.EndpointURL, cfg.Bucket)
-		inner, sweep, cleanup, err := maybeWrapWriteBack(bs, dataDir, logger)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		return storage.NewCompressedBlobStore(inner), sweep, cleanup, nil
 	default:
-		return nil, nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|s3)", backend)
+		return nil, nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (only 'disk' is supported as a standalone backend; production uses the shale-collocated blob plane)", backend)
 	}
 }
 
 // writeBackInner is the contract maybeWrapWriteBack needs of a durable
 // backend: the inner Put/Get/GetReader the compression layer wraps, plus
-// the WalkBlobs/Remove the sweep uses. Both *storage.BlobStore and
-// *storage.S3BlobStore satisfy it.
+// the WalkBlobs/Remove the sweep uses. *storage.BlobStore (the disk store)
+// satisfies it.
 type writeBackInner interface {
 	Put(sha string, r io.Reader, size int64) error
 	Get(sha string) ([]byte, error)

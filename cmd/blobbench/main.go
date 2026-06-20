@@ -1,8 +1,9 @@
 // blobbench - sync-vs-async blob-write A/B harness for Upload.Create.
 //
 // Drives Upload.Create directly against a local slatedb/shale metadata
-// store + S3 (MinIO) blob store, so it measures the exact sync-vs-async
-// variable with no SSH-handshake noise and no Sybil keygate in the way.
+// store + an on-disk standalone blob store, so it measures the exact
+// sync-vs-async variable with no SSH-handshake noise and no Sybil keygate in
+// the way. (Use -blobms to simulate a slow blob store's write tail.)
 //
 // It reports two throughputs on purpose:
 //   - ack throughput  = ops / (time for all Create calls to RETURN). In
@@ -16,7 +17,8 @@
 //   CGO_LDFLAGS="-L$HOME/.local/lib" DYLD_LIBRARY_PATH="$HOME/.local/lib" \
 //     go build -tags slatedb -o /tmp/blobbench ./cmd/blobbench
 //
-// Run (local MinIO at :9000, buckets hostthis-metadata + hostthis-blobs):
+// Run (local MinIO at :9000 for the metadata bucket hostthis-metadata; the
+// standalone blob store is on disk under a temp dir):
 //   DYLD_LIBRARY_PATH="$HOME/.local/lib" /tmp/blobbench \
 //     -sync=false -conc=8 -ops=2000 -owners=20 -size=4096
 
@@ -90,7 +92,6 @@ func main() {
 	access := env("MINIO_TEST_ACCESS_KEY", "admin")
 	secret := env("MINIO_TEST_SECRET_KEY", "supersecret")
 	metaBucket := env("MINIO_TEST_METADATA_BUCKET", "hostthis-metadata")
-	blobBucket := env("MINIO_TEST_BLOB_BUCKET", "hostthis-blobs")
 
 	// Fresh logical db per run so each run's quota starts empty.
 	dbName := fmt.Sprintf("blobbench-%d", time.Now().UnixNano())
@@ -111,18 +112,21 @@ func main() {
 	}
 	defer repo.Close()
 
-	s3, err := storage.NewS3BlobStore(storage.S3Config{
-		EndpointURL: endpoint,
-		Bucket:      blobBucket,
-		Region:      "us-east-1",
-		AccessKey:   access,
-		SecretKey:   secret,
-		UseSSL:      false,
-	})
+	// Standalone blob store for the A/B: a fresh on-disk store under a temp
+	// dir. The detached S3 standalone backend was retired with the
+	// shale-collocated blob work; this bench measures sync-vs-async on the
+	// StandaloneBlobUnit seam, which the disk store exercises identically (and
+	// the -blobms knob simulates a slow blob store's write tail directly).
+	blobDir, err := os.MkdirTemp("", "blobbench-blobs-")
 	if err != nil {
-		log.Fatalf("NewS3BlobStore: %v", err)
+		log.Fatalf("temp blob dir: %v", err)
 	}
-	compressed := storage.NewCompressedBlobStore(s3)
+	defer os.RemoveAll(blobDir) //nolint:errcheck
+	disk, err := storage.NewBlobStore(blobDir)
+	if err != nil {
+		log.Fatalf("NewBlobStore: %v", err)
+	}
+	compressed := storage.NewCompressedBlobStore(disk)
 	// blobUnit is the read+write surface the StandaloneBlobUnit seam needs.
 	// When a write delay is configured, wrap the compressed store so the
 	// writes (the ack-path bottleneck the benchmark exercises) sleep first.
