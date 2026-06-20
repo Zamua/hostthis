@@ -478,7 +478,7 @@ func openCluster(logger *log.Logger) (*storage.ShaleRepo, string, error) {
 	}
 	blobStore = bs
 
-	repo, err := storage.NewShaleRepo(storage.ShaleConfig{
+	cfg := storage.ShaleConfig{
 		NodeID:            nodeID,
 		Endpoint:          endpoint,
 		Region:            region,
@@ -496,9 +496,34 @@ func openCluster(logger *log.Logger) (*storage.ShaleRepo, string, error) {
 		CacheBytes:        uint64(cacheBytes),
 		Logger:            logger,
 		BlobStore:         blobStore,
-	})
-	if err != nil {
-		return nil, "", fmt.Errorf("NewShaleRepo: %w", err)
+	}
+	// Retry the cluster open IN-PROCESS instead of crashing. A JOINER's
+	// NewShaleRepo learns the ring by joining the founder's gossip/gRPC, which is
+	// not up until the founder's OWN open returns - so an early joiner sees
+	// "membership: join: connection refused". Crashing (exit -> the cmd's
+	// log.Fatalf in main) would make k8s restart the pod with EXPONENTIAL
+	// CrashLoopBackOff, delaying convergence past the founder's readiness wait and
+	// leaving the founder to run its mode on a degraded 2/3 ring (false "missing
+	// blobs"). The join fails FAST (before any unit mount), so retrying is cheap
+	// and keeps the pod - and thus ring membership - stable. The founder (no
+	// seeds) bootstraps locally and rarely needs this.
+	const openRetryWindow = 6 * time.Minute
+	openDeadline := time.Now().Add(openRetryWindow)
+	var repo *storage.ShaleRepo
+	for attempt := 1; ; attempt++ {
+		var err error
+		repo, err = storage.NewShaleRepo(cfg)
+		if err == nil {
+			if attempt > 1 {
+				logger.Printf("cluster open: succeeded on attempt %d", attempt)
+			}
+			break
+		}
+		if time.Now().After(openDeadline) {
+			return nil, "", fmt.Errorf("NewShaleRepo (after retries over %s): %w", openRetryWindow, err)
+		}
+		logger.Printf("cluster open: attempt %d failed (transient join race? retry in 3s): %v", attempt, err)
+		time.Sleep(3 * time.Second)
 	}
 
 	role := resolveRole(seeds)
