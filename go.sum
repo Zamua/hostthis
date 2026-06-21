@@ -10,10 +10,14 @@ github.com/Zamua/shale v0.7.1-0.20260619005503-a07654c3c18d h1:jC7xwnIXx8tgbTTBs
 github.com/Zamua/shale v0.7.1-0.20260619005503-a07654c3c18d/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
 github.com/Zamua/shale v0.7.1-0.20260620023354-886690ae2d8d h1:RObeiPE/jkqpRwszuNFc2+gGKWzz7SStlD+QwukgsJ4=
 github.com/Zamua/shale v0.7.1-0.20260620023354-886690ae2d8d/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
+github.com/Zamua/shale v0.7.1-0.20260621110638-bd879fc8d57b h1:90tYBR3ManijQV3ArafokIM6/K+jdVow4s2necGO6Co=
+github.com/Zamua/shale v0.7.1-0.20260621110638-bd879fc8d57b/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
 github.com/Zamua/shale/backends/slate v0.7.2-0.20260619005503-a07654c3c18d h1:KDsdF63QXkV1t7+Yq/9feChcn6bLe5yEH5Yt6E17PCY=
 github.com/Zamua/shale/backends/slate v0.7.2-0.20260619005503-a07654c3c18d/go.mod h1:pzz8b1S+qLuetRarjOiDFpP+UmYY/A9u4fc8uD3uOms=
 github.com/Zamua/shale/backends/slate v0.7.2-0.20260620023354-886690ae2d8d h1:Xipo5sLgyqYg5X8V5lPt5mnh+CVS+kSvaC5FaWAXEQA=
 github.com/Zamua/shale/backends/slate v0.7.2-0.20260620023354-886690ae2d8d/go.mod h1:PBvgzg/mITlBbN9B0TBYvG4WjApSn3pD4Tq2U1lJVpo=
+github.com/Zamua/shale/backends/slate v0.7.2-0.20260621110638-bd879fc8d57b h1:t1tnSGPWDl1hL2yz+ZWRAh8flmhQ1mKVn6O9av6ro74=
+github.com/Zamua/shale/backends/slate v0.7.2-0.20260621110638-bd879fc8d57b/go.mod h1:PBvgzg/mITlBbN9B0TBYvG4WjApSn3pD4Tq2U1lJVpo=
 github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/units v0.0.0-20151022065526-2efee857e7cf/go.mod h1:ybxpYRFXyAe+OPACYpWeL0wqObRcbAqCMya13uyzqw0=
