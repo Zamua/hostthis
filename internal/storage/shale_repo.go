@@ -82,6 +82,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -424,6 +425,21 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		// blob-capable surface so a staged blob's pointer co-commits with the
 		// metadata; when nil, cluster.Open opens the metadata-only path.
 		BlobStore: cfg.BlobStore,
+	}
+	// Cold-start patience: a joiner re-sweeps its seeds for the cluster generation
+	// up to GenLearnBudget (shale default 180s) so a still-mounting seed is waited
+	// for instead of crash-looping the joiner. These envs override the default (a
+	// longer budget for a slow backend, or a SHORT one + SHALE_DEBUG_MOUNT_DELAY to
+	// reproduce the pre-fix crash-loop on a real cluster); unset keeps the default.
+	if v := strings.TrimSpace(os.Getenv("SHALE_GEN_LEARN_BUDGET")); v != "" {
+		if d, derr := time.ParseDuration(v); derr == nil {
+			clusterCfg.GenLearnBudget = d
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("SHALE_DEBUG_MOUNT_DELAY")); v != "" {
+		if d, derr := time.ParseDuration(v); derr == nil {
+			clusterCfg.TestingMountDelay = d
+		}
 	}
 
 	var closeFactory func() error
