@@ -161,6 +161,15 @@ func main() {
 		}
 		logger.Printf("verify GREEN: every record-blob resolves + reads back + matches the old bucket")
 	}
+
+	// The mode finished successfully. HOLD (do not exit) so the pod stays Ready
+	// with its result line in the log: the operator/driver reads the outcome,
+	// then advances the mode via a rollout-restart (or tears the ring down).
+	// Exiting here would let k8s restart the pod, re-cold-start the ring (a
+	// ~30s reconverge), and race the driver's log read - a fresh boot has no
+	// result line yet. Members already returned above via their own hold.
+	logger.Printf("mode=%s complete; holding the ring (SIGTERM / rollout-restart to advance the mode or tear down)", *mode)
+	waitForSignal(logger)
 }
 
 // --- mode: dry-run ----------------------------------------------------------
