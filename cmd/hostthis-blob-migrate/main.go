@@ -111,6 +111,15 @@ func main() {
 	// the ring once with APPLY=false to inspect, then once with APPLY=true to apply.
 	apply := strings.EqualFold(envOr("MIGRATE_APPLY", "false"), "true")
 
+	// MIGRATE_ALLOW_DRIFT relaxes the dry-run's fail-closed-on-drift gate. Default
+	// false: a record-blob whose <sha> is MISSING from the old bucket aborts the
+	// run (the operator must look). true: such records are reported LOUDLY then
+	// SKIPPED (not migrated, not verified). Safe because a drift record's blob is
+	// already gone - the paste 404s today and 404s after, unchanged; you cannot
+	// re-key a blob that does not exist. The usual cause is stale metadata a
+	// blocked sweeper never cleaned (the blob expired, the row lingered).
+	allowDrift := strings.EqualFold(envOr("MIGRATE_ALLOW_DRIFT", "false"), "true")
+
 	// 1. Build the FULL app cluster via NewShaleRepo with the app's own env +
 	//    node identity (the pivot). openCluster mirrors buildMetadataShale.
 	repo, role, err := openCluster(logger)
@@ -160,8 +169,10 @@ func main() {
 	logger.Printf("apply=%t role=%s enumerated %d record-blobs", apply, role, len(records))
 	logCorruptRecords(logger, corrupt)
 
-	// Phase 1 - DRY-RUN (always, read-only, fail-closed on metadata/blob drift).
-	if err := runDryRun(ctx, logger, oldStore, records); err != nil {
+	// Phase 1 - DRY-RUN (always, read-only). Returns the set of drift SHAs (blobs
+	// missing from the old bucket). Fail-closed on drift unless MIGRATE_ALLOW_DRIFT.
+	drift, err := runDryRun(ctx, logger, oldStore, records, allowDrift)
+	if err != nil {
 		logger.Fatalf("dry-run: %v", err)
 	}
 
@@ -171,13 +182,24 @@ func main() {
 		return
 	}
 
-	// Phase 2 - MIGRATE (the write): re-key every record-blob at R=2.
-	if err := runMigrate(ctx, logger, repo, oldStore, records, *concurrency); err != nil {
+	// Skip drift records (their blob is gone; nothing to re-key) from the migrate
+	// set. runDryRun already errored out above unless allowDrift, so a non-empty
+	// drift set here means the operator opted in.
+	migratable := records
+	if len(drift) > 0 {
+		migratable = filterOutDrift(records, drift)
+		logger.Printf("migrate: %d of %d record-blob(s) are migratable after skipping %d drift sha(s)",
+			len(migratable), len(records), len(drift))
+	}
+
+	// Phase 2 - MIGRATE (the write): re-key every migratable record-blob at R=2.
+	if err := runMigrate(ctx, logger, repo, oldStore, migratable, *concurrency); err != nil {
 		logger.Fatalf("migrate: %v", err)
 	}
 	// Phase 3 - VERIFY (the independent zero-loss gate): re-enumerate from the
-	// metadata and assert the full read-back + byte-compare for every record.
-	if err := runVerify(ctx, logger, repo, oldStore); err != nil {
+	// metadata and assert the full read-back + byte-compare for every record
+	// (drift records are skipped - they have no old blob to compare).
+	if err := runVerify(ctx, logger, repo, oldStore, drift); err != nil {
 		logger.Fatalf("verify FAILED (zero-loss gate): %v", err)
 	}
 	logger.Printf("verify GREEN: every record-blob resolves + reads back + matches the old bucket")
@@ -195,29 +217,46 @@ func main() {
 // exists in the OLD bucket (a HEAD via Has). NO writes. Reports the count, how
 // many already carry a blob id (an already-migrated re-run), and any drift
 // (a record whose sha is MISSING from the old bucket).
-func runDryRun(ctx context.Context, logger *log.Logger, old blob.Store, records []storage.LegacyBlobRecord) error {
+func runDryRun(ctx context.Context, logger *log.Logger, old blob.Store, records []storage.LegacyBlobRecord, allowDrift bool) (map[string]struct{}, error) {
 	var present, missing, already int
+	drift := make(map[string]struct{})
 	for _, rec := range records {
 		if rec.HasBlobID {
 			already++
 		}
 		ok, err := old.Has(ctx, rec.ContentSHA)
 		if err != nil {
-			return fmt.Errorf("HEAD old bucket %s (%s/%s): %w", rec.ContentSHA, rec.Slug, kindName(rec.Kind), err)
+			return nil, fmt.Errorf("HEAD old bucket %s (%s/%s): %w", rec.ContentSHA, rec.Slug, kindName(rec.Kind), err)
 		}
 		if ok {
 			present++
 		} else {
 			missing++
+			drift[rec.ContentSHA] = struct{}{}
 			logger.Printf("  MISSING old blob: slug=%s kind=%s sha=%s", rec.Slug, kindName(rec.Kind), rec.ContentSHA)
 		}
 	}
 	logger.Printf("dry-run: records=%d present-in-old=%d missing-in-old=%d already-have-blob-id=%d",
 		len(records), present, missing, already)
 	if missing > 0 {
-		return fmt.Errorf("%d record-blob(s) reference a sha that is NOT in the old bucket (metadata/blob drift) - resolve before migrating", missing)
+		if !allowDrift {
+			return nil, fmt.Errorf("%d record-blob(s) reference a sha that is NOT in the old bucket (metadata/blob drift) - resolve before migrating, or set MIGRATE_ALLOW_DRIFT=true to SKIP them", missing)
+		}
+		logger.Printf("dry-run: MIGRATE_ALLOW_DRIFT=true -> SKIPPING %d drift sha(s); those records are already-unservable (blob gone, 404 today and after) so they are not migrated", len(drift))
 	}
-	return nil
+	return drift, nil
+}
+
+// filterOutDrift returns the records whose ContentSHA is NOT in the drift set
+// (a record-blob whose <sha> is missing from the old bucket). Order-preserving.
+func filterOutDrift(records []storage.LegacyBlobRecord, drift map[string]struct{}) []storage.LegacyBlobRecord {
+	out := make([]storage.LegacyBlobRecord, 0, len(records))
+	for _, rec := range records {
+		if _, isDrift := drift[rec.ContentSHA]; !isDrift {
+			out = append(out, rec)
+		}
+	}
+	return out
 }
 
 // --- mode: migrate ----------------------------------------------------------
@@ -355,7 +394,7 @@ func migrateOne(ctx context.Context, repo *storage.ShaleRepo, old blob.Store, re
 // Any miss returns an error => the binary exits non-zero. The verify runs on a
 // FRESH cluster (a separate Job pod), so a green verify proves the writes
 // survive a full close+reopen, exactly as the app's restart will.
-func runVerify(ctx context.Context, logger *log.Logger, repo *storage.ShaleRepo, old blob.Store) error {
+func runVerify(ctx context.Context, logger *log.Logger, repo *storage.ShaleRepo, old blob.Store, drift map[string]struct{}) error {
 	// Independent re-enumeration (does NOT trust migrate's counts), retry-guarded
 	// against a transient handoff fence the same way the initial scan is.
 	records, corrupt, err := scanWithRetry(logger, repo)
@@ -365,8 +404,15 @@ func runVerify(ctx context.Context, logger *log.Logger, repo *storage.ShaleRepo,
 	logger.Printf("verify: re-derived %d record-blobs from the metadata", len(records))
 	logCorruptRecords(logger, corrupt)
 
-	var verified, failed int
+	var verified, failed, skippedDrift int
 	for _, rec := range records {
+		// A drift record (blob missing from the old bucket) was deliberately not
+		// migrated; it has no old blob to read back / compare, so skip it rather
+		// than count it as a loss. The dry-run already reported it loudly.
+		if _, isDrift := drift[rec.ContentSHA]; isDrift {
+			skippedDrift++
+			continue
+		}
 		if err := verifyOne(ctx, repo, old, rec); err != nil {
 			failed++
 			logger.Printf("  FAIL slug=%s kind=%s sha=%s: %v", rec.Slug, kindName(rec.Kind), rec.ContentSHA, err)
@@ -374,7 +420,7 @@ func runVerify(ctx context.Context, logger *log.Logger, repo *storage.ShaleRepo,
 		}
 		verified++
 	}
-	logger.Printf("verify: records=%d verified=%d failed=%d", len(records), verified, failed)
+	logger.Printf("verify: records=%d verified=%d failed=%d skipped-drift=%d", len(records), verified, failed, skippedDrift)
 	if failed > 0 {
 		return fmt.Errorf("%d record-blob(s) failed the read-back / byte-compare gate", failed)
 	}

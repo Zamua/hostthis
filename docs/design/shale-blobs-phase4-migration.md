@@ -317,7 +317,13 @@ a bounded retry on the transient fence as a backstop. Then:
 
 - **dry-run** (always): enumerate every record-blob from the metadata, confirm
   each referenced `<sha>` exists in the OLD `hostthis-blobs` bucket, report the
-  count + any missing-blob drift. NO writes. Fail-closed on drift.
+  count + any missing-blob drift. NO writes. Fail-closed on drift by default;
+  set `MIGRATE_ALLOW_DRIFT=true` to instead report the drift loudly and SKIP
+  those records (not migrated, not verified). Skipping is safe: a drift record's
+  blob is already gone, so the paste 404s today and 404s after the cutover,
+  unchanged - you cannot re-key a blob that does not exist. The usual cause is
+  stale metadata a blocked sweeper never cleaned (the blob expired, the row
+  lingered). The migrate + verify phases honor the same skip set.
 - **migrate** (only if `MIGRATE_APPLY=true`): the real copy. For each record-blob:
   skip if the row already carries a blob_id for this sha (idempotency pre-check);
   else GET the old `<sha>` bytes, `StageBlobStream` into the collocated bucket,
@@ -361,7 +367,10 @@ exists in MinIO (created, empty).
 
 # 2. INSPECT (MIGRATE_APPLY=false). Bring up the 3-pod migrate ring. The founder
 #    converges, dry-runs (read-only), reports "records=N present-in-old=N
-#    missing-in-old=0", and HOLDS. STOP if N==0 or missing-in-old>0 (drift).
+#    missing-in-old=0", and HOLDS. STOP if N==0. If missing-in-old>0 (drift),
+#    review the MISSING lines: if those pastes are already-gone (stale metadata
+#    from the blocked sweeper), re-run with MIGRATE_ALLOW_DRIFT=true to skip them;
+#    otherwise resolve the drift before applying.
 
 # 3. APPLY (MIGRATE_APPLY=true). Tear the inspect ring down, bring it up again with
 #    APPLY=true: the founder converges ONCE and runs dry-run -> migrate -> verify in
