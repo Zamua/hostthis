@@ -94,6 +94,7 @@ import (
 	"github.com/Zamua/shale/pkg/rpc"
 	"github.com/Zamua/shale/pkg/storageunit"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	slatedb "slatedb.io/slatedb-go/uniffi"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -514,7 +515,19 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	// but does not serve itself. cluster.Open advertises GRPCAddr via gossip;
 	// this is the listener that answers it.
 	if lis != nil {
-		g := grpc.NewServer()
+		// The cluster's inter-node client (shale pkg/cluster) keepalives every
+		// 30s WITH PermitWithoutStream. A default server enforcement policy
+		// (MinTime 5min, pings-without-streams disallowed) GOAWAYs those pings as
+		// too_many_pings and closes the connection mid-preface - which presents
+		// identically to a network drop ("error reading server preface: use of
+		// closed network connection") and stalls the cross-shard scan. Permit the
+		// client's keepalive cadence so peer forwarding stays up.
+		g := grpc.NewServer(
+			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+				MinTime:             10 * time.Second,
+				PermitWithoutStream: true,
+			}),
+		)
 		rpc.NewServer(cl).Register(g)
 		r.grpcSrv = g
 		r.grpcLis = lis
