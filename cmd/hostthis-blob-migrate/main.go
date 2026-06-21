@@ -47,7 +47,9 @@
 //	-- migrate-only --
 //	MIGRATE_OLD_BLOB_BUCKET           the OLD detached hostthis-blobs bucket
 //	                                  (bare <sha> keys); opened READ-ONLY (Get/Has).
-//	MIGRATE_MODE                      dry-run | migrate | verify (or -mode flag)
+//	MIGRATE_APPLY                     false (default) = DRY-RUN ONLY (the inspect
+//	                                  gate); true = founder also migrates + verifies,
+//	                                  all in ONE process after ONE convergence.
 //	MIGRATE_ROLE                      founder | member (or auto: empty seeds => founder)
 //	MIGRATE_CONCURRENCY               distinct-slug worker count (default 4)
 //	MIGRATE_EXPECT_MEMBERS            founder waits for this ring size before re-keying
@@ -85,16 +87,19 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", envOr("MIGRATE_MODE", "dry-run"), "dry-run | migrate | verify")
-	concurrency := flag.Int("concurrency", envOrInt("MIGRATE_CONCURRENCY", 4), "distinct-slug worker count (migrate mode)")
+	concurrency := flag.Int("concurrency", envOrInt("MIGRATE_CONCURRENCY", 4), "distinct-slug worker count (migrate)")
 	flag.Parse()
 	logger := log.New(os.Stderr, "blob-migrate ", log.LstdFlags|log.LUTC)
 
-	switch *mode {
-	case "dry-run", "migrate", "verify":
-	default:
-		logger.Fatalf("unknown -mode %q (want dry-run | migrate | verify)", *mode)
-	}
+	// MIGRATE_APPLY is the single safety gate. false (default) = DRY-RUN ONLY:
+	// converge, scan, report present/missing, hold (the inspect gate). true =
+	// the founder ALSO migrates (re-keys) then verifies, all in THIS one process
+	// after ONE convergence. Doing every phase in a single process is the robust
+	// shape: a mode-switch by pod-restart re-cold-starts the ring asymmetrically
+	// (the founder restarts into a ring the joiners still hold at bumped epochs),
+	// which fence-storms the scan. So there is no -mode flag; the operator runs
+	// the ring once with APPLY=false to inspect, then once with APPLY=true to apply.
+	apply := strings.EqualFold(envOr("MIGRATE_APPLY", "false"), "true")
 
 	// 1. Build the FULL app cluster via NewShaleRepo with the app's own env +
 	//    node identity (the pivot). openCluster mirrors buildMetadataShale.
@@ -133,42 +138,43 @@ func main() {
 	if err != nil {
 		logger.Fatalf("enumerate record-blobs: %v", err)
 	}
-	logger.Printf("mode=%s role=%s enumerated %d record-blobs", *mode, role, len(records))
+	logger.Printf("apply=%t role=%s enumerated %d record-blobs", apply, role, len(records))
 
-	switch *mode {
-	case "dry-run":
-		if err := runDryRun(ctx, logger, oldStore, records); err != nil {
-			logger.Fatalf("dry-run: %v", err)
-		}
-	case "migrate":
-		// Only the FOUNDER drives the re-key loop; members hold the ring for
-		// R=2 and exit on signal (the operator tears the Job down once verify
-		// is green; a member just keeps its node up while the founder writes).
-		if role != roleFounder {
-			logger.Printf("role=member: holding the ring; the founder drives the re-key. Waiting for shutdown signal.")
-			waitForSignal(logger)
-			return
-		}
-		if err := waitForRing(logger, repo); err != nil {
-			logger.Fatalf("ring readiness: %v", err)
-		}
-		if err := runMigrate(ctx, logger, repo, oldStore, records, *concurrency); err != nil {
-			logger.Fatalf("migrate: %v", err)
-		}
-	case "verify":
-		if err := runVerify(ctx, logger, repo, oldStore); err != nil {
-			logger.Fatalf("verify FAILED (zero-loss gate): %v", err)
-		}
-		logger.Printf("verify GREEN: every record-blob resolves + reads back + matches the old bucket")
+	// Members just hold the ring for R=2 the whole time; only the FOUNDER drives
+	// the read-only dry-run + the (gated) write + verify. A member that tried to
+	// scan/verify would churn the same units the founder reads.
+	if role != roleFounder {
+		logger.Printf("role=member: holding the ring for R=2 while the founder drives. Waiting for shutdown signal.")
+		waitForSignal(logger)
+		return
 	}
 
-	// The mode finished successfully. HOLD (do not exit) so the pod stays Ready
-	// with its result line in the log: the operator/driver reads the outcome,
-	// then advances the mode via a rollout-restart (or tears the ring down).
-	// Exiting here would let k8s restart the pod, re-cold-start the ring (a
-	// ~30s reconverge), and race the driver's log read - a fresh boot has no
-	// result line yet. Members already returned above via their own hold.
-	logger.Printf("mode=%s complete; holding the ring (SIGTERM / rollout-restart to advance the mode or tear down)", *mode)
+	// Phase 1 - DRY-RUN (always, read-only, fail-closed on metadata/blob drift).
+	if err := runDryRun(ctx, logger, oldStore, records); err != nil {
+		logger.Fatalf("dry-run: %v", err)
+	}
+
+	if !apply {
+		logger.Printf("MIGRATE_APPLY!=true: DRY-RUN ONLY (inspect gate). Re-run the ring with MIGRATE_APPLY=true to migrate+verify. Holding.")
+		waitForSignal(logger)
+		return
+	}
+
+	// Phase 2 - MIGRATE (the write): re-key every record-blob at R=2.
+	if err := runMigrate(ctx, logger, repo, oldStore, records, *concurrency); err != nil {
+		logger.Fatalf("migrate: %v", err)
+	}
+	// Phase 3 - VERIFY (the independent zero-loss gate): re-enumerate from the
+	// metadata and assert the full read-back + byte-compare for every record.
+	if err := runVerify(ctx, logger, repo, oldStore); err != nil {
+		logger.Fatalf("verify FAILED (zero-loss gate): %v", err)
+	}
+	logger.Printf("verify GREEN: every record-blob resolves + reads back + matches the old bucket")
+
+	// HOLD (do not exit) so the pod stays Ready with the result line in its log:
+	// the operator/driver reads the outcome, then tears the ring down. Exiting
+	// would let k8s restart the pod and re-cold-start the ring, racing the read.
+	logger.Printf("migrate+verify complete; holding the ring (SIGTERM / rollout-restart to tear down)")
 	waitForSignal(logger)
 }
 
@@ -339,7 +345,9 @@ func migrateOne(ctx context.Context, repo *storage.ShaleRepo, old blob.Store, re
 // FRESH cluster (a separate Job pod), so a green verify proves the writes
 // survive a full close+reopen, exactly as the app's restart will.
 func runVerify(ctx context.Context, logger *log.Logger, repo *storage.ShaleRepo, old blob.Store) error {
-	records, err := repo.ScanLegacyBlobs()
+	// Independent re-enumeration (does NOT trust migrate's counts), retry-guarded
+	// against a transient handoff fence the same way the initial scan is.
+	records, err := scanWithRetry(logger, repo)
 	if err != nil {
 		return fmt.Errorf("re-enumerate record-blobs: %w", err)
 	}
@@ -572,35 +580,6 @@ func resolveRole(seeds []string) string {
 		return roleFounder
 	}
 	return roleMember
-}
-
-// waitForRing makes the founder block until the ring has the expected number of
-// members (all migrate pods joined) before it drives any R=2 write, so every
-// co-commit fans to BOTH replica positions; a one-member ring would write only
-// one replica. It polls repo.MemberCount() (cluster.Members(), the same snapshot
-// the routing reads) rather than hand-rolling a convergence protocol. The
-// expected size is MIGRATE_EXPECT_MEMBERS (default len(seeds)+1); 0 skips the
-// wait (single-node migrate / explicit opt-out).
-func waitForRing(logger *log.Logger, repo *storage.ShaleRepo) error {
-	seeds := parseSeeds(os.Getenv("HOSTTHIS_SHALE_SEEDS"))
-	expect := envOrInt("MIGRATE_EXPECT_MEMBERS", len(seeds)+1)
-	if expect <= 1 {
-		logger.Printf("ring readiness: expect<=1 (single-node or opt-out), proceeding without a wait (members=%d)", repo.MemberCount())
-		return nil
-	}
-	deadline := time.Now().Add(5 * time.Minute)
-	for {
-		got := repo.MemberCount()
-		if got >= expect {
-			logger.Printf("ring readiness: %d/%d members joined, proceeding", got, expect)
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("ring did not reach %d members within 5m (saw %d); is every migrate pod up?", expect, got)
-		}
-		logger.Printf("ring readiness: %d/%d members; waiting...", got, expect)
-		time.Sleep(2 * time.Second)
-	}
 }
 
 // waitForConvergence blocks until the migrate ring's ownership map has SETTLED:
