@@ -109,45 +109,45 @@ func main() {
 	}
 	defer func() { _ = repo.Close() }()
 
-	// 2. The OLD detached hostthis-blobs bucket, opened READ-ONLY (Get/Has).
-	oldStore, err := openOldBucket(logger)
-	if err != nil {
-		logger.Fatalf("open old blob bucket: %v", err)
-	}
-
 	ctx := context.Background()
 
-	// 2b. Wait for the ring's ownership map to SETTLE before the cross-shard
-	//     scan. A cold migrate ring boot-defers units whose stale serving
-	//     markers a prior tenant (the rehearsal seeder, or in prod the old
-	//     serving cluster just scaled to 0) still holds; reconcile then hands
-	//     them off over the next intervals, so the mounted set churns for a few
-	//     seconds after "cluster up". Scanning during that churn races a peer's
-	//     fence ("detected newer DB client"). This blocks until ownership stops
-	//     moving (and the full ring has joined), so the scan sees a settled map.
+	// 2. Wait for the ring's ownership map to SETTLE (ALL pods). A cold migrate
+	//    ring boot-defers units whose stale serving markers a prior tenant (the
+	//    rehearsal seeder, or in prod the old serving cluster just scaled to 0)
+	//    still holds; reconcile then hands them off over the next intervals, so
+	//    the mounted set churns for a few seconds after "cluster up".
 	if err := waitForConvergence(logger, repo); err != nil {
 		logger.Fatalf("ring convergence: %v", err)
 	}
 
-	// 3. Enumerate the record-blob set once (the same set drives every mode).
-	//    Retry the transient mid-handoff fence as a backstop to the convergence
-	//    wait: ownership can micro-shift right at the boundary, and a single
-	//    fenced unit fails the whole cross-shard Aggregate. A bounded retry makes
-	//    the enumeration robust without masking a durable error.
-	records, err := scanWithRetry(logger, repo)
-	if err != nil {
-		logger.Fatalf("enumerate record-blobs: %v", err)
-	}
-	logger.Printf("apply=%t role=%s enumerated %d record-blobs", apply, role, len(records))
-
-	// Members just hold the ring for R=2 the whole time; only the FOUNDER drives
-	// the read-only dry-run + the (gated) write + verify. A member that tried to
-	// scan/verify would churn the same units the founder reads.
+	// 3. MEMBERS just HOLD the ring for R=2 - they do NOT scan. A member running
+	//    the cross-shard scan reads the SAME units the founder reads (pure
+	//    cold-start churn), and a transient scan error would crash-LOOP the
+	//    member (re-cold-starting the ring under the founder). So the role gate
+	//    is BEFORE the scan: only the founder opens the old bucket + scans.
 	if role != roleFounder {
 		logger.Printf("role=member: holding the ring for R=2 while the founder drives. Waiting for shutdown signal.")
 		waitForSignal(logger)
 		return
 	}
+
+	// FOUNDER from here. Open the OLD detached hostthis-blobs bucket READ-ONLY
+	// (Get/Has) - only the founder reads it.
+	oldStore, err := openOldBucket(logger)
+	if err != nil {
+		logger.Fatalf("open old blob bucket: %v", err)
+	}
+
+	// 4. Enumerate the record-blob set once. Retry transient blips (the
+	//    mid-handoff slatedb fence AND cross-node gRPC connection drops on loaded
+	//    boxes): ownership can micro-shift right at the convergence boundary and a
+	//    single fenced/dropped unit fails the whole cross-shard Aggregate. A
+	//    bounded retry makes the enumeration robust without masking a durable error.
+	records, err := scanWithRetry(logger, repo)
+	if err != nil {
+		logger.Fatalf("enumerate record-blobs: %v", err)
+	}
+	logger.Printf("apply=%t role=%s enumerated %d record-blobs", apply, role, len(records))
 
 	// Phase 1 - DRY-RUN (always, read-only, fail-closed on metadata/blob drift).
 	if err := runDryRun(ctx, logger, oldStore, records); err != nil {
@@ -625,12 +625,17 @@ func waitForConvergence(logger *log.Logger, repo *storage.ShaleRepo) error {
 	}
 }
 
-// scanWithRetry runs ScanLegacyBlobs, retrying the transient mid-handoff fence
-// error as a backstop to waitForConvergence (ownership can micro-shift right at
-// the convergence boundary, and one fenced unit fails the whole cross-shard
-// Aggregate). Bounded so a genuine, persistent error still surfaces.
+// scanWithRetry runs ScanLegacyBlobs, retrying transient blips as a backstop to
+// waitForConvergence (ownership can micro-shift right at the convergence boundary,
+// and one fenced/dropped unit fails the whole cross-shard Aggregate). The budget
+// is generous: on loaded boxes a cross-node gRPC connection can blip for tens of
+// seconds while a peer pod re-establishes. Bounded so a genuine, persistent error
+// still surfaces.
 func scanWithRetry(logger *log.Logger, repo *storage.ShaleRepo) ([]storage.LegacyBlobRecord, error) {
-	const maxAttempts = 12
+	const (
+		maxAttempts = 24
+		backoff     = 5 * time.Second
+	)
 	for attempt := 1; ; attempt++ {
 		records, err := repo.ScanLegacyBlobs()
 		if err == nil {
@@ -639,25 +644,43 @@ func scanWithRetry(logger *log.Logger, repo *storage.ShaleRepo) ([]storage.Legac
 			}
 			return records, nil
 		}
-		if attempt >= maxAttempts || !isTransientFence(err) {
+		if attempt >= maxAttempts || !isTransientScanErr(err) {
 			return nil, err
 		}
-		logger.Printf("scan: attempt %d hit a transient handoff fence (retry in 5s): %v", attempt, err)
-		time.Sleep(5 * time.Second)
+		logger.Printf("scan: attempt %d hit a transient error (retry in %s): %v", attempt, backoff, err)
+		time.Sleep(backoff)
 	}
 }
 
-// isTransientFence reports whether err is the slatedb "a peer fenced my open of
-// this unit" error that appears while ownership is still handing off (NOT a
-// durable failure). Matched by substring: it propagates as an opaque gRPC
-// Unknown wrapping the slate "Closed: ... detected newer DB client" message.
-func isTransientFence(err error) bool {
+// isTransientScanErr reports whether err is a transient cold-start/convergence
+// blip the scan should retry rather than crash on - NOT a durable failure.
+// Two families, both matched by substring (they propagate as opaque gRPC errors
+// wrapping the underlying message):
+//   - the slatedb "a peer fenced my open of this unit" fence, which appears while
+//     ownership is still handing off ("detected newer DB client" / "Closed error");
+//   - a cross-node gRPC connection drop to a peer holding part of the keyspace, on
+//     loaded boxes during convergence ("Unavailable", "connection error", "use of
+//     closed network connection", "transport is closing", "reading server preface").
+func isTransientScanErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	s := err.Error()
-	return strings.Contains(s, "detected newer DB client") ||
-		strings.Contains(s, "Closed error")
+	for _, frag := range []string{
+		"detected newer DB client",
+		"Closed error",
+		"code = Unavailable",
+		"connection error",
+		"use of closed network connection",
+		"transport is closing",
+		"error reading server preface",
+		"connection refused",
+	} {
+		if strings.Contains(s, frag) {
+			return true
+		}
+	}
+	return false
 }
 
 // openOldBucket opens the OLD detached hostthis-blobs bucket READ-ONLY: a
