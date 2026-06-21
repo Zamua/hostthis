@@ -58,9 +58,17 @@ type LegacyBlobRecord struct {
 // already-rebound record before staging (idempotency). A record with an EMPTY
 // content sha is skipped (a paste with no body, never a blob); a deleted version
 // is skipped (its blob is GC-eligible, the same exclusion ReferencedBlobSHAs
-// applies). FAIL-CLOSED on any undecodable row: an under-enumerated set would
-// silently leave a legacy blob un-migrated, so a decode error aborts the whole
-// scan rather than skipping the row.
+// applies).
+//
+// An UNDECODABLE row (truncated/empty stored JSON) is reported as a
+// CorruptRecord and skipped, NOT aborted on. The read path decodes the row the
+// same way, so an undecodable row is already unservable (it 404s) and references
+// no recoverable blob: re-keying it is impossible, and leaving it behind cannot
+// regress a servable paste. The skip is never SILENT - every CorruptRecord is
+// returned for the caller to log, so the operator sees exactly what was left
+// behind before flipping APPLY. STRUCTURAL failures still fail closed: a
+// cross-shard scan error (transient/infra) or a malformed key (a keyspace bug)
+// abort the whole scan, because those are not dead rows.
 //
 // The paste head and its serving version (the version whose ContentSHA == the
 // head's) describe the SAME blob; this returns the head record (kind
@@ -68,21 +76,22 @@ type LegacyBlobRecord struct {
 // sha differs from the head (a pinned / Show'd older version). RebindLegacyBlob
 // for the head stamps BOTH the head and its serving version, mirroring
 // insertAuthoritative; the per-version records cover the non-head versions.
-func (r *ShaleRepo) ScanLegacyBlobs() ([]LegacyBlobRecord, error) {
+func (r *ShaleRepo) ScanLegacyBlobs() ([]LegacyBlobRecord, []CorruptRecord, error) {
 	pasteItems, err := r.aggregatePrefix([]byte("pastes/"))
 	if err != nil {
-		return nil, fmt.Errorf("scan pastes: %w", err)
+		return nil, nil, fmt.Errorf("scan pastes: %w", err)
 	}
 	versionItems, err := r.aggregatePrefix([]byte("versions/"))
 	if err != nil {
-		return nil, fmt.Errorf("scan versions: %w", err)
+		return nil, nil, fmt.Errorf("scan versions: %w", err)
 	}
 	siteItems, err := r.aggregatePrefix(prefixSites)
 	if err != nil {
-		return nil, fmt.Errorf("scan sites: %w", err)
+		return nil, nil, fmt.Errorf("scan sites: %w", err)
 	}
 
 	var out []LegacyBlobRecord
+	var corrupt []CorruptRecord
 
 	// Paste heads. headSHA[slug] = the head's served sha, so the version loop
 	// can skip the serving version (the head record already covers that blob).
@@ -90,7 +99,8 @@ func (r *ShaleRepo) ScanLegacyBlobs() ([]LegacyBlobRecord, error) {
 	for _, item := range pasteItems {
 		var p pasteRow
 		if err := json.Unmarshal(item.Value, &p); err != nil {
-			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
+			corrupt = append(corrupt, CorruptRecord{Key: string(item.Key), Bytes: len(item.Value), Reason: err.Error()})
+			continue
 		}
 		slug := strings.TrimPrefix(string(item.Key), "pastes/")
 		headSHA[slug] = p.ContentSHA
@@ -114,12 +124,13 @@ func (r *ShaleRepo) ScanLegacyBlobs() ([]LegacyBlobRecord, error) {
 	for _, item := range versionItems {
 		var v versionRow
 		if err := json.Unmarshal(item.Value, &v); err != nil {
-			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
+			corrupt = append(corrupt, CorruptRecord{Key: string(item.Key), Bytes: len(item.Value), Reason: err.Error()})
+			continue
 		}
 		rest := strings.TrimPrefix(string(item.Key), "versions/")
 		slug, _, ok := strings.Cut(rest, "/")
 		if !ok || slug == "" {
-			return nil, fmt.Errorf("scan: malformed version key %q", item.Key)
+			return nil, nil, fmt.Errorf("scan: malformed version key %q", item.Key)
 		}
 		if v.Deleted || v.ContentSHA == "" {
 			continue
@@ -141,12 +152,14 @@ func (r *ShaleRepo) ScanLegacyBlobs() ([]LegacyBlobRecord, error) {
 	for _, item := range siteItems {
 		var row siteRow
 		if err := json.Unmarshal(item.Value, &row); err != nil {
-			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
+			corrupt = append(corrupt, CorruptRecord{Key: string(item.Key), Bytes: len(item.Value), Reason: err.Error()})
+			continue
 		}
 		slug := strings.TrimPrefix(string(item.Key), "sites/")
 		man, mErr := decodeManifest(row.Manifest)
 		if mErr != nil {
-			return nil, fmt.Errorf("decode manifest %s: %w", item.Key, mErr)
+			corrupt = append(corrupt, CorruptRecord{Key: string(item.Key), Bytes: len(row.Manifest), Reason: "manifest: " + mErr.Error()})
+			continue
 		}
 		for _, sha := range man.SHASet() {
 			if sha == "" {
@@ -163,7 +176,20 @@ func (r *ShaleRepo) ScanLegacyBlobs() ([]LegacyBlobRecord, error) {
 		}
 	}
 
-	return out, nil
+	return out, corrupt, nil
+}
+
+// CorruptRecord names a metadata row ScanLegacyBlobs could not decode (truncated
+// or empty stored JSON, or an undecodable site manifest). Such a row is already
+// unservable - the read path decodes it the same way and 404s - so it references
+// no recoverable blob and is SKIPPED rather than aborting the whole scan. Every
+// one is returned so the caller can log it: the operator must see exactly which
+// dead rows were left behind before flipping APPLY (no silent under-migration).
+// TEMP - removed with this file.
+type CorruptRecord struct {
+	Key    string // the metadata key that failed to decode
+	Bytes  int    // length of the undecodable value (0 == empty row)
+	Reason string // the decode error
 }
 
 // MemberCount returns the number of nodes in the cluster's current ring
