@@ -143,11 +143,12 @@ func main() {
 	//    boxes): ownership can micro-shift right at the convergence boundary and a
 	//    single fenced/dropped unit fails the whole cross-shard Aggregate. A
 	//    bounded retry makes the enumeration robust without masking a durable error.
-	records, err := scanWithRetry(logger, repo)
+	records, corrupt, err := scanWithRetry(logger, repo)
 	if err != nil {
 		logger.Fatalf("enumerate record-blobs: %v", err)
 	}
 	logger.Printf("apply=%t role=%s enumerated %d record-blobs", apply, role, len(records))
+	logCorruptRecords(logger, corrupt)
 
 	// Phase 1 - DRY-RUN (always, read-only, fail-closed on metadata/blob drift).
 	if err := runDryRun(ctx, logger, oldStore, records); err != nil {
@@ -347,11 +348,12 @@ func migrateOne(ctx context.Context, repo *storage.ShaleRepo, old blob.Store, re
 func runVerify(ctx context.Context, logger *log.Logger, repo *storage.ShaleRepo, old blob.Store) error {
 	// Independent re-enumeration (does NOT trust migrate's counts), retry-guarded
 	// against a transient handoff fence the same way the initial scan is.
-	records, err := scanWithRetry(logger, repo)
+	records, corrupt, err := scanWithRetry(logger, repo)
 	if err != nil {
 		return fmt.Errorf("re-enumerate record-blobs: %w", err)
 	}
 	logger.Printf("verify: re-derived %d record-blobs from the metadata", len(records))
+	logCorruptRecords(logger, corrupt)
 
 	var verified, failed int
 	for _, rec := range records {
@@ -631,24 +633,39 @@ func waitForConvergence(logger *log.Logger, repo *storage.ShaleRepo) error {
 // is generous: on loaded boxes a cross-node gRPC connection can blip for tens of
 // seconds while a peer pod re-establishes. Bounded so a genuine, persistent error
 // still surfaces.
-func scanWithRetry(logger *log.Logger, repo *storage.ShaleRepo) ([]storage.LegacyBlobRecord, error) {
+func scanWithRetry(logger *log.Logger, repo *storage.ShaleRepo) ([]storage.LegacyBlobRecord, []storage.CorruptRecord, error) {
 	const (
 		maxAttempts = 24
 		backoff     = 5 * time.Second
 	)
 	for attempt := 1; ; attempt++ {
-		records, err := repo.ScanLegacyBlobs()
+		records, corrupt, err := repo.ScanLegacyBlobs()
 		if err == nil {
 			if attempt > 1 {
 				logger.Printf("scan: succeeded on attempt %d", attempt)
 			}
-			return records, nil
+			return records, corrupt, nil
 		}
 		if attempt >= maxAttempts || !isTransientScanErr(err) {
-			return nil, err
+			return nil, nil, err
 		}
 		logger.Printf("scan: attempt %d hit a transient error (retry in %s): %v", attempt, backoff, err)
 		time.Sleep(backoff)
+	}
+}
+
+// logCorruptRecords reports every metadata row ScanLegacyBlobs could not decode.
+// Such rows are already unservable (the read path 404s them), so they reference
+// no recoverable blob and are skipped - but the skip is LOUD: the operator must
+// see exactly which dead rows were left behind before flipping APPLY (no silent
+// under-migration). TEMP - removed with the blob migration.
+func logCorruptRecords(logger *log.Logger, corrupt []storage.CorruptRecord) {
+	if len(corrupt) == 0 {
+		return
+	}
+	logger.Printf("WARNING: %d undecodable metadata row(s) SKIPPED (already 404, no recoverable blob):", len(corrupt))
+	for _, c := range corrupt {
+		logger.Printf("  SKIP corrupt %s (%d bytes): %s", c.Key, c.Bytes, c.Reason)
 	}
 }
 
