@@ -112,8 +112,24 @@ func main() {
 
 	ctx := context.Background()
 
+	// 2b. Wait for the ring's ownership map to SETTLE before the cross-shard
+	//     scan. A cold migrate ring boot-defers units whose stale serving
+	//     markers a prior tenant (the rehearsal seeder, or in prod the old
+	//     serving cluster just scaled to 0) still holds; reconcile then hands
+	//     them off over the next intervals, so the mounted set churns for a few
+	//     seconds after "cluster up". Scanning during that churn races a peer's
+	//     fence ("detected newer DB client"). This blocks until ownership stops
+	//     moving (and the full ring has joined), so the scan sees a settled map.
+	if err := waitForConvergence(logger, repo); err != nil {
+		logger.Fatalf("ring convergence: %v", err)
+	}
+
 	// 3. Enumerate the record-blob set once (the same set drives every mode).
-	records, err := repo.ScanLegacyBlobs()
+	//    Retry the transient mid-handoff fence as a backstop to the convergence
+	//    wait: ownership can micro-shift right at the boundary, and a single
+	//    fenced unit fails the whole cross-shard Aggregate. A bounded retry makes
+	//    the enumeration robust without masking a durable error.
+	records, err := scanWithRetry(logger, repo)
 	if err != nil {
 		logger.Fatalf("enumerate record-blobs: %v", err)
 	}
@@ -576,6 +592,84 @@ func waitForRing(logger *log.Logger, repo *storage.ShaleRepo) error {
 		logger.Printf("ring readiness: %d/%d members; waiting...", got, expect)
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// waitForConvergence blocks until the migrate ring's ownership map has SETTLED:
+// the full member set has joined AND this node's mounted-unit count has held
+// steady across several consecutive polls (longer than one reconcile interval).
+// A freshly cold-started ring boot-defers units a prior tenant's stale serving
+// markers still cover, then reconcile acquires them over the next intervals, so
+// the mounted set churns for a few seconds after "cluster up". Running the
+// cross-shard scan during that churn races a peer's fence ("detected newer DB
+// client"). Single-node (expect<=1) has no handoff to settle and skips the wait.
+func waitForConvergence(logger *log.Logger, repo *storage.ShaleRepo) error {
+	seeds := parseSeeds(os.Getenv("HOSTTHIS_SHALE_SEEDS"))
+	expect := envOrInt("MIGRATE_EXPECT_MEMBERS", len(seeds)+1)
+	if expect <= 1 {
+		logger.Printf("convergence: expect<=1 (single-node), no handoff to settle; proceeding")
+		return nil
+	}
+	const (
+		pollEvery   = 4 * time.Second
+		stablePolls = 3 // mounted count unchanged this many polls in a row => settled (> reconcileInterval)
+	)
+	deadline := time.Now().Add(6 * time.Minute)
+	lastCount := -1
+	stable := 0
+	for {
+		members := repo.MemberCount()
+		mounted := repo.MountedUnitCount()
+		if mounted == lastCount {
+			stable++
+		} else {
+			stable = 0
+			lastCount = mounted
+		}
+		if members >= expect && stable >= stablePolls {
+			logger.Printf("convergence: members=%d/%d, mounted-units steady at %d across %d polls; ring settled, scanning", members, expect, mounted, stable)
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("ring did not settle within 6m (members=%d/%d mounted-units=%d stable=%d); every migrate pod up + reconcile progressing?", members, expect, mounted, stable)
+		}
+		logger.Printf("convergence: members=%d/%d mounted-units=%d stable=%d/%d; waiting...", members, expect, mounted, stable, stablePolls)
+		time.Sleep(pollEvery)
+	}
+}
+
+// scanWithRetry runs ScanLegacyBlobs, retrying the transient mid-handoff fence
+// error as a backstop to waitForConvergence (ownership can micro-shift right at
+// the convergence boundary, and one fenced unit fails the whole cross-shard
+// Aggregate). Bounded so a genuine, persistent error still surfaces.
+func scanWithRetry(logger *log.Logger, repo *storage.ShaleRepo) ([]storage.LegacyBlobRecord, error) {
+	const maxAttempts = 12
+	for attempt := 1; ; attempt++ {
+		records, err := repo.ScanLegacyBlobs()
+		if err == nil {
+			if attempt > 1 {
+				logger.Printf("scan: succeeded on attempt %d", attempt)
+			}
+			return records, nil
+		}
+		if attempt >= maxAttempts || !isTransientFence(err) {
+			return nil, err
+		}
+		logger.Printf("scan: attempt %d hit a transient handoff fence (retry in 5s): %v", attempt, err)
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// isTransientFence reports whether err is the slatedb "a peer fenced my open of
+// this unit" error that appears while ownership is still handing off (NOT a
+// durable failure). Matched by substring: it propagates as an opaque gRPC
+// Unknown wrapping the slate "Closed: ... detected newer DB client" message.
+func isTransientFence(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "detected newer DB client") ||
+		strings.Contains(s, "Closed error")
 }
 
 // openOldBucket opens the OLD detached hostthis-blobs bucket READ-ONLY: a

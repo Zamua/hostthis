@@ -177,6 +177,19 @@ func (r *ShaleRepo) MemberCount() int {
 	return len(r.cluster.Members())
 }
 
+// MountedUnitCount returns how many DISTINCT units this node currently has
+// mounted locally (cluster.MountedUnits, deduped by unit). The migrate binary
+// polls it to detect ring STABILITY before the cross-shard scan. A cold-started
+// migrate ring boot-defers units whose stale serving markers a prior tenant (the
+// rehearsal seeder, or in prod the old serving cluster just scaled to 0) still
+// holds, then reconcile hands them off over the next few intervals - so the
+// mounted set churns for a few seconds after "cluster up". Scanning during that
+// churn can touch a unit a peer has just fenced ("detected newer DB client");
+// waiting until this count stops changing avoids it. TEMP - removed with this file.
+func (r *ShaleRepo) MountedUnitCount() int {
+	return len(r.cluster.MountedUnits())
+}
+
 // LegacyBlobKind names which legacy record-blob a RebindLegacyBlob call
 // re-keys: the paste head, a specific version, or a site file. The migrate
 // loop enumerates record-blobs and tags each with its kind.
