@@ -654,13 +654,17 @@ func scanWithRetry(logger *log.Logger, repo *storage.ShaleRepo) ([]storage.Legac
 
 // isTransientScanErr reports whether err is a transient cold-start/convergence
 // blip the scan should retry rather than crash on - NOT a durable failure.
-// Two families, both matched by substring (they propagate as opaque gRPC errors
+// Three families, all matched by substring (they propagate as opaque gRPC errors
 // wrapping the underlying message):
 //   - the slatedb "a peer fenced my open of this unit" fence, which appears while
 //     ownership is still handing off ("detected newer DB client" / "Closed error");
 //   - a cross-node gRPC connection drop to a peer holding part of the keyspace, on
 //     loaded boxes during convergence ("Unavailable", "connection error", "use of
-//     closed network connection", "transport is closing", "reading server preface").
+//     closed network connection", "transport is closing", "reading server preface");
+//   - a peer whose gRPC server is not yet serving at cold-start (it is still
+//     mounting its units) so the scan's waitReady times out ("peer connection not
+//     ready" / "TRANSIENT_FAILURE" / "context deadline exceeded") - the next
+//     attempt, once that peer is serving, succeeds.
 func isTransientScanErr(err error) bool {
 	if err == nil {
 		return false
@@ -675,6 +679,14 @@ func isTransientScanErr(err error) bool {
 		"transport is closing",
 		"error reading server preface",
 		"connection refused",
+		// Cold-start peer-gRPC not-yet-ready: the cross-shard scan's waitReady
+		// (shale snapshotPeer) returns these while a peer is still mounting its
+		// units and its gRPC server has not begun serving. On a loaded box a peer
+		// can take a while to come up; these are transient (a later attempt, once
+		// the peer is serving, succeeds), so RETRY rather than fail the migrate.
+		"peer connection not ready",
+		"context deadline exceeded",
+		"TRANSIENT_FAILURE",
 	} {
 		if strings.Contains(s, frag) {
 			return true
