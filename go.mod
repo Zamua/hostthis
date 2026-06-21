@@ -5,8 +5,8 @@ go 1.26.0
 toolchain go1.26.4
 
 require (
-	github.com/Zamua/shale v0.7.1-0.20260621110638-bd879fc8d57b
-	github.com/Zamua/shale/backends/slate v0.7.2-0.20260621110638-bd879fc8d57b
+	github.com/Zamua/shale v0.7.1-0.20260621124044-27f6dcf55ec6
+	github.com/Zamua/shale/backends/slate v0.7.2-0.20260621124044-27f6dcf55ec6
 	github.com/charmbracelet/ssh v0.0.0-20250826160808-ebfa259c7309
 	github.com/charmbracelet/wish v1.4.7
 	github.com/coder/websocket v1.8.14
