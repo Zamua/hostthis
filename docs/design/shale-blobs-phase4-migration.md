@@ -299,30 +299,43 @@ backstop.
 
 ---
 
-## 5. Modes + the CLI loop
+## 5. The single-process flow
 
-`cmd/hostthis-blob-migrate` takes a mode flag: `dry-run | migrate | verify`.
+`cmd/hostthis-blob-migrate` runs all three phases in ONE process after ONE
+convergence, gated by `MIGRATE_APPLY` (false = dry-run-only; true = also apply).
+Splitting the phases across separate pod-restarts is unsafe: a founder-only
+restart re-cold-starts the ring asymmetrically (the joiners still hold the units
+at bumped epochs), which fence-storms the cross-shard scan ("detected newer DB
+client"). One converged process avoids that entirely.
 
-- **`dry-run`**: enumerate every record-blob from the metadata, confirm each
-  referenced `<sha>` exists in the OLD `hostthis-blobs` bucket, report the count +
-  any missing-blob drift. NO writes. Run first, against the quiescent prod buckets,
-  to size the window and catch metadata/blob drift.
-- **`migrate`**: the real copy. For each record-blob: skip if the row already
-  carries a blob_id for this sha (idempotency pre-check); else GET the old `<sha>`
-  bytes, `StageBlobStream` them into the collocated bucket, `RebindLegacyBlob`.
-  Bounded concurrency across DISTINCT slugs (distinct shards, no same-owner CAS
-  self-contention); never parallelize within one slug.
-- **`verify`**: the zero-loss gate. For every record-blob: re-read the row's NEW
-  blob_id, `GetBlobStream` from the collocated bucket THROUGH the cluster (proves
-  the bref routed + R=2-replicated), DECODE (peel magic+zstd) the body, recompute
-  the content-sha over the decoded bytes, assert it equals the record's
-  `ContentSHA`, AND fetch the OLD `<sha>` object and assert byte-identical. Exit
-  non-zero on ANY missing blob_id, missing bref, GetBlob failure, sha mismatch, or
-  body mismatch.
+On boot the founder FIRST waits for the ring's ownership map to SETTLE before any
+scan: a cold migrate ring boot-defers units whose serving markers a prior tenant
+(the old serving cluster just scaled to 0) still holds, then reconcile hands them
+off over the next intervals; scanning during that churn races a peer's fence. The
+gate polls the mounted-unit set until it is stable across several intervals, with
+a bounded retry on the transient fence as a backstop. Then:
 
-The loop runs on the FOUNDER (the seed pod identity) so a single writer drives the
-re-key; its `RebindLegacyBlob` routes + R=2-replicates through the migrate ring,
-and the other migrate pods apply the forwarded replica writes.
+- **dry-run** (always): enumerate every record-blob from the metadata, confirm
+  each referenced `<sha>` exists in the OLD `hostthis-blobs` bucket, report the
+  count + any missing-blob drift. NO writes. Fail-closed on drift.
+- **migrate** (only if `MIGRATE_APPLY=true`): the real copy. For each record-blob:
+  skip if the row already carries a blob_id for this sha (idempotency pre-check);
+  else GET the old `<sha>` bytes, `StageBlobStream` into the collocated bucket,
+  `RebindLegacyBlob`. Bounded concurrency across DISTINCT slugs (distinct shards,
+  no same-owner CAS self-contention); never parallelize within one slug.
+- **verify** (only if applied): the zero-loss gate. Re-enumerate independently;
+  for every record-blob re-read the row's NEW blob_id, `GetBlobStream` from the
+  collocated bucket THROUGH the cluster (proves the bref routed + R=2-replicated),
+  DECODE (peel magic+zstd), recompute the content-sha over the decoded bytes,
+  assert it equals the record's `ContentSHA`, AND fetch the OLD `<sha>` object and
+  assert byte-identical. Exit non-zero on ANY missing blob_id, missing bref,
+  GetBlob failure, sha mismatch, or body mismatch.
+
+The phases run on the FOUNDER (the seed pod identity) so a single writer drives
+the re-key; its `RebindLegacyBlob` routes + R=2-replicates through the migrate
+ring, and the other migrate pods hold the ring + apply the forwarded replica
+writes. To inspect before applying, run once with `MIGRATE_APPLY=false` (the
+founder dry-runs and holds), then bring the ring up again with `true`.
 
 ---
 
@@ -339,31 +352,24 @@ prod serving image. The collocated blob bucket `HOSTTHIS_SHALE_BLOB_BUCKET`
 exists in MinIO (created, empty).
 
 ```
-# 0. DRY-RUN. Run the migrate binary in dry-run mode against the LIVE buckets
-#    (read-only scan, no writes) to confirm the enumeration count + that every
-#    referenced sha exists in hostthis-blobs.
-#    -> expect N record-blobs, 0 missing.
+# 1. QUIESCE THE APP (read-down). Scale the app StatefulSets to 0 so NO node holds
+#    any unit's slatedb open. There is NO "dry-run while the app is up": the migrate
+#    ring opens the SAME units (a scan fences the live writer), so the FIRST migrate
+#    boot of any kind happens AFTER scale-to-0. The migrate then runs as the app's
+#    OWN node identities (hostthis-shard-seed-0/-0/-1) over the QUIESCENT prod
+#    buckets; the public ingress serves nothing during this window.
 
-# 1. QUIESCE THE APP (read-down). Two equivalent ways:
-#    (a) scale the app StatefulSets to 0 so NO node holds any unit's slatedb open,
-#        then run the migrate as its OWN 3-pod Job using the SAME node IDs +
-#        config; OR
-#    (b) PATCH the existing StatefulSet pods' container command from `hostthisd`
-#        to the migrate binary (mode=migrate) - the pods keep their identities,
-#        reclaim their own markers, and run the loop in place.
-#    Either way the migrate runs as the app's OWN node identities over the
-#    QUIESCENT prod buckets. The public ingress serves nothing during this window.
+# 2. INSPECT (MIGRATE_APPLY=false). Bring up the 3-pod migrate ring. The founder
+#    converges, dry-runs (read-only), reports "records=N present-in-old=N
+#    missing-in-old=0", and HOLDS. STOP if N==0 or missing-in-old>0 (drift).
 
-# 2. MIGRATE (the copy). The migrate cluster (app identity) enumerates, stages,
-#    and rebinds. The FOUNDER (seed pod identity) drives the re-key loop.
-#    Idempotent + resumable: on a mid-flight crash, re-run - the per-record skip +
-#    the in-method idempotency make a re-run correct (it skips already-rebound
-#    rows).
-
-# 3. VERIFY (the zero-loss gate). Run mode=verify (a fresh migrate cluster, so it
-#    proves the writes survive a full close+reopen). It re-reads every record-blob's
-#    NEW blob_id, GetBlob THROUGH the cluster, decodes, recomputes sha, and
-#    byte-compares to the OLD <sha> object. DO NOT PROCEED until verify is GREEN.
+# 3. APPLY (MIGRATE_APPLY=true). Tear the inspect ring down, bring it up again with
+#    APPLY=true: the founder converges ONCE and runs dry-run -> migrate -> verify in
+#    that single process. migrate stages + rebinds every record-blob at R=2; verify
+#    (independent re-enumeration) reads each NEW blob_id THROUGH the cluster, decodes,
+#    recomputes sha, and byte-compares to the OLD <sha> object. Idempotent +
+#    resumable: on a mid-flight crash, re-apply - the per-record skip + in-method
+#    idempotency make a re-run correct. DO NOT PROCEED until "verify GREEN".
 
 # 4. FLIP + UN-QUIESCE. Patch the container command back to `hostthisd` (or scale
 #    the StatefulSets back up on the blob-enabled image), with the prod overlay
