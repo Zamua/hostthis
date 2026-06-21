@@ -71,6 +71,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"strings"
@@ -90,6 +92,14 @@ func main() {
 	concurrency := flag.Int("concurrency", envOrInt("MIGRATE_CONCURRENCY", 4), "distinct-slug worker count (migrate)")
 	flag.Parse()
 	logger := log.New(os.Stderr, "blob-migrate ", log.LstdFlags|log.LUTC)
+
+	// Optional pprof + execution-trace endpoint for cold-start diagnosis. OFF
+	// unless MIGRATE_DEBUG_ADDR is set (so a normal cutover is unaffected). When
+	// set (e.g. ":6060") it serves net/http/pprof, incl. /debug/pprof/trace.
+	if dbg := os.Getenv("MIGRATE_DEBUG_ADDR"); dbg != "" {
+		go func() { _ = http.ListenAndServe(dbg, nil) }()
+		logger.Printf("pprof/trace debug server on %s", dbg)
+	}
 
 	// MIGRATE_APPLY is the single safety gate. false (default) = DRY-RUN ONLY:
 	// converge, scan, report present/missing, hold (the inspect gate). true =
