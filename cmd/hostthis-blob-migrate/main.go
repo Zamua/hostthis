@@ -436,9 +436,21 @@ func runVerify(ctx context.Context, logger *log.Logger, repo *storage.ShaleRepo,
 			skippedDrift++
 			continue
 		}
-		if err := verifyOne(ctx, repo, old, rec); err != nil {
+		// Retry verifyOne on TRANSIENT read blips (a cross-node gRPC hiccup mid
+		// read-back) so a transient does not get miscounted as a data-loss FAIL.
+		// A REAL failure (empty blob id, sha mismatch, byte diff) is non-transient
+		// and breaks immediately, preserving the zero-loss gate.
+		var verr error
+		for vAttempt := 1; vAttempt <= 4; vAttempt++ {
+			verr = verifyOne(ctx, repo, old, rec)
+			if verr == nil || !isTransientScanErr(verr) {
+				break
+			}
+			time.Sleep(2 * time.Second)
+		}
+		if verr != nil {
 			failed++
-			logger.Printf("  FAIL slug=%s kind=%s sha=%s: %v", rec.Slug, kindName(rec.Kind), rec.ContentSHA, err)
+			logger.Printf("  FAIL slug=%s kind=%s sha=%s: %v", rec.Slug, kindName(rec.Kind), rec.ContentSHA, verr)
 			continue
 		}
 		verified++
@@ -719,10 +731,15 @@ func waitForConvergence(logger *log.Logger, repo *storage.ShaleRepo) error {
 // seconds while a peer pod re-establishes. Bounded so a genuine, persistent error
 // still surfaces.
 func scanWithRetry(logger *log.Logger, repo *storage.ShaleRepo) ([]storage.LegacyBlobRecord, []storage.CorruptRecord, error) {
-	const (
-		maxAttempts = 24
-		backoff     = 5 * time.Second
-	)
+	// The founder starts scanning as soon as the ring reports settled (member count
+	// + mounted-unit count steady) - BEFORE a slow joiner's gRPC is actually
+	// serving. On the un-GC'd prod units a joiner's cold-start unit mount can take
+	// 15-20min, and each failed scan attempt blocks ~30s on the peer-connect
+	// deadline + backoff, so the default 60 attempts (~35min) rides out a slow
+	// joiner mount. Env-tunable so an even slower cold-start does not need a rebuild.
+	// (Fast units settle in seconds; this only matters when the units are bloated.)
+	maxAttempts := envOrInt("MIGRATE_SCAN_MAX_ATTEMPTS", 60)
+	const backoff = 5 * time.Second
 	for attempt := 1; ; attempt++ {
 		records, corrupt, err := repo.ScanLegacyBlobs()
 		if err == nil {
