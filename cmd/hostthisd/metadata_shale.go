@@ -122,6 +122,12 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 	if cacheBytes < 0 {
 		cacheBytes = 0
 	}
+	// Fence-WAL GC: enable slatedb's fence-WAL garbage collector so the
+	// per-open fence WAL objects don't accumulate unboundedly (slatedb ships
+	// that GC category in dry-run by default; see storage.ShaleConfig.ReapFenceWALs).
+	// Default ON for this long-lived server; HOSTTHIS_SLATEDB_FENCE_GC=false is
+	// the kill-switch (fall back to slatedb's untouched defaults).
+	reapFenceWALs := !strings.EqualFold(strings.TrimSpace(os.Getenv("HOSTTHIS_SLATEDB_FENCE_GC")), "false")
 
 	// Multi-node peer-discovery config. A non-empty bind addr is the
 	// switch that takes the cluster out of the single-node path.
@@ -174,6 +180,7 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		RelaxedDurability: !awaitDurable,
 		UnitCount:         unitCount,
 		CacheBytes:        uint64(cacheBytes),
+		ReapFenceWALs:     reapFenceWALs,
 		Logger:            logger,
 		BlobStore:         blobStore,
 	})
@@ -181,11 +188,11 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		return nil, fmt.Errorf("open shale: %w", err)
 	}
 	if bindAddr == "" {
-		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d shards=%d awaitDurable=%t blobBucket=%q endpoint=%s",
-			nodeID, bucket, dbName, replicationFactor, unitCount, awaitDurable, blobBucket, endpoint)
+		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d shards=%d awaitDurable=%t fenceGC=%t blobBucket=%q endpoint=%s",
+			nodeID, bucket, dbName, replicationFactor, unitCount, awaitDurable, reapFenceWALs, blobBucket, endpoint)
 	} else {
-		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d shards=%d awaitDurable=%t blobBucket=%q bucket=%s db=%s endpoint=%s",
-			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, unitCount, awaitDurable, blobBucket, bucket, dbName, endpoint)
+		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d shards=%d awaitDurable=%t fenceGC=%t blobBucket=%q bucket=%s db=%s endpoint=%s",
+			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, unitCount, awaitDurable, reapFenceWALs, blobBucket, bucket, dbName, endpoint)
 	}
 	bundle := &metadataBundle{
 		Repo:    repo,
