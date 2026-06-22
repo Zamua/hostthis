@@ -187,6 +187,15 @@ type ShaleConfig struct {
 	// var: HOSTTHIS_METADATA_CACHE_BYTES.
 	CacheBytes uint64
 
+	// WriteTimeout / ReadTimeout, when > 0, override the cluster's per-dispatch
+	// write/read deadline (cluster.Config defaults each to 5s). Zero keeps the
+	// shale default, so a ShaleConfig built without setting these (serving, tests)
+	// is unchanged. The bulk migration tool raises these well above 5s because a
+	// single CAS commit on an un-GC'd (bloated) unit can stall past 5s under a
+	// migrate burst, and a 5s DeadlineExceeded there aborts the whole run.
+	WriteTimeout time.Duration
+	ReadTimeout  time.Duration
+
 	// Logger receives the skip lines from the tolerant background scans
 	// (expiry / reconcile) when they hit an undecodable record. Optional:
 	// nil falls back to log.Default(). It never affects the blob-GC ref-set
@@ -412,6 +421,11 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		GRPCAddr:          advertiseGRPCAddr,
 		Seeds:             cfg.Seeds,
 		ReplicationFactor: cfg.ReplicationFactor,
+		// Per-dispatch write/read deadlines. Zero leaves cluster.Open's 5s default
+		// (serving keeps it); the bulk migrate raises them so a slow CAS on a
+		// bloated unit does not trip a 5s DeadlineExceeded mid-run.
+		WriteTimeout: cfg.WriteTimeout,
+		ReadTimeout:  cfg.ReadTimeout,
 		// ReadQuorum, not ReadNearest: at R>1 ReadNearest decides on the first
 		// replica to answer and treats a NotFound as usable, so a read served by a
 		// still-backfilling replica (a freshly joined node) could return NotFound
