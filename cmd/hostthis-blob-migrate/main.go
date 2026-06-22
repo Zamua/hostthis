@@ -372,10 +372,33 @@ func migrateOne(ctx context.Context, repo *storage.ShaleRepo, old blob.Store, re
 	if err != nil {
 		return false, fmt.Errorf("stage into collocated bucket: %w", err)
 	}
-	if err := repo.RebindLegacyBlob(ctx, rec.Slug, rec.Kind, rec.ContentSHA, ref); err != nil {
-		return false, fmt.Errorf("rebind: %w", err)
+	// Retry the rebind CAS on transient errors. A single CAS commit on an un-GC'd
+	// (bloated) unit can stall past the cluster WriteTimeout => DeadlineExceeded,
+	// and a convergence-window handoff yields Unavailable; both are transient and
+	// were what aborted the first prod run. The rebind is IDEMPOTENT for a given
+	// ref (rebindPasteHead just SETS BlobID=ref.BlobID and re-binds the pointer),
+	// so re-running it with the already-staged ref never mints a new blobid or
+	// leaks an object - safe to retry. Backoff is capped; a non-transient error
+	// fails fast (fail-closed) exactly as before.
+	const maxRebindAttempts = 6
+	backoff := 500 * time.Millisecond
+	var rebindErr error
+	for attempt := 1; attempt <= maxRebindAttempts; attempt++ {
+		rebindErr = repo.RebindLegacyBlob(ctx, rec.Slug, rec.Kind, rec.ContentSHA, ref)
+		if rebindErr == nil {
+			return true, nil
+		}
+		if !isTransientScanErr(rebindErr) {
+			return false, fmt.Errorf("rebind: %w", rebindErr)
+		}
+		if attempt < maxRebindAttempts {
+			time.Sleep(backoff)
+			if backoff < 8*time.Second {
+				backoff *= 2
+			}
+		}
 	}
-	return true, nil
+	return false, fmt.Errorf("rebind: after %d transient retries: %w", maxRebindAttempts, rebindErr)
 }
 
 // --- mode: verify -----------------------------------------------------------
@@ -587,6 +610,12 @@ func openCluster(logger *log.Logger) (*storage.ShaleRepo, string, error) {
 		CacheBytes:        uint64(cacheBytes),
 		Logger:            logger,
 		BlobStore:         blobStore,
+		// Raise the per-dispatch write/read deadline well above shale's 5s default:
+		// a single rebind CAS commit on an un-GC'd (bloated) prod unit can stall
+		// past 5s under the migrate's write burst, and a 5s DeadlineExceeded there
+		// aborts the whole run. 60s gives the slow CAS budget; tunable via env.
+		WriteTimeout: envOrDur("MIGRATE_SHALE_WRITE_TIMEOUT", 60*time.Second),
+		ReadTimeout:  envOrDur("MIGRATE_SHALE_READ_TIMEOUT", 60*time.Second),
 	}
 	// Retry the cluster open IN-PROCESS instead of crashing. A JOINER's
 	// NewShaleRepo learns the ring by joining the founder's gossip/gRPC, which is
@@ -884,4 +913,16 @@ func envOrInt(name string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func envOrDur(name string, fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fallback
+	}
+	return d
 }
