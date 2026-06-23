@@ -16,8 +16,8 @@
 // either a single Get, a single Put, an atomic transaction
 // (Db.Begin + DbTransaction.Commit), or a prefix Scan.
 //
-//	pastes/<slug>                      JSON {Identity, Kind, ContentSHA, Size, Name, PinnedVersion, CreatedAt, UpdatedAt, ExpiresAt}
-//	versions/<slug>/<NNNN>             JSON {VerNum, Kind, ContentSHA, Size, CreatedAt, Deleted}
+//	pastes/<slug>                      JSON {Identity, Kind, ContentSHA, BlobID, Size, Name, PinnedVersion, CreatedAt, UpdatedAt, ExpiresAt}
+//	versions/<slug>/<NNNN>             JSON {VerNum, Kind, ContentSHA, BlobID, Size, CreatedAt, Deleted}
 //	                                   NNNN is 4-digit zero-padded so prefix-scan + decode keeps numeric order
 //	slug_owner/<slug>                  raw identity string (small; for visitor-side lookup)
 //	identity_pastes/<identity>/<slug>  empty value (for "list by identity" prefix scan)
