@@ -172,13 +172,33 @@ func (r *SlateRepo) Close() error {
 
 // --- JSON row schemas ------------------------------------------------------
 
+// contentRef is the served-content descriptor: the four fields that together
+// name the stored bytes a paste version points at. They travel as ONE value -
+// a version row carries its own, a paste head carries the SERVED version's - so
+// "make version V the served one" is a single whole-value assignment
+// (head.contentRef = vRow.contentRef) and no field can ever be repointed
+// without the others.
+//
+// Why this type exists: pinning to an older version used to move the head's
+// ContentSHA but leave its BlobID on the prior head, so under value-separation
+// (where the read seam resolves bytes by BlobID) the head served the wrong
+// blob. Bundling the four as one value makes that drift unrepresentable - a
+// fifth descriptor field added later flows to every call site for free.
+//
+// Embedded ANONYMOUSLY in pasteRow + versionRow so the four keys stay at the
+// top level of the JSON, byte-compatible with records written before this type
+// existed.
+type contentRef struct {
+	Kind       string `json:"kind"`
+	ContentSHA string `json:"content_sha"`
+	BlobID     string `json:"blob_id,omitempty"` // shale-blob path: the staged blob id GetBlob needs; "" on the standalone (sha-keyed) path
+	Size       int    `json:"size"`
+}
+
 type pasteRow struct {
 	Identity      string    `json:"identity"`
 	Status        string    `json:"status,omitempty"` // pending|ready|failed; "" (legacy) reads as ready
-	Kind          string    `json:"kind"`
-	ContentSHA    string    `json:"content_sha"`
-	BlobID        string    `json:"blob_id,omitempty"` // shale-blob path: the staged blob id GetBlob needs; "" on the standalone path (sha-keyed)
-	Size          int       `json:"size"`
+	contentRef              // the SERVED version's descriptor (kind/content_sha/blob_id/size, promoted -> flat JSON)
 	Name          string    `json:"name"`
 	PinnedVersion int       `json:"pinned_version"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -188,10 +208,7 @@ type pasteRow struct {
 
 type versionRow struct {
 	VerNum     int       `json:"ver_num"`
-	Kind       string    `json:"kind"`
-	ContentSHA string    `json:"content_sha"`
-	BlobID     string    `json:"blob_id,omitempty"` // shale-blob path: the staged blob id GetBlob needs; "" on the standalone path
-	Size       int       `json:"size"`
+	contentRef           // this version's descriptor
 	CreatedAt  time.Time `json:"created_at"`
 	Deleted    bool      `json:"deleted"`
 }
@@ -214,11 +231,11 @@ func (p pasteRow) toDomain(slug domain.Slug) domain.Paste {
 
 func pasteFromDomain(p domain.Paste) pasteRow {
 	return pasteRow{
-		Identity:      p.Identity.String(),
-		Status:        string(domain.NormalizeStatus(string(p.Status))),
-		Kind:          string(p.Kind),
-		ContentSHA:    p.ContentSHA,
-		Size:          p.Size,
+		Identity: p.Identity.String(),
+		Status:   string(domain.NormalizeStatus(string(p.Status))),
+		// domain.Paste carries no BlobID (a storage/value-sep detail); the
+		// insert path sets the head's BlobID explicitly right after this.
+		contentRef:    contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, Size: p.Size},
 		Name:          p.Name,
 		PinnedVersion: p.PinnedVersion,
 		CreatedAt:     p.CreatedAt,
@@ -615,9 +632,7 @@ func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 	}
 	v1 := versionRow{
 		VerNum:     1,
-		Kind:       string(p.Kind),
-		ContentSHA: p.ContentSHA,
-		Size:       p.Size,
+		contentRef: contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, Size: p.Size},
 		CreatedAt:  p.CreatedAt,
 	}
 	if err := txPutJSON(tx, keyVersion(p.Slug, 1), v1); err != nil {
@@ -811,10 +826,16 @@ func (r *SlateRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error
 		_ = tx.Rollback()
 		return err
 	}
+	// Repoint the head's served descriptor at the pinned version's, as ONE
+	// value. The version row carries the full contentRef (incl. BlobID, which
+	// domain.Version does not), so the head can't drift a field out of sync.
+	var vr versionRow
+	if err := txGetJSON(tx, keyVersion(slug, ver.VerNum), &vr); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
 	p.PinnedVersion = ver.VerNum
-	p.ContentSHA = ver.ContentSHA
-	p.Size = ver.Size
-	p.Kind = string(ver.Kind)
+	p.contentRef = vr.contentRef
 	if err := txPutJSON(tx, keyPaste(slug), p); err != nil {
 		_ = tx.Rollback()
 		return err
@@ -857,9 +878,7 @@ func (r *SlateRepo) Unpin(slug domain.Slug) error {
 		return err
 	}
 	p.PinnedVersion = 0
-	p.Kind = latest.Kind
-	p.ContentSHA = latest.ContentSHA
-	p.Size = latest.Size
+	p.contentRef = latest.contentRef // whole served descriptor rolls to the latest version
 	if err := txPutJSON(tx, keyPaste(slug), p); err != nil {
 		_ = tx.Rollback()
 		return err
@@ -931,9 +950,7 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 	}
 	newV := versionRow{
 		VerNum:     newVer,
-		Kind:       string(kind),
-		ContentSHA: contentSHA,
-		Size:       size,
+		contentRef: contentRef{Kind: string(kind), ContentSHA: contentSHA, Size: size},
 		CreatedAt:  now,
 	}
 	if err := txPutJSON(tx, keyVersion(slug, newVer), newV); err != nil {
@@ -949,9 +966,7 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 	p.UpdatedAt = now
 	p.ExpiresAt = expires
 	if p.PinnedVersion == 0 {
-		p.Kind = string(kind)
-		p.ContentSHA = contentSHA
-		p.Size = size
+		p.contentRef = newV.contentRef // unpinned head rolls to the new version, whole
 	}
 	if err := txPutJSON(tx, keyPaste(slug), p); err != nil {
 		_ = tx.Rollback()
