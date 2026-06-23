@@ -3899,6 +3899,37 @@ configured as one shale node:
   seed list means "this node is the founder / seed"; the first node starts
   with no seeds and later nodes seed off it. Once gossip converges every
   node holds the same ring snapshot.
+- **Homogeneous bootstrap (optional).** The seed-based discovery above has
+  an asymmetry: one node is the *founder* (empty seeds, forms the cluster
+  generation) and the rest are *joiners* (seed off the founder's address).
+  That asymmetry is a deploy wart - the founder is a special pod, and if it
+  is recreated while joiners are live they cannot learn the generation from
+  a fresh founder. The homogeneous alternative removes the special pod: when
+  a shared `ConditionalStore` (a create-if-absent / compare-and-set object
+  arbiter over the metadata object store) is configured, **every** node
+  carries the *same* seed list (a headless Service that resolves to all
+  pods) and decides form-vs-join at runtime against a `__cluster/init`
+  marker in the shared store. On boot a node tries to join; the first one up
+  reaches no peer, so `AllowSoloStart` (active only when a `ConditionalStore`
+  is wired) lets it come up solo and contend to **form** by writing the
+  marker `{gen, count}` with `PutIfAbsent`; exactly one node wins, and the
+  rest read the existing marker and **join**, adopting its durable
+  `{gen, count}`. No founder, no role split: one StatefulSet of identical
+  pods. The marker is also the restart-safe generation source - a full
+  cluster restart reads it and resumes the right generation instead of
+  re-forming gen 0.
+
+  hostthis opts in via `HOSTTHIS_SHALE_HOMOGENEOUS=true` (multi-backend
+  sharded mode only): the metadata adapter builds a MinIO-backed
+  `ConditionalStore` over the **same** metadata bucket the units use,
+  namespaced by the metadata DB name (so the marker is the same object for
+  every pod), and passes it into the cluster. Unset (the default) keeps the
+  seed-based bootstrap above byte-for-byte, so existing seed/joiner
+  deployments are unaffected; the marker is only consulted when the store is
+  wired. Adopting an existing seed-formed cluster is a matter of pre-seeding
+  the `__cluster/init` marker to that cluster's live `{gen, count}` before
+  the homogeneous pods boot, so they all join the live data with no form
+  contention.
 
 The shard-key function (`{slug}` / `{id}` / `{subnet}` co-location) is
 unchanged across node counts: it decides which shard a key belongs to,
