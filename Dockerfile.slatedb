@@ -6,8 +6,8 @@
 #
 # Three stages:
 #   1. uniffi-build:  Rust toolchain → libslatedb_uniffi.so (~30 MB)
-#   2. go-build:      Go toolchain + cgo → hostthisd, migrate, verify, compress
-#   3. runtime:       distroless/cc:nonroot + libslatedb_uniffi.so + binaries
+#   2. go-build:      Go toolchain + cgo → hostthisd
+#   3. runtime:       distroless/cc:nonroot + libslatedb_uniffi.so + hostthisd
 #
 # Final image is ~150-180 MB vs ~75 MB for the sqlite default. Use
 # the default for any deployment that doesn't need slatedb yet.
@@ -50,20 +50,12 @@ ENV CGO_ENABLED=1 \
     CGO_LDFLAGS="-L/usr/local/lib" \
     LD_LIBRARY_PATH=/usr/local/lib
 
-# Build all four binaries with -tags slatedb so the slatedb code path
-# is compiled in. The sqlite path remains AS-WELL - operator picks at
-# runtime via HOSTTHIS_METADATA_BACKEND.
+# Build hostthisd with -tags slatedb so the slatedb metadata code path is
+# compiled in. The sqlite path remains AS-WELL - the operator picks at runtime
+# via HOSTTHIS_METADATA_BACKEND. (The one-time migration binaries were retired
+# with the blob-values cutover; this is the clean serving image.)
 RUN GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-        go build -tags slatedb -buildvcs=false -ldflags="-s -w" -o /out/hostthisd ./cmd/hostthisd \
- && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-        go build -tags slatedb -buildvcs=false -ldflags="-s -w" -o /out/hostthis-metadata-migrate ./cmd/hostthis-metadata-migrate \
- && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-        go build -tags slatedb -buildvcs=false -ldflags="-s -w" -o /out/hostthis-shale-migrate ./cmd/hostthis-shale-migrate \
- && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-        go build -buildvcs=false -ldflags="-s -w" -o /out/hostthis-blob-compress ./cmd/hostthis-blob-compress \
- && GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
-        go build -tags slatedb -buildvcs=false -ldflags="-s -w" -o /out/hostthis-blob-migrate ./cmd/hostthis-blob-migrate
-# TEMP: phase-4 blob migration binary - remove after migration (see docs/design/shale-blobs-phase4-migration.md)
+        go build -tags slatedb -buildvcs=false -ldflags="-s -w" -o /out/hostthisd ./cmd/hostthisd
 
 # ---- runtime stage ----------------------------------------------------------
 # distroless/cc has glibc + dynamic loader. distroless/static doesn't.
@@ -73,11 +65,6 @@ WORKDIR /app
 
 COPY --from=uniffi-build /src/target/release/libslatedb_uniffi.so /usr/local/lib/
 COPY --from=go-build /out/hostthisd /app/hostthisd
-COPY --from=go-build /out/hostthis-metadata-migrate /app/hostthis-metadata-migrate
-COPY --from=go-build /out/hostthis-shale-migrate /app/hostthis-shale-migrate
-COPY --from=go-build /out/hostthis-blob-compress /app/hostthis-blob-compress
-# TEMP: phase-4 blob migration binary - remove after migration (see docs/design/shale-blobs-phase4-migration.md)
-COPY --from=go-build /out/hostthis-blob-migrate /app/hostthis-blob-migrate
 COPY web/landing.html /app/web/landing.html
 
 EXPOSE 2222 8080
