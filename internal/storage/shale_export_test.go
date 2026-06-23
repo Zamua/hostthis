@@ -164,9 +164,7 @@ func LegacyPasteValueForTest(p domain.Paste) ([]byte, error) {
 func LegacyVersionValueForTest(verNum int, kind domain.ContentKind, contentSHA string, size int, createdAt time.Time, deleted bool) ([]byte, error) {
 	return json.Marshal(versionRow{
 		VerNum:     verNum,
-		Kind:       string(kind),
-		ContentSHA: contentSHA,
-		Size:       size,
+		contentRef: contentRef{Kind: string(kind), ContentSHA: contentSHA, Size: size},
 		CreatedAt:  createdAt,
 		Deleted:    deleted,
 	})

@@ -1683,10 +1683,7 @@ func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef) 
 		}
 		v1 := versionRow{
 			VerNum:     1,
-			Kind:       string(p.Kind),
-			ContentSHA: p.ContentSHA,
-			BlobID:     blobID,
-			Size:       p.Size,
+			contentRef: contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, BlobID: blobID, Size: p.Size},
 			CreatedAt:  p.CreatedAt,
 		}
 		if err := shaleTxPutJSON(tx, shaleKeyVersion(p.Slug, 1), v1); err != nil {
@@ -1976,10 +1973,7 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKin
 
 			newV := versionRow{
 				VerNum:     newVer,
-				Kind:       string(kind),
-				ContentSHA: contentSHA,
-				BlobID:     blobID,
-				Size:       size,
+				contentRef: contentRef{Kind: string(kind), ContentSHA: contentSHA, BlobID: blobID, Size: size},
 				CreatedAt:  now,
 			}
 			if err := shaleTxPutJSON(tx, verKey, newV); err != nil {
@@ -1992,10 +1986,7 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKin
 			p.UpdatedAt = now
 			p.ExpiresAt = newExpiry
 			if p.PinnedVersion == 0 {
-				p.Kind = string(kind)
-				p.ContentSHA = contentSHA
-				p.BlobID = blobID
-				p.Size = size
+				p.contentRef = newV.contentRef // unpinned head rolls to the new version, whole
 			}
 			if err := shaleTxPutJSON(tx, pasteKey, p); err != nil {
 				return err
@@ -2273,10 +2264,16 @@ func (r *ShaleRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error
 		if err := shaleTxGetJSON(tx, pasteKey, &p); err != nil {
 			return err
 		}
+		// Repoint the head's served descriptor at the pinned version's, as ONE
+		// value. The version row carries the full contentRef (incl. BlobID,
+		// which domain.Version does not), so the head can't drift a field. The
+		// version row co-shards on {slug}, so this read is inside the same CAS.
+		var vr versionRow
+		if err := shaleTxGetJSON(tx, shaleKeyVersion(slug, ver.VerNum), &vr); err != nil {
+			return err
+		}
 		p.PinnedVersion = ver.VerNum
-		p.ContentSHA = ver.ContentSHA
-		p.Size = ver.Size
-		p.Kind = string(ver.Kind)
+		p.contentRef = vr.contentRef
 		return shaleTxPutJSON(tx, pasteKey, p)
 	})
 }
@@ -2303,9 +2300,7 @@ func (r *ShaleRepo) Unpin(slug domain.Slug) error {
 			return err
 		}
 		p.PinnedVersion = 0
-		p.Kind = latest.Kind
-		p.ContentSHA = latest.ContentSHA
-		p.Size = latest.Size
+		p.contentRef = latest.contentRef // whole served descriptor rolls to the latest version
 		return shaleTxPutJSON(tx, pasteKey, p)
 	})
 }
