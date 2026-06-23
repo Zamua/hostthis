@@ -5,14 +5,13 @@ go 1.26.0
 toolchain go1.26.4
 
 require (
-	github.com/Zamua/shale v0.7.1-0.20260622020702-bb782e3f0b37
-	github.com/Zamua/shale/backends/slate v0.7.2-0.20260622020702-bb782e3f0b37
+	github.com/Zamua/shale v0.7.1-0.20260623215212-23e6a6b2f6d8
+	github.com/Zamua/shale/backends/slate v0.7.2-0.20260623215212-23e6a6b2f6d8
 	github.com/charmbracelet/ssh v0.0.0-20250826160808-ebfa259c7309
 	github.com/charmbracelet/wish v1.4.7
 	github.com/coder/websocket v1.8.14
 	github.com/klauspost/compress v1.18.6
 	github.com/microcosm-cc/bluemonday v1.0.27
-	github.com/minio/minio-go/v7 v7.2.0
 	github.com/pires/go-proxyproto v0.12.0
 	github.com/yuin/goldmark v1.8.2
 	golang.org/x/crypto v0.51.0
@@ -77,6 +76,7 @@ require (
 	github.com/miekg/dns v1.1.68 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
+	github.com/minio/minio-go/v7 v7.2.0 // indirect
 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
