@@ -142,6 +142,7 @@ func runConformanceWithSites(
 	t.Run(name+"/AppendBumpsVersion", func(t *testing.T) { conformAppendBumpsVersion(t, newRepo(t)) })
 	t.Run(name+"/PinUnpinRollsHead", func(t *testing.T) { conformPinUnpinRollsHead(t, newRepo(t)) })
 	t.Run(name+"/AppendRespectsPin", func(t *testing.T) { conformAppendRespectsPin(t, newRepo(t)) })
+	t.Run(name+"/PinOlderAfterMultipleAppends", func(t *testing.T) { conformPinOlderAfterMultipleAppends(t, newRepo(t)) })
 	t.Run(name+"/DeleteVersionTombstones", func(t *testing.T) { conformDeleteVersionTombstones(t, newRepo(t)) })
 	t.Run(name+"/VerNumNotReusedAfterTombstone", func(t *testing.T) { conformVerNumNotReused(t, newRepo(t)) })
 	t.Run(name+"/RepoIsNotOwnerGated", func(t *testing.T) { conformRepoIsNotOwnerGated(t, newRepo(t)) })
@@ -493,6 +494,61 @@ func conformAppendRespectsPin(t *testing.T, r conformanceRepo) {
 	p, _ := r.Get("ap123456")
 	if p.ContentSHA != v1.ContentSHA || p.PinnedVersion != 1 {
 		t.Fatalf("pinned head must stay on v1 after append, got sha=%q pinned=%d", p.ContentSHA, p.PinnedVersion)
+	}
+}
+
+// conformPinOlderAfterMultipleAppends is the precise prod repro for the
+// version-pinning serving bug: append v1/v2/v3 ALL unpinned (so the head
+// rolls forward to v3), THEN pin a NON-adjacent older version. The
+// denormalized paste head ContentSHA/Size must roll back to the pinned
+// version's bytes - that head field is exactly what the public serving path
+// resolves (paste head sha -> ResolveBlobID -> blob). PinUnpinRollsHead only
+// covers pin-to-v1 when the head is v2 (one back); this covers the head
+// sitting two versions ahead of the pin target and re-pinning to the middle.
+func conformPinOlderAfterMultipleAppends(t *testing.T, r conformanceRepo) {
+	insert(t, r, pasteOf("po123456", "key:p", 10))
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "po123456", domain.KindHTML, "sha-po-v2", 20, 0, fixedNow); err != nil {
+		t.Fatalf("append v2: %v", err)
+	}
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "po123456", domain.KindHTML, "sha-po-v3", 30, 0, fixedNow); err != nil {
+		t.Fatalf("append v3: %v", err)
+	}
+	// Unpinned through all three appends: head followed to v3.
+	if p, _ := r.Get("po123456"); p.ContentSHA != "sha-po-v3" || p.PinnedVersion != 0 {
+		t.Fatalf("unpinned head should be v3, got sha=%q pinned=%d", p.ContentSHA, p.PinnedVersion)
+	}
+	v1, err := r.GetVersion("po123456", 1)
+	if err != nil {
+		t.Fatalf("get v1: %v", err)
+	}
+	// The v1 row must still carry v1's own sha (not the head's).
+	if v1.ContentSHA == "sha-po-v3" {
+		t.Fatalf("v1 row carries the head's sha %q - version rows are leaking the head content", v1.ContentSHA)
+	}
+	// Pin v1 (two versions behind the head): head must roll back to v1's bytes.
+	if err := r.SetPinnedVersion("po123456", v1); err != nil {
+		t.Fatalf("pin v1: %v", err)
+	}
+	if p, _ := r.Get("po123456"); p.PinnedVersion != 1 || p.ContentSHA != v1.ContentSHA || p.Size != 10 {
+		t.Fatalf("pin v1 must roll head to v1, got pinned=%d sha=%q size=%d (want sha=%q size=10)", p.PinnedVersion, p.ContentSHA, p.Size, v1.ContentSHA)
+	}
+	// Re-pin to v2 (the middle version): head must roll to v2's bytes.
+	v2, err := r.GetVersion("po123456", 2)
+	if err != nil {
+		t.Fatalf("get v2: %v", err)
+	}
+	if err := r.SetPinnedVersion("po123456", v2); err != nil {
+		t.Fatalf("pin v2: %v", err)
+	}
+	if p, _ := r.Get("po123456"); p.PinnedVersion != 2 || p.ContentSHA != "sha-po-v2" || p.Size != 20 {
+		t.Fatalf("pin v2 must roll head to v2, got pinned=%d sha=%q size=%d", p.PinnedVersion, p.ContentSHA, p.Size)
+	}
+	// Unpin: head rolls forward to the latest (v3).
+	if err := r.Unpin("po123456"); err != nil {
+		t.Fatalf("unpin: %v", err)
+	}
+	if p, _ := r.Get("po123456"); p.PinnedVersion != 0 || p.ContentSHA != "sha-po-v3" || p.Size != 30 {
+		t.Fatalf("unpin must roll head to v3, got pinned=%d sha=%q size=%d", p.PinnedVersion, p.ContentSHA, p.Size)
 	}
 }
 
