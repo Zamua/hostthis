@@ -134,9 +134,7 @@ make dev-minio-down       # teardown (with volume wipe)
 ```
 
 The shale-blob seam tests live in `internal/shaleblob` (-tags slatedb;
-skipped unless `MINIO_TEST_ENDPOINT` is set). `hostthis-blob-compress`
-(`cmd/`) re-encodes legacy uncompressed on-disk blobs to the magic+zstd
-format; it is disk-only.
+skipped unless `MINIO_TEST_ENDPOINT` is set).
 
 Quick smoke from another terminal once it's live:
 
