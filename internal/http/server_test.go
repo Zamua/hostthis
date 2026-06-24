@@ -175,34 +175,6 @@ func TestPasteRead_IfNoneMatch304(t *testing.T) {
 	}
 }
 
-func TestPasteRead_MarkdownETagIncludesRendererVersion(t *testing.T) {
-	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
-	paste := domain.Paste{
-		Slug:       "abc23456",
-		Kind:       domain.KindMarkdown,
-		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
-		UpdatedAt:  updatedAt,
-		ExpiresAt:  updatedAt.Add(7 * 24 * time.Hour),
-	}
-	srv := &Server{
-		Pastes:     stubPasteReader{p: paste},
-		Blobs:      stubBlobReader{body: []byte("# hi")},
-		ApexDomain: "paste.test",
-		Now:        func() time.Time { return updatedAt.Add(time.Hour) },
-	}
-	r := httptest.NewRequest("GET", "/p/abc23456", nil)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
-
-	etag := w.Header().Get("ETag")
-	if !strings.Contains(etag, paste.ContentSHA) {
-		t.Errorf("md ETag should include content SHA, got %q", etag)
-	}
-	if !strings.Contains(etag, "md.v1") {
-		t.Errorf("md ETag should include renderer version, got %q", etag)
-	}
-}
-
 func TestHealthz_ReturnsOK(t *testing.T) {
 	srv := &Server{ApexDomain: "paste.test", Color: "blue"}
 	r := httptest.NewRequest("GET", "/healthz", nil)

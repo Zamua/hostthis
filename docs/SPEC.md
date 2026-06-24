@@ -32,9 +32,15 @@ out of scope for v1 - see "Non-goals" at the bottom.
 **v1**: HTML, Markdown.
 
 Detection: by content type sniffed from the first 512 bytes plus optional
-explicit `--type` flag at upload time. Markdown is rendered to HTML
-server-side at request time (no client JS required); the rendered HTML
-follows the same sandboxing rules as user-supplied HTML.
+explicit `--type` flag at upload time. A Markdown paste is served as a
+fixed, content-independent HTML shell that loads a bundled client-side
+renderer (marked + DOMPurify); the shell fetches the raw Markdown bytes
+(via `?raw` or a non-`text/html` Accept) and renders them in the browser.
+The server streams the raw bytes with `io.Copy`, so its memory stays
+constant regardless of paste size, mirroring the HTML serve path. The
+shell follows the same sandboxing rules as user-supplied HTML, and
+DOMPurify sanitizes the rendered output in the browser the same way the
+old server-side bluemonday pass did.
 
 **Future** (post-v1, behind a feature flag):
 - Mermaid diagrams (render server-side to SVG / PNG)
@@ -222,8 +228,10 @@ With* options. Refusal behavior is pinned by
   buffer is discarded.
 - **Storage backend**: pluggable. See "Blob storage backends" below.
   Default is the on-disk store (`data/blobs/<sha256[:2]>/<sha256>`).
-  Markdown is rendered to HTML on every read (cheap enough at our
-  content sizes; no cache layer yet).
+  Markdown is never rendered on the read path: a Markdown read either
+  streams the raw bytes (when the client asks for them via `?raw` or a
+  non-`text/html` Accept) or serves the fixed client-render shell, so
+  server memory is constant regardless of paste size.
 - **Storage compression**: all blob bytes are persisted zstd-encoded
   by the storage layer. Compression is invisible above the BlobStore
   interface - `Put` compresses on the way in (level 3, balance of
@@ -554,8 +562,8 @@ domain decision). An unknown extension is served as
 `application/octet-stream` - never mislabeled as `text/html`, so an
 unexpected file can't be coerced into running as script on the origin.
 A `.md` / `.txt` file in a site is served raw as `text/plain` (NOT
-rendered - server-side Markdown rendering is the single-file paste
-path, not the site path).
+rendered - Markdown rendering is the single-file paste path, where the
+browser renders it client-side, not the site path).
 
 Site reads carry the **same sandbox headers** as HTML paste reads
 (`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
@@ -2021,9 +2029,10 @@ no half-applied state visible to readers."
   wildcard. Operators should monitor via Search Console and be ready
   to manually delete abusive slugs; nothing in the protocol prevents
   abuse before flagging.
-- *Markdown render CPU exhaustion*. Goldmark is fast (~1ms typical)
-  but we render on every read with no per-slug rate limit; a hot
-  markdown slug hammered in parallel pegs CPU.
+- *Markdown render CPU*. Rendering now happens in the visitor's
+  browser (marked + DOMPurify), not on the server, so a hot markdown
+  slug hammered in parallel no longer pegs server CPU; each read just
+  streams the raw bytes or the fixed shell.
 - *Bandwidth amplification*. No per-slug egress cap. Hetzner-style
   free egress allowances are generous but not infinite. A CDN in front
   (see "Edge caching" below) makes this concern moot for cached reads.
@@ -4123,9 +4132,10 @@ hostthis has two scaling cliffs that a CDN solves:
   Hetzner free egress is ~20 TB; one viral paste could blow the budget
   in days. A CDN absorbs ~95% of reads at the edge, dropping origin
   bandwidth to a sliver.
-- *Render CPU*: every GET to a markdown paste re-runs goldmark (~1ms).
-  A hot URL at 10k req/s pegs a CPU core. CDN-cached HTML means the
-  render runs ~once per cache POP per paste version.
+- *Render CPU*: a markdown GET no longer renders on the server - it
+  streams the raw bytes or the fixed shell, and the browser runs marked
+  + DOMPurify. So a hot URL no longer pegs a server CPU core; the CDN
+  still absorbs the egress for the raw bytes and the shell.
 
 ### Cache-Control posture
 
@@ -4297,12 +4307,19 @@ treat a codepen, a gist, or a github.io page.
 
 ### Markdown rendering
 
-Markdown is rendered to HTML server-side by a memory-safe Go markdown
-library (likely `goldmark`). The output is sanitized through `bluemonday`'s
-UGC policy to strip event handlers, `javascript:` URLs, and dangerous
-tags before being served. Uploaded Markdown therefore can NOT execute JS
-even though uploaded HTML can - the sanitizer is the safety net for the
-markdown path.
+Markdown is rendered to HTML in the visitor's browser. A Markdown read
+returns a fixed, content-independent HTML shell that loads a bundled
+client-side renderer (`marked`) and sanitizer (`DOMPurify`); the shell
+fetches the raw Markdown bytes (via `?raw` or a non-`text/html` Accept)
+and renders them into the page. DOMPurify strips event handlers,
+`javascript:` URLs, and dangerous tags before the HTML is inserted, so
+uploaded Markdown still can NOT execute JS even though uploaded HTML can
+- DOMPurify is the safety net for the markdown path, replacing the old
+server-side bluemonday pass. The server never renders Markdown on the
+read path, which keeps its memory constant regardless of paste size
+(it streams the raw bytes with `io.Copy`, like the HTML path). The
+in-repo `internal/render` package and `cmd/render-md` dev tool are
+retained for offline use but are no longer on the live read path.
 
 ### Abuse reporting
 
@@ -4573,6 +4590,7 @@ without breaking v1 semantics. These are explicit no's, not oversights.
 - **Mermaid as first rendered-format expansion**: confirm the goldmark
   + mermaid SVG renderer choice once we get there; for now Mermaid is
   v2+ and out of scope.
-- **Render cache for Markdown**: we render on every read. Cheap today,
-  worth caching by content sha + renderer version if a hot paste
-  starts dominating CPU.
+- **Render cache for Markdown**: no longer relevant - rendering moved
+  to the browser, so there is no server-side render to cache. The raw
+  bytes and the fixed shell are both content-addressable and CDN-cacheable
+  on their own.

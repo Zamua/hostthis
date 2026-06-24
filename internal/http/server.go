@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/render"
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
@@ -35,13 +34,14 @@ type SiteReader interface {
 }
 
 // BlobReader is the read side of the per-record blob seam, narrowed to
-// what the http serve paths need. ReadAll buffers the whole blob (needed by
-// the markdown render path, which renders the full document); Read streams
-// the bytes so the HTML / site-file serve paths can io.Copy straight to the
-// client without a full-payload allocation per GET. Both take the record's
-// slug (the route key) + its content sha; the standalone backend keys by
-// sha alone and ignores the slug, the transactional shale backend (a later
-// phase) uses the slug to route. service.BlobUnit satisfies this.
+// what the http serve paths need. Read streams the bytes so every serve
+// path (HTML, site files, and raw markdown) can io.Copy straight to the
+// client without a full-payload allocation per GET. ReadAll buffers the
+// whole blob; it is retained on the interface for callers that still need
+// a buffered read, but the live serve paths use Read. Both take the
+// record's slug (the route key) + its content sha; the standalone backend
+// keys by sha alone and ignores the slug, the transactional shale backend
+// uses the slug to route. service.BlobUnit satisfies this.
 type BlobReader interface {
 	ReadAll(ctx context.Context, slug, sha string) ([]byte, error)
 	Read(ctx context.Context, slug, sha string) (io.ReadCloser, int64, error)
@@ -73,6 +73,12 @@ func (s *Server) nowOrTime() time.Time {
 // Handler returns the mux that the caller binds with http.ListenAndServe.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	// Client-render assets for markdown pastes. Registered as a fixed
+	// prefix so ServeMux's longest-prefix match routes /_hostthis/<name>
+	// here ahead of the "/" catch-all, on any Host. The handler
+	// whitelists the asset names, so this prefix cannot be used to reach
+	// any other path.
+	mux.HandleFunc("/_hostthis/", s.serveAsset)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// 0. Health endpoint - apex only, no Host-based routing. Used by
 		// load balancers / haproxy / nginx to decide if this backend is
@@ -258,13 +264,20 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	h.Set("Cache-Control", "public, max-age=3600")
 	h.Set("Last-Modified", p.UpdatedAt.UTC().Format(http.TimeFormat))
 
-	// ETag is the content SHA for HTML - content-addressed, byte-stable.
-	// For markdown the rendered output depends on the renderer version,
-	// so we mix that in so that a renderer bump invalidates the cache
-	// without us having to manually purge.
+	// For markdown we serve one of two things depending on what the
+	// client asks for: the RAW bytes (when ?raw or a non-text/html Accept)
+	// or the fixed client-render shell. The raw branch is content-
+	// addressed (ETag = content SHA, byte-stable). The shell is content-
+	// INDEPENDENT, so its ETag is the shell version, NOT the paste content
+	// - two different markdown pastes yield the same shell ETag. Decide
+	// here so the conditional-GET 304 below uses the right validator.
+	mdRaw := p.Kind == domain.KindMarkdown && wantsRawMarkdown(r)
+
+	// ETag is the content SHA for HTML and raw markdown - content-addressed,
+	// byte-stable. The markdown shell uses the shell version instead.
 	etag := `"` + p.ContentSHA + `"`
-	if p.Kind == domain.KindMarkdown {
-		etag = `"` + p.ContentSHA + "-" + render.MarkdownRendererVersion + `"`
+	if p.Kind == domain.KindMarkdown && !mdRaw {
+		etag = `"` + mdShellVersion + `"`
 	}
 	h.Set("ETag", etag)
 
@@ -295,23 +308,31 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.Copy(w, rc)
 	case domain.KindMarkdown:
-		// Render markdown → sanitized HTML on every read. The render
-		// is pure and cheap (~1ms for typical docs); a cache keyed
-		// on (ContentSHA, render.MarkdownRendererVersion) can land
-		// later if cold renders become hot. Markdown needs the whole
-		// document buffered, so it keeps the buffered Get.
-		body, err := s.Blobs.ReadAll(r.Context(), string(slug), p.ContentSHA)
-		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
+		// No server-side render. Either stream the raw bytes (the client
+		// asked for them) or serve the fixed shell that renders in the
+		// browser. Both keep server memory constant regardless of paste
+		// size, mirroring the HTML path.
+		if mdRaw {
+			// Stream the raw markdown straight to the client - same
+			// streaming shape as the HTML case, so no full-payload
+			// allocation per GET.
+			rc, _, err := s.Blobs.Read(r.Context(), string(slug), p.ContentSHA)
+			if err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			defer func() { _ = rc.Close() }()
+			h.Set("Content-Type", "text/markdown; charset=utf-8")
+			_, _ = io.Copy(w, rc)
 			return
 		}
-		rendered, err := render.Markdown(body)
-		if err != nil {
-			http.Error(w, "render error", http.StatusInternalServerError)
-			return
-		}
+		// Fixed client-render shell. The shell loads marked + DOMPurify
+		// and fetches the raw bytes itself. A tight CSP locks the page
+		// down: only same-origin scripts/styles/connects, no inline
+		// script, no framing.
+		h.Set("Content-Security-Policy", mdShellCSP)
 		h.Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(rendered)
+		_, _ = w.Write(shellHTML())
 	default:
 		http.Error(w, "unsupported kind", http.StatusInternalServerError)
 	}
@@ -507,6 +528,24 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 	h.Set("Content-Type", ct)
 	_, _ = io.Copy(w, rc)
 	return true
+}
+
+// mdShellCSP is set ONLY on the markdown shell response. It locks the
+// shell down: no default sources, scripts/styles/connects only from the
+// same origin (the vendored libs + bootstrap + the ?raw fetch), images
+// and media from anywhere (markdown can embed remote images), no inline
+// script, no framing, no form submission. 'unsafe-inline' is allowed for
+// styles only so the markdown's own inline styles (which DOMPurify keeps)
+// render; scripts get no such escape hatch.
+const mdShellCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+// wantsRawMarkdown reports whether the client asked for the raw markdown
+// bytes rather than the client-render shell. True when ?raw is present or
+// when the Accept header does not include text/html (e.g. a curl default
+// of */*, or an explicit text/markdown). A browser navigation sends
+// Accept: text/html,... and so gets the shell.
+func wantsRawMarkdown(r *http.Request) bool {
+	return r.URL.Query().Has("raw") || !strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
 // etagMatches checks if the client's If-None-Match header lists our
