@@ -1468,6 +1468,18 @@ func (r *ShaleRepo) SweepBlobOrphans(ctx context.Context, now time.Time, grace t
 // over StandaloneBlobUnit and to schedule SweepOrphans.
 func (r *ShaleRepo) HasBlobPlane() bool { return r.kv != nil }
 
+// DebugClusterState returns the embedded shale cluster's per-position handoff
+// dump (cluster.DebugState) for LIVE diagnosis, or "" in the single-node path
+// where there is no cluster. It is the production-safe equivalent of the
+// shaled-binary /debug/shale/state endpoint, exposed so the metadata adapter can
+// serve it on an OPTIONAL debug port without leaking the cluster handle.
+func (r *ShaleRepo) DebugClusterState() string {
+	if r.cluster == nil {
+		return ""
+	}
+	return r.cluster.DebugState()
+}
+
 // RouteKeyForSlug returns the canonical metadata route key a slug's blobs co-
 // locate with: pastes/<slug>. pastes/<slug> and sites/<slug> both shard on
 // <slug>, so they resolve to the SAME unit and the SAME bref key; the blob unit
