@@ -228,6 +228,18 @@ type ShaleConfig struct {
 	// the back-compat shape every shale test that does not exercise blobs
 	// uses, and the shape ShaleBlobUnit is simply not wired for.
 	BlobStore blob.Store
+
+	// ConditionalStore is the OPTIONAL shared CAS arbiter (create-if-absent /
+	// compare-and-set over the metadata object store) that enables the
+	// HOMOGENEOUS bootstrap: when set, cluster.Open decides form-vs-join at
+	// runtime against the __cluster/init marker instead of using the founder/
+	// joiner seed asymmetry, and AllowSoloStart lets the first pod up come up
+	// solo and contend to form. Every pod must wire the SAME store (same bucket,
+	// same key prefix) so the marker is one shared object. nil (the default)
+	// keeps the seed-based bootstrap unchanged - existing seed/joiner
+	// deployments are unaffected. Only meaningful in multi-backend (sharded)
+	// mode. See docs/SPEC.md "Homogeneous bootstrap (optional)".
+	ConditionalStore storageunit.ConditionalStore
 }
 
 // ShaleRepo is the shale-cluster-backed metadata store. It satisfies the
@@ -506,6 +518,11 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		// blob-capable surface so a staged blob's pointer co-commits with the
 		// metadata; when nil, cluster.Open opens the metadata-only path.
 		BlobStore: cfg.BlobStore,
+		// Optional homogeneous bootstrap. When set, cluster.Open uses the
+		// __cluster/init marker (try-join-else-form) + derives AllowSoloStart,
+		// retiring the founder/joiner seed asymmetry; nil keeps seed-based
+		// bootstrap. Every pod wires the SAME store. See docs/SPEC.md.
+		ConditionalStore: cfg.ConditionalStore,
 	}
 	// Cold-start patience: a joiner re-sweeps its seeds for the cluster generation
 	// up to GenLearnBudget (shale default 180s) so a still-mounting seed is waited
@@ -1450,6 +1467,18 @@ func (r *ShaleRepo) SweepBlobOrphans(ctx context.Context, now time.Time, grace t
 // (a blob store was configured). The cmd wiring uses it to pick ShaleBlobUnit
 // over StandaloneBlobUnit and to schedule SweepOrphans.
 func (r *ShaleRepo) HasBlobPlane() bool { return r.kv != nil }
+
+// DebugClusterState returns the embedded shale cluster's per-position handoff
+// dump (cluster.DebugState) for LIVE diagnosis, or "" in the single-node path
+// where there is no cluster. It is the production-safe equivalent of the
+// shaled-binary /debug/shale/state endpoint, exposed so the metadata adapter can
+// serve it on an OPTIONAL debug port without leaking the cluster handle.
+func (r *ShaleRepo) DebugClusterState() string {
+	if r.cluster == nil {
+		return ""
+	}
+	return r.cluster.DebugState()
+}
 
 // RouteKeyForSlug returns the canonical metadata route key a slug's blobs co-
 // locate with: pastes/<slug>. pastes/<slug> and sites/<slug> both shard on
