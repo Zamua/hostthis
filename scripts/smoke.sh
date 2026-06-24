@@ -13,9 +13,13 @@
 # The mode is auto-detected from the URL the first upload prints; the
 # script never needs to know which mode the server is in.
 #
-# Generates a throwaway ed25519 key under /tmp, uploads two pastes,
-# runs every verb against them, asserts the expected output / http
-# status at each step, and cleans up everything it created.
+# Reuses a persistent ed25519 key (HOSTTHIS_SMOKE_KEY, default
+# ~/.config/hostthis/smoke_id_ed25519; generated on first run), uploads
+# two pastes, runs every verb against them, asserts the expected output /
+# http status at each step, and cleans up the pastes it created (the key
+# is kept). Reusing one identity keeps the server's per-subnet new-key
+# gate from being exhausted: the key is admitted once per subnet, then
+# reused, instead of minting a fresh key (and burning a slot) every run.
 #
 # Exit codes:
 #   0  every verb passed
@@ -25,7 +29,10 @@ set -u  # don't set -e - we want to keep going on individual failures
         # and report a summary at the end
 
 HOST="${HOSTTHIS_HOST:-hostthis.dev}"
-KEY="$(mktemp -u /tmp/hostthis-smoke-XXXXXX)"
+# Persistent key so repeated smokes reuse one identity instead of minting
+# a fresh key each run (which exhausts the server's per-subnet new-key
+# gate). Override the path with HOSTTHIS_SMOKE_KEY.
+KEY="${HOSTTHIS_SMOKE_KEY:-$HOME/.config/hostthis/smoke_id_ed25519}"
 SSH="ssh -i $KEY -o StrictHostKeyChecking=no -o IdentitiesOnly=yes"
 
 # slug_from_url extracts the 8-char slug from a hostthis URL. Handles
@@ -69,12 +76,26 @@ cleanup() {
   while IFS= read -r slug; do
     $SSH "$HOST" delete "$slug" >/dev/null 2>&1 || true
   done < /tmp/hostthis-smoke.slugs
-  rm -f /tmp/hostthis-smoke.slugs "$KEY" "$KEY.pub"
+  # Keep the persistent key ($KEY) for reuse; only drop the slug list.
+  rm -f /tmp/hostthis-smoke.slugs
 }
 
-step "setup: generating throwaway ed25519 key"
-ssh-keygen -t ed25519 -f "$KEY" -q -N "" -C "smoke-$$"
+if [ -f "$KEY" ]; then
+  step "setup: reusing persistent ssh key ($KEY)"
+else
+  step "setup: generating persistent ed25519 key ($KEY)"
+  mkdir -p "$(dirname "$KEY")"
+  ssh-keygen -t ed25519 -f "$KEY" -q -N "" -C "hostthis-smoke"
+fi
 > /tmp/hostthis-smoke.slugs
+
+# A reused key may still own pastes from a prior run that died before its
+# cleanup ran. Delete them so the "active: 0" precondition below holds.
+# `list` prints "SLUG\tNAME\t..." (header on line 1); column 1 is the slug.
+step "setup: clearing any pastes left by a prior run"
+$SSH "$HOST" list 2>/dev/null | tail -n +2 | cut -f1 | while IFS= read -r s; do
+  [ -n "$s" ] && $SSH "$HOST" delete "$s" >/dev/null 2>&1 || true
+done
 
 # ---- 1. whoami (pre-upload) ------------------------------------------------
 step "whoami (expect active: 0)"
