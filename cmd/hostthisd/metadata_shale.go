@@ -39,6 +39,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 
@@ -256,6 +257,26 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		}
 		bundle.BlobUnit = unit
 		bundle.BlobOrphanSweeper = repo
+	}
+
+	// OPTIONAL live-diagnosis endpoint. When HOSTTHIS_SHALE_DEBUG_ADDR is set
+	// (e.g. ":6060"), serve the embedded cluster's per-position handoff dump at
+	// /debug/shale/state - the production-safe equivalent of the shaled binary's
+	// SHALE_DEBUG_ADDR endpoint, for diagnosing a stuck position (desired-but-
+	// unmounted, a parked handoff phase, the last swallowed acquire error). OFF
+	// unless the env var is set, so production is unaffected.
+	if dbgAddr := strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_DEBUG_ADDR")); dbgAddr != "" {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/debug/shale/state", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = fmt.Fprint(w, repo.DebugClusterState())
+		})
+		srv := &http.Server{Addr: dbgAddr, Handler: mux}
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Printf("metadata: shale debug server on %s exited: %v", dbgAddr, err)
+			}
+		}()
+		logger.Printf("metadata: shale debug endpoint serving %s/debug/shale/state", dbgAddr)
 	}
 	return bundle, nil
 }
