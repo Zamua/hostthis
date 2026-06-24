@@ -455,7 +455,23 @@ func (r *SlateRepo) CountByOwner(owner string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return len(idx), nil
+	// Count only LIVE pastes: resolve each derived-index entry to its
+	// authoritative row and skip orphans (an index entry that leaked past
+	// its paste), mirroring ListByOwner. A raw len(idx) over-counts orphans,
+	// which is the whoami-vs-list mismatch (#464).
+	live := 0
+	for _, item := range idx {
+		slug := domain.Slug(extractSlug(item.Key))
+		var row pasteRow
+		if gerr := r.getJSON(keyPaste(slug), &row); gerr != nil {
+			if errors.Is(gerr, ErrNotFound) {
+				continue
+			}
+			return 0, gerr
+		}
+		live++
+	}
+	return live, nil
 }
 
 func (r *SlateRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, error) {

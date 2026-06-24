@@ -1219,6 +1219,16 @@ func (r *ShaleRepo) GetVersion(slug domain.Slug, ver int) (domain.Version, error
 	return row.toDomain(slug), nil
 }
 
+// CountByOwner returns the owner's count of LIVE pastes. The
+// identity_pastes index is derived + eventually consistent, so it must be
+// repaired on read exactly like ListByOwner: an orphan entry (its
+// authoritative pastes/<slug> row already deleted) is NOT a live paste and
+// must not be counted. A raw len(idx) over-counts orphans - the entries
+// whose delete left a stale index pointer - which is the whoami-shows-N /
+// list-shows-fewer mismatch (#464). Resolving each entry against the
+// {slug} row, counting only the live ones, and dropping the stale entries
+// makes the count match ListByOwner (and reality), and self-heals the
+// index the same way a list does.
 func (r *ShaleRepo) CountByOwner(owner string) (int, error) {
 	if owner == "" {
 		return 0, nil
@@ -1227,7 +1237,26 @@ func (r *ShaleRepo) CountByOwner(owner string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return len(idx), nil
+	live := 0
+	var staleKeys [][]byte
+	for _, item := range idx {
+		slug := domain.Slug(extractSlug(item.Key))
+		var p pasteRow
+		if gerr := r.getJSON(shaleKeyPaste(slug), &p); gerr != nil {
+			if errors.Is(gerr, ErrNotFound) {
+				staleKeys = append(staleKeys, append([]byte(nil), item.Key...))
+				continue
+			}
+			return 0, gerr
+		}
+		live++
+	}
+	// Best-effort repair (same as ListByOwner): a failure is non-fatal -
+	// the count is already correct; the entry is re-attempted next read.
+	for _, k := range staleKeys {
+		_ = r.cluster.Delete(k)
+	}
+	return live, nil
 }
 
 // SumActiveBytesByOwner serves from the identity_bytes counter, a single
