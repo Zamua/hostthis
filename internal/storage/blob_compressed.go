@@ -4,9 +4,55 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/klauspost/compress/zstd"
 )
+
+// zstdDecoderPool reuses streaming zstd decoders across blob reads. A
+// fresh zstd.NewReader allocates a large fixed working set (window /
+// history buffers + per-goroutine decode scratch, ~10 MiB with the
+// klauspost defaults) that is INDEPENDENT of the blob size, so paying it
+// per GET dominated the serve path's allocation profile (every HTML and
+// raw-markdown read decodes through here). Pooling pays that cost once
+// and reuses it via Decoder.Reset: the buffers stay warm between reads
+// instead of being allocated-then-GC'd each time. The pool is reaped by
+// the GC under memory pressure, so idle footprint stays bounded.
+//
+// New never returns nil: zstd.NewReader(nil) only errors on invalid
+// options, and we pass none.
+var zstdDecoderPool = sync.Pool{
+	New: func() any {
+		d, _ := zstd.NewReader(nil)
+		return d
+	},
+}
+
+// getPooledDecoder borrows a decoder from the pool and points it at r via
+// Reset (Reset reconfigures a reusable decoder for a new stream without
+// re-allocating its buffers). On a Reset error the decoder is discarded
+// (Close, not returned to the pool) so a bad decoder never gets reused.
+func getPooledDecoder(r io.Reader) (*zstd.Decoder, error) {
+	d := zstdDecoderPool.Get().(*zstd.Decoder)
+	if err := d.Reset(r); err != nil {
+		d.Close()
+		return nil, err
+	}
+	return d, nil
+}
+
+// putPooledDecoder detaches the decoder from its stream (Reset(nil)
+// releases the reference to the inner reader and readies it for reuse -
+// crucially NOT Close, which frees the buffers we want to keep) and
+// returns it to the pool. If Reset fails the decoder is freed instead of
+// pooled.
+func putPooledDecoder(d *zstd.Decoder) {
+	if err := d.Reset(nil); err != nil {
+		d.Close()
+		return
+	}
+	zstdDecoderPool.Put(d)
+}
 
 // CompressedBlobStore wraps another BlobStore and transparently zstd-
 // encodes bytes on Put, decodes on Get. The wire/disk format adds a
@@ -183,8 +229,9 @@ func DecodeCompressedStream(rc io.ReadCloser, label string) (io.ReadCloser, erro
 		// rest of the inner stream, unwrapped.
 		return newPrefixReadCloser(hdr, rc), nil
 	}
-	// Compressed: the magic is consumed; decode the remaining stream.
-	dec, err := zstd.NewReader(rc)
+	// Compressed: the magic is consumed; decode the remaining stream with a
+	// pooled decoder (Reset onto rc, returned to the pool on Close).
+	dec, err := getPooledDecoder(rc)
 	if err != nil {
 		_ = rc.Close()
 		return nil, fmt.Errorf("compressed blob %s: zstd reader: %w", label, err)
@@ -220,7 +267,12 @@ type zstdReadCloser struct {
 func (z *zstdReadCloser) Read(b []byte) (int, error) { return z.dec.Read(b) }
 
 func (z *zstdReadCloser) Close() error {
-	z.dec.Close() // returns no error
+	// Return the decoder to the pool (Reset(nil) detaches the inner stream)
+	// rather than Close it, so its buffers stay warm for the next read. The
+	// inner reader is still closed here. Safe even if the caller didn't read
+	// to EOF (an aborted download): Reset readies the decoder regardless.
+	putPooledDecoder(z.dec)
+	z.dec = nil
 	return z.inner.Close()
 }
 
