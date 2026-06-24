@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"strings"
 )
 
 // mdShellFS holds the client-side markdown render assets: the fixed HTML
@@ -16,13 +17,18 @@ import (
 //go:embed assets/mdshell/*
 var mdShellFS embed.FS
 
-// mdShellVersion tags the fixed shell response's ETag. The shell is
-// content-independent, so its ETag must NOT depend on the paste content -
-// it changes only when the shell itself (this version) changes. Bump it
-// when shell.html / md.js / md.css change in a way visitors must re-fetch.
-const mdShellVersion = "mdshell-v1"
+// mdShellVersion tags the fixed shell response's ETag AND is stamped into
+// the shell's asset URLs as a ?v= cache-buster (the assets are served
+// `immutable`, so a same-path change would otherwise be pinned in browser
+// caches for a year). The shell is content-independent, so its ETag does
+// NOT depend on the paste content. BUMP THIS whenever shell.html / md.js /
+// md.css change in a way visitors must re-fetch (e.g. a style change).
+//
+// v2: restyled markdown to a GitHub-like system-sans look.
+const mdShellVersion = "mdshell-v2"
 
-// shellHTML returns the fixed markdown render shell bytes.
+// shellHTML returns the fixed markdown render shell with mdShellVersion
+// substituted into the asset URLs' ?v= cache-buster.
 func shellHTML() []byte {
 	b, err := mdShellFS.ReadFile("assets/mdshell/shell.html")
 	if err != nil {
@@ -30,7 +36,7 @@ func shellHTML() []byte {
 		// means the build is broken, which surfaces in tests.
 		return nil
 	}
-	return b
+	return []byte(strings.ReplaceAll(string(b), "__VER__", mdShellVersion))
 }
 
 // mdShellAssets is the whitelist of asset names serveAsset will serve,
