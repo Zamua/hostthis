@@ -39,11 +39,14 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 
+	"github.com/Zamua/shale/backends/slate"
 	"github.com/Zamua/shale/backends/slate/blobstore"
 	"github.com/Zamua/shale/pkg/blob"
+	"github.com/Zamua/shale/pkg/storageunit"
 
 	"github.com/Zamua/hostthis/internal/shaleblob"
 	"github.com/Zamua/hostthis/internal/storage"
@@ -164,6 +167,39 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		blobStore = bs
 	}
 
+	// Optional HOMOGENEOUS bootstrap. When HOSTTHIS_SHALE_HOMOGENEOUS=true, build
+	// a MinIO-backed ConditionalStore over the SAME metadata bucket, namespaced by
+	// the DB name (so the __cluster/init marker is one shared object for every
+	// pod), and hand it to the cluster. cluster.Open then decides form-vs-join at
+	// runtime against the marker (try-join-else-form) instead of the founder/
+	// joiner seed asymmetry; every pod runs identical config. Requires multi-
+	// backend (sharded) + multi-node mode - the marker's durable {gen, count}
+	// records the unit count, which is meaningless without sharding, and the
+	// solo-start/form race only arises across gossiping pods. See docs/SPEC.md
+	// "Homogeneous bootstrap (optional)". Unset keeps the seed-based bootstrap.
+	var condStore storageunit.ConditionalStore
+	homogeneous := strings.EqualFold(strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_HOMOGENEOUS")), "true")
+	if homogeneous {
+		if unitCount <= 0 {
+			return nil, fmt.Errorf("HOSTTHIS_SHALE_HOMOGENEOUS=true requires multi-backend mode (HOSTTHIS_SHALE_UNIT_COUNT > 0)")
+		}
+		if bindAddr == "" {
+			return nil, fmt.Errorf("HOSTTHIS_SHALE_HOMOGENEOUS=true requires multi-node mode (HOSTTHIS_SHALE_BIND_ADDR set)")
+		}
+		cs, csErr := slate.NewMinioConditionalStore(slate.MinioConditionalStoreConfig{
+			EndpointHost: stripScheme(endpoint),
+			AccessKey:    accessKey,
+			SecretKey:    secretKey,
+			UseSSL:       useSSL,
+			Bucket:       bucket,
+			KeyPrefix:    dbName,
+		})
+		if csErr != nil {
+			return nil, fmt.Errorf("open shale conditional store: %w", csErr)
+		}
+		condStore = cs
+	}
+
 	repo, err := storage.NewShaleRepo(storage.ShaleConfig{
 		NodeID:            nodeID,
 		Endpoint:          endpoint,
@@ -183,6 +219,7 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		ReapFenceWALs:     reapFenceWALs,
 		Logger:            logger,
 		BlobStore:         blobStore,
+		ConditionalStore:  condStore,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open shale: %w", err)
@@ -191,8 +228,8 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d shards=%d awaitDurable=%t fenceGC=%t blobBucket=%q endpoint=%s",
 			nodeID, bucket, dbName, replicationFactor, unitCount, awaitDurable, reapFenceWALs, blobBucket, endpoint)
 	} else {
-		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d shards=%d awaitDurable=%t fenceGC=%t blobBucket=%q bucket=%s db=%s endpoint=%s",
-			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, unitCount, awaitDurable, reapFenceWALs, blobBucket, bucket, dbName, endpoint)
+		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d shards=%d awaitDurable=%t fenceGC=%t homogeneous=%t blobBucket=%q bucket=%s db=%s endpoint=%s",
+			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, unitCount, awaitDurable, reapFenceWALs, homogeneous, blobBucket, bucket, dbName, endpoint)
 	}
 	bundle := &metadataBundle{
 		Repo:    repo,
@@ -220,6 +257,26 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		}
 		bundle.BlobUnit = unit
 		bundle.BlobOrphanSweeper = repo
+	}
+
+	// OPTIONAL live-diagnosis endpoint. When HOSTTHIS_SHALE_DEBUG_ADDR is set
+	// (e.g. ":6060"), serve the embedded cluster's per-position handoff dump at
+	// /debug/shale/state - the production-safe equivalent of the shaled binary's
+	// SHALE_DEBUG_ADDR endpoint, for diagnosing a stuck position (desired-but-
+	// unmounted, a parked handoff phase, the last swallowed acquire error). OFF
+	// unless the env var is set, so production is unaffected.
+	if dbgAddr := strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_DEBUG_ADDR")); dbgAddr != "" {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/debug/shale/state", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = fmt.Fprint(w, repo.DebugClusterState())
+		})
+		srv := &http.Server{Addr: dbgAddr, Handler: mux}
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Printf("metadata: shale debug server on %s exited: %v", dbgAddr, err)
+			}
+		}()
+		logger.Printf("metadata: shale debug endpoint serving %s/debug/shale/state", dbgAddr)
 	}
 	return bundle, nil
 }
