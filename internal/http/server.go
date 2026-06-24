@@ -330,6 +330,13 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		// and fetches the raw bytes itself. A tight CSP locks the page
 		// down: only same-origin scripts/styles/connects, no inline
 		// script, no framing.
+		//
+		// no-cache (override the shared max-age=3600): the shell is
+		// content-independent and updated occasionally (a restyle bumps
+		// mdShellVersion + the asset ?v=). Revalidating via the ETag each
+		// view - a cheap 304 when unchanged - means a shell/style change is
+		// seen on the next navigation instead of being pinned for an hour.
+		h.Set("Cache-Control", "no-cache")
 		h.Set("Content-Security-Policy", mdShellCSP)
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(shellHTML())
