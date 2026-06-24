@@ -814,6 +814,26 @@ func conformOwnerStats(t *testing.T, r conformanceRepo) {
 	if !first.IsZero() {
 		t.Fatalf("unknown owner first seen should be zero time, got %v", first)
 	}
+
+	// #464 regression: CountByOwner must count only LIVE pastes, matching
+	// ListByOwner, even when a delete leaves a stale (orphaned) derived-index
+	// entry behind. Delete one of the two pastes; the count and the list must
+	// both drop to 1 and AGREE. A raw len(index) count would over-report the
+	// orphan (the whoami-shows-2 / list-shows-1 mismatch).
+	if err := r.Delete("st223456"); err != nil {
+		t.Fatalf("delete for count-repair regression: %v", err)
+	}
+	n, err = r.CountByOwner(owner)
+	if err != nil {
+		t.Fatalf("count by owner after delete: %v", err)
+	}
+	list, err = r.ListByOwner(owner)
+	if err != nil {
+		t.Fatalf("list by owner after delete: %v", err)
+	}
+	if n != 1 || len(list) != 1 {
+		t.Fatalf("after deleting 1 of 2: CountByOwner=%d, ListByOwner=%d, want both 1 (count must ignore orphan index entries)", n, len(list))
+	}
 }
 
 func conformSetName(t *testing.T, r conformanceRepo) {
