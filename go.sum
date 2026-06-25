@@ -6,8 +6,12 @@ github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c/go.mod h1:xomTg6
 github.com/DataDog/datadog-go v3.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
-github.com/Zamua/shale v0.9.0 h1:nG1o59Esz3/Owb8qzdjdG8BmCuc7jwyR3t5MaUVrPzE=
-github.com/Zamua/shale v0.9.0/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
+github.com/Zamua/shale v0.7.1-0.20260623215212-23e6a6b2f6d8 h1:a8AQVkG9rt9SRf/chrIs0pRWKXPZMt3B0Syhji3pLFY=
+github.com/Zamua/shale v0.7.1-0.20260623215212-23e6a6b2f6d8/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
+github.com/Zamua/shale v0.8.0 h1:ItbKuoylk6g7ZtyD9olJ1D1XEqKfKrXDXfBNqxTtIUE=
+github.com/Zamua/shale v0.8.0/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
+github.com/Zamua/shale/backends/slate v0.7.2-0.20260623215212-23e6a6b2f6d8 h1:QkVsAPZG9wt2Y5xm3VvgDmiUA1TXfJ/4mqFJIIGTkVE=
+github.com/Zamua/shale/backends/slate v0.7.2-0.20260623215212-23e6a6b2f6d8/go.mod h1:PBvgzg/mITlBbN9B0TBYvG4WjApSn3pD4Tq2U1lJVpo=
 github.com/Zamua/shale/backends/slate v0.8.0 h1:urBQddpb2iiTkB9NQ09NlKSTTEf5Tu/ssoQbIJwebLA=
 github.com/Zamua/shale/backends/slate v0.8.0/go.mod h1:PBvgzg/mITlBbN9B0TBYvG4WjApSn3pD4Tq2U1lJVpo=
 github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
