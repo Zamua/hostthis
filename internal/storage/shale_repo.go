@@ -523,6 +523,13 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		// retiring the founder/joiner seed asymmetry; nil keeps seed-based
 		// bootstrap. Every pod wires the SAME store. See docs/SPEC.md.
 		ConditionalStore: cfg.ConditionalStore,
+		// Declarative reshard (homogeneous only): with the arbiter wired, the
+		// unit count is driven by config - each pod gossips its declared
+		// HOSTTHIS_SHALE_UNIT_COUNT and the cluster reshards online to the
+		// agreed count (steady-and-unanimous gated, so a roll never flaps it).
+		// Inert when the declared count already equals the live count. See
+		// docs/SPEC.md "Declarative reshard (homogeneous only)".
+		DeclarativeReshard: cfg.ConditionalStore != nil,
 	}
 	// Cold-start patience: a joiner re-sweeps its seeds for the cluster generation
 	// up to GenLearnBudget (shale default 180s) so a still-mounting seed is waited

@@ -3940,6 +3940,18 @@ configured as one shale node:
   the homogeneous pods boot, so they all join the live data with no form
   contention.
 
+- **Declarative reshard (homogeneous only).** With the homogeneous bootstrap
+  active, the embedded shale's unit (shard) count is a DECLARATIVE config
+  value: changing `HOSTTHIS_SHALE_UNIT_COUNT` and re-applying reshards the
+  metadata store online - split (more units) or merge (fewer) - with no
+  downtime and no acked-write loss, the same way a Deployment's `replicas` is
+  declared. hostthis enables it by setting shale's `Config.DeclarativeReshard`
+  whenever the `ConditionalStore` is wired (i.e. homogeneous mode); each pod
+  gossips its declared count and the cluster retargets the shared reshard
+  arbiter only when every live member agrees on the same count, so a rolling
+  deploy never flaps it. Inert when the declared count already equals the live
+  count (the steady state), and absent in seed-based mode.
+
 The shard-key function (`{slug}` / `{id}` / `{subnet}` co-location) is
 unchanged across node counts: it decides which shard a key belongs to,
 and the ring decides which node owns that shard. Co-location still holds,
