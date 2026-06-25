@@ -580,6 +580,18 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		clusterCfg.Backend = be
 	}
 
+	// Online resharding (declarative). Enable shale's config-driven reshard when
+	// the cluster is multi-backend (a BackendFactory + UnitCount) AND a shared CAS
+	// arbiter (ConditionalStore) is present - i.e. the homogeneous deployment where
+	// every pod declares the same HOSTTHIS_SHALE_UNIT_COUNT. The cluster then DRIVES
+	// the reshard target from the unanimously gossiped declared count, so changing
+	// HOSTTHIS_SHALE_UNIT_COUNT to another power of two and redeploying triggers an
+	// online, lossless split/merge to the new count (docs/SPEC.md "Online
+	// resharding"). Off for single-backend (nothing to reshard) and when there is
+	// no arbiter to coordinate the generation advance. Mirrors shale's shaled
+	// runtime (pkg/shaled/runtime.go).
+	clusterCfg.DeclarativeReshard = clusterCfg.BackendFactory != nil && clusterCfg.ConditionalStore != nil
+
 	// Open the cluster. With a blob store configured, open the blob-capable
 	// surface (cluster.NewBlobKV) so staged-blob pointers can co-commit with
 	// the metadata; without one, the metadata-only path (cluster.Open). Both

@@ -3816,6 +3816,19 @@ replication + relaxed durability unchanged: `ReplicationFactor`,
 `ReadQuorum`, and the relaxed-durability knob apply per unit exactly as
 they do for the single backend.
 
+**Online resharding (declarative).** Once a deployment is in sharded mode with
+a shared CAS arbiter (the homogeneous bootstrap, where every pod wires the same
+`ConditionalStore`), `HOSTTHIS_SHALE_UNIT_COUNT` is a LIVE target, not just an
+initial shape: changing it to another power of two and redeploying drives an
+ONLINE, lossless reshard to the new count. The cluster gossips each member's
+declared count; when every live member agrees on a new value, shale's
+decentralized arbiter retargets and the units split (or merge) WHILE SERVING -
+no downtime, no operator copy. Value-separated blobs survive the reshard because
+their pointer keys are generation-independent (the token-free bref). This is
+distinct from the single-backend -> sharded migration below, which remains a
+one-time copy. The runtime enables this whenever the cluster is multi-backend
+AND a `ConditionalStore` is present; a single-backend deployment never reshards.
+
 Migration to sharded mode is NOT in-place. Unlike the single-backend
 cutover (same bucket, same key names), the multi-backend layout stores each
 unit under its own object-store prefix, so an existing single-backend
