@@ -10,6 +10,8 @@ github.com/Zamua/shale v0.7.1-0.20260623215212-23e6a6b2f6d8 h1:a8AQVkG9rt9SRf/ch
 github.com/Zamua/shale v0.7.1-0.20260623215212-23e6a6b2f6d8/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
 github.com/Zamua/shale v0.8.0 h1:ItbKuoylk6g7ZtyD9olJ1D1XEqKfKrXDXfBNqxTtIUE=
 github.com/Zamua/shale v0.8.0/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
+github.com/Zamua/shale v0.9.1 h1:DA1ltbB2xZWvN7cwj1SuLzqoSD3uXLaE7h/ow2YYBWs=
+github.com/Zamua/shale v0.9.1/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
 github.com/Zamua/shale/backends/slate v0.7.2-0.20260623215212-23e6a6b2f6d8 h1:QkVsAPZG9wt2Y5xm3VvgDmiUA1TXfJ/4mqFJIIGTkVE=
 github.com/Zamua/shale/backends/slate v0.7.2-0.20260623215212-23e6a6b2f6d8/go.mod h1:PBvgzg/mITlBbN9B0TBYvG4WjApSn3pD4Tq2U1lJVpo=
 github.com/Zamua/shale/backends/slate v0.8.0 h1:urBQddpb2iiTkB9NQ09NlKSTTEf5Tu/ssoQbIJwebLA=
