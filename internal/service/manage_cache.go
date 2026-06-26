@@ -6,7 +6,7 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// PasteManager is the verb-level surface the SSH and HTTP layers consume.
+// PasteManager is the verb-level surface the SSH layer consumes.
 // *Manage implements it directly; CacheInvalidating wraps it to add
 // transparent CDN invalidation.
 //
