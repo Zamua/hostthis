@@ -114,6 +114,7 @@ func startStack(t *testing.T) *stack {
 		ApexDomain: "paste.test",
 		Upload:     upload,
 		Manage:     manage,
+		Pastes:     repo,
 		BuildURL: func(s domain.Slug) string {
 			return httpSrv.URL + "/p/" + s.String()
 		},

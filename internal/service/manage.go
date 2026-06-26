@@ -52,12 +52,10 @@ var ErrInvalidName = errors.New("service: name must be 1–60 printable Unicode 
 // Manage is the verb-level service. Each method maps to one ssh verb
 // (or HTTP endpoint) and is owner-gated.
 type Manage struct {
-	Repo      PasteAdmin
-	Blob      BlobUnit    // for Show (ReadAll) + Update (Stage+Commit) + Delete (UnbindOnDelete)
-	Cache     CachePurger // never called if nil; for CDN invalidation on Update/Delete
-	PublicURL URLBuilder  // required iff Cache is set; turns slug into purge URL
-	KeyGate   *KeyGate    // optional; populates WhoamiInfo.Session when set
-	Now       func() time.Time
+	Repo    PasteAdmin
+	Blob    BlobUnit // for Show (ReadAll) + Update (Stage+Commit) + Delete (UnbindOnDelete)
+	KeyGate *KeyGate // optional; populates WhoamiInfo.Session when set
+	Now     func() time.Time
 }
 
 func NewManage(repo PasteAdmin, blob BlobUnit) *Manage {
@@ -183,24 +181,12 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 	if err != nil {
 		return UpdateResult{}, err
 	}
-	m.purge(slug)
 	return UpdateResult{
 		Paste:     p,
 		NewVer:    res.NewVer,
 		WasPinned: res.WasPinned,
 		PinnedAt:  existing.PinnedVersion,
 	}, nil
-}
-
-// purge fires the configured CachePurger for slug's public URL.
-// Errors are swallowed - purge is best-effort and the impl is expected
-// to log internally. If Cache or PublicURL is nil (no CDN configured),
-// no-ops.
-func (m *Manage) purge(slug domain.Slug) {
-	if m.Cache == nil || m.PublicURL == nil {
-		return
-	}
-	_ = m.Cache.PurgeURLs([]string{m.PublicURL(slug)})
 }
 
 // Rename sets the human label. Empty string clears it.
@@ -232,7 +218,6 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 	// already gone and the sweep is the backstop - so the error is swallowed
 	// like the cache purge below.
 	_ = m.Blob.UnbindOnDelete(context.Background(), string(slug), []string{p.ContentSHA})
-	m.purge(slug)
 	return nil
 }
 
@@ -340,11 +325,6 @@ func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version
 	if err := m.Repo.SetPinnedVersion(slug, ver); err != nil {
 		return domain.Version{}, err
 	}
-	// Pin changes the bytes served at the URL - must purge CDN/browser caches
-	// or stale content lingers until the 1h max-age expires. Without this,
-	// pinning to an older version "doesn't take effect" from the user's
-	// perspective until they hard-refresh.
-	m.purge(slug)
 	return ver, nil
 }
 
@@ -358,9 +338,6 @@ func (m *Manage) Unpin(slug domain.Slug, owner string) error {
 	if err := m.Repo.Unpin(slug); err != nil {
 		return err
 	}
-	// Unpin can change the served version (pin was older → unpin reveals
-	// latest). Always purge to be safe.
-	m.purge(slug)
 	return nil
 }
 

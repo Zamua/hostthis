@@ -117,10 +117,6 @@ func main() {
 		roomRelay = relay.NewRelay(roomsSvc, relay.NewLimits())
 	}
 
-	// CDN cache purger. Default is noop (no CDN in front); when CF is
-	// configured we wire it up so Update/Delete invalidate the edge
-	// cache entries for the affected slugs.
-	manageSvc.Cache = buildCachePurger(logger)
 	keyGate := service.NewKeyGate(keyGateRepo)
 	keyGate.MaxFreshKeysPerSubnet = *freshKeysLimit
 	keyGate.Window = *freshKeysWindow
@@ -181,7 +177,13 @@ func main() {
 	// production; path mode is the dev-friendly alternative documented
 	// in SPEC.md "Dev-only path mode".
 	build := buildURL(*scheme, *apexDomain, *urlMode, logger)
-	manageSvc.PublicURL = service.URLBuilder(build)
+
+	// CDN cache purger (noop unless a CDN is configured). The decorator
+	// wraps the verb service so a mutation transparently invalidates the
+	// edge cache for the affected slug; the verb service itself stays
+	// cache-unaware (see SPEC.md "Active invalidation: CachePurger").
+	cachePurger := buildCachePurger(logger, *scheme, *apexDomain, *urlMode)
+	pasteMgr := service.NewCacheInvalidating(manageSvc, cachePurger)
 
 	sshServer := &hostssh.Server{
 		Addr:        *sshAddr,
@@ -189,7 +191,9 @@ func main() {
 		ApexDomain:  *apexDomain,
 		Upload:      uploadSvc,
 		Deploy:      deploySvc, // nil when the backend has no site repo
-		Manage:      manageSvc,
+		Manage:      pasteMgr,
+		Pastes:      pasteRepo,
+		Now:         time.Now,
 		KeyGate:     keyGate,
 		BuildURL:    build,
 		Logger:      logger,
@@ -328,8 +332,11 @@ func maybeWrapWriteBack(durable writeBackInner, dataDir string, logger *log.Logg
 }
 
 // buildCachePurger reads HOSTTHIS_CACHE_BACKEND and returns the
-// configured CachePurger. Defaults to Noop (no CDN in front).
-func buildCachePurger(logger *log.Logger) service.CachePurger {
+// configured CachePurger. Defaults to Noop (no CDN in front). The
+// scheme/apex/mode let the cloudflare adapter build a slug's public URL
+// variants (the page plus the markdown shell's "?raw=1" content fetch)
+// so a purge invalidates every cache key the paste is reachable at.
+func buildCachePurger(logger *log.Logger, scheme, apex, mode string) service.CachePurger {
 	backend := strings.ToLower(envOr("HOSTTHIS_CACHE_BACKEND", "noop"))
 	switch backend {
 	case "", "noop":
@@ -341,7 +348,7 @@ func buildCachePurger(logger *log.Logger) service.CachePurger {
 			logger.Fatalf("HOSTTHIS_CACHE_BACKEND=cloudflare requires HOSTTHIS_CF_ZONE_ID and HOSTTHIS_CF_PURGE_TOKEN")
 		}
 		logger.Printf("cache: cloudflare purger enabled for zone %s", zone)
-		return &cache.Cloudflare{ZoneID: zone, Token: token, Logger: logger}
+		return &cache.Cloudflare{ZoneID: zone, Token: token, Scheme: scheme, Apex: apex, Mode: mode, Logger: logger}
 	default:
 		logger.Fatalf("unknown HOSTTHIS_CACHE_BACKEND %q (want noop|cloudflare)", backend)
 		return nil
