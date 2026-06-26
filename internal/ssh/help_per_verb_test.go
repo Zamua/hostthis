@@ -19,11 +19,10 @@ import (
 )
 
 // verbHelpVerbs is the canonical set of verb names the help system
-// must recognize. Doc-only aliases (`put`, `get`) are included
-// alongside the dispatch verbs. Whenever a new verb is added to the
-// dispatcher, append it here AND add a descriptor in help_verbs.go.
+// must recognize (one descriptor each in help_verbs.go). Whenever a new
+// verb is added to the dispatcher, append it here AND add a descriptor.
 var verbHelpVerbs = []string{
-	"put", "get", "list", "show", "rename", "delete",
+	"get", "list", "rename", "delete",
 	"versions", "pin", "unpin", "whoami", "help",
 }
 
@@ -159,7 +158,7 @@ func TestHelpVerb_PtyCrLf(t *testing.T) {
 	s := startStack(t)
 
 	t.Run("NoPty_LF_Only", func(t *testing.T) {
-		_, stderr, exit := s.run("help put", nil)
+		_, stderr, exit := s.run("help get", nil)
 		if exit != 0 {
 			t.Fatalf("exit: %d", exit)
 		}
@@ -172,7 +171,7 @@ func TestHelpVerb_PtyCrLf(t *testing.T) {
 	})
 
 	t.Run("WithPty_CRLF", func(t *testing.T) {
-		_, stderr, exit := runCmdWithPty(t, s.keyedClient, "help put")
+		_, stderr, exit := runCmdWithPty(t, s.keyedClient, "help get")
 		if exit != 0 {
 			t.Fatalf("exit: %d", exit)
 		}
@@ -209,7 +208,7 @@ func TestHelpVerb_VerbBodyMentionsVerb(t *testing.T) {
 	s := startStack(t)
 	cases := map[string]string{
 		"list":     "list",
-		"show":     "show",
+		"get":      "get",
 		"rename":   "rename",
 		"delete":   "delete",
 		"versions": "versions",

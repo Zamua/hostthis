@@ -82,110 +82,148 @@
 </header>
 
 <h2>Name</h2>
-<div class="indent"><p>hostthis - pipe a rendered file in, get a public URL out. No signup, no app.</p></div>
+<div class="indent"><p>hostthis - pipe a rendered file in, get a public URL out</p></div>
 
 <h2>Synopsis</h2>
 <div class="indent">
-<pre><strong>cat</strong> <em>file</em> | <strong>ssh {{APEX}}</strong> [<strong>--name</strong> <em>label</em>] [<strong>--type</strong> html|markdown]
-<strong>cat</strong> <em>file</em> | <strong>ssh {{APEX}}</strong> <em>slug</em>            # update an existing paste
-<strong>ssh {{APEX}}</strong> <em>command</em> [<em>args</em>]
-<strong>ssh {{APEX}}</strong>                            # show help</pre>
+<pre><strong>cat</strong> <em>file</em>      | <strong>ssh hostthis.dev</strong> [<strong>--name</strong> <em>label</em>] [<strong>--type</strong> html|markdown]
+<strong>cat</strong> <em>file</em>      | <strong>ssh hostthis.dev</strong> <em>slug</em>
+<strong>tar czf -</strong> <em>dir</em> | <strong>ssh hostthis.dev</strong> [<em>slug</em>]
+<strong>ssh hostthis.dev</strong> <em>command</em> [<em>args</em>]</pre>
 </div>
 
 <h2>Description</h2>
 <div class="indent">
 <p>Publishes HTML or Markdown for 7 days at a random subdomain. One ssh pipe, no
-signup, no install. Useful when you want a shareable URL for a one-off HTML mock,
-a Markdown writeup, or anything you need a teammate or LLM to load in a browser
-without spinning up a deploy. Identity is your ssh public key: anyone with a
-different key can read the URL but can&rsquo;t update, rename, pin, or delete
-the paste.</p>
+signup, no install. Identity is your ssh public key: anyone with a different key
+can read the URL but cannot update, rename, pin, or delete the paste.</p>
+
+<p>A Markdown paste renders in the browser; append <code>?raw</code> to its URL
+for the raw source.</p>
 </div>
 
 <h2>Commands</h2>
 <div class="indent">
 <dl>
-  <dt>cat <em>file</em> | ssh {{APEX}} [<strong>--name</strong> <em>label</em>]</dt>
+  <dt>cat <em>file</em> | ssh hostthis.dev [<strong>--name</strong> <em>label</em>]</dt>
   <dd>upload</dd>
 
-  <dt>cat <em>file</em> | ssh {{APEX}} <em>slug</em></dt>
+  <dt>cat <em>file</em> | ssh hostthis.dev <em>slug</em></dt>
   <dd>replace <em>slug</em>&rsquo;s content; resets the 7-day clock</dd>
 
-  <dt>ssh {{APEX}} <strong>list</strong></dt>
+  <dt>ssh hostthis.dev <strong>list</strong></dt>
   <dd>active pastes, soonest to expire first</dd>
 
-  <dt>ssh {{APEX}} <strong>show</strong> <em>slug</em></dt>
+  <dt>ssh hostthis.dev <strong>get</strong> <em>slug</em></dt>
   <dd>print content to stdout</dd>
 
-  <dt>ssh {{APEX}} <strong>rename</strong> <em>slug</em> <em>label</em></dt>
+  <dt>ssh hostthis.dev <strong>rename</strong> <em>slug</em> <em>label</em></dt>
   <dd>set label; empty string clears</dd>
 
-  <dt>ssh {{APEX}} <strong>versions</strong> <em>slug</em></dt>
+  <dt>ssh hostthis.dev <strong>versions</strong> <em>slug</em></dt>
   <dd>list versions</dd>
 
-  <dt>ssh {{APEX}} <strong>pin</strong> <em>slug</em> <em>ver</em></dt>
+  <dt>ssh hostthis.dev <strong>pin</strong> <em>slug</em> <em>ver</em></dt>
   <dd>stick the URL to <em>ver</em>; survives future updates</dd>
 
-  <dt>ssh {{APEX}} <strong>unpin</strong> <em>slug</em></dt>
+  <dt>ssh hostthis.dev <strong>unpin</strong> <em>slug</em></dt>
   <dd>clear the pin; URL serves the latest version</dd>
 
-  <dt>ssh {{APEX}} <strong>delete</strong> <em>slug</em></dt>
+  <dt>ssh hostthis.dev <strong>delete</strong> <em>slug</em></dt>
   <dd>wipe the entire paste; permanent</dd>
 
-  <dt>ssh {{APEX}} <strong>delete</strong> <em>slug</em> <em>ver</em></dt>
+  <dt>ssh hostthis.dev <strong>delete</strong> <em>slug</em> <em>ver</em></dt>
   <dd>free one version&rsquo;s bytes; keeps the history row as a tombstone</dd>
 
-  <dt>ssh {{APEX}} <strong>whoami</strong></dt>
+  <dt>ssh hostthis.dev <strong>whoami</strong></dt>
   <dd>identity, active count, and quota usage</dd>
 </dl>
 </div>
 
-<h2>Examples</h2>
+<h2>Static Sites</h2>
 <div class="indent">
-<pre><span class="ink-soft"># upload, get a URL on stdout</span>
-cat index.html | ssh {{APEX}}
+<p>Pipe a gzip-tar instead of a single file to deploy a multi-file static site.</p>
+<pre>tar czf - site/ | ssh hostthis.dev            <span class="ink-soft"># deploy, get a URL</span>
+tar czf - site/ | ssh hostthis.dev abc12345   <span class="ink-soft"># re-deploy in place</span></pre>
+<p>Served at <em>slug</em>.hostthis.dev/<em>path</em>, with content type by file
+extension. A request that matches no file serves <code>index.html</code>, so
+single-page apps route client-side.</p>
+</div>
 
-<span class="ink-soft"># upload with an owner-only label visible in `list`</span>
-cat notes.md | ssh {{APEX}} --name "alpha notes"
-
-<span class="ink-soft"># update an existing paste (same URL, new bytes; bumps to v2, v3, ...)</span>
-cat v2.html | ssh {{APEX}} abc12345
-
-<span class="ink-soft"># force content type when sniffing gets it wrong</span>
-cat tricky.html | ssh {{APEX}} --type html
-
-<span class="ink-soft"># see your active pastes, plus your current quota usage</span>
-ssh {{APEX}} list
-ssh {{APEX}} whoami
-
-<span class="ink-soft"># walk a paste's version history</span>
-ssh {{APEX}} versions abc12345
-
-<span class="ink-soft"># read content back (owner only)</span>
-ssh {{APEX}} show abc12345
-
-<span class="ink-soft"># stick the URL on v1 even though v3 is the latest</span>
-ssh {{APEX}} pin abc12345 1
-ssh {{APEX}} unpin abc12345
-
-<span class="ink-soft"># free one version's bytes; the history row stays as a tombstone</span>
-ssh {{APEX}} delete abc12345 2
-
-<span class="ink-soft"># delete the paste entirely</span>
-ssh {{APEX}} delete abc12345
-
-<span class="ink-soft"># set or clear the owner label</span>
-ssh {{APEX}} rename abc12345 "new label"
-ssh {{APEX}} rename abc12345 ""</pre>
+<h2>Rooms API</h2>
+<div class="indent">
+<p>A deployed site or paste can store and sync state in a room, with no backend of
+your own. The room&rsquo;s UUID is the only key. The API is served on the
+app&rsquo;s own origin.</p>
+<p>Durable key-value (HTTP):</p>
+<pre>POST   /api/rooms                -&gt; {"id":"&lt;uuid&gt;"}    mint a room
+GET    /api/rooms/&lt;uuid&gt;         -&gt; {key: value, ...}  read the whole room
+GET    /api/rooms/&lt;uuid&gt;/&lt;key&gt;   -&gt; value              read one key
+PUT    /api/rooms/&lt;uuid&gt;/&lt;key&gt;     (request body = value)   write one key
+DELETE /api/rooms/&lt;uuid&gt;/&lt;key&gt;                          delete one key</pre>
+<p>Realtime (WebSocket, same origin):</p>
+<pre>GET (Upgrade) /api/rooms/&lt;uuid&gt;/ws</pre>
+<p>On connect you receive a <code>snapshot</code> of the room, then a live
+stream: every durable PUT/DELETE is mirrored to all clients as
+<code>{"type":"put"|"delete", ...}</code>. Frames you send are broadcast verbatim
+to other clients and never stored, for ephemeral motion.</p>
+<p>Limits: 256 KiB and 256 keys per room; 64 MiB per app; a room expires 30 days
+after its last write. Deployments without a room store return 404.</p>
 </div>
 
 <h2>Limits</h2>
 <div class="indent">
 <p>10 MiB per identity, counting post-compression bytes across every active version
-of every active paste. Highly redundant text compresses 5-10x under zstd,
-so the real ceiling on raw payload is typically 50-100 MiB of text.</p>
+of every active paste. Text compresses 5-10x under zstd, so the real raw-payload
+ceiling is typically 50-100 MiB.</p>
 
-<p>HTML and Markdown only. 7-day retention from the last <code>update</code>.</p>
+<p>Pastes are HTML or Markdown; sites are a gzip-tar archive. 7-day retention from
+the last update.</p>
+</div>
+
+<h2>Exit Status</h2>
+<div class="indent">
+<pre>0   success
+1   generic failure
+2   usage error (bad arguments or unknown verb)
+3   identity required (no ssh key presented)
+4   not found (or not yours)
+6   refused by the per-subnet rate limit</pre>
+</div>
+
+<h2>Environment</h2>
+<div class="indent">
+<pre>NO_COLOR    set to any value to disable color output
+TERM=dumb   also disables color output</pre>
+<p>Read from the environment your ssh client forwards.</p>
+</div>
+
+<h2>Examples</h2>
+<div class="indent">
+<pre><span class="ink-soft"># upload, get a URL on stdout</span>
+cat index.html | ssh hostthis.dev
+
+<span class="ink-soft"># upload with an owner-only label visible in `list`</span>
+cat notes.md | ssh hostthis.dev --name "alpha notes"
+
+<span class="ink-soft"># update an existing paste; same URL, bumps to v2, v3, ...</span>
+cat v2.html | ssh hostthis.dev abc12345
+
+<span class="ink-soft"># force content type when sniffing gets it wrong</span>
+cat tricky.html | ssh hostthis.dev --type html
+
+<span class="ink-soft"># read your content back</span>
+ssh hostthis.dev get abc12345
+
+<span class="ink-soft"># stick the URL on v1 even though v3 is the latest</span>
+ssh hostthis.dev pin abc12345 1
+ssh hostthis.dev unpin abc12345
+
+<span class="ink-soft"># free one version's bytes; leaves a tombstone row</span>
+ssh hostthis.dev delete abc12345 2
+
+<span class="ink-soft"># deploy a static site</span>
+tar czf - site/ | ssh hostthis.dev</pre>
 </div>
 
 <h2>See Also</h2>

@@ -388,20 +388,20 @@ func TestShow_Characterization(t *testing.T) {
 		body := []byte("<!doctype html><p>hello</p>")
 		stdout, _, _ := s.run("", body)
 		slug := extractSlug(stdout)
-		out, stderr, exit := s.run("show "+slug, nil)
+		out, stderr, exit := s.run("get "+slug, nil)
 		if exit != 0 {
 			t.Fatalf("exit: %d (stderr=%q)", exit, stderr)
 		}
 		// Byte-exact: show writes the stored body to stdout, no trailing
 		// newline added by the server.
 		if out != string(body) {
-			t.Fatalf("show stdout mismatch:\n got: %q\nwant: %q", out, body)
+			t.Fatalf("get stdout mismatch:\n got: %q\nwant: %q", out, body)
 		}
 	})
 
 	t.Run("MissingSlugArg_Exit2_Usage", func(t *testing.T) {
 		s := startStack(t)
-		_, stderr, exit := s.run("show", nil)
+		_, stderr, exit := s.run("get", nil)
 		if exit != 2 {
 			t.Fatalf("expected exit 2 for missing slug arg, got %d (%q)", exit, stderr)
 		}
@@ -413,7 +413,7 @@ func TestShow_Characterization(t *testing.T) {
 	t.Run("InvalidSlug_Exit2", func(t *testing.T) {
 		s := startStack(t)
 		// "BAD" isn't 8 chars and contains uppercase - not a slug.
-		_, stderr, exit := s.run("show BAD", nil)
+		_, stderr, exit := s.run("get BAD", nil)
 		if exit != 2 {
 			t.Fatalf("expected exit 2 for invalid slug, got %d (%q)", exit, stderr)
 		}
@@ -424,7 +424,7 @@ func TestShow_Characterization(t *testing.T) {
 		s := startStack(t)
 		// Generate a syntactically valid slug that won't exist.
 		ghost := domain.NewRandomSlug().String()
-		_, stderr, exit := s.run("show "+ghost, nil)
+		_, stderr, exit := s.run("get "+ghost, nil)
 		// Per the dispatcher's exitForServiceErr, ErrNotFound → 4.
 		if exit != 4 {
 			t.Fatalf("expected exit 4 for not-found, got %d (%q)", exit, stderr)
@@ -440,7 +440,7 @@ func TestShow_Characterization(t *testing.T) {
 		slug := extractSlug(stdout)
 		// Fresh client = fresh identity. Same db.
 		other, _ := newKeyClient(t, s.sshAddr)
-		_, stderr, exit := s.runOn(other, "show "+slug, nil)
+		_, stderr, exit := s.runOn(other, "get "+slug, nil)
 		// Per service.requireOwner: not-owner is collapsed to ErrNotFound
 		// at the boundary so existence doesn't leak. Exit 4.
 		if exit != 4 {
@@ -895,28 +895,28 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"\n" +
 	"    cat foo.html | ssh paste.test <slug>      replace bytes; URL stays the same\n" +
 	"    ssh paste.test list                       all your active pastes\n" +
-	"    ssh paste.test show <slug>                read content back\n" +
+	"    ssh paste.test get <slug>                 read content back\n" +
 	"    ssh paste.test rename <slug> \"label\"      set / change owner label\n" +
-	"    ssh paste.test delete <slug>              wipe the paste entirely\n" +
-	"    ssh paste.test delete <slug> <ver>        free one version's bytes (tombstone)\n" +
-	"    ssh paste.test whoami                     show your identity + active count\n" +
+	"    ssh paste.test delete <slug> [<ver>]      wipe the paste, or tombstone one version\n" +
+	"    ssh paste.test whoami                     identity + active count + quota\n" +
 	"\n" +
 	"VERSION HISTORY\n" +
 	"\n" +
-	"    Each `update` adds a new version (v2, v3, ...). Default URL serves the latest.\n" +
-	"\n" +
 	"    ssh paste.test versions <slug>            timeline of every version\n" +
-	"    ssh paste.test pin <slug> <ver>           stick URL to <ver> (survives updates)\n" +
+	"    ssh paste.test pin <slug> <ver>           stick the URL to <ver> (survives updates)\n" +
 	"    ssh paste.test unpin <slug>               URL follows latest again\n" +
+	"\n" +
+	"STATIC SITES\n" +
+	"\n" +
+	"    tar czf - site/ | ssh paste.test          deploy a multi-file site\n" +
+	"    tar czf - site/ | ssh paste.test <slug>   re-deploy in place\n" +
 	"\n" +
 	"LIMITS\n" +
 	"\n" +
-	"    10 MiB total per identity, counting post-compression bytes across\n" +
-	"    all your active pastes (every version of every paste). Highly\n" +
-	"    redundant text compresses 5-10x, so typical HTML/Markdown fits a\n" +
-	"    lot of content under the cap.\n" +
+	"    10 MiB per identity, counting post-compression bytes across all\n" +
+	"    your active pastes. HTML, Markdown, or a gzip-tar site archive.\n" +
 	"\n" +
-	"    Content types: HTML, Markdown. Anything else rejected at upload.\n"
+	"    Apps can persist + sync state: https://paste.test/  (rooms + realtime API)\n"
 
 // ---------------------------------------------------------------------------
 // 10. Auth refusal + Sybil refusal
@@ -1235,14 +1235,14 @@ func TestExitCodes_Characterization(t *testing.T) {
 		},
 		{
 			name: "ExitCode4_NotFound",
-			cmd:  "show " + domain.NewRandomSlug().String(),
+			cmd:  "get " + domain.NewRandomSlug().String(),
 			want: 4,
 			desc: "well-formed but non-existent slug → exit 4",
 		},
 		{
 			name:   "ExitCode4_NotOwner_CollapsedToNotFound",
 			client: "foreign",
-			cmd:    "show " + slugA,
+			cmd:    "get " + slugA,
 			want:   4,
 			desc:   "foreign owner's slug is hidden as 'not found' → exit 4",
 		},
@@ -1381,7 +1381,7 @@ func TestOwnerCollapse_Characterization(t *testing.T) {
 		cmd  string
 		body []byte
 	}{
-		{name: "Show_ForeignSlug", cmd: "show " + slugA},
+		{name: "Show_ForeignSlug", cmd: "get " + slugA},
 		{name: "Rename_ForeignSlug", cmd: `rename ` + slugA + ` "hijack"`},
 		{name: "Delete_ForeignSlug", cmd: "delete " + slugA},
 		{name: "DeleteVersion_ForeignSlug", cmd: "delete " + slugA + " 1"},

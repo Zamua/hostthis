@@ -245,24 +245,24 @@ func TestAnonRejectedAtSession(t *testing.T) {
 	}
 }
 
-func TestVerbShow_OwnerOnly(t *testing.T) {
+func TestVerbGet_OwnerOnly(t *testing.T) {
 	s := startStack(t)
 	stdout, _, _ := s.run("", []byte("<!doctype html><p>hello</p>"))
 	slug := extractSlug(stdout)
-	body, _, exit := s.run("show "+slug, nil)
+	body, _, exit := s.run("get "+slug, nil)
 	if exit != 0 {
-		t.Fatalf("show exit: %d", exit)
+		t.Fatalf("get exit: %d", exit)
 	}
 	if !strings.Contains(body, "hello") {
-		t.Fatalf("show returned wrong body: %q", body)
+		t.Fatalf("get returned wrong body: %q", body)
 	}
-	// A second keyed identity (different ssh key) trying to show the
+	// A second keyed identity (different ssh key) trying to get the
 	// first owner's paste should get not-found / forbidden - same as
 	// any unauthorized read of someone else's slug.
 	otherClient, _ := newKeyClient(t, s.sshAddr)
-	stdoutOther, stderrOther, exitOther := s.runOn(otherClient, "show "+slug, nil)
+	stdoutOther, stderrOther, exitOther := s.runOn(otherClient, "get "+slug, nil)
 	if exitOther == 0 {
-		t.Fatalf("other-owner show should fail, got 0 exit (stdout=%q stderr=%q)",
+		t.Fatalf("other-owner get should fail, got 0 exit (stdout=%q stderr=%q)",
 			stdoutOther, stderrOther)
 	}
 }
