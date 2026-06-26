@@ -327,8 +327,8 @@ func (s *Server) handleSession(sess gossh.Session) {
 		s.verbHelp(sess, argv[1:])
 	case "list":
 		s.verbList(sess, owner)
-	case "show":
-		s.verbShow(sess, owner, argv[1:])
+	case "get":
+		s.verbGet(sess, owner, argv[1:])
 	case "rename":
 		s.verbRename(sess, owner, argv[1:])
 	case "delete":
@@ -542,7 +542,7 @@ func renderVersCol(p domain.Paste) string {
 
 // -- show -------------------------------------------------------------------
 
-func (s *Server) verbShow(sess gossh.Session, owner string, argv []string) {
+func (s *Server) verbGet(sess gossh.Session, owner string, argv []string) {
 	slug, err := requireSlug(argv)
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
@@ -867,28 +867,28 @@ UPDATE & MANAGE (owner only; ssh key authenticates)
 
     cat foo.html | ssh {{apex}} <slug>      replace bytes; URL stays the same
     ssh {{apex}} list                       all your active pastes
-    ssh {{apex}} show <slug>                read content back
+    ssh {{apex}} get <slug>                 read content back
     ssh {{apex}} rename <slug> "label"      set / change owner label
-    ssh {{apex}} delete <slug>              wipe the paste entirely
-    ssh {{apex}} delete <slug> <ver>        free one version's bytes (tombstone)
-    ssh {{apex}} whoami                     show your identity + active count
+    ssh {{apex}} delete <slug> [<ver>]      wipe the paste, or tombstone one version
+    ssh {{apex}} whoami                     identity + active count + quota
 
 VERSION HISTORY
 
-    Each ` + "`update`" + ` adds a new version (v2, v3, ...). Default URL serves the latest.
-
     ssh {{apex}} versions <slug>            timeline of every version
-    ssh {{apex}} pin <slug> <ver>           stick URL to <ver> (survives updates)
+    ssh {{apex}} pin <slug> <ver>           stick the URL to <ver> (survives updates)
     ssh {{apex}} unpin <slug>               URL follows latest again
+
+STATIC SITES
+
+    tar czf - site/ | ssh {{apex}}          deploy a multi-file site
+    tar czf - site/ | ssh {{apex}} <slug>   re-deploy in place
 
 LIMITS
 
-    10 MiB total per identity, counting post-compression bytes across
-    all your active pastes (every version of every paste). Highly
-    redundant text compresses 5-10x, so typical HTML/Markdown fits a
-    lot of content under the cap.
+    10 MiB per identity, counting post-compression bytes across all
+    your active pastes. HTML, Markdown, or a gzip-tar site archive.
 
-    Content types: HTML, Markdown. Anything else rejected at upload.`
+    Apps can persist + sync state: https://{{apex}}/  (rooms + realtime API)`
 
 // helpText returns the rendered help with apex substituted in.
 // Caller must pass a non-empty apex.

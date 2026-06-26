@@ -1712,9 +1712,9 @@ Sets / changes the `NAME` for one of your pastes. Pass an empty string
 to clear: `ssh hostthis.dev rename abc12345 ""`. Renaming does NOT
 reset the expiry clock - purely metadata.
 
-### Show content (read back over ssh)
+### Get content (read back over ssh)
 ```
-ssh hostthis.dev show abc12345
+ssh hostthis.dev get abc12345
 <the html streams to stdout>
 ```
 Owner-only. Use case: piping a paste back through local tooling.
@@ -1835,22 +1835,50 @@ Sessions without a key never reach this verb - they're rejected at
 session startup with "ssh key required" on stderr and exit 3.
 
 ### Help
-```
-ssh hostthis.dev
-hostthis.dev - pipe rendered content (html/markdown), get a URL.
-              pastes expire 7 days after their last update.
 
-  cat file | ssh hostthis.dev [--name "..."]      upload
-  cat file | ssh hostthis.dev <slug>              update an existing upload
-  ssh hostthis.dev list                           your active pastes
-  ssh hostthis.dev show <slug>                    read content (owner only)
-  ssh hostthis.dev rename <slug> "<name>"         set / change a paste's label
-  ssh hostthis.dev versions <slug>                history within the 7-day window
-  ssh hostthis.dev pin <slug> <ver>               stick the URL to <ver> (survives updates)
-  ssh hostthis.dev unpin <slug>                   clear the pin; URL serves the latest
-  ssh hostthis.dev delete <slug>                  permanent
-  ssh hostthis.dev whoami                         your identity + active count
+The bare `ssh hostthis.dev` (and `help`) prints the global banner. It is the
+canonical user-facing reference and must stay in sync with this section, the
+README, and the landing page.
+
 ```
+Pipe a rendered file in, get a URL out. Pastes expire 7 days after last update.
+
+UPLOAD
+
+    cat foo.html | ssh hostthis.dev
+    cat doc.md   | ssh hostthis.dev --name "design notes"
+
+UPDATE & MANAGE (owner only; ssh key authenticates)
+
+    cat foo.html | ssh hostthis.dev <slug>      replace bytes; URL stays the same
+    ssh hostthis.dev list                       all your active pastes
+    ssh hostthis.dev get <slug>                 read content back
+    ssh hostthis.dev rename <slug> "label"      set / change owner label
+    ssh hostthis.dev delete <slug> [<ver>]      wipe the paste, or tombstone one version
+    ssh hostthis.dev whoami                     identity + active count + quota
+
+VERSION HISTORY
+
+    ssh hostthis.dev versions <slug>            timeline of every version
+    ssh hostthis.dev pin <slug> <ver>           stick the URL to <ver> (survives updates)
+    ssh hostthis.dev unpin <slug>               URL follows latest again
+
+STATIC SITES
+
+    tar czf - site/ | ssh hostthis.dev          deploy a multi-file site
+    tar czf - site/ | ssh hostthis.dev <slug>   re-deploy in place
+
+LIMITS
+
+    10 MiB per identity, counting post-compression bytes across all
+    your active pastes. HTML, Markdown, or a gzip-tar site archive.
+
+    Apps can persist + sync state: https://hostthis.dev/  (rooms + realtime API)
+```
+
+`get` and `versions`/`pin`/`unpin` per-verb help comes from `help <verb>` /
+`<verb> --help`. There is no `show` or `put` verb: reads are `get`, and upload
+is verbless.
 
 ### Color output
 
@@ -4199,7 +4227,7 @@ Operations that fire a purge:
   bytes stick until max-age expires.
 
 `rename` does NOT purge - the name is owner-only metadata, not part of
-the public response. Same with `versions`/`list`/`whoami`/`show`.
+the public response. Same with `versions`/`list`/`whoami`/`get`.
 
 The interface lives in the service layer; no production code - not even
 the verb service that performs the mutation - knows which CDN is in
@@ -4219,7 +4247,7 @@ decorator wraps the verb service at the composition root
 after a *successful* `Update` / `Delete` / `Pin` / `Unpin`, fires
 `PurgePaste(slug)`. The mutation use-cases stay pure; cache invalidation
 is a cross-cutting concern layered on by composition, not woven into the
-domain logic. `rename` / `versions` / `list` / `whoami` / `show` /
+domain logic. `rename` / `versions` / `list` / `whoami` / `get` /
 `deleteVersion` are delegated without a purge - they don't change the
 bytes served at the public URL (`deleteVersion` is refused outright when
 the target is the currently-served version).

@@ -12,9 +12,7 @@ import (
 // + one or two example invocations. The full conceptual model lives
 // in the global help banner.
 type verbDescriptor struct {
-	// Name is the lookup key (the verb the user types, or a doc-only
-	// alias like "put" / "get" that points back at the canonical
-	// upload / show paths).
+	// Name is the lookup key: the verb the user types.
 	Name string
 	// Signature is the one-line usage shape, with {{apex}} substituted
 	// at render time.
@@ -30,42 +28,18 @@ type verbDescriptor struct {
 // added to the dispatcher should add an entry here so `help <verb>`
 // and `<verb> --help` stay aligned.
 //
-// `put` and `get` are doc-only aliases: there is no `put` verb in the
-// dispatcher (uploads happen with no explicit verb), and `get` is the
-// nickname for `show`. Recognizing them here lets a user reach the
-// right help text by either name; the runtime dispatch is unchanged.
+// There is no `put` or `show` verb: upload is verbless (the default action
+// when no verb is supplied), and reads are `get`.
 var verbDescriptors = map[string]verbDescriptor{
-	"put": {
-		Name:      "put",
-		Signature: "cat <file> | ssh {{apex}} [--name \"label\"] [--type html|md]",
-		Description: "Upload new content. Pipe a rendered HTML or Markdown file " +
-			"in on stdin; the server prints the URL on stdout and an " +
-			"expiry note on stderr. There is no explicit `put` verb: " +
-			"upload is the default action when no verb is supplied.",
-		Examples: []string{
-			"cat index.html | ssh {{apex}}",
-			"cat notes.md   | ssh {{apex}} --name \"design notes\"",
-		},
-	},
 	"get": {
 		Name:      "get",
-		Signature: "ssh {{apex}} show <slug>",
-		Description: "Owner-only read-back: streams the stored content for one " +
-			"of your pastes to stdout. `get` is a doc alias for `show`; " +
-			"the verb the server dispatches on is `show`.",
-		Examples: []string{
-			"ssh {{apex}} show abc12345 > local.html",
-		},
-	},
-	"show": {
-		Name:      "show",
-		Signature: "ssh {{apex}} show <slug>",
+		Signature: "ssh {{apex}} get <slug>",
 		Description: "Streams the stored content for one of your pastes to " +
 			"stdout. Owner-only; foreign slugs return `not found` (no " +
 			"existence-probing).",
 		Examples: []string{
-			"ssh {{apex}} show abc12345",
-			"ssh {{apex}} show abc12345 | less",
+			"ssh {{apex}} get abc12345",
+			"ssh {{apex}} get abc12345 | less",
 		},
 	},
 	"list": {
@@ -155,7 +129,7 @@ var verbDescriptors = map[string]verbDescriptor{
 			"are equivalent to `help <verb>`.",
 		Examples: []string{
 			"ssh {{apex}} help",
-			"ssh {{apex}} help put",
+			"ssh {{apex}} help get",
 			"ssh {{apex}} pin --help",
 		},
 	},

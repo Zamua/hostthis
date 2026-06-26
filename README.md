@@ -1,28 +1,29 @@
 # HOSTTHIS(1)
 
-## Name
+## NAME
 
-hostthis - pipe a rendered file in, get a public URL out. No signup, no app.
+hostthis - pipe a rendered file in, get a public URL out
 
-## Synopsis
+## SYNOPSIS
 
 ```
-cat <file> | ssh hostthis.dev [--name <label>] [--type html|markdown]
-cat <file> | ssh hostthis.dev <slug>            # update an existing paste
+cat <file>      | ssh hostthis.dev [--name <label>] [--type html|markdown]
+cat <file>      | ssh hostthis.dev <slug>
+tar czf - <dir> | ssh hostthis.dev [<slug>]
 ssh hostthis.dev <command> [<args>]
-ssh hostthis.dev                                # show help
 ```
 
-## Description
+## DESCRIPTION
 
 Publishes HTML or Markdown for 7 days at a random subdomain. One ssh
-pipe, no signup, no install. Useful when you want a shareable URL
-for a one-off HTML mock, a Markdown writeup, or anything you need a
-teammate or LLM to load in a browser without spinning up a deploy.
-Identity is your ssh public key: anyone with a different key can
-read the URL but can't update, rename, pin, or delete the paste.
+pipe, no signup, no install. Identity is your ssh public key: anyone
+with a different key can read the URL but cannot update, rename, pin,
+or delete the paste.
 
-## Commands
+A Markdown paste renders in the browser; append `?raw` to its URL for
+the raw source.
+
+## COMMANDS
 
 <dl>
 
@@ -35,7 +36,7 @@ read the URL but can't update, rename, pin, or delete the paste.
 <dt><code>ssh hostthis.dev list</code></dt>
 <dd>active pastes, soonest to expire first</dd>
 
-<dt><code>ssh hostthis.dev show <em>slug</em></code></dt>
+<dt><code>ssh hostthis.dev get <em>slug</em></code></dt>
 <dd>print content to stdout</dd>
 
 <dt><code>ssh hostthis.dev rename <em>slug</em> <em>label</em></code></dt>
@@ -61,7 +62,80 @@ read the URL but can't update, rename, pin, or delete the paste.
 
 </dl>
 
-## Examples
+## STATIC SITES
+
+Pipe a gzip-tar instead of a single file to deploy a multi-file static
+site.
+
+```
+tar czf - site/ | ssh hostthis.dev            # deploy, get a URL
+tar czf - site/ | ssh hostthis.dev abc12345   # re-deploy in place
+```
+
+Served at `<slug>.hostthis.dev/<path>`, with content type by file
+extension. A request that matches no file serves `index.html`, so
+single-page apps route client-side.
+
+## ROOMS API
+
+A deployed site or paste can store and sync state in a room, with no
+backend of your own. The room's UUID is the only key. The API is served
+on the app's own origin.
+
+Durable key-value (HTTP):
+
+```
+POST   /api/rooms                -> {"id":"<uuid>"}    mint a room
+GET    /api/rooms/<uuid>         -> {key: value, ...}  read the whole room
+GET    /api/rooms/<uuid>/<key>   -> value              read one key
+PUT    /api/rooms/<uuid>/<key>     (request body = value)   write one key
+DELETE /api/rooms/<uuid>/<key>                          delete one key
+```
+
+Realtime (WebSocket, same origin):
+
+```
+GET (Upgrade) /api/rooms/<uuid>/ws
+```
+
+On connect you receive a `snapshot` of the room, then a live stream:
+every durable `PUT`/`DELETE` is mirrored to all clients as
+`{"type":"put"|"delete", ...}`. Frames you send are broadcast verbatim
+to other clients and never stored, for ephemeral motion.
+
+Limits: 256 KiB and 256 keys per room; 64 MiB per app; a room expires 30
+days after its last write. Deployments without a room store return 404.
+
+## LIMITS
+
+10 MiB per identity, counting post-compression bytes across every
+active version of every active paste. Text compresses 5-10x under
+zstd, so the real raw-payload ceiling is typically 50-100 MiB.
+
+Pastes are HTML or Markdown; sites are a gzip-tar archive. 7-day
+retention from the last update.
+
+## EXIT STATUS
+
+```
+0   success
+1   generic failure
+2   usage error (bad arguments or unknown verb)
+3   identity required (no ssh key presented)
+4   not found (or not yours)
+6   refused by the per-subnet rate limit
+```
+
+## ENVIRONMENT
+
+```
+NO_COLOR    set to any value to disable color output
+TERM=dumb   also disables color output
+```
+
+Read from the environment your ssh client forwards.
+
+## EXAMPLES
 
 ```
 # upload, get a URL on stdout
@@ -70,50 +144,30 @@ cat index.html | ssh hostthis.dev
 # upload with an owner-only label visible in `list`
 cat notes.md | ssh hostthis.dev --name "alpha notes"
 
-# update an existing paste (same URL, new bytes; bumps to v2, v3, ...)
+# update an existing paste; same URL, bumps to v2, v3, ...
 cat v2.html | ssh hostthis.dev abc12345
 
 # force content type when sniffing gets it wrong
 cat tricky.html | ssh hostthis.dev --type html
 
-# see your active pastes, plus your current quota usage
-ssh hostthis.dev list
-ssh hostthis.dev whoami
-
-# walk a paste's version history
-ssh hostthis.dev versions abc12345
-
-# read content back (owner only)
-ssh hostthis.dev show abc12345
+# read your content back
+ssh hostthis.dev get abc12345
 
 # stick the URL on v1 even though v3 is the latest
 ssh hostthis.dev pin abc12345 1
 ssh hostthis.dev unpin abc12345
 
-# free one version's bytes; the history row stays as a tombstone
+# free one version's bytes; leaves a tombstone row
 ssh hostthis.dev delete abc12345 2
 
-# delete the paste entirely
-ssh hostthis.dev delete abc12345
-
-# set or clear the owner label
-ssh hostthis.dev rename abc12345 "new label"
-ssh hostthis.dev rename abc12345 ""
+# deploy a static site
+tar czf - site/ | ssh hostthis.dev
 ```
 
-## Limits
-
-10 MiB per identity, counting post-compression bytes across every
-active version of every active paste. Highly redundant text
-compresses 5-10x under zstd, so the real ceiling on raw payload is
-typically 50-100 MiB of text.
-
-HTML and Markdown only. 7-day retention from the last `update`.
-
-## See Also
+## SEE ALSO
 
 Source: [github.com/Zamua/hostthis](https://github.com/Zamua/hostthis)
 
-## License
+## LICENSE
 
 MIT - see [LICENSE](LICENSE).
