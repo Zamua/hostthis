@@ -72,20 +72,26 @@ func (c *Cloudflare) purgeURLs(urls []string) error {
 
 	resp, err := c.client().Do(req)
 	if err != nil {
-		c.logErr("cloudflare purge http: %v (urls=%v)", err, urls)
+		c.logf("cloudflare purge http: %v (urls=%v)", err, urls)
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		err := fmt.Errorf("cloudflare purge non-2xx: %d %s", resp.StatusCode, string(body))
-		c.logErr("%v (urls=%v)", err, urls)
+		c.logf("%v (urls=%v)", err, urls)
 		return err
 	}
+	// Purges are low-volume (one per edit/delete/pin/unpin) and operators
+	// want to see them land, so log success too - it also makes the
+	// integration observable in a deploy that isn't yet edge-cached.
+	c.logf("cache: purged %v", urls)
 	return nil
 }
 
-func (c *Cloudflare) logErr(format string, args ...any) {
+// logf logs through the optional Logger; if none is wired, messages are
+// dropped (purge is best-effort and never blocks the caller).
+func (c *Cloudflare) logf(format string, args ...any) {
 	if c.Logger != nil {
 		c.Logger.Printf(format, args...)
 	}
