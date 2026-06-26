@@ -30,8 +30,8 @@ the raw source.
 <dt><code>cat <em>file</em> | ssh hostthis.dev</code></dt>
 <dd>upload a paste. To set a label or force the content type, pass
 <code>--name "label"</code> or <code>--type html|markdown</code> after a
-literal <code>--</code> (ssh otherwise parses a leading <code>--name</code>
-as one of its own options).</dd>
+literal <code>--</code>. ssh otherwise parses a leading <code>--name</code>
+as one of its own options.</dd>
 
 <dt><code>cat <em>file</em> | ssh hostthis.dev <em>slug</em></code></dt>
 <dd>replace <em>slug</em>'s content; resets the 7-day clock</dd>
@@ -43,7 +43,7 @@ as one of its own options).</dd>
 <dd>print content to stdout</dd>
 
 <dt><code>ssh hostthis.dev rename <em>slug</em> [<em>label</em>]</code></dt>
-<dd>set the owner label (joins multiple words); omit the label to clear it</dd>
+<dd>set the owner label from the remaining words; omit them to clear it</dd>
 
 <dt><code>ssh hostthis.dev versions <em>slug</em></code></dt>
 <dd>list versions</dd>
@@ -78,8 +78,8 @@ tar czf - site/ | ssh hostthis.dev abc12345   # re-deploy in place
 Served at `<slug>.hostthis.dev/<path>`, with content type by file
 extension. A request that matches no file serves `index.html`, so
 single-page apps route client-side. A single leading directory is
-flattened (so `tar czf - site/` serves at the root), and macOS sidecar
-files (`._*`, `.DS_Store`, `__MACOSX/`) are skipped. Delete a site with
+flattened, so `tar czf - site/` serves at the root. macOS sidecar files
+`._*`, `.DS_Store`, and `__MACOSX/` are skipped. Delete a site with
 `delete <slug>`, the same as a paste.
 
 ## ROOMS API
@@ -88,20 +88,20 @@ A deployed site or paste can store and sync state in a room, with no
 backend of your own. The room's UUID is the only key. The API is served
 on the app's own origin.
 
-Durable key-value (HTTP):
+Durable key-value over HTTP:
 
 ```
 POST   /api/rooms                -> {"id":"<uuid>"}    mint a room
 GET    /api/rooms/<uuid>         -> {key: value, ...}  read the whole room
 GET    /api/rooms/<uuid>/<key>   -> value              read one key
-PUT    /api/rooms/<uuid>/<key>     (request body = value)   write one key
-DELETE /api/rooms/<uuid>/<key>                          delete one key
+PUT    /api/rooms/<uuid>/<key>     write one key, body is the value
+DELETE /api/rooms/<uuid>/<key>     delete one key
 ```
 
-Realtime (WebSocket, same origin):
+Realtime over WebSocket, on the same origin:
 
 ```
-GET (Upgrade) /api/rooms/<uuid>/ws
+GET /api/rooms/<uuid>/ws
 ```
 
 On connect you receive a `snapshot` of the room, then a live stream:
@@ -126,9 +126,9 @@ retention from the last update.
 ```
 0   success
 1   generic failure
-2   usage error (bad arguments or unknown verb)
-3   identity required (no ssh key presented)
-4   not found (or not yours)
+2   usage error: bad arguments or unknown verb
+3   identity required: no ssh key presented
+4   not found, or not yours
 6   refused by the per-subnet rate limit
 ```
 
@@ -147,7 +147,7 @@ Read from the environment your ssh client forwards.
 # upload, get a URL on stdout
 cat index.html | ssh hostthis.dev
 
-# upload with a label (--name and --type follow a literal --)
+# upload with a label; --name and --type follow a literal --
 cat notes.md | ssh hostthis.dev -- --name "alpha notes"
 
 # update an existing paste; same URL, bumps to v2, v3, ...
@@ -159,7 +159,7 @@ cat tricky.html | ssh hostthis.dev -- --type html
 # read your content back
 ssh hostthis.dev get abc12345
 
-# set the owner label (joins words), or omit it to clear
+# set the owner label from the words, or omit it to clear
 ssh hostthis.dev rename abc12345 design notes v2
 ssh hostthis.dev rename abc12345
 
