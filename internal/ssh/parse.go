@@ -30,11 +30,19 @@ func parseUploadFlags(argv []string) (uploadArgs, error) {
 		a := argv[i]
 		switch {
 		case a == "--name":
-			if i+1 >= len(argv) {
+			// Greedily join the following tokens up to the next flag as the
+			// label: ssh flattens the command to a space-joined string, so a
+			// multi-word label arrives as several tokens. Put the slug BEFORE
+			// --name (a positional after --name is read as part of the label).
+			var parts []string
+			for j := i + 1; j < len(argv) && !strings.HasPrefix(argv[j], "--"); j++ {
+				parts = append(parts, argv[j])
+			}
+			if len(parts) == 0 {
 				return out, fmt.Errorf("--name needs a value")
 			}
-			out.Name = argv[i+1]
-			i++
+			out.Name = strings.Join(parts, " ")
+			i += len(parts)
 		case strings.HasPrefix(a, "--name="):
 			out.Name = strings.TrimPrefix(a, "--name=")
 		case a == "--type":

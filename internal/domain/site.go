@@ -99,6 +99,46 @@ func NewManifest() Manifest { return Manifest{Files: make(map[string]ManifestEnt
 // Add only stores it.
 func (m Manifest) Add(p string, e ManifestEntry) { m.Files[p] = e }
 
+// commonLeadingDir returns the single top-level directory shared by EVERY
+// file, or "" when the files live at the root or span more than one
+// top-level directory. A path with no "/" (a root-level file) immediately
+// disqualifies stripping.
+func (m Manifest) commonLeadingDir() string {
+	prefix := ""
+	first := true
+	for p := range m.Files {
+		before, _, ok := strings.Cut(p, "/")
+		if !ok {
+			return "" // a file sits at the root; nothing to strip
+		}
+		top := before
+		if first {
+			prefix, first = top, false
+		} else if top != prefix {
+			return "" // files span multiple top-level dirs
+		}
+	}
+	return prefix
+}
+
+// StripCommonLeadingDir removes a single shared top-level directory from
+// every path when ALL files live under it, so the natural `tar czf - site/`
+// (which nests everything under site/) serves index.html at the root instead
+// of 404ing there. No-op when files are already at the root or span multiple
+// top-level directories. Stripping a shared prefix preserves distinctness, so
+// it can never collide two entries onto one key.
+func (m *Manifest) StripCommonLeadingDir() {
+	dir := m.commonLeadingDir()
+	if dir == "" {
+		return
+	}
+	stripped := make(map[string]ManifestEntry, len(m.Files))
+	for p, e := range m.Files {
+		stripped[strings.TrimPrefix(p, dir+"/")] = e
+	}
+	m.Files = stripped
+}
+
 // Lookup resolves a request path to a manifest entry, applying the
 // directory-index rule:
 //

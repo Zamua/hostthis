@@ -380,6 +380,16 @@ identity, quota, the 7-day expiry, versioning, the security model - is
 identical to a single-file paste. A static site is just "a paste that
 happens to be a directory."
 
+A single shared leading directory is flattened: when every entry is
+under one top-level dir (the natural `tar czf - mysite/`), that dir is
+stripped so `index.html` serves at the site root rather than under
+`/mysite/`. OS sidecar files - macOS AppleDouble `._*`, `.DS_Store`, and
+the `__MACOSX/` container - are skipped, never published. A site is
+deleted the same way as a paste: `ssh hostthis.dev delete <slug>` (the
+delete verb tries the paste first, then falls through to an
+owner-checked site delete; a non-site / foreign slug collapses to
+not-found, no existence leak).
+
 This is the now-real form of the "Static directory hosting" bullet
 under "Future directions"; the persistence-API bullet there stays a
 proposal.
@@ -1705,12 +1715,16 @@ When the user has zero active pastes, the command prints a single
 
 ### Rename
 ```
-ssh hostthis.dev rename abc12345 "Acme prototype v4"
+ssh hostthis.dev rename abc12345 Acme prototype v4
 renamed.
 ```
-Sets / changes the `NAME` for one of your pastes. Pass an empty string
-to clear: `ssh hostthis.dev rename abc12345 ""`. Renaming does NOT
-reset the expiry clock - purely metadata.
+Sets / changes the `NAME` for one of your pastes. The label is the
+remaining words joined with spaces - ssh flattens the command to one
+space-joined string, so a multi-word label arrives as several tokens and
+is rejoined; quoting is optional. Omitting the label clears it:
+`ssh hostthis.dev rename abc12345` -> `label cleared.`. (The empty-string
+form `""` cannot survive the ssh argv-join, so no-label is the invocable
+clear path.) Renaming does NOT reset the expiry clock - purely metadata.
 
 ### Get content (read back over ssh)
 ```
