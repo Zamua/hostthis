@@ -10,14 +10,27 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// Cloudflare purges paste URLs from the Cloudflare CDN edge by POSTing
-// to the zone's purge_cache endpoint. The token only needs the
-// "Cache:Purge" zone permission - narrowest scope possible.
+// Cloudflare purges a paste's cached representations from the Cloudflare
+// CDN edge by POSTing the paste's public URL variants to the zone's
+// purge_cache endpoint. The token only needs the "Cache:Purge" zone
+// permission - narrowest scope possible.
+//
+// Scheme/Apex/Mode describe how a slug maps to its public URL(s) so the
+// adapter can purge every cache key a paste is reachable at (see
+// pasteCacheURLs). This URL-variant policy lives here, in the adapter,
+// not in the service layer, which only ever names the slug.
 type Cloudflare struct {
 	ZoneID string
 	Token  string
+
+	Scheme string // public scheme, e.g. "https"
+	Apex   string // apex domain, e.g. "hostthis.dev"
+	Mode   string // url mode: "subdomain" (prod) | "path" (dev)
+
 	Logger *log.Logger
 
 	// Optional override for tests; defaults to a 5-second-timeout client.
@@ -31,7 +44,14 @@ func (c *Cloudflare) client() *http.Client {
 	return &http.Client{Timeout: 5 * time.Second}
 }
 
-func (c *Cloudflare) PurgeURLs(urls []string) error {
+// PurgePaste purges every CDN cache key the slug is reachable at. The
+// URL-variant policy is provider-agnostic (see pasteCacheURLs in urls.go);
+// this adapter only knows how to submit that list to Cloudflare's API.
+func (c *Cloudflare) PurgePaste(slug domain.Slug) error {
+	return c.purgeURLs(pasteCacheURLs(c.Scheme, c.Apex, c.Mode, slug))
+}
+
+func (c *Cloudflare) purgeURLs(urls []string) error {
 	if len(urls) == 0 {
 		return nil
 	}

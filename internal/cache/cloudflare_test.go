@@ -6,11 +6,56 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
-func TestCloudflare_PurgeURLs_Success(t *testing.T) {
+// pasteCacheURLs must return EVERY cache key a paste is reachable at. The
+// markdown shell fetches "?raw=1" as a separate cache entry, so purging
+// only the base URL would leave an edited markdown paste serving stale
+// content - this test pins that both variants are produced.
+func TestPasteCacheURLs_Variants(t *testing.T) {
+	slug := domain.Slug("abc12345")
+	cases := []struct {
+		name, scheme, apex, mode string
+		want                     []string
+	}{
+		{
+			name: "subdomain (prod)", scheme: "https", apex: "hostthis.dev", mode: "subdomain",
+			want: []string{
+				"https://abc12345.hostthis.dev/",
+				"https://abc12345.hostthis.dev/?raw=1",
+			},
+		},
+		{
+			name: "empty mode defaults to subdomain", scheme: "https", apex: "hostthis.dev", mode: "",
+			want: []string{
+				"https://abc12345.hostthis.dev/",
+				"https://abc12345.hostthis.dev/?raw=1",
+			},
+		},
+		{
+			name: "path (dev)", scheme: "http", apex: "localhost:8080", mode: "path",
+			want: []string{
+				"http://localhost:8080/p/abc12345",
+				"http://localhost:8080/p/abc12345?raw=1",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pasteCacheURLs(tc.scheme, tc.apex, tc.mode, slug)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("pasteCacheURLs:\n got  %v\n want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCloudflare_PurgePaste_Success(t *testing.T) {
 	var gotAuth, gotPath, gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -24,12 +69,15 @@ func TestCloudflare_PurgeURLs_Success(t *testing.T) {
 	c := &Cloudflare{
 		ZoneID: "zone123",
 		Token:  "tok-456",
+		Scheme: "https",
+		Apex:   "paste.test",
+		Mode:   "subdomain",
 		HTTPClient: &http.Client{
 			Transport: redirectTransport{base: srv.URL},
 		},
 	}
-	if err := c.PurgeURLs([]string{"https://paste.test/p/abc", "https://abc.paste.test/"}); err != nil {
-		t.Fatalf("PurgeURLs returned %v, want nil", err)
+	if err := c.PurgePaste(domain.Slug("abc12345")); err != nil {
+		t.Fatalf("PurgePaste returned %v, want nil", err)
 	}
 	if gotAuth != "Bearer tok-456" {
 		t.Errorf("auth header: got %q, want Bearer tok-456", gotAuth)
@@ -43,12 +91,16 @@ func TestCloudflare_PurgeURLs_Success(t *testing.T) {
 	if err := json.Unmarshal([]byte(gotBody), &parsed); err != nil {
 		t.Fatalf("body unmarshal: %v", err)
 	}
-	if len(parsed.Files) != 2 || parsed.Files[0] != "https://paste.test/p/abc" {
-		t.Errorf("body files: got %v", parsed.Files)
+	want := []string{
+		"https://abc12345.paste.test/",
+		"https://abc12345.paste.test/?raw=1",
+	}
+	if !reflect.DeepEqual(parsed.Files, want) {
+		t.Errorf("purged files:\n got  %v\n want %v", parsed.Files, want)
 	}
 }
 
-func TestCloudflare_PurgeURLs_Non2xx(t *testing.T) {
+func TestCloudflare_PurgePaste_Non2xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"errors":[{"code":10000,"message":"invalid token"}]}`))
@@ -57,14 +109,13 @@ func TestCloudflare_PurgeURLs_Non2xx(t *testing.T) {
 
 	var logbuf strings.Builder
 	c := &Cloudflare{
-		ZoneID: "zone",
-		Token:  "bad",
+		ZoneID: "zone", Token: "bad", Scheme: "https", Apex: "paste.test", Mode: "subdomain",
 		Logger: log.New(&logbuf, "", 0),
 		HTTPClient: &http.Client{
 			Transport: redirectTransport{base: srv.URL},
 		},
 	}
-	err := c.PurgeURLs([]string{"https://paste.test/p/abc"})
+	err := c.PurgePaste(domain.Slug("abc12345"))
 	if err == nil {
 		t.Fatal("expected error on 403, got nil")
 	}
@@ -76,16 +127,16 @@ func TestCloudflare_PurgeURLs_Non2xx(t *testing.T) {
 	}
 }
 
-func TestCloudflare_PurgeURLs_Empty(t *testing.T) {
+func TestCloudflare_purgeURLs_Empty(t *testing.T) {
 	c := &Cloudflare{ZoneID: "z", Token: "t"}
-	if err := c.PurgeURLs(nil); err != nil {
+	if err := c.purgeURLs(nil); err != nil {
 		t.Errorf("empty urls: got %v, want nil", err)
 	}
 }
 
-func TestCloudflare_PurgeURLs_MissingConfig(t *testing.T) {
+func TestCloudflare_purgeURLs_MissingConfig(t *testing.T) {
 	c := &Cloudflare{} // no zone, no token
-	err := c.PurgeURLs([]string{"https://x.example/"})
+	err := c.purgeURLs([]string{"https://x.example/"})
 	if err == nil {
 		t.Fatal("expected error for missing config")
 	}

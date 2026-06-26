@@ -96,6 +96,7 @@ func startGatedStack(t *testing.T, freshKeysPerSubnet int) *gatedStack {
 		ApexDomain: "paste.test",
 		Upload:     upload,
 		Manage:     manage,
+		Pastes:     repo,
 		KeyGate:    keyGate,
 		BuildURL: func(s domain.Slug) string {
 			return httpSrv.URL + "/p/" + s.String()
@@ -1063,6 +1064,7 @@ func startProxyProtoStack(t *testing.T, freshKeysPerSubnet int) *proxyProtoStack
 		ApexDomain: "paste.test",
 		Upload:     upload,
 		Manage:     manage,
+		Pastes:     repo,
 		KeyGate:    kg,
 		BuildURL: func(s domain.Slug) string {
 			return httpSrv.URL + "/p/" + s.String()

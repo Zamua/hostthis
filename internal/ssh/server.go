@@ -21,6 +21,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	gossh "github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
@@ -50,6 +51,16 @@ import (
 // URLBuilder turns a slug into the URL we print on stdout.
 type URLBuilder func(domain.Slug) string
 
+// PasteReader is the narrow read access the SSH layer needs over and
+// above the verb service - a single by-slug fetch used when rendering
+// the `versions` output (to mark which version the URL currently
+// serves). Depending on this interface, rather than reaching into the
+// verb service's repo, keeps the SSH layer decoupled from how Manage is
+// composed (in particular from the cache-invalidating decorator).
+type PasteReader interface {
+	Get(domain.Slug) (domain.Paste, error)
+}
+
 // Server is the SSH listener.
 type Server struct {
 	Addr        string
@@ -57,10 +68,21 @@ type Server struct {
 	ApexDomain  string // used in user-visible messages (help text, error hints).
 	Upload      *service.Upload
 	Deploy      *service.DeploySite // optional; nil disables static-site archive uploads
-	Manage      *service.Manage
+	Manage      service.PasteManager
+	Pastes      PasteReader      // by-slug read for the `versions` current-marker
 	KeyGate     *service.KeyGate // optional; nil disables the Sybil rate limit
+	Now         func() time.Time // clock; defaults to time.Now when nil
 	BuildURL    URLBuilder
 	Logger      *log.Logger
+}
+
+// now returns the server's clock, defaulting to time.Now so tests that
+// don't inject a clock still work.
+func (s *Server) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 // ListenAndServe blocks. Returns whatever the listener returns -
@@ -488,7 +510,7 @@ func (s *Server) verbList(sess gossh.Session, owner string) {
 	// guarantees that). Scripts that want headerless output can
 	// strip the first line with `tail -n +2`.
 	fmt.Fprintln(sess, "SLUG\tNAME\tSIZE\tKIND\tEXPIRES_IN\tVERS")
-	now := s.Manage.Now().UTC()
+	now := s.now().UTC()
 	for _, p := range pastes {
 		name := p.Name
 		if name == "" {
@@ -643,8 +665,8 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 		emitServiceErr(sess, err)
 		return
 	}
-	p, _ := s.Manage.Repo.Get(slug)
-	now := s.Manage.Now().UTC()
+	p, _ := s.Pastes.Get(slug)
+	now := s.now().UTC()
 
 	// `current` marker: when pinned_version is 0, the served version
 	// is the MAX non-deleted ver_num. ListVersions returns newest first

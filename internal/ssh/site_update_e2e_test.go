@@ -67,6 +67,7 @@ func newUpdateStack(t *testing.T) *updateStack {
 		ApexDomain: "paste.test",
 		Upload:     upload,
 		Manage:     service.NewManage(repo, blobUnit),
+		Pastes:     repo,
 		Deploy:     service.NewDeploySite(sites, repo, blobUnit),
 		BuildURL:   func(s domain.Slug) string { return httpSrv.URL + "/p/" + s.String() },
 		Logger:     log.New(io.Discard, "", 0),

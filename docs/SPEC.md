@@ -4201,37 +4201,70 @@ Operations that fire a purge:
 `rename` does NOT purge - the name is owner-only metadata, not part of
 the public response. Same with `versions`/`list`/`whoami`/`show`.
 
-The interface lives in the service layer; no production code knows
-which CDN is in front (or that one is in front at all):
+The interface lives in the service layer; no production code - not even
+the verb service that performs the mutation - knows which CDN is in
+front, or that one is in front at all:
 
 ```go
 type CachePurger interface {
-    PurgePaste(slug string) error
+    PurgePaste(slug domain.Slug) error
 }
 ```
+
+Invalidation is **transparent to the business logic.** The verb service
+(`Manage`) performs the mutation and knows nothing about caching - it has
+no `CachePurger` field and no purge calls. A thin `CacheInvalidating`
+decorator wraps the verb service at the composition root
+(`cmd/hostthisd`): it delegates every verb to the inner service and,
+after a *successful* `Update` / `Delete` / `Pin` / `Unpin`, fires
+`PurgePaste(slug)`. The mutation use-cases stay pure; cache invalidation
+is a cross-cutting concern layered on by composition, not woven into the
+domain logic. `rename` / `versions` / `list` / `whoami` / `show` /
+`deleteVersion` are delegated without a purge - they don't change the
+bytes served at the public URL (`deleteVersion` is refused outright when
+the target is the currently-served version).
+
+The purge is best-effort: a purge error is logged but never fails the
+underlying operation (the paste IS updated/deleted on origin; the CDN
+just keeps stale content for the remaining max-age).
 
 Three implementations ship:
 
 | Impl | When used | Behavior |
 | --- | --- | --- |
 | `noop` (default) | No CDN, or CDN with adequate max-age | No-op; relies on cache TTL expiry |
-| `cloudflare` | Cloudflare in front | POSTs to `/zones/<id>/purge_cache` with the slug's URL |
+| `cloudflare` | Cloudflare in front | POSTs the slug's public URL variants to `/zones/<id>/purge_cache` |
 | `fastly` (not shipped, easy add) | Fastly in front | POSTs to Fastly's purge API |
 
-Service-layer code calls `Cache.PurgePaste(slug)` after every `Delete`
-and every successful `Update`. The interface doesn't fail loudly: a
-purge error logs but doesn't fail the underlying operation (the paste
-IS updated/deleted on origin; the CDN just keeps stale content for the
-remaining TTL).
+**Purge every served URL variant.** A paste is reachable at more than one
+cache key, and the adapter must purge all of them or an edit leaves stale
+content behind. In subdomain mode the variants for a slug are:
+
+```
+https://<slug>.<apex>/          the page (an HTML paste, or the markdown shell)
+https://<slug>.<apex>/?raw=1    the raw bytes the markdown shell fetches
+```
+
+The markdown render shell is a fixed, content-independent page served at
+`/`; the actual markdown bytes live at `/?raw=1` (the shell fetches them
+client-side - see "Client-rendered markdown"). Those are SEPARATE CDN
+cache entries. Purging only `/` would refresh the shell but leave stale
+content cached at `/?raw=1`, so an edited markdown paste would show its
+OLD content until max-age expired. The adapter therefore purges both. The
+URL-variant policy lives in the adapter (which owns the apex / scheme /
+URL-mode config); the service layer only ever names the slug.
 
 Env vars when `HOSTTHIS_CACHE_BACKEND=cloudflare`:
 
 ```
-HOSTTHIS_CF_PURGE_TOKEN  CF API token, scoped only to 'Cache Purge' on the zone
+HOSTTHIS_CF_PURGE_TOKEN  CF API token, scoped ONLY to 'Cache Purge' on the zone
 HOSTTHIS_CF_ZONE_ID      zone id of the apex domain
-HOSTTHIS_PUBLIC_URL_BASE base URL hostthis emits (e.g. https://hostthis.dev)
-                         used to construct the purge URL per slug
 ```
+
+The adapter derives the per-slug purge URLs from the apex domain, public
+scheme, and URL mode hostthis is already configured with
+(`HOSTTHIS_APEX_DOMAIN` / `HOSTTHIS_PUBLIC_SCHEME` / `HOSTTHIS_URL_MODE`),
+so no separate base-URL var is needed.
 
 The purge token is the only long-lived credential hostthis needs for
 the CDN; it's narrowly scoped (zone-level cache-purge only) so leakage
