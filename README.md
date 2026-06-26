@@ -7,11 +7,13 @@ hostthis - pipe a rendered file in, get a public URL out
 ## SYNOPSIS
 
 ```
-cat <file>      | ssh hostthis.dev [--name <label>] [--type html|markdown]
+cat <file>      | ssh hostthis.dev
 cat <file>      | ssh hostthis.dev <slug>
 tar czf - <dir> | ssh hostthis.dev [<slug>]
 ssh hostthis.dev <command> [<args>]
 ```
+
+The optional `--name` and `--type` flags need a `--` first; see NOTES.
 
 ## DESCRIPTION
 
@@ -27,8 +29,8 @@ the raw source.
 
 <dl>
 
-<dt><code>cat <em>file</em> | ssh hostthis.dev [--name <em>label</em>]</code></dt>
-<dd>upload</dd>
+<dt><code>cat <em>file</em> | ssh hostthis.dev</code></dt>
+<dd>upload (add a label with <code>--name</code>; see NOTES)</dd>
 
 <dt><code>cat <em>file</em> | ssh hostthis.dev <em>slug</em></code></dt>
 <dd>replace <em>slug</em>'s content; resets the 7-day clock</dd>
@@ -39,8 +41,8 @@ the raw source.
 <dt><code>ssh hostthis.dev get <em>slug</em></code></dt>
 <dd>print content to stdout</dd>
 
-<dt><code>ssh hostthis.dev rename <em>slug</em> <em>label</em></code></dt>
-<dd>set label; empty string clears</dd>
+<dt><code>ssh hostthis.dev rename <em>slug</em> [<em>label</em>]</code></dt>
+<dd>set the owner label (joins multiple words); omit the label to clear it</dd>
 
 <dt><code>ssh hostthis.dev versions <em>slug</em></code></dt>
 <dd>list versions</dd>
@@ -74,7 +76,10 @@ tar czf - site/ | ssh hostthis.dev abc12345   # re-deploy in place
 
 Served at `<slug>.hostthis.dev/<path>`, with content type by file
 extension. A request that matches no file serves `index.html`, so
-single-page apps route client-side.
+single-page apps route client-side. A single leading directory is
+flattened (so `tar czf - site/` serves at the root), and macOS sidecar
+files (`._*`, `.DS_Store`, `__MACOSX/`) are skipped. Delete a site with
+`delete <slug>`, the same as a paste.
 
 ## ROOMS API
 
@@ -135,6 +140,18 @@ TERM=dumb   also disables color output
 
 Read from the environment your ssh client forwards.
 
+## NOTES
+
+ssh parses a leading `--name` or `--type` as one of its own options, so put
+`--` before them to pass them through to hostthis:
+
+```
+cat doc.md | ssh hostthis.dev -- --name "design notes"
+```
+
+A label (via `--name` or `rename`) may be several words; quoting is optional.
+To clear a label, run `rename <slug>` with no label.
+
 ## EXAMPLES
 
 ```
@@ -142,16 +159,21 @@ Read from the environment your ssh client forwards.
 cat index.html | ssh hostthis.dev
 
 # upload with an owner-only label visible in `list`
-cat notes.md | ssh hostthis.dev --name "alpha notes"
+# (flags need `--` first; see NOTES)
+cat notes.md | ssh hostthis.dev -- --name "alpha notes"
 
 # update an existing paste; same URL, bumps to v2, v3, ...
 cat v2.html | ssh hostthis.dev abc12345
 
 # force content type when sniffing gets it wrong
-cat tricky.html | ssh hostthis.dev --type html
+cat tricky.html | ssh hostthis.dev -- --type html
 
 # read your content back
 ssh hostthis.dev get abc12345
+
+# set the owner label (joins words), or omit it to clear
+ssh hostthis.dev rename abc12345 design notes v2
+ssh hostthis.dev rename abc12345
 
 # stick the URL on v1 even though v3 is the latest
 ssh hostthis.dev pin abc12345 1

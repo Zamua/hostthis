@@ -42,6 +42,10 @@ type SiteRepo interface {
 	//     OLD manifest until it lands, the new one immediately after.
 	ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Site, error)
+	// Delete removes a site by slug (its manifest + row). Ownership is
+	// enforced by the caller (DeploySite.Delete reads the site and compares
+	// Identity before calling this), so Delete itself takes no owner.
+	Delete(domain.Slug) error
 	// SumActiveBytesByOwner returns the identity's active SITE bytes.
 	// The deploy path adds the paste-side sum to compute the remaining
 	// quota budget the untar may fill before the persistence-time check.
@@ -246,6 +250,28 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		}
 	}
 	return SiteResult{}, SlugTakenErr
+}
+
+// Delete removes an owned static site by slug. A non-site slug and a
+// foreign-owned site both collapse to ErrNotFound - the same sentinel the
+// paste-delete path returns - so existence/ownership never leaks. The verb
+// dispatcher tries the paste delete first and falls through to this when the
+// slug names a site rather than a paste.
+func (d *DeploySite) Delete(slug domain.Slug, owner string) error {
+	if owner == "" {
+		return ErrEmptyOwner
+	}
+	existing, err := d.Sites.Get(slug)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("get site: %w", err)
+	}
+	if existing.Identity.String() != owner {
+		return ErrNotFound
+	}
+	return d.Sites.Delete(slug)
 }
 
 // preClaimSlug mints a fresh random slug and stakes a metadata-only claim on

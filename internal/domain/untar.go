@@ -127,6 +127,11 @@ func SafeUntar(src io.Reader, sink FileSink, quotaBudget int64) (Manifest, error
 			// Entry that cleans to nothing (e.g. "./") - skip, no file.
 			continue
 		}
+		if isJunkPath(rel) {
+			// OS-generated sidecar (macOS AppleDouble / .DS_Store /
+			// __MACOSX); never published and doesn't count toward the caps.
+			continue
+		}
 		if len(rel) > MaxSitePathLen {
 			return Manifest{}, fmt.Errorf("%w: path %q exceeds %d bytes", ErrTooManyFiles, rel, MaxSitePathLen)
 		}
@@ -174,7 +179,22 @@ func SafeUntar(src io.Reader, sink FileSink, quotaBudget int64) (Manifest, error
 		}
 	}
 
+	// Strip a single shared top-level directory so a directory archive
+	// (`tar czf - site/`) serves index.html at the root rather than under
+	// /site/. No-op when files are already at root or span multiple dirs.
+	man.StripCommonLeadingDir()
 	return man, nil
+}
+
+// isJunkPath reports whether rel is an OS-generated metadata file that must
+// never be published: macOS AppleDouble sidecars (._name), .DS_Store, and the
+// __MACOSX/ container Finder adds to archives.
+func isJunkPath(rel string) bool {
+	if rel == "__MACOSX" || strings.HasPrefix(rel, "__MACOSX/") {
+		return true
+	}
+	base := path.Base(rel)
+	return base == ".DS_Store" || strings.HasPrefix(base, "._")
 }
 
 // cleanArchivePath validates and normalizes one tar entry name to a

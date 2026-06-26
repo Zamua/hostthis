@@ -86,10 +86,11 @@
 
 <h2>Synopsis</h2>
 <div class="indent">
-<pre><strong>cat</strong> <em>file</em>      | <strong>ssh hostthis.dev</strong> [<strong>--name</strong> <em>label</em>] [<strong>--type</strong> html|markdown]
+<pre><strong>cat</strong> <em>file</em>      | <strong>ssh hostthis.dev</strong>
 <strong>cat</strong> <em>file</em>      | <strong>ssh hostthis.dev</strong> <em>slug</em>
 <strong>tar czf -</strong> <em>dir</em> | <strong>ssh hostthis.dev</strong> [<em>slug</em>]
 <strong>ssh hostthis.dev</strong> <em>command</em> [<em>args</em>]</pre>
+<p>The optional <strong>--name</strong> and <strong>--type</strong> flags need a <code>--</code> first; see NOTES.</p>
 </div>
 
 <h2>Description</h2>
@@ -105,8 +106,8 @@ for the raw source.</p>
 <h2>Commands</h2>
 <div class="indent">
 <dl>
-  <dt>cat <em>file</em> | ssh hostthis.dev [<strong>--name</strong> <em>label</em>]</dt>
-  <dd>upload</dd>
+  <dt>cat <em>file</em> | ssh hostthis.dev</dt>
+  <dd>upload (add a label with <strong>--name</strong>; see NOTES)</dd>
 
   <dt>cat <em>file</em> | ssh hostthis.dev <em>slug</em></dt>
   <dd>replace <em>slug</em>&rsquo;s content; resets the 7-day clock</dd>
@@ -117,8 +118,8 @@ for the raw source.</p>
   <dt>ssh hostthis.dev <strong>get</strong> <em>slug</em></dt>
   <dd>print content to stdout</dd>
 
-  <dt>ssh hostthis.dev <strong>rename</strong> <em>slug</em> <em>label</em></dt>
-  <dd>set label; empty string clears</dd>
+  <dt>ssh hostthis.dev <strong>rename</strong> <em>slug</em> [<em>label</em>]</dt>
+  <dd>set the owner label (joins multiple words); omit the label to clear it</dd>
 
   <dt>ssh hostthis.dev <strong>versions</strong> <em>slug</em></dt>
   <dd>list versions</dd>
@@ -147,7 +148,10 @@ for the raw source.</p>
 tar czf - site/ | ssh hostthis.dev abc12345   <span class="ink-soft"># re-deploy in place</span></pre>
 <p>Served at <em>slug</em>.hostthis.dev/<em>path</em>, with content type by file
 extension. A request that matches no file serves <code>index.html</code>, so
-single-page apps route client-side.</p>
+single-page apps route client-side. A single leading directory is flattened (so
+<code>tar czf - site/</code> serves at the root), and macOS sidecar files
+(<code>._*</code>, <code>.DS_Store</code>, <code>__MACOSX/</code>) are skipped.
+Delete a site with <code>delete <em>slug</em></code>, the same as a paste.</p>
 </div>
 
 <h2>Rooms API</h2>
@@ -198,22 +202,38 @@ TERM=dumb   also disables color output</pre>
 <p>Read from the environment your ssh client forwards.</p>
 </div>
 
+<h2>Notes</h2>
+<div class="indent">
+<p>ssh parses a leading <strong>--name</strong> or <strong>--type</strong> as one
+of its own options, so put <code>--</code> before them to pass them through to
+hostthis:</p>
+<pre>cat doc.md | ssh hostthis.dev -- --name "design notes"</pre>
+<p>A label (via <strong>--name</strong> or <strong>rename</strong>) may be several
+words; quoting is optional. To clear a label, run <code>rename <em>slug</em></code>
+with no label.</p>
+</div>
+
 <h2>Examples</h2>
 <div class="indent">
 <pre><span class="ink-soft"># upload, get a URL on stdout</span>
 cat index.html | ssh hostthis.dev
 
 <span class="ink-soft"># upload with an owner-only label visible in `list`</span>
-cat notes.md | ssh hostthis.dev --name "alpha notes"
+<span class="ink-soft"># (flags need `--` first; see NOTES)</span>
+cat notes.md | ssh hostthis.dev -- --name "alpha notes"
 
 <span class="ink-soft"># update an existing paste; same URL, bumps to v2, v3, ...</span>
 cat v2.html | ssh hostthis.dev abc12345
 
 <span class="ink-soft"># force content type when sniffing gets it wrong</span>
-cat tricky.html | ssh hostthis.dev --type html
+cat tricky.html | ssh hostthis.dev -- --type html
 
 <span class="ink-soft"># read your content back</span>
 ssh hostthis.dev get abc12345
+
+<span class="ink-soft"># set the owner label (joins words), or omit it to clear</span>
+ssh hostthis.dev rename abc12345 design notes v2
+ssh hostthis.dev rename abc12345
 
 <span class="ink-soft"># stick the URL on v1 even though v3 is the latest</span>
 ssh hostthis.dev pin abc12345 1

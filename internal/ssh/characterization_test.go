@@ -471,16 +471,21 @@ func TestRename_Characterization(t *testing.T) {
 		}
 	})
 
-	t.Run("MissingArgs_Exit2_UsageHint", func(t *testing.T) {
+	t.Run("NoLabel_Clears", func(t *testing.T) {
 		s := startStack(t)
 		stdout, _, _ := s.run("", []byte("<!doctype html><p>x</p>"))
 		slug := extractSlug(stdout)
-		_, stderr, exit := s.run("rename "+slug, nil)
-		if exit != 2 {
-			t.Fatalf("expected exit 2 for missing name arg, got %d (%q)", exit, stderr)
+		// Omitting the label clears it (the empty-string form "" can't
+		// survive ssh's argv-join, so no-label is the invocable clear path).
+		if _, _, ex := s.run("rename "+slug+" mylabel", nil); ex != 0 {
+			t.Fatalf("set label: exit %d", ex)
 		}
-		if !strings.Contains(stderr, "usage: rename") {
-			t.Fatalf("expected usage hint, got %q", stderr)
+		_, stderr, exit := s.run("rename "+slug, nil)
+		if exit != 0 {
+			t.Fatalf("expected exit 0 clearing the label, got %d (%q)", exit, stderr)
+		}
+		if !strings.Contains(stderr, "cleared") {
+			t.Fatalf("expected 'label cleared.', got %q", stderr)
 		}
 	})
 
@@ -1456,15 +1461,17 @@ func TestUploadFlags_NegativeCharacterization(t *testing.T) {
 	})
 
 	t.Run("UnexpectedArgument_Exit2_ByteExactStderr", func(t *testing.T) {
-		// `--name foo bar` → name=foo, then `bar` is an unexpected
-		// positional (not a slug, not a flag). Parser returns the
-		// canonical "unexpected argument" error. SSH layer prefixes
-		// "hostthis: " and appends "\n".
-		_, stderr, exit := s.run(`--name foo bar`, nil)
+		// `--type html bad` reaches the upload parser (argv[0] is a flag):
+		// --type consumes "html", then "bad" is neither a flag nor a valid
+		// slug (too short), so the parser returns the canonical "unexpected
+		// argument" error. (NB `--name foo bar` is NOT an error any more -
+		// --name greedily joins the remaining tokens into a multi-word
+		// label.) SSH layer prefixes "hostthis: " and appends "\n".
+		_, stderr, exit := s.run(`--type html bad`, nil)
 		if exit != 2 {
 			t.Fatalf("expected exit 2, got %d (%q)", exit, stderr)
 		}
-		want := "hostthis: unexpected argument \"bar\"\n"
+		want := "hostthis: unexpected argument \"bad\"\n"
 		if stderr != want {
 			t.Fatalf("stderr drift:\n got: %q\nwant: %q", stderr, want)
 		}

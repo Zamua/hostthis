@@ -82,6 +82,38 @@ func TestDeploySite_HappyPath(t *testing.T) {
 	}
 }
 
+func TestDeploySite_Delete(t *testing.T) {
+	d, sites, _ := deployFixture(t)
+	arc := gzipTar(t, map[string]string{"index.html": "<h1>hi</h1>"})
+	res, err := d.Deploy(bytes.NewReader(arc), "key:owner")
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	slug := res.Site.Slug
+
+	// A foreign identity collapses to ErrNotFound and leaves the site intact.
+	if err := d.Delete(slug, "key:other"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("foreign delete: got %v, want ErrNotFound", err)
+	}
+	if _, err := sites.Get(slug); err != nil {
+		t.Fatalf("site should survive a foreign delete: %v", err)
+	}
+	// The owner deletes it.
+	if err := d.Delete(slug, "key:owner"); err != nil {
+		t.Fatalf("owner delete: %v", err)
+	}
+	if _, err := sites.Get(slug); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("site should be gone: got %v", err)
+	}
+	// A nonexistent slug is ErrNotFound; an empty owner is ErrEmptyOwner.
+	if err := d.Delete(domain.NewRandomSlug(), "key:owner"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing delete: got %v, want ErrNotFound", err)
+	}
+	if err := d.Delete(slug, ""); !errors.Is(err, ErrEmptyOwner) {
+		t.Fatalf("empty owner: got %v, want ErrEmptyOwner", err)
+	}
+}
+
 func TestDeploySite_RejectsNoWebContent(t *testing.T) {
 	d, _, _ := deployFixture(t)
 	arc := gzipTar(t, map[string]string{

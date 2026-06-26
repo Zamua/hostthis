@@ -230,8 +230,7 @@ func (s *Server) ratelimitMiddleware() wish.Middleware {
 			owner := domain.IdentityFromKeyFingerprint(keyedFP).String()
 			subnet := ipSubnet(remoteIP(sess))
 			if err := s.KeyGate.Admit(owner, subnet); err != nil {
-				var ref *service.SybilRefusal
-				if errors.As(err, &ref) {
+				if ref, ok := errors.AsType[*service.SybilRefusal](err); ok {
 					fmt.Fprintf(sess.Stderr(), "hostthis: too many new keys from this network today\n")
 					fmt.Fprintf(sess.Stderr(), "  subnet %s used %d of %d in the last 24h\n", ref.Subnet, ref.FreshCountInWindow, ref.Cap)
 					fmt.Fprintf(sess.Stderr(), "  your key %s isn't yet registered here\n", strings.TrimPrefix(owner, domain.IdentityKeyPrefix))
@@ -561,8 +560,8 @@ func (s *Server) verbGet(sess gossh.Session, owner string, argv []string) {
 // -- rename ------------------------------------------------------------------
 
 func (s *Server) verbRename(sess gossh.Session, owner string, argv []string) {
-	if len(argv) < 2 {
-		fmt.Fprintln(sess.Stderr(), `hostthis: usage: rename <slug> "<name>"  (empty string clears)`)
+	if len(argv) < 1 {
+		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: usage: rename <slug> [label]  (omit the label to clear it)")
 		_ = sess.Exit(ExitUsage)
 		return
 	}
@@ -572,11 +571,21 @@ func (s *Server) verbRename(sess gossh.Session, owner string, argv []string) {
 		_ = sess.Exit(ExitUsage)
 		return
 	}
-	if err := s.Manage.Rename(slug, owner, argv[1]); err != nil {
+	// Join the remaining tokens as the label: ssh flattens the command to a
+	// single space-joined string, so a multi-word label arrives as several
+	// argv tokens and must be rejoined (quoting can't survive). No tokens at
+	// all clears the label - the invocable clear path, since an empty-string
+	// argument cannot survive the ssh argv-join.
+	name := strings.Join(argv[1:], " ")
+	if err := s.Manage.Rename(slug, owner, name); err != nil {
 		emitServiceErr(sess, err)
 		return
 	}
-	fmt.Fprintln(sess.Stderr(), "renamed.")
+	if name == "" {
+		_, _ = fmt.Fprintln(sess.Stderr(), "label cleared.")
+	} else {
+		_, _ = fmt.Fprintln(sess.Stderr(), "renamed.")
+	}
 	_ = sess.Exit(ExitOK)
 }
 
@@ -599,7 +608,20 @@ func (s *Server) verbDelete(sess gossh.Session, owner string, argv []string) {
 			_ = sess.Exit(ExitUsage)
 			return
 		}
-		if err := s.Manage.Delete(slug, owner); err != nil {
+		err = s.Manage.Delete(slug, owner)
+		// A slug that is not a paste collapses to not-found, but it may name
+		// a SITE. Fall through to the owner-checked site delete before
+		// surfacing not-found, so `delete <slug>` takes a site down too. Only
+		// a clean site delete short-circuits; any site-side error keeps the
+		// original paste not-found so the cases stay indistinguishable.
+		if errors.Is(err, service.ErrNotFound) && s.Deploy != nil {
+			if serr := s.Deploy.Delete(slug, owner); serr == nil {
+				_, _ = fmt.Fprintln(sess.Stderr(), "deleted.")
+				_ = sess.Exit(ExitOK)
+				return
+			}
+		}
+		if err != nil {
 			emitServiceErr(sess, err)
 			return
 		}
