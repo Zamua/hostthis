@@ -90,7 +90,6 @@
 <strong>cat</strong> <em>file</em>      | <strong>ssh hostthis.dev</strong> <em>slug</em>
 <strong>tar czf -</strong> <em>dir</em> | <strong>ssh hostthis.dev</strong> [<em>slug</em>]
 <strong>ssh hostthis.dev</strong> <em>command</em> [<em>args</em>]</pre>
-<p>The optional <strong>--name</strong> and <strong>--type</strong> flags need a <code>--</code> first; see NOTES.</p>
 </div>
 
 <h2>Description</h2>
@@ -107,7 +106,10 @@ for the raw source.</p>
 <div class="indent">
 <dl>
   <dt>cat <em>file</em> | ssh hostthis.dev</dt>
-  <dd>upload (add a label with <strong>--name</strong>; see NOTES)</dd>
+  <dd>upload a paste. To set a label or force the content type, pass
+  <strong>--name</strong> "label" or <strong>--type</strong> html|markdown after a
+  literal <code>--</code> (ssh otherwise parses a leading <strong>--name</strong>
+  as one of its own options).</dd>
 
   <dt>cat <em>file</em> | ssh hostthis.dev <em>slug</em></dt>
   <dd>replace <em>slug</em>&rsquo;s content; resets the 7-day clock</dd>
@@ -202,24 +204,12 @@ TERM=dumb   also disables color output</pre>
 <p>Read from the environment your ssh client forwards.</p>
 </div>
 
-<h2>Notes</h2>
-<div class="indent">
-<p>ssh parses a leading <strong>--name</strong> or <strong>--type</strong> as one
-of its own options, so put <code>--</code> before them to pass them through to
-hostthis:</p>
-<pre>cat doc.md | ssh hostthis.dev -- --name "design notes"</pre>
-<p>A label (via <strong>--name</strong> or <strong>rename</strong>) may be several
-words; quoting is optional. To clear a label, run <code>rename <em>slug</em></code>
-with no label.</p>
-</div>
-
 <h2>Examples</h2>
 <div class="indent">
 <pre><span class="ink-soft"># upload, get a URL on stdout</span>
 cat index.html | ssh hostthis.dev
 
-<span class="ink-soft"># upload with an owner-only label visible in `list`</span>
-<span class="ink-soft"># (flags need `--` first; see NOTES)</span>
+<span class="ink-soft"># upload with a label (--name and --type follow a literal --)</span>
 cat notes.md | ssh hostthis.dev -- --name "alpha notes"
 
 <span class="ink-soft"># update an existing paste; same URL, bumps to v2, v3, ...</span>
