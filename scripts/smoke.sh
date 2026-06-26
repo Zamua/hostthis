@@ -186,12 +186,12 @@ echo "$body_unpinned" | grep -q "v3" \
   && ok "unpin rolls URL forward to latest" \
   || bad "unpin" "served: $body_unpinned"
 
-# ---- 9. show (over ssh) ----------------------------------------------------
-step "show (owner read over ssh)"
-show_out=$($SSH "$HOST" show "$SLUG1" 2>&1)
-echo "$show_out" | grep -q "smoke 1" \
-  && ok "show prints content" \
-  || bad "show" "$show_out"
+# ---- 9. get (over ssh) -----------------------------------------------------
+step "get (owner read over ssh)"
+get_out=$($SSH "$HOST" get "$SLUG1" 2>&1)
+echo "$get_out" | grep -q "smoke 1" \
+  && ok "get prints content" \
+  || bad "get" "$get_out"
 
 # ---- 10. rename ------------------------------------------------------------
 step "rename markdown paste"
@@ -236,37 +236,35 @@ echo "$hlp" | grep -q "UPDATE & MANAGE" && echo "$hlp" | grep -q " list " \
   && ok "help lists verbs" \
   || bad "help" "$hlp"
 
-# ---- 14a. per-verb help: help put ------------------------------------------
-# Phase C3: `help <verb>` emits the verb's descriptor (signature +
-# description + examples) instead of the global banner. The `put`
-# descriptor's Description mentions the literal token "put" and its
-# Signature contains the `--name` flag, which the global banner does
-# not, so checking for both reliably distinguishes verb help from the
-# global help.
-step "help put (per-verb help)"
-help_put=$($SSH "$HOST" help put 2>&1)
-help_put_rc=$?
-echo "$help_put" | grep -q "put" && echo "$help_put" | grep -q -- "--name" \
-  && [ "$help_put_rc" -eq 0 ] \
-  && ok "help put emits verb-specific help" \
-  || bad "help put" "rc=$help_put_rc out=$help_put"
+# ---- 14a. per-verb help: help get ------------------------------------------
+# `help <verb>` emits the verb's descriptor (signature + description +
+# examples) instead of the global banner. The descriptor carries a
+# "Usage:" line the global banner lacks, so checking for the verb name
+# plus "Usage:" reliably distinguishes verb help from the global help.
+step "help get (per-verb help)"
+help_get=$($SSH "$HOST" help get 2>&1)
+help_get_rc=$?
+echo "$help_get" | grep -q "get" && echo "$help_get" | grep -q "Usage:" \
+  && [ "$help_get_rc" -eq 0 ] \
+  && ok "help get emits verb-specific help" \
+  || bad "help get" "rc=$help_get_rc out=$help_get"
 
-# ---- 14b. per-verb help: put --help byte-matches help put ------------------
+# ---- 14b. per-verb help: get --help byte-matches help get ------------------
 # `<verb> --help` and `<verb> -h` are routed through the same descriptor
 # lookup as `help <verb>`, so all three forms should produce identical
 # bytes on stderr.
-step "put --help matches help put"
-put_dashdash=$($SSH "$HOST" put --help 2>&1)
-[ "$put_dashdash" = "$help_put" ] \
-  && ok "put --help byte-matches help put" \
-  || bad "put --help" "got: $put_dashdash"
+step "get --help matches help get"
+get_dashdash=$($SSH "$HOST" get --help 2>&1)
+[ "$get_dashdash" = "$help_get" ] \
+  && ok "get --help byte-matches help get" \
+  || bad "get --help" "got: $get_dashdash"
 
-# ---- 14c. per-verb help: put -h byte-matches help put ----------------------
-step "put -h matches help put"
-put_h=$($SSH "$HOST" put -h 2>&1)
-[ "$put_h" = "$help_put" ] \
-  && ok "put -h byte-matches help put" \
-  || bad "put -h" "got: $put_h"
+# ---- 14c. per-verb help: get -h byte-matches help get ----------------------
+step "get -h matches help get"
+get_h=$($SSH "$HOST" get -h 2>&1)
+[ "$get_h" = "$help_get" ] \
+  && ok "get -h byte-matches help get" \
+  || bad "get -h" "got: $get_h"
 
 # ---- 14d. help <unknown> → unknown-verb message + global banner ------------
 # `help <unknown>` prefixes an `unknown verb` line and then emits the
