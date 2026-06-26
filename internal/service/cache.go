@@ -16,7 +16,3 @@ import "github.com/Zamua/hostthis/internal/domain"
 type CachePurger interface {
 	PurgePaste(slug domain.Slug) error
 }
-
-// URLBuilder turns a slug into the public URL a CDN would cache.
-// Same shape used by the SSH layer for stdout URL emission.
-type URLBuilder func(domain.Slug) string

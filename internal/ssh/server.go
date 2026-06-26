@@ -665,7 +665,14 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 		emitServiceErr(sess, err)
 		return
 	}
-	p, _ := s.Pastes.Get(slug)
+	// Pastes is wired in production (and in any test that asserts the
+	// current-version marker). Guard so a versions render still works -
+	// minus the pinned-current marker - if a caller didn't supply it,
+	// rather than nil-derefing.
+	var p domain.Paste
+	if s.Pastes != nil {
+		p, _ = s.Pastes.Get(slug)
+	}
 	now := s.now().UTC()
 
 	// `current` marker: when pinned_version is 0, the served version
