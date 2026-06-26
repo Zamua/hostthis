@@ -13,8 +13,6 @@ tar czf - <dir> | ssh hostthis.dev [<slug>]
 ssh hostthis.dev <command> [<args>]
 ```
 
-The optional `--name` and `--type` flags need a `--` first; see NOTES.
-
 ## DESCRIPTION
 
 Publishes HTML or Markdown for 7 days at a random subdomain. One ssh
@@ -30,7 +28,10 @@ the raw source.
 <dl>
 
 <dt><code>cat <em>file</em> | ssh hostthis.dev</code></dt>
-<dd>upload (add a label with <code>--name</code>; see NOTES)</dd>
+<dd>upload a paste. To set a label or force the content type, pass
+<code>--name "label"</code> or <code>--type html|markdown</code> after a
+literal <code>--</code> (ssh otherwise parses a leading <code>--name</code>
+as one of its own options).</dd>
 
 <dt><code>cat <em>file</em> | ssh hostthis.dev <em>slug</em></code></dt>
 <dd>replace <em>slug</em>'s content; resets the 7-day clock</dd>
@@ -140,26 +141,13 @@ TERM=dumb   also disables color output
 
 Read from the environment your ssh client forwards.
 
-## NOTES
-
-ssh parses a leading `--name` or `--type` as one of its own options, so put
-`--` before them to pass them through to hostthis:
-
-```
-cat doc.md | ssh hostthis.dev -- --name "design notes"
-```
-
-A label (via `--name` or `rename`) may be several words; quoting is optional.
-To clear a label, run `rename <slug>` with no label.
-
 ## EXAMPLES
 
 ```
 # upload, get a URL on stdout
 cat index.html | ssh hostthis.dev
 
-# upload with an owner-only label visible in `list`
-# (flags need `--` first; see NOTES)
+# upload with a label (--name and --type follow a literal --)
 cat notes.md | ssh hostthis.dev -- --name "alpha notes"
 
 # update an existing paste; same URL, bumps to v2, v3, ...
