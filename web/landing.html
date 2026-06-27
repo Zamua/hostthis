@@ -86,10 +86,14 @@
 
 <h2>Synopsis</h2>
 <div class="indent">
-<pre><strong>cat</strong> <em>file</em>      | <strong>ssh hostthis.dev</strong>
-<strong>cat</strong> <em>file</em>      | <strong>ssh hostthis.dev</strong> <em>slug</em>
-<strong>tar czf -</strong> <em>dir</em> | <strong>ssh hostthis.dev</strong> [<em>slug</em>]
+<pre><strong>cat</strong> <em>file</em>      | <strong>ssh -T hostthis.dev</strong>
+<strong>cat</strong> <em>file</em>      | <strong>ssh -T hostthis.dev</strong> <em>slug</em>
+<strong>tar czf -</strong> <em>dir</em> | <strong>ssh -T hostthis.dev</strong> [<em>slug</em>]
 <strong>ssh hostthis.dev</strong> <em>command</em> [<em>args</em>]</pre>
+<p class="ink-soft"><code>-T</code> on piped uploads disables the ssh client&rsquo;s
+pseudo-terminal request, silencing the <em>&ldquo;Pseudo-terminal will not be
+allocated&rdquo;</em> warning. It is a client flag only and changes nothing on the
+server; verb commands don&rsquo;t need it.</p>
 </div>
 
 <h2>Description</h2>
@@ -107,13 +111,15 @@ any rendered paste's URL for the raw source.</p>
 <h2>Commands</h2>
 <div class="indent">
 <dl>
-  <dt>cat <em>file</em> | ssh hostthis.dev</dt>
-  <dd>upload a paste. To set a label or force the content type, pass
-  <strong>--name</strong> "label" or <strong>--type</strong> html|markdown|diff
-  after a literal <code>--</code>. ssh otherwise parses a leading
-  <strong>--name</strong> as one of its own options.</dd>
+  <dt>cat <em>file</em> | ssh -T hostthis.dev</dt>
+  <dd>upload a paste. The URL prints on stdout and a QR code of it on
+  stderr (<code>2&gt;/dev/null</code> drops the QR). To set a label or force the
+  content type, pass <strong>--name</strong> "label" or
+  <strong>--type</strong> html|markdown|diff after a literal <code>--</code>.
+  ssh otherwise parses a leading <strong>--name</strong> as one of its own
+  options.</dd>
 
-  <dt>cat <em>file</em> | ssh hostthis.dev <em>slug</em></dt>
+  <dt>cat <em>file</em> | ssh -T hostthis.dev <em>slug</em></dt>
   <dd>replace <em>slug</em>&rsquo;s content; resets the 30-day clock</dd>
 
   <dt>ssh hostthis.dev <strong>list</strong></dt>
@@ -121,6 +127,13 @@ any rendered paste's URL for the raw source.</p>
 
   <dt>ssh hostthis.dev <strong>get</strong> <em>slug</em></dt>
   <dd>print content to stdout</dd>
+
+  <dt>ssh hostthis.dev <strong>url</strong> <em>slug</em></dt>
+  <dd>re-show just the URL for any existing paste or site</dd>
+
+  <dt>ssh hostthis.dev <strong>qr</strong> <em>slug</em></dt>
+  <dd>re-show the URL (stdout) and a QR code (stderr) for any existing
+  paste or site</dd>
 
   <dt>ssh hostthis.dev <strong>rename</strong> <em>slug</em> [<em>label</em>]</dt>
   <dd>set the owner label from the remaining words; omit them to clear it</dd>
@@ -148,8 +161,8 @@ any rendered paste's URL for the raw source.</p>
 <h2>Static Sites</h2>
 <div class="indent">
 <p>Pipe a gzip-tar instead of a single file to deploy a multi-file static site.</p>
-<pre>tar czf - site/ | ssh hostthis.dev            <span class="ink-soft"># deploy, get a URL</span>
-tar czf - site/ | ssh hostthis.dev abc12345   <span class="ink-soft"># re-deploy in place</span></pre>
+<pre>tar czf - site/ | ssh -T hostthis.dev            <span class="ink-soft"># deploy, get a URL</span>
+tar czf - site/ | ssh -T hostthis.dev abc12345   <span class="ink-soft"># re-deploy in place</span></pre>
 <p>Served at <em>slug</em>.hostthis.dev/<em>path</em>, with content type by file
 extension. A request that matches no file serves <code>index.html</code>, so
 single-page apps route client-side. A single leading directory is flattened (so
@@ -212,23 +225,30 @@ TERM=dumb   also disables color output</pre>
 
 <h2>Examples</h2>
 <div class="indent">
-<pre><span class="ink-soft"># upload, get a URL on stdout</span>
-cat index.html | ssh hostthis.dev
+<pre><span class="ink-soft"># upload, get a URL on stdout (and a QR code on stderr)</span>
+cat index.html | ssh -T hostthis.dev
+
+<span class="ink-soft"># capture just the URL; 2>/dev/null drops the QR + narration</span>
+url=$(cat index.html | ssh -T hostthis.dev 2>/dev/null)
 
 <span class="ink-soft"># upload with a label (--name and --type follow a literal --)</span>
-cat notes.md | ssh hostthis.dev -- --name "alpha notes"
+cat notes.md | ssh -T hostthis.dev -- --name "alpha notes"
 
 <span class="ink-soft"># update an existing paste; same URL, bumps to v2, v3, ...</span>
-cat v2.html | ssh hostthis.dev abc12345
+cat v2.html | ssh -T hostthis.dev abc12345
 
 <span class="ink-soft"># force content type when sniffing gets it wrong</span>
-cat tricky.html | ssh hostthis.dev -- --type html
+cat tricky.html | ssh -T hostthis.dev -- --type html
 
 <span class="ink-soft"># render a unified diff (auto-detected, or force with --type diff)</span>
-git diff | ssh hostthis.dev
+git diff | ssh -T hostthis.dev
 
 <span class="ink-soft"># read your content back</span>
 ssh hostthis.dev get abc12345
+
+<span class="ink-soft"># re-show the link for an existing paste (URL only, or URL + QR)</span>
+ssh hostthis.dev url abc12345
+ssh hostthis.dev qr abc12345
 
 <span class="ink-soft"># set the owner label from the words, or omit it to clear</span>
 ssh hostthis.dev rename abc12345 design notes v2
@@ -242,7 +262,7 @@ ssh hostthis.dev unpin abc12345
 ssh hostthis.dev delete abc12345 2
 
 <span class="ink-soft"># deploy a static site</span>
-tar czf - site/ | ssh hostthis.dev</pre>
+tar czf - site/ | ssh -T hostthis.dev</pre>
 </div>
 
 <h2>See Also</h2>

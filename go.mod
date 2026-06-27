@@ -11,6 +11,7 @@ require (
 	github.com/charmbracelet/wish v1.4.7
 	github.com/coder/websocket v1.8.14
 	github.com/klauspost/compress v1.18.6
+	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/pires/go-proxyproto v0.12.0
 	github.com/yuin/goldmark v1.8.2
@@ -95,6 +96,7 @@ require (
 	golang.org/x/net v0.54.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.44.0 // indirect
+	golang.org/x/term v0.43.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
@@ -103,4 +105,5 @@ require (
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
+	rsc.io/qr v0.2.0 // indirect
 )
