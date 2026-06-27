@@ -130,12 +130,12 @@ func TestSinglePasteUnchangedWhenDeployWired(t *testing.T) {
 	if !strings.HasPrefix(url, st.httpURL+"/p/") {
 		t.Fatalf("expected a paste URL on stdout, got %q (stderr %q)", stdout, stderr)
 	}
-	// The paste path says "expires in 7 days"; the site path says "site: N
+	// The paste path says "expires in 30 days"; the site path says "site: N
 	// file(s)". A single .html must take the PASTE path.
 	if strings.Contains(stderr, "site:") {
 		t.Fatalf("single .html wrongly routed to the site path: stderr %q", stderr)
 	}
-	if !strings.Contains(stderr, "expires in 7 days") {
+	if !strings.Contains(stderr, "expires in 30 days") {
 		t.Fatalf("expected paste-path stderr, got %q", stderr)
 	}
 

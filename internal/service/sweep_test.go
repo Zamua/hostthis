@@ -58,8 +58,8 @@ func TestSweep_Once(t *testing.T) {
 		t.Fatalf("nothing should sweep yet: pastes=%d blobs=%d", pastes, gcBlobs)
 	}
 
-	// 8 days later, both have expired (retention is 7d).
-	future := now.Add(8 * 24 * time.Hour)
+	// Past the retention window, both have expired.
+	future := now.Add(domain.RetentionWindow + 24*time.Hour)
 	pastes, gcBlobs, err = sweep.Once(future)
 	if err != nil {
 		t.Fatalf("sweep 2: %v", err)
@@ -237,9 +237,9 @@ func TestSweep_DryRun(t *testing.T) {
 	sweep := service.NewSweep(repo, blobs, log.New(&logbuf, "", 0))
 	sweep.DryRun = true
 
-	// 8 days later A has expired (retention 7d). Dry-run: A would expire, B's
+	// Past the retention window A has expired. Dry-run: A would expire, B's
 	// blob would be GC'd - but nothing is actually touched.
-	future := now.Add(8 * 24 * time.Hour)
+	future := now.Add(domain.RetentionWindow + 24*time.Hour)
 	pastes, gcBlobs, err := sweep.Once(future)
 	if err != nil {
 		t.Fatalf("dry-run sweep: %v", err)

@@ -58,7 +58,7 @@ var verbDescriptors = map[string]verbDescriptor{
 		Signature: "ssh {{apex}} rename <slug> \"<name>\"",
 		Description: "Set or change the owner-only label for one of your pastes. " +
 			"Pass an empty string to clear. Renaming does not reset the " +
-			"7-day expiry clock.",
+			"30-day expiry clock.",
 		Examples: []string{
 			"ssh {{apex}} rename abc12345 \"design v4\"",
 			"ssh {{apex}} rename abc12345 \"\"",

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
 )
@@ -70,13 +71,13 @@ func TestSweep_ExpiresSitesAndProtectsSharedBlobs(t *testing.T) {
 	sweep := service.NewSweep(pastes, disk, logger)
 	sweep.Sites = sites
 
-	// 8 days later: the SITE has expired but the paste still references the
+	// Past the retention window: the SITE has expired but the paste still references the
 	// shared bytes. The site row must be deleted; the shared blob must NOT.
-	future := now.Add(8 * 24 * time.Hour)
+	future := now.Add(domain.RetentionWindow + 24*time.Hour)
 
 	// Reset the paste's expiry far into the future via a fresh upload-time
 	// trick: instead, just sweep at a point where the paste is alive. The
-	// paste was created at `now` with 7d retention, so it ALSO expires by
+	// paste was created at `now` with 30d retention, so it ALSO expires by
 	// `future`. To isolate the "shared blob survives while one record
 	// lives" property, sweep at now+1h (nothing expired) first, then prove
 	// the site expiry path independently below.
@@ -135,7 +136,7 @@ func TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt(t *testing.T) {
 	t0 := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	shared := "<!doctype html><h1>two sites share me</h1>"
 
-	// Site A at t0 (expires t0+7d).
+	// Site A at t0 (expires t0+30d).
 	deployA := service.NewDeploySite(sites, pastes, service.NewStandaloneBlobUnit(blobs))
 	deployA.Now = func() time.Time { return t0 }
 	resA, err := deployA.Deploy(bytes.NewReader(gzTar(t, map[string]string{"index.html": shared})), "key:a")
@@ -143,8 +144,8 @@ func TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt(t *testing.T) {
 		t.Fatalf("deploy A: %v", err)
 	}
 
-	// Site B deployed 3 days later (expires t0+3d+7d = t0+10d) - still alive
-	// when A expires at t0+7d.
+	// Site B deployed 3 days later (expires t0+3d+30d = t0+33d) - still alive
+	// when A expires at t0+30d.
 	t1 := t0.Add(3 * 24 * time.Hour)
 	deployB := service.NewDeploySite(sites, pastes, service.NewStandaloneBlobUnit(blobs))
 	deployB.Now = func() time.Time { return t1 }
@@ -156,9 +157,9 @@ func TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt(t *testing.T) {
 	sweep := service.NewSweep(pastes, disk, logger)
 	sweep.Sites = sites
 
-	// Sweep at t0+8d: site A expired, site B alive. The shared blob must
+	// Sweep past A's window: site A expired, site B alive. The shared blob must
 	// survive because B still references it.
-	deleted, gc, err := sweep.Once(t0.Add(8 * 24 * time.Hour))
+	deleted, gc, err := sweep.Once(t0.Add(domain.RetentionWindow + 24*time.Hour))
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}

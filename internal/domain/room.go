@@ -30,11 +30,11 @@ type Room struct {
 }
 
 // RoomRetentionWindow is the fixed TTL for a room: it expires this long
-// after its last write. Longer than the 7-day paste window on purpose -
-// a room backs a live app whose participants may return over several
-// weeks (a poll open for a month, a retro board a team revisits). Still
-// finite, still no user-facing knob, still swept automatically; the
-// default is a product opinion, a starting point, not an operator config.
+// after its last write. The same 30-day window as pastes and sites -
+// long enough that a room backing a live app whose participants return
+// over weeks (a poll open for a month, a retro board a team revisits)
+// survives normal use. Still finite, still no user-facing knob, still
+// swept automatically; a product opinion, a starting point, not config.
 const RoomRetentionWindow = 30 * 24 * time.Hour
 
 // Per-room data caps. A single room is sized for app STATE (a poll's

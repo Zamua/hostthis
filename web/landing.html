@@ -94,7 +94,7 @@
 
 <h2>Description</h2>
 <div class="indent">
-<p>Publishes HTML or Markdown for 7 days at a random subdomain. One ssh pipe, no
+<p>Publishes HTML or Markdown for 30 days at a random subdomain. One ssh pipe, no
 signup, no install. Identity is your ssh public key: anyone with a different key
 can read the URL but cannot update, rename, pin, or delete the paste.</p>
 
@@ -112,7 +112,7 @@ for the raw source.</p>
   as one of its own options.</dd>
 
   <dt>cat <em>file</em> | ssh hostthis.dev <em>slug</em></dt>
-  <dd>replace <em>slug</em>&rsquo;s content; resets the 7-day clock</dd>
+  <dd>replace <em>slug</em>&rsquo;s content; resets the 30-day clock</dd>
 
   <dt>ssh hostthis.dev <strong>list</strong></dt>
   <dd>active pastes, soonest to expire first</dd>
@@ -183,7 +183,7 @@ after its last write. Deployments without a room store return 404.</p>
 of every active paste. Text compresses 5-10x under zstd, so the real raw-payload
 ceiling is typically 50-100 MiB.</p>
 
-<p>Pastes are HTML or Markdown; sites are a gzip-tar archive. 7-day retention from
+<p>Pastes are HTML or Markdown; sites are a gzip-tar archive. 30-day retention from
 the last update.</p>
 </div>
 

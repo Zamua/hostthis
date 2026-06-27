@@ -210,9 +210,9 @@ func TestUpload_Characterization(t *testing.T) {
 		if _, err := domain.ParseSlug(slug); err != nil {
 			t.Fatalf("server returned malformed slug %q: %v", slug, err)
 		}
-		// stderr is exactly the "expires in 7 days" line.
-		if strings.TrimSpace(stderr) != "expires in 7 days" {
-			t.Fatalf("stderr should be exactly 'expires in 7 days', got %q", stderr)
+		// stderr is exactly the "expires in 30 days" line.
+		if strings.TrimSpace(stderr) != "expires in 30 days" {
+			t.Fatalf("stderr should be exactly 'expires in 30 days', got %q", stderr)
 		}
 	})
 
@@ -224,7 +224,7 @@ func TestUpload_Characterization(t *testing.T) {
 		if !strings.HasPrefix(strings.TrimSpace(stdout), s.httpURL+"/p/") {
 			t.Fatalf("expected URL, got %q", stdout)
 		}
-		if !strings.Contains(stderr, "expires in 7 days") {
+		if !strings.Contains(stderr, "expires in 30 days") {
 			t.Fatalf("expected expiry note, got %q", stderr)
 		}
 	})
@@ -237,9 +237,9 @@ func TestUpload_Characterization(t *testing.T) {
 		if !strings.HasPrefix(strings.TrimSpace(stdout), s.httpURL+"/p/") {
 			t.Fatalf("expected URL, got %q", stdout)
 		}
-		// stderr format pinned: `"demo". expires in 7 days`.
-		if !strings.Contains(stderr, `"demo". expires in 7 days`) {
-			t.Fatalf(`expected '"demo". expires in 7 days', got %q`, stderr)
+		// stderr format pinned: `"demo". expires in 30 days`.
+		if !strings.Contains(stderr, `"demo". expires in 30 days`) {
+			t.Fatalf(`expected '"demo". expires in 30 days', got %q`, stderr)
 		}
 	})
 
@@ -287,9 +287,9 @@ func TestUpdate_Characterization(t *testing.T) {
 		if !strings.HasPrefix(strings.TrimSpace(stdout2), s.httpURL+"/p/") {
 			t.Fatalf("expected URL on stdout, got %q", stdout2)
 		}
-		// Update stderr line: "v2 saved. expires in 7 days".
-		if !strings.Contains(stderr2, "v2 saved. expires in 7 days") {
-			t.Fatalf("expected 'v2 saved. expires in 7 days' on stderr, got %q", stderr2)
+		// Update stderr line: "v2 saved. expires in 30 days".
+		if !strings.Contains(stderr2, "v2 saved. expires in 30 days") {
+			t.Fatalf("expected 'v2 saved. expires in 30 days' on stderr, got %q", stderr2)
 		}
 	})
 
@@ -889,7 +889,7 @@ func TestHelp_Characterization(t *testing.T) {
 // the closing period. Any drift in helpTextTemplate (line addition,
 // character insertion, whitespace tweak) MUST fail the golden assertion
 // - that's the whole point of pinning the full string.
-const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pastes expire 7 days after last update.\n" +
+const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pastes expire 30 days after last update.\n" +
 	"\n" +
 	"UPLOAD\n" +
 	"\n" +

@@ -410,7 +410,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		}
 		url := s.BuildURL(res.Paste.Slug)
 		fmt.Fprintln(sess, url)
-		fmt.Fprintf(sess.Stderr(), "v%d saved. expires in 7 days\n", res.NewVer)
+		_, _ = fmt.Fprintf(sess.Stderr(), "v%d saved. expires in 30 days\n", res.NewVer)
 		if res.WasPinned {
 			fmt.Fprintf(sess.Stderr(),
 				"note: this paste is pinned to v%d, so the URL still serves v%d, not v%d.\n",
@@ -444,9 +444,9 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	url := s.BuildURL(res.Paste.Slug)
 	fmt.Fprintln(sess, url)
 	if res.Paste.Name != "" {
-		fmt.Fprintf(sess.Stderr(), "%q. expires in 7 days\n", res.Paste.Name)
+		_, _ = fmt.Fprintf(sess.Stderr(), "%q. expires in 30 days\n", res.Paste.Name)
 	} else {
-		fmt.Fprintln(sess.Stderr(), "expires in 7 days")
+		_, _ = fmt.Fprintln(sess.Stderr(), "expires in 30 days")
 	}
 	_ = sess.Exit(ExitOK)
 }
@@ -464,7 +464,7 @@ func (s *Server) deploySite(sess gossh.Session, owner string, body io.Reader) {
 	}
 	url := s.BuildURL(res.Site.Slug)
 	fmt.Fprintln(sess, url)
-	fmt.Fprintf(sess.Stderr(), "site: %d file(s). expires in 7 days\n", len(res.Site.Manifest.Files))
+	_, _ = fmt.Fprintf(sess.Stderr(), "site: %d file(s). expires in 30 days\n", len(res.Site.Manifest.Files))
 	_ = sess.Exit(ExitOK)
 }
 
@@ -485,7 +485,7 @@ func (s *Server) deploySiteToSlug(sess gossh.Session, owner string, slug domain.
 	}
 	url := s.BuildURL(res.Site.Slug)
 	_, _ = fmt.Fprintln(sess, url)
-	_, _ = fmt.Fprintf(sess.Stderr(), "site: %d file(s). expires in 7 days\n", len(res.Site.Manifest.Files))
+	_, _ = fmt.Fprintf(sess.Stderr(), "site: %d file(s). expires in 30 days\n", len(res.Site.Manifest.Files))
 	_ = sess.Exit(ExitOK)
 }
 
@@ -878,7 +878,7 @@ func emitHelp(sess gossh.Session, apex string) {
 // helpTextTemplate is the canonical user-facing help. {{apex}}
 // placeholders are substituted at render time with the configured
 // apex domain so the help is correct under any deployment.
-const helpTextTemplate = `Pipe a rendered file in, get a URL out. Pastes expire 7 days after last update.
+const helpTextTemplate = `Pipe a rendered file in, get a URL out. Pastes expire 30 days after last update.
 
 UPLOAD
 
