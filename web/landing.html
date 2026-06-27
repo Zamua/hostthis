@@ -94,12 +94,14 @@
 
 <h2>Description</h2>
 <div class="indent">
-<p>Publishes HTML or Markdown for 30 days at a random subdomain. One ssh pipe, no
-signup, no install. Identity is your ssh public key: anyone with a different key
-can read the URL but cannot update, rename, pin, or delete the paste.</p>
+<p>Publishes HTML, Markdown, or a unified diff for 30 days at a random subdomain.
+One ssh pipe, no signup, no install. Identity is your ssh public key: anyone with
+a different key can read the URL but cannot update, rename, pin, or delete the
+paste.</p>
 
-<p>A Markdown paste renders in the browser; append <code>?raw</code> to its URL
-for the raw source.</p>
+<p>A Markdown paste renders in the browser; a diff renders with diff2html
+(line-by-line or side-by-side, syntax-highlighted). Append <code>?raw</code> to
+any rendered paste's URL for the raw source.</p>
 </div>
 
 <h2>Commands</h2>
@@ -107,9 +109,9 @@ for the raw source.</p>
 <dl>
   <dt>cat <em>file</em> | ssh hostthis.dev</dt>
   <dd>upload a paste. To set a label or force the content type, pass
-  <strong>--name</strong> "label" or <strong>--type</strong> html|markdown after a
-  literal <code>--</code>. ssh otherwise parses a leading <strong>--name</strong>
-  as one of its own options.</dd>
+  <strong>--name</strong> "label" or <strong>--type</strong> html|markdown|diff
+  after a literal <code>--</code>. ssh otherwise parses a leading
+  <strong>--name</strong> as one of its own options.</dd>
 
   <dt>cat <em>file</em> | ssh hostthis.dev <em>slug</em></dt>
   <dd>replace <em>slug</em>&rsquo;s content; resets the 30-day clock</dd>
@@ -187,8 +189,8 @@ after its last write. Deployments without a room store return 404.</p>
 of every active paste. Text compresses 5-10x under zstd, so the real raw-payload
 ceiling is typically 50-100 MiB.</p>
 
-<p>Pastes are HTML or Markdown; sites are a gzip-tar archive. 30-day retention from
-the last update.</p>
+<p>Pastes are HTML, Markdown, or a unified diff; sites are a gzip-tar archive.
+30-day retention from the last update.</p>
 </div>
 
 <h2>Exit Status</h2>
@@ -221,6 +223,9 @@ cat v2.html | ssh hostthis.dev abc12345
 
 <span class="ink-soft"># force content type when sniffing gets it wrong</span>
 cat tricky.html | ssh hostthis.dev -- --type html
+
+<span class="ink-soft"># render a unified diff (auto-detected, or force with --type diff)</span>
+git diff | ssh hostthis.dev
 
 <span class="ink-soft"># read your content back</span>
 ssh hostthis.dev get abc12345
