@@ -1655,20 +1655,42 @@ With no command and no stdin, the server prints the help banner.
 
 ### Upload (new)
 ```
-cat index.html | ssh hostthis.dev
+cat index.html | ssh -T hostthis.dev
 https://abc12345.hostthis.dev
 expires in 30 days
+<QR code of the URL, on stderr>
 ```
 Reads stdin until EOF or the per-paste cap (10 MiB after compression;
 see "File handling → Per-paste hard cap" for the bytes-counted detail).
 Validates content type (HTML or Markdown in v1). Generates a fresh
 random slug.
 
+**`-T` on piped uploads**: `cat file | ssh hostthis.dev` makes the ssh
+*client* request a pseudo-terminal (the no-command-arg form defaults to
+asking for a PTY), but stdin is a pipe, so the client prints
+`Pseudo-terminal will not be allocated because stdin is not a terminal.`
+to its own stderr. `-T` disables that client-side PTY request and
+silences the warning. It is a client flag only - it changes nothing on
+the server. The documented upload examples therefore use `ssh -T`. Verb
+commands (`list`, `get`, …) pass a command argument and never trigger
+the warning, so their examples stay plain.
+
+**QR code on create (stderr, always on)**: on a successful upload the
+server also renders a terminal QR code of the URL. The URL stays the
+*only* thing on stdout (the `slug=$(… | ssh -T hostthis.dev)` capture
+contract is unchanged); the QR is written to stderr alongside the
+`expires in 30 days` narration. Per clig.dev, stdout is the
+machine-readable datum and stderr is human-facing narration, so
+`2>/dev/null` cleanly drops the QR for scripts. There is no flag to
+toggle it. The same QR can be re-shown for any existing paste later via
+the `qr` verb (below).
+
 Optional `--name`:
 ```
-cat demo.html | ssh hostthis.dev --name "Acme prototype v3"
+cat demo.html | ssh -T hostthis.dev --name "Acme prototype v3"
 https://abc12345.hostthis.dev
 "Acme prototype v3" - expires in 30 days
+<QR code of the URL, on stderr>
 ```
 The name is owner-only metadata for `list`; it never appears in the
 URL. Names are 1–60 chars, any printable Unicode except newlines.
@@ -1677,12 +1699,12 @@ URL. Names are 1–60 chars, any printable Unicode except newlines.
 one line, no trailing whitespace, no formatting - so pipes Just Work:
 
 ```
-cat foo.html | ssh hostthis.dev | pbcopy   # → URL only on the clipboard
+cat foo.html | ssh -T hostthis.dev | pbcopy   # → URL only on the clipboard
 ```
 
-Everything else (expiry note, key-onboarding nudge, warnings) prints to
-stderr. Pipes lose it, but the user's terminal still renders it because
-stderr is a TTY by default.
+Everything else (expiry note, the QR code, key-onboarding nudge,
+warnings) prints to stderr. Pipes lose it, but the user's terminal still
+renders it because stderr is a TTY by default.
 
 An ssh key is required on every session - there is no anonymous mode.
 A session opened without a key gets `ssh key required` on stderr and
@@ -1690,10 +1712,14 @@ exit code 3. See the `Identity` section above.
 
 ### Upload (update an existing slug)
 ```
-cat v2.html | ssh hostthis.dev abc12345
+cat v2.html | ssh -T hostthis.dev abc12345
 https://abc12345.hostthis.dev
 v2 saved - expires in 30 days
+<QR code of the URL, on stderr>
 ```
+The update path mirrors create: the URL is the only thing on stdout, and
+the QR code of the (unchanged) URL is rendered to stderr alongside the
+`vN saved` narration.
 Slug as positional arg means "update this one". Server checks ownership
 against the key fingerprint. The same format gate the create path uses
 decides paste-vs-site: a gzip-tar archive piped to an OWNED site slug
@@ -1782,6 +1808,37 @@ Non-owners (including connecting with a different ssh key than the
 one that originally uploaded) see "not found" - the server doesn't
 distinguish "doesn't exist" from "exists but not yours" in any verb,
 so an attacker can't probe for slugs they don't own.
+
+### Show the link / QR for an existing paste (`url`, `qr`)
+```
+ssh hostthis.dev url abc12345
+https://abc12345.hostthis.dev
+
+ssh hostthis.dev qr abc12345
+https://abc12345.hostthis.dev
+<QR code of the URL, on stderr>
+```
+
+Re-show the shareable link for any existing paste, anytime - without
+re-uploading. Both reuse the exact URL-construction logic the create
+path uses (subdomain vs. dev path mode), so the URL is byte-identical to
+what the original upload returned.
+
+- `url <slug>` prints **just the URL** on stdout (scripting / copy
+  friendly). Nothing else.
+- `qr <slug>` prints the **URL on stdout and the QR code on stderr** -
+  exactly mirroring create, so the same `2>/dev/null` script contract
+  holds and you can pipe the URL cleanly while still seeing the QR in a
+  terminal.
+
+**No ownership check.** The URL is a public capability - knowing the
+slug already grants read access at that URL - so any caller may `url` /
+`qr` any slug; there is nothing to leak that the URL itself doesn't
+already expose. The verbs DO verify the target **exists and is not
+expired**: a missing or expired slug returns the standard `not found`
+on stderr and exits 4, the same shape as every other not-found, so the
+behavior is uniform across verbs. A slug that names a deployed static
+site resolves the same way (a site also has a URL).
 
 ### Versions
 ```
@@ -1905,14 +1962,19 @@ Pipe a rendered file in, get a URL out. Pastes expire 30 days after last update.
 
 UPLOAD
 
-    cat foo.html | ssh hostthis.dev
-    cat doc.md   | ssh hostthis.dev --name "design notes"
+    cat foo.html | ssh -T hostthis.dev
+    cat doc.md   | ssh -T hostthis.dev --name "design notes"
+
+    (-T silences the ssh "pseudo-terminal will not be allocated" warning
+     on piped uploads. A QR code of the URL prints to stderr on success.)
 
 UPDATE & MANAGE (owner only; ssh key authenticates)
 
-    cat foo.html | ssh hostthis.dev <slug>      replace bytes; URL stays the same
+    cat foo.html | ssh -T hostthis.dev <slug>   replace bytes; URL stays the same
     ssh hostthis.dev list                       all your active pastes
     ssh hostthis.dev get <slug>                 read content back
+    ssh hostthis.dev url <slug>                 re-show the URL (no QR)
+    ssh hostthis.dev qr <slug>                  re-show the URL + QR code
     ssh hostthis.dev rename <slug> "label"      set / change owner label
     ssh hostthis.dev delete <slug> [<ver>]      wipe the paste, or tombstone one version
     ssh hostthis.dev whoami                     identity + active count + quota
@@ -1925,8 +1987,8 @@ VERSION HISTORY
 
 STATIC SITES
 
-    tar czf - site/ | ssh hostthis.dev          deploy a multi-file site
-    tar czf - site/ | ssh hostthis.dev <slug>   re-deploy in place
+    tar czf - site/ | ssh -T hostthis.dev        deploy a multi-file site
+    tar czf - site/ | ssh -T hostthis.dev <slug> re-deploy in place
 
 LIMITS
 

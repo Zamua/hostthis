@@ -61,6 +61,15 @@ type PasteReader interface {
 	Get(domain.Slug) (domain.Paste, error)
 }
 
+// SiteReader is the narrow by-slug read the SSH layer needs to resolve a
+// deployed static-site slug to its URL for the `url` / `qr` verbs. It is
+// optional: when nil, those verbs resolve paste slugs only. Like
+// PasteReader, this is a non-owner-scoped lookup - the URL is a public
+// capability, so resolving a live slug leaks nothing the URL doesn't.
+type SiteReader interface {
+	Get(domain.Slug) (domain.Site, error)
+}
+
 // Server is the SSH listener.
 type Server struct {
 	Addr        string
@@ -70,6 +79,7 @@ type Server struct {
 	Deploy      *service.DeploySite // optional; nil disables static-site archive uploads
 	Manage      service.PasteManager
 	Pastes      PasteReader      // by-slug read for the `versions` current-marker
+	Sites       SiteReader       // optional; by-slug site read for `url`/`qr` (nil = paste-only)
 	KeyGate     *service.KeyGate // optional; nil disables the Sybil rate limit
 	Now         func() time.Time // clock; defaults to time.Now when nil
 	BuildURL    URLBuilder
@@ -328,6 +338,10 @@ func (s *Server) handleSession(sess gossh.Session) {
 		s.verbList(sess, owner)
 	case "get":
 		s.verbGet(sess, owner, argv[1:])
+	case "url":
+		s.verbURL(sess, argv[1:])
+	case "qr":
+		s.verbQR(sess, argv[1:])
 	case "rename":
 		s.verbRename(sess, owner, argv[1:])
 	case "delete":
@@ -418,6 +432,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 			fmt.Fprintf(sess.Stderr(), "  ssh %s unpin %s        # always serve latest\n", s.apex(), slug)
 			fmt.Fprintf(sess.Stderr(), "  ssh %s pin %s %d       # serve this new version\n", s.apex(), slug, res.NewVer)
 		}
+		writeQR(sess.Stderr(), url)
 		_ = sess.Exit(ExitOK)
 		return
 	}
@@ -448,6 +463,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	} else {
 		_, _ = fmt.Fprintln(sess.Stderr(), "expires in 30 days")
 	}
+	writeQR(sess.Stderr(), url)
 	_ = sess.Exit(ExitOK)
 }
 
@@ -465,6 +481,7 @@ func (s *Server) deploySite(sess gossh.Session, owner string, body io.Reader) {
 	url := s.BuildURL(res.Site.Slug)
 	fmt.Fprintln(sess, url)
 	_, _ = fmt.Fprintf(sess.Stderr(), "site: %d file(s). expires in 30 days\n", len(res.Site.Manifest.Files))
+	writeQR(sess.Stderr(), url)
 	_ = sess.Exit(ExitOK)
 }
 
@@ -486,6 +503,7 @@ func (s *Server) deploySiteToSlug(sess gossh.Session, owner string, slug domain.
 	url := s.BuildURL(res.Site.Slug)
 	_, _ = fmt.Fprintln(sess, url)
 	_, _ = fmt.Fprintf(sess.Stderr(), "site: %d file(s). expires in 30 days\n", len(res.Site.Manifest.Files))
+	writeQR(sess.Stderr(), url)
 	_ = sess.Exit(ExitOK)
 }
 
@@ -555,6 +573,73 @@ func (s *Server) verbGet(sess gossh.Session, owner string, argv []string) {
 	}
 	_, _ = sess.Write(body)
 	_ = sess.Exit(ExitOK)
+}
+
+// -- url / qr ----------------------------------------------------------------
+
+// verbURL prints just the shareable URL for an existing slug on stdout.
+// No ownership check - the URL is a public capability - but the target
+// must exist and not be expired, otherwise the standard not-found
+// (exit 4) is returned, the same shape as every other missing slug.
+func (s *Server) verbURL(sess gossh.Session, argv []string) {
+	slug, err := requireSlug(argv)
+	if err != nil {
+		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
+		_ = sess.Exit(ExitUsage)
+		return
+	}
+	url, ok := s.resolveExistingURL(slug)
+	if !ok {
+		fmt.Fprintln(sess.Stderr(), "hostthis: not found")
+		_ = sess.Exit(ExitNotFound)
+		return
+	}
+	fmt.Fprintln(sess, url)
+	_ = sess.Exit(ExitOK)
+}
+
+// verbQR mirrors create for an existing slug: the URL on stdout, the QR
+// code on stderr. Same existence/expiry gate and not-found shape as
+// verbURL; the only difference is the QR render.
+func (s *Server) verbQR(sess gossh.Session, argv []string) {
+	slug, err := requireSlug(argv)
+	if err != nil {
+		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
+		_ = sess.Exit(ExitUsage)
+		return
+	}
+	url, ok := s.resolveExistingURL(slug)
+	if !ok {
+		fmt.Fprintln(sess.Stderr(), "hostthis: not found")
+		_ = sess.Exit(ExitNotFound)
+		return
+	}
+	fmt.Fprintln(sess, url)
+	writeQR(sess.Stderr(), url)
+	_ = sess.Exit(ExitOK)
+}
+
+// resolveExistingURL resolves slug to its shareable URL when the slug
+// names a live (existing and non-expired) paste or, failing that, a live
+// static site. The bool is false when no such live slug exists; the
+// caller maps that to the standard not-found. URL construction is reused
+// from BuildURL (the same logic the create path uses) so the result is
+// byte-identical to what the original upload returned. No ownership
+// check is performed: knowing the slug already grants read access at the
+// URL, so there is nothing to leak that the URL doesn't already expose.
+func (s *Server) resolveExistingURL(slug domain.Slug) (string, bool) {
+	now := s.now().UTC()
+	if s.Pastes != nil {
+		if p, err := s.Pastes.Get(slug); err == nil && now.Before(p.ExpiresAt) {
+			return s.BuildURL(p.Slug), true
+		}
+	}
+	if s.Sites != nil {
+		if site, err := s.Sites.Get(slug); err == nil && now.Before(site.ExpiresAt) {
+			return s.BuildURL(site.Slug), true
+		}
+	}
+	return "", false
 }
 
 // -- rename ------------------------------------------------------------------
@@ -880,18 +965,21 @@ func emitHelp(sess gossh.Session, apex string) {
 // apex domain so the help is correct under any deployment.
 const helpTextTemplate = `Pipe a rendered file in, get a URL out. Pastes expire 30 days after last update.
 
-UPLOAD
+UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;
+         a QR code of the URL also prints to stderr on success)
 
-    cat foo.html  | ssh {{apex}}
-    cat doc.md    | ssh {{apex}} --name "design notes"
-    git diff      | ssh {{apex}}                     rendered as a diff
-    cat patch.txt | ssh {{apex}} --type diff         force the diff renderer
+    cat foo.html  | ssh -T {{apex}}
+    cat doc.md    | ssh -T {{apex}} --name "design notes"
+    git diff      | ssh -T {{apex}}                  rendered as a diff
+    cat patch.txt | ssh -T {{apex}} --type diff      force the diff renderer
 
 UPDATE & MANAGE (owner only; ssh key authenticates)
 
-    cat foo.html | ssh {{apex}} <slug>      replace bytes; URL stays the same
+    cat foo.html | ssh -T {{apex}} <slug>   replace bytes; URL stays the same
     ssh {{apex}} list                       all your active pastes
     ssh {{apex}} get <slug>                 read content back
+    ssh {{apex}} url <slug>                 re-show the URL (no QR)
+    ssh {{apex}} qr <slug>                  re-show the URL + QR code
     ssh {{apex}} rename <slug> "label"      set / change owner label
     ssh {{apex}} delete <slug> [<ver>]      wipe the paste, or tombstone one version
     ssh {{apex}} whoami                     identity + active count + quota
@@ -904,8 +992,8 @@ VERSION HISTORY
 
 STATIC SITES
 
-    tar czf - site/ | ssh {{apex}}          deploy a multi-file site
-    tar czf - site/ | ssh {{apex}} <slug>   re-deploy in place
+    tar czf - site/ | ssh -T {{apex}}        deploy a multi-file site
+    tar czf - site/ | ssh -T {{apex}} <slug> re-deploy in place
 
 LIMITS
 

@@ -22,7 +22,7 @@ import (
 // must recognize (one descriptor each in help_verbs.go). Whenever a new
 // verb is added to the dispatcher, append it here AND add a descriptor.
 var verbHelpVerbs = []string{
-	"get", "list", "rename", "delete",
+	"get", "list", "url", "qr", "rename", "delete",
 	"versions", "pin", "unpin", "whoami", "help",
 }
 
