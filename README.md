@@ -109,6 +109,11 @@ every durable `PUT`/`DELETE` is mirrored to all clients as
 `{"type":"put"|"delete", ...}`. Frames you send are broadcast verbatim
 to other clients and never stored, for ephemeral motion.
 
+A value is opaque bytes. The whole-room read and the `snapshot`/`put`
+frames embed each value as JSON when it parses as JSON - a value you PUT
+as a JSON object comes back as a nested object, not a quoted string - and
+as a JSON string otherwise. Reading a single key returns the raw bytes.
+
 Limits: 256 KiB and 256 keys per room; 64 MiB per app; a room expires 30
 days after its last write. Deployments without a room store return 404.
 
