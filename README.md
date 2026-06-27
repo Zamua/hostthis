@@ -15,7 +15,7 @@ ssh hostthis.dev <command> [<args>]
 
 ## DESCRIPTION
 
-Publishes HTML or Markdown for 7 days at a random subdomain. One ssh
+Publishes HTML or Markdown for 30 days at a random subdomain. One ssh
 pipe, no signup, no install. Identity is your ssh public key: anyone
 with a different key can read the URL but cannot update, rename, pin,
 or delete the paste.
@@ -34,7 +34,7 @@ literal <code>--</code>. ssh otherwise parses a leading <code>--name</code>
 as one of its own options.</dd>
 
 <dt><code>cat <em>file</em> | ssh hostthis.dev <em>slug</em></code></dt>
-<dd>replace <em>slug</em>'s content; resets the 7-day clock</dd>
+<dd>replace <em>slug</em>'s content; resets the 30-day clock</dd>
 
 <dt><code>ssh hostthis.dev list</code></dt>
 <dd>active pastes, soonest to expire first</dd>
@@ -118,7 +118,7 @@ days after its last write. Deployments without a room store return 404.
 active version of every active paste. Text compresses 5-10x under
 zstd, so the real raw-payload ceiling is typically 50-100 MiB.
 
-Pastes are HTML or Markdown; sites are a gzip-tar archive. 7-day
+Pastes are HTML or Markdown; sites are a gzip-tar archive. 30-day
 retention from the last update.
 
 ## EXIT STATUS

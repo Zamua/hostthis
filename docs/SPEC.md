@@ -376,7 +376,7 @@ There is no new verb and no flag. hostthis DETECTS the archive the same
 way it detects Markdown vs HTML (by sniffing the upload), safe-untars
 it, stores each file as a content-addressed blob plus a manifest, and
 serves the directory at `<slug>.hostthis.dev/<path>`. Everything else -
-identity, quota, the 7-day expiry, versioning, the security model - is
+identity, quota, the 30-day expiry, versioning, the security model - is
 identical to a single-file paste. A static site is just "a paste that
 happens to be a directory."
 
@@ -457,7 +457,7 @@ A **Site** is a new domain aggregate that lives alongside `Paste`:
   SHA256 of its blob, plus per-file size and a content-type derived
   from the file extension.
 - `CreatedAt` / `UpdatedAt` / `ExpiresAt` - the same fields and the
-  same 7-day retention clock a paste carries.
+  same 30-day retention clock a paste carries.
 
 The `Manifest` is a pure value object: building it from extracted
 entries, looking a path up in it, and computing each file's
@@ -610,7 +610,7 @@ Nothing about the product opinions changes for sites:
   decompression-bomb guard aborts the untar the instant the running
   total would push the owner over that cap, so a site can never be
   persisted over-quota.
-- **Retention** is the same fixed 7-day expiry from last update; a site
+- **Retention** is the same fixed 30-day expiry from last update; a site
   evicts itself exactly like a paste, no per-site control.
 - **Versioning** reuses the paste-versioning shape where it is low-cost:
   a deploy to an OWNED site slug re-deploys the site in place (same slug,
@@ -650,7 +650,7 @@ site-vs-paste, the slug decides new-vs-update.
   mid-untar decompression-bomb guard still bounds extraction against the
   remaining budget so an over-quota archive is rejected before any blob
   lands.
-- **Retention resets.** Like a paste update, the 7-day expiry clock
+- **Retention resets.** Like a paste update, the 30-day expiry clock
   restarts from the re-deploy time.
 
 A re-deploy to an existing slug NEVER lands as a fresh slug: the slug is
@@ -1000,10 +1000,10 @@ expires after a fixed window of inactivity: default 30 days since its last
 write** (a `PUT` or `DELETE`; a read does not extend it). On expiry the
 room record and every value in its namespace are deleted by the **same
 periodic sweep** that expires pastes and sites - one more record kind the
-sweep walks, GC'd through the existing expiry-index machinery. The TTL is
-longer than the 7-day paste window on purpose: a paste is "share this link
-this week," but a room backs a live app whose participants may return over
-several weeks (a poll open for a month, a retro board a team revisits).
+sweep walks, GC'd through the existing expiry-index machinery. The window
+matches the paste and site retention: 30 days is long enough that a room
+backing a live app whose participants may return over several weeks (a poll
+open for a month, a retro board a team revisits) survives normal use.
 Still finite, still no user-facing knob, still swept automatically - the
 default is flagged as a starting point, not a contract, and like the paste
 window it is a product opinion, not an operator config.
@@ -1583,19 +1583,19 @@ concurrent register / broadcast / unregister path fails the build.
 
 ## Retention
 
-**Every paste lives for 7 days from its last update**, then it's
+**Every paste lives for 30 days from its last update**, then it's
 deleted (slug, all versions, content blob if unreferenced). No
 exceptions, no user-facing control, no operator config.
 
-- Initial upload: 7-day clock starts.
-- Each `update <slug>` resets the clock to 7 days from that moment.
+- Initial upload: 30-day clock starts.
+- Each `update <slug>` resets the clock to 30 days from that moment.
 - No `touch` verb, no `--expires` flag. Time-based extension only happens
   as a side effect of actually changing content.
 
 Rationale for short + fixed: hostthis is for *shareable rendered content*
 (HTML mockups, Markdown reports, demo prototypes). The use case is
 "send this link to a coworker this week"; nobody is sending an "open
-this link in six months" URL through us. 7 days forces the asker to
+this link in six months" URL through us. 30 days forces the asker to
 re-host if they need it again, which catches stale-link rot at the source.
 
 Long-term hosting is a deliberate non-goal - see "Non-goals" at the
@@ -1612,7 +1612,7 @@ With no command and no stdin, the server prints the help banner.
 ```
 cat index.html | ssh hostthis.dev
 https://abc12345.hostthis.dev
-expires in 7 days
+expires in 30 days
 ```
 Reads stdin until EOF or the per-paste cap (10 MiB after compression;
 see "File handling → Per-paste hard cap" for the bytes-counted detail).
@@ -1623,7 +1623,7 @@ Optional `--name`:
 ```
 cat demo.html | ssh hostthis.dev --name "Acme prototype v3"
 https://abc12345.hostthis.dev
-"Acme prototype v3" - expires in 7 days
+"Acme prototype v3" - expires in 30 days
 ```
 The name is owner-only metadata for `list`; it never appears in the
 URL. Names are 1–60 chars, any printable Unicode except newlines.
@@ -1647,7 +1647,7 @@ exit code 3. See the `Identity` section above.
 ```
 cat v2.html | ssh hostthis.dev abc12345
 https://abc12345.hostthis.dev
-v2 saved - expires in 7 days
+v2 saved - expires in 30 days
 ```
 Slug as positional arg means "update this one". Server checks ownership
 against the key fingerprint. The same format gate the create path uses
@@ -1672,7 +1672,7 @@ described here. The slug and URL are unchanged either way. Failure modes
 See "Exit codes" below for the canonical mapping.
 
 Update creates a new immutable version under the hood (SHA-keyed blob
-ref) and resets the 7-day retention clock. What the URL serves next
+ref) and resets the 30-day retention clock. What the URL serves next
 depends on pin state:
 
 - If the paste is *unpinned* (default for new uploads): the new
@@ -1855,7 +1855,7 @@ canonical user-facing reference and must stay in sync with this section, the
 README, and the landing page.
 
 ```
-Pipe a rendered file in, get a URL out. Pastes expire 7 days after last update.
+Pipe a rendered file in, get a URL out. Pastes expire 30 days after last update.
 
 UPLOAD
 
@@ -1943,7 +1943,7 @@ The sum of an identity's active pastes' COMPRESSED bytes (counting
 EVERY non-deleted version of an updated paste) cannot exceed
 `UserQuotaBytes` (10 MiB; not operator-configurable). "Identity" is
 the SHA256 fingerprint of the uploader's ssh public key. When pastes
-expire (7 days), get deleted, or have older versions explicitly
+expire (30 days), get deleted, or have older versions explicitly
 deleted via `delete <slug> <ver>`, the cap frees up. Over-quota uploads
 error with `would exceed your 10 MiB total quota`.
 
@@ -2059,7 +2059,7 @@ no half-applied state visible to readers."
   physical bytes (post-compression, post-dedup), enforced by the storage
   layer, not an app-level scan
 - Concurrent per-identity quota races → atomic transactions
-- 7-day retention as the long-term release valve
+- 30-day retention as the long-term release valve
 
 *Not bounded by the protocol* (operator-layer concerns):
 - *Multi-IP Sybil via residential-proxy fleets*. An attacker with 100
@@ -4411,7 +4411,7 @@ retained for offline use but are no longer on the live read path.
 
 ### Abuse reporting
 
-7-day retention is the primary defense - every paste evicts itself in a
+30-day retention is the primary defense - every paste evicts itself in a
 day even if the operator does nothing. For faster takedown, an
 operator can delete a slug's row directly from the sqlite db; the
 next read 404s and the next sweep GCs the blob. A user-facing
@@ -4461,7 +4461,7 @@ sample production compose.
 - Per-identity quota (10 MiB compressed)
 - Raw-input hard fast-fail (100 MiB, prevents unbounded reads)
 - Blob compression (zstd level 3, all blobs)
-- Retention (7 days)
+- Retention (30 days)
 - Sandbox headers (X-Frame-Options, Referrer-Policy, Permissions-Policy)
 - Slug alphabet (`abcdefghijkmnpqrstuvwxyz23456789`)
 
@@ -4486,7 +4486,7 @@ object store (a hard, exact ceiling on real physical post-compression /
 post-dedup bytes) and can put hostthis behind a reverse proxy that adds
 per-IP rate limiting on top of the Sybil gate. A rejected `Put` past the
 bucket quota surfaces to the user as a graceful "service is at capacity"
-response, and the system recovers as 7-day expiry + the sweep reclaim
+response, and the system recovers as 30-day expiry + the sweep reclaim
 bytes back under the quota.
 
 ---
@@ -4494,7 +4494,7 @@ bytes back under the quota.
 ## Future directions (proposed, not built)
 
 These are bigger bets that would grow hostthis from "host a renderable file
-for 7 days" toward "deploy a small real app over SSH, no account." The first
+for 30 days" toward "deploy a small real app over SSH, no account." The first
 of them (static directory hosting) has SHIPPED - see "Static site archives"
 above. The persistence API has now shipped its FIRST CUT too - the no-auth,
 capability-based **Rooms** KV store - see "Rooms (app persistence)" above;
@@ -4511,7 +4511,7 @@ the SSH-native, no-account, your-key-is-your-identity model.
 proposal here is real: a gzip-tar of a static site, piped over the
 existing SSH upload surface (no new verb), is detected, safe-untarred,
 stored as content-addressed blobs plus a manifest, and served at
-`<slug>.hostthis.dev/<path>` under the same identity, quota, 7-day
+`<slug>.hostthis.dev/<path>` under the same identity, quota, 30-day
 expiry, and origin-isolation model as an HTML paste. The "Static site
 archives" section is the authoritative description; this bullet is kept
 only as the pointer from the future-directions framing it grew out of.
@@ -4632,9 +4632,9 @@ comments, but the persistence API lets a USER build them.
 ## Non-goals (explicitly out of v1 scope)
 
 These are interesting but expand the product beyond "host renderable
-content for 7 days." Keep the surface small.
+content for 30 days." Keep the surface small.
 
-- **Long-term storage**. Every paste expires at 7 days, period. If you
+- **Long-term storage**. Every paste expires at 30 days, period. If you
   need a permanent URL, host elsewhere.
 - **Binary / non-renderable file hosting**. ZIPs, photos, videos,
   arbitrary blobs are out of scope.

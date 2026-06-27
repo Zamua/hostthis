@@ -36,7 +36,7 @@ type SiteRepo interface {
 	//     re-deploy does not double-count; a smaller one frees the diff.
 	//     ErrServiceFull / ErrOverUserQuota on overflow.
 	//   - On success the row's manifest, deduped_size, updated_at, and
-	//     expires_at are all replaced from s (the 7-day clock restarts),
+	//     expires_at are all replaced from s (the 30-day clock restarts),
 	//     and the expiry index is re-keyed. The slug and created_at are
 	//     unchanged. The swap is a single transaction: the URL serves the
 	//     OLD manifest until it lands, the new one immediately after.
