@@ -20,9 +20,9 @@ subdomain. One ssh pipe, no signup, no install. Identity is your ssh
 public key: anyone with a different key can read the URL but cannot
 update, rename, pin, or delete the paste.
 
-A Markdown paste renders in the browser; a diff renders with diff2html
-(line-by-line or side-by-side, with syntax highlighting). Append `?raw`
-to any rendered paste's URL for the raw source.
+A Markdown paste renders in the browser; so does a diff (line-by-line
+or side-by-side, with syntax highlighting). Append `?raw` to any
+rendered paste's URL for the raw source.
 
 ## COMMANDS
 
