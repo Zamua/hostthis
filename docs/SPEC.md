@@ -4240,7 +4240,7 @@ hostthis has two scaling cliffs that a CDN solves:
 
 ### Cache-Control posture
 
-Paste read responses set:
+A non-negotiated paste read response (an HTML paste) sets:
 
 ```
 Cache-Control: public, max-age=3600
@@ -4256,6 +4256,35 @@ saving body bytes on the wire.
 Apex landing page is `Cache-Control: public, max-age=300` (5 min) so
 content updates propagate quickly without becoming a no-cache origin
 hammer.
+
+#### The content-negotiated bare URL is `no-cache`
+
+A client-rendered kind (Markdown, Diff - any kind that ships a
+client-render shell) is served at its **bare URL** (no `?raw` query) by
+*content negotiation on the `Accept` header*: a browser
+(`Accept: text/html`) gets the render shell, a non-browser client (curl,
+a link-unfurl bot, `Accept: */*` or `text/markdown`) gets the raw bytes.
+Both representations answer the *same* URL.
+
+A CDN keys its cache on the URL, not on `Accept` - Cloudflare honors only
+`Vary: Accept-Encoding` (and `Vary` for images via Polish); it ignores
+`Vary: Accept` for cache keying, so `Vary: Accept` is **not** a fix. If
+the bare URL were cacheable, whichever client primed the edge first would
+pin its representation for every later client for up to `max-age`: a
+curl/bot priming the raw bytes makes a *browser* render raw text instead
+of the shell (and vice-versa).
+
+So the bare URL of a client-rendered kind is `Cache-Control: no-cache`
+whether it resolves to the shell or to the raw-by-`Accept` bytes. The
+edge never stores a variant of it; it revalidates against the ETag on
+every load (a cheap 304 when unchanged). What stays edge-cacheable:
+
+- the explicit `?raw=1` URL - it is *always* raw and never content-
+  negotiates, so it has one stable representation. This is the read-
+  throughput path the shells fetch, and it keeps `public, max-age=3600`.
+- the immutable `/_hostthis/...` assets (the bundled renderer libs).
+- an HTML paste's bare URL - HTML is not content-negotiated (one
+  representation), so it keeps `public, max-age=3600`.
 
 Static sites (multi-file) set `Cache-Control: public, no-cache` instead
 of `max-age`. A single-file paste is the top-level document, which a
@@ -4334,13 +4363,18 @@ https://<slug>.<apex>/?raw=1    the raw bytes the markdown/diff shell fetches
 ```
 
 The markdown (and diff) render shell is a fixed, content-independent page
-served at `/`; the actual bytes live at `/?raw=1` (the shell fetches them
-client-side - see "Client-rendered markdown"). Those are SEPARATE CDN
-cache entries. Purging only `/` would refresh the shell but leave stale
-content cached at `/?raw=1`, so an edited markdown/diff paste would show
-its OLD content until max-age expired. The adapter therefore purges both. The
-URL-variant policy lives in the adapter (which owns the apex / scheme /
-URL-mode config); the service layer only ever names the slug.
+served at the bare `/`; the actual bytes live at `/?raw=1` (the shell
+fetches them client-side - see "Client-rendered markdown"). The bare `/`
+is `no-cache` (content-negotiated, see "The content-negotiated bare URL is
+`no-cache`" above) so the edge never caches it; the editable content lives
+at `/?raw=1`, which IS edge-cacheable (`max-age=3600`). Purging only the
+bare `/` would leave stale content cached at `/?raw=1`, so an edited
+markdown/diff paste would show its OLD content until max-age expired. The
+adapter therefore purges both - the `/?raw=1` purge is the one that
+matters, and purging the bare `/` is a harmless belt-and-suspenders since
+nothing caches it. The URL-variant policy lives in the adapter (which owns
+the apex / scheme / URL-mode config); the service layer only ever names
+the slug.
 
 Env vars when `HOSTTHIS_CACHE_BACKEND=cloudflare`:
 
