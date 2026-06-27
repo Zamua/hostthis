@@ -273,7 +273,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	// same shell ETag. Decide here so the conditional-GET 304 below uses
 	// the right validator.
 	clientRendered := p.Kind == domain.KindMarkdown || p.Kind == domain.KindDiff
-	rawWanted := clientRendered && wantsRawMarkdown(r)
+	rawWanted := clientRendered && wantsRaw(r)
 
 	// ETag is the content SHA for HTML and raw markdown/diff - content-
 	// addressed, byte-stable. Each shell uses its own shell version instead.
@@ -344,7 +344,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		// view - a cheap 304 when unchanged - means a shell/style change is
 		// seen on the next navigation instead of being pinned for an hour.
 		h.Set("Cache-Control", "no-cache")
-		h.Set("Content-Security-Policy", mdShellCSP)
+		h.Set("Content-Security-Policy", shellCSP)
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(shellHTML())
 	case domain.KindDiff:
@@ -372,7 +372,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		// no framing. no-cache so a shell/style change (a diffShellVersion
 		// bump) is seen on the next navigation rather than pinned for an hour.
 		h.Set("Cache-Control", "no-cache")
-		h.Set("Content-Security-Policy", mdShellCSP)
+		h.Set("Content-Security-Policy", shellCSP)
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(diffShellHTML())
 	default:
@@ -572,21 +572,22 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 	return true
 }
 
-// mdShellCSP is set ONLY on the markdown shell response. It locks the
-// shell down: no default sources, scripts/styles/connects only from the
-// same origin (the vendored libs + bootstrap + the ?raw fetch), images
-// and media from anywhere (markdown can embed remote images), no inline
-// script, no framing, no form submission. 'unsafe-inline' is allowed for
-// styles only so the markdown's own inline styles (which DOMPurify keeps)
+// shellCSP is set on every client-render shell response (markdown and
+// diff). It locks the shell down: no default sources, scripts/styles/
+// connects only from the same origin (the vendored libs + bootstrap + the
+// ?raw fetch), images and media from anywhere (markdown can embed remote
+// images), no inline script, no framing, no form submission.
+// 'unsafe-inline' is allowed for styles only so the markdown's own inline
+// styles (which DOMPurify keeps) and the diff renderer's injected styles
 // render; scripts get no such escape hatch.
-const mdShellCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+const shellCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
-// wantsRawMarkdown reports whether the client asked for the raw markdown
-// bytes rather than the client-render shell. True when ?raw is present or
-// when the Accept header does not include text/html (e.g. a curl default
+// wantsRaw reports whether the client asked for the raw paste bytes rather
+// than the client-render shell (markdown or diff). True when ?raw is present
+// or when the Accept header does not include text/html (e.g. a curl default
 // of */*, or an explicit text/markdown). A browser navigation sends
 // Accept: text/html,... and so gets the shell.
-func wantsRawMarkdown(r *http.Request) bool {
+func wantsRaw(r *http.Request) bool {
 	return r.URL.Query().Has("raw") || !strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 

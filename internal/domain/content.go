@@ -185,14 +185,25 @@ func looksLikeMarkdown(b []byte) bool {
 var hunkHeaderRe = regexp.MustCompile(`@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@`)
 
 // looksLikeDiff reports whether the input is a unified diff. Detection is
-// deliberately conservative: the prefix must contain at least one real
-// hunk header (hunkHeaderRe). The `diff --git`, `--- ` / `+++ `, and
+// deliberately conservative: the scanned prefix must contain at least one
+// real hunk header (hunkHeaderRe). The `diff --git`, `--- ` / `+++ `, and
 // `Index:` markers that accompany a diff are NOT sufficient on their own
 // and are not even required - the hunk header alone gates, so a paste that
 // merely contains `+`/`-` lines (prose, source code, a markdown list) is
 // never mis-detected. A false positive renders normal text through
 // diff2html (which looks broken); a false negative just falls through to
 // the markdown/HTML path, so we bias toward requiring the strong signal.
+//
+// The scan is bounded to the first 1 KB, matching looksLikeMarkdown (in
+// practice the caller already passes only a ~512-byte upload prefix). One
+// accepted consequence of the hunk header gating anywhere in the prefix, and
+// of diff running before markdown: a Markdown doc that opens with a fenced
+// ```diff block detects as `diff`. That's a deliberate trade (the hunk
+// header is the spec'd gate, per docs/SPEC.md); `--type markdown` forces the
+// markdown renderer when that's not what you want.
 func looksLikeDiff(b []byte) bool {
+	if len(b) > 1024 {
+		b = b[:1024]
+	}
 	return hunkHeaderRe.Match(b)
 }
