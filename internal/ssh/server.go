@@ -882,8 +882,10 @@ const helpTextTemplate = `Pipe a rendered file in, get a URL out. Pastes expire 
 
 UPLOAD
 
-    cat foo.html | ssh {{apex}}
-    cat doc.md   | ssh {{apex}} --name "design notes"
+    cat foo.html  | ssh {{apex}}
+    cat doc.md    | ssh {{apex}} --name "design notes"
+    git diff      | ssh {{apex}}                     rendered as a diff
+    cat patch.txt | ssh {{apex}} --type diff         force the diff renderer
 
 UPDATE & MANAGE (owner only; ssh key authenticates)
 
@@ -908,7 +910,7 @@ STATIC SITES
 LIMITS
 
     10 MiB per identity, counting post-compression bytes across all
-    your active pastes. HTML, Markdown, or a gzip-tar site archive.
+    your active pastes. HTML, Markdown, diff, or a gzip-tar site archive.
 
     Apps can persist + sync state: https://{{apex}}/  (rooms + realtime API)`
 

@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -14,6 +15,12 @@ type ContentKind string
 const (
 	KindHTML     ContentKind = "html"
 	KindMarkdown ContentKind = "markdown"
+	// KindDiff is a unified diff (git diff / diff -u output). It is
+	// detected conservatively by a real hunk header in the upload prefix
+	// (see looksLikeDiff) and served, like Markdown, as a fixed
+	// content-independent shell that renders the raw bytes client-side
+	// (diff2html + highlight.js). No server-side diffing.
+	KindDiff ContentKind = "diff"
 	// KindSite is a gzip-tar archive of a static site (HTML/CSS/JS). It
 	// is detected by the gzip magic in the upload prefix; the archive's
 	// contents (a tar inside, and at least one piece of web content) are
@@ -26,7 +33,7 @@ const (
 // outside the v1 accepted set. The error message is what the user
 // sees on stderr.
 var ErrUnsupportedKind = errors.New(
-	"hostthis only accepts content that needs rendering (html, markdown)")
+	"hostthis only accepts content that needs rendering (html, markdown, diff)")
 
 // MaxPasteBytes is the universal per-paste size cap, measured in
 // COMPRESSED bytes (post-zstd, as written to the blob store). Equals
@@ -107,6 +114,11 @@ func DetectKind(b []byte, hint string) (ContentKind, error) {
 			return "", ErrUnsupportedKind
 		}
 		return KindMarkdown, nil
+	case hint == "diff" || hint == "patch" || strings.HasPrefix(hint, "text/x-diff") || strings.HasPrefix(hint, "text/x-patch"):
+		if !strings.HasPrefix(ct, "text/") {
+			return "", ErrUnsupportedKind
+		}
+		return KindDiff, nil
 	case hint != "":
 		// Hint we don't understand → reject without trying sniffing.
 		return "", ErrUnsupportedKind
@@ -117,6 +129,13 @@ func DetectKind(b []byte, hint string) (ContentKind, error) {
 	case strings.HasPrefix(ct, "text/html"):
 		return KindHTML, nil
 	case strings.HasPrefix(ct, "text/plain"):
+		// Diff detection runs BEFORE the markdown fallback: a unified diff
+		// is plain text that a conservative hunk-header check identifies
+		// precisely, so a real diff renders as a diff while ordinary prose
+		// (which never carries a hunk header) falls through to markdown.
+		if looksLikeDiff(b) {
+			return KindDiff, nil
+		}
 		if looksLikeMarkdown(b) {
 			return KindMarkdown, nil
 		}
@@ -156,4 +175,24 @@ func looksLikeMarkdown(b []byte) bool {
 		return true // setext/horizontal rule
 	}
 	return false
+}
+
+// hunkHeaderRe matches a unified-diff hunk header: "@@ -<n>[,<n>] +<n>[,<n>] @@".
+// The line counts after the comma are optional (a single-line hunk omits
+// them). A trailing section heading after the closing "@@" is allowed and
+// not matched. This is the load-bearing signal for diff detection - it's
+// specific enough that ordinary text never produces it by accident.
+var hunkHeaderRe = regexp.MustCompile(`@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@`)
+
+// looksLikeDiff reports whether the input is a unified diff. Detection is
+// deliberately conservative: the prefix must contain at least one real
+// hunk header (hunkHeaderRe). The `diff --git`, `--- ` / `+++ `, and
+// `Index:` markers that accompany a diff are NOT sufficient on their own
+// and are not even required - the hunk header alone gates, so a paste that
+// merely contains `+`/`-` lines (prose, source code, a markdown list) is
+// never mis-detected. A false positive renders normal text through
+// diff2html (which looks broken); a false negative just falls through to
+// the markdown/HTML path, so we bias toward requiring the strong signal.
+func looksLikeDiff(b []byte) bool {
+	return hunkHeaderRe.Match(b)
 }

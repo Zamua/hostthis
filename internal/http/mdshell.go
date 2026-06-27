@@ -51,16 +51,31 @@ var mdShellAssets = map[string]string{
 
 // serveAsset serves a single whitelisted client-render asset under
 // /_hostthis/<name>. The assets are immutable (vendored libs pinned by
-// version, the bootstrap + CSS tied to mdShellVersion), so they get a
-// year-long immutable cache. Any name outside the whitelist 404s.
+// version, the bootstrap + CSS tied to the shell version), so they get a
+// year-long immutable cache. Both the markdown shell and the diff shell
+// share this namespace; the name is matched against each shell's
+// whitelist in turn. Any name outside both whitelists 404s, so no path
+// traversal or arbitrary embedded-file disclosure is possible.
 func (s *Server) serveAsset(w http.ResponseWriter, r *http.Request) {
 	name := path.Base(r.URL.Path)
-	ct, ok := mdShellAssets[name]
-	if !ok {
+
+	var ct, embedPath string
+	if c, ok := mdShellAssets[name]; ok {
+		ct, embedPath = c, "assets/mdshell/"+name
+	} else if c, ok := diffShellAssets[name]; ok {
+		ct, embedPath = c, "assets/diffshell/"+name
+	} else {
 		http.NotFound(w, r)
 		return
 	}
-	f, err := mdShellFS.Open("assets/mdshell/" + name)
+
+	var f io.ReadCloser
+	var err error
+	if strings.HasPrefix(embedPath, "assets/mdshell/") {
+		f, err = mdShellFS.Open(embedPath)
+	} else {
+		f, err = diffShellFS.Open(embedPath)
+	}
 	if err != nil {
 		http.NotFound(w, r)
 		return

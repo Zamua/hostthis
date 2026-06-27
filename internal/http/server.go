@@ -264,20 +264,27 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	h.Set("Cache-Control", "public, max-age=3600")
 	h.Set("Last-Modified", p.UpdatedAt.UTC().Format(http.TimeFormat))
 
-	// For markdown we serve one of two things depending on what the
-	// client asks for: the RAW bytes (when ?raw or a non-text/html Accept)
-	// or the fixed client-render shell. The raw branch is content-
-	// addressed (ETag = content SHA, byte-stable). The shell is content-
-	// INDEPENDENT, so its ETag is the shell version, NOT the paste content
-	// - two different markdown pastes yield the same shell ETag. Decide
-	// here so the conditional-GET 304 below uses the right validator.
-	mdRaw := p.Kind == domain.KindMarkdown && wantsRawMarkdown(r)
+	// For the client-rendered kinds (markdown, diff) we serve one of two
+	// things depending on what the client asks for: the RAW bytes (when
+	// ?raw or a non-text/html Accept) or the fixed client-render shell.
+	// The raw branch is content-addressed (ETag = content SHA, byte-stable).
+	// The shell is content-INDEPENDENT, so its ETag is the shell version,
+	// NOT the paste content - two different markdown/diff pastes yield the
+	// same shell ETag. Decide here so the conditional-GET 304 below uses
+	// the right validator.
+	clientRendered := p.Kind == domain.KindMarkdown || p.Kind == domain.KindDiff
+	rawWanted := clientRendered && wantsRawMarkdown(r)
 
-	// ETag is the content SHA for HTML and raw markdown - content-addressed,
-	// byte-stable. The markdown shell uses the shell version instead.
+	// ETag is the content SHA for HTML and raw markdown/diff - content-
+	// addressed, byte-stable. Each shell uses its own shell version instead.
 	etag := `"` + p.ContentSHA + `"`
-	if p.Kind == domain.KindMarkdown && !mdRaw {
-		etag = `"` + mdShellVersion + `"`
+	if clientRendered && !rawWanted {
+		switch p.Kind {
+		case domain.KindMarkdown:
+			etag = `"` + mdShellVersion + `"`
+		case domain.KindDiff:
+			etag = `"` + diffShellVersion + `"`
+		}
 	}
 	h.Set("ETag", etag)
 
@@ -312,7 +319,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		// asked for them) or serve the fixed shell that renders in the
 		// browser. Both keep server memory constant regardless of paste
 		// size, mirroring the HTML path.
-		if mdRaw {
+		if rawWanted {
 			// Stream the raw markdown straight to the client - same
 			// streaming shape as the HTML case, so no full-payload
 			// allocation per GET.
@@ -340,6 +347,34 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		h.Set("Content-Security-Policy", mdShellCSP)
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(shellHTML())
+	case domain.KindDiff:
+		// Identical shape to the markdown path: no server-side diffing.
+		// Either stream the raw diff bytes (the client asked for them) or
+		// serve the fixed shell that renders in the browser via diff2html +
+		// highlight.js. Both keep server memory constant regardless of
+		// paste size.
+		if rawWanted {
+			rc, _, err := s.Blobs.Read(r.Context(), string(slug), p.ContentSHA)
+			if err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			defer func() { _ = rc.Close() }()
+			// Serve the diff as plain text so a curl / non-browser client
+			// sees it inline (the diff shell fetches these bytes itself).
+			h.Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.Copy(w, rc)
+			return
+		}
+		// Fixed client-render shell. Same CSP as the markdown shell - only
+		// same-origin scripts/styles/connects (the vendored diff2html +
+		// highlight.js + bootstrap, and the ?raw fetch), no inline script,
+		// no framing. no-cache so a shell/style change (a diffShellVersion
+		// bump) is seen on the next navigation rather than pinned for an hour.
+		h.Set("Cache-Control", "no-cache")
+		h.Set("Content-Security-Policy", mdShellCSP)
+		h.Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(diffShellHTML())
 	default:
 		http.Error(w, "unsupported kind", http.StatusInternalServerError)
 	}
