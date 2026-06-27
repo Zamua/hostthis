@@ -846,7 +846,12 @@ Behavior, endpoint by endpoint:
   to the room-creation rate limit (see "Quota and abuse").
 - **GET /api/rooms/<uuid>** scans and returns every key+value pair in the
   room as a single JSON object, so an app loads the full room state in one
-  request on join. A well-formed UUID that names no room returns **404**.
+  request on join. Each value is embedded as raw JSON when the stored bytes
+  parse as JSON - so a value the app PUT as a JSON object comes back as a
+  NESTED object, not a JSON-string of escaped text - and as a JSON string of
+  the verbatim bytes otherwise. (The WebSocket `snapshot` and `put` frames
+  encode values identically; the single-key GET below instead returns the raw
+  bytes.) A well-formed UUID that names no room returns **404**.
 - **GET /api/rooms/<uuid>/<key>** returns the stored value verbatim with a
   conservative content type (`application/octet-stream` unless the app
   stored a recognizable JSON value, which is served `application/json`). A
