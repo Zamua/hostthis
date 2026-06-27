@@ -4257,7 +4257,7 @@ Apex landing page is `Cache-Control: public, max-age=300` (5 min) so
 content updates propagate quickly without becoming a no-cache origin
 hammer.
 
-#### The content-negotiated bare URL is `no-cache`
+#### The content-negotiated bare URL is `no-store`
 
 A client-rendered kind (Markdown, Diff - any kind that ships a
 client-render shell) is served at its **bare URL** (no `?raw` query) by
@@ -4274,10 +4274,18 @@ pin its representation for every later client for up to `max-age`: a
 curl/bot priming the raw bytes makes a *browser* render raw text instead
 of the shell (and vice-versa).
 
-So the bare URL of a client-rendered kind is `Cache-Control: no-cache`
-whether it resolves to the shell or to the raw-by-`Accept` bytes. The
-edge never stores a variant of it; it revalidates against the ETag on
-every load (a cheap 304 when unchanged). What stays edge-cacheable:
+So the bare URL of a client-rendered kind is `Cache-Control: no-store`
+whether it resolves to the shell or to the raw-by-`Accept` bytes.
+`no-cache` is **not** sufficient here: under a "cache everything" edge
+rule (the deploy's CDN rule marks paste subdomains cache-eligible with
+respect-origin TTL) a `no-cache` response is still *stored* and merely
+revalidated, and the edge serves the *stored* variant on revalidation
+rather than re-running the `Accept` negotiation at the origin - so a
+primed raw variant still reaches a browser. Only `no-store` keeps the
+edge from storing the bare URL at all, so every request reaches the
+origin and is negotiated correctly. The shell is tiny and
+content-independent, so re-fetching it per navigation (rather than a 304)
+is negligible. What stays edge-cacheable:
 
 - the explicit `?raw=1` URL - it is *always* raw and never content-
   negotiates, so it has one stable representation. This is the read-
@@ -4365,10 +4373,11 @@ https://<slug>.<apex>/?raw=1    the raw bytes the markdown/diff shell fetches
 The markdown (and diff) render shell is a fixed, content-independent page
 served at the bare `/`; the actual bytes live at `/?raw=1` (the shell
 fetches them client-side - see "Client-rendered markdown"). The bare `/`
-is `no-cache` (content-negotiated, see "The content-negotiated bare URL is
-`no-cache`" above) so the edge never caches it; the editable content lives
+is `no-store` (content-negotiated, see "The content-negotiated bare URL is
+`no-store`" above) so the edge never stores it; the editable content lives
 at `/?raw=1`, which IS edge-cacheable (`max-age=3600`). Purging only the
-bare `/` would leave stale content cached at `/?raw=1`, so an edited
+bare `/` would leave stale content cached at `/?raw=1` (and the bare `/`
+is `no-store` anyway, so it has nothing cached to purge), so an edited
 markdown/diff paste would show its OLD content until max-age expired. The
 adapter therefore purges both - the `/?raw=1` purge is the one that
 matters, and purging the bare `/` is a harmless belt-and-suspenders since

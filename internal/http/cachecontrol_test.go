@@ -10,7 +10,7 @@ import (
 
 // These tests pin the CDN-cache posture (issue #3). The content-negotiated
 // BARE URL of a client-rendered kind (markdown, diff) must be
-// Cache-Control: no-cache for BOTH representations - the shell (browser
+// Cache-Control: no-store for BOTH representations - the shell (browser
 // Accept) and the raw-by-Accept bytes (curl Accept). A CDN can't vary on
 // Accept, so a cacheable bare URL lets whichever client primes the edge
 // first pin its variant for everyone. The explicit ?raw=1 URL is NOT
@@ -38,29 +38,29 @@ func cachePosture(t *testing.T, p domain.Paste, body []byte, target, accept stri
 	return w.Header().Get("Cache-Control"), w.Header().Get("Content-Type")
 }
 
-func TestBareURL_NoCache_Markdown(t *testing.T) {
+func TestBareURL_NoStore_Markdown(t *testing.T) {
 	now := time.Date(2026, 6, 27, 14, 0, 0, 0, time.UTC)
 	sha := "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe"
 	p := mdPaste("abc23456", sha, now)
 	body := []byte("# hello\n\nbody")
 
-	// Bare URL, browser Accept -> shell, no-cache.
+	// Bare URL, browser Accept -> shell, no-store.
 	cc, ct := cachePosture(t, p, body, "/p/abc23456", "text/html,application/xhtml+xml")
 	if ct != "text/html; charset=utf-8" {
 		t.Fatalf("bare browser Accept: Content-Type %q, want the shell (text/html)", ct)
 	}
-	if cc != "no-cache" {
-		t.Errorf("bare browser Accept: Cache-Control %q, want no-cache (bare URL must not be edge-cached)", cc)
+	if cc != "no-store" {
+		t.Errorf("bare browser Accept: Cache-Control %q, want no-store (bare URL must not be edge-cached)", cc)
 	}
 
-	// Bare URL, non-html Accept (curl/bot) -> raw bytes, ALSO no-cache.
+	// Bare URL, non-html Accept (curl/bot) -> raw bytes, ALSO no-store.
 	// This is the representation the bug left at max-age=3600.
 	cc, ct = cachePosture(t, p, body, "/p/abc23456", "*/*")
 	if ct != "text/markdown; charset=utf-8" {
 		t.Fatalf("bare non-html Accept: Content-Type %q, want raw (text/markdown)", ct)
 	}
-	if cc != "no-cache" {
-		t.Errorf("bare non-html Accept: Cache-Control %q, want no-cache - the raw-by-Accept bare URL must not inherit max-age=3600 (this is the bug)", cc)
+	if cc != "no-store" {
+		t.Errorf("bare non-html Accept: Cache-Control %q, want no-store - the raw-by-Accept bare URL must not inherit max-age=3600 (this is the bug)", cc)
 	}
 
 	// Explicit ?raw=1 -> raw bytes, stays edge-cacheable.
@@ -73,28 +73,28 @@ func TestBareURL_NoCache_Markdown(t *testing.T) {
 	}
 }
 
-func TestBareURL_NoCache_Diff(t *testing.T) {
+func TestBareURL_NoStore_Diff(t *testing.T) {
 	now := time.Date(2026, 6, 27, 14, 0, 0, 0, time.UTC)
 	sha := "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe"
 	p := diffPaste("abc23456", sha, now)
 	body := []byte(sampleDiff)
 
-	// Bare URL, browser Accept -> shell, no-cache.
+	// Bare URL, browser Accept -> shell, no-store.
 	cc, ct := cachePosture(t, p, body, "/p/abc23456", "text/html,application/xhtml+xml")
 	if ct != "text/html; charset=utf-8" {
 		t.Fatalf("bare browser Accept: Content-Type %q, want the diff shell (text/html)", ct)
 	}
-	if cc != "no-cache" {
-		t.Errorf("bare browser Accept: Cache-Control %q, want no-cache (bare URL must not be edge-cached)", cc)
+	if cc != "no-store" {
+		t.Errorf("bare browser Accept: Cache-Control %q, want no-store (bare URL must not be edge-cached)", cc)
 	}
 
-	// Bare URL, non-html Accept (curl/bot) -> raw diff bytes, ALSO no-cache.
+	// Bare URL, non-html Accept (curl/bot) -> raw diff bytes, ALSO no-store.
 	cc, ct = cachePosture(t, p, body, "/p/abc23456", "*/*")
 	if ct != "text/plain; charset=utf-8" {
 		t.Fatalf("bare non-html Accept: Content-Type %q, want raw diff (text/plain)", ct)
 	}
-	if cc != "no-cache" {
-		t.Errorf("bare non-html Accept: Cache-Control %q, want no-cache - the raw-by-Accept diff bare URL must not inherit max-age=3600 (this is the bug)", cc)
+	if cc != "no-store" {
+		t.Errorf("bare non-html Accept: Cache-Control %q, want no-store - the raw-by-Accept diff bare URL must not inherit max-age=3600 (this is the bug)", cc)
 	}
 
 	// Explicit ?raw=1 -> raw diff bytes, stays edge-cacheable.
@@ -108,7 +108,7 @@ func TestBareURL_NoCache_Diff(t *testing.T) {
 }
 
 // TestBareURL_HTMLPaste_Cacheable confirms an HTML paste's bare URL is
-// unaffected by the no-cache rule: HTML is not content-negotiated (one
+// unaffected by the no-store rule: HTML is not content-negotiated (one
 // representation) so it stays edge-cacheable.
 func TestBareURL_HTMLPaste_Cacheable(t *testing.T) {
 	now := time.Date(2026, 6, 27, 14, 0, 0, 0, time.UTC)
