@@ -210,9 +210,17 @@ func TestUpload_Characterization(t *testing.T) {
 		if _, err := domain.ParseSlug(slug); err != nil {
 			t.Fatalf("server returned malformed slug %q: %v", slug, err)
 		}
-		// stderr is exactly the "expires in 30 days" line.
-		if strings.TrimSpace(stderr) != "expires in 30 days" {
-			t.Fatalf("stderr should be exactly 'expires in 30 days', got %q", stderr)
+		// stderr leads with the "expires in 30 days" narration line, then
+		// the QR code of the URL (rendered to stderr on every create).
+		firstLine := stderr
+		if i := strings.IndexByte(stderr, '\n'); i >= 0 {
+			firstLine = stderr[:i]
+		}
+		if firstLine != "expires in 30 days" {
+			t.Fatalf("stderr should start with 'expires in 30 days', got %q", stderr)
+		}
+		if !strings.ContainsAny(stderr, "█▀▄") {
+			t.Fatalf("stderr should contain a rendered QR code, got %q", stderr)
 		}
 	})
 
@@ -891,18 +899,21 @@ func TestHelp_Characterization(t *testing.T) {
 // - that's the whole point of pinning the full string.
 const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pastes expire 30 days after last update.\n" +
 	"\n" +
-	"UPLOAD\n" +
+	"UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;\n" +
+	"         a QR code of the URL also prints to stderr on success)\n" +
 	"\n" +
-	"    cat foo.html  | ssh paste.test\n" +
-	"    cat doc.md    | ssh paste.test --name \"design notes\"\n" +
-	"    git diff      | ssh paste.test                     rendered as a diff\n" +
-	"    cat patch.txt | ssh paste.test --type diff         force the diff renderer\n" +
+	"    cat foo.html  | ssh -T paste.test\n" +
+	"    cat doc.md    | ssh -T paste.test --name \"design notes\"\n" +
+	"    git diff      | ssh -T paste.test                  rendered as a diff\n" +
+	"    cat patch.txt | ssh -T paste.test --type diff      force the diff renderer\n" +
 	"\n" +
 	"UPDATE & MANAGE (owner only; ssh key authenticates)\n" +
 	"\n" +
-	"    cat foo.html | ssh paste.test <slug>      replace bytes; URL stays the same\n" +
+	"    cat foo.html | ssh -T paste.test <slug>   replace bytes; URL stays the same\n" +
 	"    ssh paste.test list                       all your active pastes\n" +
 	"    ssh paste.test get <slug>                 read content back\n" +
+	"    ssh paste.test url <slug>                 re-show the URL (no QR)\n" +
+	"    ssh paste.test qr <slug>                  re-show the URL + QR code\n" +
 	"    ssh paste.test rename <slug> \"label\"      set / change owner label\n" +
 	"    ssh paste.test delete <slug> [<ver>]      wipe the paste, or tombstone one version\n" +
 	"    ssh paste.test whoami                     identity + active count + quota\n" +
@@ -915,8 +926,8 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"\n" +
 	"STATIC SITES\n" +
 	"\n" +
-	"    tar czf - site/ | ssh paste.test          deploy a multi-file site\n" +
-	"    tar czf - site/ | ssh paste.test <slug>   re-deploy in place\n" +
+	"    tar czf - site/ | ssh -T paste.test        deploy a multi-file site\n" +
+	"    tar czf - site/ | ssh -T paste.test <slug> re-deploy in place\n" +
 	"\n" +
 	"LIMITS\n" +
 	"\n" +

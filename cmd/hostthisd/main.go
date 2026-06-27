@@ -198,6 +198,9 @@ func main() {
 		BuildURL:    build,
 		Logger:      logger,
 	}
+	if siteRepo != nil {
+		sshServer.Sites = siteRepo
+	}
 
 	httpServer := &httpapi.Server{
 		Pastes:      pasteRepo,

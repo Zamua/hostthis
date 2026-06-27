@@ -7,11 +7,17 @@ hostthis - pipe a rendered file in, get a public URL out
 ## SYNOPSIS
 
 ```
-cat <file>      | ssh hostthis.dev
-cat <file>      | ssh hostthis.dev <slug>
-tar czf - <dir> | ssh hostthis.dev [<slug>]
+cat <file>      | ssh -T hostthis.dev
+cat <file>      | ssh -T hostthis.dev <slug>
+tar czf - <dir> | ssh -T hostthis.dev [<slug>]
 ssh hostthis.dev <command> [<args>]
 ```
+
+`-T` is for piped uploads only: it disables the ssh client's
+pseudo-terminal request so the client stops printing
+`Pseudo-terminal will not be allocated because stdin is not a terminal.`.
+It changes nothing on the server. Verb commands (`list`, `get`, …) pass
+a command argument and never trigger the warning.
 
 ## DESCRIPTION
 
@@ -28,13 +34,14 @@ rendered paste's URL for the raw source.
 
 <dl>
 
-<dt><code>cat <em>file</em> | ssh hostthis.dev</code></dt>
-<dd>upload a paste. To set a label or force the content type, pass
-<code>--name "label"</code> or <code>--type html|markdown|diff</code> after
-a literal <code>--</code>. ssh otherwise parses a leading <code>--name</code>
-as one of its own options.</dd>
+<dt><code>cat <em>file</em> | ssh -T hostthis.dev</code></dt>
+<dd>upload a paste. The URL prints on stdout; a QR code of it prints on
+stderr (drop it with <code>2&gt;/dev/null</code>). To set a label or force
+the content type, pass <code>--name "label"</code> or
+<code>--type html|markdown|diff</code> after a literal <code>--</code>. ssh
+otherwise parses a leading <code>--name</code> as one of its own options.</dd>
 
-<dt><code>cat <em>file</em> | ssh hostthis.dev <em>slug</em></code></dt>
+<dt><code>cat <em>file</em> | ssh -T hostthis.dev <em>slug</em></code></dt>
 <dd>replace <em>slug</em>'s content; resets the 30-day clock</dd>
 
 <dt><code>ssh hostthis.dev list</code></dt>
@@ -42,6 +49,14 @@ as one of its own options.</dd>
 
 <dt><code>ssh hostthis.dev get <em>slug</em></code></dt>
 <dd>print content to stdout</dd>
+
+<dt><code>ssh hostthis.dev url <em>slug</em></code></dt>
+<dd>re-show just the URL for any existing paste or site (no ownership
+check; not found on a missing or expired slug)</dd>
+
+<dt><code>ssh hostthis.dev qr <em>slug</em></code></dt>
+<dd>re-show the URL (stdout) and a QR code (stderr) for any existing
+paste or site</dd>
 
 <dt><code>ssh hostthis.dev rename <em>slug</em> [<em>label</em>]</code></dt>
 <dd>set the owner label from the remaining words; omit them to clear it</dd>
@@ -72,8 +87,8 @@ Pipe a gzip-tar instead of a single file to deploy a multi-file static
 site.
 
 ```
-tar czf - site/ | ssh hostthis.dev            # deploy, get a URL
-tar czf - site/ | ssh hostthis.dev abc12345   # re-deploy in place
+tar czf - site/ | ssh -T hostthis.dev            # deploy, get a URL
+tar czf - site/ | ssh -T hostthis.dev abc12345   # re-deploy in place
 ```
 
 Served at `<slug>.hostthis.dev/<path>`, with content type by file
@@ -150,24 +165,31 @@ Read from the environment your ssh client forwards.
 ## EXAMPLES
 
 ```
-# upload, get a URL on stdout
-cat index.html | ssh hostthis.dev
+# upload, get a URL on stdout (and a QR code on stderr)
+cat index.html | ssh -T hostthis.dev
+
+# capture just the URL; 2>/dev/null drops the QR + narration
+url=$(cat index.html | ssh -T hostthis.dev 2>/dev/null)
 
 # upload with a label; --name and --type follow a literal --
-cat notes.md | ssh hostthis.dev -- --name "alpha notes"
+cat notes.md | ssh -T hostthis.dev -- --name "alpha notes"
 
 # update an existing paste; same URL, bumps to v2, v3, ...
-cat v2.html | ssh hostthis.dev abc12345
+cat v2.html | ssh -T hostthis.dev abc12345
 
 # force content type when sniffing gets it wrong
-cat tricky.html | ssh hostthis.dev -- --type html
+cat tricky.html | ssh -T hostthis.dev -- --type html
 
 # render a unified diff (auto-detected, or force it with --type diff)
-git diff | ssh hostthis.dev
-cat review.patch | ssh hostthis.dev -- --type diff
+git diff | ssh -T hostthis.dev
+cat review.patch | ssh -T hostthis.dev -- --type diff
 
 # read your content back
 ssh hostthis.dev get abc12345
+
+# re-show the link for an existing paste (URL only, or URL + QR)
+ssh hostthis.dev url abc12345
+ssh hostthis.dev qr abc12345
 
 # set the owner label from the words, or omit it to clear
 ssh hostthis.dev rename abc12345 design notes v2
@@ -181,7 +203,7 @@ ssh hostthis.dev unpin abc12345
 ssh hostthis.dev delete abc12345 2
 
 # deploy a static site
-tar czf - site/ | ssh hostthis.dev
+tar czf - site/ | ssh -T hostthis.dev
 ```
 
 ## SEE ALSO

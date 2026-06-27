@@ -53,6 +53,30 @@ var verbDescriptors = map[string]verbDescriptor{
 			"ssh {{apex}} list | tail -n +2 | awk '{print $1}'",
 		},
 	},
+	"url": {
+		Name:      "url",
+		Signature: "ssh {{apex}} url <slug>",
+		Description: "Print just the shareable URL for an existing paste (or " +
+			"deployed site) on stdout - handy for re-copying a link without " +
+			"re-uploading. No ownership check (the URL is a public " +
+			"capability), but a missing or expired slug returns `not found` " +
+			"(exit 4).",
+		Examples: []string{
+			"ssh {{apex}} url abc12345",
+			"ssh {{apex}} url abc12345 | pbcopy",
+		},
+	},
+	"qr": {
+		Name:      "qr",
+		Signature: "ssh {{apex}} qr <slug>",
+		Description: "Re-show an existing paste's link as a scannable QR code. " +
+			"Mirrors create: the URL goes to stdout and the QR block to " +
+			"stderr, so `2>/dev/null` keeps just the URL. No ownership check; " +
+			"a missing or expired slug returns `not found` (exit 4).",
+		Examples: []string{
+			"ssh {{apex}} qr abc12345",
+		},
+	},
 	"rename": {
 		Name:      "rename",
 		Signature: "ssh {{apex}} rename <slug> \"<name>\"",
