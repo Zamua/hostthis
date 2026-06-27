@@ -35,7 +35,7 @@ Detection: by content type sniffed from the first 512 bytes plus optional
 explicit `--type` flag at upload time. A Markdown paste is served as a
 fixed, content-independent HTML shell that loads a bundled client-side
 renderer (marked + DOMPurify); the shell fetches the raw Markdown bytes
-(via `?raw` or a non-`text/html` Accept) and renders them in the browser.
+(via `?raw`) and renders them in the browser.
 The server streams the raw bytes with `io.Copy`, so its memory stays
 constant regardless of paste size, mirroring the HTML serve path. The
 shell follows the same sandboxing rules as user-supplied HTML, and
@@ -46,8 +46,8 @@ A **diff** paste is a unified diff (`git diff` / `diff -u` output). It is
 served exactly like Markdown - a fixed, content-independent HTML shell
 that loads a bundled client-side renderer, here
 [diff2html](https://diff2html.xyz) + [highlight.js](https://highlightjs.org)
-- and the shell fetches the raw diff bytes (via `?raw` or a non-`text/html`
-Accept) and renders them in the browser. No server-side diffing: the
+- and the shell fetches the raw diff bytes (via `?raw`) and renders them
+in the browser. No server-side diffing: the
 server only ever streams the raw bytes with `io.Copy`, so its memory stays
 constant regardless of paste size, mirroring the HTML and Markdown paths.
 The rendered view defaults to **line-by-line** (reads well on mobile) with
@@ -252,9 +252,9 @@ With* options. Refusal behavior is pinned by
 - **Storage backend**: pluggable. See "Blob storage backends" below.
   Default is the on-disk store (`data/blobs/<sha256[:2]>/<sha256>`).
   Markdown and diff are never rendered on the read path: such a read
-  either streams the raw bytes (when the client asks for them via `?raw`
-  or a non-`text/html` Accept) or serves the fixed client-render shell, so
-  server memory is constant regardless of paste size.
+  either streams the raw bytes (when the client asks for them via `?raw`)
+  or serves the fixed client-render shell, so server memory is constant
+  regardless of paste size.
 - **Storage compression**: all blob bytes are persisted zstd-encoded
   by the storage layer. Compression is invisible above the BlobStore
   interface - `Put` compresses on the way in (level 3, balance of
@@ -4257,42 +4257,44 @@ Apex landing page is `Cache-Control: public, max-age=300` (5 min) so
 content updates propagate quickly without becoming a no-cache origin
 hammer.
 
-#### The content-negotiated bare URL is `no-store`
+#### The bare URL always serves the shell (no `Accept` negotiation)
 
 A client-rendered kind (Markdown, Diff - any kind that ships a
-client-render shell) is served at its **bare URL** (no `?raw` query) by
-*content negotiation on the `Accept` header*: a browser
-(`Accept: text/html`) gets the render shell, a non-browser client (curl,
-a link-unfurl bot, `Accept: */*` or `text/markdown`) gets the raw bytes.
-Both representations answer the *same* URL.
+client-render shell) is served at its **bare URL** (no `?raw` query) as a
+*single representation*: the render shell, to **every** client - a browser,
+`curl`, a link-unfurl bot, any `Accept`. The bare URL does **not** content-
+negotiate. Raw bytes come only from the explicit `?raw=1` URL (over HTTP,
+which the shell itself fetches) and from `ssh hostthis.dev get <slug>`
+(over SSH). "`curl` gets the raw bytes at the bare URL" was never a
+requirement - the intended model is that the bare URL serves what a browser
+gets, and raw is an explicit opt-in.
 
-A CDN keys its cache on the URL, not on `Accept` - Cloudflare honors only
-`Vary: Accept-Encoding` (and `Vary` for images via Polish); it ignores
-`Vary: Accept` for cache keying, so `Vary: Accept` is **not** a fix. If
-the bare URL were cacheable, whichever client primed the edge first would
-pin its representation for every later client for up to `max-age`: a
-curl/bot priming the raw bytes makes a *browser* render raw text instead
-of the shell (and vice-versa).
+Because the bare URL is one representation, it is safe to **edge-cache**: it
+keeps the shared `Cache-Control: public, max-age=3600`. There is no per-
+`Accept` variant, so the CDN hazard that an earlier `no-store` posture
+guarded against is removed **at the root**: a CDN keys its cache on the URL,
+not on `Accept` (Cloudflare honors only `Vary: Accept-Encoding`, never
+`Vary: Accept`), but with a single representation there is nothing to mis-
+pin - whichever client primes the edge, every later client gets the same
+shell. `no-store` is therefore no longer needed anywhere in the paste serve
+path for this reason.
 
-So the bare URL of a client-rendered kind is `Cache-Control: no-store`
-whether it resolves to the shell or to the raw-by-`Accept` bytes.
-`no-cache` is **not** sufficient here: under a "cache everything" edge
-rule (the deploy's CDN rule marks paste subdomains cache-eligible with
-respect-origin TTL) a `no-cache` response is still *stored* and merely
-revalidated, and the edge serves the *stored* variant on revalidation
-rather than re-running the `Accept` negotiation at the origin - so a
-primed raw variant still reaches a browser. Only `no-store` keeps the
-edge from storing the bare URL at all, so every request reaches the
-origin and is negotiated correctly. The shell is tiny and
-content-independent, so re-fetching it per navigation (rather than a 304)
-is negligible. What stays edge-cacheable:
+The tradeoff: the shell is now edge-cacheable, so a shell/style change (a
+`mdShellVersion` / `diffShellVersion` bump) propagates within the `max-age`
+window (1h) OR immediately via the deploy-time edge purge. That is
+acceptable: shell changes only ship on a deploy, and a deploy purges the
+edge.
 
-- the explicit `?raw=1` URL - it is *always* raw and never content-
-  negotiates, so it has one stable representation. This is the read-
-  throughput path the shells fetch, and it keeps `public, max-age=3600`.
+What is edge-cacheable:
+
+- the bare URL of a client-rendered kind - now one representation (the
+  shell), so it keeps `public, max-age=3600`.
+- the explicit `?raw=1` URL - always raw, a distinct single representation.
+  This is the read-throughput path the shells fetch, and it keeps
+  `public, max-age=3600`.
 - the immutable `/_hostthis/...` assets (the bundled renderer libs).
-- an HTML paste's bare URL - HTML is not content-negotiated (one
-  representation), so it keeps `public, max-age=3600`.
+- an HTML paste's bare URL - HTML is not negotiated (one representation),
+  so it keeps `public, max-age=3600`.
 
 Static sites (multi-file) set `Cache-Control: public, no-cache` instead
 of `max-age`. A single-file paste is the top-level document, which a
@@ -4372,18 +4374,17 @@ https://<slug>.<apex>/?raw=1    the raw bytes the markdown/diff shell fetches
 
 The markdown (and diff) render shell is a fixed, content-independent page
 served at the bare `/`; the actual bytes live at `/?raw=1` (the shell
-fetches them client-side - see "Client-rendered markdown"). The bare `/`
-is `no-store` (content-negotiated, see "The content-negotiated bare URL is
-`no-store`" above) so the edge never stores it; the editable content lives
-at `/?raw=1`, which IS edge-cacheable (`max-age=3600`). Purging only the
-bare `/` would leave stale content cached at `/?raw=1` (and the bare `/`
-is `no-store` anyway, so it has nothing cached to purge), so an edited
-markdown/diff paste would show its OLD content until max-age expired. The
-adapter therefore purges both - the `/?raw=1` purge is the one that
-matters, and purging the bare `/` is a harmless belt-and-suspenders since
-nothing caches it. The URL-variant policy lives in the adapter (which owns
-the apex / scheme / URL-mode config); the service layer only ever names
-the slug.
+fetches them client-side - see "Client-rendered markdown"). Both the bare
+`/` and `/?raw=1` are now edge-cacheable (`max-age=3600`, see "The bare URL
+always serves the shell" above). The editable content lives at `/?raw=1`,
+so purging only the bare `/` would leave stale content cached at `/?raw=1`
+and an edited markdown/diff paste would show its OLD content until max-age
+expired. The adapter therefore purges both: the `/?raw=1` purge is the one
+that matters for an edit (the bare `/` is the content-independent shell,
+which only changes on a deploy), and purging the bare `/` keeps the edge
+consistent. The URL-variant policy lives in the adapter (which owns the
+apex / scheme / URL-mode config); the service layer only ever names the
+slug.
 
 Env vars when `HOSTTHIS_CACHE_BACKEND=cloudflare`:
 
@@ -4487,8 +4488,7 @@ treat a codepen, a gist, or a github.io page.
 Markdown is rendered to HTML in the visitor's browser. A Markdown read
 returns a fixed, content-independent HTML shell that loads a bundled
 client-side renderer (`marked`) and sanitizer (`DOMPurify`); the shell
-fetches the raw Markdown bytes (via `?raw` or a non-`text/html` Accept)
-and renders them into the page. DOMPurify strips event handlers,
+fetches the raw Markdown bytes (via `?raw`) and renders them into the page. DOMPurify strips event handlers,
 `javascript:` URLs, and dangerous tags before the HTML is inserted, so
 uploaded Markdown still can NOT execute JS even though uploaded HTML can
 - DOMPurify is the safety net for the markdown path, replacing the old
@@ -4504,8 +4504,8 @@ A diff paste follows the same model as Markdown. A diff read returns a
 fixed, content-independent HTML shell that loads a bundled client-side
 renderer (`diff2html`) and syntax highlighter (`highlight.js`), both
 vendored as embedded assets served from `/_hostthis/...` (no runtime
-CDN); the shell fetches the raw diff bytes (via `?raw` or a
-non-`text/html` Accept) and renders them into the page with diff2html.
+CDN); the shell fetches the raw diff bytes (via `?raw`) and renders them
+into the page with diff2html.
 The view defaults to **line-by-line** with a toggle to **side-by-side**,
 the choice persisted in `localStorage`; code is syntax-highlighted, and
 the page is dark-mode aware via `prefers-color-scheme`. The diff shell is

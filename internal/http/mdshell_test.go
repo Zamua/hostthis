@@ -123,9 +123,10 @@ func TestMarkdownRaw_QueryParam(t *testing.T) {
 	}
 }
 
-// TestMarkdownRaw_NonHTMLAccept pins the curl path: Accept */* with no
-// ?raw serves the RAW markdown, not the shell.
-func TestMarkdownRaw_NonHTMLAccept(t *testing.T) {
+// TestMarkdownBareURL_NonHTMLAccept_ServesShell pins the no-negotiation
+// posture (issue #5): the bare URL with a non-html Accept (curl/bot, */*)
+// still serves the SHELL, not raw. Raw is an explicit ?raw opt-in.
+func TestMarkdownBareURL_NonHTMLAccept_ServesShell(t *testing.T) {
 	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	sha := "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe"
 	src := []byte("# curl me\n")
@@ -143,11 +144,14 @@ func TestMarkdownRaw_NonHTMLAccept(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status: got %d, want 200", w.Code)
 	}
-	if ct := w.Header().Get("Content-Type"); ct != "text/markdown; charset=utf-8" {
-		t.Errorf("Content-Type: got %q, want text/markdown; charset=utf-8", ct)
+	if ct := w.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Errorf("Content-Type: got %q, want text/html; charset=utf-8 (the shell, not negotiated raw)", ct)
 	}
-	if got := w.Body.String(); got != string(src) {
-		t.Errorf("raw body: got %q, want %q", got, src)
+	if body := w.Body.String(); !strings.Contains(body, "/_hostthis/md.js") {
+		t.Errorf("non-html Accept should still serve the shell, got %q", body)
+	}
+	if csp := w.Header().Get("Content-Security-Policy"); csp == "" {
+		t.Errorf("shell response should carry the shell CSP, got empty")
 	}
 }
 
