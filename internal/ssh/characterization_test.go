@@ -213,8 +213,8 @@ func TestUpload_Characterization(t *testing.T) {
 		// stderr leads with the "expires in 30 days" narration line, then
 		// the QR code of the URL (rendered to stderr on every create).
 		firstLine := stderr
-		if i := strings.IndexByte(stderr, '\n'); i >= 0 {
-			firstLine = stderr[:i]
+		if before, _, ok := strings.Cut(stderr, "\n"); ok {
+			firstLine = before
 		}
 		if firstLine != "expires in 30 days" {
 			t.Fatalf("stderr should start with 'expires in 30 days', got %q", stderr)
