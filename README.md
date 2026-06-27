@@ -15,13 +15,14 @@ ssh hostthis.dev <command> [<args>]
 
 ## DESCRIPTION
 
-Publishes HTML or Markdown for 30 days at a random subdomain. One ssh
-pipe, no signup, no install. Identity is your ssh public key: anyone
-with a different key can read the URL but cannot update, rename, pin,
-or delete the paste.
+Publishes HTML, Markdown, or a unified diff for 30 days at a random
+subdomain. One ssh pipe, no signup, no install. Identity is your ssh
+public key: anyone with a different key can read the URL but cannot
+update, rename, pin, or delete the paste.
 
-A Markdown paste renders in the browser; append `?raw` to its URL for
-the raw source.
+A Markdown paste renders in the browser; a diff renders with diff2html
+(line-by-line or side-by-side, with syntax highlighting). Append `?raw`
+to any rendered paste's URL for the raw source.
 
 ## COMMANDS
 
@@ -29,8 +30,8 @@ the raw source.
 
 <dt><code>cat <em>file</em> | ssh hostthis.dev</code></dt>
 <dd>upload a paste. To set a label or force the content type, pass
-<code>--name "label"</code> or <code>--type html|markdown</code> after a
-literal <code>--</code>. ssh otherwise parses a leading <code>--name</code>
+<code>--name "label"</code> or <code>--type html|markdown|diff</code> after
+a literal <code>--</code>. ssh otherwise parses a leading <code>--name</code>
 as one of its own options.</dd>
 
 <dt><code>cat <em>file</em> | ssh hostthis.dev <em>slug</em></code></dt>
@@ -123,8 +124,8 @@ days after its last write. Deployments without a room store return 404.
 active version of every active paste. Text compresses 5-10x under
 zstd, so the real raw-payload ceiling is typically 50-100 MiB.
 
-Pastes are HTML or Markdown; sites are a gzip-tar archive. 30-day
-retention from the last update.
+Pastes are HTML, Markdown, or a unified diff; sites are a gzip-tar
+archive. 30-day retention from the last update.
 
 ## EXIT STATUS
 
@@ -160,6 +161,10 @@ cat v2.html | ssh hostthis.dev abc12345
 
 # force content type when sniffing gets it wrong
 cat tricky.html | ssh hostthis.dev -- --type html
+
+# render a unified diff (auto-detected, or force it with --type diff)
+git diff | ssh hostthis.dev
+cat review.patch | ssh hostthis.dev -- --type diff
 
 # read your content back
 ssh hostthis.dev get abc12345

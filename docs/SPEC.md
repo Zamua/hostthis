@@ -1,9 +1,9 @@
 # hostthis - spec
 
 A self-hostable, dev-first paste service for content that *needs rendering
-to be shareable* - HTML, Markdown, and a small future set of rendered
-formats. Pipe a file to ssh, get back a URL. No signup, no UI, no CLI
-to install. Your existing ssh key is the account.
+to be shareable* - HTML, Markdown, unified diffs, and a small future set
+of rendered formats. Pipe a file to ssh, get back a URL. No signup, no UI,
+no CLI to install. Your existing ssh key is the account.
 
 ```
 $ cat index.html | ssh hostthis.dev
@@ -18,8 +18,8 @@ out of scope for v1 - see "Non-goals" at the bottom.
 ## What it is, what it isn't
 
 - It IS: a hosting target for **content that needs rendering to share
-  well** - HTML pages, Markdown docs - addressable by URL, with ssh-pipe
-  as the primary upload mechanism.
+  well** - HTML pages, Markdown docs, unified diffs - addressable by URL,
+  with ssh-pipe as the primary upload mechanism.
 - It IS: dev-first. The mental model is `git push` for documents - your ssh
   key is your identity, every operation is one line in a terminal.
 - It IS NOT: a general file host. ZIPs, binaries, photos, videos belong
@@ -29,7 +29,7 @@ out of scope for v1 - see "Non-goals" at the bottom.
 
 ## Supported formats
 
-**v1**: HTML, Markdown.
+**v1**: HTML, Markdown, diff.
 
 Detection: by content type sniffed from the first 512 bytes plus optional
 explicit `--type` flag at upload time. A Markdown paste is served as a
@@ -41,6 +41,23 @@ constant regardless of paste size, mirroring the HTML serve path. The
 shell follows the same sandboxing rules as user-supplied HTML, and
 DOMPurify sanitizes the rendered output in the browser the same way the
 old server-side bluemonday pass did.
+
+A **diff** paste is a unified diff (`git diff` / `diff -u` output). It is
+served exactly like Markdown - a fixed, content-independent HTML shell
+that loads a bundled client-side renderer, here
+[diff2html](https://diff2html.xyz) + [highlight.js](https://highlightjs.org)
+- and the shell fetches the raw diff bytes (via `?raw` or a non-`text/html`
+Accept) and renders them in the browser. No server-side diffing: the
+server only ever streams the raw bytes with `io.Copy`, so its memory stays
+constant regardless of paste size, mirroring the HTML and Markdown paths.
+The rendered view defaults to **line-by-line** (reads well on mobile) with
+a control to switch to **side-by-side**; the choice is persisted in
+`localStorage` so it sticks across pastes. Code inside the diff is
+syntax-highlighted via highlight.js, and the view is dark-mode aware via
+`prefers-color-scheme`. Detection is conservative (see "File handling ->
+Format gate"): a paste must carry at least one real unified-diff hunk
+header to auto-detect as a diff, so an ordinary text paste that merely
+contains `+`/`-` lines is not mis-rendered; `--type diff` forces it.
 
 **Future** (post-v1, behind a feature flag):
 - Mermaid diagrams (render server-side to SVG / PNG)
@@ -210,11 +227,17 @@ With* options. Refusal behavior is pinned by
   reading more than that is "too big to evaluate" and rejected with
   `upload too large to consider`. Generous enough that no legitimate
   text payload ever hits this; tight enough to bound the read.
-- **Format gate**: accept only supported content types (HTML, Markdown
-  in v1). Server sniffs the first 512 bytes for content type via
+- **Format gate**: accept only supported content types (HTML, Markdown,
+  diff in v1). Server sniffs the first 512 bytes for content type via
   `http.DetectContentType` and cross-checks any explicit `--type` flag.
   Unsupported content is rejected with a clear error pointing at
   what we accept - no silent fallback to `attachment` rendering.
+  Diff detection runs BEFORE the Markdown fallback and is deliberately
+  conservative: the upload prefix must contain at least one real unified-
+  diff hunk header (`@@ -<n>[,<n>] +<n>[,<n>] @@`) to auto-detect as a
+  diff. `diff --git` / `--- ` / `+++ ` file headers may accompany it, but
+  the hunk header is the gate, so a normal text paste that merely contains
+  `+`/`-` lines is never mis-detected. `--type diff` forces the kind.
 - **Streaming I/O**: server reads stdin as a stream (no full-buffer
   allocation), tees through three sinks in parallel: a sha256 hasher
   (over uncompressed bytes - content addressability is by ORIGINAL
@@ -228,9 +251,9 @@ With* options. Refusal behavior is pinned by
   buffer is discarded.
 - **Storage backend**: pluggable. See "Blob storage backends" below.
   Default is the on-disk store (`data/blobs/<sha256[:2]>/<sha256>`).
-  Markdown is never rendered on the read path: a Markdown read either
-  streams the raw bytes (when the client asks for them via `?raw` or a
-  non-`text/html` Accept) or serves the fixed client-render shell, so
+  Markdown and diff are never rendered on the read path: such a read
+  either streams the raw bytes (when the client asks for them via `?raw`
+  or a non-`text/html` Accept) or serves the fixed client-render shell, so
   server memory is constant regardless of paste size.
 - **Storage compression**: all blob bytes are persisted zstd-encoded
   by the storage layer. Compression is invisible above the BlobStore
@@ -415,6 +438,23 @@ arbitrary file trees.
 Scope for this version is **gzip-tar only**. Plain (uncompressed) tar
 and zip are natural follow-ons but out of scope here; an upload that
 sniffs as zip or bare tar is rejected like any other unsupported type.
+
+### Detection: unified diff as a format
+
+The format gate also recognizes a **unified diff** (`git diff` /
+`diff -u` output). Within `DetectKind`, after the gzip-tar and HTML
+branches but BEFORE the Markdown fallback, the detector scans the upload
+prefix for a real unified-diff hunk header matching
+`@@ -<n>[,<n>] +<n>[,<n>] @@`. The hunk header is the gate: `diff --git`,
+`--- ` / `+++ ` file headers, or `Index:` lines may strengthen the
+signal but are not sufficient on their own, and a paste that merely
+contains `+`/`-` lines (prose, source code, a markdown list) does NOT
+match. This conservatism is deliberate - a false positive renders normal
+text through diff2html, which looks broken, whereas a false negative just
+falls through to the Markdown/HTML path. Detection is by content, never
+by filename, matching every other format. `--type diff` (hint `"diff"`)
+forces the kind; like the other text hints it still requires the bytes to
+sniff as text, so a binary relabelled `diff` is rejected.
 
 ### Safe-untar (security-critical)
 
@@ -1696,6 +1736,7 @@ ssh hostthis.dev list
 SLUG       NAME                  SIZE    KIND      EXPIRES_IN   VERS
 abc12345   Acme prototype v3     1.2k    html      6d22h        v2
 x7y8z9q0   -                      540B   markdown  6d16h        v1
+qrs78901   bugfix.diff           2.1k    diff      6d2h         v1
 mnop4567   Onboarding email      3.8k    html      5d6h         v3 (pinned, latest v5)
 zwy11122   -                     800B    html      4d12h        v3 (pinned)
 ```
@@ -1890,7 +1931,7 @@ STATIC SITES
 LIMITS
 
     10 MiB per identity, counting post-compression bytes across all
-    your active pastes. HTML, Markdown, or a gzip-tar site archive.
+    your active pastes. HTML, Markdown, diff, or a gzip-tar site archive.
 
     Apps can persist + sync state: https://hostthis.dev/  (rooms + realtime API)
 ```
@@ -4288,16 +4329,16 @@ cache key, and the adapter must purge all of them or an edit leaves stale
 content behind. In subdomain mode the variants for a slug are:
 
 ```
-https://<slug>.<apex>/          the page (an HTML paste, or the markdown shell)
-https://<slug>.<apex>/?raw=1    the raw bytes the markdown shell fetches
+https://<slug>.<apex>/          the page (an HTML paste, or the markdown/diff shell)
+https://<slug>.<apex>/?raw=1    the raw bytes the markdown/diff shell fetches
 ```
 
-The markdown render shell is a fixed, content-independent page served at
-`/`; the actual markdown bytes live at `/?raw=1` (the shell fetches them
+The markdown (and diff) render shell is a fixed, content-independent page
+served at `/`; the actual bytes live at `/?raw=1` (the shell fetches them
 client-side - see "Client-rendered markdown"). Those are SEPARATE CDN
 cache entries. Purging only `/` would refresh the shell but leave stale
-content cached at `/?raw=1`, so an edited markdown paste would show its
-OLD content until max-age expired. The adapter therefore purges both. The
+content cached at `/?raw=1`, so an edited markdown/diff paste would show
+its OLD content until max-age expired. The adapter therefore purges both. The
 URL-variant policy lives in the adapter (which owns the apex / scheme /
 URL-mode config); the service layer only ever names the slug.
 
@@ -4413,6 +4454,23 @@ read path, which keeps its memory constant regardless of paste size
 (it streams the raw bytes with `io.Copy`, like the HTML path). The
 in-repo `internal/render` package and `cmd/render-md` dev tool are
 retained for offline use but are no longer on the live read path.
+
+### Diff rendering
+
+A diff paste follows the same model as Markdown. A diff read returns a
+fixed, content-independent HTML shell that loads a bundled client-side
+renderer (`diff2html`) and syntax highlighter (`highlight.js`), both
+vendored as embedded assets served from `/_hostthis/...` (no runtime
+CDN); the shell fetches the raw diff bytes (via `?raw` or a
+non-`text/html` Accept) and renders them into the page with diff2html.
+The view defaults to **line-by-line** with a toggle to **side-by-side**,
+the choice persisted in `localStorage`; code is syntax-highlighted, and
+the page is dark-mode aware via `prefers-color-scheme`. The diff shell is
+served under the same `Content-Security-Policy` as the Markdown shell
+(`script-src 'self'`, `connect-src 'self'`, no inline script), so the
+only scripts that run are the vendored renderer + bootstrap. The server
+never renders the diff: it streams the raw bytes with `io.Copy`, keeping
+memory constant regardless of paste size.
 
 ### Abuse reporting
 

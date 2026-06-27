@@ -893,8 +893,10 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"\n" +
 	"UPLOAD\n" +
 	"\n" +
-	"    cat foo.html | ssh paste.test\n" +
-	"    cat doc.md   | ssh paste.test --name \"design notes\"\n" +
+	"    cat foo.html  | ssh paste.test\n" +
+	"    cat doc.md    | ssh paste.test --name \"design notes\"\n" +
+	"    git diff      | ssh paste.test                     rendered as a diff\n" +
+	"    cat patch.txt | ssh paste.test --type diff         force the diff renderer\n" +
 	"\n" +
 	"UPDATE & MANAGE (owner only; ssh key authenticates)\n" +
 	"\n" +
@@ -919,7 +921,7 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"LIMITS\n" +
 	"\n" +
 	"    10 MiB per identity, counting post-compression bytes across all\n" +
-	"    your active pastes. HTML, Markdown, or a gzip-tar site archive.\n" +
+	"    your active pastes. HTML, Markdown, diff, or a gzip-tar site archive.\n" +
 	"\n" +
 	"    Apps can persist + sync state: https://paste.test/  (rooms + realtime API)\n"
 

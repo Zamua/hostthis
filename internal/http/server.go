@@ -264,20 +264,27 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	h.Set("Cache-Control", "public, max-age=3600")
 	h.Set("Last-Modified", p.UpdatedAt.UTC().Format(http.TimeFormat))
 
-	// For markdown we serve one of two things depending on what the
-	// client asks for: the RAW bytes (when ?raw or a non-text/html Accept)
-	// or the fixed client-render shell. The raw branch is content-
-	// addressed (ETag = content SHA, byte-stable). The shell is content-
-	// INDEPENDENT, so its ETag is the shell version, NOT the paste content
-	// - two different markdown pastes yield the same shell ETag. Decide
-	// here so the conditional-GET 304 below uses the right validator.
-	mdRaw := p.Kind == domain.KindMarkdown && wantsRawMarkdown(r)
+	// For the client-rendered kinds (markdown, diff) we serve one of two
+	// things depending on what the client asks for: the RAW bytes (when
+	// ?raw or a non-text/html Accept) or the fixed client-render shell.
+	// The raw branch is content-addressed (ETag = content SHA, byte-stable).
+	// The shell is content-INDEPENDENT, so its ETag is the shell version,
+	// NOT the paste content - two different markdown/diff pastes yield the
+	// same shell ETag. Decide here so the conditional-GET 304 below uses
+	// the right validator.
+	clientRendered := p.Kind == domain.KindMarkdown || p.Kind == domain.KindDiff
+	rawWanted := clientRendered && wantsRaw(r)
 
-	// ETag is the content SHA for HTML and raw markdown - content-addressed,
-	// byte-stable. The markdown shell uses the shell version instead.
+	// ETag is the content SHA for HTML and raw markdown/diff - content-
+	// addressed, byte-stable. Each shell uses its own shell version instead.
 	etag := `"` + p.ContentSHA + `"`
-	if p.Kind == domain.KindMarkdown && !mdRaw {
-		etag = `"` + mdShellVersion + `"`
+	if clientRendered && !rawWanted {
+		switch p.Kind {
+		case domain.KindMarkdown:
+			etag = `"` + mdShellVersion + `"`
+		case domain.KindDiff:
+			etag = `"` + diffShellVersion + `"`
+		}
 	}
 	h.Set("ETag", etag)
 
@@ -312,7 +319,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		// asked for them) or serve the fixed shell that renders in the
 		// browser. Both keep server memory constant regardless of paste
 		// size, mirroring the HTML path.
-		if mdRaw {
+		if rawWanted {
 			// Stream the raw markdown straight to the client - same
 			// streaming shape as the HTML case, so no full-payload
 			// allocation per GET.
@@ -337,9 +344,37 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		// view - a cheap 304 when unchanged - means a shell/style change is
 		// seen on the next navigation instead of being pinned for an hour.
 		h.Set("Cache-Control", "no-cache")
-		h.Set("Content-Security-Policy", mdShellCSP)
+		h.Set("Content-Security-Policy", shellCSP)
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(shellHTML())
+	case domain.KindDiff:
+		// Identical shape to the markdown path: no server-side diffing.
+		// Either stream the raw diff bytes (the client asked for them) or
+		// serve the fixed shell that renders in the browser via diff2html +
+		// highlight.js. Both keep server memory constant regardless of
+		// paste size.
+		if rawWanted {
+			rc, _, err := s.Blobs.Read(r.Context(), string(slug), p.ContentSHA)
+			if err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			defer func() { _ = rc.Close() }()
+			// Serve the diff as plain text so a curl / non-browser client
+			// sees it inline (the diff shell fetches these bytes itself).
+			h.Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.Copy(w, rc)
+			return
+		}
+		// Fixed client-render shell. Same CSP as the markdown shell - only
+		// same-origin scripts/styles/connects (the vendored diff2html +
+		// highlight.js + bootstrap, and the ?raw fetch), no inline script,
+		// no framing. no-cache so a shell/style change (a diffShellVersion
+		// bump) is seen on the next navigation rather than pinned for an hour.
+		h.Set("Cache-Control", "no-cache")
+		h.Set("Content-Security-Policy", shellCSP)
+		h.Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(diffShellHTML())
 	default:
 		http.Error(w, "unsupported kind", http.StatusInternalServerError)
 	}
@@ -537,21 +572,22 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 	return true
 }
 
-// mdShellCSP is set ONLY on the markdown shell response. It locks the
-// shell down: no default sources, scripts/styles/connects only from the
-// same origin (the vendored libs + bootstrap + the ?raw fetch), images
-// and media from anywhere (markdown can embed remote images), no inline
-// script, no framing, no form submission. 'unsafe-inline' is allowed for
-// styles only so the markdown's own inline styles (which DOMPurify keeps)
+// shellCSP is set on every client-render shell response (markdown and
+// diff). It locks the shell down: no default sources, scripts/styles/
+// connects only from the same origin (the vendored libs + bootstrap + the
+// ?raw fetch), images and media from anywhere (markdown can embed remote
+// images), no inline script, no framing, no form submission.
+// 'unsafe-inline' is allowed for styles only so the markdown's own inline
+// styles (which DOMPurify keeps) and the diff renderer's injected styles
 // render; scripts get no such escape hatch.
-const mdShellCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+const shellCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
-// wantsRawMarkdown reports whether the client asked for the raw markdown
-// bytes rather than the client-render shell. True when ?raw is present or
-// when the Accept header does not include text/html (e.g. a curl default
+// wantsRaw reports whether the client asked for the raw paste bytes rather
+// than the client-render shell (markdown or diff). True when ?raw is present
+// or when the Accept header does not include text/html (e.g. a curl default
 // of */*, or an explicit text/markdown). A browser navigation sends
 // Accept: text/html,... and so gets the shell.
-func wantsRawMarkdown(r *http.Request) bool {
+func wantsRaw(r *http.Request) bool {
 	return r.URL.Query().Has("raw") || !strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
