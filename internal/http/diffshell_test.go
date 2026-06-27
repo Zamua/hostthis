@@ -127,9 +127,10 @@ func TestDiffRaw_QueryParam(t *testing.T) {
 	}
 }
 
-// TestDiffRaw_NonHTMLAccept pins the curl path: Accept */* with no ?raw
-// serves the RAW diff, not the shell.
-func TestDiffRaw_NonHTMLAccept(t *testing.T) {
+// TestDiffBareURL_NonHTMLAccept_ServesShell pins the no-negotiation
+// posture (issue #5): the bare URL with a non-html Accept (curl/bot, */*)
+// still serves the diff SHELL, not raw. Raw is an explicit ?raw opt-in.
+func TestDiffBareURL_NonHTMLAccept_ServesShell(t *testing.T) {
 	now := time.Date(2026, 6, 27, 14, 0, 0, 0, time.UTC)
 	sha := "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe"
 	src := []byte(sampleDiff)
@@ -147,8 +148,14 @@ func TestDiffRaw_NonHTMLAccept(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status: got %d, want 200", w.Code)
 	}
-	if got := w.Body.String(); got != string(src) {
-		t.Errorf("raw body: got %q, want %q", got, src)
+	if ct := w.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Errorf("Content-Type: got %q, want text/html; charset=utf-8 (the diff shell, not negotiated raw)", ct)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "/_hostthis/diff.js") {
+		t.Errorf("non-html Accept should still serve the diff shell, got %q", body)
+	}
+	if csp := w.Header().Get("Content-Security-Policy"); csp == "" {
+		t.Errorf("shell response should carry the shell CSP, got empty")
 	}
 }
 

@@ -265,42 +265,29 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	h.Set("Last-Modified", p.UpdatedAt.UTC().Format(http.TimeFormat))
 
 	// For the client-rendered kinds (markdown, diff) we serve one of two
-	// things depending on what the client asks for: the RAW bytes (when
-	// ?raw or a non-text/html Accept) or the fixed client-render shell.
-	// The raw branch is content-addressed (ETag = content SHA, byte-stable).
-	// The shell is content-INDEPENDENT, so its ETag is the shell version,
-	// NOT the paste content - two different markdown/diff pastes yield the
-	// same shell ETag. Decide here so the conditional-GET 304 below uses
-	// the right validator.
+	// things: the RAW bytes (only when the URL carries an explicit ?raw
+	// query) or, at the bare URL, the fixed client-render shell - served to
+	// EVERY client (no Accept negotiation). The raw branch is content-
+	// addressed (ETag = content SHA, byte-stable). The shell is content-
+	// INDEPENDENT, so its ETag is the shell version, NOT the paste content -
+	// two different markdown/diff pastes yield the same shell ETag. Decide
+	// here so the conditional-GET 304 below uses the right validator.
 	clientRendered := p.Kind == domain.KindMarkdown || p.Kind == domain.KindDiff
 	rawWanted := clientRendered && wantsRaw(r)
 
-	// The content-negotiated BARE URL must be no-STORE (not merely no-cache).
-	// A client-rendered kind (markdown, diff) is served at its bare URL - no
-	// ?raw query - by negotiating on Accept: a browser (Accept: text/html)
-	// gets the render shell, a non-browser client gets the raw bytes. Both
-	// answer the SAME URL. A CDN keys on the URL, not on Accept (Cloudflare
-	// honors only Vary: Accept-Encoding, never Vary: Accept), so any STORED
-	// representation of the bare URL is served to every later client
-	// regardless of their Accept - a curl/bot priming the raw bytes makes a
-	// browser render raw text.
-	//
-	// no-cache is NOT enough: under a "cache everything" edge rule (ours sets
-	// cache=true, respect-origin TTL) a no-cache response is still STORED and
-	// merely revalidated, and the edge serves the stored variant on
-	// revalidation rather than re-running the Accept negotiation at the
-	// origin. Only no-store keeps the edge from storing the bare URL at all,
-	// so every request reaches the origin and is negotiated correctly. (The
-	// pending/failed paste pages already rely on the rule respecting
-	// no-store.) Covers BOTH the shell branches and the raw-by-Accept
-	// branches below. The explicit ?raw=1 URL is always raw and never
-	// negotiates, so it keeps max-age=3600 - the read-throughput path the
-	// shells fetch, safe to edge-cache. HTML pastes are not negotiated (one
-	// representation) and stay cacheable. See docs/SPEC.md "The
-	// content-negotiated bare URL is no-store".
-	if clientRendered && !r.URL.Query().Has("raw") {
-		h.Set("Cache-Control", "no-store")
-	}
+	// The bare URL is a SINGLE representation (the shell), so it keeps the
+	// shared Cache-Control: public, max-age=3600 set above and is safe to
+	// edge-cache. There is no per-Accept variant, so the CDN hazard that the
+	// old no-store guarded against is gone at the root: a CDN keys on the URL
+	// (Cloudflare honors only Vary: Accept-Encoding, never Vary: Accept), but
+	// with one representation there is nothing to mis-pin. The explicit ?raw=1
+	// URL is a distinct single representation (always raw) and also stays
+	// max-age=3600. HTML pastes are not negotiated and stay cacheable. The
+	// tradeoff: the shell is now edge-cacheable, so a shell/style change (a
+	// mdShellVersion/diffShellVersion bump) propagates within max-age (1h) OR
+	// immediately via the deploy-time edge purge - acceptable since shell
+	// changes only ship on a deploy, which purges. See docs/SPEC.md "The bare
+	// URL always serves the shell (no Accept negotiation)".
 
 	// ETag is the content SHA for HTML and raw markdown/diff - content-
 	// addressed, byte-stable. Each shell uses its own shell version instead.
@@ -361,17 +348,15 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 			return
 		}
 		// Fixed client-render shell. The shell loads marked + DOMPurify
-		// and fetches the raw bytes itself. A tight CSP locks the page
-		// down: only same-origin scripts/styles/connects, no inline
+		// and fetches the raw bytes itself (via ?raw=1). A tight CSP locks
+		// the page down: only same-origin scripts/styles/connects, no inline
 		// script, no framing.
 		//
-		// Cache-Control is already no-store here: this is the bare URL of a
-		// client-rendered kind, set centrally above, so the edge never stores
-		// a representation of the bare URL that a non-browser Accept could
-		// have primed. The shell is tiny + content-independent, so re-fetching
-		// it per navigation (rather than a 304 revalidation) is negligible,
-		// and a shell/style change (a restyle bumps mdShellVersion + the asset
-		// ?v=) is seen immediately.
+		// Cache-Control is the shared public, max-age=3600 set above: the bare
+		// URL is one representation (this shell, served to every client) so it
+		// is safe to edge-cache. A shell/style change (a restyle bumps
+		// mdShellVersion + the asset ?v=) propagates within max-age or
+		// immediately via the deploy-time edge purge.
 		h.Set("Content-Security-Policy", shellCSP)
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(shellHTML())
@@ -397,10 +382,11 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		// Fixed client-render shell. Same CSP as the markdown shell - only
 		// same-origin scripts/styles/connects (the vendored diff2html +
 		// highlight.js + bootstrap, and the ?raw fetch), no inline script,
-		// no framing. Cache-Control is already no-store here: this is the
-		// bare URL of a client-rendered kind, set centrally above, so the edge
-		// never stores a representation a non-browser Accept could have primed;
-		// a shell/style change (a diffShellVersion bump) is seen immediately.
+		// no framing. Cache-Control is the shared public, max-age=3600 set
+		// above: the bare URL is one representation (this shell, served to
+		// every client) so it is safe to edge-cache. A shell/style change (a
+		// diffShellVersion bump) propagates within max-age or immediately via
+		// the deploy-time edge purge.
 		h.Set("Content-Security-Policy", shellCSP)
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(diffShellHTML())
@@ -612,12 +598,13 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 const shellCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 // wantsRaw reports whether the client asked for the raw paste bytes rather
-// than the client-render shell (markdown or diff). True when ?raw is present
-// or when the Accept header does not include text/html (e.g. a curl default
-// of */*, or an explicit text/markdown). A browser navigation sends
-// Accept: text/html,... and so gets the shell.
+// than the client-render shell (markdown or diff). True ONLY when the URL
+// carries an explicit ?raw query. There is no Accept-header negotiation: the
+// bare URL serves the shell to every client (browser, curl, link-unfurl bot)
+// so it is a single representation and safe to edge-cache. Raw bytes are an
+// explicit opt-in via ?raw (over HTTP) or `get` (over SSH).
 func wantsRaw(r *http.Request) bool {
-	return r.URL.Query().Has("raw") || !strings.Contains(r.Header.Get("Accept"), "text/html")
+	return r.URL.Query().Has("raw")
 }
 
 // etagMatches checks if the client's If-None-Match header lists our
