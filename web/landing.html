@@ -98,7 +98,7 @@ server; verb commands don&rsquo;t need it.</p>
 
 <h2>Description</h2>
 <div class="indent">
-<p>Publishes HTML, Markdown, or a unified diff for 30 days at a random subdomain.
+<p>Publishes HTML, Markdown, or a unified diff {{RETENTION}} at a random subdomain.
 One ssh pipe, no signup, no install. Identity is your ssh public key: anyone with
 a different key can read the URL but cannot update, rename, pin, or delete the
 paste.</p>
@@ -120,7 +120,7 @@ any rendered paste's URL for the raw source.</p>
   options.</dd>
 
   <dt>cat <em>file</em> | ssh -T hostthis.dev <em>slug</em></dt>
-  <dd>replace <em>slug</em>&rsquo;s content; resets the 30-day clock</dd>
+  <dd>replace <em>slug</em>&rsquo;s content; resets the retention clock</dd>
 
   <dt>ssh hostthis.dev <strong>list</strong></dt>
   <dd>active pastes, soonest to expire first</dd>
@@ -203,7 +203,7 @@ of every active paste. Text compresses 5-10x under zstd, so the real raw-payload
 ceiling is typically 50-100 MiB.</p>
 
 <p>Pastes are HTML, Markdown, or a unified diff; sites are a gzip-tar archive.
-30-day retention from the last update.</p>
+Kept {{RETENTION}} after the last update.</p>
 </div>
 
 <h2>Exit Status</h2>

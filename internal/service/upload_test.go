@@ -64,10 +64,39 @@ func TestUpload_Create_HTML(t *testing.T) {
 	if _, err := domain.ParseSlug(string(res.Paste.Slug)); err != nil {
 		t.Fatalf("returned slug is invalid: %v", err)
 	}
-	// Expiry should be RetentionWindow from now.
-	if res.Paste.ExpiresAt.Sub(res.Paste.CreatedAt) != domain.RetentionWindow {
-		t.Fatalf("expiry: got %v, want %v", res.Paste.ExpiresAt.Sub(res.Paste.CreatedAt), domain.RetentionWindow)
+	// Expiry should be the default retention window from now.
+	if res.Paste.ExpiresAt.Sub(res.Paste.CreatedAt) != domain.DefaultRetentionWindow {
+		t.Fatalf("expiry: got %v, want %v", res.Paste.ExpiresAt.Sub(res.Paste.CreatedAt), domain.DefaultRetentionWindow)
 	}
+}
+
+// TestUpload_Retention pins the configurable-retention behavior: the Upload
+// service stamps ExpiresAt from its Retention policy, so a custom window and
+// the no-expiry policy both flow through to the created paste.
+func TestUpload_Retention(t *testing.T) {
+	t.Run("custom window", func(t *testing.T) {
+		u := newRealStack(t)
+		u.Retention = domain.Retention{Window: 7 * 24 * time.Hour}
+		res, err := u.Create(bytes.NewReader([]byte("<p>hi</p>")), "k", "", "")
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if got := res.Paste.ExpiresAt.Sub(res.Paste.CreatedAt); got != 7*24*time.Hour {
+			t.Fatalf("expiry delta: got %v, want 7 days", got)
+		}
+	})
+
+	t.Run("no expiry stamps the NeverExpires sentinel", func(t *testing.T) {
+		u := newRealStack(t)
+		u.Retention = domain.Retention{Window: 0}
+		res, err := u.Create(bytes.NewReader([]byte("<p>hi</p>")), "k", "", "")
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if !res.Paste.ExpiresAt.Equal(domain.NeverExpires) {
+			t.Fatalf("expiry: got %v, want NeverExpires %v", res.Paste.ExpiresAt, domain.NeverExpires)
+		}
+	})
 }
 
 func TestUpload_Create_Markdown(t *testing.T) {
@@ -153,8 +182,8 @@ func TestUpload_Create_TimestampStable(t *testing.T) {
 	if !res.Paste.CreatedAt.Equal(now) {
 		t.Fatalf("CreatedAt: got %v, want %v", res.Paste.CreatedAt, now)
 	}
-	if !res.Paste.ExpiresAt.Equal(now.Add(domain.RetentionWindow)) {
+	if !res.Paste.ExpiresAt.Equal(now.Add(domain.DefaultRetentionWindow)) {
 		t.Fatalf("ExpiresAt: got %v, want %v",
-			res.Paste.ExpiresAt, now.Add(domain.RetentionWindow))
+			res.Paste.ExpiresAt, now.Add(domain.DefaultRetentionWindow))
 	}
 }

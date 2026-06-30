@@ -10,7 +10,7 @@ import (
 
 // Site is the aggregate for a static-site upload: a directory of files
 // served off a single slug. It lives alongside Paste and shares the
-// same slug shape, identity, and 30-day retention clock - a site is
+// same slug shape, identity, and retention clock - a site is
 // "a paste that happens to be a directory."
 //
 // The served bytes are addressed indirectly: the Manifest maps each
@@ -23,7 +23,7 @@ type Site struct {
 	Manifest  Manifest // path -> blob ref (sha + size + content-type)
 	CreatedAt time.Time
 	UpdatedAt time.Time
-	ExpiresAt time.Time // UpdatedAt + RetentionWindow
+	ExpiresAt time.Time // UpdatedAt + Retention window (or NeverExpires)
 }
 
 // ManifestEntry is one file in a site: the blob it points at, the

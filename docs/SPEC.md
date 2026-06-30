@@ -399,7 +399,7 @@ There is no new verb and no flag. hostthis DETECTS the archive the same
 way it detects Markdown vs HTML (by sniffing the upload), safe-untars
 it, stores each file as a content-addressed blob plus a manifest, and
 serves the directory at `<slug>.hostthis.dev/<path>`. Everything else -
-identity, quota, the 30-day expiry, versioning, the security model - is
+identity, quota, the retention window, versioning, the security model - is
 identical to a single-file paste. A static site is just "a paste that
 happens to be a directory."
 
@@ -497,7 +497,7 @@ A **Site** is a new domain aggregate that lives alongside `Paste`:
   SHA256 of its blob, plus per-file size and a content-type derived
   from the file extension.
 - `CreatedAt` / `UpdatedAt` / `ExpiresAt` - the same fields and the
-  same 30-day retention clock a paste carries.
+  same retention clock a paste carries.
 
 The `Manifest` is a pure value object: building it from extracted
 entries, looking a path up in it, and computing each file's
@@ -650,8 +650,8 @@ Nothing about the product opinions changes for sites:
   decompression-bomb guard aborts the untar the instant the running
   total would push the owner over that cap, so a site can never be
   persisted over-quota.
-- **Retention** is the same fixed 30-day expiry from last update; a site
-  evicts itself exactly like a paste, no per-site control.
+- **Retention** is the same retention window as a paste, from last update; a
+  site evicts itself exactly like a paste, no per-site control.
 - **Versioning** reuses the paste-versioning shape where it is low-cost:
   a deploy to an OWNED site slug re-deploys the site in place (same slug,
   same URL, new immutable manifest), so rollback / history ride the
@@ -690,7 +690,7 @@ site-vs-paste, the slug decides new-vs-update.
   mid-untar decompression-bomb guard still bounds extraction against the
   remaining budget so an over-quota archive is rejected before any blob
   lands.
-- **Retention resets.** Like a paste update, the 30-day expiry clock
+- **Retention resets.** Like a paste update, the retention clock
   restarts from the re-deploy time.
 
 A re-deploy to an existing slug NEVER lands as a fresh slug: the slug is
@@ -1045,8 +1045,9 @@ expires after a fixed window of inactivity: default 30 days since its last
 write** (a `PUT` or `DELETE`; a read does not extend it). On expiry the
 room record and every value in its namespace are deleted by the **same
 periodic sweep** that expires pastes and sites - one more record kind the
-sweep walks, GC'd through the existing expiry-index machinery. The window
-matches the paste and site retention: 30 days is long enough that a room
+sweep walks, GC'd through the existing expiry-index machinery. This 30-day
+inactivity window is the room tier's own fixed setting, independent of the
+configurable paste/site retention (`HOSTTHIS_RETENTION`): 30 days is long enough that a room
 backing a live app whose participants may return over several weeks (a poll
 open for a month, a retro board a team revisits) survives normal use.
 Still finite, still no user-facing knob, still swept automatically - the
@@ -1628,23 +1629,33 @@ concurrent register / broadcast / unregister path fails the build.
 
 ## Retention
 
-**Every paste lives for 30 days from its last update**, then it's
-deleted (slug, all versions, content blob if unreferenced). No
-exceptions, no user-facing control, no operator config.
+**Every paste lives for a configurable retention window from its last
+update**, then it's deleted (slug, all versions, content blob if
+unreferenced). The window is an installation-wide operator setting,
+`HOSTTHIS_RETENTION`, defaulting to **30 days**. There is no per-paste
+user control.
 
-- Initial upload: 30-day clock starts.
-- Each `update <slug>` resets the clock to 30 days from that moment.
+- `HOSTTHIS_RETENTION` accepts a window (`30d`, `7d`, `12h`, any Go
+  duration) or `off` / `never` / `0` to disable expiry entirely.
+- Initial upload: the retention clock starts.
+- Each `update <slug>` resets the clock to the full window from that moment.
 - No `touch` verb, no `--expires` flag. Time-based extension only happens
   as a side effect of actually changing content.
+- **No-expiry policy.** When retention is `off`, content is stamped with a
+  far-future sentinel (`domain.NeverExpires`), so the periodic sweep's
+  `expires_at < now` check never matches it and the fixed-width expiry index
+  never reaches it on a cutoff scan - the record is simply never swept. The
+  `list` / `versions` surfaces and the post-upload confirmation render its
+  expiry as "never" rather than a date.
 
-Rationale for short + fixed: hostthis is for *shareable rendered content*
-(HTML mockups, Markdown reports, demo prototypes). The use case is
-"send this link to a coworker this week"; nobody is sending an "open
-this link in six months" URL through us. 30 days forces the asker to
-re-host if they need it again, which catches stale-link rot at the source.
-
-Long-term hosting is a deliberate non-goal - see "Non-goals" at the
-bottom.
+Rationale for the 30-day default: hostthis is for *shareable rendered
+content* (HTML mockups, Markdown reports, demo prototypes). The default
+use case is "send this link to a coworker this week"; the short window
+forces the asker to re-host if they need it again, which catches stale-link
+rot at the source. An operator running a low-volume or private instance can
+widen the window or turn expiry off via `HOSTTHIS_RETENTION` - long-term
+hosting is not the *default* posture (see "Non-goals") but is a supported
+operator choice.
 
 ---
 
@@ -4800,10 +4811,14 @@ comments, but the persistence API lets a USER build them.
 ## Non-goals (explicitly out of v1 scope)
 
 These are interesting but expand the product beyond "host renderable
-content for 30 days." Keep the surface small.
+content for a short window." Keep the surface small.
 
-- **Long-term storage**. Every paste expires at 30 days, period. If you
-  need a permanent URL, host elsewhere.
+- **Long-term storage as the default**. Out of the box every paste expires
+  after the retention window (30 days by default); the product's posture is
+  ephemeral, shareable content, not a permanent CDN. An operator running a
+  private or low-volume instance MAY widen or disable expiry via
+  `HOSTTHIS_RETENTION` (see "Retention"), but that is an operator opt-in, not
+  the public default.
 - **Binary / non-renderable file hosting**. ZIPs, photos, videos,
   arbitrary blobs are out of scope.
 - **Comments / threaded discussion**. Out of scope.

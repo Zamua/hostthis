@@ -356,7 +356,7 @@ func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, us
 		return err
 	}
 	// Re-key the expiry index: drop the old (oldExpiresAt, slug) marker and
-	// write the new one, so the sweep sees the restarted 30-day clock.
+	// write the new one, so the sweep sees the restarted retention clock.
 	if !inTx.ExpiresAt.Equal(s.ExpiresAt) {
 		if err := tx.Delete(keyExpirySite(inTx.ExpiresAt, s.Slug)); err != nil {
 			_ = tx.Rollback()

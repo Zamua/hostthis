@@ -86,6 +86,27 @@ type Server struct {
 	Logger      *log.Logger
 }
 
+// retention is the installation's content-TTL policy, read from the Upload
+// service (its single source of truth, set from HOSTTHIS_RETENTION). Falls back
+// to the default when no upload service is wired (no paste path -> no message).
+func (s *Server) retention() domain.Retention {
+	if s.Upload != nil {
+		return s.Upload.Retention
+	}
+	return domain.DefaultRetention()
+}
+
+// expiresPhrase renders the retention policy for post-upload confirmations:
+// "expires in 30 days" (or the configured window), or "never expires" when
+// retention is disabled. Tracks HOSTTHIS_RETENTION so the message never lies.
+func (s *Server) expiresPhrase() string {
+	r := s.retention()
+	if !r.Enabled() {
+		return "never expires"
+	}
+	return "expires in " + r.Describe()
+}
+
 // now returns the server's clock, defaulting to time.Now so tests that
 // don't inject a clock still work.
 func (s *Server) now() time.Time {
@@ -365,7 +386,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 		// Unknown verb - print the error and the help, then exit nonzero.
 		// Matches what git, kubectl, etc. do.
 		fmt.Fprintf(sess.Stderr(), "hostthis: unknown command %q\n\n", first)
-		emitHelp(sess, s.apex())
+		emitHelp(sess, s.apex(), s.retention())
 		_ = sess.Exit(ExitUsage)
 	}
 }
@@ -424,7 +445,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		}
 		url := s.BuildURL(res.Paste.Slug)
 		fmt.Fprintln(sess, url)
-		_, _ = fmt.Fprintf(sess.Stderr(), "v%d saved. expires in 30 days\n", res.NewVer)
+		_, _ = fmt.Fprintf(sess.Stderr(), "v%d saved. %s\n", res.NewVer, s.expiresPhrase())
 		if res.WasPinned {
 			fmt.Fprintf(sess.Stderr(),
 				"note: this paste is pinned to v%d, so the URL still serves v%d, not v%d.\n",
@@ -459,9 +480,9 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	url := s.BuildURL(res.Paste.Slug)
 	fmt.Fprintln(sess, url)
 	if res.Paste.Name != "" {
-		_, _ = fmt.Fprintf(sess.Stderr(), "%q. expires in 30 days\n", res.Paste.Name)
+		_, _ = fmt.Fprintf(sess.Stderr(), "%q. %s\n", res.Paste.Name, s.expiresPhrase())
 	} else {
-		_, _ = fmt.Fprintln(sess.Stderr(), "expires in 30 days")
+		_, _ = fmt.Fprintln(sess.Stderr(), s.expiresPhrase())
 	}
 	writeQR(sess.Stderr(), url)
 	_ = sess.Exit(ExitOK)
@@ -480,7 +501,7 @@ func (s *Server) deploySite(sess gossh.Session, owner string, body io.Reader) {
 	}
 	url := s.BuildURL(res.Site.Slug)
 	fmt.Fprintln(sess, url)
-	_, _ = fmt.Fprintf(sess.Stderr(), "site: %d file(s). expires in 30 days\n", len(res.Site.Manifest.Files))
+	_, _ = fmt.Fprintf(sess.Stderr(), "site: %d file(s). %s\n", len(res.Site.Manifest.Files), s.expiresPhrase())
 	writeQR(sess.Stderr(), url)
 	_ = sess.Exit(ExitOK)
 }
@@ -502,7 +523,7 @@ func (s *Server) deploySiteToSlug(sess gossh.Session, owner string, slug domain.
 	}
 	url := s.BuildURL(res.Site.Slug)
 	_, _ = fmt.Fprintln(sess, url)
-	_, _ = fmt.Fprintf(sess.Stderr(), "site: %d file(s). expires in 30 days\n", len(res.Site.Manifest.Files))
+	_, _ = fmt.Fprintf(sess.Stderr(), "site: %d file(s). %s\n", len(res.Site.Manifest.Files), s.expiresPhrase())
 	writeQR(sess.Stderr(), url)
 	_ = sess.Exit(ExitOK)
 }
@@ -535,7 +556,7 @@ func (s *Server) verbList(sess gossh.Session, owner string) {
 		}
 		fmt.Fprintf(sess, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.Slug, name, humanBytes(p.Size), p.Kind,
-			humanDuration(p.ExpiresAt.Sub(now)), renderVersCol(p))
+			humanExpiresIn(p.ExpiresAt, now), renderVersCol(p))
 	}
 	_ = sess.Exit(ExitOK)
 }
@@ -814,8 +835,12 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 	if p.PinnedVersion != 0 {
 		pinNote = fmt.Sprintf("pinned to v%d", p.PinnedVersion)
 	}
-	fmt.Fprintf(sess.Stderr(), "%s. expires in %s (%s)\n",
-		pinNote, humanDuration(p.ExpiresAt.Sub(now)), p.ExpiresAt.Format("2006-01-02 15:04 UTC"))
+	if p.ExpiresAt.Equal(domain.NeverExpires) {
+		_, _ = fmt.Fprintf(sess.Stderr(), "%s. never expires\n", pinNote)
+	} else {
+		_, _ = fmt.Fprintf(sess.Stderr(), "%s. expires in %s (%s)\n",
+			pinNote, humanDuration(p.ExpiresAt.Sub(now)), p.ExpiresAt.Format("2006-01-02 15:04 UTC"))
+	}
 	_ = sess.Exit(ExitOK)
 }
 
@@ -916,7 +941,7 @@ func max0(n int) int {
 // so we hand them help and exit 0).
 func (s *Server) verbHelp(sess gossh.Session, rest []string) {
 	if len(rest) == 0 {
-		emitHelp(sess, s.apex())
+		emitHelp(sess, s.apex(), s.retention())
 		_ = sess.Exit(ExitOK)
 		return
 	}
@@ -932,7 +957,7 @@ func (s *Server) verbHelp(sess gossh.Session, rest []string) {
 		prefix = strings.ReplaceAll(prefix, "\n", "\r\n")
 	}
 	fmt.Fprint(sess.Stderr(), prefix)
-	emitHelp(sess, s.apex())
+	emitHelp(sess, s.apex(), s.retention())
 	_ = sess.Exit(ExitOK)
 }
 
@@ -950,8 +975,8 @@ func (s *Server) apex() string { return s.ApexDomain }
 // previous one ended. An interactive `ssh <apex>` (no command)
 // defaults to allocating a PTY; `ssh <apex> help` doesn't. Same
 // helpText, different newline handling.
-func emitHelp(sess gossh.Session, apex string) {
-	text := helpText(apex)
+func emitHelp(sess gossh.Session, apex string, retention domain.Retention) {
+	text := helpText(apex, retention)
 	if _, _, hasPty := sess.Pty(); hasPty {
 		text = strings.ReplaceAll(text, "\n", "\r\n")
 		fmt.Fprint(sess.Stderr(), text, "\r\n")
@@ -963,7 +988,7 @@ func emitHelp(sess gossh.Session, apex string) {
 // helpTextTemplate is the canonical user-facing help. {{apex}}
 // placeholders are substituted at render time with the configured
 // apex domain so the help is correct under any deployment.
-const helpTextTemplate = `Pipe a rendered file in, get a URL out. Pastes expire 30 days after last update.
+const helpTextTemplate = `Pipe a rendered file in, get a URL out. {{retention}}
 
 UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;
          a QR code of the URL also prints to stderr on success)
@@ -1004,8 +1029,17 @@ LIMITS
 
 // helpText returns the rendered help with apex substituted in.
 // Caller must pass a non-empty apex.
-func helpText(apex string) string {
-	return strings.ReplaceAll(helpTextTemplate, "{{apex}}", apex)
+func helpText(apex string, retention domain.Retention) string {
+	t := strings.ReplaceAll(helpTextTemplate, "{{apex}}", apex)
+	return strings.ReplaceAll(t, "{{retention}}", retentionSentence(retention))
+}
+
+// retentionSentence renders the help-text line about expiry from the policy.
+func retentionSentence(r domain.Retention) string {
+	if !r.Enabled() {
+		return "Pastes never expire."
+	}
+	return fmt.Sprintf("Pastes expire %s after last update.", r.Describe())
 }
 
 // -- helpers ----------------------------------------------------------------

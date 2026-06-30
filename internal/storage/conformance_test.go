@@ -172,7 +172,7 @@ func pasteOf(slug, identity string, size int) domain.Paste {
 		PinnedVersion: 0,
 		CreatedAt:     fixedNow,
 		UpdatedAt:     fixedNow,
-		ExpiresAt:     fixedNow.Add(domain.RetentionWindow),
+		ExpiresAt:     fixedNow.Add(domain.DefaultRetentionWindow),
 	}
 }
 
@@ -442,7 +442,7 @@ func conformAppendBumpsVersion(t *testing.T, r conformanceRepo) {
 		t.Fatalf("unpinned head should roll to v2, got sha=%q size=%d kind=%q", p.ContentSHA, p.Size, p.Kind)
 	}
 	// Append resets the retention clock from `now`.
-	if !p.ExpiresAt.Equal(fixedNow.Add(domain.RetentionWindow)) {
+	if !p.ExpiresAt.Equal(fixedNow.Add(domain.DefaultRetentionWindow)) {
 		t.Fatalf("append should reset expiry to now+window, got %v", p.ExpiresAt)
 	}
 }

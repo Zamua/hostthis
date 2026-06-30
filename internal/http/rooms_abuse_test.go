@@ -127,8 +127,8 @@ func TestRoomsHTTP_CreateExpiredAppIs404(t *testing.T) {
 		Slug:      "appz2345",
 		Identity:  "key:test",
 		Manifest:  domain.NewManifest(),
-		CreatedAt: now.Add(-2 * domain.RetentionWindow),
-		UpdatedAt: now.Add(-2 * domain.RetentionWindow),
+		CreatedAt: now.Add(-2 * domain.DefaultRetentionWindow),
+		UpdatedAt: now.Add(-2 * domain.DefaultRetentionWindow),
 		ExpiresAt: now.Add(-time.Hour), // already expired
 	}
 	srv := &Server{
@@ -157,7 +157,7 @@ func TestRoomsHTTP_CreateLivePasteAppSucceeds(t *testing.T) {
 		Kind:       domain.KindHTML,
 		ContentSHA: "sha",
 		UpdatedAt:  now,
-		ExpiresAt:  now.Add(domain.RetentionWindow),
+		ExpiresAt:  now.Add(domain.DefaultRetentionWindow),
 	}
 	srv := &Server{
 		ApexDomain: "hostthis.test",

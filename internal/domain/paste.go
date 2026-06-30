@@ -67,7 +67,7 @@ type Paste struct {
 	LatestVersion int         // MAX(ver_num) - what an `update` would advance from; 0 if not loaded
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
-	ExpiresAt     time.Time // UpdatedAt + RetentionWindow; only `update` moves it
+	ExpiresAt     time.Time // UpdatedAt + Retention window (or NeverExpires); only `update` moves it
 }
 
 // Version is a snapshot in a paste's history. v1 is the initial
@@ -86,9 +86,6 @@ type Version struct {
 	CreatedAt  time.Time
 	Deleted    bool
 }
-
-// RetentionWindow is the fixed 30-day TTL per SPEC.md. Not config.
-const RetentionWindow = 30 * 24 * time.Hour
 
 // HashContent returns the canonical content hash used to address blobs
 // and detect dedupable uploads. The same bytes always produce the

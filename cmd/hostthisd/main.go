@@ -48,7 +48,16 @@ func main() {
 		logger.Fatalf("--apex-domain is required (or set HOSTTHIS_APEX_DOMAIN). Pass the public domain hostthis serves on, e.g. paste.example.com.")
 	}
 
-	metadata, err := buildMetadata(*dataDir, logger)
+	// Content TTL policy (HOSTTHIS_RETENTION): how long a paste/site lives after
+	// its last update before the sweep evicts it. Default 30 days; "off" never
+	// expires. Injected into the metadata backends + the upload/site services.
+	retention, err := parseRetention(os.Getenv("HOSTTHIS_RETENTION"), domain.DefaultRetention())
+	if err != nil {
+		logger.Fatalf("%v", err)
+	}
+	logger.Printf("config: retention=%s (paste/site TTL from last update)", retention.Describe())
+
+	metadata, err := buildMetadata(*dataDir, retention, logger)
 	if err != nil {
 		logger.Fatalf("metadata backend: %v", err)
 	}
@@ -80,6 +89,7 @@ func main() {
 	roomRepo := metadata.Rooms
 
 	uploadSvc := service.NewUpload(pasteRepo, blobUnit)
+	uploadSvc.Retention = retention
 	uploadSvc.Logger = logger // record background blob-finalize outcomes
 	// HOSTTHIS_BLOB_SYNC is a BENCHMARK toggle (sync vs async A/B on one
 	// binary): when true, Create writes the blob inline on the ack path
@@ -96,6 +106,7 @@ func main() {
 	var deploySvc *service.DeploySite
 	if siteRepo != nil {
 		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobUnit)
+		deploySvc.Retention = retention
 	}
 
 	// Rooms: the no-auth, capability-based app-persistence tier
@@ -170,7 +181,14 @@ func main() {
 	// to ssh to the actual configured domain. The template ships with
 	// `{{APEX}}` everywhere a hostname appears (e.g. `ssh {{APEX}} list`).
 	if len(landing) > 0 {
-		landing = []byte(strings.ReplaceAll(string(landing), "{{APEX}}", *apexDomain))
+		s := strings.ReplaceAll(string(landing), "{{APEX}}", *apexDomain)
+		// {{RETENTION}} tracks HOSTTHIS_RETENTION so the landing never advertises
+		// the wrong expiry: "for 30 days" / "for 12 hours" / "with no expiry".
+		retPhrase := "with no expiry"
+		if retention.Enabled() {
+			retPhrase = "for " + retention.Describe()
+		}
+		landing = []byte(strings.ReplaceAll(s, "{{RETENTION}}", retPhrase))
 	}
 
 	// URL builder picks based on mode. Subdomain mode is required for
@@ -409,4 +427,31 @@ func envOrDuration(key string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
+}
+
+// parseRetention reads the HOSTTHIS_RETENTION operator knob into a retention
+// policy. Accepted forms (case-insensitive):
+//
+//	""                                 -> the supplied default
+//	"off" / "never" / "none" / "0"     -> no expiry (content is never swept)
+//	"<N>d"                             -> N days (e.g. "30d", "7d")
+//	anything time.ParseDuration takes  -> that duration (e.g. "12h", "720h")
+func parseRetention(raw string, def domain.Retention) (domain.Retention, error) {
+	s := strings.TrimSpace(strings.ToLower(raw))
+	switch s {
+	case "":
+		return def, nil
+	case "off", "never", "none", "disabled", "0":
+		return domain.Retention{Window: 0}, nil
+	}
+	if days, ok := strings.CutSuffix(s, "d"); ok {
+		if n, err := strconv.Atoi(days); err == nil && n >= 0 {
+			return domain.Retention{Window: time.Duration(n) * 24 * time.Hour}, nil
+		}
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return def, fmt.Errorf("HOSTTHIS_RETENTION=%q is not valid (use e.g. 30d, 12h, or off)", raw)
+	}
+	return domain.Retention{Window: d}, nil
 }

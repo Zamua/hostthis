@@ -36,7 +36,7 @@ type SiteRepo interface {
 	//     re-deploy does not double-count; a smaller one frees the diff.
 	//     ErrServiceFull / ErrOverUserQuota on overflow.
 	//   - On success the row's manifest, deduped_size, updated_at, and
-	//     expires_at are all replaced from s (the 30-day clock restarts),
+	//     expires_at are all replaced from s (the retention clock restarts),
 	//     and the expiry index is re-keyed. The slug and created_at are
 	//     unchanged. The swap is a single transaction: the URL serves the
 	//     OLD manifest until it lands, the new one immediately after.
@@ -83,11 +83,14 @@ type DeploySite struct {
 	Pastes PasteByteSummer
 	Blob   BlobUnit
 	Now    func() time.Time
+	// Retention stamps a deployed site's ExpiresAt (same policy as pastes).
+	Retention domain.Retention
 }
 
-// NewDeploySite wires defaults.
+// NewDeploySite wires defaults. Retention defaults to the 30-day policy; the
+// composition root overrides DeploySite.Retention from HOSTTHIS_RETENTION.
 func NewDeploySite(sites SiteRepo, pastes PasteByteSummer, blob BlobUnit) *DeploySite {
-	return &DeploySite{Sites: sites, Pastes: pastes, Blob: blob, Now: time.Now}
+	return &DeploySite{Sites: sites, Pastes: pastes, Blob: blob, Now: time.Now, Retention: domain.DefaultRetention()}
 }
 
 // SiteResult is what Deploy produced for the SSH layer to format.
@@ -207,7 +210,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		Manifest:  man,
 		CreatedAt: now,
 		UpdatedAt: now,
-		ExpiresAt: now.Add(domain.RetentionWindow),
+		ExpiresAt: d.Retention.ExpiryFor(now),
 	}
 	deduped := man.DedupedSize()
 
@@ -419,7 +422,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		Manifest:  man,
 		CreatedAt: existing.CreatedAt, // preserved across re-deploys
 		UpdatedAt: now,
-		ExpiresAt: now.Add(domain.RetentionWindow),
+		ExpiresAt: d.Retention.ExpiryFor(now),
 	}
 	deduped := man.DedupedSize()
 

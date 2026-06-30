@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Zamua/hostthis/internal/domain"
 	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
@@ -97,15 +98,15 @@ type roomStore interface {
 // configured bundle. Default is sqlite (no behavior change vs prior).
 // "slatedb" requires the binary to be built with `-tags slatedb`;
 // otherwise the slatedb branch errors with a clear message.
-func buildMetadata(dataDir string, logger *log.Logger) (*metadataBundle, error) {
+func buildMetadata(dataDir string, retention domain.Retention, logger *log.Logger) (*metadataBundle, error) {
 	backend := strings.ToLower(envOr("HOSTTHIS_METADATA_BACKEND", "sqlite"))
 	switch backend {
 	case "sqlite":
-		return buildMetadataSqlite(dataDir, logger)
+		return buildMetadataSqlite(dataDir, retention, logger)
 	case "slatedb":
-		return buildMetadataSlate(logger)
+		return buildMetadataSlate(retention, logger)
 	case "shale":
-		return buildMetadataShale(logger)
+		return buildMetadataShale(retention, logger)
 	default:
 		return nil, fmt.Errorf("unknown HOSTTHIS_METADATA_BACKEND %q (want sqlite|slatedb|shale)", backend)
 	}
@@ -113,7 +114,7 @@ func buildMetadata(dataDir string, logger *log.Logger) (*metadataBundle, error) 
 
 // buildMetadataSqlite is the always-compiled default. Opens
 // <data-dir>/hostthis.db and wires PasteRepo + KeyGateRepo.
-func buildMetadataSqlite(dataDir string, logger *log.Logger) (*metadataBundle, error) {
+func buildMetadataSqlite(dataDir string, retention domain.Retention, logger *log.Logger) (*metadataBundle, error) {
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("mkdir data-dir: %w", err)
 	}
@@ -122,8 +123,10 @@ func buildMetadataSqlite(dataDir string, logger *log.Logger) (*metadataBundle, e
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	logger.Printf("metadata: sqlite at %s", filepath.Join(dataDir, "hostthis.db"))
+	pasteRepo := storage.NewPasteRepo(db)
+	pasteRepo.Retention = retention
 	return &metadataBundle{
-		Repo:    storage.NewPasteRepo(db),
+		Repo:    pasteRepo,
 		KeyGate: storage.NewKeyGateRepo(db),
 		Sites:   storage.NewSiteRepo(db),
 		Rooms:   storage.NewRoomKVRepo(db),

@@ -73,7 +73,7 @@ func TestSweep_ExpiresSitesAndProtectsSharedBlobs(t *testing.T) {
 
 	// Past the retention window: the SITE has expired but the paste still references the
 	// shared bytes. The site row must be deleted; the shared blob must NOT.
-	future := now.Add(domain.RetentionWindow + 24*time.Hour)
+	future := now.Add(domain.DefaultRetentionWindow + 24*time.Hour)
 
 	// Reset the paste's expiry far into the future via a fresh upload-time
 	// trick: instead, just sweep at a point where the paste is alive. The
@@ -159,7 +159,7 @@ func TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt(t *testing.T) {
 
 	// Sweep past A's window: site A expired, site B alive. The shared blob must
 	// survive because B still references it.
-	deleted, gc, err := sweep.Once(t0.Add(domain.RetentionWindow + 24*time.Hour))
+	deleted, gc, err := sweep.Once(t0.Add(domain.DefaultRetentionWindow + 24*time.Hour))
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}

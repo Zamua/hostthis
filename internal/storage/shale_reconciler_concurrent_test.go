@@ -359,7 +359,7 @@ func TestShaleReconciler_RaceAgainstInserts(t *testing.T) {
 				p := domain.Paste{
 					Slug: slug, Identity: domain.Identity(owner),
 					Kind: domain.KindHTML, ContentSHA: fmt.Sprintf("sha-%d", n), Size: v1Bytes,
-					CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
+					CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 				}
 				err := repo.InsertWithQuotaCheck(context.Background(), p, userCap, now)
 				switch {
@@ -496,7 +496,7 @@ func TestShaleReconciler_GraceProtectsInflightReservation(t *testing.T) {
 	p := domain.Paste{
 		Slug: domain.Slug("gracerea"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-grace", Size: 300,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert real paste: %v", err)
@@ -582,7 +582,7 @@ func TestShaleReconciler_LeakedAppendMarker(t *testing.T) {
 	p := domain.Paste{
 		Slug: slug, Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-leak-v1", Size: 300,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert paste: %v", err)
