@@ -117,7 +117,7 @@ func mkPaste(slug, owner, sha string, size int, now time.Time) domain.Paste {
 		Size:       size,
 		CreatedAt:  now,
 		UpdatedAt:  now,
-		ExpiresAt:  now.Add(domain.RetentionWindow),
+		ExpiresAt:  now.Add(domain.DefaultRetentionWindow),
 	}
 }
 
@@ -325,7 +325,7 @@ func TestSites_BindAllAndRedeployDrops(t *testing.T) {
 		Manifest:  man,
 		CreatedAt: now,
 		UpdatedAt: now,
-		ExpiresAt: now.Add(domain.RetentionWindow),
+		ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	if err := unit.Commit(ctx, []service.BlobHandle{h1, h2}, func(ctx context.Context) error {
 		return repo.InsertSiteWithQuotaCheck(ctx, site, man.DedupedSize(), int64(domain.UserQuotaBytes), now)
@@ -357,7 +357,7 @@ func TestSites_BindAllAndRedeployDrops(t *testing.T) {
 	site2 := site
 	site2.Manifest = man2
 	site2.UpdatedAt = now2
-	site2.ExpiresAt = now2.Add(domain.RetentionWindow)
+	site2.ExpiresAt = now2.Add(domain.DefaultRetentionWindow)
 	if err := unit.Commit(ctx, []service.BlobHandle{n1, n2}, func(ctx context.Context) error {
 		return repo.ReplaceSiteWithQuotaCheck(ctx, site2, man2.DedupedSize(), int64(domain.UserQuotaBytes), now2)
 	}); err != nil {

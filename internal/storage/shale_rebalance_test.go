@@ -196,7 +196,7 @@ func pasteFor(slug, identity, name string, size int, now time.Time) domain.Paste
 		PinnedVersion: 0,
 		CreatedAt:     now,
 		UpdatedAt:     now,
-		ExpiresAt:     now.Add(domain.RetentionWindow),
+		ExpiresAt:     now.Add(domain.DefaultRetentionWindow),
 	}
 }
 

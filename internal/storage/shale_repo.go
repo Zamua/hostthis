@@ -257,6 +257,10 @@ type ShaleConfig struct {
 type ShaleRepo struct {
 	cluster *cluster.Cluster
 
+	// Retention is the content-TTL policy used to (re)stamp ExpiresAt on
+	// update. Defaults to the 30-day policy; the composition root overrides it.
+	Retention domain.Retention
+
 	// kv is the blob-capable cluster surface, set ONLY when cfg.BlobStore is
 	// non-nil (the transactional shale-blob path). It wraps the SAME *Cluster
 	// as `cluster` (kv.Cluster() == cluster), so every existing r.cluster.*
@@ -630,6 +634,7 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 
 	r := &ShaleRepo{
 		cluster:         cl,
+		Retention:       domain.DefaultRetention(),
 		kv:              kv,
 		logger:          cfg.Logger,
 		bindAddr:        cfg.BindAddr,
@@ -1979,7 +1984,7 @@ func (r *ShaleRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 
 	// Step 3: refresh the index projection (size/expiry changed) + drop
 	// the append reservation marker. Best-effort; reconciler heals a lag.
-	if err := r.confirmAppend(identity, slug, reserveSlug, now.Add(domain.RetentionWindow)); err != nil {
+	if err := r.confirmAppend(identity, slug, reserveSlug, r.Retention.ExpiryFor(now)); err != nil {
 		return res, fmt.Errorf("confirm append: %w", err)
 	}
 	return res, nil
@@ -2008,7 +2013,7 @@ var errVerTaken = errors.New("shale: candidate version number already taken")
 // MAX(ver_num) counts tombstones, so version numbers are never reused.
 func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, now time.Time, refs []cluster.BlobRef) (AppendResult, error) {
 	pasteKey := shaleKeyPaste(slug)
-	newExpiry := now.Add(domain.RetentionWindow)
+	newExpiry := r.Retention.ExpiryFor(now)
 	// The new version's staged blob (if any) was passed in via refs (carried on
 	// the call's context by Commit); it binds in the SAME {slug} transaction as
 	// the version row. The blob id lands on the new version row and, when the

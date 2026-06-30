@@ -29,7 +29,7 @@ func insertPending(t *testing.T, repo *storage.ShaleRepo, owner, slug string, si
 		Kind:       domain.KindHTML,
 		ContentSHA: "sha-" + slug,
 		Size:       size,
-		CreatedAt:  now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
+		CreatedAt:  now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert pending %s: %v", slug, err)

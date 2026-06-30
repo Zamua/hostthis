@@ -42,7 +42,7 @@ func TestPasteRepo_InsertAndGet(t *testing.T) {
 		PinnedVersion: 1,
 		CreatedAt:     now,
 		UpdatedAt:     now,
-		ExpiresAt:     now.Add(domain.RetentionWindow),
+		ExpiresAt:     now.Add(domain.DefaultRetentionWindow),
 	}
 	if err := repo.Insert(p); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -80,7 +80,7 @@ func TestPasteRepo_InsertDuplicateSlugFails(t *testing.T) {
 		PinnedVersion: 1,
 		CreatedAt:     now,
 		UpdatedAt:     now,
-		ExpiresAt:     now.Add(domain.RetentionWindow),
+		ExpiresAt:     now.Add(domain.DefaultRetentionWindow),
 	}
 	if err := repo.Insert(p); err != nil {
 		t.Fatalf("first insert: %v", err)

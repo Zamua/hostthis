@@ -71,7 +71,7 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 	good := domain.Paste{
 		Slug: domain.Slug("goodpst1"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-good", Size: 100,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	if err := repo.InsertWithQuotaCheck(context.Background(), good, 0, now); err != nil {
 		t.Fatalf("insert good paste: %v", err)
@@ -199,12 +199,12 @@ func TestShaleDecodeTolerance_BlobGCFailsClosed(t *testing.T) {
 	keep := domain.Paste{
 		Slug: domain.Slug("keeppst1"), Identity: domain.Identity("key:gc"),
 		Kind: domain.KindHTML, ContentSHA: "sha-keep-good", Size: 100,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	poisoned := domain.Paste{
 		Slug: domain.Slug("poispst2"), Identity: domain.Identity("key:gc"),
 		Kind: domain.KindHTML, ContentSHA: "sha-keep-poisoned", Size: 100,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	if err := repo.InsertWithQuotaCheck(context.Background(), keep, 0, now); err != nil {
 		t.Fatalf("insert keep paste: %v", err)
@@ -303,7 +303,7 @@ func TestShaleDecodeTolerance_UserReadHardFails(t *testing.T) {
 	p := domain.Paste{
 		Slug: domain.Slug("readpst1"), Identity: domain.Identity("key:read"),
 		Kind: domain.KindHTML, ContentSHA: "sha-read", Size: 100,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert paste: %v", err)

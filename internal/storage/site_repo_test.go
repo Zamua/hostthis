@@ -31,7 +31,7 @@ func sampleSite(slug, owner string, now time.Time) domain.Site {
 		Manifest:  m,
 		CreatedAt: now,
 		UpdatedAt: now,
-		ExpiresAt: now.Add(domain.RetentionWindow),
+		ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 }
 
@@ -92,7 +92,7 @@ func TestSiteRepo_QuotaCountsAcrossPastesAndSites(t *testing.T) {
 	p := domain.Paste{
 		Slug: "paste234", Identity: domain.Identity(owner), Kind: domain.KindHTML,
 		ContentSHA: "sha-p", Size: int(cap) - 100, // leaves 100 bytes
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	if err := pastes.InsertWithQuotaCheck(context.Background(), p, cap, now); err != nil {
 		t.Fatalf("insert paste: %v", err)
@@ -111,7 +111,7 @@ func TestSiteRepo_QuotaCountsAcrossPastesAndSites(t *testing.T) {
 	p2 := domain.Paste{
 		Slug: "paste235", Identity: domain.Identity(owner), Kind: domain.KindHTML,
 		ContentSHA: "sha-p2", Size: 200, // 200 > remaining 100
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	if err := pastes.InsertWithQuotaCheck(context.Background(), p2, cap, now); !errors.Is(err, ErrOverUserQuota) {
 		t.Fatalf("paste over quota with paste present: got %v, want ErrOverUserQuota", err)
@@ -124,7 +124,7 @@ func TestSiteRepo_SlugCollidesWithPaste(t *testing.T) {
 	p := domain.Paste{
 		Slug: "shared12", Identity: "key:test", Kind: domain.KindHTML,
 		ContentSHA: "sha", Size: 10,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	if err := pastes.Insert(p); err != nil {
 		t.Fatalf("insert paste: %v", err)
@@ -143,7 +143,7 @@ func TestSiteRepo_ExpiredAndReferenced(t *testing.T) {
 	if err := sites.Insert(live); err != nil {
 		t.Fatalf("insert live: %v", err)
 	}
-	dead := sampleSite("deadeeee", "key:test", now.Add(-2*domain.RetentionWindow))
+	dead := sampleSite("deadeeee", "key:test", now.Add(-2*domain.DefaultRetentionWindow))
 	dead.ExpiresAt = now.Add(-time.Hour)
 	if err := sites.Insert(dead); err != nil {
 		t.Fatalf("insert dead: %v", err)

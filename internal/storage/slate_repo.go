@@ -100,6 +100,10 @@ type SlateRepo struct {
 	// identities do not contend. The service-wide cap stays best-effort
 	// (cross-identity races on it are acceptable per the spec).
 	quotaLocks [256]sync.Mutex
+
+	// Retention is the content-TTL policy used to (re)stamp ExpiresAt on
+	// update. Defaults to the 30-day policy; the composition root overrides it.
+	Retention domain.Retention
 }
 
 // lockQuota acquires the per-identity quota stripe and returns the unlock.
@@ -154,7 +158,7 @@ func NewSlateRepo(cfg SlateConfig) (*SlateRepo, error) {
 		store.Destroy()
 		return nil, fmt.Errorf("open slatedb: %w", err)
 	}
-	return &SlateRepo{db: db, store: store}, nil
+	return &SlateRepo{db: db, store: store, Retention: domain.DefaultRetention()}, nil
 }
 
 // Close flushes pending writes + shuts down the underlying SlateDB.
@@ -953,7 +957,7 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		}
 	}
 	newVer := maxVer + 1
-	expires := now.Add(domain.RetentionWindow)
+	expires := r.Retention.ExpiryFor(now)
 
 	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
 	if err != nil {

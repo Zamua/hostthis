@@ -53,7 +53,7 @@ func siteOf(slug, identity string, size int) domain.Site {
 		Manifest:  man,
 		CreatedAt: fixedNow,
 		UpdatedAt: fixedNow,
-		ExpiresAt: fixedNow.Add(domain.RetentionWindow),
+		ExpiresAt: fixedNow.Add(domain.DefaultRetentionWindow),
 	}
 }
 
@@ -74,7 +74,7 @@ func siteOfV(slug, identity string, size int, v string) domain.Site {
 		Manifest:  man,
 		CreatedAt: fixedNow,
 		UpdatedAt: fixedNow,
-		ExpiresAt: fixedNow.Add(domain.RetentionWindow),
+		ExpiresAt: fixedNow.Add(domain.DefaultRetentionWindow),
 	}
 }
 
@@ -124,7 +124,7 @@ func conformSiteReplaceInPlace(t *testing.T, sr conformanceSiteRepo) {
 	v2 := siteOfV(slug, "key:rp", 250, "v2")
 	v2.CreatedAt = later // a hostile caller can't move created_at via the row
 	v2.UpdatedAt = later
-	v2.ExpiresAt = later.Add(domain.RetentionWindow)
+	v2.ExpiresAt = later.Add(domain.DefaultRetentionWindow)
 	if err := sr.ReplaceWithQuotaCheck(context.Background(), v2, v2.Manifest.DedupedSize(), 0, later); err != nil {
 		t.Fatalf("replace in place: %v", err)
 	}
@@ -146,7 +146,7 @@ func conformSiteReplaceInPlace(t *testing.T, sr conformanceSiteRepo) {
 	if !got.UpdatedAt.Equal(later) {
 		t.Fatalf("updated_at should be the re-deploy time: got %v, want %v", got.UpdatedAt, later)
 	}
-	if !got.ExpiresAt.Equal(later.Add(domain.RetentionWindow)) {
+	if !got.ExpiresAt.Equal(later.Add(domain.DefaultRetentionWindow)) {
 		t.Fatalf("expires_at should restart from re-deploy: got %v", got.ExpiresAt)
 	}
 	// The owner's live site bytes reflect the NEW size only (250), not 100+250.
@@ -250,7 +250,7 @@ func conformSiteReplaceRestartsExpiry(t *testing.T, sr conformanceSiteRepo) {
 	v2 := siteOfV(slug, "key:re", 100, "v2")
 	v2.CreatedAt = fixedNow
 	v2.UpdatedAt = at
-	v2.ExpiresAt = at.Add(domain.RetentionWindow)
+	v2.ExpiresAt = at.Add(domain.DefaultRetentionWindow)
 	if err := sr.ReplaceWithQuotaCheck(context.Background(), v2, v2.Manifest.DedupedSize(), 0, at); err != nil {
 		t.Fatalf("replace restarting expiry: %v", err)
 	}
@@ -281,7 +281,7 @@ func conformSiteDeployAndReadBack(t *testing.T, sr conformanceSiteRepo) {
 		Manifest:  man,
 		CreatedAt: fixedNow,
 		UpdatedAt: fixedNow,
-		ExpiresAt: fixedNow.Add(domain.RetentionWindow),
+		ExpiresAt: fixedNow.Add(domain.DefaultRetentionWindow),
 	}
 	insertSite(t, sr, s)
 
@@ -652,7 +652,7 @@ func conformSiteReferencedBlobSHAs(t *testing.T, sr conformanceSiteRepo) {
 	man.Add("copy.html", domain.ManifestEntry{SHA: "sha-ref-index", Size: 10, ContentType: "text/html; charset=utf-8"})
 	s := domain.Site{
 		Slug: "rf123456", Identity: "key:rf", Manifest: man,
-		CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.RetentionWindow),
+		CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.DefaultRetentionWindow),
 	}
 	insertSite(t, sr, s)
 
@@ -685,7 +685,7 @@ func conformSiteDedupedSizeCharged(t *testing.T, sr conformanceSiteRepo) {
 	man.Add("c.html", domain.ManifestEntry{SHA: "sha-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
 	s := domain.Site{
 		Slug: "dd123456", Identity: "key:dd", Manifest: man,
-		CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.RetentionWindow),
+		CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.DefaultRetentionWindow),
 	}
 	// DedupedSize is 400 (one distinct blob), not 1200.
 	if got := s.Manifest.DedupedSize(); got != 400 {

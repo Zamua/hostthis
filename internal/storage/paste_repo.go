@@ -27,9 +27,14 @@ var ErrOverUserQuota = errors.New("storage: would exceed user quota")
 // PasteRepo is the sqlite-backed implementation of paste persistence.
 type PasteRepo struct {
 	db *sql.DB
+	// Retention is the content-TTL policy used to (re)stamp ExpiresAt on
+	// update. Defaults to the 30-day policy; the composition root overrides it.
+	Retention domain.Retention
 }
 
-func NewPasteRepo(db *sql.DB) *PasteRepo { return &PasteRepo{db: db} }
+func NewPasteRepo(db *sql.DB) *PasteRepo {
+	return &PasteRepo{db: db, Retention: domain.DefaultRetention()}
+}
 
 // InsertWithQuotaCheck atomically (under BEGIN IMMEDIATE):
 //  1. checks identity active bytes + p.Size against userCap
@@ -327,7 +332,7 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		return AppendResult{}, fmt.Errorf("max ver: %w", err)
 	}
 	newVer := maxVer + 1
-	expires := now.Add(domain.RetentionWindow)
+	expires := r.Retention.ExpiryFor(now)
 	if _, err := tx.Exec(`
 		INSERT INTO versions (slug, ver_num, kind, content_sha, size, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)

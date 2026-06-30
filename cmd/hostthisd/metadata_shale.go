@@ -48,6 +48,7 @@ import (
 	"github.com/Zamua/shale/pkg/blob"
 	"github.com/Zamua/shale/pkg/storageunit"
 
+	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/shaleblob"
 	"github.com/Zamua/hostthis/internal/storage"
 	slatedb "slatedb.io/slatedb-go/uniffi"
@@ -75,7 +76,7 @@ func slatedbLogLevel(s string) (slatedb.LogLevel, bool) {
 	}
 }
 
-func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
+func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metadataBundle, error) {
 	// Optional slatedb tracing (to stderr) for diagnosing the SST-read
 	// pattern. Off unless HOSTTHIS_SLATEDB_LOG_LEVEL is set.
 	if lvl, on := slatedbLogLevel(os.Getenv("HOSTTHIS_SLATEDB_LOG_LEVEL")); on {
@@ -224,6 +225,7 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open shale: %w", err)
 	}
+	repo.Retention = retention
 	if bindAddr == "" {
 		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d shards=%d awaitDurable=%t fenceGC=%t blobBucket=%q endpoint=%s",
 			nodeID, bucket, dbName, replicationFactor, unitCount, awaitDurable, reapFenceWALs, blobBucket, endpoint)

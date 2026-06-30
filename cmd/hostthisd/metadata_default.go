@@ -9,15 +9,17 @@ package main
 import (
 	"fmt"
 	"log"
+
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
-func buildMetadataSlate(_ *log.Logger) (*metadataBundle, error) {
+func buildMetadataSlate(_ domain.Retention, _ *log.Logger) (*metadataBundle, error) {
 	return nil, fmt.Errorf(
 		"HOSTTHIS_METADATA_BACKEND=slatedb requires a binary built with -tags slatedb; " +
 			"rebuild via `go build -tags slatedb` (and ensure libslatedb_uniffi is on the loader path)")
 }
 
-func buildMetadataShale(_ *log.Logger) (*metadataBundle, error) {
+func buildMetadataShale(_ domain.Retention, _ *log.Logger) (*metadataBundle, error) {
 	return nil, fmt.Errorf(
 		"HOSTTHIS_METADATA_BACKEND=shale requires a binary built with -tags slatedb; " +
 			"rebuild via `go build -tags slatedb` (and ensure libslatedb_uniffi is on the loader path)")

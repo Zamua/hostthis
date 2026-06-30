@@ -36,7 +36,7 @@ func buildFullStackServer(t *testing.T) *Server {
 		Kind:       domain.KindHTML,
 		ContentSHA: "sha-paste",
 		UpdatedAt:  now,
-		ExpiresAt:  now.Add(domain.RetentionWindow),
+		ExpiresAt:  now.Add(domain.DefaultRetentionWindow),
 	}
 
 	// A static site (archive) at a different slug.
@@ -49,7 +49,7 @@ func buildFullStackServer(t *testing.T) *Server {
 		Manifest:  m,
 		CreatedAt: now,
 		UpdatedAt: now,
-		ExpiresAt: now.Add(domain.RetentionWindow),
+		ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 
 	return &Server{

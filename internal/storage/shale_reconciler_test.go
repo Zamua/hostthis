@@ -55,12 +55,12 @@ func TestShaleReconciler_RebuildsDerivedIndexAndCounter(t *testing.T) {
 	pA := domain.Paste{
 		Slug: domain.Slug("recon1ab"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-recon1", Size: 300,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	pB := domain.Paste{
 		Slug: domain.Slug("recon2cd"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-recon2", Size: 200,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	if err := repo.InsertWithQuotaCheck(context.Background(), pA, 0, now); err != nil {
 		t.Fatalf("insert pA: %v", err)
@@ -182,7 +182,7 @@ func TestShaleReconciler_ReleasesOrphanReservation(t *testing.T) {
 	p := domain.Paste{
 		Slug: domain.Slug("orphanab"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-orphan", Size: 300,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RetentionWindow),
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert paste: %v", err)
