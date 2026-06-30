@@ -32,7 +32,7 @@ func (liveAppSiteReader) Get(slug domain.Slug) (domain.Site, error) {
 		Manifest:  domain.NewManifest(),
 		CreatedAt: now,
 		UpdatedAt: now,
-		ExpiresAt: now.Add(domain.RetentionWindow),
+		ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}, nil
 }
 
@@ -332,6 +332,6 @@ func siteAt(slug string, m domain.Manifest) domain.Site {
 		Manifest:  m,
 		CreatedAt: now,
 		UpdatedAt: now,
-		ExpiresAt: now.Add(domain.RetentionWindow),
+		ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 }

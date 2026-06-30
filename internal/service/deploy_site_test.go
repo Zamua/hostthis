@@ -210,8 +210,8 @@ func TestDeploySite_NowInjectable(t *testing.T) {
 		t.Fatalf("deploy: %v", err)
 	}
 	got, _ := sites.Get(res.Site.Slug)
-	if !got.ExpiresAt.Equal(fixed.Add(domain.RetentionWindow)) {
-		t.Fatalf("expiry: got %v, want %v", got.ExpiresAt, fixed.Add(domain.RetentionWindow))
+	if !got.ExpiresAt.Equal(fixed.Add(domain.DefaultRetentionWindow)) {
+		t.Fatalf("expiry: got %v, want %v", got.ExpiresAt, fixed.Add(domain.DefaultRetentionWindow))
 	}
 }
 
@@ -323,7 +323,7 @@ func TestDeployToSlug_ExpiredOldRowNotCredited(t *testing.T) {
 
 	// Advance past the site's retention window: it is now expired but not
 	// yet swept (still present, still owned, Get still returns it).
-	d.Now = func() time.Time { return base.Add(domain.RetentionWindow + time.Hour) }
+	d.Now = func() time.Time { return base.Add(domain.DefaultRetentionWindow + time.Hour) }
 
 	// Re-deploy at a size OVER the cap. With the expired old bytes correctly
 	// NOT credited, the budget is the full empty cap and a >cap archive is

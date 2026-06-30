@@ -21,7 +21,8 @@ a command argument and never trigger the warning.
 
 ## DESCRIPTION
 
-Publishes HTML, Markdown, or a unified diff for 30 days at a random
+Publishes HTML, Markdown, or a unified diff for a configurable window
+(30 days by default; the operator can change or disable it) at a random
 subdomain. One ssh pipe, no signup, no install. Identity is your ssh
 public key: anyone with a different key can read the URL but cannot
 update, rename, pin, or delete the paste.
@@ -42,7 +43,7 @@ the content type, pass <code>--name "label"</code> or
 otherwise parses a leading <code>--name</code> as one of its own options.</dd>
 
 <dt><code>cat <em>file</em> | ssh -T hostthis.dev <em>slug</em></code></dt>
-<dd>replace <em>slug</em>'s content; resets the 30-day clock</dd>
+<dd>replace <em>slug</em>'s content; resets the retention clock</dd>
 
 <dt><code>ssh hostthis.dev list</code></dt>
 <dd>active pastes, soonest to expire first</dd>
@@ -140,7 +141,7 @@ active version of every active paste. Text compresses 5-10x under
 zstd, so the real raw-payload ceiling is typically 50-100 MiB.
 
 Pastes are HTML, Markdown, or a unified diff; sites are a gzip-tar
-archive. 30-day retention from the last update.
+archive. Retention runs from the last update (`HOSTTHIS_RETENTION`, 30 days by default).
 
 ## EXIT STATUS
 

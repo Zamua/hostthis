@@ -56,7 +56,7 @@ func TestShaleMigration_RawValueRoundTrips(t *testing.T) {
 		PinnedVersion: 0,
 		CreatedAt:     now,
 		UpdatedAt:     now,
-		ExpiresAt:     now.Add(domain.RetentionWindow),
+		ExpiresAt:     now.Add(domain.DefaultRetentionWindow),
 	}
 
 	pasteVal, err := storage.LegacyPasteValueForTest(p)

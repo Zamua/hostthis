@@ -59,7 +59,7 @@ func TestSweep_Once(t *testing.T) {
 	}
 
 	// Past the retention window, both have expired.
-	future := now.Add(domain.RetentionWindow + 24*time.Hour)
+	future := now.Add(domain.DefaultRetentionWindow + 24*time.Hour)
 	pastes, gcBlobs, err = sweep.Once(future)
 	if err != nil {
 		t.Fatalf("sweep 2: %v", err)
@@ -77,6 +77,51 @@ func TestSweep_Once(t *testing.T) {
 	}
 	if _, err := repo.Get(r2.Paste.Slug); err == nil {
 		t.Fatalf("paste 2 should be deleted")
+	}
+}
+
+// TestSweep_NeverExpiresSurvives is the safety property behind a no-expiry
+// retention policy: a paste stamped with the NeverExpires sentinel is NEVER
+// deleted by the sweep, even running far in the future.
+func TestSweep_NeverExpiresSurvives(t *testing.T) {
+	dir := t.TempDir()
+	db, err := storage.Open(filepath.Join(dir, "never.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	blobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
+	if err != nil {
+		t.Fatalf("blobs: %v", err)
+	}
+	repo := storage.NewPasteRepo(db)
+
+	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(blobs))
+	upload.Retention = domain.Retention{Window: 0} // no expiry
+	t.Cleanup(upload.WaitFinalize)
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	upload.Now = func() time.Time { return now }
+
+	r, err := upload.Create(bytes.NewReader([]byte("<!doctype html><p>forever</p>")), "owner", "", "")
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	upload.WaitFinalize()
+	if !r.Paste.ExpiresAt.Equal(domain.NeverExpires) {
+		t.Fatalf("ExpiresAt: got %v, want NeverExpires", r.Paste.ExpiresAt)
+	}
+
+	sweep := service.NewSweep(repo, blobs, log.New(io.Discard, "", 0))
+	// Run the sweep a century out: a finite-TTL paste would be long gone.
+	pastes, gcBlobs, err := sweep.Once(now.AddDate(100, 0, 0))
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if pastes != 0 || gcBlobs != 0 {
+		t.Fatalf("no-expiry paste must survive: swept pastes=%d blobs=%d", pastes, gcBlobs)
+	}
+	if _, err := repo.Get(r.Paste.Slug); err != nil {
+		t.Fatalf("no-expiry paste should still exist: %v", err)
 	}
 }
 
@@ -239,7 +284,7 @@ func TestSweep_DryRun(t *testing.T) {
 
 	// Past the retention window A has expired. Dry-run: A would expire, B's
 	// blob would be GC'd - but nothing is actually touched.
-	future := now.Add(domain.RetentionWindow + 24*time.Hour)
+	future := now.Add(domain.DefaultRetentionWindow + 24*time.Hour)
 	pastes, gcBlobs, err := sweep.Once(future)
 	if err != nil {
 		t.Fatalf("dry-run sweep: %v", err)

@@ -56,7 +56,7 @@ func buildSiteServer(t *testing.T) *Server {
 		Manifest:  m,
 		CreatedAt: now,
 		UpdatedAt: now,
-		ExpiresAt: now.Add(domain.RetentionWindow),
+		ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	return &Server{
 		ApexDomain: "paste.test",
@@ -272,8 +272,8 @@ func TestSite_ExpiredReturns404(t *testing.T) {
 	m.Add("index.html", domain.ManifestEntry{SHA: "sha-index", Size: 1, ContentType: "text/html; charset=utf-8"})
 	site := domain.Site{
 		Slug: "abc23456", Identity: "key:test", Manifest: m,
-		CreatedAt: now.Add(-2 * domain.RetentionWindow),
-		UpdatedAt: now.Add(-2 * domain.RetentionWindow),
+		CreatedAt: now.Add(-2 * domain.DefaultRetentionWindow),
+		UpdatedAt: now.Add(-2 * domain.DefaultRetentionWindow),
 		ExpiresAt: now.Add(-time.Hour), // expired
 	}
 	srv := &Server{

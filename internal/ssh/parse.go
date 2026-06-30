@@ -86,6 +86,15 @@ func humanBytes(n int) string {
 // Used in the EXPIRES_IN column of `list` and the footer of
 // `versions`. Goes "Nd Hh" for >= 1 day, "NhMm" for >= 1 hour,
 // "Nm" for >= 1 minute, "<1m" / "expired" at the edges.
+// humanExpiresIn formats the EXPIRES_IN cell for a paste/site, rendering the
+// no-expiry sentinel as "never" rather than a nonsensical far-future duration.
+func humanExpiresIn(expiresAt, now time.Time) string {
+	if expiresAt.Equal(domain.NeverExpires) {
+		return "never"
+	}
+	return humanDuration(expiresAt.Sub(now))
+}
+
 func humanDuration(d time.Duration) string {
 	if d <= 0 {
 		return "expired"
