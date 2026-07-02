@@ -23,11 +23,12 @@ var diffShellFS embed.FS
 // under assets/diffshell/ changes in a way visitors must re-fetch.
 //
 // v1: initial diff2html + highlight.js render shell.
-// v2: fix the line-number gutter bleeding under horizontally-scrolled
+// v2: fix the line-number gutter bleeding under horizontally-scrolled code.
+// v3: make that gutter a sticky, opaque column so the numbers stay in view
 //
-//	code (give .d2h-diff-table a positioning context so the absolute
-//	gutter scrolls with its row instead of pinning to the page).
-const diffShellVersion = "diffshell-v2"
+//	(pinned left, GitHub-style) on horizontal scroll instead of scrolling
+//	away - and never show the code through a translucent background.
+const diffShellVersion = "diffshell-v3"
 
 // diffShellHTML returns the fixed diff render shell with diffShellVersion
 // substituted into the asset URLs' ?v= cache-buster.
