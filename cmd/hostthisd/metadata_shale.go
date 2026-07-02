@@ -282,32 +282,49 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 		logger.Printf("metadata: shale debug endpoint serving %s/debug/shale/state", dbgAddr)
 	}
 
-	// One-time backfill of the identity_sites enumeration index for sites
-	// deployed BEFORE that index existed (see ShaleRepo.BackfillSiteIndexes):
-	// the index is otherwise maintained only on the confirm/delete write path,
-	// and the shale Reconcile that would heal old rows is not wired to run in
-	// production, so without this those sites stay invisible in `list`. Runs
+	// The identity_sites enumeration index for sites deployed BEFORE that index
+	// existed is healed by the periodic Reconcile below (its reconcileSiteIndexes
+	// step reprojects every sites/ row into its owner's index); the index is
+	// otherwise maintained only on the confirm/delete write path. Reconcile runs
 	// in the background so it never blocks boot, retried past the post-boot
 	// convergence window (the aggregate scan fails while units are still
 	// handing off). Idempotent, so every pod running it is harmless.
-	// Budget generously: the whole pass fails if a single scan/write hits the
-	// post-boot convergence window (units still handing off), which has been
-	// observed to take 15+ minutes on the tight staging boxes. Retry the whole
-	// (idempotent) pass every 60s for up to ~40 min; a healthy cluster
-	// completes on the first attempt. Only ONE pod needs to succeed - the index
-	// spans all shards - and a pod restart re-arms this anyway.
+	//
+	// PERIODIC RECONCILE. Reconcile is the metadata backend's maintenance
+	// pass, and it was previously never wired to run in production (only tests
+	// called it) - a latent gap that let leaked reservation markers accumulate
+	// and drift the identity_bytes / identity_site_bytes quota counters UP over
+	// time (phantom over-charge), and left the derived indexes healed only by
+	// the write path. Wiring it here fixes all of that:
+	//   - heals the identity_pastes + identity_sites indexes (this backfills
+	//     sites deployed before the identity_sites index existed, so it
+	//     REPLACES the old one-shot BackfillSiteIndexes goroutine),
+	//   - ages out crashed pending pastes,
+	//   - RELEASES leaked reservation markers via the safe, per-marker {id}-CAS
+	//     delta (orphanReleaseMarker / orphanReleaseSiteMarker) - which is what
+	//     un-drifts the quota counters.
+	// The counter is NEVER recomputed from a cross-shard snapshot (see
+	// docs/SPEC.md "The counter itself is never recomputed": that under-counts
+	// and over-admits past the cap); only the marker-driven releases, which are
+	// safe under live traffic, touch it. Idempotent + best-effort: a pass that
+	// hits the post-boot convergence window just fails and the next tick
+	// retries. First pass after a short settle delay, then every 10 min
+	// (matching the reservation grace, so a leaked marker is released the tick
+	// after it ages out).
 	go func() {
-		const maxAttempts = 40
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			time.Sleep(60 * time.Second)
-			if err := repo.BackfillSiteIndexes(); err != nil {
-				logger.Printf("metadata: site-index backfill attempt %d/%d not yet: %v", attempt, maxAttempts, err)
-				continue
+		const reconcileInterval = 10 * time.Minute
+		const reserveGrace = 10 * time.Minute
+		timer := time.NewTimer(90 * time.Second) // let the cluster converge past boot first
+		defer timer.Stop()
+		for {
+			<-timer.C
+			if err := repo.Reconcile(time.Now().UTC(), reserveGrace); err != nil {
+				logger.Printf("metadata: periodic reconcile: %v (retrying next tick)", err)
+			} else {
+				logger.Printf("metadata: periodic reconcile complete")
 			}
-			logger.Printf("metadata: site-index backfill complete (attempt %d)", attempt)
-			return
+			timer.Reset(reconcileInterval)
 		}
-		logger.Printf("metadata: site-index backfill did not complete after %d attempts; next pod boot retries", maxAttempts)
 	}()
 
 	return bundle, nil

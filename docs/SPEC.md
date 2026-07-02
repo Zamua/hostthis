@@ -3007,16 +3007,29 @@ index write can ride the SAME single-shard CAS as the confirm/delete: the
 confirm step (which drops the reservation marker) also writes the index
 entry, and `DeleteSite`'s counter-decrement CAS also deletes it. Index
 touches are best-effort (a lost confirm leaves a missing entry, never a
-failed deploy). Sites deployed BEFORE this index existed have no entry; a
-one-time `BackfillSiteIndexes` pass (invoked in the background at process
-startup, retried past the post-boot convergence window) reprojects every
-`sites/<slug>` row it scans into the per-owner index (adding missing entries,
-dropping orphans), the same "reproject authoritative rows, drop orphans" heal
-the paste `reconcileIndexes` runs. It is invoked DIRECTLY at startup, not via
-the shale `Reconcile` pass: `Reconcile` is not wired to run periodically in
-production, so the confirm/delete write path is what keeps the index current
-for live traffic and the startup backfill only seeds the pre-index
-population. Being idempotent, every pod running it is harmless.
+failed deploy). Sites deployed BEFORE this index existed have no entry; the periodic
+`Reconcile` pass (see below) reprojects every `sites/<slug>` row it scans
+into the per-owner index (adding missing entries, dropping orphans), the same
+"reproject authoritative rows, drop orphans" heal the paste `reconcileIndexes`
+runs, so a pre-index site is picked up on the next reconcile tick. Being
+idempotent, every pod running it is harmless.
+
+**Periodic reconcile.** `Reconcile` is the metadata backend's maintenance
+pass and IS wired to run periodically in production (a background ticker in
+the composition root, first pass after a short post-boot settle, then every
+~10 min - matching the reservation grace). Each pass: heals the
+`identity_pastes` + `identity_sites` indexes (including the pre-index
+backfill above), ages out crashed pending pastes, and RELEASES leaked
+reservation markers via the safe per-marker `{id}`-CAS delta
+(`orphanReleaseMarker` / `orphanReleaseSiteMarker`). The marker release is
+what keeps the `identity_bytes` / `identity_site_bytes` counters from
+drifting UP over time when a reserve's confirm never lands: without it a
+leaked reservation over-counts the quota permanently. Crucially, the pass
+NEVER recomputes the counter's absolute value (see "The counter itself is
+never recomputed"); it only applies marker-driven deltas, which are safe
+under concurrent reserves/deletes. The confirm/delete write path still keeps
+the index + counter current for live traffic; the periodic pass is the
+backstop that heals what a crashed request leaves behind.
 
 A site deploy spans the `{slug}` shard (the authoritative `sites/<slug>`
 write + the cross-family paste-slug collision read) and the `{id}` shard
