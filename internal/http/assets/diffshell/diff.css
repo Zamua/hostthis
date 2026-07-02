@@ -79,12 +79,23 @@ body {
   position: sticky !important;
   left: 0;
   z-index: 2;
+  /* Opaque fill. Two extra pieces make it a COMPLETE opaque block with no
+     leaks (diff2html's colors are all translucent rgba, and once the gutter
+     is sticky it overlaps the scrolled code column):
+       - border:0 kills the translucent 1px side-borders diff2html draws on
+         the number cells (the coloured slivers down the left edge);
+       - the box-shadow paints a 1px opaque halo so the sub-pixel gaps
+         between stacked cells can't reveal the translucent code background
+         behind them (the coloured lines between rows). */
+  border: 0 !important;
   background-color: var(--d2h-bg-color, #fff) !important;
+  box-shadow: 0 0 0 1px var(--d2h-bg-color, #fff) !important;
 }
 @media (prefers-color-scheme: dark) {
   .d2h-auto-color-scheme .d2h-code-linenumber,
   .d2h-auto-color-scheme .d2h-code-side-linenumber {
     background-color: var(--d2h-dark-bg-color, #0d1117) !important;
+    box-shadow: 0 0 0 1px var(--d2h-dark-bg-color, #0d1117) !important;
   }
 }
 /* The gutter is now a real column, so the code cell no longer needs the
