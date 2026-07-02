@@ -25,16 +25,16 @@ type countingSink struct {
 	total int64
 }
 
-func (c *countingSink) Store(_ string, r io.Reader, _ int64) (string, error) {
+func (c *countingSink) Store(_ string, r io.Reader, _ int64) (string, int, error) {
 	n, err := io.Copy(io.Discard, r)
 	c.total += n
 	if err != nil {
 		if errors.Is(err, ErrArchiveTooLarge) {
-			return "", ErrArchiveTooLarge
+			return "", 0, ErrArchiveTooLarge
 		}
-		return "", err
+		return "", 0, err
 	}
-	return "sha", nil
+	return "sha", int(n), nil
 }
 
 // --- Guard 1: path safety (zip-slip / traversal / non-regular types) ---

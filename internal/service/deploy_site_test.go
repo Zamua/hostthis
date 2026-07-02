@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	crand "crypto/rand"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -50,6 +51,19 @@ func gzipTar(t *testing.T, files map[string]string) []byte {
 	_ = tw.Close()
 	_ = gz.Close()
 	return buf.Bytes()
+}
+
+// incompressible returns n bytes of random data. Quota-fill tests need it
+// because sites now charge their COMPRESSED size: repeated bytes would
+// compress to ~nothing and no longer near the cap, so a "fill the budget"
+// fixture must be incompressible for its compressed charge to be ~n.
+func incompressible(t *testing.T, n int) string {
+	t.Helper()
+	b := make([]byte, n)
+	if _, err := crand.Read(b); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	return string(b)
 }
 
 func TestDeploySite_HappyPath(t *testing.T) {
@@ -152,18 +166,48 @@ func TestDeploySite_OverQuota(t *testing.T) {
 	}
 }
 
+// TestDeploySite_ChargesCompressedSize pins the fix: a site is charged its
+// COMPRESSED (post-zstd) size against quota, matching how pastes charge - so a
+// compressible site costs a fraction of its raw bytes, and the charged number
+// equals the manifest's CompressedDedupedSize (not the uncompressed sum).
+func TestDeploySite_ChargesCompressedSize(t *testing.T) {
+	d, sites, _ := deployFixture(t)
+	owner := "key:compress"
+	// Highly compressible content: 200 KB of a repeated byte squashes tiny.
+	raw := bytes.Repeat([]byte("A"), 200_000)
+	r, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": string(raw)})), owner)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	used, _ := sites.SumActiveBytesByOwner(owner, time.Now().UTC())
+	compressed := int64(r.Site.Manifest.CompressedDedupedSize())
+	uncompressed := int64(r.Site.Manifest.DedupedSize())
+	if used != compressed {
+		t.Fatalf("charge should equal compressed size: used %d, compressed %d", used, compressed)
+	}
+	if uncompressed != 200_000 {
+		t.Fatalf("uncompressed manifest size should be the raw 200000, got %d", uncompressed)
+	}
+	// The whole point: compressed is a small fraction of uncompressed.
+	if compressed >= uncompressed/10 {
+		t.Fatalf("compressible site should charge <<10%% of raw: compressed %d vs uncompressed %d", compressed, uncompressed)
+	}
+}
+
 func TestDeploySite_QuotaRespectsExistingUsage(t *testing.T) {
 	d, _, _ := deployFixture(t)
 	owner := "key:test"
-	// First deploy a site that uses most of the budget.
-	nearCap := bytes.Repeat([]byte("X"), int(domain.UserQuotaBytes)-200)
-	arc1 := gzipTar(t, map[string]string{"index.html": string(nearCap)})
+	// First deploy a site that uses most of the budget (incompressible so its
+	// COMPRESSED charge is ~near-cap, not ~0). Leave ~20 KB headroom - enough
+	// that zstd's small block-header expansion of random data can't overrun.
+	nearCap := incompressible(t, int(domain.UserQuotaBytes)-20000)
+	arc1 := gzipTar(t, map[string]string{"index.html": nearCap})
 	if _, err := d.Deploy(bytes.NewReader(arc1), owner); err != nil {
 		t.Fatalf("first deploy: %v", err)
 	}
-	// A second deploy whose bytes exceed the ~200 remaining must be
+	// A second deploy whose bytes exceed the ~20 KB remaining must be
 	// rejected (combined-usage budget computed before the untar).
-	arc2 := gzipTar(t, map[string]string{"index.html": string(bytes.Repeat([]byte("Y"), 500))})
+	arc2 := gzipTar(t, map[string]string{"index.html": incompressible(t, 30000)})
 	_, err := d.Deploy(bytes.NewReader(arc2), owner)
 	if !errors.Is(err, ErrOverQuota) {
 		t.Fatalf("second deploy over remaining budget: got %v, want ErrOverQuota", err)
@@ -224,8 +268,10 @@ func TestDeployToSlug_ReplacesInPlace(t *testing.T) {
 	d, sites, _ := deployFixture(t)
 	owner := "key:rp"
 
-	// Deploy v1 (one ~400-byte file).
-	v1 := gzipTar(t, map[string]string{"index.html": string(bytes.Repeat([]byte("a"), 400))})
+	// Deploy v1 (one large incompressible file so its COMPRESSED charge
+	// clearly exceeds the smaller v2 - with tiny/compressible content the
+	// per-file zstd overhead would dominate and mask the shrink).
+	v1 := gzipTar(t, map[string]string{"index.html": incompressible(t, 4000)})
 	r1, err := d.Deploy(bytes.NewReader(v1), owner)
 	if err != nil {
 		t.Fatalf("deploy v1: %v", err)
@@ -236,7 +282,7 @@ func TestDeployToSlug_ReplacesInPlace(t *testing.T) {
 
 	// Re-deploy v2 with DIFFERENT, smaller content to the SAME slug.
 	v2 := gzipTar(t, map[string]string{
-		"index.html": string(bytes.Repeat([]byte("b"), 100)),
+		"index.html": incompressible(t, 500),
 		"about.html": "<h1>about</h1>",
 	})
 	r2, err := d.DeployToSlug(slug, bytes.NewReader(v2), owner)
@@ -259,11 +305,12 @@ func TestDeployToSlug_ReplacesInPlace(t *testing.T) {
 		t.Fatalf("v2 file about.html missing from manifest: %+v", got.Manifest.Files)
 	}
 
-	// Quota delta: the owner's bytes reflect v2's deduped size only, NOT v1+v2.
+	// Quota delta: the owner's bytes reflect v2's COMPRESSED deduped size
+	// only (the quota basis), NOT v1+v2.
 	used2, _ := sites.SumActiveBytesByOwner(owner, time.Now().UTC())
-	wantV2 := int64(r2.Site.Manifest.DedupedSize())
+	wantV2 := int64(r2.Site.Manifest.CompressedDedupedSize())
 	if used2 != wantV2 {
-		t.Fatalf("replace must charge the new size only: owner sum got %d, want %d (used1 was %d)", used2, wantV2, used1)
+		t.Fatalf("replace must charge the new (compressed) size only: owner sum got %d, want %d (used1 was %d)", used2, wantV2, used1)
 	}
 	if used2 >= used1 {
 		t.Fatalf("a smaller re-deploy must FREE bytes: used1 %d, used2 %d", used1, used2)
@@ -278,15 +325,16 @@ func TestDeployToSlug_FreesOldChargesNewDelta(t *testing.T) {
 	d, _, _ := deployFixture(t)
 	owner := "key:delta"
 
-	// A site near the cap (leave ~600 bytes of headroom).
-	nearCap := bytes.Repeat([]byte("X"), int(domain.UserQuotaBytes)-600)
-	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": string(nearCap)})), owner)
+	// A site near the cap (leave ~20 KB headroom). Incompressible so the
+	// compressed charge actually nears the cap.
+	nearCap := incompressible(t, int(domain.UserQuotaBytes)-20000)
+	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": nearCap})), owner)
 	if err != nil {
 		t.Fatalf("deploy near-cap site: %v", err)
 	}
 
-	// At the original size, a 5000-byte NEW deploy would NOT fit (only ~600 free).
-	tooBig := gzipTar(t, map[string]string{"index.html": string(bytes.Repeat([]byte("Y"), 5000))})
+	// At the original size, a 30 KB NEW deploy would NOT fit (only ~20 KB free).
+	tooBig := gzipTar(t, map[string]string{"index.html": incompressible(t, 30000)})
 	if _, err := d.Deploy(bytes.NewReader(tooBig), owner); !errors.Is(err, ErrOverQuota) {
 		t.Fatalf("a 5000B new deploy should not fit at the original size: got %v", err)
 	}

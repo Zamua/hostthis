@@ -20,19 +20,20 @@ type recordingSink struct {
 
 func newRecordingSink() *recordingSink { return &recordingSink{files: map[string][]byte{}} }
 
-func (s *recordingSink) Store(p string, r io.Reader, _ int64) (string, error) {
+func (s *recordingSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, r); err != nil {
 		// Propagate the cap sentinel unchanged, like the production sink.
 		if errors.Is(err, ErrArchiveTooLarge) {
-			return "", ErrArchiveTooLarge
+			return "", 0, ErrArchiveTooLarge
 		}
-		return "", err
+		return "", 0, err
 	}
 	body := buf.Bytes()
 	s.files[p] = body
 	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:]), nil
+	// Test double doesn't compress; report the raw length as the "stored" size.
+	return hex.EncodeToString(sum[:]), len(body), nil
 }
 
 // tarEntry describes one entry to write into a test archive.
