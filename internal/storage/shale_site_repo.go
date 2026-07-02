@@ -940,40 +940,6 @@ func (r *ShaleRepo) reconcileSiteIndexes(sitesByOwner map[string]map[string]stru
 	return nil
 }
 
-// BackfillSiteIndexes writes the identity_sites enumeration index for every
-// existing site by scanning sites/ once (reproject rows into their owner's
-// index, drop orphans). Idempotent and safe to run repeatedly.
-//
-// The site index is normally maintained on the confirm/delete WRITE path, so
-// new deploys are indexed immediately. But sites deployed BEFORE the index
-// existed have no entry, and the shale Reconcile pass that would otherwise
-// heal them is not wired to run periodically in production - so without an
-// explicit backfill those sites stay invisible in ListSitesByOwner (and thus
-// in `ssh <apex> list`). The composition root calls this once at startup
-// (best-effort, with retry past the post-boot convergence window) to index
-// the pre-existing population. It is the site analog of the paste
-// reconcileIndexes heal, but invoked directly rather than via Reconcile.
-func (r *ShaleRepo) BackfillSiteIndexes() error {
-	siteItems, err := r.aggregatePrefix(prefixSites)
-	if err != nil {
-		return fmt.Errorf("backfill site indexes: scan sites: %w", err)
-	}
-	sitesByOwner := make(map[string]map[string]struct{})
-	for _, item := range siteItems {
-		slug := strings.TrimPrefix(string(item.Key), "sites/")
-		var row siteRow
-		if err := json.Unmarshal(item.Value, &row); err != nil {
-			r.repoLog().Printf("backfill site indexes: skip undecodable site %s: %v", item.Key, err)
-			continue
-		}
-		if sitesByOwner[row.Identity] == nil {
-			sitesByOwner[row.Identity] = make(map[string]struct{})
-		}
-		sitesByOwner[row.Identity][slug] = struct{}{}
-	}
-	return r.reconcileSiteIndexes(sitesByOwner)
-}
-
 // orphanReleaseSiteMarker is the targeted, read-checked {id}-shard CAS that
 // releases one abandoned SITE reservation: in a single Transact pinned on the
 // site counter (which co-shards with the marker, both keyed by {id}) it reads
