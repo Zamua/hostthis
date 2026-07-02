@@ -1779,9 +1779,15 @@ zwy11122   -                     800B    html      4d12h        v3 (pinned)
 ```
 Sorted by expiry asc (soonest-to-die first, so you notice things about
 to disappear). `NAME` column shows the user-supplied label or `-` if
-none. Output is tab-separated for easy `awk`-ing. The header line is
-on stdout (top of the output) so it appears reliably before the rows;
-scripts wanting headerless output can pipe through `tail -n +2`.
+none. Columns are space-padded so they stay aligned in the terminal no
+matter how long a `NAME` runs (a raw single-tab separator overflows the
+8-column tab stop as soon as one label is wide, shoving every following
+column out of true). The header line is on stdout (top of the output) so
+it appears reliably before the rows; scripts wanting headerless output
+can pipe through `tail -n +2`. Because `NAME` (and the `VERS` note) can
+themselves contain spaces, field-splitting is not a stable machine
+contract - consumers that need the fields should parse by the fixed
+column layout, not by whitespace.
 
 The `VERS` column reports the version the URL currently serves:
 
@@ -1854,14 +1860,14 @@ site resolves the same way (a site also has a URL).
 ### Versions
 ```
 ssh hostthis.dev versions abc12345
-v4	current	2026-06-05 15:01 UTC	1.4k
-v3		2026-06-05 14:32 UTC	1.2k
-v2	deleted	2026-06-05 12:15 UTC	-
-v1		2026-06-05 11:22 UTC	0.9k
+v4  current  2026-06-05 15:01 UTC  1.4k
+v3          2026-06-05 14:32 UTC  1.2k
+v2  deleted  2026-06-05 12:15 UTC  -
+v1          2026-06-05 11:22 UTC  0.9k
 ```
 
-Stdout: tab-separated rows, newest first. The middle column carries
-a status marker:
+Stdout: space-padded aligned rows (same rationale as `list`), newest
+first. The middle column carries a status marker:
 
 - `current` - the version the URL is currently serving (the
   pinned ver_num or `MAX(non-deleted ver_num)` when unpinned).

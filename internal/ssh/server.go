@@ -21,6 +21,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	gossh "github.com/charmbracelet/ssh"
@@ -547,17 +548,26 @@ func (s *Server) verbList(sess gossh.Session, owner string) {
 	// shows the header at the top of the output; stdout + write-order
 	// guarantees that). Scripts that want headerless output can
 	// strip the first line with `tail -n +2`.
-	fmt.Fprintln(sess, "SLUG\tNAME\tSIZE\tKIND\tEXPIRES_IN\tVERS")
+	//
+	// Columns are space-padded so they line up in a terminal regardless
+	// of NAME length (a long label like "sticky-toffee-date-loaf" used
+	// to overflow the raw-tab stop and shove every following column out
+	// of alignment). tabwriter measures each cell and emits a single
+	// aligned block; writes still flow through sess in order, so the
+	// header lands first and PTY CRLF cooking is unaffected.
+	tw := tabwriter.NewWriter(sess, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "SLUG\tNAME\tSIZE\tKIND\tEXPIRES_IN\tVERS")
 	now := s.now().UTC()
 	for _, p := range pastes {
 		name := p.Name
 		if name == "" {
 			name = "-"
 		}
-		fmt.Fprintf(sess, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.Slug, name, humanBytes(p.Size), p.Kind,
 			humanExpiresIn(p.ExpiresAt, now), renderVersCol(p))
 	}
+	_ = tw.Flush()
 	_ = sess.Exit(ExitOK)
 }
 
@@ -816,8 +826,12 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 		}
 	}
 
+	// Space-padded columns (see verbList) so the marker/date/size line up
+	// regardless of marker width. The empty-marker cell is a bare "" and
+	// tabwriter widens the column to fit "current"/"deleted".
+	tw := tabwriter.NewWriter(sess, 0, 0, 2, ' ', 0)
 	for _, v := range vers {
-		marker := "       "
+		marker := ""
 		switch {
 		case v.Deleted:
 			marker = "deleted"
@@ -828,9 +842,10 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 		if v.Deleted {
 			size = "-"
 		}
-		fmt.Fprintf(sess, "v%d\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(tw, "v%d\t%s\t%s\t%s\n",
 			v.VerNum, marker, v.CreatedAt.Format("2006-01-02 15:04 UTC"), size)
 	}
+	_ = tw.Flush()
 	pinNote := "unpinned"
 	if p.PinnedVersion != 0 {
 		pinNote = fmt.Sprintf("pinned to v%d", p.PinnedVersion)
