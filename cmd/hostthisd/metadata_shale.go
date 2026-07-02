@@ -290,17 +290,24 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 	// in the background so it never blocks boot, retried past the post-boot
 	// convergence window (the aggregate scan fails while units are still
 	// handing off). Idempotent, so every pod running it is harmless.
+	// Budget generously: the whole pass fails if a single scan/write hits the
+	// post-boot convergence window (units still handing off), which has been
+	// observed to take 15+ minutes on the tight staging boxes. Retry the whole
+	// (idempotent) pass every 60s for up to ~40 min; a healthy cluster
+	// completes on the first attempt. Only ONE pod needs to succeed - the index
+	// spans all shards - and a pod restart re-arms this anyway.
 	go func() {
-		for attempt := 1; attempt <= 12; attempt++ {
-			time.Sleep(30 * time.Second)
+		const maxAttempts = 40
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			time.Sleep(60 * time.Second)
 			if err := repo.BackfillSiteIndexes(); err != nil {
-				logger.Printf("metadata: site-index backfill attempt %d not yet: %v", attempt, err)
+				logger.Printf("metadata: site-index backfill attempt %d/%d not yet: %v", attempt, maxAttempts, err)
 				continue
 			}
-			logger.Printf("metadata: site-index backfill complete")
+			logger.Printf("metadata: site-index backfill complete (attempt %d)", attempt)
 			return
 		}
-		logger.Printf("metadata: site-index backfill did not complete after retries; next pod boot retries")
+		logger.Printf("metadata: site-index backfill did not complete after %d attempts; next pod boot retries", maxAttempts)
 	}()
 
 	return bundle, nil
