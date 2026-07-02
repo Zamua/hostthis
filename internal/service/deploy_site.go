@@ -50,6 +50,12 @@ type SiteRepo interface {
 	// The deploy path adds the paste-side sum to compute the remaining
 	// quota budget the untar may fill before the persistence-time check.
 	SumActiveBytesByOwner(owner string, now time.Time) (int64, error)
+	// ListSitesByOwner returns the identity's active (non-expired) sites so
+	// the SSH `list` verb can show static sites alongside text pastes - a
+	// site counts against the shared 10 MiB quota but never expires, so
+	// without this it silently consumes quota the owner can neither see nor
+	// free. Read-time expiry filtered.
+	ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error)
 	// PreClaimSlug stakes a metadata-only single-shard claim on slug BEFORE
 	// the deploy consumes the (one-shot) untar stream, so a transactional
 	// blob path can stage every file under slug's shard (the manifest and the
@@ -91,6 +97,17 @@ type DeploySite struct {
 // composition root overrides DeploySite.Retention from HOSTTHIS_RETENTION.
 func NewDeploySite(sites SiteRepo, pastes PasteByteSummer, blob BlobUnit) *DeploySite {
 	return &DeploySite{Sites: sites, Pastes: pastes, Blob: blob, Now: time.Now, Retention: domain.DefaultRetention()}
+}
+
+// ListSites returns the owner's active (non-expired) static sites so the SSH
+// `list` verb can show them alongside text pastes. Owner-scoped; read-time
+// expiry filtered by the repo. Anonymous / empty owners get an empty list
+// (only keyed identities own content).
+func (d *DeploySite) ListSites(owner string) ([]domain.Site, error) {
+	if !domain.Identity(owner).IsKeyed() {
+		return nil, nil
+	}
+	return d.Sites.ListSitesByOwner(owner, d.Now().UTC())
 }
 
 // SiteResult is what Deploy produced for the SSH layer to format.

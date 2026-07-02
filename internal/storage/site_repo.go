@@ -411,6 +411,43 @@ func (r *SiteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int64, er
 	return n.Int64, nil
 }
 
+// ListSitesByOwner returns the identity's active (non-expired) sites so the
+// SSH `list` verb can show static sites alongside text pastes. Read-time
+// expiry filtered (expires_at > now), mirroring SumActiveBytesByOwner.
+func (r *SiteRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error) {
+	if owner == "" {
+		return nil, nil
+	}
+	rows, err := r.db.Query(`
+		SELECT slug, identity, manifest, created_at, updated_at, expires_at
+		FROM sites WHERE identity = ? AND expires_at > ?
+	`, owner, formatSiteExpiry(now))
+	if err != nil {
+		return nil, fmt.Errorf("list sites by owner: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []domain.Site
+	for rows.Next() {
+		var slugStr, identStr, manStr, created, updated, expires string
+		if err := rows.Scan(&slugStr, &identStr, &manStr, &created, &updated, &expires); err != nil {
+			return nil, fmt.Errorf("scan site row: %w", err)
+		}
+		man, err := decodeManifest(manStr)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, domain.Site{
+			Slug:      domain.Slug(slugStr),
+			Identity:  domain.Identity(identStr),
+			Manifest:  man,
+			CreatedAt: parseTime(created),
+			UpdatedAt: parseTime(updated),
+			ExpiresAt: parseSiteExpiry(expires),
+		})
+	}
+	return out, rows.Err()
+}
+
 // PreClaimSlug is a NO-OP on the sqlite backend: its blobs are content-sha-keyed
 // in a detached store, so a deploy's files do not route by slug and the slug is
 // minted in the post-untar insert retry loop (where InsertWithQuotaCheck's
