@@ -1802,6 +1802,118 @@ The `VERS` column reports the version the URL currently serves:
 When the user has zero active pastes, the command prints a single
 `no active pastes` line to stderr and exits 0.
 
+### Machine-readable output (`-o` / `--output`)
+
+The read commands that emit a table or a structured summary accept a
+kubectl-style output selector so scripts get a stable, parseable shape
+instead of the human table. One flag, an enum value - NOT a pile of
+boolean `--json`/`--yaml` flags:
+
+```
+ssh hostthis.dev list -o json
+ssh hostthis.dev versions abc12345 -o json
+ssh hostthis.dev whoami --output json
+```
+
+- **Flag**: `-o <fmt>` or `--output <fmt>` (also the `=`-joined forms
+  `-o=<fmt>` / `--output=<fmt>`). It may appear anywhere in the verb's
+  arguments; it is parsed out and the remaining positionals are handled
+  as usual (so `versions -o json abc12345` and `versions abc12345 -o json`
+  are equivalent).
+- **Values**: `table` (the default when the flag is absent) and `json`.
+  The default is `table` even when stdout is a pipe - matching kubectl,
+  which never silently switches format based on the terminal. An
+  unrecognized value is an error: stderr gets
+  `hostthis: unknown output format "<v>" (want: table, json)` and the
+  command exits with the usage exit code (nonzero). The enum is
+  deliberately open so `yaml` / `wide` / `name` can be added later
+  without introducing new flags.
+- **Applies to**: `list`, `versions`, `whoami`. It does NOT apply to
+  `get` (raw paste bytes - the content IS the payload), `qr` (a visual
+  render), or `url` (already a bare machine datum on stdout). Upload does
+  not take it yet; a future pass may add a JSON upload result.
+- **`-o` is safe through ssh**: although `-o` is also an ssh client flag,
+  the local ssh client stops parsing its own options at the hostname, so
+  everything after the verb (`list -o json`) is forwarded verbatim as the
+  remote command. The flag only works when it follows a verb (never as
+  the first token after the host).
+
+**Output contract in `json` mode.** stdout carries ONLY the JSON value
+(per the stdout=machine-datum / stderr=narration split used elsewhere),
+so `... -o json | jq` is clean. Any human footer a command normally
+writes to stderr (e.g. the `versions` pin/expiry footer) is folded into
+the JSON object instead of being printed separately. Timestamps are
+RFC 3339 (`2006-01-02T15:04:05Z`); a never-expiring paste serializes
+`expires_at` as `null`. Sizes are integer bytes (`size_bytes`), not the
+human `2.4k` strings. The JSON is marshaled from a dedicated view shape,
+not the internal domain types, so the wire contract is stable across
+refactors.
+
+`list -o json` - a JSON array (empty `[]` when there are no active
+pastes, and in json mode that is stdout, not the `no active pastes`
+stderr line):
+
+```json
+[
+  {
+    "slug": "abc12345",
+    "name": "Acme prototype v3",
+    "size_bytes": 1234,
+    "kind": "html",
+    "expires_at": "2026-07-31T15:04:05Z",
+    "expires_in_seconds": 604800,
+    "served_version": 3,
+    "latest_version": 5,
+    "pinned_version": 3
+  }
+]
+```
+
+`name` is the empty string when unset (not the `-` table sentinel).
+`pinned_version` is `0` when the paste follows latest (unpinned);
+`served_version` is `pinned_version` when pinned, else `latest_version`.
+`expires_in_seconds` is `null` when `expires_at` is `null`.
+
+`versions <slug> -o json` - an object that folds in the stderr footer
+(pin state + paste expiry) around the version array:
+
+```json
+{
+  "slug": "abc12345",
+  "pinned_version": 0,
+  "expires_at": "2026-07-31T15:04:05Z",
+  "versions": [
+    { "version": 4, "created_at": "2026-06-05T15:01:00Z", "size_bytes": 1400, "deleted": false, "current": true },
+    { "version": 3, "created_at": "2026-06-05T14:32:00Z", "size_bytes": 1200, "deleted": false, "current": false },
+    { "version": 2, "created_at": "2026-06-05T12:15:00Z", "size_bytes": null, "deleted": true,  "current": false }
+  ]
+}
+```
+
+`size_bytes` is `null` for a deleted (tombstoned) version - the bytes are
+gone. `current` marks the served version (the pin, or MAX non-deleted
+ver_num when unpinned).
+
+`whoami -o json` - an object; `quota_bytes` is `null` when the owner has
+no quota cap, and `session` is `null` when the keygate isn't wired or the
+session has no subnet:
+
+```json
+{
+  "key": "SHA256:abcd...",
+  "first_seen": "2026-06-01T00:00:00Z",
+  "active_pastes": 2,
+  "used_bytes": 1234,
+  "quota_bytes": 10485760,
+  "session": {
+    "subnet": "203.0.113.0/24",
+    "identity_subnets": 2,
+    "subnet_fresh_count": 1,
+    "subnet_cap": 5
+  }
+}
+```
+
 ### Rename
 ```
 ssh hostthis.dev rename abc12345 Acme prototype v4
