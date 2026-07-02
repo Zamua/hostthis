@@ -28,7 +28,12 @@ var diffShellFS embed.FS
 //
 //	(pinned left, GitHub-style) on horizontal scroll instead of scrolling
 //	away - and never show the code through a translucent background.
-const diffShellVersion = "diffshell-v3"
+//
+// v4: make the sticky gutter a COMPLETE opaque block - kill diff2html's
+//
+//	translucent cell side-borders and bridge the sub-pixel gaps between
+//	stacked cells (opaque box-shadow halo) so no colour leaks through.
+const diffShellVersion = "diffshell-v4"
 
 // diffShellHTML returns the fixed diff render shell with diffShellVersion
 // substituted into the asset URLs' ?v= cache-buster.
