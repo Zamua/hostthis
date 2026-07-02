@@ -42,6 +42,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Zamua/shale/backends/slate"
 	"github.com/Zamua/shale/backends/slate/blobstore"
@@ -280,6 +281,28 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 		}()
 		logger.Printf("metadata: shale debug endpoint serving %s/debug/shale/state", dbgAddr)
 	}
+
+	// One-time backfill of the identity_sites enumeration index for sites
+	// deployed BEFORE that index existed (see ShaleRepo.BackfillSiteIndexes):
+	// the index is otherwise maintained only on the confirm/delete write path,
+	// and the shale Reconcile that would heal old rows is not wired to run in
+	// production, so without this those sites stay invisible in `list`. Runs
+	// in the background so it never blocks boot, retried past the post-boot
+	// convergence window (the aggregate scan fails while units are still
+	// handing off). Idempotent, so every pod running it is harmless.
+	go func() {
+		for attempt := 1; attempt <= 12; attempt++ {
+			time.Sleep(30 * time.Second)
+			if err := repo.BackfillSiteIndexes(); err != nil {
+				logger.Printf("metadata: site-index backfill attempt %d not yet: %v", attempt, err)
+				continue
+			}
+			logger.Printf("metadata: site-index backfill complete")
+			return
+		}
+		logger.Printf("metadata: site-index backfill did not complete after retries; next pod boot retries")
+	}()
+
 	return bundle, nil
 }
 
