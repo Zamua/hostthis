@@ -189,13 +189,14 @@ func TestServeDiffAsset_WhitelistAndDeny(t *testing.T) {
 	}
 }
 
-// TestDiffCSS_GutterPositioningFix pins the fix for the line-number gutter
-// bleeding under horizontally-scrolled code. diff2html renders the gutter
-// as position:absolute with no relative container, so without this rule the
-// gutter escapes to the page and the (translucent) numbers sit on top of the
-// scrolled code. If a future asset regen or library bump drops the rule, this
-// fails loudly rather than silently reintroducing the visual bug.
-func TestDiffCSS_GutterPositioningFix(t *testing.T) {
+// TestDiffCSS_GutterStickyFix pins the fix for the line-number gutter under
+// horizontal scroll: diff2html renders it as a translucent position:absolute
+// element, so without an override the numbers either smear over the scrolled
+// code (translucent) or scroll out of view. The fix makes the gutter a
+// sticky, opaque column so the numbers stay pinned at the left edge with the
+// code sliding cleanly beneath. If a future asset regen or library bump drops
+// the rule, this fails loudly rather than silently reintroducing the bug.
+func TestDiffCSS_GutterStickyFix(t *testing.T) {
 	srv := &Server{ApexDomain: "paste.test"}
 	mux := srv.Handler()
 
@@ -203,8 +204,11 @@ func TestDiffCSS_GutterPositioningFix(t *testing.T) {
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 	body := w.Body.String()
-	if !strings.Contains(body, ".d2h-diff-table") || !strings.Contains(body, "position: relative") {
-		t.Errorf("diff.css missing the gutter positioning fix (.d2h-diff-table{position:relative}); horizontal scroll will bleed. Got:\n%s", body)
+	if !strings.Contains(body, ".d2h-code-linenumber") || !strings.Contains(body, "position: sticky") {
+		t.Errorf("diff.css missing the sticky gutter fix (.d2h-code-linenumber{position:sticky}); horizontal scroll will smear or hide line numbers. Got:\n%s", body)
+	}
+	if !strings.Contains(body, "background-color") {
+		t.Errorf("diff.css sticky gutter must set an opaque background-color; got:\n%s", body)
 	}
 }
 
