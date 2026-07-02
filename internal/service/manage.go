@@ -52,10 +52,20 @@ var ErrInvalidName = errors.New("service: name must be 1–60 printable Unicode 
 // Manage is the verb-level service. Each method maps to one ssh verb
 // (or HTTP endpoint) and is owner-gated.
 type Manage struct {
-	Repo    PasteAdmin
-	Blob    BlobUnit // for Show (ReadAll) + Update (Stage+Commit) + Delete (UnbindOnDelete)
-	KeyGate *KeyGate // optional; populates WhoamiInfo.Session when set
-	Now     func() time.Time
+	Repo      PasteAdmin
+	Blob      BlobUnit       // for Show (ReadAll) + Update (Stage+Commit) + Delete (UnbindOnDelete)
+	KeyGate   *KeyGate       // optional; populates WhoamiInfo.Session when set
+	SiteBytes SiteByteSummer // optional; when set, Whoami's used_bytes includes static-site bytes
+	Now       func() time.Time
+}
+
+// SiteByteSummer returns an identity's active static-site bytes. Whoami adds
+// this to the paste-byte sum so used_bytes reflects the SAME paste+site total
+// the deploy/upload quota check enforces (the per-identity cap sums both
+// counters). Optional: a metadata backend with no site repo leaves it nil and
+// Whoami reports paste bytes only. The site repo satisfies it directly.
+type SiteByteSummer interface {
+	SumActiveBytesByOwner(owner string, now time.Time) (int64, error)
 }
 
 func NewManage(repo PasteAdmin, blob BlobUnit) *Manage {
@@ -369,6 +379,17 @@ func (m *Manage) Whoami(owner, subnet string) (WhoamiInfo, error) {
 	used, err := m.Repo.SumActiveBytesByOwner(owner, m.Now().UTC())
 	if err != nil {
 		return WhoamiInfo{}, err
+	}
+	// Include static-site bytes so used_bytes matches the paste+site total the
+	// quota check enforces; without this, used_bytes under-reports (pastes
+	// only) and disagrees with the write-check that rejects at the combined
+	// cap. Nil when the backend has no site repo (used_bytes = pastes only).
+	if m.SiteBytes != nil {
+		siteUsed, err := m.SiteBytes.SumActiveBytesByOwner(owner, m.Now().UTC())
+		if err != nil {
+			return WhoamiInfo{}, err
+		}
+		used += int(siteUsed)
 	}
 	info := WhoamiInfo{
 		Identity:   owner,
