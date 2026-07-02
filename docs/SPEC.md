@@ -1776,10 +1776,20 @@ x7y8z9q0   -                      540B   markdown  6d16h        v1
 qrs78901   bugfix.diff           2.1k    diff      6d2h         v1
 mnop4567   Onboarding email      3.8k    html      5d6h         v3 (pinned, latest v5)
 zwy11122   -                     800B    html      4d12h        v3 (pinned)
+portfolio2 -                    213.0k   site      27d4h        -
 ```
-Sorted by expiry asc (soonest-to-die first, so you notice things about
-to disappear). `NAME` column shows the user-supplied label or `-` if
-none. Columns are space-padded so they stay aligned in the terminal no
+Lists BOTH text pastes AND deployed static **sites** (a site shows
+`KIND=site`, its deduped byte total, its expiry, and `-` in `VERS` since
+sites are not versioned). This matters because a site counts against the
+same 10 MiB per-identity quota as pastes: if `list` omitted sites, an owner
+could hit `would exceed your 10 MiB total quota` with no visible way to see
+or free what is using it (deleting the visible text pastes reclaims almost
+nothing). Listing sites makes the quota legible and the slugs copyable for
+`delete`. Sites reuse the retention policy (`EXPIRES_IN` shows the site's
+actual expiry, `never` only under a no-expiry deploy). Sorted by expiry asc
+(soonest-to-die first, so you notice things about to disappear;
+never-expiring items sort last). `NAME` column shows the user-supplied
+label or `-` if none (sites have no label, so `-`). Columns are space-padded so they stay aligned in the terminal no
 matter how long a `NAME` runs (a raw single-tab separator overflows the
 8-column tab stop as soon as one label is wide, shoving every following
 column out of true). The header line is on stdout (top of the output) so
@@ -1866,6 +1876,17 @@ stderr line):
     "served_version": 3,
     "latest_version": 5,
     "pinned_version": 3
+  },
+  {
+    "slug": "portfolio2",
+    "name": "",
+    "size_bytes": 218000,
+    "kind": "site",
+    "expires_at": "2026-07-29T09:00:00Z",
+    "expires_in_seconds": 2347200,
+    "served_version": null,
+    "latest_version": null,
+    "pinned_version": null
   }
 ]
 ```
@@ -1873,6 +1894,12 @@ stderr line):
 `name` is the empty string when unset (not the `-` table sentinel).
 `pinned_version` is `0` when the paste follows latest (unpinned);
 `served_version` is `pinned_version` when pinned, else `latest_version`.
+A static **site** is discriminated by `kind: "site"`: it has no versions,
+so `served_version` / `latest_version` / `pinned_version` are `null`.
+`size_bytes` is the site's deduped byte total. Sites reuse the retention
+policy, so `expires_at` / `expires_in_seconds` carry the site's actual
+expiry (both `null` only under a no-expiry deploy, the same as a
+never-expiring paste).
 `expires_in_seconds` is `null` when `expires_at` is `null`.
 
 `versions <slug> -o json` - an object that folds in the stderr footer
@@ -2786,6 +2813,13 @@ The deploy path's interface is:
 - `Get(slug) (Site, error)`
 - `SumActiveBytesByOwner(owner, now) (int64, error)` (the identity's
   active SITE bytes only; the deploy path adds the paste-side sum)
+- `ListSitesByOwner(owner) ([]Site, error)` - the identity's active sites,
+  so `ssh <apex> list` can show static sites alongside text pastes (a site
+  is a paste that never expires; without this it would silently consume
+  quota the owner cannot see or free). Enumerates the `identity_sites/<id>/`
+  index and re-reads each authoritative `sites/<slug>` row (skipping /
+  repairing a stale index entry whose row is gone), read-time expiry
+  filtered, newest-expiry-last to match the paste list ordering.
 
 and the sweep path's interface is:
 
@@ -2930,10 +2964,12 @@ enumerates every site exactly as `pastes/` enumerates every paste.
 
 The shale backend reuses the slatedb site key names + JSON row schema (the
 same way it reuses the paste layout: co-location is by `ShardKeyFn`, not by
-renaming keys). It replaces the slatedb `identity_sites/<id>/<slug>` index
-with a monotonic `{id}` byte counter (the reservation pattern), because
-shale accounts per-owner bytes through that counter rather than a read-time
-scan over a per-identity index. The full site shard map:
+renaming keys). Per-owner BYTE accounting uses a monotonic `{id}` counter
+(the reservation pattern), and per-owner ENUMERATION uses the
+`identity_sites/<id>/<slug>` index (so `ListSitesByOwner` can surface a
+user's sites in `list`) - the two are complementary, exactly as pastes carry
+both an `identity_bytes/<id>` counter and the `identity_pastes/<id>/<slug>`
+index. The full site shard map:
 
 | Key family | Keys | Shard key |
 | --- | --- | --- |
@@ -2941,31 +2977,42 @@ scan over a per-identity index. The full site shard map:
 | Expiry index (per-slug) | `expiry_sites/<ts>/<slug>` | `<slug>` (slug is the LAST segment) |
 | Site byte counter (per-identity) | `identity_site_bytes/<id>` | `<id>` |
 | Site reservation marker (per-identity) | `identity_site_reserve/<id>/<slug>` | `<id>` |
+| Site enumeration index (per-identity) | `identity_sites/<id>/<slug>` | `<id>` |
 
 `sites/<slug>` joins the authoritative `{slug}` family (alongside
 `pastes/<slug>`), `expiry_sites/<ts>/<slug>` shards on its trailing slug
-like `expiry/<date>/<slug>`, and the two `identity_site_*` families join the
+like `expiry/<date>/<slug>`, and the three `identity_site*` families join the
 derived `{id}` family so they co-shard with each other (a site reserve
 step's read-increment-mark is single-shard, exactly like the paste reserve).
 The `_sites`/`_site_` suffixes keep these from matching the bare `expiry/`
 and `identity_*` prefixes (the trailing-slash anchoring in `shaleShardKey`):
-`expiry_sites/` is not `expiry/`.
+`expiry_sites/` is not `expiry/`, and `identity_sites/` is not
+`identity_site_bytes/` or `identity_site_reserve/`.
 
-Shale does NOT keep an `identity_sites/<id>/<slug>` index. The slatedb
-backend needs it (its `SumActiveSiteBytesByOwner` scans the per-identity
-index, decodes each row, and filters by expiry), but shale's owner sum is a
-single read of the `identity_site_bytes/<id>` counter, the reconciler scans
-`sites/` (not a per-identity index), and there is no `ListSitesByOwner` on
-the site interface. A per-identity site index on shale would therefore be
-write-only with no reader, so it is omitted entirely (no `identity_sites/`
-write on deploy, no delete on `DeleteSite`, no `shaleShardKey` routing case).
+**The `identity_sites/<id>/<slug>` index** carries a one-byte marker value
+(shale's `Put` rejects an empty value, unlike slatedb's `[]byte{}` marker),
+because `ListSitesByOwner` re-reads each authoritative `sites/<slug>` row for
+the fields it returns - the index only enumerates the owner's slugs, exactly
+like `ListByOwner` uses `identity_pastes/`. Because `<id>` is the first
+segment it co-shards with the byte counter + reservation marker, so the
+index write can ride the SAME single-shard CAS as the confirm/delete: the
+confirm step (which drops the reservation marker) also writes the index
+entry, and `DeleteSite`'s counter-decrement CAS also deletes it. Index
+touches are best-effort and reconciler-healed (a lost confirm leaves a
+missing entry, never a failed deploy). Sites deployed BEFORE this index
+existed have no entry; the site reconciler backfills them by reprojecting
+every `sites/<slug>` row it scans into the per-owner index (adding missing
+entries, dropping orphans), the same "reproject authoritative rows, drop
+orphans" heal the paste reconciler runs for `identity_pastes/`.
 
 A site deploy spans the `{slug}` shard (the authoritative `sites/<slug>`
 write + the cross-family paste-slug collision read) and the `{id}` shard
 (the per-identity byte counter), which cannot be one CAS, so on shale a site
 deploy uses the SAME three-step reservation pattern paste inserts use:
 reserve the `DedupedSize` on the `{id}` site counter, perform the
-authoritative `{slug}` write, then confirm (drop the reservation marker).
+authoritative `{slug}` write, then confirm (drop the reservation marker AND
+write the `identity_sites/<id>/<slug>` enumeration index entry, one `{id}`
+CAS - the same shape as the paste confirm).
 The strict-quota and sweep-time-expiry properties carry over from the paste
 counter unchanged (`conformCaps.ExpiryFreesQuotaAtReadTime = false`,
 `StrictQuotaUnderConcurrency = true`).

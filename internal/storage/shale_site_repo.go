@@ -105,6 +105,9 @@ func (s *ShaleSiteRepo) Get(slug domain.Slug) (domain.Site, error) { return s.re
 func (s *ShaleSiteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int64, error) {
 	return s.repo.SumActiveSiteBytesByOwner(owner, now)
 }
+func (s *ShaleSiteRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error) {
+	return s.repo.ListSitesByOwner(owner, now)
+}
 func (s *ShaleSiteRepo) PreClaimSlug(ctx context.Context, slug domain.Slug, owner string, now time.Time) error {
 	return s.repo.PreClaimSiteSlug(ctx, slug, owner, now)
 }
@@ -132,6 +135,20 @@ func shaleKeyIdentitySiteBytes(identity string) []byte {
 
 func shaleKeyIdentitySiteReserve(identity, slug string) []byte {
 	return []byte("identity_site_reserve/" + identity + "/" + slug)
+}
+
+// shaleKeyIdentitySite / shalePrefixIdentitySites are the per-owner site
+// ENUMERATION index (mirror shaleKeyIdentityPaste / shalePrefixIdentityPastes).
+// The entry carries a one-byte marker value (shale's Put rejects an empty
+// value): ListSitesByOwner re-reads the authoritative sites/<slug> row for
+// the returned fields, so the index only needs to enumerate the owner's
+// slugs. It co-shards on <id> with the site byte counter + reserve marker.
+func shaleKeyIdentitySite(identity, slug string) []byte {
+	return []byte("identity_sites/" + identity + "/" + slug)
+}
+
+func shalePrefixIdentitySites(identity string) []byte {
+	return []byte("identity_sites/" + identity + "/")
 }
 
 // --- JSON row schema (shared with the slatedb backend) ---------------------
@@ -606,21 +623,29 @@ func (r *ShaleRepo) insertSiteAuthoritative(s domain.Site, dedupedSize int, refs
 	})
 }
 
-// confirmSiteInsert is step 3: drop the site reservation marker on the {id}
-// shard, one CAS. Shale keeps no per-identity site index
-// (SumActiveSiteBytesByOwner reads the identity_site_bytes COUNTER, the
-// reconciler scans sites/, and there is no ListSitesByOwner), so the marker
-// is simply consumed with nothing else written. Idempotent on a missing
-// marker (a prior confirm or a reconciler drop already removed it).
+// confirmSiteInsert is step 3: on the {id} shard, drop the site reservation
+// marker AND write the identity_sites/<id>/<slug> enumeration index entry,
+// one CAS (the reserve marker, the index entry, and the byte counter all
+// co-shard on {id}, so this is the exact analog of the paste confirmInsert).
+// The index entry is a one-byte marker (ListSitesByOwner re-reads the
+// authoritative sites/<slug> row for its fields). Called by BOTH insert and
+// replace, so the index write also refreshes an in-place re-deploy (the
+// marker is idempotent - a Put over an existing marker is a no-op).
+// Best-effort + reconciler-healed: a lost confirm leaves a missing index
+// entry the reconciler rebuilds, never a failed deploy. Idempotent on a
+// missing reserve marker (a prior confirm or a reconciler drop removed it).
 func (r *ShaleRepo) confirmSiteInsert(identity, slug string) error {
 	reserveKey := shaleKeyIdentitySiteReserve(identity, slug)
+	indexKey := shaleKeyIdentitySite(identity, slug)
 	return r.cluster.Transact(reserveKey, func(tx backend.Transaction) error {
 		if _, err := tx.Get(reserveKey); err == nil {
-			return tx.Delete(reserveKey)
+			if err := tx.Delete(reserveKey); err != nil {
+				return err
+			}
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return err
 		}
-		return nil
+		return tx.Put(indexKey, markerValue)
 	})
 }
 
@@ -633,6 +658,48 @@ func (r *ShaleRepo) GetSite(slug domain.Slug) (domain.Site, error) {
 		return domain.Site{}, err
 	}
 	return row.toDomain(slug)
+}
+
+// ListSitesByOwner enumerates the owner's identity_sites/<id>/ index on the
+// {id} shard and re-reads each authoritative sites/<slug> row (mirroring the
+// paste ListByOwner). A stale index entry whose authoritative row is gone is
+// skipped and best-effort deleted (repair-on-read). Read-time expiry
+// filtering (expires_at > now) drops expired-unswept sites so the list
+// matches what the owner can still serve. The caller (verbList) merges the
+// result with ListByOwner and sorts the union by expiry.
+func (r *ShaleRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error) {
+	if owner == "" {
+		return nil, nil
+	}
+	idx, err := r.scanPrefix(shalePrefixIdentitySites(owner))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Site, 0, len(idx))
+	var staleKeys [][]byte
+	for _, item := range idx {
+		slug := domain.Slug(extractSlug(item.Key))
+		var row siteRow
+		if err := r.getJSON(shaleKeySite(slug), &row); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				staleKeys = append(staleKeys, append([]byte(nil), item.Key...))
+				continue
+			}
+			return nil, err
+		}
+		if !row.ExpiresAt.After(now) {
+			continue // expired-unswept: stops counting/listing at read time
+		}
+		site, err := row.toDomain(slug)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, site)
+	}
+	for _, k := range staleKeys {
+		_ = r.cluster.Delete(k)
+	}
+	return out, nil
 }
 
 // SumActiveSiteBytesByOwner returns the identity's active SITE bytes only,
@@ -655,11 +722,11 @@ func (r *ShaleRepo) SumActiveSiteBytesByOwner(owner string, now time.Time) (int6
 }
 
 // DeleteSite removes a site authoritative row + its expiry index on the
-// {slug} shard, then decrements the site counter by the freed bytes on the
-// {id} shard. Idempotent: a missing row is a no-op (matches the sqlite
-// DELETE, the slate DeleteSite, and the paste Delete). Shale keeps no
-// per-identity site index, so there is no index entry to clean up. The
-// sweep calls this for every expired site slug.
+// {slug} shard, then decrements the site counter by the freed bytes AND
+// deletes the identity_sites/<id>/<slug> enumeration index entry on the {id}
+// shard. Idempotent: a missing row is a no-op (matches the sqlite DELETE,
+// the slate DeleteSite, and the paste Delete). The sweep calls this for
+// every expired site slug.
 func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 	var row siteRow
 	if err := r.getJSON(shaleKeySite(slug), &row); err != nil {
@@ -707,9 +774,20 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 	}
 
 	// Counter cleanup on the {id} shard: decrement the site counter by the
-	// freed bytes, one CAS.
+	// freed bytes AND delete the enumeration index entry, one CAS (both
+	// co-shard on {id}, the analog of the paste Delete). The index delete is
+	// idempotent (a missing entry - already reconciler-dropped, or a
+	// pre-index site - is fine).
 	counterKey := shaleKeyIdentitySiteBytes(identity)
+	indexKey := shaleKeyIdentitySite(identity, slug.String())
 	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
+		if _, err := tx.Get(indexKey); err == nil {
+			if err := tx.Delete(indexKey); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, backend.ErrNotFound) {
+			return err
+		}
 		cur, err := txGetCounter(tx, counterKey)
 		if err != nil {
 			return err
@@ -773,8 +851,27 @@ func (r *ShaleRepo) reconcileSiteReservations(now time.Time, reserveGrace time.D
 		return fmt.Errorf("reconcile sites: scan sites: %w", err)
 	}
 	liveSiteSlugs := make(map[string]struct{}, len(siteItems))
+	// sitesByOwner drives the identity_sites enumeration-index backfill: every
+	// authoritative site reprojected into its owner's index (add missing,
+	// including sites deployed before the index existed). Mirrors the paste
+	// reconciler's pastesByOwner.
+	sitesByOwner := make(map[string]map[string]struct{})
 	for _, item := range siteItems {
-		liveSiteSlugs[strings.TrimPrefix(string(item.Key), "sites/")] = struct{}{}
+		slug := strings.TrimPrefix(string(item.Key), "sites/")
+		liveSiteSlugs[slug] = struct{}{}
+		var row siteRow
+		if err := json.Unmarshal(item.Value, &row); err != nil {
+			// Idempotent reconcile: the row physically exists (slug already
+			// marked live above), we just cannot decode it - skip its index
+			// projection; the next tick retries. Matches the paste reconciler's
+			// undecodable-row policy.
+			r.repoLog().Printf("reconcile sites: skip undecodable site %s: %v", item.Key, err)
+			continue
+		}
+		if sitesByOwner[row.Identity] == nil {
+			sitesByOwner[row.Identity] = make(map[string]struct{})
+		}
+		sitesByOwner[row.Identity][slug] = struct{}{}
 	}
 
 	markers, err := r.aggregatePrefix([]byte("identity_site_reserve/"))
@@ -803,6 +900,41 @@ func (r *ShaleRepo) reconcileSiteReservations(now time.Time, reserveGrace time.D
 		// Abandoned reservation: release the over-count atomically.
 		if err := r.orphanReleaseSiteMarker(item.Key); err != nil {
 			return fmt.Errorf("reconcile sites: orphan-release %s: %w", item.Key, err)
+		}
+	}
+
+	// Backfill/heal the identity_sites enumeration index from the authoritative
+	// sites/ scan (the same "reproject rows, drop orphans" heal the paste
+	// reconciler runs for identity_pastes). This is what makes sites deployed
+	// before the index existed appear in ListSitesByOwner.
+	return r.reconcileSiteIndexes(sitesByOwner)
+}
+
+// reconcileSiteIndexes rebuilds the per-owner identity_sites index to match
+// the authoritative sites present, one {id}-shard CAS per entry (idempotent
+// marker Put). Mirrors reconcileIndexes for pastes. Owners whose sites are
+// ALL gone are not scanned here (nothing in sitesByOwner); any leftover index
+// entry for them is dropped lazily by ListSitesByOwner's repair-on-read.
+func (r *ShaleRepo) reconcileSiteIndexes(sitesByOwner map[string]map[string]struct{}) error {
+	for owner, want := range sitesByOwner {
+		have, err := r.scanPrefix(shalePrefixIdentitySites(owner))
+		if err != nil {
+			return fmt.Errorf("reconcile sites: scan index %s: %w", owner, err)
+		}
+		for _, item := range have {
+			slug := extractSlug(item.Key)
+			if _, ok := want[slug]; !ok {
+				// Stale: the authoritative site is gone; drop the index entry.
+				_ = r.cluster.Delete(item.Key)
+			}
+		}
+		for slug := range want {
+			key := shaleKeyIdentitySite(owner, slug)
+			if err := r.cluster.Transact(key, func(tx backend.Transaction) error {
+				return tx.Put(key, markerValue)
+			}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

@@ -40,16 +40,14 @@ func TestShaleShardKey(t *testing.T) {
 		{"expiry_site", "expiry_sites/2026-06-05T12:00:00Z/abc12345", "abc12345"},
 		{"expiry_site nano", "expiry_sites/2026-06-05T12:00:00.123456789Z/abc12345", "abc12345"},
 
-		// Static-site per-identity derived family -> shard key <id>. Shale
-		// keeps no identity_sites/ index; the two site {id} families are the
-		// counter and the reservation marker, which disambiguate on their
-		// distinct identity_site_bytes/ vs identity_site_reserve/ prefixes.
+		// Static-site per-identity derived family -> shard key <id>. All three
+		// site {id} families (byte counter, reservation marker, enumeration
+		// index) route on the id so they co-shard; they disambiguate on their
+		// distinct identity_site_bytes/ vs identity_site_reserve/ vs
+		// identity_sites/ prefixes (which diverge before the trailing slash).
 		{"identity_site_bytes", "identity_site_bytes/sha256:deadbeef", "sha256:deadbeef"},
 		{"identity_site_reserve", "identity_site_reserve/sha256:deadbeef/abc12345", "sha256:deadbeef"},
-
-		// An identity_sites/ key has no routing case (shale never produces
-		// one), so it falls through to the whole-key default.
-		{"identity_sites falls through", "identity_sites/sha256:deadbeef/abc12345", "identity_sites/sha256:deadbeef/abc12345"},
+		{"identity_sites index", "identity_sites/sha256:deadbeef/abc12345", "sha256:deadbeef"},
 
 		// Room families -> shard key <app-slug>. All four families (+ the
 		// per-app byte counter) shard on the app slug, the FIRST segment after
@@ -116,12 +114,12 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 		// The reservation marker MUST co-shard with identity_bytes so the
 		// reserve step's read-increment-mark is a single-shard CAS.
 		"identity_reserve/" + id + "/" + slug,
-		// The site byte counter and the site reservation marker co-shard with
-		// the identity so the site reserve step's read-increment-mark is
-		// single-shard (mirrors the paste {id} family). Shale keeps no
-		// identity_sites/ index.
+		// The site byte counter, reservation marker, AND enumeration index all
+		// co-shard with the identity so the confirm/delete step's read-modify
+		// on all three is a single-shard CAS (mirrors the paste {id} family).
 		"identity_site_bytes/" + id,
 		"identity_site_reserve/" + id + "/" + slug,
+		"identity_sites/" + id + "/" + slug,
 	}
 	for _, k := range idKeys {
 		if got := string(shaleShardKey([]byte(k))); got != id {

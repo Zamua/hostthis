@@ -73,6 +73,9 @@ func (s *SlateSiteRepo) Get(slug domain.Slug) (domain.Site, error) { return s.re
 func (s *SlateSiteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int64, error) {
 	return s.repo.SumActiveSiteBytesByOwner(owner, now)
 }
+func (s *SlateSiteRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error) {
+	return s.repo.ListSitesByOwner(owner, now)
+}
 
 // PreClaimSlug is a NO-OP on the direct slatedb backend: its blobs live in a
 // detached content-sha-keyed store, so a deploy's files do not route by slug
@@ -420,6 +423,40 @@ func (r *SlateRepo) sumActiveSiteBytesForOwner(owner string, now time.Time) (int
 		total += int64(row.DedupedSize)
 	}
 	return total, nil
+}
+
+// ListSitesByOwner enumerates identity_sites/<owner>/ and returns the active
+// (non-expired) sites, re-reading each authoritative sites/<slug> row.
+// Mirrors sumActiveSiteBytesForOwner (same scan, same read-time expiry
+// filter); a stale index entry whose row is gone is skipped.
+func (r *SlateRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error) {
+	if owner == "" {
+		return nil, nil
+	}
+	idx, err := r.scanPrefix(prefixIdentitySites(owner))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Site, 0, len(idx))
+	for _, item := range idx {
+		slug := domain.Slug(extractSlug(item.Key))
+		var row siteRow
+		if err := r.getJSON(keySite(slug), &row); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue // stale index entry
+			}
+			return nil, err
+		}
+		if !row.ExpiresAt.After(now) {
+			continue
+		}
+		site, err := row.toDomain(slug)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, site)
+	}
+	return out, nil
 }
 
 // DeleteSite removes a site row and its two index entries. Idempotent: a

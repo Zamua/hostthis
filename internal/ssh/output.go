@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -109,43 +110,92 @@ func writeJSON(w io.Writer, v any) error {
 // View structs (the published JSON contract) + mappers from domain types.
 // ---------------------------------------------------------------------------
 
-// pasteView is one row of `list -o json`.
-type pasteView struct {
+// listItemView is one row of `list -o json` - a text paste OR a static
+// site, discriminated by Kind ("site" for sites). The version fields are
+// *int so a site (not versioned) serializes them as null; a paste points
+// them at real values. Expiry fields are null for a never-expiring item.
+type listItemView struct {
 	Slug             string  `json:"slug"`
 	Name             string  `json:"name"` // "" when unset (not the "-" table sentinel)
 	SizeBytes        int     `json:"size_bytes"`
-	Kind             string  `json:"kind"`
+	Kind             string  `json:"kind"`               // html/markdown/diff, or "site"
 	ExpiresAt        *string `json:"expires_at"`         // RFC3339, null when never-expires
 	ExpiresInSeconds *int64  `json:"expires_in_seconds"` // null when never-expires
-	ServedVersion    int     `json:"served_version"`
-	LatestVersion    int     `json:"latest_version"`
-	PinnedVersion    int     `json:"pinned_version"` // 0 when unpinned
+	ServedVersion    *int    `json:"served_version"`     // null for sites
+	LatestVersion    *int    `json:"latest_version"`     // null for sites
+	PinnedVersion    *int    `json:"pinned_version"`     // null for sites; 0 when unpinned
+
+	expiresAt time.Time // raw expiry for merge-sort; not serialized
 }
 
-// newPasteView maps a domain.Paste to its list view relative to now.
-func newPasteView(p domain.Paste, now time.Time) pasteView {
+// newPasteListItem maps a domain.Paste to a list item relative to now.
+func newPasteListItem(p domain.Paste, now time.Time) listItemView {
 	at, in := expiryFields(p.ExpiresAt, now)
-	return pasteView{
+	served := servedVersion(p.PinnedVersion, p.LatestVersion)
+	latest := p.LatestVersion
+	pinned := p.PinnedVersion
+	return listItemView{
 		Slug:             string(p.Slug),
 		Name:             p.Name,
 		SizeBytes:        p.Size,
 		Kind:             string(p.Kind),
 		ExpiresAt:        at,
 		ExpiresInSeconds: in,
-		ServedVersion:    servedVersion(p.PinnedVersion, p.LatestVersion),
-		LatestVersion:    p.LatestVersion,
-		PinnedVersion:    p.PinnedVersion,
+		ServedVersion:    &served,
+		LatestVersion:    &latest,
+		PinnedVersion:    &pinned,
+		expiresAt:        p.ExpiresAt,
 	}
 }
 
-// newPasteViews maps a slice, guaranteeing a non-nil slice so the JSON is
-// `[]` (not `null`) when the owner has no active pastes.
-func newPasteViews(pastes []domain.Paste, now time.Time) []pasteView {
-	views := make([]pasteView, 0, len(pastes))
-	for _, p := range pastes {
-		views = append(views, newPasteView(p, now))
+// newSiteListItem maps a domain.Site to a list item. Sites have no label
+// and no versions; SizeBytes is the deduped manifest total.
+func newSiteListItem(s domain.Site, now time.Time) listItemView {
+	at, in := expiryFields(s.ExpiresAt, now)
+	return listItemView{
+		Slug:             string(s.Slug),
+		Name:             "",
+		SizeBytes:        s.Manifest.DedupedSize(),
+		Kind:             "site",
+		ExpiresAt:        at,
+		ExpiresInSeconds: in,
+		// version fields nil: sites are not versioned
+		expiresAt: s.ExpiresAt,
 	}
+}
+
+// newListView merges pastes + sites into one list-view slice, sorted by
+// expiry ascending (soonest-to-die first; never-expiring items sort last,
+// matching the paste-only ordering). Guaranteed non-nil so json is `[]`
+// (not `null`) when the owner has no active content.
+func newListView(pastes []domain.Paste, sites []domain.Site, now time.Time) []listItemView {
+	views := make([]listItemView, 0, len(pastes)+len(sites))
+	for _, p := range pastes {
+		views = append(views, newPasteListItem(p, now))
+	}
+	for _, s := range sites {
+		views = append(views, newSiteListItem(s, now))
+	}
+	sort.SliceStable(views, func(i, j int) bool {
+		return views[i].expiresAt.Before(views[j].expiresAt)
+	})
 	return views
+}
+
+// versCol renders the table VERS column for a list item: "-" for a site
+// (no versions), else the paste's version state (mirrors renderVersCol).
+func versCol(v listItemView) string {
+	if v.ServedVersion == nil {
+		return "-"
+	}
+	switch *v.PinnedVersion {
+	case 0:
+		return fmt.Sprintf("v%d", *v.LatestVersion)
+	case *v.LatestVersion:
+		return fmt.Sprintf("v%d (pinned)", *v.LatestVersion)
+	default:
+		return fmt.Sprintf("v%d (pinned, latest v%d)", *v.PinnedVersion, *v.LatestVersion)
+	}
 }
 
 // versionsView is the `versions <slug> -o json` document. It folds the
