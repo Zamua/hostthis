@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -356,14 +357,17 @@ func TestList_Characterization(t *testing.T) {
 			t.Fatalf("expected header + 2 rows = 3 lines, got %d: %q", len(lines), stdout)
 		}
 		// Pinned header columns. Phase B / C must not reorder these.
-		want := "SLUG\tNAME\tSIZE\tKIND\tEXPIRES_IN\tVERS"
-		if lines[0] != want {
-			t.Fatalf("list header drift:\n got: %q\nwant: %q", lines[0], want)
+		// Output is space-padded (aligned), so match on the field tokens
+		// rather than a literal tab-joined string.
+		want := []string{"SLUG", "NAME", "SIZE", "KIND", "EXPIRES_IN", "VERS"}
+		if got := strings.Fields(lines[0]); !reflect.DeepEqual(got, want) {
+			t.Fatalf("list header drift:\n got: %v\nwant: %v", got, want)
 		}
-		// Each row has the same number of tab-separated columns as
-		// the header (6).
+		// Each row has the same number of whitespace-separated columns as
+		// the header (6). These fixtures use single-word names + bare
+		// v1 VERS, so field-splitting is unambiguous here.
 		for i, ln := range lines[1:] {
-			cols := strings.Split(ln, "\t")
+			cols := strings.Fields(ln)
 			if len(cols) != 6 {
 				t.Fatalf("row %d has %d cols, want 6: %q", i+1, len(cols), ln)
 			}
@@ -379,7 +383,7 @@ func TestList_Characterization(t *testing.T) {
 		if len(lines) < 2 {
 			t.Fatalf("expected at least header + 1 row: %q", stdout)
 		}
-		cols := strings.Split(lines[1], "\t")
+		cols := strings.Fields(lines[1])
 		if cols[1] != "-" {
 			t.Fatalf("unnamed paste should render name='-', got %q", cols[1])
 		}
@@ -642,17 +646,15 @@ func TestVersions_Characterization(t *testing.T) {
 		if len(lines) != 2 {
 			t.Fatalf("expected 2 version rows on stdout, got %d: %q", len(lines), out)
 		}
-		// Rows are tab-separated: vN <TAB> marker <TAB> created_at <TAB> size.
+		// Rows are space-padded aligned: vN  marker  created_at  size.
 		// First row is the latest (v2) so its marker is 'current' (unpinned →
-		// MAX(non-deleted ver_num) is the served).
-		cols := strings.Split(lines[0], "\t")
-		if len(cols) != 4 {
-			t.Fatalf("expected 4 cols on row, got %d: %q", len(cols), lines[0])
-		}
+		// MAX(non-deleted ver_num) is the served). The date field contains
+		// spaces, so match on the leading tokens rather than a fixed count.
+		cols := strings.Fields(lines[0])
 		if cols[0] != "v2" {
 			t.Fatalf("expected v2 as the latest row, got %q", cols[0])
 		}
-		if strings.TrimSpace(cols[1]) != "current" {
+		if cols[1] != "current" {
 			t.Fatalf("expected 'current' marker on latest unpinned row, got %q", cols[1])
 		}
 		// Footer on stderr: contains 'unpinned' + 'expires in'.
@@ -1355,7 +1357,7 @@ func TestConcurrent_Characterization(t *testing.T) {
 	rows := bufio.NewScanner(strings.NewReader(listOut))
 	count := 0
 	for rows.Scan() {
-		if strings.HasPrefix(rows.Text(), "SLUG\t") {
+		if strings.HasPrefix(strings.TrimSpace(rows.Text()), "SLUG") {
 			continue
 		}
 		if strings.TrimSpace(rows.Text()) == "" {
