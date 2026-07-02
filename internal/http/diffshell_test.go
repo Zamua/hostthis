@@ -189,6 +189,25 @@ func TestServeDiffAsset_WhitelistAndDeny(t *testing.T) {
 	}
 }
 
+// TestDiffCSS_GutterPositioningFix pins the fix for the line-number gutter
+// bleeding under horizontally-scrolled code. diff2html renders the gutter
+// as position:absolute with no relative container, so without this rule the
+// gutter escapes to the page and the (translucent) numbers sit on top of the
+// scrolled code. If a future asset regen or library bump drops the rule, this
+// fails loudly rather than silently reintroducing the visual bug.
+func TestDiffCSS_GutterPositioningFix(t *testing.T) {
+	srv := &Server{ApexDomain: "paste.test"}
+	mux := srv.Handler()
+
+	r := httptest.NewRequest("GET", "/_hostthis/diff.css", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	body := w.Body.String()
+	if !strings.Contains(body, ".d2h-diff-table") || !strings.Contains(body, "position: relative") {
+		t.Errorf("diff.css missing the gutter positioning fix (.d2h-diff-table{position:relative}); horizontal scroll will bleed. Got:\n%s", body)
+	}
+}
+
 // TestDiffShell_FetchesRawQuery pins diff.js to the "?raw=1" query the
 // cache-invalidation policy (internal/cache) assumes the shell fetches, in
 // lockstep with the markdown shell's equivalent guard.
