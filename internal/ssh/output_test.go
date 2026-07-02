@@ -61,14 +61,14 @@ func TestNewPasteView_ExpiryAndNaming(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	t.Run("unset name is empty string not dash", func(t *testing.T) {
-		v := newPasteView(domain.Paste{Slug: "abc12345", Name: ""}, now)
+		v := newPasteListItem(domain.Paste{Slug: "abc12345", Name: ""}, now)
 		if v.Name != "" {
 			t.Fatalf("name: got %q want empty string", v.Name)
 		}
 	})
 
 	t.Run("never-expires nulls both expiry fields", func(t *testing.T) {
-		v := newPasteView(domain.Paste{Slug: "abc12345", ExpiresAt: domain.NeverExpires}, now)
+		v := newPasteListItem(domain.Paste{Slug: "abc12345", ExpiresAt: domain.NeverExpires}, now)
 		if v.ExpiresAt != nil || v.ExpiresInSeconds != nil {
 			t.Fatalf("never-expires should null expiry: got at=%v in=%v", v.ExpiresAt, v.ExpiresInSeconds)
 		}
@@ -76,7 +76,7 @@ func TestNewPasteView_ExpiryAndNaming(t *testing.T) {
 
 	t.Run("normal expiry renders RFC3339 + seconds", func(t *testing.T) {
 		exp := now.Add(2 * time.Hour)
-		v := newPasteView(domain.Paste{Slug: "abc12345", ExpiresAt: exp}, now)
+		v := newPasteListItem(domain.Paste{Slug: "abc12345", ExpiresAt: exp}, now)
 		if v.ExpiresAt == nil || *v.ExpiresAt != exp.Format(time.RFC3339) {
 			t.Fatalf("expires_at: got %v want %s", v.ExpiresAt, exp.Format(time.RFC3339))
 		}
@@ -87,7 +87,7 @@ func TestNewPasteView_ExpiryAndNaming(t *testing.T) {
 
 	t.Run("already-expired clamps seconds to zero", func(t *testing.T) {
 		exp := now.Add(-5 * time.Minute)
-		v := newPasteView(domain.Paste{Slug: "abc12345", ExpiresAt: exp}, now)
+		v := newPasteListItem(domain.Paste{Slug: "abc12345", ExpiresAt: exp}, now)
 		if v.ExpiresInSeconds == nil || *v.ExpiresInSeconds != 0 {
 			t.Fatalf("expires_in_seconds: got %v want 0", v.ExpiresInSeconds)
 		}
@@ -98,23 +98,33 @@ func TestNewPasteView_VersionState(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	t.Run("unpinned serves latest", func(t *testing.T) {
-		v := newPasteView(domain.Paste{Slug: "s", PinnedVersion: 0, LatestVersion: 5, ExpiresAt: domain.NeverExpires}, now)
-		if v.ServedVersion != 5 || v.LatestVersion != 5 || v.PinnedVersion != 0 {
-			t.Fatalf("unpinned: got served=%d latest=%d pinned=%d", v.ServedVersion, v.LatestVersion, v.PinnedVersion)
+		v := newPasteListItem(domain.Paste{Slug: "s", PinnedVersion: 0, LatestVersion: 5, ExpiresAt: domain.NeverExpires}, now)
+		if *v.ServedVersion != 5 || *v.LatestVersion != 5 || *v.PinnedVersion != 0 {
+			t.Fatalf("unpinned: got served=%d latest=%d pinned=%d", *v.ServedVersion, *v.LatestVersion, *v.PinnedVersion)
 		}
 	})
 
 	t.Run("pinned serves the pin", func(t *testing.T) {
-		v := newPasteView(domain.Paste{Slug: "s", PinnedVersion: 3, LatestVersion: 5, ExpiresAt: domain.NeverExpires}, now)
-		if v.ServedVersion != 3 || v.LatestVersion != 5 || v.PinnedVersion != 3 {
-			t.Fatalf("pinned: got served=%d latest=%d pinned=%d", v.ServedVersion, v.LatestVersion, v.PinnedVersion)
+		v := newPasteListItem(domain.Paste{Slug: "s", PinnedVersion: 3, LatestVersion: 5, ExpiresAt: domain.NeverExpires}, now)
+		if *v.ServedVersion != 3 || *v.LatestVersion != 5 || *v.PinnedVersion != 3 {
+			t.Fatalf("pinned: got served=%d latest=%d pinned=%d", *v.ServedVersion, *v.LatestVersion, *v.PinnedVersion)
+		}
+	})
+
+	t.Run("site has null version fields + site kind", func(t *testing.T) {
+		v := newSiteListItem(domain.Site{Slug: "portfolio2", ExpiresAt: domain.NeverExpires}, now)
+		if v.Kind != "site" {
+			t.Fatalf("site kind: got %q want site", v.Kind)
+		}
+		if v.ServedVersion != nil || v.LatestVersion != nil || v.PinnedVersion != nil {
+			t.Fatalf("site version fields should be nil, got served=%v latest=%v pinned=%v", v.ServedVersion, v.LatestVersion, v.PinnedVersion)
 		}
 	})
 }
 
 func TestNewPasteViews_EmptyMarshalsToArray(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	b, err := json.Marshal(newPasteViews(nil, now))
+	b, err := json.Marshal(newListView(nil, nil, now))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
