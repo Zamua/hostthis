@@ -60,6 +60,15 @@ body {
 }
 /* Let wide diffs scroll horizontally rather than overflow the page. */
 .d2h-wrapper { overflow-x: auto; }
+/* diff2html renders the line-number gutter as `position: absolute` but
+   sets NO `position: relative` anywhere, so the gutter's containing block
+   escapes up to the page. On horizontal scroll of a wide diff the gutter
+   then stays pinned to the page while the code scrolls in its own
+   container, so the (translucent) numbers sit ON TOP of the scrolled
+   code. Give the diff table a positioning context so the absolute gutter
+   is contained by - and scrolls with - its own row. Fixes both
+   line-by-line and side-by-side. */
+.d2h-diff-table { position: relative; }
 /* Side-by-side gets cramped on phones; the toggle defaults to line-by-line,
    but if a visitor picks side-by-side on a narrow screen, allow scroll. */
 @media (max-width: 700px) {
