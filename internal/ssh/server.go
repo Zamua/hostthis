@@ -357,7 +357,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 		// byte-exact by the Phase A characterization tests.
 		s.verbHelp(sess, argv[1:])
 	case "list":
-		s.verbList(sess, owner)
+		s.verbList(sess, owner, argv[1:])
 	case "get":
 		s.verbGet(sess, owner, argv[1:])
 	case "url":
@@ -375,7 +375,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 	case "unpin":
 		s.verbUnpin(sess, owner, argv[1:])
 	case "whoami":
-		s.verbWhoami(sess, owner)
+		s.verbWhoami(sess, owner, argv[1:])
 	default:
 		// Looks like a slug? Treat as `update`. The slug-update
 		// shortcut is the SPEC.md "cat foo | ssh hostthis.dev <slug>"
@@ -531,12 +531,30 @@ func (s *Server) deploySiteToSlug(sess gossh.Session, owner string, slug domain.
 
 // -- list -------------------------------------------------------------------
 
-func (s *Server) verbList(sess gossh.Session, owner string) {
+func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
+	format, _, err := parseOutputFormat(argv)
+	if err != nil {
+		emitUsageErr(sess, err)
+		return
+	}
 	pastes, err := s.Manage.List(owner)
 	if err != nil {
 		emitServiceErr(sess, err)
 		return
 	}
+	now := s.now().UTC()
+
+	if format == formatJSON {
+		// json mode: stdout carries only the JSON array (empty [] when
+		// there are no active pastes - no "no active pastes" stderr line).
+		if err := writeJSON(sess, newPasteViews(pastes, now)); err != nil {
+			emitServiceErr(sess, err)
+			return
+		}
+		_ = sess.Exit(ExitOK)
+		return
+	}
+
 	if len(pastes) == 0 {
 		fmt.Fprintln(sess.Stderr(), "no active pastes")
 		_ = sess.Exit(ExitOK)
@@ -557,7 +575,6 @@ func (s *Server) verbList(sess gossh.Session, owner string) {
 	// header lands first and PTY CRLF cooking is unaffected.
 	tw := tabwriter.NewWriter(sess, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "SLUG\tNAME\tSIZE\tKIND\tEXPIRES_IN\tVERS")
-	now := s.now().UTC()
 	for _, p := range pastes {
 		name := p.Name
 		if name == "" {
@@ -792,7 +809,12 @@ func parseVersionArg(s string) (int, error) {
 // -- versions / pin ---------------------------------------------------------
 
 func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
-	slug, err := requireSlug(argv)
+	format, rest, err := parseOutputFormat(argv)
+	if err != nil {
+		emitUsageErr(sess, err)
+		return
+	}
+	slug, err := requireSlug(rest)
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
 		_ = sess.Exit(ExitUsage)
@@ -824,6 +846,17 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 				break
 			}
 		}
+	}
+
+	if format == formatJSON {
+		// json mode: stdout carries only the object; the pin/expiry footer
+		// (normally on stderr) folds into the document.
+		if err := writeJSON(sess, newVersionsView(string(slug), p, vers, servedVer, now)); err != nil {
+			emitServiceErr(sess, err)
+			return
+		}
+		_ = sess.Exit(ExitOK)
+		return
 	}
 
 	// Space-padded columns (see verbList) so the marker/date/size line up
@@ -904,7 +937,12 @@ func (s *Server) verbPin(sess gossh.Session, owner string, argv []string) {
 
 // -- whoami -----------------------------------------------------------------
 
-func (s *Server) verbWhoami(sess gossh.Session, owner string) {
+func (s *Server) verbWhoami(sess gossh.Session, owner string, argv []string) {
+	format, _, err := parseOutputFormat(argv)
+	if err != nil {
+		emitUsageErr(sess, err)
+		return
+	}
 	// keyRequiredMiddleware rejects key-less sessions before they get
 	// here, so owner is always a key:<fp> identity by this point.
 	subnet := ipSubnet(remoteIP(sess))
@@ -913,6 +951,16 @@ func (s *Server) verbWhoami(sess gossh.Session, owner string) {
 		emitServiceErr(sess, err)
 		return
 	}
+
+	if format == formatJSON {
+		if err := writeJSON(sess, newWhoamiView(info)); err != nil {
+			emitServiceErr(sess, err)
+			return
+		}
+		_ = sess.Exit(ExitOK)
+		return
+	}
+
 	// info.Identity is "key:SHA256:abcd..." - strip the prefix for
 	// display so it matches `ssh-keygen -lf` style.
 	fmt.Fprintf(sess, "key:     %s\n", strings.TrimPrefix(info.Identity, domain.IdentityKeyPrefix))
@@ -1064,6 +1112,15 @@ func requireSlug(argv []string) (domain.Slug, error) {
 		return "", errors.New("missing slug")
 	}
 	return domain.ParseSlug(argv[0])
+}
+
+// emitUsageErr reports a bad-argument / parser failure (e.g. an unknown
+// `-o` output format) on stderr and exits ExitUsage - the same code the
+// dispatcher uses for a malformed command, keeping the arg-error contract
+// uniform.
+func emitUsageErr(sess gossh.Session, err error) {
+	_, _ = fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
+	_ = sess.Exit(ExitUsage)
 }
 
 func emitServiceErr(sess gossh.Session, err error) {
