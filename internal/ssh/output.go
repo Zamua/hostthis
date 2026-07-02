@@ -34,12 +34,14 @@ const (
 	formatJSON  outputFormat = "json"  // stable JSON document on stdout
 )
 
-// parseOutputFormat extracts a kubectl-style `-o <fmt>` / `--output <fmt>`
-// (and the `=`-joined `-o=<fmt>` / `--output=<fmt>` forms) from a verb's
-// argument list, wherever it appears, and returns the selected format
-// plus the remaining positional args with the flag removed. Absent flag
-// => formatTable. An unrecognized format value, or a `-o` with no value,
-// is a usage error (the caller maps it to ExitUsage).
+// parseOutputFormat extracts a kubectl-style output selector from a verb's
+// argument list, wherever it appears, and returns the selected format plus
+// the remaining positional args with the flag removed. All pflag-style
+// spellings are accepted: `-o <fmt>`, `--output <fmt>`, the `=`-joined
+// `-o=<fmt>` / `--output=<fmt>`, and the glued short form `-o<fmt>` (e.g.
+// `-ojson`). Absent flag => formatTable. An unrecognized format value, or a
+// bare `-o` with no value, is a usage error (the caller maps it to
+// ExitUsage).
 func parseOutputFormat(argv []string) (outputFormat, []string, error) {
 	format := formatTable
 	rest := make([]string, 0, len(argv))
@@ -59,6 +61,10 @@ func parseOutputFormat(argv []string) (outputFormat, []string, error) {
 			val = arg[len("-o="):] // may be empty -> validated below
 		case strings.HasPrefix(arg, "--output="):
 			val = arg[len("--output="):]
+		case strings.HasPrefix(arg, "-o"):
+			// glued short form, e.g. "-ojson" (kubectl/pflag shorthand).
+			// Comes after the "-o=" case so "-o=json" isn't caught here.
+			val = arg[len("-o"):]
 		default:
 			rest = append(rest, arg)
 			continue
