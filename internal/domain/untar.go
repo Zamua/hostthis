@@ -34,7 +34,7 @@ type FileSink interface {
 	// header's declared size; the decompression-bomb guard has already
 	// admitted these bytes against the running total before Store is
 	// called.
-	Store(p string, r io.Reader, size int64) (sha string, err error)
+	Store(p string, r io.Reader, size int64) (sha string, compressedSize int, err error)
 }
 
 // SafeUntar streams a gzip-tar archive from src, enforcing the three
@@ -153,7 +153,7 @@ func SafeUntar(src io.Reader, sink FileSink, quotaBudget int64) (Manifest, error
 			capBytes: cap,
 		}
 
-		sha, err := sink.Store(rel, entryReader, hdr.Size)
+		sha, compressedSize, err := sink.Store(rel, entryReader, hdr.Size)
 		if err != nil {
 			if errors.Is(err, ErrArchiveTooLarge) {
 				return Manifest{}, ErrArchiveTooLarge
@@ -167,9 +167,10 @@ func SafeUntar(src io.Reader, sink FileSink, quotaBudget int64) (Manifest, error
 		}
 
 		man.Add(rel, ManifestEntry{
-			SHA:         sha,
-			Size:        int(entryReader.read),
-			ContentType: contentTypeByExt(rel),
+			SHA:            sha,
+			Size:           int(entryReader.read),
+			CompressedSize: compressedSize,
+			ContentType:    contentTypeByExt(rel),
 		})
 
 		// 5. Manifest-size cap (path text). Checked incrementally so a
