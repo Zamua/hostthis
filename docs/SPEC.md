@@ -1815,11 +1815,12 @@ ssh hostthis.dev versions abc12345 -o json
 ssh hostthis.dev whoami --output json
 ```
 
-- **Flag**: `-o <fmt>` or `--output <fmt>` (also the `=`-joined forms
-  `-o=<fmt>` / `--output=<fmt>`). It may appear anywhere in the verb's
-  arguments; it is parsed out and the remaining positionals are handled
-  as usual (so `versions -o json abc12345` and `versions abc12345 -o json`
-  are equivalent).
+- **Flag**: `-o <fmt>` or `--output <fmt>`, the `=`-joined forms
+  `-o=<fmt>` / `--output=<fmt>`, and the glued short form `-o<fmt>`
+  (e.g. `-ojson`) - matching kubectl / pflag shorthand parsing. It may
+  appear anywhere in the verb's arguments; it is parsed out and the
+  remaining positionals are handled as usual (so `versions -o json
+  abc12345` and `versions abc12345 -o json` are equivalent).
 - **Values**: `table` (the default when the flag is absent) and `json`.
   The default is `table` even when stdout is a pipe - matching kubectl,
   which never silently switches format based on the terminal. An
