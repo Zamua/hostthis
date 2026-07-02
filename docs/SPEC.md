@@ -646,10 +646,15 @@ Nothing about the product opinions changes for sites:
 - **Identity** is the SSH key fingerprint, the same account a paste
   upload uses, gated by the same Sybil per-subnet admission.
 - **Quota** counts the manifest's DEDUPED total blob size against the
-  SAME per-identity cap (see "Limits → Per-identity quota"). The
-  decompression-bomb guard aborts the untar the instant the running
-  total would push the owner over that cap, so a site can never be
-  persisted over-quota.
+  SAME per-identity cap (see "Limits → Per-identity quota"), using the
+  **stored (post-zstd) COMPRESSED** size per distinct blob -
+  `Manifest.CompressedDedupedSize()` - so a site is charged its real
+  on-disk footprint, exactly as a paste is charged its compressed size.
+  (Each entry keeps its uncompressed `Size` for display; the compressed
+  size is the quota basis.) The decompression-bomb guard still aborts the
+  untar on the UNCOMPRESSED running total (a memory/bomb bound, so the
+  guard is at worst more conservative than the charge), so a site can
+  never be persisted over-quota.
 - **Retention** is the same retention window as a paste, from last update; a
   site evicts itself exactly like a paste, no per-site control.
 - **Versioning** reuses the paste-versioning shape where it is low-cost:
@@ -2214,8 +2219,10 @@ error with `would exceed your 10 MiB total quota`.
 
 This is the SAME 10 MiB as the per-paste cap - both count
 post-compression bytes, so the bookkeeping number is consistent
-everywhere. A user can spend their quota as one 10 MiB paste, ten
-1 MiB pastes, or any mix.
+everywhere. Static **sites** count against the same cap and on the same
+basis: the deduped total of their files' COMPRESSED sizes (see "Static
+site archives → Quota"). A user can spend their quota as one 10 MiB
+paste, ten 1 MiB pastes, a static site, or any mix.
 
 Deleted versions (via `delete <slug> <ver>`) contribute zero bytes to the
 quota even though the metadata row remains as a tombstone - only the
@@ -2851,10 +2858,11 @@ JSON the sqlite backend stores in its `manifest` column, so the on-wire
 manifest shape is identical across backends (path -> sha + size +
 content-type). `DedupedSize` is stored on the row (not recomputed on
 read) so the quota scans never have to decode every manifest just to sum
-bytes; it is `Manifest.DedupedSize()` at deploy time, the distinct-blob
-total, the number charged against quota. The two index families carry an
-empty value (the slatedb convention for marker keys, mirroring
-`identity_pastes` and `expiry`).
+bytes; it is `Manifest.CompressedDedupedSize()` at deploy time - the
+distinct-blob total of the STORED (post-zstd) sizes, the number charged
+against quota (matching the paste compressed basis). The two index
+families carry an empty value (the slatedb convention for marker keys,
+mirroring `identity_pastes` and `expiry`).
 
 The site keys live in the SAME keyspace and the SAME SlateDB instance as
 the paste keys, so a single `Db.begin(SnapshotIsolation)` transaction can

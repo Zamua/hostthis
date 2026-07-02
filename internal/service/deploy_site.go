@@ -229,7 +229,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		UpdatedAt: now,
 		ExpiresAt: d.Retention.ExpiryFor(now),
 	}
-	deduped := man.DedupedSize()
+	deduped := man.CompressedDedupedSize()
 
 	// Transactional path: the slug is pre-claimed and the files staged under it,
 	// so the authoritative insert co-binds every pointer on the {slug} shard in
@@ -441,7 +441,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		UpdatedAt: now,
 		ExpiresAt: d.Retention.ExpiryFor(now),
 	}
-	deduped := man.DedupedSize()
+	deduped := man.CompressedDedupedSize()
 
 	// Commit the swapped manifest + bind the staged files as one unit. On the
 	// standalone path the files are already durable from the sink; Commit
@@ -483,7 +483,7 @@ type blobSink struct {
 	handles []BlobHandle
 }
 
-func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, error) {
+func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
 	// Read the whole (already-cap-bounded) file into memory: the untar's
 	// decompression-bomb guard has admitted these bytes against the
 	// running total, so this buffer is at most one file and the whole
@@ -493,17 +493,28 @@ func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, error) {
 		// Propagate the cap-exceeded sentinel unchanged so SafeUntar can
 		// distinguish it from a real I/O error.
 		if errors.Is(err, domain.ErrArchiveTooLarge) {
-			return "", domain.ErrArchiveTooLarge
+			return "", 0, domain.ErrArchiveTooLarge
 		}
-		return "", fmt.Errorf("read file %q: %w", p, err)
+		return "", 0, fmt.Errorf("read file %q: %w", p, err)
 	}
 	bodyBytes := buf.Bytes()
 	sum := sha256.Sum256(bodyBytes)
 	sha := hex.EncodeToString(sum[:])
-	handle, err := s.blob.StageStream(context.Background(), s.slug, sha, bytes.NewReader(bodyBytes), int64(len(bodyBytes)))
+	// Compress with the SAME encoder the blob store uses and store the exact
+	// bytes via the precompressed Stage path, so the returned compressed size
+	// is precisely the on-disk footprint. That is what the deploy charges
+	// against quota - matching how pastes charge their post-zstd size, so a
+	// site no longer over-counts vs its real storage. The 4-byte magic prefix
+	// is excluded to match the paste basis (compress.go).
+	encoded, err := storage.EncodeCompressedBody(bytes.NewReader(bodyBytes))
 	if err != nil {
-		return "", fmt.Errorf("blob put %q: %w", p, err)
+		return "", 0, fmt.Errorf("compress file %q: %w", p, err)
+	}
+	compressedSize := len(encoded) - len(blobMagicV1)
+	handle, err := s.blob.Stage(context.Background(), s.slug, sha, encoded)
+	if err != nil {
+		return "", 0, fmt.Errorf("blob put %q: %w", p, err)
 	}
 	s.handles = append(s.handles, handle)
-	return sha, nil
+	return sha, compressedSize, nil
 }

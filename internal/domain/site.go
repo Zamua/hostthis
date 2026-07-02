@@ -26,13 +26,15 @@ type Site struct {
 	ExpiresAt time.Time // UpdatedAt + Retention window (or NeverExpires)
 }
 
-// ManifestEntry is one file in a site: the blob it points at, the
-// uncompressed byte size, and the content-type derived purely from
-// the path's extension. No I/O - the type is a function of the name.
+// ManifestEntry is one file in a site: the blob it points at, its
+// uncompressed AND stored-compressed byte sizes, and the content-type
+// derived purely from the path's extension. No I/O - the type is a
+// function of the name.
 type ManifestEntry struct {
-	SHA         string // sha256 of the file's uncompressed bytes
-	Size        int    // uncompressed bytes
-	ContentType string // by extension; see contentTypeByExt
+	SHA            string // sha256 of the file's uncompressed bytes
+	Size           int    // uncompressed bytes (for display)
+	CompressedSize int    // stored post-zstd bytes; the quota basis (matches how pastes charge)
+	ContentType    string // by extension; see contentTypeByExt
 }
 
 // Manifest maps each safe, site-root-relative path to its blob ref.
@@ -278,6 +280,23 @@ func (m Manifest) DedupedSize() int {
 	seen := make(map[string]int, len(m.Files))
 	for _, e := range m.Files {
 		seen[e.SHA] = e.Size
+	}
+	var total int
+	for _, sz := range seen {
+		total += sz
+	}
+	return total
+}
+
+// CompressedDedupedSize is the distinct-blob total of the STORED
+// (post-zstd) sizes - the number charged against the per-identity quota,
+// matching how pastes charge their compressed size. Dedup is by SHA, so a
+// file referenced N times counts its compressed size once. DedupedSize
+// (uncompressed) is retained for display.
+func (m Manifest) CompressedDedupedSize() int {
+	seen := make(map[string]int, len(m.Files))
+	for _, e := range m.Files {
+		seen[e.SHA] = e.CompressedSize
 	}
 	var total int
 	for _, sz := range seen {
