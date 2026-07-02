@@ -45,12 +45,13 @@ var verbDescriptors = map[string]verbDescriptor{
 	"list": {
 		Name:      "list",
 		Signature: "ssh {{apex}} list",
-		Description: "List your active pastes, soonest-to-expire first. Output " +
-			"is tab-separated with a header row on stdout for easy " +
-			"`awk`-ing. Empty list prints `no active pastes` on stderr.",
+		Description: "List your active pastes, soonest-to-expire first. Prints an " +
+			"aligned, space-padded table on stdout (header first); empty list " +
+			"prints `no active pastes` on stderr. Add `-o json` for a stable, " +
+			"machine-readable array (`jq`-friendly).",
 		Examples: []string{
 			"ssh {{apex}} list",
-			"ssh {{apex}} list | tail -n +2 | awk '{print $1}'",
+			"ssh {{apex}} list -o json | jq -r '.[].slug'",
 		},
 	},
 	"url": {
@@ -107,9 +108,11 @@ var verbDescriptors = map[string]verbDescriptor{
 		Description: "Show the version timeline for one paste, newest first. The " +
 			"middle column marks the currently-served version and any " +
 			"tombstoned (deleted) versions. Footer on stderr shows pin " +
-			"state and expiry.",
+			"state and expiry. Add `-o json` for a machine-readable object " +
+			"(pin/expiry fold in; the footer is not printed separately).",
 		Examples: []string{
 			"ssh {{apex}} versions abc12345",
+			"ssh {{apex}} versions abc12345 -o json | jq '.versions'",
 		},
 	},
 	"pin": {
@@ -139,9 +142,10 @@ var verbDescriptors = map[string]verbDescriptor{
 		Description: "Show the identity the server sees for this session (the " +
 			"SHA256 fingerprint of the connecting ssh key), the active " +
 			"paste count, the quota in use, and the current Sybil-gate " +
-			"subnet budget.",
+			"subnet budget. Add `-o json` for a machine-readable object.",
 		Examples: []string{
 			"ssh {{apex}} whoami",
+			"ssh {{apex}} whoami -o json | jq .quota_bytes",
 		},
 	},
 	"help": {
