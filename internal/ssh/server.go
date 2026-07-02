@@ -542,12 +542,24 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 		emitServiceErr(sess, err)
 		return
 	}
+	// Static sites count against the same quota as pastes but never expire,
+	// so `list` MUST show them too or the quota is invisible + unfreeable.
+	// s.Deploy is nil when static-site hosting is disabled (paste-only).
+	var sites []domain.Site
+	if s.Deploy != nil {
+		sites, err = s.Deploy.ListSites(owner)
+		if err != nil {
+			emitServiceErr(sess, err)
+			return
+		}
+	}
 	now := s.now().UTC()
+	items := newListView(pastes, sites, now)
 
 	if format == formatJSON {
 		// json mode: stdout carries only the JSON array (empty [] when
-		// there are no active pastes - no "no active pastes" stderr line).
-		if err := writeJSON(sess, newPasteViews(pastes, now)); err != nil {
+		// there is no active content - no "no active pastes" stderr line).
+		if err := writeJSON(sess, items); err != nil {
 			emitServiceErr(sess, err)
 			return
 		}
@@ -555,7 +567,7 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 		return
 	}
 
-	if len(pastes) == 0 {
+	if len(items) == 0 {
 		fmt.Fprintln(sess.Stderr(), "no active pastes")
 		_ = sess.Exit(ExitOK)
 		return
@@ -575,14 +587,14 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 	// header lands first and PTY CRLF cooking is unaffected.
 	tw := tabwriter.NewWriter(sess, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "SLUG\tNAME\tSIZE\tKIND\tEXPIRES_IN\tVERS")
-	for _, p := range pastes {
-		name := p.Name
+	for _, it := range items {
+		name := it.Name
 		if name == "" {
 			name = "-"
 		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			p.Slug, name, humanBytes(p.Size), p.Kind,
-			humanExpiresIn(p.ExpiresAt, now), renderVersCol(p))
+			it.Slug, name, humanBytes(it.SizeBytes), it.Kind,
+			humanExpiresIn(it.expiresAt, now), versCol(it))
 	}
 	_ = tw.Flush()
 	_ = sess.Exit(ExitOK)

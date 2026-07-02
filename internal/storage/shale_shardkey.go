@@ -35,14 +35,16 @@ import (
 //
 // The static-site families mirror the paste families (sites reuse the paste
 // layout, only with a site_ flavor; see docs/SPEC.md "Shale reuses the
-// layout"). Shale keeps NO identity_sites/<id>/<slug> index (it would be
-// write-only on shale; the slatedb backend has one but shale's owner sum
-// reads the counter instead), so there is no routing case for it:
+// layout"). Shale keeps the identity_sites/<id>/<slug> enumeration index
+// (mirroring identity_pastes/) so ListSitesByOwner can surface a user's
+// sites in `list`; it co-shards on <id> with the site counter + reserve
+// marker, so the confirm/delete step touches all three in one {id} CAS:
 //
 //	sites/<slug>                       -> <slug>   (authoritative, joins the {slug} family)
 //	expiry_sites/<ts>/<slug>           -> <slug>   (LAST segment, like expiry/)
 //	identity_site_bytes/<id>           -> <id>     (the site quota counter)
 //	identity_site_reserve/<id>/<slug>  -> <id>     (site reservation marker; co-shards with the site counter)
+//	identity_sites/<id>/<slug>         -> <id>     (site enumeration index; co-shards with the site counter)
 //
 // The room families (the app-persistence tier) all shard on the <app-slug>,
 // co-locating an app's rooms + values + ledger + expiry + counter on one
@@ -107,14 +109,20 @@ func shaleShardKey(key []byte) []byte {
 		// reserve step's read-increment-mark is a single-shard CAS.
 		return firstSegment(key[len(prefixIdentityReserveAll):])
 
-	// Per-identity static-site derived family. The site byte counter and the
-	// site reservation marker shard on the id so they co-locate (the same
-	// single-shard-CAS argument as the paste {id} family). Shale keeps no
-	// identity_sites/<id>/<slug> index, so there is no case for it.
+	// Per-identity static-site derived family. The site byte counter, the
+	// site reservation marker, and the site enumeration index all shard on
+	// the id so they co-locate (the same single-shard-CAS argument as the
+	// paste {id} family): the confirm/delete step touches the counter, the
+	// reserve marker, AND the identity_sites index in one {id} CAS.
+	// identity_sites/ is a distinct segment prefix from identity_site_bytes/
+	// and identity_site_reserve/ (they diverge before the trailing slash), so
+	// the three cases are unambiguous in any order.
 	case bytes.HasPrefix(key, prefixIdentitySiteBytesAll):
 		return firstSegment(key[len(prefixIdentitySiteBytesAll):])
 	case bytes.HasPrefix(key, prefixIdentitySiteReserveAll):
 		return firstSegment(key[len(prefixIdentitySiteReserveAll):])
+	case bytes.HasPrefix(key, prefixIdentitySitesAll):
+		return firstSegment(key[len(prefixIdentitySitesAll):])
 
 	// Per-app room family (the app-persistence tier). All four room
 	// families shard on the <app-slug> so an app's rooms, every room value,
@@ -181,12 +189,14 @@ var (
 	prefixIdentityReserveAll   = []byte("identity_reserve/")
 	prefixKeygateAll           = []byte("keygate/")
 
-	// Static-site families (mirror the paste families). Shale keeps no
-	// identity_sites/ index, so there is no prefix var for it.
+	// Static-site families (mirror the paste families). identity_sites/ is
+	// the per-owner enumeration index (mirrors identity_pastes/); it
+	// co-shards on {id} with the site byte counter + reservation marker.
 	prefixSites                  = []byte("sites/")
 	prefixExpirySitesAll         = []byte("expiry_sites/")
 	prefixIdentitySiteBytesAll   = []byte("identity_site_bytes/")
 	prefixIdentitySiteReserveAll = []byte("identity_site_reserve/")
+	prefixIdentitySitesAll       = []byte("identity_sites/")
 
 	// Room families (the app-persistence tier). All shard on <app-slug>,
 	// co-locating an app's rooms + values + creation ledger + expiry index +

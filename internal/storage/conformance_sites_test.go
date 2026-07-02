@@ -109,6 +109,59 @@ func runSiteConformance(t *testing.T, name string, caps conformCaps, newSites fu
 	t.Run(name+"/Sites/ReplaceNotFoundShape", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceNotFoundShape(t, r, sr) })
 	t.Run(name+"/Sites/ReplaceDeltaQuota", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceDeltaQuota(t, sr) })
 	t.Run(name+"/Sites/ReplaceRestartsExpiry", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceRestartsExpiry(t, sr) })
+	t.Run(name+"/Sites/ListByOwner", func(t *testing.T) { _, sr := newSites(t); conformSiteListByOwner(t, sr) })
+}
+
+// conformSiteListByOwner pins ListSitesByOwner: it returns exactly the
+// owner's active sites (owner-scoped, not another owner's), reflects a
+// delete, and stays consistent with the enumeration index through the
+// deploy/delete lifecycle. This is the contract that makes static sites
+// visible in `ssh <apex> list` so the shared quota is legible + reclaimable.
+func conformSiteListByOwner(t *testing.T, sr conformanceSiteRepo) {
+	ownerA, ownerB := "key:AAAA", "key:BBBB"
+	insertSite(t, sr, siteOf("aone1111", ownerA, 100))
+	insertSite(t, sr, siteOf("atwo2222", ownerA, 200))
+	insertSite(t, sr, siteOf("bone3333", ownerB, 300))
+
+	slugsOf := func(owner string) map[string]bool {
+		t.Helper()
+		got, err := sr.ListSitesByOwner(owner, fixedNow)
+		if err != nil {
+			t.Fatalf("list sites %s: %v", owner, err)
+		}
+		m := make(map[string]bool, len(got))
+		for _, s := range got {
+			if string(s.Identity) != owner {
+				t.Fatalf("owner leak: %s listed under %s", s.Identity, owner)
+			}
+			m[string(s.Slug)] = true
+		}
+		return m
+	}
+
+	if a := slugsOf(ownerA); len(a) != 2 || !a["aone1111"] || !a["atwo2222"] {
+		t.Fatalf("ownerA sites: got %v want {aone1111, atwo2222}", a)
+	}
+	if b := slugsOf(ownerB); len(b) != 1 || !b["bone3333"] {
+		t.Fatalf("ownerB sites: got %v want {bone3333}", b)
+	}
+
+	// Delete one of A's sites: it must drop out of the listing (index stays
+	// consistent), the other survives, B is untouched.
+	if err := sr.Delete("aone1111"); err != nil {
+		t.Fatalf("delete site: %v", err)
+	}
+	if a := slugsOf(ownerA); len(a) != 1 || !a["atwo2222"] || a["aone1111"] {
+		t.Fatalf("after delete, ownerA sites: got %v want {atwo2222}", a)
+	}
+	if b := slugsOf(ownerB); len(b) != 1 || !b["bone3333"] {
+		t.Fatalf("after delete, ownerB sites changed: got %v", b)
+	}
+
+	// An owner with no sites lists empty (not an error).
+	if none := slugsOf("key:NOBODY"); len(none) != 0 {
+		t.Fatalf("owner with no sites should list empty, got %v", none)
+	}
 }
 
 // conformSiteReplaceInPlace pins the core re-deploy contract: replacing an
