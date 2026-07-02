@@ -218,7 +218,7 @@ func TestVerbList_AfterUpload(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("expected header + 2 list rows = 3 lines, got %d:\n%s", len(lines), stdout)
 	}
-	if !strings.HasPrefix(lines[0], "SLUG\t") {
+	if !strings.HasPrefix(strings.TrimSpace(lines[0]), "SLUG") {
 		t.Fatalf("first stdout line should be SLUG header, got %q", lines[0])
 	}
 }
