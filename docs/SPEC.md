@@ -1947,6 +1947,15 @@ session has no subnet:
 }
 ```
 
+`used_bytes` is the COMBINED per-identity total the quota cap actually
+enforces: the identity's active paste bytes PLUS its active static-site
+bytes (both post-compression). It must include sites - the deploy/upload
+write-check rejects at the paste+site sum, so a paste-only `used_bytes`
+would under-report and disagree with the cap (a user could see "22% used"
+while writes are rejected as over-quota). When the metadata backend has no
+site repo, `used_bytes` is paste bytes only. `active_pastes` still counts
+pastes only (sites are enumerated by `list`).
+
 ### Rename
 ```
 ssh hostthis.dev rename abc12345 Acme prototype v4
