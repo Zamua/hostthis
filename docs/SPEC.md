@@ -2998,12 +2998,17 @@ segment it co-shards with the byte counter + reservation marker, so the
 index write can ride the SAME single-shard CAS as the confirm/delete: the
 confirm step (which drops the reservation marker) also writes the index
 entry, and `DeleteSite`'s counter-decrement CAS also deletes it. Index
-touches are best-effort and reconciler-healed (a lost confirm leaves a
-missing entry, never a failed deploy). Sites deployed BEFORE this index
-existed have no entry; the site reconciler backfills them by reprojecting
-every `sites/<slug>` row it scans into the per-owner index (adding missing
-entries, dropping orphans), the same "reproject authoritative rows, drop
-orphans" heal the paste reconciler runs for `identity_pastes/`.
+touches are best-effort (a lost confirm leaves a missing entry, never a
+failed deploy). Sites deployed BEFORE this index existed have no entry; a
+one-time `BackfillSiteIndexes` pass (invoked in the background at process
+startup, retried past the post-boot convergence window) reprojects every
+`sites/<slug>` row it scans into the per-owner index (adding missing entries,
+dropping orphans), the same "reproject authoritative rows, drop orphans" heal
+the paste `reconcileIndexes` runs. It is invoked DIRECTLY at startup, not via
+the shale `Reconcile` pass: `Reconcile` is not wired to run periodically in
+production, so the confirm/delete write path is what keeps the index current
+for live traffic and the startup backfill only seeds the pre-index
+population. Being idempotent, every pod running it is harmless.
 
 A site deploy spans the `{slug}` shard (the authoritative `sites/<slug>`
 write + the cross-family paste-slug collision read) and the `{id}` shard
