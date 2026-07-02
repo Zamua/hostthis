@@ -45,7 +45,7 @@ otherwise parses a leading <code>--name</code> as one of its own options.</dd>
 <dt><code>cat <em>file</em> | ssh -T hostthis.dev <em>slug</em></code></dt>
 <dd>replace <em>slug</em>'s content; resets the retention clock</dd>
 
-<dt><code>ssh hostthis.dev list</code></dt>
+<dt><code>ssh hostthis.dev list [-o json]</code></dt>
 <dd>active pastes, soonest to expire first</dd>
 
 <dt><code>ssh hostthis.dev get <em>slug</em></code></dt>
@@ -62,7 +62,7 @@ paste or site</dd>
 <dt><code>ssh hostthis.dev rename <em>slug</em> [<em>label</em>]</code></dt>
 <dd>set the owner label from the remaining words; omit them to clear it</dd>
 
-<dt><code>ssh hostthis.dev versions <em>slug</em></code></dt>
+<dt><code>ssh hostthis.dev versions <em>slug</em> [-o json]</code></dt>
 <dd>list versions</dd>
 
 <dt><code>ssh hostthis.dev pin <em>slug</em> <em>ver</em></code></dt>
@@ -77,7 +77,7 @@ paste or site</dd>
 <dt><code>ssh hostthis.dev delete <em>slug</em> <em>ver</em></code></dt>
 <dd>free one version's bytes; keeps the history row as a tombstone</dd>
 
-<dt><code>ssh hostthis.dev whoami</code></dt>
+<dt><code>ssh hostthis.dev whoami [-o json]</code></dt>
 <dd>identity, active count, and quota usage</dd>
 
 </dl>

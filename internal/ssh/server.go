@@ -1078,6 +1078,10 @@ VERSION HISTORY
     ssh {{apex}} pin <slug> <ver>           stick the URL to <ver> (survives updates)
     ssh {{apex}} unpin <slug>               URL follows latest again
 
+OUTPUT
+
+    list, versions, whoami accept -o json
+
 STATIC SITES
 
     tar czf - site/ | ssh -T {{apex}}        deploy a multi-file site

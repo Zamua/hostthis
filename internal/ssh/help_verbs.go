@@ -44,11 +44,9 @@ var verbDescriptors = map[string]verbDescriptor{
 	},
 	"list": {
 		Name:      "list",
-		Signature: "ssh {{apex}} list",
-		Description: "List your active pastes, soonest-to-expire first. Prints an " +
-			"aligned, space-padded table on stdout (header first); empty list " +
-			"prints `no active pastes` on stderr. Add `-o json` for a stable, " +
-			"machine-readable array (`jq`-friendly).",
+		Signature: "ssh {{apex}} list [-o json]",
+		Description: "List your active pastes, soonest-to-expire first. Empty list " +
+			"prints `no active pastes` on stderr.",
 		Examples: []string{
 			"ssh {{apex}} list",
 			"ssh {{apex}} list -o json | jq -r '.[].slug'",
@@ -104,12 +102,11 @@ var verbDescriptors = map[string]verbDescriptor{
 	},
 	"versions": {
 		Name:      "versions",
-		Signature: "ssh {{apex}} versions <slug>",
+		Signature: "ssh {{apex}} versions <slug> [-o json]",
 		Description: "Show the version timeline for one paste, newest first. The " +
 			"middle column marks the currently-served version and any " +
 			"tombstoned (deleted) versions. Footer on stderr shows pin " +
-			"state and expiry. Add `-o json` for a machine-readable object " +
-			"(pin/expiry fold in; the footer is not printed separately).",
+			"state and expiry.",
 		Examples: []string{
 			"ssh {{apex}} versions abc12345",
 			"ssh {{apex}} versions abc12345 -o json | jq '.versions'",
@@ -138,11 +135,11 @@ var verbDescriptors = map[string]verbDescriptor{
 	},
 	"whoami": {
 		Name:      "whoami",
-		Signature: "ssh {{apex}} whoami",
+		Signature: "ssh {{apex}} whoami [-o json]",
 		Description: "Show the identity the server sees for this session (the " +
 			"SHA256 fingerprint of the connecting ssh key), the active " +
 			"paste count, the quota in use, and the current Sybil-gate " +
-			"subnet budget. Add `-o json` for a machine-readable object.",
+			"subnet budget.",
 		Examples: []string{
 			"ssh {{apex}} whoami",
 			"ssh {{apex}} whoami -o json | jq .quota_bytes",

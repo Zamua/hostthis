@@ -926,6 +926,10 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"    ssh paste.test pin <slug> <ver>           stick the URL to <ver> (survives updates)\n" +
 	"    ssh paste.test unpin <slug>               URL follows latest again\n" +
 	"\n" +
+	"OUTPUT\n" +
+	"\n" +
+	"    list, versions, whoami accept -o json\n" +
+	"\n" +
 	"STATIC SITES\n" +
 	"\n" +
 	"    tar czf - site/ | ssh -T paste.test        deploy a multi-file site\n" +
