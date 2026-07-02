@@ -107,6 +107,9 @@ func main() {
 	if siteRepo != nil {
 		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobUnit)
 		deploySvc.Retention = retention
+		// So whoami's used_bytes includes static-site bytes (the quota cap sums
+		// paste + site; without this the reported total under-counts sites).
+		manageSvc.SiteBytes = siteRepo
 	}
 
 	// Rooms: the no-auth, capability-based app-persistence tier
