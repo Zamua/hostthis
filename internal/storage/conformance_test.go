@@ -150,6 +150,7 @@ func runConformanceWithSites(
 	t.Run(name+"/DuplicateSlug", func(t *testing.T) { conformDuplicateSlug(t, newRepo(t)) })
 	t.Run(name+"/QuotaRejectsOverCap", func(t *testing.T) { conformQuotaRejectsOverCap(t, newRepo(t)) })
 	t.Run(name+"/QuotaCountsAllVersions", func(t *testing.T) { conformQuotaCountsAllVersions(t, newRepo(t)) })
+	t.Run(name+"/AppendRevivingExpiredPasteChargesFull", func(t *testing.T) { conformAppendRevivingExpiredPasteChargesFull(t, newRepo(t)) })
 	t.Run(name+"/QuotaFreedByDelete", func(t *testing.T) { conformQuotaFreedByDelete(t, newRepo(t)) })
 	t.Run(name+"/QuotaFreedByDeleteVersion", func(t *testing.T) { conformQuotaFreedByDeleteVersion(t, newRepo(t)) })
 	t.Run(name+"/QuotaPerIdentityIndependent", func(t *testing.T) { conformQuotaPerIdentityIndependent(t, newRepo(t)) })
@@ -375,6 +376,68 @@ func conformQuotaCountsAllVersions(t *testing.T, r conformanceRepo) {
 	// A smaller append that keeps the sum under cap succeeds.
 	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "v1234567", domain.KindHTML, "sha-v-v2b", 300, cap, fixedNow); err != nil {
 		t.Fatalf("append within cap (600+300=900): %v", err)
+	}
+}
+
+// conformAppendRevivingExpiredPasteChargesFull pins that appending a version
+// to an EXPIRED-but-unswept paste (which the append REVIVES by resetting
+// expires_at) charges the paste's FULL post-revival size - its existing live
+// versions PLUS the new one - not the new version alone. Because the owner sum
+// filters expires_at > now, the expired paste's existing versions are NOT in
+// `used`; charging only the new version would let the revived paste come back
+// live durably OVER the cap. docs/SPEC.md "Reviving an expired-but-unswept
+// record charges its FULL post-revival size".
+func conformAppendRevivingExpiredPasteChargesFull(t *testing.T, r conformanceRepo) {
+	const cap = 1000
+
+	// --- reject case: revived total would breach the cap ------------------
+	// Paste v1 = 900, expiring in an hour.
+	pr := pasteOf("rvp12345", "key:rvp", 900)
+	pr.ExpiresAt = fixedNow.Add(time.Hour)
+	insert(t, r, pr)
+
+	// Past expiry, before any sweep: the paste is expired-unswept, so its bytes
+	// no longer count (read-time exclusion).
+	after := fixedNow.Add(2 * time.Hour)
+	if sum, err := r.SumActiveBytesByOwner("key:rvp", after); err != nil {
+		t.Fatalf("sum after expiry: %v", err)
+	} else if sum != 0 {
+		t.Fatalf("expired-unswept paste must not count: got %d, want 0", sum)
+	}
+
+	// Append a 900-byte v2. The append REVIVES the paste (resets expires_at), so
+	// v1(900) comes back live too. Charging only v2 would see used(0)+900 <= 1000
+	// and WRONGLY ADMIT, leaving the revived paste at v1+v2 = 1800 over the 1000
+	// cap. The correct charge is the full post-revival total: existing live
+	// v1(900) + new v2(900) = 1800 > 1000 -> reject.
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "rvp12345", domain.KindHTML, "sha-rvp-v2", 900, cap, after); !errors.Is(err, storage.ErrOverUserQuota) {
+		t.Fatalf("reviving an expired paste OVER the cap must be rejected (full post-revival size charged): got %v, want ErrOverUserQuota", err)
+	}
+	// The rejected append left the paste untouched (still expired, still 0).
+	if sum, err := r.SumActiveBytesByOwner("key:rvp", after); err != nil {
+		t.Fatalf("sum after rejected append: %v", err)
+	} else if sum != 0 {
+		t.Fatalf("rejected append must not revive the paste: got %d, want 0 (still expired)", sum)
+	}
+
+	// --- accept case: revived total fits the cap --------------------------
+	// A DIFFERENT owner: paste v1 = 400, expiring in an hour.
+	pf := pasteOf("rvf12345", "key:rvf", 400)
+	pf.ExpiresAt = fixedNow.Add(time.Hour)
+	insert(t, r, pf)
+
+	// Append a 400-byte v2 at `after`. Post-revival total = existing v1(400) +
+	// new v2(400) = 800 <= 1000 -> admit. (A backend that double-charged the
+	// existing bytes would wrongly reject here, so this also guards against
+	// OVER-charging the revival.)
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "rvf12345", domain.KindHTML, "sha-rvf-v2", 400, cap, after); err != nil {
+		t.Fatalf("reviving an expired paste WITHIN the cap should succeed (post-revival 800 <= 1000): %v", err)
+	}
+	// The revived paste is now live at v1+v2 = 800 bytes.
+	if sum, err := r.SumActiveBytesByOwner("key:rvf", after); err != nil {
+		t.Fatalf("sum after revive: %v", err)
+	} else if sum != 800 {
+		t.Fatalf("revived paste must count its full post-revival size: got %d, want 800 (v1 400 + v2 400)", sum)
 	}
 }
 

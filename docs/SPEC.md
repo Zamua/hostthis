@@ -3913,17 +3913,68 @@ dedup is unchanged: `DedupedSize` is the deduped physical size stored on the
 `sites/<slug>` row, and the scan sums exactly that field, so identical files
 across a site still count once.
 
+**Reviving an expired-but-unswept record charges its FULL post-revival
+size.** Read-time expiry exclusion has a corollary every backend must
+enforce, or the "never DURABLY exceed the cap" property fails: because the
+scan EXCLUDES an expired-but-unswept record, any operation that RESETS that
+record's `expires_at` (revives it) has to account for the bytes the scan is
+not currently counting, or it admits a durable over-cap state. An
+expired-but-unswept record contributes 0 to `used`, so reviving it is charged
+as a FRESH write of its full post-revival size. Two operations revive:
+
+- a **site re-deploy** (`ReplaceWithQuotaCheck`) resets `expires_at`. The
+  replace normally credits the OLD row's deduped bytes against the delta, but
+  the credit is gated on the old row being LIVE (`expires_at > now`): an
+  expired old row is not in the scan's `used`, so crediting it would
+  double-subtract and admit an over-cap replace. When the target site is
+  expired the credit is zero, so the replace charges the full new deduped size.
+- a **paste update** (`AppendVersionWithQuotaCheck`) resets `expires_at`,
+  bringing the paste's existing live versions back into the sum. The scan
+  excluded the WHOLE (expired) paste, so `used` counts none of its versions;
+  the check must therefore charge the paste's post-revival total - its existing
+  non-deleted version bytes PLUS the new version, not the new version alone.
+  When the target paste is expired the check adds the sum of its non-deleted
+  version rows to `used` before comparing against the cap.
+
+All three backends enforce this (it is not shale-specific: sqlite and slatedb
+have the same read-time exclusion, so an unguarded append/replace under-charges
+on any of them). The site replace case is pinned by the
+`Sites/ReplaceRevivesExpiredChargesFull` conformance subtest and the append
+case by `AppendRevivingExpiredPasteChargesFull`, so no backend can regress.
+
 **Decode tolerance of the quota scan.** The quota scan reads authoritative
 rows on the synchronous write path, so an undecodable row it must sum is
 handled as a user-facing read (Policy 3, "Decode tolerance is
 per-scan-semantics"): it HARD-FAILS the upload rather than skipping the row.
 This is fail-safe in the right direction - skipping a row would UNDER-count
-and over-admit, whereas failing the upload rejects it. The reconciler's
-reprojection scan, being an idempotent background heal, keeps Policy 1
-(skip + log + continue): a single undecodable `pastes/*` row defers only
-that slug's re-indexing to the next tick, and the physically-present row is
-still summed by the quota scan (which reads it directly), so a bad row never
-silently drops an owner's bytes from their quota.
+and over-admit, whereas failing the upload rejects it. But the quota scan
+reads THROUGH the enumeration index (it sums only the rows the owner's
+`identity_pastes` / `identity_sites` entries point at), so an authoritative
+row that NO index entry enumerates is invisible to it regardless of whether
+it decodes. That matters for the reconciler's tolerance of a poisoned row: a
+naive "skip + log + continue" that merely omitted an undecodable `pastes/*`
+(or `sites/*`) row from its reprojection would, if that row's index entry was
+ALSO lost (a crash between the row write and the index write), leave the row
+enumerated by nothing - a **durable UNDER-count** that lets the owner exceed
+the cap permanently, because the reconciler is the only thing that heals a
+missing index entry and it skipped exactly this one. So the reconciler keeps
+Policy 1 (the pass never aborts on one bad row) but does NOT drop the slug: it
+derives the owner decode-independently from `slug_owner/<slug>` (a raw string,
+not JSON) and projects a placeholder enumeration entry for the slug, so the
+next quota scan ENUMERATES it and re-reads the authoritative row - which then
+HARD-FAILS the scan (Policy 3), rejecting the owner's next upload rather than
+silently under-counting. Fail-closed, never absent. Residual: if
+`slug_owner/<slug>` is also gone the owner cannot be derived and the row stays
+un-enumerated; the reconciler logs this loudly. In practice `slug_owner` is
+always present in production - every paste insert writes it, and every site
+deploy's pre-claim writes it on the transactional shale-blob path (the only
+path prod runs) - so the owner is always derivable and the fail-closed heal
+always applies; the residual is reachable only on the metadata-only test path
+that skips the pre-claim. (The decoded PROJECTION - the entry's cached
+`name/size/expiry` - is still lost for the poisoned row until it becomes
+decodable again, but the quota scan reads the authoritative size, never the
+cached projection, so a placeholder entry counts the row's true bytes once the
+row is repaired and under-counts nothing in the meantime, only fail-closes.)
 
 Taken together: the ceiling can be transiently under-enforced (Window A) or
 transiently over-admitted (Window B), each by a bounded, self-healing

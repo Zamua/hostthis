@@ -1281,6 +1281,28 @@ func (r *ShaleRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 	return total, nil
 }
 
+// sumLiveVersionBytes sums the sizes of a paste's non-deleted version rows on
+// the {slug} shard (the paste's post-revival byte contribution). When
+// AppendVersionWithQuotaCheck revives an EXPIRED-unswept paste - the scan
+// excludes it, but the append resets its expiry - the check charges this sum
+// PLUS the new version so the revived paste's full bytes are counted, matching
+// the sqlite/slatedb append revival charge (docs/SPEC.md "Reviving an
+// expired-but-unswept record charges its FULL post-revival size").
+func (r *ShaleRepo) sumLiveVersionBytes(slug domain.Slug) (int64, error) {
+	versions, err := r.scanVersions(slug)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, v := range versions {
+		if v.Deleted {
+			continue
+		}
+		total += int64(v.Size)
+	}
+	return total, nil
+}
+
 // combinedActiveBytes sums the owner's active PASTE + SITE bytes via the two
 // scan-based owner sums. It is the per-owner "used" figure the quota checks
 // compare against the cap before an authoritative write, matching the sqlite
@@ -1834,7 +1856,12 @@ func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
 // AppendVersionWithQuotaCheck appends a new version. The per-owner cap is
 // enforced by a scan-and-compare BEFORE the authoritative write: the owner's
 // combined paste+site used bytes (which already include this paste's current
-// versions) plus the new version's bytes must not exceed the cap. The check
+// versions WHEN it is live) plus the new version's bytes must not exceed the
+// cap. If the target paste is EXPIRED-unswept the scan excludes it entirely,
+// but the append revives it (resets expiry), so the check charges the paste's
+// full post-revival total - its existing non-deleted version bytes plus the new
+// version - not the new version alone (docs/SPEC.md "Reviving an
+// expired-but-unswept record charges its FULL post-revival size"). The check
 // and the write are not atomic (bounded same-owner over-admit), the same
 // tradeoff InsertWithQuotaCheck documents. The version row is then written +
 // the expiry clock reset on the {slug} shard, and the index projection's
@@ -1852,15 +1879,31 @@ func (r *ShaleRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 	identity := existing.Identity
 	body := int64(size)
 
-	// Quota CHECK (scan-based) before the authoritative write. The scan
-	// already counts this paste's live versions, so used+body is the
-	// post-append owner total.
+	// Quota CHECK (scan-based) before the authoritative write.
 	if userCap > 0 {
 		used, err := r.combinedActiveBytes(identity, now)
 		if err != nil {
 			return AppendResult{}, err
 		}
-		if used+body > userCap {
+		// The scan `used` already counts this paste's live versions WHEN the
+		// paste is live, so the vanilla charge is just body. But when the target
+		// paste is EXPIRED-unswept the scan excludes the WHOLE paste, while
+		// appendAuthoritative RESETS its expiry (revives it) and brings its
+		// existing live versions back into the sum. So a revived paste must be
+		// charged its full post-revival total: its existing non-deleted version
+		// bytes (currently excluded from `used`) PLUS the new version, not the
+		// new version alone - otherwise the revived paste durably exceeds the cap
+		// (docs/SPEC.md "Reviving an expired-but-unswept record charges its FULL
+		// post-revival size"). Matches the sqlite + slatedb append revival charge.
+		charge := body
+		if !existing.ExpiresAt.After(now) {
+			revived, err := r.sumLiveVersionBytes(slug)
+			if err != nil {
+				return AppendResult{}, err
+			}
+			charge += revived
+		}
+		if used+charge > userCap {
 			return AppendResult{}, ErrOverUserQuota
 		}
 	}
@@ -2499,19 +2542,44 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 	// pass. See docs/SPEC.md "Reconciler: age out stuck pendings".
 	var stalePending []domain.Slug
 	for _, item := range pasteItems {
+		slug := strings.TrimPrefix(string(item.Key), "pastes/")
 		var p pasteRow
 		if err := json.Unmarshal(item.Value, &p); err != nil {
-			// Idempotent reconcile: skip + log the undecodable row and
-			// continue. One poisoned paste must not stall the whole pass
-			// (which would freeze index reprojection for every healthy owner);
-			// the next tick retries it. The physically-present row is still
-			// summed directly by the quota scan, so skipping its re-indexing
-			// here never drops the owner's bytes from their quota. See
-			// docs/SPEC.md "Decode tolerance is per-scan-semantics", Policy 1.
-			r.repoLog().Printf("reconcile: skip undecodable paste %s: %v", item.Key, err)
+			// Idempotent reconcile: one poisoned paste must not stall the whole
+			// pass (which would freeze index reprojection for every healthy
+			// owner); the next tick retries it (Policy 1). But we CANNOT simply
+			// drop it: the quota scan reads THROUGH the enumeration index, so an
+			// undecodable row whose identity_pastes entry was ALSO lost (a crash
+			// between the row write and the index write) would be enumerated by
+			// nothing and silently drop from the owner's sum - a durable
+			// UNDER-count that lets the owner exceed the cap permanently. So
+			// derive the owner decode-independently from slug_owner/<slug> and
+			// still project a PLACEHOLDER enumeration entry (zero-value row) so
+			// the next quota scan enumerates the slug and re-reads the
+			// authoritative row - which then hard-fails the scan (fail-closed
+			// reject), never a silent under-count. See docs/SPEC.md "Decode
+			// tolerance of the quota scan".
+			owner := r.ownerOfSlug(domain.Slug(slug))
+			if owner == "" {
+				// No slug_owner to derive the owner (only reachable on the
+				// metadata-only test path; prod always writes slug_owner). Cannot
+				// project the entry; log loudly - this is the one residual where
+				// the row can stay un-enumerated until it is repaired.
+				r.repoLog().Printf("reconcile: undecodable paste %s AND no slug_owner: cannot project enumeration entry; quota may under-count this slug until it is repaired: %v", item.Key, err)
+				continue
+			}
+			if pastesByOwner[owner] == nil {
+				pastesByOwner[owner] = make(map[string]identityPasteRow)
+			}
+			// Zero-value projection: we cannot read name/size/expiry from the
+			// corrupt row, and the quota scan reads the authoritative size anyway.
+			// The entry's only job is to make the slug ENUMERABLE.
+			if _, ok := pastesByOwner[owner][slug]; !ok {
+				pastesByOwner[owner][slug] = identityPasteRow{}
+			}
+			r.repoLog().Printf("reconcile: undecodable paste %s: projected placeholder enumeration entry under owner %s (fail-closed): %v", item.Key, owner, err)
 			continue
 		}
-		slug := strings.TrimPrefix(string(item.Key), "pastes/")
 		if pastesByOwner[p.Identity] == nil {
 			pastesByOwner[p.Identity] = make(map[string]identityPasteRow)
 		}
