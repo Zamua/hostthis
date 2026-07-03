@@ -76,6 +76,8 @@ package storage
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -811,14 +813,44 @@ var PendingPasteTimeout = 2 * time.Minute
 // compute the marker's age (now - created_at) and apply the grace window
 // without inferring age from the paste's absence (docs/SPEC.md
 // "Reservation-pattern quota").
+//
+// Nonce identifies WHICH delete instance wrote a RELEASE marker. The release
+// marker occupies a single per-(id,slug) slot that is reused across delete
+// instances, so a concurrent re-deploy + re-delete of the same slug can
+// overwrite the slot between one delete's marker-write and its consume. The
+// nonce lets the hot-path consume prove the marker still present is the one
+// IT wrote (decrement only when the nonce matches), so a delete never
+// decrements bytes recorded by a different (possibly still-live) delete's
+// marker - the never-under-count guard. It is omitempty: reserve markers do
+// not set it and stay byte-identical to the pre-nonce layout.
 type reservationMarker struct {
 	Bytes     int64     `json:"bytes"`
 	CreatedAt time.Time `json:"created_at"`
+	Nonce     string    `json:"nonce,omitempty"`
 }
 
 // encodeReservationMarker serializes a marker to its JSON value.
 func encodeReservationMarker(bytes int64, createdAt time.Time) ([]byte, error) {
 	return json.Marshal(reservationMarker{Bytes: bytes, CreatedAt: createdAt.UTC()})
+}
+
+// encodeReleaseMarker serializes a RELEASE marker (a reservationMarker
+// carrying a per-delete nonce). The nonce is what lets consumeSiteReleaseMarker
+// decrement only its own marker; see the reservationMarker doc.
+func encodeReleaseMarker(bytes int64, createdAt time.Time, nonce string) ([]byte, error) {
+	return json.Marshal(reservationMarker{Bytes: bytes, CreatedAt: createdAt.UTC(), Nonce: nonce})
+}
+
+// newReleaseNonce mints a random 16-byte hex nonce for a single delete
+// instance's release marker. crypto/rand keeps two concurrent deletes of the
+// same slug from colliding on the same value; the value is opaque (compared
+// for equality only, never ordered or parsed).
+func newReleaseNonce() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("mint release-marker nonce: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 // parseReservationMarker decodes a reservation marker value. It tolerates
@@ -2735,12 +2767,22 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 	if err := r.releaseReservationMarkers(now, reserveGrace, markersByOwner, livePasteSlugs); err != nil {
 		return err
 	}
-	// Job 3: complete past-grace SITE markers, the exact same orphan-release /
-	// leaked-drop rule applied to identity_site_reserve/ against the SITE
-	// counter (shale_site_repo.go). It is the backstop for a deploy that
-	// crashed between the site reserve and the authoritative write (the hot
-	// path's release covers a failed write; the reconciler covers a crash).
-	return r.reconcileSiteReservations(now, reserveGrace)
+	// Job 3: complete past-grace SITE reserve markers, the exact same
+	// orphan-release / leaked-drop rule applied to identity_site_reserve/
+	// against the SITE counter (shale_site_repo.go). It is the backstop for a
+	// deploy that crashed between the site reserve and the authoritative write
+	// (the hot path's release covers a failed write; the reconciler covers a
+	// crash).
+	if err := r.reconcileSiteReservations(now, reserveGrace); err != nil {
+		return err
+	}
+	// Job 4: complete past-grace SITE release markers, the delete-side inverse
+	// of Job 3. It is the backstop for a DeleteSite that crashed between the
+	// authoritative tombstone and the counter decrement (the markerless
+	// residual the release marker now records): site absent -> decrement
+	// marker.bytes (at most once via the marker-consume); site present -> drop
+	// the marker without touching the counter (the bytes are still live).
+	return r.reconcileSiteReleaseMarkers(now, reserveGrace)
 }
 
 // reservationMarkerEntry is a parsed reservation marker tagged with its

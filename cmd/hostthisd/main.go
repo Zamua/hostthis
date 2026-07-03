@@ -29,6 +29,20 @@ import (
 )
 
 func main() {
+	// Subcommand dispatch. `hostthisd audit-counters [--apply]` is a one-shot
+	// OFFLINE op mode (recompute the shale byte counters from authoritative
+	// truth, optionally overwrite drifted ones). It short-circuits the daemon
+	// boot entirely: no servers, no sweep, no reconcile loop. Everything below
+	// this guard runs the normal daemon. See docs/SPEC.md "Offline audit that
+	// recomputes the counter from authoritative truth".
+	if len(os.Args) > 1 && os.Args[1] == "audit-counters" {
+		auditLog := log.New(os.Stderr, "hostthis-audit ", log.LstdFlags|log.LUTC)
+		if err := runAuditCounters(os.Args[2:], auditLog); err != nil {
+			auditLog.Fatalf("audit-counters: %v", err)
+		}
+		return
+	}
+
 	var (
 		dataDir         = flag.String("data-dir", envOr("HOSTTHIS_DATA_DIR", "./data"), "where sqlite + blobs live")
 		sshAddr         = flag.String("ssh-addr", envOr("HOSTTHIS_SSH_ADDR", ":2222"), "ssh listen address")

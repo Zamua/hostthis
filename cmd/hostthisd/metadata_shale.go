@@ -77,7 +77,16 @@ func slatedbLogLevel(s string) (slatedb.LogLevel, bool) {
 	}
 }
 
-func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metadataBundle, error) {
+// openShaleRepoFromEnv builds the shale ShaleRepo from the HOSTTHIS_* env and
+// nothing else: no background reconcile loop, no blob-unit wiring, no debug
+// server - just the opened repo with its retention set. Both the daemon
+// (buildMetadataShale) and the offline `audit-counters` subcommand use it, so
+// they connect to the SAME cluster the same way. The audit needs the repo
+// WITHOUT the reconcile goroutine (a concurrent marker-driven decrement would
+// reintroduce the scan-to-write conflict window the offline audit exists to
+// avoid), which is exactly what this helper hands back. The caller owns
+// repo.Close().
+func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger) (*storage.ShaleRepo, error) {
 	// Optional slatedb tracing (to stderr) for diagnosing the SST-read
 	// pattern. Off unless HOSTTHIS_SLATEDB_LOG_LEVEL is set.
 	if lvl, on := slatedbLogLevel(os.Getenv("HOSTTHIS_SLATEDB_LOG_LEVEL")); on {
@@ -233,6 +242,19 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 	} else {
 		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d shards=%d awaitDurable=%t fenceGC=%t homogeneous=%t blobBucket=%q bucket=%s db=%s endpoint=%s",
 			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, unitCount, awaitDurable, reapFenceWALs, homogeneous, blobBucket, bucket, dbName, endpoint)
+	}
+	return repo, nil
+}
+
+// buildMetadataShale opens the shale repo (openShaleRepoFromEnv) and wires the
+// full daemon bundle around it: the site + room repos, the optional
+// transactional blob unit, the optional debug endpoint, and the periodic
+// Reconcile loop. The audit subcommand deliberately does NOT go through here -
+// it wants the bare repo with no background loops.
+func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metadataBundle, error) {
+	repo, err := openShaleRepoFromEnv(retention, logger)
+	if err != nil {
+		return nil, err
 	}
 	bundle := &metadataBundle{
 		Repo:    repo,
