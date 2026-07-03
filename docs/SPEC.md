@@ -3883,7 +3883,7 @@ The same two cases cover the `<slug>#append` marker an `AppendVersion`
 reserve writes. Both are idempotent and individually correct, so the
 reconciler is safe to run against live traffic on any cadence.
 
-#### The invariant, the residual drift, and the deliberate non-goal
+#### The invariant, the crash-durable delete, and the offline audit
 
 **The invariant that matters: the counter must never under-count.** An
 under-count would let an owner exceed the cap, which is unacceptable.
@@ -3891,35 +3891,156 @@ Over-counting is fail-safe: it rejects the owner slightly early but never
 admits over the cap. So every decrement is at-most-once and happens only
 when the bytes are genuinely gone (a tombstoned version, or an abandoned
 reservation consumed atomically with its marker); increments are already
-strict.
+strict. Everything below preserves this ranking: wherever a choice trades a
+lingering over-count against any risk of under-count, the over-count wins.
 
-With the recompute removed, the only counter drift that can still occur
-is an **over-count** from a process crash in one narrow window: between
-the authoritative delete (the version tombstone on the `{slug}` shard)
-and its counter decrement (on the `{id}` shard) being lost to the crash.
-The bytes are gone from authoritative truth but still counted. This is
-**fail-safe** (the owner has slightly less available quota than they
-should, never more), and **rare** (it needs a crash between two writes in
-a single delete). It is deliberately **not auto-corrected online**:
-correcting it would require deriving the counter's absolute value from a
-cross-shard scan, which is precisely the racy recompute that was removed.
-We accept a rare, bounded, fail-safe over-count rather than reintroduce
-an under-count risk.
+With the recompute removed, the only counter drift that could still occur
+was an **over-count** from a process crash in one narrow window: after the
+authoritative delete (the row/version tombstone on the `{slug}` shard)
+committed but before its counter decrement (the separate `{id}`-shard CAS)
+landed. The bytes are gone from authoritative truth yet still counted, and
+because nothing recorded the pending decrement, the reconciler could not
+heal it: the `identity_site_bytes` / `identity_bytes` counter only ever
+moves via a marker-driven `{id}` delta, and a delete left **no marker**. This
+is the **markerless residual**. It is **fail-safe** (the owner has slightly
+less quota than they should, never more) and **rare** (a crash between the
+two writes of one delete), but it was **permanent**. Two enhancements now
+close it, and neither reintroduces the racy online recompute (deriving the
+counter's absolute value from a cross-shard scan under live traffic, which
+under-counts across the scan-to-write window).
 
-Two **robustness options are documented as future enhancements, not built
-now**, and neither runs online against live traffic:
+This drift is **shale-specific.** The single-node `slatedb` backend keeps no
+maintained byte counter to drift: it sums the live authoritative rows at read
+time inside one snapshot transaction, and its `DeleteSite` / `Delete` remove
+the row and its indexes in a **single** atomic transaction, so there is no
+cross-shard second write to lose. The release marker and the audit below
+therefore exist only on the sharded `shale` backend.
 
-1. **Crash-durable delete decrement via a symmetric release marker.**
-   Write a release marker before the authoritative tombstone, and have
-   the reconciler apply it idempotently: decrement the counter iff the
-   version is tombstoned, gated by an atomic marker-consume on the `{id}`
-   shard (the same shape as the orphan-reserve-release above). This closes
-   the crash window without any scan-derived overwrite.
-2. **An offline audit tool** that recomputes the counter from
-   authoritative truth with writes quiesced. Because it runs with no
-   concurrent traffic, the scan-then-write has no conflict window. This is
-   the only context in which recomputing an absolute value is sound, and
-   it is explicitly an offline operator step, never an online loop.
+##### 1. Crash-durable delete decrement via a symmetric release marker
+
+The delete path is made **symmetric** with the reserve path. A reserve writes
+a **reservation marker** on the `{id}` shard *before* the authoritative write,
+so a crash mid-insert leaves a marker the reconciler completes. A delete now
+writes a **release marker** on the `{id}` shard *before* the authoritative
+tombstone, so a crash mid-delete leaves a marker the reconciler completes.
+Both markers live on the `{id}` shard (co-sharded with the counter, keyed by
+identity) precisely so the decrement and the marker's deletion are **one
+atomic single-shard CAS** - the *marker-consume* that makes every decrement
+at-most-once.
+
+Keys and value (reusing the reservation-marker encoding `{bytes, created_at}`):
+
+- Site delete: `identity_site_release/<id>/<slug>`.
+- Paste whole-delete: `identity_release/<id>/<slug>`.
+- Paste single-version delete (`DeleteVersion`):
+  `identity_release/<id>/<slug>#v<NNNN>`.
+
+`bytes` is the amount this delete frees; `created_at` is the delete's `now`
+(for the grace window). The release-marker prefix is distinct from the
+reserve-marker prefix, so the reservation reconciler and the release
+reconciler never confuse one family for the other.
+
+**Ordered protocol (crash-safe `DeleteSite`).** `freed` is the row's
+`DedupedSize`, a stable property of the row:
+
+1. Read `sites/<slug>` -> owner + `freed` + expiry + file blobs. Absent ->
+   no-op return (idempotent, unchanged).
+2. **Write the release marker** on the `{id}` shard:
+   `Put(identity_site_release/<id>/<slug>, {bytes: freed, created_at: now})`.
+   One `{id}` CAS; a re-run overwrites it with the same value.
+3. **Tombstone** on the `{slug}` shard, one CAS: re-read the row (it is in
+   the CAS read-set) and confirm its `DedupedSize` still equals the marker's
+   `bytes`; if a concurrent re-deploy (`ReplaceSiteWithQuotaCheck` mutates
+   `DedupedSize` in place) changed it, abort so the delete restarts from
+   step 1 with a refreshed marker. Otherwise delete `sites/<slug>`, delete
+   `expiry_sites/<ts>/<slug>`, and unbind the file blobs - exactly the
+   authoritative removal as before.
+4. **Decrement + consume** on the `{id}` shard, one CAS: drop the
+   `identity_sites/<id>/<slug>` enumeration entry (idempotent), then read the
+   release marker; if it is **present**, `counter -= marker.bytes` AND delete
+   the marker in the same transaction; if **absent**, leave the counter
+   alone (the decrement already happened - a prior retry or the reconciler
+   consumed it). This is the atomic marker-consume, and it replaces the old
+   unconditional `counter -= freed`, so the hot path and the reconciler can
+   never both apply the same delete.
+
+The paste analog is identical in shape. For `DeleteVersion` the freed amount
+is a **stable** per-version quantity (`v.Size`), so its `…#v<NNNN>` marker
+needs no size guard and the reconciler gates it on the *version's* tombstone
+state. For a paste **whole-delete** the freed amount is the sum of the
+still-live versions, computed inside the tombstone transaction (which is how
+the existing code closes the same-slug delete-vs-`DeleteVersion` race); the
+delete writes the marker with that sum from a pre-scan, and the tombstone
+aborts and restarts the whole delete if the live-version set changed since
+the scan. In every case **`marker.bytes` equals exactly the bytes the
+committed tombstone removed - never more** - which is what keeps the
+completion from ever over-decrementing.
+
+**Reconciler completion.** A new pass (`reconcileSiteReleaseMarkers`, plus
+its paste sibling, wired into `Reconcile` after the reservation passes)
+scans the release-marker prefix cross-shard, exactly like the reservation
+pass, and for each marker:
+
+- **Younger than `reserveGrace`:** an in-flight delete between its marker
+  and its consume. Leave it strictly alone.
+- **Older than grace, authoritative row/version ABSENT (tombstoned):** the
+  delete committed the tombstone but crashed before the decrement. **Complete
+  it** with the same targeted, read-checked `{id}` CAS as
+  `orphanReleaseSiteMarker`: if the marker is still present,
+  `counter -= marker.bytes` AND delete the marker, atomically. Idempotent - a
+  marker already consumed (by the hot path or a prior pass) reads as absent
+  and the CAS is a no-op, so the bytes are never double-freed.
+- **Older than grace, authoritative row/version PRESENT:** the delete never
+  tombstoned (it crashed before its step 3), or the slug was re-deployed in
+  the meantime. The bytes are **live and correctly counted**, so the
+  completion must **not** decrement. Drop the marker with a read-checked CAS
+  that deletes it **only if it re-reads as still past grace** (so a fresh
+  delete's young marker is never removed out from under an in-flight retry);
+  the counter is untouched.
+
+This is the exact **inverse** of the reservation reconciler, which is why it
+is correct: a reserve's increment is undone when the thing did **not**
+materialize (paste/site absent -> decrement); a release's decrement is
+applied when the thing **de**-materialized (row/version absent -> decrement).
+The "row present -> drop, never touch the counter" branch cannot under-count
+by construction, and the "row absent -> decrement `marker.bytes`" branch
+removes exactly the bytes the tombstone freed, at most once.
+
+##### 2. Offline audit that recomputes the counter from authoritative truth
+
+The release marker closes the crash window going forward; the **offline
+audit** is the belt-and-suspenders that corrects any drift already banked (a
+residual from before the marker existed, or an operator's manual surgery). It
+is a one-shot `hostthisd audit-counters [--apply]` subcommand, mirroring the
+retired one-shot migration binary: it builds the same shale metadata backend
+the daemon uses, runs the audit, and exits - it never starts the SSH/HTTP
+servers or the sweep/reconcile loops.
+
+It is **sound only with writes quiesced**, which is an operator precondition
+the tool cannot enforce: the operator scales the serving Deployment to **0
+replicas** (or stops the daemon) so no upload, delete, or reserve is in
+flight, then runs `audit-counters` as a separate one-shot pod/Job against the
+same metadata cluster. With no concurrent traffic the cross-shard scan and
+the counter write have **no conflict window** - which is the *only* context
+in which recomputing a counter's absolute value is safe. The identical
+scan-then-write is forbidden online: it is the racy recompute that
+under-counts across the scan-to-write gap and was deliberately removed from
+the reconciler.
+
+What it recomputes, per identity: `identity_site_bytes/<id>` = the sum of
+`DedupedSize` over that owner's live `sites/<slug>` rows, plus any reservation
+marker still **within grace** (a legitimately-pending insert whose bytes the
+live counter would already hold); `identity_bytes/<id>` = the sum of live
+(non-tombstoned) version sizes over that owner's pastes, plus in-grace reserve
+markers. Past-grace reserve markers and all release markers are **not** added
+(they stand for bytes that are either abandoned or already freed); a full
+audit resolves them via the reconciler first. It then **sets** each counter
+authoritatively with a single `Put(counter_key, sum)`. The default is
+**dry-run** (report every owner whose stored counter differs from the
+recomputed sum, write nothing); `--apply` performs the overwrites. Because
+writes are quiesced, the overwrite is exact and may safely move a counter
+**down** - the one place an absolute overwrite is permitted, and the reason
+it is gated behind an offline operator step rather than an online loop.
 
 ### Cross-shard background operations
 
