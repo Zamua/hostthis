@@ -121,6 +121,14 @@ func shaleShardKey(key []byte) []byte {
 		return firstSegment(key[len(prefixIdentitySiteBytesAll):])
 	case bytes.HasPrefix(key, prefixIdentitySiteReserveAll):
 		return firstSegment(key[len(prefixIdentitySiteReserveAll):])
+	case bytes.HasPrefix(key, prefixIdentitySiteReleaseAll):
+		// identity_site_release/<id>/<slug>: the delete-side mirror of the
+		// reserve marker. Shard on the id so the release marker co-shards with
+		// identity_site_bytes/<id> (the site counter), which is what lets
+		// DeleteSite's decrement + marker-consume be one single-shard {id} CAS.
+		// Distinct from identity_site_reserve/ (diverges at 'l' vs 's') and from
+		// identity_sites/ (diverges at '_' vs 's'), so ordering is unambiguous.
+		return firstSegment(key[len(prefixIdentitySiteReleaseAll):])
 	case bytes.HasPrefix(key, prefixIdentitySitesAll):
 		return firstSegment(key[len(prefixIdentitySitesAll):])
 
@@ -196,6 +204,7 @@ var (
 	prefixExpirySitesAll         = []byte("expiry_sites/")
 	prefixIdentitySiteBytesAll   = []byte("identity_site_bytes/")
 	prefixIdentitySiteReserveAll = []byte("identity_site_reserve/")
+	prefixIdentitySiteReleaseAll = []byte("identity_site_release/")
 	prefixIdentitySitesAll       = []byte("identity_sites/")
 
 	// Room families (the app-persistence tier). All shard on <app-slug>,

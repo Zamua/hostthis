@@ -234,3 +234,12 @@ func IdentitySiteBytesKeyForTest(identity string) []byte {
 func IdentitySiteReserveKeyForTest(identity, slug string) []byte {
 	return shaleKeyIdentitySiteReserve(identity, slug)
 }
+
+// IdentitySiteReleaseKeyForTest returns the
+// "identity_site_release/<id>/<slug>" site RELEASE-marker key (the delete-side
+// mirror of the reserve marker). Exposed so the crash-durable-delete subtest
+// can seed a half-committed delete (tombstone + release marker written, counter
+// decrement lost) and prove the reconciler now completes the decrement.
+func IdentitySiteReleaseKeyForTest(identity, slug string) []byte {
+	return shaleKeyIdentitySiteRelease(identity, slug)
+}

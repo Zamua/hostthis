@@ -2735,12 +2735,22 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 	if err := r.releaseReservationMarkers(now, reserveGrace, markersByOwner, livePasteSlugs); err != nil {
 		return err
 	}
-	// Job 3: complete past-grace SITE markers, the exact same orphan-release /
-	// leaked-drop rule applied to identity_site_reserve/ against the SITE
-	// counter (shale_site_repo.go). It is the backstop for a deploy that
-	// crashed between the site reserve and the authoritative write (the hot
-	// path's release covers a failed write; the reconciler covers a crash).
-	return r.reconcileSiteReservations(now, reserveGrace)
+	// Job 3: complete past-grace SITE reserve markers, the exact same
+	// orphan-release / leaked-drop rule applied to identity_site_reserve/
+	// against the SITE counter (shale_site_repo.go). It is the backstop for a
+	// deploy that crashed between the site reserve and the authoritative write
+	// (the hot path's release covers a failed write; the reconciler covers a
+	// crash).
+	if err := r.reconcileSiteReservations(now, reserveGrace); err != nil {
+		return err
+	}
+	// Job 4: complete past-grace SITE release markers, the delete-side inverse
+	// of Job 3. It is the backstop for a DeleteSite that crashed between the
+	// authoritative tombstone and the counter decrement (the markerless
+	// residual the release marker now records): site absent -> decrement
+	// marker.bytes (at most once via the marker-consume); site present -> drop
+	// the marker without touching the counter (the bytes are still live).
+	return r.reconcileSiteReleaseMarkers(now, reserveGrace)
 }
 
 // reservationMarkerEntry is a parsed reservation marker tagged with its
