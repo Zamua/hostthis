@@ -137,6 +137,16 @@ func shaleKeyIdentitySiteReserve(identity, slug string) []byte {
 	return []byte("identity_site_reserve/" + identity + "/" + slug)
 }
 
+// shaleKeyIdentitySiteRelease is the delete-side mirror of the reserve marker
+// key. It co-shards on <id> with the site counter (identity_site_bytes) so the
+// delete's decrement and the marker's deletion are ONE atomic single-shard CAS
+// (the marker-consume). The value reuses the reservationMarker encoding
+// {bytes, created_at}; the prefix is DISTINCT from identity_site_reserve/ so
+// the reserve reconciler and the release reconciler never cross-contaminate.
+func shaleKeyIdentitySiteRelease(identity, slug string) []byte {
+	return []byte("identity_site_release/" + identity + "/" + slug)
+}
+
 // shaleKeyIdentitySite / shalePrefixIdentitySites are the per-owner site
 // ENUMERATION index (mirror shaleKeyIdentityPaste / shalePrefixIdentityPastes).
 // The entry carries a one-byte marker value (shale's Put rejects an empty
@@ -721,66 +731,165 @@ func (r *ShaleRepo) SumActiveSiteBytesByOwner(owner string, now time.Time) (int6
 	return parseCounter(raw)
 }
 
-// DeleteSite removes a site authoritative row + its expiry index on the
-// {slug} shard, then decrements the site counter by the freed bytes AND
-// deletes the identity_sites/<id>/<slug> enumeration index entry on the {id}
-// shard. Idempotent: a missing row is a no-op (matches the sqlite DELETE,
-// the slate DeleteSite, and the paste Delete). The sweep calls this for
-// every expired site slug.
-func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
-	var row siteRow
-	if err := r.getJSON(shaleKeySite(slug), &row); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return nil
-		}
-		return err
-	}
-	identity := row.Identity
-	freed := int64(row.DedupedSize)
+// errSiteSizeChanged aborts the DeleteSite tombstone when the row's
+// DedupedSize no longer matches the release marker's recorded bytes (a
+// concurrent in-place ReplaceSiteWithQuotaCheck mutated it). DeleteSite catches
+// it and restarts from step 1 with a refreshed marker, so the marker's bytes
+// always equal exactly what the committed tombstone frees - never more, never
+// less. That equality is what keeps the decrement from ever over- OR
+// under-counting when the marker is later consumed (by the hot path or the
+// reconciler).
+var errSiteSizeChanged = errors.New("shale: site DedupedSize changed under delete; restart with a refreshed release marker")
 
-	// Authoritative removal on the {slug} shard, one CAS. On the transactional
-	// shale-blob path every file blob the row referenced is unbound in the SAME
-	// transaction (atomic delete), so the bytes go unreferenced exactly when the
-	// manifest vanishes; SweepOrphans reclaims them after the grace.
+// deleteSiteMaxAttempts bounds the DeleteSite restart loop so a pathological
+// stream of same-slug re-deploys cannot spin it forever. A concurrent
+// size-changing replace racing a delete is already rare; 64 attempts is far
+// beyond any real interleaving and turns a livelock into a surfaced error.
+const deleteSiteMaxAttempts = 64
+
+// DeleteSite removes a site the crash-durable way, symmetric with the site
+// reserve path: it writes a RELEASE MARKER on the {id} shard BEFORE the
+// authoritative tombstone, so a crash between the tombstone and the counter
+// decrement leaves a marker the reconciler completes (closing the markerless
+// residual the old unconditional decrement left behind). The ordered protocol
+// (docs/SPEC.md "Crash-durable delete decrement via a symmetric release
+// marker"):
+//
+//  1. Read sites/<slug> -> owner + freed (its DedupedSize) + expiry + blobs.
+//     Absent -> no-op return (idempotent; the sweep re-calls this for
+//     already-gone slugs, matching the sqlite/slate DeleteSite + paste Delete).
+//  2. Write the release marker on the {id} shard:
+//     Put(identity_site_release/<id>/<slug>, {bytes: freed, created_at: now}).
+//     A re-run overwrites it with the same value.
+//  3. Tombstone on the {slug} shard, one CAS: re-read the row IN the read-set
+//     and confirm its DedupedSize still equals the marker's bytes; a concurrent
+//     in-place re-deploy that changed the size means the marker is stale, so
+//     abort (errSiteSizeChanged) and restart from step 1 with a refreshed
+//     marker. Otherwise delete sites/<slug>, delete expiry_sites/<ts>/<slug>,
+//     and unbind the file blobs - the authoritative removal, atomic on the
+//     transactional shale-blob path so the bytes go unreferenced exactly when
+//     the manifest vanishes (SweepOrphans reclaims them after the grace).
+//  4. Decrement + consume on the {id} shard, one CAS: drop the
+//     identity_sites/<id>/<slug> enumeration entry (idempotent), then consume
+//     the release marker - counter -= marker.bytes AND delete the marker iff it
+//     is still present. This atomic marker-consume REPLACES the old
+//     unconditional counter -= freed, so the hot path and the reconciler can
+//     never both apply the same delete (at-most-once decrement).
+//
+// A crash before step 3 leaves the row live with a marker: the reconciler drops
+// that marker WITHOUT decrementing (the bytes are still counted). A crash
+// between step 3 and step 4 leaves the row gone with a marker: the reconciler
+// decrements exactly marker.bytes and deletes the marker. Either way the
+// never-under-count invariant holds.
+func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 	siteKey := shaleKeySite(slug)
-	delSiteBody := func(tx shaleKVTx, unbind func(blobID string) error) error {
-		if err := tx.Delete(siteKey); err != nil {
+	for attempt := 0; attempt < deleteSiteMaxAttempts; attempt++ {
+		// Step 1: read the authoritative row.
+		var row siteRow
+		if err := r.getJSON(siteKey, &row); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil
+			}
 			return err
 		}
-		if err := tx.Delete(shaleKeyExpirySite(row.ExpiresAt, slug)); err != nil {
+		identity := row.Identity
+		freed := int64(row.DedupedSize)
+
+		// Step 2: write the release marker BEFORE the tombstone. created_at is
+		// this delete's wall clock (the grace-window stamp); the marker is
+		// consumed microseconds later in step 4 on the happy path, so the stamp
+		// only matters if the process crashes before step 4.
+		if err := r.writeSiteReleaseMarker(identity, slug.String(), freed, time.Now().UTC()); err != nil {
 			return err
 		}
-		for _, blobID := range row.FileBlobs {
-			if err := unbind(blobID); err != nil {
+
+		// Step 3: authoritative tombstone on the {slug} shard, size-guarded.
+		delSiteBody := func(tx shaleKVTx, unbind func(blobID string) error) error {
+			var cur siteRow
+			if err := shaleTxGetJSON(tx, siteKey, &cur); err != nil {
+				if errors.Is(err, ErrNotFound) {
+					// Vanished (a concurrent delete already tombstoned it):
+					// nothing to remove. Fall through to step 4's consume, which
+					// is idempotent (the marker is deleted exactly once across
+					// both racers).
+					return nil
+				}
 				return err
 			}
+			if int64(cur.DedupedSize) != freed {
+				return errSiteSizeChanged // stale marker; restart from step 1
+			}
+			if err := tx.Delete(siteKey); err != nil {
+				return err
+			}
+			// Use the re-read row's ExpiresAt + FileBlobs (not the step-1 read,
+			// which a same-size re-deploy could have moved) so the expiry index
+			// and blob unbinds match the row this CAS actually removes.
+			if err := tx.Delete(shaleKeyExpirySite(cur.ExpiresAt, slug)); err != nil {
+				return err
+			}
+			for _, blobID := range cur.FileBlobs {
+				if err := unbind(blobID); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
-		return nil
-	}
-	var delErr error
-	if r.kv != nil {
-		delErr = r.kv.Transact(siteKey, func(tx *cluster.BlobTx) error {
-			return delSiteBody(tx, func(blobID string) error {
-				return tx.UnbindBlob(r.blobRefFor(siteKey, blobID))
+		var delErr error
+		if r.kv != nil {
+			delErr = r.kv.Transact(siteKey, func(tx *cluster.BlobTx) error {
+				return delSiteBody(tx, func(blobID string) error {
+					return tx.UnbindBlob(r.blobRefFor(siteKey, blobID))
+				})
 			})
-		})
-	} else {
-		delErr = r.cluster.Transact(siteKey, func(tx backend.Transaction) error {
-			return delSiteBody(tx, func(string) error { return nil })
-		})
-	}
-	if delErr != nil {
-		return delErr
-	}
+		} else {
+			delErr = r.cluster.Transact(siteKey, func(tx backend.Transaction) error {
+				return delSiteBody(tx, func(string) error { return nil })
+			})
+		}
+		if errors.Is(delErr, errSiteSizeChanged) {
+			continue // refresh freed + marker, retry
+		}
+		if delErr != nil {
+			return delErr
+		}
 
-	// Counter cleanup on the {id} shard: decrement the site counter by the
-	// freed bytes AND delete the enumeration index entry, one CAS (both
-	// co-shard on {id}, the analog of the paste Delete). The index delete is
-	// idempotent (a missing entry - already reconciler-dropped, or a
-	// pre-index site - is fine).
+		// Step 4: decrement + consume on the {id} shard.
+		return r.consumeSiteReleaseMarker(identity, slug.String())
+	}
+	return fmt.Errorf("delete site %s: exceeded %d restart attempts (a concurrent re-deploy kept changing the size)", slug, deleteSiteMaxAttempts)
+}
+
+// writeSiteReleaseMarker is step 2 of the crash-durable delete: a single
+// {id}-shard CAS that stamps the release marker recording the bytes this delete
+// will free. Idempotent on re-run (overwrites the same {bytes, created_at}).
+func (r *ShaleRepo) writeSiteReleaseMarker(identity, slug string, freed int64, now time.Time) error {
+	releaseKey := shaleKeyIdentitySiteRelease(identity, slug)
+	markerVal, err := encodeReservationMarker(freed, now)
+	if err != nil {
+		return err
+	}
+	return r.cluster.Transact(releaseKey, func(tx backend.Transaction) error {
+		return tx.Put(releaseKey, markerVal)
+	})
+}
+
+// consumeSiteReleaseMarker is step 4 of the crash-durable delete: one
+// {id}-shard CAS that drops the enumeration index entry AND consumes the
+// release marker. The consume is the at-most-once gate: it decrements the
+// counter by marker.bytes and deletes the marker ONLY if the marker is still
+// present; an absent marker means the decrement already happened (a prior retry
+// consumed it, or the reconciler did), so the counter is left untouched. All
+// three keys (counter, index, release marker) co-shard on {id}, so this is one
+// atomic single-shard transaction. Mirrors orphanReleaseSiteMarker's read-check
+// on the marker, extended with the idempotent index drop.
+func (r *ShaleRepo) consumeSiteReleaseMarker(identity, slug string) error {
 	counterKey := shaleKeyIdentitySiteBytes(identity)
-	indexKey := shaleKeyIdentitySite(identity, slug.String())
+	indexKey := shaleKeyIdentitySite(identity, slug)
+	releaseKey := shaleKeyIdentitySiteRelease(identity, slug)
 	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
+		// Drop the enumeration index entry (idempotent: a missing entry -
+		// already reconciler-dropped, or a pre-index site - is fine).
 		if _, err := tx.Get(indexKey); err == nil {
 			if err := tx.Delete(indexKey); err != nil {
 				return err
@@ -788,11 +897,26 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return err
 		}
+		// Consume the release marker: decrement + delete iff still present.
+		raw, err := tx.Get(releaseKey)
+		if err != nil {
+			if errors.Is(err, backend.ErrNotFound) {
+				return nil // already consumed; never double-decrement
+			}
+			return err
+		}
+		m, err := parseReservationMarker(raw)
+		if err != nil {
+			return err
+		}
 		cur, err := txGetCounter(tx, counterKey)
 		if err != nil {
 			return err
 		}
-		return tx.Put(counterKey, formatCounter(cur-freed))
+		if err := tx.Put(counterKey, formatCounter(cur-m.Bytes)); err != nil {
+			return err
+		}
+		return tx.Delete(releaseKey)
 	})
 }
 
@@ -989,6 +1113,160 @@ func siteMarkerOwnerFromKey(key []byte) string {
 // identity never contains a '/').
 func siteMarkerSlugFromKey(key []byte) string {
 	rest := strings.TrimPrefix(string(key), "identity_site_reserve/")
+	if _, after, ok := strings.Cut(rest, "/"); ok {
+		return after
+	}
+	return ""
+}
+
+// reconcileSiteReleaseMarkers completes past-grace SITE release markers - the
+// crash-durable-delete backstop, and the exact INVERSE of
+// reconcileSiteReservations. A reserve's increment is undone when the site did
+// NOT materialize (site absent -> decrement); a release's decrement is applied
+// when the site DE-materialized (site absent -> decrement). For each release
+// marker:
+//
+//   - YOUNGER than reserveGrace: an in-flight delete between its marker (step 2)
+//     and its consume (step 4). Leave it strictly alone.
+//   - OLDER, site ABSENT (tombstone committed, decrement lost): complete it with
+//     the same targeted, read-checked {id}-shard CAS as orphanReleaseSiteMarker
+//     (counter -= marker.bytes AND delete the marker, atomically). Idempotent -
+//     a marker already consumed (by the hot path or a prior pass) reads as
+//     absent and the CAS is a no-op, so the bytes are never double-freed. This
+//     is what makes a DOUBLE reconcile safe.
+//   - OLDER, site PRESENT (the delete crashed before its tombstone, or the slug
+//     was re-deployed): the bytes are LIVE and correctly counted, so the
+//     completion must NOT decrement (that would under-count the live site).
+//     Drop the marker with a read-checked CAS that deletes it only if it
+//     re-reads as still past grace, so a fresh delete's young marker is never
+//     removed out from under an in-flight retry. This branch cannot under-count
+//     by construction, which is why it wins over the alternative.
+//
+// Cross-shard via aggregate; every write is an idempotent single-{id}-shard CAS,
+// so it is safe to run concurrently with live traffic (the same posture the
+// reserve reconciler holds).
+func (r *ShaleRepo) reconcileSiteReleaseMarkers(now time.Time, reserveGrace time.Duration) error {
+	// Live site slugs: a release marker whose base slug is present means the
+	// bytes are live (never decrement); absent means the tombstone committed
+	// (complete the decrement).
+	siteItems, err := r.aggregatePrefix(prefixSites)
+	if err != nil {
+		return fmt.Errorf("reconcile site releases: scan sites: %w", err)
+	}
+	liveSiteSlugs := make(map[string]struct{}, len(siteItems))
+	for _, item := range siteItems {
+		liveSiteSlugs[strings.TrimPrefix(string(item.Key), "sites/")] = struct{}{}
+	}
+
+	markers, err := r.aggregatePrefix(prefixIdentitySiteReleaseAll)
+	if err != nil {
+		return fmt.Errorf("reconcile site releases: scan release markers: %w", err)
+	}
+	for _, item := range markers {
+		m, err := parseReservationMarker(item.Value)
+		if err != nil {
+			// Idempotent reconcile: skip + log one undecodable release marker and
+			// continue; the next tick retries it. Same per-marker discipline the
+			// reserve reconciler uses.
+			r.repoLog().Printf("reconcile site releases: skip undecodable release marker %s: %v", item.Key, err)
+			continue
+		}
+		if markerInGrace(m, now, reserveGrace) {
+			continue // in-flight delete; leave it for the consume step to drop
+		}
+		slug := siteReleaseMarkerSlugFromKey(item.Key)
+		if _, present := liveSiteSlugs[slug]; present {
+			// Row present: bytes are live + counted. DROP the marker WITHOUT
+			// touching the counter, gated on the marker re-reading as still past
+			// grace (never remove a fresh delete's young marker).
+			if err := r.dropSiteReleaseMarkerIfStale(item.Key, now, reserveGrace); err != nil {
+				return fmt.Errorf("reconcile site releases: drop %s: %w", item.Key, err)
+			}
+			continue
+		}
+		// Row absent: complete the lost decrement atomically (at most once).
+		if err := r.completeSiteReleaseMarker(item.Key); err != nil {
+			return fmt.Errorf("reconcile site releases: complete %s: %w", item.Key, err)
+		}
+	}
+	return nil
+}
+
+// completeSiteReleaseMarker finishes an abandoned SITE delete whose tombstone
+// committed but whose counter decrement was lost: one Transact pinned on the
+// site counter (which co-shards with the marker, both keyed by {id}) reads the
+// counter + the marker, and if the marker is still present subtracts
+// marker.bytes AND deletes the marker, atomically. Idempotent: a marker already
+// consumed reads as absent here and the CAS is a no-op, so the bytes are never
+// double-freed (this is why a double reconcile does not double-decrement). It
+// is the delete-side twin of orphanReleaseSiteMarker.
+func (r *ShaleRepo) completeSiteReleaseMarker(releaseKey []byte) error {
+	owner := siteReleaseMarkerOwnerFromKey(releaseKey)
+	counterKey := shaleKeyIdentitySiteBytes(owner)
+	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
+		raw, err := tx.Get(releaseKey)
+		if err != nil {
+			if errors.Is(err, backend.ErrNotFound) {
+				return nil // already consumed; no-op (never double-decrement)
+			}
+			return err
+		}
+		m, err := parseReservationMarker(raw)
+		if err != nil {
+			return err
+		}
+		cur, err := txGetCounter(tx, counterKey)
+		if err != nil {
+			return err
+		}
+		if err := tx.Put(counterKey, formatCounter(cur-m.Bytes)); err != nil {
+			return err
+		}
+		return tx.Delete(releaseKey)
+	})
+}
+
+// dropSiteReleaseMarkerIfStale deletes a release marker WITHOUT touching the
+// counter (the site-present branch), but only if the marker re-reads as still
+// past grace inside the CAS. The re-check protects a fresh delete that re-wrote
+// the marker (young created_at) between the reconciler's scan and this CAS: its
+// young marker is left for that delete's own consume, never removed here.
+func (r *ShaleRepo) dropSiteReleaseMarkerIfStale(releaseKey []byte, now time.Time, reserveGrace time.Duration) error {
+	return r.cluster.Transact(releaseKey, func(tx backend.Transaction) error {
+		raw, err := tx.Get(releaseKey)
+		if err != nil {
+			if errors.Is(err, backend.ErrNotFound) {
+				return nil // already gone
+			}
+			return err
+		}
+		m, err := parseReservationMarker(raw)
+		if err != nil {
+			return err
+		}
+		if markerInGrace(m, now, reserveGrace) {
+			return nil // a fresh delete re-stamped it; leave it for that delete's consume
+		}
+		return tx.Delete(releaseKey)
+	})
+}
+
+// siteReleaseMarkerOwnerFromKey extracts <id> from an
+// identity_site_release/<id>/<slug> key (everything between the prefix and the
+// FIRST '/').
+func siteReleaseMarkerOwnerFromKey(key []byte) string {
+	rest := strings.TrimPrefix(string(key), "identity_site_release/")
+	if before, _, ok := strings.Cut(rest, "/"); ok {
+		return before
+	}
+	return rest
+}
+
+// siteReleaseMarkerSlugFromKey extracts <slug> from an
+// identity_site_release/<id>/<slug> key (everything after the FIRST '/'; an
+// identity never contains a '/').
+func siteReleaseMarkerSlugFromKey(key []byte) string {
+	rest := strings.TrimPrefix(string(key), "identity_site_release/")
 	if _, after, ok := strings.Cut(rest, "/"); ok {
 		return after
 	}

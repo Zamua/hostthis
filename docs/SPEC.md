@@ -3964,22 +3964,44 @@ reconciler never confuse one family for the other.
    unconditional `counter -= freed`, so the hot path and the reconciler can
    never both apply the same delete.
 
-The paste analog is identical in shape. For `DeleteVersion` the freed amount
-is a **stable** per-version quantity (`v.Size`), so its `…#v<NNNN>` marker
-needs no size guard and the reconciler gates it on the *version's* tombstone
-state. For a paste **whole-delete** the freed amount is the sum of the
-still-live versions, computed inside the tombstone transaction (which is how
-the existing code closes the same-slug delete-vs-`DeleteVersion` race); the
-delete writes the marker with that sum from a pre-scan, and the tombstone
-aborts and restarts the whole delete if the live-version set changed since
-the scan. In every case **`marker.bytes` equals exactly the bytes the
-committed tombstone removed - never more** - which is what keeps the
-completion from ever over-decrementing.
+The **site delete path carries this shape today** (`DeleteSite` +
+`reconcileSiteReleaseMarkers`, keys `identity_site_release/<id>/<slug>`). The
+paste analog (`Delete` + `DeleteVersion`) has the identical outer shape but is
+a **deliberate follow-up**, because two never-under-count subtleties the site
+path does not have keep it from transferring cleanly:
 
-**Reconciler completion.** A new pass (`reconcileSiteReleaseMarkers`, plus
-its paste sibling, wired into `Reconcile` after the reservation passes)
-scans the release-marker prefix cross-shard, exactly like the reservation
-pass, and for each marker:
+- The paste whole-delete computes its freed bytes *inside* the tombstone
+  transaction (re-reading each version, which is how it closes the same-slug
+  delete-vs-`DeleteVersion` race), so the loser of two concurrent same-slug
+  deletes naturally re-reads the versions as already gone, frees **zero**, and
+  never double-decrements. A crash-durable release marker must be written
+  *before* the tombstone (so a crash after the tombstone still has it), from a
+  pre-scan sum - which reintroduces exactly the concurrent-same-slug
+  double-decrement the in-transaction sum avoids. The site counter already
+  charged `freed` from an outside-the-transaction read, so the marker does not
+  make sites any worse; pastes would regress.
+- `DeleteVersion` tombstones by setting `Deleted=true` (the version row
+  **stays**), not by removing the row, so for a `…#v<NNNN>` marker "tombstoned"
+  means **present-and-`Deleted`**, not absent. An *absent* version is the
+  whole-delete-removed case, and a whole-delete that saw the version still
+  **live** already summed and decremented it - so completing an absent
+  version's marker a second time would **under-count**. The version marker must
+  therefore complete only on *present-and-`Deleted`* and drop (never decrement)
+  on absent, which is stricter than the generic "absent -> decrement" rule the
+  site pass uses below.
+
+Both are recorded so the eventual paste implementation preserves the
+never-under-count invariant; the reservation-marker encoding, key prefixes
+(`identity_release/<id>/<slug>` and `…#v<NNNN>`), and reconciler shape carry
+over unchanged. In every implemented case **`marker.bytes` equals exactly the
+bytes the committed tombstone removed - never more** (for sites, the step-3
+`DedupedSize == marker.bytes` re-check enforces it, restarting the delete with
+a refreshed marker if a concurrent in-place re-deploy changed the size) - which
+is what keeps the completion from ever over- or under-decrementing.
+
+**Reconciler completion.** A new pass (`reconcileSiteReleaseMarkers`, wired
+into `Reconcile` after the reservation passes) scans the site release-marker
+prefix cross-shard, exactly like the reservation pass, and for each marker:
 
 - **Younger than `reserveGrace`:** an in-flight delete between its marker
   and its consume. Leave it strictly alone.
@@ -4000,11 +4022,14 @@ pass, and for each marker:
 
 This is the exact **inverse** of the reservation reconciler, which is why it
 is correct: a reserve's increment is undone when the thing did **not**
-materialize (paste/site absent -> decrement); a release's decrement is
-applied when the thing **de**-materialized (row/version absent -> decrement).
-The "row present -> drop, never touch the counter" branch cannot under-count
-by construction, and the "row absent -> decrement `marker.bytes`" branch
-removes exactly the bytes the tombstone freed, at most once.
+materialize (site absent -> decrement); a release's decrement is applied when
+the thing **de**-materialized (site row absent -> decrement). The "row present
+-> drop, never touch the counter" branch cannot under-count by construction,
+and the "row absent -> decrement `marker.bytes`" branch removes exactly the
+bytes the tombstone freed, at most once. (The paste `DeleteVersion` case is the
+exception noted above: a version's absence is ambiguous under a concurrent
+whole-delete, so that path must gate on *present-and-`Deleted`* rather than
+absence - which is one reason the paste analog is a follow-up.)
 
 ##### 2. Offline audit that recomputes the counter from authoritative truth
 

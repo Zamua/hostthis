@@ -47,6 +47,11 @@ func TestShaleShardKey(t *testing.T) {
 		// identity_sites/ prefixes (which diverge before the trailing slash).
 		{"identity_site_bytes", "identity_site_bytes/sha256:deadbeef", "sha256:deadbeef"},
 		{"identity_site_reserve", "identity_site_reserve/sha256:deadbeef/abc12345", "sha256:deadbeef"},
+		// The site RELEASE marker (delete-side mirror of the reserve marker) also
+		// routes on the id so it co-shards with the site counter; its
+		// identity_site_release/ prefix diverges from identity_site_reserve/ at
+		// 'l' vs 's' and from identity_sites/ at '_' vs 's', so it is unambiguous.
+		{"identity_site_release", "identity_site_release/sha256:deadbeef/abc12345", "sha256:deadbeef"},
 		{"identity_sites index", "identity_sites/sha256:deadbeef/abc12345", "sha256:deadbeef"},
 
 		// Room families -> shard key <app-slug>. All four families (+ the
@@ -119,6 +124,9 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 		// on all three is a single-shard CAS (mirrors the paste {id} family).
 		"identity_site_bytes/" + id,
 		"identity_site_reserve/" + id + "/" + slug,
+		// The site release marker MUST co-shard with the site counter so
+		// DeleteSite's decrement + marker-consume is a single-shard {id} CAS.
+		"identity_site_release/" + id + "/" + slug,
 		"identity_sites/" + id + "/" + slug,
 	}
 	for _, k := range idKeys {
