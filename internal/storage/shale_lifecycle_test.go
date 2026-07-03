@@ -138,7 +138,7 @@ func TestShaleLifecycle_ReconcilerAgesOutStuckPending(t *testing.T) {
 	fresh := insertPending(t, repo, owner, "freshpen", 150, now)
 
 	// Run the reconciler at `now`: old is past the 1-min timeout, fresh is not.
-	if err := repo.ReconcileForTest(now, time.Hour); err != nil {
+	if err := repo.ReconcileForTest(now); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 

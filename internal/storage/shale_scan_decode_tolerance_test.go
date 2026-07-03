@@ -12,7 +12,9 @@ package storage_test
 //     SKIPPED + logged and the pass CONTINUES, still processing the other
 //     good records and returning success. The next tick retries the bad
 //     row. TestShaleDecodeTolerance_ReconcileSkipsBadRecord pins this for
-//     Reconcile (a poisoned pastes/ row) and a poisoned reservation marker.
+//     Reconcile across BOTH of its enumeration-index reprojections: a
+//     poisoned pastes/ row (the paste index pass) and a poisoned sites/ row
+//     (the re-homed site index pass).
 //
 //   - Policy 2 (blob-GC ref-set scan): an undecodable record must FAIL
 //     CLOSED. ReferencedBlobSHAs aborts the pass and returns an error,
@@ -81,16 +83,19 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 	repo.WaitPendingConfirms()
 
 	// Poison #1: an undecodable authoritative pastes/ row. A second slug so
-	// its key sorts into the same aggregate scan Reconcile walks.
+	// its key sorts into the same aggregate scan Reconcile's paste-index
+	// reprojection walks.
 	badSlug := domain.Slug("badpst22")
 	if err := repo.PutRawForTest(storage.LegacyPasteKeyForTest(badSlug), corruptJSON); err != nil {
 		t.Fatalf("seed corrupt paste row: %v", err)
 	}
 
-	// Poison #2: an undecodable reservation marker. gatherReservationMarkers
-	// (which feeds Reconcile) must skip it rather than abort.
-	if err := repo.PutRawForTest(storage.IdentityReserveKeyForTest(owner, "ghostres"), corruptJSON); err != nil {
-		t.Fatalf("seed corrupt reservation marker: %v", err)
+	// Poison #2: an undecodable authoritative sites/ row. Reconcile's re-homed
+	// site-index reprojection (reconcileSiteIndexPass) scans sites/, so it must
+	// skip this row rather than abort the whole pass.
+	badSiteSlug := domain.Slug("badsite2")
+	if err := repo.PutRawForTest(storage.SiteKeyForTest(badSiteSlug), corruptJSON); err != nil {
+		t.Fatalf("seed corrupt site row: %v", err)
 	}
 
 	// Desync the good paste's derived index so the pass has real work to do:
@@ -104,7 +109,7 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 	}
 
 	// Reconcile must SUCCEED despite both poisoned records.
-	if err := repo.ReconcileForTest(now, time.Hour); err != nil {
+	if err := repo.ReconcileForTest(now); err != nil {
 		t.Fatalf("reconcile must skip+continue on bad records, not error: %v", err)
 	}
 
@@ -122,13 +127,141 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 		t.Fatalf("post-reconcile list: got %+v, want just %q", list, good.Slug)
 	}
 
-	// The poison is untouched (skip+log leaves it for the next tick to retry).
+	// The poison is untouched (skip+log leaves it for the next tick to retry) -
+	// both the paste row and the site row.
 	raw, err := repo.GetRawForTest(storage.LegacyPasteKeyForTest(badSlug))
 	if err != nil {
 		t.Fatalf("read poisoned paste row: %v", err)
 	}
 	if len(raw) == 0 {
-		t.Fatalf("reconcile must not delete the poisoned row, it skips it; got empty")
+		t.Fatalf("reconcile must not delete the poisoned paste row, it skips it; got empty")
+	}
+	rawSite, err := repo.GetRawForTest(storage.SiteKeyForTest(badSiteSlug))
+	if err != nil {
+		t.Fatalf("read poisoned site row: %v", err)
+	}
+	if len(rawSite) == 0 {
+		t.Fatalf("reconcile must not delete the poisoned site row, it skips it; got empty")
+	}
+}
+
+// --- Policy 1 (Fix 3): reconciler heals an un-indexed undecodable row -------
+
+// TestShaleDecodeTolerance_ReconcileHealsUnindexedUndecodableRow pins the
+// fail-closed heal a naive skip+continue lacked. The quota scan reads THROUGH
+// the enumeration index, so an undecodable authoritative row whose index entry
+// was ALSO lost (a crash between the row write and the index write) is
+// enumerated by NOTHING and silently drops from the owner's sum - a DURABLE
+// under-count that lets the owner exceed the cap permanently, because the
+// reconciler is the only thing that heals a missing index entry and a naive
+// skip drops exactly this one.
+//
+// The fix: on an undecodable pastes/ (or sites/) row the reconciler derives the
+// owner decode-independently from slug_owner/<slug> and projects a placeholder
+// enumeration entry, so the next quota scan ENUMERATES the slug and re-reads the
+// authoritative row - which then HARD-FAILS the scan (fail-closed reject), never
+// a silent under-count. The residual (no slug_owner) is documented + pinned.
+//
+//	go test -tags slatedb -run TestShaleDecodeTolerance_ReconcileHeals ./internal/storage
+func TestShaleDecodeTolerance_ReconcileHealsUnindexedUndecodableRow(t *testing.T) {
+	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale decode-tolerance test (start dev MinIO first)")
+	}
+	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+
+	// --- PASTE: corrupt row + slug_owner, but NO identity_pastes entry ------
+	// Models a paste whose authoritative row got corrupted AND whose enumeration
+	// index entry was lost to a crash. slug_owner is a raw owner string
+	// (insertAuthoritative writes it decode-independently), so the reconciler can
+	// still derive the owner.
+	owner := "key:heal"
+	badSlug := domain.Slug("healbad1")
+	if err := repo.PutRawForTest(storage.LegacyPasteKeyForTest(badSlug), corruptJSON); err != nil {
+		t.Fatalf("seed corrupt paste row: %v", err)
+	}
+	if err := repo.PutRawForTest(storage.LegacySlugOwnerKeyForTest(badSlug), []byte(owner)); err != nil {
+		t.Fatalf("seed slug_owner: %v", err)
+	}
+
+	// Pre-reconcile: the corrupt row is enumerated by NOTHING (no index entry),
+	// so the quota scan is BLIND to it - it returns 0 with NO error, a silent,
+	// DURABLE under-count. This is the hole the fix closes.
+	if got, err := repo.SumActiveBytesByOwner(owner, now); err != nil {
+		t.Fatalf("pre-reconcile sum should not error (un-indexed row invisible): %v", err)
+	} else if got != 0 {
+		t.Fatalf("pre-reconcile sum: got %d, want 0 (un-indexed corrupt row invisible)", got)
+	}
+
+	// Reconcile derives the owner from slug_owner and projects a placeholder
+	// enumeration entry so the row is no longer invisible - and does NOT error.
+	if err := repo.ReconcileForTest(now); err != nil {
+		t.Fatalf("reconcile must not error on the corrupt-but-ownable row: %v", err)
+	}
+	// The enumeration entry now exists.
+	if raw, err := repo.GetRawForTest(storage.IdentityPasteKeyForTest(owner, badSlug.String())); err != nil {
+		t.Fatalf("read healed paste index entry: %v", err)
+	} else if len(raw) == 0 {
+		t.Fatalf("reconcile must project an enumeration entry for the corrupt-but-ownable paste (fail-closed heal)")
+	}
+	// Post-reconcile: the scan now ENUMERATES badSlug, re-reads the corrupt
+	// authoritative row, and HARD-FAILS (fail-closed) - rejecting the owner's
+	// next upload rather than silently under-counting. This is the gate: an
+	// undecodable authoritative row is a hard error, never absent.
+	if got, err := repo.SumActiveBytesByOwner(owner, now); err == nil {
+		t.Fatalf("post-reconcile sum must HARD-FAIL on the enumerated corrupt row (fail-closed); got %d, nil error", got)
+	}
+
+	// --- SITE: corrupt row + slug_owner, but NO identity_sites entry --------
+	// The site deploy's pre-claim writes slug_owner on the transactional
+	// shale-blob path (prod); seed it to model that.
+	siteOwner := "key:healsite"
+	badSite := domain.Slug("healbsit")
+	if err := repo.PutRawForTest(storage.SiteKeyForTest(badSite), corruptJSON); err != nil {
+		t.Fatalf("seed corrupt site row: %v", err)
+	}
+	if err := repo.PutRawForTest(storage.LegacySlugOwnerKeyForTest(badSite), []byte(siteOwner)); err != nil {
+		t.Fatalf("seed site slug_owner: %v", err)
+	}
+	if got, err := repo.SumActiveSiteBytesByOwner(siteOwner, now); err != nil {
+		t.Fatalf("pre-reconcile site sum should not error: %v", err)
+	} else if got != 0 {
+		t.Fatalf("pre-reconcile site sum: got %d, want 0 (un-indexed corrupt site invisible)", got)
+	}
+	if err := repo.ReconcileForTest(now); err != nil {
+		t.Fatalf("reconcile (site) must not error: %v", err)
+	}
+	if raw, err := repo.GetRawForTest(storage.IdentitySiteKeyForTest(siteOwner, badSite.String())); err != nil {
+		t.Fatalf("read healed site index entry: %v", err)
+	} else if len(raw) == 0 {
+		t.Fatalf("reconcile must project an enumeration entry for the corrupt-but-ownable site (fail-closed heal)")
+	}
+	if got, err := repo.SumActiveSiteBytesByOwner(siteOwner, now); err == nil {
+		t.Fatalf("post-reconcile site sum must HARD-FAIL on the enumerated corrupt site (fail-closed); got %d, nil error", got)
+	}
+
+	// --- RESIDUAL: corrupt row with NO slug_owner stays un-enumerated -------
+	// Documented residual (docs/SPEC.md "Decode tolerance of the quota scan"):
+	// without slug_owner the owner cannot be derived, so the row stays invisible.
+	// Only reachable on the metadata-only path; prod always writes slug_owner.
+	orphanOwner := "key:healorphan"
+	orphan := domain.Slug("healorph")
+	if err := repo.PutRawForTest(storage.LegacyPasteKeyForTest(orphan), corruptJSON); err != nil {
+		t.Fatalf("seed orphan corrupt row: %v", err)
+	}
+	if err := repo.ReconcileForTest(now); err != nil {
+		t.Fatalf("reconcile (orphan) must not error: %v", err)
+	}
+	if raw, err := repo.GetRawForTest(storage.IdentityPasteKeyForTest(orphanOwner, orphan.String())); err != nil {
+		t.Fatalf("read orphan index entry: %v", err)
+	} else if len(raw) != 0 {
+		t.Fatalf("no slug_owner: reconcile cannot derive the owner, so it must NOT project an entry; got a non-empty entry")
+	}
+	if got, err := repo.SumActiveBytesByOwner(orphanOwner, now); err != nil {
+		t.Fatalf("orphan sum should not error (documented residual: invisible): %v", err)
+	} else if got != 0 {
+		t.Fatalf("orphan sum: got %d, want 0 (documented residual - no slug_owner to derive)", got)
 	}
 }
 

@@ -13,48 +13,44 @@
 //
 //	sites/<slug>                       -> {slug} shard  (authoritative JSON row)
 //	expiry_sites/<ts>/<slug>           -> {slug} shard  (sweep index, marker value; ts is fixed-width)
-//	identity_site_bytes/<id>           -> {id}   shard  (the SITE quota counter)
-//	identity_site_reserve/<id>/<slug>  -> {id}   shard  (site reservation marker)
+//	identity_sites/<id>/<slug>         -> {id}   shard  (per-owner enumeration index, one-byte marker value)
 //
-// Shale keeps NO identity_sites/<id>/<slug> index (the slatedb backend has
-// one, but on shale it would be write-only: the owner sum reads the
-// identity_site_bytes counter, the reconciler scans sites/, and there is no
-// ListSitesByOwner, so nothing would read it).
+// # Scan-derived per-owner site quota (no counter)
 //
-// # Why a dedicated site-byte counter (not the shared identity_bytes)
+// There is deliberately NO stored site-byte counter and no reservation /
+// release marker. The per-owner SITE bytes are DERIVED by scanning the
+// per-owner enumeration index identity_sites/<id>/<slug> and summing each
+// live sites/<slug> row's DedupedSize (SumActiveSiteBytesByOwner), exactly
+// the way slatedb's sumActiveSiteBytesForOwner works and the same index
+// ListSitesByOwner uses. The service (service.DeploySite) computes the budget
+// as `UserQuota - paste_bytes - site_bytes`, reading the paste sum and the
+// site sum SEPARATELY and adding them, so the two scans MUST count disjoint
+// sets: the paste sum enumerates identity_pastes/, the site sum enumerates
+// identity_sites/, and the two families never overlap. The per-owner CAP
+// check sums BOTH kinds (paste + site) against the cap, exactly like the
+// sqlite identityActiveBytes and the slatedb per-identity check, so the
+// ceiling holds however an owner splits their quota.
 //
-// The deploy service (service.DeploySite) computes the per-owner budget as
-// `UserQuota - paste_bytes - site_bytes`, reading the paste sum and the
-// site sum SEPARATELY and adding them. So the two sums MUST be disjoint:
-// the paste sum from identity_bytes/<id>, the site sum from a distinct
-// identity_site_bytes/<id> counter. Folding sites into identity_bytes would
-// double-count (the budget would subtract the same site bytes twice, once
-// via paste_bytes and once via site_bytes). The dedicated counter keeps
-// SumActiveSiteBytesByOwner site-only (the conformance contract) while the
-// per-owner CAP check still sums BOTH counters (paste + site) against the
-// cap, exactly like the sqlite identityActiveBytes and the slatedb
-// per-identity check.
+// # A deploy is a plain sequence (no reservation)
 //
-// # Reservation pattern (strict per-owner quota, mirrors paste inserts)
+// A site deploy spans the {slug} shard (the authoritative sites/<slug> row +
+// the cross-family paste-slug collision read) and the {id} shard (the
+// enumeration-index entry), which cannot be one CAS transaction, but there is
+// no counter to reserve against, so it is a plain sequence:
 //
-// A site deploy spans the {id} shard (the site-byte counter) and the {slug}
-// shard (the authoritative sites/<slug> row + the cross-family paste-slug
-// collision read), which cannot be one CAS transaction. It is the same
-// three-step reservation sequence paste inserts use:
-//
-//  1. reserve DedupedSize on the {id} identity_site_bytes counter (strict
-//     per-owner cap, the increment + the check are one atomic CAS) and
-//     stamp a site reservation marker,
+//  1. check quota (scan the owner's combined paste+site used bytes),
 //  2. authoritative write on the {slug} shard (the sites/<slug> row + the
 //     expiry index, with BOTH the sites/<slug> AND pastes/<slug> collision
 //     reads in the CAS read-set),
-//  3. confirm on the {id} shard: drop the reservation marker (shale keeps
-//     no per-identity site index, so nothing else is written).
+//  3. write the identity_sites/<id>/<slug> enumeration entry on the {id}
+//     shard (best-effort; a lost write leaves a missing entry the reconciler
+//     reprojects, never a failed deploy).
 //
-// The strict-quota and sweep-time-expiry properties carry over from the
-// paste counter unchanged (conformCaps.ExpiryFreesQuotaAtReadTime = false,
-// StrictQuotaUnderConcurrency = true for shale). A failed authoritative
-// write releases the reservation (bounded over-count + the reconciler).
+// Expiry frees quota at READ time (the scan filters expires_at > now), so
+// conformCaps.ExpiryFreesQuotaAtReadTime = true for shale sites (matching
+// sqlite + slatedb); the check and the write are not atomic, so a bounded
+// same-owner over-admit is accepted (StrictIdentityQuotaUnderConcurrency =
+// false). See docs/SPEC.md "Scan-derived quota" / "The correctness argument".
 
 //go:build slatedb
 
@@ -129,30 +125,13 @@ func shaleKeyExpirySite(t time.Time, slug domain.Slug) []byte {
 	return []byte("expiry_sites/" + t.UTC().Format(expirySiteTimeFormat) + "/" + slug.String())
 }
 
-func shaleKeyIdentitySiteBytes(identity string) []byte {
-	return []byte("identity_site_bytes/" + identity)
-}
-
-func shaleKeyIdentitySiteReserve(identity, slug string) []byte {
-	return []byte("identity_site_reserve/" + identity + "/" + slug)
-}
-
-// shaleKeyIdentitySiteRelease is the delete-side mirror of the reserve marker
-// key. It co-shards on <id> with the site counter (identity_site_bytes) so the
-// delete's decrement and the marker's deletion are ONE atomic single-shard CAS
-// (the marker-consume). The value reuses the reservationMarker encoding
-// {bytes, created_at}; the prefix is DISTINCT from identity_site_reserve/ so
-// the reserve reconciler and the release reconciler never cross-contaminate.
-func shaleKeyIdentitySiteRelease(identity, slug string) []byte {
-	return []byte("identity_site_release/" + identity + "/" + slug)
-}
-
 // shaleKeyIdentitySite / shalePrefixIdentitySites are the per-owner site
 // ENUMERATION index (mirror shaleKeyIdentityPaste / shalePrefixIdentityPastes).
 // The entry carries a one-byte marker value (shale's Put rejects an empty
-// value): ListSitesByOwner re-reads the authoritative sites/<slug> row for
-// the returned fields, so the index only needs to enumerate the owner's
-// slugs. It co-shards on <id> with the site byte counter + reserve marker.
+// value): both ListSitesByOwner and the quota scan re-read the authoritative
+// sites/<slug> row for the returned fields + size, so the index only needs to
+// enumerate the owner's slugs. It co-shards on <id> with identity_pastes/, so
+// an owner's paste-index and site-index scans each stay single-shard.
 func shaleKeyIdentitySite(identity, slug string) []byte {
 	return []byte("identity_sites/" + identity + "/" + slug)
 }
@@ -183,140 +162,15 @@ func shaleSiteRowFromDomain(s domain.Site, dedupedSize int) (siteRow, error) {
 	}, nil
 }
 
-// --- site quota counter: reserve / release ---------------------------------
-
-// reserveSiteBytes is step 1 of the site reservation pattern: a single
-// {id}-shard CAS that atomically checks the per-owner cap and increments the
-// SITE counter (identity_site_bytes) by `body`, plus stamps a site
-// reservation marker keyed by slug. The cap check sums BOTH the paste
-// counter AND the site counter (so a site deploy is rejected if the owner's
-// COMBINED paste+site bytes would exceed userCap, matching the sqlite
-// identityActiveBytes which spans both kinds). Only the site counter is
-// incremented; the paste counter is read for the cap but never written here.
-//
-// The increment + the check are one atomic CAS so two concurrent reservers
-// serialize (the strict ceiling). userCap == 0 means "no per-owner cap": the
-// site counter is still incremented (so SumActiveSiteBytesByOwner stays
-// accurate) but the check is skipped.
-func (r *ShaleRepo) reserveSiteBytes(identity, slug string, body, userCap int64, now time.Time) error {
-	siteCounterKey := shaleKeyIdentitySiteBytes(identity)
-	pasteCounterKey := shaleKeyIdentityBytes(identity)
-	reserveKey := shaleKeyIdentitySiteReserve(identity, slug)
-	markerVal, err := encodeReservationMarker(body, now)
-	if err != nil {
-		return err
-	}
-	// Pin on the site counter; the paste counter co-shards on {id} (both
-	// keyed by identity), so reading it inside this CAS is a same-shard read.
-	return r.cluster.Transact(siteCounterKey, func(tx backend.Transaction) error {
-		siteCur, err := txGetCounter(tx, siteCounterKey)
-		if err != nil {
-			return err
-		}
-		if userCap > 0 {
-			pasteCur, err := txGetCounter(tx, pasteCounterKey)
-			if err != nil {
-				return err
-			}
-			if pasteCur+siteCur+body > userCap {
-				return ErrOverUserQuota
-			}
-		}
-		if err := tx.Put(siteCounterKey, formatCounter(siteCur+body)); err != nil {
-			return err
-		}
-		return tx.Put(reserveKey, markerVal)
-	})
-}
-
-// releaseSiteBytes returns `body` bytes to the site counter and drops the
-// site reservation marker, in one {id}-shard CAS. Rolls back a failed
-// reservation. Idempotent on a missing marker (a confirm already consumed
-// it, or a prior release ran), so bytes are never double-credited.
-func (r *ShaleRepo) releaseSiteBytes(identity, slug string) error {
-	siteCounterKey := shaleKeyIdentitySiteBytes(identity)
-	reserveKey := shaleKeyIdentitySiteReserve(identity, slug)
-	return r.cluster.Transact(siteCounterKey, func(tx backend.Transaction) error {
-		marker, err := tx.Get(reserveKey)
-		if err != nil {
-			if errors.Is(err, backend.ErrNotFound) {
-				return nil // already consumed/released; do not double-credit
-			}
-			return err
-		}
-		m, err := parseReservationMarker(marker)
-		if err != nil {
-			return err
-		}
-		cur, err := txGetCounter(tx, siteCounterKey)
-		if err != nil {
-			return err
-		}
-		if err := tx.Put(siteCounterKey, formatCounter(cur-m.Bytes)); err != nil {
-			return err
-		}
-		return tx.Delete(reserveKey)
-	})
-}
-
-// reserveSiteReplaceBytes is the replace-path twin of reserveSiteBytes: a
-// single {id}-shard CAS that atomically checks the per-owner cap and adjusts
-// the SITE counter by the REPLACE DELTA (newBody - oldBody), plus stamps a
-// site reservation marker recording that delta. Because the old row's bytes
-// are ALREADY in the site counter, applying the delta moves the counter to
-// the post-replace total in one step.
-//
-// The cap check sums BOTH the paste counter AND the post-delta site counter
-// (pasteCur + siteCur - oldBody + newBody), so a re-deploy is rejected only
-// if the owner's COMBINED post-swap bytes would exceed userCap. A same-size
-// re-deploy nets zero against the cap; a smaller one frees the difference.
-// The check + the adjust are one atomic CAS so two concurrent reservers
-// serialize (the strict ceiling carries over from the insert path).
-//
-// The marker records the delta (which may be negative), so a rollback
-// (releaseSiteBytes) and the reconciler's orphan-release both subtract the
-// SAME delta to undo the adjustment exactly. userCap == 0 means "no per-owner
-// cap": the counter is still adjusted (so SumActiveSiteBytesByOwner stays
-// accurate) but the check is skipped.
-func (r *ShaleRepo) reserveSiteReplaceBytes(identity, slug string, oldBody, newBody, userCap int64, now time.Time) error {
-	siteCounterKey := shaleKeyIdentitySiteBytes(identity)
-	pasteCounterKey := shaleKeyIdentityBytes(identity)
-	reserveKey := shaleKeyIdentitySiteReserve(identity, slug)
-	delta := newBody - oldBody
-	markerVal, err := encodeReservationMarker(delta, now)
-	if err != nil {
-		return err
-	}
-	return r.cluster.Transact(siteCounterKey, func(tx backend.Transaction) error {
-		siteCur, err := txGetCounter(tx, siteCounterKey)
-		if err != nil {
-			return err
-		}
-		if userCap > 0 {
-			pasteCur, err := txGetCounter(tx, pasteCounterKey)
-			if err != nil {
-				return err
-			}
-			if pasteCur+siteCur+delta > userCap {
-				return ErrOverUserQuota
-			}
-		}
-		if err := tx.Put(siteCounterKey, formatCounter(siteCur+delta)); err != nil {
-			return err
-		}
-		return tx.Put(reserveKey, markerVal)
-	})
-}
-
 // --- Site KV operations (on ShaleRepo) -------------------------------------
 
-// InsertSiteWithQuotaCheck deploys a site via the three-step reservation
-// pattern (reserve on {id}, authoritative write on {slug}, confirm on {id}),
-// mirroring InsertWithQuotaCheck for pastes:
-//
-//   - the per-owner cap is STRICT via the reserve step's atomic CAS,
-//   - the slug-collision check is BOTH directions inside the authoritative
-//     CAS (reject if a site OR a paste already owns the slug).
+// InsertSiteWithQuotaCheck deploys a site. The per-owner cap is enforced by a
+// scan-and-compare BEFORE the authoritative write (the owner's combined
+// paste+site used bytes plus this deploy's bytes must not exceed the cap),
+// and the slug-collision check is BOTH directions inside the authoritative
+// CAS (reject if a site OR a paste already owns the slug). The check and the
+// write are not atomic (bounded same-owner over-admit), the same tradeoff
+// InsertWithQuotaCheck documents.
 //
 // The durable total-bytes ceiling is NOT checked here: it is the
 // object-store bucket quota, enforced when a blob Put is rejected (see SPEC
@@ -333,67 +187,64 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(ctx context.Context, s domain.Site,
 	// authoritative {slug} transaction binds exactly this call's blobs.
 	binds := pendingBindsFromContext(ctx)
 
-	// Step 1: reserve (STRICT per-owner quota, combined paste+site).
-	if err := r.reserveSiteBytes(identity, slug, body, userCap, now); err != nil {
-		return err
+	// Quota CHECK (scan-based, combined paste+site) before the authoritative
+	// write.
+	if userCap > 0 {
+		used, err := r.combinedActiveBytes(identity, now)
+		if err != nil {
+			return err
+		}
+		if used+body > userCap {
+			return ErrOverUserQuota
+		}
 	}
 
-	// Step 2: authoritative {slug}-shard write. On any failure, release the
-	// reservation so the bytes are returned (over-count bounded to the
-	// failure window + the reconciler).
+	// Authoritative {slug}-shard write.
 	if err := r.insertSiteAuthoritative(s, dedupedSize, binds); err != nil {
-		_ = r.releaseSiteBytes(identity, slug)
 		return err
 	}
 
-	// Step 3: confirm on the {id} shard: drop the reservation marker. The
-	// site counter is NOT touched here (the reserve already accounted the
-	// bytes). Shale keeps no per-identity site index, so there is nothing
-	// else to write.
+	// Enumeration-index maintenance on the {id} shard (the scan-based quota
+	// depends on it to enumerate the owner's sites). Best-effort +
+	// reconciler-healed: a failure leaves a site the index does not list (a
+	// transient under-count the reconciler heals), never a failed deploy, so
+	// the site (already durable) is returned as success.
 	if err := r.confirmSiteInsert(identity, slug); err != nil {
-		// The authoritative site exists + the bytes are accounted on the
-		// counter; only the reservation marker lingers. The owner sum reads
-		// the counter (not any index), so this is invisible to quota; the
-		// reconciler drops the leaked marker. Surface the error so the caller
-		// knows confirm lagged, but the site is durable + quota-correct.
-		return fmt.Errorf("confirm site insert: %w", err)
+		r.repoLog().Printf("shale: site index maintenance for %s: %v (index lag; reconciler will heal)", s.Slug, err)
 	}
 	return nil
 }
 
-// ReplaceSiteWithQuotaCheck re-deploys an existing OWNED site in place via a
-// three-step sequence that mirrors InsertSiteWithQuotaCheck, charging the
-// REPLACE DELTA rather than the full new size:
+// ReplaceSiteWithQuotaCheck re-deploys an existing OWNED site in place via the
+// same scan-based sequence InsertSiteWithQuotaCheck uses, charging the REPLACE
+// DELTA rather than the full new size:
 //
-//  1. reserve the delta (newBody - oldBody) on the {id} site counter
-//     (STRICT per-owner cap, the adjust + the combined paste+site check are
-//     one atomic CAS) and stamp a site reservation marker recording the
-//     delta,
-//  2. authoritative swap on the {slug} shard (re-read sites/<slug> in the
-//     CAS read-set for ownership + the old expiry key, overwrite the row,
-//     re-key the expiry index),
-//  3. confirm on the {id} shard: drop the reservation marker.
+//  1. up-front Get to size the delta (read oldBody) and gate ownership +
+//     existence,
+//  2. quota CHECK (scan the owner's combined paste+site used bytes) charging
+//     the delta: when the old row is LIVE the scan's `used` already counts its
+//     oldBody, so the post-swap total is used + (newBody-oldBody) - a same-size
+//     re-deploy nets zero, a smaller one frees the difference, a larger one is
+//     rejected when it would breach the cap. When the old row is EXPIRED-unswept
+//     it is NOT in `used`, so oldBody is credited as 0 and the replace charges
+//     the full new size (reviving an expired site is a fresh write of that size),
+//  3. authoritative swap on the {slug} shard (re-read sites/<slug> in the CAS
+//     read-set for ownership + the old expiry key, overwrite the row, re-key
+//     the expiry index),
+//  4. refresh the identity_sites/<id>/<slug> enumeration entry (best-effort;
+//     the site scan reads DedupedSize from the freshly-swapped row).
 //
 // Ownership/existence: the slug must already be a site owned by s.Identity.
 // A missing row OR a foreign-owned row both collapse to ErrNotFound (the SAME
 // sentinel a missing slug yields), so existence/ownership never leaks. The
 // gate is enforced TWICE: an up-front Get to size the delta (read oldBody +
-// reject a foreign/missing row before touching the counter), and again INSIDE
-// the authoritative CAS so a concurrent delete/re-deploy conflicts.
+// reject a foreign/missing row before the swap), and again INSIDE the
+// authoritative CAS so a concurrent delete/re-deploy conflicts.
 //
-// The durable total-bytes ceiling is NOT checked here: it is the
-// object-store bucket quota, enforced when a blob Put is rejected (see SPEC
-// "Limits -> Durable total-bytes ceiling: an object-store quota").
-//
-// Reconciler interplay: a replace's authoritative row is ALWAYS present (it
-// is a pre-existing site), so a confirm that fails leaves a marker the
-// reconciler classifies as a leaked-marker drop (delete the marker, do NOT
-// touch the counter) - correct, because the delta was applied during reserve
-// and the swap succeeded. If instead the authoritative write FAILS, step 2's
-// caller releases the reservation (subtracting the delta back); only a crash
-// between the failed write and that release leaves the counter off by the
-// delta (a bounded over/under-count the reconciler cannot distinguish from a
-// landed replace, the same window the insert path accepts).
+// The check and the swap are not atomic (bounded same-owner over-admit), and
+// the durable total-bytes ceiling is NOT checked here: it is the object-store
+// bucket quota, enforced when a blob Put is rejected (see SPEC "Limits ->
+// Durable total-bytes ceiling: an object-store quota").
 //
 // Returns nil / ErrNotFound / ErrOverUserQuota.
 func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
@@ -406,8 +257,8 @@ func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site
 	binds := pendingBindsFromContext(ctx)
 
 	// Up-front ownership + existence gate. Sizes the delta (oldBody) and
-	// rejects a missing/foreign row BEFORE the counter is touched. A missing
-	// row and a foreign-owned row both collapse to ErrNotFound.
+	// rejects a missing/foreign row before the swap. A missing row and a
+	// foreign-owned row both collapse to ErrNotFound.
 	var existing siteRow
 	if err := r.getJSON(shaleKeySite(s.Slug), &existing); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -418,30 +269,43 @@ func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site
 	if existing.Identity != identity {
 		return ErrNotFound
 	}
+	// Credit the old bytes back ONLY if the old row is still LIVE: the
+	// scan-based `used` filters expires_at > now, so an expired-but-unswept old
+	// row is NOT in it. Crediting an expired old row would double-subtract and
+	// admit an over-cap replace - reviving an expired site must charge the full
+	// new size (docs/SPEC.md "Reviving an expired-but-unswept record charges its
+	// FULL post-revival size"). Mirrors the sqlite + slatedb ReplaceWithQuotaCheck.
 	oldBody := int64(existing.DedupedSize)
-
-	// Step 1: reserve the delta (STRICT per-owner quota, combined paste+site).
-	if err := r.reserveSiteReplaceBytes(identity, slug, oldBody, newBody, userCap, now); err != nil {
-		return err
+	if !existing.ExpiresAt.After(now) {
+		oldBody = 0
 	}
 
-	// Step 2: authoritative {slug}-shard swap. On any failure, release the
-	// reservation so the delta is undone (over/under-count bounded to the
-	// failure window + the reconciler).
+	// Quota CHECK (scan-based) before the swap, charging the DELTA. When the old
+	// row is live the scan's `used` already counts its oldBody, so the post-swap
+	// owner total is used - oldBody + newBody = used + (newBody-oldBody): a
+	// same-size re-deploy nets zero, a smaller one frees the difference, a larger
+	// one is rejected when it would breach the cap. When the old row is expired
+	// (oldBody credited as 0) the replace charges the full new size.
+	if userCap > 0 {
+		used, err := r.combinedActiveBytes(identity, now)
+		if err != nil {
+			return err
+		}
+		if used+(newBody-oldBody) > userCap {
+			return ErrOverUserQuota
+		}
+	}
+
+	// Authoritative {slug}-shard swap.
 	if err := r.replaceSiteAuthoritative(s, dedupedSize, binds); err != nil {
-		_ = r.releaseSiteBytes(identity, slug)
 		return err
 	}
 
-	// Step 3: confirm on the {id} shard: drop the reservation marker. The
-	// counter is NOT touched here (the reserve already applied the delta).
+	// Refresh the enumeration-index entry on the {id} shard (idempotent
+	// marker Put; the site scan reads DedupedSize from the freshly-swapped
+	// authoritative row). Best-effort + reconciler-healed.
 	if err := r.confirmSiteInsert(identity, slug); err != nil {
-		// The authoritative row is swapped + the delta is accounted on the
-		// counter; only the reservation marker lingers. The owner sum reads the
-		// counter (not the marker), so this is invisible to quota; the
-		// reconciler drops the leaked marker. Surface the error so the caller
-		// knows confirm lagged, but the replace is durable + quota-correct.
-		return fmt.Errorf("confirm site replace: %w", err)
+		r.repoLog().Printf("shale: site index refresh for %s: %v (index lag; reconciler will heal)", s.Slug, err)
 	}
 	return nil
 }
@@ -633,28 +497,17 @@ func (r *ShaleRepo) insertSiteAuthoritative(s domain.Site, dedupedSize int, refs
 	})
 }
 
-// confirmSiteInsert is step 3: on the {id} shard, drop the site reservation
-// marker AND write the identity_sites/<id>/<slug> enumeration index entry,
-// one CAS (the reserve marker, the index entry, and the byte counter all
-// co-shard on {id}, so this is the exact analog of the paste confirmInsert).
-// The index entry is a one-byte marker (ListSitesByOwner re-reads the
-// authoritative sites/<slug> row for its fields). Called by BOTH insert and
-// replace, so the index write also refreshes an in-place re-deploy (the
-// marker is idempotent - a Put over an existing marker is a no-op).
-// Best-effort + reconciler-healed: a lost confirm leaves a missing index
-// entry the reconciler rebuilds, never a failed deploy. Idempotent on a
-// missing reserve marker (a prior confirm or a reconciler drop removed it).
+// confirmSiteInsert writes the identity_sites/<id>/<slug> enumeration index
+// entry on the {id} shard, one CAS. The entry is a one-byte marker
+// (SumActiveSiteBytesByOwner / ListSitesByOwner re-read the authoritative
+// sites/<slug> row for the fields + size). Called by BOTH insert and replace,
+// so the write also refreshes an in-place re-deploy (the marker is idempotent
+// - a Put over an existing marker is a no-op). Best-effort + reconciler-
+// healed: a lost write leaves a missing index entry the reconciler rebuilds,
+// never a failed deploy.
 func (r *ShaleRepo) confirmSiteInsert(identity, slug string) error {
-	reserveKey := shaleKeyIdentitySiteReserve(identity, slug)
 	indexKey := shaleKeyIdentitySite(identity, slug)
-	return r.cluster.Transact(reserveKey, func(tx backend.Transaction) error {
-		if _, err := tx.Get(reserveKey); err == nil {
-			if err := tx.Delete(reserveKey); err != nil {
-				return err
-			}
-		} else if !errors.Is(err, backend.ErrNotFound) {
-			return err
-		}
+	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
 		return tx.Put(indexKey, markerValue)
 	})
 }
@@ -712,238 +565,128 @@ func (r *ShaleRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site
 	return out, nil
 }
 
-// SumActiveSiteBytesByOwner returns the identity's active SITE bytes only,
-// served from the {id}-shard identity_site_bytes counter (a single read).
-// The service layer adds the paste-side sum where it needs the combined
-// figure. Like the shale paste counter, it has NO read-time expiry
-// awareness: it sheds an expired site's bytes at sweep time (DeleteSite),
-// not read time, so `now` is unused and the counter over-counts an
-// expired-unswept site transiently but never under-counts
-// (conformCaps.ExpiryFreesQuotaAtReadTime = false on shale).
+// SumActiveSiteBytesByOwner derives the identity's active SITE bytes by
+// SCANNING the per-identity enumeration index (identity_sites/<id>/) and
+// summing the authoritative DedupedSize of each non-expired site,
+// byte-identical in shape to slatedb's sumActiveSiteBytesForOwner. There is
+// no stored site counter: the number is computed from the authoritative
+// sites/<slug> rows on every read, so it is idempotently self-correct. The
+// service layer adds the paste-side sum where it needs the combined figure.
+// now IS used: an expired-but-unswept site is excluded at read time
+// (ExpiryFreesQuotaAtReadTime = true on shale now), matching sqlite + slatedb.
 func (r *ShaleRepo) SumActiveSiteBytesByOwner(owner string, now time.Time) (int64, error) {
 	if owner == "" {
 		return 0, nil
 	}
-	raw, err := r.getRaw(shaleKeyIdentitySiteBytes(owner))
+	return r.sumActiveSiteBytesForOwner(owner, now)
+}
+
+// sumActiveSiteBytesForOwner walks identity_sites/<owner>/ and sums
+// DedupedSize of the rows whose ExpiresAt > now. A stale index entry whose
+// authoritative row is gone is skipped; an undecodable row HARD-FAILS the
+// scan (Policy 3: a synchronous write-path read fails safe by rejecting, not
+// under-counting).
+func (r *ShaleRepo) sumActiveSiteBytesForOwner(owner string, now time.Time) (int64, error) {
+	idx, err := r.scanPrefix(shalePrefixIdentitySites(owner))
 	if err != nil {
 		return 0, err
 	}
-	return parseCounter(raw)
+	var total int64
+	for _, item := range idx {
+		slug := domain.Slug(extractSlug(item.Key))
+		var row siteRow
+		if err := r.getJSON(shaleKeySite(slug), &row); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue // stale index entry
+			}
+			return 0, err
+		}
+		if !row.ExpiresAt.After(now) {
+			continue // expired-unswept: stops counting at read time
+		}
+		total += int64(row.DedupedSize)
+	}
+	return total, nil
 }
 
-// errSiteSizeChanged aborts the DeleteSite tombstone when the row's
-// DedupedSize no longer matches the release marker's recorded bytes (a
-// concurrent in-place ReplaceSiteWithQuotaCheck mutated it). DeleteSite catches
-// it and restarts from step 1 with a refreshed marker, so the marker's bytes
-// always equal exactly what the committed tombstone frees - never more, never
-// less. That equality is what keeps the decrement from ever over- OR
-// under-counting when the marker is later consumed (by the hot path or the
-// reconciler).
-var errSiteSizeChanged = errors.New("shale: site DedupedSize changed under delete; restart with a refreshed release marker")
-
-// deleteSiteMaxAttempts bounds the DeleteSite restart loop so a pathological
-// stream of same-slug re-deploys cannot spin it forever. A concurrent
-// size-changing replace racing a delete is already rare; 64 attempts is far
-// beyond any real interleaving and turns a livelock into a surfaced error.
-const deleteSiteMaxAttempts = 64
-
-// DeleteSite removes a site the crash-durable way, symmetric with the site
-// reserve path: it writes a RELEASE MARKER on the {id} shard BEFORE the
-// authoritative tombstone, so a crash between the tombstone and the counter
-// decrement leaves a marker the reconciler completes (closing the markerless
-// residual the old unconditional decrement left behind). The ordered protocol
-// (docs/SPEC.md "Crash-durable delete decrement via a symmetric release
-// marker"):
+// DeleteSite removes a site: the authoritative {slug} rows go away and the
+// {id} enumeration-index entry is dropped, so the owner's scan-derived quota
+// sum stops counting the site. There is no byte counter to decrement (the
+// freed bytes leave the owner's sum the instant the authoritative row + its
+// index entry vanish), so no release marker / crash-durable-decrement
+// protocol is needed.
 //
-//  1. Read sites/<slug> -> owner + freed (its DedupedSize) + expiry + blobs.
-//     Absent -> no-op return (idempotent; the sweep re-calls this for
-//     already-gone slugs, matching the sqlite/slate DeleteSite + paste Delete).
-//  2. Write the release marker on the {id} shard:
-//     Put(identity_site_release/<id>/<slug>, {bytes: freed, created_at: now}).
-//     A re-run overwrites it with the same value.
-//  3. Tombstone on the {slug} shard, one CAS: re-read the row IN the read-set
-//     and confirm its DedupedSize still equals the marker's bytes; a concurrent
-//     in-place re-deploy that changed the size means the marker is stale, so
-//     abort (errSiteSizeChanged) and restart from step 1 with a refreshed
-//     marker. Otherwise delete sites/<slug>, delete expiry_sites/<ts>/<slug>,
-//     and unbind the file blobs - the authoritative removal, atomic on the
+//  1. Read sites/<slug> -> owner + expiry + blobs. Absent -> no-op return
+//     (idempotent; the sweep re-calls this for already-gone slugs, matching
+//     the sqlite/slate DeleteSite + paste Delete).
+//  2. Tombstone on the {slug} shard, one CAS: delete sites/<slug>, delete
+//     expiry_sites/<ts>/<slug>, and unbind the file blobs - atomic on the
 //     transactional shale-blob path so the bytes go unreferenced exactly when
 //     the manifest vanishes (SweepOrphans reclaims them after the grace).
-//  4. Decrement + consume on the {id} shard, one CAS: drop the
-//     identity_sites/<id>/<slug> enumeration entry (idempotent), then consume
-//     the release marker - counter -= marker.bytes AND delete the marker iff it
-//     is still present. This atomic marker-consume REPLACES the old
-//     unconditional counter -= freed, so the hot path and the reconciler can
-//     never both apply the same delete (at-most-once decrement).
-//
-// A crash before step 3 leaves the row live with a marker: the reconciler drops
-// that marker WITHOUT decrementing (the bytes are still counted). A crash
-// between step 3 and step 4 leaves the row gone with a marker: the reconciler
-// decrements exactly marker.bytes and deletes the marker. Either way the
-// never-under-count invariant holds.
+//  3. Drop the identity_sites/<id>/<slug> enumeration entry on the {id} shard
+//     (idempotent) so the site leaves the owner's scan + ListSitesByOwner.
 func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 	siteKey := shaleKeySite(slug)
-	for attempt := 0; attempt < deleteSiteMaxAttempts; attempt++ {
-		// Step 1: read the authoritative row.
-		var row siteRow
-		if err := r.getJSON(siteKey, &row); err != nil {
-			if errors.Is(err, ErrNotFound) {
-				return nil
-			}
-			return err
-		}
-		identity := row.Identity
-		freed := int64(row.DedupedSize)
-
-		// Mint a fresh per-attempt nonce that stamps THIS delete instance's
-		// release marker. The release-marker slot is a single per-(id,slug) key
-		// reused across delete instances, so a concurrent re-deploy + re-delete
-		// of the same slug can overwrite it between this step 2 and this step 4;
-		// step 4 consumes ONLY a marker still carrying this nonce, so a delete
-		// never decrements bytes recorded by a different delete's marker.
-		nonce, err := newReleaseNonce()
-		if err != nil {
-			return err
-		}
-
-		// Step 2: write the release marker BEFORE the tombstone. created_at is
-		// this delete's wall clock (the grace-window stamp); the marker is
-		// consumed microseconds later in step 4 on the happy path, so the stamp
-		// only matters if the process crashes before step 4.
-		if err := r.writeSiteReleaseMarker(identity, slug.String(), freed, time.Now().UTC(), nonce); err != nil {
-			return err
-		}
-
-		// Step 3: authoritative tombstone on the {slug} shard, size-guarded.
-		delSiteBody := func(tx shaleKVTx, unbind func(blobID string) error) error {
-			var cur siteRow
-			if err := shaleTxGetJSON(tx, siteKey, &cur); err != nil {
-				if errors.Is(err, ErrNotFound) {
-					// Vanished (a concurrent delete already tombstoned it):
-					// nothing to remove. Fall through to step 4's consume, which
-					// is idempotent (the marker is deleted exactly once across
-					// both racers).
-					return nil
-				}
-				return err
-			}
-			if int64(cur.DedupedSize) != freed {
-				return errSiteSizeChanged // stale marker; restart from step 1
-			}
-			if err := tx.Delete(siteKey); err != nil {
-				return err
-			}
-			// Use the re-read row's ExpiresAt + FileBlobs (not the step-1 read,
-			// which a same-size re-deploy could have moved) so the expiry index
-			// and blob unbinds match the row this CAS actually removes.
-			if err := tx.Delete(shaleKeyExpirySite(cur.ExpiresAt, slug)); err != nil {
-				return err
-			}
-			for _, blobID := range cur.FileBlobs {
-				if err := unbind(blobID); err != nil {
-					return err
-				}
-			}
+	// Step 1: read the authoritative row (owner for the index drop).
+	var row siteRow
+	if err := r.getJSON(siteKey, &row); err != nil {
+		if errors.Is(err, ErrNotFound) {
 			return nil
 		}
-		var delErr error
-		if r.kv != nil {
-			delErr = r.kv.Transact(siteKey, func(tx *cluster.BlobTx) error {
-				return delSiteBody(tx, func(blobID string) error {
-					return tx.UnbindBlob(r.blobRefFor(siteKey, blobID))
-				})
-			})
-		} else {
-			delErr = r.cluster.Transact(siteKey, func(tx backend.Transaction) error {
-				return delSiteBody(tx, func(string) error { return nil })
-			})
-		}
-		if errors.Is(delErr, errSiteSizeChanged) {
-			continue // refresh freed + marker, retry
-		}
-		if delErr != nil {
-			return delErr
-		}
-
-		// Step 4: decrement + consume on the {id} shard.
-		return r.consumeSiteReleaseMarker(identity, slug.String(), nonce)
-	}
-	return fmt.Errorf("delete site %s: exceeded %d restart attempts (a concurrent re-deploy kept changing the size)", slug, deleteSiteMaxAttempts)
-}
-
-// writeSiteReleaseMarker is step 2 of the crash-durable delete: a single
-// {id}-shard CAS that stamps the release marker recording the bytes this delete
-// will free AND the per-delete nonce that identifies this delete instance.
-// Idempotent on re-run within one delete (overwrites the same
-// {bytes, created_at, nonce}); a DIFFERENT delete instance writes a DIFFERENT
-// nonce, which is exactly how the consume tells them apart.
-func (r *ShaleRepo) writeSiteReleaseMarker(identity, slug string, freed int64, now time.Time, nonce string) error {
-	releaseKey := shaleKeyIdentitySiteRelease(identity, slug)
-	markerVal, err := encodeReleaseMarker(freed, now, nonce)
-	if err != nil {
 		return err
 	}
-	return r.cluster.Transact(releaseKey, func(tx backend.Transaction) error {
-		return tx.Put(releaseKey, markerVal)
-	})
-}
+	identity := row.Identity
 
-// consumeSiteReleaseMarker is step 4 of the crash-durable delete: one
-// {id}-shard CAS that drops the enumeration index entry AND consumes the
-// release marker THIS delete wrote in step 2 (identified by nonce). The consume
-// is the at-most-once gate: it decrements the counter by marker.bytes and
-// deletes the marker ONLY if the marker is still present AND its nonce matches
-// the nonce this delete stamped. An absent marker means the decrement already
-// happened (a prior retry consumed it, or the reconciler did); a marker with a
-// DIFFERENT nonce means a concurrent re-deploy + re-delete of the same slug
-// overwrote the single per-(id,slug) slot after this delete's step 2 - that
-// marker belongs to the OTHER delete (its bytes may still be LIVE), so this
-// delete must NOT decrement it (that would under-count). Either way the counter
-// is left untouched. All three keys (counter, index, release marker) co-shard
-// on {id}, so this is one atomic single-shard transaction. Mirrors
-// orphanReleaseSiteMarker's read-check on the marker, extended with the
-// idempotent index drop and the nonce ownership check.
-func (r *ShaleRepo) consumeSiteReleaseMarker(identity, slug, nonce string) error {
-	counterKey := shaleKeyIdentitySiteBytes(identity)
-	indexKey := shaleKeyIdentitySite(identity, slug)
-	releaseKey := shaleKeyIdentitySiteRelease(identity, slug)
-	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
-		// Drop the enumeration index entry (idempotent: a missing entry -
-		// already reconciler-dropped, or a pre-index site - is fine).
-		if _, err := tx.Get(indexKey); err == nil {
-			if err := tx.Delete(indexKey); err != nil {
+	// Step 2: authoritative tombstone on the {slug} shard. Re-read the row IN
+	// the CAS so the expiry index and blob unbinds match the row this
+	// transaction actually removes (a same-size re-deploy could have moved
+	// ExpiresAt / FileBlobs between step 1 and here).
+	delSiteBody := func(tx shaleKVTx, unbind func(blobID string) error) error {
+		var cur siteRow
+		if err := shaleTxGetJSON(tx, siteKey, &cur); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil // a concurrent delete already tombstoned it
+			}
+			return err
+		}
+		if err := tx.Delete(siteKey); err != nil {
+			return err
+		}
+		if err := tx.Delete(shaleKeyExpirySite(cur.ExpiresAt, slug)); err != nil {
+			return err
+		}
+		for _, blobID := range cur.FileBlobs {
+			if err := unbind(blobID); err != nil {
 				return err
 			}
+		}
+		return nil
+	}
+	var delErr error
+	if r.kv != nil {
+		delErr = r.kv.Transact(siteKey, func(tx *cluster.BlobTx) error {
+			return delSiteBody(tx, func(blobID string) error {
+				return tx.UnbindBlob(r.blobRefFor(siteKey, blobID))
+			})
+		})
+	} else {
+		delErr = r.cluster.Transact(siteKey, func(tx backend.Transaction) error {
+			return delSiteBody(tx, func(string) error { return nil })
+		})
+	}
+	if delErr != nil {
+		return delErr
+	}
+
+	// Step 3: drop the enumeration-index entry on the {id} shard. Idempotent.
+	indexKey := shaleKeyIdentitySite(identity, slug.String())
+	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
+		if _, err := tx.Get(indexKey); err == nil {
+			return tx.Delete(indexKey)
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return err
 		}
-		// Consume the release marker: decrement + delete iff still present AND
-		// still carrying THIS delete's nonce.
-		raw, err := tx.Get(releaseKey)
-		if err != nil {
-			if errors.Is(err, backend.ErrNotFound) {
-				return nil // already consumed; never double-decrement
-			}
-			return err
-		}
-		m, err := parseReservationMarker(raw)
-		if err != nil {
-			return err
-		}
-		if m.Nonce != nonce {
-			// A concurrent re-delete of the same slug overwrote the slot after
-			// this delete's step 2. That marker is the other delete's to
-			// consume (its bytes may still be live); leave it untouched.
-			return nil
-		}
-		cur, err := txGetCounter(tx, counterKey)
-		if err != nil {
-			return err
-		}
-		if err := tx.Put(counterKey, formatCounter(cur-m.Bytes)); err != nil {
-			return err
-		}
-		return tx.Delete(releaseKey)
+		return nil
 	})
 }
 
@@ -976,47 +719,54 @@ func (r *ShaleRepo) ExpiredSiteSlugs(now time.Time) ([]string, error) {
 	return out, nil
 }
 
-// reconcileSiteReservations completes past-grace SITE reservation markers,
-// the exact parallel of releaseReservationMarkers for pastes (same grace
-// rule, same orphan-release / leaked-drop split), applied to
-// identity_site_reserve/ markers against the identity_site_bytes counter.
-//
-//   - YOUNGER than reserveGrace: in-flight deploy; skip (its bytes are
-//     correctly in the site counter while the confirm is expected to land).
-//   - OLDER, site ABSENT (orphan-release): the deploy was abandoned; release
-//     the over-count with a targeted, read-checked {id}-shard CAS that does
-//     site_counter -= marker.bytes AND deletes the marker atomically.
-//   - OLDER, site PRESENT (leaked-marker drop): a confirm that failed after
-//     the authoritative write left the marker behind even though the bytes
-//     are already accounted; delete the marker WITHOUT touching the counter.
-//
-// Cross-shard via aggregate; every write is an idempotent single-{id}-shard
-// CAS, so it is safe to run concurrently with live traffic (the same posture
-// the paste reconciler holds).
-func (r *ShaleRepo) reconcileSiteReservations(now time.Time, reserveGrace time.Duration) error {
-	// Live site slugs: a marker's base slug present here means the deploy's
-	// authoritative write landed (leaked-marker case), absent means it was
-	// abandoned (orphan-release case).
+// reconcileSiteIndexPass reprojects the identity_sites enumeration index from
+// the authoritative sites/ rows across all shards - the SITE parallel of the
+// paste reconciler's index reprojection, re-homed here as a standalone step in
+// Reconcile (it was previously reached only through the now-deleted
+// site-reservation pass). It scans sites/, groups each live site under its
+// owner, and reprojects (add missing entries, drop orphans) so a site's bytes
+// are enumerated by the owner's quota scan even after a crash between the
+// authoritative write and the index write - and so sites deployed before the
+// index existed appear in ListSitesByOwner. Cross-shard via aggregate; every
+// write is an idempotent single-{id}-shard CAS, safe under live traffic.
+func (r *ShaleRepo) reconcileSiteIndexPass() error {
 	siteItems, err := r.aggregatePrefix(prefixSites)
 	if err != nil {
 		return fmt.Errorf("reconcile sites: scan sites: %w", err)
 	}
-	liveSiteSlugs := make(map[string]struct{}, len(siteItems))
-	// sitesByOwner drives the identity_sites enumeration-index backfill: every
-	// authoritative site reprojected into its owner's index (add missing,
-	// including sites deployed before the index existed). Mirrors the paste
-	// reconciler's pastesByOwner.
+	// sitesByOwner drives the identity_sites enumeration-index reprojection:
+	// every authoritative site reprojected into its owner's index. Mirrors the
+	// paste reconciler's pastesByOwner.
 	sitesByOwner := make(map[string]map[string]struct{})
 	for _, item := range siteItems {
 		slug := strings.TrimPrefix(string(item.Key), "sites/")
-		liveSiteSlugs[slug] = struct{}{}
 		var row siteRow
 		if err := json.Unmarshal(item.Value, &row); err != nil {
-			// Idempotent reconcile: the row physically exists (slug already
-			// marked live above), we just cannot decode it - skip its index
-			// projection; the next tick retries. Matches the paste reconciler's
-			// undecodable-row policy.
-			r.repoLog().Printf("reconcile sites: skip undecodable site %s: %v", item.Key, err)
+			// Idempotent reconcile: one poisoned site row must not stall the pass
+			// (Policy 1). But dropping it silently would leave a durable
+			// UNDER-count if its identity_sites entry was ALSO lost: the site
+			// quota scan reads THROUGH the enumeration index, so an un-indexed
+			// undecodable row is invisible to it. Derive the owner
+			// decode-independently from slug_owner/<slug> (written by the site
+			// deploy's pre-claim on the transactional shale-blob path) and still
+			// project the enumeration entry, so the next scan enumerates the slug
+			// and re-reads the authoritative row (which then hard-fails the scan =
+			// fail-closed reject, never a silent under-count). See docs/SPEC.md
+			// "Decode tolerance of the quota scan".
+			owner := r.ownerOfSlug(domain.Slug(slug))
+			if owner == "" {
+				// No slug_owner to derive the owner (reachable only on the
+				// metadata-only test path that skips the pre-claim; prod always
+				// writes slug_owner). Cannot project the entry; log loudly - the
+				// one residual where the row can stay un-enumerated until repaired.
+				r.repoLog().Printf("reconcile sites: undecodable site %s AND no slug_owner: cannot project enumeration entry; site quota may under-count this slug until it is repaired: %v", item.Key, err)
+				continue
+			}
+			if sitesByOwner[owner] == nil {
+				sitesByOwner[owner] = make(map[string]struct{})
+			}
+			sitesByOwner[owner][slug] = struct{}{}
+			r.repoLog().Printf("reconcile sites: undecodable site %s: projected placeholder enumeration entry under owner %s (fail-closed): %v", item.Key, owner, err)
 			continue
 		}
 		if sitesByOwner[row.Identity] == nil {
@@ -1024,40 +774,6 @@ func (r *ShaleRepo) reconcileSiteReservations(now time.Time, reserveGrace time.D
 		}
 		sitesByOwner[row.Identity][slug] = struct{}{}
 	}
-
-	markers, err := r.aggregatePrefix([]byte("identity_site_reserve/"))
-	if err != nil {
-		return fmt.Errorf("reconcile sites: scan reservations: %w", err)
-	}
-	for _, item := range markers {
-		m, err := parseReservationMarker(item.Value)
-		if err != nil {
-			// Idempotent reconcile: skip + log the undecodable site marker and
-			// continue. One poisoned site-reservation marker must not stall the
-			// whole site-reconcile pass; the next tick retries it. See
-			// docs/SPEC.md "Decode tolerance is per-scan-semantics", Policy 1.
-			r.repoLog().Printf("reconcile sites: skip undecodable reservation marker %s: %v", item.Key, err)
-			continue
-		}
-		if markerInGrace(m, now, reserveGrace) {
-			continue // in-flight; leave it for the confirm step to drop
-		}
-		slug := siteMarkerSlugFromKey(item.Key)
-		if _, present := liveSiteSlugs[slug]; present {
-			// Leaked confirm-failed marker: bytes already accounted. Drop it.
-			_ = r.cluster.Delete(item.Key)
-			continue
-		}
-		// Abandoned reservation: release the over-count atomically.
-		if err := r.orphanReleaseSiteMarker(item.Key); err != nil {
-			return fmt.Errorf("reconcile sites: orphan-release %s: %w", item.Key, err)
-		}
-	}
-
-	// Backfill/heal the identity_sites enumeration index from the authoritative
-	// sites/ scan (the same "reproject rows, drop orphans" heal the paste
-	// reconciler runs for identity_pastes). This is what makes sites deployed
-	// before the index existed appear in ListSitesByOwner.
 	return r.reconcileSiteIndexes(sitesByOwner)
 }
 
@@ -1089,233 +805,6 @@ func (r *ShaleRepo) reconcileSiteIndexes(sitesByOwner map[string]map[string]stru
 		}
 	}
 	return nil
-}
-
-// orphanReleaseSiteMarker is the targeted, read-checked {id}-shard CAS that
-// releases one abandoned SITE reservation: in a single Transact pinned on the
-// site counter (which co-shards with the marker, both keyed by {id}) it reads
-// the counter + the marker, and if the marker is still present subtracts the
-// marker's bytes AND deletes the marker, atomically. Idempotent: a marker
-// already consumed reads as absent here and the CAS is a no-op, so bytes are
-// never double-credited. Mirrors orphanReleaseMarker for pastes.
-func (r *ShaleRepo) orphanReleaseSiteMarker(reserveKey []byte) error {
-	owner := siteMarkerOwnerFromKey(reserveKey)
-	counterKey := shaleKeyIdentitySiteBytes(owner)
-	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
-		raw, err := tx.Get(reserveKey)
-		if err != nil {
-			if errors.Is(err, backend.ErrNotFound) {
-				return nil // already consumed; no-op (never double-credit)
-			}
-			return err
-		}
-		m, err := parseReservationMarker(raw)
-		if err != nil {
-			return err
-		}
-		cur, err := txGetCounter(tx, counterKey)
-		if err != nil {
-			return err
-		}
-		if err := tx.Put(counterKey, formatCounter(cur-m.Bytes)); err != nil {
-			return err
-		}
-		return tx.Delete(reserveKey)
-	})
-}
-
-// siteMarkerOwnerFromKey extracts <id> from an
-// identity_site_reserve/<id>/<slug> key (everything between the prefix and
-// the FIRST '/').
-func siteMarkerOwnerFromKey(key []byte) string {
-	rest := strings.TrimPrefix(string(key), "identity_site_reserve/")
-	if before, _, ok := strings.Cut(rest, "/"); ok {
-		return before
-	}
-	return rest
-}
-
-// siteMarkerSlugFromKey extracts <slug> from an
-// identity_site_reserve/<id>/<slug> key (everything after the FIRST '/'; an
-// identity never contains a '/').
-func siteMarkerSlugFromKey(key []byte) string {
-	rest := strings.TrimPrefix(string(key), "identity_site_reserve/")
-	if _, after, ok := strings.Cut(rest, "/"); ok {
-		return after
-	}
-	return ""
-}
-
-// reconcileSiteReleaseMarkers completes past-grace SITE release markers - the
-// crash-durable-delete backstop, and the exact INVERSE of
-// reconcileSiteReservations. A reserve's increment is undone when the site did
-// NOT materialize (site absent -> decrement); a release's decrement is applied
-// when the site DE-materialized (site absent -> decrement). For each release
-// marker:
-//
-//   - YOUNGER than reserveGrace: an in-flight delete between its marker (step 2)
-//     and its consume (step 4). Leave it strictly alone.
-//   - OLDER, site ABSENT (tombstone committed, decrement lost): complete it with
-//     the same targeted, read-checked {id}-shard CAS as orphanReleaseSiteMarker
-//     (counter -= marker.bytes AND delete the marker, atomically). Idempotent -
-//     a marker already consumed (by the hot path or a prior pass) reads as
-//     absent and the CAS is a no-op, so the bytes are never double-freed. This
-//     is what makes a DOUBLE reconcile safe.
-//   - OLDER, site PRESENT (the delete crashed before its tombstone, or the slug
-//     was re-deployed): the bytes are LIVE and correctly counted, so the
-//     completion must NOT decrement (that would under-count the live site).
-//     Drop the marker with a read-checked CAS that deletes it only if it
-//     re-reads as still past grace, so a fresh delete's young marker is never
-//     removed out from under an in-flight retry. This branch cannot under-count
-//     by construction, which is why it wins over the alternative.
-//
-// Cross-shard via aggregate; every write is an idempotent single-{id}-shard CAS,
-// so it is safe to run concurrently with live traffic (the same posture the
-// reserve reconciler holds).
-func (r *ShaleRepo) reconcileSiteReleaseMarkers(now time.Time, reserveGrace time.Duration) error {
-	// Live site slugs: a release marker whose base slug is present means the
-	// bytes are live (never decrement); absent means the tombstone committed
-	// (complete the decrement).
-	siteItems, err := r.aggregatePrefix(prefixSites)
-	if err != nil {
-		return fmt.Errorf("reconcile site releases: scan sites: %w", err)
-	}
-	liveSiteSlugs := make(map[string]struct{}, len(siteItems))
-	for _, item := range siteItems {
-		liveSiteSlugs[strings.TrimPrefix(string(item.Key), "sites/")] = struct{}{}
-	}
-
-	markers, err := r.aggregatePrefix(prefixIdentitySiteReleaseAll)
-	if err != nil {
-		return fmt.Errorf("reconcile site releases: scan release markers: %w", err)
-	}
-	for _, item := range markers {
-		m, err := parseReservationMarker(item.Value)
-		if err != nil {
-			// Idempotent reconcile: skip + log one undecodable release marker and
-			// continue; the next tick retries it. Same per-marker discipline the
-			// reserve reconciler uses.
-			r.repoLog().Printf("reconcile site releases: skip undecodable release marker %s: %v", item.Key, err)
-			continue
-		}
-		if markerInGrace(m, now, reserveGrace) {
-			continue // in-flight delete; leave it for the consume step to drop
-		}
-		slug := siteReleaseMarkerSlugFromKey(item.Key)
-		if _, present := liveSiteSlugs[slug]; present {
-			// Row present: bytes are live + counted. DROP the marker WITHOUT
-			// touching the counter, gated on the marker re-reading as still past
-			// grace (never remove a fresh delete's young marker).
-			if err := r.dropSiteReleaseMarkerIfStale(item.Key, now, reserveGrace); err != nil {
-				return fmt.Errorf("reconcile site releases: drop %s: %w", item.Key, err)
-			}
-			continue
-		}
-		// Row absent: complete the lost decrement atomically (at most once).
-		// Passes now+grace so the CAS can re-check the marker's age and leave a
-		// freshly re-stamped young marker alone (never under-count a live site).
-		if err := r.completeSiteReleaseMarker(item.Key, now, reserveGrace); err != nil {
-			return fmt.Errorf("reconcile site releases: complete %s: %w", item.Key, err)
-		}
-	}
-	return nil
-}
-
-// completeSiteReleaseMarker finishes an abandoned SITE delete whose tombstone
-// committed but whose counter decrement was lost: one Transact pinned on the
-// site counter (which co-shards with the marker, both keyed by {id}) reads the
-// counter + the marker, and if the marker is still present subtracts
-// marker.bytes AND deletes the marker, atomically. Idempotent: a marker already
-// consumed reads as absent here and the CAS is a no-op, so the bytes are never
-// double-freed (this is why a double reconcile does not double-decrement). It
-// is the delete-side twin of orphanReleaseSiteMarker.
-//
-// The in-grace re-check inside the CAS is the never-under-count guard, and it
-// mirrors dropSiteReleaseMarkerIfStale exactly: the reconciler chose this
-// "complete" branch from a snapshot taken at scan time (marker past grace, slug
-// absent), but between that scan and this CAS a concurrent re-deploy + fresh
-// delete of the SAME slug can overwrite the single per-(id,slug) slot with a
-// YOUNG marker whose bytes are still LIVE (the fresh delete may not have
-// tombstoned yet, or may crash before it does). Decrementing that young
-// marker's bytes here - and deleting it - would under-count the live site with
-// no record left to recover from. So if the marker re-reads as still in grace,
-// leave it strictly alone for that delete's own consume (step 4).
-func (r *ShaleRepo) completeSiteReleaseMarker(releaseKey []byte, now time.Time, reserveGrace time.Duration) error {
-	owner := siteReleaseMarkerOwnerFromKey(releaseKey)
-	counterKey := shaleKeyIdentitySiteBytes(owner)
-	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
-		raw, err := tx.Get(releaseKey)
-		if err != nil {
-			if errors.Is(err, backend.ErrNotFound) {
-				return nil // already consumed; no-op (never double-decrement)
-			}
-			return err
-		}
-		m, err := parseReservationMarker(raw)
-		if err != nil {
-			return err
-		}
-		if markerInGrace(m, now, reserveGrace) {
-			// A fresh delete re-stamped the slot after the scan; its bytes may
-			// be live. Leave it for that delete's own consume. Never decrement.
-			return nil
-		}
-		cur, err := txGetCounter(tx, counterKey)
-		if err != nil {
-			return err
-		}
-		if err := tx.Put(counterKey, formatCounter(cur-m.Bytes)); err != nil {
-			return err
-		}
-		return tx.Delete(releaseKey)
-	})
-}
-
-// dropSiteReleaseMarkerIfStale deletes a release marker WITHOUT touching the
-// counter (the site-present branch), but only if the marker re-reads as still
-// past grace inside the CAS. The re-check protects a fresh delete that re-wrote
-// the marker (young created_at) between the reconciler's scan and this CAS: its
-// young marker is left for that delete's own consume, never removed here.
-func (r *ShaleRepo) dropSiteReleaseMarkerIfStale(releaseKey []byte, now time.Time, reserveGrace time.Duration) error {
-	return r.cluster.Transact(releaseKey, func(tx backend.Transaction) error {
-		raw, err := tx.Get(releaseKey)
-		if err != nil {
-			if errors.Is(err, backend.ErrNotFound) {
-				return nil // already gone
-			}
-			return err
-		}
-		m, err := parseReservationMarker(raw)
-		if err != nil {
-			return err
-		}
-		if markerInGrace(m, now, reserveGrace) {
-			return nil // a fresh delete re-stamped it; leave it for that delete's consume
-		}
-		return tx.Delete(releaseKey)
-	})
-}
-
-// siteReleaseMarkerOwnerFromKey extracts <id> from an
-// identity_site_release/<id>/<slug> key (everything between the prefix and the
-// FIRST '/').
-func siteReleaseMarkerOwnerFromKey(key []byte) string {
-	rest := strings.TrimPrefix(string(key), "identity_site_release/")
-	if before, _, ok := strings.Cut(rest, "/"); ok {
-		return before
-	}
-	return rest
-}
-
-// siteReleaseMarkerSlugFromKey extracts <slug> from an
-// identity_site_release/<id>/<slug> key (everything after the FIRST '/'; an
-// identity never contains a '/').
-func siteReleaseMarkerSlugFromKey(key []byte) string {
-	rest := strings.TrimPrefix(string(key), "identity_site_release/")
-	if _, after, ok := strings.Cut(rest, "/"); ok {
-		return after
-	}
-	return ""
 }
 
 // ReferencedSiteBlobSHAs returns every distinct blob SHA referenced by any

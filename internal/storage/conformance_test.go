@@ -73,26 +73,40 @@ var fixedNow = time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 // than silently accepting either.
 type conformCaps struct {
 	// ExpiryFreesQuotaAtReadTime is true for backends that exclude an
-	// expired-but-unswept paste's bytes from the owner sum at READ time
-	// (sqlite, slatedb: their sum query filters expires_at > now), so an
-	// owner reclaims that quota the instant the paste expires. It is
-	// FALSE for the shale backend, whose monotonic identity_bytes counter
-	// only sheds the bytes when the sweep deletes the expired paste, so
-	// the quota is reclaimed at sweep time, not read time (docs/SPEC.md
-	// "One intentional behavior change"). Fail-safe either way: the
-	// counter over-counts transiently, never under-counts.
+	// expired-but-unswept paste's/site's bytes from the owner sum at READ
+	// time (sqlite, slatedb, and shale: their sum query / scan filters
+	// expires_at > now), so an owner reclaims that quota the instant the
+	// record expires. All three shipping backends now set it true: shale's
+	// owner sum is a scan over the authoritative rows with a read-time expiry
+	// filter (docs/SPEC.md "Scan-derived quota"), not the old
+	// monotonic identity_bytes counter that only shed at sweep time.
 	ExpiryFreesQuotaAtReadTime bool
 
-	// StrictQuotaUnderConcurrency is true for backends that enforce the
-	// per-owner cap exactly under concurrent uploads: sqlite (its
-	// serializable insert transaction), shale (the reservation-pattern CAS
-	// counter), and slatedb (a per-identity lockQuota stripe held across the
-	// sum + the write, valid because SlateDB is single-writer so only
-	// in-process goroutines can race). All shipping backends set it true.
-	// The false branch (where the concurrency-ceiling test documents a race
-	// instead of asserting) is retained only for a hypothetical backend that
-	// sums outside its write boundary.
+	// StrictQuotaUnderConcurrency is true for backends that enforce a byte
+	// cap exactly under concurrent writes where the check + the write are one
+	// atomic boundary. It gates the ROOM per-room cap concurrency test
+	// (conformRoomPerRoomCapConcurrentCeiling): sqlite (serializable tx),
+	// slatedb (the per-room lockQuota stripe), and shale (the single-shard
+	// CAS on the value key with the per-app counter in the read-set) all hold
+	// it. The per-IDENTITY paste/site quota is gated separately by
+	// StrictIdentityQuotaUnderConcurrency, because those two strictness
+	// properties diverge on shale.
 	StrictQuotaUnderConcurrency bool
+
+	// StrictIdentityQuotaUnderConcurrency is true for backends that enforce
+	// the per-IDENTITY paste/site byte cap exactly under concurrent uploads
+	// from the same identity: sqlite (its serializable insert transaction)
+	// and slatedb (a per-identity lockQuota stripe held across the sum + the
+	// write, valid because SlateDB is single-writer so only in-process
+	// goroutines can race). It is FALSE for shale: the per-identity quota is
+	// a scan-and-compare that is NOT atomic with the authoritative write, so
+	// two concurrent uploads from one identity can both pass the check and
+	// both land - a bounded over-admit that is acceptable (one key is one
+	// person; the object-store bucket quota backstops the durable total).
+	// See docs/SPEC.md "Scan-derived quota". Gates
+	// conformQuotaConcurrentCeiling (paste) +
+	// conformSitePerOwnerCapConcurrentCeiling (site).
+	StrictIdentityQuotaUnderConcurrency bool
 }
 
 // runConformance runs the full contract suite against the backend the
@@ -136,6 +150,7 @@ func runConformanceWithSites(
 	t.Run(name+"/DuplicateSlug", func(t *testing.T) { conformDuplicateSlug(t, newRepo(t)) })
 	t.Run(name+"/QuotaRejectsOverCap", func(t *testing.T) { conformQuotaRejectsOverCap(t, newRepo(t)) })
 	t.Run(name+"/QuotaCountsAllVersions", func(t *testing.T) { conformQuotaCountsAllVersions(t, newRepo(t)) })
+	t.Run(name+"/AppendRevivingExpiredPasteChargesFull", func(t *testing.T) { conformAppendRevivingExpiredPasteChargesFull(t, newRepo(t)) })
 	t.Run(name+"/QuotaFreedByDelete", func(t *testing.T) { conformQuotaFreedByDelete(t, newRepo(t)) })
 	t.Run(name+"/QuotaFreedByDeleteVersion", func(t *testing.T) { conformQuotaFreedByDeleteVersion(t, newRepo(t)) })
 	t.Run(name+"/QuotaPerIdentityIndependent", func(t *testing.T) { conformQuotaPerIdentityIndependent(t, newRepo(t)) })
@@ -287,11 +302,11 @@ func conformQuotaConcurrentCeiling(t *testing.T, r conformanceRepo, caps conform
 		}(i)
 	}
 	wg.Wait()
-	if !caps.StrictQuotaUnderConcurrency {
-		// slatedb-direct: the quota sum runs outside the write transaction,
-		// so the ceiling can be breached. This is the documented race the
-		// shale migration fixes; record it rather than asserting strictness.
-		t.Logf("backend does not guarantee strict quota under concurrency (known slatedb-direct race): %d pastes x %dB = %dB landed, cap %dB",
+	if !caps.StrictIdentityQuotaUnderConcurrency {
+		// shale: the scan-based per-identity quota check is not atomic with
+		// the authoritative write, so the ceiling can be breached by a bounded
+		// same-owner over-admit. Record it rather than asserting strictness.
+		t.Logf("backend does not guarantee strict per-identity quota under concurrency (scan-based over-admit): %d pastes x %dB = %dB landed, cap %dB",
 			landed, body, landed*body, cap)
 		return
 	}
@@ -361,6 +376,68 @@ func conformQuotaCountsAllVersions(t *testing.T, r conformanceRepo) {
 	// A smaller append that keeps the sum under cap succeeds.
 	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "v1234567", domain.KindHTML, "sha-v-v2b", 300, cap, fixedNow); err != nil {
 		t.Fatalf("append within cap (600+300=900): %v", err)
+	}
+}
+
+// conformAppendRevivingExpiredPasteChargesFull pins that appending a version
+// to an EXPIRED-but-unswept paste (which the append REVIVES by resetting
+// expires_at) charges the paste's FULL post-revival size - its existing live
+// versions PLUS the new one - not the new version alone. Because the owner sum
+// filters expires_at > now, the expired paste's existing versions are NOT in
+// `used`; charging only the new version would let the revived paste come back
+// live durably OVER the cap. docs/SPEC.md "Reviving an expired-but-unswept
+// record charges its FULL post-revival size".
+func conformAppendRevivingExpiredPasteChargesFull(t *testing.T, r conformanceRepo) {
+	const cap = 1000
+
+	// --- reject case: revived total would breach the cap ------------------
+	// Paste v1 = 900, expiring in an hour.
+	pr := pasteOf("rvp12345", "key:rvp", 900)
+	pr.ExpiresAt = fixedNow.Add(time.Hour)
+	insert(t, r, pr)
+
+	// Past expiry, before any sweep: the paste is expired-unswept, so its bytes
+	// no longer count (read-time exclusion).
+	after := fixedNow.Add(2 * time.Hour)
+	if sum, err := r.SumActiveBytesByOwner("key:rvp", after); err != nil {
+		t.Fatalf("sum after expiry: %v", err)
+	} else if sum != 0 {
+		t.Fatalf("expired-unswept paste must not count: got %d, want 0", sum)
+	}
+
+	// Append a 900-byte v2. The append REVIVES the paste (resets expires_at), so
+	// v1(900) comes back live too. Charging only v2 would see used(0)+900 <= 1000
+	// and WRONGLY ADMIT, leaving the revived paste at v1+v2 = 1800 over the 1000
+	// cap. The correct charge is the full post-revival total: existing live
+	// v1(900) + new v2(900) = 1800 > 1000 -> reject.
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "rvp12345", domain.KindHTML, "sha-rvp-v2", 900, cap, after); !errors.Is(err, storage.ErrOverUserQuota) {
+		t.Fatalf("reviving an expired paste OVER the cap must be rejected (full post-revival size charged): got %v, want ErrOverUserQuota", err)
+	}
+	// The rejected append left the paste untouched (still expired, still 0).
+	if sum, err := r.SumActiveBytesByOwner("key:rvp", after); err != nil {
+		t.Fatalf("sum after rejected append: %v", err)
+	} else if sum != 0 {
+		t.Fatalf("rejected append must not revive the paste: got %d, want 0 (still expired)", sum)
+	}
+
+	// --- accept case: revived total fits the cap --------------------------
+	// A DIFFERENT owner: paste v1 = 400, expiring in an hour.
+	pf := pasteOf("rvf12345", "key:rvf", 400)
+	pf.ExpiresAt = fixedNow.Add(time.Hour)
+	insert(t, r, pf)
+
+	// Append a 400-byte v2 at `after`. Post-revival total = existing v1(400) +
+	// new v2(400) = 800 <= 1000 -> admit. (A backend that double-charged the
+	// existing bytes would wrongly reject here, so this also guards against
+	// OVER-charging the revival.)
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "rvf12345", domain.KindHTML, "sha-rvf-v2", 400, cap, after); err != nil {
+		t.Fatalf("reviving an expired paste WITHIN the cap should succeed (post-revival 800 <= 1000): %v", err)
+	}
+	// The revived paste is now live at v1+v2 = 800 bytes.
+	if sum, err := r.SumActiveBytesByOwner("key:rvf", after); err != nil {
+		t.Fatalf("sum after revive: %v", err)
+	} else if sum != 800 {
+		t.Fatalf("revived paste must count its full post-revival size: got %d, want 800 (v1 400 + v2 400)", sum)
 	}
 }
 

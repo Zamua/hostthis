@@ -2,28 +2,26 @@
 
 package storage_test
 
-// Reconciler test for the shale backend.
+// Reconciler test for the shale backend's scan-derived quota.
 //
-// docs/SPEC.md "Running the reconciler against live traffic":
-// identity_pastes/* is a DERIVED projection of the authoritative pastes/*
-// rows and CAN be rebuilt by the reconciler (add missing, refresh stale,
-// drop entries whose paste is gone). identity_bytes/* is the strict
-// reservation COUNTER, maintained purely by read-checked CAS deltas on
-// the hot path; the reconciler NEVER recomputes it from a scan (that was
-// the structurally-racy design that was removed). The only counter write
-// the reconciler makes is the orphan-reserve-release delta, covered by
-// TestShaleReconciler_ReleasesOrphanReservation below.
+// docs/SPEC.md "Derived indexes and repair-on-read" / "The correctness
+// argument": the per-identity quota is DERIVED by scanning the per-owner
+// enumeration index (identity_pastes/* and identity_sites/*) and summing the
+// authoritative row sizes. There is NO stored counter. The one quota-relevant
+// gap the scan design has is a crash between the authoritative {slug} row write
+// and the {id} enumeration-index write: it leaves a live row the index does not
+// list, so a scan momentarily UNDER-counts that owner (Window A) until the
+// reconciler reprojects the index. The reconciler's SOLE quota job is to
+// reproject the two enumeration indexes from the authoritative rows (an
+// idempotent SET heal); it never writes an aggregate number, so nothing can
+// durably drift.
 //
-// This test pins the derived-INDEX half of the reconciler: it desyncs the
-// index (drops an identity_pastes entry whose paste still exists, the
-// "missing index entry" half repair-on-read cannot fix on its own) AND
-// corrupts the counter to a bogus value, then runs Reconcile and asserts
-//
-//   - the missing index entry is rebuilt (the paste reappears in the list),
-//   - the corrupted counter is LEFT AS-IS: the reconciler never overwrites
-//     the counter from a scan, so a corrupted absolute value is NOT healed
-//     online (that is the deliberate non-goal; recovery is the offline
-//     audit tool documented in the spec, not an online recompute).
+// This test pins that heal for BOTH families: it drops an enumeration-index
+// entry whose authoritative paste/site still exists (modeling the crash
+// window), asserts the scan under-counts (the entry is gone so the row is not
+// enumerated), then runs Reconcile and asserts the index is rebuilt and the
+// scan is exact again. The site half also proves the re-homed
+// reconcileSiteIndexPass step in Reconcile actually runs.
 //
 //	go test -tags slatedb -run TestShaleReconciler ./internal/storage
 //
@@ -39,7 +37,7 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-func TestShaleReconciler_RebuildsDerivedIndexAndCounter(t *testing.T) {
+func TestShaleReconciler_RebuildsDerivedIndex(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
 		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale reconciler test (start dev MinIO first)")
@@ -47,18 +45,17 @@ func TestShaleReconciler_RebuildsDerivedIndexAndCounter(t *testing.T) {
 	repo := newShaleRepoOnUniqueDB(t, endpoint)
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
-	owner := "key:recon"
 
-	// Insert two pastes for the owner the normal way: this populates the
-	// authoritative rows AND the correct derived index + counter, so we
-	// have a known-good baseline to break and then heal back to.
+	// --- paste enumeration index heal -------------------------------------
+
+	pasteOwner := "key:recon"
 	pA := domain.Paste{
-		Slug: domain.Slug("recon1ab"), Identity: domain.Identity(owner),
+		Slug: domain.Slug("recon1ab"), Identity: domain.Identity(pasteOwner),
 		Kind: domain.KindHTML, ContentSHA: "sha-recon1", Size: 300,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	pB := domain.Paste{
-		Slug: domain.Slug("recon2cd"), Identity: domain.Identity(owner),
+		Slug: domain.Slug("recon2cd"), Identity: domain.Identity(pasteOwner),
 		Kind: domain.KindHTML, ContentSHA: "sha-recon2", Size: 200,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
@@ -68,163 +65,122 @@ func TestShaleReconciler_RebuildsDerivedIndexAndCounter(t *testing.T) {
 	if err := repo.InsertWithQuotaCheck(context.Background(), pB, 0, now); err != nil {
 		t.Fatalf("insert pB: %v", err)
 	}
-	// Append a second version to pA so the counter must sum across versions.
+	// Append a second version to pA so the scan must sum across versions.
 	if _, err := repo.AppendVersionWithQuotaCheck(context.Background(), pA.Slug, domain.KindHTML, "sha-recon1-v2", 100, 0, now); err != nil {
 		t.Fatalf("append pA v2: %v", err)
 	}
 
 	// Authoritative live bytes for the owner: pA(300 + 100) + pB(200) = 600.
-	const wantBytes int64 = 600
+	const wantPasteBytes = 600
 
-	// Sanity: baseline is correct before we corrupt anything.
-	if got := mustSum(t, repo, owner, now); got != int(wantBytes) {
-		t.Fatalf("baseline counter: got %d, want %d", got, wantBytes)
+	// Baseline: the scan-derived sum + count are correct before we desync.
+	// mustCount drains the deferred index confirm so the index is settled.
+	if got := mustCount(t, repo, pasteOwner); got != 2 {
+		t.Fatalf("baseline paste count: got %d, want 2", got)
 	}
-	if got := mustCount(t, repo, owner); got != 2 {
-		t.Fatalf("baseline count: got %d, want 2", got)
-	}
-
-	// --- desync the derived state -----------------------------------------
-
-	// 1. Delete pA's identity_pastes index entry while pA still exists
-	//    authoritatively. ListByOwner / CountByOwner now under-report.
-	if err := repo.DeleteRawForTest(storage.IdentityPasteKeyForTest(owner, pA.Slug.String())); err != nil {
-		t.Fatalf("delete index entry: %v", err)
-	}
-	// 2. Corrupt the identity_bytes counter to a bogus value. The reconciler
-	//    must NOT heal this (it never recomputes the counter from a scan);
-	//    we assert the corruption survives below.
-	const corruptCounter = 99999
-	if err := repo.PutRawForTest(storage.IdentityBytesKeyForTest(owner), []byte("99999")); err != nil {
-		t.Fatalf("corrupt counter: %v", err)
+	if got := mustSum(t, repo, pasteOwner, now); got != wantPasteBytes {
+		t.Fatalf("baseline paste sum: got %d, want %d", got, wantPasteBytes)
 	}
 
-	// Confirm the desync is observable (the index drop dropped pA from the
-	// owner's list; the counter now reads the bogus value).
-	if got := mustCount(t, repo, owner); got != 1 {
-		t.Fatalf("post-desync count: got %d, want 1 (pA dropped from index)", got)
+	// Model the crash-between-row-and-index window: drop pA's identity_pastes
+	// entry while pA still exists authoritatively. The quota scan enumerates
+	// THROUGH this index, so pA's bytes drop out of the sum (a transient Window
+	// A UNDER-count) and pA drops out of the owner's list.
+	if err := repo.DeleteRawForTest(storage.IdentityPasteKeyForTest(pasteOwner, pA.Slug.String())); err != nil {
+		t.Fatalf("drop pA index entry: %v", err)
 	}
-	if got := mustSum(t, repo, owner, now); got != corruptCounter {
-		t.Fatalf("post-desync counter: got %d, want %d (corrupted)", got, corruptCounter)
+	if got := mustCount(t, repo, pasteOwner); got != 1 {
+		t.Fatalf("post-desync paste count: got %d, want 1 (pA dropped from index)", got)
+	}
+	if got := mustSum(t, repo, pasteOwner, now); got != 200 {
+		t.Fatalf("post-desync paste sum: got %d, want 200 (Window A under-count: only pB enumerated)", got)
 	}
 
-	// --- reconcile + assert convergence -----------------------------------
-
-	if err := repo.ReconcileForTest(now, time.Hour); err != nil {
+	// Reconcile reprojects the enumeration index from the authoritative rows,
+	// closing the under-count window.
+	if err := repo.ReconcileForTest(now); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-
-	// The counter is NOT recomputed: the reconciler only ever moves the
-	// counter via strict CAS deltas (orphan-release), never a scan-derived
-	// overwrite, so the corrupted absolute value is deliberately left
-	// in place (docs/SPEC.md "The invariant, the residual drift, and the
-	// deliberate non-goal" - corruption recovery is the OFFLINE audit tool,
-	// never an online recompute). wantBytes is kept as documentation of the
-	// true authoritative live-byte sum the offline tool would converge to.
-	_ = wantBytes
-	if got := mustSum(t, repo, owner, now); got != corruptCounter {
-		t.Fatalf("post-reconcile counter: got %d, want %d (the reconciler must NOT recompute/heal the counter from a scan)", got, corruptCounter)
+	if got := mustSum(t, repo, pasteOwner, now); got != wantPasteBytes {
+		t.Fatalf("post-reconcile paste sum: got %d, want %d (index reprojected, scan exact again)", got, wantPasteBytes)
 	}
-	// The dropped index entry is rebuilt: both pastes are back in the list.
-	if got := mustCount(t, repo, owner); got != 2 {
-		t.Fatalf("post-reconcile count: got %d, want 2 (index rebuilt)", got)
+	if got := mustCount(t, repo, pasteOwner); got != 2 {
+		t.Fatalf("post-reconcile paste count: got %d, want 2 (index rebuilt)", got)
 	}
-	list, err := repo.ListByOwner(owner)
+	// The rebuilt entry is a real entry, not a tombstone read: the raw key is
+	// present.
+	raw, err := repo.GetRawForTest(storage.IdentityPasteKeyForTest(pasteOwner, pA.Slug.String()))
 	if err != nil {
-		t.Fatalf("list by owner: %v", err)
-	}
-	if len(list) != 2 {
-		t.Fatalf("post-reconcile list: got %d pastes, want 2", len(list))
-	}
-	sawA, sawB := false, false
-	for _, p := range list {
-		switch p.Slug {
-		case pA.Slug:
-			sawA = true
-		case pB.Slug:
-			sawB = true
-		}
-		if p.Identity.String() != owner {
-			t.Fatalf("reconcile leaked a non-owner paste: %+v", p)
-		}
-	}
-	if !sawA || !sawB {
-		t.Fatalf("post-reconcile list missing a paste: sawA=%v sawB=%v list=%+v", sawA, sawB, list)
-	}
-
-	// The rebuilt index entry is a real entry, not a tombstone read: the
-	// raw key is present.
-	raw, err := repo.GetRawForTest(storage.IdentityPasteKeyForTest(owner, pA.Slug.String()))
-	if err != nil {
-		t.Fatalf("read rebuilt index entry: %v", err)
+		t.Fatalf("read rebuilt paste index entry: %v", err)
 	}
 	if len(raw) == 0 {
 		t.Fatalf("reconcile should have rebuilt pA's index entry, got empty")
 	}
-}
-
-// TestShaleReconciler_ReleasesOrphanReservation pins the second half of
-// the reconciler's job: an identity_reserve marker for a paste that
-// never materialized (a failed authoritative write left the counter
-// over-counted) is released so the counter converges back to the
-// authoritative live-byte sum.
-func TestShaleReconciler_ReleasesOrphanReservation(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale reconciler test (start dev MinIO first)")
+	// Only the owner's pastes are healed; no leak across owners.
+	list, err := repo.ListByOwner(pasteOwner)
+	if err != nil {
+		t.Fatalf("list by owner: %v", err)
 	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	for _, p := range list {
+		if p.Identity.String() != pasteOwner {
+			t.Fatalf("reconcile leaked a non-owner paste: %+v", p)
+		}
+	}
 
-	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
-	owner := "key:orphan"
+	// --- site enumeration index heal (the re-homed reconcileSiteIndexPass) --
 
-	// One real paste of 300 bytes for the owner.
-	p := domain.Paste{
-		Slug: domain.Slug("orphanab"), Identity: domain.Identity(owner),
-		Kind: domain.KindHTML, ContentSHA: "sha-orphan", Size: 300,
+	siteOwner := "key:reconsite"
+	siteSlug := domain.Slug("reconsite")
+	man := domain.NewManifest()
+	man.Add("index.html", domain.ManifestEntry{
+		SHA: "sha-reconsite-index", Size: 400, ContentType: "text/html; charset=utf-8",
+	})
+	site := domain.Site{
+		Slug: siteSlug, Identity: domain.Identity(siteOwner), Manifest: man,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
-	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
-		t.Fatalf("insert paste: %v", err)
-	}
-	// Drain the deferred confirm so the insert's own reservation marker is
-	// consumed before the grace=0 reconcile below, which would otherwise
-	// release it and shed the real paste's 300 bytes too.
-	repo.WaitPendingConfirms()
-
-	// Simulate a crashed reservation: an identity_reserve marker for a
-	// slug that has NO authoritative paste, plus the over-counted bytes
-	// folded into the counter. This is the fail-safe over-count the
-	// reservation pattern leaves behind when the authoritative write
-	// fails after the reserve step.
-	const orphanBytes = 500
-	ghostSlug := "ghostpst"
-	mustPutRaw(t, repo, storage.IdentityReserveKeyForTest(owner, ghostSlug), []byte("500"))
-	// Counter currently holds the real 300; bump it to 800 to model the
-	// reserve that incremented but whose authoritative write never landed.
-	mustPutRaw(t, repo, storage.IdentityBytesKeyForTest(owner), []byte("800"))
-
-	if got := mustSum(t, repo, owner, now); got != 800 {
-		t.Fatalf("pre-reconcile counter: got %d, want 800 (real 300 + orphan %d)", got, orphanBytes)
+	const wantSiteBytes int64 = 400
+	if err := repo.InsertSiteWithQuotaCheck(context.Background(), site, man.DedupedSize(), 0, now); err != nil {
+		t.Fatalf("deploy site: %v", err)
 	}
 
-	// Reconcile with a zero grace window so the orphan is eligible now.
-	if err := repo.ReconcileForTest(now, 0); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	// Baseline: the site scan sees the deploy.
+	if got := mustSiteSum(t, repo, siteOwner, now); got != wantSiteBytes {
+		t.Fatalf("baseline site sum: got %d, want %d", got, wantSiteBytes)
+	}
+	if got := mustSiteCount(t, repo, siteOwner, now); got != 1 {
+		t.Fatalf("baseline site count: got %d, want 1", got)
 	}
 
-	// The counter is rebuilt to the authoritative live bytes (300); the
-	// orphan's 500 is shed.
-	if got := mustSum(t, repo, owner, now); got != 300 {
-		t.Fatalf("post-reconcile counter: got %d, want 300 (orphan released)", got)
+	// Drop the site's identity_sites entry while the authoritative site still
+	// exists (the same crash window, site side). The site scan enumerates
+	// through identity_sites, so the site's bytes drop out.
+	if err := repo.DeleteRawForTest(storage.IdentitySiteKeyForTest(siteOwner, siteSlug.String())); err != nil {
+		t.Fatalf("drop site index entry: %v", err)
 	}
-	// The orphan reservation marker is gone.
-	raw, err := repo.GetRawForTest(storage.IdentityReserveKeyForTest(owner, ghostSlug))
+	if got := mustSiteSum(t, repo, siteOwner, now); got != 0 {
+		t.Fatalf("post-desync site sum: got %d, want 0 (Window A under-count for sites)", got)
+	}
+	if got := mustSiteCount(t, repo, siteOwner, now); got != 0 {
+		t.Fatalf("post-desync site count: got %d, want 0 (site dropped from index)", got)
+	}
+
+	// Reconcile's re-homed site-index reprojection rebuilds the entry.
+	if err := repo.ReconcileForTest(now); err != nil {
+		t.Fatalf("reconcile (site): %v", err)
+	}
+	if got := mustSiteSum(t, repo, siteOwner, now); got != wantSiteBytes {
+		t.Fatalf("post-reconcile site sum: got %d, want %d (site index reprojected)", got, wantSiteBytes)
+	}
+	if got := mustSiteCount(t, repo, siteOwner, now); got != 1 {
+		t.Fatalf("post-reconcile site count: got %d, want 1 (site index rebuilt)", got)
+	}
+	rawSite, err := repo.GetRawForTest(storage.IdentitySiteKeyForTest(siteOwner, siteSlug.String()))
 	if err != nil {
-		t.Fatalf("read orphan marker: %v", err)
+		t.Fatalf("read rebuilt site index entry: %v", err)
 	}
-	if len(raw) != 0 {
-		t.Fatalf("reconcile should have released the orphan reservation marker, got %q", raw)
+	if len(rawSite) == 0 {
+		t.Fatalf("reconcile should have rebuilt the site's index entry, got empty")
 	}
 }
 
@@ -250,4 +206,22 @@ func mustCount(t *testing.T, repo *storage.ShaleRepo, owner string) int {
 		t.Fatalf("count by owner: %v", err)
 	}
 	return n
+}
+
+func mustSiteSum(t *testing.T, repo *storage.ShaleRepo, owner string, now time.Time) int64 {
+	t.Helper()
+	n, err := repo.SumActiveSiteBytesByOwner(owner, now)
+	if err != nil {
+		t.Fatalf("sum active site bytes: %v", err)
+	}
+	return n
+}
+
+func mustSiteCount(t *testing.T, repo *storage.ShaleRepo, owner string, now time.Time) int {
+	t.Helper()
+	sites, err := repo.ListSitesByOwner(owner, now)
+	if err != nil {
+		t.Fatalf("list sites by owner: %v", err)
+	}
+	return len(sites)
 }

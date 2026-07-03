@@ -15,9 +15,13 @@ package storage_test
 // Each subtest gets a FRESH logical DbName (a per-run prefix within the
 // bucket) and a fresh single-node cluster so runs don't see each other's
 // keys and the "empty repo" assertions hold. The shale backend declares
-// conformCaps{ExpiryFreesQuotaAtReadTime: false}: its identity_bytes
-// reservation counter sheds an expired paste's bytes at sweep time, not
-// read time (docs/SPEC.md "One intentional behavior change").
+// conformCaps{ExpiryFreesQuotaAtReadTime: true, StrictQuotaUnderConcurrency:
+// true, StrictIdentityQuotaUnderConcurrency: false}: its per-identity quota
+// is a scan over the authoritative rows with a read-time expiry filter, and
+// that scan is NOT atomic with the write, so the per-identity cap is not
+// strict under same-owner concurrency (a bounded over-admit); the per-room
+// cap stays strict via its own single-shard CAS (docs/SPEC.md "Scan-derived
+// per-identity quota").
 
 import (
 	"fmt"
@@ -84,7 +88,7 @@ func TestConformance_Shale(t *testing.T) {
 		t.Cleanup(func() { _ = repo.Close() })
 		return repo
 	}
-	caps := conformCaps{ExpiryFreesQuotaAtReadTime: false, StrictQuotaUnderConcurrency: true}
+	caps := conformCaps{ExpiryFreesQuotaAtReadTime: true, StrictQuotaUnderConcurrency: true, StrictIdentityQuotaUnderConcurrency: false}
 	newRepo := func(t *testing.T) conformanceRepo { return newShale(t) }
 	// The site repo (ShaleSiteRepo) wraps the SAME ShaleRepo (same cluster
 	// handle + shard routing), so the cross-quota + cross-family-slug site
