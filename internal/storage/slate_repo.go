@@ -531,6 +531,32 @@ func (r *SlateRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 	return total, nil
 }
 
+// sumLiveVersionBytesForSlug sums the sizes of a paste's non-deleted version
+// rows (the paste's post-revival byte contribution). When
+// AppendVersionWithQuotaCheck revives an EXPIRED-unswept paste - the owner sum
+// excludes it, but the append resets its expiry - the check charges this sum
+// PLUS the new version so the revived paste's full bytes are counted, matching
+// the sqlite/shale append revival charge (docs/SPEC.md "Reviving an
+// expired-but-unswept record charges its FULL post-revival size").
+func (r *SlateRepo) sumLiveVersionBytesForSlug(slug domain.Slug) (int64, error) {
+	items, err := r.scanPrefix(prefixVersions(slug))
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, item := range items {
+		var v versionRow
+		if err := json.Unmarshal(item.Value, &v); err != nil {
+			return 0, fmt.Errorf("decode %s: %w", item.Key, err)
+		}
+		if v.Deleted {
+			continue
+		}
+		total += int64(v.Size)
+	}
+	return total, nil
+}
+
 func (r *SlateRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	items, err := r.scanPrefix(prefixVersions(slug))
 	if err != nil {
@@ -936,7 +962,23 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		if err != nil {
 			return AppendResult{}, fmt.Errorf("identity site sum: %w", err)
 		}
-		if ownerPaste+ownerSite+body > userCap {
+		// Reviving an EXPIRED-unswept paste must charge its full post-revival
+		// size. The owner sums filter expires_at > now, so an expired paste's
+		// existing versions are NOT in ownerPaste - but the append below resets
+		// expires_at (revives it), bringing them back. Charge the paste's existing
+		// non-deleted version bytes PLUS the new version, not the new version
+		// alone, or the revived paste durably exceeds the cap (docs/SPEC.md
+		// "Reviving an expired-but-unswept record charges its FULL post-revival
+		// size"). Matches the sqlite + shale append revival charge.
+		charge := body
+		if !existing.ExpiresAt.After(now) {
+			revived, err := r.sumLiveVersionBytesForSlug(slug)
+			if err != nil {
+				return AppendResult{}, fmt.Errorf("revived version sum: %w", err)
+			}
+			charge += revived
+		}
+		if ownerPaste+ownerSite+charge > userCap {
 			return AppendResult{}, ErrOverUserQuota
 		}
 	}

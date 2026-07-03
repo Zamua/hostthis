@@ -287,7 +287,12 @@ type AppendResult struct {
 //
 // The "size" being charged is the new version's bytes - older versions
 // continue to count toward the identity's total until the parent paste
-// expires or is deleted.
+// expires or is deleted. EXCEPTION: if the target paste is EXPIRED-unswept it
+// is excluded from identityActiveBytes, but the UPDATE below resets expires_at
+// (revives it), so the check charges the paste's full post-revival size - its
+// existing non-deleted version bytes plus the new version - not the new version
+// alone (docs/SPEC.md "Reviving an expired-but-unswept record charges its FULL
+// post-revival size").
 // ctx is accepted to satisfy the service.PasteAdmin interface; the sqlite
 // path ignores it (no shale-blob plane) and uses its own serializable-tx
 // context.
@@ -302,10 +307,13 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 	siteNowStr := formatSiteExpiry(now)
 	body := int64(size)
 
-	// Look up the paste's identity + pin state.
+	// Look up the paste's identity + pin state + liveness. The paste
+	// expires_at column is stored with formatTime (RFC3339Nano), so it is
+	// compared against nowStr (the same format), NOT siteNowStr.
 	var ownerIdentity string
 	var existingPin int
-	if err := tx.QueryRow(`SELECT identity, pinned_version FROM pastes WHERE slug = ?`, slug.String()).Scan(&ownerIdentity, &existingPin); err != nil {
+	var pasteLive bool
+	if err := tx.QueryRow(`SELECT identity, pinned_version, expires_at > ? FROM pastes WHERE slug = ?`, nowStr, slug.String()).Scan(&ownerIdentity, &existingPin, &pasteLive); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return AppendResult{}, ErrNotFound
 		}
@@ -319,7 +327,23 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		if err != nil {
 			return AppendResult{}, err
 		}
-		if ownerTotal+body > userCap {
+		// Reviving an EXPIRED-unswept paste must charge its full post-revival
+		// size: identityActiveBytes filters expires_at > now, so an expired
+		// paste's existing versions are NOT in ownerTotal - but the UPDATE below
+		// resets expires_at (revives it), bringing them back. Charge the paste's
+		// existing non-deleted version bytes PLUS the new version, not the new
+		// version alone, or the revived paste durably exceeds the cap (docs/SPEC.md
+		// "Reviving an expired-but-unswept record charges its FULL post-revival
+		// size"). Matches the slatedb + shale append revival charge.
+		charge := body
+		if !pasteLive {
+			var revived int64
+			if err := tx.QueryRow(`SELECT COALESCE(SUM(size), 0) FROM versions WHERE slug = ? AND deleted = 0`, slug.String()).Scan(&revived); err != nil {
+				return AppendResult{}, fmt.Errorf("revived version sum: %w", err)
+			}
+			charge += revived
+		}
+		if ownerTotal+charge > userCap {
 			return AppendResult{}, ErrOverUserQuota
 		}
 	}

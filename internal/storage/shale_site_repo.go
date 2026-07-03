@@ -222,10 +222,12 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(ctx context.Context, s domain.Site,
 //  1. up-front Get to size the delta (read oldBody) and gate ownership +
 //     existence,
 //  2. quota CHECK (scan the owner's combined paste+site used bytes) charging
-//     the delta: the scan's `used` already counts this site's oldBody, so the
-//     post-swap total is used + (newBody-oldBody) - a same-size re-deploy nets
-//     zero, a smaller one frees the difference, a larger one is rejected when
-//     it would breach the cap,
+//     the delta: when the old row is LIVE the scan's `used` already counts its
+//     oldBody, so the post-swap total is used + (newBody-oldBody) - a same-size
+//     re-deploy nets zero, a smaller one frees the difference, a larger one is
+//     rejected when it would breach the cap. When the old row is EXPIRED-unswept
+//     it is NOT in `used`, so oldBody is credited as 0 and the replace charges
+//     the full new size (reviving an expired site is a fresh write of that size),
 //  3. authoritative swap on the {slug} shard (re-read sites/<slug> in the CAS
 //     read-set for ownership + the old expiry key, overwrite the row, re-key
 //     the expiry index),
@@ -267,13 +269,23 @@ func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site
 	if existing.Identity != identity {
 		return ErrNotFound
 	}
+	// Credit the old bytes back ONLY if the old row is still LIVE: the
+	// scan-based `used` filters expires_at > now, so an expired-but-unswept old
+	// row is NOT in it. Crediting an expired old row would double-subtract and
+	// admit an over-cap replace - reviving an expired site must charge the full
+	// new size (docs/SPEC.md "Reviving an expired-but-unswept record charges its
+	// FULL post-revival size"). Mirrors the sqlite + slatedb ReplaceWithQuotaCheck.
 	oldBody := int64(existing.DedupedSize)
+	if !existing.ExpiresAt.After(now) {
+		oldBody = 0
+	}
 
-	// Quota CHECK (scan-based) before the swap, charging the DELTA. The scan's
-	// `used` already counts this site's oldBody, so the post-swap owner total
-	// is used - oldBody + newBody = used + (newBody-oldBody): a same-size
-	// re-deploy nets zero, a smaller one frees the difference, a larger one is
-	// rejected when it would breach the cap.
+	// Quota CHECK (scan-based) before the swap, charging the DELTA. When the old
+	// row is live the scan's `used` already counts its oldBody, so the post-swap
+	// owner total is used - oldBody + newBody = used + (newBody-oldBody): a
+	// same-size re-deploy nets zero, a smaller one frees the difference, a larger
+	// one is rejected when it would breach the cap. When the old row is expired
+	// (oldBody credited as 0) the replace charges the full new size.
 	if userCap > 0 {
 		used, err := r.combinedActiveBytes(identity, now)
 		if err != nil {
@@ -730,12 +742,31 @@ func (r *ShaleRepo) reconcileSiteIndexPass() error {
 		slug := strings.TrimPrefix(string(item.Key), "sites/")
 		var row siteRow
 		if err := json.Unmarshal(item.Value, &row); err != nil {
-			// Idempotent reconcile: the row physically exists, we just cannot
-			// decode it - skip its index projection; the next tick retries. The
-			// physically-present row is still summed directly by the quota scan,
-			// so skipping its re-indexing never drops the owner's bytes. Matches
-			// the paste reconciler's undecodable-row policy.
-			r.repoLog().Printf("reconcile sites: skip undecodable site %s: %v", item.Key, err)
+			// Idempotent reconcile: one poisoned site row must not stall the pass
+			// (Policy 1). But dropping it silently would leave a durable
+			// UNDER-count if its identity_sites entry was ALSO lost: the site
+			// quota scan reads THROUGH the enumeration index, so an un-indexed
+			// undecodable row is invisible to it. Derive the owner
+			// decode-independently from slug_owner/<slug> (written by the site
+			// deploy's pre-claim on the transactional shale-blob path) and still
+			// project the enumeration entry, so the next scan enumerates the slug
+			// and re-reads the authoritative row (which then hard-fails the scan =
+			// fail-closed reject, never a silent under-count). See docs/SPEC.md
+			// "Decode tolerance of the quota scan".
+			owner := r.ownerOfSlug(domain.Slug(slug))
+			if owner == "" {
+				// No slug_owner to derive the owner (reachable only on the
+				// metadata-only test path that skips the pre-claim; prod always
+				// writes slug_owner). Cannot project the entry; log loudly - the
+				// one residual where the row can stay un-enumerated until repaired.
+				r.repoLog().Printf("reconcile sites: undecodable site %s AND no slug_owner: cannot project enumeration entry; site quota may under-count this slug until it is repaired: %v", item.Key, err)
+				continue
+			}
+			if sitesByOwner[owner] == nil {
+				sitesByOwner[owner] = make(map[string]struct{})
+			}
+			sitesByOwner[owner][slug] = struct{}{}
+			r.repoLog().Printf("reconcile sites: undecodable site %s: projected placeholder enumeration entry under owner %s (fail-closed): %v", item.Key, owner, err)
 			continue
 		}
 		if sitesByOwner[row.Identity] == nil {

@@ -108,6 +108,7 @@ func runSiteConformance(t *testing.T, name string, caps conformCaps, newSites fu
 	t.Run(name+"/Sites/ReplaceInPlace", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceInPlace(t, sr) })
 	t.Run(name+"/Sites/ReplaceNotFoundShape", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceNotFoundShape(t, r, sr) })
 	t.Run(name+"/Sites/ReplaceDeltaQuota", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceDeltaQuota(t, sr) })
+	t.Run(name+"/Sites/ReplaceRevivesExpiredChargesFull", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceRevivesExpiredChargesFull(t, sr) })
 	t.Run(name+"/Sites/ReplaceRestartsExpiry", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceRestartsExpiry(t, sr) })
 	t.Run(name+"/Sites/ListByOwner", func(t *testing.T) { _, sr := newSites(t); conformSiteListByOwner(t, sr) })
 }
@@ -285,6 +286,71 @@ func conformSiteReplaceDeltaQuota(t *testing.T, sr conformanceSiteRepo) {
 	}
 	if err := sr.InsertWithQuotaCheck(context.Background(), siteOfV("rq223456", "key:rq", 600, "v1"), 600, cap, fixedNow); err != nil {
 		t.Fatalf("follow-up 600 should fit after the shrink (300+600=900): %v", err)
+	}
+}
+
+// conformSiteReplaceRevivesExpiredChargesFull pins that re-deploying an
+// EXPIRED-but-unswept site charges the FULL new size, never a delta that
+// credits the expired old row. Because the scan filters expires_at > now, an
+// expired site is NOT in the owner's `used`; crediting its old bytes against
+// the replace delta would DOUBLE-SUBTRACT and admit an over-cap re-deploy,
+// leaving a live site durably over the cap. Every backend gates the old-bytes
+// credit on the old row being LIVE. docs/SPEC.md "Reviving an
+// expired-but-unswept record charges its FULL post-revival size".
+func conformSiteReplaceRevivesExpiredChargesFull(t *testing.T, sr conformanceSiteRepo) {
+	const cap = 1000
+	const slug = "revx1234"
+	// Deploy a 900-byte site that expires in an hour.
+	v1 := siteOfV(slug, "key:revx", 900, "v1")
+	v1.ExpiresAt = fixedNow.Add(time.Hour)
+	if err := sr.InsertWithQuotaCheck(context.Background(), v1, 900, cap, fixedNow); err != nil {
+		t.Fatalf("seed 900 under cap: %v", err)
+	}
+
+	// Past expiry, before any sweep: the site is expired-but-unswept, so its
+	// bytes no longer count (read-time exclusion). The owner's site sum is 0.
+	after := fixedNow.Add(2 * time.Hour)
+	if used, err := sr.SumActiveBytesByOwner("key:revx", after); err != nil {
+		t.Fatalf("sum after expiry: %v", err)
+	} else if used != 0 {
+		t.Fatalf("expired-unswept site must not count toward quota: got %d, want 0", used)
+	}
+
+	// Re-deploy the SAME slug at 1500 bytes (over the 1000 cap). A delta credit
+	// of the EXPIRED old row would compute used(0) - old(900) + new(1500) = 600
+	// <= 1000 and WRONGLY ADMIT, resurrecting a live 1500-byte site over a 1000
+	// cap. The correct behavior does NOT credit the expired old bytes, charging
+	// the full new size: 0 + 1500 = 1500 > 1000 -> reject.
+	over := siteOfV(slug, "key:revx", 1500, "v2")
+	over.CreatedAt = fixedNow
+	over.UpdatedAt = after
+	over.ExpiresAt = after.Add(domain.DefaultRetentionWindow)
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), over, 1500, cap, after); !errors.Is(err, storage.ErrOverUserQuota) {
+		t.Fatalf("reviving an expired site OVER the cap must be rejected (full new size charged, expired old bytes NOT credited): got %v, want ErrOverUserQuota", err)
+	}
+	// The rejected replace left the site untouched (still expired v1/900).
+	if used, err := sr.SumActiveBytesByOwner("key:revx", after); err != nil {
+		t.Fatalf("sum after rejected revive: %v", err)
+	} else if used != 0 {
+		t.Fatalf("rejected over-cap revive must not mutate the row: got %d, want 0 (still expired)", used)
+	}
+
+	// A revive that FITS the cap succeeds and charges the full new size: replace
+	// the expired 900 with 800. If the expired old bytes were (wrongly) counted
+	// the post-revival total would be 900+800 and the point would be moot; the
+	// correct math is simply 0 + 800 = 800 <= 1000 -> admit, and the revived
+	// site now counts its full new size.
+	fit := siteOfV(slug, "key:revx", 800, "v3")
+	fit.CreatedAt = fixedNow
+	fit.UpdatedAt = after
+	fit.ExpiresAt = after.Add(domain.DefaultRetentionWindow)
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), fit, 800, cap, after); err != nil {
+		t.Fatalf("reviving an expired site WITHIN the cap should succeed (full new size 800 <= 1000): %v", err)
+	}
+	if used, err := sr.SumActiveBytesByOwner("key:revx", after); err != nil {
+		t.Fatalf("sum after revive: %v", err)
+	} else if used != 800 {
+		t.Fatalf("revived site must count its full new size: got %d, want 800", used)
 	}
 }
 
