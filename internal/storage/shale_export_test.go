@@ -201,3 +201,36 @@ func MarkerValueForTest() []byte { return markerValue }
 func EncodeReservationMarkerForTest(bytes int64, createdAt time.Time) ([]byte, error) {
 	return encodeReservationMarker(bytes, createdAt)
 }
+
+// --- site-family keys (what a half-committed DeleteSite touches) -----------
+
+// SiteKeyForTest returns the "sites/<slug>" authoritative row key.
+func SiteKeyForTest(slug domain.Slug) []byte { return shaleKeySite(slug) }
+
+// ExpirySiteKeyForTest returns the "expiry_sites/<ts>/<slug>" sweep-index
+// key (fixed-width timestamp), so a test can remove the derived expiry entry
+// exactly as DeleteSite's {slug}-shard CAS does.
+func ExpirySiteKeyForTest(t time.Time, slug domain.Slug) []byte {
+	return shaleKeyExpirySite(t, slug)
+}
+
+// IdentitySiteKeyForTest returns the "identity_sites/<id>/<slug>"
+// enumeration-index entry key (the {id}-shard entry DeleteSite drops).
+func IdentitySiteKeyForTest(identity, slug string) []byte {
+	return shaleKeyIdentitySite(identity, slug)
+}
+
+// IdentitySiteBytesKeyForTest returns the "identity_site_bytes/<id>" SITE
+// quota counter key: the per-identity static-site byte counter DeleteSite
+// decrements on the {id} shard as a separate CAS from the {slug} row removal.
+func IdentitySiteBytesKeyForTest(identity string) []byte {
+	return shaleKeyIdentitySiteBytes(identity)
+}
+
+// IdentitySiteReserveKeyForTest returns the
+// "identity_site_reserve/<id>/<slug>" site reservation-marker key. Exposed so
+// the control subtest can seed an orphaned site reservation and prove the
+// reconciler releases it (the marker-backed drift the markerless case lacks).
+func IdentitySiteReserveKeyForTest(identity, slug string) []byte {
+	return shaleKeyIdentitySiteReserve(identity, slug)
+}
