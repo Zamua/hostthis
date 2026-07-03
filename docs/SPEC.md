@@ -291,20 +291,22 @@ object store (~250 ms, the bottleneck), then the metadata insert
 (~20 ms). The uploader waited for all three before seeing the URL.
 
 The blob bytes are content-addressed and immutable, and the metadata
-insert already runs through a quota-enforcing reservation. So we can
-return the URL right after the metadata is committed and finish the
-blob write in the background. The cost is a window where the URL exists
-but the bytes do not yet, which the status models explicitly.
+insert already enforces quota (the committed paste + version rows count
+against the owner's quota the moment they land). So we can return the URL
+right after the metadata is committed and finish the blob write in the
+background. The cost is a window where the URL exists but the bytes do not
+yet, which the status models explicitly.
 
 ### The three states
 
-- **`pending`**: the metadata is committed (slug reserved, quota charged,
+- **`pending`**: the metadata is committed (slug claimed, quota checked,
   paste row written) but the content blob has not finished landing in
   the object store. A GET on a pending paste serves a lightweight
   **loading page** that auto-refreshes (a `<meta http-equiv="refresh">`
-  ~1 s poll) until the paste resolves. The reservation already holds the
-  uploader's quota, so a pending paste counts against quota exactly like
-  a ready one.
+  ~1 s poll) until the paste resolves. The pending paste's authoritative
+  rows already count toward the uploader's quota (the quota scan / sum
+  includes any non-`failed` paste), so a pending paste counts against
+  quota exactly like a ready one.
 - **`ready`**: the blob write succeeded and the status was flipped
   `pending -> ready` by the background finalizer. A GET serves the
   content exactly as before this feature existed. This is the terminal
@@ -312,8 +314,8 @@ but the bytes do not yet, which the status models explicitly.
 - **`failed`**: the background blob write failed (object store error,
   or the handling pod died before the write completed and the
   reconciler aged the paste out, see below). A GET serves a small
-  **error page**. The reservation is released as part of the transition
-  so the failed paste no longer charges quota.
+  **error page**. A `failed` paste is excluded from the quota scan / sum
+  as part of the transition, so it no longer charges quota.
 
 A paste that predates this feature (a row with no persisted status) is
 read as **`ready`**: the absence of a status means "written before the
@@ -327,13 +329,14 @@ additive migration with no flag day.
 1. stream + hash + compress (hold the compressed body in the handling
    pod's memory),
 2. detect the content kind,
-3. **reserve quota + write the authoritative paste row with
+3. **check quota + write the authoritative paste row with
    `status=pending`** (the fast metadata path, ~20 ms),
 4. return the URL.
 
-Quota is enforced HERE, synchronously, by the same reservation CAS used
-before. An over-quota upload is rejected before any URL is handed out:
-the async split does not weaken the quota gate.
+Quota is enforced HERE, synchronously, by the same quota check used
+before (a scan of the owner's live rows on shale; a serialized in-transaction
+sum on sqlite/slatedb). An over-quota upload is rejected before any URL is
+handed out: the async split does not weaken the quota gate.
 
 ### Finalize: the asynchronous half
 
@@ -342,8 +345,8 @@ upload service) runs the finalizer:
 
 1. `PutPrecompressed` the held bytes to the object store,
 2. on success: flip the paste `pending -> ready` (a small metadata CAS),
-3. on failure: flip the paste `pending -> failed` AND release the
-   reservation (return the charged bytes).
+3. on failure: flip the paste `pending -> failed` (a failed paste is
+   excluded from the quota scan / sum, returning the charged bytes).
 
 The transitions are guarded: the finalizer only advances a paste that is
 still `pending`. If the reconciler already aged the paste to `failed`
@@ -362,7 +365,7 @@ regression the feature introduces, and it is bounded:
 - The window is the blob-write latency (~250 ms), not the whole request.
 - A paste stuck `pending` past a timeout (default: a small multiple of
   the expected blob-write latency, well under a minute) is aged to
-  `failed` by the reconciler, which also releases its reservation. So a
+  `failed` by the reconciler, so it drops out of the quota scan. So a
   lost-bytes paste self-heals into a clean `failed` rather than a
   permanent loading screen.
 - Nothing that was previously durable becomes less durable: a `ready`
@@ -379,8 +382,8 @@ observable + self-correcting rather than silent.
 
 The metadata reconciler gains one job: a paste whose `status=pending`
 and whose `created_at` is older than the pending timeout is transitioned
-to `failed` and its reservation released. This is the backstop for the
-pod-death case (the bytes are gone, no finalizer will ever run). It uses
+to `failed`, so its bytes drop out of the quota scan. This is the backstop
+for the pod-death case (the bytes are gone, no finalizer will ever run). It uses
 the same idempotent, decode-tolerant per-row discipline the reconciler's
 other jobs use: one poisoned row never stalls the pass.
 
@@ -2339,7 +2342,12 @@ no half-applied state visible to readers."
 - All identities combined → the object-store bucket quota on real
   physical bytes (post-compression, post-dedup), enforced by the storage
   layer, not an app-level scan
-- Concurrent per-identity quota races → atomic transactions
+- Concurrent per-identity quota races → atomic transactions on the
+  single-writer backends (sqlite / slatedb); on the sharded shale backend
+  the quota check is a scan that is not atomic with the write, so
+  same-identity concurrency admits a BOUNDED overshoot (one in-flight
+  upload), backstopped by the object-store bucket quota (see
+  "Scan-derived quota" / "The correctness argument")
 - 30-day retention as the long-term release valve
 
 *Not bounded by the protocol* (operator-layer concerns):
@@ -2595,20 +2603,24 @@ HOSTTHIS_METADATA_S3_BUCKET=hostthis-metadata     # required for slatedb
 
 Every write that touches multiple keys is committed atomically:
 
-- New paste = (paste row) + (v1 version row) + (identity quota
-  counter bump) + (slug-to-identity pointer). All four land or none.
+- New paste = (paste row) + (v1 version row) + (slug-to-identity
+  pointer). All three land or none. The owner's used bytes are DERIVED by
+  scanning the version rows (the row carries the identity), so there is
+  no separate quota counter to bump.
 - Update = (new version row) + (paste head pointer update if
-  unpinned) + (identity quota counter bump). All three land or none.
-- Per-version delete = (version tombstone) + (identity quota counter
-  decrement). Both land or neither.
+  unpinned). Both land or neither.
+- Per-version delete = (version tombstone). The tombstoned version drops
+  out of the next quota scan; no counter to decrement.
 - Whole-paste delete = (paste row delete) + (cascade to all version
-  rows) + (slug pointer delete) + (counter decrement by the freed
-  bytes). The authoritative `{slug}` deletes commit first; the `{id}`
-  counter decrement is a separate read-checked CAS (`counter -= freed`),
-  never a scan-derived recompute.
+  rows) + (slug pointer delete). All land or none; the freed bytes leave
+  the owner's quota simply because the next scan no longer sees them.
 
 sqlite enforces this via `BEGIN IMMEDIATE`; slatedb via
-`Db.begin(IsolationLevel.SnapshotIsolation)` with `WriteBatch`.
+`Db.begin(IsolationLevel.SnapshotIsolation)` with `WriteBatch`. On the
+shale backend the `{slug}`-shard rows above commit atomically as one CAS,
+and the owner's `{id}`-shard enumeration index entry is a separate
+best-effort write reprojected by the reconciler (see "Scan-derived
+quota"); the quota is never a stored number on any backend.
 
 ### Compose & operator config
 
@@ -2981,128 +2993,122 @@ enumerates every site exactly as `pastes/` enumerates every paste.
 
 The shale backend reuses the slatedb site key names + JSON row schema (the
 same way it reuses the paste layout: co-location is by `ShardKeyFn`, not by
-renaming keys). Per-owner BYTE accounting uses a monotonic `{id}` counter
-(the reservation pattern), and per-owner ENUMERATION uses the
-`identity_sites/<id>/<slug>` index (so `ListSitesByOwner` can surface a
-user's sites in `list`) - the two are complementary, exactly as pastes carry
-both an `identity_bytes/<id>` counter and the `identity_pastes/<id>/<slug>`
-index. The full site shard map:
+renaming keys). Per-owner BYTE accounting is DERIVED by scanning the
+per-owner ENUMERATION index `identity_sites/<id>/<slug>` and reading each
+live `sites/<slug>` row's `DedupedSize` - exactly the way slatedb's
+`sumActiveSiteBytesForOwner` works, and the same enumeration index
+`ListSitesByOwner` uses to surface a user's sites in `list`. There is no
+site byte counter and no site reservation/release marker: the sum is
+computed on demand from the rows, so nothing separate can drift. The full
+site shard map:
 
 | Key family | Keys | Shard key |
 | --- | --- | --- |
 | Authoritative (per-slug) | `sites/<slug>` | `<slug>` |
 | Expiry index (per-slug) | `expiry_sites/<ts>/<slug>` | `<slug>` (slug is the LAST segment) |
-| Site byte counter (per-identity) | `identity_site_bytes/<id>` | `<id>` |
-| Site reservation marker (per-identity) | `identity_site_reserve/<id>/<slug>` | `<id>` |
 | Site enumeration index (per-identity) | `identity_sites/<id>/<slug>` | `<id>` |
 
 `sites/<slug>` joins the authoritative `{slug}` family (alongside
 `pastes/<slug>`), `expiry_sites/<ts>/<slug>` shards on its trailing slug
-like `expiry/<date>/<slug>`, and the three `identity_site*` families join the
-derived `{id}` family so they co-shard with each other (a site reserve
-step's read-increment-mark is single-shard, exactly like the paste reserve).
-The `_sites`/`_site_` suffixes keep these from matching the bare `expiry/`
-and `identity_*` prefixes (the trailing-slash anchoring in `shaleShardKey`):
-`expiry_sites/` is not `expiry/`, and `identity_sites/` is not
-`identity_site_bytes/` or `identity_site_reserve/`.
+like `expiry/<date>/<slug>`, and `identity_sites/<id>/<slug>` joins the
+derived `{id}` family so it co-shards with `identity_pastes/<id>/*` (an
+owner's paste-index and site-index scans each stay single-shard). The
+`_sites` suffix keeps these from matching the bare `expiry/` and
+`identity_*` prefixes (the trailing-slash anchoring in `shaleShardKey`):
+`expiry_sites/` is not `expiry/`, and `identity_sites/` is not any other
+`identity_*` family.
 
 **The `identity_sites/<id>/<slug>` index** carries a one-byte marker value
 (shale's `Put` rejects an empty value, unlike slatedb's `[]byte{}` marker),
-because `ListSitesByOwner` re-reads each authoritative `sites/<slug>` row for
-the fields it returns - the index only enumerates the owner's slugs, exactly
-like `ListByOwner` uses `identity_pastes/`. Because `<id>` is the first
-segment it co-shards with the byte counter + reservation marker, so the
-index write can ride the SAME single-shard CAS as the confirm/delete: the
-confirm step (which drops the reservation marker) also writes the index
-entry, and `DeleteSite`'s counter-decrement CAS also deletes it. Index
-touches are best-effort (a lost confirm leaves a missing entry, never a
-failed deploy). Sites deployed BEFORE this index existed have no entry; the periodic
-`Reconcile` pass (see below) reprojects every `sites/<slug>` row it scans
-into the per-owner index (adding missing entries, dropping orphans), the same
-"reproject authoritative rows, drop orphans" heal the paste `reconcileIndexes`
-runs, so a pre-index site is picked up on the next reconcile tick. Being
-idempotent, every pod running it is harmless.
+because both `ListSitesByOwner` and the quota scan re-read each authoritative
+`sites/<slug>` row for the fields / size they return - the index only
+enumerates the owner's slugs, exactly like `ListByOwner` uses
+`identity_pastes/`. Because `<id>` is the first segment it co-shards with the
+paste index, so the index write rides a single-shard `{id}` CAS: the
+index-maintenance step after a deploy writes the entry, and `DeleteSite`
+deletes it. Index touches are best-effort (a lost write leaves a missing
+entry, never a failed deploy). Sites deployed BEFORE this index existed have
+no entry; the periodic `Reconcile` pass (see below) reprojects every
+`sites/<slug>` row it scans into the per-owner index (adding missing entries,
+dropping orphans), the same "reproject authoritative rows, drop orphans" heal
+the paste `reconcileIndexes` runs, so a pre-index site is picked up on the
+next reconcile tick. Being idempotent, every pod running it is harmless.
 
 **Periodic reconcile.** `Reconcile` is the metadata backend's maintenance
 pass and IS wired to run periodically in production (a background ticker in
 the composition root, first pass after a short post-boot settle, then every
-~10 min - matching the reservation grace). Each pass: heals the
-`identity_pastes` + `identity_sites` indexes (including the pre-index
-backfill above), ages out crashed pending pastes, and RELEASES leaked
-reservation markers via the safe per-marker `{id}`-CAS delta
-(`orphanReleaseMarker` / `orphanReleaseSiteMarker`). The marker release is
-what keeps the `identity_bytes` / `identity_site_bytes` counters from
-drifting UP over time when a reserve's confirm never lands: without it a
-leaked reservation over-counts the quota permanently. Crucially, the pass
-NEVER recomputes the counter's absolute value (see "The counter itself is
-never recomputed"); it only applies marker-driven deltas, which are safe
-under concurrent reserves/deletes. The confirm/delete write path still keeps
-the index + counter current for live traffic; the periodic pass is the
-backstop that heals what a crashed request leaves behind.
+~10 min). Each pass reprojects the `identity_pastes` + `identity_sites`
+enumeration indexes from the authoritative `pastes/*` / `sites/*` scans
+(adding missing entries, refreshing stale projections, dropping orphans -
+including the pre-index backfill above) and ages out crashed pending pastes.
+The site-index reprojection (`reconcileSiteIndexes`) was previously reached
+only through the now-deleted site-reservation pass; it is re-homed as a
+standalone step driven by its own `sites/*` scan so it still runs every tick.
+This index reprojection is the SOLE quota-healing mechanism: it closes the
+crash-between-row-and-index under-count window by making the enumeration set
+complete again. Because it reprojects authoritative rows (never a stored
+number), it is safe under live traffic on any cadence and cannot introduce a
+recompute race - there is no aggregate to overwrite.
 
 A site deploy spans the `{slug}` shard (the authoritative `sites/<slug>`
 write + the cross-family paste-slug collision read) and the `{id}` shard
-(the per-identity byte counter), which cannot be one CAS, so on shale a site
-deploy uses the SAME three-step reservation pattern paste inserts use:
-reserve the `DedupedSize` on the `{id}` site counter, perform the
-authoritative `{slug}` write, then confirm (drop the reservation marker AND
-write the `identity_sites/<id>/<slug>` enumeration index entry, one `{id}`
-CAS - the same shape as the paste confirm).
-The strict-quota and sweep-time-expiry properties carry over from the paste
-counter unchanged (`conformCaps.ExpiryFreesQuotaAtReadTime = false`,
-`StrictQuotaUnderConcurrency = true`).
+(the enumeration index entry), which is two CASes, but there is no counter to
+reserve against, so the deploy is a plain sequence: check quota (scan), write
+the authoritative `{slug}` row, then write the `identity_sites/<id>/<slug>`
+enumeration entry (best-effort, reconciler-healed). Expiry now frees quota at
+READ time (the scan filters `expires_at > now`), so
+`conformCaps.ExpiryFreesQuotaAtReadTime` is `true` for shale sites - matching
+sqlite and slatedb - and `StrictQuotaUnderConcurrency` is `false` (the
+scan-check and the row-write are not atomic; the bounded same-owner
+over-admit is the accepted trade, see "The correctness argument").
 
-**Why a dedicated `identity_site_bytes` counter (not the shared
-`identity_bytes`).** The deploy service computes the per-owner budget as
-`UserQuota - paste_bytes - site_bytes`, reading the paste sum and the site
-sum SEPARATELY and adding them, so the two sums MUST be disjoint: the paste
-sum from `identity_bytes/<id>`, the site sum from a distinct
-`identity_site_bytes/<id>`. Folding sites into `identity_bytes` would
-double-count (the budget would subtract the same site bytes twice). The
-dedicated counter keeps `SumActiveSiteBytesByOwner` site-only (the
-conformance contract: a site-only owner sum).
+**The two sums stay disjoint (paste sum + site sum).** The deploy service
+computes the per-owner budget as `UserQuota - paste_bytes - site_bytes`,
+reading the paste sum and the site sum SEPARATELY and adding them, so the two
+scans MUST count disjoint sets: `SumActiveBytesByOwner` sums the owner's
+paste version rows (enumerated via `identity_pastes`), and
+`SumActiveSiteBytesByOwner` sums the owner's site rows (enumerated via
+`identity_sites`). Because pastes and sites live in disjoint key families
+enumerated by disjoint indexes, adding the two sums never double-counts, and
+`SumActiveSiteBytesByOwner` stays site-only (the conformance contract: a
+site-only owner sum).
 
 The per-owner cap is SYMMETRIC across both kinds: a deploy of EITHER kind
 checks the owner's COMBINED paste + site bytes against `userCap`, so the
 ceiling holds no matter how an owner splits their quota between pastes and
 sites. This matches the sqlite `identityActiveBytes`, which sums both kinds
 and is read by BOTH the paste insert and the site deploy. Concretely:
-  - a SITE deploy's reserve step reads the paste counter alongside the site
-    counter and checks `paste + site + deduped <= userCap`, and
-  - a PASTE insert / append's reserve step reads the site counter alongside
-    the paste counter and checks `paste + site + body <= userCap`.
+  - a SITE deploy's check scans BOTH the paste sum and the site sum and
+    verifies `paste + site + deduped <= userCap`, and
+  - a PASTE insert / append's check scans BOTH sums and verifies
+    `paste + site + body <= userCap`.
 Without the second of those, a paste could be accepted while the owner's
 site bytes were ignored: e.g. an 800-byte site plus a 300-byte paste under a
 1000-byte cap would wrongly admit the paste (combined 1100 > 1000) even
 though the symmetric site direction correctly rejects it. The
-`Sites/PerOwnerCapCountsBoth` conformance subtest pins both directions, and
-`StrictQuotaUnderConcurrency` pins the combined ceiling under concurrent
-cross-kind deploys.
+`Sites/PerOwnerCapCountsBoth` conformance subtest pins both directions.
 
 The durable total-bytes ceiling is NOT a shale aggregate scan: it is the
 object-store bucket quota (see "Limits → Durable total-bytes ceiling"),
 surfaced as `ErrServiceFull` from the blob `Put`. The shale site repo runs
-no service-wide byte sum on the deploy path; only the per-identity counter
-(below) gates a deploy at the app layer.
+no service-wide byte sum on the deploy path; only the per-identity scan
+(bounded to one owner's slugs) gates a deploy at the app layer.
 
 The cross-family paste-slug collision read is added to the site
 authoritative write (reject a slug a paste owns), and the paste
-authoritative write already rejects a slug a paste owns; the site insert
-also rejects a slug another site owns, so a slug is EITHER a site or a
-paste, never both, in both directions. The reservation markers a site deploy
-/ delete leaves are completed by the same reconciler that completes paste
-markers: a Job 3 applies the identical grace-window orphan-release /
-leaked-marker-drop rule to `identity_site_reserve/` markers against the site
-counter (`reconcileSiteReservations` in `shale_site_repo.go`).
+authoritative write already rejects a slug a site owns, so a slug is EITHER a
+site or a paste, never both, in both directions. Neither path leaves a marker
+the reconciler must complete - the only per-owner `{id}` state a deploy or
+delete writes is the enumeration index entry, healed by reprojection.
 
 **Status: slatedb AND shale are both implemented + conformance-tested.**
 Prod runs the slatedb-direct backend, so the slatedb site impl is the
-load-bearing deliverable; the shale site impl is the same layout over the
-reservation pattern (the new surface is the dedicated site counter +
-reservation, the cross-family collision read, and the reconciler's Job 3
-for site markers). Both run the SAME
-conformance site subtests under the SAME factory the way sqlite and slatedb
-do, so each backend is a drop-in for static-site hosting by construction.
+load-bearing deliverable; the shale site impl is the same layout, now sharing
+the scan-derived quota shape (the enumeration index + the cross-family
+collision read, with the reconciler reprojecting the index). Both run the
+SAME conformance site subtests under the SAME factory the way sqlite and
+slatedb do, so each backend is a drop-in for static-site hosting by
+construction.
 
 #### Wiring: widen the metadata bundle's `Sites` field
 
@@ -3424,13 +3430,17 @@ protection), so a cap whose magnitude is "the sum over a key range" must be
 backed by a discrete COUNTER the CAS can read-check, not by an in-CAS scan:
 
 - **Per-app aggregate cap (strict).** A per-app room-byte counter
-  `roombytes/<app-slug>` (the per-app analogue of `identity_bytes/<id>`) is
-  read-checked and incremented inside the `{app-slug}` value-write CAS, so two
-  concurrent writers to the SAME app cannot both pass a stale per-app sum and
-  overshoot `appCap`. Because all five room families (the four above + this
-  counter) share the one `{app-slug}` shard, a room create or write is already
-  single-shard, so the value write + the counter update are one CAS - simpler
-  than the paste counter (no cross-shard reserve / confirm split needed).
+  `roombytes/<app-slug>` is read-checked and incremented inside the
+  `{app-slug}` value-write CAS, so two concurrent writers to the SAME app
+  cannot both pass a stale per-app sum and overshoot `appCap`. This counter is
+  legitimate where the per-identity paste/site byte counter was not: because
+  all five room families (the four above + this counter) share the one
+  `{app-slug}` shard, a room create or write is already single-shard, so the
+  value write + the counter update are ONE atomic CAS - there is no cross-shard
+  split between the counted rows and the counter, so it cannot drift the way a
+  per-identity counter (rows on `{slug}`, counter on `{id}`) would. That is
+  exactly why the per-identity quota is scan-derived while this per-app
+  aggregate stays a counter.
 - **Per-room cap (strict).** The per-room byte total + key count are stored ON
   the room record (`rooms/<app-slug>/<uuid>`, the `roomRow` `byte_total` +
   `key_count` fields, shale-only) and validated against `MaxRoomBytes` /
@@ -3453,9 +3463,13 @@ The shale room path runs NO service-wide byte sum either: the durable
 total-bytes ceiling is the object-store bucket quota, and a room holds no
 blobs, so the room write is bounded only by the per-room and per-app caps.
 Sweep-time expiry
-semantics (`ExpiryFreesQuotaAtReadTime = false`) carry over from the paste
-counter: a room's bytes leave the per-app counter when the sweep deletes the
-expired room, not at read time, the same fail-safe over-count direction. The
+semantics (`ExpiryFreesQuotaAtReadTime = false`) apply to the per-app room
+counter (unlike the scan-derived per-identity paste/site quota, which frees at
+read time): a room's bytes leave the per-app counter when the sweep deletes
+the expired room, not at read time, the same fail-safe over-count direction.
+This is because the per-app aggregate IS a maintained counter, decremented by
+the sweep, whereas the per-identity quota is a live scan that filters expiry.
+The
 `Rooms/PerRoomCapConcurrentCeiling` conformance subtest fires N concurrent
 distinct-key writes into one room against the structural `MaxRoomBytes` cap and
 asserts the persisted byte total never breaches it - the gate that pins the
@@ -3573,12 +3587,27 @@ pastes/<slug>                      paste row
 versions/<slug>/<NNNN>             version row
 slug_owner/<slug>                  raw identity string
 expiry/<rfc3339>/<slug>            sweep index entry
-identity_pastes/<identity>/<slug>  per-owner list index (now value-bearing, see below)
+identity_pastes/<identity>/<slug>  per-owner enumeration index (value-bearing, see below)
 identity_first_seen/<identity>     cached first-seen timestamp
-identity_bytes/<identity>          per-owner active-bytes counter (NEW)
-identity_reserve/<identity>/<slug> per-owner reservation marker (NEW, see reservation pattern)
 keygate/<subnet>/<identity>        Sybil first-seen timestamp
 ```
+
+There is deliberately **no per-owner byte counter** and **no reservation
+marker**. The per-identity quota is DERIVED by scanning the owner's
+`identity_pastes` enumeration index and summing each live paste's
+authoritative size, exactly the way the sqlite and slatedb backends sum
+live rows (see "Scan-derived quota" below). An earlier design kept a
+stored `identity_bytes/<id>` counter maintained by a cross-shard
+reservation pattern (reserve -> write -> confirm, plus reservation and
+release markers, a background reservation reconciler, a crash-durable
+release-marker delete, and an offline audit). It was removed: a stored
+numeric aggregate that lives on a shard SEPARATE from the rows it counts
+cannot be idempotently healed (a scan can only OVERWRITE it, and an
+online overwrite races the writes it is trying to sum), so it drifts
+permanently. A scan over a SET - the enumeration index, reprojected from
+the authoritative rows - is idempotently self-healing and cannot durably
+drift. All the reservation/marker/audit machinery existed ONLY to keep
+that counter correct, so it is deleted with the counter.
 
 Co-location across shards is achieved by a custom shard-key function,
 **not** by renaming keys. The cluster is opened with a `ShardKeyFn` that
@@ -3592,15 +3621,17 @@ extracts the shard key as follows:
 | Key family | Keys | Shard key |
 | --- | --- | --- |
 | Authoritative (per-slug) | `pastes/<slug>`, `versions/<slug>/*`, `slug_owner/<slug>`, `expiry/<date>/<slug>` | `<slug>` |
-| Derived (per-identity) | `identity_pastes/<id>/*`, `identity_first_seen/<id>`, `identity_bytes/<id>`, `identity_reserve/<id>/*` | `<id>` |
+| Derived (per-identity) | `identity_pastes/<id>/*`, `identity_first_seen/<id>` | `<id>` |
 | Sybil gate (per-subnet) | `keygate/<subnet>/*` | `<subnet>` |
 
 The authoritative family is the source of truth for a paste's existence
 and content. The derived family is a denormalized projection of it,
-sharded by owner so that "list my pastes" and "how many bytes do I own"
-are single-shard operations rather than full-keyspace scans. The Sybil
-gate family is sharded by subnet so admission decisions for one subnet
-touch one shard.
+sharded by owner so that "list my pastes" is a single-shard scan rather
+than a full-keyspace scan. "How many bytes do I own" starts from the same
+single-shard enumeration scan, then reads each enumerated paste's
+authoritative rows for the size (a bounded fan-out over exactly that
+owner's slugs, not the whole keyspace). The Sybil gate family is sharded
+by subnet so admission decisions for one subnet touch one shard.
 
 Because every key in a family hashes to the same shard key, a
 transaction that touches **only one family's keys for one subject** is
@@ -3612,154 +3643,146 @@ its owner's derived counter) is **not** one transaction: it is a
 sequence of single-shard transactions on different shards, and the
 design below is what keeps that sequence correct.
 
-### Reservation-pattern quota (strict, never exceeds)
+### Scan-derived quota (never durably exceeds the cap)
 
-Per-identity quota (the 10 MiB compressed cap) must be enforced exactly:
-an upload that would push an owner over the cap is rejected, and two
-concurrent uploads can never both pass the check and both land.
+Per-identity quota (the 10 MiB compressed cap) is enforced by **deriving**
+the owner's used bytes from a scan of the authoritative rows, exactly the
+way the sqlite and slatedb backends do - not by a maintained counter.
 
-All three single-writer backends enforce it exactly under concurrency, by
-different means. The sqlite backend uses ONE serializable transaction: the
-quota sum and the insert serialize, so the second upload sees the first's
-bytes. The slatedb backend holds a per-identity `lockQuota(identity)`
-stripe across the sum + the write, so two concurrent same-identity uploads
-cannot both read the pre-upload sum; this is valid because SlateDB is
-single-writer / epoch-fenced, so only intra-process goroutines can race
-and the in-process lock covers them. The shale backend uses the
-reservation pattern below: it cannot put the sum and the write in one
-transaction (the bytes counter lives on the `{id}` shard and the paste row
-on the `{slug}` shard, two different single-shard transactions), so it
-reserves on the `{id}` counter via CAS first. The difference that
-motivates the reservation pattern: slatedb's lock is PROCESS-LOCAL and
-would not survive a multi-writer split, whereas shale's CAS counter holds
-across nodes.
+The single-writer backends compute the sum at check time. sqlite runs
+`SELECT SUM(size) ... WHERE identity=? AND expires_at>now AND deleted=0`
+inside the insert's serializable transaction. slatedb walks the owner's
+`identity_pastes` / `identity_sites` index and reads each live row's size
+under a per-identity `lockQuota` stripe. The shale backend now does the
+SAME scan; it just cannot wrap the scan and the write in one transaction
+(they touch different shards), so the check and the write are two steps
+rather than one, which relaxes strictness under same-identity concurrency
+(below) but never allows a DURABLE breach of the cap.
 
-The shale backend enforces quota with a **reservation pattern**: a
-three-step sequence that makes the quota decision atomic on the owner's
-shard, before any authoritative write happens.
+**How the scan works.** `SumActiveBytesByOwner(owner)` on the shale
+backend:
 
-1. **Reserve** (one single-shard CAS on the `{id}` shard). Read
-   `identity_bytes/<id>`. If `counter + body > cap`, reject with the
-   over-quota error and stop. Otherwise increment the counter by `body`
-   and write a reservation marker `identity_reserve/<id>/<slug>`, all in
-   one CAS transaction. The marker key shards on `<id>` like the counter,
-   so the read-and-increment-and-mark is a single-shard CAS. After this
-   commits, the bytes are accounted. The marker value is a small JSON
-   object `{"bytes": <body>, "created_at": <rfc3339nano>}`: `bytes` is
-   the reserved size, and `created_at` is the `now` the reserve was
-   stamped with, so the reconciler can tell an in-flight reservation
-   (young) from an abandoned one (old) without inferring age from the
-   paste's absence. A legacy bare-number marker (a plain `body` with no
-   timestamp, as an earlier layout wrote) is still tolerated on read and
-   treated as having a zero `created_at` (very old, so always past any
-   grace window); new markers always carry the timestamp.
-2. **Authoritative write** (one single-shard CAS on the `{slug}` shard).
-   Write `pastes/<slug>`, the v1 `versions/<slug>/0001` row,
-   `slug_owner/<slug>`, and the `expiry/<date>/<slug>` index entry, all
-   in one CAS transaction. The slug-collision check (reject if
-   `pastes/<slug>` already exists) participates in this transaction.
-3. **Confirm** (one single-shard CAS on the `{id}` shard). Drop the
-   reservation marker, write the `identity_pastes/<id>/<slug>` index
-   entry (with its denormalized projection, see below), and set
-   `identity_first_seen/<id>` if absent.
+1. Scan the owner's `identity_pastes/<id>/` enumeration index on the
+   `{id}` shard (one single-shard prefix scan). This yields the owner's
+   slugs.
+2. For each enumerated slug, read the AUTHORITATIVE rows on that slug's
+   `{slug}` shard: the `pastes/<slug>` head (for expiry + status) and its
+   `versions/<slug>/*` rows. Sum the sizes of the live (non-`Deleted`)
+   versions. Skip a slug whose head row is ABSENT (a stale index entry the
+   read repairs) or whose `status == failed` or whose `expires_at <= now`.
+3. Return the total. `SumActiveSiteBytesByOwner` is the site sibling:
+   enumerate `identity_sites/<id>/`, read each `sites/<slug>` row, sum its
+   `DedupedSize`, skip absent/expired. This mirrors slatedb's
+   `sumActiveSiteBytesForOwner` line for line.
 
-   The confirm step is **deferred off the response path**:
-   `InsertWithQuotaCheck` returns success as soon as steps 1 and 2 commit
-   (the bytes are reserved and the authoritative paste row exists), and
-   runs the confirm CAS in a background goroutine. This is the metadata
-   analogue of the async blob write described under "Paste lifecycle
-   status": just as the blob `Put` is moved off the response path, so is
-   the derived-index write, leaving the synchronous upload path with only
-   the reserve + authoritative-`pending` commit before it hands back the
-   URL. Confirm only writes the derived `identity_pastes` index entry and
-   first-seen, both of which are eventually-consistent projections the
-   reconciler already heals if the goroutine is lost (it was already a
-   non-fatal step whose failure left the index to the reconciler). The
-   observable effect is that a freshly-inserted paste is `Get`-readable
-   immediately (the authoritative `pastes/<slug>` row exists, so the URL
-   resolves to the paste - serving its content once `ready`, or the
-   loading page while still `pending` - and never 404s on a missing row)
-   but may take a beat (the goroutine, or worst case the next reconciler
-   pass) to appear in the owner's `list`. Quota is unaffected: the bytes
-   were committed by the reserve in step 1, before the response, so the
-   deferred confirm never moves the counter and the strict-ceiling
-   guarantee is untouched. The marker left un-dropped by an in-flight or
-   lost confirm is exactly the "leaked-marker" case the reconciler's
-   grace-windowed pass already handles. Shutdown does not strand a
-   confirm: `Close` drains the in-flight confirm goroutines before tearing
-   the cluster down, and an operator or test that needs the index to
-   reflect a just-inserted paste synchronously can drain on demand
-   (`WaitPendingConfirms`) rather than wait for a reconciler pass.
+`CountByOwner` uses the same enumeration scan (count the live-row slugs),
+as it already did.
 
-**Why quota can never be exceeded.** The reserve step is the only place
-the counter is read and incremented, and it is a single atomic CAS on
-one shard. Two concurrent uploads for the same identity both reach the
-reserve step; CAS serializes them, so exactly one reads the
-pre-increment value and the other reads the post-increment value. The
-second sees the larger counter and is rejected if it no longer fits. The
-counter is incremented **before** the authoritative write, so the bytes
-are committed to the budget the instant they are reserved, never after.
-There is no window in which two uploads have both passed the check but
-neither has yet incremented. Quota is therefore a hard ceiling.
+**Read the authoritative size, not the denormalized index projection.**
+The `identity_pastes` entry is value-bearing (it caches `name/size/
+created_at/expires_at` so `ListByOwner` can render a list without fanning
+out). The quota scan uses the index ONLY to enumerate the owner's slugs;
+it reads the SIZE from the authoritative version rows. This is deliberate:
+a paste's live size changes after its index entry is written (an
+`AppendVersion` adds a version; a `DeleteVersion` tombstones one), so the
+cached `size` drifts from the true sum-of-live-versions, whereas the
+version rows are always current. Summing the cached size could therefore
+either over- OR under-count; summing the authoritative version rows never
+can. The cost is a bounded cross-shard fan-out (one read-set per the
+owner's OWN slugs, not the whole keyspace), which is acceptable for a
+per-upload quota check on a low-cardinality per-owner set. The trade the
+recommendation makes explicit: the enumeration index only needs to be
+COMPLETE (list every live slug), never fresh in its cached fields, for the
+quota to be exact - and a set is far easier to keep complete than a number
+is to keep exact.
 
-The failure mode is fail-safe in the over-counting direction. If step 2
-fails (CAS exhaustion, slug collision after retries, a crash between
-steps), the reservation from step 1 is left orphaned: the bytes are
-counted but no paste exists. This **over-counts**, shrinking the owner's
-available quota temporarily; it never **under-counts** (it never lets an
-owner exceed the cap). A reconciler releases orphaned reservations (see
-below). The durable total-bytes ceiling is NOT a property this counter or
-any cross-shard aggregate enforces: it is the object-store bucket quota
-(see "Limits → Durable total-bytes ceiling"), surfaced as `ErrServiceFull`
-from the blob `Put`. The shale backend runs no service-wide byte scan on
-the write path - the removed cross-shard aggregate that once summed the
-whole keyspace per write is exactly the O(active rows), single-bad-record-
-poisons-everything design the bucket quota replaces.
+**The write path is a plain row write plus index maintenance - no
+counter.** The old three-step reserve -> write -> confirm collapses:
 
-This reservation counter replaces the per-insert
-`SumActiveBytesByOwner` scan the single-writer backends run inside the
-insert transaction. The `SumActiveBytesByOwner` and `CountByOwner`
-interface methods are still served, now from the `identity_bytes`
-counter and the `identity_pastes` index respectively, both single-shard
-reads on the `{id}` shard.
+- **Check** (before the write): scan the owner's combined paste + site
+  used bytes (the two scans above, added) and reject with the over-quota
+  error if `used + body > cap`. A zero `userCap` means "no cap" and skips
+  the check. This is the SYMMETRIC combined check the sqlite backend does
+  (`identityActiveBytes` spans both kinds): a paste insert counts the
+  owner's site bytes too, and a site deploy counts the owner's paste
+  bytes, so the ceiling holds however an owner splits their quota.
+- **Authoritative write** (one single-shard CAS on the `{slug}` shard,
+  unchanged): write `pastes/<slug>` (or `sites/<slug>`), the version row,
+  `slug_owner/<slug>`, and the expiry index entry, with the same
+  slug-collision read-check (reject a slug a paste OR a site already owns).
+- **Index maintenance** (one single-shard CAS on the `{id}` shard): write
+  the `identity_pastes/<id>/<slug>` (or `identity_sites/<id>/<slug>`)
+  enumeration entry and set `identity_first_seen/<id>` if absent. This is
+  best-effort and MAY stay deferred off the response path (a background
+  goroutine, drained by `Close` / `WaitPendingConfirms`), because a lost
+  index write is healed by the reconciler's reprojection. No byte counter
+  is touched anywhere - there is none.
 
-**One intentional behavior change: expiry frees quota at sweep time, not
-read time.** The single-writer backends exclude an expired-but-not-yet-
-swept paste's bytes from the owner sum at READ time (their sum query
-filters `expires_at > now`), so an owner reclaims that quota the instant
-the paste expires, even before the sweep deletes it. The `identity_bytes`
-counter has no read-time expiry awareness: it is decremented only when
-the bytes actually leave, which for an expired paste is when the sweep
-deletes it. So under the shale backend an owner reclaims an expired
-paste's quota at the next sweep cycle (seconds to minutes), not the
-instant it expires. This is deliberate and fail-safe: the counter
-transiently OVER-counts an expired-unswept paste (rejecting the owner
-slightly early), and never under-counts (it never lets an owner exceed
-the cap). The divergence window is bounded by the sweep interval. No code
-above the storage boundary changes: the decrement rides the single
-`Delete` method that both the user's explicit delete and the sweep's
-expiry-delete already call, so the sweep stays unaware the counter
-exists. This is the only point where the shale backend's observable
-behavior intentionally differs from the single-writer backends; every
-other behavior the storage conformance suite pins is preserved exactly.
+`Delete` / `DeleteVersion` / `MarkFailed` shed a paste's bytes simply by
+removing (or tombstoning, or failing) its authoritative rows and dropping
+its enumeration entry; the next quota scan no longer sees those bytes.
+There is NO counter decrement, so there is no cross-shard second write to
+lose, and therefore no "markerless residual" to crash-durably protect.
+`DeleteSite` collapses to the slatedb shape (delete the row, the expiry
+entry, the file-blob binds, and the enumeration entry - no release marker,
+no size-guarded restart loop, no consume).
+
+**Why the cap can never be DURABLY exceeded.** The used-bytes figure is at
+every moment a pure function of the authoritative rows (the version sizes,
+filtered by expiry / status / tombstone), reprojected through the
+enumeration index. The rows are the source of truth, and they are only
+ever written under the `{slug}`-shard CAS that also enforces slug
+collision, so the true sum an owner is responsible for is always
+well-defined and always visible to a fresh scan. Two transient windows
+exist, both bounded and self-healing (detailed under "The correctness
+argument" below): (a) a crash between the row write and the index write
+leaves a live row the index does not yet enumerate, so a scan momentarily
+UNDER-counts that owner until the reconciler reprojects the index; (b) two
+concurrent same-identity uploads can both pass the check before either
+writes, a bounded over-admit. Neither can make the owner's DURABLE used
+bytes exceed the cap by more than one in-flight upload, and the global
+object-store bucket quota (`ErrServiceFull` from the blob `Put`, see
+"Limits -> Durable total-bytes ceiling") is the hard backstop on total
+bytes regardless. The shale backend runs no service-wide byte scan on the
+write path - only the per-owner enumeration scan, bounded to one identity.
+
+**Expiry now frees quota at READ time, converging with the single-writer
+backends.** Because the scan reads the authoritative rows and filters
+`expires_at > now`, an expired-but-unswept paste stops counting the
+instant it expires - exactly as sqlite and slatedb behave. This REMOVES
+the shale backend's old "one intentional behavior change" (the counter's
+sweep-time-only reclamation): with the counter gone, `conformCaps.
+ExpiryFreesQuotaAtReadTime` flips to `true` for shale, matching the other
+two backends. The scan-based backend now diverges from the single-writer
+backends on exactly one axis instead - strict-vs-bounded quota under
+same-identity concurrency (`StrictQuotaUnderConcurrency` flips to `false`
+for shale) - which is the deliberate trade the next sections justify.
 
 ### Derived indexes and repair-on-read
 
-The per-identity family is a derived projection. `identity_pastes`,
-`identity_first_seen`, and `identity_bytes` are not the source of truth;
-the `pastes/*` and `versions/*` rows on the `{slug}` shards are. The
-derived entries are written by the confirm step (step 3 above) and by
-the update / delete paths, in transactions separate from the
-authoritative write. They are therefore **eventually consistent**: a
-crash between the authoritative write and the index update leaves the
-index momentarily out of step with the authoritative rows.
+The per-identity family is a derived projection. `identity_pastes` and
+`identity_first_seen` are not the source of truth; the `pastes/*` and
+`versions/*` rows on the `{slug}` shards are. The derived entries are
+written by the index-maintenance step and by the update / delete paths,
+in transactions separate from the authoritative write. They are therefore
+**eventually consistent**: a crash between the authoritative write and the
+index update leaves the index momentarily out of step with the
+authoritative rows. The quota reads THROUGH this index (enumerate, then
+read authoritative sizes), so the only property the index must uphold for
+the quota to be exact is COMPLETENESS - it must eventually list every live
+slug. Completeness is a SET property, idempotently restorable by
+reprojecting the authoritative rows; it never drifts permanently.
 
 To carry "list my pastes" as a single-shard scan, each
 `identity_pastes/<id>/<slug>` entry is **value-bearing**: it stores a
 denormalized projection of the fields the list view needs (name, size,
 created-at) rather than the empty marker the single-writer layout uses.
-`ListByOwner` then scans one shard and returns rows without fanning out
-to the `{slug}` shards.
+`ListByOwner` then scans one shard and returns rows without fanning out to
+the `{slug}` shards. (The quota scan, by contrast, reads the authoritative
+size rather than this cached projection - see "Scan-derived quota" - so a
+stale cached `size` cannot mis-count the quota; it can at worst show a
+slightly stale figure in the `list` display, which the index-maintenance
+refresh and the reconciler both correct.)
 
 `ListByOwner` **repairs on read** to absorb one half of the
 eventual-consistency gap:
@@ -3767,357 +3790,143 @@ eventual-consistency gap:
 - **Stale index entry:** an `identity_pastes` entry whose authoritative
   `pastes/<slug>` row no longer exists is stale (the paste was deleted
   but the index update was lost). It is skipped in the result and queued
-  for removal.
+  for removal. The quota scan applies the SAME stale-entry skip, so a
+  lingering stale entry never over-counts the quota either.
 
 `ListByOwner` does **not** repair a missing index entry (an
 authoritative paste owned by the identity with no `identity_pastes`
-entry, left by a crash between the authoritative write and the confirm
-step). Discovering such a paste requires a cross-shard scan of the
+entry, left by a crash between the authoritative write and the index
+write). Discovering such a paste requires a cross-shard scan of the
 authoritative `pastes/*` rows, which the single-shard list path
 deliberately avoids: `ListByOwner` only sees the index entries it can
 scan on the `{id}` shard, and an entry that was never written is not
 among them. Healing missing entries is therefore the reconciler's job,
 not `ListByOwner`'s. The reader self-heals exactly the stale entries it
-touches; the reconciler covers everything reads alone cannot.
+touches; the reconciler covers everything reads alone cannot. A missing
+entry is also the ONE quota-relevant gap: it makes the quota scan
+UNDER-count that owner (the live row it points at is not enumerated) until
+the reconciler reprojects it - the transient, bounded, self-healing window
+detailed under "The correctness argument".
 
-A background **reconciler** does the rest of the healing. It has exactly
-two jobs, and **neither one ever overwrites the `identity_bytes` counter
-with an absolute value derived from a scan**:
+A background **reconciler** does the rest of the healing. With the counter
+gone, it has a single quota-relevant job - **reproject the enumeration
+indexes** - plus the unrelated pending-paste age-out:
 
-1. **Rebuild derived indexes** from the authoritative rows (add missing
-   `identity_pastes` entries, refresh stale projections, drop entries
-   whose paste is gone). This touches only the derived index, never the
-   counter.
-2. **Complete reservation markers** that the hot path left behind: release
-   an abandoned reservation (decrementing the counter by exactly the
-   marker's bytes, atomic with consuming the marker) and drop a leaked
-   confirm-failed marker (without touching the counter).
+1. **Rebuild the enumeration indexes** from the authoritative rows: for
+   each owner, add a missing `identity_pastes` / `identity_sites` entry,
+   refresh a stale projection, and drop an entry whose paste / site is
+   gone. This is a pure "reproject the authoritative SET, drop orphans"
+   heal - idempotent, so every pod running it converges to the same state
+   and running it more often only tightens the under-count window. It is
+   the sole mechanism that closes the crash-between-row-and-index gap. Both
+   the paste index (`reconcileIndexes`, driven by the `pastes/*` scan) and
+   the site index (`reconcileSiteIndexes`, driven by the `sites/*` scan)
+   are reprojected each pass; the site reprojection, previously reached
+   only through the now-deleted site-reservation pass, is re-homed as a
+   standalone step in `Reconcile` so it still runs.
+2. **Age out stuck pending pastes** (the pod-death backstop): a
+   `status=pending` paste older than the pending timeout is flipped to
+   `failed`, exactly as before. This is orthogonal to quota accounting (a
+   `failed` paste is excluded from the quota scan by the `status != failed`
+   filter regardless), but it lives in the same pass.
 
-The counter itself is **never recomputed**. It is maintained purely by
-the strict, read-checked CAS deltas on the hot path (a reserve adds, a
-delete or delete-version subtracts, an orphan-release subtracts), each
-atomic with the marker or version state it is gated on. The reconciler
-completes markers and repairs the derived index; it does not, and must
-not, derive the counter's absolute value from a cross-shard snapshot.
+There is no counter to rebuild, no reservation marker to complete, and no
+absolute value to overwrite - so the whole class of recompute races that
+plagued the counter design (a scan-to-write window that under-counts and
+over-admits) is structurally absent. The reconciler only ever ADDS or
+DROPS set members to match authoritative truth; it never writes a number.
 
-This design is a deliberate reversal of an earlier recompute-based
-approach. The recompute (rebuild the counter from a cross-shard live-byte
-scan plus in-grace markers, then write the absolute value under a
-read-checked CAS) was **structurally racy** and is removed. The conflict
-window it could not close was scan -> `tx.Get(counter)`, not scan ->
-commit: a reserve that committed between the reconciler's cross-shard
-scan and the moment its CAS read the counter into the read-set was
-invisible to both the stale scan and the captured markers, so the
-recompute wrote the counter **down** and a later reserve over-admitted
-past the cap. That is an under-count, the one failure mode the quota
-must never permit. A second race double-counted a marker's bytes in the
-window between the authoritative write (already in the scan) and the
-confirm that drops the marker. Both are eliminated by not recomputing at
-all: the only thing that ever moved the counter incorrectly was the
-overwrite.
+#### The correctness argument: never DURABLY exceed the cap
 
-#### Running the reconciler against live traffic
+The counter design chased an **exact, strict** ceiling and paid for it with
+cross-shard machinery that still drifted. The scan design targets a weaker
+but sufficient and self-healing property:
 
-The reconciler is safe to schedule while uploads and deletes are in
-flight. The reason is structural: it **never recomputes the counter**.
-The counter is only ever moved by strict, read-checked CAS deltas on the
-`{id}` shard, and every reconciler write is one such targeted delta (or a
-no-op), never a full-scan overwrite. A **grace window** protects markers
-for in-flight inserts so the reconciler does not race a reserve that has
-not yet confirmed.
+**The property that matters: an identity's DURABLE used bytes never exceed
+the cap.** "Durable" excludes the momentary in-flight state of a request
+that has not finished; once the system quiesces, a fresh scan of any
+owner's authoritative rows is `<= cap`. There are exactly two windows where
+a scan momentarily disagrees with durable truth, and both are bounded and
+self-healing.
 
-**Why never recompute.** Every counter change in this system is a
-read-checked CAS *delta* on the `{id}` shard, atomic with the marker or
-version state it is gated on:
+**Window A - crash between the row write and the index write (transient
+UNDER-count).** A write commits the authoritative `{slug}` row first, then
+writes the `{id}` enumeration entry second (two shards, two CASes). A crash
+in between leaves a live row that the owner's enumeration index does not
+list. The quota scan enumerates the index, so it does not see that row and
+momentarily **UNDER-counts** the owner - they could add slightly past the
+true cap on their next upload. This is the OPPOSITE of the counter's
+failure: the counter's crash window left a permanent OVER-count (fail-safe
+but unhealable); this leaves a transient UNDER-count that self-heals. It is
+bounded three ways: (1) it is at most the bytes of the one un-indexed row
+per crash; (2) it lasts only until the reconciler's next reprojection pass
+reads the authoritative `pastes/*` / `sites/*` rows and re-adds the missing
+enumeration entry (idempotent set-heal, ~10 min cadence, and every pod
+running it only tightens the window); (3) the index write is normally the
+very next CAS after the row write, so the window is microseconds on the
+happy path and only widens on an actual process death. Crucially, because
+the heal REPROJECTS the authoritative rows (not a stored aggregate), it
+always converges to exactly the true live-byte set - there is no numeric
+residual it can fail to reconcile. The bound the design accepts and
+documents: between a crash and the next reproject, ONE owner can be
+under-charged by at most their un-indexed rows, letting them briefly exceed
+the cap; the moment the index heals, the next upload is measured against the
+full set again.
 
-- **Reserve (insert / append):** `counter += body`, atomic with writing
-  the reservation marker. This is the quota guarantee. It is strict under
-  concurrency (the `QuotaConcurrentCeiling` conformance test pins it):
-  the increment commits before the authoritative write, so two concurrent
-  uploads cannot both pass the check against a stale counter.
-- **Delete / delete-version:** `counter -= bytes`, a read-checked CAS
-  gated on the version's not-already-tombstoned state. The existing
-  `freed == 0` / `!v.Deleted` guards make the decrement at-most-once, so
-  a retried or duplicated delete cannot double-decrement.
-- **Orphan-reserve-release (reconciler):** `counter -= marker.bytes`,
-  atomic with deleting the marker, in one `{id}` transaction. Idempotent:
-  the marker is consumed atomically, so a retry that finds no marker is a
-  no-op. It only ever decrements *abandoned* reservations whose bytes
-  were never consumed by a live paste, so it can never under-count a live
-  paste.
+**Window B - two concurrent same-identity uploads (bounded OVER-admit).**
+The quota CHECK (the scan) and the row WRITE are not one transaction, so two
+uploads from the SAME identity can both scan the pre-upload state, both pass
+`used + body <= cap`, and both write. The ceiling is then exceeded by up to
+the smaller upload's size. This is the strictness the counter's atomic
+reserve-CAS bought and the scan gives up: `conformCaps.
+StrictQuotaUnderConcurrency` flips to `false` for shale (it was already
+`false` for the slatedb-DIRECT config, whose sum runs outside the write
+lock; shale now shares that documented relaxation). It is acceptable for
+three reasons: (1) one identity = one key = one person, and a person racing
+their own uploads to squeak a few hundred KB past a 10 MiB cap is not a
+threat model worth atomic cross-shard coordination; (2) the over-admit is
+BOUNDED - it is the number of truly-concurrent same-identity uploads times
+the per-upload size, not an unbounded leak, and it is a one-time overshoot,
+not a permanent drift (every subsequent upload scans the now-larger set and
+is measured correctly); (3) the global **object-store bucket quota** is the
+hard backstop on TOTAL bytes across all identities (`ErrServiceFull` from
+the blob `Put`, see "Limits -> Durable total-bytes ceiling"), so no amount
+of per-identity over-admit can exhaust the store.
 
-Because the counter is only ever a sum of strict deltas, there is no
-absolute value to "rebuild" and nothing to overwrite. The earlier
-recompute tried to overwrite the absolute value from a cross-shard
-snapshot; that overwrite was the *only* thing that introduced a race
-(under-count and double-count, described above). Removing it leaves the
-counter maintained entirely by the deltas, which are individually correct
-under concurrency.
+**Expiry and dedup.** An expired-but-unswept paste stops counting the
+instant it expires, because the scan filters `expires_at > now` on the
+authoritative row (Window: none - this is exact and immediate, and it is the
+convergence with sqlite/slatedb noted above). A `status=failed` paste is
+excluded by the `status != failed` filter, so a crashed-blob upload frees
+its reserved space as soon as it fails, without any counter decrement. A
+whole-delete or version-delete frees bytes simply by removing / tombstoning
+the authoritative rows the scan reads; there is no second cross-shard write
+to lose, so the **markerless-residual crash window that the release marker
+and offline audit existed to protect against no longer exists** - it was a
+property of the counter's separate decrement, and the counter is gone. Site
+dedup is unchanged: `DedupedSize` is the deduped physical size stored on the
+`sites/<slug>` row, and the scan sums exactly that field, so identical files
+across a site still count once.
 
-**Grace window for reservation completion.** A reservation marker is only
-an orphan candidate if it is older than `reserveGrace` (computed as
-`now - created_at > reserveGrace`). A younger marker is treated as a
-genuinely in-flight insert (it is between the reserve step and the
-authoritative write) and is left strictly alone: its bytes are already in
-the counter (the reserve added them) and the confirm step is expected to
-land shortly. For a marker **older than grace**, the reconciler completes
-it in one of two ways, both keyed off whether the marker's paste / version
-materialized:
+**Decode tolerance of the quota scan.** The quota scan reads authoritative
+rows on the synchronous write path, so an undecodable row it must sum is
+handled as a user-facing read (Policy 3, "Decode tolerance is
+per-scan-semantics"): it HARD-FAILS the upload rather than skipping the row.
+This is fail-safe in the right direction - skipping a row would UNDER-count
+and over-admit, whereas failing the upload rejects it. The reconciler's
+reprojection scan, being an idempotent background heal, keeps Policy 1
+(skip + log + continue): a single undecodable `pastes/*` row defers only
+that slug's re-indexing to the next tick, and the physically-present row is
+still summed by the quota scan (which reads it directly), so a bad row never
+silently drops an owner's bytes from their quota.
 
-- **Orphan-reserve-release** (paste / version is **absent**): the insert
-  was abandoned, so the reserved bytes never became live. In one `{id}`
-  `Transact`, read the counter and the marker; if the marker is still
-  present, `counter -= marker.bytes` AND delete the marker, atomically.
-  This is the only reconciler write that touches the counter, and it
-  removes exactly the bytes the matching reserve added. Idempotent: a
-  concurrent confirm or a prior pass that already consumed the marker
-  leaves nothing to release.
-- **Leaked-marker drop** (paste **exists** and is confirmed): a confirm
-  that failed after the authoritative write succeeded leaves a marker
-  behind even though the bytes are already authoritatively counted and the
-  index entry was written. Delete the marker **without touching the
-  counter** (decrementing here would under-count the live paste). Dropping
-  the marker just stops the leak; the bytes stay correctly counted.
-
-The same two cases cover the `<slug>#append` marker an `AppendVersion`
-reserve writes. Both are idempotent and individually correct, so the
-reconciler is safe to run against live traffic on any cadence.
-
-#### The invariant, the crash-durable delete, and the offline audit
-
-**The invariant that matters: the counter must never under-count.** An
-under-count would let an owner exceed the cap, which is unacceptable.
-Over-counting is fail-safe: it rejects the owner slightly early but never
-admits over the cap. So every decrement is at-most-once and happens only
-when the bytes are genuinely gone (a tombstoned version, or an abandoned
-reservation consumed atomically with its marker); increments are already
-strict. Everything below preserves this ranking: wherever a choice trades a
-lingering over-count against any risk of under-count, the over-count wins.
-
-With the recompute removed, the only counter drift that could still occur
-was an **over-count** from a process crash in one narrow window: after the
-authoritative delete (the row/version tombstone on the `{slug}` shard)
-committed but before its counter decrement (the separate `{id}`-shard CAS)
-landed. The bytes are gone from authoritative truth yet still counted, and
-because nothing recorded the pending decrement, the reconciler could not
-heal it: the `identity_site_bytes` / `identity_bytes` counter only ever
-moves via a marker-driven `{id}` delta, and a delete left **no marker**. This
-is the **markerless residual**. It is **fail-safe** (the owner has slightly
-less quota than they should, never more) and **rare** (a crash between the
-two writes of one delete), but it was **permanent**. Two enhancements now
-close it, and neither reintroduces the racy online recompute (deriving the
-counter's absolute value from a cross-shard scan under live traffic, which
-under-counts across the scan-to-write window).
-
-This drift is **shale-specific.** The single-node `slatedb` backend keeps no
-maintained byte counter to drift: it sums the live authoritative rows at read
-time inside one snapshot transaction, and its `DeleteSite` / `Delete` remove
-the row and its indexes in a **single** atomic transaction, so there is no
-cross-shard second write to lose. The release marker and the audit below
-therefore exist only on the sharded `shale` backend.
-
-##### 1. Crash-durable delete decrement via a symmetric release marker
-
-The delete path is made **symmetric** with the reserve path. A reserve writes
-a **reservation marker** on the `{id}` shard *before* the authoritative write,
-so a crash mid-insert leaves a marker the reconciler completes. A delete now
-writes a **release marker** on the `{id}` shard *before* the authoritative
-tombstone, so a crash mid-delete leaves a marker the reconciler completes.
-Both markers live on the `{id}` shard (co-sharded with the counter, keyed by
-identity) precisely so the decrement and the marker's deletion are **one
-atomic single-shard CAS** - the *marker-consume* that makes every decrement
-at-most-once.
-
-Keys and value (extending the reservation-marker encoding to
-`{bytes, created_at, nonce}`):
-
-- Site delete: `identity_site_release/<id>/<slug>`.
-- Paste whole-delete: `identity_release/<id>/<slug>`.
-- Paste single-version delete (`DeleteVersion`):
-  `identity_release/<id>/<slug>#v<NNNN>`.
-
-`bytes` is the amount this delete frees; `created_at` is the delete's `now`
-(for the grace window); `nonce` is a random per-delete-instance token. The
-release-marker prefix is distinct from the reserve-marker prefix, so the
-reservation reconciler and the release reconciler never confuse one family for
-the other.
-
-**Why the nonce - the single-slot-reuse hazard.** The release marker occupies
-**one** key per `(id, slug)`, and that slot is **reused across delete
-instances**. A delete is not one transaction (its marker-write, its tombstone,
-and its decrement are three separate CASes), so a concurrent **re-deploy +
-re-delete of the same slug can overwrite the slot** between one delete's
-marker-write and its decrement. Without a discriminator, a decrement that reads
-"whatever marker is in the slot now" can subtract the bytes recorded by a
-**different** delete whose bytes are still **live** - an **under-count**, the
-one forbidden failure (an owner could then exceed the cap). The `nonce` stamps
-*which* delete instance wrote the marker, so the consume can prove the marker
-still present is the one **it** wrote before decrementing. Reserve markers do
-not carry a nonce; the field is `omitempty`, so reserve-marker bytes are
-unchanged, and a legacy nonce-less release marker (or one the reconciler
-completes) simply reads an empty nonce.
-
-**Ordered protocol (crash-safe `DeleteSite`).** `freed` is the row's
-`DedupedSize`, a stable property of the row:
-
-1. Read `sites/<slug>` -> owner + `freed` + expiry + file blobs. Absent ->
-   no-op return (idempotent, unchanged). Mint a fresh per-attempt `nonce`.
-2. **Write the release marker** on the `{id}` shard:
-   `Put(identity_site_release/<id>/<slug>, {bytes: freed, created_at: now, nonce})`.
-   One `{id}` CAS; a re-run within this delete overwrites it with the same
-   value; a *different* delete instance writes a *different* nonce.
-3. **Tombstone** on the `{slug}` shard, one CAS: re-read the row (it is in
-   the CAS read-set) and confirm its `DedupedSize` still equals the marker's
-   `bytes`; if a concurrent re-deploy (`ReplaceSiteWithQuotaCheck` mutates
-   `DedupedSize` in place) changed it, abort so the delete restarts from
-   step 1 with a refreshed marker. Otherwise delete `sites/<slug>`, delete
-   `expiry_sites/<ts>/<slug>`, and unbind the file blobs - exactly the
-   authoritative removal as before.
-4. **Decrement + consume** on the `{id}` shard, one CAS: drop the
-   `identity_sites/<id>/<slug>` enumeration entry (idempotent), then read the
-   release marker; if it is **present AND its nonce matches this delete's
-   nonce**, `counter -= marker.bytes` AND delete the marker in the same
-   transaction; if **absent**, leave the counter alone (the decrement already
-   happened - a prior retry or the reconciler consumed it); if **present but
-   the nonce differs**, a concurrent re-deploy + re-delete overwrote the slot
-   after this delete's step 2, so that marker belongs to the *other* delete
-   (its bytes may still be **live**) - leave it strictly alone. The nonce gate
-   is what keeps a stale delete from decrementing a live re-delete's bytes.
-   This atomic marker-consume replaces the old unconditional `counter -=
-   freed`, so the hot path and the reconciler can never both apply the same
-   delete.
-
-The **site delete path carries this shape today** (`DeleteSite` +
-`reconcileSiteReleaseMarkers`, keys `identity_site_release/<id>/<slug>`). The
-paste analog (`Delete` + `DeleteVersion`) has the identical outer shape but is
-a **deliberate follow-up**, because two never-under-count subtleties the site
-path does not have keep it from transferring cleanly:
-
-- The paste whole-delete computes its freed bytes *inside* the tombstone
-  transaction (re-reading each version, which is how it closes the same-slug
-  delete-vs-`DeleteVersion` race), so the loser of two concurrent same-slug
-  deletes naturally re-reads the versions as already gone, frees **zero**, and
-  never double-decrements. A crash-durable release marker must be written
-  *before* the tombstone (so a crash after the tombstone still has it), from a
-  pre-scan sum - which reintroduces exactly the concurrent-same-slug
-  double-decrement the in-transaction sum avoids. The site counter already
-  charged `freed` from an outside-the-transaction read, so the marker does not
-  make sites any worse; pastes would regress.
-- `DeleteVersion` tombstones by setting `Deleted=true` (the version row
-  **stays**), not by removing the row, so for a `…#v<NNNN>` marker "tombstoned"
-  means **present-and-`Deleted`**, not absent. An *absent* version is the
-  whole-delete-removed case, and a whole-delete that saw the version still
-  **live** already summed and decremented it - so completing an absent
-  version's marker a second time would **under-count**. The version marker must
-  therefore complete only on *present-and-`Deleted`* and drop (never decrement)
-  on absent, which is stricter than the generic "absent -> decrement" rule the
-  site pass uses below.
-
-Both are recorded so the eventual paste implementation preserves the
-never-under-count invariant; the reservation-marker encoding, key prefixes
-(`identity_release/<id>/<slug>` and `…#v<NNNN>`), and reconciler shape carry
-over unchanged. In every implemented case **`marker.bytes` equals exactly the
-bytes the committed tombstone removed - never more** (for sites, the step-3
-`DedupedSize == marker.bytes` re-check enforces it, restarting the delete with
-a refreshed marker if a concurrent in-place re-deploy changed the size) - which
-is what keeps the completion from ever over- or under-decrementing.
-
-**Reconciler completion.** A new pass (`reconcileSiteReleaseMarkers`, wired
-into `Reconcile` after the reservation passes) scans the site release-marker
-prefix cross-shard, exactly like the reservation pass, and for each marker:
-
-- **Younger than `reserveGrace`:** an in-flight delete between its marker
-  and its consume. Leave it strictly alone.
-- **Older than grace, authoritative row/version ABSENT (tombstoned):** the
-  delete committed the tombstone but crashed before the decrement. **Complete
-  it** with the same targeted, read-checked `{id}` CAS as
-  `orphanReleaseSiteMarker`: if the marker is still present **and re-reads as
-  still past grace inside the CAS**, `counter -= marker.bytes` AND delete the
-  marker, atomically. The **in-grace re-check is mandatory** and mirrors the
-  row-present branch below exactly: the reconciler chose this "complete" branch
-  from a snapshot taken at scan time (marker past grace, slug absent), but
-  between that scan and this CAS the single per-`(id, slug)` slot can be
-  overwritten by a re-deploy + fresh delete of the same slug with a **young**
-  marker whose bytes are still **live** (that delete may not have tombstoned
-  yet, or may crash before it does). Decrementing - and deleting - that young
-  marker would under-count the live site with no record left to recover from,
-  so a marker that re-reads as young is left for its own delete's consume.
-  Idempotent - a marker already consumed (by the hot path or a prior pass)
-  reads as absent and the CAS is a no-op, so the bytes are never double-freed.
-- **Older than grace, authoritative row/version PRESENT:** the delete never
-  tombstoned (it crashed before its step 3), or the slug was re-deployed in
-  the meantime. The bytes are **live and correctly counted**, so the
-  completion must **not** decrement. Drop the marker with a read-checked CAS
-  that deletes it **only if it re-reads as still past grace** (so a fresh
-  delete's young marker is never removed out from under an in-flight retry);
-  the counter is untouched.
-
-This is the exact **inverse** of the reservation reconciler, which is why it
-is correct: a reserve's increment is undone when the thing did **not**
-materialize (site absent -> decrement); a release's decrement is applied when
-the thing **de**-materialized (site row absent -> decrement). The "row present
--> drop, never touch the counter" branch cannot under-count by construction,
-and the "row absent -> decrement `marker.bytes`" branch removes exactly the
-bytes the tombstone freed, at most once. (The paste `DeleteVersion` case is the
-exception noted above: a version's absence is ambiguous under a concurrent
-whole-delete, so that path must gate on *present-and-`Deleted`* rather than
-absence - which is one reason the paste analog is a follow-up.)
-
-##### 2. Offline audit that recomputes the counter from authoritative truth
-
-The release marker closes the crash window going forward; the **offline
-audit** is the belt-and-suspenders that corrects any drift already banked (a
-residual from before the marker existed, or an operator's manual surgery). It
-is a one-shot `hostthisd audit-counters [--apply]` subcommand, mirroring the
-retired one-shot migration binary: it builds the same shale metadata backend
-the daemon uses, runs the audit, and exits - it never starts the SSH/HTTP
-servers or the sweep/reconcile loops.
-
-It is **sound only with writes quiesced**, which is an operator precondition
-the tool cannot enforce: the operator scales the serving Deployment to **0
-replicas** (or stops the daemon) so no upload, delete, or reserve is in
-flight, then runs `audit-counters` as a separate one-shot pod/Job against the
-same metadata cluster. With no concurrent traffic the cross-shard scan and
-the counter write have **no conflict window** - which is the *only* context
-in which recomputing a counter's absolute value is safe. The identical
-scan-then-write is forbidden online: it is the racy recompute that
-under-counts across the scan-to-write gap and was deliberately removed from
-the reconciler.
-
-What it recomputes, per identity: `identity_site_bytes/<id>` = the sum of
-`DedupedSize` over that owner's live `sites/<slug>` rows, plus any reservation
-marker still **within grace whose row is ABSENT** (a legitimately-pending
-insert whose bytes the live counter would already hold); `identity_bytes/<id>`
-= the sum of live (non-tombstoned) version sizes over that owner's pastes, plus
-those same row-absent in-grace reserve markers (an `<slug>#append` marker maps
-to the base `<slug>`). An in-grace marker whose row is **present** is a leaked
-confirm whose bytes are already summed from the row, so it is NOT folded in
-again - that would double-count. Past-grace reserve markers and all release
-markers are **not** added (they stand for bytes that are either abandoned or
-already freed); a full audit resolves them via the reconciler first. The audit
-also enumerates the existing `identity_bytes/*` and `identity_site_bytes/*`
-counter keys, so an owner whose counter is a pure **residual** (a markerless
-over-count whose row is long gone) is examined too and recomputes to `0`. It
-then **sets** each drifted counter authoritatively with a single
-`Put(counter_key, sum)`. The default is **dry-run** (report every owner whose
-stored counter differs from the recomputed sum, write nothing); `--apply`
-performs the overwrites. Because writes are quiesced, the overwrite is exact
-and may safely move a counter **down** - the one place an absolute overwrite is
-permitted, and the reason it is gated behind an offline operator step rather
-than an online loop.
-
-Unlike the reconciler, the audit **fails closed** on an undecodable record.
-The reconciler tolerates a bad row (skip + log + continue) because it only ever
-applies marker-driven *deltas*, so deferring one row to the next tick costs
-latency, not correctness (Policy 1 in "Decode tolerance is per-scan-semantics").
-The audit instead writes an *absolute* value, so skipping an undecodable
-authoritative row would omit its bytes and set the counter too **low** - an
-under-count, the one direction the ranking invariant forbids. Any undecodable
-authoritative paste / version / site row (that is charged to an owner), reserve
-marker, or counter therefore aborts the whole audit and writes nothing; the
-operator repairs the record and re-runs. (An orphan `versions/<slug>` row whose
-paste is absent is charged to no owner, so a corrupt orphan version is skipped
-by slug without decoding - it cannot abort an audit it does not affect.)
+Taken together: the ceiling can be transiently under-enforced (Window A) or
+transiently over-admitted (Window B), each by a bounded, self-healing
+amount, but an identity's used bytes can never DURABLY sit above the cap
+once its writes settle and the index reprojects - and total service bytes
+are hard-capped by the bucket quota regardless. That is the deliberate trade
+the scan design makes versus the counter's exact-but-permanently-drifting
+ceiling.
 
 ### Cross-shard background operations
 
@@ -4161,15 +3970,15 @@ satisfy availability, the one that also satisfies the invariant wins.
 LOG, continue.** The expiry sweep (`ExpiredSlugs` / `ExpiredRoomKeys`
 and the site-expiry index walk), the keygate prune
 (`DeleteFirstSeenOlderThan` / `PruneOldRoomCreates`), and the reconciler
-(`Reconcile` - rebuild derived indexes and complete reservation markers
-- including `reconcileSiteReservations`) all treat an undecodable row as
-SKIP + LOG and CONTINUE the pass. The consequence of skipping is bounded
-and self-correcting: that one record is simply not processed THIS pass;
-the next pass (the periodic loop re-runs, e.g. ~10 min later) retries it.
-This is safe ONLY because these operations are idempotent and re-run:
-expiring a slug, pruning a stale keygate marker, releasing an abandoned
-reservation, and rebuilding a derived index all produce the same end
-state whether they run once or many times, so deferring one record to a
+(`Reconcile` - reproject the `identity_pastes` + `identity_sites`
+enumeration indexes and age out stuck pending pastes) all treat an
+undecodable row as SKIP + LOG and CONTINUE the pass. The consequence of
+skipping is bounded and self-correcting: that one record is simply not
+processed THIS pass; the next pass (the periodic loop re-runs, e.g. ~10 min
+later) retries it. This is safe ONLY because these operations are
+idempotent and re-run: expiring a slug, pruning a stale keygate marker, and
+reprojecting an enumeration index all produce the same end state whether
+they run once or many times, so deferring one record to a
 later pass costs at most latency, never correctness. A single corrupt row
 must NOT be allowed to abort the whole pass: a hard-fail there would stall
 expiry (pastes/sites/rooms stop being reclaimed), stall the keygate prune
@@ -4230,7 +4039,7 @@ The three policies, side by side:
 
 | Scan kind | Examples | On a bad record | Why |
 | --- | --- | --- | --- |
-| Idempotent background sweep / reconciler | `ExpiredSlugs`, `ExpiredRoomKeys`, site-expiry walk, `DeleteFirstSeenOlderThan`, `PruneOldRoomCreates`, `Reconcile` + `reconcileSiteReservations` | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
+| Idempotent background sweep / reconciler | `ExpiredSlugs`, `ExpiredRoomKeys`, site-expiry walk, `DeleteFirstSeenOlderThan`, `PruneOldRoomCreates`, `Reconcile` (`reconcileIndexes` + `reconcileSiteIndexes` + pending age-out) | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
 | Blob-GC reference set | `ReferencedBlobSHAs`, `ReferencedSiteBlobSHAs` | FAIL CLOSED - abort the GC pass, return error, delete nothing; NEVER skip | skipping under-counts refs -> a live blob looks orphaned and is deleted (irreversible) |
 | User-facing read | `Get`, `ListByOwner`, `ListVersions`, `GetVersion`, site manifest read, room scan / per-key read | HARD-FAIL (unchanged) | a user read of corrupt data should surface an error, not silently skip |
 
@@ -4414,26 +4223,27 @@ Two compatibility details:
   envelope: it loses any comparison against a stamped write and is
   re-stamped on its next write. This is graceful, requires no offline
   conversion, and at R=1 the envelope is not used at all.
-- **The `identity_bytes` counter needs a one-time backfill.** The
-  counter is new; existing deployments have no `identity_bytes/<id>`
-  rows. Before enabling per-identity quota on the shale backend, an
-  operator runs a one-time backfill that sums each identity's
-  non-deleted version sizes and writes the counter. This is an operator
-  step performed once at cutover, out of scope for the runtime path, and
-  it is a **correctness requirement**, not an optimization: the runtime
-  never recomputes the counter from a scan, so an identity with no
-  `identity_bytes/<id>` row starts at zero and would over-permit until
-  enough deltas accumulated. The backfill is the only sanctioned
-  scan-to-absolute-value write, and like the offline audit above it runs
-  once, before live quota enforcement is enabled, with no concurrent
-  traffic.
+- **The per-owner enumeration index self-backfills; there is no counter
+  to seed.** The per-identity quota is scan-derived, so a cutover needs no
+  offline backfill of any stored aggregate. The one derived structure the
+  quota scan reads THROUGH is the `identity_pastes` / `identity_sites`
+  enumeration index. An existing slatedb deployment already maintains
+  those indexes, so they carry over as-is; and even a paste / site that
+  somehow lacks an index entry is picked up by the periodic reconciler's
+  reprojection (it scans the authoritative `pastes/*` / `sites/*` rows and
+  re-adds any missing entry). This is a graceful, idempotent, no-downtime
+  heal that runs continuously against live traffic - not a one-time
+  offline step and not a correctness precondition for enabling quota. Its
+  only effect is the transient under-count window (a not-yet-indexed live
+  row briefly missing from a scan), which the "The correctness argument"
+  section bounds.
 
 ### Multi-node shale (horizontal write scaling)
 
 Everything above runs correctly on a single shale node: one process owns
 the whole ring, every shard resolves to the local backend, and the
-shard-key function plus the reservation pattern are already in place so
-the same code is correct at any node count. This subsection describes the
+shard-key function plus the scan-derived per-identity quota are already in
+place so the same code is correct at any node count. This subsection describes the
 multi-node shape that turns that single-writer-equivalent deployment into
 a horizontally write-scaled one, and the data-safety contract the cluster
 must honor when nodes join or leave.
@@ -4658,17 +4468,20 @@ must demonstrate on hostthis's actual data shapes:
    silently applied to a copy that is about to be superseded. The client
    retries after the shard settles on its new owner. A write is never
    applied to the losing side of a cutover.
-4. **The quota counter survives the move.** The per-identity
-   `identity_bytes/<id>` counter is an ordinary value-bearing key on the
-   `{id}` shard. When that shard migrates, the counter moves with it like
-   any other key, and after the move the counter is still readable (via
-   gRPC forwarding from any node) with its exact pre-move value. A quota
-   counter that under-counted after a rebalance would let an owner upload
-   past the cap; the contract is that it does not change value across the
-   move at all. The same holds for every other hostthis data shape on the
-   moving shard: paste rows, version rows, `slug_owner`, expiry index
-   entries, reservation markers, and the value-bearing `identity_pastes`
-   projections all arrive on the new owner byte-for-byte identical.
+4. **The quota-relevant keys survive the move.** The per-identity quota
+   is scan-derived, so what must survive a rebalance is the authoritative
+   `pastes/*` / `versions/*` / `sites/*` rows (the source of truth the
+   scan sums) and the per-owner `identity_pastes/<id>/*` /
+   `identity_sites/<id>/*` enumeration index (the set the scan walks). All
+   are ordinary keys on their shards; when a shard migrates they move with
+   it like any other key and arrive on the new owner byte-for-byte
+   identical, still readable via gRPC forwarding from any node. Because the
+   quota reads live rows through the index rather than a stored aggregate,
+   there is no counter that could drift across the move - the worst a move
+   could do is delay a not-yet-reprojected index entry, the same transient
+   under-count window the reconciler heals in steady state. The same
+   survives-intact contract holds for `slug_owner`, the expiry index
+   entries, and the value-bearing `identity_pastes` projections.
 
 This contract is the property the groundwork must **prove on real data**
 before any live multi-node deployment. The proof is an integration test
@@ -5171,7 +4984,7 @@ later tier; the Rooms section is what is real today.
     Same verification path for turnkey and BYO; the developer picks per app.
 - **What it unlocks** (apps someone would actually ship): a self-hosted
   comments / guestbook widget (a Disqus replacement); a poll / voting app
-  (the reservation-pattern CAS already does atomic counts); a high-score /
+  (shale's per-shard CAS already does atomic single-shard counts); a high-score /
   save-state for browser games; a form backend ("Formspree over SSH"); URL
   shorteners, visitor counters, feature flags.
 - **The product fork to decide first.** Offering "Sign in with hostthis"
