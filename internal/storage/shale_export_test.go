@@ -110,26 +110,8 @@ func (r *ShaleRepo) DeleteRawForTest(key []byte) error {
 // ReconcileForTest exposes Reconcile under a stable test name (Reconcile
 // is already exported, but routing the reconciler test through this
 // helper keeps the test's dependency surface explicit).
-func (r *ShaleRepo) ReconcileForTest(now time.Time, reserveGrace time.Duration) error {
-	return r.Reconcile(now, reserveGrace)
-}
-
-// DecrementBytesForTest reclaims `body` bytes from an owner's counter via
-// the same single-CAS {id}-shard path Delete uses. Exposed ONLY so the
-// race test can drain the documented over-count residual: a Delete whose
-// authoritative {slug} removal committed but whose {id} counter decrement
-// lost a transient CAS retry leaves the bytes counted with the paste gone,
-// and re-calling Delete cannot heal it (the paste row is already gone, so
-// Delete early-returns without decrementing). The race test detects that
-// exact state (paste absent via Get, yet a transient was seen on the
-// recycle delete) and uses this helper to settle the counter so the
-// no-in-flight-ops END state can be asserted EXACT. It NEVER touches an
-// under-count; it only sheds bytes the authoritative truth no longer
-// holds. The reconciler itself deliberately does NOT do this online
-// (docs/SPEC.md "The invariant, the residual drift, and the deliberate
-// non-goal").
-func (r *ShaleRepo) DecrementBytesForTest(identity string, body int64) error {
-	return r.decrementBytes(identity, body)
+func (r *ShaleRepo) ReconcileForTest(now time.Time) error {
+	return r.Reconcile(now)
 }
 
 // --- legacy-value builders (the slatedb on-disk shape) ---------------------
@@ -170,22 +152,21 @@ func LegacyVersionValueForTest(verNum int, kind domain.ContentKind, contentSHA s
 	})
 }
 
-// --- derived-index keys (what the reconciler rebuilds) ---------------------
-
-// IdentityBytesKeyForTest returns the "identity_bytes/<id>" counter key.
-func IdentityBytesKeyForTest(identity string) []byte { return shaleKeyIdentityBytes(identity) }
+// --- per-owner enumeration index keys (what the reconciler reprojects) ------
 
 // IdentityPasteKeyForTest returns the "identity_pastes/<id>/<slug>"
-// derived-index key.
+// per-owner enumeration-index key.
 func IdentityPasteKeyForTest(identity, slug string) []byte {
 	return shaleKeyIdentityPaste(identity, slug)
 }
 
-// IdentityReserveKeyForTest returns the "identity_reserve/<id>/<slug>"
-// reservation-marker key. Exposed so the reconciler test can seed an
-// orphan reservation and prove it is released.
-func IdentityReserveKeyForTest(identity, slug string) []byte {
-	return shaleKeyIdentityReserve(identity, slug)
+// IdentitySiteKeyForTest returns the "identity_sites/<id>/<slug>" per-owner
+// site enumeration-index key (the {id}-shard entry a deploy writes, DeleteSite
+// drops, and the reconciler reprojects). Exposed so the reconciler test can
+// drop it while the authoritative site still exists and prove the reconciler
+// rebuilds it (closing the crash-between-row-and-index under-count window).
+func IdentitySiteKeyForTest(identity, slug string) []byte {
+	return shaleKeyIdentitySite(identity, slug)
 }
 
 // MarkerValueForTest is the non-empty placeholder value index families
@@ -193,81 +174,7 @@ func IdentityReserveKeyForTest(identity, slug string) []byte {
 // can seed the expiry index marker exactly as the backend writes it.
 func MarkerValueForTest() []byte { return markerValue }
 
-// EncodeReservationMarkerForTest produces the exact JSON value the
-// backend stores at identity_reserve/<id>/<slug>: {"bytes":N,
-// "created_at":<RFC3339Nano>}. Exposed so the grace + leak tests can seed
-// a reservation marker stamped with a chosen created_at (within or past
-// the grace window) without going through the live reserve path.
-func EncodeReservationMarkerForTest(bytes int64, createdAt time.Time) ([]byte, error) {
-	return encodeReservationMarker(bytes, createdAt)
-}
-
-// --- site-family keys (what a half-committed DeleteSite touches) -----------
-
-// SiteKeyForTest returns the "sites/<slug>" authoritative row key.
+// SiteKeyForTest returns the "sites/<slug>" authoritative site row key.
+// Exposed so the decode-tolerance test can seed a poisoned site row and prove
+// Reconcile's site-index reprojection skips + continues (Policy 1).
 func SiteKeyForTest(slug domain.Slug) []byte { return shaleKeySite(slug) }
-
-// ExpirySiteKeyForTest returns the "expiry_sites/<ts>/<slug>" sweep-index
-// key (fixed-width timestamp), so a test can remove the derived expiry entry
-// exactly as DeleteSite's {slug}-shard CAS does.
-func ExpirySiteKeyForTest(t time.Time, slug domain.Slug) []byte {
-	return shaleKeyExpirySite(t, slug)
-}
-
-// IdentitySiteKeyForTest returns the "identity_sites/<id>/<slug>"
-// enumeration-index entry key (the {id}-shard entry DeleteSite drops).
-func IdentitySiteKeyForTest(identity, slug string) []byte {
-	return shaleKeyIdentitySite(identity, slug)
-}
-
-// IdentitySiteBytesKeyForTest returns the "identity_site_bytes/<id>" SITE
-// quota counter key: the per-identity static-site byte counter DeleteSite
-// decrements on the {id} shard as a separate CAS from the {slug} row removal.
-func IdentitySiteBytesKeyForTest(identity string) []byte {
-	return shaleKeyIdentitySiteBytes(identity)
-}
-
-// IdentitySiteReserveKeyForTest returns the
-// "identity_site_reserve/<id>/<slug>" site reservation-marker key. Exposed so
-// the control subtest can seed an orphaned site reservation and prove the
-// reconciler releases it (the marker-backed drift the markerless case lacks).
-func IdentitySiteReserveKeyForTest(identity, slug string) []byte {
-	return shaleKeyIdentitySiteReserve(identity, slug)
-}
-
-// IdentitySiteReleaseKeyForTest returns the
-// "identity_site_release/<id>/<slug>" site RELEASE-marker key (the delete-side
-// mirror of the reserve marker). Exposed so the crash-durable-delete subtest
-// can seed a half-committed delete (tombstone + release marker written, counter
-// decrement lost) and prove the reconciler now completes the decrement.
-func IdentitySiteReleaseKeyForTest(identity, slug string) []byte {
-	return shaleKeyIdentitySiteRelease(identity, slug)
-}
-
-// EncodeReleaseMarkerWithNonceForTest produces the exact JSON value a
-// crash-durable DeleteSite stamps at identity_site_release/<id>/<slug>:
-// {"bytes":N,"created_at":<RFC3339Nano>,"nonce":<hex>}. Exposed so the
-// slot-reuse subtest can seed a marker written by a SPECIFIC delete instance
-// (a chosen nonce) and prove another delete's consume never touches it.
-func EncodeReleaseMarkerWithNonceForTest(bytes int64, createdAt time.Time, nonce string) ([]byte, error) {
-	return encodeReleaseMarker(bytes, createdAt, nonce)
-}
-
-// ConsumeSiteReleaseMarkerForTest drives DeleteSite's step-4 consume in
-// isolation with a chosen nonce, so the slot-reuse subtest can reproduce a
-// stale delete resuming its consume AFTER a concurrent re-delete overwrote the
-// single per-(id,slug) release-marker slot. The consume decrements + deletes
-// ONLY a marker still carrying `nonce`; a mismatched marker is left untouched.
-func (r *ShaleRepo) ConsumeSiteReleaseMarkerForTest(identity, slug, nonce string) error {
-	return r.consumeSiteReleaseMarker(identity, slug, nonce)
-}
-
-// CompleteSiteReleaseMarkerForTest drives the reconciler's release-completion
-// branch in isolation (the {id}-shard CAS that decrements + deletes a
-// past-grace release marker whose row is absent), so the slot-reuse subtest can
-// reproduce the scan-to-CAS TOCTOU: a fresh delete re-stamped the slot with a
-// YOUNG marker after the reconciler's scan chose "complete". The in-grace
-// re-check must leave that young marker alone (never under-count a live site).
-func (r *ShaleRepo) CompleteSiteReleaseMarkerForTest(identity, slug string, now time.Time, reserveGrace time.Duration) error {
-	return r.completeSiteReleaseMarker(shaleKeyIdentitySiteRelease(identity, slug), now, reserveGrace)
-}

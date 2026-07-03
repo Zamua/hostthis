@@ -38,7 +38,7 @@ func TestConformance_Slate(t *testing.T) {
 	access := envOrDefault("MINIO_TEST_ACCESS_KEY", "admin")
 	secret := envOrDefault("MINIO_TEST_SECRET_KEY", "supersecret")
 
-	caps := conformCaps{ExpiryFreesQuotaAtReadTime: true, StrictQuotaUnderConcurrency: true}
+	caps := conformCaps{ExpiryFreesQuotaAtReadTime: true, StrictQuotaUnderConcurrency: true, StrictIdentityQuotaUnderConcurrency: true}
 	newSlate := func(t *testing.T) *storage.SlateRepo {
 		// Unique per-call logical db so each subtest starts empty within
 		// the shared bucket. Run epoch (nanos) + a monotonic counter keeps

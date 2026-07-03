@@ -28,10 +28,8 @@
 //	versions/<slug>/<NNNN>             -> shard key <slug>
 //	slug_owner/<slug>                  -> shard key <slug>
 //	expiry/<rfc3339>/<slug>            -> shard key <slug>  (slug is the LAST segment)
-//	identity_pastes/<id>/<slug>        -> shard key <id>    (value-bearing projection)
+//	identity_pastes/<id>/<slug>        -> shard key <id>    (per-owner enumeration index)
 //	identity_first_seen/<id>           -> shard key <id>
-//	identity_bytes/<id>                -> shard key <id>    (the reservation counter)
-//	identity_reserve/<id>/<slug>       -> shard key <id>    (reservation marker)
 //	keygate/<subnet>/<identity>        -> shard key <subnet>
 //
 // Routing every key of a family to the same shard makes a transaction
@@ -58,17 +56,24 @@
 //     shape is reserved for Delete tombstones. Index-marker families that
 //     SlateRepo stored as empty values carry a one-byte / JSON value here.
 //
-// # Cross-family writes: the reservation pattern
+// # Cross-family writes and the scan-derived quota
 //
-// Insert / AppendVersion / Delete / DeleteVersion span the {id} counter
-// shard and the {slug} authoritative shard, which cannot be one
-// transaction. They are a sequence of single-shard CAS transactions:
-// reserve on {id}, authoritative write on {slug}, confirm on {id}. The
-// reserve step increments identity_bytes BEFORE the authoritative write,
-// so quota is a hard ceiling under concurrency (docs/SPEC.md
-// "Reservation-pattern quota"). A failure after reserve leaves an
-// orphaned reservation that over-counts (fail-safe) until the reconciler
-// releases it.
+// Insert / AppendVersion / Delete / DeleteVersion span the {slug}
+// authoritative shard and the {id} enumeration-index shard, which cannot
+// be one transaction. There is deliberately NO stored per-owner byte
+// counter: the per-identity quota is DERIVED by scanning the owner's
+// identity_pastes / identity_sites enumeration index and summing each live
+// paste's authoritative version sizes (docs/SPEC.md "Scan-derived quota"),
+// exactly the way the sqlite and slatedb backends sum live rows. A write is
+// therefore a plain sequence: check the quota (scan), authoritative write on
+// {slug}, then best-effort enumeration-index write on {id}. Because the
+// used-bytes figure is always a pure function of the authoritative rows, an
+// identity's DURABLE used bytes can never exceed the cap; the only transient
+// gaps are a crash between the row write and the index write (a bounded
+// UNDER-count the reconciler's index reprojection heals) and two concurrent
+// same-owner uploads both passing the non-atomic check (a bounded
+// over-admit). The reconciler reprojects the enumeration index from the
+// authoritative rows (an idempotent SET heal), so nothing can durably drift.
 
 //go:build slatedb
 
@@ -76,8 +81,6 @@ package storage
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -112,8 +115,8 @@ import (
 // Single-node vs multi-node is selected by BindAddr: empty keeps the
 // single-node path (every op local, no gossip, no ring routing - today's
 // behavior, the back-compat guarantee), non-empty brings up memberlist +
-// gRPC forwarding and joins the ring. The ShardKeyFn and the reservation
-// pattern are unchanged across node counts: the same code shards correctly
+// gRPC forwarding and joins the ring. The ShardKeyFn and the per-family
+// co-location are unchanged across node counts: the same code shards correctly
 // at N>1, and shale's own tests cover multi-node routing + rebalance.
 type ShaleConfig struct {
 	NodeID    string // stable node identity; required by cluster.Open
@@ -402,8 +405,8 @@ func newFenceWALGCSettings() (*slatedb.Settings, error) {
 //
 // The cluster is opened with shaleShardKey as its ShardKeyFn so that
 // every key family co-locates on the shard keyed by its subject
-// (<slug> / <id> / <subnet>), which is what makes the reservation
-// counter and the per-slug authoritative rows each single-shard.
+// (<slug> / <id> / <subnet>), which is what makes an owner's enumeration
+// index and the per-slug authoritative rows each single-shard.
 //
 // Multi-node wiring (cfg.BindAddr != ""): NewShaleRepo binds the gRPC
 // peer-forwarding listener on cfg.GRPCAddr BEFORE opening the cluster, then
@@ -755,18 +758,6 @@ func shaleKeyIdentityFirstSeen(identity string) []byte {
 	return []byte("identity_first_seen/" + identity)
 }
 
-func shaleKeyIdentityBytes(identity string) []byte {
-	return []byte("identity_bytes/" + identity)
-}
-
-func shaleKeyIdentityReserve(identity, slug string) []byte {
-	return []byte("identity_reserve/" + identity + "/" + slug)
-}
-
-func shalePrefixIdentityReserve(identity string) []byte {
-	return []byte("identity_reserve/" + identity + "/")
-}
-
 func shaleKeyExpiry(t time.Time, slug domain.Slug) []byte {
 	return []byte("expiry/" + t.UTC().Format(time.RFC3339Nano) + "/" + slug.String())
 }
@@ -784,20 +775,6 @@ func shalePrefixKeygateSubnet(subnet string) []byte {
 // empty values, so a one-byte marker stands in for SlateRepo's []byte{}.
 var markerValue = []byte{'1'}
 
-// defaultReserveGrace is the safety interval the reconciler uses to tell
-// an in-flight reservation (younger than the grace) from an abandoned or
-// leaked one (older than the grace). It is a var, not a const, so tests
-// can shrink it; callers pass their own value into Reconcile.
-var defaultReserveGrace = 10 * time.Minute
-
-// DefaultReserveGrace is the recommended reserveGrace to pass to
-// Reconcile: comfortably longer than the reserve->authoritative-write
-// window of a healthy insert, so the reconciler never races a live
-// upload, while short enough that an abandoned reservation's over-count
-// is reclaimed promptly. Operators scheduling Reconcile use this unless
-// they have a reason to override it.
-func DefaultReserveGrace() time.Duration { return defaultReserveGrace }
-
 // PendingPasteTimeout is how old a status=pending paste may be before the
 // reconciler ages it to failed (the pod-death backstop: its in-memory
 // bytes never reached the blob store). It is comfortably longer than a
@@ -806,83 +783,6 @@ func DefaultReserveGrace() time.Duration { return defaultReserveGrace }
 // self-heals out of the loading screen within a sweep tick or two. A var,
 // not a const, so tests can shrink it.
 var PendingPasteTimeout = 2 * time.Minute
-
-// reservationMarker is the value stored at identity_reserve/<id>/<slug>.
-// Bytes is the reserved size; CreatedAt is the `now` the reserve was
-// stamped with (RFC3339Nano via time.Time JSON), so the reconciler can
-// compute the marker's age (now - created_at) and apply the grace window
-// without inferring age from the paste's absence (docs/SPEC.md
-// "Reservation-pattern quota").
-//
-// Nonce identifies WHICH delete instance wrote a RELEASE marker. The release
-// marker occupies a single per-(id,slug) slot that is reused across delete
-// instances, so a concurrent re-deploy + re-delete of the same slug can
-// overwrite the slot between one delete's marker-write and its consume. The
-// nonce lets the hot-path consume prove the marker still present is the one
-// IT wrote (decrement only when the nonce matches), so a delete never
-// decrements bytes recorded by a different (possibly still-live) delete's
-// marker - the never-under-count guard. It is omitempty: reserve markers do
-// not set it and stay byte-identical to the pre-nonce layout.
-type reservationMarker struct {
-	Bytes     int64     `json:"bytes"`
-	CreatedAt time.Time `json:"created_at"`
-	Nonce     string    `json:"nonce,omitempty"`
-}
-
-// encodeReservationMarker serializes a marker to its JSON value.
-func encodeReservationMarker(bytes int64, createdAt time.Time) ([]byte, error) {
-	return json.Marshal(reservationMarker{Bytes: bytes, CreatedAt: createdAt.UTC()})
-}
-
-// encodeReleaseMarker serializes a RELEASE marker (a reservationMarker
-// carrying a per-delete nonce). The nonce is what lets consumeSiteReleaseMarker
-// decrement only its own marker; see the reservationMarker doc.
-func encodeReleaseMarker(bytes int64, createdAt time.Time, nonce string) ([]byte, error) {
-	return json.Marshal(reservationMarker{Bytes: bytes, CreatedAt: createdAt.UTC(), Nonce: nonce})
-}
-
-// newReleaseNonce mints a random 16-byte hex nonce for a single delete
-// instance's release marker. crypto/rand keeps two concurrent deletes of the
-// same slug from colliding on the same value; the value is opaque (compared
-// for equality only, never ordered or parsed).
-func newReleaseNonce() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("mint release-marker nonce: %w", err)
-	}
-	return hex.EncodeToString(b[:]), nil
-}
-
-// parseReservationMarker decodes a reservation marker value. It tolerates
-// a legacy bare-number marker (a plain decimal `body` with no timestamp,
-// as an earlier layout wrote): a legacy marker decodes to its byte count
-// with a zero CreatedAt, which reads as "very old" so it is always past
-// any grace window. New markers always carry the JSON shape.
-func parseReservationMarker(raw []byte) (reservationMarker, error) {
-	// Strip the LWW envelope first: at R>1 the raw CAS tx.Get marker is
-	// wrapped, so the '{' JSON sniff below would miss and misroute it to the
-	// legacy bare-number path. Idempotent for R=1 / already-stripped values.
-	raw, err := stripEnvelope(raw)
-	if err != nil {
-		return reservationMarker{}, fmt.Errorf("strip reservation marker envelope: %w", err)
-	}
-	if len(raw) == 0 {
-		return reservationMarker{}, nil
-	}
-	if raw[0] == '{' {
-		var m reservationMarker
-		if err := json.Unmarshal(raw, &m); err != nil {
-			return reservationMarker{}, fmt.Errorf("decode reservation marker: %w", err)
-		}
-		return m, nil
-	}
-	// Legacy bare-number marker: bytes only, zero (very old) created_at.
-	n, err := parseCounter(raw)
-	if err != nil {
-		return reservationMarker{}, fmt.Errorf("decode legacy reservation marker: %w", err)
-	}
-	return reservationMarker{Bytes: n}, nil
-}
 
 // --- JSON projections ------------------------------------------------------
 
@@ -1140,8 +1040,11 @@ func formatCounter(n int64) []byte {
 	return []byte(strconv.FormatInt(n, 10))
 }
 
-// txGetCounter reads the identity_bytes counter inside a CAS tx, recording
-// the read-check. Absent reads as 0 (and an ExpectAbsent check).
+// txGetCounter reads an integer counter value inside a CAS tx, recording the
+// read-check. Absent reads as 0 (and an ExpectAbsent check). Used by the
+// per-app room byte counter (the one counter the shale backend still keeps,
+// because a room write is a strict single-shard CAS - see shale_room_repo.go);
+// the per-identity paste/site quota is scan-derived, not counted.
 func txGetCounter(tx shaleKVTx, key []byte) (int64, error) {
 	raw, err := tx.Get(key)
 	if err != nil {
@@ -1308,24 +1211,114 @@ func (r *ShaleRepo) CountByOwner(owner string) (int, error) {
 	return live, nil
 }
 
-// SumActiveBytesByOwner serves from the identity_bytes counter, a single
-// {id}-shard read. Per docs/SPEC.md "One intentional behavior change" the
-// counter has no read-time expiry awareness (it sheds an expired paste's
-// bytes at sweep time, not read time), so `now` is unused. The counter
-// over-counts an expired-unswept paste transiently; it never under-counts.
+// SumActiveBytesByOwner derives the owner's active PASTE bytes by SCANNING
+// the per-identity enumeration index (identity_pastes/<id>/) and summing the
+// authoritative live version sizes, mirroring the sqlite + slatedb owner
+// sums. There is no stored byte counter: the number is computed from the
+// authoritative rows on every read, so it is idempotently self-correct (a
+// set-derived aggregate cannot accrue the permanent drift a mutated counter
+// can). See docs/SPEC.md "Scan-derived quota".
+//
+// The enumeration is single-shard (identity_pastes co-shards on {id}) but the
+// SIZE comes from each paste's head + version rows on their {slug} shard, so
+// it is always authoritative: the index's denormalized Size is used only for
+// the list view, never for quota (a paste's live size changes as versions are
+// appended/tombstoned after the index entry was written, so the cached size
+// could drift). now IS used: an expired-but-unswept paste is excluded at read
+// time (ExpiryFreesQuotaAtReadTime = true), matching sqlite + slatedb.
 func (r *ShaleRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, error) {
 	if owner == "" {
 		return 0, nil
 	}
-	raw, err := r.getRaw(shaleKeyIdentityBytes(owner))
+	total, err := r.sumActiveBytesForOwner(owner, now)
 	if err != nil {
 		return 0, err
 	}
-	n, err := parseCounter(raw)
+	return int(total), nil
+}
+
+// sumActiveBytesForOwner walks identity_pastes/<owner>/ and sums the sizes of
+// non-deleted version rows for each paste that is still live: head row
+// present (a stale index entry whose paste is gone is skipped), status !=
+// failed, and expires_at > now. This is the exact filter the sqlite query
+// encodes (SUM(v.size) WHERE identity=? AND expires_at>? AND v.deleted=0 AND
+// status!='failed'). An undecodable row HARD-FAILS the scan (returns the
+// error) rather than skipping: the quota scan is a synchronous write-path
+// read, so failing safe means rejecting the upload, never silently
+// under-counting (docs/SPEC.md "Decode tolerance is per-scan-semantics", Policy 3).
+func (r *ShaleRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, error) {
+	idx, err := r.scanPrefix(shalePrefixIdentityPastes(owner))
 	if err != nil {
 		return 0, err
 	}
-	return int(n), nil
+	var total int64
+	for _, item := range idx {
+		slug := domain.Slug(extractSlug(item.Key))
+		var p pasteRow
+		if err := r.getJSON(shaleKeyPaste(slug), &p); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue // stale index entry: the authoritative paste is gone
+			}
+			return 0, err
+		}
+		if domain.NormalizeStatus(p.Status) == domain.PasteStatusFailed {
+			continue // a failed paste's bytes were never durable
+		}
+		if !p.ExpiresAt.After(now) {
+			continue // expired-unswept: stops counting at read time
+		}
+		versions, err := r.scanVersions(slug)
+		if err != nil {
+			return 0, err
+		}
+		for _, v := range versions {
+			if v.Deleted {
+				continue
+			}
+			total += int64(v.Size)
+		}
+	}
+	return total, nil
+}
+
+// sumLiveVersionBytes sums the sizes of a paste's non-deleted version rows on
+// the {slug} shard (the paste's post-revival byte contribution). When
+// AppendVersionWithQuotaCheck revives an EXPIRED-unswept paste - the scan
+// excludes it, but the append resets its expiry - the check charges this sum
+// PLUS the new version so the revived paste's full bytes are counted, matching
+// the sqlite/slatedb append revival charge (docs/SPEC.md "Reviving an
+// expired-but-unswept record charges its FULL post-revival size").
+func (r *ShaleRepo) sumLiveVersionBytes(slug domain.Slug) (int64, error) {
+	versions, err := r.scanVersions(slug)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, v := range versions {
+		if v.Deleted {
+			continue
+		}
+		total += int64(v.Size)
+	}
+	return total, nil
+}
+
+// combinedActiveBytes sums the owner's active PASTE + SITE bytes via the two
+// scan-based owner sums. It is the per-owner "used" figure the quota checks
+// compare against the cap before an authoritative write, matching the sqlite
+// identityActiveBytes which spans both kinds. Reading authoritative row sizes
+// (via the enumeration indexes) means a stale index projection can never
+// under-count the check.
+func (r *ShaleRepo) combinedActiveBytes(owner string, now time.Time) (int64, error) {
+	pasteBytes, err := r.SumActiveBytesByOwner(owner, now)
+	if err != nil {
+		return 0, err
+	}
+	siteBytes, err := r.SumActiveSiteBytesByOwner(owner, now)
+	if err != nil {
+		return 0, err
+	}
+	return int64(pasteBytes) + siteBytes, nil
 }
 
 func (r *ShaleRepo) OwnerFirstSeen(owner string) (time.Time, error) {
@@ -1344,109 +1337,6 @@ func (r *ShaleRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("decode first seen: %w", err)
 	}
 	return t, nil
-}
-
-// --- reservation-pattern quota: reserve / release helpers ------------------
-
-// reserveBytes is step 1 of the reservation pattern: a single-shard CAS on
-// the {id} shard that atomically checks the per-owner cap and increments
-// the identity_bytes (PASTE) counter by `body`, plus writes a reservation
-// marker keyed by slug. Returns ErrOverUserQuota if the owner's COMBINED
-// paste + site bytes plus `body` would exceed cap. The increment + the
-// check are one atomic CAS, so two concurrent reservers serialize: exactly
-// one reads the pre-increment counter, the other reads the post-increment
-// value and is rejected if it no longer fits. Quota is therefore a hard
-// ceiling (docs/SPEC.md "Why quota can never be exceeded").
-//
-// The cap check sums BOTH the paste counter AND the site counter, so a
-// paste insert is rejected if the owner's combined paste+site bytes would
-// exceed userCap, the SYMMETRIC twin of reserveSiteBytes (which reads the
-// paste counter for the site direction) and matching the sqlite
-// identityActiveBytes that spans both kinds. The site counter
-// (identity_site_bytes/<id>) co-shards on {id} with the paste counter, so
-// reading it inside this CAS is a same-shard read. Only the paste counter
-// is incremented here; the site counter is read for the cap but never
-// written.
-//
-// A zero userCap means "no per-owner cap"; the paste counter is still
-// incremented (so SumActiveBytesByOwner stays accurate) but the check is
-// skipped.
-func (r *ShaleRepo) reserveBytes(identity, slug string, body, userCap int64, now time.Time) error {
-	counterKey := shaleKeyIdentityBytes(identity)
-	siteCounterKey := shaleKeyIdentitySiteBytes(identity)
-	reserveKey := shaleKeyIdentityReserve(identity, slug)
-	markerVal, err := encodeReservationMarker(body, now)
-	if err != nil {
-		return err
-	}
-	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
-		cur, err := txGetCounter(tx, counterKey)
-		if err != nil {
-			return err
-		}
-		if userCap > 0 {
-			siteCur, err := txGetCounter(tx, siteCounterKey)
-			if err != nil {
-				return err
-			}
-			if cur+siteCur+body > userCap {
-				return ErrOverUserQuota
-			}
-		}
-		if err := tx.Put(counterKey, formatCounter(cur+body)); err != nil {
-			return err
-		}
-		return tx.Put(reserveKey, markerVal)
-	})
-}
-
-// releaseBytes returns `body` bytes to the counter and drops the
-// reservation marker, in one {id}-shard CAS. Used to roll back a failed
-// reservation. Idempotent on a missing marker: if the marker is already
-// gone (a confirm already consumed it, or a prior release ran), the
-// counter is left untouched so the bytes are not double-credited.
-func (r *ShaleRepo) releaseBytes(identity, slug string, body int64) error {
-	counterKey := shaleKeyIdentityBytes(identity)
-	reserveKey := shaleKeyIdentityReserve(identity, slug)
-	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
-		marker, err := tx.Get(reserveKey)
-		if err != nil {
-			if errors.Is(err, backend.ErrNotFound) {
-				return nil // already consumed/released; do not double-credit
-			}
-			return err
-		}
-		m, err := parseReservationMarker(marker)
-		if err != nil {
-			return err
-		}
-		amt := m.Bytes
-		cur, err := txGetCounter(tx, counterKey)
-		if err != nil {
-			return err
-		}
-		if err := tx.Put(counterKey, formatCounter(cur-amt)); err != nil {
-			return err
-		}
-		return tx.Delete(reserveKey)
-	})
-}
-
-// decrementBytes subtracts `body` from the counter in one {id}-shard CAS,
-// with no reservation marker involved. Used by Delete / DeleteVersion to
-// shed freed bytes. Clamped at zero by formatCounter.
-func (r *ShaleRepo) decrementBytes(identity string, body int64) error {
-	if body <= 0 {
-		return nil
-	}
-	counterKey := shaleKeyIdentityBytes(identity)
-	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
-		cur, err := txGetCounter(tx, counterKey)
-		if err != nil {
-			return err
-		}
-		return tx.Put(counterKey, formatCounter(cur-body))
-	})
 }
 
 // --- Shale-blob pointer binding (the transactional shale-blob path) --------
@@ -1643,16 +1533,26 @@ func (r *ShaleRepo) blobRefFor(routeKey []byte, blobID string) cluster.BlobRef {
 
 // --- PasteRepo / PasteAdmin writes -----------------------------------------
 
-// InsertWithQuotaCheck creates a paste via the three-step reservation
-// pattern: reserve on {id}, authoritative write on {slug}, confirm on
-// {id}. The per-owner cap is enforced strictly by the reserve step's
-// atomic CAS. The durable total-bytes ceiling is NOT checked here: it is
-// the object-store bucket quota, enforced when the blob Put is rejected
-// (see SPEC "Limits -> Durable total-bytes ceiling: an object-store
-// quota"); the metadata backend runs no cross-shard byte scan.
+// InsertWithQuotaCheck creates a paste. The per-owner cap is enforced by a
+// scan-and-compare BEFORE the authoritative write: the owner's combined
+// paste+site used bytes are derived from the enumeration indexes and the
+// upload is rejected with ErrOverUserQuota if used+body would exceed the cap.
+// The check and the write are NOT atomic, so two concurrent uploads from the
+// SAME identity can both pass and both land (a bounded over-admit; acceptable
+// because one key is one person and the object-store bucket quota backstops
+// the durable total - docs/SPEC.md "Scan-derived quota"). The
+// durable total-bytes ceiling is likewise the object-store bucket quota,
+// enforced when the blob Put is rejected.
+//
+// The authoritative write is the {slug} CAS (slug-collision read-check + blob
+// bind); the {id} enumeration-index entry + first-seen are written
+// SYNCHRONOUSLY after it (not deferred) so a subsequent quota scan sees this
+// paste. The derived index is the quota source of truth now, so it cannot lag
+// the way the old reservation-counter's deferred index could; a crash between
+// the {slug} write and the {id} index write leaves a paste the index does not
+// list (a transient, bounded under-count the reconciler's reprojection heals).
 func (r *ShaleRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error {
 	identity := p.Identity.String()
-	slug := p.Slug.String()
 	body := int64(p.Size)
 
 	// The staged blob refs (if any) ride this call's context, isolated from
@@ -1660,39 +1560,30 @@ func (r *ShaleRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 	// authoritative {slug} transaction binds exactly this call's blobs.
 	binds := pendingBindsFromContext(ctx)
 
-	// Step 1: reserve (strict per-owner quota). The marker is stamped with
-	// `now` so the reconciler can apply the grace window.
-	if err := r.reserveBytes(identity, slug, body, userCap, now); err != nil {
-		return err
+	// Quota CHECK (scan-based) before the authoritative write.
+	if userCap > 0 {
+		used, err := r.combinedActiveBytes(identity, now)
+		if err != nil {
+			return err
+		}
+		if used+body > userCap {
+			return ErrOverUserQuota
+		}
 	}
 
-	// Step 2: authoritative write on the {slug} shard. On any failure
-	// here, release the reservation so the bytes are returned (the
-	// over-count is bounded to the failure window + the reconciler).
+	// Authoritative write on the {slug} shard.
 	if err := r.insertAuthoritative(p, binds); err != nil {
-		_ = r.releaseBytes(identity, slug, body)
 		return err
 	}
 
-	// Step 3: confirm on the {id} shard: drop the reservation marker,
-	// write the value-bearing index entry, set first-seen if absent. The
-	// counter is NOT touched here (the reserve already accounted the
-	// bytes); confirm just consumes the marker so the reconciler doesn't
-	// later mistake it for an orphan.
-	//
-	// Deferred off the response path (SPEC "Reservation-pattern quota",
-	// step 3). The authoritative paste row already exists, so the paste is
-	// Get-readable and its URL never 404s; the bytes were reserved in step
-	// 1, so quota is already strict. Confirm only writes the eventually-
-	// consistent derived index entry + first-seen, both of which the
-	// reconciler heals if this goroutine is lost (confirm was already a
-	// non-fatal step whose failure left the index to the reconciler). So
-	// InsertWithQuotaCheck returns success now and runs confirm in the
-	// background; a lost confirm leaves a "leaked marker" the grace-
-	// windowed reconciler pass drops and a missing index entry the
-	// reconciler rebuilds, exactly as a synchronous confirm failure did.
-	r.confirmWG.Add(1)
-	go r.deferredConfirmInsert(p)
+	// Enumeration-index maintenance on the {id} shard: write the
+	// identity_pastes index entry + first-seen. Best-effort + reconciler-
+	// healed: a failure leaves a paste the index does not list (a transient
+	// under-count the reconciler heals), never a failed upload, so the paste
+	// (already durable) is returned as success.
+	if err := r.confirmInsert(p); err != nil {
+		r.repoLog().Printf("shale: index maintenance for %s: %v (index lag; reconciler will heal)", p.Slug, err)
+	}
 	return nil
 }
 
@@ -1837,24 +1728,18 @@ func fileBlobsFromRefs(refs []cluster.BlobRef) map[string]string {
 	return out
 }
 
-// confirmInsert is step 3: drop the reservation marker, write the
-// value-bearing identity_pastes index entry, and set identity_first_seen
-// if absent. All on the {id} shard, one CAS transaction.
+// confirmInsert writes the value-bearing identity_pastes index entry and sets
+// identity_first_seen if absent, on the {id} shard in one CAS. It is the
+// enumeration-index maintenance the scan-based quota depends on: the entry is
+// how SumActiveBytesByOwner / ListByOwner / CountByOwner enumerate the owner's
+// pastes. Idempotent: a re-run overwrites the same entry and leaves an
+// already-set first-seen untouched.
 func (r *ShaleRepo) confirmInsert(p domain.Paste) error {
 	identity := p.Identity.String()
 	slug := p.Slug.String()
-	reserveKey := shaleKeyIdentityReserve(identity, slug)
 	indexKey := shaleKeyIdentityPaste(identity, slug)
 	firstSeenKey := shaleKeyIdentityFirstSeen(identity)
-	return r.cluster.Transact(reserveKey, func(tx backend.Transaction) error {
-		// Drop the reservation marker (it was consumed into the index).
-		if _, err := tx.Get(reserveKey); err == nil {
-			if err := tx.Delete(reserveKey); err != nil {
-				return err
-			}
-		} else if !errors.Is(err, backend.ErrNotFound) {
-			return err
-		}
+	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
 		if err := shaleTxPutJSON(tx, indexKey, identityPasteRow{
 			Name:      p.Name,
 			Size:      p.Size,
@@ -1906,14 +1791,13 @@ func (r *ShaleRepo) MarkReady(slug domain.Slug) error {
 	})
 }
 
-// MarkFailed flips a paste's status pending -> failed and releases its
-// reservation (sheds the charged bytes + drops the index entry), the
-// background finalizer's failure transition AND the reconciler's
-// age-out. The paste ROW stays (flipped to failed) so a read can serve
-// an error page; only its byte accounting is undone. Guarded: only a
-// still-pending paste transitions, so this never un-counts a ready
-// paste. Idempotent on re-call (a failed paste no longer has its index
-// entry, so the decrement does not double-apply). See docs/SPEC.md
+// MarkFailed flips a paste's status pending -> failed and drops its
+// enumeration-index entry, the shape both the background finalizer's failure
+// transition AND the reconciler's age-out use. The paste ROW stays (flipped to
+// failed) so a read can serve an error page; its bytes stop counting toward
+// quota the instant the status flips (the scan skips a failed head row) - there
+// is no counter to decrement. Guarded: only a still-pending paste transitions,
+// so this never un-counts a ready paste. Idempotent on re-call. See docs/SPEC.md
 // "Paste lifecycle status (async blob write)".
 func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
 	pasteKey := shaleKeyPaste(slug)
@@ -1921,7 +1805,6 @@ func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
 	// owner + size so step 2 can shed the bytes. If the paste isn't pending
 	// (already failed/ready, or absent) there's nothing to release.
 	var identity string
-	var size int64
 	var transitioned bool
 	err := r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
 		transitioned = false // reset on CAS retry
@@ -1944,7 +1827,6 @@ func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
 			return nil // only a pending paste transitions
 		}
 		identity = p.Identity
-		size = int64(p.Size)
 		p.Status = string(domain.PasteStatusFailed)
 		if err := shaleTxPutJSON(tx, pasteKey, p); err != nil {
 			return err
@@ -1955,54 +1837,75 @@ func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
 	if err != nil || !transitioned {
 		return err
 	}
-	// Step 2: shed the charged bytes on the {id} shard - drop the index
-	// entry + decrement the counter. Mirrors Delete's {id}-shard cleanup.
-	// The index-entry presence guards against a double-decrement: a second
-	// MarkFailed finds the row already failed in step 1 and never reaches
-	// here.
+	// Step 2: drop the enumeration-index entry on the {id} shard so the
+	// failed paste leaves ListByOwner. Its bytes stop counting toward quota
+	// the instant step 1 flips the status: the scan skips a failed head row
+	// (and, once the index entry is gone, never enumerates it at all), so
+	// there is no counter to decrement.
 	indexKey := shaleKeyIdentityPaste(identity, slug.String())
-	counterKey := shaleKeyIdentityBytes(identity)
-	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
+	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
 		if _, err := tx.Get(indexKey); err == nil {
-			if err := tx.Delete(indexKey); err != nil {
-				return err
-			}
+			return tx.Delete(indexKey)
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return err
 		}
-		cur, err := txGetCounter(tx, counterKey)
-		if err != nil {
-			return err
-		}
-		return tx.Put(counterKey, formatCounter(cur-size))
+		return nil
 	})
 }
 
-// AppendVersionWithQuotaCheck appends a new version via the reservation
-// pattern. The new version's bytes are reserved on the {id} shard
-// (strict per-owner quota), then the version row is written + the expiry
-// clock reset on the {slug} shard, then the index projection is refreshed
-// on the {id} shard.
+// AppendVersionWithQuotaCheck appends a new version. The per-owner cap is
+// enforced by a scan-and-compare BEFORE the authoritative write: the owner's
+// combined paste+site used bytes (which already include this paste's current
+// versions WHEN it is live) plus the new version's bytes must not exceed the
+// cap. If the target paste is EXPIRED-unswept the scan excludes it entirely,
+// but the append revives it (resets expiry), so the check charges the paste's
+// full post-revival total - its existing non-deleted version bytes plus the new
+// version - not the new version alone (docs/SPEC.md "Reviving an
+// expired-but-unswept record charges its FULL post-revival size"). The check
+// and the write are not atomic (bounded same-owner over-admit), the same
+// tradeoff InsertWithQuotaCheck documents. The version row is then written +
+// the expiry clock reset on the {slug} shard, and the index projection's
+// expiry is refreshed synchronously on the {id} shard.
 func (r *ShaleRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (AppendResult, error) {
 	// The new version's staged blob ref (if any) rides this call's context,
 	// isolated from any concurrent same-slug append. Read once and pass it down.
 	binds := pendingBindsFromContext(ctx)
 
-	// Resolve the owner identity + pin state from the authoritative paste.
+	// Resolve the owner identity from the authoritative paste.
 	var existing pasteRow
 	if err := r.getJSON(shaleKeyPaste(slug), &existing); err != nil {
 		return AppendResult{}, err
 	}
 	identity := existing.Identity
 	body := int64(size)
-	slugStr := slug.String()
 
-	// Step 1: reserve. The reservation marker is keyed by a synthetic
-	// "<slug>#append" so it never collides with an insert reservation for
-	// the same slug.
-	reserveSlug := slugStr + "#append"
-	if err := r.reserveBytes(identity, reserveSlug, body, userCap, now); err != nil {
-		return AppendResult{}, err
+	// Quota CHECK (scan-based) before the authoritative write.
+	if userCap > 0 {
+		used, err := r.combinedActiveBytes(identity, now)
+		if err != nil {
+			return AppendResult{}, err
+		}
+		// The scan `used` already counts this paste's live versions WHEN the
+		// paste is live, so the vanilla charge is just body. But when the target
+		// paste is EXPIRED-unswept the scan excludes the WHOLE paste, while
+		// appendAuthoritative RESETS its expiry (revives it) and brings its
+		// existing live versions back into the sum. So a revived paste must be
+		// charged its full post-revival total: its existing non-deleted version
+		// bytes (currently excluded from `used`) PLUS the new version, not the
+		// new version alone - otherwise the revived paste durably exceeds the cap
+		// (docs/SPEC.md "Reviving an expired-but-unswept record charges its FULL
+		// post-revival size"). Matches the sqlite + slatedb append revival charge.
+		charge := body
+		if !existing.ExpiresAt.After(now) {
+			revived, err := r.sumLiveVersionBytes(slug)
+			if err != nil {
+				return AppendResult{}, err
+			}
+			charge += revived
+		}
+		if used+charge > userCap {
+			return AppendResult{}, ErrOverUserQuota
+		}
 	}
 
 	// Determine the next version number from a scan (outside the tx). The
@@ -2010,14 +1913,15 @@ func (r *ShaleRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 	// so a racing append that took the same number conflicts + retries.
 	res, err := r.appendAuthoritative(slug, kind, contentSHA, size, now, binds)
 	if err != nil {
-		_ = r.releaseBytes(identity, reserveSlug, body)
 		return AppendResult{}, err
 	}
 
-	// Step 3: refresh the index projection (size/expiry changed) + drop
-	// the append reservation marker. Best-effort; reconciler heals a lag.
-	if err := r.confirmAppend(identity, slug, reserveSlug, r.Retention.ExpiryFor(now)); err != nil {
-		return res, fmt.Errorf("confirm append: %w", err)
+	// Refresh the index projection's expiry (the retention clock reset).
+	// Best-effort + reconciler-healed; display-only (quota reads the
+	// authoritative versions, ListByOwner reads the authoritative
+	// LatestVersion).
+	if err := r.confirmAppend(identity, slug, r.Retention.ExpiryFor(now)); err != nil {
+		r.repoLog().Printf("shale: index refresh for append %s: %v (index lag; reconciler will heal)", slug, err)
 	}
 	return res, nil
 }
@@ -2116,22 +2020,13 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKin
 	return AppendResult{}, fmt.Errorf("shale: append %q: could not allocate a free version number after %d attempts", slug, maxRenumberAttempts)
 }
 
-// confirmAppend refreshes the index projection's size/expiry for the
-// paste's owner and drops the append reservation marker, on the {id}
-// shard. The projection's Size mirrors the paste head size; ListByOwner's
-// authoritative LatestVersion read does not depend on it, but keeping it
-// fresh avoids a stale denormalized size in the list view.
-func (r *ShaleRepo) confirmAppend(identity string, slug domain.Slug, reserveSlug string, newExpiry time.Time) error {
-	reserveKey := shaleKeyIdentityReserve(identity, reserveSlug)
+// confirmAppend refreshes the index projection's expiry for the paste's owner
+// on the {id} shard so the list view's denormalized expiry stays fresh after
+// an append. ListByOwner reads the authoritative LatestVersion, so this is
+// display-only; best-effort + reconciler-healed.
+func (r *ShaleRepo) confirmAppend(identity string, slug domain.Slug, newExpiry time.Time) error {
 	indexKey := shaleKeyIdentityPaste(identity, slug.String())
-	return r.cluster.Transact(reserveKey, func(tx backend.Transaction) error {
-		if _, err := tx.Get(reserveKey); err == nil {
-			if err := tx.Delete(reserveKey); err != nil {
-				return err
-			}
-		} else if !errors.Is(err, backend.ErrNotFound) {
-			return err
-		}
+	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
 		var row identityPasteRow
 		if err := shaleTxGetJSON(tx, indexKey, &row); err != nil {
 			if errors.Is(err, ErrNotFound) {
@@ -2144,10 +2039,12 @@ func (r *ShaleRepo) confirmAppend(identity string, slug domain.Slug, reserveSlug
 	})
 }
 
-// Delete removes a paste entirely (whole-paste delete is a full removal,
-// not a tombstone): the authoritative {slug} rows go away and the freed
-// bytes are decremented from the owner's {id} counter. Idempotent on a
-// missing paste.
+// Delete removes a paste entirely (whole-paste delete is a full removal, not
+// a tombstone): the authoritative {slug} rows go away and the {id}
+// enumeration-index entry is dropped, so the owner's scan-derived quota sum
+// stops counting the paste. Idempotent on a missing paste. There is no byte
+// counter to decrement: the freed bytes leave the owner's sum the instant the
+// authoritative rows (and their index entry) vanish.
 func (r *ShaleRepo) Delete(slug domain.Slug) error {
 	var p pasteRow
 	if err := r.getJSON(shaleKeyPaste(slug), &p); err != nil {
@@ -2162,60 +2059,29 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 	}
 	identity := p.Identity
 
-	// Authoritative removal on the {slug} shard, one CAS. The freed bytes
-	// are computed INSIDE the transaction by re-reading each version's
-	// tombstone state, so the count matches exactly what this Delete
-	// removes. The re-read also puts every version key in the CAS read-set:
-	// a concurrent DeleteVersion that tombstoned (and already decremented)
-	// a version commits a change to that key, which conflicts this CAS and
-	// forces a retry that re-reads the now-tombstoned version and excludes
-	// it from `freed`. That closes the same-slug Delete-vs-DeleteVersion
-	// double-decrement (an under-count) the pre-transaction scan was
-	// exposed to.
-	var freed int64
 	pasteKey := shaleKeyPaste(slug)
 	// On the transactional shale-blob path the paste's blobs are unbound in the
-	// SAME {slug} transaction (atomic delete): each live version's pointer is
-	// removed via unbind, so the bytes go unreferenced exactly when the rows
-	// vanish, and SweepOrphans reclaims them after the grace. unbind is a no-op
-	// on the metadata-only path (the global content-addressed sweep reclaims).
+	// SAME {slug} transaction (atomic delete): each version's pointer is removed
+	// via unbind, so the bytes go unreferenced exactly when the rows vanish, and
+	// SweepOrphans reclaims them after the grace. unbind is a no-op on the
+	// metadata-only path (the global content-addressed sweep reclaims).
 	delBody := func(tx shaleKVTx, unbind func(blobID string) error) error {
-		freed = 0 // reset: the closure re-runs on a CAS conflict
 		if err := tx.Delete(pasteKey); err != nil {
 			return err
 		}
 		for _, v := range versions {
-			vKey := shaleKeyVersion(slug, v.VerNum)
-			raw, gerr := tx.Get(vKey) // read-set: detects a concurrent tombstone
-			if errors.Is(gerr, backend.ErrNotFound) {
-				continue // already gone
-			}
-			if gerr != nil {
-				return gerr
-			}
-			payload, serr := stripEnvelope(raw)
-			if serr != nil {
-				return serr
-			}
-			var vr versionRow
-			if jerr := json.Unmarshal(payload, &vr); jerr != nil {
-				return jerr
-			}
-			if !vr.Deleted {
-				freed += int64(vr.Size) // only bytes still live count toward the decrement
-			}
 			// Unbind this version's blob (the bref pointer) so its bytes go
 			// unreferenced. A tombstoned version's pointer was already unbound
 			// by DeleteVersion, so re-unbinding (an idempotent tx.Delete of a
 			// missing key) is harmless. Only the BlobID-carrying rows (the
 			// shale-blob path) have a pointer; legacy rows carry no BlobID and
 			// unbind is skipped.
-			if vr.BlobID != "" {
-				if err := unbind(vr.BlobID); err != nil {
+			if v.BlobID != "" {
+				if err := unbind(v.BlobID); err != nil {
 					return err
 				}
 			}
-			if err := tx.Delete(vKey); err != nil {
+			if err := tx.Delete(shaleKeyVersion(slug, v.VerNum)); err != nil {
 				return err
 			}
 		}
@@ -2239,40 +2105,32 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 		return err
 	}
 
-	// Derived cleanup on the {id} shard: drop the index entry + decrement
-	// the counter by the freed bytes. Two {id}-shard transactions (the
-	// index delete and the counter decrement are independent; combine into
-	// one CAS pinned on the {id} shard since both keys co-shard).
+	// Drop the enumeration-index entry on the {id} shard so the paste leaves
+	// the owner's scan (and ListByOwner / CountByOwner). Idempotent.
 	indexKey := shaleKeyIdentityPaste(identity, slug.String())
-	counterKey := shaleKeyIdentityBytes(identity)
-	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
+	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
 		if _, err := tx.Get(indexKey); err == nil {
-			if err := tx.Delete(indexKey); err != nil {
-				return err
-			}
+			return tx.Delete(indexKey)
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return err
 		}
-		cur, err := txGetCounter(tx, counterKey)
-		if err != nil {
-			return err
-		}
-		return tx.Put(counterKey, formatCounter(cur-freed))
+		return nil
 	})
 }
 
 // DeleteVersion tombstones a single version (Q1 = Option 2: the version
 // stays visible in the list flagged deleted, but its content blob is no
-// longer referenced so the GC reclaims it). The freed bytes are
-// decremented from the owner's counter. A re-delete of an already-
-// tombstoned version is a repo-level no-op (no double-decrement).
+// longer referenced so the GC reclaims it). The tombstoned version's bytes
+// leave the owner's scan-derived quota sum because the scan skips deleted
+// versions; there is no byte counter to decrement. A re-delete of an
+// already-tombstoned version is a repo-level no-op.
 func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
-	// Resolve owner for the counter decrement.
+	// Existence gate: a missing paste yields ErrNotFound, matching the sqlite
+	// + slatedb DeleteVersion which key off the paste row.
 	var p pasteRow
 	if err := r.getJSON(shaleKeyPaste(slug), &p); err != nil {
 		return err
 	}
-	identity := p.Identity
 	verKey := shaleKeyVersion(slug, ver)
 	// The tombstone tx pins on verKey, but the blob pointer (bref) routes on the
 	// {slug} shard - the SAME unit verKey routes to (versions/<slug>/<NNNN> and
@@ -2284,17 +2142,14 @@ func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 	// service guards it), so the head row's blob id is never the one unbound here.
 	pasteKey := shaleKeyPaste(slug)
 
-	var freed int64
 	verBody := func(tx shaleKVTx, unbind func(blobID string) error) error {
 		var v versionRow
 		if err := shaleTxGetJSON(tx, verKey, &v); err != nil {
 			return err
 		}
 		if v.Deleted {
-			freed = 0 // already tombstoned; no-op
-			return nil
+			return nil // already tombstoned; no-op
 		}
-		freed = int64(v.Size)
 		v.Deleted = true
 		if err := shaleTxPutJSON(tx, verKey, v); err != nil {
 			return err
@@ -2304,25 +2159,16 @@ func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 		}
 		return nil
 	}
-	var err error
 	if r.kv != nil {
-		err = r.kv.Transact(verKey, func(tx *cluster.BlobTx) error {
+		return r.kv.Transact(verKey, func(tx *cluster.BlobTx) error {
 			return verBody(tx, func(blobID string) error {
 				return tx.UnbindBlob(r.blobRefFor(pasteKey, blobID))
 			})
 		})
-	} else {
-		err = r.cluster.Transact(verKey, func(tx backend.Transaction) error {
-			return verBody(tx, func(string) error { return nil })
-		})
 	}
-	if err != nil {
-		return err
-	}
-	if freed == 0 {
-		return nil
-	}
-	return r.decrementBytes(identity, freed)
+	return r.cluster.Transact(verKey, func(tx backend.Transaction) error {
+		return verBody(tx, func(string) error { return nil })
+	})
 }
 
 func (r *ShaleRepo) SetName(slug domain.Slug, name string) error {
@@ -2649,52 +2495,44 @@ func (r *ShaleRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 
 // --- reconciler ------------------------------------------------------------
 
-// Reconcile heals the derived per-identity family and completes the
-// reservation markers the hot path left behind. It is the convergence
-// mechanism the reservation pattern relies on (docs/SPEC.md "Running the
-// reconciler against live traffic"). It has exactly two jobs, and
-// NEITHER ever overwrites the identity_bytes counter with an absolute
-// value derived from a scan:
+// Reconcile is the metadata backend's maintenance pass and the SOLE
+// quota-healing mechanism now that the per-identity quota is DERIVED by
+// scanning the enumeration indexes (docs/SPEC.md "Scan-derived quota" /
+// "Derived indexes and repair-on-read"). With no stored counter to keep
+// correct, it has exactly two jobs, and NEITHER ever writes an aggregate
+// number:
 //
-//   - rebuild identity_pastes/<id>/<slug> projections from the
-//     authoritative paste rows (adding missing entries, refreshing stale
-//     ones, dropping entries whose paste is gone). This touches only the
-//     derived index, never the counter (reconcileIndexes).
-//   - complete identity_reserve/<id>/<slug> markers older than
-//     reserveGrace: an ABANDONED reservation (paste absent) is released
-//     with a targeted, read-checked CAS that does counter -= marker.bytes
-//     AND deletes the marker atomically; a LEAKED confirm-failed marker
-//     (paste exists) is simply deleted, leaving the counter untouched
-//     because the bytes are already authoritatively counted. Markers
-//     younger than the grace are in-flight inserts and left strictly
-//     alone (releaseReservationMarkers).
+//   - REPROJECT the per-owner enumeration indexes from the authoritative
+//     rows: identity_pastes/<id>/<slug> from the pastes/ scan
+//     (reconcileIndexes) and identity_sites/<id>/<slug> from the sites/ scan
+//     (reconcileSiteIndexPass). Each adds a missing entry, refreshes a stale
+//     projection, and drops an entry whose paste/site is gone. This is a pure
+//     "reproject the authoritative SET, drop orphans" heal, so it closes the
+//     one quota-relevant gap the scan design has: a crash between the
+//     authoritative {slug} row write and the {id} enumeration-index write
+//     leaves a live row the index does not list, transiently UNDER-counting
+//     that owner until this pass re-adds the entry.
+//   - AGE OUT stuck pending pastes (the pod-death backstop): a status=pending
+//     paste older than PendingPasteTimeout is flipped to failed so it drops
+//     out of the quota scan and its loading screen. Orthogonal to quota
+//     accounting (a failed paste is excluded by the status filter regardless)
+//     but re-homed here in the same pass.
 //
-// The counter is NEVER recomputed. It is maintained purely by the strict,
-// read-checked CAS deltas on the hot path (reserve adds, delete /
-// delete-version subtracts, orphan-release subtracts). An earlier
-// recompute that rebuilt the counter from a cross-shard live-byte scan
-// was structurally racy (it could under-count across the scan ->
-// tx.Get(counter) window and let an owner over-admit past the cap) and is
-// removed. See docs/SPEC.md "Why never recompute".
-//
-// It is NOT part of the SweepRepo contract: the sweep's public surface is
-// unchanged. An operator (or a sweep hook that calls this directly) runs
-// it periodically. Single-node, cross-shard via aggregate; safe to run
-// concurrently with live traffic because every write it makes is either a
-// derived-index repair or an idempotent, targeted, read-checked CAS delta
-// on a single {id} shard, never a full-scan counter overwrite.
-func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
-	// Gather authoritative state across all shards.
+// Because it only ever reprojects the authoritative rows (a SET), never
+// overwrites a stored number, it is idempotently self-healing and safe under
+// live traffic on any cadence: every pod running it converges to the same
+// state and running it more often only tightens the under-count window (there
+// is no aggregate to race or clobber). It is NOT part of the SweepRepo
+// contract: the sweep's public surface is unchanged. Single-node, cross-shard
+// via aggregate; a poisoned row is skipped + logged and the pass continues
+// (docs/SPEC.md "Decode tolerance is per-scan-semantics", Policy 1).
+func (r *ShaleRepo) Reconcile(now time.Time) error {
+	// Gather authoritative paste state across all shards.
 	pasteItems, err := r.aggregatePrefix([]byte("pastes/"))
 	if err != nil {
 		return fmt.Errorf("reconcile: scan pastes: %w", err)
 	}
 
-	// The set of slugs that have an authoritative paste, used to decide
-	// whether a past-grace marker is an abandoned reservation (paste
-	// absent -> orphan-release, decrement) or a leaked confirm-failed
-	// marker (paste present -> drop without touching the counter).
-	livePasteSlugs := make(map[string]struct{}, len(pasteItems))
 	pastesByOwner := make(map[string]map[string]identityPasteRow)
 	// stalePending collects slugs whose status is pending and whose
 	// created_at is older than the pending timeout: the pod-death backstop
@@ -2704,28 +2542,44 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 	// pass. See docs/SPEC.md "Reconciler: age out stuck pendings".
 	var stalePending []domain.Slug
 	for _, item := range pasteItems {
+		slug := strings.TrimPrefix(string(item.Key), "pastes/")
 		var p pasteRow
 		if err := json.Unmarshal(item.Value, &p); err != nil {
-			// Idempotent reconcile: skip + log the undecodable row and
-			// continue. One poisoned paste must not stall the whole pass
-			// (which would freeze index rebuild + reservation release for
-			// every healthy owner); the next tick retries it. See docs/SPEC.md
-			// "Decode tolerance is per-scan-semantics", Policy 1.
-			r.repoLog().Printf("reconcile: skip undecodable paste %s: %v", item.Key, err)
-			// The row PHYSICALLY exists (we just cannot decode it), so mark
-			// its slug LIVE before continuing. Otherwise a past-grace
-			// reservation marker for this slug would be classified as an
-			// abandoned reservation (paste absent -> orphan-release ->
-			// decrement the owner's byte counter) for a paste that still
-			// exists, UNDER-COUNTING the owner's quota. Treating it as present
-			// makes a lingering marker a leaked-confirm (dropped, counter
-			// untouched). We still skip THIS slug's derived-index rebuild
-			// (we cannot read the row), which the next tick retries.
-			livePasteSlugs[strings.TrimPrefix(string(item.Key), "pastes/")] = struct{}{}
+			// Idempotent reconcile: one poisoned paste must not stall the whole
+			// pass (which would freeze index reprojection for every healthy
+			// owner); the next tick retries it (Policy 1). But we CANNOT simply
+			// drop it: the quota scan reads THROUGH the enumeration index, so an
+			// undecodable row whose identity_pastes entry was ALSO lost (a crash
+			// between the row write and the index write) would be enumerated by
+			// nothing and silently drop from the owner's sum - a durable
+			// UNDER-count that lets the owner exceed the cap permanently. So
+			// derive the owner decode-independently from slug_owner/<slug> and
+			// still project a PLACEHOLDER enumeration entry (zero-value row) so
+			// the next quota scan enumerates the slug and re-reads the
+			// authoritative row - which then hard-fails the scan (fail-closed
+			// reject), never a silent under-count. See docs/SPEC.md "Decode
+			// tolerance of the quota scan".
+			owner := r.ownerOfSlug(domain.Slug(slug))
+			if owner == "" {
+				// No slug_owner to derive the owner (only reachable on the
+				// metadata-only test path; prod always writes slug_owner). Cannot
+				// project the entry; log loudly - this is the one residual where
+				// the row can stay un-enumerated until it is repaired.
+				r.repoLog().Printf("reconcile: undecodable paste %s AND no slug_owner: cannot project enumeration entry; quota may under-count this slug until it is repaired: %v", item.Key, err)
+				continue
+			}
+			if pastesByOwner[owner] == nil {
+				pastesByOwner[owner] = make(map[string]identityPasteRow)
+			}
+			// Zero-value projection: we cannot read name/size/expiry from the
+			// corrupt row, and the quota scan reads the authoritative size anyway.
+			// The entry's only job is to make the slug ENUMERABLE.
+			if _, ok := pastesByOwner[owner][slug]; !ok {
+				pastesByOwner[owner][slug] = identityPasteRow{}
+			}
+			r.repoLog().Printf("reconcile: undecodable paste %s: projected placeholder enumeration entry under owner %s (fail-closed): %v", item.Key, owner, err)
 			continue
 		}
-		slug := strings.TrimPrefix(string(item.Key), "pastes/")
-		livePasteSlugs[slug] = struct{}{}
 		if pastesByOwner[p.Identity] == nil {
 			pastesByOwner[p.Identity] = make(map[string]identityPasteRow)
 		}
@@ -2744,95 +2598,25 @@ func (r *ShaleRepo) Reconcile(now time.Time, reserveGrace time.Duration) error {
 		}
 	}
 
-	// Gather the reservation markers (cross-shard) and group them by owner.
-	markersByOwner, err := r.gatherReservationMarkers()
-	if err != nil {
-		return err
-	}
-
-	// Job 1: rebuild the derived index (never touches the counter).
+	// Job 1: reproject the paste enumeration index from the authoritative rows.
 	if err := r.reconcileIndexes(pastesByOwner); err != nil {
 		return err
 	}
 	// Job 1b: age out stuck pending pastes (pod-death backstop). Each
 	// MarkFailed is independent + idempotent; a failure on one slug is
 	// logged and skipped so it cannot stall the rest of the pass (the next
-	// tick retries it), the same per-row discipline the other jobs use.
+	// tick retries it), the same per-row discipline the index reprojection uses.
 	for _, slug := range stalePending {
 		if err := r.MarkFailed(slug); err != nil {
 			r.repoLog().Printf("reconcile: age-out pending %s: %v", slug, err)
 		}
 	}
-	// Job 2: complete past-grace paste markers (orphan-release / leaked-drop).
-	if err := r.releaseReservationMarkers(now, reserveGrace, markersByOwner, livePasteSlugs); err != nil {
-		return err
-	}
-	// Job 3: complete past-grace SITE reserve markers, the exact same
-	// orphan-release / leaked-drop rule applied to identity_site_reserve/
-	// against the SITE counter (shale_site_repo.go). It is the backstop for a
-	// deploy that crashed between the site reserve and the authoritative write
-	// (the hot path's release covers a failed write; the reconciler covers a
-	// crash).
-	if err := r.reconcileSiteReservations(now, reserveGrace); err != nil {
-		return err
-	}
-	// Job 4: complete past-grace SITE release markers, the delete-side inverse
-	// of Job 3. It is the backstop for a DeleteSite that crashed between the
-	// authoritative tombstone and the counter decrement (the markerless
-	// residual the release marker now records): site absent -> decrement
-	// marker.bytes (at most once via the marker-consume); site present -> drop
-	// the marker without touching the counter (the bytes are still live).
-	return r.reconcileSiteReleaseMarkers(now, reserveGrace)
-}
-
-// reservationMarkerEntry is a parsed reservation marker tagged with its
-// full identity_reserve/<id>/<slug> key, used by the reconciler to
-// complete past-grace markers (orphan-release or leaked-marker drop).
-type reservationMarkerEntry struct {
-	Key    []byte
-	Marker reservationMarker
-}
-
-// gatherReservationMarkers scans every identity_reserve marker across all
-// shards, parses each (tolerating legacy bare-number markers), and groups
-// them by owner identity.
-func (r *ShaleRepo) gatherReservationMarkers() (map[string][]reservationMarkerEntry, error) {
-	items, err := r.aggregatePrefix([]byte("identity_reserve/"))
-	if err != nil {
-		return nil, fmt.Errorf("reconcile: scan reservations: %w", err)
-	}
-	byOwner := make(map[string][]reservationMarkerEntry)
-	for _, item := range items {
-		rest := strings.TrimPrefix(string(item.Key), "identity_reserve/")
-		before, _, ok := strings.Cut(rest, "/")
-		if !ok {
-			continue
-		}
-		owner := before
-		m, err := parseReservationMarker(item.Value)
-		if err != nil {
-			// Idempotent reconcile: skip + log the undecodable marker and
-			// continue. A single poisoned reservation marker must not stall
-			// the reconciler pass for every other owner; the next tick
-			// retries it. See docs/SPEC.md "Decode tolerance is
-			// per-scan-semantics", Policy 1.
-			r.repoLog().Printf("reconcile: skip undecodable reservation marker %s: %v", item.Key, err)
-			continue
-		}
-		byOwner[owner] = append(byOwner[owner], reservationMarkerEntry{
-			Key:    append([]byte(nil), item.Key...),
-			Marker: m,
-		})
-	}
-	return byOwner, nil
-}
-
-// markerInGrace reports whether a marker is still within the grace window
-// (now - created_at <= reserveGrace), i.e. a genuinely in-flight insert
-// whose bytes belong in the true counter value. A marker past grace is an
-// abandoned-or-leaked reservation excluded from the recompute.
-func markerInGrace(m reservationMarker, now time.Time, reserveGrace time.Duration) bool {
-	return now.Sub(m.CreatedAt) <= reserveGrace
+	// Job 2: reproject the SITE enumeration index from the authoritative sites/
+	// rows (the exact parallel of Job 1, re-homed here from the now-deleted
+	// site-reservation pass so the site index still heals every tick). This is
+	// what backfills sites deployed before the identity_sites index existed and
+	// closes the crash-between-row-and-index under-count for sites.
+	return r.reconcileSiteIndexPass()
 }
 
 // reconcileIndexes rebuilds identity_pastes projections to match the
@@ -2868,120 +2652,4 @@ func txPutIndex(r *ShaleRepo, owner, slug string, row identityPasteRow) error {
 	return r.cluster.Transact(key, func(tx backend.Transaction) error {
 		return shaleTxPutJSON(tx, key, row)
 	})
-}
-
-// releaseReservationMarkers completes past-grace reservation markers,
-// honoring the grace window so an in-flight insert's marker is never
-// mistaken for an orphan (docs/SPEC.md "Grace window for reservation
-// completion"). For each marker:
-//
-//   - YOUNGER than reserveGrace: in-flight (between the reserve step and
-//     the authoritative write). Skip it. Its bytes are already in the
-//     counter (the reserve added them) and the confirm step is expected
-//     to land shortly. The counter is never recomputed, so the marker's
-//     bytes stay correctly counted while it is in flight.
-//   - OLDER than reserveGrace, paste ABSENT (orphan-reserve-release): the
-//     insert was abandoned, so the reserved bytes never became live. This
-//     is the ONLY reconciler write that touches the counter: a targeted,
-//     read-checked CAS on the {id} shard that does counter -= marker.bytes
-//     AND deletes the marker atomically (orphanReleaseMarker). Idempotent
-//     (a concurrent confirm or a prior pass that already consumed the
-//     marker leaves nothing to release). It only ever decrements abandoned
-//     reservations whose bytes were never consumed by a live paste, so it
-//     can never under-count a live paste.
-//   - OLDER than reserveGrace, paste PRESENT (leaked-marker drop): a
-//     confirm that failed after the authoritative write succeeded left the
-//     marker behind even though the bytes are already authoritatively
-//     counted. Delete the marker WITHOUT touching the counter
-//     (decrementing here would under-count the live paste). This is what
-//     bounds the marker family: without it a confirm-failed marker for a
-//     still-live paste would leak unboundedly.
-//
-// An <slug>#append marker maps to the base <slug>'s paste: an append
-// targets an existing paste, so a past-grace append marker is virtually
-// always the leaked-marker case (the paste is present), which drops the
-// marker without moving the counter.
-func (r *ShaleRepo) releaseReservationMarkers(now time.Time, reserveGrace time.Duration, markersByOwner map[string][]reservationMarkerEntry, livePasteSlugs map[string]struct{}) error {
-	for _, markers := range markersByOwner {
-		for _, e := range markers {
-			if markerInGrace(e.Marker, now, reserveGrace) {
-				continue // in-flight; leave it for the confirm step to drop
-			}
-			baseSlug := strings.TrimSuffix(markerSlugFromKey(e.Key), "#append")
-			if _, pasteExists := livePasteSlugs[baseSlug]; pasteExists {
-				// Leaked confirm-failed marker: the bytes are already
-				// authoritatively counted. Drop the marker, leave the
-				// counter alone.
-				_ = r.cluster.Delete(e.Key)
-				continue
-			}
-			// Abandoned reservation: the paste never materialized. Release
-			// the over-count with a targeted, read-checked CAS that consumes
-			// the marker atomically.
-			if err := r.orphanReleaseMarker(e.Key); err != nil {
-				return fmt.Errorf("reconcile: orphan-release %s: %w", e.Key, err)
-			}
-		}
-	}
-	return nil
-}
-
-// orphanReleaseMarker is the targeted, read-checked CAS that releases one
-// abandoned reservation: in a single {id}-shard Transact it reads the
-// counter and the marker, and if the marker is still present, subtracts
-// the marker's bytes from the counter AND deletes the marker, atomically.
-// It is the only counter write the reconciler ever makes, and it is a
-// strict delta (counter -= marker.bytes), never an absolute overwrite.
-//
-// Idempotent: a marker already consumed (by a concurrent confirm, a
-// release, or a prior reconcile pass) is read as absent here and the CAS
-// is a no-op, so the bytes are never double-credited. Pinning the
-// transaction on the counter key (which co-shards with the marker, both
-// keyed by {id}) makes the read of the marker and the counter, and the
-// two writes, one atomic single-shard CAS.
-func (r *ShaleRepo) orphanReleaseMarker(reserveKey []byte) error {
-	owner := markerOwnerFromKey(reserveKey)
-	counterKey := shaleKeyIdentityBytes(owner)
-	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
-		raw, err := tx.Get(reserveKey)
-		if err != nil {
-			if errors.Is(err, backend.ErrNotFound) {
-				return nil // already consumed; no-op (never double-credit)
-			}
-			return err
-		}
-		m, err := parseReservationMarker(raw)
-		if err != nil {
-			return err
-		}
-		cur, err := txGetCounter(tx, counterKey)
-		if err != nil {
-			return err
-		}
-		if err := tx.Put(counterKey, formatCounter(cur-m.Bytes)); err != nil {
-			return err
-		}
-		return tx.Delete(reserveKey)
-	})
-}
-
-// markerOwnerFromKey extracts <id> from an identity_reserve/<id>/<slug>
-// key. The <id> is everything between the prefix and the FIRST "/".
-func markerOwnerFromKey(key []byte) string {
-	rest := strings.TrimPrefix(string(key), "identity_reserve/")
-	if before, _, ok := strings.Cut(rest, "/"); ok {
-		return before
-	}
-	return rest
-}
-
-// markerSlugFromKey extracts <slug> from an identity_reserve/<id>/<slug>
-// key. The <slug> is everything after the FIRST "/" (an identity never
-// contains a "/", and the slug segment may itself be "<slug>#append").
-func markerSlugFromKey(key []byte) string {
-	rest := strings.TrimPrefix(string(key), "identity_reserve/")
-	if _, after, ok := strings.Cut(rest, "/"); ok {
-		return after
-	}
-	return ""
 }
