@@ -4054,18 +4054,38 @@ the reconciler.
 
 What it recomputes, per identity: `identity_site_bytes/<id>` = the sum of
 `DedupedSize` over that owner's live `sites/<slug>` rows, plus any reservation
-marker still **within grace** (a legitimately-pending insert whose bytes the
-live counter would already hold); `identity_bytes/<id>` = the sum of live
-(non-tombstoned) version sizes over that owner's pastes, plus in-grace reserve
-markers. Past-grace reserve markers and all release markers are **not** added
-(they stand for bytes that are either abandoned or already freed); a full
-audit resolves them via the reconciler first. It then **sets** each counter
-authoritatively with a single `Put(counter_key, sum)`. The default is
-**dry-run** (report every owner whose stored counter differs from the
-recomputed sum, write nothing); `--apply` performs the overwrites. Because
-writes are quiesced, the overwrite is exact and may safely move a counter
-**down** - the one place an absolute overwrite is permitted, and the reason
-it is gated behind an offline operator step rather than an online loop.
+marker still **within grace whose row is ABSENT** (a legitimately-pending
+insert whose bytes the live counter would already hold); `identity_bytes/<id>`
+= the sum of live (non-tombstoned) version sizes over that owner's pastes, plus
+those same row-absent in-grace reserve markers (an `<slug>#append` marker maps
+to the base `<slug>`). An in-grace marker whose row is **present** is a leaked
+confirm whose bytes are already summed from the row, so it is NOT folded in
+again - that would double-count. Past-grace reserve markers and all release
+markers are **not** added (they stand for bytes that are either abandoned or
+already freed); a full audit resolves them via the reconciler first. The audit
+also enumerates the existing `identity_bytes/*` and `identity_site_bytes/*`
+counter keys, so an owner whose counter is a pure **residual** (a markerless
+over-count whose row is long gone) is examined too and recomputes to `0`. It
+then **sets** each drifted counter authoritatively with a single
+`Put(counter_key, sum)`. The default is **dry-run** (report every owner whose
+stored counter differs from the recomputed sum, write nothing); `--apply`
+performs the overwrites. Because writes are quiesced, the overwrite is exact
+and may safely move a counter **down** - the one place an absolute overwrite is
+permitted, and the reason it is gated behind an offline operator step rather
+than an online loop.
+
+Unlike the reconciler, the audit **fails closed** on an undecodable record.
+The reconciler tolerates a bad row (skip + log + continue) because it only ever
+applies marker-driven *deltas*, so deferring one row to the next tick costs
+latency, not correctness (Policy 1 in "Decode tolerance is per-scan-semantics").
+The audit instead writes an *absolute* value, so skipping an undecodable
+authoritative row would omit its bytes and set the counter too **low** - an
+under-count, the one direction the ranking invariant forbids. Any undecodable
+authoritative paste / version / site row (that is charged to an owner), reserve
+marker, or counter therefore aborts the whole audit and writes nothing; the
+operator repairs the record and re-runs. (An orphan `versions/<slug>` row whose
+paste is absent is charged to no owner, so a corrupt orphan version is skipped
+by slug without decoding - it cannot abort an audit it does not affect.)
 
 ### Cross-shard background operations
 
