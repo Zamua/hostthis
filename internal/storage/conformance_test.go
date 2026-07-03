@@ -73,26 +73,40 @@ var fixedNow = time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 // than silently accepting either.
 type conformCaps struct {
 	// ExpiryFreesQuotaAtReadTime is true for backends that exclude an
-	// expired-but-unswept paste's bytes from the owner sum at READ time
-	// (sqlite, slatedb: their sum query filters expires_at > now), so an
-	// owner reclaims that quota the instant the paste expires. It is
-	// FALSE for the shale backend, whose monotonic identity_bytes counter
-	// only sheds the bytes when the sweep deletes the expired paste, so
-	// the quota is reclaimed at sweep time, not read time (docs/SPEC.md
-	// "One intentional behavior change"). Fail-safe either way: the
-	// counter over-counts transiently, never under-counts.
+	// expired-but-unswept paste's/site's bytes from the owner sum at READ
+	// time (sqlite, slatedb, and shale: their sum query / scan filters
+	// expires_at > now), so an owner reclaims that quota the instant the
+	// record expires. All three shipping backends now set it true: shale's
+	// owner sum is a scan over the authoritative rows with a read-time expiry
+	// filter (docs/SPEC.md "Scan-derived quota"), not the old
+	// monotonic identity_bytes counter that only shed at sweep time.
 	ExpiryFreesQuotaAtReadTime bool
 
-	// StrictQuotaUnderConcurrency is true for backends that enforce the
-	// per-owner cap exactly under concurrent uploads: sqlite (its
-	// serializable insert transaction), shale (the reservation-pattern CAS
-	// counter), and slatedb (a per-identity lockQuota stripe held across the
-	// sum + the write, valid because SlateDB is single-writer so only
-	// in-process goroutines can race). All shipping backends set it true.
-	// The false branch (where the concurrency-ceiling test documents a race
-	// instead of asserting) is retained only for a hypothetical backend that
-	// sums outside its write boundary.
+	// StrictQuotaUnderConcurrency is true for backends that enforce a byte
+	// cap exactly under concurrent writes where the check + the write are one
+	// atomic boundary. It gates the ROOM per-room cap concurrency test
+	// (conformRoomPerRoomCapConcurrentCeiling): sqlite (serializable tx),
+	// slatedb (the per-room lockQuota stripe), and shale (the single-shard
+	// CAS on the value key with the per-app counter in the read-set) all hold
+	// it. The per-IDENTITY paste/site quota is gated separately by
+	// StrictIdentityQuotaUnderConcurrency, because those two strictness
+	// properties diverge on shale.
 	StrictQuotaUnderConcurrency bool
+
+	// StrictIdentityQuotaUnderConcurrency is true for backends that enforce
+	// the per-IDENTITY paste/site byte cap exactly under concurrent uploads
+	// from the same identity: sqlite (its serializable insert transaction)
+	// and slatedb (a per-identity lockQuota stripe held across the sum + the
+	// write, valid because SlateDB is single-writer so only in-process
+	// goroutines can race). It is FALSE for shale: the per-identity quota is
+	// a scan-and-compare that is NOT atomic with the authoritative write, so
+	// two concurrent uploads from one identity can both pass the check and
+	// both land - a bounded over-admit that is acceptable (one key is one
+	// person; the object-store bucket quota backstops the durable total).
+	// See docs/SPEC.md "Scan-derived quota". Gates
+	// conformQuotaConcurrentCeiling (paste) +
+	// conformSitePerOwnerCapConcurrentCeiling (site).
+	StrictIdentityQuotaUnderConcurrency bool
 }
 
 // runConformance runs the full contract suite against the backend the
@@ -287,11 +301,11 @@ func conformQuotaConcurrentCeiling(t *testing.T, r conformanceRepo, caps conform
 		}(i)
 	}
 	wg.Wait()
-	if !caps.StrictQuotaUnderConcurrency {
-		// slatedb-direct: the quota sum runs outside the write transaction,
-		// so the ceiling can be breached. This is the documented race the
-		// shale migration fixes; record it rather than asserting strictness.
-		t.Logf("backend does not guarantee strict quota under concurrency (known slatedb-direct race): %d pastes x %dB = %dB landed, cap %dB",
+	if !caps.StrictIdentityQuotaUnderConcurrency {
+		// shale: the scan-based per-identity quota check is not atomic with
+		// the authoritative write, so the ceiling can be breached by a bounded
+		// same-owner over-admit. Record it rather than asserting strictness.
+		t.Logf("backend does not guarantee strict per-identity quota under concurrency (scan-based over-admit): %d pastes x %dB = %dB landed, cap %dB",
 			landed, body, landed*body, cap)
 		return
 	}

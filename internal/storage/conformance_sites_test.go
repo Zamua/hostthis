@@ -504,8 +504,8 @@ func conformSitePerOwnerCapConcurrentCeiling(t *testing.T, caps conformCaps, r c
 		}(i)
 	}
 	wg.Wait()
-	if !caps.StrictQuotaUnderConcurrency {
-		t.Logf("backend does not guarantee strict cross-kind quota under concurrency (known slatedb-direct race): %d records x %dB = %dB landed, cap %dB",
+	if !caps.StrictIdentityQuotaUnderConcurrency {
+		t.Logf("backend does not guarantee strict cross-kind per-identity quota under concurrency (scan-based over-admit): %d records x %dB = %dB landed, cap %dB",
 			landed, body, landed*body, cap)
 		return
 	}

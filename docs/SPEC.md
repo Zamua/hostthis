@@ -3058,7 +3058,7 @@ the authoritative `{slug}` row, then write the `identity_sites/<id>/<slug>`
 enumeration entry (best-effort, reconciler-healed). Expiry now frees quota at
 READ time (the scan filters `expires_at > now`), so
 `conformCaps.ExpiryFreesQuotaAtReadTime` is `true` for shale sites - matching
-sqlite and slatedb - and `StrictQuotaUnderConcurrency` is `false` (the
+sqlite and slatedb - and `StrictIdentityQuotaUnderConcurrency` is `false` (the
 scan-check and the row-write are not atomic; the bounded same-owner
 over-admit is the accepted trade, see "The correctness argument").
 
@@ -3755,8 +3755,10 @@ sweep-time-only reclamation): with the counter gone, `conformCaps.
 ExpiryFreesQuotaAtReadTime` flips to `true` for shale, matching the other
 two backends. The scan-based backend now diverges from the single-writer
 backends on exactly one axis instead - strict-vs-bounded quota under
-same-identity concurrency (`StrictQuotaUnderConcurrency` flips to `false`
-for shale) - which is the deliberate trade the next sections justify.
+same-identity concurrency (`StrictIdentityQuotaUnderConcurrency` flips to
+`false` for shale; the separate per-ROOM cap `StrictQuotaUnderConcurrency`
+stays `true`, since a room write is still a strict single-shard CAS) - which
+is the deliberate trade the next sections justify.
 
 ### Derived indexes and repair-on-read
 
@@ -3879,10 +3881,13 @@ uploads from the SAME identity can both scan the pre-upload state, both pass
 `used + body <= cap`, and both write. The ceiling is then exceeded by up to
 the smaller upload's size. This is the strictness the counter's atomic
 reserve-CAS bought and the scan gives up: `conformCaps.
-StrictQuotaUnderConcurrency` flips to `false` for shale (it was already
-`false` for the slatedb-DIRECT config, whose sum runs outside the write
-lock; shale now shares that documented relaxation). It is acceptable for
-three reasons: (1) one identity = one key = one person, and a person racing
+StrictIdentityQuotaUnderConcurrency` flips to `false` for shale (sqlite and
+slatedb keep it `true` - their per-identity check is atomic with the write,
+via a serializable transaction and a per-identity `lockQuota` stripe
+respectively). The separate per-ROOM cap `StrictQuotaUnderConcurrency` stays
+`true` on shale - a room write is a single-shard CAS with the per-app counter
+in the read-set, still strict - so only the per-identity axis relaxes. It is
+acceptable for three reasons: (1) one identity = one key = one person, and a person racing
 their own uploads to squeak a few hundred KB past a 10 MiB cap is not a
 threat model worth atomic cross-shard coordination; (2) the over-admit is
 BOUNDED - it is the number of truly-concurrent same-identity uploads times
