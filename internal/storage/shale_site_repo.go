@@ -795,11 +795,22 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 		identity := row.Identity
 		freed := int64(row.DedupedSize)
 
+		// Mint a fresh per-attempt nonce that stamps THIS delete instance's
+		// release marker. The release-marker slot is a single per-(id,slug) key
+		// reused across delete instances, so a concurrent re-deploy + re-delete
+		// of the same slug can overwrite it between this step 2 and this step 4;
+		// step 4 consumes ONLY a marker still carrying this nonce, so a delete
+		// never decrements bytes recorded by a different delete's marker.
+		nonce, err := newReleaseNonce()
+		if err != nil {
+			return err
+		}
+
 		// Step 2: write the release marker BEFORE the tombstone. created_at is
 		// this delete's wall clock (the grace-window stamp); the marker is
 		// consumed microseconds later in step 4 on the happy path, so the stamp
 		// only matters if the process crashes before step 4.
-		if err := r.writeSiteReleaseMarker(identity, slug.String(), freed, time.Now().UTC()); err != nil {
+		if err := r.writeSiteReleaseMarker(identity, slug.String(), freed, time.Now().UTC(), nonce); err != nil {
 			return err
 		}
 
@@ -855,17 +866,20 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 		}
 
 		// Step 4: decrement + consume on the {id} shard.
-		return r.consumeSiteReleaseMarker(identity, slug.String())
+		return r.consumeSiteReleaseMarker(identity, slug.String(), nonce)
 	}
 	return fmt.Errorf("delete site %s: exceeded %d restart attempts (a concurrent re-deploy kept changing the size)", slug, deleteSiteMaxAttempts)
 }
 
 // writeSiteReleaseMarker is step 2 of the crash-durable delete: a single
 // {id}-shard CAS that stamps the release marker recording the bytes this delete
-// will free. Idempotent on re-run (overwrites the same {bytes, created_at}).
-func (r *ShaleRepo) writeSiteReleaseMarker(identity, slug string, freed int64, now time.Time) error {
+// will free AND the per-delete nonce that identifies this delete instance.
+// Idempotent on re-run within one delete (overwrites the same
+// {bytes, created_at, nonce}); a DIFFERENT delete instance writes a DIFFERENT
+// nonce, which is exactly how the consume tells them apart.
+func (r *ShaleRepo) writeSiteReleaseMarker(identity, slug string, freed int64, now time.Time, nonce string) error {
 	releaseKey := shaleKeyIdentitySiteRelease(identity, slug)
-	markerVal, err := encodeReservationMarker(freed, now)
+	markerVal, err := encodeReleaseMarker(freed, now, nonce)
 	if err != nil {
 		return err
 	}
@@ -876,14 +890,20 @@ func (r *ShaleRepo) writeSiteReleaseMarker(identity, slug string, freed int64, n
 
 // consumeSiteReleaseMarker is step 4 of the crash-durable delete: one
 // {id}-shard CAS that drops the enumeration index entry AND consumes the
-// release marker. The consume is the at-most-once gate: it decrements the
-// counter by marker.bytes and deletes the marker ONLY if the marker is still
-// present; an absent marker means the decrement already happened (a prior retry
-// consumed it, or the reconciler did), so the counter is left untouched. All
-// three keys (counter, index, release marker) co-shard on {id}, so this is one
-// atomic single-shard transaction. Mirrors orphanReleaseSiteMarker's read-check
-// on the marker, extended with the idempotent index drop.
-func (r *ShaleRepo) consumeSiteReleaseMarker(identity, slug string) error {
+// release marker THIS delete wrote in step 2 (identified by nonce). The consume
+// is the at-most-once gate: it decrements the counter by marker.bytes and
+// deletes the marker ONLY if the marker is still present AND its nonce matches
+// the nonce this delete stamped. An absent marker means the decrement already
+// happened (a prior retry consumed it, or the reconciler did); a marker with a
+// DIFFERENT nonce means a concurrent re-deploy + re-delete of the same slug
+// overwrote the single per-(id,slug) slot after this delete's step 2 - that
+// marker belongs to the OTHER delete (its bytes may still be LIVE), so this
+// delete must NOT decrement it (that would under-count). Either way the counter
+// is left untouched. All three keys (counter, index, release marker) co-shard
+// on {id}, so this is one atomic single-shard transaction. Mirrors
+// orphanReleaseSiteMarker's read-check on the marker, extended with the
+// idempotent index drop and the nonce ownership check.
+func (r *ShaleRepo) consumeSiteReleaseMarker(identity, slug, nonce string) error {
 	counterKey := shaleKeyIdentitySiteBytes(identity)
 	indexKey := shaleKeyIdentitySite(identity, slug)
 	releaseKey := shaleKeyIdentitySiteRelease(identity, slug)
@@ -897,7 +917,8 @@ func (r *ShaleRepo) consumeSiteReleaseMarker(identity, slug string) error {
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return err
 		}
-		// Consume the release marker: decrement + delete iff still present.
+		// Consume the release marker: decrement + delete iff still present AND
+		// still carrying THIS delete's nonce.
 		raw, err := tx.Get(releaseKey)
 		if err != nil {
 			if errors.Is(err, backend.ErrNotFound) {
@@ -908,6 +929,12 @@ func (r *ShaleRepo) consumeSiteReleaseMarker(identity, slug string) error {
 		m, err := parseReservationMarker(raw)
 		if err != nil {
 			return err
+		}
+		if m.Nonce != nonce {
+			// A concurrent re-delete of the same slug overwrote the slot after
+			// this delete's step 2. That marker is the other delete's to
+			// consume (its bytes may still be live); leave it untouched.
+			return nil
 		}
 		cur, err := txGetCounter(tx, counterKey)
 		if err != nil {
@@ -1185,7 +1212,9 @@ func (r *ShaleRepo) reconcileSiteReleaseMarkers(now time.Time, reserveGrace time
 			continue
 		}
 		// Row absent: complete the lost decrement atomically (at most once).
-		if err := r.completeSiteReleaseMarker(item.Key); err != nil {
+		// Passes now+grace so the CAS can re-check the marker's age and leave a
+		// freshly re-stamped young marker alone (never under-count a live site).
+		if err := r.completeSiteReleaseMarker(item.Key, now, reserveGrace); err != nil {
 			return fmt.Errorf("reconcile site releases: complete %s: %w", item.Key, err)
 		}
 	}
@@ -1200,7 +1229,18 @@ func (r *ShaleRepo) reconcileSiteReleaseMarkers(now time.Time, reserveGrace time
 // consumed reads as absent here and the CAS is a no-op, so the bytes are never
 // double-freed (this is why a double reconcile does not double-decrement). It
 // is the delete-side twin of orphanReleaseSiteMarker.
-func (r *ShaleRepo) completeSiteReleaseMarker(releaseKey []byte) error {
+//
+// The in-grace re-check inside the CAS is the never-under-count guard, and it
+// mirrors dropSiteReleaseMarkerIfStale exactly: the reconciler chose this
+// "complete" branch from a snapshot taken at scan time (marker past grace, slug
+// absent), but between that scan and this CAS a concurrent re-deploy + fresh
+// delete of the SAME slug can overwrite the single per-(id,slug) slot with a
+// YOUNG marker whose bytes are still LIVE (the fresh delete may not have
+// tombstoned yet, or may crash before it does). Decrementing that young
+// marker's bytes here - and deleting it - would under-count the live site with
+// no record left to recover from. So if the marker re-reads as still in grace,
+// leave it strictly alone for that delete's own consume (step 4).
+func (r *ShaleRepo) completeSiteReleaseMarker(releaseKey []byte, now time.Time, reserveGrace time.Duration) error {
 	owner := siteReleaseMarkerOwnerFromKey(releaseKey)
 	counterKey := shaleKeyIdentitySiteBytes(owner)
 	return r.cluster.Transact(counterKey, func(tx backend.Transaction) error {
@@ -1214,6 +1254,11 @@ func (r *ShaleRepo) completeSiteReleaseMarker(releaseKey []byte) error {
 		m, err := parseReservationMarker(raw)
 		if err != nil {
 			return err
+		}
+		if markerInGrace(m, now, reserveGrace) {
+			// A fresh delete re-stamped the slot after the scan; its bytes may
+			// be live. Leave it for that delete's own consume. Never decrement.
+			return nil
 		}
 		cur, err := txGetCounter(tx, counterKey)
 		if err != nil {
