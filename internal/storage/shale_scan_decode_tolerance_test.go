@@ -12,7 +12,9 @@ package storage_test
 //     SKIPPED + logged and the pass CONTINUES, still processing the other
 //     good records and returning success. The next tick retries the bad
 //     row. TestShaleDecodeTolerance_ReconcileSkipsBadRecord pins this for
-//     Reconcile (a poisoned pastes/ row) and a poisoned reservation marker.
+//     Reconcile across BOTH of its enumeration-index reprojections: a
+//     poisoned pastes/ row (the paste index pass) and a poisoned sites/ row
+//     (the re-homed site index pass).
 //
 //   - Policy 2 (blob-GC ref-set scan): an undecodable record must FAIL
 //     CLOSED. ReferencedBlobSHAs aborts the pass and returns an error,
@@ -81,16 +83,19 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 	repo.WaitPendingConfirms()
 
 	// Poison #1: an undecodable authoritative pastes/ row. A second slug so
-	// its key sorts into the same aggregate scan Reconcile walks.
+	// its key sorts into the same aggregate scan Reconcile's paste-index
+	// reprojection walks.
 	badSlug := domain.Slug("badpst22")
 	if err := repo.PutRawForTest(storage.LegacyPasteKeyForTest(badSlug), corruptJSON); err != nil {
 		t.Fatalf("seed corrupt paste row: %v", err)
 	}
 
-	// Poison #2: an undecodable reservation marker. gatherReservationMarkers
-	// (which feeds Reconcile) must skip it rather than abort.
-	if err := repo.PutRawForTest(storage.IdentityReserveKeyForTest(owner, "ghostres"), corruptJSON); err != nil {
-		t.Fatalf("seed corrupt reservation marker: %v", err)
+	// Poison #2: an undecodable authoritative sites/ row. Reconcile's re-homed
+	// site-index reprojection (reconcileSiteIndexPass) scans sites/, so it must
+	// skip this row rather than abort the whole pass.
+	badSiteSlug := domain.Slug("badsite2")
+	if err := repo.PutRawForTest(storage.SiteKeyForTest(badSiteSlug), corruptJSON); err != nil {
+		t.Fatalf("seed corrupt site row: %v", err)
 	}
 
 	// Desync the good paste's derived index so the pass has real work to do:
@@ -104,7 +109,7 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 	}
 
 	// Reconcile must SUCCEED despite both poisoned records.
-	if err := repo.ReconcileForTest(now, time.Hour); err != nil {
+	if err := repo.ReconcileForTest(now); err != nil {
 		t.Fatalf("reconcile must skip+continue on bad records, not error: %v", err)
 	}
 
@@ -122,13 +127,21 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 		t.Fatalf("post-reconcile list: got %+v, want just %q", list, good.Slug)
 	}
 
-	// The poison is untouched (skip+log leaves it for the next tick to retry).
+	// The poison is untouched (skip+log leaves it for the next tick to retry) -
+	// both the paste row and the site row.
 	raw, err := repo.GetRawForTest(storage.LegacyPasteKeyForTest(badSlug))
 	if err != nil {
 		t.Fatalf("read poisoned paste row: %v", err)
 	}
 	if len(raw) == 0 {
-		t.Fatalf("reconcile must not delete the poisoned row, it skips it; got empty")
+		t.Fatalf("reconcile must not delete the poisoned paste row, it skips it; got empty")
+	}
+	rawSite, err := repo.GetRawForTest(storage.SiteKeyForTest(badSiteSlug))
+	if err != nil {
+		t.Fatalf("read poisoned site row: %v", err)
+	}
+	if len(rawSite) == 0 {
+		t.Fatalf("reconcile must not delete the poisoned site row, it skips it; got empty")
 	}
 }
 

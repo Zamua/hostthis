@@ -79,13 +79,10 @@ func slatedbLogLevel(s string) (slatedb.LogLevel, bool) {
 
 // openShaleRepoFromEnv builds the shale ShaleRepo from the HOSTTHIS_* env and
 // nothing else: no background reconcile loop, no blob-unit wiring, no debug
-// server - just the opened repo with its retention set. Both the daemon
-// (buildMetadataShale) and the offline `audit-counters` subcommand use it, so
-// they connect to the SAME cluster the same way. The audit needs the repo
-// WITHOUT the reconcile goroutine (a concurrent marker-driven decrement would
-// reintroduce the scan-to-write conflict window the offline audit exists to
-// avoid), which is exactly what this helper hands back. The caller owns
-// repo.Close().
+// server - just the opened repo with its retention set. buildMetadataShale
+// calls it and then layers the reconcile loop / blob unit / debug server on
+// top, keeping the bare open path separate from the daemon wiring. The caller
+// owns repo.Close().
 func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger) (*storage.ShaleRepo, error) {
 	// Optional slatedb tracing (to stderr) for diagnosing the SST-read
 	// pattern. Off unless HOSTTHIS_SLATEDB_LOG_LEVEL is set.
@@ -304,43 +301,37 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 		logger.Printf("metadata: shale debug endpoint serving %s/debug/shale/state", dbgAddr)
 	}
 
-	// The identity_sites enumeration index for sites deployed BEFORE that index
-	// existed is healed by the periodic Reconcile below (its reconcileSiteIndexes
-	// step reprojects every sites/ row into its owner's index); the index is
-	// otherwise maintained only on the confirm/delete write path. Reconcile runs
-	// in the background so it never blocks boot, retried past the post-boot
-	// convergence window (the aggregate scan fails while units are still
-	// handing off). Idempotent, so every pod running it is harmless.
-	//
-	// PERIODIC RECONCILE. Reconcile is the metadata backend's maintenance
-	// pass, and it was previously never wired to run in production (only tests
-	// called it) - a latent gap that let leaked reservation markers accumulate
-	// and drift the identity_bytes / identity_site_bytes quota counters UP over
-	// time (phantom over-charge), and left the derived indexes healed only by
-	// the write path. Wiring it here fixes all of that:
-	//   - heals the identity_pastes + identity_sites indexes (this backfills
-	//     sites deployed before the identity_sites index existed, so it
-	//     REPLACES the old one-shot BackfillSiteIndexes goroutine),
-	//   - ages out crashed pending pastes,
-	//   - RELEASES leaked reservation markers via the safe, per-marker {id}-CAS
-	//     delta (orphanReleaseMarker / orphanReleaseSiteMarker) - which is what
-	//     un-drifts the quota counters.
-	// The counter is NEVER recomputed from a cross-shard snapshot (see
-	// docs/SPEC.md "The counter itself is never recomputed": that under-counts
-	// and over-admits past the cap); only the marker-driven releases, which are
-	// safe under live traffic, touch it. Idempotent + best-effort: a pass that
-	// hits the post-boot convergence window just fails and the next tick
-	// retries. First pass after a short settle delay, then every 10 min
-	// (matching the reservation grace, so a leaked marker is released the tick
-	// after it ages out).
+	// PERIODIC RECONCILE. Reconcile is the metadata backend's maintenance pass,
+	// and it is the SOLE quota-healing mechanism now that the per-identity quota
+	// is DERIVED by scanning the enumeration indexes rather than kept in a stored
+	// counter (docs/SPEC.md "Scan-derived quota" / "Derived indexes and
+	// repair-on-read"). Each pass:
+	//   - REPROJECTS the identity_pastes + identity_sites enumeration indexes
+	//     from the authoritative pastes/ + sites/ rows (add missing entries,
+	//     refresh stale projections, drop orphans). This is a pure "reproject the
+	//     authoritative SET, drop orphans" heal, so it closes the only
+	//     quota-relevant gap the scan design has: a crash between the
+	//     authoritative row write and the {id} enumeration-index write leaves a
+	//     live row the index does not list, transiently UNDER-counting that owner
+	//     until this pass re-adds the entry. It backfills sites deployed before
+	//     the identity_sites index existed too, so it REPLACES the old one-shot
+	//     BackfillSiteIndexes goroutine.
+	//   - AGES OUT crashed pending pastes (the pod-death backstop).
+	// Because it only ever reprojects the authoritative rows (a SET), never
+	// overwrites a stored number, it is idempotently self-healing and safe under
+	// live traffic on any cadence: every pod running it converges to the same
+	// state and running it more often only tightens the under-count window (there
+	// is no aggregate to race or clobber). Best-effort: a pass that hits the
+	// post-boot convergence window (the aggregate scan fails while units are
+	// still handing off) just logs and the next tick retries. First pass after a
+	// short settle delay, then every 10 min.
 	go func() {
 		const reconcileInterval = 10 * time.Minute
-		const reserveGrace = 10 * time.Minute
 		timer := time.NewTimer(90 * time.Second) // let the cluster converge past boot first
 		defer timer.Stop()
 		for {
 			<-timer.C
-			if err := repo.Reconcile(time.Now().UTC(), reserveGrace); err != nil {
+			if err := repo.Reconcile(time.Now().UTC()); err != nil {
 				logger.Printf("metadata: periodic reconcile: %v (retrying next tick)", err)
 			} else {
 				logger.Printf("metadata: periodic reconcile complete")
