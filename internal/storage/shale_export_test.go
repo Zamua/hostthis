@@ -243,3 +243,31 @@ func IdentitySiteReserveKeyForTest(identity, slug string) []byte {
 func IdentitySiteReleaseKeyForTest(identity, slug string) []byte {
 	return shaleKeyIdentitySiteRelease(identity, slug)
 }
+
+// EncodeReleaseMarkerWithNonceForTest produces the exact JSON value a
+// crash-durable DeleteSite stamps at identity_site_release/<id>/<slug>:
+// {"bytes":N,"created_at":<RFC3339Nano>,"nonce":<hex>}. Exposed so the
+// slot-reuse subtest can seed a marker written by a SPECIFIC delete instance
+// (a chosen nonce) and prove another delete's consume never touches it.
+func EncodeReleaseMarkerWithNonceForTest(bytes int64, createdAt time.Time, nonce string) ([]byte, error) {
+	return encodeReleaseMarker(bytes, createdAt, nonce)
+}
+
+// ConsumeSiteReleaseMarkerForTest drives DeleteSite's step-4 consume in
+// isolation with a chosen nonce, so the slot-reuse subtest can reproduce a
+// stale delete resuming its consume AFTER a concurrent re-delete overwrote the
+// single per-(id,slug) release-marker slot. The consume decrements + deletes
+// ONLY a marker still carrying `nonce`; a mismatched marker is left untouched.
+func (r *ShaleRepo) ConsumeSiteReleaseMarkerForTest(identity, slug, nonce string) error {
+	return r.consumeSiteReleaseMarker(identity, slug, nonce)
+}
+
+// CompleteSiteReleaseMarkerForTest drives the reconciler's release-completion
+// branch in isolation (the {id}-shard CAS that decrements + deletes a
+// past-grace release marker whose row is absent), so the slot-reuse subtest can
+// reproduce the scan-to-CAS TOCTOU: a fresh delete re-stamped the slot with a
+// YOUNG marker after the reconciler's scan chose "complete". The in-grace
+// re-check must leave that young marker alone (never under-count a live site).
+func (r *ShaleRepo) CompleteSiteReleaseMarkerForTest(identity, slug string, now time.Time, reserveGrace time.Duration) error {
+	return r.completeSiteReleaseMarker(shaleKeyIdentitySiteRelease(identity, slug), now, reserveGrace)
+}

@@ -3928,7 +3928,8 @@ identity) precisely so the decrement and the marker's deletion are **one
 atomic single-shard CAS** - the *marker-consume* that makes every decrement
 at-most-once.
 
-Keys and value (reusing the reservation-marker encoding `{bytes, created_at}`):
+Keys and value (extending the reservation-marker encoding to
+`{bytes, created_at, nonce}`):
 
 - Site delete: `identity_site_release/<id>/<slug>`.
 - Paste whole-delete: `identity_release/<id>/<slug>`.
@@ -3936,18 +3937,35 @@ Keys and value (reusing the reservation-marker encoding `{bytes, created_at}`):
   `identity_release/<id>/<slug>#v<NNNN>`.
 
 `bytes` is the amount this delete frees; `created_at` is the delete's `now`
-(for the grace window). The release-marker prefix is distinct from the
-reserve-marker prefix, so the reservation reconciler and the release
-reconciler never confuse one family for the other.
+(for the grace window); `nonce` is a random per-delete-instance token. The
+release-marker prefix is distinct from the reserve-marker prefix, so the
+reservation reconciler and the release reconciler never confuse one family for
+the other.
+
+**Why the nonce - the single-slot-reuse hazard.** The release marker occupies
+**one** key per `(id, slug)`, and that slot is **reused across delete
+instances**. A delete is not one transaction (its marker-write, its tombstone,
+and its decrement are three separate CASes), so a concurrent **re-deploy +
+re-delete of the same slug can overwrite the slot** between one delete's
+marker-write and its decrement. Without a discriminator, a decrement that reads
+"whatever marker is in the slot now" can subtract the bytes recorded by a
+**different** delete whose bytes are still **live** - an **under-count**, the
+one forbidden failure (an owner could then exceed the cap). The `nonce` stamps
+*which* delete instance wrote the marker, so the consume can prove the marker
+still present is the one **it** wrote before decrementing. Reserve markers do
+not carry a nonce; the field is `omitempty`, so reserve-marker bytes are
+unchanged, and a legacy nonce-less release marker (or one the reconciler
+completes) simply reads an empty nonce.
 
 **Ordered protocol (crash-safe `DeleteSite`).** `freed` is the row's
 `DedupedSize`, a stable property of the row:
 
 1. Read `sites/<slug>` -> owner + `freed` + expiry + file blobs. Absent ->
-   no-op return (idempotent, unchanged).
+   no-op return (idempotent, unchanged). Mint a fresh per-attempt `nonce`.
 2. **Write the release marker** on the `{id}` shard:
-   `Put(identity_site_release/<id>/<slug>, {bytes: freed, created_at: now})`.
-   One `{id}` CAS; a re-run overwrites it with the same value.
+   `Put(identity_site_release/<id>/<slug>, {bytes: freed, created_at: now, nonce})`.
+   One `{id}` CAS; a re-run within this delete overwrites it with the same
+   value; a *different* delete instance writes a *different* nonce.
 3. **Tombstone** on the `{slug}` shard, one CAS: re-read the row (it is in
    the CAS read-set) and confirm its `DedupedSize` still equals the marker's
    `bytes`; if a concurrent re-deploy (`ReplaceSiteWithQuotaCheck` mutates
@@ -3957,12 +3975,17 @@ reconciler never confuse one family for the other.
    authoritative removal as before.
 4. **Decrement + consume** on the `{id}` shard, one CAS: drop the
    `identity_sites/<id>/<slug>` enumeration entry (idempotent), then read the
-   release marker; if it is **present**, `counter -= marker.bytes` AND delete
-   the marker in the same transaction; if **absent**, leave the counter
-   alone (the decrement already happened - a prior retry or the reconciler
-   consumed it). This is the atomic marker-consume, and it replaces the old
-   unconditional `counter -= freed`, so the hot path and the reconciler can
-   never both apply the same delete.
+   release marker; if it is **present AND its nonce matches this delete's
+   nonce**, `counter -= marker.bytes` AND delete the marker in the same
+   transaction; if **absent**, leave the counter alone (the decrement already
+   happened - a prior retry or the reconciler consumed it); if **present but
+   the nonce differs**, a concurrent re-deploy + re-delete overwrote the slot
+   after this delete's step 2, so that marker belongs to the *other* delete
+   (its bytes may still be **live**) - leave it strictly alone. The nonce gate
+   is what keeps a stale delete from decrementing a live re-delete's bytes.
+   This atomic marker-consume replaces the old unconditional `counter -=
+   freed`, so the hot path and the reconciler can never both apply the same
+   delete.
 
 The **site delete path carries this shape today** (`DeleteSite` +
 `reconcileSiteReleaseMarkers`, keys `identity_site_release/<id>/<slug>`). The
@@ -4008,10 +4031,19 @@ prefix cross-shard, exactly like the reservation pass, and for each marker:
 - **Older than grace, authoritative row/version ABSENT (tombstoned):** the
   delete committed the tombstone but crashed before the decrement. **Complete
   it** with the same targeted, read-checked `{id}` CAS as
-  `orphanReleaseSiteMarker`: if the marker is still present,
-  `counter -= marker.bytes` AND delete the marker, atomically. Idempotent - a
-  marker already consumed (by the hot path or a prior pass) reads as absent
-  and the CAS is a no-op, so the bytes are never double-freed.
+  `orphanReleaseSiteMarker`: if the marker is still present **and re-reads as
+  still past grace inside the CAS**, `counter -= marker.bytes` AND delete the
+  marker, atomically. The **in-grace re-check is mandatory** and mirrors the
+  row-present branch below exactly: the reconciler chose this "complete" branch
+  from a snapshot taken at scan time (marker past grace, slug absent), but
+  between that scan and this CAS the single per-`(id, slug)` slot can be
+  overwritten by a re-deploy + fresh delete of the same slug with a **young**
+  marker whose bytes are still **live** (that delete may not have tombstoned
+  yet, or may crash before it does). Decrementing - and deleting - that young
+  marker would under-count the live site with no record left to recover from,
+  so a marker that re-reads as young is left for its own delete's consume.
+  Idempotent - a marker already consumed (by the hot path or a prior pass)
+  reads as absent and the CAS is a no-op, so the bytes are never double-freed.
 - **Older than grace, authoritative row/version PRESENT:** the delete never
   tombstoned (it crashed before its step 3), or the slug was re-deployed in
   the meantime. The bytes are **live and correctly counted**, so the
