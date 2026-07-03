@@ -134,7 +134,7 @@ func TestShaleDeferredConfirm_ReconcilerHealsLostConfirm(t *testing.T) {
 
 	// The reconciler rebuilds the missing index entry from the authoritative
 	// row, so the paste reappears in the owner's list.
-	if err := repo.ReconcileForTest(now, time.Hour); err != nil {
+	if err := repo.ReconcileForTest(now); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if n, err := repo.CountByOwner(owner); err != nil {
