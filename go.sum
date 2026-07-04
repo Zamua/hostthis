@@ -8,6 +8,8 @@ github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERo
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/Zamua/shale v0.9.3 h1:NhW4yG1gd2VAqMSPyVpOIoFspcSAGBVyq28zEcTWx9U=
 github.com/Zamua/shale v0.9.3/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
+github.com/Zamua/shale v0.9.4-0.20260704020533-0d8fef50902a h1:qg+07/vjeDIB2J2bVNewV144vmsfP7oRbQJlYlyr9c0=
+github.com/Zamua/shale v0.9.4-0.20260704020533-0d8fef50902a/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
 github.com/Zamua/shale/backends/slate v0.8.0 h1:urBQddpb2iiTkB9NQ09NlKSTTEf5Tu/ssoQbIJwebLA=
 github.com/Zamua/shale/backends/slate v0.8.0/go.mod h1:PBvgzg/mITlBbN9B0TBYvG4WjApSn3pD4Tq2U1lJVpo=
 github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
