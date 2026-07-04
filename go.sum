@@ -12,6 +12,8 @@ github.com/Zamua/shale v0.9.4-0.20260704020533-0d8fef50902a h1:qg+07/vjeDIB2J2bV
 github.com/Zamua/shale v0.9.4-0.20260704020533-0d8fef50902a/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
 github.com/Zamua/shale v0.9.4-0.20260704154440-7b65fdc11877 h1:HC27cDTotxIytGnuWHVgHqGbpUm5eXWiIpb4aGfZo4s=
 github.com/Zamua/shale v0.9.4-0.20260704154440-7b65fdc11877/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
+github.com/Zamua/shale v0.9.4-0.20260704171506-4748b209be55 h1:Pwjdsf4K2ET2WCiig7ubSk953ePOqCICyrXoQHQN/lQ=
+github.com/Zamua/shale v0.9.4-0.20260704171506-4748b209be55/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
 github.com/Zamua/shale/backends/slate v0.8.0 h1:urBQddpb2iiTkB9NQ09NlKSTTEf5Tu/ssoQbIJwebLA=
 github.com/Zamua/shale/backends/slate v0.8.0/go.mod h1:PBvgzg/mITlBbN9B0TBYvG4WjApSn3pD4Tq2U1lJVpo=
 github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
