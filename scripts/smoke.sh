@@ -71,10 +71,12 @@ bad()  { FAIL=$((FAIL+1)); FAILED+=("$1"); printf "[%s] %s\n" "$(red "FAIL")" "$
 
 trap 'cleanup' EXIT
 cleanup() {
-  # Best-effort delete of any pastes created.
+  # Best-effort delete of any pastes created. `ssh -n` keeps ssh from
+  # slurping the loop's stdin (the slug list) - without it only the
+  # first slug is deleted.
   [ -f /tmp/hostthis-smoke.slugs ] || return 0
   while IFS= read -r slug; do
-    $SSH "$HOST" delete "$slug" >/dev/null 2>&1 || true
+    $SSH -n "$HOST" delete "$slug" >/dev/null 2>&1 || true
   done < /tmp/hostthis-smoke.slugs
   # Keep the persistent key ($KEY) for reuse; only drop the slug list.
   rm -f /tmp/hostthis-smoke.slugs
@@ -95,7 +97,7 @@ fi
 # slug, so extract with awk rather than assuming a tab delimiter.
 step "setup: clearing any pastes left by a prior run"
 $SSH "$HOST" list 2>/dev/null | tail -n +2 | awk '{print $1}' | while IFS= read -r s; do
-  [ -n "$s" ] && $SSH "$HOST" delete "$s" >/dev/null 2>&1 || true
+  [ -n "$s" ] && $SSH -n "$HOST" delete "$s" >/dev/null 2>&1 || true
 done
 
 # ---- 1. whoami (pre-upload) ------------------------------------------------
