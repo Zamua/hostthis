@@ -29,6 +29,9 @@ set -u  # don't set -e - we want to keep going on individual failures
         # and report a summary at the end
 
 HOST="${HOSTTHIS_HOST:-hostthis.dev}"
+# Structured assertions consume `-o json` output (list/versions/whoami)
+# rather than scraping the human tables, so jq is required.
+command -v jq >/dev/null 2>&1 || { echo "smoke.sh requires jq" >&2; exit 1; }
 # Persistent key so repeated smokes reuse one identity instead of minting
 # a fresh key each run (which exhausts the server's per-subnet new-key
 # gate). Override the path with HOSTTHIS_SMOKE_KEY.
@@ -93,17 +96,15 @@ fi
 
 # A reused key may still own pastes from a prior run that died before its
 # cleanup ran. Delete them so the "active: 0" precondition below holds.
-# `list` output is space-padded columns (header on line 1); field 1 is the
-# slug, so extract with awk rather than assuming a tab delimiter.
 step "setup: clearing any pastes left by a prior run"
-$SSH "$HOST" list 2>/dev/null | tail -n +2 | awk '{print $1}' | while IFS= read -r s; do
+$SSH "$HOST" list -ojson 2>/dev/null | jq -r '.[].slug' | while IFS= read -r s; do
   [ -n "$s" ] && $SSH -n "$HOST" delete "$s" >/dev/null 2>&1 || true
 done
 
 # ---- 1. whoami (pre-upload) ------------------------------------------------
-step "whoami (expect active: 0)"
-whoami_out=$($SSH "$HOST" whoami 2>&1)
-if echo "$whoami_out" | grep -q "^active:  0 paste"; then
+step "whoami (expect active_pastes: 0)"
+whoami_out=$($SSH "$HOST" whoami -ojson 2>&1)
+if echo "$whoami_out" | jq -e '.active_pastes == 0' >/dev/null 2>&1; then
   ok "whoami shows 0 active"
 else
   bad "whoami pre-upload" "$whoami_out"
@@ -144,8 +145,9 @@ code2=$(curl -sS -o /dev/null -w "%{http_code}" "$URL2")
 
 # ---- 5. list ---------------------------------------------------------------
 step "list"
-list_out=$($SSH "$HOST" list 2>&1)
-echo "$list_out" | grep -q "$SLUG1" && echo "$list_out" | grep -q "$SLUG2" \
+list_out=$($SSH "$HOST" list -ojson 2>&1)
+echo "$list_out" | jq -e --arg a "$SLUG1" --arg b "$SLUG2" \
+    '(map(.slug) | contains([$a, $b]))' >/dev/null 2>&1 \
   && ok "list contains both slugs" \
   || bad "list" "$list_out"
 
@@ -157,8 +159,10 @@ echo "$update_out" | grep -q "^v2" && ok "update creates v2" \
 
 # ---- 7. versions -----------------------------------------------------------
 step "versions"
-ver_out=$($SSH "$HOST" versions "$SLUG1" 2>&1)
-echo "$ver_out" | grep -q "^v2.*current" && echo "$ver_out" | grep -q "^v1" \
+ver_out=$($SSH "$HOST" versions "$SLUG1" -ojson 2>&1)
+echo "$ver_out" | jq -e \
+    '(.versions | any(.version == 2 and .current)) and (.versions | any(.version == 1))' \
+    >/dev/null 2>&1 \
   && ok "versions lists v1 + v2 (v2 current)" \
   || bad "versions" "$ver_out"
 
@@ -199,15 +203,16 @@ echo "$get_out" | grep -q "smoke 1" \
 # ---- 10. rename ------------------------------------------------------------
 step "rename markdown paste"
 $SSH "$HOST" "rename $SLUG2 \"smoke md renamed\"" >/dev/null 2>&1
-list_after=$($SSH "$HOST" list 2>&1)
-echo "$list_after" | grep -q "smoke md renamed" \
+list_after=$($SSH "$HOST" list -ojson 2>&1)
+echo "$list_after" | jq -e --arg s "$SLUG2" \
+    'any(.[]; .slug == $s and .name == "smoke md renamed")' >/dev/null 2>&1 \
   && ok "rename reflected in list" \
   || bad "rename" "$list_after"
 
 # ---- 11. whoami (post-upload) ----------------------------------------------
-step "whoami (expect active: 2)"
-whoami2=$($SSH "$HOST" whoami 2>&1)
-echo "$whoami2" | grep -q "^active:  2 paste" \
+step "whoami (expect active_pastes: 2)"
+whoami2=$($SSH "$HOST" whoami -ojson 2>&1)
+echo "$whoami2" | jq -e '.active_pastes == 2' >/dev/null 2>&1 \
   && ok "whoami shows 2 active" \
   || bad "whoami post-upload" "$whoami2"
 
