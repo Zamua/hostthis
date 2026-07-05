@@ -91,9 +91,10 @@ fi
 
 # A reused key may still own pastes from a prior run that died before its
 # cleanup ran. Delete them so the "active: 0" precondition below holds.
-# `list` prints "SLUG\tNAME\t..." (header on line 1); column 1 is the slug.
+# `list` output is space-padded columns (header on line 1); field 1 is the
+# slug, so extract with awk rather than assuming a tab delimiter.
 step "setup: clearing any pastes left by a prior run"
-$SSH "$HOST" list 2>/dev/null | tail -n +2 | cut -f1 | while IFS= read -r s; do
+$SSH "$HOST" list 2>/dev/null | tail -n +2 | awk '{print $1}' | while IFS= read -r s; do
   [ -n "$s" ] && $SSH "$HOST" delete "$s" >/dev/null 2>&1 || true
 done
 
