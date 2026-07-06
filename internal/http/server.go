@@ -61,6 +61,19 @@ type Server struct {
 	// which backend is responding. Empty for single-replica deploys.
 	Color string
 	Now   func() time.Time
+	// Logf, when set, receives one warn-level line per 5xx served by the
+	// paste/site read path (docs/SPEC.md "5xx observability on the read
+	// surface"): the slug + the underlying error, so a read 500 is always
+	// attributable from the logs. The response body stays the generic
+	// "internal error". Nil disables (tests / minimal fixtures).
+	Logf func(format string, args ...any)
+}
+
+// logf emits a read-surface warning when a logger is wired; nil-safe.
+func (s *Server) logf(format string, args ...any) {
+	if s.Logf != nil {
+		s.Logf(format, args...)
+	}
 }
 
 func (s *Server) nowOrTime() time.Time {
@@ -226,6 +239,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 			http.NotFound(w, r)
 			return
 		}
+		s.logf("warn: paste read 500: slug=%s metadata get: %v", slug, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -322,6 +336,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		// the body is byte-identical to a buffered Get + Write.
 		rc, _, err := s.Blobs.Read(r.Context(), string(slug), p.ContentSHA)
 		if err != nil {
+			s.logf("warn: paste read 500: slug=%s html blob read: %v", slug, err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -339,6 +354,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 			// allocation per GET.
 			rc, _, err := s.Blobs.Read(r.Context(), string(slug), p.ContentSHA)
 			if err != nil {
+				s.logf("warn: paste read 500: slug=%s raw markdown blob read: %v", slug, err)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
@@ -369,6 +385,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		if rawWanted {
 			rc, _, err := s.Blobs.Read(r.Context(), string(slug), p.ContentSHA)
 			if err != nil {
+				s.logf("warn: paste read 500: slug=%s raw diff blob read: %v", slug, err)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
@@ -391,6 +408,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(diffShellHTML())
 	default:
+		s.logf("warn: paste read 500: slug=%s unsupported stored kind %q", slug, p.Kind)
 		http.Error(w, "unsupported kind", http.StatusInternalServerError)
 	}
 }
@@ -574,6 +592,7 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 	// set; the body is byte-identical to a buffered Get + Write.
 	rc, _, err := s.Blobs.Read(r.Context(), string(slug), entry.SHA)
 	if err != nil {
+		s.logf("warn: site read 500: slug=%s file blob read: %v", slug, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return true
 	}
