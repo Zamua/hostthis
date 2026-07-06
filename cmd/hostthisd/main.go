@@ -229,6 +229,7 @@ func main() {
 		LandingHTML: landing,
 		ApexDomain:  *apexDomain,
 		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),
+		Logf:        logger.Printf,
 	}
 	if siteRepo != nil {
 		httpServer.Sites = siteRepo
