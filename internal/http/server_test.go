@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -331,3 +332,97 @@ func TestPasteRead_ReadyServesContent(t *testing.T) {
 		t.Errorf("body: got %q, want %q", got, body)
 	}
 }
+
+// failingBlobReader models the shale blob plane erroring under a read (the
+// rollout-window read canary shape).
+type failingBlobReader struct{ err error }
+
+func (f failingBlobReader) ReadAll(_ context.Context, _, _ string) ([]byte, error) {
+	return nil, f.err
+}
+func (f failingBlobReader) Read(_ context.Context, _, _ string) (io.ReadCloser, int64, error) {
+	return nil, 0, f.err
+}
+
+// failingPasteReader models the shale metadata plane erroring under a read.
+type failingPasteReader struct{ err error }
+
+func (f failingPasteReader) Get(domain.Slug) (domain.Paste, error) { return domain.Paste{}, f.err }
+
+// TestPasteRead5xxLogsSlugAndError pins the read-surface observability
+// contract (docs/SPEC.md "5xx observability on the read surface"): every 5xx
+// on the paste read path logs one warn line with the slug and the underlying
+// error, while the response body stays the generic "internal error". Without
+// this a rollout-window 500 is unattributable (the exact gap hit on the
+// staging read canary).
+func TestPasteRead5xxLogsSlugAndError(t *testing.T) {
+	now := time.Now().UTC()
+	paste := domain.Paste{
+		Slug:       "abc23456",
+		Kind:       domain.KindMarkdown,
+		ContentSHA: "deadbeef",
+		Status:     domain.PasteStatusReady,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		ExpiresAt:  now.Add(time.Hour),
+	}
+
+	t.Run("blob read failure", func(t *testing.T) {
+		var logged strings.Builder
+		srv := &Server{
+			Pastes: stubPasteReader{p: paste},
+			Blobs:  failingBlobReader{err: context.DeadlineExceeded},
+			Logf:   func(f string, a ...any) { logged.WriteString(strings.TrimSpace(sprintf(f, a...)) + "\n") },
+			Now:    func() time.Time { return now },
+		}
+		r := httptest.NewRequest("GET", "/p/abc23456?raw=1", nil)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		if w.Code != 500 {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+		if got := w.Body.String(); !strings.Contains(got, "internal error") {
+			t.Fatalf("body %q must stay the generic internal error", got)
+		}
+		if out := logged.String(); !strings.Contains(out, "abc23456") || !strings.Contains(out, "deadline") {
+			t.Fatalf("5xx blob read must log slug + underlying error, got %q", out)
+		}
+	})
+
+	t.Run("metadata read failure", func(t *testing.T) {
+		var logged strings.Builder
+		srv := &Server{
+			Pastes: failingPasteReader{err: context.DeadlineExceeded},
+			Blobs:  stubBlobReader{},
+			Logf:   func(f string, a ...any) { logged.WriteString(strings.TrimSpace(sprintf(f, a...)) + "\n") },
+			Now:    func() time.Time { return now },
+		}
+		r := httptest.NewRequest("GET", "/p/abc23456", nil)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		if w.Code != 500 {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+		if out := logged.String(); !strings.Contains(out, "abc23456") || !strings.Contains(out, "deadline") {
+			t.Fatalf("5xx metadata read must log slug + underlying error, got %q", out)
+		}
+	})
+
+	t.Run("nil Logf does not panic", func(t *testing.T) {
+		srv := &Server{
+			Pastes: stubPasteReader{p: paste},
+			Blobs:  failingBlobReader{err: context.DeadlineExceeded},
+			Now:    func() time.Time { return now },
+		}
+		r := httptest.NewRequest("GET", "/p/abc23456?raw=1", nil)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		if w.Code != 500 {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+	})
+}
+
+// sprintf is a tiny local alias so the log-capturing closures above read
+// cleanly without importing fmt at every call site.
+func sprintf(format string, a ...any) string { return fmt.Sprintf(format, a...) }

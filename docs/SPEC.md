@@ -4598,6 +4598,18 @@ Apex landing page is `Cache-Control: public, max-age=300` (5 min) so
 content updates propagate quickly without becoming a no-cache origin
 hammer.
 
+### 5xx observability on the read surface
+
+Every 5xx returned by the paste/site read path (a metadata read failure,
+a blob read failure, an unsupported stored kind) logs one warn-level line
+carrying the slug and the underlying error before the generic
+"internal error" body is written. The response body stays generic (no
+internal detail leaks to clients), but the operator can always attribute
+a read 500 from the logs - a read canary failure with no matching log
+line means the request never reached this process. The slug is the only
+request-derived value logged (slugs are public identifiers; no client
+IPs, no headers, no payload).
+
 #### The bare URL always serves the shell (no `Accept` negotiation)
 
 A client-rendered kind (Markdown, Diff - any kind that ships a
