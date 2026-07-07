@@ -417,7 +417,8 @@ func (r *Registry) getOrCreateHubLocked(key RoomKey) (hub *Hub, created bool) {
 // SPEC.md "Persistence and late-join": the hub lock guards the connection
 // set only, and a room's live broadcasts never stall behind a durable
 // write's object-storage round trip) - a shale commit is an object-store
-// CAS taking 110ms-1.5s, and a hung storage call must wedge only ITS
+// CAS costing hundreds of milliseconds on a loaded backend and unbounded
+// when the store hangs, and a hung storage call must wedge only ITS
 // writer, never the room's ephemeral fan-out, peer deliveries, or joins.
 //
 //   - commit performs the durable KV write (the service-layer Put /

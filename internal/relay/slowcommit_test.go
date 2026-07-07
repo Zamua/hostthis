@@ -29,8 +29,9 @@ func waitForFrameContaining(t *testing.T, c *fakeConn, sub string, d time.Durati
 // does NOT run under the room's hub lock: the hub lock guards the
 // connection set only, and a room's live broadcasts never stall behind a
 // durable write's object-storage round trip"). A commit callback that
-// PARKS (standing in for a slow object-store CAS - 110ms to 1.5s in
-// production, unbounded when the store hangs) must not stall:
+// PARKS (standing in for a slow object-store CAS - hundreds of
+// milliseconds on a loaded backend, unbounded when the store hangs) must
+// not stall:
 //
 //   - the room's EPHEMERAL fan-out (a raw relay frame broadcast while the
 //     commit is in flight must deliver promptly),
