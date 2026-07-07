@@ -108,10 +108,13 @@ func (s *ShaleSiteRepo) PreClaimSlug(ctx context.Context, slug domain.Slug, owne
 	return s.repo.PreClaimSiteSlug(ctx, slug, owner, now)
 }
 
-// service.SweepSites
+// service.SweepSites (Delete also serves the owner-facing removal path)
 func (s *ShaleSiteRepo) Delete(slug domain.Slug) error { return s.repo.DeleteSite(slug) }
-func (s *ShaleSiteRepo) ExpiredSiteSlugs(now time.Time) ([]string, error) {
-	return s.repo.ExpiredSiteSlugs(now)
+func (s *ShaleSiteRepo) ExpiredSites(now time.Time) ([]domain.ExpiredSite, error) {
+	return s.repo.ExpiredSites(now)
+}
+func (s *ShaleSiteRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
+	return s.repo.DeleteExpiredSite(ref)
 }
 func (s *ShaleSiteRepo) ReferencedSiteBlobSHAs() ([]string, error) {
 	return s.repo.ReferencedSiteBlobSHAs()
@@ -690,22 +693,26 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 	})
 }
 
-// ExpiredSiteSlugs fans out across all {slug} shards over expiry_sites/ and
-// returns the slugs whose timestamp is <= now (inclusive boundary). The
-// site expiry keys use the fixed-width expirySiteTimeFormat, so the
-// timestamp segment's byte order is time order EXACTLY (correct even within
-// a shared whole second), unlike the variable-width time.RFC3339Nano the
-// paste ExpiredPastes still uses. The cutoff is formatted with the SAME
-// layout so the compare stays aligned. Matches the slate ExpiredSiteSlugs.
-func (r *ShaleRepo) ExpiredSiteSlugs(now time.Time) ([]string, error) {
+// ExpiredSites fans out across all {slug} shards over expiry_sites/ and
+// returns one reference per entry whose timestamp is <= now (inclusive
+// boundary): the slug plus the entry's full key as the opaque IndexRef, so
+// DeleteExpiredSite can remove the EXACT entry the scan surfaced even when
+// the site record is already gone. The site expiry keys use the
+// fixed-width expirySiteTimeFormat, so the timestamp segment's byte order
+// is time order EXACTLY (correct even within a shared whole second),
+// unlike the variable-width time.RFC3339Nano the paste ExpiredPastes still
+// uses. The cutoff is formatted with the SAME layout so the compare stays
+// aligned. Matches the slate ExpiredSites.
+func (r *ShaleRepo) ExpiredSites(now time.Time) ([]domain.ExpiredSite, error) {
 	items, err := r.aggregatePrefix(prefixExpirySitesAll)
 	if err != nil {
 		return nil, err
 	}
 	cutoff := now.UTC().Format(expirySiteTimeFormat)
-	var out []string
+	var out []domain.ExpiredSite
 	for _, item := range items {
-		rest := strings.TrimPrefix(string(item.Key), "expiry_sites/")
+		k := string(item.Key)
+		rest := strings.TrimPrefix(k, "expiry_sites/")
 		idx := strings.LastIndex(rest, "/")
 		if idx < 0 {
 			continue
@@ -713,10 +720,46 @@ func (r *ShaleRepo) ExpiredSiteSlugs(now time.Time) ([]string, error) {
 		ts := rest[:idx]
 		slug := rest[idx+1:]
 		if ts <= cutoff {
-			out = append(out, slug)
+			out = append(out, domain.ExpiredSite{Slug: domain.Slug(slug), IndexRef: k})
 		}
 	}
 	return out, nil
+}
+
+// DeleteExpiredSite processes one expired reference: the same full-cascade
+// delete as DeleteSite when the site record still exists, and then - in
+// every case - removal of the exact expiry-index entry the scan surfaced
+// (a single {slug}-shard CAS: the entry's shard key is its trailing slug).
+// The cascade removes the DERIVED key; this removes the OBSERVED one.
+// Idempotent: a missing record and a missing entry are both no-ops.
+// Returns whether a site record was actually deleted. Mirrors the paste
+// DeleteExpired; see docs/SPEC.md "Static-site storage" (sweep path).
+func (r *ShaleRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
+	entryKey, err := expirySiteIndexKey(ref)
+	if err != nil {
+		return false, err
+	}
+	deleted := false
+	var row siteRow
+	switch err := r.getJSON(shaleKeySite(ref.Slug), &row); {
+	case errors.Is(err, ErrNotFound):
+		// Orphaned entry: nothing to cascade, just clean the entry below.
+	case err != nil:
+		return false, err
+	default:
+		if err := r.DeleteSite(ref.Slug); err != nil {
+			return false, err
+		}
+		deleted = true
+	}
+	if entryKey != nil {
+		if err := r.cluster.Transact(entryKey, func(tx backend.Transaction) error {
+			return tx.Delete(entryKey)
+		}); err != nil {
+			return deleted, fmt.Errorf("delete site expiry entry %s: %w", entryKey, err)
+		}
+	}
+	return deleted, nil
 }
 
 // reconcileSiteIndexPass reprojects the identity_sites enumeration index from

@@ -4,9 +4,10 @@ package storage
 
 // Shared expiry-index reference validation for the index-backed metadata
 // backends (slatedb, shale). Both keep the paste expiry index under the
-// same "expiry/<ts>/<slug>" key shape, and both DeleteExpired impls remove
-// the exact entry the scan surfaced; this helper is the fail-closed gate
-// between the opaque domain.ExpiredPaste.IndexRef and that raw key.
+// "expiry/<ts>/<slug>" key shape and the site index under
+// "expiry_sites/<ts>/<slug>", and the DeleteExpired / DeleteExpiredSite
+// impls remove the exact entry the scan surfaced; these helpers are the
+// fail-closed gate between the opaque IndexRef and that raw key.
 
 import (
 	"fmt"
@@ -21,11 +22,21 @@ import (
 // malformed or names a different slug is a wiring bug, and erroring beats
 // deleting an arbitrary key.
 func expiryIndexKey(ref domain.ExpiredPaste) ([]byte, error) {
-	if ref.IndexRef == "" {
+	return checkedIndexKey("expiry/", ref.IndexRef, ref.Slug)
+}
+
+// expirySiteIndexKey is the site twin: validates that ref.IndexRef names
+// an "expiry_sites/<ts>/<slug>" entry for ref.Slug, same fail-closed rules.
+func expirySiteIndexKey(ref domain.ExpiredSite) ([]byte, error) {
+	return checkedIndexKey("expiry_sites/", ref.IndexRef, ref.Slug)
+}
+
+func checkedIndexKey(family, indexRef string, slug domain.Slug) ([]byte, error) {
+	if indexRef == "" {
 		return nil, nil
 	}
-	if !strings.HasPrefix(ref.IndexRef, "expiry/") || !strings.HasSuffix(ref.IndexRef, "/"+ref.Slug.String()) {
-		return nil, fmt.Errorf("expiry index ref %q does not name an expiry entry for slug %q", ref.IndexRef, ref.Slug)
+	if !strings.HasPrefix(indexRef, family) || !strings.HasSuffix(indexRef, "/"+slug.String()) {
+		return nil, fmt.Errorf("expiry index ref %q does not name a %s entry for slug %q", indexRef, family, slug)
 	}
-	return []byte(ref.IndexRef), nil
+	return []byte(indexRef), nil
 }

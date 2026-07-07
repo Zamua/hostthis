@@ -60,9 +60,21 @@ type BlobOrphanSweeper interface {
 // into the keep-alive set, so a blob shared between a site and a paste
 // (or two sites) survives as long as ANY live record references it.
 // internal/storage.SiteRepo satisfies it. Nil disables site sweeping.
+// The expiry pair mirrors SweepRepo's contract exactly (see docs/SPEC.md
+// "Static-site storage", sweep path).
 type SweepSites interface {
-	ExpiredSiteSlugs(now time.Time) ([]string, error)
-	Delete(slug domain.Slug) error
+	// ExpiredSites returns one reference per site whose expiry is at or
+	// before now (inclusive boundary): the slug plus, on index-backed
+	// backends, an opaque reference to the exact expiry_sites/ entry that
+	// surfaced it (round-tripped into DeleteExpiredSite).
+	ExpiredSites(now time.Time) ([]domain.ExpiredSite, error)
+	// DeleteExpiredSite processes one expired reference: it deletes the
+	// site record when it still exists (the same full cascade as the
+	// owner-facing Delete) and removes the expiry-index entry REGARDLESS,
+	// so an orphaned entry (its record already gone) cannot resurface on
+	// the next scan. Returns whether a site record was actually deleted -
+	// the sweep counts only those in its deleted total.
+	DeleteExpiredSite(ref domain.ExpiredSite) (bool, error)
 	ReferencedSiteBlobSHAs() ([]string, error)
 }
 
@@ -110,6 +122,127 @@ type Sweep struct {
 	// runs in this mode - it is never a silent no-op. See docs/SPEC.md
 	// "Dry-run (observability)".
 	DryRun bool
+
+	// guard is the cross-pass convergence guard: it classifies refs that
+	// RESURFACE after being processed (the delete reported success but did
+	// not persist - e.g. legacy data physically placed where the routed
+	// delete cannot reach it, or a diverged replica resurrecting a record)
+	// as UNREACHABLE, so the sweep skips them instead of re-processing the
+	// same refs every pass forever. Live mode only; see docs/SPEC.md
+	// "Sweep convergence guard (unreachable refs)".
+	guard refGuard
+}
+
+// maxGuardRefs bounds the convergence guard's memory (ids tracked across
+// passes). Above the cap the guard fails OPEN: new refs are processed as if
+// unguarded and the overflow is logged, so a pathological keyspace can cost
+// repeat work but never unbounded memory.
+const maxGuardRefs = 200_000
+
+// refGuard is the sweep's cross-pass convergence-guard state. One pass
+// records the ref ids it processed; the next pass classifies any of those
+// ids that RESURFACE in its scan as unreachable and skips them. Ids that
+// stop appearing are forgotten (externally purged / store converged), and a
+// process restart clears everything, so each boot re-attempts once.
+// Not safe for concurrent use; the sweep runs passes sequentially.
+type refGuard struct {
+	lastAttempted map[string]struct{} // ids processed in the previous pass
+	unreachable   map[string]struct{} // ids that resurfaced after processing
+}
+
+// guardPass is one pass's view of the guard: skip() consults + records,
+// finish() folds the pass back into the cross-pass state.
+type guardPass struct {
+	g         *refGuard
+	attempted map[string]struct{} // ids processed THIS pass
+	seen      map[string]struct{} // every id surfaced THIS pass
+	skipped   int                 // refs skipped as unreachable this pass
+	overflow  bool                // cap hit; guard failing open for new ids
+}
+
+func (g *refGuard) beginPass() *guardPass {
+	if g.lastAttempted == nil {
+		g.lastAttempted = make(map[string]struct{})
+	}
+	if g.unreachable == nil {
+		g.unreachable = make(map[string]struct{})
+	}
+	return &guardPass{
+		g:         g,
+		attempted: make(map[string]struct{}),
+		seen:      make(map[string]struct{}),
+	}
+}
+
+// skip reports whether the ref with this id must be skipped this pass
+// (known or newly-classified unreachable). A false return means the caller
+// should process the ref; the id is recorded so a resurfacing next pass
+// classifies it.
+func (p *guardPass) skip(id string) bool {
+	p.seen[id] = struct{}{}
+	if _, ok := p.g.unreachable[id]; ok {
+		p.skipped++
+		return true
+	}
+	if _, ok := p.g.lastAttempted[id]; ok {
+		// Processed last pass and back again: the mutation did not persist.
+		if len(p.g.unreachable) < maxGuardRefs {
+			p.g.unreachable[id] = struct{}{}
+		} else {
+			p.overflow = true
+		}
+		p.skipped++
+		return true
+	}
+	if len(p.attempted) < maxGuardRefs {
+		p.attempted[id] = struct{}{}
+	} else {
+		p.overflow = true // fail open: processed but not tracked
+	}
+	return false
+}
+
+// finish folds the pass into the cross-pass state. A COMPLETED pass
+// replaces lastAttempted and prunes unreachable ids that stopped appearing
+// (externally drained). An ABORTED pass only merges what it attempted (its
+// scan view is partial, so pruning against it would wrongly forget ids).
+func (p *guardPass) finish(completed bool) {
+	if completed {
+		p.g.lastAttempted = p.attempted
+		for id := range p.g.unreachable {
+			if _, ok := p.seen[id]; !ok {
+				delete(p.g.unreachable, id)
+			}
+		}
+		return
+	}
+	for id := range p.attempted {
+		if len(p.g.lastAttempted) >= maxGuardRefs {
+			break
+		}
+		p.g.lastAttempted[id] = struct{}{}
+	}
+}
+
+// Guard ids are kind-prefixed so a paste, site, and room ref can never
+// collide. Index-backed refs key on the exact index entry (the thing that
+// resurfaces); indexless backends key on the slug.
+func pasteGuardID(ref domain.ExpiredPaste) string {
+	if ref.IndexRef != "" {
+		return "p\x00" + ref.IndexRef
+	}
+	return "p\x00slug\x00" + ref.Slug.String()
+}
+
+func siteGuardID(ref domain.ExpiredSite) string {
+	if ref.IndexRef != "" {
+		return "s\x00" + ref.IndexRef
+	}
+	return "s\x00slug\x00" + ref.Slug.String()
+}
+
+func roomGuardID(ref domain.RoomRef) string {
+	return fmt.Sprintf("r\x00%s\x00%s", ref.AppSlug, ref.ID)
 }
 
 // DefaultOrphanGrace is the fallback age a staged-but-unbound shale blob object
@@ -211,14 +344,24 @@ func (s *Sweep) tick() {
 // includes expired sites - both are "records expired this tick" for
 // the purpose of the data-loss guard below.
 func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
+	// The convergence guard runs in live mode only (dry-run mutates
+	// nothing, so nothing can fail to persist). It is folded back into the
+	// cross-pass state whether the pass completes or aborts; an aborted
+	// pass merges without pruning (its scan view is partial).
+	var guard *guardPass
+	if !s.DryRun {
+		guard = s.guard.beginPass()
+		defer func() { guard.finish(err == nil) }()
+	}
+
 	expired, err := s.Repo.ExpiredPastes(now)
 	if err != nil {
 		return 0, 0, fmt.Errorf("expired pastes: %w", err)
 	}
-	// Orphaned expiry-index entries cleaned this pass: entries whose paste
-	// record was already gone. They are index maintenance, not deletions,
-	// so they don't count into pastesDeleted (which feeds the summary log
-	// AND the abort-on-zero-refs guard below); reported separately.
+	// Orphaned expiry-index entries cleaned this pass: entries whose record
+	// was already gone. They are index maintenance, not deletions, so they
+	// don't count into pastesDeleted (which feeds the summary log AND the
+	// abort-on-zero-refs guard below); reported separately.
 	orphanEntries := 0
 	for _, ref := range expired {
 		if s.DryRun {
@@ -227,6 +370,9 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 			// count, an upper bound on real deletions.
 			s.Logger.Printf("sweep[dry-run]: would expire paste %q", ref.Slug)
 			pastesDeleted++
+			continue
+		}
+		if guard.skip(pasteGuardID(ref)) {
 			continue
 		}
 		deleted, err := s.Repo.DeleteExpired(ref)
@@ -239,23 +385,33 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 			orphanEntries++
 		}
 	}
-	if orphanEntries > 0 {
-		s.Logger.Printf("sweep: cleaned %d orphaned expiry-index entries (paste already gone)", orphanEntries)
-	}
 
-	// Expire sites too, when the site sweeper is wired.
+	// Expire sites too, when the site sweeper is wired. Same contract as
+	// the paste loop: only real record deletions count into pastesDeleted;
+	// an orphaned-entry cleanup joins the cleaned count.
 	if s.Sites != nil {
-		siteSlugs, err := s.Sites.ExpiredSiteSlugs(now)
+		expiredSites, err := s.Sites.ExpiredSites(now)
 		if err != nil {
-			return pastesDeleted, 0, fmt.Errorf("expired site slugs: %w", err)
+			return pastesDeleted, 0, fmt.Errorf("expired sites: %w", err)
 		}
-		for _, slugStr := range siteSlugs {
+		for _, ref := range expiredSites {
 			if s.DryRun {
-				s.Logger.Printf("sweep[dry-run]: would expire site %q", slugStr)
-			} else if err := s.Sites.Delete(domain.Slug(slugStr)); err != nil {
-				return pastesDeleted, blobsGCd, fmt.Errorf("delete site %q: %w", slugStr, err)
+				s.Logger.Printf("sweep[dry-run]: would expire site %q", ref.Slug)
+				pastesDeleted++
+				continue
 			}
-			pastesDeleted++
+			if guard.skip(siteGuardID(ref)) {
+				continue
+			}
+			deleted, err := s.Sites.DeleteExpiredSite(ref)
+			if err != nil {
+				return pastesDeleted, blobsGCd, fmt.Errorf("delete site %q: %w", ref.Slug, err)
+			}
+			if deleted {
+				pastesDeleted++
+			} else {
+				orphanEntries++
+			}
 		}
 	}
 
@@ -273,11 +429,27 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 		for _, ref := range expiredRooms {
 			if s.DryRun {
 				s.Logger.Printf("sweep[dry-run]: would expire room %s/%s", ref.AppSlug, ref.ID)
-			} else if err := s.Rooms.DeleteRoom(ref.AppSlug, ref.ID); err != nil {
+				pastesDeleted++
+				continue
+			}
+			if guard.skip(roomGuardID(ref)) {
+				continue
+			}
+			if err := s.Rooms.DeleteRoom(ref.AppSlug, ref.ID); err != nil {
 				return pastesDeleted, blobsGCd, fmt.Errorf("delete room %s/%s: %w", ref.AppSlug, ref.ID, err)
 			}
 			pastesDeleted++
 		}
+	}
+
+	if orphanEntries > 0 {
+		s.Logger.Printf("sweep: cleaned %d orphaned expiry-index entries (record already gone)", orphanEntries)
+	}
+	if guard != nil && guard.skipped > 0 {
+		s.Logger.Printf("sweep: skipped %d unreachable expired ref(s) - processing reported success but did not persist (misplaced legacy data or replica divergence); external cleanup required", guard.skipped)
+	}
+	if guard != nil && guard.overflow {
+		s.Logger.Printf("sweep: convergence-guard capacity (%d refs) exceeded; excess refs are re-processed unguarded", maxGuardRefs)
 	}
 
 	// GC unreferenced blobs. On the transactional shale-blob path the cluster

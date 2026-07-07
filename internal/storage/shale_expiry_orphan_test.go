@@ -88,3 +88,69 @@ func TestShaleSweep_OrphanExpiryIndexEntryDrains(t *testing.T) {
 		t.Fatalf("expired live paste should have been deleted")
 	}
 }
+
+// TestShaleSweep_VerbatimLegacyEntryKeysDrain pins the drain against REAL
+// legacy fixtures: the exact key bytes of stuck production-era entries
+// (one paste expiry entry, one site expiry entry), copied VERBATIM from an
+// affected deployment's index. The scan must surface each entry with
+// IndexRef equal to the stored bytes, and processing the reference must
+// remove that exact entry - proving the key FORMAT (variable-width
+// RFC3339Nano paste ts / fixed-width site ts) never blocks the drain when
+// the entry is reachable by routed mutation. (When it is NOT reachable -
+// data physically placed under a different sharding than live routing -
+// no key-targeted delete can drain it; that state is handled by the
+// sweep's convergence guard, pinned at the service level.)
+func TestShaleSweep_VerbatimLegacyEntryKeysDrain(t *testing.T) {
+	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale verbatim-fixture test (start dev MinIO first)")
+	}
+	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	now := time.Date(2026, 7, 7, 0, 0, 0, 0, time.UTC)
+
+	// Verbatim stuck-entry fixtures (real observed key shapes; both
+	// reference records that no longer exist).
+	pasteEntry := "expiry/2026-07-01T03:20:59.990221663Z/8ajitdpm"
+	siteEntry := "expiry_sites/2026-07-03T21:22:23.536246341Z/ctimu4qh"
+	mustPutRaw(t, repo, []byte(pasteEntry), storage.MarkerValueForTest())
+	mustPutRaw(t, repo, []byte(siteEntry), storage.MarkerValueForTest())
+
+	// Paste side: the scan carries the exact stored bytes, and processing
+	// the ref drains the entry in one pass.
+	refs, err := repo.ExpiredPastes(now)
+	if err != nil {
+		t.Fatalf("ExpiredPastes: %v", err)
+	}
+	if len(refs) != 1 || refs[0].IndexRef != pasteEntry || refs[0].Slug != "8ajitdpm" {
+		t.Fatalf("scan must surface the verbatim entry (IndexRef = stored bytes), got %+v", refs)
+	}
+	deleted, err := repo.DeleteExpired(refs[0])
+	if err != nil {
+		t.Fatalf("DeleteExpired: %v", err)
+	}
+	if deleted {
+		t.Fatalf("no paste record exists; DeleteExpired must report false")
+	}
+	if again, err := repo.ExpiredPastes(now); err != nil || len(again) != 0 {
+		t.Fatalf("verbatim paste entry must drain in one pass: refs=%v err=%v", again, err)
+	}
+
+	// Site side: same contract over expiry_sites/.
+	siteRefs, err := repo.ExpiredSites(now)
+	if err != nil {
+		t.Fatalf("ExpiredSites: %v", err)
+	}
+	if len(siteRefs) != 1 || siteRefs[0].IndexRef != siteEntry || siteRefs[0].Slug != "ctimu4qh" {
+		t.Fatalf("site scan must surface the verbatim entry (IndexRef = stored bytes), got %+v", siteRefs)
+	}
+	siteDeleted, err := repo.DeleteExpiredSite(siteRefs[0])
+	if err != nil {
+		t.Fatalf("DeleteExpiredSite: %v", err)
+	}
+	if siteDeleted {
+		t.Fatalf("no site record exists; DeleteExpiredSite must report false")
+	}
+	if again, err := repo.ExpiredSites(now); err != nil || len(again) != 0 {
+		t.Fatalf("verbatim site entry must drain in one pass: refs=%v err=%v", again, err)
+	}
+}
