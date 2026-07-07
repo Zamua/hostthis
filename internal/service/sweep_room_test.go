@@ -185,3 +185,68 @@ func TestSweep_PrunesRoomCreates(t *testing.T) {
 		t.Fatalf("create count after prune = %d, want 0", perSubnet)
 	}
 }
+
+// TestSweep_RoomIndexNoOpsNotCountedAsDeleted pins the room half of the
+// expiry-pass contract, mirroring the paste and site pins: an expired
+// roomexpiry-index entry whose room record is ALREADY GONE is an index
+// cleanup, not a record deletion - the deleted-count must not include it (a
+// no-op room delete counted as a deletion is the same "deleted N expired
+// record(s) every cycle forever" pathology the paste and site paths fixed).
+func TestSweep_RoomIndexNoOpsNotCountedAsDeleted(t *testing.T) {
+	rooms := &orphanRoomSweep{ref: domain.ExpiredRoom{
+		AppSlug:  "appz2345",
+		ID:       "0b7ff45c-6a41-4f3e-9c5d-2a9d6f4b8e13",
+		IndexRef: "roomexpiry/2026-07-03T21:22:23.536246341Z/appz2345/0b7ff45c-6a41-4f3e-9c5d-2a9d6f4b8e13",
+	}}
+	sweep := service.NewSweep(noopSweepRepo{}, nil, log.New(io.Discard, "", 0))
+	sweep.Rooms = rooms
+
+	now := time.Date(2026, 7, 7, 0, 0, 0, 0, time.UTC)
+	deleted, _, err := sweep.Once(now)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("a room-index no-op (record already gone) must not count as a deletion: got %d, want 0", deleted)
+	}
+	// The pass handed the EXACT observed reference to the repo (the entry
+	// cleanup targets the surfaced index entry, not a re-derivation).
+	if len(rooms.gotRefs) != 1 || rooms.gotRefs[0] != rooms.ref {
+		t.Fatalf("DeleteExpiredRoom must receive the exact scanned ref; got %+v", rooms.gotRefs)
+	}
+
+	// The repo drained the entry: a second pass sees zero expired rooms and
+	// deletes nothing.
+	deleted, _, err = sweep.Once(now)
+	if err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if deleted != 0 || len(rooms.gotRefs) != 1 {
+		t.Fatalf("second pass must see zero expired rooms: deleted=%d calls=%d", deleted, len(rooms.gotRefs))
+	}
+}
+
+// orphanRoomSweep is a SweepRooms whose expiry scan surfaces one entry
+// referencing a room record that no longer exists - the record delete is an
+// idempotent no-op and the entry cleanup drains the scan, exactly the
+// repo-side contract.
+type orphanRoomSweep struct {
+	ref     domain.ExpiredRoom
+	drained bool
+	gotRefs []domain.ExpiredRoom
+}
+
+func (s *orphanRoomSweep) ExpiredRooms(_ time.Time) ([]domain.ExpiredRoom, error) {
+	if s.drained {
+		return nil, nil
+	}
+	return []domain.ExpiredRoom{s.ref}, nil
+}
+
+func (s *orphanRoomSweep) DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error) {
+	s.gotRefs = append(s.gotRefs, ref)
+	s.drained = true // the exact-entry removal drains the scan
+	return false, nil
+}
+
+func (s *orphanRoomSweep) PruneOldRoomCreates(_ time.Time) (int, error) { return 0, nil }

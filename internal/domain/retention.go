@@ -44,6 +44,20 @@ type ExpiredSite struct {
 	IndexRef string
 }
 
+// ExpiredRoom is the room twin of ExpiredPaste / ExpiredSite: one expired
+// room surfaced by the sweep's room-expiry scan, as the room's full key
+// (the (app-slug, room-id) pair) plus an opaque reference to the exact
+// roomexpiry/ index entry that surfaced it (empty on backends whose scan
+// reads the room records themselves, like sqlite). Round-tripped into
+// DeleteExpiredRoom for the same reason as its twins: the entry must be
+// removable even when the room record is already gone, or an orphaned
+// entry resurfaces on every scan forever.
+type ExpiredRoom struct {
+	AppSlug  Slug
+	ID       RoomID
+	IndexRef string
+}
+
 // Retention is the installation's content-TTL policy, set once at the
 // composition root from config and injected into the services / repos that
 // stamp ExpiresAt. A positive Window expires content that long after its last

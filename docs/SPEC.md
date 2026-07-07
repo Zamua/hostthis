@@ -2732,7 +2732,10 @@ behaviors are expressed in terms of inputs and observable outputs:
   nothing, so its would-expire count is the entry count, an upper bound
   on real deletions.) Static sites carry the same contract through
   `SweepSites` (`ExpiredSites` / `DeleteExpiredSite` over the
-  `expiry_sites/` index); see "Static-site storage".
+  `expiry_sites/` index); see "Static-site storage". Rooms carry it
+  through `SweepRooms` (`ExpiredRooms` / `DeleteExpiredRoom` over the
+  `roomexpiry/` index); see "Room storage on the slatedb (and shale)
+  backend".
 - **Sweep convergence guard (unreachable refs).** "One pass drains what
   it scans" holds only when the store the scan READS is the store the
   deletes WRITE. Real deployments have shown states where they diverge:
@@ -3213,9 +3216,9 @@ blob-GC keep-alive set.
 already interfaces in `internal/service` (`rooms.go`, `sweep.go`),
 satisfied by the sqlite `*storage.RoomKVRepo` today. The slatedb and shale
 backends add types that ALSO satisfy them; the domain layer (`Room`,
-`RoomID`, the pure `RoomKV` cap math, `RoomRef`) is backend-agnostic and
-unchanged - only the storage layer is backend-specific. The room-write /
-read interface is:
+`RoomID`, the pure `RoomKV` cap math, `ExpiredRoom`) is backend-agnostic
+and unchanged - only the storage layer is backend-specific. The
+room-write / read interface is:
 
 - `CreateRoom(room Room, subnet, appCap, now)` (mint an empty room, record
   the creation-accounting row, enforce the per-app aggregate cap; the
@@ -3232,9 +3235,23 @@ read interface is:
 
 and the sweep-side interface is:
 
-- `ExpiredRoomKeys(now) ([]RoomRef, error)`
-- `DeleteRoom(appSlug, id) error`
+- `ExpiredRooms(now) ([]domain.ExpiredRoom, error)`
+- `DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error)`
 - `PruneOldRoomCreates(cutoff) (int, error)`
+
+The first two mirror the paste `SweepRepo` / site `SweepSites` contract
+exactly (see "The storage contract", Expiry): the scan returns one
+reference per expired entry (the (app-slug, room-id) pair plus, on
+index-backed backends, an opaque `IndexRef` naming the exact `roomexpiry/`
+entry that surfaced it; empty on sqlite, whose scan reads the `rooms`
+table itself), and processing a reference removes the INDEX ENTRY
+regardless of whether the room record still exists, returning whether a
+record was actually deleted. Without that, an orphaned `roomexpiry/`
+entry (its record already gone) resurfaces on every pass and its no-op
+record delete is counted as a deletion forever - the same pathology the
+paste and site paths fixed. `DeleteRoom(appSlug, id)` remains on the
+concrete repos as the idempotent full cascade the processing step reuses;
+the sweep does not call it directly.
 
 #### Room key families (slatedb)
 
@@ -3412,10 +3429,13 @@ fold its bytes into.
 
 #### Expiry + sweep -> KV mapping; the fixed-width TTL timestamp
 
-- **`ExpiredRoomKeys(now)`.** Prefix-scan `roomexpiry/`; for each
+- **`ExpiredRooms(now)`.** Prefix-scan `roomexpiry/`; for each
   `roomexpiry/<ts>/<app-slug>/<uuid>` key, compare the timestamp segment
-  and return the `RoomRef{app-slug, uuid}` when `ts <= now` (inclusive
-  boundary). The room expiry timestamp is a **FIXED-WIDTH** RFC3339 with a
+  and return a reference (the (app-slug, uuid) pair plus the entry's full
+  key as the opaque `IndexRef`) when `ts <= now` (inclusive boundary), so
+  `DeleteExpiredRoom` can remove the EXACT entry the scan surfaced even
+  when the room record is already gone. The room expiry timestamp is a
+  **FIXED-WIDTH** RFC3339 with a
   zero-padded 9-digit nanosecond fraction (`expirySiteTimeFormat`,
   `2006-01-02T15:04:05.000000000Z07:00`), the SAME format the site expiry
   index uses, so a string compare on the key is byte order == time order
@@ -3430,22 +3450,31 @@ fold its bytes into.
   comparison is a correct lexical compare too. The **sqlite** backend's
   `rooms.expires_at` column adopts the SAME fixed-width format
   (`formatSiteExpiry`, matching its `sites.expires_at` column), and every
-  query that compares against it (`ExpiredRoomKeys`) uses the fixed-width
+  query that compares against it (`ExpiredRooms`) uses the fixed-width
   operand, so the sweep's inclusive-boundary
   sub-second ordering is correct on sqlite too - the `Rooms
   /ExpirySubSecondOrdering` conformance subtest pins this identically across
-  all three backends.
-- **`DeleteRoom(appSlug, id)`.** Read `rooms/<app>/<uuid>` for its
-  `ExpiresAt` (to clean up the matching `roomexpiry/` entry), then in one
-  transaction delete the room record, the `roomexpiry/<ExpiresAt>/<app>/
-  <uuid>` index entry, and EVERY `roomkv/<app>/<uuid>/` value (the slatedb
-  analogue of the sqlite FK cascade: enumerate the value subtree, delete
-  each in the tx). Idempotent: a missing room is a no-op. The sweep calls
-  this for each `RoomRef` `ExpiredRoomKeys` returns; the per-record count it
-  contributes keeps the sweep's abort-on-zero-refs blob-GC guard from
-  misfiring on a tick where only rooms expired (rooms hold no blobs, so they
-  never add to the keep-alive set, but a room expiry is still a "record
-  expired this tick").
+  all three backends. (sqlite has no standalone room-expiry index - the
+  scan reads the `rooms` table itself - so its references carry an empty
+  `IndexRef`.)
+- **`DeleteExpiredRoom(ref)`.** The sweep-side delete, mirroring the paste
+  `DeleteExpired` and site `DeleteExpiredSite`: when the `rooms/<app>/
+  <uuid>` record still exists, run the full cascade (`DeleteRoom(appSlug,
+  id)`: read the record for its `ExpiresAt`, then in one transaction
+  delete the room record, the DERIVED `roomexpiry/<ExpiresAt>/<app>/<uuid>`
+  index entry, and EVERY `roomkv/<app>/<uuid>/` value - the slatedb
+  analogue of the sqlite FK cascade), and then - in every case - remove
+  the exact OBSERVED index entry the scan surfaced (idempotent when the
+  cascade already removed it; a malformed or mismatched `IndexRef` is a
+  fail-closed error, never an arbitrary-key delete). Returns whether a
+  room record was actually deleted; only true results count into the
+  sweep's deleted total (which keeps the abort-on-zero-refs blob-GC guard
+  honest on a tick where only rooms expired - rooms hold no blobs, so they
+  never add to the keep-alive set, but a real room expiry is still a
+  "record expired this tick"), while an orphaned-entry cleanup joins the
+  cleaned count instead. `DeleteRoom` itself stays idempotent (a missing
+  room is a no-op) and remains the internal cascade; the sweep does not
+  call it directly.
 - **`PruneOldRoomCreates(cutoff)`.** Prefix-scan `roomcreate/`, delete every
   marker whose `<ts>` (the second-to-last segment, before the trailing
   disambiguator `<uuid>`) is before `cutoff` (`now - RoomCreateWindow`). Past
@@ -3605,10 +3634,13 @@ gate):
   way the paste repo is not owner-gated; the repo-level conformance pins
   that room creation under any slug succeeds, and the HTTP-layer test pins
   the 404 for a slug that names no live app.)
-- **TTL / sweep.** `ExpiredRoomKeys` returns rooms whose `ExpiresAt <= now`
-  (inclusive boundary, correct sub-second ordering via the fixed-width
-  timestamp), `DeleteRoom` removes the room and cascades to its values, and
-  the sweep reclaims them.
+- **TTL / sweep.** `ExpiredRooms` returns one reference per room whose
+  `ExpiresAt <= now` (inclusive boundary, correct sub-second ordering via
+  the fixed-width timestamp), `DeleteExpiredRoom` removes the room record
+  (cascading to its values) and the exact observed index entry regardless,
+  reporting whether a record was actually deleted - a re-scan after the
+  pass sees zero references (the drain), and re-processing a reference is
+  an idempotent no-op reporting false.
 
 A backend that passes the extended suite is a drop-in for the
 room-persistence tier by construction.
@@ -4085,7 +4117,7 @@ below is chosen to satisfy that invariant; where two policies would both
 satisfy availability, the one that also satisfies the invariant wins.
 
 **Policy 1 - idempotent background sweeps and the reconciler: SKIP +
-LOG, continue.** The expiry sweep (`ExpiredPastes` / `ExpiredRoomKeys`
+LOG, continue.** The expiry sweep (`ExpiredPastes` / `ExpiredRooms`
 and the site-expiry index walk), the keygate prune
 (`DeleteFirstSeenOlderThan` / `PruneOldRoomCreates`), and the reconciler
 (`Reconcile` - reproject the `identity_pastes` + `identity_sites`
@@ -4157,7 +4189,7 @@ The three policies, side by side:
 
 | Scan kind | Examples | On a bad record | Why |
 | --- | --- | --- | --- |
-| Idempotent background sweep / reconciler | `ExpiredPastes`, `ExpiredRoomKeys`, site-expiry walk, `DeleteFirstSeenOlderThan`, `PruneOldRoomCreates`, `Reconcile` (`reconcileIndexes` + `reconcileSiteIndexes` + pending age-out) | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
+| Idempotent background sweep / reconciler | `ExpiredPastes`, `ExpiredRooms`, site-expiry walk, `DeleteFirstSeenOlderThan`, `PruneOldRoomCreates`, `Reconcile` (`reconcileIndexes` + `reconcileSiteIndexes` + pending age-out) | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
 | Blob-GC reference set | `ReferencedBlobSHAs`, `ReferencedSiteBlobSHAs` | FAIL CLOSED - abort the GC pass, return error, delete nothing; NEVER skip | skipping under-counts refs -> a live blob looks orphaned and is deleted (irreversible) |
 | User-facing read | `Get`, `ListByOwner`, `ListVersions`, `GetVersion`, site manifest read, room scan / per-key read | HARD-FAIL (unchanged) | a user read of corrupt data should surface an error, not silently skip |
 

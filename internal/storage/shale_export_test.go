@@ -174,6 +174,14 @@ func IdentitySiteKeyForTest(identity, slug string) []byte {
 // can seed the expiry index marker exactly as the backend writes it.
 func MarkerValueForTest() []byte { return markerValue }
 
+// RoomExpiryKeyForTest returns the "roomexpiry/<ts>/<app-slug>/<uuid>" sweep
+// index key, exactly as the backend writes it. Exposed so the orphan-drain
+// test can plant an entry with NO room record behind it and prove one expiry
+// pass removes the exact observed entry.
+func RoomExpiryKeyForTest(expiresAt time.Time, appSlug domain.Slug, id domain.RoomID) []byte {
+	return shaleKeyRoomExpiry(expiresAt, appSlug, id)
+}
+
 // SiteKeyForTest returns the "sites/<slug>" authoritative site row key.
 // Exposed so the decode-tolerance test can seed a poisoned site row and prove
 // Reconcile's site-index reprojection skips + continues (Policy 1).
