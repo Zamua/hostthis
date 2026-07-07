@@ -1729,7 +1729,15 @@ landed in the room's order.
   wrong, only the live view is late. Accepted for now; the client
   lifecycle's heartbeat + visibilitychange reconnects bound it in
   practice, and a periodic room-seq beacon is the named future fix if
-  it bites.
+  it bites. A second, rarer producer of the same symptom is an
+  **ambiguous commit**: the storage write LANDS but the committer
+  observes an error (a timeout that raced the CAS round trip), so a seq
+  was consumed and no mirror frame is ever broadcast for it - not
+  locally, not to any peer (the handler surfaces the error to the app,
+  yet the write is durable). Every subscriber then sees a hole at that
+  seq that only the NEXT durable frame exposes, and a then-quiet room
+  stays visually stale until one arrives. Same accepted bound, same
+  named future fix: the periodic room-seq beacon closes both.
 - **Trust boundary.** The peer service rides the same cluster-internal
   listener the shale forwarding port already uses: pod-to-pod traffic
   inside the deployment's network boundary, never exposed on the public
@@ -1756,7 +1764,12 @@ live connections. In a rolling deploy the terminating pod keeps serving
 through its grace window, so a client acting on the hint reconnects
 while its old socket still works - the new join lands on a surviving
 pod through the normal ingress, a make-before-break re-home instead of
-a hard cut. Clients SHOULD apply small random jitter (a few seconds)
+a hard cut. The process-side half of that window is
+`HOSTTHIS_DRAIN_GRACE` (a Go duration, default `3s`): after the hint is
+broadcast the process keeps serving - existing sockets flow, new joins
+are still admitted - for that long before the final close, so the hint
+has time to flush and a hint-acting client re-homes make-before-break.
+`0` disables the pause (hint then immediate close). Clients SHOULD apply small random jitter (a few seconds)
 before reconnecting so a large room does not thundering-herd the
 survivors. The hint is an optimization, never load-bearing: a client
 that ignores it is closed at actual shutdown with a normal closure and
