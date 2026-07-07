@@ -456,7 +456,8 @@ func TestRelayHarness_LateJoinConsistentWithRoomThenLive(t *testing.T) {
 // commit and mirror are not atomic.
 //
 // WEAKEN DEMO: in http/rooms.go's putRoomValue, replace the single
-// `s.Relay.CommitAndMirror(key, commit, EncodePut(...))` call (which runs the
+// `s.Relay.CommitAndMirror(key, commit)` call (whose commit callback returns the
+// EncodePut mirror frame, and which runs the
 // KV commit and the live mirror under ONE acquisition of the room's hub lock)
 // with the commit and the mirror as two separate steps - `commit()` then a
 // standalone hub broadcast - so a join can take the hub lock between them.
@@ -511,7 +512,7 @@ func TestRelayHarness_ConcurrentPutAndJoinNoDupNoGap(t *testing.T) {
 //
 // WEAKEN DEMO: in http/rooms.go's deleteRoomValue, run the commit WITHOUT the
 // hub lock and mirror it separately - `commit()` then a standalone
-// `s.Relay.CommitAndMirror(rk, func() error { return nil }, EncodeDelete(key))`
+// `s.Relay.CommitAndMirror(rk, func() (relay.Frame, error) { return EncodeDelete(seq, key), nil })`
 // - so a join can read a post-commit snapshot (key absent) and register before
 // the separate mirror broadcast. Demonstrated RED: within ~5 rounds a joiner
 // reports `key "<round-key>" appeared 2x (DUP) across snapshot+stream`.

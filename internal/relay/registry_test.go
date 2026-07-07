@@ -183,11 +183,11 @@ func TestRegistry_AdmitDoesNotCoupleAcrossRoomsDuringSlowCommit(t *testing.T) {
 	releaseCommit := make(chan struct{})
 	var commitWG sync.WaitGroup
 	commitWG.Go(func() {
-		_ = r.commitAndMirror(keyA, func() error {
+		_, _ = r.commitAndMirror(keyA, func() (Frame, error) {
 			close(commitEntered)
 			<-releaseCommit
-			return nil
-		}, Frame{Data: []byte("mirror")})
+			return Frame{Data: []byte("mirror")}, nil
+		})
 	})
 	<-commitEntered // A's hub lock is now held by the in-flight slow commit.
 
@@ -280,11 +280,11 @@ func runDurableWriteVsJoinRound(t *testing.T, round int) {
 	// transient hub (created=true); we park inside commit() so admit below finds
 	// the hub already in the map.
 	go func() {
-		_ = r.commitAndMirror(key, func() error {
+		_, _ = r.commitAndMirror(key, func() (Frame, error) {
 			close(commitEntered)
 			<-releaseCommit
-			return nil
-		}, Frame{Data: []byte("durable")})
+			return Frame{Data: []byte("durable")}, nil
+		})
 		close(commitDone)
 	}()
 	<-commitEntered // the transient hub now exists; the commit holds its hub lock

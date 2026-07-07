@@ -416,25 +416,32 @@ func (r *Registry) getOrCreateHubLocked(key RoomKey) (hub *Hub, created bool) {
 // (gap).
 //
 //   - commit performs the durable KV write (it is the service-layer Put /
-//     Delete). It runs UNDER the hub lock, so the room's live broadcasts wait
+//     Delete) and returns the mirror frame to fan out, built AFTER the
+//     write so it carries the per-room sequence the commit assigned. It
+//     runs UNDER the hub lock, so the room's live broadcasts wait
 //     on it for its duration. This is the latency characteristic design (a)
 //     accepts: the durable path is low-frequency, so the stall is acceptable;
 //     high-frequency live motion rides ephemeral raw relay frames that never
 //     take this path. The lock is the per-room hub mutex (not a global lock),
 //     so one room's durable write never stalls another room.
-//   - mirror is the live frame to fan out after a successful commit. It is
-//     broadcast under the SAME hub-lock acquisition (broadcastLocked), so a
-//     join serialized on this hub either snapshots after the commit (key in
-//     snapshot, and it registered after the mirror so it is NOT also live) or
-//     before it (key not yet in snapshot, but it registered before the mirror
-//     so it DOES receive it live) - exactly one.
+//   - the returned mirror is the live frame fanned out after a successful
+//     commit. It is broadcast under the SAME hub-lock acquisition
+//     (broadcastLocked), so a join serialized on this hub either snapshots
+//     after the commit (key in snapshot, and it registered after the mirror
+//     so it is NOT also live) or before it (key not yet in snapshot, but it
+//     registered before the mirror so it DOES receive it live) - exactly one.
+//
+// The successful mirror frame is returned to the caller (Relay), which
+// publishes it to the peer pods OUTSIDE this lock - cross-pod ordering
+// rides the frame's seq, not this lock, so holding the lock across the
+// publish would buy nothing and cost the room's local broadcasts.
 //
 // If commit fails, the error is returned and nothing is mirrored. A hub is
 // created transiently for a room with no live connections (so the commit
 // still serializes against a join that is admitting concurrently, closing the
 // gap that a "skip the mirror when no hub" check would open); it is removed
 // again if it is still empty afterward, so an empty hub never lingers.
-func (r *Registry) commitAndMirror(key RoomKey, commit func() error, mirror Frame) error {
+func (r *Registry) commitAndMirror(key RoomKey, commit func() (Frame, error)) (Frame, error) {
 	r.mu.Lock()
 	hub, created := r.getOrCreateHubLocked(key)
 	// Take the hub lock BEFORE releasing the registry lock (lock order
@@ -443,7 +450,7 @@ func (r *Registry) commitAndMirror(key RoomKey, commit func() error, mirror Fram
 	hub.mu.Lock()
 	r.mu.Unlock()
 
-	err := commit()
+	mirror, err := commit()
 	if err != nil {
 		hub.mu.Unlock()
 		// removeHub is a no-op unless the hub is still empty, so a real
@@ -451,7 +458,7 @@ func (r *Registry) commitAndMirror(key RoomKey, commit func() error, mirror Fram
 		if created {
 			r.removeHub(key)
 		}
-		return err
+		return Frame{}, err
 	}
 	drops := hub.broadcastLocked(0, mirror)
 	hub.mu.Unlock()
@@ -464,7 +471,7 @@ func (r *Registry) commitAndMirror(key RoomKey, commit func() error, mirror Fram
 	if created {
 		r.removeHub(key)
 	}
-	return nil
+	return mirror, nil
 }
 
 // removeHub deletes key's hub from the registry IF it is empty AND has no

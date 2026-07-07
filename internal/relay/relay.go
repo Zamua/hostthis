@@ -44,6 +44,11 @@ type Relay struct {
 	reg  *Registry
 	snap Snapshotter
 
+	// peers is the multi-pod outbound port (nil on a single-pod deploy -
+	// the zero-peer degenerate case, where the relay is exactly the
+	// single-pod relay). Wired by SetPeerPublisher at the composition root.
+	peers PeerPublisher
+
 	// pingInterval / pingTimeout are fields (not the consts directly) so
 	// tests can shorten them; NewRelay sets the defaults.
 	pingInterval time.Duration
@@ -91,21 +96,35 @@ func (rl *Relay) Release(key RoomKey, id uint64) {
 	rl.reg.release(key, id)
 }
 
-// CommitAndMirror runs a durable write's KV commit and its live mirror
-// broadcast atomically under the room's hub lock, so a concurrent join's
-// snapshot-read + register cannot interleave between them. This is the
-// no-dup / no-gap guarantee the spec requires: the write lands in EXACTLY
-// ONE of {a joiner's snapshot, a joiner's live stream}, never both and
-// never neither. The HTTP KV PUT/DELETE handlers call it instead of doing
-// the commit and the mirror as two separate steps (which let a join slip
-// between them and observe the write in both its snapshot and a live frame).
+// CommitAndMirror runs a durable write's KV commit and its LOCAL live
+// mirror broadcast atomically under the room's hub lock, so a concurrent
+// local join's snapshot-read + register cannot interleave between them,
+// then publishes the mirror to the peer pods (best-effort, never on the
+// commit path). The HTTP KV PUT/DELETE handlers call it instead of doing
+// the commit and the mirror as two separate steps.
 //
-// commit performs the durable KV write (the service-layer Put / Delete) and
-// runs UNDER the hub lock; mirror is the server-originated control frame
-// (from == 0, so EVERY connected client receives it) fanned out after a
-// successful commit. A failed commit mirrors nothing and returns the error.
-func (rl *Relay) CommitAndMirror(key RoomKey, commit func() error, mirror Frame) error {
-	return rl.reg.commitAndMirror(key, commit, mirror)
+// commit performs the durable KV write (the service-layer Put / Delete)
+// and returns the mirror frame to fan out - built AFTER the write so it
+// carries the per-room sequence the commit assigned (the frame cannot be
+// built up front: the seq is durable room state only the commit knows).
+// It runs UNDER the hub lock; the mirror is broadcast server-originated
+// (from == 0, so EVERY local connection receives it) after a successful
+// commit. A failed commit mirrors nothing, publishes nothing, and returns
+// the error.
+//
+// Correctness split: the hub lock carries the LOCAL no-gap / no-dup
+// guarantee (a local joiner sees the write in exactly one of {snapshot,
+// stream}); ACROSS pods the guarantee rides the sequence instead - the
+// peer publish happens after the lock is released, remote delivery is
+// best-effort, and remote subscribers order / de-duplicate / detect loss
+// by the dense seq the frame carries (see SPEC "Multi-pod relay").
+func (rl *Relay) CommitAndMirror(key RoomKey, commit func() (Frame, error)) error {
+	mirror, err := rl.reg.commitAndMirror(key, commit)
+	if err != nil {
+		return err
+	}
+	rl.publishToPeers(key, mirror)
+	return nil
 }
 
 // wsConn is the real connection adapter: it wraps a coder/websocket
@@ -323,7 +342,14 @@ func (rl *Relay) readLoop(ctx context.Context, key RoomKey, c *wsConn) {
 				return
 			}
 		}
-		hub.broadcast(c.id, Frame{Binary: typ == websocket.MessageBinary, Data: data})
+		f := Frame{Binary: typ == websocket.MessageBinary, Data: data}
+		hub.broadcast(c.id, f)
+		// Cross-pod fan-out of the ephemeral peer frame (free on the same
+		// path the durable mirror uses; no seq, no contract - a lost or
+		// reordered ephemeral frame needs no machinery). The per-connection
+		// rate + size limits above ran BEFORE this point, so peer input is
+		// bounded at the origin. No-op with no publisher (zero peers).
+		rl.publishToPeers(key, f)
 	}
 }
 

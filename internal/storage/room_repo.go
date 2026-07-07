@@ -147,20 +147,44 @@ func (r *RoomKVRepo) GetValue(appSlug domain.Slug, id domain.RoomID, key string)
 
 // ScanRoom returns the whole namespace for (appSlug, id) as a domain
 // RoomKV (every key -> value), so an app can load full room state in one
-// request. An existing room with no values returns an empty (non-nil)
-// RoomKV. Caller verifies the room exists first (a scan of a nonexistent
-// room returns an empty namespace, indistinguishable here - the service
-// layer does the GetRoom existence check before calling this so a
-// missing room is a 404, not an empty 200).
+// request, stamped with the EXACT per-room sequence the snapshot
+// reflects (RoomKV.Seq): the seq read and the namespace scan run inside
+// ONE serializable transaction, so every mutation with seq <= Seq is in
+// the state and none with seq > Seq is - the fence the relay's late-join
+// splice contract rides. An existing room with no values returns an
+// empty (non-nil) RoomKV. Caller verifies the room exists first (a scan
+// of a nonexistent room returns an empty namespace at seq 0,
+// indistinguishable here - the service layer does the GetRoom existence
+// check before calling this so a missing room is a 404, not an empty
+// 200).
 func (r *RoomKVRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error) {
-	rows, err := r.db.Query(`
+	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
+	if err != nil {
+		return domain.RoomKV{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	kv := domain.NewRoomKV()
+
+	// The room's current seq, read inside the same tx as the scan so the
+	// stamped Seq is exactly the state the scan returns. A nonexistent room
+	// scans empty at seq 0 (the caller's GetRoom gate is what 404s it).
+	var seq sql.NullInt64
+	err = tx.QueryRow(`
+		SELECT seq FROM rooms WHERE app_slug = ? AND room_id = ?
+	`, appSlug.String(), id.String()).Scan(&seq)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.RoomKV{}, fmt.Errorf("scan room seq: %w", err)
+	}
+	kv.Seq = uint64(seq.Int64)
+
+	rows, err := tx.Query(`
 		SELECT key, val FROM room_kv WHERE app_slug = ? AND room_id = ?
 	`, appSlug.String(), id.String())
 	if err != nil {
 		return domain.RoomKV{}, fmt.Errorf("scan room: %w", err)
 	}
 	defer rows.Close()
-	kv := domain.NewRoomKV()
 	for rows.Next() {
 		var key string
 		var val []byte
@@ -172,7 +196,15 @@ func (r *RoomKVRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.Roo
 		copy(cp, val)
 		kv.Values[key] = cp
 	}
-	return kv, rows.Err()
+	if err := rows.Err(); err != nil {
+		return domain.RoomKV{}, err
+	}
+	// Close the cursor BEFORE committing: database/sql requires no open
+	// rows on the tx at Commit time (the deferred Close would run too late).
+	if err := rows.Close(); err != nil {
+		return domain.RoomKV{}, err
+	}
+	return kv, tx.Commit()
 }
 
 // PutValue writes val under key in room (appSlug, id), atomically (under
@@ -193,28 +225,33 @@ func (r *RoomKVRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.Roo
 // Quota and abuse -> Durable total-bytes ceiling"). The whole thing is one
 // serializable transaction so two concurrent writes to the same room
 // cannot both pass a stale cap check and both commit.
-func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) error {
+//
+// Returns the room's assigned per-room sequence for this mutation: a
+// dense counter incremented by exactly one inside the same transaction
+// that commits the value (see SPEC "The per-room sequence: assignment at
+// commit"). The relay stamps it onto the live mirror frame.
+func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) (uint64, error) {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	if err := roomExistsTx(tx, appSlug, id); err != nil {
-		return err
+		return 0, err
 	}
 
 	// Materialize the current namespace for the pure cap check. A room is
 	// capped at 256 keys / 256 KiB, so this is a small in-memory map.
 	kv, err := scanRoomTx(tx, appSlug, id)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if err := kv.CanPut(key, val); err != nil {
 		// Map the domain cap errors onto the storage sentinel the service
 		// layer keys on. A value-too-large is also "room full" from the
 		// storage contract's view (the write is refused, state intact).
-		return ErrRoomDataFull
+		return 0, ErrRoomDataFull
 	}
 
 	// The byte DELTA this write adds (replacing an existing key frees its
@@ -229,10 +266,10 @@ func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string,
 	if appCap > 0 && delta > 0 {
 		total, err := appRoomBytesTx(tx, appSlug.String())
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if total+delta > appCap {
-			return ErrAppRoomsFull
+			return 0, ErrAppRoomsFull
 		}
 	}
 
@@ -242,38 +279,46 @@ func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string,
 		ON CONFLICT (app_slug, room_id, key)
 		DO UPDATE SET val = excluded.val, val_size = excluded.val_size
 	`, appSlug.String(), id.String(), key, val, len(val)); err != nil {
-		return fmt.Errorf("put room value: %w", err)
+		return 0, fmt.Errorf("put room value: %w", err)
 	}
 
-	if err := touchRoomTx(tx, appSlug, id, now); err != nil {
-		return err
+	seq, err := touchRoomTx(tx, appSlug, id, now)
+	if err != nil {
+		return 0, err
 	}
-	return tx.Commit()
+	return seq, tx.Commit()
 }
 
 // DeleteValue removes key from room (appSlug, id) and resets the room's
 // retention clock (a delete is a write). Idempotent: deleting an absent
 // key succeeds (the post-condition "the key is gone" holds either way).
 // Returns ErrNotFound only when the ROOM itself does not exist.
-func (r *RoomKVRepo) DeleteValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) error {
+//
+// Returns the assigned per-room sequence, like PutValue. The idempotent
+// delete of an ABSENT key also commits (it touches the retention clock)
+// and also assigns a seq - a seq bump with no mirror frame would read as
+// a permanent hole to a relay subscriber (see SPEC "The per-room
+// sequence: assignment at commit").
+func (r *RoomKVRepo) DeleteValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) (uint64, error) {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	if err := roomExistsTx(tx, appSlug, id); err != nil {
-		return err
+		return 0, err
 	}
 	if _, err := tx.Exec(`
 		DELETE FROM room_kv WHERE app_slug = ? AND room_id = ? AND key = ?
 	`, appSlug.String(), id.String(), key); err != nil {
-		return fmt.Errorf("delete room value: %w", err)
+		return 0, fmt.Errorf("delete room value: %w", err)
 	}
-	if err := touchRoomTx(tx, appSlug, id, now); err != nil {
-		return err
+	seq, err := touchRoomTx(tx, appSlug, id, now)
+	if err != nil {
+		return 0, err
 	}
-	return tx.Commit()
+	return seq, tx.Commit()
 }
 
 // CountRoomCreates returns how many rooms have been created from subnet
@@ -480,14 +525,24 @@ func appRoomBytesTx(tx *sql.Tx, appSlug string) (int64, error) {
 }
 
 // touchRoomTx resets the room's retention clock to now + the room
-// retention window. Called by every write (PUT / DELETE).
-func touchRoomTx(tx *sql.Tx, appSlug domain.Slug, id domain.RoomID, now time.Time) error {
+// retention window AND assigns the mutation's per-room sequence
+// (seq = prior + 1, in the same UPDATE), returning the assigned seq.
+// Called by every write (PUT / DELETE); the serializable tx is what
+// makes the increment dense and unique under concurrent same-room
+// writers.
+func touchRoomTx(tx *sql.Tx, appSlug domain.Slug, id domain.RoomID, now time.Time) (uint64, error) {
 	expires := now.Add(domain.RoomRetentionWindow)
 	if _, err := tx.Exec(`
-		UPDATE rooms SET updated_at = ?, expires_at = ?
+		UPDATE rooms SET updated_at = ?, expires_at = ?, seq = seq + 1
 		WHERE app_slug = ? AND room_id = ?
 	`, formatTime(now), formatSiteExpiry(expires), appSlug.String(), id.String()); err != nil {
-		return fmt.Errorf("touch room: %w", err)
+		return 0, fmt.Errorf("touch room: %w", err)
 	}
-	return nil
+	var seq uint64
+	if err := tx.QueryRow(`
+		SELECT seq FROM rooms WHERE app_slug = ? AND room_id = ?
+	`, appSlug.String(), id.String()).Scan(&seq); err != nil {
+		return 0, fmt.Errorf("read assigned room seq: %w", err)
+	}
+	return seq, nil
 }

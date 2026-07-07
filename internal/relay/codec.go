@@ -30,18 +30,27 @@ const (
 // SAME key -> value JSON object GET /api/rooms/<uuid> returns, so the same
 // client code that loads state on a cold HTTP start consumes the snapshot
 // unchanged - only the envelope's "type" tells the client this arrived
-// over the relay rather than over HTTP.
+// over the relay rather than over HTTP. Seq is the EXACT per-room
+// sequence the state reflects: the client initializes lastSeq = Seq and
+// discards any durable frame with seq <= lastSeq (the splice contract,
+// see SPEC "The client splice contract").
 type snapshotEnvelope struct {
 	Type  string                     `json:"type"`
+	Seq   uint64                     `json:"seq"`
 	State map[string]json.RawMessage `json:"state"`
 }
 
 // durableEnvelope is the live mirror of a committed durable mutation: a
 // PUT (Value set) or a DELETE (Value omitted, Type == TypeDelete). Key is
-// the room key that changed. The client applies it as last-writer-wins on
-// that key, identical to how it applied the key in the snapshot.
+// the room key that changed. Seq is the mutation's per-room sequence,
+// assigned durably at commit - dense (+1 per committed mutation), so a
+// subscriber orders by it, de-duplicates by it, and DETECTS a lost frame
+// by the hole it leaves. The client applies the frame as
+// last-writer-wins on that key, identical to how it applied the key in
+// the snapshot, after the seq discard/splice rule admits it.
 type durableEnvelope struct {
 	Type  string          `json:"type"`
+	Seq   uint64          `json:"seq"`
 	Key   string          `json:"key"`
 	Value json.RawMessage `json:"value,omitempty"`
 }
@@ -56,23 +65,24 @@ func encodeSnapshot(kv domain.RoomKV) Frame {
 	for k, v := range kv.Values {
 		state[k] = jsonValue(v)
 	}
-	env := snapshotEnvelope{Type: TypeSnapshot, State: state}
+	env := snapshotEnvelope{Type: TypeSnapshot, Seq: kv.Seq, State: state}
 	data, err := json.Marshal(env)
 	if err != nil {
 		// Unreachable: every value is valid raw JSON (jsonValue guarantees
 		// it). Fall back to an empty snapshot rather than panic.
-		data = []byte(`{"type":"snapshot","state":{}}`)
+		data = []byte(`{"type":"snapshot","seq":0,"state":{}}`)
 	}
 	return Frame{Binary: false, Data: data}
 }
 
-// EncodePut builds the live-mirror frame for a durable PUT of (key, val).
-// The HTTP PUT handler passes this frame to Relay.CommitAndMirror alongside
-// the commit closure, so the KV write and this live fan-out run under the
-// room's hub lock as one critical section - the room's connected clients see
-// the change live exactly when it lands in the durable KV.
-func EncodePut(key string, val []byte) Frame {
-	env := durableEnvelope{Type: TypePut, Key: key, Value: jsonValue(val)}
+// EncodePut builds the live-mirror frame for a durable PUT of (key, val)
+// whose commit assigned the per-room sequence seq. The HTTP PUT handler's
+// commit closure (passed to Relay.CommitAndMirror) builds this frame AFTER
+// the durable write returns the assigned seq, so the KV write and the live
+// fan-out run under the room's hub lock as one critical section and the
+// frame carries the exact position the write landed at in the room's order.
+func EncodePut(seq uint64, key string, val []byte) Frame {
+	env := durableEnvelope{Type: TypePut, Seq: seq, Key: key, Value: jsonValue(val)}
 	data, err := json.Marshal(env)
 	if err != nil {
 		return Frame{}
@@ -81,9 +91,9 @@ func EncodePut(key string, val []byte) Frame {
 }
 
 // EncodeDelete builds the live-mirror frame for a committed durable DELETE
-// of key.
-func EncodeDelete(key string) Frame {
-	env := durableEnvelope{Type: TypeDelete, Key: key}
+// of key whose commit assigned the per-room sequence seq.
+func EncodeDelete(seq uint64, key string) Frame {
+	env := durableEnvelope{Type: TypeDelete, Seq: seq, Key: key}
 	data, err := json.Marshal(env)
 	if err != nil {
 		return Frame{}
