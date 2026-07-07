@@ -116,6 +116,71 @@ func TestSweep_ExpiresSitesAndProtectsSharedBlobs(t *testing.T) {
 	}
 }
 
+// TestSweep_SiteIndexNoOpsNotCountedAsDeleted pins the site half of the
+// expiry-pass contract: an expired site-expiry-index entry whose site
+// record is ALREADY GONE is an index cleanup, not a record deletion - the
+// deleted-count must not include it (a no-op site delete counted as a
+// deletion is exactly the "deleted 2 expired record(s) every cycle
+// forever" pathology observed live). The fixture mirrors a real stuck
+// staging entry byte-for-byte.
+func TestSweep_SiteIndexNoOpsNotCountedAsDeleted(t *testing.T) {
+	sites := &orphanSiteSweep{ref: domain.ExpiredSite{
+		Slug:     "ctimu4qh",
+		IndexRef: "expiry_sites/2026-07-03T21:22:23.536246341Z/ctimu4qh",
+	}}
+	sweep := service.NewSweep(noopSweepRepo{}, nil, log.New(io.Discard, "", 0))
+	sweep.Sites = sites
+
+	now := time.Date(2026, 7, 7, 0, 0, 0, 0, time.UTC)
+	deleted, _, err := sweep.Once(now)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("a site-index no-op (record already gone) must not count as a deletion: got %d, want 0", deleted)
+	}
+	// The pass handed the EXACT observed reference to the repo (the entry
+	// cleanup targets the surfaced index entry, not a re-derivation).
+	if len(sites.gotRefs) != 1 || sites.gotRefs[0] != sites.ref {
+		t.Fatalf("DeleteExpiredSite must receive the exact scanned ref; got %+v", sites.gotRefs)
+	}
+
+	// The repo drained the entry: a second pass sees zero expired sites and
+	// deletes nothing.
+	deleted, _, err = sweep.Once(now)
+	if err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if deleted != 0 || len(sites.gotRefs) != 1 {
+		t.Fatalf("second pass must see zero expired sites: deleted=%d calls=%d", deleted, len(sites.gotRefs))
+	}
+}
+
+// orphanSiteSweep is a SweepSites whose expiry scan surfaces one entry
+// referencing a site record that no longer exists - the record delete is
+// an idempotent no-op and the entry cleanup drains the scan, exactly the
+// repo-side contract.
+type orphanSiteSweep struct {
+	ref     domain.ExpiredSite
+	drained bool
+	gotRefs []domain.ExpiredSite
+}
+
+func (s *orphanSiteSweep) ExpiredSites(_ time.Time) ([]domain.ExpiredSite, error) {
+	if s.drained {
+		return nil, nil
+	}
+	return []domain.ExpiredSite{s.ref}, nil
+}
+
+func (s *orphanSiteSweep) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
+	s.gotRefs = append(s.gotRefs, ref)
+	s.drained = true // the exact-entry removal drains the scan
+	return false, nil
+}
+
+func (s *orphanSiteSweep) ReferencedSiteBlobSHAs() ([]string, error) { return nil, nil }
+
 // TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt proves the
 // union keep-alive: two sites share a blob, one expires, the blob lives.
 func TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt(t *testing.T) {

@@ -149,12 +149,12 @@ func TestSiteRepo_ExpiredAndReferenced(t *testing.T) {
 		t.Fatalf("insert dead: %v", err)
 	}
 
-	expired, err := sites.ExpiredSiteSlugs(now)
+	expired, err := sites.ExpiredSites(now)
 	if err != nil {
 		t.Fatalf("expired: %v", err)
 	}
-	if len(expired) != 1 || expired[0] != "deadeeee" {
-		t.Fatalf("expired site slugs: got %v, want [deadeeee]", expired)
+	if len(expired) != 1 || expired[0].Slug != "deadeeee" {
+		t.Fatalf("expired sites: got %v, want [deadeeee]", expired)
 	}
 
 	refs, err := sites.ReferencedSiteBlobSHAs()

@@ -102,6 +102,7 @@ func runSiteConformance(t *testing.T, name string, caps conformCaps, newSites fu
 	t.Run(name+"/Sites/PerOwnerCapConcurrentCeiling", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapConcurrentCeiling(t, caps, r, sr) })
 	t.Run(name+"/Sites/SlugCollisionVsPaste", func(t *testing.T) { r, sr := newSites(t); conformSiteSlugCollisionVsPaste(t, r, sr) })
 	t.Run(name+"/Sites/ExpiryAndSweep", func(t *testing.T) { _, sr := newSites(t); conformSiteExpiryAndSweep(t, caps, sr) })
+	t.Run(name+"/Sites/DeleteExpiredSite", func(t *testing.T) { _, sr := newSites(t); conformDeleteExpiredSite(t, sr) })
 	t.Run(name+"/Sites/ExpirySubSecondOrdering", func(t *testing.T) { _, sr := newSites(t); conformSiteExpirySubSecondOrdering(t, sr) })
 	t.Run(name+"/Sites/ReferencedBlobSHAs", func(t *testing.T) { _, sr := newSites(t); conformSiteReferencedBlobSHAs(t, sr) })
 	t.Run(name+"/Sites/DedupedSizeCharged", func(t *testing.T) { _, sr := newSites(t); conformSiteDedupedSizeCharged(t, sr) })
@@ -377,13 +378,23 @@ func conformSiteReplaceRestartsExpiry(t *testing.T, sr conformanceSiteRepo) {
 	// At +2h (past the ORIGINAL +1h expiry, before the new one) the site must
 	// NOT be swept: the old expiry key was re-keyed, not left dangling.
 	cutoff := fixedNow.Add(2 * time.Hour)
-	slugs, err := sr.ExpiredSiteSlugs(cutoff)
+	refs, err := sr.ExpiredSites(cutoff)
 	if err != nil {
-		t.Fatalf("expired site slugs: %v", err)
+		t.Fatalf("expired sites: %v", err)
 	}
-	if sliceHas(slugs, slug) {
-		t.Fatalf("re-deployed site must NOT be expired at %v (expiry restarted): got %v", cutoff, slugs)
+	if siteRefsHaveSlug(refs, slug) {
+		t.Fatalf("re-deployed site must NOT be expired at %v (expiry restarted): got %v", cutoff, refs)
 	}
+}
+
+// siteRefsHaveSlug reports whether any expired-site reference names slug.
+func siteRefsHaveSlug(refs []domain.ExpiredSite, slug string) bool {
+	for _, ref := range refs {
+		if ref.Slug.String() == slug {
+			return true
+		}
+	}
+	return false
 }
 
 // conformSiteDeployAndReadBack deploys a multi-file site and reads every
@@ -628,24 +639,24 @@ func conformSiteExpiryAndSweep(t *testing.T, caps conformCaps, sr conformanceSit
 
 	// At a time past `soon` but before `far`, only `soon` is expired.
 	at := fixedNow.Add(2 * time.Hour)
-	slugs, err := sr.ExpiredSiteSlugs(at)
+	refs, err := sr.ExpiredSites(at)
 	if err != nil {
-		t.Fatalf("expired site slugs: %v", err)
+		t.Fatalf("expired sites: %v", err)
 	}
-	if !sliceHas(slugs, "se123456") {
-		t.Fatalf("se123456 should be expired at %v, got %v", at, slugs)
+	if !siteRefsHaveSlug(refs, "se123456") {
+		t.Fatalf("se123456 should be expired at %v, got %v", at, refs)
 	}
-	if sliceHas(slugs, "se223456") {
-		t.Fatalf("se223456 should NOT be expired at %v, got %v", at, slugs)
+	if siteRefsHaveSlug(refs, "se223456") {
+		t.Fatalf("se223456 should NOT be expired at %v, got %v", at, refs)
 	}
 	// Inclusive boundary: expires_at == now counts as expired.
 	atBoundary := fixedNow.Add(time.Hour)
-	slugs, err = sr.ExpiredSiteSlugs(atBoundary)
+	refs, err = sr.ExpiredSites(atBoundary)
 	if err != nil {
-		t.Fatalf("expired site slugs at boundary: %v", err)
+		t.Fatalf("expired sites at boundary: %v", err)
 	}
-	if !sliceHas(slugs, "se123456") {
-		t.Fatalf("expires_at == now should be inclusive-expired, got %v", slugs)
+	if !siteRefsHaveSlug(refs, "se123456") {
+		t.Fatalf("expires_at == now should be inclusive-expired, got %v", refs)
 	}
 
 	// Read-time expiry exclusion from the owner sum (on backends that free
@@ -685,6 +696,68 @@ func conformSiteExpiryAndSweep(t *testing.T, caps conformCaps, sr conformanceSit
 	}
 }
 
+// conformDeleteExpiredSite pins the site half of the expiry-pass delete
+// contract (docs/SPEC.md "Static-site storage", sweep path), mirroring the
+// paste conformDeleteExpired: processing a reference the scan surfaced
+// deletes the site record (reporting true), leaves not-yet-expired sites
+// untouched, and DRAINS the scan - a re-scan after the pass sees zero
+// references, and a re-processed reference is an idempotent no-op
+// reporting false (no record was deleted by it).
+func conformDeleteExpiredSite(t *testing.T, sr conformanceSiteRepo) {
+	dead := siteOf("ds123456", "key:ds", 100)
+	dead.ExpiresAt = fixedNow.Add(time.Hour)
+	insertSite(t, sr, dead)
+
+	alive := siteOf("ds223456", "key:ds", 100)
+	alive.ExpiresAt = fixedNow.Add(48 * time.Hour)
+	insertSite(t, sr, alive)
+
+	at := fixedNow.Add(2 * time.Hour)
+	refs, err := sr.ExpiredSites(at)
+	if err != nil {
+		t.Fatalf("expired sites: %v", err)
+	}
+	if len(refs) != 1 || refs[0].Slug != "ds123456" {
+		t.Fatalf("only ds123456 should be expired at %v, got %v", at, refs)
+	}
+
+	// Processing the reference deletes the record and reports true.
+	deleted, err := sr.DeleteExpiredSite(refs[0])
+	if err != nil {
+		t.Fatalf("delete expired site: %v", err)
+	}
+	if !deleted {
+		t.Fatalf("DeleteExpiredSite must report true for a live site record")
+	}
+	if _, err := sr.Get("ds123456"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expired site should be gone after DeleteExpiredSite: %v", err)
+	}
+
+	// One pass drains what it scanned: a re-scan sees zero references.
+	again, err := sr.ExpiredSites(at)
+	if err != nil {
+		t.Fatalf("expired sites (re-scan): %v", err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("re-scan after the pass must see zero expired site references, got %v", again)
+	}
+
+	// Re-processing the same reference is an idempotent no-op reporting
+	// false (the sweep's deleted-count only reflects real record deletions).
+	deleted, err = sr.DeleteExpiredSite(refs[0])
+	if err != nil {
+		t.Fatalf("re-processed site reference must no-op, got: %v", err)
+	}
+	if deleted {
+		t.Fatalf("DeleteExpiredSite must report false when the site record was already gone")
+	}
+
+	// The not-yet-expired site is untouched throughout.
+	if _, err := sr.Get("ds223456"); err != nil {
+		t.Fatalf("active site must survive the expiry pass: %v", err)
+	}
+}
+
 // conformSiteExpirySubSecondOrdering pins that the site expiry index orders
 // by TIME within a shared whole second: the expiry-index key's byte order
 // must equal time order even when ExpiresAt carries a sub-second fraction.
@@ -715,40 +788,40 @@ func conformSiteExpirySubSecondOrdering(t *testing.T, sr conformanceSiteRepo) {
 	// variable-width format the .5s key would sort before this cutoff and be
 	// wrongly reported expired.
 	atStart := base // 12:00:00.0
-	slugs, err := sr.ExpiredSiteSlugs(atStart)
+	refs, err := sr.ExpiredSites(atStart)
 	if err != nil {
-		t.Fatalf("expired site slugs at .0s: %v", err)
+		t.Fatalf("expired sites at .0s: %v", err)
 	}
-	if sliceHas(slugs, "essLate1") {
-		t.Fatalf("site expiring at .5s must NOT be expired at a .0s cutoff (sub-second ordering bug), got %v", slugs)
+	if siteRefsHaveSlug(refs, "essLate1") {
+		t.Fatalf("site expiring at .5s must NOT be expired at a .0s cutoff (sub-second ordering bug), got %v", refs)
 	}
-	if !sliceHas(slugs, "essEarly") {
-		t.Fatalf("site expiring at .0s should be inclusive-expired at a .0s cutoff, got %v", slugs)
+	if !siteRefsHaveSlug(refs, "essEarly") {
+		t.Fatalf("site expiring at .0s should be inclusive-expired at a .0s cutoff, got %v", refs)
 	}
 
 	// Cutoff at .5s: now BOTH are expired (the .5s site is at the inclusive
 	// boundary, the .0s site is past it).
 	atHalf := base.Add(500 * time.Millisecond) // 12:00:00.5
-	slugs, err = sr.ExpiredSiteSlugs(atHalf)
+	refs, err = sr.ExpiredSites(atHalf)
 	if err != nil {
-		t.Fatalf("expired site slugs at .5s: %v", err)
+		t.Fatalf("expired sites at .5s: %v", err)
 	}
-	if !sliceHas(slugs, "essLate1") {
-		t.Fatalf("site expiring at .5s should be inclusive-expired at a .5s cutoff, got %v", slugs)
+	if !siteRefsHaveSlug(refs, "essLate1") {
+		t.Fatalf("site expiring at .5s should be inclusive-expired at a .5s cutoff, got %v", refs)
 	}
-	if !sliceHas(slugs, "essEarly") {
-		t.Fatalf("site expiring at .0s should still be expired at a .5s cutoff, got %v", slugs)
+	if !siteRefsHaveSlug(refs, "essEarly") {
+		t.Fatalf("site expiring at .0s should still be expired at a .5s cutoff, got %v", refs)
 	}
 
 	// And a cutoff just BELOW the .5s site (e.g. .4s) leaves it unexpired,
 	// proving the boundary is real sub-second time, not whole-second rounding.
 	atBelow := base.Add(400 * time.Millisecond) // 12:00:00.4
-	slugs, err = sr.ExpiredSiteSlugs(atBelow)
+	refs, err = sr.ExpiredSites(atBelow)
 	if err != nil {
-		t.Fatalf("expired site slugs at .4s: %v", err)
+		t.Fatalf("expired sites at .4s: %v", err)
 	}
-	if sliceHas(slugs, "essLate1") {
-		t.Fatalf("site expiring at .5s must NOT be expired at a .4s cutoff, got %v", slugs)
+	if siteRefsHaveSlug(refs, "essLate1") {
+		t.Fatalf("site expiring at .5s must NOT be expired at a .4s cutoff, got %v", refs)
 	}
 }
 

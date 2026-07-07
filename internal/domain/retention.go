@@ -33,6 +33,17 @@ type ExpiredPaste struct {
 	IndexRef string
 }
 
+// ExpiredSite is the static-site twin of ExpiredPaste: one expired site
+// surfaced by the sweep's site-expiry scan, as the slug plus an opaque
+// reference to the exact index entry that surfaced it (empty on backends
+// without a standalone site-expiry index). Round-tripped into
+// DeleteExpiredSite for the same reason: the entry must be removable even
+// when the site record is already gone.
+type ExpiredSite struct {
+	Slug     Slug
+	IndexRef string
+}
+
 // Retention is the installation's content-TTL policy, set once at the
 // composition root from config and injected into the services / repos that
 // stamp ExpiresAt. A positive Window expires content that long after its last
