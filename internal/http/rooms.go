@@ -22,9 +22,14 @@ import (
 type RoomService interface {
 	Create(appSlug domain.Slug, subnet string) (domain.Room, error)
 	Get(appSlug domain.Slug, id domain.RoomID, key string) ([]byte, error)
+	// Scan returns the namespace stamped with the exact per-room sequence
+	// its state reflects (RoomKV.Seq) - the relay's late-join snapshot fence.
 	Scan(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error)
-	Put(appSlug domain.Slug, id domain.RoomID, key string, val []byte) error
-	Delete(appSlug domain.Slug, id domain.RoomID, key string) error
+	// Put / Delete return the mutation's assigned per-room sequence, which
+	// the handlers stamp onto the live mirror frame (see SPEC.md "The wire
+	// format: seq on every durable frame").
+	Put(appSlug domain.Slug, id domain.RoomID, key string, val []byte) (uint64, error)
+	Delete(appSlug domain.Slug, id domain.RoomID, key string) (uint64, error)
 }
 
 // roomAPIPrefix is the reserved path the rooms API lives under, on the
@@ -240,18 +245,28 @@ func (s *Server) putRoomValue(w http.ResponseWriter, r *http.Request, appSlug do
 		http.Error(w, "read body\n", http.StatusBadRequest)
 		return
 	}
-	// Commit the durable write and mirror it to the room's live relay hub as
-	// ONE atomic step under the room's hub lock, so a join racing this PUT
-	// cannot observe the key in BOTH its snapshot and a live frame (the
-	// no-dup guarantee - see SPEC.md "Persistence and late-join"). The relay
-	// never PERSISTS a frame; the mirror is the live fan-out of a change that
-	// commits through the one cap-checked PutValue path. With no relay (relay
+	// Commit the durable write, then mirror it to the room's live relay hub
+	// and the peer pods. The mirror frame is built INSIDE the commit
+	// callback because it carries the per-room sequence the durable write
+	// assigns (SPEC.md "The wire format: seq on every durable frame"); that
+	// sequence - not any lock - is what keeps a join racing this PUT from
+	// double-applying or missing it (the client discards frames with
+	// seq <= its snapshot's S; see SPEC.md "Persistence and late-join").
+	// The commit runs with NO relay lock held, so a slow storage write
+	// never stalls the room's live fan-out. The relay never PERSISTS a
+	// frame; the mirror is the live fan-out of a change that commits
+	// through the one cap-checked PutValue path. With no relay (relay
 	// disabled on this backend), the commit runs on its own.
-	commit := func() error { return s.Rooms.Put(appSlug, id, key, body) }
 	if s.Relay != nil {
-		err = s.Relay.CommitAndMirror(relay.RoomKey{App: appSlug, ID: id}, commit, relay.EncodePut(key, body))
+		err = s.Relay.CommitAndMirror(relay.RoomKey{App: appSlug, ID: id}, func() (relay.Frame, error) {
+			seq, perr := s.Rooms.Put(appSlug, id, key, body)
+			if perr != nil {
+				return relay.Frame{}, perr
+			}
+			return relay.EncodePut(seq, key, body), nil
+		})
 	} else {
-		err = commit()
+		_, err = s.Rooms.Put(appSlug, id, key, body)
 	}
 	if err != nil {
 		s.writeRoomError(w, r, err)
@@ -265,16 +280,22 @@ func (s *Server) deleteRoomValue(w http.ResponseWriter, r *http.Request, appSlug
 		http.Error(w, "invalid key\n", http.StatusBadRequest)
 		return
 	}
-	// Commit the durable delete and mirror it to the room's live relay hub
-	// atomically under the room's hub lock (see putRoomValue for why the
-	// commit + mirror are one critical section: the no-dup guarantee). A nil
+	// Commit the durable delete, then mirror it to the room's live relay
+	// hub and the peer pods (see putRoomValue for why the frame is built
+	// inside the callback: it carries the assigned seq, which is what makes
+	// a racing join correct - no lock is held across the commit). A nil
 	// relay runs the commit on its own.
-	commit := func() error { return s.Rooms.Delete(appSlug, id, key) }
 	var err error
 	if s.Relay != nil {
-		err = s.Relay.CommitAndMirror(relay.RoomKey{App: appSlug, ID: id}, commit, relay.EncodeDelete(key))
+		err = s.Relay.CommitAndMirror(relay.RoomKey{App: appSlug, ID: id}, func() (relay.Frame, error) {
+			seq, derr := s.Rooms.Delete(appSlug, id, key)
+			if derr != nil {
+				return relay.Frame{}, derr
+			}
+			return relay.EncodeDelete(seq, key), nil
+		})
 	} else {
-		err = commit()
+		_, err = s.Rooms.Delete(appSlug, id, key)
 	}
 	if err != nil {
 		s.writeRoomError(w, r, err)

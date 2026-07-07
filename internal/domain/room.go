@@ -207,6 +207,16 @@ func hexNibble(c byte) (byte, bool) {
 // bytes + key count + per-key length), enforced by CanPut.
 type RoomKV struct {
 	Values map[string][]byte
+
+	// Seq is the room's per-room sequence at the instant this view was
+	// materialized: the dense uint64 counter the storage backend assigns at
+	// commit, +1 per committed mutation (PUT or DELETE, including the
+	// idempotent delete of an absent key). A snapshot stamped with Seq == S
+	// reflects EXACTLY the mutations with seq <= S - no more, no fewer -
+	// which is what lets a relay late-joiner splice the live stream onto
+	// the snapshot (discard frames with seq <= S, apply seq > S in order).
+	// Zero for a fresh room and for the zero value.
+	Seq uint64
 }
 
 // NewRoomKV returns an empty namespace ready to fill.

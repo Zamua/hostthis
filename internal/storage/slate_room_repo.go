@@ -85,10 +85,10 @@ func (s *SlateRoomRepo) GetValue(appSlug domain.Slug, id domain.RoomID, key stri
 func (s *SlateRoomRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error) {
 	return s.repo.ScanRoom(appSlug, id)
 }
-func (s *SlateRoomRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) error {
+func (s *SlateRoomRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) (uint64, error) {
 	return s.repo.PutRoomValue(appSlug, id, key, val, appCap, now)
 }
-func (s *SlateRoomRepo) DeleteValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) error {
+func (s *SlateRoomRepo) DeleteValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) (uint64, error) {
 	return s.repo.DeleteRoomValue(appSlug, id, key, now)
 }
 func (s *SlateRoomRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now time.Time, window time.Duration) (perSubnet, perApp int, err error) {
@@ -126,6 +126,13 @@ type roomRow struct {
 	ExpiresAt time.Time `json:"expires_at"`
 	ByteTotal int64     `json:"byte_total,omitempty"` // shale-only running per-room byte total
 	KeyCount  int       `json:"key_count,omitempty"`  // shale-only running per-room key count
+	// Seq is the per-room mutation sequence (see SPEC "The per-room
+	// sequence: assignment at commit"): dense, +1 per committed PUT/DELETE,
+	// bumped by the touch that every mutation already performs on this
+	// record. Maintained by BOTH the slatedb and shale backends (the record
+	// is in every mutation's write path on each). omitempty keeps a
+	// fresh/legacy room's JSON shape unchanged (a missing field reads as 0).
+	Seq uint64 `json:"seq,omitempty"`
 }
 
 func roomRowFromDomain(r domain.Room) roomRow {
@@ -276,13 +283,40 @@ func (r *SlateRepo) GetRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 }
 
 // ScanRoom returns the whole namespace for (appSlug, id) as a domain.RoomKV
-// (every key -> value), so an app loads full room state in one request. An
-// existing room with no values returns an empty (non-nil) RoomKV. The scan
-// is a ScanPrefix over roomkv/<app>/<uuid>/ - bounded to exactly one room's
-// subtree (the cross-room isolation guarantee). The caller verifies the
-// room exists first (the service layer's GetRoom makes a nonexistent room a
-// 404, not an empty 200).
+// (every key -> value), so an app loads full room state in one request,
+// stamped with the EXACT per-room sequence the snapshot reflects
+// (RoomKV.Seq). Exactness rides the per-ROOM quota stripe: every same-room
+// mutation holds it across its record touch + value write, so holding it
+// here across the record read (the seq) + the namespace scan means no
+// commit can interleave between them (valid because SlateDB is
+// single-writer: only in-process goroutines can race). An existing room
+// with no values returns an empty (non-nil) RoomKV; a nonexistent room
+// scans empty at seq 0 (the service layer's GetRoom makes it a 404, not an
+// empty 200). The scan is a ScanPrefix over roomkv/<app>/<uuid>/ - bounded
+// to exactly one room's subtree (the cross-room isolation guarantee).
 func (r *SlateRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error) {
+	defer r.lockQuota(appSlug.String() + "/" + id.String())()
+
+	var row roomRow
+	seq := uint64(0)
+	if err := r.getJSON(keyRoom(appSlug, id), &row); err == nil {
+		seq = row.Seq
+	} else if !errors.Is(err, ErrNotFound) {
+		return domain.RoomKV{}, err
+	}
+	kv, err := r.scanRoomValues(appSlug, id)
+	if err != nil {
+		return domain.RoomKV{}, err
+	}
+	kv.Seq = seq
+	return kv, nil
+}
+
+// scanRoomValues materializes the room's namespace WITHOUT the per-room
+// stripe and WITHOUT the seq stamp. It is the internal scan PutRoomValue's
+// cap math uses while ALREADY holding the stripe (the public ScanRoom takes
+// the stripe itself, so calling it there would self-deadlock).
+func (r *SlateRepo) scanRoomValues(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error) {
 	items, err := r.scanPrefix(prefixRoomValues(appSlug, id))
 	if err != nil {
 		return domain.RoomKV{}, err
@@ -312,9 +346,13 @@ func (r *SlateRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.Room
 // no service-wide byte cap on this path (see SPEC "Rooms -> Quota and abuse
 // -> Durable total-bytes ceiling").
 //
+// Returns the assigned per-room sequence (dense, +1 per committed
+// mutation, bumped by the touch under the same stripe + tx that commits
+// the value - see SPEC "The per-room sequence: assignment at commit").
+//
 // Returns ErrNotFound if the room is gone, ErrRoomDataFull (413) on the
 // per-room cap, ErrAppRoomsFull (507) on the per-app aggregate.
-func (r *SlateRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) error {
+func (r *SlateRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) (uint64, error) {
 	// The per-room stripe serializes same-room writers (so the materialized
 	// namespace the CanPut math runs against is not stale by commit time).
 	// The per-app pre-check happens under the same stripe.
@@ -324,15 +362,16 @@ func (r *SlateRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 	// capped at 256 keys / 256 KiB, so this is a small in-memory map). Done
 	// outside the tx because SlateDB has no SUM operator; the per-room stripe
 	// already serializes same-room writers and single-writer fencing means no
-	// other process can interleave.
-	kv, err := r.ScanRoom(appSlug, id)
+	// other process can interleave. (scanRoomValues, not ScanRoom: the public
+	// scan takes this same stripe.)
+	kv, err := r.scanRoomValues(appSlug, id)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if err := kv.CanPut(key, val); err != nil {
 		// A value-too-large is also "room full" from the storage contract's
 		// view (the write is refused, prior state intact).
-		return ErrRoomDataFull
+		return 0, ErrRoomDataFull
 	}
 
 	// Byte DELTA this write adds (replacing a key frees its old bytes).
@@ -346,16 +385,16 @@ func (r *SlateRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 	if appCap > 0 && delta > 0 {
 		total, err := r.sumAppRoomBytes(appSlug)
 		if err != nil {
-			return fmt.Errorf("app room bytes: %w", err)
+			return 0, fmt.Errorf("app room bytes: %w", err)
 		}
 		if total+delta > appCap {
-			return ErrAppRoomsFull
+			return 0, ErrAppRoomsFull
 		}
 	}
 
 	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 
 	// Room-exists re-check INSIDE the write boundary so a concurrent expiry
@@ -363,7 +402,7 @@ func (r *SlateRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 	var row roomRow
 	if err := txGetJSON(tx, keyRoom(appSlug, id), &row); err != nil {
 		_ = tx.Rollback()
-		return err // ErrNotFound if the room is gone
+		return 0, err // ErrNotFound if the room is gone
 	}
 
 	// Upsert the value (verbatim). slatedb Put accepts arbitrary bytes
@@ -371,58 +410,64 @@ func (r *SlateRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 	// round-trip - including an empty value if the app PUT one.
 	if err := tx.Put(keyRoomValue(appSlug, id, key), val); err != nil {
 		_ = tx.Rollback()
-		return fmt.Errorf("put room value: %w", err)
+		return 0, fmt.Errorf("put room value: %w", err)
 	}
 
-	// Touch the room: reset UpdatedAt + ExpiresAt and move the expiry index
-	// entry (remove-and-re-add, the same shape the paste expiry index uses).
+	// Touch the room: reset UpdatedAt + ExpiresAt, assign the mutation's
+	// seq (row.Seq+1), and move the expiry index entry (remove-and-re-add,
+	// the same shape the paste expiry index uses).
 	if err := r.txTouchRoom(tx, appSlug, id, &row, now); err != nil {
 		_ = tx.Rollback()
-		return err
+		return 0, err
 	}
 	if _, err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit put room value %s/%s: %w", appSlug, id, err)
+		return 0, fmt.Errorf("commit put room value %s/%s: %w", appSlug, id, err)
 	}
-	return nil
+	return row.Seq, nil
 }
 
 // DeleteRoomValue removes key from room (appSlug, id) and resets the
 // retention clock (a delete is a write). Idempotent: deleting an absent key
-// succeeds (the post-condition "the key is gone" holds either way). Returns
-// ErrNotFound only when the ROOM itself does not exist.
-func (r *SlateRepo) DeleteRoomValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) error {
+// succeeds (the post-condition "the key is gone" holds either way) and
+// still assigns a seq (it commits a touch; a seq bump rides every commit).
+// Returns the assigned per-room sequence. Returns ErrNotFound only when
+// the ROOM itself does not exist.
+func (r *SlateRepo) DeleteRoomValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) (uint64, error) {
 	defer r.lockQuota(appSlug.String() + "/" + id.String())()
 	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 	var row roomRow
 	if err := txGetJSON(tx, keyRoom(appSlug, id), &row); err != nil {
 		_ = tx.Rollback()
-		return err // ErrNotFound if the room is gone
+		return 0, err // ErrNotFound if the room is gone
 	}
 	if err := tx.Delete(keyRoomValue(appSlug, id, key)); err != nil {
 		_ = tx.Rollback()
-		return fmt.Errorf("delete room value: %w", err)
+		return 0, fmt.Errorf("delete room value: %w", err)
 	}
 	if err := r.txTouchRoom(tx, appSlug, id, &row, now); err != nil {
 		_ = tx.Rollback()
-		return err
+		return 0, err
 	}
 	if _, err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit delete room value %s/%s: %w", appSlug, id, err)
+		return 0, fmt.Errorf("commit delete room value %s/%s: %w", appSlug, id, err)
 	}
-	return nil
+	return row.Seq, nil
 }
 
 // txTouchRoom resets the room's retention clock to now + the room retention
-// window inside the caller's tx, moving the roomexpiry index entry from the
-// old ExpiresAt to the new one (delete-then-add, like the paste append). It
-// mutates *row in place so the caller sees the new clock if it needs it.
+// window inside the caller's tx, ASSIGNS the mutation's per-room sequence
+// (row.Seq = prior + 1; the per-room stripe every caller holds is what makes
+// the increment dense and unique), and moves the roomexpiry index entry from
+// the old ExpiresAt to the new one (delete-then-add, like the paste append).
+// It mutates *row in place so the caller sees the new clock + assigned seq.
 func (r *SlateRepo) txTouchRoom(tx *slatedb.DbTransaction, appSlug domain.Slug, id domain.RoomID, row *roomRow, now time.Time) error {
 	oldExpiry := row.ExpiresAt
 	row.UpdatedAt = now
 	row.ExpiresAt = now.Add(domain.RoomRetentionWindow)
+	row.Seq++
 	if err := txPutJSON(tx, keyRoom(appSlug, id), *row); err != nil {
 		return err
 	}

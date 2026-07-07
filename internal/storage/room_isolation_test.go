@@ -23,7 +23,7 @@ func TestRoom_CollaborativeOnRefresh(t *testing.T) {
 	room := mkRoom(repo, t, "app12345", now)
 
 	// Participant A joins and writes a value (its availability, say).
-	if err := repo.PutValue(room.AppSlug, room.ID, "slot/mon", []byte("alice"), 0, now); err != nil {
+	if _, err := repo.PutValue(room.AppSlug, room.ID, "slot/mon", []byte("alice"), 0, now); err != nil {
 		t.Fatalf("A put: %v", err)
 	}
 
@@ -39,7 +39,7 @@ func TestRoom_CollaborativeOnRefresh(t *testing.T) {
 	}
 
 	// B writes its own value into the same shared namespace.
-	if err := repo.PutValue(room.AppSlug, room.ID, "slot/tue", []byte("bob"), 0, now); err != nil {
+	if _, err := repo.PutValue(room.AppSlug, room.ID, "slot/tue", []byte("bob"), 0, now); err != nil {
 		t.Fatalf("B put: %v", err)
 	}
 
@@ -69,7 +69,7 @@ func TestRoom_CollaborativeOnRefresh(t *testing.T) {
 	// Either participant can overwrite any key - the names are cosmetic
 	// attribution, not access control (per the spec's in-room-identity
 	// note). B overwrites A's slot; A sees the new value on refresh.
-	if err := repo.PutValue(room.AppSlug, room.ID, "slot/mon", []byte("carol"), 0, now); err != nil {
+	if _, err := repo.PutValue(room.AppSlug, room.ID, "slot/mon", []byte("carol"), 0, now); err != nil {
 		t.Fatalf("B overwrite A's key: %v", err)
 	}
 	kvA, _ = repo.ScanRoom(room.AppSlug, room.ID)
@@ -111,19 +111,19 @@ func TestRoom_IsolationDependsOnRoomIDNamespacing(t *testing.T) {
 	b := mkRoom(repo, t, "app12345", now)
 
 	// Shared key name, different values (catches a GetValue predicate drop).
-	if err := repo.PutValue(a.AppSlug, a.ID, "secret", []byte("from-A"), 0, now); err != nil {
+	if _, err := repo.PutValue(a.AppSlug, a.ID, "secret", []byte("from-A"), 0, now); err != nil {
 		t.Fatalf("put A secret: %v", err)
 	}
-	if err := repo.PutValue(b.AppSlug, b.ID, "secret", []byte("from-B"), 0, now); err != nil {
+	if _, err := repo.PutValue(b.AppSlug, b.ID, "secret", []byte("from-B"), 0, now); err != nil {
 		t.Fatalf("put B secret: %v", err)
 	}
 	// Per-room unique keys (catches a ScanRoom predicate drop: a leak shows
 	// up as an EXTRA key in the other room's scan, not just an overwrite of
 	// a shared key name).
-	if err := repo.PutValue(a.AppSlug, a.ID, "a-only", []byte("A-private"), 0, now); err != nil {
+	if _, err := repo.PutValue(a.AppSlug, a.ID, "a-only", []byte("A-private"), 0, now); err != nil {
 		t.Fatalf("put A a-only: %v", err)
 	}
-	if err := repo.PutValue(b.AppSlug, b.ID, "b-only", []byte("B-private"), 0, now); err != nil {
+	if _, err := repo.PutValue(b.AppSlug, b.ID, "b-only", []byte("B-private"), 0, now); err != nil {
 		t.Fatalf("put B b-only: %v", err)
 	}
 

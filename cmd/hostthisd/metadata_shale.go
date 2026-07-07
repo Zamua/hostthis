@@ -51,8 +51,11 @@ import (
 	"github.com/Zamua/shale/backends/slate/blobstore"
 	"github.com/Zamua/shale/pkg/blob"
 	"github.com/Zamua/shale/pkg/storageunit"
+	"google.golang.org/grpc"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/relay"
+	"github.com/Zamua/hostthis/internal/relay/relaygrpc"
 	"github.com/Zamua/hostthis/internal/shaleblob"
 	"github.com/Zamua/hostthis/internal/storage"
 	slatedb "slatedb.io/slatedb-go/uniffi"
@@ -86,7 +89,13 @@ func slatedbLogLevel(s string) (slatedb.LogLevel, bool) {
 // calls it and then layers the reconcile loop / blob unit / debug server on
 // top, keeping the bare open path separate from the daemon wiring. The caller
 // owns repo.Close().
-func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger) (*storage.ShaleRepo, error) {
+//
+// registerGRPC (optional, nil for callers that want the bare repo) is the
+// opaque hook threaded into ShaleConfig.RegisterGRPC: in multi-node mode
+// NewShaleRepo calls it with the cluster gRPC server before serving, so
+// composition-root services (the relay's peer fan-out) ride the same
+// listener + advertised address shale forwarding uses.
+func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger, registerGRPC func(*grpc.Server)) (*storage.ShaleRepo, error) {
 	// Optional slatedb tracing (to stderr) for diagnosing the SST-read
 	// pattern. Off unless HOSTTHIS_SLATEDB_LOG_LEVEL is set.
 	if lvl, on := slatedbLogLevel(os.Getenv("HOSTTHIS_SLATEDB_LOG_LEVEL")); on {
@@ -244,6 +253,7 @@ func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger) (*stor
 		Logger:            logger,
 		BlobStore:         blobStore,
 		ConditionalStore:  condStore,
+		RegisterGRPC:      registerGRPC,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open shale: %w", err)
@@ -265,7 +275,24 @@ func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger) (*stor
 // Reconcile loop. The audit subcommand deliberately does NOT go through here -
 // it wants the bare repo with no background loops.
 func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metadataBundle, error) {
-	repo, err := openShaleRepoFromEnv(retention, logger)
+	// Multi-pod relay peer transport (SPEC "Multi-pod relay: the peer
+	// transport"): the RECEIVER must exist before the repo opens - its
+	// Register method is the opaque func(*grpc.Server) hook NewShaleRepo
+	// calls when it stands up the cluster gRPC server in multi-node mode -
+	// while its local-delivery target is late-bound by main once the relay
+	// exists (frames arriving before that bind are dropped; no client can
+	// be connected before the HTTP server is up). Single-node mode never
+	// invokes the hook and wires no transport: the relay keeps its nil
+	// publisher, the zero-peer degenerate case.
+	// The receiver's cap must admit the LARGEST legal frame on this
+	// channel: a durable mirror carrying a committed room value verbatim
+	// (domain.MaxRoomValueBytes, set by the HTTP PUT path - several times
+	// the client-socket frame cap) with worst-case JSON-string inflation.
+	// Sizing this to the client-socket cap silently severs cross-pod
+	// mirrors for every legal value above it (SPEC "Trust boundary").
+	relayRecv := relaygrpc.NewReceiver(relay.MaxDurableFrameBytes(domain.MaxRoomValueBytes))
+
+	repo, err := openShaleRepoFromEnv(retention, logger, relayRecv.Register)
 	if err != nil {
 		return nil, err
 	}
@@ -283,6 +310,23 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 		Rooms: storage.NewShaleRoomRepo(repo),
 		Close: repo.Close,
 	}
+	// Multi-node: supply the relay peer transport. The publisher fans every
+	// frame out to the CURRENT peer set, discovered per publish from the
+	// ring membership the cluster gossips (self excluded) - the same
+	// advertised gRPC addresses shale forwarding dials, adapted onto the
+	// relay's narrow Peers port so the relay stays storage-agnostic. main
+	// wires Publisher + Bind into the relay and Closes the publisher at
+	// shutdown.
+	if repo.GRPCAddr() != "" {
+		pub := relaygrpc.NewPublisher(shalePeers{repo: repo}, relaygrpc.PublisherConfig{Logf: logger.Printf})
+		bundle.RelayPeer = &relayPeerTransport{
+			Publisher: pub,
+			Bind:      func(deliver func(relay.RoomKey, relay.Frame)) { relayRecv.Bind(deliver) },
+			Close:     pub.Close,
+		}
+		logger.Printf("relay: multi-pod peer transport ready (peer service on the cluster gRPC server at %s; discovery via ring membership)", repo.GRPCAddr())
+	}
+
 	// Transactional shale-blob seam: when the repo opened a blob plane, supply
 	// the shaleblob.Unit (pointer co-commits with metadata) + schedule
 	// SweepOrphans for orphan-bytes reclamation. main picks these over the
@@ -358,6 +402,14 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 
 	return bundle, nil
 }
+
+// shalePeers adapts the ShaleRepo's gossiped ring-membership view onto
+// the relay's Peers port (the current peer gRPC addresses, self
+// excluded). Defined here at the composition root so storage stays
+// relay-agnostic and the relay stays storage-agnostic.
+type shalePeers struct{ repo *storage.ShaleRepo }
+
+func (p shalePeers) Addresses() []string { return p.repo.PeerGRPCAddrs() }
 
 // stripScheme removes a leading http:// or https:// from a metadata S3 endpoint
 // so the blobstore.Config gets the bare host:port it wants (the metadata config

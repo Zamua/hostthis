@@ -102,10 +102,10 @@ func (s *ShaleRoomRepo) GetValue(appSlug domain.Slug, id domain.RoomID, key stri
 func (s *ShaleRoomRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error) {
 	return s.repo.ScanRoom(appSlug, id)
 }
-func (s *ShaleRoomRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) error {
+func (s *ShaleRoomRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) (uint64, error) {
 	return s.repo.PutRoomValue(appSlug, id, key, val, appCap, now)
 }
-func (s *ShaleRoomRepo) DeleteValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) error {
+func (s *ShaleRoomRepo) DeleteValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) (uint64, error) {
 	return s.repo.DeleteRoomValue(appSlug, id, key, now)
 }
 func (s *ShaleRoomRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now time.Time, window time.Duration) (perSubnet, perApp int, err error) {
@@ -287,25 +287,81 @@ func (r *ShaleRepo) GetRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 	return shaleDecodeRoomValue(raw), nil
 }
 
-// ScanRoom returns the whole namespace for (appSlug, id) as a domain.RoomKV.
+// ScanRoom returns the whole namespace for (appSlug, id) as a domain.RoomKV,
+// stamped with the EXACT per-room sequence the snapshot reflects
+// (RoomKV.Seq). Shale cannot put a prefix scan inside a CAS (no phantom
+// protection), so exactness runs a SEQ FENCE (see SPEC "The per-room
+// sequence: assignment at commit"): read the room record's seq, scan the
+// namespace, re-read the seq - equal means no mutation committed between
+// the two reads (every mutation bumps the record's seq in its CAS), so the
+// scan is exactly the state at S; changed means a commit interleaved and
+// the scan retries. Bounded retries; on exhaustion the scan FAILS rather
+// than returning a state whose S is a lie (the relay join then fails and
+// the client reconnects - correctness is never traded for a stale fence).
+//
+// REPLICATION BAR (R <= 2): the fence's exactness additionally assumes
+// every read it issues - the two seq reads AND the union scan between them
+// - observes every mutation the equal fence values bracket. That holds at
+// R=1 (a single owner serves everything) and at R=2 (the write bar is 2/2:
+// a write acks only once EVERY replica holds it, so any member a read
+// lands on is complete). At R >= 3 a write's ack set is a quorum, so a
+// read-one union scan served mid-handoff by a member OUTSIDE some write's
+// ack set could miss a mutation that both fence reads - served by
+// up-to-date members - agree is committed: S would be stamped high with
+// the mutation absent from the state, a hole the splice contract CANNOT
+// detect (the snapshot claims to cover it). Before raising the room
+// tier's replication factor past 2, this fence must be revisited (e.g. a
+// quorum union scan, or bracketing scan and fence reads on the same
+// member set). The current bar is pinned by
+// TestShaleRoomSeqFence_ReplicationBar.
+//
 // Single-shard ScanPrefix over roomkv/<app>/<uuid>/ (every room family
 // co-shards on {app-slug}, so this never fans out). An existing room with no
-// values returns an empty (non-nil) RoomKV; the service layer's prior GetRoom
-// is what turns a nonexistent room into a 404.
+// values returns an empty (non-nil) RoomKV; a nonexistent room scans empty
+// at seq 0 (the service layer's prior GetRoom is what turns it into a 404).
 func (r *ShaleRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error) {
-	items, err := r.scanPrefix(shalePrefixRoomValues(appSlug, id))
-	if err != nil {
-		return domain.RoomKV{}, err
-	}
-	kv := domain.NewRoomKV()
+	const maxFenceRetries = 5
 	prefix := string(shalePrefixRoomValues(appSlug, id))
-	for _, item := range items {
-		// Recover the app-chosen <key> by stripping the namespace prefix (a
-		// key may itself contain '/', so strip the fixed prefix, not split).
-		k := strings.TrimPrefix(string(item.Key), prefix)
-		kv.Values[k] = shaleDecodeRoomValue(item.Value)
+	for range maxFenceRetries {
+		before, err := r.roomSeq(appSlug, id)
+		if err != nil {
+			return domain.RoomKV{}, err
+		}
+		items, err := r.scanPrefix(shalePrefixRoomValues(appSlug, id))
+		if err != nil {
+			return domain.RoomKV{}, err
+		}
+		after, err := r.roomSeq(appSlug, id)
+		if err != nil {
+			return domain.RoomKV{}, err
+		}
+		if before != after {
+			continue // a mutation interleaved; the scan's S would be a lie
+		}
+		kv := domain.NewRoomKV()
+		kv.Seq = before
+		for _, item := range items {
+			// Recover the app-chosen <key> by stripping the namespace prefix (a
+			// key may itself contain '/', so strip the fixed prefix, not split).
+			k := strings.TrimPrefix(string(item.Key), prefix)
+			kv.Values[k] = shaleDecodeRoomValue(item.Value)
+		}
+		return kv, nil
 	}
-	return kv, nil
+	return domain.RoomKV{}, fmt.Errorf("scan room %s/%s: seq fence exhausted after %d retries", appSlug, id, maxFenceRetries)
+}
+
+// roomSeq reads the room record's current seq; a nonexistent room reads as
+// seq 0 (matching the empty scan the caller pairs it with).
+func (r *ShaleRepo) roomSeq(appSlug domain.Slug, id domain.RoomID) (uint64, error) {
+	var row roomRow
+	if err := r.getJSON(shaleKeyRoom(appSlug, id), &row); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return row.Seq, nil
 }
 
 // PutRoomValue writes val under key, enforcing the per-room and per-app caps
@@ -324,12 +380,18 @@ func (r *ShaleRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.Room
 // the per-app counter, the room record, and the expiry index all co-shard on
 // {app-slug}, this is single-shard - no reserve/confirm split needed.
 //
+// Returns the assigned per-room sequence: the room record is in every
+// mutation's CAS read-set, so each commit observes the prior seq and
+// writes exactly prior + 1 - density and uniqueness fall out of the same
+// conflict that makes the per-room cap strict (see SPEC "The per-room
+// sequence: assignment at commit").
+//
 // Returns ErrNotFound if the room is gone, ErrRoomDataFull (413) on the
 // per-room cap, ErrAppRoomsFull (507) on the per-app aggregate. Rooms hold
 // no blobs, so a room write touches no object-store quota and has no
 // service-wide byte cap on this path (see SPEC "Rooms -> Quota and abuse ->
 // Durable total-bytes ceiling").
-func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) error {
+func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) (uint64, error) {
 	valueKey := shaleKeyRoomValue(appSlug, id, key)
 	roomKey := shaleKeyRoom(appSlug, id)
 	counterKey := shaleKeyRoomBytes(appSlug)
@@ -339,8 +401,13 @@ func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 	// against a stale scan, so they move INSIDE the CAS below, validated against
 	// the room record's running totals (which the CAS read-set carries).
 	if len(val) > domain.MaxRoomValueBytes {
-		return ErrRoomDataFull
+		return 0, ErrRoomDataFull
 	}
+
+	// The assigned seq, captured from the closure's LAST (committed) run: a
+	// CAS retry re-reads the record and recomputes, so the value left here
+	// is the one the winning commit actually wrote.
+	var assigned uint64
 
 	// Authoritative single-shard CAS on {app-slug}: re-check the room exists,
 	// re-read the value key (so the byte delta is computed against the value
@@ -348,8 +415,8 @@ func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 	// enforce the STRICT per-room cap (from the room record's running totals,
 	// which are in the read-set) and the STRICT per-app cap (the per-app
 	// counter, also in the read-set), write the value, and touch the room (move
-	// the expiry index + update the running totals).
-	return r.cluster.Transact(valueKey, func(tx backend.Transaction) error {
+	// the expiry index + update the running totals + assign the seq).
+	err := r.cluster.Transact(valueKey, func(tx backend.Transaction) error {
 		// Room-exists re-check INSIDE the write boundary so a concurrent
 		// expiry sweep cannot delete the room between the service's GetRoom
 		// and this write. This Get also puts the room record in the read-set,
@@ -418,25 +485,49 @@ func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 			return fmt.Errorf("put room value: %w", err)
 		}
 
-		// Touch the room: reset the clock, move the expiry index entry, AND
-		// commit the new per-room running totals onto the record.
+		// Touch the room: reset the clock, move the expiry index entry,
+		// commit the new per-room running totals onto the record, AND assign
+		// the mutation's seq (row.Seq+1, inside this CAS).
 		row.ByteTotal = newByteTotal
 		row.KeyCount = newKeyCount
-		return shaleTxTouchRoom(tx, appSlug, id, &row, now)
+		if err := shaleTxTouchRoom(tx, appSlug, id, &row, now); err != nil {
+			return err
+		}
+		assigned = row.Seq
+		return nil
 	})
+	if err != nil {
+		// AMBIGUOUS-COMMIT CAVEAT (documented limitation; see SPEC "Multi-pod
+		// relay -> Delivery semantics"): an error here does NOT always mean
+		// the write failed. If the CAS landed but its ack was lost (a timeout
+		// racing the object-store round trip), the room's seq was consumed
+		// DURABLY while this caller - which mirrors only on success -
+		// broadcasts no frame for it, locally or to any peer. Every
+		// subscriber then sees a hole at that seq that only the NEXT durable
+		// frame exposes, so a then-quiet room stays visually stale until one
+		// arrives; the durable KV itself is never wrong (a re-snapshot heals
+		// any subscriber). Accepted for now; the periodic room-seq beacon the
+		// spec names is the future fix.
+		return 0, err
+	}
+	return assigned, nil
 }
 
 // DeleteRoomValue removes key and resets the retention clock (a delete is a
-// write). Idempotent: deleting an absent key succeeds. One {app-slug}-shard
+// write). Idempotent: deleting an absent key succeeds - and still assigns a
+// seq (it commits a touch; a seq bump rides every commit, so no relay
+// subscriber ever sees a bump with no frame). One {app-slug}-shard
 // CAS: re-check the room exists, delete the value, decrement the per-app
 // counter by the freed bytes, drop the per-room byte_total + key_count on the
-// record by the same freed bytes / one key, and touch the room. Returns
+// record by the same freed bytes / one key, and touch the room (which
+// assigns the seq). Returns the assigned per-room sequence. Returns
 // ErrNotFound only when the ROOM does not exist.
-func (r *ShaleRepo) DeleteRoomValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) error {
+func (r *ShaleRepo) DeleteRoomValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) (uint64, error) {
 	valueKey := shaleKeyRoomValue(appSlug, id, key)
 	roomKey := shaleKeyRoom(appSlug, id)
 	counterKey := shaleKeyRoomBytes(appSlug)
-	return r.cluster.Transact(valueKey, func(tx backend.Transaction) error {
+	var assigned uint64
+	err := r.cluster.Transact(valueKey, func(tx backend.Transaction) error {
 		var row roomRow
 		if err := shaleTxGetJSON(tx, roomKey, &row); err != nil {
 			return err // ErrNotFound if the room is gone
@@ -477,12 +568,26 @@ func (r *ShaleRepo) DeleteRoomValue(appSlug domain.Slug, id domain.RoomID, key s
 				row.KeyCount--
 			}
 		}
-		return shaleTxTouchRoom(tx, appSlug, id, &row, now)
+		if err := shaleTxTouchRoom(tx, appSlug, id, &row, now); err != nil {
+			return err
+		}
+		assigned = row.Seq
+		return nil
 	})
+	if err != nil {
+		// Same ambiguous-commit caveat as PutRoomValue: an error here can
+		// still have consumed a seq durably with no mirror frame anywhere.
+		return 0, err
+	}
+	return assigned, nil
 }
 
 // shaleTxTouchRoom resets the room's retention clock to now + the window
-// inside the caller's CAS, moving the roomexpiry index entry from the old
+// inside the caller's CAS, ASSIGNS the mutation's per-room sequence
+// (row.Seq = prior + 1; the record is in the CAS read-set, so a concurrent
+// same-room mutation conflicts and the loser retries against the updated
+// seq - density and uniqueness ride the same conflict that makes the
+// per-room cap strict), and moves the roomexpiry index entry from the old
 // ExpiresAt to the new one (delete-then-add). Every key it touches (the room
 // record, both expiry index entries) co-shards with the value on {app-slug},
 // so the whole touch stays in the one CAS. Mutates *row in place.
@@ -490,6 +595,7 @@ func shaleTxTouchRoom(tx backend.Transaction, appSlug domain.Slug, id domain.Roo
 	oldExpiry := row.ExpiresAt
 	row.UpdatedAt = now
 	row.ExpiresAt = now.Add(domain.RoomRetentionWindow)
+	row.Seq++
 	if err := shaleTxPutJSON(tx, shaleKeyRoom(appSlug, id), *row); err != nil {
 		return err
 	}
