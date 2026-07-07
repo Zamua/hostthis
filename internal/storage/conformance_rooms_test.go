@@ -23,6 +23,7 @@ package storage_test
 import (
 	"bytes"
 	"errors"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -91,6 +92,9 @@ func runRoomConformance(t *testing.T, name string, caps conformCaps, newRooms fu
 	t.Run(name+"/Rooms/ExpiryAndSweep", func(t *testing.T) { conformRoomExpiryAndSweep(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/DeleteExpiredRoom", func(t *testing.T) { conformDeleteExpiredRoom(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/ExpirySubSecondOrdering", func(t *testing.T) { conformRoomExpirySubSecondOrdering(t, newRooms(t).Rooms) })
+	t.Run(name+"/Rooms/SeqDenseAssignment", func(t *testing.T) { conformRoomSeqDenseAssignment(t, newRooms(t).Rooms) })
+	t.Run(name+"/Rooms/SeqConcurrentWritersUniqueDense", func(t *testing.T) { conformRoomSeqConcurrentWritersUniqueDense(t, newRooms(t).Rooms) })
+	t.Run(name+"/Rooms/SeqScanExactUnderConcurrentWrites", func(t *testing.T) { conformRoomSeqScanExactUnderConcurrentWrites(t, newRooms(t).Rooms) })
 }
 
 // conformRoomRoundTrip: create a room, PUT values under several keys, GET each
@@ -104,7 +108,7 @@ func conformRoomRoundTrip(t *testing.T, rr conformanceRoomRepo) {
 		"empty":           {},                             // empty value must round-trip
 	}
 	for k, v := range pairs {
-		if err := rr.PutValue(room.AppSlug, room.ID, k, v, 0, fixedNow); err != nil {
+		if _, err := rr.PutValue(room.AppSlug, room.ID, k, v, 0, fixedNow); err != nil {
 			t.Fatalf("put %q: %v", k, err)
 		}
 	}
@@ -143,14 +147,14 @@ func conformRoomRoundTrip(t *testing.T, rr conformanceRoomRepo) {
 		}
 	}
 	// Delete one key; it leaves the namespace, the others remain.
-	if err := rr.DeleteValue(room.AppSlug, room.ID, "card/1", fixedNow); err != nil {
+	if _, err := rr.DeleteValue(room.AppSlug, room.ID, "card/1", fixedNow); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if _, err := rr.GetValue(room.AppSlug, room.ID, "card/1"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("deleted key should be gone: %v", err)
 	}
 	// Deleting an absent key is idempotent (room exists -> success).
-	if err := rr.DeleteValue(room.AppSlug, room.ID, "card/1", fixedNow); err != nil {
+	if _, err := rr.DeleteValue(room.AppSlug, room.ID, "card/1", fixedNow); err != nil {
 		t.Fatalf("re-delete absent key should be a no-op, got %v", err)
 	}
 }
@@ -163,7 +167,7 @@ func conformRoomCrossRoomIsolation(t *testing.T, rr conformanceRoomRepo) {
 	roomA := mkConformRoom(t, rr, app, fixedNow)
 	roomB := mkConformRoom(t, rr, app, fixedNow)
 
-	if err := rr.PutValue(roomA.AppSlug, roomA.ID, "secret", []byte("A-only"), 0, fixedNow); err != nil {
+	if _, err := rr.PutValue(roomA.AppSlug, roomA.ID, "secret", []byte("A-only"), 0, fixedNow); err != nil {
 		t.Fatalf("put in A: %v", err)
 	}
 	// B cannot read A's key.
@@ -179,7 +183,7 @@ func conformRoomCrossRoomIsolation(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("room B scan leaked %d keys from room A (isolation broken): %v", kvB.KeyCount(), kvB.Values)
 	}
 	// B writes its own key; A does not see it.
-	if err := rr.PutValue(app, roomB.ID, "secret", []byte("B-only"), 0, fixedNow); err != nil {
+	if _, err := rr.PutValue(app, roomB.ID, "secret", []byte("B-only"), 0, fixedNow); err != nil {
 		t.Fatalf("put in B: %v", err)
 	}
 	gotA, err := rr.GetValue(app, roomA.ID, "secret")
@@ -208,7 +212,7 @@ func conformRoomCrossAppIsolation(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("create room under app2 (same uuid): %v", err)
 	}
 
-	if err := rr.PutValue(roomA.AppSlug, id, "k", []byte("app1-data"), 0, now); err != nil {
+	if _, err := rr.PutValue(roomA.AppSlug, id, "k", []byte("app1-data"), 0, now); err != nil {
 		t.Fatalf("put under app1: %v", err)
 	}
 	// app2's same-UUID room does not see app1's value.
@@ -240,12 +244,12 @@ func conformRoomNonexistent404(t *testing.T, rr conformanceRoomRepo) {
 	}
 	// PUT to a gone room is ErrNotFound (the room existence is re-checked
 	// inside the write boundary).
-	if err := rr.PutValue(app, ghost, "k", []byte("x"), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := rr.PutValue(app, ghost, "k", []byte("x"), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("PutValue on nonexistent room: got %v, want ErrNotFound", err)
 	}
 	// DELETE to a gone room is ErrNotFound (only the ROOM-missing case errors;
 	// an absent key in a REAL room is a success - covered in RoundTrip).
-	if err := rr.DeleteValue(app, ghost, "k", fixedNow); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := rr.DeleteValue(app, ghost, "k", fixedNow); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("DeleteValue on nonexistent room: got %v, want ErrNotFound", err)
 	}
 	// A real room exists, but a missing KEY in it is the SAME ErrNotFound a
@@ -263,11 +267,11 @@ func conformRoomPerRoomByteCap(t *testing.T, rr conformanceRoomRepo) {
 	room := mkConformRoom(t, rr, "app12345", fixedNow)
 	// Fill the room to exactly the byte cap with one value.
 	full := make([]byte, domain.MaxRoomBytes)
-	if err := rr.PutValue(room.AppSlug, room.ID, "big", full, 0, fixedNow); err != nil {
+	if _, err := rr.PutValue(room.AppSlug, room.ID, "big", full, 0, fixedNow); err != nil {
 		t.Fatalf("put at byte cap: %v", err)
 	}
 	// One more byte (a new key) exceeds MaxRoomBytes -> rejected.
-	if err := rr.PutValue(room.AppSlug, room.ID, "more", []byte("x"), 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
+	if _, err := rr.PutValue(room.AppSlug, room.ID, "more", []byte("x"), 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
 		t.Fatalf("over-byte-cap put: got %v, want ErrRoomDataFull", err)
 	}
 	// The rejected key was NOT written (prior state intact).
@@ -275,7 +279,7 @@ func conformRoomPerRoomByteCap(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("rejected key was written anyway: %v", err)
 	}
 	// A value larger than the whole-room budget is rejected up front too.
-	if err := rr.PutValue(room.AppSlug, room.ID, "huge", make([]byte, domain.MaxRoomValueBytes+1), 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
+	if _, err := rr.PutValue(room.AppSlug, room.ID, "huge", make([]byte, domain.MaxRoomValueBytes+1), 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
 		t.Fatalf("over-value-cap put: got %v, want ErrRoomDataFull", err)
 	}
 }
@@ -287,16 +291,16 @@ func conformRoomPerRoomKeyCap(t *testing.T, rr conformanceRoomRepo) {
 	// Fill the room to exactly MaxRoomKeys with one-byte values.
 	for i := range domain.MaxRoomKeys {
 		k := keyN(i)
-		if err := rr.PutValue(room.AppSlug, room.ID, k, []byte("x"), 0, fixedNow); err != nil {
+		if _, err := rr.PutValue(room.AppSlug, room.ID, k, []byte("x"), 0, fixedNow); err != nil {
 			t.Fatalf("put key %d: %v", i, err)
 		}
 	}
 	// One more distinct key exceeds MaxRoomKeys -> rejected.
-	if err := rr.PutValue(room.AppSlug, room.ID, "overflow", []byte("x"), 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
+	if _, err := rr.PutValue(room.AppSlug, room.ID, "overflow", []byte("x"), 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
 		t.Fatalf("over-key-cap put: got %v, want ErrRoomDataFull", err)
 	}
 	// Overwriting an EXISTING key does NOT add a key slot -> still allowed.
-	if err := rr.PutValue(room.AppSlug, room.ID, keyN(0), []byte("y"), 0, fixedNow); err != nil {
+	if _, err := rr.PutValue(room.AppSlug, room.ID, keyN(0), []byte("y"), 0, fixedNow); err != nil {
 		t.Fatalf("overwrite at key cap should be allowed (no new slot): %v", err)
 	}
 }
@@ -334,7 +338,7 @@ func conformRoomPerRoomCapConcurrentCeiling(t *testing.T, rr conformanceRoomRepo
 			// service cap (0) - this isolates the per-room byte cap. A non-nil
 			// error (over-cap, or a transient backend lock) means the value did
 			// not land; we assert only the ceiling, so the error kind is moot.
-			if err := rr.PutValue(room.AppSlug, room.ID, keyN(i), make([]byte, body), 0, fixedNow); err == nil {
+			if _, err := rr.PutValue(room.AppSlug, room.ID, keyN(i), make([]byte, body), 0, fixedNow); err == nil {
 				atomic.AddInt64(&landed, 1)
 			}
 		}(i)
@@ -368,7 +372,7 @@ func conformRoomPerAppAggregateCap(t *testing.T, rr conformanceRoomRepo) {
 	const appCap = 100
 	roomA := mkConformRoom(t, rr, app, fixedNow)
 	// Fill 90 of the 100 app-cap bytes via room A.
-	if err := rr.PutValue(roomA.AppSlug, roomA.ID, "k", make([]byte, 90), 0 /*per-room: unused here, appCap below*/, fixedNow); err != nil {
+	if _, err := rr.PutValue(roomA.AppSlug, roomA.ID, "k", make([]byte, 90), 0 /*per-room: unused here, appCap below*/, fixedNow); err != nil {
 		// per-room cap unused (the appCap is what we test); pass appCap on the
 		// next writes.
 		t.Fatalf("seed 90 app bytes: %v", err)
@@ -376,16 +380,16 @@ func conformRoomPerAppAggregateCap(t *testing.T, rr conformanceRoomRepo) {
 	// A second room under the SAME app: a 20-byte write pushes the app
 	// aggregate to 110 > 100 -> rejected (the per-app sum counts BOTH rooms).
 	roomB := mkConformRoom(t, rr, app, fixedNow)
-	if err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 20), appCap, fixedNow); !errors.Is(err, storage.ErrAppRoomsFull) {
+	if _, err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 20), appCap, fixedNow); !errors.Is(err, storage.ErrAppRoomsFull) {
 		t.Fatalf("over-app-cap write (must count both rooms): got %v, want ErrAppRoomsFull", err)
 	}
 	// A 10-byte write fits (90 + 10 = 100).
-	if err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 10), appCap, fixedNow); err != nil {
+	if _, err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 10), appCap, fixedNow); err != nil {
 		t.Fatalf("write within app cap (90+10=100): %v", err)
 	}
 	// A DIFFERENT app has its own untouched budget.
 	roomC := mkConformRoom(t, rr, "app99999", fixedNow)
-	if err := rr.PutValue(roomC.AppSlug, roomC.ID, "k", make([]byte, 90), appCap, fixedNow); err != nil {
+	if _, err := rr.PutValue(roomC.AppSlug, roomC.ID, "k", make([]byte, 90), appCap, fixedNow); err != nil {
 		t.Fatalf("different app should have its own budget: %v", err)
 	}
 }
@@ -408,17 +412,17 @@ func conformRoomDeleteFreesCap(t *testing.T, rr conformanceRoomRepo) {
 	const doomed = 1000
 	anchor := domain.MaxRoomBytes - doomed
 	appCap := int64(domain.MaxRoomBytes)
-	if err := rr.PutValue(room.AppSlug, room.ID, "anchor", make([]byte, anchor), appCap, fixedNow); err != nil {
+	if _, err := rr.PutValue(room.AppSlug, room.ID, "anchor", make([]byte, anchor), appCap, fixedNow); err != nil {
 		t.Fatalf("seed anchor (%d bytes): %v", anchor, err)
 	}
-	if err := rr.PutValue(room.AppSlug, room.ID, "doomed", make([]byte, doomed), appCap, fixedNow); err != nil {
+	if _, err := rr.PutValue(room.AppSlug, room.ID, "doomed", make([]byte, doomed), appCap, fixedNow); err != nil {
 		t.Fatalf("seed doomed (%d bytes): %v", doomed, err)
 	}
 
 	// The room is now full on BOTH axes: a new value is rejected. (A new key of
 	// `doomed` bytes overflows the per-room byte cap; the same write also
 	// overflows the per-app counter, which is at MaxRoomBytes.)
-	if err := rr.PutValue(room.AppSlug, room.ID, "extra", make([]byte, doomed), appCap, fixedNow); err == nil {
+	if _, err := rr.PutValue(room.AppSlug, room.ID, "extra", make([]byte, doomed), appCap, fixedNow); err == nil {
 		t.Fatalf("write into a full room should be rejected (per-room + per-app both at cap), got nil")
 	} else if !errors.Is(err, storage.ErrRoomDataFull) && !errors.Is(err, storage.ErrAppRoomsFull) {
 		t.Fatalf("full-room write err = %v, want ErrRoomDataFull or ErrAppRoomsFull", err)
@@ -426,7 +430,7 @@ func conformRoomDeleteFreesCap(t *testing.T, rr conformanceRoomRepo) {
 
 	// Delete the doomed cell: its `doomed` bytes return to BOTH the per-room
 	// total and the per-app counter.
-	if err := rr.DeleteValue(room.AppSlug, room.ID, "doomed", fixedNow); err != nil {
+	if _, err := rr.DeleteValue(room.AppSlug, room.ID, "doomed", fixedNow); err != nil {
 		t.Fatalf("delete doomed: %v", err)
 	}
 
@@ -434,7 +438,7 @@ func conformRoomDeleteFreesCap(t *testing.T, rr conformanceRoomRepo) {
 	// both caps. (A NEW key, so it adds a key slot AND `doomed` bytes; the room
 	// is back to anchor + doomed = MaxRoomBytes, and the per-app counter is
 	// likewise back to MaxRoomBytes == appCap, both at-but-not-over.)
-	if err := rr.PutValue(room.AppSlug, room.ID, "reclaimed", make([]byte, doomed), appCap, fixedNow); err != nil {
+	if _, err := rr.PutValue(room.AppSlug, room.ID, "reclaimed", make([]byte, doomed), appCap, fixedNow); err != nil {
 		t.Fatalf("re-PUT of the freed size should succeed after a delete frees capacity: %v", err)
 	}
 	// And the freed-then-refilled state is correct: the room holds anchor +
@@ -573,11 +577,11 @@ func conformRoomExpiryAndSweep(t *testing.T, rr conformanceRoomRepo) {
 	// Backdate `soon`'s clock by writing at a time whose window lands an hour
 	// out: write at (fixedNow - window + hour) so ExpiresAt = fixedNow + hour.
 	writeAt := fixedNow.Add(-domain.RoomRetentionWindow).Add(time.Hour)
-	if err := rr.PutValue(soon.AppSlug, soon.ID, "k", []byte("v"), 0, writeAt); err != nil {
+	if _, err := rr.PutValue(soon.AppSlug, soon.ID, "k", []byte("v"), 0, writeAt); err != nil {
 		t.Fatalf("put to set soon expiry: %v", err)
 	}
 	far := mkConformRoom(t, rr, app, fixedNow)
-	if err := rr.PutValue(far.AppSlug, far.ID, "k", []byte("v"), 0, fixedNow); err != nil {
+	if _, err := rr.PutValue(far.AppSlug, far.ID, "k", []byte("v"), 0, fixedNow); err != nil {
 		t.Fatalf("put to set far expiry: %v", err)
 	}
 
@@ -649,11 +653,11 @@ func conformDeleteExpiredRoom(t *testing.T, rr conformanceRoomRepo) {
 	dead := mkConformRoom(t, rr, app, fixedNow)
 	// Backdate: write at (fixedNow - window + hour) so ExpiresAt = fixedNow + 1h.
 	writeAt := fixedNow.Add(-domain.RoomRetentionWindow).Add(time.Hour)
-	if err := rr.PutValue(dead.AppSlug, dead.ID, "k", []byte("v"), 0, writeAt); err != nil {
+	if _, err := rr.PutValue(dead.AppSlug, dead.ID, "k", []byte("v"), 0, writeAt); err != nil {
 		t.Fatalf("put to set dead expiry: %v", err)
 	}
 	alive := mkConformRoom(t, rr, app, fixedNow)
-	if err := rr.PutValue(alive.AppSlug, alive.ID, "k", []byte("v"), 0, fixedNow); err != nil {
+	if _, err := rr.PutValue(alive.AppSlug, alive.ID, "k", []byte("v"), 0, fixedNow); err != nil {
 		t.Fatalf("put to set alive expiry: %v", err)
 	}
 
@@ -716,13 +720,13 @@ func conformRoomExpirySubSecondOrdering(t *testing.T, rr conformanceRoomRepo) {
 	// (base - window + 0.5s) so ExpiresAt = base + 0.5s.
 	late := mkConformRoom(t, rr, app, base)
 	lateWriteAt := base.Add(-domain.RoomRetentionWindow).Add(500 * time.Millisecond)
-	if err := rr.PutValue(late.AppSlug, late.ID, "k", []byte("v"), 0, lateWriteAt); err != nil {
+	if _, err := rr.PutValue(late.AppSlug, late.ID, "k", []byte("v"), 0, lateWriteAt); err != nil {
 		t.Fatalf("put to set late (.5s) expiry: %v", err)
 	}
 	// A room that expires at the START of the same whole second.
 	early := mkConformRoom(t, rr, app, base)
 	earlyWriteAt := base.Add(-domain.RoomRetentionWindow)
-	if err := rr.PutValue(early.AppSlug, early.ID, "k", []byte("v"), 0, earlyWriteAt); err != nil {
+	if _, err := rr.PutValue(early.AppSlug, early.ID, "k", []byte("v"), 0, earlyWriteAt); err != nil {
 		t.Fatalf("put to set early (.0s) expiry: %v", err)
 	}
 
@@ -783,4 +787,201 @@ func keyN(i int) string {
 		i /= 36
 	}
 	return string(out)
+}
+
+// --- Per-room sequence conformance (SPEC "The per-room sequence:
+// assignment at commit") -----------------------------------------------------
+//
+// The relay's multi-pod correctness rides these invariants, so they are
+// contract, pinned on every backend:
+//
+//   - every committed mutation (PUT or DELETE, including the idempotent
+//     DELETE of an absent key) assigns exactly one seq, dense +1 from 0
+//   - PutValue / DeleteValue return the assigned seq
+//   - concurrent same-room writers never share or skip a seq
+//   - ScanRoom's stamped Seq is EXACT: every mutation with seq <= S is in
+//     the state, none with seq > S is, even under concurrent writes
+
+// conformRoomSeqDenseAssignment: sequential mutations of every flavor assign
+// 1, 2, 3, ... with no holes, and ScanRoom reports the last assigned seq.
+func conformRoomSeqDenseAssignment(t *testing.T, rr conformanceRoomRepo) {
+	room := mkConformRoom(t, rr, "app12345", fixedNow)
+
+	// A fresh room's scan is seq 0.
+	kv, err := rr.ScanRoom(room.AppSlug, room.ID)
+	if err != nil {
+		t.Fatalf("scan fresh: %v", err)
+	}
+	if kv.Seq != 0 {
+		t.Fatalf("fresh room scan seq = %d, want 0", kv.Seq)
+	}
+
+	steps := []struct {
+		name string
+		run  func() (uint64, error)
+	}{
+		{"put k1", func() (uint64, error) { return rr.PutValue(room.AppSlug, room.ID, "k1", []byte("v1"), 0, fixedNow) }},
+		{"put k2", func() (uint64, error) { return rr.PutValue(room.AppSlug, room.ID, "k2", []byte("v2"), 0, fixedNow) }},
+		{"overwrite k1", func() (uint64, error) { return rr.PutValue(room.AppSlug, room.ID, "k1", []byte("v1b"), 0, fixedNow) }},
+		{"delete k2", func() (uint64, error) { return rr.DeleteValue(room.AppSlug, room.ID, "k2", fixedNow) }},
+		// The idempotent DELETE of an ABSENT key still commits (it touches
+		// the retention clock) so it still assigns a seq - a bump with no
+		// frame would read as a permanent hole to a relay subscriber, and a
+		// commit with no bump would break density.
+		{"delete absent", func() (uint64, error) { return rr.DeleteValue(room.AppSlug, room.ID, "never-existed", fixedNow) }},
+	}
+	for i, step := range steps {
+		seq, err := step.run()
+		if err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		if want := uint64(i + 1); seq != want {
+			t.Fatalf("%s: assigned seq = %d, want %d (dense +1 per committed mutation)", step.name, seq, want)
+		}
+	}
+
+	kv, err = rr.ScanRoom(room.AppSlug, room.ID)
+	if err != nil {
+		t.Fatalf("scan after mutations: %v", err)
+	}
+	if want := uint64(len(steps)); kv.Seq != want {
+		t.Fatalf("scan seq = %d, want %d (the exact seq the snapshot reflects)", kv.Seq, want)
+	}
+}
+
+// conformRoomSeqConcurrentWritersUniqueDense: N concurrent same-room writers
+// (distinct keys, so only the record/stripe serializes them) receive N*M
+// seqs that are all unique and together form the dense range 1..N*M - no
+// share, no skip. This is the invariant that makes a hole in the relay's
+// live stream MEAN a lost frame (and not a storage-side numbering artifact).
+func conformRoomSeqConcurrentWritersUniqueDense(t *testing.T, rr conformanceRoomRepo) {
+	room := mkConformRoom(t, rr, "app12345", fixedNow)
+	const writers = 4
+	const putsEach = 20
+
+	var mu sync.Mutex
+	seen := make(map[uint64]string, writers*putsEach)
+	var wg sync.WaitGroup
+	for w := range writers {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := range putsEach {
+				key := keyN(w*putsEach + i)
+				seq, err := rr.PutValue(room.AppSlug, room.ID, key, []byte("v"), 0, fixedNow)
+				if err != nil {
+					t.Errorf("writer %d put %d: %v", w, i, err)
+					return
+				}
+				mu.Lock()
+				if prev, dup := seen[seq]; dup {
+					t.Errorf("seq %d assigned twice (to %s and %s)", seq, prev, key)
+				}
+				seen[seq] = key
+				mu.Unlock()
+			}
+		}(w)
+	}
+	wg.Wait()
+	if t.Failed() {
+		return
+	}
+	const total = writers * putsEach
+	if len(seen) != total {
+		t.Fatalf("assigned %d distinct seqs, want %d", len(seen), total)
+	}
+	for s := uint64(1); s <= total; s++ {
+		if _, ok := seen[s]; !ok {
+			t.Fatalf("seq %d never assigned: the range 1..%d must be dense (no skip)", s, total)
+		}
+	}
+	kv, err := rr.ScanRoom(room.AppSlug, room.ID)
+	if err != nil {
+		t.Fatalf("final scan: %v", err)
+	}
+	if kv.Seq != uint64(total) {
+		t.Fatalf("final scan seq = %d, want %d", kv.Seq, total)
+	}
+}
+
+// conformRoomSeqScanExactUnderConcurrentWrites: while writers add one NEW key
+// per mutation, every concurrent ScanRoom must satisfy key-count == Seq
+// exactly - each of the S committed mutations added exactly one key, so a
+// snapshot claiming seq S with more or fewer than S keys has a broken fence
+// (it would hand a relay late-joiner a state that does not match its splice
+// point). Also pins that sequential scans observe a nondecreasing Seq.
+func conformRoomSeqScanExactUnderConcurrentWrites(t *testing.T, rr conformanceRoomRepo) {
+	room := mkConformRoom(t, rr, "app12345", fixedNow)
+	const writers = 3
+	const putsEach = 25
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for w := range writers {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := range putsEach {
+				if _, err := rr.PutValue(room.AppSlug, room.ID, keyN(w*putsEach+i), []byte("v"), 0, fixedNow); err != nil {
+					t.Errorf("writer %d put %d: %v", w, i, err)
+					return
+				}
+			}
+		}(w)
+	}
+
+	scanErr := make(chan error, 1)
+	go func() {
+		defer close(scanErr)
+		var lastSeq uint64
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			kv, err := rr.ScanRoom(room.AppSlug, room.ID)
+			if err != nil {
+				scanErr <- err
+				return
+			}
+			if kv.Seq < lastSeq {
+				scanErr <- errSeqRegressed(lastSeq, kv.Seq)
+				return
+			}
+			lastSeq = kv.Seq
+			if got, want := uint64(kv.KeyCount()), kv.Seq; got != want {
+				scanErr <- errScanInexact(want, got)
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(stop)
+	if err := <-scanErr; err != nil {
+		t.Fatal(err)
+	}
+	if t.Failed() {
+		return
+	}
+	kv, err := rr.ScanRoom(room.AppSlug, room.ID)
+	if err != nil {
+		t.Fatalf("final scan: %v", err)
+	}
+	const total = writers * putsEach
+	if kv.Seq != uint64(total) || kv.KeyCount() != total {
+		t.Fatalf("final scan seq=%d keys=%d, want both %d", kv.Seq, kv.KeyCount(), total)
+	}
+}
+
+func errSeqRegressed(prev, cur uint64) error {
+	return errors.New("scan seq regressed from " +
+		strconv.FormatUint(prev, 10) + " to " + strconv.FormatUint(cur, 10))
+}
+
+func errScanInexact(seq, keys uint64) error {
+	return errors.New("scan fence inexact: snapshot claims seq " +
+		strconv.FormatUint(seq, 10) + " but holds " + strconv.FormatUint(keys, 10) +
+		" keys (each committed mutation added exactly one key, so they must match)")
 }

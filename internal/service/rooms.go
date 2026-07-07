@@ -21,17 +21,25 @@ type RoomRepo interface {
 	GetRoom(appSlug domain.Slug, id domain.RoomID) (domain.Room, error)
 	// GetValue returns one value or storage.ErrNotFound.
 	GetValue(appSlug domain.Slug, id domain.RoomID, key string) ([]byte, error)
-	// ScanRoom returns the whole namespace.
+	// ScanRoom returns the whole namespace, stamped with the EXACT per-room
+	// sequence the snapshot reflects (RoomKV.Seq): every mutation with
+	// seq <= Seq is in the state, none with seq > Seq is. The relay's
+	// late-join splice contract rides this fence.
 	ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error)
 	// PutValue writes one value, enforcing the per-room + per-app caps and
-	// resetting the retention clock. storage.ErrNotFound if the room is gone,
-	// storage.ErrRoomDataFull / storage.ErrAppRoomsFull on caps. Rooms hold
-	// no blobs, so a room write touches no object-store quota: there is no
-	// service-wide byte cap on this path (see SPEC "Rooms -> Quota and
+	// resetting the retention clock, and returns the mutation's assigned
+	// per-room sequence (dense, +1 per committed mutation, assigned inside
+	// the same transaction that commits the value - see SPEC "The per-room
+	// sequence: assignment at commit"). storage.ErrNotFound if the room is
+	// gone, storage.ErrRoomDataFull / storage.ErrAppRoomsFull on caps. Rooms
+	// hold no blobs, so a room write touches no object-store quota: there is
+	// no service-wide byte cap on this path (see SPEC "Rooms -> Quota and
 	// abuse -> Durable total-bytes ceiling").
-	PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) error
-	// DeleteValue removes one value (idempotent) and resets the clock.
-	DeleteValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) error
+	PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) (uint64, error)
+	// DeleteValue removes one value (idempotent) and resets the clock,
+	// returning the assigned per-room sequence (an absent-key delete still
+	// commits a touch, so it still assigns one).
+	DeleteValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) (uint64, error)
 	// CountRoomCreates returns in-window creation counts (perSubnet, perApp)
 	// for the room-creation rate limit.
 	CountRoomCreates(appSlug domain.Slug, subnet string, now time.Time, window time.Duration) (perSubnet, perApp int, err error)
@@ -179,38 +187,44 @@ func (s *Rooms) Scan(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, erro
 }
 
 // Put writes val under key, enforcing the per-room data cap (in the repo)
-// and the per-app aggregate. Returns ErrRoomNotFound if the room is gone,
-// ErrRoomDataCap (413) on the per-room cap, ErrAppRoomsCap (507) on the
-// per-app aggregate. Rooms hold no blobs, so a room write touches no
-// object-store quota and has no service-wide byte cap on this path (see
-// SPEC "Rooms -> Quota and abuse -> Durable total-bytes ceiling"). key
-// must already be validated by the caller.
-func (s *Rooms) Put(appSlug domain.Slug, id domain.RoomID, key string, val []byte) error {
+// and the per-app aggregate, and returns the mutation's assigned per-room
+// sequence (the dense counter the relay stamps onto the live mirror
+// frame). Returns ErrRoomNotFound if the room is gone, ErrRoomDataCap
+// (413) on the per-room cap, ErrAppRoomsCap (507) on the per-app
+// aggregate. Rooms hold no blobs, so a room write touches no object-store
+// quota and has no service-wide byte cap on this path (see SPEC "Rooms ->
+// Quota and abuse -> Durable total-bytes ceiling"). key must already be
+// validated by the caller.
+func (s *Rooms) Put(appSlug domain.Slug, id domain.RoomID, key string, val []byte) (uint64, error) {
 	now := s.now()
-	err := s.Repo.PutValue(appSlug, id, key, val, s.PerAppByteCap, now)
+	seq, err := s.Repo.PutValue(appSlug, id, key, val, s.PerAppByteCap, now)
 	switch {
 	case err == nil:
-		return nil
+		return seq, nil
 	case errors.Is(err, storage.ErrNotFound):
-		return ErrRoomNotFound
+		return 0, ErrRoomNotFound
 	case errors.Is(err, storage.ErrRoomDataFull):
-		return ErrRoomDataCap
+		return 0, ErrRoomDataCap
 	case errors.Is(err, storage.ErrAppRoomsFull):
-		return ErrAppRoomsCap
+		return 0, ErrAppRoomsCap
 	default:
-		return err
+		return 0, err
 	}
 }
 
-// Delete removes key (idempotent) and resets the room's retention clock.
-// Returns ErrRoomNotFound only when the ROOM does not exist; deleting an
-// absent key in a real room is a success. key must already be validated.
-func (s *Rooms) Delete(appSlug domain.Slug, id domain.RoomID, key string) error {
+// Delete removes key (idempotent) and resets the room's retention clock,
+// returning the assigned per-room sequence (an absent-key delete still
+// commits, so it still assigns one - a seq bump with no mirror frame would
+// read as a permanent hole to a relay subscriber). Returns ErrRoomNotFound
+// only when the ROOM does not exist; deleting an absent key in a real room
+// is a success. key must already be validated.
+func (s *Rooms) Delete(appSlug domain.Slug, id domain.RoomID, key string) (uint64, error) {
 	now := s.now()
-	if err := s.Repo.DeleteValue(appSlug, id, key, now); err != nil {
-		return s.mapNotFound(err)
+	seq, err := s.Repo.DeleteValue(appSlug, id, key, now)
+	if err != nil {
+		return 0, s.mapNotFound(err)
 	}
-	return nil
+	return seq, nil
 }
 
 func (s *Rooms) now() time.Time {

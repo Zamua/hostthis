@@ -40,7 +40,7 @@ func TestSweep_ExpiresRoomsAndCascades(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create room: %v", err)
 	}
-	if err := roomsSvc.Put(room.AppSlug, room.ID, "k1", []byte("v1")); err != nil {
+	if _, err := roomsSvc.Put(room.AppSlug, room.ID, "k1", []byte("v1")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestSweep_ExpiredRoom404sThroughServiceAfterSweep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create room: %v", err)
 	}
-	if err := roomsSvc.Put(room.AppSlug, room.ID, "state", []byte(`{"votes":3}`)); err != nil {
+	if _, err := roomsSvc.Put(room.AppSlug, room.ID, "state", []byte(`{"votes":3}`)); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	// Before expiry the room reads fine.
@@ -136,10 +136,10 @@ func TestSweep_ExpiredRoom404sThroughServiceAfterSweep(t *testing.T) {
 	if _, err := roomsSvc.Scan(room.AppSlug, room.ID); !errors.Is(err, service.ErrRoomNotFound) {
 		t.Fatalf("scan swept room = %v, want ErrRoomNotFound", err)
 	}
-	if err := roomsSvc.Put(room.AppSlug, room.ID, "state", []byte("x")); !errors.Is(err, service.ErrRoomNotFound) {
+	if _, err := roomsSvc.Put(room.AppSlug, room.ID, "state", []byte("x")); !errors.Is(err, service.ErrRoomNotFound) {
 		t.Fatalf("put swept room = %v, want ErrRoomNotFound", err)
 	}
-	if err := roomsSvc.Delete(room.AppSlug, room.ID, "state"); !errors.Is(err, service.ErrRoomNotFound) {
+	if _, err := roomsSvc.Delete(room.AppSlug, room.ID, "state"); !errors.Is(err, service.ErrRoomNotFound) {
 		t.Fatalf("delete swept room = %v, want ErrRoomNotFound", err)
 	}
 }

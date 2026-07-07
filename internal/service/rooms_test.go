@@ -43,7 +43,7 @@ func TestRoomsSvc_CreateAndKVRoundTrip(t *testing.T) {
 		t.Fatalf("created id not a valid v4: %v", err)
 	}
 
-	if err := svc.Put(room.AppSlug, room.ID, "name", []byte("alice")); err != nil {
+	if _, err := svc.Put(room.AppSlug, room.ID, "name", []byte("alice")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	v, err := svc.Get(room.AppSlug, room.ID, "name")
@@ -70,10 +70,10 @@ func TestRoomsSvc_NonexistentRoomIs404Shape(t *testing.T) {
 	if _, err := svc.Scan("app12345", id); !errors.Is(err, ErrRoomNotFound) {
 		t.Fatalf("scan missing room = %v", err)
 	}
-	if err := svc.Put("app12345", id, "k", []byte("v")); !errors.Is(err, ErrRoomNotFound) {
+	if _, err := svc.Put("app12345", id, "k", []byte("v")); !errors.Is(err, ErrRoomNotFound) {
 		t.Fatalf("put missing room = %v", err)
 	}
-	if err := svc.Delete("app12345", id, "k"); !errors.Is(err, ErrRoomNotFound) {
+	if _, err := svc.Delete("app12345", id, "k"); !errors.Is(err, ErrRoomNotFound) {
 		t.Fatalf("delete missing room = %v", err)
 	}
 }
@@ -90,7 +90,7 @@ func TestRoomsSvc_DeleteAbsentKeyIsSuccess(t *testing.T) {
 	svc, _ := newRoomsSvc(t)
 	room, _ := svc.Create("app12345", "10.0.0.0/24")
 	// Deleting a key that never existed in a REAL room is a success.
-	if err := svc.Delete(room.AppSlug, room.ID, "never"); err != nil {
+	if _, err := svc.Delete(room.AppSlug, room.ID, "never"); err != nil {
 		t.Fatalf("delete absent key in real room = %v, want nil", err)
 	}
 }
@@ -167,10 +167,10 @@ func TestRoomsSvc_PerRoomDataCap(t *testing.T) {
 	svc, _ := newRoomsSvc(t)
 	room, _ := svc.Create("app12345", "10.0.0.0/24")
 	atCap := make([]byte, domain.MaxRoomBytes)
-	if err := svc.Put(room.AppSlug, room.ID, "big", atCap); err != nil {
+	if _, err := svc.Put(room.AppSlug, room.ID, "big", atCap); err != nil {
 		t.Fatalf("at-cap put: %v", err)
 	}
-	if err := svc.Put(room.AppSlug, room.ID, "more", []byte("x")); !errors.Is(err, ErrRoomDataCap) {
+	if _, err := svc.Put(room.AppSlug, room.ID, "more", []byte("x")); !errors.Is(err, ErrRoomDataCap) {
 		t.Fatalf("over-cap put = %v, want ErrRoomDataCap", err)
 	}
 }
@@ -180,10 +180,10 @@ func TestRoomsSvc_PerAppAggregateCap(t *testing.T) {
 	svc.PerAppByteCap = 10
 	r1, _ := svc.Create("app12345", "10.0.0.0/24")
 	r2, _ := svc.Create("app12345", "10.0.1.0/24")
-	if err := svc.Put(r1.AppSlug, r1.ID, "k", []byte("123456")); err != nil {
+	if _, err := svc.Put(r1.AppSlug, r1.ID, "k", []byte("123456")); err != nil {
 		t.Fatalf("first write under app cap: %v", err)
 	}
-	if err := svc.Put(r2.AppSlug, r2.ID, "k", []byte("78901")); !errors.Is(err, ErrAppRoomsCap) {
+	if _, err := svc.Put(r2.AppSlug, r2.ID, "k", []byte("78901")); !errors.Is(err, ErrAppRoomsCap) {
 		t.Fatalf("over-app-cap write = %v, want ErrAppRoomsCap", err)
 	}
 }
@@ -192,7 +192,7 @@ func TestRoomsSvc_CrossRoomIsolation(t *testing.T) {
 	svc, _ := newRoomsSvc(t)
 	a, _ := svc.Create("app12345", "10.0.0.0/24")
 	b, _ := svc.Create("app12345", "10.0.0.0/24")
-	if err := svc.Put(a.AppSlug, a.ID, "secret", []byte("A")); err != nil {
+	if _, err := svc.Put(a.AppSlug, a.ID, "secret", []byte("A")); err != nil {
 		t.Fatalf("put A: %v", err)
 	}
 	// B cannot read A's key.

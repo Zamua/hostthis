@@ -1193,59 +1193,70 @@ KV (the durable tier specified above) so a client that JOINS - including a
 client that reloaded the page mid-session - is caught up to the current
 state and then sees every subsequent change exactly once.
 
-**The model: snapshot-then-stream, with the snapshot read inside the
-join.** On a successful upgrade, before the connection is added to the
-hub's broadcast set, the server:
+**The model: snapshot-then-stream, ordered by the room's durable
+sequence.** Every durable mutation (a committed PUT or DELETE) is
+assigned a **dense per-room sequence number at commit** - `seq` - by the
+storage backend, inside the same transaction that commits the write (the
+assignment mechanics are specified in "Multi-pod relay" below). The
+snapshot and every live mirror frame carry it, and it - not any lock -
+is what makes late-join correct. On a successful upgrade the server:
 
-1. **Reads the room KV snapshot** (`RoomRepo.ScanRoom`) and sends it to
-   the joining client as the first frame, tagged as the snapshot (a
-   control envelope the client distinguishes from a relayed peer message).
-   This is the late-joiner's full current state - byte-identical to what
+1. **Registers the connection in the hub FIRST**, so every mirror frame
+   broadcast from that instant on is queued for the joiner. The queue
+   holds a reserved first-frame slot the snapshot will fill; the writer
+   sends nothing until the snapshot is in it, so the snapshot is still
+   the first frame ON THE WIRE even though live frames may already be
+   buffered behind it.
+2. **Then reads the room KV snapshot** (`RoomRepo.ScanRoom`) and sends it
+   as that first frame, tagged as the snapshot control envelope and
+   stamped with the exact sequence number `S` its state reflects. The
+   envelope's `state` object is the same key -> value object
    `GET /api/rooms/<uuid>` returns, so the same client code that loads
-   state on a cold start consumes it.
-2. **Then registers the connection in the hub** and begins streaming live
-   messages.
+   state on a cold HTTP start consumes it.
+3. **The live stream follows.** The client applies a mirror frame with
+   seq > S and discards a frame with seq <= S (its effect is already in
+   the snapshot).
 
-The ordering - snapshot read THEN hub-join, both holding the hub's
-registration lock so no broadcast can interleave between them - is what
-makes late-join correct:
+Register-then-snapshot plus the sequence is what makes late-join
+correct, and unlike the earlier hub-lock formulation it holds across
+pods (the full cross-pod derivation, and the reasons the design moved
+off the lock, are in "Multi-pod relay" below):
 
-- **No gap.** The snapshot is taken and the connection is registered
-  without releasing the lock that serializes "a message arrives at the
-  hub" against "a connection joins the hub." A durable write that lands
-  AFTER the snapshot is read will, because the connection is already in
-  the broadcast set by the time the lock is released, be delivered as a
-  live message. There is no window where a change is neither in the
-  snapshot nor in the stream.
-- **No dup.** A durable write that landed BEFORE the snapshot is reflected
-  in the snapshot; the connection was not yet in the broadcast set when
-  that write was relayed, so it did not also receive it as a live message.
-  Every change is in exactly one of {snapshot, stream}, never both.
+- **No gap.** A mirror frame for seq N is only ever broadcast AFTER
+  mutation N durably committed, and the snapshot read observes every
+  commit that precedes its start. So a frame the joiner MISSED (one
+  broadcast before it registered) came from a commit that landed before
+  the snapshot read began, is therefore IN the snapshot, and has
+  seq <= S; a frame from any later commit finds the connection already
+  registered and is delivered live. Every change is in the snapshot or
+  in the stream.
+- **No dup.** A change CAN arrive in both (a frame broadcast inside the
+  join window is also caught by the snapshot read that follows the
+  register). The sequence de-duplicates it: the client discards every
+  frame with seq <= S, so the change is APPLIED exactly once. hostthis
+  is payload-opaque and makes no idempotency assumption about the app's
+  bytes (an app that treats a live mirror as a delta / increment /
+  append corrupts on a double-apply), which is why the discard rule is
+  keyed on the exact snapshot sequence, never on a heuristic.
+- **Gaps are detectable.** The sequence is DENSE - exactly +1 per
+  committed mutation, a counter, not a timestamp - so a subscriber that
+  holds seq N and receives seq N+2 KNOWS a frame is missing and resyncs
+  (the splice contract in "Multi-pod relay"). Live delivery is
+  best-effort; DETECTION is guaranteed by the data.
 
-  The no-dup half is what forces the commit and its live mirror to be
-  atomic with respect to a join. A durable write is two events - the KV
-  COMMIT (so a future snapshot reflects it) and the live MIRROR broadcast
-  (so already-connected clients see it). If those run as two separate
-  steps, a join can slip between them: the commit lands, a joiner takes the
-  hub lock and reads a snapshot that ALREADY reflects the commit, registers,
-  releases - and THEN the mirror broadcast finds the now-registered joiner
-  and delivers the same key live. The joiner has the key in BOTH its
-  snapshot and a live frame: a dup. hostthis is payload-opaque and makes no
-  idempotency assumption about the app's bytes, so a dup is a real defect (an
-  app that treats a live mirror as a delta / increment / append corrupts on
-  it). The relay therefore runs **the commit and the mirror under the room's
-  hub lock as one critical section**: a join's snapshot-read + register
-  cannot interleave between them, so the write is in exactly one of
-  {snapshot, stream}. The lock is per-room (the hub's own mutex), so one
-  room's durable write never stalls another room. The cost is that the room's
-  live broadcasts wait on the durable KV write (object-storage I/O) for that
-  write's duration - acceptable because the durable path is the LOW-frequency
-  one (a finished availability cell, a placed card, a final vote); the
-  high-frequency live texture (cursors, strokes-in-progress at 60 Hz) rides
-  ephemeral raw relay frames that never take this path and never pay this
-  cost. An app with high-frequency DURABLE writes is the one case this
-  latency characteristic matters for, and that app should batch its commits
-  or move motion to ephemeral frames.
+Because correctness rides the sequence, the durable commit does NOT run
+under the room's hub lock: the hub lock guards the connection set only,
+and a room's live broadcasts never stall behind a durable write's
+object-storage round trip. (An earlier single-pod formulation held the
+hub lock across the commit + mirror as one critical section to get the
+no-dup guarantee; the sequence carries that guarantee now - and carries
+it cross-pod, which no pod-local lock can - so the lock shrinks back to
+a pure membership mutex.) The durable path remains the LOW-frequency
+one (a finished availability cell, a placed card, a final vote); the
+high-frequency live texture (cursors, strokes-in-progress at 60 Hz)
+rides ephemeral raw relay frames, which carry no seq and never touch
+the durable tier. An app with high-frequency DURABLE writes should
+batch its commits or move motion to ephemeral frames.
 
 **What persists vs what is ephemeral.** The relay separates two message
 flavors, and this is the abuse + correctness lever:
@@ -1274,11 +1285,11 @@ by NOT inventing an app protocol, but it must know which messages to
 persist. The chosen convention: the durable path is the EXISTING HTTP KV
 verb, and the relay is broadcast-only by default. An app that wants a
 change to be both durable AND pushed live does the durable write with `PUT
-/api/rooms/<uuid>/<key>` (which the server, holding the room's hub lock
-across BOTH the KV commit AND the live fan-out so a concurrent join cannot
-slip between them - the no-dup atomicity above - mirrors the committed
-write to the room's connected clients as a live message tagged with the
-key), and uses raw relay frames only for ephemeral signals. This keeps the relay payload-opaque (no reserved fields in the
+/api/rooms/<uuid>/<key>` (which the server commits, then mirrors to the
+room's connected clients on EVERY pod as a live message tagged with the
+key and the mutation's room sequence - the sequence, not a lock, is what
+keeps a join racing the PUT from double-applying or missing it; see
+above), and uses raw relay frames only for ephemeral signals. This keeps the relay payload-opaque (no reserved fields in the
 app's bytes), makes the durable write go through the one audited cap-
 checked path, and gives the live fan-out of a committed change for free.
 
@@ -1304,9 +1315,11 @@ holds no per-client durable session state across a disconnect: a
 connection is not assumed unique or permanent, and a client may have zero,
 one, or several live connections to the same room at once (two tabs).
 Re-syncing from the KV snapshot on every (re)connect is what makes the
-relay reconnect-friendly - there is no incremental "catch me up from
-sequence N" replay to get wrong, because the durable KV is always the
-authoritative full state and a fresh scan is always correct.
+relay reconnect-friendly - there is deliberately no incremental "replay
+me everything since sequence N" protocol to get wrong. The room sequence
+orders, de-duplicates, and detects loss; it never drives a replay (the
+server retains no per-room frame history). The durable KV is always the
+authoritative full state and a fresh snapshot is always correct.
 
 ### Connection lifecycle (the finicky core)
 
@@ -1330,32 +1343,38 @@ own four pieces; they interlock.
   per-app / total-rooms cap check, the lazy hub-create) and then RELEASES
   the global lock BEFORE it takes the target hub's lock for the per-room cap
   check + register. So a join to one room never holds the global lock while
-  waiting on another room's hub lock, and a slow durable commit on one room
-  (which holds that room's hub lock for the KV write's duration) never
-  stalls a concurrent upgrade to a DIFFERENT room. One room's contention
-  stays local to that room.
+  waiting on another room's hub lock. Neither lock is ever held across
+  I/O: the durable commit runs outside the hub lock (the room sequence,
+  not the lock, carries the no-gap / no-dup guarantee - see "Persistence
+  and late-join"), and the join's snapshot read runs after the register,
+  also outside it. A hub lock is held only for map mutation and the
+  wait-free buffer enqueues of a fan-out, so one room's contention stays
+  local to that room and no room's broadcasts stall behind storage.
 
   Decoupling admission from the global lock opens a window: between an
   admission reserving its per-app slot (and releasing the global lock) and
   registering its reservation into the hub, the hub is momentarily empty
-  from the perspective of any other goroutine. A concurrent durable write to
-  the SAME room with no live connections creates a transient hub, commits,
-  mirrors, and then tears that hub down if it is "still empty" - and would,
-  in that window, remove the very hub the admission is about to register
-  into, orphaning the registration (it lands in a hub no longer in the map,
-  so it misses live frames) and leaking its per-app slot (a later release
-  finds no hub and skips the decrement). A PENDING-ADMIT guard closes this:
-  the registry tracks a per-room count of in-flight admissions, incremented
+  from the perspective of any other goroutine. A concurrent leave that
+  empties the hub fires its empty-hub teardown in that window and would
+  remove the very hub the admission is about to register into, orphaning
+  the registration (it lands in a hub no longer in the map, so it misses
+  live frames) and leaking its per-app slot (a later release finds no
+  hub and skips the decrement). A PENDING-ADMIT guard closes this: the
+  registry tracks a per-room count of in-flight admissions, incremented
   under the global lock when the slot is reserved (before the lock is
   released) and decremented under it once the register has run. Every
   hub-removal path - the empty-hub teardown the last leave fires, the
-  transient-hub cleanup a durable write runs, and an admission's own
+  laggard-drop path that empties a hub, and an admission's own
   per-room-cap rollback - removes a hub only when it is empty AND has zero
   in-flight admissions, so a hub an admission is about to register into is
   never torn out. The guard keeps the admission decoupled (it still holds no
   global lock while taking the hub lock to register), so the per-room
   isolation above is preserved; it only narrows "the hub is idle" to also
-  mean "no admission is mid-flight into it."
+  mean "no admission is mid-flight into it." (A durable write, for its
+  part, never creates a hub: the mirror fan-out looks the hub up and a
+  missing hub just means no local subscribers - the frame is dropped
+  locally, exactly as a peer-received frame for a subscriber-less room
+  is.)
 - **Server heartbeat (ping/pong) to reap dead connections.** The server
   sends a WebSocket ping to each connection on a fixed interval and expects
   a pong back within a deadline; a connection that misses the pong deadline
@@ -1491,60 +1510,311 @@ durable read returns an empty snapshot. Live hubs are pure in-memory
 state, GC'd when the last connection leaves; they are never persisted and
 never participate in the sweep.
 
-### Single-node now, multi-node later (sticky-by-room)
+### Multi-pod relay: broadcast fan-out ordered by a durable per-room sequence
 
-**The MVP relay is single-node, and that is correct for today's deploy.**
-Production hostthis runs as a single pod on the slatedb-direct backend, so
-all of a room's WebSocket connections terminate on the one process, the
-per-room hubs are in-memory on that process, and a broadcast reaches every
-connection because every connection is local. A single-node relay is
-complete and correct for a single-pod deploy; nothing about the model
-above needs a second node to be right.
+A single-pod relay is complete on one process: every connection to a
+room terminates on the pod, the room's hub IS the room, and a broadcast
+reaches everyone. A multi-pod deploy (the sharded shale backend runs
+several hostthisd pods behind one non-sticky ingress) breaks that
+silently: two clients in the same room land on different pods, each
+pod's in-memory hub sees only its own sockets, and a durable PUT
+handled by pod A mirrors only to A's connections - with N pods and
+random routing, roughly (N-1)/N of live mirrors never reach a given
+client. The durable KV stays correct throughout (every pod routes reads
+and writes through the one storage cluster); it is only the LIVE delta
+that splits. This section is the cross-pod design.
 
-The multi-node path is **documented, not built**, and the design boundary
-is already laid by the existing shale ring:
+**The shape: every pod fans out to every pod, and ordering rides the
+data, not the topology.** A frame's origin pod broadcasts it locally and
+publishes it to every peer pod, which broadcasts it to its own local
+connections. That alone would be unordered and lossy (two pods' fan-outs
+race; a peer can be down), so the durable stream is made correct by the
+**per-room sequence**: a dense counter the storage backend assigns at
+commit, carried on every mirror frame and on every snapshot. Subscribers
+order by seq, de-duplicate by seq, and DETECT loss by seq (dense means a
+hole is visible); a detected hole is healed by re-snapshotting. Delivery
+is best-effort; correctness is a property of the data.
 
-- **The problem multi-node introduces.** With N hostthisd pods behind a
-  load balancer, two clients in the same room can land on DIFFERENT pods.
-  An in-memory hub on pod A does not see a connection on pod B, so a
-  broadcast on A would not reach B's client - the room would silently
-  split. The relay needs every connection in one room to share one
-  broadcast domain.
-- **The chosen future shape: sticky-by-room via shale's ring.** The shale
-  shard-key function already routes every key of a room
-  (`rooms/<app-slug>/<uuid>`, `roomkv/<app-slug>/<uuid>/...`, the ledger,
-  the expiry index) to the SAME shard, owned by ONE node, by sharding on
-  `<app-slug>` (see "Three shard families" / "Shale reuses the layout").
-  The relay reuses that exact routing: a room's WebSocket connections are
-  made sticky to the node that owns the room's shard. The load balancer (or
-  a thin upgrade-time redirect / internal forward) routes
-  `/api/rooms/<uuid>/ws` to the shard owner the ring resolves for
-  `<app-slug>`, so all of a room's connections terminate on the one node
-  that also owns the room's durable data. That node's in-memory hub is then
-  the whole room, exactly as in the single-node case, and the
-  snapshot-then-stream join reads the local backend. Co-locating the live
-  hub with the durable shard is the clean property: the node that pushes
-  the live delta is the node that commits the durable write, so there is no
-  cross-node coordination on the hot path.
-- **The alternative considered and deferred: a pub/sub backplane.** Instead
-  of pinning connections to the owning node, every node could host any
-  room's connections and publish each broadcast to a shared bus (Redis
-  pub/sub, NATS) that every node subscribes to, fanning a broadcast out to
-  peers' local connections. This decouples connection placement from shard
-  ownership but adds a second distributed system, a per-message network hop
-  on the broadcast hot path, and a new ordering surface (two pods' views of
-  one room's stream). Sticky-by-room reuses infrastructure hostthis already
-  has (the ring) and keeps the live hub and the durable shard on one node,
-  so it is the preferred future shape; the backplane is the fallback if a
-  single room's connection count ever exceeds one node's capacity (sticky
-  caps a room at one node's connection budget, which the per-room
-  connection cap already bounds well under that). Either way, the
-  cross-pod design is a LATER tier; the MVP ships single-node and names
-  this boundary so the multi-node path is known, not discovered.
+#### Rejected alternatives
 
-This mirrors the "single shale node now, gossip + ring multi-node later"
-boundary the metadata tier already documents: the same code is correct at
-one node, and the ring is the routing primitive the scale-out reuses.
+- **Sticky-by-room (route a room's sockets to its shard owner) -
+  rejected for deploy re-homing.** A rolling deploy of the sharded
+  backend migrates shard ownership between pods mid-roll (the surge
+  deploy hands every unit off with zero interruption). Connections
+  pinned to the owner would re-home on every rollout and every ring
+  change, turning routine deploys into room-wide reconnect storms, and
+  the ingress would have to resolve slug -> current owner (a ring lookup
+  no standard ingress does, racing the very handoffs it must follow).
+  Sticky also caps a room at one pod's connection budget and makes that
+  pod's death the whole room's outage. The clean co-location property it
+  promised (the node that commits pushes the delta) is instead recovered
+  by the sequence: ANY pod can commit, because the order is in the data.
+- **A pub/sub backplane (Redis / NATS) - rejected as a second
+  distributed system.** It decouples placement from fan-out, but adds a
+  new deployment to run and secure, a per-message hop, and its own
+  ordering surface, to solve a fan-out of N where N is a handful of
+  pods. Direct peer fan-out costs O(pods) per frame and reuses transport
+  the deploy already has. The recipient list is deliberately behind a
+  port (see "The peer transport") so **interest-based fan-out** - publish
+  a room's frames only to pods with live subscribers to that room - can
+  replace "all peers" later as a pure optimization, with no protocol or
+  contract change.
+
+#### The per-room sequence: assignment at commit
+
+The sequence lives ON the room's authoritative record
+(`rooms/<app-slug>/<uuid>`), which every backend ALREADY rewrites inside
+every durable mutation (the retention-clock touch on PUT and DELETE). It
+is a `uint64` starting at 0 for a fresh room; each committed mutation
+assigns `seq = prior + 1` in the same transaction that commits the
+value:
+
+- **shale**: a `seq` field on the room record, incremented inside the
+  existing single-shard `{app-slug}` CAS. The record is already in every
+  mutation's CAS read-set (the strict per-room cap mechanism), so two
+  concurrent writers to the same room - even to distinct keys - conflict
+  on the record, the loser retries, and each commit observes the prior
+  seq and writes exactly prior + 1. Density and uniqueness fall out of
+  the same conflict that makes the per-room cap strict; no new race
+  surface is added.
+- **slatedb**: the same record field, incremented under the per-room
+  serialized-writer stripe that already serializes the cap math.
+- **sqlite**: a `seq` column on the `rooms` table, incremented in the
+  same serializable transaction as the value write.
+
+`RoomRepo.PutValue` and `RoomRepo.DeleteValue` return the assigned seq
+to the caller: the storage layer is the assignment point because the seq
+is durable room state (it must survive the pod that assigned it), and
+storage owns the record it rides on. Two invariants make gap detection
+sound, and both are contract, pinned by the backend-agnostic conformance
+suite:
+
+- **Every committed mutation has exactly one seq, and every seq has
+  exactly one mirror frame.** This includes the idempotent DELETE of an
+  absent key: it already commits (it touches the retention clock) and
+  already mirrors, so it assigns a seq like any other mutation. A seq
+  bump with no frame would read as a permanent hole (a subscriber would
+  re-snapshot for nothing); a frame with no seq could not be spliced.
+- **`ScanRoom` reports the exact seq its snapshot reflects.** The
+  snapshot's `S` must satisfy: every mutation with seq <= S is in the
+  state, no mutation with seq > S is. sqlite and slatedb read the seq
+  inside the same transaction / stripe as the scan, so the fence is
+  free. shale cannot put a prefix scan inside a CAS, so `ScanRoom` runs
+  a **seq fence**: read the record's seq, scan the namespace, re-read
+  the seq; equal means no commit interleaved and the scan is exactly the
+  state at S; changed means retry (bounded; on exhaustion the join fails
+  and the client reconnects - correctness is never traded for a stale
+  fence).
+
+A swept (expired) room deletes its record and its seq with it; a room
+UUID is never reused (creation mints a fresh UUIDv4), so no subscriber
+can ever observe a room's sequence regress.
+
+#### The wire format: seq on every durable frame
+
+The two server-originated control envelopes gain a `seq` field:
+
+```
+{"type":"snapshot", "seq":S, "state":{...}}          the late-join snapshot
+{"type":"put",      "seq":N, "key":"...", "value":...}  live mirror of a PUT
+{"type":"delete",   "seq":N, "key":"..."}            live mirror of a DELETE
+```
+
+Ephemeral peer frames are untouched: payload-opaque, no envelope, no
+seq. They are stale-the-instant-they-are-sent signals with no ordering
+contract; the room sequence orders only the durable stream.
+
+This is a **coordinated frame-format and client-contract change**, and
+the spec says so explicitly rather than pretending compatibility: the
+added `seq` field is additive JSON (an old client ignores it and keeps
+working against a single-pod deploy), but the no-dup guarantee MOVES
+from a server-side lock to the client's discard rule, so a client that
+predates the sequence can observe duplicates on a multi-pod deploy. The
+tier's consumers are few and version with the service; client and
+server adopt the sequence in the same release.
+
+#### The client splice contract
+
+The client keeps `lastSeq`, initialized by the snapshot:
+
+1. **On snapshot**: replace local state with `state`, set
+   `lastSeq = S`. (The snapshot is always the first frame the server
+   sends on a connection.)
+2. **On a durable frame with seq n**:
+   - `n <= lastSeq`: discard (already reflected; this is the no-dup
+     rule).
+   - `n == lastSeq + 1`: apply, advance `lastSeq`.
+   - `n > lastSeq + 1`: hold the frame in a small pending set and start
+     a short gap timer. Out-of-order arrival is NORMAL, not
+     exceptional - two writes committed via different pods race their
+     fan-outs - so the client splices, it does not panic: when the
+     missing seqs arrive, apply the run in order and clear the timer;
+     if the timer fires (a couple of seconds), the frame is lost -
+     resync.
+3. **Resync = reconnect.** Close the socket and rejoin; the fresh
+   snapshot-then-stream is the one resync path and it is already
+   correct. There is deliberately no in-band "resend me seq N" request:
+   every client -> server frame is broadcast to peers as an ephemeral
+   frame (the relay is payload-opaque and has no client control
+   channel), and the server retains no frame history to serve a replay
+   from.
+
+A client's own PUT comes back to it as a seq'd mirror frame (the mirror
+is server-originated and fanned to everyone, sender included). That is
+by design: the HTTP 204 says "durable"; the frame says where the write
+landed in the room's order.
+
+#### The peer transport
+
+- **Protocol.** A hostthis-owned gRPC service (its proto lives in the
+  relay bounded context), one RPC: publish a frame to a peer, carrying
+  `(app_slug, room_id, binary, data)`. The frame body is opaque to the
+  transport - a durable mirror's seq rides inside `data`, an ephemeral
+  frame has none - so the peer tier needs no schema knowledge and the
+  envelope can evolve without touching the proto.
+- **Receive path.** The receiving pod resolves its LOCAL hub for
+  `(app_slug, room_id)` and broadcasts the frame as server-originated
+  (from = 0: every local connection receives it; the originating socket,
+  if any, lives on the origin pod, which already excluded it from its
+  own local fan-out). No local hub means no local subscribers: the frame
+  is dropped, correct because the live path never carries correctness.
+  A received frame is delivered locally ONLY - never re-forwarded. The
+  origin pod is the single fan-out point (full mesh, TTL 1), so no
+  routing loops exist by construction.
+- **What fans out.** Both flavors: a durable mirror (after its commit)
+  and an ephemeral client frame (as it is broadcast locally). Ephemeral
+  frames get cross-pod delivery for free on the same path; their loss
+  or reordering needs no machinery because they carry no contract.
+- **Listener: registered on the gRPC server the sharded backend already
+  runs.** In multi-node mode hostthis itself constructs the peer
+  forwarding server (`internal/storage.NewShaleRepo` binds the
+  listener, creates the `grpc.Server`, registers shale's node service
+  on it, and serves it; the server is hostthis-owned code, not buried
+  in the shale library). The relay's peer service registers on that
+  same server via a generic registrar hook on the storage config,
+  wired at the composition root. One advertised address per pod, one
+  listener lifecycle, and the address is one every peer can already
+  reach - it is the same one shale forwarding uses. The storage package
+  stays relay-agnostic (an opaque `func(*grpc.Server)` hook); the relay
+  stays storage-agnostic (it implements a gRPC service and consumes two
+  small ports). The receiver's local-delivery target is late-bound: the
+  relay is constructed after the repo, so the receiver holds a settable
+  delivery hook, and a frame arriving before wiring completes (a boot
+  race) is dropped - correct, since no client can be connected before
+  the HTTP server is up.
+- **Peer discovery: the ring membership the cluster already gossips.**
+  The cluster's member list carries each live pod's advertised gRPC
+  address - exactly the address the relay should dial - kept current by
+  the same gossip that tracks joins, leaves, and deploy churn, fresher
+  than any DNS view and free of a second discovery mechanism. The relay
+  consumes it through a narrow `Peers` port (the current peer addresses,
+  self excluded) so tests inject a static list and a future non-shale
+  multi-pod shape could plug a DNS-based provider without touching the
+  relay. (The operator-side headless service that seeds gossip remains
+  just that - the seed; membership is the live truth.)
+- **Delivery semantics: best-effort per peer, isolated per peer, and
+  never on the commit path.** The origin enqueues the frame on a
+  bounded per-peer outbound queue (the enqueue never blocks; a full
+  queue drops the frame) drained by a per-peer sender goroutine over a
+  long-lived client connection. A slow, full, or unreachable peer costs
+  the writer NOTHING: the commit already returned (the HTTP 204
+  reflects durability, never liveness), the local mirror already ran,
+  and other peers' queues are independent. No peer error ever fails or
+  delays a durable write. A dropped durable frame is DETECTABLE at
+  every affected subscriber via the dense seq (the splice contract
+  re-snapshots); a dropped ephemeral frame is harmless by definition.
+  The known bound: a subscriber behind a missed durable frame learns of
+  the gap only when the NEXT durable frame arrives, so a then-quiet
+  room can stay visually stale until then - the durable KV is never
+  wrong, only the live view is late. Accepted for now; the client
+  lifecycle's heartbeat + visibilitychange reconnects bound it in
+  practice, and a periodic room-seq beacon is the named future fix if
+  it bites. A second, rarer producer of the same symptom is an
+  **ambiguous commit**: the storage write LANDS but the committer
+  observes an error (a timeout that raced the CAS round trip), so a seq
+  was consumed and no mirror frame is ever broadcast for it - not
+  locally, not to any peer (the handler surfaces the error to the app,
+  yet the write is durable). Every subscriber then sees a hole at that
+  seq that only the NEXT durable frame exposes, and a then-quiet room
+  stays visually stale until one arrives. Same accepted bound, same
+  named future fix: the periodic room-seq beacon closes both.
+- **Trust boundary.** The peer service rides the same cluster-internal
+  listener the shale forwarding port already uses: pod-to-pod traffic
+  inside the deployment's network boundary, never exposed on the public
+  ingress. Every per-connection abuse limit (frame size, inbound rate)
+  is enforced at the ORIGIN pod against the client socket BEFORE any
+  peer fan-out, so peer input is trusted to the same degree shale's own
+  forwarded writes are; the receiver re-checks a frame size cap on
+  arrival as cheap defense in depth. That receiver cap is sized to the
+  LARGEST legal frame on this channel, which is NOT the client-socket
+  cap: a durable mirror carries a committed room value verbatim (up to
+  the room value cap, set by the HTTP PUT path, several times the
+  client-socket frame cap) inside a JSON envelope whose string encoding
+  can inflate non-JSON bytes up to 6x (worst-case escaping). Sizing the
+  receiver to the client-socket cap would silently sever cross-pod
+  mirrors for every legal value above it - a whole value class whose
+  remote subscribers would stall until the next durable frame exposed
+  the gap.
+
+#### Drain hint: reconnect-before-shutdown
+
+WebSockets die with their pod - that is accepted, and the reconnect +
+snapshot path heals it. The drain hint makes the heal proactive: a new
+server-originated control envelope
+
+```
+{"type":"reconnect"}
+```
+
+(no seq - it is not a room mutation) is broadcast once to EVERY local
+connection the moment the process receives its termination signal,
+BEFORE the HTTP server stops accepting and before the final close of
+live connections. In a rolling deploy the terminating pod keeps serving
+through its grace window, so a client acting on the hint reconnects
+while its old socket still works - the new join lands on a surviving
+pod through the normal ingress, a make-before-break re-home instead of
+a hard cut. The process-side half of that window is
+`HOSTTHIS_DRAIN_GRACE` (a Go duration, default `3s`): after the hint is
+broadcast the process keeps serving - existing sockets flow, new joins
+are still admitted - for that long before the final close, so the hint
+has time to flush and a hint-acting client re-homes make-before-break.
+`0` disables the pause (hint then immediate close). Clients SHOULD apply small random jitter (a few seconds)
+before reconnecting so a large room does not thundering-herd the
+survivors. The hint is an optimization, never load-bearing: a client
+that ignores it is closed at actual shutdown with a normal closure and
+heals through the standard reconnect + snapshot + splice path.
+
+#### The degenerate case: zero peers
+
+Every single-pod deploy (sqlite, slatedb-direct, single-node shale) has
+an empty peer set: no peer gRPC service is registered (there is no
+multi-node server to register on), the sender is inert, and the relay
+is exactly the single-pod relay - same seq assignment, same
+register-then-snapshot join, same client contract (the splice
+degenerates to "discard <= S, frames arrive in order"). One code path,
+no mode flag; the multi-pod machinery is the peer set being non-empty.
+The drain hint fires on a single pod too: there is nowhere else to go,
+so clients bounce back after the restart, which is today's behavior
+made explicit.
+
+#### Acceptance criteria
+
+The multi-pod gate, stated as observable behavior:
+
+- **Two clients on different pods receive every put/delete mirror.**
+- **Late-join during concurrent cross-pod writes has no gap and no
+  dup.**
+- **A killed pod's clients resync via reconnect+snapshot with the
+  splice holding.**
+
+Pinned by an in-process two-relay harness (two `Relay` instances over
+the same storage backend, bridged by an in-memory implementation of the
+peer port - no real network needed for the correctness core), plus a
+real-gRPC seam test for the transport adapter. The storage conformance
+suite additionally pins the sequence semantics on every backend: dense
++1 per committed mutation with no gaps at the source, `PutValue` /
+`DeleteValue` return it, concurrent same-room writers never share or
+skip a seq, and `ScanRoom`'s S is exact under concurrent writes.
 
 ### Sandbox and security posture
 
@@ -1592,9 +1862,13 @@ top discipline the rest of the codebase follows:
 - **The hub / relay service is the bounded context** (connection registry,
   broadcast fan-out, lifecycle). It depends on the room KV ONLY through the
   existing small `service.RoomRepo` interface - the same snapshot
-  (`ScanRoom`) and durable-write (`PutValue` / `DeleteValue`) verbs the
+  (`ScanRoom`, which reports the snapshot's seq) and durable-write
+  (`PutValue` / `DeleteValue`, which return the assigned seq) verbs the
   HTTP KV handlers use - so the relay reuses the durable tier's caps and
-  retention without re-implementing them.
+  retention without re-implementing them. Its only other dependencies
+  are the two small outbound ports of the multi-pod tier (the `Peers`
+  address provider and the per-peer frame publisher; see "Multi-pod
+  relay"), both trivially faked in tests.
 - **The connection is an interface, not a concrete socket.** The hub talks
   to a connection abstraction (send a frame, close, identity) so the hub
   logic - register, broadcast, drop-a-laggard, reap-on-heartbeat-timeout,
@@ -1633,7 +1907,10 @@ A never sees room B's or another app's traffic); and the connection / room
 logic is additionally unit-tested against a fake connection (no real
 socket) for the register / broadcast / backpressure / reap / teardown
 paths. The WebSocket tests run under `-race` so a data race in the hub's
-concurrent register / broadcast / unregister path fails the build.
+concurrent register / broadcast / unregister path fails the build. The
+multi-pod tier has its own gate on top of this one - the two-relay
+peer harness and the seq conformance pins - specified under "Multi-pod
+relay" (Acceptance criteria).
 
 ## Retention
 
@@ -3292,7 +3569,27 @@ stores a running `byte_total` + `key_count` on this record (the `roomRow`
 shale-only fields), because shale validates the per-room cap inside a CAS and a
 CAS read-set cannot carry a scan, so it needs a discrete in-record total the
 read-set can read-check (see "Shale reuses the layout" -> "Per-room cap
-(strict)"). A value is stored **verbatim** (not
+(strict)").
+
+EVERY backend additionally maintains the room's **durable sequence** on
+this record: a `seq` field (a `seq` column on sqlite), the dense
+per-room counter the relay's cross-pod ordering rides (see "Multi-pod
+relay: broadcast fan-out ordered by a durable per-room sequence"). It
+is incremented in the SAME transaction / CAS as every value PUT and
+DELETE - the record is already rewritten there for the retention-clock
+touch - and returned to the caller as the mutation's position in the
+room's history. The storage contract's share of the design is exactly
+three properties, pinned by the conformance suite: the seq is dense
+(+1 per committed mutation, no gaps at the source, concurrent writers
+never share or skip one), it is assigned at commit, and `ScanRoom`
+reports the exact seq its snapshot reflects (sqlite/slatedb read it
+inside the scan's own transaction / stripe; shale, whose CAS read-set
+cannot carry a scan, runs the read-scan-reread seq fence and retries on
+motion). A legacy record with no `seq` field decodes as 0, so the first
+post-upgrade mutation assigns 1 - no migration of existing rooms is
+needed on the KV backends.
+
+A value is stored **verbatim** (not
 JSON-wrapped): hostthis never parses a room value, so `roomkv/...` holds
 the exact bytes the app PUT, and a Get returns them unchanged. The two
 marker families (`roomcreate/`, `roomexpiry/`) carry an empty value, the

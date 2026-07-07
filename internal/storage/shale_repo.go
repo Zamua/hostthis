@@ -245,6 +245,18 @@ type ShaleConfig struct {
 	// deployments are unaffected. Only meaningful in multi-backend (sharded)
 	// mode. See docs/SPEC.md "Homogeneous bootstrap (optional)".
 	ConditionalStore storageunit.ConditionalStore
+
+	// RegisterGRPC is an OPTIONAL, OPAQUE hook the composition root passes
+	// so other cluster-internal services can register on the SAME gRPC
+	// server NewShaleRepo constructs and serves in multi-node mode (the
+	// relay's peer fan-out service rides it - one advertised address per
+	// pod, one listener lifecycle, reachable at exactly the address shale
+	// forwarding already dials; see docs/SPEC.md "Multi-pod relay: the peer
+	// transport"). Called once, with the server, after shale's own node
+	// service is registered and BEFORE Serve starts. nil registers nothing
+	// extra. Ignored in single-node mode (no server exists). The storage
+	// package stays relay-agnostic: the hook's type is all it knows.
+	RegisterGRPC func(*grpc.Server)
 }
 
 // ShaleRepo is the shale-cluster-backed metadata store. It satisfies the
@@ -287,9 +299,12 @@ type ShaleRepo struct {
 	// grpcAddr is the ACTUAL bound forwarding address advertised to peers
 	// (lis.Addr().String()), or "" in single-node mode. bindAddr mirrors
 	// the memberlist bind address a second node seeds off. Both are exposed
-	// via accessors so a peer can reference this node.
+	// via accessors so a peer can reference this node. nodeID is this
+	// node's stable cluster identity (cfg.NodeID), used to exclude self
+	// from the peer-address view PeerGRPCAddrs serves.
 	grpcAddr string
 	bindAddr string
+	nodeID   string
 
 	// grpcSrv + grpcLis are the peer-forwarding server and its listener,
 	// set only in multi-node mode. nil single-node (the back-compat path
@@ -644,6 +659,7 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		logger:          cfg.Logger,
 		bindAddr:        cfg.BindAddr,
 		grpcAddr:        advertiseGRPCAddr,
+		nodeID:          cfg.NodeID,
 		cache:           cache,
 		fenceGCSettings: fenceGCSettings,
 		closeFactory:    closeFactory,
@@ -667,6 +683,12 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 			}),
 		)
 		rpc.NewServer(cl).Register(g)
+		// Composition-root services (the relay's peer fan-out) register on
+		// the SAME server via the opaque hook, before Serve. Storage stays
+		// agnostic to what rides along.
+		if cfg.RegisterGRPC != nil {
+			cfg.RegisterGRPC(g)
+		}
 		r.grpcSrv = g
 		r.grpcLis = lis
 		go func() {
@@ -731,6 +753,27 @@ func (r *ShaleRepo) GRPCAddr() string { return r.grpcAddr }
 // single-node mode. A second node passes this as its Seeds entry to join
 // the ring this node founded.
 func (r *ShaleRepo) BindAddr() string { return r.bindAddr }
+
+// PeerGRPCAddrs returns the CURRENT gRPC addresses of every OTHER live
+// cluster member - self excluded - read from the ring membership the
+// cluster gossips. This is the address each peer advertised at join
+// (exactly the one shale forwarding dials), kept current by the same
+// gossip that tracks joins, leaves, and deploy churn, so it is fresher
+// than any DNS view. The composition root adapts this onto the relay's
+// Peers port for the multi-pod peer fan-out (docs/SPEC.md "Multi-pod
+// relay: peer discovery"); storage itself is relay-agnostic. Single-node
+// mode returns an empty slice (the zero-peer degenerate case). Safe for
+// concurrent use.
+func (r *ShaleRepo) PeerGRPCAddrs() []string {
+	var out []string
+	for _, m := range r.cluster.Members() {
+		if m.ID == r.nodeID || m.Addr == "" {
+			continue
+		}
+		out = append(out, m.Addr)
+	}
+	return out
+}
 
 // --- key builders (mirror SlateRepo's layout) ------------------------------
 

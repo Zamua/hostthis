@@ -1,0 +1,11 @@
+-- Per-room sequence (see SPEC.md "Multi-pod relay: broadcast fan-out
+-- ordered by a durable per-room sequence"). A dense uint64 counter on
+-- the room's authoritative record, assigned at commit: every committed
+-- mutation (PUT or DELETE, including the idempotent delete of an absent
+-- key) increments it by exactly one inside the same serializable
+-- transaction that commits the value. The relay stamps it onto every
+-- live mirror frame and onto the late-join snapshot, so subscribers
+-- order by seq, de-duplicate by seq, and detect loss by seq (dense
+-- means a hole is visible). Starts at 0 for a fresh room; existing
+-- rooms adopt 0 and count up from their next write.
+ALTER TABLE rooms ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;

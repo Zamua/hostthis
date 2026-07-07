@@ -17,9 +17,34 @@ import (
 
 	"github.com/Zamua/hostthis/internal/domain"
 	httpapi "github.com/Zamua/hostthis/internal/http"
+	"github.com/Zamua/hostthis/internal/relay"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
 )
+
+// relayPeerTransport is the multi-pod relay peer transport a metadata
+// backend supplies when it runs a peer-reachable gRPC server (multi-node
+// shale, where the relay's peer service registers on the cluster server
+// and peer discovery reads the gossiped ring membership - docs/SPEC.md
+// "Multi-pod relay: the peer transport"). Every single-pod backend leaves
+// the bundle field nil, which keeps the relay's nil publisher: the
+// zero-peer degenerate case, byte-for-byte the single-pod relay. The
+// fields are relay-port types only, so the untagged build stays free of
+// the transport's gRPC dependency (the adapter lives behind the slatedb
+// build tag).
+type relayPeerTransport struct {
+	// Publisher is the outbound per-peer fan-out main wires into the relay
+	// via SetPeerPublisher.
+	Publisher relay.PeerPublisher
+	// Bind late-binds the receive path's local-delivery hook to the relay
+	// (its DeliverFromPeer) once the relay exists - the relay is
+	// constructed after the repo, so the receiver starts unbound and drops
+	// early frames (a boot race, correct by design).
+	Bind func(func(relay.RoomKey, relay.Frame))
+	// Close stops the publisher's sender goroutines and closes its client
+	// connections; main calls it during shutdown, after CloseAll.
+	Close func()
+}
 
 // metadataBundle is everything the rest of the binary needs from a
 // metadata backend. We hold the concrete repo + keygate as the union
@@ -54,7 +79,11 @@ type metadataBundle struct {
 	// age-gated, mounted-unit-local); main schedules it in the sweep loop. nil
 	// on every other path (the global content-addressed sweep is the GC there).
 	BlobOrphanSweeper service.BlobOrphanSweeper
-	Close             func() error
+	// RelayPeer is the OPTIONAL multi-pod relay peer transport (multi-node
+	// shale only; see the relayPeerTransport doc). nil keeps the relay
+	// pod-local (the zero-peer degenerate case).
+	RelayPeer *relayPeerTransport
+	Close     func() error
 }
 
 // metadataRepo is the union of every service-layer / http-layer

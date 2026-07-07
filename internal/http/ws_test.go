@@ -201,7 +201,7 @@ func TestRelay_LateJoinSnapshotThenStreamNoGapNoDup(t *testing.T) {
 	defer cancel()
 
 	// Seed durable state BEFORE the late joiner connects (a committed cell).
-	if err := rooms.Put(domain.Slug(slug), domain.RoomID(id), "cell/1", []byte(`"busy"`)); err != nil {
+	if _, err := rooms.Put(domain.Slug(slug), domain.RoomID(id), "cell/1", []byte(`"busy"`)); err != nil {
 		t.Fatalf("seed put: %v", err)
 	}
 

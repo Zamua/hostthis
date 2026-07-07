@@ -131,6 +131,19 @@ func main() {
 		roomRelay = relay.NewRelay(roomsSvc, relay.NewLimits())
 	}
 
+	// Multi-pod relay peer fan-out (SPEC "Multi-pod relay"). A multi-node
+	// shale backend supplies the transport: the outbound publisher (frames
+	// fan out to every peer pod over the cluster gRPC tier) and the
+	// late-bound receive hook (a peer's frames broadcast into THIS pod's
+	// local hubs). Every single-pod backend leaves RelayPeer nil and the
+	// relay keeps its nil publisher - the zero-peer degenerate case, the
+	// single-pod relay unchanged.
+	if roomRelay != nil && metadata.RelayPeer != nil {
+		roomRelay.SetPeerPublisher(metadata.RelayPeer.Publisher)
+		metadata.RelayPeer.Bind(roomRelay.DeliverFromPeer)
+		logger.Printf("relay: multi-pod peer fan-out wired (publish + receive on the cluster gRPC tier)")
+	}
+
 	keyGate := service.NewKeyGate(keyGateRepo)
 	keyGate.MaxFreshKeysPerSubnet = *freshKeysLimit
 	keyGate.Window = *freshKeysWindow
@@ -279,12 +292,32 @@ func main() {
 		}
 	}
 
-	// Close all live relay connections first: a hijacked WebSocket is not
+	// Drain hint, then the grace window, then the close (SPEC "Drain hint:
+	// reconnect-before-shutdown"). The hint fires at drain start - BEFORE the
+	// HTTP server stops accepting - telling every live relay client to
+	// re-home; the process then KEEPS SERVING through HOSTTHIS_DRAIN_GRACE
+	// (default 3s, 0 disables) so the hint flushes and hint-acting clients
+	// reconnect make-before-break through the ingress onto a surviving pod.
+	if roomRelay != nil {
+		roomRelay.AnnounceDrain()
+		if grace := envOrDuration("HOSTTHIS_DRAIN_GRACE", 3*time.Second); grace > 0 {
+			logger.Printf("relay: drain hint broadcast; serving through %s grace before close", grace)
+			time.Sleep(grace)
+		}
+	}
+
+	// Close all live relay connections: a hijacked WebSocket is not
 	// tracked by http.Server.Shutdown, so closing them here (with a normal
 	// closure) unblocks their request goroutines and lets clients reconnect
 	// on their backoff schedule rather than hammering instantly.
 	if roomRelay != nil {
 		roomRelay.Registry().CloseAll()
+	}
+
+	// Stop the peer publisher's senders (multi-pod only): local fan-out is
+	// done, so drop the outbound peer queues and their connections cleanly.
+	if metadata.RelayPeer != nil {
+		metadata.RelayPeer.Close()
 	}
 
 	shutdownCtx, scancel := context.WithTimeout(context.Background(), 5*time.Second)

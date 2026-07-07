@@ -1,0 +1,45 @@
+// The multi-pod relay's pod-to-pod frame fan-out service (see
+// docs/SPEC.md "Multi-pod relay: the peer transport"). The proto lives in
+// the relay bounded context: the transport carries (app_slug, room_id,
+// binary, data) and the frame body is OPAQUE to it - a durable mirror's
+// seq rides inside data, an ephemeral frame has none - so the peer tier
+// needs no schema knowledge and the envelope can evolve without touching
+// this file.
+//
+// Regenerate with:
+//
+//	protoc --go_out=. --go_opt=paths=source_relative \
+//	       --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+//	       roomrelay.proto
+syntax = "proto3";
+
+package hostthis.relay.v1;
+
+option go_package = "github.com/Zamua/hostthis/internal/relay/relaygrpc";
+
+// RoomRelay is the peer fan-out service every pod registers on the SAME
+// cluster-internal gRPC server shale forwarding already runs. Best-effort:
+// a peer that cannot be reached simply misses the frame (a durable
+// mirror's loss is detectable at every affected subscriber via the dense
+// seq; an ephemeral frame's loss is harmless by definition).
+service RoomRelay {
+  // Publish delivers one relay frame to this pod, which broadcasts it to
+  // its own LOCAL subscribers of the room as server-originated. A received
+  // frame is delivered locally only - never re-forwarded - so the origin
+  // pod is the single fan-out point (full mesh, TTL 1) and no routing
+  // loops exist by construction.
+  rpc Publish(PublishRequest) returns (PublishResponse);
+}
+
+message PublishRequest {
+  // The room's hub key: the app slug plus the room UUID.
+  string app_slug = 1;
+  string room_id = 2;
+  // The WebSocket message flavor the origin client used (text vs binary),
+  // carried through so the receiving pod re-emits the same type.
+  bool binary = 3;
+  // The opaque frame body, fanned out verbatim.
+  bytes data = 4;
+}
+
+message PublishResponse {}

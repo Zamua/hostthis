@@ -33,12 +33,14 @@ type RoomRelay interface {
 	// Release frees a slot reserved by Admit but never handed to Serve (the
 	// websocket Accept failed after admission).
 	Release(key relay.RoomKey, id uint64)
-	// CommitAndMirror runs a durable write's KV commit and its live mirror
-	// atomically under the room's hub lock, so a concurrent join cannot
-	// observe the write in BOTH its snapshot and a live frame (the no-dup
-	// guarantee). The HTTP PUT/DELETE handlers pass the durable write as the
-	// commit callback and the live mirror as the frame.
-	CommitAndMirror(key relay.RoomKey, commit func() error, mirror relay.Frame) error
+	// CommitAndMirror runs a durable write's KV commit (with no relay lock
+	// held - a slow commit never stalls the room), then broadcasts its
+	// live mirror locally and publishes it to the peer pods. The HTTP
+	// PUT/DELETE handlers pass a commit callback that performs the durable
+	// write and returns the mirror frame - built AFTER the write so it
+	// carries the per-room sequence the commit assigned, which is what
+	// orders / de-duplicates it at every subscriber.
+	CommitAndMirror(key relay.RoomKey, commit func() (relay.Frame, error)) error
 }
 
 // handleRoomWS performs the WebSocket upgrade for a room's relay. It is

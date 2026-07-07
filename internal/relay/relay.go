@@ -44,6 +44,11 @@ type Relay struct {
 	reg  *Registry
 	snap Snapshotter
 
+	// peers is the multi-pod outbound port (nil on a single-pod deploy -
+	// the zero-peer degenerate case, where the relay is exactly the
+	// single-pod relay). Wired by SetPeerPublisher at the composition root.
+	peers PeerPublisher
+
 	// pingInterval / pingTimeout are fields (not the consts directly) so
 	// tests can shorten them; NewRelay sets the defaults.
 	pingInterval time.Duration
@@ -63,6 +68,17 @@ func NewRelay(snap Snapshotter, limits Limits) *Relay {
 // Registry exposes the registry so the HTTP layer can mirror a durable PUT
 // to a live hub and so server shutdown can close all connections.
 func (rl *Relay) Registry() *Registry { return rl.reg }
+
+// AnnounceDrain broadcasts the {"type":"reconnect"} drain hint once to
+// every live connection (SPEC "Drain hint: reconnect-before-shutdown").
+// The composition root calls it the moment the process receives its
+// termination signal - BEFORE the HTTP server stops accepting and before
+// CloseAll - then keeps serving through the drain grace window so a client
+// acting on the hint reconnects (through the ingress, onto a surviving
+// pod) while its old socket still works. The hint is an optimization,
+// never load-bearing: ignoring clients heal through the normal reconnect +
+// snapshot + splice path when the close lands.
+func (rl *Relay) AnnounceDrain() { rl.reg.announceDrain() }
 
 // SetHeartbeat overrides the ping interval + timeout. Used by tests to
 // drive the reap path quickly; production uses the NewRelay defaults.
@@ -91,21 +107,35 @@ func (rl *Relay) Release(key RoomKey, id uint64) {
 	rl.reg.release(key, id)
 }
 
-// CommitAndMirror runs a durable write's KV commit and its live mirror
-// broadcast atomically under the room's hub lock, so a concurrent join's
-// snapshot-read + register cannot interleave between them. This is the
-// no-dup / no-gap guarantee the spec requires: the write lands in EXACTLY
-// ONE of {a joiner's snapshot, a joiner's live stream}, never both and
-// never neither. The HTTP KV PUT/DELETE handlers call it instead of doing
-// the commit and the mirror as two separate steps (which let a join slip
-// between them and observe the write in both its snapshot and a live frame).
+// CommitAndMirror runs a durable write's KV commit, then broadcasts its
+// LOCAL live mirror, then publishes the mirror to the peer pods
+// (best-effort, never on the commit path). The HTTP KV PUT/DELETE handlers
+// call it instead of doing the commit and the mirror as two separate steps.
 //
-// commit performs the durable KV write (the service-layer Put / Delete) and
-// runs UNDER the hub lock; mirror is the server-originated control frame
-// (from == 0, so EVERY connected client receives it) fanned out after a
-// successful commit. A failed commit mirrors nothing and returns the error.
-func (rl *Relay) CommitAndMirror(key RoomKey, commit func() error, mirror Frame) error {
-	return rl.reg.commitAndMirror(key, commit, mirror)
+// commit performs the durable KV write (the service-layer Put / Delete)
+// and returns the mirror frame to fan out - built AFTER the write so it
+// carries the per-room sequence the commit assigned (the frame cannot be
+// built up front: the seq is durable room state only the commit knows).
+// NOTHING runs under the room's hub lock here - the commit is a storage
+// round trip and the spec forbids holding the hub lock across storage I/O
+// (a slow commit must never stall the room's fan-out or joins; see
+// registry.commitAndMirror). The mirror is broadcast server-originated
+// (from == 0, so EVERY local connection receives it) after a successful
+// commit. A failed commit mirrors nothing, publishes nothing, and returns
+// the error.
+//
+// Correctness - locally AND across pods - rides the sequence: subscribers
+// order by seq, de-duplicate by the discard rule (seq <= their snapshot's
+// S), and detect loss by the hole a dense seq leaves (see SPEC "Multi-pod
+// relay"). Local and remote delivery are the same contract; the local
+// broadcast is merely the zero-hop case.
+func (rl *Relay) CommitAndMirror(key RoomKey, commit func() (Frame, error)) error {
+	mirror, err := rl.reg.commitAndMirror(key, commit)
+	if err != nil {
+		return err
+	}
+	rl.publishToPeers(key, mirror)
+	return nil
 }
 
 // wsConn is the real connection adapter: it wraps a coder/websocket
@@ -189,19 +219,23 @@ func (c *wsConn) Close() {
 // which is correct since the websocket was hijacked out from under the
 // http.Server's timeouts.
 //
-// The ordering that makes late-join correct (no gap, no dup):
+// The ordering that makes late-join correct (no gap, no dup) is the
+// spec's register-FIRST sequence (SPEC "Persistence and late-join"):
 //
-//  1. Read the room KV snapshot and send it as the FIRST frame, tagged so
-//     the client distinguishes it from a relayed peer message.
-//  2. Bind the connection into the hub (it is now in the broadcast set).
-//  3. Start the reader + heartbeat; live frames flow.
+//  1. Register the connection into the hub FIRST, so every mirror frame
+//     broadcast from that instant on is queued for it (the frames wait in
+//     the send buffer behind the reserved first-frame slot).
+//  2. Read the room KV snapshot OUTSIDE the hub lock and write it as the
+//     FIRST frame on the wire, stamped with the exact seq S it reflects.
+//  3. Start the writer (draining any buffered live frames), reader, and
+//     heartbeat; live frames flow.
 //
-// A durable write that lands AFTER the snapshot read but BEFORE the bind
-// is delivered as a live message (the connection is in the set by the
-// time the writer drains it). A durable write that landed BEFORE the
-// snapshot is in the snapshot and was not relayed to this connection (it
-// was not yet a hub member). Every change is in exactly one of {snapshot,
-// stream}.
+// A frame broadcast BEFORE the register came from a commit that completed
+// before the snapshot read started, so its effect is in the snapshot
+// (seq <= S) - no gap. A frame delivered after the register whose effect
+// the snapshot also caught is discarded by the client's seq <= S rule -
+// no dup. Correctness rides the sequence, so it holds identically for
+// frames arriving from peer pods.
 func (rl *Relay) Serve(ctx context.Context, key RoomKey, id uint64, ws *websocket.Conn) {
 	limits := rl.reg.limits
 	ws.SetReadLimit(limits.MaxMessageBytes)
@@ -216,23 +250,30 @@ func (rl *Relay) Serve(ctx context.Context, key RoomKey, id uint64, ws *websocke
 		rl.reg.release(key, id)
 	}()
 
-	// 1+2. Late-join under the hub lock: read the durable KV snapshot, queue
-	// it as the FIRST frame, and register the connection into the hub - all
-	// atomically, so no broadcast can interleave between the snapshot read
-	// and the register (the no-gap / no-dup guarantee). A read error closes
-	// the connection before it joins the live set: a client that cannot be
-	// caught up is better off reconnecting (which re-syncs from the KV).
-	err := rl.reg.joinWithSnapshot(key, c,
-		func() (Frame, error) { return rl.buildSnapshot(key) },
-		func(f Frame) bool { return c.Send(f) },
-	)
+	// 1+2. Late-join, register-first: joinWithSnapshot swaps the admit's
+	// reservation for c under the hub lock (c is the broadcast target from
+	// that instant), then reads the durable KV snapshot with no lock held
+	// and returns it. A read error closes the connection: a client that
+	// cannot be caught up is better off reconnecting (which re-syncs from
+	// the KV).
+	snap, err := rl.reg.joinWithSnapshot(key, c, func() (Frame, error) { return rl.buildSnapshot(key) })
 	if err != nil {
 		_ = ws.Close(websocket.StatusInternalError, "join failed")
 		return
 	}
 
+	// The reserved first-frame slot: write the snapshot DIRECTLY to the
+	// socket before the writer goroutine starts draining the send buffer,
+	// so the snapshot is the first frame ON THE WIRE even though live
+	// frames may already be buffered behind it. (A room bursting faster
+	// than the send buffer during the read can drop this joiner as a
+	// laggard - it reconnects; correctness is unaffected.)
+	if !c.writeFrame(ctx, snap) {
+		return
+	}
+
 	// 3. Run the writer, reader, and heartbeat. writeLoop drains the send
-	// buffer (starting with the snapshot already queued) to the socket;
+	// buffer (any live frames queued during the join) to the socket;
 	// readLoop pumps inbound frames into the hub broadcast and enforces the
 	// per-frame size + rate limits; heartbeat pings and reaps.
 	var wg sync.WaitGroup
@@ -254,12 +295,29 @@ func (rl *Relay) buildSnapshot(key RoomKey) (Frame, error) {
 	return encodeSnapshot(kv), nil
 }
 
+// writeFrame writes one frame to the socket under the bounded write
+// timeout, closing the connection on error (a write that does not complete
+// within the timeout is a dead socket, reaped the same as a missed pong).
+// Reports whether the write succeeded. Used by writeLoop for every drained
+// frame and by Serve for the snapshot's reserved first-frame write.
+func (c *wsConn) writeFrame(ctx context.Context, f Frame) bool {
+	typ := websocket.MessageText
+	if f.Binary {
+		typ = websocket.MessageBinary
+	}
+	wctx, cancel := context.WithTimeout(ctx, c.writeTimeout)
+	err := c.ws.Write(wctx, typ, f.Data)
+	cancel()
+	if err != nil {
+		c.Close()
+		return false
+	}
+	return true
+}
+
 // writeLoop drains the send buffer to the socket. It exits when the
 // connection is closed or ctx is done. A write error closes the
-// connection (which the lifecycle's teardown finishes). Each write uses a
-// bounded context so a stuck socket write cannot hang the writer forever -
-// a write that does not complete within the ping timeout is a dead socket,
-// reaped the same as a missed pong.
+// connection (which the lifecycle's teardown finishes).
 func (c *wsConn) writeLoop(ctx context.Context) {
 	for {
 		select {
@@ -268,15 +326,7 @@ func (c *wsConn) writeLoop(ctx context.Context) {
 		case <-c.closed:
 			return
 		case f := <-c.send:
-			typ := websocket.MessageText
-			if f.Binary {
-				typ = websocket.MessageBinary
-			}
-			wctx, cancel := context.WithTimeout(ctx, c.writeTimeout)
-			err := c.ws.Write(wctx, typ, f.Data)
-			cancel()
-			if err != nil {
-				c.Close()
+			if !c.writeFrame(ctx, f) {
 				return
 			}
 		}
@@ -323,7 +373,14 @@ func (rl *Relay) readLoop(ctx context.Context, key RoomKey, c *wsConn) {
 				return
 			}
 		}
-		hub.broadcast(c.id, Frame{Binary: typ == websocket.MessageBinary, Data: data})
+		f := Frame{Binary: typ == websocket.MessageBinary, Data: data}
+		hub.broadcast(c.id, f)
+		// Cross-pod fan-out of the ephemeral peer frame (free on the same
+		// path the durable mirror uses; no seq, no contract - a lost or
+		// reordered ephemeral frame needs no machinery). The per-connection
+		// rate + size limits above ran BEFORE this point, so peer input is
+		// bounded at the origin. No-op with no publisher (zero peers).
+		rl.publishToPeers(key, f)
 	}
 }
 
