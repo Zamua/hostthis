@@ -87,9 +87,10 @@ func encodeSnapshot(kv domain.RoomKV) Frame {
 // EncodePut builds the live-mirror frame for a durable PUT of (key, val)
 // whose commit assigned the per-room sequence seq. The HTTP PUT handler's
 // commit closure (passed to Relay.CommitAndMirror) builds this frame AFTER
-// the durable write returns the assigned seq, so the KV write and the live
-// fan-out run under the room's hub lock as one critical section and the
-// frame carries the exact position the write landed at in the room's order.
+// the durable write returns the assigned seq, so the frame carries the
+// exact position the write landed at in the room's order - the seq every
+// subscriber (local or on a peer pod) orders, de-duplicates, and
+// gap-detects by.
 func EncodePut(seq uint64, key string, val []byte) Frame {
 	env := durableEnvelope{Type: TypePut, Seq: seq, Key: key, Value: jsonValue(val)}
 	data, err := json.Marshal(env)

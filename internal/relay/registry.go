@@ -209,10 +209,10 @@ func (r *Registry) admit(key RoomKey) (h *Hub, id uint64, err error) {
 	// in-flight (the pending-admit guard), both while still under r.mu, so the
 	// cap check above and these increments are atomic against a concurrent
 	// admit. The pending count keeps the hub from being torn out between here
-	// and the register below (a concurrent commitAndMirror on this empty room
-	// would otherwise remove the transient hub it created as "still empty").
-	// If the per-room register below fails, the rollback path (decApp +
-	// pending-- + transient-hub teardown) undoes it.
+	// and the register below (the room's departing LAST connection would
+	// otherwise fire onEmpty -> removeHub on the hub this admit is about to
+	// register into). If the per-room register below fails, the rollback
+	// path (decApp + pending-- + created-hub teardown) undoes it.
 	id = r.nextConnID()
 	r.perApp[key.App]++
 	r.pending[key]++
