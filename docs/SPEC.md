@@ -4545,6 +4545,54 @@ commit on a bloated unit can stall past 5s; the bulk migration tooling has
 always raised these budgets internally), but serving deploys normally
 leave it at the default.
 
+#### WAL flush backstop: bounding live WAL accumulation
+
+Each slatedb unit database appends every commit to a WAL object in the
+object store, and those WALs stay LIVE (unreclaimable by the data-WAL
+garbage collector) until the memtable behind them is flushed to an L0
+SST - the flush is what advances the GC boundary. slatedb has two flush
+triggers: a memtable size threshold (`l0_sst_size_bytes`, 64 MiB) and a
+backstop counter, `max_wal_flushes_before_l0_flush`, which forces an L0
+flush after that many WAL flushes regardless of memtable size. At
+hostthis's write profile - small metadata records, kilobytes per commit -
+the 64 MiB trigger effectively never fires, so the backstop counter is
+the ONLY trigger in practice, and slatedb's default (4096) lets every
+unit accumulate up to ~4096 live WAL objects (including the 0-byte fence
+WALs a restart storm writes) that sit unreapable more or less forever at
+low write rates, bloating the unit's object-store prefix and slowing
+cold-start opens (an open re-reads every live WAL).
+
+`HOSTTHIS_SLATEDB_MAX_WAL_FLUSHES` caps this. Unset or empty applies the
+hostthis default of 256: an L0 flush at least every 256 WAL flushes, so
+a unit's live WAL count stays bounded near 256 while still batching
+enough that the extra L0 flushes are negligible. `0` keeps slatedb's own
+default untouched (the kill-switch, mirroring
+`HOSTTHIS_SLATEDB_FENCE_GC=false`); any other positive integer is used
+as-is. A malformed or negative value is a configuration error: the
+daemon refuses to start rather than run with a silently substituted
+default (the same fail-loud posture as the dispatch-deadline knobs).
+
+The cap rides on the same slatedb `Settings` object that enables the
+fence-WAL garbage collector (`HOSTTHIS_SLATEDB_FENCE_GC`, default on:
+slatedb ships that GC category in dry-run, so the per-open fence WAL
+objects are never deleted without it - flipping
+`garbage_collector_options.wal_fence_options.dry_run` off is what lets
+them be reaped once superseded). The slate backend forwards the Settings
+verbatim to EVERY unit's DbBuilder, single- and multi-node alike; the
+`ShaleConfig` field is `MaxWALFlushesBeforeL0`, whose zero value leaves
+slatedb's default untouched so short-lived callers (tests, the migration
+tool) that build a config without it are byte-for-byte unchanged. The
+two knobs are complementary: the fence GC reaps superseded 0-byte fence
+WALs, and the flush backstop is what makes DATA WALs (and the residue a
+fence storm leaves behind the un-advanced GC boundary) reclaimable at
+all under a tiny-value write load.
+
+One sharp edge, pinned by test: the uniffi `Settings.Set` deserializes
+without unknown-field rejection, so a typo'd key SILENTLY no-ops. The
+settings builder's test asserts the applied value by re-reading the
+Settings JSON (the key is present and changed to the configured value),
+never merely that `Set` returned no error.
+
 #### The value envelope and the strip-on-read invariant
 
 At R>1 shale wraps every stored value in a last-writer-wins envelope (a
