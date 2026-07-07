@@ -15,7 +15,7 @@ package storage_test
 // it writes the legacy paste/version/owner/expiry rows straight to the
 // bucket via the non-CAS, non-envelope raw-write path (the same shape a
 // pre-shale deployment left behind), then reads them back through the
-// public ShaleRepo surface (Get / GetVersion / ListVersions / ExpiredSlugs)
+// public ShaleRepo surface (Get / GetVersion / ListVersions / ExpiredPastes)
 // and asserts every field survives.
 //
 //	go test -tags slatedb -run TestShaleMigration ./internal/storage
@@ -110,11 +110,11 @@ func TestShaleMigration_RawValueRoundTrips(t *testing.T) {
 	}
 
 	// The legacy expiry index marker is honored by the sweep's scan.
-	expired, err := repo.ExpiredSlugs(p.ExpiresAt.Add(time.Hour))
+	expired, err := repo.ExpiredPastes(p.ExpiresAt.Add(time.Hour))
 	if err != nil {
-		t.Fatalf("ExpiredSlugs: %v", err)
+		t.Fatalf("ExpiredPastes: %v", err)
 	}
-	if !sliceHasMig(expired, slug.String()) {
+	if !refsHaveSlug(expired, slug.String()) {
 		t.Fatalf("legacy expiry index not honored: %v should contain %q", expired, slug)
 	}
 

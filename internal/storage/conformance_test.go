@@ -161,7 +161,8 @@ func runConformanceWithSites(
 	t.Run(name+"/DeleteVersionTombstones", func(t *testing.T) { conformDeleteVersionTombstones(t, newRepo(t)) })
 	t.Run(name+"/VerNumNotReusedAfterTombstone", func(t *testing.T) { conformVerNumNotReused(t, newRepo(t)) })
 	t.Run(name+"/RepoIsNotOwnerGated", func(t *testing.T) { conformRepoIsNotOwnerGated(t, newRepo(t)) })
-	t.Run(name+"/ExpiredSlugs", func(t *testing.T) { conformExpiredSlugs(t, newRepo(t)) })
+	t.Run(name+"/ExpiredPastes", func(t *testing.T) { conformExpiredPastes(t, newRepo(t)) })
+	t.Run(name+"/DeleteExpired", func(t *testing.T) { conformDeleteExpired(t, newRepo(t)) })
 	t.Run(name+"/ReferencedBlobSHAs", func(t *testing.T) { conformReferencedBlobSHAs(t, newRepo(t)) })
 	t.Run(name+"/OwnerStats", func(t *testing.T) { conformOwnerStats(t, newRepo(t)) })
 	t.Run(name+"/SetName", func(t *testing.T) { conformSetName(t, newRepo(t)) })
@@ -721,7 +722,7 @@ func conformRepoIsNotOwnerGated(t *testing.T, r conformanceRepo) {
 
 // --- contract: expiry ------------------------------------------------
 
-func conformExpiredSlugs(t *testing.T, r conformanceRepo) {
+func conformExpiredPastes(t *testing.T, r conformanceRepo) {
 	// One paste expiring soon, one far in the future.
 	soon := pasteOf("ex123456", "key:e", 10)
 	soon.ExpiresAt = fixedNow.Add(time.Hour)
@@ -733,25 +734,98 @@ func conformExpiredSlugs(t *testing.T, r conformanceRepo) {
 
 	// At a time past `soon` but before `far`, only `soon` is expired.
 	at := fixedNow.Add(2 * time.Hour)
-	slugs, err := r.ExpiredSlugs(at)
+	refs, err := r.ExpiredPastes(at)
 	if err != nil {
-		t.Fatalf("expired slugs: %v", err)
+		t.Fatalf("expired pastes: %v", err)
 	}
-	if !sliceHas(slugs, "ex123456") {
-		t.Fatalf("ex123456 should be expired at %v, got %v", at, slugs)
+	if !refsHaveSlug(refs, "ex123456") {
+		t.Fatalf("ex123456 should be expired at %v, got %v", at, refs)
 	}
-	if sliceHas(slugs, "ex223456") {
-		t.Fatalf("ex223456 should NOT be expired at %v, got %v", at, slugs)
+	if refsHaveSlug(refs, "ex223456") {
+		t.Fatalf("ex223456 should NOT be expired at %v, got %v", at, refs)
 	}
 	// Inclusive boundary: expires_at == now counts as expired.
 	atBoundary := fixedNow.Add(time.Hour)
-	slugs, err = r.ExpiredSlugs(atBoundary)
+	refs, err = r.ExpiredPastes(atBoundary)
 	if err != nil {
-		t.Fatalf("expired slugs at boundary: %v", err)
+		t.Fatalf("expired pastes at boundary: %v", err)
 	}
-	if !sliceHas(slugs, "ex123456") {
-		t.Fatalf("expires_at == now should be inclusive-expired, got %v", slugs)
+	if !refsHaveSlug(refs, "ex123456") {
+		t.Fatalf("expires_at == now should be inclusive-expired, got %v", refs)
 	}
+}
+
+// conformDeleteExpired pins the expiry pass's delete contract (docs/SPEC.md
+// "The storage contract", Expiry): processing a reference the scan surfaced
+// deletes the paste record (reporting true), leaves not-yet-expired pastes
+// untouched, and DRAINS the scan - a re-scan after the pass sees zero
+// references, and a re-processed reference is an idempotent no-op reporting
+// false (no record was deleted by it).
+func conformDeleteExpired(t *testing.T, r conformanceRepo) {
+	// One expired paste, one still-active one.
+	dead := pasteOf("de123456", "key:d", 10)
+	dead.ExpiresAt = fixedNow.Add(time.Hour)
+	insert(t, r, dead)
+
+	alive := pasteOf("de223456", "key:d", 10)
+	alive.ExpiresAt = fixedNow.Add(48 * time.Hour)
+	insert(t, r, alive)
+
+	at := fixedNow.Add(2 * time.Hour)
+	refs, err := r.ExpiredPastes(at)
+	if err != nil {
+		t.Fatalf("expired pastes: %v", err)
+	}
+	if len(refs) != 1 || refs[0].Slug != "de123456" {
+		t.Fatalf("only de123456 should be expired at %v, got %v", at, refs)
+	}
+
+	// Processing the reference deletes the record and reports true.
+	deleted, err := r.DeleteExpired(refs[0])
+	if err != nil {
+		t.Fatalf("delete expired: %v", err)
+	}
+	if !deleted {
+		t.Fatalf("DeleteExpired must report true for a live paste record")
+	}
+	if _, err := r.Get("de123456"); err == nil {
+		t.Fatalf("expired paste should be gone after DeleteExpired")
+	}
+
+	// One pass drains what it scanned: a re-scan sees zero references.
+	again, err := r.ExpiredPastes(at)
+	if err != nil {
+		t.Fatalf("expired pastes (re-scan): %v", err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("re-scan after the pass must see zero expired references, got %v", again)
+	}
+
+	// Re-processing the same reference is an idempotent no-op: no record
+	// was deleted by it, so it reports false (the sweep's deleted-count
+	// only reflects real paste deletions).
+	deleted, err = r.DeleteExpired(refs[0])
+	if err != nil {
+		t.Fatalf("re-processed reference must no-op, got: %v", err)
+	}
+	if deleted {
+		t.Fatalf("DeleteExpired must report false when the paste record was already gone")
+	}
+
+	// The not-yet-expired paste is untouched throughout.
+	if _, err := r.Get("de223456"); err != nil {
+		t.Fatalf("active paste must survive the expiry pass: %v", err)
+	}
+}
+
+// refsHaveSlug reports whether any expired-paste reference names slug.
+func refsHaveSlug(refs []domain.ExpiredPaste, slug string) bool {
+	for _, ref := range refs {
+		if ref.Slug.String() == slug {
+			return true
+		}
+	}
+	return false
 }
 
 // --- contract: blob GC reference set --------------------------------

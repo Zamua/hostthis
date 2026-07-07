@@ -3,27 +3,49 @@ package storage
 import (
 	"fmt"
 	"time"
+
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// ExpiredSlugs returns the slugs of pastes whose expires_at is at or
+// ExpiredPastes returns one reference per paste whose expires_at is at or
 // before `now`. The sweep job uses this to know what to delete; the
 // HTTP read path uses a similar check inline to 404 expired-but-not-
-// yet-deleted rows.
-func (r *PasteRepo) ExpiredSlugs(now time.Time) ([]string, error) {
+// yet-deleted rows. The sqlite scan reads the pastes table itself (there
+// is no standalone expiry index to fall out of sync with the records),
+// so IndexRef is always empty and a returned slug always names a live
+// row at scan time.
+func (r *PasteRepo) ExpiredPastes(now time.Time) ([]domain.ExpiredPaste, error) {
 	rows, err := r.db.Query(`SELECT slug FROM pastes WHERE expires_at <= ?`, formatTime(now))
 	if err != nil {
-		return nil, fmt.Errorf("expired slugs: %w", err)
+		return nil, fmt.Errorf("expired pastes: %w", err)
 	}
 	defer rows.Close()
-	var out []string
+	var out []domain.ExpiredPaste
 	for rows.Next() {
 		var s string
 		if err := rows.Scan(&s); err != nil {
 			return nil, err
 		}
-		out = append(out, s)
+		out = append(out, domain.ExpiredPaste{Slug: domain.Slug(s)})
 	}
 	return out, rows.Err()
+}
+
+// DeleteExpired processes one expired reference: the same full-cascade
+// delete as Delete, reporting whether a paste row was actually removed.
+// On sqlite there is no standalone expiry-index entry to clean (the scan
+// IS the pastes table), so a missing row is simply a no-op that returns
+// false. See docs/SPEC.md "The storage contract" (Expiry).
+func (r *PasteRepo) DeleteExpired(ref domain.ExpiredPaste) (bool, error) {
+	res, err := r.db.Exec(`DELETE FROM pastes WHERE slug = ?`, ref.Slug.String())
+	if err != nil {
+		return false, fmt.Errorf("delete expired %q: %w", ref.Slug, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("delete expired %q: rows affected: %w", ref.Slug, err)
+	}
+	return n > 0, nil
 }
 
 // ReferencedBlobSHAs returns the set of blob content-SHAs still

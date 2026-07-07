@@ -2260,25 +2260,29 @@ func (r *ShaleRepo) Unpin(slug domain.Slug) error {
 
 // --- SweepRepo -------------------------------------------------------------
 
-// ExpiredSlugs fans out across all {slug} shards (cluster.Aggregate) over
-// the expiry/* index and returns the slugs whose expiry timestamp is <=
-// now. The timestamp is the middle segment of expiry/<rfc3339>/<slug>;
-// RFC3339Nano sorts lexicographically so a string compare is correct at
-// whole-second granularity. NOTE: RFC3339Nano is variable-width (a
-// fractional ".5Z" sorts before a bare "Z" within one whole second), so
-// this paste index carries the same latent sub-second skew documented for
-// the paste expiry path; fixing it is a key-format migration left as a
-// follow-up. The site expiry index uses a fixed-width format
-// (expirySiteTimeFormat) and has no such skew.
-func (r *ShaleRepo) ExpiredSlugs(now time.Time) ([]string, error) {
+// ExpiredPastes fans out across all {slug} shards (cluster.Aggregate) over
+// the expiry/* index and returns one reference per entry whose expiry
+// timestamp is <= now: the slug plus the entry's full key as the opaque
+// IndexRef, so DeleteExpired can remove the EXACT entry that surfaced the
+// slug even when the paste record is already gone. The timestamp is the
+// middle segment of expiry/<rfc3339>/<slug>; RFC3339Nano sorts
+// lexicographically so a string compare is correct at whole-second
+// granularity. NOTE: RFC3339Nano is variable-width (a fractional ".5Z"
+// sorts before a bare "Z" within one whole second), so this paste index
+// carries the same latent sub-second skew documented for the paste expiry
+// path; fixing it is a key-format migration left as a follow-up. The site
+// expiry index uses a fixed-width format (expirySiteTimeFormat) and has no
+// such skew.
+func (r *ShaleRepo) ExpiredPastes(now time.Time) ([]domain.ExpiredPaste, error) {
 	items, err := r.aggregatePrefix([]byte("expiry/"))
 	if err != nil {
 		return nil, err
 	}
 	cutoff := now.UTC().Format(time.RFC3339Nano)
-	var out []string
+	var out []domain.ExpiredPaste
 	for _, item := range items {
-		rest := strings.TrimPrefix(string(item.Key), "expiry/")
+		k := string(item.Key)
+		rest := strings.TrimPrefix(k, "expiry/")
 		idx := strings.LastIndex(rest, "/")
 		if idx < 0 {
 			continue
@@ -2286,10 +2290,50 @@ func (r *ShaleRepo) ExpiredSlugs(now time.Time) ([]string, error) {
 		ts := rest[:idx]
 		slug := rest[idx+1:]
 		if ts <= cutoff {
-			out = append(out, slug)
+			out = append(out, domain.ExpiredPaste{Slug: domain.Slug(slug), IndexRef: k})
 		}
 	}
 	return out, nil
+}
+
+// DeleteExpired processes one expired reference: the same full-cascade
+// delete as Delete when the paste record still exists, and then - in
+// every case - removal of the exact expiry-index entry the scan surfaced
+// (a single {slug}-shard CAS: the entry's shard key is its trailing slug,
+// the same shard the paste rows live on). The unconditional entry removal
+// is what keeps an orphaned entry (paste already gone, e.g. legacy
+// TTL-era state) from resurfacing on every scan forever; it also
+// self-heals an entry whose key drifted from the paste row's ExpiresAt
+// (the cascade removes the DERIVED key; this removes the OBSERVED one).
+// Idempotent: a missing record and a missing entry are both no-ops.
+// Returns whether a paste record was actually deleted. See docs/SPEC.md
+// "The storage contract" (Expiry).
+func (r *ShaleRepo) DeleteExpired(ref domain.ExpiredPaste) (bool, error) {
+	entryKey, err := expiryIndexKey(ref)
+	if err != nil {
+		return false, err
+	}
+	deleted := false
+	var p pasteRow
+	switch err := r.getJSON(shaleKeyPaste(ref.Slug), &p); {
+	case errors.Is(err, ErrNotFound):
+		// Orphaned entry: nothing to cascade, just clean the entry below.
+	case err != nil:
+		return false, err
+	default:
+		if err := r.Delete(ref.Slug); err != nil {
+			return false, err
+		}
+		deleted = true
+	}
+	if entryKey != nil {
+		if err := r.cluster.Transact(entryKey, func(tx backend.Transaction) error {
+			return tx.Delete(entryKey)
+		}); err != nil {
+			return deleted, fmt.Errorf("delete expiry entry %s: %w", entryKey, err)
+		}
+	}
+	return deleted, nil
 }
 
 // ReferencedBlobSHAs returns the set of blob content-SHAs still referenced

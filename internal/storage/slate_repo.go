@@ -1067,13 +1067,17 @@ func (r *SlateRepo) DeleteVersion(slug domain.Slug, ver int) error {
 
 // --- SweepRepo -------------------------------------------------------------
 
-func (r *SlateRepo) ExpiredSlugs(now time.Time) ([]string, error) {
+// ExpiredPastes scans the expiry/ index and returns one reference per
+// expired entry: the slug plus the entry's full key as the opaque
+// IndexRef, so DeleteExpired can remove the EXACT entry that surfaced the
+// slug even when the paste record is already gone.
+func (r *SlateRepo) ExpiredPastes(now time.Time) ([]domain.ExpiredPaste, error) {
 	items, err := r.scanPrefix(prefixExpiry())
 	if err != nil {
 		return nil, err
 	}
 	cutoff := now.UTC().Format(time.RFC3339Nano)
-	var out []string
+	var out []domain.ExpiredPaste
 	for _, item := range items {
 		// key shape: expiry/<rfc3339>/<slug>. Compare timestamp lex (sortable).
 		k := string(item.Key)
@@ -1085,10 +1089,54 @@ func (r *SlateRepo) ExpiredSlugs(now time.Time) ([]string, error) {
 		ts := rest[:idx]
 		slug := rest[idx+1:]
 		if ts <= cutoff {
-			out = append(out, slug)
+			out = append(out, domain.ExpiredPaste{Slug: domain.Slug(slug), IndexRef: k})
 		}
 	}
 	return out, nil
+}
+
+// DeleteExpired processes one expired reference: the same full-cascade
+// delete as Delete when the paste record still exists, and then - in
+// every case - removal of the exact expiry-index entry the scan surfaced.
+// The unconditional entry removal is what keeps an orphaned entry (paste
+// already gone, e.g. legacy TTL-era state) from resurfacing on every
+// scan forever; it also self-heals an entry whose key drifted from the
+// paste row's ExpiresAt (the cascade removes the DERIVED key; this
+// removes the OBSERVED one). Idempotent: a missing record and a missing
+// entry are both no-ops. Returns whether a paste record was actually
+// deleted. See docs/SPEC.md "The storage contract" (Expiry).
+func (r *SlateRepo) DeleteExpired(ref domain.ExpiredPaste) (bool, error) {
+	entryKey, err := expiryIndexKey(ref)
+	if err != nil {
+		return false, err
+	}
+	deleted := false
+	var p pasteRow
+	switch err := r.getJSON(keyPaste(ref.Slug), &p); {
+	case errors.Is(err, ErrNotFound):
+		// Orphaned entry: nothing to cascade, just clean the entry below.
+	case err != nil:
+		return false, err
+	default:
+		if err := r.Delete(ref.Slug); err != nil {
+			return false, err
+		}
+		deleted = true
+	}
+	if entryKey != nil {
+		tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
+		if err != nil {
+			return deleted, fmt.Errorf("begin tx: %w", err)
+		}
+		if err := tx.Delete(entryKey); err != nil {
+			_ = tx.Rollback()
+			return deleted, fmt.Errorf("delete expiry entry %s: %w", entryKey, err)
+		}
+		if _, err := tx.Commit(); err != nil {
+			return deleted, fmt.Errorf("commit delete expiry entry %s: %w", entryKey, err)
+		}
+	}
+	return deleted, nil
 }
 
 // ReferencedBlobSHAs returns the set of blob content-SHAs still

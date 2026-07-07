@@ -228,6 +228,99 @@ func TestSweep_GuardsAgainstBuggyRepoZeroRefs(t *testing.T) {
 	}
 }
 
+// TestSweep_OrphanExpiryIndexEntries pins the expiry pass's contract for
+// index-backed backends (slatedb/shale keep a standalone expiry index):
+//
+//   - an index entry whose paste is ALREADY GONE is removed by one pass, so
+//     a second pass sees zero expired entries (the pass drains, it does not
+//     loop on the same legacy entries forever);
+//   - the deleted-count reflects pastes actually deleted, NOT index no-ops;
+//   - the pass reports the orphaned index entries it cleaned.
+//
+// The fake mirrors the real index-backed repos: the expiry scan reads the
+// standalone index, and the paste-delete cascade removes the index entry
+// only when the paste record still exists.
+func TestSweep_OrphanExpiryIndexEntries(t *testing.T) {
+	repo := &indexedSweepRepo{
+		pastes: map[string]bool{"live1234": true},
+		index: map[string]string{
+			"expiry/2026-01-01T00:00:00Z/live1234": "live1234",
+			// The orphan: its paste is already gone (a legacy TTL-era
+			// entry whose record was removed without index cleanup).
+			"expiry/2025-01-01T00:00:00Z/gone1234": "gone1234",
+		},
+	}
+
+	var logbuf bytes.Buffer
+	sweep := service.NewSweep(repo, nil, log.New(&logbuf, "", 0))
+
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	pastes, _, err := sweep.Once(now)
+	if err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	// Only live1234's paste record actually existed: the deleted-count is 1,
+	// not 2 (the orphan entry is an index cleanup, not a paste deletion).
+	if pastes != 1 {
+		t.Fatalf("deleted-count must reflect real paste deletions only: got %d, want 1", pastes)
+	}
+	// BOTH index entries are gone after one pass: live1234's via the paste
+	// delete, gone1234's via the orphan cleanup.
+	if len(repo.index) != 0 {
+		t.Fatalf("expiry index must drain in one pass; %d entr(ies) remain: %v", len(repo.index), repo.index)
+	}
+	// The pass reports the orphaned entries it cleaned.
+	if !bytes.Contains(logbuf.Bytes(), []byte("orphaned expiry-index")) {
+		t.Fatalf("sweep should log the orphaned index-entry cleanup; got:\n%s", logbuf.String())
+	}
+
+	// A second pass finds nothing: zero entries, zero deletions.
+	pastes, _, err = sweep.Once(now)
+	if err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if pastes != 0 {
+		t.Fatalf("second pass must see zero expired entries, got %d", pastes)
+	}
+}
+
+// indexedSweepRepo mimics an index-backed metadata backend (slatedb/shale):
+// ExpiredPastes scans a standalone expiry index (returning each entry's key
+// as the opaque IndexRef), and DeleteExpired cascades the paste delete when
+// the record still exists and removes the OBSERVED index entry regardless -
+// exactly the repo-side contract in docs/SPEC.md "The storage contract"
+// (Expiry).
+type indexedSweepRepo struct {
+	pastes map[string]bool   // slug -> record exists
+	index  map[string]string // index key -> slug
+}
+
+func (r *indexedSweepRepo) ExpiredPastes(_ time.Time) ([]domain.ExpiredPaste, error) {
+	var out []domain.ExpiredPaste
+	for k, slug := range r.index {
+		out = append(out, domain.ExpiredPaste{Slug: domain.Slug(slug), IndexRef: k})
+	}
+	return out, nil
+}
+
+func (r *indexedSweepRepo) DeleteExpired(ref domain.ExpiredPaste) (bool, error) {
+	deleted := r.pastes[ref.Slug.String()]
+	if deleted {
+		delete(r.pastes, ref.Slug.String())
+		// The paste-delete cascade removes the DERIVED index entry ...
+		for k, s := range r.index {
+			if s == ref.Slug.String() {
+				delete(r.index, k)
+			}
+		}
+	}
+	// ... and the OBSERVED entry is removed regardless, so an orphan drains.
+	delete(r.index, ref.IndexRef)
+	return deleted, nil
+}
+
+func (r *indexedSweepRepo) ReferencedBlobSHAs() ([]string, error) { return []string{"sha-live"}, nil }
+
 // buggyRepo simulates the failure mode this test guards against:
 // ReferencedBlobSHAs always returns nil (i.e. "no shas are
 // referenced") even when paste rows exist. Only methods the sweep
@@ -235,9 +328,11 @@ func TestSweep_GuardsAgainstBuggyRepoZeroRefs(t *testing.T) {
 // surfaces unexpected calls.
 type buggyRepo struct{}
 
-func (buggyRepo) ExpiredSlugs(_ time.Time) ([]string, error) { return nil, nil }
-func (buggyRepo) Delete(_ domain.Slug) error                 { panic("not expected") }
-func (buggyRepo) ReferencedBlobSHAs() ([]string, error)      { return nil, nil }
+func (buggyRepo) ExpiredPastes(_ time.Time) ([]domain.ExpiredPaste, error) { return nil, nil }
+func (buggyRepo) DeleteExpired(_ domain.ExpiredPaste) (bool, error) {
+	panic("not expected")
+}
+func (buggyRepo) ReferencedBlobSHAs() ([]string, error) { return nil, nil }
 
 // TestSweep_DryRun - in dry-run the sweep COMPUTES + LOGS what it would
 // expire/GC but mutates nothing: the expired record and every blob survive.
