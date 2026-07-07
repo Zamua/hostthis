@@ -20,6 +20,9 @@
 //   HOSTTHIS_SHALE_SEEDS              (comma-separated peer BIND_ADDRs; empty = seed node)
 //   HOSTTHIS_METADATA_AWAIT_DURABLE   (true|false; default true; false = relaxed
 //                                      durability/fast-ack, only safe at RF>=2)
+//   HOSTTHIS_SHALE_READ_TIMEOUT       (Go duration, e.g. "8s"; unset/empty =
+//                                      shale's 5s default; malformed fails startup)
+//   HOSTTHIS_SHALE_WRITE_TIMEOUT      (same, for the per-dispatch write deadline)
 //
 // With HOSTTHIS_SHALE_BIND_ADDR unset (the default) the node runs the
 // single-node path exactly as before: no gossip, no ring routing, every
@@ -139,6 +142,17 @@ func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger) (*stor
 	// Default ON for this long-lived server; HOSTTHIS_SLATEDB_FENCE_GC=false is
 	// the kill-switch (fall back to slatedb's untouched defaults).
 	reapFenceWALs := !strings.EqualFold(strings.TrimSpace(os.Getenv("HOSTTHIS_SLATEDB_FENCE_GC")), "false")
+	// Per-dispatch cluster deadlines (shale defaults each to 5s; zero keeps
+	// them). The read budget is the one deploys raise (e.g. "8s"): during a
+	// rollout a read that lands in a shard's sub-second handoff window
+	// re-polls within ReadTimeout, so a bigger budget turns the rare
+	// window-exceeding read into latency instead of a client error. Malformed
+	// values are a config error and fail startup - never a silent default.
+	// See docs/SPEC.md "Dispatch deadlines: the read/write timeout knobs".
+	readTimeout, writeTimeout, err := shaleTimeoutsFromEnv()
+	if err != nil {
+		return nil, err
+	}
 
 	// Multi-node peer-discovery config. A non-empty bind addr is the
 	// switch that takes the cluster out of the single-node path.
@@ -225,6 +239,8 @@ func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger) (*stor
 		UnitCount:         unitCount,
 		CacheBytes:        uint64(cacheBytes),
 		ReapFenceWALs:     reapFenceWALs,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
 		Logger:            logger,
 		BlobStore:         blobStore,
 		ConditionalStore:  condStore,

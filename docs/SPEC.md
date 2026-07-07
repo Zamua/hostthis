@@ -4516,6 +4516,35 @@ the same HA deployment that runs R=2 across distinct nodes. The flag is
 threaded to the slate backend's per-write `WriteOptions`; leaving it at the
 default keeps the byte-exact durable path.
 
+#### Dispatch deadlines: the read/write timeout knobs
+
+Every clustered metadata op runs under a per-dispatch deadline: the shale
+cluster bounds each read dispatch and each write dispatch, defaulting both
+to 5s. Two operator envs override them:
+
+```
+HOSTTHIS_SHALE_READ_TIMEOUT    per-dispatch read deadline    (unset = shale default, 5s)
+HOSTTHIS_SHALE_WRITE_TIMEOUT   per-dispatch write deadline   (unset = shale default, 5s)
+```
+
+Both parse as Go durations (`8s`, `500ms`). Unset or empty leaves the
+corresponding `ShaleConfig` field zero, so the shale default applies and a
+deployment that sets neither is byte-for-byte unchanged. A value that does
+not parse as a Go duration, or a negative one, is a configuration error:
+the daemon refuses to start rather than running with a silently
+substituted default (the same fail-loud posture as `HOSTTHIS_RETENTION`).
+
+The knob that earns its keep is the read budget. During a rolling deploy a
+shard briefly hands off between nodes, and a read that lands inside that
+sub-second handoff window re-polls until the shard settles - but only for
+as long as the read deadline allows. Under the 5s default a rare handoff
+that outlives the budget surfaces as a client error; raising the read
+deadline (e.g. `8s`) converts that tail case into added latency instead.
+The write deadline exists for the same class of reason (a heavyweight CAS
+commit on a bloated unit can stall past 5s; the bulk migration tooling has
+always raised these budgets internally), but serving deploys normally
+leave it at the default.
+
 #### The value envelope and the strip-on-read invariant
 
 At R>1 shale wraps every stored value in a last-writer-wins envelope (a
