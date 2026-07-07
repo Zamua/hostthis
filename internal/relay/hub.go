@@ -162,11 +162,12 @@ func (d broadcastDrops) run() {
 // snapshots the recipient set, Sends to each (Send never blocks, so holding
 // the lock across the Sends is safe and keeps register / unregister
 // serialized against this fan-out), removes laggards from the map, and
-// returns the cleanup the caller runs after releasing the lock. It exists as
-// a separate method so the commit-and-mirror path (registry.commitAndMirror)
-// can fan out the live mirror under the SAME hub-lock acquisition that the
-// durable commit runs in, making the two atomic against a join's
-// snapshot-read + register.
+// returns the cleanup the caller runs after releasing the lock. The split
+// exists so the laggard teardown (Close, the registry's per-app decApp, a
+// possible onEmpty) runs OUTSIDE the lock - none of it may stall the room.
+// NB the hub lock is a pure membership mutex: no storage I/O ever runs
+// under it (the durable commit happens before broadcast is even called; see
+// registry.commitAndMirror).
 func (h *Hub) broadcastLocked(from uint64, f Frame) broadcastDrops {
 	var laggards []Conn
 	var laggardIDs []uint64

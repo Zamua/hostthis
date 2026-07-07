@@ -23,6 +23,7 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	nethttp "net/http"
 	"net/http/httptest"
@@ -37,6 +38,17 @@ import (
 	"github.com/Zamua/hostthis/internal/relay"
 	"github.com/Zamua/hostthis/internal/service"
 )
+
+// parseEnvelope decodes a server control envelope (snapshot / put /
+// delete). ok is false for anything else - an opaque relayed peer frame
+// has no "type" field, so it never parses as an envelope.
+func parseEnvelope(data []byte) (durableFrame, bool) {
+	var f durableFrame
+	if err := json.Unmarshal(data, &f); err != nil || f.Type == "" {
+		return durableFrame{}, false
+	}
+	return f, true
+}
 
 // domainSlug is a tiny local converter so the harness's registry
 // assertions read cleanly (the registry's AppConns takes a domain.Slug).
@@ -438,32 +450,37 @@ func TestRelayHarness_LateJoinConsistentWithRoomThenLive(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // NO-DUP under a concurrent PUT || join race. This is the gate for the
-// spec's "every change is in exactly one of {snapshot, stream}, never both"
-// guarantee, asserted at the level the bug actually lives: an HTTP durable
-// PUT racing a fresh WebSocket join. The durable write is two events - the
-// KV COMMIT (so a snapshot reflects it) and the live MIRROR broadcast (so
-// connected clients see it). If those are not atomic with respect to the
-// join's snapshot-read + register, a joiner can observe the SAME key in BOTH
-// its snapshot AND a live mirror frame: a dup. hostthis is payload-opaque
-// and makes no idempotency assumption, so a dup is a real defect.
+// spec's "every change is APPLIED exactly once" guarantee, asserted at the
+// level the bug actually lives: an HTTP durable PUT racing a fresh
+// WebSocket join. Per the spec's register-first join, the no-dup rule is
+// the CLIENT's seq discard (drop any frame with seq <= the snapshot's S -
+// SPEC "The client splice contract"), not a server lock: a frame CAN
+// legally arrive on the wire whose effect the snapshot already reflects,
+// and the discard rule is what applies it zero more times. So the gate
+// counts occurrences the way a spec-compliant client does: once if the
+// snapshot reflects the mutation, plus once per live frame that SURVIVES
+// the discard rule (seq > S). hostthis is payload-opaque and makes no
+// idempotency assumption, so an applied dup is a real defect.
 //
 // The test fires, per round, a PUT of a round-unique key concurrently with a
 // fresh join, then drains the joiner's snapshot + live frames and asserts the
-// key appears EXACTLY ONCE across {snapshot state, live put frames}. Zero is
-// a gap (the write was lost); two is a dup (the write was both snapshotted
-// and mirrored live). Many rounds are run because the interleave that dups is
-// timing-dependent - the dup reproduces within a handful of rounds when the
-// commit and mirror are not atomic.
+// mutation is APPLIED exactly once. Zero is a gap (the write was lost); two
+// is a dup (the snapshot reflected it AND a frame with seq > S also carried
+// it - a broken S stamp or a broken discard rule). Many rounds are run
+// because the interleave is timing-dependent.
 //
-// WEAKEN DEMO: in http/rooms.go's putRoomValue, replace the single
-// `s.Relay.CommitAndMirror(key, commit)` call (whose commit callback returns the
-// EncodePut mirror frame, and which runs the
-// KV commit and the live mirror under ONE acquisition of the room's hub lock)
-// with the commit and the mirror as two separate steps - `commit()` then a
-// standalone hub broadcast - so a join can take the hub lock between them.
-// Demonstrated RED: within ~6 rounds a joiner reports
-// `key "<round-key>" appeared 2x (dup) across snapshot+stream`. Restoring the
-// single atomic commit-and-mirror critical section is green.
+// WEAKEN DEMO (both run, observed, restored; the reds land on the sibling
+// gates because this gate's failing interleave is timing-sampled):
+//   - dropped mirror: in relay/registry.go's commitAndMirror, delete the
+//     local `hub.broadcast(0, mirror)`. Deterministic RED on
+//     TestRelay_LateJoinSnapshotThenStreamNoGapNoDup and
+//     TestRelayHarness_LateJoinConsistentWithRoomThenLive (the post-join
+//     PUT's live mirror never arrives).
+//   - mis-stamped S: in relay/codec.go's encodeSnapshot, stamp
+//     `Seq: kv.Seq - 1`. Deterministic RED on
+//     TestMultiPod_BroadcastReachesAllPods ("fresh room snapshots at seq
+//     18446744073709551615..., want 0/0") - the exact-S stamp the discard
+//     rule fences on is load-bearing everywhere the splice client runs.
 // ---------------------------------------------------------------------------
 
 func TestRelayHarness_ConcurrentPutAndJoinNoDupNoGap(t *testing.T) {
@@ -473,20 +490,26 @@ func TestRelayHarness_ConcurrentPutAndJoinNoDupNoGap(t *testing.T) {
 			val := fmt.Sprintf("%q", fmt.Sprintf("v%d", round))
 			httpPut(t, ts, slug, id, key, []byte(val))
 		},
-		// occurrences: the PUT is reflected once in the snapshot if its key+value
-		// is present, and once per live TypePut frame for the key. Exactly one
-		// total: 0 is a gap (the write was lost), 2 a dup (snapshotted AND
-		// streamed).
-		func(snap []byte, live [][]byte, key string, round int) int {
+		// occurrences: the PUT is APPLIED once if its key+value is in the
+		// snapshot, plus once per live TypePut frame for the key that survives
+		// the client discard rule (seq > the snapshot's S). Exactly one total:
+		// 0 is a gap (the write was lost), 2 a dup (snapshotted AND applied
+		// from the stream).
+		func(snap []byte, snapSeq uint64, live [][]byte, key string, round int) int {
 			val := fmt.Sprintf("%q", fmt.Sprintf("v%d", round))
 			count := 0
 			if containsSub(snap, fmt.Sprintf("%q:%s", key, val)) {
 				count++
 			}
 			for _, f := range live {
-				if hasType(f, relay.TypePut) && containsSub(f, fmt.Sprintf(`"key":%q`, key)) {
-					count++
+				env, ok := parseEnvelope(f)
+				if !ok || env.Type != relay.TypePut || env.Key != key {
+					continue
 				}
+				if env.Seq <= snapSeq {
+					continue // the client discard rule: already reflected in the snapshot
+				}
+				count++
 			}
 			return count
 		},
@@ -496,44 +519,47 @@ func TestRelayHarness_ConcurrentPutAndJoinNoDupNoGap(t *testing.T) {
 
 // TestRelayHarness_ConcurrentDeleteAndJoinNoDupNoGap is the DELETE twin of the
 // PUT no-dup gate. The durable DELETE path (deleteRoomValue ->
-// CommitAndMirror with EncodeDelete) goes through the IDENTICAL atomic
-// commit-and-mirror critical section the PUT path does, so it is structurally
-// covered - but this pins it directly: per round it SEEDS a key, then races a
-// DELETE of that key against a fresh join, and asserts the joiner observes the
-// deletion in EXACTLY ONE of {snapshot reflects it (key absent), live stream
-// carries the delete frame}. The deletion is "reflected in the snapshot" when
-// the key is ABSENT (the commit landed before the snapshot read) and
-// "reflected in the stream" when a TypeDelete frame for the key arrives. Zero
-// is a gap (the key is still present AND no delete frame: the delete was lost);
-// two is a dup (the key is absent in the snapshot AND a delete frame also
-// arrived: the delete was both applied to the snapshot and streamed live to a
-// joiner that already saw it gone). A dup matters because hostthis is
+// CommitAndMirror with EncodeDelete) rides the identical commit-then-mirror
+// path + client discard rule the PUT does, so it is structurally covered -
+// but this pins it directly: per round it SEEDS a key, then races a DELETE
+// of that key against a fresh join, and asserts the joiner APPLIES the
+// deletion exactly once: the deletion is "reflected in the snapshot" when
+// the key is ABSENT (the commit landed before the snapshot read; the
+// delete frame's seq is then <= S and the discard rule drops it), and
+// "applied from the stream" when a TypeDelete frame for the key SURVIVES
+// the discard rule (seq > S). Zero is a gap (the key is still present AND
+// no surviving delete frame: the delete was lost); two is a dup (the key
+// is absent in the snapshot AND a frame with seq > S also carried the
+// delete: a broken S stamp). A dup matters because hostthis is
 // payload-opaque and an app may treat a delete as a state transition.
 //
-// WEAKEN DEMO: in http/rooms.go's deleteRoomValue, run the commit WITHOUT the
-// hub lock and mirror it separately - `commit()` then a standalone
-// `s.Relay.CommitAndMirror(rk, func() (relay.Frame, error) { return EncodeDelete(seq, key), nil })`
-// - so a join can read a post-commit snapshot (key absent) and register before
-// the separate mirror broadcast. Demonstrated RED: within ~5 rounds a joiner
-// reports `key "<round-key>" appeared 2x (DUP) across snapshot+stream`.
-// Restoring the single atomic commit-and-mirror is green.
+// WEAKEN DEMO: same two edits as the PUT gate (drop the local mirror
+// broadcast in registry.commitAndMirror; understate the snapshot's S in
+// codec.encodeSnapshot), observed RED on the deterministic sibling gates
+// named there.
 func TestRelayHarness_ConcurrentDeleteAndJoinNoDupNoGap(t *testing.T) {
 	runConcurrentMutateAndJoinNoDupNoGap(t, "delete",
 		// mutate: DELETE this round's (pre-seeded) key.
 		func(ts *httptest.Server, slug, id, key string, round int) {
 			httpDelete(t, ts, slug, id, key)
 		},
-		// occurrences: the deletion is reflected once in the snapshot when the
-		// key is ABSENT, and once per live TypeDelete frame. Exactly one total.
-		func(snap []byte, live [][]byte, key string, round int) int {
+		// occurrences: the deletion is applied once when the key is ABSENT
+		// from the snapshot, plus once per live TypeDelete frame that survives
+		// the discard rule (seq > S). Exactly one total.
+		func(snap []byte, snapSeq uint64, live [][]byte, key string, round int) int {
 			count := 0
 			if !containsSub(snap, fmt.Sprintf(`%q:`, key)) {
 				count++ // key absent from the snapshot: the delete is reflected there
 			}
 			for _, f := range live {
-				if hasType(f, relay.TypeDelete) && containsSub(f, fmt.Sprintf(`"key":%q`, key)) {
-					count++
+				env, ok := parseEnvelope(f)
+				if !ok || env.Type != relay.TypeDelete || env.Key != key {
+					continue
 				}
+				if env.Seq <= snapSeq {
+					continue // discard rule: the snapshot already reflects it
+				}
+				count++
 			}
 			return count
 		},
@@ -547,19 +573,19 @@ func TestRelayHarness_ConcurrentDeleteAndJoinNoDupNoGap(t *testing.T) {
 
 // runConcurrentMutateAndJoinNoDupNoGap is the shared body of the PUT and DELETE
 // no-dup gates. Per round it (optionally) seeds the round's key, then races
-// `mutate` (a durable PUT or DELETE through the HTTP verb, which the server
-// commits-and-mirrors under the room hub lock) against a fresh WebSocket join,
-// and asserts `occurrences` (the count of the mutation across the joiner's
-// {snapshot, live frames}) is EXACTLY ONE - never 0 (a gap: the change was
-// neither snapshotted nor streamed) and never >1 (a dup: it was both). Many
-// rounds run because the dup-producing interleave is timing-dependent; it
-// reproduces within a handful of rounds when the commit and mirror are not
-// atomic w.r.t. the join.
+// `mutate` (a durable PUT or DELETE through the HTTP verb: the server
+// commits, then mirrors, with no lock held across the commit) against a
+// fresh WebSocket join, and asserts `occurrences` (the count of the
+// mutation as a spec-compliant client APPLIES it: snapshot state + live
+// frames surviving the seq <= S discard rule) is EXACTLY ONE - never 0 (a
+// gap: the change was neither snapshotted nor streamed) and never >1 (an
+// applied dup). Many rounds run because the failing interleaves are
+// timing-dependent.
 func runConcurrentMutateAndJoinNoDupNoGap(
 	t *testing.T,
 	kind string,
 	mutate func(ts *httptest.Server, slug, id, key string, round int),
-	occurrences func(snap []byte, live [][]byte, key string, round int) int,
+	occurrences func(snap []byte, snapSeq uint64, live [][]byte, key string, round int) int,
 	seed func(ts *httptest.Server, slug, id, key string, round int),
 ) {
 	t.Helper()
@@ -606,16 +632,22 @@ func runConcurrentMutateAndJoinNoDupNoGap(
 
 		// The joiner's first frame is its snapshot (may or may not reflect this
 		// round's mutation, depending on whether the commit landed before the
-		// join's snapshot read). Then drain every live frame for a short window.
+		// join's snapshot read). Its exact seq S is the discard fence the
+		// occurrence count applies. Then drain every live frame for a short
+		// window.
 		snap := joiner.expectSnapshotFrame(ctx)
+		snapEnv, ok := parseEnvelope(snap)
+		if !ok || snapEnv.Type != relay.TypeSnapshot {
+			t.Fatalf("round %d (%s): first frame is not a snapshot envelope: %q", round, kind, snap)
+		}
 		live := joiner.drainFrames(ctx, 250*time.Millisecond)
 
-		count := occurrences(snap, live, key, round)
+		count := occurrences(snap, snapEnv.Seq, live, key, round)
 		switch {
 		case count == 0:
 			t.Fatalf("round %d (%s): key %q appeared 0x (GAP) across snapshot+stream - the change was neither snapshotted nor mirrored live", round, kind, key)
 		case count > 1:
-			t.Fatalf("round %d (%s): key %q appeared %dx (DUP) across snapshot+stream - the commit and the live mirror were not atomic w.r.t. the join", round, kind, key, count)
+			t.Fatalf("round %d (%s): key %q appeared %dx (DUP) - applied from the stream despite already being reflected in the snapshot (broken S stamp or discard fence)", round, kind, key, count)
 		}
 
 		joiner.close()

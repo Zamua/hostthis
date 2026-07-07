@@ -109,7 +109,7 @@ type Registry struct {
 	// but BEFORE it takes the hub lock to register the reservation. It is nil
 	// in production (the field is set only by tests that need to drive the
 	// admit-reserved-but-not-registered window deterministically), so the
-	// production path is unchanged. See the transient-hub race test.
+	// production path is unchanged. See the last-leave-vs-admit race test.
 	afterAdmitReserve func(key RoomKey)
 }
 
@@ -144,30 +144,30 @@ func (r *Registry) nextConnID() uint64 {
 //
 // Per-room isolation in the admission path: admit must NOT hold the global
 // registry lock across any hub-lock work, so a join to ANY room never
-// stalls a concurrent join to (or durable commit on) a DIFFERENT room
-// behind that room's hub mutex. It therefore does the per-app + total-rooms
-// accounting and the lazy hub create (the fast, map-only work the global
-// lock must serialize) UNDER r.mu, RELEASES r.mu, and only then takes the
-// target hub's lock for the per-room cap check + register. admit never holds
-// r.mu and hub.mu at once, so it cannot stall on a concurrent
-// commitAndMirror that is holding the same hub's lock across a slow KV
-// commit; and since the two never overlap their lock holds in admit, there
-// is no lock-order cycle to deadlock on.
+// stalls a concurrent join to a DIFFERENT room behind that room's hub
+// mutex. It therefore does the per-app + total-rooms accounting and the
+// lazy hub create (the fast, map-only work the global lock must serialize)
+// UNDER r.mu, RELEASES r.mu, and only then takes the target hub's lock for
+// the per-room cap check + register. admit never holds r.mu and hub.mu at
+// once, so there is no lock-order cycle to deadlock on. (The hub lock
+// itself is a pure membership mutex - no storage I/O ever runs under it,
+// see commitAndMirror - so the register can never stall behind a slow
+// durable commit either.)
 //
 // The hub admit is about to register into is kept alive across the r.mu gap by
 // the PENDING-ADMIT guard, not by emptiness. admit increments r.pending[key]
 // under r.mu (alongside perApp++ and the id reservation) BEFORE it releases
 // r.mu, and decrements it under r.mu AFTER hub.register returns (success OR
-// rollback). Every hub-removal path - removeHub (the onEmpty callback),
-// commitAndMirror's transient cleanup, and admit's own rollback - deletes a hub
-// only when it is empty AND has zero pending admits. So a hub an admit has
-// reserved a slot for but not yet registered into is never torn out from under
-// the register, even by a concurrent commitAndMirror that CREATED a transient
-// hub for the same empty room and would otherwise remove it as "still empty."
-// This closes the transient-hub slot-leak race while keeping admit decoupled
-// from r.mu across hub.register: admit still holds NO global lock while it takes
-// the hub lock to register, so a join to one room never stalls on another
-// room's hub contention.
+// rollback). Every hub-removal path - removeHub (the onEmpty callback fired
+// when a room's LAST connection leaves) and admit's own rollback - deletes a
+// hub only when it is empty AND has zero pending admits. So a hub an admit
+// has reserved a slot for but not yet registered into is never torn out from
+// under the register (the last-leave-vs-admit race: the departing last
+// connection's onEmpty would otherwise remove the hub the admit is about to
+// register into, orphaning the join and leaking its per-app slot). This
+// keeps admit decoupled from r.mu across hub.register: admit still holds NO
+// global lock while it takes the hub lock to register, so a join to one room
+// never stalls on another room's hub contention.
 //
 // The order of checks: the total-rooms cap (an upgrade creating a NEW hub)
 // and the per-app aggregate are checked under r.mu; the per-room cap is
@@ -235,10 +235,10 @@ func (r *Registry) admit(key RoomKey) (h *Hub, id uint64, err error) {
 
 	if !ok {
 		// At the per-room cap. Roll back the optimistic per-app reservation and
-		// tear down a hub we created transiently (removeHub re-checks emptiness
-		// AND pending == 0 under r.mu, so a real connection that joined it in
-		// the meantime - or another in-flight admit - keeps it). decApp +
-		// removeHub each take r.mu themselves.
+		// tear down a hub we created for this admit alone (removeHub re-checks
+		// emptiness AND pending == 0 under r.mu, so a real connection that
+		// joined it in the meantime - or another in-flight admit - keeps it).
+		// decApp + removeHub each take r.mu themselves.
 		r.decApp(key.App)
 		if created {
 			r.removeHub(key)
@@ -266,12 +266,12 @@ func (r *Registry) clearPending(key RoomKey) {
 // reservation is a placeholder Conn that admit registers into the hub to
 // hold the slot atomically with the cap check. joinWithSnapshot later swaps
 // it for the real connection under the hub lock. A broadcast that hits the
-// reservation (before the real conn is bound) is safely discarded: the
-// snapshot read in joinWithSnapshot happens under the same hub lock, AFTER
-// any such broadcast, and that broadcast's write committed before its
-// broadcast - so the discarded change is in the snapshot the joiner then
-// receives. The id is reserved from the instant of admission, so the caps
-// hold against concurrent admits.
+// reservation (before the real conn is bound) is safely discarded: a frame
+// broadcast before the real conn is registered came from a commit that
+// completed before the join's snapshot read starts, so its effect is IN
+// the snapshot (seq <= S) the joiner then receives - the missed frame is
+// never a gap. The id is reserved from the instant of admission, so the
+// caps hold against concurrent admits.
 type reservation struct{ id uint64 }
 
 func newReservation(id uint64) reservation { return reservation{id: id} }
@@ -280,32 +280,38 @@ func (reservation) Send(Frame) bool { return true }
 func (reservation) Close()          {}
 func (r reservation) ID() uint64    { return r.id }
 
-// joinWithSnapshot completes a late-join atomically: it reads the room's
-// durable snapshot and registers the real connection c into the hub UNDER
-// THE HUB'S LOCK, so no broadcast can interleave between the snapshot read
-// and the register. This is the no-gap / no-dup guarantee the spec
-// requires (see SPEC.md "Persistence and late-join"):
+// joinWithSnapshot completes a late-join in the spec's register-FIRST
+// order (see SPEC.md "Persistence and late-join"): it swaps the admit's
+// reservation for the real connection c UNDER the hub lock (a pure
+// membership mutex - from that instant every broadcast is queued for c),
+// then reads the room's durable snapshot OUTSIDE the lock and returns it.
+// The caller sends the returned snapshot as the connection's FIRST wire
+// frame (the reserved first-frame slot), ahead of any live frames that
+// buffered on c during the read.
 //
-//   - snapshot is built (via the readSnapshot callback) and queued onto c
-//     as the FIRST frame, then the reservation placeholder is swapped for
-//     the real c (c enters the broadcast set) - all while h.mu is held, so
-//     a concurrent commit-and-mirror broadcast on this room is serialized
-//     against it.
-//   - A durable write whose broadcast already ran (before this lock was
-//     acquired) committed to the KV before this snapshot read (which is
-//     under the lock, after), so it is IN the snapshot - not missed (no
-//     gap) and not also delivered live (c was not yet in the set when it
-//     broadcast: no dup).
-//   - A durable write whose broadcast runs AFTER this returns finds c in
-//     the broadcast set and is delivered live - not missed (no gap), and it
-//     post-dates the snapshot so it is not also in it (no dup).
+// Correctness rides the per-room sequence, not the lock:
 //
-// readSnapshot returns the frame to queue first plus an error; on error
-// joinWithSnapshot returns it without registering c (the caller closes the
-// connection: a client that cannot be caught up reconnects). enqueue is a
-// non-blocking enqueue onto c's send buffer; the snapshot is the first
-// frame so it always fits.
-func (r *Registry) joinWithSnapshot(key RoomKey, c Conn, readSnapshot func() (Frame, error), enqueue func(Frame) bool) error {
+//   - No gap. A mirror frame broadcast BEFORE the register came from a
+//     commit that completed before the snapshot read started, so its
+//     effect is IN the snapshot (seq <= S). A commit whose broadcast runs
+//     after the register finds c in the set and is delivered live.
+//   - No dup. A frame CAN be both delivered to c and reflected in the
+//     snapshot (it broadcast inside the join window); the client's discard
+//     rule (drop seq <= S) applies it exactly once. No server lock is
+//     needed for this - which is the point: the same rule de-duplicates
+//     frames arriving from PEER pods, which no pod-local lock could
+//     serialize against.
+//
+// The hub lock is held only for the map swap; the snapshot read (a
+// storage Scan - an object-store round trip on the shale backend) runs
+// with NO lock held, so a slow read stalls only this join, never the
+// room's fan-out.
+//
+// On a readSnapshot error the error is returned and no frame is sent; c
+// stays registered until the caller's deferred release unregisters it
+// (the caller closes the connection: a client that cannot be caught up
+// reconnects).
+func (r *Registry) joinWithSnapshot(key RoomKey, c Conn, readSnapshot func() (Frame, error)) (Frame, error) {
 	r.mu.Lock()
 	hub := r.hubs[key]
 	r.mu.Unlock()
@@ -313,28 +319,26 @@ func (r *Registry) joinWithSnapshot(key RoomKey, c Conn, readSnapshot func() (Fr
 		// Hub gone (the reservation's room was torn down between admit and
 		// here - only possible if release already ran, which it has not).
 		// Treat as a failed join.
-		return errHubGone
+		return Frame{}, errHubGone
 	}
 
 	hub.mu.Lock()
-	defer hub.mu.Unlock()
-
 	// The reservation must still hold this id's slot; if not, the connection
 	// was already released (e.g. shutdown) and we must not register.
 	if _, ok := hub.conns[c.ID()]; !ok {
-		return errHubGone
+		hub.mu.Unlock()
+		return Frame{}, errHubGone
 	}
-
-	snap, err := readSnapshot()
-	if err != nil {
-		return err
-	}
-	// Queue the snapshot as the first frame, THEN make c the broadcast
-	// target. Both under h.mu: a broadcast cannot slip a live frame ahead of
-	// the snapshot, and cannot be missed once c is in the set.
-	enqueue(snap)
+	// Register FIRST: c is the broadcast target from this instant, so no
+	// later mirror can be missed. Frames delivered before the snapshot is
+	// sent wait in c's send buffer behind the reserved first-frame slot.
 	hub.conns[c.ID()] = c
-	return nil
+	hub.mu.Unlock()
+
+	// Snapshot read OUTSIDE the lock. Every commit that completed before
+	// this read began is reflected in it (and counted by its exact S), which
+	// is what makes the register-first order gapless.
+	return readSnapshot()
 }
 
 // release ends a connection: it unregisters id from key's hub and
@@ -393,8 +397,8 @@ func (r *Registry) hub(key RoomKey) *Hub {
 
 // getOrCreateHubLocked returns key's hub, creating an empty one (with the
 // standard onEmpty / onDrop wiring) if none exists. created reports whether
-// this call made it, so the commit-and-mirror path can tear down a hub it
-// created transiently for a room with no live connections. Caller holds r.mu.
+// this call made it, so admit's per-room-cap rollback can tear down a hub
+// it created for an admit that was then refused. Caller holds r.mu.
 func (r *Registry) getOrCreateHubLocked(key RoomKey) (hub *Hub, created bool) {
 	if hub = r.hubs[key]; hub != nil {
 		return hub, false
@@ -407,82 +411,58 @@ func (r *Registry) getOrCreateHubLocked(key RoomKey) (hub *Hub, created bool) {
 	return hub, true
 }
 
-// commitAndMirror runs a durable write's KV COMMIT and its live MIRROR
-// broadcast as ONE critical section under the room's hub lock, so a
-// concurrent join's snapshot-read + register cannot interleave between them.
-// This is the no-dup atomicity the spec requires (see SPEC.md "Persistence
-// and late-join"): a durable write ends up in EXACTLY ONE of {a joiner's
-// snapshot, a joiner's live stream}, never both (dup) and never neither
-// (gap).
+// commitAndMirror runs a durable write's KV COMMIT and then its live
+// MIRROR broadcast: commit FIRST, with NO lock held, broadcast after a
+// successful commit. The spec forbids storage I/O under the hub lock (see
+// SPEC.md "Persistence and late-join": the hub lock guards the connection
+// set only, and a room's live broadcasts never stall behind a durable
+// write's object-storage round trip) - a shale commit is an object-store
+// CAS taking 110ms-1.5s, and a hung storage call must wedge only ITS
+// writer, never the room's ephemeral fan-out, peer deliveries, or joins.
 //
-//   - commit performs the durable KV write (it is the service-layer Put /
+//   - commit performs the durable KV write (the service-layer Put /
 //     Delete) and returns the mirror frame to fan out, built AFTER the
-//     write so it carries the per-room sequence the commit assigned. It
-//     runs UNDER the hub lock, so the room's live broadcasts wait
-//     on it for its duration. This is the latency characteristic design (a)
-//     accepts: the durable path is low-frequency, so the stall is acceptable;
-//     high-frequency live motion rides ephemeral raw relay frames that never
-//     take this path. The lock is the per-room hub mutex (not a global lock),
-//     so one room's durable write never stalls another room.
-//   - the returned mirror is the live frame fanned out after a successful
-//     commit. It is broadcast under the SAME hub-lock acquisition
-//     (broadcastLocked), so a join serialized on this hub either snapshots
-//     after the commit (key in snapshot, and it registered after the mirror
-//     so it is NOT also live) or before it (key not yet in snapshot, but it
-//     registered before the mirror so it DOES receive it live) - exactly one.
+//     write so it carries the per-room sequence the commit assigned.
+//   - the mirror is then broadcast to the room's live hub, if one exists.
+//     A room with NO live hub skips the local fan-out entirely: there are
+//     no local subscribers to mirror to, and no transient hub is created -
+//     a joiner racing this commit reads a snapshot whose exact S already
+//     reflects it (the storage read is the serialization point, not a
+//     lock), so nothing is missed.
+//
+// No-gap / no-dup against a concurrent join rides the SEQUENCE, not a
+// critical section: the joiner registers first, snapshots second, and
+// discards any frame with seq <= S (see joinWithSnapshot). A frame this
+// broadcast delivers to a joiner whose snapshot also reflects the write is
+// a wire-level duplicate the client's discard rule drops - the same rule
+// that de-duplicates the frame when it arrives from a PEER pod, which no
+// pod-local lock could order anyway.
 //
 // The successful mirror frame is returned to the caller (Relay), which
-// publishes it to the peer pods OUTSIDE this lock - cross-pod ordering
-// rides the frame's seq, not this lock, so holding the lock across the
-// publish would buy nothing and cost the room's local broadcasts.
-//
-// If commit fails, the error is returned and nothing is mirrored. A hub is
-// created transiently for a room with no live connections (so the commit
-// still serializes against a join that is admitting concurrently, closing the
-// gap that a "skip the mirror when no hub" check would open); it is removed
-// again if it is still empty afterward, so an empty hub never lingers.
+// publishes it to the peer pods - also off every lock, best-effort, never
+// on the commit path. If commit fails, the error is returned and nothing
+// is mirrored anywhere.
 func (r *Registry) commitAndMirror(key RoomKey, commit func() (Frame, error)) (Frame, error) {
-	r.mu.Lock()
-	hub, created := r.getOrCreateHubLocked(key)
-	// Take the hub lock BEFORE releasing the registry lock (lock order
-	// r.mu -> hub.mu, the same order admit uses), so no concurrent join can
-	// slip its snapshot-read + register between our commit and our mirror.
-	hub.mu.Lock()
-	r.mu.Unlock()
-
 	mirror, err := commit()
 	if err != nil {
-		hub.mu.Unlock()
-		// removeHub is a no-op unless the hub is still empty, so a real
-		// connection that joined the transient hub during the commit keeps it.
-		if created {
-			r.removeHub(key)
-		}
 		return Frame{}, err
 	}
-	drops := hub.broadcastLocked(0, mirror)
-	hub.mu.Unlock()
-	drops.run()
-
-	// Tear down a hub THIS commit created transiently for a room with no live
-	// connections, IF it is still empty (removeHub re-checks emptiness, so a
-	// connection that joined during the commit keeps the hub). A pre-existing
-	// hub is owned by its connections' own teardown.
-	if created {
-		r.removeHub(key)
+	if hub := r.hub(key); hub != nil {
+		hub.broadcast(0, mirror)
 	}
 	return mirror, nil
 }
 
 // removeHub deletes key's hub from the registry IF it is empty AND has no
-// in-flight admit (the pending-admit guard). It is the onEmpty callback the hub
-// fires when its last connection leaves, and the transient-cleanup path
-// commitAndMirror / admit-rollback use. Both conditions are re-checked under
-// the registry lock so neither a connection that joined between the hub's "I am
-// empty" signal and this call, NOR an admit that has reserved a slot but not
-// yet registered its reservation into the hub, is torn out from under. The
-// pending check is what closes the transient-hub slot-leak race: a hub an admit
-// is about to register into is never removed.
+// in-flight admit (the pending-admit guard). It is the onEmpty callback the
+// hub fires when its last connection leaves, and the rollback path admit
+// uses when the per-room cap refuses a register. Both conditions are
+// re-checked under the registry lock so neither a connection that joined
+// between the hub's "I am empty" signal and this call, NOR an admit that has
+// reserved a slot but not yet registered its reservation into the hub, is
+// torn out from under. The pending check is what closes the
+// last-leave-vs-admit slot-leak race: a hub an admit is about to register
+// into is never removed.
 func (r *Registry) removeHub(key RoomKey) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

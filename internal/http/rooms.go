@@ -245,16 +245,17 @@ func (s *Server) putRoomValue(w http.ResponseWriter, r *http.Request, appSlug do
 		http.Error(w, "read body\n", http.StatusBadRequest)
 		return
 	}
-	// Commit the durable write and mirror it to the room's live relay hub as
-	// ONE atomic step under the room's hub lock, so a local join racing this
-	// PUT cannot observe the key in BOTH its snapshot and a live frame (the
-	// no-dup guarantee - see SPEC.md "Persistence and late-join"). The
-	// mirror frame is built INSIDE the commit callback because it carries
-	// the per-room sequence the durable write assigns (SPEC.md "The wire
-	// format: seq on every durable frame"); the relay fans it out locally
-	// under the lock and publishes it to the peer pods after. The relay
-	// never PERSISTS a frame; the mirror is the live fan-out of a change that
-	// commits through the one cap-checked PutValue path. With no relay (relay
+	// Commit the durable write, then mirror it to the room's live relay hub
+	// and the peer pods. The mirror frame is built INSIDE the commit
+	// callback because it carries the per-room sequence the durable write
+	// assigns (SPEC.md "The wire format: seq on every durable frame"); that
+	// sequence - not any lock - is what keeps a join racing this PUT from
+	// double-applying or missing it (the client discards frames with
+	// seq <= its snapshot's S; see SPEC.md "Persistence and late-join").
+	// The commit runs with NO relay lock held, so a slow storage write
+	// never stalls the room's live fan-out. The relay never PERSISTS a
+	// frame; the mirror is the live fan-out of a change that commits
+	// through the one cap-checked PutValue path. With no relay (relay
 	// disabled on this backend), the commit runs on its own.
 	if s.Relay != nil {
 		err = s.Relay.CommitAndMirror(relay.RoomKey{App: appSlug, ID: id}, func() (relay.Frame, error) {
@@ -279,11 +280,11 @@ func (s *Server) deleteRoomValue(w http.ResponseWriter, r *http.Request, appSlug
 		http.Error(w, "invalid key\n", http.StatusBadRequest)
 		return
 	}
-	// Commit the durable delete and mirror it to the room's live relay hub
-	// atomically under the room's hub lock (see putRoomValue for why the
-	// commit + mirror are one critical section and why the frame is built
-	// inside the callback: it carries the assigned seq). A nil relay runs
-	// the commit on its own.
+	// Commit the durable delete, then mirror it to the room's live relay
+	// hub and the peer pods (see putRoomValue for why the frame is built
+	// inside the callback: it carries the assigned seq, which is what makes
+	// a racing join correct - no lock is held across the commit). A nil
+	// relay runs the commit on its own.
 	var err error
 	if s.Relay != nil {
 		err = s.Relay.CommitAndMirror(relay.RoomKey{App: appSlug, ID: id}, func() (relay.Frame, error) {
