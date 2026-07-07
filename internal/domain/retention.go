@@ -17,6 +17,22 @@ const DefaultRetentionWindow = 30 * 24 * time.Hour
 // unambiguous marker the read/display layers test against to render "never".
 var NeverExpires = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
 
+// ExpiredPaste references one expired paste surfaced by the sweep's expiry
+// scan: the slug to delete plus, on backends that keep a standalone expiry
+// index, an opaque reference to the exact index entry that surfaced it. The
+// sweep round-trips the reference into the repo's DeleteExpired so the index
+// entry is removed even when the paste record is already gone; without that,
+// an orphaned entry would resurface on every scan forever. See docs/SPEC.md
+// "The storage contract" (Expiry).
+type ExpiredPaste struct {
+	Slug Slug
+	// IndexRef is opaque to everything but the backend that produced it
+	// (the index-backed backends encode the entry's full key). Empty on
+	// backends whose expiry scan reads the paste records themselves and
+	// so have no standalone entry to clean.
+	IndexRef string
+}
+
 // Retention is the installation's content-TTL policy, set once at the
 // composition root from config and injected into the services / repos that
 // stamp ExpiresAt. A positive Window expires content that long after its last

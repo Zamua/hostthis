@@ -57,13 +57,15 @@ func (r *recordingOrphanSweeper) SweepBlobOrphans(_ context.Context, now time.Ti
 
 // noopSweepRepo is a SweepRepo with nothing to expire and no referenced shas -
 // the shale path's metadata side is irrelevant to what these tests pin (the
-// orphan sweep, not the expiry pass). Panics on Delete so an unexpected expiry
-// surfaces.
+// orphan sweep, not the expiry pass). Panics on DeleteExpired so an unexpected
+// expiry surfaces.
 type noopSweepRepo struct{}
 
-func (noopSweepRepo) ExpiredSlugs(_ time.Time) ([]string, error) { return nil, nil }
-func (noopSweepRepo) Delete(_ domain.Slug) error                 { panic("not expected: nothing should expire") }
-func (noopSweepRepo) ReferencedBlobSHAs() ([]string, error)      { return nil, nil }
+func (noopSweepRepo) ExpiredPastes(_ time.Time) ([]domain.ExpiredPaste, error) { return nil, nil }
+func (noopSweepRepo) DeleteExpired(_ domain.ExpiredPaste) (bool, error) {
+	panic("not expected: nothing should expire")
+}
+func (noopSweepRepo) ReferencedBlobSHAs() ([]string, error) { return nil, nil }
 
 // TestSweep_ShalePath_NoGlobalGC: with Blobs nil (the shale wiring) Once does
 // NOT run the global content-addressed GC - it returns early before any

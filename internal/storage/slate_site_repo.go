@@ -496,7 +496,7 @@ func (r *SlateRepo) DeleteSite(slug domain.Slug) error {
 // fixed-width expirySiteTimeFormat, so the timestamp segment's byte order
 // is time order EXACTLY (a string compare is correct even within a shared
 // whole second) - unlike the variable-width time.RFC3339Nano the paste
-// ExpiredSlugs still uses. The cutoff is formatted with the SAME layout so
+// ExpiredPastes still uses. The cutoff is formatted with the SAME layout so
 // the compare stays aligned.
 func (r *SlateRepo) ExpiredSiteSlugs(now time.Time) ([]string, error) {
 	items, err := r.scanPrefix(prefixExpirySites())
