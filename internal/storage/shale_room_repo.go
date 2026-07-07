@@ -299,6 +299,22 @@ func (r *ShaleRepo) GetRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 // than returning a state whose S is a lie (the relay join then fails and
 // the client reconnects - correctness is never traded for a stale fence).
 //
+// REPLICATION BAR (R <= 2): the fence's exactness additionally assumes
+// every read it issues - the two seq reads AND the union scan between them
+// - observes every mutation the equal fence values bracket. That holds at
+// R=1 (a single owner serves everything) and at R=2 (the write bar is 2/2:
+// a write acks only once EVERY replica holds it, so any member a read
+// lands on is complete). At R >= 3 a write's ack set is a quorum, so a
+// read-one union scan served mid-handoff by a member OUTSIDE some write's
+// ack set could miss a mutation that both fence reads - served by
+// up-to-date members - agree is committed: S would be stamped high with
+// the mutation absent from the state, a hole the splice contract CANNOT
+// detect (the snapshot claims to cover it). Before raising the room
+// tier's replication factor past 2, this fence must be revisited (e.g. a
+// quorum union scan, or bracketing scan and fence reads on the same
+// member set). The current bar is pinned by
+// TestShaleRoomSeqFence_ReplicationBar.
+//
 // Single-shard ScanPrefix over roomkv/<app>/<uuid>/ (every room family
 // co-shards on {app-slug}, so this never fans out). An existing room with no
 // values returns an empty (non-nil) RoomKV; a nonexistent room scans empty
@@ -481,6 +497,17 @@ func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 		return nil
 	})
 	if err != nil {
+		// AMBIGUOUS-COMMIT CAVEAT (documented limitation; see SPEC "Multi-pod
+		// relay -> Delivery semantics"): an error here does NOT always mean
+		// the write failed. If the CAS landed but its ack was lost (a timeout
+		// racing the object-store round trip), the room's seq was consumed
+		// DURABLY while this caller - which mirrors only on success -
+		// broadcasts no frame for it, locally or to any peer. Every
+		// subscriber then sees a hole at that seq that only the NEXT durable
+		// frame exposes, so a then-quiet room stays visually stale until one
+		// arrives; the durable KV itself is never wrong (a re-snapshot heals
+		// any subscriber). Accepted for now; the periodic room-seq beacon the
+		// spec names is the future fix.
 		return 0, err
 	}
 	return assigned, nil
@@ -548,6 +575,8 @@ func (r *ShaleRepo) DeleteRoomValue(appSlug domain.Slug, id domain.RoomID, key s
 		return nil
 	})
 	if err != nil {
+		// Same ambiguous-commit caveat as PutRoomValue: an error here can
+		// still have consumed a seq durably with no mirror frame anywhere.
 		return 0, err
 	}
 	return assigned, nil
