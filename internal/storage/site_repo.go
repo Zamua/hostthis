@@ -313,24 +313,43 @@ func (r *SiteRepo) Delete(slug domain.Slug) error {
 	return nil
 }
 
-// ExpiredSiteSlugs returns the slugs of sites whose expires_at is at or
+// ExpiredSites returns one reference per site whose expires_at is at or
 // before now. The sweep deletes them; the HTTP read path 404s expired-
-// but-not-yet-deleted rows inline.
-func (r *SiteRepo) ExpiredSiteSlugs(now time.Time) ([]string, error) {
+// but-not-yet-deleted rows inline. The sqlite scan reads the sites table
+// itself (no standalone expiry index to fall out of sync with the
+// records), so IndexRef is always empty and a returned slug always names
+// a live row at scan time.
+func (r *SiteRepo) ExpiredSites(now time.Time) ([]domain.ExpiredSite, error) {
 	rows, err := r.db.Query(`SELECT slug FROM sites WHERE expires_at <= ?`, formatSiteExpiry(now))
 	if err != nil {
-		return nil, fmt.Errorf("expired site slugs: %w", err)
+		return nil, fmt.Errorf("expired sites: %w", err)
 	}
 	defer rows.Close()
-	var out []string
+	var out []domain.ExpiredSite
 	for rows.Next() {
 		var s string
 		if err := rows.Scan(&s); err != nil {
 			return nil, err
 		}
-		out = append(out, s)
+		out = append(out, domain.ExpiredSite{Slug: domain.Slug(s)})
 	}
 	return out, rows.Err()
+}
+
+// DeleteExpiredSite processes one expired reference: the same full-cascade
+// delete as Delete, reporting whether a site row was actually removed. On
+// sqlite there is no standalone expiry-index entry to clean (the scan IS
+// the sites table), so a missing row is simply a no-op that returns false.
+func (r *SiteRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
+	res, err := r.db.Exec(`DELETE FROM sites WHERE slug = ?`, ref.Slug.String())
+	if err != nil {
+		return false, fmt.Errorf("delete expired site %q: %w", ref.Slug, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("delete expired site %q: rows affected: %w", ref.Slug, err)
+	}
+	return n > 0, nil
 }
 
 // ReferencedSiteBlobSHAs returns the set of blob SHAs referenced by any

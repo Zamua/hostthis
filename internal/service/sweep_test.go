@@ -321,6 +321,117 @@ func (r *indexedSweepRepo) DeleteExpired(ref domain.ExpiredPaste) (bool, error) 
 
 func (r *indexedSweepRepo) ReferencedBlobSHAs() ([]string, error) { return []string{"sha-live"}, nil }
 
+// TestSweep_UnreachableRefsSkippedAfterResurface pins the sweep's
+// convergence guard: a ref whose processing REPORTS success but does not
+// persist (the scan surfaces the same ref again on the next pass - e.g.
+// legacy data physically placed where routed deletes cannot reach it, or a
+// diverged replica resurrecting a deleted record) is classified UNREACHABLE:
+// the sweep stops re-processing it every pass (one attempt, then skip),
+// keeps it out of the deleted/cleaned counters, and reports the skipped
+// count instead. Without the guard the sweep spins forever re-"cleaning"
+// the same refs (observed as a constant cleaned-count every cycle).
+//
+// The fixture key is byte-for-byte a real stuck staging entry's shape.
+func TestSweep_UnreachableRefsSkippedAfterResurface(t *testing.T) {
+	// The sticky ref: every scan returns it; DeleteExpired reports the
+	// orphan-cleanup "success" but nothing actually drains.
+	stickyKey := "expiry/2026-07-01T03:20:59.990221663Z/8ajitdpm"
+	repo := &stickySweepRepo{ref: domain.ExpiredPaste{Slug: "8ajitdpm", IndexRef: stickyKey}}
+
+	var logbuf bytes.Buffer
+	sweep := service.NewSweep(repo, nil, log.New(&logbuf, "", 0))
+	now := time.Date(2026, 7, 7, 0, 0, 0, 0, time.UTC)
+
+	// Pass 1: first sight - the sweep attempts the cleanup (1 call).
+	if _, _, err := sweep.Once(now); err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+	if repo.deleteCalls != 1 {
+		t.Fatalf("pass 1 should attempt the ref once, got %d calls", repo.deleteCalls)
+	}
+
+	// Pass 2: the ref RESURFACED after a reported-successful processing -
+	// the delete provably did not persist. The sweep must NOT attempt it
+	// again (no second call), must not count it as cleaned, and must
+	// report it as unreachable.
+	logbuf.Reset()
+	if _, _, err := sweep.Once(now); err != nil {
+		t.Fatalf("pass 2: %v", err)
+	}
+	if repo.deleteCalls != 1 {
+		t.Fatalf("resurfaced ref must not be re-processed: want 1 total call, got %d", repo.deleteCalls)
+	}
+	if !bytes.Contains(logbuf.Bytes(), []byte("unreachable")) {
+		t.Fatalf("pass 2 should report the unreachable ref; got:\n%s", logbuf.String())
+	}
+	if bytes.Contains(logbuf.Bytes(), []byte("orphaned expiry-index entries")) {
+		t.Fatalf("pass 2 must not claim it cleaned anything; got:\n%s", logbuf.String())
+	}
+
+	// Pass 3: still skipped (the classification is sticky while the ref
+	// keeps appearing).
+	if _, _, err := sweep.Once(now); err != nil {
+		t.Fatalf("pass 3: %v", err)
+	}
+	if repo.deleteCalls != 1 {
+		t.Fatalf("unreachable ref must stay skipped: want 1 total call, got %d", repo.deleteCalls)
+	}
+}
+
+// TestSweep_UnreachableRefForgottenOnceDrained pins the guard's pruning: a
+// ref that STOPS appearing (drained externally, e.g. an operator purge)
+// leaves the guard's memory, so a later reappearance of the same id (a
+// fresh, legitimate record) is treated as new and processed again.
+func TestSweep_UnreachableRefForgottenOnceDrained(t *testing.T) {
+	stickyKey := "expiry/2026-07-01T03:20:59.990221663Z/8ajitdpm"
+	repo := &stickySweepRepo{ref: domain.ExpiredPaste{Slug: "8ajitdpm", IndexRef: stickyKey}}
+	sweep := service.NewSweep(repo, nil, log.New(io.Discard, "", 0))
+	now := time.Date(2026, 7, 7, 0, 0, 0, 0, time.UTC)
+
+	// Pass 1 attempts; pass 2 classifies unreachable + skips.
+	_, _, _ = sweep.Once(now)
+	_, _, _ = sweep.Once(now)
+	if repo.deleteCalls != 1 {
+		t.Fatalf("setup: want 1 call after 2 passes, got %d", repo.deleteCalls)
+	}
+
+	// The ref drains externally: a pass with an empty scan prunes it.
+	repo.gone = true
+	_, _, _ = sweep.Once(now)
+
+	// It reappears (a fresh record with the same identity): processed anew.
+	repo.gone = false
+	_, _, _ = sweep.Once(now)
+	if repo.deleteCalls != 2 {
+		t.Fatalf("a drained-then-reborn ref must be attempted again: want 2 calls, got %d", repo.deleteCalls)
+	}
+}
+
+// stickySweepRepo is a SweepRepo whose expiry scan keeps returning the same
+// ref no matter how often DeleteExpired "succeeds" - the observed staging
+// pathology (the entry's physical placement is not reachable by the routed
+// delete, so the mutation never lands where the scan reads). Setting gone
+// empties the scan (external cleanup).
+type stickySweepRepo struct {
+	ref         domain.ExpiredPaste
+	gone        bool
+	deleteCalls int
+}
+
+func (r *stickySweepRepo) ExpiredPastes(_ time.Time) ([]domain.ExpiredPaste, error) {
+	if r.gone {
+		return nil, nil
+	}
+	return []domain.ExpiredPaste{r.ref}, nil
+}
+
+func (r *stickySweepRepo) DeleteExpired(_ domain.ExpiredPaste) (bool, error) {
+	r.deleteCalls++
+	return false, nil // paste already gone; entry cleanup reported ok (but never persists)
+}
+
+func (r *stickySweepRepo) ReferencedBlobSHAs() ([]string, error) { return []string{"sha-x"}, nil }
+
 // buggyRepo simulates the failure mode this test guards against:
 // ReferencedBlobSHAs always returns nil (i.e. "no shas are
 // referenced") even when paste rows exist. Only methods the sweep

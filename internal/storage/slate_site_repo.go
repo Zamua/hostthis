@@ -86,10 +86,13 @@ func (s *SlateSiteRepo) PreClaimSlug(_ context.Context, _ domain.Slug, _ string,
 	return nil
 }
 
-// service.SweepSites
+// service.SweepSites (Delete also serves the owner-facing removal path)
 func (s *SlateSiteRepo) Delete(slug domain.Slug) error { return s.repo.DeleteSite(slug) }
-func (s *SlateSiteRepo) ExpiredSiteSlugs(now time.Time) ([]string, error) {
-	return s.repo.ExpiredSiteSlugs(now)
+func (s *SlateSiteRepo) ExpiredSites(now time.Time) ([]domain.ExpiredSite, error) {
+	return s.repo.ExpiredSites(now)
+}
+func (s *SlateSiteRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
+	return s.repo.DeleteExpiredSite(ref)
 }
 func (s *SlateSiteRepo) ReferencedSiteBlobSHAs() ([]string, error) {
 	return s.repo.ReferencedSiteBlobSHAs()
@@ -491,22 +494,25 @@ func (r *SlateRepo) DeleteSite(slug domain.Slug) error {
 	return nil
 }
 
-// ExpiredSiteSlugs returns the slugs of sites whose ExpiresAt is at or
-// before now (inclusive boundary). The site expiry keys use the
-// fixed-width expirySiteTimeFormat, so the timestamp segment's byte order
-// is time order EXACTLY (a string compare is correct even within a shared
-// whole second) - unlike the variable-width time.RFC3339Nano the paste
-// ExpiredPastes still uses. The cutoff is formatted with the SAME layout so
-// the compare stays aligned.
-func (r *SlateRepo) ExpiredSiteSlugs(now time.Time) ([]string, error) {
+// ExpiredSites returns one reference per site whose ExpiresAt is at or
+// before now (inclusive boundary): the slug plus the entry's full key as
+// the opaque IndexRef, so DeleteExpiredSite can remove the EXACT entry the
+// scan surfaced even when the site record is already gone. The site expiry
+// keys use the fixed-width expirySiteTimeFormat, so the timestamp
+// segment's byte order is time order EXACTLY (a string compare is correct
+// even within a shared whole second) - unlike the variable-width
+// time.RFC3339Nano the paste ExpiredPastes still uses. The cutoff is
+// formatted with the SAME layout so the compare stays aligned.
+func (r *SlateRepo) ExpiredSites(now time.Time) ([]domain.ExpiredSite, error) {
 	items, err := r.scanPrefix(prefixExpirySites())
 	if err != nil {
 		return nil, err
 	}
 	cutoff := now.UTC().Format(expirySiteTimeFormat)
-	var out []string
+	var out []domain.ExpiredSite
 	for _, item := range items {
-		rest := strings.TrimPrefix(string(item.Key), "expiry_sites/")
+		k := string(item.Key)
+		rest := strings.TrimPrefix(k, "expiry_sites/")
 		idx := strings.LastIndex(rest, "/")
 		if idx < 0 {
 			continue
@@ -514,10 +520,51 @@ func (r *SlateRepo) ExpiredSiteSlugs(now time.Time) ([]string, error) {
 		ts := rest[:idx]
 		slug := rest[idx+1:]
 		if ts <= cutoff {
-			out = append(out, slug)
+			out = append(out, domain.ExpiredSite{Slug: domain.Slug(slug), IndexRef: k})
 		}
 	}
 	return out, nil
+}
+
+// DeleteExpiredSite processes one expired reference: the same full-cascade
+// delete as DeleteSite when the site record still exists, and then - in
+// every case - removal of the exact expiry-index entry the scan surfaced
+// (the cascade removes the DERIVED key; this removes the OBSERVED one).
+// Idempotent: a missing record and a missing entry are both no-ops.
+// Returns whether a site record was actually deleted. Mirrors the paste
+// DeleteExpired; see docs/SPEC.md "Static-site storage" (sweep path).
+func (r *SlateRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
+	entryKey, err := expirySiteIndexKey(ref)
+	if err != nil {
+		return false, err
+	}
+	deleted := false
+	var row siteRow
+	switch err := r.getJSON(keySite(ref.Slug), &row); {
+	case errors.Is(err, ErrNotFound):
+		// Orphaned entry: nothing to cascade, just clean the entry below.
+	case err != nil:
+		return false, err
+	default:
+		if err := r.DeleteSite(ref.Slug); err != nil {
+			return false, err
+		}
+		deleted = true
+	}
+	if entryKey != nil {
+		tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
+		if err != nil {
+			return deleted, fmt.Errorf("begin tx: %w", err)
+		}
+		if err := tx.Delete(entryKey); err != nil {
+			_ = tx.Rollback()
+			return deleted, fmt.Errorf("delete site expiry entry %s: %w", entryKey, err)
+		}
+		if _, err := tx.Commit(); err != nil {
+			return deleted, fmt.Errorf("commit delete site expiry entry %s: %w", entryKey, err)
+		}
+	}
+	return deleted, nil
 }
 
 // ReferencedSiteBlobSHAs returns every distinct blob SHA referenced by any

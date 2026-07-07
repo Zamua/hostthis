@@ -2730,7 +2730,34 @@ behaviors are expressed in terms of inputs and observable outputs:
   that merely cleaned orphaned index entries - and logs the orphaned
   entries it cleaned as a separate count. (In dry-run the pass mutates
   nothing, so its would-expire count is the entry count, an upper bound
-  on real deletions.)
+  on real deletions.) Static sites carry the same contract through
+  `SweepSites` (`ExpiredSites` / `DeleteExpiredSite` over the
+  `expiry_sites/` index); see "Static-site storage".
+- **Sweep convergence guard (unreachable refs).** "One pass drains what
+  it scans" holds only when the store the scan READS is the store the
+  deletes WRITE. Real deployments have shown states where they diverge:
+  records physically placed where the routed delete cannot reach them
+  (e.g. bulk-imported legacy data placed under a different sharding
+  function than live routing uses) or a diverged replica resurrecting a
+  deleted record. In such a state every processing "succeeds" while
+  nothing persists, and an unguarded sweep re-processes the same refs
+  every pass forever (a constant deleted/cleaned count each cycle and
+  millions of pointless metadata ops per day). The sweep therefore keeps
+  an in-process guard across passes, in live mode, covering all three
+  record kinds (pastes, sites, rooms): it remembers the refs it processed
+  in the previous pass, and a ref that RESURFACES in the next scan after
+  being processed is classified UNREACHABLE - skipped (not re-processed),
+  excluded from the deleted and cleaned counts, and reported once per
+  pass as a distinct skipped-count log line so the operator knows
+  external cleanup is required. An unreachable ref that stops appearing
+  (externally purged, or the store converged) is forgotten, so a later
+  legitimate record with the same identity is processed normally; a
+  process restart also clears the guard, giving each boot one fresh
+  attempt (self-healing when the store converges later). The guard's
+  memory is bounded; at the cap it fails open (refs are processed as if
+  unguarded, and the overflow is logged). The guard never weakens abort
+  semantics: scan/aggregation errors still abort the pass, and dry-run
+  (which mutates nothing) neither consults nor updates it.
 - **Sweep / GC.** `ReferencedBlobSHAs` returns the set of blob
   content-SHAs still referenced by a LIVE (non-deleted) version or
   paste head: the head SHA of every active paste plus the content SHA
@@ -2870,9 +2897,20 @@ The deploy path's interface is:
 
 and the sweep path's interface is:
 
-- `ExpiredSiteSlugs(now) ([]string, error)`
-- `Delete(slug) error`
+- `ExpiredSites(now) ([]domain.ExpiredSite, error)`
+- `DeleteExpiredSite(ref domain.ExpiredSite) (bool, error)`
 - `ReferencedSiteBlobSHAs() ([]string, error)`
+
+The first two mirror the paste `SweepRepo` contract exactly (see "The
+storage contract", Expiry): the scan returns one reference per expired
+entry (the slug plus, on index-backed backends, an opaque reference to
+the exact index entry that surfaced it), and processing a reference
+removes the INDEX ENTRY regardless of whether the site record still
+exists, returning whether a record was actually deleted. Without that,
+an orphaned `expiry_sites/` entry (its record already gone) resurfaces
+on every pass and its no-op record delete is counted as a deletion
+forever. `Delete(slug)` remains on the concrete repos for the
+owner-facing removal path; the sweep does not use it.
 
 #### Site key layout (slatedb)
 
@@ -2883,7 +2921,7 @@ the established ones (`sites/<slug>` parallels `pastes/<slug>`,
 The site expiry timestamp is fixed-width (zero-padded 9-digit nanos,
 `2006-01-02T15:04:05.000000000Z07:00`) so its byte order is time order
 exactly; it does NOT reuse the paste index's variable-width `RFC3339Nano`
-(see `ExpiredSiteSlugs` above for why). Values are JSON unless noted; all
+(see `ExpiredSites` above for why). Values are JSON unless noted; all
 keys are UTF-8 strings cast to bytes, the same as the paste layout:
 
 ```
@@ -2974,9 +3012,10 @@ enumerates every site exactly as `pastes/` enumerates every paste.
 
 #### Expiry + sweep -> KV mapping
 
-- **`ExpiredSiteSlugs(now)`.** Prefix-scan `expiry_sites/`; for each
+- **`ExpiredSites(now)`.** Prefix-scan `expiry_sites/`; for each
   `expiry_sites/<ts>/<slug>` key, compare the timestamp segment and return
-  `<slug>` when `ts <= now` (inclusive boundary). The site expiry timestamp
+  a reference (the `<slug>` plus the entry's full key as the opaque
+  IndexRef) when `ts <= now` (inclusive boundary). The site expiry timestamp
   is a FIXED-WIDTH RFC3339 with a zero-padded 9-digit nanosecond fraction
   (`2006-01-02T15:04:05.000000000Z07:00`), so a string compare on the key is
   byte order == time order EXACTLY, including within a shared whole second.
@@ -2991,14 +3030,18 @@ enumerates every site exactly as `pastes/` enumerates every paste.
   orphan the old keys so those pastes would never expire). That migration is
   a documented follow-up; until then the paste path keeps its current key
   format unchanged.
-- **`Delete(slug)`.** Read `sites/<slug>` for its identity + expiry (to
-  clean up both index entries), then in one transaction delete
-  `sites/<slug>`, `identity_sites/<id>/<slug>`, and
-  `expiry_sites/<ExpiresAt>/<slug>`. Idempotent: a missing row is a no-op,
-  matching the sqlite `DELETE ... WHERE slug = ?` and the paste `Delete`.
-  The sweep calls this for every slug `ExpiredSiteSlugs` returns; the
-  per-record count it contributes makes the sweep's abort-on-zero-refs
-  data-loss guard not misfire on a tick where only sites expired.
+- **`DeleteExpiredSite(ref)`.** The sweep-side delete, mirroring the paste
+  `DeleteExpired`: when the `sites/<slug>` record still exists, run the
+  full owner-facing cascade (`Delete(slug)`: one transaction removing
+  `sites/<slug>`, `identity_sites/<id>/<slug>`, and the DERIVED
+  `expiry_sites/<ExpiresAt>/<slug>`), and then - in every case - remove
+  the exact OBSERVED index entry the scan surfaced (idempotent when the
+  cascade already removed it). Returns whether a site record was actually
+  deleted; only true results count into the sweep's deleted total (which
+  keeps the abort-on-zero-refs data-loss guard honest on a tick where
+  only sites expired), while an orphaned-entry cleanup is reported in the
+  cleaned count instead. `Delete(slug)` itself stays idempotent (a
+  missing row is a no-op) and remains the owner-facing removal path.
 - **`ReferencedSiteBlobSHAs()`.** Prefix-scan `sites/`, decode each
   manifest, union every distinct `sha` it references. The sweep unions
   this with the paste-side `ReferencedBlobSHAs` so a blob shared between a
@@ -3149,8 +3192,8 @@ deploy a site and read every path back byte-identically (manifest
 round-trip), list/sum a site's bytes by identity, the per-identity quota
 counts SITE bytes (a site fills the owner's quota a paste then sees, and
 vice versa), the slug-collision rejects a slug a paste already owns
-(and a paste rejects a slug a site owns), and `ExpiredSiteSlugs` +
-`Delete` + `ReferencedSiteBlobSHAs` drive the sweep. A backend that passes
+(and a paste rejects a slug a site owns), and `ExpiredSites` +
+`DeleteExpiredSite` + `ReferencedSiteBlobSHAs` drive the sweep. A backend that passes
 the extended suite is a drop-in for static-site hosting by construction.
 
 ### Room storage on the slatedb (and shale) backend
