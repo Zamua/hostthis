@@ -308,22 +308,23 @@ func (r *RoomKVRepo) AppRoomBytes(appSlug domain.Slug) (int64, error) {
 	return n.Int64, nil
 }
 
-// ExpiredRoomKeys returns the (app_slug, room_id) pairs of rooms whose
-// expires_at is at or before now. The sweep deletes them (which cascades
-// to their values); the HTTP read path 404s expired-but-not-yet-deleted
-// rooms inline. Returned as a slice of domain.RoomRef so the sweep can
-// delete each by its full key.
-func (r *RoomKVRepo) ExpiredRoomKeys(now time.Time) ([]domain.RoomRef, error) {
+// ExpiredRooms returns one reference per room whose expires_at is at or
+// before now. The sweep processes each (deleting the record, which cascades
+// to its values); the HTTP read path 404s expired-but-not-yet-deleted rooms
+// inline. The sqlite scan reads the rooms table itself (no standalone expiry
+// index to fall out of sync with the records), so IndexRef is always empty
+// and a returned reference always names a live row at scan time.
+func (r *RoomKVRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
 	rows, err := r.db.Query(`
 		SELECT app_slug, room_id FROM rooms WHERE expires_at <= ?
 	`, formatSiteExpiry(now))
 	if err != nil {
-		return nil, fmt.Errorf("expired room keys: %w", err)
+		return nil, fmt.Errorf("expired rooms: %w", err)
 	}
 	defer rows.Close()
-	var out []domain.RoomRef
+	var out []domain.ExpiredRoom
 	for rows.Next() {
-		var ref domain.RoomRef
+		var ref domain.ExpiredRoom
 		var appStr, idStr string
 		if err := rows.Scan(&appStr, &idStr); err != nil {
 			return nil, err
@@ -335,8 +336,27 @@ func (r *RoomKVRepo) ExpiredRoomKeys(now time.Time) ([]domain.RoomRef, error) {
 	return out, rows.Err()
 }
 
+// DeleteExpiredRoom processes one expired reference: the same full-cascade
+// delete as DeleteRoom, reporting whether a room row was actually removed.
+// On sqlite there is no standalone expiry-index entry to clean (the scan IS
+// the rooms table), so a missing row is simply a no-op that returns false.
+func (r *RoomKVRepo) DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error) {
+	res, err := r.db.Exec(`
+		DELETE FROM rooms WHERE app_slug = ? AND room_id = ?
+	`, ref.AppSlug.String(), ref.ID.String())
+	if err != nil {
+		return false, fmt.Errorf("delete expired room %s/%s: %w", ref.AppSlug, ref.ID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("delete expired room %s/%s: rows affected: %w", ref.AppSlug, ref.ID, err)
+	}
+	return n > 0, nil
+}
+
 // DeleteRoom removes a room and (via the FK cascade) every value in its
-// namespace. Used by the sweep on expiry. Idempotent.
+// namespace. Idempotent. The internal cascade the expiry pass reuses
+// (through DeleteExpiredRoom); not called by the sweep directly.
 func (r *RoomKVRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 	if _, err := r.db.Exec(`
 		DELETE FROM rooms WHERE app_slug = ? AND room_id = ?

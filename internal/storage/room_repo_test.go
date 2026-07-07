@@ -284,22 +284,27 @@ func TestRoom_ExpiryAndCascade(t *testing.T) {
 	_ = repo.PutValue(room.AppSlug, room.ID, "k", []byte("v"), 0, now)
 
 	// Nothing expired yet.
-	expired, err := repo.ExpiredRoomKeys(now)
+	expired, err := repo.ExpiredRooms(now)
 	if err != nil {
-		t.Fatalf("expired keys: %v", err)
+		t.Fatalf("expired rooms: %v", err)
 	}
 	if len(expired) != 0 {
 		t.Fatalf("room expired prematurely: %d", len(expired))
 	}
-	// Past the window, the room is expired.
+	// Past the window, the room is expired (IndexRef empty on sqlite: the
+	// scan reads the rooms table itself, no standalone index).
 	future := now.Add(domain.RoomRetentionWindow + time.Hour)
-	expired, _ = repo.ExpiredRoomKeys(future)
-	if len(expired) != 1 || expired[0].ID != room.ID {
+	expired, _ = repo.ExpiredRooms(future)
+	if len(expired) != 1 || expired[0].ID != room.ID || expired[0].IndexRef != "" {
 		t.Fatalf("expired set = %+v", expired)
 	}
-	// Deleting the room cascades to its values.
-	if err := repo.DeleteRoom(room.AppSlug, room.ID); err != nil {
-		t.Fatalf("delete room: %v", err)
+	// Processing the reference deletes the room, cascading to its values.
+	deleted, err := repo.DeleteExpiredRoom(expired[0])
+	if err != nil {
+		t.Fatalf("delete expired room: %v", err)
+	}
+	if !deleted {
+		t.Fatalf("DeleteExpiredRoom must report true for a live room row")
 	}
 	if _, err := repo.GetRoom(room.AppSlug, room.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("room survived delete: %v", err)

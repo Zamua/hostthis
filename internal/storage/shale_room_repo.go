@@ -113,11 +113,11 @@ func (s *ShaleRoomRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now
 }
 
 // service.SweepRooms
-func (s *ShaleRoomRepo) ExpiredRoomKeys(now time.Time) ([]domain.RoomRef, error) {
-	return s.repo.ExpiredRoomKeys(now)
+func (s *ShaleRoomRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
+	return s.repo.ExpiredRooms(now)
 }
-func (s *ShaleRoomRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
-	return s.repo.DeleteRoom(appSlug, id)
+func (s *ShaleRoomRepo) DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error) {
+	return s.repo.DeleteExpiredRoom(ref)
 }
 func (s *ShaleRoomRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
 	return s.repo.PruneOldRoomCreates(cutoff)
@@ -555,20 +555,25 @@ func (r *ShaleRepo) SumActiveRoomBytes() (int64, error) {
 
 // --- SweepRooms ------------------------------------------------------------
 
-// ExpiredRoomKeys fans out across all {app-slug} shards over roomexpiry/ and
-// returns the RoomRefs whose <ts> is <= now (inclusive boundary). The expiry
-// keys use the fixed-width expirySiteTimeFormat, so the timestamp segment's
-// byte order is time order EXACTLY (correct within a shared whole second).
-func (r *ShaleRepo) ExpiredRoomKeys(now time.Time) ([]domain.RoomRef, error) {
+// ExpiredRooms fans out across all {app-slug} shards over roomexpiry/ and
+// returns one reference per entry whose <ts> is <= now (inclusive
+// boundary): the (app-slug, room-id) pair plus the entry's full key as the
+// opaque IndexRef, so DeleteExpiredRoom can remove the EXACT entry the scan
+// surfaced even when the room record is already gone. The expiry keys use
+// the fixed-width expirySiteTimeFormat, so the timestamp segment's byte
+// order is time order EXACTLY (correct within a shared whole second).
+// Matches the slate ExpiredRooms.
+func (r *ShaleRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
 	items, err := r.aggregatePrefix(prefixRoomExpiryAll)
 	if err != nil {
 		return nil, err
 	}
 	cutoff := now.UTC().Format(expirySiteTimeFormat)
-	var out []domain.RoomRef
+	var out []domain.ExpiredRoom
 	for _, item := range items {
 		// key shape: roomexpiry/<ts>/<app-slug>/<uuid>
-		rest := strings.TrimPrefix(string(item.Key), "roomexpiry/")
+		k := string(item.Key)
+		rest := strings.TrimPrefix(k, "roomexpiry/")
 		before, after, ok := strings.Cut(rest, "/")
 		if !ok {
 			continue
@@ -582,12 +587,50 @@ func (r *ShaleRepo) ExpiredRoomKeys(now time.Time) ([]domain.RoomRef, error) {
 		if ts > cutoff {
 			continue
 		}
-		out = append(out, domain.RoomRef{
-			AppSlug: domain.Slug(before),
-			ID:      domain.RoomID(after),
+		out = append(out, domain.ExpiredRoom{
+			AppSlug:  domain.Slug(before),
+			ID:       domain.RoomID(after),
+			IndexRef: k,
 		})
 	}
 	return out, nil
+}
+
+// DeleteExpiredRoom processes one expired reference: the same full-cascade
+// delete as DeleteRoom when the room record still exists, and then - in
+// every case - removal of the exact expiry-index entry the scan surfaced
+// (a single {app-slug}-shard CAS: the entry's shard key is its app-slug
+// segment). The cascade removes the DERIVED key; this removes the OBSERVED
+// one. Idempotent: a missing record and a missing entry are both no-ops.
+// Returns whether a room record was actually deleted. Mirrors the paste
+// DeleteExpired and site DeleteExpiredSite; see docs/SPEC.md "Room storage
+// on the slatedb (and shale) backend" (sweep path).
+func (r *ShaleRepo) DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error) {
+	entryKey, err := expiryRoomIndexKey(ref)
+	if err != nil {
+		return false, err
+	}
+	deleted := false
+	var row roomRow
+	switch err := r.getJSON(shaleKeyRoom(ref.AppSlug, ref.ID), &row); {
+	case errors.Is(err, ErrNotFound):
+		// Orphaned entry: nothing to cascade, just clean the entry below.
+	case err != nil:
+		return false, err
+	default:
+		if err := r.DeleteRoom(ref.AppSlug, ref.ID); err != nil {
+			return false, err
+		}
+		deleted = true
+	}
+	if entryKey != nil {
+		if err := r.cluster.Transact(entryKey, func(tx backend.Transaction) error {
+			return tx.Delete(entryKey)
+		}); err != nil {
+			return deleted, fmt.Errorf("delete room expiry entry %s: %w", entryKey, err)
+		}
+	}
+	return deleted, nil
 }
 
 // DeleteRoom removes a room record, its expiry index entry, and EVERY value
@@ -595,8 +638,9 @@ func (r *ShaleRepo) ExpiredRoomKeys(now time.Time) ([]domain.RoomRef, error) {
 // all on the one {app-slug} shard. The value keys are enumerated OUTSIDE the
 // CAS (ScanPrefix is not allowed inside) but every delete + the counter
 // decrement land in ONE CAS, so the room and all its values vanish atomically
-// (the shale analogue of the sqlite FK cascade). Idempotent: a missing room
-// is a no-op. The sweep calls this for each expired RoomRef.
+// (the shale analogue of the sqlite FK cascade). The internal cascade the
+// expiry pass reuses (through DeleteExpiredRoom); not called by the sweep
+// directly. Idempotent: a missing room is a no-op.
 func (r *ShaleRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 	var row roomRow
 	if err := r.getJSON(shaleKeyRoom(appSlug, id), &row); err != nil {
