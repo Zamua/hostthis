@@ -87,7 +87,7 @@ func buildGRPCPair(t *testing.T) [2]*grpcPod {
 			t.Fatalf("pod%d listen: %v", i, lerr)
 		}
 		g := grpc.NewServer()
-		recv := relaygrpc.NewReceiver(relay.DefaultMaxMessageBytes)
+		recv := relaygrpc.NewReceiver(relay.MaxDurableFrameBytes(domain.MaxRoomValueBytes))
 		recv.Register(g)
 		go func() { _ = g.Serve(lis) }()
 		t.Cleanup(g.Stop)
@@ -159,5 +159,40 @@ func TestMultiPod_RealGRPCSeam_CrossPodDelivery(t *testing.T) {
 		if d := p.pub.Drops(); d != 0 {
 			t.Fatalf("pod%d publisher dropped %d frames on a healthy loopback transport", i, d)
 		}
+	}
+}
+
+// TestMultiPod_RealGRPCSeam_LargeDurableMirrorCrossesPods pins the peer
+// receiver's frame cap to the durable-mirror class (SPEC "Trust boundary"):
+// a legal room value is far larger than the client-socket frame cap, and a
+// non-JSON value inflates further under JSON-string escaping. With the
+// receiver capped at the client-socket size, this mirror is refused on
+// arrival and pod B's client silently never sees the write (the exact
+// defect a delta review proved live); sized to MaxDurableFrameBytes it
+// crosses. Red observed with relay.DefaultMaxMessageBytes in the fixture.
+func TestMultiPod_RealGRPCSeam_LargeDurableMirrorCrossesPods(t *testing.T) {
+	pods := buildGRPCPair(t)
+	const slug = "appz2345"
+	id := mkRoom(t, pods[0].rooms, slug)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	clientB := newSpliceClient(t, ctx, pods[1].ts, "clientB", slug, id)
+	defer clientB.close()
+
+	// 64 KiB of non-JSON bytes with control characters: over the
+	// client-socket cap on its own, and escaping-inflated in the envelope.
+	big := make([]byte, 64<<10)
+	for i := range big {
+		big[i] = byte(i % 32) // control range: worst-case \u00XX escaping
+	}
+	httpPut(t, pods[0].ts, slug, id, "blob/1", big) // seq 1, via pod A
+
+	clientB.awaitSeq(ctx, 1, 5*time.Second)
+	if clientB.applied[1] == 0 {
+		t.Fatalf("pod B's client never received the large durable mirror: receiver cap severed the cross-pod frame")
+	}
+	if _, ok := clientB.state["blob/1"]; !ok {
+		t.Fatalf("pod B's client applied seq 1 but blob/1 missing from state")
 	}
 }

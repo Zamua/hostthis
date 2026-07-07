@@ -117,6 +117,20 @@ func encodeReconnect() Frame {
 	return Frame{Binary: false, Data: []byte(`{"type":"reconnect"}`)}
 }
 
+// MaxDurableFrameBytes bounds the largest frame EncodePut can produce for
+// a value of at most maxValueBytes. It is the size the peer receiver's
+// defense-in-depth cap must admit: jsonValue encodes a non-JSON value as
+// a JSON string, and worst-case escaping (\u00XX per control byte)
+// inflates it up to 6x, plus the quotes and the envelope (type, seq, key).
+// The client-socket cap (Limits.MaxMessageBytes) deliberately does NOT
+// apply here - it bounds ephemeral frames from untrusted client sockets,
+// while durable mirrors originate from the HTTP PUT path whose value cap
+// is several times larger.
+func MaxDurableFrameBytes(maxValueBytes int) int64 {
+	const envelopeHeadroom = 4 << 10 // type + seq + escaped key + JSON syntax
+	return int64(6*maxValueBytes) + envelopeHeadroom
+}
+
 // jsonValue returns v as raw JSON when it already parses as JSON, else as
 // a JSON string of the verbatim bytes. This mirrors the HTTP scan
 // handler's jsonValue so a relay snapshot/mirror encodes a value

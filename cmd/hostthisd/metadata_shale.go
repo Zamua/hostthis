@@ -284,7 +284,13 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 	// be connected before the HTTP server is up). Single-node mode never
 	// invokes the hook and wires no transport: the relay keeps its nil
 	// publisher, the zero-peer degenerate case.
-	relayRecv := relaygrpc.NewReceiver(relay.DefaultMaxMessageBytes)
+	// The receiver's cap must admit the LARGEST legal frame on this
+	// channel: a durable mirror carrying a committed room value verbatim
+	// (domain.MaxRoomValueBytes, set by the HTTP PUT path - several times
+	// the client-socket frame cap) with worst-case JSON-string inflation.
+	// Sizing this to the client-socket cap silently severs cross-pod
+	// mirrors for every legal value above it (SPEC "Trust boundary").
+	relayRecv := relaygrpc.NewReceiver(relay.MaxDurableFrameBytes(domain.MaxRoomValueBytes))
 
 	repo, err := openShaleRepoFromEnv(retention, logger, relayRecv.Register)
 	if err != nil {

@@ -1744,8 +1744,17 @@ landed in the room's order.
   ingress. Every per-connection abuse limit (frame size, inbound rate)
   is enforced at the ORIGIN pod against the client socket BEFORE any
   peer fan-out, so peer input is trusted to the same degree shale's own
-  forwarded writes are; the receiver re-checks the frame size cap on
-  arrival as cheap defense in depth.
+  forwarded writes are; the receiver re-checks a frame size cap on
+  arrival as cheap defense in depth. That receiver cap is sized to the
+  LARGEST legal frame on this channel, which is NOT the client-socket
+  cap: a durable mirror carries a committed room value verbatim (up to
+  the room value cap, set by the HTTP PUT path, several times the
+  client-socket frame cap) inside a JSON envelope whose string encoding
+  can inflate non-JSON bytes up to 6x (worst-case escaping). Sizing the
+  receiver to the client-socket cap would silently sever cross-pod
+  mirrors for every legal value above it - a whole value class whose
+  remote subscribers would stall until the next durable frame exposed
+  the gap.
 
 #### Drain hint: reconnect-before-shutdown
 
