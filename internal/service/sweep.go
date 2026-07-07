@@ -12,8 +12,19 @@ import (
 // SweepRepo is the persistence interface the Sweep service needs.
 // internal/storage.PasteRepo satisfies it.
 type SweepRepo interface {
-	ExpiredSlugs(now time.Time) ([]string, error)
-	Delete(slug domain.Slug) error
+	// ExpiredPastes returns one reference per paste whose expires_at is at
+	// or before now (inclusive boundary): the slug plus, on index-backed
+	// backends, an opaque reference to the exact expiry-index entry that
+	// surfaced it (round-tripped into DeleteExpired).
+	ExpiredPastes(now time.Time) ([]domain.ExpiredPaste, error)
+	// DeleteExpired processes one expired reference: it deletes the paste
+	// record when it still exists (the same full cascade as Delete) and
+	// removes the expiry-index entry REGARDLESS, so an orphaned entry (its
+	// paste already gone) cannot resurface on the next scan. Returns
+	// whether a paste record was actually deleted - the sweep counts only
+	// those in its deleted total. See docs/SPEC.md "The storage contract"
+	// (Expiry).
+	DeleteExpired(ref domain.ExpiredPaste) (bool, error)
 	// ReferencedBlobSHAs returns the set of blob content-SHAs still
 	// referenced by a LIVE (non-deleted) version or paste head. The
 	// sweep GCs any blob NOT in this set. Returning an empty/nil set
@@ -200,17 +211,36 @@ func (s *Sweep) tick() {
 // includes expired sites - both are "records expired this tick" for
 // the purpose of the data-loss guard below.
 func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
-	slugs, err := s.Repo.ExpiredSlugs(now)
+	expired, err := s.Repo.ExpiredPastes(now)
 	if err != nil {
-		return 0, 0, fmt.Errorf("expired slugs: %w", err)
+		return 0, 0, fmt.Errorf("expired pastes: %w", err)
 	}
-	for _, slugStr := range slugs {
+	// Orphaned expiry-index entries cleaned this pass: entries whose paste
+	// record was already gone. They are index maintenance, not deletions,
+	// so they don't count into pastesDeleted (which feeds the summary log
+	// AND the abort-on-zero-refs guard below); reported separately.
+	orphanEntries := 0
+	for _, ref := range expired {
 		if s.DryRun {
-			s.Logger.Printf("sweep[dry-run]: would expire paste %q", slugStr)
-		} else if err := s.Repo.Delete(domain.Slug(slugStr)); err != nil {
-			return pastesDeleted, blobsGCd, fmt.Errorf("delete %q: %w", slugStr, err)
+			// Dry-run mutates nothing, so it can't distinguish a live paste
+			// from an orphaned entry; the would-expire count is the entry
+			// count, an upper bound on real deletions.
+			s.Logger.Printf("sweep[dry-run]: would expire paste %q", ref.Slug)
+			pastesDeleted++
+			continue
 		}
-		pastesDeleted++
+		deleted, err := s.Repo.DeleteExpired(ref)
+		if err != nil {
+			return pastesDeleted, blobsGCd, fmt.Errorf("delete %q: %w", ref.Slug, err)
+		}
+		if deleted {
+			pastesDeleted++
+		} else {
+			orphanEntries++
+		}
+	}
+	if orphanEntries > 0 {
+		s.Logger.Printf("sweep: cleaned %d orphaned expiry-index entries (paste already gone)", orphanEntries)
 	}
 
 	// Expire sites too, when the site sweeper is wired.

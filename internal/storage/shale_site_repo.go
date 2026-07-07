@@ -695,7 +695,7 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 // site expiry keys use the fixed-width expirySiteTimeFormat, so the
 // timestamp segment's byte order is time order EXACTLY (correct even within
 // a shared whole second), unlike the variable-width time.RFC3339Nano the
-// paste ExpiredSlugs still uses. The cutoff is formatted with the SAME
+// paste ExpiredPastes still uses. The cutoff is formatted with the SAME
 // layout so the compare stays aligned. Matches the slate ExpiredSiteSlugs.
 func (r *ShaleRepo) ExpiredSiteSlugs(now time.Time) ([]string, error) {
 	items, err := r.aggregatePrefix(prefixExpirySitesAll)

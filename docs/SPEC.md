@@ -2651,7 +2651,7 @@ through four small Go interfaces declared in `internal/service`:
   `SetPinnedVersion`, `Unpin`, `AppendVersionWithQuotaCheck`,
   `ListVersions`, `GetVersion`, `DeleteVersion`, `CountByOwner`,
   `SumActiveBytesByOwner`, `OwnerFirstSeen`.
-- `SweepRepo` (sweep): `ExpiredSlugs`, `Delete`,
+- `SweepRepo` (sweep): `ExpiredPastes`, `DeleteExpired`,
   `ReferencedBlobSHAs`.
 - `KeyGateRepo` (keygate): `AdmitNewKey`, `DeleteFirstSeenOlderThan`,
   `SubnetSnapshot`, `SubnetsForIdentity`.
@@ -2709,9 +2709,28 @@ behaviors are expressed in terms of inputs and observable outputs:
   regardless of who owns it. IDOR protection (a cross-owner read
   surfacing as not-found) lives in `Manage.requireOwner`. A backend
   must NOT add owner checks; doing so would change observable behavior.
-- **Expiry.** `ExpiredSlugs(now)` returns slugs whose `expires_at` is
-  at or before `now` (inclusive boundary); not-yet-expired pastes are
-  excluded.
+- **Expiry.** `ExpiredPastes(now)` returns one reference per paste whose
+  `expires_at` is at or before `now` (inclusive boundary): the slug plus,
+  on backends that keep a standalone expiry index (slatedb, shale), an
+  opaque reference to the exact index entry that surfaced it (empty on
+  backends whose scan reads the paste records themselves, like sqlite).
+  Not-yet-expired pastes are excluded and untouched. `DeleteExpired(ref)`
+  processes one reference: it deletes the paste record when it still
+  exists (the same full cascade as `Delete`) and removes the expiry-index
+  entry REGARDLESS of whether the paste record was still there, returning
+  whether a paste record was actually deleted. Removing the index entry
+  unconditionally is the load-bearing half of the contract: an entry
+  whose paste is already gone (e.g. legacy TTL-era state) would otherwise
+  resurface on every pass forever - the scan returns its slug, the
+  idempotent paste delete no-ops on the missing record, and nothing ever
+  touches the entry itself. One pass drains what it scans: a second scan
+  at the same `now` sees zero entries. The sweep counts only real paste
+  deletions (`DeleteExpired` returning true) in its deleted total - so
+  the abort-on-zero-refs data-loss guard below is not defeated by a tick
+  that merely cleaned orphaned index entries - and logs the orphaned
+  entries it cleaned as a separate count. (In dry-run the pass mutates
+  nothing, so its would-expire count is the entry count, an upper bound
+  on real deletions.)
 - **Sweep / GC.** `ReferencedBlobSHAs` returns the set of blob
   content-SHAs still referenced by a LIVE (non-deleted) version or
   paste head: the head SHA of every active paste plus the content SHA
@@ -4023,7 +4042,7 @@ below is chosen to satisfy that invariant; where two policies would both
 satisfy availability, the one that also satisfies the invariant wins.
 
 **Policy 1 - idempotent background sweeps and the reconciler: SKIP +
-LOG, continue.** The expiry sweep (`ExpiredSlugs` / `ExpiredRoomKeys`
+LOG, continue.** The expiry sweep (`ExpiredPastes` / `ExpiredRoomKeys`
 and the site-expiry index walk), the keygate prune
 (`DeleteFirstSeenOlderThan` / `PruneOldRoomCreates`), and the reconciler
 (`Reconcile` - reproject the `identity_pastes` + `identity_sites`
@@ -4095,7 +4114,7 @@ The three policies, side by side:
 
 | Scan kind | Examples | On a bad record | Why |
 | --- | --- | --- | --- |
-| Idempotent background sweep / reconciler | `ExpiredSlugs`, `ExpiredRoomKeys`, site-expiry walk, `DeleteFirstSeenOlderThan`, `PruneOldRoomCreates`, `Reconcile` (`reconcileIndexes` + `reconcileSiteIndexes` + pending age-out) | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
+| Idempotent background sweep / reconciler | `ExpiredPastes`, `ExpiredRoomKeys`, site-expiry walk, `DeleteFirstSeenOlderThan`, `PruneOldRoomCreates`, `Reconcile` (`reconcileIndexes` + `reconcileSiteIndexes` + pending age-out) | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
 | Blob-GC reference set | `ReferencedBlobSHAs`, `ReferencedSiteBlobSHAs` | FAIL CLOSED - abort the GC pass, return error, delete nothing; NEVER skip | skipping under-counts refs -> a live blob looks orphaned and is deleted (irreversible) |
 | User-facing read | `Get`, `ListByOwner`, `ListVersions`, `GetVersion`, site manifest read, room scan / per-key read | HARD-FAIL (unchanged) | a user read of corrupt data should surface an error, not silently skip |
 
