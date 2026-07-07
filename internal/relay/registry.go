@@ -486,6 +486,24 @@ func (r *Registry) AppConns(app domain.Slug) int {
 	return r.perApp[app]
 }
 
+// announceDrain broadcasts the reconnect drain hint to every connection of
+// every hub, server-originated (from == 0). It closes NOTHING and sets no
+// flag: the relay keeps serving through the operator's drain grace window
+// so hint-acting clients re-home make-before-break; CloseAll runs after
+// (see cmd/hostthisd's shutdown sequence and SPEC "Drain hint").
+func (r *Registry) announceDrain() {
+	r.mu.Lock()
+	hubs := make([]*Hub, 0, len(r.hubs))
+	for _, h := range r.hubs {
+		hubs = append(hubs, h)
+	}
+	r.mu.Unlock()
+	hint := encodeReconnect()
+	for _, h := range hubs {
+		h.broadcast(0, hint)
+	}
+}
+
 // CloseAll closes every connection in every hub (server shutdown). It sets
 // the closing flag so no new acquire succeeds, then closes each hub's
 // connections with a normal-closure status (driven by each connection's

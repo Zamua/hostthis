@@ -279,7 +279,21 @@ func main() {
 		}
 	}
 
-	// Close all live relay connections first: a hijacked WebSocket is not
+	// Drain hint, then the grace window, then the close (SPEC "Drain hint:
+	// reconnect-before-shutdown"). The hint fires at drain start - BEFORE the
+	// HTTP server stops accepting - telling every live relay client to
+	// re-home; the process then KEEPS SERVING through HOSTTHIS_DRAIN_GRACE
+	// (default 3s, 0 disables) so the hint flushes and hint-acting clients
+	// reconnect make-before-break through the ingress onto a surviving pod.
+	if roomRelay != nil {
+		roomRelay.AnnounceDrain()
+		if grace := envOrDuration("HOSTTHIS_DRAIN_GRACE", 3*time.Second); grace > 0 {
+			logger.Printf("relay: drain hint broadcast; serving through %s grace before close", grace)
+			time.Sleep(grace)
+		}
+	}
+
+	// Close all live relay connections: a hijacked WebSocket is not
 	// tracked by http.Server.Shutdown, so closing them here (with a normal
 	// closure) unblocks their request goroutines and lets clients reconnect
 	// on their backoff schedule rather than hammering instantly.

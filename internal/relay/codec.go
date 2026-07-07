@@ -24,6 +24,15 @@ const (
 	// TypeDelete is the live mirror of a committed durable DELETE: a single
 	// key was removed.
 	TypeDelete = "delete"
+	// TypeReconnect is the drain hint (SPEC "Drain hint:
+	// reconnect-before-shutdown"): broadcast once to every local connection
+	// the moment the process receives its termination signal, BEFORE the
+	// final close, so a client acting on it re-homes (with small random
+	// jitter) while its old socket still works. It carries NO seq - it is
+	// not a room mutation - and it is an optimization, never load-bearing: a
+	// client that ignores it is closed at actual shutdown and heals through
+	// the normal reconnect + snapshot + splice path.
+	TypeReconnect = "reconnect"
 )
 
 // snapshotEnvelope is the late-join control frame. Its State field is the
@@ -99,6 +108,12 @@ func EncodeDelete(seq uint64, key string) Frame {
 		return Frame{}
 	}
 	return Frame{Binary: false, Data: data}
+}
+
+// encodeReconnect builds the drain-hint control frame. It is a fixed
+// envelope (no seq, no payload); see TypeReconnect.
+func encodeReconnect() Frame {
+	return Frame{Binary: false, Data: []byte(`{"type":"reconnect"}`)}
 }
 
 // jsonValue returns v as raw JSON when it already parses as JSON, else as

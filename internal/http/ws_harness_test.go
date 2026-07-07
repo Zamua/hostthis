@@ -1091,6 +1091,54 @@ func TestRelayHarness_ConcurrentConnectSendDisconnectRace(t *testing.T) {
 	waitForRooms(t, rl, 0, 10*time.Second)
 }
 
+// ---------------------------------------------------------------------------
+// DRAIN HINT: on shutdown begin the relay broadcasts {"type":"reconnect"}
+// to every live connection BEFORE any close (SPEC "Drain hint:
+// reconnect-before-shutdown") - this drives the exact sequence main runs
+// (AnnounceDrain, a serve-through grace, then CloseAll) over real sockets
+// and asserts each client receives the hint frame first and the normal
+// closure after. The hint carries no seq (it is not a room mutation).
+//
+// WEAKEN DEMO: delete the AnnounceDrain broadcast (or reorder it after
+// CloseAll in main). RED: "c1: expected the reconnect drain hint within
+// 3s, none arrived" - clients are hard-cut with no re-home window.
+// ---------------------------------------------------------------------------
+
+func TestRelayHarness_DrainHintBeforeClose(t *testing.T) {
+	ts, rooms, rl := wsTestServer(t, relay.NewLimits())
+	const slug = "appz2345"
+	id := mkRoom(t, rooms, slug)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	c1 := newWSClient(t, ctx, ts, "c1", slug, id)
+	defer c1.close()
+	c2 := newWSClient(t, ctx, ts, "c2", slug, id)
+	defer c2.close()
+	c1.expectSnapshotFrame(ctx)
+	c2.expectSnapshotFrame(ctx)
+
+	// Drain start: the hint fires while the relay is still serving.
+	rl.AnnounceDrain()
+	for _, c := range []*wsClient{c1, c2} {
+		c.expectFrame(ctx, 3*time.Second, "the reconnect drain hint", func(f []byte) bool {
+			return hasType(f, relay.TypeReconnect)
+		})
+	}
+
+	// The relay is still serving after the hint: a fresh join succeeds (the
+	// make-before-break window a hint-acting client re-homes in).
+	c3 := newWSClient(t, ctx, ts, "c3", slug, id)
+	defer c3.close()
+	c3.expectSnapshotFrame(ctx)
+
+	// Then the final close, as main does after the grace window: every
+	// connection observes a close AFTER having received the hint.
+	rl.Registry().CloseAll()
+	c1.expectClosed(ctx, 5*time.Second, "shutdown close after the drain hint")
+	c2.expectClosed(ctx, 5*time.Second, "shutdown close after the drain hint")
+}
+
 // waitForAppConns polls the registry until the app's live connection count
 // equals want, or fails after d. Separate from waitForRoomConns only in the
 // failure message (this is the terminal no-leak convergence check).

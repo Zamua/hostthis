@@ -69,6 +69,17 @@ func NewRelay(snap Snapshotter, limits Limits) *Relay {
 // to a live hub and so server shutdown can close all connections.
 func (rl *Relay) Registry() *Registry { return rl.reg }
 
+// AnnounceDrain broadcasts the {"type":"reconnect"} drain hint once to
+// every live connection (SPEC "Drain hint: reconnect-before-shutdown").
+// The composition root calls it the moment the process receives its
+// termination signal - BEFORE the HTTP server stops accepting and before
+// CloseAll - then keeps serving through the drain grace window so a client
+// acting on the hint reconnects (through the ingress, onto a surviving
+// pod) while its old socket still works. The hint is an optimization,
+// never load-bearing: ignoring clients heal through the normal reconnect +
+// snapshot + splice path when the close lands.
+func (rl *Relay) AnnounceDrain() { rl.reg.announceDrain() }
+
 // SetHeartbeat overrides the ping interval + timeout. Used by tests to
 // drive the reap path quickly; production uses the NewRelay defaults.
 func (rl *Relay) SetHeartbeat(interval, timeout time.Duration) {
