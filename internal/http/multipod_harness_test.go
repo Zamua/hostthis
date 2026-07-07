@@ -8,7 +8,8 @@ package http
 // implementation of the relay's PeerPublisher port, and drives real
 // WebSocket clients through each pod's real upgrade + hub + snapshot
 // paths. No real network transport is needed for the correctness core;
-// the gRPC adapter is a seam behind the same port.
+// the gRPC adapter is a seam behind the same port, gated separately by
+// multipod_grpc_seam_test.go over the real client/server transport.
 //
 // The three observable acceptance criteria pinned here:
 //
@@ -223,14 +224,16 @@ type spliceClient struct {
 	discarded int
 }
 
-// newSpliceClient dials pod i and consumes the join snapshot (always the
-// first frame), initializing lastSeq to its exact seq S.
-func newSpliceClient(t *testing.T, ctx context.Context, h *multiPod, i int, name, slug, id string) *spliceClient {
+// newSpliceClient dials a pod's HTTP surface and consumes the join
+// snapshot (always the first frame), initializing lastSeq to its exact
+// seq S. It takes the httptest server directly so both the in-memory
+// bridge fixture and the real-gRPC seam test share it.
+func newSpliceClient(t *testing.T, ctx context.Context, ts *httptest.Server, name, slug, id string) *spliceClient {
 	t.Helper()
 	sc := &spliceClient{
 		t:       t,
 		name:    name,
-		c:       newWSClient(t, ctx, h.pods[i].ts, name, slug, id),
+		c:       newWSClient(t, ctx, ts, name, slug, id),
 		pending: make(map[uint64]durableFrame),
 		applied: make(map[uint64]int),
 	}
@@ -434,9 +437,9 @@ func TestMultiPod_BroadcastReachesAllPods(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	clientA := newSpliceClient(t, ctx, h, 0, "clientA", slug, id)
+	clientA := newSpliceClient(t, ctx, h.pods[0].ts, "clientA", slug, id)
 	defer clientA.close()
-	clientB := newSpliceClient(t, ctx, h, 1, "clientB", slug, id)
+	clientB := newSpliceClient(t, ctx, h.pods[1].ts, "clientB", slug, id)
 	defer clientB.close()
 	if clientA.snapSeq != 0 || clientB.snapSeq != 0 {
 		t.Fatalf("fresh room snapshots at seq %d/%d, want 0/0", clientA.snapSeq, clientB.snapSeq)
@@ -527,7 +530,7 @@ func TestMultiPod_LateJoinDuringConcurrentCrossPodWrites(t *testing.T) {
 	for h.scanTruth(slug, id).Seq < 15 {
 		time.Sleep(2 * time.Millisecond)
 	}
-	joiner := newSpliceClient(t, ctx, h, 2, "late-joiner", slug, id)
+	joiner := newSpliceClient(t, ctx, h.pods[2].ts, "late-joiner", slug, id)
 	defer joiner.close()
 	if joiner.snapSeq < 15 {
 		t.Fatalf("joiner snapshot seq %d, want >= 15 (the join gate polls the durable seq first)", joiner.snapSeq)
@@ -569,7 +572,7 @@ func TestMultiPod_PodKillMidStreamReconnectResync(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	victim := newSpliceClient(t, ctx, h, 0, "victim", slug, id)
+	victim := newSpliceClient(t, ctx, h.pods[0].ts, "victim", slug, id)
 	defer victim.close()
 
 	// A steady writer through pod 2, paced so the kill lands mid-stream.
@@ -595,7 +598,7 @@ func TestMultiPod_PodKillMidStreamReconnectResync(t *testing.T) {
 	// Reconnect to a SURVIVING pod: the normal join, a fresh snapshot, a
 	// fresh splice base. S2 can only be at or past everything epoch 1
 	// applied (the durable seq never regresses).
-	revived := newSpliceClient(t, ctx, h, 1, "revived", slug, id)
+	revived := newSpliceClient(t, ctx, h.pods[1].ts, "revived", slug, id)
 	defer revived.close()
 	if revived.snapSeq < epoch1Last {
 		t.Fatalf("reconnect snapshot seq %d regressed below the %d the victim had already applied", revived.snapSeq, epoch1Last)

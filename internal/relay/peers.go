@@ -32,6 +32,20 @@ type PeerPublisher interface {
 	Publish(key RoomKey, f Frame)
 }
 
+// Peers is the peer-discovery port: the CURRENT peer pods' gRPC addresses,
+// self excluded (SPEC "Peer discovery: the ring membership the cluster
+// already gossips"). The production implementation reads the shale ring
+// membership - each live pod's advertised gRPC address, the same one shale
+// forwarding dials, kept current by the gossip that tracks joins, leaves,
+// and deploy churn. Tests inject a static list, and a future non-shale
+// multi-pod shape could plug a DNS-based provider without touching the
+// relay. Addresses is called per publish, so the peer set follows
+// membership with no subscription machinery; implementations must be safe
+// for concurrent use.
+type Peers interface {
+	Addresses() []string
+}
+
 // SetPeerPublisher wires the outbound peer port. Called once at the
 // composition root, before the HTTP server accepts connections; nil (the
 // default) is the zero-peer deploy. Late-bound as a setter because the

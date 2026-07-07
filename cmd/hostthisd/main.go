@@ -131,6 +131,19 @@ func main() {
 		roomRelay = relay.NewRelay(roomsSvc, relay.NewLimits())
 	}
 
+	// Multi-pod relay peer fan-out (SPEC "Multi-pod relay"). A multi-node
+	// shale backend supplies the transport: the outbound publisher (frames
+	// fan out to every peer pod over the cluster gRPC tier) and the
+	// late-bound receive hook (a peer's frames broadcast into THIS pod's
+	// local hubs). Every single-pod backend leaves RelayPeer nil and the
+	// relay keeps its nil publisher - the zero-peer degenerate case, the
+	// single-pod relay unchanged.
+	if roomRelay != nil && metadata.RelayPeer != nil {
+		roomRelay.SetPeerPublisher(metadata.RelayPeer.Publisher)
+		metadata.RelayPeer.Bind(roomRelay.DeliverFromPeer)
+		logger.Printf("relay: multi-pod peer fan-out wired (publish + receive on the cluster gRPC tier)")
+	}
+
 	keyGate := service.NewKeyGate(keyGateRepo)
 	keyGate.MaxFreshKeysPerSubnet = *freshKeysLimit
 	keyGate.Window = *freshKeysWindow
@@ -299,6 +312,12 @@ func main() {
 	// on their backoff schedule rather than hammering instantly.
 	if roomRelay != nil {
 		roomRelay.Registry().CloseAll()
+	}
+
+	// Stop the peer publisher's senders (multi-pod only): local fan-out is
+	// done, so drop the outbound peer queues and their connections cleanly.
+	if metadata.RelayPeer != nil {
+		metadata.RelayPeer.Close()
 	}
 
 	shutdownCtx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
