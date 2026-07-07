@@ -85,10 +85,23 @@ type SweepSites interface {
 // Rooms hold no blobs (their values live in the metadata store, not the
 // content-addressed BlobStore), so they contribute nothing to the
 // blob-GC keep-alive set. internal/storage.RoomKVRepo satisfies it. Nil
-// disables room sweeping.
+// disables room sweeping. The expiry pair mirrors SweepRepo's contract
+// exactly (see docs/SPEC.md "Room storage on the slatedb (and shale)
+// backend", sweep path).
 type SweepRooms interface {
-	ExpiredRoomKeys(now time.Time) ([]domain.RoomRef, error)
-	DeleteRoom(appSlug domain.Slug, id domain.RoomID) error
+	// ExpiredRooms returns one reference per room whose expiry is at or
+	// before now (inclusive boundary): the (app-slug, room-id) pair plus,
+	// on index-backed backends, an opaque reference to the exact
+	// roomexpiry/ entry that surfaced it (round-tripped into
+	// DeleteExpiredRoom).
+	ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error)
+	// DeleteExpiredRoom processes one expired reference: it deletes the
+	// room record (cascading to every value in its namespace) when it
+	// still exists and removes the expiry-index entry REGARDLESS, so an
+	// orphaned entry (its record already gone) cannot resurface on the
+	// next scan. Returns whether a room record was actually deleted -
+	// the sweep counts only those in its deleted total.
+	DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error)
 	PruneOldRoomCreates(cutoff time.Time) (int, error)
 }
 
@@ -241,7 +254,10 @@ func siteGuardID(ref domain.ExpiredSite) string {
 	return "s\x00slug\x00" + ref.Slug.String()
 }
 
-func roomGuardID(ref domain.RoomRef) string {
+func roomGuardID(ref domain.ExpiredRoom) string {
+	if ref.IndexRef != "" {
+		return "r\x00" + ref.IndexRef
+	}
 	return fmt.Sprintf("r\x00%s\x00%s", ref.AppSlug, ref.ID)
 }
 
@@ -415,16 +431,18 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 		}
 	}
 
-	// Expire rooms too, when the room sweeper is wired. Deleting a room
-	// cascades (in storage) to every value in its namespace. Rooms hold
-	// no blobs, so this does not touch the keep-alive set - but a room
-	// expiry still counts as a "record expired this tick" so the
-	// data-loss guard below doesn't misfire on a tick where only rooms
-	// expired.
+	// Expire rooms too, when the room sweeper is wired. Same contract as
+	// the paste and site loops: only real record deletions count into
+	// pastesDeleted; an orphaned-entry cleanup joins the cleaned count.
+	// Deleting a room cascades (in storage) to every value in its
+	// namespace. Rooms hold no blobs, so this does not touch the
+	// keep-alive set - but a real room expiry still counts as a "record
+	// expired this tick" so the data-loss guard below doesn't misfire on
+	// a tick where only rooms expired.
 	if s.Rooms != nil {
-		expiredRooms, err := s.Rooms.ExpiredRoomKeys(now)
+		expiredRooms, err := s.Rooms.ExpiredRooms(now)
 		if err != nil {
-			return pastesDeleted, 0, fmt.Errorf("expired room keys: %w", err)
+			return pastesDeleted, 0, fmt.Errorf("expired rooms: %w", err)
 		}
 		for _, ref := range expiredRooms {
 			if s.DryRun {
@@ -435,10 +453,15 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 			if guard.skip(roomGuardID(ref)) {
 				continue
 			}
-			if err := s.Rooms.DeleteRoom(ref.AppSlug, ref.ID); err != nil {
+			deleted, err := s.Rooms.DeleteExpiredRoom(ref)
+			if err != nil {
 				return pastesDeleted, blobsGCd, fmt.Errorf("delete room %s/%s: %w", ref.AppSlug, ref.ID, err)
 			}
-			pastesDeleted++
+			if deleted {
+				pastesDeleted++
+			} else {
+				orphanEntries++
+			}
 		}
 	}
 

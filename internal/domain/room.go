@@ -172,15 +172,6 @@ func ParseRoomID(s string) (RoomID, error) {
 // String returns the room id as a plain string for key building + URLs.
 func (id RoomID) String() string { return string(id) }
 
-// RoomRef is the full key of a room: the (app-slug, room-id) pair. The
-// sweep enumerates expired rooms as RoomRefs and deletes each. It is a
-// pure value object (no behavior), in the domain so the service-layer
-// sweep interface can name it without importing storage.
-type RoomRef struct {
-	AppSlug Slug
-	ID      RoomID
-}
-
 // formatUUID renders 16 bytes as canonical lowercase 8-4-4-4-12 hex.
 func formatUUID(b [16]byte) string {
 	const hyphen = "-"

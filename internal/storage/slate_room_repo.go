@@ -6,7 +6,7 @@
 //
 // The room interface method names (GetRoom, GetValue, ScanRoom, PutValue,
 // DeleteValue, CreateRoom, CountRoomCreates, plus the sweep-side
-// ExpiredRoomKeys / DeleteRoom / PruneOldRoomCreates) do not collide with
+// ExpiredRooms / DeleteExpiredRoom / PruneOldRoomCreates) do not collide with
 // the paste / site method names, so they could live directly on SlateRepo.
 // They live there as `...Room` operations and a thin SlateRoomRepo adapter
 // exposes them under the service.RoomRepo + service.SweepRooms interface
@@ -96,11 +96,11 @@ func (s *SlateRoomRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now
 }
 
 // service.SweepRooms
-func (s *SlateRoomRepo) ExpiredRoomKeys(now time.Time) ([]domain.RoomRef, error) {
-	return s.repo.ExpiredRoomKeys(now)
+func (s *SlateRoomRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
+	return s.repo.ExpiredRooms(now)
 }
-func (s *SlateRoomRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
-	return s.repo.DeleteRoom(appSlug, id)
+func (s *SlateRoomRepo) DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error) {
+	return s.repo.DeleteExpiredRoom(ref)
 }
 func (s *SlateRoomRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
 	return s.repo.PruneOldRoomCreates(cutoff)
@@ -554,21 +554,25 @@ func (r *SlateRepo) sumOneRoomBytes(appSlug domain.Slug, id domain.RoomID) (int6
 
 // --- SweepRooms ------------------------------------------------------------
 
-// ExpiredRoomKeys returns the RoomRefs of rooms whose ExpiresAt is at or
-// before now (inclusive boundary). Prefix-scans roomexpiry/; the timestamp
-// segment uses the fixed-width expirySiteTimeFormat, so a string compare on
-// the ts is byte order == time order EXACTLY (correct even within a shared
-// whole second), the same guarantee the site expiry index has.
-func (r *SlateRepo) ExpiredRoomKeys(now time.Time) ([]domain.RoomRef, error) {
+// ExpiredRooms returns one reference per room whose ExpiresAt is at or
+// before now (inclusive boundary): the (app-slug, room-id) pair plus the
+// entry's full key as the opaque IndexRef, so DeleteExpiredRoom can remove
+// the EXACT entry the scan surfaced even when the room record is already
+// gone. Prefix-scans roomexpiry/; the timestamp segment uses the
+// fixed-width expirySiteTimeFormat, so a string compare on the ts is byte
+// order == time order EXACTLY (correct even within a shared whole second),
+// the same guarantee the site expiry index has.
+func (r *SlateRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
 	items, err := r.scanPrefix(prefixRoomExpiry())
 	if err != nil {
 		return nil, err
 	}
 	cutoff := now.UTC().Format(expirySiteTimeFormat)
-	var out []domain.RoomRef
+	var out []domain.ExpiredRoom
 	for _, item := range items {
 		// key shape: roomexpiry/<ts>/<app-slug>/<uuid>
-		rest := strings.TrimPrefix(string(item.Key), "roomexpiry/")
+		k := string(item.Key)
+		rest := strings.TrimPrefix(k, "roomexpiry/")
 		// Split off the leading <ts> (fixed-width, no '/').
 		before, after, ok := strings.Cut(rest, "/")
 		if !ok {
@@ -584,18 +588,62 @@ func (r *SlateRepo) ExpiredRoomKeys(now time.Time) ([]domain.RoomRef, error) {
 		if ts > cutoff {
 			continue
 		}
-		out = append(out, domain.RoomRef{
-			AppSlug: domain.Slug(before),
-			ID:      domain.RoomID(after),
+		out = append(out, domain.ExpiredRoom{
+			AppSlug:  domain.Slug(before),
+			ID:       domain.RoomID(after),
+			IndexRef: k,
 		})
 	}
 	return out, nil
 }
 
+// DeleteExpiredRoom processes one expired reference: the same full-cascade
+// delete as DeleteRoom when the room record still exists, and then - in
+// every case - removal of the exact expiry-index entry the scan surfaced
+// (the cascade removes the DERIVED key; this removes the OBSERVED one).
+// Idempotent: a missing record and a missing entry are both no-ops.
+// Returns whether a room record was actually deleted. Mirrors the paste
+// DeleteExpired and site DeleteExpiredSite; see docs/SPEC.md "Room storage
+// on the slatedb (and shale) backend" (sweep path).
+func (r *SlateRepo) DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error) {
+	entryKey, err := expiryRoomIndexKey(ref)
+	if err != nil {
+		return false, err
+	}
+	deleted := false
+	var row roomRow
+	switch err := r.getJSON(keyRoom(ref.AppSlug, ref.ID), &row); {
+	case errors.Is(err, ErrNotFound):
+		// Orphaned entry: nothing to cascade, just clean the entry below.
+	case err != nil:
+		return false, err
+	default:
+		if err := r.DeleteRoom(ref.AppSlug, ref.ID); err != nil {
+			return false, err
+		}
+		deleted = true
+	}
+	if entryKey != nil {
+		tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
+		if err != nil {
+			return deleted, fmt.Errorf("begin tx: %w", err)
+		}
+		if err := tx.Delete(entryKey); err != nil {
+			_ = tx.Rollback()
+			return deleted, fmt.Errorf("delete room expiry entry %s: %w", entryKey, err)
+		}
+		if _, err := tx.Commit(); err != nil {
+			return deleted, fmt.Errorf("commit delete room expiry entry %s: %w", entryKey, err)
+		}
+	}
+	return deleted, nil
+}
+
 // DeleteRoom removes a room record, its expiry index entry, and EVERY value
 // in its namespace (the slatedb analogue of the sqlite FK cascade:
-// enumerate the value subtree, delete each in the tx). Used by the sweep on
-// expiry. Idempotent: a missing room is a no-op.
+// enumerate the value subtree, delete each in the tx). The internal cascade
+// the expiry pass reuses (through DeleteExpiredRoom); not called by the
+// sweep directly. Idempotent: a missing room is a no-op.
 func (r *SlateRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 	var row roomRow
 	if err := r.getJSON(keyRoom(appSlug, id), &row); err != nil {

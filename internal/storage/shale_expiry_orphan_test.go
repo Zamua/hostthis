@@ -154,3 +154,85 @@ func TestShaleSweep_VerbatimLegacyEntryKeysDrain(t *testing.T) {
 		t.Fatalf("verbatim site entry must drain in one pass: refs=%v err=%v", again, err)
 	}
 }
+
+// TestShaleSweep_OrphanRoomExpiryEntryDrains is the roomexpiry/ twin of the
+// paste test above: a roomexpiry/<ts>/<app>/<uuid> entry whose room record
+// is ALREADY GONE must be removed by one expiry pass. ExpiredRooms surfaces
+// the entry with its exact stored key as the opaque IndexRef, and
+// DeleteExpiredRoom removes that OBSERVED entry regardless of the missing
+// record (reporting false - an index cleanup, not a room deletion). Without
+// that, the orphan resurfaces on every pass forever: the scan returns its
+// (app, id), the idempotent room delete no-ops on the missing record, and
+// nothing ever touches the entry itself. A genuinely-expired LIVE room next
+// to it pins the true-reporting cascade path in the same pass.
+func TestShaleSweep_OrphanRoomExpiryEntryDrains(t *testing.T) {
+	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale orphan-room-expiry test (start dev MinIO first)")
+	}
+	repo := newShaleRepoOnUniqueDB(t, endpoint)
+
+	expiresAt := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	now := expiresAt.Add(time.Hour)
+	const app = domain.Slug("appz2345")
+
+	// Plant the orphan: a roomexpiry entry with NO room record behind it.
+	orphanID := domain.NewRoomID()
+	orphanKey := storage.RoomExpiryKeyForTest(expiresAt, app, orphanID)
+	mustPutRaw(t, repo, orphanKey, storage.MarkerValueForTest())
+
+	// And a genuinely-expired LIVE room next to it, so the pass exercises
+	// both shapes: real deletion and orphan cleanup.
+	live := domain.Room{
+		AppSlug:   app,
+		ID:        domain.NewRoomID(),
+		CreatedAt: expiresAt.Add(-time.Hour),
+		UpdatedAt: expiresAt.Add(-time.Hour),
+		ExpiresAt: expiresAt,
+	}
+	if err := repo.CreateRoom(live, "10.0.0.0/24", 0, live.CreatedAt); err != nil {
+		t.Fatalf("create live room: %v", err)
+	}
+
+	// One expiry pass over the sweep repo surface.
+	refs, err := repo.ExpiredRooms(now)
+	if err != nil {
+		t.Fatalf("ExpiredRooms: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("scan should surface the orphan entry AND the live room, got %v", refs)
+	}
+	deleted := 0
+	for _, ref := range refs {
+		// Every surfaced reference carries the EXACT observed entry key.
+		if ref.AppSlug == app && ref.ID == orphanID && ref.IndexRef != string(orphanKey) {
+			t.Fatalf("orphan ref must carry the verbatim stored key %q, got %q", orphanKey, ref.IndexRef)
+		}
+		ok, err := repo.DeleteExpiredRoom(ref)
+		if err != nil {
+			t.Fatalf("DeleteExpiredRoom(%s/%s): %v", ref.AppSlug, ref.ID, err)
+		}
+		if ok {
+			deleted++
+		}
+	}
+	// Only the live room was an actual record deletion; the orphan entry
+	// was an index cleanup, not a room deletion.
+	if deleted != 1 {
+		t.Fatalf("exactly one room record should have been deleted, got %d", deleted)
+	}
+
+	// The pass DRAINED the index: a second scan sees zero expired entries.
+	again, err := repo.ExpiredRooms(now)
+	if err != nil {
+		t.Fatalf("ExpiredRooms (second pass): %v", err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("room expiry index must drain in one pass; %d entr(ies) remain: %v", len(again), again)
+	}
+
+	// The live room's record is really gone too.
+	if _, err := repo.GetRoom(live.AppSlug, live.ID); err == nil {
+		t.Fatalf("expired live room should have been deleted")
+	}
+}
