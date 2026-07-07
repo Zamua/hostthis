@@ -208,21 +208,6 @@ type ShaleConfig struct {
 	// HOSTTHIS_SLATEDB_FENCE_GC (default on; "false" is the kill-switch).
 	ReapFenceWALs bool
 
-	// MaxWALFlushesBeforeL0, when > 0, caps slatedb's
-	// max_wal_flushes_before_l0_flush: the backstop that forces an L0 flush
-	// (advancing the WAL GC boundary) after that many WAL flushes. slatedb's
-	// default (4096) is the only flush trigger that ever fires at hostthis's
-	// tiny-value write profile (the 64 MiB memtable trigger never does), so
-	// each unit accumulates up to ~4096 live WAL objects - including
-	// fence-storm 0-byte WALs - that sit unreapable ~forever at low write
-	// rates. The long-lived serving deploys cap it (daemon default 256). The
-	// zero value leaves slatedb's default untouched, the unchanged path for
-	// short-lived callers (tests, the migration tool). Rides on the same
-	// Settings handle as ReapFenceWALs. Operator-facing env var:
-	// HOSTTHIS_SLATEDB_MAX_WAL_FLUSHES ("0" is the kill-switch). See
-	// docs/SPEC.md "WAL flush backstop: bounding live WAL accumulation".
-	MaxWALFlushesBeforeL0 int
-
 	// WriteTimeout / ReadTimeout, when > 0, override the cluster's per-dispatch
 	// write/read deadline (cluster.Config defaults each to 5s). Zero keeps the
 	// shale default, so a ShaleConfig built without setting these (serving, tests)
@@ -326,14 +311,12 @@ type ShaleRepo struct {
 	// Destroys it after the cluster (and its backend) have shut down.
 	cache *slatedb.DbCache
 
-	// slatedbSettings is the slatedb Settings object carrying the non-default
-	// per-unit tuning: the fence-WAL garbage collector enablement (see
-	// ShaleConfig.ReapFenceWALs) and the WAL flush backstop (see
-	// ShaleConfig.MaxWALFlushesBeforeL0). Built once and forwarded verbatim
-	// to every unit's DbBuilder by the slate backend; an operator-owned
-	// uniffi handle that Close Destroys after the cluster (and its backends)
-	// have shut down. Nil when both knobs are off.
-	slatedbSettings *slatedb.Settings
+	// fenceGCSettings is the slatedb Settings object that enables the fence-WAL
+	// garbage collector (see ShaleConfig.ReapFenceWALs). Built once and
+	// forwarded verbatim to every unit's DbBuilder by the slate backend; an
+	// operator-owned uniffi handle that Close Destroys after the cluster (and
+	// its backends) have shut down. Nil when ReapFenceWALs is false.
+	fenceGCSettings *slatedb.Settings
 
 	// closeFactory releases the multi-backend slate Backing after the cluster
 	// shuts down (cluster.Close closes the mounted unit databases; this is the
@@ -389,50 +372,21 @@ func slateConfigFromShale(cfg ShaleConfig) slate.Config {
 	return sc
 }
 
-// newSlatedbSettings builds the slatedb Settings carrying the repo's
-// non-default per-unit tuning, or nil when both knobs are off (leave slatedb's
-// defaults untouched - the unchanged path for short-lived callers).
-//
-//   - reapFenceWALs flips garbage_collector_options.wal_fence_options.dry_run
-//     from slatedb's default (true) to false. ONLY that one flag is changed -
-//     every other GC category and the conservative min_age (slatedb's 300s
-//     default) are left untouched, so the GC reaps only superseded fence WAL
-//     objects older than min_age and never touches data WALs or a recently-
-//     written (still-live) fence. Without this, fence WALs (one written per
-//     unit open) are never collected and a unit's object-store prefix grows
-//     without bound, making cold-start opens crawl. See
-//     ShaleConfig.ReapFenceWALs.
-//   - maxWALFlushesBeforeL0 (> 0) caps max_wal_flushes_before_l0_flush, the
-//     backstop L0-flush trigger that advances the WAL GC boundary - at
-//     hostthis's tiny-value write profile it is the ONLY trigger that fires,
-//     and slatedb's 4096 default leaves ~4096 live WALs per unit unreapable
-//     at low write rates. See ShaleConfig.MaxWALFlushesBeforeL0 and
-//     docs/SPEC.md "WAL flush backstop: bounding live WAL accumulation".
-//
-// CAUTION: the uniffi Settings.Set deserializes without unknown-field
-// rejection, so a typo'd key silently no-ops. The pinned tests
-// (shale_repo_fencegc_test.go) therefore assert each key's applied value by
-// re-reading the Settings JSON, never just that Set returned no error.
-//
-// The returned handle is operator-owned: the caller forwards it to the slate
-// backend (which hands it to every unit's DbBuilder) and Destroys it on
-// shutdown.
-func newSlatedbSettings(reapFenceWALs bool, maxWALFlushesBeforeL0 int) (*slatedb.Settings, error) {
-	if !reapFenceWALs && maxWALFlushesBeforeL0 <= 0 {
-		return nil, nil
-	}
+// newFenceWALGCSettings builds a slatedb Settings with the fence-WAL garbage
+// collector enabled: it flips garbage_collector_options.wal_fence_options.dry_run
+// from slatedb's default (true) to false. ONLY that one flag is changed - every
+// other GC category and the conservative min_age (slatedb's 300s default) are
+// left untouched, so the GC reaps only superseded fence WAL objects older than
+// min_age and never touches data WALs or a recently-written (still-live) fence.
+// Without this, fence WALs (one written per unit open) are never collected and a
+// unit's object-store prefix grows without bound, making cold-start opens crawl.
+// See ShaleConfig.ReapFenceWALs. The returned handle is operator-owned: the
+// caller forwards it to the slate backend and Destroys it on shutdown.
+func newFenceWALGCSettings() (*slatedb.Settings, error) {
 	s := slatedb.SettingsDefault()
-	if reapFenceWALs {
-		if err := s.Set("garbage_collector_options.wal_fence_options.dry_run", "false"); err != nil {
-			s.Destroy()
-			return nil, err
-		}
-	}
-	if maxWALFlushesBeforeL0 > 0 {
-		if err := s.Set("max_wal_flushes_before_l0_flush", strconv.Itoa(maxWALFlushesBeforeL0)); err != nil {
-			s.Destroy()
-			return nil, err
-		}
+	if err := s.Set("garbage_collector_options.wal_fence_options.dry_run", "false"); err != nil {
+		s.Destroy()
+		return nil, err
 	}
 	return s, nil
 }
@@ -511,33 +465,34 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		cache = c
 	}
 
-	// Per-unit slatedb tuning: build the Settings that turns OFF the fence-WAL
-	// collector's dry-run default (so the per-open fence WAL objects get reaped
-	// instead of accumulating unboundedly, see ShaleConfig.ReapFenceWALs) and
-	// caps the WAL flush backstop (so live WALs stay bounded at a tiny-value
-	// write profile, see ShaleConfig.MaxWALFlushesBeforeL0). Nil when both
-	// knobs are off. The slate backend forwards this verbatim to every unit's
-	// DbBuilder (both the single-backend slate.Config and the multi-backend
-	// BackingConfig below). Built before cleanup so the closure Destroys it on
-	// any later open error.
-	slatedbSettings, sErr := newSlatedbSettings(cfg.ReapFenceWALs, cfg.MaxWALFlushesBeforeL0)
-	if sErr != nil {
-		if cache != nil {
-			cache.Destroy()
+	// Fence-WAL GC: build the slatedb Settings that turns OFF the fence-WAL
+	// collector's dry-run default, so the per-open fence WAL objects get reaped
+	// instead of accumulating unboundedly (see ShaleConfig.ReapFenceWALs). The
+	// slate backend forwards this verbatim to every unit's DbBuilder (both the
+	// single-backend slate.Config and the multi-backend BackingConfig below).
+	// Built before cleanup so the closure Destroys it on any later open error.
+	var fenceGCSettings *slatedb.Settings
+	if cfg.ReapFenceWALs {
+		s, sErr := newFenceWALGCSettings()
+		if sErr != nil {
+			if cache != nil {
+				cache.Destroy()
+			}
+			if lis != nil {
+				_ = lis.Close()
+			}
+			return nil, fmt.Errorf("shale: build fence-WAL GC settings: %w", sErr)
 		}
-		if lis != nil {
-			_ = lis.Close()
-		}
-		return nil, fmt.Errorf("shale: build slatedb settings: %w", sErr)
+		sc.Settings = s
+		fenceGCSettings = s
 	}
-	sc.Settings = slatedbSettings
 
 	cleanup := func() {
 		if cache != nil {
 			cache.Destroy()
 		}
-		if slatedbSettings != nil {
-			slatedbSettings.Destroy()
+		if fenceGCSettings != nil {
+			fenceGCSettings.Destroy()
 		}
 		if lis != nil {
 			_ = lis.Close()
@@ -613,7 +568,7 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 			UseSSL:                   cfg.UseSSL,
 			KeyPrefix:                cfg.DbName,
 			Cache:                    cache,
-			Settings:                 slatedbSettings,
+			Settings:                 fenceGCSettings,
 			RelaxedReplicaDurability: cfg.RelaxedDurability,
 		})
 		if bErr != nil {
@@ -690,7 +645,7 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		bindAddr:        cfg.BindAddr,
 		grpcAddr:        advertiseGRPCAddr,
 		cache:           cache,
-		slatedbSettings: slatedbSettings,
+		fenceGCSettings: fenceGCSettings,
 		closeFactory:    closeFactory,
 	}
 
@@ -758,9 +713,9 @@ func (r *ShaleRepo) Close() error {
 	// cluster + backends closed). The opened units captured their GC config at
 	// Build time, so this handle is no longer referenced once they have shut
 	// down.
-	if r.slatedbSettings != nil {
-		r.slatedbSettings.Destroy()
-		r.slatedbSettings = nil
+	if r.fenceGCSettings != nil {
+		r.fenceGCSettings.Destroy()
+		r.fenceGCSettings = nil
 	}
 	return err
 }

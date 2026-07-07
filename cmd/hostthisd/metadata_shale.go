@@ -23,9 +23,6 @@
 //   HOSTTHIS_SHALE_READ_TIMEOUT       (Go duration, e.g. "8s"; unset/empty =
 //                                      shale's 5s default; malformed fails startup)
 //   HOSTTHIS_SHALE_WRITE_TIMEOUT      (same, for the per-dispatch write deadline)
-//   HOSTTHIS_SLATEDB_MAX_WAL_FLUSHES  (WAL flush backstop; unset/empty = 256,
-//                                      "0" = slatedb default, malformed/negative
-//                                      fails startup)
 //
 // With HOSTTHIS_SHALE_BIND_ADDR unset (the default) the node runs the
 // single-node path exactly as before: no gossip, no ring routing, every
@@ -145,17 +142,6 @@ func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger) (*stor
 	// Default ON for this long-lived server; HOSTTHIS_SLATEDB_FENCE_GC=false is
 	// the kill-switch (fall back to slatedb's untouched defaults).
 	reapFenceWALs := !strings.EqualFold(strings.TrimSpace(os.Getenv("HOSTTHIS_SLATEDB_FENCE_GC")), "false")
-	// WAL flush backstop: cap slatedb's max_wal_flushes_before_l0_flush so a
-	// unit's live WAL count stays bounded at hostthis's tiny-value write
-	// profile (slatedb's 4096 default is the only flush trigger that fires
-	// there; see storage.ShaleConfig.MaxWALFlushesBeforeL0). Default 256;
-	// HOSTTHIS_SLATEDB_MAX_WAL_FLUSHES=0 keeps slatedb's default. A malformed
-	// or negative value is a config error and fails startup - never a silent
-	// default. See docs/SPEC.md "WAL flush backstop".
-	maxWALFlushes, err := maxWALFlushesFromEnv()
-	if err != nil {
-		return nil, err
-	}
 	// Per-dispatch cluster deadlines (shale defaults each to 5s; zero keeps
 	// them). The read budget is the one deploys raise (e.g. "8s"): during a
 	// rollout a read that lands in a shard's sub-second handoff window
@@ -237,39 +223,38 @@ func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger) (*stor
 	}
 
 	repo, err := storage.NewShaleRepo(storage.ShaleConfig{
-		NodeID:                nodeID,
-		Endpoint:              endpoint,
-		Region:                region,
-		Bucket:                bucket,
-		AccessKey:             accessKey,
-		SecretKey:             secretKey,
-		UseSSL:                useSSL,
-		DbName:                dbName,
-		BindAddr:              bindAddr,
-		GRPCAddr:              grpcAddr,
-		Seeds:                 seeds,
-		ReplicationFactor:     replicationFactor,
-		RelaxedDurability:     !awaitDurable,
-		UnitCount:             unitCount,
-		CacheBytes:            uint64(cacheBytes),
-		ReapFenceWALs:         reapFenceWALs,
-		MaxWALFlushesBeforeL0: maxWALFlushes,
-		ReadTimeout:           readTimeout,
-		WriteTimeout:          writeTimeout,
-		Logger:                logger,
-		BlobStore:             blobStore,
-		ConditionalStore:      condStore,
+		NodeID:            nodeID,
+		Endpoint:          endpoint,
+		Region:            region,
+		Bucket:            bucket,
+		AccessKey:         accessKey,
+		SecretKey:         secretKey,
+		UseSSL:            useSSL,
+		DbName:            dbName,
+		BindAddr:          bindAddr,
+		GRPCAddr:          grpcAddr,
+		Seeds:             seeds,
+		ReplicationFactor: replicationFactor,
+		RelaxedDurability: !awaitDurable,
+		UnitCount:         unitCount,
+		CacheBytes:        uint64(cacheBytes),
+		ReapFenceWALs:     reapFenceWALs,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		Logger:            logger,
+		BlobStore:         blobStore,
+		ConditionalStore:  condStore,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open shale: %w", err)
 	}
 	repo.Retention = retention
 	if bindAddr == "" {
-		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d shards=%d awaitDurable=%t fenceGC=%t maxWALFlushes=%d blobBucket=%q endpoint=%s",
-			nodeID, bucket, dbName, replicationFactor, unitCount, awaitDurable, reapFenceWALs, maxWALFlushes, blobBucket, endpoint)
+		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d shards=%d awaitDurable=%t fenceGC=%t blobBucket=%q endpoint=%s",
+			nodeID, bucket, dbName, replicationFactor, unitCount, awaitDurable, reapFenceWALs, blobBucket, endpoint)
 	} else {
-		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d shards=%d awaitDurable=%t fenceGC=%t maxWALFlushes=%d homogeneous=%t blobBucket=%q bucket=%s db=%s endpoint=%s",
-			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, unitCount, awaitDurable, reapFenceWALs, maxWALFlushes, homogeneous, blobBucket, bucket, dbName, endpoint)
+		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d shards=%d awaitDurable=%t fenceGC=%t homogeneous=%t blobBucket=%q bucket=%s db=%s endpoint=%s",
+			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, unitCount, awaitDurable, reapFenceWALs, homogeneous, blobBucket, bucket, dbName, endpoint)
 	}
 	return repo, nil
 }
