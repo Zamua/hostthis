@@ -872,9 +872,12 @@ type identityPasteRow struct {
 	// decoded: the live sum is uncomputable, so instead of projecting a
 	// partial number (a silent under-count) the entry carries this marker
 	// and the quota scan HARD-FAILS on it (docs/SPEC.md "Decode tolerance
-	// of the quota scan"). Cleared by the next reprojection once the
-	// record decodes again. omitempty keeps ordinary entries byte-shaped
-	// as before the field existed.
+	// of the quota scan"). Cleared only when the record decodes again or
+	// the row is removed (which for real corruption means an operator
+	// repair or raw-key delete - Delete/DeleteVersion/the sweep decode the
+	// same row, so no self-service path clears it; see the spec's operator
+	// note). omitempty keeps ordinary entries byte-shaped as before the
+	// field existed.
 	Placeholder bool `json:"placeholder,omitempty"`
 }
 

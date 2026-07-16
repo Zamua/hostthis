@@ -4524,9 +4524,24 @@ it, and every site deploy's pre-claim writes it on the transactional
 shale-blob path (the only path prod runs) - so the owner is always
 derivable and the fail-closed heal always applies; the residual is
 reachable only on the metadata-only test path that skips the pre-claim.
-The placeholder clears the same way it appears: once the authoritative
-record decodes again, the next reprojection overwrites it with real cached
-values and the owner's checks resume.
+
+Be honest about what clears a placeholder, because nothing in the system
+repairs a corrupt record by itself. The exits are exactly three: (1) the
+authoritative record becomes decodable again (a schema-version rollback,
+a restored value) - the next reprojection overwrites the placeholder with
+real cached values; (2) an operator deletes the corrupt record at the
+raw-key level - the row is then gone, so the next pass's prune drops the
+placeholder; or (3) the row otherwise disappears, same prune. Until one of
+those happens, that owner CANNOT upload - and note the trap: the normal
+self-service paths out are closed too, because `Delete`, `DeleteVersion`,
+and the expiry sweep's per-slug removal all read (and must decode) the
+same corrupt row, so they fail on it as well; a persistently undecodable
+record therefore blocks that owner INDEFINITELY, not "until it heals".
+Fail-closed is still the right call - the alternative is silently
+under-counting the owner's bytes forever - but the operator contract is
+stated plainly: a placeholder that survives more than a pass or two is a
+page, and the remedy is repairing or raw-key-deleting the record, not
+waiting.
 
 Taken together: the ceiling can be transiently under-enforced (Window A, or
 Window C's stale-small cache), transiently over-admitted (Window B), or

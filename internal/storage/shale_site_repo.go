@@ -164,8 +164,9 @@ type identitySiteRow struct {
 	// Placeholder marks a fail-closed entry the reconciler projects for a
 	// slug whose authoritative sites/<slug> row cannot be decoded: the quota
 	// scan HARD-FAILS on it rather than silently under-counting (docs/SPEC.md
-	// "Decode tolerance of the quota scan"). Cleared by the next reprojection
-	// once the row decodes again.
+	// "Decode tolerance of the quota scan"). Cleared only when the row
+	// decodes again or is removed (for real corruption: an operator repair
+	// or raw-key delete; see the spec's operator note).
 	Placeholder bool `json:"placeholder,omitempty"`
 }
 
