@@ -1293,7 +1293,9 @@ func (r *ShaleRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, err
 
 // sumActiveBytesForOwner scans identity_pastes/<owner>/ once and sums the
 // cached size of every live entry (cached expires_at > now). It never reads
-// the authoritative {slug} rows: the entry IS the accounting record. The
+// the authoritative {slug} rows (the entry IS the accounting record), with
+// one upgrade-path exception: an empty-valued LEGACY entry (see the
+// fail-closed note below) is read through its authoritative row. The
 // consequences of trusting the cache are deliberate and documented
 // (docs/SPEC.md "Scan-derived quota"):
 //
@@ -1308,7 +1310,14 @@ func (r *ShaleRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, err
 // Fail-closed (Policy 3, this is a synchronous write-path read): an entry
 // that does not decode, or that carries the reconciler's fail-closed
 // Placeholder marker (an undecodable authoritative record), HARD-FAILS the
-// scan - rejecting the upload rather than silently under-counting.
+// scan - rejecting the upload rather than silently under-counting. The one
+// deliberate exception is the upgrade path: a LEGACY entry recognized by
+// shape (an EMPTY value, the slatedb layout's bare-marker convention that
+// an in-place migration carries over) is read through its authoritative
+// pastes/<slug> row plus live version sum - the slatedb per-entry
+// semantics - until the reconciler's reprojection enriches it. Without the
+// fallback an empty migrated entry would hard-fail every quota-checked
+// create for that owner until the first post-cutover reconcile.
 func (r *ShaleRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, error) {
 	idx, err := r.scanPrefix(shalePrefixIdentityPastes(owner))
 	if err != nil {
@@ -1316,6 +1325,14 @@ func (r *ShaleRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 	}
 	var total int64
 	for _, item := range idx {
+		if len(item.Value) == 0 {
+			n, err := r.legacyPasteEntryBytes(item.Key, now)
+			if err != nil {
+				return 0, err
+			}
+			total += n
+			continue
+		}
 		var row identityPasteRow
 		if err := json.Unmarshal(item.Value, &row); err != nil {
 			return 0, fmt.Errorf("decode %s: %w", item.Key, err)
@@ -1329,6 +1346,30 @@ func (r *ShaleRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 		total += int64(row.Size)
 	}
 	return total, nil
+}
+
+// legacyPasteEntryBytes resolves a LEGACY (empty-valued) identity_pastes
+// entry against its authoritative rows: the read-through path a migrated
+// slatedb deployment needs until the reconciler enriches the entry (the
+// paste mirror of legacySiteEntryBytes; pastes have no marker-byte legacy
+// era, so the empty value is the only recognized paste shape). A stale
+// legacy entry (row gone) contributes zero (the reconciler prunes it); an
+// undecodable row HARD-FAILS (Policy 3); a live row contributes its live
+// version sum under the same read-time expiry filter, exactly what the
+// slatedb sum computed for the entry.
+func (r *ShaleRepo) legacyPasteEntryBytes(indexKey []byte, now time.Time) (int64, error) {
+	slug := domain.Slug(extractSlug(indexKey))
+	var p pasteRow
+	if err := r.getJSON(shaleKeyPaste(slug), &p); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return 0, nil // stale legacy entry; the reconciler prunes it
+		}
+		return 0, err
+	}
+	if !p.ExpiresAt.After(now) {
+		return 0, nil // expired-unswept: stops counting at read time
+	}
+	return r.sumLiveVersionBytes(slug)
 }
 
 // sumLiveVersionBytes sums the sizes of a paste's non-deleted version rows on

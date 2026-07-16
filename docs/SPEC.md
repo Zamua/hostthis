@@ -4086,7 +4086,15 @@ backend:
    HARD-FAIL on an entry that does not decode or that carries the
    reconciler's fail-closed placeholder marker (see "Decode tolerance of
    the quota scan"). No authoritative row is read: the check is ONE prefix
-   scan with zero per-entry fan-out.
+   scan with zero per-entry fan-out. (One deliberate exception, the
+   upgrade path: a LEGACY paste entry migrated from a slatedb deployment
+   carries an EMPTY value - the slatedb layout stored `identity_pastes`
+   as bare markers - and is read through its authoritative `pastes/<slug>`
+   row plus live version sum, exactly the slatedb per-entry semantics,
+   until the reconciler's reprojection enriches it with the JSON
+   projection. Without this fallback an empty migrated entry would
+   hard-fail EVERY quota-checked create for that owner until the first
+   post-cutover reconcile.)
 3. Return the total. `SumActiveSiteBytesByOwner` is the site sibling:
    enumerate `identity_sites/<id>/` and sum each entry's cached deduped
    size with the same expiry filter and the same fail-closed rules. (A
@@ -4430,11 +4438,18 @@ synchronous write path and sums the owner's enumeration ENTRIES, so the
 fail-closed unit is the entry (Policy 3, "Decode tolerance is
 per-scan-semantics"): an entry that does not decode HARD-FAILS the check,
 rejecting the upload rather than being skipped - skipping would
-UNDER-count and over-admit. (The one deliberate exception: a legacy SITE
-entry holding the pre-value-bearing marker byte or an empty migrated value
-is recognized explicitly and read through its authoritative row, the
-upgrade path - only a value that is neither the marker shape nor valid
-JSON fails.) The same fail-closed outcome must survive an undecodable
+UNDER-count and over-admit. (The one deliberate exception is the legacy
+upgrade path, recognized by SHAPE: a SITE entry holding the
+pre-value-bearing marker byte or an empty migrated value, or a PASTE
+entry holding an empty migrated value - the slatedb layout stored both
+index families as bare markers, and pastes never had a marker-byte era,
+so an empty value is the only legacy paste shape - is read through its
+authoritative row (for a paste, the row plus its live version sum) until
+the reconciler's reprojection enriches it. Only a value that is neither a
+recognized legacy shape nor valid JSON fails. A legacy entry whose
+authoritative row is GONE contributes zero and is pruned by the
+reconciler; one whose row is undecodable hard-fails, same as any other
+authoritative decode failure.) The same fail-closed outcome must survive an undecodable
 AUTHORITATIVE record, which the scan itself never reads; that is the
 reconciler's job. On an undecodable `pastes/*` (or `sites/*`) row - or a
 paste any of whose VERSION rows cannot be decoded, since the cached size
@@ -4767,7 +4782,12 @@ Two compatibility details:
   offline backfill of any stored aggregate. The one derived structure the
   quota scan reads THROUGH is the `identity_pastes` / `identity_sites`
   enumeration index. An existing slatedb deployment already maintains
-  those indexes, so they carry over as-is; and even a paste / site that
+  those indexes, so they carry over as-is - but as EMPTY values (the
+  slatedb marker convention), so until the first post-cutover reconcile
+  enriches them the quota scan reads each such entry through its
+  authoritative rows (the legacy fallback under "Scan-derived quota"),
+  paying the slatedb-shaped per-entry fan-out for exactly those entries
+  and never hard-failing on the shape; and even a paste / site that
   somehow lacks an index entry is picked up by the periodic reconciler's
   reprojection (it scans the authoritative `pastes/*` / `sites/*` rows and
   re-adds any missing entry). This is a graceful, idempotent, no-downtime

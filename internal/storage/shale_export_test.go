@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/Zamua/shale/pkg/backend"
 	"github.com/Zamua/shale/pkg/cluster"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -97,6 +98,29 @@ func (r *ShaleRepo) PutRawForTest(key, value []byte) error {
 // (nil, nil) when absent. Used to assert the raw counter / index bytes.
 func (r *ShaleRepo) GetRawForTest(key []byte) ([]byte, error) {
 	return r.getRaw(key)
+}
+
+// PutEmptyBackendForTest plants an EMPTY value under key straight on the
+// local backend(s), bypassing the cluster Put path (which rejects empty
+// values with cluster.ErrEmptyValue). This is the only way to reproduce
+// the legacy identity_pastes shape a migrated slatedb deployment carries
+// on disk: slatedb stored the enumeration index as bare empty markers,
+// and the migration is in-place, so the shale scans encounter those raw
+// empty bytes even though no shale write path can produce them. Only
+// meaningful on a single-node test repo (the write bypasses ring routing).
+func (r *ShaleRepo) PutEmptyBackendForTest(key []byte) error {
+	results := r.cluster.Aggregate(func(b backend.Backend) any {
+		return b.Put(key, []byte{})
+	})
+	for _, res := range results {
+		if res.Err != nil {
+			return res.Err
+		}
+		if err, ok := res.Value.(error); ok && err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DeleteRawForTest removes key straight through the cluster's Delete
