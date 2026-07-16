@@ -138,6 +138,24 @@ func (r *ShaleRepo) ReconcileForTest(now time.Time) error {
 	return r.Reconcile(now)
 }
 
+// SetReconcileBeforeIndexWritesHookForTest installs the test seam that runs
+// after Reconcile captures its snapshots and before the paste reprojection's
+// prune + write loops. The guarded-write race test injects a live append
+// there - the exact window where an unguarded reprojection would clobber
+// the fresher refresh. Pass nil to clear.
+func (r *ShaleRepo) SetReconcileBeforeIndexWritesHookForTest(fn func()) {
+	r.testHookReconcileBeforeIndexWrites = fn
+}
+
+// SetBeforeOrphanPruneDeleteHookForTest installs the test seam that runs
+// inside the orphan prune between the authoritative-row confirm and the
+// entry delete. The prune TOCTOU test injects a same-slug redeploy there -
+// the window where an unconditional delete would drop the fresh entry.
+// Pass nil to clear.
+func (r *ShaleRepo) SetBeforeOrphanPruneDeleteHookForTest(fn func(key []byte)) {
+	r.testHookBeforeOrphanPruneDelete = fn
+}
+
 // --- legacy-value builders (the slatedb on-disk shape) ---------------------
 
 // LegacyPasteKeyForTest returns the authoritative paste key for slug, the

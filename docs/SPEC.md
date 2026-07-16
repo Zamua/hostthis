@@ -3402,10 +3402,22 @@ as a standalone step driven by its own `sites/*` scan so it still runs
 every tick. This index reprojection is the SOLE quota-healing mechanism: it
 closes the crash-between-row-and-index under-count window by making the
 enumeration set complete again, and it bounds cached-value drift (a lost
-size/expiry refresh, a stale or orphaned entry) to one pass. Because it
-reprojects authoritative rows (never a stored number), it is safe under
-live traffic on any cadence and cannot introduce a recompute race - there
-is no aggregate to overwrite.
+size/expiry refresh, a stale or orphaned entry) to one pass. The SET part
+of the heal (add/drop entries) is idempotent and race-free, but the cached
+VALUES the entries carry are numbers derived from a point-in-time snapshot
+of the authoritative rows - so a reprojection CAN race a live write's
+fresher refresh (an append that lands after the pass's snapshot but before
+its index write). Every reprojection and refresh index write is therefore
+GUARDED: it commits only if the entry still holds the exact value the
+computation read when it started (a per-entry conditional write through
+the same {id}-shard CAS; the pass snapshots the index BEFORE the
+authoritative scans so a guard pass proves the computed value is at least
+as fresh as the entry). On a guard conflict the write is SKIPPED and
+logged - never retried on the spot - leaving whichever value landed;
+residual staleness is bounded by one reconcile cycle (the next pass
+recomputes from fresher rows and re-guards). Guarded to lose, never to
+clobber: that is what keeps the pass safe under live traffic on any
+cadence.
 
 A site deploy spans the `{slug}` shard (the authoritative `sites/<slug>`
 write + the cross-family paste-slug collision read) and the `{id}` shard
@@ -4125,13 +4137,22 @@ contract that makes the cached sum safe:
   after the tombstone commits; `Delete` and `MarkFailed` drop the entry
   outright. Each refresh is a synchronous best-effort `{id}`-shard CAS
   right after the authoritative `{slug}` write, logged on failure - never
-  a failed operation.
+  a failed operation. Because the refreshed sum is recomputed from a
+  version scan OUTSIDE the index CAS, each refresh is GUARDED: it captures
+  the entry's value before recomputing and commits only if the entry still
+  holds it, skipping on conflict (two concurrent same-slug refreshes
+  cannot land older-sum-last; the loser skips, one-cycle-bounded, healed
+  by the reprojection). No retry loop on the response path.
 - **The reconciler's reprojection is the drift healer.** Every reconcile
   pass rebuilds each entry's cached values FROM the authoritative rows
   (the head fields plus the live version sum), so a lost refresh - a crash
   or a failed index CAS between the authoritative write and the index
   write - leaves the cached size wrong only until the next pass.
   Cached-value error is bounded by a reconcile cycle, never permanent.
+  Reprojection writes carry the same guard (conditioned on the index
+  value snapshotted before the pass's authoritative scans), so a
+  point-in-time pass cannot clobber a fresher value a live write landed
+  mid-pass - it skips and the next cycle recomputes.
 - **Stale-entry semantics are honest, not exact.** An entry whose paste
   died of EXPIRY self-excludes (its cached `expires_at` is past). An entry
   orphaned by a crash mid-`Delete` (or mid-`MarkFailed`) keeps counting
@@ -4293,9 +4314,12 @@ indexes** - plus the unrelated pending-paste age-out:
    it again if a crash mid-`MarkFailed` left it behind), so the index
    enumerates exactly the non-failed authoritative set. This heal is
    idempotent: every pod running it converges to the same state and
-   running it more often only tightens the drift windows. It is the sole
-   mechanism that closes the crash-between-row-and-index gap and the
-   stale-cached-value gap. Both the paste index (`reconcileIndexes`,
+   running it more often only tightens the drift windows. Each entry write
+   is guarded (conditional on the value the pass snapshotted before its
+   authoritative scans; skip + log on conflict), so a pass racing live
+   traffic - or another pod's pass - loses to the fresher write instead of
+   clobbering it. It is the sole mechanism that closes the
+   crash-between-row-and-index gap and the stale-cached-value gap. Both the paste index (`reconcileIndexes`,
    driven by the `pastes/*` + `versions/*` scans) and the site index
    (`reconcileSiteIndexes`, driven by the `sites/*` scan) are reprojected
    each pass.
@@ -4305,11 +4329,19 @@ indexes** - plus the unrelated pending-paste age-out:
    enumeration entry, which is what removes the bytes from the quota scan;
    it lives in the same pass.
 
-There is no counter to rebuild, no reservation marker to complete, and no
-absolute value to overwrite - so the whole class of recompute races that
-plagued the counter design (a scan-to-write window that under-counts and
-over-admits) is structurally absent. The reconciler only ever ADDS or
-DROPS set members to match authoritative truth; it never writes a number.
+There is no counter to rebuild and no reservation marker to complete, so
+the counter design's specific failure (a stored aggregate on a foreign
+shard that any recompute overwrite races and permanently drifts) is
+structurally absent. But the reconciler DOES write numbers now: each
+reprojected entry carries a cached size derived from a point-in-time
+snapshot, so a recompute race with a live write's refresh exists and is
+handled, not wished away - every reprojection (and refresh) index write is
+a per-entry conditional write that commits only if the entry still holds
+the value read when the computation started, skipping (and logging) on
+conflict. A skipped write is at most one cycle of staleness on one entry,
+healed by the next reprojection from fresher rows; a clobber (the stale
+snapshot value silently replacing a fresher one, recurring every cycle) is
+what the guard exists to prevent.
 
 #### The correctness argument: never DURABLY exceed the cap
 
@@ -4374,18 +4406,29 @@ of per-identity over-admit can exhaust the store.
 **Window C - stale cached values and orphaned entries (bounded, healed by
 reprojection).** The cached sum introduces a third window the
 authoritative-fan-out shape did not have: the enumeration entry can be
-WRONG, not just missing. A lost size/expiry refresh (crash or failed CAS
-after an append or version-tombstone commits) leaves the entry's cached
-size stale - too small UNDER-counts (an over-admit shaped exactly like
-Window A, bounded by that one record's delta), too large OVER-counts
-(wrongly rejects, never admits). An entry orphaned by a crash mid-`Delete`
-or mid-`MarkFailed` keeps counting a dead record's cached bytes - an
-over-count, so admission stays conservative. Every variant is bounded by
-one record's bytes per crash and lasts at most one reconcile cycle: the
-reprojection rebuilds every entry's cached values from the authoritative
-rows and prunes entries whose row is gone or failed. This is the deliberate
-trade for a fan-out-free check, and it stays inside the same envelope the
-non-atomic check-then-write contract already accepts.
+WRONG, not just missing. It opens two ways. CRASH-shaped: a lost
+size/expiry refresh (crash or failed CAS after an append or
+version-tombstone commits) leaves the entry's cached size stale. An entry
+orphaned by a crash mid-`Delete` or mid-`MarkFailed` keeps counting a dead
+record's cached bytes - an over-count, so admission stays conservative.
+RACE-shaped: the cached value is a number recomputed outside the index
+CAS, so two writers of the same entry can hold sums computed from
+different authoritative states - a reconciler reprojection racing a live
+append/tombstone refresh, or two concurrent same-slug refreshes. Unguarded,
+the staler sum could land LAST and silently replace the fresher one (and
+the reprojection recurs every cycle, so that clobber would repeat). Every
+such write is therefore guarded to LOSE: it commits only if the entry
+still holds the value its computation started from, and on conflict it
+skips (see "Periodic reconcile"), so a race costs at most one skipped
+refresh - the same stale-cache shape as a lost refresh, in whichever
+direction the surviving value errs (too small UNDER-counts, an over-admit
+shaped exactly like Window A; too large OVER-counts, wrongly rejects,
+never admits). Every variant is bounded by one record's bytes per
+crash/race and lasts at most one reconcile cycle: the reprojection
+rebuilds every entry's cached values from the authoritative rows (guarded
+the same way) and prunes entries whose row is gone or failed. This is the
+deliberate trade for a fan-out-free check, and it stays inside the same
+envelope the non-atomic check-then-write contract already accepts.
 
 **Expiry and dedup.** An expired-but-unswept paste stops counting the
 instant it expires, because the scan filters `expires_at > now` on the

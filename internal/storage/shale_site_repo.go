@@ -840,6 +840,15 @@ func (r *ShaleRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
 // marker) appear enriched in the index. Cross-shard via aggregate; every
 // write is an idempotent single-{id}-shard CAS, safe under live traffic.
 func (r *ShaleRepo) reconcileSiteIndexPass() error {
+	// Snapshot the site enumeration index FIRST - strictly before the
+	// authoritative sites/ scan - as the guard baseline for the reprojection
+	// writes (the same ordering argument as the paste pass in Reconcile: a
+	// baseline that predates the authoritative scan makes "entry unchanged"
+	// prove the computed value is at least as fresh).
+	siteIdx, err := r.aggregatePrefix(prefixIdentitySitesAll)
+	if err != nil {
+		return fmt.Errorf("reconcile sites: scan identity_sites: %w", err)
+	}
 	siteItems, err := r.aggregatePrefix(prefixSites)
 	if err != nil {
 		return fmt.Errorf("reconcile sites: scan sites: %w", err)
@@ -886,23 +895,26 @@ func (r *ShaleRepo) reconcileSiteIndexPass() error {
 			ExpiresAt: row.ExpiresAt,
 		}
 	}
-	return r.reconcileSiteIndexes(sitesByOwner)
+	return r.reconcileSiteIndexes(sitesByOwner, siteIdx)
 }
 
 // reconcileSiteIndexes rebuilds the per-owner identity_sites index to match
-// the authoritative sites present, one {id}-shard CAS per entry (idempotent
+// the authoritative sites present, one {id}-shard CAS per entry (a
 // value-bearing overwrite - this is also what enriches a legacy marker entry
-// to the JSON projection). Mirrors reconcileIndexes for pastes, including the
+// to the JSON projection). have is the pass's index snapshot, captured by
+// reconcileSiteIndexPass BEFORE the authoritative sites/ scan; it is both
+// the orphan-prune candidate set and the expected-value baseline for the
+// guarded writes. Mirrors reconcileIndexes for pastes, including the
 // global orphan prune: entries are pruned against a full aggregate of the
 // index family - so an orphan lingers nowhere, not even under an owner with
 // no remaining sites (the quota scan sums cached values without resolving the
 // rows, so an unpruned orphan would over-count that owner forever) - and each
 // candidate is confirmed against its authoritative row before dropping, so a
 // fresh deploy racing the pass snapshot is kept.
-func (r *ShaleRepo) reconcileSiteIndexes(sitesByOwner map[string]map[string]identitySiteRow) error {
-	have, err := r.aggregatePrefix(prefixIdentitySitesAll)
-	if err != nil {
-		return fmt.Errorf("reconcile sites: scan identity_sites: %w", err)
+func (r *ShaleRepo) reconcileSiteIndexes(sitesByOwner map[string]map[string]identitySiteRow, have []scanItem) error {
+	snapshot := make(map[string][]byte, len(have))
+	for _, item := range have {
+		snapshot[string(item.Key)] = item.Value
 	}
 	for _, item := range have {
 		owner, slug, ok := splitIdentityIndexKey(item.Key, prefixIdentitySitesAll)
@@ -925,11 +937,17 @@ func (r *ShaleRepo) reconcileSiteIndexes(sitesByOwner map[string]map[string]iden
 	}
 	for owner, want := range sitesByOwner {
 		for slug, row := range want {
+			// Guarded on the pass's snapshot value, exactly like the paste
+			// reprojection: a live deploy/replace that landed mid-pass wins
+			// and this pass's point-in-time value skips.
 			key := shaleKeyIdentitySite(owner, slug)
-			if err := r.cluster.Transact(key, func(tx backend.Transaction) error {
-				return shaleTxPutJSON(tx, key, row)
-			}); err != nil {
+			expected, present := snapshot[string(key)]
+			written, err := r.guardedPutIndexEntry(key, expected, present, row)
+			if err != nil {
 				return err
+			}
+			if !written {
+				r.repoLog().Printf("reconcile sites: index write %s skipped: entry changed since the pass snapshot (a live write landed; next pass reprojects)", key)
 			}
 		}
 	}
