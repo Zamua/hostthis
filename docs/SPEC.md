@@ -4856,6 +4856,26 @@ Two compatibility details:
   row briefly missing from a scan), which the "The correctness argument"
   section bounds.
 
+**Upgrading from earlier shale code (pre-value-maintained cached sizes) -
+deployment note.** Entries written by earlier shale versions decode fine
+but their cached `size` was never version-maintained: the old append
+refresh updated only `expires_at`, and the old reconciler projected the
+HEAD row's size rather than the live version sum. Expect bounded quota
+slack at upgrade: until the first post-upgrade reconcile pass completes,
+the quota scans sum those stale cached sizes, typically UNDER-counting a
+multi-version paste's owner (head size <= live sum) - the same transient,
+Window-A-shaped envelope the correctness argument already accepts, cleared
+by one pass. Do NOT run mixed versions beyond a normal rolling deploy: OLD
+pods' reconcilers write UNGUARDED (they predate the guarded reprojection),
+so for the duration of the roll an old pod's pass can clobber a new pod's
+correct sums with its stale point-in-time values, re-opening the slack
+every old-pod cycle. The new pods' guard protects only against that
+clobber LANDING BETWEEN a new pod's snapshot and its write (the guard
+compares and skips); it cannot stop the old pod's unguarded overwrite
+itself, so the drift window genuinely lasts until the last old pod exits
+plus one new-code reconcile cycle - bounded, self-healing, but real for
+exactly that long.
+
 ### Multi-node shale (horizontal write scaling)
 
 Everything above runs correctly on a single shale node: one process owns
