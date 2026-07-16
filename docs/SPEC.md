@@ -4581,7 +4581,11 @@ and the site-expiry index walk), the keygate prune
 (`DeleteFirstSeenOlderThan` / `PruneOldRoomCreates`), and the reconciler
 (`Reconcile` - reproject the `identity_pastes` + `identity_sites`
 enumeration indexes and age out stuck pending pastes) all treat an
-undecodable row as SKIP + LOG and CONTINUE the pass. The consequence of
+undecodable row as SKIP + LOG and CONTINUE the pass. The reconciler's
+reprojection WRITE loop holds the same discipline for a failed per-entry
+index write: skip + log, keep writing the rest, and report an aggregated
+error at the end so the pass is retried next tick - one flaky entry's
+blast radius stays one entry, never a frozen pass. The consequence of
 skipping is bounded and self-correcting: that one record is simply not
 processed THIS pass; the next pass (the periodic loop re-runs, e.g. ~10 min
 later) retries it. This is safe ONLY because these operations are

@@ -360,6 +360,11 @@ type ShaleRepo struct {
 	// the authoritative-row confirm and before the entry delete - the
 	// TOCTOU window a same-slug delete-then-redeploy can race.
 	testHookBeforeOrphanPruneDelete func(key []byte)
+	// testHookGuardedIndexWrite runs at the top of every guarded index
+	// write; a non-nil return fails that write with the returned error.
+	// Fault injection for the Policy-1 pin: one entry's write failure must
+	// not stall the rest of the reprojection.
+	testHookGuardedIndexWrite func(key []byte) error
 }
 
 // WaitPendingConfirms blocks until every background confirm goroutine has
@@ -2698,8 +2703,7 @@ func (r *ShaleRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 // quota-healing mechanism now that the per-identity quota is DERIVED by
 // summing the cached values of the enumeration indexes (docs/SPEC.md
 // "Scan-derived quota" / "Derived indexes and repair-on-read"). With no
-// stored counter to keep correct, it has exactly two jobs, and NEITHER ever
-// writes an aggregate number:
+// stored counter to keep correct, it has exactly two jobs:
 //
 //   - REPROJECT the per-owner enumeration indexes from the authoritative
 //     rows: identity_pastes/<id>/<slug> from the pastes/ + versions/ scans
@@ -2720,16 +2724,23 @@ func (r *ShaleRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 //     out of the quota scan (MarkFailed drops its enumeration entry) and its
 //     loading screen.
 //
-// Because it only ever reprojects the authoritative rows (a SET plus
-// per-record cached values, each a pure function of that record's rows),
-// never a stored aggregate, it is idempotently self-healing and safe under
-// live traffic on any cadence: every pod running it converges to the same
-// state and running it more often only tightens the drift windows. It is
-// NOT part of the SweepRepo contract: the sweep's public surface is
-// unchanged. Single-node, cross-shard via aggregate; a poisoned row is
-// skipped + logged and the pass continues (docs/SPEC.md "Decode tolerance
-// is per-scan-semantics", Policy 1) - but never silently dropped from the
-// projection (see the fail-closed placeholder below).
+// It reprojects the authoritative rows: a SET (add/drop entries, an
+// idempotent heal) plus per-record cached VALUES (each paste's live version
+// sum), and the values are numbers computed from the pass's point-in-time
+// snapshot, so a pass can race a live write's fresher refresh. Every
+// reprojection write (and prune delete) is therefore GUARDED on the value
+// the pass's index snapshot read - captured strictly BEFORE the
+// authoritative scans, see the ordering note in the body - skipping when a
+// live write moved the entry mid-pass (guarded to lose, never to clobber).
+// That is what makes the pass safe under live traffic on any cadence and
+// from every pod concurrently: each converges toward the authoritative
+// state, and a skip costs at most one cycle of staleness on one entry. It
+// is NOT part of the SweepRepo contract: the sweep's public surface is
+// unchanged. Single-node, cross-shard via aggregate; a poisoned row - or a
+// failed per-entry index write - is skipped + logged and the pass continues
+// (docs/SPEC.md "Decode tolerance is per-scan-semantics", Policy 1) - but
+// an undecodable row is never silently dropped from the projection (see the
+// fail-closed placeholder below).
 func (r *ShaleRepo) Reconcile(now time.Time) error {
 	// Snapshot the enumeration index FIRST - strictly before the
 	// authoritative scans - because it is the guard baseline for every
@@ -2870,9 +2881,14 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 		r.testHookReconcileBeforeIndexWrites()
 	}
 
+	// The three jobs are independent (Policy 1: one stalled job must not
+	// freeze the others), so a failure in one is collected and the pass
+	// continues; the joined error makes the whole pass retried next tick.
+	var errs []error
+
 	// Job 1: reproject the paste enumeration index from the authoritative rows.
 	if err := r.reconcileIndexes(pastesByOwner, pasteIdx); err != nil {
-		return err
+		errs = append(errs, err)
 	}
 	// Job 1b: age out stuck pending pastes (pod-death backstop). Each
 	// MarkFailed is independent + idempotent; a failure on one slug is
@@ -2888,7 +2904,10 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 	// site-reservation pass so the site index still heals every tick). This is
 	// what backfills sites deployed before the identity_sites index existed and
 	// closes the crash-between-row-and-index under-count for sites.
-	return r.reconcileSiteIndexPass()
+	if err := r.reconcileSiteIndexPass(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 // reconcileIndexes rebuilds identity_pastes projections to match the
@@ -2944,6 +2963,7 @@ func (r *ShaleRepo) reconcileIndexes(pastesByOwner map[string]map[string]identit
 			// Live row that raced the snapshot: keep; the next pass reprojects it.
 		}
 	}
+	var writeFailures int
 	for owner, want := range pastesByOwner {
 		for slug, row := range want {
 			// Refresh every wanted entry (idempotent; covers add + update).
@@ -2955,12 +2975,21 @@ func (r *ShaleRepo) reconcileIndexes(pastesByOwner map[string]map[string]identit
 			expected, present := snapshot[string(key)]
 			written, err := r.guardedPutIndexEntry(key, expected, present, row)
 			if err != nil {
-				return err
+				// Policy 1: one entry's failed write must not stall the rest
+				// of the reprojection (aborting here would freeze index
+				// healing for every healthy owner too). Log, count, continue;
+				// the aggregated error below makes the pass retried next tick.
+				writeFailures++
+				r.repoLog().Printf("reconcile: index write %s failed: %v (skipped; next pass retries)", key, err)
+				continue
 			}
 			if !written {
 				r.repoLog().Printf("reconcile: index write %s skipped: entry changed since the pass snapshot (a live write landed; next pass reprojects)", key)
 			}
 		}
+	}
+	if writeFailures > 0 {
+		return fmt.Errorf("reconcile: %d identity_pastes index write(s) failed (skipped; next pass retries them)", writeFailures)
 	}
 	return nil
 }
@@ -2998,6 +3027,11 @@ var errIndexEntryChanged = errors.New("shale: index entry changed since the comp
 // a write landing between the compare and the commit conflicts, and the
 // re-run closure re-compares against the new value and skips.
 func (r *ShaleRepo) guardedPutIndexEntry(key, expected []byte, present bool, row any) (bool, error) {
+	if r.testHookGuardedIndexWrite != nil {
+		if err := r.testHookGuardedIndexWrite(key); err != nil {
+			return false, err
+		}
+	}
 	err := r.cluster.Transact(key, func(tx backend.Transaction) error {
 		cur, gerr := tx.Get(key) // records the read-check
 		switch {

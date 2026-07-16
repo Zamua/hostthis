@@ -941,6 +941,7 @@ func (r *ShaleRepo) reconcileSiteIndexes(sitesByOwner map[string]map[string]iden
 			// Live row that raced the snapshot: keep; the next pass reprojects it.
 		}
 	}
+	var writeFailures int
 	for owner, want := range sitesByOwner {
 		for slug, row := range want {
 			// Guarded on the pass's snapshot value, exactly like the paste
@@ -950,12 +951,19 @@ func (r *ShaleRepo) reconcileSiteIndexes(sitesByOwner map[string]map[string]iden
 			expected, present := snapshot[string(key)]
 			written, err := r.guardedPutIndexEntry(key, expected, present, row)
 			if err != nil {
-				return err
+				// Policy 1: skip + log + continue; the aggregated error below
+				// makes the pass retried next tick (the paste loop's twin).
+				writeFailures++
+				r.repoLog().Printf("reconcile sites: index write %s failed: %v (skipped; next pass retries)", key, err)
+				continue
 			}
 			if !written {
 				r.repoLog().Printf("reconcile sites: index write %s skipped: entry changed since the pass snapshot (a live write landed; next pass reprojects)", key)
 			}
 		}
+	}
+	if writeFailures > 0 {
+		return fmt.Errorf("reconcile sites: %d identity_sites index write(s) failed (skipped; next pass retries them)", writeFailures)
 	}
 	return nil
 }

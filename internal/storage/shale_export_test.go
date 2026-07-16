@@ -156,6 +156,15 @@ func (r *ShaleRepo) SetBeforeOrphanPruneDeleteHookForTest(fn func(key []byte)) {
 	r.testHookBeforeOrphanPruneDelete = fn
 }
 
+// SetGuardedIndexWriteHookForTest installs the fault-injection seam at the
+// top of every guarded index write: a non-nil return from fn fails that
+// write with the returned error. The Policy-1 reprojection test uses it to
+// prove one entry's write failure is skipped + logged and the rest of the
+// pass continues. Pass nil to clear.
+func (r *ShaleRepo) SetGuardedIndexWriteHookForTest(fn func(key []byte) error) {
+	r.testHookGuardedIndexWrite = fn
+}
+
 // --- legacy-value builders (the slatedb on-disk shape) ---------------------
 
 // LegacyPasteKeyForTest returns the authoritative paste key for slug, the
