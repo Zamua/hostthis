@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/Zamua/shale/pkg/backend"
 	"github.com/Zamua/shale/pkg/cluster"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -99,6 +100,29 @@ func (r *ShaleRepo) GetRawForTest(key []byte) ([]byte, error) {
 	return r.getRaw(key)
 }
 
+// PutEmptyBackendForTest plants an EMPTY value under key straight on the
+// local backend(s), bypassing the cluster Put path (which rejects empty
+// values with cluster.ErrEmptyValue). This is the only way to reproduce
+// the legacy identity_pastes shape a migrated slatedb deployment carries
+// on disk: slatedb stored the enumeration index as bare empty markers,
+// and the migration is in-place, so the shale scans encounter those raw
+// empty bytes even though no shale write path can produce them. Only
+// meaningful on a single-node test repo (the write bypasses ring routing).
+func (r *ShaleRepo) PutEmptyBackendForTest(key []byte) error {
+	results := r.cluster.Aggregate(func(b backend.Backend) any {
+		return b.Put(key, []byte{})
+	})
+	for _, res := range results {
+		if res.Err != nil {
+			return res.Err
+		}
+		if err, ok := res.Value.(error); ok && err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // DeleteRawForTest removes key straight through the cluster's Delete
 // path. Used by the reconciler test to desync a derived index (e.g.
 // drop an identity_pastes entry whose paste still exists) and prove the
@@ -112,6 +136,33 @@ func (r *ShaleRepo) DeleteRawForTest(key []byte) error {
 // helper keeps the test's dependency surface explicit).
 func (r *ShaleRepo) ReconcileForTest(now time.Time) error {
 	return r.Reconcile(now)
+}
+
+// SetReconcileBeforeIndexWritesHookForTest installs the test seam that runs
+// after Reconcile captures its snapshots and before the paste reprojection's
+// prune + write loops. The guarded-write race test injects a live append
+// there - the exact window where an unguarded reprojection would clobber
+// the fresher refresh. Pass nil to clear.
+func (r *ShaleRepo) SetReconcileBeforeIndexWritesHookForTest(fn func()) {
+	r.testHookReconcileBeforeIndexWrites = fn
+}
+
+// SetBeforeOrphanPruneDeleteHookForTest installs the test seam that runs
+// inside the orphan prune between the authoritative-row confirm and the
+// entry delete. The prune TOCTOU test injects a same-slug redeploy there -
+// the window where an unconditional delete would drop the fresh entry.
+// Pass nil to clear.
+func (r *ShaleRepo) SetBeforeOrphanPruneDeleteHookForTest(fn func(key []byte)) {
+	r.testHookBeforeOrphanPruneDelete = fn
+}
+
+// SetGuardedIndexWriteHookForTest installs the fault-injection seam at the
+// top of every guarded index write: a non-nil return from fn fails that
+// write with the returned error. The Policy-1 reprojection test uses it to
+// prove one entry's write failure is skipped + logged and the rest of the
+// pass continues. Pass nil to clear.
+func (r *ShaleRepo) SetGuardedIndexWriteHookForTest(fn func(key []byte) error) {
+	r.testHookGuardedIndexWrite = fn
 }
 
 // --- legacy-value builders (the slatedb on-disk shape) ---------------------
