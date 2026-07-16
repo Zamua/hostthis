@@ -148,19 +148,20 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 // --- Policy 1 (Fix 3): reconciler heals an un-indexed undecodable row -------
 
 // TestShaleDecodeTolerance_ReconcileHealsUnindexedUndecodableRow pins the
-// fail-closed heal a naive skip+continue lacked. The quota scan reads THROUGH
-// the enumeration index, so an undecodable authoritative row whose index entry
+// fail-closed heal a naive skip+continue lacked. The quota scan sums the
+// enumeration entries, so an undecodable authoritative row whose index entry
 // was ALSO lost (a crash between the row write and the index write) is
 // enumerated by NOTHING and silently drops from the owner's sum - a DURABLE
 // under-count that lets the owner exceed the cap permanently, because the
 // reconciler is the only thing that heals a missing index entry and a naive
 // skip drops exactly this one.
 //
-// The fix: on an undecodable pastes/ (or sites/) row the reconciler derives the
-// owner decode-independently from slug_owner/<slug> and projects a placeholder
-// enumeration entry, so the next quota scan ENUMERATES the slug and re-reads the
-// authoritative row - which then HARD-FAILS the scan (fail-closed reject), never
-// a silent under-count. The residual (no slug_owner) is documented + pinned.
+// The fix: on an undecodable pastes/ (or sites/) row the reconciler derives
+// the owner decode-independently from slug_owner/<slug> and projects a
+// FAIL-CLOSED PLACEHOLDER enumeration entry (placeholder: true), so the
+// owner's next quota scan sees the marker and HARD-FAILS (fail-closed
+// reject), never a silent under-count. The residual (no slug_owner) is
+// documented + pinned.
 //
 //	go test -tags slatedb -run TestShaleDecodeTolerance_ReconcileHeals ./internal/storage
 func TestShaleDecodeTolerance_ReconcileHealsUnindexedUndecodableRow(t *testing.T) {
@@ -205,10 +206,10 @@ func TestShaleDecodeTolerance_ReconcileHealsUnindexedUndecodableRow(t *testing.T
 	} else if len(raw) == 0 {
 		t.Fatalf("reconcile must project an enumeration entry for the corrupt-but-ownable paste (fail-closed heal)")
 	}
-	// Post-reconcile: the scan now ENUMERATES badSlug, re-reads the corrupt
-	// authoritative row, and HARD-FAILS (fail-closed) - rejecting the owner's
-	// next upload rather than silently under-counting. This is the gate: an
-	// undecodable authoritative row is a hard error, never absent.
+	// Post-reconcile: the scan now sees badSlug's fail-closed placeholder
+	// entry and HARD-FAILS - rejecting the owner's next upload rather than
+	// silently under-counting. This is the gate: an undecodable
+	// authoritative row is a hard error, never absent.
 	if got, err := repo.SumActiveBytesByOwner(owner, now); err == nil {
 		t.Fatalf("post-reconcile sum must HARD-FAIL on the enumerated corrupt row (fail-closed); got %d, nil error", got)
 	}

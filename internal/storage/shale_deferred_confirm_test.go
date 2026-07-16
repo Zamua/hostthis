@@ -2,22 +2,21 @@
 
 package storage_test
 
-// Deferred-confirm test for the shale backend.
+// Confirm-step test for the shale backend.
 //
-// docs/SPEC.md "Reservation-pattern quota", step 3: InsertWithQuotaCheck
-// returns success as soon as the reserve (step 1, bytes accounted) and the
-// authoritative write (step 2, paste row exists) commit, and runs the
-// confirm CAS (step 3: identity_pastes index entry + first-seen) in a
-// background goroutine OFF the response path. This pins the observable
-// consequences:
+// docs/SPEC.md "Scan-derived quota": InsertWithQuotaCheck commits the
+// authoritative {slug} write, then runs the confirm CAS (the value-bearing
+// identity_pastes index entry + first-seen) SYNCHRONOUSLY on the response
+// path - the entry is the quota's accounting record. This pins the
+// observable consequences:
 //
 //   - the paste is Get-readable immediately on return (the authoritative
 //     row exists, so the URL never 404s),
-//   - the bytes are counted immediately (the reserve ran before return), so
-//     quota is strict the instant Create returns,
-//   - the derived index entry (which backs ListByOwner / CountByOwner)
-//     appears once the deferred confirm runs; WaitPendingConfirms drains it
-//     so a subsequent list is deterministic.
+//   - the bytes are counted immediately (the index entry the quota scan
+//     sums is written before the response returns),
+//   - the derived index entry (which backs ListByOwner / CountByOwner) is
+//     present after WaitPendingConfirms (a no-op drain today, kept as the
+//     seam in case a future write moves off the response path).
 //
 //	go test -tags slatedb -run TestShaleDeferredConfirm ./internal/storage
 //
@@ -61,9 +60,9 @@ func TestShaleDeferredConfirm_ReadableImmediately_IndexAppearsAfterDrain(t *test
 		t.Fatalf("Get round-trip mismatch: got %+v want slug=%q sha=%q size=%d", got, p.Slug, p.ContentSHA, p.Size)
 	}
 
-	// The bytes are counted the instant Insert returns: the reserve (step 1)
-	// committed before the response, so quota is strict immediately. This
-	// reads identity_bytes, which is written synchronously (NOT deferred).
+	// The bytes are counted the instant Insert returns: the index entry (the
+	// quota's accounting record - the scan sums its cached size) is written
+	// synchronously before the response.
 	if sum, err := repo.SumActiveBytesByOwner(owner, now); err != nil {
 		t.Fatalf("sum active bytes: %v", err)
 	} else if sum != p.Size {

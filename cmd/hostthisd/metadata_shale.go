@@ -368,22 +368,26 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 	// repair-on-read"). Each pass:
 	//   - REPROJECTS the identity_pastes + identity_sites enumeration indexes
 	//     from the authoritative pastes/ + sites/ rows (add missing entries,
-	//     refresh stale projections, drop orphans). This is a pure "reproject the
-	//     authoritative SET, drop orphans" heal, so it closes the only
-	//     quota-relevant gap the scan design has: a crash between the
-	//     authoritative row write and the {id} enumeration-index write leaves a
-	//     live row the index does not list, transiently UNDER-counting that owner
-	//     until this pass re-adds the entry. It backfills sites deployed before
-	//     the identity_sites index existed too, so it REPLACES the old one-shot
+	//     refresh stale projections, drop orphans). This closes the
+	//     crash-between-row-and-index gap: a crash between the authoritative row
+	//     write and the {id} enumeration-index write leaves a live row the index
+	//     does not list, transiently UNDER-counting that owner until this pass
+	//     re-adds the entry. It backfills sites deployed before the
+	//     identity_sites index existed too, so it REPLACES the old one-shot
 	//     BackfillSiteIndexes goroutine.
 	//   - AGES OUT crashed pending pastes (the pod-death backstop).
-	// Because it only ever reprojects the authoritative rows (a SET), never
-	// overwrites a stored number, it is idempotently self-healing and safe under
-	// live traffic on any cadence: every pod running it converges to the same
-	// state and running it more often only tightens the under-count window (there
-	// is no aggregate to race or clobber). Best-effort: a pass that hits the
+	// The SET part of the heal (add/drop entries) is idempotent, but the entries
+	// carry cached NUMBERS (each paste's live version sum) computed from the
+	// pass's point-in-time snapshot, so a pass CAN race a live write's fresher
+	// refresh. Every reprojection write is therefore guarded - it commits only
+	// if the entry still holds the pass's snapshot value, skipping (guarded to
+	// LOSE, never to clobber) when a live write landed mid-pass - which is what
+	// makes the pass safe under live traffic on any cadence and from every pod
+	// concurrently; residual staleness from a skip is healed by the next pass
+	// (docs/SPEC.md "Periodic reconcile"). Best-effort: a pass that hits the
 	// post-boot convergence window (the aggregate scan fails while units are
-	// still handing off) just logs and the next tick retries. First pass after a
+	// still handing off), or that had per-entry write failures (each skipped +
+	// logged, Policy 1), just logs and the next tick retries. First pass after a
 	// short settle delay, then every 10 min.
 	go func() {
 		const reconcileInterval = 10 * time.Minute
