@@ -4309,7 +4309,19 @@ indexes** - plus the unrelated pending-paste age-out:
    a full aggregate of the index family - so an entry lingering under an
    owner with NO remaining authoritative rows is still dropped - and
    confirms each candidate against its authoritative row before deleting,
-   so a fresh insert racing the pass snapshot is kept. A `failed` paste is
+   so a fresh insert racing the pass snapshot is kept. The confirm and the
+   delete are not one atomic step, so the drop itself is additionally
+   VALUE-COMPARED (the delete sibling of the guarded reprojection write):
+   it deletes only while the entry still holds the payload the pass's
+   snapshot read, so a same-slug delete-then-redeploy that lands its fresh
+   entry between the confirm's NotFound and the delete flips the compare
+   and the fresh entry survives. Two bounded residuals remain, both healed
+   next pass: a skipped drop leaves the stale entry one more cycle (an
+   over-count that can only over-reject), and a redeploy whose
+   authoritative row landed but whose index entry had not yet (so the
+   compare still matched and the stale entry was dropped) is
+   Window-A-shaped - a live row briefly un-enumerated until the next
+   reprojection re-adds it. A `failed` paste is
    NOT reprojected (its entry was dropped by `MarkFailed`; the prune drops
    it again if a crash mid-`MarkFailed` left it behind), so the index
    enumerates exactly the non-failed authoritative set. This heal is

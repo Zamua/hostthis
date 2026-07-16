@@ -2920,19 +2920,26 @@ func (r *ShaleRepo) reconcileIndexes(pastesByOwner map[string]map[string]identit
 		// gone), a failed paste's leftover entry (crash mid-MarkFailed), or a
 		// FRESH insert that raced this pass's pastes/ snapshot. Confirm
 		// against the authoritative row before dropping so the racing insert
-		// is kept.
+		// is kept - and drop via the VALUE-COMPARED delete, because the
+		// confirm and the delete are not one step: a same-slug
+		// delete-then-redeploy can land a fresh row + entry between the
+		// confirm's NotFound and the delete, and the fresh entry must survive
+		// (docs/SPEC.md, the reconciler's prune).
 		var p pasteRow
 		switch gerr := r.getJSON(shaleKeyPaste(domain.Slug(slug)), &p); {
 		case errors.Is(gerr, ErrNotFound):
-			if r.testHookBeforeOrphanPruneDelete != nil {
-				r.testHookBeforeOrphanPruneDelete(item.Key)
+			// Orphan: the paste is gone. Best-effort, guarded drop.
+			if _, err := r.guardedDeleteIndexEntry(item.Key, item.Value); err != nil {
+				r.repoLog().Printf("reconcile: prune %s: %v (next pass retries)", item.Key, err)
 			}
-			_ = r.cluster.Delete(item.Key) // orphan: the paste is gone
 		case gerr != nil:
 			// Undecodable row: keep the entry; the fail-closed placeholder
 			// projection above handles it (or already did via slug_owner).
 		case domain.NormalizeStatus(p.Status) == domain.PasteStatusFailed:
-			_ = r.cluster.Delete(item.Key) // failed pastes are not enumerated
+			// Failed pastes are not enumerated. Same guarded drop.
+			if _, err := r.guardedDeleteIndexEntry(item.Key, item.Value); err != nil {
+				r.repoLog().Printf("reconcile: prune %s: %v (next pass retries)", item.Key, err)
+			}
 		default:
 			// Live row that raced the snapshot: keep; the next pass reprojects it.
 		}
@@ -3013,6 +3020,48 @@ func (r *ShaleRepo) guardedPutIndexEntry(key, expected []byte, present bool, row
 			}
 		}
 		return shaleTxPutJSON(tx, key, row)
+	})
+	if errors.Is(err, errIndexEntryChanged) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// guardedDeleteIndexEntry drops the enumeration entry at key ONLY IF it
+// still holds expected - the payload the pass's snapshot read. It is the
+// delete sibling of guardedPutIndexEntry, closing the orphan prune's
+// TOCTOU: the prune confirms the authoritative row is gone/failed and THEN
+// deletes, and a same-slug delete-then-redeploy landing its fresh row +
+// entry in that window must not have the FRESH entry dropped. A changed
+// value skips, returning (false, nil) - the redeploy's entry survives, and
+// the stale entry (if the skip kept one) lingers at most one more pass; an
+// already-gone entry is an idempotent no-op (docs/SPEC.md, the
+// reconciler's prune). The compare runs inside the {id}-shard CAS with the
+// entry in the read-set, so a write landing between the compare and the
+// commit conflicts and the re-run closure re-compares and skips.
+func (r *ShaleRepo) guardedDeleteIndexEntry(key, expected []byte) (bool, error) {
+	if r.testHookBeforeOrphanPruneDelete != nil {
+		r.testHookBeforeOrphanPruneDelete(key)
+	}
+	err := r.cluster.Transact(key, func(tx backend.Transaction) error {
+		cur, gerr := tx.Get(key) // records the read-check
+		switch {
+		case errors.Is(gerr, backend.ErrNotFound):
+			return nil // already gone: idempotent no-op
+		case gerr != nil:
+			return gerr
+		}
+		payload, serr := stripEnvelope(cur)
+		if serr != nil {
+			return serr
+		}
+		if !bytes.Equal(payload, expected) {
+			return errIndexEntryChanged
+		}
+		return tx.Delete(key)
 	})
 	if errors.Is(err, errIndexEntryChanged) {
 		return false, nil

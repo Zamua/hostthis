@@ -927,7 +927,13 @@ func (r *ShaleRepo) reconcileSiteIndexes(sitesByOwner map[string]map[string]iden
 		var row siteRow
 		switch gerr := r.getJSON(shaleKeySite(domain.Slug(slug)), &row); {
 		case errors.Is(gerr, ErrNotFound):
-			_ = r.cluster.Delete(item.Key) // orphan: the site is gone
+			// Orphan: the site is gone. VALUE-COMPARED drop (the confirm and
+			// the delete are not one step; a same-slug delete-then-redeploy
+			// landing in between must keep its fresh entry - the paste
+			// prune's TOCTOU guard, mirrored).
+			if _, err := r.guardedDeleteIndexEntry(item.Key, item.Value); err != nil {
+				r.repoLog().Printf("reconcile sites: prune %s: %v (next pass retries)", item.Key, err)
+			}
 		case gerr != nil:
 			// Undecodable row: keep the entry; the fail-closed placeholder
 			// projection above handles it (or already did via slug_owner).
