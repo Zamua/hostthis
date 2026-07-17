@@ -6,10 +6,10 @@ github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c/go.mod h1:xomTg6
 github.com/DataDog/datadog-go v3.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
-github.com/Zamua/shale v0.10.3 h1:ab3fP1vfN3yYo0+rzSkMr2tRVLgaJdZ9ydrfrfky7L0=
-github.com/Zamua/shale v0.10.3/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
-github.com/Zamua/shale/backends/slate v0.9.3 h1:XHgfUe2GGXg/T2j8lxR1L+bZ2N8tcwdKxaojt/XpXJg=
-github.com/Zamua/shale/backends/slate v0.9.3/go.mod h1:xEwtVIsdjKKd07Hp7gwUB4H0ZhWZLdr5tolZ1o1Y+n0=
+github.com/Zamua/shale v0.10.4 h1:YDjhZWwQbZVca8Fk9XS6zyNldu3P6jpMwwydxjP9HBw=
+github.com/Zamua/shale v0.10.4/go.mod h1:1DzbjQ30ViczQICyOiFTl+XZwWSfWwtZlbC48O7VZH4=
+github.com/Zamua/shale/backends/slate v0.9.4 h1:0Bkor/9F7wdBkjXygq2trQlEL8EQQo3augCsvJj+ydQ=
+github.com/Zamua/shale/backends/slate v0.9.4/go.mod h1:xEwtVIsdjKKd07Hp7gwUB4H0ZhWZLdr5tolZ1o1Y+n0=
 github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/units v0.0.0-20151022065526-2efee857e7cf/go.mod h1:ybxpYRFXyAe+OPACYpWeL0wqObRcbAqCMya13uyzqw0=
