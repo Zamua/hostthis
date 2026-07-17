@@ -21,11 +21,21 @@ type fakeBlobs struct {
 	stored   map[string][]byte
 	failPut  bool
 	putCalls int
+	// holdPut, when non-nil, parks every PutPrecompressed until the channel
+	// is closed. The blob write is the background finalizer's FIRST act, so
+	// parking it holds the whole finalizer (no MarkReady/MarkFailed can run)
+	// - the seam that lets a test assert pre-finalize state without racing
+	// the finalizer goroutine. Set before the first Create; never mutate
+	// once uploads are in flight.
+	holdPut chan struct{}
 }
 
 func newFakeBlobs() *fakeBlobs { return &fakeBlobs{stored: map[string][]byte{}} }
 
 func (f *fakeBlobs) PutPrecompressed(sha string, body []byte) error {
+	if f.holdPut != nil {
+		<-f.holdPut
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.putCalls++
@@ -107,7 +117,13 @@ func waitFinalize(t *testing.T, done chan struct{}) {
 
 // Create returns a PENDING paste before the blob write completes.
 func TestUpload_Create_ReturnsPending(t *testing.T) {
-	u, repo, done := newStackWithBlobs(t, newFakeBlobs())
+	// Park the finalizer at its first act (the blob write) so the
+	// pre-finalize assertions below cannot race it: without the hold, a
+	// slow runner lets the background finalizer flip the row to ready
+	// between Create returning and repo.Get.
+	blobs := newFakeBlobs()
+	blobs.holdPut = make(chan struct{})
+	u, repo, done := newStackWithBlobs(t, blobs)
 	res, err := u.Create(bytes.NewReader([]byte("<p>hi</p>")), "owner", "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -116,6 +132,8 @@ func TestUpload_Create_ReturnsPending(t *testing.T) {
 		t.Fatalf("returned status: got %q, want pending", res.Paste.Status)
 	}
 	// The persisted row is pending too, immediately after Create returns.
+	// The finalizer is parked at the blob write, so this observes the
+	// synchronous half's committed state deterministically.
 	got, err := repo.Get(res.Paste.Slug)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -123,6 +141,8 @@ func TestUpload_Create_ReturnsPending(t *testing.T) {
 	if got.Status != domain.PasteStatusPending {
 		t.Fatalf("persisted status before finalize: got %q, want pending", got.Status)
 	}
+	// Release the finalizer and let it drain so cleanup doesn't strand it.
+	close(blobs.holdPut)
 	waitFinalize(t, done)
 }
 

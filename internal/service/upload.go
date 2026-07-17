@@ -200,7 +200,7 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	// synchronously, before any URL is handed out (docs/SPEC.md "Create:
 	// the synchronous half").
 	const maxRetries = 5
-	for range maxRetries {
+	for attempt := 1; attempt <= maxRetries; attempt++ {
 		p.Slug = domain.NewRandomSlug()
 		err := u.Repo.InsertWithQuotaCheck(context.Background(), p, int64(domain.UserQuotaBytes), now)
 		switch {
@@ -224,6 +224,10 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		case errors.Is(err, storage.ErrOverUserQuota):
 			return Result{}, ErrOverQuota
 		case isSlugTaken(err):
+			// A silent remint would make this class invisible; each retry
+			// logs once (slug + attempt) so a remint burst shows up in the
+			// service log. Semantics unchanged: same budget, same re-mint.
+			u.logf("upload: slug %s taken, re-minting (attempt %d/%d)", p.Slug, attempt, maxRetries)
 			continue
 		default:
 			return Result{}, err
@@ -259,7 +263,7 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 	}
 	ctx := context.Background()
 	const maxRetries = 5
-	for range maxRetries {
+	for attempt := 1; attempt <= maxRetries; attempt++ {
 		p.Slug = domain.NewRandomSlug()
 		// Stage with the chosen slug so the ref co-routes to its shard, then
 		// Commit binds it in the authoritative {slug} transaction. Staging
@@ -288,7 +292,9 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 		case isSlugTaken(err):
 			// Re-mint the slug and re-stage so the new ref co-routes to the
 			// new slug's shard; the prior staged object ages out via the
-			// orphan sweep.
+			// orphan sweep. Logged so a remint burst (which strands staged
+			// objects for the sweep) is never invisible.
+			u.logf("upload: slug %s taken, re-minting + re-staging (attempt %d/%d)", p.Slug, attempt, maxRetries)
 			continue
 		default:
 			return Result{}, err

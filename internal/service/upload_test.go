@@ -2,8 +2,12 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"log"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -185,5 +189,64 @@ func TestUpload_Create_TimestampStable(t *testing.T) {
 	if !res.Paste.ExpiresAt.Equal(now.Add(domain.DefaultRetentionWindow)) {
 		t.Fatalf("ExpiresAt: got %v, want %v",
 			res.Paste.ExpiresAt, now.Add(domain.DefaultRetentionWindow))
+	}
+}
+
+// slugTakenNTimesRepo wraps a repo, failing the first `failures` inserts
+// with a slug-collision error so the remint loop runs deterministically.
+type slugTakenNTimesRepo struct {
+	PasteRepo
+	mu       sync.Mutex
+	failures int
+}
+
+func (r *slugTakenNTimesRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error {
+	r.mu.Lock()
+	fail := r.failures > 0
+	if fail {
+		r.failures--
+	}
+	r.mu.Unlock()
+	if fail {
+		return errors.New("storage: slug already exists")
+	}
+	return r.PasteRepo.InsertWithQuotaCheck(ctx, p, userCap, now)
+}
+
+// TestUpload_Create_LogsSlugRemint pins the remint observability: each
+// slug-collision retry inside Create logs one line (slug + attempt number),
+// so silent remints - which leave committed orphan row-sets on backends
+// whose insert retry can misread its own committed write - are never
+// invisible. The remint semantics themselves are unchanged.
+func TestUpload_Create_LogsSlugRemint(t *testing.T) {
+	dir := t.TempDir()
+	db, err := storage.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &slugTakenNTimesRepo{PasteRepo: storage.NewPasteRepo(db), failures: 2}
+	u := NewUpload(repo, NewStandaloneBlobUnit(newFakeBlobs()))
+	var buf bytes.Buffer
+	u.Logger = log.New(&buf, "", 0)
+
+	res, err := u.Create(bytes.NewReader([]byte("# remint me")), "key:owner", "", "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if res.Paste.Slug == "" {
+		t.Fatal("create returned no slug")
+	}
+	// Reading the log buffer races the background finalizer's logf; drain it.
+	u.WaitFinalize()
+
+	logged := buf.String()
+	if got := strings.Count(logged, "re-minting"); got != 2 {
+		t.Fatalf("remint log lines: got %d, want 2\nlog:\n%s", got, logged)
+	}
+	for _, want := range []string{"attempt 1/5", "attempt 2/5"} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("remint log missing %q\nlog:\n%s", want, logged)
+		}
 	}
 }
