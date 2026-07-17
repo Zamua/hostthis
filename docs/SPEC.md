@@ -2517,6 +2517,36 @@ Deleted versions (via `delete <slug> <ver>`) contribute zero bytes to the
 quota even though the metadata row remains as a tombstone - only the
 blob bytes are gone.
 
+### Same-identity create admission: a width-2 gate
+
+Paste creates are admitted to the metadata commit through a per-identity
+gate of width 2: at most two creates for the SAME identity run their
+quota-check + insert concurrently, and further same-identity creates
+QUEUE until a slot frees. Queueing preserves no arrival order (FIFO
+fairness is not guaranteed; concurrent creates never had an ordering
+guarantee to begin with). Different identities are fully independent:
+one identity's queue never delays another identity's create.
+
+The gate guards against the failure mode where a burst of same-identity
+creates becomes a same-owner write storm in the storage tier. The
+metadata backends serialize same-owner commits at a CAS / transaction
+boundary, so N concurrent same-owner commits each contend with N-1
+rivals, and a CAS layer under that contention amplifies work (retried
+and re-run commits) faster than it completes it. Bounding same-identity
+admission BEFORE the storage tier keeps the contention the backend sees
+at a small constant instead of the burst size.
+
+A lone create - the overwhelmingly common case - passes straight
+through: acquiring an uncontended slot is a map lookup, with no queueing
+and no added latency. Width 2 exists precisely so admission control is
+invisible until an identity is genuinely storming. The default width is
+2 (`HOSTTHIS_CREATE_ADMISSION_WIDTH` overrides it; values below 1 are
+rejected). The gate is in-process per pod - it bounds each pod's
+contribution to same-owner concurrency, not a global total - and applies
+to the CREATE path only; updates, deletes, and reads are not gated. Gate
+state is transient: an identity with no create in flight holds no gate
+entry.
+
 ### Durable total-bytes ceiling: an object-store quota
 
 The total durable bytes the whole service can hold are bounded at the
@@ -5560,6 +5590,9 @@ sample production compose.
   ceiling")
 - Sybil gate (`--fresh-keys-per-subnet`, `--fresh-keys-window`,
   both can be tightened or relaxed for the operator's threat model)
+- Same-identity create admission width
+  (`HOSTTHIS_CREATE_ADMISSION_WIDTH`, default 2; see "Limits →
+  Same-identity create admission")
 - Standalone blob backend (`HOSTTHIS_BLOB_BACKEND=disk`, disk-only;
   production uses the shale-collocated blob plane via
   `HOSTTHIS_SHALE_BLOB_BUCKET`, not a standalone backend)

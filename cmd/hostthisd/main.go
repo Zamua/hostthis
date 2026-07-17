@@ -88,7 +88,18 @@ func main() {
 	siteRepo := metadata.Sites
 	roomRepo := metadata.Rooms
 
-	uploadSvc := service.NewUpload(pasteRepo, blobUnit)
+	// Per-identity create admission (docs/SPEC.md "Same-identity create
+	// admission: a width-2 gate"): same-identity creates beyond the width
+	// queue BEFORE the metadata commit, so a one-owner create storm cannot
+	// amplify in the storage tier's CAS layer; other identities pass
+	// independently. Wired here as a repo decorator so the upload service
+	// stays admission-unaware.
+	admissionWidth := envOrInt("HOSTTHIS_CREATE_ADMISSION_WIDTH", service.DefaultCreateAdmissionWidth)
+	if admissionWidth < 1 {
+		logger.Fatalf("HOSTTHIS_CREATE_ADMISSION_WIDTH must be >= 1, got %d", admissionWidth)
+	}
+	createGate := service.NewCreateAdmission(admissionWidth)
+	uploadSvc := service.NewUpload(service.GateCreates(pasteRepo, createGate), blobUnit)
 	uploadSvc.Retention = retention
 	uploadSvc.Logger = logger // record background blob-finalize outcomes
 	// HOSTTHIS_BLOB_SYNC is a BENCHMARK toggle (sync vs async A/B on one
