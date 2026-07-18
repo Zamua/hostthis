@@ -292,6 +292,15 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 	// mirrors for every legal value above it (SPEC "Trust boundary").
 	relayRecv := relaygrpc.NewReceiver(relay.MaxDurableFrameBytes(domain.MaxRoomValueBytes))
 
+	// /readyz mount floor (docs/SPEC.md "Readiness vs liveness"). Parsed
+	// BEFORE the (heavy) cluster open: a malformed or out-of-range fraction
+	// is a configuration error that must refuse startup, same fail-loud
+	// posture as the dispatch timeouts.
+	minMountedFraction, err := readyMinMountedFractionFromEnv()
+	if err != nil {
+		return nil, err
+	}
+
 	repo, err := openShaleRepoFromEnv(retention, logger, relayRecv.Register)
 	if err != nil {
 		return nil, err
@@ -308,8 +317,14 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 		// shale cluster, co-locating every room family on the {app-slug} shard
 		// so the room tier runs on shale clusters too.
 		Rooms: storage.NewShaleRoomRepo(repo),
-		Close: repo.Close,
+		// Readiness: gate /readyz on the cluster's mount floor so a rollout
+		// stalls on a pod that cannot mount its storage instead of surging
+		// past it. The fraction semantics (0 = no floor, desired == 0
+		// vacuously ready) live in the shale predicate.
+		Readiness: shaleReadinessProber{repo: repo, minMountedFraction: minMountedFraction},
+		Close:     repo.Close,
 	}
+	logger.Printf("readiness: /readyz mount floor minMountedFraction=%g (0 disables the floor)", minMountedFraction)
 	// Multi-node: supply the relay peer transport. The publisher fans every
 	// frame out to the CURRENT peer set, discovered per publish from the
 	// ring membership the cluster gossips (self excluded) - the same
