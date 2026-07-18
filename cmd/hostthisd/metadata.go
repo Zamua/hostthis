@@ -83,6 +83,12 @@ type metadataBundle struct {
 	// shale only; see the relayPeerTransport doc). nil keeps the relay
 	// pod-local (the zero-peer degenerate case).
 	RelayPeer *relayPeerTransport
+	// Readiness is the OPTIONAL backend-supplied readiness predicate behind
+	// /readyz (docs/SPEC.md "Readiness vs liveness"). The shale backend
+	// supplies its mount-floor prober; sqlite / slatedb leave it nil (no
+	// mount concept - their open failures already fail startup), which the
+	// http server reads as always-ready.
+	Readiness httpapi.ReadinessProber
 	Close     func() error
 }
 

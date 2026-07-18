@@ -5548,6 +5548,104 @@ next read 404s and the next sweep GCs the blob. A user-facing
 
 ---
 
+## Readiness vs liveness (health endpoints)
+
+The HTTP listener serves two probe endpoints, and they answer two
+DIFFERENT questions on purpose:
+
+- **`/healthz` - liveness.** "Is this process up?" Returns `200 ok`
+  whenever the HTTP server can respond, and NEVER gates on storage
+  state. It echoes `X-Backend-Color` when the replica is color-labeled.
+  This is the restart signal: an orchestrator that sees liveness fail
+  should restart the process. Storage health stays OUT of it, because a
+  restart cannot repair an unmountable backing store - restart-looping
+  a pod whose store cannot open only destroys the retry progress its
+  running process was making.
+- **`/readyz` - readiness.** "Should this replica receive traffic, and
+  may a rollout proceed past it?" Returns `200` iff the metadata
+  backend's readiness predicate passes, `503 Service Unavailable`
+  otherwise. An orchestrator points its READINESS probe here; its
+  liveness (and startup) probes stay on `/healthz`. A readiness-failing
+  pod must be held out of rotation, never restarted.
+
+Both are served on the same HTTP listener/port as the paste surface,
+routed by path ahead of any Host-based routing (they answer on any Host
+header), and both are deliberately un-gated: no auth, no keygate - a
+probe must never be turned away.
+
+### The failure class /readyz exists for
+
+Degraded boot on the shale backend deliberately lets a pod come up with
+storage units still unmounted: the process is up (liveness passes) and
+the reconcile keeps retrying the mounts. That is the right per-pod
+availability call, but it creates a rollout hazard: if the readiness
+probe points at a liveness signal, a fleet-wide config error (a bad
+credential, a bad bucket - anything that makes EVERY unit open fail on
+every NEW pod) still reports each new pod "ready". A surge rollout then
+replaces the entire fleet with pods that have mounted NOTHING and
+"completes" while writes are down. Gating readiness on actual mount
+state stalls that rollout at the FIRST new pod: it never goes ready,
+the rollout cannot proceed, the old pods keep serving, and the operator
+reads the cause straight off the probe body.
+
+### The shale readiness predicate (mount floor)
+
+On the shale metadata backend, `/readyz` returns 200 iff
+`cluster.Ready(minMountedFraction)` holds: the pod has mounted at least
+`ceil(f * desired)` of the storage-unit positions it currently owns.
+The predicate's edge contract is shale's (see the shale SPEC "Mount
+readiness"): `desired == 0` is vacuously ready, so a pod with no
+assigned positions (mid-join, legacy single-backend mode) never wedges
+its own rollout.
+
+The fraction is the operator knob:
+
+```
+HOSTTHIS_READY_MIN_MOUNTED_FRACTION   mount floor in [0, 1]   (default 0.5)
+```
+
+- **Default `0.5`**: HALF the desired units must be mounted. This
+  catches the uniform-failure class - a pod where every open fails has
+  0 mounted, and 0 never passes any floor above 0 - while tolerating a
+  pod briefly below full mounts mid-handoff or mid-join, so a healthy
+  rollout keeps moving.
+- **`0` disables the floor entirely**: `/readyz` is then always 200 (no
+  mount floor - readiness reduces to process-up, the same gate as
+  `/healthz`). The semantics live in the shale predicate (`f <= 0`
+  clamps to "no floor requested"), not in a hostthis special case, and
+  the response body still reports the live counts.
+- **`1`** is the strict end: every desired unit must be mounted.
+- **Malformed or out-of-range values refuse startup** with an error
+  naming the variable - the same fail-loud config discipline as
+  `HOSTTHIS_RETENTION` and the shale dispatch timeouts. A typo in a
+  readiness knob must not silently deploy as some other floor.
+
+### Non-shale backends
+
+sqlite and single-node slatedb have no mount concept: an open failure
+there fails startup outright, so a process that is up IS ready.
+`/readyz` returns 200 whenever the process is up - equivalent in gate
+behavior to `/healthz`, but kept as a distinct endpoint so probe wiring
+never changes when the metadata backend does.
+
+### Response body (diagnosable with curl)
+
+`/readyz` responds with the mount counts as JSON in BOTH directions
+(200 and 503), so a stalled rollout is diagnosable with a curl against
+the stuck pod - no debug endpoint, no shell in the image required:
+
+```
+{"ready":false,"desired":8,"mounted":0,"pending":8,"failedOpen":8,"lastAcquireError":"open unit 0: ..."}
+```
+
+`desired` / `mounted` / `pending` / `failedOpen` are the shale
+mount-readiness counts (all zero on non-shale backends and on a legacy
+single-backend shale node); `lastAcquireError` is one representative
+acquire error, omitted when there is none. The body is `no-store`: a
+probe result must never be cached.
+
+---
+
 ## Self-hosting
 
 The public `hostthis.dev` is the default deploy, but the same Go binary
@@ -5607,6 +5705,8 @@ sample production compose.
 - Same-identity create admission width
   (`HOSTTHIS_CREATE_ADMISSION_WIDTH`, default 2; see "Limits →
   Same-identity create admission")
+- Readiness mount floor (`HOSTTHIS_READY_MIN_MOUNTED_FRACTION`,
+  default 0.5, shale backend only; see "Readiness vs liveness")
 - Standalone blob backend (`HOSTTHIS_BLOB_BACKEND=disk`, disk-only;
   production uses the shale-collocated blob plane via
   `HOSTTHIS_SHALE_BLOB_BUCKET`, not a standalone backend)
