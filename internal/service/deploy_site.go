@@ -200,15 +200,15 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		return SiteResult{}, ErrOverQuota
 	case errors.Is(err, domain.ErrUnsupportedKind):
 		return SiteResult{}, domain.ErrUnsupportedKind
-	case errors.Is(err, storage.ErrServiceFull):
-		// A blob Put rejected by the object store's bucket quota propagates
-		// through the sink (the durable total-bytes ceiling). Translate it
-		// into the graceful "service is at capacity" response.
-		return SiteResult{}, ErrServiceFull
 	case err != nil:
-		// ErrUnsafeArchive / ErrTooManyFiles / ErrNoWebContent surface
-		// verbatim so the SSH layer can message them precisely.
-		return SiteResult{}, err
+		// A blob Put rejected by the object store's bucket quota propagates
+		// through the sink (the durable total-bytes ceiling) and translates
+		// via the shared classifier into the graceful "service is at
+		// capacity" response. ErrUnsafeArchive / ErrTooManyFiles /
+		// ErrNoWebContent are unclassified and surface verbatim so the SSH
+		// layer can message them precisely.
+		_, terr := classifyCommitErr(err)
+		return SiteResult{}, terr
 	}
 
 	if len(man.Files) == 0 {
@@ -255,17 +255,13 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		err := d.Blob.Commit(ctx, sink.handles, func(ctx context.Context) error {
 			return d.Sites.InsertWithQuotaCheck(ctx, site, deduped, int64(domain.UserQuotaBytes), now)
 		})
-		switch {
-		case err == nil:
+		switch class, terr := classifyCommitErr(err); class {
+		case commitOK:
 			return SiteResult{Site: site}, nil
-		case errors.Is(err, storage.ErrServiceFull):
-			return SiteResult{}, ErrServiceFull
-		case errors.Is(err, storage.ErrOverUserQuota):
-			return SiteResult{}, ErrOverQuota
-		case isSlugTaken(err):
+		case commitSlugTaken:
 			continue
 		default:
-			return SiteResult{}, err
+			return SiteResult{}, terr
 		}
 	}
 	return SiteResult{}, SlugTakenErr
@@ -320,17 +316,14 @@ func (d *DeploySite) preClaimSlug(ctx context.Context, owner string, now time.Ti
 // designed to prevent) is caught defensively and mapped to ErrDeployFailed so a
 // raw backend sentinel never reaches the SSH client.
 func finalizeDeploy(site domain.Site, err error) (SiteResult, error) {
-	switch {
-	case err == nil:
+	switch class, terr := classifyCommitErr(err); {
+	case class == commitOK:
 		return SiteResult{Site: site}, nil
-	case errors.Is(err, storage.ErrServiceFull):
-		return SiteResult{}, ErrServiceFull
-	case errors.Is(err, storage.ErrOverUserQuota):
-		return SiteResult{}, ErrOverQuota
-	case isSlugTaken(err):
-		// The pre-claim holds the slot, so this is effectively unreachable; the
-		// stream is consumed and cannot re-untar, so surface a clean failure.
-		return SiteResult{}, SlugTakenErr
+	case class != commitOther:
+		// The translated triad. Includes the effectively-unreachable
+		// slug-taken case: the pre-claim holds the slot, and the consumed
+		// stream cannot re-untar, so it surfaces as the clean SlugTakenErr.
+		return SiteResult{}, terr
 	case isCrossShard(err):
 		return SiteResult{}, fmt.Errorf("%w: %v", ErrDeployFailed, err)
 	default:
@@ -420,11 +413,12 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		return SiteResult{}, ErrOverQuota
 	case errors.Is(err, domain.ErrUnsupportedKind):
 		return SiteResult{}, domain.ErrUnsupportedKind
-	case errors.Is(err, storage.ErrServiceFull):
-		// Object-store bucket quota rejection propagated through the sink.
-		return SiteResult{}, ErrServiceFull
 	case err != nil:
-		return SiteResult{}, err
+		// Object-store bucket quota rejection propagated through the sink
+		// translates via the shared classifier; untar-guard errors are
+		// unclassified and surface verbatim.
+		_, terr := classifyCommitErr(err)
+		return SiteResult{}, terr
 	}
 
 	if len(man.Files) == 0 {
@@ -450,20 +444,16 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	err = d.Blob.Commit(context.Background(), sink.handles, func(ctx context.Context) error {
 		return d.Sites.ReplaceWithQuotaCheck(ctx, site, deduped, int64(domain.UserQuotaBytes), now)
 	})
-	switch {
-	case err == nil:
+	switch class, terr := classifyCommitErr(err); {
+	case class == commitOK:
 		return SiteResult{Site: site}, nil
 	case errors.Is(err, storage.ErrNotFound):
 		// The site was deleted/expired-swept between the ownership check and
 		// the swap. Surface as not-found, the same shape the up-front check
-		// would have yielded.
+		// would have yielded. (Replace-specific: not part of the shared triad.)
 		return SiteResult{}, ErrNotFound
-	case errors.Is(err, storage.ErrServiceFull):
-		return SiteResult{}, ErrServiceFull
-	case errors.Is(err, storage.ErrOverUserQuota):
-		return SiteResult{}, ErrOverQuota
 	default:
-		return SiteResult{}, err
+		return SiteResult{}, terr
 	}
 }
 

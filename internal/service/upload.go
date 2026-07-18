@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/storage"
 )
 
 // PasteRepo is the persistence interface the upload service needs.
@@ -202,8 +201,8 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		p.Slug = domain.NewRandomSlug()
 		err := u.Repo.InsertWithQuotaCheck(context.Background(), p, int64(domain.UserQuotaBytes), now)
-		switch {
-		case err == nil:
+		switch class, terr := classifyCommitErr(err); class {
+		case commitOK:
 			if u.SyncBlob {
 				// Benchmark sync path: row already committed as ready; write
 				// the blob INLINE (on the ack path), no pending/MarkReady flip.
@@ -218,18 +217,15 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 			// and finish the blob write in the background.
 			u.startFinalize(p.Slug, staged.SHA, staged.Body)
 			return Result{Paste: p}, nil
-		case errors.Is(err, storage.ErrServiceFull):
-			return Result{}, ErrServiceFull
-		case errors.Is(err, storage.ErrOverUserQuota):
-			return Result{}, ErrOverQuota
-		case isSlugTaken(err):
+		case commitSlugTaken:
 			// A silent remint would make this class invisible; each retry
 			// logs once (slug + attempt) so a remint burst shows up in the
 			// service log. Semantics unchanged: same budget, same re-mint.
 			u.logf("upload: slug %s taken, re-minting (attempt %d/%d)", p.Slug, attempt, maxRetries)
 			continue
 		default:
-			return Result{}, err
+			// The translated triad sentinel, or the raw error verbatim.
+			return Result{}, terr
 		}
 	}
 	return Result{}, SlugTakenErr
@@ -273,22 +269,18 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 		if err != nil {
 			// A blob Put rejected by the object store's bucket quota surfaces
 			// storage.ErrServiceFull (the durable total-bytes ceiling).
-			if errors.Is(err, storage.ErrServiceFull) {
-				return Result{}, ErrServiceFull
+			if class, terr := classifyCommitErr(err); class != commitOther {
+				return Result{}, terr
 			}
 			return Result{}, fmt.Errorf("blob write: %w", err)
 		}
 		err = u.Blob.Commit(ctx, []BlobHandle{handle}, func(ctx context.Context) error {
 			return u.Repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
 		})
-		switch {
-		case err == nil:
+		switch class, terr := classifyCommitErr(err); class {
+		case commitOK:
 			return Result{Paste: p}, nil
-		case errors.Is(err, storage.ErrServiceFull):
-			return Result{}, ErrServiceFull
-		case errors.Is(err, storage.ErrOverUserQuota):
-			return Result{}, ErrOverQuota
-		case isSlugTaken(err):
+		case commitSlugTaken:
 			// Re-mint the slug and re-stage so the new ref co-routes to the
 			// new slug's shard; the prior staged object ages out via the
 			// orphan sweep. Logged so a remint burst (which strands staged
@@ -296,7 +288,8 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 			u.logf("upload: slug %s taken, re-minting + re-staging (attempt %d/%d)", p.Slug, attempt, maxRetries)
 			continue
 		default:
-			return Result{}, err
+			// The translated triad sentinel, or the raw error verbatim.
+			return Result{}, terr
 		}
 	}
 	return Result{}, SlugTakenErr
