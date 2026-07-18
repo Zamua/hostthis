@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
@@ -351,14 +350,11 @@ func (u *Upload) finalize(slug domain.Slug, sha string, body []byte) {
 	}
 }
 
-// isSlugTaken returns true if err is any flavor of "slug already
-// exists in the repo." We sniff the error message to avoid the
-// service layer importing the storage package directly - that would
-// invert the dependency direction (service shouldn't know which
-// concrete repo it's talking to).
+// isSlugTaken reports whether err is the slug-collision sentinel
+// (domain.ErrSlugTaken, aliased as storage.ErrSlugTaken), matched by
+// identity through any wrapping. Identity, not message text: an
+// unrelated error whose text mentions "slug" must surface verbatim,
+// not silently burn the remint budget.
 func isSlugTaken(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "slug")
+	return errors.Is(err, domain.ErrSlugTaken)
 }

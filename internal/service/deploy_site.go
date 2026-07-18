@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -339,14 +338,16 @@ func finalizeDeploy(site domain.Site, err error) (SiteResult, error) {
 	}
 }
 
-// isCrossShard sniffs a backend cross-shard-guard error WITHOUT importing the
-// backend package (the same dependency-direction discipline isSlugTaken keeps:
-// the service layer must not know which concrete backend it talks to). Shale's
-// cross-shard guard error message contains "cross-shard"; this is a defensive
-// last line - with the pre-claim in place a deploy's binds always co-route, so
-// it should never match.
+// isCrossShard reports whether err is the cross-shard deploy-commit
+// sentinel (domain.ErrCrossShardDeploy), matched by identity through
+// any wrapping. The service never imports a backend package (the same
+// dependency-direction discipline isSlugTaken keeps): the shale
+// storage layer translates its backend's cross-shard guard error into
+// the domain sentinel at the boundary, and this checks THAT. Defensive
+// last line - with the pre-claim in place a deploy's binds always
+// co-route, so it should never match.
 func isCrossShard(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "cross-shard")
+	return errors.Is(err, domain.ErrCrossShardDeploy)
 }
 
 // DeployToSlug re-deploys a SITE at an existing owned slug in place. It

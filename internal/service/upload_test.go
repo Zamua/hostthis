@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"path/filepath"
 	"strings"
@@ -208,7 +209,9 @@ func (r *slugTakenNTimesRepo) InsertWithQuotaCheck(ctx context.Context, p domain
 	}
 	r.mu.Unlock()
 	if fail {
-		return errors.New("storage: slug already exists")
+		// Wrapped, not bare: the remint loop must detect the sentinel
+		// through wrapping (errors.Is), the way a backend may surface it.
+		return fmt.Errorf("insert: %w", storage.ErrSlugTaken)
 	}
 	return r.PasteRepo.InsertWithQuotaCheck(ctx, p, userCap, now)
 }

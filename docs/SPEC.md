@@ -2989,9 +2989,11 @@ behaviors are expressed in terms of inputs and observable outputs:
 
 - **Insert / Get.** A successful `InsertWithQuotaCheck` makes the paste
   readable by `Get` with the same field values; a missing slug returns
-  the not-found sentinel; a duplicate slug returns an error whose
-  message contains "slug" (the upload service sniffs the message to
-  retry with a fresh slug).
+  the not-found sentinel; a duplicate slug returns the slug-taken
+  sentinel - bare or `%w`-wrapped, matched by `errors.Is` identity, on
+  which the upload service retries with a fresh slug. Message text is
+  never load-bearing for classification: an unrelated error whose text
+  mentions "slug" must surface verbatim, not trigger a retry.
 - **Quota (strict, never exceeded).** `InsertWithQuotaCheck` and
   `AppendVersionWithQuotaCheck` reject (over-quota sentinel) when
   accepting the write would push the identity's active bytes above the

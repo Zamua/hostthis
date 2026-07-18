@@ -49,4 +49,14 @@ var (
 	// ErrTooManyNewKeys is returned by AdmitNewKey when the subnet has
 	// hit its fresh-key quota for the window (the Sybil rate limit).
 	ErrTooManyNewKeys = errors.New("storage: too many new keys from this network")
+
+	// ErrCrossShardDeploy is the domain translation of a sharded
+	// backend's cross-shard-commit guard rejecting a site deploy's
+	// authoritative write (a staged file's pointer routed to a
+	// different shard than the manifest - a routing regression the
+	// slug pre-claim is designed to prevent). The shale storage layer
+	// translates the backend sentinel into this one at the boundary,
+	// keeping the original error in the wrap chain, so the deploy
+	// service classifies it without importing any backend package.
+	ErrCrossShardDeploy = errors.New("storage: cross-shard deploy commit rejected")
 )
