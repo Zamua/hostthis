@@ -666,36 +666,8 @@ func (r *ShaleRepo) SumActiveRoomBytes() (int64, error) {
 // order is time order EXACTLY (correct within a shared whole second).
 // Matches the slate ExpiredRooms.
 func (r *ShaleRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
-	items, err := r.aggregatePrefix(prefixRoomExpiryAll)
-	if err != nil {
-		return nil, err
-	}
-	cutoff := now.UTC().Format(expirySiteTimeFormat)
-	var out []domain.ExpiredRoom
-	for _, item := range items {
-		// key shape: roomexpiry/<ts>/<app-slug>/<uuid>
-		k := string(item.Key)
-		rest := strings.TrimPrefix(k, "roomexpiry/")
-		before, after, ok := strings.Cut(rest, "/")
-		if !ok {
-			continue
-		}
-		ts := before
-		appAndID := after
-		before, after, ok = strings.Cut(appAndID, "/")
-		if !ok {
-			continue
-		}
-		if ts > cutoff {
-			continue
-		}
-		out = append(out, domain.ExpiredRoom{
-			AppSlug:  domain.Slug(before),
-			ID:       domain.RoomID(after),
-			IndexRef: k,
-		})
-	}
-	return out, nil
+	// key shape: roomexpiry/<ts>/<app-slug>/<uuid>
+	return scanExpiredRefs(r.aggregatePrefix, prefixRoomExpiryAll, now, expirySiteTimeFormat, parseExpiredRoomKey)
 }
 
 // DeleteExpiredRoom processes one expired reference: the same full-cascade
@@ -708,31 +680,11 @@ func (r *ShaleRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
 // DeleteExpired and site DeleteExpiredSite; see docs/SPEC.md "Room storage
 // on the slatedb (and shale) backend" (sweep path).
 func (r *ShaleRepo) DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error) {
-	entryKey, err := expiryRoomIndexKey(ref)
-	if err != nil {
-		return false, err
-	}
-	deleted := false
 	var row roomRow
-	switch err := r.getJSON(shaleKeyRoom(ref.AppSlug, ref.ID), &row); {
-	case errors.Is(err, ErrNotFound):
-		// Orphaned entry: nothing to cascade, just clean the entry below.
-	case err != nil:
-		return false, err
-	default:
-		if err := r.DeleteRoom(ref.AppSlug, ref.ID); err != nil {
-			return false, err
-		}
-		deleted = true
-	}
-	if entryKey != nil {
-		if err := r.cluster.Transact(entryKey, func(tx backend.Transaction) error {
-			return tx.Delete(entryKey)
-		}); err != nil {
-			return deleted, fmt.Errorf("delete room expiry entry %s: %w", entryKey, err)
-		}
-	}
-	return deleted, nil
+	return deleteExpiredRef(ref, expiryRoomIndexKey,
+		func() error { return r.getJSON(shaleKeyRoom(ref.AppSlug, ref.ID), &row) },
+		func() error { return r.DeleteRoom(ref.AppSlug, ref.ID) },
+		func(entryKey []byte) error { return r.deleteExpiryEntry(entryKey, "room expiry entry") })
 }
 
 // DeleteRoom removes a room record, its expiry index entry, and EVERY value

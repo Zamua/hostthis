@@ -1,11 +1,19 @@
 package storage
 
+// Blob-store tests for the sqlite/disk backend. The paste CRUD tests that
+// used to live here (insert+get round-trip, get-not-found, duplicate slug)
+// were folded into the backend-agnostic conformance suite, which runs the
+// same assertions against sqlite on every default `go test` run
+// (conformInsertAndGet / conformGetNotFound / conformDuplicateSlug in
+// conformance_test.go). The BlobStore tests below have no conformance
+// counterpart (the suite covers metadata backends, not the disk blob
+// store), so they stay.
+
 import (
 	"bytes"
 	"errors"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
@@ -27,67 +35,6 @@ func newTestDB(t *testing.T) (*PasteRepo, *BlobStore) {
 		t.Fatalf("blob store: %v", err)
 	}
 	return NewPasteRepo(db), blobs
-}
-
-func TestPasteRepo_InsertAndGet(t *testing.T) {
-	repo, _ := newTestDB(t)
-	now := time.Now().UTC().Truncate(time.Second) // round-trip safely through RFC3339Nano
-	p := domain.Paste{
-		Slug:          "abc23456",
-		Identity:      "key:sha256:test",
-		Kind:          domain.KindHTML,
-		ContentSHA:    "sha-of-bytes",
-		Size:          42,
-		Name:          "demo",
-		PinnedVersion: 1,
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		ExpiresAt:     now.Add(domain.DefaultRetentionWindow),
-	}
-	if err := repo.Insert(p); err != nil {
-		t.Fatalf("insert: %v", err)
-	}
-	got, err := repo.Get(p.Slug)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got.Slug != p.Slug || got.Identity != p.Identity || got.Kind != p.Kind ||
-		got.ContentSHA != p.ContentSHA || got.Size != p.Size || got.Name != p.Name {
-		t.Fatalf("round-trip mismatch:\n got  %+v\n want %+v", got, p)
-	}
-	if !got.CreatedAt.Equal(p.CreatedAt) || !got.ExpiresAt.Equal(p.ExpiresAt) {
-		t.Fatalf("time round-trip mismatch:\n got  %v / %v\n want %v / %v",
-			got.CreatedAt, got.ExpiresAt, p.CreatedAt, p.ExpiresAt)
-	}
-}
-
-func TestPasteRepo_GetNotFound(t *testing.T) {
-	repo, _ := newTestDB(t)
-	_, err := repo.Get("abcdefgh")
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("got %v, want ErrNotFound", err)
-	}
-}
-
-func TestPasteRepo_InsertDuplicateSlugFails(t *testing.T) {
-	repo, _ := newTestDB(t)
-	now := time.Now().UTC().Truncate(time.Second)
-	p := domain.Paste{
-		Slug:          "abc23456",
-		Kind:          domain.KindHTML,
-		ContentSHA:    "x",
-		Size:          1,
-		PinnedVersion: 1,
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		ExpiresAt:     now.Add(domain.DefaultRetentionWindow),
-	}
-	if err := repo.Insert(p); err != nil {
-		t.Fatalf("first insert: %v", err)
-	}
-	if err := repo.Insert(p); !errors.Is(err, ErrSlugTaken) {
-		t.Fatalf("second insert: got %v, want ErrSlugTaken", err)
-	}
 }
 
 func TestBlobStore_PutAndGet(t *testing.T) {

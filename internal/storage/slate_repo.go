@@ -1070,27 +1070,8 @@ func (r *SlateRepo) DeleteVersion(slug domain.Slug, ver int) error {
 // IndexRef, so DeleteExpired can remove the EXACT entry that surfaced the
 // slug even when the paste record is already gone.
 func (r *SlateRepo) ExpiredPastes(now time.Time) ([]domain.ExpiredPaste, error) {
-	items, err := r.scanPrefix(prefixExpiry())
-	if err != nil {
-		return nil, err
-	}
-	cutoff := now.UTC().Format(time.RFC3339Nano)
-	var out []domain.ExpiredPaste
-	for _, item := range items {
-		// key shape: expiry/<rfc3339>/<slug>. Compare timestamp lex (sortable).
-		k := string(item.Key)
-		rest := strings.TrimPrefix(k, "expiry/")
-		idx := strings.LastIndex(rest, "/")
-		if idx < 0 {
-			continue
-		}
-		ts := rest[:idx]
-		slug := rest[idx+1:]
-		if ts <= cutoff {
-			out = append(out, domain.ExpiredPaste{Slug: domain.Slug(slug), IndexRef: k})
-		}
-	}
-	return out, nil
+	// key shape: expiry/<rfc3339>/<slug>. Compare timestamp lex (sortable).
+	return scanExpiredRefs(r.scanPrefix, prefixExpiry(), now, time.RFC3339Nano, parseExpiredPasteKey)
 }
 
 // DeleteExpired processes one expired reference: the same full-cascade
@@ -1104,37 +1085,29 @@ func (r *SlateRepo) ExpiredPastes(now time.Time) ([]domain.ExpiredPaste, error) 
 // entry are both no-ops. Returns whether a paste record was actually
 // deleted. See docs/SPEC.md "The storage contract" (Expiry).
 func (r *SlateRepo) DeleteExpired(ref domain.ExpiredPaste) (bool, error) {
-	entryKey, err := expiryIndexKey(ref)
-	if err != nil {
-		return false, err
-	}
-	deleted := false
 	var p pasteRow
-	switch err := r.getJSON(keyPaste(ref.Slug), &p); {
-	case errors.Is(err, ErrNotFound):
-		// Orphaned entry: nothing to cascade, just clean the entry below.
-	case err != nil:
-		return false, err
-	default:
-		if err := r.Delete(ref.Slug); err != nil {
-			return false, err
-		}
-		deleted = true
+	return deleteExpiredRef(ref, expiryIndexKey,
+		func() error { return r.getJSON(keyPaste(ref.Slug), &p) },
+		func() error { return r.Delete(ref.Slug) },
+		func(entryKey []byte) error { return r.deleteExpiryEntry(entryKey, "expiry entry") })
+}
+
+// deleteExpiryEntry removes one expiry-index entry in its own tx. label
+// names the family in the error strings ("expiry entry", "site expiry
+// entry", "room expiry entry") so each family's messages keep their shape.
+func (r *SlateRepo) deleteExpiryEntry(entryKey []byte, label string) error {
+	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
 	}
-	if entryKey != nil {
-		tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
-		if err != nil {
-			return deleted, fmt.Errorf("begin tx: %w", err)
-		}
-		if err := tx.Delete(entryKey); err != nil {
-			_ = tx.Rollback()
-			return deleted, fmt.Errorf("delete expiry entry %s: %w", entryKey, err)
-		}
-		if _, err := tx.Commit(); err != nil {
-			return deleted, fmt.Errorf("commit delete expiry entry %s: %w", entryKey, err)
-		}
+	if err := tx.Delete(entryKey); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("delete %s %s: %w", label, entryKey, err)
 	}
-	return deleted, nil
+	if _, err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete %s %s: %w", label, entryKey, err)
+	}
+	return nil
 }
 
 // ReferencedBlobSHAs returns the set of blob content-SHAs still

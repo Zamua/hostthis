@@ -261,6 +261,42 @@ func roomGuardID(ref domain.ExpiredRoom) string {
 	return fmt.Sprintf("r\x00%s\x00%s", ref.AppSlug, ref.ID)
 }
 
+// sweepExpired runs one record family's expiry loop (paste, site, or room)
+// over the refs its scan surfaced, preserving the counter semantics the
+// three families share. In dry-run, every ref is logged (dryRunLog) and
+// counted into deleted - a mutation-free pass can't distinguish a live
+// record from an orphaned entry, so the would-expire count is the entry
+// count, an upper bound on real deletions. Live passes consult the
+// convergence guard first: a skipped-unreachable ref counts into NEITHER
+// total (the guardPass tracks its own skipped count). A processed ref
+// whose record was actually deleted counts into deleted; one whose record
+// was already gone (an orphaned-entry cleanup, index maintenance rather
+// than a deletion) counts into cleaned. A processing error aborts the
+// family's loop, returning the counts accumulated so far with the error
+// wrapped by wrapErr.
+func sweepExpired[T any](s *Sweep, guard *guardPass, refs []T, guardID func(T) string, process func(T) (bool, error), dryRunLog func(T), wrapErr func(T, error) error) (deleted, cleaned int, err error) {
+	for _, ref := range refs {
+		if s.DryRun {
+			dryRunLog(ref)
+			deleted++
+			continue
+		}
+		if guard.skip(guardID(ref)) {
+			continue
+		}
+		ok, perr := process(ref)
+		if perr != nil {
+			return deleted, cleaned, wrapErr(ref, perr)
+		}
+		if ok {
+			deleted++
+		} else {
+			cleaned++
+		}
+	}
+	return deleted, cleaned, nil
+}
+
 // DefaultOrphanGrace is the fallback age a staged-but-unbound shale blob object
 // must exceed before the orphan sweep reclaims it (used when Sweep.OrphanGrace
 // is zero). One hour comfortably exceeds the longest stage->commit window (a
@@ -379,27 +415,13 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 	// don't count into pastesDeleted (which feeds the summary log AND the
 	// abort-on-zero-refs guard below); reported separately.
 	orphanEntries := 0
-	for _, ref := range expired {
-		if s.DryRun {
-			// Dry-run mutates nothing, so it can't distinguish a live paste
-			// from an orphaned entry; the would-expire count is the entry
-			// count, an upper bound on real deletions.
-			s.Logger.Printf("sweep[dry-run]: would expire paste %q", ref.Slug)
-			pastesDeleted++
-			continue
-		}
-		if guard.skip(pasteGuardID(ref)) {
-			continue
-		}
-		deleted, err := s.Repo.DeleteExpired(ref)
-		if err != nil {
-			return pastesDeleted, blobsGCd, fmt.Errorf("delete %q: %w", ref.Slug, err)
-		}
-		if deleted {
-			pastesDeleted++
-		} else {
-			orphanEntries++
-		}
+	d, c, err := sweepExpired(s, guard, expired, pasteGuardID, s.Repo.DeleteExpired,
+		func(ref domain.ExpiredPaste) { s.Logger.Printf("sweep[dry-run]: would expire paste %q", ref.Slug) },
+		func(ref domain.ExpiredPaste, err error) error { return fmt.Errorf("delete %q: %w", ref.Slug, err) })
+	pastesDeleted += d
+	orphanEntries += c
+	if err != nil {
+		return pastesDeleted, blobsGCd, err
 	}
 
 	// Expire sites too, when the site sweeper is wired. Same contract as
@@ -410,24 +432,13 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 		if err != nil {
 			return pastesDeleted, 0, fmt.Errorf("expired sites: %w", err)
 		}
-		for _, ref := range expiredSites {
-			if s.DryRun {
-				s.Logger.Printf("sweep[dry-run]: would expire site %q", ref.Slug)
-				pastesDeleted++
-				continue
-			}
-			if guard.skip(siteGuardID(ref)) {
-				continue
-			}
-			deleted, err := s.Sites.DeleteExpiredSite(ref)
-			if err != nil {
-				return pastesDeleted, blobsGCd, fmt.Errorf("delete site %q: %w", ref.Slug, err)
-			}
-			if deleted {
-				pastesDeleted++
-			} else {
-				orphanEntries++
-			}
+		d, c, err := sweepExpired(s, guard, expiredSites, siteGuardID, s.Sites.DeleteExpiredSite,
+			func(ref domain.ExpiredSite) { s.Logger.Printf("sweep[dry-run]: would expire site %q", ref.Slug) },
+			func(ref domain.ExpiredSite, err error) error { return fmt.Errorf("delete site %q: %w", ref.Slug, err) })
+		pastesDeleted += d
+		orphanEntries += c
+		if err != nil {
+			return pastesDeleted, blobsGCd, err
 		}
 	}
 
@@ -444,24 +455,17 @@ func (s *Sweep) Once(now time.Time) (pastesDeleted, blobsGCd int, err error) {
 		if err != nil {
 			return pastesDeleted, 0, fmt.Errorf("expired rooms: %w", err)
 		}
-		for _, ref := range expiredRooms {
-			if s.DryRun {
+		d, c, err := sweepExpired(s, guard, expiredRooms, roomGuardID, s.Rooms.DeleteExpiredRoom,
+			func(ref domain.ExpiredRoom) {
 				s.Logger.Printf("sweep[dry-run]: would expire room %s/%s", ref.AppSlug, ref.ID)
-				pastesDeleted++
-				continue
-			}
-			if guard.skip(roomGuardID(ref)) {
-				continue
-			}
-			deleted, err := s.Rooms.DeleteExpiredRoom(ref)
-			if err != nil {
-				return pastesDeleted, blobsGCd, fmt.Errorf("delete room %s/%s: %w", ref.AppSlug, ref.ID, err)
-			}
-			if deleted {
-				pastesDeleted++
-			} else {
-				orphanEntries++
-			}
+			},
+			func(ref domain.ExpiredRoom, err error) error {
+				return fmt.Errorf("delete room %s/%s: %w", ref.AppSlug, ref.ID, err)
+			})
+		pastesDeleted += d
+		orphanEntries += c
+		if err != nil {
+			return pastesDeleted, blobsGCd, err
 		}
 	}
 

@@ -608,38 +608,8 @@ func (r *SlateRepo) sumOneRoomBytes(appSlug domain.Slug, id domain.RoomID) (int6
 // order == time order EXACTLY (correct even within a shared whole second),
 // the same guarantee the site expiry index has.
 func (r *SlateRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
-	items, err := r.scanPrefix(prefixRoomExpiry())
-	if err != nil {
-		return nil, err
-	}
-	cutoff := now.UTC().Format(expirySiteTimeFormat)
-	var out []domain.ExpiredRoom
-	for _, item := range items {
-		// key shape: roomexpiry/<ts>/<app-slug>/<uuid>
-		k := string(item.Key)
-		rest := strings.TrimPrefix(k, "roomexpiry/")
-		// Split off the leading <ts> (fixed-width, no '/').
-		before, after, ok := strings.Cut(rest, "/")
-		if !ok {
-			continue
-		}
-		ts := before
-		appAndID := after
-		// <app-slug>/<uuid>: slug + uuid are both slash-free, so split on '/'.
-		before, after, ok = strings.Cut(appAndID, "/")
-		if !ok {
-			continue
-		}
-		if ts > cutoff {
-			continue
-		}
-		out = append(out, domain.ExpiredRoom{
-			AppSlug:  domain.Slug(before),
-			ID:       domain.RoomID(after),
-			IndexRef: k,
-		})
-	}
-	return out, nil
+	// key shape: roomexpiry/<ts>/<app-slug>/<uuid>
+	return scanExpiredRefs(r.scanPrefix, prefixRoomExpiry(), now, expirySiteTimeFormat, parseExpiredRoomKey)
 }
 
 // DeleteExpiredRoom processes one expired reference: the same full-cascade
@@ -651,37 +621,11 @@ func (r *SlateRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
 // DeleteExpired and site DeleteExpiredSite; see docs/SPEC.md "Room storage
 // on the slatedb (and shale) backend" (sweep path).
 func (r *SlateRepo) DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error) {
-	entryKey, err := expiryRoomIndexKey(ref)
-	if err != nil {
-		return false, err
-	}
-	deleted := false
 	var row roomRow
-	switch err := r.getJSON(keyRoom(ref.AppSlug, ref.ID), &row); {
-	case errors.Is(err, ErrNotFound):
-		// Orphaned entry: nothing to cascade, just clean the entry below.
-	case err != nil:
-		return false, err
-	default:
-		if err := r.DeleteRoom(ref.AppSlug, ref.ID); err != nil {
-			return false, err
-		}
-		deleted = true
-	}
-	if entryKey != nil {
-		tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
-		if err != nil {
-			return deleted, fmt.Errorf("begin tx: %w", err)
-		}
-		if err := tx.Delete(entryKey); err != nil {
-			_ = tx.Rollback()
-			return deleted, fmt.Errorf("delete room expiry entry %s: %w", entryKey, err)
-		}
-		if _, err := tx.Commit(); err != nil {
-			return deleted, fmt.Errorf("commit delete room expiry entry %s: %w", entryKey, err)
-		}
-	}
-	return deleted, nil
+	return deleteExpiredRef(ref, expiryRoomIndexKey,
+		func() error { return r.getJSON(keyRoom(ref.AppSlug, ref.ID), &row) },
+		func() error { return r.DeleteRoom(ref.AppSlug, ref.ID) },
+		func(entryKey []byte) error { return r.deleteExpiryEntry(entryKey, "room expiry entry") })
 }
 
 // DeleteRoom removes a room record, its expiry index entry, and EVERY value
