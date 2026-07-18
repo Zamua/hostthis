@@ -787,26 +787,7 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 // uses. The cutoff is formatted with the SAME layout so the compare stays
 // aligned. Matches the slate ExpiredSites.
 func (r *ShaleRepo) ExpiredSites(now time.Time) ([]domain.ExpiredSite, error) {
-	items, err := r.aggregatePrefix(prefixExpirySitesAll)
-	if err != nil {
-		return nil, err
-	}
-	cutoff := now.UTC().Format(expirySiteTimeFormat)
-	var out []domain.ExpiredSite
-	for _, item := range items {
-		k := string(item.Key)
-		rest := strings.TrimPrefix(k, "expiry_sites/")
-		idx := strings.LastIndex(rest, "/")
-		if idx < 0 {
-			continue
-		}
-		ts := rest[:idx]
-		slug := rest[idx+1:]
-		if ts <= cutoff {
-			out = append(out, domain.ExpiredSite{Slug: domain.Slug(slug), IndexRef: k})
-		}
-	}
-	return out, nil
+	return scanExpiredRefs(r.aggregatePrefix, prefixExpirySitesAll, now, expirySiteTimeFormat, parseExpiredSiteKey)
 }
 
 // DeleteExpiredSite processes one expired reference: the same full-cascade
@@ -818,31 +799,11 @@ func (r *ShaleRepo) ExpiredSites(now time.Time) ([]domain.ExpiredSite, error) {
 // Returns whether a site record was actually deleted. Mirrors the paste
 // DeleteExpired; see docs/SPEC.md "Static-site storage" (sweep path).
 func (r *ShaleRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
-	entryKey, err := expirySiteIndexKey(ref)
-	if err != nil {
-		return false, err
-	}
-	deleted := false
 	var row siteRow
-	switch err := r.getJSON(shaleKeySite(ref.Slug), &row); {
-	case errors.Is(err, ErrNotFound):
-		// Orphaned entry: nothing to cascade, just clean the entry below.
-	case err != nil:
-		return false, err
-	default:
-		if err := r.DeleteSite(ref.Slug); err != nil {
-			return false, err
-		}
-		deleted = true
-	}
-	if entryKey != nil {
-		if err := r.cluster.Transact(entryKey, func(tx backend.Transaction) error {
-			return tx.Delete(entryKey)
-		}); err != nil {
-			return deleted, fmt.Errorf("delete site expiry entry %s: %w", entryKey, err)
-		}
-	}
-	return deleted, nil
+	return deleteExpiredRef(ref, expirySiteIndexKey,
+		func() error { return r.getJSON(shaleKeySite(ref.Slug), &row) },
+		func() error { return r.DeleteSite(ref.Slug) },
+		func(entryKey []byte) error { return r.deleteExpiryEntry(entryKey, "site expiry entry") })
 }
 
 // reconcileSiteIndexPass reprojects the identity_sites enumeration index from

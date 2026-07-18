@@ -2437,26 +2437,7 @@ func (r *ShaleRepo) Unpin(slug domain.Slug) error {
 // expiry index uses a fixed-width format (expirySiteTimeFormat) and has no
 // such skew.
 func (r *ShaleRepo) ExpiredPastes(now time.Time) ([]domain.ExpiredPaste, error) {
-	items, err := r.aggregatePrefix([]byte("expiry/"))
-	if err != nil {
-		return nil, err
-	}
-	cutoff := now.UTC().Format(time.RFC3339Nano)
-	var out []domain.ExpiredPaste
-	for _, item := range items {
-		k := string(item.Key)
-		rest := strings.TrimPrefix(k, "expiry/")
-		idx := strings.LastIndex(rest, "/")
-		if idx < 0 {
-			continue
-		}
-		ts := rest[:idx]
-		slug := rest[idx+1:]
-		if ts <= cutoff {
-			out = append(out, domain.ExpiredPaste{Slug: domain.Slug(slug), IndexRef: k})
-		}
-	}
-	return out, nil
+	return scanExpiredRefs(r.aggregatePrefix, []byte("expiry/"), now, time.RFC3339Nano, parseExpiredPasteKey)
 }
 
 // DeleteExpired processes one expired reference: the same full-cascade
@@ -2472,31 +2453,25 @@ func (r *ShaleRepo) ExpiredPastes(now time.Time) ([]domain.ExpiredPaste, error) 
 // Returns whether a paste record was actually deleted. See docs/SPEC.md
 // "The storage contract" (Expiry).
 func (r *ShaleRepo) DeleteExpired(ref domain.ExpiredPaste) (bool, error) {
-	entryKey, err := expiryIndexKey(ref)
-	if err != nil {
-		return false, err
-	}
-	deleted := false
 	var p pasteRow
-	switch err := r.getJSON(shaleKeyPaste(ref.Slug), &p); {
-	case errors.Is(err, ErrNotFound):
-		// Orphaned entry: nothing to cascade, just clean the entry below.
-	case err != nil:
-		return false, err
-	default:
-		if err := r.Delete(ref.Slug); err != nil {
-			return false, err
-		}
-		deleted = true
+	return deleteExpiredRef(ref, expiryIndexKey,
+		func() error { return r.getJSON(shaleKeyPaste(ref.Slug), &p) },
+		func() error { return r.Delete(ref.Slug) },
+		func(entryKey []byte) error { return r.deleteExpiryEntry(entryKey, "expiry entry") })
+}
+
+// deleteExpiryEntry removes one expiry-index entry in a single-shard CAS
+// (the entry's shard key is its trailing subject segment, the same shard
+// its record rows live on). label names the family in the error string
+// ("expiry entry", "site expiry entry", "room expiry entry") so each
+// family's messages keep their shape.
+func (r *ShaleRepo) deleteExpiryEntry(entryKey []byte, label string) error {
+	if err := r.cluster.Transact(entryKey, func(tx backend.Transaction) error {
+		return tx.Delete(entryKey)
+	}); err != nil {
+		return fmt.Errorf("delete %s %s: %w", label, entryKey, err)
 	}
-	if entryKey != nil {
-		if err := r.cluster.Transact(entryKey, func(tx backend.Transaction) error {
-			return tx.Delete(entryKey)
-		}); err != nil {
-			return deleted, fmt.Errorf("delete expiry entry %s: %w", entryKey, err)
-		}
-	}
-	return deleted, nil
+	return nil
 }
 
 // ReferencedBlobSHAs returns the set of blob content-SHAs still referenced
