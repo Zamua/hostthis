@@ -2892,82 +2892,103 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 // authoritative paste set per owner: adds missing entries, refreshes every
 // projection's cached values, and drops entries with no live authoritative
 // paste. have is the pass's index snapshot, captured by Reconcile BEFORE
-// the authoritative scans (see the guard-baseline reasoning there); it
-// serves double duty as the orphan-prune candidate set and as the
-// expected-value baseline for the guarded writes. The orphan prune runs
-// against that FULL aggregate of the index family - not just the owners
-// with authoritative rows - so an entry lingering under an owner whose
-// pastes are ALL gone is still dropped (the quota scan sums cached values
-// without resolving the head rows, so an unpruned orphan would over-count
-// that owner forever, not just until a list repaired it).
+// the authoritative scans (see the guard-baseline reasoning there). The
+// mechanics - orphan prune, guarded reprojection, Policy 1 error handling -
+// live in reconcileEnumerationIndex; this wrapper supplies the paste
+// family's prefix, key builder, and confirm-then-classify prune step.
 func (r *ShaleRepo) reconcileIndexes(pastesByOwner map[string]map[string]identityPasteRow, have []scanItem) error {
+	return reconcileEnumerationIndex(r, pastesByOwner, have, prefixIdentityPastesAll,
+		shaleKeyIdentityPaste, r.pruneOrphanPasteEntry, "reconcile", "identity_pastes")
+}
+
+// pruneOrphanPasteEntry classifies one identity_pastes entry whose (owner,
+// slug) is missing from the reprojection set: an orphan (the authoritative
+// paste is gone), a failed paste's leftover entry (crash mid-MarkFailed), or
+// a FRESH insert that raced the pass's pastes/ snapshot. It confirms against
+// the authoritative row so the racing insert is kept; only the first two
+// verdicts prune.
+func (r *ShaleRepo) pruneOrphanPasteEntry(slug string) bool {
+	var p pasteRow
+	switch gerr := r.getJSON(shaleKeyPaste(domain.Slug(slug)), &p); {
+	case errors.Is(gerr, ErrNotFound):
+		// Orphan: the paste is gone.
+		return true
+	case gerr != nil:
+		// Undecodable row: keep the entry; the fail-closed placeholder
+		// projection handles it (or already did via slug_owner).
+		return false
+	case domain.NormalizeStatus(p.Status) == domain.PasteStatusFailed:
+		// Failed pastes are not enumerated. Same guarded drop.
+		return true
+	default:
+		// Live row that raced the snapshot: keep; the next pass reprojects it.
+		return false
+	}
+}
+
+// reconcileEnumerationIndex rebuilds one per-owner enumeration-index family
+// (identity_pastes / identity_sites) to match the authoritative rows: it
+// prunes entries with no wanted row and refreshes every wanted entry
+// (idempotent; covers add + update), one {id}-shard CAS per entry. have is
+// the pass's index snapshot, captured BEFORE the authoritative scans (the
+// guard-baseline ordering argument in Reconcile); it serves double duty as
+// the orphan-prune candidate set and as the expected-value baseline for the
+// guarded writes. The orphan prune runs against that FULL aggregate of the
+// index family - not just the owners with authoritative rows - so an entry
+// lingering under an owner whose records are ALL gone is still dropped (the
+// quota scan sums cached values without resolving the rows, so an unpruned
+// orphan would over-count that owner forever). pruneOrphan is the per-family
+// confirm-then-classify step; the drop itself is the VALUE-COMPARED
+// guardedDeleteIndexEntry, because the confirm and the delete are not one
+// step: a same-slug delete-then-redeploy can land a fresh row + entry
+// between the confirm's NotFound and the delete, and the fresh entry must
+// survive (docs/SPEC.md, the reconciler's prune). Reprojection writes are
+// guarded on the pass's snapshot value: a live write that landed mid-pass
+// (its cached values are fresher than this pass's point-in-time computation)
+// flips the guard and the write skips - the next pass recomputes from
+// fresher rows. A failed write follows Policy 1 (one entry's failure must
+// not stall the reprojection for every healthy owner): log, count, continue;
+// the aggregated error makes the whole pass retried next tick. logPrefix +
+// familyName keep each family's log/error strings byte-identical to the
+// pre-extraction per-family loops.
+func reconcileEnumerationIndex[R any](r *ShaleRepo, wanted map[string]map[string]R, have []scanItem, prefix []byte, entryKey func(owner, slug string) []byte, pruneOrphan func(slug string) bool, logPrefix, familyName string) error {
 	snapshot := make(map[string][]byte, len(have))
 	for _, item := range have {
 		snapshot[string(item.Key)] = item.Value
 	}
 	for _, item := range have {
-		owner, slug, ok := splitIdentityIndexKey(item.Key, prefixIdentityPastesAll)
+		owner, slug, ok := splitIdentityIndexKey(item.Key, prefix)
 		if !ok {
 			continue
 		}
-		if _, wanted := pastesByOwner[owner][slug]; wanted {
+		if _, w := wanted[owner][slug]; w {
 			continue
 		}
-		// Not in the reprojection set: an orphan (the authoritative paste is
-		// gone), a failed paste's leftover entry (crash mid-MarkFailed), or a
-		// FRESH insert that raced this pass's pastes/ snapshot. Confirm
-		// against the authoritative row before dropping so the racing insert
-		// is kept - and drop via the VALUE-COMPARED delete, because the
-		// confirm and the delete are not one step: a same-slug
-		// delete-then-redeploy can land a fresh row + entry between the
-		// confirm's NotFound and the delete, and the fresh entry must survive
-		// (docs/SPEC.md, the reconciler's prune).
-		var p pasteRow
-		switch gerr := r.getJSON(shaleKeyPaste(domain.Slug(slug)), &p); {
-		case errors.Is(gerr, ErrNotFound):
-			// Orphan: the paste is gone. Best-effort, guarded drop.
+		if pruneOrphan(slug) {
+			// Best-effort, guarded drop.
 			if _, err := r.guardedDeleteIndexEntry(item.Key, item.Value); err != nil {
-				r.repoLog().Printf("reconcile: prune %s: %v (next pass retries)", item.Key, err)
+				r.repoLog().Printf("%s: prune %s: %v (next pass retries)", logPrefix, item.Key, err)
 			}
-		case gerr != nil:
-			// Undecodable row: keep the entry; the fail-closed placeholder
-			// projection above handles it (or already did via slug_owner).
-		case domain.NormalizeStatus(p.Status) == domain.PasteStatusFailed:
-			// Failed pastes are not enumerated. Same guarded drop.
-			if _, err := r.guardedDeleteIndexEntry(item.Key, item.Value); err != nil {
-				r.repoLog().Printf("reconcile: prune %s: %v (next pass retries)", item.Key, err)
-			}
-		default:
-			// Live row that raced the snapshot: keep; the next pass reprojects it.
 		}
 	}
 	var writeFailures int
-	for owner, want := range pastesByOwner {
+	for owner, want := range wanted {
 		for slug, row := range want {
-			// Refresh every wanted entry (idempotent; covers add + update).
-			// Guarded on the pass's snapshot value: a live write that landed
-			// mid-pass (its cached sum is fresher than this pass's
-			// point-in-time computation) flips the guard and the write skips
-			// - the next pass recomputes from fresher rows.
-			key := shaleKeyIdentityPaste(owner, slug)
+			key := entryKey(owner, slug)
 			expected, present := snapshot[string(key)]
 			written, err := r.guardedPutIndexEntry(key, expected, present, row)
 			if err != nil {
-				// Policy 1: one entry's failed write must not stall the rest
-				// of the reprojection (aborting here would freeze index
-				// healing for every healthy owner too). Log, count, continue;
-				// the aggregated error below makes the pass retried next tick.
 				writeFailures++
-				r.repoLog().Printf("reconcile: index write %s failed: %v (skipped; next pass retries)", key, err)
+				r.repoLog().Printf("%s: index write %s failed: %v (skipped; next pass retries)", logPrefix, key, err)
 				continue
 			}
 			if !written {
-				r.repoLog().Printf("reconcile: index write %s skipped: entry changed since the pass snapshot (a live write landed; next pass reprojects)", key)
+				r.repoLog().Printf("%s: index write %s skipped: entry changed since the pass snapshot (a live write landed; next pass reprojects)", logPrefix, key)
 			}
 		}
 	}
 	if writeFailures > 0 {
-		return fmt.Errorf("reconcile: %d identity_pastes index write(s) failed (skipped; next pass retries them)", writeFailures)
+		return fmt.Errorf("%s: %d %s index write(s) failed (skipped; next pass retries them)", logPrefix, writeFailures, familyName)
 	}
 	return nil
 }
