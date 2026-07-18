@@ -27,8 +27,6 @@ func TestShaleShardKey(t *testing.T) {
 		// Per-identity derived family -> shard key <id>.
 		{"identity_pastes", "identity_pastes/sha256:deadbeef/abc12345", "sha256:deadbeef"},
 		{"identity_first_seen", "identity_first_seen/sha256:deadbeef", "sha256:deadbeef"},
-		{"identity_bytes", "identity_bytes/sha256:deadbeef", "sha256:deadbeef"},
-		{"identity_reserve", "identity_reserve/sha256:deadbeef/abc12345", "sha256:deadbeef"},
 
 		// Per-subnet Sybil-gate family -> shard key <subnet>.
 		{"keygate", "keygate/10.0.0.0_24/sha256:deadbeef", "10.0.0.0_24"},
@@ -40,18 +38,9 @@ func TestShaleShardKey(t *testing.T) {
 		{"expiry_site", "expiry_sites/2026-06-05T12:00:00Z/abc12345", "abc12345"},
 		{"expiry_site nano", "expiry_sites/2026-06-05T12:00:00.123456789Z/abc12345", "abc12345"},
 
-		// Static-site per-identity derived family -> shard key <id>. All three
-		// site {id} families (byte counter, reservation marker, enumeration
-		// index) route on the id so they co-shard; they disambiguate on their
-		// distinct identity_site_bytes/ vs identity_site_reserve/ vs
-		// identity_sites/ prefixes (which diverge before the trailing slash).
-		{"identity_site_bytes", "identity_site_bytes/sha256:deadbeef", "sha256:deadbeef"},
-		{"identity_site_reserve", "identity_site_reserve/sha256:deadbeef/abc12345", "sha256:deadbeef"},
-		// The site RELEASE marker (delete-side mirror of the reserve marker) also
-		// routes on the id so it co-shards with the site counter; its
-		// identity_site_release/ prefix diverges from identity_site_reserve/ at
-		// 'l' vs 's' and from identity_sites/ at '_' vs 's', so it is unambiguous.
-		{"identity_site_release", "identity_site_release/sha256:deadbeef/abc12345", "sha256:deadbeef"},
+		// Static-site per-identity derived family -> shard key <id>: the
+		// identity_sites/ enumeration index routes on the id so an owner's
+		// site entries co-locate for the single-shard quota scan.
 		{"identity_sites index", "identity_sites/sha256:deadbeef/abc12345", "sha256:deadbeef"},
 
 		// Room families -> shard key <app-slug>. All four families (+ the
@@ -115,18 +104,9 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 	idKeys := []string{
 		"identity_pastes/" + id + "/" + slug,
 		"identity_first_seen/" + id,
-		"identity_bytes/" + id,
-		// The reservation marker MUST co-shard with identity_bytes so the
-		// reserve step's read-increment-mark is a single-shard CAS.
-		"identity_reserve/" + id + "/" + slug,
-		// The site byte counter, reservation marker, AND enumeration index all
-		// co-shard with the identity so the confirm/delete step's read-modify
-		// on all three is a single-shard CAS (mirrors the paste {id} family).
-		"identity_site_bytes/" + id,
-		"identity_site_reserve/" + id + "/" + slug,
-		// The site release marker MUST co-shard with the site counter so
-		// DeleteSite's decrement + marker-consume is a single-shard {id} CAS.
-		"identity_site_release/" + id + "/" + slug,
+		// The site enumeration index co-shards with the paste {id} family so
+		// an owner's paste + site entries land on one shard and each quota
+		// prefix scan is single-shard.
 		"identity_sites/" + id + "/" + slug,
 	}
 	for _, k := range idKeys {
