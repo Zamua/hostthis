@@ -5124,6 +5124,53 @@ commit on a bloated unit can stall past 5s; the bulk migration tooling has
 always raised these budgets internally), but serving deploys normally
 leave it at the default.
 
+#### Retrying the handoff refusal
+
+The read budget above is the FIRST line of defence for the handoff window:
+shale re-polls inside it, so a blip shorter than the budget never reaches
+the caller. This is the second line, for a window that outlives it.
+
+When a unit is mid-handoff, a routed op can refuse with a typed signal
+meaning "this is bounded by a mount completing, not by an outage" -
+nothing external has to recover for a retry to succeed. shale exposes that
+as a matchable sentinel identically whether the refusal was raised locally
+or forwarded from a peer, so the caller never has to know which. It does
+NOT re-route within the same op, so without a retry the refusal reaches the
+client as a request failure even though the work is about to become
+possible.
+
+Every non-transactional cluster read therefore retries on exactly that
+signal, and on nothing else:
+
+- A bare `Unavailable` is NOT retried. It is overloaded with genuine
+  peer-down, and retrying a real outage converts a clean fast failure into
+  a slow one while adding load precisely when the cluster is struggling.
+- A deadline expiry is NOT retried. When some legs are acquiring and others
+  are genuinely down and the window outlives the read budget, the op
+  terminates as a deadline, and from the caller's side that is
+  indistinguishable from ordinary slowness. It falls through to normal
+  error handling.
+
+Reads on the request path are bounded by arithmetic, not taste: an attempt
+can burn the entire read budget before refusing, so the attempt count times
+the budget, plus backoff, must fit inside the HTTP response deadline with
+margin left for rendering. A test pins that relationship, so raising either
+the attempt count or the read budget without re-examining the response
+deadline fails the build rather than silently shipping a retry that
+outlives the response.
+
+Cross-shard background scans (the expiry sweep, the referenced-blob set,
+the key-gate prune) retry more patiently, because no request deadline
+bounds them, and they retry as a WHOLE CALL rather than per-peer: a refused
+peer's slice is absent from every other peer's result, so a partial fan-out
+is never a usable answer. The patience is bought for one consumer in
+particular. Blob GC acts on ABSENCE - it deletes any blob NOT in the
+referenced set - so consuming a truncated set destroys live data, whereas
+the other two consumers merely under-report and self-correct on the next
+pass. That asymmetry is the general rule for any fan-out consumer: a
+partial result is dangerous exactly when the code acts on absence rather
+than on presence.
+
 #### The value envelope and the strip-on-read invariant
 
 At R>1 shale wraps every stored value in a last-writer-wins envelope (a
