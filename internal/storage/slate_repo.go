@@ -47,14 +47,12 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1354,17 +1352,3 @@ func sortVersionsDesc(vs []domain.Version) {
 }
 
 // --- Misc helpers ----------------------------------------------------------
-
-// parseVerNumFromKey extracts the NNNN ver_num suffix from a key like
-// "versions/<slug>/<NNNN>". Returns 0 + error on malformed keys.
-func parseVerNumFromKey(key []byte) (int, error) {
-	s := string(key)
-	if !bytes.HasPrefix(key, []byte("versions/")) {
-		return 0, fmt.Errorf("not a version key: %s", s)
-	}
-	idx := bytes.LastIndexByte(key, '/')
-	if idx < 0 {
-		return 0, fmt.Errorf("malformed version key: %s", s)
-	}
-	return strconv.Atoi(string(key[idx+1:]))
-}

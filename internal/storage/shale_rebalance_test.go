@@ -4,7 +4,7 @@ package storage_test
 
 // THE GATE: a REAL 2-node shale cluster, in-process, on live MinIO,
 // proving a ring rebalance is LOSSLESS for hostthis's actual data
-// shapes (pastes + their versions, the identity_bytes quota counter,
+// shapes (pastes + their versions, the scan-derived per-owner quota,
 // and the identity_pastes projection that backs ListByOwner).
 //
 //	CGO_ENABLED=1 \
@@ -18,7 +18,7 @@ package storage_test
 // after a second node joins and the ring redistributes ownership, every
 // paste written through node A is still readable from the CLUSTER (via
 // either node's repo, forwarding when the local node is not the owner),
-// the per-identity quota counter survives its move to whichever node now
+// the per-identity quota sum survives its move to whichever node now
 // owns the {id} shard (no under/over-count), and the per-owner
 // projection survives so ListByOwner stays correct.
 //
@@ -41,7 +41,7 @@ package storage_test
 // If shale's rebalance dropped a partition's bytes on the handoff
 // boundary, the missing paste's Get would return ErrNotFound (or
 // ListVersions would come back short) - assertion 1 fails loudly with
-// the slug. If the identity_bytes counter did not move with its {id}
+// the slug. If the {id} family's entries did not move with their
 // shard, SumActiveBytesByOwner read through the wrong (empty) owner
 // would return 0, or a partial value - assertion 2 fails with the
 // before/after numbers. If the projection were lost, ListByOwner would
@@ -214,11 +214,11 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 	// --- the dataset, written through node A's PUBLIC api ---
 	//
 	// Three identities, each with several pastes, varied so the projections
-	// + counters are non-trivial:
+	// + quota sums are non-trivial:
 	//   - alice: two single-version pastes.
 	//   - bob:   one paste taken to v3 (multi-version: v1 + 2 appends), and
 	//            a second paste with one version tombstoned (a deleted
-	//            version sheds its bytes from the counter).
+	//            version sheds its bytes from the quota sum).
 	//   - carol: one single-version paste.
 	//
 	// The slugs use only SlugAlphabet chars (no l/o/0/1) so they are
@@ -230,7 +230,7 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 		slugs      map[string]int // slug -> latest active version number
 	}
 
-	cap0 := int64(0) // no caps; the counter still tracks bytes exactly
+	cap0 := int64(0) // no caps; the quota sum still tracks bytes exactly
 
 	// alice
 	aliceP1 := pasteFor("aaaa2345", "key:alice", "alice one", 100, now)
@@ -246,7 +246,7 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 	mustAppend(t, nodeA.repo, "bbbb2345", domain.KindHTML, "sha-bbbb2345-v3", 500, cap0, now.Add(2*time.Minute))
 
 	// bob, paste 2: v1 (700) then append v2 (200), then TOMBSTONE v1.
-	// A tombstoned version sheds its 700 bytes from the counter; the
+	// A tombstoned version sheds its 700 bytes from the quota sum; the
 	// version stays listable (flagged deleted). Latest active = 2.
 	bobTomb := pasteFor("bbbc2345", "key:bob", "bob tomb", 700, now)
 	mustInsert(t, nodeA.repo, bobTomb, cap0)
@@ -413,10 +413,10 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 	}
 	t.Logf("ASSERTION 1 PASSED: all %d pastes (+ their version sets) readable via BOTH nodes; forwarding works", len(allSlugs))
 
-	// --- ASSERTION 2: the quota counter survived its move. Read
+	// --- ASSERTION 2: the per-owner quota survived the move. Read
 	// SumActiveBytesByOwner for each identity via BOTH nodes; it must equal
-	// the BEFORE value exactly (the {id} shard, and its identity_bytes
-	// counter, may now live on B - the read forwards there). No under/over.
+	// the BEFORE value exactly (the {id} shard, and the identity_pastes
+	// entries it sums, may now live on B - the read forwards there).
 	for _, w := range wants {
 		gotA, errA := nodeA.repo.SumActiveBytesByOwner(w.identity, now)
 		gotB, errB := nodeB.repo.SumActiveBytesByOwner(w.identity, now)
@@ -425,14 +425,14 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 		}
 		if gotA != w.activeByte {
 			t.Fatalf("ASSERTION 2 FAILED (QUOTA MISCOUNT): %s active bytes via A = %d, want %d (before=%d). "+
-				"The identity_bytes counter did not survive the rebalance.", w.identity, gotA, w.activeByte, beforeBytes[w.identity])
+				"The per-owner quota sum did not survive the rebalance.", w.identity, gotA, w.activeByte, beforeBytes[w.identity])
 		}
 		if gotB != w.activeByte {
 			t.Fatalf("ASSERTION 2 FAILED (QUOTA MISCOUNT): %s active bytes via B (forwarded) = %d, want %d. "+
-				"The counter is wrong when read through the non-owning node.", w.identity, gotB, w.activeByte)
+				"The quota sum is wrong when read through the non-owning node.", w.identity, gotB, w.activeByte)
 		}
 	}
-	t.Logf("ASSERTION 2 PASSED: per-owner quota counters survived exactly via both nodes: %v", beforeBytes)
+	t.Logf("ASSERTION 2 PASSED: per-owner quota sums survived exactly via both nodes: %v", beforeBytes)
 
 	// --- ASSERTION 3: projections survived -> ListByOwner correct via both
 	// nodes. Same paste set, same latest-active-version per slug.

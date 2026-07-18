@@ -129,10 +129,6 @@ func shaleKeyRoom(appSlug domain.Slug, id domain.RoomID) []byte {
 	return []byte("rooms/" + appSlug.String() + "/" + id.String())
 }
 
-func shalePrefixAppRooms(appSlug domain.Slug) []byte {
-	return []byte("rooms/" + appSlug.String() + "/")
-}
-
 func shaleKeyRoomValue(appSlug domain.Slug, id domain.RoomID, key string) []byte {
 	return []byte("roomkv/" + appSlug.String() + "/" + id.String() + "/" + key)
 }
@@ -158,9 +154,9 @@ func shaleKeyRoomExpiry(t time.Time, appSlug domain.Slug, id domain.RoomID) []by
 	return []byte("roomexpiry/" + t.UTC().Format(expirySiteTimeFormat) + "/" + appSlug.String() + "/" + id.String())
 }
 
-// shaleKeyRoomBytes is the per-app room-byte counter (the per-app analogue of
-// identity_bytes/<id>). Co-shards with every room family on {app-slug}, so the
-// value write + the counter update are one single-shard CAS.
+// shaleKeyRoomBytes is the per-app room-byte counter. Co-shards with every
+// room family on {app-slug}, so the value write + the counter update are one
+// single-shard CAS.
 func shaleKeyRoomBytes(appSlug domain.Slug) []byte {
 	return []byte("roombytes/" + appSlug.String())
 }

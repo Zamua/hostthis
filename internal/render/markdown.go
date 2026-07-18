@@ -1,6 +1,10 @@
 // Package render turns user-uploaded source into safe-to-serve HTML.
 // Each renderer is a pure function - source bytes in, HTML bytes out.
 // No I/O, no caching, no global state.
+//
+// This package is NOT on the production serve path (the serve surface
+// renders client-side); it is retained for the render-md tool and the
+// markdown memory benchmark.
 package render
 
 import (
@@ -15,13 +19,6 @@ import (
 	"github.com/yuin/goldmark/parser"
 	gmhtml "github.com/yuin/goldmark/renderer/html"
 )
-
-// MarkdownRendererVersion is bumped whenever the rendering pipeline
-// changes in a way that would produce different bytes for the same
-// input (different sanitizer policy, different markdown extensions,
-// updated default styles, etc.). The storage layer can use this to
-// invalidate cached renders.
-const MarkdownRendererVersion = "md.v1"
 
 // Markdown renders source markdown into a self-contained sanitized
 // HTML document. The output is a complete <!doctype html> page with
