@@ -12,13 +12,15 @@ import (
 
 // ErrRoomDataFull is returned when accepting a write would push a single
 // room past its per-room byte or key-count cap. The prior value is left
-// intact. The service layer maps it to a 413.
-var ErrRoomDataFull = errors.New("storage: room is at its data cap")
+// intact. The service layer maps it to a 413. Alias of the domain-owned
+// sentinel (see internal/domain/errors.go).
+var ErrRoomDataFull = domain.ErrRoomDataFull
 
 // ErrAppRoomsFull is returned when accepting a room creation or a write
 // would push an APP's aggregate room bytes past the per-app cap. The
-// service layer maps it to a 507.
-var ErrAppRoomsFull = errors.New("storage: app room storage is at capacity")
+// service layer maps it to a 507. Alias of the domain-owned sentinel
+// (see internal/domain/errors.go).
+var ErrAppRoomsFull = domain.ErrAppRoomsFull
 
 // RoomKVRepo is the sqlite-backed implementation of the room
 // persistence tier. It stores rooms + their key-value namespaces with

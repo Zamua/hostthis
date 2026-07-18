@@ -355,7 +355,7 @@ func (sc *spliceClient) assertStateEquals(truth domain.RoomKV) {
 		if !ok {
 			sc.t.Fatalf("%s: spliced state missing key %q", sc.name, k)
 		}
-		if want := jsonValue(v); string(got) != string(want) {
+		if want := domain.RoomWireValue(v); string(got) != string(want) {
 			sc.t.Fatalf("%s: key %q spliced to %s, ground truth %s", sc.name, k, got, want)
 		}
 	}

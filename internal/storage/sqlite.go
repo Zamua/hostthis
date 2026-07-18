@@ -7,8 +7,9 @@ package storage
 import (
 	"database/sql"
 	"embed"
-	"errors"
 	"fmt"
+
+	"github.com/Zamua/hostthis/internal/domain"
 
 	// Pure-Go sqlite (no CGo) so binaries cross-compile cleanly into
 	// distroless containers.
@@ -99,5 +100,8 @@ func migrate(db *sql.DB) error {
 	return nil
 }
 
-// ErrNotFound is returned by any repo when a lookup misses.
-var ErrNotFound = errors.New("storage: not found")
+// ErrNotFound is returned by any repo when a lookup misses. It is an
+// alias of the domain-owned sentinel (the error vocabulary lives in
+// internal/domain; see docs/SPEC.md "The storage contract"), kept under
+// its historical name so existing errors.Is / == checks hold unchanged.
+var ErrNotFound = domain.ErrNotFound

@@ -505,7 +505,7 @@ func (r *ShaleRepo) insertSiteAuthoritative(s domain.Site, dedupedSize int, refs
 	// manifest row). The sha -> blob-id side-table lands on the row so the read
 	// path resolves a manifest sha to the blob id GetBlob needs.
 	row.FileBlobs = fileBlobsFromRefs(refs)
-	return r.runAuthoritative(siteKey, refs, func(tx shaleKVTx, bind func() error) error {
+	return translateCrossShard(r.runAuthoritative(siteKey, refs, func(tx shaleKVTx, bind func() error) error {
 		// Collision check, both directions. A found site OR paste is
 		// ErrSlugTaken; the ExpectAbsent read-checks make a concurrent insert
 		// of the same slug conflict.
@@ -527,7 +527,24 @@ func (r *ShaleRepo) insertSiteAuthoritative(s domain.Site, dedupedSize int, refs
 		}
 		// Bind every staged file's pointer, co-committed with the manifest.
 		return bind()
-	})
+	}))
+}
+
+// translateCrossShard maps shale's client-side cross-shard guard sentinel
+// (backend.ErrCrossShard - fired inside the tx buffer at the offending op,
+// before any commit, when a buffered key routes to a different shard than
+// the pinned one) into the domain vocabulary the deploy service checks
+// (domain.ErrCrossShardDeploy). This is the DDD boundary translation:
+// the service layer stays backend-agnostic - it never imports a shale
+// package - and matches the domain sentinel instead. Both sentinels stay
+// in the wrap chain (%w twice) so errors.Is holds for either and the
+// operator log keeps the full original text. Any other error passes
+// through untouched.
+func translateCrossShard(err error) error {
+	if err != nil && errors.Is(err, backend.ErrCrossShard) {
+		return fmt.Errorf("%w: %w", domain.ErrCrossShardDeploy, err)
+	}
+	return err
 }
 
 // confirmSiteInsert writes the value-bearing identity_sites/<id>/<slug>

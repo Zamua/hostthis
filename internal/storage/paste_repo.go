@@ -17,12 +17,14 @@ import (
 // an object-store quota"). The blob store surfaces it; the service layer
 // translates it into a graceful "try again later" response. The metadata
 // repos no longer run a service-wide byte scan, so this never originates
-// from a quota pre-check on the write path.
-var ErrServiceFull = errors.New("storage: service is at capacity")
+// from a quota pre-check on the write path. Alias of the domain-owned
+// sentinel (see internal/domain/errors.go).
+var ErrServiceFull = domain.ErrServiceFull
 
 // ErrOverUserQuota is returned when accepting a write would push an
-// identity's active bytes past its per-user cap.
-var ErrOverUserQuota = errors.New("storage: would exceed user quota")
+// identity's active bytes past its per-user cap. Alias of the
+// domain-owned sentinel (see internal/domain/errors.go).
+var ErrOverUserQuota = domain.ErrOverUserQuota
 
 // PasteRepo is the sqlite-backed implementation of paste persistence.
 type PasteRepo struct {
@@ -604,7 +606,8 @@ func scanPasteWithLatest(s scanner) (domain.Paste, error) {
 type scanner interface{ Scan(dest ...any) error }
 
 // ErrSlugTaken is returned by Insert when the chosen slug already exists.
-var ErrSlugTaken = errors.New("storage: slug already taken")
+// Alias of the domain-owned sentinel (see internal/domain/errors.go).
+var ErrSlugTaken = domain.ErrSlugTaken
 
 func isUniqueViolation(err error) bool {
 	if err == nil {

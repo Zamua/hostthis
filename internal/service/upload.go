@@ -10,12 +10,10 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/storage"
 )
 
 // PasteRepo is the persistence interface the upload service needs.
@@ -203,8 +201,8 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		p.Slug = domain.NewRandomSlug()
 		err := u.Repo.InsertWithQuotaCheck(context.Background(), p, int64(domain.UserQuotaBytes), now)
-		switch {
-		case err == nil:
+		switch class, terr := classifyCommitErr(err); class {
+		case commitOK:
 			if u.SyncBlob {
 				// Benchmark sync path: row already committed as ready; write
 				// the blob INLINE (on the ack path), no pending/MarkReady flip.
@@ -219,18 +217,15 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 			// and finish the blob write in the background.
 			u.startFinalize(p.Slug, staged.SHA, staged.Body)
 			return Result{Paste: p}, nil
-		case errors.Is(err, storage.ErrServiceFull):
-			return Result{}, ErrServiceFull
-		case errors.Is(err, storage.ErrOverUserQuota):
-			return Result{}, ErrOverQuota
-		case isSlugTaken(err):
+		case commitSlugTaken:
 			// A silent remint would make this class invisible; each retry
 			// logs once (slug + attempt) so a remint burst shows up in the
 			// service log. Semantics unchanged: same budget, same re-mint.
 			u.logf("upload: slug %s taken, re-minting (attempt %d/%d)", p.Slug, attempt, maxRetries)
 			continue
 		default:
-			return Result{}, err
+			// The translated triad sentinel, or the raw error verbatim.
+			return Result{}, terr
 		}
 	}
 	return Result{}, SlugTakenErr
@@ -274,22 +269,18 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 		if err != nil {
 			// A blob Put rejected by the object store's bucket quota surfaces
 			// storage.ErrServiceFull (the durable total-bytes ceiling).
-			if errors.Is(err, storage.ErrServiceFull) {
-				return Result{}, ErrServiceFull
+			if class, terr := classifyCommitErr(err); class != commitOther {
+				return Result{}, terr
 			}
 			return Result{}, fmt.Errorf("blob write: %w", err)
 		}
 		err = u.Blob.Commit(ctx, []BlobHandle{handle}, func(ctx context.Context) error {
 			return u.Repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
 		})
-		switch {
-		case err == nil:
+		switch class, terr := classifyCommitErr(err); class {
+		case commitOK:
 			return Result{Paste: p}, nil
-		case errors.Is(err, storage.ErrServiceFull):
-			return Result{}, ErrServiceFull
-		case errors.Is(err, storage.ErrOverUserQuota):
-			return Result{}, ErrOverQuota
-		case isSlugTaken(err):
+		case commitSlugTaken:
 			// Re-mint the slug and re-stage so the new ref co-routes to the
 			// new slug's shard; the prior staged object ages out via the
 			// orphan sweep. Logged so a remint burst (which strands staged
@@ -297,7 +288,8 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 			u.logf("upload: slug %s taken, re-minting + re-staging (attempt %d/%d)", p.Slug, attempt, maxRetries)
 			continue
 		default:
-			return Result{}, err
+			// The translated triad sentinel, or the raw error verbatim.
+			return Result{}, terr
 		}
 	}
 	return Result{}, SlugTakenErr
@@ -351,14 +343,11 @@ func (u *Upload) finalize(slug domain.Slug, sha string, body []byte) {
 	}
 }
 
-// isSlugTaken returns true if err is any flavor of "slug already
-// exists in the repo." We sniff the error message to avoid the
-// service layer importing the storage package directly - that would
-// invert the dependency direction (service shouldn't know which
-// concrete repo it's talking to).
+// isSlugTaken reports whether err is the slug-collision sentinel
+// (domain.ErrSlugTaken, aliased as storage.ErrSlugTaken), matched by
+// identity through any wrapping. Identity, not message text: an
+// unrelated error whose text mentions "slug" must surface verbatim,
+// not silently burn the remint budget.
 func isSlugTaken(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "slug")
+	return errors.Is(err, domain.ErrSlugTaken)
 }

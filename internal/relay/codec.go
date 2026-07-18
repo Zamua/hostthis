@@ -65,20 +65,19 @@ type durableEnvelope struct {
 }
 
 // encodeSnapshot builds the late-join snapshot frame from a room KV. The
-// State object embeds each value as raw JSON when it parses as JSON, else
-// as a JSON string of the verbatim bytes - byte-for-byte the encoding the
-// HTTP scan handler uses, so the snapshot and a cold-start GET are
-// interchangeable on the client.
+// State object embeds each value via domain.RoomWireValue - the SAME
+// shared encoder the HTTP scan handler uses, byte-for-byte, so the
+// snapshot and a cold-start GET are interchangeable on the client.
 func encodeSnapshot(kv domain.RoomKV) Frame {
 	state := make(map[string]json.RawMessage, kv.KeyCount())
 	for k, v := range kv.Values {
-		state[k] = jsonValue(v)
+		state[k] = domain.RoomWireValue(v)
 	}
 	env := snapshotEnvelope{Type: TypeSnapshot, Seq: kv.Seq, State: state}
 	data, err := json.Marshal(env)
 	if err != nil {
-		// Unreachable: every value is valid raw JSON (jsonValue guarantees
-		// it). Fall back to an empty snapshot rather than panic.
+		// Unreachable: every value is valid raw JSON (RoomWireValue
+		// guarantees it). Fall back to an empty snapshot rather than panic.
 		data = []byte(`{"type":"snapshot","seq":0,"state":{}}`)
 	}
 	return Frame{Binary: false, Data: data}
@@ -92,7 +91,7 @@ func encodeSnapshot(kv domain.RoomKV) Frame {
 // subscriber (local or on a peer pod) orders, de-duplicates, and
 // gap-detects by.
 func EncodePut(seq uint64, key string, val []byte) Frame {
-	env := durableEnvelope{Type: TypePut, Seq: seq, Key: key, Value: jsonValue(val)}
+	env := durableEnvelope{Type: TypePut, Seq: seq, Key: key, Value: domain.RoomWireValue(val)}
 	data, err := json.Marshal(env)
 	if err != nil {
 		return Frame{}
@@ -119,9 +118,10 @@ func encodeReconnect() Frame {
 
 // MaxDurableFrameBytes bounds the largest frame EncodePut can produce for
 // a value of at most maxValueBytes. It is the size the peer receiver's
-// defense-in-depth cap must admit: jsonValue encodes a non-JSON value as
-// a JSON string, and worst-case escaping (\u00XX per control byte)
-// inflates it up to 6x, plus the quotes and the envelope (type, seq, key).
+// defense-in-depth cap must admit: domain.RoomWireValue encodes a
+// non-JSON value as a JSON string, and worst-case escaping (\u00XX per
+// control byte) inflates it up to 6x, plus the quotes and the envelope
+// (type, seq, key).
 // The client-socket cap (Limits.MaxMessageBytes) deliberately does NOT
 // apply here - it bounds ephemeral frames from untrusted client sockets,
 // while durable mirrors originate from the HTTP PUT path whose value cap
@@ -129,19 +129,4 @@ func encodeReconnect() Frame {
 func MaxDurableFrameBytes(maxValueBytes int) int64 {
 	const envelopeHeadroom = 4 << 10 // type + seq + escaped key + JSON syntax
 	return int64(6*maxValueBytes) + envelopeHeadroom
-}
-
-// jsonValue returns v as raw JSON when it already parses as JSON, else as
-// a JSON string of the verbatim bytes. This mirrors the HTTP scan
-// handler's jsonValue so a relay snapshot/mirror encodes a value
-// identically to the HTTP KV surface.
-func jsonValue(v []byte) json.RawMessage {
-	if len(v) > 0 && json.Valid(v) {
-		return json.RawMessage(v)
-	}
-	encoded, err := json.Marshal(string(v))
-	if err != nil {
-		return json.RawMessage("null")
-	}
-	return json.RawMessage(encoded)
 }
