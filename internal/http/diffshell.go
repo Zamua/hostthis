@@ -47,7 +47,7 @@ func diffShellHTML() []byte {
 	return []byte(strings.ReplaceAll(string(b), "__VER__", diffShellVersion))
 }
 
-// diffShellAssets is the whitelist of asset names serveDiffAsset will
+// diffShellAssets is the whitelist of asset names serveAsset will
 // serve, mapped to their Content-Type. Anything not in this set 404s, so
 // no path traversal or arbitrary embedded-file disclosure is possible.
 var diffShellAssets = map[string]string{
