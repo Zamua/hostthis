@@ -113,7 +113,12 @@ type identityPasteRow struct {
 // backend.ErrNotFound to the storage sentinel the callers + conformance
 // suite expect).
 func (r *ShaleRepo) getJSON(key []byte, out any) error {
-	raw, err := r.cluster.Get(key)
+	var raw []byte
+	err := retryAcquiring(readRetry, func() error {
+		var gerr error
+		raw, gerr = r.cluster.Get(key)
+		return gerr
+	})
 	if err != nil {
 		if errors.Is(err, backend.ErrNotFound) {
 			return ErrNotFound
@@ -139,7 +144,12 @@ func (r *ShaleRepo) getJSON(key []byte, out any) error {
 // getJSON it strips the LWW envelope cluster.Get leaves on at R=1 / multi
 // (idempotent for raw values) so callers see the payload, not the wrapper.
 func (r *ShaleRepo) getRaw(key []byte) ([]byte, error) {
-	raw, err := r.cluster.Get(key)
+	var raw []byte
+	err := retryAcquiring(readRetry, func() error {
+		var gerr error
+		raw, gerr = r.cluster.Get(key)
+		return gerr
+	})
 	if err != nil {
 		if errors.Is(err, backend.ErrNotFound) {
 			return nil, nil
@@ -157,7 +167,22 @@ func (r *ShaleRepo) getRaw(key []byte) ([]byte, error) {
 // from the OWNING shard, via the routed cluster.ScanPrefix. Used for
 // single-shard list/prefix queries (a paste's versions, an owner's
 // pastes, a subnet's keygate rows). For cross-shard scans use aggregate.
+// The WHOLE scan is the retry unit, not just the ScanPrefix call: a unit can
+// go mid-handoff partway through iteration, so an acquiring refusal surfaces
+// from it.Next() as readily as from the open. Retrying the open alone would
+// leave the mid-stream case unretried, and a half-consumed iterator is not a
+// usable answer, so a retry restarts the scan from the beginning.
 func (r *ShaleRepo) scanPrefix(prefix []byte) ([]scanItem, error) {
+	var out []scanItem
+	err := retryAcquiring(readRetry, func() error {
+		var serr error
+		out, serr = r.scanPrefixOnce(prefix)
+		return serr
+	})
+	return out, err
+}
+
+func (r *ShaleRepo) scanPrefixOnce(prefix []byte) ([]scanItem, error) {
 	it, err := r.cluster.ScanPrefix(prefix)
 	if err != nil {
 		return nil, fmt.Errorf("scan prefix %s: %w", prefix, err)
@@ -195,7 +220,27 @@ func (r *ShaleRepo) scanPrefix(prefix []byte) ([]scanItem, error) {
 // identical so last-writer-wins on the map is fine). Used for the three
 // inherently cross-shard background operations: the expiry scan, the
 // referenced-blob set, and keygate prune / counting.
+// Retried as a WHOLE CALL, never per-peer: a refused peer's slice is absent
+// from every other peer's result, so a partial fan-out is not a usable answer
+// (shale guarantees a refusal is raised rather than silently skipped, on both
+// the AggregateResult.Err channel and through the scan fn). backgroundRetry
+// rather than readRetry because all three consumers - the expiry sweep, the
+// referenced-blob set, keygate prune - are background, so no request deadline
+// bounds them and they can afford to be patient. That patience is bought for
+// the blob-GC consumer specifically: it acts on ABSENCE (deleting any blob NOT
+// in the referenced set), so consuming a truncated set deletes live data,
+// whereas the other two merely under-report.
 func (r *ShaleRepo) aggregatePrefix(prefix []byte) ([]scanItem, error) {
+	var out []scanItem
+	err := retryAcquiring(backgroundRetry, func() error {
+		var aerr error
+		out, aerr = r.aggregatePrefixOnce(prefix)
+		return aerr
+	})
+	return out, err
+}
+
+func (r *ShaleRepo) aggregatePrefixOnce(prefix []byte) ([]scanItem, error) {
 	results := r.cluster.Aggregate(func(b backend.Backend) any {
 		it, err := b.ScanPrefix(prefix)
 		if err != nil {
