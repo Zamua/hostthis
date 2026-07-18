@@ -164,10 +164,11 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 	handle, err := m.Blob.Stage(ctx, string(slug), staged.SHA, staged.Body)
 	if err != nil {
 		// A blob Put rejected by the object store's bucket quota surfaces
-		// storage.ErrServiceFull (the durable total-bytes ceiling). Translate
-		// it into the graceful "service is at capacity" response.
-		if errors.Is(err, storage.ErrServiceFull) {
-			return UpdateResult{}, ErrServiceFull
+		// storage.ErrServiceFull (the durable total-bytes ceiling); the
+		// shared classifier translates it into the graceful "service is at
+		// capacity" response.
+		if class, terr := classifyCommitErr(err); class != commitOther {
+			return UpdateResult{}, terr
 		}
 		return UpdateResult{}, fmt.Errorf("blob write: %w", err)
 	}
@@ -178,14 +179,8 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 		return aerr
 	})
 	if err != nil {
-		switch {
-		case errors.Is(err, storage.ErrServiceFull):
-			return UpdateResult{}, ErrServiceFull
-		case errors.Is(err, storage.ErrOverUserQuota):
-			return UpdateResult{}, ErrOverQuota
-		default:
-			return UpdateResult{}, err
-		}
+		_, terr := classifyCommitErr(err)
+		return UpdateResult{}, terr
 	}
 	p, err := m.Repo.Get(slug) // re-read so caller sees updated UpdatedAt + ExpiresAt
 	if err != nil {

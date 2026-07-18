@@ -38,7 +38,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -254,16 +253,13 @@ func conformDuplicateSlug(t *testing.T, r conformanceRepo) {
 	if err == nil {
 		t.Fatalf("duplicate insert should error")
 	}
-	// The upload service sniffs err.Error() for "slug" to know it should
-	// retry with a fresh slug; the message must contain it. (Pins the
-	// contract isSlugTaken in service/upload.go depends on.)
-	if !containsSlug(err) {
-		t.Fatalf("duplicate-slug error message must contain %q, got %q", "slug", err.Error())
+	// The upload service matches the slug-taken sentinel with errors.Is
+	// to know it should retry with a fresh slug; every backend must
+	// surface it, bare or wrapped. (Pins the contract isSlugTaken in
+	// service/upload.go depends on.)
+	if !errors.Is(err, storage.ErrSlugTaken) {
+		t.Fatalf("duplicate-slug error must be storage.ErrSlugTaken (errors.Is), got %v", err)
 	}
-}
-
-func containsSlug(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "slug")
 }
 
 // --- contract: quota -------------------------------------------------

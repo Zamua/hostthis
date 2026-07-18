@@ -601,8 +601,8 @@ func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conform
 	if err == nil {
 		t.Fatalf("site deploy onto a paste's slug must be rejected")
 	}
-	if !containsSlug(err) {
-		t.Fatalf("site-vs-paste collision error must contain %q, got %q", "slug", err.Error())
+	if !errors.Is(err, storage.ErrSlugTaken) {
+		t.Fatalf("site-vs-paste collision error must be storage.ErrSlugTaken (errors.Is), got %v", err)
 	}
 
 	// A site owns "col22345"; a paste insert onto the same slug is rejected.
@@ -611,8 +611,8 @@ func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conform
 	if perr == nil {
 		t.Fatalf("paste insert onto a site's slug must be rejected")
 	}
-	if !containsSlug(perr) {
-		t.Fatalf("paste-vs-site collision error must contain %q, got %q", "slug", perr.Error())
+	if !errors.Is(perr, storage.ErrSlugTaken) {
+		t.Fatalf("paste-vs-site collision error must be storage.ErrSlugTaken (errors.Is), got %v", perr)
 	}
 
 	// Two sites cannot share a slug either.
@@ -621,8 +621,8 @@ func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conform
 	if derr == nil {
 		t.Fatalf("duplicate site slug must be rejected")
 	}
-	if !containsSlug(derr) {
-		t.Fatalf("duplicate-site-slug error must contain %q, got %q", "slug", derr.Error())
+	if !errors.Is(derr, storage.ErrSlugTaken) {
+		t.Fatalf("duplicate-site-slug error must be storage.ErrSlugTaken (errors.Is), got %v", derr)
 	}
 }
 

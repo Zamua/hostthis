@@ -3,6 +3,8 @@ package service
 import (
 	"errors"
 	"time"
+
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
 // KeyGateRepo is the persistence interface backing the per-IP-subnet
@@ -155,11 +157,12 @@ func (g *KeyGate) PruneOldRows(now time.Time) (int, error) {
 	return g.Repo.DeleteFirstSeenOlderThan(cutoff)
 }
 
-// isStorageRateLimitErr matches storage.ErrTooManyNewKeys without
-// importing storage into the service layer's stable signature surface.
+// isStorageRateLimitErr reports whether err is the keygate rate-limit
+// sentinel (domain.ErrTooManyNewKeys, aliased as
+// storage.ErrTooManyNewKeys), matched by identity through any
+// wrapping. Identity, not message text: exact-string comparison
+// demoted a wrapped rate-limit error to a generic failure, losing the
+// enriched Sybil refusal.
 func isStorageRateLimitErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	return err.Error() == "storage: too many new keys from this network"
+	return errors.Is(err, domain.ErrTooManyNewKeys)
 }

@@ -2972,14 +2972,28 @@ and the same accounting regardless of which backend is wired. Adding a
 backend is only safe if the new backend preserves that observable
 contract.
 
+The sentinel error vocabulary those contracts speak (not-found,
+slug-taken, over-user-quota, service-full, room-data-full,
+app-rooms-full, too-many-new-keys) is OWNED BY THE DOMAIN LAYER
+(`internal/domain`): the sentinels are business outcomes every layer
+must agree on, not backend internals. The storage package re-exports
+each sentinel under its historical `storage.Err...` name as an alias of
+the same error value, so `errors.Is` identity holds whichever name a
+caller matches against. The message text is stable contract too (it
+keeps the historical `storage:` prefix): sentinel messages appear in
+user-facing output, so moving the definitions must not change a byte of
+them.
+
 **Observable contract (what every backend must agree on).** These
 behaviors are expressed in terms of inputs and observable outputs:
 
 - **Insert / Get.** A successful `InsertWithQuotaCheck` makes the paste
   readable by `Get` with the same field values; a missing slug returns
-  the not-found sentinel; a duplicate slug returns an error whose
-  message contains "slug" (the upload service sniffs the message to
-  retry with a fresh slug).
+  the not-found sentinel; a duplicate slug returns the slug-taken
+  sentinel - bare or `%w`-wrapped, matched by `errors.Is` identity, on
+  which the upload service retries with a fresh slug. Message text is
+  never load-bearing for classification: an unrelated error whose text
+  mentions "slug" must surface verbatim, not trigger a retry.
 - **Quota (strict, never exceeded).** `InsertWithQuotaCheck` and
   `AppendVersionWithQuotaCheck` reject (over-quota sentinel) when
   accepting the write would push the identity's active bytes above the

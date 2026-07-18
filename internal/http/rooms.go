@@ -202,7 +202,7 @@ func (s *Server) scanRoom(w http.ResponseWriter, r *http.Request, appSlug domain
 	// request on join.
 	out := make(map[string]json.RawMessage, kv.KeyCount())
 	for k, v := range kv.Values {
-		out[k] = jsonValue(v)
+		out[k] = domain.RoomWireValue(v)
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -224,7 +224,7 @@ func (s *Server) getRoomValue(w http.ResponseWriter, r *http.Request, appSlug do
 	// app's opaque bytes are never mislabeled as something a browser
 	// would execute.
 	w.Header().Set("Cache-Control", "no-store")
-	if isJSON(val) {
+	if domain.RoomValueIsJSON(val) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	} else {
 		w.Header().Set("Content-Type", "application/octet-stream")
@@ -397,28 +397,4 @@ func ipSubnet(ip net.IP) string {
 		return v4.Mask(net.CIDRMask(24, 32)).String() + "/24"
 	}
 	return ip.Mask(net.CIDRMask(48, 128)).String() + "/48"
-}
-
-// jsonValue returns v as raw JSON when it already parses as JSON (so an
-// app that stored a JSON value gets it back as structured JSON in a
-// scan), else as a JSON string of the verbatim bytes (so opaque bytes
-// round-trip without corrupting the scan's JSON object).
-func jsonValue(v []byte) json.RawMessage {
-	if isJSON(v) {
-		return json.RawMessage(v)
-	}
-	encoded, err := json.Marshal(string(v))
-	if err != nil {
-		// Unreachable for any []byte; fall back to a JSON null.
-		return json.RawMessage("null")
-	}
-	return json.RawMessage(encoded)
-}
-
-// isJSON reports whether b is syntactically valid JSON.
-func isJSON(b []byte) bool {
-	if len(b) == 0 {
-		return false
-	}
-	return json.Valid(b)
 }

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
 // KeyGateRepo backs the Sybil rate limit - tracks first-seen pairs
@@ -126,8 +128,9 @@ func (r *KeyGateRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 }
 
 // ErrTooManyNewKeys is returned by AdmitNewKey when the subnet has
-// hit its fresh-key quota for the window.
-var ErrTooManyNewKeys = errors.New("storage: too many new keys from this network")
+// hit its fresh-key quota for the window. Alias of the domain-owned
+// sentinel (see internal/domain/errors.go).
+var ErrTooManyNewKeys = domain.ErrTooManyNewKeys
 
 // txSerializable asks the modernc sqlite driver to issue
 // BEGIN IMMEDIATE - exclusive write lock at transaction start so
