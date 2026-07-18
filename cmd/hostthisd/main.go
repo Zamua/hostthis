@@ -253,7 +253,11 @@ func main() {
 		LandingHTML: landing,
 		ApexDomain:  *apexDomain,
 		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),
-		Logf:        logger.Printf,
+		// Readiness gates /readyz on the metadata backend's predicate (the
+		// shale mount floor); nil on backends with no mount concept, which
+		// the server reads as always-ready. /healthz stays pure liveness.
+		Readiness: metadata.Readiness,
+		Logf:      logger.Printf,
 	}
 	if siteRepo != nil {
 		httpServer.Sites = siteRepo

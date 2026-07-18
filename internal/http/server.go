@@ -60,7 +60,12 @@ type Server struct {
 	// X-Backend-Color response header on /healthz so operators can verify
 	// which backend is responding. Empty for single-replica deploys.
 	Color string
-	Now   func() time.Time
+	// Readiness gates /readyz (docs/SPEC.md "Readiness vs liveness"): the
+	// composition root wires the metadata backend's readiness predicate
+	// (the shale mount floor). Optional; nil = always ready (backends with
+	// no mount concept - their open failures already fail startup).
+	Readiness ReadinessProber
+	Now       func() time.Time
 	// Logf, when set, receives one warn-level line per 5xx served by the
 	// paste/site read path (docs/SPEC.md "5xx observability on the read
 	// surface"): the slug + the underlying error, so a read 500 is always
@@ -101,6 +106,16 @@ func (s *Server) Handler() http.Handler {
 		// here means the backend is healthy enough to serve.
 		if r.URL.Path == "/healthz" {
 			s.serveHealthz(w, r)
+			return
+		}
+		// 0b. Readiness endpoint - same any-Host, un-gated posture as
+		// /healthz, but a DIFFERENT question: /healthz is liveness (process
+		// up; restart signal), /readyz applies the metadata backend's
+		// readiness predicate (the shale mount floor) so a rollout stalls
+		// on a pod that cannot mount its storage instead of replacing the
+		// fleet. See docs/SPEC.md "Readiness vs liveness".
+		if r.URL.Path == "/readyz" {
+			s.serveReadyz(w, r)
 			return
 		}
 		// 1. Subdomain mode: Host like "<slug>.<apex>".
