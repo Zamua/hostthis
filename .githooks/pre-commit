@@ -24,10 +24,25 @@ if [ -z "$staged_go" ]; then
 fi
 
 # 1. gofmt: list any staged file whose formatting is off.
-unformatted=$(printf '%s\n' "$staged_go" | xargs gofmt -l 2>/dev/null || true)
-if [ -n "$unformatted" ]; then
-  printf 'pre-commit: the following files are not gofmt-clean:\n%s\n' "$unformatted" >&2
-  printf '\nRun:\n  gofmt -w %s\n' "$unformatted" >&2
+#    Two OUTCOMES that must not be conflated. gofmt -l prints unformatted file
+#    NAMES on stdout and exits 0; on a file it cannot PARSE it prints a
+#    diagnostic on stderr and exits non-zero. The previous form
+#    ('2>/dev/null || true') swallowed both the message and the status, so a
+#    syntactically broken file produced empty output and read as gofmt-clean -
+#    the check passed precisely when the file was most broken. Verified: a file
+#    containing 'func broken( {' sailed through.
+set +e
+gofmt_out=$(printf '%s\n' "$staged_go" | xargs gofmt -l 2>&1)
+gofmt_status=$?
+set -e
+
+if [ "$gofmt_status" -ne 0 ]; then
+  printf 'pre-commit: gofmt could not parse a staged file (a syntax error, not a formatting issue):\n%s\n' "$gofmt_out" >&2
+  exit 1
+fi
+if [ -n "$gofmt_out" ]; then
+  printf 'pre-commit: the following files are not gofmt-clean:\n%s\n' "$gofmt_out" >&2
+  printf '\nRun:\n  gofmt -w %s\n' "$gofmt_out" >&2
   exit 1
 fi
 
