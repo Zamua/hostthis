@@ -54,10 +54,22 @@ var (
 
 	// backgroundRetry is for the cross-shard background scans (expiry sweep,
 	// referenced-blob set, keygate prune). They are NOT request-path, so no
-	// outer deadline constrains them and they can afford to be patient. A
-	// retried background fan-out costs some seconds; the alternative on the
-	// blob-GC consumer is acting on an incomplete answer.
-	backgroundRetry = retryPolicy{attempts: 3, backoff: 500 * time.Millisecond}
+	// outer deadline constrains them and they can afford to be patient.
+	//
+	// The span is set by MEASUREMENT, not by feel. The first version of this
+	// (3 attempts, 500ms base) spanned ~1.5s and was observed exhausting on
+	// EVERY background scan during a rolling deploy, because a node holds its
+	// positions unmounted for the length of the handoff, measured at 17-21s.
+	// A retry an order of magnitude shorter than the window it exists to
+	// cover is not patience, it just postpones the same failure by 1.5s. So
+	// the span must exceed a realistic handoff: 6 attempts at a 1s base gives
+	// 1+2+4+8+16 = 31s of backoff. TestBackgroundRetryPolicy_CoversAHandoff
+	// pins that against the observed window.
+	//
+	// Blocking a periodic background job for ~30s is free: none of the three
+	// consumers is latency-sensitive, and the alternative is the scan failing
+	// and waiting for its next tick anyway.
+	backgroundRetry = retryPolicy{attempts: 6, backoff: time.Second}
 )
 
 // retryAcquiring runs fn, retrying ONLY while it refuses with
