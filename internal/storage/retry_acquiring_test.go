@@ -5,6 +5,8 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,7 +22,7 @@ import (
 func TestRetryAcquiring_SucceedsFirstTry_NoSleep(t *testing.T) {
 	calls := 0
 	start := time.Now()
-	err := retryAcquiring(fastRetry, func() error {
+	err := retryAcquiring(fastRetry, nil, "test", func() error {
 		calls++
 		return nil
 	})
@@ -39,7 +41,7 @@ func TestRetryAcquiring_SucceedsFirstTry_NoSleep(t *testing.T) {
 
 func TestRetryAcquiring_RetriesAcquiringThenSucceeds(t *testing.T) {
 	calls := 0
-	err := retryAcquiring(fastRetry, func() error {
+	err := retryAcquiring(fastRetry, nil, "test", func() error {
 		calls++
 		if calls == 1 {
 			return fmt.Errorf("get k: %w", cluster.ErrAcquiring)
@@ -60,7 +62,7 @@ func TestRetryAcquiring_RetriesAcquiringThenSucceeds(t *testing.T) {
 func TestRetryAcquiring_MatchesThroughWrapping(t *testing.T) {
 	calls := 0
 	deep := fmt.Errorf("aggregate p: %w", fmt.Errorf("leg 3: %w", cluster.ErrAcquiring))
-	_ = retryAcquiring(fastRetry, func() error {
+	_ = retryAcquiring(fastRetry, nil, "test", func() error {
 		calls++
 		if calls < 2 {
 			return deep
@@ -87,7 +89,7 @@ func TestRetryAcquiring_DoesNotRetryNonAcquiring(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
-			err := retryAcquiring(fastRetry, func() error {
+			err := retryAcquiring(fastRetry, nil, "test", func() error {
 				calls++
 				return tc.err
 			})
@@ -107,7 +109,7 @@ func TestRetryAcquiring_DoesNotRetryNonAcquiring(t *testing.T) {
 // slow one, which is the same trap as gating on bare Unavailable.
 func TestRetryAcquiring_IsBounded(t *testing.T) {
 	calls := 0
-	err := retryAcquiring(fastRetry, func() error {
+	err := retryAcquiring(fastRetry, nil, "test", func() error {
 		calls++
 		return fmt.Errorf("get k: %w", cluster.ErrAcquiring)
 	})
@@ -150,3 +152,51 @@ func TestBackgroundRetryPolicy_IsMorePatientThanRead(t *testing.T) {
 }
 
 var fastRetry = retryPolicy{attempts: 3, backoff: time.Millisecond}
+
+// The retry must be OBSERVABLE. Unobserved, a retry that fires constantly
+// (window wider than believed) and one that never fires (sentinel silently
+// not matching, e.g. an upstream call-site regression) look identical from
+// outside: both are a quiet, green deploy. This pins that a real retry says
+// so exactly once per retry, and that the hot path stays silent.
+func TestRetryAcquiring_LogsOnlyWhenItActuallyRetries(t *testing.T) {
+	t.Run("success path is silent", func(t *testing.T) {
+		var buf strings.Builder
+		lg := log.New(&buf, "", 0)
+		_ = retryAcquiring(fastRetry, lg, "get", func() error { return nil })
+		if buf.Len() != 0 {
+			t.Fatalf("healthy reads must not log; got %q", buf.String())
+		}
+	})
+
+	t.Run("non-acquiring failure is silent", func(t *testing.T) {
+		var buf strings.Builder
+		lg := log.New(&buf, "", 0)
+		_ = retryAcquiring(fastRetry, lg, "get", func() error { return ErrNotFound })
+		if buf.Len() != 0 {
+			t.Fatalf("a non-retryable error must not log a retry; got %q", buf.String())
+		}
+	})
+
+	t.Run("each retry logs once", func(t *testing.T) {
+		var buf strings.Builder
+		lg := log.New(&buf, "", 0)
+		calls := 0
+		_ = retryAcquiring(fastRetry, lg, "aggregate", func() error {
+			calls++
+			return fmt.Errorf("leg: %w", cluster.ErrAcquiring)
+		})
+		got := strings.Count(buf.String(), "\n")
+		if want := fastRetry.attempts - 1; got != want {
+			t.Fatalf("want %d retry lines for %d attempts, got %d: %q", want, fastRetry.attempts, got, buf.String())
+		}
+		if !strings.Contains(buf.String(), "aggregate") {
+			t.Fatalf("retry line must name the operation so a spike is attributable; got %q", buf.String())
+		}
+	})
+
+	t.Run("nil logger is safe", func(t *testing.T) {
+		if err := retryAcquiring(fastRetry, nil, "get", func() error { return nil }); err != nil {
+			t.Fatalf("nil logger must not panic or error: %v", err)
+		}
+	})
+}
