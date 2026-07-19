@@ -4,6 +4,7 @@ package storage
 
 import (
 	"errors"
+	"log"
 	"time"
 
 	"github.com/Zamua/shale/pkg/cluster"
@@ -59,12 +60,27 @@ var (
 	backgroundRetry = retryPolicy{attempts: 3, backoff: 500 * time.Millisecond}
 )
 
-// retryAcquiring runs op, retrying ONLY while it refuses with
+// retryAcquiring runs fn, retrying ONLY while it refuses with
 // cluster.ErrAcquiring, up to p.attempts total calls with exponential
 // backoff. Any other error (and success) returns immediately, unchanged, so
 // callers keep their existing error handling. On exhaustion the last
 // acquiring error is returned so the caller still sees the real reason.
-func retryAcquiring(p retryPolicy, op func() error) error {
+//
+// A retry is logged ONLY when one actually happens, never on the success path, so a
+// healthy read stays silent and the log volume is itself the signal.
+//
+// This exists because the two ways this can be wrong are indistinguishable
+// from outside without it. If the handoff window is wider than believed the
+// retry fires constantly; if the sentinel silently stops matching (an
+// upstream call-site regression, a reason dropped somewhere in the chain)
+// the retry never fires at all. BOTH present as a quiet, green deploy. The
+// log line is what separates "working and rarely needed" from "wired up
+// wrong", and it is the only way to report a real firing upstream.
+//
+// op names the operation rather than the key: a spike needs to be
+// attributable to a call path, and keys carry user content that has no
+// business in operator logs.
+func retryAcquiring(p retryPolicy, lg *log.Logger, op string, fn func() error) error {
 	if p.attempts < 1 {
 		p.attempts = 1
 	}
@@ -74,8 +90,12 @@ func retryAcquiring(p retryPolicy, op func() error) error {
 			// Sleep only between attempts: a succeeding op must never pay
 			// backoff, because that would tax every healthy read.
 			time.Sleep(p.backoff << (attempt - 1))
+			if lg != nil {
+				lg.Printf("shale: %s refused with the acquiring-window signal; retry %d/%d (a unit is mid-handoff)",
+					op, attempt, p.attempts-1)
+			}
 		}
-		if err = op(); err == nil {
+		if err = fn(); err == nil {
 			return nil
 		}
 		if !errors.Is(err, cluster.ErrAcquiring) {

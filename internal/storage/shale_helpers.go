@@ -114,7 +114,7 @@ type identityPasteRow struct {
 // suite expect).
 func (r *ShaleRepo) getJSON(key []byte, out any) error {
 	var raw []byte
-	err := retryAcquiring(readRetry, func() error {
+	err := retryAcquiring(readRetry, r.repoLog(), "get", func() error {
 		var gerr error
 		raw, gerr = r.cluster.Get(key)
 		return gerr
@@ -145,7 +145,7 @@ func (r *ShaleRepo) getJSON(key []byte, out any) error {
 // (idempotent for raw values) so callers see the payload, not the wrapper.
 func (r *ShaleRepo) getRaw(key []byte) ([]byte, error) {
 	var raw []byte
-	err := retryAcquiring(readRetry, func() error {
+	err := retryAcquiring(readRetry, r.repoLog(), "get", func() error {
 		var gerr error
 		raw, gerr = r.cluster.Get(key)
 		return gerr
@@ -174,7 +174,7 @@ func (r *ShaleRepo) getRaw(key []byte) ([]byte, error) {
 // usable answer, so a retry restarts the scan from the beginning.
 func (r *ShaleRepo) scanPrefix(prefix []byte) ([]scanItem, error) {
 	var out []scanItem
-	err := retryAcquiring(readRetry, func() error {
+	err := retryAcquiring(readRetry, r.repoLog(), "scan-prefix", func() error {
 		var serr error
 		out, serr = r.scanPrefixOnce(prefix)
 		return serr
@@ -232,7 +232,7 @@ func (r *ShaleRepo) scanPrefixOnce(prefix []byte) ([]scanItem, error) {
 // whereas the other two merely under-report.
 func (r *ShaleRepo) aggregatePrefix(prefix []byte) ([]scanItem, error) {
 	var out []scanItem
-	err := retryAcquiring(backgroundRetry, func() error {
+	err := retryAcquiring(backgroundRetry, r.repoLog(), "aggregate-prefix", func() error {
 		var aerr error
 		out, aerr = r.aggregatePrefixOnce(prefix)
 		return aerr
