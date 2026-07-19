@@ -141,6 +141,24 @@ func TestReadRetryPolicy_FitsInsideRequestDeadline(t *testing.T) {
 	}
 }
 
+// The background span must actually outlast a real handoff. Pinned against a
+// MEASURED window rather than a guess: during a staging rolling deploy on
+// 2026-07-19, nodes held positions unmounted for 17-21s, and the original
+// ~1.5s policy exhausted on every background scan, failing the periodic
+// reconcile and the key-gate prune. If someone shortens this, that regression
+// returns silently - the scans just start failing during deploys again.
+func TestBackgroundRetryPolicy_CoversAHandoff(t *testing.T) {
+	const observedHandoffWindow = 21 * time.Second
+	var span time.Duration
+	for i := 0; i < backgroundRetry.attempts-1; i++ {
+		span += backgroundRetry.backoff << i
+	}
+	if span <= observedHandoffWindow {
+		t.Fatalf("background retry spans %v, which does not outlast the %v handoff window it exists to cover; "+
+			"a retry shorter than the window just postpones the same failure", span, observedHandoffWindow)
+	}
+}
+
 // Background fan-outs are NOT request-path, so they may retry more patiently.
 // Pinned so a future edit does not accidentally collapse the two policies and
 // silently make background scans as impatient as reads.
