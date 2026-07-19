@@ -32,8 +32,16 @@ if [ -n "$unformatted" ]; then
 fi
 
 # 2. go vet across the whole module: fast and catches obvious issues.
-if ! go vet ./...; then
-  printf 'pre-commit: go vet failed\n' >&2
+#    GOWORK=off deliberately: gate the configuration that SHIPS, not the one
+#    the developer happens to have. A go.work can replace a dependency with a
+#    local checkout that is mid-refactor, on a different commit, or carrying
+#    module-graph edges the released version resolves differently - so a
+#    workspace vet can fail (or pass) where CI and the release build do the
+#    opposite. A hook that gates a configuration nobody ships is worse than no
+#    hook: it blocks good commits, which trains people to reach for
+#    --no-verify, and it can miss real breakage in the build that matters.
+if ! GOWORK=off go vet ./...; then
+  printf 'pre-commit: go vet failed (GOWORK=off, matching CI)\n' >&2
   exit 1
 fi
 
@@ -42,7 +50,13 @@ fi
 #    means un-modernized idioms are staged. (Default tags only; the cdylib
 #    isn't assumed present, so slatedb-tagged files are checked by running
 #    'go fix ./...' manually + the future slatedb CI job.)
-fix_pending=$(go fix -diff ./... 2>/dev/null || true)
+#    GOWORK=off for the same reason as vet above. Note this step FAILS OPEN by
+#    construction: '2>/dev/null || true' turns any error into empty output,
+#    which reads as "nothing pending" and passes. So if the module graph will
+#    not load, this check silently does not run rather than complaining - it
+#    would look exactly like a clean result. Keeping it on the shipped
+#    configuration is what stops that from happening quietly.
+fix_pending=$(GOWORK=off go fix -diff ./... 2>/dev/null || true)
 if [ -n "$fix_pending" ]; then
   printf 'pre-commit: pending Go modernizations. Run:\n  go fix ./...\nthen re-stage and re-commit.\n' >&2
   exit 1
@@ -51,7 +65,7 @@ fi
 # 4. golangci-lint: only if installed. Skips with a warning otherwise so
 #    a contributor without the tool installed isn't blocked from committing.
 if command -v golangci-lint >/dev/null 2>&1; then
-  if ! golangci-lint run --new-from-rev HEAD --fix=false; then
+  if ! GOWORK=off golangci-lint run --new-from-rev HEAD --fix=false; then
     printf 'pre-commit: golangci-lint reported issues\n' >&2
     exit 1
   fi
