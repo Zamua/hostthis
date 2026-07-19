@@ -141,12 +141,17 @@ func TestReadRetryPolicy_FitsInsideRequestDeadline(t *testing.T) {
 	}
 }
 
-// The background span must actually outlast a real handoff. Pinned against a
-// MEASURED window rather than a guess: during a staging rolling deploy on
-// 2026-07-19, nodes held positions unmounted for 17-21s, and the original
-// ~1.5s policy exhausted on every background scan, failing the periodic
-// reconcile and the key-gate prune. If someone shortens this, that regression
-// returns silently - the scans just start failing during deploys again.
+// The background span must actually outlast a real handoff. The window is
+// bounded by a MOUNT - opening a per-(unit, replica) database from object
+// storage - not by an RPC round trip, so it runs to seconds or tens of
+// seconds rather than milliseconds, and it scales with backend latency,
+// units per node and cluster size. A span shorter than it does not absorb
+// the handoff: it exhausts and fails, while still reading like a working
+// retry. The constant below is therefore sized against an observed window
+// for this deployment shape and must be re-checked against the operator's
+// own backend rather than trusted as universal. If someone shortens it, the
+// regression returns silently - background scans simply start failing
+// during deploys again.
 func TestBackgroundRetryPolicy_CoversAHandoff(t *testing.T) {
 	const observedHandoffWindow = 21 * time.Second
 	var span time.Duration
