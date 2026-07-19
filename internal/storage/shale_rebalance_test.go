@@ -141,6 +141,13 @@ func startRebalNode(t *testing.T, id, dbName, seedBind string) *rebalNode {
 		GRPCAddr:          "127.0.0.1:0", // OS-assigned; the repo serves the actual port
 		Seeds:             seeds,
 		ReplicationFactor: 1,
+		// Multi-node REQUIRES sharding: shale removed the legacy per-node
+		// byte-copy engine, so a bind address with UnitCount 0 is refused at
+		// cluster.Open. What this test gates changed shape with it - see the
+		// note on assertion 4 below - but the product properties it pins
+		// (nothing lost across a shape change, readable through a non-owning
+		// node) are engine-independent and still worth gating.
+		UnitCount: 4,
 	})
 	if err != nil {
 		t.Fatalf("node %s: NewShaleRepo: %v", id, err)
@@ -209,7 +216,15 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 	epoch := time.Now().UnixNano()
 
 	// --- node A: the seed/founder ---
-	nodeA := startRebalNode(t, "rebal-A", fmt.Sprintf("rebal-A-%d", epoch), "")
+	// One dbName SHARED by both nodes. In the retired per-node model each node
+	// owned a separate local store, so a distinct name per node was correct.
+	// Under the unit model DbName is the shared key-PREFIX that all units live
+	// beneath in object storage (see ShaleConfig.DbName), so giving the nodes
+	// different names points them at disjoint prefix trees: B opens empty units
+	// and A's data is invisible, which surfaces as a spurious ASSERTION 1 DATA
+	// LOSS failure while nothing is actually lost.
+	dbName := fmt.Sprintf("rebal-%d", epoch)
+	nodeA := startRebalNode(t, "rebal-A", dbName, "")
 
 	// --- the dataset, written through node A's PUBLIC api ---
 	//
@@ -307,7 +322,7 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 	t.Logf("BEFORE: node A holds %d local keys; node B not yet joined", keysBeforeA)
 
 	// --- node B joins -> 2-node ring -> rebalance ---
-	nodeB := startRebalNode(t, "rebal-B", fmt.Sprintf("rebal-B-%d", epoch), nodeA.bindAddr)
+	nodeB := startRebalNode(t, "rebal-B", dbName, nodeA.bindAddr)
 	nodes := []*rebalNode{nodeA, nodeB}
 	waitMembers(t, nodes, 2, 15*time.Second)
 	t.Logf("ring converged to 2 members")
@@ -337,21 +352,26 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 	// keys. Zero means the ring "rebalance" moved nothing (everything still
 	// on the seed) - which would make the read assertions pass trivially
 	// while hiding a broken handoff.
-	keysA, err := nodeA.repo.LocalKeyCountForTest(nil)
-	if err != nil {
-		t.Fatalf("local key count A: %v", err)
-	}
-	keysB, err := nodeB.repo.LocalKeyCountForTest(nil)
-	if err != nil {
-		t.Fatalf("local key count B: %v", err)
-	}
-	t.Logf("AFTER: physical key distribution: A=%d B=%d (total=%d)", keysA, keysB, keysA+keysB)
+	// PORTED: this used to count LOCAL KEYS via LocalScanPrefix, which was the
+	// right instrument when a join physically COPIED bytes to the new node.
+	// Under the unit model nothing is copied - a unit is a database at a fixed
+	// prefix in shared object storage and a join moves the LEASE, not the
+	// bytes - so local key counts read 0 on both nodes and the old assertion
+	// failed while the product was perfectly healthy. The INTENT survives
+	// unchanged (catch a "rebalance" that moved nothing, which would make the
+	// read assertions above pass trivially); only the instrument had to change.
+	// Mount counts are the equivalent question in the new model: did the ring
+	// actually hand this node any units to serve?
+	readyA := nodeA.repo.MountReadiness()
+	readyB := nodeB.repo.MountReadiness()
+	keysA, keysB := readyA.MountedUnits, readyB.MountedUnits
+	t.Logf("AFTER: mounted-unit distribution: A=%d B=%d (total=%d)", keysA, keysB, keysA+keysB)
 	if keysB == 0 {
-		t.Fatalf("ASSERTION 4 FAILED: node B holds ZERO local keys after the join; the ring rebalance "+
-			"delivered no partitions to the new node (A=%d B=%d). Rebalance is a no-op, not lossless.", keysA, keysB)
+		t.Fatalf("ASSERTION 4 FAILED: node B has mounted ZERO units after the join; the ring "+
+			"delivered no units to the new node (A=%d B=%d). Rebalance is a no-op, not lossless.", keysA, keysB)
 	}
 	if keysA == 0 {
-		t.Fatalf("ASSERTION 4 FAILED: node A holds ZERO local keys after the join; everything moved off the "+
+		t.Fatalf("ASSERTION 4 FAILED: node A has mounted ZERO units after the join; everything moved off the "+
 			"seed (A=%d B=%d), which is implausible for a 2-node ring and signals a placement bug.", keysA, keysB)
 	}
 
