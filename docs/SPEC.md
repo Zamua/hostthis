@@ -5161,7 +5161,12 @@ outlives the response.
 
 Cross-shard background scans (the expiry sweep, the referenced-blob set,
 the key-gate prune) retry more patiently, because no request deadline
-bounds them, and they retry as a WHOLE CALL rather than per-peer: a refused
+bounds them. How MUCH more is set by measurement rather than by feel: a
+node holds its positions unmounted for the length of a handoff, so a
+background retry span shorter than a realistic handoff is not patience, it
+merely postpones the same failure. The span is pinned by a test against an
+observed handoff window, and blocking a periodic background job for that
+long is free because none of the three consumers is latency-sensitive. They and they retry as a WHOLE CALL rather than per-peer: a refused
 peer's slice is absent from every other peer's result, so a partial fan-out
 is never a usable answer. The patience is bought for one consumer in
 particular. Blob GC acts on ABSENCE - it deletes any blob NOT in the
