@@ -175,6 +175,13 @@ func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger, regist
 	if accessKey == "" || secretKey == "" {
 		return nil, fmt.Errorf("HOSTTHIS_METADATA_S3_ACCESS_KEY + HOSTTHIS_METADATA_S3_SECRET_KEY are required")
 	}
+	// Checked with the other required-env checks, i.e. BEFORE anything is
+	// allocated, so a refusal needs no cleanup path. Deliberately validated
+	// here rather than left to the cluster layer: the operator gets an error
+	// naming the env var they set, not one about internal config fields.
+	if err := checkUnitCountForMode(unitCount, bindAddr); err != nil {
+		return nil, err
+	}
 
 	// Optional transactional shale-blob plane. When HOSTTHIS_SHALE_BLOB_BUCKET
 	// is set, blobs go THROUGH shale (the pointer co-commits with the metadata

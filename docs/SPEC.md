@@ -4857,6 +4857,17 @@ replication + relaxed durability unchanged: `ReplicationFactor`,
 `ReadQuorum`, and the relaxed-durability knob apply per unit exactly as
 they do for the single backend.
 
+`0` is only meaningful for a SINGLE-NODE deployment. Combining it with a
+bind address - i.e. asking to join a cluster while declining to shard - is
+a configuration error and the daemon refuses to start, naming the env var.
+It is not silently downgraded to a single-node backend, because that
+failure is invisible in exactly the way that matters: the node comes up
+healthy, serves reads and writes, and looks indistinguishable from a
+clustered peer right up until the replication it was supposed to provide
+is needed. A refused boot is loud, immediate, and attributable; a quietly
+un-clustered production node is none of those. Single-node deployments are
+unaffected, since the check fires only when a bind address is present.
+
 **Online resharding (declarative).** Once a deployment is in sharded mode with
 a shared CAS arbiter (the homogeneous bootstrap, where every pod wires the same
 `ConditionalStore`), `HOSTTHIS_SHALE_UNIT_COUNT` is a LIVE target, not just an
