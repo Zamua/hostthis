@@ -1,4 +1,12 @@
-//go:build slatedb
+// Retry policy for the shale acquiring-window refusal.
+//
+// DELIBERATELY NOT behind the `slatedb` build tag, even though its only
+// callers are. CI runs `go test ./...` with no tags, so a tagged test does
+// not execute there - and the pins below exist precisely to fail when
+// someone changes a constant. A regression guard that CI never runs cannot
+// guard anything; it just looks like coverage. The logic here needs only
+// stdlib plus pkg/cluster, which builds tagless, so there is no reason to
+// hide it. See servingmarker.go upstream, extracted for the same reason.
 
 package storage
 
