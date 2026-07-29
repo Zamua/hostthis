@@ -101,3 +101,18 @@ func (u *StandaloneBlobUnit) IsTransactional() bool { return false }
 
 // Ensure StandaloneBlobUnit satisfies the seam.
 var _ BlobUnit = (*StandaloneBlobUnit)(nil)
+
+// StageEncoding implements BlobUnit for the standalone path. Same contract as
+// the transactional adapter: encode to the at-rest format, stage it, report the
+// compressed size excluding the framing prefix.
+func (u *StandaloneBlobUnit) StageEncoding(ctx context.Context, slug, sha string, r io.Reader) (BlobHandle, int, error) {
+	body, size, err := u.store.EncodeBody(r)
+	if err != nil {
+		return BlobHandle{}, 0, err
+	}
+	h, err := u.Stage(ctx, slug, sha, body)
+	if err != nil {
+		return BlobHandle{}, 0, err
+	}
+	return h, size, nil
+}

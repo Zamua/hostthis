@@ -33,6 +33,18 @@ type BlobUnit interface {
 	// when to Stage relative to its metadata write.
 	Stage(ctx context.Context, slug, sha string, body []byte) (BlobHandle, error)
 
+	// StageEncoding encodes UNCOMPRESSED bytes into the adapter's at-rest
+	// format, stages them, and reports the quota-relevant compressed size.
+	//
+	// It exists so a caller that needs the on-disk footprint (the site deploy,
+	// which charges the post-compression size against quota) does not have to
+	// know the encoder or the framing to compute it. Previously the service
+	// reached into internal/storage for the encoder and subtracted the magic
+	// prefix itself - two pieces of at-rest-format knowledge above the layer
+	// that owns the format, and a dependency pointing the wrong way. The
+	// adapter owns the format; the port reports the number.
+	StageEncoding(ctx context.Context, slug, sha string, r io.Reader) (BlobHandle, int, error)
+
 	// StageStream durably writes a record's blob by streaming r (UNCOMPRESSED
 	// bytes; the storage layer compresses them at rest) and returns a handle
 	// to commit. size is the expected uncompressed length. Used by the site

@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/storage"
 )
 
 // RoomRepo is the persistence interface the Rooms service needs.
@@ -15,11 +14,11 @@ import (
 type RoomRepo interface {
 	// CreateRoom records a new empty room + its creation-accounting row,
 	// enforcing the per-app aggregate cap. ErrSlugTaken if (app, id)
-	// collides (caller retries); storage.ErrAppRoomsFull past the app cap.
+	// collides (caller retries); domain.ErrAppRoomsFull past the app cap.
 	CreateRoom(room domain.Room, subnet string, appCap int64, now time.Time) error
-	// GetRoom returns the room record or storage.ErrNotFound.
+	// GetRoom returns the room record or domain.ErrNotFound.
 	GetRoom(appSlug domain.Slug, id domain.RoomID) (domain.Room, error)
-	// GetValue returns one value or storage.ErrNotFound.
+	// GetValue returns one value or domain.ErrNotFound.
 	GetValue(appSlug domain.Slug, id domain.RoomID, key string) ([]byte, error)
 	// ScanRoom returns the whole namespace, stamped with the EXACT per-room
 	// sequence the snapshot reflects (RoomKV.Seq): every mutation with
@@ -30,8 +29,8 @@ type RoomRepo interface {
 	// resetting the retention clock, and returns the mutation's assigned
 	// per-room sequence (dense, +1 per committed mutation, assigned inside
 	// the same transaction that commits the value - see SPEC "The per-room
-	// sequence: assignment at commit"). storage.ErrNotFound if the room is
-	// gone, storage.ErrRoomDataFull / storage.ErrAppRoomsFull on caps. Rooms
+	// sequence: assignment at commit"). domain.ErrNotFound if the room is
+	// gone, domain.ErrRoomDataFull / domain.ErrAppRoomsFull on caps. Rooms
 	// hold no blobs, so a room write touches no object-store quota: there is
 	// no service-wide byte cap on this path (see SPEC "Rooms -> Quota and
 	// abuse -> Durable total-bytes ceiling").
@@ -146,7 +145,7 @@ func (s *Rooms) Create(appSlug domain.Slug, subnet string) (domain.Room, error) 
 		switch {
 		case err == nil:
 			return room, nil
-		case errors.Is(err, storage.ErrAppRoomsFull):
+		case errors.Is(err, domain.ErrAppRoomsFull):
 			return domain.Room{}, ErrAppRoomsCap
 		case isSlugTaken(err):
 			continue
@@ -201,11 +200,11 @@ func (s *Rooms) Put(appSlug domain.Slug, id domain.RoomID, key string, val []byt
 	switch {
 	case err == nil:
 		return seq, nil
-	case errors.Is(err, storage.ErrNotFound):
+	case errors.Is(err, domain.ErrNotFound):
 		return 0, ErrRoomNotFound
-	case errors.Is(err, storage.ErrRoomDataFull):
+	case errors.Is(err, domain.ErrRoomDataFull):
 		return 0, ErrRoomDataCap
-	case errors.Is(err, storage.ErrAppRoomsFull):
+	case errors.Is(err, domain.ErrAppRoomsFull):
 		return 0, ErrAppRoomsCap
 	default:
 		return 0, err
@@ -237,7 +236,7 @@ func (s *Rooms) now() time.Time {
 // mapNotFound translates the storage not-found sentinel to the service
 // one, passing any other error through.
 func (s *Rooms) mapNotFound(err error) error {
-	if errors.Is(err, storage.ErrNotFound) {
+	if errors.Is(err, domain.ErrNotFound) {
 		return ErrRoomNotFound
 	}
 	return err

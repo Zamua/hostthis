@@ -3,7 +3,7 @@ package service
 import (
 	"errors"
 
-	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
 // commitErrClass is the classification classifyCommitErr assigns a
@@ -44,9 +44,9 @@ func classifyCommitErr(err error) (commitErrClass, error) {
 	switch {
 	case err == nil:
 		return commitOK, nil
-	case errors.Is(err, storage.ErrServiceFull):
+	case errors.Is(err, domain.ErrServiceFull):
 		return commitServiceFull, ErrServiceFull
-	case errors.Is(err, storage.ErrOverUserQuota):
+	case errors.Is(err, domain.ErrOverUserQuota):
 		return commitOverQuota, ErrOverQuota
 	case isSlugTaken(err):
 		return commitSlugTaken, SlugTakenErr
