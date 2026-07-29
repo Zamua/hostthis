@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage
 
 import (
