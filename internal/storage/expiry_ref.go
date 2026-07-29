@@ -27,7 +27,7 @@ import (
 // scanExpiredRefs scans one expiry-index family and returns a typed ref for
 // every entry whose timestamp segment is at or before now (inclusive
 // boundary), preserving scan order. scan is the backend's prefix scanner
-// (SlateRepo.scanPrefix or ShaleRepo.aggregatePrefix); parse extracts the
+// (SlateRepo.scanPrefix or ShaleRepo.aggregateForBackground); parse extracts the
 // timestamp segment and builds the typed ref from an entry's full key
 // (ok=false skips a malformed key).
 //

@@ -223,3 +223,37 @@ func TestRetryAcquiring_LogsOnlyWhenItActuallyRetries(t *testing.T) {
 		}
 	})
 }
+
+// The retry budget must be chosen by the CALLER's context, not by what the
+// call happens to be. A cross-shard fan-out is "background" as a mechanism,
+// but whoami reaches one to fetch best-effort session info - and a best-effort
+// call, whose error the caller discards by design, must never be able to block
+// an interactive command for the background span.
+//
+// This is a regression pin. Shipped behavior: whoami blocked ~32s retrying a
+// keygate scan whose result it then threw away, because the fan-out helper
+// applied the background policy to every caller uniformly.
+func TestRequestPathBudget_FitsAnInteractiveCommand(t *testing.T) {
+	const interactiveCeiling = 10 * time.Second
+
+	span := func(p retryPolicy) time.Duration {
+		var d time.Duration
+		for i := 0; i < p.attempts-1; i++ {
+			d += p.backoff << i
+		}
+		return d
+	}
+
+	if got := span(readRetry); got > interactiveCeiling {
+		t.Fatalf("request-path retry spans %v, too long to sit in front of an interactive command (ceiling %v)",
+			got, interactiveCeiling)
+	}
+	// The background policy is DELIBERATELY longer than the interactive
+	// ceiling - that is exactly why it must not be applied to a request path.
+	// If this stops holding the two policies have collapsed and the
+	// distinction this test protects is gone.
+	if got := span(backgroundRetry); got <= interactiveCeiling {
+		t.Fatalf("background retry spans %v, which no longer exceeds the interactive ceiling %v; "+
+			"the two policies have collapsed and the caller-context distinction is meaningless", got, interactiveCeiling)
+	}
+}

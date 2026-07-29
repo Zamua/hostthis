@@ -2076,7 +2076,7 @@ func (r *ShaleRepo) Unpin(slug domain.Slug) error {
 // expiry index uses a fixed-width format (expirySiteTimeFormat) and has no
 // such skew.
 func (r *ShaleRepo) ExpiredPastes(now time.Time) ([]domain.ExpiredPaste, error) {
-	return scanExpiredRefs(r.aggregatePrefix, []byte("expiry/"), now, time.RFC3339Nano, parseExpiredPasteKey)
+	return scanExpiredRefs(r.aggregateForBackground, []byte("expiry/"), now, time.RFC3339Nano, parseExpiredPasteKey)
 }
 
 // DeleteExpired processes one expired reference: the same full-cascade
@@ -2126,11 +2126,11 @@ func (r *ShaleRepo) deleteExpiryEntry(entryKey []byte, label string) error {
 // nil with a nil error, and the sweep's abort-on-zero-refs guard backstops
 // it. An empty result is only legitimate for an empty keyspace.
 func (r *ShaleRepo) ReferencedBlobSHAs() ([]string, error) {
-	pastes, err := r.aggregatePrefix([]byte("pastes/"))
+	pastes, err := r.aggregateForBackground([]byte("pastes/"))
 	if err != nil {
 		return nil, err
 	}
-	versions, err := r.aggregatePrefix([]byte("versions/"))
+	versions, err := r.aggregateForBackground([]byte("versions/"))
 	if err != nil {
 		return nil, err
 	}
