@@ -121,3 +121,16 @@ func (b *BlobStore) Get(sha string) ([]byte, error) {
 	}
 	return body, nil
 }
+
+// EncodeBody encodes UNCOMPRESSED bytes into the at-rest format and reports the
+// payload size excluding the framing prefix. Present so the plain disk store
+// satisfies the same service-side BlobStore contract as CompressedBlobStore:
+// callers ask the store that owns the format instead of doing the framing
+// arithmetic themselves.
+func (s *BlobStore) EncodeBody(r io.Reader) ([]byte, int, error) {
+	body, err := EncodeCompressedBody(r)
+	if err != nil {
+		return nil, 0, err
+	}
+	return body, len(body) - CompressedBodyPrefixLen, nil
+}

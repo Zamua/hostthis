@@ -245,3 +245,14 @@ func TestUpload_Create_QuotaEnforcedSynchronously(t *testing.T) {
 	}
 	waitFinalize(t, done)
 }
+
+// EncodeBody delegates to the REAL encoder so a size assertion in a test
+// measures what production measures. A hand-rolled length here would make a
+// size regression invisible.
+func (f *fakeBlobs) EncodeBody(r io.Reader) ([]byte, int, error) {
+	body, err := storage.EncodeCompressedBody(r)
+	if err != nil {
+		return nil, 0, err
+	}
+	return body, len(body) - storage.CompressedBodyPrefixLen, nil
+}

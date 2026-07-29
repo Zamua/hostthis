@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/storage"
 )
 
 // SiteRepo is the persistence interface the site-deploy + site-read
@@ -25,7 +24,7 @@ type SiteRepo interface {
 	//
 	//   - The slug MUST already exist as a site AND be owned by s.Identity.
 	//     If it does not exist as a site, OR exists but is owned by another
-	//     identity, return storage.ErrNotFound - the SAME sentinel a
+	//     identity, return domain.ErrNotFound - the SAME sentinel a
 	//     missing slug yields, so the caller cannot distinguish "not yours"
 	//     from "does not exist" (no existence leak).
 	//   - The quota check is the REPLACE DELTA: the per-identity cap is
@@ -60,7 +59,7 @@ type SiteRepo interface {
 	// blob path can stage every file under slug's shard (the manifest and the
 	// blob pointers then co-route to the SAME shard at commit). It is a cheap
 	// existence claim, NOT a blob reservation: no two-store coupling, no quota
-	// charge. It returns storage.ErrSlugTaken if slug is already a paste or a
+	// charge. It returns domain.ErrSlugTaken if slug is already a paste or a
 	// site (so the caller re-mints and re-claims a fresh slug before reading
 	// the body), nil if the claim succeeded.
 	//
@@ -278,7 +277,7 @@ func (d *DeploySite) Delete(slug domain.Slug, owner string) error {
 	}
 	existing, err := d.Sites.Get(slug)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
+		if errors.Is(err, domain.ErrNotFound) {
 			return ErrNotFound
 		}
 		return fmt.Errorf("get site: %w", err)
@@ -373,7 +372,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	// both collapse to ErrNotFound so existence/ownership never leaks.
 	existing, err := d.Sites.Get(slug)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
+		if errors.Is(err, domain.ErrNotFound) {
 			return SiteResult{}, ErrNotFound
 		}
 		return SiteResult{}, fmt.Errorf("get site: %w", err)
@@ -447,7 +446,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	switch class, terr := classifyCommitErr(err); {
 	case class == commitOK:
 		return SiteResult{Site: site}, nil
-	case errors.Is(err, storage.ErrNotFound):
+	case errors.Is(err, domain.ErrNotFound):
 		// The site was deleted/expired-swept between the ownership check and
 		// the swap. Surface as not-found, the same shape the up-front check
 		// would have yielded. (Replace-specific: not part of the shared triad.)
@@ -497,12 +496,7 @@ func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
 	// against quota - matching how pastes charge their post-zstd size, so a
 	// site no longer over-counts vs its real storage. The 4-byte magic prefix
 	// is excluded to match the paste basis (compress.go).
-	encoded, err := storage.EncodeCompressedBody(bytes.NewReader(bodyBytes))
-	if err != nil {
-		return "", 0, fmt.Errorf("compress file %q: %w", p, err)
-	}
-	compressedSize := len(encoded) - len(blobMagicV1)
-	handle, err := s.blob.Stage(context.Background(), s.slug, sha, encoded)
+	handle, compressedSize, err := s.blob.StageEncoding(context.Background(), s.slug, sha, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", 0, fmt.Errorf("blob put %q: %w", p, err)
 	}

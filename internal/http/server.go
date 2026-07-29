@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/storage"
 )
 
 // PasteReader is the read-side interface - same shape the service
@@ -250,7 +249,7 @@ func (s *Server) serveLanding(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug domain.Slug) {
 	p, err := s.Pastes.Get(slug)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
+		if errors.Is(err, domain.ErrNotFound) {
 			http.NotFound(w, r)
 			return
 		}
