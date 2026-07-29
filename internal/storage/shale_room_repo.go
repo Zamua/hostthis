@@ -640,7 +640,7 @@ func (r *ShaleRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now tim
 // counters it has NO read-time expiry awareness: an expired-unswept room's
 // bytes leave the counter at sweep time (DeleteRoom), not read time.
 func (r *ShaleRepo) SumActiveRoomBytes() (int64, error) {
-	counters, err := r.aggregatePrefix(prefixRoomBytes)
+	counters, err := r.aggregateForBackground(prefixRoomBytes)
 	if err != nil {
 		return 0, err
 	}
@@ -667,7 +667,7 @@ func (r *ShaleRepo) SumActiveRoomBytes() (int64, error) {
 // Matches the slate ExpiredRooms.
 func (r *ShaleRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
 	// key shape: roomexpiry/<ts>/<app-slug>/<uuid>
-	return scanExpiredRefs(r.aggregatePrefix, prefixRoomExpiryAll, now, expirySiteTimeFormat, parseExpiredRoomKey)
+	return scanExpiredRefs(r.aggregateForBackground, prefixRoomExpiryAll, now, expirySiteTimeFormat, parseExpiredRoomKey)
 }
 
 // DeleteExpiredRoom processes one expired reference: the same full-cascade
@@ -746,7 +746,7 @@ func (r *ShaleRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 // family bounded - the same discipline the keygate prune + the sqlite
 // room_creates prune use. Returns the number of markers deleted.
 func (r *ShaleRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
-	items, err := r.aggregatePrefix(prefixRoomCreate)
+	items, err := r.aggregateForBackground(prefixRoomCreate)
 	if err != nil {
 		return 0, err
 	}
