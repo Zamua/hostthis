@@ -42,6 +42,13 @@ type BlobStore interface {
 	Put(sha string, r io.Reader, size int64) error
 	PutPrecompressed(sha string, body []byte) error
 	Get(sha string) ([]byte, error)
+
+	// EncodeBody encodes UNCOMPRESSED bytes into the store's at-rest format and
+	// reports the payload size EXCLUDING the framing prefix - the basis quota
+	// charges. Declared here so a caller needing the on-disk footprint asks the
+	// component that owns the format instead of importing the storage package
+	// and doing the framing arithmetic itself.
+	EncodeBody(r io.Reader) (body []byte, payloadSize int, err error)
 }
 
 // SlugTakenErr signals that the chosen slug already exists. The

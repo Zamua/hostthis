@@ -134,3 +134,15 @@ func TestDeploySite_BlobQuotaSurfacesServiceFull(t *testing.T) {
 		t.Fatalf("blob-quota deploy = %v, want service.ErrServiceFull", err)
 	}
 }
+
+// EncodeBody mirrors the real store's at-rest encoding so a test that measures
+// the quota-relevant size measures the SAME number production would. Delegating
+// to the real encoder rather than faking a size keeps the double honest: a
+// fabricated length here would let a size regression pass.
+func (f fullBlobStore) EncodeBody(r io.Reader) ([]byte, int, error) {
+	body, err := storage.EncodeCompressedBody(r)
+	if err != nil {
+		return nil, 0, err
+	}
+	return body, len(body) - storage.CompressedBodyPrefixLen, nil
+}

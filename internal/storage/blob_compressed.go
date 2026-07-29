@@ -132,6 +132,12 @@ func (c *CompressedBlobStore) Put(sha string, r io.Reader, _ int64) error {
 // stores files in the SAME compressed format, so a site file read on the shale
 // path decodes identically to a paste read and to the standalone path. The body
 // is bounded by one file (the untar's per-file cap), so buffering is safe.
+// CompressedBodyPrefixLen is the width of the at-rest framing prefix that
+// EncodeCompressedBody writes ahead of the zstd stream. Exported so a caller
+// computing the quota-relevant payload size subtracts the real width instead
+// of keeping its own copy of the magic bytes to measure.
+const CompressedBodyPrefixLen = len(magicV1)
+
 func EncodeCompressedBody(r io.Reader) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.Grow(int(estimatedCompressedSize(0)))
@@ -291,4 +297,15 @@ func estimatedCompressedSize(uncompressed int) int {
 		return len(magicV1) + 64
 	}
 	return len(magicV1) + uncompressed/2 // optimistic; Buffer grows if needed
+}
+
+// EncodeBody implements the service-side BlobStore encoder: it returns the
+// at-rest body and the payload size excluding the framing prefix. The service
+// asks for this rather than computing it, so the prefix width lives only here.
+func (s *CompressedBlobStore) EncodeBody(r io.Reader) ([]byte, int, error) {
+	body, err := EncodeCompressedBody(r)
+	if err != nil {
+		return nil, 0, err
+	}
+	return body, len(body) - CompressedBodyPrefixLen, nil
 }

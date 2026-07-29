@@ -271,10 +271,10 @@ func (r *PasteRepo) Unpin(slug domain.Slug) error {
 // AppendResult reports what AppendVersionWithQuotaCheck did. The
 // caller (SSH layer) uses WasPinned to decide whether to surface a
 // "your pin held; new version isn't being served" warning.
-type AppendResult struct {
-	NewVer    int
-	WasPinned bool // paste was pinned to a specific version BEFORE this append
-}
+// AppendResult is an alias for domain.AppendResult, which owns the type: the
+// service port that returns it must not name a storage-owned type. Kept as an
+// alias so adapters and their tests continue to compile unchanged.
+type AppendResult = domain.AppendResult
 
 // AppendVersionWithQuotaCheck atomically (under BEGIN IMMEDIATE):
 //  1. checks identity (the existing paste's owner) active bytes + size against userCap

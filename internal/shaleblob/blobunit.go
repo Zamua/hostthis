@@ -215,3 +215,19 @@ func (c *ctxCancelReadCloser) Close() error {
 
 // Ensure Unit satisfies the seam.
 var _ service.BlobUnit = (*Unit)(nil)
+
+// StageEncoding implements service.BlobUnit: it encodes to the at-rest format,
+// stages the exact bytes, and returns the compressed size WITHOUT the framing
+// prefix - the basis quota charges, matching how a paste charges its post-zstd
+// size. The caller never sees the encoder or the prefix width.
+func (u *Unit) StageEncoding(ctx context.Context, slug, sha string, r io.Reader) (service.BlobHandle, int, error) {
+	body, err := storage.EncodeCompressedBody(r)
+	if err != nil {
+		return service.BlobHandle{}, 0, err
+	}
+	h, err := u.Stage(ctx, slug, sha, body)
+	if err != nil {
+		return service.BlobHandle{}, 0, err
+	}
+	return h, len(body) - storage.CompressedBodyPrefixLen, nil
+}
