@@ -82,13 +82,13 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 	// snapshot would be adopted as the baseline and the stale computed value
 	// would sail through the guard - the exact clobber the guard exists to
 	// stop.)
-	pasteIdx, err := r.aggregatePrefix(prefixIdentityPastesAll)
+	pasteIdx, err := r.aggregateForBackground(prefixIdentityPastesAll)
 	if err != nil {
 		return fmt.Errorf("reconcile: scan identity_pastes: %w", err)
 	}
 
 	// Gather authoritative paste state across all shards.
-	pasteItems, err := r.aggregatePrefix([]byte("pastes/"))
+	pasteItems, err := r.aggregateForBackground([]byte("pastes/"))
 	if err != nil {
 		return fmt.Errorf("reconcile: scan pastes: %w", err)
 	}
@@ -99,7 +99,7 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 	// its live sum computed - projecting a PARTIAL sum would silently
 	// under-count - so it is marked and projected as a fail-closed
 	// placeholder below (Policy 1 for the pass, Policy 3 for the value).
-	verItems, err := r.aggregatePrefix(prefixVersionsAll)
+	verItems, err := r.aggregateForBackground(prefixVersionsAll)
 	if err != nil {
 		return fmt.Errorf("reconcile: scan versions: %w", err)
 	}

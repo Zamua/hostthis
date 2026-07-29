@@ -197,7 +197,7 @@ func (r *ShaleRepo) scanPrefixOnce(prefix []byte) ([]scanItem, error) {
 		if k == nil && v == nil {
 			break
 		}
-		// cluster.ScanPrefix, like the backend scan under aggregatePrefix,
+		// cluster.ScanPrefix, like the backend scan under the cross-shard aggregate,
 		// returns the RAW stored value - an LWW envelope at R>1. Strip it so
 		// consumers (keygate timestamps, version rows, owner pastes) decode
 		// the payload exactly as cluster.Get hands it to them. Idempotent for
@@ -230,9 +230,33 @@ func (r *ShaleRepo) scanPrefixOnce(prefix []byte) ([]scanItem, error) {
 // the blob-GC consumer specifically: it acts on ABSENCE (deleting any blob NOT
 // in the referenced set), so consuming a truncated set deletes live data,
 // whereas the other two merely under-report.
-func (r *ShaleRepo) aggregatePrefix(prefix []byte) ([]scanItem, error) {
+// aggregateForBackground fans out for a BACKGROUND caller: reconcile, the
+// sweeps, blob GC. Nothing is waiting on the result, so it retries patiently
+// through a handoff window - which is correct here, because the alternative on
+// the blob-GC path is acting on a partial answer and deleting live data.
+func (r *ShaleRepo) aggregateForBackground(prefix []byte) ([]scanItem, error) {
+	return r.aggregateWith(backgroundRetry, prefix)
+}
+
+// aggregateForRequest fans out for a caller with a USER WAITING on it. It gives
+// up quickly, because a slow answer is worse than a missing one on an
+// interactive path.
+//
+// These are two APIs rather than one with a policy argument on purpose. They
+// are the same mechanism but different operations, and the difference that
+// matters - is anything waiting on this? - is a property of the CALLER, which
+// the mechanism cannot see. A single entry point invited exactly one bug: the
+// fan-out was classified "background" by its shape, so an interactive whoami
+// inherited the patient budget and blocked ~32s retrying a best-effort keygate
+// lookup whose error it then discarded. Naming the caller's context makes that
+// mistake visible at the call site instead of buried in a shared default.
+func (r *ShaleRepo) aggregateForRequest(prefix []byte) ([]scanItem, error) {
+	return r.aggregateWith(readRetry, prefix)
+}
+
+func (r *ShaleRepo) aggregateWith(p retryPolicy, prefix []byte) ([]scanItem, error) {
 	var out []scanItem
-	err := retryAcquiring(backgroundRetry, r.repoLog(), "aggregate-prefix", func() error {
+	err := retryAcquiring(p, r.repoLog(), "aggregate-prefix", func() error {
 		var aerr error
 		out, aerr = r.aggregatePrefixOnce(prefix)
 		return aerr

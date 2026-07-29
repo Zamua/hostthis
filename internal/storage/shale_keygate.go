@@ -110,7 +110,11 @@ func (r *ShaleRepo) SubnetSnapshot(subnet string, now time.Time, window time.Dur
 // Cross-shard (a keygate row could live on any {subnet} shard), so it
 // fans out via aggregate over the global keygate prefix.
 func (r *ShaleRepo) SubnetsForIdentity(identity string, now time.Time, window time.Duration) (int, error) {
-	items, err := r.aggregatePrefix([]byte("keygate/"))
+	// REQUEST-PATH budget, not the background one: this is reached from whoami
+	// (via KeyGate.Inspect), which treats a keygate error as best-effort and
+	// discards it. Blocking an interactive command for the background span to
+	// produce a value the caller throws away is pure latency.
+	items, err := r.aggregateForRequest([]byte("keygate/"))
 	if err != nil {
 		return 0, err
 	}
@@ -143,7 +147,7 @@ func (r *ShaleRepo) SubnetsForIdentity(identity string, now time.Time, window ti
 // cutoff, across all {subnet} shards. The candidate set is gathered via a
 // cross-shard aggregate; each delete is routed to its owning shard.
 func (r *ShaleRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
-	items, err := r.aggregatePrefix([]byte("keygate/"))
+	items, err := r.aggregateForBackground([]byte("keygate/"))
 	if err != nil {
 		return 0, err
 	}

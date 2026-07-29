@@ -787,7 +787,7 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 // uses. The cutoff is formatted with the SAME layout so the compare stays
 // aligned. Matches the slate ExpiredSites.
 func (r *ShaleRepo) ExpiredSites(now time.Time) ([]domain.ExpiredSite, error) {
-	return scanExpiredRefs(r.aggregatePrefix, prefixExpirySitesAll, now, expirySiteTimeFormat, parseExpiredSiteKey)
+	return scanExpiredRefs(r.aggregateForBackground, prefixExpirySitesAll, now, expirySiteTimeFormat, parseExpiredSiteKey)
 }
 
 // DeleteExpiredSite processes one expired reference: the same full-cascade
@@ -824,11 +824,11 @@ func (r *ShaleRepo) reconcileSiteIndexPass() error {
 	// writes (the same ordering argument as the paste pass in Reconcile: a
 	// baseline that predates the authoritative scan makes "entry unchanged"
 	// prove the computed value is at least as fresh).
-	siteIdx, err := r.aggregatePrefix(prefixIdentitySitesAll)
+	siteIdx, err := r.aggregateForBackground(prefixIdentitySitesAll)
 	if err != nil {
 		return fmt.Errorf("reconcile sites: scan identity_sites: %w", err)
 	}
-	siteItems, err := r.aggregatePrefix(prefixSites)
+	siteItems, err := r.aggregateForBackground(prefixSites)
 	if err != nil {
 		return fmt.Errorf("reconcile sites: scan sites: %w", err)
 	}
@@ -920,7 +920,7 @@ func (r *ShaleRepo) pruneOrphanSiteEntry(slug string) bool {
 // per-file tombstone), so a live site with files always contributes a
 // non-empty set.
 func (r *ShaleRepo) ReferencedSiteBlobSHAs() ([]string, error) {
-	sites, err := r.aggregatePrefix(prefixSites)
+	sites, err := r.aggregateForBackground(prefixSites)
 	if err != nil {
 		return nil, err
 	}

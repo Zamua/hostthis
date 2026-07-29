@@ -5170,6 +5170,16 @@ the attempt count or the read budget without re-examining the response
 deadline fails the build rather than silently shipping a retry that
 outlives the response.
 
+The budget is chosen by the CALLER's context, not by the shape of the
+call. Whether anything is waiting on a result is a property of the caller,
+which the mechanism cannot see, so the cross-shard fan-out is exposed as
+two operations rather than one with a tunable: a request-path form that
+gives up quickly, and a background form that waits. A single shared entry
+point invited the opposite mistake - an interactive command inherited the
+patient budget and blocked for the full background span retrying a
+best-effort lookup whose error it then discarded, so a user waited half a
+minute for a value that was thrown away either way.
+
 Cross-shard background scans (the expiry sweep, the referenced-blob set,
 the key-gate prune) retry more patiently, because no request deadline
 bounds them. How MUCH more is set by measurement rather than by feel: a
