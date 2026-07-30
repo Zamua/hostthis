@@ -273,37 +273,29 @@ func (reservation) Send(Frame) bool { return true }
 func (reservation) Close()          {}
 func (r reservation) ID() uint64    { return r.id }
 
-// joinWithSnapshot completes a late-join in the spec's register-FIRST
-// order (see SPEC.md "Persistence and late-join"): it swaps the admit's
-// reservation for the real connection c UNDER the hub lock (a pure
-// membership mutex - from that instant every broadcast is queued for c),
-// then reads the room's durable snapshot OUTSIDE the lock and returns it.
-// The caller sends the returned snapshot as the connection's FIRST wire
-// frame (the reserved first-frame slot), ahead of any live frames that
-// buffered on c during the read.
+// joinWithSnapshot completes a late-join in register-FIRST order: it swaps the
+// admit's reservation for the real connection under the hub lock, so from that
+// instant every broadcast queues for c, then reads the durable snapshot OUTSIDE
+// the lock. The caller sends that snapshot as the connection's first frame,
+// ahead of any live frames buffered during the read.
 //
 // Correctness rides the per-room sequence, not the lock:
 //
-//   - No gap. A mirror frame broadcast BEFORE the register came from a
-//     commit that completed before the snapshot read started, so its
-//     effect is IN the snapshot (seq <= S). A commit whose broadcast runs
-//     after the register finds c in the set and is delivered live.
-//   - No dup. A frame CAN be both delivered to c and reflected in the
-//     snapshot (it broadcast inside the join window); the client's discard
-//     rule (drop seq <= S) applies it exactly once. No server lock is
-//     needed for this - which is the point: the same rule de-duplicates
-//     frames arriving from PEER pods, which no pod-local lock could
-//     serialize against.
+//   - No gap. A frame broadcast before the register came from a commit that
+//     completed before the snapshot read began, so its effect is IN the
+//     snapshot. A commit broadcasting after the register finds c registered.
+//   - No dup. A frame can be both delivered and reflected in the snapshot; the
+//     client's discard rule (drop seq <= S) applies it exactly once. That needs
+//     no server lock, which is the point: the same rule de-duplicates frames
+//     from PEER pods, which no pod-local lock could serialize against.
 //
-// The hub lock is held only for the map swap; the snapshot read (a
-// storage Scan - an object-store round trip on the shale backend) runs
-// with NO lock held, so a slow read stalls only this join, never the
-// room's fan-out.
+// The hub lock covers only the map swap. The snapshot read is an object-store
+// round trip on the shale backend, so holding a lock across it would stall the
+// room's fan-out rather than just this join.
 //
-// On a readSnapshot error the error is returned and no frame is sent; c
-// stays registered until the caller's deferred release unregisters it
-// (the caller closes the connection: a client that cannot be caught up
-// reconnects).
+// On a read error nothing is sent and c stays registered until the caller's
+// deferred release; the caller closes the connection and the client
+// reconnects.
 func (r *Registry) joinWithSnapshot(key RoomKey, c Conn, readSnapshot func() (Frame, error)) (Frame, error) {
 	r.mu.Lock()
 	hub := r.hubs[key]
@@ -404,38 +396,28 @@ func (r *Registry) getOrCreateHubLocked(key RoomKey) (hub *Hub, created bool) {
 	return hub, true
 }
 
-// commitAndMirror runs a durable write's KV COMMIT and then its live
-// MIRROR broadcast: commit FIRST, with NO lock held, broadcast after a
-// successful commit. The spec forbids storage I/O under the hub lock (see
-// SPEC.md "Persistence and late-join": the hub lock guards the connection
-// set only, and a room's live broadcasts never stall behind a durable
-// write's object-storage round trip) - a shale commit is an object-store
-// CAS costing hundreds of milliseconds on a loaded backend and unbounded
-// when the store hangs, and a hung storage call must wedge only ITS
-// writer, never the room's ephemeral fan-out, peer deliveries, or joins.
+// commitAndMirror runs a durable write's commit and then its live mirror
+// broadcast: commit FIRST with no lock held, broadcast after it succeeds.
 //
-//   - commit performs the durable KV write (the service-layer Put /
-//     Delete) and returns the mirror frame to fan out, built AFTER the
-//     write so it carries the per-room sequence the commit assigned.
-//   - the mirror is then broadcast to the room's live hub, if one exists.
-//     A room with NO live hub skips the local fan-out entirely: there are
-//     no local subscribers to mirror to, and no transient hub is created -
-//     a joiner racing this commit reads a snapshot whose exact S already
-//     reflects it (the storage read is the serialization point, not a
-//     lock), so nothing is missed.
+// Storage I/O must never run under the hub lock. A shale commit is an
+// object-store CAS costing hundreds of milliseconds on a loaded backend, and
+// unbounded when the store hangs, so holding the lock across it would wedge the
+// room's fan-out, peer deliveries and joins rather than just its own writer.
 //
-// No-gap / no-dup against a concurrent join rides the SEQUENCE, not a
-// critical section: the joiner registers first, snapshots second, and
-// discards any frame with seq <= S (see joinWithSnapshot). A frame this
-// broadcast delivers to a joiner whose snapshot also reflects the write is
-// a wire-level duplicate the client's discard rule drops - the same rule
-// that de-duplicates the frame when it arrives from a PEER pod, which no
-// pod-local lock could order anyway.
+//   - commit does the durable write and returns the mirror frame, built AFTER
+//     it so the frame carries the sequence the commit assigned.
+//   - the mirror then broadcasts to the live hub if one exists. A room with no
+//     hub skips the fan-out and creates no transient one: a joiner racing this
+//     commit reads a snapshot whose S already reflects it, since the storage
+//     read is the serialization point.
 //
-// The successful mirror frame is returned to the caller (Relay), which
-// publishes it to the peer pods - also off every lock, best-effort, never
-// on the commit path. If commit fails, the error is returned and nothing
-// is mirrored anywhere.
+// No-gap and no-dup against a concurrent join ride the sequence, not a critical
+// section: the joiner registers first, snapshots second, and discards frames
+// with seq <= S. A duplicate reaching such a joiner is dropped by that same
+// rule, which is also what de-duplicates frames arriving from peer pods.
+//
+// The mirror is returned to Relay, which publishes it to peers off every lock,
+// best-effort. On commit failure nothing is mirrored anywhere.
 func (r *Registry) commitAndMirror(key RoomKey, commit func() (Frame, error)) (Frame, error) {
 	mirror, err := commit()
 	if err != nil {

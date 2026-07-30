@@ -2,24 +2,18 @@
 
 package storage_test
 
-// The scan-derived quota SUMS THE CACHED VALUES of the identity_pastes /
-// identity_sites enumeration entries - one prefix scan, zero per-entry
-// fan-out to the {slug} shards.
+// The scan-derived quota SUMS THE CACHED VALUES of the enumeration entries: one
+// prefix scan, zero per-entry fan-out to the {slug} shards.
 //
-// docs/SPEC.md "Scan-derived quota" / "Sum the cached index values; the
-// write paths keep them fresh": the identity_pastes/<id>/<slug> entry caches
-// the paste's live byte sum + expires_at, and the quota scan trusts exactly
-// those cached fields. The freshness contract this file pins:
+// The entry caches the paste's live byte sum and expires_at, and the scan trusts
+// exactly those fields. The freshness contract pinned here:
 //
-//   - every size-changing operation maintains the cached size (insert seeds
-//     it, AppendVersion + DeleteVersion refresh it),
-//   - the scan performs NO per-entry follow-up reads - observable because a
+//   - every size-changing operation maintains the cached size,
+//   - the scan performs NO per-entry follow-up reads, observable because a
 //     stale-but-decodable entry whose authoritative rows are ABSENT still
-//     contributes its cached values (the retired design skipped it via a
-//     per-entry authoritative read),
-//   - the reconciler's reprojection is the drift healer: it rebuilds cached
-//     values from the authoritative rows and prunes orphans, even under an
-//     owner with no remaining authoritative records,
+//     contributes its cached values,
+//   - the reconciler's reprojection is the drift healer, rebuilding cached
+//     values and pruning orphans even under an owner with no records left,
 //   - fail-closed (Policy 3): an undecodable entry or a fail-closed
 //     placeholder HARD-FAILS the scan,
 //   - shale's quota result equals sqlite's on the same op sequence

@@ -405,33 +405,26 @@ func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int, ref
 }
 
 // PreClaimSiteSlug stakes a metadata-only claim on slug BEFORE a transactional
-// (shale-collocated blob) site deploy consumes its untar stream, so every file
-// stages under slug's {slug} shard and the pointers co-bind with the manifest
-// at commit. It is the cheap existence stake the site-deploy service needs: a
-// single {slug}-shard CAS that writes slug_owner/<slug> = owner IFF the slug is
-// free in BOTH directions (no pastes/<slug>, no sites/<slug>) AND not already
-// pre-claimed (no slug_owner/<slug>). All three reads join the CAS read-set, so
-// two concurrent claims of the same slug serialize and one loses.
+// site deploy consumes its untar stream, so every file stages under the {slug}
+// shard and the pointers co-bind with the manifest at commit.
 //
-// It returns ErrSlugTaken on any collision (the caller re-mints + re-claims a
-// fresh slug before reading the body), nil on a successful claim.
+// A single {slug}-shard CAS writing slug_owner/<slug> IFF the slug is free in
+// BOTH directions (no pastes/, no sites/) and not already pre-claimed. All three
+// reads join the read-set, so concurrent claims serialize and one loses.
 //
-// The slug_owner/<slug> family is the SAME key a paste insert writes (it co-
-// shards on {slug}); a site claim parks a marker there without conflicting with
-// the site authoritative insert, which checks only sites/<slug> + pastes/<slug>
-// for its collision (NOT slug_owner), so the deploy's own InsertSiteWithQuota
-// Check does not reject the claim it just made. A crash after a successful claim
-// but before the deploy commits leaves a slug_owner/<slug> marker with no
-// authoritative site row: a harmless metadata leak. There is NO dedicated
-// slug_owner sweep - the marker self-heals because a later paste insert that
-// mints that slug overwrites slug_owner/<slug> unconditionally (insertAuthoritative
-// Puts it and checks only pastes/<slug> + sites/<slug> for its collision). Until
-// such a paste reuses it, the only effect is that one slug staying un-pre-claimable
-// for a future SITE deploy, in a 32^8 space (the owner sum reads the counter and
-// the site reconciler scans sites/; neither touches slug_owner).
+// Returns ErrSlugTaken on any collision; the caller re-mints and re-claims.
 //
-// owner + now are accepted for symmetry with the seam and to value the marker;
-// the claim itself does not charge quota (it is not a byte reservation).
+// slug_owner/<slug> is the same key a paste insert writes. The site
+// authoritative insert checks only sites/ and pastes/ for its collision, so a
+// deploy does not reject the claim it just made.
+//
+// A crash after claiming but before committing leaves a marker with no site row:
+// a harmless leak with no dedicated sweep, because a later paste minting that
+// slug overwrites the marker unconditionally. Until then the only effect is one
+// slug staying un-pre-claimable for a future site deploy, in a 32^8 space.
+//
+// owner and now are accepted for symmetry with the seam; the claim charges no
+// quota, being a stake rather than a byte reservation.
 func (r *ShaleRepo) PreClaimSiteSlug(_ context.Context, slug domain.Slug, owner string, _ time.Time) error {
 	pasteKey := shaleKeyPaste(slug)
 	siteKey := shaleKeySite(slug)

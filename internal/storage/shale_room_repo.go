@@ -261,33 +261,33 @@ func (r *ShaleRepo) GetRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 	return shaleDecodeRoomValue(raw), nil
 }
 
-// ScanRoom returns the whole namespace for (appSlug, id) as a domain.RoomKV,
-// stamped with the EXACT per-room sequence the snapshot reflects
-// (RoomKV.Seq). Shale cannot put a prefix scan inside a CAS (no phantom
-// protection), so exactness runs a SEQ FENCE (see SPEC "The per-room
-// sequence: assignment at commit"): read the room record's seq, scan the
-// namespace, re-read the seq - equal means no mutation committed between
-// the two reads (every mutation bumps the record's seq in its CAS), so the
-// scan is exactly the state at S; changed means a commit interleaved and
-// the scan retries. Bounded retries; on exhaustion the scan FAILS rather
-// than returning a state whose S is a lie (the relay join then fails and
-// the client reconnects - correctness is never traded for a stale fence).
+// ScanRoom returns the whole namespace for (appSlug, id), stamped with the
+// EXACT per-room sequence the snapshot reflects.
 //
-// REPLICATION BAR (R <= 2): the fence's exactness additionally assumes
-// every read it issues - the two seq reads AND the union scan between them
-// - observes every mutation the equal fence values bracket. That holds at
-// R=1 (a single owner serves everything) and at R=2 (the write bar is 2/2:
-// a write acks only once EVERY replica holds it, so any member a read
-// lands on is complete). At R >= 3 a write's ack set is a quorum, so a
-// read-one union scan served mid-handoff by a member OUTSIDE some write's
-// ack set could miss a mutation that both fence reads - served by
-// up-to-date members - agree is committed: S would be stamped high with
-// the mutation absent from the state, a hole the splice contract CANNOT
-// detect (the snapshot claims to cover it). Before raising the room
-// tier's replication factor past 2, this fence must be revisited (e.g. a
-// quorum union scan, or bracketing scan and fence reads on the same
-// member set). The current bar is pinned by
-// TestShaleRoomSeqFence_ReplicationBar.
+// Shale cannot put a prefix scan inside a CAS (no phantom protection), so
+// exactness runs a SEQ FENCE: read the room record's seq, scan, re-read the
+// seq. Equal means no mutation committed between the reads, since every
+// mutation bumps that seq in its own CAS, so the scan is exactly the state at S.
+// Changed means a commit interleaved and the scan retries.
+//
+// Bounded retries. On exhaustion the scan FAILS rather than returning a state
+// whose S is a lie: the join then fails and the client reconnects.
+//
+// # Replication bar (R <= 2)
+//
+// The fence also assumes every read it issues observes every mutation the equal
+// fence values bracket. That holds at R=1, and at R=2 because the write bar is
+// 2/2, so any member a read lands on is complete.
+//
+// At R >= 3 a write acks on a quorum, so a read-one union scan served
+// mid-handoff by a member outside some write's ack set could miss a mutation
+// both fence reads agree is committed. S would be stamped high with the
+// mutation absent, a hole the splice contract CANNOT detect because the
+// snapshot claims to cover it.
+//
+// Raising the room tier past R=2 requires revisiting this fence, e.g. a quorum
+// union scan, or bracketing the scan and fence reads on the same member set.
+// Pinned by TestShaleRoomSeqFence_ReplicationBar.
 //
 // Single-shard ScanPrefix over roomkv/<app>/<uuid>/ (every room family
 // co-shards on {app-slug}, so this never fans out). An existing room with no
