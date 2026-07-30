@@ -298,6 +298,14 @@ func (r *ShaleRepo) aggregatePrefixOnce(prefix []byte) ([]scanItem, error) {
 			if derr != nil {
 				return fmt.Errorf("decode envelope for %q: %w", k, derr)
 			}
+			if isTombstoneEnvelope(env) {
+				// A DELETED key, not a row - same rule as scanPrefixOnce, and
+				// this is the path the CROSS-SHARD consumers use (reconcile,
+				// quota sum, expiry sweep), so omitting it here left the
+				// phantom-row bug fully intact for exactly those consumers
+				// while the single-shard path looked fixed.
+				continue
+			}
 			local = append(local, scanItem{
 				Key:   append([]byte(nil), k...),
 				Value: append([]byte(nil), env.Payload...),
