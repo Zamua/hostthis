@@ -1,41 +1,32 @@
 // Package shaleblob adapts a blob-capable storage.ShaleRepo to the
 // service.BlobUnit seam, routing a record's blob lifecycle through the shale
-// cluster's transactional blob plane (*cluster.BlobKV) so a staged blob's
-// pointer co-commits with the metadata on the owning {slug} shard.
+// cluster's transactional blob plane so a staged blob's pointer co-commits with
+// the metadata on the owning {slug} shard.
 //
-// It is the second service.BlobUnit implementation (the first is
-// service.StandaloneBlobUnit, the detached content-addressed store). It lives
-// in its OWN package because it depends on BOTH service (the seam) AND storage
-// (the repo): service imports storage for its error sentinels, so storage
-// cannot import service - this adapter package breaks the cycle. The cmd wiring
-// picks it for a shale backend whose repo has a blob store configured
-// (ShaleRepo.HasBlobPlane()).
+// Its own package because it depends on BOTH service and storage: service
+// imports storage for error sentinels, so storage cannot import service, and
+// this breaks the cycle. Selected for a shale backend whose repo has a blob
+// store configured.
 //
-// Canonical design: docs/design/shale-blobs-phase3.md + docs/SPEC.md
-// "Shale-collocated blobs".
+// Design: docs/design/shale-blobs-phase3.md, docs/SPEC.md "Shale-collocated
+// blobs".
 //
-// The seam mapping (vs the standalone path):
+// The seam mapping, against the standalone path:
 //
-//   - Stage / StageStream -> ShaleRepo.StageBlobStream -> BlobKV.StageBlob: the
-//     bytes stream to the FINAL unit-keyed object OUTSIDE any transaction and
-//     are reader-INVISIBLE until Commit binds the pointer. The returned
-//     BlobHandle carries the opaque cluster.BlobRef in its Ref field.
-//   - Commit -> stash the staged refs by slug, run the repo's existing metadata
-//     write (which pops + BindBlobs them inside the authoritative {slug}
-//     transaction), then clear the stash. The pointer co-commits with the row
-//     in ONE single-shard CAS, so there is no pending window - the paste
-//     commits READY directly (the pending/finalizer model collapses here; it
-//     stays on the standalone path, see SPEC).
-//   - Read / ReadAll -> ResolveBlobID(slug, sha) -> BlobKV.GetBlob, wrapped in
-//     the SAME magic-peek + zstd decode the standalone GetReader uses, so the
-//     read path sees decompressed bytes. ctx is tied to the reader's Close
-//     (GetBlob streams lazily; ctx MUST outlive the reader).
-//   - UnbindOnDelete -> a NO-OP: the delete-side unbind is folded INTO the
-//     metadata-delete transaction (ShaleRepo.Delete / DeleteVersion /
-//     DeleteSite already UnbindBlob the row's blobs atomically), so the seam's
-//     post-delete hook has nothing to do.
+//   - Stage streams bytes to the final unit-keyed object OUTSIDE any
+//     transaction; they stay reader-invisible until Commit binds the pointer.
+//   - Commit stashes the staged refs by slug and runs the repo's metadata
+//     write, which binds them inside the authoritative {slug} transaction. The
+//     pointer co-commits with the row in one CAS, so there is no pending
+//     window and the paste commits READY directly. The pending/finalizer model
+//     collapses here and stays on the standalone path.
+//   - Read resolves the blob id and wraps the same magic-peek + zstd decode the
+//     standalone reader uses. ctx is tied to the reader's Close, since the
+//     stream is lazy and ctx MUST outlive it.
+//   - UnbindOnDelete is a no-op: the unbind is folded into the metadata-delete
+//     transaction, so the post-delete hook has nothing left to do.
 //
-// Build/runtime: -tags slatedb (it reaches *cluster.BlobKV through *ShaleRepo).
+// Needs -tags slatedb.
 
 //go:build slatedb
 
