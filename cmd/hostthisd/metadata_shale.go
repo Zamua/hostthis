@@ -1,7 +1,5 @@
-// metadata_shale.go - shale-cluster-backed metadataBundle. Active only
-// when the binary is built with -tags slatedb (the shale backend wraps
-// slatedb as its per-node KV engine, so it carries the same build/runtime
-// requirements as the direct slatedb backend).
+// metadata_shale.go - shale-cluster-backed metadataBundle, active only under
+// -tags slatedb (shale wraps slatedb as its per-node KV engine).
 //
 // Reads the same S3 connection config as the slatedb backend:
 //   HOSTTHIS_METADATA_S3_ENDPOINT   (e.g. http://minio:9000)
@@ -24,16 +22,14 @@
 //                                      shale's 5s default; malformed fails startup)
 //   HOSTTHIS_SHALE_WRITE_TIMEOUT      (same, for the per-dispatch write deadline)
 //
-// With HOSTTHIS_SHALE_BIND_ADDR unset (the default) the node runs the
-// single-node path exactly as before: no gossip, no ring routing, every
-// op local. Setting it brings up memberlist + gRPC forwarding and joins
+// With BIND_ADDR unset the node runs single-node: no gossip, no ring routing,
+// every op local. Setting it brings up memberlist + gRPC forwarding and joins
 // the ring (docs/SPEC.md "Multi-node shale").
 //
-// ReadConsistency is fixed at cluster.ReadQuorum inside
-// storage.NewShaleRepo (ShaleConfig exposes no knob for it), so there is
-// no env var for it here. Quorum is required at R>1 (ReadNearest could
-// return a still-backfilling replica's NotFound for live data); at R=1 a
-// quorum is the single replica, so it is behavior-identical there.
+// ReadConsistency is fixed at ReadQuorum inside NewShaleRepo, so there is no env
+// var. Quorum is required at R>1, where ReadNearest could return a
+// still-backfilling replica's NotFound for live data; at R=1 the quorum is the
+// single replica, so it is behaviour-identical.
 
 //go:build slatedb
 

@@ -135,47 +135,40 @@ func (r *Registry) nextConnID() uint64 {
 	return r.nextID
 }
 
-// admit reserves a connection slot for key under all three caps and
-// returns the hub to register into (creating it lazily) plus the fresh
-// connection id, OR an admission error. The reservation increments the
-// per-app counter; the caller MUST call release(key) exactly once when the
-// connection ends so the counter is decremented (the relay does this in
-// the connection's deferred teardown).
+// admit reserves a connection slot for key under all three caps and returns the
+// hub to register into (creating it lazily) plus a fresh connection id.
 //
-// Per-room isolation in the admission path: admit must NOT hold the global
-// registry lock across any hub-lock work, so a join to ANY room never
-// stalls a concurrent join to a DIFFERENT room behind that room's hub
-// mutex. It therefore does the per-app + total-rooms accounting and the
-// lazy hub create (the fast, map-only work the global lock must serialize)
-// UNDER r.mu, RELEASES r.mu, and only then takes the target hub's lock for
-// the per-room cap check + register. admit never holds r.mu and hub.mu at
-// once, so there is no lock-order cycle to deadlock on. (The hub lock
-// itself is a pure membership mutex - no storage I/O ever runs under it,
-// see commitAndMirror - so the register can never stall behind a slow
-// durable commit either.)
+// The reservation increments the per-app counter, so the caller MUST call
+// release(key) exactly once when the connection ends.
 //
-// The hub admit is about to register into is kept alive across the r.mu gap by
-// the PENDING-ADMIT guard, not by emptiness. admit increments r.pending[key]
-// under r.mu (alongside perApp++ and the id reservation) BEFORE it releases
-// r.mu, and decrements it under r.mu AFTER hub.register returns (success OR
-// rollback). Every hub-removal path - removeHub (the onEmpty callback fired
-// when a room's LAST connection leaves) and admit's own rollback - deletes a
-// hub only when it is empty AND has zero pending admits. So a hub an admit
-// has reserved a slot for but not yet registered into is never torn out from
-// under the register (the last-leave-vs-admit race: the departing last
-// connection's onEmpty would otherwise remove the hub the admit is about to
-// register into, orphaning the join and leaking its per-app slot). This
-// keeps admit decoupled from r.mu across hub.register: admit still holds NO
-// global lock while it takes the hub lock to register, so a join to one room
-// never stalls on another room's hub contention.
+// # Per-room isolation
 //
-// The order of checks: the total-rooms cap (an upgrade creating a NEW hub)
-// and the per-app aggregate are checked under r.mu; the per-room cap is
-// enforced inside hub.register under hub.mu. When a room is at its
-// per-room cap AND its app is at the per-app cap at once, the per-app
-// refusal wins (it is checked first, under r.mu) - a precedence the prior
-// global-lock version reversed, but no contract pins which 429 a
-// doubly-capped upgrade returns, and decoupling the hubs is worth it.
+// admit must NOT hold the global registry lock across any hub-lock work, or a
+// join to one room stalls a concurrent join to a different room. So it does the
+// map-only accounting and lazy hub create under r.mu, RELEASES r.mu, then takes
+// the target hub's lock to check the per-room cap and register.
+//
+// It never holds r.mu and hub.mu at once, so there is no lock-order cycle. The
+// hub lock is pure membership with no storage I/O under it, so a register
+// cannot stall behind a durable commit either.
+//
+// # Keeping the hub alive across the r.mu gap
+//
+// By a pending-admit guard, not by emptiness. admit increments r.pending[key]
+// under r.mu before releasing it, and decrements it after hub.register returns,
+// success or rollback. Every hub-removal path deletes a hub only when it is
+// empty AND has zero pending admits.
+//
+// Without that, a departing last connection's onEmpty could remove the hub an
+// admit is about to register into, orphaning the join and leaking its per-app
+// slot.
+//
+// # Order of checks
+//
+// The total-rooms cap and the per-app aggregate are checked under r.mu; the
+// per-room cap inside hub.register under hub.mu. A room at its per-room cap
+// whose app is also at the per-app cap gets the per-app refusal, since that is
+// checked first. No contract pins which 429 a doubly-capped upgrade returns.
 func (r *Registry) admit(key RoomKey) (h *Hub, id uint64, err error) {
 	r.mu.Lock()
 	if r.closing {
