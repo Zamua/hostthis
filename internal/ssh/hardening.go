@@ -4,46 +4,29 @@ import (
 	gossh "github.com/charmbracelet/ssh"
 )
 
-// Session hardening: defense in depth.
+// Session hardening: defence in depth.
 //
-// hostthis sessions are short-lived single-command exchanges:
-//   - exec (or shell with a PTY) → verb runs → exit
-// Nothing about that requires port-forwarding, agent-forwarding, X11, or
-// subsystem channels. Disabling them shrinks the blast radius if an
-// attacker ever compromises an identity: the SSH connection becomes
-// useless as a TCP-tunnel pivot, a credential-relay surface, or an
-// SFTP/SCP file mover.
+// A hostthis session is a short-lived single-command exchange, which needs no
+// port-forwarding, agent-forwarding, X11 or subsystem channels. Disabling them
+// shrinks the blast radius of a compromised identity: the connection becomes
+// useless as a TCP-tunnel pivot, a credential-relay surface, or an SFTP mover.
 //
-// Mechanism summary (charmbracelet/ssh, gliderlabs fork):
-//   - LocalPortForwardingCallback returning false → refuses
-//     `direct-tcpip` channel requests (ssh -L). The library's tcpip.go
-//     denies when the callback is nil OR returns false; we set an
-//     explicit `false` callback for clarity and to survive any future
-//     upstream default flip.
-//   - ReversePortForwardingCallback returning false → refuses
-//     `tcpip-forward` requests (ssh -R). Same shape as above.
-//   - SessionRequestCallback returning false for "subsystem" → refuses
-//     SFTP/SCP-as-subsystem and any other named subsystem. The library
-//     consults this callback on subsystem requests; "shell" and "exec"
-//     are explicitly allowed so normal verb sessions still work.
+// Explicitly gated:
 //
-// Already covered by upstream defaults:
-//   - SubsystemHandlers is nil → unknown subsystems are refused with
-//     a reply(false). The SessionRequestCallback gate is belt and
-//     suspenders so a future upstream change that adds a default
-//     subsystem doesn't quietly expose us.
-//   - x11-req is not in the library's request switch → it falls to the
-//     default case which replies(false). No additional gate needed,
-//     but documented here so the contract is explicit.
-//   - auth-agent-req@openssh.com is acknowledged by the library but no
-//     forwarding socket is ever set up by hostthis (we never call into
-//     ssh.AgentRequested), so an "approved" agent-req is a no-op for
-//     any client that tried to use it.
+//   - LocalPortForwardingCallback false refuses direct-tcpip (ssh -L).
+//   - ReversePortForwardingCallback false refuses tcpip-forward (ssh -R).
+//   - SessionRequestCallback false for "subsystem" refuses SFTP/SCP and any
+//     other named subsystem; "shell" and "exec" stay allowed.
 //
-// We keep PTY allocation enabled: the verb-help formatter switches LF →
-// CRLF when a PTY is present, and the test suite exercises both shapes.
-// PTY itself is not a tunnel; it's just stdin/stdout wrapped in line
-// discipline.
+// The library already denies the first two when the callback is nil, and
+// already refuses unknown subsystems and x11-req by default. The explicit
+// callbacks exist so an upstream default flip cannot quietly expose us.
+//
+// auth-agent-req is acknowledged by the library, but hostthis never sets up a
+// forwarding socket, so an approved agent-req is a no-op.
+//
+// PTY allocation stays ENABLED: the help formatter switches LF to CRLF when a
+// PTY is present. A PTY is line discipline, not a tunnel.
 
 // withHardening returns an ssh.Option that disables port-forwarding,
 // reverse port-forwarding, and subsystem requests on the wish server.
