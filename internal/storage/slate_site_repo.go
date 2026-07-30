@@ -128,12 +128,13 @@ func (row siteRow) toDomain(slug domain.Slug) (domain.Site, error) {
 		return domain.Site{}, err
 	}
 	return domain.Site{
-		Slug:      slug,
-		Identity:  domain.Identity(row.Identity),
-		Manifest:  man,
-		CreatedAt: row.CreatedAt,
-		UpdatedAt: row.UpdatedAt,
-		ExpiresAt: row.ExpiresAt,
+		Slug:        slug,
+		Identity:    domain.Identity(row.Identity),
+		Manifest:    man,
+		StoredBytes: row.DedupedSize,
+		CreatedAt:   row.CreatedAt,
+		UpdatedAt:   row.UpdatedAt,
+		ExpiresAt:   row.ExpiresAt,
 	}, nil
 }
 
