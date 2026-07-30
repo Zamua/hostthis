@@ -418,18 +418,19 @@ type blobSink struct {
 // identity cap minus everything the owner holds, crediting back the site being
 // replaced.
 //
-// Takes the existing SITE rather than a credit figure, so the call site cannot
-// pick the wrong unit. A site is charged as CompressedDedupedSize, so usedSite
-// is a sum of compressed bytes; crediting the uncompressed DedupedSize would
-// subtract more than was ever added and inflate the budget past the owner's
-// real remaining quota.
+// The credit is StoredBytes, the figure the deploy charged and usedSite sums.
+// It is NOT derivable from the manifest: per-entry compressed sizes are not
+// persisted, so a loaded manifest's CompressedDedupedSize is 0 and crediting it
+// would credit nothing, blocking an in-place update for an owner at their cap.
+// The uncompressed DedupedSize is the opposite error, subtracting more than was
+// ever charged and inflating the budget past the real remaining quota.
 //
 // An expired-but-unswept target is credited NOTHING: usedSite already excludes
 // it, so crediting it would subtract bytes that were never counted.
 func siteExtractBudget(cap, usedPaste, usedSite int64, existing domain.Site, now time.Time) int64 {
 	credit := int64(0)
 	if !domain.IsExpired(existing.ExpiresAt, now) {
-		credit = int64(existing.Manifest.CompressedDedupedSize())
+		credit = int64(existing.StoredBytes)
 	}
 	used := usedPaste + max(usedSite-credit, 0)
 	return domain.Allowance{Cap: cap, Used: used}.Remaining()

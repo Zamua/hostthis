@@ -7,10 +7,13 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-func siteWith(uncompressed, compressed int, expiresAt time.Time) domain.Site {
+// siteWith builds a site as a READ returns it: a manifest carrying only
+// uncompressed sizes (per-entry compressed sizes are not persisted) plus the
+// StoredBytes the deploy charged.
+func siteWith(uncompressed, stored int, expiresAt time.Time) domain.Site {
 	man := domain.NewManifest()
-	man.Add("index.html", domain.ManifestEntry{SHA: "a", Size: uncompressed, CompressedSize: compressed})
-	return domain.Site{Manifest: man, ExpiresAt: expiresAt}
+	man.Add("index.html", domain.ManifestEntry{SHA: "a", Size: uncompressed})
+	return domain.Site{Manifest: man, StoredBytes: stored, ExpiresAt: expiresAt}
 }
 
 // The replace budget must credit the site's STORED size.
@@ -33,11 +36,11 @@ func TestSiteExtractBudget_CreditsTheCompressedSize(t *testing.T) {
 
 	got := siteExtractBudget(1000, 0, usedSite, existing, now)
 
-	// Correct: credit the stored 100 -> used 600 -> budget 400.
+	// Correct: credit StoredBytes (100) -> used 600 -> budget 400.
 	if got != 400 {
 		t.Fatalf("want 400 (cap 1000 minus the 600 of OTHER sites), got %d. 700 means the credit used "+
-			"the UNCOMPRESSED size (400), subtracting bytes that were never charged and handing the "+
-			"untar guard a budget past the owner's real remaining quota.", got)
+			"the uncompressed manifest total (400), inflating the budget past the real remaining "+
+			"quota; 300 means it credited 0, which blocks an in-place update at the cap.", got)
 	}
 }
 

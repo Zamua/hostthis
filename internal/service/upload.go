@@ -63,6 +63,8 @@ type Upload struct {
 	// rule, an adapter supplies the algorithm. Overridable so a test can drive
 	// a branch without hunting for bytes that sniff a particular way.
 	Sniff domain.MIMESniffer
+	// finalizeWG tracks this instance's in-flight background finalizers.
+	finalizeWG sync.WaitGroup
 	// Retention is the installation's content-TTL policy; it stamps a new
 	// paste's ExpiresAt (UpdatedAt + window, or "never" when disabled).
 	Retention domain.Retention
@@ -274,19 +276,19 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 	return Result{}, SlugTakenErr
 }
 
-// finalizeWG lets a graceful shutdown wait for in-flight background finalizers
-// to drain, so a clean exit does not strand pending pastes for the reconciler
-// to age out.
-var finalizeWG sync.WaitGroup
-
-// WaitFinalize blocks until every background finalize started so far has
-// completed.
-func (u *Upload) WaitFinalize() { finalizeWG.Wait() }
+// WaitFinalize blocks until every background finalize this Upload started has
+// completed, so a graceful shutdown does not strand pending pastes for the
+// reconciler to age out.
+//
+// Per-instance. A package-level WaitGroup would make one Upload's WaitFinalize
+// block on every other instance's in-flight work, coupling unrelated servers
+// and any tests that run in parallel.
+func (u *Upload) WaitFinalize() { u.finalizeWG.Wait() }
 
 // startFinalize runs the background half of Create (write the blob, then flip
 // the paste's status) so the SSH/HTTP caller never blocks on the blob write.
 func (u *Upload) startFinalize(slug domain.Slug, sha string, body []byte) {
-	finalizeWG.Go(func() {
+	u.finalizeWG.Go(func() {
 		u.finalize(slug, sha, body)
 		if u.onFinalizeDone != nil {
 			u.onFinalizeDone()
