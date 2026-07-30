@@ -124,6 +124,9 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 	}
 
 	pastesByOwner := make(map[string]map[string]identityPasteRow)
+	// Corrupt rows are TALLIED and summarised once per pass, never logged per
+	// record: see corrupt_tally.go for why that distinction is load-bearing.
+	var corrupt corruptTally
 	// stalePending collects slugs whose status is pending and whose
 	// created_at is older than the pending timeout: the pod-death backstop
 	// (the in-memory bytes are gone, no finalizer will ever run). They are
@@ -151,11 +154,23 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 			// tolerance of the quota scan".
 			owner := r.ownerOfSlug(domain.Slug(slug))
 			if owner == "" {
-				// No slug_owner to derive the owner (only reachable on the
-				// metadata-only test path; prod always writes slug_owner). Cannot
-				// project the entry; log loudly - this is the one residual where
-				// the row can stay un-enumerated until it is repaired.
-				r.repoLog().Printf("reconcile: undecodable paste %s AND no slug_owner: cannot project enumeration entry; quota may under-count this slug until it is repaired: %v", item.Key, err)
+				// No slug_owner, so the owner cannot be derived and no
+				// enumeration entry can be projected: the row stays
+				// un-enumerated until it is repaired.
+				//
+				// COUNTED, NOT LOGGED PER RECORD. The comment here used to say
+				// this was "only reachable on the metadata-only test path; prod
+				// always writes slug_owner" - that assumption is FALSE, and the
+				// cost of it being false was severe: these rows can never be
+				// repaired (there is nothing left to derive an owner from), so
+				// every pass re-found the same set and logged one line each.
+				// Observed at 19,764 rows emitting ~60 lines/sec and consuming
+				// ~1.5 CPU cores, which starved the request path badly enough to
+				// take a read from 0.45s to 19s. A per-pass summary keeps the
+				// diagnostic (the count is what matters; the individual slugs are
+				// identical every pass) at a fixed cost. Sample the first few so
+				// a reader can still go look at one.
+				corrupt.noteUnrepairable(slug)
 				continue
 			}
 			if pastesByOwner[owner] == nil {
@@ -169,7 +184,10 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 			if _, ok := pastesByOwner[owner][slug]; !ok {
 				pastesByOwner[owner][slug] = identityPasteRow{Placeholder: true}
 			}
-			r.repoLog().Printf("reconcile: undecodable paste %s: projected fail-closed placeholder enumeration entry under owner %s: %v", item.Key, owner, err)
+			// Also counted rather than logged per record, same reasoning: a
+			// corrupt row is corrupt on every pass, so the line repeats forever
+			// at a cost proportional to the debris.
+			corrupt.notePlaceholder(slug)
 			continue
 		}
 		if domain.NormalizeStatus(p.Status) == domain.PasteStatusFailed {
@@ -202,6 +220,10 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 			now.Sub(p.CreatedAt) > PendingPasteTimeout {
 			stalePending = append(stalePending, domain.Slug(slug))
 		}
+	}
+
+	if line, ok := corrupt.summary("pastes"); ok {
+		r.repoLog().Print(line)
 	}
 
 	if r.testHookReconcileBeforeIndexWrites != nil {

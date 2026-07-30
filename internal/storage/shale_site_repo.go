@@ -836,6 +836,8 @@ func (r *ShaleRepo) reconcileSiteIndexPass() error {
 	// every authoritative site reprojected into its owner's index with its
 	// cached quota values. Mirrors the paste reconciler's pastesByOwner.
 	sitesByOwner := make(map[string]map[string]identitySiteRow)
+	// Tallied, not logged per record. See corrupt_tally.go.
+	var corrupt corruptTally
 	for _, item := range siteItems {
 		slug := strings.TrimPrefix(string(item.Key), "sites/")
 		var row siteRow
@@ -852,18 +854,21 @@ func (r *ShaleRepo) reconcileSiteIndexPass() error {
 			// under-count). See docs/SPEC.md "Decode tolerance of the quota scan".
 			owner := r.ownerOfSlug(domain.Slug(slug))
 			if owner == "" {
-				// No slug_owner to derive the owner (reachable only on the
-				// metadata-only test path that skips the pre-claim; prod always
-				// writes slug_owner). Cannot project the entry; log loudly - the
-				// one residual where the row can stay un-enumerated until repaired.
-				r.repoLog().Printf("reconcile sites: undecodable site %s AND no slug_owner: cannot project enumeration entry; site quota may under-count this slug until it is repaired: %v", item.Key, err)
+				// No slug_owner, so the owner cannot be derived and no
+				// enumeration entry can be projected: the row stays
+				// un-enumerated until repaired. COUNTED, not logged per record -
+				// the note that used to sit here claiming this was reachable
+				// "only on the metadata-only test path" is FALSE, and per-record
+				// logging of a set that can never be repaired is an unbounded,
+				// permanent cost.
+				corrupt.noteUnrepairable(slug)
 				continue
 			}
 			if sitesByOwner[owner] == nil {
 				sitesByOwner[owner] = make(map[string]identitySiteRow)
 			}
 			sitesByOwner[owner][slug] = identitySiteRow{Placeholder: true}
-			r.repoLog().Printf("reconcile sites: undecodable site %s: projected fail-closed placeholder enumeration entry under owner %s: %v", item.Key, owner, err)
+			corrupt.notePlaceholder(slug)
 			continue
 		}
 		if sitesByOwner[row.Identity] == nil {
@@ -873,6 +878,9 @@ func (r *ShaleRepo) reconcileSiteIndexPass() error {
 			Size:      row.DedupedSize,
 			ExpiresAt: row.ExpiresAt,
 		}
+	}
+	if line, ok := corrupt.summary("sites"); ok {
+		r.repoLog().Print(line)
 	}
 	return r.reconcileSiteIndexes(sitesByOwner, siteIdx)
 }
