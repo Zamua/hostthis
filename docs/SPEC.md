@@ -4669,6 +4669,36 @@ right thing for an idempotent counter (a tolerant parse that skip +
 continues on a bad row). The skip is LOGGED so a persistently-bad row is
 visible to an operator, not silently swallowed forever.
 
+  **A DELETED key is not a corrupt row: tombstones are skipped by the scan.**
+  At R>1 a delete is not a removal. shale turns it into an empty-payload
+  tombstone write, so the key keeps a stamped envelope carrying no payload.
+  `cluster.Get` resolves that to not-found, but a raw prefix scan hands the
+  stored bytes back, so a scan consumer sees the deleted key as an item whose
+  value is empty. An empty value does NOT present as "absent" to a consumer -
+  it presents as CORRUPT, because decoding empty input fails. Every deleted
+  record would therefore reappear as a phantom undecodable row on every pass,
+  permanently: it has no owner to derive (the owner mapping was deleted with
+  it), so it falls in the unrepairable class above, and deletes are ordinary
+  traffic, so the phantom set only grows. The scan therefore drops tombstones,
+  which simply makes it agree with the semantics `Get` already has.
+
+  **Emptiness alone does NOT identify a tombstone, and conflating the two is
+  a quota-correctness bug.** Two distinct things arrive as an empty payload:
+
+  - a TOMBSTONE: a STAMPED envelope with no payload. A deleted key. Skipped.
+  - a LEGACY BARE MARKER: a genuinely empty stored value with NO envelope.
+    The pre-shale engine stored enumeration-index entries as bare empty
+    markers and the migration is in place, so scans still encounter those raw
+    empty bytes even though no shale write can produce one (its Put rejects
+    empty values, which is why the index families use a one-byte marker). This
+    is LIVE DATA - an owner's enumeration entry, which the quota scan sums.
+
+  Skipping the second would UNDER-COUNT a quota with no error surfaced
+  anywhere, which the ranking invariant forbids outright. The test is
+  therefore "stamped AND empty", never "empty": a bare value decodes with the
+  zero stamp, while a real envelope always carries the commit stamp it was
+  written under.
+
   **The log is a PER-PASS SUMMARY, never one line per row.** This matters
   because "retried next pass" is not the same as "eventually repaired":
   corrupt rows split into two classes, and only one of them can heal.
