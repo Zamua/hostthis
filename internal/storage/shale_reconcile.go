@@ -105,6 +105,7 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 	}
 	liveBytes := make(map[string]int64)
 	poisonedVersions := make(map[string]bool)
+	var corruptVersions corruptTally
 	for _, item := range verItems {
 		rest := strings.TrimPrefix(string(item.Key), string(prefixVersionsAll))
 		slug, _, ok := strings.Cut(rest, "/")
@@ -113,14 +114,21 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 		}
 		var v versionRow
 		if err := json.Unmarshal(item.Value, &v); err != nil {
+			// Counted, not logged per record: a poisoned version row is
+			// poisoned on every pass, so a line here repeats forever at a cost
+			// proportional to the debris. See corrupt_tally.go.
 			poisonedVersions[slug] = true
-			r.repoLog().Printf("reconcile: undecodable version %s: projecting a fail-closed placeholder for %s: %v", item.Key, slug, err)
+			corruptVersions.notePlaceholder(slug)
 			continue
 		}
 		if v.Deleted {
 			continue
 		}
 		liveBytes[slug] += int64(v.Size)
+	}
+
+	if line, ok := corruptVersions.summary("versions"); ok {
+		r.repoLog().Print(line)
 	}
 
 	pastesByOwner := make(map[string]map[string]identityPasteRow)
@@ -245,6 +253,7 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 	// tick retries it), the same per-row discipline the index reprojection uses.
 	for _, slug := range stalePending {
 		if err := r.MarkFailed(slug); err != nil {
+			// transient-failure-log: fires only when MarkFailed errors, not per record.
 			r.repoLog().Printf("reconcile: age-out pending %s: %v", slug, err)
 		}
 	}
@@ -338,6 +347,7 @@ func reconcileEnumerationIndex[R any](r *ShaleRepo, wanted map[string]map[string
 		if pruneOrphan(slug) {
 			// Best-effort, guarded drop.
 			if _, err := r.guardedDeleteIndexEntry(item.Key, item.Value); err != nil {
+				// transient-failure-log: fires only on a failed prune, and the next pass retries.
 				r.repoLog().Printf("%s: prune %s: %v (next pass retries)", logPrefix, item.Key, err)
 			}
 		}
@@ -350,10 +360,12 @@ func reconcileEnumerationIndex[R any](r *ShaleRepo, wanted map[string]map[string
 			written, err := r.guardedPutIndexEntry(key, expected, present, row)
 			if err != nil {
 				writeFailures++
+				// transient-failure-log: fires only on a failed write, and the next pass retries.
 				r.repoLog().Printf("%s: index write %s failed: %v (skipped; next pass retries)", logPrefix, key, err)
 				continue
 			}
 			if !written {
+				// transient-failure-log: a concurrent live write, self-resolving next pass.
 				r.repoLog().Printf("%s: index write %s skipped: entry changed since the pass snapshot (a live write landed; next pass reprojects)", logPrefix, key)
 			}
 		}
