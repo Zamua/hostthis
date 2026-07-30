@@ -1,59 +1,43 @@
 // Package storage's shale-cluster-backed static-site persistence.
 //
-// Shale-cluster twin of slate_site_repo.go (the SlateDB-direct site repo)
-// and site_repo.go (the sqlite SiteRepo). It reuses the SAME site key
-// names + JSON row schema the slatedb backend uses (see slate_site_repo.go
-// and docs/SPEC.md "Shale reuses the layout"); co-location across shards is
-// by the ShardKeyFn (shaleShardKey in shale_shardkey.go), not by renaming
-// keys. The encodeManifest/decodeManifest pair + the siteRow JSON shape are
-// shared package-level with the sqlite + slatedb backends, so the on-wire
-// manifest is byte-identical across all three.
+// Reuses the site key names and JSON row schema of the slatedb backend, and
+// shares the manifest codec with all three backends, so the on-wire manifest is
+// byte-identical. Co-location is by shaleShardKey.
 //
-// # Key layout (reuses the slatedb site layout; sharded per family)
+// # Key layout
 //
-//	sites/<slug>                       -> {slug} shard  (authoritative JSON row)
-//	expiry_sites/<ts>/<slug>           -> {slug} shard  (sweep index, marker value; ts is fixed-width)
-//	identity_sites/<id>/<slug>         -> {id}   shard  (per-owner enumeration index, value-bearing: cached size + expiry)
+//	sites/<slug>                authoritative JSON row      -> {slug}
+//	expiry_sites/<ts>/<slug>    sweep index, marker value   -> {slug}
+//	identity_sites/<id>/<slug>  per-owner enumeration index -> {id}
+//	                            (value-bearing: cached size + expiry)
 //
-// # Scan-derived per-owner site quota (no counter)
+// # Scan-derived site quota
 //
-// There is deliberately NO stored site-byte counter and no reservation /
-// release marker. The per-owner SITE bytes are DERIVED by ONE prefix scan
-// of the per-owner enumeration index identity_sites/<id>/<slug>, summing
-// the cached (deduped size, expires_at) each value-bearing entry carries
-// (SumActiveSiteBytesByOwner) - zero per-entry row reads, mirroring the
-// paste quota scan; the deploy/replace paths write the cached values and
-// the reconciler's reprojection heals drift. ListSitesByOwner uses the same
-// index. The service (service.DeploySite) computes the budget
-// as `UserQuota - paste_bytes - site_bytes`, reading the paste sum and the
-// site sum SEPARATELY and adding them, so the two scans MUST count disjoint
-// sets: the paste sum enumerates identity_pastes/, the site sum enumerates
-// identity_sites/, and the two families never overlap. The per-owner CAP
-// check sums BOTH kinds (paste + site) against the cap, exactly like the
-// sqlite identityActiveBytes and the slatedb per-identity check, so the
-// ceiling holds however an owner splits their quota.
+// No stored counter and no reservation. Per-owner site bytes are derived by one
+// prefix scan of identity_sites/<id>/, summing the cached size each entry
+// carries. The deploy paths write those cached values; the reconciler heals
+// drift.
 //
-// # A deploy is a plain sequence (no reservation)
+// The service computes its budget as UserQuota - paste_bytes - site_bytes,
+// reading the two sums separately, so the two scans MUST count disjoint sets:
+// identity_pastes/ and identity_sites/ never overlap. The cap check sums both
+// kinds, so the ceiling holds however an owner splits their quota.
 //
-// A site deploy spans the {slug} shard (the authoritative sites/<slug> row +
-// the cross-family paste-slug collision read) and the {id} shard (the
-// enumeration-index entry), which cannot be one CAS transaction, but there is
-// no counter to reserve against, so it is a plain sequence:
+// # A deploy is a plain sequence
 //
-//  1. check quota (scan the owner's combined paste+site used bytes),
-//  2. authoritative write on the {slug} shard (the sites/<slug> row + the
-//     expiry index, with BOTH the sites/<slug> AND pastes/<slug> collision
-//     reads in the CAS read-set),
-//  3. write the value-bearing identity_sites/<id>/<slug> enumeration entry
-//     (cached deduped size + expiry, what the quota scan sums) on the {id}
-//     shard (best-effort; a lost write leaves a missing entry the reconciler
-//     reprojects, never a failed deploy).
+// It spans the {slug} shard (authoritative row, plus the cross-family paste
+// collision read) and the {id} shard (enumeration entry), which cannot be one
+// transaction. With no counter to reserve against it is simply:
 //
-// Expiry frees quota at READ time (the scan filters expires_at > now), so
-// conformCaps.ExpiryFreesQuotaAtReadTime = true for shale sites (matching
-// sqlite + slatedb); the check and the write are not atomic, so a bounded
-// same-owner over-admit is accepted (StrictIdentityQuotaUnderConcurrency =
-// false). See docs/SPEC.md "Scan-derived quota" / "The correctness argument".
+//  1. check quota (scan combined paste+site bytes),
+//  2. authoritative write on {slug}, with BOTH sites/<slug> and pastes/<slug>
+//     collision reads in the CAS read-set,
+//  3. write the enumeration entry on {id}, best-effort: a lost write leaves an
+//     entry the reconciler reprojects, never a failed deploy.
+//
+// Expiry frees quota at read time (the scan filters on expires_at). Check and
+// write are not atomic, so a bounded same-owner over-admit is accepted. See
+// docs/SPEC.md "Scan-derived quota".
 
 //go:build slatedb
 

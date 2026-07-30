@@ -1,64 +1,42 @@
 // Package storage's shale-cluster-backed room (app-persistence) KV store.
 //
-// Shale-cluster twin of slate_room_repo.go (the SlateDB-direct room repo)
-// and room_repo.go (the sqlite RoomKVRepo). It reuses the SAME room key
-// names + JSON record schema the slatedb backend uses (see
-// slate_room_repo.go and docs/SPEC.md "Shale reuses the layout"); co-location
-// across shards is by the ShardKeyFn (shaleShardKey in shale_shardkey.go),
-// not by renaming keys. The roomRow JSON shape is shared package-level with
-// the slatedb backend, so the on-wire room record is identical across both
-// slatedb-tagged backends.
+// Reuses the room key names and JSON schema of the slatedb room repo, so the
+// on-wire record is identical across both slatedb-tagged backends. Co-location
+// is by shaleShardKey, not by renaming keys.
 //
-// # Key layout (reuses the slatedb room layout; all sharded on {app-slug})
+// # Key layout (all sharded on {app-slug})
 //
-//	rooms/<app-slug>/<uuid>                     -> {app-slug} shard  (JSON record; carries the per-room byte_total + key_count for the strict per-room cap)
-//	roomkv/<app-slug>/<uuid>/<key>              -> {app-slug} shard  (raw value bytes, sentinel-prefixed)
-//	roomcreate/<app-slug>/<subnet>/<ts>/<uuid>  -> {app-slug} shard  (creation ledger marker; ts fixed-width, uuid disambiguates)
-//	roomexpiry/<ts>/<app-slug>/<uuid>           -> {app-slug} shard  (sweep index marker; ts fixed-width)
-//	roombytes/<app-slug>                        -> {app-slug} shard  (the per-app room-byte counter)
+//	rooms/<app-slug>/<uuid>                     JSON record, carries byte_total + key_count
+//	roomkv/<app-slug>/<uuid>/<key>              raw value bytes, sentinel-prefixed
+//	roomcreate/<app-slug>/<subnet>/<ts>/<uuid>  creation ledger marker
+//	roomexpiry/<ts>/<app-slug>/<uuid>           sweep index marker
+//	roombytes/<app-slug>                        per-app byte counter
 //
-// All four room families AND the per-app byte counter shard on <app-slug>,
-// so an app's rooms, every value, its creation ledger, its expiry entries,
-// and its byte counter co-locate on ONE shard. That makes "write one key,"
-// "load the whole room," "count this app's creations," and "check the per-app
-// cap" all single-shard operations - the room repo never fans out across
-// shards on the hot path.
+// Everything an app owns co-locates on one shard, so loading a room, counting
+// its creations and checking the per-app cap are all single-shard. The room
+// repo never fans out on the hot path.
 //
-// # Both caps are STRICT (single-shard CAS, two different read-set members)
+// # Both caps are strict
 //
-// A CAS read-set is a set of discrete key checks - ScanPrefix is not allowed
-// inside a transaction (a scanned range has no cheap phantom protection) - so a
-// cap whose magnitude is "the sum over a key range" must be backed by a
-// discrete COUNTER the read-set can carry, not by an in-CAS scan. The two room
-// caps use two different such read-set members:
+// A CAS read-set is discrete key checks, and ScanPrefix is not allowed inside a
+// transaction, so a cap whose magnitude is "the sum over a key range" needs a
+// discrete counter the read-set can carry. The two caps use different members:
 //
-//   - Per-APP aggregate: the per-app counter roombytes/<app> is read-checked +
-//     incremented in the {app-slug} value-write CAS, so two concurrent same-app
-//     writers cannot both pass a stale per-app sum and overshoot appCap.
-//   - Per-ROOM byte + key total: stored ON the room record (the roomRow
-//     byte_total + key_count fields, shale-only) and validated against
-//     MaxRoomBytes / MaxRoomKeys INSIDE the CAS. The room record is already in
-//     the read-set (the room-exists re-check) and rewritten on every PUT/DELETE
-//     (the clock touch), so two concurrent writers to DISTINCT keys of the same
-//     room - which target disjoint value keys and so would NOT conflict on the
-//     value-key check alone - DO conflict on the shared room record; the loser
-//     retries against the now-updated totals. So the per-room ceiling holds no
-//     matter how the writes interleave (conformCaps.StrictQuotaUnderConcurrency
-//     = true; the Rooms/PerRoomCapConcurrentCeiling conformance subtest pins it).
+//   - Per-APP: roombytes/<app> is read-checked and incremented in the same CAS,
+//     so two concurrent same-app writers cannot both pass a stale sum.
+//   - Per-ROOM: byte_total + key_count live ON the room record and are validated
+//     inside the CAS. That record is already in the read-set and is rewritten on
+//     every put, so two writers to DISTINCT keys of one room still conflict on
+//     it and the loser retries against updated totals.
 //
-// Unlike the paste / site insert (which spans the {id} counter shard and the
-// {slug} authoritative shard and needs the three-step reserve/authoritative/
-// confirm reservation), every room key co-shards on {app-slug}, so a room PUT
-// is a single-shard read-check-validate-write - no reserve/confirm split.
+// Every room key co-shards, so a put is a single-shard
+// read-check-validate-write with no reserve/confirm split.
 //
-// # Sweep-time expiry (ExpiryFreesQuotaAtReadTime = false)
+// # Sweep-time expiry
 //
-// The per-app room-byte counter (roombytes/<app>) is monotonic the way the
-// paste / site byte counters are: an expired-but-unswept room's bytes leave
-// the counter when the sweep deletes the room (DeleteRoom), not at read time.
-// So the counter over-counts an expired-unswept room transiently but never
-// under-counts (the fail-safe direction), matching the shale paste + site
-// counters.
+// The per-app counter is monotonic: an expired-but-unswept room's bytes leave
+// it when the sweep deletes the room, not at read time. So it over-counts
+// transiently and never under-counts, which is the fail-safe direction.
 
 //go:build slatedb
 
