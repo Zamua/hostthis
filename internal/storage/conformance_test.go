@@ -2,21 +2,15 @@ package storage_test
 
 // Backend-agnostic conformance suite for the storage contract.
 //
-// hostthis can run on more than one metadata backend (sqlite today,
-// slatedb behind a build tag, a shale-backed cluster planned). Every
-// backend implements the same four service-layer interfaces, and the
-// service / SSH / HTTP layers must behave identically no matter which
-// is wired. This suite pins the OBSERVABLE contract those interfaces
-// expose so a backend swap can be proven behavior-preserving: the same
-// assertions run against any implementation supplied through the
-// `newRepo` factory.
+// Every backend implements the same four service-layer interfaces, and the
+// service, SSH and HTTP layers must behave identically whichever is wired. This
+// pins the OBSERVABLE contract those interfaces expose, so a backend swap can be
+// proven behaviour-preserving: the same assertions run against any
+// implementation supplied through the newRepo factory.
 //
-// runConformance is the entry point. The sqlite backend calls it from
-// conformance_sqlite_test.go (default build). The slatedb backend calls
-// it from conformance_slatedb_test.go (build tag `slatedb`). A future
-// shale-backed backend adds its own factory file and calls the same
-// runConformance, which is the acceptance gate for "did the swap change
-// any observable behavior."
+// runConformance is the entry point; each backend adds a factory file calling
+// it. That is the acceptance gate for "did the swap change any observable
+// behaviour".
 //
 // Design notes:
 //   - The suite touches a backend ONLY through the conformanceRepo

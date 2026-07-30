@@ -406,34 +406,22 @@ func newFenceWALGCSettings() (*slatedb.Settings, error) {
 	return s, nil
 }
 
-// NewShaleRepo opens a shale cluster over a fresh slate backend and
-// returns a ShaleRepo over it. Caller must Close() to flush and shut down
-// the cluster (which shuts down the slate backend in turn).
+// NewShaleRepo opens a shale cluster over a fresh slate backend. The caller must
+// Close() to flush and shut down the cluster, which shuts down the backend too.
 //
-// When cfg.BindAddr is empty the cluster opens single-node (today's
-// behavior: every op local, no gossip, no ring routing). When BindAddr is
-// non-empty it opens multi-node: cluster.Open brings up memberlist on
-// BindAddr, advertises GRPCAddr to peers, joins via Seeds, and rebalances
-// the ring on membership change. The peer-discovery fields are passed
-// straight through to cluster.Config; everything else (ShardKeyFn,
-// ReadConsistency, ReplicationFactor) is identical across modes.
+// An empty cfg.BindAddr opens single-node: every op local, no gossip, no ring
+// routing. Non-empty opens multi-node, bringing up memberlist, advertising
+// GRPCAddr, joining via Seeds and rebalancing the ring on membership change.
+// ShardKeyFn, ReadConsistency and ReplicationFactor are identical across modes.
 //
-// The cluster is opened with shaleShardKey as its ShardKeyFn so that
-// every key family co-locates on the shard keyed by its subject
-// (<slug> / <id> / <subnet>), which is what makes an owner's enumeration
-// index and the per-slug authoritative rows each single-shard.
+// shaleShardKey is the ShardKeyFn, so every family co-locates on the shard
+// keyed by its subject, which is what makes an owner's enumeration index and
+// the per-slug authoritative rows each single-shard.
 //
-// Multi-node wiring (cfg.BindAddr != ""): NewShaleRepo binds the gRPC
-// peer-forwarding listener on cfg.GRPCAddr BEFORE opening the cluster, then
-// advertises the listener's ACTUAL bound address (lis.Addr().String()) as
-// the cluster's GRPCAddr. This matters when cfg.GRPCAddr is ":0" / an
-// OS-assigned port: the real port is only known after Listen, and a peer
-// that forwards to the advertised address must reach the address actually
-// served. After the cluster is open it registers the cluster's rpc
-// handlers on a grpc.Server and serves in a background goroutine. Close
-// gracefully stops that server + closes the listener. Single-node mode
-// (cfg.BindAddr == "") binds no listener and starts no server: the
-// back-compat path is byte-for-byte today's behavior.
+// In multi-node mode the gRPC peer-forwarding listener is bound BEFORE the
+// cluster opens, and the listener's ACTUAL address is advertised. That matters
+// when GRPCAddr is ":0": the real port is known only after Listen, and a peer
+// forwarding to the advertised address must reach the one actually served.
 func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	if cfg.Bucket == "" {
 		return nil, fmt.Errorf("ShaleConfig.Bucket required")
