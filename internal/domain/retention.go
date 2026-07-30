@@ -116,3 +116,22 @@ func plural(n int, unit string) string {
 	}
 	return fmt.Sprintf("%d %ss", n, unit)
 }
+
+// IsExpired reports whether content with this ExpiresAt has expired at now.
+//
+// A free function rather than a method because the field lives on several row
+// types across the adapters, not only on Paste.
+//
+// The BOUNDARY is the point: expiry is inclusive, so content whose ExpiresAt
+// equals now is expired. Twelve adapter sites spelled this as
+// `!ExpiresAt.After(now)` and all twelve agreed - unlike the quota rule, which
+// had already drifted - but a thirteenth written as `ExpiresAt.Before(now)`
+// reads just as naturally and would disagree at exactly that instant, serving
+// content one tick past its lifetime. Naming the rule is what stops that.
+//
+// Safe for the no-expiry policy because NeverExpires is a far-future sentinel
+// rather than the zero time: a zero value would make this report "expired" and
+// silently sweep content that must never be swept.
+func IsExpired(expiresAt, now time.Time) bool {
+	return !expiresAt.After(now)
+}

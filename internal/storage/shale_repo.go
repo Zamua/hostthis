@@ -1022,7 +1022,7 @@ func (r *ShaleRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 		if row.Placeholder {
 			return 0, fmt.Errorf("quota scan: %s is a fail-closed placeholder (authoritative record undecodable; the reconciler clears it once the record is repaired)", item.Key)
 		}
-		if !row.ExpiresAt.After(now) {
+		if domain.IsExpired(row.ExpiresAt, now) {
 			continue // expired (or a stale entry whose cached expiry passed): self-excludes
 		}
 		total += int64(row.Size)
@@ -1048,7 +1048,7 @@ func (r *ShaleRepo) legacyPasteEntryBytes(indexKey []byte, now time.Time) (int64
 		}
 		return 0, err
 	}
-	if !p.ExpiresAt.After(now) {
+	if domain.IsExpired(p.ExpiresAt, now) {
 		return 0, nil // expired-unswept: stops counting at read time
 	}
 	return r.sumLiveVersionBytes(slug)
@@ -1660,7 +1660,7 @@ func (r *ShaleRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 		// (docs/SPEC.md "Reviving an expired-but-unswept record charges its FULL
 		// post-revival size"). Matches the sqlite + slatedb append revival charge.
 		charge := body
-		if !existing.ExpiresAt.After(now) {
+		if domain.IsExpired(existing.ExpiresAt, now) {
 			revived, err := r.sumLiveVersionBytes(slug)
 			if err != nil {
 				return AppendResult{}, err

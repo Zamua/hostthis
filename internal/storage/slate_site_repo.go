@@ -419,7 +419,7 @@ func (r *SlateRepo) sumActiveSiteBytesForOwner(owner string, now time.Time) (int
 			}
 			return 0, err
 		}
-		if !row.ExpiresAt.After(now) {
+		if domain.IsExpired(row.ExpiresAt, now) {
 			continue
 		}
 		total += int64(row.DedupedSize)
@@ -449,7 +449,7 @@ func (r *SlateRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site
 			}
 			return nil, err
 		}
-		if !row.ExpiresAt.After(now) {
+		if domain.IsExpired(row.ExpiresAt, now) {
 			continue
 		}
 		site, err := row.toDomain(slug)

@@ -508,7 +508,7 @@ func (r *SlateRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 			}
 			return 0, err
 		}
-		if !p.ExpiresAt.After(now) {
+		if domain.IsExpired(p.ExpiresAt, now) {
 			continue // expired pastes don't count toward quota
 		}
 		versions, err := r.scanPrefix(prefixVersions(slug))
@@ -969,7 +969,7 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		// "Reviving an expired-but-unswept record charges its FULL post-revival
 		// size"). Matches the sqlite + shale append revival charge.
 		charge := body
-		if !existing.ExpiresAt.After(now) {
+		if domain.IsExpired(existing.ExpiresAt, now) {
 			revived, err := r.sumLiveVersionBytesForSlug(slug)
 			if err != nil {
 				return AppendResult{}, fmt.Errorf("revived version sum: %w", err)

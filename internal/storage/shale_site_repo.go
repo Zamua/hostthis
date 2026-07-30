@@ -307,7 +307,7 @@ func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site
 	// new size (docs/SPEC.md "Reviving an expired-but-unswept record charges its
 	// FULL post-revival size"). Mirrors the sqlite + slatedb ReplaceWithQuotaCheck.
 	oldBody := int64(existing.DedupedSize)
-	if !existing.ExpiresAt.After(now) {
+	if domain.IsExpired(existing.ExpiresAt, now) {
 		oldBody = 0
 	}
 
@@ -602,7 +602,7 @@ func (r *ShaleRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site
 			}
 			return nil, err
 		}
-		if !row.ExpiresAt.After(now) {
+		if domain.IsExpired(row.ExpiresAt, now) {
 			continue // expired-unswept: stops counting/listing at read time
 		}
 		site, err := row.toDomain(slug)
@@ -666,7 +666,7 @@ func (r *ShaleRepo) sumActiveSiteBytesForOwner(owner string, now time.Time) (int
 		if row.Placeholder {
 			return 0, fmt.Errorf("site quota scan: %s is a fail-closed placeholder (authoritative row undecodable; the reconciler clears it once the row is repaired)", item.Key)
 		}
-		if !row.ExpiresAt.After(now) {
+		if domain.IsExpired(row.ExpiresAt, now) {
 			continue // expired (or a stale entry whose cached expiry passed): self-excludes
 		}
 		total += int64(row.Size)
@@ -689,7 +689,7 @@ func (r *ShaleRepo) legacySiteEntryBytes(indexKey []byte, now time.Time) (int64,
 		}
 		return 0, err
 	}
-	if !row.ExpiresAt.After(now) {
+	if domain.IsExpired(row.ExpiresAt, now) {
 		return 0, nil // expired-unswept: stops counting at read time
 	}
 	return int64(row.DedupedSize), nil
