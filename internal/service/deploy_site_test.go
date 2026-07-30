@@ -53,10 +53,9 @@ func gzipTar(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-// incompressible returns n bytes of random data. Quota-fill tests need it
-// because sites now charge their COMPRESSED size: repeated bytes would
-// compress to ~nothing and no longer near the cap, so a "fill the budget"
-// fixture must be incompressible for its compressed charge to be ~n.
+// incompressible returns n bytes of random data. Sites charge their COMPRESSED
+// size, so a "fill the budget" fixture must be incompressible for its charge to
+// be ~n; repeated bytes would squash to nothing.
 func incompressible(t *testing.T, n int) string {
 	t.Helper()
 	b := make([]byte, n)
@@ -80,12 +79,10 @@ func TestDeploySite_HappyPath(t *testing.T) {
 	if len(res.Site.Manifest.Files) != 3 {
 		t.Fatalf("manifest files: got %d, want 3", len(res.Site.Manifest.Files))
 	}
-	// Site persisted and readable.
 	got, err := sites.Get(res.Site.Slug)
 	if err != nil {
 		t.Fatalf("get site: %v", err)
 	}
-	// Blobs stored + readable + byte-exact.
 	e := got.Manifest.Files["index.html"]
 	body, err := blobs.Get(e.SHA)
 	if err != nil {
@@ -112,14 +109,12 @@ func TestDeploySite_Delete(t *testing.T) {
 	if _, err := sites.Get(slug); err != nil {
 		t.Fatalf("site should survive a foreign delete: %v", err)
 	}
-	// The owner deletes it.
 	if err := d.Delete(slug, "key:owner"); err != nil {
 		t.Fatalf("owner delete: %v", err)
 	}
 	if _, err := sites.Get(slug); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("site should be gone: got %v", err)
 	}
-	// A nonexistent slug is ErrNotFound; an empty owner is ErrEmptyOwner.
 	if err := d.Delete(domain.NewRandomSlug(), "key:owner"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing delete: got %v, want ErrNotFound", err)
 	}
@@ -166,10 +161,10 @@ func TestDeploySite_OverQuota(t *testing.T) {
 	}
 }
 
-// TestDeploySite_ChargesCompressedSize pins the fix: a site is charged its
-// COMPRESSED (post-zstd) size against quota, matching how pastes charge - so a
-// compressible site costs a fraction of its raw bytes, and the charged number
-// equals the manifest's CompressedDedupedSize (not the uncompressed sum).
+// TestDeploySite_ChargesCompressedSize pins that a site is charged its
+// COMPRESSED (post-zstd) size against quota, matching how pastes charge: the
+// charged number equals the manifest's CompressedDedupedSize, not the
+// uncompressed sum.
 func TestDeploySite_ChargesCompressedSize(t *testing.T) {
 	d, sites, _ := deployFixture(t)
 	owner := "key:compress"
@@ -188,7 +183,6 @@ func TestDeploySite_ChargesCompressedSize(t *testing.T) {
 	if uncompressed != 200_000 {
 		t.Fatalf("uncompressed manifest size should be the raw 200000, got %d", uncompressed)
 	}
-	// The whole point: compressed is a small fraction of uncompressed.
 	if compressed >= uncompressed/10 {
 		t.Fatalf("compressible site should charge <<10%% of raw: compressed %d vs uncompressed %d", compressed, uncompressed)
 	}
@@ -197,9 +191,9 @@ func TestDeploySite_ChargesCompressedSize(t *testing.T) {
 func TestDeploySite_QuotaRespectsExistingUsage(t *testing.T) {
 	d, _, _ := deployFixture(t)
 	owner := "key:test"
-	// First deploy a site that uses most of the budget (incompressible so its
-	// COMPRESSED charge is ~near-cap, not ~0). Leave ~20 KB headroom - enough
-	// that zstd's small block-header expansion of random data can't overrun.
+	// A site using most of the budget (incompressible so its COMPRESSED charge
+	// nears the cap). ~20 KB headroom is enough that zstd's block-header
+	// expansion of random data cannot overrun.
 	nearCap := incompressible(t, int(domain.UserQuotaBytes)-20000)
 	arc1 := gzipTar(t, map[string]string{"index.html": nearCap})
 	if _, err := d.Deploy(bytes.NewReader(arc1), owner); err != nil {
@@ -226,11 +220,9 @@ func TestDeploySite_DedupesAcrossDeploys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deploy 2: %v", err)
 	}
-	// Identical file content → identical blob SHA across two sites/owners.
 	if r1.Site.Manifest.Files["index.html"].SHA != r2.Site.Manifest.Files["index.html"].SHA {
 		t.Fatalf("identical content should share a blob SHA")
 	}
-	// And the blob is present once, readable.
 	if _, err := blobs.Get(r1.Site.Manifest.Files["index.html"].SHA); err != nil {
 		t.Fatalf("shared blob: %v", err)
 	}
@@ -259,18 +251,17 @@ func TestDeploySite_NowInjectable(t *testing.T) {
 	}
 }
 
-// TestDeployToSlug_ReplacesInPlace is the service-level pin for the bug
-// fix: DeployToSlug re-deploys an existing OWNED site at the SAME slug.
-// The slug + created_at are preserved, the manifest swaps to the new
-// content, and the owner's live bytes reflect the NEW size only (the old
-// bytes are freed in the same swap, not double-counted).
+// TestDeployToSlug_ReplacesInPlace pins that DeployToSlug re-deploys an existing
+// OWNED site at the SAME slug: slug + created_at preserved, manifest swapped to
+// the new content, and the owner's live bytes reflecting the NEW size only (the
+// old bytes are freed in the same swap, not double-counted).
 func TestDeployToSlug_ReplacesInPlace(t *testing.T) {
 	d, sites, _ := deployFixture(t)
 	owner := "key:rp"
 
-	// Deploy v1 (one large incompressible file so its COMPRESSED charge
-	// clearly exceeds the smaller v2 - with tiny/compressible content the
-	// per-file zstd overhead would dominate and mask the shrink).
+	// v1 is one large incompressible file so its COMPRESSED charge clearly
+	// exceeds the smaller v2; with tiny or compressible content the per-file
+	// zstd overhead would dominate and mask the shrink.
 	v1 := gzipTar(t, map[string]string{"index.html": incompressible(t, 4000)})
 	r1, err := d.Deploy(bytes.NewReader(v1), owner)
 	if err != nil {
@@ -317,16 +308,15 @@ func TestDeployToSlug_ReplacesInPlace(t *testing.T) {
 	}
 }
 
-// TestDeployToSlug_FreesOldChargesNewDelta pins the replace-delta quota
-// math at the service layer: shrinking a near-cap site frees enough budget
-// that a follow-up NEW deploy fits where it would have been rejected at the
-// original size.
+// TestDeployToSlug_FreesOldChargesNewDelta pins the replace-delta quota math:
+// shrinking a near-cap site frees enough budget that a follow-up NEW deploy
+// fits where it would have been rejected at the original size.
 func TestDeployToSlug_FreesOldChargesNewDelta(t *testing.T) {
 	d, _, _ := deployFixture(t)
 	owner := "key:delta"
 
-	// A site near the cap (leave ~20 KB headroom). Incompressible so the
-	// compressed charge actually nears the cap.
+	// A site near the cap (~20 KB headroom), incompressible so the compressed
+	// charge actually nears the cap.
 	nearCap := incompressible(t, int(domain.UserQuotaBytes)-20000)
 	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": nearCap})), owner)
 	if err != nil {
@@ -344,18 +334,17 @@ func TestDeployToSlug_FreesOldChargesNewDelta(t *testing.T) {
 		t.Fatalf("shrink in place: %v", err)
 	}
 
-	// Now the same 5000-byte NEW deploy fits.
+	// The freed budget now admits a NEW deploy.
 	if _, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": string(bytes.Repeat([]byte("Z"), 5000))})), owner); err != nil {
 		t.Fatalf("5000B new deploy should fit after the shrink freed budget: %v", err)
 	}
 }
 
 // TestDeployToSlug_ExpiredOldRowNotCredited pins the replace-delta quota
-// against an EXPIRED-but-unswept site. Re-deploying such a site resurrects
-// it, but the old bytes are already excluded from the owner's active sum,
-// so they must NOT be credited back: an over-cap re-deploy must be rejected
-// exactly as a fresh deploy would be. Crediting the stale bytes would let
-// the owner exceed the per-identity cap by the old site's size.
+// against an EXPIRED-but-unswept site. Re-deploying resurrects it, but the old
+// bytes are already excluded from the owner's active sum, so they must NOT be
+// credited back: crediting them would let the owner exceed the per-identity cap
+// by the old site's size.
 func TestDeployToSlug_ExpiredOldRowNotCredited(t *testing.T) {
 	d, _, _ := deployFixture(t)
 	owner := "key:expired"
@@ -373,18 +362,17 @@ func TestDeployToSlug_ExpiredOldRowNotCredited(t *testing.T) {
 	// yet swept (still present, still owned, Get still returns it).
 	d.Now = func() time.Time { return base.Add(domain.DefaultRetentionWindow + time.Hour) }
 
-	// Re-deploy at a size OVER the cap. With the expired old bytes correctly
-	// NOT credited, the budget is the full empty cap and a >cap archive is
-	// rejected. The buggy path credited the 4000 stale bytes and admitted it.
+	// Re-deploy at a size OVER the cap. With the expired old bytes correctly NOT
+	// credited, the budget is the full empty cap and a >cap archive is rejected.
 	big := gzipTar(t, map[string]string{"index.html": string(bytes.Repeat([]byte("B"), int(domain.UserQuotaBytes)+2000))})
 	if _, err := d.DeployToSlug(r.Site.Slug, bytes.NewReader(big), owner); !errors.Is(err, ErrOverQuota) {
 		t.Fatalf("re-deploy of an EXPIRED site over the cap must be rejected (stale bytes must not be credited): got %v, want ErrOverQuota", err)
 	}
 }
 
-// TestDeployToSlug_NonexistentSlug pins that re-deploying to a slug that
-// was never deployed returns ErrNotFound (the same "service: not found"
-// the SSH layer maps to exit 4) - never silently creating it.
+// TestDeployToSlug_NonexistentSlug pins that re-deploying to a slug that was
+// never deployed returns ErrNotFound (the "service: not found" the SSH layer
+// maps to exit 4), never silently creating it.
 func TestDeployToSlug_NonexistentSlug(t *testing.T) {
 	d, _, _ := deployFixture(t)
 	arc := gzipTar(t, map[string]string{"index.html": "<h1>x</h1>"})
@@ -394,13 +382,12 @@ func TestDeployToSlug_NonexistentSlug(t *testing.T) {
 	}
 }
 
-// TestDeployToSlug_ForeignSlug pins ownership at the service layer: a
-// second identity re-deploying onto someone else's site gets ErrNotFound
-// (no ownership/existence leak) and the original site is untouched.
+// TestDeployToSlug_ForeignSlug pins ownership at the service layer: a second
+// identity re-deploying onto someone else's site gets ErrNotFound (no
+// ownership/existence leak) and the original site is untouched.
 func TestDeployToSlug_ForeignSlug(t *testing.T) {
 	d, sites, _ := deployFixture(t)
 
-	// alice deploys a site.
 	r, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>alice</h1>"})), "key:alice")
 	if err != nil {
 		t.Fatalf("alice deploy: %v", err)
@@ -408,13 +395,11 @@ func TestDeployToSlug_ForeignSlug(t *testing.T) {
 	slug := r.Site.Slug
 	aliceSHA := r.Site.Manifest.Files["index.html"].SHA
 
-	// mallory tries to re-deploy onto alice's slug.
 	_, err = d.DeployToSlug(slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>mallory</h1>"})), "key:mallory")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("foreign re-deploy: got %v, want ErrNotFound (no ownership leak)", err)
 	}
 
-	// alice's site is byte-for-byte unchanged.
 	got, err := sites.Get(slug)
 	if err != nil {
 		t.Fatalf("get alice's site: %v", err)

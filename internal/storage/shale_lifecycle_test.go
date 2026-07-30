@@ -132,12 +132,12 @@ func TestShaleLifecycle_ReconcilerAgesOutStuckPending(t *testing.T) {
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	owner := "key:life-stuck"
 
-	// One pending paste that is too old (created 2 min ago) and one that is
-	// fresh (created now). The reconciler should age out only the old one.
+	// One pending paste past the timeout and one within it: only the first
+	// ages out.
 	old := insertPending(t, repo, owner, "stuckold", 250, now.Add(-2*time.Minute))
 	fresh := insertPending(t, repo, owner, "freshpen", 150, now)
 
-	// Run the reconciler at `now`: old is past the 1-min timeout, fresh is not.
+	// Reconcile at `now`: old is past the 1-min timeout, fresh is not.
 	if err := repo.ReconcileForTest(now); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}

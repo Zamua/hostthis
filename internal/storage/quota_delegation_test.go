@@ -15,12 +15,12 @@ import (
 //
 // Untagged so CI runs it: most of these files are behind the slatedb tag, and
 // the failure has no symptom in any single adapter. It is the adapters
-// disagreeing with each other.
+// disagreeing with one another.
 func TestQuotaDecisionIsNotOpenCodedInAdapters(t *testing.T) {
 	// Any comparison against the cap that is not delegating to the domain.
 	openCoded := regexp.MustCompile(`[><]=?\s*userCap|userCap\s*[><]=?`)
-	// ...except asking whether a cap is configured at all, which is a
-	// short-circuit skipping an expensive scan, not the rule.
+	// ...except asking whether a cap is configured at all, which short-circuits
+	// an expensive scan rather than applying the rule.
 	configCheck := regexp.MustCompile(`userCap\s*(>\s*0|<=\s*0)\s*\{?\s*$`)
 
 	files, err := filepath.Glob("*.go")

@@ -1,18 +1,14 @@
 package storage_test
 
-// Site operations in the backend-agnostic conformance suite.
+// Site operations in the backend-agnostic conformance suite: the OBSERVABLE
+// static-site contract every site-supporting metadata backend must hold
+// identically. Subtests run only when the backend's factory supplies a non-nil
+// site repo (newSites).
 //
-// These subtests pin the OBSERVABLE static-site contract every metadata
-// backend that supports sites must hold identically (sqlite and slatedb
-// today; shale when wired). They run only when the backend's factory
-// supplies a non-nil site repo (newSites). A site repo is the union of
-// service.SiteRepo (deploy + read + per-owner site-byte sum) and
-// service.SweepSites (expiry slugs + delete + referenced blob set).
-//
-// The site repo and the paste repo from one factory call MUST share the
-// same backing store, so the cross-quota subtests (a site's bytes affect a
-// paste's quota check and vice versa) and the cross-family slug-collision
-// subtest exercise the real interaction, not two independent stores.
+// The site repo and the paste repo from one factory call MUST share the same
+// backing store, so the cross-quota subtests (a site's bytes affect a paste's
+// quota check and vice versa) and the cross-family slug-collision subtest
+// exercise the real interaction, not two independent stores.
 
 import (
 	"context"
@@ -28,18 +24,16 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// conformanceSiteRepo is the union of the two site-side service interfaces
-// a backend that supports static sites must satisfy. The sqlite
-// *storage.SiteRepo and the slatedb *storage.SlateSiteRepo both implement
-// it.
+// conformanceSiteRepo is the union of the two site-side service interfaces a
+// static-site backend must satisfy: deploy/read/per-owner byte sum, plus the
+// sweep's expiry scan, delete and referenced-blob set.
 type conformanceSiteRepo interface {
 	service.SiteRepo
 	service.SweepSites
 }
 
-// siteOf builds a Site with one file whose content is derived from the
-// slug, stamped at fixedNow with the standard retention window. size is
-// the single file's (and therefore the deduped) byte total.
+// siteOf builds a Site with one slug-derived file, stamped at fixedNow with the
+// standard retention window. size is that file's, and so the deduped, total.
 func siteOf(slug, identity string, size int) domain.Site {
 	man := domain.NewManifest()
 	man.Add("index.html", domain.ManifestEntry{
@@ -57,10 +51,9 @@ func siteOf(slug, identity string, size int) domain.Site {
 	}
 }
 
-// siteOfV is siteOf with a version tag folded into the file's SHA, so two
-// deploys of the SAME slug at different v produce DISTINCT manifests (a fresh
-// content SHA). Used by the replace conformance to prove the row's manifest
-// actually swaps, not just its timestamps.
+// siteOfV folds a version tag into the file's SHA, so two deploys of the SAME
+// slug at different v produce DISTINCT manifests. That is what lets the replace
+// conformance prove the row's manifest swaps, not just its timestamps.
 func siteOfV(slug, identity string, size int, v string) domain.Site {
 	man := domain.NewManifest()
 	man.Add("index.html", domain.ManifestEntry{
@@ -86,12 +79,10 @@ func insertSite(t *testing.T, sr conformanceSiteRepo, s domain.Site) {
 	}
 }
 
-// runSiteConformance runs the site contract subtests. `newSites` produces
-// a fresh paste repo + site repo pair (sharing one backing store) per
-// subtest, matching the paste suite's "fresh empty repo per subtest"
-// discipline so the empty-store assertions hold. `caps` declares the
-// backend's by-design behavior exceptions (the same flags the paste suite
-// uses; sites honor ExpiryFreesQuotaAtReadTime).
+// runSiteConformance runs the site contract subtests. newSites must produce a
+// FRESH paste+site pair sharing one backing store per subtest, or the
+// empty-store assertions do not hold. caps declares the backend's by-design
+// behavior exceptions; sites honor ExpiryFreesQuotaAtReadTime.
 func runSiteConformance(t *testing.T, name string, caps conformCaps, newSites func(t *testing.T) (conformanceRepo, conformanceSiteRepo)) {
 	t.Helper()
 	t.Run(name+"/Sites/DeployAndReadBack", func(t *testing.T) { _, sr := newSites(t); conformSiteDeployAndReadBack(t, sr) })
@@ -114,11 +105,10 @@ func runSiteConformance(t *testing.T, name string, caps conformCaps, newSites fu
 	t.Run(name+"/Sites/ListByOwner", func(t *testing.T) { _, sr := newSites(t); conformSiteListByOwner(t, sr) })
 }
 
-// conformSiteListByOwner pins ListSitesByOwner: it returns exactly the
-// owner's active sites (owner-scoped, not another owner's), reflects a
-// delete, and stays consistent with the enumeration index through the
-// deploy/delete lifecycle. This is the contract that makes static sites
-// visible in `ssh <apex> list` so the shared quota is legible + reclaimable.
+// conformSiteListByOwner pins ListSitesByOwner: exactly the owner's active
+// sites, never another owner's, tracking the enumeration index across the
+// deploy/delete lifecycle. It is what makes sites visible in `ssh <apex> list`,
+// so the shared quota stays legible and reclaimable.
 func conformSiteListByOwner(t *testing.T, sr conformanceSiteRepo) {
 	ownerA, ownerB := "key:AAAA", "key:BBBB"
 	insertSite(t, sr, siteOf("aone1111", ownerA, 100))
@@ -148,8 +138,8 @@ func conformSiteListByOwner(t *testing.T, sr conformanceSiteRepo) {
 		t.Fatalf("ownerB sites: got %v want {bone3333}", b)
 	}
 
-	// Delete one of A's sites: it must drop out of the listing (index stays
-	// consistent), the other survives, B is untouched.
+	// A delete must drop out of the listing, leaving A's other site and B
+	// untouched.
 	if err := sr.Delete("aone1111"); err != nil {
 		t.Fatalf("delete site: %v", err)
 	}
@@ -167,14 +157,13 @@ func conformSiteListByOwner(t *testing.T, sr conformanceSiteRepo) {
 }
 
 // conformSiteReplaceInPlace pins the core re-deploy contract: replacing an
-// existing owned site swaps the manifest (new content SHA) while keeping the
-// slug + created_at stable, so rollback/history ride the same identity.
+// owned site swaps the manifest while keeping the slug and created_at stable,
+// so rollback and history ride the same identity.
 func conformSiteReplaceInPlace(t *testing.T, sr conformanceSiteRepo) {
 	const slug = "rp123456"
 	v1 := siteOfV(slug, "key:rp", 100, "v1")
 	insertSite(t, sr, v1)
 
-	// Re-deploy the SAME slug with distinct content at a later updated_at.
 	later := fixedNow.Add(2 * time.Hour)
 	v2 := siteOfV(slug, "key:rp", 250, "v2")
 	v2.CreatedAt = later // a hostile caller can't move created_at via the row
@@ -188,7 +177,6 @@ func conformSiteReplaceInPlace(t *testing.T, sr conformanceSiteRepo) {
 	if err != nil {
 		t.Fatalf("get after replace: %v", err)
 	}
-	// The manifest swapped to v2's content.
 	e, ok := got.Manifest.Files["index.html"]
 	if !ok || e.SHA != "sha-"+slug+"-v2" || e.Size != 250 {
 		t.Fatalf("manifest not swapped: got %+v", got.Manifest.Files)
@@ -197,14 +185,14 @@ func conformSiteReplaceInPlace(t *testing.T, sr conformanceSiteRepo) {
 	if !got.CreatedAt.Equal(fixedNow) {
 		t.Fatalf("created_at must be stable across re-deploy: got %v, want %v", got.CreatedAt, fixedNow)
 	}
-	// updated_at + expires_at restarted from the re-deploy.
+	// updated_at and expires_at restart from the re-deploy.
 	if !got.UpdatedAt.Equal(later) {
 		t.Fatalf("updated_at should be the re-deploy time: got %v, want %v", got.UpdatedAt, later)
 	}
 	if !got.ExpiresAt.Equal(later.Add(domain.DefaultRetentionWindow)) {
 		t.Fatalf("expires_at should restart from re-deploy: got %v", got.ExpiresAt)
 	}
-	// The owner's live site bytes reflect the NEW size only (250), not 100+250.
+	// The owner's live site bytes are the NEW size only, not 100+250.
 	used, err := sr.SumActiveBytesByOwner("key:rp", later)
 	if err != nil {
 		t.Fatalf("sum after replace: %v", err)
@@ -214,11 +202,10 @@ func conformSiteReplaceInPlace(t *testing.T, sr conformanceSiteRepo) {
 	}
 }
 
-// conformSiteReplaceNotFoundShape pins that a replace targeting a slug the
-// identity does not own collapses to ErrNotFound - the SAME sentinel a
-// missing slug yields - for both the foreign-owner and the missing-row cases,
-// AND for a slug that exists only as a PASTE (never a site). No existence or
-// ownership leak.
+// conformSiteReplaceNotFoundShape pins that a replace the identity may not
+// perform collapses to ErrNotFound, the SAME sentinel a missing slug yields, so
+// neither existence nor ownership leaks: foreign-owned, missing, and
+// paste-only slugs are indistinguishable.
 func conformSiteReplaceNotFoundShape(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	// Missing slug: never deployed.
 	miss := siteOfV("rmiss123", "key:owner", 50, "v1")
@@ -226,13 +213,13 @@ func conformSiteReplaceNotFoundShape(t *testing.T, r conformanceRepo, sr conform
 		t.Fatalf("replace of missing slug: got %v, want ErrNotFound", err)
 	}
 
-	// Foreign-owned: owned by key:alice, a replace as key:mallory is NotFound.
+	// Foreign-owned: alice's site, replaced as mallory.
 	insertSite(t, sr, siteOfV("rfor1234", "key:alice", 100, "v1"))
 	foreign := siteOfV("rfor1234", "key:mallory", 100, "v2")
 	if err := sr.ReplaceWithQuotaCheck(context.Background(), foreign, foreign.Manifest.DedupedSize(), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("replace of foreign-owned site: got %v, want ErrNotFound (no ownership leak)", err)
 	}
-	// The legitimate owner's site is untouched by the rejected foreign replace.
+	// The rejected replace left the owner's row untouched.
 	got, err := sr.Get("rfor1234")
 	if err != nil {
 		t.Fatalf("owner's site after rejected foreign replace: %v", err)
@@ -241,7 +228,7 @@ func conformSiteReplaceNotFoundShape(t *testing.T, r conformanceRepo, sr conform
 		t.Fatalf("foreign replace must not mutate the owner's row: got %+v", got.Manifest.Files)
 	}
 
-	// Slug that exists only as a PASTE: a site replace must not find it.
+	// A slug that exists only as a PASTE: a site replace must not find it.
 	if err := r.InsertWithQuotaCheck(context.Background(), pasteOf("rpaste12", "key:owner", 10), 0, fixedNow); err != nil {
 		t.Fatalf("seed paste: %v", err)
 	}
@@ -251,11 +238,10 @@ func conformSiteReplaceNotFoundShape(t *testing.T, r conformanceRepo, sr conform
 	}
 }
 
-// conformSiteReplaceDeltaQuota pins that the replace charges the DELTA, not
-// the full new size: a same-size re-deploy nets zero against the cap, a
-// smaller one frees the difference (admitting a follow-up that the original
-// size would have blocked), and a larger one is rejected when the post-swap
-// total would breach the cap (the old bytes credited, the new charged).
+// conformSiteReplaceDeltaQuota pins that a replace charges the DELTA (old bytes
+// credited, new bytes charged), not the full new size: same-size nets zero,
+// smaller frees the difference, larger is rejected when the post-swap total
+// would breach the cap.
 func conformSiteReplaceDeltaQuota(t *testing.T, sr conformanceSiteRepo) {
 	const cap = 1000
 	// Owner sits at 800 of a 1000 cap.
@@ -266,8 +252,7 @@ func conformSiteReplaceDeltaQuota(t *testing.T, sr conformanceSiteRepo) {
 	if err := sr.ReplaceWithQuotaCheck(context.Background(), siteOfV("rq123456", "key:rq", 800, "v2"), 800, cap, fixedNow); err != nil {
 		t.Fatalf("same-size re-deploy should net zero: %v", err)
 	}
-	// A LARGER re-deploy that would breach the cap is rejected: 800 - 800 +
-	// 1100 = 1100 > 1000. The old bytes are credited and the new charged.
+	// A LARGER re-deploy breaches the cap: 800 - 800 + 1100 = 1100 > 1000.
 	if err := sr.ReplaceWithQuotaCheck(context.Background(), siteOfV("rq123456", "key:rq", 1100, "v3"), 1100, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("over-cap re-deploy: got %v, want ErrOverUserQuota", err)
 	}
@@ -291,25 +276,23 @@ func conformSiteReplaceDeltaQuota(t *testing.T, sr conformanceSiteRepo) {
 }
 
 // conformSiteReplaceRevivesExpiredChargesFull pins that re-deploying an
-// EXPIRED-but-unswept site charges the FULL new size, never a delta that
-// credits the expired old row. Because the scan filters expires_at > now, an
-// expired site is NOT in the owner's `used`; crediting its old bytes against
-// the replace delta would DOUBLE-SUBTRACT and admit an over-cap re-deploy,
-// leaving a live site durably over the cap. Every backend gates the old-bytes
-// credit on the old row being LIVE. docs/SPEC.md "Reviving an
-// expired-but-unswept record charges its FULL post-revival size".
+// EXPIRED-but-unswept site charges the FULL new size. The scan filters
+// expires_at > now, so an expired site is NOT in the owner's `used`, and
+// crediting its old bytes against the replace delta would DOUBLE-SUBTRACT and
+// admit an over-cap re-deploy, leaving a live site durably over the cap. Every
+// backend gates the old-bytes credit on the old row being LIVE. docs/SPEC.md
+// "Reviving an expired-but-unswept record charges its FULL post-revival size".
 func conformSiteReplaceRevivesExpiredChargesFull(t *testing.T, sr conformanceSiteRepo) {
 	const cap = 1000
 	const slug = "revx1234"
-	// Deploy a 900-byte site that expires in an hour.
 	v1 := siteOfV(slug, "key:revx", 900, "v1")
 	v1.ExpiresAt = fixedNow.Add(time.Hour)
 	if err := sr.InsertWithQuotaCheck(context.Background(), v1, 900, cap, fixedNow); err != nil {
 		t.Fatalf("seed 900 under cap: %v", err)
 	}
 
-	// Past expiry, before any sweep: the site is expired-but-unswept, so its
-	// bytes no longer count (read-time exclusion). The owner's site sum is 0.
+	// Past expiry, before any sweep: read-time exclusion drops the site's
+	// bytes, so the owner's site sum is 0.
 	after := fixedNow.Add(2 * time.Hour)
 	if used, err := sr.SumActiveBytesByOwner("key:revx", after); err != nil {
 		t.Fatalf("sum after expiry: %v", err)
@@ -317,11 +300,9 @@ func conformSiteReplaceRevivesExpiredChargesFull(t *testing.T, sr conformanceSit
 		t.Fatalf("expired-unswept site must not count toward quota: got %d, want 0", used)
 	}
 
-	// Re-deploy the SAME slug at 1500 bytes (over the 1000 cap). A delta credit
-	// of the EXPIRED old row would compute used(0) - old(900) + new(1500) = 600
-	// <= 1000 and WRONGLY ADMIT, resurrecting a live 1500-byte site over a 1000
-	// cap. The correct behavior does NOT credit the expired old bytes, charging
-	// the full new size: 0 + 1500 = 1500 > 1000 -> reject.
+	// Crediting the EXPIRED old row would compute used(0) - old(900) +
+	// new(1500) = 600 <= 1000 and admit, resurrecting a live 1500-byte site
+	// over a 1000 cap. Charging the full new size gives 1500 > 1000 -> reject.
 	over := siteOfV(slug, "key:revx", 1500, "v2")
 	over.CreatedAt = fixedNow
 	over.UpdatedAt = after
@@ -336,11 +317,8 @@ func conformSiteReplaceRevivesExpiredChargesFull(t *testing.T, sr conformanceSit
 		t.Fatalf("rejected over-cap revive must not mutate the row: got %d, want 0 (still expired)", used)
 	}
 
-	// A revive that FITS the cap succeeds and charges the full new size: replace
-	// the expired 900 with 800. If the expired old bytes were (wrongly) counted
-	// the post-revival total would be 900+800 and the point would be moot; the
-	// correct math is simply 0 + 800 = 800 <= 1000 -> admit, and the revived
-	// site now counts its full new size.
+	// A revive that FITS succeeds and then counts its full new size:
+	// 0 + 800 = 800 <= 1000 -> admit.
 	fit := siteOfV(slug, "key:revx", 800, "v3")
 	fit.CreatedAt = fixedNow
 	fit.UpdatedAt = after
@@ -355,10 +333,9 @@ func conformSiteReplaceRevivesExpiredChargesFull(t *testing.T, sr conformanceSit
 	}
 }
 
-// conformSiteReplaceRestartsExpiry pins that a re-deploy re-keys the expiry
-// index: after a replace at a later clock, the site is NOT reported expired at
-// a cutoff the ORIGINAL expires_at would have crossed, and the OLD expiry key
-// no longer fires the sweep.
+// conformSiteReplaceRestartsExpiry pins that a re-deploy RE-KEYS the expiry
+// index rather than leaving the old key dangling: the site is not reported
+// expired at a cutoff the original expires_at would have crossed.
 func conformSiteReplaceRestartsExpiry(t *testing.T, sr conformanceSiteRepo) {
 	const slug = "re123456"
 	v1 := siteOfV(slug, "key:re", 100, "v1")
@@ -375,8 +352,7 @@ func conformSiteReplaceRestartsExpiry(t *testing.T, sr conformanceSiteRepo) {
 		t.Fatalf("replace restarting expiry: %v", err)
 	}
 
-	// At +2h (past the ORIGINAL +1h expiry, before the new one) the site must
-	// NOT be swept: the old expiry key was re-keyed, not left dangling.
+	// +2h is past the ORIGINAL +1h expiry but before the new one.
 	cutoff := fixedNow.Add(2 * time.Hour)
 	refs, err := sr.ExpiredSites(cutoff)
 	if err != nil {
@@ -387,7 +363,6 @@ func conformSiteReplaceRestartsExpiry(t *testing.T, sr conformanceSiteRepo) {
 	}
 }
 
-// siteRefsHaveSlug reports whether any expired-site reference names slug.
 func siteRefsHaveSlug(refs []domain.ExpiredSite, slug string) bool {
 	for _, ref := range refs {
 		if ref.Slug.String() == slug {
@@ -397,9 +372,9 @@ func siteRefsHaveSlug(refs []domain.ExpiredSite, slug string) bool {
 	return false
 }
 
-// conformSiteDeployAndReadBack deploys a multi-file site and reads every
-// path back byte-for-byte (sha + size + content-type), so the manifest
-// round-trips through the backend's encoding identically.
+// conformSiteDeployAndReadBack pins that a multi-file manifest round-trips
+// through the backend's encoding identically: sha, size and content-type per
+// path, plus the site's timestamps.
 func conformSiteDeployAndReadBack(t *testing.T, sr conformanceSiteRepo) {
 	man := domain.NewManifest()
 	man.Add("index.html", domain.ManifestEntry{SHA: "sha-rb-index", Size: 100, ContentType: "text/html; charset=utf-8"})
@@ -473,36 +448,29 @@ func conformSiteSumByIdentity(t *testing.T, sr conformanceSiteRepo) {
 // per-identity cap against the owner's existing SITE bytes.
 func conformSiteQuotaCountsSiteBytes(t *testing.T, sr conformanceSiteRepo) {
 	const cap = 1000
-	// First site fits at 600.
 	if err := sr.InsertWithQuotaCheck(context.Background(), siteOf("sq123456", "key:sq", 600), 600, cap, fixedNow); err != nil {
 		t.Fatalf("first site (600 under 1000): %v", err)
 	}
-	// Second would be 600+500=1100 > 1000 -> reject.
+	// 600+500=1100 > 1000 -> reject.
 	err := sr.InsertWithQuotaCheck(context.Background(), siteOf("sq223456", "key:sq", 500), 500, cap, fixedNow)
 	if !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("over-cap site deploy: got %v, want ErrOverUserQuota", err)
 	}
-	// A smaller one that keeps the sum under cap succeeds.
 	if err := sr.InsertWithQuotaCheck(context.Background(), siteOf("sq323456", "key:sq", 300), 300, cap, fixedNow); err != nil {
 		t.Fatalf("site within cap (600+300=900): %v", err)
 	}
 }
 
-// conformSitePerOwnerCapCountsBoth pins the cross-kind PER-OWNER cap: the
-// owner's paste bytes and site bytes both count toward the same per-owner
-// cap, in BOTH directions. The headline asymmetry this guards against: a
-// site sees paste bytes but a paste must ALSO see site bytes, so a deploy of
-// either kind is rejected when the owner's COMBINED paste+site bytes plus
-// the new body would exceed userCap. The reproduced bug: an 800-byte site +
-// a 300-byte paste under a 1000-byte cap wrongly admitted the paste on the
-// KV backends (combined 1100 > 1000) while sqlite (and the symmetric site
-// direction) correctly rejected it.
+// conformSitePerOwnerCapCountsBoth pins the cross-kind PER-OWNER cap in BOTH
+// directions: a deploy of either kind is rejected when the owner's COMBINED
+// paste+site bytes plus the new body exceed userCap. The asymmetry this guards
+// against is a paste check that sees only paste bytes, which admits an
+// 800-byte site plus a 300-byte paste under a 1000-byte cap.
 func conformSitePerOwnerCapCountsBoth(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	const cap = 1000
 
 	// Direction 1: a SITE fills most of the cap, then a PASTE that would
-	// overflow the COMBINED total is rejected. This is the direction the bug
-	// broke: the paste's per-owner check must count the existing site bytes.
+	// overflow the COMBINED total is rejected.
 	if err := sr.InsertWithQuotaCheck(context.Background(), siteOf("pb1site1", "key:pb1", 800), 800, cap, fixedNow); err != nil {
 		t.Fatalf("site 800 under cap: %v", err)
 	}
@@ -510,18 +478,17 @@ func conformSitePerOwnerCapCountsBoth(t *testing.T, r conformanceRepo, sr confor
 	if err := r.InsertWithQuotaCheck(context.Background(), pasteOf("pb1pst1", "key:pb1", 300), cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("paste over combined cap (site bytes must count): got %v, want ErrOverUserQuota", err)
 	}
-	// A paste that keeps the combined total at/under cap fits: 800+200=1000.
+	// At/under cap fits: 800+200=1000.
 	if err := r.InsertWithQuotaCheck(context.Background(), pasteOf("pb1pst2", "key:pb1", 200), cap, fixedNow); err != nil {
 		t.Fatalf("paste within combined cap (800+200=1000): %v", err)
 	}
-	// And now the owner is full: another byte is rejected.
+	// The owner is now full: another byte is rejected.
 	if err := r.InsertWithQuotaCheck(context.Background(), pasteOf("pb1pst3", "key:pb1", 1), cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("paste at full combined cap should be rejected: got %v", err)
 	}
 
-	// Direction 2 (the reverse): a PASTE fills most of the cap, then a SITE
-	// that would overflow the COMBINED total is rejected. This direction was
-	// already correct (the site path summed both), pinned here for symmetry.
+	// Direction 2: a PASTE fills most of the cap, then a SITE that would
+	// overflow the COMBINED total is rejected.
 	if err := r.InsertWithQuotaCheck(context.Background(), pasteOf("pb2pst1", "key:pb2", 800), cap, fixedNow); err != nil {
 		t.Fatalf("paste 800 under cap: %v", err)
 	}
@@ -529,31 +496,24 @@ func conformSitePerOwnerCapCountsBoth(t *testing.T, r conformanceRepo, sr confor
 	if err := sr.InsertWithQuotaCheck(context.Background(), siteOf("pb2site1", "key:pb2", 300), 300, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("site over combined cap (paste bytes must count): got %v, want ErrOverUserQuota", err)
 	}
-	// A site that keeps the combined total at/under cap fits: 800+200=1000.
+	// At/under cap fits: 800+200=1000.
 	if err := sr.InsertWithQuotaCheck(context.Background(), siteOf("pb2site2", "key:pb2", 200), 200, cap, fixedNow); err != nil {
 		t.Fatalf("site within combined cap (800+200=1000): %v", err)
 	}
 
-	// An append also counts site bytes: the owner is at cap, so any append is
-	// rejected (covers the AppendVersionWithQuotaCheck cross-kind path).
+	// The append path counts site bytes too: at cap, any append is rejected.
 	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "pb2pst1", domain.KindHTML, "sha-pb2-v2", 1, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("append at full combined cap should be rejected (site bytes must count): got %v", err)
 	}
 }
 
-// conformSitePerOwnerCapConcurrentCeiling pins the COMBINED per-owner
-// ceiling under concurrent CROSS-KIND deploys: N goroutines each deploy a
-// distinct paste OR site of `body` bytes for ONE owner against a per-owner
-// cap that admits only K combined. The invariant is the ceiling: the bytes
-// that land (paste bytes + site bytes) never exceed the cap, no matter how
-// the cross-kind inserts interleave. This keeps StrictQuotaUnderConcurrency
-// honest across kinds: a backend that checked paste and site quota on
-// separate, non-serialized paths could let the combined total overshoot even
-// if each kind alone held its ceiling. All three backends hold it: sqlite
-// (serializable insert tx, one identityActiveBytes spanning both kinds),
-// shale (both reserve steps CAS the same {id} shard, each reading both
-// counters), and slatedb (the per-identity lockQuota stripe shared by the
-// paste and site inserts spans both kinds), so all three assert the ceiling.
+// conformSitePerOwnerCapConcurrentCeiling pins the COMBINED per-owner ceiling
+// under concurrent CROSS-KIND deploys: however the interleaving falls, the
+// bytes that land never exceed the cap. A backend that checked paste and site
+// quota on separate, non-serialized paths could overshoot the combined total
+// while each kind alone held its ceiling. Each backend serializes both kinds on
+// one thing: sqlite a serializable tx, shale the same {id} shard CAS, slatedb
+// the per-identity lockQuota stripe.
 func conformSitePerOwnerCapConcurrentCeiling(t *testing.T, caps conformCaps, r conformanceRepo, sr conformanceSiteRepo) {
 	const (
 		body = 100
@@ -567,8 +527,8 @@ func conformSitePerOwnerCapConcurrentCeiling(t *testing.T, caps conformCaps, r c
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			// Alternate kinds so the race is genuinely cross-kind: even i ->
-			// paste, odd i -> site, all for the same owner "key:ccx".
+			// Alternate kinds so the race is genuinely cross-kind, with
+			// every record under the same owner.
 			var err error
 			if i%2 == 0 {
 				err = r.InsertWithQuotaCheck(context.Background(), pasteOf(fmt.Sprintf("ccp%05d", i), "key:ccx", body), cap, fixedNow)
@@ -592,10 +552,10 @@ func conformSitePerOwnerCapConcurrentCeiling(t *testing.T, caps conformCaps, r c
 	}
 }
 
-// conformSiteSlugCollisionVsPaste pins the both-directions slug collision:
-// a slug is EITHER a site or a paste, never both.
+// conformSiteSlugCollisionVsPaste pins that a slug is EITHER a site or a paste,
+// never both, in both directions, and that the refusal is ErrSlugTaken.
 func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
-	// A paste owns "col12345"; a site deploy onto the same slug is rejected.
+	// A site deploy onto a paste's slug.
 	insert(t, r, pasteOf("col12345", "key:c", 10))
 	err := sr.InsertWithQuotaCheck(context.Background(), siteOf("col12345", "key:c", 10), 10, 0, fixedNow)
 	if err == nil {
@@ -605,7 +565,7 @@ func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conform
 		t.Fatalf("site-vs-paste collision error must be storage.ErrSlugTaken (errors.Is), got %v", err)
 	}
 
-	// A site owns "col22345"; a paste insert onto the same slug is rejected.
+	// A paste insert onto a site's slug.
 	insertSite(t, sr, siteOf("col22345", "key:c", 10))
 	perr := r.InsertWithQuotaCheck(context.Background(), pasteOf("col22345", "key:c", 10), 0, fixedNow)
 	if perr == nil {
@@ -626,9 +586,9 @@ func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conform
 	}
 }
 
-// conformSiteExpiryAndSweep pins ExpiredSiteSlugs (inclusive boundary),
-// Delete (frees quota), and the read-time expiry exclusion from the sum
-// (on backends that free quota at read time).
+// conformSiteExpiryAndSweep pins the expiry scan's inclusive boundary, that
+// Delete frees quota and is idempotent, and the read-time expiry exclusion from
+// the sum on backends that free quota at read time.
 func conformSiteExpiryAndSweep(t *testing.T, caps conformCaps, sr conformanceSiteRepo) {
 	soon := siteOf("se123456", "key:se", 100)
 	soon.ExpiresAt = fixedNow.Add(time.Hour)
@@ -659,8 +619,7 @@ func conformSiteExpiryAndSweep(t *testing.T, caps conformCaps, sr conformanceSit
 		t.Fatalf("expires_at == now should be inclusive-expired, got %v", refs)
 	}
 
-	// Read-time expiry exclusion from the owner sum (on backends that free
-	// quota at read time). At `at`, soon is expired-unswept; far is alive.
+	// At `at`, soon is expired-unswept and far is alive.
 	used, err := sr.SumActiveBytesByOwner("key:se", at)
 	if err != nil {
 		t.Fatalf("sum at expiry: %v", err)
@@ -675,7 +634,6 @@ func conformSiteExpiryAndSweep(t *testing.T, caps conformCaps, sr conformanceSit
 		}
 	}
 
-	// Delete the expired site; it leaves the listing and frees its bytes.
 	if err := sr.Delete("se123456"); err != nil {
 		t.Fatalf("delete site: %v", err)
 	}
@@ -686,7 +644,7 @@ func conformSiteExpiryAndSweep(t *testing.T, caps conformCaps, sr conformanceSit
 	if err := sr.Delete("se123456"); err != nil {
 		t.Fatalf("re-delete missing site should be a no-op, got %v", err)
 	}
-	// After deleting soon, the owner's live sum is just far (100).
+	// The owner's live sum is now just far.
 	used, err = sr.SumActiveBytesByOwner("key:se", fixedNow)
 	if err != nil {
 		t.Fatalf("sum after delete: %v", err)
@@ -697,12 +655,10 @@ func conformSiteExpiryAndSweep(t *testing.T, caps conformCaps, sr conformanceSit
 }
 
 // conformDeleteExpiredSite pins the site half of the expiry-pass delete
-// contract (docs/SPEC.md "Static-site storage", sweep path), mirroring the
-// paste conformDeleteExpired: processing a reference the scan surfaced
-// deletes the site record (reporting true), leaves not-yet-expired sites
-// untouched, and DRAINS the scan - a re-scan after the pass sees zero
-// references, and a re-processed reference is an idempotent no-op
-// reporting false (no record was deleted by it).
+// contract (docs/SPEC.md "Static-site storage", sweep path): processing a
+// scanned reference deletes the record and reports true, not-yet-expired sites
+// are untouched, and one pass DRAINS the scan, so a re-scan sees zero
+// references and a re-processed reference is a no-op reporting false.
 func conformDeleteExpiredSite(t *testing.T, sr conformanceSiteRepo) {
 	dead := siteOf("ds123456", "key:ds", 100)
 	dead.ExpiresAt = fixedNow.Add(time.Hour)
@@ -721,7 +677,6 @@ func conformDeleteExpiredSite(t *testing.T, sr conformanceSiteRepo) {
 		t.Fatalf("only ds123456 should be expired at %v, got %v", at, refs)
 	}
 
-	// Processing the reference deletes the record and reports true.
 	deleted, err := sr.DeleteExpiredSite(refs[0])
 	if err != nil {
 		t.Fatalf("delete expired site: %v", err)
@@ -733,7 +688,6 @@ func conformDeleteExpiredSite(t *testing.T, sr conformanceSiteRepo) {
 		t.Fatalf("expired site should be gone after DeleteExpiredSite: %v", err)
 	}
 
-	// One pass drains what it scanned: a re-scan sees zero references.
 	again, err := sr.ExpiredSites(at)
 	if err != nil {
 		t.Fatalf("expired sites (re-scan): %v", err)
@@ -742,8 +696,7 @@ func conformDeleteExpiredSite(t *testing.T, sr conformanceSiteRepo) {
 		t.Fatalf("re-scan after the pass must see zero expired site references, got %v", again)
 	}
 
-	// Re-processing the same reference is an idempotent no-op reporting
-	// false (the sweep's deleted-count only reflects real record deletions).
+	// The sweep's deleted-count must reflect real record deletions only.
 	deleted, err = sr.DeleteExpiredSite(refs[0])
 	if err != nil {
 		t.Fatalf("re-processed site reference must no-op, got: %v", err)
@@ -752,41 +705,32 @@ func conformDeleteExpiredSite(t *testing.T, sr conformanceSiteRepo) {
 		t.Fatalf("DeleteExpiredSite must report false when the site record was already gone")
 	}
 
-	// The not-yet-expired site is untouched throughout.
 	if _, err := sr.Get("ds223456"); err != nil {
 		t.Fatalf("active site must survive the expiry pass: %v", err)
 	}
 }
 
-// conformSiteExpirySubSecondOrdering pins that the site expiry index orders
-// by TIME within a shared whole second: the expiry-index key's byte order
-// must equal time order even when ExpiresAt carries a sub-second fraction.
+// conformSiteExpirySubSecondOrdering pins that the expiry-index key's BYTE
+// order equals TIME order within a shared whole second.
 //
-// This is the regression guard for the variable-width-timestamp bug: with
-// time.RFC3339Nano (trailing fractional zeros dropped) a key at "...00.5Z"
-// sorts BEFORE a whole-second cutoff "...00Z" (because '.' < 'Z'), so a
-// site that expires LATER in the second (e.g. .5s) would be reported expired
-// at a cutoff EARLIER in the same second (.0s) - swept up to ~1s early. The
-// fixed-width format (zero-padded 9-digit nanos) makes byte order == time
-// order, so this subtest fails on the unfixed key format and passes on the
-// fixed one.
+// It fails on a variable-width timestamp: under time.RFC3339Nano (trailing
+// fractional zeros dropped) a key at "...00.5Z" sorts BEFORE a whole-second
+// cutoff "...00Z" because '.' < 'Z', so a site expiring later in the second is
+// reported expired at an earlier cutoff and swept up to ~1s early. Zero-padded
+// 9-digit nanos are what make the two orders agree.
 func conformSiteExpirySubSecondOrdering(t *testing.T, sr conformanceSiteRepo) {
 	base := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 
-	// A site that expires HALF A SECOND into the whole second.
 	late := siteOf("essLate1", "key:ess", 100)
 	late.ExpiresAt = base.Add(500 * time.Millisecond) // 12:00:00.5
 	insertSite(t, sr, late)
 
-	// A site that expires at the START of the same whole second.
 	early := siteOf("essEarly", "key:ess", 100)
 	early.ExpiresAt = base // 12:00:00.0
 	insertSite(t, sr, early)
 
-	// Cutoff at the start of the whole second (.0s): the .5s site has NOT
-	// expired yet, the .0s site has (inclusive boundary). Under the buggy
-	// variable-width format the .5s key would sort before this cutoff and be
-	// wrongly reported expired.
+	// At a .0s cutoff the .5s site has NOT expired and the .0s site has
+	// (inclusive boundary).
 	atStart := base // 12:00:00.0
 	refs, err := sr.ExpiredSites(atStart)
 	if err != nil {
@@ -799,8 +743,7 @@ func conformSiteExpirySubSecondOrdering(t *testing.T, sr conformanceSiteRepo) {
 		t.Fatalf("site expiring at .0s should be inclusive-expired at a .0s cutoff, got %v", refs)
 	}
 
-	// Cutoff at .5s: now BOTH are expired (the .5s site is at the inclusive
-	// boundary, the .0s site is past it).
+	// At .5s both are expired: the .5s site sits on the inclusive boundary.
 	atHalf := base.Add(500 * time.Millisecond) // 12:00:00.5
 	refs, err = sr.ExpiredSites(atHalf)
 	if err != nil {
@@ -813,8 +756,8 @@ func conformSiteExpirySubSecondOrdering(t *testing.T, sr conformanceSiteRepo) {
 		t.Fatalf("site expiring at .0s should still be expired at a .5s cutoff, got %v", refs)
 	}
 
-	// And a cutoff just BELOW the .5s site (e.g. .4s) leaves it unexpired,
-	// proving the boundary is real sub-second time, not whole-second rounding.
+	// A cutoff just below leaves it unexpired: the boundary is real
+	// sub-second time, not whole-second rounding.
 	atBelow := base.Add(400 * time.Millisecond) // 12:00:00.4
 	refs, err = sr.ExpiredSites(atBelow)
 	if err != nil {
@@ -826,9 +769,8 @@ func conformSiteExpirySubSecondOrdering(t *testing.T, sr conformanceSiteRepo) {
 }
 
 // conformSiteReferencedBlobSHAs pins the site-side referenced-blob set the
-// sweep unions into its keep-alive set.
+// sweep unions into its keep-alive set, including its deduplication.
 func conformSiteReferencedBlobSHAs(t *testing.T, sr conformanceSiteRepo) {
-	// Empty: no sites, no referenced shas.
 	refs, err := sr.ReferencedSiteBlobSHAs()
 	if err != nil {
 		t.Fatalf("referenced site shas (empty): %v", err)
@@ -855,7 +797,6 @@ func conformSiteReferencedBlobSHAs(t *testing.T, sr conformanceSiteRepo) {
 	if !sliceHas(refs, "sha-ref-index") || !sliceHas(refs, "sha-ref-js") {
 		t.Fatalf("both distinct site blob shas should be referenced, got %v", refs)
 	}
-	// Distinct dedup: index sha appears once despite two paths.
 	count := 0
 	for _, s := range refs {
 		if s == "sha-ref-index" {
@@ -867,9 +808,8 @@ func conformSiteReferencedBlobSHAs(t *testing.T, sr conformanceSiteRepo) {
 	}
 }
 
-// conformSiteDedupedSizeCharged pins that the bytes charged against quota
-// are the DEDUPED size (distinct blobs), not the sum over all paths: two
-// paths to the same blob count once.
+// conformSiteDedupedSizeCharged pins that quota is charged the DEDUPED size
+// (distinct blobs), not the sum over all paths.
 func conformSiteDedupedSizeCharged(t *testing.T, sr conformanceSiteRepo) {
 	man := domain.NewManifest()
 	man.Add("a.html", domain.ManifestEntry{SHA: "sha-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
@@ -879,7 +819,7 @@ func conformSiteDedupedSizeCharged(t *testing.T, sr conformanceSiteRepo) {
 		Slug: "dd123456", Identity: "key:dd", Manifest: man,
 		CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.DefaultRetentionWindow),
 	}
-	// DedupedSize is 400 (one distinct blob), not 1200.
+	// Three paths, one distinct blob: 400, not 1200.
 	if got := s.Manifest.DedupedSize(); got != 400 {
 		t.Fatalf("DedupedSize should be 400 (one distinct blob), got %d", got)
 	}

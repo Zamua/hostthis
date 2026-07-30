@@ -12,9 +12,8 @@ import (
 )
 
 // The retry exists for ONE shale contract: a routed op can refuse with
-// cluster.ErrAcquiring while a unit is mid-handoff, and that refusal is
-// bounded by the handoff completing rather than by an outage. Everything
-// pinned below is a property the deploy depends on, so each test names the
+// cluster.ErrAcquiring while a unit is mid-handoff, and that refusal is bounded
+// by the handoff completing rather than by an outage. Each test below names the
 // failure it prevents rather than the branch it covers.
 
 func TestRetryAcquiring_SucceedsFirstTry_NoSleep(t *testing.T) {
@@ -54,9 +53,8 @@ func TestRetryAcquiring_RetriesAcquiringThenSucceeds(t *testing.T) {
 	}
 }
 
-// The wrapped form is what callers actually produce: every chokepoint wraps
-// with fmt.Errorf("...: %w", err), so a matcher testing == would silently
-// never fire in production while passing a naive test.
+// Every chokepoint wraps with fmt.Errorf("...: %w", err), so a matcher testing
+// == would never fire in production while passing a naive test.
 func TestRetryAcquiring_MatchesThroughWrapping(t *testing.T) {
 	calls := 0
 	deep := fmt.Errorf("aggregate p: %w", fmt.Errorf("leg 3: %w", cluster.ErrAcquiring))
@@ -72,9 +70,8 @@ func TestRetryAcquiring_MatchesThroughWrapping(t *testing.T) {
 	}
 }
 
-// The single most important negative: a genuine outage must fail FAST.
-// Retrying a real peer-down converts a clean fast failure into a slow one
-// and amplifies load exactly when the cluster is already struggling.
+// A genuine outage must fail FAST: retrying a real peer-down converts a clean
+// fast failure into a slow one and amplifies load on a struggling cluster.
 func TestRetryAcquiring_DoesNotRetryNonAcquiring(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -101,10 +98,9 @@ func TestRetryAcquiring_DoesNotRetryNonAcquiring(t *testing.T) {
 	}
 }
 
-// Bounded, because each read attempt can burn shale's full ReadTimeout (8s in
-// a deployment may raise) and the outer http.Server WriteTimeout bounds it. An unbounded retry
-// would outlive the response deadline and turn a fast typed failure into a
-// slow one, which is the same trap as gating on bare Unavailable.
+// Bounded: each read attempt can burn shale's full read budget and the outer
+// http.Server WriteTimeout bounds the whole response, so an unbounded retry
+// would outlive the deadline and turn a fast typed failure into a slow one.
 func TestRetryAcquiring_IsBounded(t *testing.T) {
 	calls := 0
 	err := retryAcquiring(fastRetry, nil, "test", func() error {
@@ -119,10 +115,9 @@ func TestRetryAcquiring_IsBounded(t *testing.T) {
 	}
 }
 
-// The read policy must fit inside the request deadline with margin. This
-// pins the ARITHMETIC, not the constant: if someone raises the attempt count
-// or the shale read budget without re-checking the outer deadline, this
-// fails rather than silently shipping a retry that outlives the response.
+// Pins the ARITHMETIC, not the constant: raising the attempt count or the shale
+// read budget without re-checking the outer deadline fails here rather than
+// shipping a retry that outlives the response.
 func TestReadRetryPolicy_FitsInsideRequestDeadline(t *testing.T) {
 	const (
 		shaleReadBudget   = 8 * time.Second  // a representative HOSTTHIS_SHALE_READ_TIMEOUT
@@ -139,17 +134,13 @@ func TestReadRetryPolicy_FitsInsideRequestDeadline(t *testing.T) {
 	}
 }
 
-// The background span must actually outlast a real handoff. The window is
-// bounded by a MOUNT - opening a per-(unit, replica) database from object
-// storage - not by an RPC round trip, so it runs to seconds or tens of
-// seconds rather than milliseconds, and it scales with backend latency,
-// units per node and cluster size. A span shorter than it does not absorb
-// the handoff: it exhausts and fails, while still reading like a working
-// retry. The constant below is therefore sized against an observed window
-// for this deployment shape and must be re-checked against the operator's
-// own backend rather than trusted as universal. If someone shortens it, the
-// regression returns silently - background scans simply start failing
-// during deploys again.
+// The background span must outlast a real handoff. The window is bounded by a
+// MOUNT (opening a per-(unit, replica) database from object storage), not an
+// RPC round trip, so it runs to seconds or tens of seconds and scales with
+// backend latency, units per node and cluster size. A shorter span exhausts and
+// fails while still reading like a working retry, so the constant below is
+// sized for this deployment shape and must be re-checked against the operator's
+// own backend rather than trusted as universal.
 func TestBackgroundRetryPolicy_CoversAHandoff(t *testing.T) {
 	const observedHandoffWindow = 21 * time.Second
 	var span time.Duration
@@ -163,8 +154,8 @@ func TestBackgroundRetryPolicy_CoversAHandoff(t *testing.T) {
 }
 
 // Background fan-outs are NOT request-path, so they may retry more patiently.
-// Pinned so a future edit does not accidentally collapse the two policies and
-// silently make background scans as impatient as reads.
+// Pinned so an edit cannot collapse the two policies and silently make
+// background scans as impatient as reads.
 func TestBackgroundRetryPolicy_IsMorePatientThanRead(t *testing.T) {
 	if backgroundRetry.attempts < readRetry.attempts {
 		t.Fatalf("background retry (%d) must be at least as persistent as read (%d)",
@@ -174,11 +165,10 @@ func TestBackgroundRetryPolicy_IsMorePatientThanRead(t *testing.T) {
 
 var fastRetry = retryPolicy{attempts: 3, backoff: time.Millisecond}
 
-// The retry must be OBSERVABLE. Unobserved, a retry that fires constantly
-// (window wider than believed) and one that never fires (sentinel silently
-// not matching, e.g. an upstream call-site regression) look identical from
-// outside: both are a quiet, green deploy. This pins that a real retry says
-// so exactly once per retry, and that the hot path stays silent.
+// The retry must be OBSERVABLE: unobserved, a retry that fires constantly
+// (window wider than believed) and one that never fires (sentinel silently not
+// matching) look identical from outside. Pins one line per real retry, and
+// silence on the hot path.
 func TestRetryAcquiring_LogsOnlyWhenItActuallyRetries(t *testing.T) {
 	t.Run("success path is silent", func(t *testing.T) {
 		var buf strings.Builder
@@ -222,15 +212,10 @@ func TestRetryAcquiring_LogsOnlyWhenItActuallyRetries(t *testing.T) {
 	})
 }
 
-// The retry budget must be chosen by the CALLER's context, not by what the
-// call happens to be. A cross-shard fan-out is "background" as a mechanism,
-// but whoami reaches one to fetch best-effort session info - and a best-effort
-// call, whose error the caller discards by design, must never be able to block
-// an interactive command for the background span.
-//
-// This is a regression pin. Shipped behavior: whoami blocked ~32s retrying a
-// keygate scan whose result it then threw away, because the fan-out helper
-// applied the background policy to every caller uniformly.
+// The retry budget belongs to the CALLER's context, not the mechanism: a
+// cross-shard fan-out is "background", but whoami reaches one for best-effort
+// session info and a call whose error the caller discards must never block an
+// interactive command for the background span.
 func TestRequestPathBudget_FitsAnInteractiveCommand(t *testing.T) {
 	const interactiveCeiling = 10 * time.Second
 
@@ -247,9 +232,7 @@ func TestRequestPathBudget_FitsAnInteractiveCommand(t *testing.T) {
 			got, interactiveCeiling)
 	}
 	// The background policy is DELIBERATELY longer than the interactive
-	// ceiling - that is exactly why it must not be applied to a request path.
-	// If this stops holding the two policies have collapsed and the
-	// distinction this test protects is gone.
+	// ceiling, which is exactly why it must not be applied to a request path.
 	if got := span(backgroundRetry); got <= interactiveCeiling {
 		t.Fatalf("background retry spans %v, which no longer exceeds the interactive ceiling %v; "+
 			"the two policies have collapsed and the caller-context distinction is meaningless", got, interactiveCeiling)

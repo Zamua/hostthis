@@ -7,15 +7,14 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// fakeConn is a test Conn that records the frames it received and can be
-// made to fill its buffer (block) so the backpressure path is exercised
-// without a real socket. It implements the Conn interface.
+// fakeConn records the frames it received and can be forced full, so the
+// laggard-drop path is exercised without a real socket.
 type fakeConn struct {
 	id uint64
 
 	mu       sync.Mutex
 	received []Frame
-	full     bool // when true, Send returns false (buffer full / laggard)
+	full     bool // makes Send return false: a laggard
 	closed   bool
 }
 
@@ -116,33 +115,27 @@ func TestHub_RegisterRespectsPerRoomCap(t *testing.T) {
 }
 
 func TestHub_SlowClientDroppedWithoutBlockingRoom(t *testing.T) {
-	// onDrop must fire exactly once, for the dropped laggard's id, so the
-	// registry can reclaim its per-app slot (the leak the multi-client churn
-	// test surfaced: a laggard drop that never decremented the per-app
-	// counter). A non-laggard recipient never triggers onDrop.
+	// A laggard is dropped without stalling the room, and onDrop fires exactly
+	// once for its id so the registry reclaims the per-app slot. A non-laggard
+	// recipient never triggers onDrop.
 	var dropped []uint64
 	h := newHub(testKey(), 0, nil, func(id uint64) { dropped = append(dropped, id) })
 	slow, fast := newFakeConn(1), newFakeConn(2)
 	h.register(slow)
 	h.register(fast)
-	slow.setFull(true) // slow's buffer is full: Send will return false.
+	slow.setFull(true)
 
 	h.broadcast(0, Frame{Data: []byte("x")})
 
-	// The fast client still got the frame (the room was not stalled on the
-	// laggard).
 	if got := fast.recv(); len(got) != 1 {
 		t.Fatalf("fast client got %d frames, want 1 (room stalled on laggard?)", len(got))
 	}
-	// The slow client was dropped: closed and removed from the hub.
 	if !slow.isClosed() {
 		t.Fatal("slow client was not closed")
 	}
 	if h.len() != 1 {
 		t.Fatalf("hub len = %d after dropping laggard, want 1", h.len())
 	}
-	// onDrop fired once, for the slow client's id only (so the registry decApps
-	// the dropped slot - and exactly once).
 	if len(dropped) != 1 || dropped[0] != slow.id {
 		t.Fatalf("onDrop fired with %v, want exactly [%d] (the dropped laggard)", dropped, slow.id)
 	}
@@ -191,9 +184,8 @@ func TestHub_DroppingLastLaggardFiresOnEmptyAndOnDrop(t *testing.T) {
 	h.register(only)
 	only.setFull(true)
 
-	// A server-originated broadcast to the one full client drops it, which
-	// empties the hub and must fire BOTH onDrop (reclaim its per-app slot) and
-	// onEmpty (tear the now-empty hub down).
+	// Dropping the room's last client must fire BOTH onDrop (reclaim its
+	// per-app slot) and onEmpty (tear the now-empty hub down).
 	h.broadcast(0, Frame{Data: []byte("x")})
 	if !only.isClosed() {
 		t.Fatal("the only (laggard) client was not closed")
@@ -210,8 +202,7 @@ func TestHub_DroppingLastLaggardFiresOnEmptyAndOnDrop(t *testing.T) {
 }
 
 func TestHub_ConcurrentRegisterBroadcastUnregisterRace(t *testing.T) {
-	// Run under -race: hammer register / broadcast / unregister from many
-	// goroutines to catch a data race in the hub's concurrent paths.
+	// Meaningful only under -race: concurrent register / broadcast / unregister.
 	h := newHub(testKey(), 0, nil, nil)
 	var wg sync.WaitGroup
 	for i := range 50 {

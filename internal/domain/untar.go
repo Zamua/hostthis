@@ -7,30 +7,24 @@ import (
 	"strings"
 )
 
-// GzipMagic is the two-byte gzip member header (RFC 1952). Detection
-// sniffs for it the same way DetectKind sniffs HTML vs Markdown.
+// GzipMagic is the two-byte gzip member header (RFC 1952).
 var GzipMagic = [2]byte{0x1f, 0x8b}
 
 // HasGzipMagic reports whether b begins with the gzip magic bytes.
-// The format gate uses it to decide whether to try the archive path.
 func HasGzipMagic(b []byte) bool {
 	return len(b) >= 2 && b[0] == GzipMagic[0] && b[1] == GzipMagic[1]
 }
 
-// FileSink receives one safe, fully-validated regular file from the
-// archive: its cleaned relative path and the SHA + uncompressed size of
-// its bytes. SafeUntar streams the file's bytes to the sink's writer so
-// the caller (the DeploySite service) can hash + store each file as a
-// content-addressed blob without SafeUntar importing any storage code.
-//
-// The sink returns the SHA it computed (content-addressing is by the
-// file's uncompressed bytes) so the manifest can reference the blob.
+// FileSink receives one safe, fully-validated regular file from the archive.
+// SafeUntar streams the file's bytes to the sink so the caller can hash +
+// store each file as a content-addressed blob without SafeUntar importing any
+// storage code.
 type FileSink interface {
-	// Store consumes the file's bytes from r (exactly size bytes) and
-	// returns the content SHA it stored them under. size is the tar
-	// header's declared size; the decompression-bomb guard has already
-	// admitted these bytes against the running total before Store is
-	// called.
+	// Store consumes exactly size bytes from r and returns the content SHA
+	// it stored them under (content-addressing is by the file's
+	// uncompressed bytes, so the manifest can reference the blob). size is
+	// the tar header's declared size; the decompression-bomb guard has
+	// already admitted these bytes against the running total.
 	Store(p string, r io.Reader, size int64) (sha string, compressedSize int, err error)
 }
 
@@ -45,21 +39,19 @@ func isJunkPath(rel string) bool {
 	return base == ".DS_Store" || strings.HasPrefix(base, "._")
 }
 
-// cleanArchivePath validates and normalizes one tar entry name to a
-// safe, site-root-relative, slash-separated path. Returns ErrUnsafeArchive
-// for anything that is absolute, escapes the root via "..", or uses a
-// backslash (Windows-style separators are not trusted - they can hide a
-// traversal on some extractors).
+// cleanArchivePath validates and normalizes one tar entry name to a safe,
+// site-root-relative, slash-separated path. Returns ErrUnsafeArchive for
+// anything absolute, escaping the root via "..", or using a backslash
+// (Windows-style separators can hide a traversal on some extractors).
 //
-// Returns ("", nil) for entries that clean to the root itself ("." or
-// "./"), which the caller skips. Returns the cleaned path otherwise.
+// Returns ("", nil) for entries that clean to the root itself ("." or "./"),
+// which the caller skips.
 func cleanArchivePath(name string) (string, error) {
-	// Reject backslashes outright: a path like "..\\etc" is a traversal
-	// that path.Clean (which only knows "/") would not catch.
+	// A path like "..\\etc" is a traversal path.Clean (which only knows "/")
+	// would not catch.
 	if strings.ContainsRune(name, '\\') {
 		return "", fmt.Errorf("%w: backslash in %q", ErrUnsafeArchive, name)
 	}
-	// Reject NUL and other control bytes that have no place in a path.
 	if strings.ContainsRune(name, 0x00) {
 		return "", fmt.Errorf("%w: NUL byte in path", ErrUnsafeArchive)
 	}
@@ -75,14 +67,13 @@ func cleanArchivePath(name string) (string, error) {
 	if clean == "." {
 		return "", nil
 	}
-	// After cleaning, a leading "../" (or a bare "..") means the entry
-	// climbed out of the root. path.Clean keeps leading ".." segments,
-	// so this catches every traversal that survived normalization.
+	// path.Clean keeps leading ".." segments, so this catches every traversal
+	// that survived normalization.
 	if clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", fmt.Errorf("%w: path %q escapes site root", ErrUnsafeArchive, name)
 	}
-	// Defensive: Clean never yields a leading "/" for a relative input,
-	// but guard anyway so a future Clean change can't open a hole.
+	// Clean never yields a leading "/" for a relative input; guard anyway so
+	// a future Clean change cannot open a hole.
 	if strings.HasPrefix(clean, "/") {
 		return "", fmt.Errorf("%w: path %q resolves absolute", ErrUnsafeArchive, name)
 	}
@@ -90,11 +81,11 @@ func cleanArchivePath(name string) (string, error) {
 	return clean, nil
 }
 
-// cappedTarReader wraps a tar entry reader and aborts the read with
-// ErrArchiveTooLarge the instant the RUNNING uncompressed total (shared
-// across every entry via the running pointer) would cross capBytes. The
-// cap is enforced on bytes as they are read out of the decompressor, so
-// a decompression bomb is stopped mid-stream, never after full inflation.
+// cappedReader wraps a tar entry reader and aborts with ErrArchiveTooLarge the
+// instant the RUNNING uncompressed total (shared across every entry via the
+// running pointer) would cross capBytes. The cap is enforced on bytes as they
+// come out of the decompressor, so a decompression bomb is stopped mid-stream,
+// never after full inflation.
 type cappedReader struct {
 	r        io.Reader
 	running  *int64 // shared running total across all entries
@@ -104,17 +95,16 @@ type cappedReader struct {
 }
 
 func (c *cappedReader) Read(p []byte) (int, error) {
-	// Pre-trim the read window so we never pull more than the remaining
-	// budget out of the decompressor in a single Read.
+	// Pre-trim the read window so no single Read pulls more than the
+	// remaining budget out of the decompressor.
 	remaining := c.capBytes - *c.running
 	if remaining <= 0 {
 		c.tripped = true
 		return 0, ErrArchiveTooLarge
 	}
 	if int64(len(p)) > remaining {
-		// Read one byte past the budget so we can detect overflow: if the
-		// source still has bytes after we've consumed the whole budget,
-		// the site is over-cap. We cap the slice at remaining+1.
+		// One byte past the budget, so overflow is detectable: bytes still
+		// arriving once the whole budget is consumed mean an over-cap site.
 		p = p[:remaining+1]
 	}
 	n, err := c.r.Read(p)

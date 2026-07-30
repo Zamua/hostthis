@@ -2,35 +2,25 @@
 
 package storage_test
 
-// Decode-tolerance policy tests for the shale background scans.
+// Decode-tolerance policy tests for the shale background scans, pinned against
+// a real ShaleRepo on the shared MinIO test bucket. docs/SPEC.md "Decode
+// tolerance is per-scan-semantics" defines the three policies:
 //
-// docs/SPEC.md "Decode tolerance is per-scan-semantics" defines three
-// policies, and these tests pin each one against a real ShaleRepo on the
-// shared MinIO test bucket:
+//   - Policy 1 (idempotent sweeps/reconcile): an undecodable record is SKIPPED
+//     and logged, the pass continues over the good records and returns success,
+//     and the next tick retries the bad row.
 //
-//   - Policy 1 (idempotent sweeps/reconcile): an undecodable record is
-//     SKIPPED + logged and the pass CONTINUES, still processing the other
-//     good records and returning success. The next tick retries the bad
-//     row. TestShaleDecodeTolerance_ReconcileSkipsBadRecord pins this for
-//     Reconcile across BOTH of its enumeration-index reprojections: a
-//     poisoned pastes/ row (the paste index pass) and a poisoned sites/ row
-//     (the re-homed site index pass).
+//   - Policy 2 (blob-GC ref-set scan): an undecodable record must FAIL CLOSED.
+//     ReferencedBlobSHAs returns an error, never a partial keep-set, so the
+//     sweep deletes NOTHING that pass. Skipping would under-count references
+//     and delete a live blob, which is irreversible.
 //
-//   - Policy 2 (blob-GC ref-set scan): an undecodable record must FAIL
-//     CLOSED. ReferencedBlobSHAs aborts the pass and returns an error,
-//     never a partial keep-set, so the sweep caller deletes NOTHING that
-//     pass. Skipping here would UNDER-COUNT references and delete a live
-//     blob (irreversible). TestShaleDecodeTolerance_BlobGCFailsClosed
-//     drives the full Sweep.Once and asserts zero blobs removed, then
-//     demonstrates the regression a skip-on-bad change would introduce.
-//
-//   - Policy 3 (user-facing reads): a read of a corrupt record still HARD
-//     FAILS - the user sees an error, not a silent skip.
-//     TestShaleDecodeTolerance_UserReadHardFails pins Get.
+//   - Policy 3 (user-facing reads): a read of a corrupt record HARD FAILS. The
+//     user sees an error, not a silent skip.
 //
 //	go test -tags slatedb -run TestShaleDecodeTolerance ./internal/storage
 //
-// All three skip cleanly unless MINIO_TEST_ENDPOINT is set.
+// All skip cleanly unless MINIO_TEST_ENDPOINT is set.
 
 import (
 	"context"
@@ -47,17 +37,16 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// corruptJSON is bytes that pasteRow / versionRow / the reservation marker
-// all fail to json.Unmarshal: a bare token that is not a JSON object.
+// corruptJSON fails json.Unmarshal into pasteRow, versionRow and the
+// reservation marker alike: a bare token that is not a JSON object.
 var corruptJSON = []byte("this-is-not-json{")
 
 // --- Policy 1: idempotent reconcile skips + continues -----------------------
 
-// TestShaleDecodeTolerance_ReconcileSkipsBadRecord pins Policy 1: a single
-// undecodable pastes/ row (and a single undecodable reservation marker) must
-// NOT stall Reconcile. The pass skips the bad records, still heals the
-// healthy owner's derived index, and returns success - the next tick retries
-// the poisoned rows.
+// TestShaleDecodeTolerance_ReconcileSkipsBadRecord pins Policy 1 across BOTH of
+// Reconcile's enumeration-index reprojections (a poisoned pastes/ row and a
+// poisoned sites/ row): the pass skips them, still heals the healthy owner's
+// derived index, and returns success.
 func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -68,8 +57,8 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	owner := "key:tolerant"
 
-	// A healthy paste for the owner: its derived index entry will be the
-	// thing the reconcile pass must still rebuild despite the poison.
+	// A healthy paste whose derived index entry the pass must still rebuild
+	// despite the poison.
 	good := domain.Paste{
 		Slug: domain.Slug("goodpst1"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-good", Size: 100,
@@ -78,29 +67,28 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 	if err := repo.InsertWithQuotaCheck(context.Background(), good, 0, now); err != nil {
 		t.Fatalf("insert good paste: %v", err)
 	}
-	// Drain the deferred confirm before we manually desync the index below:
-	// a not-yet-run confirm would re-write the index entry we delete.
+	// Drain the deferred confirm before desyncing the index below: a
+	// not-yet-run confirm would re-write the entry the desync deletes.
 	repo.WaitPendingConfirms()
 
-	// Poison #1: an undecodable authoritative pastes/ row. A second slug so
-	// its key sorts into the same aggregate scan Reconcile's paste-index
-	// reprojection walks.
+	// Poison #1: an undecodable authoritative pastes/ row, under a slug whose
+	// key sorts into the same aggregate scan the paste-index reprojection
+	// walks.
 	badSlug := domain.Slug("badpst22")
 	if err := repo.PutRawForTest(storage.LegacyPasteKeyForTest(badSlug), corruptJSON); err != nil {
 		t.Fatalf("seed corrupt paste row: %v", err)
 	}
 
-	// Poison #2: an undecodable authoritative sites/ row. Reconcile's re-homed
-	// site-index reprojection (reconcileSiteIndexPass) scans sites/, so it must
-	// skip this row rather than abort the whole pass.
+	// Poison #2: an undecodable authoritative sites/ row, which
+	// reconcileSiteIndexPass must skip rather than abort the whole pass on.
 	badSiteSlug := domain.Slug("badsite2")
 	if err := repo.PutRawForTest(storage.SiteKeyForTest(badSiteSlug), corruptJSON); err != nil {
 		t.Fatalf("seed corrupt site row: %v", err)
 	}
 
-	// Desync the good paste's derived index so the pass has real work to do:
-	// drop its identity_pastes entry. Reconcile must rebuild it - proving the
-	// poison did not short-circuit the pass before it reached the healthy row.
+	// Drop the good paste's identity_pastes entry so the pass has real work:
+	// rebuilding it proves the poison did not short-circuit the pass before
+	// it reached the healthy row.
 	if err := repo.DeleteRawForTest(storage.IdentityPasteKeyForTest(owner, good.Slug.String())); err != nil {
 		t.Fatalf("desync good index entry: %v", err)
 	}
@@ -108,14 +96,11 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 		t.Fatalf("post-desync count: got %d, want 0 (good index dropped)", got)
 	}
 
-	// Reconcile must SUCCEED despite both poisoned records.
 	if err := repo.ReconcileForTest(now); err != nil {
 		t.Fatalf("reconcile must skip+continue on bad records, not error: %v", err)
 	}
 
-	// The healthy owner's index was rebuilt: the good paste is back in the
-	// list. This is the "the pass still processed the OTHER good records"
-	// half of Policy 1.
+	// The "still processed the OTHER good records" half of Policy 1.
 	if got := mustCount(t, repo, owner); got != 1 {
 		t.Fatalf("post-reconcile count: got %d, want 1 (good index rebuilt despite poison)", got)
 	}
@@ -127,8 +112,7 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 		t.Fatalf("post-reconcile list: got %+v, want just %q", list, good.Slug)
 	}
 
-	// The poison is untouched (skip+log leaves it for the next tick to retry) -
-	// both the paste row and the site row.
+	// Both poisoned rows survive the pass, left for the next tick to retry.
 	raw, err := repo.GetRawForTest(storage.LegacyPasteKeyForTest(badSlug))
 	if err != nil {
 		t.Fatalf("read poisoned paste row: %v", err)
@@ -145,23 +129,20 @@ func TestShaleDecodeTolerance_ReconcileSkipsBadRecord(t *testing.T) {
 	}
 }
 
-// --- Policy 1 (Fix 3): reconciler heals an un-indexed undecodable row -------
+// --- Policy 1: reconciler heals an un-indexed undecodable row ---------------
 
 // TestShaleDecodeTolerance_ReconcileHealsUnindexedUndecodableRow pins the
-// fail-closed heal a naive skip+continue lacked. The quota scan sums the
+// fail-closed heal that plain skip+continue lacks. The quota scan sums
 // enumeration entries, so an undecodable authoritative row whose index entry
 // was ALSO lost (a crash between the row write and the index write) is
-// enumerated by NOTHING and silently drops from the owner's sum - a DURABLE
-// under-count that lets the owner exceed the cap permanently, because the
-// reconciler is the only thing that heals a missing index entry and a naive
-// skip drops exactly this one.
+// enumerated by NOTHING and silently drops from the owner's sum: a DURABLE
+// under-count letting the owner exceed the cap permanently, since the
+// reconciler is the only thing that heals a missing index entry.
 //
-// The fix: on an undecodable pastes/ (or sites/) row the reconciler derives
-// the owner decode-independently from slug_owner/<slug> and projects a
-// FAIL-CLOSED PLACEHOLDER enumeration entry (placeholder: true), so the
-// owner's next quota scan sees the marker and HARD-FAILS (fail-closed
-// reject), never a silent under-count. The residual (no slug_owner) is
-// documented + pinned.
+// So on an undecodable pastes/ or sites/ row the reconciler derives the owner
+// decode-independently from slug_owner/<slug> and projects a FAIL-CLOSED
+// PLACEHOLDER enumeration entry, making the owner's next quota scan hard-fail
+// rather than under-count. The residual (no slug_owner) is pinned below.
 //
 //	go test -tags slatedb -run TestShaleDecodeTolerance_ReconcileHeals ./internal/storage
 func TestShaleDecodeTolerance_ReconcileHealsUnindexedUndecodableRow(t *testing.T) {
@@ -173,10 +154,10 @@ func TestShaleDecodeTolerance_ReconcileHealsUnindexedUndecodableRow(t *testing.T
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 
 	// --- PASTE: corrupt row + slug_owner, but NO identity_pastes entry ------
-	// Models a paste whose authoritative row got corrupted AND whose enumeration
-	// index entry was lost to a crash. slug_owner is a raw owner string
-	// (insertAuthoritative writes it decode-independently), so the reconciler can
-	// still derive the owner.
+	// A paste whose authoritative row is corrupt AND whose enumeration entry
+	// was lost to a crash. slug_owner holds a raw owner string
+	// (insertAuthoritative writes it decode-independently), so the owner is
+	// still derivable.
 	owner := "key:heal"
 	badSlug := domain.Slug("healbad1")
 	if err := repo.PutRawForTest(storage.LegacyPasteKeyForTest(badSlug), corruptJSON); err != nil {
@@ -186,9 +167,8 @@ func TestShaleDecodeTolerance_ReconcileHealsUnindexedUndecodableRow(t *testing.T
 		t.Fatalf("seed slug_owner: %v", err)
 	}
 
-	// Pre-reconcile: the corrupt row is enumerated by NOTHING (no index entry),
-	// so the quota scan is BLIND to it - it returns 0 with NO error, a silent,
-	// DURABLE under-count. This is the hole the fix closes.
+	// Nothing enumerates the corrupt row yet, so the quota scan is BLIND to
+	// it: 0 with no error, the silent durable under-count.
 	if got, err := repo.SumActiveBytesByOwner(owner, now); err != nil {
 		t.Fatalf("pre-reconcile sum should not error (un-indexed row invisible): %v", err)
 	} else if got != 0 {
@@ -196,27 +176,24 @@ func TestShaleDecodeTolerance_ReconcileHealsUnindexedUndecodableRow(t *testing.T
 	}
 
 	// Reconcile derives the owner from slug_owner and projects a placeholder
-	// enumeration entry so the row is no longer invisible - and does NOT error.
+	// entry, without erroring.
 	if err := repo.ReconcileForTest(now); err != nil {
 		t.Fatalf("reconcile must not error on the corrupt-but-ownable row: %v", err)
 	}
-	// The enumeration entry now exists.
 	if raw, err := repo.GetRawForTest(storage.IdentityPasteKeyForTest(owner, badSlug.String())); err != nil {
 		t.Fatalf("read healed paste index entry: %v", err)
 	} else if len(raw) == 0 {
 		t.Fatalf("reconcile must project an enumeration entry for the corrupt-but-ownable paste (fail-closed heal)")
 	}
-	// Post-reconcile: the scan now sees badSlug's fail-closed placeholder
-	// entry and HARD-FAILS - rejecting the owner's next upload rather than
-	// silently under-counting. This is the gate: an undecodable
-	// authoritative row is a hard error, never absent.
+	// The scan now sees the placeholder and HARD-FAILS, rejecting the owner's
+	// next upload: an undecodable authoritative row is an error, never absent.
 	if got, err := repo.SumActiveBytesByOwner(owner, now); err == nil {
 		t.Fatalf("post-reconcile sum must HARD-FAIL on the enumerated corrupt row (fail-closed); got %d, nil error", got)
 	}
 
 	// --- SITE: corrupt row + slug_owner, but NO identity_sites entry --------
 	// The site deploy's pre-claim writes slug_owner on the transactional
-	// shale-blob path (prod); seed it to model that.
+	// shale-blob path; seed it to model that.
 	siteOwner := "key:healsite"
 	badSite := domain.Slug("healbsit")
 	if err := repo.PutRawForTest(storage.SiteKeyForTest(badSite), corruptJSON); err != nil {
@@ -244,8 +221,8 @@ func TestShaleDecodeTolerance_ReconcileHealsUnindexedUndecodableRow(t *testing.T
 
 	// --- RESIDUAL: corrupt row with NO slug_owner stays un-enumerated -------
 	// Documented residual (docs/SPEC.md "Decode tolerance of the quota scan"):
-	// without slug_owner the owner cannot be derived, so the row stays invisible.
-	// Only reachable on the metadata-only path; prod always writes slug_owner.
+	// with no slug_owner the owner cannot be derived, so the row stays
+	// invisible. Only reachable on the metadata-only path.
 	orphanOwner := "key:healorphan"
 	orphan := domain.Slug("healorph")
 	if err := repo.PutRawForTest(storage.LegacyPasteKeyForTest(orphan), corruptJSON); err != nil {
@@ -266,11 +243,10 @@ func TestShaleDecodeTolerance_ReconcileHealsUnindexedUndecodableRow(t *testing.T
 	}
 }
 
-// --- Policy 2 (THE IMPORTANT ONE): blob-GC ref scan fails closed ------------
+// --- Policy 2: blob-GC ref scan fails closed --------------------------------
 
-// fakeBlobs is an in-memory SweepBlobs whose Remove records every deletion.
-// The blob-GC fail-closed test asserts Remove is NEVER called when the
-// ref-set scan errors.
+// fakeBlobs is an in-memory SweepBlobs whose Remove records every deletion, so
+// a test can assert Remove is NEVER called.
 type fakeBlobs struct {
 	mu      sync.Mutex
 	present map[string]struct{}
@@ -309,15 +285,13 @@ func (b *fakeBlobs) Remove(sha string) error {
 }
 
 // TestShaleDecodeTolerance_BlobGCFailsClosed pins Policy 2, the data-loss
-// guard. A corrupt pastes/ row must make ReferencedBlobSHAs ABORT (return an
-// error, never a partial keep-set), and the Sweep caller must therefore
-// delete NOTHING this pass - including the live blob the corrupt row still
-// references.
+// guard: a corrupt pastes/ row makes ReferencedBlobSHAs ABORT (an error, never
+// a partial keep-set), so the Sweep caller deletes NOTHING that pass, including
+// the live blob the corrupt row still references.
 //
-// The test also demonstrates the regression a skip-on-bad change would
-// introduce: it confirms the corrupt row's referenced sha is NOT recoverable
-// from the (aborted) scan, so if the scan had skipped instead of aborting,
-// the keep-set would omit that sha and the sweep would delete a live blob.
+// It also shows what a skip-on-bad change would cost: the corrupt row's sha is
+// not recoverable from the aborted scan, so a skipping scan would omit it from
+// the keep-set and the sweep would delete a live blob.
 func TestShaleDecodeTolerance_BlobGCFailsClosed(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -327,9 +301,9 @@ func TestShaleDecodeTolerance_BlobGCFailsClosed(t *testing.T) {
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 
-	// Two pastes, each referencing a DISTINCT blob sha. Neither is expired
-	// (ExpiresAt is well in the future) so the sweep deletes no pastes; the
-	// only question is which blobs it considers referenced.
+	// Two pastes referencing DISTINCT blob shas, neither expired, so the
+	// sweep deletes no pastes and the only question is which blobs it
+	// considers referenced.
 	keep := domain.Paste{
 		Slug: domain.Slug("keeppst1"), Identity: domain.Identity("key:gc"),
 		Kind: domain.KindHTML, ContentSHA: "sha-keep-good", Size: 100,
@@ -347,22 +321,20 @@ func TestShaleDecodeTolerance_BlobGCFailsClosed(t *testing.T) {
 		t.Fatalf("insert poisoned paste: %v", err)
 	}
 
-	// Both blobs exist on disk. The honest answer is "both still referenced".
+	// Both blobs exist on disk; the honest answer is "both still referenced".
 	const keepSHA = "sha-keep-good"
 	const poisonedSHA = "sha-keep-poisoned"
 
-	// Make the poisoned paste's blob be referenced SOLELY by its pastes/ row:
-	// drop the auto-created v1 version row (which carries the same sha). Now
-	// the ONLY thing keeping poisonedSHA alive is the row we are about to
-	// corrupt - so a skip-on-bad ref scan would omit poisonedSHA from the
-	// keep-set and the sweep would delete a live blob. This is what makes the
-	// fail-closed assertion below a real data-loss guard, not a formality.
+	// Dropping the auto-created v1 version row (same sha) leaves the pastes/
+	// row about to be corrupted as the ONLY reference to poisonedSHA. That is
+	// what makes the fail-closed assertion a real data-loss guard: a
+	// skip-on-bad scan would omit poisonedSHA and the sweep would delete a
+	// live blob.
 	if err := repo.DeleteRawForTest(storage.LegacyVersionKeyForTest(poisoned.Slug, 1)); err != nil {
 		t.Fatalf("drop poisoned v1 version row: %v", err)
 	}
 
-	// Baseline (before corruption): ReferencedBlobSHAs returns BOTH shas and
-	// the sweep deletes nothing. Pins that the test fixture itself is sound.
+	// Baseline: both shas referenced, proving the fixture itself is sound.
 	baseRefs, err := repo.ReferencedBlobSHAs()
 	if err != nil {
 		t.Fatalf("baseline ReferencedBlobSHAs: %v", err)
@@ -371,16 +343,12 @@ func TestShaleDecodeTolerance_BlobGCFailsClosed(t *testing.T) {
 		t.Fatalf("baseline refs %v must contain both %q and %q", baseRefs, keepSHA, poisonedSHA)
 	}
 
-	// Now corrupt the poisoned paste's authoritative row to undecodable bytes.
 	if err := repo.PutRawForTest(storage.LegacyPasteKeyForTest(poisoned.Slug), corruptJSON); err != nil {
 		t.Fatalf("corrupt poisoned paste row: %v", err)
 	}
 
-	// (a) The repo-level claim: the ref-set scan FAILS CLOSED. It returns an
-	//     error and a nil/partial slice - NEVER a usable keep-set missing the
-	//     poisoned sha. This is the regression guard: a skip-on-bad change
-	//     would instead return (["sha-keep-good"], nil), omitting the poisoned
-	//     sha, and the sweep below would delete its live blob.
+	// (a) Repo level: the ref-set scan FAILS CLOSED, never returning a usable
+	//     keep-set that omits the poisoned sha.
 	refs, err := repo.ReferencedBlobSHAs()
 	if err == nil {
 		t.Fatalf("ReferencedBlobSHAs must FAIL CLOSED on a corrupt row; got refs=%v, nil error (a skip-on-bad regression)", refs)
@@ -389,9 +357,8 @@ func TestShaleDecodeTolerance_BlobGCFailsClosed(t *testing.T) {
 		t.Fatalf("failed-closed ReferencedBlobSHAs must not return a partial keep-set; got %v", refs)
 	}
 
-	// (b) The caller-level claim: the full Sweep.Once, given that erroring
-	//     ref scan, deletes NOTHING. Both blobs survive - including the live
-	//     blob the corrupt row still references.
+	// (b) Caller level: Sweep.Once, given that erroring ref scan, deletes
+	//     NOTHING, so the live blob the corrupt row references survives.
 	blobs := newFakeBlobs(keepSHA, poisonedSHA)
 	silent := log.New(io.Discard, "", 0)
 	sweep := &service.Sweep{
@@ -413,8 +380,6 @@ func TestShaleDecodeTolerance_BlobGCFailsClosed(t *testing.T) {
 	if len(blobs.removed) != 0 {
 		t.Fatalf("DATA LOSS: Sweep removed blobs %v on a fail-closed ref scan; it must delete NOTHING", blobs.removed)
 	}
-	// Both blobs are still present - the live blob the corrupt row references
-	// was NOT deleted.
 	if !blobs.has(keepSHA) || !blobs.has(poisonedSHA) {
 		t.Fatalf("both blobs must survive a fail-closed pass; present=%v", blobs.snapshot())
 	}
@@ -423,9 +388,8 @@ func TestShaleDecodeTolerance_BlobGCFailsClosed(t *testing.T) {
 // --- Policy 3: user-facing reads still hard-fail ----------------------------
 
 // TestShaleDecodeTolerance_UserReadHardFails pins Policy 3: a user read of a
-// corrupt record surfaces an error rather than silently skipping. The
-// tolerant background scans must NOT have leaked their skip behavior into the
-// per-request read path.
+// corrupt record surfaces an error, so the tolerant background scans cannot
+// have leaked their skip behavior into the per-request read path.
 func TestShaleDecodeTolerance_UserReadHardFails(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -443,13 +407,10 @@ func TestShaleDecodeTolerance_UserReadHardFails(t *testing.T) {
 		t.Fatalf("insert paste: %v", err)
 	}
 
-	// Corrupt the authoritative row to undecodable bytes.
 	if err := repo.PutRawForTest(storage.LegacyPasteKeyForTest(p.Slug), corruptJSON); err != nil {
 		t.Fatalf("corrupt paste row: %v", err)
 	}
 
-	// Get must return an error - the user sees corrupt data surfaced, not a
-	// silent skip / empty result.
 	got, err := repo.Get(p.Slug)
 	if err == nil {
 		t.Fatalf("Get of a corrupt row must hard-fail; got paste=%+v, nil error", got)

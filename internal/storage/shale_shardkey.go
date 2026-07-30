@@ -39,19 +39,14 @@ import (
 //	roombytes/<app-slug>               -> <app-slug>
 //	roomexpiry/<ts>/<app-slug>/<uuid>  -> <app-slug>  (SECOND-to-last segment)
 //
-// The site families mirror the paste ones. The room families all shard on the
-// app-slug, co-locating an app's rooms, values, ledger, expiry and counter.
-//
 // An unrecognised key falls back to the full key as its own shard key: it
 // routes deterministically and cannot collide families.
 func shaleShardKey(key []byte) []byte {
 	switch {
 	// Blob-pointer keys (shale-internal). The route shard key lives in the
 	// Redis-style hash tag {<routeShard>} that brefKey writes, so the pointer
-	// co-routes with the app metadata under the SAME unit (a paste's bref/
-	// pointer lands on the {slug} shard, exactly where pastes/<slug> is). Defer
-	// to the default hash-tag extractor, which returns the bytes between the
-	// first '{' and '}'. This MUST be the leading case so a bref/ key is never
+	// co-routes with the metadata under the SAME unit; ring.ShardKey is the
+	// hash-tag extractor. This MUST be the leading case so a bref/ key is never
 	// mis-classified by a later family prefix. See blob-values.md section 11.5.
 	case bytes.HasPrefix(key, prefixBref):
 		return ring.ShardKey(key)
@@ -71,12 +66,12 @@ func shaleShardKey(key []byte) []byte {
 		// the date from the slug unambiguously.
 		return lastSegment(key[len(prefixExpiryAll):])
 
-	// Per-slug static-site authoritative family (mirrors pastes/ + expiry/).
+	// Per-slug static-site authoritative family.
 	case bytes.HasPrefix(key, prefixSites):
 		return firstSegment(key[len(prefixSites):])
 	case bytes.HasPrefix(key, prefixExpirySitesAll):
-		// expiry_sites/<rfc3339>/<slug>: slug is the LAST segment, same as
-		// expiry/. The '_sites' suffix keeps it from matching expiry/.
+		// expiry_sites/<rfc3339>/<slug>: slug is the LAST segment. The '_sites'
+		// suffix keeps it from matching expiry/.
 		return lastSegment(key[len(prefixExpirySitesAll):])
 
 	// Per-identity derived family. All shard on the id, the first segment
@@ -87,33 +82,23 @@ func shaleShardKey(key []byte) []byte {
 		return firstSegment(key[len(prefixIdentityFirstSeenAll):])
 
 	// Shards on the identity so one key's subnet entries co-locate and the
-	// lookup is a single-shard prefix scan.
-	//
-	// Without a case here the family hashes the whole key and scatters, forcing
-	// a cross-shard fan-out whose cost is set by unit count rather than rows
-	// matched. Same argument as identity_pastes/ above.
+	// lookup is a single-shard prefix scan. Without a case here the family
+	// hashes the whole key and scatters, forcing a cross-shard fan-out whose
+	// cost is set by unit count rather than rows matched.
 	case bytes.HasPrefix(key, prefixKeygateIdentityAll):
 		return firstSegment(key[len(prefixKeygateIdentityAll):])
 
-	// Per-identity static-site derived family. The site enumeration index
-	// shards on the id so an owner's site entries co-locate and the site
-	// quota's prefix scan is single-shard (the same argument as
-	// identity_pastes/).
+	// Per-identity static-site derived family: shards on the id so an owner's
+	// site entries co-locate and the site quota's prefix scan is single-shard.
 	case bytes.HasPrefix(key, prefixIdentitySitesAll):
 		return firstSegment(key[len(prefixIdentitySitesAll):])
 
-	// Per-app room family (the app-persistence tier). All four room
-	// families shard on the <app-slug> so an app's rooms, every room value,
-	// its creation ledger, its expiry entries, and its byte counter co-locate
-	// on ONE shard (so "write one key" / "load the whole room" / "count this
-	// app's creations" are single-shard ops). The <app-slug> is the FIRST
-	// segment after the prefix for rooms/ + roomkv/ + roomcreate/, but for
-	// roomexpiry it is the SECOND-to-last segment (between the <ts> and the
-	// trailing <uuid>); family-aware parsing pulls it out.
-	//
-	// roomkv/ MUST be matched BEFORE rooms/ would (it isn't, the trailing
-	// slash anchors each prefix to a full segment so "roomkv/" never matches
-	// "rooms/"), and roomcreate/ + roomexpiry/ are distinct prefixes.
+	// Per-app room family (the app-persistence tier). All room families shard
+	// on the <app-slug> so an app's rooms, values, creation ledger, expiry
+	// entries and byte counter co-locate on ONE shard, making "write one key" /
+	// "load the whole room" / "count this app's creations" single-shard ops.
+	// The <app-slug> is the FIRST segment after the prefix for rooms/ + roomkv/
+	// + roomcreate/, but the SECOND-to-last for roomexpiry/.
 	case bytes.HasPrefix(key, prefixRooms):
 		return firstSegment(key[len(prefixRooms):])
 	case bytes.HasPrefix(key, prefixRoomKV):
@@ -121,22 +106,18 @@ func shaleShardKey(key []byte) []byte {
 	case bytes.HasPrefix(key, prefixRoomCreate):
 		return firstSegment(key[len(prefixRoomCreate):])
 	case bytes.HasPrefix(key, prefixRoomBytes):
-		// roombytes/<app-slug>: the app slug is the whole remainder (no
-		// further '/').
 		return firstSegment(key[len(prefixRoomBytes):])
 	case bytes.HasPrefix(key, prefixRoomExpiryAll):
-		// roomexpiry/<ts>/<app-slug>/<uuid>: the app slug is the
-		// second-to-last segment. The <ts> is fixed-width (no '/'), the slug
-		// + uuid are slash-free, so strip the leading <ts> then take the
-		// first of the remaining "<app-slug>/<uuid>".
+		// roomexpiry/<ts>/<app-slug>/<uuid>: the <ts> is fixed-width (no '/')
+		// and slug + uuid are slash-free, so strip the leading <ts> then take
+		// the first of the remaining "<app-slug>/<uuid>".
 		rest := key[len(prefixRoomExpiryAll):]
 		if _, after, ok := bytes.Cut(rest, []byte{'/'}); ok {
 			return firstSegment(after)
 		}
 		return rest
 
-	// Per-subnet Sybil-gate family. Shards on the subnet, the first
-	// segment after the prefix.
+	// Per-subnet Sybil-gate family.
 	case bytes.HasPrefix(key, prefixKeygateAll):
 		return firstSegment(key[len(prefixKeygateAll):])
 	}
@@ -152,9 +133,7 @@ func shaleShardKey(key []byte) []byte {
 // segment so e.g. "expiry/" never matches "expiry_sites/".
 var (
 	// prefixBref matches shale's internal blob-pointer keys
-	// (bref/{<routeShard>}/<unit>/<blobid>). The route shard key sits in the
-	// {...} hash tag, so ring.ShardKey extracts it and the pointer co-routes
-	// with the metadata it references.
+	// (bref/{<routeShard>}/<unit>/<blobid>).
 	prefixBref = []byte("bref/")
 
 	prefixPastes               = []byte("pastes/")
@@ -166,16 +145,14 @@ var (
 	prefixKeygateIdentityAll   = []byte("keygate_id/")
 	prefixKeygateAll           = []byte("keygate/")
 
-	// Static-site families (mirror the paste families). identity_sites/ is
-	// the per-owner enumeration index (mirrors identity_pastes/).
+	// Static-site families. identity_sites/ is the per-owner enumeration index.
 	prefixSites            = []byte("sites/")
 	prefixExpirySitesAll   = []byte("expiry_sites/")
 	prefixIdentitySitesAll = []byte("identity_sites/")
 
 	// Room families (the app-persistence tier). All shard on <app-slug>,
 	// co-locating an app's rooms + values + creation ledger + expiry index +
-	// byte counter on one shard. The trailing '/' anchors each prefix to a
-	// full segment so "roomkv/" never matches "rooms/".
+	// byte counter on one shard.
 	prefixRooms         = []byte("rooms/")
 	prefixRoomKV        = []byte("roomkv/")
 	prefixRoomCreate    = []byte("roomcreate/")
@@ -183,9 +160,8 @@ var (
 	prefixRoomExpiryAll = []byte("roomexpiry/")
 )
 
-// firstSegment returns the bytes up to (but not including) the first '/'
-// in s, or all of s if there is no '/'. Used to pull the leading shard
-// subject out of the remainder after a family prefix has been stripped.
+// firstSegment returns the bytes up to (but not including) the first '/' in s,
+// or all of s if there is no '/'.
 func firstSegment(s []byte) []byte {
 	if before, _, ok := bytes.Cut(s, []byte{'/'}); ok {
 		return before
@@ -193,9 +169,8 @@ func firstSegment(s []byte) []byte {
 	return s
 }
 
-// lastSegment returns the bytes after the last '/' in s, or all of s if
-// there is no '/'. Used to pull the trailing slug out of the
-// expiry/<date>/<slug> shape.
+// lastSegment returns the bytes after the last '/' in s, or all of s if there
+// is no '/'.
 func lastSegment(s []byte) []byte {
 	if i := bytes.LastIndexByte(s, '/'); i >= 0 {
 		return s[i+1:]
@@ -203,12 +178,11 @@ func lastSegment(s []byte) []byte {
 	return s
 }
 
-// The identity-leading view of the same fact, so "which subnets has this key
-// been seen in" is a narrow prefix scan rather than a scan of every keygate row.
-//
-// A KV store cannot derive one key ordering from another, so both must be
-// materialised. Subnet-leading alone still returns the right answer, by reading
-// the whole table.
+// shaleKeyKeygateIdentity is the identity-leading view of a keygate fact, so
+// "which subnets has this key been seen in" is a narrow prefix scan rather than
+// a scan of every keygate row. A KV store cannot derive one key ordering from
+// another, so both must be materialised; subnet-leading alone still returns the
+// right answer, but only by reading the whole table.
 func shaleKeyKeygateIdentity(identity, subnet string) []byte {
 	return []byte("keygate_id/" + identity + "/" + subnet)
 }

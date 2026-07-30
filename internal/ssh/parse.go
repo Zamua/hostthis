@@ -9,31 +9,29 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// uploadArgs captures the parsed argv for upload/update. Only one of
-// Slug (update) or Name (create-with-name) is the headline; both can
-// be set if `cat foo | ssh hostthis.dev <slug> --name "new"` resets
-// the label as part of an update.
+// uploadArgs captures the parsed argv for upload/update. Slug and Name can both
+// be set: `... <slug> --name "new"` relabels as part of an update.
 type uploadArgs struct {
 	Slug string
 	Name string
-	Type string // "html", "md", etc. - passed straight to DetectKind
+	Type string // "html", "md", etc.; passed straight to DetectKind
 }
 
 // parseUploadFlags consumes the upload argv:
 //
 //	[<slug>] [--name "label"] [--type html|markdown|diff]
 //
-// Flags can come before or after the slug; the parser stays minimal.
+// Flags may come before or after the slug.
 func parseUploadFlags(argv []string) (uploadArgs, error) {
 	var out uploadArgs
 	for i := 0; i < len(argv); i++ {
 		a := argv[i]
 		switch {
 		case a == "--name":
-			// Greedily join the following tokens up to the next flag as the
-			// label: ssh flattens the command to a space-joined string, so a
-			// multi-word label arrives as several tokens. Put the slug BEFORE
-			// --name (a positional after --name is read as part of the label).
+			// ssh flattens the command to a space-joined string, so a
+			// multi-word label arrives as several tokens: join up to the next
+			// flag. A positional after --name is therefore swallowed by the
+			// label, so the slug must precede it.
 			var parts []string
 			for j := i + 1; j < len(argv) && !strings.HasPrefix(argv[j], "--"); j++ {
 				parts = append(parts, argv[j])
@@ -54,7 +52,7 @@ func parseUploadFlags(argv []string) (uploadArgs, error) {
 		case strings.HasPrefix(a, "--type="):
 			out.Type = strings.TrimPrefix(a, "--type=")
 		default:
-			// First non-flag positional is the slug.
+			// The first non-flag positional is the slug.
 			if out.Slug == "" {
 				if _, err := domain.ParseSlug(a); err == nil {
 					out.Slug = a
@@ -67,7 +65,6 @@ func parseUploadFlags(argv []string) (uploadArgs, error) {
 	return out, nil
 }
 
-// parseInt is a thin alias to keep the call sites short.
 func parseInt(s string) (int, error) { return strconv.Atoi(s) }
 
 // humanBytes formats a byte count compactly: 540B, 1.2k, 3.8M.
@@ -82,10 +79,6 @@ func humanBytes(n int) string {
 	}
 }
 
-// humanDuration formats a remaining-time duration compactly.
-// Used in the EXPIRES_IN column of `list` and the footer of
-// `versions`. Goes "Nd Hh" for >= 1 day, "NhMm" for >= 1 hour,
-// "Nm" for >= 1 minute, "<1m" / "expired" at the edges.
 // humanExpiresIn formats the EXPIRES_IN cell for a paste/site, rendering the
 // no-expiry sentinel as "never" rather than a nonsensical far-future duration.
 func humanExpiresIn(expiresAt, now time.Time) string {
@@ -95,6 +88,8 @@ func humanExpiresIn(expiresAt, now time.Time) string {
 	return humanDuration(expiresAt.Sub(now))
 }
 
+// humanDuration renders a remaining time as "2d3h", "3h4m", "5m", "<1m", or
+// "expired".
 func humanDuration(d time.Duration) string {
 	if d <= 0 {
 		return "expired"

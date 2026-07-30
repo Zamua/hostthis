@@ -7,10 +7,9 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// RoomRepo is the persistence interface the Rooms service needs.
-// internal/storage.RoomKVRepo satisfies it. Declared here (not in
-// storage) so the service layer owns its dependency contract, the same
-// way PasteRepo / SiteRepo / SweepRepo / KeyGateRepo are.
+// RoomRepo is the persistence contract the Rooms service needs, declared here
+// rather than in storage so the service layer owns it (as with PasteRepo /
+// SiteRepo / SweepRepo / KeyGateRepo). internal/storage.RoomKVRepo satisfies it.
 type RoomRepo interface {
 	// CreateRoom records a new empty room + its creation-accounting row,
 	// enforcing the per-app aggregate cap. ErrSlugTaken if (app, id)
@@ -27,13 +26,12 @@ type RoomRepo interface {
 	ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error)
 	// PutValue writes one value, enforcing the per-room + per-app caps and
 	// resetting the retention clock, and returns the mutation's assigned
-	// per-room sequence (dense, +1 per committed mutation, assigned inside
-	// the same transaction that commits the value - see SPEC "The per-room
-	// sequence: assignment at commit"). domain.ErrNotFound if the room is
-	// gone, domain.ErrRoomDataFull / domain.ErrAppRoomsFull on caps. Rooms
-	// hold no blobs, so a room write touches no object-store quota: there is
-	// no service-wide byte cap on this path (see SPEC "Rooms -> Quota and
-	// abuse -> Durable total-bytes ceiling").
+	// per-room sequence: dense, +1 per committed mutation, assigned inside the
+	// same transaction that commits the value (SPEC "The per-room sequence:
+	// assignment at commit"). domain.ErrNotFound if the room is gone,
+	// domain.ErrRoomDataFull / domain.ErrAppRoomsFull on caps. Rooms hold no
+	// blobs, so this path touches no object-store quota and has no
+	// service-wide byte cap.
 	PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) (uint64, error)
 	// DeleteValue removes one value (idempotent) and resets the clock,
 	// returning the assigned per-room sequence (an absent-key delete still
@@ -45,10 +43,9 @@ type RoomRepo interface {
 }
 
 // Rooms is the application service for the no-auth room persistence tier
-// (see SPEC.md "Rooms (app persistence)"). It orchestrates room creation
-// (with the per-IP + per-app creation rate limit) and the KV verbs
-// (get / put / delete / scan, with the per-room cap enforced in the
-// repo). It carries no I/O of its own - the repo is the only adapter.
+// (SPEC.md "Rooms (app persistence)"): room creation under the per-IP +
+// per-app rate limit, and the KV verbs. It carries no I/O of its own; the
+// repo is the only adapter.
 type Rooms struct {
 	Repo RoomRepo
 
@@ -74,26 +71,25 @@ func NewRooms(repo RoomRepo) *Rooms {
 	}
 }
 
-// Sentinels the HTTP layer maps to status codes. They are service-layer
-// errors so the HTTP handler does not import storage's sentinels
-// directly for the room-specific cases.
+// Sentinels the HTTP layer maps to status codes. Service-layer errors, so the
+// HTTP handler never imports storage's sentinels for the room cases.
 var (
-	// ErrRoomNotFound: the room (or key) does not exist. HTTP 404 - the
+	// ErrRoomNotFound: the room OR the key is missing. HTTP 404, the
 	// existence-not-leaked shape.
 	ErrRoomNotFound = errors.New("service: room not found")
-	// ErrRoomCreateRateLimited: the per-IP or per-app creation rate limit
-	// is hit. HTTP 429. The Scope field of *RoomRateLimit says which.
+	// ErrRoomCreateRateLimited: HTTP 429. *RoomRateLimit's Scope says whether
+	// the per-IP or the per-app limit tripped.
 	ErrRoomCreateRateLimited = errors.New("service: room creation rate limit reached")
-	// ErrRoomDataCap: a write would exceed the per-room byte/key cap.
-	// HTTP 413; the prior value is intact.
+	// ErrRoomDataCap: the write would exceed the per-room cap. HTTP 413; the
+	// prior value is intact.
 	ErrRoomDataCap = errors.New("service: room is at its data cap")
 	// ErrAppRoomsCap: the per-app aggregate cap is hit. HTTP 507.
 	ErrAppRoomsCap = errors.New("service: app room storage is at capacity")
 )
 
-// RoomRateLimit enriches ErrRoomCreateRateLimited with the scope that
-// tripped (per-IP vs per-app) and the window, so the HTTP layer can set
-// a sensible Retry-After. errors.Is(err, ErrRoomCreateRateLimited) holds.
+// RoomRateLimit enriches ErrRoomCreateRateLimited with the scope that tripped
+// and the window, so the HTTP layer can set a Retry-After.
+// errors.Is(err, ErrRoomCreateRateLimited) holds.
 type RoomRateLimit struct {
 	Scope  string // "ip" or "app"
 	Window time.Duration
@@ -102,21 +98,19 @@ type RoomRateLimit struct {
 func (e *RoomRateLimit) Error() string        { return ErrRoomCreateRateLimited.Error() }
 func (e *RoomRateLimit) Is(target error) bool { return target == ErrRoomCreateRateLimited }
 
-// Create mints a fresh UUIDv4 and creates an empty room under appSlug,
-// after checking the per-IP-subnet AND per-app creation rate limits.
-// subnet is the canonical /24 (IPv4) or /48 (IPv6) the request came from
-// (the HTTP layer derives it, reusing the same shape the SSH Sybil gate
-// uses). Returns the created Room.
+// Create mints a fresh UUIDv4 and creates an empty room under appSlug, after
+// checking the per-IP-subnet AND per-app creation rate limits. subnet is the
+// canonical /24 (IPv4) or /48 (IPv6) the request came from, the same shape the
+// SSH Sybil gate uses.
 //
 // On rate-limit returns *RoomRateLimit (also errors.Is ErrRoomCreateRateLimited).
 // On per-app aggregate full returns ErrAppRoomsCap.
 //
-// The rate-limit count is read OUTSIDE the CreateRoom transaction, so the
-// creation gate is a SOFT bound: N concurrent creators can each observe
-// the same in-window count and all pass before their accounting rows
-// commit, slightly overshooting the cap. That is an accepted trade for a
-// coarse abuse bound (the hard structural bounds are the per-app aggregate
-// byte cap and the service-wide cap, both enforced inside the write tx).
+// The rate-limit count is read OUTSIDE the CreateRoom transaction, making the
+// creation gate a SOFT bound: N concurrent creators can each observe the same
+// in-window count and all pass before their accounting rows commit, slightly
+// overshooting the cap. Accepted for a coarse abuse bound; the hard bounds are
+// the per-app aggregate and service-wide byte caps, enforced inside the tx.
 func (s *Rooms) Create(appSlug domain.Slug, subnet string) (domain.Room, error) {
 	now := s.now()
 
@@ -131,7 +125,7 @@ func (s *Rooms) Create(appSlug domain.Slug, subnet string) (domain.Room, error) 
 		return domain.Room{}, &RoomRateLimit{Scope: "app", Window: s.CreateWindow}
 	}
 
-	// Retry on the astronomically-unlikely (app, id) collision.
+	// Retry past an (app, id) collision.
 	const maxRetries = 5
 	for range maxRetries {
 		room := domain.Room{
@@ -156,10 +150,9 @@ func (s *Rooms) Create(appSlug domain.Slug, subnet string) (domain.Room, error) 
 	return domain.Room{}, SlugTakenErr
 }
 
-// Get returns one value from a room. It checks the room exists first so a
-// missing ROOM and a missing KEY both surface as ErrRoomNotFound (the
-// 404 that does not leak room existence), distinct from a value that is
-// present. key must already be validated by the caller.
+// Get returns one value from a room. The room-existence check makes a missing
+// ROOM and a missing KEY both surface as ErrRoomNotFound, the 404 that does not
+// leak room existence. key must already be validated by the caller.
 func (s *Rooms) Get(appSlug domain.Slug, id domain.RoomID, key string) ([]byte, error) {
 	if _, err := s.Repo.GetRoom(appSlug, id); err != nil {
 		return nil, s.mapNotFound(err)
@@ -171,9 +164,8 @@ func (s *Rooms) Get(appSlug domain.Slug, id domain.RoomID, key string) ([]byte, 
 	return val, nil
 }
 
-// Scan returns the room's whole namespace as a domain.RoomKV, after
-// verifying the room exists (a scan of a nonexistent room is a 404, not
-// an empty 200, so existence is not leaked the other way either).
+// Scan returns the room's whole namespace. A scan of a nonexistent room is a
+// 404, not an empty 200, so existence is not leaked the other way either.
 func (s *Rooms) Scan(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error) {
 	if _, err := s.Repo.GetRoom(appSlug, id); err != nil {
 		return domain.RoomKV{}, s.mapNotFound(err)
@@ -185,15 +177,11 @@ func (s *Rooms) Scan(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, erro
 	return kv, nil
 }
 
-// Put writes val under key, enforcing the per-room data cap (in the repo)
-// and the per-app aggregate, and returns the mutation's assigned per-room
-// sequence (the dense counter the relay stamps onto the live mirror
-// frame). Returns ErrRoomNotFound if the room is gone, ErrRoomDataCap
-// (413) on the per-room cap, ErrAppRoomsCap (507) on the per-app
-// aggregate. Rooms hold no blobs, so a room write touches no object-store
-// quota and has no service-wide byte cap on this path (see SPEC "Rooms ->
-// Quota and abuse -> Durable total-bytes ceiling"). key must already be
-// validated by the caller.
+// Put writes val under key and returns the mutation's assigned per-room
+// sequence, the dense counter the relay stamps onto the live mirror frame.
+// Returns ErrRoomNotFound if the room is gone, ErrRoomDataCap (413) on the
+// per-room cap, ErrAppRoomsCap (507) on the per-app aggregate. key must
+// already be validated by the caller.
 func (s *Rooms) Put(appSlug domain.Slug, id domain.RoomID, key string, val []byte) (uint64, error) {
 	now := s.now()
 	seq, err := s.Repo.PutValue(appSlug, id, key, val, s.PerAppByteCap, now)
@@ -212,11 +200,11 @@ func (s *Rooms) Put(appSlug domain.Slug, id domain.RoomID, key string, val []byt
 }
 
 // Delete removes key (idempotent) and resets the room's retention clock,
-// returning the assigned per-room sequence (an absent-key delete still
-// commits, so it still assigns one - a seq bump with no mirror frame would
-// read as a permanent hole to a relay subscriber). Returns ErrRoomNotFound
-// only when the ROOM does not exist; deleting an absent key in a real room
-// is a success. key must already be validated.
+// returning the assigned per-room sequence. An absent-key delete still commits
+// and so still assigns one: a seq bump with no mirror frame would read as a
+// permanent hole to a relay subscriber. ErrRoomNotFound only when the ROOM does
+// not exist; deleting an absent key in a real room is a success. key must
+// already be validated.
 func (s *Rooms) Delete(appSlug domain.Slug, id domain.RoomID, key string) (uint64, error) {
 	now := s.now()
 	seq, err := s.Repo.DeleteValue(appSlug, id, key, now)
@@ -233,8 +221,6 @@ func (s *Rooms) now() time.Time {
 	return time.Now().UTC()
 }
 
-// mapNotFound translates the storage not-found sentinel to the service
-// one, passing any other error through.
 func (s *Rooms) mapNotFound(err error) error {
 	if errors.Is(err, domain.ErrNotFound) {
 		return ErrRoomNotFound

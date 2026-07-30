@@ -14,15 +14,14 @@ import (
 	"time"
 )
 
-// fakeDurable is an in-memory durableBlobStore for unit tests. It can be
-// told to fail Put a fixed number of times (to exercise retry) and
-// counts uploads.
+// fakeDurable is an in-memory durableBlobStore that can be told to fail Put a
+// fixed number of times, or always, and counts the attempts.
 type fakeDurable struct {
 	mu         sync.Mutex
 	objs       map[string][]byte
 	putCalls   int32
 	failFirst  int32 // fail this many Put attempts before succeeding
-	failAlways bool  // when true, every Put fails (permanently pinned)
+	failAlways bool  // every Put fails, so entries stay permanently pinned
 	putErr     error // error to return while failing
 }
 
@@ -121,8 +120,8 @@ func newTestWriteBack(t *testing.T, durable durableBlobStore, cfg WriteBackConfi
 	return wb
 }
 
-// TestWriteBack_PutLocalThenAsyncUpload: Put returns immediately with the
-// blob in the local cache, and the background uploader makes it durable.
+// Put returns with the blob in the local cache; the background uploader then
+// makes it durable.
 func TestWriteBack_PutLocalThenAsyncUpload(t *testing.T) {
 	durable := newFakeDurable()
 	wb := newTestWriteBack(t, durable, WriteBackConfig{})
@@ -133,11 +132,9 @@ func TestWriteBack_PutLocalThenAsyncUpload(t *testing.T) {
 	if err := wb.PutPrecompressed(sha, body); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	// Local cache has it right away.
 	if _, err := os.Stat(wb.blobPath(sha)); err != nil {
 		t.Fatalf("expected blob in local cache: %v", err)
 	}
-	// Eventually durable.
 	if !wb.drainForTest(2 * time.Second) {
 		t.Fatal("uploader did not drain in time")
 	}
@@ -149,8 +146,8 @@ func TestWriteBack_PutLocalThenAsyncUpload(t *testing.T) {
 	}
 }
 
-// TestWriteBack_GetCacheThenDurable: Get serves from the cache while
-// local, and from the durable backend after eviction.
+// Get serves from the cache while the blob is local, and falls through to the
+// durable backend once it is gone.
 func TestWriteBack_GetCacheThenDurable(t *testing.T) {
 	durable := newFakeDurable()
 	wb := newTestWriteBack(t, durable, WriteBackConfig{})
@@ -160,12 +157,11 @@ func TestWriteBack_GetCacheThenDurable(t *testing.T) {
 	if err := wb.PutPrecompressed(sha, body); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	// Cache hit.
 	got, err := wb.Get(sha)
 	if err != nil || !bytes.Equal(got, body) {
 		t.Fatalf("cache Get: got %q err %v", got, err)
 	}
-	// Wait for durability, then remove local copy to force a durable read.
+	// Wait for durability, then drop the local copy to force a durable read.
 	wb.drainForTest(2 * time.Second)
 	if err := os.Remove(wb.blobPath(sha)); err != nil {
 		t.Fatalf("remove local: %v", err)
@@ -174,20 +170,19 @@ func TestWriteBack_GetCacheThenDurable(t *testing.T) {
 	if err != nil || !bytes.Equal(got, body) {
 		t.Fatalf("durable-fallback Get: got %q err %v", got, err)
 	}
-	// GetReader fallback too.
 	rc, _, err := wb.GetReader(sha)
 	if err != nil {
 		t.Fatalf("durable-fallback GetReader: %v", err)
 	}
-	defer rc.Close()
+	defer rc.Close() //nolint:errcheck
 	rb, _ := io.ReadAll(rc)
 	if !bytes.Equal(rb, body) {
 		t.Fatalf("GetReader bytes mismatch: %q", rb)
 	}
 }
 
-// TestWriteBack_UploaderRetries: a durable backend that fails the first
-// few Puts is retried until it succeeds, without losing the blob.
+// A durable backend that fails its first Puts is retried until it succeeds,
+// without losing the blob.
 func TestWriteBack_UploaderRetries(t *testing.T) {
 	durable := newFakeDurable()
 	durable.failFirst = 3
@@ -209,16 +204,15 @@ func TestWriteBack_UploaderRetries(t *testing.T) {
 	}
 }
 
-// TestWriteBack_StartupRescanReenqueues: a blob left in the cache dir
-// without an uploaded marker (simulating a crash mid-upload) is
+// A blob left in the cache dir with no uploaded marker (a crash mid-upload) is
 // re-enqueued and uploaded by the next process's startup rescan.
 func TestWriteBack_StartupRescanReenqueues(t *testing.T) {
 	dir := t.TempDir()
 	body := []byte("survived a crash")
 	sha := wbShaOf(body)
 
-	// Pre-seed the cache dir as if a prior process wrote locally but died
-	// before uploading: blob present, NO ".up" marker.
+	// Seed the cache dir as a prior process would leave it after dying between
+	// the local write and the upload: blob present, NO ".up" marker.
 	shardDir := filepath.Join(dir, sha[:2])
 	if err := os.MkdirAll(shardDir, 0o750); err != nil {
 		t.Fatal(err)
@@ -238,24 +232,23 @@ func TestWriteBack_StartupRescanReenqueues(t *testing.T) {
 	}
 }
 
-// TestWriteBack_PinnedNotEvicted: not-yet-uploaded entries are never
-// evicted even when the cache is over its byte cap (they are the only
-// durable copy).
+// A not-yet-uploaded entry is never evicted even over the byte cap: the local
+// copy is the ONLY copy.
 func TestWriteBack_PinnedNotEvicted(t *testing.T) {
 	durable := newFakeDurable()
-	durable.failAlways = true // uploads never succeed -> everything pinned
+	durable.failAlways = true
 	wb := newTestWriteBack(t, durable, WriteBackConfig{MaxBytes: 64})
 
 	var shas []string
 	for i := range 5 {
-		body := bytes.Repeat([]byte{byte('a' + i)}, 40) // ~200 bytes total, over 64
+		body := bytes.Repeat([]byte{byte('a' + i)}, 40) // ~200 bytes total, over the 64 cap
 		sha := wbShaOf(body)
 		shas = append(shas, sha)
 		if err := wb.PutPrecompressed(sha, body); err != nil {
 			t.Fatalf("Put %d: %v", i, err)
 		}
 	}
-	// Force eviction passes; nothing is uploaded so nothing may be evicted.
+	// Nothing was uploaded, so no eviction pass may drop anything.
 	wb.evictIfNeeded()
 	wb.evictIfNeeded()
 	for i, sha := range shas {
@@ -265,10 +258,10 @@ func TestWriteBack_PinnedNotEvicted(t *testing.T) {
 	}
 }
 
-// TestWriteBack_EvictionAfterUpload: once a blob is uploaded (durable),
-// it becomes eligible for eviction and is dropped when over the cap.
+// Once a blob is durable it becomes evictable and is dropped when over the cap,
+// while staying readable from the durable backend.
 func TestWriteBack_EvictionAfterUpload(t *testing.T) {
-	durable := newFakeDurable() // always succeeds
+	durable := newFakeDurable()
 	wb := newTestWriteBack(t, durable, WriteBackConfig{MaxBytes: 64})
 
 	var shas []string
@@ -283,8 +276,6 @@ func TestWriteBack_EvictionAfterUpload(t *testing.T) {
 	if !wb.drainForTest(2 * time.Second) {
 		t.Fatal("uploads did not drain")
 	}
-	// All durable now. An eviction pass should bring the cache under cap by
-	// dropping uploaded entries.
 	wb.evictIfNeeded()
 	_, total, err := wb.scanEntries()
 	if err != nil {
@@ -293,7 +284,7 @@ func TestWriteBack_EvictionAfterUpload(t *testing.T) {
 	if total > 64 {
 		t.Fatalf("cache still over cap after eviction: %d bytes", total)
 	}
-	// Every blob is still durable (eviction only drops the local copy).
+	// Eviction drops only the local copy.
 	for i, sha := range shas {
 		if !durable.has(sha) {
 			t.Fatalf("blob %d lost from durable after eviction", i)
@@ -301,13 +292,12 @@ func TestWriteBack_EvictionAfterUpload(t *testing.T) {
 	}
 }
 
-// TestWriteBack_DurableDedupSkip: if the durable backend already has the
-// object, Put neither writes locally nor enqueues an upload.
+// When the durable backend already holds the object, Put neither writes locally
+// nor enqueues an upload.
 func TestWriteBack_DurableDedupSkip(t *testing.T) {
 	durable := newFakeDurable()
 	body := []byte("already durable")
 	sha := wbShaOf(body)
-	// Seed durable directly.
 	_ = durable.Put(sha, bytes.NewReader(body), int64(len(body)))
 	before := atomic.LoadInt32(&durable.putCalls)
 
@@ -322,7 +312,7 @@ func TestWriteBack_DurableDedupSkip(t *testing.T) {
 	if got := atomic.LoadInt32(&durable.putCalls); got != before {
 		t.Fatalf("expected no extra durable Put on dedup hit, calls went %d -> %d", before, got)
 	}
-	// Read still works (falls through to durable).
+	// The read still works, falling through to durable.
 	got, err := wb.Get(sha)
 	if err != nil || !bytes.Equal(got, body) {
 		t.Fatalf("Get on dedup blob: %q %v", got, err)

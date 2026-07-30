@@ -2,16 +2,12 @@ package main
 
 import "fmt"
 
-// checkUnitCountForMode rejects the one incoherent combination of the two
-// mode selectors: a bind address (join a cluster) with unit count 0
-// (single-backend, no sharding).
+// checkUnitCountForMode rejects the incoherent combination of a bind address
+// (join a cluster) with unit count 0 (single-backend, no sharding).
 //
-// It is a startup refusal rather than a silent downgrade to single-node. The
-// downgrade is the more dangerous outcome despite looking like the forgiving
-// one: the node comes up, reports healthy, and serves traffic exactly like a
-// clustered peer, so the missing replication is undetectable until the moment
-// it was supposed to save you. Single-node deployments are unaffected - with
-// no bind address there is no cluster to be silently absent from.
+// Refusing at startup beats downgrading to single-node: a downgraded node comes
+// up, reports healthy, and serves exactly like a clustered peer, so the missing
+// replication stays undetectable until it was supposed to save you.
 func checkUnitCountForMode(unitCount int, bindAddr string) error {
 	if bindAddr != "" && unitCount <= 0 {
 		return fmt.Errorf(

@@ -1,26 +1,19 @@
 package ssh
 
-// Structured exit codes for SSH sessions. The SSH protocol carries the
-// exit status back to the local ssh client, which surfaces it as the
-// process exit code; shell scripts and CI pipelines use these to branch.
-// Keep the mapping stable: existing scripts will rely on specific codes.
+// Structured exit codes for SSH sessions, carried back to the local ssh client
+// as the process exit code. Scripts branch on them, so the mapping is frozen:
+// a value's meaning never changes, and a new meaning takes the next free slot.
+// The source of truth; docs/SPEC.md > "Exit codes" mirrors it.
 //
-// See docs/SPEC.md > "Exit codes" for the prose contract. The values
-// here are the source of truth; the spec mirrors them.
-//
-// Note: 5 is intentionally unused. It was historically reserved for an
-// ErrNotOwner path that the owner-collapse contract eliminated (the SSH
-// surface never observes ErrNotOwner because service.requireOwner
-// collapses non-owner reads to ErrNotFound so existence can't leak
-// across identities). Do not reuse 5 for a new meaning; pick the next
-// free slot to avoid retroactively changing the semantics of a code
-// that was already documented.
+// 5 is documented-but-dead and stays that way. The SSH surface never observes
+// ErrNotOwner: service.requireOwner collapses non-owner reads to ErrNotFound so
+// existence cannot leak across identities.
 const (
 	ExitOK          = 0 // success
 	ExitErr         = 1 // generic / unclassified failure
 	ExitUsage       = 2 // malformed args, bad verb, parser failure
 	ExitAuth        = 3 // identity required (no key) or missing-owner service error
 	ExitNotFound    = 4 // not found, including owner-collapsed permission failures
-	_               = 5 // reserved; previously ErrNotOwner before owner-collapse made it dead. Do not reuse.
+	_               = 5 // reserved, do not reuse
 	ExitSybilRefuse = 6 // Sybil per-subnet rate-limit refusal
 )

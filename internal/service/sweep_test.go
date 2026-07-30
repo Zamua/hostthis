@@ -13,9 +13,7 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// TestSweep_Once - drives the sweep against a real sqlite + blob store.
-// Uploads two pastes, marks one expired by setting Now to the future,
-// asserts the expired one is gone and the still-active one survives.
+// The sweep deletes expired pastes and GCs their blobs.
 func TestSweep_Once(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "sweep.db"))
@@ -42,14 +40,12 @@ func TestSweep_Once(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upload 2: %v", err)
 	}
-	// The blob writes finalize in the background; drain them so both blobs
-	// are on disk before the sweep walks them.
+	// Blob writes finalize in the background; drain before the sweep walks them.
 	upload.WaitFinalize()
 
 	logger := log.New(io.Discard, "", 0)
 	sweep := service.NewSweep(repo, blobs, logger)
 
-	// At the moment of upload, nothing expired.
 	pastes, gcBlobs, err := sweep.Once(now)
 	if err != nil {
 		t.Fatalf("sweep 1: %v", err)
@@ -58,7 +54,6 @@ func TestSweep_Once(t *testing.T) {
 		t.Fatalf("nothing should sweep yet: pastes=%d blobs=%d", pastes, gcBlobs)
 	}
 
-	// Past the retention window, both have expired.
 	future := now.Add(domain.DefaultRetentionWindow + 24*time.Hour)
 	pastes, gcBlobs, err = sweep.Once(future)
 	if err != nil {
@@ -71,7 +66,6 @@ func TestSweep_Once(t *testing.T) {
 		t.Fatalf("expected 2 blobs GC'd, got %d", gcBlobs)
 	}
 
-	// Both records are gone.
 	if _, err := repo.Get(r1.Paste.Slug); err == nil {
 		t.Fatalf("paste 1 should be deleted")
 	}
@@ -80,9 +74,8 @@ func TestSweep_Once(t *testing.T) {
 	}
 }
 
-// TestSweep_NeverExpiresSurvives is the safety property behind a no-expiry
-// retention policy: a paste stamped with the NeverExpires sentinel is NEVER
-// deleted by the sweep, even running far in the future.
+// A paste stamped NeverExpires is never swept, however far in the future the
+// sweep runs.
 func TestSweep_NeverExpiresSurvives(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "never.db"))
@@ -112,7 +105,7 @@ func TestSweep_NeverExpiresSurvives(t *testing.T) {
 	}
 
 	sweep := service.NewSweep(repo, blobs, log.New(io.Discard, "", 0))
-	// Run the sweep a century out: a finite-TTL paste would be long gone.
+	// A century out: any finite TTL would be long gone.
 	pastes, gcBlobs, err := sweep.Once(now.AddDate(100, 0, 0))
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
@@ -146,7 +139,7 @@ func TestSweep_KeepsActive(t *testing.T) {
 	}
 
 	sweep := service.NewSweep(repo, blobs, log.New(io.Discard, "", 0))
-	// 1 hour later - well within retention
+	// Well within retention.
 	pastes, _, _ := sweep.Once(now.Add(time.Hour))
 	if pastes != 0 {
 		t.Fatalf("active paste should not be swept, got %d", pastes)
@@ -163,7 +156,7 @@ func TestSweep_GCsOrphanBlobOnly(t *testing.T) {
 	blobs, _ := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	repo := storage.NewPasteRepo(db)
 
-	// Write a referenced blob via the upload path.
+	// A referenced blob, via the upload path.
 	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(blobs))
 	t.Cleanup(upload.WaitFinalize)
 	upload.Now = func() time.Time { return time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC) }
@@ -172,7 +165,7 @@ func TestSweep_GCsOrphanBlobOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Write an orphan blob directly.
+	// An orphan blob, written straight to the store.
 	orphanSHA := domain.HashContent([]byte("orphan"))
 	if err := blobs.Put(orphanSHA, bytes.NewReader([]byte("orphan")), int64(len("orphan"))); err != nil {
 		t.Fatal(err)
@@ -186,22 +179,17 @@ func TestSweep_GCsOrphanBlobOnly(t *testing.T) {
 	if gc != 1 {
 		t.Fatalf("expected 1 orphan GC, got %d", gc)
 	}
-	// Orphan gone, referenced blob still there.
 	if _, err := blobs.Get(orphanSHA); err == nil {
 		t.Fatalf("orphan should be gone")
 	}
 }
 
-// TestSweep_GuardsAgainstBuggyRepoZeroRefs pins the data-loss
-// guard: if a buggy metadata-repo impl returns zero referenced shas
-// while blobs exist AND no pastes were just deleted, the sweep MUST
-// refuse to GC instead of wiping the bucket. We model the bug with
-// a fake repo whose ReferencedBlobSHAs always returns nil.
+// A repo reporting zero referenced shas while blobs exist and nothing was just
+// deleted must make the sweep REFUSE to GC rather than wipe the store.
 func TestSweep_GuardsAgainstBuggyRepoZeroRefs(t *testing.T) {
 	dir := t.TempDir()
 	blobs, _ := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 
-	// Two real blobs in the store.
 	sha1 := domain.HashContent([]byte("aaa"))
 	sha2 := domain.HashContent([]byte("bbb"))
 	for sha, body := range map[string][]byte{sha1: []byte("aaa"), sha2: []byte("bbb")} {
@@ -220,7 +208,6 @@ func TestSweep_GuardsAgainstBuggyRepoZeroRefs(t *testing.T) {
 	if gc != 0 {
 		t.Fatalf("guard MUST refuse GC, got gc=%d", gc)
 	}
-	// Both blobs must still exist.
 	for _, sha := range []string{sha1, sha2} {
 		if _, err := blobs.Get(sha); err != nil {
 			t.Fatalf("blob %s should survive a buggy repo: %v", sha, err)
@@ -228,25 +215,16 @@ func TestSweep_GuardsAgainstBuggyRepoZeroRefs(t *testing.T) {
 	}
 }
 
-// TestSweep_OrphanExpiryIndexEntries pins the expiry pass's contract for
-// index-backed backends (slatedb/shale keep a standalone expiry index):
-//
-//   - an index entry whose paste is ALREADY GONE is removed by one pass, so
-//     a second pass sees zero expired entries (the pass drains, it does not
-//     loop on the same legacy entries forever);
-//   - the deleted-count reflects pastes actually deleted, NOT index no-ops;
-//   - the pass reports the orphaned index entries it cleaned.
-//
-// The fake mirrors the real index-backed repos: the expiry scan reads the
-// standalone index, and the paste-delete cascade removes the index entry
-// only when the paste record still exists.
+// For index-backed backends the expiry pass drains in ONE pass: an entry whose
+// paste is already gone is removed (a second pass sees nothing), the
+// deleted-count counts real paste deletions and not index no-ops, and the
+// orphaned entries cleaned are reported.
 func TestSweep_OrphanExpiryIndexEntries(t *testing.T) {
 	repo := &indexedSweepRepo{
 		pastes: map[string]bool{"live1234": true},
 		index: map[string]string{
 			"expiry/2026-01-01T00:00:00Z/live1234": "live1234",
-			// The orphan: its paste is already gone (a legacy TTL-era
-			// entry whose record was removed without index cleanup).
+			// The orphan: its paste record is already gone.
 			"expiry/2025-01-01T00:00:00Z/gone1234": "gone1234",
 		},
 	}
@@ -259,22 +237,18 @@ func TestSweep_OrphanExpiryIndexEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep 1: %v", err)
 	}
-	// Only live1234's paste record actually existed: the deleted-count is 1,
-	// not 2 (the orphan entry is an index cleanup, not a paste deletion).
+	// Only live1234 had a paste record; an orphan entry is an index cleanup.
 	if pastes != 1 {
 		t.Fatalf("deleted-count must reflect real paste deletions only: got %d, want 1", pastes)
 	}
-	// BOTH index entries are gone after one pass: live1234's via the paste
-	// delete, gone1234's via the orphan cleanup.
+	// live1234's entry goes via the paste delete, gone1234's via orphan cleanup.
 	if len(repo.index) != 0 {
 		t.Fatalf("expiry index must drain in one pass; %d entr(ies) remain: %v", len(repo.index), repo.index)
 	}
-	// The pass reports the orphaned entries it cleaned.
 	if !bytes.Contains(logbuf.Bytes(), []byte("orphaned expiry-index")) {
 		t.Fatalf("sweep should log the orphaned index-entry cleanup; got:\n%s", logbuf.String())
 	}
 
-	// A second pass finds nothing: zero entries, zero deletions.
 	pastes, _, err = sweep.Once(now)
 	if err != nil {
 		t.Fatalf("sweep 2: %v", err)
@@ -284,12 +258,11 @@ func TestSweep_OrphanExpiryIndexEntries(t *testing.T) {
 	}
 }
 
-// indexedSweepRepo mimics an index-backed metadata backend (slatedb/shale):
-// ExpiredPastes scans a standalone expiry index (returning each entry's key
-// as the opaque IndexRef), and DeleteExpired cascades the paste delete when
-// the record still exists and removes the OBSERVED index entry regardless -
-// exactly the repo-side contract in docs/SPEC.md "The storage contract"
-// (Expiry).
+// indexedSweepRepo mimics an index-backed metadata backend: ExpiredPastes scans
+// a standalone expiry index (each entry's key is the opaque IndexRef), and
+// DeleteExpired cascades the paste delete when the record still exists while
+// removing the OBSERVED entry regardless. That is the repo-side contract in
+// docs/SPEC.md "The storage contract" (Expiry).
 type indexedSweepRepo struct {
 	pastes map[string]bool   // slug -> record exists
 	index  map[string]string // index key -> slug
@@ -307,7 +280,7 @@ func (r *indexedSweepRepo) DeleteExpired(ref domain.ExpiredPaste) (bool, error) 
 	deleted := r.pastes[ref.Slug.String()]
 	if deleted {
 		delete(r.pastes, ref.Slug.String())
-		// The paste-delete cascade removes the DERIVED index entry ...
+		// The paste delete cascades to the DERIVED index entry ...
 		for k, s := range r.index {
 			if s == ref.Slug.String() {
 				delete(r.index, k)
@@ -321,20 +294,14 @@ func (r *indexedSweepRepo) DeleteExpired(ref domain.ExpiredPaste) (bool, error) 
 
 func (r *indexedSweepRepo) ReferencedBlobSHAs() ([]string, error) { return []string{"sha-live"}, nil }
 
-// TestSweep_UnreachableRefsSkippedAfterResurface pins the sweep's
-// convergence guard: a ref whose processing REPORTS success but does not
-// persist (the scan surfaces the same ref again on the next pass - e.g.
-// legacy data physically placed where routed deletes cannot reach it, or a
-// diverged replica resurrecting a deleted record) is classified UNREACHABLE:
-// the sweep stops re-processing it every pass (one attempt, then skip),
-// keeps it out of the deleted/cleaned counters, and reports the skipped
-// count instead. Without the guard the sweep spins forever re-"cleaning"
-// the same refs (observed as a constant cleaned-count every cycle).
-//
-// The fixture key is byte-for-byte a real stuck staging entry's shape.
+// A ref whose processing reports success but resurfaces on the next scan (data
+// placed where routed deletes cannot reach it, or a diverged replica
+// resurrecting a deleted record) is classified UNREACHABLE: attempted once then
+// skipped, kept out of the deleted/cleaned counters, and reported as skipped.
+// Without the guard the sweep re-"cleans" the same refs on every pass forever.
 func TestSweep_UnreachableRefsSkippedAfterResurface(t *testing.T) {
-	// The sticky ref: every scan returns it; DeleteExpired reports the
-	// orphan-cleanup "success" but nothing actually drains.
+	// Every scan returns this ref and DeleteExpired reports success, but
+	// nothing drains.
 	stickyKey := "expiry/2026-07-01T03:20:59.990221663Z/8ajitdpm"
 	repo := &stickySweepRepo{ref: domain.ExpiredPaste{Slug: "8ajitdpm", IndexRef: stickyKey}}
 
@@ -342,7 +309,7 @@ func TestSweep_UnreachableRefsSkippedAfterResurface(t *testing.T) {
 	sweep := service.NewSweep(repo, nil, log.New(&logbuf, "", 0))
 	now := time.Date(2026, 7, 7, 0, 0, 0, 0, time.UTC)
 
-	// Pass 1: first sight - the sweep attempts the cleanup (1 call).
+	// Pass 1: first sight, so the cleanup is attempted.
 	if _, _, err := sweep.Once(now); err != nil {
 		t.Fatalf("pass 1: %v", err)
 	}
@@ -350,10 +317,8 @@ func TestSweep_UnreachableRefsSkippedAfterResurface(t *testing.T) {
 		t.Fatalf("pass 1 should attempt the ref once, got %d calls", repo.deleteCalls)
 	}
 
-	// Pass 2: the ref RESURFACED after a reported-successful processing -
-	// the delete provably did not persist. The sweep must NOT attempt it
-	// again (no second call), must not count it as cleaned, and must
-	// report it as unreachable.
+	// Pass 2: the ref resurfaced, so the delete provably did not persist. No
+	// second attempt, no cleaned-count, and an unreachable report.
 	logbuf.Reset()
 	if _, _, err := sweep.Once(now); err != nil {
 		t.Fatalf("pass 2: %v", err)
@@ -368,8 +333,7 @@ func TestSweep_UnreachableRefsSkippedAfterResurface(t *testing.T) {
 		t.Fatalf("pass 2 must not claim it cleaned anything; got:\n%s", logbuf.String())
 	}
 
-	// Pass 3: still skipped (the classification is sticky while the ref
-	// keeps appearing).
+	// Pass 3: the classification is sticky while the ref keeps appearing.
 	if _, _, err := sweep.Once(now); err != nil {
 		t.Fatalf("pass 3: %v", err)
 	}
@@ -378,10 +342,8 @@ func TestSweep_UnreachableRefsSkippedAfterResurface(t *testing.T) {
 	}
 }
 
-// TestSweep_UnreachableRefForgottenOnceDrained pins the guard's pruning: a
-// ref that STOPS appearing (drained externally, e.g. an operator purge)
-// leaves the guard's memory, so a later reappearance of the same id (a
-// fresh, legitimate record) is treated as new and processed again.
+// A ref that stops appearing leaves the guard's memory, so a later record with
+// the same id is treated as new and processed again.
 func TestSweep_UnreachableRefForgottenOnceDrained(t *testing.T) {
 	stickyKey := "expiry/2026-07-01T03:20:59.990221663Z/8ajitdpm"
 	repo := &stickySweepRepo{ref: domain.ExpiredPaste{Slug: "8ajitdpm", IndexRef: stickyKey}}
@@ -395,11 +357,11 @@ func TestSweep_UnreachableRefForgottenOnceDrained(t *testing.T) {
 		t.Fatalf("setup: want 1 call after 2 passes, got %d", repo.deleteCalls)
 	}
 
-	// The ref drains externally: a pass with an empty scan prunes it.
+	// It drains externally: a pass with an empty scan prunes it.
 	repo.gone = true
 	_, _, _ = sweep.Once(now)
 
-	// It reappears (a fresh record with the same identity): processed anew.
+	// A fresh record with the same identity is processed anew.
 	repo.gone = false
 	_, _, _ = sweep.Once(now)
 	if repo.deleteCalls != 2 {
@@ -407,11 +369,10 @@ func TestSweep_UnreachableRefForgottenOnceDrained(t *testing.T) {
 	}
 }
 
-// stickySweepRepo is a SweepRepo whose expiry scan keeps returning the same
-// ref no matter how often DeleteExpired "succeeds" - the observed staging
-// pathology (the entry's physical placement is not reachable by the routed
-// delete, so the mutation never lands where the scan reads). Setting gone
-// empties the scan (external cleanup).
+// stickySweepRepo's expiry scan keeps returning the same ref no matter how
+// often DeleteExpired reports success: the entry's placement is unreachable by
+// the routed delete, so the mutation never lands where the scan reads. Setting
+// gone empties the scan, modelling an external cleanup.
 type stickySweepRepo struct {
 	ref         domain.ExpiredPaste
 	gone        bool
@@ -432,11 +393,8 @@ func (r *stickySweepRepo) DeleteExpired(_ domain.ExpiredPaste) (bool, error) {
 
 func (r *stickySweepRepo) ReferencedBlobSHAs() ([]string, error) { return []string{"sha-x"}, nil }
 
-// buggyRepo simulates the failure mode this test guards against:
-// ReferencedBlobSHAs always returns nil (i.e. "no shas are
-// referenced") even when paste rows exist. Only methods the sweep
-// actually invokes are stubbed; everything else panics so the test
-// surfaces unexpected calls.
+// buggyRepo's ReferencedBlobSHAs always reports no shas referenced, even when
+// paste rows exist. Unused methods panic so an unexpected call surfaces.
 type buggyRepo struct{}
 
 func (buggyRepo) ExpiredPastes(_ time.Time) ([]domain.ExpiredPaste, error) { return nil, nil }
@@ -445,12 +403,10 @@ func (buggyRepo) DeleteExpired(_ domain.ExpiredPaste) (bool, error) {
 }
 func (buggyRepo) ReferencedBlobSHAs() ([]string, error) { return nil, nil }
 
-// TestSweep_DryRun - in dry-run the sweep COMPUTES + LOGS what it would
-// expire/GC but mutates nothing: the expired record and every blob survive.
-// This is the "disabled = log what it would clean" mode. (The blob-GC count
-// reflects blobs already orphaned, e.g. by a prior delete; a blob freed only
-// by THIS tick's would-be expiry stays referenced because dry-run doesn't
-// actually delete the paste - it's counted once the expiry is live.)
+// In dry-run the sweep computes and logs what it would expire or GC while
+// mutating nothing. The blob-GC count covers only blobs ALREADY orphaned: a
+// blob freed by this tick's would-be expiry stays referenced, because dry-run
+// does not delete the paste.
 func TestSweep_DryRun(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "sweep.db"))
@@ -479,7 +435,7 @@ func TestSweep_DryRun(t *testing.T) {
 	}
 	upload.WaitFinalize()
 
-	// Delete B so its blob is already orphaned (a blob the GC would reclaim).
+	// Delete B so its blob is already orphaned.
 	if err := repo.Delete(rB.Paste.Slug); err != nil {
 		t.Fatalf("delete B: %v", err)
 	}
@@ -488,8 +444,7 @@ func TestSweep_DryRun(t *testing.T) {
 	sweep := service.NewSweep(repo, blobs, log.New(&logbuf, "", 0))
 	sweep.DryRun = true
 
-	// Past the retention window A has expired. Dry-run: A would expire, B's
-	// blob would be GC'd - but nothing is actually touched.
+	// Past the retention window: A would expire and B's blob would be GC'd.
 	future := now.Add(domain.DefaultRetentionWindow + 24*time.Hour)
 	pastes, gcBlobs, err := sweep.Once(future)
 	if err != nil {
@@ -502,7 +457,7 @@ func TestSweep_DryRun(t *testing.T) {
 		t.Fatalf("dry-run should report 1 would-gc orphan blob, got %d", gcBlobs)
 	}
 
-	// NOTHING was mutated: A still exists, and BOTH blobs survive on disk.
+	// Nothing was mutated: A still exists and both blobs survive on disk.
 	if _, err := repo.Get(rA.Paste.Slug); err != nil {
 		t.Fatalf("dry-run must NOT delete the expired paste; Get err %v", err)
 	}
@@ -513,7 +468,6 @@ func TestSweep_DryRun(t *testing.T) {
 	if blobCount != 2 {
 		t.Fatalf("dry-run must NOT remove any blob; want 2 on disk, got %d", blobCount)
 	}
-	// And it logged what it WOULD do.
 	if !bytes.Contains(logbuf.Bytes(), []byte("would expire paste")) {
 		t.Fatalf("dry-run should log 'would expire paste'; got:\n%s", logbuf.String())
 	}

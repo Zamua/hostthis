@@ -8,25 +8,19 @@ import (
 )
 
 // verbDescriptor is the per-verb metadata behind `help <verb>` and
-// `<verb> --help`. Keep these short: one paragraph + a signature line
-// + one or two example invocations. The full conceptual model lives
-// in the global help banner.
+// `<verb> --help`. {{apex}} in Signature and Examples is substituted at render
+// time. Keep bodies short: one paragraph, a signature line, one or two
+// examples. The conceptual model lives in the global help banner.
 type verbDescriptor struct {
-	// Name is the lookup key: the verb the user types.
-	Name string
-	// Signature is the one-line usage shape, with {{apex}} substituted
-	// at render time.
-	Signature string
-	// Description is the one-paragraph "what it does" body.
+	Name        string // lookup key: the verb the user types
+	Signature   string
 	Description string
-	// Examples are 1-2 concrete invocations, each line starting with
-	// the bare command. {{apex}} is substituted at render time.
-	Examples []string
+	Examples    []string
 }
 
-// verbDescriptors is the source of truth for per-verb help. New verbs
-// added to the dispatcher should add an entry here so `help <verb>`
-// and `<verb> --help` stay aligned.
+// verbDescriptors is the source of truth for per-verb help. A verb added to the
+// dispatcher needs an entry here so `help <verb>` and `<verb> --help` stay
+// aligned.
 //
 // There is no `put` or `show` verb: upload is verbless (the default action
 // when no verb is supplied), and reads are `get`.
@@ -160,16 +154,13 @@ var verbDescriptors = map[string]verbDescriptor{
 	},
 }
 
-// lookupVerbDescriptor returns the verb descriptor for name, or false
-// if name isn't a known verb (or doc-only alias).
 func lookupVerbDescriptor(name string) (verbDescriptor, bool) {
 	d, ok := verbDescriptors[name]
 	return d, ok
 }
 
-// renderVerbHelp produces the verb-help body (LF-terminated lines)
-// with {{apex}} substituted. The caller is responsible for the
-// PTY-aware CRLF translation; see emitVerbHelp.
+// renderVerbHelp produces the verb-help body with {{apex}} substituted, always
+// LF-terminated. PTY-aware CRLF translation is the caller's job (emitVerbHelp).
 func renderVerbHelp(d verbDescriptor, apex string) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, strings.ReplaceAll(d.Description, "{{apex}}", apex))
@@ -186,29 +177,23 @@ func renderVerbHelp(d verbDescriptor, apex string) string {
 	return b.String()
 }
 
-// emitVerbHelp writes the rendered verb-help body to stderr with the
-// same PTY-aware CRLF discipline as emitHelp. The trailing newline is
-// already in the rendered text, so the PTY path just translates the
-// whole block; no extra CRLF is emitted, keeping the output a clean
-// block matching renderVerbHelp's byte count.
+// emitVerbHelp writes the verb-help body to stderr with the same PTY-aware
+// CRLF discipline as emitHelp. The rendered text already ends in a newline, so
+// no extra CRLF is emitted and the output matches renderVerbHelp byte for byte.
 func emitVerbHelp(sess gossh.Session, apex string, d verbDescriptor) {
 	text := renderVerbHelp(d, apex)
 	if _, _, hasPty := sess.Pty(); hasPty {
 		text = strings.ReplaceAll(text, "\n", "\r\n")
-		fmt.Fprint(sess.Stderr(), text)
+		fmt.Fprint(sess.Stderr(), text) //nolint:errcheck
 		return
 	}
 	_, _ = fmt.Fprint(sess.Stderr(), text)
 }
 
-// argvWantsHelp reports whether argv contains a `--help` or `-h` flag
-// AFTER the first positional argument. Used by the dispatcher to
-// intercept `<verb> --help` and `<verb> -h` before the verb body runs.
-//
-// Callers should NOT pass argv[0] through this check: the first token
-// is the verb itself, and the existing `--help` / `-h` cases in the
-// switch handle the no-verb form. This guards against e.g. the upload
-// path tripping on `--help` as a flag value.
+// argvWantsHelp reports whether argv carries `--help` or `-h` after argv[0],
+// letting the dispatcher intercept `<verb> --help` before the verb body runs.
+// argv[0] is skipped deliberately: it is the verb itself, and the no-verb form
+// is handled by the dispatcher's own `--help` / `-h` cases.
 func argvWantsHelp(argv []string) bool {
 	if len(argv) < 2 {
 		return false

@@ -20,8 +20,8 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// stack is the per-test bundle of services + listener addresses for
-// driving the SSH server end-to-end.
+// stack is the per-test bundle of services + listener addresses for driving
+// the SSH server end-to-end.
 type stack struct {
 	t           *testing.T
 	httpURL     string
@@ -34,9 +34,9 @@ type stack struct {
 	anonClient  *xssh.Client
 }
 
-// signWith returns a stable SHA256 fingerprint for an ssh key, the
-// same way the server computes it. We pre-seed it so tests can
-// assert ownership without parsing the live ssh greeting.
+// newKeyClient dials with a fresh ed25519 key and returns the client plus the
+// owner fingerprint, so tests can assert ownership without parsing the live
+// ssh greeting.
 func newKeyClient(t *testing.T, addr string) (*xssh.Client, string) {
 	t.Helper()
 	_, priv, err := genEd25519()
@@ -58,9 +58,7 @@ func newKeyClient(t *testing.T, addr string) (*xssh.Client, string) {
 		t.Fatalf("ssh dial: %v", err)
 	}
 	t.Cleanup(func() { _ = cli.Close() })
-	// fingerprint matches what fingerprintKey emits on the server
-	// (SHA256:<hex>). We mirror that here so tests can reason about
-	// expected owners without reaching into the server.
+	// Mirrors what fingerprintKey emits on the server (SHA256:<hex>).
 	hash := fingerprintSigner(signer.PublicKey())
 	return cli, hash
 }
@@ -93,8 +91,8 @@ func startStack(t *testing.T) *stack {
 	if err != nil {
 		t.Fatalf("blobs: %v", err)
 	}
-	// Same wrapping as production cmd/hostthisd: service + http surface
-	// both go through the compression layer; only the sweep talks raw.
+	// Same wrapping as production cmd/hostthisd: service + http surface both
+	// go through the compression layer; only the sweep talks raw.
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	repo := storage.NewPasteRepo(db)
@@ -139,8 +137,8 @@ func startStack(t *testing.T) *stack {
 	}
 }
 
-// run executes one ssh command against the keyed client and returns
-// (stdout, stderr, exit-status). Stdin is the optional body.
+// run executes one ssh command against the keyed client and returns (stdout,
+// stderr, exit-status). Stdin is the optional body.
 func (s *stack) run(cmd string, stdin []byte) (string, string, int) {
 	return s.runOn(s.keyedClient, cmd, stdin)
 }
@@ -171,10 +169,9 @@ func (s *stack) runOn(cli *xssh.Client, cmd string, stdin []byte) (string, strin
 			s.t.Fatalf("run %q: %v\nstderr: %s", cmd, err, stderr.String())
 		}
 	}
-	// An upload's blob write + status flip to ready now finalize in a
-	// background goroutine. Drain them before returning so a subsequent
-	// read (show / GET / list) in the same test sees a ready paste rather
-	// than racing the finalizer. A no-op when the command did not upload.
+	// An upload's blob write + status flip to ready finalize in a background
+	// goroutine. Drain them so a subsequent read in the same test sees a ready
+	// paste instead of racing the finalizer. No-op when nothing uploaded.
 	if s.upload != nil {
 		s.upload.WaitFinalize()
 	}
@@ -197,7 +194,7 @@ func TestVerbList_Empty(t *testing.T) {
 
 func TestVerbList_AfterUpload(t *testing.T) {
 	s := startStack(t)
-	// Upload one with --name, one without.
+	// One upload with --name, one without.
 	stdout1, stderr1, exit1 := s.run(`--name "demo"`, []byte("<!doctype html><h1>1</h1>"))
 	stdout2, stderr2, exit2 := s.run("", []byte("# md\n"))
 	if !strings.Contains(stdout1, "/p/") || !strings.Contains(stdout2, "/p/") {
@@ -211,9 +208,8 @@ func TestVerbList_AfterUpload(t *testing.T) {
 	if !strings.Contains(stdout, "demo") {
 		t.Fatalf("named paste should appear in list: %q", stdout)
 	}
-	// Header + 2 rows of tab-separated output. Header MUST be the first
-	// stdout line - pins the regression where it was emitted on stderr
-	// (which arrived AFTER the rows from the client's perspective).
+	// The header MUST be the first stdout line: emitted on stderr it would
+	// reach the client AFTER the rows.
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")
 	if len(lines) != 3 {
 		t.Fatalf("expected header + 2 list rows = 3 lines, got %d:\n%s", len(lines), stdout)
@@ -256,9 +252,7 @@ func TestVerbGet_OwnerOnly(t *testing.T) {
 	if !strings.Contains(body, "hello") {
 		t.Fatalf("get returned wrong body: %q", body)
 	}
-	// A second keyed identity (different ssh key) trying to get the
-	// first owner's paste should get not-found / forbidden - same as
-	// any unauthorized read of someone else's slug.
+	// A second keyed identity reading the first owner's paste fails.
 	otherClient, _ := newKeyClient(t, s.sshAddr)
 	stdoutOther, stderrOther, exitOther := s.runOn(otherClient, "get "+slug, nil)
 	if exitOther == 0 {
@@ -272,7 +266,6 @@ func TestVerbDelete_Roundtrip(t *testing.T) {
 	stdout, _, _ := s.run("", []byte("<!doctype html><p>delete me</p>"))
 	slug := extractSlug(stdout)
 
-	// Confirm it serves via http first.
 	resp, err := http.Get(s.httpURL + "/p/" + slug)
 	if err != nil {
 		t.Fatalf("get before delete: %v", err)
@@ -282,7 +275,6 @@ func TestVerbDelete_Roundtrip(t *testing.T) {
 		t.Fatalf("expected 200 before delete, got %d", resp.StatusCode)
 	}
 
-	// Delete.
 	_, stderr, exit := s.run("delete "+slug, nil)
 	if exit != 0 {
 		t.Fatalf("delete exit: %d (%q)", exit, stderr)
@@ -291,7 +283,6 @@ func TestVerbDelete_Roundtrip(t *testing.T) {
 		t.Fatalf("expected 'deleted' confirmation, got %q", stderr)
 	}
 
-	// Confirm it 404s.
 	resp, err = http.Get(s.httpURL + "/p/" + slug)
 	if err != nil {
 		t.Fatalf("get after delete: %v", err)
@@ -313,7 +304,6 @@ func TestVerbRename(t *testing.T) {
 	if !strings.Contains(stderr, "renamed") {
 		t.Fatalf("expected renamed confirmation: %q", stderr)
 	}
-	// list should show the new name
 	listStdout, _, _ := s.run("list", nil)
 	if !strings.Contains(listStdout, "new label") {
 		t.Fatalf("expected new label in list: %q", listStdout)
@@ -324,7 +314,6 @@ func TestVerbUpdate_AppendsVersion(t *testing.T) {
 	s := startStack(t)
 	stdout, _, _ := s.run("", []byte("<!doctype html><p>v1</p>"))
 	slug := extractSlug(stdout)
-	// Update
 	_, stderr, exit := s.run(slug, []byte("<!doctype html><p>v2</p>"))
 	if exit != 0 {
 		t.Fatalf("update exit: %d (%q)", exit, stderr)
@@ -332,19 +321,17 @@ func TestVerbUpdate_AppendsVersion(t *testing.T) {
 	if !strings.Contains(stderr, "v2") {
 		t.Fatalf("expected v2 in update stderr: %q", stderr)
 	}
-	// versions verb should list both
 	stdoutV, _, _ := s.run("versions "+slug, nil)
 	if !strings.Contains(stdoutV, "v1") || !strings.Contains(stdoutV, "v2") {
 		t.Fatalf("expected v1 + v2 in versions output: %q", stdoutV)
 	}
-	// http should serve v2
 	resp, _ := http.Get(s.httpURL + "/p/" + slug)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if !strings.Contains(string(body), "v2") {
 		t.Fatalf("expected v2 served: %q", body)
 	}
-	// Pin v1, http should now serve v1
+	// Pinning v1 changes what the URL serves.
 	_, _, _ = s.run("pin "+slug+" 1", nil)
 	resp, _ = http.Get(s.httpURL + "/p/" + slug)
 	body, _ = io.ReadAll(resp.Body)

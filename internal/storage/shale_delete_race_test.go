@@ -13,24 +13,14 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// TestShaleDelete_VsDeleteVersionSameSlug_NoUnderCount pins the closure of
-// review finding (b): a whole-paste Delete and a DeleteVersion on the SAME
-// slug, run concurrently, must never double-decrement the freed bytes. A
-// double-decrement is an UNDER-count, which would let the owner exceed
-// quota - the one direction that is unacceptable.
+// TestShaleDelete_VsDeleteVersionSameSlug_NoUnderCount pins that a whole-paste
+// Delete racing a DeleteVersion on the SAME slug never under-counts the owner's
+// active bytes. An under-count lets the owner exceed quota, the one
+// unacceptable direction; an over-count only over-rejects.
 //
-// The fix computes Delete's `freed` INSIDE its authoritative CAS by
-// re-reading each version's tombstone state; a concurrent DeleteVersion
-// that already tombstoned (and decremented) a version commits a change to
-// that version key, conflicting Delete's CAS so the retry re-reads the
-// now-tombstoned version and excludes it from `freed`.
-//
-// To make an under-count observable, each owner also holds a "keeper"
-// paste that is never touched: its bytes are the floor the counter must
-// never drop below. After the race the victim paste is gone (Delete
-// removes it whichever way the race resolves), so the true live bytes for
-// the owner equal exactly the keeper. The counter must therefore stay >=
-// the keeper bytes; the double-decrement bug drops it below.
+// Each owner also holds an untouched "keeper" paste. The victim is gone
+// whichever way the race resolves, so the owner's true live bytes equal exactly
+// the keeper: the sum must never fall below that floor.
 func TestShaleDelete_VsDeleteVersionSameSlug_NoUnderCount(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -40,11 +30,11 @@ func TestShaleDelete_VsDeleteVersionSameSlug_NoUnderCount(t *testing.T) {
 	now := time.Now().UTC()
 
 	const (
-		keeperBytes = 200 // a live paste the race never touches: the counter floor
+		keeperBytes = 200 // a live paste the race never touches: the floor
 		v1Bytes     = 100 // victim insert
 		v2Bytes     = 60  // victim append
 		userCap     = 1 << 20
-		iters       = 40 // enough rounds to land in the race window on slate-on-MinIO
+		iters       = 40 // enough rounds to land in the race window
 	)
 
 	for i := range iters {
@@ -66,7 +56,7 @@ func TestShaleDelete_VsDeleteVersionSameSlug_NoUnderCount(t *testing.T) {
 		if _, err := repo.AppendVersionWithQuotaCheck(context.Background(), victim, domain.KindHTML, "sha-"+victim.String()+"-v2", v2Bytes, userCap, now); err != nil {
 			t.Fatalf("iter %d victim append: %v", i, err)
 		}
-		// counter == keeperBytes + v1Bytes + v2Bytes for this owner.
+		// The owner's sum is now keeperBytes + v1Bytes + v2Bytes.
 
 		var wg sync.WaitGroup
 		wg.Add(2)
@@ -74,10 +64,9 @@ func TestShaleDelete_VsDeleteVersionSameSlug_NoUnderCount(t *testing.T) {
 		go func() { defer wg.Done(); _ = repo.DeleteVersion(victim, 2) }()
 		wg.Wait()
 
-		// Victim gone -> true live bytes == keeperBytes. The counter must
-		// never have under-counted below that floor. An over-count (a delete
-		// whose {id} decrement lost a transient CAS) is the documented
-		// fail-safe direction and is allowed; an under-count is the bug.
+		// Victim gone -> true live bytes == keeperBytes. An over-count (a lost
+		// index write) is the allowed fail-safe direction; under-counting below
+		// the floor is not.
 		got, err := repo.SumActiveBytesByOwner(owner, now)
 		if err != nil {
 			t.Fatalf("iter %d sum: %v", i, err)

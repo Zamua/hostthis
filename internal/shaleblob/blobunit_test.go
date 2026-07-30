@@ -1,22 +1,10 @@
 //go:build slatedb
 
-// End-to-end tests for the transactional shale-blob path. The METADATA plane
-// is a real single-node shale cluster over the slate backend (needs MinIO via
-// MINIO_TEST_ENDPOINT + the slatedb build tag + the dylib); the BLOB plane is
-// an in-memory blobmem.Store (NO MinIO, NO network for the bytes). The blobmem
-// store's settable clock + ModTime drive the SweepOrphans age-gate
-// deterministically.
-//
-// What these pin (docs/design/shale-blobs-phase3.md section 8 step 2 + 3):
-//   - reader-atomic create: a staged-but-not-committed blob is invisible (Read
-//     -> blob.ErrNotFound); after Commit it serves.
-//   - pending-collapse: a committed paste is READY directly (no pending row).
-//   - atomic delete: the metadata delete + the blob unbind are one transaction;
-//     after delete a Read -> blob.ErrNotFound.
-//   - stage-without-commit -> SweepOrphans reclaims the orphan AFTER the grace,
-//     not before.
-//   - versions: each version binds its own blob; a non-head version reads back.
-//   - sites: bind-all-with-manifest; a redeploy drops the old files' blobs.
+// End-to-end tests for the transactional shale-blob path. The METADATA plane is
+// a real single-node shale cluster over the slate backend (needs MINIO_TEST_
+// ENDPOINT, the slatedb tag and the dylib); the BLOB plane is an in-memory
+// blobmem.Store, so the bytes never touch MinIO or the network. blobmem's
+// settable ModTime is what makes the SweepOrphans age-gate deterministic.
 
 package shaleblob_test
 
@@ -49,10 +37,9 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// newBlobRepo opens a fresh single-node blob-capable ShaleRepo on a unique
-// logical metadata db (real slate-over-MinIO), with an in-memory blobmem store
-// for the byte plane. Returns the repo, the seam unit, and the blobmem store
-// (so a test can drive the SweepOrphans age-gate). Skips when MinIO is absent.
+// newBlobRepo opens a blob-capable ShaleRepo on a unique logical metadata db,
+// with a blobmem store for the byte plane. The store is returned so a test can
+// drive the SweepOrphans age-gate. Skips when MinIO is absent.
 func newBlobRepo(t *testing.T) (*storage.ShaleRepo, *shaleblob.Unit, *blobmem.Store) {
 	t.Helper()
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
@@ -85,7 +72,7 @@ func newBlobRepo(t *testing.T) (*storage.ShaleRepo, *shaleblob.Unit, *blobmem.St
 	return repo, unit, bs
 }
 
-// encode runs the same magic+zstd encode the upload pipeline produces, so the
+// encode applies the same magic+zstd framing the upload pipeline produces, so a
 // staged body decodes back through the seam's Read.
 func encode(t *testing.T, raw []byte) []byte {
 	t.Helper()
@@ -121,7 +108,8 @@ func mkPaste(slug, owner, sha string, size int, now time.Time) domain.Paste {
 	}
 }
 
-// TestReaderAtomicCreate: a staged blob is invisible until Commit binds it.
+// A staged blob is invisible until Commit binds it, and the committed paste is
+// READY directly with no pending row.
 func TestReaderAtomicCreate(t *testing.T) {
 	repo, unit, _ := newBlobRepo(t)
 	ctx := context.Background()
@@ -130,17 +118,17 @@ func TestReaderAtomicCreate(t *testing.T) {
 	sha := "sha-atomic-1"
 	body := encode(t, raw)
 
-	// Stage WITHOUT committing: the bytes are durable but unreferenced.
+	// Staged without committing: the bytes are durable but unreferenced.
 	h, err := unit.Stage(ctx, "atomicslug", sha, body)
 	if err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
-	// A read before the bind must 404 (no metadata row resolves the blob id).
+	// No metadata row resolves the blob id yet, so the read must 404.
 	if _, rerr := readAll(t, unit, "atomicslug", sha); !isNotFound(rerr) {
 		t.Fatalf("read before commit = %v, want not-found", rerr)
 	}
 
-	// Commit: the metadata row + the bind co-commit.
+	// The metadata row and the bind co-commit.
 	p := mkPaste("atomicslug", "owner-a", sha, len(body), now)
 	if err := unit.Commit(ctx, []service.BlobHandle{h}, func(ctx context.Context) error {
 		return repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
@@ -148,7 +136,6 @@ func TestReaderAtomicCreate(t *testing.T) {
 		t.Fatalf("Commit: %v", err)
 	}
 
-	// Pending-collapse: the committed paste is READY directly (no pending row).
 	got, gerr := repo.Get(domain.Slug("atomicslug"))
 	if gerr != nil {
 		t.Fatalf("Get after commit: %v", gerr)
@@ -157,7 +144,6 @@ func TestReaderAtomicCreate(t *testing.T) {
 		t.Fatalf("status after commit = %q, want ready (pending-collapse)", got.Status)
 	}
 
-	// Now the read serves the original bytes.
 	out, rerr := readAll(t, unit, "atomicslug", sha)
 	if rerr != nil {
 		t.Fatalf("read after commit: %v", rerr)
@@ -167,8 +153,8 @@ func TestReaderAtomicCreate(t *testing.T) {
 	}
 }
 
-// TestAtomicDelete: delete removes the metadata AND unbinds the blob in one
-// transaction; afterward the blob is unreachable.
+// Delete removes the metadata and unbinds the blob in ONE transaction, leaving
+// the blob unreachable.
 func TestAtomicDelete(t *testing.T) {
 	repo, unit, _ := newBlobRepo(t)
 	ctx := context.Background()
@@ -191,30 +177,27 @@ func TestAtomicDelete(t *testing.T) {
 		t.Fatalf("read after commit: %v", rerr)
 	}
 
-	// Delete: metadata + unbind co-commit.
 	if err := repo.Delete(domain.Slug("delslug")); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	// The metadata row is gone.
 	if _, gerr := repo.Get(domain.Slug("delslug")); !isStorageNotFound(gerr) {
 		t.Fatalf("Get after delete = %v, want not-found", gerr)
 	}
-	// The blob is unbound -> Read 404s (the pointer is gone, even though the
-	// bytes may still sit in blobmem until SweepOrphans reclaims them).
+	// The pointer is gone even though the bytes may sit in blobmem until
+	// SweepOrphans reclaims them.
 	if _, rerr := readAll(t, unit, "delslug", sha); !isNotFound(rerr) {
 		t.Fatalf("read after delete = %v, want not-found", rerr)
 	}
 }
 
-// TestStageWithoutCommit_SweepReclaims: a staged-but-never-bound blob is an
-// orphan SweepOrphans reclaims AFTER the grace, not before.
+// A staged-but-never-bound blob is an orphan SweepOrphans reclaims AFTER the
+// grace, not before.
 func TestStageWithoutCommit_SweepReclaims(t *testing.T) {
 	repo, unit, bs := newBlobRepo(t)
 	ctx := context.Background()
 	body := encode(t, []byte("orphan bytes"))
 
-	// Stage, never commit: an orphan object now sits in blobmem with a fresh
-	// ModTime (the real wall clock).
+	// Staged and never committed: an orphan object with a fresh ModTime.
 	if _, err := unit.Stage(ctx, "orphanslug", "sha-orphan", body); err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
@@ -222,7 +205,7 @@ func TestStageWithoutCommit_SweepReclaims(t *testing.T) {
 		t.Fatalf("after stage: object count = %d, want 1", countObjects(ctx, bs))
 	}
 
-	// A sweep with a generous grace must NOT reclaim a just-staged object.
+	// A generous grace must NOT reclaim a just-staged object.
 	now := time.Now().UTC()
 	if err := repo.SweepBlobOrphans(ctx, now, time.Hour); err != nil {
 		t.Fatalf("SweepBlobOrphans (fresh): %v", err)
@@ -231,7 +214,7 @@ func TestStageWithoutCommit_SweepReclaims(t *testing.T) {
 		t.Fatalf("after fresh sweep: object count = %d, want 1 (not reclaimed before grace)", countObjects(ctx, bs))
 	}
 
-	// Age the object past the grace, then sweep: now it is reclaimed.
+	// Aged past the grace, the same sweep reclaims it.
 	for k := range listKeys(ctx, bs) {
 		bs.SetModTime(k, now.Add(-2*time.Hour))
 	}
@@ -243,8 +226,8 @@ func TestStageWithoutCommit_SweepReclaims(t *testing.T) {
 	}
 }
 
-// TestVersions_BindAndRead: an appended version binds its own blob; both the
-// head (latest) and the older version read back their own bytes.
+// Each version binds its own blob, so the head and an older version each read
+// back their own bytes.
 func TestVersions_BindAndRead(t *testing.T) {
 	repo, unit, _ := newBlobRepo(t)
 	ctx := context.Background()
@@ -264,7 +247,7 @@ func TestVersions_BindAndRead(t *testing.T) {
 		t.Fatalf("Commit v1: %v", err)
 	}
 
-	// Append v2 (a different blob). The head moves to v2 (unpinned).
+	// v2 is a different blob; unpinned, so the head moves to it.
 	rawV2 := []byte("<h1>v2 newer</h1>")
 	shaV2 := "sha-v2"
 	bodyV2 := encode(t, rawV2)
@@ -279,7 +262,6 @@ func TestVersions_BindAndRead(t *testing.T) {
 		t.Fatalf("Commit v2: %v", err)
 	}
 
-	// The head serves v2.
 	outHead, herr := readAll(t, unit, "verslug", shaV2)
 	if herr != nil {
 		t.Fatalf("read head (v2): %v", herr)
@@ -287,7 +269,7 @@ func TestVersions_BindAndRead(t *testing.T) {
 	if !bytes.Equal(outHead, rawV2) {
 		t.Fatalf("head read = %q, want %q", outHead, rawV2)
 	}
-	// The older version (v1) still reads back via its own sha -> its own blob.
+	// v1 still reads back via its own sha, hence its own blob.
 	outV1, v1err := readAll(t, unit, "verslug", shaV1)
 	if v1err != nil {
 		t.Fatalf("read v1: %v", v1err)
@@ -297,18 +279,15 @@ func TestVersions_BindAndRead(t *testing.T) {
 	}
 }
 
-// TestSites_BindAllAndRedeployDrops: a site deploy binds EVERY file in one
-// transaction (bind-all-with-manifest), each file reads back, and a redeploy
-// that drops a file unbinds the dropped file's blob (Read 404s) while the kept
-// file still serves.
+// A site deploy binds EVERY file in one transaction, and a redeploy unbinds the
+// blobs of the files it drops while the kept files still serve.
 func TestSites_BindAllAndRedeployDrops(t *testing.T) {
 	repo, unit, _ := newBlobRepo(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	// Deploy v1 with two files. Stage each (as the deploy sink does, via
-	// StageStream which encodes), collect the handles, then Commit the manifest
-	// + binds together through InsertSiteWithQuotaCheck.
+	// Stage each file as the deploy sink does, then commit the manifest and all
+	// the binds together.
 	rawIndex := []byte("<!doctype html><h1>home</h1>")
 	rawAbout := []byte("<!doctype html><h1>about</h1>")
 	shaIndex := "sha-site-index"
@@ -333,7 +312,6 @@ func TestSites_BindAllAndRedeployDrops(t *testing.T) {
 		t.Fatalf("Commit site v1: %v", err)
 	}
 
-	// Both files read back via their shas.
 	if out, err := readAll(t, unit, "siteslug", shaIndex); err != nil || !bytes.Equal(out, rawIndex) {
 		t.Fatalf("read index v1 = (%q, %v), want %q", out, err, rawIndex)
 	}
@@ -341,8 +319,8 @@ func TestSites_BindAllAndRedeployDrops(t *testing.T) {
 		t.Fatalf("read about v1 = (%q, %v), want %q", out, err, rawAbout)
 	}
 
-	// Redeploy: keep index.html (re-staged: a NEW blob id), drop about.html,
-	// add contact.html. The dropped file's OLD blob must be unbound.
+	// Redeploy: index.html is re-staged under a NEW blob id, about.html is
+	// dropped, contact.html is added.
 	rawIndex2 := []byte("<!doctype html><h1>home v2</h1>")
 	rawContact := []byte("<!doctype html><h1>contact</h1>")
 	shaIndex2 := "sha-site-index2"
@@ -364,26 +342,24 @@ func TestSites_BindAllAndRedeployDrops(t *testing.T) {
 		t.Fatalf("Commit site v2 (redeploy): %v", err)
 	}
 
-	// The new files serve.
 	if out, err := readAll(t, unit, "siteslug", shaIndex2); err != nil || !bytes.Equal(out, rawIndex2) {
 		t.Fatalf("read index v2 = (%q, %v), want %q", out, err, rawIndex2)
 	}
 	if out, err := readAll(t, unit, "siteslug", shaContact); err != nil || !bytes.Equal(out, rawContact) {
 		t.Fatalf("read contact v2 = (%q, %v), want %q", out, err, rawContact)
 	}
-	// The dropped file's blob is unbound -> Read 404s.
+	// The dropped file's blob is unbound.
 	if _, err := readAll(t, unit, "siteslug", shaAbout); !isNotFound(err) {
 		t.Fatalf("read dropped about after redeploy = %v, want not-found", err)
 	}
-	// The OLD index blob (re-staged under a new id) is also unbound -> the old
-	// sha no longer resolves (the manifest now maps index.html to shaIndex2).
+	// So is the OLD index blob: the manifest now maps index.html to shaIndex2.
 	if _, err := readAll(t, unit, "siteslug", shaIndex); !isNotFound(err) {
 		t.Fatalf("read old index sha after redeploy = %v, want not-found", err)
 	}
 }
 
-// stageFile stages a single site file through StageStream (which encodes the
-// uncompressed bytes), mirroring the deploy sink.
+// stageFile stages one site file through StageStream, which encodes the
+// uncompressed bytes, mirroring the deploy sink.
 func stageFile(t *testing.T, unit *shaleblob.Unit, slug, sha string, raw []byte) service.BlobHandle {
 	t.Helper()
 	h, err := unit.StageStream(context.Background(), slug, sha, bytes.NewReader(raw), int64(len(raw)))

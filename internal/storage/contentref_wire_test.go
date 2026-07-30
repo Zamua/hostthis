@@ -8,22 +8,14 @@ import (
 	"testing"
 )
 
-// TestContentRef_WireCompat pins the on-disk JSON contract for the served-
-// content descriptor. The four fields (kind/content_sha/blob_id/size) must stay
-// at the TOP LEVEL of pasteRow / versionRow JSON - NOT nested under a
-// "contentRef" object - so:
-//
-//   - records this code writes are readable by anything expecting the flat
-//     schema, and
-//   - records written before the contentRef type existed (every current prod
-//     paste) still decode into the embedded descriptor.
-//
-// A regression here (naming the embedded field, or giving it a json tag, which
-// would nest it) would silently strand every existing paste. This is the guard
-// that makes the anonymous-embed assumption explicit and testable, with no
-// MinIO/cluster needed - it is pure (un)marshaling.
+// TestContentRef_WireCompat pins the JSON contract for the served-content
+// descriptor: kind/content_sha/blob_id/size must stay at the TOP LEVEL of
+// pasteRow / versionRow JSON, never nested under a "contentRef" object, so
+// records round-trip against the flat schema in both directions. Naming the
+// embedded field or giving it a json tag nests it and silently strands every
+// stored record.
 func TestContentRef_WireCompat(t *testing.T) {
-	// 1. New code marshals to FLAT keys (anonymous embed -> promoted fields).
+	// Anonymous embed promotes the fields, so marshaling is flat.
 	pr := pasteRow{
 		Identity:      "key:o",
 		Status:        "ready",
@@ -44,8 +36,8 @@ func TestContentRef_WireCompat(t *testing.T) {
 		t.Fatalf("pasteRow JSON nested the descriptor (it must stay flat):\n%s", js)
 	}
 
-	// 2. OLD-format flat JSON (a pre-contentRef prod record) decodes into the
-	//    embedded descriptor AND keeps the row's own fields.
+	// Flat JSON decodes into the embedded descriptor AND keeps the row's own
+	// fields.
 	oldPaste := `{"identity":"key:o","status":"ready","kind":"markdown","content_sha":"oldsha","blob_id":"oldblob","size":42,"name":"n","pinned_version":3}`
 	var gotP pasteRow
 	if err := json.Unmarshal([]byte(oldPaste), &gotP); err != nil {
@@ -58,7 +50,7 @@ func TestContentRef_WireCompat(t *testing.T) {
 		t.Fatalf("legacy pasteRow lost its own fields: %+v", gotP)
 	}
 
-	// 3. Same contract for versionRow.
+	// The same contract binds versionRow.
 	oldVer := `{"ver_num":5,"kind":"html","content_sha":"vsha","blob_id":"vblob","size":7,"deleted":false}`
 	var gotV versionRow
 	if err := json.Unmarshal([]byte(oldVer), &gotV); err != nil {

@@ -15,10 +15,9 @@ import (
 	"time"
 )
 
-// durableBlobStore is the contract the write-back cache requires of the
-// backend it fronts. *BlobStore (the disk store) satisfies it. The cache
-// reads/writes the COMPRESSED stored bytes - it sits below the compression
-// layer - so it deals only in opaque bytes keyed by sha.
+// durableBlobStore is the contract the write-back cache requires of the backend
+// it fronts. The cache sits BELOW the compression layer, so it moves only
+// opaque already-compressed bytes keyed by sha.
 type durableBlobStore interface {
 	Put(sha string, r io.Reader, size int64) error
 	Get(sha string) ([]byte, error)
@@ -31,13 +30,11 @@ type durableBlobStore interface {
 type WriteBackConfig struct {
 	// Dir is the local cache directory. Required.
 	Dir string
-	// MaxBytes is the soft cap on the cache's on-disk size. Once the
-	// cache exceeds this, already-uploaded entries are evicted
-	// oldest-first. Not-yet-uploaded entries are never evicted. <= 0
-	// means a 1 GiB default.
+	// MaxBytes is the soft cap on the cache's on-disk size. Past it,
+	// already-uploaded entries are evicted oldest-first; not-yet-uploaded
+	// entries are never evicted. <= 0 means 1 GiB.
 	MaxBytes int64
-	// Workers is the number of background uploader goroutines. <= 0
-	// means 2.
+	// Workers is the number of background uploader goroutines. <= 0 means 2.
 	Workers int
 	// Logger receives non-fatal uploader diagnostics. nil discards.
 	Logger *log.Logger
@@ -49,20 +46,17 @@ type WriteBackConfig struct {
 	maxRetryBackoff time.Duration
 }
 
-// WriteBackBlobStore is a local-disk write-back cache in front of a
-// durable backend. Put writes the bytes to the pod's local disk and
-// enqueues an asynchronous upload to the durable backend; Get/GetReader
-// serve from the local cache first and fall back to the durable backend.
+// WriteBackBlobStore is a local-disk write-back cache in front of a durable
+// backend: Put writes to the pod's local disk and enqueues an asynchronous
+// upload, Get/GetReader serve from the cache first and fall back to the backend.
+// It is OPT-IN, trading a durability window (the local copy lands immediately,
+// the backend copy follows the async upload) for a fast upload ack. See SPEC
+// "Local-disk write-back cache".
 //
-// It is OPT-IN: it trades a small durability window (the local copy is
-// durable immediately, the durable-backend copy follows the async
-// upload) for a fast upload ack. See SPEC "Local-disk write-back cache".
-//
-// The cache stores the compressed bytes at
-// <dir>/<sha[:2]>/<sha>; an uploaded entry additionally carries a
-// zero-byte marker file <dir>/<sha[:2]>/<sha>.up. Absence of the marker
-// means the blob has not been confirmed durable in the backend yet and
-// must NOT be evicted.
+// Compressed bytes live at <dir>/<sha[:2]>/<sha>; an uploaded entry additionally
+// carries a zero-byte <dir>/<sha[:2]>/<sha>.up marker. No marker means the blob
+// is not yet confirmed durable in the backend, so the local copy is the ONLY one
+// and must not be evicted.
 type WriteBackBlobStore struct {
 	durable  durableBlobStore
 	dir      string
@@ -77,19 +71,17 @@ type WriteBackBlobStore struct {
 	stopCh  chan struct{}
 	stopOne sync.Once
 
-	// mu guards inFlight (the set of shas currently queued or being
-	// uploaded) so the same sha isn't enqueued twice concurrently and
-	// eviction can avoid in-flight entries.
+	// mu guards inFlight (shas queued or uploading) so the same sha is never
+	// enqueued twice concurrently and eviction can skip in-flight entries.
 	mu       sync.Mutex
 	inFlight map[string]struct{}
 }
 
 const uploadedMarkerSuffix = ".up"
 
-// NewWriteBackBlobStore builds the cache, scans the cache dir to
-// re-enqueue any blobs that were not confirmed uploaded before the last
-// shutdown, and starts the background uploader pool. Call Close to stop
-// the uploaders (drains in-flight work best-effort).
+// NewWriteBackBlobStore builds the cache, re-enqueues any blob the cache dir
+// shows was not confirmed uploaded before the last shutdown, and starts the
+// uploader pool. Call Close to stop the uploaders.
 func NewWriteBackBlobStore(durable durableBlobStore, cfg WriteBackConfig) (*WriteBackBlobStore, error) {
 	if cfg.Dir == "" {
 		return nil, errors.New("writeback: cache dir required")
@@ -116,9 +108,8 @@ func NewWriteBackBlobStore(durable durableBlobStore, cfg WriteBackConfig) (*Writ
 		logger:      cfg.Logger,
 		baseBackoff: cfg.retryBackoff,
 		maxBackoff:  cfg.maxRetryBackoff,
-		// Buffered generously so Put rarely blocks on a full queue; if it
-		// does fill, Put falls back to a synchronous durable upload rather
-		// than blocking the request (see Put).
+		// Buffered generously so Put rarely meets a full queue; when it
+		// does, enqueue uploads synchronously rather than block the request.
 		queue:    make(chan string, 1024),
 		stopCh:   make(chan struct{}),
 		inFlight: make(map[string]struct{}),
@@ -128,8 +119,8 @@ func NewWriteBackBlobStore(durable durableBlobStore, cfg WriteBackConfig) (*Writ
 		go w.uploadWorker()
 	}
 	if err := w.rescanPending(); err != nil {
-		// A scan failure is not fatal - the cache still functions, it just
-		// may not have re-enqueued everything. Log and continue.
+		// Not fatal: the cache still functions, it may just not have
+		// re-enqueued everything.
 		w.logf("writeback: startup rescan error: %v", err)
 	}
 	return w, nil
@@ -149,26 +140,22 @@ func (w *WriteBackBlobStore) markerPath(sha string) string {
 	return filepath.Join(w.dir, sha[:2], sha+uploadedMarkerSuffix)
 }
 
-// Put writes the bytes to the local cache and enqueues an async upload.
-// Returns once the local write is durable (fsync'd + renamed). The
-// content-addressed skip applies: if the durable backend already has the
-// object, nothing is written or enqueued.
+// Put writes the bytes to the local cache and enqueues an async upload,
+// returning once the local write is durable (fsync'd + renamed). If the durable
+// backend already holds the object, nothing is written or enqueued.
 func (w *WriteBackBlobStore) Put(sha string, r io.Reader, size int64) error {
 	if len(sha) < 2 {
 		return fmt.Errorf("writeback: sha too short")
 	}
-	// Buffer the bytes so we can both write them locally and (later)
-	// read them back for the durable upload. Callers pass an in-memory
-	// body via PutPrecompressed, so this is not an extra copy of unbounded
-	// size - it's the same staging buffer the upload service already holds.
+	// Buffered so the bytes can be written locally and read back for the
+	// upload. Callers pass an in-memory body via PutPrecompressed, so this is
+	// the staging buffer the upload service already holds, not an extra copy
+	// of unbounded size.
 	body, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("writeback read body: %w", err)
 	}
-	// If the durable backend already has it, this is a dedup hit - skip
-	// the local write and the enqueue entirely, and make sure a local
-	// copy left over from a prior run is marked uploaded so it can be
-	// evicted.
+	// Dedup hit: skip the local write and the enqueue entirely.
 	if w.durableHas(sha) {
 		return nil
 	}
@@ -176,14 +163,14 @@ func (w *WriteBackBlobStore) Put(sha string, r io.Reader, size int64) error {
 		return err
 	}
 	w.enqueue(sha)
-	// Opportunistic eviction so a long-running process doesn't grow the
-	// cache unbounded between uploads.
+	// Opportunistic, so a long-running process does not grow the cache
+	// unbounded between uploads.
 	w.evictIfNeeded()
 	return nil
 }
 
-// PutPrecompressed mirrors the other backends: the body is already the
-// stored (compressed, magic-prefixed) representation.
+// PutPrecompressed takes the body already in its stored (compressed,
+// magic-prefixed) representation, mirroring the other backends.
 func (w *WriteBackBlobStore) PutPrecompressed(sha string, body []byte) error {
 	return w.Put(sha, bytes.NewReader(body), int64(len(body)))
 }
@@ -203,7 +190,7 @@ func (w *WriteBackBlobStore) writeLocal(sha string, body []byte) error {
 		return fmt.Errorf("writeback tmp create: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer os.Remove(tmpName) //nolint:errcheck
 	if _, err := tmp.Write(body); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("writeback write: %w", err)
@@ -221,10 +208,9 @@ func (w *WriteBackBlobStore) writeLocal(sha string, body []byte) error {
 	return nil
 }
 
-// durableHas reports whether the durable backend already holds sha. A
-// cheap existence probe; on error we assume not-present (the uploader
-// will re-check and the worst case is a redundant Put, which the durable
-// backend itself dedups).
+// durableHas reports whether the durable backend already holds sha. An error
+// reads as not-present: the worst case is a redundant Put, which the durable
+// backend itself dedups.
 func (w *WriteBackBlobStore) durableHas(sha string) bool {
 	rc, _, err := w.durable.GetReader(sha)
 	if err != nil {
@@ -248,13 +234,13 @@ func (w *WriteBackBlobStore) enqueue(sha string) {
 	case w.queue <- sha:
 	default:
 		// Queue full: upload synchronously rather than block the caller or
-		// drop the work. Keeps durability moving under bursty load.
+		// drop the work.
 		w.mu.Lock()
 		delete(w.inFlight, sha)
 		w.mu.Unlock()
 		if err := w.uploadOnce(sha); err != nil {
 			w.logf("writeback: synchronous upload of %s failed: %v", sha, err)
-			// Re-enqueue via a goroutine so we don't recurse/block here.
+			// From a goroutine, to avoid recursing here.
 			go w.enqueue(sha)
 		}
 	}
@@ -272,10 +258,9 @@ func (w *WriteBackBlobStore) uploadWorker() {
 	}
 }
 
-// handleUpload uploads sha with bounded exponential backoff. On
-// persistent failure it gives up for this cycle but leaves the local
-// copy + the unmarked state intact, so the next startup rescan (or a
-// future Put of the same sha) re-enqueues it.
+// handleUpload uploads sha with bounded exponential backoff. Persistent failure
+// gives up for this cycle but leaves the local copy unmarked, so the next
+// startup rescan (or a future Put of the same sha) re-enqueues it.
 func (w *WriteBackBlobStore) handleUpload(sha string) {
 	defer func() {
 		w.mu.Lock()
@@ -303,10 +288,9 @@ func (w *WriteBackBlobStore) handleUpload(sha string) {
 	w.logf("writeback: giving up on %s after %d attempts; left for next rescan", sha, maxAttempts)
 }
 
-// uploadOnce reads the cached bytes and Puts them to the durable backend,
-// then writes the uploaded marker. A missing local file is treated as
-// success (already evicted/uploaded). ErrServiceFull is surfaced so the
-// caller can decide; everything else is a retryable error.
+// uploadOnce reads the cached bytes, Puts them to the durable backend, and
+// writes the uploaded marker. A missing local file counts as success (already
+// evicted or uploaded).
 func (w *WriteBackBlobStore) uploadOnce(sha string) error {
 	body, err := os.ReadFile(w.blobPath(sha))
 	if err != nil {
@@ -317,9 +301,8 @@ func (w *WriteBackBlobStore) uploadOnce(sha string) error {
 	}
 	if err := w.durable.Put(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 		if errors.Is(err, ErrServiceFull) {
-			// Durable store is at quota. Retrying won't help; mark as a
-			// terminal-ish error by returning it. We do NOT mark uploaded,
-			// so the blob stays pinned locally (correct: it is not durable).
+			// Durable store at quota. No marker is written, so the blob stays
+			// pinned locally, which is correct: it is not durable yet.
 			return err
 		}
 		return err
@@ -327,7 +310,6 @@ func (w *WriteBackBlobStore) uploadOnce(sha string) error {
 	return w.markUploaded(sha)
 }
 
-// markUploaded writes the zero-byte ".up" marker next to the blob.
 func (w *WriteBackBlobStore) markUploaded(sha string) error {
 	mp := w.markerPath(sha)
 	f, err := os.OpenFile(mp, os.O_CREATE|os.O_WRONLY, 0o640)
@@ -377,10 +359,10 @@ func (w *WriteBackBlobStore) GetReader(sha string) (io.ReadCloser, int64, error)
 	return w.durable.GetReader(sha)
 }
 
-// WalkBlobs delegates to the durable backend, which is authoritative for
-// what blobs exist for GC purposes. (Not-yet-uploaded local-only blobs
-// belong to live pastes whose metadata rows reference them; they are not
-// GC candidates and will appear in the durable backend once uploaded.)
+// WalkBlobs delegates to the durable backend, which is authoritative for what
+// exists for GC purposes. A not-yet-uploaded local-only blob belongs to a live
+// paste whose metadata references it, so it is not a GC candidate and shows up
+// in the backend once uploaded.
 func (w *WriteBackBlobStore) WalkBlobs(fn func(sha string) error) error {
 	return w.durable.WalkBlobs(fn)
 }
@@ -393,9 +375,8 @@ func (w *WriteBackBlobStore) Remove(sha string) error {
 	return derr
 }
 
-// rescanPending walks the cache dir and re-enqueues every blob lacking
-// the uploaded marker, so an upload interrupted by a crash/restart
-// resumes. Called once at construction.
+// rescanPending re-enqueues every cached blob lacking the uploaded marker, so an
+// upload interrupted by a crash or restart resumes. Called once at construction.
 func (w *WriteBackBlobStore) rescanPending() error {
 	var pending []string
 	err := filepath.WalkDir(w.dir, func(path string, d fs.DirEntry, err error) error {
@@ -440,9 +421,9 @@ type cacheEntry struct {
 }
 
 // evictIfNeeded brings the cache back under maxBytes by deleting
-// already-uploaded entries oldest-first. Not-yet-uploaded entries are
-// never evicted (they are the only durable copy). The cap is therefore
-// soft under a burst.
+// already-uploaded entries oldest-first. A not-yet-uploaded entry is the only
+// durable copy of its bytes and is never evicted, so the cap is soft under a
+// burst of uploads the backend has not absorbed yet.
 func (w *WriteBackBlobStore) evictIfNeeded() {
 	entries, total, err := w.scanEntries()
 	if err != nil {
@@ -452,7 +433,7 @@ func (w *WriteBackBlobStore) evictIfNeeded() {
 	if total <= w.maxBytes {
 		return
 	}
-	// Evictable = uploaded and not in flight, oldest first.
+	// Evictable: uploaded and not in flight, oldest first.
 	w.mu.Lock()
 	evictable := make([]cacheEntry, 0, len(entries))
 	for _, e := range entries {
@@ -481,9 +462,8 @@ func (w *WriteBackBlobStore) evictIfNeeded() {
 	}
 }
 
-// scanEntries lists every blob file in the cache (excluding markers and
-// tmp files) with its size, mtime, and uploaded state, plus the running
-// total byte size.
+// scanEntries lists every blob file in the cache, excluding markers and tmp
+// files, plus the total byte size.
 func (w *WriteBackBlobStore) scanEntries() ([]cacheEntry, int64, error) {
 	var entries []cacheEntry
 	var total int64
@@ -517,16 +497,15 @@ func (w *WriteBackBlobStore) scanEntries() ([]cacheEntry, int64, error) {
 	return entries, total, err
 }
 
-// Close stops the background uploaders. It does not block on draining the
-// queue: any blob not yet uploaded stays in the cache with no marker and
-// is re-enqueued by the next process's startup rescan.
+// Close stops the background uploaders without draining the queue: a blob not
+// yet uploaded stays in the cache unmarked and is re-enqueued by the next
+// process's startup rescan.
 func (w *WriteBackBlobStore) Close() {
 	w.stopOne.Do(func() { close(w.stopCh) })
 	w.wg.Wait()
 }
 
-// drainForTest blocks until the in-flight set is empty or the deadline
-// passes. Test helper only.
+// drainForTest blocks until the in-flight set is empty or the deadline passes.
 func (w *WriteBackBlobStore) drainForTest(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

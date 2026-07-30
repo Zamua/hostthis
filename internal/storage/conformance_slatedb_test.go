@@ -4,18 +4,14 @@ package storage_test
 
 // SlateDB backend's entry into the backend-agnostic conformance suite.
 //
-// Built only under `-tags slatedb` (which also needs cgo +
-// libslatedb on the loader path, exactly like the rest of the slatedb
-// build). It needs a live S3-compatible endpoint to back the store, so
-// it skips cleanly unless MINIO_TEST_ENDPOINT is set: the same env-var
-// gate the S3 blob round-trip test uses. Bring one up with the dev
-// MinIO compose, then run:
+// Needs cgo + libslatedb on the loader path (like the rest of the slatedb
+// build) and a live S3-compatible endpoint, so it skips unless
+// MINIO_TEST_ENDPOINT is set. Bring one up with the dev MinIO compose, then:
 //
 //	go test -tags slatedb -run TestConformance_Slate ./internal/storage
 //
-// Each subtest gets a FRESH logical DbName (a per-run prefix within the
-// bucket) so runs don't see each other's keys and the "empty repo"
-// assertions hold.
+// Each subtest gets a FRESH logical DbName (a per-run prefix within the bucket)
+// so runs cannot see each other's keys and the "empty repo" assertions hold.
 
 import (
 	"fmt"
@@ -40,9 +36,9 @@ func TestConformance_Slate(t *testing.T) {
 
 	caps := conformCaps{ExpiryFreesQuotaAtReadTime: true, StrictQuotaUnderConcurrency: true, StrictIdentityQuotaUnderConcurrency: true}
 	newSlate := func(t *testing.T) *storage.SlateRepo {
-		// Unique per-call logical db so each subtest starts empty within
-		// the shared bucket. Run epoch (nanos) + a monotonic counter keeps
-		// concurrent CI runs from colliding.
+		// Run epoch plus a monotonic counter: unique per call so each
+		// subtest starts empty, and unique per run so concurrent CI runs
+		// against the shared bucket cannot collide.
 		dbName := fmt.Sprintf("conform-%d-%d", time.Now().UnixNano(), slateConformSeq.Add(1))
 		repo, err := storage.NewSlateRepo(storage.SlateConfig{
 			Endpoint:  endpoint,
@@ -60,16 +56,15 @@ func TestConformance_Slate(t *testing.T) {
 		return repo
 	}
 	newRepo := func(t *testing.T) conformanceRepo { return newSlate(t) }
-	// The site repo (SlateSiteRepo) wraps the SAME SlateRepo, so the
-	// cross-quota + cross-family-slug site subtests exercise the real
-	// interaction in one SlateDB instance.
+	// The site repo wraps the SAME SlateRepo, so the cross-quota and
+	// cross-family-slug subtests exercise the real interaction rather than
+	// two independent stores.
 	newSites := func(t *testing.T) (conformanceRepo, conformanceSiteRepo) {
 		repo := newSlate(t)
 		return repo, storage.NewSlateSiteRepo(repo)
 	}
-	// The room repo (SlateRoomRepo), the paste repo, and the site repo all wrap
-	// the SAME SlateRepo, so the cross-kind service-wide cap room subtest
-	// exercises the real interaction in one SlateDB instance.
+	// Room, paste and site repos all wrap the SAME SlateRepo, so the
+	// cross-kind service-wide cap subtest sees one shared store.
 	newRooms := func(t *testing.T) roomConformanceStores {
 		repo := newSlate(t)
 		return roomConformanceStores{

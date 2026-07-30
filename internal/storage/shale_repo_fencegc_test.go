@@ -9,14 +9,10 @@ import (
 	slatedb "slatedb.io/slatedb-go/uniffi"
 )
 
-// TestNewFenceWALGCSettings pins the permanent fix for the fence-WAL bloat (the
-// 0-byte WAL objects slatedb writes one-per-open to claim the writer epoch).
-// slatedb ships its fence-WAL garbage collector in DRY-RUN by default, so those
-// objects are never deleted and accumulate without bound, making a unit's
-// cold-start open crawl (it re-reads every WAL). The fix is to flip ONLY that
-// one flag (garbage_collector_options.wal_fence_options.dry_run) to false; this
-// test asserts both that the slatedb default is the bug and that our Settings
-// corrects it without touching the (already-active) data-WAL collector.
+// TestNewFenceWALGCSettings pins that newFenceWALGCSettings activates slatedb's
+// fence-WAL collector (dry-run by default, so the 0-byte fence WAL written per
+// open accumulates without bound and slows cold-start) and leaves the data-WAL
+// collector alone.
 func TestNewFenceWALGCSettings(t *testing.T) {
 	type gcView struct {
 		GC struct {
@@ -40,15 +36,14 @@ func TestNewFenceWALGCSettings(t *testing.T) {
 		return g
 	}
 
-	// Precondition: slatedb's default ships fence-WAL GC in dry-run - that IS
-	// the leak. If this ever flips upstream the fix may be redundant; fail loud.
+	// Precondition: the upstream default is dry-run. If it ever flips, the
+	// override below is redundant; fail loud rather than pass silently.
 	def := slatedb.SettingsDefault()
 	defer def.Destroy()
 	if d := parse(def); !d.GC.WALFence.DryRun {
 		t.Fatalf("precondition: expected slatedb default wal_fence_options.dry_run=true (the bug); got false - did the upstream default change?")
 	}
 
-	// The fix: fence-WAL GC active (dry_run=false), data-WAL GC unchanged.
 	fixed, err := newFenceWALGCSettings()
 	if err != nil {
 		t.Fatalf("newFenceWALGCSettings: %v", err)

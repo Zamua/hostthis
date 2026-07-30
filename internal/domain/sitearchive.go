@@ -6,20 +6,17 @@ import (
 	"io"
 )
 
-// Site-archive extraction rules, over format-neutral entries.
-//
-// None of these guards is about tar: they concern paths, counts and bytes, and
-// would be identical for a zip or a directory walk. An adapter owns the codec;
-// this owns the policy.
+// Site-archive extraction rules, over format-neutral entries. No guard here is
+// about tar: they concern paths, counts and bytes, and would be identical for a
+// zip or a directory walk. An adapter owns the codec; this owns the policy.
 
 // ArchiveEntryKind is what an entry is, independent of the archive's encoding.
 // A format adapter maps its own type codes onto these.
 type ArchiveEntryKind int
 
 const (
-	// EntryOther is anything else: symlinks, hardlinks, devices, FIFOs. Always
-	// rejected, since this category carries the link-following and device-node
-	// attacks.
+	// EntryOther is symlinks, hardlinks, devices, FIFOs. Always rejected: this
+	// category carries the link-following and device-node attacks.
 	EntryOther ArchiveEntryKind = iota
 	EntryFile
 	EntryDir
@@ -31,8 +28,8 @@ type ArchiveEntry struct {
 	Size int64  // ADVISORY only; a lying header must not be believed
 	Kind ArchiveEntryKind
 
-	// TypeCode is the adapter's own type value, carried so a rejection message
-	// can name what was in the archive. Never decided on.
+	// TypeCode is the adapter's own type value, carried only so a rejection
+	// message can name what was in the archive. Never decided on.
 	TypeCode int
 }
 
@@ -45,8 +42,8 @@ type ArchiveEntry struct {
 //   - only regular files and directories.
 //   - paths cleaned, and rejected if absolute, containing "..", or escaping the
 //     site root.
-//   - the running uncompressed total is capped, checked as bytes are read
-//     rather than from the declared size.
+//   - the running uncompressed total is capped, measured as bytes are read
+//     rather than taken from the declared size.
 //   - file-count, entry-count, path-length and manifest-size caps.
 type SiteExtractor struct {
 	capBytes int64
@@ -71,9 +68,9 @@ func NewSiteExtractor(quotaBudget int64) *SiteExtractor {
 // The byte cap is enforced on what is actually READ from body, not on ent.Size:
 // a header that under-reports could stream past a cap that already approved it.
 func (e *SiteExtractor) Add(ent ArchiveEntry, body io.Reader, sink FileSink) error {
-	// Bound TOTAL entries, not just admitted files: directories and paths that
-	// clean away return early, so counting only files leaves an archive of a
-	// million directories unbounded.
+	// TOTAL entries are bounded, not just admitted files: directories and paths
+	// that clean away return early, so counting only files would leave an
+	// archive of a million directories unbounded.
 	e.entries++
 	if e.entries > MaxSiteFiles {
 		return fmt.Errorf("%w: more than %d archive entries", ErrTooManyFiles, MaxSiteFiles)
@@ -100,7 +97,7 @@ func (e *SiteExtractor) Add(ent ArchiveEntry, body io.Reader, sink FileSink) err
 		return nil // cleans to nothing (e.g. "./")
 	}
 	if isJunkPath(rel) {
-		// OS-generated sidecar: never published, and does not count toward caps.
+		// OS-generated sidecar: never published, never counted toward a cap.
 		return nil
 	}
 	if len(rel) > MaxSitePathLen {
@@ -132,7 +129,8 @@ func (e *SiteExtractor) Add(ent ArchiveEntry, body io.Reader, sink FileSink) err
 		ContentType:    contentTypeByExt(rel),
 	})
 
-	// Incremental, so a flood of long names aborts before the map grows.
+	// Checked incrementally, so a flood of long names aborts before the map
+	// grows.
 	if e.man.PathTextBytes() > MaxManifestBytes {
 		return fmt.Errorf("%w: manifest path text exceeds %d bytes", ErrTooManyFiles, MaxManifestBytes)
 	}

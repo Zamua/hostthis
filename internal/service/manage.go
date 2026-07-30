@@ -12,9 +12,8 @@ import (
 	"github.com/Zamua/hostthis/internal/mime"
 )
 
-// PasteAdmin is the persistence interface for everything except
-// "create a new paste" - list, get versions, mutate flags, delete.
-// internal/storage.PasteRepo satisfies it.
+// PasteAdmin is the persistence interface for everything except "create a new
+// paste". internal/storage.PasteRepo satisfies it.
 type PasteAdmin interface {
 	Get(domain.Slug) (domain.Paste, error)
 	ListByOwner(owner string) ([]domain.Paste, error)
@@ -31,42 +30,40 @@ type PasteAdmin interface {
 	OwnerFirstSeen(owner string) (time.Time, error)
 }
 
-// ErrNotOwner is returned by any owner-gated operation when the
-// requesting identity doesn't match the paste's identity. The
-// SSH/HTTP surfaces map this to 403.
+// ErrNotOwner is returned by an owner-gated operation when the requesting
+// identity doesn't match the paste's. The SSH/HTTP surfaces map it to 403.
 var ErrNotOwner = errors.New("service: not the paste owner")
 
-// ErrNotFound is returned when a paste / version doesn't exist.
-// Owner-gated reads of a slug that exists but belongs to someone
-// else also map to ErrNotFound (don't leak existence to outsiders).
+// ErrNotFound is returned when a paste / version doesn't exist. An owner-gated
+// read of a slug owned by someone else maps here too, so existence never leaks
+// to outsiders.
 var ErrNotFound = errors.New("service: not found")
 
-// ErrEmptyOwner is returned when an operation requires an identified
-// owner (list, delete, rename, …) and the caller is anonymous.
+// ErrEmptyOwner is returned when an operation requires an identified owner and
+// the caller is anonymous.
 var ErrEmptyOwner = errors.New("service: anonymous - add an ssh key for this command")
 
-// ErrInvalidName is returned by Rename when the name violates the
-// length / unicode rules.
+// ErrInvalidName is returned by Rename when the name violates the length /
+// unicode rules.
 var ErrInvalidName = errors.New("service: name must be 1–60 printable Unicode chars, no newlines")
 
-// Manage is the verb-level service. Each method maps to one ssh verb
-// (or HTTP endpoint) and is owner-gated.
+// Manage is the verb-level service. Each method maps to one ssh verb (or HTTP
+// endpoint) and is owner-gated.
 type Manage struct {
 	// Sniff classifies bytes for DetectKind's text-only rule. A PORT
-	// (domain.MIMESniffer); see Upload.Sniff.
+	// (domain.MIMESniffer).
 	Sniff     domain.MIMESniffer
 	Repo      PasteAdmin
-	Blob      BlobUnit       // for Show (ReadAll) + Update (Stage+Commit) + Delete (UnbindOnDelete)
+	Blob      BlobUnit       // Show (ReadAll), Update (Stage+Commit), Delete (UnbindOnDelete)
 	KeyGate   *KeyGate       // optional; populates WhoamiInfo.Session when set
 	SiteBytes SiteByteSummer // optional; when set, Whoami's used_bytes includes static-site bytes
 	Now       func() time.Time
 }
 
 // SiteByteSummer returns an identity's active static-site bytes. Whoami adds
-// this to the paste-byte sum so used_bytes reflects the SAME paste+site total
-// the deploy/upload quota check enforces (the per-identity cap sums both
-// counters). Optional: a metadata backend with no site repo leaves it nil and
-// Whoami reports paste bytes only. The site repo satisfies it directly.
+// them to the paste-byte sum so used_bytes reflects the SAME paste+site total
+// the quota check enforces. Nil on a metadata backend with no site repo, in
+// which case Whoami reports paste bytes only.
 type SiteByteSummer interface {
 	SumActiveBytesByOwner(owner string, now time.Time) (int64, error)
 }
@@ -75,10 +72,9 @@ func NewManage(repo PasteAdmin, blob BlobUnit) *Manage {
 	return &Manage{Repo: repo, Blob: blob, Now: time.Now, Sniff: mime.Detect}
 }
 
-// requireOwner returns the paste if owner matches; otherwise the
-// appropriate sentinel. Anonymous identities (no key offered) and
-// empty owners are rejected - only keyed identities (which carry
-// the "key:" prefix) can manage their pastes.
+// requireOwner returns the paste if owner matches, else the appropriate
+// sentinel. Only keyed identities (which carry the "key:" prefix) can manage
+// pastes; anonymous and empty owners are rejected.
 func (m *Manage) requireOwner(slug domain.Slug, owner string) (domain.Paste, error) {
 	if !domain.Identity(owner).IsKeyed() {
 		return domain.Paste{}, ErrEmptyOwner
@@ -115,10 +111,8 @@ func (m *Manage) Show(slug domain.Slug, owner string) (domain.Paste, []byte, err
 	return p, body, nil
 }
 
-// UpdateResult is returned from Update so the SSH layer can surface
-// the right messaging - in particular, whether the paste was pinned
-// before the update (in which case the new version was saved but
-// isn't being served).
+// UpdateResult tells the SSH layer whether the paste was pinned at update
+// time, in which case the new version was saved but is not being served.
 type UpdateResult struct {
 	Paste     domain.Paste
 	NewVer    int
@@ -126,12 +120,10 @@ type UpdateResult struct {
 	PinnedAt  int // ver_num of the still-served version if WasPinned
 }
 
-// Update appends a new version to an existing slug and resets the
-// retention expiry. If the paste was UNPINNED (default), the new version
-// also becomes the served version. If it was PINNED to a specific
-// version, the pin holds and the new version is recorded but not
-// served - the SSH layer prints a note pointing at `unpin` or
-// `pin <new ver>`.
+// Update appends a new version to an existing slug and resets the retention
+// expiry. On an UNPINNED paste (the default) the new version also becomes the
+// served one; on a PINNED paste the pin holds and the new version is recorded
+// but not served.
 func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint string) (UpdateResult, error) {
 	staged, err := streamUpload(body)
 	switch {
@@ -153,23 +145,21 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 	if err != nil {
 		return UpdateResult{}, err
 	}
-	// KindSite (a gzip-tar archive) is not a paste; updating a paste with
-	// archive content must not skip the deploy pipeline's safe-untar guards.
+	// KindSite (a gzip-tar archive) is not a paste: accepting it here would
+	// skip the deploy pipeline's safe-untar guards.
 	if kind == domain.KindSite {
 		return UpdateResult{}, domain.ErrUnsupportedKind
 	}
 	now := m.Now().UTC()
 	ctx := context.Background()
-	// Stage the version's bytes, then Commit binds the staged blob with the
-	// AppendVersion metadata write. On the standalone path Stage writes the
-	// bytes and Commit just runs the metadata write - the same blob-first
-	// ordering this path always used.
+	// Commit binds the staged blob with the AppendVersion metadata write. On
+	// the standalone path Stage writes the bytes and Commit runs only the
+	// metadata write, keeping the blob-first ordering.
 	handle, err := m.Blob.Stage(ctx, string(slug), staged.SHA, staged.Body)
 	if err != nil {
 		// A blob Put rejected by the object store's bucket quota surfaces
-		// storage.ErrServiceFull (the durable total-bytes ceiling); the
-		// shared classifier translates it into the graceful "service is at
-		// capacity" response.
+		// storage.ErrServiceFull (the durable total-bytes ceiling), which the
+		// shared classifier turns into the graceful "at capacity" response.
 		if class, terr := classifyCommitErr(err); class != commitOther {
 			return UpdateResult{}, terr
 		}
@@ -219,19 +209,17 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 	if err := m.Repo.Delete(slug); err != nil {
 		return err
 	}
-	// Unbind the paste's blob references. On the standalone path this is a
-	// no-op (the global sweep reclaims unreferenced content-addressed blobs);
-	// it names the delete-side lifecycle so the call is uniform across
-	// backends. A failure here is logged-by-impl, not fatal - the metadata is
-	// already gone and the sweep is the backstop - so the error is swallowed
-	// like the cache purge below.
+	// Unbind the paste's blob references. A no-op on the standalone path,
+	// where the global sweep reclaims unreferenced content-addressed blobs;
+	// naming the delete-side lifecycle keeps the call uniform across backends.
+	// The error is swallowed on purpose: the metadata is already gone and the
+	// sweep is the backstop.
 	_ = m.Blob.UnbindOnDelete(context.Background(), string(slug), []string{p.ContentSHA})
 	return nil
 }
 
-// Versions returns the slug's full history (newest first). Includes
-// tombstoned (deleted) rows - the `versions` verb renders them with
-// a `deleted` marker.
+// Versions returns the slug's full history (newest first), including
+// tombstoned rows, which the `versions` verb renders with a `deleted` marker.
 func (m *Manage) Versions(slug domain.Slug, owner string) ([]domain.Version, error) {
 	if _, err := m.requireOwner(slug, owner); err != nil {
 		return nil, err
@@ -239,32 +227,29 @@ func (m *Manage) Versions(slug domain.Slug, owner string) ([]domain.Version, err
 	return m.Repo.ListVersions(slug)
 }
 
-// DeleteVersionResult reports what DeleteVersion did so the SSH
-// layer can format messaging like "deleted v2. freed 187.3k.".
+// DeleteVersionResult reports what DeleteVersion did so the SSH layer can
+// format messaging like "deleted v2. freed 187.3k.".
 type DeleteVersionResult struct {
 	VerNum     int
 	FreedBytes int
 }
 
-// ErrVersionAlreadyDeleted is returned when the target version is
-// already a tombstone. Caller chooses whether to treat this as a
-// soft success or hard error.
+// ErrVersionAlreadyDeleted is returned when the target version is already a
+// tombstone. The caller chooses soft success or hard error.
 var ErrVersionAlreadyDeleted = errors.New("service: version already deleted")
 
-// ErrVersionCurrentlyServed is returned when the target version is
-// the one the URL currently serves. Caller should hint at `pin`
-// (to a different version) or `unpin` as the way to free it.
+// ErrVersionCurrentlyServed is returned when the target version is the one the
+// URL serves. Freeing it requires `pin` to a different version, or `unpin`.
 var ErrVersionCurrentlyServed = errors.New("service: version is currently served by the URL; pin a different version first")
 
-// DeleteVersion frees a single version's blob bytes (tombstones the
-// row). Refused when:
+// DeleteVersion frees a single version's blob bytes (tombstones the row).
+// Refused when:
 //   - paste doesn't exist or owner doesn't match → ErrNotFound
 //   - target version doesn't exist → ErrNotFound
 //   - target is already tombstoned → ErrVersionAlreadyDeleted
 //   - target is the version the URL currently serves → ErrVersionCurrentlyServed
 //
-// On success, returns the version number and the freed byte count
-// (the row's pre-deletion size column).
+// The freed byte count is the row's pre-deletion size column.
 func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (DeleteVersionResult, error) {
 	p, err := m.requireOwner(slug, owner)
 	if err != nil {
@@ -292,14 +277,13 @@ func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (Dele
 	if err := m.Repo.DeleteVersion(slug, verNum); err != nil {
 		return DeleteVersionResult{}, err
 	}
-	// No cache purge - the served bytes didn't change; we just freed
-	// an older version's bytes that no URL surface was exposing.
+	// No cache purge: the served bytes did not change, only an older
+	// version's bytes that no URL surface exposed.
 	return DeleteVersionResult{VerNum: verNum, FreedBytes: target.Size}, nil
 }
 
-// servedVersion returns the ver_num of the version the URL is
-// currently serving for slug. Mirrors the read path: pinned wins,
-// else MAX(non-deleted ver_num).
+// servedVersion returns the ver_num the URL currently serves for slug.
+// Mirrors the read path: pinned wins, else MAX(non-deleted ver_num).
 func (m *Manage) servedVersion(slug domain.Slug, pinnedVersion int) (int, error) {
 	if pinnedVersion > 0 {
 		return pinnedVersion, nil
@@ -313,12 +297,12 @@ func (m *Manage) servedVersion(slug domain.Slug, pinnedVersion int) (int, error)
 			return v.VerNum, nil
 		}
 	}
-	return 0, nil // no live versions - shouldn't happen for an active paste
+	return 0, nil // no live versions: unreachable for an active paste
 }
 
-// Pin sets which version_num the public URL serves and makes it
-// sticky - subsequent `update`s won't bump the pin. Does NOT reset
-// the expiry clock; only Update does that.
+// Pin sets which version_num the public URL serves and makes it sticky, so
+// later `update`s do not bump it. Does NOT reset the expiry clock; only Update
+// does that.
 func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version, error) {
 	if _, err := m.requireOwner(slug, owner); err != nil {
 		return domain.Version{}, err
@@ -336,9 +320,8 @@ func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version
 	return ver, nil
 }
 
-// Unpin clears a sticky pin and reverts the URL to "always serve the
-// latest version." On future updates the new version is published
-// immediately.
+// Unpin clears a sticky pin, reverting the URL to "always serve the latest
+// version".
 func (m *Manage) Unpin(slug domain.Slug, owner string) error {
 	if _, err := m.requireOwner(slug, owner); err != nil {
 		return err
@@ -349,19 +332,18 @@ func (m *Manage) Unpin(slug domain.Slug, owner string) error {
 	return nil
 }
 
-// Whoami returns the per-owner summary used by the `whoami` verb.
+// WhoamiInfo is the per-owner summary the `whoami` verb renders.
 type WhoamiInfo struct {
 	Identity   string
 	Active     int
 	FirstSeen  time.Time
 	UsedBytes  int         // compressed bytes summed across active non-deleted versions
-	QuotaBytes int         // domain.UserQuotaBytes - surfaced so SSH formatter doesn't import domain
+	QuotaBytes int         // domain.UserQuotaBytes, surfaced so the SSH formatter need not import domain
 	Session    SessionInfo // per-session keygate state; zero value if KeyGate isn't wired
 }
 
-// Whoami populates WhoamiInfo for an owner (key fingerprint). subnet
-// may be empty when the caller doesn't have one (tests etc.); session
-// fields are then zero. KeyGate may be nil - same effect.
+// Whoami populates WhoamiInfo for an owner (key fingerprint). An empty subnet,
+// or a nil KeyGate, leaves the session fields zero.
 func (m *Manage) Whoami(owner, subnet string) (WhoamiInfo, error) {
 	if !domain.Identity(owner).IsKeyed() {
 		return WhoamiInfo{}, ErrEmptyOwner
@@ -379,9 +361,8 @@ func (m *Manage) Whoami(owner, subnet string) (WhoamiInfo, error) {
 		return WhoamiInfo{}, err
 	}
 	// Include static-site bytes so used_bytes matches the paste+site total the
-	// quota check enforces; without this, used_bytes under-reports (pastes
-	// only) and disagrees with the write-check that rejects at the combined
-	// cap. Nil when the backend has no site repo (used_bytes = pastes only).
+	// quota check enforces; without this it under-reports and disagrees with
+	// the write-check that rejects at the combined cap.
 	if m.SiteBytes != nil {
 		siteUsed, err := m.SiteBytes.SumActiveBytesByOwner(owner, m.Now().UTC())
 		if err != nil {
@@ -397,8 +378,8 @@ func (m *Manage) Whoami(owner, subnet string) (WhoamiInfo, error) {
 		QuotaBytes: domain.UserQuotaBytes,
 	}
 	if m.KeyGate != nil && subnet != "" {
-		// Best-effort: a keygate error doesn't fail whoami; session
-		// fields just stay zero. The user still sees their pastes.
+		// Best-effort: a keygate error leaves the session fields zero rather
+		// than failing whoami.
 		if s, err := m.KeyGate.Inspect(owner, subnet); err == nil {
 			info.Session = s
 		}
@@ -406,7 +387,7 @@ func (m *Manage) Whoami(owner, subnet string) (WhoamiInfo, error) {
 	return info, nil
 }
 
-// validName: per spec, 1–60 printable Unicode chars, no newlines.
+// validName holds the spec's rule: 1-60 printable Unicode chars, no newlines.
 func validName(s string) bool {
 	if utf8.RuneCountInString(s) == 0 || utf8.RuneCountInString(s) > 60 {
 		return false

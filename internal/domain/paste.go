@@ -7,34 +7,27 @@ import (
 	"time"
 )
 
-// PasteStatus is the lifecycle state of a paste's content blob. It
-// exists so the slow blob write (to object storage) can run in the
-// background after the metadata is committed: Create returns the URL
-// while the paste is still PasteStatusPending, a background finalizer
-// flips it to PasteStatusReady once the bytes land (or
-// PasteStatusFailed if the write fails). See docs/SPEC.md "Paste
+// PasteStatus is the lifecycle state of a paste's content blob. It lets the
+// slow blob write run in the background after the metadata commits: Create
+// returns the URL while the paste is still pending. See docs/SPEC.md "Paste
 // lifecycle status (async blob write)".
 type PasteStatus string
 
 const (
-	// PasteStatusPending: metadata is committed (slug reserved, quota
-	// charged) but the content blob has not finished landing in the
-	// object store. A read serves a loading page.
+	// PasteStatusPending: metadata committed (slug reserved, quota charged),
+	// blob not yet landed. A read serves a loading page.
 	PasteStatusPending PasteStatus = "pending"
-	// PasteStatusReady: the blob write succeeded; the paste serves its
-	// content normally. Terminal success state.
+	// PasteStatusReady: terminal success; the paste serves its content.
 	PasteStatusReady PasteStatus = "ready"
-	// PasteStatusFailed: the background blob write failed (or the
-	// handling pod died mid-write and the reconciler aged the paste
-	// out). A read serves an error page; the reservation is released.
+	// PasteStatusFailed: the blob write failed, or the handling pod died
+	// mid-write and the reconciler aged the paste out. A read serves an error
+	// page; the reservation is released.
 	PasteStatusFailed PasteStatus = "failed"
 )
 
-// NormalizeStatus maps a persisted status string to a PasteStatus,
-// defaulting an empty value to PasteStatusReady. A row written before
-// the lifecycle existed has no status field; "absent" means "written
-// before the lifecycle, therefore complete." This keeps the status a
-// pure additive migration with no flag day.
+// NormalizeStatus maps a persisted status string to a PasteStatus. An absent
+// or unrecognized value reads as ready: a row carrying no status field is
+// complete, which keeps the field a purely additive migration with no flag day.
 func NormalizeStatus(s string) PasteStatus {
 	switch PasteStatus(s) {
 	case PasteStatusPending:
@@ -42,19 +35,16 @@ func NormalizeStatus(s string) PasteStatus {
 	case PasteStatusFailed:
 		return PasteStatusFailed
 	default:
-		// "" (legacy row) or any unknown value -> ready.
 		return PasteStatusReady
 	}
 }
 
-// Paste is the unit a user uploads. The "currently served" bytes are
-// addressed by ContentSHA + Kind. Older versions live in a parallel
-// versions table, addressed by (Slug, VerNum).
+// Paste is the unit a user uploads. The currently-served bytes are addressed
+// by ContentSHA + Kind; older versions live in a parallel versions table,
+// addressed by (Slug, VerNum).
 //
-// There's no Published flag or per-paste secret - the URL slug
-// itself is the secret (8 chars / 32^8 ≈ 10^12 possibilities), so
-// "share the URL with whoever you want to see it" is the access
-// model.
+// There is no Published flag or per-paste secret: the slug IS the secret
+// (8 chars over a 32-char alphabet), so the access model is "share the URL".
 type Paste struct {
 	Slug          Slug
 	Identity      Identity    // "key:<fp>" or "ip:<subnet>" - quota AND capability gate
@@ -70,13 +60,12 @@ type Paste struct {
 	ExpiresAt     time.Time // UpdatedAt + Retention window (or NeverExpires); only `update` moves it
 }
 
-// Version is a snapshot in a paste's history. v1 is the initial
-// upload; each subsequent `update` writes a new row with ver_num+1.
+// Version is a snapshot in a paste's history. v1 is the initial upload; each
+// `update` writes a new row with ver_num+1.
 //
-// Deleted=true marks a tombstone - the row stays so version numbers
-// don't get reused and `versions` shows the history, but the blob
-// bytes are gone (quota SUMs skip it; serving falls back to MAX of
-// non-deleted ver_num). Set by `delete <slug> <ver>`.
+// Deleted=true is a tombstone: the row stays so version numbers are never
+// reused and `versions` still shows the history, but the blob bytes are gone
+// (quota SUMs skip it; serving falls back to MAX of non-deleted ver_num).
 type Version struct {
 	Slug       Slug
 	VerNum     int
@@ -87,24 +76,20 @@ type Version struct {
 	Deleted    bool
 }
 
-// HashContent returns the canonical content hash used to address blobs
-// and detect dedupable uploads. The same bytes always produce the
-// same hex digest.
+// HashContent returns the canonical content hash blobs are addressed by, and
+// which dedupable uploads are detected with.
 func HashContent(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
 
-// NewRandomSlug returns a fresh random Slug drawn from SlugAlphabet
-// using crypto/rand. Callers handle collision with the persistence
-// layer (retry on uniqueness violation); this function never returns
-// an error because crypto/rand.Read on darwin/linux only fails in
-// the impossible case.
+// NewRandomSlug returns a fresh random Slug drawn from SlugAlphabet using
+// crypto/rand. Collisions are the caller's problem: retry on the persistence
+// layer's uniqueness violation.
 func NewRandomSlug() Slug {
 	buf := make([]byte, SlugLength)
 	if _, err := rand.Read(buf); err != nil {
-		// crypto/rand on linux/darwin reads from getrandom(2)/arc4random;
-		// the only failure mode is "OS is dying." Panic is appropriate.
+		// getrandom(2)/arc4random only fails if the OS is dying.
 		panic("hostthis: crypto/rand failure: " + err.Error())
 	}
 	out := make([]byte, SlugLength)

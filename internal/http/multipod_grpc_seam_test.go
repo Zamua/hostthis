@@ -1,26 +1,19 @@
 package http
 
-// The real-gRPC seam test the spec's acceptance criteria call for
-// ("plus a real-gRPC seam test for the transport adapter"): two full
-// in-process pods - each a Server + relay.Relay over ONE shared sqlite
-// store - bridged by the REAL relaygrpc client/server transport over
-// loopback listeners, NOT the in-process memBridge. It proves the
-// adapter end to end in the production shape:
+// The real-gRPC seam: two in-process pods, each a Server + relay.Relay over
+// ONE shared sqlite store, bridged by the REAL relaygrpc client/server
+// transport over loopback listeners rather than the in-process memBridge.
 //
-//   - each pod runs a real grpc.Server with the relaygrpc.Receiver
-//     registered (the same Register hook the shale storage config invokes
-//     in multi-node mode) and Bind'd to its relay's DeliverFromPeer;
-//   - each pod's relay publishes through a real relaygrpc.Publisher whose
-//     Peers port names the OTHER pod's listener address (a static stand-in
-//     for the ring-membership adapter);
-//   - a durable PUT/DELETE through either pod's HTTP surface reaches the
-//     other pod's WebSocket client as a seq'd mirror over the wire, the
-//     splice holds exactly-once, and an ephemeral frame crosses on the
-//     same path.
+//   - each pod runs a grpc.Server with the relaygrpc.Receiver registered via
+//     the same Register hook the shale storage config invokes, Bind'd to its
+//     relay's DeliverFromPeer
+//   - each pod's relay publishes through a relaygrpc.Publisher whose Peers
+//     port names the OTHER pod's listener address, a static stand-in for the
+//     ring-membership adapter
 //
-// The correctness CORE (ordering, splice, pod-kill) is gated by the
-// in-memory-bridge harness in multipod_harness_test.go; this file gates
-// the TRANSPORT: proto round-trip, client/server plumbing, queue + sender
+// The correctness core (ordering, splice, pod-kill) is gated by the
+// in-memory-bridge harness in multipod_harness_test.go; this file gates the
+// TRANSPORT: proto round-trip, client/server plumbing, queue + sender
 // delivery, receive-side broadcast.
 
 import (
@@ -79,9 +72,8 @@ func buildGRPCPair(t *testing.T) [2]*grpcPod {
 		ts := httptest.NewServer(srv.Handler())
 		t.Cleanup(ts.Close)
 
-		// The pod's REAL peer-facing gRPC server: receiver registered via
-		// the same hook the storage config calls, delivery late-bound to
-		// this pod's relay (the composition-root order main uses).
+		// Delivery is late-bound to this pod's relay, the composition-root
+		// order main uses.
 		lis, lerr := net.Listen("tcp", "127.0.0.1:0")
 		if lerr != nil {
 			t.Fatalf("pod%d listen: %v", i, lerr)
@@ -96,7 +88,7 @@ func buildGRPCPair(t *testing.T) [2]*grpcPod {
 		pods[i] = &grpcPod{rooms: rooms, relay: rl, ts: ts, addr: lis.Addr().String()}
 	}
 
-	// Cross-wire the publishers: each pod's peer set is the OTHER pod.
+	// Each pod's peer set is the OTHER pod.
 	for i := range pods {
 		other := pods[1-i].addr
 		pub := relaygrpc.NewPublisher(fixedPeers{other}, relaygrpc.PublisherConfig{})
@@ -119,8 +111,8 @@ func TestMultiPod_RealGRPCSeam_CrossPodDelivery(t *testing.T) {
 	clientB := newSpliceClient(t, ctx, pods[1].ts, "clientB", slug, id)
 	defer clientB.close()
 
-	// Durable mutations through BOTH pods' HTTP surfaces: every mirror must
-	// cross the real wire to the other pod's client, splice exactly-once.
+	// Every mirror must cross the real wire to the other pod's client and
+	// splice exactly-once.
 	httpPut(t, pods[0].ts, slug, id, "board/1", []byte(`{"cell":"x"}`)) // seq 1, via A's pod
 	httpPut(t, pods[1].ts, slug, id, "board/2", []byte(`{"cell":"o"}`)) // seq 2, via B's pod
 	httpDelete(t, pods[0].ts, slug, id, "board/2")                      // seq 3
@@ -142,7 +134,7 @@ func TestMultiPod_RealGRPCSeam_CrossPodDelivery(t *testing.T) {
 		sc.assertStateEquals(truth)
 	}
 
-	// Ephemeral frames cross the same real transport, verbatim, both ways.
+	// Ephemeral frames cross the same transport, verbatim, both ways.
 	clientA.c.send(ctx, "ephemeral-A-over-grpc")
 	clientB.c.expectFrame(ctx, 5*time.Second, "cross-pod ephemeral frame over real gRPC", func(b []byte) bool {
 		return string(b) == "ephemeral-A-over-grpc"
@@ -152,9 +144,8 @@ func TestMultiPod_RealGRPCSeam_CrossPodDelivery(t *testing.T) {
 		return string(b) == "ephemeral-B-over-grpc"
 	})
 
-	// Nothing was silently dropped on the way: the transport is healthy in
-	// this fixture, so a nonzero drop count means the adapter shed frames
-	// it had every opportunity to deliver.
+	// The transport is healthy in this fixture, so a nonzero drop count means
+	// the adapter shed frames it had every opportunity to deliver.
 	for i, p := range pods {
 		if d := p.pub.Drops(); d != 0 {
 			t.Fatalf("pod%d publisher dropped %d frames on a healthy loopback transport", i, d)
@@ -163,13 +154,12 @@ func TestMultiPod_RealGRPCSeam_CrossPodDelivery(t *testing.T) {
 }
 
 // TestMultiPod_RealGRPCSeam_LargeDurableMirrorCrossesPods pins the peer
-// receiver's frame cap to the durable-mirror class (SPEC "Trust boundary"):
-// a legal room value is far larger than the client-socket frame cap, and a
-// non-JSON value inflates further under JSON-string escaping. With the
-// receiver capped at the client-socket size, this mirror is refused on
-// arrival and pod B's client silently never sees the write (the exact
-// defect a delta review proved live); sized to MaxDurableFrameBytes it
-// crosses. Red observed with relay.DefaultMaxMessageBytes in the fixture.
+// receiver's frame cap to the durable-mirror class (SPEC "Trust boundary"): a
+// legal room value is far larger than the client-socket frame cap, and a
+// non-JSON value inflates further under JSON-string escaping. A receiver
+// capped at the client-socket size refuses the mirror on arrival and pod B's
+// client silently never sees the write; sized to MaxDurableFrameBytes it
+// crosses.
 func TestMultiPod_RealGRPCSeam_LargeDurableMirrorCrossesPods(t *testing.T) {
 	pods := buildGRPCPair(t)
 	const slug = "appz2345"

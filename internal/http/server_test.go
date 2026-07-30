@@ -14,7 +14,6 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// stubPasteReader / stubBlobReader satisfy the read interfaces.
 type stubPasteReader struct{ p domain.Paste }
 
 func (s stubPasteReader) Get(slug domain.Slug) (domain.Paste, error) {
@@ -42,16 +41,16 @@ func TestSlugFromHost(t *testing.T) {
 		{"abc23456.paste.test:443", "abc23456", true},
 		{"paste.test", "", false},
 		{"paste.test:443", "", false},
-		// Multi-level subdomain - ignored.
+		// Multi-level subdomain.
 		{"foo.abc23456.paste.test", "", false},
-		// Wrong apex - ignored.
+		// Wrong apex.
 		{"abc23456.example.com", "", false},
-		// Slug too short - fails ParseSlug.
+		// Too short for ParseSlug.
 		{"abc.paste.test", "", false},
-		// Slug uses uppercase - fails ParseSlug.
+		// Uppercase fails ParseSlug.
 		{"ABC23456.paste.test", "", false},
-		// Reserved-ish but valid slug shape - accepted (apex landing
-		// blocks reserved by never generating them, not by Host check).
+		// Valid slug shape is accepted even if it reads like a reserved
+		// word: reserved names are blocked by never being generated.
 		{"abcdefgh.paste.test", "abcdefgh", true},
 	}
 	for _, c := range cases {
@@ -67,28 +66,24 @@ func TestSlugFromHost(t *testing.T) {
 	}
 }
 
+// An empty ApexDomain must never match a host: that deploy is path-mode only.
 func TestSlugFromHost_NoApexConfigured(t *testing.T) {
-	// When ApexDomain is empty, never match - only path-mode works.
 	s := &Server{}
 	if _, ok := s.slugFromHost("abc23456.anything.com"); ok {
 		t.Fatalf("should not match without ApexDomain")
 	}
 }
 
-// TestSubdomain_OnlyServesRoot - the bug fix that motivated this
-// test: a slug subdomain must ONLY serve the paste at path "/", not
-// at /favicon.ico or any other path. Otherwise Safari's auto-favicon
-// request gets a 60 KB HTML response and the loading indicator
-// hangs.
+// TestSubdomain_OnlyServesRoot pins that a slug subdomain serves the paste at
+// "/" and nothing else: without it, Safari's auto-favicon request receives the
+// whole HTML body and its loading indicator hangs.
+//
+// "/" itself is not exercised here (no real PasteReader is wired); this covers
+// the path-rejection branch only.
 func TestSubdomain_OnlyServesRoot(t *testing.T) {
 	srv := &Server{ApexDomain: "paste.test"}
 	mux := srv.Handler()
 
-	// "/" on a slug subdomain - would call servePasteSlug. We don't
-	// have a real PasteReader here so we'll get a 500 / panic. Skip
-	// this case; we only care about the path-rejection path.
-
-	// /favicon.ico on a slug subdomain → must be 404.
 	r := httptest.NewRequest("GET", "/favicon.ico", nil)
 	r.Host = "abc23456.paste.test"
 	w := httptest.NewRecorder()
@@ -97,7 +92,6 @@ func TestSubdomain_OnlyServesRoot(t *testing.T) {
 		t.Fatalf("/favicon.ico on slug subdomain: got %d, want 404", w.Code)
 	}
 
-	// /anything else on slug subdomain → 404.
 	for _, path := range []string{"/style.css", "/wp-login.php", "/p/abc23456", "/foo/bar"} {
 		r := httptest.NewRequest("GET", path, nil)
 		r.Host = "abc23456.paste.test"
@@ -109,9 +103,9 @@ func TestSubdomain_OnlyServesRoot(t *testing.T) {
 	}
 }
 
-// TestPasteRead_CacheHeaders pins the Cache-Control + ETag + Last-Modified
-// headers on a successful paste read. Those headers are the contract with
-// the CDN; if they regress, edge caching silently breaks.
+// TestPasteRead_CacheHeaders pins Cache-Control + ETag + Last-Modified on a
+// successful read: they are the contract with the CDN, and a regression breaks
+// edge caching silently.
 func TestPasteRead_CacheHeaders(t *testing.T) {
 	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	expiresAt := updatedAt.Add(7 * 24 * time.Hour)
@@ -230,10 +224,9 @@ func TestPasteRead_IfModifiedSince304(t *testing.T) {
 	}
 }
 
-// TestPasteRead_PendingServesLoadingPage pins the pending lifecycle state:
-// a GET on a pending paste serves the auto-refreshing loading page (200,
-// no-store, meta-refresh) instead of the content. See docs/SPEC.md "Paste
-// lifecycle status".
+// TestPasteRead_PendingServesLoadingPage pins the pending lifecycle state: a
+// GET serves the auto-refreshing loading page (200, no-store, meta-refresh)
+// and never the content. docs/SPEC.md "Paste lifecycle status".
 func TestPasteRead_PendingServesLoadingPage(t *testing.T) {
 	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	paste := domain.Paste{
@@ -270,9 +263,8 @@ func TestPasteRead_PendingServesLoadingPage(t *testing.T) {
 	}
 }
 
-// TestPasteRead_FailedServesErrorPage pins the failed lifecycle state: a
-// GET on a failed paste serves the error page (410 Gone, no-store), never
-// the content.
+// TestPasteRead_FailedServesErrorPage pins the failed lifecycle state: a GET
+// serves the error page (410 Gone, no-store), never the content.
 func TestPasteRead_FailedServesErrorPage(t *testing.T) {
 	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	paste := domain.Paste{
@@ -302,8 +294,8 @@ func TestPasteRead_FailedServesErrorPage(t *testing.T) {
 	}
 }
 
-// TestPasteRead_ReadyServesContent confirms an explicit ready status still
-// serves the content normally (the terminal success state).
+// TestPasteRead_ReadyServesContent pins the terminal success state: an explicit
+// ready status serves the content.
 func TestPasteRead_ReadyServesContent(t *testing.T) {
 	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	body := []byte("<!doctype html><h1>ready</h1>")
@@ -333,8 +325,7 @@ func TestPasteRead_ReadyServesContent(t *testing.T) {
 	}
 }
 
-// failingBlobReader models the shale blob plane erroring under a read (the
-// rollout-window read canary shape).
+// failingBlobReader models the blob plane erroring under a read.
 type failingBlobReader struct{ err error }
 
 func (f failingBlobReader) ReadAll(_ context.Context, _, _ string) ([]byte, error) {
@@ -344,17 +335,15 @@ func (f failingBlobReader) Read(_ context.Context, _, _ string) (io.ReadCloser, 
 	return nil, 0, f.err
 }
 
-// failingPasteReader models the shale metadata plane erroring under a read.
+// failingPasteReader models the metadata plane erroring under a read.
 type failingPasteReader struct{ err error }
 
 func (f failingPasteReader) Get(domain.Slug) (domain.Paste, error) { return domain.Paste{}, f.err }
 
-// TestPasteRead5xxLogsSlugAndError pins the read-surface observability
-// contract (docs/SPEC.md "5xx observability on the read surface"): every 5xx
-// on the paste read path logs one warn line with the slug and the underlying
-// error, while the response body stays the generic "internal error". Without
-// this a rollout-window 500 is unattributable (the exact gap hit on the
-// staging read canary).
+// TestPasteRead5xxLogsSlugAndError pins the read-surface observability contract
+// (docs/SPEC.md "5xx observability on the read surface"): every 5xx logs one
+// line carrying the slug and the underlying error, while the response body
+// stays the generic "internal error". Without the log a 500 is unattributable.
 func TestPasteRead5xxLogsSlugAndError(t *testing.T) {
 	now := time.Now().UTC()
 	paste := domain.Paste{
@@ -423,6 +412,4 @@ func TestPasteRead5xxLogsSlugAndError(t *testing.T) {
 	})
 }
 
-// sprintf is a tiny local alias so the log-capturing closures above read
-// cleanly without importing fmt at every call site.
 func sprintf(format string, a ...any) string { return fmt.Sprintf(format, a...) }

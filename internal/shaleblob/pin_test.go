@@ -1,27 +1,18 @@
 //go:build slatedb
 
-// Deterministic, single-node reproduction of the version-pinning serve bug.
+// Version pinning must repoint the paste head's BlobID, not just its
+// ContentSHA.
 //
-// The public read path (internal/http/server.go) resolves the bytes to serve
-// by the PASTE HEAD's ContentSHA: it does `p := Pastes.Get(slug)` then
-// `Blobs.Read(slug, p.ContentSHA)`. Under value-separation that Read maps the
-// sha -> a BlobID via ResolveBlobID, whose first branch returns the paste
-// head's own BlobID whenever the head's ContentSHA equals the requested sha
-// (always true for the serving path, which passes the head's own sha).
+// The public read path resolves bytes by the head's ContentSHA, and under
+// value separation that resolution short-circuits to the head's own BlobID
+// whenever the requested sha equals the head's (always true when serving).
+// So a SetPinnedVersion/Unpin that updates ContentSHA without the BlobID
+// leaves the head streaming the wrong version's bytes while the ETag reports
+// the pinned one.
 //
-// SetPinnedVersion / Unpin update the head's ContentSHA/Size/Kind but NOT its
-// BlobID (and domain.Version carries no BlobID to copy from), so after pinning
-// an OLDER version the head ends up {ContentSHA: pinned-sha, BlobID: stale
-// pre-pin-head blob}. The serving Read then streams the stale head blob while
-// the ETag (= ContentSHA) reflects the pinned version: the page serves the
-// wrong bytes. This was inert before the blob value-separation cutover because
-// the standalone disk store keyed bytes by content-sha, not by a BlobID.
-//
-// This test fails until SetPinnedVersion/Unpin repoint the head BlobID at the
-// selected version's blob. It needs only a single-node R=1 durable metadata
-// cluster + the in-memory blob plane: no replication, relaxed durability, or
-// timing is involved, which is the point - the bug is plain missing-field
-// logic, not a consistency window.
+// Single node, R=1, in-memory blob plane: no replication or timing is
+// involved, so a failure here is missing-field logic, not a consistency
+// window.
 
 package shaleblob_test
 
@@ -42,7 +33,7 @@ func TestPin_ServesPinnedVersionBytes(t *testing.T) {
 	now := time.Now().UTC()
 	slug := "pinblob1"
 
-	// v1: insert + bind its blob.
+	// v1: insert and bind its blob.
 	rawV1 := []byte("<h1>PIN-V1-original-bytes</h1>")
 	shaV1 := "sha-pinblob-v1"
 	bodyV1 := encode(t, rawV1)
@@ -72,7 +63,7 @@ func TestPin_ServesPinnedVersionBytes(t *testing.T) {
 		t.Fatalf("Commit v2: %v", err)
 	}
 
-	// Sanity: the unpinned head serves v2's bytes (this already works).
+	// Sanity: the unpinned head serves v2's bytes.
 	if out, _ := readAll(t, unit, slug, mustHeadSHA(t, repo, slug)); !bytes.Equal(out, rawV2) {
 		t.Fatalf("unpinned head served %q, want v2 %q", out, rawV2)
 	}
@@ -90,14 +81,11 @@ func TestPin_ServesPinnedVersionBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after pin: %v", err)
 	}
-	// The metadata is correct: the pinned head reports v1's content-sha (this is
-	// what the ETag is built from, and it matched v1 in the prod measurement).
+	// The ETag is built from this.
 	if head.ContentSHA != shaV1 {
 		t.Fatalf("pinned head ContentSHA = %q, want %q (v1)", head.ContentSHA, shaV1)
 	}
-	// The BYTES served (resolved by the head's ContentSHA, exactly as the public
-	// read path does) must be v1's. The bug: they are v2's, because the head's
-	// BlobID was left pointing at v2's blob.
+	// Resolved by the head's ContentSHA, exactly as the public read path does.
 	out, rerr := readAll(t, unit, slug, head.ContentSHA)
 	if rerr != nil {
 		t.Fatalf("read pinned head: %v", rerr)

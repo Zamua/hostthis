@@ -6,30 +6,20 @@ import (
 	"time"
 )
 
-// TestRoom_CollaborativeOnRefresh pins the headline product behavior of
-// the rooms tier: two participants who hold the SAME room UUID see each
-// other's writes on the next read. This is the "collaborative on refresh"
-// model the spec describes (request/response KV, no WebSocket): one
-// browser PUTs a value, a second browser holding the same room link reads
-// the full namespace and observes it, then writes its own value back, and
-// the first browser sees that on its next scan. There is no per-user
-// identity at this layer - both participants address the one shared
-// namespace keyed by (app, room-uuid), exactly like a shared doc link.
+// TestRoom_CollaborativeOnRefresh pins the collaborate-on-refresh model: two
+// callers holding the SAME room UUID address one shared namespace keyed by
+// (app, room-uuid), so each sees the other's writes on its next read. There is
+// no per-user identity at this layer.
 func TestRoom_CollaborativeOnRefresh(t *testing.T) {
 	repo := newRoomTestRepo(t)
 	now := time.Now().UTC()
-	// One room, shared by both participants. The repo IS the server; two
-	// callers carrying the same (app, id) stand in for two browsers.
+	// Two callers carrying the same (app, id) stand in for two browsers.
 	room := mkRoom(repo, t, "app12345", now)
 
-	// Participant A joins and writes a value (its availability, say).
 	if _, err := repo.PutValue(room.AppSlug, room.ID, "slot/mon", []byte("alice"), 0, now); err != nil {
 		t.Fatalf("A put: %v", err)
 	}
 
-	// Participant B holds the same room link. On join it scans the room
-	// and must see A's write - that is the whole "collaborate on refresh"
-	// payoff.
 	kvB, err := repo.ScanRoom(room.AppSlug, room.ID)
 	if err != nil {
 		t.Fatalf("B scan: %v", err)
@@ -38,14 +28,10 @@ func TestRoom_CollaborativeOnRefresh(t *testing.T) {
 		t.Fatalf("B did not see A's write on join: got %q", got)
 	}
 
-	// B writes its own value into the same shared namespace.
 	if _, err := repo.PutValue(room.AppSlug, room.ID, "slot/tue", []byte("bob"), 0, now); err != nil {
 		t.Fatalf("B put: %v", err)
 	}
 
-	// A refreshes and now sees BOTH writes - its own and B's. The room is
-	// one shared namespace; possession of the UUID is the whole access
-	// model.
 	kvA, err := repo.ScanRoom(room.AppSlug, room.ID)
 	if err != nil {
 		t.Fatalf("A re-scan: %v", err)
@@ -60,15 +46,14 @@ func TestRoom_CollaborativeOnRefresh(t *testing.T) {
 		t.Fatalf("A lost its own write: got %q", got)
 	}
 
-	// A point read of B's key by A also succeeds (not just the scan).
+	// The point read, not just the scan, crosses between participants.
 	v, err := repo.GetValue(room.AppSlug, room.ID, "slot/tue")
 	if err != nil || !bytes.Equal(v, []byte("bob")) {
 		t.Fatalf("A point-read of B's key = %q, %v", v, err)
 	}
 
-	// Either participant can overwrite any key - the names are cosmetic
-	// attribution, not access control (per the spec's in-room-identity
-	// note). B overwrites A's slot; A sees the new value on refresh.
+	// Either participant can overwrite any key: the names are cosmetic
+	// attribution, not access control.
 	if _, err := repo.PutValue(room.AppSlug, room.ID, "slot/mon", []byte("carol"), 0, now); err != nil {
 		t.Fatalf("B overwrite A's key: %v", err)
 	}
@@ -81,45 +66,31 @@ func TestRoom_CollaborativeOnRefresh(t *testing.T) {
 	}
 }
 
-// TestRoom_IsolationDependsOnRoomIDNamespacing pins the cross-room
-// isolation property THROUGH the production repo methods, so it is a real
-// regression guard rather than a re-implementation of the WHERE clause.
+// TestRoom_IsolationDependsOnRoomIDNamespacing pins that a request carrying
+// room B's UUID can never read room A's data, even within the same app. The
+// guard is the room_id predicate in every production read; this test drives
+// EXACTLY GetValue and ScanRoom rather than its own SQL, so dropping the
+// predicate from either one goes red.
 //
-// The security property is "a request carrying room B's UUID can never
-// read room A's data, even within the same app." It is enforced
-// structurally by the room_id predicate in the WHERE clause of every
-// production read (GetValue, ScanRoom). This test exercises EXACTLY those
-// methods - it does NOT run its own ad-hoc SQL - so that if a refactor
-// drops the room_id predicate from the real GetValue or ScanRoom, this
-// test goes red (the same change makes TestRoom_CrossRoomIsolation go red
-// too; the two together pin the namespacing from both the point-read and
-// the scan side).
-//
-// Concretely: two rooms A and B exist under the SAME app. They share a key
-// name ("secret") with DIFFERENT values, AND each holds a key the other
-// does not ("a-only" / "b-only"). That is the adversarial setup - if the
-// room_id scoping were dropped, (app, key) alone is ambiguous across the
-// two rooms, so B's point-read would surface A's "secret" value and B's
-// scan would surface A's "a-only" key (an extra key that should not exist
-// in B). We assert the production methods keep them separate from both the
-// point-read and the scan side, so dropping the predicate from EITHER
-// GetValue or ScanRoom makes this test fail.
+// The setup is adversarial on both axes: two rooms under one app share a key
+// name with different values, and each holds a key the other does not. Without
+// room_id scoping, (app, key) is ambiguous, so B's point-read surfaces A's
+// value and B's scan surfaces A's private key.
 func TestRoom_IsolationDependsOnRoomIDNamespacing(t *testing.T) {
 	repo := newRoomTestRepo(t)
 	now := time.Now().UTC()
 	a := mkRoom(repo, t, "app12345", now)
 	b := mkRoom(repo, t, "app12345", now)
 
-	// Shared key name, different values (catches a GetValue predicate drop).
+	// Shared key name, different values: catches a GetValue predicate drop.
 	if _, err := repo.PutValue(a.AppSlug, a.ID, "secret", []byte("from-A"), 0, now); err != nil {
 		t.Fatalf("put A secret: %v", err)
 	}
 	if _, err := repo.PutValue(b.AppSlug, b.ID, "secret", []byte("from-B"), 0, now); err != nil {
 		t.Fatalf("put B secret: %v", err)
 	}
-	// Per-room unique keys (catches a ScanRoom predicate drop: a leak shows
-	// up as an EXTRA key in the other room's scan, not just an overwrite of
-	// a shared key name).
+	// Per-room unique keys: catches a ScanRoom predicate drop, which shows up
+	// as an EXTRA key in the other room's scan.
 	if _, err := repo.PutValue(a.AppSlug, a.ID, "a-only", []byte("A-private"), 0, now); err != nil {
 		t.Fatalf("put A a-only: %v", err)
 	}
@@ -127,9 +98,6 @@ func TestRoom_IsolationDependsOnRoomIDNamespacing(t *testing.T) {
 		t.Fatalf("put B b-only: %v", err)
 	}
 
-	// Production point-read: B's UUID reads B's own value, never A's. If the
-	// room_id predicate is dropped from GetValue, this surfaces "from-A"
-	// (or an ambiguous row) and the assertion fails.
 	gotB, err := repo.GetValue(b.AppSlug, b.ID, "secret")
 	if err != nil {
 		t.Fatalf("B GetValue errored: %v", err)
@@ -145,10 +113,7 @@ func TestRoom_IsolationDependsOnRoomIDNamespacing(t *testing.T) {
 		t.Fatalf("GetValue crossed the room boundary: A read %q, want its own \"from-A\"", gotA)
 	}
 
-	// Production scan: B's scan returns ONLY B's keys ("secret"=from-B,
-	// "b-only"), never A's "a-only". If the room_id predicate is dropped
-	// from ScanRoom, B's scan surfaces A's "a-only" key too -> 3 keys, and
-	// the count + contents assertions fail.
+	// B's scan must return ONLY B's two keys; a leak makes it three.
 	kvB, err := repo.ScanRoom(b.AppSlug, b.ID)
 	if err != nil {
 		t.Fatalf("B ScanRoom errored: %v", err)

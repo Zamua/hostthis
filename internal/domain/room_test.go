@@ -10,7 +10,6 @@ import (
 func TestNewRoomID_IsValidV4(t *testing.T) {
 	for range 200 {
 		id := NewRoomID()
-		// Must parse cleanly as its own canonical form.
 		got, err := ParseRoomID(id.String())
 		if err != nil {
 			t.Fatalf("NewRoomID produced an unparseable id %q: %v", id, err)
@@ -44,7 +43,7 @@ func TestNewRoomID_Unique(t *testing.T) {
 }
 
 func TestParseRoomID(t *testing.T) {
-	valid := "f47ac10b-58cc-4372-a567-0e02b2c3d479" // a canonical v4
+	valid := "f47ac10b-58cc-4372-a567-0e02b2c3d479" // canonical v4
 	got, err := ParseRoomID(valid)
 	if err != nil {
 		t.Fatalf("valid v4 rejected: %v", err)

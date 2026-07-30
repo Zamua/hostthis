@@ -2,15 +2,12 @@
 
 package storage
 
-// Pins the storage-boundary translation of shale's cross-shard guard
-// sentinel into the domain vocabulary (see translateCrossShard in
-// shale_site_repo.go). Pure-function pins: no cluster, no MinIO - the
-// guard fires CLIENT-side in the tx buffer before any commit, and the
-// wrapping layers between it and the deploy service's isCrossShard
-// check (Transact, runAuthoritative, ShaleSiteRepo, shaleblob Commit)
-// all pass the error through verbatim or %w-wrap, so identity is what
-// carries. The service-side half of the pin (finalizeDeploy classifying
-// the translated sentinel) lives in
+// Pins the storage-boundary translation of shale's cross-shard guard sentinel
+// into the domain vocabulary (translateCrossShard in shale_site_repo.go). No
+// cluster is needed: the guard fires client-side in the tx buffer before any
+// commit, and every layer between it and the deploy service's isCrossShard
+// check passes the error through verbatim or %w-wraps it, so error identity is
+// what carries. The service-side half of the pin lives in
 // internal/service/typed_errors_test.go.
 
 import (
@@ -39,8 +36,7 @@ func TestTranslateCrossShard(t *testing.T) {
 			if !errors.Is(out, backend.ErrCrossShard) {
 				t.Fatalf("translateCrossShard(%v) = %v; the backend sentinel must stay in the chain", in, out)
 			}
-			// The original text is preserved (not re-rendered away): the
-			// operator log must show what the backend actually said.
+			// The operator log must show what the backend actually said.
 			if want := in.Error(); !strings.Contains(out.Error(), want) {
 				t.Fatalf("translateCrossShard(%v) message %q lost the original %q", in, out.Error(), want)
 			}

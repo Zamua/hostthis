@@ -9,9 +9,8 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// mdPaste builds a ready markdown paste fixture with the given slug +
-// content SHA. The serve-time content comes from the stub blob reader,
-// not from this struct.
+// mdPaste builds a ready markdown paste fixture; the serve-time content comes
+// from the stub blob reader, not from this struct.
 func mdPaste(slug, sha string, now time.Time) domain.Paste {
 	return domain.Paste{
 		Slug:       domain.Slug(slug),
@@ -24,8 +23,8 @@ func mdPaste(slug, sha string, now time.Time) domain.Paste {
 }
 
 // TestMarkdownShell_ServedForBrowser pins the shell branch: a browser
-// navigation (Accept: text/html, no ?raw) gets the fixed client-render
-// shell with the CSP header, and the shell ETag is content-INDEPENDENT.
+// navigation gets the client-render shell with the CSP header, and the shell
+// ETag is content-INDEPENDENT.
 func TestMarkdownShell_ServedForBrowser(t *testing.T) {
 	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	sha := "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe"
@@ -64,8 +63,8 @@ func TestMarkdownShell_ServedForBrowser(t *testing.T) {
 		t.Errorf("CSP missing connect-src 'self', got %q", csp)
 	}
 
-	// The shell ETag must be content-INDEPENDENT: a different markdown
-	// paste (different slug + content SHA) yields the SAME shell ETag.
+	// A different markdown paste (different slug + content SHA) must yield the
+	// SAME shell ETag.
 	etag1 := w.Header().Get("ETag")
 	sha2 := "00001111222233334444555566667777888899990000111122223333deadbeef"
 	srv2 := &Server{
@@ -87,9 +86,8 @@ func TestMarkdownShell_ServedForBrowser(t *testing.T) {
 	}
 }
 
-// TestMarkdownRaw_QueryParam pins the raw branch via ?raw=1: the server
-// streams the exact raw source bytes as text/markdown with the content
-// SHA as the ETag.
+// TestMarkdownRaw_QueryParam pins the raw branch: ?raw=1 streams the exact
+// source bytes as text/markdown with the content SHA as the ETag and no CSP.
 func TestMarkdownRaw_QueryParam(t *testing.T) {
 	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	sha := "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe"
@@ -124,8 +122,8 @@ func TestMarkdownRaw_QueryParam(t *testing.T) {
 }
 
 // TestMarkdownBareURL_NonHTMLAccept_ServesShell pins the no-negotiation
-// posture (issue #5): the bare URL with a non-html Accept (curl/bot, */*)
-// still serves the SHELL, not raw. Raw is an explicit ?raw opt-in.
+// posture: a bare URL with a non-html Accept still serves the SHELL. Raw is an
+// explicit ?raw opt-in, never negotiated.
 func TestMarkdownBareURL_NonHTMLAccept_ServesShell(t *testing.T) {
 	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	sha := "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe"
@@ -155,9 +153,9 @@ func TestMarkdownBareURL_NonHTMLAccept_ServesShell(t *testing.T) {
 	}
 }
 
-// TestServeAsset_WhitelistAndDeny pins the asset handler: a whitelisted
-// lib serves with the immutable cache header and a non-empty body; an
-// unknown name 404s (no path traversal / arbitrary embedded disclosure).
+// TestServeAsset_WhitelistAndDeny pins the asset handler: a whitelisted name
+// serves with the immutable cache header and a non-empty body; an unknown name
+// 404s (no path traversal / arbitrary embedded disclosure).
 func TestServeAsset_WhitelistAndDeny(t *testing.T) {
 	srv := &Server{ApexDomain: "paste.test"}
 	mux := srv.Handler()
@@ -186,8 +184,8 @@ func TestServeAsset_WhitelistAndDeny(t *testing.T) {
 	}
 }
 
-// TestHTMLPaste_NoShellTreatment confirms the HTML serve path is
-// unchanged: still streamed text/html, and it does NOT get the markdown
+// TestHTMLPaste_NoShellTreatment pins that an HTML paste streams raw as
+// text/html with the content-SHA ETag and does NOT pick up the markdown
 // shell's CSP header.
 func TestHTMLPaste_NoShellTreatment(t *testing.T) {
 	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)

@@ -1,6 +1,5 @@
-// Package main wires the hostthis daemon: SSH server + HTTP server +
-// storage + the periodic expiry sweep. Reads flags / env for the
-// runtime config (apex domain, URL mode, scheme, ports, data dir).
+// Package main wires the hostthis daemon: SSH server, HTTP server, storage and
+// the periodic expiry sweep, configured from flags and HOSTTHIS_* env.
 package main
 
 import (
@@ -48,9 +47,9 @@ func main() {
 		logger.Fatalf("--apex-domain is required (or set HOSTTHIS_APEX_DOMAIN). Pass the public domain hostthis serves on, e.g. paste.example.com.")
 	}
 
-	// Content TTL policy (HOSTTHIS_RETENTION): how long a paste/site lives after
-	// its last update before the sweep evicts it. Default 30 days; "off" never
-	// expires. Injected into the metadata backends + the upload/site services.
+	// HOSTTHIS_RETENTION: how long a paste or site lives past its last update
+	// before the sweep evicts it. Injected into the metadata backends and the
+	// upload/site services.
 	retention, err := parseRetention(os.Getenv("HOSTTHIS_RETENTION"), domain.DefaultRetention())
 	if err != nil {
 		logger.Fatalf("%v", err)
@@ -76,9 +75,10 @@ func main() {
 	defer blobsCleanup()
 
 	// The per-record blob seam. A shale backend with a blob store configured
-	// supplies a transactional shaleblob.Unit (the metadata co-commits the blob
-	// pointer); every other backend uses the standalone adapter over the
-	// detached content-addressed store. Either way the services run one shape.
+	// supplies a transactional shaleblob.Unit that co-commits the blob pointer
+	// with the metadata; every other backend uses the standalone adapter over
+	// the detached content-addressed store. The services see one shape either
+	// way.
 	var blobUnit service.BlobUnit = service.NewStandaloneBlobUnit(blobs)
 	if metadata.BlobUnit != nil {
 		blobUnit = metadata.BlobUnit
@@ -89,11 +89,10 @@ func main() {
 	roomRepo := metadata.Rooms
 
 	// Per-identity create admission (docs/SPEC.md "Same-identity create
-	// admission: a width-2 gate"): same-identity creates beyond the width
-	// queue BEFORE the metadata commit, so a one-owner create storm cannot
-	// amplify in the storage tier's CAS layer; other identities pass
-	// independently. Wired here as a repo decorator so the upload service
-	// stays admission-unaware.
+	// admission"): same-identity creates beyond the width queue BEFORE the
+	// metadata commit, so a one-owner create storm cannot amplify in the
+	// storage tier's CAS layer, while other identities pass independently.
+	// A repo decorator, so the upload service stays admission-unaware.
 	admissionWidth := envOrInt("HOSTTHIS_CREATE_ADMISSION_WIDTH", service.DefaultCreateAdmissionWidth)
 	if admissionWidth < 1 {
 		logger.Fatalf("HOSTTHIS_CREATE_ADMISSION_WIDTH must be >= 1, got %d", admissionWidth)
@@ -102,53 +101,47 @@ func main() {
 	uploadSvc := service.NewUpload(service.GateCreates(pasteRepo, createGate), blobUnit)
 	uploadSvc.Retention = retention
 	uploadSvc.Logger = logger // record background blob-finalize outcomes
-	// HOSTTHIS_BLOB_SYNC is a BENCHMARK toggle (sync vs async A/B on one
-	// binary): when true, Create writes the blob inline on the ack path
-	// (the pre-async shape) instead of finalizing in the background.
+	// HOSTTHIS_BLOB_SYNC is a benchmark toggle for a sync-vs-async A/B on one
+	// binary: Create writes the blob inline on the ack path instead of
+	// finalizing in the background.
 	if strings.EqualFold(os.Getenv("HOSTTHIS_BLOB_SYNC"), "true") {
 		uploadSvc.SyncBlob = true
 		logger.Printf("upload: HOSTTHIS_BLOB_SYNC=true (inline blob write; benchmark mode)")
 	}
 	manageSvc := service.NewManage(pasteRepo, blobUnit)
 
-	// Static-site archive deploys. Reuses the same blob store + the same
-	// per-identity quota as pastes; nil-safe if the metadata backend
-	// doesn't expose a site repo.
+	// Static-site archive deploys reuse the same blob store and per-identity
+	// quota as pastes. Nil when the metadata backend exposes no site repo.
 	var deploySvc *service.DeploySite
 	if siteRepo != nil {
 		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobUnit)
 		deploySvc.Retention = retention
-		// So whoami's used_bytes includes static-site bytes (the quota cap sums
-		// paste + site; without this the reported total under-counts sites).
+		// The quota cap sums paste + site bytes, so whoami's used_bytes
+		// under-counts without this.
 		manageSvc.SiteBytes = siteRepo
 	}
 
-	// Rooms: the no-auth, capability-based app-persistence tier
-	// (POST/GET/PUT/DELETE under /api/rooms on an app subdomain). Reuses
-	// the same metadata backend; nil-safe if the backend has no room repo.
+	// Rooms: the no-auth, capability-based app-persistence tier under
+	// /api/rooms. Nil when the metadata backend has no room repo.
 	var roomsSvc *service.Rooms
 	if roomRepo != nil {
 		roomsSvc = service.NewRooms(roomRepo)
 	}
 
-	// Relay: the real-time per-room WebSocket relay layered on the rooms
-	// tier (see SPEC.md "Real-time room relay (WebSocket)"). It depends on
-	// the rooms service only for the late-join snapshot (the Scan verb) and
-	// reuses the durable KV for persistence via the HTTP PUT/DELETE mirror.
-	// Single-node, in-memory per-room hubs; nil-safe when rooms are not
-	// wired (no relay surface on a backend without a room repo).
+	// Relay: the real-time per-room WebSocket layer over the rooms tier (SPEC
+	// "Real-time room relay (WebSocket)"). It depends on the rooms service only
+	// for the late-join snapshot; persistence goes through the HTTP PUT/DELETE
+	// mirror. Per-room hubs are in-memory and per-pod. Nil without a room repo.
 	var roomRelay *relay.Relay
 	if roomsSvc != nil {
 		roomRelay = relay.NewRelay(roomsSvc, relay.NewLimits())
 	}
 
-	// Multi-pod relay peer fan-out (SPEC "Multi-pod relay"). A multi-node
-	// shale backend supplies the transport: the outbound publisher (frames
-	// fan out to every peer pod over the cluster gRPC tier) and the
-	// late-bound receive hook (a peer's frames broadcast into THIS pod's
-	// local hubs). Every single-pod backend leaves RelayPeer nil and the
-	// relay keeps its nil publisher - the zero-peer degenerate case, the
-	// single-pod relay unchanged.
+	// Multi-pod relay peer fan-out (SPEC "Multi-pod relay"). A multi-node shale
+	// backend supplies both directions: an outbound publisher that fans frames
+	// to every peer pod over the cluster gRPC tier, and a late-bound receive
+	// hook that broadcasts a peer's frames into this pod's local hubs. A
+	// single-pod backend leaves RelayPeer nil, the zero-peer degenerate case.
 	if roomRelay != nil && metadata.RelayPeer != nil {
 		roomRelay.SetPeerPublisher(metadata.RelayPeer.Publisher)
 		metadata.RelayPeer.Bind(roomRelay.DeliverFromPeer)
@@ -158,38 +151,34 @@ func main() {
 	keyGate := service.NewKeyGate(keyGateRepo)
 	keyGate.MaxFreshKeysPerSubnet = *freshKeysLimit
 	keyGate.Window = *freshKeysWindow
-	// Whoami uses the keygate for per-session subnet/budget info.
+	// Whoami reports per-session subnet and budget info from the keygate.
 	manageSvc.KeyGate = keyGate
 	sweepSvc := service.NewSweep(pasteRepo, blobsSweep, logger)
 	sweepSvc.KeyGate = keyGate
 	// On the transactional shale-blob path the cluster owns the blobs: a delete
-	// unbinds the pointer in the metadata-delete transaction, so the global
-	// content-addressed GC over the detached store is skipped (Blobs=nil) and
-	// orphan BYTES are reclaimed by SweepOrphans instead. The detached store is
-	// not the blob backend on that path.
+	// unbinds the pointer inside the metadata-delete transaction, so the global
+	// content-addressed GC over the detached store is disabled (Blobs=nil) and
+	// SweepOrphans reclaims orphan bytes instead.
 	if metadata.BlobOrphanSweeper != nil {
 		sweepSvc.Blobs = nil
 		sweepSvc.BlobOrphans = metadata.BlobOrphanSweeper
 		logger.Printf("sweep: shale-blob path - global content-addressed blob GC disabled; SweepOrphans reclaims staged-but-unbound objects (grace %s)", service.DefaultOrphanGrace)
 	}
 	if siteRepo != nil {
-		// Wire site expiry + site-blob GC protection into the sweep.
+		// Site expiry plus site-blob GC protection.
 		sweepSvc.Sites = siteRepo
 	}
 	if roomRepo != nil {
-		// Wire room expiry (30-day inactivity TTL) + the room-create
-		// rate-limit prune into the sweep.
+		// Room inactivity expiry plus the room-create rate-limit prune.
 		sweepSvc.Rooms = roomRepo
 	}
 
-	// HOSTTHIS_SWEEP_DISABLED toggles the sweep between DRY-RUN and LIVE -
-	// it is NOT an on/off switch and a "disabled" sweep is never a no-op.
-	// true (the default-safe operator handle for a cutover/nervous window):
-	// the sweep still runs every interval, computing + LOGGING what it WOULD
-	// expire/GC, but mutating nothing. false: live cleanup. So an operator
-	// can deploy a risky change, watch the dry-run log confirm the sweep
-	// would clean only what's expected, then flip to false. See docs/SPEC.md
-	// "Dry-run (observability)".
+	// HOSTTHIS_SWEEP_DISABLED selects DRY-RUN vs LIVE; it is not an on/off
+	// switch and a "disabled" sweep is never a no-op. True means the sweep
+	// still runs every interval, computing and LOGGING what it would expire or
+	// GC while mutating nothing, so a risky change can be deployed and the
+	// dry-run log read before flipping to live. See docs/SPEC.md "Dry-run
+	// (observability)".
 	sweepSvc.DryRun = strings.EqualFold(envOr("HOSTTHIS_SWEEP_DISABLED", "false"), "true")
 	if sweepSvc.DryRun {
 		logger.Printf("sweep: DRY-RUN via HOSTTHIS_SWEEP_DISABLED=true - runs every %s, LOGS what it would expire/GC, deletes nothing. Set false to enable live cleanup.", sweepSvc.Interval)
@@ -204,13 +193,11 @@ func main() {
 	if err != nil {
 		logger.Printf("warn: landing not loaded from %q: %v (apex will serve a stub)", *landingPath, err)
 	}
-	// Substitute the apex placeholder so the landing page tells visitors
-	// to ssh to the actual configured domain. The template ships with
-	// `{{APEX}}` everywhere a hostname appears (e.g. `ssh {{APEX}} list`).
+	// The landing template carries {{APEX}} everywhere a hostname appears and
+	// {{RETENTION}} where the expiry is described, so the page never advertises
+	// a domain or a TTL this deploy does not have.
 	if len(landing) > 0 {
 		s := strings.ReplaceAll(string(landing), "{{APEX}}", *apexDomain)
-		// {{RETENTION}} tracks HOSTTHIS_RETENTION so the landing never advertises
-		// the wrong expiry: "for 30 days" / "for 12 hours" / "with no expiry".
 		retPhrase := "with no expiry"
 		if retention.Enabled() {
 			retPhrase = "for " + retention.Describe()
@@ -218,15 +205,12 @@ func main() {
 		landing = []byte(strings.ReplaceAll(s, "{{RETENTION}}", retPhrase))
 	}
 
-	// URL builder picks based on mode. Subdomain mode is required for
-	// production; path mode is the dev-friendly alternative documented
-	// in SPEC.md "Dev-only path mode".
 	build := buildURL(*scheme, *apexDomain, *urlMode, logger)
 
-	// CDN cache purger (noop unless a CDN is configured). The decorator
-	// wraps the verb service so a mutation transparently invalidates the
-	// edge cache for the affected slug; the verb service itself stays
-	// cache-unaware (see SPEC.md "Active invalidation: CachePurger").
+	// The decorator wraps the verb service so a mutation transparently
+	// invalidates the edge cache for the affected slug, keeping the verb
+	// service cache-unaware (SPEC "Active invalidation: CachePurger"). Noop
+	// unless a CDN is configured.
 	cachePurger := buildCachePurger(logger, *scheme, *apexDomain, *urlMode)
 	pasteMgr := service.NewCacheInvalidating(manageSvc, cachePurger)
 
@@ -254,8 +238,8 @@ func main() {
 		ApexDomain:  *apexDomain,
 		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),
 		// Readiness gates /readyz on the metadata backend's predicate (the
-		// shale mount floor); nil on backends with no mount concept, which
-		// the server reads as always-ready. /healthz stays pure liveness.
+		// shale mount floor); nil on a backend with no mount concept, which the
+		// server reads as always-ready. /healthz stays pure liveness.
 		Readiness: metadata.Readiness,
 		Logf:      logger.Printf,
 	}
@@ -271,10 +255,9 @@ func main() {
 	httpSrv := &http.Server{
 		Addr:    *httpAddr,
 		Handler: httpServer.Handler(),
-		// Bound the four axes a slow / hostile client could try to
-		// hold open. Reads are tiny (we only do GETs for content +
-		// headers), writes are at most MaxPasteBytes (1 MiB), so the
-		// values below are generous but not unbounded.
+		// Bound the four axes a slow or hostile client could hold open. Reads
+		// are tiny and writes are at most MaxPasteBytes, so these are generous
+		// but never unbounded.
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -282,8 +265,8 @@ func main() {
 		MaxHeaderBytes:    8 << 10, // 8 KiB
 	}
 
-	// Run both servers + the sweep goroutine; whichever signaling
-	// event hits first wins. Signals tear them all down cleanly.
+	// Both servers and the sweep run concurrently; the first signalling event
+	// wins and tears them all down.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -293,9 +276,9 @@ func main() {
 		logger.Printf("http: listening on %s", *httpAddr)
 		errs <- httpSrv.ListenAndServe()
 	}()
-	// Always run the sweep loop; HOSTTHIS_SWEEP_DISABLED selects dry-run vs
-	// live (sweepSvc.DryRun), it does not gate the goroutine - a dry-run
-	// sweep must still run to log what it would clean.
+	// The sweep loop always runs: HOSTTHIS_SWEEP_DISABLED selects dry-run vs
+	// live, it does not gate the goroutine, because a dry-run sweep must still
+	// run to log what it would clean.
 	go sweepSvc.Run(ctx)
 
 	select {
@@ -307,12 +290,11 @@ func main() {
 		}
 	}
 
-	// Drain hint, then the grace window, then the close (SPEC "Drain hint:
-	// reconnect-before-shutdown"). The hint fires at drain start - BEFORE the
-	// HTTP server stops accepting - telling every live relay client to
-	// re-home; the process then KEEPS SERVING through HOSTTHIS_DRAIN_GRACE
-	// (default 3s, 0 disables) so the hint flushes and hint-acting clients
-	// reconnect make-before-break through the ingress onto a surviving pod.
+	// Drain hint, grace window, then close (SPEC "Drain hint:
+	// reconnect-before-shutdown"). The hint fires BEFORE the HTTP server stops
+	// accepting, and the process keeps serving through HOSTTHIS_DRAIN_GRACE (0
+	// disables) so the hint flushes and clients acting on it reconnect
+	// make-before-break onto a surviving pod.
 	if roomRelay != nil {
 		roomRelay.AnnounceDrain()
 		if grace := envOrDuration("HOSTTHIS_DRAIN_GRACE", 3*time.Second); grace > 0 {
@@ -321,16 +303,14 @@ func main() {
 		}
 	}
 
-	// Close all live relay connections: a hijacked WebSocket is not
-	// tracked by http.Server.Shutdown, so closing them here (with a normal
-	// closure) unblocks their request goroutines and lets clients reconnect
-	// on their backoff schedule rather than hammering instantly.
+	// http.Server.Shutdown does not track hijacked WebSockets, so closing them
+	// here unblocks their request goroutines and lets clients reconnect on
+	// their backoff schedule rather than hammering instantly.
 	if roomRelay != nil {
 		roomRelay.Registry().CloseAll()
 	}
 
-	// Stop the peer publisher's senders (multi-pod only): local fan-out is
-	// done, so drop the outbound peer queues and their connections cleanly.
+	// Local fan-out is done, so drop the outbound peer queues and connections.
 	if metadata.RelayPeer != nil {
 		metadata.RelayPeer.Close()
 	}
@@ -340,13 +320,10 @@ func main() {
 	_ = httpSrv.Shutdown(shutdownCtx)
 }
 
-// buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured
-// BlobStore + SweepBlobs (same type, narrowed via two interfaces). The disk
-// backend is the only standalone backend (dev/test); production runs the shale
-// metadata backend, whose ShaleRepo owns its OWN shale-managed MinIO blob plane
-// (cluster.BlobKV) constructed in NewShaleRepo - it does NOT go through this
-// detached store. The detached S3 standalone backend was retired with the
-// shale-collocated blob work (the shale path made it redundant; dev uses disk).
+// buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured store,
+// narrowed through two interfaces (BlobStore and SweepBlobs). Disk is the only
+// standalone backend. The shale metadata backend does NOT go through this
+// detached store: its ShaleRepo owns a shale-managed blob plane of its own.
 func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, service.SweepBlobs, func(), error) {
 	backend := strings.ToLower(envOr("HOSTTHIS_BLOB_BACKEND", "disk"))
 	switch backend {
@@ -356,9 +333,9 @@ func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlob
 			return nil, nil, nil, err
 		}
 		logger.Printf("blobs: disk backend at %s/blobs (zstd-compressed at rest)", dataDir)
-		// Wrap with the compression layer for Put/Get used by upload + manage.
-		// Sweep uses WalkBlobs + Remove which are sha-only (no body access),
-		// so it bypasses the wrapper and talks to the raw backend.
+		// Only the upload/manage Put/Get path needs the compression wrapper.
+		// The sweep uses WalkBlobs + Remove, which are sha-only and never touch
+		// a body, so it talks to the raw backend.
 		inner, sweep, cleanup, err := maybeWrapWriteBack(bs, dataDir, logger)
 		if err != nil {
 			return nil, nil, nil, err
@@ -369,10 +346,9 @@ func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlob
 	}
 }
 
-// writeBackInner is the contract maybeWrapWriteBack needs of a durable
-// backend: the inner Put/Get/GetReader the compression layer wraps, plus
-// the WalkBlobs/Remove the sweep uses. *storage.BlobStore (the disk store)
-// satisfies it.
+// writeBackInner is what maybeWrapWriteBack needs of a durable backend: the
+// Put/Get/GetReader the compression layer wraps, plus the WalkBlobs/Remove the
+// sweep uses.
 type writeBackInner interface {
 	Put(sha string, r io.Reader, size int64) error
 	Get(sha string) ([]byte, error)
@@ -381,12 +357,10 @@ type writeBackInner interface {
 	Remove(sha string) error
 }
 
-// maybeWrapWriteBack optionally fronts the durable backend with the
-// local-disk write-back cache when HOSTTHIS_BLOB_WRITEBACK=true. When
-// disabled (the default), the durable backend is returned unchanged so
-// today's strict durable-before-ack behavior is preserved. Returns the
-// store to wrap with compression, the sweep interface, and a cleanup
-// func (stops the uploaders; no-op when disabled).
+// maybeWrapWriteBack fronts the durable backend with the local-disk write-back
+// cache when HOSTTHIS_BLOB_WRITEBACK=true. Disabled, it returns the durable
+// backend unchanged, preserving strict durable-before-ack. The cleanup func
+// stops the uploaders and is a no-op when disabled.
 func maybeWrapWriteBack(durable writeBackInner, dataDir string, logger *log.Logger) (storage.InnerBlobStore, service.SweepBlobs, func(), error) {
 	if strings.ToLower(envOr("HOSTTHIS_BLOB_WRITEBACK", "false")) != "true" {
 		return durable, durable, func() {}, nil
@@ -404,11 +378,10 @@ func maybeWrapWriteBack(durable writeBackInner, dataDir string, logger *log.Logg
 	return wb, wb, wb.Close, nil
 }
 
-// buildCachePurger reads HOSTTHIS_CACHE_BACKEND and returns the
-// configured CachePurger. Defaults to Noop (no CDN in front). The
-// scheme/apex/mode let the cloudflare adapter build a slug's public URL
-// variants (the page plus the markdown shell's "?raw=1" content fetch)
-// so a purge invalidates every cache key the paste is reachable at.
+// buildCachePurger reads HOSTTHIS_CACHE_BACKEND and returns the configured
+// CachePurger, defaulting to Noop. scheme/apex/mode let the cloudflare adapter
+// build every public URL variant of a slug (the page plus the markdown shell's
+// "?raw=1" fetch), so a purge invalidates every cache key it is reachable at.
 func buildCachePurger(logger *log.Logger, scheme, apex, mode string) service.CachePurger {
 	backend := strings.ToLower(envOr("HOSTTHIS_CACHE_BACKEND", "noop"))
 	switch backend {
@@ -428,7 +401,8 @@ func buildCachePurger(logger *log.Logger, scheme, apex, mode string) service.Cac
 	}
 }
 
-// buildURL returns the URL emitter for a given scheme + mode + apex.
+// buildURL returns the URL emitter for a scheme, mode and apex. Subdomain mode
+// is required in production; path mode is dev-only (SPEC "Dev-only path mode").
 func buildURL(scheme, apex, mode string, logger *log.Logger) hostssh.URLBuilder {
 	switch strings.ToLower(mode) {
 	case "subdomain":
@@ -481,8 +455,8 @@ func envOrDuration(key string, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-// parseRetention reads the HOSTTHIS_RETENTION operator knob into a retention
-// policy. Accepted forms (case-insensitive):
+// parseRetention reads HOSTTHIS_RETENTION into a policy. Accepted forms,
+// case-insensitive:
 //
 //	""                                 -> the supplied default
 //	"off" / "never" / "none" / "0"     -> no expiry (content is never swept)
