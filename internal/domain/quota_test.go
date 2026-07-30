@@ -5,10 +5,8 @@ import (
 	"testing"
 )
 
-// The boundary. Landing EXACTLY on the cap is allowed; one byte past is not.
-// This was consistent across all thirteen adapter copies and is the single
-// most likely thing to be flipped by a well-meaning simplification, since
-// `>=` reads just as naturally as `>` to someone who has not checked.
+// The boundary: landing exactly on the cap is allowed, one byte past is not.
+// `>=` reads as naturally as `>` to anyone who has not checked.
 func TestAllowance_AdmitBoundary(t *testing.T) {
 	a := Allowance{Cap: 100, Used: 90}
 
@@ -22,10 +20,9 @@ func TestAllowance_AdmitBoundary(t *testing.T) {
 		t.Fatalf("a zero-byte write must be admitted, got %v", err)
 	}
 
-	// AT the cap, a zero-byte write must STILL be admitted. The old arithmetic
-	// was `used + incoming > cap`, which admits this; an overflow-safe rewrite
-	// naturally reaches for an early `used >= cap` reject and silently changes
-	// it. Caught exactly that way during this refactor.
+	// At the cap, a zero-byte write must still be admitted. An overflow-safe
+	// rewrite naturally reaches for an early `used >= cap` reject, which changes
+	// this silently.
 	full := Allowance{Cap: 100, Used: 100}
 	if err := full.Admit(0); err != nil {
 		t.Fatalf("a zero-byte write at the cap must be admitted (the old arithmetic did), got %v", err)
@@ -35,9 +32,8 @@ func TestAllowance_AdmitBoundary(t *testing.T) {
 	}
 }
 
-// A non-positive cap means unlimited. Every adapter spelled this as
-// `if userCap > 0 { ...check... }`, so the meaning has to survive the move or
-// installations with no configured cap would start rejecting every write.
+// A non-positive cap means unlimited. Installations with no configured cap
+// must not start rejecting every write.
 func TestAllowance_NonPositiveCapIsUnlimited(t *testing.T) {
 	for _, cap := range []int64{0, -1} {
 		a := Allowance{Cap: cap, Used: 1 << 40}
@@ -53,12 +49,9 @@ func TestAllowance_NonPositiveCapIsUnlimited(t *testing.T) {
 	}
 }
 
-// THE case the scattered copies disagreed about: replacing a record credits
-// the bytes it is displacing.
-//
-// Without the credit, redeploying a site at the SAME size is charged twice, so
-// a user at their limit can never update in place - they would have to delete
-// and re-upload. That is the regression this pins.
+// Replacing a record credits the bytes it displaces. Without it, redeploying at
+// the same size is charged twice and an identity at its limit cannot update in
+// place.
 func TestAllowance_AdmitReplacingCreditsTheOldBytes(t *testing.T) {
 	// Exactly at the cap, replacing like for like.
 	a := Allowance{Cap: 100, Used: 100}
@@ -76,9 +69,8 @@ func TestAllowance_AdmitReplacingCreditsTheOldBytes(t *testing.T) {
 	}
 }
 
-// Admit and AdmitReplacing must not be the same function wearing two names:
-// a replacement that ignored the credit would be indistinguishable from Admit,
-// and this is what says so.
+// Admit and AdmitReplacing must differ: a replacement ignoring the credit would
+// be indistinguishable from a plain add.
 func TestAllowance_ReplacingIsNotThePlainAdd(t *testing.T) {
 	a := Allowance{Cap: 100, Used: 100}
 	if err := a.Admit(40); !errors.Is(err, ErrOverUserQuota) {
@@ -94,16 +86,13 @@ func TestAllowance_Remaining(t *testing.T) {
 	if got := (Allowance{Cap: 100, Used: 30}).Remaining(); got != 70 {
 		t.Fatalf("Remaining: want 70, got %d", got)
 	}
-	// Floored at zero rather than going negative: the site extractor takes this
-	// as a byte budget, and a negative budget would read as "no limit" or wrap
-	// depending on how it is used.
+	// Floored at zero: the site extractor takes this as a byte budget.
 	if got := (Allowance{Cap: 100, Used: 250}).Remaining(); got != 0 {
 		t.Fatalf("an over-quota identity must report 0 remaining, not a negative budget; got %d", got)
 	}
 }
 
-// Overflow safety. Sizes arrive from callers and headers; a cap near maxint
-// plus a large incoming value must not wrap negative and silently admit.
+// A large incoming size must not wrap negative and silently admit.
 func TestAllowance_DoesNotWrapOnHugeValues(t *testing.T) {
 	const maxInt64 = int64(^uint64(0) >> 1)
 	a := Allowance{Cap: 100, Used: 50}

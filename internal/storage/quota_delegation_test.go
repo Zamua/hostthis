@@ -8,31 +8,19 @@ import (
 	"testing"
 )
 
-// The quota DECISION belongs to the domain; adapters only supply the inputs.
+// The quota decision belongs to the domain; adapters supply the inputs.
 //
-// UNTAGGED so CI runs it: most of these files are behind the slatedb tag, and
-// the failure this prevents has no behavioural symptom in any single adapter -
-// it is the adapters disagreeing with each other.
+// Computing how many bytes an identity occupies is a query and stays here.
+// Deciding whether that total admits a write is a rule and does not.
 //
-// This rule existed nowhere and the arithmetic was open-coded in twelve places
-// across four repositories, which had already diverged: some were a plain
-// `used + body > cap`, some credited a replaced record's bytes
-// (`used - creditOld + body`), two expressed that credit in different algebra,
-// and some summed paste and site totals while others did not. Twelve copies of
-// a rule are twelve chances for it to drift, and the subtle case
-// (replace-credits-the-old-size) is exactly the one that gets fixed in one
-// place and missed elsewhere.
-//
-// Computing how many bytes an identity occupies is a QUERY and stays here.
-// Deciding whether that total admits a write is a RULE and does not.
+// Untagged so CI runs it: most of these files are behind the slatedb tag, and
+// the failure has no symptom in any single adapter. It is the adapters
+// disagreeing with each other.
 func TestQuotaDecisionIsNotOpenCodedInAdapters(t *testing.T) {
 	// Any comparison against the cap that is not delegating to the domain.
 	openCoded := regexp.MustCompile(`[><]=?\s*userCap|userCap\s*[><]=?`)
-	// ...except asking whether a cap is CONFIGURED at all. That is not the
-	// rule, it is a short-circuit that skips an expensive byte-summing scan
-	// when no ceiling applies, and it belongs in the adapter because the scan
-	// does. domain.Allowance.Unlimited() encodes the same meaning for callers
-	// that hold an Allowance.
+	// ...except asking whether a cap is configured at all, which is a
+	// short-circuit skipping an expensive scan, not the rule.
 	configCheck := regexp.MustCompile(`userCap\s*(>\s*0|<=\s*0)\s*\{?\s*$`)
 
 	files, err := filepath.Glob("*.go")
@@ -72,9 +60,8 @@ func TestQuotaDecisionIsNotOpenCodedInAdapters(t *testing.T) {
 		t.Fatal("scanned no non-test files; this guard checked nothing")
 	}
 
-	// Positive control: the delegation this guard exists to protect must
-	// actually be present. Without it the check above passes just as happily
-	// on a package that dropped quota enforcement altogether.
+	// Positive control: without it the check above passes on a package that
+	// dropped quota enforcement altogether.
 	var delegations int
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
