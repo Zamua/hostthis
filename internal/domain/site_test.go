@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"net/http"
+	"testing"
+)
 
 func mustManifest(files map[string]string) Manifest {
 	m := NewManifest()
@@ -181,15 +184,15 @@ func TestContentTypeForPath(t *testing.T) {
 func TestDetectKind_Archive(t *testing.T) {
 	gzipBytes := []byte{0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00}
 	// No hint: gzip magic → KindSite.
-	if k, err := DetectKind(gzipBytes, ""); err != nil || k != KindSite {
+	if k, err := DetectKind(gzipBytes, "", http.DetectContentType); err != nil || k != KindSite {
 		t.Fatalf("gzip no hint: got (%q, %v), want (site, nil)", k, err)
 	}
 	// A text hint must NOT smuggle a gzip stream through as HTML.
-	if _, err := DetectKind(gzipBytes, "html"); err == nil {
+	if _, err := DetectKind(gzipBytes, "html", http.DetectContentType); err == nil {
 		t.Fatalf("gzip with html hint should reject")
 	}
 	// Non-gzip bytes are unaffected by the new branch.
-	if k, err := DetectKind([]byte("<!doctype html><h1>x</h1>"), ""); err != nil || k != KindHTML {
+	if k, err := DetectKind([]byte("<!doctype html><h1>x</h1>"), "", http.DetectContentType); err != nil || k != KindHTML {
 		t.Fatalf("html still detected: got (%q, %v)", k, err)
 	}
 }
