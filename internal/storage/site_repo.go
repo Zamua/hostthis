@@ -133,8 +133,8 @@ func (r *SiteRepo) InsertWithQuotaCheck(_ context.Context, s domain.Site, dedupe
 		if err != nil {
 			return err
 		}
-		if owned+body > userCap {
-			return ErrOverUserQuota
+		if err := (domain.Allowance{Cap: userCap, Used: owned}).Admit(body); err != nil {
+			return err
 		}
 	}
 
@@ -237,8 +237,8 @@ func (r *SiteRepo) ReplaceWithQuotaCheck(_ context.Context, s domain.Site, dedup
 		if err != nil {
 			return err
 		}
-		if owned-creditOld+body > userCap {
-			return ErrOverUserQuota
+		if err := (domain.Allowance{Cap: userCap, Used: owned}).AdmitReplacing(creditOld, body); err != nil {
+			return err
 		}
 	}
 

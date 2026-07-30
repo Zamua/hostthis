@@ -634,8 +634,8 @@ func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 		if err != nil {
 			return fmt.Errorf("identity site sum: %w", err)
 		}
-		if ownerPaste+ownerSite+body > userCap {
-			return ErrOverUserQuota
+		if err := (domain.Allowance{Cap: userCap, Used: ownerPaste + ownerSite}).Admit(body); err != nil {
+			return err
 		}
 	}
 
@@ -976,8 +976,8 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 			}
 			charge += revived
 		}
-		if ownerPaste+ownerSite+charge > userCap {
-			return AppendResult{}, ErrOverUserQuota
+		if err := (domain.Allowance{Cap: userCap, Used: ownerPaste + ownerSite}).Admit(charge); err != nil {
+			return AppendResult{}, err
 		}
 	}
 	// MAX(ver_num) INCLUDING deleted rows - version numbers are not
