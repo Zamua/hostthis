@@ -75,8 +75,8 @@ func (r *PasteRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 		if err != nil {
 			return err
 		}
-		if ownerTotal+body > userCap {
-			return ErrOverUserQuota
+		if err := (domain.Allowance{Cap: userCap, Used: ownerTotal}).Admit(body); err != nil {
+			return err
 		}
 	}
 	// A slug must be unique across sites too (a read resolves a slug in
@@ -345,8 +345,8 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 			}
 			charge += revived
 		}
-		if ownerTotal+charge > userCap {
-			return AppendResult{}, ErrOverUserQuota
+		if err := (domain.Allowance{Cap: userCap, Used: ownerTotal}).Admit(charge); err != nil {
+			return AppendResult{}, err
 		}
 	}
 

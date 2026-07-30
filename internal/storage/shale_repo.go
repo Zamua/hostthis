@@ -1340,8 +1340,8 @@ func (r *ShaleRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 		if err != nil {
 			return err
 		}
-		if used+body > userCap {
-			return ErrOverUserQuota
+		if err := (domain.Allowance{Cap: userCap, Used: used}).Admit(body); err != nil {
+			return err
 		}
 	}
 
@@ -1667,8 +1667,8 @@ func (r *ShaleRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 			}
 			charge += revived
 		}
-		if used+charge > userCap {
-			return AppendResult{}, ErrOverUserQuota
+		if err := (domain.Allowance{Cap: userCap, Used: used}).Admit(charge); err != nil {
+			return AppendResult{}, err
 		}
 	}
 

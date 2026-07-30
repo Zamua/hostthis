@@ -224,8 +224,8 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(ctx context.Context, s domain.Site,
 		if err != nil {
 			return err
 		}
-		if used+body > userCap {
-			return ErrOverUserQuota
+		if err := (domain.Allowance{Cap: userCap, Used: used}).Admit(body); err != nil {
+			return err
 		}
 	}
 
@@ -322,8 +322,8 @@ func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site
 		if err != nil {
 			return err
 		}
-		if used+(newBody-oldBody) > userCap {
-			return ErrOverUserQuota
+		if err := (domain.Allowance{Cap: userCap, Used: used}).AdmitReplacing(oldBody, newBody); err != nil {
+			return err
 		}
 	}
 

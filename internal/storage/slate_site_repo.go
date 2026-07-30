@@ -201,8 +201,8 @@ func (r *SlateRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, use
 		if err != nil {
 			return fmt.Errorf("identity site sum: %w", err)
 		}
-		if ownerPaste+ownerSite+body > userCap {
-			return ErrOverUserQuota
+		if err := (domain.Allowance{Cap: userCap, Used: ownerPaste + ownerSite}).Admit(body); err != nil {
+			return err
 		}
 	}
 
@@ -318,8 +318,8 @@ func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, us
 		if err != nil {
 			return fmt.Errorf("identity site sum: %w", err)
 		}
-		if ownerPaste+ownerSite-creditOld+body > userCap {
-			return ErrOverUserQuota
+		if err := (domain.Allowance{Cap: userCap, Used: ownerPaste + ownerSite}).AdmitReplacing(creditOld, body); err != nil {
+			return err
 		}
 	}
 
