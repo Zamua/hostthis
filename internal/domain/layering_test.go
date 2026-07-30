@@ -6,16 +6,12 @@ import (
 	"testing"
 )
 
-// The layering rule: dependencies point INWARD. domain depends on nothing,
-// service and storage depend only on domain, transports depend on service.
-// storage must never be reachable from service or a transport - a port is
-// defined by the consumer, and an adapter type crossing that boundary points
-// the arrow the wrong way.
+// Dependencies point inward: domain depends on nothing, service and storage on
+// domain only, transports on service. storage must never be reachable from
+// service or a transport, since a port is defined by its consumer and an
+// adapter type crossing that boundary points the arrow the wrong way.
 //
-// This is enforced rather than documented because it held by convention for
-// months and still drifted: a value type and an encoder function had leaked
-// from storage into service and http, found only by auditing the import graph
-// by hand. A rule nothing checks is a rule that decays.
+// Enforced rather than documented: a rule nothing checks decays.
 func TestLayeringDependenciesPointInward(t *testing.T) {
 	forbidden := map[string][]string{
 		// package under test -> packages it must NOT import
@@ -25,9 +21,8 @@ func TestLayeringDependenciesPointInward(t *testing.T) {
 		"http":    {"storage"},
 		"ssh":     {"storage"},
 		"render":  {"service", "storage", "http", "ssh"},
-		// The two adapters extracted to keep the domain pure. They exist to
-		// hold a mechanism (a wire format, a classifier) and must not grow
-		// upward into application or transport concerns.
+		// Adapters holding a mechanism; must not grow upward into application or
+		// transport concerns.
 		"archive": {"service", "storage", "http", "ssh"},
 		"mime":    {"service", "storage", "http", "ssh", "domain"},
 	}
@@ -50,22 +45,14 @@ func TestLayeringDependenciesPointInward(t *testing.T) {
 	}
 }
 
-// The domain must not depend on INFRASTRUCTURE, and stdlib counts.
+// The domain must not depend on infrastructure, and stdlib counts.
 //
-// The rule above only checks our own packages, which is a real gap: it passed
-// for months while the domain imported net/http and archive/tar. Neither is a
-// layering violation by package name, but both are infrastructure concerns
-// wearing a stdlib label - a transport, and an archive codec.
+// A package is banned when it represents a MECHANISM (transport, wire format,
+// storage, process). Pure computation over values the domain already holds is
+// fine, which is why crypto, encoding/json and regexp are not listed.
 //
-// The distinction this encodes: a package is banned when it represents a
-// MECHANISM the domain should not know about (transport, wire format, storage,
-// process, clock source). Pure computation on values is fine, which is why
-// crypto/sha256, encoding/json and regexp are not listed - they compute over
-// bytes the domain already holds rather than reaching outside the process.
-//
-// If the domain needs one of these, the answer is a PORT: declare the
-// capability as an interface or function type in the domain and let an adapter
-// supply the mechanism. DetectKind takes a MIMESniffer for exactly this reason.
+// When the domain needs one of these the answer is a port: declare the
+// capability in the domain, let an adapter supply it.
 func TestDomainDoesNotDependOnInfrastructure(t *testing.T) {
 	banned := []string{
 		"net/http",      // a transport (was imported for DetectContentType)
