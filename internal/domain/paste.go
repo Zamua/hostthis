@@ -46,15 +46,19 @@ func NormalizeStatus(s string) PasteStatus {
 // There is no Published flag or per-paste secret: the slug IS the secret
 // (8 chars over a 32-char alphabet), so the access model is "share the URL".
 type Paste struct {
-	Slug          Slug
-	Identity      Identity    // "key:<fp>" or "ip:<subnet>" - quota AND capability gate
-	Status        PasteStatus // pending | ready | failed (blob-write lifecycle)
-	Kind          ContentKind // html | markdown of the currently-served version
-	ContentSHA    string      // sha256 of the currently-served bytes
-	Size          int         // bytes (currently-served)
-	Name          string      // optional owner-set label; empty when unset
-	PinnedVersion int         // explicit pin; 0 means unpinned (follow latest)
-	LatestVersion int         // MAX(ver_num) - what an `update` would advance from; 0 if not loaded
+	Slug       Slug
+	Identity   Identity    // "key:<fp>" or "ip:<subnet>" - quota AND capability gate
+	Status     PasteStatus // pending | ready | failed (blob-write lifecycle)
+	Kind       ContentKind // html | markdown of the currently-served version
+	ContentSHA string      // sha256 of the currently-served bytes
+	Size       int         // bytes (currently-served version)
+	// StoredBytes is what the quota charges for this paste: the sum across every
+	// live version, not just the served one. Populated on list reads; zero
+	// elsewhere, where Size is the only figure available.
+	StoredBytes   int
+	Name          string // optional owner-set label; empty when unset
+	PinnedVersion int    // explicit pin; 0 means unpinned (follow latest)
+	LatestVersion int    // MAX(ver_num) - what an `update` would advance from; 0 if not loaded
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 	ExpiresAt     time.Time // UpdatedAt + Retention window (or NeverExpires); only `update` moves it

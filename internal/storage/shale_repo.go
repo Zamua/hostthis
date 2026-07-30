@@ -724,6 +724,14 @@ func (r *ShaleRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 			return nil, err
 		}
 		paste.LatestVersion = latestActiveVerNum(versions)
+		// The enumeration entry already caches this paste's live-version sum,
+		// which is the figure the quota charges. Carry it up rather than
+		// re-deriving it: the scan holds it, and recomputing would mean a
+		// per-paste fan-out to the version shards.
+		var idxRow identityPasteRow
+		if err := json.Unmarshal(item.Value, &idxRow); err == nil && !idxRow.Placeholder {
+			paste.StoredBytes = idxRow.Size
+		}
 		out = append(out, paste)
 	}
 	// Best-effort repair: the list is already correct, so a failed delete just

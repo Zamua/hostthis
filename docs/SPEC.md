@@ -2063,8 +2063,21 @@ mnop4567   Onboarding email      3.8k    html      5d6h         v3 (pinned, late
 zwy11122   -                     800B    html      4d12h        v3 (pinned)
 portfolio2 -                    213.0k   site      27d4h        -
 ```
+**SIZE is what the item COSTS the owner, not the size of what it serves.**
+For a paste that is every LIVE version summed, so a paste at v3 shows more
+than the v3 bytes alone; for a site it is the deduped stored total. That is
+the only reading under which the SIZE column sums to the usage `whoami`
+reports, which is what makes `list` a per-item breakdown of the quota.
+
+When at least one row is charged for more than it serves, stderr carries a
+note pointing at `versions <slug>` for the per-version breakdown. It is
+conditional because a single-version list has nothing to explain. The note
+is needed because `VERS` cannot carry the explanation: it shows the SERVED
+version NUMBER, not how many versions are stored, and a paste whose v1 was
+deleted is charged for two while still displaying `v3`.
+
 Lists BOTH text pastes AND deployed static **sites** (a site shows
-`KIND=site`, its deduped byte total, its expiry, and `-` in `VERS` since
+`KIND=site`, its stored byte total, its expiry, and `-` in `VERS` since
 sites are not versioned). This matters because a site counts against the
 same 10 MiB per-identity quota as pastes: if `list` omitted sites, an owner
 could hit `would exceed your 10 MiB total quota` with no visible way to see
@@ -2181,7 +2194,15 @@ stderr line):
 `served_version` is `pinned_version` when pinned, else `latest_version`.
 A static **site** is discriminated by `kind: "site"`: it has no versions,
 so `served_version` / `latest_version` / `pinned_version` are `null`.
-`size_bytes` is the site's deduped byte total. Sites reuse the retention
+`size_bytes` is the item's CHARGED total: every live version for a paste,
+the deduped stored total for a site. `served_size_bytes` is the bytes of
+the version being served, and is `null` for a site, which has no versions.
+
+Both are emitted because json mode prints only the array - the human
+footer never reaches a script - and a consumer cannot infer which figure
+it holds: `served_version` does not say how many versions are charged,
+since a deleted version leaves a paste billed for fewer than its number
+implies. Sites reuse the retention
 policy, so `expires_at` / `expires_in_seconds` carry the site's actual
 expiry (both `null` only under a no-expiry deploy, the same as a
 never-expiring paste).
