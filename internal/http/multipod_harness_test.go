@@ -1,42 +1,29 @@
 package http
 
-// This file is the MULTI-POD relay acceptance harness: the gate the spec
-// names in "Multi-pod relay -> Acceptance criteria". It stands up N
-// in-process "pods" - N independent Server + relay.Relay instances over
-// ONE shared storage backend (exactly the production shape: pods share
-// the storage cluster, nothing else) - bridged by an in-memory
-// implementation of the relay's PeerPublisher port, and drives real
-// WebSocket clients through each pod's real upgrade + hub + snapshot
-// paths. No real network transport is needed for the correctness core;
-// the gRPC adapter is a seam behind the same port, gated separately by
-// multipod_grpc_seam_test.go over the real client/server transport.
+// Multi-pod relay acceptance harness, the gate the spec names in "Multi-pod
+// relay -> Acceptance criteria".
 //
-// The three observable acceptance criteria pinned here:
+// Stands up N in-process pods (independent Server + relay.Relay instances over
+// ONE shared storage backend, the production shape) bridged by an in-memory
+// PeerPublisher, and drives real WebSocket clients through each pod's real
+// upgrade, hub and snapshot paths. No network transport is needed for the
+// correctness core; the gRPC adapter sits behind the same port and is gated by
+// multipod_grpc_seam_test.go.
 //
-//   1. Two clients on DIFFERENT pods receive every put/delete mirror,
-//      no matter which pod's HTTP surface handled the durable write.
-//   2. A late join during concurrent cross-pod writes has no gap and no
-//      dup: the snapshot's exact seq S plus the client splice contract
-//      (discard <= S, buffer out-of-order, apply dense runs) reconstructs
-//      exactly the durable state.
-//   3. A killed pod's clients reconnect to a surviving pod and resync
-//      via snapshot + splice, again with no gap and no dup.
+// The three acceptance criteria pinned here:
 //
-// Plus the REPRO pin: with NO peer publisher wired (the zero-peer relay,
-// byte-for-byte the pre-multi-pod behavior), live mirrors are POD-LOCAL
-// and cross-pod subscribers observe silence - the measured (N-1)/N live
-// update loss this design exists to fix. That test documents the failure
-// shape permanently; the fan-out test above is the one that goes RED if
-// the peer wiring is dropped.
+//  1. Clients on DIFFERENT pods receive every put/delete mirror, whichever
+//     pod's HTTP surface handled the durable write.
+//  2. A late join during concurrent cross-pod writes has no gap and no dup:
+//     the snapshot's seq plus the client splice contract reconstructs exactly
+//     the durable state.
+//  3. A killed pod's clients reconnect to a surviving pod and resync via
+//     snapshot + splice, again with no gap and no dup.
 //
-// WEAKEN DEMO (run, observed, restored - the fan-out gate fails closed):
-// in relay/relay.go, delete the `rl.publishToPeers(key, mirror)` line from
-// CommitAndMirror. Demonstrated RED: TestMultiPod_BroadcastReachesAllPods
-// fails with "clientB: splice stalled at seq 0 waiting for 10" (the
-// cross-pod clients never receive another pod's mirrors - exactly the
-// pre-branch pod-local relay). Deleting the readLoop's publishToPeers
-// instead fails the same test's ephemeral leg ("clientB: expected
-// cross-pod ephemeral frame"). Restoring both is green.
+// Plus a repro pin: with NO peer publisher wired, live mirrors are pod-local
+// and cross-pod subscribers observe silence, the (N-1)/N live update loss this
+// design exists to fix. The fan-out test is the one that goes red if the peer
+// wiring is dropped.
 
 import (
 	"context"

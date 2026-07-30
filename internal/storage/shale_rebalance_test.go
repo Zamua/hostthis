@@ -2,10 +2,10 @@
 
 package storage_test
 
-// THE GATE: a REAL 2-node shale cluster, in-process, on live MinIO,
-// proving a ring rebalance is LOSSLESS for hostthis's actual data
-// shapes (pastes + their versions, the scan-derived per-owner quota,
-// and the identity_pastes projection that backs ListByOwner).
+// A real 2-node shale cluster, in-process on live MinIO, proving a ring
+// rebalance is lossless for hostthis's data shapes: pastes and their versions,
+// the scan-derived per-owner quota, and the identity_pastes projection backing
+// ListByOwner.
 //
 //	CGO_ENABLED=1 \
 //	CGO_LDFLAGS="-L<slatedb-lib-dir>" DYLD_LIBRARY_PATH="<slatedb-lib-dir>" \
@@ -14,42 +14,28 @@ package storage_test
 //	MINIO_TEST_ACCESS_KEY=admin MINIO_TEST_SECRET_KEY=supersecret \
 //	go test -tags slatedb -run TestShaleRebalance ./internal/storage
 //
-// What "lossless" means here is the spec's primary multi-node contract:
-// after a second node joins and the ring redistributes ownership, every
-// paste written through node A is still readable from the CLUSTER (via
-// either node's repo, forwarding when the local node is not the owner),
-// the per-identity quota sum survives its move to whichever node now
-// owns the {id} shard (no under/over-count), and the per-owner
-// projection survives so ListByOwner stays correct.
+// Lossless means: after a second node joins and the ring redistributes, every
+// paste stays readable from the CLUSTER (through either node, forwarding when
+// the local one is not the owner), the quota sum survives its move to whichever
+// node now owns the {id} shard, and the projection survives so ListByOwner
+// stays correct.
 //
-// # What forwarding requires, and where it is wired
+// # Forwarding
 //
-// cluster.Open advertises a node's GRPCAddr via gossip but does NOT
-// stand up the gRPC listener that serves forwarded reads/writes - the
-// host PROCESS owns that. storage.NewShaleRepo now stands it up in
-// multi-node mode (cfg.BindAddr != ""): it binds the listener, advertises
-// the ACTUAL bound address, and registers the cluster's rpc handlers, so a
-// real multi-node deploy (hostthisd's buildMetadataShale calls the same
-// constructor) forwards over a live wire instead of a dead GRPCAddr. This
-// test drives that production path directly - it passes GRPCAddr
-// "127.0.0.1:0" and reads repo.GRPCAddr() back - so the lossless-read
-// assertion via the NON-owning node exercises the same forwarding server
-// production runs, not a test-only stand-up. See startRebalNode.
+// cluster.Open advertises a GRPCAddr but does not stand up the server that
+// answers forwarded ops: the host process owns that. NewShaleRepo does it in
+// multi-node mode, binding the listener and advertising the ACTUAL bound
+// address. This test drives that production path rather than a test-only
+// stand-up, so the read-via-non-owner assertion exercises real forwarding.
 //
-// # How a loss would surface
+// # How a loss surfaces
 //
-// If shale's rebalance dropped a partition's bytes on the handoff
-// boundary, the missing paste's Get would return ErrNotFound (or
-// ListVersions would come back short) - assertion 1 fails loudly with
-// the slug. If the {id} family's entries did not move with their
-// shard, SumActiveBytesByOwner read through the wrong (empty) owner
-// would return 0, or a partial value - assertion 2 fails with the
-// before/after numbers. If the projection were lost, ListByOwner would
-// return fewer pastes than were inserted - assertion 3 fails with the
-// counts. A rebalance that moved NOTHING (everything still on A) is also
-// a (different) failure: assertion 4 asserts node B physically holds
-// some keys, so a no-op "rebalance" that silently kept all data on the
-// seed is caught too.
+// Dropped bytes on a handoff boundary make a Get return ErrNotFound. An {id}
+// family that did not move with its shard makes the quota read 0 or partial. A
+// lost projection makes ListByOwner short.
+//
+// A rebalance that moved NOTHING is also a failure, so one assertion requires
+// node B to physically hold keys.
 
 import (
 	"context"
