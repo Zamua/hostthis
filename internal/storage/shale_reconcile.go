@@ -26,48 +26,36 @@ import (
 
 // --- reconciler ------------------------------------------------------------
 
-// Reconcile is the metadata backend's maintenance pass and the SOLE
-// quota-healing mechanism now that the per-identity quota is DERIVED by
-// summing the cached values of the enumeration indexes (docs/SPEC.md
-// "Scan-derived quota" / "Derived indexes and repair-on-read"). With no
-// stored counter to keep correct, it has exactly two jobs:
+// Reconcile is the metadata backend's maintenance pass and the sole
+// quota-healing mechanism, since the quota is derived by summing the cached
+// values on the enumeration indexes. With no stored counter, it has two jobs:
 //
-//   - REPROJECT the per-owner enumeration indexes from the authoritative
-//     rows: identity_pastes/<id>/<slug> from the pastes/ + versions/ scans
-//     (reconcileIndexes) and identity_sites/<id>/<slug> from the sites/ scan
-//     (reconcileSiteIndexPass). Each adds a missing entry, rebuilds every
-//     projection's CACHED QUOTA VALUES (a paste entry's size is the live
-//     version sum from the versions/ scan; a site entry's is the row's
-//     deduped size), and drops an entry whose paste/site is gone or failed -
-//     pruning against a full aggregate of the index family so an orphan
-//     lingers nowhere, not even under an owner with no remaining rows. This
-//     closes BOTH quota-relevant gaps the cached-sum design has: a crash
-//     between the authoritative {slug} row write and the {id} index write
-//     (a live row the index does not list, transiently UNDER-counting the
-//     owner) and a stale/orphaned cached value (a lost size refresh or a
-//     lost entry drop, transiently mis-counting by that record's bytes).
-//   - AGE OUT stuck pending pastes (the pod-death backstop): a status=pending
-//     paste older than PendingPasteTimeout is flipped to failed so it drops
-//     out of the quota scan (MarkFailed drops its enumeration entry) and its
-//     loading screen.
+//   - REPROJECT the per-owner enumeration indexes from the authoritative rows.
+//     Each pass adds missing entries, rebuilds every projection's cached quota
+//     values, and drops entries whose record is gone or failed, pruning against
+//     a full aggregate of the family so no orphan lingers.
 //
-// It reprojects the authoritative rows: a SET (add/drop entries, an
-// idempotent heal) plus per-record cached VALUES (each paste's live version
-// sum), and the values are numbers computed from the pass's point-in-time
-// snapshot, so a pass can race a live write's fresher refresh. Every
-// reprojection write (and prune delete) is therefore GUARDED on the value
-// the pass's index snapshot read - captured strictly BEFORE the
-// authoritative scans, see the ordering note in the body - skipping when a
-// live write moved the entry mid-pass (guarded to lose, never to clobber).
-// That is what makes the pass safe under live traffic on any cadence and
-// from every pod concurrently: each converges toward the authoritative
-// state, and a skip costs at most one cycle of staleness on one entry. It
-// is NOT part of the SweepRepo contract: the sweep's public surface is
-// unchanged. Single-node, cross-shard via aggregate; a poisoned row - or a
-// failed per-entry index write - is skipped + logged and the pass continues
-// (docs/SPEC.md "Decode tolerance is per-scan-semantics", Policy 1) - but
-// an undecodable row is never silently dropped from the projection (see the
-// fail-closed placeholder below).
+//     This closes both quota gaps the cached-sum design has: a crash between the
+//     {slug} row write and the {id} index write (a live row the index omits,
+//     under-counting) and a stale or orphaned cached value (mis-counting by one
+//     record's bytes).
+//
+//   - AGE OUT stuck pendings: a pending paste older than PendingPasteTimeout is
+//     flipped to failed, dropping it from the quota scan and its loading screen.
+//
+// The cached values are computed from the pass's point-in-time snapshot, so a
+// pass can race a live write's fresher refresh. Every reprojection write and
+// prune delete is therefore GUARDED on the value the pass's index snapshot read
+// (captured strictly before the authoritative scans), and skips when a live
+// write moved the entry mid-pass: guarded to lose, never to clobber.
+//
+// That is what makes the pass safe under live traffic, on any cadence, from
+// every pod concurrently. Each converges toward the authoritative state, and a
+// skip costs one cycle of staleness on one entry.
+//
+// Not part of the SweepRepo contract. Cross-shard via aggregate. A poisoned row
+// or a failed per-entry write is skipped and the pass continues (Policy 1), but
+// an undecodable row is never silently dropped from the projection.
 func (r *ShaleRepo) Reconcile(now time.Time) error {
 	// Snapshot the enumeration index FIRST - strictly before the
 	// authoritative scans - because it is the guard baseline for every
