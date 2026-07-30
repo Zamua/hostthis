@@ -157,9 +157,8 @@ func TestRegistry_ReleaseIsIdempotent(t *testing.T) {
 // neither admit has anything to wait on. The same-room fan-out half of this
 // property is pinned by TestCommitAndMirror_SlowCommitDoesNotBlockRoom.
 //
-// WEAKEN DEMO: make commitAndMirror take A's hub lock before running
-// commit() (the retired one-critical-section shape). RED: admit(A) blocks
-// on A's hub lock behind the parked commit and misses the deadline.
+// Fails if commitAndMirror takes A's hub lock before running commit(): admit(A)
+// then blocks behind the parked commit and misses the deadline.
 func TestRegistry_AdmitDoesNotCoupleAcrossRoomsDuringSlowCommit(t *testing.T) {
 	r := NewRegistry(NewLimits())
 	keyA := testKey()
@@ -309,11 +308,11 @@ func runLastLeaveVsAdmitRound(t *testing.T, round int) {
 // removeHub deletes a hub only when it is empty AND has zero pending
 // admits, so a hub a join is about to register into is never torn out.
 //
-// WEAKEN DEMO: drop the `r.pending[key] == 0` condition from removeHub.
-// RED: "r.hub(key) is nil for a joined connection - the hub was orphaned by
-// the last leave's removeHub". Restoring the guard is green. Run under
-// -race; many rounds, each a fresh room, to also catch any data race the
-// guard's bookkeeping might introduce.
+// Fails if removeHub drops its `r.pending[key] == 0` condition: the last
+// leave then orphans a hub a concurrent admit is registering into.
+//
+// Many rounds, each a fresh room, and run under -race to also catch a data race
+// in the guard's own bookkeeping.
 func TestRegistry_LastLeaveDuringAdmitDoesNotOrphanJoin(t *testing.T) {
 	const rounds = 500
 	for i := range rounds {
