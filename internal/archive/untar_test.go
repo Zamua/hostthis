@@ -1,4 +1,4 @@
-package domain
+package archive_test
 
 import (
 	"archive/tar"
@@ -10,6 +10,9 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/Zamua/hostthis/internal/archive"
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
 // recordingSink captures every file SafeUntar hands it, computing the
@@ -24,8 +27,8 @@ func (s *recordingSink) Store(p string, r io.Reader, _ int64) (string, int, erro
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, r); err != nil {
 		// Propagate the cap sentinel unchanged, like the production sink.
-		if errors.Is(err, ErrArchiveTooLarge) {
-			return "", 0, ErrArchiveTooLarge
+		if errors.Is(err, domain.ErrArchiveTooLarge) {
+			return "", 0, domain.ErrArchiveTooLarge
 		}
 		return "", 0, err
 	}
@@ -90,7 +93,7 @@ func TestSafeUntar_HappyPath(t *testing.T) {
 		{name: "sub/page.html", body: "<p>x</p>"},
 	})
 	sink := newRecordingSink()
-	man, err := SafeUntar(bytes.NewReader(arc), sink, int64(UserQuotaBytes))
+	man, err := archive.Untar(bytes.NewReader(arc), sink, int64(domain.UserQuotaBytes))
 	if err != nil {
 		t.Fatalf("SafeUntar: %v", err)
 	}
@@ -124,9 +127,9 @@ func TestSafeUntar_RejectsSymlink(t *testing.T) {
 		{name: "index.html", body: "<h1>ok</h1>"},
 		{name: "evil", typeflag: tar.TypeSymlink, linkname: "/etc/passwd"},
 	})
-	_, err := SafeUntar(bytes.NewReader(arc), newRecordingSink(), int64(UserQuotaBytes))
-	if !errors.Is(err, ErrUnsafeArchive) {
-		t.Fatalf("symlink: got %v, want ErrUnsafeArchive", err)
+	_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
+	if !errors.Is(err, domain.ErrUnsafeArchive) {
+		t.Fatalf("symlink: got %v, want domain.ErrUnsafeArchive", err)
 	}
 }
 
@@ -135,18 +138,18 @@ func TestSafeUntar_RejectsHardlink(t *testing.T) {
 		{name: "a.html", body: "<h1>ok</h1>"},
 		{name: "b", typeflag: tar.TypeLink, linkname: "a.html"},
 	})
-	_, err := SafeUntar(bytes.NewReader(arc), newRecordingSink(), int64(UserQuotaBytes))
-	if !errors.Is(err, ErrUnsafeArchive) {
-		t.Fatalf("hardlink: got %v, want ErrUnsafeArchive", err)
+	_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
+	if !errors.Is(err, domain.ErrUnsafeArchive) {
+		t.Fatalf("hardlink: got %v, want domain.ErrUnsafeArchive", err)
 	}
 }
 
 func TestSafeUntar_RejectsDeviceAndFifo(t *testing.T) {
 	for _, tf := range []byte{tar.TypeChar, tar.TypeBlock, tar.TypeFifo} {
 		arc := makeGzipTar(t, []tarEntry{{name: "dev", typeflag: tf}})
-		_, err := SafeUntar(bytes.NewReader(arc), newRecordingSink(), int64(UserQuotaBytes))
-		if !errors.Is(err, ErrUnsafeArchive) {
-			t.Fatalf("typeflag %d: got %v, want ErrUnsafeArchive", tf, err)
+		_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
+		if !errors.Is(err, domain.ErrUnsafeArchive) {
+			t.Fatalf("typeflag %d: got %v, want domain.ErrUnsafeArchive", tf, err)
 		}
 	}
 }
@@ -162,9 +165,9 @@ func TestSafeUntar_RejectsTraversal(t *testing.T) {
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			arc := makeGzipTar(t, []tarEntry{{name: name, body: "x"}})
-			_, err := SafeUntar(bytes.NewReader(arc), newRecordingSink(), int64(UserQuotaBytes))
-			if !errors.Is(err, ErrUnsafeArchive) {
-				t.Fatalf("path %q: got %v, want ErrUnsafeArchive", name, err)
+			_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
+			if !errors.Is(err, domain.ErrUnsafeArchive) {
+				t.Fatalf("path %q: got %v, want domain.ErrUnsafeArchive", name, err)
 			}
 		})
 	}
@@ -172,9 +175,9 @@ func TestSafeUntar_RejectsTraversal(t *testing.T) {
 
 func TestSafeUntar_RejectsBackslashTraversal(t *testing.T) {
 	arc := makeGzipTar(t, []tarEntry{{name: `..\windows\evil.html`, body: "x"}})
-	_, err := SafeUntar(bytes.NewReader(arc), newRecordingSink(), int64(UserQuotaBytes))
-	if !errors.Is(err, ErrUnsafeArchive) {
-		t.Fatalf("backslash: got %v, want ErrUnsafeArchive", err)
+	_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
+	if !errors.Is(err, domain.ErrUnsafeArchive) {
+		t.Fatalf("backslash: got %v, want domain.ErrUnsafeArchive", err)
 	}
 }
 
@@ -182,7 +185,7 @@ func TestSafeUntar_AllowsDotSlashPrefix(t *testing.T) {
 	// "./index.html" is the common `tar czf - .` shape - must be accepted
 	// and clean to "index.html".
 	arc := makeGzipTar(t, []tarEntry{{name: "./index.html", body: "<h1>ok</h1>"}})
-	man, err := SafeUntar(bytes.NewReader(arc), newRecordingSink(), int64(UserQuotaBytes))
+	man, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
 	if err != nil {
 		t.Fatalf("SafeUntar: %v", err)
 	}
@@ -200,9 +203,9 @@ func TestSafeUntar_DecompressionBombAbortsMidStream(t *testing.T) {
 		{name: "big.html", body: big},
 	})
 	// Budget of 1 MiB: the 4 MiB file must trip the guard.
-	_, err := SafeUntar(bytes.NewReader(arc), newRecordingSink(), 1<<20)
-	if !errors.Is(err, ErrArchiveTooLarge) {
-		t.Fatalf("bomb: got %v, want ErrArchiveTooLarge", err)
+	_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), 1<<20)
+	if !errors.Is(err, domain.ErrArchiveTooLarge) {
+		t.Fatalf("bomb: got %v, want domain.ErrArchiveTooLarge", err)
 	}
 }
 
@@ -216,29 +219,29 @@ func TestSafeUntar_RunningTotalAcrossEntries(t *testing.T) {
 		{name: "b.html", body: chunk},
 		{name: "c.html", body: chunk}, // 1.2 MiB cumulative > 1 MiB budget
 	})
-	_, err := SafeUntar(bytes.NewReader(arc), newRecordingSink(), 1<<20)
-	if !errors.Is(err, ErrArchiveTooLarge) {
-		t.Fatalf("running total: got %v, want ErrArchiveTooLarge", err)
+	_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), 1<<20)
+	if !errors.Is(err, domain.ErrArchiveTooLarge) {
+		t.Fatalf("running total: got %v, want domain.ErrArchiveTooLarge", err)
 	}
 }
 
 func TestSafeUntar_FileCountCap(t *testing.T) {
-	entries := make([]tarEntry, 0, MaxSiteFiles+2)
+	entries := make([]tarEntry, 0, domain.MaxSiteFiles+2)
 	entries = append(entries, tarEntry{name: "index.html", body: "x"})
-	for i := range MaxSiteFiles + 1 {
+	for i := range domain.MaxSiteFiles + 1 {
 		entries = append(entries, tarEntry{name: "f" + itoa(i) + ".txt", body: "y"})
 	}
-	_, err := SafeUntar(bytes.NewReader(makeGzipTar(t, entries)), newRecordingSink(), int64(UserQuotaBytes))
-	if !errors.Is(err, ErrTooManyFiles) {
-		t.Fatalf("file count: got %v, want ErrTooManyFiles", err)
+	_, err := archive.Untar(bytes.NewReader(makeGzipTar(t, entries)), newRecordingSink(), int64(domain.UserQuotaBytes))
+	if !errors.Is(err, domain.ErrTooManyFiles) {
+		t.Fatalf("file count: got %v, want domain.ErrTooManyFiles", err)
 	}
 }
 
 func TestSafeUntar_RejectsNonGzip(t *testing.T) {
 	// Plain bytes, no gzip wrapper - SafeUntar must reject as unsupported.
-	_, err := SafeUntar(strings.NewReader("not a gzip stream at all"), newRecordingSink(), int64(UserQuotaBytes))
-	if !errors.Is(err, ErrUnsupportedKind) {
-		t.Fatalf("non-gzip: got %v, want ErrUnsupportedKind", err)
+	_, err := archive.Untar(strings.NewReader("not a gzip stream at all"), newRecordingSink(), int64(domain.UserQuotaBytes))
+	if !errors.Is(err, domain.ErrUnsupportedKind) {
+		t.Fatalf("non-gzip: got %v, want domain.ErrUnsupportedKind", err)
 	}
 }
 
@@ -248,9 +251,9 @@ func TestSafeUntar_CorruptTarInGzip(t *testing.T) {
 	gz := gzip.NewWriter(&buf)
 	_, _ = gz.Write(bytes.Repeat([]byte{0x42}, 2048))
 	_ = gz.Close()
-	_, err := SafeUntar(bytes.NewReader(buf.Bytes()), newRecordingSink(), int64(UserQuotaBytes))
-	if !errors.Is(err, ErrUnsupportedKind) {
-		t.Fatalf("corrupt tar: got %v, want ErrUnsupportedKind", err)
+	_, err := archive.Untar(bytes.NewReader(buf.Bytes()), newRecordingSink(), int64(domain.UserQuotaBytes))
+	if !errors.Is(err, domain.ErrUnsupportedKind) {
+		t.Fatalf("corrupt tar: got %v, want domain.ErrUnsupportedKind", err)
 	}
 }
 
@@ -260,7 +263,7 @@ func TestSafeUntar_DedupesIdenticalFiles(t *testing.T) {
 		{name: "index.html", body: same},
 		{name: "copy.html", body: same},
 	})
-	man, err := SafeUntar(bytes.NewReader(arc), newRecordingSink(), int64(UserQuotaBytes))
+	man, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
 	if err != nil {
 		t.Fatalf("SafeUntar: %v", err)
 	}
@@ -289,7 +292,7 @@ func itoa(n int) string {
 	return string(b[i:])
 }
 
-func keys(m map[string]ManifestEntry) []string {
+func keys(m map[string]domain.ManifestEntry) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)

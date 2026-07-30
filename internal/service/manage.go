@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/mime"
 )
 
 // PasteAdmin is the persistence interface for everything except
@@ -51,6 +52,9 @@ var ErrInvalidName = errors.New("service: name must be 1–60 printable Unicode 
 // Manage is the verb-level service. Each method maps to one ssh verb
 // (or HTTP endpoint) and is owner-gated.
 type Manage struct {
+	// Sniff classifies bytes for DetectKind's text-only rule. A PORT
+	// (domain.MIMESniffer); see Upload.Sniff.
+	Sniff     domain.MIMESniffer
 	Repo      PasteAdmin
 	Blob      BlobUnit       // for Show (ReadAll) + Update (Stage+Commit) + Delete (UnbindOnDelete)
 	KeyGate   *KeyGate       // optional; populates WhoamiInfo.Session when set
@@ -68,7 +72,7 @@ type SiteByteSummer interface {
 }
 
 func NewManage(repo PasteAdmin, blob BlobUnit) *Manage {
-	return &Manage{Repo: repo, Blob: blob, Now: time.Now}
+	return &Manage{Repo: repo, Blob: blob, Now: time.Now, Sniff: mime.Detect}
 }
 
 // requireOwner returns the paste if owner matches; otherwise the
@@ -145,7 +149,7 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 	if err != nil {
 		return UpdateResult{}, err
 	}
-	kind, err := domain.DetectKind(staged.Prefix, typeHint)
+	kind, err := domain.DetectKind(staged.Prefix, typeHint, m.Sniff)
 	if err != nil {
 		return UpdateResult{}, err
 	}

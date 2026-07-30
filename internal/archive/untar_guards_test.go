@@ -1,4 +1,4 @@
-package domain
+package archive_test
 
 import (
 	"archive/tar"
@@ -7,6 +7,9 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/Zamua/hostthis/internal/archive"
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
 // This file pins the security guards of SafeUntar as focused tests, each
@@ -29,8 +32,8 @@ func (c *countingSink) Store(_ string, r io.Reader, _ int64) (string, int, error
 	n, err := io.Copy(io.Discard, r)
 	c.total += n
 	if err != nil {
-		if errors.Is(err, ErrArchiveTooLarge) {
-			return "", 0, ErrArchiveTooLarge
+		if errors.Is(err, domain.ErrArchiveTooLarge) {
+			return "", 0, domain.ErrArchiveTooLarge
 		}
 		return "", 0, err
 	}
@@ -67,9 +70,9 @@ func TestGuard_PathTraversalRejected(t *testing.T) {
 				c.entry,
 			})
 			sink := newRecordingSink()
-			_, err := SafeUntar(bytes.NewReader(arc), sink, int64(UserQuotaBytes))
-			if !errors.Is(err, ErrUnsafeArchive) {
-				t.Fatalf("%s: got %v, want ErrUnsafeArchive", c.name, err)
+			_, err := archive.Untar(bytes.NewReader(arc), sink, int64(domain.UserQuotaBytes))
+			if !errors.Is(err, domain.ErrUnsafeArchive) {
+				t.Fatalf("%s: got %v, want domain.ErrUnsafeArchive", c.name, err)
 			}
 			// And the escaping path NEVER reaches the manifest/sink: the
 			// guard fires before any unsafe path is recorded. (index.html may
@@ -107,9 +110,9 @@ func TestGuard_BombAbortsBeforeFullExpansion(t *testing.T) {
 	})
 
 	sink := &countingSink{}
-	_, err := SafeUntar(bytes.NewReader(arc), sink, cap)
-	if !errors.Is(err, ErrArchiveTooLarge) {
-		t.Fatalf("bomb: got %v, want ErrArchiveTooLarge", err)
+	_, err := archive.Untar(bytes.NewReader(arc), sink, cap)
+	if !errors.Is(err, domain.ErrArchiveTooLarge) {
+		t.Fatalf("bomb: got %v, want domain.ErrArchiveTooLarge", err)
 	}
 	// The reader pulls at most cap+1 bytes (the +1 is the lookahead probe
 	// that detects overflow). It must NOT have streamed the whole 64x body.
@@ -121,18 +124,18 @@ func TestGuard_BombAbortsBeforeFullExpansion(t *testing.T) {
 // --- Guard 3: file-count + manifest-size (path-text) caps ---
 
 // TestGuard_ManifestPathTextCapRejected pins the SECOND count-style guard
-// the SPEC names: total manifest path text is bounded (MaxManifestBytes),
+// the SPEC names: total manifest path text is bounded (domain.MaxManifestBytes),
 // independent of the file count. A "few thousand long-named files" stays
-// well under MaxSiteFiles but blows the path-text budget, so it must be
-// rejected with ErrTooManyFiles.
+// well under domain.MaxSiteFiles but blows the path-text budget, so it must be
+// rejected with domain.ErrTooManyFiles.
 //
-// Guard-removal demonstration: deleting the PathTextBytes() > MaxManifestBytes
+// Guard-removal demonstration: deleting the PathTextBytes() > domain.MaxManifestBytes
 // check at the bottom of SafeUntar's loop (untar.go) lets the archive
 // extract fully (returns nil), failing this test. Restoring re-pins it.
 // Verified locally.
 func TestGuard_ManifestPathTextCapRejected(t *testing.T) {
-	// Each path is ~900 bytes (< MaxSitePathLen 1024). The total path text
-	// crosses MaxManifestBytes (1 MiB) well before MaxSiteFiles (5000):
+	// Each path is ~900 bytes (< domain.MaxSitePathLen 1024). The total path text
+	// crosses domain.MaxManifestBytes (1 MiB) well before domain.MaxSiteFiles (5000):
 	// 1 MiB / 900 ~= 1165 entries. We write 2000 to be safely over.
 	const pathLen = 900
 	stem := strings.Repeat("a", pathLen-len(".html")-6) // leave room for index + ext
@@ -143,28 +146,28 @@ func TestGuard_ManifestPathTextCapRejected(t *testing.T) {
 		name := "dir" + pad6(i) + stem + ".html"
 		entries = append(entries, tarEntry{name: name, body: "x"})
 	}
-	_, err := SafeUntar(bytes.NewReader(makeGzipTar(t, entries)), newRecordingSink(), int64(UserQuotaBytes))
-	if !errors.Is(err, ErrTooManyFiles) {
-		t.Fatalf("manifest path-text cap: got %v, want ErrTooManyFiles", err)
+	_, err := archive.Untar(bytes.NewReader(makeGzipTar(t, entries)), newRecordingSink(), int64(domain.UserQuotaBytes))
+	if !errors.Is(err, domain.ErrTooManyFiles) {
+		t.Fatalf("manifest path-text cap: got %v, want domain.ErrTooManyFiles", err)
 	}
 }
 
 // TestGuard_PerPathLengthCapRejected pins the per-path length cap
-// (MaxSitePathLen): a single absurdly long path is rejected even though
+// (domain.MaxSitePathLen): a single absurdly long path is rejected even though
 // the file count and total manifest size are tiny.
 //
-// Guard-removal demonstration: deleting the `len(rel) > MaxSitePathLen`
+// Guard-removal demonstration: deleting the `len(rel) > domain.MaxSitePathLen`
 // check in SafeUntar (untar.go) lets the single long-named file through
 // (returns nil), failing this test. Restoring re-pins it. Verified locally.
 func TestGuard_PerPathLengthCapRejected(t *testing.T) {
-	long := strings.Repeat("z", MaxSitePathLen+10) + ".html"
+	long := strings.Repeat("z", domain.MaxSitePathLen+10) + ".html"
 	arc := makeGzipTar(t, []tarEntry{
 		{name: "index.html", body: "<h1>ok</h1>"},
 		{name: long, body: "x"},
 	})
-	_, err := SafeUntar(bytes.NewReader(arc), newRecordingSink(), int64(UserQuotaBytes))
-	if !errors.Is(err, ErrTooManyFiles) {
-		t.Fatalf("per-path length cap: got %v, want ErrTooManyFiles", err)
+	_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
+	if !errors.Is(err, domain.ErrTooManyFiles) {
+		t.Fatalf("per-path length cap: got %v, want domain.ErrTooManyFiles", err)
 	}
 }
 

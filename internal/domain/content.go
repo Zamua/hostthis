@@ -2,7 +2,6 @@ package domain
 
 import (
 	"errors"
-	"net/http"
 	"regexp"
 	"strings"
 )
@@ -89,7 +88,26 @@ const HardRawByteCap = 100 << 20 // 100 MiB
 // through and have it served with `Content-Type: text/html`.
 //
 // Pass "" to skip the hint and rely purely on sniffing.
-func DetectKind(b []byte, hint string) (ContentKind, error) {
+// MIMESniffLen is how many leading bytes are enough to classify content. The
+// sniffing algorithms this feeds are all defined over a bounded prefix.
+const MIMESniffLen = 512
+
+// MIMESniffer reports a media type for a byte prefix, e.g. "text/plain;
+// charset=utf-8" or "application/octet-stream".
+//
+// A PORT, not an implementation. Classifying bytes is a mechanism, and the one
+// obvious implementation lives in net/http - a transport package the domain
+// must not depend on. What belongs here is the RULE the sniff feeds: content
+// must sniff as some flavour of text, so a binary payload is rejected even when
+// the user labels it "html". That rule is a security control (it is what stops
+// a type hint short-circuiting detection); the algorithm behind it is not.
+//
+// Adapters supply http.DetectContentType. Tests supply whatever they need to
+// exercise a branch, which is the secondary benefit: the rule becomes testable
+// without constructing bytes that happen to sniff a particular way.
+type MIMESniffer func(b []byte) string
+
+func DetectKind(b []byte, hint string, sniffMIME MIMESniffer) (ContentKind, error) {
 	hint = strings.ToLower(strings.TrimSpace(hint))
 
 	// Archive branch: a gzip magic prefix routes to the static-site path.
@@ -107,10 +125,10 @@ func DetectKind(b []byte, hint string) (ContentKind, error) {
 	}
 
 	sniff := b
-	if len(sniff) > 512 {
-		sniff = sniff[:512]
+	if len(sniff) > MIMESniffLen {
+		sniff = sniff[:MIMESniffLen]
 	}
-	ct := http.DetectContentType(sniff)
+	ct := sniffMIME(sniff)
 
 	// Hint path: trust the user's labelling for *which* renderer to
 	// use, but require the bytes to sniff as some flavor of text. If

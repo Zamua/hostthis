@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/mime"
 )
 
 // PasteRepo is the persistence interface the upload service needs.
@@ -66,6 +67,12 @@ type Upload struct {
 	// bytes in the background).
 	Blob BlobUnit
 	Now  func() time.Time
+	// Sniff classifies uploaded bytes so DetectKind can apply the
+	// text-only rule. A PORT (domain.MIMESniffer): the domain owns the rule,
+	// an adapter supplies the algorithm. Defaulted by NewUpload to the stdlib
+	// adapter; overridable, which is what lets a test drive a branch without
+	// hunting for bytes that happen to sniff a particular way.
+	Sniff domain.MIMESniffer
 	// Retention is the installation's content-TTL policy; it stamps a new
 	// paste's ExpiresAt (UpdatedAt + window, or "never" when disabled).
 	Retention domain.Retention
@@ -90,7 +97,7 @@ type Upload struct {
 // NewUpload wires defaults. Retention defaults to the 30-day policy; the
 // composition root overrides Upload.Retention from HOSTTHIS_RETENTION.
 func NewUpload(repo PasteRepo, blob BlobUnit) *Upload {
-	return &Upload{Repo: repo, Blob: blob, Now: time.Now, Retention: domain.DefaultRetention()}
+	return &Upload{Repo: repo, Blob: blob, Now: time.Now, Retention: domain.DefaultRetention(), Sniff: mime.Detect}
 }
 
 func (u *Upload) logf(format string, args ...any) {
@@ -154,7 +161,7 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	if staged.RawSize == 0 {
 		return Result{}, errors.New("empty upload")
 	}
-	kind, err := domain.DetectKind(staged.Prefix, typeHint)
+	kind, err := domain.DetectKind(staged.Prefix, typeHint, u.Sniff)
 	if err != nil {
 		return Result{}, err
 	}

@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"net/http"
 	"testing"
 )
 
@@ -44,7 +45,7 @@ func TestDetectKind(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := DetectKind([]byte(c.body), c.hint)
+			got, err := DetectKind([]byte(c.body), c.hint, http.DetectContentType)
 			if c.isErr {
 				if !errors.Is(err, ErrUnsupportedKind) {
 					t.Fatalf("err: got %v, want ErrUnsupportedKind", err)
@@ -56,6 +57,34 @@ func TestDetectKind(t *testing.T) {
 			}
 			if got != c.want {
 				t.Fatalf("kind: got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// The text-only rule, driven directly through the sniffer port.
+//
+// This is a security control: a type hint must not short-circuit detection, so
+// bytes that classify as binary are rejected even when the user labels them
+// "html". Before the port existed this could only be tested by finding real
+// byte sequences that happen to sniff a particular way, which tests the
+// classifier as much as the rule. Injecting the classification isolates the
+// rule itself.
+func TestDetectKind_RejectsNonTextUnderATextHint(t *testing.T) {
+	body := []byte("<!doctype html><h1>looks like html</h1>")
+
+	for _, hint := range []string{"html", "md", "diff"} {
+		t.Run(hint+"/binary sniff is rejected", func(t *testing.T) {
+			if _, err := DetectKind(body, hint, stubSniffer("application/octet-stream")); err == nil {
+				t.Fatalf("hint %q with binary-sniffing bytes must be rejected: a hint must not be able "+
+					"to short-circuit content detection", hint)
+			}
+		})
+		t.Run(hint+"/text sniff is accepted", func(t *testing.T) {
+			// The mirror case. Without it, a DetectKind that rejected
+			// everything would pass the assertion above.
+			if _, err := DetectKind(body, hint, stubSniffer("text/plain; charset=utf-8")); err != nil {
+				t.Fatalf("hint %q with text-sniffing bytes must be accepted, got %v", hint, err)
 			}
 		})
 	}

@@ -10,6 +10,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/Zamua/hostthis/internal/archive"
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
@@ -193,7 +194,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	// manifest's {slug} shard and the bind co-commits. On the standalone path
 	// slug is empty and unused (content-sha keying).
 	sink := &blobSink{blob: d.Blob, slug: string(slug)}
-	man, err := domain.SafeUntar(body, sink, budget)
+	man, err := archive.Untar(body, sink, budget)
 	switch {
 	case errors.Is(err, domain.ErrArchiveTooLarge):
 		return SiteResult{}, ErrOverQuota
@@ -406,7 +407,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	budget := max(int64(domain.UserQuotaBytes)-int64(usedPaste)-(usedSite-creditOld), 0)
 
 	sink := &blobSink{blob: d.Blob, slug: string(slug)}
-	man, err := domain.SafeUntar(body, sink, budget)
+	man, err := archive.Untar(body, sink, budget)
 	switch {
 	case errors.Is(err, domain.ErrArchiveTooLarge):
 		return SiteResult{}, ErrOverQuota
