@@ -42,10 +42,8 @@ func waitForFrameContaining(t *testing.T, c *fakeConn, sub string, d time.Durati
 // commit-then-broadcast order is preserved; ordering ACROSS writers rides
 // the seq, not a lock).
 //
-// WEAKEN DEMO (the pre-fix shape): make commitAndMirror take the hub lock
-// before running commit() (the old one-critical-section form). RED: every
-// leg times out - "ephemeral broadcast stalled behind an in-flight durable
-// commit". The off-lock commit is green.
+// Fails if commitAndMirror takes the hub lock before running commit(): every
+// leg then times out behind the in-flight durable commit.
 func TestCommitAndMirror_SlowCommitDoesNotBlockRoom(t *testing.T) {
 	r := NewRegistry(NewLimits())
 	key := testKey()

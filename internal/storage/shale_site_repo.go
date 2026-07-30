@@ -229,37 +229,27 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(ctx context.Context, s domain.Site,
 	return nil
 }
 
-// ReplaceSiteWithQuotaCheck re-deploys an existing OWNED site in place via the
-// same scan-based sequence InsertSiteWithQuotaCheck uses, charging the REPLACE
-// DELTA rather than the full new size:
+// ReplaceSiteWithQuotaCheck re-deploys an owned site in place, charging the
+// replace DELTA rather than the full new size:
 //
-//  1. up-front Get to size the delta (read oldBody) and gate ownership +
-//     existence,
-//  2. quota CHECK (scan the owner's combined paste+site used bytes) charging
-//     the delta: when the old row is LIVE the scan's `used` already counts its
-//     oldBody, so the post-swap total is used + (newBody-oldBody) - a same-size
-//     re-deploy nets zero, a smaller one frees the difference, a larger one is
-//     rejected when it would breach the cap. When the old row is EXPIRED-unswept
-//     it is NOT in `used`, so oldBody is credited as 0 and the replace charges
-//     the full new size (reviving an expired site is a fresh write of that size),
-//  3. authoritative swap on the {slug} shard (re-read sites/<slug> in the CAS
-//     read-set for ownership + the old expiry key, overwrite the row, re-key
-//     the expiry index),
-//  4. refresh the identity_sites/<id>/<slug> enumeration entry with the new
-//     cached size + expiry (best-effort; the site scan SUMS the cached entry
-//     values, and the reconciler heals a lost refresh).
+//  1. an up-front Get to size the delta and gate ownership + existence,
+//  2. a quota check charging that delta. When the old row is LIVE the scan's
+//     `used` already counts its oldBody, so a same-size re-deploy nets zero and
+//     a smaller one frees the difference. When the old row is EXPIRED-unswept it
+//     is not in `used`, so oldBody credits as 0 and the full new size is
+//     charged: reviving an expired site is a fresh write.
+//  3. the authoritative swap on {slug}, re-reading sites/<slug> in the CAS
+//     read-set and re-keying the expiry index,
+//  4. a best-effort refresh of the enumeration entry's cached size + expiry,
+//     which the reconciler heals if lost.
 //
-// Ownership/existence: the slug must already be a site owned by s.Identity.
-// A missing row OR a foreign-owned row both collapse to ErrNotFound (the SAME
-// sentinel a missing slug yields), so existence/ownership never leaks. The
-// gate is enforced TWICE: an up-front Get to size the delta (read oldBody +
-// reject a foreign/missing row before the swap), and again INSIDE the
-// authoritative CAS so a concurrent delete/re-deploy conflicts.
+// A missing row and a foreign-owned row both collapse to ErrNotFound, so
+// existence and ownership never leak. The gate is enforced twice: up front, and
+// again inside the CAS so a concurrent delete or re-deploy conflicts.
 //
-// The check and the swap are not atomic (bounded same-owner over-admit), and
-// the durable total-bytes ceiling is NOT checked here: it is the object-store
-// bucket quota, enforced when a blob Put is rejected (see SPEC "Limits ->
-// Durable total-bytes ceiling: an object-store quota").
+// Check and swap are not atomic (bounded same-owner over-admit). The durable
+// total-bytes ceiling is not checked here: it is the object-store bucket quota,
+// surfaced when a blob Put is rejected.
 //
 // Returns nil / ErrNotFound / ErrOverUserQuota.
 func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error {

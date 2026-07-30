@@ -367,7 +367,7 @@ func rawKeysOf(m map[string]json.RawMessage) []string {
 //
 // This test PASSES against the pre-branch relay too - it characterizes the
 // bug. The gate that FAILS without the fix is
-// TestMultiPod_BroadcastReachesAllPods below (see the WEAKEN DEMO at the
+// TestMultiPod_BroadcastReachesAllPods below (see the mutation noted at the
 // top of the file: deleting the publishToPeers wiring reproduces the
 // pre-branch behavior and that test goes red).
 // ---------------------------------------------------------------------------

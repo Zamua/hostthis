@@ -245,9 +245,8 @@ func containsSub(haystack []byte, needle string) bool {
 // is in ws_test.go; this drives N=5 with each client both sending and
 // receiving, so the fan-out is asserted across the whole set.
 //
-// WEAKEN DEMO: drop the `if id == from { continue }` guard in
-// relay/hub.go's broadcast, so the fan-out includes the sender. Demonstrated
-// RED: "c0 received its OWN frame (echo leak)". Restoring the guard is green.
+// Fails if broadcast's `if id == from { continue }` guard is dropped, which
+// echoes a sender its own frame.
 // ---------------------------------------------------------------------------
 
 func TestRelayHarness_BroadcastNClientsFanOutNoEcho(t *testing.T) {
@@ -315,16 +314,11 @@ func keysOf(m map[string]bool) []string {
 // under app X never receive app Y's traffic. The room key is
 // (app-slug, room-uuid), so isolation is structural, not a filter.
 //
-// WEAKEN DEMO: key the hub on the room-uuid ALONE (drop the app slug from
-// the RoomKey the registry maps on), so two different apps' rooms that
-// share a uuid collide into one hub. The cross-app frame then leaks and the
-// expectSilence on the OTHER app fails. The same-uuid-different-app pair
-// below is what makes the app-slug in the key load-bearing: with distinct
-// uuids the room-vs-room half is structural, but two apps colliding on one
-// uuid is exactly the leak a slug-less key would open. Demonstrated RED by
-// normalizing key.App = "" in the registry's hub lookups: "bShared:
-// expected silence ... but received secret-of-room-A1". Restoring the app
-// slug in the key is green.
+// Fails if the hub is keyed on the room uuid alone: two apps sharing a uuid
+// then collide into one hub and frames leak across apps.
+//
+// The same-uuid-different-app pair below is what makes the app slug in the key
+// load-bearing. With distinct uuids the room-vs-room half is structural.
 // ---------------------------------------------------------------------------
 
 func TestRelayHarness_IsolationAcrossRoomsAndApps(t *testing.T) {
@@ -449,38 +443,25 @@ func TestRelayHarness_LateJoinConsistentWithRoomThenLive(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// NO-DUP under a concurrent PUT || join race. This is the gate for the
-// spec's "every change is APPLIED exactly once" guarantee, asserted at the
-// level the bug actually lives: an HTTP durable PUT racing a fresh
-// WebSocket join. Per the spec's register-first join, the no-dup rule is
-// the CLIENT's seq discard (drop any frame with seq <= the snapshot's S -
-// SPEC "The client splice contract"), not a server lock: a frame CAN
-// legally arrive on the wire whose effect the snapshot already reflects,
-// and the discard rule is what applies it zero more times. So the gate
-// counts occurrences the way a spec-compliant client does: once if the
-// snapshot reflects the mutation, plus once per live frame that SURVIVES
-// the discard rule (seq > S). hostthis is payload-opaque and makes no
-// idempotency assumption, so an applied dup is a real defect.
+// NO-DUP under a concurrent PUT || join race: the gate for "every change is
+// APPLIED exactly once", asserted where the bug lives, an HTTP durable PUT
+// racing a fresh WebSocket join.
 //
-// The test fires, per round, a PUT of a round-unique key concurrently with a
-// fresh join, then drains the joiner's snapshot + live frames and asserts the
-// mutation is APPLIED exactly once. Zero is a gap (the write was lost); two
-// is a dup (the snapshot reflected it AND a frame with seq > S also carried
-// it - a broken S stamp or a broken discard rule). Many rounds are run
-// because the interleave is timing-dependent.
+// Per the register-first join, the no-dup rule is the CLIENT's seq discard
+// (drop frames with seq <= the snapshot's S), not a server lock: a frame can
+// legally arrive whose effect the snapshot already reflects, and the discard is
+// what applies it zero more times. So this counts occurrences the way a
+// compliant client does: once if the snapshot reflects the mutation, plus once
+// per live frame surviving the discard.
 //
-// WEAKEN DEMO (both run, observed, restored; the reds land on the sibling
-// gates because this gate's failing interleave is timing-sampled):
-//   - dropped mirror: in relay/registry.go's commitAndMirror, delete the
-//     local `hub.broadcast(0, mirror)`. Deterministic RED on
-//     TestRelay_LateJoinSnapshotThenStreamNoGapNoDup and
-//     TestRelayHarness_LateJoinConsistentWithRoomThenLive (the post-join
-//     PUT's live mirror never arrives).
-//   - mis-stamped S: in relay/codec.go's encodeSnapshot, stamp
-//     `Seq: kv.Seq - 1`. Deterministic RED on
-//     TestMultiPod_BroadcastReachesAllPods ("fresh room snapshots at seq
-//     18446744073709551615..., want 0/0") - the exact-S stamp the discard
-//     rule fences on is load-bearing everywhere the splice client runs.
+// hostthis is payload-opaque and assumes no idempotency, so an applied dup is a
+// real defect.
+//
+// Per round it fires a PUT of a round-unique key concurrently with a fresh
+// join, drains the snapshot and live frames, and asserts the mutation applied
+// exactly once. Zero is a gap; two is a dup, meaning either a broken S stamp or
+// a broken discard rule. Many rounds, because the interleave is
+// timing-dependent.
 // ---------------------------------------------------------------------------
 
 func TestRelayHarness_ConcurrentPutAndJoinNoDupNoGap(t *testing.T) {
@@ -533,10 +514,8 @@ func TestRelayHarness_ConcurrentPutAndJoinNoDupNoGap(t *testing.T) {
 // delete: a broken S stamp). A dup matters because hostthis is
 // payload-opaque and an app may treat a delete as a state transition.
 //
-// WEAKEN DEMO: same two edits as the PUT gate (drop the local mirror
-// broadcast in registry.commitAndMirror; understate the snapshot's S in
-// codec.encodeSnapshot), observed RED on the deterministic sibling gates
-// named there.
+// Fails on the same two mutations as the PUT gate: dropping the local mirror
+// broadcast, or understating the snapshot's S.
 func TestRelayHarness_ConcurrentDeleteAndJoinNoDupNoGap(t *testing.T) {
 	runConcurrentMutateAndJoinNoDupNoGap(t, "delete",
 		// mutate: DELETE this round's (pre-seeded) key.
@@ -660,10 +639,8 @@ func runConcurrentMutateAndJoinNoDupNoGap(
 // the hub reaps the dead connection so there is no leak (the room's
 // connection count returns to exactly the survivors).
 //
-// WEAKEN DEMO: drop the `rl.reg.release(key, id)` in relay/relay.go's Serve
-// teardown defer, so a dropped connection leaks its hub slot. Demonstrated
-// RED: after the drop the room never returns to 1 conn ("live conns = 2 ...
-// want 1"). Restoring the release is green.
+// Fails if Serve's teardown drops its `reg.release(key, id)`: a dropped
+// connection then leaks its hub slot and the room never returns to 1 conn.
 // ---------------------------------------------------------------------------
 
 func TestRelayHarness_DisconnectReconnectResyncsAndReapsNoLeak(t *testing.T) {
@@ -822,12 +799,8 @@ func TestRelayHarness_HealthyClientSurvivesIdleAcrossHeartbeats(t *testing.T) {
 // MULTIPLE fast clients (a stricter shape than ws_test.go's single-fast
 // version): every fast client keeps flowing despite the stuck peer.
 //
-// WEAKEN DEMO: replace wsConn.Send's non-blocking buffered send in
-// relay/relay.go (`select { case c.send <- f: ...; default: return false }`)
-// with a blocking `c.send <- f`, so a stuck client head-of-line-blocks the
-// room instead of being dropped. Demonstrated RED: "fast0 received only 26
-// frames ... room stalled on the laggard". Restoring the non-blocking
-// drop-the-laggard send is green.
+// Fails if wsConn.Send's non-blocking buffered send becomes a blocking one: a
+// stuck client then head-of-line-blocks the room instead of being dropped.
 // ---------------------------------------------------------------------------
 
 func TestRelayHarness_StuckClientDoesNotStallMultipleFastPeers(t *testing.T) {
@@ -932,10 +905,8 @@ func TestRelayHarness_StuckClientDoesNotStallMultipleFastPeers(t *testing.T) {
 // rejection the already-connected clients keep working (the room is not
 // collateral-damaged by the refusal).
 //
-// WEAKEN DEMO: remove the per-app cap check in the registry's admit (the
-// `if r.perApp[key.App] >= MaxConnsPerApp { return ErrAppFull }` block), so
-// the over-cap upgrade gets a 101 instead of a 429. Demonstrated RED: "dial
-// past the per-app cap succeeded, want refusal". Restoring the check is green.
+// Fails if admit's per-app cap check is removed: an over-cap upgrade then gets
+// a 101 instead of a 429.
 // ---------------------------------------------------------------------------
 
 func TestRelayHarness_PerAppConnectionCapRefusesAndRoomStaysHealthy(t *testing.T) {
@@ -1099,9 +1070,8 @@ func TestRelayHarness_ConcurrentConnectSendDisconnectRace(t *testing.T) {
 // and asserts each client receives the hint frame first and the normal
 // closure after. The hint carries no seq (it is not a room mutation).
 //
-// WEAKEN DEMO: delete the AnnounceDrain broadcast (or reorder it after
-// CloseAll in main). RED: "c1: expected the reconnect drain hint within
-// 3s, none arrived" - clients are hard-cut with no re-home window.
+// Fails if the AnnounceDrain broadcast is deleted or reordered after CloseAll:
+// clients are then hard-cut with no re-home window.
 // ---------------------------------------------------------------------------
 
 func TestRelayHarness_DrainHintBeforeClose(t *testing.T) {
