@@ -2655,6 +2655,32 @@ operator to bump `--fresh-keys-per-subnet` temporarily. The gate is
 deliberately a subnet-scoped abuse control, not a per-key whitelist -
 this is the trade-off.
 
+### Where the rules live
+
+Two rules were, until recently, expressed only inside the storage adapters, and
+both are stated here because that placement is a design property rather than an
+implementation detail.
+
+**The quota decision is the domain's, the byte count is the adapter's.** Whether
+a total admits a write is a rule; computing how many bytes an identity occupies
+means scanning an enumeration index and is infrastructure. The rule has two
+forms and they are NOT the same:
+
+- a plain write ADDS its bytes to the current total.
+- a write that REPLACES an existing record (a site redeploy) CREDITS the
+  displaced record's bytes first, because they are still counted at the moment
+  of the check but are about to stop existing. Without the credit, redeploying
+  at the same size is charged twice and a user at their limit can never update
+  in place - they would have to delete and re-upload.
+
+The boundary is inclusive on the allowed side: a total landing exactly on the
+cap is at the limit, not over it. A cap of zero or less means no limit.
+
+**Expiry is inclusive.** Content whose ExpiresAt equals the current instant is
+expired. The no-expiry policy is a far-future sentinel rather than a zero time,
+specifically so that a naive "has this passed" test cannot classify
+never-expiring content as expired and hand it to the sweep.
+
 ### Atomicity
 
 The per-identity quota check and the Sybil admit run inside a single
