@@ -61,11 +61,6 @@ func shalePrefixKeygateSubnet(subnet string) []byte {
 	return []byte("keygate/" + subnet + "/")
 }
 
-// markerValue is the non-empty placeholder for index families that
-// carry no data of their own (the expiry index). shale's Put rejects
-// empty values, so a one-byte marker stands in for SlateRepo's []byte{}.
-var markerValue = []byte{'1'}
-
 // PendingPasteTimeout is how old a status=pending paste may be before the
 // reconciler ages it to failed (the pod-death backstop: its in-memory
 // bytes never reached the blob store). It is comfortably longer than a
@@ -202,13 +197,21 @@ func (r *ShaleRepo) scanPrefixOnce(prefix []byte) ([]scanItem, error) {
 		// consumers (keygate timestamps, version rows, owner pastes) decode
 		// the payload exactly as cluster.Get hands it to them. Idempotent for
 		// R=1 / pre-envelope values; a truncated envelope surfaces as an error.
-		payload, derr := stripEnvelope(v)
+		env, derr := cluster.Decode(v)
 		if derr != nil {
 			return nil, fmt.Errorf("scan strip %s: %w", prefix, derr)
 		}
+		if isTombstoneEnvelope(env) {
+			// A DELETED key, not a row. Skipping is what makes this scan agree
+			// with cluster.Get, which already reports not-found for a winning
+			// tombstone; without it every delete leaves a permanent phantom
+			// that decodes as corrupt. NB a bare legacy empty marker is NOT a
+			// tombstone and is deliberately kept - see isTombstoneEnvelope.
+			continue
+		}
 		out = append(out, scanItem{
 			Key:   append([]byte(nil), k...),
-			Value: append([]byte(nil), payload...),
+			Value: append([]byte(nil), env.Payload...),
 		})
 	}
 	return out, nil
