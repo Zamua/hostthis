@@ -1,46 +1,34 @@
 // Package storage's SlateDB-backed room (app-persistence) KV store.
 //
-// SlateDB-backed twin of room_repo.go (the sqlite RoomKVRepo). Adds the
-// room key families to the SAME SlateDB instance the paste + site keys
-// live in, so a room create/write commits in one transaction.
+// Adds the room key families to the SAME SlateDB instance holding paste and
+// site keys, so a room create/write commits in one transaction.
 //
-// The room interface method names (GetRoom, GetValue, ScanRoom, PutValue,
-// DeleteValue, CreateRoom, CountRoomCreates, plus the sweep-side
-// ExpiredRooms / DeleteExpiredRoom / PruneOldRoomCreates) do not collide with
-// the paste / site method names, so they could live directly on SlateRepo.
-// They live there as `...Room` operations and a thin SlateRoomRepo adapter
-// exposes them under the service.RoomRepo + service.SweepRooms interface
-// names, mirroring SlateSiteRepo so the wiring shape is uniform across the
-// site and room tiers. NewSlateRoomRepo(repo) builds the adapter.
+// The room methods live on SlateRepo (their names do not collide with the paste
+// or site ones); a thin SlateRoomRepo adapter exposes them under the
+// service.RoomRepo + service.SweepRooms names, mirroring SlateSiteRepo.
 //
-// Canonical layout in docs/SPEC.md "Room storage on the slatedb (and
-// shale) backend".
+// Layout: docs/SPEC.md "Room storage on the slatedb (and shale) backend".
 //
 // # Key layout
 //
-//	rooms/<app-slug>/<uuid>                   JSON {CreatedAt, UpdatedAt, ExpiresAt} (the room record)
-//	roomkv/<app-slug>/<uuid>/<key>            raw value bytes (verbatim; NOT JSON)
-//	roomcreate/<app-slug>/<subnet>/<ts>/<uuid>  empty value (one marker per room created; ts fixed-width, uuid disambiguates same-ms creates)
-//	roomexpiry/<ts>/<app-slug>/<uuid>         empty value (sweep prefix scan; ts fixed-width)
+//	rooms/<app-slug>/<uuid>                     JSON room record
+//	roomkv/<app-slug>/<uuid>/<key>              raw value bytes, NOT JSON
+//	roomcreate/<app-slug>/<subnet>/<ts>/<uuid>  empty value, one per create
+//	roomexpiry/<ts>/<app-slug>/<uuid>           empty value, sweep scan index
 //
-// The room value is stored VERBATIM (not JSON-wrapped): hostthis never
-// parses a room value, so roomkv/... holds the exact bytes the app PUT.
-// The two marker families carry an empty value, the slatedb index-key
-// convention (mirroring identity_pastes / expiry_sites). The room record's
-// ExpiresAt is the retention clock; byte + key totals are NOT stored on it
-// - they are computed by prefix-scanning roomkv/<app>/<uuid>/ at PUT time,
-// the same way the sqlite backend materializes the namespace for the pure
-// RoomKV.CanPut cap math.
+// Room values are stored verbatim: hostthis never parses one, so roomkv/ holds
+// exactly the bytes the app put. The marker families carry empty values, the
+// slatedb index-key convention.
+//
+// Byte and key totals are NOT stored on the room record; they are computed by
+// prefix-scanning roomkv/<app>/<uuid>/ at put time.
 //
 // # Fixed-width TTL timestamp
 //
-// The roomexpiry and roomcreate <ts> segments use expirySiteTimeFormat
-// (the zero-padded 9-digit-nanos RFC3339, the SAME format the site expiry
-// index uses), so a string compare on the key is byte order == time order
-// EXACTLY, including within a shared whole second. This is NOT
-// time.RFC3339Nano (variable-width, sorts wrong within a second). The room
-// expiry index is new with no prod data, so it adopts the fixed-width
-// format from the start - the same lesson the site expiry index learned.
+// The <ts> segments use expirySiteTimeFormat (zero-padded 9-digit nanos), so a
+// string compare on the key is byte order == time order exactly, including
+// within a shared second. time.RFC3339Nano is variable-width and sorts wrong
+// within a second.
 
 //go:build slatedb
 
