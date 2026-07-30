@@ -2615,6 +2615,37 @@ table, swept by the same periodic worker that deletes expired
 pastes - rows past the window are dropped to keep the table
 bounded.
 
+**Two access patterns, therefore two orderings.** The gate is read
+two ways, and they need opposite key orders:
+
+1. SUBNET-leading, `(ip_subnet, first_seen_at)`: "how many distinct
+   fresh keys has this subnet admitted in the window?" This is the
+   ADMISSION gate, on the connect path.
+2. IDENTITY-leading, `(identity, ip_subnet)`: "how many distinct
+   subnets has this key been seen in?" This feeds the `whoami`
+   session block. DISPLAY ONLY - it is read after admit and gates
+   nothing, so a stale answer is a cosmetic inaccuracy, never a
+   weakened control.
+
+On a relational backend one composite primary key
+`(identity, ip_subnet)` serves the second for free (leading-column
+seek) and a secondary index serves the first. **A KV backend cannot
+derive one ordering from the other**, so both must be written
+explicitly: the subnet-leading row `keygate/<subnet>/<identity>` AND
+an identity-leading entry `keygate_id/<identity>/<subnet>`. Omitting
+the second does not produce a wrong answer - it produces a FULL SCAN
+of every keygate row in the cluster on an interactive command, whose
+cost grows with total admissions across all users and is invisible
+until the table is large.
+
+The identity-leading entry is a DERIVED index. shale's transactions
+are single-shard and the two keys hash to different shards, so it
+cannot be written atomically with the authoritative row; it is
+written best-effort after the admit and REPAIRED by the reconciler,
+exactly like the enumeration indexes. Drift is therefore possible and
+bounded to a display value: a missing entry under-reports the subnet
+count until the next reconcile pass projects it.
+
 **Implication: same key + different subnet = a fresh registration.**
 A user who connects from a new IP (different ISP, mobile network,
 VPN, coffee-shop wifi) is "new" to the gate even if their ssh key is

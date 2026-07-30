@@ -265,6 +265,81 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 	if err := r.reconcileSiteIndexPass(); err != nil {
 		errs = append(errs, err)
 	}
+	// Job 3: reproject the IDENTITY-leading keygate index from the
+	// authoritative subnet-leading rows. This is what BACKFILLS keys admitted
+	// before the index existed, and what repairs the drift the best-effort
+	// co-write at admit time can leave.
+	if err := r.reconcileKeygateIdentityIndex(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// reconcileKeygateIdentityIndex rebuilds keygate_id/<identity>/<subnet> to
+// match the authoritative keygate/<subnet>/<identity> rows.
+//
+// The identity-leading entry cannot be written atomically with the
+// authoritative row - shale transactions are single-shard and the two keys
+// hash to different shards - so it is written best-effort at admit and healed
+// here, exactly like the enumeration indexes. This pass is also the backfill
+// for rows admitted before the index existed.
+//
+// Deliberately BACKGROUND budget and O(all keygate rows): that full scan is
+// precisely the work being moved OFF the interactive path, where it cost
+// 10-18s on a command whose answer is a display value. Nothing waits on this
+// pass, so paying it once every reconcile tick is the right place for it.
+//
+// Policy 1 (skip + continue) applies: one bad row must not stall the pass.
+func (r *ShaleRepo) reconcileKeygateIdentityIndex() error {
+	rows, err := r.aggregateForBackground([]byte("keygate/"))
+	if err != nil {
+		return fmt.Errorf("reconcile keygate index: scan authoritative rows: %w", err)
+	}
+	have, err := r.aggregateForBackground([]byte("keygate_id/"))
+	if err != nil {
+		return fmt.Errorf("reconcile keygate index: scan identity index: %w", err)
+	}
+
+	want := make(map[string][]byte, len(rows))
+	for _, item := range rows {
+		rest := strings.TrimPrefix(string(item.Key), "keygate/")
+		idx := strings.LastIndex(rest, "/")
+		if idx < 0 {
+			continue
+		}
+		subnet, identity := rest[:idx], rest[idx+1:]
+		if subnet == "" || identity == "" {
+			continue
+		}
+		want[string(shaleKeyKeygateIdentity(identity, subnet))] = item.Value
+	}
+
+	present := make(map[string]struct{}, len(have))
+	var errs []error
+	for _, item := range have {
+		key := string(item.Key)
+		present[key] = struct{}{}
+		if _, ok := want[key]; ok {
+			continue
+		}
+		// ORPHAN: no authoritative row. Left alone it would make whoami
+		// over-report subnets the gate has already pruned, and nothing else
+		// would ever remove it.
+		if derr := r.cluster.Delete(item.Key); derr != nil {
+			errs = append(errs, fmt.Errorf("prune orphan keygate index entry %s: %w", item.Key, derr))
+		}
+	}
+	for key, val := range want {
+		if _, ok := present[key]; ok {
+			continue
+		}
+		k := []byte(key)
+		if perr := r.cluster.Transact(k, func(tx backend.Transaction) error {
+			return tx.Put(k, val)
+		}); perr != nil {
+			errs = append(errs, fmt.Errorf("project keygate index entry %s: %w", key, perr))
+		}
+	}
 	return errors.Join(errs...)
 }
 
