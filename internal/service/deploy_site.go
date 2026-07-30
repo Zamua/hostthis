@@ -50,7 +50,7 @@ type SiteRepo interface {
 	SumActiveBytesByOwner(owner string, now time.Time) (int64, error)
 	// ListSitesByOwner returns the identity's active (non-expired) sites so
 	// the SSH `list` verb can show static sites alongside text pastes - a
-	// site counts against the shared 10 MiB quota but never expires, so
+	// site counts against the shared 100 MiB quota but never expires, so
 	// without this it silently consumes quota the owner can neither see nor
 	// free. Read-time expiry filtered.
 	ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error)

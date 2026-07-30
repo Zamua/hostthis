@@ -67,9 +67,14 @@ const (
 	// extract to. The decompression-bomb guard aborts the untar the
 	// instant the running total would exceed this OR the identity's
 	// available quota, whichever is smaller. A site is text/web content,
-	// so this sits at the per-identity quota - a site can fill a user's
+	// so this tracks the per-identity quota - a site can fill a user's
 	// whole budget but never exceed it.
-	MaxSiteBytes = UserQuotaBytes
+	//
+	// Declared as its own value rather than an alias of UserQuotaBytes because
+	// that became a var (test-shrinkable) and a const cannot reference one. The
+	// two are meant to stay equal; MaxSiteBytesMatchesQuota pins that so a
+	// future quota change cannot silently leave the untar guard behind.
+	MaxSiteBytes = 100 << 20 // 100 MiB, tracking UserQuotaBytes
 )
 
 // Errors the safe-untar surfaces. All abort the whole deploy: a

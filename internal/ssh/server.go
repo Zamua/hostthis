@@ -1101,7 +1101,7 @@ STATIC SITES
 
 LIMITS
 
-    10 MiB per identity, counting post-compression bytes across all
+    100 MiB per identity, counting post-compression bytes across all
     your active pastes. HTML, Markdown, diff, or a gzip-tar site archive.
 
     Apps can persist + sync state: https://{{apex}}/  (rooms + realtime API)`

@@ -345,6 +345,40 @@ else
   bad "sftp not refused" "rc=$sftp_rc out=$sftp_out"
 fi
 
+# ---- latency gate ----------------------------------------------------------
+# Behaviour and LATENCY are separate failure modes and smoke used to see only
+# the first. During the 2026-07 drain wedge this suite reported 26 PASS / 0 FAIL
+# continuously while `whoami` took 32-38 SECONDS: every assertion held, and the
+# service was unusable. A verb can be perfectly correct and operationally
+# broken, so a deploy is not verified until both are checked.
+#
+# Budgets are per-verb wall clock over a fresh SSH connection - what a user
+# actually waits for, not server-side processing time. SMOKE_LATENCY_BUDGET_MS
+# raises the ceiling for a deliberately slow environment; SMOKE_SKIP_LATENCY=1
+# skips the gate entirely, which should be rare and never on a deploy.
+LAT_BUDGET_MS="${SMOKE_LATENCY_BUDGET_MS:-6000}"
+LAT_WARN_MS="${SMOKE_LATENCY_WARN_MS:-3000}"
+
+if [ "${SMOKE_SKIP_LATENCY:-0}" = "1" ]; then
+  step "latency gate SKIPPED (SMOKE_SKIP_LATENCY=1)"
+else
+  now_ms(){ python3 -c 'import time;print(int(time.time()*1000))'; }
+  for v in help whoami list; do
+    step "latency: $v"
+    t0=$(now_ms)
+    ssh -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o BatchMode=yes \
+        -o ConnectTimeout=45 "$HOST" "$v" >/dev/null 2>&1
+    t1=$(now_ms); ms=$((t1-t0))
+    if [ "$ms" -gt "$LAT_BUDGET_MS" ]; then
+      bad "latency: $v over budget" "${ms}ms > ${LAT_BUDGET_MS}ms"
+    elif [ "$ms" -gt "$LAT_WARN_MS" ]; then
+      ok "latency: $v ${ms}ms (SLOW, over ${LAT_WARN_MS}ms warn)"
+    else
+      ok "latency: $v ${ms}ms"
+    fi
+  done
+fi
+
 # ---- summary ---------------------------------------------------------------
 printf "\n"
 printf "%s %d / %s %d\n" "$(green PASS)" "$PASS" "$(red FAIL)" "$FAIL"
