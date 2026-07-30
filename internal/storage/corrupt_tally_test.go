@@ -111,75 +111,90 @@ func TestCorruptTally_SummaryNamesTheScan(t *testing.T) {
 }
 
 // THE property, pinned where it actually lives: neither reconciler may log
-// inside the loop that walks records. Log volume per pass must be O(1) in the
-// number of corrupt rows, not O(N).
+// once per RECORD. Log volume per pass must be O(1) in the number of corrupt
+// rows, not O(N).
 //
 // This is a source-level guard because the property is structural and the
 // reconcilers it constrains are behind the slatedb tag, needing a live cluster
-// and a real object store to drive. A behavioural version of this test would
-// therefore not run in CI, which is exactly how the original defect survived
-// review: it was a pure cost regression with no behavioural symptom, so every
-// functional check stayed green while a read went from 0.45s to 19s. Precedent
-// for inspecting the package graph rather than the runtime lives in
-// layering_test.go.
+// and a real object store to drive. A behavioural version would therefore not
+// run in CI, which is exactly how the original defect survived review: a pure
+// cost regression with no behavioural symptom, so every functional check stayed
+// green while a read went from 0.45s to 19s. Precedent for inspecting source
+// rather than runtime lives in layering_test.go.
 //
-// A tally-level test cannot substitute. summary() returns one string by
-// construction, so asserting it has one line is vacuous; the regression is a
-// Printf being reasonably re-added next to a note() call, and only the
-// reconciler source shows that.
+// The check is EVERY log call inside a record loop, not merely the ones next to
+// a tally. An earlier version of this guard anchored on loops that already
+// called the tally, which meant it only inspected code that was already fixed -
+// and it duly passed while a third per-record log site sat untouched in the
+// version loop, emitting 20,108 lines a pass. A guard that only looks where the
+// fix is cannot report the absence of the fix.
+//
+// Transient-failure logs are legitimately per-record: they fire when a write or
+// prune FAILS, so their volume tracks failures rather than debris, and a burst
+// of them is a real signal. Those are opted out explicitly with a
+// transient-failure-log comment, which makes the exemption a deliberate,
+// reviewable decision rather than a silent one. A new log for a PERSISTENT
+// condition - a corrupt row, which is corrupt on every pass forever - gets no
+// such marker and fails here.
 func TestReconcilersDoNotLogPerRecord(t *testing.T) {
+	const exempt = "transient-failure-log"
 	for _, file := range []string{"shale_reconcile.go", "shale_site_repo.go"} {
 		t.Run(file, func(t *testing.T) {
 			fset := token.NewFileSet()
-			f, err := parser.ParseFile(fset, file, nil, 0)
+			f, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
 			if err != nil {
 				t.Fatalf("parse %s: %v", file, err)
 			}
 
-			calls := func(n ast.Node, name string) []token.Pos {
-				var out []token.Pos
-				ast.Inspect(n, func(n ast.Node) bool {
-					if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == name {
-						out = append(out, sel.Pos())
-					}
-					return true
-				})
-				return out
+			// Lines carrying (or immediately preceded by) the opt-out marker.
+			exemptLines := map[int]bool{}
+			for _, cg := range f.Comments {
+				if !strings.Contains(cg.Text(), exempt) {
+					continue
+				}
+				end := fset.Position(cg.End()).Line
+				// The marker covers its own line and the statement it precedes.
+				exemptLines[end] = true
+				exemptLines[end+1] = true
 			}
 
-			// Find every record-walking loop: one that tallies a corrupt row.
-			// Anchoring on the tally calls rather than on a line range keeps the
-			// guard correct as the surrounding code moves.
-			var checked int
+			var loops, checked int
 			ast.Inspect(f, func(n ast.Node) bool {
-				body, ok := n.(*ast.RangeStmt)
+				rng, ok := n.(*ast.RangeStmt)
 				if !ok {
 					return true
 				}
-				tallies := append(calls(body, "noteUnrepairable"), calls(body, "notePlaceholder")...)
-				if len(tallies) == 0 {
+				loops++
+				ast.Inspect(rng.Body, func(m ast.Node) bool {
+					sel, ok := m.(*ast.SelectorExpr)
+					if !ok || sel.Sel.Name != "repoLog" {
+						return true
+					}
+					checked++
+					line := fset.Position(sel.Pos()).Line
+					if exemptLines[line] {
+						return true
+					}
+					t.Errorf("%s:%d logs once per record inside a loop, with no %q marker. A corrupt or "+
+						"otherwise persistently-bad row is bad on EVERY pass, so a log here costs one line per "+
+						"row per pass forever: observed at ~20k rows producing ~1,770 lines/sec, starving the "+
+						"request path (a read went 0.45s -> 19s) while every behavioural check stayed green. "+
+						"Tally it and summarise once per pass (see corruptTally). If this genuinely fires only "+
+						"on a TRANSIENT failure, add the %q comment above it saying why.",
+						file, line, exempt, exempt)
 					return true
-				}
-				checked++
-				if logs := calls(body, "repoLog"); len(logs) > 0 {
-					t.Errorf("%s: the record loop at %s logs via repoLog() at %s. A corrupt row is corrupt on "+
-						"EVERY pass and the unrepairable class can never be repaired by a retry, so a log call here "+
-						"costs one line per row per pass forever: observed at 19,764 rows producing ~60 lines/sec and "+
-						"~1.5 CPU cores, starving the request path (a read went 0.45s -> 19s) while every behavioural "+
-						"check stayed green. Tally it and summarise once per pass instead - see corruptTally.",
-						file, fset.Position(body.Pos()), fset.Position(logs[0]))
-				}
+				})
 				return true
 			})
 
-			// Without this the test passes vacuously the moment the loop is
-			// refactored into a shape the walk above stops recognising - the same
-			// class of silent-pass bug this whole change exists to fix.
-			if checked == 0 {
-				t.Fatalf("%s: found no record loop containing a corruptTally call, so this guard checked NOTHING. "+
-					"Either the corrupt-row handling moved or it stopped tallying; re-point the guard rather than "+
-					"leaving it green.", file)
+			// Without this the guard silently passes the moment the loops move
+			// or are rewritten into a shape the walk stops recognising - the
+			// same vacuous-pass bug this change exists to fix.
+			if loops == 0 {
+				t.Fatalf("%s: found no range loops at all, so this guard checked NOTHING; re-point it "+
+					"rather than leaving it green", file)
 			}
+			t.Logf("%s: inspected %d loops, %d repoLog call sites", file, loops, checked)
 		})
 	}
 }
