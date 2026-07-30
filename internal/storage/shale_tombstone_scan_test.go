@@ -2,27 +2,13 @@
 
 package storage_test
 
-// A DELETED key must be invisible to the scan path, exactly as it already is
-// to cluster.Get - while a BARE legacy empty marker must still come through.
+// A deleted key must be invisible to the scan path, as it already is to
+// cluster.Get, while a bare legacy empty marker must still come through.
 //
-// At R>1 shale does not remove a key on delete: it writes an empty-payload
-// tombstone envelope under the commit stamp. cluster.Get resolves that to
-// not-found, but a raw ScanPrefix hands the stored bytes back, so without a
-// tombstone check every deleted record reappears to every scan consumer as an
-// item whose value is empty - and empty does not read as "absent" to a
-// consumer, it reads as CORRUPT (json.Unmarshal gives "unexpected end of JSON
-// input"). A deleted paste therefore became a permanent phantom corrupt row
-// that no retry could repair, re-found on every reconcile pass for as long as
-// the tombstone lived. Deletes are ordinary traffic, so the set only grew.
-//
-// The tombstone is CONSTRUCTED here rather than produced by calling Delete,
-// deliberately: shale only tombstones at R>1 ("At R=1 the raw tx.Put /
-// tx.Delete path is unchanged"), and the shared test helper opens an R=1
-// cluster. A Delete on an R=1 repo removes the key outright, so a test written
-// that way would pass whether or not the fix were present - it would assert
-// nothing at all. Writing the exact bytes an R>1 delete leaves keeps the test
-// honest on the cheap R=1 fixture, and the setup asserts the shape it depends
-// on rather than trusting it.
+// The tombstone is CONSTRUCTED rather than produced by Delete: shale only
+// tombstones at R>1, and the shared helper opens an R=1 cluster where Delete
+// removes the key outright. A Delete-based test would pass with or without the
+// skip and assert nothing.
 //
 //	go test -tags slatedb -run TestShaleTombstone ./internal/storage
 

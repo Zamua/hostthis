@@ -175,18 +175,12 @@ func TestShaleShardKeyBrefCoRoutes(t *testing.T) {
 	}
 }
 
-// CO-LOCATION of the identity-leading keygate index.
+// Co-location of the identity-leading keygate index.
 //
-// This is the half of that index that makes it worth having, and it is
-// invisible to a correctness test: a SCATTERED index returns exactly the same
-// answer, just via a cross-shard fan-out instead of a local scan. The fan-out's
-// cost is set by the number of units, not the rows matched - measured at 26.7s
-// to return ONE entry, alongside 38ms for the co-located subnet scan in the
-// same call. So correctness tests passed while the feature did nothing.
-//
-// Untagged, so CI actually runs it: shaleShardKey is pure, and a family that
-// silently loses its case here degrades to hashing the whole key, which is a
-// pure performance regression with no behavioural symptom.
+// Invisible to a correctness test: a scattered index returns the same answer
+// via a cross-shard fan-out, whose cost is set by unit count rather than rows
+// matched. Untagged so CI runs it, since losing a shard-key case is a pure cost
+// regression with no behavioural symptom.
 func TestShardKey_KeygateIdentityIndexCoLocatesPerIdentity(t *testing.T) {
 	const id = "key:frank"
 	subnets := []string{

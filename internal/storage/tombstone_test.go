@@ -11,16 +11,11 @@ import (
 	"github.com/Zamua/shale/pkg/cluster"
 )
 
-// UNTAGGED on purpose: the scan path these guard is behind the slatedb tag,
-// which CI does not build, so a tagged pin would not run in CI.
+// Untagged: the scan path is behind the slatedb tag, but CI builds no tags.
 
-// The predicate's contract, and specifically the distinction that makes it
-// safe: STAMPED-and-empty is a tombstone; BARE-and-empty is live legacy data.
-//
-// Getting this wrong in the lenient direction leaves the phantom-row bug in
-// place. Getting it wrong in the strict direction is worse: it silently drops
-// migrated slatedb enumeration entries, which the quota scan sums, so an owner
-// would be under-charged with no error surfaced anywhere.
+// Stamped-and-empty is a tombstone; bare-and-empty is live migrated data.
+// Too lenient leaves deleted rows visible as corrupt; too strict silently drops
+// enumeration entries the quota scan sums.
 func TestIsTombstoneEnvelope(t *testing.T) {
 	stamped := cluster.Stamp{TimestampNanos: 1, NodeID: "n1"}
 	for _, tc := range []struct {
@@ -45,10 +40,8 @@ func TestIsTombstoneEnvelope(t *testing.T) {
 	}
 }
 
-// The distinction must survive a real Encode/Decode round trip, not just hold
-// for hand-built structs. If Encode stopped recording the stamp, or Decode
-// stopped signalling bareness with the zero stamp, the predicate would quietly
-// reclassify one case as the other.
+// The distinction must survive a real round trip: if Decode stopped signalling
+// bareness with the zero stamp, the predicate would reclassify one as the other.
 func TestIsTombstoneEnvelope_SurvivesRoundTrip(t *testing.T) {
 	tomb, err := cluster.Decode(cluster.Encode(cluster.Envelope{
 		Stamp: cluster.Stamp{TimestampNanos: 42, NodeID: "n1"},
@@ -72,21 +65,13 @@ func TestIsTombstoneEnvelope_SurvivesRoundTrip(t *testing.T) {
 	}
 }
 
-// THE INVARIANT the tombstone skip rests on: no shale-backend write may store
-// an empty value.
+// The invariant the tombstone skip rests on: no shale write may store an empty
+// value.
 //
-// isTombstone treats an empty payload as a deleted key and the scan drops it.
-// That is only sound because shale's Put REJECTS empty values, so no live value
-// can ever be empty - which is precisely why markerValue exists as a one-byte
-// stand-in for SlateRepo's []byte{}. If someone later adds an empty-value Put
-// on a shale path (reasonably, copying the SlateRepo marker idiom, which DOES
-// use []byte{} and has its own separate scanPrefix), that family's rows would
-// become invisible to every scan: silently dropped as tombstones, with no
-// error anywhere. Data would simply stop being enumerated.
-//
-// That failure is invisible by construction, so it needs a structural guard
-// rather than a behavioural one. The SlateRepo files are deliberately NOT
-// checked - their empty markers are correct, they do not share this scan path.
+// Sound only because shale's Put rejects empty values, so no live value can be
+// empty. An empty-value Put added here would make that family invisible to
+// every scan, silently and with no error. SlateRepo is not checked: its empty
+// markers are correct and it has its own scan path.
 func TestNoShaleWriteStoresAnEmptyValue(t *testing.T) {
 	files, err := filepath.Glob("shale_*.go")
 	if err != nil {

@@ -1,94 +1,60 @@
 // Package storage's shale-backed metadata implementation.
 //
-// ShaleRepo is the third metadata backend, satisfying the same four
-// service-layer interfaces (PasteRepo, PasteAdmin, SweepRepo,
-// KeyGateRepo) as the sqlite PasteRepo and the slatedb SlateRepo. Where
-// SlateRepo talks to one SlateDB instance directly, ShaleRepo talks to a
-// shale cluster.Cluster, which routes each key to the node that owns its
-// shard and so scales horizontally. The slate backend is wrapped as the
-// per-node KV engine, so a single-node ShaleRepo and the direct SlateRepo
-// sit on the same storage primitive; the difference is the cluster layer
-// (sharded routing + per-shard CAS) above it.
+// ShaleRepo satisfies the same service-layer interfaces as PasteRepo and
+// SlateRepo, but talks to a shale cluster.Cluster, which routes each key to the
+// node owning its shard. The slate backend is its per-node KV engine, so the
+// difference from SlateRepo is the cluster layer above it.
 //
-// Canonical design: docs/SPEC.md "Shale-backed metadata storage".
+// Design: docs/SPEC.md "Shale-backed metadata storage". Needs cgo +
+// libslatedb_uniffi; built only under -tags slatedb.
 //
-// Build/runtime requirement: cgo + libslatedb_uniffi on the platform
-// loader path, exactly like SlateRepo (the slate backend ShaleRepo wraps
-// pulls in slatedb). Built only under -tags slatedb.
+// # Key layout
 //
-// # Key layout (unchanged from SlateRepo)
+// Co-location is achieved by shaleShardKey extracting a shard key per family,
+// not by renaming keys:
 //
-// The key names are identical to SlateRepo's so the row schemas and the
-// observable contract carry over without a rename. Co-location across
-// shards is achieved by a custom ShardKeyFn (shaleShardKey in
-// shale_shardkey.go) that extracts a shard key per key family, NOT by
-// renaming keys:
+//	pastes/<slug>                  -> <slug>
+//	versions/<slug>/<NNNN>         -> <slug>
+//	slug_owner/<slug>              -> <slug>
+//	expiry/<rfc3339>/<slug>        -> <slug>   (slug is the LAST segment)
+//	identity_pastes/<id>/<slug>    -> <id>     (per-owner enumeration index)
+//	identity_first_seen/<id>       -> <id>
+//	keygate/<subnet>/<identity>    -> <subnet> (Sybil admission)
+//	keygate_id/<identity>/<subnet> -> <identity>
 //
-//	pastes/<slug>                      -> shard key <slug>
-//	versions/<slug>/<NNNN>             -> shard key <slug>
-//	slug_owner/<slug>                  -> shard key <slug>
-//	expiry/<rfc3339>/<slug>            -> shard key <slug>  (slug is the LAST segment)
-//	identity_pastes/<id>/<slug>        -> shard key <id>    (per-owner enumeration index)
-//	identity_first_seen/<id>           -> shard key <id>
-//	keygate/<subnet>/<identity>        -> shard key <subnet>
-//
-// Routing every key of a family to the same shard makes a transaction
-// that touches one family for one subject a single-shard CAS, committed
-// through cluster.Transact(pinKey, fn).
+// Routing a family's keys to one shard makes a transaction touching one family
+// for one subject a single-shard CAS via cluster.Transact(pinKey, fn).
 //
 // # Transaction model
 //
-// shale's CAS transaction (cluster.Transact) is read-modify-write under
-// optimistic concurrency: tx.Get records a read-check, tx.Put / tx.Delete
-// buffer writes, and Commit validates the read-set on the owner shard and
-// applies atomically (retrying the closure on conflict). Two constraints
-// shape the code:
+// cluster.Transact is read-modify-write under optimistic concurrency. Two
+// constraints shape the code:
 //
-//   - ScanPrefix is NOT supported inside a CAS transaction. Every scan
-//     (a paste's versions, an owner's index entries, a subnet's keygate
-//     rows) runs OUTSIDE the transaction via cluster.ScanPrefix (single
-//     shard) or cluster.Aggregate (cross-shard). Where the result of a
-//     scan must be made race-safe (e.g. the next version number must not
-//     be reused), the specific key the decision hinges on is re-read
-//     INSIDE the transaction as a read-check, so a racing writer that
-//     grabbed it conflicts and the closure retries.
-//   - Put rejects empty values (cluster.ErrEmptyValue); the empty-payload
-//     shape is reserved for Delete tombstones. Index-marker families that
-//     SlateRepo stored as empty values carry a one-byte / JSON value here.
+//   - ScanPrefix is NOT supported inside a CAS transaction, so every scan runs
+//     outside it. Where a scan's result must be race-safe (the next version
+//     number must not be reused), the key the decision hinges on is re-read
+//     INSIDE the transaction as a read-check, so a racing writer conflicts.
+//   - Put rejects empty values: the empty-payload shape is reserved for delete
+//     tombstones. Marker-only families carry a one-byte value instead.
 //
 // # Cross-family writes and the scan-derived quota
 //
-// Insert / AppendVersion / Delete / DeleteVersion span the {slug}
-// authoritative shard and the {id} enumeration-index shard, which cannot
-// be one transaction. There is deliberately NO stored per-owner byte
-// counter: the per-identity quota is DERIVED by ONE single-shard prefix
-// scan of the owner's identity_pastes / identity_sites enumeration index,
-// summing the cached (size, expires_at) each value-bearing entry carries -
-// zero per-entry fan-out to the {slug} shards (docs/SPEC.md "Scan-derived
-// quota"). A write is therefore a plain sequence: check the quota (scan),
-// authoritative write on {slug}, then best-effort enumeration-index write
-// on {id}. The freshness contract: every size-changing operation maintains
-// the cached size (insert seeds it, append + version-tombstone refresh it,
-// delete/fail drop the entry), and the reconciler's reprojection rebuilds
-// every entry's cached values from the authoritative rows - so an
-// identity's DURABLE used bytes can never exceed the cap; the transient
-// gaps (a crash between the row write and the index write, a lost cache
-// refresh, an orphaned entry, two concurrent same-owner uploads passing
-// the non-atomic check) are each bounded by one record's bytes and healed
-// within one reconcile cycle. The reconciler reprojects the enumeration
-// index from the authoritative rows (an idempotent SET heal), so nothing
-// can durably drift.
+// Insert / AppendVersion / Delete span the {slug} and {id} shards, which cannot
+// be one transaction. There is no stored byte counter: the quota is DERIVED by
+// one single-shard scan of the owner's enumeration index, summing the cached
+// size each entry carries.
+//
+// So a write is: check quota (scan), authoritative write on {slug}, then
+// best-effort index write on {id}. Durable used-bytes can never exceed the cap;
+// the transient gaps (a crash between the two writes, an orphaned entry, two
+// concurrent same-owner uploads passing the non-atomic check) are each bounded
+// by one record and healed by the reconciler's idempotent reprojection.
 //
 // # File layout
 //
-// The paste-side ShaleRepo implementation spans four files: this one
-// (config, lifecycle, open/close, core CRUD reads + writes, blob-pointer
-// binding, sweep expiry), shale_helpers.go (key builders, JSON/envelope/
-// counter codecs, scan helpers), shale_keygate.go (the KeyGateRepo Sybil
-// rate limit), and shale_reconcile.go (Reconcile + the enumeration-index
-// reprojection/prune + the guarded index-entry writes). The site and room
-// tiers live in shale_site_repo.go / shale_room_repo.go, and the shard-key
-// routing in shale_shardkey.go.
+// Paste-side: this file (config, lifecycle, CRUD, blob binding, expiry),
+// shale_helpers.go (keys, codecs, scans), shale_keygate.go, shale_reconcile.go.
+// Site and room tiers and shard-key routing live in their own files.
 
 //go:build slatedb
 

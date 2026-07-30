@@ -1,12 +1,5 @@
-// Retry policy for the shale acquiring-window refusal.
-//
-// DELIBERATELY NOT behind the `slatedb` build tag, even though its only
-// callers are. CI runs `go test ./...` with no tags, so a tagged test does
-// not execute there - and the pins below exist precisely to fail when
-// someone changes a constant. A regression guard that CI never runs cannot
-// guard anything; it just looks like coverage. The logic here needs only
-// stdlib plus pkg/cluster, which builds tagless, so there is no reason to
-// hide it. See servingmarker.go upstream, extracted for the same reason.
+// Untagged on purpose: the callers are behind the slatedb tag, but CI builds no
+// tags, and these constants are exactly what the pins exist to catch changing.
 
 package storage
 
@@ -18,88 +11,50 @@ import (
 	"github.com/Zamua/shale/pkg/cluster"
 )
 
-// Bounded retry for the ONE shale refusal that is bounded by a mount rather
-// than by an outage.
+// retryPolicy bounds retries of the one shale refusal that resolves without
+// external recovery: a routed op refusing with cluster.ErrAcquiring because its
+// unit is mid-handoff.
 //
-// During a handoff a unit can be routed to a node that is mid-acquire, and a
-// routed op there refuses with cluster.ErrAcquiring: the work will become
-// possible once the handoff completes, with nothing external needing to
-// recover. shale signals that clearly, but does NOT re-route within the same
-// op, so without this the refusal reaches the caller as a request failure.
+// errors.Is(err, cluster.ErrAcquiring) is the ONLY retryable condition, and the
+// exclusions are load-bearing:
 //
-// Deliberately narrow. errors.Is(err, cluster.ErrAcquiring) is the ONLY
-// retryable condition:
-//
-//   - A bare codes.Unavailable is NOT retried. It is overloaded with genuine
-//     peer-down, and retrying a real outage converts a clean fast failure into
-//     a slow one while adding load exactly when the cluster is struggling.
-//   - DeadlineExceeded is NOT retried. A permanently-mixed read (some legs
-//     acquiring, some genuinely down, window outliving the read budget)
-//     terminates that way, and it is indistinguishable from real slowness from
-//     out here, so it falls through to normal error handling.
-//
-// Both exclusions are load-bearing and pinned by tests.
+//   - a bare codes.Unavailable is overloaded with genuine peer-down, and
+//     retrying a real outage turns a fast failure slow while adding load.
+//   - DeadlineExceeded is indistinguishable from real slowness from here.
 type retryPolicy struct {
 	attempts int           // total calls, including the first
 	backoff  time.Duration // base delay; doubles per retry
 }
 
 var (
-	// readRetry is the REQUEST-PATH policy. Each attempt can burn shale's
-	// entire per-dispatch read budget (HOSTTHIS_SHALE_READ_TIMEOUT) before
-	// refusing, and the outer bound is the http.Server WriteTimeout, so the
-	// attempt count follows from that arithmetic rather than being chosen for
-	// feel: attempts x read-budget, plus backoff, must fit inside the response
-	// deadline with margin left for rendering and write-out.
+	// readRetry is the request-path policy. Each attempt can burn shale's whole
+	// per-dispatch read budget, and the outer bound is the http.Server
+	// WriteTimeout, so attempts x read-budget plus backoff must fit inside the
+	// response deadline with margin for rendering.
 	//
-	// Two is also sufficient rather than merely safe. shale already re-polls
-	// INSIDE its own budget, so this is a second line, not the first: one
-	// extra attempt roughly doubles the covered window, and a handoff that
-	// outlives ~16s is a genuine cluster problem rather than the sub-second
-	// blip this exists for. TestReadRetryPolicy_FitsInsideRequestDeadline
-	// fails if the arithmetic stops holding.
+	// Two is sufficient because shale re-polls inside its own budget: this is a
+	// second line, not the first, and a handoff outliving it is a cluster
+	// problem rather than the blip this covers.
 	readRetry = retryPolicy{attempts: 2, backoff: 150 * time.Millisecond}
 
-	// backgroundRetry is for the cross-shard background scans (expiry sweep,
-	// referenced-blob set, keygate prune). They are NOT request-path, so no
-	// outer deadline constrains them and they can afford to be patient.
+	// backgroundRetry is for cross-shard background scans. Nothing waits on
+	// them, so they can be patient.
 	//
-	// The span is set by MEASUREMENT, not by feel. The first version of this
-	// (3 attempts, 500ms base) spanned ~1.5s and was observed exhausting on
-	// EVERY background scan during a rolling deploy, because a node holds its
-	// positions unmounted for the length of the handoff, measured at 17-21s.
-	// A retry an order of magnitude shorter than the window it exists to
-	// cover is not patience, it just postpones the same failure by 1.5s. So
-	// the span must exceed a realistic handoff: 6 attempts at a 1s base gives
-	// 1+2+4+8+16 = 31s of backoff. TestBackgroundRetryPolicy_CoversAHandoff
-	// pins that against the observed window.
-	//
-	// Blocking a periodic background job for ~30s is free: none of the three
-	// consumers is latency-sensitive, and the alternative is the scan failing
-	// and waiting for its next tick anyway.
+	// The span must EXCEED a real handoff (a node holds positions unmounted for
+	// 17-21s) or it just postpones the same failure. 6 attempts at a 1s base
+	// gives 31s of backoff.
 	backgroundRetry = retryPolicy{attempts: 6, backoff: time.Second}
 )
 
-// retryAcquiring runs fn, retrying ONLY while it refuses with
-// cluster.ErrAcquiring, up to p.attempts total calls with exponential
-// backoff. Any other error (and success) returns immediately, unchanged, so
-// callers keep their existing error handling. On exhaustion the last
-// acquiring error is returned so the caller still sees the real reason.
+// retryAcquiring runs fn, retrying only while it refuses with
+// cluster.ErrAcquiring. Any other error returns unchanged; on exhaustion the
+// last acquiring error surfaces.
 //
-// A retry is logged ONLY when one actually happens, never on the success path, so a
-// healthy read stays silent and the log volume is itself the signal.
+// A retry logs only when one actually happens. Unobserved, a retry firing
+// constantly and one never firing look identical from outside: both are a
+// quiet, green deploy.
 //
-// This exists because the two ways this can be wrong are indistinguishable
-// from outside without it. If the handoff window is wider than believed the
-// retry fires constantly; if the sentinel silently stops matching (an
-// upstream call-site regression, a reason dropped somewhere in the chain)
-// the retry never fires at all. BOTH present as a quiet, green deploy. The
-// log line is what separates "working and rarely needed" from "wired up
-// wrong", and it is the only way to report a real firing upstream.
-//
-// op names the operation rather than the key: a spike needs to be
-// attributable to a call path, and keys carry user content that has no
-// business in operator logs.
+// op names the operation rather than the key, since keys carry user content.
 func retryAcquiring(p retryPolicy, lg *log.Logger, op string, fn func() error) error {
 	if p.attempts < 1 {
 		p.attempts = 1
@@ -107,8 +62,7 @@ func retryAcquiring(p retryPolicy, lg *log.Logger, op string, fn func() error) e
 	var err error
 	for attempt := 0; attempt < p.attempts; attempt++ {
 		if attempt > 0 {
-			// Sleep only between attempts: a succeeding op must never pay
-			// backoff, because that would tax every healthy read.
+			// Sleep only between attempts, so a succeeding op pays no backoff.
 			time.Sleep(p.backoff << (attempt - 1))
 			if lg != nil {
 				lg.Printf("shale: %s refused with the acquiring-window signal; retry %d/%d (a unit is mid-handoff)",
