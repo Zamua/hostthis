@@ -1,16 +1,9 @@
-// Package archive is the gzip-tar ADAPTER for site uploads.
+// Package archive is the gzip-tar adapter for site uploads.
 //
-// It owns the codec and nothing else: open the gzip stream, iterate the tar,
-// map tar's type flags onto the domain's format-neutral entry kinds, and hand
-// each entry to the domain extractor. Every security guard - path traversal,
-// decompression bomb, file and entry counts, manifest size - lives in the
-// domain, because none of them is about tar. They would read identically for a
-// zip or a directory walk.
-//
-// This package exists so the domain does not import archive/tar and
-// compress/gzip. It previously did, which no layering rule caught: neither is a
-// forbidden package by name, but both are wire formats, and a wire format is a
-// mechanism the domain has no business knowing.
+// It owns the codec and nothing else. Every security guard lives in the domain,
+// because none of them is about tar. Exists so the domain need not import
+// archive/tar and compress/gzip: a wire format is a mechanism the domain has no
+// business knowing.
 package archive
 
 import (
@@ -23,23 +16,19 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// Untar streams a gzip-tar archive from src, applying the domain's site-upload
-// guards to every entry, and returns the resulting manifest.
+// Untar streams a gzip-tar archive from src, applying the domain's guards to
+// every entry.
 //
-// quotaBudget is the identity's REMAINING quota in bytes; the domain caps the
-// site at min(quotaBudget, MaxSiteBytes).
+// quotaBudget is the identity's remaining quota in bytes.
 //
-// Performs NO durable I/O of its own: it reads src and calls sink.Store. On
-// error the caller treats the deploy as failed and persists nothing - blobs the
-// sink may already have written are content-addressed and get GC'd if they end
-// up unreferenced.
+// No durable I/O of its own. On error the caller persists nothing; blobs the
+// sink already wrote are content-addressed and GC'd if unreferenced.
 func Untar(src io.Reader, sink domain.FileSink, quotaBudget int64) (domain.Manifest, error) {
 	ex := domain.NewSiteExtractor(quotaBudget)
 
 	gz, err := gzip.NewReader(src)
 	if err != nil {
-		// Not a valid gzip stream after all (truncated / corrupt). An
-		// unsupported upload, not a server error.
+		// Truncated or corrupt: an unsupported upload, not a server error.
 		return domain.Manifest{}, fmt.Errorf("%w: not a valid gzip stream: %v", domain.ErrUnsupportedKind, err)
 	}
 	defer gz.Close() //nolint:errcheck
@@ -53,8 +42,7 @@ func Untar(src io.Reader, sink domain.FileSink, quotaBudget int64) (domain.Manif
 		if err != nil {
 			return domain.Manifest{}, fmt.Errorf("%w: corrupt tar: %v", domain.ErrUnsupportedKind, err)
 		}
-		// tr is the reader for the CURRENT entry and is only valid until the
-		// next Next(), which is exactly the lifetime Add needs.
+		// tr reads the current entry and is valid only until the next Next().
 		if err := ex.Add(entryOf(hdr), tr, sink); err != nil {
 			return domain.Manifest{}, err
 		}
@@ -63,18 +51,15 @@ func Untar(src io.Reader, sink domain.FileSink, quotaBudget int64) (domain.Manif
 }
 
 // legacyTypeRegA is tar's pre-1.11 alias for a regular file. Go's reader
-// normalises it to TypeReg, so this arm is belt-and-braces rather than
-// load-bearing - spelled as the raw byte because the named constant is
-// deprecated and staticcheck rejects it.
+// normalises it to TypeReg, so this arm is defensive. Spelled as the raw byte
+// because the named constant is deprecated.
 const legacyTypeRegA = '\x00'
 
 // entryOf maps a tar header onto the domain's format-neutral entry.
 //
-// The mapping is deliberately CLOSED: anything that is not a plain file or a
-// directory becomes EntryOther, which the domain rejects. Listing the allowed
-// types rather than the disallowed ones is what keeps an exotic or
-// newly-standardised type flag from defaulting into "allowed" - that category
-// is where the link-following and device-node attacks live.
+// Deliberately closed: anything not a plain file or directory becomes
+// EntryOther, which the domain rejects. Listing allowed rather than disallowed
+// types keeps an exotic type flag from defaulting into "allowed".
 func entryOf(hdr *tar.Header) domain.ArchiveEntry {
 	kind := domain.EntryOther
 	switch hdr.Typeflag {
