@@ -2,20 +2,11 @@
 
 package storage_test
 
-// The IDENTITY-leading keygate index.
+// The identity-leading keygate index.
 //
-// "Which subnets has this key been seen in" used to scan every keygate row in
-// the cluster and filter in Go. That returns the RIGHT answer at a cost that
-// grows with total admissions across ALL users - invisible while the table is
-// small, and measured at 10-18s on an interactive command once it was not. The
-// relational schema this replaced got the fast path for free from
-// PRIMARY KEY (identity, ip_subnet); a KV store cannot derive one ordering from
-// the other, so the identity-leading view is materialised explicitly.
-//
-// These tests pin the two things that can go wrong with a derived index:
-// it can disagree with the authoritative rows, and it can fail to be cleaned
-// up. A faster index that returns a different answer is strictly worse than
-// the slow scan.
+// Two things can go wrong with a derived index: it can disagree with the
+// authoritative rows, and it can fail to be cleaned up. A faster index that
+// returns a different answer is worse than the scan it replaces.
 //
 //	go test -tags slatedb -run TestShaleKeygateIndex ./internal/storage
 
@@ -27,9 +18,8 @@ import (
 
 const kgWindow = 24 * time.Hour
 
-// The index must agree with the authoritative rows, for the same identity,
-// across MULTIPLE subnets - which is the whole point of the query, and the
-// case a single-subnet test would pass without exercising.
+// Must agree with the authoritative rows across multiple subnets, which a
+// single-subnet test would not exercise.
 func TestShaleKeygateIndex_CountsSubnetsForIdentity(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -74,9 +64,8 @@ func TestShaleKeygateIndex_CountsSubnetsForIdentity(t *testing.T) {
 	}
 }
 
-// Out-of-window entries must not count. The window filter lived in the old
-// scan; it has to survive the move to the index, and a test that only uses
-// fresh rows would never notice its loss.
+// Out-of-window entries must not count. A test using only fresh rows would not
+// notice the window filter going missing.
 func TestShaleKeygateIndex_ExcludesOutOfWindow(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -104,10 +93,8 @@ func TestShaleKeygateIndex_ExcludesOutOfWindow(t *testing.T) {
 	}
 }
 
-// Pruning an authoritative row must drop its index entry too. Otherwise the
-// derived index outlives the fact it describes and whoami over-reports subnets
-// the gate has already forgotten - and nothing else would ever remove them, so
-// the error grows without bound.
+// Pruning an authoritative row must drop its index entry, or the index outlives
+// the fact it describes and the count over-reports without bound.
 func TestShaleKeygateIndex_PruneDropsTheIndexEntry(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -143,9 +130,9 @@ func TestShaleKeygateIndex_PruneDropsTheIndexEntry(t *testing.T) {
 	}
 }
 
-// The reconciler must BACKFILL an identity entry for a row that has none.
-// This is the migration path for every key admitted before the index existed,
-// and the repair for the best-effort co-write failing at admit time.
+// Reconcile must backfill an entry for a row that has none: the migration path
+// for keys admitted before the index existed, and the repair when the
+// best-effort co-write at admit fails.
 func TestShaleKeygateIndex_ReconcileBackfillsAndPrunes(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -181,15 +168,9 @@ func TestShaleKeygateIndex_ReconcileBackfillsAndPrunes(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 
-	// Assert on WHICH entries exist, not on the count.
-	//
-	// The count alone cannot distinguish success from two errors cancelling
-	// out: if reconcile did nothing at all, the un-backfilled legacy row
-	// contributes 0 and the un-pruned orphan contributes 1, for a total of 1 -
-	// the same answer as a fully correct pass. This test asserted that count
-	// and duly passed with the reconcile job deleted, which a sabotage check
-	// caught. Naming the exact keys makes the two effects independently
-	// observable.
+	// Assert on WHICH entries exist, not the count. The count cannot distinguish
+	// success from two errors cancelling: an un-backfilled row contributes 0 and
+	// an un-pruned orphan contributes 1, totalling the correct answer.
 	backfilled := []byte("keygate_id/" + id + "/10.3.0.0/24")
 	orphan := []byte("keygate_id/" + id + "/10.9.9.0/24")
 
