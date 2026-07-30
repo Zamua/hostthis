@@ -264,11 +264,12 @@ func (r *SiteRepo) Insert(s domain.Site) error {
 // expired rows too: the HTTP layer 404s them, the sweep deletes them.
 func (r *SiteRepo) Get(slug domain.Slug) (domain.Site, error) {
 	row := r.db.QueryRow(`
-		SELECT slug, identity, manifest, created_at, updated_at, expires_at
+		SELECT slug, identity, manifest, deduped_size, created_at, updated_at, expires_at
 		FROM sites WHERE slug = ?
 	`, slug.String())
 	var slugStr, identStr, manStr, created, updated, expires string
-	if err := row.Scan(&slugStr, &identStr, &manStr, &created, &updated, &expires); err != nil {
+	var dedupedSize int
+	if err := row.Scan(&slugStr, &identStr, &manStr, &dedupedSize, &created, &updated, &expires); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Site{}, ErrNotFound
 		}
@@ -279,12 +280,13 @@ func (r *SiteRepo) Get(slug domain.Slug) (domain.Site, error) {
 		return domain.Site{}, err
 	}
 	return domain.Site{
-		Slug:      domain.Slug(slugStr),
-		Identity:  domain.Identity(identStr),
-		Manifest:  man,
-		CreatedAt: parseTime(created),
-		UpdatedAt: parseTime(updated),
-		ExpiresAt: parseSiteExpiry(expires),
+		Slug:        domain.Slug(slugStr),
+		Identity:    domain.Identity(identStr),
+		Manifest:    man,
+		StoredBytes: dedupedSize,
+		CreatedAt:   parseTime(created),
+		UpdatedAt:   parseTime(updated),
+		ExpiresAt:   parseSiteExpiry(expires),
 	}, nil
 }
 
@@ -417,7 +419,7 @@ func (r *SiteRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site,
 		return nil, nil
 	}
 	rows, err := r.db.Query(`
-		SELECT slug, identity, manifest, created_at, updated_at, expires_at
+		SELECT slug, identity, manifest, deduped_size, created_at, updated_at, expires_at
 		FROM sites WHERE identity = ? AND expires_at > ?
 	`, owner, formatSiteExpiry(now))
 	if err != nil {
@@ -427,7 +429,8 @@ func (r *SiteRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site,
 	var out []domain.Site
 	for rows.Next() {
 		var slugStr, identStr, manStr, created, updated, expires string
-		if err := rows.Scan(&slugStr, &identStr, &manStr, &created, &updated, &expires); err != nil {
+		var dedupedSize int
+		if err := rows.Scan(&slugStr, &identStr, &manStr, &dedupedSize, &created, &updated, &expires); err != nil {
 			return nil, fmt.Errorf("scan site row: %w", err)
 		}
 		man, err := decodeManifest(manStr)
@@ -435,12 +438,13 @@ func (r *SiteRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site,
 			return nil, err
 		}
 		out = append(out, domain.Site{
-			Slug:      domain.Slug(slugStr),
-			Identity:  domain.Identity(identStr),
-			Manifest:  man,
-			CreatedAt: parseTime(created),
-			UpdatedAt: parseTime(updated),
-			ExpiresAt: parseSiteExpiry(expires),
+			Slug:        domain.Slug(slugStr),
+			Identity:    domain.Identity(identStr),
+			Manifest:    man,
+			StoredBytes: dedupedSize,
+			CreatedAt:   parseTime(created),
+			UpdatedAt:   parseTime(updated),
+			ExpiresAt:   parseSiteExpiry(expires),
 		})
 	}
 	return out, rows.Err()
