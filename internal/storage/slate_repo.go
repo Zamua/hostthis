@@ -1,46 +1,37 @@
 // Package storage's SlateDB-backed metadata implementation.
 //
-// SlateDB-backed twin of paste_repo.go + sweep.go + keygate_repo.go.
-// Both backends implement the same service-layer interfaces, so
-// cmd/hostthisd picks one via HOSTTHIS_METADATA_BACKEND env var and
-// the rest of the app is unaware of the choice. Canonical spec in
-// docs/SPEC.md "Metadata storage backends".
+// Implements the same service-layer interfaces as the sqlite backend;
+// cmd/hostthisd picks one via HOSTTHIS_METADATA_BACKEND and the rest of the app
+// is unaware. Spec: docs/SPEC.md "Metadata storage backends".
 //
-// Build/runtime requirement: cgo + libslatedb_uniffi on the platform
-// loader path. See Dockerfile + Makefile.
+// Needs cgo + libslatedb_uniffi on the loader path.
 //
 // # Key layout
 //
-// All keys are UTF-8 strings cast to []byte. Values are JSON unless
-// noted. The layout is designed so every operation we need maps to
-// either a single Get, a single Put, an atomic transaction
-// (Db.Begin + DbTransaction.Commit), or a prefix Scan.
+// UTF-8 keys, JSON values unless noted. The layout is chosen so every operation
+// maps to a single Get, a single Put, one transaction, or a prefix scan.
 //
-//	pastes/<slug>                      JSON {Identity, Kind, ContentSHA, BlobID, Size, Name, PinnedVersion, CreatedAt, UpdatedAt, ExpiresAt}
-//	versions/<slug>/<NNNN>             JSON {VerNum, Kind, ContentSHA, BlobID, Size, CreatedAt, Deleted}
-//	                                   NNNN is 4-digit zero-padded so prefix-scan + decode keeps numeric order
-//	slug_owner/<slug>                  raw identity string (small; for visitor-side lookup)
-//	identity_pastes/<identity>/<slug>  empty value (for "list by identity" prefix scan)
-//	identity_first_seen/<identity>     RFC3339 timestamp (cached MIN(pastes.created_at))
-//	expiry/<rfc3339>/<slug>            empty value (for sweep prefix scan to find pastes whose expires_at <= now)
-//	keygate/<subnet>/<identity>        RFC3339 first-seen timestamp (Sybil rate limit)
+//	pastes/<slug>                      JSON paste row
+//	versions/<slug>/<NNNN>             JSON version row; NNNN zero-padded so a
+//	                                   prefix scan keeps numeric order
+//	slug_owner/<slug>                  raw identity, for visitor-side lookup
+//	identity_pastes/<identity>/<slug>  empty value, for list-by-identity
+//	identity_first_seen/<identity>     RFC3339, cached MIN(created_at)
+//	expiry/<rfc3339>/<slug>            empty value, for the sweep scan
+//	keygate/<subnet>/<identity>        RFC3339 first-seen, Sybil rate limit
 //
 // # Atomicity
 //
-// Every multi-key write opens a SlateDB transaction (SnapshotIsolation)
-// and commits all puts/deletes atomically. SlateDB's writer_epoch
-// fencing ensures only one writer is alive at once across processes -
-// matches our single-replica rolling-deploy model.
+// Every multi-key write commits in one SnapshotIsolation transaction. SlateDB's
+// writer_epoch fencing keeps exactly one writer alive across processes, which
+// matches the single-replica rolling-deploy model.
 //
 // # Quota math
 //
 // SumActiveBytesByOwner scans versions/* for every paste in
-// identity_pastes/<owner>/* and sums sizes of non-deleted rows.
-// O(versions-owned-by-identity) per call. For low identity activity
-// (the common case) this is fast enough to inline in the hot path;
-// for heavy identities we'd want a cached counter (out of scope for
-// this initial implementation; the sqlite backend isn't smarter
-// either).
+// identity_pastes/<owner>/* and sums non-deleted rows: O(versions owned). Fast
+// enough inline for low per-identity activity; a heavy identity would want a
+// cached counter.
 
 //go:build slatedb
 

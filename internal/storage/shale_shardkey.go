@@ -6,55 +6,44 @@ import (
 	"github.com/Zamua/shale/pkg/ring"
 )
 
-// shaleShardKey is the ShardKeyFn the shale cluster is opened with. It
-// extracts the routing shard key from a full metadata key by parsing its
-// family prefix, so that every key belonging to the same subject
-// (<slug> / <id> / <subnet>) co-locates on one shard WITHOUT renaming any
-// key. See docs/SPEC.md "Three shard families".
+// shaleShardKey is the ShardKeyFn the cluster is opened with. It extracts a
+// routing key from a full metadata key by parsing its family prefix, so every
+// key belonging to one subject co-locates on a shard WITHOUT renaming keys.
+// See docs/SPEC.md "Three shard families".
 //
-// It lives in an untagged file and is unit-testable on the default build
-// (the one shale dependency it pulls in, pkg/ring, is a pure, cgo-free,
-// slatedb-free helper, so the file still builds with plain `go build`). The
-// tagged shale_repo.go references it as cluster.Config.ShardKeyFn.
+// Untagged so it is unit-testable on the default build: its one shale
+// dependency, pkg/ring, is cgo-free and slatedb-free.
 //
 // Family -> shard key:
 //
-//	bref/{<routeShard>}/<unit>/<blobid> -> <routeShard> (the {...} hash tag)
+//	bref/{<routeShard>}/<unit>/<blobid> -> <routeShard>  (the {...} hash tag)
 //
-//	pastes/<slug>                 -> <slug>   (segment after the first '/')
-//	versions/<slug>/<NNNN>        -> <slug>   (first segment after the prefix)
-//	slug_owner/<slug>             -> <slug>
-//	expiry/<rfc3339>/<slug>       -> <slug>   (LAST segment; slugs are slash-free
-//	                                           and RFC3339 contains no '/', so
-//	                                           last-segment extraction is unambiguous)
-//	identity_pastes/<id>/<slug>   -> <id>     (first segment after the prefix)
-//	identity_first_seen/<id>      -> <id>
-//	keygate/<subnet>/<identity>   -> <subnet> (first segment after the prefix)
+//	pastes/<slug>                  -> <slug>
+//	versions/<slug>/<NNNN>         -> <slug>
+//	slug_owner/<slug>              -> <slug>
+//	expiry/<rfc3339>/<slug>        -> <slug>      (LAST segment; slugs are
+//	                                               slash-free and RFC3339 has no
+//	                                               '/', so this is unambiguous)
+//	identity_pastes/<id>/<slug>    -> <id>
+//	identity_first_seen/<id>       -> <id>
+//	keygate/<subnet>/<identity>    -> <subnet>    (Sybil admission)
+//	keygate_id/<identity>/<subnet> -> <identity>  (identity-leading view)
 //
-// The static-site families mirror the paste families (sites reuse the paste
-// layout, only with a site_ flavor; see docs/SPEC.md "Shale reuses the
-// layout"). Shale keeps the identity_sites/<id>/<slug> enumeration index
-// (mirroring identity_pastes/) so ListSitesByOwner can surface a user's
-// sites in `list` and the scan-derived site quota can sum an owner's sites:
+//	sites/<slug>                   -> <slug>
+//	expiry_sites/<ts>/<slug>       -> <slug>      (LAST segment)
+//	identity_sites/<id>/<slug>     -> <id>
 //
-//	sites/<slug>                       -> <slug>   (authoritative, joins the {slug} family)
-//	expiry_sites/<ts>/<slug>           -> <slug>   (LAST segment, like expiry/)
-//	identity_sites/<id>/<slug>         -> <id>     (site enumeration index)
+//	rooms/<app-slug>/<uuid>            -> <app-slug>
+//	roomkv/<app-slug>/<uuid>/<key>     -> <app-slug>
+//	roomcreate/<app-slug>/<subnet>/<ts> -> <app-slug>
+//	roombytes/<app-slug>               -> <app-slug>
+//	roomexpiry/<ts>/<app-slug>/<uuid>  -> <app-slug>  (SECOND-to-last segment)
 //
-// The room families (the app-persistence tier) all shard on the <app-slug>,
-// co-locating an app's rooms + values + ledger + expiry + counter on one
-// shard (see docs/SPEC.md "Shale reuses the layout"):
+// The site families mirror the paste ones. The room families all shard on the
+// app-slug, co-locating an app's rooms, values, ledger, expiry and counter.
 //
-//	rooms/<app-slug>/<uuid>                 -> <app-slug> (first segment after the prefix)
-//	roomkv/<app-slug>/<uuid>/<key>          -> <app-slug> (first segment; roomkv/ != rooms/)
-//	roomcreate/<app-slug>/<subnet>/<ts>     -> <app-slug> (first segment)
-//	roombytes/<app-slug>                    -> <app-slug> (the per-app room-byte counter)
-//	roomexpiry/<ts>/<app-slug>/<uuid>       -> <app-slug> (SECOND-to-last segment, between <ts> and <uuid>)
-//
-// A key that matches no known family falls back to the full key as its
-// own shard key (the safe default: it routes deterministically and never
-// collides families). This mirrors shale's default hash-tagged identity
-// for unrecognized shapes.
+// An unrecognised key falls back to the full key as its own shard key: it
+// routes deterministically and cannot collide families.
 func shaleShardKey(key []byte) []byte {
 	switch {
 	// Blob-pointer keys (shale-internal). The route shard key lives in the
