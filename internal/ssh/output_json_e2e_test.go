@@ -6,11 +6,11 @@ import (
 	"testing"
 )
 
-// End-to-end coverage for `-o json` over a real SSH session, complementing
-// the pure mapper/parser unit tests in output_test.go. These decode stdout
-// into TEST-LOCAL structs (a consumer's view of the published wire
-// contract), deliberately NOT the internal view types, so the test fails
-// if the on-the-wire JSON keys/shape ever drift.
+// End-to-end coverage for `-o json` over a real SSH session, complementing the
+// pure mapper/parser unit tests in output_test.go. Stdout decodes into
+// TEST-LOCAL structs, a consumer's view of the published wire contract and
+// deliberately not the internal view types, so any drift in the on-the-wire
+// keys or shape fails here.
 
 type jsonPaste struct {
 	Slug             string  `json:"slug"`
@@ -90,8 +90,7 @@ func TestListJSON_GluedShortForm(t *testing.T) {
 	s := startStack(t)
 	_, _, _ = s.run("", []byte("<!doctype html><p>a</p>"))
 
-	// The glued short form `-ojson` (no space, no =) must work over the
-	// real ssh path, same as `-o json`.
+	// The glued short form (no space, no =) must work over the real ssh path.
 	stdout, stderr, exit := s.run("list -ojson", nil)
 	if exit != 0 {
 		t.Fatalf("exit: %d (stderr %q)", exit, stderr)

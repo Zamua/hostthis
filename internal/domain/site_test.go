@@ -29,11 +29,11 @@ func TestManifest_Lookup_DirectoryIndex(t *testing.T) {
 		{"/index.html", "sha-index.html", true},
 		{"/css/style.css", "sha-css/style.css", true},
 		{"/blog/", "sha-blog/index.html", true},
-		{"/blog", "sha-blog/index.html", true}, // bare dir name → its index
+		{"/blog", "sha-blog/index.html", true}, // bare dir name resolves to its index
 		{"/blog/index.html", "sha-blog/index.html", true},
 		{"/missing.html", "", false},
 		{"/blog/missing.css", "", false},
-		{"/nope/", "", false}, // dir with no index.html
+		{"/nope/", "", false}, // a dir with no index.html is a miss
 	}
 	for _, c := range cases {
 		t.Run(c.req, func(t *testing.T) {
@@ -100,17 +100,15 @@ func TestManifest_LookupWithSPAFallback(t *testing.T) {
 	}
 }
 
-// A site with NO root index.html cannot SPA-fall-back: a route-shaped
-// miss has nothing to serve, so it 404s rather than serving some other
-// index.
+// Without a root index.html a route-shaped miss has nothing to fall back to, so
+// it 404s rather than serving some other index.
 func TestManifest_LookupWithSPAFallback_NoRootIndex(t *testing.T) {
 	m := mustManifest(map[string]string{
-		"blog/index.html": "blog", // only a nested index, no root index.html
+		"blog/index.html": "blog", // a nested index only
 	})
 	if _, hit, _ := m.LookupWithSPAFallback("/about"); hit {
 		t.Fatalf("route miss with no root index.html should 404, got a hit")
 	}
-	// A direct hit on the nested index still works.
 	if _, hit, via := m.LookupWithSPAFallback("/blog/"); !hit || via {
 		t.Fatalf("nested index direct hit: hit=%v via=%v, want true,false", hit, via)
 	}
@@ -143,7 +141,7 @@ func TestManifest_HasWebContent(t *testing.T) {
 func TestManifest_DedupedSize(t *testing.T) {
 	m := NewManifest()
 	m.Add("a.html", ManifestEntry{SHA: "x", Size: 100})
-	m.Add("b.html", ManifestEntry{SHA: "x", Size: 100}) // same blob
+	m.Add("b.html", ManifestEntry{SHA: "x", Size: 100}) // the same blob, counted once
 	m.Add("c.css", ManifestEntry{SHA: "y", Size: 50})
 	if got := m.DedupedSize(); got != 150 {
 		t.Fatalf("DedupedSize: got %d, want 150", got)
@@ -171,7 +169,7 @@ func TestContentTypeForPath(t *testing.T) {
 		"logo.svg":    "image/svg+xml",
 		"pic.png":     "image/png",
 		"font.woff2":  "font/woff2",
-		"mystery.xyz": "application/octet-stream", // unknown → download, never text/html
+		"mystery.xyz": "application/octet-stream", // an unknown ext downloads, never renders as HTML
 		"noext":       "application/octet-stream",
 	}
 	for p, want := range cases {
@@ -183,7 +181,6 @@ func TestContentTypeForPath(t *testing.T) {
 
 func TestDetectKind_Archive(t *testing.T) {
 	gzipBytes := []byte{0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00}
-	// No hint: gzip magic → KindSite.
 	if k, err := DetectKind(gzipBytes, "", http.DetectContentType); err != nil || k != KindSite {
 		t.Fatalf("gzip no hint: got (%q, %v), want (site, nil)", k, err)
 	}
@@ -191,7 +188,6 @@ func TestDetectKind_Archive(t *testing.T) {
 	if _, err := DetectKind(gzipBytes, "html", http.DetectContentType); err == nil {
 		t.Fatalf("gzip with html hint should reject")
 	}
-	// Non-gzip bytes are unaffected by the new branch.
 	if k, err := DetectKind([]byte("<!doctype html><h1>x</h1>"), "", http.DetectContentType); err != nil || k != KindHTML {
 		t.Fatalf("html still detected: got (%q, %v)", k, err)
 	}

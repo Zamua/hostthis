@@ -22,80 +22,67 @@ import (
 type PasteRepo interface {
 	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Paste, error)
-	// MarkReady flips a pending paste to ready once its blob has landed.
-	// MarkFailed flips a pending paste to failed and releases its
-	// reservation. Both are guarded to advance only a still-pending paste
-	// (so a late finalizer cannot resurrect a reconciler-failed paste) and
-	// are no-ops on a missing or non-pending paste. Used by the async
-	// finalizer; see docs/SPEC.md "Paste lifecycle status".
+	// MarkReady / MarkFailed advance a still-PENDING paste only (MarkFailed
+	// also releases its reservation), so a late finalizer cannot resurrect a
+	// reconciler-failed paste; both no-op on a missing or non-pending paste.
+	// docs/SPEC.md "Paste lifecycle status".
 	MarkReady(domain.Slug) error
 	MarkFailed(domain.Slug) error
 }
 
-// BlobStore writes and reads content-addressed bytes. Put streams r
-// to the backing store; size is the expected byte length (required by
-// S3-shaped backends to set Content-Length, accepted by the disk impl
-// for interface uniformity). PutPrecompressed writes a body that's
-// already magic-prefixed + zstd-encoded - used by the streaming upload
-// path so the staging buffer doesn't get re-encoded on its way down.
-// Get returns the full UNCOMPRESSED bytes in memory.
+// BlobStore writes and reads content-addressed bytes. Put's size is required by
+// S3-shaped backends to set Content-Length; the disk impl accepts it for
+// interface uniformity. PutPrecompressed takes a body that is already
+// magic-prefixed + zstd-encoded, so the streaming upload path does not re-encode
+// its staging buffer. Get returns the full UNCOMPRESSED bytes in memory.
 type BlobStore interface {
 	Put(sha string, r io.Reader, size int64) error
 	PutPrecompressed(sha string, body []byte) error
 	Get(sha string) ([]byte, error)
 
 	// EncodeBody encodes UNCOMPRESSED bytes into the store's at-rest format and
-	// reports the payload size EXCLUDING the framing prefix - the basis quota
+	// reports the payload size EXCLUDING the framing prefix: the basis quota
 	// charges. Declared here so a caller needing the on-disk footprint asks the
-	// component that owns the format instead of importing the storage package
-	// and doing the framing arithmetic itself.
+	// component that owns the format instead of redoing the framing arithmetic.
 	EncodeBody(r io.Reader) (body []byte, payloadSize int, err error)
 }
 
-// SlugTakenErr signals that the chosen slug already exists. The
-// upload service retries internally on Insert; this is exported so
-// tests can assert on it if the retry budget is exhausted.
+// SlugTakenErr is returned when the internal slug re-mint retry budget is
+// exhausted.
 var SlugTakenErr = errors.New("service: slug taken (after retries)")
 
 // Upload is the application service for new paste creation.
 type Upload struct {
 	Repo PasteRepo
 	// Blob is the per-record blob lifecycle seam (Stage/Commit/Read/
-	// UnbindOnDelete). Upload uses Stage to write the paste's bytes; the
-	// metadata row is committed via Repo (the pending model is preserved on
-	// the standalone path: the row commits first, the finalizer Stages the
-	// bytes in the background).
+	// UnbindOnDelete). On the standalone path the metadata row commits first
+	// and the finalizer Stages the bytes in the background.
 	Blob BlobUnit
 	Now  func() time.Time
-	// Sniff classifies uploaded bytes so DetectKind can apply the
-	// text-only rule. A PORT (domain.MIMESniffer): the domain owns the rule,
-	// an adapter supplies the algorithm. Defaulted by NewUpload to the stdlib
-	// adapter; overridable, which is what lets a test drive a branch without
-	// hunting for bytes that happen to sniff a particular way.
+	// Sniff is the port DetectKind's text-only rule calls: the domain owns the
+	// rule, an adapter supplies the algorithm. Overridable so a test can drive
+	// a branch without hunting for bytes that sniff a particular way.
 	Sniff domain.MIMESniffer
 	// Retention is the installation's content-TTL policy; it stamps a new
 	// paste's ExpiresAt (UpdatedAt + window, or "never" when disabled).
 	Retention domain.Retention
-	// Logger records background-finalize outcomes. The blob write runs
-	// after Create has returned the URL, so a failure there cannot be
-	// returned to the caller; it is logged + reflected in the paste
-	// status. Optional - nil discards.
+	// Logger records background-finalize outcomes: the blob write runs after
+	// Create returned the URL, so a failure there cannot reach the caller.
+	// nil discards.
 	Logger *log.Logger
-	// onFinalizeDone, when non-nil, is called after each background
-	// finalize completes (success or failure). Test seam so a test can
-	// wait for the async half deterministically; nil in production.
+	// onFinalizeDone is called after each background finalize completes,
+	// success or failure. Test seam for waiting on the async half; nil in
+	// production.
 	onFinalizeDone func()
-	// SyncBlob, when true, restores the pre-async behavior: Create writes
-	// the paste row as ready + writes the blob INLINE (on the ack path) and
-	// skips the pending/MarkReady status flip - so one metadata write + one
-	// blob write, both synchronous. This is a BENCHMARK TOGGLE (env
-	// HOSTTHIS_BLOB_SYNC) to A/B sync vs async on one binary; not a normal
-	// production mode. Default false = the async path.
+	// SyncBlob makes Create commit the row READY and write the blob INLINE on
+	// the ack path, skipping the pending/MarkReady flip. A BENCHMARK TOGGLE
+	// (env HOSTTHIS_BLOB_SYNC) for A/B-ing sync against async on one binary,
+	// not a production mode.
 	SyncBlob bool
 }
 
-// NewUpload wires defaults. Retention defaults to the 30-day policy; the
-// composition root overrides Upload.Retention from HOSTTHIS_RETENTION.
+// NewUpload wires defaults; the composition root overrides Upload.Retention
+// from HOSTTHIS_RETENTION.
 func NewUpload(repo PasteRepo, blob BlobUnit) *Upload {
 	return &Upload{Repo: repo, Blob: blob, Now: time.Now, Retention: domain.DefaultRetention(), Sniff: mime.Detect}
 }
@@ -106,48 +93,38 @@ func (u *Upload) logf(format string, args ...any) {
 	}
 }
 
-// Result captures what Create produced for the caller (SSH / HTTP)
-// to format into a response.
+// Result is what Create produced, for the SSH and HTTP layers to format.
 type Result struct {
 	Paste domain.Paste
 }
 
-// ErrOverQuota is returned when accepting the upload would push the
-// identity's total active COMPRESSED bytes above UserQuotaBytes.
-// Derived from the constant rather than hardcoded: a user told "10 MiB" while
-// the real limit is 100 MiB is worse served than by no number at all, and a
-// hardcoded string silently disagrees the moment the quota moves.
+// ErrOverQuota is returned when accepting the upload would push the identity's
+// total active COMPRESSED bytes above UserQuotaBytes. The number is derived
+// from the constant so the message cannot drift from the enforced limit.
 var ErrOverQuota = fmt.Errorf("service: would exceed your %d MiB total quota; delete a paste or wait for one to expire", domain.UserQuotaBytes>>20)
 
-// ErrRawTooLarge is returned when the raw input exceeded the
-// 100 MiB hard fast-fail cap. The server stopped reading before any
-// compression check could run.
+// ErrRawTooLarge is returned when the raw input exceeded the fast-fail cap.
+// The server stopped reading before any compression check could run.
 var ErrRawTooLarge = errors.New("service: upload too large to consider (raw input exceeded 100 MiB cap)")
 
-// ErrCompressedTooLarge is returned when the input compressed under
-// zstd to more than MaxPasteBytes. Caller may want to surface the
-// compressed-size number to the user; see Upload.Create.
+// ErrCompressedTooLarge is returned when the input compressed under zstd to
+// more than MaxPasteBytes.
 var ErrCompressedTooLarge = errors.New("service: upload exceeds 10 MiB compressed cap")
 
-// ErrServiceFull is returned when the durable total-bytes ceiling is hit:
-// the object store rejects a blob Put because the bucket is at its
-// configured hard quota (see SPEC "Limits -> Durable total-bytes ceiling:
-// an object-store quota"). The blob store surfaces storage.ErrServiceFull,
-// and the upload / deploy services translate it into this graceful
-// "service is at capacity" response.
+// ErrServiceFull is the graceful translation of storage.ErrServiceFull: the
+// object store rejected a blob Put because the bucket is at its configured
+// hard quota (SPEC "Limits -> Durable total-bytes ceiling: an object-store
+// quota").
 var ErrServiceFull = errors.New("service: service is at capacity, try again after the next expiry")
 
-// Create persists a new paste owned by the given identity.
-// The identity is a "key:<fp>" string built from the uploader's ssh
-// public key fingerprint. The identity gates quota - sum of the
-// identity's active pastes plus this body cannot exceed UserQuotaBytes.
+// Create persists a new paste owned by owner, a "key:<fp>" identity built from
+// the uploader's ssh public key fingerprint. That identity gates quota: its
+// active pastes plus this body cannot exceed UserQuotaBytes.
 //
-// Reads body via the streaming pipeline (single pass: hash + compress
-// + count, peak memory ~MaxPasteBytes). Type detection runs on the
-// captured 512-byte prefix so we don't have to re-read the source.
-//
-// Unsupported types return domain.ErrUnsupportedKind so the caller
-// can surface the right message verbatim.
+// body is consumed in a single streaming pass (hash + compress + count, peak
+// memory ~MaxPasteBytes), and type detection runs on the captured 512-byte
+// prefix so the source is never re-read. Unsupported types return
+// domain.ErrUnsupportedKind for the caller to surface verbatim.
 func (u *Upload) Create(body io.Reader, owner string, name string, typeHint string) (Result, error) {
 	staged, err := streamUpload(body)
 	switch {
@@ -165,33 +142,26 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	if err != nil {
 		return Result{}, err
 	}
-	// KindSite (a gzip-tar archive) is NOT a paste: it must go through the
-	// deploy pipeline (which runs the safe-untar guards). Reaching the
-	// single-file paste path with KindSite would persist the raw gzip as a
-	// paste and skip every untar guard, so reject it here.
+	// KindSite (a gzip-tar archive) must go through the deploy pipeline and its
+	// untar guards. Reaching the single-file paste path with it would persist
+	// the raw gzip as a paste and skip every one of them.
 	if kind == domain.KindSite {
 		return Result{}, domain.ErrUnsupportedKind
 	}
 	now := u.Now().UTC()
 	if u.Blob.IsTransactional() {
-		// Shale-collocated path: stage the bytes durably, then co-commit a
-		// READY paste row with the blob bind in ONE transaction. No pending
-		// window, no background finalizer - the row and its bytes become
-		// visible together (docs/SPEC.md "Pending-collapse: a shale-collocated
-		// paste commits READY directly"). On a staging failure the row never
-		// commits and the SSH client gets the error.
+		// Shale-collocated: the row and its bytes become visible together, so
+		// there is no pending window and no finalizer (docs/SPEC.md
+		// "Pending-collapse: a shale-collocated paste commits READY directly").
+		// A staging failure means the row never commits.
 		return u.createTransactional(staged, owner, name, kind, now)
 	}
-	// Detached-store path (sqlite / slatedb / shale-without-a-blob-bucket):
-	// the blob write (the ~250 ms bottleneck) is deferred to a background
-	// finalizer. Synchronously we only reserve quota + write the
-	// authoritative paste row as PENDING, then return the URL. The held
-	// bytes (staged.Body) live in this pod's memory until the finalizer
-	// flushes them; a crash in that window loses them and the reconciler
-	// ages the stuck pending to failed (docs/SPEC.md "Durability trade").
-	// SyncBlob (benchmark toggle) commits the row as ready and writes the
-	// blob inline below; the async path commits pending and finalizes in
-	// the background.
+	// Detached-store path (sqlite / slatedb / shale-without-a-blob-bucket): the
+	// blob write is deferred to a background finalizer, so only the quota
+	// reserve and the PENDING row happen before the URL is returned. staged.Body
+	// lives in this pod's memory until the finalizer flushes it; a crash in that
+	// window loses the bytes and the reconciler ages the stuck pending to failed
+	// (docs/SPEC.md "Durability trade").
 	initialStatus := domain.PasteStatusPending
 	if u.SyncBlob {
 		initialStatus = domain.PasteStatusReady
@@ -208,11 +178,10 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		UpdatedAt:     now,
 		ExpiresAt:     u.Retention.ExpiryFor(now),
 	}
-	// Retry on slug collision. SlugAlphabet has 32^8 ≈ 1.1e12 distinct
-	// slugs; collisions inside 5 retries are vanishingly unlikely.
-	// The quota checks live inside InsertWithQuotaCheck so concurrent
-	// uploads can't both pass and both insert. Quota is enforced HERE,
-	// synchronously, before any URL is handed out (docs/SPEC.md "Create:
+	// Retry on slug collision; SlugAlphabet's 32^8 slugs make a collision
+	// inside 5 retries vanishingly unlikely. The quota check lives INSIDE
+	// InsertWithQuotaCheck so concurrent uploads cannot both pass and both
+	// insert, and it runs before any URL is handed out (docs/SPEC.md "Create:
 	// the synchronous half").
 	const maxRetries = 5
 	for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -221,23 +190,20 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		switch class, terr := classifyCommitErr(err); class {
 		case commitOK:
 			if u.SyncBlob {
-				// Benchmark sync path: row already committed as ready; write
-				// the blob INLINE (on the ack path), no pending/MarkReady flip.
-				// One metadata write + one blob write, both synchronous - the
-				// pre-async shape.
+				// Benchmark path: the row is already committed ready, so write
+				// the blob inline with no MarkReady flip.
 				if _, berr := u.Blob.Stage(context.Background(), string(p.Slug), staged.SHA, staged.Body); berr != nil {
 					u.logf("upload: sync blob write %s: %v", p.Slug, berr)
 				}
 				return Result{Paste: p}, nil
 			}
-			// Metadata committed as pending. Hand the URL back immediately
-			// and finish the blob write in the background.
+			// Metadata committed as pending: hand the URL back and finish the
+			// blob write in the background.
 			u.startFinalize(p.Slug, staged.SHA, staged.Body)
 			return Result{Paste: p}, nil
 		case commitSlugTaken:
-			// A silent remint would make this class invisible; each retry
-			// logs once (slug + attempt) so a remint burst shows up in the
-			// service log. Semantics unchanged: same budget, same re-mint.
+			// Logged so a remint burst shows up in the service log instead of
+			// being silent.
 			u.logf("upload: slug %s taken, re-minting (attempt %d/%d)", p.Slug, attempt, maxRetries)
 			continue
 		default:
@@ -249,17 +215,15 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 }
 
 // createTransactional is the shale-collocated Create: stage the (already
-// magic+zstd) body, then commit the paste row as READY with the blob bound
-// in the SAME transaction (Stage->Commit). There is no pending status, no
-// async finalizer, and no SyncBlob toggle on this path - the staged bytes are
-// durable BEFORE the metadata commit and the bind makes them visible together,
-// so a reader never sees a row without its blob.
+// magic+zstd) body, then commit the row READY with the blob bound in the SAME
+// transaction, so the bytes are durable before the metadata commit and a reader
+// never sees a row without its blob. No pending status, no finalizer, no
+// SyncBlob toggle on this path.
 //
-// The blob is staged INSIDE the retry loop with the chosen slug: the staged
-// ref's route shard is captured from the slug at stage time, so the bind
-// co-commits with the row only when both use the SAME slug. A (vanishingly
-// rare) slug collision re-mints the slug and re-stages; the first staged-but-
-// unbound object is reclaimed by the orphan sweep.
+// Staging happens INSIDE the retry loop because the staged ref's route shard is
+// captured from the slug: the bind co-commits with the row only when both use
+// the SAME slug. A collision re-mints and re-stages, and the orphan sweep
+// reclaims the first staged-but-unbound object.
 func (u *Upload) createTransactional(staged stagedUpload, owner, name string, kind domain.ContentKind, now time.Time) (Result, error) {
 	p := domain.Paste{
 		Identity:      domain.Identity(owner),
@@ -277,14 +241,12 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 	const maxRetries = 5
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		p.Slug = domain.NewRandomSlug()
-		// Stage with the chosen slug so the ref co-routes to its shard, then
-		// Commit binds it in the authoritative {slug} transaction. Staging
-		// before the insert means a staging failure aborts WITHOUT a metadata
-		// row (no quota charged), and the insert's quota reserve still runs
-		// inside InsertWithQuotaCheck so an over-quota upload is rejected.
+		// Staging before the insert means a staging failure aborts WITHOUT a
+		// metadata row and with no quota charged; the reserve still runs inside
+		// InsertWithQuotaCheck, so an over-quota upload is still rejected.
 		handle, err := u.Blob.Stage(ctx, string(p.Slug), staged.SHA, staged.Body)
 		if err != nil {
-			// A blob Put rejected by the object store's bucket quota surfaces
+			// A Put rejected by the bucket quota surfaces
 			// storage.ErrServiceFull (the durable total-bytes ceiling).
 			if class, terr := classifyCommitErr(err); class != commitOther {
 				return Result{}, terr
@@ -298,10 +260,10 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 		case commitOK:
 			return Result{Paste: p}, nil
 		case commitSlugTaken:
-			// Re-mint the slug and re-stage so the new ref co-routes to the
-			// new slug's shard; the prior staged object ages out via the
-			// orphan sweep. Logged so a remint burst (which strands staged
-			// objects for the sweep) is never invisible.
+			// Re-mint and re-stage so the new ref co-routes to the new slug's
+			// shard; the prior staged object ages out via the orphan sweep.
+			// Logged so a remint burst, which strands those objects, is
+			// visible.
 			u.logf("upload: slug %s taken, re-minting + re-staging (attempt %d/%d)", p.Slug, attempt, maxRetries)
 			continue
 		default:
@@ -312,19 +274,17 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 	return Result{}, SlugTakenErr
 }
 
-// finalizeWG lets a graceful shutdown (or a test) wait for in-flight
-// background finalizers to drain. Production wiring may Wait on it before
-// exiting so a clean shutdown doesn't strand pending pastes the
-// reconciler would otherwise have to age out.
+// finalizeWG lets a graceful shutdown wait for in-flight background finalizers
+// to drain, so a clean exit does not strand pending pastes for the reconciler
+// to age out.
 var finalizeWG sync.WaitGroup
 
 // WaitFinalize blocks until every background finalize started so far has
-// completed. Intended for graceful shutdown + deterministic tests.
+// completed.
 func (u *Upload) WaitFinalize() { finalizeWG.Wait() }
 
-// startFinalize launches the background half of Create: write the blob,
-// then flip the paste's status. It owns the goroutine so the SSH/HTTP
-// caller never blocks on the ~250 ms blob write.
+// startFinalize runs the background half of Create (write the blob, then flip
+// the paste's status) so the SSH/HTTP caller never blocks on the blob write.
 func (u *Upload) startFinalize(slug domain.Slug, sha string, body []byte) {
 	finalizeWG.Go(func() {
 		u.finalize(slug, sha, body)
@@ -334,16 +294,14 @@ func (u *Upload) startFinalize(slug domain.Slug, sha string, body []byte) {
 	})
 }
 
-// finalize writes the held bytes to the blob store and transitions the
-// paste status: ready on success, failed (reservation released) on
-// failure. The transitions are guarded in the repo so a finalize that
-// races the reconciler's age-out cannot resurrect a failed paste. Errors
-// are logged, not returned: the caller already has its URL.
+// finalize writes the held bytes and transitions the paste: ready on success,
+// failed (reservation released) otherwise. The repo guards the transitions so a
+// finalize racing the reconciler's age-out cannot resurrect a failed paste.
+// Errors are logged, not returned: the caller already has its URL.
 func (u *Upload) finalize(slug domain.Slug, sha string, body []byte) {
 	if _, err := u.Blob.Stage(context.Background(), string(slug), sha, body); err != nil {
-		// Blob write failed (object-store error, bucket quota, etc.). Flip
-		// the paste to failed + release its reservation so it stops charging
-		// quota and a read serves the error page.
+		// Flip to failed and release the reservation so the paste stops
+		// charging quota and a read serves the error page.
 		u.logf("upload: finalize %s: blob write failed: %v", slug, err)
 		if ferr := u.Repo.MarkFailed(slug); ferr != nil {
 			u.logf("upload: finalize %s: mark failed: %v", slug, ferr)
@@ -351,20 +309,17 @@ func (u *Upload) finalize(slug domain.Slug, sha string, body []byte) {
 		return
 	}
 	if err := u.Repo.MarkReady(slug); err != nil {
-		// The bytes ARE durable; only the status flip failed. The reconciler
-		// will not age this out (it is no longer pending only if the flip
-		// landed) - a retry-on-read or the next finalize attempt is out of
-		// scope here, so surface it loudly. A stuck-pending-with-durable-blob
-		// is still served as a loading page until something flips it.
+		// The bytes ARE durable and only the status flip failed, so the paste
+		// stays pending and is served as a loading page until something flips
+		// it. Nothing retries the flip, so surface it loudly.
 		u.logf("upload: finalize %s: mark ready: %v", slug, err)
 	}
 }
 
-// isSlugTaken reports whether err is the slug-collision sentinel
-// (domain.ErrSlugTaken, aliased as storage.ErrSlugTaken), matched by
-// identity through any wrapping. Identity, not message text: an
-// unrelated error whose text mentions "slug" must surface verbatim,
-// not silently burn the remint budget.
+// isSlugTaken matches the slug-collision sentinel (domain.ErrSlugTaken, aliased
+// as storage.ErrSlugTaken) by identity through any wrapping, never by message
+// text: an unrelated error mentioning "slug" must surface verbatim rather than
+// burn the remint budget.
 func isSlugTaken(err error) bool {
 	return errors.Is(err, domain.ErrSlugTaken)
 }

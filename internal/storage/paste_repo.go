@@ -11,26 +11,21 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// ErrServiceFull is returned when the durable total-bytes ceiling is hit:
-// the object store rejects a blob Put because the bucket is at its
-// configured hard quota (see SPEC "Limits -> Durable total-bytes ceiling:
-// an object-store quota"). The blob store surfaces it; the service layer
-// translates it into a graceful "try again later" response. The metadata
-// repos no longer run a service-wide byte scan, so this never originates
-// from a quota pre-check on the write path. Alias of the domain-owned
-// sentinel (see internal/domain/errors.go).
+// ErrServiceFull is returned when the object store rejects a blob Put because
+// the bucket is at its configured hard quota (SPEC "Limits -> Durable
+// total-bytes ceiling"). It only ever originates from the blob store; the
+// metadata repos run no service-wide byte scan. Alias of the domain sentinel.
 var ErrServiceFull = domain.ErrServiceFull
 
-// ErrOverUserQuota is returned when accepting a write would push an
-// identity's active bytes past its per-user cap. Alias of the
-// domain-owned sentinel (see internal/domain/errors.go).
+// ErrOverUserQuota is returned when a write would push an identity's active
+// bytes past its per-user cap. Alias of the domain sentinel.
 var ErrOverUserQuota = domain.ErrOverUserQuota
 
 // PasteRepo is the sqlite-backed implementation of paste persistence.
 type PasteRepo struct {
 	db *sql.DB
-	// Retention is the content-TTL policy used to (re)stamp ExpiresAt on
-	// update. Defaults to the 30-day policy; the composition root overrides it.
+	// Retention re-stamps ExpiresAt on update. The composition root overrides
+	// the default.
 	Retention domain.Retention
 }
 
@@ -38,25 +33,18 @@ func NewPasteRepo(db *sql.DB) *PasteRepo {
 	return &PasteRepo{db: db, Retention: domain.DefaultRetention()}
 }
 
-// InsertWithQuotaCheck atomically (under BEGIN IMMEDIATE):
-//  1. checks identity active bytes + p.Size against userCap
-//  2. inserts the paste row + its v1 version row
+// InsertWithQuotaCheck checks the identity's active bytes against userCap and
+// inserts the paste row plus its v1 version row, both under one BEGIN
+// IMMEDIATE. Concurrent calls serialize at the transaction boundary, so two
+// uploads from one identity cannot both pass the cap check and both insert.
+// The durable total-bytes ceiling is not checked here: it is the object-store
+// bucket quota, enforced when the blob Put is rejected.
 //
-// Concurrent calls serialize at the transaction boundary, so two
-// uploads from the same identity can't both pass the user-cap check
-// and both insert. The durable total-bytes ceiling is NOT checked here:
-// it is the object-store bucket quota, enforced when the blob Put is
-// rejected (see SPEC "Limits -> Durable total-bytes ceiling: an
-// object-store quota").
+// Returns ErrSlugTaken when p.Slug is in use (the caller re-mints), or
+// ErrOverUserQuota when accepting would exceed userCap.
 //
-// Returns:
-//   - nil on success
-//   - ErrSlugTaken if p.Slug is already in use (caller retries with a fresh slug)
-//   - ErrOverUserQuota if accepting would exceed userCap
-//
-// ctx is accepted to satisfy the service.PasteRepo interface (the shale
-// backend carries staged blob refs on it); the sqlite path has no shale-blob
-// plane, so it ignores ctx and uses its own serializable-tx context.
+// ctx exists to satisfy service.PasteRepo, on which the shale backend carries
+// staged blob refs. The sqlite path has no blob plane and ignores it.
 func (r *PasteRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, userCap int64, now time.Time) error {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
@@ -68,8 +56,7 @@ func (r *PasteRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 	siteNowStr := formatSiteExpiry(now)
 	body := int64(p.Size)
 
-	// Per-identity check across BOTH pastes and sites. Tombstoned
-	// versions contribute 0.
+	// The check spans BOTH pastes and sites. Tombstoned versions contribute 0.
 	if userCap > 0 {
 		ownerTotal, err := identityActiveBytes(tx, p.Identity.String(), nowStr, siteNowStr)
 		if err != nil {
@@ -79,9 +66,9 @@ func (r *PasteRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 			return err
 		}
 	}
-	// A slug must be unique across sites too (a read resolves a slug in
-	// either table). The SiteRepo already checks the pastes table on insert;
-	// mirror it here so a paste cannot take a slug a site owns.
+	// A slug must be unique across sites too, since a read resolves a slug in
+	// either table. SiteRepo checks the pastes table on insert; this mirrors it
+	// so a paste cannot take a slug a site owns.
 	var siteExists int
 	if err := tx.QueryRow(`SELECT COUNT(1) FROM sites WHERE slug = ?`, p.Slug.String()).Scan(&siteExists); err != nil {
 		return fmt.Errorf("check site slug collision: %w", err)
@@ -89,7 +76,6 @@ func (r *PasteRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 	if siteExists > 0 {
 		return ErrSlugTaken
 	}
-	// 3. Insert.
 	if _, err := tx.Exec(`
 		INSERT INTO pastes (slug, identity, status, kind, content_sha, size, name,
 		                    pinned_version,
@@ -113,17 +99,13 @@ func (r *PasteRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 	return tx.Commit()
 }
 
-// Insert is the simple variant used by tests + any caller that
-// doesn't need quota enforcement. Production paths use
-// InsertWithQuotaCheck.
+// Insert is the unmetered variant for callers that need no quota enforcement.
 func (r *PasteRepo) Insert(p domain.Paste) error {
 	return r.InsertWithQuotaCheck(context.Background(), p, 0, p.CreatedAt)
 }
 
-// Get returns the paste for slug, or ErrNotFound. Expired pastes are
-// still returned by this read - the HTTP layer is responsible for
-// 404'ing them; the background sweep is responsible for deleting
-// them.
+// Get returns the paste for slug, or ErrNotFound. Expired pastes are still
+// returned: the HTTP layer 404s them and the sweep deletes them.
 func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
 	row := r.db.QueryRow(`
 		SELECT slug, identity, status, kind, content_sha, size, name,
@@ -134,17 +116,14 @@ func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
 	return scanPaste(row)
 }
 
-// ListByOwner returns all of an owner's active pastes, ordered by
-// expires_at ascending (soonest to die first - matches what `list`
-// should show). Empty identity returns no rows.
+// ListByOwner returns an owner's active pastes ordered by expires_at ascending
+// (soonest to die first, what `list` shows). An empty identity returns no rows.
 func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	if owner == "" {
 		return nil, nil
 	}
-	// Subquery computes MAX(ver_num) per paste so `list` can show "latest
-	// vN" alongside the served version. The N+1 query alternative would
-	// have been simpler but the active-pastes-per-owner count is small
-	// enough that one join in one statement is the right shape.
+	// The subquery computes MAX(ver_num) per paste so `list` can show "latest
+	// vN" alongside the served version, in one statement instead of N+1.
 	rows, err := r.db.Query(`
 		SELECT p.slug, p.identity, p.status, p.kind, p.content_sha, p.size, p.name,
 		       p.pinned_version,
@@ -156,7 +135,7 @@ func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list by owner: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	var out []domain.Paste
 	for rows.Next() {
 		p, err := scanPasteWithLatest(rows)
@@ -168,8 +147,8 @@ func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	return out, rows.Err()
 }
 
-// Delete removes a paste and (via FK cascade) all its versions.
-// Caller is responsible for owner check.
+// Delete removes a paste and, via FK cascade, all its versions. The caller owns
+// the ownership check.
 func (r *PasteRepo) Delete(slug domain.Slug) error {
 	_, err := r.db.Exec(`DELETE FROM pastes WHERE slug = ?`, slug.String())
 	if err != nil {
@@ -187,10 +166,9 @@ func (r *PasteRepo) SetName(slug domain.Slug, name string) error {
 	return nil
 }
 
-// MarkReady flips a paste's status pending -> ready (the finalizer's
-// success transition once the blob landed). Guarded by the WHERE clause:
-// only a still-pending row is advanced, so a late finalizer cannot
-// resurrect a failed paste. A missing or non-pending row is a no-op. See
+// MarkReady flips a paste pending -> ready once its blob has landed. The WHERE
+// clause advances only a still-pending row, so a late finalizer cannot
+// resurrect a failed paste; a missing or non-pending row is a no-op. See
 // docs/SPEC.md "Paste lifecycle status (async blob write)".
 func (r *PasteRepo) MarkReady(slug domain.Slug) error {
 	_, err := r.db.Exec(
@@ -202,14 +180,11 @@ func (r *PasteRepo) MarkReady(slug domain.Slug) error {
 	return nil
 }
 
-// MarkFailed flips a paste's status pending -> failed (the finalizer's
-// failure transition AND the reconciler's age-out). The row stays so a
-// read can serve an error page; the quota SUM excludes failed pastes
-// (see identityActiveBytes), so flipping the status IS the byte release -
-// no separate index to drop on sqlite. Guarded by the WHERE clause: only
-// a still-pending row transitions, so a ready paste is never un-counted.
-// Idempotent: a re-call finds the row already failed and changes nothing.
-// See docs/SPEC.md "Paste lifecycle status (async blob write)".
+// MarkFailed flips a paste pending -> failed. The row stays so a read can serve
+// an error page; identityActiveBytes excludes failed pastes, so the status flip
+// IS the byte release. The WHERE clause transitions only a still-pending row,
+// so a ready paste is never un-counted, and a re-call is a no-op. See
+// docs/SPEC.md "Paste lifecycle status (async blob write)".
 func (r *PasteRepo) MarkFailed(slug domain.Slug) error {
 	_, err := r.db.Exec(
 		`UPDATE pastes SET status = 'failed' WHERE slug = ? AND status = 'pending'`,
@@ -220,9 +195,8 @@ func (r *PasteRepo) MarkFailed(slug domain.Slug) error {
 	return nil
 }
 
-// SetPinnedVersion sets the pin to a specific version_num and rolls
-// the pastes row's denormalized head (content_sha + size + kind) to
-// that version's bytes. Caller verified ver exists.
+// SetPinnedVersion pins to ver and rolls the denormalized head (content_sha,
+// size, kind) to that version's bytes. The caller has verified ver exists.
 func (r *PasteRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error {
 	_, err := r.db.Exec(`
 		UPDATE pastes
@@ -235,8 +209,8 @@ func (r *PasteRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error
 	return nil
 }
 
-// Unpin clears the pin (pinned_version=0) and rolls the denormalized
-// head fields back to whatever the latest version (MAX ver_num) is.
+// Unpin clears the pin and rolls the denormalized head fields to the latest
+// version (MAX ver_num).
 func (r *PasteRepo) Unpin(slug domain.Slug) error {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
@@ -268,36 +242,23 @@ func (r *PasteRepo) Unpin(slug domain.Slug) error {
 	return tx.Commit()
 }
 
-// AppendResult reports what AppendVersionWithQuotaCheck did. The
-// caller (SSH layer) uses WasPinned to decide whether to surface a
-// "your pin held; new version isn't being served" warning.
-// AppendResult is an alias for domain.AppendResult, which owns the type: the
-// service port that returns it must not name a storage-owned type. Kept as an
-// alias so adapters and their tests continue to compile unchanged.
+// AppendResult aliases domain.AppendResult, which owns the type: the service
+// port returning it must not name a storage-owned type.
 type AppendResult = domain.AppendResult
 
-// AppendVersionWithQuotaCheck atomically (under BEGIN IMMEDIATE):
-//  1. checks identity (the existing paste's owner) active bytes + size against userCap
-//  2. inserts a new version row
-//  3. resets the retention clock (updated_at + expires_at)
-//  4. if the paste was UNPINNED (pinned_version=0), updates the
-//     denormalized head fields (kind, content_sha, size) so the public
-//     URL serves the new bytes. If the paste was PINNED to a specific
-//     version, the head fields stay pointing at that version's data -
-//     the new version is recorded but not served until the user
-//     `unpin`s or `pin`s a different version.
+// AppendVersionWithQuotaCheck checks the owning identity against userCap,
+// inserts a version row, resets the retention clock, and (only when the paste
+// is unpinned) rolls the denormalized head fields so the public URL serves the
+// new bytes. A pinned paste records the version without serving it until the
+// owner unpins or repins. All of it runs under one BEGIN IMMEDIATE.
 //
-// The "size" being charged is the new version's bytes - older versions
-// continue to count toward the identity's total until the parent paste
-// expires or is deleted. EXCEPTION: if the target paste is EXPIRED-unswept it
-// is excluded from identityActiveBytes, but the UPDATE below resets expires_at
-// (revives it), so the check charges the paste's full post-revival size - its
-// existing non-deleted version bytes plus the new version - not the new version
-// alone (docs/SPEC.md "Reviving an expired-but-unswept record charges its FULL
-// post-revival size").
-// ctx is accepted to satisfy the service.PasteAdmin interface; the sqlite
-// path ignores it (no shale-blob plane) and uses its own serializable-tx
-// context.
+// The charge is the new version's bytes; older versions keep counting until the
+// parent paste expires or is deleted. An EXPIRED-unswept paste is the
+// exception: identityActiveBytes excludes it, but the UPDATE below revives it,
+// so the charge is its FULL post-revival size (existing non-deleted version
+// bytes plus the new version) or the revived paste durably exceeds the cap.
+//
+// ctx exists to satisfy service.PasteAdmin; the sqlite path ignores it.
 func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (AppendResult, error) {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
@@ -309,9 +270,8 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 	siteNowStr := formatSiteExpiry(now)
 	body := int64(size)
 
-	// Look up the paste's identity + pin state + liveness. The paste
-	// expires_at column is stored with formatTime (RFC3339Nano), so it is
-	// compared against nowStr (the same format), NOT siteNowStr.
+	// The pastes.expires_at column is written with formatTime (RFC3339Nano), so
+	// it must be compared against nowStr, NOT siteNowStr.
 	var ownerIdentity string
 	var existingPin int
 	var pasteLive bool
@@ -322,21 +282,16 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		return AppendResult{}, fmt.Errorf("lookup paste identity: %w", err)
 	}
 
-	// Per-identity check across BOTH pastes and sites. Tombstoned
-	// versions contribute 0.
+	// The check spans BOTH pastes and sites. Tombstoned versions contribute 0.
 	if userCap > 0 {
 		ownerTotal, err := identityActiveBytes(tx, ownerIdentity, nowStr, siteNowStr)
 		if err != nil {
 			return AppendResult{}, err
 		}
-		// Reviving an EXPIRED-unswept paste must charge its full post-revival
-		// size: identityActiveBytes filters expires_at > now, so an expired
-		// paste's existing versions are NOT in ownerTotal - but the UPDATE below
-		// resets expires_at (revives it), bringing them back. Charge the paste's
-		// existing non-deleted version bytes PLUS the new version, not the new
-		// version alone, or the revived paste durably exceeds the cap (docs/SPEC.md
-		// "Reviving an expired-but-unswept record charges its FULL post-revival
-		// size"). Matches the slatedb + shale append revival charge.
+		// identityActiveBytes filters expires_at > now, so an expired paste's
+		// existing versions are absent from ownerTotal, yet the UPDATE below
+		// revives them. Add them to the charge, or the revived paste durably
+		// exceeds the cap.
 		charge := body
 		if !pasteLive {
 			var revived int64
@@ -350,9 +305,8 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		}
 	}
 
-	// MAX(ver_num) includes deleted rows - version numbers are NOT
-	// reused even after a tombstone. Predictable for users who
-	// `versions` and see continuous numbering.
+	// MAX(ver_num) includes deleted rows, so a version number is never reused
+	// after a tombstone and `versions` shows continuous numbering.
 	var maxVer int
 	if err := tx.QueryRow(`SELECT COALESCE(MAX(ver_num), 0) FROM versions WHERE slug = ?`, slug.String()).Scan(&maxVer); err != nil {
 		return AppendResult{}, fmt.Errorf("max ver: %w", err)
@@ -366,9 +320,8 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		return AppendResult{}, fmt.Errorf("insert version: %w", err)
 	}
 
-	// Head fields (kind, content_sha, size) ARE updated only when the
-	// paste was unpinned. A pinned paste keeps serving its pinned
-	// version's data; the new version is recorded but not yet served.
+	// The head fields move only when the paste is unpinned; a pinned paste
+	// keeps serving its pinned version's bytes.
 	if existingPin == 0 {
 		if _, err := tx.Exec(`
 			UPDATE pastes
@@ -379,8 +332,7 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 			return AppendResult{}, fmt.Errorf("update paste head (unpinned): %w", err)
 		}
 	} else {
-		// Pinned - only bump the clock; head fields stay pointing at
-		// the pinned version's bytes.
+		// Pinned: bump only the clock.
 		if _, err := tx.Exec(`
 			UPDATE pastes
 			SET updated_at = ?, expires_at = ?
@@ -396,16 +348,15 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 	return AppendResult{NewVer: newVer, WasPinned: existingPin != 0}, nil
 }
 
-// AppendVersion is the simple variant used by tests + any caller that
-// doesn't need quota enforcement.
+// AppendVersion is the unmetered variant for callers that need no quota
+// enforcement.
 func (r *PasteRepo) AppendVersion(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, now time.Time) (int, error) {
 	res, err := r.AppendVersionWithQuotaCheck(context.Background(), slug, kind, contentSHA, size, 0, now)
 	return res.NewVer, err
 }
 
-// ListVersions returns the version history for slug, newest first.
-// Includes tombstoned (deleted=1) rows so the `versions` verb can
-// render them with a `deleted` marker.
+// ListVersions returns the version history for slug, newest first. Tombstoned
+// rows are included so `versions` can render them with a `deleted` marker.
 func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	rows, err := r.db.Query(`
 		SELECT slug, ver_num, kind, content_sha, size, created_at, deleted
@@ -415,7 +366,7 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list versions: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	var out []domain.Version
 	for rows.Next() {
 		var v domain.Version
@@ -433,9 +384,8 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	return out, rows.Err()
 }
 
-// GetVersion returns a single version row, or ErrNotFound. Returns
-// tombstoned rows too; callers needing "real, with bytes" should
-// check v.Deleted.
+// GetVersion returns a single version row, or ErrNotFound. Tombstoned rows are
+// returned too; a caller needing bytes must check v.Deleted.
 func (r *PasteRepo) GetVersion(slug domain.Slug, ver int) (domain.Version, error) {
 	row := r.db.QueryRow(`
 		SELECT slug, ver_num, kind, content_sha, size, created_at, deleted
@@ -457,17 +407,13 @@ func (r *PasteRepo) GetVersion(slug domain.Slug, ver int) (domain.Version, error
 	return v, nil
 }
 
-// DeleteVersion marks a single version's blob bytes as freed by
-// flipping the deleted flag to 1. The row stays so:
-//   - ver_num isn't reused (a future `update` still gets MAX(ver_num)+1)
-//   - audit trail + `versions` history survives
+// DeleteVersion tombstones one version by setting deleted = 1. The row stays so
+// ver_num is never reused and the `versions` history survives; quota SUMs and
+// latest-served-version pickers filter deleted = 0 so a tombstone contributes
+// nothing to active accounting.
 //
-// Quota SUMs, latest-served-version pickers, and AppendVersion's
-// MAX(ver_num) all filter `deleted = 0` so tombstones don't influence
-// active accounting.
-//
-// Returns ErrNotFound if (slug, ver) doesn't exist. Does NOT check
-// owner or served-status - service layer enforces those.
+// Returns ErrNotFound when (slug, ver) does not exist. Owner and served-status
+// checks belong to the service layer.
 func (r *PasteRepo) DeleteVersion(slug domain.Slug, ver int) error {
 	res, err := r.db.Exec(`UPDATE versions SET deleted = 1 WHERE slug = ? AND ver_num = ?`, slug.String(), ver)
 	if err != nil {
@@ -483,8 +429,7 @@ func (r *PasteRepo) DeleteVersion(slug domain.Slug, ver int) error {
 	return nil
 }
 
-// CountByOwner returns how many active pastes the owner has - used
-// by whoami output.
+// CountByOwner returns how many active pastes the owner has.
 func (r *PasteRepo) CountByOwner(owner string) (int, error) {
 	if owner == "" {
 		return 0, nil
@@ -497,16 +442,10 @@ func (r *PasteRepo) CountByOwner(owner string) (int, error) {
 	return n, nil
 }
 
-// SumActiveSizeByOwner returns the total bytes the identity currently
-// has alive - the sum of every VERSION row attached to any of its
-// non-expired pastes. We sum versions, not pastes, so that update
-// history is properly accounted: each call to `update` adds a new
-// version row that persists on disk until the parent paste expires
-// or is deleted.
-//
-// Delete frees this completely: the FK cascade drops the parent
-// paste row AND all its version rows, so the next call to this
-// function returns the lower total.
+// SumActiveSizeByOwner totals the identity's live bytes: every VERSION row
+// under a non-expired paste. Summing versions rather than pastes is what
+// accounts for update history, since each update leaves a version row on disk
+// until the parent paste expires or is deleted (the FK cascade frees both).
 func (r *PasteRepo) SumActiveSizeByOwner(owner string, now time.Time) (int64, error) {
 	if owner == "" {
 		return 0, nil
@@ -525,9 +464,8 @@ func (r *PasteRepo) SumActiveSizeByOwner(owner string, now time.Time) (int64, er
 	return n.Int64, nil
 }
 
-// SumActiveBytesByOwner is the int-returning shape the service layer's
-// PasteAdmin interface expects (whoami formatting uses int). Same
-// query as SumActiveSizeByOwner but with the type narrowed.
+// SumActiveBytesByOwner is SumActiveSizeByOwner narrowed to the int the
+// service layer's PasteAdmin interface expects.
 func (r *PasteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, error) {
 	n, err := r.SumActiveSizeByOwner(owner, now)
 	if err != nil {
@@ -536,9 +474,8 @@ func (r *PasteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, err
 	return int(n), nil
 }
 
-// OwnerFirstSeen returns the earliest CreatedAt across the owner's
-// pastes - a proxy for "when did we first see this key". Zero
-// time.Time when the owner has no pastes.
+// OwnerFirstSeen returns the earliest CreatedAt across the owner's pastes, a
+// proxy for when the key was first seen. Zero time when the owner has none.
 func (r *PasteRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 	if owner == "" {
 		return time.Time{}, nil
@@ -554,8 +491,8 @@ func (r *PasteRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 	return parseTime(s.String), nil
 }
 
-// scanPaste is shared by Get + ListByOwner - same column order, one
-// place to update if columns shift.
+// scanPaste is shared by Get and ListByOwner: one place to change when the
+// column order shifts.
 func scanPaste(s scanner) (domain.Paste, error) {
 	var p domain.Paste
 	var slugStr, identStr, status, kind, created, updated, expires string
@@ -577,8 +514,7 @@ func scanPaste(s scanner) (domain.Paste, error) {
 	return p, nil
 }
 
-// scanPasteWithLatest is scanPaste plus the latest_version column. Used
-// by ListByOwner; one extra COALESCE'd subquery in the SELECT.
+// scanPasteWithLatest is scanPaste plus the latest_version column.
 func scanPasteWithLatest(s scanner) (domain.Paste, error) {
 	var p domain.Paste
 	var slugStr, identStr, status, kind, created, updated, expires string
@@ -601,12 +537,12 @@ func scanPasteWithLatest(s scanner) (domain.Paste, error) {
 	return p, nil
 }
 
-// scanner is the minimal interface *sql.Row and *sql.Rows both satisfy
-// so scanPaste can take either.
+// scanner is the minimal interface both *sql.Row and *sql.Rows satisfy, so
+// scanPaste can take either.
 type scanner interface{ Scan(dest ...any) error }
 
 // ErrSlugTaken is returned by Insert when the chosen slug already exists.
-// Alias of the domain-owned sentinel (see internal/domain/errors.go).
+// Alias of the domain sentinel.
 var ErrSlugTaken = domain.ErrSlugTaken
 
 func isUniqueViolation(err error) bool {

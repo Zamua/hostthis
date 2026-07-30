@@ -1,10 +1,8 @@
-// Package storage's SlateDB-backed metadata implementation.
-//
-// Implements the same service-layer interfaces as the sqlite backend;
-// cmd/hostthisd picks one via HOSTTHIS_METADATA_BACKEND and the rest of the app
-// is unaware. Spec: docs/SPEC.md "Metadata storage backends".
-//
-// Needs cgo + libslatedb_uniffi on the loader path.
+// SlateDB-backed metadata implementation, satisfying the same service-layer
+// interfaces as the sqlite backend; cmd/hostthisd picks one via
+// HOSTTHIS_METADATA_BACKEND and the rest of the app is unaware. Spec:
+// docs/SPEC.md "Metadata storage backends". Needs cgo + libslatedb_uniffi on
+// the loader path.
 //
 // # Key layout
 //
@@ -53,26 +51,24 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// SlateConfig captures the connection parameters for the SlateDB
-// metadata store. NewSlateRepo writes these to the AWS_* process env
-// vars before calling ObjectStoreResolve - that's how the underlying
-// OpenDAL/object_store crate picks up S3 configuration (passing the
-// same fields via URL query params does NOT work; the crate ignores
-// them).
+// SlateConfig captures the connection parameters for the SlateDB metadata
+// store. NewSlateRepo writes these to the AWS_* process env vars before calling
+// ObjectStoreResolve: that is the only way the underlying OpenDAL/object_store
+// crate picks up S3 configuration, since it ignores the same fields passed as
+// URL query params.
 type SlateConfig struct {
 	Endpoint  string // e.g. "http://minio:9000"; empty for AWS
 	Region    string // e.g. "us-east-1"
 	Bucket    string // bucket name (required)
 	AccessKey string
 	SecretKey string
-	UseSSL    bool   // false → set AWS_ALLOW_HTTP=true (MinIO dev)
+	UseSSL    bool   // false sets AWS_ALLOW_HTTP=true (MinIO dev)
 	DbName    string // logical db name within the bucket; key prefix for SlateDB files
 }
 
-// SlateRepo is the SlateDB-backed metadata store. Satisfies the
-// same service-layer interfaces as PasteRepo (sqlite). Concurrent
-// access from a single Go process is safe; multi-process writers are
-// fenced via SlateDB's writer_epoch protocol.
+// SlateRepo is the SlateDB-backed metadata store. Concurrent access from a
+// single Go process is safe; multi-process writers are fenced via SlateDB's
+// writer_epoch protocol.
 type SlateRepo struct {
 	db    *slatedb.Db
 	store *slatedb.ObjectStore
@@ -80,14 +76,12 @@ type SlateRepo struct {
 	// quotaLocks serializes the per-identity quota-check-and-write so two
 	// concurrent same-identity uploads cannot both read the pre-upload sum,
 	// both pass the cap, and both commit. Snapshot isolation does NOT
-	// serialize them on its own: they write DIFFERENT keys (distinct slugs),
-	// so there is no write-write conflict for SI to detect; only the
-	// per-identity quota SUM is shared, and it is read outside any single
-	// key the transaction conflicts on. SlateDB is single-writer
-	// (writer-epoch fenced), so an in-process lock is sufficient: no other
-	// process can interleave a write. Striped by identity hash so different
-	// identities do not contend. The service-wide cap stays best-effort
-	// (cross-identity races on it are acceptable per the spec).
+	// serialize them: they write DIFFERENT keys (distinct slugs), so SI sees
+	// no write-write conflict, while the shared per-identity SUM is read
+	// outside any key the transaction conflicts on. SlateDB is single-writer,
+	// so no other process can interleave and an in-process lock suffices.
+	// Striped by identity hash so different identities do not contend. The
+	// service-wide cap stays best-effort per the spec.
 	quotaLocks [256]sync.Mutex
 
 	// Retention is the content-TTL policy used to (re)stamp ExpiresAt on
@@ -95,9 +89,9 @@ type SlateRepo struct {
 	Retention domain.Retention
 }
 
-// lockQuota acquires the per-identity quota stripe and returns the unlock.
-// Held across the quota SUM and the write transaction so the check and the
-// commit are atomic with respect to other same-identity uploads.
+// lockQuota acquires the per-identity quota stripe and returns the unlock. Hold
+// it across the quota SUM and the write transaction so the check and the commit
+// are atomic against other same-identity uploads.
 func (r *SlateRepo) lockQuota(identity string) func() {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(identity))
@@ -106,12 +100,10 @@ func (r *SlateRepo) lockQuota(identity string) func() {
 	return m.Unlock
 }
 
-// NewSlateRepo opens a SlateDB instance backed by the configured
-// object store. Caller must Close() to flush + shut down cleanly.
-// Sets process-global AWS_* env vars from cfg - the OpenDAL crate
-// SlateDB uses internally reads them. Don't run two SlateRepo
-// instances pointing at different buckets within the same process
-// (the env-var write would collide).
+// NewSlateRepo opens a SlateDB instance backed by the configured object store.
+// The caller must Close to flush and shut down cleanly. cfg is applied as
+// process-global AWS_* env vars, so two SlateRepo instances pointing at
+// different buckets cannot coexist in one process.
 func NewSlateRepo(cfg SlateConfig) (*SlateRepo, error) {
 	if cfg.Bucket == "" {
 		return nil, fmt.Errorf("SlateConfig.Bucket required")
@@ -131,9 +123,8 @@ func NewSlateRepo(cfg SlateConfig) (*SlateRepo, error) {
 	if !cfg.UseSSL {
 		os.Setenv("AWS_ALLOW_HTTP", "true")
 	}
-	// Path-style addressing - MinIO + most non-AWS S3-compatibles
-	// don't support virtual-hosted-style (bucket.host) without
-	// custom DNS. Harmless on AWS proper too.
+	// Path-style addressing: MinIO and most non-AWS S3-compatibles need
+	// custom DNS for virtual-hosted-style (bucket.host). Harmless on AWS.
 	os.Setenv("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", "false")
 
 	url := "s3://" + cfg.Bucket + "/"
@@ -150,7 +141,7 @@ func NewSlateRepo(cfg SlateConfig) (*SlateRepo, error) {
 	return &SlateRepo{db: db, store: store, Retention: domain.DefaultRetention()}, nil
 }
 
-// Close flushes pending writes + shuts down the underlying SlateDB.
+// Close flushes pending writes and shuts down the underlying SlateDB.
 func (r *SlateRepo) Close() error {
 	if r.db != nil {
 		if err := r.db.Shutdown(); err != nil {
@@ -166,32 +157,26 @@ func (r *SlateRepo) Close() error {
 // --- JSON row schemas ------------------------------------------------------
 
 // contentRef is the served-content descriptor: the four fields that together
-// name the stored bytes a paste version points at. They travel as ONE value -
-// a version row carries its own, a paste head carries the SERVED version's - so
-// "make version V the served one" is a single whole-value assignment
-// (head.contentRef = vRow.contentRef) and no field can ever be repointed
-// without the others.
+// name the stored bytes a paste version points at. They travel as ONE value (a
+// version row carries its own, a paste head carries the SERVED version's) so
+// "make version V the served one" is a single whole-value assignment and no
+// field can be repointed without the others. Moving ContentSHA while leaving
+// BlobID behind would make the head serve the wrong blob under value
+// separation, where the read seam resolves bytes by BlobID.
 //
-// Why this type exists: pinning to an older version used to move the head's
-// ContentSHA but leave its BlobID on the prior head, so under value-separation
-// (where the read seam resolves bytes by BlobID) the head served the wrong
-// blob. Bundling the four as one value makes that drift unrepresentable - a
-// fifth descriptor field added later flows to every call site for free.
-//
-// Embedded ANONYMOUSLY in pasteRow + versionRow so the four keys stay at the
-// top level of the JSON, byte-compatible with records written before this type
-// existed.
+// Embedded ANONYMOUSLY in pasteRow and versionRow so the four keys stay at the
+// top level of the JSON.
 type contentRef struct {
 	Kind       string `json:"kind"`
 	ContentSHA string `json:"content_sha"`
-	BlobID     string `json:"blob_id,omitempty"` // shale-blob path: the staged blob id GetBlob needs; "" on the standalone (sha-keyed) path
+	BlobID     string `json:"blob_id,omitempty"` // shale-blob path: the staged blob id GetBlob needs; "" on the standalone sha-keyed path
 	Size       int    `json:"size"`
 }
 
 type pasteRow struct {
 	Identity      string    `json:"identity"`
-	Status        string    `json:"status,omitempty"` // pending|ready|failed; "" (legacy) reads as ready
-	contentRef              // the SERVED version's descriptor (kind/content_sha/blob_id/size, promoted -> flat JSON)
+	Status        string    `json:"status,omitempty"` // pending|ready|failed; "" reads as ready
+	contentRef              // the SERVED version's descriptor, promoted to flat JSON
 	Name          string    `json:"name"`
 	PinnedVersion int       `json:"pinned_version"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -226,8 +211,8 @@ func pasteFromDomain(p domain.Paste) pasteRow {
 	return pasteRow{
 		Identity: p.Identity.String(),
 		Status:   string(domain.NormalizeStatus(string(p.Status))),
-		// domain.Paste carries no BlobID (a storage/value-sep detail); the
-		// insert path sets the head's BlobID explicitly right after this.
+		// domain.Paste carries no BlobID (a storage/value-separation
+		// detail); the insert path sets the head's BlobID after this.
 		contentRef:    contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, Size: p.Size},
 		Name:          p.Name,
 		PinnedVersion: p.PinnedVersion,
@@ -285,8 +270,8 @@ func keyKeygate(subnet, identity string) []byte {
 
 func prefixKeygateSubnet(subnet string) []byte { return []byte("keygate/" + subnet + "/") }
 
-// extractSlug pulls the trailing slug out of a key like
-// "identity_pastes/<identity>/<slug>" or "expiry/<rfc3339>/<slug>".
+// extractSlug takes the segment after the last '/', the slug in
+// "identity_pastes/<identity>/<slug>" and "expiry/<rfc3339>/<slug>".
 func extractSlug(key []byte) string {
 	s := string(key)
 	idx := strings.LastIndex(s, "/")
@@ -298,8 +283,7 @@ func extractSlug(key []byte) string {
 
 // --- Generic helpers -------------------------------------------------------
 
-// getJSON reads + JSON-decodes a value at key. Returns ErrNotFound
-// when the key doesn't exist.
+// getJSON decodes the value at key, returning ErrNotFound when it is absent.
 func (r *SlateRepo) getJSON(key []byte, out any) error {
 	raw, err := r.db.Get(key)
 	if err != nil {
@@ -314,7 +298,8 @@ func (r *SlateRepo) getJSON(key []byte, out any) error {
 	return nil
 }
 
-// txGetJSON reads + JSON-decodes inside a transaction.
+// txGetJSON is getJSON inside a transaction, so the read joins SI conflict
+// detection.
 func txGetJSON(tx *slatedb.DbTransaction, key []byte, out any) error {
 	raw, err := tx.Get(key)
 	if err != nil {
@@ -329,7 +314,6 @@ func txGetJSON(tx *slatedb.DbTransaction, key []byte, out any) error {
 	return nil
 }
 
-// txPutJSON encodes + puts inside a transaction.
 func txPutJSON(tx *slatedb.DbTransaction, key []byte, v any) error {
 	body, err := json.Marshal(v)
 	if err != nil {
@@ -341,9 +325,8 @@ func txPutJSON(tx *slatedb.DbTransaction, key []byte, v any) error {
 	return nil
 }
 
-// scanPrefix collects all (key, value) pairs whose key starts with
-// prefix. Used for list/prefix queries (versions of a paste, pastes
-// of an identity, expired pastes, keygate-by-subnet).
+// scanPrefix collects every (key, value) pair under prefix, copying both out of
+// the iterator's buffers.
 func (r *SlateRepo) scanPrefix(prefix []byte) ([]scanItem, error) {
 	it, err := r.db.ScanPrefix(prefix)
 	if err != nil {
@@ -396,14 +379,11 @@ func (r *SlateRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 		var row pasteRow
 		if err := r.getJSON(keyPaste(slug), &row); err != nil {
 			if errors.Is(err, ErrNotFound) {
-				// Index leaked past the paste; skip silently. A future
-				// compaction-style fixup could clean these up.
-				continue
+				continue // index entry outlived its paste; skip the orphan
 			}
 			return nil, err
 		}
 		p := row.toDomain(slug)
-		// LatestVersion = max(ver_num) across non-deleted versions of this slug.
 		latest, err := r.latestActiveVersion(slug)
 		if err != nil {
 			return nil, err
@@ -411,8 +391,7 @@ func (r *SlateRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 		p.LatestVersion = latest
 		out = append(out, p)
 	}
-	// Match sqlite ORDER BY expires_at ASC.
-	sortByExpiresAt(out)
+	sortByExpiresAt(out) // matches sqlite ORDER BY expires_at ASC
 	return out, nil
 }
 
@@ -448,10 +427,9 @@ func (r *SlateRepo) CountByOwner(owner string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	// Count only LIVE pastes: resolve each derived-index entry to its
-	// authoritative row and skip orphans (an index entry that leaked past
-	// its paste), mirroring ListByOwner. A raw len(idx) over-counts orphans,
-	// which is the whoami-vs-list mismatch (#464).
+	// Resolve each derived-index entry to its authoritative row and skip
+	// orphans, mirroring ListByOwner. A raw len(idx) counts orphans too, and
+	// whoami then disagrees with list.
 	live := 0
 	for _, item := range idx {
 		slug := domain.Slug(extractSlug(item.Key))
@@ -479,10 +457,8 @@ func (r *SlateRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, err
 }
 
 // sumActiveBytesForOwner walks every paste indexed under
-// identity_pastes/<owner>/ and sums the sizes of non-deleted version
-// rows attached to pastes whose expires_at > now. Used both by the
-// public SumActiveBytesByOwner and by the quota check inside
-// InsertWithQuotaCheck / AppendVersionWithQuotaCheck.
+// identity_pastes/<owner>/ and sums the sizes of non-deleted version rows
+// attached to pastes whose expires_at > now.
 func (r *SlateRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, error) {
 	idx, err := r.scanPrefix(prefixIdentityPastes(owner))
 	if err != nil {
@@ -520,13 +496,11 @@ func (r *SlateRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 	return total, nil
 }
 
-// sumLiveVersionBytesForSlug sums the sizes of a paste's non-deleted version
-// rows (the paste's post-revival byte contribution). When
-// AppendVersionWithQuotaCheck revives an EXPIRED-unswept paste - the owner sum
-// excludes it, but the append resets its expiry - the check charges this sum
-// PLUS the new version so the revived paste's full bytes are counted, matching
-// the sqlite/shale append revival charge (docs/SPEC.md "Reviving an
-// expired-but-unswept record charges its FULL post-revival size").
+// sumLiveVersionBytesForSlug sums a paste's non-deleted version rows: its
+// post-revival byte contribution. An append to an EXPIRED-unswept paste resets
+// its expiry while the owner sum still excludes it, so the quota check charges
+// this sum PLUS the new version (docs/SPEC.md "Reviving an expired-but-unswept
+// record charges its FULL post-revival size").
 func (r *SlateRepo) sumLiveVersionBytesForSlug(slug domain.Slug) (int64, error) {
 	items, err := r.scanPrefix(prefixVersions(slug))
 	if err != nil {
@@ -559,8 +533,7 @@ func (r *SlateRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 		}
 		out = append(out, v.toDomain(slug))
 	}
-	// Match sqlite ORDER BY ver_num DESC.
-	sortVersionsDesc(out)
+	sortVersionsDesc(out) // matches sqlite ORDER BY ver_num DESC
 	return out, nil
 }
 
@@ -592,31 +565,24 @@ func (r *SlateRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 
 // --- Writes (each opens a SlateDB transaction) -----------------------------
 
-// ctx is accepted to satisfy the service.PasteRepo interface (the shale
-// backend carries staged blob refs on it); the direct slate path has no
-// shale-blob plane, so it ignores ctx.
+// ctx satisfies the service.PasteRepo interface (the shale backend carries
+// staged blob refs on it); the direct slate path has no shale-blob plane.
 func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, userCap int64, now time.Time) error {
-	// The per-identity cap pre-check happens OUTSIDE the transaction window
-	// because SlateDB has no SUM operator; scanning every key during a
-	// transaction would hold tx state across many round-trips. Single-writer
-	// fencing means no other PROCESS can sneak a write in between the check
-	// and the commit. Concurrent GOROUTINES in this process are NOT
-	// serialized by the SI transaction (they write different keys, so SI
-	// finds no conflict), so the per-identity quota stripe below serializes
-	// the same-identity check-and-commit: without it two concurrent uploads
-	// could both pass the cap and both land. The durable total-bytes ceiling
-	// is NOT checked here: it is the object-store bucket quota, enforced when
-	// the blob Put is rejected (see SPEC "Limits -> Durable total-bytes
-	// ceiling: an object-store quota").
+	// The per-identity cap pre-check runs OUTSIDE the transaction: SlateDB
+	// has no SUM operator, so scanning every key inside one would hold tx
+	// state across many round-trips. Single-writer fencing keeps another
+	// PROCESS from interleaving, but concurrent goroutines here write
+	// different keys and so raise no SI conflict; the quota stripe is what
+	// stops two same-identity uploads both passing the cap and both landing.
+	// The durable total-bytes ceiling is the object-store bucket quota,
+	// enforced when a blob Put is rejected, not here (SPEC "Limits").
 	defer r.lockQuota(p.Identity.String())()
 	body := int64(p.Size)
 	if userCap > 0 {
-		// Per-owner cap counts BOTH paste bytes AND site bytes, symmetric
-		// with InsertSiteWithQuotaCheck (which sums both for a site deploy)
-		// and matching the sqlite identityActiveBytes that spans both kinds.
-		// Without the site term a paste could be admitted while the owner's
-		// site bytes are ignored (e.g. an 800-byte site + a 300-byte paste
-		// under a 1000-byte cap would wrongly pass).
+		// The per-owner cap counts BOTH paste and site bytes, symmetric with
+		// the site deploy path and with sqlite's identityActiveBytes.
+		// Without the site term an 800-byte site plus a 300-byte paste would
+		// pass a 1000-byte cap.
 		ownerPaste, err := r.sumActiveBytesForOwner(p.Identity.String(), now)
 		if err != nil {
 			return fmt.Errorf("identity paste sum: %w", err)
@@ -635,9 +601,8 @@ func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 		return fmt.Errorf("begin tx: %w", err)
 	}
 
-	// Slug-collision: read; if a row exists, surface ErrSlugTaken so
-	// the caller picks a different slug + retries. Read participates
-	// in SI conflict detection.
+	// Slug collision: ErrSlugTaken tells the caller to pick another slug and
+	// retry. The read participates in SI conflict detection.
 	existing, err := tx.Get(keyPaste(p.Slug))
 	if err != nil {
 		_ = tx.Rollback()
@@ -647,10 +612,8 @@ func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 		_ = tx.Rollback()
 		return ErrSlugTaken
 	}
-	// A slug must be unique across sites too (a read resolves a slug in
-	// either family). The site insert already checks the paste key;
-	// mirror it here so a paste cannot take a slug a site owns. Matches
-	// the sqlite paste insert's `SELECT COUNT(1) FROM sites` guard.
+	// A slug must be unique across sites too, since a read resolves a slug in
+	// either family. The site insert makes the mirror-image check.
 	existingSite, err := tx.Get(keySite(p.Slug))
 	if err != nil {
 		_ = tx.Rollback()
@@ -687,8 +650,8 @@ func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 		return fmt.Errorf("put expiry index: %w", err)
 	}
 
-	// identity_first_seen: write only if absent (sqlite uses MIN(created_at)
-	// across paste rows; here we cache it explicitly on first paste).
+	// identity_first_seen is write-once: sqlite derives it as MIN(created_at)
+	// across paste rows, so overwriting here would move it forward.
 	fsKey := keyIdentityFirstSeen(p.Identity.String())
 	fs, err := tx.Get(fsKey)
 	if err != nil {
@@ -709,16 +672,15 @@ func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 }
 
 func (r *SlateRepo) Delete(slug domain.Slug) error {
-	// Read the paste first to learn its identity + expires_at (need
-	// both to clean up secondary indexes).
+	// Identity and expires_at are the secondary-index keys, so the row must
+	// be read before it can be removed.
 	var p pasteRow
 	if err := r.getJSON(keyPaste(slug), &p); err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return nil // idempotent - sqlite's DELETE is also a no-op on missing rows
+			return nil // idempotent, like sqlite's DELETE on a missing row
 		}
 		return err
 	}
-	// Enumerate version keys to delete.
 	versions, err := r.scanPrefix(prefixVersions(slug))
 	if err != nil {
 		return err
@@ -777,10 +739,10 @@ func (r *SlateRepo) SetName(slug domain.Slug, name string) error {
 	return nil
 }
 
-// MarkReady flips a paste's status pending -> ready. Guarded: only a
-// still-pending paste transitions, so a late finalizer cannot resurrect
-// a failed paste. A missing paste, or one already ready/failed, is a
-// no-op. See docs/SPEC.md "Paste lifecycle status (async blob write)".
+// MarkReady flips a paste's status pending -> ready. Only a still-pending
+// paste transitions, so a late finalizer cannot resurrect a failed one; any
+// other state, or a missing paste, is a no-op. docs/SPEC.md "Paste lifecycle
+// status (async blob write)".
 func (r *SlateRepo) MarkReady(slug domain.Slug) error {
 	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
 	if err != nil {
@@ -809,14 +771,12 @@ func (r *SlateRepo) MarkReady(slug domain.Slug) error {
 	return nil
 }
 
-// MarkFailed flips a paste's status pending -> failed and releases its
-// quota by deleting the identity_pastes index entry (the slate quota SUM
-// walks that index, so dropping it is the byte release). The paste row
-// stays (flipped to failed) so a read can serve an error page. Guarded:
-// only a still-pending paste transitions, so a ready paste is never
-// un-counted. Idempotent: a second call finds the row already failed and
-// does nothing. See docs/SPEC.md "Paste lifecycle status (async blob
-// write)".
+// MarkFailed flips a paste's status pending -> failed and releases its quota by
+// deleting the identity_pastes index entry, which is what the quota SUM walks.
+// The row itself stays, flipped to failed, so a read can serve an error page.
+// Only a still-pending paste transitions, so a ready paste is never un-counted,
+// and a second call is a no-op. docs/SPEC.md "Paste lifecycle status (async
+// blob write)".
 func (r *SlateRepo) MarkFailed(slug domain.Slug) error {
 	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
 	if err != nil {
@@ -839,8 +799,6 @@ func (r *SlateRepo) MarkFailed(slug domain.Slug) error {
 		_ = tx.Rollback()
 		return err
 	}
-	// Release the reservation: drop the index entry so the quota SUM no
-	// longer counts this paste's bytes.
 	if err := tx.Delete(keyIdentityPaste(p.Identity, slug.String())); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("delete identity-paste index: %w", err)
@@ -861,9 +819,9 @@ func (r *SlateRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error
 		_ = tx.Rollback()
 		return err
 	}
-	// Repoint the head's served descriptor at the pinned version's, as ONE
-	// value. The version row carries the full contentRef (incl. BlobID, which
-	// domain.Version does not), so the head can't drift a field out of sync.
+	// Repoint the head's served descriptor as ONE value. The version ROW
+	// carries the full contentRef including BlobID, which domain.Version does
+	// not, so the head cannot drift a field out of sync.
 	var vr versionRow
 	if err := txGetJSON(tx, keyVersion(slug, ver.VerNum), &vr); err != nil {
 		_ = tx.Rollback()
@@ -882,8 +840,8 @@ func (r *SlateRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error
 }
 
 func (r *SlateRepo) Unpin(slug domain.Slug) error {
-	// Need latest non-deleted version's head fields. Scan outside tx
-	// is fine; commit detects conflicting writes.
+	// Scanning for the latest version outside the tx is safe: the commit
+	// still detects a conflicting write.
 	versions, err := r.scanPrefix(prefixVersions(slug))
 	if err != nil {
 		return err
@@ -913,7 +871,7 @@ func (r *SlateRepo) Unpin(slug domain.Slug) error {
 		return err
 	}
 	p.PinnedVersion = 0
-	p.contentRef = latest.contentRef // whole served descriptor rolls to the latest version
+	p.contentRef = latest.contentRef // the whole served descriptor rolls, never one field
 	if err := txPutJSON(tx, keyPaste(slug), p); err != nil {
 		_ = tx.Rollback()
 		return err
@@ -924,15 +882,14 @@ func (r *SlateRepo) Unpin(slug domain.Slug) error {
 	return nil
 }
 
-// ctx is accepted to satisfy the service.PasteAdmin interface; the direct
-// slate path ignores it (no shale-blob plane).
+// ctx satisfies the service.PasteAdmin interface; the direct slate path has no
+// shale-blob plane.
 func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (AppendResult, error) {
-	// Need owner identity to do the per-user check. Read it first (a plain
-	// read, no lock needed), then hold the per-identity quota stripe across
-	// the sum + the append so two concurrent same-identity writes cannot
-	// both pass the cap (see InsertWithQuotaCheck + the quotaLocks doc). The
-	// durable total-bytes ceiling is NOT checked here (it is the object-store
-	// bucket quota).
+	// The owner identity is needed to pick the quota stripe, so it is read
+	// first, unlocked; the stripe then spans the sum and the append so two
+	// concurrent same-identity writes cannot both pass the cap (see
+	// quotaLocks). The durable total-bytes ceiling is the object-store bucket
+	// quota, not checked here.
 	var existing pasteRow
 	if err := r.getJSON(keyPaste(slug), &existing); err != nil {
 		return AppendResult{}, err
@@ -940,9 +897,8 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 	defer r.lockQuota(existing.Identity)()
 	body := int64(size)
 	if userCap > 0 {
-		// Per-owner cap counts BOTH paste bytes AND site bytes (symmetric
-		// with the site deploy path + the sqlite identityActiveBytes), so an
-		// append cannot ignore the owner's existing site bytes.
+		// The per-owner cap counts BOTH paste and site bytes, so an append
+		// cannot ignore the owner's existing site bytes.
 		ownerPaste, err := r.sumActiveBytesForOwner(existing.Identity, now)
 		if err != nil {
 			return AppendResult{}, fmt.Errorf("identity paste sum: %w", err)
@@ -951,14 +907,12 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		if err != nil {
 			return AppendResult{}, fmt.Errorf("identity site sum: %w", err)
 		}
-		// Reviving an EXPIRED-unswept paste must charge its full post-revival
-		// size. The owner sums filter expires_at > now, so an expired paste's
-		// existing versions are NOT in ownerPaste - but the append below resets
-		// expires_at (revives it), bringing them back. Charge the paste's existing
-		// non-deleted version bytes PLUS the new version, not the new version
-		// alone, or the revived paste durably exceeds the cap (docs/SPEC.md
-		// "Reviving an expired-but-unswept record charges its FULL post-revival
-		// size"). Matches the sqlite + shale append revival charge.
+		// The owner sums filter expires_at > now, so an expired paste's
+		// existing versions are NOT in ownerPaste, yet the append below
+		// resets expires_at and brings them back. Charging the new version
+		// alone would leave the revived paste durably over the cap
+		// (docs/SPEC.md "Reviving an expired-but-unswept record charges its
+		// FULL post-revival size").
 		charge := body
 		if domain.IsExpired(existing.ExpiresAt, now) {
 			revived, err := r.sumLiveVersionBytesForSlug(slug)
@@ -971,8 +925,7 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 			return AppendResult{}, err
 		}
 	}
-	// MAX(ver_num) INCLUDING deleted rows - version numbers are not
-	// reused (matches sqlite behavior).
+	// MAX(ver_num) INCLUDING deleted rows: version numbers are never reused.
 	versions, err := r.scanPrefix(prefixVersions(slug))
 	if err != nil {
 		return AppendResult{}, err
@@ -1009,7 +962,7 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		return AppendResult{}, err
 	}
 
-	// Remove + re-add expiry index entry (the date in the key changes).
+	// The expiry entry is re-keyed, not updated: the timestamp is in the key.
 	if err := tx.Delete(keyExpiry(p.ExpiresAt, slug)); err != nil {
 		_ = tx.Rollback()
 		return AppendResult{}, fmt.Errorf("delete old expiry idx: %w", err)
@@ -1017,7 +970,7 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 	p.UpdatedAt = now
 	p.ExpiresAt = expires
 	if p.PinnedVersion == 0 {
-		p.contentRef = newV.contentRef // unpinned head rolls to the new version, whole
+		p.contentRef = newV.contentRef // an unpinned head rolls whole, never one field
 	}
 	if err := txPutJSON(tx, keyPaste(slug), p); err != nil {
 		_ = tx.Rollback()
@@ -1056,25 +1009,21 @@ func (r *SlateRepo) DeleteVersion(slug domain.Slug, ver int) error {
 
 // --- SweepRepo -------------------------------------------------------------
 
-// ExpiredPastes scans the expiry/ index and returns one reference per
-// expired entry: the slug plus the entry's full key as the opaque
-// IndexRef, so DeleteExpired can remove the EXACT entry that surfaced the
-// slug even when the paste record is already gone.
+// ExpiredPastes returns one reference per expired entry: the slug plus the
+// entry's full key as the opaque IndexRef, so DeleteExpired can remove the
+// EXACT entry that surfaced the slug even once the paste record is gone.
 func (r *SlateRepo) ExpiredPastes(now time.Time) ([]domain.ExpiredPaste, error) {
-	// key shape: expiry/<rfc3339>/<slug>. Compare timestamp lex (sortable).
+	// expiry/<rfc3339>/<slug>: the timestamp segment compares lexically.
 	return scanExpiredRefs(r.scanPrefix, prefixExpiry(), now, time.RFC3339Nano, parseExpiredPasteKey)
 }
 
-// DeleteExpired processes one expired reference: the same full-cascade
-// delete as Delete when the paste record still exists, and then - in
-// every case - removal of the exact expiry-index entry the scan surfaced.
-// The unconditional entry removal is what keeps an orphaned entry (paste
-// already gone, e.g. legacy TTL-era state) from resurfacing on every
-// scan forever; it also self-heals an entry whose key drifted from the
-// paste row's ExpiresAt (the cascade removes the DERIVED key; this
-// removes the OBSERVED one). Idempotent: a missing record and a missing
-// entry are both no-ops. Returns whether a paste record was actually
-// deleted. See docs/SPEC.md "The storage contract" (Expiry).
+// DeleteExpired processes one expired reference: the full Delete cascade when
+// the paste record still exists, then, in EVERY case, removal of the exact
+// expiry-index entry the scan surfaced. That unconditional removal stops an
+// orphaned entry resurfacing on every scan forever and self-heals an entry
+// whose key drifted from the paste row's ExpiresAt: the cascade removes the
+// DERIVED key, this removes the OBSERVED one. Idempotent. Reports whether a
+// paste record was actually deleted. docs/SPEC.md "The storage contract".
 func (r *SlateRepo) DeleteExpired(ref domain.ExpiredPaste) (bool, error) {
 	var p pasteRow
 	return deleteExpiredRef(ref, expiryIndexKey,
@@ -1083,9 +1032,9 @@ func (r *SlateRepo) DeleteExpired(ref domain.ExpiredPaste) (bool, error) {
 		func(entryKey []byte) error { return r.deleteExpiryEntry(entryKey, "expiry entry") })
 }
 
-// deleteExpiryEntry removes one expiry-index entry in its own tx. label
-// names the family in the error strings ("expiry entry", "site expiry
-// entry", "room expiry entry") so each family's messages keep their shape.
+// deleteExpiryEntry removes one expiry-index entry in its own tx. label names
+// the family ("expiry entry", "site expiry entry", "room expiry entry") so the
+// error strings stay attributable.
 func (r *SlateRepo) deleteExpiryEntry(entryKey []byte, label string) error {
 	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
 	if err != nil {
@@ -1101,18 +1050,13 @@ func (r *SlateRepo) deleteExpiryEntry(entryKey []byte, label string) error {
 	return nil
 }
 
-// ReferencedBlobSHAs returns the set of blob content-SHAs still
-// referenced by a live version or paste head. The sweep treats the
-// returned slice as the allow-list: any blob whose sha is NOT in this
-// slice is deleted as orphan. Returning an empty slice while the bucket
-// has blobs would tell the sweep "everything is orphan" and wipe the
-// bucket, so the sweep has an abort-on-zero-refs guard; never stub this
-// method to nil.
+// ReferencedBlobSHAs returns the blob content-SHAs still referenced: the head
+// sha of an active paste, or the content_sha of a NON-DELETED version row. A
+// tombstoned version's sha is excluded, so its blob becomes GC-eligible.
 //
-// A sha is "referenced" if it's the head sha of an active paste OR the
-// content_sha of a NON-DELETED version row. A tombstoned version's sha
-// is excluded (the canonical rule), so its blob becomes GC-eligible on
-// the next sweep.
+// The sweep treats the result as an allow-list and deletes every blob not in
+// it, so an empty slice over a populated bucket would wipe the bucket. The
+// sweep guards with abort-on-zero-refs; never stub this method to nil.
 func (r *SlateRepo) ReferencedBlobSHAs() ([]string, error) {
 	pastes, err := r.scanPrefix([]byte("pastes/"))
 	if err != nil {
@@ -1159,7 +1103,7 @@ func (r *SlateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 		return false, fmt.Errorf("begin tx: %w", err)
 	}
 
-	// Fast path: already known?
+	// A known (identity, subnet) never counts against the budget again.
 	if raw, err := tx.Get(keyKeygate(subnet, identity)); err != nil {
 		_ = tx.Rollback()
 		return false, fmt.Errorf("keygate get: %w", err)
@@ -1170,7 +1114,8 @@ func (r *SlateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 		return true, nil
 	}
 
-	// New (identity, subnet) - count fresh keys in this subnet within window.
+	// New pair: admit only while the subnet's in-window key count is under
+	// the limit.
 	items, err := r.scanPrefix(prefixKeygateSubnet(subnet))
 	if err != nil {
 		_ = tx.Rollback()
@@ -1201,9 +1146,8 @@ func (r *SlateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 	return false, nil
 }
 
-// SubnetSnapshot counts in-window rows for a subnet + finds the
-// oldest first_seen value among them. Used by the rich Sybil refusal
-// + by whoami's per-session budget block.
+// SubnetSnapshot counts a subnet's in-window rows and the oldest first_seen
+// among them, which together tell a refused user when budget frees up.
 func (r *SlateRepo) SubnetSnapshot(subnet string, now time.Time, window time.Duration) (int, time.Time, error) {
 	items, err := r.scanPrefix(prefixKeygateSubnet(subnet))
 	if err != nil {
@@ -1228,9 +1172,9 @@ func (r *SlateRepo) SubnetSnapshot(subnet string, now time.Time, window time.Dur
 	return count, oldest, nil
 }
 
-// SubnetsForIdentity counts distinct in-window subnets for an identity.
-// Walks the global keygate prefix; cost is O(total keygate rows) which
-// is bounded by the per-subnet cap × number of active subnets.
+// SubnetsForIdentity counts distinct in-window subnets for an identity. There
+// is no identity-first index, so it walks the whole keygate prefix: O(total
+// keygate rows), bounded by the per-subnet cap times the active subnets.
 func (r *SlateRepo) SubnetsForIdentity(identity string, now time.Time, window time.Duration) (int, error) {
 	items, err := r.scanPrefix([]byte("keygate/"))
 	if err != nil {
@@ -1239,7 +1183,7 @@ func (r *SlateRepo) SubnetsForIdentity(identity string, now time.Time, window ti
 	cutoff := now.Add(-window)
 	seen := make(map[string]struct{})
 	for _, item := range items {
-		// key shape: keygate/<subnet>/<identity>
+		// keygate/<subnet>/<identity>; identity is the slash-free suffix.
 		k := string(item.Key)
 		rest := strings.TrimPrefix(k, "keygate/")
 		idx := strings.LastIndex(rest, "/")
@@ -1297,7 +1241,10 @@ func (r *SlateRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 	return len(toDelete), nil
 }
 
-// --- Sort helpers (avoid pulling sort.Slice into hot paths) ----------------
+// --- Sort helpers -----------------------------------------------------------
+
+// Insertion sorts: these slices are one owner's pastes or one paste's versions,
+// small enough that sort.Slice's reflection costs more than it saves.
 
 func sortByExpiresAt(ps []domain.Paste) {
 	for i := 1; i < len(ps); i++ {
@@ -1314,5 +1261,3 @@ func sortVersionsDesc(vs []domain.Version) {
 		}
 	}
 }
-
-// --- Misc helpers ----------------------------------------------------------

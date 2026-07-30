@@ -10,9 +10,8 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// reqFrom is like req but lets the caller choose the source address, so a
-// test can simulate two distinct participants (different IPs) hitting the
-// same room. The two stand in for two browsers sharing a room link.
+// reqFrom is req with a caller-chosen source address, so one test can drive two
+// participants on different IPs against the same room.
 func reqFrom(t *testing.T, srv *Server, method, slug, path, remoteAddr string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	var r *http.Request
@@ -27,19 +26,14 @@ func reqFrom(t *testing.T, srv *Server, method, slug, path, remoteAddr string, b
 	return w
 }
 
-// TestRoomsHTTP_TwoParticipantsCollaborate exercises the headline
-// collaborative-on-refresh flow end to end through the HTTP surface, with
-// two simulated participants on different source IPs sharing one room
-// link. Participant A creates the room and shares its id; A writes, B
-// reads it back via a full-room scan (its "join"), B writes, and A sees
-// B's write on its next scan. No per-user auth anywhere - holding the room
-// id is the whole access model, so both participants address the one
-// shared namespace.
+// Two participants on different source IPs collaborate through one room link:
+// each sees the other's writes on its next scan. Holding the room id is the
+// whole access model, so both address one shared namespace with no per-user
+// auth anywhere.
 func TestRoomsHTTP_TwoParticipantsCollaborate(t *testing.T) {
 	srv := buildRoomServer(t)
 	const slug = "appz2345"
 
-	// Participant A (one IP) creates the room and shares the id.
 	const ipA = "203.0.113.5:40000"
 	wc := reqFrom(t, srv, http.MethodPost, slug, "/api/rooms", ipA, nil)
 	if wc.Code != http.StatusCreated {
@@ -56,13 +50,12 @@ func TestRoomsHTTP_TwoParticipantsCollaborate(t *testing.T) {
 		t.Fatalf("created id not a valid v4: %q", id)
 	}
 
-	// A writes its availability.
 	if w := reqFrom(t, srv, http.MethodPut, slug, "/api/rooms/"+id+"/slot/mon", ipA, []byte("alice")); w.Code != http.StatusNoContent {
 		t.Fatalf("A put: code %d", w.Code)
 	}
 
-	// Participant B (a DIFFERENT IP) holds the same link. On join it scans
-	// the room and must see A's write.
+	// B holds the same link from a DIFFERENT IP, and its join-time scan must
+	// see A's write.
 	const ipB = "198.51.100.9:50000"
 	w := reqFrom(t, srv, http.MethodGet, slug, "/api/rooms/"+id, ipB, nil)
 	if w.Code != http.StatusOK {
@@ -76,12 +69,11 @@ func TestRoomsHTTP_TwoParticipantsCollaborate(t *testing.T) {
 		t.Fatalf("B did not see A's write on join: %s", bScan["slot/mon"])
 	}
 
-	// B writes its own value into the same shared namespace.
 	if w := reqFrom(t, srv, http.MethodPut, slug, "/api/rooms/"+id+"/slot/tue", ipB, []byte("bob")); w.Code != http.StatusNoContent {
 		t.Fatalf("B put: code %d", w.Code)
 	}
 
-	// A refreshes (re-scans) and now sees BOTH writes.
+	// A refreshes and sees BOTH writes.
 	w = reqFrom(t, srv, http.MethodGet, slug, "/api/rooms/"+id, ipA, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("A re-scan: code %d", w.Code)
@@ -100,7 +92,7 @@ func TestRoomsHTTP_TwoParticipantsCollaborate(t *testing.T) {
 		t.Fatalf("A lost its own write: %s", aScan["slot/mon"])
 	}
 
-	// A point-reads B's key directly (not just via scan).
+	// A point-read resolves B's key too, not just the scan.
 	w = reqFrom(t, srv, http.MethodGet, slug, "/api/rooms/"+id+"/slot/tue", ipA, nil)
 	if w.Code != http.StatusOK || w.Body.String() != "bob" {
 		t.Fatalf("A point-read of B's key: code %d body %q", w.Code, w.Body.String())

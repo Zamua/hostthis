@@ -8,11 +8,9 @@ import (
 	"testing"
 )
 
-// TestDecoderPoolReuse exercises the pooled streaming zstd decoder across
-// many interleaved reads (which force the pool to reuse decoders) plus an
-// aborted read (Close before EOF), asserting every decode is byte-exact.
-// It is the correctness guard for the pooling change: a decoder whose
-// state leaked from a prior read would corrupt a later one.
+// TestDecoderPoolReuse pins that a pooled zstd decoder carries no state between
+// borrows: every decode stays byte-exact across many reuses and after an
+// aborted read (Close before EOF).
 func TestDecoderPoolReuse(t *testing.T) {
 	c := NewCompressedBlobStore(newFakeRawStore())
 
@@ -39,8 +37,7 @@ func TestDecoderPoolReuse(t *testing.T) {
 		return out
 	}
 
-	// Many interleaved full reads: the pool hands a reused decoder back on
-	// most of these, and each decode must reproduce the exact bytes.
+	// Interleaving forces the pool to hand back reused decoders.
 	for round := range 50 {
 		for sha, want := range blobs {
 			if got := readFull(sha); !bytes.Equal(got, want) {
@@ -49,8 +46,8 @@ func TestDecoderPoolReuse(t *testing.T) {
 		}
 	}
 
-	// Aborted download: read a few bytes then Close before EOF. The decoder
-	// returns to the pool via Reset(nil); the next borrower must be clean.
+	// Aborted download: the decoder returns to the pool via Reset(nil), and
+	// the next borrower must still be clean.
 	for sha := range blobs {
 		rc, _, err := c.GetReader(sha)
 		if err != nil {
@@ -67,10 +64,8 @@ func TestDecoderPoolReuse(t *testing.T) {
 	}
 }
 
-// TestDecoderPoolConcurrent hammers GetReader from many goroutines so the
-// pool hands out decoders concurrently. Run with -race: it proves a pooled
-// decoder is never shared across two readers at once (Get removes it from
-// the pool) and that concurrent decode stays correct.
+// TestDecoderPoolConcurrent pins that a pooled decoder is never handed to two
+// readers at once and that concurrent decodes stay byte-exact. Run with -race.
 func TestDecoderPoolConcurrent(t *testing.T) {
 	c := NewCompressedBlobStore(newFakeRawStore())
 	body := bytes.Repeat([]byte("concurrent-zstd-pool-payload "), 50_000)

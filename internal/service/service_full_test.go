@@ -11,13 +11,9 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// fullBlobStore is a blob store whose writes always fail with
-// storage.ErrServiceFull, simulating the object store rejecting a Put
-// because its bucket is at the configured hard quota (the durable
-// total-bytes ceiling). Reads delegate to a real disk store so the Manage
-// show path (if exercised) still works. It carries the full read+write
-// surface (Get/GetReader as well as the writes) so it can back a
-// StandaloneBlobUnit.
+// fullBlobStore models the object store rejecting a Put at its bucket quota:
+// every write fails with storage.ErrServiceFull. Reads delegate to a real disk
+// store, so it carries the whole surface a StandaloneBlobUnit needs.
 type fullBlobStore struct{ real *storage.CompressedBlobStore }
 
 func (f fullBlobStore) Put(sha string, r io.Reader, size int64) error {
@@ -32,14 +28,13 @@ func (f fullBlobStore) GetReader(sha string) (io.ReadCloser, int64, error) {
 	return f.real.GetReader(sha)
 }
 
-// fullBlobUnit wraps fullBlobStore as the BlobUnit seam (Stage fails, reads
-// delegate). Used where a service now takes a BlobUnit.
+// fullBlobUnit wraps fullBlobStore as the BlobUnit seam: Stage fails, reads
+// delegate.
 func fullBlobUnit(t *testing.T) *StandaloneBlobUnit {
 	t.Helper()
 	return NewStandaloneBlobUnit(fullBlobStore{real: realBlobs(t)})
 }
 
-// realBlobs builds a real compressed disk blob store for the read side.
 func realBlobs(t *testing.T) *storage.CompressedBlobStore {
 	t.Helper()
 	disk, err := storage.NewBlobStore(filepath.Join(t.TempDir(), "blobs"))
@@ -49,17 +44,11 @@ func realBlobs(t *testing.T) *storage.CompressedBlobStore {
 	return storage.NewCompressedBlobStore(disk)
 }
 
-// TestUpload_BlobQuotaDrivesFinalizeToFailed pins the create-path ceiling
-// contract under the ASYNC blob write: Create returns a pending paste (the
-// URL is handed out before the blob is attempted), then the background
-// finalizer's blob Put is rejected by the object-store bucket quota
-// (storage.ErrServiceFull) and the paste transitions to failed. The
-// durable-ceiling rejection can no longer be a synchronous Create error on
-// this path - the bytes are written in the background - so the failure
-// surfaces as the paste's failed status + a released reservation (see SPEC
-// "Paste lifecycle status -> Finalize: the asynchronous half"). The Update
-// and DeploySite paths remain synchronous and still return ErrServiceFull
-// directly (their tests below).
+// TestUpload_BlobQuotaDrivesFinalizeToFailed pins how the durable ceiling
+// surfaces on the ASYNC create path: Create hands out the URL as pending
+// before the blob is attempted, so the bucket-quota rejection cannot be a
+// Create error - it lands as the paste's failed status (SPEC "Paste lifecycle
+// status -> Finalize: the asynchronous half").
 func TestUpload_BlobQuotaDrivesFinalizeToFailed(t *testing.T) {
 	u, repo, done := newStackWithBlobs(t, fullBlobStore{real: realBlobs(t)})
 
@@ -80,9 +69,9 @@ func TestUpload_BlobQuotaDrivesFinalizeToFailed(t *testing.T) {
 	}
 }
 
-// TestManageUpdate_BlobQuotaSurfacesServiceFull pins the same translation on
-// the paste-update path: a blob Put rejected by the bucket quota becomes the
-// graceful ErrServiceFull rather than a wrapped blob-write error.
+// TestManageUpdate_BlobQuotaSurfacesServiceFull pins that the synchronous
+// update path returns the graceful ErrServiceFull, not a wrapped blob-write
+// error.
 func TestManageUpdate_BlobQuotaSurfacesServiceFull(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "test.db"))
@@ -92,8 +81,8 @@ func TestManageUpdate_BlobQuotaSurfacesServiceFull(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	repo := storage.NewPasteRepo(db)
 
-	// Seed an owned paste so Update reaches the blob write before the
-	// owner check can reject it.
+	// An owned paste, so Update reaches the blob write instead of being
+	// rejected by the owner check.
 	disk, err := storage.NewBlobStore(filepath.Join(dir, "seedblobs"))
 	if err != nil {
 		t.Fatalf("seed blobs: %v", err)
@@ -114,9 +103,8 @@ func TestManageUpdate_BlobQuotaSurfacesServiceFull(t *testing.T) {
 	}
 }
 
-// TestDeploySite_BlobQuotaSurfacesServiceFull pins the translation on the
-// site-deploy path: the blob Put rejection propagates through the safe-untar
-// sink and DeploySite.Deploy returns the graceful ErrServiceFull.
+// TestDeploySite_BlobQuotaSurfacesServiceFull pins that the blob Put rejection
+// propagates out through the safe-untar sink as ErrServiceFull.
 func TestDeploySite_BlobQuotaSurfacesServiceFull(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "test.db"))
@@ -135,10 +123,8 @@ func TestDeploySite_BlobQuotaSurfacesServiceFull(t *testing.T) {
 	}
 }
 
-// EncodeBody mirrors the real store's at-rest encoding so a test that measures
-// the quota-relevant size measures the SAME number production would. Delegating
-// to the real encoder rather than faking a size keeps the double honest: a
-// fabricated length here would let a size regression pass.
+// EncodeBody delegates to the real at-rest encoder rather than faking a size:
+// a fabricated length here would let a size regression pass.
 func (f fullBlobStore) EncodeBody(r io.Reader) ([]byte, int, error) {
 	body, err := storage.EncodeCompressedBody(r)
 	if err != nil {

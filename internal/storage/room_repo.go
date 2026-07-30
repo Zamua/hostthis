@@ -10,58 +10,40 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// ErrRoomDataFull is returned when accepting a write would push a single
-// room past its per-room byte or key-count cap. The prior value is left
-// intact. The service layer maps it to a 413. Alias of the domain-owned
-// sentinel (see internal/domain/errors.go).
+// ErrRoomDataFull is returned when a write would push one room past its
+// per-room byte or key-count cap; the prior value is left intact. The service
+// layer maps it to a 413. Alias of the domain-owned sentinel.
 var ErrRoomDataFull = domain.ErrRoomDataFull
 
-// ErrAppRoomsFull is returned when accepting a room creation or a write
-// would push an APP's aggregate room bytes past the per-app cap. The
-// service layer maps it to a 507. Alias of the domain-owned sentinel
-// (see internal/domain/errors.go).
+// ErrAppRoomsFull is returned when a room creation or write would push an
+// APP's aggregate room bytes past the per-app cap. The service layer maps it
+// to a 507. Alias of the domain-owned sentinel.
 var ErrAppRoomsFull = domain.ErrAppRoomsFull
 
-// RoomKVRepo is the sqlite-backed implementation of the room
-// persistence tier. It stores rooms + their key-value namespaces with
-// STRICT namespacing: every read and write is scoped by the
-// (app_slug, room_id) pair, so a request carrying one room's UUID can
-// only ever address keys under that room, and one app's rooms are
-// structurally separate from another app's. A forged or guessed id
-// addresses an empty keyspace.
-//
-// It lives alongside PasteRepo / SiteRepo and shares the same db.
+// RoomKVRepo is the sqlite-backed room persistence tier. Namespacing is
+// STRICT: every read and write is scoped by the (app_slug, room_id) pair, so a
+// request carrying one room's UUID can only address keys under that room, and
+// a forged or guessed id addresses an empty keyspace.
 type RoomKVRepo struct {
 	db *sql.DB
 }
 
 func NewRoomKVRepo(db *sql.DB) *RoomKVRepo { return &RoomKVRepo{db: db} }
 
-// CreateRoom inserts a new empty room owned by appSlug with the minted
-// id, recording a creation row for the per-IP / per-app rate limit and
-// (atomically, under the serializable tx):
-//  1. enforces the per-app aggregate cap (room creation is refused once
-//     the app is already at its byte aggregate) -> ErrAppRoomsFull
-//  2. inserts the room record (created_at = updated_at = now,
-//     expires_at = now + RoomRetentionWindow)
-//  3. inserts the creation-accounting row (app, subnet, now)
+// CreateRoom inserts an empty room owned by appSlug, enforcing the per-app
+// aggregate cap (ErrAppRoomsFull) and recording the creation-accounting row,
+// all in one serializable tx.
 //
-// The rate-limit DECISION (count in-window creations) is made by the
-// service layer via CountRoomCreates BEFORE this call, OUTSIDE this
-// transaction; CreateRoom only records the accounting row so the count is
-// accurate for the next caller. Because the count runs outside the tx, the
-// creation rate limit is a SOFT bound, not a strictly-serialized one: N
-// concurrent creators can each read the same in-window count and all pass
-// before any of their accounting rows commit, so the cap can be slightly
-// overshot under concurrency. This is an accepted trade - the creation
-// gate is a coarse abuse bound (60/IP/hr, 300/app/hr), not a precise
-// quota, and the per-app aggregate BYTE cap below (which IS enforced
-// inside this serializable tx) is the hard structural bound on how much an
-// app can actually store. The per-room byte cap on PutValue is likewise
-// hard-enforced inside its own serializable tx.
+// The rate-limit DECISION runs in the service layer via CountRoomCreates,
+// OUTSIDE this tx, which makes the creation rate limit a SOFT bound: N
+// concurrent creators can all read the same in-window count and pass before any
+// accounting row commits, so the cap can be slightly overshot. Accepted - the
+// creation gate is a coarse abuse bound, and the hard structural limit on what
+// an app can store is the per-app byte cap enforced here plus the per-room cap
+// enforced in PutValue.
 //
-// Returns ErrSlugTaken if the (app, id) pair already exists - the
-// service retries with a fresh id (astronomically unlikely for a v4).
+// Returns ErrSlugTaken when the (app, id) pair exists; the service retries with
+// a fresh id (astronomically unlikely for a v4).
 func (r *RoomKVRepo) CreateRoom(room domain.Room, subnet string, appCap int64, now time.Time) error {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
@@ -69,10 +51,8 @@ func (r *RoomKVRepo) CreateRoom(room domain.Room, subnet string, appCap int64, n
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// 1. Per-app aggregate: refuse a new room once the app is already at
-	// its byte cap. A brand-new room is empty, but bounding creation here
-	// keeps a single app from accumulating unbounded EMPTY rooms once it
-	// is full of data, and pairs with the per-write check below.
+	// A brand-new room is empty, but refusing creation at the byte cap keeps
+	// a full app from accumulating unbounded EMPTY rooms.
 	if appCap > 0 {
 		total, err := appRoomBytesTx(tx, room.AppSlug.String())
 		if err != nil {
@@ -103,10 +83,9 @@ func (r *RoomKVRepo) CreateRoom(room domain.Room, subnet string, appCap int64, n
 	return tx.Commit()
 }
 
-// GetRoom returns the room record for (appSlug, id), or ErrNotFound.
-// Like the paste/site reads it returns expired-but-not-yet-swept rows;
-// the HTTP layer 404s them and the sweep deletes them. A well-formed id
-// that names no room returns ErrNotFound (the existence-not-leaked 404).
+// GetRoom returns the room record for (appSlug, id), or ErrNotFound. Like the
+// paste/site reads it returns expired-but-unswept rows: the HTTP layer 404s
+// them, the sweep deletes them.
 func (r *RoomKVRepo) GetRoom(appSlug domain.Slug, id domain.RoomID) (domain.Room, error) {
 	row := r.db.QueryRow(`
 		SELECT app_slug, room_id, created_at, updated_at, expires_at
@@ -128,11 +107,9 @@ func (r *RoomKVRepo) GetRoom(appSlug domain.Slug, id domain.RoomID) (domain.Room
 	}, nil
 }
 
-// GetValue returns one value, scoped by (appSlug, id, key). Returns
-// ErrNotFound when the key (or the room) does not exist - the same
-// not-found shape either way, so a caller cannot distinguish "missing
-// key in a real room" from "no such room" at this layer (the service /
-// HTTP layer checks the room separately when it needs to).
+// GetValue returns one value, scoped by (appSlug, id, key). A missing key and
+// a missing room both return ErrNotFound, so this layer leaks no per-key
+// existence; a caller that needs the distinction checks the room separately.
 func (r *RoomKVRepo) GetValue(appSlug domain.Slug, id domain.RoomID, key string) ([]byte, error) {
 	var val []byte
 	err := r.db.QueryRow(`
@@ -147,18 +124,15 @@ func (r *RoomKVRepo) GetValue(appSlug domain.Slug, id domain.RoomID, key string)
 	return val, nil
 }
 
-// ScanRoom returns the whole namespace for (appSlug, id) as a domain
-// RoomKV (every key -> value), so an app can load full room state in one
-// request, stamped with the EXACT per-room sequence the snapshot
-// reflects (RoomKV.Seq): the seq read and the namespace scan run inside
-// ONE serializable transaction, so every mutation with seq <= Seq is in
-// the state and none with seq > Seq is - the fence the relay's late-join
-// splice contract rides. An existing room with no values returns an
-// empty (non-nil) RoomKV. Caller verifies the room exists first (a scan
-// of a nonexistent room returns an empty namespace at seq 0,
-// indistinguishable here - the service layer does the GetRoom existence
-// check before calling this so a missing room is a 404, not an empty
-// 200).
+// ScanRoom returns the whole namespace for (appSlug, id), stamped with the
+// EXACT per-room sequence the snapshot reflects (RoomKV.Seq). The seq read and
+// the namespace scan share ONE serializable transaction, so every mutation with
+// seq <= Seq is in the state and none with seq > Seq is: the fence the relay's
+// late-join splice contract rides.
+//
+// An existing room with no values returns an empty (non-nil) RoomKV, and a
+// nonexistent room scans empty at seq 0 - indistinguishable here, so the
+// service layer's prior GetRoom is what makes a missing room a 404.
 func (r *RoomKVRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error) {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
@@ -168,9 +142,8 @@ func (r *RoomKVRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.Roo
 
 	kv := domain.NewRoomKV()
 
-	// The room's current seq, read inside the same tx as the scan so the
-	// stamped Seq is exactly the state the scan returns. A nonexistent room
-	// scans empty at seq 0 (the caller's GetRoom gate is what 404s it).
+	// Read inside the same tx as the scan, so the stamped Seq is exactly the
+	// state the scan returns.
 	var seq sql.NullInt64
 	err = tx.QueryRow(`
 		SELECT seq FROM rooms WHERE app_slug = ? AND room_id = ?
@@ -186,7 +159,7 @@ func (r *RoomKVRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.Roo
 	if err != nil {
 		return domain.RoomKV{}, fmt.Errorf("scan room: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	for rows.Next() {
 		var key string
 		var val []byte
@@ -201,37 +174,31 @@ func (r *RoomKVRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.Roo
 	if err := rows.Err(); err != nil {
 		return domain.RoomKV{}, err
 	}
-	// Close the cursor BEFORE committing: database/sql requires no open
-	// rows on the tx at Commit time (the deferred Close would run too late).
+	// database/sql requires no open rows on the tx at Commit time, and the
+	// deferred Close would run too late.
 	if err := rows.Close(); err != nil {
 		return domain.RoomKV{}, err
 	}
 	return kv, tx.Commit()
 }
 
-// PutValue writes val under key in room (appSlug, id), atomically (under
-// the serializable tx):
-//  1. verifies the room exists (ErrNotFound otherwise - existence is the
-//     caller's gate; we re-check inside the tx so a concurrent expiry
-//     sweep cannot delete the room between the service's GetRoom and this
-//     write)
-//  2. enforces the per-room byte + key-count caps using the PURE domain
-//     CanPut math against the room's current state -> ErrRoomDataFull
-//  3. enforces the per-app aggregate byte cap on the post-write delta ->
-//     ErrAppRoomsFull
-//  4. upserts the value row
-//  5. resets the room's retention clock (updated_at + expires_at)
+// PutValue writes val under key in room (appSlug, id), in ONE serializable tx:
+// re-check the room exists (ErrNotFound), enforce the per-room byte + key-count
+// caps via the pure domain CanPut (ErrRoomDataFull) and the per-app aggregate
+// on the delta (ErrAppRoomsFull), upsert the value, reset the retention clock.
 //
-// Rooms hold no blobs, so a room write touches no object-store quota and
-// there is no service-wide byte cap on this path (see SPEC "Rooms ->
-// Quota and abuse -> Durable total-bytes ceiling"). The whole thing is one
-// serializable transaction so two concurrent writes to the same room
-// cannot both pass a stale cap check and both commit.
+// The single tx is what stops two concurrent writes to the same room both
+// passing a stale cap check and both committing. The room-exists re-check must
+// be inside it too, so a concurrent expiry sweep cannot delete the room between
+// the service's GetRoom and this write.
 //
-// Returns the room's assigned per-room sequence for this mutation: a
-// dense counter incremented by exactly one inside the same transaction
-// that commits the value (see SPEC "The per-room sequence: assignment at
-// commit"). The relay stamps it onto the live mirror frame.
+// Rooms hold no blobs, so this path touches no object-store quota and has no
+// service-wide byte cap (SPEC "Rooms -> Quota and abuse -> Durable total-bytes
+// ceiling").
+//
+// Returns the assigned per-room sequence: a dense counter incremented by
+// exactly one inside the tx that commits the value (SPEC "The per-room
+// sequence: assignment at commit"). The relay stamps it onto the mirror frame.
 func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) (uint64, error) {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
@@ -243,28 +210,27 @@ func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string,
 		return 0, err
 	}
 
-	// Materialize the current namespace for the pure cap check. A room is
-	// capped at 256 keys / 256 KiB, so this is a small in-memory map.
+	// Materializing the namespace for the pure cap check is cheap: a room is
+	// capped at 256 keys / 256 KiB.
 	kv, err := scanRoomTx(tx, appSlug, id)
 	if err != nil {
 		return 0, err
 	}
 	if err := kv.CanPut(key, val); err != nil {
-		// Map the domain cap errors onto the storage sentinel the service
-		// layer keys on. A value-too-large is also "room full" from the
-		// storage contract's view (the write is refused, state intact).
+		// Every domain cap error collapses to the one storage sentinel the
+		// service keys on: from the storage contract's view a value-too-large
+		// is also "room full" (write refused, state intact).
 		return 0, ErrRoomDataFull
 	}
 
-	// The byte DELTA this write adds (replacing an existing key frees its
-	// old bytes). Used by the per-app aggregate check.
+	// Replacing an existing key frees its old bytes.
 	prior := 0
 	if existing, ok := kv.Values[key]; ok {
 		prior = len(existing)
 	}
 	delta := int64(len(val) - prior)
 
-	// Per-app aggregate: charge only the delta.
+	// Per-app aggregate charges only the delta.
 	if appCap > 0 && delta > 0 {
 		total, err := appRoomBytesTx(tx, appSlug.String())
 		if err != nil {
@@ -291,16 +257,14 @@ func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string,
 	return seq, tx.Commit()
 }
 
-// DeleteValue removes key from room (appSlug, id) and resets the room's
-// retention clock (a delete is a write). Idempotent: deleting an absent
-// key succeeds (the post-condition "the key is gone" holds either way).
-// Returns ErrNotFound only when the ROOM itself does not exist.
+// DeleteValue removes key and resets the room's retention clock (a delete is a
+// write). Idempotent: deleting an absent key succeeds. Returns ErrNotFound only
+// when the ROOM does not exist.
 //
-// Returns the assigned per-room sequence, like PutValue. The idempotent
-// delete of an ABSENT key also commits (it touches the retention clock)
-// and also assigns a seq - a seq bump with no mirror frame would read as
-// a permanent hole to a relay subscriber (see SPEC "The per-room
-// sequence: assignment at commit").
+// Returns the assigned per-room sequence, like PutValue. The absent-key delete
+// commits and assigns a seq too, because a seq bump with no mirror frame reads
+// as a permanent hole to a relay subscriber (SPEC "The per-room sequence:
+// assignment at commit").
 func (r *RoomKVRepo) DeleteValue(appSlug domain.Slug, id domain.RoomID, key string, now time.Time) (uint64, error) {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
@@ -323,10 +287,8 @@ func (r *RoomKVRepo) DeleteValue(appSlug domain.Slug, id domain.RoomID, key stri
 	return seq, tx.Commit()
 }
 
-// CountRoomCreates returns how many rooms have been created from subnet
-// AND under appSlug within the window ending at now. The service layer
-// uses the two counts (per-IP and per-app) for the room-creation rate
-// limit before minting a new id. Returned as (perSubnet, perApp).
+// CountRoomCreates returns the in-window (perSubnet, perApp) creation counts
+// the service layer's room-creation rate limit reads before minting a new id.
 func (r *RoomKVRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now time.Time, window time.Duration) (perSubnet, perApp int, err error) {
 	windowStart := formatTime(now.Add(-window))
 	if err := r.db.QueryRow(`
@@ -342,9 +304,8 @@ func (r *RoomKVRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now ti
 	return perSubnet, perApp, nil
 }
 
-// AppRoomBytes returns the total stored value bytes across ALL of an
-// app's rooms - the figure the per-app aggregate cap bounds. Exposed for
-// the service layer + tests.
+// AppRoomBytes returns the total stored value bytes across all of an app's
+// rooms: the figure the per-app aggregate cap bounds.
 func (r *RoomKVRepo) AppRoomBytes(appSlug domain.Slug) (int64, error) {
 	var n sql.NullInt64
 	if err := r.db.QueryRow(`
@@ -355,12 +316,10 @@ func (r *RoomKVRepo) AppRoomBytes(appSlug domain.Slug) (int64, error) {
 	return n.Int64, nil
 }
 
-// ExpiredRooms returns one reference per room whose expires_at is at or
-// before now. The sweep processes each (deleting the record, which cascades
-// to its values); the HTTP read path 404s expired-but-not-yet-deleted rooms
-// inline. The sqlite scan reads the rooms table itself (no standalone expiry
-// index to fall out of sync with the records), so IndexRef is always empty
-// and a returned reference always names a live row at scan time.
+// ExpiredRooms returns one reference per room whose expires_at is at or before
+// now. The scan reads the rooms table itself - there is no standalone expiry
+// index to fall out of sync - so IndexRef is always empty and a returned
+// reference always named a live row at scan time.
 func (r *RoomKVRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
 	rows, err := r.db.Query(`
 		SELECT app_slug, room_id FROM rooms WHERE expires_at <= ?
@@ -368,7 +327,7 @@ func (r *RoomKVRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
 	if err != nil {
 		return nil, fmt.Errorf("expired rooms: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	var out []domain.ExpiredRoom
 	for rows.Next() {
 		var ref domain.ExpiredRoom
@@ -383,10 +342,10 @@ func (r *RoomKVRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
 	return out, rows.Err()
 }
 
-// DeleteExpiredRoom processes one expired reference: the same full-cascade
-// delete as DeleteRoom, reporting whether a room row was actually removed.
-// On sqlite there is no standalone expiry-index entry to clean (the scan IS
-// the rooms table), so a missing row is simply a no-op that returns false.
+// DeleteExpiredRoom processes one expired reference with the same full-cascade
+// delete as DeleteRoom, reporting whether a row was removed. There is no
+// expiry-index entry to clean (the scan IS the rooms table), so a missing row
+// is a no-op returning false.
 func (r *RoomKVRepo) DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error) {
 	res, err := r.db.Exec(`
 		DELETE FROM rooms WHERE app_slug = ? AND room_id = ?
@@ -401,9 +360,9 @@ func (r *RoomKVRepo) DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error) {
 	return n > 0, nil
 }
 
-// DeleteRoom removes a room and (via the FK cascade) every value in its
-// namespace. Idempotent. The internal cascade the expiry pass reuses
-// (through DeleteExpiredRoom); not called by the sweep directly.
+// DeleteRoom removes a room and, via the FK cascade, every value in its
+// namespace. Idempotent. The sweep reaches it through DeleteExpiredRoom rather
+// than calling it directly.
 func (r *RoomKVRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 	if _, err := r.db.Exec(`
 		DELETE FROM rooms WHERE app_slug = ? AND room_id = ?
@@ -413,10 +372,9 @@ func (r *RoomKVRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 	return nil
 }
 
-// PruneOldRoomCreates deletes room_creates rows older than cutoff - past
-// the rate-limit window they can never affect a future decision. The
-// sweep calls this each tick so the table stays bounded. Returns the
-// number of rows deleted.
+// PruneOldRoomCreates deletes room_creates rows older than cutoff: past the
+// rate-limit window they can never affect a future decision. The sweep calls it
+// each tick so the table stays bounded.
 func (r *RoomKVRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
 	res, err := r.db.Exec(`DELETE FROM room_creates WHERE created_at < ?`, formatTime(cutoff))
 	if err != nil {
@@ -426,10 +384,9 @@ func (r *RoomKVRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
 	return int(n), nil
 }
 
-// SumActiveRoomBytes returns the total stored value bytes across every
-// app's non-expired rooms. Exposed for observability and tests; the
-// durable total-bytes ceiling lives at the object store (the blob bucket
-// quota), not in an app-level sum of room bytes.
+// SumActiveRoomBytes returns the total stored value bytes across every app's
+// non-expired rooms. Observability only: the durable total-bytes ceiling lives
+// at the object store (the blob bucket quota), not in a sum of room bytes.
 func (r *RoomKVRepo) SumActiveRoomBytes(now time.Time) (int64, error) {
 	tx, err := r.db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -444,10 +401,8 @@ func (r *RoomKVRepo) SumActiveRoomBytes(now time.Time) (int64, error) {
 }
 
 // activeRoomBytesTx sums stored value bytes across every app's non-expired
-// rooms inside the caller's tx. Used by SumActiveRoomBytes. The room
-// expires_at column is fixed-width (formatSiteExpiry), so nowStr must be
-// the fixed-width form, matching the stored column's byte-order ==
-// time-order layout.
+// rooms inside the caller's tx. nowStr must be the fixed-width formatSiteExpiry
+// form, since that column's byte order is time order only in that layout.
 func activeRoomBytesTx(tx *sql.Tx, nowStr string) (int64, error) {
 	var n sql.NullInt64
 	if err := tx.QueryRow(`
@@ -463,10 +418,9 @@ func activeRoomBytesTx(tx *sql.Tx, nowStr string) (int64, error) {
 
 // --- tx-scoped helpers (run inside a caller's serializable tx) ---
 
-// roomExistsTx returns ErrNotFound when (appSlug, id) names no room. Used
-// inside PutValue/DeleteValue so a write re-checks existence within the
-// same serializable boundary that does the write - closing the race with
-// a concurrent expiry sweep.
+// roomExistsTx returns ErrNotFound when (appSlug, id) names no room. Called
+// inside PutValue/DeleteValue so existence is re-checked within the same
+// serializable boundary as the write, closing the race with the expiry sweep.
 func roomExistsTx(tx *sql.Tx, appSlug domain.Slug, id domain.RoomID) error {
 	var one int
 	err := tx.QueryRow(`
@@ -490,7 +444,7 @@ func scanRoomTx(tx *sql.Tx, appSlug domain.Slug, id domain.RoomID) (domain.RoomK
 	if err != nil {
 		return domain.RoomKV{}, fmt.Errorf("scan room (tx): %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	kv := domain.NewRoomKV()
 	for rows.Next() {
 		var key string
@@ -505,17 +459,12 @@ func scanRoomTx(tx *sql.Tx, appSlug domain.Slug, id domain.RoomID) (domain.RoomK
 	return kv, rows.Err()
 }
 
-// appRoomBytesTx sums an app's stored value bytes inside the caller's tx,
-// with NO expiry predicate: every room_kv row under the app counts, including
-// rows of an expired-but-not-yet-swept room. This is DELIBERATE and consistent
-// across all three backends (the slatedb sumAppRoomBytes and the shale per-app
-// roombytes/<app> counter do the same) - the per-app room aggregate is
-// sweep-time, distinct from the per-identity paste/site quota that sqlite +
-// slatedb free at read time. The effect is fail-safe: an expired-unswept room's
-// bytes are counted until the sweep deletes the room (DeleteRoom cascades its
-// values), so the cap can transiently OVER-count (reject a write slightly
-// early) but never UNDER-counts (admit past the real cap). The sweep runs on a
-// short cadence, so the over-count window is small and self-correcting.
+// appRoomBytesTx sums an app's stored value bytes inside the caller's tx with
+// NO expiry predicate: every room_kv row counts, including rows of an
+// expired-but-unswept room. Deliberate, and matched by the other backends - the
+// per-app room aggregate is sweep-time, unlike the per-identity paste/site
+// quota, which frees at read time. Fail-safe direction: the cap can transiently
+// OVER-count (reject a write slightly early) but never under-count.
 func appRoomBytesTx(tx *sql.Tx, appSlug string) (int64, error) {
 	var n sql.NullInt64
 	if err := tx.QueryRow(`
@@ -526,12 +475,10 @@ func appRoomBytesTx(tx *sql.Tx, appSlug string) (int64, error) {
 	return n.Int64, nil
 }
 
-// touchRoomTx resets the room's retention clock to now + the room
-// retention window AND assigns the mutation's per-room sequence
-// (seq = prior + 1, in the same UPDATE), returning the assigned seq.
-// Called by every write (PUT / DELETE); the serializable tx is what
-// makes the increment dense and unique under concurrent same-room
-// writers.
+// touchRoomTx resets the retention clock and assigns the mutation's per-room
+// sequence (seq = prior + 1, in the same UPDATE), returning it. Every write
+// calls it; the serializable tx is what makes the increment dense and unique
+// under concurrent same-room writers.
 func touchRoomTx(tx *sql.Tx, appSlug domain.Slug, id domain.RoomID, now time.Time) (uint64, error) {
 	expires := now.Add(domain.RoomRetentionWindow)
 	if _, err := tx.Exec(`

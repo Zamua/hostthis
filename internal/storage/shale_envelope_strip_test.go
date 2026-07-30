@@ -2,26 +2,20 @@
 
 package storage_test
 
-// Envelope-strip regression for the shale backend.
+// A value written at ReplicationFactor>1 is stored wrapped in an LWW envelope
+// (magic byte + Stamp + payload). The cluster layer unwraps only on the
+// single-key Get path: cross-shard Aggregate, single-shard ScanPrefix, and raw
+// CAS tx.Get all hand back the raw stored bytes, which the aggregate / scan /
+// counter consumers decode as JSON or integers. One enveloped record therefore
+// poisons every service-wide quota pre-check and listing unless the scan paths
+// strip it.
 //
-// A value written at ReplicationFactor>1 is stored wrapped in an LWW
-// envelope (magic byte + Stamp + payload). The cluster layer unwraps on the
-// single-key Get path, but NOT on the scan paths (cross-shard Aggregate,
-// single-shard ScanPrefix) nor on raw CAS tx.Get reads - those hand back the
-// raw stored bytes. hostthis's aggregate / scan / counter consumers decode
-// those raw reads as JSON / integers, so a single enveloped record poisoned
-// EVERY service-wide quota pre-check and listing the moment a 2-node deploy
-// wrote one (the 2026-06-12 R=2 cutover incident).
-//
-// This pins the fix: the scan paths strip the envelope, so an enveloped
-// version row round-trips exactly like a raw one. Revert any of the strips in
-// scanPrefix / aggregatePrefix and ListVersions / ReferencedBlobSHAs below
-// fail with "invalid character" decode errors.
+// Pins that they do: drop a strip in scanPrefix / aggregatePrefix and
+// ListVersions / ReferencedBlobSHAs fail with "invalid character" decode errors.
 //
 //	go test -tags slatedb -run TestShaleEnvelopeStrip ./internal/storage
 //
-// Skips cleanly unless MINIO_TEST_ENDPOINT is set, mirroring the conformance
-// + migration files.
+// Skips unless MINIO_TEST_ENDPOINT is set.
 
 import (
 	"os"
@@ -64,8 +58,7 @@ func TestShaleEnvelopeStrip_ScanPathsDecodeEnvelopedValue(t *testing.T) {
 		t.Fatalf("encode version: %v", err)
 	}
 
-	// Wrap the version row in an LWW envelope - exactly the shape an R>1 write
-	// leaves on the backend.
+	// The shape an R>1 write leaves on the backend.
 	enveloped := cluster.Encode(cluster.Envelope{
 		Stamp:   cluster.Stamp{TimestampNanos: uint64(now.UnixNano()), NodeID: "node-1"},
 		Payload: verVal,
@@ -74,8 +67,8 @@ func TestShaleEnvelopeStrip_ScanPathsDecodeEnvelopedValue(t *testing.T) {
 		t.Fatalf("test setup: expected an LWW envelope (magic 0xE0), got %#v", enveloped[:1])
 	}
 
-	// Paste + slug-owner rows raw (denormalized head); the VERSION row
-	// enveloped (the poison shape). All authoritative, no derived counters.
+	// Paste + slug-owner rows raw; the version row enveloped (the shape
+	// under test). All authoritative, no derived counters.
 	mustPutRaw(t, repo, storage.LegacyPasteKeyForTest(slug), pasteVal)
 	mustPutRaw(t, repo, storage.LegacyVersionKeyForTest(slug, 1), enveloped)
 	mustPutRaw(t, repo, storage.LegacySlugOwnerKeyForTest(slug), []byte(owner))
@@ -89,8 +82,8 @@ func TestShaleEnvelopeStrip_ScanPathsDecodeEnvelopedValue(t *testing.T) {
 		t.Fatalf("enveloped version did not round-trip via scanPrefix: %+v", vers)
 	}
 
-	// aggregatePrefix path: ReferencedBlobSHAs is the cross-shard scan the
-	// blob GC + service-wide quota pre-check run on; it must decode it too.
+	// aggregatePrefix path: the cross-shard scan the blob GC + service-wide
+	// quota pre-check run on.
 	refs, err := repo.ReferencedBlobSHAs()
 	if err != nil {
 		t.Fatalf("ReferencedBlobSHAs over an enveloped version row: %v", err)

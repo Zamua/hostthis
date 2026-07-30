@@ -1,9 +1,7 @@
 // ShaleRepo's KeyGateRepo implementation (the Sybil rate limit): admit /
 // snapshot / prune of the keygate/<subnet>/<identity> rows and the
-// identity_first_seen family, each a single-{subnet}- or {id}-shard op.
-// Split out of shale_repo.go (which keeps the config, lifecycle, and core
-// CRUD); see that file's package comment for the key layout and
-// transaction model.
+// identity_first_seen family, each a single-{subnet}- or {id}-shard op. The
+// key layout and transaction model are documented in shale_repo.go.
 
 //go:build slatedb
 
@@ -20,21 +18,20 @@ import (
 
 // --- KeyGateRepo (Sybil rate limit) ----------------------------------------
 
-// AdmitNewKey atomically checks + admits a fresh (identity, subnet) pair
-// on the {subnet} shard. The check (count in-window rows + the per-subnet
-// cap) and the admit (write the row) are ONE CAS transaction, so two
-// concurrent admissions for the same subnet serialize. The in-window count
-// is computed from a pre-scan (scans are not allowed inside the tx); the
-// candidate row's key is read ExpectAbsent inside the tx so the admit
-// participates in conflict detection, and a racing admit of the same pair
-// makes the second a known-already result.
+// AdmitNewKey atomically checks + admits a fresh (identity, subnet) pair on the
+// {subnet} shard: the count-and-cap check and the row write are ONE CAS
+// transaction, so concurrent admissions for a subnet serialize. The in-window
+// count comes from a pre-scan because scans are not allowed inside the tx; the
+// candidate key is read ExpectAbsent inside the tx so the admit participates in
+// conflict detection, and a racing admit of the same pair resolves as
+// known-already.
 func (r *ShaleRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPerSubnet int, window time.Duration) (knownAlready bool, err error) {
 	if identity == "" || subnet == "" {
 		return false, errors.New("identity + subnet required")
 	}
 	rowKey := shaleKeyKeygate(subnet, identity)
 
-	// Fast path: already known? (single-shard read; no accounting.)
+	// Fast path: already known (single-shard read, no accounting).
 	if raw, err := r.getRaw(rowKey); err != nil {
 		return false, err
 	} else if raw != nil {
@@ -63,9 +60,9 @@ func (r *ShaleRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 
 	known := false
 	txErr := r.cluster.Transact(rowKey, func(tx backend.Transaction) error {
-		// Re-read inside the tx: a concurrent admit of the same pair makes
-		// this a known result; the ExpectAbsent read-check otherwise makes
-		// a racing admit conflict + retry (re-checking the count).
+		// Re-read inside the tx: a concurrent admit of the same pair resolves
+		// as known; otherwise the ExpectAbsent read-check makes a racing admit
+		// conflict and retry, re-checking the count.
 		if _, gerr := tx.Get(rowKey); gerr == nil {
 			known = true
 			return nil
@@ -78,16 +75,13 @@ func (r *ShaleRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 		return false, txErr
 	}
 	if !known {
-		// Materialise the IDENTITY-leading view of the row just written.
-		//
-		// Best-effort and deliberately OUTSIDE the transaction above: shale
-		// transactions are single-shard, and this key hashes to a different
-		// shard than the authoritative row, so including it would abort with
-		// ErrCrossShard. It is a DERIVED index, repaired by the reconciler
-		// like the enumeration indexes, so a failure here costs at most a
-		// stale display value until the next pass - never a lost admission
-		// and never a weakened gate, because the gate reads the
-		// subnet-leading row that was already committed above.
+		// The IDENTITY-leading view of the row just written, deliberately
+		// OUTSIDE the transaction above: it hashes to a different shard than
+		// the authoritative row and shale transactions are single-shard, so
+		// including it aborts with ErrCrossShard. Best-effort is safe because
+		// this is a derived index the reconciler repairs, and the gate reads
+		// the subnet-leading row already committed above: a failure costs a
+		// stale display value, never a lost admission or a weakened gate.
 		idKey := shaleKeyKeygateIdentity(identity, subnet)
 		if err := r.cluster.Transact(idKey, func(tx backend.Transaction) error {
 			return tx.Put(idKey, []byte(now.UTC().Format(time.RFC3339Nano)))
@@ -98,8 +92,8 @@ func (r *ShaleRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 	return known, nil
 }
 
-// SubnetSnapshot counts in-window rows for a subnet + finds the oldest
-// first_seen value among them. Single-shard scan on the {subnet} shard.
+// SubnetSnapshot counts in-window rows for a subnet and finds the oldest
+// first_seen among them. Single-shard scan on the {subnet} shard.
 func (r *ShaleRepo) SubnetSnapshot(subnet string, now time.Time, window time.Duration) (int, time.Time, error) {
 	items, err := r.scanPrefix(shalePrefixKeygateSubnet(subnet))
 	if err != nil {
@@ -127,22 +121,17 @@ func (r *ShaleRepo) SubnetSnapshot(subnet string, now time.Time, window time.Dur
 // SubnetsForIdentity counts distinct in-window subnets for an identity.
 //
 // Reads the IDENTITY-leading index, so the cost is the number of subnets THIS
-// key has been seen in (1 for a normal user) rather than the number of keygate
-// rows in the entire cluster. A scan of the global keygate/ prefix filtered in
-// Go returns the same answer at a cost that grows with total admissions across
-// ALL users.
+// key has been seen in rather than the number of keygate rows in the whole
+// cluster, which is what a filtered scan of the global keygate/ prefix costs.
 //
-// DISPLAY ONLY: reached from whoami via KeyGate.Inspect, which is called after
-// admit and discards its error. This gates nothing, so an index entry that has
-// not been projected yet under-reports the count rather than weakening the
-// Sybil control - that control reads the subnet-leading rows, which are
-// authoritative and written transactionally.
+// DISPLAY ONLY (whoami via KeyGate.Inspect, whose error is discarded): an entry
+// not yet projected under-reports the count rather than weakening the Sybil
+// control, which reads the transactionally-written subnet-leading rows.
 func (r *ShaleRepo) SubnetsForIdentity(identity string, now time.Time, window time.Duration) (int, error) {
 	// SINGLE-SHARD: keygate_id/ shards on the identity (see shaleShardKey), so
 	// every entry for this key lives on one unit and this is a local prefix
-	// scan, not a fan-out. That co-location is what makes the index pay: a
-	// narrow prefix collected via fan-out still costs the fan-out, measured at
-	// 26.7s to return a single entry.
+	// scan. Without that co-location even a narrow prefix costs a full
+	// fan-out, which is the whole point of the index.
 	items, err := r.scanPrefix(shalePrefixKeygateIdentity(identity))
 	if err != nil {
 		return 0, err
@@ -181,11 +170,10 @@ func (r *ShaleRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 			if err := r.cluster.Delete(item.Key); err != nil {
 				return deleted, fmt.Errorf("delete %s: %w", item.Key, err)
 			}
-			// Drop the identity-leading view of the same fact. Without this
-			// the derived index outlives the authoritative row and whoami
-			// would keep counting subnets the gate has already forgotten -
-			// an OVER-report, and one that grows without bound because
-			// nothing else would ever remove these.
+			// Drop the identity-leading view of the same fact. Without it the
+			// derived index outlives the authoritative row and whoami keeps
+			// counting subnets the gate has forgotten: an over-report that
+			// grows without bound, since nothing else removes these.
 			rest := strings.TrimPrefix(string(item.Key), "keygate/")
 			if idx := strings.LastIndex(rest, "/"); idx >= 0 {
 				subnet, identity := rest[:idx], rest[idx+1:]

@@ -1,8 +1,6 @@
-// Package ssh implements the SSH-pipe surface - the user's full CLI.
-// Every session must offer a publickey; sessions without one are
-// rejected at startup. The presented key's SHA256 fingerprint becomes
-// the identity passed to the application services for quota
-// accounting and ownership checks.
+// Package ssh implements the SSH-pipe CLI surface. Every session must offer a
+// publickey; the key's SHA256 fingerprint is the identity the application
+// services use for quota accounting and ownership checks.
 package ssh
 
 import (
@@ -33,40 +31,29 @@ import (
 	"github.com/Zamua/hostthis/internal/service"
 )
 
-// Structured exit codes for SSH sessions. The SSH protocol carries the
-// exit status back to the local ssh client, which surfaces it as the
-// process exit code; shell scripts and CI pipelines use these to branch.
-// Keep the mapping stable: existing scripts will rely on specific codes.
+// Structured exit codes for SSH sessions, surfaced to the client as the ssh
+// process exit code. The mapping is a public contract that scripts branch on,
+// so a code is never reassigned; docs/SPEC.md "Exit codes" mirrors it.
 //
-// See docs/SPEC.md → "Exit codes" for the prose contract. The values
-// here are the source of truth; the spec mirrors them.
-//
-// Note: 5 is intentionally unused. It was historically reserved for an
-// ErrNotOwner path that the owner-collapse contract eliminated (the SSH
-// surface never observes ErrNotOwner - service.requireOwner collapses
-// non-owner reads to ErrNotFound so existence can't leak across
-// identities). Do not reuse 5 for a new meaning; pick the next free
-// slot to avoid retroactively changing the semantics of a code that
-// was already documented.
+// 5 is permanently unused: service.requireOwner collapses non-owner reads to
+// ErrNotFound so existence cannot leak across identities, meaning the SSH
+// surface never observes ErrNotOwner. A new code takes the next free slot.
 
-// URLBuilder turns a slug into the URL we print on stdout.
+// URLBuilder renders a slug as its public URL.
 type URLBuilder func(domain.Slug) string
 
-// PasteReader is the narrow read access the SSH layer needs over and
-// above the verb service - a single by-slug fetch used when rendering
-// the `versions` output (to mark which version the URL currently
-// serves). Depending on this interface, rather than reaching into the
-// verb service's repo, keeps the SSH layer decoupled from how Manage is
-// composed (in particular from the cache-invalidating decorator).
+// PasteReader is the by-slug read the SSH layer needs beyond the verb service,
+// used to mark which version `versions` currently serves. Depending on this
+// rather than the verb service's repo keeps the SSH layer decoupled from how
+// Manage is composed, in particular from the cache-invalidating decorator.
 type PasteReader interface {
 	Get(domain.Slug) (domain.Paste, error)
 }
 
-// SiteReader is the narrow by-slug read the SSH layer needs to resolve a
-// deployed static-site slug to its URL for the `url` / `qr` verbs. It is
-// optional: when nil, those verbs resolve paste slugs only. Like
-// PasteReader, this is a non-owner-scoped lookup - the URL is a public
-// capability, so resolving a live slug leaks nothing the URL doesn't.
+// SiteReader resolves a deployed static-site slug to its URL for `url` / `qr`.
+// Optional: nil means those verbs resolve paste slugs only. Like PasteReader
+// the lookup is not owner-scoped - the URL is a public capability, so resolving
+// a live slug leaks nothing the URL doesn't.
 type SiteReader interface {
 	Get(domain.Slug) (domain.Site, error)
 }
@@ -87,9 +74,8 @@ type Server struct {
 	Logger      *log.Logger
 }
 
-// retention is the installation's content-TTL policy, read from the Upload
-// service (its single source of truth, set from HOSTTHIS_RETENTION). Falls back
-// to the default when no upload service is wired (no paste path -> no message).
+// retention reads the content-TTL policy from the Upload service, its single
+// source of truth. Falls back to the default when no upload service is wired.
 func (s *Server) retention() domain.Retention {
 	if s.Upload != nil {
 		return s.Upload.Retention
@@ -98,8 +84,7 @@ func (s *Server) retention() domain.Retention {
 }
 
 // expiresPhrase renders the retention policy for post-upload confirmations:
-// "expires in 30 days" (or the configured window), or "never expires" when
-// retention is disabled. Tracks HOSTTHIS_RETENTION so the message never lies.
+// "expires in 30 days", or "never expires" when retention is disabled.
 func (s *Server) expiresPhrase() string {
 	r := s.retention()
 	if !r.Enabled() {
@@ -108,8 +93,7 @@ func (s *Server) expiresPhrase() string {
 	return "expires in " + r.Describe()
 }
 
-// now returns the server's clock, defaulting to time.Now so tests that
-// don't inject a clock still work.
+// now returns the injected clock, defaulting to time.Now.
 func (s *Server) now() time.Time {
 	if s.Now != nil {
 		return s.Now()
@@ -117,24 +101,14 @@ func (s *Server) now() time.Time {
 	return time.Now()
 }
 
-// ListenAndServe blocks. Returns whatever the listener returns -
-// typically nil after a clean shutdown or net.ErrClosed.
+// ListenAndServe blocks, returning whatever the listener returns (nil after a
+// clean shutdown or net.ErrClosed).
 //
-// When HOSTTHIS_SSH_PROXY_PROTOCOL=true is set in the environment,
-// the listener is wrapped with go-proxyproto's listener so PROXY
-// protocol v1/v2 headers from a TCP-level forwarder (traefik, haproxy,
-// nginx stream) are parsed and net.Conn.RemoteAddr() returns the real
-// client IP. Required when hostthis SSH is behind traefik's TCP router
-// - without it, every session looks like it's coming from the
-// traefik container's docker-bridge IP and the Sybil per-subnet
-// rate limit collapses to a global cap.
-//
-// The server is built with charmbracelet/wish: the underlying
-// *ssh.Server is the charmbracelet fork of gliderlabs/ssh and the
-// behavior matches the previous gliderlabs setup byte-for-byte. The
-// session-time concerns (key-required, Sybil gate, verb dispatch) are
-// expressed as wish middlewares stacked so the key-required check is
-// outermost, the Sybil gate next, and the verb dispatcher innermost.
+// HOSTTHIS_SSH_PROXY_PROTOCOL=true wraps the listener so PROXY protocol v1/v2
+// headers from a TCP-level forwarder (traefik, haproxy, nginx stream) are
+// parsed and RemoteAddr() carries the real client IP. Required whenever SSH
+// sits behind a TCP router: without it every session appears to originate from
+// the forwarder and the Sybil per-subnet limit collapses to a global cap.
 func (s *Server) ListenAndServe() error {
 	signer, err := s.hostSigner()
 	if err != nil {
@@ -151,29 +125,22 @@ func (s *Server) ListenAndServe() error {
 		wish.WithKeyboardInteractiveAuth(func(_ gossh.Context, _ xssh.KeyboardInteractiveChallenge) bool {
 			return true
 		}),
-		// Middlewares compose first-to-last → the LAST middleware in the
-		// argument list wraps the rest and runs FIRST per request. To
-		// get the desired call order
-		//   1. keyRequired   (outermost; refuses keyless sessions)
-		//   2. ratelimit     (Sybil gate; refuses bursts of fresh keys)
-		//   3. terminal      (the verb dispatcher)
-		// we list them inner-to-outer.
+		// The LAST middleware in the list wraps the rest and runs FIRST, so
+		// they are listed inner-to-outer to get the call order: keyRequired
+		// (refuses keyless sessions), then the Sybil gate, then the dispatcher.
 		wish.WithMiddleware(
 			s.terminalMiddleware(),
 			s.ratelimitMiddleware(),
 			s.keyRequiredMiddleware(),
 		),
-		// Defense-in-depth: refuse port-forwarding (-L / -R), agent-
-		// forwarding usefulness, X11, and subsystem (sftp/scp) channels.
-		// See hardening.go for the full rationale and the upstream-
-		// defaults audit. hostthis sessions are short-lived
-		// single-command exchanges; none of those channels are needed.
+		// Refuse port-forwarding, agent-forwarding, X11 and subsystem
+		// (sftp/scp) channels: sessions are single-command exchanges that need
+		// none of them. Rationale in hardening.go.
 		withHardening(),
 	)
 	if err != nil {
 		return fmt.Errorf("ssh wish server: %w", err)
 	}
-	// Plain Listen first; optionally wrap with go-proxyproto.
 	ln, err := net.Listen("tcp", s.Addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.Addr, err)
@@ -190,10 +157,9 @@ func (s *Server) ListenAndServe() error {
 	return err
 }
 
-// hostSigner loads (or, on first run, creates) the host key signer
-// using the existing PKCS8-PEM format. Returns nil signer when
-// HostKeyPath is empty; wish.NewServer then auto-generates an
-// in-memory ed25519 key, which is what the test fixtures rely on.
+// hostSigner loads, or on first run creates, the PKCS8-PEM host key signer. A
+// nil signer (empty HostKeyPath) makes wish.NewServer auto-generate an
+// in-memory ed25519 key, which the test fixtures rely on.
 func (s *Server) hostSigner() (xssh.Signer, error) {
 	if s.HostKeyPath == "" {
 		return nil, nil
@@ -205,9 +171,8 @@ func (s *Server) hostSigner() (xssh.Signer, error) {
 	return signer, nil
 }
 
-// withHostSigner returns an ssh.Option that registers a pre-loaded
-// signer as a host key. Skips when signer is nil (so wish's auto-gen
-// path stays available for tests).
+// withHostSigner registers a pre-loaded signer as a host key. A nil signer is
+// skipped so wish's auto-generate path stays available.
 func withHostSigner(signer xssh.Signer) gossh.Option {
 	return func(srv *gossh.Server) error {
 		if signer == nil {
@@ -218,19 +183,17 @@ func withHostSigner(signer xssh.Signer) gossh.Option {
 	}
 }
 
-// keyRequiredMiddleware refuses sessions that authenticated via
-// password / keyboard-interactive (no public key presented). hostthis
-// needs a key on every session to attribute the paste to an identity
-// and to enforce the per-identity quota. Without one we exit 3 with a
-// helpful message pointing at ssh-keygen.
+// keyRequiredMiddleware refuses sessions that authenticated without presenting
+// a public key. Every session needs a key to attribute content to an identity
+// and enforce the per-identity quota; keyless sessions exit ExitAuth.
 func (s *Server) keyRequiredMiddleware() wish.Middleware {
 	return func(next gossh.Handler) gossh.Handler {
 		return func(sess gossh.Session) {
 			keyedFP, _ := sess.Context().Value("ownerHash").(string)
 			if keyedFP == "" {
-				fmt.Fprintln(sess.Stderr(), "hostthis: ssh key required.")
-				fmt.Fprintln(sess.Stderr(), "  generate one (ssh-keygen -t ed25519) and add it to ssh-agent,")
-				fmt.Fprintf(sess.Stderr(), "  or pass it on the command line: ssh -i ~/.ssh/id_ed25519 %s\n", s.apex())
+				fmt.Fprintln(sess.Stderr(), "hostthis: ssh key required.")                                              //nolint:errcheck
+				fmt.Fprintln(sess.Stderr(), "  generate one (ssh-keygen -t ed25519) and add it to ssh-agent,")          //nolint:errcheck
+				fmt.Fprintf(sess.Stderr(), "  or pass it on the command line: ssh -i ~/.ssh/id_ed25519 %s\n", s.apex()) //nolint:errcheck
 				_ = sess.Exit(ExitAuth)
 				return
 			}
@@ -239,11 +202,9 @@ func (s *Server) keyRequiredMiddleware() wish.Middleware {
 	}
 }
 
-// ratelimitMiddleware enforces the Sybil per-subnet cap on the number
-// of distinct fresh fingerprints any one IP subnet can introduce in
-// the configured window. Returning users - any (key, subnet) we've
-// seen before - pass through with no accounting. When the gate is
-// nil, the middleware is a no-op.
+// ratelimitMiddleware enforces the Sybil cap on how many distinct fresh
+// fingerprints one IP subnet may introduce per window. Any (key, subnet) pair
+// already seen passes with no accounting. A nil KeyGate makes this a no-op.
 func (s *Server) ratelimitMiddleware() wish.Middleware {
 	return func(next gossh.Handler) gossh.Handler {
 		return func(sess gossh.Session) {
@@ -252,9 +213,8 @@ func (s *Server) ratelimitMiddleware() wish.Middleware {
 				return
 			}
 			keyedFP, _ := sess.Context().Value("ownerHash").(string)
-			// keyRequired runs before us, so a missing key would have
-			// already exited. The defensive guard keeps the middleware
-			// honest if the chain is reordered in a future refactor.
+			// keyRequired runs first, so this is unreachable; the guard keeps
+			// the middleware correct if the chain is ever reordered.
 			if keyedFP == "" {
 				next(sess)
 				return
@@ -263,10 +223,10 @@ func (s *Server) ratelimitMiddleware() wish.Middleware {
 			subnet := ipSubnet(remoteIP(sess))
 			if err := s.KeyGate.Admit(owner, subnet); err != nil {
 				if ref, ok := errors.AsType[*service.SybilRefusal](err); ok {
-					fmt.Fprintf(sess.Stderr(), "hostthis: too many new keys from this network today\n")
-					fmt.Fprintf(sess.Stderr(), "  subnet %s used %d of %d in the last 24h\n", ref.Subnet, ref.FreshCountInWindow, ref.Cap)
+					fmt.Fprintf(sess.Stderr(), "hostthis: too many new keys from this network today\n")                                    //nolint:errcheck
+					fmt.Fprintf(sess.Stderr(), "  subnet %s used %d of %d in the last 24h\n", ref.Subnet, ref.FreshCountInWindow, ref.Cap) //nolint:errcheck
 					fmt.Fprintf(sess.Stderr(), "  your key %s isn't yet registered here\n", strings.TrimPrefix(owner, domain.IdentityKeyPrefix))
-					fmt.Fprintln(sess.Stderr(), "to get in:")
+					fmt.Fprintln(sess.Stderr(), "to get in:") //nolint:errcheck
 					fmt.Fprintln(sess.Stderr(), "  (a) use a key already known on this subnet")
 					if frees := ref.NextSlotFreesAt(); !frees.IsZero() {
 						fmt.Fprintf(sess.Stderr(), "  (b) wait until %s - the oldest entry ages out then\n", frees.UTC().Format("2006-01-02 15:04 UTC"))
@@ -290,23 +250,18 @@ func (s *Server) ratelimitMiddleware() wish.Middleware {
 	}
 }
 
-// terminalMiddleware is the innermost middleware: the verb dispatcher.
-// It ignores `next` (which is wish's noop stub) because the dispatcher
-// is the terminal handler - there's nothing further in the chain.
+// terminalMiddleware is the innermost middleware: the verb dispatcher. It
+// ignores next (wish's noop stub) because nothing follows it in the chain.
 func (s *Server) terminalMiddleware() wish.Middleware {
 	return func(_ gossh.Handler) gossh.Handler {
 		return s.handleSession
 	}
 }
 
-// handleSession dispatches one ssh command.
-//
-// `sess.Command()` returns the already-shell-split arg vector (ssh
-// client does that for us). The first token is the verb. An empty
-// command means "implicit upload of whatever's on stdin." Key-required
-// and Sybil-gate refusals are handled in upstream middlewares - by
-// the time we get here we know the session has a public key and the
-// gate (if configured) admitted it.
+// handleSession dispatches one ssh command. sess.Command() is the
+// already-shell-split arg vector; its first token is the verb, and an empty
+// command means an implicit upload of whatever is on stdin. Upstream
+// middlewares guarantee the session carries a public key the gate admitted.
 func (s *Server) handleSession(sess gossh.Session) {
 	keyedFP, _ := sess.Context().Value("ownerHash").(string)
 	owner := domain.IdentityFromKeyFingerprint(keyedFP).String()
@@ -314,11 +269,8 @@ func (s *Server) handleSession(sess gossh.Session) {
 	argv := sess.Command()
 
 	if len(argv) == 0 {
-		// "ssh hostthis.dev" with nothing piped in: show help and exit.
-		// We detect this by checking whether the client allocated a
-		// PTY (interactive terminal) - pipes don't get a PTY. Without
-		// this, we'd block reading stdin from a user just typing
-		// `ssh hostthis.dev` to "see what it does."
+		// A PTY means an interactive `ssh <apex>` with nothing piped in (a
+		// pipe gets no PTY): show help rather than blocking on stdin.
 		if _, _, hasPty := sess.Pty(); hasPty {
 			s.verbHelp(sess, nil)
 			return
@@ -327,19 +279,15 @@ func (s *Server) handleSession(sess gossh.Session) {
 		return
 	}
 
-	// Flag in the first position (e.g. `--name "foo"`) means an upload
-	// with no slug - flow into the upload path directly. Without this
-	// the dispatcher tries to treat `--name` as a verb.
+	// A leading flag (e.g. `--name "foo"`) is an upload with no slug; without
+	// this the dispatcher would treat the flag as a verb.
 	if strings.HasPrefix(argv[0], "--") && argv[0] != "--help" {
 		s.verbUpload(sess, owner, argv)
 		return
 	}
 
-	// `<verb> --help` / `<verb> -h` intercept: if the first token is a
-	// known verb (or a doc-only alias like `put` / `get`) and a help
-	// flag appears later in argv, emit verb-specific help instead of
-	// running the verb. This guards against side effects (delete, pin,
-	// etc.) when the user only wanted documentation.
+	// `<verb> --help` emits verb help instead of running the verb, so asking
+	// for documentation never triggers a side effect (delete, pin, ...).
 	if argvWantsHelp(argv) {
 		if d, ok := lookupVerbDescriptor(argv[0]); ok {
 			emitVerbHelp(sess, s.apex(), d)
@@ -350,11 +298,6 @@ func (s *Server) handleSession(sess gossh.Session) {
 
 	switch first := argv[0]; first {
 	case "help", "--help", "-h":
-		// `help <verb>` → verb-specific help when <verb> is recognized;
-		// otherwise an `unknown verb` prefix + the global banner. The
-		// bare `help` (and the `--help` / `-h` no-verb forms) keep
-		// emitting the global help banner; that path is pinned
-		// byte-exact by the Phase A characterization tests.
 		s.verbHelp(sess, argv[1:])
 	case "list":
 		s.verbList(sess, owner, argv[1:])
@@ -377,15 +320,11 @@ func (s *Server) handleSession(sess gossh.Session) {
 	case "whoami":
 		s.verbWhoami(sess, owner, argv[1:])
 	default:
-		// Looks like a slug? Treat as `update`. The slug-update
-		// shortcut is the SPEC.md "cat foo | ssh hostthis.dev <slug>"
-		// shape: no explicit verb, just the slug.
+		// A bare slug is the update shortcut: `cat foo | ssh <apex> <slug>`.
 		if _, err := domain.ParseSlug(first); err == nil {
 			s.verbUpload(sess, owner, argv) // pass slug as first arg
 			return
 		}
-		// Unknown verb - print the error and the help, then exit nonzero.
-		// Matches what git, kubectl, etc. do.
 		fmt.Fprintf(sess.Stderr(), "hostthis: unknown command %q\n\n", first)
 		emitHelp(sess, s.apex(), s.retention())
 		_ = sess.Exit(ExitUsage)
@@ -406,26 +345,20 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		_ = sess.Exit(ExitUsage)
 		return
 	}
-	// Hand the live session reader to the service layer. The service
-	// streams bytes through hash + compress + raw-counter, capping
-	// at HardRawByteCap on the input side and MaxPasteBytes on the
-	// compressed side. We DO NOT buffer the body here - that would
-	// peak memory at HardRawByteCap per concurrent upload, which
-	// blows the VPS RAM budget at modest concurrency.
+	// The live session reader goes straight to the service layer, which streams
+	// it through hash + compress + raw-counter (HardRawByteCap on the input
+	// side, MaxPasteBytes on the compressed side). Buffering the body here
+	// would peak memory at HardRawByteCap per concurrent upload.
 	limited := io.LimitReader(sess, int64(domain.HardRawByteCap)+1)
 
 	if args.Slug != "" {
 		// Update path.
 		slug, _ := domain.ParseSlug(args.Slug)
 
-		// A gzip-tar archive piped to an OWNED site slug re-deploys that
-		// site in place (same slug, same URL, new manifest), the static-
-		// site analogue of a paste update. The format gate (gzip magic)
-		// decides site-vs-paste exactly as the create path does; the slug
-		// positional decides new-vs-update. Peek non-destructively - the
-		// buffered reader replays the prefix downstream - and only when no
-		// explicit text type was forced. Anything else falls through to the
-		// paste-update path UNCHANGED.
+		// A gzip-tar archive piped at an owned site slug re-deploys in place.
+		// The gzip magic decides site-vs-paste, the slug positional decides
+		// new-vs-update. The peek is non-destructive: the buffered reader
+		// replays the prefix downstream. Anything else is a paste update.
 		if s.Deploy != nil && args.Type == "" {
 			peeked := bufio.NewReaderSize(limited, 512)
 			if head, _ := peeked.Peek(2); domain.HasGzipMagic(head) {
@@ -459,12 +392,9 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		return
 	}
 
-	// Create path. Peek the leading bytes to detect a gzip-tar static-
-	// site archive the same way the format gate detects HTML vs Markdown.
-	// A gzip magic prefix (and no explicit text type hint) routes to the
-	// site-deploy path; everything else is a single-file paste. The peek
-	// is non-destructive: the buffered reader replays the prefix to the
-	// downstream service.
+	// Create path. A gzip magic prefix (with no explicit type hint) routes to
+	// the site deploy; everything else is a single-file paste. The peek is
+	// non-destructive: the buffered reader replays the prefix downstream.
 	peeked := bufio.NewReaderSize(limited, 512)
 	if s.Deploy != nil && args.Type == "" {
 		if head, _ := peeked.Peek(2); domain.HasGzipMagic(head) {
@@ -489,11 +419,9 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	_ = sess.Exit(ExitOK)
 }
 
-// deploySite runs the static-site archive path: safe-untar the gzip-tar
-// stream, store each file as a blob, build the manifest, persist the
-// Site. Returns the same shape of URL response a single-file upload
-// does - no new verb, no extra flags - so `tar czf - site/ | ssh apex`
-// just works.
+// deploySite runs the static-site archive path and returns the same shape of
+// URL response a single-file upload does, so `tar czf - site/ | ssh <apex>`
+// needs no verb and no flag.
 func (s *Server) deploySite(sess gossh.Session, owner string, body io.Reader) {
 	res, err := s.Deploy.Deploy(body, owner)
 	if err != nil {
@@ -507,15 +435,12 @@ func (s *Server) deploySite(sess gossh.Session, owner string, body io.Reader) {
 	_ = sess.Exit(ExitOK)
 }
 
-// deploySiteToSlug re-deploys a static-site archive at an existing OWNED
-// slug in place: safe-untar the gzip-tar stream, store each file as a
-// blob, build the manifest, and atomically swap the site row at slug. The
-// slug and URL are unchanged; the same URL serves the new content. A slug
-// that names a foreign-owned site, or that is not a site at all, maps
-// through emitServiceErr to a not-found exit - byte-for-byte the same
-// shape as any not-found, so a non-owner can't probe existence/ownership.
-// Sites have no name field, so a --name flag (if any) is ignored here, the
-// same as the create-path deploySite.
+// deploySiteToSlug re-deploys a static-site archive at an existing owned slug,
+// atomically swapping the site row; the slug and URL are unchanged. A slug
+// naming a foreign-owned site, or not naming a site at all, exits with a
+// not-found byte-for-byte identical to any other not-found, so a non-owner
+// cannot probe existence or ownership. Sites have no name field, so --name is
+// ignored here just as it is on the create path.
 func (s *Server) deploySiteToSlug(sess gossh.Session, owner string, slug domain.Slug, body io.Reader) {
 	res, err := s.Deploy.DeployToSlug(slug, body, owner)
 	if err != nil {
@@ -542,9 +467,9 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 		emitServiceErr(sess, err)
 		return
 	}
-	// Static sites count against the same quota as pastes but never expire,
-	// so `list` MUST show them too or the quota is invisible + unfreeable.
-	// s.Deploy is nil when static-site hosting is disabled (paste-only).
+	// Sites count against the same quota as pastes but never expire, so `list`
+	// must show them or the quota is invisible and unfreeable. A nil Deploy
+	// means static-site hosting is disabled.
 	var sites []domain.Site
 	if s.Deploy != nil {
 		sites, err = s.Deploy.ListSites(owner)
@@ -557,8 +482,8 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 	items := newListView(pastes, sites, now)
 
 	if format == formatJSON {
-		// json mode: stdout carries only the JSON array (empty [] when
-		// there is no active content - no "no active pastes" stderr line).
+		// json mode: stdout carries only the array (empty [] when nothing is
+		// active), with no "no active pastes" stderr line.
 		if err := writeJSON(sess, items); err != nil {
 			emitServiceErr(sess, err)
 			return
@@ -572,19 +497,10 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 		_ = sess.Exit(ExitOK)
 		return
 	}
-	// Header on stdout (was stderr historically - stderr ordering
-	// vs stdout is non-deterministic over ssh, so the header could
-	// arrive AFTER the rows from the user's perspective. The spec
-	// shows the header at the top of the output; stdout + write-order
-	// guarantees that). Scripts that want headerless output can
-	// strip the first line with `tail -n +2`.
-	//
-	// Columns are space-padded so they line up in a terminal regardless
-	// of NAME length (a long label like "sticky-toffee-date-loaf" used
-	// to overflow the raw-tab stop and shove every following column out
-	// of alignment). tabwriter measures each cell and emits a single
-	// aligned block; writes still flow through sess in order, so the
-	// header lands first and PTY CRLF cooking is unaffected.
+	// The header goes on stdout, not stderr: stdout/stderr interleaving is
+	// non-deterministic over ssh, so a stderr header can arrive after the rows.
+	// tabwriter space-pads the columns so a long NAME cannot push every later
+	// column out of alignment.
 	tw := tabwriter.NewWriter(sess, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "SLUG\tNAME\tSIZE\tKIND\tEXPIRES_IN\tVERS")
 	for _, it := range items {
@@ -600,13 +516,13 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 	_ = sess.Exit(ExitOK)
 }
 
-// renderVersCol renders the VERS column for `list`. Three states per spec:
+// renderVersCol renders the VERS column for `list`. Three states:
 //
 //	unpinned                       → "v<latest>"
 //	pinned, pin == latest          → "v<latest> (pinned)"
 //	pinned, pin <  latest          → "v<pin> (pinned, latest v<latest>)"
 //
-// LatestVersion comes from MAX(ver_num); always >= 1 for active pastes.
+// LatestVersion is MAX(ver_num), always >= 1 for an active paste.
 func renderVersCol(p domain.Paste) string {
 	if p.PinnedVersion == 0 {
 		return fmt.Sprintf("v%d", p.LatestVersion)
@@ -637,10 +553,9 @@ func (s *Server) verbGet(sess gossh.Session, owner string, argv []string) {
 
 // -- url / qr ----------------------------------------------------------------
 
-// verbURL prints just the shareable URL for an existing slug on stdout.
-// No ownership check - the URL is a public capability - but the target
-// must exist and not be expired, otherwise the standard not-found
-// (exit 4) is returned, the same shape as every other missing slug.
+// verbURL prints the shareable URL for an existing slug on stdout. No
+// ownership check (the URL is a public capability), but the target must exist
+// and be unexpired, otherwise the standard not-found.
 func (s *Server) verbURL(sess gossh.Session, argv []string) {
 	slug, err := requireSlug(argv)
 	if err != nil {
@@ -658,9 +573,8 @@ func (s *Server) verbURL(sess gossh.Session, argv []string) {
 	_ = sess.Exit(ExitOK)
 }
 
-// verbQR mirrors create for an existing slug: the URL on stdout, the QR
-// code on stderr. Same existence/expiry gate and not-found shape as
-// verbURL; the only difference is the QR render.
+// verbQR mirrors create for an existing slug: the URL on stdout, the QR code
+// on stderr. Same existence gate and not-found shape as verbURL.
 func (s *Server) verbQR(sess gossh.Session, argv []string) {
 	slug, err := requireSlug(argv)
 	if err != nil {
@@ -679,14 +593,11 @@ func (s *Server) verbQR(sess gossh.Session, argv []string) {
 	_ = sess.Exit(ExitOK)
 }
 
-// resolveExistingURL resolves slug to its shareable URL when the slug
-// names a live (existing and non-expired) paste or, failing that, a live
-// static site. The bool is false when no such live slug exists; the
-// caller maps that to the standard not-found. URL construction is reused
-// from BuildURL (the same logic the create path uses) so the result is
-// byte-identical to what the original upload returned. No ownership
-// check is performed: knowing the slug already grants read access at the
-// URL, so there is nothing to leak that the URL doesn't already expose.
+// resolveExistingURL resolves slug to its shareable URL when it names a live
+// (existing, unexpired) paste or, failing that, a live static site; false when
+// no such slug exists. Reusing BuildURL keeps the result byte-identical to what
+// the original upload returned. No ownership check: knowing the slug already
+// grants read access at the URL.
 func (s *Server) resolveExistingURL(slug domain.Slug) (string, bool) {
 	now := s.now().UTC()
 	if s.Pastes != nil {
@@ -716,11 +627,10 @@ func (s *Server) verbRename(sess gossh.Session, owner string, argv []string) {
 		_ = sess.Exit(ExitUsage)
 		return
 	}
-	// Join the remaining tokens as the label: ssh flattens the command to a
-	// single space-joined string, so a multi-word label arrives as several
-	// argv tokens and must be rejoined (quoting can't survive). No tokens at
-	// all clears the label - the invocable clear path, since an empty-string
-	// argument cannot survive the ssh argv-join.
+	// ssh flattens the command to one space-joined string, so a multi-word
+	// label arrives as several tokens and must be rejoined; quoting cannot
+	// survive. No tokens clears the label, which is the only invocable clear
+	// path since an empty-string argument cannot survive that join either.
 	name := strings.Join(argv[1:], " ")
 	if err := s.Manage.Rename(slug, owner, name); err != nil {
 		emitServiceErr(sess, err)
@@ -754,11 +664,10 @@ func (s *Server) verbDelete(sess gossh.Session, owner string, argv []string) {
 			return
 		}
 		err = s.Manage.Delete(slug, owner)
-		// A slug that is not a paste collapses to not-found, but it may name
-		// a SITE. Fall through to the owner-checked site delete before
-		// surfacing not-found, so `delete <slug>` takes a site down too. Only
-		// a clean site delete short-circuits; any site-side error keeps the
-		// original paste not-found so the cases stay indistinguishable.
+		// A not-found paste may still name a site, so try the owner-checked
+		// site delete before surfacing not-found. Only a clean site delete
+		// short-circuits; any site-side error keeps the paste not-found so the
+		// cases stay indistinguishable.
 		if errors.Is(err, service.ErrNotFound) && s.Deploy != nil {
 			if serr := s.Deploy.Delete(slug, owner); serr == nil {
 				_, _ = fmt.Fprintln(sess.Stderr(), "deleted.")
@@ -837,19 +746,17 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 		emitServiceErr(sess, err)
 		return
 	}
-	// Pastes is wired in production (and in any test that asserts the
-	// current-version marker). Guard so a versions render still works -
-	// minus the pinned-current marker - if a caller didn't supply it,
-	// rather than nil-derefing.
+	// Guard a caller that left Pastes nil: the render still works, minus the
+	// current-version marker.
 	var p domain.Paste
 	if s.Pastes != nil {
 		p, _ = s.Pastes.Get(slug)
 	}
 	now := s.now().UTC()
 
-	// `current` marker: when pinned_version is 0, the served version
-	// is the MAX non-deleted ver_num. ListVersions returns newest first
-	// (including tombstones), so we walk forward to the first non-deleted.
+	// With no pin, the served version is the highest non-deleted ver_num.
+	// ListVersions is newest-first including tombstones, so the first
+	// non-deleted entry is it.
 	servedVer := p.PinnedVersion
 	if servedVer == 0 {
 		for _, v := range vers {
@@ -871,9 +778,8 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 		return
 	}
 
-	// Space-padded columns (see verbList) so the marker/date/size line up
-	// regardless of marker width. The empty-marker cell is a bare "" and
-	// tabwriter widens the column to fit "current"/"deleted".
+	// Space-padded columns (see verbList) so the marker column widens to fit
+	// "current" / "deleted" and the date and size stay aligned.
 	tw := tabwriter.NewWriter(sess, 0, 0, 2, ' ', 0)
 	for _, v := range vers {
 		marker := ""
@@ -955,8 +861,7 @@ func (s *Server) verbWhoami(sess gossh.Session, owner string, argv []string) {
 		emitUsageErr(sess, err)
 		return
 	}
-	// keyRequiredMiddleware rejects key-less sessions before they get
-	// here, so owner is always a key:<fp> identity by this point.
+	// keyRequiredMiddleware ran first, so owner is always a key:<fp> identity.
 	subnet := ipSubnet(remoteIP(sess))
 	info, err := s.Manage.Whoami(owner, subnet)
 	if err != nil {
@@ -973,8 +878,8 @@ func (s *Server) verbWhoami(sess gossh.Session, owner string, argv []string) {
 		return
 	}
 
-	// info.Identity is "key:SHA256:abcd..." - strip the prefix for
-	// display so it matches `ssh-keygen -lf` style.
+	// info.Identity is "key:SHA256:abcd..."; stripping the prefix matches the
+	// `ssh-keygen -lf` display style.
 	fmt.Fprintf(sess, "key:     %s\n", strings.TrimPrefix(info.Identity, domain.IdentityKeyPrefix))
 	if !info.FirstSeen.IsZero() {
 		fmt.Fprintf(sess, "joined:  %s\n", info.FirstSeen.Format("2006-01-02"))
@@ -1006,14 +911,11 @@ func max0(n int) int {
 
 // -- help -------------------------------------------------------------------
 
-// verbHelp dispatches help requests. With no extra args it emits the
-// global help banner (Phase A pins this byte-exact). With one extra
-// arg that matches a known verb (or doc-only alias like `put` / `get`),
-// it emits verb-specific help. With one extra arg that doesn't match,
-// it prefixes an `unknown verb` line and falls back to the global
-// banner - mirroring the "unknown command" treatment for dispatch
-// misses, but without the exit 2 (the user explicitly asked for help,
-// so we hand them help and exit 0).
+// verbHelp dispatches help requests. No args emits the global banner, which
+// characterization tests pin byte-exact. One arg naming a known verb (including
+// doc-only aliases like `put` / `get`) emits verb help; anything else prefixes
+// an `unknown verb` line and falls back to the banner, still exiting 0 because
+// help is what was asked for.
 func (s *Server) verbHelp(sess gossh.Session, rest []string) {
 	if len(rest) == 0 {
 		emitHelp(sess, s.apex(), s.retention())
@@ -1031,38 +933,33 @@ func (s *Server) verbHelp(sess gossh.Session, rest []string) {
 	if _, _, hasPty := sess.Pty(); hasPty {
 		prefix = strings.ReplaceAll(prefix, "\n", "\r\n")
 	}
-	fmt.Fprint(sess.Stderr(), prefix)
+	fmt.Fprint(sess.Stderr(), prefix) //nolint:errcheck
 	emitHelp(sess, s.apex(), s.retention())
 	_ = sess.Exit(ExitOK)
 }
 
-// apex returns the configured apex domain. The binary refuses to
-// start with an empty apex (cmd/hostthisd enforces this), so this
-// is always non-empty in production. Tests that construct Server
-// directly must set ApexDomain too.
+// apex returns the configured apex domain. cmd/hostthisd refuses to start with
+// an empty apex, so it is always non-empty in production; a test constructing
+// Server directly must set ApexDomain.
 func (s *Server) apex() string { return s.ApexDomain }
 
-// emitHelp writes the rendered help text to stderr, translating LF
-// to CRLF when the session has a PTY allocated. The PTY is in raw
-// mode on the client (it expects \r\n from the remote) and a bare
-// \n produces a "staircase" effect - the cursor advances a line but
-// doesn't return to column 0, so subsequent lines start where the
-// previous one ended. An interactive `ssh <apex>` (no command)
-// defaults to allocating a PTY; `ssh <apex> help` doesn't. Same
-// helpText, different newline handling.
+// emitHelp writes the help text to stderr, translating LF to CRLF when the
+// session has a PTY. A client PTY is in raw mode and expects \r\n; a bare \n
+// staircases the output (the cursor advances without returning to column 0).
+// Interactive `ssh <apex>` allocates a PTY, `ssh <apex> help` does not.
 func emitHelp(sess gossh.Session, apex string, retention domain.Retention) {
 	text := helpText(apex, retention)
 	if _, _, hasPty := sess.Pty(); hasPty {
 		text = strings.ReplaceAll(text, "\n", "\r\n")
-		fmt.Fprint(sess.Stderr(), text, "\r\n")
+		fmt.Fprint(sess.Stderr(), text, "\r\n") //nolint:errcheck
 		return
 	}
 	fmt.Fprintln(sess.Stderr(), text)
 }
 
-// helpTextTemplate is the canonical user-facing help. {{apex}}
-// placeholders are substituted at render time with the configured
-// apex domain so the help is correct under any deployment.
+// helpTextTemplate is the canonical user-facing help. {{apex}} and
+// {{retention}} are substituted at render time, so the text is correct under
+// any deployment.
 const helpTextTemplate = `Pipe a rendered file in, get a URL out. {{retention}}
 
 UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;
@@ -1106,14 +1003,13 @@ LIMITS
 
     Apps can persist + sync state: https://{{apex}}/  (rooms + realtime API)`
 
-// helpText returns the rendered help with apex substituted in.
-// Caller must pass a non-empty apex.
+// helpText renders helpTextTemplate. apex must be non-empty.
 func helpText(apex string, retention domain.Retention) string {
 	t := strings.ReplaceAll(helpTextTemplate, "{{apex}}", apex)
 	return strings.ReplaceAll(t, "{{retention}}", retentionSentence(retention))
 }
 
-// retentionSentence renders the help-text line about expiry from the policy.
+// retentionSentence renders the help-text expiry line from the policy.
 func retentionSentence(r domain.Retention) string {
 	if !r.Enabled() {
 		return "Pastes never expire."
@@ -1130,10 +1026,8 @@ func requireSlug(argv []string) (domain.Slug, error) {
 	return domain.ParseSlug(argv[0])
 }
 
-// emitUsageErr reports a bad-argument / parser failure (e.g. an unknown
-// `-o` output format) on stderr and exits ExitUsage - the same code the
-// dispatcher uses for a malformed command, keeping the arg-error contract
-// uniform.
+// emitUsageErr reports a bad-argument or parser failure on stderr and exits
+// ExitUsage, the same code the dispatcher uses for a malformed command.
 func emitUsageErr(sess gossh.Session, err error) {
 	_, _ = fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
 	_ = sess.Exit(ExitUsage)
@@ -1156,10 +1050,8 @@ func emitServiceErr(sess gossh.Session, err error) {
 	case errors.Is(err, domain.ErrTooManyFiles):
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrTooManyFiles.Error())
 	case errors.Is(err, service.ErrDeployFailed):
-		// A site deploy hit an unexpected backend error (defensively translated,
-		// e.g. a cross-shard bind that the slug pre-claim is designed to prevent).
-		// Show the user a clean retryable message, NOT the raw backend sentinel
-		// the wrapped cause carries.
+		// Show a clean retryable message, not the raw backend sentinel the
+		// wrapped cause carries.
 		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: site deploy failed, please retry")
 	default:
 		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
@@ -1167,13 +1059,10 @@ func emitServiceErr(sess gossh.Session, err error) {
 	_ = sess.Exit(exitForServiceErr(err))
 }
 
-// exitForServiceErr maps a service-layer error to the canonical exit code.
-// Note: ErrNotOwner is intentionally NOT a case here. Every owner-gated
-// path in service.Manage collapses not-owner to ErrNotFound (see
-// requireOwner) so existence doesn't leak across identities. The SSH
-// surface therefore never sees ErrNotOwner; mapping it would be dead
-// code. A foreign-identity verb attempt is indistinguishable from a
-// well-formed-but-missing slug: both exit 4.
+// exitForServiceErr maps a service-layer error to its exit code. ErrNotOwner is
+// deliberately absent: every owner-gated path in service.Manage collapses
+// not-owner to ErrNotFound so existence cannot leak across identities, so a
+// foreign-identity verb attempt and a missing slug both exit ExitNotFound.
 func exitForServiceErr(err error) int {
 	switch {
 	case errors.Is(err, service.ErrEmptyOwner):
@@ -1185,8 +1074,8 @@ func exitForServiceErr(err error) int {
 	}
 }
 
-// remoteIP extracts the client's IP address from a session's
-// RemoteAddr. Returns nil for unknown / unparseable.
+// remoteIP extracts the client IP from a session's RemoteAddr, nil when
+// unknown or unparseable.
 func remoteIP(sess gossh.Session) net.IP {
 	addr := sess.RemoteAddr()
 	if addr == nil {
@@ -1202,9 +1091,9 @@ func remoteIP(sess gossh.Session) net.IP {
 	return net.ParseIP(host)
 }
 
-// ipSubnet returns the canonical subnet string for the Sybil gate.
-// IPv4 → "/24" prefix; IPv6 → "/48". A nil IP becomes "unknown" so
-// the gate treats it as one stable bucket rather than crashing.
+// ipSubnet returns the canonical subnet string for the Sybil gate: IPv4 → /24,
+// IPv6 → /48. A nil IP becomes "unknown" so the gate treats it as one stable
+// bucket rather than crashing.
 func ipSubnet(ip net.IP) string {
 	if ip == nil {
 		return "unknown"
@@ -1215,8 +1104,8 @@ func ipSubnet(ip net.IP) string {
 	return ip.Mask(net.CIDRMask(48, 128)).String() + "/48"
 }
 
-// fingerprintKey returns the canonical SHA256 fingerprint of an ssh
-// public key, matching what `ssh-keygen -lf` emits.
+// fingerprintKey returns an ssh public key's SHA256 fingerprint, matching what
+// `ssh-keygen -lf` emits.
 func fingerprintKey(pk gossh.PublicKey) string {
 	wire := pk.Marshal()
 	sum := sha256.Sum256(wire)

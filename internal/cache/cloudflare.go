@@ -14,15 +14,11 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// Cloudflare purges a paste's cached representations from the Cloudflare
-// CDN edge by POSTing the paste's public URL variants to the zone's
-// purge_cache endpoint. The token only needs the "Cache:Purge" zone
-// permission - narrowest scope possible.
+// Cloudflare purges a paste's cached representations from the Cloudflare CDN
+// edge. The token needs only the zone "Cache:Purge" permission.
 //
-// Scheme/Apex/Mode describe how a slug maps to its public URL(s) so the
-// adapter can purge every cache key a paste is reachable at (see
-// pasteCacheURLs). This URL-variant policy lives here, in the adapter,
-// not in the service layer, which only ever names the slug.
+// Scheme/Apex/Mode map a slug to its public URL variants (pasteCacheURLs).
+// That policy lives in the adapter; the service layer only names the slug.
 type Cloudflare struct {
 	ZoneID string
 	Token  string
@@ -33,7 +29,7 @@ type Cloudflare struct {
 
 	Logger *log.Logger
 
-	// Optional override for tests; defaults to a 5-second-timeout client.
+	// Defaults to a 5-second-timeout client.
 	HTTPClient *http.Client
 }
 
@@ -44,9 +40,9 @@ func (c *Cloudflare) client() *http.Client {
 	return &http.Client{Timeout: 5 * time.Second}
 }
 
-// PurgePaste purges every CDN cache key the slug is reachable at. The
-// URL-variant policy is provider-agnostic (see pasteCacheURLs in urls.go);
-// this adapter only knows how to submit that list to Cloudflare's API.
+// PurgePaste purges every CDN cache key the slug is reachable at. The variant
+// policy is provider-agnostic (pasteCacheURLs in urls.go); this adapter only
+// submits the list.
 func (c *Cloudflare) PurgePaste(slug domain.Slug) error {
 	return c.purgeURLs(pasteCacheURLs(c.Scheme, c.Apex, c.Mode, slug))
 }
@@ -75,22 +71,20 @@ func (c *Cloudflare) purgeURLs(urls []string) error {
 		c.logf("cloudflare purge http: %v (urls=%v)", err, urls)
 		return err
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		err := fmt.Errorf("cloudflare purge non-2xx: %d %s", resp.StatusCode, string(body))
 		c.logf("%v (urls=%v)", err, urls)
 		return err
 	}
-	// Purges are low-volume (one per edit/delete/pin/unpin) and operators
-	// want to see them land, so log success too - it also makes the
-	// integration observable in a deploy that isn't yet edge-cached.
+	// Low-volume (one per edit/delete/pin/unpin), so success is logged too:
+	// it keeps the integration observable before any edge caching exists.
 	c.logf("cache: purged %v", urls)
 	return nil
 }
 
-// logf logs through the optional Logger; if none is wired, messages are
-// dropped (purge is best-effort and never blocks the caller).
+// logf drops messages when no Logger is wired: purge is best-effort.
 func (c *Cloudflare) logf(format string, args ...any) {
 	if c.Logger != nil {
 		c.Logger.Printf(format, args...)

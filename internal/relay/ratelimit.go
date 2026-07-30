@@ -5,24 +5,17 @@ import (
 	"time"
 )
 
-// rateLimiter is a per-connection token bucket bounding the inbound
-// message rate (the per-connection send rate limit). It is the relay's
-// analogue of the room-creation rate limit on the KV side: a client over
-// its ceiling is dropped, so one hostile connection cannot saturate a
-// room's fan-out (each inbound frame is multiplied by the room's
-// connection count on the way out).
-//
-// The bucket fills at maxPerSec tokens/second up to a burst of maxPerSec
-// (one second of headroom), and each inbound frame spends one token.
-// allow returns false when the bucket is empty, which the reader treats as
-// "drop this connection." A maxPerSec of 0 disables the limit (used by
-// tests isolating other axes).
+// rateLimiter is a per-connection token bucket over inbound frames. Fan-out
+// multiplies every inbound frame by the room's connection count, so without a
+// per-connection ceiling one hostile client saturates the whole room. Fills at
+// maxPerSec tokens/second with a burst of maxPerSec; maxPerSec <= 0 disables
+// the limit.
 type rateLimiter struct {
 	mu        sync.Mutex
 	maxPerSec float64
 	tokens    float64
 	last      time.Time
-	now       func() time.Time // injectable for tests; defaults to time.Now
+	now       func() time.Time // injectable for tests
 }
 
 func newRateLimiter(maxPerSec int) *rateLimiter {
@@ -34,9 +27,8 @@ func newRateLimiter(maxPerSec int) *rateLimiter {
 	}
 }
 
-// allow reports whether one more inbound frame is within the rate ceiling,
-// spending a token if so. A disabled limiter (maxPerSec <= 0) always
-// allows.
+// allow spends a token for one inbound frame. False means the connection is
+// over its ceiling, which the reader treats as "drop this connection".
 func (r *rateLimiter) allow() bool {
 	if r.maxPerSec <= 0 {
 		return true

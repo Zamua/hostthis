@@ -36,10 +36,9 @@ func makeSiteArchive(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-// TestDeploySiteAndServe - the headline end-to-end for static sites.
-// Pipe a gzip-tar archive in via a real ssh client (NO new verb, NO
-// flags), then GET multiple paths off the returned URL and assert each
-// file round-trips with the right content-type + sandbox headers.
+// A gzip-tar archive piped through a real ssh client, with no verb and no flag,
+// deploys a site whose files each serve back with the right content-type and
+// sandbox headers, and whose route-shaped misses fall back to the root index.
 func TestDeploySiteAndServe(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "test.db"))
@@ -74,7 +73,7 @@ func TestDeploySiteAndServe(t *testing.T) {
 		Upload:     upload,
 		Deploy:     deploy,
 		BuildURL: func(s domain.Slug) string {
-			// Path-mode shape: /p/<slug>. Site files hang off /p/<slug>/<path>.
+			// Path mode: site files hang off /p/<slug>/<path>.
 			return httpSrv.URL + "/p/" + s.String()
 		},
 		Logger: log.New(io.Discard, "", 0),
@@ -118,8 +117,7 @@ func TestDeploySiteAndServe(t *testing.T) {
 	sess.Stdout = &stdout
 	sess.Stderr = &stderr
 
-	// Empty command = upload. The gzip magic routes it to the site path
-	// with no verb and no flag - "tar czf - site/ | ssh paste.test".
+	// An empty command is an upload; the gzip magic routes it to the site path.
 	if err := sess.Run(""); err != nil {
 		t.Fatalf("ssh run: %v\nstderr: %s", err, stderr.String())
 	}
@@ -132,7 +130,6 @@ func TestDeploySiteAndServe(t *testing.T) {
 		t.Fatalf("stderr should mention site, got %q", stderr.String())
 	}
 
-	// GET each file off the returned URL.
 	checks := []struct {
 		path  string
 		body  string
@@ -152,7 +149,7 @@ func TestDeploySiteAndServe(t *testing.T) {
 			t.Fatalf("GET %s: %v", url, err)
 		}
 		got, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		resp.Body.Close() //nolint:errcheck
 		if resp.StatusCode != 200 {
 			t.Fatalf("GET %s: status %d", url, resp.StatusCode)
 		}
@@ -167,10 +164,8 @@ func TestDeploySiteAndServe(t *testing.T) {
 		}
 	}
 
-	// SPA fallback through the real upload pipe: a route-shaped miss
-	// (no extension or ".html") serves the ROOT index.html with a 200 so
-	// a client-side router can render the route. A path that looks like a
-	// missing static ASSET still 404s.
+	// A route-shaped miss (no extension, or ".html") serves the ROOT index.html
+	// with a 200 so a client-side router can render the route.
 	rootIndex := "<!doctype html><h1>home</h1>"
 	routeChecks := []string{"/about-page", "/does-not-exist.html", "/users/42"}
 	for _, p := range routeChecks {
@@ -188,7 +183,7 @@ func TestDeploySiteAndServe(t *testing.T) {
 		}
 	}
 
-	// A genuinely-missing asset still 404s (no silent index.html-as-JS).
+	// An asset-shaped miss still 404s: never index.html served as JS.
 	resp, err := http.Get(base + "/assets/nope.js")
 	if err != nil {
 		t.Fatalf("GET missing asset: %v", err)
@@ -199,8 +194,8 @@ func TestDeploySiteAndServe(t *testing.T) {
 	}
 }
 
-// TestDeploySite_NoWebContentRejected - an archive with no web content
-// is rejected like any unsupported upload, with a nonzero exit.
+// An archive with no web content is rejected like any unsupported upload, with
+// a nonzero exit and an explanatory stderr line.
 func TestDeploySite_NoWebContentRejected(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "test.db"))

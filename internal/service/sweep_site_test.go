@@ -29,10 +29,9 @@ func gzTar(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-// TestSweep_ExpiresSitesAndProtectsSharedBlobs drives the sweep against
-// real sqlite + blob stores with both a paste and a site sharing a blob.
-// When the site expires but the paste references the SAME bytes, the
-// shared blob must survive (union of paste-ref + site-ref keep-alive).
+// TestSweep_ExpiresSitesAndProtectsSharedBlobs pins the union keep-alive
+// across kinds: a blob shared by a paste and a site is collected only once
+// NEITHER references it.
 func TestSweep_ExpiresSitesAndProtectsSharedBlobs(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "sweep.db"))
@@ -50,8 +49,8 @@ func TestSweep_ExpiresSitesAndProtectsSharedBlobs(t *testing.T) {
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 
-	// Identical bytes uploaded as a paste AND deployed as a site so they
-	// share a blob.
+	// Identical bytes uploaded as a paste AND deployed as a site, so the two
+	// records share one blob.
 	shared := "<!doctype html><h1>shared bytes</h1>"
 	upload := service.NewUpload(pastes, service.NewStandaloneBlobUnit(blobs))
 	t.Cleanup(upload.WaitFinalize)
@@ -71,16 +70,10 @@ func TestSweep_ExpiresSitesAndProtectsSharedBlobs(t *testing.T) {
 	sweep := service.NewSweep(pastes, disk, logger)
 	sweep.Sites = sites
 
-	// Past the retention window: the SITE has expired but the paste still references the
-	// shared bytes. The site row must be deleted; the shared blob must NOT.
 	future := now.Add(domain.DefaultRetentionWindow + 24*time.Hour)
 
-	// Reset the paste's expiry far into the future via a fresh upload-time
-	// trick: instead, just sweep at a point where the paste is alive. The
-	// paste was created at `now` with 30d retention, so it ALSO expires by
-	// `future`. To isolate the "shared blob survives while one record
-	// lives" property, sweep at now+1h (nothing expired) first, then prove
-	// the site expiry path independently below.
+	// Both records were created at `now` with the same retention, so both are
+	// alive here and both expire by `future`.
 	deleted, gc, err := sweep.Once(now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("sweep early: %v", err)
@@ -89,40 +82,33 @@ func TestSweep_ExpiresSitesAndProtectsSharedBlobs(t *testing.T) {
 		t.Fatalf("nothing should sweep early: deleted=%d gc=%d", deleted, gc)
 	}
 
-	// The shared blob is readable (sanity).
 	sha := res.Site.Manifest.Files["index.html"].SHA
 	if _, err := blobs.Get(sha); err != nil {
 		t.Fatalf("shared blob missing before sweep: %v", err)
 	}
 
-	// Now sweep at `future`: BOTH the paste and the site have expired, so
-	// the shared blob is unreferenced and gets GC'd. This confirms the
-	// site sweep path deletes the site row and that its blob is collected
-	// once no record references it.
+	// At `future` both records have expired, so nothing references the shared
+	// blob and it is collected.
 	deleted, gc, err = sweep.Once(future)
 	if err != nil {
 		t.Fatalf("sweep future: %v", err)
 	}
-	// 1 paste + 1 site expired.
 	if deleted != 2 {
 		t.Fatalf("expected 2 records expired (paste+site), got %d", deleted)
 	}
 	if gc != 1 {
 		t.Fatalf("expected 1 shared blob GC'd, got %d", gc)
 	}
-	// Site row gone.
 	if _, err := sites.Get(res.Site.Slug); err == nil {
 		t.Fatalf("site should be deleted after expiry")
 	}
 }
 
 // TestSweep_SiteIndexNoOpsNotCountedAsDeleted pins the site half of the
-// expiry-pass contract: an expired site-expiry-index entry whose site
-// record is ALREADY GONE is an index cleanup, not a record deletion - the
-// deleted-count must not include it (a no-op site delete counted as a
-// deletion is exactly the "deleted 2 expired record(s) every cycle
-// forever" pathology observed live). The fixture mirrors a real stuck
-// staging entry byte-for-byte.
+// expiry-pass contract: an expired index entry whose site record is ALREADY
+// GONE is an index cleanup, not a record deletion, so the deleted-count must
+// not include it. Counting it reports a constant nonzero deletion every cycle
+// forever.
 func TestSweep_SiteIndexNoOpsNotCountedAsDeleted(t *testing.T) {
 	sites := &orphanSiteSweep{ref: domain.ExpiredSite{
 		Slug:     "ctimu4qh",
@@ -139,14 +125,11 @@ func TestSweep_SiteIndexNoOpsNotCountedAsDeleted(t *testing.T) {
 	if deleted != 0 {
 		t.Fatalf("a site-index no-op (record already gone) must not count as a deletion: got %d, want 0", deleted)
 	}
-	// The pass handed the EXACT observed reference to the repo (the entry
-	// cleanup targets the surfaced index entry, not a re-derivation).
+	// The cleanup must target the surfaced index entry, not a re-derivation.
 	if len(sites.gotRefs) != 1 || sites.gotRefs[0] != sites.ref {
 		t.Fatalf("DeleteExpiredSite must receive the exact scanned ref; got %+v", sites.gotRefs)
 	}
 
-	// The repo drained the entry: a second pass sees zero expired sites and
-	// deletes nothing.
 	deleted, _, err = sweep.Once(now)
 	if err != nil {
 		t.Fatalf("sweep 2: %v", err)
@@ -157,9 +140,8 @@ func TestSweep_SiteIndexNoOpsNotCountedAsDeleted(t *testing.T) {
 }
 
 // orphanSiteSweep is a SweepSites whose expiry scan surfaces one entry
-// referencing a site record that no longer exists - the record delete is
-// an idempotent no-op and the entry cleanup drains the scan, exactly the
-// repo-side contract.
+// referencing a site record that is already gone, so the record delete is an
+// idempotent no-op and the entry cleanup drains the scan.
 type orphanSiteSweep struct {
 	ref     domain.ExpiredSite
 	drained bool
@@ -175,14 +157,14 @@ func (s *orphanSiteSweep) ExpiredSites(_ time.Time) ([]domain.ExpiredSite, error
 
 func (s *orphanSiteSweep) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
 	s.gotRefs = append(s.gotRefs, ref)
-	s.drained = true // the exact-entry removal drains the scan
+	s.drained = true
 	return false, nil
 }
 
 func (s *orphanSiteSweep) ReferencedSiteBlobSHAs() ([]string, error) { return nil, nil }
 
-// TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt proves the
-// union keep-alive: two sites share a blob, one expires, the blob lives.
+// TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt: two sites share a
+// blob, one expires, the blob lives.
 func TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "sweep.db"))
@@ -201,7 +183,6 @@ func TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt(t *testing.T) {
 	t0 := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	shared := "<!doctype html><h1>two sites share me</h1>"
 
-	// Site A at t0 (expires t0+30d).
 	deployA := service.NewDeploySite(sites, pastes, service.NewStandaloneBlobUnit(blobs))
 	deployA.Now = func() time.Time { return t0 }
 	resA, err := deployA.Deploy(bytes.NewReader(gzTar(t, map[string]string{"index.html": shared})), "key:a")
@@ -209,8 +190,7 @@ func TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt(t *testing.T) {
 		t.Fatalf("deploy A: %v", err)
 	}
 
-	// Site B deployed 3 days later (expires t0+3d+30d = t0+33d) - still alive
-	// when A expires at t0+30d.
+	// Site B is deployed 3 days later, so it is still alive when A expires.
 	t1 := t0.Add(3 * 24 * time.Hour)
 	deployB := service.NewDeploySite(sites, pastes, service.NewStandaloneBlobUnit(blobs))
 	deployB.Now = func() time.Time { return t1 }
@@ -222,8 +202,7 @@ func TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt(t *testing.T) {
 	sweep := service.NewSweep(pastes, disk, logger)
 	sweep.Sites = sites
 
-	// Sweep past A's window: site A expired, site B alive. The shared blob must
-	// survive because B still references it.
+	// Past A's window only: B still references the shared blob.
 	deleted, gc, err := sweep.Once(t0.Add(domain.DefaultRetentionWindow + 24*time.Hour))
 	if err != nil {
 		t.Fatalf("sweep: %v", err)

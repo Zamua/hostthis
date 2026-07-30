@@ -6,25 +6,14 @@ import (
 	"testing"
 )
 
-// TestJoinWithSnapshot_NoGapUnderConcurrentBroadcast pins the spec's core
-// late-join guarantee at the unit level, deterministically: a durable write
-// racing a join is NEVER lost (no gap). The join registers the connection
-// FIRST, then reads the snapshot (SPEC "Persistence and late-join"), so:
+// TestJoinWithSnapshot_NoGapUnderConcurrentBroadcast pins the late-join no-gap
+// guarantee: a durable write racing a join is never lost. Register-then-read
+// (SPEC "Persistence and late-join") is what buys it - a broadcast before the
+// register is missed live but its commit precedes the snapshot read, and a
+// broadcast after the register is delivered live.
 //
-//   - a broadcast that ran BEFORE the register was missed by the
-//     connection, but its commit completed before the snapshot read
-//     started, so the write is IN the snapshot;
-//   - a broadcast that ran AFTER the register is delivered live.
-//
-// The write CAN legally appear in both (a broadcast inside the join
-// window whose commit the snapshot read also caught) - that wire-level
-// duplicate is handled by the client's seq-discard rule, not by a server
-// lock, so this test asserts only the no-gap half: the written key appears
-// in the snapshot, the live stream, or both - never neither.
-//
-// The test drives the race many times. The snapshot reflects whatever the
-// shared store held at read time; the writer mutates that store THEN
-// broadcasts (mirroring the HTTP PUT: commit-then-mirror).
+// A write may legally land in BOTH; the client's seq-discard rule handles that
+// duplicate, so only the no-gap half is asserted here: never neither.
 func TestJoinWithSnapshot_NoGapUnderConcurrentBroadcast(t *testing.T) {
 	const iterations = 200
 	for i := range iterations {
@@ -32,7 +21,7 @@ func TestJoinWithSnapshot_NoGapUnderConcurrentBroadcast(t *testing.T) {
 		key := testKey()
 
 		// A shared "durable store": the snapshot reads it; the writer mutates
-		// it before broadcasting, exactly like commit-then-mirror.
+		// it before broadcasting, like commit-then-mirror.
 		var storeMu sync.Mutex
 		written := false
 		readSnap := func() (Frame, error) {
@@ -45,7 +34,6 @@ func TestJoinWithSnapshot_NoGapUnderConcurrentBroadcast(t *testing.T) {
 			return Frame{Data: []byte(`{"type":"snapshot","state":{}}`)}, nil
 		}
 
-		// Admit + the connection we will join.
 		_, id, err := r.admit(key)
 		if err != nil {
 			t.Fatalf("admit: %v", err)
@@ -55,8 +43,8 @@ func TestJoinWithSnapshot_NoGapUnderConcurrentBroadcast(t *testing.T) {
 		var wg sync.WaitGroup
 		wg.Add(2)
 
-		// Goroutine A: the durable write. Commit to the store, THEN broadcast
-		// the live mirror (the order commit-and-mirror uses).
+		// The durable write: commit to the store, THEN broadcast the live
+		// mirror (the order commit-and-mirror uses).
 		go func() {
 			defer wg.Done()
 			storeMu.Lock()
@@ -67,7 +55,7 @@ func TestJoinWithSnapshot_NoGapUnderConcurrentBroadcast(t *testing.T) {
 			}
 		}()
 
-		// Goroutine B: the join (register first, snapshot read off the lock).
+		// The join: register first, snapshot read off the lock.
 		snapCh := make(chan Frame, 1)
 		go func() {
 			defer wg.Done()
@@ -81,9 +69,8 @@ func TestJoinWithSnapshot_NoGapUnderConcurrentBroadcast(t *testing.T) {
 
 		wg.Wait()
 
-		// Observe what the joiner has: the returned snapshot (its first wire
-		// frame) plus any live frames delivered to the connection. The written
-		// key must appear in at least one of them (no gap).
+		// What the joiner has: the returned snapshot (its first wire frame)
+		// plus any live frames delivered to the connection.
 		snap, ok := <-snapCh
 		if !ok {
 			t.Fatalf("iter %d: join failed", i)
@@ -110,13 +97,10 @@ func framesToStrings(fs []Frame) []string {
 	return out
 }
 
-// TestJoinWithSnapshot_RegistersThenReturnsSnapshot confirms the join's two
-// halves: the connection is IN the broadcast set when joinWithSnapshot
-// returns (a subsequent broadcast reaches it), and the snapshot frame is
-// RETURNED to the caller - who writes it as the first frame on the wire
-// (the reserved first-frame slot; the wire ordering itself is pinned by
-// the ws-level harness, where every join's first frame is asserted to be
-// the snapshot).
+// TestJoinWithSnapshot_RegistersThenReturnsSnapshot pins the join's two halves:
+// the connection is in the broadcast set when joinWithSnapshot returns, and the
+// snapshot frame is returned to the caller (who writes it as the first wire
+// frame; the wire ordering itself is pinned by the ws-level harness).
 func TestJoinWithSnapshot_RegistersThenReturnsSnapshot(t *testing.T) {
 	r := NewRegistry(NewLimits())
 	key := testKey()

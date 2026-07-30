@@ -7,21 +7,12 @@ import (
 	"time"
 )
 
-// The retry-budget arithmetic in internal/storage assumes a specific outer
-// response deadline: attempts x shale-read-budget, plus backoff, must fit
-// inside the http.Server WriteTimeout with margin. That assumption lives in a
-// DIFFERENT package, which cannot import this one (main), so it hardcodes the
-// number.
-//
-// Nothing made the two agree. Raising or lowering the real timeout here would
-// leave that pin asserting against a stale value and passing - a check whose
-// premise had silently become false, which is the same shape as a test whose
-// harness runs a non-production cadence and therefore cannot see the gap it
-// was written to catch.
-//
-// This closes the loop from the composition root: change the timeout below
-// and this fails, naming the constant in internal/storage that must move with
-// it.
+// The retry-budget arithmetic in internal/storage assumes this outer response
+// deadline: attempts x shale-read-budget, plus backoff, must fit inside the
+// http.Server WriteTimeout with margin. internal/storage cannot import main,
+// so it hardcodes the number; without this pin, changing the real timeout
+// leaves that assertion measuring a value the daemon does not use, and still
+// passing.
 const retryArithmeticAssumesWriteTimeout = 30 * time.Second
 
 func TestHTTPWriteTimeoutMatchesRetryArithmetic(t *testing.T) {

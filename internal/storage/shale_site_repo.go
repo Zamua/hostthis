@@ -1,8 +1,5 @@
 // Package storage's shale-cluster-backed static-site persistence.
-//
-// Reuses the site key names and JSON row schema of the slatedb backend, and
-// shares the manifest codec with all three backends, so the on-wire manifest is
-// byte-identical. Co-location is by shaleShardKey.
+// Co-location is by shaleShardKey.
 //
 // # Key layout
 //
@@ -13,21 +10,18 @@
 //
 // # Scan-derived site quota
 //
-// No stored counter and no reservation. Per-owner site bytes are derived by one
-// prefix scan of identity_sites/<id>/, summing the cached size each entry
-// carries. The deploy paths write those cached values; the reconciler heals
-// drift.
+// No stored counter, no reservation: per-owner site bytes are one prefix scan
+// of identity_sites/<id>/ summing the cached size each entry carries.
 //
-// The service computes its budget as UserQuota - paste_bytes - site_bytes,
-// reading the two sums separately, so the two scans MUST count disjoint sets:
-// identity_pastes/ and identity_sites/ never overlap. The cap check sums both
-// kinds, so the ceiling holds however an owner splits their quota.
+// The service budget is UserQuota - paste_bytes - site_bytes, read as two
+// separate sums, so the two scans MUST count disjoint sets: identity_pastes/
+// and identity_sites/ never overlap.
 //
 // # A deploy is a plain sequence
 //
 // It spans the {slug} shard (authoritative row, plus the cross-family paste
-// collision read) and the {id} shard (enumeration entry), which cannot be one
-// transaction. With no counter to reserve against it is simply:
+// collision read) and the {id} shard (enumeration entry), so it cannot be one
+// transaction:
 //
 //  1. check quota (scan combined paste+site bytes),
 //  2. authoritative write on {slug}, with BOTH sites/<slug> and pastes/<slug>
@@ -58,24 +52,19 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// ShaleSiteRepo is the service.SiteRepo + service.SweepSites adapter over a
-// ShaleRepo. It delegates the interface-named methods (Get, Delete,
-// InsertWithQuotaCheck, SumActiveBytesByOwner) to the ShaleRepo `...Site`
-// methods, so the shale backend's site repo shares the same cluster handle
-// (and shard routing) as its paste repo. NewShaleSiteRepo(repo) builds it.
+// ShaleSiteRepo adapts a ShaleRepo to service.SiteRepo + service.SweepSites,
+// so the site repo shares the paste repo's cluster handle and shard routing.
 //
-// The interface method names collide with the paste method names on
-// ShaleRepo with different signatures, so they cannot both live on
-// ShaleRepo directly; the KV operations live on ShaleRepo as `...Site`
-// methods and this thin adapter exposes them under the service interface
-// names. This mirrors SlateSiteRepo exactly.
+// The interface method names collide with ShaleRepo's paste methods under
+// different signatures, so both cannot live on ShaleRepo; the KV operations
+// are `...Site` methods there and this adapter exposes them under the
+// interface names.
 type ShaleSiteRepo struct {
 	repo *ShaleRepo
 }
 
-// NewShaleSiteRepo wraps a ShaleRepo so static-site hosting runs on the
-// shale backend. The returned adapter satisfies service.SiteRepo and
-// service.SweepSites (and so the cmd/hostthisd siteStore union).
+// NewShaleSiteRepo wraps a ShaleRepo so static-site hosting runs on the shale
+// backend.
 func NewShaleSiteRepo(repo *ShaleRepo) *ShaleSiteRepo { return &ShaleSiteRepo{repo: repo} }
 
 // service.SiteRepo
@@ -108,7 +97,7 @@ func (s *ShaleSiteRepo) ReferencedSiteBlobSHAs() ([]string, error) {
 	return s.repo.ReferencedSiteBlobSHAs()
 }
 
-// --- key builders (mirror the slatedb site layout) -------------------------
+// --- key builders ----------------------------------------------------------
 
 func shaleKeySite(slug domain.Slug) []byte { return []byte("sites/" + slug.String()) }
 
@@ -117,16 +106,13 @@ func shaleKeyExpirySite(t time.Time, slug domain.Slug) []byte {
 }
 
 // shaleKeyIdentitySite / shalePrefixIdentitySites are the per-owner site
-// ENUMERATION index (mirror shaleKeyIdentityPaste / shalePrefixIdentityPastes).
-// The entry is VALUE-BEARING (identitySiteRow): it caches the deduped size +
-// expiry the quota scan sums, so SumActiveSiteBytesByOwner is one prefix scan
-// with zero per-entry row reads. ListSitesByOwner still re-reads each
-// authoritative sites/<slug> row (repair-on-read). It co-shards on <id> with
+// ENUMERATION index. The entry is VALUE-BEARING (identitySiteRow): it caches
+// the deduped size + expiry the quota scan sums, so SumActiveSiteBytesByOwner
+// is one prefix scan with zero per-entry row reads. It co-shards on <id> with
 // identity_pastes/, so an owner's paste-index and site-index scans each stay
-// single-shard. A LEGACY entry (written before the index was value-bearing)
-// carries a one-byte marker - or an empty value migrated from a slatedb
-// layout - and is read through its authoritative row until the reconciler's
-// reprojection overwrites it with the JSON projection.
+// single-shard. A LEGACY entry carries a one-byte marker or an empty value and
+// is read through its authoritative row until the reconciler's reprojection
+// overwrites it with the JSON projection.
 func shaleKeyIdentitySite(identity, slug string) []byte {
 	return []byte("identity_sites/" + identity + "/" + slug)
 }
@@ -137,10 +123,9 @@ func shalePrefixIdentitySites(identity string) []byte {
 
 // identitySiteRow is the value-bearing projection stored at
 // identity_sites/<id>/<slug>: the cached (deduped size, expires_at) the site
-// quota scan sums - the site mirror of identityPasteRow. Derived (eventually
-// consistent): the deploy/replace index write maintains it and the
-// reconciler's reprojection rebuilds it from the authoritative sites/<slug>
-// row, so cached-value error is bounded by a reconcile cycle.
+// quota scan sums. Derived and eventually consistent - the reconciler rebuilds
+// it from the authoritative sites/<slug> row, so cached-value error is bounded
+// by a reconcile cycle.
 type identitySiteRow struct {
 	Size      int       `json:"size"`
 	ExpiresAt time.Time `json:"expires_at"`
@@ -148,19 +133,17 @@ type identitySiteRow struct {
 	// Placeholder marks a fail-closed entry the reconciler projects for a
 	// slug whose authoritative sites/<slug> row cannot be decoded: the quota
 	// scan HARD-FAILS on it rather than silently under-counting (docs/SPEC.md
-	// "Decode tolerance of the quota scan"). Cleared only when the row
-	// decodes again or is removed (for real corruption: an operator repair
-	// or raw-key delete; see the spec's operator note).
+	// "Decode tolerance of the quota scan"). Cleared when the row decodes
+	// again or is removed.
 	Placeholder bool `json:"placeholder,omitempty"`
 }
 
-// --- JSON row schema (shared with the slatedb backend) ---------------------
+// --- JSON row schema -------------------------------------------------------
 
 // shaleSiteRowFromDomain builds the persisted siteRow (defined in
-// slate_site_repo.go: the SAME shape both slatedb-tagged backends store) by
-// encoding the manifest with the package-level encodeManifest the sqlite +
-// slatedb backends use. DedupedSize is stored so the quota scans never
-// decode a manifest just to sum bytes.
+// slate_site_repo.go, the shape both slatedb-tagged backends store).
+// DedupedSize is stored so the quota scans never decode a manifest just to
+// sum bytes.
 func shaleSiteRowFromDomain(s domain.Site, dedupedSize int) (siteRow, error) {
 	manStr, err := encodeManifest(s.Manifest)
 	if err != nil {
@@ -178,17 +161,15 @@ func shaleSiteRowFromDomain(s domain.Site, dedupedSize int) (siteRow, error) {
 
 // --- Site KV operations (on ShaleRepo) -------------------------------------
 
-// InsertSiteWithQuotaCheck deploys a site. The per-owner cap is enforced by a
-// scan-and-compare BEFORE the authoritative write (the owner's combined
-// paste+site used bytes plus this deploy's bytes must not exceed the cap),
-// and the slug-collision check is BOTH directions inside the authoritative
-// CAS (reject if a site OR a paste already owns the slug). The check and the
-// write are not atomic (bounded same-owner over-admit), the same tradeoff
-// InsertWithQuotaCheck documents.
+// InsertSiteWithQuotaCheck deploys a site. The per-owner cap is a
+// scan-and-compare BEFORE the authoritative write (combined paste+site used
+// bytes plus this deploy's bytes must not exceed the cap), and the
+// slug-collision check runs BOTH directions inside the authoritative CAS
+// (reject if a site OR a paste already owns the slug). Check and write are not
+// atomic (bounded same-owner over-admit).
 //
-// The durable total-bytes ceiling is NOT checked here: it is the
-// object-store bucket quota, enforced when a blob Put is rejected (see SPEC
-// "Limits -> Durable total-bytes ceiling: an object-store quota").
+// The durable total-bytes ceiling is NOT checked here: it is the object-store
+// bucket quota, enforced when a blob Put is rejected.
 //
 // Returns nil / ErrSlugTaken / ErrOverUserQuota.
 func (r *ShaleRepo) InsertSiteWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
@@ -196,13 +177,11 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(ctx context.Context, s domain.Site,
 	slug := s.Slug.String()
 	body := int64(dedupedSize)
 
-	// The deploy's staged file refs (if any) ride this call's context, isolated
-	// from any concurrent same-slug write. Read once and pass them down so the
+	// The deploy's staged file refs ride this call's context, isolated from any
+	// concurrent same-slug write. Read once and pass them down so the
 	// authoritative {slug} transaction binds exactly this call's blobs.
 	binds := pendingBindsFromContext(ctx)
 
-	// Quota CHECK (scan-based, combined paste+site) before the authoritative
-	// write.
 	if userCap > 0 {
 		used, err := r.combinedActiveBytes(identity, now)
 		if err != nil {
@@ -213,16 +192,14 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(ctx context.Context, s domain.Site,
 		}
 	}
 
-	// Authoritative {slug}-shard write.
 	if err := r.insertSiteAuthoritative(s, dedupedSize, binds); err != nil {
 		return err
 	}
 
-	// Enumeration-index maintenance on the {id} shard (the scan-based quota
-	// SUMS this entry's cached size + expiry). Best-effort + reconciler-
-	// healed: a failure leaves a site the index does not list (a transient
-	// under-count the reconciler heals), never a failed deploy, so the site
-	// (already durable) is returned as success.
+	// Enumeration-index maintenance on the {id} shard, best-effort: a failure
+	// leaves a site the quota scan does not count (a transient under-count the
+	// reconciler heals), never a failed deploy, so the already-durable site
+	// returns success.
 	if err := r.confirmSiteInsert(identity, slug, dedupedSize, s.ExpiresAt); err != nil {
 		r.repoLog().Printf("shale: site index maintenance for %s: %v (index lag; reconciler will heal)", s.Slug, err)
 	}
@@ -230,18 +207,11 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(ctx context.Context, s domain.Site,
 }
 
 // ReplaceSiteWithQuotaCheck re-deploys an owned site in place, charging the
-// replace DELTA rather than the full new size:
-//
-//  1. an up-front Get to size the delta and gate ownership + existence,
-//  2. a quota check charging that delta. When the old row is LIVE the scan's
-//     `used` already counts its oldBody, so a same-size re-deploy nets zero and
-//     a smaller one frees the difference. When the old row is EXPIRED-unswept it
-//     is not in `used`, so oldBody credits as 0 and the full new size is
-//     charged: reviving an expired site is a fresh write.
-//  3. the authoritative swap on {slug}, re-reading sites/<slug> in the CAS
-//     read-set and re-keying the expiry index,
-//  4. a best-effort refresh of the enumeration entry's cached size + expiry,
-//     which the reconciler heals if lost.
+// replace DELTA rather than the full new size. When the old row is LIVE the
+// scan's `used` already counts its bytes, so a same-size re-deploy nets zero
+// and a smaller one frees the difference. When the old row is EXPIRED-unswept
+// it is not in `used`, so it credits as 0 and the full new size is charged:
+// reviving an expired site is a fresh write.
 //
 // A missing row and a foreign-owned row both collapse to ErrNotFound, so
 // existence and ownership never leak. The gate is enforced twice: up front, and
@@ -257,13 +227,11 @@ func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site
 	slug := s.Slug.String()
 	newBody := int64(dedupedSize)
 
-	// The redeploy's staged file refs (if any) ride this call's context,
-	// isolated from any concurrent same-slug write. Read once and pass down.
+	// The redeploy's staged file refs ride this call's context, isolated from
+	// any concurrent same-slug write.
 	binds := pendingBindsFromContext(ctx)
 
-	// Up-front ownership + existence gate. Sizes the delta (oldBody) and
-	// rejects a missing/foreign row before the swap. A missing row and a
-	// foreign-owned row both collapse to ErrNotFound.
+	// Up-front ownership + existence gate, also sizing the delta.
 	var existing siteRow
 	if err := r.getJSON(shaleKeySite(s.Slug), &existing); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -274,23 +242,16 @@ func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site
 	if existing.Identity != identity {
 		return ErrNotFound
 	}
-	// Credit the old bytes back ONLY if the old row is still LIVE: the
-	// scan-based `used` filters expires_at > now, so an expired-but-unswept old
-	// row is NOT in it. Crediting an expired old row would double-subtract and
-	// admit an over-cap replace - reviving an expired site must charge the full
-	// new size (docs/SPEC.md "Reviving an expired-but-unswept record charges its
-	// FULL post-revival size"). Mirrors the sqlite + slatedb ReplaceWithQuotaCheck.
+	// Credit the old bytes back ONLY if the old row is still LIVE: `used` filters
+	// expires_at > now, so an expired-but-unswept old row is not in it.
+	// Crediting one would double-subtract and admit an over-cap replace
+	// (docs/SPEC.md "Reviving an expired-but-unswept record charges its FULL
+	// post-revival size").
 	oldBody := int64(existing.DedupedSize)
 	if domain.IsExpired(existing.ExpiresAt, now) {
 		oldBody = 0
 	}
 
-	// Quota CHECK (scan-based) before the swap, charging the DELTA. When the old
-	// row is live the scan's `used` already counts its oldBody, so the post-swap
-	// owner total is used - oldBody + newBody = used + (newBody-oldBody): a
-	// same-size re-deploy nets zero, a smaller one frees the difference, a larger
-	// one is rejected when it would breach the cap. When the old row is expired
-	// (oldBody credited as 0) the replace charges the full new size.
 	if userCap > 0 {
 		used, err := r.combinedActiveBytes(identity, now)
 		if err != nil {
@@ -301,16 +262,13 @@ func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site
 		}
 	}
 
-	// Authoritative {slug}-shard swap.
 	if err := r.replaceSiteAuthoritative(s, dedupedSize, binds); err != nil {
 		return err
 	}
 
-	// Refresh the enumeration-index entry on the {id} shard with the swapped
-	// row's cached size + reset expiry (the site scan SUMS these cached
-	// values, so the re-deploy's delta starts counting the moment the refresh
-	// lands). Best-effort + reconciler-healed: a lost refresh leaves a stale
-	// cached size until the next reprojection (bounded drift).
+	// Refresh the enumeration entry's cached size + reset expiry on the {id}
+	// shard, best-effort: a lost refresh leaves a stale cached size until the
+	// next reconciler reprojection (bounded drift).
 	if err := r.confirmSiteInsert(identity, slug, dedupedSize, s.ExpiresAt); err != nil {
 		r.repoLog().Printf("shale: site index refresh for %s: %v (index lag; reconciler will heal)", s.Slug, err)
 	}
@@ -318,26 +276,22 @@ func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site
 }
 
 // replaceSiteAuthoritative swaps the {slug}-shard authoritative rows in one
-// CAS: re-read sites/<slug> (ownership re-check INSIDE the read-set so a
-// racing delete/re-deploy conflicts), overwrite it with the new row, and
-// re-key the expiry index (delete the old (oldExpiresAt, slug) marker, write
-// the new one) so the sweep sees the restarted retention clock. A missing or
-// foreign-owned row inside the CAS collapses to ErrNotFound.
+// CAS: re-read sites/<slug> (the ownership re-check must be INSIDE the
+// read-set so a racing delete/re-deploy conflicts), overwrite it, and re-key
+// the expiry index so the sweep sees the restarted retention clock. A missing
+// or foreign-owned row inside the CAS collapses to ErrNotFound.
 func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int, refs []cluster.BlobRef) error {
 	row, err := shaleSiteRowFromDomain(s, dedupedSize)
 	if err != nil {
 		return err
 	}
 	siteKey := shaleKeySite(s.Slug)
-	// On the transactional shale-blob path the redeploy's staged files (passed
-	// in via refs, carried on the call's context by Commit) bind in this swap
-	// transaction, and EVERY blob the OLD row referenced is unbound in the same
-	// transaction. So a file carried across the redeploy is re-staged under a
-	// fresh blob id and bound, while its OLD blob (and every truly-dropped
-	// file's blob) is unbound; the bytes go unreferenced and SweepOrphans
-	// reclaims them. This re-uploads unchanged bytes (no within-record byte
-	// dedup in this phase) but never leaks. The new FileBlobs side-table is
-	// authoritative for the read path.
+	// On the transactional shale-blob path the redeploy's staged files bind in
+	// this swap transaction and EVERY blob the OLD row referenced is unbound in
+	// the same transaction, so a file carried across the redeploy is re-staged
+	// under a fresh blob id while its old blob goes unreferenced for
+	// SweepOrphans. This re-uploads unchanged bytes but never leaks. The new
+	// FileBlobs side-table is authoritative for the read path.
 	row.FileBlobs = fileBlobsFromRefs(refs)
 	swapBody := func(tx shaleKVTx, bindAll func() error, unbind func(blobID string) error) error {
 		var cur siteRow
@@ -350,18 +304,15 @@ func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int, ref
 		if cur.Identity != s.Identity.String() {
 			return ErrNotFound // re-deployed to a different owner; treat as gone
 		}
-		// created_at is the slug's birth time: STRUCTURALLY immutable across a
-		// re-deploy, matching the sqlite UPDATE which never touches the column.
-		// Pin it from the current row so a caller cannot move it via the new row
-		// (the service layer forwards existing.CreatedAt, but the storage
-		// contract must not trust the caller).
+		// created_at is the slug's birth time, immutable across a re-deploy. Pin
+		// it from the current row: the storage contract must not trust the
+		// caller's value.
 		row.CreatedAt = cur.CreatedAt
 		if err := shaleTxPutJSON(tx, siteKey, row); err != nil {
 			return err
 		}
-		// Re-key the expiry index off the CURRENT row's ExpiresAt (read in this
-		// CAS), so a concurrent re-deploy that changed it can't orphan a stale
-		// marker. Skip the delete when the timestamp is unchanged.
+		// Re-key off the CURRENT row's ExpiresAt (read in this CAS) so a
+		// concurrent re-deploy that changed it cannot orphan a stale marker.
 		if !cur.ExpiresAt.Equal(s.ExpiresAt) {
 			if err := tx.Delete(shaleKeyExpirySite(cur.ExpiresAt, s.Slug)); err != nil {
 				return err
@@ -370,11 +321,9 @@ func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int, ref
 		if err := tx.Put(shaleKeyExpirySite(s.ExpiresAt, s.Slug), markerValue); err != nil {
 			return err
 		}
-		// Unbind every blob the OLD row referenced (its FileBlobs side-table);
-		// the new manifest's files are freshly staged + bound below, so a file
-		// carried across re-deploys is re-staged under a new id and the old id is
-		// dropped. This frees the dropped files' bytes (and the unchanged files'
-		// old bytes); SweepOrphans reclaims them after the grace.
+		// Unbind every blob the OLD row referenced; the new manifest's files are
+		// freshly staged + bound below. SweepOrphans reclaims the freed bytes
+		// after the grace.
 		for _, oldBlobID := range cur.FileBlobs {
 			if err := unbind(oldBlobID); err != nil {
 				return err
@@ -411,7 +360,6 @@ func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int, ref
 // A single {slug}-shard CAS writing slug_owner/<slug> IFF the slug is free in
 // BOTH directions (no pastes/, no sites/) and not already pre-claimed. All three
 // reads join the read-set, so concurrent claims serialize and one loses.
-//
 // Returns ErrSlugTaken on any collision; the caller re-mints and re-claims.
 //
 // slug_owner/<slug> is the same key a paste insert writes. The site
@@ -420,18 +368,17 @@ func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int, ref
 //
 // A crash after claiming but before committing leaves a marker with no site row:
 // a harmless leak with no dedicated sweep, because a later paste minting that
-// slug overwrites the marker unconditionally. Until then the only effect is one
-// slug staying un-pre-claimable for a future site deploy, in a 32^8 space.
+// slug overwrites the marker unconditionally. Until then one slug in a 32^8
+// space stays un-pre-claimable.
 //
-// owner and now are accepted for symmetry with the seam; the claim charges no
-// quota, being a stake rather than a byte reservation.
+// owner and now are accepted for symmetry with the seam; a claim is a stake,
+// not a byte reservation, so it charges no quota.
 func (r *ShaleRepo) PreClaimSiteSlug(_ context.Context, slug domain.Slug, owner string, _ time.Time) error {
 	pasteKey := shaleKeyPaste(slug)
 	siteKey := shaleKeySite(slug)
 	ownerKey := shaleKeySlugOwner(slug)
 	return r.cluster.Transact(siteKey, func(tx backend.Transaction) error {
-		// Free in both directions? A present paste OR site row means the slug is
-		// taken. Each Get joins the CAS read-set so a racing insert conflicts.
+		// Each Get joins the CAS read-set so a racing insert conflicts.
 		if _, err := tx.Get(pasteKey); err == nil {
 			return ErrSlugTaken
 		} else if !errors.Is(err, backend.ErrNotFound) {
@@ -442,9 +389,8 @@ func (r *ShaleRepo) PreClaimSiteSlug(_ context.Context, slug domain.Slug, owner 
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return fmt.Errorf("preclaim site check: %w", err)
 		}
-		// Already pre-claimed by another in-flight deploy? slug_owner present
-		// means a paste owns it OR a concurrent site deploy claimed it first;
-		// either way the slug is taken.
+		// slug_owner present means a paste owns the slug OR a concurrent site
+		// deploy claimed it first; either way it is taken.
 		if _, err := tx.Get(ownerKey); err == nil {
 			return ErrSlugTaken
 		} else if !errors.Is(err, backend.ErrNotFound) {
@@ -454,28 +400,25 @@ func (r *ShaleRepo) PreClaimSiteSlug(_ context.Context, slug domain.Slug, owner 
 	})
 }
 
-// insertSiteAuthoritative writes the {slug}-shard authoritative rows in one
-// CAS: the sites/<slug> JSON row + the expiry_sites index. The slug-collision
-// check is BOTH directions (sites/<slug> AND pastes/<slug>), and both reads
-// participate in the CAS read-set so a racing insert of the same slug (as a
-// site OR a paste) conflicts.
+// insertSiteAuthoritative writes sites/<slug> + the expiry_sites index in one
+// {slug}-shard CAS. The slug-collision check is BOTH directions (sites/ AND
+// pastes/), and both reads participate in the read-set so a racing insert of
+// the same slug conflicts.
 func (r *ShaleRepo) insertSiteAuthoritative(s domain.Site, dedupedSize int, refs []cluster.BlobRef) error {
 	row, err := shaleSiteRowFromDomain(s, dedupedSize)
 	if err != nil {
 		return err
 	}
 	siteKey := shaleKeySite(s.Slug)
-	// On the transactional shale-blob path the deploy's staged files (passed in
-	// via refs, carried on the call's context by ShaleBlobUnit.Commit) are ALL
+	// On the transactional shale-blob path the deploy's staged files are ALL
 	// bound in this one {slug} transaction with the manifest - no reservation
-	// needed (the files are reader-invisible until the bind co-commits with the
-	// manifest row). The sha -> blob-id side-table lands on the row so the read
-	// path resolves a manifest sha to the blob id GetBlob needs.
+	// needed, since the files are reader-invisible until the bind co-commits
+	// with the manifest row. The sha -> blob-id side-table lands on the row so
+	// the read path resolves a manifest sha to the blob id GetBlob needs.
 	row.FileBlobs = fileBlobsFromRefs(refs)
 	return translateCrossShard(r.runAuthoritative(siteKey, refs, func(tx shaleKVTx, bind func() error) error {
-		// Collision check, both directions. A found site OR paste is
-		// ErrSlugTaken; the ExpectAbsent read-checks make a concurrent insert
-		// of the same slug conflict.
+		// A found site OR paste is ErrSlugTaken; the ExpectAbsent read-checks
+		// make a concurrent insert of the same slug conflict.
 		if _, err := tx.Get(siteKey); err == nil {
 			return ErrSlugTaken
 		} else if !errors.Is(err, backend.ErrNotFound) {
@@ -497,15 +440,11 @@ func (r *ShaleRepo) insertSiteAuthoritative(s domain.Site, dedupedSize int, refs
 	}))
 }
 
-// translateCrossShard maps shale's client-side cross-shard guard sentinel
-// (backend.ErrCrossShard - fired inside the tx buffer at the offending op,
-// before any commit, when a buffered key routes to a different shard than
-// the pinned one) into the domain vocabulary the deploy service checks
-// (domain.ErrCrossShardDeploy). This is the DDD boundary translation:
-// the service layer stays backend-agnostic - it never imports a shale
-// package - and matches the domain sentinel instead. Both sentinels stay
-// in the wrap chain (%w twice) so errors.Is holds for either and the
-// operator log keeps the full original text. Any other error passes
+// translateCrossShard maps shale's cross-shard guard sentinel
+// (backend.ErrCrossShard) into the domain vocabulary the deploy service checks
+// (domain.ErrCrossShardDeploy), so the service layer never imports a shale
+// package. Both sentinels stay in the wrap chain (%w twice) so errors.Is holds
+// for either and the log keeps the original text. Any other error passes
 // through untouched.
 func translateCrossShard(err error) error {
 	if err != nil && errors.Is(err, backend.ErrCrossShard) {
@@ -514,13 +453,11 @@ func translateCrossShard(err error) error {
 	return err
 }
 
-// confirmSiteInsert writes the value-bearing identity_sites/<id>/<slug>
-// enumeration entry on the {id} shard, one CAS: the cached (deduped size,
-// expires_at) the site quota scan sums. Called by BOTH insert and replace,
-// so the write also refreshes an in-place re-deploy's cached values
-// (idempotent overwrite). Best-effort + reconciler-healed: a lost write
-// leaves a missing (or stale) index entry the reconciler rebuilds, never a
-// failed deploy.
+// confirmSiteInsert writes the value-bearing identity_sites/<id>/<slug> entry
+// on the {id} shard in one CAS. Called by BOTH insert and replace (idempotent
+// overwrite), so it also refreshes an in-place re-deploy's cached values.
+// Best-effort: a lost write leaves a missing or stale entry the reconciler
+// rebuilds, never a failed deploy.
 func (r *ShaleRepo) confirmSiteInsert(identity, slug string, dedupedSize int, expiresAt time.Time) error {
 	indexKey := shaleKeyIdentitySite(identity, slug)
 	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
@@ -531,9 +468,8 @@ func (r *ShaleRepo) confirmSiteInsert(identity, slug string, dedupedSize int, ex
 	})
 }
 
-// GetSite returns the site for slug, or ErrNotFound. Like the sqlite + slate
-// site Get it returns expired-but-unswept rows too (the HTTP layer 404s
-// them, the sweep deletes them).
+// GetSite returns the site for slug, or ErrNotFound. Expired-but-unswept rows
+// are returned too (the HTTP layer 404s them, the sweep deletes them).
 func (r *ShaleRepo) GetSite(slug domain.Slug) (domain.Site, error) {
 	var row siteRow
 	if err := r.getJSON(shaleKeySite(slug), &row); err != nil {
@@ -543,12 +479,10 @@ func (r *ShaleRepo) GetSite(slug domain.Slug) (domain.Site, error) {
 }
 
 // ListSitesByOwner enumerates the owner's identity_sites/<id>/ index on the
-// {id} shard and re-reads each authoritative sites/<slug> row (mirroring the
-// paste ListByOwner). A stale index entry whose authoritative row is gone is
-// skipped and best-effort deleted (repair-on-read). Read-time expiry
-// filtering (expires_at > now) drops expired-unswept sites so the list
-// matches what the owner can still serve. The caller (verbList) merges the
-// result with ListByOwner and sorts the union by expiry.
+// {id} shard and re-reads each authoritative sites/<slug> row. A stale index
+// entry whose row is gone is skipped and best-effort deleted
+// (repair-on-read). Expired-unswept sites are filtered out so the list matches
+// what the owner can still serve.
 func (r *ShaleRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error) {
 	if owner == "" {
 		return nil, nil
@@ -584,17 +518,14 @@ func (r *ShaleRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site
 	return out, nil
 }
 
-// SumActiveSiteBytesByOwner derives the identity's active SITE bytes from
-// ONE prefix scan of the per-identity enumeration index
-// (identity_sites/<id>/), summing the cached (deduped size, expires_at) each
-// value-bearing entry carries - zero per-entry row reads, the site mirror of
-// the paste quota scan. There is no stored site counter: the deploy/replace
-// paths maintain the cached values and the reconciler's reprojection rebuilds
-// them from the authoritative sites/<slug> rows, so drift is bounded by a
-// reconcile cycle. The service layer adds the paste-side sum where it needs
-// the combined figure. now IS used: an expired-but-unswept site self-excludes
-// at read time via its cached expiry (ExpiryFreesQuotaAtReadTime = true),
-// matching sqlite + slatedb.
+// SumActiveSiteBytesByOwner derives the identity's active SITE bytes from ONE
+// prefix scan of identity_sites/<id>/, summing each value-bearing entry's
+// cached (deduped size, expires_at) with zero per-entry row reads. There is no
+// stored site counter: the reconciler rebuilds the cached values from the
+// authoritative rows, so drift is bounded by a reconcile cycle. The service
+// layer adds the paste-side sum where it needs the combined figure. An
+// expired-but-unswept site self-excludes at read time via its cached expiry
+// (ExpiryFreesQuotaAtReadTime = true).
 func (r *ShaleRepo) SumActiveSiteBytesByOwner(owner string, now time.Time) (int64, error) {
 	if owner == "" {
 		return 0, nil
@@ -603,14 +534,11 @@ func (r *ShaleRepo) SumActiveSiteBytesByOwner(owner string, now time.Time) (int6
 }
 
 // sumActiveSiteBytesForOwner scans identity_sites/<owner>/ once and sums the
-// cached size of every live entry (cached expires_at > now). Fail-closed
-// (Policy 3, this is a synchronous write-path read): an entry that does not
-// decode, or that carries the reconciler's fail-closed Placeholder marker,
-// HARD-FAILS the scan. The one deliberate exception is the upgrade path: a
-// LEGACY entry recognized by shape (the pre-value-bearing one-byte marker,
-// or an empty value migrated from a slatedb layout) is read through its
-// authoritative sites/<slug> row until the reconciler's reprojection
-// overwrites it with the JSON projection.
+// cached size of every live entry. Fail-closed (Policy 3, a synchronous
+// write-path read): an entry that does not decode, or that carries the
+// reconciler's Placeholder marker, HARD-FAILS the scan. The one exception is a
+// LEGACY entry recognized by shape (a one-byte marker or an empty value), read
+// through its authoritative sites/<slug> row until the reconciler enriches it.
 func (r *ShaleRepo) sumActiveSiteBytesForOwner(owner string, now time.Time) (int64, error) {
 	idx, err := r.scanPrefix(shalePrefixIdentitySites(owner))
 	if err != nil {
@@ -642,11 +570,10 @@ func (r *ShaleRepo) sumActiveSiteBytesForOwner(owner string, now time.Time) (int
 }
 
 // legacySiteEntryBytes resolves a LEGACY (marker-valued) identity_sites entry
-// against its authoritative sites/<slug> row: the pre-value-bearing read
-// path, kept so a deployment upgrades without a flag day (the reconciler
-// enriches the entry on its next pass). A stale legacy entry (row gone) is
-// skipped; an undecodable row HARD-FAILS (Policy 3); a live row contributes
-// its DedupedSize under the same read-time expiry filter.
+// against its authoritative sites/<slug> row, so a deployment upgrades without
+// a flag day. A stale legacy entry (row gone) is skipped; an undecodable row
+// HARD-FAILS (Policy 3); a live row contributes its DedupedSize under the same
+// read-time expiry filter.
 func (r *ShaleRepo) legacySiteEntryBytes(indexKey []byte, now time.Time) (int64, error) {
 	slug := domain.Slug(extractSlug(indexKey))
 	var row siteRow
@@ -662,25 +589,21 @@ func (r *ShaleRepo) legacySiteEntryBytes(indexKey []byte, now time.Time) (int64,
 	return int64(row.DedupedSize), nil
 }
 
-// DeleteSite removes a site: the authoritative {slug} rows go away and the
-// {id} enumeration-index entry is dropped, so the owner's scan-derived quota
-// sum stops counting the site. There is no byte counter to decrement (the
-// freed bytes leave the owner's sum the instant the authoritative row + its
-// index entry vanish), so no release marker / crash-durable-decrement
-// protocol is needed.
+// DeleteSite removes a site: the authoritative {slug} rows and the {id}
+// enumeration-index entry. There is no byte counter to decrement (freed bytes
+// leave the owner's sum the instant the row and its index entry vanish), so no
+// release marker / crash-durable-decrement protocol is needed.
 //
-//  1. Read sites/<slug> -> owner + expiry + blobs. Absent -> no-op return
-//     (idempotent; the sweep re-calls this for already-gone slugs, matching
-//     the sqlite/slate DeleteSite + paste Delete).
+//  1. Read sites/<slug>. Absent -> no-op return (idempotent; the sweep
+//     re-calls this for already-gone slugs).
 //  2. Tombstone on the {slug} shard, one CAS: delete sites/<slug>, delete
 //     expiry_sites/<ts>/<slug>, and unbind the file blobs - atomic on the
 //     transactional shale-blob path so the bytes go unreferenced exactly when
 //     the manifest vanishes (SweepOrphans reclaims them after the grace).
-//  3. Drop the identity_sites/<id>/<slug> enumeration entry on the {id} shard
-//     (idempotent) so the site leaves the owner's scan + ListSitesByOwner.
+//  3. Drop identity_sites/<id>/<slug> on the {id} shard (idempotent).
 func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 	siteKey := shaleKeySite(slug)
-	// Step 1: read the authoritative row (owner for the index drop).
+	// The owner is needed for the step-3 index drop.
 	var row siteRow
 	if err := r.getJSON(siteKey, &row); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -690,10 +613,9 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 	}
 	identity := row.Identity
 
-	// Step 2: authoritative tombstone on the {slug} shard. Re-read the row IN
-	// the CAS so the expiry index and blob unbinds match the row this
-	// transaction actually removes (a same-size re-deploy could have moved
-	// ExpiresAt / FileBlobs between step 1 and here).
+	// Re-read the row IN the CAS so the expiry index and blob unbinds match the
+	// row this transaction actually removes: a re-deploy could have moved
+	// ExpiresAt / FileBlobs since the read above.
 	delSiteBody := func(tx shaleKVTx, unbind func(blobID string) error) error {
 		var cur siteRow
 		if err := shaleTxGetJSON(tx, siteKey, &cur); err != nil {
@@ -731,7 +653,6 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 		return delErr
 	}
 
-	// Step 3: drop the enumeration-index entry on the {id} shard. Idempotent.
 	indexKey := shaleKeyIdentitySite(identity, slug.String())
 	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
 		if _, err := tx.Get(indexKey); err == nil {
@@ -745,26 +666,21 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 
 // ExpiredSites fans out across all {slug} shards over expiry_sites/ and
 // returns one reference per entry whose timestamp is <= now (inclusive
-// boundary): the slug plus the entry's full key as the opaque IndexRef, so
-// DeleteExpiredSite can remove the EXACT entry the scan surfaced even when
-// the site record is already gone. The site expiry keys use the
-// fixed-width expirySiteTimeFormat, so the timestamp segment's byte order
-// is time order EXACTLY (correct even within a shared whole second),
-// unlike the variable-width time.RFC3339Nano the paste ExpiredPastes still
-// uses. The cutoff is formatted with the SAME layout so the compare stays
-// aligned. Matches the slate ExpiredSites.
+// boundary), carrying the entry's full key as the opaque IndexRef so
+// DeleteExpiredSite can remove the EXACT entry the scan surfaced even when the
+// site record is already gone. Site expiry keys use the fixed-width
+// expirySiteTimeFormat, so byte order is time order exactly, even within a
+// shared whole second; the cutoff is formatted with the SAME layout so the
+// compare stays aligned.
 func (r *ShaleRepo) ExpiredSites(now time.Time) ([]domain.ExpiredSite, error) {
 	return scanExpiredRefs(r.aggregateForBackground, prefixExpirySitesAll, now, expirySiteTimeFormat, parseExpiredSiteKey)
 }
 
-// DeleteExpiredSite processes one expired reference: the same full-cascade
-// delete as DeleteSite when the site record still exists, and then - in
-// every case - removal of the exact expiry-index entry the scan surfaced
-// (a single {slug}-shard CAS: the entry's shard key is its trailing slug).
-// The cascade removes the DERIVED key; this removes the OBSERVED one.
-// Idempotent: a missing record and a missing entry are both no-ops.
-// Returns whether a site record was actually deleted. Mirrors the paste
-// DeleteExpired; see docs/SPEC.md "Static-site storage" (sweep path).
+// DeleteExpiredSite processes one expired reference: the full-cascade delete
+// when the site record still exists, and in every case removal of the exact
+// expiry-index entry the scan surfaced. The cascade removes the DERIVED key;
+// this removes the OBSERVED one. Idempotent: a missing record and a missing
+// entry are both no-ops. Returns whether a site record was actually deleted.
 func (r *ShaleRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
 	var row siteRow
 	return deleteExpiredRef(ref, expirySiteIndexKey,
@@ -774,22 +690,16 @@ func (r *ShaleRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
 }
 
 // reconcileSiteIndexPass reprojects the identity_sites enumeration index from
-// the authoritative sites/ rows across all shards - the SITE parallel of the
-// paste reconciler's index reprojection, as a standalone step in Reconcile.
-// It scans sites/, groups each live site under its
-// owner with the cached quota values the entry carries (deduped size +
-// expiry), and reprojects (add missing entries, refresh cached values, drop
-// orphans) so a site's bytes are counted by the owner's quota scan even after
-// a crash between the authoritative write and the index write - and so sites
-// deployed before the index existed (or whose entry still holds the legacy
-// marker) appear enriched in the index. Cross-shard via aggregate; every
-// write is an idempotent single-{id}-shard CAS, safe under live traffic.
+// the authoritative sites/ rows across all shards: group each live site under
+// its owner with the cached quota values, then add missing entries, refresh
+// cached values, and drop orphans. That is what makes a site's bytes count
+// after a crash between the authoritative write and the index write, and what
+// enriches an entry still holding the legacy marker. Every write is an
+// idempotent single-{id}-shard CAS, safe under live traffic.
 func (r *ShaleRepo) reconcileSiteIndexPass() error {
-	// Snapshot the site enumeration index FIRST - strictly before the
-	// authoritative sites/ scan - as the guard baseline for the reprojection
-	// writes (the same ordering argument as the paste pass in Reconcile: a
-	// baseline that predates the authoritative scan makes "entry unchanged"
-	// prove the computed value is at least as fresh).
+	// Snapshot the index STRICTLY BEFORE the authoritative sites/ scan: a
+	// baseline that predates the scan is what makes "entry unchanged" prove the
+	// computed value is at least as fresh.
 	siteIdx, err := r.aggregateForBackground(prefixIdentitySitesAll)
 	if err != nil {
 		return fmt.Errorf("reconcile sites: scan identity_sites: %w", err)
@@ -798,9 +708,8 @@ func (r *ShaleRepo) reconcileSiteIndexPass() error {
 	if err != nil {
 		return fmt.Errorf("reconcile sites: scan sites: %w", err)
 	}
-	// sitesByOwner drives the identity_sites enumeration-index reprojection:
-	// every authoritative site reprojected into its owner's index with its
-	// cached quota values. Mirrors the paste reconciler's pastesByOwner.
+	// sitesByOwner drives the reprojection: every authoritative site under its
+	// owner's index with its cached quota values.
 	sitesByOwner := make(map[string]map[string]identitySiteRow)
 	// Tallied, not logged per record. See corrupt_tally.go.
 	var corrupt corruptTally
@@ -809,24 +718,20 @@ func (r *ShaleRepo) reconcileSiteIndexPass() error {
 		var row siteRow
 		if err := json.Unmarshal(item.Value, &row); err != nil {
 			// Idempotent reconcile: one poisoned site row must not stall the pass
-			// (Policy 1). But dropping it silently would leave a durable
-			// UNDER-count if its identity_sites entry was ALSO lost: the site
-			// quota scan sums the enumeration entries, so an un-indexed
-			// undecodable row is invisible to it. Derive the owner
-			// decode-independently from slug_owner/<slug> (written by the site
-			// deploy's pre-claim on the transactional shale-blob path) and
-			// project a fail-closed PLACEHOLDER entry, so the owner's next scan
-			// sees the marker and hard-fails (fail-closed reject, never a silent
-			// under-count). See docs/SPEC.md "Decode tolerance of the quota scan".
+			// (Policy 1). Dropping it silently would leave a durable UNDER-count
+			// if its identity_sites entry was ALSO lost, since the quota scan sums
+			// the enumeration entries and an un-indexed undecodable row is
+			// invisible to it. Derive the owner decode-independently from
+			// slug_owner/<slug> and project a fail-closed PLACEHOLDER, so the
+			// owner's next scan hard-fails instead of under-counting. See
+			// docs/SPEC.md "Decode tolerance of the quota scan".
 			owner := r.ownerOfSlug(domain.Slug(slug))
 			if owner == "" {
-				// No slug_owner, so the owner cannot be derived and no
-				// enumeration entry can be projected: the row stays
-				// un-enumerated until repaired. COUNTED, not logged per record -
-				// the note that used to sit here claiming this was reachable
-				// "only on the metadata-only test path" is FALSE, and per-record
-				// logging of a set that can never be repaired is an unbounded,
-				// permanent cost.
+				// No slug_owner: the owner cannot be derived and no enumeration
+				// entry can be projected, so the row stays un-enumerated until
+				// repaired. Counted rather than logged per record - the set is not
+				// self-repairing, so per-record logging is an unbounded permanent
+				// cost.
 				corrupt.noteUnrepairable(slug)
 				continue
 			}
@@ -853,13 +758,11 @@ func (r *ShaleRepo) reconcileSiteIndexPass() error {
 
 // reconcileSiteIndexes rebuilds the per-owner identity_sites index to match
 // the authoritative sites present, one {id}-shard CAS per entry (a
-// value-bearing overwrite - this is also what enriches a legacy marker entry
-// to the JSON projection). have is the pass's index snapshot, captured by
-// reconcileSiteIndexPass BEFORE the authoritative sites/ scan. The mechanics
-// - orphan prune, guarded reprojection, Policy 1 error handling - live in
-// reconcileEnumerationIndex (shared with the paste family); this wrapper
-// supplies the site family's prefix, key builder, and confirm-then-classify
-// prune step.
+// value-bearing overwrite, which is also what enriches a legacy marker entry
+// to the JSON projection). have is the pass's index snapshot, captured BEFORE
+// the authoritative sites/ scan. The mechanics (orphan prune, guarded
+// reprojection, Policy 1 error handling) live in reconcileEnumerationIndex;
+// this wrapper supplies the site family's prefix, key builder, and prune step.
 func (r *ShaleRepo) reconcileSiteIndexes(sitesByOwner map[string]map[string]identitySiteRow, have []scanItem) error {
 	return reconcileEnumerationIndex(r, sitesByOwner, have, prefixIdentitySitesAll,
 		shaleKeyIdentitySite, r.pruneOrphanSiteEntry, "reconcile sites", "identity_sites")
@@ -868,17 +771,15 @@ func (r *ShaleRepo) reconcileSiteIndexes(sitesByOwner map[string]map[string]iden
 // pruneOrphanSiteEntry classifies one identity_sites entry whose (owner,
 // slug) is missing from the reprojection set, confirming against the
 // authoritative row so a fresh deploy racing the pass snapshot is kept.
-// The site family has no failed-status case (a site is live or gone), so
-// only a confirmed-gone row prunes.
+// A site is live or gone, so only a confirmed-gone row prunes.
 func (r *ShaleRepo) pruneOrphanSiteEntry(slug string) bool {
 	var row siteRow
 	switch gerr := r.getJSON(shaleKeySite(domain.Slug(slug)), &row); {
 	case errors.Is(gerr, ErrNotFound):
-		// Orphan: the site is gone.
 		return true
 	case gerr != nil:
 		// Undecodable row: keep the entry; the fail-closed placeholder
-		// projection handles it (or already did via slug_owner).
+		// projection handles it.
 		return false
 	default:
 		// Live row that raced the snapshot: keep; the next pass reprojects it.
@@ -887,12 +788,11 @@ func (r *ShaleRepo) pruneOrphanSiteEntry(slug string) bool {
 }
 
 // ReferencedSiteBlobSHAs returns every distinct blob SHA referenced by any
-// live site's manifest, aggregated across all {slug} shards. The sweep
-// unions this with the paste-side referenced set, so a blob shared between a
-// site and a paste (or two sites) survives as long as ANY live record
-// references it. A site manifest references a blob unconditionally (no
-// per-file tombstone), so a live site with files always contributes a
-// non-empty set.
+// live site's manifest, aggregated across all {slug} shards. The sweep unions
+// this with the paste-side referenced set, so a blob shared between records
+// survives as long as ANY live record references it. A site manifest
+// references a blob unconditionally (no per-file tombstone), so a live site
+// with files always contributes a non-empty set.
 func (r *ShaleRepo) ReferencedSiteBlobSHAs() ([]string, error) {
 	sites, err := r.aggregateForBackground(prefixSites)
 	if err != nil {
@@ -902,13 +802,11 @@ func (r *ShaleRepo) ReferencedSiteBlobSHAs() ([]string, error) {
 	for _, item := range sites {
 		var row siteRow
 		if err := json.Unmarshal(item.Value, &row); err != nil {
-			// FAIL CLOSED, never skip. Site sibling of the paste ref-set scan:
-			// skipping an undecodable site row would under-count the blob
-			// keep-set, so a blob the site's manifest still references would
-			// look orphaned and be deleted (irreversible). Abort the pass with
-			// the error; the sweep treats any error here as "delete nothing
-			// this pass". See docs/SPEC.md "Decode tolerance is
-			// per-scan-semantics", Policy 2.
+			// FAIL CLOSED, never skip: skipping an undecodable site row would
+			// under-count the blob keep-set, so a blob the manifest still
+			// references would look orphaned and be deleted (irreversible). The
+			// sweep treats any error here as "delete nothing this pass". See
+			// docs/SPEC.md "Decode tolerance is per-scan-semantics", Policy 2.
 			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
 		}
 		man, err := decodeManifest(row.Manifest)

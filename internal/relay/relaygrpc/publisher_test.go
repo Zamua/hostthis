@@ -12,8 +12,8 @@ import (
 	"github.com/Zamua/hostthis/internal/relay"
 )
 
-// staticPeers is a fixed relay.Peers for tests; Set swaps the list to
-// drive membership churn.
+// staticPeers is a fixed relay.Peers whose Set swaps the list to drive
+// membership churn.
 type staticPeers struct {
 	mu    sync.Mutex
 	addrs []string
@@ -35,8 +35,7 @@ func testRoomKey() relay.RoomKey {
 	return relay.RoomKey{App: domain.Slug("appz2345"), ID: domain.NewRoomID()}
 }
 
-// startReceiver serves a Receiver on a loopback listener and returns its
-// address plus the receiver. Cleanup stops the server.
+// startReceiver serves a Receiver on a loopback listener; cleanup stops it.
 func startReceiver(t *testing.T, maxFrameBytes int64) (string, *Receiver) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -51,17 +50,16 @@ func startReceiver(t *testing.T, maxFrameBytes int64) (string, *Receiver) {
 	return lis.Addr().String(), recv
 }
 
-// TestPublisher_NeverBlocksOnUnreachablePeer pins the delivery contract's
-// core clause: Publish enqueues and returns - it never blocks and never
-// fails the caller, even when the peer is unreachable and the queue
-// overflows. Frames past the bounded queue are DROPPED (drop-newest),
-// counted, and the caller is never delayed: the whole burst must complete
-// in a bound far below a single dial timeout.
+// TestPublisher_NeverBlocksOnUnreachablePeer pins the delivery contract's core
+// clause: Publish never blocks and never fails the caller, even when the peer
+// is unreachable and the queue overflows. Frames past the bounded queue are
+// dropped and counted, and the whole burst completes far below a single dial
+// timeout.
 func TestPublisher_NeverBlocksOnUnreachablePeer(t *testing.T) {
 	peers := &staticPeers{}
-	// A TEST-NET address nothing answers on: every RPC hangs until its
-	// deadline, so the sender goroutine drains at most one frame per
-	// timeout while the caller keeps publishing.
+	// A TEST-NET address nothing answers on, so every RPC hangs until its
+	// deadline and the sender goroutine drains at most one frame per timeout
+	// while the caller keeps publishing.
 	peers.Set("192.0.2.1:9")
 	p := NewPublisher(peers, PublisherConfig{QueueDepth: 8, SendTimeout: 200 * time.Millisecond})
 	defer p.Close()
@@ -81,11 +79,10 @@ func TestPublisher_NeverBlocksOnUnreachablePeer(t *testing.T) {
 	}
 }
 
-// TestPublisher_DeliversOverRealGRPCAndFollowsMembership drives the full
-// adapter loop over the REAL client/server transport: frames published
-// reach the peer's Receiver (after Bind), a peer removed from the
-// membership stops receiving (its sender is pruned), and Close shuts down
-// cleanly.
+// TestPublisher_DeliversOverRealGRPCAndFollowsMembership drives the adapter
+// loop over the REAL client/server transport: published frames reach a bound
+// peer's Receiver, and a peer removed from the membership has its sender
+// pruned and stops receiving.
 func TestPublisher_DeliversOverRealGRPCAndFollowsMembership(t *testing.T) {
 	addr, recv := startReceiver(t, relay.DefaultMaxMessageBytes)
 
@@ -110,8 +107,6 @@ func TestPublisher_DeliversOverRealGRPCAndFollowsMembership(t *testing.T) {
 		return len(got) == 1 && got[0] == "first"
 	})
 
-	// Membership churn: the peer leaves; its sender is pruned and later
-	// frames do not arrive.
 	peers.Set()
 	p.Publish(key, relay.Frame{Data: []byte("after-leave")}) // triggers the reconcile
 	time.Sleep(100 * time.Millisecond)
@@ -123,10 +118,9 @@ func TestPublisher_DeliversOverRealGRPCAndFollowsMembership(t *testing.T) {
 	}
 }
 
-// TestReceiver_DropsBeforeBindAndEnforcesSizeCap pins the receive path's
-// two guards: a frame arriving before the delivery hook is bound (the
-// boot race) is dropped without error, and an over-cap frame is refused
-// (the defense-in-depth size re-check).
+// TestReceiver_DropsBeforeBindAndEnforcesSizeCap pins the receive path's two
+// guards: a frame arriving before the delivery hook is bound (the boot race)
+// is dropped without error, and an over-cap frame is refused.
 func TestReceiver_DropsBeforeBindAndEnforcesSizeCap(t *testing.T) {
 	addr, recv := startReceiver(t, 16)
 
@@ -137,8 +131,8 @@ func TestReceiver_DropsBeforeBindAndEnforcesSizeCap(t *testing.T) {
 
 	key := testRoomKey()
 
-	// Before Bind: delivery must be a silent drop (no panic, no error
-	// surfaced anywhere that could fail the origin).
+	// Before Bind: a silent drop, with no error surfaced anywhere that could
+	// fail the origin.
 	p.Publish(key, relay.Frame{Data: []byte("early")})
 	time.Sleep(100 * time.Millisecond)
 
@@ -152,7 +146,6 @@ func TestReceiver_DropsBeforeBindAndEnforcesSizeCap(t *testing.T) {
 
 	// Over the 16-byte cap: refused at the receiver, never delivered.
 	p.Publish(key, relay.Frame{Data: []byte("this frame is far past the sixteen byte cap")})
-	// Under the cap: delivered.
 	p.Publish(key, relay.Frame{Data: []byte("small")})
 
 	waitFor(t, 5*time.Second, "the under-cap frame to arrive", func() bool {
@@ -167,7 +160,7 @@ func TestReceiver_DropsBeforeBindAndEnforcesSizeCap(t *testing.T) {
 	}
 }
 
-// waitFor polls cond until true or fails after d.
+// waitFor polls cond until it is true, failing after d.
 func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(d)

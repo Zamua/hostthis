@@ -1,15 +1,13 @@
-// Package sitevalidation holds the byte-identical validation harness for
-// static-site hosting. It is a test-only package: it deploys real,
-// framework-built site fixtures through the SAME archive pipeline an ssh
-// tar upload hits (service.DeploySite over a real sqlite repo + compressed
-// blob store), then fetches every built file back over the real HTTP
-// serving surface and asserts the served bytes are BYTE-IDENTICAL to the
-// fixture on disk, with the content-type the extension implies.
+// Package sitevalidation is the test-only byte-identical validation harness for
+// static-site hosting. It deploys real framework-built site fixtures through the
+// SAME archive pipeline an ssh tar upload hits (service.DeploySite over a real
+// sqlite repo and compressed blob store), fetches every built file back over the
+// real HTTP serving surface, and asserts the served bytes are BYTE-IDENTICAL to
+// the fixture with the content type the extension implies.
 //
-// The fixtures live in testdata/sitefixtures/<demo>/dist and are committed
-// build outputs (see that dir's README). This harness never runs npm: it
-// byte-compares against the committed dist/, so `go test ./...` exercises
-// the full deploy + serve round-trip with no Node toolchain.
+// Fixtures are committed build outputs under testdata/sitefixtures/<demo>/dist
+// (see that dir's README). The harness never runs npm, so `go test ./...`
+// exercises the full deploy + serve round-trip with no Node toolchain.
 package sitevalidation
 
 import (
@@ -36,9 +34,9 @@ import (
 
 const apexDomain = "paste.test"
 
-// fixtureRoot resolves the absolute path to a fixture's dist/ directory.
-// Tests run with the package dir as CWD, so the fixtures are two levels
-// up under testdata/.
+// fixtureDist resolves the absolute path to a fixture's dist/ directory. Tests
+// run with the package dir as CWD, so fixtures are two levels up under
+// testdata/.
 func fixtureDist(t *testing.T, demo string) string {
 	t.Helper()
 	p, err := filepath.Abs(filepath.Join("..", "..", "testdata", "sitefixtures", demo, "dist"))
@@ -51,16 +49,16 @@ func fixtureDist(t *testing.T, demo string) string {
 	return p
 }
 
-// distFile is one file in a fixture's dist/ tree: the site-root-relative
-// slash-separated path (the manifest key, the URL path) and its raw bytes.
+// distFile is one file in a fixture's dist/ tree. relPath is both the manifest
+// key and the URL path.
 type distFile struct {
 	relPath string // e.g. "index.html", "assets/index-abc123.js"
 	body    []byte
 }
 
-// readDist walks dist/ and returns every regular file with its
-// site-root-relative, forward-slash path - exactly the paths the archive
-// pipeline will key the manifest on. Sorted for deterministic iteration.
+// readDist walks dist/ and returns every regular file under its
+// site-root-relative forward-slash path, the exact key the archive pipeline
+// puts in the manifest. Sorted for deterministic iteration.
 func readDist(t *testing.T, distDir string) []distFile {
 	t.Helper()
 	var files []distFile
@@ -95,10 +93,9 @@ func readDist(t *testing.T, distDir string) []distFile {
 	return files
 }
 
-// tarDist packs the dist files into a gzip-tar, exactly the shape a
-// `tar czf - dist/ | ssh hostthis.dev` upload streams in (regular files,
-// site-root-relative paths). This is the byte stream the deploy pipeline
-// consumes.
+// tarDist packs the dist files into the gzip-tar shape a
+// `tar czf - dist/ | ssh hostthis.dev` upload streams in: regular files at
+// site-root-relative paths.
 func tarDist(t *testing.T, files []distFile) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -134,9 +131,8 @@ type deployedSite struct {
 	httpSrv *httptest.Server
 }
 
-// baseURL returns the subdomain-mode base for the deployed slug. We point
-// every request's Host at "<slug>.paste.test" via a custom client so the
-// server's subdomain routing peels the slug exactly as in production.
+// get issues a request whose Host is "<slug>.paste.test", so the server's
+// subdomain routing peels the slug exactly as in production.
 func (d deployedSite) get(t *testing.T, urlPath string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest("GET", d.httpSrv.URL+urlPath, nil)
@@ -151,10 +147,9 @@ func (d deployedSite) get(t *testing.T, urlPath string) *http.Response {
 	return resp
 }
 
-// deployFixture stands up real sqlite + compressed-blob + site repos,
-// deploys the fixture's dist/ through the production DeploySite use case,
-// and fronts the same repos with the real HTTP handler. It returns the
-// fixture's dist files (for the byte-compare) and the live site.
+// deployFixture stands up real sqlite, compressed-blob and site repos, deploys
+// the fixture's dist/ through the production DeploySite use case, and fronts
+// those same repos with the real HTTP handler.
 func deployFixture(t *testing.T, demo string) ([]distFile, deployedSite) {
 	t.Helper()
 	dir := t.TempDir()
@@ -194,7 +189,6 @@ func deployFixture(t *testing.T, demo string) ([]distFile, deployedSite) {
 	return files, deployedSite{slug: res.Site.Slug, httpSrv: httpSrv}
 }
 
-// readBody drains and closes a response body.
 func readBody(t *testing.T, resp *http.Response) []byte {
 	t.Helper()
 	b, err := io.ReadAll(resp.Body)
@@ -205,7 +199,6 @@ func readBody(t *testing.T, resp *http.Response) []byte {
 	return b
 }
 
-// indexBytes returns the root index.html bytes from the fixture file set.
 func indexBytes(t *testing.T, files []distFile) []byte {
 	t.Helper()
 	for _, f := range files {
@@ -217,16 +210,14 @@ func indexBytes(t *testing.T, files []distFile) []byte {
 	return nil
 }
 
-// assertByteIdentical is the core of the harness: deploy a fixture, then
-// GET every built file and assert the served bytes equal the fixture file
-// EXACTLY and the content-type matches the extension. Then GET "/" and
-// assert it serves the root index.html, and GET a missing asset and assert
-// 404. The SPA-route assertion is layered on per-demo by the callers.
+// assertByteIdentical is the core of the harness: deploy a fixture, then assert
+// every built file round-trips byte-identically with the content type its
+// extension implies, "/" serves the root index.html, and a missing asset 404s.
+// Callers layer the SPA-route assertion on per demo.
 func assertByteIdentical(t *testing.T, demo string) ([]distFile, deployedSite) {
 	t.Helper()
 	files, site := deployFixture(t, demo)
 
-	// Every built file round-trips byte-identically with the right ctype.
 	for _, f := range files {
 		t.Run("file/"+f.relPath, func(t *testing.T) {
 			resp := site.get(t, "/"+f.relPath)
@@ -249,7 +240,6 @@ func assertByteIdentical(t *testing.T, demo string) ([]distFile, deployedSite) {
 		})
 	}
 
-	// "/" serves the root index.html, byte-identically.
 	t.Run("root", func(t *testing.T) {
 		resp := site.get(t, "/")
 		got := readBody(t, resp)
@@ -264,7 +254,8 @@ func assertByteIdentical(t *testing.T, demo string) ([]distFile, deployedSite) {
 		}
 	})
 
-	// A genuinely-missing static ASSET 404s (no silent index.html-as-JS).
+	// A genuinely missing asset 404s: the SPA fallback must not serve
+	// index.html under a .js URL.
 	t.Run("missing-asset-404", func(t *testing.T) {
 		resp := site.get(t, "/assets/nope.js")
 		_ = readBody(t, resp)
@@ -276,9 +267,8 @@ func assertByteIdentical(t *testing.T, demo string) ([]distFile, deployedSite) {
 	return files, site
 }
 
-// assertSPAFallback asserts a deep client-side route serves the ROOT
-// index.html via the SPA fallback (200, index bytes). Used by the three
-// framework demos, whose /about + /users/:id routes are not real files.
+// assertSPAFallback asserts a deep client-side route (not a real file) serves
+// the root index.html via the SPA fallback.
 func assertSPAFallback(t *testing.T, files []distFile, site deployedSite) {
 	t.Helper()
 	wantIndex := indexBytes(t, files)
@@ -314,19 +304,13 @@ func TestSvelteSPA_ByteIdentical(t *testing.T) {
 	assertSPAFallback(t, files, site)
 }
 
-// TestPlainStatic_ByteIdentical runs the same deploy + byte-identical
-// round-trip for a hand-written, no-framework multi-page site. It does NOT
-// rely on the SPA fallback for its second page: /about.html is a REAL file
-// in the manifest, so it must resolve directly (not via fallback) and
-// match its fixture bytes. The shared assertByteIdentical already proves
-// /about.html round-trips as a file; here we additionally pin that it is a
-// direct hit (its own bytes, not the index).
+// TestPlainStatic_ByteIdentical runs the round-trip for a hand-written
+// multi-page site and additionally pins that /about.html is a DIRECT manifest
+// hit, not the SPA fallback: both would be 200 + text/html, so only the body
+// distinguishes them.
 func TestPlainStatic_ByteIdentical(t *testing.T) {
 	files, site := assertByteIdentical(t, "plain-static")
 
-	// /about.html is a real file: it must serve its OWN bytes, not the
-	// root index. This distinguishes "served as a real file" from "served
-	// via the SPA fallback" (both would be 200 + text/html).
 	var aboutBody []byte
 	for _, f := range files {
 		if f.relPath == "about.html" {
@@ -349,16 +333,11 @@ func TestPlainStatic_ByteIdentical(t *testing.T) {
 	}
 }
 
-// TestFixtureSnapshot_Matches is the committed-known-good-snapshot check.
-// The round-trip tests read whatever dist/ is on disk and prove the
-// PIPELINE preserves those bytes; this test independently proves the
-// COMMITTED bytes are the intended ones, by hashing every fixture file and
-// comparing against testdata/sitefixtures/SHA256SUMS. That manifest is
-// regenerated by `make rebuild-site-fixtures`, so an accidental dist/
-// corruption (a botched merge, a stray editor save) shows up here even
-// though it would slip past the round-trip alone. It also fails if a
-// fixture file is added or removed without updating the manifest, so the
-// snapshot can never silently drift out of the committed contract.
+// TestFixtureSnapshot_Matches hashes every fixture file against
+// testdata/sitefixtures/SHA256SUMS. The round-trip tests only prove the pipeline
+// preserves whatever dist/ is on disk; this proves those committed bytes are the
+// intended ones, and fails if a fixture file is added or removed without
+// regenerating the manifest (`make rebuild-site-fixtures`).
 func TestFixtureSnapshot_Matches(t *testing.T) {
 	sumsPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "sitefixtures", "SHA256SUMS"))
 	if err != nil {
@@ -370,7 +349,7 @@ func TestFixtureSnapshot_Matches(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 
-	// Parse the manifest: "<hex-sha>  <demo>/<rel-path>" per line.
+	// Manifest lines are "<hex-sha>  <demo>/<rel-path>".
 	want := make(map[string]string) // "<demo>/<rel>" -> sha
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -391,8 +370,6 @@ func TestFixtureSnapshot_Matches(t *testing.T) {
 		t.Fatalf("SHA256SUMS is empty")
 	}
 
-	// Every committed file under each fixture dist/ must be in the manifest
-	// with a matching hash, and every manifest entry must exist on disk.
 	have := make(map[string]string)
 	for _, demo := range []string{"react", "vue", "svelte", "plain-static"} {
 		distDir := fixtureDist(t, demo)
@@ -420,11 +397,9 @@ func TestFixtureSnapshot_Matches(t *testing.T) {
 	}
 }
 
-// TestFixtureManifest_ExpectedFiles pins the basic shape of each committed
-// fixture so an accidental fixture corruption (a missing index.html, a
-// stray file) is caught loudly, independent of the round-trip. Every
-// framework demo must ship exactly an index.html plus a hashed JS asset
-// under assets/; the plain-static demo ships its hand-written file set.
+// TestFixtureManifest_ExpectedFiles pins the shape of each committed fixture, so
+// a corruption such as a missing index.html is caught independently of the
+// round-trip.
 func TestFixtureManifest_ExpectedFiles(t *testing.T) {
 	cases := map[string][]string{
 		"react":  {"index.html"},
@@ -446,8 +421,8 @@ func TestFixtureManifest_ExpectedFiles(t *testing.T) {
 					t.Fatalf("fixture %s missing expected file %q", demo, want)
 				}
 			}
-			// Framework demos must carry at least one hashed JS bundle under
-			// assets/ - the proof these are real builds, not hand-faked HTML.
+			// A hashed JS bundle under assets/ is the proof a framework demo
+			// is a real build, not hand-faked HTML.
 			if demo != "plain-static" {
 				var hasAssetJS bool
 				for _, f := range files {

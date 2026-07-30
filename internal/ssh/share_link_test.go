@@ -6,13 +6,13 @@ import (
 	"testing"
 )
 
-// qrGlyphs are the half-block runes qrterminal emits in HalfBlocks mode
-// (BLACK/WHITE combinations). At least one must appear for a rendered QR
-// to be present; none may appear on stdout (the URL must stay clean).
+// qrGlyphs are the half-block runes qrterminal emits in HalfBlocks mode. At
+// least one marks a rendered QR; none may appear on stdout, which must stay a
+// clean URL.
 const qrGlyphs = "█▀▄"
 
-// slugFromURL pulls the trailing slug off a path-mode URL
-// (httpURL + "/p/<slug>"). The e2e stack builds URLs that way.
+// slugFromURL pulls the trailing slug off a path-mode URL (httpURL+"/p/<slug>"),
+// the shape the e2e stack builds.
 func slugFromURL(t *testing.T, url string) string {
 	t.Helper()
 	s := path.Base(strings.TrimSpace(url))
@@ -22,17 +22,16 @@ func slugFromURL(t *testing.T, url string) string {
 	return s
 }
 
-// TestCreate_QROnStderr_URLOnStdout pins the create contract: the URL is
-// the ONLY thing on stdout (no QR glyphs leak there, preserving the
-// `slug=$(... | ssh -T host)` capture), while the QR renders on stderr
-// alongside the expiry narration.
+// TestCreate_QROnStderr_URLOnStdout pins the create contract: the URL is the
+// ONLY thing on stdout, so a `slug=$(... | ssh -T host)` capture stays clean,
+// while the QR renders on stderr alongside the expiry narration.
 func TestCreate_QROnStderr_URLOnStdout(t *testing.T) {
 	s := startStack(t)
 	stdout, stderr, exit := s.run("", []byte("<!doctype html><h1>qr</h1>"))
 	if exit != 0 {
 		t.Fatalf("exit: %d (stderr: %q)", exit, stderr)
 	}
-	// stdout is exactly the URL line - one line, no QR characters.
+	// stdout is exactly the URL line: one line, no QR characters.
 	url := strings.TrimSpace(stdout)
 	if !strings.Contains(url, "/p/") {
 		t.Fatalf("stdout should be a paste URL, got %q", stdout)
@@ -52,8 +51,8 @@ func TestCreate_QROnStderr_URLOnStdout(t *testing.T) {
 	}
 }
 
-// TestVerbURL_Existing: `url <slug>` prints just the URL on stdout, no
-// QR, exit 0. The URL must match what create returned (same builder).
+// TestVerbURL_Existing pins `url <slug>`: the URL on stdout, no QR, exit 0, and
+// byte-identical to what create returned.
 func TestVerbURL_Existing(t *testing.T) {
 	s := startStack(t)
 	createOut, _, _ := s.run("", []byte("<!doctype html><h1>u</h1>"))
@@ -72,7 +71,7 @@ func TestVerbURL_Existing(t *testing.T) {
 	}
 }
 
-// TestVerbQR_Existing: `qr <slug>` mirrors create - URL on stdout, QR on
+// TestVerbQR_Existing pins `qr <slug>` mirroring create: URL on stdout, QR on
 // stderr.
 func TestVerbQR_Existing(t *testing.T) {
 	s := startStack(t)
@@ -95,9 +94,9 @@ func TestVerbQR_Existing(t *testing.T) {
 	}
 }
 
-// TestVerbURLQR_Missing: a well-formed but nonexistent slug returns the
-// standard not-found (exit 4) for both verbs - same shape as every other
-// missing-slug path, so existence isn't probeable.
+// TestVerbURLQR_Missing pins that a well-formed but nonexistent slug returns
+// the standard not-found (exit 4) for both verbs, the same shape as every other
+// missing-slug path, so existence is not probeable.
 func TestVerbURLQR_Missing(t *testing.T) {
 	s := startStack(t)
 	const ghost = "abcdefgh" // valid slug shape, never uploaded
@@ -115,8 +114,8 @@ func TestVerbURLQR_Missing(t *testing.T) {
 	}
 }
 
-// TestVerbURL_BadSlug: a malformed slug is a usage error (exit 2), not a
-// not-found - it never reaches the existence lookup.
+// TestVerbURL_BadSlug pins a malformed slug as a usage error (exit 2), not a
+// not-found: it never reaches the existence lookup.
 func TestVerbURL_BadSlug(t *testing.T) {
 	s := startStack(t)
 	_, stderr, exit := s.run("url not-a-valid-slug", nil)

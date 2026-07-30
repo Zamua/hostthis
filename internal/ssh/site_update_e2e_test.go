@@ -19,19 +19,16 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// updateStack is a full real stack (sqlite + blob store + http surface +
-// ssh server) with BOTH the paste-manage path and the site-deploy path
-// wired, PLUS persistent keyed clients so two sessions from the same
-// fixedClient share one owner (the fingerprint of one key). This is what
-// the in-place site-update e2e needs: re-deploying to the same slug must
-// come from the SAME identity, which the per-call fresh-key helper in
-// site_regression_test.go cannot express.
+// updateStack is a full real stack (sqlite + blob store + http + ssh) with both
+// the paste-manage and site-deploy paths wired, plus PERSISTENT keyed clients:
+// re-deploying to the same slug must come from the same identity, which a
+// per-call fresh-key helper cannot express.
 type updateStack struct {
 	t       *testing.T
 	httpURL string
 	sshAddr string
 	owner   *xssh.Client // identity A
-	other   *xssh.Client // identity B (a different key -> different owner)
+	other   *xssh.Client // identity B: a different key, a different owner
 }
 
 func newUpdateStack(t *testing.T) *updateStack {
@@ -80,9 +77,8 @@ func newUpdateStack(t *testing.T) *updateStack {
 	return &updateStack{t: t, httpURL: httpSrv.URL, sshAddr: addr, owner: owner, other: other}
 }
 
-// run drives one ssh command over the given persistent client and returns
-// (stdout, stderr, exit). A persistent client keeps the same owner across
-// sessions, which is the whole point of the in-place-update tests.
+// run drives one ssh command over the given persistent client, which keeps the
+// same owner across sessions.
 func (s *updateStack) run(cli *xssh.Client, cmd string, body []byte) (string, string, int) {
 	s.t.Helper()
 	sess, err := cli.NewSession()
@@ -119,12 +115,9 @@ func getBody(t *testing.T, url string) (int, string) {
 	return resp.StatusCode, string(got)
 }
 
-// TestSiteUpdateInPlace_SameSlugNewContent is the headline regression for
-// the confirmed bug: piping a gzip-tar to UPDATE an existing SITE slug
-// returned "service: not found" (exit 4) because the update path
-// unconditionally called the PASTE-update service. This pins the spec'd
-// behavior: a re-deploy to an OWNED site slug succeeds (exit 0), keeps the
-// SAME slug/URL, and serves the NEW content byte-for-byte.
+// TestSiteUpdateInPlace_SameSlugNewContent pins in-place site re-deploy:
+// piping a gzip-tar to an OWNED site slug succeeds (exit 0), keeps the SAME
+// slug/URL, and serves the NEW content byte-for-byte.
 func TestSiteUpdateInPlace_SameSlugNewContent(t *testing.T) {
 	st := newUpdateStack(t)
 
@@ -158,7 +151,6 @@ func TestSiteUpdateInPlace_SameSlugNewContent(t *testing.T) {
 	})
 	out2, err2, exit2 := st.run(st.owner, slug, v2)
 
-	// The bug: this used to fail with "service: not found" and exit 4.
 	if exit2 != 0 {
 		t.Fatalf("in-place site update should succeed, got exit %d stderr %q", exit2, err2)
 	}
@@ -194,7 +186,6 @@ func TestSiteUpdateInPlace_SameSlugNewContent(t *testing.T) {
 func TestSiteUpdateInPlace_ForeignOwnerNotFound(t *testing.T) {
 	st := newUpdateStack(t)
 
-	// owner deploys a site.
 	v1 := makeSiteArchive(t, map[string]string{"index.html": "<!doctype html><h1>mine</h1>"})
 	out1, _, exit1 := st.run(st.owner, "", v1)
 	if exit1 != 0 {
@@ -211,16 +202,14 @@ func TestSiteUpdateInPlace_ForeignOwnerNotFound(t *testing.T) {
 			hostssh.ExitNotFound, exit2, errOut)
 	}
 
-	// The site is unchanged: still serving owner's original content.
 	if code, body := getBody(t, base); code != 200 || body != "<!doctype html><h1>mine</h1>" {
 		t.Fatalf("site after rejected foreign re-deploy: code %d body %q, want unchanged", code, body)
 	}
 }
 
-// TestPasteUpdateSurvivesGzipPeek is the no-regression guard for the fix:
-// the gzip-magic peek added to the UPDATE path must not break a normal
-// HTML paste update. A plain-HTML re-upload to a PASTE slug still bumps
-// the paste version and serves the new body.
+// TestPasteUpdateSurvivesGzipPeek pins that the update path's gzip-magic peek
+// leaves a plain-HTML paste update alone: the version still bumps and the new
+// body is served.
 func TestPasteUpdateSurvivesGzipPeek(t *testing.T) {
 	st := newUpdateStack(t)
 
@@ -235,8 +224,8 @@ func TestPasteUpdateSurvivesGzipPeek(t *testing.T) {
 	base := strings.TrimSpace(out1)
 	slug := extractSlug(out1)
 
-	// Update the SAME paste slug with new HTML. The peek sees no gzip magic
-	// and must fall through to the paste-update path unchanged.
+	// The peek sees no gzip magic and must fall through to the paste-update
+	// path.
 	out2, err2, exit2 := st.run(st.owner, slug, []byte("<!doctype html><p>v2 paste UPDATED</p>"))
 	if exit2 != 0 {
 		t.Fatalf("paste update should succeed, got exit %d stderr %q", exit2, err2)
@@ -252,9 +241,8 @@ func TestPasteUpdateSurvivesGzipPeek(t *testing.T) {
 	}
 }
 
-// TestNewSiteUploadStillWorks is the second no-regression guard: uploading
-// a NEW site (no slug positional) still mints a fresh random slug via the
-// create path, unaffected by the new update-path routing.
+// TestNewSiteUploadStillWorks pins that a site upload with no slug positional
+// mints a fresh random slug via the create path.
 func TestNewSiteUploadStillWorks(t *testing.T) {
 	st := newUpdateStack(t)
 	arc := makeSiteArchive(t, map[string]string{

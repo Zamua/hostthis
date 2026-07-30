@@ -6,24 +6,20 @@ package http
 // Stands up N in-process pods (independent Server + relay.Relay instances over
 // ONE shared storage backend, the production shape) bridged by an in-memory
 // PeerPublisher, and drives real WebSocket clients through each pod's real
-// upgrade, hub and snapshot paths. No network transport is needed for the
-// correctness core; the gRPC adapter sits behind the same port and is gated by
+// upgrade, hub and snapshot paths. The correctness core needs no network
+// transport; the gRPC adapter sits behind the same port and is gated by
 // multipod_grpc_seam_test.go.
 //
 // The three acceptance criteria pinned here:
 //
 //  1. Clients on DIFFERENT pods receive every put/delete mirror, whichever
 //     pod's HTTP surface handled the durable write.
-//  2. A late join during concurrent cross-pod writes has no gap and no dup:
-//     the snapshot's seq plus the client splice contract reconstructs exactly
-//     the durable state.
+//  2. A late join during concurrent cross-pod writes has no gap and no dup.
 //  3. A killed pod's clients reconnect to a surviving pod and resync via
 //     snapshot + splice, again with no gap and no dup.
 //
-// Plus a repro pin: with NO peer publisher wired, live mirrors are pod-local
-// and cross-pod subscribers observe silence, the (N-1)/N live update loss this
-// design exists to fix. The fan-out test is the one that goes red if the peer
-// wiring is dropped.
+// Plus a characterization: with NO peer publisher wired, live mirrors are
+// pod-local and cross-pod subscribers observe silence.
 
 import (
 	"context"
@@ -64,12 +60,12 @@ type multiPod struct {
 	alive []bool // bridge fan-out skips dead pods (a killed pod's transport is gone)
 }
 
-// memBridge is the in-memory PeerPublisher for ONE pod: Publish delivers
-// the frame synchronously to every OTHER live pod's DeliverFromPeer. It is
-// the test double for the gRPC transport - same port, no network. Delivery
-// is synchronous (strongest-ordering transport); the cross-pod races the
-// splice contract exists for still occur naturally, because two pods'
-// commit->publish sections interleave freely.
+// memBridge is the in-memory PeerPublisher for ONE pod: Publish delivers the
+// frame synchronously to every OTHER live pod's DeliverFromPeer. Test double
+// for the gRPC transport: same port, no network. Delivery is synchronous
+// (strongest-ordering transport), yet the cross-pod races the splice contract
+// exists for still occur, because two pods' commit->publish sections interleave
+// freely.
 type memBridge struct {
 	h    *multiPod
 	self int
@@ -86,11 +82,10 @@ func (b *memBridge) Publish(key relay.RoomKey, f relay.Frame) {
 	}
 }
 
-// buildMultiPod stands up n pods over one fresh sqlite store. bridged
-// selects the peer wiring: true wires the memBridge into every pod's
-// relay (the multi-pod deploy), false leaves every relay with a nil
-// publisher (the zero-peer relay - byte-for-byte the single-pod behavior,
-// which on a multi-pod deploy IS the repro'd bug).
+// buildMultiPod stands up n pods over one fresh sqlite store. bridged selects
+// the peer wiring: true wires the memBridge into every pod's relay (the
+// multi-pod deploy), false leaves every relay with a nil publisher (the
+// zero-peer relay, which on a multi-pod deploy is the bug).
 func buildMultiPod(t *testing.T, n int, bridged bool) *multiPod {
 	t.Helper()
 	dir := t.TempDir()
@@ -126,9 +121,8 @@ func buildMultiPod(t *testing.T, n int, bridged bool) *multiPod {
 	return h
 }
 
-// kill takes pod i down: its relay closes every live connection (the
-// sockets die with the pod), the bridge stops delivering to it, and its
-// HTTP surface stops. Idempotent.
+// kill takes pod i down: its relay closes every live connection, the bridge
+// stops delivering to it, and its HTTP surface stops. Idempotent.
 func (h *multiPod) kill(i int) {
 	h.mu.Lock()
 	dead := !h.alive[i]
@@ -142,8 +136,8 @@ func (h *multiPod) kill(i int) {
 	h.pods[i].ts.Close()
 }
 
-// put commits a durable PUT through pod i's real HTTP handler stack (the
-// "a PUT handled by a third pod" path). Fails the test on a non-204.
+// put commits a durable PUT through pod i's real HTTP handler stack. Fails the
+// test on a non-204.
 func (h *multiPod) put(i int, slug, id, key string, val []byte) {
 	h.t.Helper()
 	if w := reqFrom(h.t, h.pods[i].srv, nethttp.MethodPut, slug, "/api/rooms/"+id+"/"+key, "203.0.113.9:40000", val); w.Code != nethttp.StatusNoContent {
@@ -159,8 +153,8 @@ func (h *multiPod) del(i int, slug, id, key string) {
 	}
 }
 
-// scanTruth reads the durable ground truth (state + exact seq) directly
-// from the shared storage through the service layer.
+// scanTruth reads the durable ground truth (state + exact seq) from the shared
+// storage through the service layer.
 func (h *multiPod) scanTruth(slug, id string) domain.RoomKV {
 	h.t.Helper()
 	kv, err := h.pods[0].rooms.Scan(domain.Slug(slug), domain.RoomID(id))
@@ -183,12 +177,11 @@ func (h *multiPod) scanTruth(slug, id string) domain.RoomKV {
 //                                arrival is NORMAL: two pods' fan-outs race),
 //                                apply the run when the hole fills
 //   - a hole that never fills within the wait = a lost frame -> the test
-//     FAILS (production resyncs by reconnect; the harness's transport is
-//     lossless so a stall is a bug, not weather)
+//     FAILS (this transport is lossless, so a stall is a bug; production
+//     resyncs by reconnect)
 //
-// It records every applied seq (for exactly-once assertions) and every
-// discarded frame (dup deliveries are LEGAL on the wire; applying one is
-// not).
+// Records every applied seq (exactly-once assertions) and every discarded frame
+// (dup deliveries are LEGAL on the wire; applying one is not).
 
 type durableFrame struct {
 	Type  string                     `json:"type"`
@@ -211,10 +204,10 @@ type spliceClient struct {
 	discarded int
 }
 
-// newSpliceClient dials a pod's HTTP surface and consumes the join
-// snapshot (always the first frame), initializing lastSeq to its exact
-// seq S. It takes the httptest server directly so both the in-memory
-// bridge fixture and the real-gRPC seam test share it.
+// newSpliceClient dials a pod's HTTP surface and consumes the join snapshot
+// (always the first frame), initializing lastSeq to its exact seq S. Takes the
+// httptest server directly so both the in-memory bridge fixture and the
+// real-gRPC seam test share it.
 func newSpliceClient(t *testing.T, ctx context.Context, ts *httptest.Server, name, slug, id string) *spliceClient {
 	t.Helper()
 	sc := &spliceClient{
@@ -245,9 +238,8 @@ func (sc *spliceClient) ingest(data []byte) {
 		maps.Copy(sc.state, f.State)
 		sc.lastSeq = f.Seq
 		sc.snapSeq = f.Seq
-		// Frames buffered from before the snapshot (possible only for a
-		// snapshot that is not the connection's first frame; kept for
-		// contract completeness) splice onto the new base.
+		// Frames buffered from before the snapshot splice onto the new base
+		// (only possible when the snapshot is not the connection's first frame).
 		sc.drainPending()
 	case relay.TypePut, relay.TypeDelete:
 		if f.Seq <= sc.lastSeq {
@@ -282,9 +274,9 @@ func (sc *spliceClient) apply(f durableFrame) {
 }
 
 // awaitSeq pumps inbound frames through the splice until lastSeq reaches
-// target, failing the test if the stream stalls for more than the quiet
-// window (a stalled splice on a lossless transport = a lost or missing
-// frame = the bug this harness gates).
+// target, failing the test if the stream stalls past the quiet window: on a
+// lossless transport a stalled splice means a lost or missing frame, the bug
+// this harness gates.
 func (sc *spliceClient) awaitSeq(ctx context.Context, target uint64, quiet time.Duration) {
 	sc.t.Helper()
 	for sc.lastSeq < target {
@@ -330,7 +322,7 @@ func (sc *spliceClient) assertExactlyOnceSince(since, through uint64) {
 }
 
 // assertStateEquals compares the spliced client state against the durable
-// ground truth, value-encoded exactly as the wire encodes them.
+// ground truth, value-encoded exactly as the wire encodes it.
 func (sc *spliceClient) assertStateEquals(truth domain.RoomKV) {
 	sc.t.Helper()
 	if len(sc.state) != truth.KeyCount() {
@@ -357,19 +349,14 @@ func rawKeysOf(m map[string]json.RawMessage) []string {
 }
 
 // ---------------------------------------------------------------------------
-// THE REPRO: the zero-peer relay on a multi-pod deploy is pod-local. Two
-// clients whose sockets live on pods 0 and 1; a durable PUT handled by pod
-// 2 reaches NEITHER, and a PUT handled by pod 0 reaches only pod 0's
-// client. This is byte-for-byte the pre-multi-pod relay (no publisher
-// wired is exactly what main's relay does on every pod) and pins the
-// measured (N-1)/N live-mirror loss that motivated the design. The durable
-// KV stays correct throughout - only the LIVE delta splits.
+// THE REPRO: a zero-peer relay on a multi-pod deploy is pod-local. Two clients
+// whose sockets live on pods 0 and 1: a durable PUT handled by pod 2 reaches
+// NEITHER, and a PUT handled by pod 0 reaches only pod 0's client, the (N-1)/N
+// live-mirror loss the peer fan-out exists to fix. The durable KV stays correct
+// throughout; only the LIVE delta splits.
 //
-// This test PASSES against the pre-branch relay too - it characterizes the
-// bug. The gate that FAILS without the fix is
-// TestMultiPod_BroadcastReachesAllPods below (see the mutation noted at the
-// top of the file: deleting the publishToPeers wiring reproduces the
-// pre-branch behavior and that test goes red).
+// This test characterizes the bug and passes with or without the peer wiring.
+// The gate that FAILS without it is TestMultiPod_BroadcastReachesAllPods.
 // ---------------------------------------------------------------------------
 
 func TestMultiPod_ZeroPeerRelayIsPodLocal(t *testing.T) {
@@ -386,9 +373,9 @@ func TestMultiPod_ZeroPeerRelayIsPodLocal(t *testing.T) {
 	clientA.expectSnapshotFrame(ctx)
 	clientB.expectSnapshotFrame(ctx)
 
-	// A PUT handled by pod 2 (no local subscribers): the durable write
-	// succeeds and is mirrored only into pod 2's own (empty) hub. Both
-	// remote clients observe SILENCE - the live update is lost.
+	// A PUT handled by pod 2 (no local subscribers): the durable write succeeds
+	// and is mirrored only into pod 2's own empty hub, so both remote clients
+	// observe SILENCE.
 	h.put(2, slug, id, "routed-to-2", []byte(`"lost-live"`))
 	clientA.expectSilence(ctx, 700*time.Millisecond, "pod-local mirror: pod2's PUT must not reach pod0 without peer fan-out")
 	clientB.expectSilence(ctx, 700*time.Millisecond, "pod-local mirror: pod2's PUT must not reach pod1 without peer fan-out")
@@ -408,13 +395,13 @@ func TestMultiPod_ZeroPeerRelayIsPodLocal(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ACCEPTANCE 1: two clients on different pods receive EVERY put/delete
-// mirror - durable writes routed through a third pod, through each
-// client's own pod, and a delete of an absent key (which still commits and
-// still assigns a seq) all included. Ordering, de-duplication, and
-// completeness ride the per-room seq; the splice client asserts the dense
-// range applied exactly once and the final state byte-equals the durable
-// truth. Ephemeral (payload-opaque) frames cross pods on the same path.
+// ACCEPTANCE 1: two clients on different pods receive EVERY put/delete mirror,
+// including writes routed through a third pod, through each client's own pod,
+// and a delete of an absent key (which still commits and still assigns a seq).
+// Ordering, de-duplication and completeness ride the per-room seq: the splice
+// client asserts the dense range applied exactly once and the final state
+// byte-equals the durable truth. Ephemeral (payload-opaque) frames cross pods
+// on the same path.
 // ---------------------------------------------------------------------------
 
 func TestMultiPod_BroadcastReachesAllPods(t *testing.T) {
@@ -432,9 +419,9 @@ func TestMultiPod_BroadcastReachesAllPods(t *testing.T) {
 		t.Fatalf("fresh room snapshots at seq %d/%d, want 0/0", clientA.snapSeq, clientB.snapSeq)
 	}
 
-	// Ten durable mutations, deliberately spread across every pod's HTTP
-	// surface (any pod can commit; ordering is a property of the data, not
-	// the topology) and covering both verbs plus the absent-key delete.
+	// Ten durable mutations spread across every pod's HTTP surface (any pod can
+	// commit; ordering is a property of the data, not the topology), covering
+	// both verbs plus the absent-key delete.
 	h.put(2, slug, id, "board/1", []byte(`{"cell":"x"}`))       // seq 1, via the no-subscriber pod
 	h.put(2, slug, id, "board/2", []byte(`{"cell":"o"}`))       // seq 2
 	h.put(0, slug, id, "cursor/a", []byte(`"a1"`))              // seq 3, via A's own pod
@@ -459,8 +446,7 @@ func TestMultiPod_BroadcastReachesAllPods(t *testing.T) {
 		sc.assertStateEquals(truth)
 	}
 
-	// Ephemeral cross-pod fan-out rides the same path: a raw peer frame
-	// from A (pod 0) reaches B (pod 1) verbatim, and vice versa.
+	// Ephemeral cross-pod fan-out rides the same path, payload verbatim.
 	clientA.c.send(ctx, "ephemeral-from-A")
 	if got := clientB.c.expectFrame(ctx, 3*time.Second, "cross-pod ephemeral frame", func(b []byte) bool {
 		return string(b) == "ephemeral-from-A"
@@ -474,15 +460,14 @@ func TestMultiPod_BroadcastReachesAllPods(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ACCEPTANCE 2: late join during concurrent cross-pod writes - no gap, no
-// dup, and the splice at the snapshot's exact seq S holds. Two writers
-// hammer the same room through DIFFERENT pods (their commit->fanout
-// sections interleave freely, so the joiner's stream races both pods'
-// mirrors and the snapshot read); a client then joins mid-stream and must
-// reconstruct exactly the durable state: nothing at or below its snapshot
-// S applied, the dense range (S, total] applied exactly once, spliced
-// state byte-equal to the shared store. Run under -count=20 to sample the
-// interleavings (the phase-2 gate did; see the workflow notes).
+// ACCEPTANCE 2: late join during concurrent cross-pod writes, no gap and no
+// dup, with the splice at the snapshot's exact seq S. Two writers hammer the
+// same room through DIFFERENT pods (their commit->fanout sections interleave
+// freely, so the joiner's stream races both pods' mirrors and the snapshot
+// read); the joiner must reconstruct exactly the durable state: nothing at or
+// below its snapshot S applied, the dense range (S, total] applied exactly
+// once, spliced state byte-equal to the shared store. Run under -count=20 to
+// sample the interleavings.
 // ---------------------------------------------------------------------------
 
 func TestMultiPod_LateJoinDuringConcurrentCrossPodWrites(t *testing.T) {
@@ -492,9 +477,8 @@ func TestMultiPod_LateJoinDuringConcurrentCrossPodWrites(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Two concurrent writers on different pods. Each PUTs its own keys and
-	// deletes a few of them again, so the stream carries both verbs. 22
-	// mutations each, 44 in the concurrent phase.
+	// Two concurrent writers on different pods, each PUTting its own keys and
+	// deleting a few again so the stream carries both verbs.
 	const perWriter = 22 // 18 puts + 4 deletes each
 	var wg sync.WaitGroup
 	for w := range 2 {
@@ -510,10 +494,10 @@ func TestMultiPod_LateJoinDuringConcurrentCrossPodWrites(t *testing.T) {
 		}(w)
 	}
 
-	// Join mid-stream: wait until at least a third of the writes committed
-	// (the durable seq is the ground truth for "mid"), then connect through
-	// pod 2 - a pod NEITHER writer routes through, so every mirror the
-	// joiner sees crossed pods.
+	// Join mid-stream: wait until at least a third of the writes committed (the
+	// durable seq is the ground truth for "mid"), then connect through pod 2, a
+	// pod NEITHER writer routes through, so every mirror the joiner sees crossed
+	// pods.
 	for h.scanTruth(slug, id).Seq < 15 {
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -543,13 +527,13 @@ func TestMultiPod_LateJoinDuringConcurrentCrossPodWrites(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ACCEPTANCE 3: a relay pod dies mid-stream. Its client's socket dies with
-// it (accepted; WebSockets die with their pod), the client reconnects to a
-// SURVIVING pod through the normal join, and the snapshot + splice resync
-// it: the fresh snapshot's S2 covers everything missed during the outage,
-// the discard rule drops any frame at or below S2, and the stream from S2
-// on is dense and exactly-once. Writes never stop flowing during the kill
-// (they route through surviving pods; the durable tier is unaffected).
+// ACCEPTANCE 3: a relay pod dies mid-stream. Its client's socket dies with it
+// (accepted: WebSockets die with their pod), the client reconnects to a
+// SURVIVING pod through the normal join, and snapshot + splice resync it: the
+// fresh snapshot's S2 covers everything missed during the outage, the discard
+// rule drops any frame at or below S2, and the stream from S2 on is dense and
+// exactly-once. Writes never stop flowing during the kill: they route through
+// surviving pods and the durable tier is unaffected.
 // ---------------------------------------------------------------------------
 
 func TestMultiPod_PodKillMidStreamReconnectResync(t *testing.T) {
@@ -582,9 +566,9 @@ func TestMultiPod_PodKillMidStreamReconnectResync(t *testing.T) {
 	victim.c.expectClosed(ctx, 5*time.Second, "its pod was killed")
 	victim.assertExactlyOnceSince(victim.snapSeq, epoch1Last) // epoch 1 was clean up to where it spliced
 
-	// Reconnect to a SURVIVING pod: the normal join, a fresh snapshot, a
-	// fresh splice base. S2 can only be at or past everything epoch 1
-	// applied (the durable seq never regresses).
+	// Reconnect to a SURVIVING pod: normal join, fresh snapshot, fresh splice
+	// base. S2 can only be at or past everything epoch 1 applied (the durable
+	// seq never regresses).
 	revived := newSpliceClient(t, ctx, h.pods[1].ts, "revived", slug, id)
 	defer revived.close()
 	if revived.snapSeq < epoch1Last {

@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 )
 
-// BlobStore is a content-addressed on-disk store. Bytes are written
-// to `<root>/<sha256[:2]>/<sha256>` so directory fanout stays sane.
-// Multiple pastes pointing to the same bytes share one file.
+// BlobStore is a content-addressed on-disk store. Bytes live at
+// <root>/<sha256[:2]>/<sha256> so directory fanout stays sane; records pointing
+// at the same bytes share one file.
 type BlobStore struct {
 	root string
 }
@@ -24,13 +24,10 @@ func NewBlobStore(root string) (*BlobStore, error) {
 	return &BlobStore{root: root}, nil
 }
 
-// Put streams r into the content-addressed location for sha. If a file
-// already exists at the destination, we trust the existing bytes
-// (content-addressed - sha collision is the only way to "overwrite"
-// and that's not a real concern at sha256). size is the expected byte
-// length of r; passed for symmetry with S3-shaped backends that need
-// to send Content-Length up front. The disk impl doesn't strictly
-// require it but accepts it for interface uniformity.
+// Put streams r into the content-addressed location for sha. An existing file
+// at the destination is trusted as-is: only a sha256 collision could reach it
+// with different bytes. size is accepted for parity with S3-shaped backends
+// that need Content-Length up front; the disk store does not need it.
 func (b *BlobStore) Put(sha string, r io.Reader, size int64) error {
 	if len(sha) < 2 {
 		return fmt.Errorf("blob: sha too short")
@@ -41,20 +38,19 @@ func (b *BlobStore) Put(sha string, r io.Reader, size int64) error {
 	}
 	dst := filepath.Join(dir, sha)
 	if _, err := os.Stat(dst); err == nil {
-		// Already there - no-op. Content-addressed means same bytes.
-		// Drain r so a caller streaming a request body doesn't block.
+		// Drain r so a caller streaming a request body does not block.
 		_, _ = io.Copy(io.Discard, r)
 		return nil
 	}
-	// Write to a tmp file, fsync, rename. This makes Put atomic under
-	// crash: either the final filename exists with the full bytes, or
-	// it doesn't exist at all. Partial writes never become visible.
+	// tmp + fsync + rename: a crash leaves the complete file or nothing, never
+	// a partial blob visible under the final name.
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
 		return fmt.Errorf("blob tmp create: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // safe - if rename succeeded, file no longer exists
+	// Fails with ENOENT once the rename has succeeded, which is the normal path.
+	defer os.Remove(tmpName) //nolint:errcheck
 	if _, err := io.Copy(tmp, r); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("blob write: %w", err)
@@ -72,20 +68,17 @@ func (b *BlobStore) Put(sha string, r io.Reader, size int64) error {
 	return nil
 }
 
-// PutPrecompressed writes already-encoded bytes (magic prefix + zstd)
-// straight to storage. Equivalent to Put for the disk store since the
-// disk store doesn't transform bytes; provided so the disk store
-// satisfies the same service-layer interface as CompressedBlobStore.
+// PutPrecompressed writes already-encoded bytes (magic prefix + zstd) straight
+// to storage. Present so the disk store satisfies the same service-layer
+// interface as CompressedBlobStore.
 func (b *BlobStore) PutPrecompressed(sha string, body []byte) error {
 	return b.Put(sha, bytes.NewReader(body), int64(len(body)))
 }
 
-// GetReader returns a streaming reader over the bytes for sha, or
-// ErrNotFound. The caller MUST Close the returned reader. The int64 is
-// the on-disk byte length (the raw stored bytes; for blobs wrapped by
-// CompressedBlobStore this is the compressed length, not the decoded
-// length). Streaming avoids buffering the whole blob into memory the
-// way Get does - the serve path io.Copy's straight to the client.
+// GetReader returns a streaming reader over the bytes for sha, or ErrNotFound.
+// The caller MUST Close it. The int64 is the on-disk length of the raw stored
+// bytes: for blobs wrapped by CompressedBlobStore that is the compressed
+// length, not the decoded one.
 func (b *BlobStore) GetReader(sha string) (io.ReadCloser, int64, error) {
 	if len(sha) < 2 {
 		return nil, 0, fmt.Errorf("blob: sha too short")
@@ -122,11 +115,9 @@ func (b *BlobStore) Get(sha string) ([]byte, error) {
 	return body, nil
 }
 
-// EncodeBody encodes UNCOMPRESSED bytes into the at-rest format and reports the
-// payload size excluding the framing prefix. Present so the plain disk store
-// satisfies the same service-side BlobStore contract as CompressedBlobStore:
-// callers ask the store that owns the format instead of doing the framing
-// arithmetic themselves.
+// EncodeBody encodes uncompressed bytes into the at-rest format and reports the
+// payload size excluding the framing prefix, so callers ask the store that owns
+// the format instead of doing the framing arithmetic themselves.
 func (s *BlobStore) EncodeBody(r io.Reader) ([]byte, int, error) {
 	body, err := EncodeCompressedBody(r)
 	if err != nil {

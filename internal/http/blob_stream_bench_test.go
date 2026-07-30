@@ -16,12 +16,9 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// discardResponseWriter is an http.ResponseWriter that throws the body
-// away. Using it instead of httptest.ResponseRecorder keeps the
-// benchmark measuring the SERVE PATH's allocation behavior (buffered
-// Get vs streamed GetReader) rather than the recorder's own
-// body-accumulation allocations, which would otherwise dominate and
-// mask the difference.
+// discardResponseWriter throws the body away. httptest.ResponseRecorder's own
+// body accumulation would dominate the allocation numbers and mask the
+// buffered-vs-streamed difference the benchmarks measure.
 type discardResponseWriter struct {
 	h http.Header
 }
@@ -32,12 +29,8 @@ func (d *discardResponseWriter) Header() http.Header         { return d.h }
 func (d *discardResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (d *discardResponseWriter) WriteHeader(int)             {}
 
-// bufferingBlobReader forces the OLD serve behavior: Read buffers the
-// whole decompressed blob into memory (via ReadAll) and hands back an
-// in-memory reader. This is the "before" baseline for the benchmark - it
-// reproduces the full-payload per-GET allocation that FIX #1 removes. The
-// "after" path uses the real seam over *storage.CompressedBlobStore, whose
-// Read streams.
+// bufferingBlobReader buffers the whole decompressed blob per Read: the
+// full-payload-per-GET baseline the streaming serve path is measured against.
 type bufferingBlobReader struct{ inner BlobReader }
 
 func (b bufferingBlobReader) ReadAll(ctx context.Context, slug, sha string) ([]byte, error) {
@@ -56,9 +49,6 @@ func shaOfBench(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// benchServer wires a Server over a real compressed-on-disk blob store
-// holding one large HTML paste, returning the server and the request to
-// drive. The blob is realistic (~4 MiB of compressible HTML).
 func benchServer(b *testing.B, blobs BlobReader, sha string, updatedAt time.Time) (*Server, *http.Request) {
 	b.Helper()
 	paste := domain.Paste{
@@ -94,8 +84,7 @@ func newBenchBlobStore(b *testing.B) (*storage.CompressedBlobStore, string) {
 	return c, sha
 }
 
-// runConcurrentGETs drives the server's handler from b.RunParallel,
-// simulating N concurrent clients hitting the same large paste.
+// runConcurrentGETs stands in for N concurrent clients on one large paste.
 func runConcurrentGETs(b *testing.B, srv *Server, r *http.Request) {
 	b.Helper()
 	h := srv.Handler()
@@ -107,9 +96,9 @@ func runConcurrentGETs(b *testing.B, srv *Server, r *http.Request) {
 	})
 }
 
-// BenchmarkServePaste_StreamedGetReader is the AFTER path: the HTML
-// serve path io.Copy's straight from the streaming zstd decoder. Report
-// allocs/op + B/op; compare against the buffered baseline below.
+// BenchmarkServePaste_StreamedGetReader measures the serve path io.Copy'ing
+// straight from the streaming zstd decoder. Compare allocs/op + B/op against
+// the buffered baseline below.
 func BenchmarkServePaste_StreamedGetReader(b *testing.B) {
 	store, sha := newBenchBlobStore(b)
 	srv, r := benchServer(b, service.NewStandaloneBlobUnit(store), sha, time.Now().UTC())
@@ -117,10 +106,9 @@ func BenchmarkServePaste_StreamedGetReader(b *testing.B) {
 	runConcurrentGETs(b, srv, r)
 }
 
-// BenchmarkServePaste_BufferedGet is the BEFORE baseline: the serve
-// path buffers the whole decompressed blob per GET (the pre-FIX-#1
-// behavior). The delta in B/op vs the streamed bench is the per-GET
-// full-payload spike that scaled with concurrency on the small VPS.
+// BenchmarkServePaste_BufferedGet is the baseline: the whole decompressed blob
+// allocated per GET. The B/op delta against the streamed bench is the
+// full-payload spike streaming removes, and it scales with concurrency.
 func BenchmarkServePaste_BufferedGet(b *testing.B) {
 	store, sha := newBenchBlobStore(b)
 	srv, r := benchServer(b, bufferingBlobReader{inner: service.NewStandaloneBlobUnit(store)}, sha, time.Now().UTC())
@@ -128,8 +116,6 @@ func BenchmarkServePaste_BufferedGet(b *testing.B) {
 	runConcurrentGETs(b, srv, r)
 }
 
-// compile-time assertions that the bench writer + reader satisfy the
-// interfaces they stand in for.
 var (
 	_ http.ResponseWriter = (*discardResponseWriter)(nil)
 	_ BlobReader          = bufferingBlobReader{}

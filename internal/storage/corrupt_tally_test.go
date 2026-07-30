@@ -8,10 +8,9 @@ import (
 	"testing"
 )
 
-// UNTAGGED on purpose. The reconcilers that use corruptTally are behind the
+// UNTAGGED on purpose: the reconcilers that use corruptTally are behind the
 // slatedb build tag, and CI runs `go test ./...` with no tags, so a tagged pin
-// would never execute in CI - which is how the original defect survived: the
-// behaviour looked fine because nothing was measuring the thing that was wrong.
+// would never execute.
 
 // A clean pass must be SILENT. If the summary printed unconditionally, the log
 // would carry a line on every reconcile tick forever, which buries the
@@ -105,14 +104,13 @@ func TestCorruptTally_SummaryNamesTheScan(t *testing.T) {
 // No log call inside a record loop: log volume per pass must be O(1) in the
 // number of corrupt rows.
 //
-// A source-level guard because the property is structural and the reconcilers
-// are behind the slatedb tag, so a behavioural version would not run in CI.
-// Checks EVERY log call in EVERY record loop, not only loops that already
-// tally: a guard that inspects only already-fixed code cannot report the
-// absence of the fix.
+// Source-level because the property is structural and the reconcilers are
+// behind the slatedb tag, so a behavioural version would not run in CI. It
+// checks EVERY log call in EVERY record loop: a guard that inspects only
+// already-fixed code cannot report the absence of the fix.
 //
 // Transient-failure logs are legitimately per-record, since their volume tracks
-// failures rather than debris. Those opt out explicitly, which makes the
+// failures rather than debris; those opt out explicitly, which makes the
 // exemption reviewable.
 func TestReconcilersDoNotLogPerRecord(t *testing.T) {
 	const exempt = "transient-failure-log"
@@ -166,8 +164,7 @@ func TestReconcilersDoNotLogPerRecord(t *testing.T) {
 			})
 
 			// Without this the guard silently passes the moment the loops move
-			// or are rewritten into a shape the walk stops recognising - the
-			// same vacuous-pass bug this change exists to fix.
+			// or are rewritten into a shape the walk stops recognising.
 			if loops == 0 {
 				t.Fatalf("%s: found no range loops at all, so this guard checked NOTHING; re-point it "+
 					"rather than leaving it green", file)

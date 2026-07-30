@@ -1,7 +1,7 @@
 // metadata_shale.go - shale-cluster-backed metadataBundle, active only under
 // -tags slatedb (shale wraps slatedb as its per-node KV engine).
 //
-// Reads the same S3 connection config as the slatedb backend:
+// S3 connection config, shared with the slatedb backend:
 //   HOSTTHIS_METADATA_S3_ENDPOINT   (e.g. http://minio:9000)
 //   HOSTTHIS_METADATA_S3_BUCKET     (required)
 //   HOSTTHIS_METADATA_S3_REGION     (default us-east-1)
@@ -10,7 +10,7 @@
 //   HOSTTHIS_METADATA_S3_USE_SSL    (true|false; default true)
 //   HOSTTHIS_METADATA_DB_NAME       (default "hostthis-metadata")
 //
-// Plus the cluster-layer additions:
+// Cluster-layer additions:
 //   HOSTTHIS_NODE_ID                  (default os.Hostname(), or "hostthis-1")
 //   HOSTTHIS_SHALE_REPLICATION_FACTOR (default 1)
 //   HOSTTHIS_SHALE_BIND_ADDR          (host:port; NON-EMPTY enables multi-node mode)
@@ -58,8 +58,8 @@ import (
 )
 
 // slatedbLogLevel maps HOSTTHIS_SLATEDB_LOG_LEVEL to a slatedb LogLevel.
-// Empty / "off" => no slatedb tracing (the default). Diagnostic only:
-// enabling debug/trace is verbose and meant for short-lived investigation.
+// Empty / "off" disables slatedb tracing. Diagnostic only: debug/trace are
+// verbose and meant for short-lived investigation.
 func slatedbLogLevel(s string) (slatedb.LogLevel, bool) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "", "off":
@@ -81,19 +81,15 @@ func slatedbLogLevel(s string) (slatedb.LogLevel, bool) {
 
 // openShaleRepoFromEnv builds the shale ShaleRepo from the HOSTTHIS_* env and
 // nothing else: no background reconcile loop, no blob-unit wiring, no debug
-// server - just the opened repo with its retention set. buildMetadataShale
-// calls it and then layers the reconcile loop / blob unit / debug server on
-// top, keeping the bare open path separate from the daemon wiring. The caller
-// owns repo.Close().
+// server, just the opened repo with its retention set. The caller owns
+// repo.Close().
 //
 // registerGRPC (optional, nil for callers that want the bare repo) is the
 // opaque hook threaded into ShaleConfig.RegisterGRPC: in multi-node mode
 // NewShaleRepo calls it with the cluster gRPC server before serving, so
-// composition-root services (the relay's peer fan-out) ride the same
-// listener + advertised address shale forwarding uses.
+// composition-root services (the relay's peer fan-out) ride the same listener +
+// advertised address shale forwarding uses.
 func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger, registerGRPC func(*grpc.Server)) (*storage.ShaleRepo, error) {
-	// Optional slatedb tracing (to stderr) for diagnosing the SST-read
-	// pattern. Off unless HOSTTHIS_SLATEDB_LOG_LEVEL is set.
 	if lvl, on := slatedbLogLevel(os.Getenv("HOSTTHIS_SLATEDB_LOG_LEVEL")); on {
 		if err := slatedb.InitLogging(lvl, nil); err != nil {
 			logger.Printf("metadata: slatedb InitLogging failed: %v", err)
@@ -119,41 +115,38 @@ func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger, regist
 		}
 	}
 	replicationFactor := envOrInt("HOSTTHIS_SHALE_REPLICATION_FACTOR", 1)
-	// Backend shape: 0 (default) = single slatedb DB per node (today). A power
-	// of two = MULTI-BACKEND sharded mode: that many slatedb units distributed
-	// across the ring, routed per key. Each unit is a full slatedb instance per
-	// owning replica, so keep small on the RAM-tight boxes. See docs/SPEC.md
-	// "Sharded metadata (multi-backend mode)".
+	// Backend shape: 0 (default) = one slatedb DB per node. A power of two =
+	// MULTI-BACKEND sharded mode: that many slatedb units distributed across the
+	// ring, routed per key. Each unit is a full slatedb instance per owning
+	// replica, so keep it small on RAM-tight boxes. See docs/SPEC.md "Sharded
+	// metadata (multi-backend mode)".
 	unitCount := envOrInt("HOSTTHIS_SHALE_UNIT_COUNT", 0)
 	if unitCount < 0 {
 		unitCount = 0
 	}
-	// Durability mode: default true (ack after the durable object-store
-	// flush). false = relaxed durability (fast-ack at the memtable), the big
-	// write-throughput win; only safe at RF>=2 on separate nodes. See
-	// docs/SPEC.md "Relaxed durability: fast-ack at the memtable".
+	// true (default) acks after the durable object-store flush. false = relaxed
+	// durability (fast-ack at the memtable), the big write-throughput win; only
+	// safe at RF>=2 on separate nodes. See docs/SPEC.md "Relaxed durability:
+	// fast-ack at the memtable".
 	awaitDurable := strings.EqualFold(envOr("HOSTTHIS_METADATA_AWAIT_DURABLE", "true"), "true")
-	// Block cache for the slatedb metadata layer (Moka in-memory). Without it
-	// slatedb has NO block cache and re-fetches SST blocks from MinIO on every
-	// read - a steady self-inflicted read storm against the object store.
-	// Default 128 MiB; set 0 to disable. Tunable on the RAM-tight boxes.
+	// Block cache for the slatedb metadata layer. Without it slatedb has NO
+	// block cache and re-fetches SST blocks from the object store on every read,
+	// a steady self-inflicted read storm. 0 disables.
 	cacheBytes := envOrInt("HOSTTHIS_METADATA_CACHE_BYTES", 128<<20)
 	if cacheBytes < 0 {
 		cacheBytes = 0
 	}
-	// Fence-WAL GC: enable slatedb's fence-WAL garbage collector so the
-	// per-open fence WAL objects don't accumulate unboundedly (slatedb ships
-	// that GC category in dry-run by default; see storage.ShaleConfig.ReapFenceWALs).
-	// Default ON for this long-lived server; HOSTTHIS_SLATEDB_FENCE_GC=false is
-	// the kill-switch (fall back to slatedb's untouched defaults).
+	// Enable slatedb's fence-WAL garbage collector so the per-open fence WAL
+	// objects do not accumulate unboundedly (slatedb ships that GC category in
+	// dry-run by default). HOSTTHIS_SLATEDB_FENCE_GC=false is the kill-switch.
 	reapFenceWALs := !strings.EqualFold(strings.TrimSpace(os.Getenv("HOSTTHIS_SLATEDB_FENCE_GC")), "false")
 	// Per-dispatch cluster deadlines (shale defaults each to 5s; zero keeps
-	// them). The read budget is the one deploys raise (e.g. "8s"): during a
-	// rollout a read that lands in a shard's sub-second handoff window
-	// re-polls within ReadTimeout, so a bigger budget turns the rare
-	// window-exceeding read into latency instead of a client error. Malformed
-	// values are a config error and fail startup - never a silent default.
-	// See docs/SPEC.md "Dispatch deadlines: the read/write timeout knobs".
+	// them). The read budget is the one deploys raise: during a rollout a read
+	// landing in a shard's sub-second handoff window re-polls within
+	// ReadTimeout, so a bigger budget turns the rare window-exceeding read into
+	// latency instead of a client error. Malformed values fail startup, never a
+	// silent default. See docs/SPEC.md "Dispatch deadlines: the read/write
+	// timeout knobs".
 	readTimeout, writeTimeout, err := shaleTimeoutsFromEnv()
 	if err != nil {
 		return nil, err
@@ -172,19 +165,18 @@ func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger, regist
 		return nil, fmt.Errorf("HOSTTHIS_METADATA_S3_ACCESS_KEY + HOSTTHIS_METADATA_S3_SECRET_KEY are required")
 	}
 	// Checked with the other required-env checks, i.e. BEFORE anything is
-	// allocated, so a refusal needs no cleanup path. Deliberately validated
-	// here rather than left to the cluster layer: the operator gets an error
-	// naming the env var they set, not one about internal config fields.
+	// allocated, so a refusal needs no cleanup path. Validated here rather than
+	// in the cluster layer so the operator gets an error naming the env var they
+	// set, not one about internal config fields.
 	if err := checkUnitCountForMode(unitCount, bindAddr); err != nil {
 		return nil, err
 	}
 
-	// Optional transactional shale-blob plane. When HOSTTHIS_SHALE_BLOB_BUCKET
-	// is set, blobs go THROUGH shale (the pointer co-commits with the metadata
-	// on the owning shard) over a MinIO blob.Store pointed at that DISTINCT blob
+	// Optional transactional shale-blob plane. With HOSTTHIS_SHALE_BLOB_BUCKET
+	// set, blobs go THROUGH shale (the pointer co-commits with the metadata on
+	// the owning shard) over a MinIO blob.Store pointed at that DISTINCT blob
 	// bucket on the SAME object store the metadata uses. Unset keeps the
-	// metadata-only path (the detached content-addressed store via
-	// buildBlobStore stays the blob backend).
+	// detached content-addressed store (buildBlobStore) as the blob backend.
 	var blobStore blob.Store
 	blobBucket := strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_BLOB_BUCKET"))
 	if blobBucket != "" {
@@ -201,16 +193,15 @@ func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger, regist
 		blobStore = bs
 	}
 
-	// Optional HOMOGENEOUS bootstrap. When HOSTTHIS_SHALE_HOMOGENEOUS=true, build
-	// a MinIO-backed ConditionalStore over the SAME metadata bucket, namespaced by
-	// the DB name (so the __cluster/init marker is one shared object for every
-	// pod), and hand it to the cluster. cluster.Open then decides form-vs-join at
-	// runtime against the marker (try-join-else-form) instead of the founder/
-	// joiner seed asymmetry; every pod runs identical config. Requires multi-
-	// backend (sharded) + multi-node mode - the marker's durable {gen, count}
-	// records the unit count, which is meaningless without sharding, and the
-	// solo-start/form race only arises across gossiping pods. See docs/SPEC.md
-	// "Homogeneous bootstrap (optional)". Unset keeps the seed-based bootstrap.
+	// Optional HOMOGENEOUS bootstrap. With HOSTTHIS_SHALE_HOMOGENEOUS=true, a
+	// MinIO-backed ConditionalStore over the SAME metadata bucket (namespaced by
+	// the DB name, so the __cluster/init marker is one shared object for every
+	// pod) lets cluster.Open decide form-vs-join at runtime against the marker
+	// instead of the founder/joiner seed asymmetry; every pod runs identical
+	// config. Requires multi-backend (sharded) + multi-node mode: the marker's
+	// durable {gen, count} records the unit count, meaningless without sharding,
+	// and the solo-start/form race only arises across gossiping pods. See
+	// docs/SPEC.md "Homogeneous bootstrap (optional)".
 	var condStore storageunit.ConditionalStore
 	homogeneous := strings.EqualFold(strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_HOMOGENEOUS")), "true")
 	if homogeneous {
@@ -275,30 +266,29 @@ func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger, regist
 // buildMetadataShale opens the shale repo (openShaleRepoFromEnv) and wires the
 // full daemon bundle around it: the site + room repos, the optional
 // transactional blob unit, the optional debug endpoint, and the periodic
-// Reconcile loop. The audit subcommand deliberately does NOT go through here -
-// it wants the bare repo with no background loops.
+// Reconcile loop. The audit subcommand deliberately bypasses it: it wants the
+// bare repo with no background loops.
 func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metadataBundle, error) {
 	// Multi-pod relay peer transport (SPEC "Multi-pod relay: the peer
-	// transport"): the RECEIVER must exist before the repo opens - its
-	// Register method is the opaque func(*grpc.Server) hook NewShaleRepo
-	// calls when it stands up the cluster gRPC server in multi-node mode -
-	// while its local-delivery target is late-bound by main once the relay
-	// exists (frames arriving before that bind are dropped; no client can
-	// be connected before the HTTP server is up). Single-node mode never
-	// invokes the hook and wires no transport: the relay keeps its nil
-	// publisher, the zero-peer degenerate case.
-	// The receiver's cap must admit the LARGEST legal frame on this
-	// channel: a durable mirror carrying a committed room value verbatim
-	// (domain.MaxRoomValueBytes, set by the HTTP PUT path - several times
-	// the client-socket frame cap) with worst-case JSON-string inflation.
-	// Sizing this to the client-socket cap silently severs cross-pod
-	// mirrors for every legal value above it (SPEC "Trust boundary").
+	// transport"). The RECEIVER must exist before the repo opens: its Register
+	// method is the opaque func(*grpc.Server) hook NewShaleRepo calls when it
+	// stands up the cluster gRPC server in multi-node mode. Its local-delivery
+	// target is late-bound by main once the relay exists; frames arriving before
+	// that bind are dropped, and no client can connect before the HTTP server is
+	// up. Single-node mode never invokes the hook and wires no transport: the
+	// relay keeps its nil publisher, the zero-peer degenerate case.
+	//
+	// The receiver's cap must admit the LARGEST legal frame on this channel: a
+	// durable mirror carrying a committed room value verbatim
+	// (domain.MaxRoomValueBytes, several times the client-socket frame cap) with
+	// worst-case JSON-string inflation. Sizing it to the client-socket cap
+	// silently severs cross-pod mirrors for every legal value above it (SPEC
+	// "Trust boundary").
 	relayRecv := relaygrpc.NewReceiver(relay.MaxDurableFrameBytes(domain.MaxRoomValueBytes))
 
-	// /readyz mount floor (docs/SPEC.md "Readiness vs liveness"). Parsed
-	// BEFORE the (heavy) cluster open: a malformed or out-of-range fraction
-	// is a configuration error that must refuse startup, same fail-loud
-	// posture as the dispatch timeouts.
+	// /readyz mount floor (docs/SPEC.md "Readiness vs liveness"). Parsed BEFORE
+	// the heavy cluster open: a malformed or out-of-range fraction is a
+	// configuration error that must refuse startup.
 	minMountedFraction, err := readyMinMountedFractionFromEnv()
 	if err != nil {
 		return nil, err
@@ -311,30 +301,26 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 	bundle := &metadataBundle{
 		Repo:    repo,
 		KeyGate: repo,
-		// Static-site hosting on shale: the ShaleSiteRepo adapter shares the
-		// same shale cluster (shard routing + per-shard CAS) as the paste
-		// repo, so a non-nil Sites lights up archive hosting on shale, the
-		// same way it does on slatedb.
+		// ShaleSiteRepo shares the same shale cluster (shard routing +
+		// per-shard CAS) as the paste repo, so a non-nil Sites lights up
+		// archive hosting on shale.
 		Sites: storage.NewShaleSiteRepo(repo),
-		// Room persistence on shale: the ShaleRoomRepo adapter shares the same
-		// shale cluster, co-locating every room family on the {app-slug} shard
-		// so the room tier runs on shale clusters too.
+		// ShaleRoomRepo shares the same cluster, co-locating every room family
+		// on the {app-slug} shard.
 		Rooms: storage.NewShaleRoomRepo(repo),
-		// Readiness: gate /readyz on the cluster's mount floor so a rollout
-		// stalls on a pod that cannot mount its storage instead of surging
-		// past it. The fraction semantics (0 = no floor, desired == 0
-		// vacuously ready) live in the shale predicate.
+		// Gate /readyz on the cluster's mount floor so a rollout stalls on a
+		// pod that cannot mount its storage instead of surging past it. The
+		// fraction semantics (0 = no floor, desired == 0 vacuously ready) live
+		// in the shale predicate.
 		Readiness: shaleReadinessProber{repo: repo, minMountedFraction: minMountedFraction},
 		Close:     repo.Close,
 	}
 	logger.Printf("readiness: /readyz mount floor minMountedFraction=%g (0 disables the floor)", minMountedFraction)
 	// Multi-node: supply the relay peer transport. The publisher fans every
-	// frame out to the CURRENT peer set, discovered per publish from the
-	// ring membership the cluster gossips (self excluded) - the same
-	// advertised gRPC addresses shale forwarding dials, adapted onto the
-	// relay's narrow Peers port so the relay stays storage-agnostic. main
-	// wires Publisher + Bind into the relay and Closes the publisher at
-	// shutdown.
+	// frame out to the CURRENT peer set, discovered per publish from the ring
+	// membership the cluster gossips (self excluded), adapted onto the relay's
+	// narrow Peers port so the relay stays storage-agnostic. main wires
+	// Publisher + Bind into the relay and Closes the publisher at shutdown.
 	if repo.GRPCAddr() != "" {
 		pub := relaygrpc.NewPublisher(shalePeers{repo: repo}, relaygrpc.PublisherConfig{Logf: logger.Printf})
 		bundle.RelayPeer = &relayPeerTransport{
@@ -347,8 +333,7 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 
 	// Transactional shale-blob seam: when the repo opened a blob plane, supply
 	// the shaleblob.Unit (pointer co-commits with metadata) + schedule
-	// SweepOrphans for orphan-bytes reclamation. main picks these over the
-	// standalone unit + the global content-addressed sweep.
+	// SweepOrphans for orphan-bytes reclamation.
 	if repo.HasBlobPlane() {
 		unit, uErr := shaleblob.New(repo)
 		if uErr != nil {
@@ -359,12 +344,10 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 		bundle.BlobOrphanSweeper = repo
 	}
 
-	// OPTIONAL live-diagnosis endpoint. When HOSTTHIS_SHALE_DEBUG_ADDR is set
-	// (e.g. ":6060"), serve the embedded cluster's per-position handoff dump at
-	// /debug/shale/state - the production-safe equivalent of the shaled binary's
-	// SHALE_DEBUG_ADDR endpoint, for diagnosing a stuck position (desired-but-
-	// unmounted, a parked handoff phase, the last swallowed acquire error). OFF
-	// unless the env var is set, so production is unaffected.
+	// OPTIONAL live-diagnosis endpoint. With HOSTTHIS_SHALE_DEBUG_ADDR set (e.g.
+	// ":6060"), serve the embedded cluster's per-position handoff dump at
+	// /debug/shale/state, for diagnosing a stuck position (desired-but-unmounted,
+	// a parked handoff phase, the last swallowed acquire error).
 	if dbgAddr := strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_DEBUG_ADDR")); dbgAddr != "" {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/debug/shale/state", func(w http.ResponseWriter, _ *http.Request) {
@@ -379,20 +362,10 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 		logger.Printf("metadata: shale debug endpoint serving %s/debug/shale/state", dbgAddr)
 	}
 
-	// PERIODIC RECONCILE: the sole quota-healing mechanism, since the quota is
-	// derived by scanning the enumeration indexes rather than stored. Each pass
-	// reprojects those indexes from the authoritative rows and ages out crashed
-	// pendings.
-	//
-	// The set heal is idempotent, but entries carry cached numbers computed from
-	// the pass's snapshot, so a pass can race a live write's fresher refresh.
-	// Every reprojection write is guarded to LOSE rather than clobber, which is
-	// what makes the pass safe under live traffic from every pod concurrently;
-	// a skip is healed next tick.
-	//
-	// Best-effort: a pass hitting the post-boot convergence window, or with
-	// per-entry write failures, just logs and retries. First pass after a short
-	// settle delay, then every 10 min.
+	// PERIODIC RECONCILE: the sole quota-healing mechanism (contract and
+	// concurrency argument in ShaleRepo.Reconcile). Best-effort: a pass hitting
+	// the post-boot convergence window, or with per-entry write failures, logs
+	// and retries next tick.
 	go func() {
 		const reconcileInterval = 10 * time.Minute
 		timer := time.NewTimer(90 * time.Second) // let the cluster converge past boot first
@@ -411,18 +384,18 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 	return bundle, nil
 }
 
-// shalePeers adapts the ShaleRepo's gossiped ring-membership view onto
-// the relay's Peers port (the current peer gRPC addresses, self
-// excluded). Defined here at the composition root so storage stays
-// relay-agnostic and the relay stays storage-agnostic.
+// shalePeers adapts the ShaleRepo's gossiped ring-membership view onto the
+// relay's Peers port (current peer gRPC addresses, self excluded). Defined at
+// the composition root so storage stays relay-agnostic and the relay stays
+// storage-agnostic.
 type shalePeers struct{ repo *storage.ShaleRepo }
 
 func (p shalePeers) Addresses() []string { return p.repo.PeerGRPCAddrs() }
 
 // stripScheme removes a leading http:// or https:// from a metadata S3 endpoint
-// so the blobstore.Config gets the bare host:port it wants (the metadata config
-// carries the full URL; the blobstore adapter takes EndpointHost + a UseSSL
-// flag separately). A scheme-less endpoint is returned unchanged.
+// so blobstore.Config gets the bare host:port it wants: the metadata config
+// carries the full URL, the blobstore adapter takes EndpointHost + UseSSL
+// separately.
 func stripScheme(endpoint string) string {
 	s := strings.TrimSpace(endpoint)
 	s = strings.TrimPrefix(s, "https://")
@@ -430,11 +403,9 @@ func stripScheme(endpoint string) string {
 	return strings.TrimSuffix(s, "/")
 }
 
-// parseSeeds splits a comma-separated HOSTTHIS_SHALE_SEEDS value into peer
-// bind addresses, trimming whitespace around each entry and dropping empty
-// ones (so a trailing comma or an all-whitespace value yields nil, which
-// cluster.Open reads as "this node is the seed"). Returns nil for an empty
-// input so the single-node path sees a nil Seeds slice unchanged.
+// parseSeeds splits a comma-separated HOSTTHIS_SHALE_SEEDS value into peer bind
+// addresses, dropping empty entries so a trailing comma or an all-whitespace
+// value yields nil, which cluster.Open reads as "this node is the seed".
 func parseSeeds(raw string) []string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

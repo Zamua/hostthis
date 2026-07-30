@@ -9,8 +9,8 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// diffPaste builds a ready diff paste fixture with the given slug + content
-// SHA. The serve-time content comes from the stub blob reader.
+// diffPaste builds a ready diff paste fixture; the serve-time content comes
+// from the stub blob reader, not from this struct.
 func diffPaste(slug, sha string, now time.Time) domain.Paste {
 	return domain.Paste{
 		Slug:       domain.Slug(slug),
@@ -24,9 +24,9 @@ func diffPaste(slug, sha string, now time.Time) domain.Paste {
 
 const sampleDiff = "diff --git a/foo.go b/foo.go\n--- a/foo.go\n+++ b/foo.go\n@@ -1,3 +1,4 @@\n-old\n+new\n+added\n"
 
-// TestDiffShell_ServedForBrowser pins the shell branch: a browser
-// navigation (Accept: text/html, no ?raw) gets the fixed client-render
-// diff shell with the CSP header, and the shell ETag is content-INDEPENDENT.
+// TestDiffShell_ServedForBrowser pins the shell branch: a browser navigation
+// gets the client-render diff shell with the CSP header, and the shell ETag is
+// content-INDEPENDENT.
 func TestDiffShell_ServedForBrowser(t *testing.T) {
 	now := time.Date(2026, 6, 27, 14, 0, 0, 0, time.UTC)
 	sha := "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe"
@@ -68,8 +68,8 @@ func TestDiffShell_ServedForBrowser(t *testing.T) {
 		t.Errorf("CSP missing connect-src 'self', got %q", csp)
 	}
 
-	// The shell ETag must be content-INDEPENDENT: a different diff paste
-	// (different slug + content SHA) yields the SAME shell ETag.
+	// A different diff paste (different slug + content SHA) must yield the SAME
+	// shell ETag.
 	etag1 := w.Header().Get("ETag")
 	sha2 := "00001111222233334444555566667777888899990000111122223333deadbeef"
 	srv2 := &Server{
@@ -91,9 +91,8 @@ func TestDiffShell_ServedForBrowser(t *testing.T) {
 	}
 }
 
-// TestDiffRaw_QueryParam pins the raw branch via ?raw=1: the server streams
-// the exact raw diff bytes unchanged as text/plain with the content SHA as
-// the ETag and no CSP.
+// TestDiffRaw_QueryParam pins the raw branch: ?raw=1 streams the exact diff
+// bytes as text/plain with the content SHA as the ETag and no CSP.
 func TestDiffRaw_QueryParam(t *testing.T) {
 	now := time.Date(2026, 6, 27, 14, 0, 0, 0, time.UTC)
 	sha := "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe"
@@ -127,9 +126,9 @@ func TestDiffRaw_QueryParam(t *testing.T) {
 	}
 }
 
-// TestDiffBareURL_NonHTMLAccept_ServesShell pins the no-negotiation
-// posture (issue #5): the bare URL with a non-html Accept (curl/bot, */*)
-// still serves the diff SHELL, not raw. Raw is an explicit ?raw opt-in.
+// TestDiffBareURL_NonHTMLAccept_ServesShell pins the no-negotiation posture:
+// a bare URL with a non-html Accept still serves the diff SHELL. Raw is an
+// explicit ?raw opt-in, never negotiated.
 func TestDiffBareURL_NonHTMLAccept_ServesShell(t *testing.T) {
 	now := time.Date(2026, 6, 27, 14, 0, 0, 0, time.UTC)
 	sha := "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe"
@@ -160,7 +159,7 @@ func TestDiffBareURL_NonHTMLAccept_ServesShell(t *testing.T) {
 }
 
 // TestServeDiffAsset_WhitelistAndDeny pins the diff asset handler: a
-// whitelisted lib serves with the immutable cache header and a non-empty
+// whitelisted name serves with the immutable cache header and a non-empty
 // body; an unknown name 404s.
 func TestServeDiffAsset_WhitelistAndDeny(t *testing.T) {
 	srv := &Server{ApexDomain: "paste.test"}
@@ -189,13 +188,11 @@ func TestServeDiffAsset_WhitelistAndDeny(t *testing.T) {
 	}
 }
 
-// TestDiffCSS_GutterStickyFix pins the fix for the line-number gutter under
-// horizontal scroll: diff2html renders it as a translucent position:absolute
-// element, so without an override the numbers either smear over the scrolled
-// code (translucent) or scroll out of view. The fix makes the gutter a
-// sticky, opaque column so the numbers stay pinned at the left edge with the
-// code sliding cleanly beneath. If a future asset regen or library bump drops
-// the rule, this fails loudly rather than silently reintroducing the bug.
+// TestDiffCSS_GutterStickyFix pins the sticky, opaque line-number gutter.
+// diff2html renders it as a translucent position:absolute element, so without
+// the override the numbers smear over horizontally-scrolled code or scroll out
+// of view. An asset regen or library bump that drops the rule fails here
+// rather than silently reintroducing the bug.
 func TestDiffCSS_GutterStickyFix(t *testing.T) {
 	srv := &Server{ApexDomain: "paste.test"}
 	mux := srv.Handler()
@@ -213,8 +210,7 @@ func TestDiffCSS_GutterStickyFix(t *testing.T) {
 }
 
 // TestDiffShell_FetchesRawQuery pins diff.js to the "?raw=1" query the
-// cache-invalidation policy (internal/cache) assumes the shell fetches, in
-// lockstep with the markdown shell's equivalent guard.
+// cache-invalidation policy (internal/cache) assumes the shell fetches.
 func TestDiffShell_FetchesRawQuery(t *testing.T) {
 	b, err := diffShellFS.ReadFile("assets/diffshell/diff.js")
 	if err != nil {

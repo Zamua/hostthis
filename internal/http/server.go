@@ -1,9 +1,8 @@
 // Package http serves the apex landing + the paste read surface.
 //
-// The router accepts both URL shapes simultaneously so the binary
-// works whether the operator runs in subdomain mode (`<slug>.apex`)
-// or path mode (`apex/p/<slug>`). The actual mode is set by what URL
-// the SSH server emits after upload; the HTTP side just doesn't care.
+// The router accepts both URL shapes at once, subdomain (`<slug>.apex`) and
+// path (`apex/p/<slug>`), so the serving side is independent of which URL
+// the SSH server emits after upload.
 package http
 
 import (
@@ -18,29 +17,24 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// PasteReader is the read-side interface - same shape the service
-// layer uses, intentionally narrow (this package doesn't need
-// Insert).
+// PasteReader is the read side of the paste repo, narrowed to what serving
+// needs.
 type PasteReader interface {
 	Get(domain.Slug) (domain.Paste, error)
 }
 
-// SiteReader is the read-side interface for static sites. Optional:
-// nil disables site serving (the slug then resolves only as a paste).
-// internal/storage.SiteRepo satisfies it.
+// SiteReader is the read side for static sites. Optional: nil disables site
+// serving, so a slug then resolves only as a paste. internal/storage.SiteRepo
+// satisfies it.
 type SiteReader interface {
 	Get(domain.Slug) (domain.Site, error)
 }
 
-// BlobReader is the read side of the per-record blob seam, narrowed to
-// what the http serve paths need. Read streams the bytes so every serve
-// path (HTML, site files, and raw markdown) can io.Copy straight to the
-// client without a full-payload allocation per GET. ReadAll buffers the
-// whole blob; it is retained on the interface for callers that still need
-// a buffered read, but the live serve paths use Read. Both take the
-// record's slug (the route key) + its content sha; the standalone backend
-// keys by sha alone and ignores the slug, the transactional shale backend
-// uses the slug to route. service.BlobUnit satisfies this.
+// BlobReader is the read side of the per-record blob seam. Read streams, so a
+// serve path can io.Copy without a full-payload allocation per GET; ReadAll
+// buffers. Both take the record's slug plus its content sha: the standalone
+// backend keys by sha alone and ignores the slug, the transactional shale
+// backend routes on it. service.BlobUnit satisfies this.
 type BlobReader interface {
 	ReadAll(ctx context.Context, slug, sha string) ([]byte, error)
 	Read(ctx context.Context, slug, sha string) (io.ReadCloser, int64, error)
@@ -53,27 +47,24 @@ type Server struct {
 	Rooms       RoomService // optional; nil disables the /api/rooms surface
 	Relay       RoomRelay   // optional; nil disables the /api/rooms/<uuid>/ws relay
 	Blobs       BlobReader
-	LandingHTML []byte // optional - apex landing page bytes embedded at build
-	ApexDomain  string // e.g. "hostthis.dev" - used to peel slug subdomains
-	// Color labels the replica in blue/green deploys. Echoed in the
-	// X-Backend-Color response header on /healthz so operators can verify
-	// which backend is responding. Empty for single-replica deploys.
+	LandingHTML []byte // optional; apex landing page bytes embedded at build
+	ApexDomain  string // e.g. "hostthis.dev"; used to peel slug subdomains
+	// Color labels the replica in blue/green deploys, echoed in the
+	// X-Backend-Color header on /healthz. Empty for single-replica deploys.
 	Color string
-	// Readiness gates /readyz (docs/SPEC.md "Readiness vs liveness"): the
-	// composition root wires the metadata backend's readiness predicate
-	// (the shale mount floor). Optional; nil = always ready (backends with
-	// no mount concept - their open failures already fail startup).
+	// Readiness gates /readyz (docs/SPEC.md "Readiness vs liveness") with the
+	// metadata backend's readiness predicate. Optional; nil means always
+	// ready, for backends with no mount concept whose open failures already
+	// fail startup.
 	Readiness ReadinessProber
 	Now       func() time.Time
-	// Logf, when set, receives one warn-level line per 5xx served by the
-	// paste/site read path (docs/SPEC.md "5xx observability on the read
-	// surface"): the slug + the underlying error, so a read 500 is always
-	// attributable from the logs. The response body stays the generic
-	// "internal error". Nil disables (tests / minimal fixtures).
+	// Logf, when set, receives one warn line per 5xx served by the paste/site
+	// read path (docs/SPEC.md "5xx observability on the read surface"): slug +
+	// underlying error, so a read 500 is attributable from the logs while the
+	// response body stays a generic "internal error". Nil disables.
 	Logf func(format string, args ...any)
 }
 
-// logf emits a read-surface warning when a logger is wired; nil-safe.
 func (s *Server) logf(format string, args ...any) {
 	if s.Logf != nil {
 		s.Logf(format, args...)
@@ -87,50 +78,35 @@ func (s *Server) nowOrTime() time.Time {
 	return time.Now().UTC()
 }
 
-// Handler returns the mux that the caller binds with http.ListenAndServe.
+// Handler returns the mux the caller binds with http.ListenAndServe.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	// Client-render assets for markdown pastes. Registered as a fixed
-	// prefix so ServeMux's longest-prefix match routes /_hostthis/<name>
-	// here ahead of the "/" catch-all, on any Host. The handler
-	// whitelists the asset names, so this prefix cannot be used to reach
-	// any other path.
+	// Fixed prefix so ServeMux's longest-prefix match routes /_hostthis/<name>
+	// here ahead of the "/" catch-all, on any Host. serveAsset whitelists the
+	// asset names, so the prefix cannot reach any other path.
 	mux.HandleFunc("/_hostthis/", s.serveAsset)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// 0. Health endpoint - apex only, no Host-based routing. Used by
-		// load balancers / haproxy / nginx to decide if this backend is
-		// ready to take traffic. Cheap: just confirms the HTTP server is
-		// up. Container startup opens the db + verifies blob backend
-		// before binding the http listener, so an HTTP response from
-		// here means the backend is healthy enough to serve.
+		// /healthz and /readyz answer on any Host, ungated, and ask different
+		// questions: /healthz is liveness (process up, a restart signal),
+		// /readyz applies the metadata backend's readiness predicate so a
+		// rollout stalls on a pod that cannot mount its storage instead of
+		// replacing the fleet. See docs/SPEC.md "Readiness vs liveness".
 		if r.URL.Path == "/healthz" {
 			s.serveHealthz(w, r)
 			return
 		}
-		// 0b. Readiness endpoint - same any-Host, un-gated posture as
-		// /healthz, but a DIFFERENT question: /healthz is liveness (process
-		// up; restart signal), /readyz applies the metadata backend's
-		// readiness predicate (the shale mount floor) so a rollout stalls
-		// on a pod that cannot mount its storage instead of replacing the
-		// fleet. See docs/SPEC.md "Readiness vs liveness".
 		if r.URL.Path == "/readyz" {
 			s.serveReadyz(w, r)
 			return
 		}
-		// 1. Subdomain mode: Host like "<slug>.<apex>".
-		//
-		// A slug can resolve to a SITE (a directory served off its whole
-		// path space) or a single-file PASTE (served only at "/"). We try
-		// the site first - if a site owns the slug, every path on the
-		// subdomain routes into its manifest. Otherwise we fall back to
-		// the paste, which serves ONLY at "/" (any other path 404s, so a
-		// browser's automatic favicon fetch doesn't get the full paste
-		// HTML labeled text/html and hang the loading indicator).
+		// Subdomain mode: Host like "<slug>.<apex>". A slug resolves to a SITE
+		// (owning its whole path space) or a single-file PASTE. Site wins;
+		// the paste fallback serves ONLY at "/" so a browser's automatic
+		// favicon fetch does not receive the paste HTML labeled text/html.
 		if slug, ok := s.slugFromHost(r.Host); ok {
-			// The /api/rooms surface is carved out of the site's path space
-			// and handled BEFORE the static-file lookup, so a manifest file
-			// can never shadow the API (and the API is served even for a
-			// paste-only slug that owns no site).
+			// The /api/rooms surface is handled BEFORE the static-file lookup
+			// so a manifest file can never shadow the API, and the API is
+			// served even for a paste-only slug that owns no site.
 			if rest, ok := roomAPIPath(r.URL.Path); ok {
 				s.handleRoomsAPI(w, r, slug, rest)
 				return
@@ -145,13 +121,12 @@ func (s *Server) Handler() http.Handler {
 			s.servePasteSlug(w, r, slug)
 			return
 		}
-		// 2. Path mode: /p/<slug> (paste) or /p/<slug>/<path...> (site)
-		// on the apex.
+		// Path mode: /p/<slug> (paste) or /p/<slug>/<path...> (site) on the
+		// apex.
 		if after, ok := strings.CutPrefix(r.URL.Path, "/p/"); ok {
 			rest := after
-			// Split the first segment (the slug) from the remaining site
-			// path, if any. "/p/abc12345" → slug "abc12345", path "/".
-			// "/p/abc12345/css/x.css" → slug "abc12345", path "/css/x.css".
+			// "/p/abc12345" -> slug "abc12345", path "/".
+			// "/p/abc12345/css/x.css" -> slug "abc12345", path "/css/x.css".
 			slugStr := rest
 			sitePath := "/"
 			if i := strings.IndexByte(rest, '/'); i >= 0 {
@@ -163,9 +138,9 @@ func (s *Server) Handler() http.Handler {
 				http.NotFound(w, r)
 				return
 			}
-			// Dev path mode mirrors the subdomain carve-out: the rooms API
-			// lives under /p/<slug>/api/rooms/... and is handled before the
-			// static-file lookup so a manifest file never shadows it.
+			// Same carve-out as subdomain mode: the rooms API is handled
+			// before the static-file lookup so a manifest file never shadows
+			// it.
 			if rest, ok := roomAPIPath(sitePath); ok {
 				s.handleRoomsAPI(w, r, slug, rest)
 				return
@@ -181,7 +156,6 @@ func (s *Server) Handler() http.Handler {
 			s.servePasteSlug(w, r, slug)
 			return
 		}
-		// 3. Apex root → landing.
 		if r.URL.Path == "/" {
 			s.serveLanding(w, r)
 			return
@@ -201,9 +175,8 @@ func (s *Server) serveHealthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok\n"))
 }
 
-// slugFromHost returns (slug, true) when host is "<slug>.<apex>" and
-// the slug parses cleanly. Otherwise (_, false). Strips the port if
-// present.
+// slugFromHost returns (slug, true) when host is "<slug>.<apex>" and the slug
+// parses cleanly. The port, if present, is ignored.
 func (s *Server) slugFromHost(host string) (domain.Slug, bool) {
 	if s.ApexDomain == "" {
 		return "", false
@@ -217,7 +190,7 @@ func (s *Server) slugFromHost(host string) (domain.Slug, bool) {
 	}
 	sub := strings.TrimSuffix(host, suffix)
 	if strings.Contains(sub, ".") {
-		// Multi-level subdomain (e.g. "x.y.apex") - not a slug, ignore.
+		// Multi-level subdomain ("x.y.apex") is not a slug.
 		return "", false
 	}
 	slug, err := domain.ParseSlug(sub)
@@ -229,23 +202,21 @@ func (s *Server) slugFromHost(host string) (domain.Slug, bool) {
 
 func (s *Server) serveLanding(w http.ResponseWriter, _ *http.Request) {
 	if len(s.LandingHTML) == 0 {
-		// Dev/test default - operator can override at startup with the
-		// real bytes from web/landing.html.
+		// Dev/test default; a deploy embeds web/landing.html.
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprintln(w, "hostthis - landing page not embedded.")
 		return
 	}
-	// Landing changes more often than pastes (rare edits, new copy);
-	// 5-min cache balances "operators can ship a copy fix and see it
-	// in minutes" against not hammering origin for every visitor.
+	// Short max-age: landing copy changes more often than a paste, and a
+	// copy fix should be visible within minutes without hitting origin per
+	// visitor.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	_, _ = w.Write(s.LandingHTML)
 }
 
-// servePasteSlug serves the paste for the given slug, with all the
-// sandboxing headers. Both the subdomain and the path entry points
-// funnel through here.
+// servePasteSlug serves a paste with its sandboxing headers. Both the
+// subdomain and the path routes funnel through here.
 func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug domain.Slug) {
 	p, err := s.Pastes.Get(slug)
 	if err != nil {
@@ -259,18 +230,15 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	}
 	now := s.nowOrTime()
 	if !now.Before(p.ExpiresAt) {
-		// Past the retention window. The background sweep will delete this
-		// shortly; we 404 in the meantime so visitors don't see
-		// content that's technically expired.
+		// Expired but not yet swept: 404 rather than serve past the
+		// retention window.
 		http.NotFound(w, r)
 		return
 	}
 
-	// Lifecycle status gate (docs/SPEC.md "Paste lifecycle status"). A
-	// pending paste's blob has not landed yet: serve a loading page that
-	// auto-refreshes until the finalizer flips it to ready. A failed paste
-	// serves an error page. Only a ready paste falls through to the normal
-	// content serve below.
+	// Lifecycle status gate (docs/SPEC.md "Paste lifecycle status"). A pending
+	// paste's blob has not landed yet, so it gets a self-refreshing loading
+	// page; only a ready paste reaches the content serve below.
 	switch p.Status {
 	case domain.PasteStatusPending:
 		s.servePending(w, r)
@@ -286,39 +254,24 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()")
 
-	// Cache-Control: 1h max-age is the sweet spot for hostthis. Active
-	// changes (update/delete) fire an explicit purge via CachePurger;
-	// passive expiry gets at most 1h of staleness which is acceptable.
+	// An update/delete fires an explicit purge via CachePurger, so max-age
+	// only bounds the staleness of passive expiry.
 	h.Set("Cache-Control", "public, max-age=3600")
 	h.Set("Last-Modified", p.UpdatedAt.UTC().Format(http.TimeFormat))
 
-	// For the client-rendered kinds (markdown, diff) we serve one of two
-	// things: the RAW bytes (only when the URL carries an explicit ?raw
-	// query) or, at the bare URL, the fixed client-render shell - served to
-	// EVERY client (no Accept negotiation). The raw branch is content-
-	// addressed (ETag = content SHA, byte-stable). The shell is content-
-	// INDEPENDENT, so its ETag is the shell version, NOT the paste content -
-	// two different markdown/diff pastes yield the same shell ETag. Decide
-	// here so the conditional-GET 304 below uses the right validator.
+	// A client-rendered kind (markdown, diff) serves either the raw bytes,
+	// only under an explicit ?raw query, or the fixed client-render shell at
+	// the bare URL. There is no Accept negotiation, so each URL is a SINGLE
+	// representation and safe to edge-cache under the max-age set above. See
+	// docs/SPEC.md "The bare URL always serves the shell (no Accept
+	// negotiation)".
 	clientRendered := p.Kind == domain.KindMarkdown || p.Kind == domain.KindDiff
 	rawWanted := clientRendered && wantsRaw(r)
 
-	// The bare URL is a SINGLE representation (the shell), so it keeps the
-	// shared Cache-Control: public, max-age=3600 set above and is safe to
-	// edge-cache. There is no per-Accept variant, so the CDN hazard that the
-	// old no-store guarded against is gone at the root: a CDN keys on the URL
-	// (Cloudflare honors only Vary: Accept-Encoding, never Vary: Accept), but
-	// with one representation there is nothing to mis-pin. The explicit ?raw=1
-	// URL is a distinct single representation (always raw) and also stays
-	// max-age=3600. HTML pastes are not negotiated and stay cacheable. The
-	// tradeoff: the shell is now edge-cacheable, so a shell/style change (a
-	// mdShellVersion/diffShellVersion bump) propagates within max-age (1h) OR
-	// immediately via the deploy-time edge purge - acceptable since shell
-	// changes only ship on a deploy, which purges. See docs/SPEC.md "The bare
-	// URL always serves the shell (no Accept negotiation)".
-
-	// ETag is the content SHA for HTML and raw markdown/diff - content-
-	// addressed, byte-stable. Each shell uses its own shell version instead.
+	// ETag is the content SHA for HTML and raw markdown/diff. The shell is
+	// content-INDEPENDENT, so it validates on its shell version instead: two
+	// different pastes yield the same shell ETag, and a shell change
+	// propagates within max-age or immediately via the deploy-time purge.
 	etag := `"` + p.ContentSHA + `"`
 	if clientRendered && !rawWanted {
 		switch p.Kind {
@@ -330,7 +283,6 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	}
 	h.Set("ETag", etag)
 
-	// Conditional GET: 304 if either If-None-Match or If-Modified-Since says so.
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
@@ -344,28 +296,22 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 
 	switch p.Kind {
 	case domain.KindHTML:
-		// Stream the (decompressed) blob straight to the client. Avoids
-		// buffering up to ~10 MiB per GET; the spike scaled with
-		// concurrency on the small VPS. Headers above are already set;
-		// the body is byte-identical to a buffered Get + Write.
+		// Streamed so a GET never buffers the whole payload; the body is
+		// byte-identical to a buffered read + write.
 		rc, _, err := s.Blobs.Read(r.Context(), string(slug), p.ContentSHA)
 		if err != nil {
 			s.logf("warn: paste read 500: slug=%s html blob read: %v", slug, err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		defer rc.Close()
+		defer rc.Close() //nolint:errcheck
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.Copy(w, rc)
 	case domain.KindMarkdown:
-		// No server-side render. Either stream the raw bytes (the client
-		// asked for them) or serve the fixed shell that renders in the
-		// browser. Both keep server memory constant regardless of paste
-		// size, mirroring the HTML path.
+		// No server-side render: either the raw bytes or the shell that
+		// renders them in the browser. Both keep server memory constant
+		// regardless of paste size.
 		if rawWanted {
-			// Stream the raw markdown straight to the client - same
-			// streaming shape as the HTML case, so no full-payload
-			// allocation per GET.
 			rc, _, err := s.Blobs.Read(r.Context(), string(slug), p.ContentSHA)
 			if err != nil {
 				s.logf("warn: paste read 500: slug=%s raw markdown blob read: %v", slug, err)
@@ -377,25 +323,14 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 			_, _ = io.Copy(w, rc)
 			return
 		}
-		// Fixed client-render shell. The shell loads marked + DOMPurify
-		// and fetches the raw bytes itself (via ?raw=1). A tight CSP locks
-		// the page down: only same-origin scripts/styles/connects, no inline
-		// script, no framing.
-		//
-		// Cache-Control is the shared public, max-age=3600 set above: the bare
-		// URL is one representation (this shell, served to every client) so it
-		// is safe to edge-cache. A shell/style change (a restyle bumps
-		// mdShellVersion + the asset ?v=) propagates within max-age or
-		// immediately via the deploy-time edge purge.
+		// The shell loads marked + DOMPurify and fetches the raw bytes itself
+		// via ?raw=1, all same-origin under shellCSP.
 		h.Set("Content-Security-Policy", shellCSP)
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(shellHTML())
 	case domain.KindDiff:
-		// Identical shape to the markdown path: no server-side diffing.
-		// Either stream the raw diff bytes (the client asked for them) or
-		// serve the fixed shell that renders in the browser via diff2html +
-		// highlight.js. Both keep server memory constant regardless of
-		// paste size.
+		// Same shape as markdown: no server-side diffing, either the raw
+		// bytes or the shell that renders them via diff2html + highlight.js.
 		if rawWanted {
 			rc, _, err := s.Blobs.Read(r.Context(), string(slug), p.ContentSHA)
 			if err != nil {
@@ -404,20 +339,13 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 				return
 			}
 			defer func() { _ = rc.Close() }()
-			// Serve the diff as plain text so a curl / non-browser client
-			// sees it inline (the diff shell fetches these bytes itself).
+			// Plain text so a non-browser client sees the diff inline.
 			h.Set("Content-Type", "text/plain; charset=utf-8")
 			_, _ = io.Copy(w, rc)
 			return
 		}
-		// Fixed client-render shell. Same CSP as the markdown shell - only
-		// same-origin scripts/styles/connects (the vendored diff2html +
-		// highlight.js + bootstrap, and the ?raw fetch), no inline script,
-		// no framing. Cache-Control is the shared public, max-age=3600 set
-		// above: the bare URL is one representation (this shell, served to
-		// every client) so it is safe to edge-cache. A shell/style change (a
-		// diffShellVersion bump) propagates within max-age or immediately via
-		// the deploy-time edge purge.
+		// Same shellCSP as the markdown shell: the vendored diff2html +
+		// highlight.js + bootstrap and the ?raw fetch are all same-origin.
 		h.Set("Content-Security-Policy", shellCSP)
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(diffShellHTML())
@@ -427,12 +355,9 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	}
 }
 
-// loadingPageHTML is the body served for a pending paste. It
-// auto-refreshes every second (meta refresh, no JS required) until the
-// finalizer flips the paste to ready and a refresh lands on the content.
-// Kept tiny + on-brand: a centered monospace "preparing your paste" with
-// a subtle pulse. The 200 status + no-store cache make every refresh hit
-// the origin so the transition is seen promptly.
+// loadingPageHTML is the body served for a pending paste. The meta refresh
+// (no JS required) re-checks every second until the finalizer flips the paste
+// to ready.
 const loadingPageHTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -470,9 +395,8 @@ const loadingPageHTML = `<!doctype html>
 </html>
 `
 
-// failedPageHTML is the body served for a failed paste (the blob write
-// did not complete - object-store error or pod death mid-write). Same
-// on-brand monospace shell as the loading page, no auto-refresh.
+// failedPageHTML is the body served for a failed paste, one whose blob write
+// never completed. No auto-refresh: the content will never arrive.
 const failedPageHTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -501,9 +425,9 @@ const failedPageHTML = `<!doctype html>
 </html>
 `
 
-// servePending serves the loading page for a pending paste. 200 + no-store
-// so the meta-refresh always re-checks the origin (a cached 200 would
-// freeze the loading screen even after the paste went ready).
+// servePending serves the loading page for a pending paste. no-store is
+// required: a cached 200 freezes the loading screen even after the paste goes
+// ready.
 func (s *Server) servePending(w http.ResponseWriter, _ *http.Request) {
 	h := w.Header()
 	h.Set("X-Frame-Options", "DENY")
@@ -515,10 +439,9 @@ func (s *Server) servePending(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, loadingPageHTML)
 }
 
-// serveFailed serves the error page for a failed paste. 410 Gone: the
-// slug existed but its content will never arrive, which is exactly what
-// Gone means, and it keeps the failed paste out of any naive success
-// cache. no-store so a later re-upload to a (different) slug is unaffected.
+// serveFailed serves the error page for a failed paste. 410 Gone: the slug
+// existed but its content will never arrive, which also keeps the failed
+// paste out of any naive success cache.
 func (s *Server) serveFailed(w http.ResponseWriter, _ *http.Request) {
 	h := w.Header()
 	h.Set("X-Frame-Options", "DENY")
@@ -529,57 +452,49 @@ func (s *Server) serveFailed(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, failedPageHTML)
 }
 
-// serveSiteIfExists tries to serve reqPath from the static site owning
-// slug. Returns true if it handled the request (served a file, 404'd a
-// path inside an existing site, or 404'd an expired site) - the caller
-// must then return. Returns false ONLY when no site owns the slug, so
-// the caller can fall through to the paste path. This keeps the slug
-// namespace unified: one slug is either a site or a paste, never both.
+// serveSiteIfExists serves reqPath from the static site owning slug. True
+// means the request was handled and the caller must return. False is returned
+// ONLY when no site owns the slug, so the caller falls through to the paste
+// path: one slug is either a site or a paste, never both.
 func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug domain.Slug, reqPath string) bool {
 	if s.Sites == nil {
 		return false
 	}
 	site, err := s.Sites.Get(slug)
 	if err != nil {
-		// Not a site (or a read error) - fall through to the paste path.
-		// A storage error here is indistinguishable from "no such site"
-		// on purpose: we let the paste path try, and it will surface its
-		// own 404 / 500 if the slug isn't a paste either.
+		// A read error is deliberately indistinguishable from "no such site":
+		// the paste path tries next and surfaces its own 404 or 500.
 		return false
 	}
 	now := s.nowOrTime()
 	if !now.Before(site.ExpiresAt) {
-		// Expired: 404 here (we own the slug) rather than falling through.
+		// The slug is owned here, so an expired site 404s rather than falling
+		// through to the paste path.
 		http.NotFound(w, r)
 		return true
 	}
 
-	// SPA fallback: a direct manifest hit serves that file; a miss that
-	// looks like a client-side ROUTE (no extension or ".html") serves the
-	// site's ROOT index.html with a 200 so the SPA's JS loads and routes;
-	// a miss that looks like a missing static ASSET (a known asset
-	// extension) stays a 404. The decision is a pure domain function -
-	// see domain.Manifest.LookupWithSPAFallback + SPEC.md "SPA fallback
-	// (route vs. asset)". A fallback hit is served byte-identically to
-	// requesting "/" (same root index.html bytes, content-type, ETag, and
-	// 200 status); only the request path differs.
+	// SPA fallback: a manifest miss that looks like a client-side ROUTE (no
+	// extension, or ".html") serves the site's root index.html with a 200 so
+	// the SPA's JS loads and routes; a miss that looks like a static ASSET
+	// stays a 404. The decision is a pure domain function; see
+	// domain.Manifest.LookupWithSPAFallback + SPEC.md "SPA fallback (route
+	// vs. asset)". A fallback hit is byte-identical to requesting "/".
 	entry, hit, _ := site.Manifest.LookupWithSPAFallback(reqPath)
 	if !hit {
 		http.NotFound(w, r)
 		return true
 	}
 
-	// Same sandbox headers as an HTML paste read (files served RAW, secured
-	// by per-subdomain origin isolation, not by sanitizing the bytes).
+	// Site files are served RAW, secured by per-subdomain origin isolation
+	// rather than by sanitizing the bytes, so they carry the same sandbox
+	// headers as an HTML paste.
 	//
-	// Cache posture differs from a single-file paste: a site is multi-file,
-	// and a browser serves a site's sub-resources (its js/css) from cache
-	// without revalidating while they are fresh under max-age - so a
-	// re-deploy would not show until each asset's max-age expired (the
-	// classic SPA "stale bundle after deploy" trap). no-cache makes every
-	// site file revalidate via its content-SHA ETag on each load: a cheap
-	// 304 when the SHA is unchanged, fresh bytes when it changed. So a
-	// re-deploy is visible on the next normal reload, with no version-busting.
+	// no-cache, unlike a paste's max-age: under max-age a browser serves a
+	// site's sub-resources from cache without revalidating, so a re-deploy
+	// stays invisible until each asset expires (the SPA stale-bundle trap).
+	// no-cache revalidates every file against its content-SHA ETag: a cheap
+	// 304 when unchanged, fresh bytes when not.
 	h := w.Header()
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "no-referrer")
@@ -587,7 +502,6 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 	h.Set("Cache-Control", "public, no-cache")
 	h.Set("Last-Modified", site.UpdatedAt.UTC().Format(http.TimeFormat))
 
-	// ETag is the file's content SHA - content-addressed, byte-stable.
 	etag := `"` + entry.SHA + `"`
 	h.Set("ETag", etag)
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {
@@ -601,16 +515,14 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 		}
 	}
 
-	// Stream the (decompressed) site file straight to the client rather
-	// than buffering the whole asset per GET. Headers above are already
-	// set; the body is byte-identical to a buffered Get + Write.
+	// Streamed so a GET never buffers the whole asset.
 	rc, _, err := s.Blobs.Read(r.Context(), string(slug), entry.SHA)
 	if err != nil {
 		s.logf("warn: site read 500: slug=%s file blob read: %v", slug, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return true
 	}
-	defer rc.Close()
+	defer rc.Close() //nolint:errcheck
 	ct := entry.ContentType
 	if ct == "" {
 		ct = "application/octet-stream"
@@ -620,28 +532,24 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 	return true
 }
 
-// shellCSP is set on every client-render shell response (markdown and
-// diff). It locks the shell down: no default sources, scripts/styles/
-// connects only from the same origin (the vendored libs + bootstrap + the
-// ?raw fetch), images and media from anywhere (markdown can embed remote
-// images), no inline script, no framing, no form submission.
-// 'unsafe-inline' is allowed for styles only so the markdown's own inline
-// styles (which DOMPurify keeps) and the diff renderer's injected styles
-// render; scripts get no such escape hatch.
+// shellCSP locks down every client-render shell response: no default sources,
+// scripts/styles/connects same-origin only, no inline script, no framing, no
+// form submission. Images and media are unrestricted because markdown can
+// embed remote images. 'unsafe-inline' covers styles only, so the markdown's
+// own inline styles (which DOMPurify keeps) and the diff renderer's injected
+// styles render; scripts get no such escape hatch.
 const shellCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 // wantsRaw reports whether the client asked for the raw paste bytes rather
-// than the client-render shell (markdown or diff). True ONLY when the URL
-// carries an explicit ?raw query. There is no Accept-header negotiation: the
-// bare URL serves the shell to every client (browser, curl, link-unfurl bot)
-// so it is a single representation and safe to edge-cache. Raw bytes are an
-// explicit opt-in via ?raw (over HTTP) or `get` (over SSH).
+// than the client-render shell. True ONLY for an explicit ?raw query: there is
+// no Accept negotiation, so the bare URL is a single representation (the
+// shell, for every client) and safe to edge-cache.
 func wantsRaw(r *http.Request) bool {
 	return r.URL.Query().Has("raw")
 }
 
-// etagMatches checks if the client's If-None-Match header lists our
-// etag. Supports the comma-separated form and the "*" wildcard.
+// etagMatches reports whether an If-None-Match header lists etag. Handles the
+// comma-separated form and the "*" wildcard.
 func etagMatches(ifNoneMatch, etag string) bool {
 	if ifNoneMatch == "" {
 		return false
