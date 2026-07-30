@@ -141,13 +141,14 @@ func newPasteListItem(p domain.Paste, now time.Time) listItemView {
 }
 
 // newSiteListItem maps a domain.Site to a list item. Sites have no label and
-// no versions; SizeBytes is the deduped manifest total.
+// no versions; SizeBytes is what the quota charged, so a list sums to the
+// figure whoami reports.
 func newSiteListItem(s domain.Site, now time.Time) listItemView {
 	at, in := expiryFields(s.ExpiresAt, now)
 	return listItemView{
 		Slug:             string(s.Slug),
 		Name:             "",
-		SizeBytes:        s.Manifest.DedupedSize(),
+		SizeBytes:        s.StoredBytes,
 		Kind:             "site",
 		ExpiresAt:        at,
 		ExpiresInSeconds: in,

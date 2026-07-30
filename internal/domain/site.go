@@ -16,12 +16,19 @@ import (
 // content-addressed BlobStore dedupes identical files across deploys and
 // across sites for free.
 type Site struct {
-	Slug      Slug
-	Identity  Identity // owner; "key:<fp>" - quota AND ownership gate
-	Manifest  Manifest // path -> blob ref (sha + size + content-type)
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	ExpiresAt time.Time // UpdatedAt + Retention window (or NeverExpires)
+	Slug     Slug
+	Identity Identity // owner; "key:<fp>" - quota AND ownership gate
+	Manifest Manifest // path -> blob ref (sha + size + content-type)
+	// StoredBytes is what the quota charged for this site: the deduped total of
+	// the STORED (post-zstd) blob sizes, recorded at deploy.
+	//
+	// Carried on the Site rather than recomputed from Manifest because the
+	// per-entry compressed sizes are not persisted, so a loaded manifest cannot
+	// reproduce this figure. Zero on a Site that has not been read from storage.
+	StoredBytes int
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	ExpiresAt   time.Time // UpdatedAt + Retention window (or NeverExpires)
 }
 
 // ManifestEntry is one file in a site. ContentType is a function of the
