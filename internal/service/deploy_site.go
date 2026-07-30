@@ -353,14 +353,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	if err != nil {
 		return SiteResult{}, fmt.Errorf("sum site bytes: %w", err)
 	}
-	// Credit the target site's bytes back ONLY if it is still live: usedSite
-	// already excludes an expired-but-unswept row, so crediting an expired one
-	// would under-count and let the owner extract past the cap.
-	creditOld := int64(existing.Manifest.DedupedSize())
-	if !existing.ExpiresAt.After(now) {
-		creditOld = 0
-	}
-	budget := max(int64(domain.UserQuotaBytes)-int64(usedPaste)-(usedSite-creditOld), 0)
+	budget := siteExtractBudget(int64(domain.UserQuotaBytes), int64(usedPaste), usedSite, existing, now)
 
 	sink := &blobSink{blob: d.Blob, slug: string(slug)}
 	man, err := archive.Untar(body, sink, budget)
@@ -419,6 +412,28 @@ type blobSink struct {
 	blob    BlobUnit
 	slug    string
 	handles []BlobHandle
+}
+
+// siteExtractBudget is the byte budget for a replace deploy's untar guard: the
+// identity cap minus everything the owner holds, crediting back the site being
+// replaced.
+//
+// The credit is StoredBytes, the figure the deploy charged and usedSite sums.
+// It is NOT derivable from the manifest: per-entry compressed sizes are not
+// persisted, so a loaded manifest's CompressedDedupedSize is 0 and crediting it
+// would credit nothing, blocking an in-place update for an owner at their cap.
+// The uncompressed DedupedSize is the opposite error, subtracting more than was
+// ever charged and inflating the budget past the real remaining quota.
+//
+// An expired-but-unswept target is credited NOTHING: usedSite already excludes
+// it, so crediting it would subtract bytes that were never counted.
+func siteExtractBudget(cap, usedPaste, usedSite int64, existing domain.Site, now time.Time) int64 {
+	credit := int64(0)
+	if !domain.IsExpired(existing.ExpiresAt, now) {
+		credit = int64(existing.StoredBytes)
+	}
+	used := usedPaste + max(usedSite-credit, 0)
+	return domain.Allowance{Cap: cap, Used: used}.Remaining()
 }
 
 func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
