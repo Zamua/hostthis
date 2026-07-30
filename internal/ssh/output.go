@@ -115,13 +115,23 @@ type listItemView struct {
 	ExpiresAt        *string `json:"expires_at"`         // RFC3339, null when never-expires
 	ExpiresInSeconds *int64  `json:"expires_in_seconds"` // null when never-expires
 	ServedVersion    *int    `json:"served_version"`     // null for sites
-	LatestVersion    *int    `json:"latest_version"`     // null for sites
-	PinnedVersion    *int    `json:"pinned_version"`     // null for sites; 0 when unpinned
+	// ServedSizeBytes is the bytes of the version being SERVED, where SizeBytes
+	// is every live version (what the quota charges). Null for a site, which
+	// has no versions. Both are given so a consumer never has to infer which
+	// number it is holding: served_version alone cannot tell, since a deleted
+	// version leaves a paste charged for fewer versions than its number implies.
+	ServedSizeBytes *int `json:"served_size_bytes"`
+	// multiVersion marks a row whose STORED size exceeds the served version's,
+	// so the table can explain the difference. Unexported: display state.
+	multiVersion  bool
+	LatestVersion *int `json:"latest_version"` // null for sites
+	PinnedVersion *int `json:"pinned_version"` // null for sites; 0 when unpinned
 
 	expiresAt time.Time // raw expiry for merge-sort; not serialized
 }
 
 func newPasteListItem(p domain.Paste, now time.Time) listItemView {
+	servedSize := p.Size
 	at, in := expiryFields(p.ExpiresAt, now)
 	served := servedVersion(p.PinnedVersion, p.LatestVersion)
 	latest := p.LatestVersion
@@ -129,7 +139,9 @@ func newPasteListItem(p domain.Paste, now time.Time) listItemView {
 	return listItemView{
 		Slug:             string(p.Slug),
 		Name:             p.Name,
-		SizeBytes:        p.Size,
+		SizeBytes:        pasteStoredBytes(p),
+		ServedSizeBytes:  &servedSize,
+		multiVersion:     pasteStoredBytes(p) > p.Size,
 		Kind:             string(p.Kind),
 		ExpiresAt:        at,
 		ExpiresInSeconds: in,
@@ -172,6 +184,30 @@ func newListView(pastes []domain.Paste, sites []domain.Site, now time.Time) []li
 		return views[i].expiresAt.Before(views[j].expiresAt)
 	})
 	return views
+}
+
+// pasteStoredBytes is what the quota charges for a paste: every live version,
+// not just the served one.
+//
+// Falls back to the served version's size on a backend whose list read does not
+// carry the total. That understates a multi-version paste rather than reporting
+// zero, which is the safe direction for a display.
+func pasteStoredBytes(p domain.Paste) int {
+	if p.StoredBytes > 0 {
+		return p.StoredBytes
+	}
+	return p.Size
+}
+
+// MultiVersionNote reports whether any row is charged for more versions than it
+// serves, so the caller can explain a size that exceeds the served version.
+func MultiVersionNote(items []listItemView) bool {
+	for _, it := range items {
+		if it.multiVersion {
+			return true
+		}
+	}
+	return false
 }
 
 // versCol renders the table VERS column: "-" for an unversioned site, else the

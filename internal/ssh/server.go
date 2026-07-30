@@ -502,6 +502,8 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 	// tabwriter space-pads the columns so a long NAME cannot push every later
 	// column out of alignment.
 	tw := tabwriter.NewWriter(sess, 0, 0, 2, ' ', 0)
+	// SIZE is what the item COSTS the owner, which for a paste is every live
+	// version. That is what makes the column sum to whoami.
 	_, _ = fmt.Fprintln(tw, "SLUG\tNAME\tSIZE\tKIND\tEXPIRES_IN\tVERS")
 	for _, it := range items {
 		name := it.Name
@@ -513,6 +515,13 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 			humanExpiresIn(it.expiresAt, now), versCol(it))
 	}
 	_ = tw.Flush()
+	// Only when a row actually costs more than it serves. VERS shows the SERVED
+	// version number, not how many are stored, so it cannot explain the gap on
+	// its own: a paste at v3 with v1 deleted is charged for two.
+	if MultiVersionNote(items) {
+		_, _ = fmt.Fprintln(sess.Stderr(),
+			"\nSIZE counts every live version. Run `versions <slug>` for the per-version breakdown.")
+	}
 	_ = sess.Exit(ExitOK)
 }
 
