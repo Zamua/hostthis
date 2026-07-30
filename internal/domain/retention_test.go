@@ -70,3 +70,37 @@ func TestDefaultRetention(t *testing.T) {
 		t.Fatalf("DefaultRetention().Describe() = %q, want %q", r.Describe(), "30 days")
 	}
 }
+
+// The expiry boundary is INCLUSIVE: content expiring exactly now is expired.
+func TestIsExpired_Boundary(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+
+	if !IsExpired(now, now) {
+		t.Fatal("content whose ExpiresAt equals now must be expired (the boundary is inclusive); " +
+			"a `Before` spelling would serve it one tick past its lifetime")
+	}
+	if !IsExpired(now.Add(-time.Nanosecond), now) {
+		t.Fatal("content past its ExpiresAt must be expired")
+	}
+	if IsExpired(now.Add(time.Nanosecond), now) {
+		t.Fatal("content one tick short of its ExpiresAt must NOT be expired")
+	}
+}
+
+// The no-expiry policy must never read as expired. NeverExpires is a
+// far-future sentinel; had it been the zero time, this predicate would report
+// expired and the sweep would delete content that must never be deleted.
+func TestIsExpired_NeverExpiresSentinelIsNotExpired(t *testing.T) {
+	for _, now := range []time.Time{
+		time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC),
+		time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC),
+	} {
+		if IsExpired(NeverExpires, now) {
+			t.Fatalf("the NeverExpires sentinel must never read as expired, even at %v", now.Year())
+		}
+	}
+	if NeverExpires.IsZero() {
+		t.Fatal("NeverExpires must not be the zero time: IsExpired would report it expired and the " +
+			"sweep would reclaim content under a no-expiry policy")
+	}
+}

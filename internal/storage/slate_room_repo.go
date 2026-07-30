@@ -548,7 +548,7 @@ func (r *SlateRepo) SumActiveRoomBytes(now time.Time) (int64, error) {
 		if err := json.Unmarshal(item.Value, &row); err != nil {
 			return 0, fmt.Errorf("decode %s: %w", item.Key, err)
 		}
-		if !row.ExpiresAt.After(now) {
+		if domain.IsExpired(row.ExpiresAt, now) {
 			continue // expired-unswept rooms don't count (read-time exclusion)
 		}
 		appSlug, id, ok := parseRoomRecordKey(item.Key)
