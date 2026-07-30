@@ -107,7 +107,10 @@ type Result struct {
 
 // ErrOverQuota is returned when accepting the upload would push the
 // identity's total active COMPRESSED bytes above UserQuotaBytes.
-var ErrOverQuota = errors.New("service: would exceed your 10 MiB total quota; delete a paste or wait for one to expire")
+// Derived from the constant rather than hardcoded: a user told "10 MiB" while
+// the real limit is 100 MiB is worse served than by no number at all, and a
+// hardcoded string silently disagrees the moment the quota moves.
+var ErrOverQuota = fmt.Errorf("service: would exceed your %d MiB total quota; delete a paste or wait for one to expire", domain.UserQuotaBytes>>20)
 
 // ErrRawTooLarge is returned when the raw input exceeded the
 // 100 MiB hard fast-fail cap. The server stopped reading before any

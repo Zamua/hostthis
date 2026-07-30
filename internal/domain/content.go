@@ -38,16 +38,29 @@ var ErrUnsupportedKind = errors.New(
 // MaxPasteBytes is the universal per-paste size cap, measured in
 // COMPRESSED bytes (post-zstd, as written to the blob store). Equals
 // the per-identity quota (UserQuotaBytes) - there's only ever one
-// number to reason about: an identity has 10 MiB of stored content
+// number to reason about: an identity has 100 MiB of stored content
 // total. Highly redundant text (typical HTML/Markdown) compresses
 // 5–10× so users can upload ~50–100 MiB of raw text under this cap.
 const MaxPasteBytes = 10 << 20 // 10 MiB
 
+// UserQuotaBytes is DELIBERATELY larger than MaxPasteBytes above. The two were
+// equal historically on the reasoning that one number is easier to reason
+// about, but they constrain different things: a single upload is staged in RAM
+// before it is written, so MaxPasteBytes is what stops one request exhausting a
+// small node, while this is a fairness limit on accumulated storage that costs
+// nothing at request time. Raising the total does not imply raising the
+// per-request ceiling.
+//
 // UserQuotaBytes is the cap on the total compressed size of an
 // identity's active pastes (counting every non-deleted version).
 // "Identity" is the ssh key fingerprint for keyed uploads or the
 // client IP subnet for anonymous ones; either way, the same cap.
-const UserQuotaBytes = 10 << 20 // 10 MiB
+// A var, not a const, so tests can shrink it - the same pattern as
+// PendingPasteTimeout. Quota tests must drive a total over the limit, and with
+// the per-paste cap at 10 MiB that would otherwise mean generating and
+// compressing 100+ MiB of high-entropy data per test. Production never writes
+// to it.
+var UserQuotaBytes = 100 << 20 // 100 MiB
 
 // HardRawByteCap is the hard fast-fail cap on RAW input bytes - the
 // server stops reading after this many uncompressed bytes regardless

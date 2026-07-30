@@ -937,7 +937,7 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"\n" +
 	"LIMITS\n" +
 	"\n" +
-	"    10 MiB per identity, counting post-compression bytes across all\n" +
+	"    100 MiB per identity, counting post-compression bytes across all\n" +
 	"    your active pastes. HTML, Markdown, diff, or a gzip-tar site archive.\n" +
 	"\n" +
 	"    Apps can persist + sync state: https://paste.test/  (rooms + realtime API)\n"

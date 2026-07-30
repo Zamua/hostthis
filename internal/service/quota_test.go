@@ -3,6 +3,7 @@ package service_test
 import (
 	"bytes"
 	"errors"
+	"github.com/Zamua/hostthis/internal/domain"
 	"path/filepath"
 	"testing"
 	"time"
@@ -65,6 +66,7 @@ func htmlBody(n int) []byte {
 // in maps to ~1 byte out), making N-byte input ≈ N-byte quota cost.
 
 func TestQuota_BlocksOversum(t *testing.T) {
+	withSmallQuota(t, 10<<20)
 	upload, _, _ := newStack(t)
 	owner := "key:test-id"
 
@@ -77,6 +79,7 @@ func TestQuota_BlocksOversum(t *testing.T) {
 }
 
 func TestQuota_FreedByDelete(t *testing.T) {
+	withSmallQuota(t, 10<<20)
 	upload, manage, _ := newStack(t)
 	owner := "key:test-id"
 
@@ -98,6 +101,7 @@ func TestQuota_FreedByDelete(t *testing.T) {
 }
 
 func TestQuota_VersionsCount(t *testing.T) {
+	withSmallQuota(t, 10<<20)
 	upload, manage, _ := newStack(t)
 	owner := "key:test-id"
 
@@ -114,6 +118,7 @@ func TestQuota_VersionsCount(t *testing.T) {
 }
 
 func TestQuota_PerIdentityIndependent(t *testing.T) {
+	withSmallQuota(t, 10<<20)
 	upload, _, _ := newStack(t)
 
 	if _, err := upload.Create(bytes.NewReader(htmlBody(9_000_000)), "key:alice", "", ""); err != nil {
@@ -136,4 +141,19 @@ func TestQuota_PerPasteCapEqualsIdentityCap(t *testing.T) {
 	if _, err := upload.Create(bytes.NewReader(htmlBody(12<<20)), "key:id", "", ""); !errors.Is(err, service.ErrCompressedTooLarge) {
 		t.Fatalf("oversize paste should reject with ErrCompressedTooLarge, got %v", err)
 	}
+}
+
+// withSmallQuota shrinks the per-identity quota for one test and restores it.
+//
+// Needed because the quota is 100 MiB while a single paste is capped at 10 MiB:
+// driving a real over-quota condition at the production value would mean
+// generating and compressing 100+ MiB of high-entropy data per test. Shrinking
+// the limit tests the same logic - the enforcement path is identical at any
+// value - without the cost. Tests that assert on the PRODUCTION number should
+// read domain.UserQuotaBytes instead of hardcoding it.
+func withSmallQuota(t *testing.T, n int) {
+	t.Helper()
+	orig := domain.UserQuotaBytes
+	domain.UserQuotaBytes = n
+	t.Cleanup(func() { domain.UserQuotaBytes = orig })
 }

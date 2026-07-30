@@ -67,7 +67,7 @@ func TestGuard_PathTraversalRejected(t *testing.T) {
 				c.entry,
 			})
 			sink := newRecordingSink()
-			_, err := SafeUntar(bytes.NewReader(arc), sink, UserQuotaBytes)
+			_, err := SafeUntar(bytes.NewReader(arc), sink, int64(UserQuotaBytes))
 			if !errors.Is(err, ErrUnsafeArchive) {
 				t.Fatalf("%s: got %v, want ErrUnsafeArchive", c.name, err)
 			}
@@ -143,7 +143,7 @@ func TestGuard_ManifestPathTextCapRejected(t *testing.T) {
 		name := "dir" + pad6(i) + stem + ".html"
 		entries = append(entries, tarEntry{name: name, body: "x"})
 	}
-	_, err := SafeUntar(bytes.NewReader(makeGzipTar(t, entries)), newRecordingSink(), UserQuotaBytes)
+	_, err := SafeUntar(bytes.NewReader(makeGzipTar(t, entries)), newRecordingSink(), int64(UserQuotaBytes))
 	if !errors.Is(err, ErrTooManyFiles) {
 		t.Fatalf("manifest path-text cap: got %v, want ErrTooManyFiles", err)
 	}
@@ -162,7 +162,7 @@ func TestGuard_PerPathLengthCapRejected(t *testing.T) {
 		{name: "index.html", body: "<h1>ok</h1>"},
 		{name: long, body: "x"},
 	})
-	_, err := SafeUntar(bytes.NewReader(arc), newRecordingSink(), UserQuotaBytes)
+	_, err := SafeUntar(bytes.NewReader(arc), newRecordingSink(), int64(UserQuotaBytes))
 	if !errors.Is(err, ErrTooManyFiles) {
 		t.Fatalf("per-path length cap: got %v, want ErrTooManyFiles", err)
 	}
