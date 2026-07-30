@@ -9,6 +9,7 @@ import (
 )
 
 func TestDeleteVersion_FreesQuota(t *testing.T) {
+	withSmallQuota(t, 10<<20)
 	upload, manage, _ := newStack(t)
 	owner := "key:dv-quota"
 

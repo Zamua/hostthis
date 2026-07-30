@@ -54,6 +54,7 @@ func hugeGzipTar(t *testing.T, name string, n int) []byte {
 // to 64 MiB, far past the 10 MiB per-identity cap. The mid-untar guard
 // must abort it and the persistence step must never run.
 func TestGuard_DeployBombStoresNothing(t *testing.T) {
+	withSmallQuota(t, 10<<20)
 	d, sites, _ := deployFixture(t)
 	owner := "key:bomber"
 
@@ -156,4 +157,15 @@ func pad6svc(n int) string {
 		i--
 	}
 	return string(s)
+}
+
+// withSmallQuota shrinks the per-identity quota for one test and restores it.
+// Duplicated from the external test package because this file is package
+// service (internal) and cannot import it. See quota_test.go for why shrinking
+// beats generating 100+ MiB of high-entropy data per test.
+func withSmallQuota(t *testing.T, n int) {
+	t.Helper()
+	orig := domain.UserQuotaBytes
+	domain.UserQuotaBytes = n
+	t.Cleanup(func() { domain.UserQuotaBytes = orig })
 }

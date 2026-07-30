@@ -2496,19 +2496,26 @@ at the app layer, plus a durable total-bytes ceiling enforced one layer
 down at the object store (see "Durable total-bytes ceiling: an
 object-store quota" below).
 
-### Per-identity quota: 10 MiB (compressed)
+### Per-identity quota: 100 MiB (compressed)
 
 The sum of an identity's active pastes' COMPRESSED bytes (counting
 EVERY non-deleted version of an updated paste) cannot exceed
-`UserQuotaBytes` (10 MiB; not operator-configurable). "Identity" is
+`UserQuotaBytes` (100 MiB; not operator-configurable). "Identity" is
 the SHA256 fingerprint of the uploader's ssh public key. When pastes
 expire (30 days), get deleted, or have older versions explicitly
 deleted via `delete <slug> <ver>`, the cap frees up. Over-quota uploads
-error with `would exceed your 10 MiB total quota`.
+error with `would exceed your 100 MiB total quota`.
 
-This is the SAME 10 MiB as the per-paste cap - both count
-post-compression bytes, so the bookkeeping number is consistent
-everywhere. Static **sites** count against the same cap and on the same
+The per-identity quota and the per-paste cap are DELIBERATELY DIFFERENT
+numbers: 100 MiB total, 10 MiB for any single paste. They were equal
+historically, on the reasoning that one number is easier to reason
+about, but they constrain different things and one of them is bounded by
+memory rather than policy. A single upload is staged in RAM before it is
+written, so the per-paste cap is what protects a small node from one
+large request; the per-identity quota is a fairness limit on accumulated
+storage and costs nothing at request time. Raising the total therefore
+does not imply raising the per-request ceiling, and they should be
+expected to diverge again. Static **sites** count against the same cap and on the same
 basis: the deduped total of their files' COMPRESSED sizes (see "Static
 site archives → Quota"). A user can spend their quota as one 10 MiB
 paste, ten 1 MiB pastes, a static site, or any mix.
