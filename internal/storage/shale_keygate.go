@@ -128,10 +128,9 @@ func (r *ShaleRepo) SubnetSnapshot(subnet string, now time.Time, window time.Dur
 //
 // Reads the IDENTITY-leading index, so the cost is the number of subnets THIS
 // key has been seen in (1 for a normal user) rather than the number of keygate
-// rows in the entire cluster. It previously scanned the global keygate/ prefix
-// and filtered in Go, which returned the right answer at a cost that grew with
-// total admissions across all users - fine while the table was small, and
-// measured at 10-18s on an interactive command once it was not.
+// rows in the entire cluster. A scan of the global keygate/ prefix filtered in
+// Go returns the same answer at a cost that grows with total admissions across
+// ALL users.
 //
 // DISPLAY ONLY: reached from whoami via KeyGate.Inspect, which is called after
 // admit and discards its error. This gates nothing, so an index entry that has

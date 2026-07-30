@@ -102,8 +102,7 @@ type identityPasteRow struct {
 	// the row is removed (which for real corruption means an operator
 	// repair or raw-key delete - Delete/DeleteVersion/the sweep decode the
 	// same row, so no self-service path clears it; see the spec's operator
-	// note). omitempty keeps ordinary entries byte-shaped as before the
-	// field existed.
+	// note). omitempty keeps ordinary entries byte-shaped.
 	Placeholder bool `json:"placeholder,omitempty"`
 }
 
