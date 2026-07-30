@@ -10,32 +10,21 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// KeyGateRepo backs the Sybil rate limit - tracks first-seen pairs
-// of (identity, ip-subnet) and counts how many fresh fingerprints
-// have come from a subnet recently.
+// KeyGateRepo backs the Sybil rate limit: it records first-seen (identity,
+// ip-subnet) pairs and counts recent fresh fingerprints per subnet.
 type KeyGateRepo struct {
 	db *sql.DB
 }
 
 func NewKeyGateRepo(db *sql.DB) *KeyGateRepo { return &KeyGateRepo{db: db} }
 
-// AdmitNewKey is the atomic gate: in a single BEGIN IMMEDIATE
-// transaction it checks whether (identity, subnet) is already known
-// (returning success immediately if so), or, if it's new, counts how
-// many distinct fresh fingerprints have appeared from this subnet in
-// the last `window` and either admits (recording the first-seen row)
-// or rejects.
+// AdmitNewKey is the atomic gate. A known (identity, subnet) pair returns
+// knownAlready=true with no rate-limit bookkeeping; a fresh one is admitted
+// (recording its first-seen row) or rejected with ErrTooManyNewKeys once the
+// subnet has limitPerSubnet fresh fingerprints inside window.
 //
-// Returns:
-//   - knownAlready=true,  err=nil  → returning user, no rate-limit
-//     bookkeeping needed
-//   - knownAlready=false, err=nil  → new fingerprint admitted, row
-//     recorded
-//   - knownAlready=false, err=ErrTooManyNewKeys → rate-limited
-//     (caller surfaces this to the user)
-//
-// The check + insert is one transaction so two concurrent fresh keys
-// from the same subnet can't both win the last slot.
+// The count and the insert are one BEGIN IMMEDIATE transaction, so two
+// concurrent fresh keys from one subnet cannot both win the last slot.
 func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPerSubnet int, window time.Duration) (knownAlready bool, err error) {
 	if identity == "" || subnet == "" {
 		return false, fmt.Errorf("identity + subnet required")
@@ -47,7 +36,6 @@ func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitP
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Already known? Fast path - no rate-limit accounting.
 	var seenAt sql.NullString
 	if err := tx.QueryRow(`SELECT first_seen_at FROM key_first_seen WHERE identity = ? AND ip_subnet = ?`, identity, subnet).Scan(&seenAt); err == nil {
 		return true, tx.Commit()
@@ -55,8 +43,7 @@ func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitP
 		return false, fmt.Errorf("lookup: %w", err)
 	}
 
-	// Fresh key - count current fresh-key rows from this subnet
-	// within the window.
+	// Fresh key: count this subnet's in-window fresh-key rows.
 	windowStart := now.Add(-window)
 	var freshCount int
 	if err := tx.QueryRow(`
@@ -69,7 +56,6 @@ func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitP
 		return false, ErrTooManyNewKeys
 	}
 
-	// Admit + record.
 	if _, err := tx.Exec(`
 		INSERT INTO key_first_seen (identity, ip_subnet, first_seen_at)
 		VALUES (?, ?, ?)
@@ -79,9 +65,8 @@ func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitP
 	return false, tx.Commit()
 }
 
-// SubnetSnapshot returns (freshCount, oldestFirstSeen) for in-window
-// rows from subnet. Empty subnet → (0, zero-time, nil). See the
-// service-layer KeyGateRepo interface for usage.
+// SubnetSnapshot returns the fresh count and oldest first-seen across a
+// subnet's in-window rows. An empty subnet yields (0, zero-time, nil).
 func (r *KeyGateRepo) SubnetSnapshot(subnet string, now time.Time, window time.Duration) (int, time.Time, error) {
 	windowStart := now.Add(-window)
 	var count int
@@ -114,10 +99,9 @@ func (r *KeyGateRepo) SubnetsForIdentity(identity string, now time.Time, window 
 	return n, nil
 }
 
-// DeleteFirstSeenOlderThan removes key_first_seen rows whose
-// first_seen_at is before cutoff. Such rows can never contribute to
-// the rate-limit count again - they're past the window - so they're
-// safe to drop. Without this, the table grows forever.
+// DeleteFirstSeenOlderThan removes key_first_seen rows older than cutoff. Past
+// the window they can never contribute to a rate-limit count again, and without
+// the prune the table grows forever.
 func (r *KeyGateRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 	res, err := r.db.Exec(`DELETE FROM key_first_seen WHERE first_seen_at < ?`, formatTime(cutoff))
 	if err != nil {
@@ -127,12 +111,11 @@ func (r *KeyGateRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 	return int(n), nil
 }
 
-// ErrTooManyNewKeys is returned by AdmitNewKey when the subnet has
-// hit its fresh-key quota for the window. Alias of the domain-owned
-// sentinel (see internal/domain/errors.go).
+// ErrTooManyNewKeys is returned by AdmitNewKey when the subnet has hit its
+// fresh-key quota for the window. Alias of the domain sentinel.
 var ErrTooManyNewKeys = domain.ErrTooManyNewKeys
 
-// txSerializable asks the modernc sqlite driver to issue
-// BEGIN IMMEDIATE - exclusive write lock at transaction start so
-// concurrent transactions serialize from the very first statement.
+// txSerializable makes the modernc sqlite driver issue BEGIN IMMEDIATE: an
+// exclusive write lock at transaction start, so concurrent transactions
+// serialize from the very first statement.
 var txSerializable = sql.TxOptions{Isolation: sql.LevelSerializable}

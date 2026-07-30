@@ -13,11 +13,9 @@ func TestDeleteVersion_FreesQuota(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	owner := "key:dv-quota"
 
-	// Sequence:
-	//   v1 = 3M, v2 = 6M  → paste now uses 9M of quota (v2 serves, v1 idle)
-	//   try v3 = 3M       → would be 12M total, ErrOverQuota
-	//   delete-version v1 → frees 3M, total = 6M
-	//   v3 = 3M           → fits (total 9M)
+	// v1 = 3M, v2 = 6M -> 9M used (v2 serves, v1 idle)
+	// v3 = 3M would total 12M -> ErrOverQuota
+	// delete-version v1 frees 3M -> 6M, so v3 then fits at 9M
 	r, err := upload.Create(bytes.NewReader(htmlBody(3_000_000)), owner, "", "")
 	if err != nil {
 		t.Fatalf("create v1: %v", err)
@@ -25,7 +23,7 @@ func TestDeleteVersion_FreesQuota(t *testing.T) {
 	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(6_000_000)), ""); err != nil {
 		t.Fatalf("update v2: %v", err)
 	}
-	// Baseline - v3 attempt should fail before delete-version.
+	// Baseline: the v3 attempt fails before delete-version.
 	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(3_000_000)), ""); !errors.Is(err, service.ErrOverQuota) {
 		t.Fatalf("expected over-quota baseline, got %v", err)
 	}
@@ -49,7 +47,7 @@ func TestDeleteVersion_RefusesCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	// v1 is the only version - currently served. Refuse.
+	// v1 is the only version, so it is the served one.
 	_, err = manage.DeleteVersion(r.Paste.Slug, owner, 1)
 	if !errors.Is(err, service.ErrVersionCurrentlyServed) {
 		t.Fatalf("expected ErrVersionCurrentlyServed, got %v", err)
@@ -66,11 +64,10 @@ func TestDeleteVersion_RefusesPinnedCurrent(t *testing.T) {
 	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(1000)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	// Pin to v1 - now v1 is the served version (even though v2 is newer).
+	// Pinning makes v1 the served version even though v2 is newer.
 	if _, err := manage.Pin(r.Paste.Slug, owner, 1); err != nil {
 		t.Fatalf("pin: %v", err)
 	}
-	// Refuse to delete v1 (pinned = served).
 	if _, err := manage.DeleteVersion(r.Paste.Slug, owner, 1); !errors.Is(err, service.ErrVersionCurrentlyServed) {
 		t.Fatalf("expected ErrVersionCurrentlyServed for pinned v1, got %v", err)
 	}
@@ -127,7 +124,6 @@ func TestDeleteVersion_VersionsListShowsTombstone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Versions: %v", err)
 	}
-	// v1 should be present + flagged deleted.
 	found := false
 	for _, v := range vers {
 		if v.VerNum == 1 {

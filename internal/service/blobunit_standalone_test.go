@@ -13,8 +13,8 @@ import (
 )
 
 // newStandaloneUnit builds a StandaloneBlobUnit over a real compressed disk
-// blob store (the same stack production wires), so these characterization
-// tests exercise the seam end-to-end with no mocks and no network.
+// blob store, the same stack the composition root wires, so the seam is
+// exercised end to end with no mocks and no network.
 func newStandaloneUnit(t *testing.T) (*StandaloneBlobUnit, *storage.CompressedBlobStore) {
 	t.Helper()
 	disk, err := storage.NewBlobStore(filepath.Join(t.TempDir(), "blobs"))
@@ -25,10 +25,9 @@ func newStandaloneUnit(t *testing.T) (*StandaloneBlobUnit, *storage.CompressedBl
 	return NewStandaloneBlobUnit(store), store
 }
 
-// stage encodes raw bytes the way the streaming upload pipeline does
-// (magic+zstd) and stages them, returning the content sha + handle. The
-// upload service stages an already-encoded body, so the seam's Stage takes
-// precompressed bytes - we reuse streamUpload to produce them.
+// stage encodes raw bytes the way the streaming upload pipeline does and stages
+// them. Stage takes precompressed bytes because the upload service always hands
+// it an already-encoded body, so streamUpload produces them here too.
 func stage(t *testing.T, u *StandaloneBlobUnit, slug string, raw []byte) (string, BlobHandle) {
 	t.Helper()
 	staged, err := streamUpload(bytes.NewReader(raw))
@@ -42,9 +41,8 @@ func stage(t *testing.T, u *StandaloneBlobUnit, slug string, raw []byte) (string
 	return staged.SHA, h
 }
 
-// TestStandalone_StageRead_RoundTrip pins that bytes staged through the seam
-// read back DECOMPRESSED and byte-identical via both Read (streaming) and
-// ReadAll (buffered) - the contract the upload/serve paths rely on.
+// Staged bytes read back DECOMPRESSED and byte-identical through both Read
+// (streaming) and ReadAll (buffered).
 func TestStandalone_StageRead_RoundTrip(t *testing.T) {
 	u, _ := newStandaloneUnit(t)
 	raw := []byte("<!doctype html><h1>round trip</h1>")
@@ -74,9 +72,8 @@ func TestStandalone_StageRead_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestStandalone_StageStream_RoundTrip pins the streaming-stage path (the
-// site deploy sink): bytes streamed in through StageStream (uncompressed,
-// the store compresses) read back identical.
+// The streaming-stage path used by the site deploy sink round-trips: bytes go
+// in uncompressed through StageStream and read back identical.
 func TestStandalone_StageStream_RoundTrip(t *testing.T) {
 	u, _ := newStandaloneUnit(t)
 	raw := []byte("body{margin:0}\n/* a stylesheet a site file would carry */")
@@ -94,14 +91,12 @@ func TestStandalone_StageStream_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestStandalone_Commit_RunsMetaWrite pins that Commit runs the metadata
-// closure exactly once and returns its error verbatim (success + failure),
-// so the callers' retry/translate switches see it unchanged.
+// Commit runs the metadata closure exactly once and returns its error verbatim,
+// so a caller's retry/translate switch sees it unchanged.
 func TestStandalone_Commit_RunsMetaWrite(t *testing.T) {
 	u, _ := newStandaloneUnit(t)
 	_, h := stage(t, u, "slug0002", []byte("<p>commit</p>"))
 
-	// Success: metaWrite runs, nil error.
 	calls := 0
 	if err := u.Commit(context.Background(), []BlobHandle{h}, func(context.Context) error {
 		calls++
@@ -113,7 +108,6 @@ func TestStandalone_Commit_RunsMetaWrite(t *testing.T) {
 		t.Fatalf("metaWrite call count: got %d, want 1", calls)
 	}
 
-	// Failure: Commit returns metaWrite's error unchanged.
 	sentinel := errors.New("metadata write failed")
 	if err := u.Commit(context.Background(), []BlobHandle{h}, func(context.Context) error {
 		return sentinel
@@ -122,10 +116,8 @@ func TestStandalone_Commit_RunsMetaWrite(t *testing.T) {
 	}
 }
 
-// TestStandalone_UnbindOnDelete_IsNoop pins that UnbindOnDelete does NOT
-// remove the bytes on the standalone path: the blob is still readable after
-// it, because the global content-addressed sweep (not a per-record unbind)
-// owns reclamation here.
+// UnbindOnDelete does NOT remove bytes on the standalone path: the global
+// content-addressed sweep owns reclamation, not a per-record unbind.
 func TestStandalone_UnbindOnDelete_IsNoop(t *testing.T) {
 	u, _ := newStandaloneUnit(t)
 	raw := []byte("<p>still here after unbind</p>")
@@ -143,9 +135,8 @@ func TestStandalone_UnbindOnDelete_IsNoop(t *testing.T) {
 	}
 }
 
-// TestStandalone_Read_NotFound pins that reading a sha that was never staged
-// surfaces storage.ErrNotFound through the seam (the read path turns this
-// into a 404 / loading retry upstream).
+// Reading a never-staged sha surfaces storage.ErrNotFound through the seam,
+// which upstream turns into a 404 or a loading retry.
 func TestStandalone_Read_NotFound(t *testing.T) {
 	u, _ := newStandaloneUnit(t)
 	if _, _, err := u.Read(context.Background(), "slug0004", "deadbeef"); !errors.Is(err, storage.ErrNotFound) {

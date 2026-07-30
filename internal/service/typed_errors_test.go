@@ -1,19 +1,16 @@
 package service
 
-// Pins for the typed error detectors that replaced the string-sniffing
-// ones (isSlugTaken, isStorageRateLimitErr, isCrossShard). Each detector
-// gets BOTH directions pinned:
+// Pins for the typed error detectors (isSlugTaken, isStorageRateLimitErr,
+// isCrossShard). Each detector gets BOTH directions pinned:
 //
-//   - a text LOOKALIKE (an unrelated error whose message happens to
-//     contain the sniffed substring) must NOT classify - the old
-//     string-sniff misfired on these;
-//   - the real sentinel, bare AND %w-wrapped, MUST classify - identity
-//     survives any wrapping the storage layers add.
+//   - a text LOOKALIKE (an unrelated error whose message contains the substring
+//     a text match would key on) must NOT classify;
+//   - the real sentinel, bare AND %w-wrapped, MUST classify: identity survives
+//     any wrapping the storage layers add.
 //
-// Where the classification has a behavioral consequence (remint vs
-// surface, Sybil refusal vs generic error, deploy-failed translation vs
-// verbatim), the consequence is pinned through the service entry point,
-// not just the boolean.
+// Where the classification has a behavioral consequence (remint vs surface,
+// Sybil refusal vs generic error, deploy-failed translation vs verbatim), the
+// consequence is pinned through the service entry point, not just the boolean.
 
 import (
 	"bytes"
@@ -35,9 +32,9 @@ func TestIsSlugTaken_Classification(t *testing.T) {
 		err  error
 		want bool
 	}{
-		// The misfire the string-sniff allowed: unrelated error text that
-		// happens to contain "slug" must not read as a collision (a remint
-		// would silently swallow the real error and burn the retry budget).
+		// Unrelated error text containing "slug" must not read as a collision:
+		// a remint would silently swallow the real error and burn the retry
+		// budget.
 		{"text lookalike does not misfire", fmt.Errorf("room slug validation failed"), false},
 		{"nil", nil, false},
 		{"unrelated error", errors.New("disk on fire"), false},
@@ -73,11 +70,10 @@ func (r *slugLookalikeErrRepo) MarkReady(domain.Slug) error  { return nil }
 func (r *slugLookalikeErrRepo) MarkFailed(domain.Slug) error { return nil }
 
 // TestUpload_Create_LookalikeErrorIsNotARemint pins the classification
-// CONSEQUENCE: an insert failure whose text contains "slug" but is not
-// the sentinel must surface VERBATIM from Create, after exactly one
-// attempt. Under the old string-sniff it triggered the remint loop:
-// five wasted re-mints and a bogus "slug taken (after retries)" to the
-// user, hiding the real failure.
+// CONSEQUENCE: an insert failure whose text contains "slug" but is not the
+// sentinel surfaces VERBATIM from Create, after exactly one attempt. Classified
+// as a collision it would instead burn the whole remint budget and report a
+// bogus "slug taken (after retries)", hiding the real failure.
 func TestUpload_Create_LookalikeErrorIsNotARemint(t *testing.T) {
 	repo := &slugLookalikeErrRepo{}
 	u := NewUpload(repo, NewStandaloneBlobUnit(newFakeBlobs()))
@@ -126,9 +122,8 @@ func (f *fakeKeyGateRepo) SubnetsForIdentity(string, time.Time, time.Duration) (
 //   - any other repo error -> surfaced verbatim, NOT a Sybil refusal,
 //     and the snapshot is never consulted.
 //
-// The wrapped-sentinel row is the hardening: the old detector compared
-// err.Error() against the exact sentinel text, so ANY wrapping by a
-// backend demoted a real rate-limit to a generic 500-class error.
+// The wrapped-sentinel row matters: a comparison against the sentinel's exact
+// text would demote any backend-wrapped rate-limit to a generic 500-class error.
 func TestKeyGateAdmit_RateLimitClassification(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -171,24 +166,21 @@ func TestKeyGateAdmit_RateLimitClassification(t *testing.T) {
 
 // --- 2c: isCrossShard --------------------------------------------------------
 
-// TestFinalizeDeploy_CrossShardClassification pins the defensive
-// translation boundary in finalizeDeploy:
+// TestFinalizeDeploy_CrossShardClassification pins the defensive translation
+// boundary in finalizeDeploy:
 //
-//   - a genuine cross-shard commit rejection - the domain sentinel the
-//     shale storage layer translates the backend guard error into,
-//     under any further wrapping - maps to ErrDeployFailed, so the raw
-//     backend text never reaches the SSH client;
-//   - an unrelated error whose TEXT contains "cross-shard" (say a user
-//     file named cross-shard.txt in a failing blob put) surfaces
-//     verbatim. The old substring sniff misfired here, masking the real
-//     error behind "site deploy failed".
+//   - a genuine cross-shard commit rejection (the domain sentinel the shale
+//     storage layer translates the backend guard error into, under any further
+//     wrapping) maps to ErrDeployFailed, so the raw backend text never reaches
+//     the SSH client;
+//   - an unrelated error whose TEXT contains "cross-shard" (say a user file
+//     named cross-shard.txt in a failing blob put) surfaces verbatim.
 func TestFinalizeDeploy_CrossShardClassification(t *testing.T) {
 	site := domain.Site{Slug: "testslug"}
 
-	// The faithfully-constructed storage-path shape: the backend guard
-	// sentinel translated into the domain sentinel at the storage
-	// boundary (both kept in the chain), then wrapped again by an outer
-	// layer - identity must survive every layer.
+	// The storage-path shape: the backend guard sentinel translated into the
+	// domain sentinel at the storage boundary (both kept in the chain), then
+	// wrapped again by an outer layer. Identity must survive every layer.
 	backendGuard := errors.New("backend: cross-shard transaction not supported")
 	translated := fmt.Errorf("%w: %w", domain.ErrCrossShardDeploy, backendGuard)
 	outer := fmt.Errorf("insert site: %w", translated)
@@ -204,8 +196,7 @@ func TestFinalizeDeploy_CrossShardClassification(t *testing.T) {
 		t.Fatalf("finalizeDeploy(cross-shard) = %v; cause must be rendered, not re-wrapped", err)
 	}
 
-	// The misfire case: cross-shard TEXT without the sentinel surfaces
-	// verbatim (it is not a cross-shard commit rejection).
+	// cross-shard TEXT without the sentinel is not a commit rejection.
 	lookalike := fmt.Errorf("blob put %q: upstream rejected", "cross-shard.txt")
 	_, err = finalizeDeploy(site, lookalike)
 	if !errors.Is(err, lookalike) {

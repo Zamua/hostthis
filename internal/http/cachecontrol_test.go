@@ -8,15 +8,12 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// These tests pin the CDN-cache posture (issue #5, superseding #3). The bare
-// URL of a client-rendered kind (markdown, diff) is a SINGLE representation -
-// the render shell, served to every client regardless of Accept. It does NOT
-// content-negotiate, so it is safe to edge-cache (public, max-age=3600). Raw
-// bytes are an explicit opt-in via ?raw=1 (also public, max-age=3600, a
-// distinct single representation). A non-negotiated HTML paste is unchanged.
+// These tests pin the CDN-cache posture. The bare URL of a client-rendered kind
+// (markdown, diff) serves one representation, the render shell, to every client
+// regardless of Accept: no content negotiation, so it is safe to edge-cache
+// (public, max-age=3600). Raw bytes are an explicit opt-in via ?raw=1, a
+// distinct single representation with the same posture.
 
-// cachePosture serves slug with the given Accept header and returns the
-// response Cache-Control + Content-Type.
 func cachePosture(t *testing.T, p domain.Paste, body []byte, target, accept string) (cacheControl, contentType string) {
 	t.Helper()
 	now := time.Date(2026, 6, 27, 14, 0, 0, 0, time.UTC)
@@ -42,7 +39,6 @@ func TestBareURL_Shell_Markdown(t *testing.T) {
 	p := mdPaste("abc23456", sha, now)
 	body := []byte("# hello\n\nbody")
 
-	// Bare URL, browser Accept -> shell, edge-cacheable.
 	cc, ct := cachePosture(t, p, body, "/p/abc23456", "text/html,application/xhtml+xml")
 	if ct != "text/html; charset=utf-8" {
 		t.Fatalf("bare browser Accept: Content-Type %q, want the shell (text/html)", ct)
@@ -51,8 +47,6 @@ func TestBareURL_Shell_Markdown(t *testing.T) {
 		t.Errorf("bare browser Accept: Cache-Control %q, want public, max-age=3600 (single representation, edge-cacheable)", cc)
 	}
 
-	// Bare URL, non-html Accept (curl/bot) -> STILL the shell, edge-cacheable.
-	// This is the key behavior change: the bare URL does not content-negotiate.
 	cc, ct = cachePosture(t, p, body, "/p/abc23456", "*/*")
 	if ct != "text/html; charset=utf-8" {
 		t.Fatalf("bare non-html Accept: Content-Type %q, want the shell (text/html) - the bare URL does not content-negotiate", ct)
@@ -61,7 +55,6 @@ func TestBareURL_Shell_Markdown(t *testing.T) {
 		t.Errorf("bare non-html Accept: Cache-Control %q, want public, max-age=3600 (single representation, edge-cacheable)", cc)
 	}
 
-	// Explicit ?raw=1 -> raw bytes, stays edge-cacheable.
 	cc, ct = cachePosture(t, p, body, "/p/abc23456?raw=1", "text/html")
 	if ct != "text/markdown; charset=utf-8" {
 		t.Fatalf("?raw=1: Content-Type %q, want raw (text/markdown)", ct)
@@ -77,7 +70,6 @@ func TestBareURL_Shell_Diff(t *testing.T) {
 	p := diffPaste("abc23456", sha, now)
 	body := []byte(sampleDiff)
 
-	// Bare URL, browser Accept -> shell, edge-cacheable.
 	cc, ct := cachePosture(t, p, body, "/p/abc23456", "text/html,application/xhtml+xml")
 	if ct != "text/html; charset=utf-8" {
 		t.Fatalf("bare browser Accept: Content-Type %q, want the diff shell (text/html)", ct)
@@ -86,7 +78,6 @@ func TestBareURL_Shell_Diff(t *testing.T) {
 		t.Errorf("bare browser Accept: Cache-Control %q, want public, max-age=3600 (single representation, edge-cacheable)", cc)
 	}
 
-	// Bare URL, non-html Accept (curl/bot) -> STILL the diff shell, edge-cacheable.
 	cc, ct = cachePosture(t, p, body, "/p/abc23456", "*/*")
 	if ct != "text/html; charset=utf-8" {
 		t.Fatalf("bare non-html Accept: Content-Type %q, want the diff shell (text/html) - the bare URL does not content-negotiate", ct)
@@ -95,7 +86,6 @@ func TestBareURL_Shell_Diff(t *testing.T) {
 		t.Errorf("bare non-html Accept: Cache-Control %q, want public, max-age=3600 (single representation, edge-cacheable)", cc)
 	}
 
-	// Explicit ?raw=1 -> raw diff bytes, stays edge-cacheable.
 	cc, ct = cachePosture(t, p, body, "/p/abc23456?raw=1", "text/html")
 	if ct != "text/plain; charset=utf-8" {
 		t.Fatalf("?raw=1: Content-Type %q, want raw diff (text/plain)", ct)
@@ -105,8 +95,8 @@ func TestBareURL_Shell_Diff(t *testing.T) {
 	}
 }
 
-// TestBareURL_HTMLPaste_Cacheable confirms an HTML paste's bare URL stays
-// edge-cacheable: HTML is not content-negotiated (one representation).
+// TestBareURL_HTMLPaste_Cacheable pins that an HTML paste's bare URL stays
+// edge-cacheable: HTML is not content-negotiated either.
 func TestBareURL_HTMLPaste_Cacheable(t *testing.T) {
 	now := time.Date(2026, 6, 27, 14, 0, 0, 0, time.UTC)
 	p := domain.Paste{

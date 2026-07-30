@@ -25,10 +25,9 @@ func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
 
 const wsTestApex = "hostthis.test"
 
-// wsTestServer wires a Server with a real Rooms service over a real sqlite
-// repo AND a relay, fronted by an httptest.Server so tests can dial real
-// WebSocket connections through the full mux + upgrade handler. The
-// returned relay lets a test tune heartbeat timing for the reap test.
+// wsTestServer wires a real Rooms service over a real sqlite repo plus a relay,
+// fronted by an httptest.Server, so tests dial real WebSocket connections
+// through the full mux + upgrade handler.
 func wsTestServer(t *testing.T, limits relay.Limits) (*httptest.Server, *service.Rooms, *relay.Relay) {
 	t.Helper()
 	dir := t.TempDir()
@@ -50,8 +49,7 @@ func wsTestServer(t *testing.T, limits relay.Limits) (*httptest.Server, *service
 	return ts, rooms, rl
 }
 
-// mkRoom creates a room directly through the service (no HTTP) and returns
-// its id string.
+// mkRoom creates a room directly through the service, bypassing HTTP.
 func mkRoom(t *testing.T, rooms *service.Rooms, slug string) string {
 	t.Helper()
 	room, err := rooms.Create(domain.Slug(slug), "203.0.113.0/24")
@@ -61,18 +59,15 @@ func mkRoom(t *testing.T, rooms *service.Rooms, slug string) string {
 	return room.ID.String()
 }
 
-// wsURL builds the relay URL for an httptest server + room. The scheme is
-// ws://; the path is the subdomain-mode path (/api/rooms/<id>/ws) and the
-// dial sets the Host to the app subdomain so slugFromHost resolves the
-// slug and the Origin policy treats it as same-origin. (Subdomain mode is
-// the production mode; the test exercises it directly.)
+// wsURL builds the subdomain-mode relay URL. The slug is not in the path: the
+// dial's Host header is what slugFromHost resolves, and what makes the Origin
+// policy read the request as same-origin.
 func wsURL(ts *httptest.Server, _ /*slug*/, id string) string {
 	base := strings.Replace(ts.URL, "http://", "ws://", 1)
 	return base + "/api/rooms/" + id + "/ws"
 }
 
-// dial opens a relay WebSocket against ts for (slug, id). It sets the Host
-// to the app subdomain so the Origin check is satisfied.
+// dial opens a relay WebSocket against ts for (slug, id).
 func dial(t *testing.T, ctx context.Context, ts *httptest.Server, slug, id string) *websocket.Conn {
 	t.Helper()
 	c, _, err := websocket.Dial(ctx, wsURL(ts, slug, id), &websocket.DialOptions{
@@ -81,15 +76,13 @@ func dial(t *testing.T, ctx context.Context, ts *httptest.Server, slug, id strin
 	if err != nil {
 		t.Fatalf("dial %s/%s: %v", slug, id, err)
 	}
-	// Raise the CLIENT-side read limit (default 32 KiB) so the test client
-	// accepts the larger server frames the backpressure test sends. This is
-	// a test-harness concern, separate from the server's MaxMessageBytes cap
-	// on INBOUND frames.
+	// Raise the CLIENT read limit (default 32 KiB) for the larger frames the
+	// backpressure test sends. Unrelated to the server's MaxMessageBytes cap,
+	// which bounds INBOUND frames.
 	c.SetReadLimit(1 << 20)
 	return c
 }
 
-// readJSON reads one text frame and decodes it into a generic envelope.
 func readJSON(t *testing.T, ctx context.Context, c *websocket.Conn) map[string]any {
 	t.Helper()
 	_, data, err := c.Read(ctx)
@@ -103,8 +96,7 @@ func readJSON(t *testing.T, ctx context.Context, c *websocket.Conn) map[string]a
 	return m
 }
 
-// expectSnapshot reads the first frame and asserts it is the snapshot
-// envelope, returning its state map.
+// expectSnapshot asserts the next frame is the snapshot and returns its state.
 func expectSnapshot(t *testing.T, ctx context.Context, c *websocket.Conn) map[string]any {
 	t.Helper()
 	m := readJSON(t, ctx, c)
@@ -123,15 +115,13 @@ func TestRelay_BroadcastReachesPeersNotSender(t *testing.T) {
 	defer cancel()
 
 	a := dial(t, ctx, ts, slug, id)
-	defer a.CloseNow()
+	defer a.CloseNow() //nolint:errcheck
 	b := dial(t, ctx, ts, slug, id)
-	defer b.CloseNow()
-	// Drain both snapshots (empty room).
+	defer b.CloseNow() //nolint:errcheck
 	expectSnapshot(t, ctx, a)
 	expectSnapshot(t, ctx, b)
 
-	// A sends a raw relay frame; B must receive it verbatim, A must NOT see
-	// its own message.
+	// B must receive A's frame verbatim; A must not see its own.
 	if err := a.Write(ctx, websocket.MessageText, []byte("cursor:10,20")); err != nil {
 		t.Fatalf("a write: %v", err)
 	}
@@ -143,8 +133,7 @@ func TestRelay_BroadcastReachesPeersNotSender(t *testing.T) {
 		t.Fatalf("b got %q, want the verbatim relayed frame", got)
 	}
 
-	// A must not have received its own frame: a short-deadline read times
-	// out (nothing queued for A).
+	// Nothing queued for A, so a short-deadline read times out.
 	shortCtx, scancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer scancel()
 	if _, _, err := a.Read(shortCtx); err == nil {
@@ -152,9 +141,8 @@ func TestRelay_BroadcastReachesPeersNotSender(t *testing.T) {
 	}
 }
 
-// httpPut issues an HTTP PUT of a room value through the live httptest
-// server (so the relay's durable-mirror path fires on the real wired
-// relay). The Host is set to the app subdomain so slugFromHost resolves.
+// httpPut PUTs a room value through the live server, so the relay's
+// durable-mirror path fires on the real wired relay.
 func httpPut(t *testing.T, ts *httptest.Server, slug, id, key string, body []byte) {
 	t.Helper()
 	req, err := nethttp.NewRequest("PUT", ts.URL+"/api/rooms/"+id+"/"+key, bytesReader(body))
@@ -172,10 +160,8 @@ func httpPut(t *testing.T, ts *httptest.Server, slug, id, key string, body []byt
 	}
 }
 
-// httpDelete issues an HTTP DELETE of a room value through the live httptest
-// server, so the relay's durable-delete mirror path (CommitAndMirror with an
-// EncodeDelete frame) fires on the real wired relay - the DELETE twin of
-// httpPut. Deleting a present or absent key both return 204 (idempotent).
+// httpDelete is the DELETE twin of httpPut, driving the relay's durable-delete
+// mirror path. A present and an absent key both return 204 (idempotent).
 func httpDelete(t *testing.T, ts *httptest.Server, slug, id, key string) {
 	t.Helper()
 	req, err := nethttp.NewRequest("DELETE", ts.URL+"/api/rooms/"+id+"/"+key, nil)
@@ -200,31 +186,27 @@ func TestRelay_LateJoinSnapshotThenStreamNoGapNoDup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Seed durable state BEFORE the late joiner connects (a committed cell).
+	// Durable state committed BEFORE the late joiner connects.
 	if _, err := rooms.Put(domain.Slug(slug), domain.RoomID(id), "cell/1", []byte(`"busy"`)); err != nil {
 		t.Fatalf("seed put: %v", err)
 	}
 
-	// Late joiner connects: its first frame is the snapshot, which must
-	// already reflect the seeded cell (no gap: a pre-join write is in the
-	// snapshot).
+	// No gap: a pre-join write is already in the joiner's first frame.
 	late := dial(t, ctx, ts, slug, id)
-	defer late.CloseNow()
+	defer late.CloseNow() //nolint:errcheck
 	state := expectSnapshot(t, ctx, late)
 	if state["cell/1"] != "busy" {
 		t.Fatalf("snapshot cell/1 = %v, want busy (pre-join write must be in snapshot)", state["cell/1"])
 	}
 
-	// A durable PUT AFTER the join arrives as exactly one live mirror frame,
-	// tagged "put" with the key + value (no gap, and not a dup of a snapshot
-	// value since it post-dates the snapshot).
+	// A durable PUT after the join arrives as exactly one live mirror frame.
 	httpPut(t, ts, slug, id, "cell/2", []byte(`"free"`))
 	m := readJSON(t, ctx, late)
 	if m["type"] != relay.TypePut || m["key"] != "cell/2" || m["value"] != "free" {
 		t.Fatalf("live mirror frame = %v, want put cell/2=free", m)
 	}
 
-	// No further frame for that single PUT (no dup): a short read times out.
+	// No dup: a short read after that one frame times out.
 	shortCtx, scancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer scancel()
 	if _, _, err := late.Read(shortCtx); err == nil {
@@ -239,35 +221,33 @@ func TestRelay_ReconnectReSyncsFromSnapshot(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Connect, then disconnect (simulating a page reload).
+	// Connect, then disconnect: a page reload.
 	first := dial(t, ctx, ts, slug, id)
 	expectSnapshot(t, ctx, first)
-	first.CloseNow()
+	first.CloseNow() //nolint:errcheck
 
 	// A durable write lands while the client is away.
 	httpPut(t, ts, slug, id, "k", []byte(`"v"`))
 
-	// Reconnect: a fresh join re-syncs the full current state from the KV
-	// snapshot, with no incremental "catch me up from N" replay to get wrong.
+	// A fresh join re-syncs full current state from the KV snapshot: there is
+	// no incremental "catch me up from N" replay to get wrong.
 	again := dial(t, ctx, ts, slug, id)
-	defer again.CloseNow()
+	defer again.CloseNow() //nolint:errcheck
 	state := expectSnapshot(t, ctx, again)
 	if state["k"] != "v" {
 		t.Fatalf("reconnect snapshot k = %v, want v (the away-time write must be caught up)", state["k"])
 	}
 }
 
-// TestRelay_StuckClientDoesNotStallTheRoom asserts the end-to-end property
-// that a slow / non-reading client does NOT head-of-line-block the room's
-// broadcast to everyone else: while a stuck client (one that never reads
-// after its snapshot) is a hub member, a fast client keeps receiving the
-// room's traffic. The DROP-the-laggard half of the backpressure contract is
-// proven deterministically against the real wsConn adapter + the hub in the
-// relay package (TestWSConn_SendBufferBoundsAndDropSignal +
-// TestHub_SlowClientDroppedWithoutBlockingRoom); reproducing a socket-level
-// drop over loopback is unreliable because the kernel's TCP buffers absorb a
-// non-reading client's backlog, so this integration test pins the
-// observable non-stalling property instead.
+// TestRelay_StuckClientDoesNotStallTheRoom pins that a non-reading client does
+// not head-of-line-block the room: a fast client keeps receiving while a stuck
+// one is a hub member.
+//
+// Only the non-stalling half is testable here. A socket-level drop over
+// loopback is unreproducible (the kernel's TCP buffers absorb the backlog), so
+// the DROP-the-laggard half is pinned in the relay package instead
+// (TestWSConn_SendBufferBoundsAndDropSignal,
+// TestHub_SlowClientDroppedWithoutBlockingRoom).
 func TestRelay_StuckClientDoesNotStallTheRoom(t *testing.T) {
 	lim := relay.NewLimits()
 	lim.MaxMsgsPerSec = 0         // isolate from the rate limit
@@ -279,16 +259,16 @@ func TestRelay_StuckClientDoesNotStallTheRoom(t *testing.T) {
 	defer cancel()
 
 	fast := dial(t, ctx, ts, slug, id)
-	defer fast.CloseNow()
+	defer fast.CloseNow()               //nolint:errcheck
 	stuck := dial(t, ctx, ts, slug, id) // never reads after its snapshot
-	defer stuck.CloseNow()
+	defer stuck.CloseNow()              //nolint:errcheck
 	sender := dial(t, ctx, ts, slug, id)
-	defer sender.CloseNow()
+	defer sender.CloseNow() //nolint:errcheck
 	expectSnapshot(t, ctx, fast)
 	expectSnapshot(t, ctx, stuck)
 	expectSnapshot(t, ctx, sender)
 
-	// fast drains promptly; stuck NEVER reads again (a stuck participant).
+	// fast drains promptly; stuck never reads again.
 	var fastGot int32
 	go func() {
 		for {
@@ -299,9 +279,8 @@ func TestRelay_StuckClientDoesNotStallTheRoom(t *testing.T) {
 		}
 	}()
 
-	// Burst frames continuously. Despite the stuck peer in the room, fast
-	// must keep receiving - the broadcast is wait-free per client, so the
-	// stuck member never head-of-line-blocks the others.
+	// The broadcast is wait-free per client, so this burst must keep reaching
+	// fast with the stuck peer present.
 	payload := make([]byte, 64<<10)
 	stop := make(chan struct{})
 	go func() {
@@ -319,12 +298,10 @@ func TestRelay_StuckClientDoesNotStallTheRoom(t *testing.T) {
 	}()
 	defer close(stop)
 
-	// fast must accumulate a healthy stream of frames with the stuck peer
-	// present (the room is not stalled on it).
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if atomic.LoadInt32(&fastGot) >= 50 {
-			return // room flowing for fast despite the stuck peer.
+			return // room flowing for fast despite the stuck peer
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -333,7 +310,7 @@ func TestRelay_StuckClientDoesNotStallTheRoom(t *testing.T) {
 
 func TestRelay_HeartbeatReapsDeadConnection(t *testing.T) {
 	ts, rooms, rl := wsTestServer(t, relay.NewLimits())
-	// Aggressive heartbeat so the reap fires quickly in the test.
+	// Aggressive heartbeat so the reap fires quickly.
 	rl.SetHeartbeat(100*time.Millisecond, 150*time.Millisecond)
 	const slug = "appz2345"
 	id := mkRoom(t, rooms, slug)
@@ -341,18 +318,16 @@ func TestRelay_HeartbeatReapsDeadConnection(t *testing.T) {
 	defer cancel()
 
 	c := dial(t, ctx, ts, slug, id)
-	defer c.CloseNow()
+	defer c.CloseNow() //nolint:errcheck
 	expectSnapshot(t, ctx, c)
 
-	// The server pings on its cadence; coder/websocket auto-pongs as long as
-	// the client reads. To simulate a vanished client we must NOT read - but
-	// coder/websocket only processes control frames during a Read. A client
-	// that stops reading will not pong, so the server's Ping times out and
-	// reaps the connection. Stop reading and wait for the room to empty.
+	// coder/websocket only processes control frames during a Read, so a client
+	// that stops reading never pongs: that models a vanished client, and the
+	// server's Ping times out and reaps it.
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
 		if rl.Registry().Rooms() == 0 {
-			return // reaped: the hub was torn down.
+			return // reaped: the hub was torn down
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -370,18 +345,17 @@ func TestRelay_StrictIsolationAcrossRoomsAndApps(t *testing.T) {
 	roomB1 := mkRoom(t, rooms, appB) // different app
 
 	a1 := dial(t, ctx, ts, appA, roomA1)
-	defer a1.CloseNow()
+	defer a1.CloseNow() //nolint:errcheck
 	a2 := dial(t, ctx, ts, appA, roomA2)
-	defer a2.CloseNow()
+	defer a2.CloseNow() //nolint:errcheck
 	b1 := dial(t, ctx, ts, appB, roomB1)
-	defer b1.CloseNow()
+	defer b1.CloseNow() //nolint:errcheck
 	for _, c := range []*websocket.Conn{a1, a2, b1} {
 		expectSnapshot(t, ctx, c)
 	}
 
-	// A frame in roomA1 must reach NO ONE in roomA2 (same app) or roomB1
-	// (different app). Only a peer in roomA1 would see it; there is none, so
-	// every other connection's short read times out.
+	// A frame in roomA1 reaches no one in roomA2 (same app) or roomB1
+	// (different app), so every other connection's short read times out.
 	if err := a1.Write(ctx, websocket.MessageText, []byte("secret")); err != nil {
 		t.Fatalf("a1 write: %v", err)
 	}
@@ -405,13 +379,13 @@ func TestRelay_PerRoomConnectionCapRefuses(t *testing.T) {
 	defer cancel()
 
 	c1 := dial(t, ctx, ts, slug, id)
-	defer c1.CloseNow()
+	defer c1.CloseNow() //nolint:errcheck
 	c2 := dial(t, ctx, ts, slug, id)
-	defer c2.CloseNow()
+	defer c2.CloseNow() //nolint:errcheck
 	expectSnapshot(t, ctx, c1)
 	expectSnapshot(t, ctx, c2)
 
-	// The third upgrade is refused with a 429 BEFORE the 101 handshake.
+	// The third upgrade is refused with a 429 before the 101 handshake.
 	_, resp, err := websocket.Dial(ctx, wsURL(ts, slug, id), &websocket.DialOptions{Host: slug + "." + wsTestApex})
 	if err == nil {
 		t.Fatal("third dial succeeded past the per-room cap")
@@ -431,11 +405,11 @@ func TestRelay_FrameSizeCapClosesConnection(t *testing.T) {
 	defer cancel()
 
 	c := dial(t, ctx, ts, slug, id)
-	defer c.CloseNow()
+	defer c.CloseNow() //nolint:errcheck
 	expectSnapshot(t, ctx, c)
 
-	// A frame over the cap: the server's SetReadLimit closes the connection
-	// with StatusMessageTooBig. The client's next read returns an error.
+	// Over the cap: the server's SetReadLimit closes with
+	// StatusMessageTooBig, so the client's next read errors.
 	big := make([]byte, 256)
 	_ = c.Write(ctx, websocket.MessageText, big)
 	rctx, rcancel := context.WithTimeout(ctx, 2*time.Second)
@@ -456,11 +430,11 @@ func TestRelay_RateLimitDropsFloodingClient(t *testing.T) {
 	defer cancel()
 
 	flooder := dial(t, ctx, ts, slug, id)
-	defer flooder.CloseNow()
+	defer flooder.CloseNow() //nolint:errcheck
 	expectSnapshot(t, ctx, flooder)
 
-	// Send a burst well past the per-second ceiling as fast as possible. The
-	// server drops the connection once the bucket empties.
+	// A burst past the per-second ceiling: the server drops the connection
+	// once the bucket empties.
 	for range 100 {
 		if err := flooder.Write(ctx, websocket.MessageText, []byte("x")); err != nil {
 			break
@@ -481,12 +455,10 @@ func TestRelay_UpgradeValidation(t *testing.T) {
 	defer cancel()
 
 	t.Run("unknown app slug 404", func(t *testing.T) {
-		// liveAppSiteReader treats every slug as live, so to exercise the
-		// unknown-app path we use a server with NO site reader. Build a bare
-		// one sharing the same rooms+relay is awkward; instead assert the
-		// real existence gate via a nonexistent ROOM (also a 404) below, and
-		// rely on the appExists unit coverage for the slug path. Here we
-		// confirm a well-formed-but-nonexistent room is a 404.
+		// liveAppSiteReader treats every slug as live, so the unknown-slug
+		// path is not reachable through this harness; the appExists unit
+		// coverage carries it. What is asserted here is the other 404: a
+		// well-formed but nonexistent room.
 		bogus := domain.NewRoomID().String()
 		_, resp, err := websocket.Dial(ctx, wsURL(ts, liveSlug, bogus), &websocket.DialOptions{Host: liveSlug + "." + wsTestApex})
 		if err == nil {
@@ -509,8 +481,8 @@ func TestRelay_UpgradeValidation(t *testing.T) {
 	})
 
 	t.Run("non-upgrade GET is not 101", func(t *testing.T) {
-		// A plain GET to the /ws path (no Upgrade header) must not get a 101;
-		// websocket.Accept refuses it.
+		// websocket.Accept refuses a GET with no Upgrade header, so the /ws
+		// path never answers 101.
 		req, _ := nethttp.NewRequest("GET", ts.URL+"/api/rooms/"+id+"/ws", nil)
 		req.Host = liveSlug + "." + wsTestApex
 		resp, err := ts.Client().Do(req)

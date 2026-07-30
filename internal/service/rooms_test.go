@@ -11,9 +11,8 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// newRoomsSvc wires a Rooms service over the real sqlite-backed repo so
-// the rate-limit + cap + isolation behavior is exercised end-to-end (an
-// integration test, the preferred boundary per CLAUDE.md).
+// newRoomsSvc wires a Rooms service over the real sqlite-backed repo so the
+// rate-limit + cap + isolation behavior is exercised end-to-end.
 func newRoomsSvc(t *testing.T) (*Rooms, *fixedClock) {
 	t.Helper()
 	dir := t.TempDir()
@@ -61,8 +60,8 @@ func TestRoomsSvc_CreateAndKVRoundTrip(t *testing.T) {
 
 func TestRoomsSvc_NonexistentRoomIs404Shape(t *testing.T) {
 	svc, _ := newRoomsSvc(t)
-	// A well-formed but nonexistent room: read, scan, put, delete all
-	// surface ErrRoomNotFound (no existence leak).
+	// On a well-formed but nonexistent room, read/scan/put/delete all surface
+	// ErrRoomNotFound (no existence leak).
 	id := domain.NewRoomID()
 	if _, err := svc.Get("app12345", id, "k"); !errors.Is(err, ErrRoomNotFound) {
 		t.Fatalf("get missing room = %v", err)
@@ -89,7 +88,7 @@ func TestRoomsSvc_MissingKeyIs404(t *testing.T) {
 func TestRoomsSvc_DeleteAbsentKeyIsSuccess(t *testing.T) {
 	svc, _ := newRoomsSvc(t)
 	room, _ := svc.Create("app12345", "10.0.0.0/24")
-	// Deleting a key that never existed in a REAL room is a success.
+	// Deleting a key that never existed in a REAL room succeeds.
 	if _, err := svc.Delete(room.AppSlug, room.ID, "never"); err != nil {
 		t.Fatalf("delete absent key in real room = %v, want nil", err)
 	}
@@ -105,7 +104,7 @@ func TestRoomsSvc_PerIPRateLimit(t *testing.T) {
 			t.Fatalf("create %d under IP limit: %v", i, err)
 		}
 	}
-	// 4th from the same subnet is rate-limited with scope "ip".
+	// The 4th from the same subnet is rate-limited with scope "ip".
 	_, err := svc.Create("app12345", subnet)
 	var rl *RoomRateLimit
 	if !errors.As(err, &rl) {
@@ -156,7 +155,7 @@ func TestRoomsSvc_RateLimitWindowSlides(t *testing.T) {
 	if _, err := svc.Create("app12345", subnet); !errors.Is(err, ErrRoomCreateRateLimited) {
 		t.Fatalf("immediate second = %v, want rate-limited", err)
 	}
-	// Advance past the window: the slot frees.
+	// Past the window, the slot frees.
 	clk.advance(svc.CreateWindow + time.Minute)
 	if _, err := svc.Create("app12345", subnet); err != nil {
 		t.Fatalf("create after window = %v, want nil", err)

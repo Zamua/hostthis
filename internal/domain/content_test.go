@@ -62,14 +62,9 @@ func TestDetectKind(t *testing.T) {
 	}
 }
 
-// The text-only rule, driven directly through the sniffer port.
-//
-// This is a security control: a type hint must not short-circuit detection, so
-// bytes that classify as binary are rejected even when the user labels them
-// "html". Before the port existed this could only be tested by finding real
-// byte sequences that happen to sniff a particular way, which tests the
-// classifier as much as the rule. Injecting the classification isolates the
-// rule itself.
+// The text-only rule, driven through an injected sniffer so the rule is
+// isolated from the classifier. A type hint must not short-circuit detection:
+// bytes that classify as binary are rejected even when labeled "html".
 func TestDetectKind_RejectsNonTextUnderATextHint(t *testing.T) {
 	body := []byte("<!doctype html><h1>looks like html</h1>")
 
@@ -81,8 +76,8 @@ func TestDetectKind_RejectsNonTextUnderATextHint(t *testing.T) {
 			}
 		})
 		t.Run(hint+"/text sniff is accepted", func(t *testing.T) {
-			// The mirror case. Without it, a DetectKind that rejected
-			// everything would pass the assertion above.
+			// Without this mirror case, a DetectKind that rejected everything
+			// would pass the assertion above.
 			if _, err := DetectKind(body, hint, stubSniffer("text/plain; charset=utf-8")); err != nil {
 				t.Fatalf("hint %q with text-sniffing bytes must be accepted, got %v", hint, err)
 			}

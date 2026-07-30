@@ -16,10 +16,9 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// TestList_IncludesSites is the headline regression for the "static-site
-// quota is opaque" bug: a deployed site counts against the same quota as
-// pastes but never expires, so `list` MUST show it (both table + -o json)
-// or the owner can neither see nor free what is using their quota.
+// TestList_IncludesSites pins that `list` shows deployed sites in both the
+// table and -o json. A site counts against the same quota as pastes but never
+// expires, so an owner who cannot see it can never free what it holds.
 func TestList_IncludesSites(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "test.db"))
@@ -55,9 +54,8 @@ func TestList_IncludesSites(t *testing.T) {
 	client, _ := dialKeyed(t, sshAddr)
 	t.Cleanup(func() { _ = client.Close() })
 
-	// 1. Upload a text paste.
 	runSSH(t, client, "", []byte("<!doctype html><p>a text paste</p>"))
-	// 2. Deploy a static site (gzip-tar => site path).
+	// A gzip-tar body dispatches to the site-deploy path.
 	arc := makeSiteArchive(t, map[string]string{
 		"index.html":    "<!doctype html><h1>home</h1>",
 		"css/style.css": "body{color:green}",
@@ -67,7 +65,7 @@ func TestList_IncludesSites(t *testing.T) {
 		t.Fatalf("expected a site deploy, stderr=%q", siteOut.stderr)
 	}
 
-	// --- table `list` shows BOTH, and the site row is kind=site / never ---
+	// --- table output ---
 	out := runSSH(t, client, "list", nil)
 	lines := strings.Split(strings.TrimRight(out.stdout, "\n"), "\n")
 	if len(lines) != 3 { // header + paste + site
@@ -87,7 +85,7 @@ func TestList_IncludesSites(t *testing.T) {
 		t.Fatalf("site VERS column should be '-', got %q in %q", f[len(f)-1], siteRow)
 	}
 
-	// --- `list -o json` shows the site with kind=site + null versions ---
+	// --- json output ---
 	jsonOut := runSSH(t, client, "list -o json", nil)
 	var items []struct {
 		Slug          string `json:"slug"`
@@ -104,8 +102,8 @@ func TestList_IncludesSites(t *testing.T) {
 		switch it.Kind {
 		case "site":
 			site++
-			// Sites are not versioned: the version fields are null (the
-			// reliable discriminator, independent of the retention policy).
+			// A null version field is the reliable site discriminator:
+			// independent of the retention policy, unlike expires_at.
 			if it.ServedVersion != nil {
 				t.Fatalf("site served_version should be null, got %v", *it.ServedVersion)
 			}
@@ -124,7 +122,6 @@ func TestList_IncludesSites(t *testing.T) {
 	}
 }
 
-// sshResult adapts the shared runCmd (stdout, stderr, exit) helper.
 type sshResult struct{ stdout, stderr string }
 
 func runSSH(t *testing.T, client *xssh.Client, cmd string, stdin []byte) sshResult {

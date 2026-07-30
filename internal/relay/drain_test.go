@@ -4,12 +4,10 @@ import (
 	"testing"
 )
 
-// TestAnnounceDrain_HintReachesEveryConnectionAndKeepsServing pins the
-// drain hint (SPEC "Drain hint: reconnect-before-shutdown"): AnnounceDrain
-// broadcasts the {"type":"reconnect"} control envelope once to EVERY
-// connection of EVERY hub, and the relay keeps serving afterwards - the
-// hint is fired at drain start, before any close, so a client acting on it
-// re-homes while its old socket still works and new joins still land.
+// Pins the drain hint (SPEC "Drain hint: reconnect-before-shutdown"):
+// AnnounceDrain sends the reconnect envelope exactly once to every connection
+// of every hub, closes nothing, and leaves the relay admitting new joins, so a
+// client re-homes while its old socket still works.
 func TestAnnounceDrain_HintReachesEveryConnectionAndKeepsServing(t *testing.T) {
 	r := NewRegistry(NewLimits())
 	k1, k2 := testKey(), testKey()
@@ -36,8 +34,6 @@ func TestAnnounceDrain_HintReachesEveryConnectionAndKeepsServing(t *testing.T) {
 		}
 	}
 
-	// The relay keeps serving through the grace window: a new admit + join
-	// still succeeds after the hint fired.
 	_, id, err := r.admit(k1)
 	if err != nil {
 		t.Fatalf("admit after AnnounceDrain: %v (the relay must keep serving through the drain grace)", err)

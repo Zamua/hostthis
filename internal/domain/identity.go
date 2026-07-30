@@ -2,13 +2,9 @@ package domain
 
 import "strings"
 
-// Identity is the string the storage layer uses to attribute a paste
-// to a user. Always shaped as `key:<sha256-fingerprint>` - every
-// hostthis session must offer an ssh public key.
-//
-// Identity is the unit of quota accounting (the per-user 1 MiB cap
-// is summed by Identity) AND the capability gate for the management
-// verbs (list, update, delete, etc.).
+// Identity attributes a paste to a user, always shaped as
+// `key:<sha256-fingerprint>`. It is both the unit of quota accounting and
+// the capability gate for the management verbs.
 type Identity string
 
 // IdentityKeyPrefix prefixes the sha256 fingerprint of a presented
@@ -16,12 +12,12 @@ type Identity string
 const IdentityKeyPrefix = "key:"
 
 // IsKeyed reports whether the identity is well-formed. Empty or
-// otherwise prefix-less identities are NOT keyed.
+// otherwise prefix-less identities are not keyed.
 func (i Identity) IsKeyed() bool {
 	return strings.HasPrefix(string(i), IdentityKeyPrefix)
 }
 
-// String returns the identity as a plain string for storage.
+// String returns the identity as a plain string, the form it is stored in.
 func (i Identity) String() string { return string(i) }
 
 // IdentityFromKeyFingerprint wraps a SHA256:... fingerprint in the

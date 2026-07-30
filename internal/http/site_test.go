@@ -22,8 +22,8 @@ func (r stubSiteReader) Get(slug domain.Slug) (domain.Site, error) {
 	return r.s, nil
 }
 
-// stubBlobMap returns bytes by sha (the slug is ignored, as on the
-// standalone content-addressed path).
+// stubBlobMap returns bytes by sha, ignoring the slug as the standalone
+// content-addressed path does.
 type stubBlobMap struct{ m map[string][]byte }
 
 func (b stubBlobMap) ReadAll(_ context.Context, _, sha string) ([]byte, error) {
@@ -85,9 +85,8 @@ func TestSite_ServesFilesAndIndex(t *testing.T) {
 		{"/blog/", 200, "<h1>blog</h1>", "text/html; charset=utf-8"},
 		{"/blog", 200, "<h1>blog</h1>", "text/html; charset=utf-8"},
 		{"/data.bin", 200, "\x00\x01\x02", "application/octet-stream"},
-		// SPA fallback: a ".html" miss is a client-side route, so it serves
-		// the root index.html (200). A ".css" miss is a real missing asset,
-		// so it stays a 404. See domain.Manifest.LookupWithSPAFallback.
+		// SPA fallback: a ".html" miss is a client-side route and serves the
+		// root index.html; a ".css" miss is a real missing asset and 404s.
 		{"/missing.html", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
 		{"/blog/missing.css", 404, "", ""},
 	}
@@ -113,11 +112,9 @@ func TestSite_ServesFilesAndIndex(t *testing.T) {
 	}
 }
 
-// TestSite_SPAFallback pins the route-vs-asset behavior end-to-end over
-// the real HTTP handler: a route-shaped miss serves the ROOT index.html
-// (200, index bytes, same headers as serving "/" directly), while an
-// asset-shaped miss stays a 404. Real files and directory indexes are
-// unaffected.
+// TestSite_SPAFallback pins route-vs-asset behavior over the real handler: a
+// route-shaped miss serves the ROOT index.html, an asset-shaped miss 404s, and
+// real files and directory indexes are unaffected.
 func TestSite_SPAFallback(t *testing.T) {
 	srv := buildSiteServer(t)
 	mux := srv.Handler()
@@ -129,7 +126,7 @@ func TestSite_SPAFallback(t *testing.T) {
 		body  string // checked only on 200
 		ctype string // checked only on 200
 	}{
-		// Real files / indexes still resolve directly (no fallback).
+		// Real files / indexes resolve directly, with no fallback.
 		{"root", "/", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
 		{"dir index", "/blog/", 200, "<h1>blog</h1>", "text/html; charset=utf-8"},
 		{"real file", "/css/style.css", 200, "body{}", "text/css; charset=utf-8"},
@@ -140,7 +137,7 @@ func TestSite_SPAFallback(t *testing.T) {
 		{"nested route", "/users/123/edit", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
 		{"html route", "/about.html", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
 
-		// Asset-shaped misses 404 (a genuinely-missing asset).
+		// Asset-shaped misses 404.
 		{"missing js", "/assets/nope.js", 404, "", ""},
 		{"missing css", "/styles/gone.css", 404, "", ""},
 		{"missing png", "/img/missing.png", 404, "", ""},
@@ -168,9 +165,9 @@ func TestSite_SPAFallback(t *testing.T) {
 	}
 }
 
-// TestSite_SPAFallback_SameHeadersAsRoot proves a fallback response is
-// byte-identical to requesting "/": same body, content-type, sandbox
-// headers, and ETag (the root index.html's content SHA).
+// TestSite_SPAFallback_SameHeadersAsRoot pins that a fallback response is
+// indistinguishable from requesting "/": same body, content-type, sandbox
+// headers, and ETag.
 func TestSite_SPAFallback_SameHeadersAsRoot(t *testing.T) {
 	srv := buildSiteServer(t)
 	mux := srv.Handler()
@@ -203,9 +200,9 @@ func TestSite_SPAFallback_SameHeadersAsRoot(t *testing.T) {
 	if route.Header().Get("ETag") != `"sha-index"` {
 		t.Fatalf("fallback etag: got %q, want %q", route.Header().Get("ETag"), `"sha-index"`)
 	}
-	// Sites serve no-cache: a re-deploy must be visible on the next normal
-	// reload. Under max-age a browser would keep serving a site's cached
-	// js/css sub-resources without revalidating, so updates would not show.
+	// Sites serve no-cache so a re-deploy shows on the next reload. Under
+	// max-age a browser would keep serving cached js/css sub-resources without
+	// revalidating and updates would never appear.
 	if got := root.Header().Get("Cache-Control"); got != "public, no-cache" {
 		t.Fatalf("site Cache-Control: got %q, want public, no-cache", got)
 	}
@@ -245,8 +242,7 @@ func TestSite_PathMode(t *testing.T) {
 		{"/p/abc23456", 200, "<h1>root</h1>"},
 		{"/p/abc23456/css/style.css", 200, "body{}"},
 		{"/p/abc23456/blog/", 200, "<h1>blog</h1>"},
-		// SPA fallback also applies in path mode: a ".html" miss serves the
-		// root index.html (200), a ".js" miss stays a 404.
+		// The SPA fallback applies in path mode too.
 		{"/p/abc23456/missing.html", 200, "<h1>root</h1>"},
 		{"/p/abc23456/missing.js", 404, ""},
 	}
@@ -291,9 +287,9 @@ func TestSite_ExpiredReturns404(t *testing.T) {
 }
 
 func TestSite_FallsThroughToPasteWhenNoSite(t *testing.T) {
-	// A slug that is NOT a site falls through to the paste path. With no
-	// paste reader wired, servePasteSlug would panic - so we wire a stub
-	// paste that owns the slug, and prove the site path declines cleanly.
+	// A slug that is NOT a site falls through to the paste path. The stub
+	// paste owning the slug is required: servePasteSlug panics with no paste
+	// reader wired.
 	now := time.Now().UTC()
 	p := domain.Paste{
 		Slug: "abc23456", Identity: "key:test", Kind: domain.KindHTML,

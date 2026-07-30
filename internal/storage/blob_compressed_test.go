@@ -11,10 +11,8 @@ import (
 	"testing"
 )
 
-// fakeRawStore is an in-memory inner BlobStore for testing the
-// compression wrapper in isolation. Tracks how many bytes a Put
-// actually persisted so tests can assert compression actually
-// happened.
+// fakeRawStore is an in-memory inner BlobStore that records how many bytes a
+// Put actually persisted, so a test can assert compression happened.
 type fakeRawStore struct {
 	mu    sync.Mutex
 	store map[string][]byte
@@ -109,7 +107,6 @@ func TestCompressedBlobStore_StoresMagicHeader(t *testing.T) {
 }
 
 func TestCompressedBlobStore_ActuallyCompresses(t *testing.T) {
-	// 32 KB of redundant text should compress to <5% of original under zstd.
 	body := bytes.Repeat([]byte("the quick brown fox jumps over the lazy dog\n"), 1000)
 	sha := shaOf(body)
 	inner := newFakeRawStore()
@@ -121,15 +118,14 @@ func TestCompressedBlobStore_ActuallyCompresses(t *testing.T) {
 	if stored >= len(body) {
 		t.Fatalf("compression did not reduce size: input=%d stored=%d", len(body), stored)
 	}
-	// Sanity-check: redundant text should hit at least 5x compression.
+	// Redundant text should hit at least 5x under zstd.
 	if ratio := float64(len(body)) / float64(stored); ratio < 5 {
 		t.Fatalf("compression ratio too low: %.1fx (input=%d, stored=%d)", ratio, len(body), stored)
 	}
 }
 
 func TestCompressedBlobStore_LegacyUncompressedReadable(t *testing.T) {
-	// Simulate a blob written before the compression layer existed:
-	// raw bytes, no magic header.
+	// A legacy blob: raw bytes with no magic header.
 	legacy := []byte("<!doctype html><h1>legacy paste</h1>")
 	sha := shaOf(legacy)
 	inner := newFakeRawStore()
@@ -170,7 +166,8 @@ func TestCompressedBlobStore_EmptyInput(t *testing.T) {
 }
 
 func TestCompressedBlobStore_LegacyShortBodyTreatedAsLegacy(t *testing.T) {
-	// A 3-byte legacy blob can't possibly hold the magic - fallback path.
+	// A 3-byte body is shorter than the magic prefix, so it must take the
+	// legacy fallback rather than index out of range.
 	short := []byte("hi\n")
 	sha := shaOf(short)
 	inner := newFakeRawStore()
@@ -185,12 +182,10 @@ func TestCompressedBlobStore_LegacyShortBodyTreatedAsLegacy(t *testing.T) {
 	}
 }
 
-// TestCompressedBlobStore_GetReaderMatchesGet pins the behavior-
-// preservation contract for FIX #1: the streaming GetReader must yield
-// byte-identical output to the buffered Get for every blob shape
-// (compressed, empty, legacy-uncompressed, short-legacy). The HTML and
-// site-file serve paths switched from Get+Write to GetReader+io.Copy;
-// this guards that the bytes on the wire did not change.
+// TestCompressedBlobStore_GetReaderMatchesGet pins that the streaming
+// GetReader yields byte-identical output to the buffered Get for every blob
+// shape, since the HTML and site-file serve paths read through GetReader while
+// other callers use Get.
 func TestCompressedBlobStore_GetReaderMatchesGet(t *testing.T) {
 	cases := map[string]struct {
 		body   []byte
@@ -222,7 +217,7 @@ func TestCompressedBlobStore_GetReaderMatchesGet(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetReader: %v", err)
 			}
-			defer rc.Close()
+			defer rc.Close() //nolint:errcheck
 			got, err := io.ReadAll(rc)
 			if err != nil {
 				t.Fatalf("ReadAll: %v", err)

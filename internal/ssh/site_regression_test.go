@@ -20,11 +20,9 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// siteStack is a full real stack (sqlite + blob store + http surface +
-// ssh server) with the site-deploy path WIRED. The no-regression tests
-// below use it to prove that wiring DeploySite does not change the
-// single-file paste path: a plain .html still routes to a paste, only a
-// gzip-tar routes to a site.
+// siteStack is a full real stack (sqlite + blob store + http surface + ssh
+// server) with the site-deploy path WIRED, so the tests below can pin that a
+// plain .html still routes to a paste and only a gzip-tar routes to a site.
 type siteStack struct {
 	httpURL string
 	sshAddr string
@@ -75,8 +73,8 @@ func newSiteStack(t *testing.T) *siteStack {
 	return &siteStack{httpURL: httpSrv.URL, sshAddr: addr, upload: upload}
 }
 
-// runUpload pipes body over a real ssh client (empty command = upload)
-// and returns (stdout, stderr).
+// runUpload pipes body over a real ssh client (empty command = upload) and
+// returns (stdout, stderr).
 func (s *siteStack) runUpload(t *testing.T, body []byte) (string, string) {
 	t.Helper()
 	_, priv, err := genEd25519()
@@ -96,7 +94,7 @@ func (s *siteStack) runUpload(t *testing.T, body []byte) (string, string) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer client.Close()
+	defer client.Close() //nolint:errcheck
 	sess, err := client.NewSession()
 	if err != nil {
 		t.Fatalf("session: %v", err)
@@ -109,19 +107,16 @@ func (s *siteStack) runUpload(t *testing.T, body []byte) (string, string) {
 	if err := sess.Run(""); err != nil {
 		t.Fatalf("ssh run: %v\nstderr: %s", err, stderr.String())
 	}
-	// Drain the background blob finalizer so a subsequent GET sees a ready
-	// paste rather than the loading page.
+	// Drain the background blob finalizer so a later GET sees a ready paste
+	// rather than the loading page.
 	if s.upload != nil {
 		s.upload.WaitFinalize()
 	}
 	return stdout.String(), stderr.String()
 }
 
-// TestSinglePasteUnchangedWhenDeployWired pins the no-regression property:
-// with the site-deploy path WIRED on the SSH server, a plain single-file
-// .html upload STILL routes to the paste path, not the site path. The
-// gzip-magic sniff only diverts gzip-tar archives; everything else is a
-// single-file paste.
+// With the site-deploy path wired, a plain single-file .html still routes to
+// the paste path: the gzip-magic sniff diverts only gzip-tar archives.
 func TestSinglePasteUnchangedWhenDeployWired(t *testing.T) {
 	st := newSiteStack(t)
 	stdout, stderr := st.runUpload(t, []byte("<!doctype html><h1>just a paste</h1>"))
@@ -130,8 +125,8 @@ func TestSinglePasteUnchangedWhenDeployWired(t *testing.T) {
 	if !strings.HasPrefix(url, st.httpURL+"/p/") {
 		t.Fatalf("expected a paste URL on stdout, got %q (stderr %q)", stdout, stderr)
 	}
-	// The paste path says "expires in 30 days"; the site path says "site: N
-	// file(s)". A single .html must take the PASTE path.
+	// The paste path says "expires in 30 days"; the site path says
+	// "site: N file(s)".
 	if strings.Contains(stderr, "site:") {
 		t.Fatalf("single .html wrongly routed to the site path: stderr %q", stderr)
 	}
@@ -139,8 +134,8 @@ func TestSinglePasteUnchangedWhenDeployWired(t *testing.T) {
 		t.Fatalf("expected paste-path stderr, got %q", stderr)
 	}
 
-	// And it serves as a single-file paste: the whole body at the slug
-	// root, byte-exact, as text/html.
+	// It serves as a single-file paste: the whole body at the slug root,
+	// byte-exact, as text/html.
 	resp, err := http.Get(url)
 	if err != nil {
 		t.Fatalf("GET paste: %v", err)
@@ -158,10 +153,9 @@ func TestSinglePasteUnchangedWhenDeployWired(t *testing.T) {
 	}
 }
 
-// TestArchiveAndPasteCoexist pins that the SAME wired server routes a
-// gzip-tar to a SITE and a plain file to a PASTE, with the standard
-// project asset layout (index.html + css/app.css + js/app.js) round-
-// tripping byte-exact off the site URL with correct content-types.
+// The SAME server routes a gzip-tar to a SITE and a plain file to a PASTE,
+// with the standard asset layout round-tripping byte-exact off the site URL
+// with correct content-types.
 func TestArchiveAndPasteCoexist(t *testing.T) {
 	st := newSiteStack(t)
 
@@ -202,8 +196,8 @@ func TestArchiveAndPasteCoexist(t *testing.T) {
 			t.Fatalf("GET %s ctype: got %q want %q", c.path, ct, c.ctype)
 		}
 	}
-	// A missing ASSET (a known asset extension) still 404s under the SPA
-	// fallback - only route-shaped misses serve the root index.html.
+	// A missing ASSET still 404s under the SPA fallback: only route-shaped
+	// misses serve the root index.html.
 	resp, err := http.Get(base + "/nope/missing.js")
 	if err != nil {
 		t.Fatalf("GET missing: %v", err)
@@ -213,7 +207,7 @@ func TestArchiveAndPasteCoexist(t *testing.T) {
 		t.Fatalf("missing site path: got %d, want 404", resp.StatusCode)
 	}
 
-	// 2. Plain file -> paste, on the SAME server. Different slug, paste path.
+	// 2. Plain file -> paste on the SAME server, under a different slug.
 	pasteOut, pasteErr := st.runUpload(t, []byte("<!doctype html><p>sibling paste</p>"))
 	if strings.Contains(pasteErr, "site:") {
 		t.Fatalf("plain file wrongly routed to site path: %q", pasteErr)

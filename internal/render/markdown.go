@@ -1,10 +1,9 @@
-// Package render turns user-uploaded source into safe-to-serve HTML.
-// Each renderer is a pure function - source bytes in, HTML bytes out.
-// No I/O, no caching, no global state.
+// Package render turns user-uploaded source into safe-to-serve HTML. Each
+// renderer is a pure function: source bytes in, HTML bytes out. No I/O, no
+// caching, no global state.
 //
-// This package is NOT on the production serve path (the serve surface
-// renders client-side); it is retained for the render-md tool and the
-// markdown memory benchmark.
+// Not on the production serve path (the serve surface renders client-side);
+// used by the render-md tool and the markdown memory benchmark.
 package render
 
 import (
@@ -20,22 +19,16 @@ import (
 	gmhtml "github.com/yuin/goldmark/renderer/html"
 )
 
-// Markdown renders source markdown into a self-contained sanitized
-// HTML document. The output is a complete <!doctype html> page with
-// inline default styling - drop it onto disk and serve it directly.
+// Markdown renders source markdown into a self-contained sanitized HTML
+// document: a complete <!doctype html> page with inline default styling, ready
+// to serve as-is.
 //
-// Pipeline:
-//  1. goldmark parses with GFM extensions enabled (tables, strikethrough,
-//     linkify, task lists), unsafe HTML preserved so the source can
-//     include trusted-looking markup the user wrote inline.
-//  2. bluemonday's UGCPolicy strips dangerous tags/attributes from the
-//     intermediate HTML - `<script>`, `javascript:` URLs, `onclick=`,
-//     dangerous form actions, etc.
-//  3. The sanitized body is wrapped in a document with default styling
-//     so it looks like an article instead of un-styled HTML.
-//
-// The wrapper template is server-controlled and trusted; the body is
-// the sanitized user content.
+// goldmark parses with GFM extensions and unsafe HTML PRESERVED, then
+// bluemonday's UGCPolicy strips the dangerous tags and attributes (`<script>`,
+// `javascript:` URLs, `onclick=`, dangerous form actions) from the intermediate
+// HTML. That order is what lets inline HTML the user wrote survive parsing and
+// still be sanitized. The wrapper template is server-controlled and trusted;
+// only the body is user content.
 func Markdown(src []byte) ([]byte, error) {
 	md := goldmark.New(
 		goldmark.WithExtensions(
@@ -73,30 +66,29 @@ func Markdown(src []byte) ([]byte, error) {
 	return page.Bytes(), nil
 }
 
-// sanitizer returns a bluemonday policy that's strict-by-default for
-// uploaded HTML embedded in markdown. UGCPolicy already strips scripts,
-// event handlers, javascript: URLs, etc. We extend it slightly:
-//   - allow `id` on headings (goldmark auto-generates them; anchors break otherwise)
-//   - allow `class` for syntax highlighting if the source set it
-//   - allow `<input type=checkbox disabled checked>` so GFM task lists render
+// sanitizer returns a bluemonday policy that is strict-by-default for uploaded
+// HTML embedded in markdown. UGCPolicy already strips scripts, event handlers,
+// javascript: URLs, etc. Extensions on top of it:
+//   - `id` on headings (goldmark auto-generates them; anchors break otherwise)
+//   - `class` for syntax highlighting if the source set it
+//   - `<input type=checkbox disabled checked>` so GFM task lists render
 //     (UGCPolicy strips <input> entirely by default)
 func sanitizer() *bluemonday.Policy {
 	p := bluemonday.UGCPolicy()
 	p.AllowAttrs("id").OnElements("h1", "h2", "h3", "h4", "h5", "h6")
 	p.AllowAttrs("class").OnElements("code", "pre", "span", "div", "table", "th", "td")
-	// GFM task list checkboxes - goldmark emits
-	//   <input checked="" disabled="" type="checkbox">
-	// for `- [x] item`. UGCPolicy strips <input> entirely; allow it
-	// only with the safe attrs the task list extension actually uses.
+	// goldmark emits <input checked="" disabled="" type="checkbox"> for
+	// `- [x] item`. UGCPolicy strips <input> entirely; allow it only with the
+	// safe attrs the task list extension uses.
 	p.AllowElements("input")
 	p.AllowAttrs("type").Matching(bluemonday.SpaceSeparatedTokens).OnElements("input")
 	p.AllowAttrs("checked", "disabled").OnElements("input")
 	return p
 }
 
-// extractTitle scans the source for the first ATX h1 (`# ...`) line.
-// Returns "markdown" as a fallback. Used only for the <title> tag -
-// the rendered body still contains the heading.
+// extractTitle scans the source for the first ATX h1 (`# ...`) line, falling
+// back to "markdown". Used only for the <title> tag; the rendered body still
+// carries the heading.
 func extractTitle(src []byte) string {
 	for line := range bytes.SplitSeq(src, []byte("\n")) {
 		trimmed := bytes.TrimSpace(line)
@@ -107,9 +99,9 @@ func extractTitle(src []byte) string {
 	return "markdown"
 }
 
-// defaultStyles is the inline stylesheet for rendered markdown pages.
-// Monospace headings + serif body, neutral black-on-white / white-on-
-// black palette matching the apex landing page. Mobile-first. ~3 KB.
+// defaultStyles is the inline stylesheet for rendered markdown pages: monospace
+// headings, serif body, neutral palette matching the apex landing page,
+// mobile-first.
 const defaultStyles = `<style>
   :root {
     --bg:#ffffff; --ink:#111111; --soft:#555555; --accent:#111111;

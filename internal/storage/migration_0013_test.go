@@ -6,11 +6,10 @@ import (
 	"testing"
 )
 
-// applyMigrationsMatching replays the embedded migration files whose name
-// satisfies pred, in lexical order, each in its own transaction - the same
-// shape as migrate(). It does NOT use the _migrations bookkeeping table; the
-// caller drives exactly which files run, so a populated-DB upgrade across a
-// single migration can be exercised in isolation.
+// applyMigrationsMatching replays the embedded migrations whose name satisfies
+// pred, in lexical order, each in its own transaction. It bypasses the
+// _migrations bookkeeping table so the caller can run one migration in
+// isolation against a populated DB.
 func applyMigrationsMatching(t *testing.T, db *sql.DB, pred func(name string) bool) {
 	t.Helper()
 	entries, err := migrations.ReadDir("migrations")
@@ -43,16 +42,10 @@ func applyMigrationsMatching(t *testing.T, db *sql.DB, pred func(name string) bo
 	}
 }
 
-// TestMigration0013_PreservesVersionsOnPopulatedDB is the regression test for
-// the data-loss hazard in the 0013 (add 'diff' kind) table rebuild. The
-// migrator runs with foreign_keys ON, so a naive rebuild of the pastes parent
-// would fire versions' ON DELETE CASCADE and silently wipe all version
-// history on any existing sqlite deploy. This test populates the DB through
-// 0012, then applies ONLY 0013, and asserts the version rows survive (and a
-// 'diff'-kind insert is now accepted, and the FK still rejects an orphan).
-//
-// It fails on the cascade-bug version of 0013 (versions emptied) and passes
-// on the stash-and-refill fix.
+// TestMigration0013_PreservesVersionsOnPopulatedDB pins that the 0013 (add
+// 'diff' kind) table rebuild preserves version history on a populated DB. The
+// migrator runs with foreign_keys ON, so rebuilding the pastes parent without
+// stashing fires versions' ON DELETE CASCADE and silently wipes all history.
 func TestMigration0013_PreservesVersionsOnPopulatedDB(t *testing.T) {
 	// Same connection shape as Open(): foreign_keys ON, single connection.
 	db, err := sql.Open("sqlite", "file:mig0013?mode=memory&cache=shared&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
@@ -68,8 +61,8 @@ func TestMigration0013_PreservesVersionsOnPopulatedDB(t *testing.T) {
 	// Bring the schema up to the pre-0013 state.
 	applyMigrationsMatching(t, db, func(name string) bool { return name < "0013" })
 
-	// Populate: one paste with two version rows (one a tombstone) - exactly
-	// the history a cascade would silently destroy.
+	// One paste with two version rows (one a tombstone): the history a
+	// cascade would destroy.
 	if _, err := db.Exec(`INSERT INTO pastes (slug, identity, kind, content_sha, size, name, created_at, updated_at, expires_at, pinned_version, status)
 		VALUES ('abc12345', 'id-hash', 'markdown', 'sha-v2', 10, 'note', '2026-06-01T00:00:00Z', '2026-06-02T00:00:00Z', '2026-07-02T00:00:00Z', 2, 'ready')`); err != nil {
 		t.Fatalf("insert paste: %v", err)
@@ -91,7 +84,7 @@ func TestMigration0013_PreservesVersionsOnPopulatedDB(t *testing.T) {
 	if versionCount != 2 {
 		t.Fatalf("version history lost in migration: got %d rows, want 2", versionCount)
 	}
-	// The tombstone flag must be preserved too (not just the row count).
+	// The tombstone flag survives too, not just the row count.
 	var deletedV1 int
 	if err := db.QueryRow(`SELECT deleted FROM versions WHERE slug = 'abc12345' AND ver_num = 1`).Scan(&deletedV1); err != nil {
 		t.Fatalf("read v1 deleted: %v", err)
@@ -109,7 +102,7 @@ func TestMigration0013_PreservesVersionsOnPopulatedDB(t *testing.T) {
 		t.Errorf("versions_stash table left behind after migration")
 	}
 
-	// The relaxed CHECK now accepts a 'diff' kind on both tables.
+	// The relaxed CHECK accepts a 'diff' kind on both tables.
 	if _, err := db.Exec(`INSERT INTO pastes (slug, identity, kind, content_sha, size, name, created_at, updated_at, expires_at, pinned_version, status)
 		VALUES ('diff0001', 'id-hash', 'diff', 'sha-d1', 12, '', '2026-06-03T00:00:00Z', '2026-06-03T00:00:00Z', '2026-07-03T00:00:00Z', 1, 'ready')`); err != nil {
 		t.Fatalf("diff-kind paste insert should be accepted after 0013: %v", err)
@@ -119,7 +112,7 @@ func TestMigration0013_PreservesVersionsOnPopulatedDB(t *testing.T) {
 		t.Fatalf("diff-kind version insert should be accepted after 0013: %v", err)
 	}
 
-	// The FK from versions -> pastes must still be enforced after the rebuild.
+	// The FK from versions -> pastes survives the rebuild.
 	if _, err := db.Exec(`INSERT INTO versions (slug, ver_num, kind, content_sha, size, created_at, deleted)
 		VALUES ('nopaste9', 1, 'html', 'sha-x', 1, '2026-06-03T00:00:00Z', 0)`); err == nil {
 		t.Errorf("orphan version insert should be rejected by the FK, but it was accepted")

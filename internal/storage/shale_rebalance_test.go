@@ -5,7 +5,10 @@ package storage_test
 // A real 2-node shale cluster, in-process on live MinIO, proving a ring
 // rebalance is lossless for hostthis's data shapes: pastes and their versions,
 // the scan-derived per-owner quota, and the identity_pastes projection backing
-// ListByOwner.
+// ListByOwner. Lossless means every paste stays readable through EITHER node
+// (forwarding when the local one is not the owner), the quota sum survives its
+// move to whichever node owns the {id} shard, and the projection survives so
+// ListByOwner stays correct.
 //
 //	CGO_ENABLED=1 \
 //	CGO_LDFLAGS="-L<slatedb-lib-dir>" DYLD_LIBRARY_PATH="<slatedb-lib-dir>" \
@@ -14,28 +17,12 @@ package storage_test
 //	MINIO_TEST_ACCESS_KEY=admin MINIO_TEST_SECRET_KEY=supersecret \
 //	go test -tags slatedb -run TestShaleRebalance ./internal/storage
 //
-// Lossless means: after a second node joins and the ring redistributes, every
-// paste stays readable from the CLUSTER (through either node, forwarding when
-// the local one is not the owner), the quota sum survives its move to whichever
-// node now owns the {id} shard, and the projection survives so ListByOwner
-// stays correct.
+// NewShaleRepo binds the peer-forwarding listener and advertises the ACTUAL
+// bound address (cluster.Open advertises a GRPCAddr but does not serve it), so
+// the read-via-non-owner assertions exercise the production forwarding path.
 //
-// # Forwarding
-//
-// cluster.Open advertises a GRPCAddr but does not stand up the server that
-// answers forwarded ops: the host process owns that. NewShaleRepo does it in
-// multi-node mode, binding the listener and advertising the ACTUAL bound
-// address. This test drives that production path rather than a test-only
-// stand-up, so the read-via-non-owner assertion exercises real forwarding.
-//
-// # How a loss surfaces
-//
-// Dropped bytes on a handoff boundary make a Get return ErrNotFound. An {id}
-// family that did not move with its shard makes the quota read 0 or partial. A
-// lost projection makes ListByOwner short.
-//
-// A rebalance that moved NOTHING is also a failure, so one assertion requires
-// node B to physically hold keys.
+// A rebalance that moved NOTHING would satisfy every read assertion trivially,
+// so one assertion requires node B to hold units.
 
 import (
 	"context"
@@ -50,12 +37,9 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// rebalNode bundles one in-process node: its ShaleRepo (the public surface
-// the test drives) and the addresses peers seed off / forward to. The
-// ShaleRepo now OWNS its peer-forwarding gRPC server (NewShaleRepo stands it
-// up in multi-node mode, the production wiring); the test no longer binds a
-// listener or registers rpc.NewServer itself, so repo.Close() is the only
-// teardown needed.
+// rebalNode bundles one in-process node: its ShaleRepo plus the addresses peers
+// seed off and forward to. The repo owns its peer-forwarding gRPC server, so
+// repo.Close() is the only teardown needed.
 type rebalNode struct {
 	id       string
 	repo     *storage.ShaleRepo
@@ -65,13 +49,12 @@ type rebalNode struct {
 
 func (n *rebalNode) close() {
 	if n.repo != nil {
-		_ = n.repo.Close() // gracefully stops the repo's gRPC server too
+		_ = n.repo.Close() // also gracefully stops the repo's gRPC server
 	}
 }
 
-// freeTCPPort grabs an OS-assigned ephemeral port and releases it so the
-// caller can bind it. The tiny release->rebind race is harmless on
-// loopback (same pattern shale's own integration fixtures use).
+// freeTCPPort grabs an OS-assigned ephemeral port and releases it for the
+// caller to bind. The release->rebind race is harmless on loopback.
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -85,21 +68,11 @@ func freeTCPPort(t *testing.T) int {
 
 func loopback(port int) string { return fmt.Sprintf("127.0.0.1:%d", port) }
 
-// startRebalNode opens a multi-node ShaleRepo on a distinct DbName.
-// seedBind="" makes this the founding node (Seeds=nil); a non-empty
-// seedBind joins the existing ring. R=1 is the horizontal-write-scaling
-// shape the gate is about.
-//
-// The gRPC peer-forwarding server is now stood up by NewShaleRepo itself
-// (the PRODUCTION wiring): cluster.Open advertises GRPCAddr via gossip but
-// does not serve it, so NewShaleRepo binds the listener + registers the
-// cluster's rpc handlers. The test passes GRPCAddr "127.0.0.1:0" (an
-// OS-assigned port) and reads the ACTUAL bound address back via
-// repo.GRPCAddr() so a sibling node could reference it - this exercises the
-// real forwarding path (and the actual-addr advertise) on the same code a
-// 2-pod deploy runs. Earlier this file bound the listener + called
-// rpc.NewServer(repo.ClusterForTest()) by hand; that manual wiring has
-// moved into the production path.
+// startRebalNode opens a multi-node ShaleRepo. seedBind="" makes this the
+// founding node; a non-empty one joins the existing ring. R=1 is the
+// horizontal-write-scaling shape the gate is about. GRPCAddr "127.0.0.1:0"
+// takes an OS-assigned port, read back via repo.GRPCAddr() for a sibling to
+// reference.
 func startRebalNode(t *testing.T, id, dbName, seedBind string) *rebalNode {
 	t.Helper()
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
@@ -127,12 +100,8 @@ func startRebalNode(t *testing.T, id, dbName, seedBind string) *rebalNode {
 		GRPCAddr:          "127.0.0.1:0", // OS-assigned; the repo serves the actual port
 		Seeds:             seeds,
 		ReplicationFactor: 1,
-		// Multi-node REQUIRES sharding: shale removed the legacy per-node
-		// byte-copy engine, so a bind address with UnitCount 0 is refused at
-		// cluster.Open. What this test gates changed shape with it - see the
-		// note on assertion 4 below - but the product properties it pins
-		// (nothing lost across a shape change, readable through a non-owning
-		// node) are engine-independent and still worth gating.
+		// Multi-node REQUIRES sharding: a bind address with UnitCount 0 is
+		// refused at cluster.Open.
 		UnitCount: 4,
 	})
 	if err != nil {
@@ -175,9 +144,8 @@ func waitMembers(t *testing.T, nodes []*rebalNode, want int, timeout time.Durati
 	t.Fatalf("ring did not converge to %d members within %s: sizes=%v", want, timeout, sizes)
 }
 
-// pasteFor builds a v1 paste at `now` with the standard retention window.
-// Mirrors the conformance suite's pasteOf but local to this file so the
-// gate test owns its fixtures.
+// pasteFor builds a v1 paste at now with the standard retention window. Local
+// to this file so the gate owns its fixtures.
 func pasteFor(slug, identity, name string, size int, now time.Time) domain.Paste {
 	return domain.Paste{
 		Slug:          domain.Slug(slug),
@@ -202,29 +170,18 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 	epoch := time.Now().UnixNano()
 
 	// --- node A: the seed/founder ---
-	// One dbName SHARED by both nodes. In the retired per-node model each node
-	// owned a separate local store, so a distinct name per node was correct.
-	// Under the unit model DbName is the shared key-PREFIX that all units live
-	// beneath in object storage (see ShaleConfig.DbName), so giving the nodes
-	// different names points them at disjoint prefix trees: B opens empty units
-	// and A's data is invisible, which surfaces as a spurious ASSERTION 1 DATA
-	// LOSS failure while nothing is actually lost.
+	// One dbName SHARED by both nodes: DbName is the key-PREFIX every unit
+	// lives beneath in object storage, so distinct names point the nodes at
+	// disjoint prefix trees, B opens empty units, and A's data is invisible -
+	// a spurious ASSERTION 1 data-loss failure with nothing actually lost.
 	dbName := fmt.Sprintf("rebal-%d", epoch)
 	nodeA := startRebalNode(t, "rebal-A", dbName, "")
 
 	// --- the dataset, written through node A's PUBLIC api ---
 	//
-	// Three identities, each with several pastes, varied so the projections
-	// + quota sums are non-trivial:
-	//   - alice: two single-version pastes.
-	//   - bob:   one paste taken to v3 (multi-version: v1 + 2 appends), and
-	//            a second paste with one version tombstoned (a deleted
-	//            version sheds its bytes from the quota sum).
-	//   - carol: one single-version paste.
-	//
-	// The slugs use only SlugAlphabet chars (no l/o/0/1) so they are
-	// well-formed 8-char slugs. The byte sizes are distinct primes-ish so a
-	// miscount is obvious in the failure message.
+	// Three identities with varied paste shapes so the projections + quota sums
+	// are non-trivial. Slugs use only SlugAlphabet chars (no l/o/0/1); sizes are
+	// distinct so a miscount is obvious in the failure message.
 	type want struct {
 		identity   string
 		activeByte int            // expected SumActiveBytesByOwner
@@ -246,9 +203,9 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 	mustAppend(t, nodeA.repo, "bbbb2345", domain.KindHTML, "sha-bbbb2345-v2", 400, cap0, now.Add(time.Minute))
 	mustAppend(t, nodeA.repo, "bbbb2345", domain.KindHTML, "sha-bbbb2345-v3", 500, cap0, now.Add(2*time.Minute))
 
-	// bob, paste 2: v1 (700) then append v2 (200), then TOMBSTONE v1.
-	// A tombstoned version sheds its 700 bytes from the quota sum; the
-	// version stays listable (flagged deleted). Latest active = 2.
+	// bob, paste 2: v1 (700), append v2 (200), then TOMBSTONE v1. A tombstoned
+	// version sheds its bytes from the quota sum but stays listable (flagged
+	// deleted). Latest active = 2.
 	bobTomb := pasteFor("bbbc2345", "key:bob", "bob tomb", 700, now)
 	mustInsert(t, nodeA.repo, bobTomb, cap0)
 	mustAppend(t, nodeA.repo, "bbbc2345", domain.KindHTML, "sha-bbbc2345-v2", 200, cap0, now.Add(time.Minute))
@@ -313,13 +270,10 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 	waitMembers(t, nodes, 2, 15*time.Second)
 	t.Logf("ring converged to 2 members")
 
-	// Wait for the post-join rebalance to settle on BOTH nodes. The cluster
-	// default RebalanceSettleDelay is 5s (ShaleConfig exposes no knob to
-	// shrink it), so sleep past the debounce before WaitForRebalanceIdle so
-	// the Coordinator has actually evaluated + dispatched the migrations
-	// (calling WaitForIdle during the debounce window returns "idle"
-	// immediately because nothing is pending yet). Then gate on idle with a
-	// generous budget that covers the slate-backed streaming handoff.
+	// The cluster's RebalanceSettleDelay is 5s and ShaleConfig exposes no knob
+	// to shrink it, so sleep past the debounce first: WaitForIdle inside that
+	// window reports idle immediately because nothing is pending yet. The idle
+	// budget then covers the slate-backed streaming handoff.
 	time.Sleep(6 * time.Second)
 	idleCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -328,26 +282,17 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 			t.Fatalf("rebalance did not reach idle on %s: %v", n.id, err)
 		}
 	}
-	// Small drain window so the source-side grace sweep ticks land before we
-	// inspect physical placement.
+	// Drain window so the source-side grace sweep ticks land before physical
+	// placement is inspected.
 	time.Sleep(1 * time.Second)
 	t.Logf("rebalance reported idle on both nodes")
 
-	// --- ASSERTION 4 (run first, it shapes the others): keys redistributed.
-	// Node B's local backend must now physically hold SOME of the metadata
-	// keys. Zero means the ring "rebalance" moved nothing (everything still
-	// on the seed) - which would make the read assertions pass trivially
-	// while hiding a broken handoff.
-	// PORTED: this used to count LOCAL KEYS via LocalScanPrefix, which was the
-	// right instrument when a join physically COPIED bytes to the new node.
-	// Under the unit model nothing is copied - a unit is a database at a fixed
-	// prefix in shared object storage and a join moves the LEASE, not the
-	// bytes - so local key counts read 0 on both nodes and the old assertion
-	// failed while the product was perfectly healthy. The INTENT survives
-	// unchanged (catch a "rebalance" that moved nothing, which would make the
-	// read assertions above pass trivially); only the instrument had to change.
-	// Mount counts are the equivalent question in the new model: did the ring
-	// actually hand this node any units to serve?
+	// --- ASSERTION 4 (run first, it shapes the others): units redistributed.
+	// A join moves a unit's LEASE, not its bytes (a unit is a database at a
+	// fixed prefix in shared object storage), so mounted-unit counts are the
+	// instrument here and local key counts would read 0 on both nodes. Zero
+	// mounted units on B means the rebalance moved nothing, which makes the
+	// read assertions pass trivially while hiding a broken handoff.
 	readyA := nodeA.repo.MountReadiness()
 	readyB := nodeB.repo.MountReadiness()
 	keysA, keysB := readyA.MountedUnits, readyB.MountedUnits
@@ -361,8 +306,8 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 			"seed (A=%d B=%d), which is implausible for a 2-node ring and signals a placement bug.", keysA, keysB)
 	}
 
-	// --- diagnostic dump: for each paste's authoritative key, which node
-	// does the ring say owns it, and where do the bytes physically live?
+	// --- diagnostic dump: per paste key, the ring's owner vs where the bytes
+	// physically live.
 	for _, slug := range allSlugs {
 		pasteKey := []byte("pastes/" + slug)
 		t.Logf("DIAG %s: ring-owner A?=%v B?=%v | physically-on A=%v B=%v",
@@ -374,9 +319,9 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 		)
 	}
 
-	// --- ASSERTION 1: every paste still readable from the CLUSTER, via BOTH
-	// nodes' repos. Whichever node does NOT own a given {slug} shard must
-	// forward the Get over gRPC and return identical content. Zero losses.
+	// --- ASSERTION 1: every paste readable via BOTH nodes' repos. Whichever
+	// node does NOT own a given {slug} shard forwards the Get over gRPC and
+	// must return identical content.
 	for _, slug := range allSlugs {
 		ds := domain.Slug(slug)
 		pasteKey := []byte("pastes/" + slug)
@@ -419,10 +364,10 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 	}
 	t.Logf("ASSERTION 1 PASSED: all %d pastes (+ their version sets) readable via BOTH nodes; forwarding works", len(allSlugs))
 
-	// --- ASSERTION 2: the per-owner quota survived the move. Read
-	// SumActiveBytesByOwner for each identity via BOTH nodes; it must equal
-	// the BEFORE value exactly (the {id} shard, and the identity_pastes
-	// entries it sums, may now live on B - the read forwards there).
+	// --- ASSERTION 2: the per-owner quota survived the move. The {id} shard
+	// and the identity_pastes entries it sums may now live on B, so the read
+	// forwards; the sum must still equal the BEFORE value exactly via either
+	// node.
 	for _, w := range wants {
 		gotA, errA := nodeA.repo.SumActiveBytesByOwner(w.identity, now)
 		gotB, errB := nodeB.repo.SumActiveBytesByOwner(w.identity, now)

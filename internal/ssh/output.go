@@ -12,20 +12,16 @@ import (
 	"github.com/Zamua/hostthis/internal/service"
 )
 
-// output.go is the SSH adapter's PRESENTATION contract for the read
-// verbs (`list`, `versions`, `whoami`). The domain + service layers stay
-// pure and return domain types; this file is the thin translation layer
-// that shapes those types into either the human table (rendered by the
-// verb handlers themselves) or a stable, machine-readable JSON document.
+// The SSH adapter's PRESENTATION contract for the read verbs (`list`,
+// `versions`, `whoami`): domain types in, human table or machine-readable JSON
+// out.
 //
-// Two deliberate DDD choices:
-//
-//   - The JSON wire shape is a set of dedicated *view* structs, NOT the
-//     internal domain types. Marshaling domain.Paste directly would leak
-//     internal field names and couple the wire format to refactors; the
-//     view structs are the published contract (see docs/SPEC.md).
-//   - Machine consumers get real types: integer bytes, RFC 3339
-//     timestamps (or null), never the human "2.4k" / "13m" strings.
+//   - The JSON wire shape is a set of dedicated *view* structs, NOT the domain
+//     types. Marshaling domain.Paste directly would leak internal field names
+//     and couple the wire format to refactors; the view structs are the
+//     published contract (docs/SPEC.md).
+//   - Machine consumers get real types: integer bytes, RFC 3339 timestamps (or
+//     null), never the human "2.4k" / "13m" strings.
 
 // outputFormat is the value of the `-o` / `--output` selector.
 type outputFormat string
@@ -35,14 +31,12 @@ const (
 	formatJSON  outputFormat = "json"  // stable JSON document on stdout
 )
 
-// parseOutputFormat extracts a kubectl-style output selector from a verb's
-// argument list, wherever it appears, and returns the selected format plus
-// the remaining positional args with the flag removed. All pflag-style
-// spellings are accepted: `-o <fmt>`, `--output <fmt>`, the `=`-joined
-// `-o=<fmt>` / `--output=<fmt>`, and the glued short form `-o<fmt>` (e.g.
-// `-ojson`). Absent flag => formatTable. An unrecognized format value, or a
-// bare `-o` with no value, is a usage error (the caller maps it to
-// ExitUsage).
+// parseOutputFormat extracts a kubectl-style output selector from anywhere in
+// a verb's argument list and returns the format plus the remaining positional
+// args. Every pflag-style spelling is accepted: `-o <fmt>`, `--output <fmt>`,
+// `-o=<fmt>`, `--output=<fmt>`, and the glued short form `-o<fmt>` (e.g.
+// `-ojson`). Absent flag => formatTable. An unrecognized value, or a bare `-o`,
+// is a usage error the caller maps to ExitUsage.
 func parseOutputFormat(argv []string) (outputFormat, []string, error) {
 	format := formatTable
 	rest := make([]string, 0, len(argv))
@@ -52,7 +46,6 @@ func parseOutputFormat(argv []string) (outputFormat, []string, error) {
 		var val string
 		switch {
 		case arg == "-o" || arg == "--output":
-			// value is the next token
 			if i+1 >= len(argv) {
 				return "", nil, fmt.Errorf("missing value for %s (want: table, json)", arg)
 			}
@@ -63,8 +56,8 @@ func parseOutputFormat(argv []string) (outputFormat, []string, error) {
 		case strings.HasPrefix(arg, "--output="):
 			val = arg[len("--output="):]
 		case strings.HasPrefix(arg, "-o"):
-			// glued short form, e.g. "-ojson" (kubectl/pflag shorthand).
-			// Comes after the "-o=" case so "-o=json" isn't caught here.
+			// Glued short form ("-ojson"). Must stay after the "-o=" case so
+			// "-o=json" is not caught here.
 			val = arg[len("-o"):]
 		default:
 			rest = append(rest, arg)
@@ -92,8 +85,8 @@ func parseFormatValue(val string) (outputFormat, error) {
 	}
 }
 
-// writeJSON marshals v as indented JSON followed by a newline. Callers
-// use this only in json mode, where stdout carries the JSON value alone.
+// writeJSON marshals v as indented JSON followed by a newline. Used only in
+// json mode, where stdout carries the JSON value alone.
 func writeJSON(w io.Writer, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -110,10 +103,10 @@ func writeJSON(w io.Writer, v any) error {
 // View structs (the published JSON contract) + mappers from domain types.
 // ---------------------------------------------------------------------------
 
-// listItemView is one row of `list -o json` - a text paste OR a static
-// site, discriminated by Kind ("site" for sites). The version fields are
-// *int so a site (not versioned) serializes them as null; a paste points
-// them at real values. Expiry fields are null for a never-expiring item.
+// listItemView is one row of `list -o json`: a text paste OR a static site,
+// discriminated by Kind ("site" for sites). The version fields are *int so an
+// unversioned site serializes them as null. Expiry fields are null for a
+// never-expiring item.
 type listItemView struct {
 	Slug             string  `json:"slug"`
 	Name             string  `json:"name"` // "" when unset (not the "-" table sentinel)
@@ -128,7 +121,6 @@ type listItemView struct {
 	expiresAt time.Time // raw expiry for merge-sort; not serialized
 }
 
-// newPasteListItem maps a domain.Paste to a list item relative to now.
 func newPasteListItem(p domain.Paste, now time.Time) listItemView {
 	at, in := expiryFields(p.ExpiresAt, now)
 	served := servedVersion(p.PinnedVersion, p.LatestVersion)
@@ -148,8 +140,8 @@ func newPasteListItem(p domain.Paste, now time.Time) listItemView {
 	}
 }
 
-// newSiteListItem maps a domain.Site to a list item. Sites have no label
-// and no versions; SizeBytes is the deduped manifest total.
+// newSiteListItem maps a domain.Site to a list item. Sites have no label and
+// no versions; SizeBytes is the deduped manifest total.
 func newSiteListItem(s domain.Site, now time.Time) listItemView {
 	at, in := expiryFields(s.ExpiresAt, now)
 	return listItemView{
@@ -164,10 +156,9 @@ func newSiteListItem(s domain.Site, now time.Time) listItemView {
 	}
 }
 
-// newListView merges pastes + sites into one list-view slice, sorted by
-// expiry ascending (soonest-to-die first; never-expiring items sort last,
-// matching the paste-only ordering). Guaranteed non-nil so json is `[]`
-// (not `null`) when the owner has no active content.
+// newListView merges pastes + sites into one slice sorted by expiry ascending,
+// so never-expiring items sort last. Guaranteed non-nil so json renders `[]`
+// rather than `null` when the owner has no active content.
 func newListView(pastes []domain.Paste, sites []domain.Site, now time.Time) []listItemView {
 	views := make([]listItemView, 0, len(pastes)+len(sites))
 	for _, p := range pastes {
@@ -182,8 +173,8 @@ func newListView(pastes []domain.Paste, sites []domain.Site, now time.Time) []li
 	return views
 }
 
-// versCol renders the table VERS column for a list item: "-" for a site
-// (no versions), else the paste's version state (mirrors renderVersCol).
+// versCol renders the table VERS column: "-" for an unversioned site, else the
+// paste's version state (mirrors renderVersCol).
 func versCol(v listItemView) string {
 	if v.ServedVersion == nil {
 		return "-"
@@ -198,9 +189,8 @@ func versCol(v listItemView) string {
 	}
 }
 
-// versionsView is the `versions <slug> -o json` document. It folds the
-// stderr footer (pin state + paste expiry) into the object around the
-// version array.
+// versionsView is the `versions <slug> -o json` document. It folds the stderr
+// footer (pin state + paste expiry) into the object around the version array.
 type versionsView struct {
 	Slug          string        `json:"slug"`
 	PinnedVersion int           `json:"pinned_version"` // 0 when unpinned
@@ -219,8 +209,8 @@ type versionView struct {
 
 // newVersionsView maps the version timeline + owning paste to the json
 // document. servedVer is the currently-served ver_num (the pin, or MAX
-// non-deleted ver_num when unpinned) computed by the caller, which
-// already walks the list for the table render.
+// non-deleted ver_num when unpinned), passed in because the caller already
+// walks the list for the table render.
 func newVersionsView(slug string, p domain.Paste, vers []domain.Version, servedVer int, now time.Time) versionsView {
 	at, _ := expiryFields(p.ExpiresAt, now)
 	views := make([]versionView, 0, len(vers))
@@ -263,9 +253,7 @@ type sessionView struct {
 }
 
 // newWhoamiView maps the service WhoamiInfo to its json document. The key
-// prefix is stripped to match the human render (ssh-keygen -lf style);
-// quota_bytes is null when there's no cap; session is null when the
-// keygate isn't wired (no subnet).
+// prefix is stripped to match the human render (ssh-keygen -lf style).
 func newWhoamiView(info service.WhoamiInfo) whoamiView {
 	v := whoamiView{
 		Key:          strings.TrimPrefix(info.Identity, domain.IdentityKeyPrefix),
@@ -291,10 +279,10 @@ func newWhoamiView(info service.WhoamiInfo) whoamiView {
 	return v
 }
 
-// expiryFields renders (expires_at, expires_in_seconds) for a paste
-// expiry: both nil when the paste never expires; otherwise an RFC3339
-// timestamp and the whole seconds until expiry (clamped at 0, never
-// negative, so an already-expired-but-not-yet-swept paste reads 0).
+// expiryFields renders (expires_at, expires_in_seconds): both nil when the
+// paste never expires, otherwise an RFC3339 timestamp and the whole seconds
+// until expiry, clamped at 0 so an expired-but-unswept paste reads 0 rather
+// than negative.
 func expiryFields(expiresAt, now time.Time) (*string, *int64) {
 	if expiresAt.Equal(domain.NeverExpires) {
 		return nil, nil
@@ -305,7 +293,7 @@ func expiryFields(expiresAt, now time.Time) (*string, *int64) {
 }
 
 // servedVersion is the version the URL serves: the pin when set, else the
-// latest. Mirrors renderVersCol's logic for the json shape.
+// latest.
 func servedVersion(pinned, latest int) int {
 	if pinned != 0 {
 		return pinned

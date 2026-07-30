@@ -10,11 +10,9 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// countingCreateRepo is an instrumented PasteRepo fake for the admission
-// pins: it counts how many InsertWithQuotaCheck calls are inside it
-// simultaneously (the number the gate must bound) and can hold a given
-// identity's inserts open on a channel so a test can wedge one owner
-// while probing another.
+// countingCreateRepo counts simultaneous InsertWithQuotaCheck entrants (the
+// number the gate must bound) and can hold one identity's inserts open on a
+// channel, so a test can wedge one owner while probing another.
 type countingCreateRepo struct {
 	mu        sync.Mutex
 	inside    int
@@ -72,10 +70,9 @@ func gatedInsert(t *testing.T, repo PasteRepo, identity string) {
 }
 
 // TestCreateAdmission_AtMostWidthInside pins the admission contract: K
-// concurrent same-identity creates all complete, but at most width (2) are
-// ever inside the gated section simultaneously. The ungated control run
-// proves the instrumentation would catch a broken gate (without the gate the
-// same burst overlaps well past 2).
+// concurrent same-identity creates all complete, at most width (2) inside the
+// gated section at once. The ungated control run proves the instrument can
+// observe an overlap past 2, so a broken gate would not pass vacuously.
 func TestCreateAdmission_AtMostWidthInside(t *testing.T) {
 	const K = 32
 
@@ -130,9 +127,8 @@ func TestCreateAdmission_AtMostWidthInside(t *testing.T) {
 }
 
 // TestCreateAdmission_IdentitiesIndependent pins independence: with owner A
-// saturated (both slots held inside the repo and a third create queued at
-// the gate), owner B's create completes promptly - one identity's storm
-// never delays another identity.
+// saturated (both slots held, a third create queued at the gate), owner B's
+// create still completes promptly.
 func TestCreateAdmission_IdentitiesIndependent(t *testing.T) {
 	unblockA := make(chan struct{})
 	repo := &countingCreateRepo{holdFor: map[string]chan struct{}{"key:a": unblockA}}
@@ -171,7 +167,7 @@ func TestCreateAdmission_IdentitiesIndependent(t *testing.T) {
 
 // TestCreateAdmission_NoIdleEntries pins the no-leak property: once every
 // holder and waiter for an identity has released, the gate retains no entry
-// for it - idle owners cost nothing.
+// for it.
 func TestCreateAdmission_NoIdleEntries(t *testing.T) {
 	repo := &countingCreateRepo{dwell: time.Millisecond}
 	gate := NewCreateAdmission(2)
@@ -194,8 +190,8 @@ func TestCreateAdmission_NoIdleEntries(t *testing.T) {
 }
 
 // TestCreateAdmission_LoneCreatePassesThrough pins the fast path: an
-// uncontended create acquires with a map access - no goroutine spawn, no
-// scheduler round-trip - so lone-create latency is unaffected by the gate.
+// uncontended create acquires with a map access, spawning no goroutine and
+// taking no scheduler round-trip.
 func TestCreateAdmission_LoneCreatePassesThrough(t *testing.T) {
 	repo := &countingCreateRepo{}
 	gated := GateCreates(repo, NewCreateAdmission(2))
@@ -212,8 +208,8 @@ func TestCreateAdmission_LoneCreatePassesThrough(t *testing.T) {
 	if after > before {
 		t.Fatalf("fast path grew the goroutine count: %d -> %d", before, after)
 	}
-	// 1000 uncontended acquire/release cycles are map accesses; even a very
-	// generous bound catches an implementation that blocks or schedules.
+	// Uncontended acquire/release cycles are map accesses; even a generous
+	// bound catches an implementation that blocks or schedules.
 	if elapsed > 500*time.Millisecond {
 		t.Fatalf("%d uncontended gated creates took %v; the uncontended path must not block", N, elapsed)
 	}

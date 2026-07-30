@@ -7,19 +7,17 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// TestRoomWireValue pins the room-value wire encoding BYTE-FOR-BYTE.
-// This is the single shared implementation behind both the HTTP scan
-// handler and the relay snapshot/mirror frames; the client splice
-// contract depends on the two surfaces encoding a value identically,
-// so the exact output bytes are contract, not implementation detail.
+// TestRoomWireValue pins the room-value wire encoding byte-for-byte: the client
+// splice contract requires the HTTP scan handler and the relay frames to encode
+// a value identically, so the exact output bytes are contract.
 func TestRoomWireValue(t *testing.T) {
 	cases := []struct {
 		name string
 		in   []byte
 		want string
 	}{
-		// Valid JSON passes through VERBATIM - the exact stored bytes,
-		// whitespace and all, not a re-marshaled canonical form.
+		// Valid JSON passes through verbatim, whitespace and all, not
+		// re-marshaled to a canonical form.
 		{"json object passthrough", []byte(`{"a":1,"b":[true,null]}`), `{"a":1,"b":[true,null]}`},
 		{"json object with stored whitespace", []byte(`{ "a" : 1 }`), `{ "a" : 1 }`},
 		{"json number passthrough", []byte(`42`), `42`},
@@ -38,8 +36,7 @@ func TestRoomWireValue(t *testing.T) {
 
 		// Control chars escape per encoding/json's string rules.
 		{"control chars", []byte{0x00, 0x01, 'a', '\n'}, "\"\\u0000\\u0001a\\n\""},
-		// Invalid UTF-8 is coerced to U+FFFD, emitted as its escape
-		// sequence (encoding/json string rule).
+		// Invalid UTF-8 coerces to U+FFFD.
 		{"invalid utf8", []byte{0xff, 0xfe}, `"\ufffd\ufffd"`},
 	}
 	for _, tc := range cases {
@@ -48,8 +45,8 @@ func TestRoomWireValue(t *testing.T) {
 			if string(got) != tc.want {
 				t.Fatalf("RoomWireValue(%q) = %s, want %s", tc.in, got, tc.want)
 			}
-			// The output must always itself be valid JSON: it is embedded
-			// verbatim into a surrounding JSON object by both surfaces.
+			// Both surfaces embed the output verbatim into a surrounding
+			// JSON object, so it must itself be valid JSON.
 			if !json.Valid(got) {
 				t.Fatalf("RoomWireValue(%q) = %s is not valid JSON", tc.in, got)
 			}

@@ -2,23 +2,13 @@ package storage_test
 
 // Room operations in the backend-agnostic conformance suite.
 //
-// These subtests pin the OBSERVABLE room-persistence contract every metadata
-// backend that supports the rooms tier must hold IDENTICALLY (sqlite,
-// slatedb, and shale). They run only when the backend's factory supplies a
-// non-nil room repo (newRooms). A room repo is the union of service.RoomRepo
-// (create + the KV verbs + the creation-count) and service.SweepRooms (expiry
-// refs + the expired-ref delete + the creation-ledger prune).
+// These subtests pin the observable room-persistence contract every metadata
+// backend supporting the rooms tier must hold IDENTICALLY. They run only when
+// the backend's factory supplies a non-nil room repo.
 //
-// The room repo, the paste repo, and the site repo from one factory call MUST
-// share the same backing store, so the cross-kind service-wide cap subtest (a
-// room's bytes affect a paste / site quota check and vice versa) exercises the
-// real interaction, not three independent stores.
-//
-// Each room subtest is constructed so it FAILS on intentionally-weakened code
-// (the TDD gate): the isolation subtest fails if a key builder drops the app
-// or room segment; the cap subtests fail if a cap check is removed; the
-// service-wide subtest fails if the room bytes are dropped from the sum in
-// either direction.
+// The room, paste, and site repos from one factory call MUST share the same
+// backing store, so the cross-kind service-wide cap subtest exercises the real
+// interaction rather than three independent stores.
 
 import (
 	"bytes"
@@ -35,25 +25,22 @@ import (
 )
 
 // conformanceRoomRepo is the union of the two room-side service interfaces a
-// backend that supports the rooms tier must satisfy. The sqlite
-// *storage.RoomKVRepo, the slatedb *storage.SlateRoomRepo, and the shale
-// *storage.ShaleRoomRepo all implement it.
+// backend supporting the rooms tier must satisfy.
 type conformanceRoomRepo interface {
 	service.RoomRepo
 	service.SweepRooms
 }
 
 // roomConformanceStores bundles the three repos a backend's room factory
-// returns, all sharing one backing store. The cross-kind service-wide cap
-// subtest drives all three.
+// returns, all sharing one backing store.
 type roomConformanceStores struct {
 	Rooms conformanceRoomRepo
 	Paste conformanceRepo
 	Site  conformanceSiteRepo
 }
 
-// mkConformRoom creates an empty room under app with a freshly-minted UUIDv4
-// and the standard retention window, with no caps. Returns the created Room.
+// mkConformRoom creates an empty room under app with a fresh UUIDv4, the
+// standard retention window, and no caps.
 func mkConformRoom(t *testing.T, rr conformanceRoomRepo, app string, now time.Time) domain.Room {
 	t.Helper()
 	room := domain.Room{
@@ -69,12 +56,9 @@ func mkConformRoom(t *testing.T, rr conformanceRoomRepo, app string, now time.Ti
 	return room
 }
 
-// runRoomConformance runs the room contract subtests. `newRooms` produces a
-// fresh room+paste+site store bundle (sharing one backing store) per subtest,
-// matching the suite's "fresh empty store per subtest" discipline so the
-// empty-store assertions hold. `caps` declares the backend's by-design
-// behavior exceptions (rooms honor ExpiryFreesQuotaAtReadTime for the per-app
-// aggregate the same way pastes + sites do).
+// runRoomConformance runs the room contract subtests. newRooms must produce a
+// FRESH store bundle per subtest, since the empty-store assertions depend on
+// it. caps declares the backend's by-design behavior exceptions.
 func runRoomConformance(t *testing.T, name string, caps conformCaps, newRooms func(t *testing.T) roomConformanceStores) {
 	t.Helper()
 	t.Run(name+"/Rooms/RoundTrip", func(t *testing.T) { conformRoomRoundTrip(t, newRooms(t).Rooms) })
@@ -97,8 +81,8 @@ func runRoomConformance(t *testing.T, name string, caps conformCaps, newRooms fu
 	t.Run(name+"/Rooms/SeqScanExactUnderConcurrentWrites", func(t *testing.T) { conformRoomSeqScanExactUnderConcurrentWrites(t, newRooms(t).Rooms) })
 }
 
-// conformRoomRoundTrip: create a room, PUT values under several keys, GET each
-// back byte-identically, SCAN the whole namespace and observe every pair.
+// conformRoomRoundTrip: values PUT into a room come back byte-identically from
+// GET and from a whole-namespace SCAN, and a delete removes exactly one key.
 func conformRoomRoundTrip(t *testing.T, rr conformanceRoomRepo) {
 	room := mkConformRoom(t, rr, "app12345", fixedNow)
 	pairs := map[string][]byte{
@@ -121,7 +105,6 @@ func conformRoomRoundTrip(t *testing.T, rr conformanceRoomRepo) {
 			t.Fatalf("value round-trip mismatch for %q: got %v, want %v", k, got, want)
 		}
 	}
-	// GetRoom returns the room record.
 	got, err := rr.GetRoom(room.AppSlug, room.ID)
 	if err != nil {
 		t.Fatalf("get room: %v", err)
@@ -129,7 +112,6 @@ func conformRoomRoundTrip(t *testing.T, rr conformanceRoomRepo) {
 	if got.AppSlug != room.AppSlug || got.ID != room.ID {
 		t.Fatalf("room record mismatch: got app=%q id=%q", got.AppSlug, got.ID)
 	}
-	// Scan returns every pair.
 	kv, err := rr.ScanRoom(room.AppSlug, room.ID)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
@@ -146,22 +128,21 @@ func conformRoomRoundTrip(t *testing.T, rr conformanceRoomRepo) {
 			t.Fatalf("scan value mismatch for %q: got %v, want %v", k, got, want)
 		}
 	}
-	// Delete one key; it leaves the namespace, the others remain.
 	if _, err := rr.DeleteValue(room.AppSlug, room.ID, "card/1", fixedNow); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if _, err := rr.GetValue(room.AppSlug, room.ID, "card/1"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("deleted key should be gone: %v", err)
 	}
-	// Deleting an absent key is idempotent (room exists -> success).
+	// Deleting an absent key is idempotent while the room exists.
 	if _, err := rr.DeleteValue(room.AppSlug, room.ID, "card/1", fixedNow); err != nil {
 		t.Fatalf("re-delete absent key should be a no-op, got %v", err)
 	}
 }
 
 // conformRoomCrossRoomIsolation: a second room's UUID under the SAME app
-// cannot read, write, or scan the first room's data. This FAILS if the key
-// builder drops the room segment (both rooms would share one namespace).
+// cannot read, write, or scan the first room's data. Fails if the key builder
+// drops the room segment.
 func conformRoomCrossRoomIsolation(t *testing.T, rr conformanceRoomRepo) {
 	const app = "app12345"
 	roomA := mkConformRoom(t, rr, app, fixedNow)
@@ -170,11 +151,9 @@ func conformRoomCrossRoomIsolation(t *testing.T, rr conformanceRoomRepo) {
 	if _, err := rr.PutValue(roomA.AppSlug, roomA.ID, "secret", []byte("A-only"), 0, fixedNow); err != nil {
 		t.Fatalf("put in A: %v", err)
 	}
-	// B cannot read A's key.
 	if _, err := rr.GetValue(app, roomB.ID, "secret"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("room B read room A's key (isolation broken): %v", err)
 	}
-	// B's scan does not see A's data.
 	kvB, err := rr.ScanRoom(app, roomB.ID)
 	if err != nil {
 		t.Fatalf("scan B: %v", err)
@@ -182,7 +161,6 @@ func conformRoomCrossRoomIsolation(t *testing.T, rr conformanceRoomRepo) {
 	if kvB.KeyCount() != 0 {
 		t.Fatalf("room B scan leaked %d keys from room A (isolation broken): %v", kvB.KeyCount(), kvB.Values)
 	}
-	// B writes its own key; A does not see it.
 	if _, err := rr.PutValue(app, roomB.ID, "secret", []byte("B-only"), 0, fixedNow); err != nil {
 		t.Fatalf("put in B: %v", err)
 	}
@@ -195,12 +173,10 @@ func conformRoomCrossRoomIsolation(t *testing.T, rr conformanceRoomRepo) {
 	}
 }
 
-// conformRoomCrossAppIsolation: an IDENTICAL room-UUID-shaped string under a
-// SECOND app addresses a different keyspace. FAILS if the key builder drops
-// the app segment.
+// conformRoomCrossAppIsolation: a byte-identical room UUID under a SECOND app
+// addresses a different keyspace. Fails if the key builder drops the app
+// segment.
 func conformRoomCrossAppIsolation(t *testing.T, rr conformanceRoomRepo) {
-	// Two apps, but the SAME room UUID under each (constructed by hand so the
-	// id is byte-identical across the two apps).
 	id := domain.NewRoomID()
 	now := fixedNow
 	roomA := domain.Room{AppSlug: "app1aaaa", ID: id, CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RoomRetentionWindow)}
@@ -215,7 +191,6 @@ func conformRoomCrossAppIsolation(t *testing.T, rr conformanceRoomRepo) {
 	if _, err := rr.PutValue(roomA.AppSlug, id, "k", []byte("app1-data"), 0, now); err != nil {
 		t.Fatalf("put under app1: %v", err)
 	}
-	// app2's same-UUID room does not see app1's value.
 	if _, err := rr.GetValue(roomB.AppSlug, id, "k"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("app2 read app1's room key under the same UUID (cross-app isolation broken): %v", err)
 	}
@@ -229,12 +204,10 @@ func conformRoomCrossAppIsolation(t *testing.T, rr conformanceRoomRepo) {
 }
 
 // conformRoomNonexistent404: a per-key GET / PUT / DELETE on a well-formed but
-// nonexistent room returns ErrNotFound - the same shape as a missing key in a
-// real room (no per-key existence leak), and the same as a write to a gone
-// room.
+// nonexistent room returns ErrNotFound, the same shape as a missing key in a
+// real room, so per-key existence never leaks.
 func conformRoomNonexistent404(t *testing.T, rr conformanceRoomRepo) {
 	const app = "app12345"
-	// No room created under this app; a fresh well-formed UUID names no room.
 	ghost := domain.NewRoomID()
 	if _, err := rr.GetRoom(app, ghost); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("GetRoom on nonexistent room: got %v, want ErrNotFound", err)
@@ -242,82 +215,66 @@ func conformRoomNonexistent404(t *testing.T, rr conformanceRoomRepo) {
 	if _, err := rr.GetValue(app, ghost, "k"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("GetValue on nonexistent room: got %v, want ErrNotFound", err)
 	}
-	// PUT to a gone room is ErrNotFound (the room existence is re-checked
-	// inside the write boundary).
+	// Room existence is re-checked inside the write boundary.
 	if _, err := rr.PutValue(app, ghost, "k", []byte("x"), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("PutValue on nonexistent room: got %v, want ErrNotFound", err)
 	}
-	// DELETE to a gone room is ErrNotFound (only the ROOM-missing case errors;
-	// an absent key in a REAL room is a success - covered in RoundTrip).
+	// Only the ROOM-missing case errors; an absent key in a REAL room is a
+	// success, covered in RoundTrip.
 	if _, err := rr.DeleteValue(app, ghost, "k", fixedNow); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("DeleteValue on nonexistent room: got %v, want ErrNotFound", err)
 	}
-	// A real room exists, but a missing KEY in it is the SAME ErrNotFound a
-	// nonexistent room gives (no existence distinction on the per-key path).
 	room := mkConformRoom(t, rr, app, fixedNow)
 	if _, err := rr.GetValue(room.AppSlug, room.ID, "absent"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("missing key in a real room: got %v, want ErrNotFound (same as nonexistent room)", err)
 	}
 }
 
-// conformRoomPerRoomByteCap: a PUT that would push the room past MaxRoomBytes
-// is rejected (ErrRoomDataFull), prior value intact. FAILS if the per-room cap
-// check is removed.
+// conformRoomPerRoomByteCap: a PUT past MaxRoomBytes is rejected with the
+// prior state intact. Fails if the per-room cap check is removed.
 func conformRoomPerRoomByteCap(t *testing.T, rr conformanceRoomRepo) {
 	room := mkConformRoom(t, rr, "app12345", fixedNow)
-	// Fill the room to exactly the byte cap with one value.
 	full := make([]byte, domain.MaxRoomBytes)
 	if _, err := rr.PutValue(room.AppSlug, room.ID, "big", full, 0, fixedNow); err != nil {
 		t.Fatalf("put at byte cap: %v", err)
 	}
-	// One more byte (a new key) exceeds MaxRoomBytes -> rejected.
 	if _, err := rr.PutValue(room.AppSlug, room.ID, "more", []byte("x"), 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
 		t.Fatalf("over-byte-cap put: got %v, want ErrRoomDataFull", err)
 	}
-	// The rejected key was NOT written (prior state intact).
 	if _, err := rr.GetValue(room.AppSlug, room.ID, "more"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("rejected key was written anyway: %v", err)
 	}
-	// A value larger than the whole-room budget is rejected up front too.
+	// A value larger than the whole-room budget is rejected up front.
 	if _, err := rr.PutValue(room.AppSlug, room.ID, "huge", make([]byte, domain.MaxRoomValueBytes+1), 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
 		t.Fatalf("over-value-cap put: got %v, want ErrRoomDataFull", err)
 	}
 }
 
-// conformRoomPerRoomKeyCap: a PUT that would push the room past MaxRoomKeys is
-// rejected, even though the bytes are tiny.
+// conformRoomPerRoomKeyCap: a PUT past MaxRoomKeys is rejected even when the
+// bytes are tiny.
 func conformRoomPerRoomKeyCap(t *testing.T, rr conformanceRoomRepo) {
 	room := mkConformRoom(t, rr, "app12345", fixedNow)
-	// Fill the room to exactly MaxRoomKeys with one-byte values.
 	for i := range domain.MaxRoomKeys {
 		k := keyN(i)
 		if _, err := rr.PutValue(room.AppSlug, room.ID, k, []byte("x"), 0, fixedNow); err != nil {
 			t.Fatalf("put key %d: %v", i, err)
 		}
 	}
-	// One more distinct key exceeds MaxRoomKeys -> rejected.
 	if _, err := rr.PutValue(room.AppSlug, room.ID, "overflow", []byte("x"), 0, fixedNow); !errors.Is(err, storage.ErrRoomDataFull) {
 		t.Fatalf("over-key-cap put: got %v, want ErrRoomDataFull", err)
 	}
-	// Overwriting an EXISTING key does NOT add a key slot -> still allowed.
+	// Overwriting an EXISTING key adds no key slot, so it stays allowed.
 	if _, err := rr.PutValue(room.AppSlug, room.ID, keyN(0), []byte("y"), 0, fixedNow); err != nil {
 		t.Fatalf("overwrite at key cap should be allowed (no new slot): %v", err)
 	}
 }
 
-// conformRoomPerRoomCapConcurrentCeiling pins the strict-per-room-cap invariant
-// under concurrency: N goroutines each PUT a DISTINCT key of `body` bytes into
-// ONE room whose structural per-room byte cap (MaxRoomBytes) admits only K. The
-// invariant asserted is the CEILING - the bytes that land never exceed
-// MaxRoomBytes, no matter how the writes interleave. This is the room analogue
-// of conformQuotaConcurrentCeiling (the paste strict-quota gate). It pins the
-// per-room cap that the task calls out as "enforced on PUT, strictly under
-// concurrency," and it holds on every backend that declares
-// StrictQuotaUnderConcurrency: sqlite (serializable tx), slatedb (the per-room
-// lockQuota stripe held across the read+write), and shale (the single-shard CAS
-// on the value key with the per-app counter in the read-set). It FAILS if a
-// backend drops the per-room serialization (two writers both read a stale
-// namespace, both pass CanPut, and both commit, breaching MaxRoomBytes).
+// conformRoomPerRoomCapConcurrentCeiling pins the per-room cap CEILING under
+// concurrency: n writers race for the k slots MaxRoomBytes admits, and the
+// bytes that land never exceed the cap however the writes interleave. Fails if
+// a backend declaring StrictQuotaUnderConcurrency drops the per-room
+// serialization, letting two writers read a stale namespace, both pass CanPut,
+// and both commit.
 func conformRoomPerRoomCapConcurrentCeiling(t *testing.T, rr conformanceRoomRepo, caps conformCaps) {
 	room := mkConformRoom(t, rr, "app12345", fixedNow)
 	// body chosen so exactly k values fit under MaxRoomBytes and the (k+1)-th
@@ -333,11 +290,11 @@ func conformRoomPerRoomCapConcurrentCeiling(t *testing.T, rr conformanceRoomRepo
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			// Distinct key per writer (so the cap is exercised by the byte
-			// total across keys, not by overwriting one key). No per-app /
-			// service cap (0) - this isolates the per-room byte cap. A non-nil
-			// error (over-cap, or a transient backend lock) means the value did
-			// not land; we assert only the ceiling, so the error kind is moot.
+			// Distinct key per writer, so the cap is exercised by the byte
+			// total across keys rather than by overwriting one key, and no
+			// per-app cap, isolating the per-room one. Any error means the
+			// value did not land; only the ceiling is asserted, so the error
+			// kind is moot.
 			if _, err := rr.PutValue(room.AppSlug, room.ID, keyN(i), make([]byte, body), 0, fixedNow); err == nil {
 				atomic.AddInt64(&landed, 1)
 			}
@@ -354,8 +311,8 @@ func conformRoomPerRoomCapConcurrentCeiling(t *testing.T, rr conformanceRoomRepo
 		t.Fatalf("per-room cap ceiling breached under concurrency: %d values x %dB = %dB landed, cap %dB",
 			landed, body, landed*int64(body), int64(domain.MaxRoomBytes))
 	}
-	// Sanity: the room's actual stored bytes (via a scan) also stay under cap -
-	// the ceiling holds against what's persisted, not just the success count.
+	// The ceiling must hold against what is PERSISTED, not just the success
+	// count.
 	kv, err := rr.ScanRoom(room.AppSlug, room.ID)
 	if err != nil {
 		t.Fatalf("scan after race: %v", err)
@@ -365,50 +322,41 @@ func conformRoomPerRoomCapConcurrentCeiling(t *testing.T, rr conformanceRoomRepo
 	}
 }
 
-// conformRoomPerAppAggregateCap: an app's rooms in aggregate are bounded; past
-// the per-app byte cap a new room write (and a new room creation) is rejected.
+// conformRoomPerAppAggregateCap: the per-app byte cap sums across ALL of an
+// app's rooms, and a different app has its own budget.
 func conformRoomPerAppAggregateCap(t *testing.T, rr conformanceRoomRepo) {
 	const app = "app12345"
 	const appCap = 100
 	roomA := mkConformRoom(t, rr, app, fixedNow)
-	// Fill 90 of the 100 app-cap bytes via room A.
-	if _, err := rr.PutValue(roomA.AppSlug, roomA.ID, "k", make([]byte, 90), 0 /*per-room: unused here, appCap below*/, fixedNow); err != nil {
-		// per-room cap unused (the appCap is what we test); pass appCap on the
-		// next writes.
+	// Seed 90 of the 100 app-cap bytes via room A.
+	if _, err := rr.PutValue(roomA.AppSlug, roomA.ID, "k", make([]byte, 90), 0 /*per-room cap unused; appCap is the axis under test*/, fixedNow); err != nil {
 		t.Fatalf("seed 90 app bytes: %v", err)
 	}
-	// A second room under the SAME app: a 20-byte write pushes the app
-	// aggregate to 110 > 100 -> rejected (the per-app sum counts BOTH rooms).
+	// A second room under the SAME app: 90 + 20 > 100, so the write is
+	// rejected only if the sum counts both rooms.
 	roomB := mkConformRoom(t, rr, app, fixedNow)
 	if _, err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 20), appCap, fixedNow); !errors.Is(err, storage.ErrAppRoomsFull) {
 		t.Fatalf("over-app-cap write (must count both rooms): got %v, want ErrAppRoomsFull", err)
 	}
-	// A 10-byte write fits (90 + 10 = 100).
 	if _, err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 10), appCap, fixedNow); err != nil {
 		t.Fatalf("write within app cap (90+10=100): %v", err)
 	}
-	// A DIFFERENT app has its own untouched budget.
 	roomC := mkConformRoom(t, rr, "app99999", fixedNow)
 	if _, err := rr.PutValue(roomC.AppSlug, roomC.ID, "k", make([]byte, 90), appCap, fixedNow); err != nil {
 		t.Fatalf("different app should have its own budget: %v", err)
 	}
 }
 
-// conformRoomDeleteFreesCap: a DeleteValue frees per-room AND per-app cap
-// capacity for a subsequent PutValue. Fills a room to the per-room byte cap
-// (under a per-app cap set to exactly that fill, so BOTH caps are at their
-// ceiling), confirms a fresh write is rejected by each, DELETEs a value, then
-// asserts a PutValue of the freed size now succeeds - so the delete returned
-// the bytes to both budgets. FAILS if a delete does not credit the per-room
-// total (the re-PUT still 413s) or the per-app counter (the re-PUT still 507s).
+// conformRoomDeleteFreesCap: a DeleteValue credits BOTH the per-room total and
+// the per-app counter, so a re-PUT of the freed size succeeds. Fails if a
+// delete credits neither (the re-PUT still 413s) or only one of them (still
+// 507s).
 func conformRoomDeleteFreesCap(t *testing.T, rr conformanceRoomRepo) {
 	const app = "app12345"
 	room := mkConformRoom(t, rr, app, fixedNow)
 
-	// Two values fill the room to EXACTLY MaxRoomBytes: a big anchor and a
-	// smaller "doomed" cell we will delete to free its bytes. appCap is set to
-	// MaxRoomBytes too, so the per-app aggregate sits at its ceiling alongside
-	// the per-room cap.
+	// Two values fill the room to EXACTLY MaxRoomBytes, with appCap set to the
+	// same figure so both caps sit at their ceiling.
 	const doomed = 1000
 	anchor := domain.MaxRoomBytes - doomed
 	appCap := int64(domain.MaxRoomBytes)
@@ -419,30 +367,23 @@ func conformRoomDeleteFreesCap(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("seed doomed (%d bytes): %v", doomed, err)
 	}
 
-	// The room is now full on BOTH axes: a new value is rejected. (A new key of
-	// `doomed` bytes overflows the per-room byte cap; the same write also
-	// overflows the per-app counter, which is at MaxRoomBytes.)
+	// Full on BOTH axes: a new key of `doomed` bytes overflows the per-room
+	// byte cap and the per-app counter alike.
 	if _, err := rr.PutValue(room.AppSlug, room.ID, "extra", make([]byte, doomed), appCap, fixedNow); err == nil {
 		t.Fatalf("write into a full room should be rejected (per-room + per-app both at cap), got nil")
 	} else if !errors.Is(err, storage.ErrRoomDataFull) && !errors.Is(err, storage.ErrAppRoomsFull) {
 		t.Fatalf("full-room write err = %v, want ErrRoomDataFull or ErrAppRoomsFull", err)
 	}
 
-	// Delete the doomed cell: its `doomed` bytes return to BOTH the per-room
-	// total and the per-app counter.
 	if _, err := rr.DeleteValue(room.AppSlug, room.ID, "doomed", fixedNow); err != nil {
 		t.Fatalf("delete doomed: %v", err)
 	}
 
-	// A fresh value of exactly the freed size now fits - the delete credited
-	// both caps. (A NEW key, so it adds a key slot AND `doomed` bytes; the room
-	// is back to anchor + doomed = MaxRoomBytes, and the per-app counter is
-	// likewise back to MaxRoomBytes == appCap, both at-but-not-over.)
+	// A NEW key of exactly the freed size: it adds a key slot and `doomed`
+	// bytes, putting both budgets back at-but-not-over their ceiling.
 	if _, err := rr.PutValue(room.AppSlug, room.ID, "reclaimed", make([]byte, doomed), appCap, fixedNow); err != nil {
 		t.Fatalf("re-PUT of the freed size should succeed after a delete frees capacity: %v", err)
 	}
-	// And the freed-then-refilled state is correct: the room holds anchor +
-	// reclaimed (doomed is gone), exactly MaxRoomBytes.
 	kv, err := rr.ScanRoom(room.AppSlug, room.ID)
 	if err != nil {
 		t.Fatalf("scan after reclaim: %v", err)
@@ -456,14 +397,15 @@ func conformRoomDeleteFreesCap(t *testing.T, rr conformanceRoomRepo) {
 }
 
 // conformRoomCreationRateLimitCounts: the per-subnet and per-app in-window
-// counts the service gates on are accurate after N creations.
+// counts the service gates on are accurate, and creations outside the window
+// do not count.
 func conformRoomCreationRateLimitCounts(t *testing.T, rr conformanceRoomRepo) {
 	const app = "app12345"
 	const window = time.Hour
 	subnetA := "1.2.3.0/24"
 	subnetB := "9.9.9.0/24"
 
-	// Create 3 rooms from subnet A and 2 from subnet B, all under one app.
+	// 3 rooms from subnet A and 2 from subnet B, all under one app.
 	for i := range 3 {
 		room := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.RoomRetentionWindow)}
 		if err := rr.CreateRoom(room, subnetA, 0, fixedNow); err != nil {
@@ -477,7 +419,6 @@ func conformRoomCreationRateLimitCounts(t *testing.T, rr conformanceRoomRepo) {
 		}
 	}
 
-	// Per-subnet count for A is 3; per-app count is 5 (all under one app).
 	perSubnet, perApp, err := rr.CountRoomCreates(app, subnetA, fixedNow, window)
 	if err != nil {
 		t.Fatalf("count creates (A): %v", err)
@@ -488,7 +429,6 @@ func conformRoomCreationRateLimitCounts(t *testing.T, rr conformanceRoomRepo) {
 	if perApp != 5 {
 		t.Fatalf("per-app count: got %d, want 5", perApp)
 	}
-	// Per-subnet count for B is 2.
 	perSubnetB, _, err := rr.CountRoomCreates(app, subnetB, fixedNow, window)
 	if err != nil {
 		t.Fatalf("count creates (B): %v", err)
@@ -496,7 +436,6 @@ func conformRoomCreationRateLimitCounts(t *testing.T, rr conformanceRoomRepo) {
 	if perSubnetB != 2 {
 		t.Fatalf("per-subnet count for B: got %d, want 2", perSubnetB)
 	}
-	// A row OUTSIDE the window does not count.
 	old := fixedNow.Add(-2 * window)
 	oldRoom := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: old, UpdatedAt: old, ExpiresAt: old.Add(domain.RoomRetentionWindow)}
 	if err := rr.CreateRoom(oldRoom, subnetA, 0, old); err != nil {
@@ -512,13 +451,12 @@ func conformRoomCreationRateLimitCounts(t *testing.T, rr conformanceRoomRepo) {
 }
 
 // conformRoomCreationLedgerPrune: a windowed prune drops past-window ledger
-// rows, so the family stays bounded and the count after a prune is correct.
+// rows so the family stays bounded, and the in-window count survives it.
 func conformRoomCreationLedgerPrune(t *testing.T, rr conformanceRoomRepo) {
 	const app = "app12345"
 	const window = time.Hour
 	subnet := "1.2.3.0/24"
 
-	// Two old creations (outside the window) + one fresh one.
 	old := fixedNow.Add(-2 * window)
 	for i := range 2 {
 		room := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: old, UpdatedAt: old, ExpiresAt: old.Add(domain.RoomRetentionWindow)}
@@ -531,7 +469,6 @@ func conformRoomCreationLedgerPrune(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("create fresh: %v", err)
 	}
 
-	// Prune everything older than the window cutoff (now - window).
 	n, err := rr.PruneOldRoomCreates(fixedNow.Add(-window))
 	if err != nil {
 		t.Fatalf("prune: %v", err)
@@ -539,7 +476,6 @@ func conformRoomCreationLedgerPrune(t *testing.T, rr conformanceRoomRepo) {
 	if n != 2 {
 		t.Fatalf("prune should remove the 2 old ledger rows, got %d", n)
 	}
-	// After the prune, the in-window count is just the fresh one.
 	perSubnet, _, err := rr.CountRoomCreates(app, subnet, fixedNow, window)
 	if err != nil {
 		t.Fatalf("count after prune: %v", err)
@@ -549,14 +485,10 @@ func conformRoomCreationLedgerPrune(t *testing.T, rr conformanceRoomRepo) {
 	}
 }
 
-// conformRoomAppExistenceNotRepoGated: room creation at the REPO level is NOT
-// app-existence-gated (the HTTP layer enforces the slug-names-a-live-app rule;
-// the repo creates a room under any slug, the same way the paste repo is not
-// owner-gated). Pins that the repo accepts a create under a slug with no
-// matching site/paste.
+// conformRoomAppExistenceNotRepoGated: the repo creates a room under a slug
+// naming no live site or paste. The slug-names-a-live-app rule is an
+// HTTP-layer concern, not a repo one.
 func conformRoomAppExistenceNotRepoGated(t *testing.T, rr conformanceRoomRepo) {
-	// A slug that names no live site or paste still creates a room at the repo
-	// level - the existence gate is an HTTP-layer concern, not a repo one.
 	room := domain.Room{AppSlug: "noappxyz", ID: domain.NewRoomID(), CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.RoomRetentionWindow)}
 	if err := rr.CreateRoom(room, "10.0.0.0/24", 0, fixedNow); err != nil {
 		t.Fatalf("repo CreateRoom should not be app-existence-gated: %v", err)
@@ -571,11 +503,9 @@ func conformRoomAppExistenceNotRepoGated(t *testing.T, rr conformanceRoomRepo) {
 // room and cascades to its values, and an unexpired room is left alone.
 func conformRoomExpiryAndSweep(t *testing.T, rr conformanceRoomRepo) {
 	const app = "app12345"
-	// One room expiring soon, one far in the future. Create then PUT to set a
-	// known ExpiresAt (a PUT resets the clock to now + window).
+	// A PUT resets the retention clock to its write time + window, which is
+	// how each room below gets a known ExpiresAt.
 	soon := mkConformRoom(t, rr, app, fixedNow)
-	// Backdate `soon`'s clock by writing at a time whose window lands an hour
-	// out: write at (fixedNow - window + hour) so ExpiresAt = fixedNow + hour.
 	writeAt := fixedNow.Add(-domain.RoomRetentionWindow).Add(time.Hour)
 	if _, err := rr.PutValue(soon.AppSlug, soon.ID, "k", []byte("v"), 0, writeAt); err != nil {
 		t.Fatalf("put to set soon expiry: %v", err)
@@ -585,8 +515,6 @@ func conformRoomExpiryAndSweep(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("put to set far expiry: %v", err)
 	}
 
-	// At a time past `soon`'s expiry but before `far`'s, only `soon` is
-	// expired.
 	at := fixedNow.Add(2 * time.Hour)
 	expired, err := rr.ExpiredRooms(at)
 	if err != nil {
@@ -610,8 +538,7 @@ func conformRoomExpiryAndSweep(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("ExpiresAt == now should be inclusive-expired, got %v", expired)
 	}
 
-	// Processing the surfaced reference removes the room AND its values
-	// (the cascade) and reports a real record deletion.
+	// Processing the surfaced reference cascades to the room's values.
 	deleted, err := rr.DeleteExpiredRoom(soonRef)
 	if err != nil {
 		t.Fatalf("delete expired room: %v", err)
@@ -625,8 +552,7 @@ func conformRoomExpiryAndSweep(t *testing.T, rr conformanceRoomRepo) {
 	if _, err := rr.GetValue(soon.AppSlug, soon.ID, "k"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("deleted room's value should be cascaded away: %v", err)
 	}
-	// Re-processing the same reference is an idempotent no-op reporting
-	// false (the sweep may re-process a ref a prior tick already handled).
+	// The sweep may re-process a reference a prior tick already handled.
 	deleted, err = rr.DeleteExpiredRoom(soonRef)
 	if err != nil {
 		t.Fatalf("re-processed room reference must no-op, got %v", err)
@@ -634,24 +560,20 @@ func conformRoomExpiryAndSweep(t *testing.T, rr conformanceRoomRepo) {
 	if deleted {
 		t.Fatalf("DeleteExpiredRoom must report false when the room record was already gone")
 	}
-	// `far` survives.
 	if _, err := rr.GetRoom(far.AppSlug, far.ID); err != nil {
 		t.Fatalf("far room should survive the sweep of soon: %v", err)
 	}
 }
 
 // conformDeleteExpiredRoom pins the room half of the expiry-pass delete
-// contract (docs/SPEC.md "Room storage on the slatedb (and shale) backend",
-// sweep path), mirroring the paste conformDeleteExpired and the site
-// conformDeleteExpiredSite: processing a reference the scan surfaced deletes
-// the room record (reporting true), leaves not-yet-expired rooms untouched,
-// and DRAINS the scan - a re-scan after the pass sees zero references, and a
-// re-processed reference is an idempotent no-op reporting false (no record
-// was deleted by it).
+// contract (docs/SPEC.md "Room storage on the slatedb (and shale) backend"):
+// processing a scanned reference deletes the room record and reports true,
+// leaves unexpired rooms alone, and DRAINS the scan, so a re-scan sees zero
+// references and a re-processed reference no-ops reporting false.
 func conformDeleteExpiredRoom(t *testing.T, rr conformanceRoomRepo) {
 	const app = "app12345"
 	dead := mkConformRoom(t, rr, app, fixedNow)
-	// Backdate: write at (fixedNow - window + hour) so ExpiresAt = fixedNow + 1h.
+	// Write at (fixedNow - window + hour) so ExpiresAt = fixedNow + 1h.
 	writeAt := fixedNow.Add(-domain.RoomRetentionWindow).Add(time.Hour)
 	if _, err := rr.PutValue(dead.AppSlug, dead.ID, "k", []byte("v"), 0, writeAt); err != nil {
 		t.Fatalf("put to set dead expiry: %v", err)
@@ -670,7 +592,6 @@ func conformDeleteExpiredRoom(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("only the dead room should be expired at %v, got %v", at, refs)
 	}
 
-	// Processing the reference deletes the record and reports true.
 	deleted, err := rr.DeleteExpiredRoom(refs[0])
 	if err != nil {
 		t.Fatalf("delete expired room: %v", err)
@@ -682,7 +603,6 @@ func conformDeleteExpiredRoom(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("expired room should be gone after DeleteExpiredRoom: %v", err)
 	}
 
-	// One pass drains what it scanned: a re-scan sees zero references.
 	again, err := rr.ExpiredRooms(at)
 	if err != nil {
 		t.Fatalf("expired rooms (re-scan): %v", err)
@@ -691,8 +611,7 @@ func conformDeleteExpiredRoom(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("re-scan after the pass must see zero expired room references, got %v", again)
 	}
 
-	// Re-processing the same reference is an idempotent no-op reporting
-	// false (the sweep's deleted-count only reflects real record deletions).
+	// The sweep's deleted-count must reflect only real record deletions.
 	deleted, err = rr.DeleteExpiredRoom(refs[0])
 	if err != nil {
 		t.Fatalf("re-processed room reference must no-op, got: %v", err)
@@ -701,37 +620,33 @@ func conformDeleteExpiredRoom(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("DeleteExpiredRoom must report false when the room record was already gone")
 	}
 
-	// The not-yet-expired room is untouched throughout.
 	if _, err := rr.GetRoom(alive.AppSlug, alive.ID); err != nil {
 		t.Fatalf("active room must survive the expiry pass: %v", err)
 	}
 }
 
 // conformRoomExpirySubSecondOrdering pins that the room expiry index orders by
-// TIME within a shared whole second (the fixed-width-timestamp guard). With a
-// variable-width format a room expiring at "...00.5Z" would sort BEFORE a
-// whole-second cutoff "...00Z" and be swept up to ~1s early; the fixed-width
-// format makes byte order == time order, so this FAILS on the unfixed format.
+// TIME within a shared whole second. Under a variable-width timestamp a room
+// expiring at "...00.5Z" sorts BEFORE a whole-second cutoff "...00Z" and is
+// swept up to ~1s early; the fixed-width format makes byte order == time order.
 func conformRoomExpirySubSecondOrdering(t *testing.T, rr conformanceRoomRepo) {
 	const app = "app12345"
 	base := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 
-	// A room that expires HALF A SECOND into the whole second: write at
-	// (base - window + 0.5s) so ExpiresAt = base + 0.5s.
+	// Expires half a second into the whole second.
 	late := mkConformRoom(t, rr, app, base)
 	lateWriteAt := base.Add(-domain.RoomRetentionWindow).Add(500 * time.Millisecond)
 	if _, err := rr.PutValue(late.AppSlug, late.ID, "k", []byte("v"), 0, lateWriteAt); err != nil {
 		t.Fatalf("put to set late (.5s) expiry: %v", err)
 	}
-	// A room that expires at the START of the same whole second.
+	// Expires at the START of the same whole second.
 	early := mkConformRoom(t, rr, app, base)
 	earlyWriteAt := base.Add(-domain.RoomRetentionWindow)
 	if _, err := rr.PutValue(early.AppSlug, early.ID, "k", []byte("v"), 0, earlyWriteAt); err != nil {
 		t.Fatalf("put to set early (.0s) expiry: %v", err)
 	}
 
-	// Cutoff at .0s: the .5s room has NOT expired, the .0s room has (inclusive).
-	atStart := base // 12:00:00.0
+	atStart := base
 	expired, err := rr.ExpiredRooms(atStart)
 	if err != nil {
 		t.Fatalf("expired at .0s: %v", err)
@@ -743,8 +658,8 @@ func conformRoomExpirySubSecondOrdering(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("room expiring at .0s should be inclusive-expired at a .0s cutoff, got %v", expired)
 	}
 
-	// Cutoff at .4s: still below the .5s room -> it remains unexpired (proving
-	// the boundary is real sub-second time, not whole-second rounding).
+	// A .4s cutoff proves the boundary is real sub-second time rather than
+	// whole-second rounding.
 	atBelow := base.Add(400 * time.Millisecond)
 	expired, err = rr.ExpiredRooms(atBelow)
 	if err != nil {
@@ -757,13 +672,11 @@ func conformRoomExpirySubSecondOrdering(t *testing.T, rr conformanceRoomRepo) {
 
 // --- small helpers ---------------------------------------------------------
 
-// refsHas reports whether the (app, id) pair is in the expired-room slice.
 func refsHas(refs []domain.ExpiredRoom, app domain.Slug, id domain.RoomID) bool {
 	_, ok := refFor(refs, app, id)
 	return ok
 }
 
-// refFor returns the expired-room reference naming the (app, id) pair.
 func refFor(refs []domain.ExpiredRoom, app domain.Slug, id domain.RoomID) (domain.ExpiredRoom, bool) {
 	for _, ref := range refs {
 		if ref.AppSlug == app && ref.ID == id {
@@ -773,11 +686,10 @@ func refFor(refs []domain.ExpiredRoom, app domain.Slug, id domain.RoomID) (domai
 	return domain.ExpiredRoom{}, false
 }
 
-// keyN builds a deterministic distinct key for the i-th value (for the key-cap
-// subtest). Keys are within MaxRoomKeyLen.
+// keyN builds a distinct key for the i-th value, base-36 and within
+// MaxRoomKeyLen.
 func keyN(i int) string {
 	const digits = "0123456789abcdefghijklmnopqrstuvwxyz"
-	// base-36, fixed enough to stay distinct for i < MaxRoomKeys.
 	if i == 0 {
 		return "k0"
 	}
@@ -792,22 +704,21 @@ func keyN(i int) string {
 // --- Per-room sequence conformance (SPEC "The per-room sequence:
 // assignment at commit") -----------------------------------------------------
 //
-// The relay's multi-pod correctness rides these invariants, so they are
-// contract, pinned on every backend:
+// The relay's multi-pod correctness rides these invariants, so every backend
+// must hold them:
 //
 //   - every committed mutation (PUT or DELETE, including the idempotent
 //     DELETE of an absent key) assigns exactly one seq, dense +1 from 0
 //   - PutValue / DeleteValue return the assigned seq
 //   - concurrent same-room writers never share or skip a seq
-//   - ScanRoom's stamped Seq is EXACT: every mutation with seq <= S is in
-//     the state, none with seq > S is, even under concurrent writes
+//   - ScanRoom's stamped Seq is EXACT: every mutation with seq <= S is in the
+//     state and none with seq > S is, even under concurrent writes
 
 // conformRoomSeqDenseAssignment: sequential mutations of every flavor assign
 // 1, 2, 3, ... with no holes, and ScanRoom reports the last assigned seq.
 func conformRoomSeqDenseAssignment(t *testing.T, rr conformanceRoomRepo) {
 	room := mkConformRoom(t, rr, "app12345", fixedNow)
 
-	// A fresh room's scan is seq 0.
 	kv, err := rr.ScanRoom(room.AppSlug, room.ID)
 	if err != nil {
 		t.Fatalf("scan fresh: %v", err)
@@ -824,10 +735,10 @@ func conformRoomSeqDenseAssignment(t *testing.T, rr conformanceRoomRepo) {
 		{"put k2", func() (uint64, error) { return rr.PutValue(room.AppSlug, room.ID, "k2", []byte("v2"), 0, fixedNow) }},
 		{"overwrite k1", func() (uint64, error) { return rr.PutValue(room.AppSlug, room.ID, "k1", []byte("v1b"), 0, fixedNow) }},
 		{"delete k2", func() (uint64, error) { return rr.DeleteValue(room.AppSlug, room.ID, "k2", fixedNow) }},
-		// The idempotent DELETE of an ABSENT key still commits (it touches
-		// the retention clock) so it still assigns a seq - a bump with no
-		// frame would read as a permanent hole to a relay subscriber, and a
-		// commit with no bump would break density.
+		// The idempotent DELETE of an ABSENT key still commits, touching the
+		// retention clock, so it must still assign a seq: a bump with no
+		// frame reads as a permanent hole to a relay subscriber, and a commit
+		// with no bump breaks density.
 		{"delete absent", func() (uint64, error) { return rr.DeleteValue(room.AppSlug, room.ID, "never-existed", fixedNow) }},
 	}
 	for i, step := range steps {
@@ -849,11 +760,10 @@ func conformRoomSeqDenseAssignment(t *testing.T, rr conformanceRoomRepo) {
 	}
 }
 
-// conformRoomSeqConcurrentWritersUniqueDense: N concurrent same-room writers
-// (distinct keys, so only the record/stripe serializes them) receive N*M
-// seqs that are all unique and together form the dense range 1..N*M - no
-// share, no skip. This is the invariant that makes a hole in the relay's
-// live stream MEAN a lost frame (and not a storage-side numbering artifact).
+// conformRoomSeqConcurrentWritersUniqueDense: concurrent same-room writers on
+// distinct keys receive seqs that are all unique and together form the dense
+// range 1..N. This is what makes a hole in the relay's live stream MEAN a lost
+// frame rather than a storage-side numbering artifact.
 func conformRoomSeqConcurrentWritersUniqueDense(t *testing.T, rr conformanceRoomRepo) {
 	room := mkConformRoom(t, rr, "app12345", fixedNow)
 	const writers = 4
@@ -906,10 +816,9 @@ func conformRoomSeqConcurrentWritersUniqueDense(t *testing.T, rr conformanceRoom
 
 // conformRoomSeqScanExactUnderConcurrentWrites: while writers add one NEW key
 // per mutation, every concurrent ScanRoom must satisfy key-count == Seq
-// exactly - each of the S committed mutations added exactly one key, so a
-// snapshot claiming seq S with more or fewer than S keys has a broken fence
-// (it would hand a relay late-joiner a state that does not match its splice
-// point). Also pins that sequential scans observe a nondecreasing Seq.
+// exactly. A snapshot claiming seq S with more or fewer than S keys has a
+// broken fence and would hand a relay late-joiner a state that does not match
+// its splice point. Sequential scans must also observe a nondecreasing Seq.
 func conformRoomSeqScanExactUnderConcurrentWrites(t *testing.T, rr conformanceRoomRepo) {
 	room := mkConformRoom(t, rr, "app12345", fixedNow)
 	const writers = 3

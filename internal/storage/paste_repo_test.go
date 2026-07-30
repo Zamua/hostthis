@@ -1,13 +1,8 @@
 package storage
 
-// Blob-store tests for the sqlite/disk backend. The paste CRUD tests that
-// used to live here (insert+get round-trip, get-not-found, duplicate slug)
-// were folded into the backend-agnostic conformance suite, which runs the
-// same assertions against sqlite on every default `go test` run
-// (conformInsertAndGet / conformGetNotFound / conformDuplicateSlug in
-// conformance_test.go). The BlobStore tests below have no conformance
-// counterpart (the suite covers metadata backends, not the disk blob
-// store), so they stay.
+// Blob-store tests for the disk backend. Paste CRUD lives in the
+// backend-agnostic conformance suite (conformance_test.go), which covers
+// metadata backends only; the disk blob store has no counterpart there.
 
 import (
 	"bytes"
@@ -18,10 +13,9 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// newTestDB opens an isolated sqlite file in t.TempDir(). We use an
-// on-disk DB (not :memory:) so the connection pool with multiple
-// goroutines sees the same data - modernc sqlite ":memory:" creates
-// a fresh in-memory db per connection by default.
+// newTestDB opens an isolated sqlite file in t.TempDir(). On-disk, not
+// ":memory:": modernc sqlite gives each connection its own in-memory db, so a
+// pooled multi-goroutine test would not see the same data.
 func newTestDB(t *testing.T) (*PasteRepo, *BlobStore) {
 	t.Helper()
 	dir := t.TempDir()

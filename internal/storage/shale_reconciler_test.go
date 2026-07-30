@@ -4,24 +4,19 @@ package storage_test
 
 // Reconciler test for the shale backend's scan-derived quota.
 //
-// docs/SPEC.md "Derived indexes and repair-on-read" / "The correctness
-// argument": the per-identity quota is DERIVED by scanning the per-owner
-// enumeration index (identity_pastes/* and identity_sites/*) and summing the
-// authoritative row sizes. There is NO stored counter. The one quota-relevant
-// gap the scan design has is a crash between the authoritative {slug} row write
-// and the {id} enumeration-index write: it leaves a live row the index does not
-// list, so a scan momentarily UNDER-counts that owner (Window A) until the
-// reconciler reprojects the index. The reconciler's SOLE quota job is to
-// reproject the two enumeration indexes from the authoritative rows (an
-// idempotent SET heal); it never writes an aggregate number, so nothing can
-// durably drift.
+// docs/SPEC.md "Derived indexes and repair-on-read": the per-identity quota is
+// DERIVED by scanning the per-owner enumeration indexes (identity_pastes/* and
+// identity_sites/*) and summing the authoritative row sizes; there is no stored
+// counter. The one quota-relevant gap is a crash between the authoritative
+// {slug} row write and the {id} index write, which leaves a live row the index
+// does not list, so a scan UNDER-counts that owner until the reconciler
+// reprojects. The reconciler only ever reprojects the indexes from the
+// authoritative rows (an idempotent SET heal) and never writes an aggregate, so
+// nothing can durably drift.
 //
-// This test pins that heal for BOTH families: it drops an enumeration-index
-// entry whose authoritative paste/site still exists (modeling the crash
-// window), asserts the scan under-counts (the entry is gone so the row is not
-// enumerated), then runs Reconcile and asserts the index is rebuilt and the
-// scan is exact again. The site half also proves the re-homed
-// reconcileSiteIndexPass step in Reconcile actually runs.
+// This pins the heal for both families: drop an index entry whose authoritative
+// paste/site still exists, assert the under-count, reconcile, assert the index
+// is rebuilt and the scan exact again.
 //
 //	go test -tags slatedb -run TestShaleReconciler ./internal/storage
 //
@@ -65,16 +60,16 @@ func TestShaleReconciler_RebuildsDerivedIndex(t *testing.T) {
 	if err := repo.InsertWithQuotaCheck(context.Background(), pB, 0, now); err != nil {
 		t.Fatalf("insert pB: %v", err)
 	}
-	// Append a second version to pA so the scan must sum across versions.
+	// A second version on pA, so the scan must sum across versions.
 	if _, err := repo.AppendVersionWithQuotaCheck(context.Background(), pA.Slug, domain.KindHTML, "sha-recon1-v2", 100, 0, now); err != nil {
 		t.Fatalf("append pA v2: %v", err)
 	}
 
-	// Authoritative live bytes for the owner: pA(300 + 100) + pB(200) = 600.
+	// Authoritative live bytes for the owner: pA(300 + 100) + pB(200).
 	const wantPasteBytes = 600
 
-	// Baseline: the scan-derived sum + count are correct before we desync.
-	// mustCount drains the deferred index confirm so the index is settled.
+	// Baseline before the desync. mustCount drains the deferred index confirm
+	// so the index is settled.
 	if got := mustCount(t, repo, pasteOwner); got != 2 {
 		t.Fatalf("baseline paste count: got %d, want 2", got)
 	}
@@ -82,10 +77,9 @@ func TestShaleReconciler_RebuildsDerivedIndex(t *testing.T) {
 		t.Fatalf("baseline paste sum: got %d, want %d", got, wantPasteBytes)
 	}
 
-	// Model the crash-between-row-and-index window: drop pA's identity_pastes
-	// entry while pA still exists authoritatively. The quota scan enumerates
-	// THROUGH this index, so pA's bytes drop out of the sum (a transient Window
-	// A UNDER-count) and pA drops out of the owner's list.
+	// The crash-between-row-and-index window: drop pA's identity_pastes entry
+	// while pA still exists authoritatively. The quota scan enumerates THROUGH
+	// that index, so pA's bytes and pA itself drop out.
 	if err := repo.DeleteRawForTest(storage.IdentityPasteKeyForTest(pasteOwner, pA.Slug.String())); err != nil {
 		t.Fatalf("drop pA index entry: %v", err)
 	}
@@ -96,8 +90,6 @@ func TestShaleReconciler_RebuildsDerivedIndex(t *testing.T) {
 		t.Fatalf("post-desync paste sum: got %d, want 200 (Window A under-count: only pB enumerated)", got)
 	}
 
-	// Reconcile reprojects the enumeration index from the authoritative rows,
-	// closing the under-count window.
 	if err := repo.ReconcileForTest(now); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -107,8 +99,7 @@ func TestShaleReconciler_RebuildsDerivedIndex(t *testing.T) {
 	if got := mustCount(t, repo, pasteOwner); got != 2 {
 		t.Fatalf("post-reconcile paste count: got %d, want 2 (index rebuilt)", got)
 	}
-	// The rebuilt entry is a real entry, not a tombstone read: the raw key is
-	// present.
+	// The rebuilt entry is a real entry, not a tombstone read.
 	raw, err := repo.GetRawForTest(storage.IdentityPasteKeyForTest(pasteOwner, pA.Slug.String()))
 	if err != nil {
 		t.Fatalf("read rebuilt paste index entry: %v", err)
@@ -116,7 +107,7 @@ func TestShaleReconciler_RebuildsDerivedIndex(t *testing.T) {
 	if len(raw) == 0 {
 		t.Fatalf("reconcile should have rebuilt pA's index entry, got empty")
 	}
-	// Only the owner's pastes are healed; no leak across owners.
+	// The heal stays inside the owner: no leak across owners.
 	list, err := repo.ListByOwner(pasteOwner)
 	if err != nil {
 		t.Fatalf("list by owner: %v", err)
@@ -127,7 +118,7 @@ func TestShaleReconciler_RebuildsDerivedIndex(t *testing.T) {
 		}
 	}
 
-	// --- site enumeration index heal (the re-homed reconcileSiteIndexPass) --
+	// --- site enumeration index heal -------------------------------------
 
 	siteOwner := "key:reconsite"
 	siteSlug := domain.Slug("reconsite")
@@ -144,7 +135,6 @@ func TestShaleReconciler_RebuildsDerivedIndex(t *testing.T) {
 		t.Fatalf("deploy site: %v", err)
 	}
 
-	// Baseline: the site scan sees the deploy.
 	if got := mustSiteSum(t, repo, siteOwner, now); got != wantSiteBytes {
 		t.Fatalf("baseline site sum: got %d, want %d", got, wantSiteBytes)
 	}
@@ -152,9 +142,8 @@ func TestShaleReconciler_RebuildsDerivedIndex(t *testing.T) {
 		t.Fatalf("baseline site count: got %d, want 1", got)
 	}
 
-	// Drop the site's identity_sites entry while the authoritative site still
-	// exists (the same crash window, site side). The site scan enumerates
-	// through identity_sites, so the site's bytes drop out.
+	// The same crash window on the site side: the scan enumerates through
+	// identity_sites, so dropping the entry drops the site's bytes.
 	if err := repo.DeleteRawForTest(storage.IdentitySiteKeyForTest(siteOwner, siteSlug.String())); err != nil {
 		t.Fatalf("drop site index entry: %v", err)
 	}
@@ -165,7 +154,6 @@ func TestShaleReconciler_RebuildsDerivedIndex(t *testing.T) {
 		t.Fatalf("post-desync site count: got %d, want 0 (site dropped from index)", got)
 	}
 
-	// Reconcile's re-homed site-index reprojection rebuilds the entry.
 	if err := repo.ReconcileForTest(now); err != nil {
 		t.Fatalf("reconcile (site): %v", err)
 	}
@@ -198,8 +186,8 @@ func mustSum(t *testing.T, repo *storage.ShaleRepo, owner string, now time.Time)
 func mustCount(t *testing.T, repo *storage.ShaleRepo, owner string) int {
 	t.Helper()
 	// CountByOwner reads the identity_pastes index, which InsertWithQuotaCheck
-	// writes via a deferred confirm goroutine. Drain so the count is
-	// deterministic; a no-op when nothing is pending.
+	// writes from a deferred confirm goroutine; draining makes the count
+	// deterministic. A no-op when nothing is pending.
 	repo.WaitPendingConfirms()
 	n, err := repo.CountByOwner(owner)
 	if err != nil {

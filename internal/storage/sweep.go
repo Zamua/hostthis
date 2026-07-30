@@ -8,18 +8,15 @@ import (
 )
 
 // ExpiredPastes returns one reference per paste whose expires_at is at or
-// before `now`. The sweep job uses this to know what to delete; the
-// HTTP read path uses a similar check inline to 404 expired-but-not-
-// yet-deleted rows. The sqlite scan reads the pastes table itself (there
-// is no standalone expiry index to fall out of sync with the records),
-// so IndexRef is always empty and a returned slug always names a live
-// row at scan time.
+// before now. The scan reads the pastes table itself (there is no standalone
+// expiry index to fall out of sync with the records), so IndexRef is always
+// empty and a returned slug always named a live row at scan time.
 func (r *PasteRepo) ExpiredPastes(now time.Time) ([]domain.ExpiredPaste, error) {
 	rows, err := r.db.Query(`SELECT slug FROM pastes WHERE expires_at <= ?`, formatTime(now))
 	if err != nil {
 		return nil, fmt.Errorf("expired pastes: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	var out []domain.ExpiredPaste
 	for rows.Next() {
 		var s string
@@ -31,11 +28,10 @@ func (r *PasteRepo) ExpiredPastes(now time.Time) ([]domain.ExpiredPaste, error) 
 	return out, rows.Err()
 }
 
-// DeleteExpired processes one expired reference: the same full-cascade
-// delete as Delete, reporting whether a paste row was actually removed.
-// On sqlite there is no standalone expiry-index entry to clean (the scan
-// IS the pastes table), so a missing row is simply a no-op that returns
-// false. See docs/SPEC.md "The storage contract" (Expiry).
+// DeleteExpired processes one expired reference with the same full-cascade
+// delete as Delete, reporting whether a paste row was actually removed. There
+// is no expiry-index entry to clean here, so a missing row is a no-op that
+// returns false (docs/SPEC.md "The storage contract", Expiry).
 func (r *PasteRepo) DeleteExpired(ref domain.ExpiredPaste) (bool, error) {
 	res, err := r.db.Exec(`DELETE FROM pastes WHERE slug = ?`, ref.Slug.String())
 	if err != nil {
@@ -48,32 +44,21 @@ func (r *PasteRepo) DeleteExpired(ref domain.ExpiredPaste) (bool, error) {
 	return n > 0, nil
 }
 
-// ReferencedBlobSHAs returns the set of blob content-SHAs still
-// referenced by a live version or paste head. The sweep keeps these
-// and GCs any blob NOT in the set; returning an empty set while pastes
-// exist would delete every blob, so the sweep has an abort-on-zero-refs
-// guard. NOTE: this sqlite impl currently also keeps a TOMBSTONED
-// version's SHA referenced (its query has no deleted filter), which
-// diverges from the canonical rule that drops a tombstoned version's
-// blob. Bringing this query in line with the canonical rule is a known
-// open follow-up.
+// ReferencedBlobSHAs returns the content-SHAs the sweep must keep. Every blob
+// NOT in the set is GC'd, so an empty set while pastes exist would delete every
+// blob; the sweep guards against that by aborting on zero refs.
+//
+// This impl also keeps a TOMBSTONED version's SHA referenced (its query has no
+// deleted filter), diverging from the canonical rule that a tombstoned
+// version's blob is GC-able.
 func (r *PasteRepo) ReferencedBlobSHAs() ([]string, error) {
-	// A blob is "referenced" if it appears as a paste's content_sha
-	// OR as a version row's content_sha. The blob store only knows
-	// shas that have ever been written; the sweep walks the disk and
-	// passes each sha through this check.
-	//
-	// Implementation note: we materialize the set of referenced
-	// content_shas in memory because sqlite "NOT IN (subselect)"
-	// against a non-existent index is slow on big tables. Even at
-	// 100k pastes, the referenced set is ~100k strings = ~6MB.
-	// Sweep runs every 10 minutes so this is fine.
+	// Materialised in memory rather than a sqlite "NOT IN (subselect)": that
+	// subselect has no index to lean on and is slow on big tables, while the
+	// set stays a few MB even at 100k pastes.
 	refs, err := r.referencedSHAs()
 	if err != nil {
 		return nil, err
 	}
-	// The caller walks the disk and asks `isReferenced(sha)` for each
-	// blob file. We return the set as a map embedded in a helper.
 	out := make([]string, 0, len(refs))
 	for sha := range refs {
 		out = append(out, sha)
@@ -81,8 +66,6 @@ func (r *PasteRepo) ReferencedBlobSHAs() ([]string, error) {
 	return out, nil
 }
 
-// referencedSHAs returns a set of all SHAs referenced by either the
-// pastes or versions tables. Used by the blob GC pass.
 func (r *PasteRepo) referencedSHAs() (map[string]struct{}, error) {
 	out := make(map[string]struct{}, 1024)
 	for _, q := range []string{
@@ -96,7 +79,7 @@ func (r *PasteRepo) referencedSHAs() (map[string]struct{}, error) {
 		for rows.Next() {
 			var s string
 			if err := rows.Scan(&s); err != nil {
-				rows.Close()
+				rows.Close() //nolint:errcheck
 				return nil, err
 			}
 			out[s] = struct{}{}

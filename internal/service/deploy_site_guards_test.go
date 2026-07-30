@@ -10,17 +10,14 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// This file pins the security guards at the SERVICE boundary: it drives
-// DeploySite against real sqlite + a real compressed blob store so a
-// guard trip is asserted to leave NOTHING durable (no site row, no active
-// bytes charged). deploy_site_test.go already proves the happy path and
-// the error-surface mapping; these tests pin the "aborts atomically,
-// stores nothing" property the SPEC calls out for safe-untar.
+// The safe-untar guards at the SERVICE boundary, driven against real sqlite +
+// a real compressed blob store: a tripped guard must leave NOTHING durable (no
+// site row, no active bytes charged). The happy path and the error-surface
+// mapping live in deploy_site_test.go.
 
-// hugeGzipTar builds a gzip-tar whose single entry has a body of n bytes.
-// Because the body is a long run of one byte it compresses tiny, so the
-// archive on the wire is small while the uncompressed expansion is n: a
-// decompression bomb in the SPEC's sense.
+// hugeGzipTar builds a gzip-tar whose single entry has a body of n bytes. The
+// body is a long run of one byte, so the archive is tiny on the wire while the
+// uncompressed expansion is n: a decompression bomb.
 func hugeGzipTar(t *testing.T, name string, n int) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -45,14 +42,9 @@ func hugeGzipTar(t *testing.T, name string, n int) []byte {
 	return buf.Bytes()
 }
 
-// TestGuard_DeployBombStoresNothing proves the decompression-bomb guard
-// aborts the deploy AND leaves nothing durable: no site row, and zero
-// active site bytes charged against the identity. A half-extracted site
-// is never persisted (SPEC: "The aborted upload writes nothing durable").
-//
-// The archive is tiny on the wire (~few KiB compressed) but would inflate
-// to 64 MiB, far past the 10 MiB per-identity cap. The mid-untar guard
-// must abort it and the persistence step must never run.
+// TestGuard_DeployBombStoresNothing: the decompression-bomb guard aborts
+// mid-untar and persists nothing (SPEC: "The aborted upload writes nothing
+// durable"). The archive inflates to 64 MiB against a 10 MiB per-identity cap.
 func TestGuard_DeployBombStoresNothing(t *testing.T) {
 	withSmallQuota(t, 10<<20)
 	d, sites, _ := deployFixture(t)
@@ -64,8 +56,7 @@ func TestGuard_DeployBombStoresNothing(t *testing.T) {
 		t.Fatalf("bomb deploy: got %v, want ErrOverQuota", err)
 	}
 
-	// No site row was persisted: the union of all site manifests references
-	// no SHAs (no site rows exist at all in this fresh db).
+	// The db is fresh, so any referenced SHA means a site row was persisted.
 	refs, err := sites.ReferencedSiteBlobSHAs()
 	if err != nil {
 		t.Fatalf("referenced site shas: %v", err)
@@ -74,9 +65,8 @@ func TestGuard_DeployBombStoresNothing(t *testing.T) {
 		t.Fatalf("bomb left site rows behind: %v", refs)
 	}
 
-	// And the identity is charged ZERO active site bytes - it never crossed
-	// the persistence boundary, so a follow-up legitimate deploy has the
-	// whole budget available.
+	// Zero bytes charged: the abort never crossed the persistence boundary, so
+	// a follow-up deploy has the whole budget available.
 	used, err := sites.SumActiveBytesByOwner(owner, d.Now().UTC())
 	if err != nil {
 		t.Fatalf("sum active: %v", err)
@@ -85,18 +75,17 @@ func TestGuard_DeployBombStoresNothing(t *testing.T) {
 		t.Fatalf("bomb charged %d active bytes, want 0", used)
 	}
 
-	// Proof the abort was non-destructive: a real (small) site from the
-	// same identity still deploys cleanly afterward.
+	// The abort is non-destructive: a small site from the same identity still
+	// deploys cleanly afterward.
 	good := gzipTar(t, map[string]string{"index.html": "<h1>recovered</h1>"})
 	if _, err := d.Deploy(bytes.NewReader(good), owner); err != nil {
 		t.Fatalf("post-bomb legitimate deploy failed: %v", err)
 	}
 }
 
-// TestGuard_DeployTraversalStoresNothing proves a traversal entry aborts
-// the deploy with ErrUnsafeArchive and persists no site row, even though
-// the archive also contains a perfectly valid index.html. The guard is
-// all-or-nothing: one unsafe entry voids the whole deploy.
+// TestGuard_DeployTraversalStoresNothing: the traversal guard is
+// all-or-nothing. One unsafe entry voids the whole deploy and persists no site
+// row, even though the archive also carries a valid index.html.
 func TestGuard_DeployTraversalStoresNothing(t *testing.T) {
 	d, sites, _ := deployFixture(t)
 	arc := gzipTar(t, map[string]string{
@@ -117,16 +106,14 @@ func TestGuard_DeployTraversalStoresNothing(t *testing.T) {
 	}
 }
 
-// TestGuard_DeployManifestSizeCapStoresNothing exercises the manifest
-// path-text cap through the full service path and asserts the deploy is
-// rejected with ErrTooManyFiles and no site row is persisted. This pins
-// the third safe-untar guard at the service boundary (the domain test
-// pins it in isolation).
+// TestGuard_DeployManifestSizeCapStoresNothing: the manifest path-text cap
+// rejects with ErrTooManyFiles and persists no site row, through the full
+// service path (the domain test pins the cap in isolation).
 func TestGuard_DeployManifestSizeCapStoresNothing(t *testing.T) {
 	d, sites, _ := deployFixture(t)
 
-	// ~900-byte paths so the path-text total crosses MaxManifestBytes
-	// (1 MiB) well before MaxSiteFiles (5000).
+	// ~900-byte paths so the path-text total crosses MaxManifestBytes (1 MiB)
+	// well before MaxSiteFiles (5000), isolating the cap under test.
 	files := map[string]string{"index.html": "<h1>ok</h1>"}
 	stem := bytes.Repeat([]byte("a"), 900-len("dir000000.html"))
 	for i := range 2000 {
@@ -160,9 +147,8 @@ func pad6svc(n int) string {
 }
 
 // withSmallQuota shrinks the per-identity quota for one test and restores it.
-// Duplicated from the external test package because this file is package
-// service (internal) and cannot import it. See quota_test.go for why shrinking
-// beats generating 100+ MiB of high-entropy data per test.
+// Duplicated from the external test package, which package service cannot
+// import. Shrinking the cap beats generating 100+ MiB of high-entropy data.
 func withSmallQuota(t *testing.T, n int) {
 	t.Helper()
 	orig := domain.UserQuotaBytes

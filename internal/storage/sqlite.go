@@ -1,7 +1,7 @@
-// Package storage holds the infrastructure adapters that back the
-// domain types - sqlite for paste metadata, content-addressed disk
-// store for paste bytes. Domain types (internal/domain) never import
-// this package; this package imports domain. DDD layering enforced.
+// Package storage holds the infrastructure adapters behind the domain types:
+// sqlite for paste metadata, a content-addressed disk store for paste bytes.
+// The dependency runs one way only: storage imports internal/domain, never the
+// reverse.
 package storage
 
 import (
@@ -19,27 +19,20 @@ import (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
-// Open opens or creates the sqlite db at the given path, applying any
-// pending migrations from the embedded `migrations/` dir in lexical
-// order. ":memory:" is a valid path for tests.
-//
-// Returned *sql.DB is safe for concurrent use; the caller closes it
-// at shutdown. WAL mode + busy_timeout are set so concurrent writes
-// don't immediately fail under contention.
+// Open opens or creates the sqlite db at path, applying pending migrations from
+// the embedded migrations/ dir in lexical order. ":memory:" is valid for tests.
+// The returned *sql.DB is safe for concurrent use; the caller closes it.
 func Open(path string) (*sql.DB, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
-	// Serialize all access through a single connection. sqlite has one
-	// writer regardless; an unbounded pool lets concurrent writers race
-	// into the WAL write-lock upgrade deadlock, which busy_timeout cannot
-	// resolve (it returns SQLITE_BUSY immediately). One connection removes
-	// the contention entirely - correct for the single-host, low-volume
-	// sqlite mode (prod metadata runs on shale, not sqlite). Especially
-	// needed now that the async-blob finalizer issues a second write (the
-	// status flip) concurrent with the insert.
+	// Serialize all access through one connection. sqlite has a single writer
+	// regardless, and an unbounded pool lets concurrent writers race into the
+	// WAL write-lock upgrade deadlock, which busy_timeout cannot resolve (it
+	// returns SQLITE_BUSY immediately). Concurrent writers are real here: the
+	// async-blob finalizer's status flip overlaps the insert.
 	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
@@ -57,9 +50,7 @@ func migrate(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("read migrations: %w", err)
 	}
-	// Track applied migrations in a tiny meta table so re-runs are
-	// idempotent. Single-process, single-file db - no need for a
-	// migration framework.
+	// Applied filenames are tracked in a meta table so re-runs are idempotent.
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS _migrations (
 		filename TEXT PRIMARY KEY,
 		applied_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -100,8 +91,7 @@ func migrate(db *sql.DB) error {
 	return nil
 }
 
-// ErrNotFound is returned by any repo when a lookup misses. It is an
-// alias of the domain-owned sentinel (the error vocabulary lives in
-// internal/domain; see docs/SPEC.md "The storage contract"), kept under
-// its historical name so existing errors.Is / == checks hold unchanged.
+// ErrNotFound is returned by any repo when a lookup misses. It aliases the
+// domain-owned sentinel: the error vocabulary lives in internal/domain (see
+// docs/SPEC.md "The storage contract").
 var ErrNotFound = domain.ErrNotFound

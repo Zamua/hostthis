@@ -5,14 +5,10 @@ import (
 	"testing"
 )
 
-// The markdown render shell (md.js) fetches the paste's raw bytes from a
-// SEPARATE URL - "<path>?raw=1" - which a CDN caches as a distinct entry.
-// The CDN purge in internal/cache/urls.go (pasteCacheURLs) hard-codes that
-// same "?raw=1" suffix so an edited markdown paste invalidates BOTH cache
-// keys. If md.js ever changes the query it fetches, that purge would
-// silently stop matching and edits would serve stale content. This test
-// pins the two in lockstep: if you change md.js's fetch query, you must
-// update internal/cache/urls.go (and this test) to match.
+// md.js fetches the paste's raw bytes from "<path>?raw=1", which a CDN caches
+// as a distinct entry, so pasteCacheURLs in internal/cache/urls.go hard-codes
+// the same suffix. Changing the query in one place and not the other leaves an
+// edited markdown paste serving stale bytes with nothing failing.
 func TestMdShell_FetchesRawQuery(t *testing.T) {
 	b, err := mdShellFS.ReadFile("assets/mdshell/md.js")
 	if err != nil {

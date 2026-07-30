@@ -6,40 +6,32 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// commitErrClass is the classification classifyCommitErr assigns a
-// commit-path storage error.
+// commitErrClass is the classification classifyCommitErr assigns a commit-path
+// storage error.
 type commitErrClass int
 
 const (
-	// commitOK: err was nil.
 	commitOK commitErrClass = iota
-	// commitServiceFull: the durable total-bytes ceiling (the object
-	// store's bucket quota) rejected the write; translated ErrServiceFull.
+	// commitServiceFull: the object store's bucket quota rejected the write.
 	commitServiceFull
-	// commitOverQuota: the per-identity cap rejected the write;
-	// translated ErrOverQuota.
+	// commitOverQuota: the per-identity cap rejected the write.
 	commitOverQuota
-	// commitSlugTaken: the chosen slug/id collided; translated
-	// SlugTakenErr. Retry loops re-mint on this class instead of
-	// returning the translated error.
+	// commitSlugTaken: the chosen slug collided. A retry loop re-mints on this
+	// class instead of returning the translated error.
 	commitSlugTaken
-	// commitOther: unclassified; the error passes through VERBATIM so
-	// call sites keep their own default handling (wrap with context,
-	// check further sentinels, surface as-is).
+	// commitOther: unclassified, so the error passes through VERBATIM and call
+	// sites keep their own default handling.
 	commitOther
 )
 
-// classifyCommitErr is the ONE translation of the storage commit-error
-// triad (service-full / over-user-quota / slug-taken) into the service
-// vocabulary. Every write path - upload create (both blob modes), paste
-// update, site deploy/redeploy - repeats this exact mapping, so it
-// lives here once; the call sites keep only their path-specific cases
-// (re-mint on collision, wrap a stage failure, translate not-found).
+// classifyCommitErr is the ONE translation of the storage commit-error triad
+// (service-full, over-user-quota, slug-taken) into the service vocabulary.
+// Every write path repeats this exact mapping, so it lives here once and the
+// call sites keep only their path-specific cases.
 //
-// Returns the class plus the translated error: nil for commitOK, the
-// service sentinel for the triad classes, and err itself (the same
-// value, not a copy) for commitOther. Sentinels are matched with
-// errors.Is, so wrapping anywhere in the storage stack is fine.
+// The returned error is nil for commitOK, the service sentinel for the triad
+// classes, and err itself (the same value) for commitOther. Sentinels are
+// matched with errors.Is, so wrapping anywhere in the storage stack is fine.
 func classifyCommitErr(err error) (commitErrClass, error) {
 	switch {
 	case err == nil:

@@ -1,9 +1,7 @@
-// Homogeneous-bootstrap gate (-tags slatedb, MinIO-backed). Pins the wiring
-// that lets hostthis's embedded shale cluster form-vs-join at runtime against
-// the __cluster/init marker instead of the founder/joiner seed asymmetry: a
-// shared ConditionalStore flows through storage.NewShaleRepo into the cluster,
-// AllowSoloStart derives from it, and the marker drives one-founder-then-join.
-// See docs/SPEC.md "Homogeneous bootstrap (optional)".
+// Homogeneous-bootstrap gate (-tags slatedb, MinIO-backed). Pins that a shared
+// ConditionalStore flows through storage.NewShaleRepo into the cluster, that
+// AllowSoloStart derives from it, and that the __cluster/init marker drives
+// one-founder-then-join. See docs/SPEC.md "Homogeneous bootstrap (optional)".
 //
 //go:build slatedb
 
@@ -21,11 +19,10 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// startHomogNode brings up a multi-backend node via the production
-// storage.NewShaleRepo path with a shared ConditionalStore wired (the
-// homogeneous bootstrap). Mirrors startRebalNode but takes the cond store,
-// seed list, unit count, and replication factor explicitly so a test can
-// drive the form-vs-join marker decision.
+// startHomogNode brings up a node via the production storage.NewShaleRepo path
+// with a shared ConditionalStore wired, taking the cond store, seeds, unit
+// count, and replication factor explicitly so a test can drive the form-vs-join
+// marker decision.
 func startHomogNode(t *testing.T, id, dbName string, seeds []string, cs storageunit.ConditionalStore, unitCount, rf int) *rebalNode {
 	t.Helper()
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
@@ -65,7 +62,7 @@ func startHomogNode(t *testing.T, id, dbName string, seeds []string, cs storageu
 	return n
 }
 
-// TestShaleHomogeneous_MarkerBootstrap proves the homogeneous path end to end
+// TestShaleHomogeneous_MarkerBootstrap pins the homogeneous path end to end
 // over the real backend:
 //
 //   - Node A is configured with a seed it CANNOT reach. Without a
@@ -76,7 +73,7 @@ func startHomogNode(t *testing.T, id, dbName string, seeds []string, cs storageu
 //   - The marker records the durable {gen:0, count:N}.
 //   - Node B, carrying A's real address and the SAME store, joins gossip and
 //     reads the marker (adopts gen 0, no second form).
-//   - A write through A is readable through B: R=2 routing over the
+//   - A write through A is readable through B, so R=2 routing over the
 //     homogeneously-bootstrapped ring round-trips.
 func TestShaleHomogeneous_MarkerBootstrap(t *testing.T) {
 	if os.Getenv("MINIO_TEST_ENDPOINT") == "" {
@@ -88,20 +85,18 @@ func TestShaleHomogeneous_MarkerBootstrap(t *testing.T) {
 	dbName := fmt.Sprintf("homog-%d", epoch) // fresh prefix: clean form-from-empty
 	const units = 4
 
-	// Shared CAS arbiter: the in-process MemConditionalStore stands in for the
-	// MinIO-backed store every pod shares in production. It stores keys
-	// verbatim (the prefix namespacing is a MinioConditionalStore property), so
-	// the marker key is the bare "__cluster/init".
+	// Shared CAS arbiter standing in for the MinIO-backed store every pod
+	// shares in production. It stores keys verbatim (prefix namespacing is a
+	// MinioConditionalStore property), so the marker key is the bare
+	// "__cluster/init".
 	cs := storageunit.NewMemConditionalStore()
 
-	// A seed that resolves but has nothing listening: a free port we grab and
-	// immediately let go (freeTCPPort closes its probe listener). Node A's join
-	// to it fails, so only AllowSoloStart (active because the store is wired)
-	// keeps Open from erroring.
+	// A seed that resolves but has nothing listening (freeTCPPort closes its
+	// probe listener). Node A's join to it fails, so only AllowSoloStart,
+	// active because the store is wired, keeps Open from erroring.
 	deadSeed := loopback(freeTCPPort(t))
 	nodeA := startHomogNode(t, "homog-A", dbName, []string{deadSeed}, cs, units, 2)
 
-	// The founder wrote the marker as {gen:0, count:units}.
 	data, _, err := cs.Get("__cluster/init")
 	if err != nil {
 		t.Fatalf("expected __cluster/init marker after solo form, got error: %v", err)
@@ -110,13 +105,13 @@ func TestShaleHomogeneous_MarkerBootstrap(t *testing.T) {
 		t.Fatalf("marker should record unit count %d, got %q", units, data)
 	}
 
-	// Node B seeds off A's real address + shares the store: joins gossip and
-	// reads the marker (adopts gen 0). No second form.
+	// Node B seeds off A's real address and shares the store: it joins gossip
+	// and adopts gen 0 from the marker rather than forming a second cluster.
 	nodeB := startHomogNode(t, "homog-B", dbName, []string{nodeA.bindAddr}, cs, units, 2)
 	waitMembers(t, []*rebalNode{nodeA, nodeB}, 2, 30*time.Second)
 
-	// R=2 round-trip across the homogeneously-bootstrapped ring: write through
-	// A, read through B. Slug uses only SlugAlphabet chars (no l/o/0/1).
+	// R=2 round-trip: write through A, read through B. The slug uses only
+	// SlugAlphabet chars (no l/o/0/1).
 	p := pasteFor("hmg23456", "key:alice", "homog one", 123, now)
 	mustInsert(t, nodeA.repo, p, 0)
 

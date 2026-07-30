@@ -2,12 +2,10 @@ package storage
 
 import "testing"
 
-// TestShaleShardKey pins shaleShardKey's family-prefix parsing: every key
-// in a family must extract to the same shard key (the family's subject),
-// so a transaction touching one family for one subject is single-shard.
-// This is the routing contract docs/SPEC.md "Three shard families"
-// depends on; a parsing bug here would silently scatter a subject's keys
-// across shards and break the per-shard CAS invariants.
+// TestShaleShardKey pins shaleShardKey's family-prefix parsing: every key in a
+// family extracts to the same shard key, so a transaction over one family for
+// one subject is single-shard (docs/SPEC.md "Three shard families"). A parsing
+// bug here silently scatters a subject's keys and breaks the per-shard CAS.
 func TestShaleShardKey(t *testing.T) {
 	cases := []struct {
 		name string
@@ -38,16 +36,14 @@ func TestShaleShardKey(t *testing.T) {
 		{"expiry_site", "expiry_sites/2026-06-05T12:00:00Z/abc12345", "abc12345"},
 		{"expiry_site nano", "expiry_sites/2026-06-05T12:00:00.123456789Z/abc12345", "abc12345"},
 
-		// Static-site per-identity derived family -> shard key <id>: the
-		// identity_sites/ enumeration index routes on the id so an owner's
-		// site entries co-locate for the single-shard quota scan.
+		// Static-site per-identity derived family -> shard key <id>, so an
+		// owner's site entries co-locate for the single-shard quota scan.
 		{"identity_sites index", "identity_sites/sha256:deadbeef/abc12345", "sha256:deadbeef"},
 
-		// Room families -> shard key <app-slug>. All four families (+ the
-		// per-app byte counter) shard on the app slug, the FIRST segment after
-		// the prefix for rooms/ + roomkv/ + roomcreate/, and the SECOND-to-last
-		// segment for roomexpiry/ (between the <ts> and the trailing <uuid>).
-		// The trailing-slash discipline keeps roomkv/ from matching rooms/.
+		// Room families -> shard key <app-slug>: the FIRST segment after the
+		// prefix for rooms/ + roomkv/ + roomcreate/, the SECOND-to-last for
+		// roomexpiry/. The trailing-slash discipline keeps roomkv/ from
+		// matching rooms/.
 		{"room record", "rooms/app12345/9f8e7d6c-1234-4abc-89de-0123456789ab", "app12345"},
 		{"room value", "roomkv/app12345/9f8e7d6c-1234-4abc-89de-0123456789ab/card/1", "app12345"},
 		{"room create", "roomcreate/app12345/10.0.0.0_24/2026-06-05T12:00:00.000000000Z/9f8e7d6c-1234-4abc-89de-0123456789ab", "app12345"},
@@ -70,10 +66,9 @@ func TestShaleShardKey(t *testing.T) {
 	}
 }
 
-// TestShaleShardKeyFamilyColocation asserts the load-bearing property
-// directly: all of a single slug's authoritative keys, and all of a
-// single identity's derived keys, extract to one shard key each. If this
-// regresses, single-shard transactions silently become cross-shard.
+// TestShaleShardKeyFamilyColocation asserts the property directly: a slug's
+// authoritative keys all extract to one shard key, and an identity's derived
+// keys to another. A regression turns single-shard transactions cross-shard.
 func TestShaleShardKeyFamilyColocation(t *testing.T) {
 	slug := "z9y8x7w6"
 	slugKeys := []string{
@@ -82,15 +77,14 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 		"versions/" + slug + "/0009",
 		"slug_owner/" + slug,
 		"expiry/2026-06-05T12:00:00Z/" + slug,
-		// A site's authoritative + expiry keys co-shard with the same slug,
-		// so the cross-family paste-slug collision read in the site insert is
-		// single-shard with the authoritative site write.
+		// A site's keys co-shard with the same slug, so the site insert's
+		// cross-family paste-slug collision read is single-shard with the
+		// authoritative site write.
 		"sites/" + slug,
 		"expiry_sites/2026-06-05T12:00:00Z/" + slug,
-		// A blob pointer's bref key carries the route shard in its {...} hash
-		// tag, so it co-shards with the metadata it references: the BindBlob
+		// A bref key carries its route shard in the {...} hash tag, so BindBlob
 		// co-commits with the authoritative {slug} write in one single-shard
-		// transaction. (The <unit>/<blobid> tail does not affect routing.)
+		// transaction. The <unit>/<blobid> tail does not affect routing.
 		"bref/{" + slug + "}/0-3/deadbeefcafe",
 		"bref/{" + slug + "}/legacy/0123456789ab",
 	}
@@ -104,7 +98,7 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 	idKeys := []string{
 		"identity_pastes/" + id + "/" + slug,
 		"identity_first_seen/" + id,
-		// The site enumeration index co-shards with the paste {id} family so
+		// The site enumeration index co-shards with the paste {id} family, so
 		// an owner's paste + site entries land on one shard and each quota
 		// prefix scan is single-shard.
 		"identity_sites/" + id + "/" + slug,
@@ -115,17 +109,15 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 		}
 	}
 
-	// The two families must NOT collide: a slug and an id that happen to
-	// be equal strings still land on the correct family key, but the
-	// distinct prefixes mean keygate/<subnet> never aliases a slug.
+	// Distinct prefixes: keygate/<subnet> never aliases a slug even when the
+	// two strings are equal.
 	if got := string(shaleShardKey([]byte("keygate/" + slug + "/" + id))); got != slug {
 		t.Fatalf("keygate subnet extraction = %q, want %q", got, slug)
 	}
 
-	// All FOUR room families + the per-app byte counter co-shard on the app
-	// slug, so a room create / write / count / cap-check is single-shard. If
-	// any regresses to a different shard key, those become cross-shard and the
-	// per-app cap's single-shard CAS invariant breaks.
+	// All four room families + the per-app byte counter co-shard on the app
+	// slug, so a room create / write / count / cap-check is single-shard. One
+	// family drifting breaks the per-app cap's single-shard CAS invariant.
 	app := "app77777"
 	uuid := "9f8e7d6c-1234-4abc-89de-0123456789ab"
 	roomKeys := []string{
@@ -141,23 +133,19 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 		}
 	}
 	// roomkv/ must NOT alias rooms/: the trailing-slash discipline keeps them
-	// distinct families (both still shard on the app slug, but via different
-	// cases - a regression that collapsed them would be a latent bug).
+	// distinct families, matched by different cases even though both shard on
+	// the app slug.
 	if got := string(shaleShardKey([]byte("roomkv/" + app + "/" + uuid + "/k"))); got != app {
 		t.Fatalf("roomkv key sharded to %q, want %q", got, app)
 	}
 }
 
-// TestShaleShardKeyBrefCoRoutes pins the one wiring requirement the shale-blob
-// path imposes (blob-values.md 11.5): a blob pointer's bref key MUST route to
-// the SAME shard as the metadata it references, so BindBlob co-commits with the
-// authoritative {slug} write. The bref key carries the route shard in its {...}
-// hash tag; shaleShardKey's bref/ case defers to ring.ShardKey, which extracts
-// it. A regression (the bref/ case dropped, or a later family prefix shadowing
-// it) would scatter the pointer off the metadata's shard and break the co-
-// commit, so this asserts strict equality with BOTH pastes/<slug> and
-// sites/<slug> (pastes and sites co-shard, so a blob staged for either routes
-// the same).
+// TestShaleShardKeyBrefCoRoutes pins the wiring requirement the shale-blob path
+// imposes (blob-values.md 11.5): a bref key MUST route to the SAME shard as the
+// metadata it references, or BindBlob cannot co-commit with the authoritative
+// {slug} write. Dropping the bref/ case, or shadowing it with a later family
+// prefix, scatters the pointer off that shard. Equality is asserted against
+// BOTH pastes/<slug> and sites/<slug>, which co-shard.
 func TestShaleShardKeyBrefCoRoutes(t *testing.T) {
 	for _, slug := range []string{"abc12345", "z9y8x7w6", "00000000"} {
 		pasteShard := string(shaleShardKey([]byte("pastes/" + slug)))
@@ -204,9 +192,9 @@ func TestShardKey_KeygateIdentityIndexCoLocatesPerIdentity(t *testing.T) {
 		t.Fatalf("keygate_id/ must shard on the identity, got %q want %q", want, id)
 	}
 
-	// And it must SPREAD identities. A shard key that is constant for every
-	// identity also passes the co-location check above while piling the whole
-	// family onto one unit.
+	// It must also SPREAD identities: a shard key constant for every identity
+	// passes the co-location check above while piling the whole family onto
+	// one unit.
 	seen := make(map[string]struct{})
 	for _, other := range []string{"key:g", "key:h", "key:i", "key:j"} {
 		seen[string(shaleShardKey(shaleKeyKeygateIdentity(other, "10.4.0.0/24")))] = struct{}{}

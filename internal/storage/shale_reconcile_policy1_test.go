@@ -2,16 +2,15 @@
 
 package storage_test
 
-// Policy 1 for the reprojection WRITE loop (docs/SPEC.md "Decode tolerance
-// is per-scan-semantics"): the reconciler treats a per-record failure as
-// SKIP + LOG and CONTINUES the pass, so one bad entry's blast radius stays
-// one entry. The write loop must honor that too: a failed index write is
-// counted and skipped, every other wanted entry is still written, and the
-// pass returns an aggregated error so the next tick retries.
+// Policy 1 for the reprojection WRITE loop (docs/SPEC.md "Decode tolerance is
+// per-scan-semantics"): a per-record failure is SKIP + LOG and the pass
+// CONTINUES, so one bad entry's blast radius stays one entry. A failed index
+// write is counted and skipped, every other wanted entry is still written, and
+// the pass returns an aggregated error so the next tick retries.
 //
-// Failure is injected through the guarded-write fault seam (see
-// shale_export_test.go) because a healthy single-node cluster offers no
-// organic way to fail exactly one {id}-shard CAS.
+// Failure is injected through the guarded-write fault seam (shale_export_test.go)
+// because a healthy single-node cluster offers no organic way to fail exactly
+// one {id}-shard CAS.
 //
 //	go test -tags slatedb -run TestShaleReprojectionWriteLoopSkipsFailedEntries ./internal/storage
 //
@@ -52,9 +51,8 @@ func TestShaleReprojectionWriteLoopSkipsFailedEntries(t *testing.T) {
 	}
 	repo.WaitPendingConfirms()
 
-	// Drop all three entries so the pass must re-add each (three wanted
-	// writes), then fail EVERY write: the loop must still ATTEMPT all
-	// three (skip + continue), not abort on the first failure.
+	// Drop all three entries so the pass must re-add each, then fail EVERY
+	// write: the loop must still attempt all three, not abort on the first.
 	var mu sync.Mutex
 	attempted := make(map[string]bool)
 	for _, slug := range slugs {
@@ -84,7 +82,7 @@ func TestShaleReprojectionWriteLoopSkipsFailedEntries(t *testing.T) {
 		t.Fatalf("the write loop must skip + continue past each failure: attempted %d of %d writes", got, len(slugs))
 	}
 
-	// Clear the fault: the next pass heals everything the failed one skipped.
+	// With the fault cleared, the next pass heals everything that was skipped.
 	repo.SetGuardedIndexWriteHookForTest(nil)
 	if err := repo.ReconcileForTest(now); err != nil {
 		t.Fatalf("healing pass: %v", err)

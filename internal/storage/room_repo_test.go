@@ -1,27 +1,11 @@
 package storage
 
-// Sqlite-direct room tests. Most of the original TestRoom_* suite was
-// folded into the backend-agnostic conformance suite, which runs the same
-// assertions against sqlite on every default `go test` run (the
-// conformRoom* subtests in conformance_rooms_test.go). The tests below
-// stay because they pin behavior the conformance suite does NOT:
+// Sqlite-direct room tests, pinning behavior the backend-agnostic conformance
+// suite (conformance_rooms_test.go) does not: reading back an overwritten
+// value, the expiry clock after a PUT and a DELETE, the sqlite-specific empty
+// IndexRef, and SumActiveRoomBytes.
 //
-//   - TestRoom_Overwrite: reads BACK an overwritten value (and that the
-//     overwrite added no key slot). Conformance admits an overwrite at the
-//     key cap but never re-reads the replaced value.
-//   - TestRoom_WriteResetsRetentionClock: asserts GetRoom().ExpiresAt
-//     directly after a PUT and after a DELETE. Conformance pins the PUT
-//     reset only indirectly (expiry-boundary math) and never pins that a
-//     DELETE resets the clock.
-//   - TestRoom_ExpiryAndCascade: pins the sqlite-specific contract that
-//     ExpiredRooms returns an EMPTY IndexRef (the scan reads the rooms
-//     table itself; no standalone index). Conformance is backend-agnostic
-//     and treats IndexRef as opaque.
-//   - TestRoom_SumActiveRoomBytes: SumActiveRoomBytes (the service-wide
-//     cap input) has no conformance counterpart.
-//
-// The newRoomTestRepo / mkRoom helpers are shared with
-// room_isolation_test.go.
+// newRoomTestRepo / mkRoom are shared with room_isolation_test.go.
 
 import (
 	"bytes"
@@ -59,6 +43,7 @@ func mkRoom(repo *RoomKVRepo, t *testing.T, app string, now time.Time) domain.Ro
 	return room
 }
 
+// An overwrite replaces the value and consumes no extra key slot.
 func TestRoom_Overwrite(t *testing.T) {
 	repo := newRoomTestRepo(t)
 	now := time.Now().UTC()
@@ -79,6 +64,7 @@ func TestRoom_Overwrite(t *testing.T) {
 	}
 }
 
+// A PUT and a DELETE each restart the room's retention clock.
 func TestRoom_WriteResetsRetentionClock(t *testing.T) {
 	repo := newRoomTestRepo(t)
 	created := time.Now().UTC().Truncate(time.Second)
@@ -93,7 +79,6 @@ func TestRoom_WriteResetsRetentionClock(t *testing.T) {
 	if !got.ExpiresAt.Equal(wantExpiry) {
 		t.Fatalf("put did not reset clock: expires %v, want %v", got.ExpiresAt, wantExpiry)
 	}
-	// A DELETE also resets the clock.
 	evenLater := later.Add(24 * time.Hour)
 	if _, err := repo.DeleteValue(room.AppSlug, room.ID, "k", evenLater); err != nil {
 		t.Fatalf("delete: %v", err)
@@ -104,6 +89,8 @@ func TestRoom_WriteResetsRetentionClock(t *testing.T) {
 	}
 }
 
+// An expired room surfaces with an empty IndexRef on sqlite, and processing
+// that reference deletes the room and cascades to its values.
 func TestRoom_ExpiryAndCascade(t *testing.T) {
 	repo := newRoomTestRepo(t)
 	now := time.Now().UTC()
@@ -118,14 +105,13 @@ func TestRoom_ExpiryAndCascade(t *testing.T) {
 	if len(expired) != 0 {
 		t.Fatalf("room expired prematurely: %d", len(expired))
 	}
-	// Past the window, the room is expired (IndexRef empty on sqlite: the
-	// scan reads the rooms table itself, no standalone index).
+	// IndexRef is empty on sqlite: the scan reads the rooms table itself, with
+	// no standalone index.
 	future := now.Add(domain.RoomRetentionWindow + time.Hour)
 	expired, _ = repo.ExpiredRooms(future)
 	if len(expired) != 1 || expired[0].ID != room.ID || expired[0].IndexRef != "" {
 		t.Fatalf("expired set = %+v", expired)
 	}
-	// Processing the reference deletes the room, cascading to its values.
 	deleted, err := repo.DeleteExpiredRoom(expired[0])
 	if err != nil {
 		t.Fatalf("delete expired room: %v", err)
@@ -143,6 +129,7 @@ func TestRoom_ExpiryAndCascade(t *testing.T) {
 	}
 }
 
+// SumActiveRoomBytes totals live value bytes across every app.
 func TestRoom_SumActiveRoomBytes(t *testing.T) {
 	repo := newRoomTestRepo(t)
 	now := time.Now().UTC()

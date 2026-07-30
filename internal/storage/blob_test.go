@@ -29,7 +29,7 @@ func TestBlobStore_GetReaderMatchesGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetReader: %v", err)
 	}
-	defer rc.Close()
+	defer rc.Close() //nolint:errcheck
 	if size != int64(len(body)) {
 		t.Fatalf("size: want %d got %d", len(body), size)
 	}
@@ -75,7 +75,7 @@ func TestCompressedOverDisk_GetReaderMatchesGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetReader: %v", err)
 	}
-	defer rc.Close()
+	defer rc.Close() //nolint:errcheck
 	got, err := io.ReadAll(rc)
 	if err != nil {
 		t.Fatalf("ReadAll: %v", err)

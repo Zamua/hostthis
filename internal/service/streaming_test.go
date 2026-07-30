@@ -10,9 +10,8 @@ import (
 	"github.com/Zamua/hostthis/internal/service"
 )
 
-// dripReader hands out n bytes at a time, recording the cumulative
-// count + the number of Read() calls. Used to verify the upload path
-// streams rather than buffering everything via io.ReadAll.
+// dripReader hands out a bounded chunk per Read, counting calls and bytes, so
+// a test can tell streaming apart from a single io.ReadAll.
 type dripReader struct {
 	src   io.Reader
 	chunk int
@@ -30,10 +29,9 @@ func (d *dripReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// TestUpload_StreamsInChunks proves the upload path doesn't slurp the
-// whole body into one buffer up front. With a drip reader handing out
-// 4 KiB per Read, a 4 MiB body should require ~1000 Read calls. If
-// the path were doing io.ReadAll, it'd be 1-3 calls.
+// TestUpload_StreamsInChunks pins that the upload path does not slurp the whole
+// body into one buffer: at 4 KiB per Read a 4 MiB body takes ~1000 calls, where
+// an io.ReadAll would take 1-3.
 func TestUpload_StreamsInChunks(t *testing.T) {
 	upload, _, _ := newStack(t)
 	body := htmlBody(4 << 20) // 4 MiB high-entropy ASCII
@@ -46,9 +44,8 @@ func TestUpload_StreamsInChunks(t *testing.T) {
 	if res.Paste.Size <= 0 {
 		t.Fatalf("compressed size should be positive, got %d", res.Paste.Size)
 	}
-	// Floor for "definitely streamed" is generous - anything > 100
-	// calls proves it wasn't a single io.ReadAll. Real number will
-	// be in the thousands for a 4 MiB body at 4 KiB per Read.
+	// A deliberately loose floor: anything over 100 calls rules out a single
+	// io.ReadAll, and the real figure is in the thousands.
 	if drip.calls < 100 {
 		t.Fatalf("expected hundreds+ Read calls, got %d (body slurped via io.ReadAll?)", drip.calls)
 	}
@@ -57,12 +54,9 @@ func TestUpload_StreamsInChunks(t *testing.T) {
 	}
 }
 
-// TestUpload_PeakHeapUnderCap measures the heap delta over a 5 MiB
-// upload. With the streaming pipeline + compressed staging, peak
-// allocation should be in the low-MiB range, not the body-size range.
-//
-// Compares HeapInuse before vs peak during; flaky on contended runners
-// (GC behavior is timing-dependent), so the threshold is generous.
+// TestUpload_PeakHeapUnderCap pins that a 5 MiB upload's heap delta stays in
+// the low-MiB range rather than scaling with the body. GC behaviour is
+// timing-dependent, so the threshold is deliberately loose.
 func TestUpload_PeakHeapUnderCap(t *testing.T) {
 	if testing.Short() {
 		t.Skip("heap-watching test; skip under -short")
@@ -79,31 +73,25 @@ func TestUpload_PeakHeapUnderCap(t *testing.T) {
 	}
 
 	runtime.ReadMemStats(&after)
-	// HeapAlloc includes objects still alive; the staged buffer is
-	// freed after Put returns. Delta should be in the low MB range,
-	// not the 5+ MiB the body itself occupies.
 	delta := int(after.HeapAlloc) - int(before.HeapAlloc)
 	t.Logf("heap delta after 5 MiB upload: %d bytes", delta)
-	// Generous ceiling: 50 MiB. The test body itself plus the
-	// readerWrap holding it plus the zstd encoder's internal state
-	// plus the staging buffer adds up to ~30-40 MiB even with
-	// perfect streaming. The point is to catch a future change that
-	// 10x's this (e.g. accidental io.ReadAll re-introduction), not
-	// to enforce a tight bound.
+	// The test body, the readerWrap holding it, the zstd encoder state and the
+	// staging buffer already total tens of MiB under perfect streaming, so the
+	// ceiling only catches a change that 10x's the profile (an io.ReadAll
+	// creeping back in), not a tight bound.
 	if delta > 50<<20 {
 		t.Fatalf("heap delta too high: %d bytes (expected < 50 MiB; body alone was 5 MiB)", delta)
 	}
 }
 
-// TestUpload_RawCapTrips fires when stdin delivers more than
-// HardRawByteCap before EOF. Needs HIGHLY COMPRESSIBLE input so the
-// raw counter hits 100 MiB before zstd output crosses the 10 MiB
-// compressed cap - otherwise ErrCompressedTooLarge fires first (which
-// is correct behavior for typical incompressible payloads).
+// TestUpload_RawCapTrips pins ErrRawTooLarge for stdin exceeding HardRawByteCap
+// before EOF. The input must be HIGHLY COMPRESSIBLE so the raw counter hits
+// 100 MiB before the zstd output crosses the 10 MiB compressed cap; otherwise
+// ErrCompressedTooLarge fires first, which is correct for an incompressible
+// payload but tests the other cap.
 func TestUpload_RawCapTrips(t *testing.T) {
 	upload, _, _ := newStack(t)
-	// 110 MiB of repeated 'a' compresses to ~30 KB. Raw counter
-	// trips at 100 MiB long before any compressed-size concern.
+	// 110 MiB of repeated 'a' compresses to ~30 KB.
 	body := make([]byte, 110<<20)
 	body[0] = '<'
 	for i := 1; i < len(body); i++ {
@@ -115,10 +103,9 @@ func TestUpload_RawCapTrips(t *testing.T) {
 	}
 }
 
-// TestUpload_CompressedCapTrips fires when the body fits under the raw
-// cap but its compressed output exceeds the per-paste compressed cap.
-// High-entropy ASCII at 11 MiB compresses to ~11 MiB, blowing past the
-// 10 MiB compressed cap.
+// TestUpload_CompressedCapTrips pins the compressed cap for a body under the
+// raw cap: 11 MiB of high-entropy ASCII barely compresses, so it lands past the
+// 10 MiB compressed limit.
 func TestUpload_CompressedCapTrips(t *testing.T) {
 	upload, _, _ := newStack(t)
 	body := htmlBody(11 << 20)
@@ -128,9 +115,6 @@ func TestUpload_CompressedCapTrips(t *testing.T) {
 	}
 }
 
-// bytesReaderFor is a thin alias so the test reads more linearly
-// (avoids the "bytes.NewReader" import noise in the test body when
-// most tests already import bytes for unrelated reasons).
 func bytesReaderFor(b []byte) io.Reader {
 	return &readerWrap{b: b}
 }
@@ -149,5 +133,5 @@ func (r *readerWrap) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// strings import compiler-anchor (silences vet if helpers grow).
+// Anchors the strings import against helper churn.
 var _ = strings.Repeat

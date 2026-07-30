@@ -11,20 +11,15 @@ import (
 	"github.com/Zamua/hostthis/internal/service"
 )
 
-// These tests pin the SHALE-PATH sweep contract WITHOUT MinIO or the slatedb
-// build tag: they exercise the pure-Go service.Sweep wiring (Blobs nil +
-// BlobOrphans set) that cmd/hostthisd builds for a blob-capable ShaleRepo.
-//
-// What they prove (docs/design/shale-blobs-phase3.md section 10.3 step 2):
+// The shale-path sweep contract, over the pure-Go service.Sweep wiring
+// (Blobs nil + BlobOrphans set) cmd/hostthisd builds for a blob-capable
+// ShaleRepo, so no MinIO or slatedb build tag is needed:
 //   - the global content-addressed GC (WalkBlobs + Remove) does NOT run on the
-//     shale path (Blobs is nil; the metadata-delete already unbinds bound blobs),
-//   - the orphan-bytes reclaimer (SweepOrphans) IS invoked each tick with the
-//     configured grace (DefaultOrphanGrace when OrphanGrace is zero).
+//     shale path (the metadata delete already unbinds bound blobs),
+//   - the orphan-bytes reclaimer IS invoked each tick with the configured
+//     grace (DefaultOrphanGrace when OrphanGrace is zero).
 
-// recordingBlobs is a SweepBlobs whose WalkBlobs/Remove record whether the
-// global content-addressed GC touched it. On the shale path it must NEVER be
-// wired (Sweep.Blobs is nil), so these counters stay zero - the test asserts
-// the shale wiring leaves Blobs nil rather than handing the sweep a live store.
+// recordingBlobs records whether the global content-addressed GC touched it.
 type recordingBlobs struct {
 	walkCalls   int
 	removeCalls int
@@ -40,8 +35,8 @@ func (r *recordingBlobs) Remove(sha string) error {
 	return nil
 }
 
-// recordingOrphanSweeper records each SweepBlobOrphans call + the grace it was
-// handed, standing in for ShaleRepo.SweepBlobOrphans (-> BlobKV.SweepOrphans).
+// recordingOrphanSweeper stands in for ShaleRepo.SweepBlobOrphans, recording
+// each call and the grace it was handed.
 type recordingOrphanSweeper struct {
 	calls     int
 	lastGrace time.Duration
@@ -55,10 +50,8 @@ func (r *recordingOrphanSweeper) SweepBlobOrphans(_ context.Context, now time.Ti
 	return nil
 }
 
-// noopSweepRepo is a SweepRepo with nothing to expire and no referenced shas -
-// the shale path's metadata side is irrelevant to what these tests pin (the
-// orphan sweep, not the expiry pass). Panics on DeleteExpired so an unexpected
-// expiry surfaces.
+// noopSweepRepo has nothing to expire and no referenced shas. It panics on
+// DeleteExpired so an unexpected expiry surfaces rather than passing silently.
 type noopSweepRepo struct{}
 
 func (noopSweepRepo) ExpiredPastes(_ time.Time) ([]domain.ExpiredPaste, error) { return nil, nil }
@@ -67,10 +60,8 @@ func (noopSweepRepo) DeleteExpired(_ domain.ExpiredPaste) (bool, error) {
 }
 func (noopSweepRepo) ReferencedBlobSHAs() ([]string, error) { return nil, nil }
 
-// TestSweep_ShalePath_NoGlobalGC: with Blobs nil (the shale wiring) Once does
-// NOT run the global content-addressed GC - it returns early before any
-// WalkBlobs/Remove. Even with a recordingBlobs available, the shale wiring keeps
-// Blobs nil, so the recorder is never touched.
+// TestSweep_ShalePath_NoGlobalGC: with Blobs nil, Once returns before any
+// WalkBlobs/Remove.
 func TestSweep_ShalePath_NoGlobalGC(t *testing.T) {
 	orphans := &recordingOrphanSweeper{}
 	sweep := &service.Sweep{
@@ -90,8 +81,6 @@ func TestSweep_ShalePath_NoGlobalGC(t *testing.T) {
 	if pastes != 0 {
 		t.Fatalf("nothing should expire: pastes=%d", pastes)
 	}
-	// The whole point: Blobs==nil short-circuits the global GC entirely, so the
-	// blobsGCd count is zero and no WalkBlobs/Remove ran.
 	if blobsGCd != 0 {
 		t.Fatalf("shale path must not GC via the global content-addressed sweep: blobsGCd=%d", blobsGCd)
 	}
@@ -111,8 +100,8 @@ func TestSweep_ShalePath_TickRunsOrphanSweep(t *testing.T) {
 		Now:         func() time.Time { return now },
 	}
 
-	// Run the loop once: Run does an immediate tick then blocks on the ticker;
-	// cancel right away so only the boot tick fires.
+	// Run does an immediate tick then blocks on the ticker; cancelling first
+	// leaves only the boot tick.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	sweep.Run(ctx)
@@ -155,9 +144,8 @@ func TestSweep_ShalePath_HonorsConfiguredGrace(t *testing.T) {
 }
 
 // TestSweep_StandalonePath_NoOrphanSweep: the standalone path (Blobs set,
-// BlobOrphans nil) runs the global GC and NEVER the orphan sweep - the two GC
-// mechanisms stay on their own paths. We assert the orphan sweeper is untouched
-// when only Blobs is wired.
+// BlobOrphans nil) runs the global GC and never the orphan sweep. The two GC
+// mechanisms stay on their own paths.
 func TestSweep_StandalonePath_NoOrphanSweep(t *testing.T) {
 	orphans := &recordingOrphanSweeper{}
 	blobs := &recordingBlobs{}

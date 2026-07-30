@@ -26,8 +26,8 @@ func TestIsTombstoneEnvelope(t *testing.T) {
 		{"stamped + empty payload is a tombstone", cluster.Envelope{Stamp: stamped}, true},
 		{"stamped + nil payload is a tombstone", cluster.Envelope{Stamp: stamped, Payload: nil}, true},
 		{"stamped + a value is NOT", cluster.Envelope{Stamp: stamped, Payload: []byte(`{}`)}, false},
-		// The legacy case. A bare slatedb marker decodes to the zero Stamp and
-		// an empty payload; it is an owner's live enumeration entry.
+		// A bare slatedb marker decodes to the zero Stamp and an empty
+		// payload, and is an owner's live enumeration entry.
 		{"BARE + empty is NOT a tombstone (legacy marker)", cluster.Envelope{Payload: []byte{}}, false},
 		{"BARE + nil is NOT a tombstone (legacy marker)", cluster.Envelope{}, false},
 		{"bare + a value is NOT", cluster.Envelope{Payload: markerValue}, false},
@@ -53,8 +53,8 @@ func TestIsTombstoneEnvelope_SurvivesRoundTrip(t *testing.T) {
 		t.Fatalf("an encoded-then-decoded empty-payload envelope must be a tombstone, got %+v", tomb)
 	}
 
-	// A bare empty value, exactly as a migrated slatedb deployment stores it:
-	// NOT passed through Encode, because that is the whole point.
+	// A bare empty value as a migrated slatedb deployment stores it: NOT passed
+	// through Encode, which is the whole point.
 	bare, err := cluster.Decode([]byte{})
 	if err != nil {
 		t.Fatalf("decode bare empty: %v", err)
@@ -66,19 +66,16 @@ func TestIsTombstoneEnvelope_SurvivesRoundTrip(t *testing.T) {
 }
 
 // The invariant the tombstone skip rests on: no shale write may store an empty
-// value.
-//
-// Sound only because shale's Put rejects empty values, so no live value can be
-// empty. An empty-value Put added here would make that family invisible to
-// every scan, silently and with no error. SlateRepo is not checked: its empty
-// markers are correct and it has its own scan path.
+// value. An empty-value Put would make that row family invisible to every scan,
+// silently and with no error raised. SlateRepo is exempt: its empty markers are
+// correct and it has its own scan path.
 func TestNoShaleWriteStoresAnEmptyValue(t *testing.T) {
 	files, err := filepath.Glob("shale_*.go")
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}
-	// Without this the guard silently checks nothing if the files are ever
-	// renamed - the same shape of vacuous pass it exists to prevent.
+	// Without this, renaming the files leaves the guard checking nothing:
+	// the same vacuous pass it exists to prevent.
 	if len(files) == 0 {
 		t.Fatal("found no shale_*.go files to check; re-point this guard rather than leaving it green")
 	}

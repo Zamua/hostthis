@@ -30,27 +30,24 @@ type PublisherConfig struct {
 	Logf        func(format string, args ...any)
 }
 
-// Publisher is the production relay.PeerPublisher: it fans every frame
-// out to the CURRENT peer set (read from the relay.Peers port per
-// publish, so membership churn is followed with no subscription
-// machinery) over one bounded queue + one sender goroutine + one
-// long-lived client connection per peer.
+// Publisher is the production relay.PeerPublisher: it fans every frame out to
+// the CURRENT peer set (read from the relay.Peers port per publish, so
+// membership churn is followed with no subscription machinery) over one bounded
+// queue, one sender goroutine, and one long-lived client connection per peer.
 //
-// The delivery contract (SPEC "Delivery semantics: best-effort per peer,
-// isolated per peer, and never on the commit path"):
+// Delivery contract (SPEC "Delivery semantics: best-effort per peer, isolated
+// per peer, and never on the commit path"):
 //
-//   - Publish NEVER blocks and NEVER fails the caller: it enqueues on
-//     each peer's bounded queue and returns. A FULL queue drops the frame
-//     being published (drop-newest: O(1), allocation-free; drop-oldest
-//     would be equally contract-legal since either way the gap is
-//     detectable). A dropped durable frame is healed by the affected
-//     subscribers' splice re-snapshot; a dropped ephemeral frame is
+//   - Publish NEVER blocks and NEVER fails the caller: it enqueues on each
+//     peer's bounded queue and returns. A full queue drops the frame being
+//     published (drop-newest; drop-oldest would be equally legal, since either
+//     way the gap is detectable). A dropped durable frame is healed by the
+//     affected subscribers' splice re-snapshot; a dropped ephemeral frame is
 //     harmless by definition.
-//   - Peers are isolated: a slow, full, or unreachable peer costs the
-//     writer nothing and other peers' queues nothing.
-//   - Senders follow membership: a new peer address gets a sender on the
-//     next publish; a departed peer's sender is stopped and its
-//     connection closed.
+//   - Peers are isolated: a slow, full, or unreachable peer costs the writer
+//     nothing and other peers' queues nothing.
+//   - Senders follow membership: a new peer address gets a sender on the next
+//     publish; a departed peer's sender is stopped and its connection closed.
 type Publisher struct {
 	peers       relay.Peers
 	queueDepth  int
@@ -67,8 +64,8 @@ type Publisher struct {
 	closed    bool
 	wg        sync.WaitGroup
 
-	// drops counts frames dropped on a full queue (all peers combined).
-	// Observability + tests; never consulted for control flow.
+	// drops counts frames dropped (full queue or failed send) across all
+	// peers. Observability only; never consulted for control flow.
 	drops atomic.Uint64
 }
 
@@ -107,9 +104,9 @@ func NewPublisher(peers relay.Peers, cfg PublisherConfig) *Publisher {
 	}
 }
 
-// Publish implements relay.PeerPublisher: reconcile the sender set with
-// the current peer addresses, then enqueue the frame on every peer's
-// queue without blocking. See the Publisher doc for the drop policy.
+// Publish implements relay.PeerPublisher: reconcile the sender set against the
+// current peer addresses, then enqueue on every peer's queue without blocking.
+// Drop policy: see the Publisher doc.
 func (p *Publisher) Publish(key relay.RoomKey, f relay.Frame) {
 	addrs := p.peers.Addresses()
 
@@ -130,10 +127,8 @@ func (p *Publisher) Publish(key relay.RoomKey, f relay.Frame) {
 	p.mu.Unlock()
 }
 
-// reconcileLocked aligns p.senders with addrs: start senders for new
-// peers, stop senders for departed ones. Caller holds p.mu. The sorted
-// snapshot makes the steady state (unchanged membership) a cheap
-// slice-compare.
+// reconcileLocked aligns p.senders with addrs. Caller holds p.mu. The sorted
+// snapshot makes the steady state (unchanged membership) a slice-compare.
 func (p *Publisher) reconcileLocked(addrs []string) {
 	sorted := slices.Clone(addrs)
 	slices.Sort(sorted)
@@ -172,14 +167,13 @@ func (p *Publisher) reconcileLocked(addrs []string) {
 // so a flapping peer does not spam the log.
 func (p *Publisher) runSender(s *peerSender) {
 	defer p.wg.Done()
-	// grpc.NewClient constructs the connection lazily; the first RPC dials.
-	// The peer service rides the cluster-internal listener shale forwarding
-	// uses (pod-to-pod inside the deployment's network boundary, never the
-	// public ingress), so plaintext credentials mirror shale's own
-	// forwarding client.
+	// grpc.NewClient connects lazily; the first RPC dials. The peer service
+	// rides the cluster-internal listener shale forwarding uses (pod-to-pod
+	// inside the deployment's network boundary, never the public ingress), so
+	// plaintext credentials mirror shale's own forwarding client.
 	conn, err := grpc.NewClient(s.addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		// Malformed target (not a transient dial failure - those surface per
+		// A malformed target, not a transient dial failure (those surface per
 		// RPC). Drain and drop until the peer leaves the membership.
 		p.logfSafe("relay peers: client for %s failed to construct: %v (frames to this peer drop)", s.addr, err)
 		for {
@@ -222,13 +216,12 @@ func (p *Publisher) runSender(s *peerSender) {
 	}
 }
 
-// Drops reports the total frames dropped so far (full queues + failed
-// sends, all peers combined). Observability + tests only.
+// Drops reports the total frames dropped so far (full queues plus failed sends,
+// all peers combined). Observability only.
 func (p *Publisher) Drops() uint64 { return p.drops.Load() }
 
-// Close stops every sender goroutine, aborts in-flight RPCs, and closes
-// the client connections. Safe to call once at shutdown; Publish after
-// Close is a no-op.
+// Close stops every sender goroutine, aborts in-flight RPCs, and closes the
+// client connections. Publish after Close is a no-op.
 func (p *Publisher) Close() {
 	p.mu.Lock()
 	if p.closed {

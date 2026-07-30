@@ -1,32 +1,26 @@
-// Package storage's SlateDB-backed static-site persistence.
-//
-// SlateDB-backed twin of site_repo.go (the sqlite SiteRepo). Adds the
-// site key families to the SAME SlateDB instance the paste keys live in,
-// so a site insert + its indexes commit in one transaction.
+// SlateDB-backed static-site persistence: the twin of site_repo.go (the sqlite
+// SiteRepo). The site key families live in the SAME SlateDB instance as the
+// paste keys, so a site insert + its indexes commit in one transaction.
 //
 // The site interface method names (Get, Delete, SumActiveBytesByOwner,
-// InsertWithQuotaCheck) collide with the paste method names on SlateRepo
-// with different signatures, so they cannot both live on SlateRepo. The
-// KV operations live on SlateRepo as `...Site` methods (sharing db and
-// lockQuota), and a thin SlateSiteRepo adapter
-// exposes them under the service.SiteRepo + service.SweepSites interface
-// names by delegating. NewSlateSiteRepo(repo) builds the adapter.
+// InsertWithQuotaCheck) collide with the paste method names on SlateRepo at
+// different signatures, so they cannot both live on SlateRepo. The KV
+// operations live on SlateRepo as `...Site` methods (sharing db and lockQuota)
+// and SlateSiteRepo re-exposes them under the service.SiteRepo +
+// service.SweepSites names by delegating.
 //
 // Canonical layout in docs/SPEC.md "Static-site storage on the slatedb
 // (and shale) backend".
 //
 // # Key layout
 //
-// Mirrors the paste families (sites/<slug> ~ pastes/<slug>, etc.):
-//
 //	sites/<slug>                       JSON {Identity, Manifest, DedupedSize, CreatedAt, UpdatedAt, ExpiresAt}
 //	identity_sites/<identity>/<slug>   empty value (list/sum sites by identity)
 //	expiry_sites/<rfc3339>/<slug>      empty value (sweep prefix scan)
 //
-// The Manifest is encoded with the SAME encodeManifest/decodeManifest the
-// sqlite backend uses (package-level in site_repo.go), so the on-wire
-// manifest shape is identical across backends. DedupedSize is stored on
-// the row so the quota scans never decode a manifest just to sum bytes.
+// Manifests use the same encodeManifest/decodeManifest as the sqlite backend,
+// so the on-wire manifest shape is identical across backends. DedupedSize is
+// stored on the row so quota scans never decode a manifest just to sum bytes.
 
 //go:build slatedb
 
@@ -44,24 +38,20 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// SlateSiteRepo is the service.SiteRepo + service.SweepSites adapter over
-// a SlateRepo. It delegates the interface-named methods to the SlateRepo
-// `...Site` methods, so the slatedb backend's site repo shares the same
-// SlateDB instance (and quota accounting) as its paste repo.
+// SlateSiteRepo is the service.SiteRepo + service.SweepSites adapter over a
+// SlateRepo, delegating to its `...Site` methods so the site repo shares one
+// SlateDB instance (and quota accounting) with the paste repo.
 type SlateSiteRepo struct {
 	repo *SlateRepo
 }
 
-// NewSlateSiteRepo wraps a SlateRepo so static-site hosting runs on the
-// slatedb backend. The returned adapter satisfies service.SiteRepo and
-// service.SweepSites.
+// NewSlateSiteRepo adapts a SlateRepo to service.SiteRepo + service.SweepSites.
 func NewSlateSiteRepo(repo *SlateRepo) *SlateSiteRepo { return &SlateSiteRepo{repo: repo} }
 
 // service.SiteRepo
 //
-// ctx is accepted to satisfy the service.SiteRepo interface (the shale backend
-// carries staged blob refs on it); the direct slate path has no shale-blob
-// plane, so it ignores ctx.
+// ctx exists for the interface (the shale backend carries staged blob refs on
+// it); the direct slate path has no shale-blob plane and ignores it.
 func (s *SlateSiteRepo) InsertWithQuotaCheck(_ context.Context, site domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	return s.repo.InsertSiteWithQuotaCheck(site, dedupedSize, userCap, now)
 }
@@ -79,8 +69,8 @@ func (s *SlateSiteRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.
 // PreClaimSlug is a NO-OP on the direct slatedb backend: its blobs live in a
 // detached content-sha-keyed store, so a deploy's files do not route by slug
 // and the slug is minted in the post-untar insert retry loop. Only the
-// transactional shale-collocated blob path pre-claims (so files stage under the
-// manifest's shard). Accepted to satisfy the service.SiteRepo seam.
+// transactional shale-collocated path pre-claims, so its files stage under the
+// manifest's shard.
 func (s *SlateSiteRepo) PreClaimSlug(_ context.Context, _ domain.Slug, _ string, _ time.Time) error {
 	return nil
 }
@@ -99,10 +89,8 @@ func (s *SlateSiteRepo) ReferencedSiteBlobSHAs() ([]string, error) {
 
 // --- JSON row schema -------------------------------------------------------
 
-// siteRow is the persisted shape of a Site. Manifest holds the exact
-// string encodeManifest produces (the same compact JSON the sqlite backend
-// stores), so the slatedb and sqlite backends serialize the manifest
-// identically (path -> sha + size + content-type).
+// siteRow is the persisted shape of a Site. Manifest holds the exact string
+// encodeManifest produces, the same compact JSON the sqlite backend stores.
 type siteRow struct {
 	Identity    string    `json:"identity"`
 	Manifest    string    `json:"manifest"`
@@ -111,13 +99,11 @@ type siteRow struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 	ExpiresAt   time.Time `json:"expires_at"`
 
-	// FileBlobs maps a file's content sha to the shale-blob id that file's
-	// bytes were staged under (the transactional shale-blob path only). A site
-	// stores each file as its own blob bound under the {slug} shard; the
-	// manifest references files by sha, so this side-table is how the read path
-	// resolves sha -> blobid for GetBlob. Empty on the standalone path (sqlite /
-	// slatedb / disk), where files are content-addressed by sha alone. omitempty
-	// keeps a standalone row byte-identical to before this field existed.
+	// FileBlobs maps a file's content sha to the shale-blob id its bytes were
+	// staged under. The manifest references files by sha, so this side-table is
+	// how the read path resolves sha -> blobid for GetBlob. Empty on the
+	// standalone paths (sqlite / slatedb / disk), where a file is
+	// content-addressed by sha alone.
 	FileBlobs map[string]string `json:"file_blobs,omitempty"`
 }
 
@@ -171,18 +157,16 @@ func prefixExpirySites() []byte { return []byte("expiry_sites/") }
 
 // --- Site KV operations (on SlateRepo) -------------------------------------
 
-// InsertSiteWithQuotaCheck atomically checks the deploying identity's
-// per-identity quota (counting site bytes alongside paste bytes), rejects a
-// slug already taken by a paste OR a site, and writes the site row + its two
-// index entries in one transaction.
+// InsertSiteWithQuotaCheck checks the deploying identity's quota (counting site
+// bytes alongside paste bytes), rejects a slug already taken by a paste OR a
+// site, and writes the site row + its two index entries in one transaction.
 //
-// The deduped size charged is dedupedSize (distinct blobs only), the same
-// figure the sqlite backend charges. The per-identity quota stripe is held
-// across the sum + the write so two concurrent same-identity deploys cannot
-// both pass the cap (mirrors SlateRepo.InsertWithQuotaCheck for pastes). The
-// durable total-bytes ceiling is NOT checked here: it is the object-store
-// bucket quota, enforced when a blob Put is rejected (see SPEC "Limits ->
-// Durable total-bytes ceiling: an object-store quota").
+// Charged bytes are dedupedSize (distinct blobs only), matching sqlite. The
+// per-identity quota stripe is held across the sum + the write so two
+// concurrent same-identity deploys cannot both pass the cap. The durable
+// total-bytes ceiling is NOT checked here: it is the object-store bucket
+// quota, enforced when a blob Put is rejected (SPEC "Limits -> Durable
+// total-bytes ceiling: an object-store quota").
 //
 // Returns:
 //   - nil on success
@@ -216,9 +200,8 @@ func (r *SlateRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, use
 		return fmt.Errorf("begin tx: %w", err)
 	}
 
-	// Slug-collision check, BOTH directions: reject if a site OR a paste
-	// already owns the slug. Both reads participate in SI conflict
-	// detection.
+	// Reject if a site OR a paste already owns the slug. Both reads participate
+	// in SI conflict detection.
 	existingSite, err := tx.Get(keySite(s.Slug))
 	if err != nil {
 		_ = tx.Rollback()
@@ -257,26 +240,20 @@ func (r *SlateRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, use
 }
 
 // ReplaceSiteWithQuotaCheck re-deploys an existing OWNED site in place,
-// swapping its row (manifest, deduped size, updated_at, expires_at) and
-// re-keying its expiry index, while enforcing the per-identity cap against
-// the REPLACE DELTA.
+// swapping its row and re-keying its expiry index, enforcing the per-identity
+// cap against the REPLACE DELTA.
 //
-// The slug must already exist as a site AND be owned by s.Identity. A
-// missing row OR a foreign-owned row both collapse to ErrNotFound (the
-// SAME sentinel a missing slug yields), so existence/ownership never
-// leaks. Mirrors the sqlite SiteRepo.ReplaceWithQuotaCheck contract.
+// A missing row OR a foreign-owned row both collapse to ErrNotFound (the SAME
+// sentinel a missing slug yields), so existence and ownership never leak.
 //
-// Quota: the per-identity sum already includes the old row (it is a live,
-// non-expired site), so the post-swap total is (owned - oldDeduped + body).
-// A same-size re-deploy nets zero; a smaller one frees the difference. The
-// durable total-bytes ceiling is NOT checked here (it is the object-store
-// bucket quota).
+// Quota: the per-identity sum already includes the old (live) row, so the
+// post-swap total is (owned - oldDeduped + body). The durable total-bytes
+// ceiling is NOT checked here (it is the object-store bucket quota).
 //
 // Concurrency: the per-identity quota stripe is held across the sum + the
-// swap (matching InsertSiteWithQuotaCheck), and the row read + the writes
-// run in one snapshot-isolation tx whose read of sites/<slug> participates
-// in SI conflict detection, so a racing re-deploy / delete of the same
-// slug conflicts.
+// swap, and the row read + the writes run in one snapshot-isolation tx whose
+// read of sites/<slug> participates in SI conflict detection, so a racing
+// re-deploy / delete of the same slug conflicts.
 //
 // Returns:
 //   - nil on success
@@ -286,8 +263,7 @@ func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, us
 	defer r.lockQuota(s.Identity.String())()
 	body := int64(dedupedSize)
 
-	// Ownership + existence gate (outside the tx, but under the quota lock).
-	// A missing row and a foreign-owned row both collapse to ErrNotFound.
+	// Ownership + existence gate, outside the tx but under the quota lock.
 	var existing siteRow
 	if err := r.getJSON(keySite(s.Slug), &existing); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -299,16 +275,13 @@ func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, us
 		return ErrNotFound
 	}
 	// Credit the old bytes back ONLY if the old row is still live: the sums
-	// below filter on expiry, so an expired-but-unswept old row is NOT in
-	// them. Crediting it would under-count and admit an over-quota re-deploy
-	// (resurrecting an expired site must charge the full new size).
+	// below filter on expiry, so an expired-but-unswept row is not in them and
+	// crediting it would under-count and admit an over-quota re-deploy.
 	creditOld := int64(0)
 	if existing.ExpiresAt.After(now) {
 		creditOld = int64(existing.DedupedSize)
 	}
 
-	// Quota: the sum below includes the OLD (live) row, so subtract its
-	// credited deduped bytes and add the new to evaluate the post-swap total.
 	if userCap > 0 {
 		ownerPaste, err := r.sumActiveBytesForOwner(s.Identity.String(), now)
 		if err != nil {
@@ -333,8 +306,8 @@ func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, us
 		return fmt.Errorf("begin tx: %w", err)
 	}
 
-	// Re-read the row inside the tx so its presence + ownership participate
-	// in SI conflict detection (a concurrent delete/re-deploy conflicts).
+	// Re-read inside the tx so presence + ownership participate in SI conflict
+	// detection: a concurrent delete / re-deploy conflicts.
 	var inTx siteRow
 	if err := txGetJSON(tx, keySite(s.Slug), &inTx); err != nil {
 		_ = tx.Rollback()
@@ -347,21 +320,17 @@ func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, us
 		_ = tx.Rollback()
 		return ErrNotFound
 	}
-	// created_at is the slug's birth time: it is STRUCTURALLY immutable across
-	// a re-deploy, matching the sqlite UPDATE which never touches the column.
-	// Pin it from the existing row so a caller cannot move it via the new row
-	// (the service layer already forwards existing.CreatedAt, but the storage
-	// contract must not trust the caller).
+	// created_at is the slug's birth time, immutable across a re-deploy. Pinned
+	// from the existing row so a caller cannot move it via the new row.
 	row.CreatedAt = inTx.CreatedAt
 
-	// Swap the authoritative row in place. The identity-site index key is
-	// keyed by (identity, slug) - both unchanged - so it needs no rewrite.
+	// The identity-site index is keyed by (identity, slug), both unchanged, so
+	// it needs no rewrite.
 	if err := txPutJSON(tx, keySite(s.Slug), row); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
-	// Re-key the expiry index: drop the old (oldExpiresAt, slug) marker and
-	// write the new one, so the sweep sees the restarted retention clock.
+	// Re-key the expiry index so the sweep sees the restarted retention clock.
 	if !inTx.ExpiresAt.Equal(s.ExpiresAt) {
 		if err := tx.Delete(keyExpirySite(inTx.ExpiresAt, s.Slug)); err != nil {
 			_ = tx.Rollback()
@@ -378,9 +347,8 @@ func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, us
 	return nil
 }
 
-// GetSite returns the site for slug, or ErrNotFound. Like the sqlite
-// SiteRepo it returns expired-but-unswept rows too (the HTTP layer 404s
-// them, the sweep deletes them).
+// GetSite returns the site for slug, or ErrNotFound. Expired-but-unswept rows
+// are returned too: the HTTP layer 404s them, the sweep deletes them.
 func (r *SlateRepo) GetSite(slug domain.Slug) (domain.Site, error) {
 	var row siteRow
 	if err := r.getJSON(keySite(slug), &row); err != nil {
@@ -389,10 +357,8 @@ func (r *SlateRepo) GetSite(slug domain.Slug) (domain.Site, error) {
 	return row.toDomain(slug)
 }
 
-// SumActiveSiteBytesByOwner returns the identity's active SITE bytes only
-// (DedupedSize of non-expired sites). The service layer adds the
-// paste-side sum where it needs the combined figure, matching
-// SiteRepo.SumActiveBytesByOwner on sqlite.
+// SumActiveSiteBytesByOwner returns the identity's active SITE bytes only. The
+// service layer adds the paste-side sum where it needs the combined figure.
 func (r *SlateRepo) SumActiveSiteBytesByOwner(owner string, now time.Time) (int64, error) {
 	if owner == "" {
 		return 0, nil
@@ -400,9 +366,9 @@ func (r *SlateRepo) SumActiveSiteBytesByOwner(owner string, now time.Time) (int6
 	return r.sumActiveSiteBytesForOwner(owner, now)
 }
 
-// sumActiveSiteBytesForOwner walks identity_sites/<owner>/ and sums
-// DedupedSize of the rows whose ExpiresAt > now. Read-time expiry filter,
-// so an expired-unswept site stops counting the instant it expires
+// sumActiveSiteBytesForOwner walks identity_sites/<owner>/ and sums DedupedSize
+// of rows whose ExpiresAt > now. The expiry filter is at READ time, so an
+// expired-unswept site stops counting the instant it expires
 // (conformCaps.ExpiryFreesQuotaAtReadTime = true on slatedb).
 func (r *SlateRepo) sumActiveSiteBytesForOwner(owner string, now time.Time) (int64, error) {
 	idx, err := r.scanPrefix(prefixIdentitySites(owner))
@@ -427,10 +393,9 @@ func (r *SlateRepo) sumActiveSiteBytesForOwner(owner string, now time.Time) (int
 	return total, nil
 }
 
-// ListSitesByOwner enumerates identity_sites/<owner>/ and returns the active
-// (non-expired) sites, re-reading each authoritative sites/<slug> row.
-// Mirrors sumActiveSiteBytesForOwner (same scan, same read-time expiry
-// filter); a stale index entry whose row is gone is skipped.
+// ListSitesByOwner returns the active (non-expired) sites for owner, re-reading
+// each authoritative sites/<slug> row. Same scan and read-time expiry filter as
+// sumActiveSiteBytesForOwner; a stale index entry whose row is gone is skipped.
 func (r *SlateRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error) {
 	if owner == "" {
 		return nil, nil
@@ -462,7 +427,7 @@ func (r *SlateRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site
 }
 
 // DeleteSite removes a site row and its two index entries. Idempotent: a
-// missing row is a no-op (matches the sqlite DELETE and the paste Delete).
+// missing row is a no-op.
 func (r *SlateRepo) DeleteSite(slug domain.Slug) error {
 	var row siteRow
 	if err := r.getJSON(keySite(slug), &row); err != nil {
@@ -493,26 +458,22 @@ func (r *SlateRepo) DeleteSite(slug domain.Slug) error {
 	return nil
 }
 
-// ExpiredSites returns one reference per site whose ExpiresAt is at or
-// before now (inclusive boundary): the slug plus the entry's full key as
-// the opaque IndexRef, so DeleteExpiredSite can remove the EXACT entry the
-// scan surfaced even when the site record is already gone. The site expiry
-// keys use the fixed-width expirySiteTimeFormat, so the timestamp
-// segment's byte order is time order EXACTLY (a string compare is correct
-// even within a shared whole second) - unlike the variable-width
-// time.RFC3339Nano the paste ExpiredPastes still uses. The cutoff is
-// formatted with the SAME layout so the compare stays aligned.
+// ExpiredSites returns one reference per site whose ExpiresAt is at or before
+// now (inclusive): the slug plus the entry's full key as the opaque IndexRef,
+// so DeleteExpiredSite can remove the EXACT entry the scan surfaced even when
+// the site record is already gone. Site expiry keys use the fixed-width
+// expirySiteTimeFormat, so byte order is time order exactly and a string
+// compare is correct even within a shared whole second. The cutoff is formatted
+// with the SAME layout to keep the compare aligned.
 func (r *SlateRepo) ExpiredSites(now time.Time) ([]domain.ExpiredSite, error) {
 	return scanExpiredRefs(r.scanPrefix, prefixExpirySites(), now, expirySiteTimeFormat, parseExpiredSiteKey)
 }
 
-// DeleteExpiredSite processes one expired reference: the same full-cascade
-// delete as DeleteSite when the site record still exists, and then - in
-// every case - removal of the exact expiry-index entry the scan surfaced
-// (the cascade removes the DERIVED key; this removes the OBSERVED one).
-// Idempotent: a missing record and a missing entry are both no-ops.
-// Returns whether a site record was actually deleted. Mirrors the paste
-// DeleteExpired; see docs/SPEC.md "Static-site storage" (sweep path).
+// DeleteExpiredSite processes one expired reference: the full DeleteSite
+// cascade when the record still exists, and in every case removal of the exact
+// expiry-index entry the scan surfaced (the cascade removes the DERIVED key,
+// this the OBSERVED one). Idempotent, and reports whether a record was
+// actually deleted. See docs/SPEC.md "Static-site storage" (sweep path).
 func (r *SlateRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
 	var row siteRow
 	return deleteExpiredRef(ref, expirySiteIndexKey,
@@ -521,12 +482,9 @@ func (r *SlateRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
 		func(entryKey []byte) error { return r.deleteExpiryEntry(entryKey, "site expiry entry") })
 }
 
-// ReferencedSiteBlobSHAs returns every distinct blob SHA referenced by any
-// live site's manifest. The sweep unions this with the paste-side
-// referenced set, so a blob shared between a site and a paste (or two
-// sites) survives as long as ANY live record references it. A site
-// manifest references a blob unconditionally (no per-file tombstone), so a
-// live site with files always contributes a non-empty set.
+// ReferencedSiteBlobSHAs returns every distinct blob SHA referenced by any live
+// site's manifest. The sweep unions this with the paste-side set, so a blob
+// shared between records survives as long as ANY live record references it.
 func (r *SlateRepo) ReferencedSiteBlobSHAs() ([]string, error) {
 	sites, err := r.scanPrefix([]byte("sites/"))
 	if err != nil {

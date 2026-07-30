@@ -10,7 +10,7 @@ import "fmt"
 const corruptSampleLimit = 3
 
 // corruptTally counts a single reconcile pass's corrupt rows and renders at
-// most one summary line.
+// most one summary line. The zero value is ready to use.
 //
 // Per-record logging is wrong here: a corrupt row is corrupt on every pass, so
 // its cost scales with accumulated debris rather than with anything actionable,
@@ -20,8 +20,6 @@ const corruptSampleLimit = 3
 // owner, so no enumeration entry can be projected and no retry can fix it. A
 // placeholder row has a known owner, so a fail-closed entry gets projected and
 // the owner's next quota scan hard-fails rather than under-counting.
-//
-// The zero value is ready to use.
 type corruptTally struct {
 	unrepairable       int
 	unrepairableSample []string
@@ -46,8 +44,7 @@ func (t *corruptTally) notePlaceholder(slug string) {
 // summary renders the pass's line, or ok=false when nothing was corrupt.
 //
 // A clean pass must stay silent: log volume is itself the signal, and a line
-// every tick would bury the transition from clean to not. The actionable
-// reading is the derivative, not the level.
+// every tick would bury the transition from clean to not.
 func (t *corruptTally) summary(scan string) (string, bool) {
 	if t.unrepairable == 0 && t.placeholder == 0 {
 		return "", false

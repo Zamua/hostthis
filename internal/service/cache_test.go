@@ -9,8 +9,8 @@ import (
 	"github.com/Zamua/hostthis/internal/service"
 )
 
-// recordingPurger captures the slugs it's asked to purge. It implements
-// service.CachePurger so it can stand in for a real CDN adapter.
+// recordingPurger is a service.CachePurger standing in for a CDN adapter,
+// capturing the slugs it is asked to purge.
 type recordingPurger struct {
 	mu       sync.Mutex
 	slugs    []domain.Slug
@@ -46,7 +46,7 @@ func (e assertErr) Error() string { return string(e) }
 
 const testOwner = "key:test-id"
 
-// newPaste uploads a fresh HTML paste and returns its slug.
+// newPaste uploads a fresh HTML paste.
 func newPaste(t *testing.T, upload *service.Upload) domain.Slug {
 	t.Helper()
 	res, err := upload.Create(bytes.NewReader(htmlBody(200)), testOwner, "", "")
@@ -105,8 +105,8 @@ func TestCacheInvalidating_MutationsPurge(t *testing.T) {
 	})
 }
 
-// rename never changes the bytes served at the public URL, so the
-// decorator must NOT purge it (matches the spec).
+// rename never changes the bytes served at the public URL, so it must NOT
+// purge.
 func TestCacheInvalidating_RenameDoesNotPurge(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	purger := &recordingPurger{}
@@ -121,14 +121,12 @@ func TestCacheInvalidating_RenameDoesNotPurge(t *testing.T) {
 	}
 }
 
-// A failed mutation must NOT purge - there is nothing stale to flush, and
-// purging a slug whose served bytes didn't change is wasteful.
+// A failed mutation must NOT purge: nothing is stale to flush.
 func TestCacheInvalidating_FailedMutationDoesNotPurge(t *testing.T) {
 	_, manage, _ := newStack(t)
 	purger := &recordingPurger{}
 	mgr := service.NewCacheInvalidating(manage, purger)
 
-	// Delete of a slug that doesn't exist (or isn't owned) errors.
 	if err := mgr.Delete(domain.Slug("nope1234"), testOwner); err == nil {
 		t.Fatalf("expected delete of missing slug to error")
 	}
@@ -137,8 +135,8 @@ func TestCacheInvalidating_FailedMutationDoesNotPurge(t *testing.T) {
 	}
 }
 
-// A purge error is best-effort: it is swallowed so the underlying
-// mutation still reports success (the paste IS deleted on origin).
+// A purge is best-effort: its error is swallowed so the mutation still reports
+// the success it actually achieved on origin.
 func TestCacheInvalidating_PurgeErrorDoesNotFailOp(t *testing.T) {
 	upload, manage, repo := newStack(t)
 	purger := &recordingPurger{failNext: true}
@@ -153,8 +151,8 @@ func TestCacheInvalidating_PurgeErrorDoesNotFailOp(t *testing.T) {
 	}
 }
 
-// With no CDN configured (nil purger), the decorator unwraps to the inner
-// service so there is zero overhead and the wrap is invisible.
+// A nil purger unwraps to the inner service, so an unconfigured CDN costs
+// nothing.
 func TestCacheInvalidating_NilPurgerUnwraps(t *testing.T) {
 	_, manage, _ := newStack(t)
 	if got := service.NewCacheInvalidating(manage, nil); got != service.PasteManager(manage) {

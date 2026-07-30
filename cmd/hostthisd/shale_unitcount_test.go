@@ -5,11 +5,11 @@ import (
 	"testing"
 )
 
-// A bind address means "join a cluster". A unit count of 0 means
-// single-backend. Asking for both is incoherent, and the failure it used to
-// produce was the dangerous kind: the node booted, served reads and writes,
-// and looked exactly like a clustered peer while providing none of the
-// replication it was deployed for. Refusing the boot makes that loud.
+// A bind address means "join a cluster" and a unit count of 0 means
+// single-backend, so asking for both is incoherent. The boot is refused rather
+// than downgraded, because a downgraded node serves reads and writes and looks
+// exactly like a clustered peer while providing none of the replication it was
+// deployed for.
 func TestRequireUnitCountWhenClustering(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -30,9 +30,8 @@ func TestRequireUnitCountWhenClustering(t *testing.T) {
 			if !tc.wantErr && err != nil {
 				t.Fatalf("want no error, got %v", err)
 			}
-			// The message must name the env var an operator would have to set.
-			// A refusal that does not say which knob to turn is only marginally
-			// better than the silent downgrade it replaced.
+			// The message must name the env var to set: a refusal that does not
+			// say which knob to turn is barely better than a silent downgrade.
 			if err != nil && !strings.Contains(err.Error(), "HOSTTHIS_SHALE_UNIT_COUNT") {
 				t.Fatalf("error must name the env var to set; got %q", err)
 			}

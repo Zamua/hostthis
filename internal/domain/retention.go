@@ -7,51 +7,41 @@ import (
 
 // DefaultRetentionWindow is the out-of-the-box content TTL: a paste or site
 // expires this long after its last update unless the operator overrides it
-// (HOSTTHIS_RETENTION). 30 days matches the long-standing default.
+// (HOSTTHIS_RETENTION).
 const DefaultRetentionWindow = 30 * 24 * time.Hour
 
 // NeverExpires is the ExpiresAt sentinel for content under a no-expiry policy.
-// It is far enough in the future that the sweep's `expires_at < now` check
-// never matches and the fixed-width (RFC3339Nano) expiry index never reaches
-// it on a cutoff scan, so such content is simply never swept. It is also an
-// unambiguous marker the read/display layers test against to render "never".
+// Far enough in the future that the sweep's `expires_at < now` check never
+// matches and the expiry index never reaches it on a cutoff scan, so such
+// content is never swept. Also the marker the read/display layers test against
+// to render "never".
 var NeverExpires = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // ExpiredPaste references one expired paste surfaced by the sweep's expiry
-// scan: the slug to delete plus, on backends that keep a standalone expiry
-// index, an opaque reference to the exact index entry that surfaced it. The
-// sweep round-trips the reference into the repo's DeleteExpired so the index
-// entry is removed even when the paste record is already gone; without that,
-// an orphaned entry would resurface on every scan forever. See docs/SPEC.md
-// "The storage contract" (Expiry).
+// scan. The sweep round-trips the reference into the repo's DeleteExpired so
+// the index entry is removed even when the paste record is already gone;
+// without that, an orphaned entry resurfaces on every scan forever. See
+// docs/SPEC.md "The storage contract" (Expiry).
 type ExpiredPaste struct {
 	Slug Slug
 	// IndexRef is opaque to everything but the backend that produced it
-	// (the index-backed backends encode the entry's full key). Empty on
-	// backends whose expiry scan reads the paste records themselves and
-	// so have no standalone entry to clean.
+	// (index-backed backends encode the entry's full key). Empty on backends
+	// whose expiry scan reads the paste records themselves, which therefore
+	// have no standalone entry to clean.
 	IndexRef string
 }
 
-// ExpiredSite is the static-site twin of ExpiredPaste: one expired site
-// surfaced by the sweep's site-expiry scan, as the slug plus an opaque
-// reference to the exact index entry that surfaced it (empty on backends
-// without a standalone site-expiry index). Round-tripped into
-// DeleteExpiredSite for the same reason: the entry must be removable even
-// when the site record is already gone.
+// ExpiredSite is the static-site twin of ExpiredPaste, round-tripped into
+// DeleteExpiredSite for the same reason. IndexRef is empty on backends without
+// a standalone site-expiry index.
 type ExpiredSite struct {
 	Slug     Slug
 	IndexRef string
 }
 
-// ExpiredRoom is the room twin of ExpiredPaste / ExpiredSite: one expired
-// room surfaced by the sweep's room-expiry scan, as the room's full key
-// (the (app-slug, room-id) pair) plus an opaque reference to the exact
-// roomexpiry/ index entry that surfaced it (empty on backends whose scan
-// reads the room records themselves, like sqlite). Round-tripped into
-// DeleteExpiredRoom for the same reason as its twins: the entry must be
-// removable even when the room record is already gone, or an orphaned
-// entry resurfaces on every scan forever.
+// ExpiredRoom is the room twin of ExpiredPaste, keyed by the (app-slug,
+// room-id) pair and round-tripped into DeleteExpiredRoom for the same reason.
+// IndexRef is empty on backends whose scan reads the room records themselves.
 type ExpiredRoom struct {
 	AppSlug  Slug
 	ID       RoomID
@@ -59,12 +49,9 @@ type ExpiredRoom struct {
 }
 
 // Retention is the installation's content-TTL policy, set once at the
-// composition root from config and injected into the services / repos that
-// stamp ExpiresAt. A positive Window expires content that long after its last
+// composition root and injected into the services / repos that stamp
+// ExpiresAt. A positive Window expires content that long after its last
 // update; a Window <= 0 means content never expires.
-//
-// It is a pure value object: no I/O, safe to copy, the single source of truth
-// for "when does content expire" and "how do we describe that to a human".
 type Retention struct {
 	Window time.Duration // <= 0 means "never expire"
 }
@@ -85,8 +72,7 @@ func (r Retention) ExpiryFor(now time.Time) time.Time {
 }
 
 // Describe renders the policy for user-facing copy: "30 days", "12 hours",
-// "90 minutes", or "never" when disabled. Used so every "expires in ..."
-// string tracks the configured window instead of a hard-coded literal.
+// "90 minutes", or "never" when disabled.
 func (r Retention) Describe() string {
 	if !r.Enabled() {
 		return "never"
@@ -119,18 +105,16 @@ func plural(n int, unit string) string {
 
 // IsExpired reports whether content with this ExpiresAt has expired at now.
 //
+// The BOUNDARY is the point: expiry is INCLUSIVE, so content whose ExpiresAt
+// equals now is expired. `ExpiresAt.Before(now)` reads just as naturally and
+// disagrees at exactly that instant, serving content one tick past its
+// lifetime.
+//
 // A free function rather than a method because the field lives on several row
 // types across the adapters, not only on Paste.
 //
-// The BOUNDARY is the point: expiry is inclusive, so content whose ExpiresAt
-// equals now is expired. Twelve adapter sites spelled this as
-// `!ExpiresAt.After(now)` and all twelve agreed - unlike the quota rule, which
-// had already drifted - but a thirteenth written as `ExpiresAt.Before(now)`
-// reads just as naturally and would disagree at exactly that instant, serving
-// content one tick past its lifetime. Naming the rule is what stops that.
-//
-// Safe for the no-expiry policy because NeverExpires is a far-future sentinel
-// rather than the zero time: a zero value would make this report "expired" and
+// Safe under the no-expiry policy only because NeverExpires is a far-future
+// sentinel rather than the zero time: a zero value would report "expired" and
 // silently sweep content that must never be swept.
 func IsExpired(expiresAt, now time.Time) bool {
 	return !expiresAt.After(now)

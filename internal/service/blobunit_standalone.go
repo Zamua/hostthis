@@ -6,34 +6,18 @@ import (
 )
 
 // blobReadStore is the read surface StandaloneBlobUnit needs on top of the
-// write+buffered-read BlobStore the services already hold. *storage.
-// CompressedBlobStore satisfies both. GetReader streams the decompressed
-// bytes; Get buffers them. Kept here (not imported from http) so the
-// service layer does not depend on the http package.
+// write+buffered-read BlobStore the services already hold: GetReader streams
+// the decompressed bytes, Get buffers them. Declared here rather than imported
+// from http so the service layer does not depend on the http package.
 type blobReadStore interface {
 	GetReader(sha string) (io.ReadCloser, int64, error)
 	Get(sha string) ([]byte, error)
 }
 
-// StandaloneBlobUnit adapts the existing detached content-addressed blob
-// store (the *storage.CompressedBlobStore over disk or S3) to the BlobUnit
-// seam. It is the ONLY implementation today; every metadata backend
-// (sqlite, slatedb, shale) uses it, so wiring the services through the seam
-// changes nothing at runtime - this is a behavior-preserving refactor.
-//
-// The mapping to today's direct calls:
-//
-//   - Stage           -> BlobStore.PutPrecompressed(sha, body)
-//   - StageStream      -> BlobStore.Put(sha, r, size)  (compresses at rest)
-//   - Commit           -> just runs metaWrite; the bytes are already durable
-//     from Stage/StageStream, so there is no separate bind. This reproduces
-//     the pre-seam blob-first ordering (write the blob, then the metadata
-//     row) that update and deploy already used.
-//   - Read             -> GetReader(sha)   (streaming, decompressed)
-//   - ReadAll          -> Get(sha)         (buffered, decompressed)
-//   - UnbindOnDelete   -> no-op. Blobs are content-addressed and reclaimed
-//     by the global content-addressed sweep when no live record references
-//     their sha; a delete never removes bytes directly on this path.
+// StandaloneBlobUnit adapts the detached content-addressed blob store (a
+// *storage.CompressedBlobStore) to the BlobUnit seam. Bytes are durable the
+// moment Stage/StageStream returns, so the ordering is blob-first and Commit
+// has nothing to bind.
 type StandaloneBlobUnit struct {
 	store interface {
 		BlobStore
@@ -41,8 +25,7 @@ type StandaloneBlobUnit struct {
 	}
 }
 
-// NewStandaloneBlobUnit wraps a content-addressed blob store (the same
-// *storage.CompressedBlobStore the services hold today) as a BlobUnit.
+// NewStandaloneBlobUnit wraps a content-addressed blob store as a BlobUnit.
 func NewStandaloneBlobUnit(store interface {
 	BlobStore
 	blobReadStore
@@ -69,15 +52,13 @@ func (u *StandaloneBlobUnit) StageStream(_ context.Context, slug, sha string, r 
 
 // Commit runs the record's metadata write. The staged bytes are already
 // durable, so there is nothing to bind: Commit returns metaWrite's error
-// verbatim (preserving the caller's slug-collision / quota error handling).
-// The ambient context is forwarded to metaWrite unchanged - the standalone
-// path carries no per-call binds.
+// verbatim, preserving the caller's slug-collision / quota error handling.
 func (u *StandaloneBlobUnit) Commit(ctx context.Context, _ []BlobHandle, metaWrite func(context.Context) error) error {
 	return metaWrite(ctx)
 }
 
-// Read streams the decompressed bytes for sha (slug is unused on this path -
-// blobs are keyed by content sha alone).
+// Read streams the decompressed bytes for sha. slug is unused: blobs are keyed
+// by content sha alone.
 func (u *StandaloneBlobUnit) Read(_ context.Context, _ /*slug*/, sha string) (io.ReadCloser, int64, error) {
 	return u.store.GetReader(sha)
 }
@@ -87,24 +68,22 @@ func (u *StandaloneBlobUnit) ReadAll(_ context.Context, _ /*slug*/, sha string) 
 	return u.store.Get(sha)
 }
 
-// UnbindOnDelete is a no-op on the standalone path: the global sweep
-// reclaims unreferenced blobs by content sha.
+// UnbindOnDelete is a no-op: the global content-addressed sweep reclaims blobs
+// no live record references, so a delete never removes bytes directly.
 func (u *StandaloneBlobUnit) UnbindOnDelete(_ context.Context, _ string, _ []string) error {
 	return nil
 }
 
-// IsTransactional is false: the standalone path writes bytes to a detached
-// content-addressed store AFTER (or before) the metadata, with no co-commit.
-// Upload.Create therefore keeps the pending/finalizer model on this path -
-// commit a PENDING row, write the bytes in the background, flip to ready.
+// IsTransactional is false: the bytes land in a detached store with no
+// co-commit, so Upload.Create keeps the pending/finalizer model on this path
+// (commit a PENDING row, write the bytes in the background, flip to ready).
 func (u *StandaloneBlobUnit) IsTransactional() bool { return false }
 
-// Ensure StandaloneBlobUnit satisfies the seam.
 var _ BlobUnit = (*StandaloneBlobUnit)(nil)
 
-// StageEncoding implements BlobUnit for the standalone path. Same contract as
-// the transactional adapter: encode to the at-rest format, stage it, report the
-// compressed size excluding the framing prefix.
+// StageEncoding implements BlobUnit for the standalone path, on the same
+// contract as the transactional adapter: encode to the at-rest format, stage
+// it, report the compressed size excluding the framing prefix.
 func (u *StandaloneBlobUnit) StageEncoding(ctx context.Context, slug, sha string, r io.Reader) (BlobHandle, int, error) {
 	body, size, err := u.store.EncodeBody(r)
 	if err != nil {

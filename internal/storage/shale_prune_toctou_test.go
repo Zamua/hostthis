@@ -2,14 +2,13 @@
 
 package storage_test
 
-// Orphan-prune TOCTOU (docs/SPEC.md "Derived indexes and repair-on-read" /
-// the reconciler's prune): the prune confirms a candidate entry's
-// authoritative row is gone before dropping it, but a same-slug
-// delete-then-redeploy can land a fresh row + entry BETWEEN the confirm
-// and the delete. The delete is therefore value-compared: it drops the
-// entry only while it still holds the value the pass's snapshot read, so
-// the fresh entry survives; the stale entry then lingers at most one more
-// pass (a Window-A-shaped residual the next pass heals).
+// Orphan-prune TOCTOU (docs/SPEC.md "Derived indexes and repair-on-read"): the
+// prune confirms a candidate entry's authoritative row is gone before dropping
+// it, but a same-slug delete-then-redeploy can land a fresh row and entry
+// BETWEEN the confirm and the delete. The delete is therefore value-compared:
+// it drops the entry only while it still holds the value the pass's snapshot
+// read, so the fresh entry survives and a stale one lingers at most one more
+// pass.
 //
 //	go test -tags slatedb -run TestShaleOrphanPruneKeepsFreshRedeployEntry ./internal/storage
 //
@@ -27,11 +26,9 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// TestShaleOrphanPruneKeepsFreshRedeployEntry pins F5's TOCTOU: the orphan
-// prune confirms the authoritative row is gone, then a same-slug redeploy
-// lands a fresh row + entry before the delete. The delete must be
-// value-compared (drop only the entry the snapshot read) so the fresh
-// entry survives.
+// TestShaleOrphanPruneKeepsFreshRedeployEntry pins that a same-slug redeploy
+// landing between the prune's confirm and its delete survives, because the
+// delete drops only the entry value the snapshot read.
 func TestShaleOrphanPruneKeepsFreshRedeployEntry(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -44,12 +41,12 @@ func TestShaleOrphanPruneKeepsFreshRedeployEntry(t *testing.T) {
 	slug := domain.Slug("prunerc1")
 	idxKey := storage.IdentityPasteKeyForTest(owner, slug.String())
 
-	// The stale orphan entry: its authoritative row is gone (a crash
-	// mid-delete left it), so the prune will confirm NotFound and drop it.
+	// A stale orphan entry, as a crash mid-delete leaves: its authoritative
+	// row is gone, so the prune confirms NotFound and drops it.
 	writeIndexEntryJSON(t, repo, idxKey, 777, now.Add(domain.DefaultRetentionWindow))
 
 	// The same-slug redeploy lands between the prune's confirm and its
-	// delete: a fresh authoritative row + a fresh enumeration entry (300).
+	// delete: a fresh authoritative row plus a fresh enumeration entry.
 	var once sync.Once
 	repo.SetBeforeOrphanPruneDeleteHookForTest(func(key []byte) {
 		if !bytes.Equal(key, idxKey) {
@@ -72,8 +69,8 @@ func TestShaleOrphanPruneKeepsFreshRedeployEntry(t *testing.T) {
 	if err := repo.ReconcileForTest(now); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	// The fresh redeploy's entry survives the prune (value-compared delete
-	// skipped: the entry no longer holds the snapshot's value).
+	// The entry no longer holds the snapshot's value, so the value-compared
+	// delete skips it.
 	if got := readCachedIndexSize(t, repo, idxKey); got != 300 {
 		t.Fatalf("prune dropped the fresh redeploy's entry: cached size got %d, want 300", got)
 	}

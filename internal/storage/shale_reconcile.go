@@ -1,11 +1,8 @@
-// ShaleRepo's reconciler: the periodic Reconcile maintenance pass, the
-// enumeration-index reprojection + orphan prune it drives (shared across
-// the paste and site families via reconcileEnumerationIndex), and the
-// guarded index-entry write/delete primitives that keep every recomputed
-// cached-value write from clobbering a fresher concurrent one. Split out
-// of shale_repo.go (which keeps the config, lifecycle, and core CRUD);
-// see that file's package comment for the key layout and transaction
-// model, and docs/SPEC.md "Periodic reconcile" for the design.
+// ShaleRepo's reconciler: the periodic Reconcile pass, the enumeration-index
+// reprojection + orphan prune it drives (shared across the paste and site
+// families via reconcileEnumerationIndex), and the guarded index-entry
+// write/delete primitives. Key layout and transaction model live in
+// shale_repo.go; the design is docs/SPEC.md "Periodic reconcile".
 
 //go:build slatedb
 
@@ -27,66 +24,52 @@ import (
 // --- reconciler ------------------------------------------------------------
 
 // Reconcile is the metadata backend's maintenance pass and the sole
-// quota-healing mechanism, since the quota is derived by summing the cached
-// values on the enumeration indexes. With no stored counter, it has two jobs:
+// quota-healing mechanism: the quota is derived by summing the cached values on
+// the enumeration indexes, with no stored counter. Two jobs:
 //
-//   - REPROJECT the per-owner enumeration indexes from the authoritative rows.
-//     Each pass adds missing entries, rebuilds every projection's cached quota
-//     values, and drops entries whose record is gone or failed, pruning against
-//     a full aggregate of the family so no orphan lingers.
-//
-//     This closes both quota gaps the cached-sum design has: a crash between the
-//     {slug} row write and the {id} index write (a live row the index omits,
-//     under-counting) and a stale or orphaned cached value (mis-counting by one
-//     record's bytes).
-//
+//   - REPROJECT the per-owner enumeration indexes from the authoritative rows
+//     (add missing entries, rebuild cached quota values, drop entries whose
+//     record is gone or failed), pruning against a full aggregate of the family
+//     so no orphan lingers. Closes both quota gaps of the cached-sum design: a
+//     crash between the {slug} row write and the {id} index write (a live row
+//     the index omits, under-counting) and a stale or orphaned cached value.
 //   - AGE OUT stuck pendings: a pending paste older than PendingPasteTimeout is
 //     flipped to failed, dropping it from the quota scan and its loading screen.
 //
-// The cached values are computed from the pass's point-in-time snapshot, so a
-// pass can race a live write's fresher refresh. Every reprojection write and
-// prune delete is therefore GUARDED on the value the pass's index snapshot read
-// (captured strictly before the authoritative scans), and skips when a live
-// write moved the entry mid-pass: guarded to lose, never to clobber.
-//
-// That is what makes the pass safe under live traffic, on any cadence, from
-// every pod concurrently. Each converges toward the authoritative state, and a
-// skip costs one cycle of staleness on one entry.
+// Cached values come from the pass's point-in-time snapshot, so a pass can race
+// a live write's fresher refresh. Every reprojection write and prune delete is
+// GUARDED on the value the pass's index snapshot read (captured strictly before
+// the authoritative scans) and skips when a live write moved the entry mid-pass:
+// guarded to lose, never to clobber. That is what makes the pass safe under live
+// traffic, on any cadence, from every pod concurrently; a skip costs one cycle
+// of staleness on one entry.
 //
 // Not part of the SweepRepo contract. Cross-shard via aggregate. A poisoned row
-// or a failed per-entry write is skipped and the pass continues (Policy 1), but
-// an undecodable row is never silently dropped from the projection.
+// or a failed per-entry write is skipped and the pass continues (Policy 1); an
+// undecodable row is never silently dropped from the projection.
 func (r *ShaleRepo) Reconcile(now time.Time) error {
-	// Snapshot the enumeration index FIRST - strictly before the
-	// authoritative scans - because it is the guard baseline for every
-	// reprojection write below: a write commits only if its entry still
-	// holds this snapshot's value. Snapshotting the index first is what
-	// makes a guard pass MEAN something: the value this pass computes comes
-	// from authoritative rows read AFTER the baseline, so "entry unchanged
-	// since the baseline" proves the computed value is at least as fresh as
-	// the entry - while any live refresh that lands mid-pass changes the
-	// entry and flips the guard to skip. (Baselined the other way around, a
-	// refresh landing between the authoritative scan and a later index
-	// snapshot would be adopted as the baseline and the stale computed value
-	// would sail through the guard - the exact clobber the guard exists to
-	// stop.)
+	// Snapshot the enumeration index FIRST, strictly before the authoritative
+	// scans: it is the guard baseline for every reprojection write below. Values
+	// computed from rows read AFTER the baseline are at least as fresh as the
+	// entry, so "entry unchanged since the baseline" is a meaningful guard, and
+	// any live refresh landing mid-pass flips it to skip. Baselined the other
+	// way around, a refresh landing between the authoritative scan and the index
+	// snapshot would BE the baseline and the stale computed value would sail
+	// through the guard.
 	pasteIdx, err := r.aggregateForBackground(prefixIdentityPastesAll)
 	if err != nil {
 		return fmt.Errorf("reconcile: scan identity_pastes: %w", err)
 	}
 
-	// Gather authoritative paste state across all shards.
 	pasteItems, err := r.aggregateForBackground([]byte("pastes/"))
 	if err != nil {
 		return fmt.Errorf("reconcile: scan pastes: %w", err)
 	}
 
-	// Gather the version rows too: the reprojected entry caches the paste's
-	// LIVE byte sum (what the quota scan sums), which lives in the version
-	// rows, not the head. A slug with an undecodable version row cannot have
-	// its live sum computed - projecting a PARTIAL sum would silently
-	// under-count - so it is marked and projected as a fail-closed
-	// placeholder below (Policy 1 for the pass, Policy 3 for the value).
+	// The reprojected entry caches the paste's LIVE byte sum (what the quota
+	// scan sums), which lives in the version rows, not the head. A slug with an
+	// undecodable version row gets a fail-closed placeholder below: projecting a
+	// PARTIAL sum would silently under-count.
 	verItems, err := r.aggregateForBackground(prefixVersionsAll)
 	if err != nil {
 		return fmt.Errorf("reconcile: scan versions: %w", err)
@@ -102,9 +85,9 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 		}
 		var v versionRow
 		if err := json.Unmarshal(item.Value, &v); err != nil {
-			// Counted, not logged per record: a poisoned version row is
-			// poisoned on every pass, so a line here repeats forever at a cost
-			// proportional to the debris. See corrupt_tally.go.
+			// Counted, not logged per record: a poisoned row is poisoned on
+			// every pass, so a line here repeats forever at a cost proportional
+			// to the debris. See corrupt_tally.go.
 			poisonedVersions[slug] = true
 			corruptVersions.notePlaceholder(slug)
 			continue
@@ -120,78 +103,58 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 	}
 
 	pastesByOwner := make(map[string]map[string]identityPasteRow)
-	// Corrupt rows are TALLIED and summarised once per pass, never logged per
-	// record: see corrupt_tally.go for why that distinction is load-bearing.
 	var corrupt corruptTally
-	// stalePending collects slugs whose status is pending and whose
-	// created_at is older than the pending timeout: the pod-death backstop
-	// (the in-memory bytes are gone, no finalizer will ever run). They are
-	// aged to failed AFTER the scan + index rebuild so a too-old pending's
-	// index entry does not get re-projected by reconcileIndexes on the same
+	// A pending older than the timeout is a pod-death casualty: its in-memory
+	// bytes are gone and no finalizer will ever run. Aged to failed AFTER the
+	// scan + index rebuild so its index entry is not re-projected on the same
 	// pass. See docs/SPEC.md "Reconciler: age out stuck pendings".
 	var stalePending []domain.Slug
 	for _, item := range pasteItems {
 		slug := strings.TrimPrefix(string(item.Key), "pastes/")
 		var p pasteRow
 		if err := json.Unmarshal(item.Value, &p); err != nil {
-			// Idempotent reconcile: one poisoned paste must not stall the whole
-			// pass (which would freeze index reprojection for every healthy
-			// owner); the next tick retries it (Policy 1). But we CANNOT simply
-			// drop it: the quota scan reads THROUGH the enumeration index, so an
-			// undecodable row whose identity_pastes entry was ALSO lost (a crash
-			// between the row write and the index write) would be enumerated by
-			// nothing and silently drop from the owner's sum - a durable
-			// UNDER-count that lets the owner exceed the cap permanently. So
-			// derive the owner decode-independently from slug_owner/<slug> and
-			// still project a PLACEHOLDER enumeration entry (zero-value row) so
-			// the next quota scan enumerates the slug and re-reads the
-			// authoritative row - which then hard-fails the scan (fail-closed
-			// reject), never a silent under-count. See docs/SPEC.md "Decode
-			// tolerance of the quota scan".
+			// One poisoned paste must not stall the whole pass, which would
+			// freeze index reprojection for every healthy owner; the next tick
+			// retries it (Policy 1). But it CANNOT simply be dropped: the quota
+			// scan reads THROUGH the enumeration index, so an undecodable row
+			// whose identity_pastes entry was ALSO lost would be enumerated by
+			// nothing and silently drop out of the owner's sum, a durable
+			// UNDER-count that lets the owner exceed the cap permanently. Derive
+			// the owner decode-independently from slug_owner/<slug> and project a
+			// PLACEHOLDER entry so the next quota scan enumerates the slug,
+			// re-reads the authoritative row, and hard-fails (fail-closed
+			// reject). See docs/SPEC.md "Decode tolerance of the quota scan".
 			owner := r.ownerOfSlug(domain.Slug(slug))
 			if owner == "" {
-				// No slug_owner, so the owner cannot be derived and no
-				// enumeration entry can be projected: the row stays
-				// un-enumerated until it is repaired.
-				//
-				// COUNTED, NOT LOGGED PER RECORD. The comment here used to say
-				// this was "only reachable on the metadata-only test path; prod
-				// always writes slug_owner" - that assumption is FALSE, and the
-				// cost of it being false was severe: these rows can never be
-				// repaired (there is nothing left to derive an owner from), so
-				// every pass re-found the same set and logged one line each.
-				// Observed at 19,764 rows emitting ~60 lines/sec and consuming
-				// ~1.5 CPU cores, which starved the request path badly enough to
-				// take a read from 0.45s to 19s. A per-pass summary keeps the
-				// diagnostic (the count is what matters; the individual slugs are
-				// identical every pass) at a fixed cost. Sample the first few so
-				// a reader can still go look at one.
+				// No slug_owner: the owner cannot be derived and no enumeration
+				// entry can be projected, so the row stays un-enumerated until
+				// it is repaired. Counted, not logged per record: such a row is
+				// unrepairable, so every pass re-finds the same set and per-row
+				// logging burns CPU proportional to the debris, starving the
+				// request path. The count is the diagnostic; the samples let a
+				// reader go look at one.
 				corrupt.noteUnrepairable(slug)
 				continue
 			}
 			if pastesByOwner[owner] == nil {
 				pastesByOwner[owner] = make(map[string]identityPasteRow)
 			}
-			// Fail-closed placeholder: we cannot read name/size/expiry from the
-			// corrupt row, and the quota scan sums the CACHED size, so a
-			// zero-value entry would silently under-count. The placeholder
-			// marker makes the owner's next quota scan HARD-FAIL instead
-			// (docs/SPEC.md "Decode tolerance of the quota scan").
+			// Fail-closed placeholder: name/size/expiry are unreadable and the
+			// quota scan sums the CACHED size, so a zero-value entry would
+			// silently under-count. The placeholder marker makes the owner's
+			// next quota scan HARD-FAIL instead (docs/SPEC.md "Decode tolerance
+			// of the quota scan").
 			if _, ok := pastesByOwner[owner][slug]; !ok {
 				pastesByOwner[owner][slug] = identityPasteRow{Placeholder: true}
 			}
-			// Also counted rather than logged per record, same reasoning: a
-			// corrupt row is corrupt on every pass, so the line repeats forever
-			// at a cost proportional to the debris.
 			corrupt.notePlaceholder(slug)
 			continue
 		}
 		if domain.NormalizeStatus(p.Status) == domain.PasteStatusFailed {
-			// A failed paste is NOT enumerated: MarkFailed drops its entry, and
+			// A failed paste is NOT enumerated: MarkFailed drops its entry and
 			// the quota scan sums whatever the index lists, so reprojecting it
-			// would resurrect its bytes (and its ListByOwner presence). A
-			// leftover entry (crash mid-MarkFailed) is pruned by
-			// reconcileIndexes' orphan pass instead.
+			// would resurrect its bytes and its ListByOwner presence. A leftover
+			// entry is pruned by reconcileIndexes' orphan pass instead.
 			continue
 		}
 		if pastesByOwner[p.Identity] == nil {
@@ -209,9 +172,7 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 				ExpiresAt: p.ExpiresAt,
 			}
 		}
-		// Age-out check: a pending paste older than the timeout is a
-		// pod-death casualty (its in-memory bytes never reached the blob
-		// store). Defer the transition until after the index rebuild.
+		// Deferred until after the index rebuild (see stalePending).
 		if domain.NormalizeStatus(p.Status) == domain.PasteStatusPending &&
 			now.Sub(p.CreatedAt) > PendingPasteTimeout {
 			stalePending = append(stalePending, domain.Slug(slug))
@@ -226,37 +187,33 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 		r.testHookReconcileBeforeIndexWrites()
 	}
 
-	// The three jobs are independent (Policy 1: one stalled job must not
-	// freeze the others), so a failure in one is collected and the pass
-	// continues; the joined error makes the whole pass retried next tick.
+	// The three jobs are independent (Policy 1: one stalled job must not freeze
+	// the others), so a failure in one is collected and the pass continues; the
+	// joined error makes the whole pass retried next tick.
 	var errs []error
 
-	// Job 1: reproject the paste enumeration index from the authoritative rows.
+	// Job 1: the paste enumeration index.
 	if err := r.reconcileIndexes(pastesByOwner, pasteIdx); err != nil {
 		errs = append(errs, err)
 	}
-	// Job 1b: age out stuck pending pastes (pod-death backstop). Each
-	// MarkFailed is independent + idempotent; a failure on one slug is
-	// logged and skipped so it cannot stall the rest of the pass (the next
-	// tick retries it), the same per-row discipline the index reprojection uses.
+	// Job 1b: age out stuck pending pastes. Each MarkFailed is independent +
+	// idempotent; a failure on one slug is logged and skipped so it cannot
+	// stall the rest of the pass.
 	for _, slug := range stalePending {
 		if err := r.MarkFailed(slug); err != nil {
 			// transient-failure-log: fires only when MarkFailed errors, not per record.
 			r.repoLog().Printf("reconcile: age-out pending %s: %v", slug, err)
 		}
 	}
-	// Job 2: reproject the SITE enumeration index from the authoritative sites/
-	// rows (the exact parallel of Job 1, re-homed here from the now-deleted
-	// site-reservation pass so the site index still heals every tick). This is
-	// what backfills sites deployed before the identity_sites index existed and
-	// closes the crash-between-row-and-index under-count for sites.
+	// Job 2: the SITE enumeration index, the exact parallel of Job 1. Backfills
+	// sites with no index entry and closes the crash-between-row-and-index
+	// under-count for sites.
 	if err := r.reconcileSiteIndexPass(); err != nil {
 		errs = append(errs, err)
 	}
-	// Job 3: reproject the IDENTITY-leading keygate index from the
-	// authoritative subnet-leading rows. This is what BACKFILLS keys admitted
-	// before the index existed, and what repairs the drift the best-effort
-	// co-write at admit time can leave.
+	// Job 3: the IDENTITY-leading keygate index, rebuilt from the authoritative
+	// subnet-leading rows. Backfills entries that were never written and repairs
+	// the drift the best-effort co-write at admit time can leave.
 	if err := r.reconcileKeygateIdentityIndex(); err != nil {
 		errs = append(errs, err)
 	}
@@ -267,15 +224,12 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 // match the authoritative keygate/<subnet>/<identity> rows.
 //
 // The identity-leading entry cannot be written atomically with the
-// authoritative row - shale transactions are single-shard and the two keys
-// hash to different shards - so it is written best-effort at admit and healed
-// here, exactly like the enumeration indexes. This pass is also the backfill
-// for rows admitted before the index existed.
+// authoritative row (shale transactions are single-shard and the two keys hash
+// to different shards), so it is written best-effort at admit and healed here.
 //
-// Deliberately BACKGROUND budget and O(all keygate rows): that full scan is
-// precisely the work being moved OFF the interactive path, where it cost
-// 10-18s on a command whose answer is a display value. Nothing waits on this
-// pass, so paying it once every reconcile tick is the right place for it.
+// Deliberately BACKGROUND budget and O(all keygate rows): that full scan is the
+// work kept OFF the interactive path, where it dominated a command whose answer
+// is a display value. Nothing waits on this pass.
 //
 // Policy 1 (skip + continue) applies: one bad row must not stall the pass.
 func (r *ShaleRepo) reconcileKeygateIdentityIndex() error {
@@ -305,17 +259,14 @@ func (r *ShaleRepo) reconcileKeygateIdentityIndex() error {
 	// PRESENCE IS CHECKED THROUGH THE CONSUMER'S LENS, not the aggregate's.
 	//
 	// keygate_id/ shards on the identity, so SubnetsForIdentity reads it with a
-	// SINGLE-SHARD prefix scan. An entry sitting on the wrong unit - written
-	// before the family had a shard-key case, so it was placed by hashing the
-	// whole key - is still visible to the cross-shard aggregate below but NOT
-	// to that read. Treating the aggregate's view as presence would mark such
-	// an entry "already projected" and leave it stranded forever, invisible to
-	// the only thing that reads it. Probing per identity with the same
-	// single-shard scan the consumer uses repairs placement instead: the entry
-	// reads as absent, gets re-written, and lands on the correct unit.
-	//
-	// One narrow scan per distinct identity, on a background pass, rather than
-	// one point read per row.
+	// SINGLE-SHARD prefix scan. An entry sitting on the wrong unit is still
+	// visible to the cross-shard aggregate below but NOT to that read; treating
+	// the aggregate's view as presence would mark it "already projected" and
+	// strand it forever, invisible to the only thing that reads it. Probing per
+	// identity with the same single-shard scan the consumer uses repairs
+	// placement instead: the entry reads as absent, gets re-written, and lands
+	// on the correct unit. One narrow scan per distinct identity on a background
+	// pass, rather than one point read per row.
 	visible := make(map[string]struct{}, len(want))
 	identities := make(map[string]struct{})
 	for key := range want {
@@ -343,9 +294,8 @@ func (r *ShaleRepo) reconcileKeygateIdentityIndex() error {
 		if _, ok := want[key]; ok {
 			continue
 		}
-		// ORPHAN: no authoritative row. Left alone it would make whoami
-		// over-report subnets the gate has already pruned, and nothing else
-		// would ever remove it.
+		// ORPHAN: no authoritative row. Left alone it makes whoami over-report
+		// subnets the gate has already pruned, and nothing else removes it.
 		if derr := r.cluster.Delete(item.Key); derr != nil {
 			errs = append(errs, fmt.Errorf("prune orphan keygate index entry %s: %w", item.Key, derr))
 		}
@@ -365,13 +315,10 @@ func (r *ShaleRepo) reconcileKeygateIdentityIndex() error {
 }
 
 // reconcileIndexes rebuilds identity_pastes projections to match the
-// authoritative paste set per owner: adds missing entries, refreshes every
-// projection's cached values, and drops entries with no live authoritative
-// paste. have is the pass's index snapshot, captured by Reconcile BEFORE
-// the authoritative scans (see the guard-baseline reasoning there). The
-// mechanics - orphan prune, guarded reprojection, Policy 1 error handling -
-// live in reconcileEnumerationIndex; this wrapper supplies the paste
-// family's prefix, key builder, and confirm-then-classify prune step.
+// authoritative paste set per owner. have is the pass's index snapshot,
+// captured by Reconcile BEFORE the authoritative scans (see the guard-baseline
+// reasoning there). The mechanics live in reconcileEnumerationIndex; this
+// wrapper supplies the paste family's prefix, key builder, and prune step.
 func (r *ShaleRepo) reconcileIndexes(pastesByOwner map[string]map[string]identityPasteRow, have []scanItem) error {
 	return reconcileEnumerationIndex(r, pastesByOwner, have, prefixIdentityPastesAll,
 		shaleKeyIdentityPaste, r.pruneOrphanPasteEntry, "reconcile", "identity_pastes")
@@ -379,10 +326,9 @@ func (r *ShaleRepo) reconcileIndexes(pastesByOwner map[string]map[string]identit
 
 // pruneOrphanPasteEntry classifies one identity_pastes entry whose (owner,
 // slug) is missing from the reprojection set: an orphan (the authoritative
-// paste is gone), a failed paste's leftover entry (crash mid-MarkFailed), or
-// a FRESH insert that raced the pass's pastes/ snapshot. It confirms against
-// the authoritative row so the racing insert is kept; only the first two
-// verdicts prune.
+// paste is gone), a failed paste's leftover entry, or a FRESH insert that raced
+// the pass's pastes/ snapshot. It confirms against the authoritative row so the
+// racing insert is kept; only the first two verdicts prune.
 func (r *ShaleRepo) pruneOrphanPasteEntry(slug string) bool {
 	var p pasteRow
 	switch gerr := r.getJSON(shaleKeyPaste(domain.Slug(slug)), &p); {
@@ -391,7 +337,7 @@ func (r *ShaleRepo) pruneOrphanPasteEntry(slug string) bool {
 		return true
 	case gerr != nil:
 		// Undecodable row: keep the entry; the fail-closed placeholder
-		// projection handles it (or already did via slug_owner).
+		// projection handles it.
 		return false
 	case domain.NormalizeStatus(p.Status) == domain.PasteStatusFailed:
 		// Failed pastes are not enumerated. Same guarded drop.
@@ -403,30 +349,28 @@ func (r *ShaleRepo) pruneOrphanPasteEntry(slug string) bool {
 }
 
 // reconcileEnumerationIndex rebuilds one per-owner enumeration-index family
-// (identity_pastes / identity_sites) to match the authoritative rows: it
-// prunes entries with no wanted row and refreshes every wanted entry
-// (idempotent; covers add + update), one {id}-shard CAS per entry. have is
-// the pass's index snapshot, captured BEFORE the authoritative scans (the
-// guard-baseline ordering argument in Reconcile); it serves double duty as
+// (identity_pastes / identity_sites) to match the authoritative rows: prune
+// entries with no wanted row, refresh every wanted entry (idempotent; covers
+// add + update), one {id}-shard CAS per entry.
+//
+// have is the pass's index snapshot, captured BEFORE the authoritative scans
+// (the guard-baseline ordering argument in Reconcile), serving double duty as
 // the orphan-prune candidate set and as the expected-value baseline for the
-// guarded writes. The orphan prune runs against that FULL aggregate of the
-// index family - not just the owners with authoritative rows - so an entry
-// lingering under an owner whose records are ALL gone is still dropped (the
-// quota scan sums cached values without resolving the rows, so an unpruned
-// orphan would over-count that owner forever). pruneOrphan is the per-family
-// confirm-then-classify step; the drop itself is the VALUE-COMPARED
-// guardedDeleteIndexEntry, because the confirm and the delete are not one
-// step: a same-slug delete-then-redeploy can land a fresh row + entry
-// between the confirm's NotFound and the delete, and the fresh entry must
-// survive (docs/SPEC.md, the reconciler's prune). Reprojection writes are
-// guarded on the pass's snapshot value: a live write that landed mid-pass
-// (its cached values are fresher than this pass's point-in-time computation)
-// flips the guard and the write skips - the next pass recomputes from
-// fresher rows. A failed write follows Policy 1 (one entry's failure must
-// not stall the reprojection for every healthy owner): log, count, continue;
-// the aggregated error makes the whole pass retried next tick. logPrefix +
-// familyName keep each family's log/error strings byte-identical to the
-// pre-extraction per-family loops.
+// guarded writes. The prune runs against that FULL aggregate of the family, not
+// just the owners with authoritative rows, so an entry lingering under an owner
+// whose records are ALL gone is still dropped: the quota scan sums cached
+// values without resolving the rows, so an unpruned orphan over-counts that
+// owner forever.
+//
+// pruneOrphan is the per-family confirm-then-classify step; the drop itself is
+// the VALUE-COMPARED guardedDeleteIndexEntry, because the confirm and the
+// delete are not one step: a same-slug delete-then-redeploy can land a fresh
+// row + entry between the confirm's NotFound and the delete, and the fresh
+// entry must survive (docs/SPEC.md, the reconciler's prune). Reprojection
+// writes are likewise guarded on the snapshot value, so a live write that
+// landed mid-pass flips the guard and the write skips; the next pass recomputes
+// from fresher rows. A failed write follows Policy 1: log, count, continue, and
+// the aggregated error makes the whole pass retried next tick.
 func reconcileEnumerationIndex[R any](r *ShaleRepo, wanted map[string]map[string]R, have []scanItem, prefix []byte, entryKey func(owner, slug string) []byte, pruneOrphan func(slug string) bool, logPrefix, familyName string) error {
 	snapshot := make(map[string][]byte, len(have))
 	for _, item := range have {
@@ -441,7 +385,6 @@ func reconcileEnumerationIndex[R any](r *ShaleRepo, wanted map[string]map[string
 			continue
 		}
 		if pruneOrphan(slug) {
-			// Best-effort, guarded drop.
 			if _, err := r.guardedDeleteIndexEntry(item.Key, item.Value); err != nil {
 				// transient-failure-log: fires only on a failed prune, and the next pass retries.
 				r.repoLog().Printf("%s: prune %s: %v (next pass retries)", logPrefix, item.Key, err)
@@ -473,9 +416,9 @@ func reconcileEnumerationIndex[R any](r *ShaleRepo, wanted map[string]map[string
 }
 
 // splitIdentityIndexKey splits an enumeration-index key
-// (<prefix><owner>/<slug>) into its owner + slug. The slug is the LAST
-// segment (slugs are slash-free; an owner identity may itself contain '/',
-// e.g. a base64 key fingerprint, so the last '/' is the only safe split).
+// (<prefix><owner>/<slug>) into its owner + slug. The slug is the LAST segment:
+// slugs are slash-free, but an owner identity may contain '/' (e.g. a base64
+// key fingerprint), so the last '/' is the only safe split.
 func splitIdentityIndexKey(key, prefix []byte) (owner, slug string, ok bool) {
 	rest := string(key[len(prefix):])
 	i := strings.LastIndex(rest, "/")
@@ -485,25 +428,22 @@ func splitIdentityIndexKey(key, prefix []byte) (owner, slug string, ok bool) {
 	return rest[:i], rest[i+1:], true
 }
 
-// errIndexEntryChanged is the internal sentinel a guarded index write's
-// closure aborts with when the entry no longer holds the value the writing
-// computation started from (a fresher write landed in between). Transact
-// returns a non-conflict fn error verbatim, so guardedPutIndexEntry maps it
-// to "skipped". It never escapes guardedPutIndexEntry.
+// errIndexEntryChanged is the internal sentinel a guarded index write's closure
+// aborts with when the entry no longer holds the value the writing computation
+// started from. Transact returns a non-conflict fn error verbatim, so
+// guardedPutIndexEntry maps it to "skipped". It never escapes that function.
 var errIndexEntryChanged = errors.New("shale: index entry changed since the computation read it")
 
-// guardedPutIndexEntry writes row (JSON) at key ONLY IF the entry still
-// holds expected - the exact payload the writing computation read when it
-// started (present=false: the entry must still be absent). This is the
-// conditional primitive that keeps every recomputed cached-value write (the
-// reconciler's reprojections, the append/tombstone refreshes) from
-// clobbering a FRESHER value a concurrent write landed after the
-// computation's snapshot: on a mismatch it skips, returning (false, nil) -
-// guarded to lose, never to clobber; the next cycle/refresh recomputes from
-// fresher rows (docs/SPEC.md "Periodic reconcile" / "Window C"). The
-// compare runs inside the {id}-shard CAS with the entry in the read-set, so
-// a write landing between the compare and the commit conflicts, and the
-// re-run closure re-compares against the new value and skips.
+// guardedPutIndexEntry writes row (JSON) at key ONLY IF the entry still holds
+// expected, the exact payload the writing computation read when it started
+// (present=false: the entry must still be absent). This is the conditional
+// primitive that keeps every recomputed cached-value write (reprojections,
+// append/tombstone refreshes) from clobbering a FRESHER value landed after the
+// computation's snapshot: on a mismatch it skips, returning (false, nil), and
+// the next cycle recomputes from fresher rows (docs/SPEC.md "Periodic
+// reconcile" / "Window C"). The compare runs inside the {id}-shard CAS with the
+// entry in the read-set, so a write landing between the compare and the commit
+// conflicts, and the re-run closure re-compares against the new value and skips.
 func (r *ShaleRepo) guardedPutIndexEntry(key, expected []byte, present bool, row any) (bool, error) {
 	if r.testHookGuardedIndexWrite != nil {
 		if err := r.testHookGuardedIndexWrite(key); err != nil {
@@ -542,18 +482,17 @@ func (r *ShaleRepo) guardedPutIndexEntry(key, expected []byte, present bool, row
 	return true, nil
 }
 
-// guardedDeleteIndexEntry drops the enumeration entry at key ONLY IF it
-// still holds expected - the payload the pass's snapshot read. It is the
-// delete sibling of guardedPutIndexEntry, closing the orphan prune's
-// TOCTOU: the prune confirms the authoritative row is gone/failed and THEN
-// deletes, and a same-slug delete-then-redeploy landing its fresh row +
-// entry in that window must not have the FRESH entry dropped. A changed
-// value skips, returning (false, nil) - the redeploy's entry survives, and
-// the stale entry (if the skip kept one) lingers at most one more pass; an
-// already-gone entry is an idempotent no-op (docs/SPEC.md, the
-// reconciler's prune). The compare runs inside the {id}-shard CAS with the
-// entry in the read-set, so a write landing between the compare and the
-// commit conflicts and the re-run closure re-compares and skips.
+// guardedDeleteIndexEntry drops the enumeration entry at key ONLY IF it still
+// holds expected, the payload the pass's snapshot read. It is the delete
+// sibling of guardedPutIndexEntry, closing the orphan prune's TOCTOU: the prune
+// confirms the authoritative row is gone/failed and THEN deletes, and a
+// same-slug delete-then-redeploy landing its fresh row + entry in that window
+// must not have the FRESH entry dropped. A changed value skips, returning
+// (false, nil), so the redeploy's entry survives and a stale entry lingers at
+// most one more pass; an already-gone entry is an idempotent no-op. The compare
+// runs inside the {id}-shard CAS with the entry in the read-set, so a write
+// landing between the compare and the commit conflicts and the re-run closure
+// re-compares and skips.
 func (r *ShaleRepo) guardedDeleteIndexEntry(key, expected []byte) (bool, error) {
 	if r.testHookBeforeOrphanPruneDelete != nil {
 		r.testHookBeforeOrphanPruneDelete(key)

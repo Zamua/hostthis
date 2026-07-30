@@ -27,10 +27,9 @@ func newStack(t *testing.T) (*service.Upload, *service.Manage, *storage.PasteRep
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	repo := storage.NewPasteRepo(db)
 	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(blobs))
-	// Optimization A writes blobs in a background finalizer goroutine.
-	// Drain it before the t.TempDir() cleanup (registered above, so it
-	// runs LATER under LIFO) tries to RemoveAll the blob dir out from
-	// under an in-flight finalize.
+	// Blobs are written by a background finalizer goroutine. Drain it before
+	// the t.TempDir() cleanup (registered above, so LIFO runs it later)
+	// RemoveAll's the blob dir out from under an in-flight finalize.
 	t.Cleanup(upload.WaitFinalize)
 	manage := service.NewManage(repo, service.NewStandaloneBlobUnit(blobs))
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
@@ -39,12 +38,10 @@ func newStack(t *testing.T) (*service.Upload, *service.Manage, *storage.PasteRep
 	return upload, manage, repo
 }
 
-// htmlBody returns an HTML-detected payload of approximately `n` bytes
-// of HIGH-ENTROPY ASCII so zstd compression barely shrinks it. Quota
-// tests need predictable compressed sizes ≈ uncompressed sizes so the
-// 10 MiB compressed cap is hit with N-byte inputs as expected.
-//
-// Deterministic LCG so the test stays reproducible.
+// htmlBody returns an HTML-detected payload of about n bytes of HIGH-ENTROPY
+// ASCII, so zstd barely shrinks it and compressed size approximates n. Quota is
+// charged on compressed bytes, so an N-byte input must cost about N. The LCG
+// keeps it deterministic.
 func htmlBody(n int) []byte {
 	const head = "<!doctype html><body>"
 	if n <= len(head) {
@@ -60,10 +57,6 @@ func htmlBody(n int) []byte {
 	}
 	return out
 }
-
-// Quota tests are now sized against the 10 MiB compressed cap. htmlBody
-// produces high-entropy ASCII so compressed ≈ uncompressed (each byte
-// in maps to ~1 byte out), making N-byte input ≈ N-byte quota cost.
 
 func TestQuota_BlocksOversum(t *testing.T) {
 	withSmallQuota(t, 10<<20)
@@ -105,9 +98,8 @@ func TestQuota_VersionsCount(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	owner := "key:test-id"
 
-	// Upload a 6M paste, then update with another 6M. Each version
-	// row counts toward the identity's active bytes, so total = 12M >
-	// 10 MiB → second update should fail.
+	// Every version row counts toward the identity's active bytes, so a 6M
+	// paste updated with another 6M totals 12M and breaches a 10 MiB cap.
 	r, err := upload.Create(bytes.NewReader(htmlBody(6_000_000)), owner, "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -135,22 +127,19 @@ func TestQuota_PerIdentityIndependent(t *testing.T) {
 
 func TestQuota_PerPasteCapEqualsIdentityCap(t *testing.T) {
 	upload, _, _ := newStack(t)
-	// 12 MiB of high-entropy bytes → compresses to >10 MiB → rejected
-	// by the compressed-cap gate. Use a size comfortably above the cap
-	// to avoid flakiness from rounding.
+	// 12 MiB of high-entropy bytes still compresses to over the 10 MiB cap;
+	// the margin over the cap keeps the assertion clear of rounding.
 	if _, err := upload.Create(bytes.NewReader(htmlBody(12<<20)), "key:id", "", ""); !errors.Is(err, service.ErrCompressedTooLarge) {
 		t.Fatalf("oversize paste should reject with ErrCompressedTooLarge, got %v", err)
 	}
 }
 
 // withSmallQuota shrinks the per-identity quota for one test and restores it.
-//
-// Needed because the quota is 100 MiB while a single paste is capped at 10 MiB:
-// driving a real over-quota condition at the production value would mean
-// generating and compressing 100+ MiB of high-entropy data per test. Shrinking
-// the limit tests the same logic - the enforcement path is identical at any
-// value - without the cost. Tests that assert on the PRODUCTION number should
-// read domain.UserQuotaBytes instead of hardcoding it.
+// The production quota is 100 MiB while a single paste is capped at 10 MiB, so
+// breaching it honestly would mean compressing 100+ MiB of high-entropy data
+// per test; the enforcement path is identical at any cap value. A test
+// asserting on the PRODUCTION number must read domain.UserQuotaBytes rather
+// than hardcode it.
 func withSmallQuota(t *testing.T, n int) {
 	t.Helper()
 	orig := domain.UserQuotaBytes

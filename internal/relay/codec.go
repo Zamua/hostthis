@@ -6,57 +6,46 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// The relay's ONLY server-originated frames are two control envelopes the
-// client distinguishes by their "type" field. hostthis never stamps
-// anything onto a relayed PEER frame (those stay payload-opaque, fanned
-// out verbatim) - these envelopes carry only server-originated state: the
-// late-join snapshot and the live mirror of a durable PUT/DELETE.
+// The only server-originated frames, which the client distinguishes by their
+// "type" field. A relayed PEER frame is never stamped: those stay
+// payload-opaque and fan out verbatim.
 const (
-	// TypeSnapshot is the first frame a joining client receives: its full
-	// current room state, so a late joiner (including a reloaded page) is
-	// caught up before the live stream begins.
+	// TypeSnapshot is the first frame a joining client receives: the full
+	// current room state, so a late joiner is caught up before the live stream
+	// begins.
 	TypeSnapshot = "snapshot"
-	// TypePut is the live mirror of a committed durable PUT: a single key
-	// was set. The client applies it the same way it applied that key in
-	// the snapshot (last-writer-wins per key), so a stray re-delivery is
-	// idempotent.
+	// TypePut is the live mirror of a committed durable PUT. The client applies
+	// it exactly as it applied that key in the snapshot (last-writer-wins per
+	// key), so a stray re-delivery is idempotent.
 	TypePut = "put"
-	// TypeDelete is the live mirror of a committed durable DELETE: a single
-	// key was removed.
+	// TypeDelete is the live mirror of a committed durable DELETE.
 	TypeDelete = "delete"
 	// TypeReconnect is the drain hint (SPEC "Drain hint:
-	// reconnect-before-shutdown"): broadcast once to every local connection
-	// the moment the process receives its termination signal, BEFORE the
-	// final close, so a client acting on it re-homes (with small random
-	// jitter) while its old socket still works. It carries NO seq - it is
-	// not a room mutation - and it is an optimization, never load-bearing: a
-	// client that ignores it is closed at actual shutdown and heals through
-	// the normal reconnect + snapshot + splice path.
+	// reconnect-before-shutdown"), broadcast to every local connection on the
+	// termination signal and BEFORE the final close, so a client acting on it
+	// re-homes while its old socket still works. It carries no seq, being no
+	// room mutation, and is never load-bearing: a client that ignores it is
+	// closed at shutdown and heals through reconnect + snapshot + splice.
 	TypeReconnect = "reconnect"
 )
 
-// snapshotEnvelope is the late-join control frame. Its State field is the
-// SAME key -> value JSON object GET /api/rooms/<uuid> returns, so the same
-// client code that loads state on a cold HTTP start consumes the snapshot
-// unchanged - only the envelope's "type" tells the client this arrived
-// over the relay rather than over HTTP. Seq is the EXACT per-room
-// sequence the state reflects: the client initializes lastSeq = Seq and
-// discards any durable frame with seq <= lastSeq (the splice contract,
-// see SPEC "The client splice contract").
+// snapshotEnvelope is the late-join control frame. State is the SAME key ->
+// value JSON object GET /api/rooms/<uuid> returns, so the client code that
+// loads state on a cold HTTP start consumes a snapshot unchanged. Seq is the
+// exact per-room sequence that state reflects: the client sets lastSeq = Seq
+// and discards any durable frame with seq <= lastSeq (SPEC "The client splice
+// contract").
 type snapshotEnvelope struct {
 	Type  string                     `json:"type"`
 	Seq   uint64                     `json:"seq"`
 	State map[string]json.RawMessage `json:"state"`
 }
 
-// durableEnvelope is the live mirror of a committed durable mutation: a
-// PUT (Value set) or a DELETE (Value omitted, Type == TypeDelete). Key is
-// the room key that changed. Seq is the mutation's per-room sequence,
-// assigned durably at commit - dense (+1 per committed mutation), so a
-// subscriber orders by it, de-duplicates by it, and DETECTS a lost frame
-// by the hole it leaves. The client applies the frame as
-// last-writer-wins on that key, identical to how it applied the key in
-// the snapshot, after the seq discard/splice rule admits it.
+// durableEnvelope is the live mirror of a committed durable mutation: a PUT
+// (Value set) or a DELETE (Value omitted). Seq is the mutation's per-room
+// sequence, assigned durably at commit and DENSE (+1 per committed mutation),
+// so a subscriber orders by it, de-duplicates by it, and detects a lost frame
+// by the hole it leaves.
 type durableEnvelope struct {
 	Type  string          `json:"type"`
 	Seq   uint64          `json:"seq"`
@@ -64,10 +53,9 @@ type durableEnvelope struct {
 	Value json.RawMessage `json:"value,omitempty"`
 }
 
-// encodeSnapshot builds the late-join snapshot frame from a room KV. The
-// State object embeds each value via domain.RoomWireValue - the SAME
-// shared encoder the HTTP scan handler uses, byte-for-byte, so the
-// snapshot and a cold-start GET are interchangeable on the client.
+// encodeSnapshot builds the late-join snapshot frame from a room KV. Values go
+// through domain.RoomWireValue, the same encoder the HTTP scan handler uses, so
+// a snapshot and a cold-start GET are byte-for-byte interchangeable.
 func encodeSnapshot(kv domain.RoomKV) Frame {
 	state := make(map[string]json.RawMessage, kv.KeyCount())
 	for k, v := range kv.Values {
@@ -76,20 +64,18 @@ func encodeSnapshot(kv domain.RoomKV) Frame {
 	env := snapshotEnvelope{Type: TypeSnapshot, Seq: kv.Seq, State: state}
 	data, err := json.Marshal(env)
 	if err != nil {
-		// Unreachable: every value is valid raw JSON (RoomWireValue
-		// guarantees it). Fall back to an empty snapshot rather than panic.
+		// Unreachable: RoomWireValue guarantees every value is valid raw JSON.
+		// An empty snapshot beats a panic.
 		data = []byte(`{"type":"snapshot","seq":0,"state":{}}`)
 	}
 	return Frame{Binary: false, Data: data}
 }
 
-// EncodePut builds the live-mirror frame for a durable PUT of (key, val)
-// whose commit assigned the per-room sequence seq. The HTTP PUT handler's
-// commit closure (passed to Relay.CommitAndMirror) builds this frame AFTER
-// the durable write returns the assigned seq, so the frame carries the
-// exact position the write landed at in the room's order - the seq every
-// subscriber (local or on a peer pod) orders, de-duplicates, and
-// gap-detects by.
+// EncodePut builds the live-mirror frame for a durable PUT of (key, val) whose
+// commit assigned the per-room sequence seq. The commit closure passed to
+// Relay.CommitAndMirror builds the frame only AFTER the durable write returns
+// that seq, so it carries the exact position the write landed at in the room's
+// order.
 func EncodePut(seq uint64, key string, val []byte) Frame {
 	env := durableEnvelope{Type: TypePut, Seq: seq, Key: key, Value: domain.RoomWireValue(val)}
 	data, err := json.Marshal(env)
@@ -110,22 +96,21 @@ func EncodeDelete(seq uint64, key string) Frame {
 	return Frame{Binary: false, Data: data}
 }
 
-// encodeReconnect builds the drain-hint control frame. It is a fixed
-// envelope (no seq, no payload); see TypeReconnect.
+// encodeReconnect builds the drain-hint control frame: a fixed envelope with no
+// seq and no payload. See TypeReconnect.
 func encodeReconnect() Frame {
 	return Frame{Binary: false, Data: []byte(`{"type":"reconnect"}`)}
 }
 
-// MaxDurableFrameBytes bounds the largest frame EncodePut can produce for
-// a value of at most maxValueBytes. It is the size the peer receiver's
-// defense-in-depth cap must admit: domain.RoomWireValue encodes a
-// non-JSON value as a JSON string, and worst-case escaping (\u00XX per
-// control byte) inflates it up to 6x, plus the quotes and the envelope
-// (type, seq, key).
-// The client-socket cap (Limits.MaxMessageBytes) deliberately does NOT
-// apply here - it bounds ephemeral frames from untrusted client sockets,
-// while durable mirrors originate from the HTTP PUT path whose value cap
-// is several times larger.
+// MaxDurableFrameBytes bounds the largest frame EncodePut can produce for a
+// value of at most maxValueBytes, and is what the peer receiver's cap must
+// admit. RoomWireValue encodes a non-JSON value as a JSON string, and
+// worst-case escaping (\u00XX per control byte) inflates it up to 6x, plus
+// quotes and the envelope.
+//
+// The client-socket cap (Limits.MaxMessageBytes) deliberately does NOT apply:
+// it bounds ephemeral frames from untrusted client sockets, while durable
+// mirrors come from the HTTP PUT path, whose value cap is several times larger.
 func MaxDurableFrameBytes(maxValueBytes int) int64 {
 	const envelopeHeadroom = 4 << 10 // type + seq + escaped key + JSON syntax
 	return int64(6*maxValueBytes) + envelopeHeadroom

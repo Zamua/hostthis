@@ -2,25 +2,20 @@
 
 package storage_test
 
-// Confirm-step test for the shale backend.
+// Confirm-step tests for the shale backend.
 //
-// docs/SPEC.md "Scan-derived quota": InsertWithQuotaCheck commits the
-// authoritative {slug} write, then runs the confirm CAS (the value-bearing
-// identity_pastes index entry + first-seen) SYNCHRONOUSLY on the response
-// path - the entry is the quota's accounting record. This pins the
-// observable consequences:
-//
-//   - the paste is Get-readable immediately on return (the authoritative
-//     row exists, so the URL never 404s),
-//   - the bytes are counted immediately (the index entry the quota scan
-//     sums is written before the response returns),
-//   - the derived index entry (which backs ListByOwner / CountByOwner) is
-//     present after WaitPendingConfirms (a no-op drain today, kept as the
-//     seam in case a future write moves off the response path).
+// InsertWithQuotaCheck commits the authoritative {slug} write, then runs the
+// confirm CAS (the value-bearing identity_pastes entry + first-seen)
+// synchronously on the response path, because that entry is the quota's
+// accounting record (docs/SPEC.md "Scan-derived quota"). Pins the observable
+// consequences: the paste is Get-readable on return, so the URL never 404s;
+// its bytes are counted on return; and the derived entry backing ListByOwner /
+// CountByOwner is present after WaitPendingConfirms (a no-op drain, kept as the
+// seam should a write move off the response path).
 //
 //	go test -tags slatedb -run TestShaleDeferredConfirm ./internal/storage
 //
-// Skips cleanly unless MINIO_TEST_ENDPOINT is set.
+// Skips unless MINIO_TEST_ENDPOINT is set.
 
 import (
 	"context"
@@ -50,8 +45,7 @@ func TestShaleDeferredConfirm_ReadableImmediately_IndexAppearsAfterDrain(t *test
 		t.Fatalf("insert: %v", err)
 	}
 
-	// The authoritative paste row exists the instant Insert returns: Get
-	// resolves it (so a public URL never 404s) WITHOUT waiting on confirm.
+	// Get resolves without waiting on confirm, so a public URL never 404s.
 	got, err := repo.Get(p.Slug)
 	if err != nil {
 		t.Fatalf("Get immediately after insert (URL must not 404): %v", err)
@@ -60,17 +54,16 @@ func TestShaleDeferredConfirm_ReadableImmediately_IndexAppearsAfterDrain(t *test
 		t.Fatalf("Get round-trip mismatch: got %+v want slug=%q sha=%q size=%d", got, p.Slug, p.ContentSHA, p.Size)
 	}
 
-	// The bytes are counted the instant Insert returns: the index entry (the
-	// quota's accounting record - the scan sums its cached size) is written
-	// synchronously before the response.
+	// The bytes are counted the instant Insert returns: the index entry whose
+	// cached size the quota scan sums is written before the response.
 	if sum, err := repo.SumActiveBytesByOwner(owner, now); err != nil {
 		t.Fatalf("sum active bytes: %v", err)
 	} else if sum != p.Size {
 		t.Fatalf("active bytes immediately after insert = %d, want %d (reserve runs before the response)", sum, p.Size)
 	}
 
-	// Drain the deferred confirm: the derived index entry is now written, so
-	// the paste appears in the owner's list + count + first-seen.
+	// After the drain the derived entry is written, so the paste appears in
+	// the owner's list, count, and first-seen.
 	repo.WaitPendingConfirms()
 
 	if n, err := repo.CountByOwner(owner); err != nil {
@@ -92,14 +85,10 @@ func TestShaleDeferredConfirm_ReadableImmediately_IndexAppearsAfterDrain(t *test
 	}
 }
 
-// TestShaleDeferredConfirm_ReconcilerHealsLostConfirm pins that a LOST
-// deferred confirm (the goroutine never ran / crashed) is healed by the
-// reconciler: the missing identity_pastes index entry is rebuilt and the
-// leaked reservation marker is what the grace-windowed pass would later
-// drop. We model "confirm never ran" by inserting, draining, then dropping
-// the index entry the confirm wrote (the same end state a lost confirm
-// leaves: authoritative paste present, no index entry), and asserting the
-// reconciler rebuilds it.
+// TestShaleDeferredConfirm_ReconcilerHealsLostConfirm pins that a lost confirm
+// is healed: the reconciler rebuilds the missing identity_pastes entry. The
+// lost confirm is modeled by dropping the entry after a successful insert,
+// which leaves the same end state (authoritative paste present, no entry).
 func TestShaleDeferredConfirm_ReconcilerHealsLostConfirm(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -119,9 +108,8 @@ func TestShaleDeferredConfirm_ReconcilerHealsLostConfirm(t *testing.T) {
 	}
 	repo.WaitPendingConfirms()
 
-	// Model a confirm that never wrote its index entry: drop it. The
-	// authoritative paste still exists, exactly the state a crash between
-	// the authoritative write and the (deferred) confirm leaves.
+	// Drop the entry: the state a crash between the authoritative write and
+	// the confirm leaves.
 	if err := repo.DeleteRawForTest(storage.IdentityPasteKeyForTest(owner, p.Slug.String())); err != nil {
 		t.Fatalf("drop index entry to model lost confirm: %v", err)
 	}
@@ -131,8 +119,7 @@ func TestShaleDeferredConfirm_ReconcilerHealsLostConfirm(t *testing.T) {
 		t.Fatalf("post-drop count = %d, want 0 (index entry gone)", n)
 	}
 
-	// The reconciler rebuilds the missing index entry from the authoritative
-	// row, so the paste reappears in the owner's list.
+	// The rebuild is from the authoritative row.
 	if err := repo.ReconcileForTest(now); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}

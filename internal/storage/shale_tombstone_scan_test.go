@@ -7,10 +7,7 @@ package storage_test
 //
 // The tombstone is CONSTRUCTED rather than produced by Delete: shale only
 // tombstones at R>1, and the shared helper opens an R=1 cluster where Delete
-// removes the key outright. A Delete-based test would pass with or without the
-// skip and assert nothing.
-//
-//	go test -tags slatedb -run TestShaleTombstone ./internal/storage
+// removes the key outright, so a Delete-based test would assert nothing.
 
 import (
 	"os"
@@ -48,10 +45,8 @@ func TestShaleTombstone_DeletedRowIsInvisibleToScan(t *testing.T) {
 
 	stamp := cluster.Stamp{TimestampNanos: uint64(now.UnixNano()), NodeID: "node-1"}
 
-	// Version 1: LIVE, wrapped in an envelope as an R>1 write leaves it. Its
-	// presence is what distinguishes "the scan skipped the tombstone" from "the
-	// scan returned nothing at all" - the latter would satisfy a weaker
-	// assertion for entirely the wrong reason.
+	// Version 1: LIVE, enveloped as an R>1 write leaves it. Its presence is what
+	// keeps the tombstone assertion from passing vacuously on an empty scan.
 	liveVal, err := storage.LegacyVersionValueForTest(1, p.Kind, sha, int(p.Size), now, false)
 	if err != nil {
 		t.Fatalf("encode live version: %v", err)
@@ -64,10 +59,8 @@ func TestShaleTombstone_DeletedRowIsInvisibleToScan(t *testing.T) {
 	if len(tombstone) == 0 || tombstone[0] != 0xE0 {
 		t.Fatalf("test setup: expected an LWW envelope (magic 0xE0), got %#v", tombstone)
 	}
-	// Pin the two properties the whole test rests on, rather than assuming
-	// them: the constructed value really does decode to an empty payload, and
-	// it really does carry a stamp (a zero stamp would make it a BARE value,
-	// which is legitimately live legacy data and correctly not skipped).
+	// A zero stamp would make this a BARE value - legitimately live legacy data,
+	// correctly not skipped - so pin both the empty payload and the stamp.
 	env, derr := cluster.Decode(tombstone)
 	if derr != nil {
 		t.Fatalf("test setup: tombstone must decode: %v", derr)
@@ -81,7 +74,7 @@ func TestShaleTombstone_DeletedRowIsInvisibleToScan(t *testing.T) {
 	}
 	mustPutRaw(t, repo, storage.LegacyVersionKeyForTest(slug, 2), tombstone)
 
-	// ListVersions walks the version rows through the scan path.
+	// ListVersions is the vehicle: it walks the version rows through the scan path.
 	vers, err := repo.ListVersions(slug)
 	if err != nil {
 		t.Fatalf("ListVersions with a tombstoned version present: %v; a tombstone must be SKIPPED, "+

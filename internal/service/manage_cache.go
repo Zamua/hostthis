@@ -6,13 +6,10 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// PasteManager is the verb-level surface the SSH layer consumes.
-// *Manage implements it directly; CacheInvalidating wraps it to add
-// transparent CDN invalidation.
-//
-// Exposing this interface (rather than the concrete *Manage) is what lets
-// cache invalidation be a decorator the composition root layers on,
-// invisibly to callers and to the verb service itself.
+// PasteManager is the verb-level surface the SSH layer consumes. Exposing an
+// interface rather than the concrete *Manage is what lets cache invalidation be
+// a decorator the composition root layers on, invisible to callers and to the
+// verb service itself.
 type PasteManager interface {
 	List(owner string) ([]domain.Paste, error)
 	Show(slug domain.Slug, owner string) (domain.Paste, []byte, error)
@@ -26,33 +23,29 @@ type PasteManager interface {
 	Whoami(owner, subnet string) (WhoamiInfo, error)
 }
 
-// Compile-time assertion that the concrete verb service satisfies the
-// interface its decorator and callers depend on.
 var _ PasteManager = (*Manage)(nil)
 
-// CacheInvalidating decorates a PasteManager with CDN cache invalidation.
-// It delegates every verb to the inner manager and, after a SUCCESSFUL
-// mutation that changes the bytes served at a paste's public URL
-// (Update / Delete / Pin / Unpin), fires the purger for that slug.
+// CacheInvalidating decorates a PasteManager with CDN cache invalidation,
+// firing the purger after a SUCCESSFUL mutation that changes the bytes served
+// at a paste's public URL (Update / Delete / Pin / Unpin). Verbs that do NOT
+// change served bytes are delegated untouched through the embedded interface,
+// so no purge fires; that includes DeleteVersion, which is refused outright for
+// the currently-served version.
 //
-// This is what keeps cache invalidation transparent to the business
-// logic: the inner verb service has no CachePurger field and no purge
-// calls; invalidation is composed in here, at the edge. Verbs that do
-// NOT change served bytes - Rename, Versions, List, Show, Whoami, and
-// DeleteVersion (refused outright for the currently-served version) - are
-// delegated untouched via the embedded interface, so no purge fires.
+// The inner verb service holds no CachePurger and makes no purge calls: that is
+// the point of composing invalidation here at the edge.
 //
-// The purge is best-effort: PurgePaste errors are swallowed (the mutation
-// already succeeded on origin; the impl logs internally), so a transient
-// CDN issue never turns a successful update/delete into a failure.
+// The purge is best-effort. PurgePaste errors are swallowed (the mutation
+// already succeeded on origin, and the impl logs internally), so a transient
+// CDN issue never turns a successful update or delete into a failure.
 type CacheInvalidating struct {
 	PasteManager
 	purger CachePurger
 }
 
-// NewCacheInvalidating wraps inner so its mutating verbs also purge the
-// CDN. A nil purger means "no CDN in front": inner is returned unwrapped,
-// so the composition root can call this unconditionally.
+// NewCacheInvalidating wraps inner so its mutating verbs also purge the CDN. A
+// nil purger means no CDN in front and returns inner unwrapped, so the
+// composition root can call this unconditionally.
 func NewCacheInvalidating(inner PasteManager, purger CachePurger) PasteManager {
 	if purger == nil {
 		return inner

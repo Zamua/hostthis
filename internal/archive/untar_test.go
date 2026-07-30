@@ -15,8 +15,8 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// recordingSink captures every file SafeUntar hands it, computing the
-// SHA the same way the real blob sink does (over uncompressed bytes).
+// recordingSink captures every file Untar hands it, computing the SHA the same
+// way the real blob sink does (over uncompressed bytes).
 type recordingSink struct {
 	files map[string][]byte
 }
@@ -39,7 +39,6 @@ func (s *recordingSink) Store(p string, r io.Reader, _ int64) (string, int, erro
 	return hex.EncodeToString(sum[:]), len(body), nil
 }
 
-// tarEntry describes one entry to write into a test archive.
 type tarEntry struct {
 	name     string
 	body     string
@@ -47,8 +46,8 @@ type tarEntry struct {
 	linkname string
 }
 
-// makeGzipTar builds a gzip-tar from entries. typeflag 0 defaults to a
-// regular file.
+// makeGzipTar builds a gzip-tar from entries; typeflag 0 defaults to a regular
+// file.
 func makeGzipTar(t *testing.T, entries []tarEntry) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -182,8 +181,8 @@ func TestSafeUntar_RejectsBackslashTraversal(t *testing.T) {
 }
 
 func TestSafeUntar_AllowsDotSlashPrefix(t *testing.T) {
-	// "./index.html" is the common `tar czf - .` shape - must be accepted
-	// and clean to "index.html".
+	// "./index.html" is the common `tar czf - .` shape: accepted, and cleaned
+	// to "index.html".
 	arc := makeGzipTar(t, []tarEntry{{name: "./index.html", body: "<h1>ok</h1>"}})
 	man, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
 	if err != nil {
@@ -195,8 +194,8 @@ func TestSafeUntar_AllowsDotSlashPrefix(t *testing.T) {
 }
 
 func TestSafeUntar_DecompressionBombAbortsMidStream(t *testing.T) {
-	// One file far larger than the cap. The cap is enforced on the bytes
-	// as they stream, so this aborts long before the whole file inflates.
+	// One file far larger than the cap. The cap is enforced on the bytes as
+	// they stream, so this aborts long before the whole file inflates.
 	big := strings.Repeat("A", 4<<20) // 4 MiB
 	arc := makeGzipTar(t, []tarEntry{
 		{name: "index.html", body: "<h1>hi</h1>"},
@@ -238,7 +237,7 @@ func TestSafeUntar_FileCountCap(t *testing.T) {
 }
 
 func TestSafeUntar_RejectsNonGzip(t *testing.T) {
-	// Plain bytes, no gzip wrapper - SafeUntar must reject as unsupported.
+	// Plain bytes, no gzip wrapper: rejected as unsupported.
 	_, err := archive.Untar(strings.NewReader("not a gzip stream at all"), newRecordingSink(), int64(domain.UserQuotaBytes))
 	if !errors.Is(err, domain.ErrUnsupportedKind) {
 		t.Fatalf("non-gzip: got %v, want domain.ErrUnsupportedKind", err)

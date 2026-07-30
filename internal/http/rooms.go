@@ -15,43 +15,37 @@ import (
 	"github.com/Zamua/hostthis/internal/service"
 )
 
-// RoomService is the application-service surface the HTTP layer needs for
-// the /api/rooms endpoints. internal/service.Rooms satisfies it.
-// Optional: when nil, the /api/rooms prefix is not served (the metadata
-// backend has no room repo wired).
+// RoomService is the application-service surface the HTTP layer needs for the
+// /api/rooms endpoints. internal/service.Rooms satisfies it. Optional: when
+// nil the /api/rooms prefix is not served.
 type RoomService interface {
 	Create(appSlug domain.Slug, subnet string) (domain.Room, error)
 	Get(appSlug domain.Slug, id domain.RoomID, key string) ([]byte, error)
-	// Scan returns the namespace stamped with the exact per-room sequence
-	// its state reflects (RoomKV.Seq) - the relay's late-join snapshot fence.
+	// Scan returns the namespace stamped with the exact per-room sequence its
+	// state reflects: the relay's late-join snapshot fence.
 	Scan(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error)
-	// Put / Delete return the mutation's assigned per-room sequence, which
-	// the handlers stamp onto the live mirror frame (see SPEC.md "The wire
-	// format: seq on every durable frame").
+	// Put / Delete return the mutation's assigned per-room sequence, which the
+	// handlers stamp onto the live mirror frame (SPEC.md "The wire format: seq
+	// on every durable frame").
 	Put(appSlug domain.Slug, id domain.RoomID, key string, val []byte) (uint64, error)
 	Delete(appSlug domain.Slug, id domain.RoomID, key string) (uint64, error)
 }
 
-// roomAPIPrefix is the reserved path the rooms API lives under, on the
-// app's own subdomain. It is carved out of the site's path space: a
-// site's manifest lookup never serves a file here, so the API path and
-// the static-file path do not collide.
+// roomAPIPrefix is carved out of the site's path space on the app's own
+// subdomain: a site's manifest lookup never serves a file here, so the API
+// path and the static-file path cannot collide.
 const roomAPIPrefix = "/api/rooms"
 
-// roomMaxBodyBytes bounds a single PUT body. A value larger than the
-// whole-room cap can never fit (the domain CanPut rejects it), so we cap
-// the request body at the room byte cap + a small slack and let the
-// service layer surface the precise 413. Reading is bounded so a hostile
-// client cannot stream an unbounded body into memory.
+// roomMaxBodyBytes bounds a single PUT body so a hostile client cannot stream
+// an unbounded body into memory. A value this large is already over the
+// per-room cap, so the service layer surfaces the precise 413.
 const roomMaxBodyBytes = domain.MaxRoomValueBytes + 1
 
-// roomAPIPath reports whether reqPath addresses the rooms API and, if
-// so, returns the remainder after roomAPIPrefix. It matches the prefix
-// exactly ("/api/rooms" -> "") or as a path segment ("/api/rooms/<rest>"
-// -> "/<rest>"), but NOT a longer first segment like "/api/roomsX",
-// which is a normal site path. This keeps the carve-out tight: only the
-// reserved prefix is intercepted, everything else falls through to the
-// static-site / paste path.
+// roomAPIPath reports whether reqPath addresses the rooms API and returns the
+// remainder after roomAPIPrefix. It matches the prefix exactly or as a whole
+// path segment, but NOT a longer first segment like "/api/roomsX", which is a
+// normal site path. This keeps the carve-out tight: everything else falls
+// through to the static-site / paste path.
 func roomAPIPath(reqPath string) (rest string, ok bool) {
 	if reqPath == roomAPIPrefix {
 		return "", true
@@ -62,28 +56,22 @@ func roomAPIPath(reqPath string) (rest string, ok bool) {
 	return "", false
 }
 
-// handleRoomsAPI serves the /api/rooms surface for the app identified by
-// appSlug. apiPath is the request path with the roomAPIPrefix already
-// stripped (so "" / "/" is the collection, "/<uuid>" is a room,
-// "/<uuid>/<key>" is one value). Returns true once it has handled the
-// request; the caller must then return.
+// handleRoomsAPI serves the /api/rooms surface for appSlug. apiPath is the
+// request path with roomAPIPrefix stripped: "" / "/" is the collection,
+// "/<uuid>" is a room, "/<uuid>/<key>" is one value. Returns true once it has
+// handled the request; the caller must then return.
 //
-// The router calls this BEFORE the static-site lookup so the API prefix
-// is never shadowed by a manifest file. A request whose app slug owns a
-// site OR a live paste gets the rooms API (both are valid apps); room
-// CREATION additionally requires the slug to name a live app (see
-// createRoom's existence gate) so an unprovisioned slug 404s rather than
-// minting a fresh per-app budget.
+// The router calls this BEFORE the static-site lookup so a manifest file can
+// never shadow the API prefix. Any slug owning a site OR a live paste gets the
+// API; room CREATION additionally requires a live app (see createRoom).
 func (s *Server) handleRoomsAPI(w http.ResponseWriter, r *http.Request, appSlug domain.Slug, apiPath string) bool {
 	if s.Rooms == nil {
-		// Rooms not wired on this backend: 404 the whole prefix.
 		http.NotFound(w, r)
 		return true
 	}
 
 	rest := strings.TrimPrefix(apiPath, "/")
 
-	// Collection: POST /api/rooms -> create.
 	if rest == "" {
 		if r.Method != http.MethodPost {
 			roomMethodNotAllowed(w, http.MethodPost)
@@ -104,15 +92,14 @@ func (s *Server) handleRoomsAPI(w http.ResponseWriter, r *http.Request, appSlug 
 
 	id, err := domain.ParseRoomID(idStr)
 	if err != nil {
-		// A malformed UUID is a 400 - "this is not a room id at all" -
-		// distinct from the 404 a well-formed-but-nonexistent room gets.
-		// Neither confirms the existence of any specific room.
+		// A malformed UUID is a 400 ("not a room id at all"), distinct from
+		// the 404 a well-formed-but-nonexistent room gets. Neither confirms
+		// the existence of any specific room.
 		http.Error(w, "malformed room id\n", http.StatusBadRequest)
 		return true
 	}
 
 	if key == "" {
-		// Whole-room scan.
 		if r.Method != http.MethodGet {
 			roomMethodNotAllowed(w, http.MethodGet)
 			return true
@@ -121,16 +108,14 @@ func (s *Server) handleRoomsAPI(w http.ResponseWriter, r *http.Request, appSlug 
 		return true
 	}
 
-	// Reserved /<uuid>/ws path: the real-time relay upgrade. "ws" is the
-	// one key the KV verbs do not serve as data, so it is carved out here
-	// BEFORE the value verbs. A non-Upgrade GET to this path is refused by
-	// websocket.Accept (a 426/400); the KV value verbs never see it.
+	// "ws" is the one key the KV verbs do not serve as data: it is the
+	// real-time relay upgrade, carved out BEFORE the value verbs so they never
+	// see it. A non-Upgrade GET here is refused by websocket.Accept.
 	if key == wsKey {
 		s.handleRoomWS(w, r, appSlug, id)
 		return true
 	}
 
-	// Single value verbs.
 	switch r.Method {
 	case http.MethodGet:
 		s.getRoomValue(w, r, appSlug, id, key)
@@ -145,13 +130,11 @@ func (s *Server) handleRoomsAPI(w http.ResponseWriter, r *http.Request, appSlug 
 }
 
 func (s *Server) createRoom(w http.ResponseWriter, r *http.Request, appSlug domain.Slug) {
-	// The slug must name a LIVE app (a non-expired site or paste) before a
-	// room can be created under it. Without this, any well-formed 8-char
-	// slug (~10^12 of them) could host rooms, each getting its own
-	// per-app creation + byte budget - so an attacker rotating slugs would
-	// defeat both per-app caps. Tying creation to an operator-provisioned
-	// app bounds the per-app caps to a finite set. An unknown slug 404s,
-	// the same existence-not-leaked shape a missing room gets.
+	// The slug must name a LIVE app before a room can be created under it.
+	// Without this, any well-formed 8-char slug (~10^12 of them) could host
+	// rooms, each with its own per-app creation and byte budget, so an
+	// attacker rotating slugs would defeat both per-app caps. An unknown slug
+	// 404s, the same existence-not-leaked shape a missing room gets.
 	if !s.appExists(appSlug) {
 		http.NotFound(w, r)
 		return
@@ -169,12 +152,10 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request, appSlug doma
 	}{ID: room.ID.String()})
 }
 
-// appExists reports whether appSlug names a LIVE (non-expired) site or
-// paste - the existence requirement room creation rides on. A read error
-// or a not-found from either reader is "no such app." An expired site /
-// paste is treated as gone (the same line the read handlers draw). When
-// neither reader is wired, no app can be resolved, so creation is refused
-// (404) rather than allowed unbounded.
+// appExists reports whether appSlug names a LIVE (non-expired) site or paste.
+// A read error, a not-found, or an expired record is "no such app". With
+// neither reader wired nothing resolves, so creation is refused rather than
+// allowed unbounded.
 func (s *Server) appExists(appSlug domain.Slug) bool {
 	now := s.nowOrTime()
 	if s.Sites != nil {
@@ -196,10 +177,8 @@ func (s *Server) scanRoom(w http.ResponseWriter, r *http.Request, appSlug domain
 		s.writeRoomError(w, r, err)
 		return
 	}
-	// Encode the whole namespace as one JSON object: key -> value, with
-	// each value embedded as raw JSON when it parses as JSON, else as a
-	// JSON string of the verbatim bytes. The app loads full state in one
-	// request on join.
+	// One JSON object, key -> value, each value embedded as raw JSON when it
+	// parses as JSON, else as a JSON string of the verbatim bytes.
 	out := make(map[string]json.RawMessage, kv.KeyCount())
 	for k, v := range kv.Values {
 		out[k] = domain.RoomWireValue(v)
@@ -219,10 +198,9 @@ func (s *Server) getRoomValue(w http.ResponseWriter, r *http.Request, appSlug do
 		s.writeRoomError(w, r, err)
 		return
 	}
-	// Conservative content type: application/json only when the stored
-	// bytes are recognizably JSON, else application/octet-stream so an
-	// app's opaque bytes are never mislabeled as something a browser
-	// would execute.
+	// application/json only when the stored bytes are recognizably JSON, else
+	// application/octet-stream, so an app's opaque bytes are never mislabeled
+	// as something a browser would execute.
 	w.Header().Set("Cache-Control", "no-store")
 	if domain.RoomValueIsJSON(val) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -237,26 +215,19 @@ func (s *Server) putRoomValue(w http.ResponseWriter, r *http.Request, appSlug do
 		http.Error(w, "invalid key\n", http.StatusBadRequest)
 		return
 	}
-	// Bound the body. ReadAll on a capped reader returns at most
-	// roomMaxBodyBytes; a body at exactly the limit+1 is over the
-	// per-room cap and the service layer 413s it.
 	body, err := io.ReadAll(io.LimitReader(r.Body, roomMaxBodyBytes))
 	if err != nil {
 		http.Error(w, "read body\n", http.StatusBadRequest)
 		return
 	}
-	// Commit the durable write, then mirror it to the room's live relay hub
-	// and the peer pods. The mirror frame is built INSIDE the commit
-	// callback because it carries the per-room sequence the durable write
-	// assigns (SPEC.md "The wire format: seq on every durable frame"); that
-	// sequence - not any lock - is what keeps a join racing this PUT from
-	// double-applying or missing it (the client discards frames with
-	// seq <= its snapshot's S; see SPEC.md "Persistence and late-join").
-	// The commit runs with NO relay lock held, so a slow storage write
-	// never stalls the room's live fan-out. The relay never PERSISTS a
-	// frame; the mirror is the live fan-out of a change that commits
-	// through the one cap-checked PutValue path. With no relay (relay
-	// disabled on this backend), the commit runs on its own.
+	// The mirror frame is built INSIDE the commit callback because it carries
+	// the per-room sequence the durable write assigns. That sequence, not any
+	// lock, is what keeps a join racing this PUT from double-applying or
+	// missing it: the client discards frames with seq <= its snapshot's
+	// (SPEC.md "Persistence and late-join"). The commit runs with NO relay
+	// lock held, so a slow storage write never stalls the live fan-out. The
+	// relay never PERSISTS a frame; every change commits through the one
+	// cap-checked PutValue path.
 	if s.Relay != nil {
 		err = s.Relay.CommitAndMirror(relay.RoomKey{App: appSlug, ID: id}, func() (relay.Frame, error) {
 			seq, perr := s.Rooms.Put(appSlug, id, key, body)
@@ -280,11 +251,8 @@ func (s *Server) deleteRoomValue(w http.ResponseWriter, r *http.Request, appSlug
 		http.Error(w, "invalid key\n", http.StatusBadRequest)
 		return
 	}
-	// Commit the durable delete, then mirror it to the room's live relay
-	// hub and the peer pods (see putRoomValue for why the frame is built
-	// inside the callback: it carries the assigned seq, which is what makes
-	// a racing join correct - no lock is held across the commit). A nil
-	// relay runs the commit on its own.
+	// See putRoomValue for why the frame is built inside the callback: it
+	// carries the assigned seq, which is what makes a racing join correct.
 	var err error
 	if s.Relay != nil {
 		err = s.Relay.CommitAndMirror(relay.RoomKey{App: appSlug, ID: id}, func() (relay.Frame, error) {
@@ -304,10 +272,9 @@ func (s *Server) deleteRoomValue(w http.ResponseWriter, r *http.Request, appSlug
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// writeRoomError maps the service-layer room sentinels to status codes.
-// A not-found (room OR key) is 404 - the existence-not-leaked shape; a
-// rate-limit is 429 with Retry-After; a per-room cap is 413; a per-app
-// aggregate is 507.
+// writeRoomError maps the service-layer room sentinels to status codes: a
+// not-found (room OR key) is the existence-not-leaked 404, a rate limit is 429
+// with Retry-After, a per-room cap is 413, a per-app aggregate is 507.
 func (s *Server) writeRoomError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, service.ErrRoomNotFound):
@@ -334,42 +301,29 @@ func roomMethodNotAllowed(w http.ResponseWriter, allowed ...string) {
 	http.Error(w, "method not allowed\n", http.StatusMethodNotAllowed)
 }
 
-// trustXFFEnv reports whether the operator has opted into trusting the
-// X-Forwarded-For header for client-IP derivation. Read fresh from the
-// environment so tests can flip it per-case via t.Setenv. Mirrors the SSH
-// side's HOSTTHIS_SSH_PROXY_PROTOCOL discipline: a client-supplied header
-// is NEVER trusted by default, only when an operator behind a reverse
-// proxy explicitly enables it.
+// trustXFFEnv reports whether the operator has opted into trusting
+// X-Forwarded-For for client-IP derivation. Read fresh from the environment so
+// tests can flip it per case. A client-supplied header is NEVER trusted by
+// default, only when an operator behind a reverse proxy enables it.
 func trustXFFEnv() bool {
 	return strings.EqualFold(os.Getenv("HOSTTHIS_HTTP_TRUST_XFF"), "true")
 }
 
-// clientSubnet derives the canonical /24 (IPv4) or /48 (IPv6) subnet of
-// the requester for the per-IP room-creation rate limit, mirroring the
-// shape the SSH Sybil gate uses.
+// clientSubnet derives the canonical /24 (IPv4) or /48 (IPv6) subnet of the
+// requester for the per-IP room-creation rate limit.
 //
-// By DEFAULT the address comes from the TCP RemoteAddr only - a
-// client-supplied X-Forwarded-For is ignored. Trusting XFF by default
-// would be a rate-limit bypass: an attacker could set a fresh
-// X-Forwarded-For per POST and land in a new per-IP bucket each time,
-// exactly the inconsistency the SSH Sybil gate avoids by using only the
-// real RemoteAddr (or an env-gated PROXY-protocol header).
+// By DEFAULT the address comes from the TCP RemoteAddr only. Trusting
+// X-Forwarded-For by default would be a rate-limit bypass: an attacker could
+// set a fresh value per POST and land in a new per-IP bucket each time.
 //
-// When the operator sets HOSTTHIS_HTTP_TRUST_XFF=true (because hostthis
-// sits behind a reverse proxy that appends the real client IP), the
-// RIGHT-MOST X-Forwarded-For value is used - the hop the trusted proxy
-// itself recorded, which the client cannot forge past the proxy - not the
-// left-most value, which is fully attacker-controlled. An unparseable
-// address becomes the stable "unknown" bucket rather than crashing.
+// With HOSTTHIS_HTTP_TRUST_XFF=true the RIGHT-MOST X-Forwarded-For value is
+// used: the hop the trusted proxy itself recorded, which the client cannot
+// forge past the proxy. The left-most value is fully attacker-controlled. An
+// unparseable address becomes the stable "unknown" bucket.
 func clientSubnet(r *http.Request) string {
 	host := ""
 	if trustXFFEnv() {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			// Take the RIGHT-MOST hop: behind a trusted proxy, the proxy
-			// appends the real client IP as the last entry, so the right-most
-			// value is the proxy's own view of the client. The left-most
-			// entries are whatever the client chose to send and must not be
-			// trusted.
 			parts := strings.Split(xff, ",")
 			host = strings.TrimSpace(parts[len(parts)-1])
 		}
@@ -386,9 +340,8 @@ func clientSubnet(r *http.Request) string {
 	return ipSubnet(ip)
 }
 
-// ipSubnet returns the canonical subnet string. IPv4 -> "/24", IPv6 ->
-// "/48". A nil IP becomes "unknown" so the rate limit treats it as one
-// stable bucket. Same derivation the SSH Sybil gate uses.
+// ipSubnet returns the canonical subnet string: IPv4 -> "/24", IPv6 -> "/48".
+// A nil IP becomes "unknown" so the rate limit treats it as one stable bucket.
 func ipSubnet(ip net.IP) string {
 	if ip == nil {
 		return "unknown"

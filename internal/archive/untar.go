@@ -1,9 +1,6 @@
-// Package archive is the gzip-tar adapter for site uploads.
-//
-// It owns the codec and nothing else. Every security guard lives in the domain,
-// because none of them is about tar. Exists so the domain need not import
-// archive/tar and compress/gzip: a wire format is a mechanism the domain has no
-// business knowing.
+// Package archive is the gzip-tar adapter for site uploads. It owns the codec
+// and nothing else: every security guard lives in the domain, which stays free
+// of archive/tar and compress/gzip.
 package archive
 
 import (
@@ -17,12 +14,10 @@ import (
 )
 
 // Untar streams a gzip-tar archive from src, applying the domain's guards to
-// every entry.
+// every entry. quotaBudget is the identity's remaining quota in bytes.
 //
-// quotaBudget is the identity's remaining quota in bytes.
-//
-// No durable I/O of its own. On error the caller persists nothing; blobs the
-// sink already wrote are content-addressed and GC'd if unreferenced.
+// No durable I/O of its own: on error the caller persists nothing, and blobs
+// the sink already wrote are content-addressed and GC'd if unreferenced.
 func Untar(src io.Reader, sink domain.FileSink, quotaBudget int64) (domain.Manifest, error) {
 	ex := domain.NewSiteExtractor(quotaBudget)
 
@@ -42,7 +37,7 @@ func Untar(src io.Reader, sink domain.FileSink, quotaBudget int64) (domain.Manif
 		if err != nil {
 			return domain.Manifest{}, fmt.Errorf("%w: corrupt tar: %v", domain.ErrUnsupportedKind, err)
 		}
-		// tr reads the current entry and is valid only until the next Next().
+		// tr is valid only until the next Next().
 		if err := ex.Add(entryOf(hdr), tr, sink); err != nil {
 			return domain.Manifest{}, err
 		}
@@ -51,15 +46,13 @@ func Untar(src io.Reader, sink domain.FileSink, quotaBudget int64) (domain.Manif
 }
 
 // legacyTypeRegA is tar's pre-1.11 alias for a regular file. Go's reader
-// normalises it to TypeReg, so this arm is defensive. Spelled as the raw byte
+// normalises it to TypeReg, so the arm is defensive. Spelled as the raw byte
 // because the named constant is deprecated.
 const legacyTypeRegA = '\x00'
 
-// entryOf maps a tar header onto the domain's format-neutral entry.
-//
-// Deliberately closed: anything not a plain file or directory becomes
-// EntryOther, which the domain rejects. Listing allowed rather than disallowed
-// types keeps an exotic type flag from defaulting into "allowed".
+// entryOf maps a tar header onto the domain's format-neutral entry. The switch
+// lists ALLOWED types only, so an exotic type flag falls through to EntryOther
+// (which the domain rejects) instead of defaulting into "allowed".
 func entryOf(hdr *tar.Header) domain.ArchiveEntry {
 	kind := domain.EntryOther
 	switch hdr.Typeflag {

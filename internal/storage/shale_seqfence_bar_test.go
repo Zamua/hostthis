@@ -4,25 +4,21 @@ package storage_test
 
 import "testing"
 
-// shaleRoomFenceReplicationBar is the replication factor the ScanRoom seq
-// fence is known airtight at (see the REPLICATION BAR comment on
-// ShaleRepo.ScanRoom): R=1 is single-owner, R=2 acks a write only once
-// EVERY replica holds it (write bar 2/2), so any member a fence-bracketed
-// read lands on is complete. R >= 3 acks on a quorum, and a read-one union
-// scan served mid-handoff by a member outside some write's ack set could
-// miss a mutation both fence reads agree on - an undetectable hole (S
-// stamped high). The fence must be revisited before crossing this bar.
+// shaleRoomFenceReplicationBar is the replication factor the ScanRoom seq fence
+// is sound at (see the REPLICATION BAR comment on ShaleRepo.ScanRoom): R=1 is
+// single-owner and R=2 acks a write only once EVERY replica holds it, so any
+// member a fence-bracketed read lands on is complete. R >= 3 acks on a quorum,
+// and a read-one union scan served mid-handoff by a member outside some write's
+// ack set could miss a mutation both fence reads agree on: an undetectable hole
+// with S stamped high.
 const shaleRoomFenceReplicationBar = 2
 
-// TestShaleRoomSeqFence_ReplicationBar documents the ScanRoom seq fence's
-// replication bar and pins that the fence conformance evidence (the
-// Rooms/Seq* subtests of TestConformance_Shale, which run over
-// uniqueShaleConfig-shaped single-node clusters) is collected AT OR BELOW
-// it. It is a config-level assertion, deliberately cheap: no cluster is
-// opened and no MinIO is needed, so it always runs under -tags slatedb.
-// If the test fixtures ever move past R=2, this fails and forces the
-// fence rework (quorum union scan, or scan + fence reads bracketed on one
-// member set) instead of silently shipping an unsound S.
+// TestShaleRoomSeqFence_ReplicationBar pins that the fence conformance evidence
+// (the Rooms/Seq* subtests of TestConformance_Shale) is collected at or below
+// that bar, so fixtures moving past R=2 force the fence rework (quorum union
+// scan, or scan + fence reads bracketed on one member set) instead of silently
+// shipping an unsound S. Config-level and deliberately cheap: no cluster is
+// opened and no MinIO is needed.
 func TestShaleRoomSeqFence_ReplicationBar(t *testing.T) {
 	cfg := uniqueShaleConfig("http://unused.invalid:9000") // config only; nothing is opened
 	if cfg.ReplicationFactor > shaleRoomFenceReplicationBar {

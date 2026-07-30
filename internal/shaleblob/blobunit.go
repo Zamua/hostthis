@@ -3,30 +3,15 @@
 // cluster's transactional blob plane so a staged blob's pointer co-commits with
 // the metadata on the owning {slug} shard.
 //
+// Staged bytes stay reader-invisible until Commit binds the pointer, so there
+// is no pending window on this path: the paste commits READY directly and the
+// pending/finalizer model stays on the standalone path.
+//
 // Its own package because it depends on BOTH service and storage: service
-// imports storage for error sentinels, so storage cannot import service, and
-// this breaks the cycle. Selected for a shale backend whose repo has a blob
-// store configured.
+// imports storage for error sentinels, so storage cannot import service.
 //
 // Design: docs/design/shale-blobs-phase3.md, docs/SPEC.md "Shale-collocated
 // blobs".
-//
-// The seam mapping, against the standalone path:
-//
-//   - Stage streams bytes to the final unit-keyed object OUTSIDE any
-//     transaction; they stay reader-invisible until Commit binds the pointer.
-//   - Commit stashes the staged refs by slug and runs the repo's metadata
-//     write, which binds them inside the authoritative {slug} transaction. The
-//     pointer co-commits with the row in one CAS, so there is no pending
-//     window and the paste commits READY directly. The pending/finalizer model
-//     collapses here and stays on the standalone path.
-//   - Read resolves the blob id and wraps the same magic-peek + zstd decode the
-//     standalone reader uses. ctx is tied to the reader's Close, since the
-//     stream is lazy and ctx MUST outlive it.
-//   - UnbindOnDelete is a no-op: the unbind is folded into the metadata-delete
-//     transaction, so the post-delete hook has nothing left to do.
-//
-// Needs -tags slatedb.
 
 //go:build slatedb
 
@@ -46,8 +31,6 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// bytesReader is a tiny alias for bytes.NewReader to keep the Stage call sites
-// readable.
 func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
 
 // Unit adapts a blob-capable ShaleRepo to the service.BlobUnit seam.
@@ -55,9 +38,9 @@ type Unit struct {
 	repo *storage.ShaleRepo
 }
 
-// New builds the transactional shale-blob seam over repo. repo MUST have a blob
-// store configured (repo.HasBlobPlane()); New returns an error otherwise,
-// surfacing the wiring mistake at construction rather than at the first Stage.
+// New builds the transactional shale-blob seam over repo, which MUST have a
+// blob store configured. Erroring here surfaces the wiring mistake at
+// construction rather than at the first Stage.
 func New(repo *storage.ShaleRepo) (*Unit, error) {
 	if repo == nil || !repo.HasBlobPlane() {
 		return nil, errors.New("shaleblob: New requires a ShaleRepo with a configured blob store (cfg.BlobStore)")
@@ -65,10 +48,9 @@ func New(repo *storage.ShaleRepo) (*Unit, error) {
 	return &Unit{repo: repo}, nil
 }
 
-// Stage stages the already magic+zstd-encoded paste/version body and returns a
-// handle carrying the staged cluster.BlobRef. The content sha is carried on the
-// ref so the integrity hash lands in the persisted blob.Pointer (and the site
-// path can rebuild its sha -> blob-id side-table).
+// Stage stages an already magic+zstd-encoded paste/version body. The content
+// sha rides the ref so the integrity hash lands in the persisted blob.Pointer
+// and the site path can rebuild its sha -> blob-id side-table.
 func (u *Unit) Stage(ctx context.Context, slug, sha string, body []byte) (service.BlobHandle, error) {
 	ref, err := u.repo.StageBlobStream(ctx, u.repo.RouteKeyForSlug(slug), bytesReader(body), int64(len(body)), sha)
 	if err != nil {
@@ -77,14 +59,11 @@ func (u *Unit) Stage(ctx context.Context, slug, sha string, body []byte) (servic
 	return service.BlobHandle{Slug: slug, SHA: sha, Ref: ref}, nil
 }
 
-// StageStream stages a site-deploy file. The sink hands UNCOMPRESSED bytes
-// (matching the standalone BlobStore.Put contract), but BlobKV.StageBlob streams
-// verbatim and does NOT compress, so the repo's stage path encodes the body
-// into the `magic + zstd(bytes)` at-rest format first (the SAME format the
-// paste path and the standalone path produce), keeping the read decode uniform.
-// The provided size (uncompressed) is unused; the staged size is the encoded
-// length, computed inside StageBlobStream after encoding. size is accepted to
-// satisfy the seam.
+// StageStream stages a site-deploy file. The sink hands UNCOMPRESSED bytes but
+// BlobKV.StageBlob streams verbatim, so the body is encoded into the
+// `magic + zstd(bytes)` at-rest format here, keeping the read decode uniform
+// with the paste and standalone paths. size is ignored (the staged length is
+// the encoded one) and accepted only to satisfy the seam.
 func (u *Unit) StageStream(ctx context.Context, slug, sha string, r io.Reader, _ int64) (service.BlobHandle, error) {
 	body, err := storage.EncodeCompressedBody(r)
 	if err != nil {
@@ -97,20 +76,16 @@ func (u *Unit) StageStream(ctx context.Context, slug, sha string, r io.Reader, _
 	return service.BlobHandle{Slug: slug, SHA: sha, Ref: ref}, nil
 }
 
-// Commit carries the staged refs on a PER-CALL child context and runs the
-// repo's metadata write under it; the authoritative {slug} write reads the refs
-// off that context and binds them in the same transaction the row commits in.
-// Because the refs ride the context (not a shared per-repo stash keyed by slug),
-// two concurrent same-slug Commits each bind their OWN blobs - there is no
-// window where one call's refs clobber or are clobbered by another's. metaWrite
-// returns the slug-collision / quota error verbatim, so the caller's retry
-// switch is unchanged. On a metaWrite error nothing is bound (the authoritative
-// transaction committed both the row and the binds or neither), and any
+// Commit carries the staged refs on a PER-CALL child context and runs metaWrite
+// under it; the authoritative {slug} write reads them off that context and
+// binds them in the transaction the row commits in. Riding the context rather
+// than a per-repo stash keyed by slug is what lets two concurrent same-slug
+// Commits each bind their OWN blobs. metaWrite's error surfaces verbatim, and
+// on error nothing is bound (row and binds commit together or not at all) so
 // staged-but-unbound objects age out via SweepOrphans.
 //
-// The caller's metaWrite closure MUST thread the context it is handed into the
-// repo's metadata-write method (the seam contract); passing a different context
-// drops the binds.
+// The metaWrite closure MUST thread the context it is handed into the repo's
+// metadata-write method; passing a different one silently drops the binds.
 func (u *Unit) Commit(ctx context.Context, handles []service.BlobHandle, metaWrite func(context.Context) error) error {
 	if len(handles) == 0 {
 		return metaWrite(ctx)
@@ -126,13 +101,11 @@ func (u *Unit) Commit(ctx context.Context, handles []service.BlobHandle, metaWri
 	return metaWrite(storage.WithPendingBinds(ctx, refs))
 }
 
-// Read resolves the blob id for (slug, sha) from the metadata, streams the
-// stored (compressed) object via GetBlob, and wraps it in the magic-peek + zstd
-// decode so the caller sees decompressed bytes (identical contract to the
-// standalone GetReader). ctx is tied to the returned reader's Close: GetBlob
-// streams lazily and its ctx must outlive the reader, so Close cancels it after
-// the body has been piped downstream. The int64 is the inner (stored) length,
-// which the serve path does not use for Content-Length (it matches GetReader).
+// Read streams the stored object for (slug, sha) through the magic-peek + zstd
+// decode, so the caller sees decompressed bytes (same contract as the
+// standalone GetReader). ctx is tied to the returned reader's Close because
+// GetBlob streams lazily and its ctx must outlive the reader. The int64 is the
+// inner stored length, not a Content-Length.
 func (u *Unit) Read(ctx context.Context, slug, sha string) (io.ReadCloser, int64, error) {
 	blobID, err := u.repo.ResolveBlobID(domain.Slug(slug), sha)
 	if err != nil {
@@ -141,8 +114,6 @@ func (u *Unit) Read(ctx context.Context, slug, sha string) (io.ReadCloser, int64
 		}
 		return nil, 0, err
 	}
-	// Scope a child ctx to the reader's lifetime: GetBlob's stream is lazy, so
-	// the ctx must stay live until Close (not just until Read returns).
 	streamCtx, cancel := context.WithCancel(ctx)
 	rc, size, err := u.repo.GetBlobStream(streamCtx, u.repo.RouteKeyForSlug(slug), blobID)
 	if err != nil {
@@ -160,8 +131,8 @@ func (u *Unit) Read(ctx context.Context, slug, sha string) (io.ReadCloser, int64
 	return &ctxCancelReadCloser{rc: dec, cancel: cancel}, size, nil
 }
 
-// ReadAll buffers the full decompressed blob for (slug, sha). Used by the
-// markdown render + owner Show paths that need the whole document at once.
+// ReadAll buffers the full decompressed blob, for the paths that need the
+// whole document at once.
 func (u *Unit) ReadAll(ctx context.Context, slug, sha string) ([]byte, error) {
 	rc, _, err := u.Read(ctx, slug, sha)
 	if err != nil {
@@ -173,24 +144,20 @@ func (u *Unit) ReadAll(ctx context.Context, slug, sha string) ([]byte, error) {
 
 // UnbindOnDelete is a no-op: the unbind is folded into the metadata-delete
 // transaction (ShaleRepo.Delete / DeleteVersion / DeleteSite), so the bytes go
-// unreferenced atomically with the row removal and there is nothing for the
-// seam's post-delete hook to do.
+// unreferenced atomically with the row removal.
 func (u *Unit) UnbindOnDelete(_ context.Context, _ string, _ []string) error {
 	return nil
 }
 
-// IsTransactional is true: a staged blob's pointer co-commits with the metadata
-// in one {slug}-shard transaction (BindBlob inside the authoritative write), so
-// a Stage->Commit makes the row and its bytes visible together. Upload.Create
-// uses this to commit a paste READY directly (no pending row, no finalizer); the
-// pending/finalizer model is collapsed on this path (docs/SPEC.md
-// "Pending-collapse: a shale-collocated paste commits READY directly").
+// IsTransactional is true: BindBlob runs inside the authoritative {slug} write,
+// so a Stage->Commit makes the row and its bytes visible together. Upload.Create
+// keys off this to commit a paste READY directly, with no pending row and no
+// finalizer (docs/SPEC.md "Pending-collapse: a shale-collocated paste commits
+// READY directly").
 func (u *Unit) IsTransactional() bool { return true }
 
-// ctxCancelReadCloser ties a context cancel to the reader's Close, so the
-// GetBlob stream's bound ctx is canceled exactly when the caller is done piping
-// the bytes (the LIFETIME contract on BlobKV.GetBlob). Close closes the inner
-// reader first, then cancels.
+// ctxCancelReadCloser cancels the stream's ctx on Close, satisfying the
+// lifetime contract on BlobKV.GetBlob: the bound ctx must outlive the reader.
 type ctxCancelReadCloser struct {
 	rc     io.ReadCloser
 	cancel context.CancelFunc
@@ -204,13 +171,11 @@ func (c *ctxCancelReadCloser) Close() error {
 	return err
 }
 
-// Ensure Unit satisfies the seam.
 var _ service.BlobUnit = (*Unit)(nil)
 
-// StageEncoding implements service.BlobUnit: it encodes to the at-rest format,
-// stages the exact bytes, and returns the compressed size WITHOUT the framing
-// prefix - the basis quota charges, matching how a paste charges its post-zstd
-// size. The caller never sees the encoder or the prefix width.
+// StageEncoding encodes to the at-rest format, stages those exact bytes, and
+// returns the compressed size EXCLUDING the framing prefix: the basis quota
+// charges, matching how a paste charges its post-zstd size.
 func (u *Unit) StageEncoding(ctx context.Context, slug, sha string, r io.Reader) (service.BlobHandle, int, error) {
 	body, err := storage.EncodeCompressedBody(r)
 	if err != nil {

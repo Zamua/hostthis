@@ -21,12 +21,10 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// TestUploadAndServe - the headline end-to-end. Spin up the SSH +
-// HTTP stack on real localhost ports backed by real sqlite + blobs,
-// pipe an HTML file in via a real ssh client, GET the returned URL,
-// assert the bytes round-tripped.
+// TestUploadAndServe pins the end-to-end round trip: a real ssh client pipes
+// HTML into the real SSH + HTTP stack on localhost ports, and a GET of the
+// returned URL yields the same bytes with the expected sandbox headers.
 func TestUploadAndServe(t *testing.T) {
-	// Real sqlite + real blob store under t.TempDir().
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -37,45 +35,37 @@ func TestUploadAndServe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
-	// Wrap with compression so service writes + http reads decode
-	// transparently - mirrors the production wiring in cmd/hostthisd.
+	// Compression wrapper mirrors the production wiring in cmd/hostthisd.
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	repo := storage.NewPasteRepo(db)
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 
-	// HTTP server on a real port via httptest.
 	httpSrv := httptest.NewServer((&httpapi.Server{Pastes: repo, Blobs: blobUnit}).Handler())
 	t.Cleanup(httpSrv.Close)
 
-	// SSH server on a fresh port. ":0" reserves one for us.
 	sshListener := mustListen(t)
 	sshAddr := sshListener.Addr().String()
-	_ = sshListener.Close() // gliderlabs opens its own listener; we just wanted the port
+	_ = sshListener.Close() // gliderlabs opens its own listener; this only reserved the port
 
 	sshSrv := &hostssh.Server{
 		Addr:       sshAddr,
 		ApexDomain: "paste.test",
 		Upload:     upload,
 		BuildURL: func(s domain.Slug) string {
-			// Build the URL pointing at the httptest server we just stood
-			// up, in path-mode shape (`/p/<slug>`). This is what the
-			// real binary does in dev/path mode.
+			// Path-mode shape, pointing at the httptest server.
 			return httpSrv.URL + "/p/" + s.String()
 		},
 		Logger: log.New(io.Discard, "", 0),
 	}
 	go func() {
-		// ListenAndServe blocks until we close it (or test ends - the
-		// goroutine just stays alive).
 		_ = sshSrv.ListenAndServe()
 	}()
 	waitForSSH(t, sshAddr)
 
-	// Real ssh client. No host-key verification - we're talking to our
-	// own test server on localhost. Generate a fresh ed25519 key and
-	// authenticate with it (anonymous uploads are no longer allowed).
+	// A fresh ed25519 key: uploads require an authenticated identity. Host-key
+	// verification is off because the server is this test's own localhost one.
 	_, priv, err := genEd25519()
 	if err != nil {
 		t.Fatalf("genkey: %v", err)
@@ -102,8 +92,6 @@ func TestUploadAndServe(t *testing.T) {
 	}
 	defer sess.Close()
 
-	// Wire stdin/stdout/stderr - sess.Output is a convenience that
-	// drains stdout into a buffer after the command completes.
 	htmlBody := []byte("<!doctype html><h1>integration ok</h1>")
 	sess.Stdin = bytes.NewReader(htmlBody)
 	var stdout bytes.Buffer
@@ -111,7 +99,7 @@ func TestUploadAndServe(t *testing.T) {
 	sess.Stdout = &stdout
 	sess.Stderr = &stderr
 
-	// Empty command = upload. Matches "cat foo | ssh paste.test" exactly.
+	// Empty command = upload, matching "cat foo | ssh paste.test".
 	if err := sess.Run(""); err != nil {
 		t.Fatalf("ssh run: %v\nstderr: %s", err, stderr.String())
 	}
@@ -125,16 +113,15 @@ func TestUploadAndServe(t *testing.T) {
 		t.Fatalf("stderr should mention expiry, got %q", stderr.String())
 	}
 
-	// The blob write + status flip to ready now happen in a background
-	// finalizer; wait for it before reading so the GET sees a ready paste.
+	// The blob write and the flip to ready run in a background finalizer, so
+	// the GET below needs it drained first.
 	upload.WaitFinalize()
 
-	// Now GET the URL and assert the bytes round-trip.
 	resp, err := http.Get(url)
 	if err != nil {
 		t.Fatalf("http get: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != 200 {
 		t.Fatalf("http status: got %d, want 200", resp.StatusCode)
 	}
@@ -148,10 +135,8 @@ func TestUploadAndServe(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Fatalf("content-type: got %q, want text/html…", ct)
 	}
-	// We deliberately do NOT set a Content-Security-Policy on paste
-	// reads - origin isolation is the security boundary, not CSP.
-	// Confirm the header is absent so a future "let's add a CSP back"
-	// refactor has to update this test deliberately.
+	// Paste reads carry NO Content-Security-Policy: origin isolation is the
+	// security boundary, not CSP. Pinned so adding one has to be deliberate.
 	if csp := resp.Header.Get("Content-Security-Policy"); csp != "" {
 		t.Fatalf("Content-Security-Policy should be unset on paste reads, got %q", csp)
 	}
@@ -175,8 +160,8 @@ func mustListen(t *testing.T) net.Listener {
 	return l
 }
 
-// waitForSSH polls the SSH port until it accepts a TCP connection.
-// gliderlabs's ListenAndServe doesn't expose a "ready" signal.
+// waitForSSH polls the SSH port until it accepts a TCP connection, because
+// gliderlabs's ListenAndServe exposes no "ready" signal.
 func waitForSSH(t *testing.T, addr string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

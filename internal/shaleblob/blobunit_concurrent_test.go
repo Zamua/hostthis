@@ -1,20 +1,16 @@
 //go:build slatedb
 
-// Concurrency regression for the per-call blob-bind isolation (P1-1).
+// Concurrency regression for per-call blob-bind isolation.
 //
-// Before the fix, a ShaleBlobUnit.Commit stashed the staged refs in a per-repo
-// map keyed by SLUG (StashBinds/popBinds). Two concurrent same-slug writes
-// shared that one map entry, so goroutine B's stash could overwrite A's refs
-// mid-metaWrite (A binds B's blob), or B's deferred ClearBinds could wipe the
-// entry during A's CAS-retry (A commits with NO bind -> an orphaned blob + an
-// unreadable row). The refs now ride the per-Commit context.Context, so each
-// call binds its OWN blob with no shared mutable state.
+// A Commit's staged refs ride that call's context.Context, never a shared
+// slug-keyed stash. Two concurrent same-slug writes sharing one stash entry
+// could bind each other's blob mid-metaWrite, or have a deferred clear wipe the
+// entry during a CAS retry and commit a version with NO bind, leaving an
+// orphaned blob and an unreadable row.
 //
-// This test drives the exact race: two parallel AppendVersion Commits on ONE
-// slug, each staging a DISTINCT blob, then asserts every version reads back its
-// OWN bytes and carries a non-empty blob id. A regression (the shared map)
-// shows up as a version resolving to the wrong content, a Read 404 (no bind),
-// or an empty BlobID.
+// This drives that race: two parallel AppendVersion Commits on ONE slug, each
+// staging a DISTINCT blob. A regression surfaces as a version resolving to the
+// wrong content, a Read 404, or an empty BlobID.
 
 package shaleblob_test
 
@@ -30,17 +26,15 @@ import (
 	"github.com/Zamua/hostthis/internal/service"
 )
 
-// TestConcurrentSameSlugBindsOwnBlob runs two parallel AppendVersion Commits on
-// the same slug, each staging its own blob, and proves each version binds its
-// own bytes (per-call isolation, no shared slug-keyed stash).
+// TestConcurrentSameSlugBindsOwnBlob pins that two parallel AppendVersion
+// Commits on one slug each bind their OWN blob.
 func TestConcurrentSameSlugBindsOwnBlob(t *testing.T) {
 	repo, unit, _ := newBlobRepo(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	const slug = "concslug"
 
-	// v1: seed the paste so the slug exists and AppendVersion has a head to
-	// extend. Its own blob is bound here.
+	// Seed the paste so the slug exists and AppendVersion has a head to extend.
 	rawV1 := []byte("<!doctype html><h1>v1 seed</h1>")
 	shaV1 := "sha-conc-v1"
 	bodyV1 := encode(t, rawV1)
@@ -55,9 +49,7 @@ func TestConcurrentSameSlugBindsOwnBlob(t *testing.T) {
 		t.Fatalf("Commit v1: %v", err)
 	}
 
-	// Two concurrent appends on the SAME slug, each with DISTINCT content. With
-	// the old slug-keyed stash these two Commits raced on one map entry; with
-	// per-call context binds they are isolated.
+	// Two concurrent appends on the SAME slug, each with DISTINCT content.
 	type appended struct {
 		sha string
 		raw []byte
@@ -77,9 +69,7 @@ func TestConcurrentSameSlugBindsOwnBlob(t *testing.T) {
 			defer wg.Done()
 			a := want[i]
 			body := encode(t, a.raw)
-			// Each goroutine stages its own blob and commits the append under a
-			// fresh Commit (its refs ride that Commit's context, not a shared
-			// per-slug stash).
+			// Each goroutine's refs ride its own Commit's context.
 			h, serr := unit.Stage(ctx, slug, a.sha, body)
 			if serr != nil {
 				errs[i] = fmt.Errorf("stage %s: %w", a.sha, serr)
@@ -100,9 +90,8 @@ func TestConcurrentSameSlugBindsOwnBlob(t *testing.T) {
 		}
 	}
 
-	// Both appended versions plus the seed must each read back THEIR OWN bytes
-	// (resolved via the version's content sha -> its bound blob id). A shared-
-	// stash regression binds the wrong blob (wrong bytes) or none (Read 404).
+	// Every version, seed included, reads back THEIR OWN bytes via its content
+	// sha -> bound blob id.
 	expectReads := append([]appended{{sha: shaV1, raw: rawV1}}, want...)
 	for _, a := range expectReads {
 		got, rerr := readAll(t, unit, slug, a.sha)
@@ -114,9 +103,8 @@ func TestConcurrentSameSlugBindsOwnBlob(t *testing.T) {
 		}
 	}
 
-	// Every version row carries a non-empty blob id: a ClearBinds-during-retry
-	// regression commits a version with NO bind, which would leave an empty
-	// BlobID here (and the orphaned blob the Read check above already catches).
+	// Every version row carries a non-empty blob id: a clear-during-retry
+	// commits a version with NO bind, which shows up as an empty BlobID here.
 	versions, verr := repo.ListVersions(domain.Slug(slug))
 	if verr != nil {
 		t.Fatalf("ListVersions: %v", verr)
@@ -134,8 +122,7 @@ func TestConcurrentSameSlugBindsOwnBlob(t *testing.T) {
 		}
 	}
 
-	// Sanity: the two appended blobs got DISTINCT ids (no accidental id reuse),
-	// confirming each Commit minted + bound its own staged blob.
+	// DISTINCT ids: each Commit minted and bound its own staged blob.
 	idA, _ := repo.ResolveBlobID(domain.Slug(slug), want[0].sha)
 	idB, _ := repo.ResolveBlobID(domain.Slug(slug), want[1].sha)
 	if idA == idB {

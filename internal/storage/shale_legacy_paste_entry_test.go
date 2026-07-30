@@ -2,19 +2,15 @@
 
 package storage_test
 
-// Legacy (migrated-slatedb) identity_pastes entries and the paste quota
-// scan.
+// Migrated-slatedb identity_pastes entries and the paste quota scan.
 //
-// docs/SPEC.md "Scan-derived quota" / "Decode tolerance of the quota
-// scan": the slatedb layout stored identity_pastes/<id>/<slug> as bare
-// EMPTY markers, and the migration is in-place (no key rewritten), so a
-// cutover deployment's paste scans encounter empty entry values. The scan
-// must recognize that legacy shape and read the entry through its
-// authoritative row plus live version sum (the slatedb per-entry
-// semantics) rather than hard-failing the decode - a hard fail would
-// brick EVERY quota-checked create for that owner until the first
-// post-cutover reconcile. The reconciler's reprojection then enriches the
-// entry with the JSON projection, retiring the fallback.
+// docs/SPEC.md "Scan-derived quota" / "Decode tolerance of the quota scan":
+// the slatedb layout stores identity_pastes/<id>/<slug> as bare EMPTY markers
+// and migration rewrites no key, so a scan encounters empty entry values. It
+// must read such an entry through its authoritative row plus live version sum
+// rather than hard-failing the decode: a hard fail bricks EVERY quota-checked
+// create for that owner until the next reconcile. The reconciler then enriches
+// the entry with the JSON projection, retiring the fallback.
 //
 //	go test -tags slatedb -run TestShaleQuotaScanLegacyEmptyPasteEntry ./internal/storage
 //
@@ -41,11 +37,10 @@ func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
 	owner := "key:legidx"
 	slug := domain.Slug("legidx01")
 
-	// Plant the migrated layout raw: the authoritative paste + version rows
-	// (two live versions, 300 + 200, so the fallback provably sums the
-	// version rows rather than reading the head's denormalized size),
-	// slug_owner, the expiry marker - and the identity_pastes entry with the
-	// EMPTY value slatedb wrote.
+	// Plant the migrated layout raw. Two live versions (300 + 200) so the
+	// fallback provably sums the version rows rather than reading the head's
+	// denormalized size, plus the identity_pastes entry with slatedb's EMPTY
+	// value.
 	p := domain.Paste{
 		Slug: slug, Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-legidx-v2", Size: 200,
@@ -75,8 +70,8 @@ func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
 		t.Fatalf("plant empty legacy index entry: %v", err)
 	}
 
-	// The scan must NOT hard-fail on the empty legacy shape: it reads the
-	// entry through the authoritative rows (live version sum = 500).
+	// The scan reads the entry through the authoritative rows: live version
+	// sum = 500.
 	got, err := repo.SumActiveBytesByOwner(owner, now)
 	if err != nil {
 		t.Fatalf("quota scan over a legacy empty entry must fall back to the authoritative row, not hard-fail: %v", err)
@@ -85,8 +80,8 @@ func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
 		t.Fatalf("legacy fallback sum: got %d, want 500 (live version sum)", got)
 	}
 
-	// The bricked-create symptom, pinned end-to-end: a quota-checked insert
-	// for the same owner must succeed while the legacy entry is present.
+	// The bricked-create symptom, end to end: a quota-checked insert for the
+	// same owner must succeed while the empty entry is present.
 	fresh := domain.Paste{
 		Slug: domain.Slug("legidx02"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-legidx-new", Size: 100,
@@ -100,8 +95,8 @@ func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
 		t.Fatalf("sum after insert: got %d, want 600", got)
 	}
 
-	// A stale legacy entry (authoritative row GONE) contributes zero
-	// instead of failing or counting phantom bytes.
+	// An entry whose authoritative row is GONE contributes zero rather than
+	// failing or counting phantom bytes.
 	staleKey := storage.IdentityPasteKeyForTest(owner, "leggone1")
 	if err := repo.PutEmptyBackendForTest(staleKey); err != nil {
 		t.Fatalf("plant stale legacy entry: %v", err)
@@ -110,9 +105,9 @@ func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
 		t.Fatalf("stale legacy entry must contribute zero: got %d, want 600", got)
 	}
 
-	// The reconciler enriches the legacy entry to the JSON projection (and
-	// prunes the stale one), retiring the fallback: the cached size equals
-	// the live version sum and the scan agrees.
+	// Reconcile enriches the empty entry to the JSON projection and prunes the
+	// stale one, retiring the fallback: the cached size equals the live
+	// version sum and the scan agrees.
 	if err := repo.ReconcileForTest(now); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}

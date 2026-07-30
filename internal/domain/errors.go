@@ -2,20 +2,18 @@ package domain
 
 import "errors"
 
-// The persistence-outcome sentinel vocabulary. These are the business
-// outcomes every storage backend must agree on and every caller matches
-// with errors.Is (see docs/SPEC.md "The storage contract and its
-// conformance suite"): the domain owns the vocabulary, the backends
-// return it, the services translate it.
+// The persistence-outcome sentinel vocabulary: the business outcomes every
+// storage backend must agree on and every caller matches with errors.Is (see
+// docs/SPEC.md "The storage contract and its conformance suite"). The domain
+// owns the vocabulary, the backends return it, the services translate it.
 //
-// The storage package re-exports each sentinel under its historical
-// storage.Err... name (an alias of the SAME error value), so errors.Is
-// identity holds whichever name a caller matches against.
+// The storage package re-exports each sentinel under a storage.Err... alias of
+// the SAME error value, so errors.Is identity holds whichever name a caller
+// matches against.
 //
-// The message text is stable contract: it keeps the historical
-// "storage:" prefix VERBATIM because sentinel messages reach
-// user-facing output (SSH stderr, HTTP error bodies). Do not edit the
-// strings.
+// The message text is stable contract, "storage:" prefix included, because
+// sentinel messages reach user-facing output (SSH stderr, HTTP error bodies).
+// Do not edit the strings.
 var (
 	// ErrNotFound is returned by any repo when a lookup misses.
 	ErrNotFound = errors.New("storage: not found")
@@ -50,13 +48,11 @@ var (
 	// hit its fresh-key quota for the window (the Sybil rate limit).
 	ErrTooManyNewKeys = errors.New("storage: too many new keys from this network")
 
-	// ErrCrossShardDeploy is the domain translation of a sharded
-	// backend's cross-shard-commit guard rejecting a site deploy's
-	// authoritative write (a staged file's pointer routed to a
-	// different shard than the manifest - a routing regression the
-	// slug pre-claim is designed to prevent). The shale storage layer
-	// translates the backend sentinel into this one at the boundary,
-	// keeping the original error in the wrap chain, so the deploy
-	// service classifies it without importing any backend package.
+	// ErrCrossShardDeploy is the domain translation of a sharded backend
+	// rejecting a site deploy whose staged file pointer routed to a different
+	// shard than the manifest. The shale storage layer translates its backend
+	// sentinel into this one at the boundary, keeping the original in the wrap
+	// chain, so the deploy service classifies it without importing any backend
+	// package.
 	ErrCrossShardDeploy = errors.New("storage: cross-shard deploy commit rejected")
 )

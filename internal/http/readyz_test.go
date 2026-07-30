@@ -6,11 +6,10 @@ import (
 	"testing"
 )
 
-// fakeProber is the test double behind the /readyz pins. A REAL
-// shale-backed pin (a cluster reporting 0 mounted units) needs the slatedb
-// build tag plus a live MinIO, so the readiness split is pinned here via
-// the same narrow port the composition root wires; the shale predicate's
-// own edge contract is pinned upstream in the shale repo.
+// fakeProber stands in for a real cluster: driving one to 0 mounted units would
+// need the slatedb tag plus a live MinIO, so the readiness split is pinned
+// through the same narrow port the composition root wires. The shale
+// predicate's own edge contract is pinned upstream in the shale repo.
 type fakeProber struct {
 	ready bool
 	stats ReadinessStats
@@ -28,12 +27,10 @@ func decodeReadyz(t *testing.T, body []byte) map[string]any {
 	return m
 }
 
-// TestReadyz_NotReady503_HealthzStays200 pins the liveness/readiness
-// split for the uniform-failure class (docs/SPEC.md "Readiness vs
-// liveness"): a pod whose cluster reports 0 mounted of N desired units
-// fails /readyz with the diagnosable counts body, while /healthz on the
-// SAME server stays 200 (a restart cannot fix an unmountable store, so
-// liveness must not gate on it).
+// TestReadyz_NotReady503_HealthzStays200 pins the liveness/readiness split
+// (docs/SPEC.md "Readiness vs liveness"): 0 mounted of N desired units fails
+// /readyz with the diagnosable counts body while /healthz on the SAME server
+// stays 200, because a restart cannot fix an unmountable store.
 func TestReadyz_NotReady503_HealthzStays200(t *testing.T) {
 	srv := &Server{
 		ApexDomain: "paste.test",
@@ -74,7 +71,6 @@ func TestReadyz_NotReady503_HealthzStays200(t *testing.T) {
 		t.Errorf("lastAcquireError: got %v", m["lastAcquireError"])
 	}
 
-	// Liveness is unaffected on the same server: /healthz stays 200.
 	r = httptest.NewRequest("GET", "/healthz", nil)
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -83,8 +79,8 @@ func TestReadyz_NotReady503_HealthzStays200(t *testing.T) {
 	}
 }
 
-// TestReadyz_Ready200WithCounts pins the healthy direction: 200 with the
-// same counts JSON, so the body is curl-diagnosable in both directions.
+// TestReadyz_Ready200WithCounts pins the healthy direction: 200 carries the
+// same counts JSON, so the body is curl-diagnosable either way.
 func TestReadyz_Ready200WithCounts(t *testing.T) {
 	srv := &Server{
 		ApexDomain: "paste.test",
@@ -111,9 +107,9 @@ func TestReadyz_Ready200WithCounts(t *testing.T) {
 	}
 }
 
-// TestReadyz_NilProberAlwaysReady pins the non-shale path (sqlite /
-// single-node slatedb, and every test fixture that never wires a prober):
-// no ReadinessProber means process-up IS ready, zero counts in the body.
+// TestReadyz_NilProberAlwaysReady pins the non-shale path (sqlite,
+// single-node slatedb, and every fixture that wires no prober): with no
+// ReadinessProber, process-up IS ready, with zero counts in the body.
 func TestReadyz_NilProberAlwaysReady(t *testing.T) {
 	srv := &Server{ApexDomain: "paste.test"}
 	r := httptest.NewRequest("GET", "/readyz", nil)

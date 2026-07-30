@@ -1,35 +1,25 @@
 package ssh_test
 
-// Per-verb help tests (Phase C polish, pattern #3).
-//
-// Pin the additive `help <verb>` and `<verb> --help` / `<verb> -h`
-// behavior so a future refactor of the verb dispatcher can't silently
-// regress it. The global help banner is pinned byte-exact by the
-// Phase A characterization suite; this file only covers the new
+// Pins the `help <verb>` and `<verb> --help` / `<verb> -h` shapes against a
+// real ssh server + client (startStack). The global help banner is pinned
+// byte-exact by the characterization suite; this file covers only the
 // verb-specific shapes.
-//
-// Conventions match the rest of the package's test suite:
-//   - real ssh server + real ssh client via startStack
-//   - sub-tests per behavior bullet
-//   - assertions over (stdout, stderr, exit) shape
 
 import (
 	"strings"
 	"testing"
 )
 
-// verbHelpVerbs is the canonical set of verb names the help system
-// must recognize (one descriptor each in help_verbs.go). Whenever a new
-// verb is added to the dispatcher, append it here AND add a descriptor.
+// verbHelpVerbs is the canonical set of verb names the help system must
+// recognize (one descriptor each in help_verbs.go). A verb added to the
+// dispatcher needs an entry here AND a descriptor.
 var verbHelpVerbs = []string{
 	"get", "list", "url", "qr", "rename", "delete",
 	"versions", "pin", "unpin", "whoami", "help",
 }
 
-// TestHelpVerb_HelpSpaceVerb covers `ssh hostthis.dev help <verb>`.
-// One sub-test per known verb verifies the verb-specific block is
-// emitted (signature line carries the verb name, stderr contains the
-// `Usage:` and `Examples:` section headings) and the exit is 0.
+// TestHelpVerb_HelpSpaceVerb pins that `help <verb>` emits the verb-specific
+// block (Usage: + Examples:) and exits 0, for every known verb.
 func TestHelpVerb_HelpSpaceVerb(t *testing.T) {
 	s := startStack(t)
 	for _, v := range verbHelpVerbs {
@@ -44,9 +34,8 @@ func TestHelpVerb_HelpSpaceVerb(t *testing.T) {
 			if !strings.Contains(stderr, "Examples:") {
 				t.Fatalf("expected Examples: section in verb help, got %q", stderr)
 			}
-			// `help <verb>` MUST NOT emit the global banner - that's the
-			// whole point of verb-specific help. The global banner's
-			// opening line is the canary.
+			// The global banner's opening line is the canary: verb help
+			// must not fall through to it.
 			if strings.Contains(stderr, "Pipe a rendered file in") {
 				t.Fatalf("verb help leaked the global banner: %q", stderr)
 			}
@@ -54,19 +43,15 @@ func TestHelpVerb_HelpSpaceVerb(t *testing.T) {
 	}
 }
 
-// TestHelpVerb_VerbDashDashHelp covers `ssh hostthis.dev <verb> --help`.
-// Each verb is dispatched with `--help` appended; the body must match
-// the `help <verb>` form byte-for-byte (same source text, same PTY-
-// awareness) so the two surfaces stay consistent.
+// TestHelpVerb_VerbDashDashHelp pins that `<verb> --help` produces the
+// `help <verb>` body byte-for-byte, so the two surfaces cannot drift.
 func TestHelpVerb_VerbDashDashHelp(t *testing.T) {
 	s := startStack(t)
 	for _, v := range verbHelpVerbs {
 		t.Run(v+"_dashdash_help", func(t *testing.T) {
 			if v == "help" {
-				// `help --help` is degenerate: the dispatcher's `help`
-				// case sees `--help` as the verb arg and treats it as
-				// an unknown verb (it isn't in the descriptor map).
-				// Other verbs are exercised normally below.
+				// Degenerate: the dispatcher's `help` case sees `--help`
+				// as the verb arg, which is not in the descriptor map.
 				t.Skip("help --help has bespoke unknown-verb shape covered elsewhere")
 			}
 			_, stderr, exit := s.run(v+" --help", nil)
@@ -76,7 +61,6 @@ func TestHelpVerb_VerbDashDashHelp(t *testing.T) {
 			if !strings.Contains(stderr, "Usage:") {
 				t.Fatalf("expected Usage: section for %s --help, got %q", v, stderr)
 			}
-			// Cross-check: same body as `help <verb>`.
 			_, helpVerbStderr, _ := s.run("help "+v, nil)
 			if stderr != helpVerbStderr {
 				t.Fatalf("`%s --help` diverged from `help %s`:\n got %q\n want %q",
@@ -86,9 +70,8 @@ func TestHelpVerb_VerbDashDashHelp(t *testing.T) {
 	}
 }
 
-// TestHelpVerb_VerbDashH mirrors the --help test for the `-h` shorthand.
-// We keep it as a separate test so a future regression in one form
-// doesn't mask the other.
+// TestHelpVerb_VerbDashH mirrors the --help pin for the `-h` shorthand, kept
+// separate so a regression in one form cannot mask the other.
 func TestHelpVerb_VerbDashH(t *testing.T) {
 	s := startStack(t)
 	for _, v := range verbHelpVerbs {
@@ -112,9 +95,8 @@ func TestHelpVerb_VerbDashH(t *testing.T) {
 	}
 }
 
-// TestHelpVerb_HelpUnknown pins the `help <unknown>` shape: prefix
-// stderr with `unknown verb`, fall back to the global help banner,
-// exit 0 (the user asked for help; we hand them help).
+// TestHelpVerb_HelpUnknown pins the `help <unknown>` shape: an `unknown verb`
+// prefix on stderr, then the global banner, exit 0.
 func TestHelpVerb_HelpUnknown(t *testing.T) {
 	s := startStack(t)
 	_, stderr, exit := s.run("help notarealverb", nil)
@@ -124,18 +106,15 @@ func TestHelpVerb_HelpUnknown(t *testing.T) {
 	if !strings.Contains(stderr, `unknown verb "notarealverb"`) {
 		t.Fatalf("expected unknown-verb prefix, got %q", stderr)
 	}
-	// The global banner MUST follow so the user sees the verb list
-	// they meant to pick from.
+	// The banner must follow so the user sees the verb list to pick from.
 	if !strings.Contains(stderr, "Pipe a rendered file in") {
 		t.Fatalf("expected global help to follow unknown-verb prefix, got %q", stderr)
 	}
 }
 
-// TestHelpVerb_BareHelpUnchanged guards the Phase A invariant that
-// `help` (no arg) emits the global banner unchanged. The byte-exact
-// golden lives in characterization_test.go; this test only verifies
-// the canary line + LF discipline to make a regression in this file
-// fail fast next to the related code.
+// TestHelpVerb_BareHelpUnchanged pins that bare `help` still emits the global
+// banner and no verb block. The byte-exact golden lives in
+// characterization_test.go; this checks the canary line next to the verb code.
 func TestHelpVerb_BareHelpUnchanged(t *testing.T) {
 	s := startStack(t)
 	_, stderr, exit := s.run("help", nil)
@@ -150,10 +129,8 @@ func TestHelpVerb_BareHelpUnchanged(t *testing.T) {
 	}
 }
 
-// TestHelpVerb_PtyCrLf pins the PTY-aware CRLF translation: with a
-// PTY allocated, verb help lines are CRLF-terminated; without a PTY,
-// they're LF-only. Mirrors the global help banner's PTY behavior so
-// the user's terminal renders verb help cleanly either way.
+// TestHelpVerb_PtyCrLf pins the PTY-aware CRLF translation: CRLF-terminated
+// with a PTY allocated, LF-only without one.
 func TestHelpVerb_PtyCrLf(t *testing.T) {
 	s := startStack(t)
 
@@ -201,9 +178,8 @@ func TestHelpVerb_PtyCrLf(t *testing.T) {
 	})
 }
 
-// TestHelpVerb_VerbBodyMentionsVerb_Spot-checks a few verbs to confirm
-// the descriptor's signature actually references the verb (catches a
-// copy-paste regression where two descriptors' signatures swap).
+// TestHelpVerb_VerbBodyMentionsVerb catches a copy-paste regression where two
+// descriptors' signatures swap: each verb's help must name that verb.
 func TestHelpVerb_VerbBodyMentionsVerb(t *testing.T) {
 	s := startStack(t)
 	cases := map[string]string{
@@ -229,15 +205,12 @@ func TestHelpVerb_VerbBodyMentionsVerb(t *testing.T) {
 	}
 }
 
-// TestHelpVerb_NoSideEffects guards against the worst regression:
-// `delete <slug> --help` running the delete. With no slug owned by
-// the test identity, a real delete would surface a not-found error;
-// the help intercept must emit the verb help instead and exit 0 with
-// no Manage service call.
+// TestHelpVerb_NoSideEffects pins that `delete <slug> --help` does NOT run the
+// delete: the help intercept must short-circuit before the verb body.
 func TestHelpVerb_NoSideEffects(t *testing.T) {
 	s := startStack(t)
-	// Pick a slug-shaped string so the verb's own parser wouldn't
-	// reject it on arg-shape grounds.
+	// A slug-shaped string, so the verb's own parser would not reject it on
+	// arg-shape grounds.
 	_, stderr, exit := s.run("delete abcd1234 --help", nil)
 	if exit != 0 {
 		t.Fatalf("exit: %d (stderr: %q)", exit, stderr)
@@ -245,8 +218,7 @@ func TestHelpVerb_NoSideEffects(t *testing.T) {
 	if !strings.Contains(stderr, "Usage:") {
 		t.Fatalf("expected verb help, got %q", stderr)
 	}
-	// A real delete that hit not-found would say `not found` on
-	// stderr; the help intercept must short-circuit before then.
+	// A real delete would have surfaced `not found` for this unowned slug.
 	if strings.Contains(stderr, "not found") {
 		t.Fatalf("intercept failed - delete ran instead of help: %q", stderr)
 	}

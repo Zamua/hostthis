@@ -1,7 +1,4 @@
-// metadata_slatedb.go - slatedb-backed metadataBundle. Active only
-// when the binary is built with -tags slatedb.
-//
-// Reads connection config from env vars:
+// slatedb-backed metadataBundle. Connection config comes from env vars:
 //   HOSTTHIS_METADATA_S3_ENDPOINT   (e.g. http://minio:9000)
 //   HOSTTHIS_METADATA_S3_BUCKET     (required)
 //   HOSTTHIS_METADATA_S3_REGION     (default us-east-1)
@@ -57,13 +54,9 @@ func buildMetadataSlate(retention domain.Retention, logger *log.Logger) (*metada
 	return &metadataBundle{
 		Repo:    repo,
 		KeyGate: repo,
-		// Static-site hosting on slatedb: the SlateSiteRepo adapter shares
-		// the same SlateDB instance + quota accounting as the paste repo.
+		// Sites and rooms share the paste repo's SlateDB instance and its
+		// service-wide quota accounting.
 		Sites: storage.NewSlateSiteRepo(repo),
-		// Room persistence (the no-auth /api/rooms tier) on slatedb: the
-		// SlateRoomRepo adapter shares the same SlateDB instance + service-wide
-		// quota accounting as the paste + site repos, so the room tier runs on
-		// the slatedb-direct backend prod runs.
 		Rooms: storage.NewSlateRoomRepo(repo),
 		Close: repo.Close,
 	}, nil
