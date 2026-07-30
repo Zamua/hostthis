@@ -792,9 +792,8 @@ func (r *ShaleRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
 
 // reconcileSiteIndexPass reprojects the identity_sites enumeration index from
 // the authoritative sites/ rows across all shards - the SITE parallel of the
-// paste reconciler's index reprojection, re-homed here as a standalone step in
-// Reconcile (it was previously reached only through the now-deleted
-// site-reservation pass). It scans sites/, groups each live site under its
+// paste reconciler's index reprojection, as a standalone step in Reconcile.
+// It scans sites/, groups each live site under its
 // owner with the cached quota values the entry carries (deduped size +
 // expiry), and reprojects (add missing entries, refresh cached values, drop
 // orphans) so a site's bytes are counted by the owner's quota scan even after

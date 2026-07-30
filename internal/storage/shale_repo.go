@@ -445,7 +445,7 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	// Multi-node only: bind the peer-forwarding listener BEFORE opening the
 	// cluster so the advertised GRPCAddr is the address actually served
 	// (resolves the ":0" / OS-assigned-port case). Single-node leaves lis
-	// nil and the cluster opens with an empty GRPCAddr, exactly as before.
+	// nil and the cluster opens with an empty GRPCAddr.
 	var lis net.Listener
 	advertiseGRPCAddr := cfg.GRPCAddr
 	if cfg.BindAddr != "" {

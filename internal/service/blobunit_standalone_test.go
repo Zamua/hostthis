@@ -96,7 +96,7 @@ func TestStandalone_StageStream_RoundTrip(t *testing.T) {
 
 // TestStandalone_Commit_RunsMetaWrite pins that Commit runs the metadata
 // closure exactly once and returns its error verbatim (success + failure),
-// so the callers' retry/translate switches behave as before the seam.
+// so the callers' retry/translate switches see it unchanged.
 func TestStandalone_Commit_RunsMetaWrite(t *testing.T) {
 	u, _ := newStandaloneUnit(t)
 	_, h := stage(t, u, "slug0002", []byte("<p>commit</p>"))

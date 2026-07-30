@@ -121,7 +121,7 @@ func (s *siteStack) runUpload(t *testing.T, body []byte) (string, string) {
 // with the site-deploy path WIRED on the SSH server, a plain single-file
 // .html upload STILL routes to the paste path, not the site path. The
 // gzip-magic sniff only diverts gzip-tar archives; everything else is a
-// single-file paste exactly as before.
+// single-file paste.
 func TestSinglePasteUnchangedWhenDeployWired(t *testing.T) {
 	st := newSiteStack(t)
 	stdout, stderr := st.runUpload(t, []byte("<!doctype html><h1>just a paste</h1>"))
