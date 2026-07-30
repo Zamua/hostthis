@@ -314,8 +314,41 @@ func (r *ShaleRepo) reconcileKeygateIdentityIndex() error {
 		want[string(shaleKeyKeygateIdentity(identity, subnet))] = item.Value
 	}
 
-	present := make(map[string]struct{}, len(have))
+	// PRESENCE IS CHECKED THROUGH THE CONSUMER'S LENS, not the aggregate's.
+	//
+	// keygate_id/ shards on the identity, so SubnetsForIdentity reads it with a
+	// SINGLE-SHARD prefix scan. An entry sitting on the wrong unit - written
+	// before the family had a shard-key case, so it was placed by hashing the
+	// whole key - is still visible to the cross-shard aggregate below but NOT
+	// to that read. Treating the aggregate's view as presence would mark such
+	// an entry "already projected" and leave it stranded forever, invisible to
+	// the only thing that reads it. Probing per identity with the same
+	// single-shard scan the consumer uses repairs placement instead: the entry
+	// reads as absent, gets re-written, and lands on the correct unit.
+	//
+	// One narrow scan per distinct identity, on a background pass, rather than
+	// one point read per row.
+	visible := make(map[string]struct{}, len(want))
+	identities := make(map[string]struct{})
+	for key := range want {
+		rest := strings.TrimPrefix(key, "keygate_id/")
+		if idx := strings.Index(rest, "/"); idx > 0 {
+			identities[rest[:idx]] = struct{}{}
+		}
+	}
 	var errs []error
+	for identity := range identities {
+		items, serr := r.scanPrefix(shalePrefixKeygateIdentity(identity))
+		if serr != nil {
+			errs = append(errs, fmt.Errorf("scan keygate index for %s: %w", identity, serr))
+			continue
+		}
+		for _, item := range items {
+			visible[string(item.Key)] = struct{}{}
+		}
+	}
+
+	present := make(map[string]struct{}, len(have))
 	for _, item := range have {
 		key := string(item.Key)
 		present[key] = struct{}{}
@@ -330,7 +363,7 @@ func (r *ShaleRepo) reconcileKeygateIdentityIndex() error {
 		}
 	}
 	for key, val := range want {
-		if _, ok := present[key]; ok {
+		if _, ok := visible[key]; ok {
 			continue
 		}
 		k := []byte(key)

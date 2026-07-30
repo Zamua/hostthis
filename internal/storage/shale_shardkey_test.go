@@ -174,3 +174,51 @@ func TestShaleShardKeyBrefCoRoutes(t *testing.T) {
 		}
 	}
 }
+
+// CO-LOCATION of the identity-leading keygate index.
+//
+// This is the half of that index that makes it worth having, and it is
+// invisible to a correctness test: a SCATTERED index returns exactly the same
+// answer, just via a cross-shard fan-out instead of a local scan. The fan-out's
+// cost is set by the number of units, not the rows matched - measured at 26.7s
+// to return ONE entry, alongside 38ms for the co-located subnet scan in the
+// same call. So correctness tests passed while the feature did nothing.
+//
+// Untagged, so CI actually runs it: shaleShardKey is pure, and a family that
+// silently loses its case here degrades to hashing the whole key, which is a
+// pure performance regression with no behavioural symptom.
+func TestShardKey_KeygateIdentityIndexCoLocatesPerIdentity(t *testing.T) {
+	const id = "key:frank"
+	subnets := []string{
+		"10.4.0.0/24", "10.4.1.0/24", "10.4.2.0/24", "10.4.3.0/24",
+		"2001:db8::/48", "10.4.5.0/24", "10.4.6.0/24", "10.4.7.0/24",
+	}
+
+	want := string(shaleShardKey(shaleKeyKeygateIdentity(id, subnets[0])))
+	for _, subnet := range subnets[1:] {
+		got := string(shaleShardKey(shaleKeyKeygateIdentity(id, subnet)))
+		if got != want {
+			t.Fatalf("entries for one identity must share a shard key so they co-locate on one unit: "+
+				"subnet %q gave %q, want %q. Without this, SubnetsForIdentity degrades to a cross-shard "+
+				"fan-out whose cost scales with unit count rather than rows matched (26.7s to return a "+
+				"single entry when this was missing).", subnet, got, want)
+		}
+	}
+	// The shard key must be the IDENTITY, not something incidental that merely
+	// happens to be constant across this input set.
+	if want != id {
+		t.Fatalf("keygate_id/ must shard on the identity, got %q want %q", want, id)
+	}
+
+	// And it must SPREAD identities. A shard key that is constant for every
+	// identity also passes the co-location check above while piling the whole
+	// family onto one unit.
+	seen := make(map[string]struct{})
+	for _, other := range []string{"key:g", "key:h", "key:i", "key:j"} {
+		seen[string(shaleShardKey(shaleKeyKeygateIdentity(other, "10.4.0.0/24")))] = struct{}{}
+	}
+	if len(seen) != 4 {
+		t.Fatalf("4 distinct identities produced %d distinct shard keys; the family must spread across "+
+			"units, not pin every identity to one", len(seen))
+	}
+}

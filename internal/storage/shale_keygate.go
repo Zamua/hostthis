@@ -139,10 +139,12 @@ func (r *ShaleRepo) SubnetSnapshot(subnet string, now time.Time, window time.Dur
 // Sybil control - that control reads the subnet-leading rows, which are
 // authoritative and written transactionally.
 func (r *ShaleRepo) SubnetsForIdentity(identity string, now time.Time, window time.Duration) (int, error) {
-	// REQUEST-PATH budget: whoami waits on this. Still a fan-out (the entries
-	// for one identity can span shards), but over a prefix scoped to that
-	// identity rather than the whole table.
-	items, err := r.aggregateForRequest(shalePrefixKeygateIdentity(identity))
+	// SINGLE-SHARD: keygate_id/ shards on the identity (see shaleShardKey), so
+	// every entry for this key lives on one unit and this is a local prefix
+	// scan, not a fan-out. That co-location is what makes the index pay: a
+	// narrow prefix collected via fan-out still costs the fan-out, measured at
+	// 26.7s to return a single entry.
+	items, err := r.scanPrefix(shalePrefixKeygateIdentity(identity))
 	if err != nil {
 		return 0, err
 	}
