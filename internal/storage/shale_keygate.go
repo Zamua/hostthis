@@ -77,6 +77,24 @@ func (r *ShaleRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 	if txErr != nil {
 		return false, txErr
 	}
+	if !known {
+		// Materialise the IDENTITY-leading view of the row just written.
+		//
+		// Best-effort and deliberately OUTSIDE the transaction above: shale
+		// transactions are single-shard, and this key hashes to a different
+		// shard than the authoritative row, so including it would abort with
+		// ErrCrossShard. It is a DERIVED index, repaired by the reconciler
+		// like the enumeration indexes, so a failure here costs at most a
+		// stale display value until the next pass - never a lost admission
+		// and never a weakened gate, because the gate reads the
+		// subnet-leading row that was already committed above.
+		idKey := shaleKeyKeygateIdentity(identity, subnet)
+		if err := r.cluster.Transact(idKey, func(tx backend.Transaction) error {
+			return tx.Put(idKey, []byte(now.UTC().Format(time.RFC3339Nano)))
+		}); err != nil {
+			r.repoLog().Printf("keygate: identity index write for %s failed: %v (whoami's subnet count may under-report until the next reconcile)", idKey, err)
+		}
+	}
 	return known, nil
 }
 
@@ -107,28 +125,32 @@ func (r *ShaleRepo) SubnetSnapshot(subnet string, now time.Time, window time.Dur
 }
 
 // SubnetsForIdentity counts distinct in-window subnets for an identity.
-// Cross-shard (a keygate row could live on any {subnet} shard), so it
-// fans out via aggregate over the global keygate prefix.
+//
+// Reads the IDENTITY-leading index, so the cost is the number of subnets THIS
+// key has been seen in (1 for a normal user) rather than the number of keygate
+// rows in the entire cluster. It previously scanned the global keygate/ prefix
+// and filtered in Go, which returned the right answer at a cost that grew with
+// total admissions across all users - fine while the table was small, and
+// measured at 10-18s on an interactive command once it was not.
+//
+// DISPLAY ONLY: reached from whoami via KeyGate.Inspect, which is called after
+// admit and discards its error. This gates nothing, so an index entry that has
+// not been projected yet under-reports the count rather than weakening the
+// Sybil control - that control reads the subnet-leading rows, which are
+// authoritative and written transactionally.
 func (r *ShaleRepo) SubnetsForIdentity(identity string, now time.Time, window time.Duration) (int, error) {
-	// REQUEST-PATH budget, not the background one: this is reached from whoami
-	// (via KeyGate.Inspect), which treats a keygate error as best-effort and
-	// discards it. Blocking an interactive command for the background span to
-	// produce a value the caller throws away is pure latency.
-	items, err := r.aggregateForRequest([]byte("keygate/"))
+	// REQUEST-PATH budget: whoami waits on this. Still a fan-out (the entries
+	// for one identity can span shards), but over a prefix scoped to that
+	// identity rather than the whole table.
+	items, err := r.aggregateForRequest(shalePrefixKeygateIdentity(identity))
 	if err != nil {
 		return 0, err
 	}
 	cutoff := now.Add(-window)
 	seen := make(map[string]struct{})
 	for _, item := range items {
-		rest := strings.TrimPrefix(string(item.Key), "keygate/")
-		idx := strings.LastIndex(rest, "/")
-		if idx < 0 {
-			continue
-		}
-		subnet := rest[:idx]
-		id := rest[idx+1:]
-		if id != identity {
+		subnet := strings.TrimPrefix(string(item.Key), "keygate_id/"+identity+"/")
+		if subnet == "" {
 			continue
 		}
 		t, perr := time.Parse(time.RFC3339Nano, string(item.Value))
@@ -143,9 +165,6 @@ func (r *ShaleRepo) SubnetsForIdentity(identity string, now time.Time, window ti
 	return len(seen), nil
 }
 
-// DeleteFirstSeenOlderThan prunes keygate rows whose first-seen is before
-// cutoff, across all {subnet} shards. The candidate set is gathered via a
-// cross-shard aggregate; each delete is routed to its owning shard.
 func (r *ShaleRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 	items, err := r.aggregateForBackground([]byte("keygate/"))
 	if err != nil {
@@ -160,6 +179,21 @@ func (r *ShaleRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 		if t.Before(cutoff) {
 			if err := r.cluster.Delete(item.Key); err != nil {
 				return deleted, fmt.Errorf("delete %s: %w", item.Key, err)
+			}
+			// Drop the identity-leading view of the same fact. Without this
+			// the derived index outlives the authoritative row and whoami
+			// would keep counting subnets the gate has already forgotten -
+			// an OVER-report, and one that grows without bound because
+			// nothing else would ever remove these.
+			rest := strings.TrimPrefix(string(item.Key), "keygate/")
+			if idx := strings.LastIndex(rest, "/"); idx >= 0 {
+				subnet, identity := rest[:idx], rest[idx+1:]
+				idKey := shaleKeyKeygateIdentity(identity, subnet)
+				if err := r.cluster.Delete(idKey); err != nil {
+					// Best-effort, like the write: the reconciler prunes an
+					// identity entry whose authoritative row is gone.
+					r.repoLog().Printf("keygate: identity index prune for %s failed: %v (next reconcile drops it)", idKey, err)
+				}
 			}
 			deleted++
 		}

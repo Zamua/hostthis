@@ -61,6 +61,25 @@ func shalePrefixKeygateSubnet(subnet string) []byte {
 	return []byte("keygate/" + subnet + "/")
 }
 
+// The IDENTITY-leading view of the same fact, so "which subnets has this key
+// been seen in" is a narrow prefix scan instead of a scan of every keygate row
+// in the cluster.
+//
+// A relational backend gets this for free: the original schema's
+// PRIMARY KEY (identity, ip_subnet) makes an identity-leading lookup an index
+// seek, while a secondary index on (ip_subnet, first_seen_at) serves the
+// admission count. A KV store cannot derive one ordering from the other, so
+// both orderings must be materialised. Storing only the subnet-leading row
+// still returns the RIGHT answer for an identity query - it just reads the
+// whole table to do it, which stays invisible until the table is large.
+func shaleKeyKeygateIdentity(identity, subnet string) []byte {
+	return []byte("keygate_id/" + identity + "/" + subnet)
+}
+
+func shalePrefixKeygateIdentity(identity string) []byte {
+	return []byte("keygate_id/" + identity + "/")
+}
+
 // PendingPasteTimeout is how old a status=pending paste may be before the
 // reconciler ages it to failed (the pod-death backstop: its in-memory
 // bytes never reached the blob store). It is comfortably longer than a
