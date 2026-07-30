@@ -4666,9 +4666,34 @@ being healed) for every healthy record too, until an operator hand-fixes
 the one bad row. The blast radius of one poisoned row must stay one row.
 This mirrors the keygate admission-count scan, which already does the
 right thing for an idempotent counter (a tolerant parse that skip +
-continues on a bad row). The skip is LOGGED (record key + decode error)
-so a persistently-bad row is visible to an operator, not silently
-swallowed forever.
+continues on a bad row). The skip is LOGGED so a persistently-bad row is
+visible to an operator, not silently swallowed forever.
+
+  **The log is a PER-PASS SUMMARY, never one line per row.** This matters
+  because "retried next pass" is not the same as "eventually repaired":
+  corrupt rows split into two classes, and only one of them can heal.
+
+  - REPAIRABLE: the row is undecodable but its owner is still derivable
+    (from `slug_owner/<slug>`), so the pass projects a fail-closed
+    placeholder enumeration entry and the owner's next quota scan hard-fails
+    rather than silently under-counting. A later repair of the row clears it.
+  - UNREPAIRABLE: the row is undecodable AND has no `slug_owner`, so no owner
+    can be derived and no entry can be projected. Nothing the reconciler
+    re-runs can fix this; it needs an out-of-band repair. Re-running the pass
+    re-finds exactly the same set, forever.
+
+  So for the unrepairable class the "self-correcting, retried next tick"
+  reasoning above does NOT apply, and per-row logging is not a bounded
+  diagnostic but a PERMANENT cost proportional to accumulated debris rather
+  than to anything an operator can act on. At scale that cost is not
+  cosmetic: the log volume alone can consume enough CPU to starve the request
+  path, degrading interactive reads by orders of magnitude while every
+  behavioural check still passes, because nothing about the service's
+  RESPONSES is wrong. Each pass therefore emits at most ONE line per scan,
+  carrying the COUNT per class plus a bounded sample of slugs; a clean pass
+  emits nothing, so log volume stays the signal. The actionable reading is
+  the derivative rather than the level: a steady count is known debris, a
+  growing one means something is still producing corrupt rows.
 
   Each skip-and-continue pass is therefore PARTIAL by design: it did the
   work for every decodable record and deferred the undecodable ones. A
