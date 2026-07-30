@@ -111,6 +111,8 @@ import (
 	"github.com/Zamua/shale/pkg/backend"
 	"github.com/Zamua/shale/pkg/blob"
 	"github.com/Zamua/shale/pkg/cluster"
+	"github.com/Zamua/shale/pkg/coord"
+	"github.com/Zamua/shale/pkg/coord/gossip"
 	"github.com/Zamua/shale/pkg/rpc"
 	"github.com/Zamua/shale/pkg/storageunit"
 	"google.golang.org/grpc"
@@ -550,11 +552,27 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	// sharded (UnitCount a power of two). The cluster.Config differs only in
 	// Backend vs BackendFactory+UnitCount; the peer-discovery + read-quorum +
 	// shard-key fields are identical.
+	// COORDINATION ADAPTER. shale v0.15.0 moved BindAddr/Seeds off cluster.Config
+	// and behind a Coordinator port: gossip (SWIM + consistent hash) is one
+	// adapter, a CAS/lease adapter over the conditional store is another. We pass
+	// the gossip adapter explicitly to keep running exactly the coordination we
+	// ran before the port existed - the version bump and any adapter change stay
+	// in separate blast radii, so "which change caused it" is never a question.
+	//
+	// A nil Coordinator means single-node, which is what an empty BindAddr meant
+	// before, so the single-node path stays a nil here rather than a special case.
+	var coordinator coord.Coordinator
+	if cfg.BindAddr != "" {
+		coordinator = gossip.New(gossip.Config{
+			BindAddr: cfg.BindAddr,
+			Seeds:    cfg.Seeds,
+		})
+	}
+
 	clusterCfg := cluster.Config{
 		NodeID:            cfg.NodeID,
-		BindAddr:          cfg.BindAddr,
+		Coordinator:       coordinator,
 		GRPCAddr:          advertiseGRPCAddr,
-		Seeds:             cfg.Seeds,
 		ReplicationFactor: cfg.ReplicationFactor,
 		// Per-dispatch write/read deadlines. Zero leaves cluster.Open's 5s default
 		// (serving keeps it); the bulk migrate raises them so a slow CAS on a

@@ -5135,6 +5135,26 @@ commit on a bloated unit can stall past 5s; the bulk migration tooling has
 always raised these budgets internally), but serving deploys normally
 leave it at the default.
 
+#### Coordination is a pluggable choice
+
+Who owns which storage unit is decided by a coordination adapter, not by the
+cluster itself. Two exist upstream: gossip (SWIM membership plus a
+consistent-hash ring) and a CAS/lease adapter that keeps one membership
+document in the conditional store and renews per-node leases against it.
+
+This deployment passes the GOSSIP adapter explicitly. That is a deliberate
+choice rather than a default: a single-node deployment passes no coordinator
+at all (which is what an empty bind address meant before the port existed),
+and any change of adapter is a separate, independently verifiable change from
+a dependency upgrade. Keeping those in different blast radii means a surprise
+after either one never raises the question of which caused it.
+
+The coordinator is ADVISORY: it says who SHOULD hold a unit. The storage
+epoch is AUTHORITATIVE - a unit is only writable by whoever opened its
+database at the highest epoch. So a coordinator that is wrong, slow, or
+partitioned is an availability problem, never a correctness one. That
+separation is what makes swapping adapters a bounded risk.
+
 #### Retrying the handoff refusal
 
 The read budget above is the FIRST line of defence for the handoff window:
