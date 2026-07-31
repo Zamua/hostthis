@@ -2079,8 +2079,8 @@ deleted is charged for two while still displaying `v3`.
 Lists BOTH text pastes AND deployed static **sites** (a site shows
 `KIND=site`, its stored byte total, its expiry, and `-` in `VERS` since
 sites are not versioned). This matters because a site counts against the
-same 10 MiB per-identity quota as pastes: if `list` omitted sites, an owner
-could hit `would exceed your 10 MiB total quota` with no visible way to see
+same 100 MiB per-identity quota as pastes: if `list` omitted sites, an owner
+could hit `would exceed your 100 MiB total quota` with no visible way to see
 or free what is using it (deleting the visible text pastes reclaims almost
 nothing). Listing sites makes the quota legible and the slugs copyable for
 `delete`. Sites reuse the retention policy (`EXPIRES_IN` shows the site's
@@ -2464,7 +2464,7 @@ STATIC SITES
 
 LIMITS
 
-    10 MiB per identity, counting post-compression bytes across all
+    100 MiB per identity, counting post-compression bytes across all
     your active pastes. HTML, Markdown, diff, or a gzip-tar site archive.
 
     Apps can persist + sync state: https://hostthis.dev/  (rooms + realtime API)
