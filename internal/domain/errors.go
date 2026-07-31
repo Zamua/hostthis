@@ -55,4 +55,15 @@ var (
 	// chain, so the deploy service classifies it without importing any backend
 	// package.
 	ErrCrossShardDeploy = errors.New("storage: cross-shard deploy commit rejected")
+
+	// ErrConcurrentChange is returned when another write to the same
+	// record landed while this one was deciding what to do, and the
+	// decision cannot be salvaged without re-reading. The operation
+	// applied NOTHING, so a retry is safe and is left to the caller: an
+	// interactive verb reports it and the user re-runs, the expiry sweep
+	// skips the ref and the next pass picks it up.
+	//
+	// Backends whose concurrency control cannot lose this way never
+	// produce it, so the conformance suite does not require it.
+	ErrConcurrentChange = errors.New("storage: changed concurrently, retry")
 )

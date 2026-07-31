@@ -3069,6 +3069,25 @@ keeps the historical `storage:` prefix): sentinel messages appear in
 user-facing output, so moving the definitions must not change a byte of
 them.
 
+One sentinel is domain-owned without being universal:
+`ErrConcurrentChange`. It reports that another write to the same record
+landed while this one was deciding what to do, leaving a decision that
+cannot be salvaged without re-reading. The operation applied NOTHING,
+which is what makes a retry safe, and the retry is the CALLER's: an
+interactive verb reports it and the user re-runs, the expiry sweep skips
+that reference and the next pass picks it up (its index entry is still
+standing, because a cascade that failed did not drop it). It lives in
+the domain because the sweep must recognise it without importing an
+adapter. A backend whose concurrency control cannot lose this way simply
+never returns it, so the conformance suite does not require it.
+
+Retrying in the repo instead was rejected: the optimistic-commit layer
+already spends a bounded retry budget internally and only surfaces a
+conflict once that is exhausted, so a second loop above it re-runs an
+already-exhausted one. Where a stale read taken OUTSIDE the transaction
+is the thing that must be redone, the only correct place to start over
+is the caller.
+
 **Observable contract (what every backend must agree on).** These
 behaviors are expressed in terms of inputs and observable outputs:
 

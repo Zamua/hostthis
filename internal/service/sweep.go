@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -292,6 +293,13 @@ func sweepExpired[T any](s *Sweep, guard *guardPass, refs []T, guardID func(T) s
 			continue
 		}
 		ok, perr := process(ref)
+		if errors.Is(perr, domain.ErrConcurrentChange) {
+			// The record was written while this pass was cascading it, so
+			// nothing was applied and its expiry entry still stands. Skipping
+			// hands the retry to the next pass; aborting would strand every
+			// later ref in the batch behind one contended record.
+			continue
+		}
 		if perr != nil {
 			return deleted, cleaned, wrapErr(ref, perr)
 		}
