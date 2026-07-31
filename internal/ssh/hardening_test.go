@@ -11,6 +11,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	xssh "golang.org/x/crypto/ssh"
 )
@@ -19,26 +20,55 @@ func TestHardening_LocalPortForwardingRefused(t *testing.T) {
 	s := startStack(t)
 	cli, _ := newKeyClient(t, s.sshAddr)
 
+	// The forward target is a listener the TEST owns and keeps accepting on.
+	// That is what makes the refusal observable: aiming at a closed port
+	// instead, a forward that WORKED would fail the dial and report the same
+	// "open failed" / "connection refused" the refusal produces, so no
+	// assertion on the error can tell the two apart.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("forward target listen: %v", err)
+	}
+	defer ln.Close() //nolint:errcheck
+	accepts := make(chan net.Conn, 4)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepts <- c
+		}
+	}()
+
+	// Control: the target really is reachable, so a working forward would
+	// connect. Without this the test cannot distinguish a refusal from a
+	// target that was never dialable.
+	direct, err := net.DialTimeout("tcp", ln.Addr().String(), 3*time.Second)
+	if err != nil {
+		t.Fatalf("control dial to the forward target failed: %v", err)
+	}
+	_ = direct.Close()
+	select {
+	case c := <-accepts:
+		_ = c.Close()
+	case <-time.After(3 * time.Second):
+		t.Fatal("control dial never reached the listener; this test cannot tell a refusal from an unreachable target")
+	}
+
 	// `ssh -L` equivalent: ask the server to open a direct-tcpip channel to
-	// an arbitrary endpoint. The refusal is expected at the channel open, so
-	// the dial never happens.
-	conn, err := cli.Dial("tcp", "127.0.0.1:1")
+	// that endpoint. The refusal is expected at the channel open, so the
+	// server-side dial never happens.
+	conn, err := cli.Dial("tcp", ln.Addr().String())
 	if err == nil {
 		_ = conn.Close()
-		t.Fatalf("expected local port forward to be refused, but got a usable connection")
+		t.Fatalf("expected local port forward to be refused, but got a usable connection to a reachable listener")
 	}
-	// The wording is library-internal, so any refusal shape counts. Two are
-	// legitimate: "unknown channel type" (no direct-tcpip handler is
-	// registered at all, so the reject precedes LocalPortForwardingCallback)
-	// and the denial shapes that callback's false return produces if an
-	// upstream change ever registers the handler.
-	low := strings.ToLower(err.Error())
-	if !strings.Contains(low, "unknown channel type") &&
-		!strings.Contains(low, "administratively prohibited") &&
-		!strings.Contains(low, "denied") &&
-		!strings.Contains(low, "refused") &&
-		!strings.Contains(low, "open failed") {
-		t.Fatalf("expected channel-open refusal error, got %v", err)
+	select {
+	case c := <-accepts:
+		_ = c.Close()
+		t.Fatalf("the server dialed the forward target, so -L was not refused at the channel open (client err: %v)", err)
+	case <-time.After(500 * time.Millisecond):
 	}
 }
 
@@ -143,16 +173,4 @@ func TestHardening_X11RequestRefused(t *testing.T) {
 	if ok {
 		t.Fatalf("x11-req should be refused, but server replied ok=true")
 	}
-}
-
-// reachableEphemeralPort: an unused helper, kept for the flake where the
-// kernel rejects 127.0.0.1:1 before the server's refusal lands.
-var _ = func() int {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	_ = l.Close()
-	return port
 }

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -137,18 +138,21 @@ type Sweep struct {
 const maxGuardRefs = 200_000
 
 // refGuard is the sweep's cross-pass convergence-guard state. One pass records
-// the ref ids it processed; the next classifies any of those that RESURFACE in
-// its scan as unreachable and skips them. Ids that stop appearing are forgotten
-// (externally purged, or the store converged), and a process restart clears
-// everything, so each boot re-attempts once. Not safe for concurrent use; the
-// sweep runs passes sequentially.
+// the ref ids it processed SUCCESSFULLY; the next classifies any of those that
+// RESURFACE in its scan as unreachable and skips them. A ref whose processing
+// errored is not recorded, so it is retried rather than classified. Ids that
+// stop appearing are forgotten (externally purged, or the store converged), and
+// a process restart clears everything, so each boot re-attempts once. Not safe
+// for concurrent use; the sweep runs passes sequentially.
 type refGuard struct {
-	lastAttempted map[string]struct{} // ids processed in the previous pass
+	lastAttempted map[string]struct{} // ids processed successfully in the previous pass
 	unreachable   map[string]struct{} // ids that resurfaced after processing
 }
 
-// guardPass is one pass's view of the guard: skip consults and records, finish
-// folds the pass back into the cross-pass state.
+// guardPass is one pass's view of the guard: skip consults, recordAttempted
+// records a ref whose processing SUCCEEDED, finish folds the pass back into the
+// cross-pass state. A nil *guardPass is the dry-run mode and every method is a
+// no-op on it.
 type guardPass struct {
 	g         *refGuard
 	attempted map[string]struct{} // ids processed THIS pass
@@ -172,9 +176,13 @@ func (g *refGuard) beginPass() *guardPass {
 }
 
 // skip reports whether the ref with this id is unreachable (already classified,
-// or classified now because it resurfaced). A false return means process it; the
-// id is recorded so that resurfacing next pass classifies it.
+// or classified now because it resurfaced). A false return means process it, and
+// recordAttempted must then run on success so that resurfacing next pass
+// classifies it.
 func (p *guardPass) skip(id string) bool {
+	if p == nil {
+		return false
+	}
 	p.seen[id] = struct{}{}
 	if _, ok := p.g.unreachable[id]; ok {
 		p.skipped++
@@ -190,12 +198,23 @@ func (p *guardPass) skip(id string) bool {
 		p.skipped++
 		return true
 	}
+	return false
+}
+
+// recordAttempted marks an id whose processing REPORTED SUCCESS, arming the
+// next pass to classify it as unreachable if it resurfaces. Only a successful
+// process may be recorded: "resurfaced" is evidence of non-persistence only when
+// the mutation claimed to have landed, so recording a failed attempt would turn
+// one transient delete error into permanent suppression of that record's expiry.
+func (p *guardPass) recordAttempted(id string) {
+	if p == nil {
+		return
+	}
 	if len(p.attempted) < maxGuardRefs {
 		p.attempted[id] = struct{}{}
 	} else {
 		p.overflow = true // fail open: processed but not tracked
 	}
-	return false
 }
 
 // finish folds the pass into the cross-pass state. A COMPLETED pass replaces
@@ -203,6 +222,9 @@ func (p *guardPass) skip(id string) bool {
 // pass only merges what it attempted: its scan view is partial, so pruning
 // against it would wrongly forget ids.
 func (p *guardPass) finish(completed bool) {
+	if p == nil {
+		return
+	}
 	if completed {
 		p.g.lastAttempted = p.attempted
 		for id := range p.g.unreachable {
@@ -257,7 +279,8 @@ func roomGuardID(ref domain.ExpiredRoom) string {
 //     deletion).
 //
 // A processing error aborts the family's loop and returns the counts so far
-// with the error wrapped by wrapErr.
+// with the error wrapped by wrapErr. The errored ref is NOT recorded with the
+// guard, so the next pass retries it instead of classifying it unreachable.
 func sweepExpired[T any](s *Sweep, guard *guardPass, refs []T, guardID func(T) string, process func(T) (bool, error), dryRunLog func(T), wrapErr func(T, error) error) (deleted, cleaned int, err error) {
 	for _, ref := range refs {
 		if s.DryRun {
@@ -265,13 +288,22 @@ func sweepExpired[T any](s *Sweep, guard *guardPass, refs []T, guardID func(T) s
 			deleted++
 			continue
 		}
-		if guard.skip(guardID(ref)) {
+		id := guardID(ref)
+		if guard.skip(id) {
 			continue
 		}
 		ok, perr := process(ref)
+		if errors.Is(perr, domain.ErrConcurrentChange) {
+			// The record was written while this pass was cascading it, so
+			// nothing was applied and its expiry entry still stands. Skipping
+			// hands the retry to the next pass; aborting would strand every
+			// later ref in the batch behind one contended record.
+			continue
+		}
 		if perr != nil {
 			return deleted, cleaned, wrapErr(ref, perr)
 		}
+		guard.recordAttempted(id)
 		if ok {
 			deleted++
 		} else {

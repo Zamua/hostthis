@@ -2079,8 +2079,8 @@ deleted is charged for two while still displaying `v3`.
 Lists BOTH text pastes AND deployed static **sites** (a site shows
 `KIND=site`, its stored byte total, its expiry, and `-` in `VERS` since
 sites are not versioned). This matters because a site counts against the
-same 10 MiB per-identity quota as pastes: if `list` omitted sites, an owner
-could hit `would exceed your 10 MiB total quota` with no visible way to see
+same 100 MiB per-identity quota as pastes: if `list` omitted sites, an owner
+could hit `would exceed your 100 MiB total quota` with no visible way to see
 or free what is using it (deleting the visible text pastes reclaims almost
 nothing). Listing sites makes the quota legible and the slugs copyable for
 `delete`. Sites reuse the retention policy (`EXPIRES_IN` shows the site's
@@ -2464,7 +2464,7 @@ STATIC SITES
 
 LIMITS
 
-    10 MiB per identity, counting post-compression bytes across all
+    100 MiB per identity, counting post-compression bytes across all
     your active pastes. HTML, Markdown, diff, or a gzip-tar site archive.
 
     Apps can persist + sync state: https://hostthis.dev/  (rooms + realtime API)
@@ -3068,6 +3068,25 @@ caller matches against. The message text is stable contract too (it
 keeps the historical `storage:` prefix): sentinel messages appear in
 user-facing output, so moving the definitions must not change a byte of
 them.
+
+One sentinel is domain-owned without being universal:
+`ErrConcurrentChange`. It reports that another write to the same record
+landed while this one was deciding what to do, leaving a decision that
+cannot be salvaged without re-reading. The operation applied NOTHING,
+which is what makes a retry safe, and the retry is the CALLER's: an
+interactive verb reports it and the user re-runs, the expiry sweep skips
+that reference and the next pass picks it up (its index entry is still
+standing, because a cascade that failed did not drop it). It lives in
+the domain because the sweep must recognise it without importing an
+adapter. A backend whose concurrency control cannot lose this way simply
+never returns it, so the conformance suite does not require it.
+
+Retrying in the repo instead was rejected: the optimistic-commit layer
+already spends a bounded retry budget internally and only surfaces a
+conflict once that is exhausted, so a second loop above it re-runs an
+already-exhausted one. Where a stale read taken OUTSIDE the transaction
+is the thing that must be redone, the only correct place to start over
+is the caller.
 
 **Observable contract (what every backend must agree on).** These
 behaviors are expressed in terms of inputs and observable outputs:

@@ -101,15 +101,15 @@ func (s *ShaleRoomRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
 // --- key builders (mirror the slatedb room layout; sharded on {app-slug}) ---
 
 func shaleKeyRoom(appSlug domain.Slug, id domain.RoomID) []byte {
-	return []byte("rooms/" + appSlug.String() + "/" + id.String())
+	return shaleKey(prefixRooms, appSlug.String(), "/", id.String())
 }
 
 func shaleKeyRoomValue(appSlug domain.Slug, id domain.RoomID, key string) []byte {
-	return []byte("roomkv/" + appSlug.String() + "/" + id.String() + "/" + key)
+	return shaleKey(prefixRoomKV, appSlug.String(), "/", id.String(), "/", key)
 }
 
 func shalePrefixRoomValues(appSlug domain.Slug, id domain.RoomID) []byte {
-	return []byte("roomkv/" + appSlug.String() + "/" + id.String() + "/")
+	return shaleKey(prefixRoomKV, appSlug.String(), "/", id.String(), "/")
 }
 
 // shaleKeyRoomCreate is the creation-ledger marker. The room id trails so two
@@ -117,22 +117,24 @@ func shalePrefixRoomValues(appSlug domain.Slug, id domain.RoomID) []byte {
 // keys; a shared key would overwrite and undercount the rate limit. The <ts> is
 // fixed-width and a windowed compare reads it as the second-to-last segment.
 func shaleKeyRoomCreate(appSlug domain.Slug, subnet string, id domain.RoomID, t time.Time) []byte {
-	return []byte("roomcreate/" + appSlug.String() + "/" + subnet + "/" + t.UTC().Format(expirySiteTimeFormat) + "/" + id.String())
+	return shaleKey(prefixRoomCreate, appSlug.String(), "/", subnet, "/",
+		t.UTC().Format(expirySiteTimeFormat), "/", id.String())
 }
 
 func shalePrefixAppRoomCreates(appSlug domain.Slug) []byte {
-	return []byte("roomcreate/" + appSlug.String() + "/")
+	return shaleKey(prefixRoomCreate, appSlug.String(), "/")
 }
 
 func shaleKeyRoomExpiry(t time.Time, appSlug domain.Slug, id domain.RoomID) []byte {
-	return []byte("roomexpiry/" + t.UTC().Format(expirySiteTimeFormat) + "/" + appSlug.String() + "/" + id.String())
+	return shaleKey(prefixRoomExpiryAll, t.UTC().Format(expirySiteTimeFormat), "/",
+		appSlug.String(), "/", id.String())
 }
 
 // shaleKeyRoomBytes is the per-app room-byte counter. It co-shards with every
 // room family on {app-slug}, so a value write and the counter update are one
 // single-shard CAS.
 func shaleKeyRoomBytes(appSlug domain.Slug) []byte {
-	return []byte("roombytes/" + appSlug.String())
+	return shaleKey(prefixRoomBytes, appSlug.String())
 }
 
 // --- room value encoding (shale rejects empty Put values) ------------------
@@ -397,8 +399,10 @@ func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 		}
 
 		// STRICT per-app aggregate: read-check-increment the counter in the
-		// same CAS, charging only a positive delta.
-		if delta != 0 || appCap > 0 {
+		// same CAS, charging only a positive delta. Skipped entirely on a
+		// zero delta, where no cap decision and no counter write can follow:
+		// reading it would only widen the read set and buy spurious retries.
+		if delta != 0 {
 			cur, err := txGetCounter(tx, counterKey)
 			if err != nil {
 				return err
@@ -561,27 +565,6 @@ func (r *ShaleRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now tim
 	return perSubnet, perApp, nil
 }
 
-// SumActiveRoomBytes returns the total room value bytes across every app, from
-// the per-app roombytes/ counters via a cross-shard aggregate. Observability
-// only: the durable total-bytes ceiling lives at the object store (the blob
-// bucket quota). NO read-time expiry awareness - an expired-unswept room's
-// bytes leave the counter at sweep time, not read time.
-func (r *ShaleRepo) SumActiveRoomBytes() (int64, error) {
-	counters, err := r.aggregateForBackground(prefixRoomBytes)
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	for _, item := range counters {
-		n, err := parseCounter(item.Value)
-		if err != nil {
-			return 0, fmt.Errorf("decode %s: %w", item.Key, err)
-		}
-		total += n
-	}
-	return total, nil
-}
-
 // --- SweepRooms ------------------------------------------------------------
 
 // ExpiredRooms fans out across all {app-slug} shards over roomexpiry/ and
@@ -609,57 +592,90 @@ func (r *ShaleRepo) DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error) {
 		func(entryKey []byte) error { return r.deleteExpiryEntry(entryKey, "room expiry entry") })
 }
 
+// errRoomDeleteFenceStale reports that a mutation landed between DeleteRoom's
+// value enumeration and its commit, so the enumeration no longer describes the
+// room. Never escapes DeleteRoom's retry loop.
+var errRoomDeleteFenceStale = errors.New("room mutated during delete enumeration")
+
 // DeleteRoom removes a room record, its expiry index entry, and EVERY value in
 // its namespace, then decrements the per-app counter by the freed bytes, all on
 // the one {app-slug} shard. Idempotent: a missing room is a no-op. The sweep
 // reaches it through DeleteExpiredRoom rather than calling it directly.
 //
 // The value keys are enumerated OUTSIDE the CAS, since ScanPrefix is not
-// allowed inside, but every delete and the counter decrement land in ONE CAS,
-// so the room and all its values vanish atomically (the shale analogue of the
-// sqlite FK cascade).
+// allowed inside, so the enumeration is fenced on the room record's seq exactly
+// as ScanRoom fences its scan: read the seq, scan, then re-read the record
+// inside the CAS and require the same seq. Every mutation bumps that seq in its
+// own CAS, so a put committing in the window is detected and the whole pass
+// retries. Without the fence a value written in that window survives as a row
+// no scan can reach (its room is gone) and its bytes stay charged to the
+// per-app counter forever, which no reconciler repairs.
+//
+// Given equal fence values, every delete and the counter decrement land in ONE
+// CAS, so the room and all its values vanish atomically (the shale analogue of
+// the sqlite FK cascade).
 func (r *ShaleRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
-	var row roomRow
-	if err := r.getJSON(shaleKeyRoom(appSlug, id), &row); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return nil
-		}
-		return err
-	}
-	// The value keys and their total freed bytes, outside the tx.
-	values, err := r.scanPrefix(shalePrefixRoomValues(appSlug, id))
-	if err != nil {
-		return err
-	}
-	var freed int64
-	for _, item := range values {
-		freed += int64(shaleDecodedRoomValueLen(item.Value))
-	}
+	const maxFenceRetries = 5
 	roomKey := shaleKeyRoom(appSlug, id)
 	counterKey := shaleKeyRoomBytes(appSlug)
-	return r.cluster.Transact(roomKey, func(tx backend.Transaction) error {
-		if err := tx.Delete(roomKey); err != nil {
-			return fmt.Errorf("delete room record: %w", err)
+	for range maxFenceRetries {
+		var row roomRow
+		if err := r.getJSON(roomKey, &row); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil
+			}
+			return err
 		}
-		if err := tx.Delete(shaleKeyRoomExpiry(row.ExpiresAt, appSlug, id)); err != nil {
-			return fmt.Errorf("delete room expiry idx: %w", err)
+		// The value keys and their total freed bytes, outside the tx.
+		values, err := r.scanPrefix(shalePrefixRoomValues(appSlug, id))
+		if err != nil {
+			return err
 		}
+		var freed int64
 		for _, item := range values {
-			if err := tx.Delete(item.Key); err != nil {
-				return fmt.Errorf("delete room value %s: %w", item.Key, err)
-			}
+			freed += int64(shaleDecodedRoomValueLen(item.Value))
 		}
-		if freed > 0 {
-			cur, err := txGetCounter(tx, counterKey)
-			if err != nil {
+		err = r.cluster.Transact(roomKey, func(tx backend.Transaction) error {
+			// Re-reading the record joins it to the read set AND closes the
+			// enumeration window: an interleaved put bumped its seq.
+			var inTx roomRow
+			if err := shaleTxGetJSON(tx, roomKey, &inTx); err != nil {
+				if errors.Is(err, ErrNotFound) {
+					return nil // a concurrent delete already removed it
+				}
 				return err
 			}
-			if err := tx.Put(counterKey, formatCounter(cur-freed)); err != nil {
-				return err
+			if inTx.Seq != row.Seq {
+				return errRoomDeleteFenceStale
 			}
+			if err := tx.Delete(roomKey); err != nil {
+				return fmt.Errorf("delete room record: %w", err)
+			}
+			if err := tx.Delete(shaleKeyRoomExpiry(inTx.ExpiresAt, appSlug, id)); err != nil {
+				return fmt.Errorf("delete room expiry idx: %w", err)
+			}
+			for _, item := range values {
+				if err := tx.Delete(item.Key); err != nil {
+					return fmt.Errorf("delete room value %s: %w", item.Key, err)
+				}
+			}
+			if freed > 0 {
+				cur, err := txGetCounter(tx, counterKey)
+				if err != nil {
+					return err
+				}
+				if err := tx.Put(counterKey, formatCounter(cur-freed)); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if errors.Is(err, errRoomDeleteFenceStale) {
+			continue
 		}
-		return nil
-	})
+		return err
+	}
+	return fmt.Errorf("delete room %s/%s: seq fence exhausted after %d retries", appSlug, id, maxFenceRetries)
 }
 
 // PruneOldRoomCreates deletes roomcreate/ markers whose <ts> is before cutoff,

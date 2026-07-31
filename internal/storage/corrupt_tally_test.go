@@ -113,7 +113,6 @@ func TestCorruptTally_SummaryNamesTheScan(t *testing.T) {
 // failures rather than debris; those opt out explicitly, which makes the
 // exemption reviewable.
 func TestReconcilersDoNotLogPerRecord(t *testing.T) {
-	const exempt = "transient-failure-log"
 	for _, file := range []string{"shale_reconcile.go", "shale_site_repo.go"} {
 		t.Run(file, func(t *testing.T) {
 			fset := token.NewFileSet()
@@ -121,55 +120,181 @@ func TestReconcilersDoNotLogPerRecord(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %s: %v", file, err)
 			}
-
-			// Lines carrying (or immediately preceded by) the opt-out marker.
-			exemptLines := map[int]bool{}
-			for _, cg := range f.Comments {
-				if !strings.Contains(cg.Text(), exempt) {
-					continue
-				}
-				end := fset.Position(cg.End()).Line
-				// The marker covers its own line and the statement it precedes.
-				exemptLines[end] = true
-				exemptLines[end+1] = true
+			sites, loops, calls := scanPerRecordLogs(fset, f)
+			for _, s := range sites {
+				t.Errorf("%s:%d logs once per record inside a loop (%s), with no %q marker. A corrupt or "+
+					"otherwise persistently-bad row is bad on EVERY pass, so a log here costs one line per "+
+					"row per pass forever: observed at ~20k rows producing ~1,770 lines/sec, starving the "+
+					"request path (a read went 0.45s -> 19s) while every behavioural check stayed green. "+
+					"Tally it and summarise once per pass (see corruptTally). If this genuinely fires only "+
+					"on a TRANSIENT failure, add the %q comment above it saying why.",
+					file, s.line, s.call, perRecordLogExemptMarker, perRecordLogExemptMarker)
 			}
-
-			var loops, checked int
-			ast.Inspect(f, func(n ast.Node) bool {
-				rng, ok := n.(*ast.RangeStmt)
-				if !ok {
-					return true
-				}
-				loops++
-				ast.Inspect(rng.Body, func(m ast.Node) bool {
-					sel, ok := m.(*ast.SelectorExpr)
-					if !ok || sel.Sel.Name != "repoLog" {
-						return true
-					}
-					checked++
-					line := fset.Position(sel.Pos()).Line
-					if exemptLines[line] {
-						return true
-					}
-					t.Errorf("%s:%d logs once per record inside a loop, with no %q marker. A corrupt or "+
-						"otherwise persistently-bad row is bad on EVERY pass, so a log here costs one line per "+
-						"row per pass forever: observed at ~20k rows producing ~1,770 lines/sec, starving the "+
-						"request path (a read went 0.45s -> 19s) while every behavioural check stayed green. "+
-						"Tally it and summarise once per pass (see corruptTally). If this genuinely fires only "+
-						"on a TRANSIENT failure, add the %q comment above it saying why.",
-						file, line, exempt, exempt)
-					return true
-				})
-				return true
-			})
 
 			// Without this the guard silently passes the moment the loops move
 			// or are rewritten into a shape the walk stops recognising.
 			if loops == 0 {
-				t.Fatalf("%s: found no range loops at all, so this guard checked NOTHING; re-point it "+
+				t.Fatalf("%s: found no loops at all, so this guard checked NOTHING; re-point it "+
 					"rather than leaving it green", file)
 			}
-			t.Logf("%s: inspected %d loops, %d repoLog call sites", file, loops, checked)
+			t.Logf("%s: inspected %d loops, %d logging call sites in loop bodies", file, loops, calls)
+		})
+	}
+}
+
+// perRecordLogExemptMarker opts one call site out of the per-record-log ban.
+const perRecordLogExemptMarker = "transient-failure-log"
+
+// loggingMethods are the *log.Logger emit methods. Keying on the METHOD rather
+// than on a receiver spelling is what survives a rename: `r.repoLog().Printf`,
+// a hoisted `lg := r.repoLog()` then `lg.Printf`, and a package-level
+// `log.Printf` all cost the same one line per record, and a matcher that knows
+// only the first name reads green on the other two.
+var loggingMethods = map[string]bool{"Print": true, "Printf": true, "Println": true}
+
+type perRecordLogSite struct {
+	line int
+	call string
+}
+
+// scanPerRecordLogs returns every unexempted logging call reachable from a loop
+// body in f, plus how many loops were walked and how many logging calls sat
+// inside one. Both loop forms count: rewriting a `for range` as a counted `for`
+// must not silently retire the guard.
+func scanPerRecordLogs(fset *token.FileSet, f *ast.File) (sites []perRecordLogSite, loops, calls int) {
+	// Lines carrying (or immediately preceded by) the opt-out marker.
+	exemptLines := map[int]bool{}
+	for _, cg := range f.Comments {
+		if !strings.Contains(cg.Text(), perRecordLogExemptMarker) {
+			continue
+		}
+		end := fset.Position(cg.End()).Line
+		// The marker covers its own line and the statement it precedes.
+		exemptLines[end] = true
+		exemptLines[end+1] = true
+	}
+
+	seen := map[int]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		var body *ast.BlockStmt
+		switch loop := n.(type) {
+		case *ast.RangeStmt:
+			body = loop.Body
+		case *ast.ForStmt:
+			body = loop.Body
+		default:
+			return true
+		}
+		loops++
+		ast.Inspect(body, func(m ast.Node) bool {
+			call, ok := m.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || !loggingMethods[sel.Sel.Name] {
+				return true
+			}
+			calls++
+			line := fset.Position(call.Pos()).Line
+			if exemptLines[line] || seen[line] {
+				return true
+			}
+			seen[line] = true
+			sites = append(sites, perRecordLogSite{line: line, call: sel.Sel.Name})
+			return true
+		})
+		return true
+	})
+	return sites, loops, calls
+}
+
+// The detector itself, over the loop and logger shapes a refactor can produce.
+// Applied only to already-correct files it can report nothing about what it
+// fails to recognise, which is how a source-level guard goes quietly vacuous.
+func TestScanPerRecordLogs(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		src       string
+		wantSites int
+		wantLoops int
+	}{
+		{
+			name: "counted for loop with a hoisted logger",
+			src: `package p
+func f(items []int, lg logger) {
+	for i := 0; i < len(items); i++ {
+		lg.Printf("row %d", i)
+	}
+}`,
+			wantSites: 1, wantLoops: 1,
+		},
+		{
+			name: "range loop with a package-level logger",
+			src: `package p
+func f(items []int) {
+	for _, it := range items {
+		log.Println(it)
+	}
+}`,
+			wantSites: 1, wantLoops: 1,
+		},
+		{
+			name: "range loop with the repo logger",
+			src: `package p
+func (r *R) f(items []int) {
+	for _, it := range items {
+		r.repoLog().Printf("%v", it)
+	}
+}`,
+			wantSites: 1, wantLoops: 1,
+		},
+		{
+			name: "log inside a closure inside a loop still runs per record",
+			src: `package p
+func (r *R) f(items []int) {
+	for _, it := range items {
+		func() { r.repoLog().Print(it) }()
+	}
+}`,
+			wantSites: 1, wantLoops: 1,
+		},
+		{
+			name: "exempted call",
+			src: `package p
+func (r *R) f(items []int) {
+	for _, it := range items {
+		// transient-failure-log: fires only on a failed write.
+		r.repoLog().Printf("%v", it)
+	}
+}`,
+			wantSites: 0, wantLoops: 1,
+		},
+		{
+			name: "summary outside the loop is the wanted shape",
+			src: `package p
+func (r *R) f(items []int) {
+	for _, it := range items {
+		tally.note(it)
+	}
+	r.repoLog().Print(tally.summary())
+}`,
+			wantSites: 0, wantLoops: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, "fixture.go", tc.src, parser.ParseComments)
+			if err != nil {
+				t.Fatalf("parse fixture: %v", err)
+			}
+			sites, loops, _ := scanPerRecordLogs(fset, f)
+			if len(sites) != tc.wantSites {
+				t.Fatalf("sites = %d %+v, want %d", len(sites), sites, tc.wantSites)
+			}
+			if loops != tc.wantLoops {
+				t.Fatalf("loops = %d, want %d", loops, tc.wantLoops)
+			}
 		})
 	}
 }

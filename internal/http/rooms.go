@@ -159,12 +159,12 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request, appSlug doma
 func (s *Server) appExists(appSlug domain.Slug) bool {
 	now := s.nowOrTime()
 	if s.Sites != nil {
-		if site, err := s.Sites.Get(appSlug); err == nil && now.Before(site.ExpiresAt) {
+		if site, err := s.Sites.Get(appSlug); err == nil && !domain.IsExpired(site.ExpiresAt, now) {
 			return true
 		}
 	}
 	if s.Pastes != nil {
-		if paste, err := s.Pastes.Get(appSlug); err == nil && now.Before(paste.ExpiresAt) {
+		if paste, err := s.Pastes.Get(appSlug); err == nil && !domain.IsExpired(paste.ExpiresAt, now) {
 			return true
 		}
 	}
