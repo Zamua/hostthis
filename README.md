@@ -136,7 +136,7 @@ days after its last write. Deployments without a room store return 404.
 
 ## LIMITS
 
-10 MiB per identity, counting post-compression bytes across every
+100 MiB per identity, counting post-compression bytes across every
 active version of every active paste. Text compresses 5-10x under
 zstd, so the real raw-payload ceiling is typically 50-100 MiB.
 

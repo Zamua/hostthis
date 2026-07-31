@@ -88,10 +88,16 @@ func (c *CompressedBlobStore) PutPrecompressed(sha string, body []byte) error {
 //
 // Cheap to inspect on every Get, and distinct enough that no real
 // HTML/Markdown blob matches by accident.
+//
+// Mirrored: the service-layer streaming upload path holds its own copy of these
+// bytes and of compressionLevel, because it must not import this package. A
+// change here has to land there too;
+// service.TestStreamUploadMatchesStorageAtRestFormat pins the two encoders
+// byte-identical.
 var magicV1 = [4]byte{'H', 'Z', 0x00, 0x01}
 
 // SpeedDefault (level 3): ratio close to the slower levels on HTML/text, at
-// roughly 500 MB/s encode and 1 GB/s decode.
+// roughly 500 MB/s encode and 1 GB/s decode. Mirrored service-side, see magicV1.
 const compressionLevel = zstd.SpeedDefault
 
 // NewCompressedBlobStore wraps inner with the compression layer.
@@ -112,16 +118,19 @@ func (c *CompressedBlobStore) Put(sha string, r io.Reader, _ int64) error {
 
 // CompressedBodyPrefixLen is the width of the at-rest framing prefix that
 // EncodeCompressedBody writes ahead of the zstd stream. Exported so a caller
-// computing the quota-relevant payload size subtracts the real width instead
-// of keeping its own copy of the magic bytes to measure.
+// computing the quota-relevant payload size subtracts the real width rather
+// than hardcoding it.
 const CompressedBodyPrefixLen = len(magicV1)
 
 // EncodeCompressedBody returns `magic + zstd(r)` buffered in memory: the exact
 // at-rest format Put writes and DecodeCompressedStream reads. The shale-blob
 // stage path streams to BlobKV.StageBlob rather than through
-// CompressedBlobStore.Put, and calls this so both paths store the identical
-// format and a site file decodes the same as a paste. The body is bounded by
-// one file (the untar's per-file cap), so buffering is safe.
+// CompressedBlobStore.Put, and calls this so a site file is stored in the same
+// format as a paste. The body is bounded by one file (the untar's per-file
+// cap), so buffering is safe.
+//
+// Not the only encoder of this format: the service-layer streaming upload path
+// re-implements it to hash, cap and encode stdin in a single pass. See magicV1.
 func EncodeCompressedBody(r io.Reader) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.Grow(int(estimatedCompressedSize(0)))
@@ -261,8 +270,8 @@ func estimatedCompressedSize(uncompressed int) int {
 }
 
 // EncodeBody implements the service-side BlobStore encoder, returning the
-// at-rest body and the payload size excluding the framing prefix. The service
-// asks rather than computing, so the prefix width lives only here.
+// at-rest body and the payload size excluding the framing prefix, so a caller
+// needing the on-disk footprint does not redo the framing arithmetic.
 func (s *CompressedBlobStore) EncodeBody(r io.Reader) ([]byte, int, error) {
 	body, err := EncodeCompressedBody(r)
 	if err != nil {

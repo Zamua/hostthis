@@ -341,6 +341,53 @@ func TestVerbUpdate_AppendsVersion(t *testing.T) {
 	}
 }
 
+// An update that carries a rejected --name reports the failure instead of the
+// success banner: the label did not change, so claiming the save succeeded
+// hides a half-applied command.
+func TestVerbUpdate_RejectedNameIsNotReportedAsSuccess(t *testing.T) {
+	s := startStack(t)
+	stdout, _, _ := s.run("", []byte("<!doctype html><p>v1</p>"))
+	slug := extractSlug(stdout)
+
+	tooLong := strings.Repeat("a", 61) // validName caps a label at 60 runes
+	outUpd, stderr, exit := s.run(slug+" --name "+tooLong, []byte("<!doctype html><p>v2</p>"))
+	if exit == 0 {
+		t.Fatalf("update with a rejected label should exit non-zero, got 0 (stdout=%q stderr=%q)", outUpd, stderr)
+	}
+	if !strings.Contains(stderr, "name must be") {
+		t.Fatalf("expected the invalid-name message, got %q", stderr)
+	}
+	if strings.Contains(stderr, "saved") {
+		t.Fatalf("a rejected label must not print the saved banner, got %q", stderr)
+	}
+	// The label really is unchanged, so the error was the truthful report.
+	listOut, _, _ := s.run("list", nil)
+	if strings.Contains(listOut, tooLong) {
+		t.Fatalf("rejected label must not be applied: %q", listOut)
+	}
+}
+
+// Piping to a slug the caller does not own reports the SAME not-found text
+// every other verb reports, with no internal layer name in it.
+func TestVerbUpdate_ForeignSlugNotFoundMatchesOtherVerbs(t *testing.T) {
+	s := startStack(t)
+	stdout, _, _ := s.run("", []byte("<!doctype html><p>mine</p>"))
+	slug := extractSlug(stdout)
+
+	other, _ := newKeyClient(t, s.sshAddr)
+	_, updStderr, updExit := s.runOn(other, slug, []byte("<!doctype html><p>theirs</p>"))
+	if updExit == 0 {
+		t.Fatalf("foreign update should fail, got exit 0 (%q)", updStderr)
+	}
+	_, getStderr, _ := s.runOn(other, "get "+slug, nil)
+	if updStderr != getStderr {
+		t.Fatalf("foreign update stderr %q must match the foreign get stderr %q", updStderr, getStderr)
+	}
+	if strings.Contains(updStderr, "service:") {
+		t.Fatalf("update must not leak the service layer name: %q", updStderr)
+	}
+}
+
 func TestVerbHelp_OnUnknown(t *testing.T) {
 	s := startStack(t)
 	_, stderr, exit := s.run("nonsense", nil)

@@ -116,6 +116,8 @@ func main() {
 	if siteRepo != nil {
 		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobUnit)
 		deploySvc.Retention = retention
+		// Without this the compensating slug-claim release fails silently.
+		deploySvc.Logger = logger
 		// The quota cap sums paste + site bytes, so whoami's used_bytes
 		// under-counts without this.
 		manageSvc.SiteBytes = siteRepo
@@ -428,22 +430,38 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// A malformed value is a configuration ERROR, not a reason to fall back. The
+// operator set the variable deliberately, and silently substituting the default
+// leaves the startup log confirming a value they never got. Exits rather than
+// returning an error because these are read during flag setup, before there is
+// anywhere to return one to.
+func configFatal(key, val, want string) {
+	fmt.Fprintf(os.Stderr, "hostthisd: %s=%q is not %s\n", key, val, want)
+	os.Exit(2)
+}
+
 func envOrInt(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
 	}
-	return fallback
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		configFatal(key, v, "an integer")
+	}
+	return n
 }
 
 func envOrInt64(key string, fallback int64) int64 {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			return n
-		}
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
 	}
-	return fallback
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		configFatal(key, v, "an integer")
+	}
+	return n
 }
 
 func envOrDuration(key string, fallback time.Duration) time.Duration {

@@ -24,46 +24,65 @@ import (
 
 // --- key builders (mirror SlateRepo's layout) ------------------------------
 
-func shaleKeyPaste(slug domain.Slug) []byte { return []byte("pastes/" + slug.String()) }
+// shaleKey joins a family prefix with the rest of a key. The prefix is always
+// one of the vars shaleShardKey routes on, never a re-spelled literal: a key
+// whose family the router does not recognise falls through to the whole-key
+// fallback, which scatters that family across shards and silently turns every
+// single-shard CAS it depends on into a cross-shard write. Binding both sides
+// to one var is what makes a typo a compile error instead.
+func shaleKey(prefix []byte, parts ...string) []byte {
+	n := len(prefix)
+	for _, p := range parts {
+		n += len(p)
+	}
+	out := make([]byte, 0, n)
+	out = append(out, prefix...)
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
+}
+
+func shaleKeyPaste(slug domain.Slug) []byte { return shaleKey(prefixPastes, slug.String()) }
 
 func shaleKeyVersion(slug domain.Slug, verNum int) []byte {
-	return fmt.Appendf(nil, "versions/%s/%04d", slug.String(), verNum)
+	return fmt.Appendf(shalePrefixVersions(slug), "%04d", verNum)
 }
 
 func shalePrefixVersions(slug domain.Slug) []byte {
-	return []byte("versions/" + slug.String() + "/")
+	return shaleKey(prefixVersionsAll, slug.String(), "/")
 }
 
-func shaleKeySlugOwner(slug domain.Slug) []byte { return []byte("slug_owner/" + slug.String()) }
+func shaleKeySlugOwner(slug domain.Slug) []byte { return shaleKey(prefixSlugOwner, slug.String()) }
 
 func shaleKeyIdentityPaste(identity, slug string) []byte {
-	return []byte("identity_pastes/" + identity + "/" + slug)
+	return shaleKey(prefixIdentityPastesAll, identity, "/", slug)
 }
 
 func shalePrefixIdentityPastes(identity string) []byte {
-	return []byte("identity_pastes/" + identity + "/")
+	return shaleKey(prefixIdentityPastesAll, identity, "/")
 }
 
 func shaleKeyIdentityFirstSeen(identity string) []byte {
-	return []byte("identity_first_seen/" + identity)
+	return shaleKey(prefixIdentityFirstSeenAll, identity)
 }
 
 func shaleKeyExpiry(t time.Time, slug domain.Slug) []byte {
-	return []byte("expiry/" + t.UTC().Format(time.RFC3339Nano) + "/" + slug.String())
+	return shaleKey(prefixExpiryAll, t.UTC().Format(time.RFC3339Nano), "/", slug.String())
 }
 
 func shaleKeyKeygate(subnet, identity string) []byte {
-	return []byte("keygate/" + subnet + "/" + identity)
+	return shaleKey(prefixKeygateAll, subnet, "/", identity)
 }
 
 func shalePrefixKeygateSubnet(subnet string) []byte {
-	return []byte("keygate/" + subnet + "/")
+	return shaleKey(prefixKeygateAll, subnet, "/")
 }
 
 // Prefix form of the identity-leading index key. It lives in this build-tagged
 // file because only the tagged scan paths use it.
 func shalePrefixKeygateIdentity(identity string) []byte {
-	return []byte("keygate_id/" + identity + "/")
+	return shaleKey(prefixKeygateIdentityAll, identity, "/")
 }
 
 // PendingPasteTimeout is how old a status=pending paste may be before the
@@ -222,22 +241,13 @@ func (r *ShaleRepo) scanPrefixOnce(prefix []byte) ([]scanItem, error) {
 // specifically: it acts on ABSENCE (deleting any blob NOT in the referenced
 // set), so a truncated answer deletes live data, where the other consumers
 // merely under-report.
+//
+// Named for the CALLER's context rather than taking a policy argument: whether
+// anything is waiting on the answer is a property the mechanism cannot see, so
+// an interactive fan-out has to declare itself at the call site (with a budget
+// that gives up quickly) instead of inheriting this patient one by default.
 func (r *ShaleRepo) aggregateForBackground(prefix []byte) ([]scanItem, error) {
 	return r.aggregateWith(backgroundRetry, prefix)
-}
-
-// aggregateForRequest fans out for a caller with a USER WAITING on it. It gives
-// up quickly, because a slow answer is worse than a missing one on an
-// interactive path.
-//
-// Two APIs rather than one with a policy argument, deliberately: the difference
-// that decides the budget (is anything waiting on this?) is a property of the
-// CALLER, which the mechanism cannot see. Behind a single entry point an
-// interactive path silently inherits the patient budget and blocks on a
-// best-effort lookup whose error it then discards. Naming the caller's context
-// makes that mistake visible at the call site instead of buried in a default.
-func (r *ShaleRepo) aggregateForRequest(prefix []byte) ([]scanItem, error) {
-	return r.aggregateWith(readRetry, prefix)
 }
 
 // aggregateWith fans out across all shards (cluster.Aggregate) and collects

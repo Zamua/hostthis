@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -71,10 +72,18 @@ type WriteBackBlobStore struct {
 	stopCh  chan struct{}
 	stopOne sync.Once
 
-	// mu guards inFlight (shas queued or uploading) so the same sha is never
-	// enqueued twice concurrently and eviction can skip in-flight entries.
+	// diskBytes is a running count of the cached blob bytes so the common
+	// under-cap Put skips the full-directory walk. Any walk resyncs it, and
+	// the accounting only ever errs high (one extra walk), never low (a
+	// skipped eviction).
+	diskBytes atomic.Int64
+
+	// mu guards inFlight (shas queued or uploading) and closed, so the same
+	// sha is never enqueued twice concurrently, eviction can skip in-flight
+	// entries, and no retry goroutine starts after Close.
 	mu       sync.Mutex
 	inFlight map[string]struct{}
+	closed   bool
 }
 
 const uploadedMarkerSuffix = ".up"
@@ -205,6 +214,7 @@ func (w *WriteBackBlobStore) writeLocal(sha string, body []byte) error {
 	if err := os.Rename(tmpName, dst); err != nil {
 		return fmt.Errorf("writeback rename: %w", err)
 	}
+	w.diskBytes.Add(int64(len(body)))
 	return nil
 }
 
@@ -232,17 +242,58 @@ func (w *WriteBackBlobStore) enqueue(sha string) {
 
 	select {
 	case w.queue <- sha:
+		return
 	default:
-		// Queue full: upload synchronously rather than block the caller or
-		// drop the work.
-		w.mu.Lock()
-		delete(w.inFlight, sha)
+	}
+	// Queue full: attempt the upload here rather than block the caller on the
+	// queue or drop the work. sha stays in flight for the attempt so eviction
+	// leaves it alone. A failure hands off to ONE tracked retry goroutine with
+	// the workers' bounded backoff; re-entering enqueue instead would spawn an
+	// unbounded chain that hammers the failing backend and outlives Close.
+	err := w.uploadOnce(sha)
+	if err == nil {
+		w.releaseInFlight(sha)
+		return
+	}
+	w.logf("writeback: synchronous upload of %s failed: %v", sha, err)
+	if !w.goTracked(func() { w.retryUpload(sha) }) {
+		// Shutting down: the local copy stays unmarked for the next rescan.
+		w.releaseInFlight(sha)
+	}
+}
+
+func (w *WriteBackBlobStore) releaseInFlight(sha string) {
+	w.mu.Lock()
+	delete(w.inFlight, sha)
+	w.mu.Unlock()
+}
+
+// goTracked runs fn in a goroutine the uploader WaitGroup covers, so Close
+// waits for it. Reports false, starting nothing, once Close has begun.
+func (w *WriteBackBlobStore) goTracked(fn func()) bool {
+	w.mu.Lock()
+	if w.closed {
 		w.mu.Unlock()
-		if err := w.uploadOnce(sha); err != nil {
-			w.logf("writeback: synchronous upload of %s failed: %v", sha, err)
-			// From a goroutine, to avoid recursing here.
-			go w.enqueue(sha)
-		}
+		return false
+	}
+	w.wg.Add(1)
+	w.mu.Unlock()
+	go func() {
+		defer w.wg.Done()
+		fn()
+	}()
+	return true
+}
+
+// retryUpload waits out one backoff, then runs the same bounded retry the
+// workers use. Entered only from the queue-full path, whose first attempt has
+// already failed.
+func (w *WriteBackBlobStore) retryUpload(sha string) {
+	select {
+	case <-w.stopCh:
+		w.releaseInFlight(sha)
+	case <-time.After(w.baseBackoff):
+		w.handleUpload(sha)
 	}
 }
 
@@ -262,11 +313,7 @@ func (w *WriteBackBlobStore) uploadWorker() {
 // gives up for this cycle but leaves the local copy unmarked, so the next
 // startup rescan (or a future Put of the same sha) re-enqueues it.
 func (w *WriteBackBlobStore) handleUpload(sha string) {
-	defer func() {
-		w.mu.Lock()
-		delete(w.inFlight, sha)
-		w.mu.Unlock()
-	}()
+	defer w.releaseInFlight(sha)
 	backoff := w.baseBackoff
 	const maxAttempts = 8
 	for attempt := range maxAttempts {
@@ -370,7 +417,15 @@ func (w *WriteBackBlobStore) WalkBlobs(fn func(sha string) error) error {
 // Remove deletes sha from both the durable backend and the local cache.
 func (w *WriteBackBlobStore) Remove(sha string) error {
 	derr := w.durable.Remove(sha)
-	_ = os.Remove(w.blobPath(sha))
+	// Too short to shard, so it cannot name a cache path; the durable backend
+	// above decides what such a sha means.
+	if len(sha) < 2 {
+		return derr
+	}
+	fi, statErr := os.Stat(w.blobPath(sha))
+	if err := os.Remove(w.blobPath(sha)); err == nil && statErr == nil {
+		w.diskBytes.Add(-fi.Size())
+	}
 	_ = os.Remove(w.markerPath(sha))
 	return derr
 }
@@ -379,6 +434,7 @@ func (w *WriteBackBlobStore) Remove(sha string) error {
 // upload interrupted by a crash or restart resumes. Called once at construction.
 func (w *WriteBackBlobStore) rescanPending() error {
 	var pending []string
+	var total int64
 	err := filepath.WalkDir(w.dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -394,12 +450,21 @@ func (w *WriteBackBlobStore) rescanPending() error {
 		if strings.HasSuffix(base, uploadedMarkerSuffix) {
 			return nil // marker file, not a blob
 		}
+		if len(base) < 2 {
+			return nil // too short to shard, so not a blob this cache wrote
+		}
+		if info, ierr := d.Info(); ierr == nil {
+			total += info.Size()
+		}
 		if w.isUploaded(base) {
 			return nil // already confirmed durable
 		}
 		pending = append(pending, base)
 		return nil
 	})
+	// Seed the running byte count even from a partial walk: a walk that errors
+	// blocks eviction anyway, so a low seed costs nothing it did not already.
+	w.diskBytes.Store(total)
 	if err != nil {
 		return err
 	}
@@ -425,11 +490,20 @@ type cacheEntry struct {
 // durable copy of its bytes and is never evicted, so the cap is soft under a
 // burst of uploads the backend has not absorbed yet.
 func (w *WriteBackBlobStore) evictIfNeeded() {
+	// Put calls this every time, so answer from the running count when the
+	// cache is nowhere near the cap: the walk below costs a stat per cached
+	// file, which a multi-file site deploy would otherwise pay per Put.
+	before := w.diskBytes.Load()
+	if before <= w.maxBytes {
+		return
+	}
 	entries, total, err := w.scanEntries()
 	if err != nil {
 		w.logf("writeback: eviction scan error: %v", err)
 		return
 	}
+	// Resync as a delta, not a store, so a concurrent Put's increment survives.
+	w.diskBytes.Add(total - before)
 	if total <= w.maxBytes {
 		return
 	}
@@ -459,6 +533,7 @@ func (w *WriteBackBlobStore) evictIfNeeded() {
 		}
 		_ = os.Remove(w.markerPath(e.sha))
 		total -= e.size
+		w.diskBytes.Add(-e.size)
 	}
 }
 
@@ -477,6 +552,9 @@ func (w *WriteBackBlobStore) scanEntries() ([]cacheEntry, int64, error) {
 		base := filepath.Base(path)
 		if strings.HasPrefix(base, ".tmp-") || strings.HasSuffix(base, uploadedMarkerSuffix) {
 			return nil
+		}
+		if len(base) < 2 {
+			return nil // too short to shard, so not a blob this cache wrote
 		}
 		info, ierr := d.Info()
 		if ierr != nil {
@@ -501,6 +579,9 @@ func (w *WriteBackBlobStore) scanEntries() ([]cacheEntry, int64, error) {
 // yet uploaded stays in the cache unmarked and is re-enqueued by the next
 // process's startup rescan.
 func (w *WriteBackBlobStore) Close() {
+	w.mu.Lock()
+	w.closed = true
+	w.mu.Unlock()
 	w.stopOne.Do(func() { close(w.stopCh) })
 	w.wg.Wait()
 }

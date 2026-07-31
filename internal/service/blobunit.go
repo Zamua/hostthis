@@ -38,9 +38,12 @@ type BlobUnit interface {
 
 	// StageStream durably writes a record's blob by streaming r
 	// (UNCOMPRESSED; the storage layer compresses at rest). size is the
-	// expected uncompressed length. Used by the site deploy path, which stores
-	// one file at a time straight out of the safe-untar without buffering the
-	// whole archive.
+	// expected uncompressed length.
+	//
+	// NO production caller: the site deploy stages through StageEncoding,
+	// which also reports the compressed size it charges against quota. Both
+	// adapters implement StageStream and their own tests cover it, but a
+	// service reaching for it here would be the first to travel that path.
 	StageStream(ctx context.Context, slug, sha string, r io.Reader, size int64) (BlobHandle, error)
 
 	// Commit persists a record's metadata AND binds every staged handle as ONE

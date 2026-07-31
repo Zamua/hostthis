@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/archive"
@@ -63,6 +64,23 @@ type SiteRepo interface {
 	PreClaimSlug(ctx context.Context, slug domain.Slug, owner string, now time.Time) error
 }
 
+// SlugClaimReleaser is the compensating half of SiteRepo.PreClaimSlug: it drops
+// a claim no record was committed under, so a deploy that aborts after staking
+// one (unreadable archive, no web content, a failed commit) does not remove the
+// slug from the namespace for good. The claim is durable and no other path
+// undoes it.
+//
+// Optional rather than part of SiteRepo: a backend whose PreClaimSlug is a
+// no-op has nothing to release, and the deploy path skips the compensation when
+// the repo does not implement this.
+//
+// An implementation MUST NOT drop a claim a paste or site was actually
+// committed under, and MUST be a no-op on an absent or foreign claim so a
+// repeated release is harmless.
+type SlugClaimReleaser interface {
+	ReleaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) error
+}
+
 // PasteByteSummer is the slice of the paste repo the deploy path needs for
 // its remaining-budget computation. internal/storage.PasteRepo satisfies it.
 type PasteByteSummer interface {
@@ -81,6 +99,16 @@ type DeploySite struct {
 	Now    func() time.Time
 	// Retention stamps a deployed site's ExpiresAt (same policy as pastes).
 	Retention domain.Retention
+	// Logger records outcomes the caller never sees: the compensating release
+	// of a pre-claimed slug runs on the way out of a failed deploy and its own
+	// failure must not replace the deploy's error. nil discards.
+	Logger *log.Logger
+}
+
+func (d *DeploySite) logf(format string, args ...any) {
+	if d.Logger != nil {
+		d.Logger.Printf(format, args...)
+	}
 }
 
 // NewDeploySite wires defaults. The composition root overrides
@@ -161,12 +189,22 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	// routes nothing, so it stays empty here and is minted in the post-untar
 	// insert retry loop.
 	var slug domain.Slug
+	committed := false
 	if d.Blob.IsTransactional() {
 		s, err := d.preClaimSlug(ctx, owner, now)
 		if err != nil {
 			return SiteResult{}, err
 		}
 		slug = s
+		// The claim is durable and nothing else ever drops it, so every exit
+		// from here that does not commit a site under slug has to undo it or
+		// the slug leaves the namespace permanently. A deferred compensation
+		// covers the untar, manifest and commit failures alike, plus a panic.
+		defer func() {
+			if !committed {
+				d.releaseSlugClaim(ctx, slug, owner)
+			}
+		}()
 	}
 
 	sink := &blobSink{blob: d.Blob, slug: string(slug)}
@@ -212,7 +250,9 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		err := d.Blob.Commit(ctx, sink.handles, func(ctx context.Context) error {
 			return d.Sites.InsertWithQuotaCheck(ctx, site, deduped, int64(domain.UserQuotaBytes), now)
 		})
-		return finalizeDeploy(site, err)
+		res, ferr := finalizeDeploy(site, err)
+		committed = ferr == nil
+		return res, ferr
 	}
 
 	// Standalone path: mint the slug in a retry loop. The mid-untar guard
@@ -276,6 +316,20 @@ func (d *DeploySite) preClaimSlug(ctx context.Context, owner string, now time.Ti
 		}
 	}
 	return "", SlugTakenErr
+}
+
+// releaseSlugClaim undoes a pre-claim no site was committed under. Best-effort:
+// a failure re-leaks the claim (one slug of a 32^8 space) and must never
+// replace the deploy error the caller is about to see. A backend whose
+// PreClaimSlug is a no-op implements no releaser and needs none.
+func (d *DeploySite) releaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) {
+	rel, ok := d.Sites.(SlugClaimReleaser)
+	if !ok {
+		return
+	}
+	if err := rel.ReleaseSlugClaim(ctx, slug, owner); err != nil {
+		d.logf("deploy: release slug claim %s: %v", slug, err)
+	}
 }
 
 // finalizeDeploy translates the transactional insert's error into the deploy

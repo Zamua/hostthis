@@ -85,6 +85,11 @@ func (s *ShaleSiteRepo) PreClaimSlug(ctx context.Context, slug domain.Slug, owne
 	return s.repo.PreClaimSiteSlug(ctx, slug, owner, now)
 }
 
+// service.SlugClaimReleaser
+func (s *ShaleSiteRepo) ReleaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) error {
+	return s.repo.ReleaseSiteSlugClaim(ctx, slug, owner)
+}
+
 // service.SweepSites (Delete also serves the owner-facing removal path)
 func (s *ShaleSiteRepo) Delete(slug domain.Slug) error { return s.repo.DeleteSite(slug) }
 func (s *ShaleSiteRepo) ExpiredSites(now time.Time) ([]domain.ExpiredSite, error) {
@@ -366,10 +371,11 @@ func (r *ShaleRepo) replaceSiteAuthoritative(s domain.Site, dedupedSize int, ref
 // authoritative insert checks only sites/ and pastes/ for its collision, so a
 // deploy does not reject the claim it just made.
 //
-// A crash after claiming but before committing leaves a marker with no site row:
-// a harmless leak with no dedicated sweep, because a later paste minting that
-// slug overwrites the marker unconditionally. Until then one slug in a 32^8
-// space stays un-pre-claimable.
+// A claim is durable and no sweep reclaims one, so a deploy that does not
+// commit under the slug MUST hand it back via ReleaseSiteSlugClaim or the slug
+// leaves the site namespace for good. Only a crash in that window leaves a
+// marker with no row, and a later paste minting the slug overwrites it
+// unconditionally.
 //
 // owner and now are accepted for symmetry with the seam; a claim is a stake,
 // not a byte reservation, so it charges no quota.
@@ -397,6 +403,50 @@ func (r *ShaleRepo) PreClaimSiteSlug(_ context.Context, slug domain.Slug, owner 
 			return fmt.Errorf("preclaim slug_owner check: %w", err)
 		}
 		return tx.Put(ownerKey, []byte(owner))
+	})
+}
+
+// ReleaseSiteSlugClaim hands a pre-claimed slug back when the deploy that
+// staked it never committed a site under it, so an aborted deploy does not burn
+// the slug: PreClaimSiteSlug rejects any slug carrying a marker, and nothing
+// else removes one.
+//
+// A single {slug}-shard CAS deleting slug_owner/<slug> IFF it still holds
+// owner's stake AND neither pastes/<slug> nor sites/<slug> exists. All three
+// reads join the read-set, so a racing insert that makes the marker load-bearing
+// conflicts instead of losing its owner pointer, and an ambiguous commit that
+// actually landed keeps its marker. A missing or foreign claim is a no-op, so a
+// repeated release is harmless.
+func (r *ShaleRepo) ReleaseSiteSlugClaim(_ context.Context, slug domain.Slug, owner string) error {
+	pasteKey := shaleKeyPaste(slug)
+	siteKey := shaleKeySite(slug)
+	ownerKey := shaleKeySlugOwner(slug)
+	return r.cluster.Transact(siteKey, func(tx backend.Transaction) error {
+		raw, err := tx.Get(ownerKey)
+		if err != nil {
+			if errors.Is(err, backend.ErrNotFound) {
+				return nil // nothing claimed
+			}
+			return fmt.Errorf("release slug_owner check: %w", err)
+		}
+		claimed, err := stripEnvelope(raw)
+		if err != nil {
+			return fmt.Errorf("release slug_owner strip: %w", err)
+		}
+		if string(claimed) != owner {
+			return nil // another identity's stake
+		}
+		if _, err := tx.Get(pasteKey); err == nil {
+			return nil // a paste owns the slug; the marker is its own
+		} else if !errors.Is(err, backend.ErrNotFound) {
+			return fmt.Errorf("release paste check: %w", err)
+		}
+		if _, err := tx.Get(siteKey); err == nil {
+			return nil // the deploy landed after all
+		} else if !errors.Is(err, backend.ErrNotFound) {
+			return fmt.Errorf("release site check: %w", err)
+		}
+		return tx.Delete(ownerKey)
 	})
 }
 
@@ -597,9 +647,13 @@ func (r *ShaleRepo) legacySiteEntryBytes(indexKey []byte, now time.Time) (int64,
 //  1. Read sites/<slug>. Absent -> no-op return (idempotent; the sweep
 //     re-calls this for already-gone slugs).
 //  2. Tombstone on the {slug} shard, one CAS: delete sites/<slug>, delete
-//     expiry_sites/<ts>/<slug>, and unbind the file blobs - atomic on the
-//     transactional shale-blob path so the bytes go unreferenced exactly when
-//     the manifest vanishes (SweepOrphans reclaims them after the grace).
+//     expiry_sites/<ts>/<slug>, delete slug_owner/<slug>, and unbind the file
+//     blobs - atomic on the transactional shale-blob path so the bytes go
+//     unreferenced exactly when the manifest vanishes (SweepOrphans reclaims
+//     them after the grace). Dropping slug_owner is what returns the slug to
+//     the namespace: PreClaimSiteSlug rejects a slug that still carries one, so
+//     a marker left behind would make the slug undeployable forever. The paste
+//     delete drops the same key.
 //  3. Drop identity_sites/<id>/<slug> on the {id} shard (idempotent).
 func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 	siteKey := shaleKeySite(slug)
@@ -628,6 +682,13 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 			return err
 		}
 		if err := tx.Delete(shaleKeyExpirySite(cur.ExpiresAt, slug)); err != nil {
+			return err
+		}
+		// slug_owner co-shards with sites/<slug>, so the claim the deploy staked
+		// clears in the same CAS the row it belongs to does. Deleting an absent
+		// key is a no-op, which covers a site deployed on a path that never
+		// pre-claimed.
+		if err := tx.Delete(shaleKeySlugOwner(slug)); err != nil {
 			return err
 		}
 		for _, blobID := range cur.FileBlobs {

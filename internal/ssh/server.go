@@ -370,12 +370,19 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 
 		res, err := s.Manage.Update(slug, owner, limited, args.Type)
 		if err != nil {
-			fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-			_ = sess.Exit(exitForServiceErr(err))
+			// Through emitServiceErr like every other verb, so a foreign slug
+			// reports the same not-found text `get` and `delete` do.
+			emitServiceErr(sess, err)
 			return
 		}
 		if args.Name != "" {
-			_ = s.Manage.Rename(slug, owner, args.Name)
+			// A refused label is reported instead of the success banner: the
+			// paste kept its old one, so announcing the save hides half of what
+			// the command was asked to do.
+			if err := s.Manage.Rename(slug, owner, args.Name); err != nil {
+				emitServiceErr(sess, err)
+				return
+			}
 		}
 		url := s.BuildURL(res.Paste.Slug)
 		fmt.Fprintln(sess, url)
@@ -525,23 +532,6 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 	_ = sess.Exit(ExitOK)
 }
 
-// renderVersCol renders the VERS column for `list`. Three states:
-//
-//	unpinned                       → "v<latest>"
-//	pinned, pin == latest          → "v<latest> (pinned)"
-//	pinned, pin <  latest          → "v<pin> (pinned, latest v<latest>)"
-//
-// LatestVersion is MAX(ver_num), always >= 1 for an active paste.
-func renderVersCol(p domain.Paste) string {
-	if p.PinnedVersion == 0 {
-		return fmt.Sprintf("v%d", p.LatestVersion)
-	}
-	if p.PinnedVersion >= p.LatestVersion {
-		return fmt.Sprintf("v%d (pinned)", p.PinnedVersion)
-	}
-	return fmt.Sprintf("v%d (pinned, latest v%d)", p.PinnedVersion, p.LatestVersion)
-}
-
 // -- show -------------------------------------------------------------------
 
 func (s *Server) verbGet(sess gossh.Session, owner string, argv []string) {
@@ -610,12 +600,12 @@ func (s *Server) verbQR(sess gossh.Session, argv []string) {
 func (s *Server) resolveExistingURL(slug domain.Slug) (string, bool) {
 	now := s.now().UTC()
 	if s.Pastes != nil {
-		if p, err := s.Pastes.Get(slug); err == nil && now.Before(p.ExpiresAt) {
+		if p, err := s.Pastes.Get(slug); err == nil && !domain.IsExpired(p.ExpiresAt, now) {
 			return s.BuildURL(p.Slug), true
 		}
 	}
 	if s.Sites != nil {
-		if site, err := s.Sites.Get(slug); err == nil && now.Before(site.ExpiresAt) {
+		if site, err := s.Sites.Get(slug); err == nil && !domain.IsExpired(site.ExpiresAt, now) {
 			return s.BuildURL(site.Slug), true
 		}
 	}
@@ -887,8 +877,9 @@ func (s *Server) verbWhoami(sess gossh.Session, owner string, argv []string) {
 		return
 	}
 
-	// info.Identity is "key:SHA256:abcd..."; stripping the prefix matches the
-	// `ssh-keygen -lf` display style.
+	// info.Identity is "key:SHA256:<hex>"; the "key:" prefix is an internal
+	// identity namespace, so only the fingerprint is shown. The digest is hex,
+	// not `ssh-keygen -lf`'s base64 (see fingerprintKey).
 	fmt.Fprintf(sess, "key:     %s\n", strings.TrimPrefix(info.Identity, domain.IdentityKeyPrefix))
 	if !info.FirstSeen.IsZero() {
 		fmt.Fprintf(sess, "joined:  %s\n", info.FirstSeen.Format("2006-01-02"))
@@ -966,8 +957,8 @@ func emitHelp(sess gossh.Session, apex string, retention domain.Retention) {
 	fmt.Fprintln(sess.Stderr(), text)
 }
 
-// helpTextTemplate is the canonical user-facing help. {{apex}} and
-// {{retention}} are substituted at render time, so the text is correct under
+// helpTextTemplate is the canonical user-facing help. {{apex}}, {{retention}}
+// and {{quota}} are substituted at render time, so the text is correct under
 // any deployment.
 const helpTextTemplate = `Pipe a rendered file in, get a URL out. {{retention}}
 
@@ -1007,7 +998,7 @@ STATIC SITES
 
 LIMITS
 
-    100 MiB per identity, counting post-compression bytes across all
+    {{quota}} per identity, counting post-compression bytes across all
     your active pastes. HTML, Markdown, diff, or a gzip-tar site archive.
 
     Apps can persist + sync state: https://{{apex}}/  (rooms + realtime API)`
@@ -1015,7 +1006,15 @@ LIMITS
 // helpText renders helpTextTemplate. apex must be non-empty.
 func helpText(apex string, retention domain.Retention) string {
 	t := strings.ReplaceAll(helpTextTemplate, "{{apex}}", apex)
-	return strings.ReplaceAll(t, "{{retention}}", retentionSentence(retention))
+	t = strings.ReplaceAll(t, "{{retention}}", retentionSentence(retention))
+	return strings.ReplaceAll(t, "{{quota}}", quotaSentence())
+}
+
+// quotaSentence renders the per-identity cap for the help text's LIMITS block,
+// derived from the domain constant so raising the cap cannot leave the number
+// users read behind.
+func quotaSentence() string {
+	return fmt.Sprintf("%d MiB", domain.UserQuotaBytes>>20)
 }
 
 // retentionSentence renders the help-text expiry line from the policy.
@@ -1058,6 +1057,10 @@ func emitServiceErr(sess gossh.Session, err error) {
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrUnsafeArchive.Error())
 	case errors.Is(err, domain.ErrTooManyFiles):
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrTooManyFiles.Error())
+	case errors.Is(err, domain.ErrConcurrentChange):
+		// Nothing was applied, so re-running is the whole fix. Say that,
+		// rather than leaking the sentinel's "storage:" wording.
+		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: another change landed first, nothing was applied. try again")
 	case errors.Is(err, service.ErrDeployFailed):
 		// Show a clean retryable message, not the raw backend sentinel the
 		// wrapped cause carries.
@@ -1113,8 +1116,17 @@ func ipSubnet(ip net.IP) string {
 	return ip.Mask(net.CIDRMask(48, 128)).String() + "/48"
 }
 
-// fingerprintKey returns an ssh public key's SHA256 fingerprint, matching what
-// `ssh-keygen -lf` emits.
+// fingerprintKey returns an ssh public key's SHA256 fingerprint as
+// "SHA256:<lowercase hex>". This deliberately does NOT match `ssh-keygen -lf`,
+// which prints the same digest in unpadded base64.
+//
+// The value is the durable primary key of every identity: pastes, sites, quota
+// rows and keygate rows are all keyed by it. Re-encoding it re-keys every
+// identity and orphans all of their content, so the encoding must not change.
+//
+// Hex is also slash-free, which the keygate and identity key parsers depend on:
+// they split "keygate/<subnet>/<identity>" on the LAST '/', which base64 (whose
+// alphabet includes '/') would break.
 func fingerprintKey(pk gossh.PublicKey) string {
 	wire := pk.Marshal()
 	sum := sha256.Sum256(wire)

@@ -99,11 +99,6 @@ func (r *PasteRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 	return tx.Commit()
 }
 
-// Insert is the unmetered variant for callers that need no quota enforcement.
-func (r *PasteRepo) Insert(p domain.Paste) error {
-	return r.InsertWithQuotaCheck(context.Background(), p, 0, p.CreatedAt)
-}
-
 // Get returns the paste for slug, or ErrNotFound. Expired pastes are still
 // returned: the HTTP layer 404s them and the sweep deletes them.
 func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
@@ -210,7 +205,10 @@ func (r *PasteRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error
 }
 
 // Unpin clears the pin and rolls the denormalized head fields to the latest
-// version (MAX ver_num).
+// LIVE version, the same rule the read path applies to an unpinned paste.
+// Tombstoned versions are skipped: rolling the head onto one would serve bytes
+// the owner deleted, or 404 once the GC reclaims them. ErrNotFound when the
+// paste has no live version left.
 func (r *PasteRepo) Unpin(slug domain.Slug) error {
 	tx, err := r.db.BeginTx(context.Background(), &txSerializable)
 	if err != nil {
@@ -225,7 +223,7 @@ func (r *PasteRepo) Unpin(slug domain.Slug) error {
 	)
 	if err := tx.QueryRow(`
 		SELECT ver_num, kind, content_sha, size FROM versions
-		WHERE slug = ? ORDER BY ver_num DESC LIMIT 1
+		WHERE slug = ? AND deleted = 0 ORDER BY ver_num DESC LIMIT 1
 	`, slug.String()).Scan(&maxVer, &kind, &sha, &size); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
@@ -346,13 +344,6 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		return AppendResult{}, err
 	}
 	return AppendResult{NewVer: newVer, WasPinned: existingPin != 0}, nil
-}
-
-// AppendVersion is the unmetered variant for callers that need no quota
-// enforcement.
-func (r *PasteRepo) AppendVersion(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, now time.Time) (int, error) {
-	res, err := r.AppendVersionWithQuotaCheck(context.Background(), slug, kind, contentSHA, size, 0, now)
-	return res.NewVer, err
 }
 
 // ListVersions returns the version history for slug, newest first. Tombstoned

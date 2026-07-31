@@ -104,9 +104,7 @@ func TestNoShaleWriteStoresAnEmptyValue(t *testing.T) {
 			}
 			checkedPuts++
 			last := call.Args[len(call.Args)-1]
-			// []byte{} / []byte(nil) written literally at the call site.
-			lit, ok := last.(*ast.CompositeLit)
-			if ok && len(lit.Elts) == 0 && isByteSlice(lit.Type) {
+			if isEmptyByteValueExpr(last) {
 				t.Errorf("%s: %s writes an EMPTY value. On the shale backend an empty payload is "+
 					"indistinguishable from a delete: shale turns a Delete into an empty-payload tombstone "+
 					"Put, and isTombstone/scanPrefixOnce therefore DROP empty payloads from every scan. This "+
@@ -120,13 +118,83 @@ func TestNoShaleWriteStoresAnEmptyValue(t *testing.T) {
 	if checkedPuts == 0 {
 		t.Fatal("inspected no Put/Set call sites across shale_*.go, so this guard checked NOTHING")
 	}
+	t.Logf("inspected %d Put/Set call sites across %d shale_*.go files", checkedPuts, len(files))
+}
+
+// isEmptyByteValueExpr reports whether e is an empty byte value written at the
+// call site, in ANY of its syntactic forms.
+//
+// Deny-by-default over the whole candidate set is the point: a matcher keyed on
+// one node type recognises []byte{} and silently admits the equally-empty
+// tx.Put(k, nil), while still counting that site as inspected - the guard reads
+// green precisely where it is blind.
+func isEmptyByteValueExpr(e ast.Expr) bool {
+	switch v := unparen(e).(type) {
+	case *ast.Ident:
+		return v.Name == "nil"
+	case *ast.BasicLit:
+		return v.Kind == token.STRING && len(v.Value) == 2 // "" or ``
+	case *ast.CompositeLit:
+		return len(v.Elts) == 0 && isByteSlice(v.Type)
+	case *ast.CallExpr:
+		// A []byte(x) conversion is empty exactly when x is.
+		if len(v.Args) == 1 && isByteSlice(v.Fun) {
+			return isEmptyByteValueExpr(v.Args[0])
+		}
+	}
+	return false
+}
+
+func unparen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
 }
 
 func isByteSlice(e ast.Expr) bool {
-	arr, ok := e.(*ast.ArrayType)
+	arr, ok := unparen(e).(*ast.ArrayType)
 	if !ok || arr.Len != nil {
 		return false
 	}
 	id, ok := arr.Elt.(*ast.Ident)
 	return ok && id.Name == "byte"
+}
+
+// The empty-value matcher itself, over every form a call site can spell. Without
+// this the guard above is only ever exercised against already-correct code, so
+// it can report nothing about the forms it fails to recognise.
+func TestIsEmptyByteValueExpr(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		want bool
+	}{
+		{`[]byte{}`, true},
+		{`nil`, true},
+		{`[]byte(nil)`, true},
+		{`([]byte)(nil)`, true},
+		{`[]byte("")`, true},
+		{"[]byte(``)", true},
+		{`([]byte{})`, true},
+		{`markerValue`, false},
+		{`[]byte("1")`, false},
+		{`[]byte{'1'}`, false},
+		{`row`, false},
+		{`buf.Bytes()`, false},
+		{`json.Marshal(row)`, false},
+		{`[4]byte{}`, false},
+	} {
+		t.Run(tc.src, func(t *testing.T) {
+			e, err := parser.ParseExpr(tc.src)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.src, err)
+			}
+			if got := isEmptyByteValueExpr(e); got != tc.want {
+				t.Fatalf("isEmptyByteValueExpr(%s) = %v, want %v", tc.src, got, tc.want)
+			}
+		})
+	}
 }

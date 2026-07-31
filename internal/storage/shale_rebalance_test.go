@@ -237,6 +237,18 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 
 	allSlugs := []string{"aaaa2345", "aaab2345", "bbbb2345", "bbbc2345", "cccc2345"}
 
+	// Expected version-LIST length per slug, tombstones included: DeleteVersion
+	// leaves the row so the number is never reused, so bbbc2345 still lists 2.
+	// Asserting only that the two nodes AGREE is satisfied by 0 == 0 - the exact
+	// reading a version family lost in the handoff produces on both nodes.
+	wantVersions := map[string]int{
+		"aaaa2345": 1,
+		"aaab2345": 1,
+		"bbbb2345": 3,
+		"bbbc2345": 2, // v1 tombstoned, still listed
+		"cccc2345": 1,
+	}
+
 	// --- record the BEFORE state through node A (single node, no routing) ---
 	beforeBytes := map[string]int{}
 	for _, w := range wants {
@@ -358,8 +370,18 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 		if errVA != nil || errVB != nil {
 			t.Fatalf("ASSERTION 1 FAILED: ListVersions(%s): A=%v B=%v", slug, errVA, errVB)
 		}
-		if len(va) != len(vb) {
-			t.Fatalf("ASSERTION 1 FAILED: ListVersions(%s) length differs across nodes: A=%d B=%d", slug, len(va), len(vb))
+		want := wantVersions[slug]
+		if len(va) != want {
+			t.Fatalf("ASSERTION 1 FAILED (VERSIONS LOST): ListVersions(%s) via node A returned %d versions %v, want %d",
+				slug, len(va), versionNumbers(va), want)
+		}
+		if len(vb) != want {
+			t.Fatalf("ASSERTION 1 FAILED (VERSIONS LOST): ListVersions(%s) via node B (forwarded) returned %d versions %v, want %d",
+				slug, len(vb), versionNumbers(vb), want)
+		}
+		if !sameInts(versionNumbers(va), versionNumbers(vb)) {
+			t.Fatalf("ASSERTION 1 FAILED: ListVersions(%s) version numbers differ across nodes: A=%v B=%v",
+				slug, versionNumbers(va), versionNumbers(vb))
 		}
 	}
 	t.Logf("ASSERTION 1 PASSED: all %d pastes (+ their version sets) readable via BOTH nodes; forwarding works", len(allSlugs))
@@ -443,6 +465,27 @@ func assertListByOwner(t *testing.T, repo *storage.ShaleRepo, label, owner strin
 				owner, label, slug, gotVer, wantVer)
 		}
 	}
+}
+
+func versionNumbers(vs []domain.Version) []int {
+	out := make([]int, 0, len(vs))
+	for _, v := range vs {
+		out = append(out, v.VerNum)
+	}
+	sort.Ints(out)
+	return out
+}
+
+func sameInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func keysOf(m map[string]int) []string {

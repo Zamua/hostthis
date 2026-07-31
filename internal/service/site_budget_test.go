@@ -44,12 +44,22 @@ func TestSiteExtractBudget_CreditsTheCompressedSize(t *testing.T) {
 	}
 }
 
-// The distinction has to be observable, or the test above passes on a manifest
-// whose two sizes happen to match.
-func TestSiteExtractBudget_UnitsActuallyDiffer(t *testing.T) {
+// The three CANDIDATE credits must be pairwise distinct, or the test above
+// passes whichever one the code picked.
+//
+// siteExtractBudget reads StoredBytes; the two wrong answers are the manifest's
+// uncompressed DedupedSize and its (unpersisted, therefore 0)
+// CompressedDedupedSize. Comparing only the two manifest figures leaves the one
+// value the function actually reads unpinned, so a fixture whose StoredBytes
+// happened to equal DedupedSize would satisfy both tests while proving nothing.
+func TestSiteExtractBudget_CandidateCreditsAreDistinguishable(t *testing.T) {
 	existing := siteWith(400, 100, time.Now().Add(time.Hour))
-	if existing.Manifest.DedupedSize() == existing.Manifest.CompressedDedupedSize() {
-		t.Fatal("fixture is degenerate: the two sizes must differ or the unit check proves nothing")
+	stored := existing.StoredBytes
+	deduped := existing.Manifest.DedupedSize()
+	compressed := existing.Manifest.CompressedDedupedSize()
+	if stored == deduped || stored == compressed || deduped == compressed {
+		t.Fatalf("fixture is degenerate: stored=%d deduped=%d compressed=%d must be pairwise distinct, "+
+			"or the budget assertion cannot tell which credit was used", stored, deduped, compressed)
 	}
 }
 

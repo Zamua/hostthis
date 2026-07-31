@@ -172,27 +172,99 @@ func (m Manifest) Lookup(reqPath string) (ManifestEntry, bool) {
 	return ManifestEntry{}, false
 }
 
-// assetExtensions is the set of file extensions the SPA fallback treats as
-// REAL static assets: a manifest miss ending in one of these 404s, a miss with
-// any other extension (or none) is a client-side ROUTE and gets the root
-// index.html. See SPEC.md "SPA fallback (route vs. asset)".
+// fileType is one known extension's serving policy: the content type its files
+// are served as, and whether a manifest MISS on it is a 404 (a real static
+// asset) rather than the SPA index (a client-side route).
+type fileType struct {
+	contentType string
+	asset       bool
+}
+
+// fileTypes is the ONE table of known file extensions. Holding the content
+// type and the asset flag on a single entry is what keeps them from diverging:
+// an extension cannot be admitted as an asset while having no content type,
+// which served video and audio files as application/octet-stream.
 //
 // Enumerating the ASSET set rather than the route set is what makes a novel
 // route shape default to the SPA index instead of a 404. ".html" is
-// deliberately absent: a missing ".html" path is a pre-rendered route the
-// build did not emit, so it routes through the SPA too.
-var assetExtensions = map[string]struct{}{
-	".js": {}, ".mjs": {}, ".cjs": {}, ".css": {}, ".json": {}, ".map": {},
-	".xml": {}, ".txt": {}, ".csv": {}, ".pdf": {}, ".wasm": {}, ".webmanifest": {},
-	".png": {}, ".jpg": {}, ".jpeg": {}, ".gif": {}, ".webp": {},
-	".avif": {}, ".svg": {}, ".ico": {}, ".bmp": {},
-	".woff": {}, ".woff2": {}, ".ttf": {}, ".otf": {}, ".eot": {},
+// deliberately not an asset: a missing ".html" path is a pre-rendered route the
+// build did not emit, so it routes through the SPA too. See SPEC.md "SPA
+// fallback (route vs. asset)".
+var fileTypes = map[string]fileType{
+	// Markup + prose: known types, but a miss is a ROUTE, not a 404.
+	".html": {contentType: "text/html; charset=utf-8"},
+	".htm":  {contentType: "text/html; charset=utf-8"},
+	// Markdown is served raw, not rendered (rendering is the single-file paste
+	// path). Plain text so it isn't run as markup.
+	".md":       {contentType: "text/plain; charset=utf-8"},
+	".markdown": {contentType: "text/plain; charset=utf-8"},
+
+	// Scripts, styles, structured data.
+	".css":         {contentType: "text/css; charset=utf-8", asset: true},
+	".js":          {contentType: "text/javascript; charset=utf-8", asset: true},
+	".mjs":         {contentType: "text/javascript; charset=utf-8", asset: true},
+	".cjs":         {contentType: "text/javascript; charset=utf-8", asset: true},
+	".json":        {contentType: "application/json; charset=utf-8", asset: true},
+	".map":         {contentType: "application/json; charset=utf-8", asset: true},
+	".xml":         {contentType: "application/xml; charset=utf-8", asset: true},
+	".txt":         {contentType: "text/plain; charset=utf-8", asset: true},
+	".csv":         {contentType: "text/csv; charset=utf-8", asset: true},
+	".pdf":         {contentType: "application/pdf", asset: true},
+	".wasm":        {contentType: "application/wasm", asset: true},
+	".webmanifest": {contentType: "application/manifest+json; charset=utf-8", asset: true},
+
+	// Images.
+	".png":  {contentType: "image/png", asset: true},
+	".jpg":  {contentType: "image/jpeg", asset: true},
+	".jpeg": {contentType: "image/jpeg", asset: true},
+	".gif":  {contentType: "image/gif", asset: true},
+	".webp": {contentType: "image/webp", asset: true},
+	".avif": {contentType: "image/avif", asset: true},
+	".svg":  {contentType: "image/svg+xml", asset: true},
+	".ico":  {contentType: "image/x-icon", asset: true},
+	".bmp":  {contentType: "image/bmp", asset: true},
+
+	// Fonts.
+	".woff":  {contentType: "font/woff", asset: true},
+	".woff2": {contentType: "font/woff2", asset: true},
+	".ttf":   {contentType: "font/ttf", asset: true},
+	".otf":   {contentType: "font/otf", asset: true},
+	".eot":   {contentType: "application/vnd.ms-fontobject", asset: true},
+
 	// Media: a missing one must 404, not get served the index.html as text/html.
-	".mp4": {}, ".webm": {}, ".mov": {}, ".m4v": {}, ".ogv": {},
-	".mp3": {}, ".wav": {}, ".ogg": {}, ".flac": {}, ".m4a": {}, ".aac": {},
-	// Pre-compressed bundles + common data/binary assets.
-	".gz": {}, ".br": {}, ".zip": {}, ".bin": {}, ".dat": {},
+	".mp4":  {contentType: "video/mp4", asset: true},
+	".webm": {contentType: "video/webm", asset: true},
+	".mov":  {contentType: "video/quicktime", asset: true},
+	".m4v":  {contentType: "video/x-m4v", asset: true},
+	".ogv":  {contentType: "video/ogg", asset: true},
+	".mp3":  {contentType: "audio/mpeg", asset: true},
+	".wav":  {contentType: "audio/wav", asset: true},
+	".ogg":  {contentType: "audio/ogg", asset: true},
+	".flac": {contentType: "audio/flac", asset: true},
+	".m4a":  {contentType: "audio/mp4", asset: true},
+	".aac":  {contentType: "audio/aac", asset: true},
+
+	// Pre-compressed bundles + opaque data. Brotli has no registered media
+	// type, and .bin/.dat carry arbitrary bytes, so the download default IS
+	// their correct type.
+	".gz":  {contentType: "application/gzip", asset: true},
+	".br":  {contentType: "application/octet-stream", asset: true},
+	".zip": {contentType: "application/zip", asset: true},
+	".bin": {contentType: "application/octet-stream", asset: true},
+	".dat": {contentType: "application/octet-stream", asset: true},
 }
+
+// assetExtensions is the SPA fallback's asset set, DERIVED from fileTypes so
+// the two can never disagree about which extensions exist.
+var assetExtensions = func() map[string]struct{} {
+	out := make(map[string]struct{}, len(fileTypes))
+	for ext, ft := range fileTypes {
+		if ft.asset {
+			out[ext] = struct{}{}
+		}
+	}
+	return out
+}()
 
 // looksLikeAsset reports whether reqPath's LAST segment has a known
 // static-asset extension, so "/users/123/edit" is a route and "/img/logo.png"
@@ -300,66 +372,18 @@ func (m Manifest) SHASet() []string {
 	return out
 }
 
-// contentTypeByExt maps a file extension to a content-type, purely by name.
-// Anything unknown gets application/octet-stream so an unexpected extension is
-// served as a download, never mislabeled as text/html (which would let
+// contentTypeByExt maps a file extension to a content-type, purely by name,
+// through fileTypes. An unknown extension gets application/octet-stream so it
+// is served as a download, never mislabeled as text/html (which would let
 // arbitrary bytes run as script on the origin).
 //
 // The ONE place content-type is decided for site files: it is a domain
 // decision (a property of the name), not an infrastructure one.
 func contentTypeByExt(p string) string {
-	switch strings.ToLower(path.Ext(p)) {
-	case ".html", ".htm":
-		return "text/html; charset=utf-8"
-	case ".css":
-		return "text/css; charset=utf-8"
-	case ".js", ".mjs":
-		return "text/javascript; charset=utf-8"
-	case ".json":
-		return "application/json; charset=utf-8"
-	case ".map":
-		return "application/json; charset=utf-8"
-	case ".xml":
-		return "application/xml; charset=utf-8"
-	case ".txt":
-		return "text/plain; charset=utf-8"
-	case ".md", ".markdown":
-		// Served raw, not rendered (rendering is the single-file paste path).
-		// Plain text so it isn't run as markup.
-		return "text/plain; charset=utf-8"
-	case ".svg":
-		return "image/svg+xml"
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".gif":
-		return "image/gif"
-	case ".webp":
-		return "image/webp"
-	case ".avif":
-		return "image/avif"
-	case ".ico":
-		return "image/x-icon"
-	case ".woff":
-		return "font/woff"
-	case ".woff2":
-		return "font/woff2"
-	case ".ttf":
-		return "font/ttf"
-	case ".otf":
-		return "font/otf"
-	case ".eot":
-		return "application/vnd.ms-fontobject"
-	case ".webmanifest":
-		return "application/manifest+json; charset=utf-8"
-	case ".wasm":
-		return "application/wasm"
-	case ".pdf":
-		return "application/pdf"
-	default:
-		return "application/octet-stream"
+	if ft, ok := fileTypes[strings.ToLower(path.Ext(p))]; ok {
+		return ft.contentType
 	}
+	return "application/octet-stream"
 }
 
 // ContentTypeForPath exposes contentTypeByExt so the mapping has exactly one

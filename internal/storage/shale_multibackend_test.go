@@ -29,6 +29,24 @@ func TestShaleMultiBackend_ShardedRoundTrip(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = repo.Close() })
 
+	// The round trip below cannot tell 4 units from 1: pastes read back exactly
+	// as well from a single database. The mounted-unit count is what separates
+	// a sharded open from a degenerate one, so assert it before writing
+	// anything - otherwise UnitCount silently reverting to 1 keeps this green.
+	ready := repo.MountReadiness()
+	if ready.MountedUnits < 2 {
+		t.Fatalf("only %d unit(s) mounted (desired=%d pending=%d failed=%d lastErr=%q); with fewer than "+
+			"two there is nothing to route BETWEEN, so the round trip below cannot distinguish the "+
+			"sharded path from a single database",
+			ready.MountedUnits, ready.DesiredUnits, ready.PendingUnits,
+			ready.FailedOpenUnits, ready.LastAcquireError)
+	}
+	if ready.DesiredUnits != cfg.UnitCount || ready.MountedUnits != cfg.UnitCount {
+		t.Fatalf("UnitCount=%d opened %d desired / %d mounted units (pending=%d failed=%d lastErr=%q)",
+			cfg.UnitCount, ready.DesiredUnits, ready.MountedUnits, ready.PendingUnits,
+			ready.FailedOpenUnits, ready.LastAcquireError)
+	}
+
 	now := time.Now().UTC()
 	slugs := make([]string, 0, 40)
 	for i := 0; i < 40; i++ {

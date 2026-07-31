@@ -18,13 +18,22 @@ import (
 
 // --- KeyGateRepo (Sybil rate limit) ----------------------------------------
 
-// AdmitNewKey atomically checks + admits a fresh (identity, subnet) pair on the
-// {subnet} shard: the count-and-cap check and the row write are ONE CAS
-// transaction, so concurrent admissions for a subnet serialize. The in-window
-// count comes from a pre-scan because scans are not allowed inside the tx; the
-// candidate key is read ExpectAbsent inside the tx so the admit participates in
-// conflict detection, and a racing admit of the same pair resolves as
-// known-already.
+// AdmitNewKey checks the subnet's in-window budget and admits a fresh
+// (identity, subnet) pair on the {subnet} shard.
+//
+// The cap is APPROXIMATE under concurrency, not exact. The in-window count is a
+// prefix scan, which shale does not permit inside a CAS transaction, and the
+// transaction's read-set covers only the candidate's OWN row. Two first-sight
+// identities in one subnet therefore write DIFFERENT keys, raise no conflict,
+// and can both commit having each observed a count one below the limit. The
+// overshoot is bounded by how many first-sight keys race in one subnet at once;
+// a serial attacker sees the exact cap, and every admitted row counts against
+// every later admit, so the gate does not decay. Making it exact needs a
+// per-subnet counter in the transaction's read-set, which is a key-layout
+// change (a new family plus its shaleShardKey routing), not a local edit.
+//
+// The candidate key IS read inside the tx, which is what makes a racing admit
+// of the SAME pair resolve as known-already instead of writing the row twice.
 func (r *ShaleRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPerSubnet int, window time.Duration) (knownAlready bool, err error) {
 	if identity == "" || subnet == "" {
 		return false, errors.New("identity + subnet required")
@@ -38,7 +47,9 @@ func (r *ShaleRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 		return true, nil
 	}
 
-	// Count fresh in-window rows from a pre-scan (outside the tx).
+	// Count fresh in-window rows from a pre-scan (outside the tx). This count is
+	// NOT fenced by the transaction below: see the cap-is-approximate note on
+	// the doc comment.
 	items, err := r.scanPrefix(shalePrefixKeygateSubnet(subnet))
 	if err != nil {
 		return false, err
@@ -60,9 +71,10 @@ func (r *ShaleRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 
 	known := false
 	txErr := r.cluster.Transact(rowKey, func(tx backend.Transaction) error {
-		// Re-read inside the tx: a concurrent admit of the same pair resolves
-		// as known; otherwise the ExpectAbsent read-check makes a racing admit
-		// conflict and retry, re-checking the count.
+		// Re-read inside the tx so a concurrent admit of the same PAIR resolves
+		// as known rather than writing the row twice. It does not fence the
+		// budget: an admit of a DIFFERENT identity touches a different key and
+		// conflicts with nothing here, and no retry recomputes freshCount.
 		if _, gerr := tx.Get(rowKey); gerr == nil {
 			known = true
 			return nil

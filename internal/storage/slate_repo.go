@@ -84,6 +84,15 @@ type SlateRepo struct {
 	// service-wide cap stays best-effort per the spec.
 	quotaLocks [256]sync.Mutex
 
+	// keygateLocks serializes the per-subnet Sybil count-and-admit for the same
+	// reason quotaLocks exists, and it is NOT redundant with the transaction:
+	// two first-sight identities in one subnet write DIFFERENT keygate keys, so
+	// SI sees no write-write conflict, while the budget count is a prefix scan
+	// no key in the read-set covers. Without the stripe N simultaneous new keys
+	// from one subnet each read count = limit-1 and all N are admitted.
+	// Striped by subnet hash so different subnets do not contend.
+	keygateLocks [256]sync.Mutex
+
 	// Retention is the content-TTL policy used to (re)stamp ExpiresAt on
 	// update. Defaults to the 30-day policy; the composition root overrides it.
 	Retention domain.Retention
@@ -96,6 +105,17 @@ func (r *SlateRepo) lockQuota(identity string) func() {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(identity))
 	m := &r.quotaLocks[h.Sum32()%uint32(len(r.quotaLocks))]
+	m.Lock()
+	return m.Unlock
+}
+
+// lockKeygate acquires the per-subnet Sybil stripe and returns the unlock. Hold
+// it across the in-window count and the admitting commit so the check and the
+// write are atomic against other admits for the same subnet.
+func (r *SlateRepo) lockKeygate(subnet string) func() {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(subnet))
+	m := &r.keygateLocks[h.Sum32()%uint32(len(r.keygateLocks))]
 	m.Lock()
 	return m.Unlock
 }
@@ -236,7 +256,7 @@ func (v versionRow) toDomain(slug domain.Slug) domain.Version {
 
 // --- Key builders ----------------------------------------------------------
 
-func keyPaste(slug domain.Slug) []byte { return []byte("pastes/" + slug.String()) }
+func keyPaste(slug domain.Slug) []byte { return shaleKey(prefixPastes, slug.String()) }
 
 func keyVersion(slug domain.Slug, verNum int) []byte {
 	return fmt.Appendf(nil, "versions/%s/%04d", slug.String(), verNum)
@@ -244,7 +264,7 @@ func keyVersion(slug domain.Slug, verNum int) []byte {
 
 func prefixVersions(slug domain.Slug) []byte { return []byte("versions/" + slug.String() + "/") }
 
-func keySlugOwner(slug domain.Slug) []byte { return []byte("slug_owner/" + slug.String()) }
+func keySlugOwner(slug domain.Slug) []byte { return shaleKey(prefixSlugOwner, slug.String()) }
 
 func keyIdentityPaste(identity, slug string) []byte {
 	return []byte("identity_pastes/" + identity + "/" + slug)
@@ -839,6 +859,10 @@ func (r *SlateRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error
 	return nil
 }
 
+// Unpin clears the pin and rolls the head to the latest LIVE version, the same
+// rule latestActiveVersion and the read path apply. Tombstoned versions are
+// skipped: pointing the head at one would serve bytes the owner deleted, or
+// 404 once the GC reclaims them. ErrNotFound when no live version remains.
 func (r *SlateRepo) Unpin(slug domain.Slug) error {
 	// Scanning for the latest version outside the tx is safe: the commit
 	// still detects a conflicting write.
@@ -851,6 +875,9 @@ func (r *SlateRepo) Unpin(slug domain.Slug) error {
 		var v versionRow
 		if err := json.Unmarshal(item.Value, &v); err != nil {
 			return fmt.Errorf("decode %s: %w", item.Key, err)
+		}
+		if v.Deleted {
+			continue
 		}
 		if latest == nil || v.VerNum > latest.VerNum {
 			vCopy := v
@@ -1094,10 +1121,16 @@ func (r *SlateRepo) ReferencedBlobSHAs() ([]string, error) {
 
 // --- KeyGateRepo (Sybil rate limit) ----------------------------------------
 
+// AdmitNewKey checks the subnet's in-window budget and admits the pair, both
+// under the per-subnet stripe: the budget is a prefix scan, which snapshot
+// isolation cannot serialize (concurrent admits write different keys and so
+// raise no conflict), and SlateDB is single-writer, so an in-process lock is
+// the whole boundary.
 func (r *SlateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPerSubnet int, window time.Duration) (knownAlready bool, err error) {
 	if identity == "" || subnet == "" {
 		return false, errors.New("identity + subnet required")
 	}
+	defer r.lockKeygate(subnet)()
 	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
 	if err != nil {
 		return false, fmt.Errorf("begin tx: %w", err)

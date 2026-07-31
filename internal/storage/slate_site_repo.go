@@ -139,22 +139,26 @@ func (row siteRow) toDomain(slug domain.Slug) (domain.Site, error) {
 }
 
 // --- Key builders ----------------------------------------------------------
+//
+// Built from the SAME family-prefix vars shaleShardKey routes on, so the two
+// backends' shared layout has one spelling rather than two that must be kept
+// in step by hand.
 
-func keySite(slug domain.Slug) []byte { return []byte("sites/" + slug.String()) }
+func keySite(slug domain.Slug) []byte { return shaleKey(prefixSites, slug.String()) }
 
 func keyIdentitySite(identity, slug string) []byte {
-	return []byte("identity_sites/" + identity + "/" + slug)
+	return shaleKey(prefixIdentitySitesAll, identity, "/", slug)
 }
 
 func prefixIdentitySites(identity string) []byte {
-	return []byte("identity_sites/" + identity + "/")
+	return shaleKey(prefixIdentitySitesAll, identity, "/")
 }
 
 func keyExpirySite(t time.Time, slug domain.Slug) []byte {
-	return []byte("expiry_sites/" + t.UTC().Format(expirySiteTimeFormat) + "/" + slug.String())
+	return shaleKey(prefixExpirySitesAll, t.UTC().Format(expirySiteTimeFormat), "/", slug.String())
 }
 
-func prefixExpirySites() []byte { return []byte("expiry_sites/") }
+func prefixExpirySites() []byte { return shaleKey(prefixExpirySitesAll) }
 
 // --- Site KV operations (on SlateRepo) -------------------------------------
 
@@ -279,7 +283,7 @@ func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, us
 	// below filter on expiry, so an expired-but-unswept row is not in them and
 	// crediting it would under-count and admit an over-quota re-deploy.
 	creditOld := int64(0)
-	if existing.ExpiresAt.After(now) {
+	if !domain.IsExpired(existing.ExpiresAt, now) {
 		creditOld = int64(existing.DedupedSize)
 	}
 
@@ -487,7 +491,7 @@ func (r *SlateRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
 // site's manifest. The sweep unions this with the paste-side set, so a blob
 // shared between records survives as long as ANY live record references it.
 func (r *SlateRepo) ReferencedSiteBlobSHAs() ([]string, error) {
-	sites, err := r.scanPrefix([]byte("sites/"))
+	sites, err := r.scanPrefix(prefixSites)
 	if err != nil {
 		return nil, err
 	}
