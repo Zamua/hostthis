@@ -210,8 +210,7 @@ func MultiVersionNote(items []listItemView) bool {
 	return false
 }
 
-// versCol renders the table VERS column. The ONE implementation of the column;
-// renderVersCol is the paste-shaped entry point onto it.
+// versCol renders the table VERS column, for pastes and sites alike.
 //
 //	unversioned site               -> "-"
 //	unpinned                       -> "v<latest>"

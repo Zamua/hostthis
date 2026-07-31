@@ -1057,6 +1057,10 @@ func emitServiceErr(sess gossh.Session, err error) {
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrUnsafeArchive.Error())
 	case errors.Is(err, domain.ErrTooManyFiles):
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrTooManyFiles.Error())
+	case errors.Is(err, domain.ErrConcurrentChange):
+		// Nothing was applied, so re-running is the whole fix. Say that,
+		// rather than leaking the sentinel's "storage:" wording.
+		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: another change landed first, nothing was applied. try again")
 	case errors.Is(err, service.ErrDeployFailed):
 		// Show a clean retryable message, not the raw backend sentinel the
 		// wrapped cause carries.
