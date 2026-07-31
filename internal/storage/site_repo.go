@@ -95,9 +95,11 @@ func decodeManifest(s string) (domain.Manifest, error) {
 // stops two concurrent uploads from the same identity both passing the cap
 // check and both inserting.
 //
-// The charged size is s.Manifest.DedupedSize(): distinct blobs only, matching
-// the "dedupe for free" storage property and the budget the
-// decompression-bomb guard enforced mid-untar.
+// The charged size is the caller's dedupedSize, not a figure derived from the
+// manifest here: the deploy path passes Manifest.CompressedDedupedSize(), the
+// distinct blobs' STORED bytes, so the charge is denominated in the same unit
+// as every other quota in the system. Manifest.DedupedSize() is the
+// uncompressed display figure and would over-charge.
 //
 // Returns:
 //   - nil on success
@@ -253,11 +255,6 @@ func (r *SiteRepo) ReplaceWithQuotaCheck(_ context.Context, s domain.Site, dedup
 		return ErrNotFound
 	}
 	return tx.Commit()
-}
-
-// Insert is the variant for callers that do not need quota enforcement.
-func (r *SiteRepo) Insert(s domain.Site) error {
-	return r.InsertWithQuotaCheck(context.Background(), s, s.Manifest.DedupedSize(), 0, s.CreatedAt)
 }
 
 // Get returns the site for slug, or ErrNotFound. Like PasteRepo.Get it returns

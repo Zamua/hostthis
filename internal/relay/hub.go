@@ -61,15 +61,21 @@ func (h *Hub) register(c Conn) (ok bool) {
 	return true
 }
 
-// unregister removes the connection with id, firing onEmpty outside the lock
-// if that was the last one. It does NOT call Conn.Close: the connection's own
-// lifecycle closes the socket, the hub only forgets it. Idempotent, and an
-// unregister of an absent id does not fire onEmpty.
-func (h *Hub) unregister(id uint64) {
+// unregister removes the connection with id and reports whether this call is
+// the one that removed it, firing onEmpty outside the lock if that was the last
+// one. It does NOT call Conn.Close: the connection's own lifecycle closes the
+// socket, the hub only forgets it. Idempotent, and an unregister of an absent
+// id reports false and does not fire onEmpty.
+//
+// The report is what lets the Registry reclaim the per-app slot exactly once.
+// The removal and the answer to "did I remove it" come from the same critical
+// section, so a laggard drop removing the same id concurrently cannot make two
+// callers both believe they own the reclaim.
+func (h *Hub) unregister(id uint64) (removed bool) {
 	h.mu.Lock()
 	if _, present := h.conns[id]; !present {
 		h.mu.Unlock()
-		return
+		return false
 	}
 	delete(h.conns, id)
 	empty := len(h.conns) == 0
@@ -79,6 +85,7 @@ func (h *Hub) unregister(id uint64) {
 	if empty && onEmpty != nil {
 		onEmpty()
 	}
+	return true
 }
 
 // broadcast fans f out to every connection EXCEPT id == from, so a frame is

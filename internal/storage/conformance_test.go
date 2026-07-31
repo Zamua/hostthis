@@ -2,8 +2,8 @@ package storage_test
 
 // Backend-agnostic conformance suite for the storage contract: the same
 // assertions run against any implementation the newRepo factory supplies, so a
-// backend swap can be proven behaviour-preserving. runConformance is the entry
-// point; each backend adds a factory file calling it.
+// backend swap can be proven behaviour-preserving. runConformanceWithSites is
+// the entry point; each backend adds a factory file calling it.
 //
 // House rules:
 //   - Touch a backend ONLY through conformanceRepo, never a backend-specific
@@ -32,7 +32,7 @@ import (
 
 // conformanceRepo is the union of the four service-layer interfaces a metadata
 // backend must satisfy. Any type satisfying it can be driven through
-// runConformance, whether it is one struct or several sharing a db.
+// runConformanceWithSites, whether it is one struct or several sharing a db.
 type conformanceRepo interface {
 	service.PasteRepo
 	service.PasteAdmin
@@ -75,20 +75,15 @@ type conformCaps struct {
 	StrictIdentityQuotaUnderConcurrency bool
 }
 
-// runConformance runs the paste contract suite against the backend newRepo
-// produces (a fresh, empty repo per call). name labels the subtests so failures
-// identify the backend; caps declares its by-design exceptions.
+// runConformanceWithSites runs the paste contract suite against the backend
+// newRepo produces (a fresh, empty repo per call), plus the site suite when
+// newSites is non-nil and the room suite when newRooms is non-nil. name labels
+// the subtests so failures identify the backend; caps declares its by-design
+// exceptions.
 //
-//nolint:unused // called from the per-backend factory files, some build-tagged
-func runConformance(t *testing.T, name string, caps conformCaps, newRepo func(t *testing.T) conformanceRepo) {
-	t.Helper()
-	runConformanceWithSites(t, name, caps, newRepo, nil, nil)
-}
-
-// runConformanceWithSites also runs the site suite when newSites is non-nil and
-// the room suite when newRooms is non-nil. Those factories MUST return repos
-// sharing the backing store of the paste repo from the same call, or the
-// cross-quota and cross-family subtests exercise nothing real.
+// The site/room factories MUST return repos sharing the backing store of the
+// paste repo from the same call, or the cross-quota and cross-family subtests
+// exercise nothing real.
 func runConformanceWithSites(
 	t *testing.T,
 	name string,

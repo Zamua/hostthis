@@ -14,6 +14,12 @@ import (
 )
 
 // The sweep deletes expired pastes and GCs their blobs.
+//
+// Uploads go through NewCompressedBlobStore, as the composition root wires
+// them: that wrapper owns the at-rest encoding, and handing the raw disk store
+// to the blob unit would store encoded bytes it cannot decode on read. The
+// sweep itself takes the raw store, which is also production's shape - it walks
+// and removes by sha and never reads a body.
 func TestSweep_Once(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "sweep.db"))
@@ -27,7 +33,7 @@ func TestSweep_Once(t *testing.T) {
 	}
 	repo := storage.NewPasteRepo(db)
 
-	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(blobs))
+	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(storage.NewCompressedBlobStore(blobs)))
 	t.Cleanup(upload.WaitFinalize)
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	upload.Now = func() time.Time { return now }
@@ -89,7 +95,7 @@ func TestSweep_NeverExpiresSurvives(t *testing.T) {
 	}
 	repo := storage.NewPasteRepo(db)
 
-	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(blobs))
+	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(storage.NewCompressedBlobStore(blobs)))
 	upload.Retention = domain.Retention{Window: 0} // no expiry
 	t.Cleanup(upload.WaitFinalize)
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
@@ -128,7 +134,7 @@ func TestSweep_KeepsActive(t *testing.T) {
 	blobs, _ := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	repo := storage.NewPasteRepo(db)
 
-	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(blobs))
+	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(storage.NewCompressedBlobStore(blobs)))
 	t.Cleanup(upload.WaitFinalize)
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	upload.Now = func() time.Time { return now }
@@ -157,7 +163,7 @@ func TestSweep_GCsOrphanBlobOnly(t *testing.T) {
 	repo := storage.NewPasteRepo(db)
 
 	// A referenced blob, via the upload path.
-	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(blobs))
+	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(storage.NewCompressedBlobStore(blobs)))
 	t.Cleanup(upload.WaitFinalize)
 	upload.Now = func() time.Time { return time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC) }
 	_, err := upload.Create(bytes.NewReader([]byte("<!doctype html><p>ref</p>")), "owner", "", "")
@@ -420,7 +426,7 @@ func TestSweep_DryRun(t *testing.T) {
 	}
 	repo := storage.NewPasteRepo(db)
 
-	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(blobs))
+	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(storage.NewCompressedBlobStore(blobs)))
 	t.Cleanup(upload.WaitFinalize)
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	upload.Now = func() time.Time { return now }

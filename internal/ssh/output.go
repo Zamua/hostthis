@@ -210,20 +210,29 @@ func MultiVersionNote(items []listItemView) bool {
 	return false
 }
 
-// versCol renders the table VERS column: "-" for an unversioned site, else the
-// paste's version state (mirrors renderVersCol).
+// versCol renders the table VERS column. The ONE implementation of the column;
+// renderVersCol is the paste-shaped entry point onto it.
+//
+//	unversioned site               -> "-"
+//	unpinned                       -> "v<latest>"
+//	pinned, pin >= latest          -> "v<pin> (pinned)"
+//	pinned, pin <  latest          -> "v<pin> (pinned, latest v<latest>)"
+//
+// PinnedVersion 0 is the unpinned sentinel, never a version number to display.
 func versCol(v listItemView) string {
 	if v.ServedVersion == nil {
 		return "-"
 	}
-	switch *v.PinnedVersion {
-	case 0:
-		return fmt.Sprintf("v%d", *v.LatestVersion)
-	case *v.LatestVersion:
-		return fmt.Sprintf("v%d (pinned)", *v.LatestVersion)
-	default:
-		return fmt.Sprintf("v%d (pinned, latest v%d)", *v.PinnedVersion, *v.LatestVersion)
+	pinned, latest := *v.PinnedVersion, *v.LatestVersion
+	if pinned == 0 {
+		return fmt.Sprintf("v%d", latest)
 	}
+	// A pin names an existing version, so pin > latest is unreachable; >=
+	// keeps that case from advertising a "latest" behind the served version.
+	if pinned >= latest {
+		return fmt.Sprintf("v%d (pinned)", pinned)
+	}
+	return fmt.Sprintf("v%d (pinned, latest v%d)", pinned, latest)
 }
 
 // versionsView is the `versions <slug> -o json` document. It folds the stderr
@@ -289,8 +298,9 @@ type sessionView struct {
 	SubnetCap        int    `json:"subnet_cap"`
 }
 
-// newWhoamiView maps the service WhoamiInfo to its json document. The key
-// prefix is stripped to match the human render (ssh-keygen -lf style).
+// newWhoamiView maps the service WhoamiInfo to its json document. The internal
+// "key:" identity prefix is stripped, leaving the "SHA256:<hex>" fingerprint
+// the human render shows. The digest is hex, not `ssh-keygen -lf`'s base64.
 func newWhoamiView(info service.WhoamiInfo) whoamiView {
 	v := whoamiView{
 		Key:          strings.TrimPrefix(info.Identity, domain.IdentityKeyPrefix),

@@ -179,30 +179,49 @@ func TestHelpVerb_PtyCrLf(t *testing.T) {
 }
 
 // TestHelpVerb_VerbBodyMentionsVerb catches a copy-paste regression where two
-// descriptors' signatures swap: each verb's help must name that verb.
+// descriptors' signatures swap: each verb's Usage: line must name that verb.
+//
+// The Usage line, matched as a whole token, is what makes the swap visible.
+// A substring search over the whole body cannot see it: "pin" occurs inside
+// "unpin" and "delete" inside "deleted", so swapping the pin/unpin or
+// delete/versions descriptors satisfies a Contains check in BOTH directions.
 func TestHelpVerb_VerbBodyMentionsVerb(t *testing.T) {
 	s := startStack(t)
-	cases := map[string]string{
-		"list":     "list",
-		"get":      "get",
-		"rename":   "rename",
-		"delete":   "delete",
-		"versions": "versions",
-		"pin":      "pin",
-		"unpin":    "unpin",
-		"whoami":   "whoami",
-	}
-	for verb, needle := range cases {
+	for _, verb := range []string{
+		"get", "list", "url", "qr", "rename", "delete",
+		"versions", "pin", "unpin", "whoami", "help",
+	} {
 		t.Run(verb, func(t *testing.T) {
 			_, stderr, exit := s.run("help "+verb, nil)
 			if exit != 0 {
 				t.Fatalf("exit: %d", exit)
 			}
-			if !strings.Contains(stderr, needle) {
-				t.Fatalf("expected verb help for %q to mention %q, got %q", verb, needle, stderr)
+			usage, ok := usageLine(stderr)
+			if !ok {
+				t.Fatalf("no Usage: line in help for %q, got %q", verb, stderr)
+			}
+			// "ssh <apex> <verb> ..."; the verb is the third whitespace token.
+			fields := strings.Fields(usage)
+			if len(fields) < 3 {
+				t.Fatalf("Usage line for %q is too short to name a verb: %q", verb, usage)
+			}
+			if fields[2] != verb {
+				t.Fatalf("help %q printed the usage for %q (%q): the descriptors are swapped or mis-keyed",
+					verb, fields[2], usage)
 			}
 		})
 	}
+}
+
+// usageLine returns the line following the "Usage:" header, trimmed.
+func usageLine(body string) (string, bool) {
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "Usage:" && i+1 < len(lines) {
+			return strings.TrimSpace(lines[i+1]), true
+		}
+	}
+	return "", false
 }
 
 // TestHelpVerb_NoSideEffects pins that `delete <slug> --help` does NOT run the

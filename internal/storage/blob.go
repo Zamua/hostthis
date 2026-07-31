@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +12,11 @@ import (
 // BlobStore is a content-addressed on-disk store. Bytes live at
 // <root>/<sha256[:2]>/<sha256> so directory fanout stays sane; records pointing
 // at the same bytes share one file.
+//
+// It stores whatever bytes it is handed and does NOT satisfy service.BlobStore:
+// the at-rest encoding is CompressedBlobStore's, and every wiring path must
+// pass through that wrapper. Giving the raw store the encoder methods would let
+// a mis-wiring compile and then serve undecoded bytes.
 type BlobStore struct {
 	root string
 }
@@ -68,13 +72,6 @@ func (b *BlobStore) Put(sha string, r io.Reader, size int64) error {
 	return nil
 }
 
-// PutPrecompressed writes already-encoded bytes (magic prefix + zstd) straight
-// to storage. Present so the disk store satisfies the same service-layer
-// interface as CompressedBlobStore.
-func (b *BlobStore) PutPrecompressed(sha string, body []byte) error {
-	return b.Put(sha, bytes.NewReader(body), int64(len(body)))
-}
-
 // GetReader returns a streaming reader over the bytes for sha, or ErrNotFound.
 // The caller MUST Close it. The int64 is the on-disk length of the raw stored
 // bytes: for blobs wrapped by CompressedBlobStore that is the compressed
@@ -113,15 +110,4 @@ func (b *BlobStore) Get(sha string) ([]byte, error) {
 		return nil, fmt.Errorf("blob read %q: %w", sha, err)
 	}
 	return body, nil
-}
-
-// EncodeBody encodes uncompressed bytes into the at-rest format and reports the
-// payload size excluding the framing prefix, so callers ask the store that owns
-// the format instead of doing the framing arithmetic themselves.
-func (s *BlobStore) EncodeBody(r io.Reader) ([]byte, int, error) {
-	body, err := EncodeCompressedBody(r)
-	if err != nil {
-		return nil, 0, err
-	}
-	return body, len(body) - CompressedBodyPrefixLen, nil
 }

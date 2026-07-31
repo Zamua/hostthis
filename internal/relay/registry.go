@@ -105,6 +105,13 @@ type Registry struct {
 	// production; set only by tests driving that window deterministically (see
 	// the last-leave-vs-admit race test).
 	afterAdmitReserve func(key RoomKey)
+
+	// beforeReleaseUnregister is a test-only seam fired by release just BEFORE
+	// it takes the hub lock to unregister the id, the window in which a
+	// broadcast can drop that same connection as a laggard. Nil in production;
+	// set only by tests driving that window deterministically (see the
+	// laggard-drop-during-release test).
+	beforeReleaseUnregister func(key RoomKey, id uint64)
 }
 
 // NewRegistry builds an empty registry with the given limits.
@@ -304,8 +311,16 @@ func (r *Registry) joinWithSnapshot(key RoomKey, c Conn, readSnapshot func() (Fr
 }
 
 // release ends a connection: it unregisters id from key's hub and decrements the
-// per-app counter. Idempotent per (key, id), guarded by whether the hub still
-// holds the id, so a second call decrements nothing.
+// per-app counter. Idempotent per (key, id): the decrement is gated on the
+// unregister reporting that THIS call removed the id, so a second call
+// decrements nothing.
+//
+// The gate must be the unregister's own report, never a presence check taken
+// beforehand. A broadcast dropping this same connection as a laggard removes it
+// under the hub lock and reclaims its slot via onDrop, so a decision made before
+// the unregister can be stale by the time it is acted on: one connection would
+// be decremented twice and a live sibling's slot stolen, drifting the effective
+// MaxConnsPerApp upward.
 func (r *Registry) release(key RoomKey, id uint64) {
 	r.mu.Lock()
 	hub := r.hubs[key]
@@ -319,17 +334,15 @@ func (r *Registry) release(key RoomKey, id uint64) {
 		// under-count a sibling connection of the same app.
 		return
 	}
-	// Decrement ONLY if the hub still holds this id, meaning this release is
-	// the one performing the unregister. If the id is already gone (a double
-	// release, or a laggard drop that ran onDrop), whoever removed it already
-	// did the decApp.
-	hub.mu.Lock()
-	_, held := hub.conns[id]
-	hub.mu.Unlock()
-	if !held {
+	if r.beforeReleaseUnregister != nil {
+		r.beforeReleaseUnregister(key, id)
+	}
+	// Decrement ONLY if this release is the one that removed the id. If it was
+	// already gone (a double release, or a laggard drop that ran onDrop),
+	// whoever removed it already did the decApp.
+	if !hub.unregister(id) {
 		return
 	}
-	hub.unregister(id)
 	r.decApp(key.App)
 }
 

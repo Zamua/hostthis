@@ -229,7 +229,7 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		return
 	}
 	now := s.nowOrTime()
-	if !now.Before(p.ExpiresAt) {
+	if domain.IsExpired(p.ExpiresAt, now) {
 		// Expired but not yet swept: 404 rather than serve past the
 		// retention window.
 		http.NotFound(w, r)
@@ -467,7 +467,7 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 		return false
 	}
 	now := s.nowOrTime()
-	if !now.Before(site.ExpiresAt) {
+	if domain.IsExpired(site.ExpiresAt, now) {
 		// The slug is owned here, so an expired site 404s rather than falling
 		// through to the paste path.
 		http.NotFound(w, r)

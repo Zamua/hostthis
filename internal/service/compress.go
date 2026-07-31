@@ -13,10 +13,16 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// blobMagicV1 mirrors storage.magicV1, kept local so the service layer can
-// produce blob bytes without importing the storage package. If the two
-// diverge, blob reads break with "no magic header found" on fresh blobs.
+// blobMagicV1 and blobCompressionLevel mirror storage.magicV1 and
+// storage.compressionLevel, kept local because the service layer must not
+// import the storage package. Together they are a second implementation of the
+// at-rest blob format: a diverged magic makes fresh blobs read back as
+// uncompressed, and a diverged level changes the stored bytes the quota is
+// charged for. TestStreamUploadMatchesStorageAtRestFormat pins the two encoders
+// byte-identical.
 var blobMagicV1 = [4]byte{'H', 'Z', 0x00, 0x01}
+
+const blobCompressionLevel = zstd.SpeedDefault
 
 // stagedUpload is the result of streaming bytes through the upload pipeline.
 // Body is magic-prefixed + zstd-encoded, ready for
@@ -60,7 +66,7 @@ func streamUpload(r io.Reader) (stagedUpload, error) {
 
 	cap := &cappedWriter{inner: staging, limit: domain.MaxPasteBytes + len(blobMagicV1)}
 
-	zw, err := zstd.NewWriter(cap, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	zw, err := zstd.NewWriter(cap, zstd.WithEncoderLevel(blobCompressionLevel))
 	if err != nil {
 		return stagedUpload{}, fmt.Errorf("zstd writer: %w", err)
 	}

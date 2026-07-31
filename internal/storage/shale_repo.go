@@ -1453,9 +1453,10 @@ func (r *ShaleRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 }
 
 // errVerTaken signals that the candidate version number was already present at
-// read time inside the authoritative tx. The closure aborts with it (Transact
-// returns a non-conflict fn error verbatim) and the outer loop re-numbers. It
-// never escapes appendAuthoritative.
+// read time inside a {slug} transaction, so the pre-scan the closure was built
+// from is stale. The closure aborts with it (Transact returns a non-conflict fn
+// error verbatim) and the caller's outer loop re-scans. Never escapes the
+// function that raises it.
 var errVerTaken = errors.New("shale: candidate version number already taken")
 
 // appendAuthoritative writes the new version row and resets the expiry clock on
@@ -1590,73 +1591,106 @@ func (r *ShaleRepo) refreshIndexProjection(identity string, slug domain.Slug, ne
 // a tombstone. The authoritative {slug} rows go away and the {id}
 // enumeration-index entry is dropped, which is what stops the owner's
 // scan-derived quota sum counting the paste. Idempotent on a missing paste.
+//
+// The version enumeration runs outside the transaction (ScanPrefix is
+// unsupported inside a CAS tx), so the cascade joins the read set two ways: the
+// head row is read INSIDE the tx, and the candidate NEXT version key is read
+// ExpectAbsent. Without those the tx would carry only writes and commit
+// unconditionally, leaving a version row a concurrent append wrote alive under
+// a deleted paste - an orphan no scan reaches and no reconcile pass prunes,
+// whose ContentSHA keeps its blob out of the GC's reach forever.
 func (r *ShaleRepo) Delete(slug domain.Slug) error {
-	var p pasteRow
-	if err := r.getJSON(shaleKeyPaste(slug), &p); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return nil
-		}
-		return err
-	}
-	versions, err := r.scanVersions(slug)
-	if err != nil {
-		return err
-	}
-	identity := p.Identity
-
 	pasteKey := shaleKeyPaste(slug)
-	// The blobs unbind in the SAME {slug} transaction, so the bytes go
-	// unreferenced exactly when the rows vanish and SweepOrphans reclaims them
-	// after the grace. unbind is a no-op on the metadata-only path, where the
-	// global content-addressed sweep reclaims instead.
-	delBody := func(tx shaleKVTx, unbind func(blobID string) error) error {
-		if err := tx.Delete(pasteKey); err != nil {
+	const maxRescanAttempts = 16
+	for range maxRescanAttempts {
+		var head pasteRow
+		if err := r.getJSON(pasteKey, &head); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil
+			}
 			return err
 		}
-		for _, v := range versions {
-			// A tombstoned version's pointer was already unbound by
-			// DeleteVersion; re-unbinding is an idempotent tx.Delete of a
-			// missing key. A legacy row carries no BlobID and has no pointer.
-			if v.BlobID != "" {
-				if err := unbind(v.BlobID); err != nil {
+		identity := head.Identity
+		versions, err := r.scanVersions(slug)
+		if err != nil {
+			return err
+		}
+		// MAX(ver_num) counts tombstones, so this is the number a racing append
+		// would claim next.
+		nextVerKey := shaleKeyVersion(slug, maxVerNum(versions)+1)
+
+		// The blobs unbind in the SAME {slug} transaction, so the bytes go
+		// unreferenced exactly when the rows vanish and SweepOrphans reclaims
+		// them after the grace. unbind is a no-op on the metadata-only path,
+		// where the global content-addressed sweep reclaims instead.
+		delBody := func(tx shaleKVTx, unbind func(blobID string) error) error {
+			// Read the head inside the tx: its ExpiresAt names the expiry entry
+			// to remove, and the read-check makes a racing append conflict.
+			var p pasteRow
+			if err := shaleTxGetJSON(tx, pasteKey, &p); err != nil {
+				return err
+			}
+			if _, gerr := tx.Get(nextVerKey); gerr == nil {
+				return errVerTaken
+			} else if !errors.Is(gerr, backend.ErrNotFound) {
+				return gerr
+			}
+			if err := tx.Delete(pasteKey); err != nil {
+				return err
+			}
+			for _, v := range versions {
+				// A tombstoned version's pointer was already unbound by
+				// DeleteVersion; re-unbinding is an idempotent tx.Delete of a
+				// missing key. A legacy row carries no BlobID and has no pointer.
+				if v.BlobID != "" {
+					if err := unbind(v.BlobID); err != nil {
+						return err
+					}
+				}
+				if err := tx.Delete(shaleKeyVersion(slug, v.VerNum)); err != nil {
 					return err
 				}
 			}
-			if err := tx.Delete(shaleKeyVersion(slug, v.VerNum)); err != nil {
+			if err := tx.Delete(shaleKeySlugOwner(slug)); err != nil {
 				return err
 			}
+			return tx.Delete(shaleKeyExpiry(p.ExpiresAt, slug))
 		}
-		if err := tx.Delete(shaleKeySlugOwner(slug)); err != nil {
-			return err
-		}
-		return tx.Delete(shaleKeyExpiry(p.ExpiresAt, slug))
-	}
-	if r.kv != nil {
-		err = r.kv.Transact(pasteKey, func(tx *cluster.BlobTx) error {
-			return delBody(tx, func(blobID string) error {
-				return tx.UnbindBlob(r.blobRefFor(pasteKey, blobID))
+		var txErr error
+		if r.kv != nil {
+			txErr = r.kv.Transact(pasteKey, func(tx *cluster.BlobTx) error {
+				return delBody(tx, func(blobID string) error {
+					return tx.UnbindBlob(r.blobRefFor(pasteKey, blobID))
+				})
 			})
-		})
-	} else {
-		err = r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
-			return delBody(tx, func(string) error { return nil })
-		})
-	}
-	if err != nil {
-		return err
-	}
-
-	// Drop the enumeration-index entry on the {id} shard so the paste leaves the
-	// owner's scan. Idempotent.
-	indexKey := shaleKeyIdentityPaste(identity, slug.String())
-	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
-		if _, err := tx.Get(indexKey); err == nil {
-			return tx.Delete(indexKey)
-		} else if !errors.Is(err, backend.ErrNotFound) {
-			return err
+		} else {
+			txErr = r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
+				return delBody(tx, func(string) error { return nil })
+			})
 		}
-		return nil
-	})
+		switch {
+		case txErr == nil:
+		case errors.Is(txErr, errVerTaken) || errors.Is(txErr, backend.ErrCASConflict):
+			continue // a version landed after the scan; re-scan and re-cascade
+		case errors.Is(txErr, ErrNotFound):
+			return nil // a concurrent delete cascaded first; idempotent
+		default:
+			return txErr
+		}
+
+		// Drop the enumeration-index entry on the {id} shard so the paste leaves
+		// the owner's scan. Idempotent.
+		indexKey := shaleKeyIdentityPaste(identity, slug.String())
+		return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
+			if _, err := tx.Get(indexKey); err == nil {
+				return tx.Delete(indexKey)
+			} else if !errors.Is(err, backend.ErrNotFound) {
+				return err
+			}
+			return nil
+		})
+	}
+	return fmt.Errorf("shale: delete %q: version set kept changing across %d attempts", slug, maxRescanAttempts)
 }
 
 // DeleteVersion tombstones a single version: it stays visible in the list
@@ -1783,30 +1817,65 @@ func (r *ShaleRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error
 	})
 }
 
+// Unpin clears the pin and rolls the head to the latest LIVE version, the same
+// rule latestActiveVerNum and the read path apply. Tombstoned versions are
+// skipped: pointing the head at one would serve bytes the owner deleted, or
+// 404 once the GC reclaims them. ErrNotFound when no live version remains.
+//
+// The version scan runs outside the transaction (ScanPrefix is unsupported
+// inside a CAS tx) and Transact re-runs the closure on conflict, so the
+// candidate NEXT version key is read ExpectAbsent inside the tx. An append that
+// lands after the scan is then either visible to that read or fails the
+// read-check, and both routes re-scan for a fresh latest instead of committing
+// a stale head.
 func (r *ShaleRepo) Unpin(slug domain.Slug) error {
-	versions, err := r.scanVersions(slug)
-	if err != nil {
-		return err
-	}
-	var latest *versionRow
-	for i := range versions {
-		if latest == nil || versions[i].VerNum > latest.VerNum {
-			latest = &versions[i]
-		}
-	}
-	if latest == nil {
-		return ErrNotFound
-	}
 	pasteKey := shaleKeyPaste(slug)
-	return r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
-		var p pasteRow
-		if err := shaleTxGetJSON(tx, pasteKey, &p); err != nil {
+	const maxRescanAttempts = 16
+	for range maxRescanAttempts {
+		versions, err := r.scanVersions(slug)
+		if err != nil {
 			return err
 		}
-		p.PinnedVersion = 0
-		p.contentRef = latest.contentRef // whole served descriptor rolls to the latest version
-		return shaleTxPutJSON(tx, pasteKey, p)
-	})
+		var latest *versionRow
+		for i := range versions {
+			if versions[i].Deleted {
+				continue
+			}
+			if latest == nil || versions[i].VerNum > latest.VerNum {
+				latest = &versions[i]
+			}
+		}
+		if latest == nil {
+			return ErrNotFound
+		}
+		// MAX(ver_num) counts tombstones, so this is the number a racing
+		// append would claim next.
+		nextVerKey := shaleKeyVersion(slug, maxVerNum(versions)+1)
+
+		txErr := r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
+			var p pasteRow
+			if err := shaleTxGetJSON(tx, pasteKey, &p); err != nil {
+				return err
+			}
+			if _, gerr := tx.Get(nextVerKey); gerr == nil {
+				return errVerTaken
+			} else if !errors.Is(gerr, backend.ErrNotFound) {
+				return gerr
+			}
+			p.PinnedVersion = 0
+			p.contentRef = latest.contentRef // whole served descriptor rolls to the latest live version
+			return shaleTxPutJSON(tx, pasteKey, p)
+		})
+		switch {
+		case txErr == nil:
+			return nil
+		case errors.Is(txErr, errVerTaken) || errors.Is(txErr, backend.ErrCASConflict):
+			continue // a version landed after the scan; re-scan for a fresh latest
+		default:
+			return txErr
+		}
+	}
+	return fmt.Errorf("shale: unpin %q: version set kept changing across %d attempts", slug, maxRescanAttempts)
 }
 
 // --- SweepRepo -------------------------------------------------------------

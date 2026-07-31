@@ -50,7 +50,11 @@ type SiteExtractor struct {
 	running  int64
 	files    int
 	entries  int
-	man      Manifest
+	// pathBytes carries Manifest.PathTextBytes() forward across Adds. Re-summing
+	// the manifest per file is quadratic in an entry count the client controls.
+	// It counts a path once, so it stays exact when an archive repeats one.
+	pathBytes int
+	man       Manifest
 }
 
 // NewSiteExtractor starts an extraction with quotaBudget bytes available. The
@@ -122,6 +126,11 @@ func (e *SiteExtractor) Add(ent ArchiveEntry, body io.Reader, sink FileSink) err
 		return ErrArchiveTooLarge
 	}
 
+	// Charged only for a path the manifest does not already hold, so the running
+	// total equals Manifest.PathTextBytes() even when an archive repeats a path.
+	if _, dup := e.man.Files[rel]; !dup {
+		e.pathBytes += len(rel)
+	}
 	e.man.Add(rel, ManifestEntry{
 		SHA:            sha,
 		Size:           int(capped.read),
@@ -131,7 +140,7 @@ func (e *SiteExtractor) Add(ent ArchiveEntry, body io.Reader, sink FileSink) err
 
 	// Checked incrementally, so a flood of long names aborts before the map
 	// grows.
-	if e.man.PathTextBytes() > MaxManifestBytes {
+	if e.pathBytes > MaxManifestBytes {
 		return fmt.Errorf("%w: manifest path text exceeds %d bytes", ErrTooManyFiles, MaxManifestBytes)
 	}
 	return nil
