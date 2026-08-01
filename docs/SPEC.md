@@ -29,7 +29,7 @@ out of scope for v1 - see "Non-goals" at the bottom.
 
 ## Supported formats
 
-**v1**: HTML, Markdown, diff.
+HTML, Markdown, diff, Mermaid, PDF, CSV/TSV, JSON/JSONL.
 
 Detection: by content type sniffed from the first 512 bytes plus optional
 explicit `--type` flag at upload time. A Markdown paste is served as a
@@ -59,20 +59,82 @@ Format gate"): a paste must carry at least one real unified-diff hunk
 header to auto-detect as a diff, so an ordinary text paste that merely
 contains `+`/`-` lines is not mis-rendered; `--type diff` forces it.
 
-**Future** (post-v1, behind a feature flag):
-- Mermaid diagrams (render server-side to SVG / PNG)
-- Maybe: PlantUML, GraphViz / DOT, ASCII tables
+**Fenced blocks in a markdown paste.** A ` ```mermaid ` block becomes a
+diagram, drawn by the same renderer the standalone mermaid kind uses and
+fetched only when such a fence is present, so a prose paste never loads it.
+
+A ` ```diff ` block stays a **code block**, tinted by leading character
+(`+` green, `-` red, `@@` and file headers emphasised). The fence is a
+LANGUAGE TAG in the same sense as ` ```java `: it asks for highlighting
+inside a code block, not for the standalone diff viewer's chrome. Tinting
+by leading character is the whole grammar, so it needs no highlighter
+library and no lazy load at all.
+
+A **mermaid** paste is a [Mermaid](https://mermaid.js.org) diagram source
+(`graph`, `sequenceDiagram`, `flowchart`, ...). Same shape again: a fixed
+shell fetches the raw source via `?raw` and renders it to SVG in the
+browser. Mermaid also renders **inside markdown pastes**: a fenced
+` ```mermaid ` block in any markdown paste becomes a diagram. The renderer
+is ~3.5 MB, so the markdown shell loads it **only when the fetched source
+actually contains a mermaid fence** - a prose paste never pays for it.
+
+A **pdf** paste renders through [pdf.js](https://mozilla.github.io/pdf.js/)
+with **scripting disabled**, giving page navigation, text selection, and
+per-page deep links. PDF is the first accepted kind whose bytes are not
+text; see "File handling -> Format gate" for why that is a smaller step
+than it looks.
+
+A **csv** paste (also TSV) renders as a sortable table with inferred column
+types and per-column statistics (row count, null count, distinct count,
+min/max for numeric columns). A **json** paste (also JSONL) renders as a
+collapsible tree with a filter box. Both are parsed in the browser from
+the same `?raw` bytes; the server does not parse either format.
 
 Uploads of unsupported types are **rejected** with a clear error pointing
 at what we accept:
 
 ```
 $ cat photo.jpg | ssh hostthis.dev
-error: hostthis only accepts content that needs rendering (html, markdown).
+error: hostthis only accepts content it can render
+       (html, markdown, diff, mermaid, pdf, csv, json)
 ```
 
-This is deliberate scope: every accepted format expands the surface for
-abuse + sandboxing edge cases. Stay narrow.
+This is deliberate scope. The inclusion test is not "can we store it" -
+storage is format-blind and always has been - but:
+
+> **Does the rendered view beat downloading the file?**
+
+A CSV you can sort and summarise beats opening a spreadsheet; a PDF you
+can link to page 7 of beats an attachment; a diagram beats a screenshot of
+a diagram. An archive, an executable, or a video does not clear that bar,
+so hostthis is not a general file host. Every accepted format expands the
+surface for abuse and sandboxing edge cases, so each one has to earn it.
+
+### Deep links (addressing a location inside a paste)
+
+Every rendered kind accepts a URL **fragment** naming a place inside the
+content, so a paste can be *cited* and not merely sent:
+
+| Fragment | Kinds | Meaning |
+| --- | --- | --- |
+| `#<heading-slug>` | markdown | scroll to that heading |
+| `#L<n>` / `#L<a>-L<b>` | csv, json, diff | that line, or that inclusive range |
+| `#page=<n>` | pdf | that page |
+| `#row=<n>` | csv | that row (1-based, excluding the header) |
+
+Fragments are chosen over query parameters deliberately: a fragment is
+never sent to the server, so deep links add no routing, cost no extra
+request, and leave every URL a single cacheable representation. The
+viewers also *produce* them - clicking a line number, row, or heading
+anchor rewrites `location.hash` in place so the address bar always holds a
+copyable deep link.
+
+**The load order rule.** Every kind here renders client-side after an async
+`?raw` fetch, so the browser's native fragment scroll fires against an
+empty document and lands at the top. A shell MUST therefore resolve the
+fragment *itself* after render, and again on `hashchange`. This is a
+property of the client-render architecture, not of any one viewer: any new
+shell has the same obligation.
 
 ---
 
@@ -227,17 +289,43 @@ With* options. Refusal behavior is pinned by
   reading more than that is "too big to evaluate" and rejected with
   `upload too large to consider`. Generous enough that no legitimate
   text payload ever hits this; tight enough to bound the read.
-- **Format gate**: accept only supported content types (HTML, Markdown,
-  diff in v1). Server sniffs the first 512 bytes for content type via
-  `http.DetectContentType` and cross-checks any explicit `--type` flag.
-  Unsupported content is rejected with a clear error pointing at
-  what we accept - no silent fallback to `attachment` rendering.
-  Diff detection runs BEFORE the Markdown fallback and is deliberately
-  conservative: the upload prefix must contain at least one real unified-
-  diff hunk header (`@@ -<n>[,<n>] +<n>[,<n>] @@`) to auto-detect as a
-  diff. `diff --git` / `--- ` / `+++ ` file headers may accompany it, but
-  the hunk header is the gate, so a normal text paste that merely contains
-  `+`/`-` lines is never mis-detected. `--type diff` forces the kind.
+- **Format gate**: accept only supported content types. Server sniffs the
+  first 512 bytes for content type via `http.DetectContentType` and
+  cross-checks any explicit `--type` flag. Unsupported content is rejected
+  with a clear error pointing at what we accept - no silent fallback to
+  `attachment` rendering.
+
+  Detection order among the text kinds is precision-first, because the
+  cheap checks are the imprecise ones: **diff** (a real unified-diff hunk
+  header `@@ -<n>[,<n>] +<n>[,<n>] @@`), then **mermaid** (an opening
+  diagram keyword on the first non-blank line), then **json** (the prefix
+  parses as a JSON value), then **csv** (a consistent delimiter count
+  across the first several lines), then **markdown** (any structural cue),
+  which is the loosest and so must run last. Each gate is specific enough
+  that ordinary prose never trips it; `--type` forces any kind.
+
+  A hunk header appearing AFTER a markdown code fence is **quoted**, not
+  the document's own format, so that document is markdown. This is what
+  lets a design doc show a diff without its prose being served as diff
+  noise, and nothing is lost by it: the markdown viewer draws a fenced
+  diff through the same renderer the diff kind uses. The ordering test is
+  what keeps a real diff OF a markdown file working - there the hunk
+  header comes first and the fence is part of the diffed content.
+
+- **Binary kinds pass the same gate, not a hole in it.** PDF is accepted
+  by its `%PDF-` magic exactly as a site archive is accepted by its gzip
+  magic - an explicit format signature, checked in the same function,
+  never a fallback for "bytes we could not classify." The textual branches
+  still reject binary under a text hint, so `--type html` cannot smuggle a
+  binary through and have it served as `text/html`.
+
+  What makes this a small step rather than a new posture: hostthis already
+  stores and serves arbitrary bytes with correct content types inside site
+  archives, and every paste already gets its own origin. A PDF kind adds a
+  viewer and a single-file upload path, not a new storage capability and
+  not a new sandbox boundary. The PDF is served with `Content-Type:
+  application/pdf` and rendered by pdf.js with scripting disabled, so an
+  embedded-JS PDF cannot execute.
 - **Streaming I/O**: server reads stdin as a stream (no full-buffer
   allocation), tees through three sinks in parallel: a sha256 hasher
   (over uncompressed bytes - content addressability is by ORIGINAL

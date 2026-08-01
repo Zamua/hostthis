@@ -876,10 +876,14 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;\n" +
 	"         a QR code of the URL also prints to stderr on success)\n" +
 	"\n" +
-	"    cat foo.html  | ssh -T paste.test\n" +
-	"    cat doc.md    | ssh -T paste.test --name \"design notes\"\n" +
-	"    git diff      | ssh -T paste.test                  rendered as a diff\n" +
-	"    cat patch.txt | ssh -T paste.test --type diff      force the diff renderer\n" +
+	"    cat foo.html   | ssh -T paste.test\n" +
+	"    cat doc.md     | ssh -T paste.test --name \"design notes\"\n" +
+	"    git diff       | ssh -T paste.test                 rendered as a diff\n" +
+	"    cat chart.mmd  | ssh -T paste.test                 mermaid diagram\n" +
+	"    cat report.pdf | ssh -T paste.test                 paged pdf viewer\n" +
+	"    cat sales.csv  | ssh -T paste.test                 sortable table + SQL\n" +
+	"    cat events.json| ssh -T paste.test                 collapsible tree\n" +
+	"    cat x.txt      | ssh -T paste.test --type csv      force a renderer\n" +
 	"\n" +
 	"UPDATE & MANAGE (owner only; ssh key authenticates)\n" +
 	"\n" +
@@ -898,6 +902,16 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"    ssh paste.test pin <slug> <ver>           stick the URL to <ver> (survives updates)\n" +
 	"    ssh paste.test unpin <slug>               URL follows latest again\n" +
 	"\n" +
+	"LINK TO A PLACE INSIDE A PASTE\n" +
+	"\n" +
+	"    <url>#some-heading      markdown: jump to that heading\n" +
+	"    <url>#page=3            pdf: jump to that page\n" +
+	"    <url>#row=42            csv: jump to that row\n" +
+	"    <url>#L12-L20           diff/json: highlight those lines\n" +
+	"\n" +
+	"    Clicking a heading, row, or page in the viewer updates the URL, so the\n" +
+	"    address bar always holds a link you can copy.\n" +
+	"\n" +
 	"OUTPUT\n" +
 	"\n" +
 	"    list, versions, whoami accept -o json\n" +
@@ -910,7 +924,8 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"LIMITS\n" +
 	"\n" +
 	"    100 MiB per identity, counting post-compression bytes across all\n" +
-	"    your active pastes. HTML, Markdown, diff, or a gzip-tar site archive.\n" +
+	"    your active pastes. HTML, Markdown, diff, Mermaid, PDF, CSV, JSON,\n" +
+	"    or a gzip-tar site archive.\n" +
 	"\n" +
 	"    Apps can persist + sync state: https://paste.test/  (rooms + realtime API)\n"
 

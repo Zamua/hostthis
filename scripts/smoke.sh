@@ -36,7 +36,11 @@ command -v jq >/dev/null 2>&1 || { echo "smoke.sh requires jq" >&2; exit 1; }
 # a fresh key each run (which exhausts the server's per-subnet new-key
 # gate). Override the path with HOSTTHIS_SMOKE_KEY.
 KEY="${HOSTTHIS_SMOKE_KEY:-$HOME/.config/hostthis/smoke_id_ed25519}"
-SSH="ssh -i $KEY -o StrictHostKeyChecking=no -o IdentitiesOnly=yes"
+# A deploy fronts ssh on 22; `make run` uses 2222. Without this the suite can
+# only ever be run against a deploy, which is the wrong way round for a check
+# a contributor should be able to run before pushing.
+SSH_PORT="${HOSTTHIS_SSH_PORT:-22}"
+SSH="ssh -p $SSH_PORT -i $KEY -o StrictHostKeyChecking=no -o IdentitiesOnly=yes"
 
 # slug_from_url extracts the 8-char slug from a hostthis URL. Handles
 # both URL shapes the server can emit:
@@ -113,7 +117,7 @@ fi
 # ---- 2. upload HTML with --name --------------------------------------------
 step "upload HTML with --name"
 URL1=$(echo '<!doctype html><h1>smoke 1</h1>' | \
-  ssh -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -- \
+  ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -- \
     "$HOST" '--name "smoke html"' 2>/dev/null | head -1)
 SLUG1=$(slug_from_url "$URL1")
 if [ -z "$URL1" ]; then
@@ -126,7 +130,7 @@ fi
 # ---- 3. upload Markdown ----------------------------------------------------
 step "upload Markdown"
 URL2=$(printf '# Smoke MD\n\nbody\n' | \
-  ssh -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -- \
+  ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -- \
     "$HOST" '--name "smoke md"' 2>/dev/null | head -1)
 SLUG2=$(slug_from_url "$URL2")
 if [ -z "$URL2" ]; then
@@ -216,6 +220,92 @@ echo "$whoami2" | jq -e '.active_pastes == 2' >/dev/null 2>&1 \
   && ok "whoami shows 2 active" \
   || bad "whoami post-upload" "$whoami2"
 
+# ---- 11b. every renderable kind -------------------------------------------
+# One upload per accepted kind, checking the three things that can silently go
+# wrong independently of each other: the kind the GATE assigned, the SHELL the
+# bare URL serves, and the Content-Type of ?raw. A kind can be detected right
+# and served by the wrong viewer, or served by the right viewer with a
+# Content-Type that makes a browser download it instead.
+step "every renderable kind: detect, shell, raw type"
+
+# kind|shell asset the page must load|expected ?raw Content-Type prefix
+kind_specs='mermaid|/_hostthis/mermaid.js|text/plain
+csv|/_hostthis/data.js|text/plain
+json|/_hostthis/data.js|application/json
+pdf|/_hostthis/pdf.js|application/pdf'
+
+kind_body() {
+  case "$1" in
+    mermaid) printf 'flowchart TD\n  A[start] --> B[end]\n' ;;
+    csv)     printf 'region,rep,units\nnorth,ada,4\nsouth,grace,5\neast,alan,6\n' ;;
+    json)    printf '{"service":"api","counts":{"info":1,"error":2}}\n' ;;
+    # Smallest structurally-valid PDF: the gate keys on the signature, and the
+    # viewer is exercised by the browser tests, not here.
+    pdf)     printf '%%PDF-1.4\n1 0 obj\n<</Type/Catalog>>\nendobj\ntrailer<</Root 1 0 R>>\n%%%%EOF\n' ;;
+  esac
+}
+
+while IFS='|' read -r kind want_shell want_ct; do
+  [ -z "$kind" ] && continue
+  url=$(kind_body "$kind" | ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no \
+      -o IdentitiesOnly=yes -- "$HOST" 2>/dev/null | head -1)
+  slug=$(slug_from_url "$url")
+  if [ -z "$slug" ]; then
+    bad "kind $kind: upload" "no URL emitted (the format gate rejected it?)"
+    continue
+  fi
+  echo "$slug" >> /tmp/hostthis-smoke.slugs
+
+  # -n: without it this ssh swallows the loop's here-string and only the
+  # first kind is ever checked.
+  got_kind=$($SSH -n "$HOST" list -ojson 2>/dev/null \
+    | jq -r --arg s "$slug" '.[] | select(.slug==$s) | .kind')
+  [ "$got_kind" = "$kind" ] \
+    && ok "kind $kind: detected" \
+    || bad "kind $kind: detection" "stored as '${got_kind:-?}'"
+
+  page=$(curl -sS "$url")
+  case "$page" in
+    *"$want_shell"*) ok "kind $kind: serves its viewer" ;;
+    *) bad "kind $kind: viewer" "page does not load $want_shell" ;;
+  esac
+
+  ct=$(curl -sS -o /dev/null -w '%{content_type}' "$url?raw=1")
+  case "$ct" in
+    "$want_ct"*) ok "kind $kind: raw is $want_ct" ;;
+    *) bad "kind $kind: raw Content-Type" "got '$ct', want '$want_ct'" ;;
+  esac
+done <<< "$kind_specs"
+
+# ---- 11c. a markdown doc quoting a diff stays markdown ---------------------
+# The gate matches a hunk header anywhere in the prefix, so a design doc
+# showing a diff was classified as a diff outright and its prose served as
+# diff noise. The fence must win.
+step "markdown quoting a diff is markdown, not diff"
+qd_url=$(printf '# Review\n\nThe change:\n\n```diff\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new\n```\n' | \
+  ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -- "$HOST" 2>/dev/null | head -1)
+qd_slug=$(slug_from_url "$qd_url")
+if [ -z "$qd_slug" ]; then
+  bad "quoted-diff upload" "no URL emitted"
+else
+  echo "$qd_slug" >> /tmp/hostthis-smoke.slugs
+  qd_kind=$($SSH "$HOST" list -ojson 2>/dev/null | jq -r --arg s "$qd_slug" '.[] | select(.slug==$s) | .kind')
+  [ "$qd_kind" = "markdown" ] \
+    && ok "quoted diff stays markdown" \
+    || bad "quoted diff kind" "stored as '${qd_kind:-?}', want markdown: its prose would be served as diff noise"
+fi
+
+# ---- 11d. an unsupported type is still refused -----------------------------
+# The gate widened to seven kinds; it must not have become a catch-all.
+step "unsupported content is still rejected"
+rej=$(printf '\x00\x01\x02binary junk\x00\xff' | \
+  ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -- "$HOST" 2>&1 | head -2)
+case "$rej" in
+  *"only accepts"*) ok "binary refused with the format message" ;;
+  *hostthis.dev*|*"$HOST"*) bad "binary accepted" "the gate became a catch-all: $rej" ;;
+  *) ok "binary refused" ;;
+esac
+
 # ---- 12. delete + verify 404 -----------------------------------------------
 step "delete + verify 404"
 $SSH "$HOST" delete "$SLUG1" >/dev/null 2>&1
@@ -304,7 +394,7 @@ echo "$nokey" | grep -q "ssh key required" \
 # to use stdio as a direct-tcpip channel IMMEDIATELY at session start,
 # which forces the server to accept-or-reject before any command runs.
 step "ssh -W (direct-tcpip channel) refused"
-fwd_l=$(ssh -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+fwd_l=$(ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
         -W localhost:80 "$HOST" 2>&1 </dev/null)
 fwd_l_rc=$?
 if [ "$fwd_l_rc" -ne 0 ] && \
@@ -319,7 +409,7 @@ fi
 # global request is rejected at session start. ExitOnForwardFailure=yes
 # guarantees ssh exits non-zero in that case.
 step "ssh -R (reverse forward) refused"
-fwd_r=$(ssh -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+fwd_r=$(ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
         -o ExitOnForwardFailure=yes \
         -R 19998:localhost:80 -- "$HOST" whoami 2>&1)
 fwd_r_rc=$?
@@ -366,7 +456,7 @@ else
   for v in help whoami list; do
     step "latency: $v"
     t0=$(now_ms)
-    ssh -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o BatchMode=yes \
+    ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o BatchMode=yes \
         -o ConnectTimeout=45 "$HOST" "$v" >/dev/null 2>&1
     t1=$(now_ms); ms=$((t1-t0))
     if [ "$ms" -gt "$LAT_BUDGET_MS" ]; then

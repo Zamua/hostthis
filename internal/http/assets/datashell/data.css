@@ -1,0 +1,95 @@
+:root {
+  --bg:#ffffff; --panel:#f6f8fa; --ink:#1f2328; --soft:#59636e; --rule:#d1d9e0;
+  --accent:#0969da; --zebra:#f9fafb; --num:#0550ae; --null:#8b949e; --err:#cf222e;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#0d1117; --panel:#151b23; --ink:#e6edf3; --soft:#9198a1; --rule:#3d444d;
+          --accent:#4493f8; --zebra:#11161d; --num:#79c0ff; --null:#6e7681; --err:#ff7b72; }
+}
+* { box-sizing: border-box; }
+html, body { background: var(--bg); color: var(--ink); margin: 0; height: 100%; }
+body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  display: flex; flex-direction: column; -webkit-text-size-adjust: 100%; }
+
+/* Fixed height so revealing the view switch mid-session cannot change the
+   bar's size, and with it the content region below. */
+#bar { position: sticky; top: 0; z-index: 6; display: flex; align-items: center; gap: .6rem;
+  height: 44px; flex: 0 0 44px; padding: 0 .85rem; background: var(--panel);
+  border-bottom: 1px solid var(--rule); }
+#bar .grow { flex: 1; }
+#summary { color: var(--soft); font-size: .82rem; letter-spacing: .02em; }
+#filter { font: inherit; padding: .28rem .55rem; min-width: 7rem; max-width: 14rem;
+  background: var(--bg); color: var(--ink); border: 1px solid var(--rule); border-radius: 7px; }
+#bar button, #run { font: inherit; font-size: .85rem; padding: .28rem .7rem; cursor: pointer;
+  background: transparent; color: var(--ink); border: 1px solid var(--rule); border-radius: 7px; }
+#bar button:hover, #run:hover { border-color: var(--accent); color: var(--accent); }
+#bar button[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+#dl { color: var(--accent); text-decoration: none; font-size: .86rem; }
+
+/* The query pane is closed at rest: the table is the content, and an editor
+   sitting open above it competes with the thing the reader came for. */
+#sql { padding: .7rem .85rem; border-bottom: 1px solid var(--rule); background: var(--panel); }
+#editor { border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; background: var(--bg); }
+#editor .cm-editor { font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+#editor .cm-editor.cm-focused { outline: none; }
+#editor .cm-scroller { max-height: 40vh; }
+/* Shown only if the editor bundle fails to load, so the console still works. */
+#editor textarea.fallback { display: block; width: 100%; border: 0; padding: .55rem .7rem; resize: vertical;
+  font: 13px/1.55 ui-monospace, Menlo, monospace; background: var(--bg); color: var(--ink); }
+.sqlrow { display: flex; align-items: center; gap: .7rem; margin-top: .5rem; }
+.hint { color: var(--soft); font-size: .74rem; font-family: ui-monospace, Menlo, monospace; }
+.vimtoggle { color: var(--soft); font-size: .78rem; display: flex; align-items: center; gap: .28rem; cursor: pointer; }
+#sqlstatus { color: var(--soft); font-size: .8rem; }
+/* A query result and the source data are both tables, so they share ONE
+   region and the view switches between them. Stacking them made the layout
+   move every time a query ran. */
+.seg { display: flex; border: 1px solid var(--rule); border-radius: 7px; overflow: hidden; }
+/* display:flex outranks the UA's [hidden]{display:none}, so the switch would
+   show before any query had produced a result to switch to. */
+.seg[hidden] { display: none; }
+/* Scoped under #bar: the generic `#bar button` rule outranks a bare
+   `.seg button` on specificity and would win back the border and background. */
+#bar .seg button { font: inherit; font-size: .8rem; padding: .22rem .75rem; cursor: pointer;
+  background: transparent; color: var(--soft); border: 0; border-radius: 0; }
+#bar .seg button.on { background: var(--accent); color: #fff; }
+#bar .seg button:hover:not(.on) { color: var(--accent); border-color: transparent; }
+
+#content { flex: 1; min-height: 0; overflow: auto; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; font-variant-numeric: tabular-nums; width: max-content; min-width: 100%; }
+th, td { padding: .36rem .7rem; border-bottom: 1px solid var(--rule); text-align: left; white-space: nowrap; vertical-align: top; }
+
+/* Column facts live in the header, so there is no second grid to
+   cross-reference and the table is the only full-width region. */
+thead th { position: sticky; top: 0; background: var(--panel); cursor: pointer; user-select: none;
+  border-bottom: 2px solid var(--rule); z-index: 2; padding-top: .45rem; padding-bottom: .45rem; }
+thead th:hover { color: var(--accent); }
+thead th .name { font-weight: 600; }
+thead th .arrow { opacity: .5; font-size: .74rem; margin-left: .25rem; }
+thead th .type { display: block; font-weight: 400; font-size: .66rem; color: var(--soft);
+  letter-spacing: .06em; text-transform: uppercase; margin-top: 1px; }
+thead th .facts { display: block; font-weight: 400; font-size: .68rem; color: var(--soft); margin-top: 1px; }
+/* Range bar: a numeric column's spread, without spending a row on it. */
+thead th .spark { display: block; height: 3px; margin-top: 4px; border-radius: 2px; background: var(--rule); }
+thead th .spark i { display: block; height: 100%; border-radius: 2px; background: var(--accent); opacity: .5; }
+
+tbody tr:nth-child(even) { background: var(--zebra); }
+td.n { text-align: right; color: var(--num); font-family: ui-monospace, Menlo, monospace; }
+td.null { color: var(--null); font-style: italic; }
+td.rn, th.rn { color: var(--soft); text-align: right; font-family: ui-monospace, Menlo, monospace;
+  font-size: .78rem; cursor: pointer; position: sticky; left: 0; background: var(--bg); }
+tbody tr:nth-child(even) td.rn { background: var(--zebra); }
+td.rn:hover { color: var(--accent); }
+.dl-flash { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.tree { font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; padding: .9rem .85rem; }
+.tree details { margin-left: 1rem; }
+.tree summary { cursor: pointer; }
+.tree .k { color: var(--accent); }
+.tree .num, .tree .b { color: var(--num); }
+.tree .nul { color: var(--null); font-style: italic; }
+.tree .row { display: block; }
+.tree mark { background: rgba(255, 212, 0, .35); color: inherit; }
+
+.status { color: var(--soft); padding: 2rem .85rem; }
+.err { color: var(--err); font-family: ui-monospace, Menlo, monospace; white-space: pre-wrap; padding: 1rem .85rem; }

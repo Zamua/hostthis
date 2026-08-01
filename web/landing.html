@@ -98,7 +98,8 @@ server; verb commands don&rsquo;t need it.</p>
 
 <h2>Description</h2>
 <div class="indent">
-<p>Publishes HTML, Markdown, or a unified diff {{RETENTION}} at a random subdomain.
+<p>Publishes HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV or a
+JSON document {{RETENTION}} at a random subdomain.
 One ssh pipe, no signup, no install. Identity is your ssh public key: anyone with
 a different key can read the URL but cannot update, rename, pin, or delete the
 paste.</p>
@@ -115,7 +116,7 @@ any rendered paste's URL for the raw source.</p>
   <dd>upload a paste. The URL prints on stdout and a QR code of it on
   stderr (<code>2&gt;/dev/null</code> drops the QR). To set a label or force the
   content type, pass <strong>--name</strong> "label" or
-  <strong>--type</strong> html|markdown|diff after a literal <code>--</code>.
+  <strong>--type</strong> html|markdown|diff|mermaid|pdf|csv|json after a literal <code>--</code>.
   ssh otherwise parses a leading <strong>--name</strong> as one of its own
   options.</dd>
 
@@ -202,7 +203,8 @@ after its last write. Deployments without a room store return 404.</p>
 of every active paste. Text compresses 5-10x under zstd, so the real raw-payload
 ceiling is typically 50-100 MiB.</p>
 
-<p>Pastes are HTML, Markdown, or a unified diff; sites are a gzip-tar archive.
+<p>Pastes are HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV or a
+JSON document; sites are a gzip-tar archive.
 Kept {{RETENTION}} after the last update.</p>
 </div>
 
@@ -242,6 +244,13 @@ cat tricky.html | ssh -T hostthis.dev -- --type html
 
 <span class="ink-soft"># render a unified diff (auto-detected, or force with --type diff)</span>
 git diff | ssh -T hostthis.dev
+
+<span class="ink-soft"># diagrams, documents and data - all auto-detected</span>
+cat architecture.mmd | ssh -T hostthis.dev
+cat q3-review.pdf    | ssh -T hostthis.dev
+cat sales.csv        | ssh -T hostthis.dev
+
+<span class="ink-soft"># link to a place inside a paste: #heading  #page=3  #row=42  #L12-L20</span>
 
 <span class="ink-soft"># read your content back</span>
 ssh hostthis.dev get abc12345

@@ -87,3 +87,35 @@ tr:nth-child(2n) { background: var(--zebra); }
 input[type="checkbox"] { margin-right: 0.4rem; }
 /* Footnotes */
 .footnotes { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--rule); font-size: 0.9rem; color: var(--soft); }
+
+/* Deep links: an anchored heading is clickable, and the flash is what makes
+   the addressed element findable after the scroll settles. */
+.anchored { cursor: pointer; }
+.anchored:hover::after { content: " #"; color: var(--soft); font-weight: 400; }
+.dl-flash { background: rgba(255, 212, 0, .22); border-radius: 4px; transition: background .4s; }
+.mermaid-block {
+  margin: 1.2rem 0; text-align: center;
+  width: min(96vw, 1180px);
+  margin-left: calc(50% - min(48vw, 590px));
+}
+.mermaid-block svg { max-width: 100%; height: auto; }
+.mermaid-err {
+  text-align: left; white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace;
+  font-size: .85rem; background: var(--code-bg); border-radius: 6px; padding: .8rem;
+}
+
+
+/* A ```diff fence stays a code block and is tinted by leading character, the
+   same convention ```java uses for a language. The colours sit on the code
+   background rather than replacing it, so the block still reads as code. */
+/* Every line is a block, so the newline comes from layout rather than from a
+   text node; a span AND a newline would double-space the block. */
+.diff-code .d-line { display: block; min-height: 1em; }
+.diff-code .d-ins { background: rgba(46, 160, 67, .16); }
+.diff-code .d-del { background: rgba(248, 81, 73, .14); }
+.diff-code .d-hunk { color: var(--link); font-weight: 600; }
+.diff-code .d-file { color: var(--soft); font-weight: 600; }
+@media (prefers-color-scheme: dark) {
+  .diff-code .d-ins { background: rgba(46, 160, 67, .22); }
+  .diff-code .d-del { background: rgba(248, 81, 73, .20); }
+}

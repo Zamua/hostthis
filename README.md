@@ -21,7 +21,8 @@ a command argument and never trigger the warning.
 
 ## DESCRIPTION
 
-Publishes HTML, Markdown, or a unified diff for a configurable window
+Publishes HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV
+or a JSON document for a configurable window
 (30 days by default; the operator can change or disable it) at a random
 subdomain. One ssh pipe, no signup, no install. Identity is your ssh
 public key: anyone with a different key can read the URL but cannot
@@ -39,7 +40,7 @@ rendered paste's URL for the raw source.
 <dd>upload a paste. The URL prints on stdout; a QR code of it prints on
 stderr (drop it with <code>2&gt;/dev/null</code>). To set a label or force
 the content type, pass <code>--name "label"</code> or
-<code>--type html|markdown|diff</code> after a literal <code>--</code>. ssh
+<code>--type html|markdown|diff|mermaid|pdf|csv|json</code> after a literal <code>--</code>. ssh
 otherwise parses a leading <code>--name</code> as one of its own options.</dd>
 
 <dt><code>cat <em>file</em> | ssh -T hostthis.dev <em>slug</em></code></dt>
@@ -140,7 +141,8 @@ days after its last write. Deployments without a room store return 404.
 active version of every active paste. Text compresses 5-10x under
 zstd, so the real raw-payload ceiling is typically 50-100 MiB.
 
-Pastes are HTML, Markdown, or a unified diff; sites are a gzip-tar
+Pastes are HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV
+or a JSON document; sites are a gzip-tar
 archive. Retention runs from the last update (`HOSTTHIS_RETENTION`, 30 days by default).
 
 ## EXIT STATUS
@@ -184,6 +186,18 @@ cat tricky.html | ssh -T hostthis.dev -- --type html
 # render a unified diff (auto-detected, or force it with --type diff)
 git diff | ssh -T hostthis.dev
 cat review.patch | ssh -T hostthis.dev -- --type diff
+
+# a mermaid diagram, a pdf, a csv, a json document - all auto-detected
+cat architecture.mmd | ssh -T hostthis.dev
+cat q3-review.pdf    | ssh -T hostthis.dev
+cat sales.csv        | ssh -T hostthis.dev
+cat events.json      | ssh -T hostthis.dev
+
+# link to a place INSIDE a paste
+#   <url>#some-heading   markdown heading
+#   <url>#page=3         pdf page
+#   <url>#row=42         csv row
+#   <url>#L12-L20        diff / json lines
 
 # read your content back
 ssh hostthis.dev get abc12345
