@@ -131,6 +131,22 @@ highlight the row whose gutter reads `180`.
 `F<f>` scopes it to the f-th file, because the same line number occurs in every
 file of a multi-file diff. A bare `#L<n>` is accepted and means file 1.
 
+Those two numbering schemes can collide inside one file: a line deleted at old
+line 17 and another added at new line 17 both display `17`. The bare number
+resolves to the **new-file** row, since that is the line a reader shares.
+
+**A range covers the rows between its endpoints, not the numbers between them.**
+Gutter numbers are not consecutive across a deletion, so a range is resolved by
+spanning rows and then clamped to the ones that exist - a hand-written range
+running past the end of a hunk lands on the rows it does cover rather than
+failing, and a range drawn over a deletion has no holes in it.
+
+**Selecting a range needs no keyboard.** Shift-click extends from the last
+selected line. A touch device has no shift key, so there a second tap extends
+instead, and tapping any line inside the selection clears it. Escape also
+clears. The two behaviours are chosen per input event, not per device, so a
+touchscreen laptop follows whichever one the reader actually used.
+
 The numbers are those of the **line-by-line** rendering. Side-by-side splits one
 logical line across two rows, so a link resolved there would land differently: a
 line link therefore switches the view when it is RESOLVED. That override happens
