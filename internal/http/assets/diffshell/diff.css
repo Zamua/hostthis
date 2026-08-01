@@ -208,17 +208,6 @@ tr.dl-line.dl-line > td.d2h-code-linenumber {
   color: var(--dl-accent) !important;
   font-weight: 700 !important;
 }
-/* The bounding rules go on the ROW, not its cells. A td border stops at the
-   cell, so it breaks across the unowned strip between the gutter and the code
-   (the space diff2html reserved for its originally-absolute line numbers), and
-   the rule reads as two dashes with a hole. An inset shadow on the row spans
-   the row box, gap included. */
-tr.dl-first.dl-first { box-shadow: inset 0 2px 0 0 var(--dl-accent) !important; }
-tr.dl-last.dl-last { box-shadow: inset 0 -2px 0 0 var(--dl-accent) !important; }
-/* A single-line selection is both bounds at once. */
-tr.dl-first.dl-last {
-  box-shadow: inset 0 2px 0 0 var(--dl-accent), inset 0 -2px 0 0 var(--dl-accent) !important;
-}
 
 :root { --dl-accent: #0969da; }
 @media (prefers-color-scheme: dark) {
@@ -244,7 +233,24 @@ tr.dl-first.dl-last {
 }
 /* Two beats over ~2s. One short fade was finishing before a reader's eye had
    even reached the range on a cold load, which is the only moment it fires. */
+/* Both the row AND its cells. The cells paint over the row, so a row-only
+   animation flashes just the unowned strip between them; a cell-only animation
+   flashes everything except that strip. Together they cover the whole band. */
+tr.dl-arrive,
 tr.dl-arrive > td:not(.d2h-code-linenumber) { animation: dl-arrive 2s ease-out 1; }
+
+/* The gutter flashes via filter, not the overlay. Its accent bar and sticky
+   halo are one !important box-shadow, and a CSS animation cannot override an
+   !important declaration - animating box-shadow there does nothing at all.
+   filter is unclaimed, so it can carry the same beat without touching either. */
+@keyframes dl-arrive-gutter {
+  0%   { filter: none; }
+  12%  { filter: brightness(.70) saturate(1.9); }
+  46%  { filter: brightness(.93) saturate(1.2); }
+  70%  { filter: brightness(.77) saturate(1.7); }
+  100% { filter: none; }
+}
+tr.dl-arrive > td.d2h-code-linenumber { animation: dl-arrive-gutter 2s ease-out 1; }
 @media (prefers-color-scheme: dark) {
   @keyframes dl-arrive {
     0%   { box-shadow: inset 0 0 0 9999px rgba(68, 147, 248, .00); }
