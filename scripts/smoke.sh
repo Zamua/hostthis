@@ -232,7 +232,8 @@ step "every renderable kind: detect, shell, raw type"
 kind_specs='mermaid|/_hostthis/mermaid.js|text/plain
 csv|/_hostthis/data.js|text/plain
 json|/_hostthis/data.js|application/json
-pdf|/_hostthis/pdf.js|application/pdf'
+pdf|/_hostthis/pdf.js|application/pdf
+flamegraph|/_hostthis/flame.js|text/plain'
 
 kind_body() {
   case "$1" in
@@ -242,6 +243,7 @@ kind_body() {
     # Smallest structurally-valid PDF: the gate keys on the signature, and the
     # viewer is exercised by the browser tests, not here.
     pdf)     printf '%%PDF-1.4\n1 0 obj\n<</Type/Catalog>>\nendobj\ntrailer<</Root 1 0 R>>\n%%%%EOF\n' ;;
+    flamegraph) printf 'main;serve;read 41\nmain;serve;write 18\nmain;gc 6\n' ;;
   esac
 }
 

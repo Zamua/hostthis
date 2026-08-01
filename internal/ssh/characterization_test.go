@@ -883,6 +883,7 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"    cat report.pdf | ssh -T paste.test                 paged pdf viewer\n" +
 	"    cat sales.csv  | ssh -T paste.test                 sortable table + SQL\n" +
 	"    cat events.json| ssh -T paste.test                 collapsible tree\n" +
+	"    cat cpu.folded | ssh -T paste.test                 interactive flame graph\n" +
 	"    cat x.txt      | ssh -T paste.test --type csv      force a renderer\n" +
 	"\n" +
 	"UPDATE & MANAGE (owner only; ssh key authenticates)\n" +
@@ -908,10 +909,13 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"    <url>#page=3            pdf: jump to that page\n" +
 	"    <url>#row=42            csv: jump to that row\n" +
 	"    <url>#F1L42-L48         diff: highlight lines 42-48 of file 1\n" +
+	"    <url>#focus=main;serve  flamegraph: zoom to that stack\n" +
+	"    <url>#q=malloc          flamegraph: highlight matching frames\n" +
 	"\n" +
-	"    Clicking a heading, row, page, or diff line number updates the URL, so\n" +
-	"    the address bar always holds a link you can copy. Shift-click a second\n" +
-	"    diff line number to select a range.\n" +
+	"    Clicking a heading, row, page, diff line number, or flame frame updates\n" +
+	"    the URL, so the address bar always holds a link you can copy. To select\n" +
+	"    a range of diff lines: shift-click a second line number, or on a touch\n" +
+	"    screen just tap it.\n" +
 	"\n" +
 	"OUTPUT\n" +
 	"\n" +
@@ -926,7 +930,7 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"\n" +
 	"    100 MiB per identity, counting post-compression bytes across all\n" +
 	"    your active pastes. HTML, Markdown, diff, Mermaid, PDF, CSV, JSON,\n" +
-	"    or a gzip-tar site archive.\n" +
+	"    folded stacks, or a gzip-tar site archive.\n" +
 	"\n" +
 	"    Apps can persist + sync state: https://paste.test/  (rooms + realtime API)\n"
 
