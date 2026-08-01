@@ -17,7 +17,7 @@ var diffShellFS embed.FS
 // caches for a year. The shell is content-independent, so its ETag does NOT
 // depend on the paste content. BUMP THIS whenever any file under
 // assets/diffshell/ changes in a way visitors must re-fetch.
-const diffShellVersion = "diffshell-v30"
+const diffShellVersion = "diffshell-v32"
 
 // diffShellAssets is the whitelist of asset names serveAsset will serve, mapped
 // to their Content-Type. Anything not in this set 404s, so no path traversal or
