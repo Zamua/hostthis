@@ -271,32 +271,32 @@ func looksLikeMermaid(b []byte) bool {
 // "item 1 / item 2" also ends every line in a count.
 func looksLikeFolded(b []byte) bool {
 	s := string(b)
-	truncated := len(s) > 8192
-	if truncated {
+	if len(s) > 8192 {
 		s = s[:8192]
 	}
 	lines := strings.Split(s, "\n")
-	// Only a line the WINDOW cut is discarded: its count is chopped and would
-	// fail a whole-file gate that is otherwise satisfied. A file that merely
-	// ends without a newline is complete, and dropping its last line would
-	// push a short profile under the two-line floor.
-	if truncated && len(lines) > 1 {
-		lines = lines[:len(lines)-1]
-	}
 	var n, withSep int
-	for _, line := range lines {
+	for i, line := range lines {
 		line = strings.TrimRight(line, "\r")
 		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		// Frames may contain spaces (a C++ signature does), so the count is
 		// the LAST field, never the second.
-		i := strings.LastIndexAny(line, " \t")
-		if i < 0 {
-			return false
+		idx := strings.LastIndexAny(line, " \t")
+		stack := ""
+		if idx >= 0 {
+			stack = strings.TrimRight(line[:idx], " \t")
 		}
-		stack := strings.TrimRight(line[:i], " \t")
-		if !isPositiveInt(line[i+1:]) || stack == "" {
+		if idx < 0 || stack == "" || !isPositiveInt(line[idx+1:]) {
+			// The caller sniffs a PREFIX, so the window's final line is
+			// routinely cut mid-count. Only that line is forgiven; a malformed
+			// line anywhere earlier is proof this is not a profile. Treating a
+			// truncated line as malformed rejected every real profile, since
+			// they are far longer than the sniff window.
+			if i == len(lines)-1 {
+				continue
+			}
 			return false
 		}
 		n++

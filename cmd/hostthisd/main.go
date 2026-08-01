@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"syscall"
@@ -38,10 +39,29 @@ func main() {
 		landingPath     = flag.String("landing", envOr("HOSTTHIS_LANDING", "web/landing.html"), "path to apex landing HTML")
 		freshKeysLimit  = flag.Int("fresh-keys-per-subnet", envOrInt("HOSTTHIS_FRESH_KEYS_PER_SUBNET", 20), "max distinct new key fingerprints admitted per IP subnet per window")
 		freshKeysWindow = flag.Duration("fresh-keys-window", envOrDuration("HOSTTHIS_FRESH_KEYS_WINDOW", 24*time.Hour), "rolling window for the Sybil rate limit on fresh keys")
+		cpuProfile      = flag.String("cpuprofile", "", "write a CPU profile to this file until shutdown (local file; opens no network surface)")
 	)
 	flag.Parse()
 
 	logger := log.New(os.Stderr, "hostthis ", log.LstdFlags|log.LUTC)
+
+	// Deliberately a file, not a /debug/pprof endpoint: a profiling handler on
+	// a public daemon is a disclosure and denial-of-service surface, and this
+	// answers the same question without listening anywhere.
+	if *cpuProfile != "" {
+		f, err := os.Create(*cpuProfile)
+		if err != nil {
+			logger.Fatalf("cpuprofile: %v", err)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			logger.Fatalf("cpuprofile: %v", err)
+		}
+		logger.Printf("cpu profile: writing to %s until shutdown", *cpuProfile)
+		defer func() {
+			pprof.StopCPUProfile()
+			_ = f.Close()
+		}()
+	}
 
 	if *apexDomain == "" {
 		logger.Fatalf("--apex-domain is required (or set HOSTTHIS_APEX_DOMAIN). Pass the public domain hostthis serves on, e.g. paste.example.com.")
