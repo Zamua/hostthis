@@ -91,6 +91,31 @@ func TestDetectKind_FoldedPrefixIsTruncated(t *testing.T) {
 	}
 }
 
+// A real Go profile's frames are fully-qualified, so ONE folded line averages
+// around 600 bytes and often exceeds it. The 512-byte window the pipeline used
+// to capture could therefore hold no complete line at all, and no line-based
+// gate can fire on that. The fixtures above all use short frames and so cannot
+// catch it: they passed while every real profile was rejected.
+func TestDetectKind_FoldedLinesLongerThanTheMIMEWindow(t *testing.T) {
+	frame := "github.com/example/project/internal/transport.(*Server).handleConnection"
+	var sb strings.Builder
+	for i := 0; sb.Len() < 3*domain.SniffPrefixLen; i++ {
+		for f := range 9 {
+			fmt.Fprintf(&sb, "%s.step%d.variant%d;", frame, f, i)
+		}
+		fmt.Fprintf(&sb, "leaf%d %d\n", i, 7+i)
+	}
+	full := []byte(sb.String())
+	if first := strings.Index(sb.String(), "\n"); first < domain.MIMESniffLen {
+		t.Fatalf("fixture defeats its purpose: first line is %d bytes, want > %d",
+			first, domain.MIMESniffLen)
+	}
+	got, err := domain.DetectKind(full[:domain.SniffPrefixLen], "", sniff)
+	if err != nil || got != domain.KindFlamegraph {
+		t.Fatalf("got %q err=%v, want flamegraph", got, err)
+	}
+}
+
 // Forgiving the window's last line must not forgive one in the middle.
 func TestDetectKind_MalformedLineBeforeTheEndStillRejects(t *testing.T) {
 	body := "main;a;b 12\nthis line is prose, not a stack\nmain;c;d 9\nmain;e 4\n"
