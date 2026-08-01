@@ -68,12 +68,28 @@
   // The number is the new-file line for context and added lines, and the
   // old-file line for deletions, which is the only number those rows show.
   // F<n> scopes it because the same line number occurs in every file.
+  //
+  // Those two numbering schemes collide: a line deleted at old-17 and another
+  // added at new-17 both read "17" in the same file. A duplicate id is not just
+  // invalid, it is unreachable - getElementById only ever returns the first, so
+  // one of the rows can neither be linked nor lit. Deletions therefore carry a
+  // "d", leaving the bare number to mean the new file, which is what a reader
+  // shares. The suffix stays out of the fragment grammar; it is resolved here.
+  var fileRows = {};
+
+  function rowFor(file, n) {
+    return document.getElementById("F" + file + "L" + n) ||
+      document.getElementById("F" + file + "L" + n + "d");
+  }
+
   function anchorLines() {
     if (format !== "line-by-line") return;
+    fileRows = {};
     var fileIdx = 0;
     mount.querySelectorAll(".d2h-file-wrapper").forEach(function (file) {
       fileIdx++;
       var fi = fileIdx;
+      var ordered = fileRows[fi] = [];
       file.querySelectorAll("tr").forEach(function (tr) {
         var cells = tr.querySelectorAll("td.d2h-code-linenumber");
         var code = tr.querySelector(".d2h-code-line");
@@ -94,13 +110,23 @@
         // Prefer the LAST number: line-by-line prints old then new, so the new
         // one is the number a reader tracking the result cares about.
         var line = nums[nums.length - 1];
-        tr.id = "F" + fi + "L" + line;
+        var del = !!tr.querySelector("td.d2h-del");
+        tr.id = "F" + fi + "L" + line + (del ? "d" : "");
+        ordered.push(tr);
         cells.forEach(function (c) {
           c.classList.add("linkable");
-          c.title = "link to this line \u2014 shift-click for a range";
+          c.title = "link to this line; shift-click for a range";
           c.addEventListener("click", function (e) {
             e.preventDefault();
-            selectLine(fi, line, e.shiftKey);
+            // On touch a second tap extends, because there is no shift key.
+            // On a mouse it replaces, which is what a plain click means
+            // everywhere else and what shift-click exists to override.
+            var extend = e.shiftKey;
+            if (!extend && lastTouch && anchorStart && anchorStart.file === fi &&
+                anchorStart.tr !== tr) {
+              extend = true;
+            }
+            selectLine(fi, line, tr, extend);
           });
         });
       });
@@ -113,6 +139,15 @@
   // otherwise the pulse is applied to an empty document and then cleared.
   var pendingArrival = true;
 
+  // Touch has no shift key, so a range would be unreachable on a phone. The
+  // pointer type is read from the event that STARTED the click rather than
+  // from a media query, so a hybrid laptop behaves per-input rather than being
+  // classified once at load.
+  var lastTouch = false;
+  document.addEventListener("pointerdown", function (e) {
+    lastTouch = e.pointerType === "touch" || e.pointerType === "pen";
+  }, true);
+
   // anchorStart remembers the last single-line click so a shift-click extends
   // from it, the selection model file listings already use. It carries the file
   // too: a range spanning two files has no meaning here.
@@ -121,50 +156,68 @@
   // clearSelection drops the highlight AND the fragment, so a URL copied after
   // deselecting does not still carry a range.
   function clearSelection() {
-    mount.querySelectorAll("tr.dl-line, tr.dl-arrive").forEach(function (tr) {
-      tr.classList.remove("dl-line", "dl-arrive");
-    });
+    clearMarks();
     anchorStart = null;
     DL.clearHash();
   }
 
-  function selectLine(file, line, extend) {
-    // Clicking the one selected line again deselects it. Without this the only
-    // way out of a selection is to edit the URL by hand.
-    if (!extend && anchorStart && anchorStart.file === file && anchorStart.line === line) {
+  // Shown at most once per load: a reader who has already made a range knows.
+  var hinted = false;
+
+  function hintOnce() {
+    if (hinted) return;
+    hinted = true;
+    var el = document.createElement("div");
+    el.id = "dl-hint";
+    el.textContent = "tap another line to extend";
+    document.body.appendChild(el);
+    requestAnimationFrame(function () { el.classList.add("on"); });
+    setTimeout(function () {
+      el.classList.remove("on");
+      setTimeout(function () { el.remove(); }, 400);
+    }, 2600);
+  }
+
+  function clearMarks() {
+    mount.querySelectorAll("tr.dl-line, tr.dl-arrive").forEach(function (tr) {
+      tr.classList.remove("dl-line", "dl-arrive");
+    });
+  }
+
+  function selectLine(file, line, tr, extend) {
+    // Tapping a line that is already IN the selection clears it. On a mouse
+    // that only matters for a single line (Escape handles the rest), but on
+    // touch there is no Escape, so it is the only way out of a range.
+    if (tr.classList.contains("dl-line")) {
       var lit = mount.querySelectorAll("tr.dl-line");
-      if (lit.length === 1) {
+      if (lit.length === 1 || lastTouch) {
         clearSelection();
         return;
       }
     }
-    var start = extend && anchorStart && anchorStart.file === file ? anchorStart.line : line;
-    if (!extend || !anchorStart || anchorStart.file !== file) {
-      anchorStart = { file: file, line: line };
+    var from = extend && anchorStart && anchorStart.file === file ? anchorStart : null;
+    if (!from) {
+      anchorStart = { file: file, line: line, tr: tr };
+      // A second tap extending the range is not a gesture anyone guesses, and
+      // the tooltip that says so on a mouse never appears without hover.
+      if (lastTouch) hintOnce();
     }
-    var lo = Math.min(start, line), hi = Math.max(start, line);
-    DL.setHash("F" + file + "L" + lo + (lo === hi ? "" : "-L" + hi));
-    highlight(file, lo, hi, false, false);
+    paint(file, from ? from.tr : tr, tr, false, false);
   }
 
-  function highlight(file, lo, hi, scroll, arrived) {
-    mount.querySelectorAll("tr.dl-line, tr.dl-first, tr.dl-last, tr.dl-arrive")
-      .forEach(function (tr) {
-        tr.classList.remove("dl-line", "dl-first", "dl-last", "dl-arrive");
-      });
-    var rows = [];
-    for (var i = lo; i <= hi; i++) {
-      var tr = document.getElementById("F" + file + "L" + i);
-      if (!tr) continue; // a line absent from the diff simply has no row
-      tr.classList.add("dl-line");
-      rows.push(tr);
-    }
-    if (!rows.length) return;
-    // The bounds are marked on the rows that actually exist, not on lo and hi:
-    // a range whose first line is absent from the diff would otherwise draw its
-    // top rule nowhere.
-    rows[0].classList.add("dl-first");
-    rows[rows.length - 1].classList.add("dl-last");
+  // Endpoints are ROWS, not line numbers. Consecutive gutter numbers are not
+  // consecutive rows across a deletion, so walking the numbers would skip the
+  // deleted rows a reader dragged over and light a range with holes in it.
+  function paint(file, a, b, scroll, arrived) {
+    clearMarks();
+    var all = fileRows[file] || [];
+    var i = all.indexOf(a), j = all.indexOf(b);
+    if (i < 0 || j < 0) return;
+    if (i > j) { var t = i; i = j; j = t; }
+    var rows = all.slice(i, j + 1);
+    rows.forEach(function (tr) { tr.classList.add("dl-line"); });
+    var lo = lineOf(rows[0]), hi = lineOf(rows[rows.length - 1]);
+    DL.setHash("F" + file + "L" + lo + (lo === hi ? "" : "-L" + hi));
     // Arrival drives BOTH the pulse and the scroll, and both hang off the
     // pending flag rather than the caller. On a cold load the resolver runs
     // before the ?raw fetch returns, so the first highlight comes from the
@@ -177,6 +230,28 @@
     } else if (scroll) {
       rows[0].scrollIntoView({ block: "center", behavior: "smooth" });
     }
+  }
+
+  function lineOf(tr) {
+    return parseInt(tr.id.replace(/^F\d+L/, ""), 10);
+  }
+
+  // Resolves a fragment range onto rows. A line absent from the diff has no
+  // row; the range is clamped to the rows that exist rather than dropped, so a
+  // link written by hand around a hunk still lands somewhere sensible.
+  function highlight(file, lo, hi, scroll, arrived) {
+    var all = fileRows[file] || [];
+    var a = null, b = null;
+    for (var i = 0; i < all.length; i++) {
+      var n = lineOf(all[i]);
+      if (n >= lo && n <= hi) {
+        if (!a) a = all[i];
+        b = all[i];
+      }
+    }
+    if (!a) return;
+    anchorStart = { file: file, line: lineOf(a), tr: a };
+    paint(file, a, b, scroll, arrived);
   }
 
   // Re-applies the addressed range after a render, because a render rebuilds
