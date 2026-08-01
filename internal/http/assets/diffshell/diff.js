@@ -144,7 +144,7 @@
     }
     var lo = Math.min(start, line), hi = Math.max(start, line);
     DL.setHash("F" + file + "L" + lo + (lo === hi ? "" : "-L" + hi));
-    highlight(file, lo, hi, true, false);
+    highlight(file, lo, hi, false, false);
   }
 
   function highlight(file, lo, hi, scroll, arrived) {
@@ -165,11 +165,18 @@
     // top rule nowhere.
     rows[0].classList.add("dl-first");
     rows[rows.length - 1].classList.add("dl-last");
+    // Arrival drives BOTH the pulse and the scroll, and both hang off the
+    // pending flag rather than the caller. On a cold load the resolver runs
+    // before the ?raw fetch returns, so the first highlight comes from the
+    // render path with scroll=false - passing the intent from the resolver
+    // alone left a deep link opening at the top of the document.
     if (arrived && pendingArrival) {
       pendingArrival = false;
       rows.forEach(function (tr) { tr.classList.add("dl-arrive"); });
+      rows[0].scrollIntoView({ block: "center", behavior: "smooth" });
+    } else if (scroll) {
+      rows[0].scrollIntoView({ block: "center", behavior: "smooth" });
     }
-    if (scroll) rows[0].scrollIntoView({ block: "center", behavior: "smooth" });
   }
 
   // Re-applies the addressed range after a render, because a render rebuilds

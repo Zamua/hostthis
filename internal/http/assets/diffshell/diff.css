@@ -81,6 +81,12 @@ body {
      anything drawn on their edges (the selection's accent bar) comes out
      dashed. As a table-cell it fills the row and consecutive bars butt. */
   display: table-cell !important;
+  /* As inline-block the cell carried diff2html's fixed width: 7.5em. A
+     table-cell is shrinkable, so on a narrow viewport the column collapsed and
+     the two 3.5em number divs (old | new) wrapped, doubling every context
+     row's height and stacking its numbers. The width has to be pinned back. */
+  width: 7.5em !important;
+  min-width: 7.5em !important;
   position: sticky !important;
   left: 0;
   z-index: 2;
