@@ -123,6 +123,39 @@ body {
 .d2h-code-line .hljs-addition,
 .d2h-code-line .hljs-deletion { background: transparent; }
 
+/* The gutter carries its row's colour.
+   
+   It cannot simply be tinted: the rule above pins an OPAQUE fill with
+   !important because the gutter is sticky and overlaps the code column as it
+   scrolls, and diff2html's own tints are translucent rgba - letting one
+   through would smear the scrolled code under the numbers. So each state gets
+   an opaque equivalent, flattened against the page behind it, and the
+   box-shadow halo is set to match or a 1px white rim survives at every row
+   boundary. */
+.d2h-code-linenumber.d2h-ins {
+  background-color: rgb(221, 255, 221) !important;
+  box-shadow: 0 0 0 1px rgb(221, 255, 221) !important;
+}
+/* A changed line is a slightly different green from a pure addition. */
+.d2h-code-linenumber.d2h-ins.d2h-change {
+  background-color: rgb(221, 238, 221) !important;
+  box-shadow: 0 0 0 1px rgb(221, 238, 221) !important;
+}
+.d2h-code-linenumber.d2h-del {
+  background-color: rgb(253, 242, 208) !important;
+  box-shadow: 0 0 0 1px rgb(253, 242, 208) !important;
+}
+@media (prefers-color-scheme: dark) {
+  .d2h-auto-color-scheme .d2h-code-linenumber.d2h-ins {
+    background-color: rgb(18, 38, 30) !important;
+    box-shadow: 0 0 0 1px rgb(18, 38, 30) !important;
+  }
+  .d2h-auto-color-scheme .d2h-code-linenumber.d2h-del {
+    background-color: rgb(52, 44, 25) !important;
+    box-shadow: 0 0 0 1px rgb(52, 44, 25) !important;
+  }
+}
+
 /* A line number addresses its line, so it has to look like a control. */
 .d2h-code-linenumber.linkable { cursor: pointer; }
 .d2h-code-linenumber.linkable:hover { color: #0969da; text-decoration: underline; }
@@ -130,7 +163,15 @@ body {
    code together. !important because diff2html sets the row background per
    ins/del/context and would otherwise win. */
 tr.dl-line > td { background: rgba(255, 212, 0, .30) !important; }
+tr.dl-line > td.d2h-code-linenumber {
+  background-color: rgb(255, 242, 178) !important;
+  box-shadow: 0 0 0 1px rgb(255, 242, 178) !important;
+}
 @media (prefers-color-scheme: dark) {
   .d2h-code-linenumber.linkable:hover { color: #4493f8; }
   tr.dl-line > td { background: rgba(255, 212, 0, .18) !important; }
+  .d2h-auto-color-scheme tr.dl-line > td.d2h-code-linenumber {
+    background-color: rgb(57, 52, 19) !important;
+    box-shadow: 0 0 0 1px rgb(57, 52, 19) !important;
+  }
 }
