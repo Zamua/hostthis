@@ -59,12 +59,16 @@ Format gate"): a paste must carry at least one real unified-diff hunk
 header to auto-detect as a diff, so an ordinary text paste that merely
 contains `+`/`-` lines is not mis-rendered; `--type diff` forces it.
 
-**Fenced blocks in a markdown paste render richly.** A ` ```mermaid ` block
-becomes a diagram and a ` ```diff ` block becomes the full diff view
-(diff2html, syntax-highlighted, word-level intra-line marking), each drawn
-by the same renderer the standalone kind uses. Both libraries are fetched
-only when a fence of that language is actually present, so a prose paste
-loads neither.
+**Fenced blocks in a markdown paste.** A ` ```mermaid ` block becomes a
+diagram, drawn by the same renderer the standalone mermaid kind uses and
+fetched only when such a fence is present, so a prose paste never loads it.
+
+A ` ```diff ` block stays a **code block**, tinted by leading character
+(`+` green, `-` red, `@@` and file headers emphasised). The fence is a
+LANGUAGE TAG in the same sense as ` ```java `: it asks for highlighting
+inside a code block, not for the standalone diff viewer's chrome. Tinting
+by leading character is the whole grammar, so it needs no highlighter
+library and no lazy load at all.
 
 A **mermaid** paste is a [Mermaid](https://mermaid.js.org) diagram source
 (`graph`, `sequenceDiagram`, `flowchart`, ...). Same shape again: a fixed

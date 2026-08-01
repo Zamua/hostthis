@@ -104,20 +104,18 @@ input[type="checkbox"] { margin-right: 0.4rem; }
   font-size: .85rem; background: var(--code-bg); border-radius: 6px; padding: .8rem;
 }
 
-/* A fenced diff renders through the same viewer the standalone diff kind uses.
-   The scroll is its own, so a wide hunk never makes the article scroll.
 
-   Prose wants a 72ch measure; a diff does not, and reading one two columns at a
-   time is miserable. On a viewport with room to spare the block breaks out of
-   the text column, capped so it never exceeds the window. */
-.diff-block {
-  margin: 1.2rem 0; overflow-x: auto; font-size: .88rem;
-  width: min(96vw, 1180px);
-  margin-left: calc(50% - min(48vw, 590px));
-}
-.diff-block .d2h-wrapper { margin: 0; }
-.diff-block .d2h-file-header { border-radius: 6px 6px 0 0; }
-.diff-err {
-  white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace; font-size: .85rem;
-  background: var(--code-bg); border-radius: 6px; padding: .8rem;
+/* A ```diff fence stays a code block and is tinted by leading character, the
+   same convention ```java uses for a language. The colours sit on the code
+   background rather than replacing it, so the block still reads as code. */
+/* Every line is a block, so the newline comes from layout rather than from a
+   text node; a span AND a newline would double-space the block. */
+.diff-code .d-line { display: block; min-height: 1em; }
+.diff-code .d-ins { background: rgba(46, 160, 67, .16); }
+.diff-code .d-del { background: rgba(248, 81, 73, .14); }
+.diff-code .d-hunk { color: var(--link); font-weight: 600; }
+.diff-code .d-file { color: var(--soft); font-weight: 600; }
+@media (prefers-color-scheme: dark) {
+  .diff-code .d-ins { background: rgba(46, 160, 67, .22); }
+  .diff-code .d-del { background: rgba(248, 81, 73, .20); }
 }
