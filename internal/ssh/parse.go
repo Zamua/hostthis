@@ -19,7 +19,7 @@ type uploadArgs struct {
 
 // parseUploadFlags consumes the upload argv:
 //
-//	[<slug>] [--name "label"] [--type html|markdown|diff]
+//	[<slug>] [--name "label"] [--type html|markdown|diff|mermaid|pdf|csv|json]
 //
 // Flags may come before or after the slug.
 func parseUploadFlags(argv []string) (uploadArgs, error) {

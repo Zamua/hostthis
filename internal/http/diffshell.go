@@ -1,9 +1,6 @@
 package http
 
-import (
-	"embed"
-	"strings"
-)
+import "embed"
 
 // diffShellFS holds the client-side diff render assets: the fixed HTML shell,
 // the bootstrap JS, the page CSS, and the vendored diff2html + highlight.js
@@ -21,18 +18,6 @@ var diffShellFS embed.FS
 // depend on the paste content. BUMP THIS whenever any file under
 // assets/diffshell/ changes in a way visitors must re-fetch.
 const diffShellVersion = "diffshell-v4"
-
-// diffShellHTML returns the fixed diff render shell with diffShellVersion
-// substituted into the asset URLs' ?v= cache-buster.
-func diffShellHTML() []byte {
-	b, err := diffShellFS.ReadFile("assets/diffshell/shell.html")
-	if err != nil {
-		// The asset is compiled into the binary; a read failure means the
-		// build is broken, which surfaces in tests.
-		return nil
-	}
-	return []byte(strings.ReplaceAll(string(b), "__VER__", diffShellVersion))
-}
 
 // diffShellAssets is the whitelist of asset names serveAsset will serve, mapped
 // to their Content-Type. Anything not in this set 404s, so no path traversal or

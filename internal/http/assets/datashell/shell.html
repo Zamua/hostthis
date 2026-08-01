@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en" data-kind="__KIND__">
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<meta name=color-scheme content="light dark">
+<title>hostthis</title>
+<link rel="stylesheet" href="/_hostthis/data.css?v=__VER__">
+<header id="bar">
+  <span id="summary">loading…</span>
+  <div id="views" class="seg" hidden>
+    <button type="button" data-view="data" class="on">Data</button>
+    <button type="button" data-view="result">Result</button>
+  </div>
+  <span class="grow"></span>
+  <input id="filter" type="search" placeholder="filter" autocomplete="off" spellcheck="false">
+  <button id="sqlbtn" type="button" hidden>SQL</button>
+  <a id="dl" href="?raw=1" download>raw</a>
+</header>
+<section id="sql" hidden>
+  <div id="editor"></div>
+  <div class="sqlrow">
+    <button id="run" type="button">Run</button>
+    <span class="hint">⌘⏎</span>
+    <label class="vimtoggle"><input id="vim" type="checkbox"> vim</label>
+    <span id="sqlstatus"></span>
+  </div>
+</section>
+<main id="content"><div class="status">loading…</div></main>
+<script src="/_hostthis/deeplink.js?v=__VER__"></script>
+<script src="/_hostthis/data.js?v=__VER__"></script>
