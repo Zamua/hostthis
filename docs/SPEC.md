@@ -59,6 +59,13 @@ Format gate"): a paste must carry at least one real unified-diff hunk
 header to auto-detect as a diff, so an ordinary text paste that merely
 contains `+`/`-` lines is not mis-rendered; `--type diff` forces it.
 
+**Fenced blocks in a markdown paste render richly.** A ` ```mermaid ` block
+becomes a diagram and a ` ```diff ` block becomes the full diff view
+(diff2html, syntax-highlighted, word-level intra-line marking), each drawn
+by the same renderer the standalone kind uses. Both libraries are fetched
+only when a fence of that language is actually present, so a prose paste
+loads neither.
+
 A **mermaid** paste is a [Mermaid](https://mermaid.js.org) diagram source
 (`graph`, `sequenceDiagram`, `flowchart`, ...). Same shape again: a fixed
 shell fetches the raw source via `?raw` and renders it to SVG in the
@@ -292,6 +299,14 @@ With* options. Refusal behavior is pinned by
   across the first several lines), then **markdown** (any structural cue),
   which is the loosest and so must run last. Each gate is specific enough
   that ordinary prose never trips it; `--type` forces any kind.
+
+  A hunk header appearing AFTER a markdown code fence is **quoted**, not
+  the document's own format, so that document is markdown. This is what
+  lets a design doc show a diff without its prose being served as diff
+  noise, and nothing is lost by it: the markdown viewer draws a fenced
+  diff through the same renderer the diff kind uses. The ordering test is
+  what keeps a real diff OF a markdown file working - there the hunk
+  header comes first and the fence is part of the diffed content.
 
 - **Binary kinds pass the same gate, not a hole in it.** PDF is accepted
   by its `%PDF-` magic exactly as a site archive is accepted by its gzip

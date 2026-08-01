@@ -8,17 +8,68 @@
   var DL = window.HostthisDeepLink;
   var content = document.getElementById("content");
 
-  // Mermaid is ~3.4 MB. Loading it for every prose paste would multiply the
-  // page weight to serve a feature most documents never use, so it is fetched
-  // only once a fence is known to be present.
-  function loadMermaid() {
+  // Fenced blocks are rendered by the same libraries the standalone kinds use,
+  // fetched ONLY once a fence of that language is known to be present. Mermaid
+  // alone is ~3.4 MB, and most documents contain neither kind of block.
+  function loadScript(src) {
     return new Promise(function (resolve, reject) {
-      if (window.mermaid) return resolve(window.mermaid);
       var s = document.createElement("script");
-      s.src = "/_hostthis/mermaid.min.js";
-      s.onload = function () { resolve(window.mermaid); };
-      s.onerror = function () { reject(new Error("mermaid failed to load")); };
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = function () { reject(new Error(src + " failed to load")); };
       document.head.appendChild(s);
+    });
+  }
+
+  function loadStyle(href, media) {
+    var l = document.createElement("link");
+    l.rel = "stylesheet";
+    l.href = href;
+    if (media) l.media = media;
+    document.head.appendChild(l);
+  }
+
+  function loadMermaid() {
+    if (window.mermaid) return Promise.resolve(window.mermaid);
+    return loadScript("/_hostthis/mermaid.min.js").then(function () { return window.mermaid; });
+  }
+
+  // diff2html needs highlight.js present BEFORE it draws, and its own
+  // stylesheet plus the light/dark hljs themes the diff shell uses.
+  var diffLibs = null;
+  function loadDiff2Html() {
+    if (diffLibs) return diffLibs;
+    loadStyle("/_hostthis/diff2html.min.css");
+    loadStyle("/_hostthis/hljs-light.css", "(prefers-color-scheme: light)");
+    loadStyle("/_hostthis/hljs-dark.css", "(prefers-color-scheme: dark)");
+    diffLibs = loadScript("/_hostthis/highlight.min.js")
+      .then(function () { return loadScript("/_hostthis/diff2html-ui-base.min.js"); });
+    return diffLibs;
+  }
+
+  async function renderDiffBlocks(blocks) {
+    try {
+      await loadDiff2Html();
+    } catch (e) {
+      return; // the source stays visible in its <pre>
+    }
+    blocks.forEach(function (b) {
+      try {
+        var ui = new Diff2HtmlUI(b.el, b.src, {
+          // No file list for an inline block: a fenced diff is one hunk in
+          // the middle of prose, not a changeset to navigate.
+          drawFileList: false,
+          matching: "lines",
+          outputFormat: "line-by-line",
+          highlight: true,
+          colorScheme: "auto",
+        }, window.hljs);
+        ui.draw();
+        ui.highlightCode();
+      } catch (err) {
+        b.el.textContent = b.src;
+        b.el.className = "diff-block diff-err";
+      }
     });
   }
 
@@ -95,6 +146,18 @@
       blocks.push({ el: holder, src: code.textContent });
     });
     if (blocks.length) renderMermaidBlocks(blocks);
+
+    // Same treatment for a fenced ```diff block: the rich viewer, not a grey
+    // code box. A document whose FIRST fence is a diff is detected as the diff
+    // kind outright; this covers a diff quoted inside prose.
+    var diffs = [];
+    content.querySelectorAll("pre > code.language-diff, pre > code.language-patch").forEach(function (code) {
+      var holder = document.createElement("div");
+      holder.className = "diff-block";
+      code.parentElement.replaceWith(holder);
+      diffs.push({ el: holder, src: code.textContent });
+    });
+    if (diffs.length) renderDiffBlocks(diffs);
 
     // Resolve the fragment only now. The browser already tried at parse time,
     // when #content was empty, so without this a deep link lands at the top.

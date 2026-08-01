@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -382,12 +383,22 @@ var hunkHeaderRe = regexp.MustCompile(`@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@`)
 // positive renders normal text through diff2html (visibly broken) while a
 // false negative just falls through to markdown/HTML.
 //
-// Accepted consequence of gating on a hunk header anywhere in the prefix, and
-// of diff running before markdown: a Markdown doc opening with a fenced ```diff
-// block detects as `diff`. `--type markdown` forces the markdown renderer.
+// A hunk header that appears AFTER a markdown code fence is QUOTED, not the
+// document's own format: that is a design doc showing a diff, and it must
+// render as markdown so its prose renders too. The markdown viewer draws such
+// a fence through the same diff renderer, so nothing is lost by classifying it
+// as markdown.
+//
+// The ordering test is what keeps a real diff OF a markdown file working: its
+// hunk header comes first and the fence is part of the diffed content.
 func looksLikeDiff(b []byte) bool {
 	if len(b) > 1024 {
 		b = b[:1024]
 	}
-	return hunkHeaderRe.Match(b)
+	loc := hunkHeaderRe.FindIndex(b)
+	if loc == nil {
+		return false
+	}
+	fence := bytes.Index(b, []byte("```"))
+	return fence < 0 || fence > loc[0]
 }
