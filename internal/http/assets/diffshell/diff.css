@@ -123,35 +123,38 @@ body {
 .d2h-code-line .hljs-addition,
 .d2h-code-line .hljs-deletion { background: transparent; }
 
-/* The gutter carries its row's colour.
+/* Each changed row is ONE flat colour, end to end.
    
-   It cannot simply be tinted: the rule above pins an OPAQUE fill with
-   !important because the gutter is sticky and overlaps the code column as it
-   scrolls, and diff2html's own tints are translucent rgba - letting one
-   through would smear the scrolled code under the numbers. So each state gets
-   an opaque equivalent, flattened against the page behind it, and the
-   box-shadow halo is set to match or a 1px white rim survives at every row
-   boundary. */
-.d2h-code-linenumber.d2h-ins {
-  background-color: rgb(221, 255, 221) !important;
-  box-shadow: 0 0 0 1px rgb(221, 255, 221) !important;
-}
-/* A changed line is a slightly different green from a pure addition. */
-.d2h-code-linenumber.d2h-ins.d2h-change {
-  background-color: rgb(221, 238, 221) !important;
+   Three things fought this. diff2html's line-number cell was originally
+   absolutely positioned with the code cell padded to make room; our
+   sticky-gutter fix put it back in flow, leaving a ~50px strip belonging to
+   NEITHER cell, which only a background on the <tr> can reach. The gutter must
+   be opaque, because it is sticky and overlaps the code as that scrolls. And
+   diff2html's own tints are translucent, so a cell painted over a tinted row
+   compounds into a third shade.
+   
+   Setting the row AND its cells to the same opaque colour settles all three:
+   nothing layers, nothing is left unpainted. Dark values are diff2html's own
+   rgba flattened against the dark page. */
+tr:has(> td.d2h-ins),
+tr:has(> td.d2h-ins) > td { background: rgb(221, 238, 221) !important; }
+tr:has(> td.d2h-del),
+tr:has(> td.d2h-del) > td { background: rgb(253, 242, 208) !important; }
+tr:has(> td.d2h-ins) > td.d2h-code-linenumber {
   box-shadow: 0 0 0 1px rgb(221, 238, 221) !important;
 }
-.d2h-code-linenumber.d2h-del {
-  background-color: rgb(253, 242, 208) !important;
+tr:has(> td.d2h-del) > td.d2h-code-linenumber {
   box-shadow: 0 0 0 1px rgb(253, 242, 208) !important;
 }
 @media (prefers-color-scheme: dark) {
-  .d2h-auto-color-scheme .d2h-code-linenumber.d2h-ins {
-    background-color: rgb(18, 38, 30) !important;
-    box-shadow: 0 0 0 1px rgb(18, 38, 30) !important;
+  .d2h-auto-color-scheme tr:has(> td.d2h-ins),
+  .d2h-auto-color-scheme tr:has(> td.d2h-ins) > td { background: rgb(21, 53, 34) !important; }
+  .d2h-auto-color-scheme tr:has(> td.d2h-del),
+  .d2h-auto-color-scheme tr:has(> td.d2h-del) > td { background: rgb(52, 44, 25) !important; }
+  .d2h-auto-color-scheme tr:has(> td.d2h-ins) > td.d2h-code-linenumber {
+    box-shadow: 0 0 0 1px rgb(21, 53, 34) !important;
   }
-  .d2h-auto-color-scheme .d2h-code-linenumber.d2h-del {
-    background-color: rgb(52, 44, 25) !important;
+  .d2h-auto-color-scheme tr:has(> td.d2h-del) > td.d2h-code-linenumber {
     box-shadow: 0 0 0 1px rgb(52, 44, 25) !important;
   }
 }
@@ -159,19 +162,28 @@ body {
 /* A line number addresses its line, so it has to look like a control. */
 .d2h-code-linenumber.linkable { cursor: pointer; }
 .d2h-code-linenumber.linkable:hover { color: #0969da; text-decoration: underline; }
-/* The addressed range, marked on the row so it reads across the gutter and the
-   code together. !important because diff2html sets the row background per
-   ins/del/context and would otherwise win. */
-tr.dl-line > td { background: rgba(255, 212, 0, .30) !important; }
-tr.dl-line > td.d2h-code-linenumber {
-  background-color: rgb(255, 242, 178) !important;
-  box-shadow: 0 0 0 1px rgb(255, 242, 178) !important;
-}
+
+/* ---------------------------------------------------------------------------
+   The addressed range. LAST in the file and naming three classes, because the
+   ins/del rules above are themselves !important and equally specific: a
+   selection written any weaker wins on some cells and loses on others, and the
+   range renders in two tones. Selection is a state ON TOP of ins/del, so it
+   must outrank them everywhere, not merely somewhere.
+   --------------------------------------------------------------------------- */
+/* `tr.dl-line.dl-line` repeats the class deliberately. The ins/del rules above
+   use :has(), whose argument contributes its own specificity, putting them at
+   (0,2,3) - higher than a plain `tr.dl-line > td`. Selection is a state ON TOP
+   of ins/del and has to outrank it on every cell, so it is raised to (0,3,x)
+   rather than left to win on some cells and lose on others. */
+tr.dl-line.dl-line,
+tr.dl-line.dl-line > td,
+tr.dl-line.dl-line > td.d2h-code-linenumber { background: rgb(255, 240, 170) !important; }
+tr.dl-line.dl-line > td.d2h-code-linenumber { box-shadow: 0 0 0 1px rgb(255, 240, 170) !important; }
 @media (prefers-color-scheme: dark) {
-  .d2h-code-linenumber.linkable:hover { color: #4493f8; }
-  tr.dl-line > td { background: rgba(255, 212, 0, .18) !important; }
-  .d2h-auto-color-scheme tr.dl-line > td.d2h-code-linenumber {
-    background-color: rgb(57, 52, 19) !important;
-    box-shadow: 0 0 0 1px rgb(57, 52, 19) !important;
+  .d2h-auto-color-scheme tr.dl-line.dl-line,
+  .d2h-auto-color-scheme tr.dl-line.dl-line > td,
+  .d2h-auto-color-scheme tr.dl-line.dl-line > td.d2h-code-linenumber { background: rgb(63, 57, 20) !important; }
+  .d2h-auto-color-scheme tr.dl-line.dl-line > td.d2h-code-linenumber {
+    box-shadow: 0 0 0 1px rgb(63, 57, 20) !important;
   }
 }
