@@ -972,6 +972,7 @@ UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;
     cat report.pdf | ssh -T {{apex}}                 paged pdf viewer
     cat sales.csv  | ssh -T {{apex}}                 sortable table + SQL
     cat events.json| ssh -T {{apex}}                 collapsible tree
+    cat cpu.folded | ssh -T {{apex}}                 interactive flame graph
     cat x.txt      | ssh -T {{apex}} --type csv      force a renderer
 
 UPDATE & MANAGE (owner only; ssh key authenticates)
@@ -997,10 +998,13 @@ LINK TO A PLACE INSIDE A PASTE
     <url>#page=3            pdf: jump to that page
     <url>#row=42            csv: jump to that row
     <url>#F1L42-L48         diff: highlight lines 42-48 of file 1
+    <url>#focus=main;serve  flamegraph: zoom to that stack
+    <url>#q=malloc          flamegraph: highlight matching frames
 
-    Clicking a heading, row, page, or diff line number updates the URL, so
-    the address bar always holds a link you can copy. Shift-click a second
-    diff line number to select a range.
+    Clicking a heading, row, page, diff line number, or flame frame updates
+    the URL, so the address bar always holds a link you can copy. To select
+    a range of diff lines: shift-click a second line number, or on a touch
+    screen just tap it.
 
 OUTPUT
 
@@ -1015,7 +1019,7 @@ LIMITS
 
     {{quota}} per identity, counting post-compression bytes across all
     your active pastes. HTML, Markdown, diff, Mermaid, PDF, CSV, JSON,
-    or a gzip-tar site archive.
+    folded stacks, or a gzip-tar site archive.
 
     Apps can persist + sync state: https://{{apex}}/  (rooms + realtime API)`
 

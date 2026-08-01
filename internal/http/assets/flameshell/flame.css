@@ -1,0 +1,137 @@
+:root {
+  --bg: #fff;
+  --fg: #1c2128;
+  --muted: #6a737d;
+  --line: #d8dee4;
+  --bar: #f6f8fa;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --line: #30363d;
+    --bar: #161b22;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+#bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  background: var(--bar);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.grow { flex: 1 1 auto; }
+
+#bar button,
+#bar input {
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.3rem 0.6rem;
+}
+#bar button { cursor: pointer; }
+#bar button:hover { border-color: var(--muted); }
+#filter { min-width: 10rem; }
+
+#crumbs {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  flex-wrap: wrap;
+  color: var(--muted);
+  min-width: 0;
+}
+.crumb {
+  border: 0 !important;
+  background: none !important;
+  padding: 0.1rem 0.2rem !important;
+  color: var(--fg);
+  cursor: pointer;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crumb:hover { text-decoration: underline; }
+.share { color: var(--muted); margin-left: 0.5rem; }
+#matched { color: var(--muted); min-width: 6.5rem; text-align: right; }
+
+#flame {
+  position: relative;
+  margin: 0.5rem 0.75rem;
+}
+
+/* Frames are absolutely positioned so a row is one pass of layout regardless
+   of how many frames it holds; flow layout would reflow the whole row on
+   every zoom. */
+.fr {
+  position: absolute;
+  height: 18px;
+  padding: 0 3px;
+  overflow: hidden;
+  white-space: nowrap;
+  border-radius: 2px;
+  cursor: pointer;
+  color: #1c2128;
+  background: hsl(calc(var(--h) * 1deg) 78% 66%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45);
+}
+.fr:hover { box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.55); }
+
+/* The focused node and its ancestors read as context, not as data: dimming
+   them stops a full-width chain from looking like the widest hot path. */
+.fr.chain {
+  background: hsl(calc(var(--h) * 1deg) 26% 72%);
+  color: #24292f;
+}
+@media (prefers-color-scheme: dark) {
+  .fr.chain { background: hsl(calc(var(--h) * 1deg) 18% 34%); color: var(--fg); }
+}
+
+/* Search hits keep their own hue rather than becoming one flat colour, so a
+   match is still readable as part of the graph. */
+.fr.hit {
+  outline: 2px solid #8250df;
+  outline-offset: -2px;
+  filter: saturate(1.6) brightness(1.06);
+}
+
+#tip {
+  position: fixed;
+  z-index: 20;
+  pointer-events: none;
+  padding: 0.35rem 0.55rem;
+  border-radius: 6px;
+  background: rgba(28, 33, 40, 0.94);
+  color: #fff;
+  font-size: 12px;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
+  max-width: 70vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 560px) {
+  #matched { text-align: left; min-width: 0; }
+  .crumb { max-width: 9rem; }
+}

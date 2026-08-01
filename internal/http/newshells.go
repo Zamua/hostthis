@@ -68,3 +68,17 @@ var dataShellAssets = map[string]string{
 	// throws on duplicate state instances. Lazy-loaded with the console.
 	"codemirror.min.js": "text/javascript; charset=utf-8",
 }
+
+// flameShellFS holds the flame graph renderer for folded stack profiles. No
+// profiling library is vendored: the format is one line per stack, and the
+// renderer is a prefix-tree aggregation plus a rectangle layout.
+//
+//go:embed assets/flameshell/*
+var flameShellFS embed.FS
+
+const flameShellVersion = "flameshell-v1"
+
+var flameShellAssets = map[string]string{
+	"flame.js":  "text/javascript; charset=utf-8",
+	"flame.css": "text/css; charset=utf-8",
+}

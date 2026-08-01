@@ -35,6 +35,11 @@ const (
 	// KindJSON is a JSON value or a JSONL stream, detected by parsing the
 	// prefix rather than by punctuation heuristics.
 	KindJSON ContentKind = "json"
+	// KindFlamegraph is a profile in folded stack format: one line per unique
+	// stack, frames joined by ';', then a sample count. Detected by that shape
+	// rather than by any profiler's own format, because every profiler can
+	// emit it and none of them agree on anything else.
+	KindFlamegraph ContentKind = "flamegraph"
 	// KindPDF is a PDF document, detected by the %PDF- signature. The only
 	// accepted kind whose bytes are not text; it clears the same explicit-magic
 	// bar KindSite does rather than being a fallback for unclassifiable bytes.
@@ -44,7 +49,7 @@ const (
 // ErrUnsupportedKind is returned when content sniffs outside the accepted set.
 // The message is what the user sees on stderr.
 var ErrUnsupportedKind = errors.New(
-	"hostthis only accepts content it can render (html, markdown, diff, mermaid, pdf, csv, json)")
+	"hostthis only accepts content it can render (html, markdown, diff, mermaid, pdf, csv, json, flamegraph)")
 
 // MaxPasteBytes is the per-paste size cap, measured in COMPRESSED bytes
 // (post-zstd, as written to the blob store). A single upload is staged in RAM
@@ -165,6 +170,11 @@ func DetectKind(b []byte, hint string, sniffMIME MIMESniffer) (ContentKind, erro
 			return "", ErrUnsupportedKind
 		}
 		return KindJSON, nil
+	case hint == "flamegraph" || hint == "flame" || hint == "folded":
+		if !strings.HasPrefix(ct, "text/") {
+			return "", ErrUnsupportedKind
+		}
+		return KindFlamegraph, nil
 	case hint != "":
 		// An unrecognized hint rejects without falling back to sniffing.
 		return "", ErrUnsupportedKind
@@ -183,6 +193,9 @@ func DetectKind(b []byte, hint string, sniffMIME MIMESniffer) (ContentKind, erro
 		}
 		if looksLikeMermaid(b) {
 			return KindMermaid, nil
+		}
+		if looksLikeFolded(b) {
+			return KindFlamegraph, nil
 		}
 		if looksLikeJSON(b) {
 			return KindJSON, nil
@@ -243,6 +256,70 @@ func looksLikeMermaid(b []byte) bool {
 		return false
 	}
 	return false
+}
+
+// looksLikeFolded reports whether the content is a folded stack profile:
+// every line "frame;frame;frame <count>".
+//
+// Runs before the CSV gate. A C++ or Rust frame carries commas inside its
+// argument list, so a profile of such a binary presents a consistent comma
+// count per line and would otherwise sniff as CSV.
+//
+// The gate is EVERY line, not most: a profile is machine-generated and
+// perfectly uniform, so one prose line is enough to prove it is not one. The
+// semicolon requirement is what keeps an ordinary numbered list out, since
+// "item 1 / item 2" also ends every line in a count.
+func looksLikeFolded(b []byte) bool {
+	s := string(b)
+	truncated := len(s) > 8192
+	if truncated {
+		s = s[:8192]
+	}
+	lines := strings.Split(s, "\n")
+	// Only a line the WINDOW cut is discarded: its count is chopped and would
+	// fail a whole-file gate that is otherwise satisfied. A file that merely
+	// ends without a newline is complete, and dropping its last line would
+	// push a short profile under the two-line floor.
+	if truncated && len(lines) > 1 {
+		lines = lines[:len(lines)-1]
+	}
+	var n, withSep int
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Frames may contain spaces (a C++ signature does), so the count is
+		// the LAST field, never the second.
+		i := strings.LastIndexAny(line, " \t")
+		if i < 0 {
+			return false
+		}
+		stack := strings.TrimRight(line[:i], " \t")
+		if !isPositiveInt(line[i+1:]) || stack == "" {
+			return false
+		}
+		n++
+		if strings.Contains(stack, ";") {
+			withSep++
+		}
+	}
+	// Two lines is the floor: a single "word 12" is not evidence of anything.
+	// Half carrying a separator allows the flat top-level frames a real
+	// profile also contains without admitting a list that has none.
+	return n >= 2 && withSep*2 >= n
+}
+
+func isPositiveInt(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // looksLikeJSON reports whether the content is a JSON value or a JSONL stream.

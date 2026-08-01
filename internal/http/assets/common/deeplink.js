@@ -29,6 +29,24 @@
     }
     if ((m = h.match(/^page=(\d+)$/))) return { type: "page", n: parseInt(m[1], 10) };
     if ((m = h.match(/^row=(\d+)$/))) return { type: "row", n: parseInt(m[1], 10) };
+    // A flame graph frame is addressed by its STACK, not by an index or a
+    // coordinate: both of those move when the profile is re-recorded, so a
+    // link would quietly point elsewhere in the next run.
+    //
+    // Zoom and highlight are independent axes and may appear together, so the
+    // fragment always describes the viewer's whole state. Splitting on a raw
+    // "&" is safe because both values are percent-encoded.
+    if (/^(focus|q)=/.test(h)) {
+      var t = { type: "flame", stack: "", q: "" };
+      h.split("&").forEach(function (part) {
+        var eq = part.indexOf("=");
+        if (eq < 0) return;
+        var k = part.slice(0, eq), v = decodeURIComponent(part.slice(eq + 1));
+        if (k === "focus") t.stack = v;
+        else if (k === "q") t.q = v;
+      });
+      return t;
+    }
     return { type: "id", id: decodeURIComponent(h) };
   }
 

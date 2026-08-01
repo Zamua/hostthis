@@ -90,12 +90,13 @@ var dataShell = &clientShell{
 // shells maps each client-rendered kind to its shell. A kind absent from this
 // map is served directly (HTML) or is not a paste at all (site).
 var shells = map[domain.ContentKind]*clientShell{
-	domain.KindMarkdown: {version: mdShellVersion, fs: mdShellFS, dir: "assets/mdshell", assets: mdShellAssets},
-	domain.KindDiff:     {version: diffShellVersion, fs: diffShellFS, dir: "assets/diffshell", assets: diffShellAssets},
-	domain.KindMermaid:  {version: mermaidShellVersion, fs: mermaidShellFS, dir: "assets/mermaidshell", assets: mermaidShellAssets},
-	domain.KindPDF:      {version: pdfShellVersion, fs: pdfShellFS, dir: "assets/pdfshell", assets: pdfShellAssets, csp: wasmWorkerCSP},
-	domain.KindCSV:      dataShell,
-	domain.KindJSON:     dataShell,
+	domain.KindMarkdown:   {version: mdShellVersion, fs: mdShellFS, dir: "assets/mdshell", assets: mdShellAssets},
+	domain.KindDiff:       {version: diffShellVersion, fs: diffShellFS, dir: "assets/diffshell", assets: diffShellAssets},
+	domain.KindMermaid:    {version: mermaidShellVersion, fs: mermaidShellFS, dir: "assets/mermaidshell", assets: mermaidShellAssets},
+	domain.KindPDF:        {version: pdfShellVersion, fs: pdfShellFS, dir: "assets/pdfshell", assets: pdfShellAssets, csp: wasmWorkerCSP},
+	domain.KindCSV:        dataShell,
+	domain.KindJSON:       dataShell,
+	domain.KindFlamegraph: {version: flameShellVersion, fs: flameShellFS, dir: "assets/flameshell", assets: flameShellAssets},
 }
 
 // rawContentType is the Content-Type each client-rendered kind's ?raw response
@@ -104,12 +105,13 @@ var shells = map[domain.ContentKind]*clientShell{
 // PDF is the one kind whose "raw" IS the representation a browser can use
 // directly, so its type has to be right for the viewer and for a plain curl.
 var rawContentType = map[domain.ContentKind]string{
-	domain.KindMarkdown: "text/markdown; charset=utf-8",
-	domain.KindDiff:     "text/plain; charset=utf-8",
-	domain.KindMermaid:  "text/plain; charset=utf-8",
-	domain.KindCSV:      "text/plain; charset=utf-8",
-	domain.KindJSON:     "application/json; charset=utf-8",
-	domain.KindPDF:      "application/pdf",
+	domain.KindMarkdown:   "text/markdown; charset=utf-8",
+	domain.KindDiff:       "text/plain; charset=utf-8",
+	domain.KindMermaid:    "text/plain; charset=utf-8",
+	domain.KindCSV:        "text/plain; charset=utf-8",
+	domain.KindJSON:       "application/json; charset=utf-8",
+	domain.KindPDF:        "application/pdf",
+	domain.KindFlamegraph: "text/plain; charset=utf-8",
 }
 
 // shellFor returns the shell for kind, or nil when the kind renders without one.

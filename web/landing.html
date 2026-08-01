@@ -116,7 +116,7 @@ any rendered paste's URL for the raw source.</p>
   <dd>upload a paste. The URL prints on stdout and a QR code of it on
   stderr (<code>2&gt;/dev/null</code> drops the QR). To set a label or force the
   content type, pass <strong>--name</strong> "label" or
-  <strong>--type</strong> html|markdown|diff|mermaid|pdf|csv|json after a literal <code>--</code>.
+  <strong>--type</strong> html|markdown|diff|mermaid|pdf|csv|json|flamegraph after a literal <code>--</code>.
   ssh otherwise parses a leading <strong>--name</strong> as one of its own
   options.</dd>
 
@@ -249,8 +249,10 @@ git diff | ssh -T hostthis.dev
 cat architecture.mmd | ssh -T hostthis.dev
 cat q3-review.pdf    | ssh -T hostthis.dev
 cat sales.csv        | ssh -T hostthis.dev
+cat cpu.folded       | ssh -T hostthis.dev
 
-<span class="ink-soft"># link to a place inside a paste: #heading  #page=3  #row=42  #F1L42-L48</span>
+<span class="ink-soft"># link to a place inside a paste: #heading  #page=3  #row=42  #F1L42-L48
+# a flame graph too:  #focus=main;serve  #q=malloc</span>
 
 <span class="ink-soft"># read your content back</span>
 ssh hostthis.dev get abc12345
