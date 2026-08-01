@@ -22,6 +22,7 @@
     } catch (e) {}
   }
 
+  var DL = window.HostthisDeepLink;
   var mount = document.getElementById("diff");
   var btnLine = document.getElementById("btn-line");
   var btnSide = document.getElementById("btn-side");
@@ -54,7 +55,111 @@
     );
     ui.draw();
     ui.highlightCode();
+    anchorLines();
+    reapplyHighlight(false);
     mount.setAttribute("aria-busy", "false");
+  }
+
+  // Anchors carry the line number the reader can SEE in the gutter, scoped by
+  // file. An earlier version numbered content rows sequentially, which is
+  // unambiguous but means #L75 highlights the row whose gutter reads 180 - the
+  // link contradicts the page.
+  //
+  // The number is the new-file line for context and added lines, and the
+  // old-file line for deletions, which is the only number those rows show.
+  // F<n> scopes it because the same line number occurs in every file.
+  function anchorLines() {
+    if (format !== "line-by-line") return;
+    var fileIdx = 0;
+    mount.querySelectorAll(".d2h-file-wrapper").forEach(function (file) {
+      fileIdx++;
+      var fi = fileIdx;
+      file.querySelectorAll("tr").forEach(function (tr) {
+        var cells = tr.querySelectorAll("td.d2h-code-linenumber");
+        var code = tr.querySelector(".d2h-code-line");
+        // A hunk header is a row but not a line of content.
+        if (!cells.length || !code || cells[0].classList.contains("d2h-info")) return;
+        var nums = [];
+        cells.forEach(function (c) {
+          c.querySelectorAll("*").forEach(function (n) {
+            var v = parseInt(n.innerText.trim(), 10);
+            if (!isNaN(v)) nums.push(v);
+          });
+          if (!c.children.length) {
+            var v = parseInt(c.innerText.trim(), 10);
+            if (!isNaN(v)) nums.push(v);
+          }
+        });
+        if (!nums.length) return;
+        // Prefer the LAST number: line-by-line prints old then new, so the new
+        // one is the number a reader tracking the result cares about.
+        var line = nums[nums.length - 1];
+        tr.id = "F" + fi + "L" + line;
+        cells.forEach(function (c) {
+          c.classList.add("linkable");
+          c.title = "link to this line \u2014 shift-click for a range";
+          c.addEventListener("click", function (e) {
+            e.preventDefault();
+            selectLine(fi, line, e.shiftKey);
+          });
+        });
+      });
+    });
+  }
+
+  // anchorStart remembers the last single-line click so a shift-click extends
+  // from it, the selection model file listings already use. It carries the file
+  // too: a range spanning two files has no meaning here.
+  var anchorStart = null;
+
+  function selectLine(file, line, extend) {
+    var start = extend && anchorStart && anchorStart.file === file ? anchorStart.line : line;
+    if (!extend || !anchorStart || anchorStart.file !== file) {
+      anchorStart = { file: file, line: line };
+    }
+    var lo = Math.min(start, line), hi = Math.max(start, line);
+    DL.setHash("F" + file + "L" + lo + (lo === hi ? "" : "-L" + hi));
+    highlight(file, lo, hi, true);
+  }
+
+  function highlight(file, lo, hi, scroll) {
+    mount.querySelectorAll("tr.dl-line").forEach(function (tr) {
+      tr.classList.remove("dl-line");
+    });
+    var first = null;
+    for (var i = lo; i <= hi; i++) {
+      var tr = document.getElementById("F" + file + "L" + i);
+      if (!tr) continue; // a line absent from the diff simply has no row
+      tr.classList.add("dl-line");
+      if (!first) first = tr;
+    }
+    if (scroll && first) first.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+
+  // Re-applies the addressed range after a render, because a render rebuilds
+  // the rows and drops the highlight with them.
+  //
+  // It does NOT change the format. Forcing line-by-line here would fire on a
+  // format switch too, so a reader with a line link in the URL would press
+  // side-by-side and be yanked straight back - a button that looks broken.
+  function reapplyHighlight(scroll) {
+    var t = DL.parse();
+    if (!t || t.type !== "line" || format !== "line-by-line") return;
+    anchorStart = { file: t.file, line: t.from };
+    highlight(t.file, t.from, t.to, scroll);
+  }
+
+  // Resolving a fragment is the one moment the format may be overridden: the
+  // ordinals are only meaningful in line-by-line, so a link that arrives while
+  // side-by-side is showing has to switch to be honoured at all.
+  function resolveHash() {
+    var t = DL.parse();
+    if (!t || t.type !== "line") return;
+    if (format !== "line-by-line") {
+      pick("line-by-line"); // re-renders, and reapplyHighlight runs with it
+      return;
+    }
+    reapplyHighlight(true);
   }
 
   function pick(next) {
@@ -64,6 +169,10 @@
     syncButtons();
     render();
   }
+
+  // A fragment arriving later (someone pastes a link into the same tab) still
+  // resolves, and re-resolves on every hashchange.
+  DL.onResolve(function () { resolveHash(); });
 
   btnLine.addEventListener("click", function () { pick("line-by-line"); });
   btnSide.addEventListener("click", function () { pick("side-by-side"); });

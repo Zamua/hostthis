@@ -295,6 +295,32 @@ else
     || bad "quoted diff kind" "stored as '${qd_kind:-?}', want markdown: its prose would be served as diff noise"
 fi
 
+# ---- 11c2. a diff paste anchors its lines ----------------------------------
+# The viewer numbers content rows over the line-by-line rendering. Only the
+# shell can assert the scroll, but the server side is checkable: a diff must
+# still detect as diff and serve the diff viewer, which is what the anchors
+# hang off.
+step "diff kind serves the diff viewer"
+dv_url=$(printf -- '--- a/x\n+++ b/x\n@@ -1,4 +1,4 @@\n ctx\n-old one\n+new one\n ctx2\n' | \
+  ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -- "$HOST" 2>/dev/null | head -1)
+dv_slug=$(slug_from_url "$dv_url")
+if [ -z "$dv_slug" ]; then
+  bad "diff upload" "no URL emitted"
+else
+  echo "$dv_slug" >> /tmp/hostthis-smoke.slugs
+  dv_kind=$($SSH -n "$HOST" list -ojson 2>/dev/null | jq -r --arg s "$dv_slug" '.[] | select(.slug==$s) | .kind')
+  [ "$dv_kind" = "diff" ] && ok "diff: detected" || bad "diff: detection" "stored as '${dv_kind:-?}'"
+  dv_page=$(curl -sS "$dv_url")
+  case "$dv_page" in
+    *"/_hostthis/diff.js"*) ok "diff: serves its viewer" ;;
+    *) bad "diff: viewer" "page does not load diff.js" ;;
+  esac
+  case "$dv_page" in
+    *"/_hostthis/deeplink.js"*) ok "diff: loads the deep-link resolver" ;;
+    *) bad "diff: deep links" "the diff shell does not load deeplink.js, so #L cannot resolve" ;;
+  esac
+fi
+
 # ---- 11d. an unsupported type is still refused -----------------------------
 # The gate widened to seven kinds; it must not have become a catch-all.
 step "unsupported content is still rejected"
