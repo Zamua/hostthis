@@ -27,7 +27,7 @@ var mermaidShellAssets = map[string]string{
 //go:embed assets/pdfshell/*
 var pdfShellFS embed.FS
 
-const pdfShellVersion = "pdfshell-v1"
+const pdfShellVersion = "pdfshell-v3"
 
 var pdfShellAssets = map[string]string{
 	"pdf.min.mjs":        "text/javascript; charset=utf-8",
@@ -48,7 +48,7 @@ var pdfShellAssets = map[string]string{
 //go:embed assets/datashell/*
 var dataShellFS embed.FS
 
-const dataShellVersion = "datashell-v6"
+const dataShellVersion = "datashell-v7"
 
 var dataShellAssets = map[string]string{
 	"data.js":                     "text/javascript; charset=utf-8",

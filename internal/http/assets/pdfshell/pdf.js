@@ -87,7 +87,32 @@ function setPos(n, total) {
   next.disabled = n >= total;
 }
 
+// A bare `download` attribute makes the browser derive the filename from the
+// URL path, which at a paste's subdomain root is "/" - the save dialog then
+// offers to download a file literally called "/". The slug is the only stable
+// name we have for the document.
+function nameDownload() {
+  const dl = document.getElementById("dl");
+  if (!dl) return;
+  dl.setAttribute("download", pasteSlug() + ".pdf");
+}
+
+// The slug appears in the hostname under subdomain URLs and in the path under
+// the dev path mode, so both shapes are checked rather than assuming one.
+// Slugs are exactly 8 chars from a fixed alphabet, which is what identifies
+// them in either position.
+function pasteSlug() {
+  const isSlug = (s) => /^[a-z0-9]{8}$/.test(s);
+  const fromHost = location.hostname.split(".")[0];
+  if (isSlug(fromHost)) return fromHost;
+  const segs = location.pathname.split("/").filter(Boolean);
+  const last = segs[segs.length - 1];
+  if (isSlug(last)) return last;
+  return "document";
+}
+
 (async function () {
+  nameDownload();
   try {
     const doc = await pdfjs.getDocument({
       url: location.pathname + "?raw=1",
