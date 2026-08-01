@@ -72,6 +72,16 @@ async function renderPage(doc, holder, scale) {
   }
 }
 
+// flash shows a brief confirmation next to the counter.
+function flash(msg) {
+  const el = document.getElementById("copied");
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.add("on");
+  clearTimeout(flash._t);
+  flash._t = setTimeout(() => el.classList.remove("on"), 1800);
+}
+
 function goTo(n, total) {
   const clamped = Math.min(Math.max(n, 1), total);
   const holder = document.getElementById("page-" + clamped);
@@ -87,7 +97,32 @@ function setPos(n, total) {
   next.disabled = n >= total;
 }
 
+// A bare `download` attribute makes the browser derive the filename from the
+// URL path, which at a paste's subdomain root is "/" - the save dialog then
+// offers to download a file literally called "/". The slug is the only stable
+// name we have for the document.
+function nameDownload() {
+  const dl = document.getElementById("dl");
+  if (!dl) return;
+  dl.setAttribute("download", pasteSlug() + ".pdf");
+}
+
+// The slug appears in the hostname under subdomain URLs and in the path under
+// the dev path mode, so both shapes are checked rather than assuming one.
+// Slugs are exactly 8 chars from a fixed alphabet, which is what identifies
+// them in either position.
+function pasteSlug() {
+  const isSlug = (s) => /^[a-z0-9]{8}$/.test(s);
+  const fromHost = location.hostname.split(".")[0];
+  if (isSlug(fromHost)) return fromHost;
+  const segs = location.pathname.split("/").filter(Boolean);
+  const last = segs[segs.length - 1];
+  if (isSlug(last)) return last;
+  return "document";
+}
+
 (async function () {
+  nameDownload();
   try {
     const doc = await pdfjs.getDocument({
       url: location.pathname + "?raw=1",
@@ -127,13 +162,34 @@ function setPos(n, total) {
     prev.onclick = () => goTo(currentPage() - 1, total);
     next.onclick = () => goTo(currentPage() + 1, total);
 
+    // Without this the fragment is only reachable by hand-editing the URL: the
+    // counter looks like a readout, so nothing tells a reader it addresses the
+    // page they are on.
+    pos.title = "copy a link to this page";
+    pos.classList.add("copyable");
+    pos.onclick = async () => {
+      const url = location.origin + location.pathname + "#page=" + currentPage();
+      try {
+        await navigator.clipboard.writeText(url);
+        flash("link copied");
+      } catch {
+        // Clipboard access is refused without a user gesture in some contexts
+        // and over plain http; the fragment is still correct in the address bar.
+        flash("link is in the address bar");
+      }
+    };
+
     // Track the page under the reader as they scroll, so the counter and the
     // fragment describe what is actually on screen.
     const spy = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
           if (e.isIntersecting && e.intersectionRatio > 0.5) {
-            setPos(Number(e.target.dataset.page), total);
+            const n = Number(e.target.dataset.page);
+            setPos(n, total);
+            // replaceState, so this neither stacks history entries nor fires
+            // hashchange back into our own resolver.
+            DL.setHash("page=" + n);
           }
         }
       },
