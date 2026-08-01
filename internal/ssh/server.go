@@ -996,9 +996,11 @@ LINK TO A PLACE INSIDE A PASTE
     <url>#some-heading      markdown: jump to that heading
     <url>#page=3            pdf: jump to that page
     <url>#row=42            csv: jump to that row
+    <url>#L12-L20           diff: highlight those lines
 
-    Clicking a heading, row, or page in the viewer updates the URL, so the
-    address bar always holds a link you can copy.
+    Clicking a heading, row, page, or diff line number updates the URL, so
+    the address bar always holds a link you can copy. Shift-click a second
+    diff line number to select a range.
 
 OUTPUT
 
