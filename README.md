@@ -40,7 +40,7 @@ rendered paste's URL for the raw source.
 <dd>upload a paste. The URL prints on stdout; a QR code of it prints on
 stderr (drop it with <code>2&gt;/dev/null</code>). To set a label or force
 the content type, pass <code>--name "label"</code> or
-<code>--type html|markdown|diff|mermaid|pdf|csv|json</code> after a literal <code>--</code>. ssh
+<code>--type html|markdown|diff|mermaid|pdf|csv|json|flamegraph</code> after a literal <code>--</code>. ssh
 otherwise parses a leading <code>--name</code> as one of its own options.</dd>
 
 <dt><code>cat <em>file</em> | ssh -T hostthis.dev <em>slug</em></code></dt>
@@ -192,6 +192,9 @@ cat architecture.mmd | ssh -T hostthis.dev
 cat q3-review.pdf    | ssh -T hostthis.dev
 cat sales.csv        | ssh -T hostthis.dev
 cat events.json      | ssh -T hostthis.dev
+
+# a profile in folded-stack format renders as an interactive flame graph
+go tool pprof -raw cpu.pprof | stackcollapse-go.pl | ssh -T hostthis.dev
 
 # link to a place INSIDE a paste
 #   <url>#some-heading   markdown heading

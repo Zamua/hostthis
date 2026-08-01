@@ -29,7 +29,8 @@ out of scope for v1 - see "Non-goals" at the bottom.
 
 ## Supported formats
 
-HTML, Markdown, diff, Mermaid, PDF, CSV/TSV, JSON/JSONL.
+HTML, Markdown, diff, Mermaid, PDF, CSV/TSV, JSON/JSONL, folded stacks
+(flame graph).
 
 Detection: by content type sniffed from the first 512 bytes plus optional
 explicit `--type` flag at upload time. A Markdown paste is served as a
@@ -90,13 +91,44 @@ min/max for numeric columns). A **json** paste (also JSONL) renders as a
 collapsible tree with a filter box. Both are parsed in the browser from
 the same `?raw` bytes; the server does not parse either format.
 
+A **flamegraph** paste is a profile in **folded stack** format: one line
+per unique stack, frames separated by `;`, then a space and an integer
+sample count.
+
+```
+main;handleRequest;parseHeader 118
+main;handleRequest;readBody 402
+main;flush 27
+```
+
+That format was chosen because it is the one every profiler already
+converts to. `perf script` via stackcollapse, Go's pprof, py-spy, async
+profiler, and `dtrace` all emit or export it, so hostthis needs no
+per-profiler parsing and no binary decoding. Accepting pprof's protobuf
+directly was rejected for v1: it is gzipped protobuf, which cannot be
+told apart from other gzipped bytes by sniffing without decoding it, and
+the conversion is a single command on the producer's side.
+
+The rendered view is an interactive flame graph: width is proportional to
+samples, clicking a frame zooms to it, and a filter box highlights
+matching frames and reports their combined share. Rendering is entirely
+client-side from the `?raw` bytes, like every other kind. The renderer is
+written for this shell rather than pulled in as a library, because the
+whole algorithm is a prefix-tree aggregation plus a rectangle layout.
+
+**A flame graph is not a timeline.** Frames are aggregated by stack, so
+the x-axis is share of samples, not time; a wide frame means "much CPU",
+never "ran for a long time". Profiles of work that is mostly waiting
+(network, locks, disk) will look almost empty, which is information, not
+a bug.
+
 Uploads of unsupported types are **rejected** with a clear error pointing
 at what we accept:
 
 ```
 $ cat photo.jpg | ssh hostthis.dev
 error: hostthis only accepts content it can render
-       (html, markdown, diff, mermaid, pdf, csv, json)
+       (html, markdown, diff, mermaid, pdf, csv, json, flamegraph)
 ```
 
 This is deliberate scope. The inclusion test is not "can we store it" -
@@ -121,6 +153,24 @@ content, so a paste can be *cited* and not merely sent:
 | `#page=<n>` | pdf | that page |
 | `#row=<n>` | csv | that row (1-based, excluding the header) |
 | `#F<f>L<n>` / `#F<f>L<a>-L<b>` | diff | that line of file `f`, or that range |
+| `#focus=<a;b;c>` | flamegraph | zoom to that stack |
+| `#q=<text>` | flamegraph | highlight frames matching that text |
+| `#focus=<a;b;c>&q=<text>` | flamegraph | both at once |
+
+**A flame graph anchor names the stack, not a coordinate.** Frame indices
+and pixel positions both change whenever the profile is re-recorded, so a
+link written against one run would silently point somewhere else in the
+next. The stack path is the only identifier stable across recordings, and
+it stays readable in the URL. A `#focus=` naming a stack absent from the
+profile resolves to the nearest ancestor that does exist rather than
+failing, so a link taken from one run still lands usefully in the next.
+
+Zoom and highlight combine because they are independent axes: a reader who
+has zoomed and then searches would otherwise produce a URL describing only
+the search, silently discarding the zoom that gives it meaning. The
+fragment always states the viewer's whole state. `&` separates them, and
+both values are percent-encoded, so a frame name containing `&` or `;`
+survives the round trip.
 
 **A diff line anchor carries the number the reader can SEE**, not a position:
 the new-file line for context and added lines, the old-file line for deletions,
