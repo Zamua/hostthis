@@ -76,6 +76,11 @@ body {
    padding. Works for both line-by-line and side-by-side. */
 .d2h-code-linenumber,
 .d2h-code-side-linenumber {
+  /* diff2html renders these as inline-block, which does not fill the row: each
+     cell ends ~0.7px above its row's bottom, so stacked cells never touch and
+     anything drawn on their edges (the selection's accent bar) comes out
+     dashed. As a table-cell it fills the row and consecutive bars butt. */
+  display: table-cell !important;
   position: sticky !important;
   left: 0;
   z-index: 2;
@@ -89,13 +94,13 @@ body {
          behind them (the coloured lines between rows). */
   border: 0 !important;
   background-color: var(--d2h-bg-color, #fff) !important;
-  box-shadow: 0 0 0 1px var(--d2h-bg-color, #fff) !important;
+  box-shadow: 1px 0 0 0 var(--d2h-bg-color, #fff) !important;
 }
 @media (prefers-color-scheme: dark) {
   .d2h-auto-color-scheme .d2h-code-linenumber,
   .d2h-auto-color-scheme .d2h-code-side-linenumber {
     background-color: var(--d2h-dark-bg-color, #0d1117) !important;
-    box-shadow: 0 0 0 1px var(--d2h-dark-bg-color, #0d1117) !important;
+    box-shadow: 1px 0 0 0 var(--d2h-dark-bg-color, #0d1117) !important;
   }
 }
 /* The gutter is now a real column, so the code cell no longer needs the
@@ -141,10 +146,10 @@ tr:has(> td.d2h-ins) > td { background: rgb(221, 238, 221) !important; }
 tr:has(> td.d2h-del),
 tr:has(> td.d2h-del) > td { background: rgb(253, 242, 208) !important; }
 tr:has(> td.d2h-ins) > td.d2h-code-linenumber {
-  box-shadow: 0 0 0 1px rgb(221, 238, 221) !important;
+  box-shadow: 1px 0 0 0 rgb(221, 238, 221) !important;
 }
 tr:has(> td.d2h-del) > td.d2h-code-linenumber {
-  box-shadow: 0 0 0 1px rgb(253, 242, 208) !important;
+  box-shadow: 1px 0 0 0 rgb(253, 242, 208) !important;
 }
 @media (prefers-color-scheme: dark) {
   .d2h-auto-color-scheme tr:has(> td.d2h-ins),
@@ -152,10 +157,10 @@ tr:has(> td.d2h-del) > td.d2h-code-linenumber {
   .d2h-auto-color-scheme tr:has(> td.d2h-del),
   .d2h-auto-color-scheme tr:has(> td.d2h-del) > td { background: rgb(52, 44, 25) !important; }
   .d2h-auto-color-scheme tr:has(> td.d2h-ins) > td.d2h-code-linenumber {
-    box-shadow: 0 0 0 1px rgb(21, 53, 34) !important;
+    box-shadow: 1px 0 0 0 rgb(21, 53, 34) !important;
   }
   .d2h-auto-color-scheme tr:has(> td.d2h-del) > td.d2h-code-linenumber {
-    box-shadow: 0 0 0 1px rgb(52, 44, 25) !important;
+    box-shadow: 1px 0 0 0 rgb(52, 44, 25) !important;
   }
 }
 
@@ -185,13 +190,13 @@ tr:has(> td.d2h-del) > td.d2h-code-linenumber {
 tr.dl-line.dl-line,
 tr.dl-line.dl-line > td,
 tr.dl-line.dl-line > td.d2h-code-linenumber { background: rgb(212, 232, 255) !important; }
-tr.dl-line.dl-line > td.d2h-code-linenumber { box-shadow: 0 0 0 1px rgb(212, 232, 255) !important; }
+tr.dl-line.dl-line > td.d2h-code-linenumber { box-shadow: 1px 0 0 0 rgb(212, 232, 255) !important; }
 @media (prefers-color-scheme: dark) {
   .d2h-auto-color-scheme tr.dl-line.dl-line,
   .d2h-auto-color-scheme tr.dl-line.dl-line > td,
   .d2h-auto-color-scheme tr.dl-line.dl-line > td.d2h-code-linenumber { background: rgb(20, 41, 70) !important; }
   .d2h-auto-color-scheme tr.dl-line.dl-line > td.d2h-code-linenumber {
-    box-shadow: 0 0 0 1px rgb(20, 41, 70) !important;
+    box-shadow: 1px 0 0 0 rgb(20, 41, 70) !important;
   }
 }
 
@@ -202,7 +207,12 @@ tr.dl-line.dl-line > td.d2h-code-linenumber { box-shadow: 0 0 0 1px rgb(212, 232
    numbers in that accent, and a rule above the first and below the last row so
    a RANGE reads as one block rather than as rows that happen to match. */
 tr.dl-line.dl-line > td:first-child {
-  box-shadow: inset 3px 0 0 var(--dl-accent), 0 0 0 1px rgb(212, 232, 255) !important;
+  /* No spread. A spread halo paints 1px ABOVE and BELOW the cell as well, in
+     the row colour, notching the neighbouring row's accent bar at every seam -
+     the bar looked dashed. The halo guarded against translucent row tints
+     leaking under the sticky gutter; every row colour is opaque now, so a
+     right-side sliver is all that is still needed. */
+  box-shadow: inset 3px 0 0 var(--dl-accent), 1px 0 0 0 rgb(212, 232, 255) !important;
 }
 tr.dl-line.dl-line > td.d2h-code-linenumber {
   color: var(--dl-accent) !important;
@@ -213,7 +223,7 @@ tr.dl-line.dl-line > td.d2h-code-linenumber {
 @media (prefers-color-scheme: dark) {
   :root { --dl-accent: #4493f8; }
   .d2h-auto-color-scheme tr.dl-line.dl-line > td:first-child {
-    box-shadow: inset 3px 0 0 var(--dl-accent), 0 0 0 1px rgb(20, 41, 70) !important;
+    box-shadow: inset 3px 0 0 var(--dl-accent), 1px 0 0 0 rgb(20, 41, 70) !important;
   }
 }
 

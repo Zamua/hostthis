@@ -118,7 +118,26 @@
   // too: a range spanning two files has no meaning here.
   var anchorStart = null;
 
+  // clearSelection drops the highlight AND the fragment, so a URL copied after
+  // deselecting does not still carry a range.
+  function clearSelection() {
+    mount.querySelectorAll("tr.dl-line, tr.dl-arrive").forEach(function (tr) {
+      tr.classList.remove("dl-line", "dl-arrive");
+    });
+    anchorStart = null;
+    DL.clearHash();
+  }
+
   function selectLine(file, line, extend) {
+    // Clicking the one selected line again deselects it. Without this the only
+    // way out of a selection is to edit the URL by hand.
+    if (!extend && anchorStart && anchorStart.file === file && anchorStart.line === line) {
+      var lit = mount.querySelectorAll("tr.dl-line");
+      if (lit.length === 1) {
+        clearSelection();
+        return;
+      }
+    }
     var start = extend && anchorStart && anchorStart.file === file ? anchorStart.line : line;
     if (!extend || !anchorStart || anchorStart.file !== file) {
       anchorStart = { file: file, line: line };
@@ -193,6 +212,14 @@
   // A fragment arriving later (someone pastes a link into the same tab) still
   // resolves, and re-resolves on every hashchange.
   DL.onResolve(function () { resolveHash(); });
+
+  // Escape clears from anywhere, which is what a reader reaches for and the
+  // only route out of a multi-line range short of re-clicking its first line.
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && mount.querySelector("tr.dl-line")) {
+      clearSelection();
+    }
+  });
 
   btnLine.addEventListener("click", function () { pick("line-by-line"); });
   btnSide.addEventListener("click", function () { pick("side-by-side"); });
