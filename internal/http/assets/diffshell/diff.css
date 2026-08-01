@@ -76,6 +76,11 @@ body {
    padding. Works for both line-by-line and side-by-side. */
 .d2h-code-linenumber,
 .d2h-code-side-linenumber {
+  /* diff2html renders these as inline-block, which does not fill the row: each
+     cell ends ~0.7px above its row's bottom, so stacked cells never touch and
+     anything drawn on their edges (the selection's accent bar) comes out
+     dashed. As a table-cell it fills the row and consecutive bars butt. */
+  display: table-cell !important;
   position: sticky !important;
   left: 0;
   z-index: 2;
@@ -89,13 +94,13 @@ body {
          behind them (the coloured lines between rows). */
   border: 0 !important;
   background-color: var(--d2h-bg-color, #fff) !important;
-  box-shadow: 0 0 0 1px var(--d2h-bg-color, #fff) !important;
+  box-shadow: 1px 0 0 0 var(--d2h-bg-color, #fff) !important;
 }
 @media (prefers-color-scheme: dark) {
   .d2h-auto-color-scheme .d2h-code-linenumber,
   .d2h-auto-color-scheme .d2h-code-side-linenumber {
     background-color: var(--d2h-dark-bg-color, #0d1117) !important;
-    box-shadow: 0 0 0 1px var(--d2h-dark-bg-color, #0d1117) !important;
+    box-shadow: 1px 0 0 0 var(--d2h-dark-bg-color, #0d1117) !important;
   }
 }
 /* The gutter is now a real column, so the code cell no longer needs the
@@ -123,14 +128,145 @@ body {
 .d2h-code-line .hljs-addition,
 .d2h-code-line .hljs-deletion { background: transparent; }
 
+/* Each changed row is ONE flat colour, end to end.
+   
+   Three things fought this. diff2html's line-number cell was originally
+   absolutely positioned with the code cell padded to make room; our
+   sticky-gutter fix put it back in flow, leaving a ~50px strip belonging to
+   NEITHER cell, which only a background on the <tr> can reach. The gutter must
+   be opaque, because it is sticky and overlaps the code as that scrolls. And
+   diff2html's own tints are translucent, so a cell painted over a tinted row
+   compounds into a third shade.
+   
+   Setting the row AND its cells to the same opaque colour settles all three:
+   nothing layers, nothing is left unpainted. Dark values are diff2html's own
+   rgba flattened against the dark page. */
+tr:has(> td.d2h-ins),
+tr:has(> td.d2h-ins) > td { background: rgb(221, 238, 221) !important; }
+tr:has(> td.d2h-del),
+tr:has(> td.d2h-del) > td { background: rgb(253, 242, 208) !important; }
+tr:has(> td.d2h-ins) > td.d2h-code-linenumber {
+  box-shadow: 1px 0 0 0 rgb(221, 238, 221) !important;
+}
+tr:has(> td.d2h-del) > td.d2h-code-linenumber {
+  box-shadow: 1px 0 0 0 rgb(253, 242, 208) !important;
+}
+@media (prefers-color-scheme: dark) {
+  .d2h-auto-color-scheme tr:has(> td.d2h-ins),
+  .d2h-auto-color-scheme tr:has(> td.d2h-ins) > td { background: rgb(21, 53, 34) !important; }
+  .d2h-auto-color-scheme tr:has(> td.d2h-del),
+  .d2h-auto-color-scheme tr:has(> td.d2h-del) > td { background: rgb(52, 44, 25) !important; }
+  .d2h-auto-color-scheme tr:has(> td.d2h-ins) > td.d2h-code-linenumber {
+    box-shadow: 1px 0 0 0 rgb(21, 53, 34) !important;
+  }
+  .d2h-auto-color-scheme tr:has(> td.d2h-del) > td.d2h-code-linenumber {
+    box-shadow: 1px 0 0 0 rgb(52, 44, 25) !important;
+  }
+}
+
 /* A line number addresses its line, so it has to look like a control. */
 .d2h-code-linenumber.linkable { cursor: pointer; }
 .d2h-code-linenumber.linkable:hover { color: #0969da; text-decoration: underline; }
-/* The addressed range, marked on the row so it reads across the gutter and the
-   code together. !important because diff2html sets the row background per
-   ins/del/context and would otherwise win. */
-tr.dl-line > td { background: rgba(255, 212, 0, .30) !important; }
+
+/* ---------------------------------------------------------------------------
+   The addressed range, in BLUE.
+   
+   Not yellow: this theme colours deletions amber (253,242,208), so a yellow
+   selection reads as the same family and a selected line is hard to tell from
+   a deleted one. Blue is the only hue not already carrying meaning here -
+   green is an addition, amber a deletion, the page colour is context.
+   
+   LAST in the file and naming three classes, because the
+   ins/del rules above are themselves !important and equally specific: a
+   selection written any weaker wins on some cells and loses on others, and the
+   range renders in two tones. Selection is a state ON TOP of ins/del, so it
+   must outrank them everywhere, not merely somewhere.
+   --------------------------------------------------------------------------- */
+/* `tr.dl-line.dl-line` repeats the class deliberately. The ins/del rules above
+   use :has(), whose argument contributes its own specificity, putting them at
+   (0,2,3) - higher than a plain `tr.dl-line > td`. Selection is a state ON TOP
+   of ins/del and has to outrank it on every cell, so it is raised to (0,3,x)
+   rather than left to win on some cells and lose on others. */
+tr.dl-line.dl-line,
+tr.dl-line.dl-line > td,
+tr.dl-line.dl-line > td.d2h-code-linenumber { background: rgb(212, 232, 255) !important; }
+tr.dl-line.dl-line > td.d2h-code-linenumber { box-shadow: 1px 0 0 0 rgb(212, 232, 255) !important; }
 @media (prefers-color-scheme: dark) {
-  .d2h-code-linenumber.linkable:hover { color: #4493f8; }
-  tr.dl-line > td { background: rgba(255, 212, 0, .18) !important; }
+  .d2h-auto-color-scheme tr.dl-line.dl-line,
+  .d2h-auto-color-scheme tr.dl-line.dl-line > td,
+  .d2h-auto-color-scheme tr.dl-line.dl-line > td.d2h-code-linenumber { background: rgb(20, 41, 70) !important; }
+  .d2h-auto-color-scheme tr.dl-line.dl-line > td.d2h-code-linenumber {
+    box-shadow: 1px 0 0 0 rgb(20, 41, 70) !important;
+  }
+}
+
+/* The selection needs more than a fill: it sits between two other fills (the
+   ins green and the del amber), so colour alone does not say "selected".
+   
+   Three cues, one colour: an accent bar down the left edge, the addressed line
+   numbers in that accent, and a rule above the first and below the last row so
+   a RANGE reads as one block rather than as rows that happen to match. */
+tr.dl-line.dl-line > td:first-child {
+  /* No spread. A spread halo paints 1px ABOVE and BELOW the cell as well, in
+     the row colour, notching the neighbouring row's accent bar at every seam -
+     the bar looked dashed. The halo guarded against translucent row tints
+     leaking under the sticky gutter; every row colour is opaque now, so a
+     right-side sliver is all that is still needed. */
+  box-shadow: inset 3px 0 0 var(--dl-accent), 1px 0 0 0 rgb(212, 232, 255) !important;
+}
+tr.dl-line.dl-line > td.d2h-code-linenumber {
+  color: var(--dl-accent) !important;
+  font-weight: 700 !important;
+}
+
+:root { --dl-accent: #0969da; }
+@media (prefers-color-scheme: dark) {
+  :root { --dl-accent: #4493f8; }
+  .d2h-auto-color-scheme tr.dl-line.dl-line > td:first-child {
+    box-shadow: inset 3px 0 0 var(--dl-accent), 1px 0 0 0 rgb(20, 41, 70) !important;
+  }
+}
+
+/* A single pulse ON ARRIVAL, so following a link says where it landed without
+   the page shouting for the rest of the session. Not fired on click: you are
+   already looking at the line you clicked.
+   
+   It animates an inset overlay rather than the background, because a CSS
+   animation does NOT override an !important declaration and every colour here
+   is !important. */
+@keyframes dl-arrive {
+  0%   { box-shadow: inset 0 0 0 9999px rgba(9, 105, 218, .00); }
+  12%  { box-shadow: inset 0 0 0 9999px rgba(9, 105, 218, .55); }
+  46%  { box-shadow: inset 0 0 0 9999px rgba(9, 105, 218, .12); }
+  70%  { box-shadow: inset 0 0 0 9999px rgba(9, 105, 218, .42); }
+  100% { box-shadow: inset 0 0 0 9999px rgba(9, 105, 218, 0); }
+}
+/* Two beats over ~2s. One short fade was finishing before a reader's eye had
+   even reached the range on a cold load, which is the only moment it fires. */
+/* Both the row AND its cells. The cells paint over the row, so a row-only
+   animation flashes just the unowned strip between them; a cell-only animation
+   flashes everything except that strip. Together they cover the whole band. */
+tr.dl-arrive,
+tr.dl-arrive > td:not(.d2h-code-linenumber) { animation: dl-arrive 2s ease-out 1; }
+
+/* The gutter flashes via filter, not the overlay. Its accent bar and sticky
+   halo are one !important box-shadow, and a CSS animation cannot override an
+   !important declaration - animating box-shadow there does nothing at all.
+   filter is unclaimed, so it can carry the same beat without touching either. */
+@keyframes dl-arrive-gutter {
+  0%   { filter: none; }
+  12%  { filter: brightness(.70) saturate(1.9); }
+  46%  { filter: brightness(.93) saturate(1.2); }
+  70%  { filter: brightness(.77) saturate(1.7); }
+  100% { filter: none; }
+}
+tr.dl-arrive > td.d2h-code-linenumber { animation: dl-arrive-gutter 2s ease-out 1; }
+@media (prefers-color-scheme: dark) {
+  @keyframes dl-arrive {
+    0%   { box-shadow: inset 0 0 0 9999px rgba(68, 147, 248, .00); }
+    12%  { box-shadow: inset 0 0 0 9999px rgba(68, 147, 248, .60); }
+    46%  { box-shadow: inset 0 0 0 9999px rgba(68, 147, 248, .14); }
+    70%  { box-shadow: inset 0 0 0 9999px rgba(68, 147, 248, .46); }
+    100% { box-shadow: inset 0 0 0 9999px rgba(68, 147, 248, 0); }
+  }
 }

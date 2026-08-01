@@ -64,6 +64,15 @@
     history.replaceState(null, "", "#" + frag);
   }
 
+  // clearHash drops the fragment without adding a history entry and without
+  // reloading. The path is restated explicitly because assigning an empty hash
+  // leaves a bare "#" in the address bar, which still reads as a link to
+  // somewhere and would be copied along with the URL.
+  function clearHash() {
+    if (!location.hash) return;
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+
   // slug converts heading text to an id, matching the anchor style used across
   // markdown renderers so links written elsewhere resolve here.
   function slug(text) {
@@ -80,6 +89,7 @@
     onResolve: onResolve,
     reveal: reveal,
     setHash: setHash,
+    clearHash: clearHash,
     slug: slug,
   };
 })();
