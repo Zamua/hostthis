@@ -194,3 +194,46 @@ tr.dl-line.dl-line > td.d2h-code-linenumber { box-shadow: 0 0 0 1px rgb(212, 232
     box-shadow: 0 0 0 1px rgb(20, 41, 70) !important;
   }
 }
+
+/* The selection needs more than a fill: it sits between two other fills (the
+   ins green and the del amber), so colour alone does not say "selected".
+   
+   Three cues, one colour: an accent bar down the left edge, the addressed line
+   numbers in that accent, and a rule above the first and below the last row so
+   a RANGE reads as one block rather than as rows that happen to match. */
+tr.dl-line.dl-line > td:first-child {
+  box-shadow: inset 3px 0 0 var(--dl-accent), 0 0 0 1px rgb(212, 232, 255) !important;
+}
+tr.dl-line.dl-line > td.d2h-code-linenumber {
+  color: var(--dl-accent) !important;
+  font-weight: 700 !important;
+}
+tr.dl-first.dl-first > td { border-top: 2px solid var(--dl-accent) !important; }
+tr.dl-last.dl-last > td { border-bottom: 2px solid var(--dl-accent) !important; }
+
+:root { --dl-accent: #0969da; }
+@media (prefers-color-scheme: dark) {
+  :root { --dl-accent: #4493f8; }
+  .d2h-auto-color-scheme tr.dl-line.dl-line > td:first-child {
+    box-shadow: inset 3px 0 0 var(--dl-accent), 0 0 0 1px rgb(20, 41, 70) !important;
+  }
+}
+
+/* A single pulse ON ARRIVAL, so following a link says where it landed without
+   the page shouting for the rest of the session. Not fired on click: you are
+   already looking at the line you clicked.
+   
+   It animates an inset overlay rather than the background, because a CSS
+   animation does NOT override an !important declaration and every colour here
+   is !important. */
+@keyframes dl-arrive {
+  0%, 10% { box-shadow: inset 0 0 0 9999px rgba(9, 105, 218, .30); }
+  100%    { box-shadow: inset 0 0 0 9999px rgba(9, 105, 218, 0); }
+}
+tr.dl-arrive > td:not(.d2h-code-linenumber) { animation: dl-arrive 1.25s ease-out 1; }
+@media (prefers-color-scheme: dark) {
+  @keyframes dl-arrive {
+    0%, 10% { box-shadow: inset 0 0 0 9999px rgba(68, 147, 248, .34); }
+    100%    { box-shadow: inset 0 0 0 9999px rgba(68, 147, 248, 0); }
+  }
+}
