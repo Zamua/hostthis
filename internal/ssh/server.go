@@ -965,10 +965,14 @@ const helpTextTemplate = `Pipe a rendered file in, get a URL out. {{retention}}
 UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;
          a QR code of the URL also prints to stderr on success)
 
-    cat foo.html  | ssh -T {{apex}}
-    cat doc.md    | ssh -T {{apex}} --name "design notes"
-    git diff      | ssh -T {{apex}}                  rendered as a diff
-    cat patch.txt | ssh -T {{apex}} --type diff      force the diff renderer
+    cat foo.html   | ssh -T {{apex}}
+    cat doc.md     | ssh -T {{apex}} --name "design notes"
+    git diff       | ssh -T {{apex}}                 rendered as a diff
+    cat chart.mmd  | ssh -T {{apex}}                 mermaid diagram
+    cat report.pdf | ssh -T {{apex}}                 paged pdf viewer
+    cat sales.csv  | ssh -T {{apex}}                 sortable table + SQL
+    cat events.json| ssh -T {{apex}}                 collapsible tree
+    cat x.txt      | ssh -T {{apex}} --type csv      force a renderer
 
 UPDATE & MANAGE (owner only; ssh key authenticates)
 
@@ -987,6 +991,16 @@ VERSION HISTORY
     ssh {{apex}} pin <slug> <ver>           stick the URL to <ver> (survives updates)
     ssh {{apex}} unpin <slug>               URL follows latest again
 
+LINK TO A PLACE INSIDE A PASTE
+
+    <url>#some-heading      markdown: jump to that heading
+    <url>#page=3            pdf: jump to that page
+    <url>#row=42            csv: jump to that row
+    <url>#L12-L20           diff/json: highlight those lines
+
+    Clicking a heading, row, or page in the viewer updates the URL, so the
+    address bar always holds a link you can copy.
+
 OUTPUT
 
     list, versions, whoami accept -o json
@@ -999,7 +1013,8 @@ STATIC SITES
 LIMITS
 
     {{quota}} per identity, counting post-compression bytes across all
-    your active pastes. HTML, Markdown, diff, or a gzip-tar site archive.
+    your active pastes. HTML, Markdown, diff, Mermaid, PDF, CSV, JSON,
+    or a gzip-tar site archive.
 
     Apps can persist + sync state: https://{{apex}}/  (rooms + realtime API)`
 

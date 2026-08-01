@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"errors"
 	"regexp"
 	"strings"
@@ -23,12 +24,26 @@ const (
 	// inside is confirmed by the safe-untar, not by the format gate. Served
 	// as a directory off its slug, not as one rendered file.
 	KindSite ContentKind = "site"
+	// KindMermaid is Mermaid diagram source, detected by an opening diagram
+	// keyword. Mermaid also renders inside a markdown paste's fenced blocks;
+	// this kind is for a bare diagram uploaded on its own.
+	KindMermaid ContentKind = "mermaid"
+	// KindCSV is delimiter-separated tabular text (comma or tab), detected by
+	// a consistent delimiter count across the prefix's lines.
+	KindCSV ContentKind = "csv"
+	// KindJSON is a JSON value or a JSONL stream, detected by parsing the
+	// prefix rather than by punctuation heuristics.
+	KindJSON ContentKind = "json"
+	// KindPDF is a PDF document, detected by the %PDF- signature. The only
+	// accepted kind whose bytes are not text; it clears the same explicit-magic
+	// bar KindSite does rather than being a fallback for unclassifiable bytes.
+	KindPDF ContentKind = "pdf"
 )
 
 // ErrUnsupportedKind is returned when content sniffs outside the accepted set.
 // The message is what the user sees on stderr.
 var ErrUnsupportedKind = errors.New(
-	"hostthis only accepts content that needs rendering (html, markdown, diff)")
+	"hostthis only accepts content it can render (html, markdown, diff, mermaid, pdf, csv, json)")
 
 // MaxPasteBytes is the per-paste size cap, measured in COMPRESSED bytes
 // (post-zstd, as written to the blob store). A single upload is staged in RAM
@@ -88,14 +103,25 @@ type MIMESniffer func(b []byte) string
 func DetectKind(b []byte, hint string, sniffMIME MIMESniffer) (ContentKind, error) {
 	hint = strings.ToLower(strings.TrimSpace(hint))
 
-	// Archive branch, by content: the SSH pipe carries no filename. A text
-	// hint disqualifies it, so a gzip stream cannot be relabelled as HTML,
-	// mirroring the textual branches rejecting binary bytes under a text
-	// hint. Whether a tar with web content is inside is the safe-untar's
-	// question, not this gate's.
+	// Binary branches, by explicit format signature: the SSH pipe carries no
+	// filename. A text hint disqualifies them, so a gzip or PDF stream cannot
+	// be relabelled as HTML, mirroring the textual branches rejecting binary
+	// bytes under a text hint. These are magic-gated, never a fallback for
+	// bytes that failed to classify.
+	//
+	// Whether a tar with web content is inside a gzip stream is the
+	// safe-untar's question, not this gate's.
 	if HasGzipMagic(b) && (hint == "" || hint == "tgz" || hint == "tar.gz" ||
 		strings.HasPrefix(hint, "application/gzip") || strings.HasPrefix(hint, "application/x-gzip")) {
 		return KindSite, nil
+	}
+	if HasPDFMagic(b) && (hint == "" || hint == "pdf" || strings.HasPrefix(hint, "application/pdf")) {
+		return KindPDF, nil
+	}
+	// A pdf hint without the signature is a rejection, not a relabelling: the
+	// viewer would fail on the bytes and the Content-Type would be a lie.
+	if hint == "pdf" || strings.HasPrefix(hint, "application/pdf") {
+		return "", ErrUnsupportedKind
 	}
 
 	sniff := b
@@ -123,21 +149,45 @@ func DetectKind(b []byte, hint string, sniffMIME MIMESniffer) (ContentKind, erro
 			return "", ErrUnsupportedKind
 		}
 		return KindDiff, nil
+	case hint == "mermaid" || hint == "mmd" || strings.HasPrefix(hint, "text/vnd.mermaid"):
+		if !strings.HasPrefix(ct, "text/") {
+			return "", ErrUnsupportedKind
+		}
+		return KindMermaid, nil
+	case hint == "csv" || hint == "tsv" || strings.HasPrefix(hint, "text/csv") || strings.HasPrefix(hint, "text/tab-separated-values"):
+		if !strings.HasPrefix(ct, "text/") {
+			return "", ErrUnsupportedKind
+		}
+		return KindCSV, nil
+	case hint == "json" || hint == "jsonl" || hint == "ndjson" || strings.HasPrefix(hint, "application/json"):
+		if !strings.HasPrefix(ct, "text/") {
+			return "", ErrUnsupportedKind
+		}
+		return KindJSON, nil
 	case hint != "":
 		// An unrecognized hint rejects without falling back to sniffing.
 		return "", ErrUnsupportedKind
 	}
 
-	// No hint - pure sniffing.
+	// No hint - pure sniffing. Ordered precision-first, because the cheap
+	// checks are the imprecise ones: each gate below is specific enough that
+	// ordinary prose never trips it, and markdown (the loosest, satisfied by a
+	// single structural cue) must therefore run last.
 	switch {
 	case strings.HasPrefix(ct, "text/html"):
 		return KindHTML, nil
 	case strings.HasPrefix(ct, "text/plain"):
-		// Diff runs BEFORE the markdown fallback: the hunk-header check is
-		// precise, so a real diff renders as a diff while prose (which never
-		// carries a hunk header) falls through to markdown.
 		if looksLikeDiff(b) {
 			return KindDiff, nil
+		}
+		if looksLikeMermaid(b) {
+			return KindMermaid, nil
+		}
+		if looksLikeJSON(b) {
+			return KindJSON, nil
+		}
+		if looksLikeCSV(b) {
+			return KindCSV, nil
 		}
 		if looksLikeMarkdown(b) {
 			return KindMarkdown, nil
@@ -146,6 +196,146 @@ func DetectKind(b []byte, hint string, sniffMIME MIMESniffer) (ContentKind, erro
 	default:
 		return "", ErrUnsupportedKind
 	}
+}
+
+// pdfMagic opens every PDF document. The version digits that follow are not
+// checked: a viewer that cannot read the version will say so, and rejecting on
+// it here would turn an unusual-but-valid file into "unsupported type".
+var pdfMagic = []byte("%PDF-")
+
+// HasPDFMagic reports whether the prefix opens with the PDF signature.
+func HasPDFMagic(b []byte) bool {
+	return len(b) >= len(pdfMagic) && string(b[:len(pdfMagic)]) == string(pdfMagic)
+}
+
+// mermaidOpeners are the diagram keywords Mermaid accepts on the opening line.
+// Matching the opener is what keeps this gate off prose: no English sentence
+// begins with "sequenceDiagram".
+var mermaidOpeners = []string{
+	"graph ", "graph\n", "flowchart ", "sequenceDiagram", "classDiagram",
+	"stateDiagram-v2", "stateDiagram", "erDiagram", "journey", "gantt",
+	"pie ", "pie\n", "gitGraph", "mindmap", "timeline", "quadrantChart",
+	"requirementDiagram", "C4Context", "sankey-beta", "xychart-beta",
+	"block-beta", "packet-beta", "architecture-beta", "kanban", "radar-beta",
+}
+
+// looksLikeMermaid reports whether the first non-blank line opens a diagram.
+// Mermaid's own front-matter and directive prefixes are skipped first, since
+// both legally precede the opener.
+func looksLikeMermaid(b []byte) bool {
+	s := string(b)
+	if len(s) > 1024 {
+		s = s[:1024]
+	}
+	for line := range strings.SplitSeq(s, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || t == "---" || strings.HasPrefix(t, "%%") || strings.HasPrefix(t, "config:") {
+			continue
+		}
+		for _, op := range mermaidOpeners {
+			// The opener may be the whole line, so compare against the line
+			// plus a newline to let space-suffixed openers match it.
+			if strings.HasPrefix(t+"\n", op) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// looksLikeJSON reports whether the content is a JSON value or a JSONL stream.
+// Parsing is the gate rather than punctuation: `{` opens a JSON object and also
+// a C function body, and only one of those unmarshals.
+//
+// The prefix may be truncated mid-value, so a failed parse of the whole input
+// falls back to the FIRST LINE, which is complete for JSONL and for any
+// pretty-printed document whose opening line is a bare bracket.
+func looksLikeJSON(b []byte) bool {
+	trimmed := strings.TrimSpace(string(b))
+	if trimmed == "" {
+		return false
+	}
+	if c := trimmed[0]; c != '{' && c != '[' {
+		// A bare scalar is valid JSON but indistinguishable from plain text,
+		// and rendering `42` as a tree helps nobody.
+		return false
+	}
+	if json.Valid([]byte(trimmed)) {
+		return true
+	}
+	first, _, _ := strings.Cut(trimmed, "\n")
+	first = strings.TrimSpace(first)
+	if first == "{" || first == "[" {
+		return true // pretty-printed, truncated by the sniff window
+	}
+	return json.Valid([]byte(first)) // JSONL: one complete value per line
+}
+
+// csvDelimiters are the separators looksLikeCSV will consider. Pipe is
+// deliberately absent: a markdown table is pipe-separated and consistent, and
+// it is markdown.
+var csvDelimiters = []rune{',', '\t'}
+
+// looksLikeCSV reports whether the prefix is delimiter-separated tabular text.
+//
+// The gate is a CONSISTENT field count of at least 3 across at least 3 lines.
+// Two-column data is given up deliberately: prose wraps at punctuation, so
+// "Hello, world" over two lines is a consistent 2-field table, and a false
+// positive renders a paragraph as a spreadsheet. Three fields across three
+// lines effectively never occurs in prose, and a real 2-column CSV still
+// renders as a table under `--type csv`.
+func looksLikeCSV(b []byte) bool {
+	s := string(b)
+	if len(s) > 4096 {
+		s = s[:4096]
+	}
+	var lines []string
+	for line := range strings.SplitSeq(s, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	// The sniff window can truncate the final line mid-field, which would show
+	// a short count and fail an otherwise consistent file.
+	if len(lines) > 3 && !strings.HasSuffix(s, "\n") {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) < 3 {
+		return false
+	}
+	for _, d := range csvDelimiters {
+		want := countFields(lines[0], d)
+		if want < 3 {
+			continue
+		}
+		consistent := true
+		for _, line := range lines[1:] {
+			if countFields(line, d) != want {
+				consistent = false
+				break
+			}
+		}
+		if consistent {
+			return true
+		}
+	}
+	return false
+}
+
+// countFields counts delimiter-separated fields in one line, honouring RFC 4180
+// double-quoted fields so an address like "Springfield, IL" counts as one.
+func countFields(line string, delim rune) int {
+	fields, inQuotes := 1, false
+	for _, r := range line {
+		switch {
+		case r == '"':
+			inQuotes = !inQuotes
+		case r == delim && !inQuotes:
+			fields++
+		}
+	}
+	return fields
 }
 
 // looksLikeMarkdown reports whether the first 1 KB carries a markdown

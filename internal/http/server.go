@@ -265,21 +265,16 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 	// representation and safe to edge-cache under the max-age set above. See
 	// docs/SPEC.md "The bare URL always serves the shell (no Accept
 	// negotiation)".
-	clientRendered := p.Kind == domain.KindMarkdown || p.Kind == domain.KindDiff
-	rawWanted := clientRendered && wantsRaw(r)
+	shell := shellFor(p.Kind)
+	rawWanted := shell != nil && wantsRaw(r)
 
-	// ETag is the content SHA for HTML and raw markdown/diff. The shell is
+	// ETag is the content SHA for HTML and for any raw body. The shell is
 	// content-INDEPENDENT, so it validates on its shell version instead: two
 	// different pastes yield the same shell ETag, and a shell change
 	// propagates within max-age or immediately via the deploy-time purge.
 	etag := `"` + p.ContentSHA + `"`
-	if clientRendered && !rawWanted {
-		switch p.Kind {
-		case domain.KindMarkdown:
-			etag = `"` + mdShellVersion + `"`
-		case domain.KindDiff:
-			etag = `"` + diffShellVersion + `"`
-		}
+	if shell != nil && !rawWanted {
+		etag = `"` + shell.version + `"`
 	}
 	h.Set("ETag", etag)
 
@@ -294,65 +289,47 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		}
 	}
 
-	switch p.Kind {
-	case domain.KindHTML:
-		// Streamed so a GET never buffers the whole payload; the body is
-		// byte-identical to a buffered read + write.
+	// streamBlob copies the stored bytes out under ct. Streamed so a GET never
+	// buffers the whole payload; the body is byte-identical to a buffered read
+	// + write, and server memory stays constant regardless of paste size.
+	streamBlob := func(ct, what string) {
 		rc, _, err := s.Blobs.Read(r.Context(), string(slug), p.ContentSHA)
 		if err != nil {
-			s.logf("warn: paste read 500: slug=%s html blob read: %v", slug, err)
+			s.logf("warn: paste read 500: slug=%s %s blob read: %v", slug, what, err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		defer rc.Close() //nolint:errcheck
-		h.Set("Content-Type", "text/html; charset=utf-8")
+		defer func() { _ = rc.Close() }()
+		h.Set("Content-Type", ct)
 		_, _ = io.Copy(w, rc)
-	case domain.KindMarkdown:
-		// No server-side render: either the raw bytes or the shell that
-		// renders them in the browser. Both keep server memory constant
-		// regardless of paste size.
-		if rawWanted {
-			rc, _, err := s.Blobs.Read(r.Context(), string(slug), p.ContentSHA)
-			if err != nil {
-				s.logf("warn: paste read 500: slug=%s raw markdown blob read: %v", slug, err)
-				http.Error(w, "internal error", http.StatusInternalServerError)
-				return
-			}
-			defer func() { _ = rc.Close() }()
-			h.Set("Content-Type", "text/markdown; charset=utf-8")
-			_, _ = io.Copy(w, rc)
-			return
-		}
-		// The shell loads marked + DOMPurify and fetches the raw bytes itself
-		// via ?raw=1, all same-origin under shellCSP.
-		h.Set("Content-Security-Policy", shellCSP)
-		h.Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(shellHTML())
-	case domain.KindDiff:
-		// Same shape as markdown: no server-side diffing, either the raw
-		// bytes or the shell that renders them via diff2html + highlight.js.
-		if rawWanted {
-			rc, _, err := s.Blobs.Read(r.Context(), string(slug), p.ContentSHA)
-			if err != nil {
-				s.logf("warn: paste read 500: slug=%s raw diff blob read: %v", slug, err)
-				http.Error(w, "internal error", http.StatusInternalServerError)
-				return
-			}
-			defer func() { _ = rc.Close() }()
-			// Plain text so a non-browser client sees the diff inline.
-			h.Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = io.Copy(w, rc)
-			return
-		}
-		// Same shellCSP as the markdown shell: the vendored diff2html +
-		// highlight.js + bootstrap and the ?raw fetch are all same-origin.
-		h.Set("Content-Security-Policy", shellCSP)
-		h.Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(diffShellHTML())
-	default:
+	}
+
+	// HTML is the one kind served as itself: the stored bytes ARE the page.
+	if p.Kind == domain.KindHTML {
+		streamBlob("text/html; charset=utf-8", "html")
+		return
+	}
+
+	// Every other kind is client-rendered: no server-side render, just the raw
+	// bytes (under an explicit ?raw) or the fixed shell that fetches and
+	// renders them. The vendored libraries and the ?raw fetch are all
+	// same-origin under shellCSP.
+	if shell == nil {
 		s.logf("warn: paste read 500: slug=%s unsupported stored kind %q", slug, p.Kind)
 		http.Error(w, "unsupported kind", http.StatusInternalServerError)
+		return
 	}
+	if rawWanted {
+		ct := rawContentType[p.Kind]
+		if ct == "" {
+			ct = "text/plain; charset=utf-8"
+		}
+		streamBlob(ct, "raw "+string(p.Kind))
+		return
+	}
+	h.Set("Content-Security-Policy", shell.policy())
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(shell.html(p.Kind))
 }
 
 // loadingPageHTML is the body served for a pending paste. The meta refresh

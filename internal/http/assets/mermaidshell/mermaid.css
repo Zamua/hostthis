@@ -1,0 +1,21 @@
+:root { --bg:#ffffff; --ink:#1f2328; --soft:#59636e; --rule:#d1d9e0; --err:#cf222e; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#0d1117; --ink:#e6edf3; --soft:#9198a1; --rule:#3d444d; --err:#ff7b72; }
+}
+* { box-sizing: border-box; }
+html, body { background: var(--bg); color: var(--ink); margin: 0; }
+body {
+  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+  min-height: 100vh; display: flex; flex-direction: column;
+  -webkit-text-size-adjust: 100%;
+}
+#content { flex: 1; display: flex; align-items: center; justify-content: center; padding: 1.5rem 1rem 3rem; }
+/* The diagram is an SVG of intrinsic size; letting it exceed the viewport is
+   what makes a wide flowchart unreadable on a phone. */
+#content svg { max-width: 100%; height: auto; }
+.status { color: var(--soft); font-size: 0.95rem; }
+.err {
+  color: var(--err); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9rem; white-space: pre-wrap; text-align: left;
+  border: 1px solid var(--rule); border-radius: 8px; padding: 1rem; max-width: 72ch;
+}

@@ -87,3 +87,15 @@ tr:nth-child(2n) { background: var(--zebra); }
 input[type="checkbox"] { margin-right: 0.4rem; }
 /* Footnotes */
 .footnotes { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--rule); font-size: 0.9rem; color: var(--soft); }
+
+/* Deep links: an anchored heading is clickable, and the flash is what makes
+   the addressed element findable after the scroll settles. */
+.anchored { cursor: pointer; }
+.anchored:hover::after { content: " #"; color: var(--soft); font-weight: 400; }
+.dl-flash { background: rgba(255, 212, 0, .22); border-radius: 4px; transition: background .4s; }
+.mermaid-block { margin: 1.2rem 0; text-align: center; }
+.mermaid-block svg { max-width: 100%; height: auto; }
+.mermaid-err {
+  text-align: left; white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace;
+  font-size: .85rem; background: var(--code-bg); border-radius: 6px; padding: .8rem;
+}

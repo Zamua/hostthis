@@ -1,0 +1,62 @@
+:root {
+  --bg:#ffffff; --panel:#f6f8fa; --ink:#1f2328; --soft:#59636e; --rule:#d1d9e0;
+  --accent:#0969da; --zebra:#f6f8fa; --num:#0550ae; --null:#8b949e; --err:#cf222e;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#0d1117; --panel:#151b23; --ink:#e6edf3; --soft:#9198a1; --rule:#3d444d;
+          --accent:#4493f8; --zebra:#151b23; --num:#79c0ff; --null:#6e7681; --err:#ff7b72; }
+}
+* { box-sizing: border-box; }
+html, body { background: var(--bg); color: var(--ink); margin: 0; }
+body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; -webkit-text-size-adjust: 100%; }
+#bar { position: sticky; top: 0; z-index: 6; display: flex; align-items: center; gap: .6rem;
+  padding: .5rem .85rem; background: var(--panel); border-bottom: 1px solid var(--rule); }
+#bar .grow { flex: 1; }
+#summary { color: var(--soft); font-size: .82rem; letter-spacing: .02em; }
+#filter { font: inherit; padding: .3rem .55rem; min-width: 8rem; max-width: 16rem;
+  background: var(--bg); color: var(--ink); border: 1px solid var(--rule); border-radius: 7px; }
+#bar button, #run { font: inherit; padding: .3rem .7rem; cursor: pointer; background: transparent;
+  color: var(--ink); border: 1px solid var(--rule); border-radius: 7px; }
+#bar button:hover, #run:hover { border-color: var(--accent); color: var(--accent); }
+#dl { color: var(--accent); text-decoration: none; font-size: .88rem; }
+#sql { padding: .7rem .85rem; border-bottom: 1px solid var(--rule); background: var(--panel); }
+#q { width: 100%; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--bg); color: var(--ink); border: 1px solid var(--rule); border-radius: 8px; padding: .55rem .7rem; resize: vertical; }
+.sqlrow { display: flex; align-items: center; gap: .7rem; margin-top: .5rem; }
+#sqlstatus { color: var(--soft); font-size: .82rem; }
+#sqlout { margin-top: .7rem; overflow-x: auto; }
+#content { padding: 0 0 4rem; }
+/* The table scrolls inside its own box: a wide CSV must never make the page
+   itself scroll sideways. */
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; font-variant-numeric: tabular-nums; width: max-content; min-width: 100%; }
+th, td { padding: .38rem .7rem; border-bottom: 1px solid var(--rule); text-align: left; white-space: nowrap; vertical-align: top; }
+thead th { position: sticky; top: 0; background: var(--panel); cursor: pointer; user-select: none;
+  border-bottom: 2px solid var(--rule); z-index: 2; }
+thead th:hover { color: var(--accent); }
+thead th .type { display: block; font-weight: 400; font-size: .68rem; color: var(--soft); letter-spacing: .06em; text-transform: uppercase; }
+thead th .arrow { opacity: .45; font-size: .75rem; }
+tbody tr:nth-child(even) { background: var(--zebra); }
+td.n { text-align: right; color: var(--num); font-family: ui-monospace, Menlo, monospace; }
+td.null { color: var(--null); font-style: italic; }
+/* The row-number gutter is the deep-link handle: clicking it addresses the row. */
+td.rn, th.rn { color: var(--soft); text-align: right; font-family: ui-monospace, Menlo, monospace;
+  font-size: .8rem; cursor: pointer; position: sticky; left: 0; background: var(--bg); }
+tbody tr:nth-child(even) td.rn { background: var(--zebra); }
+td.rn:hover { color: var(--accent); }
+.dl-flash { outline: 2px solid var(--accent); outline-offset: -2px; }
+#stats { padding: .8rem .85rem; border-bottom: 1px solid var(--rule); overflow-x: auto; }
+#stats table { font-size: .82rem; }
+#stats th { position: static; cursor: default; }
+.tree { font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; padding: .9rem .85rem; }
+.tree details { margin-left: 1rem; }
+.tree summary { cursor: pointer; }
+.tree .k { color: var(--accent); }
+.tree .s { color: var(--ink); }
+.tree .num { color: var(--num); }
+.tree .b { color: var(--num); }
+.tree .nul { color: var(--null); font-style: italic; }
+.tree .row { display: block; }
+.tree mark { background: rgba(255, 212, 0, .35); color: inherit; }
+.status { color: var(--soft); padding: 2rem .85rem; }
+.err { color: var(--err); font-family: ui-monospace, Menlo, monospace; white-space: pre-wrap; padding: 1.5rem .85rem; }
