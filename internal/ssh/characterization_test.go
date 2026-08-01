@@ -907,7 +907,6 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"    <url>#some-heading      markdown: jump to that heading\n" +
 	"    <url>#page=3            pdf: jump to that page\n" +
 	"    <url>#row=42            csv: jump to that row\n" +
-	"    <url>#L12-L20           diff/json: highlight those lines\n" +
 	"\n" +
 	"    Clicking a heading, row, or page in the viewer updates the URL, so the\n" +
 	"    address bar always holds a link you can copy.\n" +

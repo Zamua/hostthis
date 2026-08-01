@@ -118,9 +118,12 @@ content, so a paste can be *cited* and not merely sent:
 | Fragment | Kinds | Meaning |
 | --- | --- | --- |
 | `#<heading-slug>` | markdown | scroll to that heading |
-| `#L<n>` / `#L<a>-L<b>` | csv, json, diff | that line, or that inclusive range |
 | `#page=<n>` | pdf | that page |
 | `#row=<n>` | csv | that row (1-based, excluding the header) |
+
+`#L<n>` and `#L<a>-L<b>` are parsed by the shared resolver but no viewer
+addresses lines yet, so they are deliberately absent from the table above:
+this spec describes what the code does.
 
 Fragments are chosen over query parameters deliberately: a fragment is
 never sent to the server, so deep links add no routing, cost no extra
