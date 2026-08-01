@@ -32,8 +32,13 @@ out of scope for v1 - see "Non-goals" at the bottom.
 HTML, Markdown, diff, Mermaid, PDF, CSV/TSV, JSON/JSONL, folded stacks
 (flame graph).
 
-Detection: by content type sniffed from the first 512 bytes plus optional
-explicit `--type` flag at upload time. A Markdown paste is served as a
+Detection: by content sniffed from the first **8 KiB** of the upload, plus an
+optional explicit `--type` flag. The MIME classification inside that gate
+still reads only the first 512 bytes, which is all the sniffing algorithm
+defines, but the per-format heuristics get the larger window: they need to
+see structure, and a single line of a real profile or a wide CSV row can
+exceed 512 bytes on its own, leaving the smaller window with no complete
+line to judge. A Markdown paste is served as a
 fixed, content-independent HTML shell that loads a bundled client-side
 renderer (marked + DOMPurify); the shell fetches the raw Markdown bytes
 (via `?raw`) and renders them in the browser.

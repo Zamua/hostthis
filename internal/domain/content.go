@@ -81,6 +81,14 @@ const HardRawByteCap = 100 << 20 // 100 MiB
 // sniffing algorithms this feeds are all defined over a bounded prefix.
 const MIMESniffLen = 512
 
+// SniffPrefixLen is how many leading bytes the upload pipeline must capture
+// for DetectKind. It is far larger than MIMESniffLen because the MIME sniff
+// and the format heuristics need different amounts of evidence: the former is
+// defined over 512 bytes, the latter need whole lines. One folded stack line
+// from a real profile averages ~600 bytes, so a 512-byte window can contain no
+// complete line at all and no line-based gate can fire.
+const SniffPrefixLen = 8192
+
 // MIMESniffer reports a media type for a byte prefix, e.g. "text/plain;
 // charset=utf-8" or "application/octet-stream".
 //

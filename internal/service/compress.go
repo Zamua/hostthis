@@ -32,8 +32,10 @@ type stagedUpload struct {
 	Body           []byte
 	RawSize        int
 	CompressedSize int
-	// Prefix holds the first ~512 uncompressed bytes so callers can sniff
-	// content type without re-reading the source.
+	// Prefix holds the leading uncompressed bytes so callers can classify the
+	// content without re-reading the source. Sized by domain.SniffPrefixLen,
+	// which is what the format heuristics need rather than what the MIME
+	// sniff needs.
 	Prefix []byte
 }
 
@@ -73,7 +75,7 @@ func streamUpload(r io.Reader) (stagedUpload, error) {
 
 	hasher := sha256.New()
 	rawCount := &rawCountWriter{limit: domain.HardRawByteCap}
-	prefix := &prefixBuffer{cap: 512}
+	prefix := &prefixBuffer{cap: domain.SniffPrefixLen}
 
 	mw := io.MultiWriter(zw, hasher, rawCount, prefix)
 	if _, err := io.Copy(mw, r); err != nil {
