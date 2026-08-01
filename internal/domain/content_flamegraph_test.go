@@ -1,6 +1,7 @@
 package domain_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -69,6 +70,32 @@ func TestDetectKind_CppProfileIsNotCSV(t *testing.T) {
 	}
 	if got != domain.KindFlamegraph {
 		t.Fatalf("got %q, want flamegraph", got)
+	}
+}
+
+// The service sniffs a ~512-byte PREFIX, not the whole upload, so a real
+// profile always arrives with its final line cut mid-count. Every fixture
+// above is smaller than that window and so could not catch this: detection
+// passed on them and rejected every real profile.
+func TestDetectKind_FoldedPrefixIsTruncated(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; sb.Len() < 4096; i++ {
+		fmt.Fprintf(&sb, "main;serve;handler%d;read %d\n", i, 10+i)
+	}
+	full := []byte(sb.String())
+	for _, n := range []int{512, 700, 1024} {
+		got, err := domain.DetectKind(full[:n], "", sniff)
+		if err != nil || got != domain.KindFlamegraph {
+			t.Fatalf("prefix of %d bytes: got %q err=%v, want flamegraph", n, got, err)
+		}
+	}
+}
+
+// Forgiving the window's last line must not forgive one in the middle.
+func TestDetectKind_MalformedLineBeforeTheEndStillRejects(t *testing.T) {
+	body := "main;a;b 12\nthis line is prose, not a stack\nmain;c;d 9\nmain;e 4\n"
+	if got, _ := domain.DetectKind([]byte(body), "", sniff); got == domain.KindFlamegraph {
+		t.Fatal("detected as flamegraph despite a malformed interior line")
 	}
 }
 
