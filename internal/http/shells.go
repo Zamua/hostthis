@@ -135,7 +135,7 @@ var commonShell = &clientShell{
 // commonVersion busts the cache for the shared assets. Every shell stamps its
 // OWN version into its asset URLs, so bumping this alone is not enough: bump
 // the shells that must re-fetch too.
-const commonVersion = "common-v2"
+const commonVersion = "common-v3"
 
 // assetSource resolves a flat asset name to the shell that owns it. Built once
 // from the shell table so a new shell needs no change here.

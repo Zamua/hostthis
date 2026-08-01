@@ -107,33 +107,69 @@
     });
   }
 
+  // The resolver runs before the fetch completes, so on a cold load the first
+  // highlight comes from render(), not from resolveHash(). Arrival is tracked
+  // as a pending flag and consumed by whichever highlight lands first;
+  // otherwise the pulse is applied to an empty document and then cleared.
+  var pendingArrival = true;
+
   // anchorStart remembers the last single-line click so a shift-click extends
   // from it, the selection model file listings already use. It carries the file
   // too: a range spanning two files has no meaning here.
   var anchorStart = null;
 
+  // clearSelection drops the highlight AND the fragment, so a URL copied after
+  // deselecting does not still carry a range.
+  function clearSelection() {
+    mount.querySelectorAll("tr.dl-line, tr.dl-arrive").forEach(function (tr) {
+      tr.classList.remove("dl-line", "dl-arrive");
+    });
+    anchorStart = null;
+    DL.clearHash();
+  }
+
   function selectLine(file, line, extend) {
+    // Clicking the one selected line again deselects it. Without this the only
+    // way out of a selection is to edit the URL by hand.
+    if (!extend && anchorStart && anchorStart.file === file && anchorStart.line === line) {
+      var lit = mount.querySelectorAll("tr.dl-line");
+      if (lit.length === 1) {
+        clearSelection();
+        return;
+      }
+    }
     var start = extend && anchorStart && anchorStart.file === file ? anchorStart.line : line;
     if (!extend || !anchorStart || anchorStart.file !== file) {
       anchorStart = { file: file, line: line };
     }
     var lo = Math.min(start, line), hi = Math.max(start, line);
     DL.setHash("F" + file + "L" + lo + (lo === hi ? "" : "-L" + hi));
-    highlight(file, lo, hi, true);
+    highlight(file, lo, hi, true, false);
   }
 
-  function highlight(file, lo, hi, scroll) {
-    mount.querySelectorAll("tr.dl-line").forEach(function (tr) {
-      tr.classList.remove("dl-line");
-    });
-    var first = null;
+  function highlight(file, lo, hi, scroll, arrived) {
+    mount.querySelectorAll("tr.dl-line, tr.dl-first, tr.dl-last, tr.dl-arrive")
+      .forEach(function (tr) {
+        tr.classList.remove("dl-line", "dl-first", "dl-last", "dl-arrive");
+      });
+    var rows = [];
     for (var i = lo; i <= hi; i++) {
       var tr = document.getElementById("F" + file + "L" + i);
       if (!tr) continue; // a line absent from the diff simply has no row
       tr.classList.add("dl-line");
-      if (!first) first = tr;
+      rows.push(tr);
     }
-    if (scroll && first) first.scrollIntoView({ block: "center", behavior: "smooth" });
+    if (!rows.length) return;
+    // The bounds are marked on the rows that actually exist, not on lo and hi:
+    // a range whose first line is absent from the diff would otherwise draw its
+    // top rule nowhere.
+    rows[0].classList.add("dl-first");
+    rows[rows.length - 1].classList.add("dl-last");
+    if (arrived && pendingArrival) {
+      pendingArrival = false;
+      rows.forEach(function (tr) { tr.classList.add("dl-arrive"); });
+    }
+    if (scroll) rows[0].scrollIntoView({ block: "center", behavior: "smooth" });
   }
 
   // Re-applies the addressed range after a render, because a render rebuilds
@@ -146,7 +182,9 @@
     var t = DL.parse();
     if (!t || t.type !== "line" || format !== "line-by-line") return;
     anchorStart = { file: t.file, line: t.from };
-    highlight(t.file, t.from, t.to, scroll);
+    // A re-render must not re-pulse, but the FIRST paint after a cold load is
+    // an arrival, so the flag decides rather than the call site.
+    highlight(t.file, t.from, t.to, scroll, true);
   }
 
   // Resolving a fragment is the one moment the format may be overridden: the
@@ -159,6 +197,7 @@
       pick("line-by-line"); // re-renders, and reapplyHighlight runs with it
       return;
     }
+    pendingArrival = true; // a hashchange is a new arrival
     reapplyHighlight(true);
   }
 
@@ -173,6 +212,14 @@
   // A fragment arriving later (someone pastes a link into the same tab) still
   // resolves, and re-resolves on every hashchange.
   DL.onResolve(function () { resolveHash(); });
+
+  // Escape clears from anywhere, which is what a reader reaches for and the
+  // only route out of a multi-line range short of re-clicking its first line.
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && mount.querySelector("tr.dl-line")) {
+      clearSelection();
+    }
+  });
 
   btnLine.addEventListener("click", function () { pick("line-by-line"); });
   btnSide.addEventListener("click", function () { pick("side-by-side"); });
