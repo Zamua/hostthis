@@ -13,9 +13,11 @@
   <a id="dl" href="?raw=1" download>raw</a>
 </header>
 <section id="sql" hidden>
-  <textarea id="q" rows="3" spellcheck="false"></textarea>
+  <div id="editor"></div>
   <div class="sqlrow">
     <button id="run" type="button">Run</button>
+    <span class="hint">⌘⏎</span>
+    <label class="vimtoggle"><input id="vim" type="checkbox"> vim</label>
     <span id="sqlstatus"></span>
   </div>
   <div id="sqlout"></div>

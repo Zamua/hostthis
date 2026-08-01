@@ -48,7 +48,7 @@ var pdfShellAssets = map[string]string{
 //go:embed assets/datashell/*
 var dataShellFS embed.FS
 
-const dataShellVersion = "datashell-v1"
+const dataShellVersion = "datashell-v2"
 
 var dataShellAssets = map[string]string{
 	"data.js":                     "text/javascript; charset=utf-8",
@@ -63,4 +63,8 @@ var dataShellAssets = map[string]string{
 	"apache-arrow.js": "text/javascript; charset=utf-8",
 	"flatbuffers.js":  "text/javascript; charset=utf-8",
 	"tslib.js":        "text/javascript; charset=utf-8",
+	// CodeMirror is a single esbuild bundle on purpose: loading its packages
+	// separately gives each one its own @codemirror/state, and CodeMirror
+	// throws on duplicate state instances. Lazy-loaded with the console.
+	"codemirror.min.js": "text/javascript; charset=utf-8",
 }

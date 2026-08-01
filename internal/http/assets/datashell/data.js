@@ -97,27 +97,24 @@
     };
   }
 
-  function renderStats(cols, rows) {
-    var wrap = document.createElement("section");
-    wrap.id = "stats";
-    var t = document.createElement("table");
-    t.innerHTML =
-      "<thead><tr><th>column</th><th>type</th><th>nulls</th><th>distinct</th><th>min</th><th>max</th></tr></thead>";
-    var tb = document.createElement("tbody");
-    cols.forEach(function (c, i) {
-      var s = statsFor(rows, i, c.type);
-      var tr = document.createElement("tr");
-      [c.name, c.type, s.nulls, s.distinct, s.min == null ? "" : s.min, s.max == null ? "" : s.max]
-        .forEach(function (v) {
-          var td = document.createElement("td");
-          td.textContent = String(v);
-          tr.appendChild(td);
-        });
-      tb.appendChild(tr);
-    });
-    t.appendChild(tb);
-    wrap.appendChild(t);
-    return wrap;
+  // describe renders a column's facts as one short line for its header. Nulls
+  // are named only when there are some: "0 null" on every column is noise that
+  // makes the one column that HAS nulls harder to spot.
+  function describe(st, type) {
+    var parts = [];
+    if (type === "number" && st.min != null) {
+      parts.push(fmtNum(st.min) + " – " + fmtNum(st.max));
+    } else {
+      parts.push(st.distinct + " distinct");
+    }
+    if (st.nulls) parts.push(st.nulls + " null");
+    return parts.join(" · ");
+  }
+
+  function fmtNum(n) {
+    if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+    if (Math.abs(n) >= 1e4) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
+    return String(n);
   }
 
   // ---- table -------------------------------------------------------------
@@ -154,12 +151,21 @@
     htr.appendChild(rn);
     state.cols.forEach(function (c, i) {
       var th = document.createElement("th");
-      var arrow = state.sort && state.sort.col === i ? (state.sort.dir === "asc" ? " ▲" : " ▼") : "";
+      var arrow = state.sort && state.sort.col === i ? "▲" : "";
+      if (state.sort && state.sort.col === i && state.sort.dir === "desc") arrow = "▼";
       th.innerHTML =
-        '<span class="name"></span><span class="arrow"></span><span class="type"></span>';
+        '<span class="name"></span><span class="arrow"></span>' +
+        '<span class="type"></span><span class="facts"></span>';
       th.querySelector(".name").textContent = c.name;
       th.querySelector(".arrow").textContent = arrow;
       th.querySelector(".type").textContent = c.type;
+      th.querySelector(".facts").textContent = c.facts;
+      if (c.type === "number") {
+        var bar = document.createElement("span");
+        bar.className = "spark";
+        bar.innerHTML = "<i></i>";
+        th.appendChild(bar);
+      }
       th.onclick = function () {
         var asc = !(state.sort && state.sort.col === i && state.sort.dir === "asc");
         state.sort = { col: i, dir: asc ? "asc" : "desc" };
@@ -196,7 +202,6 @@
     wrap.appendChild(t);
 
     content.innerHTML = "";
-    content.appendChild(renderStats(state.cols, state.rows));
     content.appendChild(wrap);
     summary.textContent =
       rows.length + (q ? " of " + state.rows.length : "") + " rows · " + state.cols.length + " cols";
@@ -292,6 +297,66 @@
     return db;
   }
 
+  // The editor is lazy for the same reason the engine is: a reader who never
+  // opens the console should not download either. CodeMirror must be ONE
+  // bundle - two copies of @codemirror/state make it throw.
+  var editor = null;
+
+  async function mountEditor(host, initial, onRun) {
+    var cm;
+    try {
+      cm = await import("/_hostthis/codemirror.min.js");
+    } catch (e) {
+      // A fallback textarea keeps the console usable rather than dead.
+      var ta = document.createElement("textarea");
+      ta.className = "fallback";
+      ta.rows = 3;
+      ta.value = initial;
+      host.appendChild(ta);
+      return { value: function () { return ta.value; }, focus: function () { ta.focus(); } };
+    }
+
+    // Schema-aware completion: the column names are already known, so the
+    // editor completes them instead of offering generic SQL keywords only.
+    var schema = { data: state.cols.map(function (c) { return c.name; }) };
+
+    var vimCompartment = new cm.Compartment();
+    var wantVim = localStorage.getItem("hostthis.vim") === "1";
+    var dark = matchMedia("(prefers-color-scheme: dark)").matches;
+
+    var view = new cm.EditorView({
+      doc: initial,
+      parent: host,
+      // Order IS precedence in CodeMirror: earlier extensions win. vim must
+      // precede the default keymap, and Mod-Enter must precede basicSetup,
+      // whose defaultKeymap already binds it to insertBlankLine.
+      extensions: [
+        vimCompartment.of(wantVim ? cm.vim() : []),
+        cm.keymap.of([
+          { key: "Mod-Enter", run: function () { onRun(); return true; }, preventDefault: true },
+        ]),
+        cm.basicSetup,
+        cm.sql({ dialect: cm.PostgreSQL, schema: schema, upperCaseKeywords: true }),
+      ].concat(dark ? [cm.oneDark] : []),
+    });
+
+    var toggle = document.getElementById("vim");
+    toggle.checked = wantVim;
+    toggle.onchange = function () {
+      localStorage.setItem("hostthis.vim", toggle.checked ? "1" : "0");
+      view.dispatch({ effects: vimCompartment.reconfigure(toggle.checked ? cm.vim() : []) });
+      view.focus();
+    };
+
+    return {
+      value: function () { return view.state.doc.toString(); },
+      focus: function () { view.focus(); },
+      // Running with the completion list still open leaves it floating over
+      // the results it just produced.
+      dismiss: function () { cm.closeCompletion(view); },
+    };
+  }
+
   function renderResult(table, host) {
     var cols = table.schema.fields.map(function (f) { return f.name; });
     var t = document.createElement("table");
@@ -311,7 +376,11 @@
         var td = document.createElement("td");
         var v = row[c];
         if (v === null || v === undefined) { td.className = "null"; td.textContent = "—"; }
-        else { td.textContent = typeof v === "bigint" ? v.toString() : String(v); }
+        else {
+          var str = typeof v === "bigint" ? v.toString() : String(v);
+          if (typeof v === "number" || typeof v === "bigint") td.className = "n";
+          td.textContent = str;
+        }
         tr.appendChild(td);
       });
       tb.appendChild(tr);
@@ -323,24 +392,23 @@
 
   function wireSQL() {
     var panel = document.getElementById("sql");
-    var q = document.getElementById("q");
+    var host = document.getElementById("editor");
     var run = document.getElementById("run");
     var status = document.getElementById("sqlstatus");
     var out = document.getElementById("sqlout");
 
     sqlBtn.hidden = false;
-    q.value = "SELECT * FROM data LIMIT 20;";
-    sqlBtn.onclick = function () {
-      panel.hidden = !panel.hidden;
-      if (!panel.hidden) q.focus();
-    };
-    run.onclick = async function () {
+    sqlBtn.setAttribute("aria-expanded", "false");
+
+    async function execute() {
+      if (!editor) return;
       try {
         run.disabled = true;
+        if (editor.dismiss) editor.dismiss();
         var d = await initDuck(status);
         status.textContent = "running…";
         var t0 = performance.now();
-        var res = await d.conn.query(q.value);
+        var res = await d.conn.query(editor.value());
         status.textContent = res.numRows + " rows · " + Math.round(performance.now() - t0) + " ms";
         renderResult(res, out);
       } catch (e) {
@@ -354,10 +422,19 @@
       } finally {
         run.disabled = false;
       }
+    }
+
+    sqlBtn.onclick = async function () {
+      var opening = panel.hidden;
+      panel.hidden = !opening;
+      sqlBtn.setAttribute("aria-expanded", String(opening));
+      if (!opening) return;
+      if (!editor) {
+        editor = await mountEditor(host, "SELECT * FROM data LIMIT 20;", execute);
+      }
+      editor.focus();
     };
-    q.addEventListener("keydown", function (e) {
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") run.click();
-    });
+    run.onclick = execute;
   }
 
   // ---- boot --------------------------------------------------------------
@@ -394,7 +471,15 @@
         body.forEach(function (r, i) { r.__n = i + 1; });
         state.rows = body;
         state.cols = header.map(function (name, i) {
-          return { name: name || "col" + (i + 1), type: columnType(body, i) };
+          var type = columnType(body, i);
+          var st = statsFor(body, i, type);
+          return {
+            name: name || "col" + (i + 1),
+            type: type,
+            facts: describe(st, type),
+            min: st.min,
+            max: st.max,
+          };
         });
         filterEl.oninput = renderTable;
         renderTable();
