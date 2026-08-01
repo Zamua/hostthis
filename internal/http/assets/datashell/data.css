@@ -11,8 +11,11 @@ html, body { background: var(--bg); color: var(--ink); margin: 0; height: 100%; 
 body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   display: flex; flex-direction: column; -webkit-text-size-adjust: 100%; }
 
+/* Fixed height so revealing the view switch mid-session cannot change the
+   bar's size, and with it the content region below. */
 #bar { position: sticky; top: 0; z-index: 6; display: flex; align-items: center; gap: .6rem;
-  padding: .5rem .85rem; background: var(--panel); border-bottom: 1px solid var(--rule); }
+  height: 44px; flex: 0 0 44px; padding: 0 .85rem; background: var(--panel);
+  border-bottom: 1px solid var(--rule); }
 #bar .grow { flex: 1; }
 #summary { color: var(--soft); font-size: .82rem; letter-spacing: .02em; }
 #filter { font: inherit; padding: .28rem .55rem; min-width: 7rem; max-width: 14rem;
@@ -37,8 +40,19 @@ body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, 
 .hint { color: var(--soft); font-size: .74rem; font-family: ui-monospace, Menlo, monospace; }
 .vimtoggle { color: var(--soft); font-size: .78rem; display: flex; align-items: center; gap: .28rem; cursor: pointer; }
 #sqlstatus { color: var(--soft); font-size: .8rem; }
-#sqlout { margin-top: .7rem; overflow-x: auto; max-height: 45vh; }
-#sqlout table { background: var(--bg); border: 1px solid var(--rule); border-radius: 8px; }
+/* A query result and the source data are both tables, so they share ONE
+   region and the view switches between them. Stacking them made the layout
+   move every time a query ran. */
+.seg { display: flex; border: 1px solid var(--rule); border-radius: 7px; overflow: hidden; }
+/* display:flex outranks the UA's [hidden]{display:none}, so the switch would
+   show before any query had produced a result to switch to. */
+.seg[hidden] { display: none; }
+/* Scoped under #bar: the generic `#bar button` rule outranks a bare
+   `.seg button` on specificity and would win back the border and background. */
+#bar .seg button { font: inherit; font-size: .8rem; padding: .22rem .75rem; cursor: pointer;
+  background: transparent; color: var(--soft); border: 0; border-radius: 0; }
+#bar .seg button.on { background: var(--accent); color: #fff; }
+#bar .seg button:hover:not(.on) { color: var(--accent); border-color: transparent; }
 
 #content { flex: 1; min-height: 0; overflow: auto; }
 .tablewrap { overflow-x: auto; }

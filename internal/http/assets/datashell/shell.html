@@ -7,6 +7,10 @@
 <link rel="stylesheet" href="/_hostthis/data.css?v=__VER__">
 <header id="bar">
   <span id="summary">loading…</span>
+  <div id="views" class="seg" hidden>
+    <button type="button" data-view="data" class="on">Data</button>
+    <button type="button" data-view="result">Result</button>
+  </div>
   <span class="grow"></span>
   <input id="filter" type="search" placeholder="filter" autocomplete="off" spellcheck="false">
   <button id="sqlbtn" type="button" hidden>SQL</button>
@@ -20,7 +24,6 @@
     <label class="vimtoggle"><input id="vim" type="checkbox"> vim</label>
     <span id="sqlstatus"></span>
   </div>
-  <div id="sqlout"></div>
 </section>
 <main id="content"><div class="status">loading…</div></main>
 <script src="/_hostthis/deeplink.js?v=__VER__"></script>

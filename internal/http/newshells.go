@@ -48,7 +48,7 @@ var pdfShellAssets = map[string]string{
 //go:embed assets/datashell/*
 var dataShellFS embed.FS
 
-const dataShellVersion = "datashell-v2"
+const dataShellVersion = "datashell-v6"
 
 var dataShellAssets = map[string]string{
 	"data.js":                     "text/javascript; charset=utf-8",

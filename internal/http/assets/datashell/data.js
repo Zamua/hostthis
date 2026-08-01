@@ -14,7 +14,32 @@
   var filterEl = document.getElementById("filter");
   var sqlBtn = document.getElementById("sqlbtn");
 
-  var state = { rows: [], cols: [], sort: null, kind: null, raw: "" };
+  var views = document.getElementById("views");
+
+  // ONE content region holds either the source table or the query result. They
+  // are both tables; stacking them moved the whole layout every time a query
+  // ran, which is what made the page feel unsettled.
+  var state = { rows: [], cols: [], sort: null, kind: null, raw: "", view: "data", result: null };
+
+  function setView(v) {
+    state.view = v;
+    Array.prototype.forEach.call(views.querySelectorAll("button"), function (b) {
+      b.classList.toggle("on", b.dataset.view === v);
+    });
+    render();
+  }
+
+  // render draws whichever view is active into the shared region.
+  function render() {
+    if (state.view === "result" && state.result) {
+      content.innerHTML = "";
+      content.appendChild(state.result.node);
+      summary.textContent = state.result.summary;
+      return;
+    }
+    if (state.kind === "json") { renderTree(); return; }
+    renderTable();
+  }
 
   function fail(msg) {
     content.innerHTML = "";
@@ -237,7 +262,8 @@
     return wrap;
   }
 
-  function renderTree(value, count) {
+  function renderTree() {
+    var value = state.json, count = state.jsonCount;
     var q = filterEl.value.trim().toLowerCase();
     var host = document.createElement("div");
     host.className = "tree";
@@ -357,7 +383,7 @@
     };
   }
 
-  function renderResult(table, host) {
+  function buildResult(table) {
     var cols = table.schema.fields.map(function (f) { return f.name; });
     var t = document.createElement("table");
     var thead = document.createElement("thead");
@@ -386,8 +412,10 @@
       tb.appendChild(tr);
     }
     t.appendChild(tb);
-    host.innerHTML = "";
-    host.appendChild(t);
+    var wrap = document.createElement("div");
+    wrap.className = "tablewrap";
+    wrap.appendChild(t);
+    return wrap;
   }
 
   function wireSQL() {
@@ -395,7 +423,10 @@
     var host = document.getElementById("editor");
     var run = document.getElementById("run");
     var status = document.getElementById("sqlstatus");
-    var out = document.getElementById("sqlout");
+
+    Array.prototype.forEach.call(views.querySelectorAll("button"), function (b) {
+      b.onclick = function () { setView(b.dataset.view); };
+    });
 
     sqlBtn.hidden = false;
     sqlBtn.setAttribute("aria-expanded", "false");
@@ -409,16 +440,25 @@
         status.textContent = "running…";
         var t0 = performance.now();
         var res = await d.conn.query(editor.value());
-        status.textContent = res.numRows + " rows · " + Math.round(performance.now() - t0) + " ms";
-        renderResult(res, out);
+        var ms = Math.round(performance.now() - t0);
+        status.textContent = res.numRows + " rows · " + ms + " ms";
+        state.result = {
+          node: buildResult(res),
+          summary: res.numRows + " rows · " + ms + " ms",
+        };
+        views.hidden = false;
+        views.querySelector('[data-view="result"]').textContent = "Result · " + res.numRows;
+        setView("result");
       } catch (e) {
         status.textContent = "";
-        out.innerHTML = "";
         var err = document.createElement("div");
         err.className = "err";
         // A wasm-unsupported browser fails here, and the message says which.
         err.textContent = String((e && e.message) || e);
-        out.appendChild(err);
+        state.result = { node: err, summary: "query failed" };
+        views.hidden = false;
+        views.querySelector('[data-view="result"]').textContent = "Result";
+        setView("result");
       } finally {
         run.disabled = false;
       }
@@ -460,8 +500,10 @@
           value = lines.map(function (l) { return JSON.parse(l); });
           count = value.length + " records";
         }
-        filterEl.oninput = function () { renderTree(value, count); };
-        renderTree(value, count);
+        state.json = value;
+        state.jsonCount = count;
+        filterEl.oninput = render;
+        render();
       } else {
         var delim = pickDelimiter(text);
         var grid = parseDelimited(text, delim);
@@ -481,8 +523,8 @@
             max: st.max,
           };
         });
-        filterEl.oninput = renderTable;
-        renderTable();
+        filterEl.oninput = render;
+        render();
       }
 
       wireSQL();
