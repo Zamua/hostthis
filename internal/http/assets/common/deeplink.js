@@ -15,10 +15,17 @@
     var h = (hash || location.hash || "").replace(/^#/, "");
     if (!h) return null;
     var m;
-    if ((m = h.match(/^L(\d+)(?:-L?(\d+))?$/))) {
-      var from = parseInt(m[1], 10);
-      var to = m[2] ? parseInt(m[2], 10) : from;
-      return { type: "line", from: Math.min(from, to), to: Math.max(from, to) };
+    // Optional F<n> scopes the lines to one file of a multi-file diff, since
+    // the same line number occurs in every file. Bare L<n> means the first.
+    if ((m = h.match(/^(?:F(\d+))?L(\d+)(?:-L?(\d+))?$/))) {
+      var from = parseInt(m[2], 10);
+      var to = m[3] ? parseInt(m[3], 10) : from;
+      return {
+        type: "line",
+        file: m[1] ? parseInt(m[1], 10) : 1,
+        from: Math.min(from, to),
+        to: Math.max(from, to),
+      };
     }
     if ((m = h.match(/^page=(\d+)$/))) return { type: "page", n: parseInt(m[1], 10) };
     if ((m = h.match(/^row=(\d+)$/))) return { type: "row", n: parseInt(m[1], 10) };

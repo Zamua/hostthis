@@ -60,54 +60,76 @@
     mount.setAttribute("aria-busy", "false");
   }
 
-  // Line anchors are numbered over the LINE-BY-LINE rendering: side-by-side
-  // splits one logical line across two rows, so the same ordinal would point
-  // somewhere else and a shared link would land on the wrong line. Opening a
-  // #L link therefore switches to line-by-line rather than guessing.
+  // Anchors carry the line number the reader can SEE in the gutter, scoped by
+  // file. An earlier version numbered content rows sequentially, which is
+  // unambiguous but means #L75 highlights the row whose gutter reads 180 - the
+  // link contradicts the page.
+  //
+  // The number is the new-file line for context and added lines, and the
+  // old-file line for deletions, which is the only number those rows show.
+  // F<n> scopes it because the same line number occurs in every file.
   function anchorLines() {
     if (format !== "line-by-line") return;
-    var n = 0;
-    mount.querySelectorAll("tr").forEach(function (tr) {
-      var num = tr.querySelector("td.d2h-code-linenumber");
-      var code = tr.querySelector(".d2h-code-line");
-      // A hunk header is a row but not a line of content, so numbering it
-      // would make every anchor after it drift by one per hunk.
-      if (!num || !code || num.classList.contains("d2h-info")) return;
-      n++;
-      var at = n;
-      tr.id = "L" + at;
-      num.classList.add("linkable");
-      num.title = "link to this line \u2014 shift-click for a range";
-      num.addEventListener("click", function (e) {
-        e.preventDefault();
-        selectLine(at, e.shiftKey);
+    var fileIdx = 0;
+    mount.querySelectorAll(".d2h-file-wrapper").forEach(function (file) {
+      fileIdx++;
+      var fi = fileIdx;
+      file.querySelectorAll("tr").forEach(function (tr) {
+        var cells = tr.querySelectorAll("td.d2h-code-linenumber");
+        var code = tr.querySelector(".d2h-code-line");
+        // A hunk header is a row but not a line of content.
+        if (!cells.length || !code || cells[0].classList.contains("d2h-info")) return;
+        var nums = [];
+        cells.forEach(function (c) {
+          c.querySelectorAll("*").forEach(function (n) {
+            var v = parseInt(n.innerText.trim(), 10);
+            if (!isNaN(v)) nums.push(v);
+          });
+          if (!c.children.length) {
+            var v = parseInt(c.innerText.trim(), 10);
+            if (!isNaN(v)) nums.push(v);
+          }
+        });
+        if (!nums.length) return;
+        // Prefer the LAST number: line-by-line prints old then new, so the new
+        // one is the number a reader tracking the result cares about.
+        var line = nums[nums.length - 1];
+        tr.id = "F" + fi + "L" + line;
+        cells.forEach(function (c) {
+          c.classList.add("linkable");
+          c.title = "link to this line \u2014 shift-click for a range";
+          c.addEventListener("click", function (e) {
+            e.preventDefault();
+            selectLine(fi, line, e.shiftKey);
+          });
+        });
       });
     });
-    lineCount = n;
   }
 
   // anchorStart remembers the last single-line click so a shift-click extends
-  // from it, the selection model people already know from file listings.
+  // from it, the selection model file listings already use. It carries the file
+  // too: a range spanning two files has no meaning here.
   var anchorStart = null;
-  var lineCount = 0;
 
-  function selectLine(n, extend) {
-    var a = extend && anchorStart ? anchorStart : n;
-    var b = n;
-    if (!extend) anchorStart = n;
-    var lo = Math.min(a, b), hi = Math.max(a, b);
-    DL.setHash(lo === hi ? "L" + lo : "L" + lo + "-L" + hi);
-    highlight(lo, hi, true);
+  function selectLine(file, line, extend) {
+    var start = extend && anchorStart && anchorStart.file === file ? anchorStart.line : line;
+    if (!extend || !anchorStart || anchorStart.file !== file) {
+      anchorStart = { file: file, line: line };
+    }
+    var lo = Math.min(start, line), hi = Math.max(start, line);
+    DL.setHash("F" + file + "L" + lo + (lo === hi ? "" : "-L" + hi));
+    highlight(file, lo, hi, true);
   }
 
-  function highlight(lo, hi, scroll) {
+  function highlight(file, lo, hi, scroll) {
     mount.querySelectorAll("tr.dl-line").forEach(function (tr) {
       tr.classList.remove("dl-line");
     });
     var first = null;
     for (var i = lo; i <= hi; i++) {
-      var tr = document.getElementById("L" + i);
-      if (!tr) continue;
+      var tr = document.getElementById("F" + file + "L" + i);
+      if (!tr) continue; // a line absent from the diff simply has no row
       tr.classList.add("dl-line");
       if (!first) first = tr;
     }
@@ -123,8 +145,8 @@
   function reapplyHighlight(scroll) {
     var t = DL.parse();
     if (!t || t.type !== "line" || format !== "line-by-line") return;
-    anchorStart = t.from;
-    highlight(t.from, t.to, scroll);
+    anchorStart = { file: t.file, line: t.from };
+    highlight(t.file, t.from, t.to, scroll);
   }
 
   // Resolving a fragment is the one moment the format may be overridden: the

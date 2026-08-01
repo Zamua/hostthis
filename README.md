@@ -197,7 +197,7 @@ cat events.json      | ssh -T hostthis.dev
 #   <url>#some-heading   markdown heading
 #   <url>#page=3         pdf page
 #   <url>#row=42         csv row
-#   <url>#L12-L20        diff lines (shift-click for a range)
+#   <url>#F1L42-L48      diff lines of file 1 (shift-click for a range)
 
 # read your content back
 ssh hostthis.dev get abc12345

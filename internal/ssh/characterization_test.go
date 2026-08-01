@@ -907,7 +907,7 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"    <url>#some-heading      markdown: jump to that heading\n" +
 	"    <url>#page=3            pdf: jump to that page\n" +
 	"    <url>#row=42            csv: jump to that row\n" +
-	"    <url>#L12-L20           diff: highlight those lines\n" +
+	"    <url>#F1L42-L48         diff: highlight lines 42-48 of file 1\n" +
 	"\n" +
 	"    Clicking a heading, row, page, or diff line number updates the URL, so\n" +
 	"    the address bar always holds a link you can copy. Shift-click a second\n" +

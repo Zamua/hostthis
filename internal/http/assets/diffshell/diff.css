@@ -108,6 +108,21 @@ body {
   #diff { padding: 0.5rem; }
 }
 
+/* highlight.js themes paint their own page background onto whatever carries
+   the .hljs class, and diff2html puts that class on the code span INSIDE the
+   row. The theme's white therefore covered the row's ins/del tint, leaving
+   colour visible only in the padding around the text. The code span must be
+   transparent so the row's own colour is what shows.
+
+   .hljs-addition / .hljs-deletion are the theme's colours for highlighting a
+   diff AS a language; inside a real diff the row already says that, and they
+   paint over it the same way. */
+.d2h-code-line-ctn.hljs,
+.d2h-code-line-ctn .hljs,
+.d2h-code-line .hljs,
+.d2h-code-line .hljs-addition,
+.d2h-code-line .hljs-deletion { background: transparent; }
+
 /* A line number addresses its line, so it has to look like a control. */
 .d2h-code-linenumber.linkable { cursor: pointer; }
 .d2h-code-linenumber.linkable:hover { color: #0969da; text-decoration: underline; }

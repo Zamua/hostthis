@@ -120,16 +120,22 @@ content, so a paste can be *cited* and not merely sent:
 | `#<heading-slug>` | markdown | scroll to that heading |
 | `#page=<n>` | pdf | that page |
 | `#row=<n>` | csv | that row (1-based, excluding the header) |
-| `#L<n>` / `#L<a>-L<b>` | diff | that line, or that inclusive range |
+| `#F<f>L<n>` / `#F<f>L<a>-L<b>` | diff | that line of file `f`, or that range |
 
-**Diff line ordinals are defined over the LINE-BY-LINE rendering.** They count
-content rows across the whole diff, skipping hunk headers, and continue across
-files so a multi-file diff has no ambiguity. Side-by-side splits one logical
-line across two rows, so the same ordinal would point elsewhere: a `#L` link
-therefore switches the view to line-by-line when it is resolved. That override
-happens ONLY at resolve time (load, or a hashchange), never on a re-render, so
-a reader who presses side-by-side while a line link sits in the URL is not
-yanked back.
+**A diff line anchor carries the number the reader can SEE**, not a position:
+the new-file line for context and added lines, the old-file line for deletions,
+which is the only number those rows display. Anything else produces a link that
+contradicts the page - an ordinal scheme numbering content rows made `#L75`
+highlight the row whose gutter reads `180`.
+
+`F<f>` scopes it to the f-th file, because the same line number occurs in every
+file of a multi-file diff. A bare `#L<n>` is accepted and means file 1.
+
+The numbers are those of the **line-by-line** rendering. Side-by-side splits one
+logical line across two rows, so a link resolved there would land differently: a
+line link therefore switches the view when it is RESOLVED. That override happens
+only at resolve time (load, or a hashchange), never on a re-render, so a reader
+who presses side-by-side while a line link sits in the URL is not yanked back.
 
 Fragments are chosen over query parameters deliberately: a fragment is
 never sent to the server, so deep links add no routing, cost no extra
