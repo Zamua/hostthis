@@ -164,7 +164,14 @@ tr:has(> td.d2h-del) > td.d2h-code-linenumber {
 .d2h-code-linenumber.linkable:hover { color: #0969da; text-decoration: underline; }
 
 /* ---------------------------------------------------------------------------
-   The addressed range. LAST in the file and naming three classes, because the
+   The addressed range, in BLUE.
+   
+   Not yellow: this theme colours deletions amber (253,242,208), so a yellow
+   selection reads as the same family and a selected line is hard to tell from
+   a deleted one. Blue is the only hue not already carrying meaning here -
+   green is an addition, amber a deletion, the page colour is context.
+   
+   LAST in the file and naming three classes, because the
    ins/del rules above are themselves !important and equally specific: a
    selection written any weaker wins on some cells and loses on others, and the
    range renders in two tones. Selection is a state ON TOP of ins/del, so it
@@ -177,13 +184,13 @@ tr:has(> td.d2h-del) > td.d2h-code-linenumber {
    rather than left to win on some cells and lose on others. */
 tr.dl-line.dl-line,
 tr.dl-line.dl-line > td,
-tr.dl-line.dl-line > td.d2h-code-linenumber { background: rgb(255, 240, 170) !important; }
-tr.dl-line.dl-line > td.d2h-code-linenumber { box-shadow: 0 0 0 1px rgb(255, 240, 170) !important; }
+tr.dl-line.dl-line > td.d2h-code-linenumber { background: rgb(212, 232, 255) !important; }
+tr.dl-line.dl-line > td.d2h-code-linenumber { box-shadow: 0 0 0 1px rgb(212, 232, 255) !important; }
 @media (prefers-color-scheme: dark) {
   .d2h-auto-color-scheme tr.dl-line.dl-line,
   .d2h-auto-color-scheme tr.dl-line.dl-line > td,
-  .d2h-auto-color-scheme tr.dl-line.dl-line > td.d2h-code-linenumber { background: rgb(63, 57, 20) !important; }
+  .d2h-auto-color-scheme tr.dl-line.dl-line > td.d2h-code-linenumber { background: rgb(20, 41, 70) !important; }
   .d2h-auto-color-scheme tr.dl-line.dl-line > td.d2h-code-linenumber {
-    box-shadow: 0 0 0 1px rgb(63, 57, 20) !important;
+    box-shadow: 0 0 0 1px rgb(20, 41, 70) !important;
   }
 }
