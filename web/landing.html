@@ -99,8 +99,8 @@ server; verb commands don&rsquo;t need it.</p>
 <h2>Description</h2>
 <div class="indent">
 <p>Publishes HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV or
-JSON document, or a profile as an interactive flame graph, {{RETENTION}} at a
-random subdomain.
+JSON document, a profile as a flame graph, structured logs, or plain text
+with linkable lines, {{RETENTION}} at a random subdomain.
 One ssh pipe, no signup, no install. Identity is your ssh public key: anyone with
 a different key can read the URL but cannot update, rename, pin, or delete the
 paste.</p>
@@ -117,7 +117,7 @@ any rendered paste's URL for the raw source.</p>
   <dd>upload a paste. The URL prints on stdout and a QR code of it on
   stderr (<code>2&gt;/dev/null</code> drops the QR). To set a label or force the
   content type, pass <strong>--name</strong> "label" or
-  <strong>--type</strong> html|markdown|diff|mermaid|pdf|csv|json|flamegraph after a literal <code>--</code>.
+  <strong>--type</strong> html|markdown|diff|mermaid|pdf|csv|json|flamegraph|log|text after a literal <code>--</code>.
   ssh otherwise parses a leading <strong>--name</strong> as one of its own
   options.</dd>
 
@@ -205,8 +205,8 @@ of every active paste. Text compresses 5-10x under zstd, so the real raw-payload
 ceiling is typically 50-100 MiB.</p>
 
 <p>Pastes are HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV or
-JSON document, or folded stacks rendered as a flame graph; sites are a gzip-tar
-archive.
+JSON document, folded stacks as a flame graph, NDJSON logs, or plain text;
+sites are a gzip-tar archive.
 Kept {{RETENTION}} after the last update.</p>
 </div>
 
@@ -252,6 +252,8 @@ cat architecture.mmd | ssh -T hostthis.dev
 cat q3-review.pdf    | ssh -T hostthis.dev
 cat sales.csv        | ssh -T hostthis.dev
 cat cpu.folded       | ssh -T hostthis.dev
+cat app.ndjson       | ssh -T hostthis.dev
+cat nginx.conf       | ssh -T hostthis.dev
 
 <span class="ink-soft"># link to a place inside a paste: #heading  #page=3  #row=42  #F1L42-L48
 # a flame graph too:  #focus=main;serve  #q=malloc</span>

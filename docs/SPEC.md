@@ -30,7 +30,7 @@ out of scope for v1 - see "Non-goals" at the bottom.
 ## Supported formats
 
 HTML, Markdown, diff, Mermaid, PDF, CSV/TSV, JSON/JSONL, folded stacks
-(flame graph).
+(flame graph), structured logs (NDJSON), and plain text.
 
 Detection: by content sniffed from the first **8 KiB** of the upload, plus an
 optional explicit `--type` flag. The MIME classification inside that gate
@@ -127,13 +127,50 @@ never "ran for a long time". Profiles of work that is mostly waiting
 (network, locks, disk) will look almost empty, which is information, not
 a bug.
 
+A **text** paste is anything textual that matches no richer format. It
+renders with a line-number gutter, and every line is addressable: clicking
+or tapping a number selects it, and a second click (shift) or tap extends
+to a range, exactly as the diff viewer does. That addressability is the
+whole value, and it is what the raw bytes cannot give.
+
+Text is the **fallback**, never a competitor: it is reached only after
+every other gate declines, so a document that looks like Markdown still
+renders as Markdown. Before it existed, prose carrying no Markdown cue -
+no heading, list, fence, blockquote or link - was rejected outright, which
+meant a config file, a stack trace, or a transcript bounced.
+
+Accepting it does not turn hostthis into a general file host. The bar is
+unchanged: a rendered view has to beat the raw bytes, and a citable line
+range does. The gate still requires the bytes to sniff as text, so nothing
+binary reaches it.
+
+A **log** paste is structured logs as NDJSON: one JSON object per line.
+That is the shape Loki and OpenSearch both work in and what every JSON
+logger emits, so it is the one format that covers the ecosystem rather
+than any single tool. Three container shapes are unwrapped on the way in,
+because they are what the tools actually export:
+
+- Loki's stream objects, `{"stream":{...},"values":[[ts, line], ...]}`
+- OpenSearch bulk NDJSON, whose *action* lines (`{"create":{}}`) alternate
+  with documents and would otherwise render as empty records
+- an OpenSearch search response, with records under `hits.hits[]._source`
+
+Detection requires most lines to carry a recognisable timestamp **and** a
+level or message field, under any of the usual names (`@timestamp`, `ts`,
+`time`; `level`, `severity`; `message`, `msg`). It runs **before** the JSON
+gate, which would otherwise claim NDJSON and render a log as a collapsible
+tree - correct, but useless for reading logs.
+
+The view adds what a log file cannot: filtering by level, filtering by
+text, expanding one record to all of its fields, and a link to a line.
+
 Uploads of unsupported types are **rejected** with a clear error pointing
 at what we accept:
 
 ```
 $ cat photo.jpg | ssh hostthis.dev
 error: hostthis only accepts content it can render
-       (html, markdown, diff, mermaid, pdf, csv, json, flamegraph)
+       (html, markdown, diff, mermaid, pdf, csv, json, flamegraph, log, text)
 ```
 
 This is deliberate scope. The inclusion test is not "can we store it" -
@@ -161,6 +198,7 @@ content, so a paste can be *cited* and not merely sent:
 | `#focus=<a;b;c>` | flamegraph | zoom to that stack |
 | `#q=<text>` | flamegraph | highlight frames matching that text |
 | `#focus=<a;b;c>&q=<text>` | flamegraph | both at once |
+| `#L<n>` / `#L<a>-L<b>` | text, log | that line, or that range |
 
 **A flame graph anchor names the stack, not a coordinate.** Frame indices
 and pixel positions both change whenever the profile is re-recorded, so a

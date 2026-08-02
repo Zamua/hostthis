@@ -1,0 +1,58 @@
+/* Shared line-gutter presentation: the numbered column, the selected-range
+   colours, and the touch hint. Any viewer whose content is a sequence of
+   addressable lines uses this so selection looks identical across them. */
+.lg-num {
+  display: inline-block;
+  width: 4.5em;
+  padding-right: 1em;
+  text-align: right;
+  flex: 0 0 auto;
+  color: var(--muted, #6a737d);
+  cursor: pointer;
+  user-select: none;
+  /* The number column must not shrink or wrap: at phone widths a flexible
+     gutter collapses and its digits stack, doubling every row's height. */
+  white-space: nowrap;
+}
+.lg-num:hover { color: var(--accent, #0969da); }
+
+/* Selection is blue rather than the amber/green a diff uses for changed
+   lines, so "I linked this" never reads as "this changed". */
+.lg-sel { background: rgb(212, 232, 255); }
+.lg-sel .lg-num {
+  color: var(--accent, #0969da);
+  font-weight: 600;
+  /* An inset shadow rather than a border: a border on the first cell only
+     paints its own box, so the accent bar comes out segmented per row. */
+  box-shadow: inset 3px 0 0 var(--accent, #0969da);
+}
+@media (prefers-color-scheme: dark) {
+  .lg-sel { background: rgb(20, 41, 70); }
+}
+
+@keyframes lg-arrive {
+  0% { filter: brightness(1.35) saturate(1.5); }
+  100% { filter: none; }
+}
+.lg-arrive { animation: lg-arrive 1.2s ease-out 1; }
+@media (prefers-reduced-motion: reduce) {
+  .lg-arrive { animation: none; }
+}
+
+#lg-hint {
+  position: fixed;
+  left: 50%;
+  bottom: calc(1.25rem + env(safe-area-inset-bottom));
+  transform: translate(-50%, 0.5rem);
+  z-index: 20;
+  padding: 0.5rem 0.9rem;
+  border-radius: 999px;
+  font: 500 0.82rem/1 system-ui, sans-serif;
+  color: #fff;
+  background: rgba(28, 33, 40, 0.92);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.28);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s, transform 0.25s;
+}
+#lg-hint.on { opacity: 1; transform: translate(-50%, 0); }

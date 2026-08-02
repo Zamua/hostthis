@@ -82,3 +82,30 @@ var flameShellAssets = map[string]string{
 	"flame.js":  "text/javascript; charset=utf-8",
 	"flame.css": "text/css; charset=utf-8",
 }
+
+// textShellFS holds the plain-text viewer. Its line gutter and range selection
+// come from the common assets, since a log viewer needs exactly the same
+// behaviour and two copies is how they drift apart.
+//
+//go:embed assets/textshell/*
+var textShellFS embed.FS
+
+const textShellVersion = "textshell-v1"
+
+var textShellAssets = map[string]string{
+	"text.js":  "text/javascript; charset=utf-8",
+	"text.css": "text/css; charset=utf-8",
+}
+
+// logShellFS holds the structured-log viewer. It shares the line gutter with
+// the text shell, so a link into a log behaves exactly like a link into text.
+//
+//go:embed assets/logshell/*
+var logShellFS embed.FS
+
+const logShellVersion = "logshell-v1"
+
+var logShellAssets = map[string]string{
+	"log.js":  "text/javascript; charset=utf-8",
+	"log.css": "text/css; charset=utf-8",
+}

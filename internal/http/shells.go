@@ -97,6 +97,8 @@ var shells = map[domain.ContentKind]*clientShell{
 	domain.KindCSV:        dataShell,
 	domain.KindJSON:       dataShell,
 	domain.KindFlamegraph: {version: flameShellVersion, fs: flameShellFS, dir: "assets/flameshell", assets: flameShellAssets},
+	domain.KindText:       {version: textShellVersion, fs: textShellFS, dir: "assets/textshell", assets: textShellAssets},
+	domain.KindLog:        {version: logShellVersion, fs: logShellFS, dir: "assets/logshell", assets: logShellAssets},
 }
 
 // rawContentType is the Content-Type each client-rendered kind's ?raw response
@@ -112,6 +114,8 @@ var rawContentType = map[domain.ContentKind]string{
 	domain.KindJSON:       "application/json; charset=utf-8",
 	domain.KindPDF:        "application/pdf",
 	domain.KindFlamegraph: "text/plain; charset=utf-8",
+	domain.KindText:       "text/plain; charset=utf-8",
+	domain.KindLog:        "application/x-ndjson; charset=utf-8",
 }
 
 // shellFor returns the shell for kind, or nil when the kind renders without one.
@@ -130,14 +134,16 @@ var commonShell = &clientShell{
 	fs:      commonShellFS,
 	dir:     "assets/common",
 	assets: map[string]string{
-		"deeplink.js": "text/javascript; charset=utf-8",
+		"deeplink.js":    "text/javascript; charset=utf-8",
+		"linegutter.js":  "text/javascript; charset=utf-8",
+		"linegutter.css": "text/css; charset=utf-8",
 	},
 }
 
 // commonVersion busts the cache for the shared assets. Every shell stamps its
 // OWN version into its asset URLs, so bumping this alone is not enough: bump
 // the shells that must re-fetch too.
-const commonVersion = "common-v3"
+const commonVersion = "common-v4"
 
 // assetSource resolves a flat asset name to the shell that owns it. Built once
 // from the shell table so a new shell needs no change here.

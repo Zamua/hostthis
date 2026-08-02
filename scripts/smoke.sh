@@ -233,7 +233,9 @@ kind_specs='mermaid|/_hostthis/mermaid.js|text/plain
 csv|/_hostthis/data.js|text/plain
 json|/_hostthis/data.js|application/json
 pdf|/_hostthis/pdf.js|application/pdf
-flamegraph|/_hostthis/flame.js|text/plain'
+flamegraph|/_hostthis/flame.js|text/plain
+log|/_hostthis/log.js|application/x-ndjson
+text|/_hostthis/text.js|text/plain'
 
 kind_body() {
   case "$1" in
@@ -244,6 +246,9 @@ kind_body() {
     # viewer is exercised by the browser tests, not here.
     pdf)     printf '%%PDF-1.4\n1 0 obj\n<</Type/Catalog>>\nendobj\ntrailer<</Root 1 0 R>>\n%%%%EOF\n' ;;
     flamegraph) printf 'main;serve;read 41\nmain;serve;write 18\nmain;gc 6\n' ;;
+    log)     printf '{"@timestamp":"2026-08-02T03:00:00Z","level":"INFO","message":"a"}\n{"@timestamp":"2026-08-02T03:00:01Z","level":"ERROR","message":"b"}\n' ;;
+    # No markdown cue anywhere: the point is that this reaches the fallback.
+    text)    printf 'server {\n  listen 443;\n}\n' ;;
   esac
 }
 
