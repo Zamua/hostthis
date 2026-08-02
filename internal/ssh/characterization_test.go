@@ -884,6 +884,8 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"    cat sales.csv  | ssh -T paste.test                 sortable table + SQL\n" +
 	"    cat events.json| ssh -T paste.test                 collapsible tree\n" +
 	"    cat cpu.folded | ssh -T paste.test                 interactive flame graph\n" +
+	"    cat app.ndjson | ssh -T paste.test                 log viewer (levels, filter)\n" +
+	"    cat nginx.conf | ssh -T paste.test                 text with linkable lines\n" +
 	"    cat x.txt      | ssh -T paste.test --type csv      force a renderer\n" +
 	"\n" +
 	"UPDATE & MANAGE (owner only; ssh key authenticates)\n" +
@@ -911,6 +913,7 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"    <url>#F1L42-L48         diff: highlight lines 42-48 of file 1\n" +
 	"    <url>#focus=main;serve  flamegraph: zoom to that stack\n" +
 	"    <url>#q=malloc          flamegraph: highlight matching frames\n" +
+	"    <url>#L42-L48           text / log: highlight those lines\n" +
 	"\n" +
 	"    Clicking a heading, row, page, diff line number, or flame frame updates\n" +
 	"    the URL, so the address bar always holds a link you can copy. To select\n" +
@@ -930,7 +933,7 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"\n" +
 	"    100 MiB per identity, counting post-compression bytes across all\n" +
 	"    your active pastes. HTML, Markdown, diff, Mermaid, PDF, CSV, JSON,\n" +
-	"    folded stacks, or a gzip-tar site archive.\n" +
+	"    folded stacks, NDJSON logs, plain text, or a gzip-tar site archive.\n" +
 	"\n" +
 	"    Apps can persist + sync state: https://paste.test/  (rooms + realtime API)\n"
 
