@@ -102,3 +102,56 @@ body {
 /* While a time window is selected the chart is dimmed so the log below is
    obviously a subset rather than the whole file. */
 #hist.brushed { background: rgba(9, 105, 218, 0.06); }
+
+/* Field sidebar. Sits beside the log rather than above it so the reader can
+   scan values and rows at the same time, which is the whole point of it. */
+#body { display: flex; align-items: flex-start; min-height: 0; }
+#fields {
+  flex: 0 0 15rem;
+  max-height: calc(100vh - 7rem);
+  overflow-y: auto;
+  padding: 0.5rem 0.6rem 2rem;
+  border-right: 1px solid var(--line);
+  font-family: system-ui, sans-serif;
+  font-size: 0.78rem;
+}
+#body.nofields #fields { display: none; }
+#body #log { flex: 1 1 auto; min-width: 0; }
+
+.fld { margin-bottom: 0.55rem; }
+.fld-h {
+  display: flex; align-items: baseline; gap: 0.35rem;
+  width: 100%; text-align: left;
+  background: none; border: 0; padding: 0.15rem 0; cursor: pointer;
+  color: var(--fg); font: inherit; font-weight: 600;
+}
+.fld-h:hover { color: var(--accent); }
+/* A promoted field is a column; the dot is the only affordance that survives
+   at this size without adding another control. */
+.fld-h.col::before { content: "●"; color: var(--accent); font-size: 0.7em; }
+.fld-h:not(.col)::before { content: "○"; color: var(--muted); font-size: 0.7em; }
+.fld-n { color: var(--muted); font-weight: 400; margin-left: auto; }
+
+.val {
+  display: flex; align-items: center; gap: 0.4rem;
+  width: 100%; text-align: left;
+  background: none; border: 0; padding: 0.1rem 0 0.1rem 0.9rem; cursor: pointer;
+  color: var(--muted); font: inherit;
+}
+.val:hover { color: var(--accent); }
+.val-t { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.val-p { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+/* A bar behind the percentage reads faster than the number alone when
+   scanning for which value dominates. */
+.val-bar { flex: 0 0 2.5rem; height: 4px; background: var(--line); border-radius: 2px; }
+.val-bar span { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+
+.rec .col { color: var(--fg); flex: 0 0 auto; }
+.rec .col-k { color: var(--muted); }
+
+@media (max-width: 720px) {
+  /* Beside-the-log does not fit a phone; the sidebar becomes a drawer above
+     the rows instead of being crushed to an unreadable column. */
+  #body { display: block; }
+  #fields { flex: none; max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--line); }
+}

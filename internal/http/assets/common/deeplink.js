@@ -39,14 +39,17 @@
     // A log view is several independent axes at once (query, time window,
     // selected lines), so its fragment is a set of parts rather than one
     // value. Parsed before the flame graph's, which also uses "q=".
-    if (/(^|&)t=\d+-\d+(&|$)/.test(h) || (/(^|&)L\d+/.test(h) && /(^|&)q=/.test(h))) {
-      var v = { type: "logview", q: "", from: 0, to: 0, line: null };
+    if (/(^|&)t=\d+-\d+(&|$)/.test(h) || /(^|&)c=/.test(h) ||
+        (/(^|&)L\d+/.test(h) && /(^|&)q=/.test(h))) {
+      var v = { type: "logview", q: "", from: 0, to: 0, line: null, cols: [] };
       h.split("&").forEach(function (part) {
         var m2;
         if ((m2 = part.match(/^q=([\s\S]*)$/))) v.q = decodeURIComponent(m2[1]);
         else if ((m2 = part.match(/^t=(\d+)-(\d+)$/))) {
           v.from = parseInt(m2[1], 10);
           v.to = parseInt(m2[2], 10);
+        } else if ((m2 = part.match(/^c=([\s\S]*)$/))) {
+          v.cols = decodeURIComponent(m2[1]).split(",").filter(Boolean);
         } else if ((m2 = part.match(/^L(\d+)(?:-L?(\d+))?$/))) {
           var a = parseInt(m2[1], 10), b = m2[2] ? parseInt(m2[2], 10) : a;
           v.line = { type: "line", file: 1, from: Math.min(a, b), to: Math.max(a, b) };

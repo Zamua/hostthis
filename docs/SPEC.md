@@ -184,6 +184,19 @@ no round trip. That is the one structural advantage a paste has over a
 log service, and it is why the query bar can re-evaluate on every
 keystroke.
 
+A **field sidebar** lists every field the records actually carry, ordered
+by coverage, with its distinct-value count and its top values as shares of
+the current result set. Clicking a value filters to it; clicking a field
+promotes it to its own column so values line up down the page. Both are
+recomputed against the filtered set, so the sidebar describes what is on
+screen rather than the whole file.
+
+Fields already rendered as columns (time, level, message) are omitted:
+listing them would offer the reader a way to print a field twice. Distinct
+values are tracked up to a cap and reported as `200+` beyond it, because a
+request-id field has one value per record and an exact count of those is
+neither cheap nor useful.
+
 **The view lives in the URL.** Query, time window and selection are all
 in the fragment, so a filtered, time-boxed view is a link. A paste
 service has no place to save a search, and it does not need one: the link
