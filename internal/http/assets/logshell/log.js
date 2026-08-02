@@ -28,6 +28,7 @@
   var records = [];
   var query = "";
   var brush = null;  // [fromMs, toMs] selected on the histogram
+  var columns = [];  // fields promoted from the sidebar into their own column
   var gutter = null;
 
   function pick(obj, keys) {
@@ -157,12 +158,24 @@
       el.appendChild(lv);
       el.appendChild(m);
 
-      // Every field is available, not just the three the columns show; a
-      // record whose detail is in its fields is the normal case.
-      if (r.extra) {
+      // A promoted field gets its own cell so values line up down the page,
+      // which is the entire reason to promote one.
+      columns.forEach(function (f) {
+        var c = document.createElement("span");
+        c.className = "col";
+        var v = Q.fieldValue(r, f);
+        c.textContent = v === undefined ? "" : (typeof v === "string" ? v : JSON.stringify(v));
+        el.appendChild(c);
+      });
+
+      // Every remaining field is still shown: a record whose detail is in its
+      // fields is the normal case, and hiding them would make promotion feel
+      // like the only way to see anything.
+      var rest = r.extraFor(columns);
+      if (rest) {
         var more = document.createElement("span");
         more.className = "extra";
-        more.textContent = r.extra;
+        more.textContent = rest;
         el.appendChild(more);
       }
       frag.appendChild(el);
@@ -173,8 +186,117 @@
       ? records.length + " records"
       : rows.length + " of " + records.length;
     drawHist();
+    drawFields();
     if (gutter) gutter.resolve(DL.parse(), false);
   }
+
+  var fieldsEl = document.getElementById("fields");
+  var bodyEl = document.getElementById("body");
+
+  // Distinct values per field are capped: a request-id field has one value per
+  // record, and tracking them all costs memory for a list nobody reads. The
+  // cardinality is reported as "200+" once capped rather than as a wrong exact
+  // number.
+  var VALUE_CAP = 200;
+
+  // Time, level and message are already dedicated columns on every row, so
+  // offering them here would list what is on screen and let a reader promote
+  // a field into a second copy of itself.
+  function isShownColumn(k) {
+    var lk = k.toLowerCase();
+    return TIME_KEYS.concat(LEVEL_KEYS, MSG_KEYS).some(function (n) {
+      return n.toLowerCase() === lk;
+    });
+  }
+
+  function fieldStats(rows) {
+    var stats = Object.create(null);
+    rows.forEach(function (r) {
+      Object.keys(r.fields).forEach(function (k) {
+        if (isShownColumn(k)) return;
+        var st = stats[k] || (stats[k] = { n: 0, capped: false, vals: Object.create(null) });
+        st.n++;
+        var v = r.fields[k];
+        var key = typeof v === "string" ? v : JSON.stringify(v);
+        if (st.vals[key] === undefined) {
+          if (Object.keys(st.vals).length >= VALUE_CAP) { st.capped = true; return; }
+          st.vals[key] = 0;
+        }
+        st.vals[key]++;
+      });
+    });
+    return stats;
+  }
+
+  function drawFields() {
+    var rows = visible();
+    var stats = fieldStats(rows);
+    var names = Object.keys(stats).sort(function (a, b) {
+      return stats[b].n - stats[a].n || (a < b ? -1 : 1);
+    });
+    fieldsEl.textContent = "";
+    names.forEach(function (name) {
+      var st = stats[name];
+      var wrap = document.createElement("div");
+      wrap.className = "fld";
+      // Coverage, not just distinct count: "present in 27% of these records"
+      // is what decides whether a field is worth promoting to a column.
+      wrap.dataset.coverage = String(Math.round(st.n / (rows.length || 1) * 100));
+      wrap.dataset.field = name;
+
+      var h = document.createElement("button");
+      h.type = "button";
+      h.className = "fld-h" + (columns.indexOf(name) >= 0 ? " col" : "");
+      h.appendChild(document.createTextNode(name));
+      var n = document.createElement("span");
+      n.className = "fld-n";
+      var distinct = Object.keys(st.vals).length;
+      n.textContent = st.capped ? VALUE_CAP + "+" : distinct;
+      h.appendChild(n);
+      h.title = "in " + st.n + " of " + rows.length + " shown records"
+        + " (" + wrap.dataset.coverage + "%) - click to show as a column";
+      h.onclick = function () {
+        var at = columns.indexOf(name);
+        if (at >= 0) columns.splice(at, 1); else columns.push(name);
+        render();
+        writeHash();
+      };
+      wrap.appendChild(h);
+
+      // Top values only. A field with 200 distinct values has nothing to say
+      // in a sidebar, and the count above already says so.
+      var top = Object.keys(st.vals)
+        .sort(function (a, b) { return st.vals[b] - st.vals[a]; })
+        .slice(0, 5);
+      top.forEach(function (v) {
+        var share = st.vals[v] / (rows.length || 1);
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "val";
+        b.title = "filter to " + name + "=" + v;
+        var t = document.createElement("span");
+        t.className = "val-t";
+        t.textContent = v === "" ? '""' : v;
+        var bar = document.createElement("span");
+        bar.className = "val-bar";
+        var fill = document.createElement("span");
+        fill.style.width = Math.round(share * 100) + "%";
+        bar.appendChild(fill);
+        var pct = document.createElement("span");
+        pct.className = "val-p";
+        pct.textContent = Math.round(share * 100) + "%";
+        b.appendChild(t); b.appendChild(bar); b.appendChild(pct);
+        b.onclick = function () { setQuery(Q.withTerm(query, name, "=", v)); };
+        wrap.appendChild(b);
+      });
+      fieldsEl.appendChild(wrap);
+    });
+  }
+
+  document.getElementById("togglefields").onclick = function () {
+    var off = bodyEl.classList.toggle("nofields");
+    this.setAttribute("aria-pressed", off ? "false" : "true");
+  };
 
   function drawLevels() {
     var counts = {};
@@ -214,6 +336,7 @@
     var parts = [];
     if (query) parts.push("q=" + encodeURIComponent(query));
     if (brush) parts.push("t=" + Math.round(brush[0]) + "-" + Math.round(brush[1]));
+    if (columns.length) parts.push("c=" + encodeURIComponent(columns.join(",")));
     var sel = gutter && gutter.current();
     if (sel && sel.length) {
       parts.push("L" + sel[0] + (sel.length > 1 ? "-L" + sel[sel.length - 1] : ""));
@@ -327,6 +450,14 @@
           }
         });
         var keys = Object.keys(rest);
+        r.extraPairs = keys.map(function (k) {
+          var v = rest[k];
+          return { k: k, s: k + "=" + (typeof v === "string" ? v : JSON.stringify(v)) };
+        });
+        r.extraFor = function (cols) {
+          return this.extraPairs.filter(function (p) { return cols.indexOf(p.k) < 0; })
+            .map(function (p) { return p.s; }).join("  ");
+        };
         r.extra = keys.length
           ? keys.map(function (k) {
               var v = rest[k];
@@ -347,6 +478,7 @@
         if (!t) return;
         if (t.type === "logview") {
           brush = t.from ? [t.from, t.to] : null;
+          columns = t.cols || [];
           query = t.q;
           qBox.value = t.q;
           // Query and window are applied BEFORE the line selection, because

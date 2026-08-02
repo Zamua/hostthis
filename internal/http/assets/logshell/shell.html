@@ -7,13 +7,17 @@
 <link rel="stylesheet" href="/_hostthis/log.css?v=__VER__">
 <header id="bar">
   <div id="levels" role="group" aria-label="Filter by level"></div>
+  <button id="togglefields" type="button" aria-pressed="true" title="show or hide the field list">Fields</button>
   <span class="grow"></span>
   <input id="q" type="search" placeholder="level=error status>=500 &quot;connection reset&quot;" autocomplete="off" spellcheck="false">
   <span id="meta" aria-live="polite"></span>
   <a id="dl" href="?raw=1">raw</a>
 </header>
 <div id="hist" hidden aria-label="Records over time"></div>
-<main id="log" aria-busy="true"></main>
+<div id="body">
+  <aside id="fields" aria-label="Detected fields"></aside>
+  <main id="log" aria-busy="true"></main>
+</div>
 <script src="/_hostthis/deeplink.js?v=__VER__"></script>
 <script src="/_hostthis/linegutter.js?v=__VER__"></script>
 <script src="/_hostthis/query.js?v=__VER__"></script>
