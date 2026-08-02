@@ -75,6 +75,15 @@ body {
 .share { color: var(--muted); margin-left: 0.5rem; }
 #matched { color: var(--muted); min-width: 6.5rem; text-align: right; }
 
+/* The two facts a reader cannot guess and the graph cannot show: that the
+   x-axis is share rather than time, and that frames are clickable at all.
+   Both were asked about before this existed. */
+#legend {
+  margin: 0.5rem 0.75rem 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 #flame {
   position: relative;
   margin: 0.5rem 0.75rem;

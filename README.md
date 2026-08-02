@@ -22,7 +22,8 @@ a command argument and never trigger the warning.
 ## DESCRIPTION
 
 Publishes HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV
-or a JSON document for a configurable window
+or JSON document, or a profile as an interactive flame graph, for a
+configurable window
 (30 days by default; the operator can change or disable it) at a random
 subdomain. One ssh pipe, no signup, no install. Identity is your ssh
 public key: anyone with a different key can read the URL but cannot
@@ -142,8 +143,8 @@ active version of every active paste. Text compresses 5-10x under
 zstd, so the real raw-payload ceiling is typically 50-100 MiB.
 
 Pastes are HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV
-or a JSON document; sites are a gzip-tar
-archive. Retention runs from the last update (`HOSTTHIS_RETENTION`, 30 days by default).
+or JSON document, or folded stacks rendered as a flame graph; sites are a
+gzip-tar archive. Retention runs from the last update (`HOSTTHIS_RETENTION`, 30 days by default).
 
 ## EXIT STATUS
 
@@ -193,14 +194,18 @@ cat q3-review.pdf    | ssh -T hostthis.dev
 cat sales.csv        | ssh -T hostthis.dev
 cat events.json      | ssh -T hostthis.dev
 
-# a profile in folded-stack format renders as an interactive flame graph
-go tool pprof -raw cpu.pprof | stackcollapse-go.pl | ssh -T hostthis.dev
+# a profile renders as an interactive flame graph. The accepted format is
+# folded stacks ("a;b;c 123" per line), which every profiler can emit:
+# perf via stackcollapse-perf.pl, Go pprof, py-spy --format raw, async-profiler
+cat cpu.folded | ssh -T hostthis.dev
 
 # link to a place INSIDE a paste
 #   <url>#some-heading   markdown heading
 #   <url>#page=3         pdf page
 #   <url>#row=42         csv row
-#   <url>#F1L42-L48      diff lines of file 1 (shift-click for a range)
+#   <url>#F1L42-L48      diff lines of file 1 (shift-click, or tap, for a range)
+#   <url>#focus=main;serve  flame graph: zoom to that stack
+#   <url>#q=malloc          flame graph: highlight matching frames
 
 # read your content back
 ssh hostthis.dev get abc12345

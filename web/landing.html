@@ -98,8 +98,9 @@ server; verb commands don&rsquo;t need it.</p>
 
 <h2>Description</h2>
 <div class="indent">
-<p>Publishes HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV or a
-JSON document {{RETENTION}} at a random subdomain.
+<p>Publishes HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV or
+JSON document, or a profile as an interactive flame graph, {{RETENTION}} at a
+random subdomain.
 One ssh pipe, no signup, no install. Identity is your ssh public key: anyone with
 a different key can read the URL but cannot update, rename, pin, or delete the
 paste.</p>
@@ -203,8 +204,9 @@ after its last write. Deployments without a room store return 404.</p>
 of every active paste. Text compresses 5-10x under zstd, so the real raw-payload
 ceiling is typically 50-100 MiB.</p>
 
-<p>Pastes are HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV or a
-JSON document; sites are a gzip-tar archive.
+<p>Pastes are HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV or
+JSON document, or folded stacks rendered as a flame graph; sites are a gzip-tar
+archive.
 Kept {{RETENTION}} after the last update.</p>
 </div>
 
