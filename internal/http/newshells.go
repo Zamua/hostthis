@@ -103,9 +103,10 @@ var textShellAssets = map[string]string{
 //go:embed assets/logshell/*
 var logShellFS embed.FS
 
-const logShellVersion = "logshell-v1"
+const logShellVersion = "logshell-v2"
 
 var logShellAssets = map[string]string{
-	"log.js":  "text/javascript; charset=utf-8",
-	"log.css": "text/css; charset=utf-8",
+	"log.js":   "text/javascript; charset=utf-8",
+	"query.js": "text/javascript; charset=utf-8",
+	"log.css":  "text/css; charset=utf-8",
 }

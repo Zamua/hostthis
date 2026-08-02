@@ -8,11 +8,13 @@
 <header id="bar">
   <div id="levels" role="group" aria-label="Filter by level"></div>
   <span class="grow"></span>
-  <input id="q" type="search" placeholder="filter" autocomplete="off" spellcheck="false">
+  <input id="q" type="search" placeholder="level=error status>=500 &quot;connection reset&quot;" autocomplete="off" spellcheck="false">
   <span id="meta" aria-live="polite"></span>
   <a id="dl" href="?raw=1">raw</a>
 </header>
+<div id="hist" hidden aria-label="Records over time"></div>
 <main id="log" aria-busy="true"></main>
 <script src="/_hostthis/deeplink.js?v=__VER__"></script>
 <script src="/_hostthis/linegutter.js?v=__VER__"></script>
+<script src="/_hostthis/query.js?v=__VER__"></script>
 <script src="/_hostthis/log.js?v=__VER__"></script>
