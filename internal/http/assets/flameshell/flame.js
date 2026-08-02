@@ -213,7 +213,8 @@
     if (!el || !el._node) { tip.hidden = true; return; }
     var n = el._node;
     tip.textContent = n.name + "  -  " + n.value + " samples ("
-      + ((n.value / root.value) * 100).toFixed(2) + "%)";
+      + ((n.value / root.value) * 100).toFixed(2) + "%)"
+      + (n.kids.length ? "  -  click to zoom" : "");
     tip.hidden = false;
     var pad = 12;
     var x = Math.min(e.clientX + pad, innerWidth - tip.offsetWidth - 4);
