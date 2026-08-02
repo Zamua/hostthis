@@ -155,3 +155,51 @@ body {
   #body { display: block; }
   #fields { flex: none; max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--line); }
 }
+
+/* A record excluded by the query but shown for context. Dimmed and marked, so
+   it can never be mistaken for a match: the whole point is to see what the
+   filter was hiding, which only works if the distinction is obvious. */
+.rec.ctx { opacity: 0.55; }
+.rec.ctx .lg-num::after { content: "·"; color: var(--muted); margin-left: 0.2em; }
+
+/* The detail panel is a SIBLING of the record, not a child: a record is a
+   flex row sized to its content, and nesting a block would make every row as
+   tall as the widest panel. */
+.det {
+  margin: 0.2rem 0 0.5rem 4.5em;
+  padding: 0.5rem 0.7rem;
+  border-left: 2px solid var(--accent);
+  background: var(--bar);
+  font-family: system-ui, sans-serif;
+  font-size: 0.8rem;
+  width: max-content;
+  min-width: 24rem;
+  max-width: min(100%, 60rem);
+}
+.det dl {
+  display: grid;
+  grid-template-columns: minmax(6rem, max-content) 1fr;
+  gap: 0.15rem 0.9rem;
+  margin: 0 0 0.5rem;
+}
+.det dt { color: var(--muted); }
+.det dd { margin: 0; overflow-wrap: anywhere; }
+.det dd.clickable { cursor: pointer; }
+.det dd.clickable:hover { color: var(--accent); text-decoration: underline; }
+.det-bar { display: flex; gap: 0.4rem; }
+.det-bar button {
+  font: inherit; cursor: pointer; color: inherit;
+  background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 0.2rem 0.55rem;
+}
+.det-bar button:hover { border-color: var(--muted); }
+.det-raw {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+}
