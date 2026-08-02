@@ -1,0 +1,42 @@
+:root {
+  --bg: #fff; --fg: #1c2128; --muted: #6a737d; --line: #d8dee4;
+  --bar: #f6f8fa; --accent: #0969da;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0d1117; --fg: #e6edf3; --muted: #8b949e; --line: #30363d;
+          --bar: #161b22; --accent: #4493f8; }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+#bar {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; gap: 0.75rem; align-items: center;
+  padding: 0.5rem 0.75rem; background: var(--bar);
+  border-bottom: 1px solid var(--line);
+  font-family: system-ui, sans-serif; font-size: 0.85rem;
+}
+.grow { flex: 1 1 auto; }
+#meta, #wraplabel { color: var(--muted); }
+#wraplabel { cursor: pointer; user-select: none; }
+#dl { color: var(--accent); text-decoration: none; }
+#dl:hover { text-decoration: underline; }
+
+/* The lines scroll sideways as one block, so a long line does not wrap by
+   default and the gutter stays put while the code moves under it. */
+#text { overflow-x: auto; padding: 0.5rem 0; }
+.row { display: flex; align-items: flex-start; min-height: 1.55em; }
+.lg-code { white-space: pre; padding-right: 1rem; }
+
+/* Wrapped mode keeps the gutter aligned to the FIRST visual line of a
+   wrapped row rather than centring it against the whole block. */
+#text.wrap { overflow-x: hidden; }
+#text.wrap .lg-code { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* The selection must span the full scrollable width, not the visible width:
+   a block child of a horizontally scrolling box takes the container's CLIENT
+   width, so the highlight would stop at the fold. */
+#text > .row { width: max-content; min-width: 100%; }

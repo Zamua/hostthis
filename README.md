@@ -22,8 +22,8 @@ a command argument and never trigger the warning.
 ## DESCRIPTION
 
 Publishes HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV
-or JSON document, or a profile as an interactive flame graph, for a
-configurable window
+or JSON document, a profile as an interactive flame graph, structured
+logs, or plain text with linkable lines, for a configurable window
 (30 days by default; the operator can change or disable it) at a random
 subdomain. One ssh pipe, no signup, no install. Identity is your ssh
 public key: anyone with a different key can read the URL but cannot
@@ -41,7 +41,7 @@ rendered paste's URL for the raw source.
 <dd>upload a paste. The URL prints on stdout; a QR code of it prints on
 stderr (drop it with <code>2&gt;/dev/null</code>). To set a label or force
 the content type, pass <code>--name "label"</code> or
-<code>--type html|markdown|diff|mermaid|pdf|csv|json|flamegraph</code> after a literal <code>--</code>. ssh
+<code>--type html|markdown|diff|mermaid|pdf|csv|json|flamegraph|log|text</code> after a literal <code>--</code>. ssh
 otherwise parses a leading <code>--name</code> as one of its own options.</dd>
 
 <dt><code>cat <em>file</em> | ssh -T hostthis.dev <em>slug</em></code></dt>
@@ -143,8 +143,8 @@ active version of every active paste. Text compresses 5-10x under
 zstd, so the real raw-payload ceiling is typically 50-100 MiB.
 
 Pastes are HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV
-or JSON document, or folded stacks rendered as a flame graph; sites are a
-gzip-tar archive. Retention runs from the last update (`HOSTTHIS_RETENTION`, 30 days by default).
+or JSON document, folded stacks as a flame graph, NDJSON logs, or plain
+text; sites are a gzip-tar archive. Retention runs from the last update (`HOSTTHIS_RETENTION`, 30 days by default).
 
 ## EXIT STATUS
 
@@ -198,6 +198,13 @@ cat events.json      | ssh -T hostthis.dev
 # folded stacks ("a;b;c 123" per line), which every profiler can emit:
 # perf via stackcollapse-perf.pl, Go pprof, py-spy --format raw, async-profiler
 cat cpu.folded | ssh -T hostthis.dev
+
+# NDJSON logs get levels, filtering and per-line links. This is the shape
+# Loki and OpenSearch both work in; their stream and bulk wrappers unwrap.
+cat app.ndjson | ssh -T hostthis.dev
+
+# anything else textual renders with a line gutter and citable ranges
+cat nginx.conf | ssh -T hostthis.dev
 
 # link to a place INSIDE a paste
 #   <url>#some-heading   markdown heading

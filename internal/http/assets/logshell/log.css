@@ -1,0 +1,80 @@
+:root {
+  --bg: #fff; --fg: #1c2128; --muted: #6a737d; --line: #d8dee4;
+  --bar: #f6f8fa; --accent: #0969da;
+  --error: #cf222e; --warn: #9a6700; --info: #0969da; --debug: #6a737d; --fatal: #a40e26;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0d1117; --fg: #e6edf3; --muted: #8b949e; --line: #30363d;
+          --bar: #161b22; --accent: #4493f8;
+          --error: #ff7b72; --warn: #d29922; --info: #4493f8; --debug: #8b949e; --fatal: #ff9492; }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+#bar {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
+  padding: 0.5rem 0.75rem; background: var(--bar);
+  border-bottom: 1px solid var(--line);
+  font-family: system-ui, sans-serif; font-size: 0.82rem;
+}
+.grow { flex: 1 1 auto; }
+#meta { color: var(--muted); }
+#dl { color: var(--accent); text-decoration: none; }
+#levels { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+
+.chip {
+  font: inherit; cursor: pointer;
+  padding: 0.2rem 0.5rem; border-radius: 999px;
+  border: 1px solid currentColor; background: none;
+}
+/* A disabled chip keeps its colour and loses its fill, so the row of chips
+   stays readable as a legend even while some are switched off. */
+.chip.off { opacity: 0.4; }
+.chip.lv-error, .rec.lv-error .lv { color: var(--error); }
+.chip.lv-fatal, .rec.lv-fatal .lv { color: var(--fatal); }
+.chip.lv-warn,  .rec.lv-warn .lv  { color: var(--warn); }
+.chip.lv-info,  .rec.lv-info .lv  { color: var(--info); }
+.chip.lv-debug, .rec.lv-debug .lv,
+.chip.lv-trace, .rec.lv-trace .lv,
+.chip.lv-other, .rec.lv-other .lv { color: var(--debug); }
+
+#q {
+  font: inherit; color: inherit; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 0.25rem 0.5rem;
+  min-width: 8rem;
+}
+
+#log { overflow-x: auto; padding: 0.35rem 0; }
+
+/* One row per record, not wrapped: a log is scanned down the left edge, and
+   wrapping makes the timestamp column stop lining up. */
+.rec {
+  display: flex; align-items: baseline; gap: 0.6rem;
+  white-space: pre; width: max-content; min-width: 100%;
+}
+.rec .t { color: var(--muted); flex: 0 0 auto; }
+.rec .lv { flex: 0 0 4.2em; font-weight: 600; }
+.rec .msg { flex: 0 0 auto; }
+.rec .extra { color: var(--muted); flex: 0 0 auto; }
+
+/* Errors carry a tint as well as coloured text: at a glance down a long file
+   the eye finds the band, not the four-letter word. */
+.rec.lv-error, .rec.lv-fatal { background: rgba(207, 34, 46, 0.07); }
+@media (prefers-color-scheme: dark) {
+  .rec.lv-error, .rec.lv-fatal { background: rgba(248, 81, 73, 0.12); }
+}
+/* Selection outranks the level tint: it is a state ON TOP of the row, and a
+   linked error row must still read as linked. */
+.rec.lg-sel.lg-sel { background: rgb(212, 232, 255); }
+@media (prefers-color-scheme: dark) {
+  .rec.lg-sel.lg-sel { background: rgb(20, 41, 70); }
+}
+
+@media (max-width: 560px) {
+  .rec .lv { flex-basis: 3.4em; }
+  .lg-num { width: 3.2em; padding-right: 0.6em; }
+}

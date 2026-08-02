@@ -20,7 +20,7 @@ func TestDetectKind(t *testing.T) {
 		{name: "markdown fenced code sniffed", body: "intro\n```go\nfn()\n```\n", want: KindMarkdown},
 		{name: "markdown bullet list sniffed", body: "stuff\n- one\n- two\n", want: KindMarkdown},
 		{name: "markdown link sniffed", body: "see [docs](https://example.com)", want: KindMarkdown},
-		{name: "plain text rejected", body: "just some plain text", isErr: true},
+		{name: "plain text falls back to the text kind", body: "just some plain text", want: KindText},
 		{name: "binary rejected", body: "\x89PNG\r\n\x1a\n... png bytes", isErr: true},
 		{name: "explicit html hint over textual", body: "anything textual here", hint: "html", want: KindHTML},
 		{name: "explicit md hint over textual", body: "anything textual here", hint: "md", want: KindMarkdown},
@@ -40,7 +40,9 @@ func TestDetectKind(t *testing.T) {
 		{name: "text/x-diff hint forces kind", body: "anything textual here", hint: "text/x-diff", want: KindDiff},
 		{name: "prose with plus and minus lines is markdown not diff", body: "# Changelog\n\n- added a feature\n+ this is just a plus sign in prose\n- removed a thing\n", want: KindMarkdown},
 		{name: "source code with plus minus operators is not diff", body: "function diff(a, b) {\n  const result = a + b - 1;\n  return result;\n}\n# also has a heading-like line", want: KindMarkdown},
-		{name: "fake hunk header missing plus side is not diff", body: "some notes about @@ markers\n@@ -1,3 @@ not a real hunk\njust text here\nmore text", isErr: true},
+		// Still pins "not a diff"; it lands in the text fallback now rather
+		// than being refused, which is a stronger assertion than isErr was.
+		{name: "fake hunk header missing plus side is not diff", body: "some notes about @@ markers\n@@ -1,3 @@ not a real hunk\njust text here\nmore text", want: KindText},
 		{name: "diff hint with png bytes rejected", body: "\x89PNG\r\n\x1a\n...png bytes here padded to be long enough...", hint: "diff", isErr: true},
 	}
 	for _, c := range cases {

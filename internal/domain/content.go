@@ -40,6 +40,13 @@ const (
 	// rather than by any profiler's own format, because every profiler can
 	// emit it and none of them agree on anything else.
 	KindFlamegraph ContentKind = "flamegraph"
+	// KindLog is structured logs as NDJSON, one record per line. Detected
+	// before KindJSON, which would otherwise claim the same bytes and render a
+	// log as a tree.
+	KindLog ContentKind = "log"
+	// KindText is textual content matching no richer format. The fallback, so
+	// it is reached only once every other gate declines.
+	KindText ContentKind = "text"
 	// KindPDF is a PDF document, detected by the %PDF- signature. The only
 	// accepted kind whose bytes are not text; it clears the same explicit-magic
 	// bar KindSite does rather than being a fallback for unclassifiable bytes.
@@ -183,6 +190,16 @@ func DetectKind(b []byte, hint string, sniffMIME MIMESniffer) (ContentKind, erro
 			return "", ErrUnsupportedKind
 		}
 		return KindFlamegraph, nil
+	case hint == "log" || hint == "logs" || hint == "ndjson-log":
+		if !strings.HasPrefix(ct, "text/") {
+			return "", ErrUnsupportedKind
+		}
+		return KindLog, nil
+	case hint == "text" || hint == "txt" || strings.HasPrefix(hint, "text/plain"):
+		if !strings.HasPrefix(ct, "text/") {
+			return "", ErrUnsupportedKind
+		}
+		return KindText, nil
 	case hint != "":
 		// An unrecognized hint rejects without falling back to sniffing.
 		return "", ErrUnsupportedKind
@@ -205,6 +222,11 @@ func DetectKind(b []byte, hint string, sniffMIME MIMESniffer) (ContentKind, erro
 		if looksLikeFolded(b) {
 			return KindFlamegraph, nil
 		}
+		// Before the JSON gate on purpose: logs ARE NDJSON, so JSON would
+		// claim them and render a tree instead of a log.
+		if looksLikeLog(b) {
+			return KindLog, nil
+		}
 		if looksLikeJSON(b) {
 			return KindJSON, nil
 		}
@@ -214,7 +236,10 @@ func DetectKind(b []byte, hint string, sniffMIME MIMESniffer) (ContentKind, erro
 		if looksLikeMarkdown(b) {
 			return KindMarkdown, nil
 		}
-		return "", ErrUnsupportedKind
+		// The fallback. Reached only once every richer gate has declined, so
+		// it cannot steal from them; it exists so textual content is rendered
+		// with citable lines rather than refused.
+		return KindText, nil
 	default:
 		return "", ErrUnsupportedKind
 	}
@@ -328,6 +353,90 @@ func isPositiveInt(s string) bool {
 		}
 	}
 	return true
+}
+
+// logTimeFields and logBodyFields are the field names a record is recognised
+// by. No log format standardised these, so the union of what the common
+// loggers emit is the only workable gate.
+var logTimeFields = []string{"@timestamp", "timestamp", "ts", "time", "Time", "eventTime"}
+
+var logBodyFields = []string{"level", "log.level", "severity", "lvl", "levelname", "message", "msg", "body", "Body"}
+
+// looksLikeLog reports whether the content is structured logs as NDJSON.
+//
+// Runs BEFORE looksLikeJSON, which would otherwise claim the same bytes: logs
+// ARE valid JSONL, and rendering a log as a collapsible tree is correct and
+// useless.
+//
+// The gate is a timestamp AND a level-or-message, because a timestamp alone
+// admits any time series and a message alone admits most config. Only a
+// majority of lines need to match: a real capture carries blank lines and, in
+// OpenSearch bulk NDJSON, action lines that are not records at all.
+func looksLikeLog(b []byte) bool {
+	s := string(b)
+	if len(s) > SniffPrefixLen {
+		s = s[:SniffPrefixLen]
+	}
+	lines := strings.Split(s, "\n")
+	var records, hits int
+	for i, line := range lines {
+		line = strings.TrimSpace(strings.TrimRight(line, "\r"))
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "{") {
+			// One non-object line is enough: NDJSON is machine-written and
+			// uniform, so prose here means this is something else.
+			return false
+		}
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			// The sniff window cuts the last line mid-object; anything
+			// earlier that will not parse is not NDJSON.
+			if i == len(lines)-1 {
+				continue
+			}
+			return false
+		}
+		// A bulk action line ({"create":{}}, {"index":{...}}) is metadata
+		// between documents, not a record. Skipping rather than failing is
+		// what lets OpenSearch bulk exports through.
+		if isBulkAction(m) {
+			continue
+		}
+		records++
+		if hasAnyKey(m, logTimeFields) && hasAnyKey(m, logBodyFields) {
+			hits++
+		} else if _, ok := m["stream"]; ok {
+			if _, ok := m["values"]; ok {
+				hits++ // Loki stream object: timestamps live inside values
+			}
+		}
+	}
+	return records >= 2 && hits*2 > records
+}
+
+func hasAnyKey(m map[string]json.RawMessage, keys []string) bool {
+	for _, k := range keys {
+		if _, ok := m[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// isBulkAction reports whether an NDJSON line is an Elasticsearch/OpenSearch
+// bulk action rather than a document: a single key naming an operation.
+func isBulkAction(m map[string]json.RawMessage) bool {
+	if len(m) != 1 {
+		return false
+	}
+	for _, op := range []string{"index", "create", "update", "delete"} {
+		if _, ok := m[op]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // looksLikeJSON reports whether the content is a JSON value or a JSONL stream.
