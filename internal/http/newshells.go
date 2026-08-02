@@ -76,7 +76,7 @@ var dataShellAssets = map[string]string{
 //go:embed assets/flameshell/*
 var flameShellFS embed.FS
 
-const flameShellVersion = "flameshell-v1"
+const flameShellVersion = "flameshell-v2"
 
 var flameShellAssets = map[string]string{
 	"flame.js":  "text/javascript; charset=utf-8",
