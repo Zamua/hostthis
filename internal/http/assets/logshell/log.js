@@ -29,6 +29,8 @@
   var query = "";
   var brush = null;  // [fromMs, toMs] selected on the histogram
   var columns = [];  // fields promoted from the sidebar into their own column
+  var opened = null; // record number whose detail panel is open
+  var context = null; // {n, span} - neighbours forced into view around record n
   var gutter = null;
 
   function pick(obj, keys) {
@@ -116,12 +118,25 @@
 
   // One filtering mechanism, not two: the level chips write into the query,
   // so the URL always describes the whole view.
+  function matches(r, terms) {
+    if (brush && (r.at < brush[0] || r.at > brush[1])) return false;
+    return Q.match(r, terms);
+  }
+
   function visible() {
     var terms = Q.parse(query);
-    return records.filter(function (r) {
-      if (brush && (r.at < brush[0] || r.at > brush[1])) return false;
-      return Q.match(r, terms);
+    var out = records.filter(function (r) { return matches(r, terms); });
+    if (!context) return out;
+    // Context records are the ones a filter EXCLUDED around a hit. Merging
+    // them in by original position is what makes "what happened just before
+    // this error" answerable without abandoning the query.
+    var lo = context.n - context.span, hi = context.n + context.span;
+    var extra = records.filter(function (r) {
+      return r.n >= lo && r.n <= hi && !matches(r, terms);
     });
+    extra.forEach(function (r) { r.isContext = true; });
+    out.forEach(function (r) { r.isContext = false; });
+    return out.concat(extra).sort(function (a, b) { return a.n - b.n; });
   }
 
   function render() {
@@ -130,7 +145,7 @@
     var frag = document.createDocumentFragment();
     rows.forEach(function (r) {
       var el = document.createElement("div");
-      el.className = "rec lv-" + r.level;
+      el.className = "rec lv-" + r.level + (r.isContext ? " ctx" : "");
       // The line number is the record's ORIGINAL position, so a link keeps
       // meaning after the reader filters. Numbering the filtered view would
       // make #L12 point at a different record for every filter.
@@ -179,6 +194,8 @@
         el.appendChild(more);
       }
       frag.appendChild(el);
+
+      if (opened === r.n) frag.appendChild(detail(r));
     });
     mount.appendChild(frag);
     mount.setAttribute("aria-busy", "false");
@@ -297,6 +314,69 @@
     var off = bodyEl.classList.toggle("nofields");
     this.setAttribute("aria-pressed", off ? "false" : "true");
   };
+
+  // The detail panel is a sibling row, not a child of the record: a record is
+  // a flex row sized to its content, and nesting a block inside it would make
+  // every row as tall as the widest panel.
+  function detail(r) {
+    var d = document.createElement("div");
+    d.className = "det";
+
+    var tbl = document.createElement("dl");
+    Object.keys(r.fields).forEach(function (k) {
+      var dt = document.createElement("dt");
+      dt.textContent = k;
+      var dd = document.createElement("dd");
+      var v = r.fields[k];
+      dd.textContent = typeof v === "string" ? v : JSON.stringify(v);
+      // Every field is a filter: reading a value and then having to retype it
+      // into the query bar is the tedious half of an investigation.
+      dd.className = "clickable";
+      dd.title = "filter to " + k + "=" + dd.textContent;
+      dd.onclick = function () { setQuery(Q.withTerm(query, k, "=", dd.textContent)); };
+      tbl.appendChild(dt);
+      tbl.appendChild(dd);
+    });
+    d.appendChild(tbl);
+
+    var bar = document.createElement("div");
+    bar.className = "det-bar";
+
+    var ctxBtn = document.createElement("button");
+    ctxBtn.type = "button";
+    var on = context && context.n === r.n;
+    ctxBtn.textContent = on ? "hide surrounding" : "show 5 around";
+    ctxBtn.onclick = function () {
+      context = on ? null : { n: r.n, span: 5 };
+      render();
+    };
+    bar.appendChild(ctxBtn);
+
+    var rawBtn = document.createElement("button");
+    rawBtn.type = "button";
+    rawBtn.textContent = "raw";
+    var raw = document.createElement("pre");
+    raw.className = "det-raw";
+    raw.hidden = true;
+    raw.textContent = JSON.stringify(r.fields, null, 2);
+    rawBtn.onclick = function () { raw.hidden = !raw.hidden; };
+    bar.appendChild(rawBtn);
+
+    d.appendChild(bar);
+    d.appendChild(raw);
+    return d;
+  }
+
+  // Clicking a record opens its detail. The gutter owns clicks on the NUMBER,
+  // so selecting a line and inspecting one stay separate gestures.
+  mount.addEventListener("click", function (e) {
+    if (e.target.closest(".lg-num") || e.target.closest(".det")) return;
+    var rec = e.target.closest(".rec");
+    if (!rec) return;
+    var n = Number(rec.dataset.line);
+    opened = opened === n ? null : n;
+    render();
+  });
 
   function drawLevels() {
     var counts = {};
