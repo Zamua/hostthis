@@ -197,6 +197,17 @@ values are tracked up to a cap and reported as `200+` beyond it, because a
 request-id field has one value per record and an exact count of those is
 neither cheap nor useful.
 
+**Clicking a record expands it** to every field it carries, each one
+clickable to filter by that value, plus its raw JSON. Reading a value and
+then retyping it into the query bar is the tedious half of an
+investigation, so the value itself is the control.
+
+An expanded record also offers **the records around it**, which are shown
+even though the query excludes them. "What happened just before this
+error" is the question a filtered log cannot otherwise answer without
+abandoning the filter that found the error. Context records are dimmed and
+marked so they can never be mistaken for matches.
+
 **The view lives in the URL.** Query, time window and selection are all
 in the fragment, so a filtered, time-boxed view is a link. A paste
 service has no place to save a search, and it does not need one: the link
