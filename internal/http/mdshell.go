@@ -16,7 +16,7 @@ var mdShellFS embed.FS
 // so a same-path change would otherwise be pinned in browser caches for a year.
 // BUMP THIS whenever shell.html / md.js / md.css change in a way visitors must
 // re-fetch.
-const mdShellVersion = "mdshell-v6"
+const mdShellVersion = "mdshell-v7"
 
 // mdShellAssets whitelists the asset names serveAsset will serve, mapped to
 // their Content-Type. Anything outside it 404s.

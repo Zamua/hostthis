@@ -109,7 +109,20 @@ input[type="checkbox"] { margin-right: 0.4rem; }
    same convention ```java uses for a language. The colours sit on the code
    background rather than replacing it, so the block still reads as code. */
 /* Every line is a block, so the newline comes from layout rather than from a
-   text node; a span AND a newline would double-space the block. */
+   text node; a span AND a newline would double-space the block.
+
+   The sizing lives on the CODE element, not on the lines. A block takes its
+   container's visible width, so in a fence wide enough to scroll sideways the
+   tint stopped at the fold and the rest of the line sat on bare background.
+   Sizing each LINE to max-content fixes that but leaves a ragged right edge,
+   since every stripe then ends at its own text. Sizing the code block to
+   max-content instead makes it as wide as its longest line and lets the lines
+   fill it, so the stripes are flush with each other. */
+.diff-code > code {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+}
 .diff-code .d-line { display: block; min-height: 1em; }
 .diff-code .d-ins { background: rgba(46, 160, 67, .16); }
 .diff-code .d-del { background: rgba(248, 81, 73, .14); }
