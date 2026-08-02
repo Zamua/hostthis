@@ -973,7 +973,7 @@ UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;
     cat sales.csv  | ssh -T {{apex}}                 sortable table + SQL
     cat events.json| ssh -T {{apex}}                 collapsible tree
     cat cpu.folded | ssh -T {{apex}}                 interactive flame graph
-    cat app.ndjson | ssh -T {{apex}}                 log viewer (levels, filter)
+    cat app.ndjson | ssh -T {{apex}}                 log viewer (query + histogram)
     cat nginx.conf | ssh -T {{apex}}                 text with linkable lines
     cat x.txt      | ssh -T {{apex}} --type csv      force a renderer
 
@@ -1003,6 +1003,9 @@ LINK TO A PLACE INSIDE A PASTE
     <url>#focus=main;serve  flamegraph: zoom to that stack
     <url>#q=malloc          flamegraph: highlight matching frames
     <url>#L42-L48           text / log: highlight those lines
+    <url>#q=level=error     log: a saved query, time window and selection
+                            all live in the fragment, so a filtered view
+                            is just a link
 
     Clicking a heading, row, page, diff line number, or flame frame updates
     the URL, so the address bar always holds a link you can copy. To select

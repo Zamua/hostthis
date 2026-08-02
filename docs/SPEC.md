@@ -161,8 +161,33 @@ level or message field, under any of the usual names (`@timestamp`, `ts`,
 gate, which would otherwise claim NDJSON and render a log as a collapsible
 tree - correct, but useless for reading logs.
 
-The view adds what a log file cannot: filtering by level, filtering by
-text, expanding one record to all of its fields, and a link to a line.
+The view adds what a log file cannot. A **query bar** takes field matchers
+rather than a plain substring:
+
+```
+level=error status>=500 path=~^/p/ "connection reset"
+```
+
+Equality, negation (`!=`), numeric comparison (`>`, `>=`, `<`, `<=`),
+regex (`=~`, `!~`), and quoted phrases matched against the whole record.
+Terms combine with AND, which is what a reader narrowing an investigation
+means; OR is available per-field as `level=error|warn`. Level chips write
+into the same query rather than filtering separately, so there is one
+mechanism and the URL describes the whole view.
+
+A **volume histogram** buckets records over time. Dragging across it
+selects a time window, which is the fastest way to get from "something
+broke" to the minute it broke in.
+
+Everything runs against the whole file in the browser, so filtering costs
+no round trip. That is the one structural advantage a paste has over a
+log service, and it is why the query bar can re-evaluate on every
+keystroke.
+
+**The view lives in the URL.** Query, time window and selection are all
+in the fragment, so a filtered, time-boxed view is a link. A paste
+service has no place to save a search, and it does not need one: the link
+carries the data and the view together.
 
 Uploads of unsupported types are **rejected** with a clear error pointing
 at what we accept:

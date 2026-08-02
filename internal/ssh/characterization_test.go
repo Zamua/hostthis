@@ -884,7 +884,7 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"    cat sales.csv  | ssh -T paste.test                 sortable table + SQL\n" +
 	"    cat events.json| ssh -T paste.test                 collapsible tree\n" +
 	"    cat cpu.folded | ssh -T paste.test                 interactive flame graph\n" +
-	"    cat app.ndjson | ssh -T paste.test                 log viewer (levels, filter)\n" +
+	"    cat app.ndjson | ssh -T paste.test                 log viewer (query + histogram)\n" +
 	"    cat nginx.conf | ssh -T paste.test                 text with linkable lines\n" +
 	"    cat x.txt      | ssh -T paste.test --type csv      force a renderer\n" +
 	"\n" +
@@ -914,6 +914,9 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"    <url>#focus=main;serve  flamegraph: zoom to that stack\n" +
 	"    <url>#q=malloc          flamegraph: highlight matching frames\n" +
 	"    <url>#L42-L48           text / log: highlight those lines\n" +
+	"    <url>#q=level=error     log: a saved query, time window and selection\n" +
+	"                            all live in the fragment, so a filtered view\n" +
+	"                            is just a link\n" +
 	"\n" +
 	"    Clicking a heading, row, page, diff line number, or flame frame updates\n" +
 	"    the URL, so the address bar always holds a link you can copy. To select\n" +

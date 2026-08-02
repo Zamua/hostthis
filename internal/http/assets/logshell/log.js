@@ -24,9 +24,10 @@
 
   var ORDER = ["fatal", "error", "warn", "info", "debug", "trace", "other"];
 
+  var Q = window.HostthisLogQuery;
   var records = [];
-  var active = {};   // level -> excluded when true
   var query = "";
+  var brush = null;  // [fromMs, toMs] selected on the histogram
   var gutter = null;
 
   function pick(obj, keys) {
@@ -112,12 +113,13 @@
     return out;
   }
 
+  // One filtering mechanism, not two: the level chips write into the query,
+  // so the URL always describes the whole view.
   function visible() {
-    var q = query.toLowerCase();
+    var terms = Q.parse(query);
     return records.filter(function (r) {
-      if (active[r.level]) return false;
-      if (!q) return true;
-      return r.line.toLowerCase().indexOf(q) >= 0;
+      if (brush && (r.at < brush[0] || r.at > brush[1])) return false;
+      return Q.match(r, terms);
     });
   }
 
@@ -170,6 +172,7 @@
     meta.textContent = rows.length === records.length
       ? records.length + " records"
       : rows.length + " of " + records.length;
+    drawHist();
     if (gutter) gutter.resolve(DL.parse(), false);
   }
 
@@ -183,21 +186,124 @@
       b.type = "button";
       b.className = "chip lv-" + lv;
       b.textContent = (lv === "other" ? "other" : lv.toUpperCase()) + " " + counts[lv];
-      b.setAttribute("aria-pressed", "true");
       b.onclick = function () {
-        active[lv] = !active[lv];
-        b.setAttribute("aria-pressed", active[lv] ? "false" : "true");
-        b.classList.toggle("off", !!active[lv]);
-        render();
+        var terms = Q.parse(query);
+        var cur = null;
+        terms.forEach(function (t) { if (t.op === "=" && t.field === "level") cur = t; });
+        var picked = cur ? cur.value.split("|") : [];
+        var at = picked.indexOf(lv);
+        if (at >= 0) picked.splice(at, 1); else picked.push(lv);
+        setQuery(picked.length ? Q.withTerm(query, "level", "=", picked.join("|"))
+                               : Q.withoutField(query, "level"));
       };
       levelsBar.appendChild(b);
     });
   }
 
-  qBox.addEventListener("input", function () {
-    query = qBox.value.trim();
+  function setQuery(q) {
+    query = q;
+    qBox.value = q;
     render();
+    writeHash();
+  }
+
+  // The whole view is the fragment: a filtered, time-boxed log is a link.
+  // A paste has nowhere to save a search and needs nowhere, since the link
+  // carries the data and the view together.
+  function writeHash() {
+    var parts = [];
+    if (query) parts.push("q=" + encodeURIComponent(query));
+    if (brush) parts.push("t=" + Math.round(brush[0]) + "-" + Math.round(brush[1]));
+    var sel = gutter && gutter.current();
+    if (sel && sel.length) {
+      parts.push("L" + sel[0] + (sel.length > 1 ? "-L" + sel[sel.length - 1] : ""));
+    }
+    if (parts.length) DL.setHash(parts.join("&"));
+    else DL.clearHash();
+  }
+
+  var typing = null;
+  qBox.addEventListener("input", function () {
+    query = qBox.value;
+    render();
+    // The hash is debounced but the render is not: filtering must feel
+    // immediate, while rewriting the URL on every keystroke is wasted work.
+    clearTimeout(typing);
+    typing = setTimeout(writeHash, 300);
   });
+
+  // ---- volume histogram --------------------------------------------------
+
+  var histEl = document.getElementById("hist");
+
+  function drawHist() {
+    var withTime = records.filter(function (r) { return r.at; });
+    if (withTime.length < 2) { histEl.hidden = true; return; }
+    histEl.hidden = false;
+    var lo = Infinity, hi = -Infinity;
+    withTime.forEach(function (r) { lo = Math.min(lo, r.at); hi = Math.max(hi, r.at); });
+    if (!(hi > lo)) { histEl.hidden = true; return; }
+
+    var BUCKETS = 60;
+    var span = (hi - lo) / BUCKETS;
+    var shown = {}, all = new Array(BUCKETS).fill(0), lit = new Array(BUCKETS).fill(0);
+    visible().forEach(function (r) { shown[r.n] = true; });
+    withTime.forEach(function (r) {
+      var i = Math.min(BUCKETS - 1, Math.floor((r.at - lo) / span));
+      all[i]++;
+      if (shown[r.n]) lit[i]++;
+    });
+    var peak = Math.max.apply(null, all) || 1;
+
+    histEl.textContent = "";
+    for (var i = 0; i < BUCKETS; i++) {
+      var col = document.createElement("div");
+      col.className = "hb";
+      col.dataset.from = String(Math.round(lo + i * span));
+      col.dataset.to = String(Math.round(lo + (i + 1) * span));
+      // Two stacked bars: total in grey behind, matching in colour in front,
+      // so narrowing a query shows what it EXCLUDED rather than rescaling to
+      // hide it. A histogram that rescales cannot show a query's effect.
+      var back = document.createElement("span");
+      back.className = "hb-all";
+      back.style.height = (all[i] / peak * 100) + "%";
+      var front = document.createElement("span");
+      front.className = "hb-lit";
+      front.style.height = (lit[i] / peak * 100) + "%";
+      col.appendChild(back);
+      col.appendChild(front);
+      col.title = new Date(Number(col.dataset.from)).toISOString() + "  " + all[i] + " records";
+      histEl.appendChild(col);
+    }
+    histEl.classList.toggle("brushed", !!brush);
+  }
+
+  // Drag across the histogram to select a time window.
+  (function wireBrush() {
+    var from = null;
+    function bucketAt(e) {
+      var el = document.elementFromPoint(e.clientX, e.clientY);
+      return el && el.closest ? el.closest(".hb") : null;
+    }
+    histEl.addEventListener("pointerdown", function (e) {
+      var b = bucketAt(e);
+      if (!b) return;
+      from = b;
+      histEl.setPointerCapture(e.pointerId);
+    });
+    histEl.addEventListener("pointerup", function (e) {
+      if (!from) return;
+      var to = bucketAt(e) || from;
+      var a = Math.min(Number(from.dataset.from), Number(to.dataset.from));
+      var z = Math.max(Number(from.dataset.to), Number(to.dataset.to));
+      from = null;
+      // A click with no drag on an already-brushed chart clears it, which is
+      // the only way back out without editing the URL.
+      brush = (brush && a === brush[0] && z === brush[1]) ? null : [a, z];
+      render();
+      writeHash();
+    });
+  })();
 
   fetch(location.pathname + "?raw=1", { credentials: "same-origin" })
     .then(function (r) {
@@ -208,6 +314,10 @@
       records = parse(text);
       records.forEach(function (r, i) {
         r.n = i + 1;
+        r.at = Date.parse(r.time) || 0;
+        // The query engine resolves `level=` and `message=` against these
+        // regardless of which key the logger actually used.
+        r.norm = { level: r.level, message: r.msg, msg: r.msg, time: r.time };
         // Precomputed once: the filter runs over every record on each
         // keystroke, and re-serialising there made typing lag on a big file.
         var rest = {};
@@ -233,7 +343,22 @@
       drawLevels();
       render();
       gutter = window.HostthisLineGutter.attach(mount, { hint: true });
-      DL.onResolve(function (t) { gutter.resolve(t); });
+      DL.onResolve(function (t) {
+        if (!t) return;
+        if (t.type === "logview") {
+          brush = t.from ? [t.from, t.to] : null;
+          query = t.q;
+          qBox.value = t.q;
+          // Query and window are applied BEFORE the line selection, because
+          // render() rebuilds the rows and a selection painted first would be
+          // discarded with them.
+          render();
+          if (t.line) gutter.resolve(t.line);
+          return;
+        }
+        if (t.type === "line") gutter.resolve(t);
+        else if (t.type === "query") { query = t.q; qBox.value = t.q; render(); }
+      });
     })
     .catch(function (err) {
       mount.textContent = "could not load: " + err.message;
