@@ -832,38 +832,43 @@ func (r *ShaleRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, err
 //   - failed pastes are absent by construction (MarkFailed drops the entry;
 //     a failed row's entry is pruned on the owner's next list).
 //
-// Fail-closed (Policy 2; this is a synchronous write-path read): an entry that
-// does not decode, or that carries the fail-closed Placeholder marker for an
-// undecodable authoritative record, HARD-FAILS the scan, rejecting the upload
-// rather than silently under-counting. The one exception is a LEGACY entry,
-// recognized by shape (an EMPTY value, the bare-marker convention an in-place
-// migration carries over), which is read through its authoritative rows until
-// their next list enriches it. Without that fallback one migrated entry would
-// hard-fail every quota-checked create for its owner until they next list.
+// Fail OPEN: an entry that cannot be read - undecodable, or carrying the
+// Placeholder marker for an undecodable authoritative record - counts as ZERO
+// and the scan continues (docs/SPEC.md "Unreadable entries fail OPEN"). The
+// owner is UNDER-charged for exactly those bytes and keeps working, rather than
+// being locked out of uploading by damage they did not cause. Skips are
+// summarised in one log line per scan. A LEGACY entry, recognized by shape (an
+// EMPTY value, the bare-marker convention an in-place migration carries over),
+// is read through its authoritative rows until their next list enriches it.
 func (r *ShaleRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, error) {
 	idx, err := r.scanPrefix(shalePrefixIdentityPastes(owner))
 	if err != nil {
 		return 0, err
 	}
 	var total int64
+	var skips scanSkips
 	for _, item := range idx {
 		if len(item.Value) == 0 {
 			n, err := r.legacyPasteEntryBytes(item.Key)
 			if err != nil {
-				return 0, err
+				skips.add(item.Key, err)
+				continue
 			}
 			total += n
 			continue
 		}
 		var row identityPasteRow
 		if err := json.Unmarshal(item.Value, &row); err != nil {
-			return 0, fmt.Errorf("decode %s: %w", item.Key, err)
+			skips.add(item.Key, err)
+			continue
 		}
 		if row.Placeholder {
-			return 0, fmt.Errorf("quota scan: %s is a fail-closed placeholder (authoritative record undecodable; a list clears it once the record decodes again)", item.Key)
+			skips.add(item.Key, errUnreadableRecord)
+			continue
 		}
 		total += int64(row.Size)
 	}
+	skips.report(r, owner, "paste")
 	return total, nil
 }
 
@@ -871,8 +876,9 @@ func (r *ShaleRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 // through its authoritative rows, the read-through a migrated deployment needs
 // until the owner's next list enriches the entry. An empty value is the only legacy
 // paste shape (unlike sites, pastes have no marker-byte era). A stale entry
-// whose row is gone contributes zero; an undecodable row HARD-FAILS (Policy 2);
-// a live row contributes its live version sum.
+// whose row is gone contributes zero; an undecodable row is reported to the
+// caller, which counts it as zero and keeps going (docs/SPEC.md "Unreadable
+// entries fail OPEN"); a live row contributes its live version sum.
 func (r *ShaleRepo) legacyPasteEntryBytes(indexKey []byte) (int64, error) {
 	slug := domain.Slug(extractSlug(indexKey))
 	var p pasteRow
@@ -1584,9 +1590,9 @@ func (r *ShaleRepo) refreshIndexProjection(identity string, slug domain.Slug) er
 	if err := json.Unmarshal(expected, &row); err != nil {
 		return fmt.Errorf("decode %s: %w", indexKey, err)
 	}
-	if row.Placeholder {
-		return nil // fail-closed placeholder: only a list that decodes the row replaces it
-	}
+	// A placeholder is NOT skipped: this path holds the head row, so if the
+	// record decodes again the refresh below replaces the marker with real
+	// values and the entry stops being under-charged.
 	// Refresh from the head row, which carries the totals transactionally: one
 	// routed read instead of a version-family scan.
 	var head pasteRow
