@@ -45,7 +45,6 @@ func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
 		Slug: slug, Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-legidx-v2", Size: 200,
 		CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour),
-		ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	pasteVal, err := storage.LegacyPasteValueForTest(p)
 	if err != nil {
@@ -63,7 +62,6 @@ func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
 	mustPutRaw(t, repo, storage.LegacyVersionKeyForTest(slug, 1), v1Val)
 	mustPutRaw(t, repo, storage.LegacyVersionKeyForTest(slug, 2), v2Val)
 	mustPutRaw(t, repo, storage.LegacySlugOwnerKeyForTest(slug), []byte(owner))
-	mustPutRaw(t, repo, storage.LegacyExpiryKeyForTest(p.ExpiresAt, slug), storage.MarkerValueForTest())
 
 	idxKey := storage.IdentityPasteKeyForTest(owner, slug.String())
 	if err := repo.PutEmptyBackendForTest(idxKey); err != nil {
@@ -85,8 +83,7 @@ func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
 	fresh := domain.Paste{
 		Slug: domain.Slug("legidx02"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-legidx-new", Size: 100,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	if err := repo.InsertWithQuotaCheck(context.Background(), fresh, 1<<20, now); err != nil {
 		t.Fatalf("quota-checked insert with a legacy empty entry present must succeed: %v", err)
 	}

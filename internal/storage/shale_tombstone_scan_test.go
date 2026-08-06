@@ -34,8 +34,7 @@ func TestShaleTombstone_DeletedRowIsInvisibleToScan(t *testing.T) {
 	p := domain.Paste{
 		Slug: slug, Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: sha, Size: 100,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	pasteVal, err := storage.LegacyPasteValueForTest(p)
 	if err != nil {
 		t.Fatalf("encode paste: %v", err)

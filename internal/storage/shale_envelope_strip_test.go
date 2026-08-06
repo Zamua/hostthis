@@ -47,7 +47,6 @@ func TestShaleEnvelopeStrip_ScanPathsDecodeEnvelopedValue(t *testing.T) {
 		Size:       99,
 		CreatedAt:  now,
 		UpdatedAt:  now,
-		ExpiresAt:  now.Add(domain.DefaultRetentionWindow),
 	}
 	pasteVal, err := storage.LegacyPasteValueForTest(p)
 	if err != nil {

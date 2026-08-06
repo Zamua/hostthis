@@ -43,8 +43,7 @@ func TestShaleReprojectionWriteLoopSkipsFailedEntries(t *testing.T) {
 		p := domain.Paste{
 			Slug: slug, Identity: domain.Identity(owner),
 			Kind: domain.KindHTML, ContentSHA: fmt.Sprintf("sha-pol1-%d", i), Size: 100,
-			CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-		}
+			CreatedAt: now, UpdatedAt: now}
 		if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 			t.Fatalf("insert %s: %v", slug, err)
 		}

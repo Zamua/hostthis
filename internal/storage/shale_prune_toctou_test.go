@@ -43,7 +43,7 @@ func TestShaleOrphanPruneKeepsFreshRedeployEntry(t *testing.T) {
 
 	// A stale orphan entry, as a crash mid-delete leaves: its authoritative
 	// row is gone, so the prune confirms NotFound and drops it.
-	writeIndexEntryJSON(t, repo, idxKey, 777, now.Add(domain.DefaultRetentionWindow))
+	writeIndexEntryJSON(t, repo, idxKey, 777, now)
 
 	// The same-slug redeploy lands between the prune's confirm and its
 	// delete: a fresh authoritative row plus a fresh enumeration entry.
@@ -56,8 +56,7 @@ func TestShaleOrphanPruneKeepsFreshRedeployEntry(t *testing.T) {
 			fresh := domain.Paste{
 				Slug: slug, Identity: domain.Identity(owner),
 				Kind: domain.KindHTML, ContentSHA: "sha-prunerace-v1", Size: 300,
-				CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-			}
+				CreatedAt: now, UpdatedAt: now}
 			if err := repo.InsertWithQuotaCheck(context.Background(), fresh, 0, now); err != nil {
 				t.Errorf("racing redeploy: %v", err)
 			}

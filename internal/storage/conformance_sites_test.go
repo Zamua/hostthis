@@ -47,7 +47,6 @@ func siteOf(slug, identity string, size int) domain.Site {
 		Manifest:  man,
 		CreatedAt: fixedNow,
 		UpdatedAt: fixedNow,
-		ExpiresAt: fixedNow.Add(domain.DefaultRetentionWindow),
 	}
 }
 
@@ -67,7 +66,6 @@ func siteOfV(slug, identity string, size int, v string) domain.Site {
 		Manifest:  man,
 		CreatedAt: fixedNow,
 		UpdatedAt: fixedNow,
-		ExpiresAt: fixedNow.Add(domain.DefaultRetentionWindow),
 	}
 }
 
@@ -92,16 +90,11 @@ func runSiteConformance(t *testing.T, name string, caps conformCaps, newSites fu
 	t.Run(name+"/Sites/PerOwnerCapCountsBoth", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapCountsBoth(t, r, sr) })
 	t.Run(name+"/Sites/PerOwnerCapConcurrentCeiling", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapConcurrentCeiling(t, caps, r, sr) })
 	t.Run(name+"/Sites/SlugCollisionVsPaste", func(t *testing.T) { r, sr := newSites(t); conformSiteSlugCollisionVsPaste(t, r, sr) })
-	t.Run(name+"/Sites/ExpiryAndSweep", func(t *testing.T) { _, sr := newSites(t); conformSiteExpiryAndSweep(t, caps, sr) })
-	t.Run(name+"/Sites/DeleteExpiredSite", func(t *testing.T) { _, sr := newSites(t); conformDeleteExpiredSite(t, sr) })
-	t.Run(name+"/Sites/ExpirySubSecondOrdering", func(t *testing.T) { _, sr := newSites(t); conformSiteExpirySubSecondOrdering(t, sr) })
 	t.Run(name+"/Sites/ReferencedBlobSHAs", func(t *testing.T) { _, sr := newSites(t); conformSiteReferencedBlobSHAs(t, sr) })
 	t.Run(name+"/Sites/DedupedSizeCharged", func(t *testing.T) { _, sr := newSites(t); conformSiteDedupedSizeCharged(t, sr) })
 	t.Run(name+"/Sites/ReplaceInPlace", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceInPlace(t, sr) })
 	t.Run(name+"/Sites/ReplaceNotFoundShape", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceNotFoundShape(t, r, sr) })
 	t.Run(name+"/Sites/ReplaceDeltaQuota", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceDeltaQuota(t, sr) })
-	t.Run(name+"/Sites/ReplaceRevivesExpiredChargesFull", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceRevivesExpiredChargesFull(t, sr) })
-	t.Run(name+"/Sites/ReplaceRestartsExpiry", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceRestartsExpiry(t, sr) })
 	t.Run(name+"/Sites/ListByOwner", func(t *testing.T) { _, sr := newSites(t); conformSiteListByOwner(t, sr) })
 }
 
@@ -168,7 +161,6 @@ func conformSiteReplaceInPlace(t *testing.T, sr conformanceSiteRepo) {
 	v2 := siteOfV(slug, "key:rp", 250, "v2")
 	v2.CreatedAt = later // a hostile caller can't move created_at via the row
 	v2.UpdatedAt = later
-	v2.ExpiresAt = later.Add(domain.DefaultRetentionWindow)
 	if err := sr.ReplaceWithQuotaCheck(context.Background(), v2, v2.Manifest.DedupedSize(), 0, later); err != nil {
 		t.Fatalf("replace in place: %v", err)
 	}
@@ -188,9 +180,6 @@ func conformSiteReplaceInPlace(t *testing.T, sr conformanceSiteRepo) {
 	// updated_at and expires_at restart from the re-deploy.
 	if !got.UpdatedAt.Equal(later) {
 		t.Fatalf("updated_at should be the re-deploy time: got %v, want %v", got.UpdatedAt, later)
-	}
-	if !got.ExpiresAt.Equal(later.Add(domain.DefaultRetentionWindow)) {
-		t.Fatalf("expires_at should restart from re-deploy: got %v", got.ExpiresAt)
 	}
 	// The owner's live site bytes are the NEW size only, not 100+250.
 	used, err := sr.SumActiveBytesByOwner("key:rp", later)
@@ -275,103 +264,6 @@ func conformSiteReplaceDeltaQuota(t *testing.T, sr conformanceSiteRepo) {
 	}
 }
 
-// conformSiteReplaceRevivesExpiredChargesFull pins that re-deploying an
-// EXPIRED-but-unswept site charges the FULL new size. The scan filters
-// expires_at > now, so an expired site is NOT in the owner's `used`, and
-// crediting its old bytes against the replace delta would DOUBLE-SUBTRACT and
-// admit an over-cap re-deploy, leaving a live site durably over the cap. Every
-// backend gates the old-bytes credit on the old row being LIVE. docs/SPEC.md
-// "Reviving an expired-but-unswept record charges its FULL post-revival size".
-func conformSiteReplaceRevivesExpiredChargesFull(t *testing.T, sr conformanceSiteRepo) {
-	const cap = 1000
-	const slug = "revx1234"
-	v1 := siteOfV(slug, "key:revx", 900, "v1")
-	v1.ExpiresAt = fixedNow.Add(time.Hour)
-	if err := sr.InsertWithQuotaCheck(context.Background(), v1, 900, cap, fixedNow); err != nil {
-		t.Fatalf("seed 900 under cap: %v", err)
-	}
-
-	// Past expiry, before any sweep: read-time exclusion drops the site's
-	// bytes, so the owner's site sum is 0.
-	after := fixedNow.Add(2 * time.Hour)
-	if used, err := sr.SumActiveBytesByOwner("key:revx", after); err != nil {
-		t.Fatalf("sum after expiry: %v", err)
-	} else if used != 0 {
-		t.Fatalf("expired-unswept site must not count toward quota: got %d, want 0", used)
-	}
-
-	// Crediting the EXPIRED old row would compute used(0) - old(900) +
-	// new(1500) = 600 <= 1000 and admit, resurrecting a live 1500-byte site
-	// over a 1000 cap. Charging the full new size gives 1500 > 1000 -> reject.
-	over := siteOfV(slug, "key:revx", 1500, "v2")
-	over.CreatedAt = fixedNow
-	over.UpdatedAt = after
-	over.ExpiresAt = after.Add(domain.DefaultRetentionWindow)
-	if err := sr.ReplaceWithQuotaCheck(context.Background(), over, 1500, cap, after); !errors.Is(err, storage.ErrOverUserQuota) {
-		t.Fatalf("reviving an expired site OVER the cap must be rejected (full new size charged, expired old bytes NOT credited): got %v, want ErrOverUserQuota", err)
-	}
-	// The rejected replace left the site untouched (still expired v1/900).
-	if used, err := sr.SumActiveBytesByOwner("key:revx", after); err != nil {
-		t.Fatalf("sum after rejected revive: %v", err)
-	} else if used != 0 {
-		t.Fatalf("rejected over-cap revive must not mutate the row: got %d, want 0 (still expired)", used)
-	}
-
-	// A revive that FITS succeeds and then counts its full new size:
-	// 0 + 800 = 800 <= 1000 -> admit.
-	fit := siteOfV(slug, "key:revx", 800, "v3")
-	fit.CreatedAt = fixedNow
-	fit.UpdatedAt = after
-	fit.ExpiresAt = after.Add(domain.DefaultRetentionWindow)
-	if err := sr.ReplaceWithQuotaCheck(context.Background(), fit, 800, cap, after); err != nil {
-		t.Fatalf("reviving an expired site WITHIN the cap should succeed (full new size 800 <= 1000): %v", err)
-	}
-	if used, err := sr.SumActiveBytesByOwner("key:revx", after); err != nil {
-		t.Fatalf("sum after revive: %v", err)
-	} else if used != 800 {
-		t.Fatalf("revived site must count its full new size: got %d, want 800", used)
-	}
-}
-
-// conformSiteReplaceRestartsExpiry pins that a re-deploy RE-KEYS the expiry
-// index rather than leaving the old key dangling: the site is not reported
-// expired at a cutoff the original expires_at would have crossed.
-func conformSiteReplaceRestartsExpiry(t *testing.T, sr conformanceSiteRepo) {
-	const slug = "re123456"
-	v1 := siteOfV(slug, "key:re", 100, "v1")
-	v1.ExpiresAt = fixedNow.Add(time.Hour) // expires soon
-	insertSite(t, sr, v1)
-
-	// Re-deploy at +30m, pushing expiry a full retention window past that.
-	at := fixedNow.Add(30 * time.Minute)
-	v2 := siteOfV(slug, "key:re", 100, "v2")
-	v2.CreatedAt = fixedNow
-	v2.UpdatedAt = at
-	v2.ExpiresAt = at.Add(domain.DefaultRetentionWindow)
-	if err := sr.ReplaceWithQuotaCheck(context.Background(), v2, v2.Manifest.DedupedSize(), 0, at); err != nil {
-		t.Fatalf("replace restarting expiry: %v", err)
-	}
-
-	// +2h is past the ORIGINAL +1h expiry but before the new one.
-	cutoff := fixedNow.Add(2 * time.Hour)
-	refs, err := sr.ExpiredSites(cutoff)
-	if err != nil {
-		t.Fatalf("expired sites: %v", err)
-	}
-	if siteRefsHaveSlug(refs, slug) {
-		t.Fatalf("re-deployed site must NOT be expired at %v (expiry restarted): got %v", cutoff, refs)
-	}
-}
-
-func siteRefsHaveSlug(refs []domain.ExpiredSite, slug string) bool {
-	for _, ref := range refs {
-		if ref.Slug.String() == slug {
-			return true
-		}
-	}
-	return false
-}
-
 // conformSiteDeployAndReadBack pins that a multi-file manifest round-trips
 // through the backend's encoding identically: sha, size and content-type per
 // path, plus the site's timestamps.
@@ -386,7 +278,6 @@ func conformSiteDeployAndReadBack(t *testing.T, sr conformanceSiteRepo) {
 		Manifest:  man,
 		CreatedAt: fixedNow,
 		UpdatedAt: fixedNow,
-		ExpiresAt: fixedNow.Add(domain.DefaultRetentionWindow),
 	}
 	insertSite(t, sr, s)
 
@@ -396,10 +287,6 @@ func conformSiteDeployAndReadBack(t *testing.T, sr conformanceSiteRepo) {
 	}
 	if got.Slug != s.Slug || got.Identity != s.Identity {
 		t.Fatalf("site round-trip mismatch: got slug=%q id=%q", got.Slug, got.Identity)
-	}
-	if !got.CreatedAt.Equal(s.CreatedAt) || !got.ExpiresAt.Equal(s.ExpiresAt) {
-		t.Fatalf("site time round-trip mismatch: got %v/%v want %v/%v",
-			got.CreatedAt, got.ExpiresAt, s.CreatedAt, s.ExpiresAt)
 	}
 	if len(got.Manifest.Files) != len(s.Manifest.Files) {
 		t.Fatalf("manifest file count: got %d, want %d", len(got.Manifest.Files), len(s.Manifest.Files))
@@ -586,188 +473,6 @@ func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conform
 	}
 }
 
-// conformSiteExpiryAndSweep pins the expiry scan's inclusive boundary, that
-// Delete frees quota and is idempotent, and the read-time expiry exclusion from
-// the sum on backends that free quota at read time.
-func conformSiteExpiryAndSweep(t *testing.T, caps conformCaps, sr conformanceSiteRepo) {
-	soon := siteOf("se123456", "key:se", 100)
-	soon.ExpiresAt = fixedNow.Add(time.Hour)
-	insertSite(t, sr, soon)
-	far := siteOf("se223456", "key:se", 100)
-	far.ExpiresAt = fixedNow.Add(48 * time.Hour)
-	insertSite(t, sr, far)
-
-	// At a time past `soon` but before `far`, only `soon` is expired.
-	at := fixedNow.Add(2 * time.Hour)
-	refs, err := sr.ExpiredSites(at)
-	if err != nil {
-		t.Fatalf("expired sites: %v", err)
-	}
-	if !siteRefsHaveSlug(refs, "se123456") {
-		t.Fatalf("se123456 should be expired at %v, got %v", at, refs)
-	}
-	if siteRefsHaveSlug(refs, "se223456") {
-		t.Fatalf("se223456 should NOT be expired at %v, got %v", at, refs)
-	}
-	// Inclusive boundary: expires_at == now counts as expired.
-	atBoundary := fixedNow.Add(time.Hour)
-	refs, err = sr.ExpiredSites(atBoundary)
-	if err != nil {
-		t.Fatalf("expired sites at boundary: %v", err)
-	}
-	if !siteRefsHaveSlug(refs, "se123456") {
-		t.Fatalf("expires_at == now should be inclusive-expired, got %v", refs)
-	}
-
-	// At `at`, soon is expired-unswept and far is alive.
-	used, err := sr.SumActiveBytesByOwner("key:se", at)
-	if err != nil {
-		t.Fatalf("sum at expiry: %v", err)
-	}
-	if caps.ExpiryFreesQuotaAtReadTime {
-		if used != 100 {
-			t.Fatalf("read-time expiry: want 100 (only far counts), got %d", used)
-		}
-	} else {
-		if used != 200 {
-			t.Fatalf("sweep-time expiry: want 200 (expired-unswept still counts), got %d", used)
-		}
-	}
-
-	if err := sr.Delete("se123456"); err != nil {
-		t.Fatalf("delete site: %v", err)
-	}
-	if _, err := sr.Get("se123456"); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("deleted site should be gone: %v", err)
-	}
-	// Delete is idempotent (sweep may re-delete a slug a prior tick removed).
-	if err := sr.Delete("se123456"); err != nil {
-		t.Fatalf("re-delete missing site should be a no-op, got %v", err)
-	}
-	// The owner's live sum is now just far.
-	used, err = sr.SumActiveBytesByOwner("key:se", fixedNow)
-	if err != nil {
-		t.Fatalf("sum after delete: %v", err)
-	}
-	if used != 100 {
-		t.Fatalf("post-delete site sum: got %d, want 100", used)
-	}
-}
-
-// conformDeleteExpiredSite pins the site half of the expiry-pass delete
-// contract (docs/SPEC.md "Static-site storage", sweep path): processing a
-// scanned reference deletes the record and reports true, not-yet-expired sites
-// are untouched, and one pass DRAINS the scan, so a re-scan sees zero
-// references and a re-processed reference is a no-op reporting false.
-func conformDeleteExpiredSite(t *testing.T, sr conformanceSiteRepo) {
-	dead := siteOf("ds123456", "key:ds", 100)
-	dead.ExpiresAt = fixedNow.Add(time.Hour)
-	insertSite(t, sr, dead)
-
-	alive := siteOf("ds223456", "key:ds", 100)
-	alive.ExpiresAt = fixedNow.Add(48 * time.Hour)
-	insertSite(t, sr, alive)
-
-	at := fixedNow.Add(2 * time.Hour)
-	refs, err := sr.ExpiredSites(at)
-	if err != nil {
-		t.Fatalf("expired sites: %v", err)
-	}
-	if len(refs) != 1 || refs[0].Slug != "ds123456" {
-		t.Fatalf("only ds123456 should be expired at %v, got %v", at, refs)
-	}
-
-	deleted, err := sr.DeleteExpiredSite(refs[0])
-	if err != nil {
-		t.Fatalf("delete expired site: %v", err)
-	}
-	if !deleted {
-		t.Fatalf("DeleteExpiredSite must report true for a live site record")
-	}
-	if _, err := sr.Get("ds123456"); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("expired site should be gone after DeleteExpiredSite: %v", err)
-	}
-
-	again, err := sr.ExpiredSites(at)
-	if err != nil {
-		t.Fatalf("expired sites (re-scan): %v", err)
-	}
-	if len(again) != 0 {
-		t.Fatalf("re-scan after the pass must see zero expired site references, got %v", again)
-	}
-
-	// The sweep's deleted-count must reflect real record deletions only.
-	deleted, err = sr.DeleteExpiredSite(refs[0])
-	if err != nil {
-		t.Fatalf("re-processed site reference must no-op, got: %v", err)
-	}
-	if deleted {
-		t.Fatalf("DeleteExpiredSite must report false when the site record was already gone")
-	}
-
-	if _, err := sr.Get("ds223456"); err != nil {
-		t.Fatalf("active site must survive the expiry pass: %v", err)
-	}
-}
-
-// conformSiteExpirySubSecondOrdering pins that the expiry-index key's BYTE
-// order equals TIME order within a shared whole second.
-//
-// It fails on a variable-width timestamp: under time.RFC3339Nano (trailing
-// fractional zeros dropped) a key at "...00.5Z" sorts BEFORE a whole-second
-// cutoff "...00Z" because '.' < 'Z', so a site expiring later in the second is
-// reported expired at an earlier cutoff and swept up to ~1s early. Zero-padded
-// 9-digit nanos are what make the two orders agree.
-func conformSiteExpirySubSecondOrdering(t *testing.T, sr conformanceSiteRepo) {
-	base := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
-
-	late := siteOf("essLate1", "key:ess", 100)
-	late.ExpiresAt = base.Add(500 * time.Millisecond) // 12:00:00.5
-	insertSite(t, sr, late)
-
-	early := siteOf("essEarly", "key:ess", 100)
-	early.ExpiresAt = base // 12:00:00.0
-	insertSite(t, sr, early)
-
-	// At a .0s cutoff the .5s site has NOT expired and the .0s site has
-	// (inclusive boundary).
-	atStart := base // 12:00:00.0
-	refs, err := sr.ExpiredSites(atStart)
-	if err != nil {
-		t.Fatalf("expired sites at .0s: %v", err)
-	}
-	if siteRefsHaveSlug(refs, "essLate1") {
-		t.Fatalf("site expiring at .5s must NOT be expired at a .0s cutoff (sub-second ordering bug), got %v", refs)
-	}
-	if !siteRefsHaveSlug(refs, "essEarly") {
-		t.Fatalf("site expiring at .0s should be inclusive-expired at a .0s cutoff, got %v", refs)
-	}
-
-	// At .5s both are expired: the .5s site sits on the inclusive boundary.
-	atHalf := base.Add(500 * time.Millisecond) // 12:00:00.5
-	refs, err = sr.ExpiredSites(atHalf)
-	if err != nil {
-		t.Fatalf("expired sites at .5s: %v", err)
-	}
-	if !siteRefsHaveSlug(refs, "essLate1") {
-		t.Fatalf("site expiring at .5s should be inclusive-expired at a .5s cutoff, got %v", refs)
-	}
-	if !siteRefsHaveSlug(refs, "essEarly") {
-		t.Fatalf("site expiring at .0s should still be expired at a .5s cutoff, got %v", refs)
-	}
-
-	// A cutoff just below leaves it unexpired: the boundary is real
-	// sub-second time, not whole-second rounding.
-	atBelow := base.Add(400 * time.Millisecond) // 12:00:00.4
-	refs, err = sr.ExpiredSites(atBelow)
-	if err != nil {
-		t.Fatalf("expired sites at .4s: %v", err)
-	}
-	if siteRefsHaveSlug(refs, "essLate1") {
-		t.Fatalf("site expiring at .5s must NOT be expired at a .4s cutoff, got %v", refs)
-	}
-}
-
 // conformSiteReferencedBlobSHAs pins the site-side referenced-blob set the
 // sweep unions into its keep-alive set, including its deduplication.
 func conformSiteReferencedBlobSHAs(t *testing.T, sr conformanceSiteRepo) {
@@ -786,8 +491,7 @@ func conformSiteReferencedBlobSHAs(t *testing.T, sr conformanceSiteRepo) {
 	man.Add("copy.html", domain.ManifestEntry{SHA: "sha-ref-index", Size: 10, ContentType: "text/html; charset=utf-8"})
 	s := domain.Site{
 		Slug: "rf123456", Identity: "key:rf", Manifest: man,
-		CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: fixedNow, UpdatedAt: fixedNow}
 	insertSite(t, sr, s)
 
 	refs, err = sr.ReferencedSiteBlobSHAs()
@@ -817,8 +521,7 @@ func conformSiteDedupedSizeCharged(t *testing.T, sr conformanceSiteRepo) {
 	man.Add("c.html", domain.ManifestEntry{SHA: "sha-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
 	s := domain.Site{
 		Slug: "dd123456", Identity: "key:dd", Manifest: man,
-		CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: fixedNow, UpdatedAt: fixedNow}
 	// Three paths, one distinct blob: 400, not 1200.
 	if got := s.Manifest.DedupedSize(); got != 400 {
 		t.Fatalf("DedupedSize should be 400 (one distinct blob), got %d", got)

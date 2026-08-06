@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
 )
@@ -29,10 +28,9 @@ func gzTar(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-// TestSweep_ExpiresSitesAndProtectsSharedBlobs pins the union keep-alive
-// across kinds: a blob shared by a paste and a site is collected only once
-// NEITHER references it.
-func TestSweep_ExpiresSitesAndProtectsSharedBlobs(t *testing.T) {
+// The GC keep-set is the UNION across kinds: a blob shared by a paste and a
+// site is collected only once NEITHER references it.
+func TestSweep_SharedBlobSurvivesUntilBothKindsRelease(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "sweep.db"))
 	if err != nil {
@@ -49,13 +47,25 @@ func TestSweep_ExpiresSitesAndProtectsSharedBlobs(t *testing.T) {
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 
+	// A survivor keeps the keep-set non-empty: on an empty set the sweep's
+	// abort-on-zero-refs guard refuses to GC anything, so the fixture could not
+	// observe a collection.
+	survivor := service.NewUpload(pastes, service.NewStandaloneBlobUnit(blobs))
+	t.Cleanup(survivor.WaitFinalize)
+	survivor.Now = func() time.Time { return now }
+	if _, err := survivor.Create(bytes.NewReader([]byte("<!doctype html><p>survivor</p>")), "key:survivor", "", ""); err != nil {
+		t.Fatalf("survivor upload: %v", err)
+	}
+	survivor.WaitFinalize()
+
 	// Identical bytes uploaded as a paste AND deployed as a site, so the two
 	// records share one blob.
 	shared := "<!doctype html><h1>shared bytes</h1>"
 	upload := service.NewUpload(pastes, service.NewStandaloneBlobUnit(blobs))
 	t.Cleanup(upload.WaitFinalize)
 	upload.Now = func() time.Time { return now }
-	if _, err := upload.Create(bytes.NewReader([]byte(shared)), "key:paste-owner", "", ""); err != nil {
+	up, err := upload.Create(bytes.NewReader([]byte(shared)), "key:paste-owner", "", "")
+	if err != nil {
 		t.Fatalf("paste upload: %v", err)
 	}
 
@@ -65,106 +75,40 @@ func TestSweep_ExpiresSitesAndProtectsSharedBlobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
+	sha := res.Site.Manifest.Files["index.html"].SHA
 
 	logger := log.New(io.Discard, "", 0)
 	sweep := service.NewSweep(pastes, disk, logger)
 	sweep.Sites = sites
 
-	future := now.Add(domain.DefaultRetentionWindow + 24*time.Hour)
-
-	// Both records were created at `now` with the same retention, so both are
-	// alive here and both expire by `future`.
-	deleted, gc, err := sweep.Once(now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("sweep early: %v", err)
-	}
-	if deleted != 0 || gc != 0 {
-		t.Fatalf("nothing should sweep early: deleted=%d gc=%d", deleted, gc)
+	// Both alive: nothing to collect.
+	if gc, err := sweep.Once(now); err != nil || gc != 0 {
+		t.Fatalf("both records alive: gc=%d err=%v, want 0/nil", gc, err)
 	}
 
-	sha := res.Site.Manifest.Files["index.html"].SHA
+	// Drop the paste. The site still references the blob, so it survives.
+	if err := pastes.Delete(up.Paste.Slug); err != nil {
+		t.Fatalf("delete paste: %v", err)
+	}
+	if gc, err := sweep.Once(now); err != nil || gc != 0 {
+		t.Fatalf("site still references the blob: gc=%d err=%v, want 0/nil", gc, err)
+	}
 	if _, err := blobs.Get(sha); err != nil {
-		t.Fatalf("shared blob missing before sweep: %v", err)
+		t.Fatalf("shared blob wrongly collected while the site referenced it: %v", err)
 	}
 
-	// At `future` both records have expired, so nothing references the shared
-	// blob and it is collected.
-	deleted, gc, err = sweep.Once(future)
-	if err != nil {
-		t.Fatalf("sweep future: %v", err)
+	// Drop the site too. Now nothing references the blob.
+	if err := sites.Delete(res.Site.Slug); err != nil {
+		t.Fatalf("delete site: %v", err)
 	}
-	if deleted != 2 {
-		t.Fatalf("expected 2 records expired (paste+site), got %d", deleted)
-	}
-	if gc != 1 {
-		t.Fatalf("expected 1 shared blob GC'd, got %d", gc)
-	}
-	if _, err := sites.Get(res.Site.Slug); err == nil {
-		t.Fatalf("site should be deleted after expiry")
+	if gc, err := sweep.Once(now); err != nil || gc != 1 {
+		t.Fatalf("blob unreferenced by both kinds: gc=%d err=%v, want 1/nil", gc, err)
 	}
 }
 
-// TestSweep_SiteIndexNoOpsNotCountedAsDeleted pins the site half of the
-// expiry-pass contract: an expired index entry whose site record is ALREADY
-// GONE is an index cleanup, not a record deletion, so the deleted-count must
-// not include it. Counting it reports a constant nonzero deletion every cycle
-// forever.
-func TestSweep_SiteIndexNoOpsNotCountedAsDeleted(t *testing.T) {
-	sites := &orphanSiteSweep{ref: domain.ExpiredSite{
-		Slug:     "ctimu4qh",
-		IndexRef: "expiry_sites/2026-07-03T21:22:23.536246341Z/ctimu4qh",
-	}}
-	sweep := service.NewSweep(noopSweepRepo{}, nil, log.New(io.Discard, "", 0))
-	sweep.Sites = sites
-
-	now := time.Date(2026, 7, 7, 0, 0, 0, 0, time.UTC)
-	deleted, _, err := sweep.Once(now)
-	if err != nil {
-		t.Fatalf("sweep: %v", err)
-	}
-	if deleted != 0 {
-		t.Fatalf("a site-index no-op (record already gone) must not count as a deletion: got %d, want 0", deleted)
-	}
-	// The cleanup must target the surfaced index entry, not a re-derivation.
-	if len(sites.gotRefs) != 1 || sites.gotRefs[0] != sites.ref {
-		t.Fatalf("DeleteExpiredSite must receive the exact scanned ref; got %+v", sites.gotRefs)
-	}
-
-	deleted, _, err = sweep.Once(now)
-	if err != nil {
-		t.Fatalf("sweep 2: %v", err)
-	}
-	if deleted != 0 || len(sites.gotRefs) != 1 {
-		t.Fatalf("second pass must see zero expired sites: deleted=%d calls=%d", deleted, len(sites.gotRefs))
-	}
-}
-
-// orphanSiteSweep is a SweepSites whose expiry scan surfaces one entry
-// referencing a site record that is already gone, so the record delete is an
-// idempotent no-op and the entry cleanup drains the scan.
-type orphanSiteSweep struct {
-	ref     domain.ExpiredSite
-	drained bool
-	gotRefs []domain.ExpiredSite
-}
-
-func (s *orphanSiteSweep) ExpiredSites(_ time.Time) ([]domain.ExpiredSite, error) {
-	if s.drained {
-		return nil, nil
-	}
-	return []domain.ExpiredSite{s.ref}, nil
-}
-
-func (s *orphanSiteSweep) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
-	s.gotRefs = append(s.gotRefs, ref)
-	s.drained = true
-	return false, nil
-}
-
-func (s *orphanSiteSweep) ReferencedSiteBlobSHAs() ([]string, error) { return nil, nil }
-
-// TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt: two sites share a
-// blob, one expires, the blob lives.
+// Two sites sharing one blob: deleting one leaves the blob referenced by the
+// other. Pins that the site-side keep-set is a union across sites, not a
+// last-writer-wins single reference.
 func TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "sweep.db"))
@@ -190,10 +134,8 @@ func TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt(t *testing.T) {
 		t.Fatalf("deploy A: %v", err)
 	}
 
-	// Site B is deployed 3 days later, so it is still alive when A expires.
-	t1 := t0.Add(3 * 24 * time.Hour)
 	deployB := service.NewDeploySite(sites, pastes, service.NewStandaloneBlobUnit(blobs))
-	deployB.Now = func() time.Time { return t1 }
+	deployB.Now = func() time.Time { return t0 }
 	if _, err := deployB.Deploy(bytes.NewReader(gzTar(t, map[string]string{"index.html": shared})), "key:b"); err != nil {
 		t.Fatalf("deploy B: %v", err)
 	}
@@ -202,13 +144,12 @@ func TestSweep_SiteBlobSurvivesWhileAnotherSiteReferencesIt(t *testing.T) {
 	sweep := service.NewSweep(pastes, disk, logger)
 	sweep.Sites = sites
 
-	// Past A's window only: B still references the shared blob.
-	deleted, gc, err := sweep.Once(t0.Add(domain.DefaultRetentionWindow + 24*time.Hour))
+	if err := sites.Delete(resA.Site.Slug); err != nil {
+		t.Fatalf("delete site A: %v", err)
+	}
+	gc, err := sweep.Once(t0)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
-	}
-	if deleted != 1 {
-		t.Fatalf("expected only site A expired, got %d", deleted)
 	}
 	if gc != 0 {
 		t.Fatalf("shared blob must survive while site B references it; gc=%d", gc)

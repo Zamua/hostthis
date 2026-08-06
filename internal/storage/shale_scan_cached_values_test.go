@@ -49,8 +49,7 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 	p := domain.Paste{
 		Slug: slug, Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-cachesz-v1", Size: 300,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert v1: %v", err)
 	}
@@ -88,7 +87,7 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 	// because the scan never resolves the head row. Bounded over-count: it
 	// counts until the reconciler prunes it.
 	staleKey := storage.IdentityPasteKeyForTest(owner, "cachegon")
-	writeIndexEntryJSON(t, repo, staleKey, 999, now.Add(domain.DefaultRetentionWindow))
+	writeIndexEntryJSON(t, repo, staleKey, 999, now)
 	if got := mustSum(t, repo, owner, now); got != 200+999 {
 		t.Fatalf("a stale-but-decodable entry must contribute its cached value (no per-entry fan-out): got %d, want %d", got, 200+999)
 	}
@@ -126,7 +125,7 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 	// forever.
 	orphanOwner := "key:cacheorph"
 	orphanKey := storage.IdentityPasteKeyForTest(orphanOwner, "orphgone")
-	writeIndexEntryJSON(t, repo, orphanKey, 777, now.Add(domain.DefaultRetentionWindow))
+	writeIndexEntryJSON(t, repo, orphanKey, 777, now)
 	if got := mustSum(t, repo, orphanOwner, now); got != 777 {
 		t.Fatalf("pre-reconcile orphan sum: got %d, want 777 (cached value counts until pruned)", got)
 	}
@@ -159,8 +158,7 @@ func TestShaleQuotaScanFailClosed(t *testing.T) {
 	good := domain.Paste{
 		Slug: domain.Slug("qfcgood1"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-qfc", Size: 100,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	if err := repo.InsertWithQuotaCheck(context.Background(), good, 0, now); err != nil {
 		t.Fatalf("insert good: %v", err)
 	}
@@ -236,7 +234,7 @@ func TestShaleReconcileDoesNotResurrectFailedPasteEntry(t *testing.T) {
 	// A leftover entry models a crash between MarkFailed's status flip and its
 	// entry drop: it over-counts for the bounded window, and the prune drops
 	// it even though the head row still exists, because that row is failed.
-	writeIndexEntryJSON(t, repo, idxKey, 400, now.Add(domain.DefaultRetentionWindow))
+	writeIndexEntryJSON(t, repo, idxKey, 400, now)
 	if got := mustSum(t, repo, owner, now); got != 400 {
 		t.Fatalf("leftover failed-paste entry should count until pruned (bounded over-count): got %d, want 400", got)
 	}
@@ -275,8 +273,7 @@ func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
 	})
 	site := domain.Site{
 		Slug: slug, Identity: domain.Identity(owner), Manifest: man,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	if err := repo.InsertSiteWithQuotaCheck(context.Background(), site, 400, 0, now); err != nil {
 		t.Fatalf("deploy site: %v", err)
 	}
@@ -297,8 +294,7 @@ func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
 	})
 	site2 := domain.Site{
 		Slug: slug, Identity: domain.Identity(owner), Manifest: man2,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	if err := repo.ReplaceSiteWithQuotaCheck(context.Background(), site2, 250, 0, now); err != nil {
 		t.Fatalf("replace site: %v", err)
 	}
@@ -331,7 +327,7 @@ func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
 	// authoritative sites counts until pruned.
 	orphanOwner := "key:sitecorph"
 	orphanKey := storage.IdentitySiteKeyForTest(orphanOwner, "sitegone")
-	writeIndexEntryJSON(t, repo, orphanKey, 777, now.Add(domain.DefaultRetentionWindow))
+	writeIndexEntryJSON(t, repo, orphanKey, 777, now)
 	if got := mustSiteSum(t, repo, orphanOwner, now); got != 777 {
 		t.Fatalf("pre-reconcile orphan site sum: got %d, want 777 (cached value counts until pruned)", got)
 	}
@@ -380,13 +376,11 @@ func TestShaleQuotaParityWithSqlite(t *testing.T) {
 	p1 := domain.Paste{
 		Slug: domain.Slug("parity1a"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-parity1", Size: 300,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	p2 := domain.Paste{
 		Slug: domain.Slug("parity2b"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-parity2", Size: 200,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 
 	assertParity := func(step string) {
 		t.Helper()
@@ -512,13 +506,12 @@ func writeCachedIndexSize(t *testing.T, repo *storage.ShaleRepo, idxKey []byte, 
 // authoritative rows may not exist, the shape a crash mid-delete leaves. The
 // field set is the shared subset of identityPasteRow / identitySiteRow, so one
 // helper serves both families.
-func writeIndexEntryJSON(t *testing.T, repo *storage.ShaleRepo, idxKey []byte, size int, expiresAt time.Time) {
+func writeIndexEntryJSON(t *testing.T, repo *storage.ShaleRepo, idxKey []byte, size int, createdAt time.Time) {
 	t.Helper()
 	out, err := json.Marshal(map[string]any{
 		"name":       "",
 		"size":       size,
-		"created_at": expiresAt.Add(-domain.DefaultRetentionWindow),
-		"expires_at": expiresAt,
+		"created_at": createdAt,
 	})
 	if err != nil {
 		t.Fatalf("encode index entry: %v", err)

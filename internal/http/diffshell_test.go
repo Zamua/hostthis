@@ -18,7 +18,6 @@ func diffPaste(slug, sha string, now time.Time) domain.Paste {
 		Kind:       domain.KindDiff,
 		ContentSHA: sha,
 		UpdatedAt:  now,
-		ExpiresAt:  now.Add(7 * 24 * time.Hour),
 	}
 }
 

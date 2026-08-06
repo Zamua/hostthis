@@ -47,7 +47,6 @@ func TestShaleMigration_RawValueRoundTrips(t *testing.T) {
 		PinnedVersion: 0,
 		CreatedAt:     now,
 		UpdatedAt:     now,
-		ExpiresAt:     now.Add(domain.DefaultRetentionWindow),
 	}
 
 	pasteVal, err := storage.LegacyPasteValueForTest(p)
@@ -64,7 +63,6 @@ func TestShaleMigration_RawValueRoundTrips(t *testing.T) {
 	mustPutRaw(t, repo, storage.LegacyPasteKeyForTest(slug), pasteVal)
 	mustPutRaw(t, repo, storage.LegacyVersionKeyForTest(slug, 1), v1Val)
 	mustPutRaw(t, repo, storage.LegacySlugOwnerKeyForTest(slug), []byte(owner))
-	mustPutRaw(t, repo, storage.LegacyExpiryKeyForTest(p.ExpiresAt, slug), storage.MarkerValueForTest())
 
 	got, err := repo.Get(slug)
 	if err != nil {
@@ -74,10 +72,6 @@ func TestShaleMigration_RawValueRoundTrips(t *testing.T) {
 		got.ContentSHA != p.ContentSHA || got.Size != p.Size || got.Name != p.Name ||
 		got.PinnedVersion != p.PinnedVersion {
 		t.Fatalf("legacy paste did not round-trip:\n got  %+v\n want %+v", got, p)
-	}
-	if !got.CreatedAt.Equal(p.CreatedAt) || !got.UpdatedAt.Equal(p.UpdatedAt) || !got.ExpiresAt.Equal(p.ExpiresAt) {
-		t.Fatalf("legacy paste timestamps drifted: got %v/%v/%v want %v/%v/%v",
-			got.CreatedAt, got.UpdatedAt, got.ExpiresAt, p.CreatedAt, p.UpdatedAt, p.ExpiresAt)
 	}
 
 	gotV, err := repo.GetVersion(slug, 1)
@@ -95,15 +89,6 @@ func TestShaleMigration_RawValueRoundTrips(t *testing.T) {
 	}
 	if len(vers) != 1 || vers[0].VerNum != 1 {
 		t.Fatalf("ListVersions over legacy rows: got %+v, want one v1", vers)
-	}
-
-	// The expiry index marker is honored by the sweep's scan.
-	expired, err := repo.ExpiredPastes(p.ExpiresAt.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("ExpiredPastes: %v", err)
-	}
-	if !refsHaveSlug(expired, slug.String()) {
-		t.Fatalf("legacy expiry index not honored: %v should contain %q", expired, slug)
 	}
 
 	// The content sha must be in the referenced set (the GC allow-list) or the

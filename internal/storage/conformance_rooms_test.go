@@ -39,8 +39,8 @@ type roomConformanceStores struct {
 	Site  conformanceSiteRepo
 }
 
-// mkConformRoom creates an empty room under app with a fresh UUIDv4, the
-// standard retention window, and no caps.
+// mkConformRoom creates an empty room under app with a fresh UUIDv4 and no
+// caps.
 func mkConformRoom(t *testing.T, rr conformanceRoomRepo, app string, now time.Time) domain.Room {
 	t.Helper()
 	room := domain.Room{
@@ -48,7 +48,6 @@ func mkConformRoom(t *testing.T, rr conformanceRoomRepo, app string, now time.Ti
 		ID:        domain.NewRoomID(),
 		CreatedAt: now,
 		UpdatedAt: now,
-		ExpiresAt: now.Add(domain.RoomRetentionWindow),
 	}
 	if err := rr.CreateRoom(room, "10.0.0.0/24", 0, now); err != nil {
 		t.Fatalf("create room under %q: %v", app, err)
@@ -73,9 +72,6 @@ func runRoomConformance(t *testing.T, name string, caps conformCaps, newRooms fu
 	t.Run(name+"/Rooms/CreationRateLimitCounts", func(t *testing.T) { conformRoomCreationRateLimitCounts(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/CreationLedgerPrune", func(t *testing.T) { conformRoomCreationLedgerPrune(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/AppExistenceNotRepoGated", func(t *testing.T) { conformRoomAppExistenceNotRepoGated(t, newRooms(t).Rooms) })
-	t.Run(name+"/Rooms/ExpiryAndSweep", func(t *testing.T) { conformRoomExpiryAndSweep(t, newRooms(t).Rooms) })
-	t.Run(name+"/Rooms/DeleteExpiredRoom", func(t *testing.T) { conformDeleteExpiredRoom(t, newRooms(t).Rooms) })
-	t.Run(name+"/Rooms/ExpirySubSecondOrdering", func(t *testing.T) { conformRoomExpirySubSecondOrdering(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/SeqDenseAssignment", func(t *testing.T) { conformRoomSeqDenseAssignment(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/SeqConcurrentWritersUniqueDense", func(t *testing.T) { conformRoomSeqConcurrentWritersUniqueDense(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/SeqScanExactUnderConcurrentWrites", func(t *testing.T) { conformRoomSeqScanExactUnderConcurrentWrites(t, newRooms(t).Rooms) })
@@ -179,8 +175,8 @@ func conformRoomCrossRoomIsolation(t *testing.T, rr conformanceRoomRepo) {
 func conformRoomCrossAppIsolation(t *testing.T, rr conformanceRoomRepo) {
 	id := domain.NewRoomID()
 	now := fixedNow
-	roomA := domain.Room{AppSlug: "app1aaaa", ID: id, CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RoomRetentionWindow)}
-	roomB := domain.Room{AppSlug: "app2bbbb", ID: id, CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.RoomRetentionWindow)}
+	roomA := domain.Room{AppSlug: "app1aaaa", ID: id, CreatedAt: now, UpdatedAt: now}
+	roomB := domain.Room{AppSlug: "app2bbbb", ID: id, CreatedAt: now, UpdatedAt: now}
 	if err := rr.CreateRoom(roomA, "10.0.0.0/24", 0, now); err != nil {
 		t.Fatalf("create room under app1: %v", err)
 	}
@@ -407,13 +403,13 @@ func conformRoomCreationRateLimitCounts(t *testing.T, rr conformanceRoomRepo) {
 
 	// 3 rooms from subnet A and 2 from subnet B, all under one app.
 	for i := range 3 {
-		room := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.RoomRetentionWindow)}
+		room := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: fixedNow, UpdatedAt: fixedNow}
 		if err := rr.CreateRoom(room, subnetA, 0, fixedNow); err != nil {
 			t.Fatalf("create A%d: %v", i, err)
 		}
 	}
 	for i := range 2 {
-		room := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.RoomRetentionWindow)}
+		room := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: fixedNow, UpdatedAt: fixedNow}
 		if err := rr.CreateRoom(room, subnetB, 0, fixedNow); err != nil {
 			t.Fatalf("create B%d: %v", i, err)
 		}
@@ -437,7 +433,7 @@ func conformRoomCreationRateLimitCounts(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("per-subnet count for B: got %d, want 2", perSubnetB)
 	}
 	old := fixedNow.Add(-2 * window)
-	oldRoom := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: old, UpdatedAt: old, ExpiresAt: old.Add(domain.RoomRetentionWindow)}
+	oldRoom := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: old, UpdatedAt: old}
 	if err := rr.CreateRoom(oldRoom, subnetA, 0, old); err != nil {
 		t.Fatalf("create old: %v", err)
 	}
@@ -459,12 +455,12 @@ func conformRoomCreationLedgerPrune(t *testing.T, rr conformanceRoomRepo) {
 
 	old := fixedNow.Add(-2 * window)
 	for i := range 2 {
-		room := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: old, UpdatedAt: old, ExpiresAt: old.Add(domain.RoomRetentionWindow)}
+		room := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: old, UpdatedAt: old}
 		if err := rr.CreateRoom(room, subnet, 0, old); err != nil {
 			t.Fatalf("create old %d: %v", i, err)
 		}
 	}
-	fresh := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.RoomRetentionWindow)}
+	fresh := domain.Room{AppSlug: app, ID: domain.NewRoomID(), CreatedAt: fixedNow, UpdatedAt: fixedNow}
 	if err := rr.CreateRoom(fresh, subnet, 0, fixedNow); err != nil {
 		t.Fatalf("create fresh: %v", err)
 	}
@@ -489,7 +485,7 @@ func conformRoomCreationLedgerPrune(t *testing.T, rr conformanceRoomRepo) {
 // naming no live site or paste. The slug-names-a-live-app rule is an
 // HTTP-layer concern, not a repo one.
 func conformRoomAppExistenceNotRepoGated(t *testing.T, rr conformanceRoomRepo) {
-	room := domain.Room{AppSlug: "noappxyz", ID: domain.NewRoomID(), CreatedAt: fixedNow, UpdatedAt: fixedNow, ExpiresAt: fixedNow.Add(domain.RoomRetentionWindow)}
+	room := domain.Room{AppSlug: "noappxyz", ID: domain.NewRoomID(), CreatedAt: fixedNow, UpdatedAt: fixedNow}
 	if err := rr.CreateRoom(room, "10.0.0.0/24", 0, fixedNow); err != nil {
 		t.Fatalf("repo CreateRoom should not be app-existence-gated: %v", err)
 	}
@@ -498,193 +494,7 @@ func conformRoomAppExistenceNotRepoGated(t *testing.T, rr conformanceRoomRepo) {
 	}
 }
 
-// conformRoomExpiryAndSweep: ExpiredRooms returns one reference per room
-// whose ExpiresAt <= now (inclusive boundary), DeleteExpiredRoom removes the
-// room and cascades to its values, and an unexpired room is left alone.
-func conformRoomExpiryAndSweep(t *testing.T, rr conformanceRoomRepo) {
-	const app = "app12345"
-	// A PUT resets the retention clock to its write time + window, which is
-	// how each room below gets a known ExpiresAt.
-	soon := mkConformRoom(t, rr, app, fixedNow)
-	writeAt := fixedNow.Add(-domain.RoomRetentionWindow).Add(time.Hour)
-	if _, err := rr.PutValue(soon.AppSlug, soon.ID, "k", []byte("v"), 0, writeAt); err != nil {
-		t.Fatalf("put to set soon expiry: %v", err)
-	}
-	far := mkConformRoom(t, rr, app, fixedNow)
-	if _, err := rr.PutValue(far.AppSlug, far.ID, "k", []byte("v"), 0, fixedNow); err != nil {
-		t.Fatalf("put to set far expiry: %v", err)
-	}
-
-	at := fixedNow.Add(2 * time.Hour)
-	expired, err := rr.ExpiredRooms(at)
-	if err != nil {
-		t.Fatalf("expired rooms: %v", err)
-	}
-	if !refsHas(expired, soon.AppSlug, soon.ID) {
-		t.Fatalf("soon room should be expired at %v, got %v", at, expired)
-	}
-	if refsHas(expired, far.AppSlug, far.ID) {
-		t.Fatalf("far room should NOT be expired at %v, got %v", at, expired)
-	}
-
-	// Inclusive boundary: ExpiresAt == now counts as expired.
-	atBoundary := writeAt.Add(domain.RoomRetentionWindow)
-	expired, err = rr.ExpiredRooms(atBoundary)
-	if err != nil {
-		t.Fatalf("expired rooms at boundary: %v", err)
-	}
-	soonRef, ok := refFor(expired, soon.AppSlug, soon.ID)
-	if !ok {
-		t.Fatalf("ExpiresAt == now should be inclusive-expired, got %v", expired)
-	}
-
-	// Processing the surfaced reference cascades to the room's values.
-	deleted, err := rr.DeleteExpiredRoom(soonRef)
-	if err != nil {
-		t.Fatalf("delete expired room: %v", err)
-	}
-	if !deleted {
-		t.Fatalf("DeleteExpiredRoom must report true for a live room record")
-	}
-	if _, err := rr.GetRoom(soon.AppSlug, soon.ID); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("deleted room should be gone: %v", err)
-	}
-	if _, err := rr.GetValue(soon.AppSlug, soon.ID, "k"); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("deleted room's value should be cascaded away: %v", err)
-	}
-	// The sweep may re-process a reference a prior tick already handled.
-	deleted, err = rr.DeleteExpiredRoom(soonRef)
-	if err != nil {
-		t.Fatalf("re-processed room reference must no-op, got %v", err)
-	}
-	if deleted {
-		t.Fatalf("DeleteExpiredRoom must report false when the room record was already gone")
-	}
-	if _, err := rr.GetRoom(far.AppSlug, far.ID); err != nil {
-		t.Fatalf("far room should survive the sweep of soon: %v", err)
-	}
-}
-
-// conformDeleteExpiredRoom pins the room half of the expiry-pass delete
-// contract (docs/SPEC.md "Room storage on the slatedb (and shale) backend"):
-// processing a scanned reference deletes the room record and reports true,
-// leaves unexpired rooms alone, and DRAINS the scan, so a re-scan sees zero
-// references and a re-processed reference no-ops reporting false.
-func conformDeleteExpiredRoom(t *testing.T, rr conformanceRoomRepo) {
-	const app = "app12345"
-	dead := mkConformRoom(t, rr, app, fixedNow)
-	// Write at (fixedNow - window + hour) so ExpiresAt = fixedNow + 1h.
-	writeAt := fixedNow.Add(-domain.RoomRetentionWindow).Add(time.Hour)
-	if _, err := rr.PutValue(dead.AppSlug, dead.ID, "k", []byte("v"), 0, writeAt); err != nil {
-		t.Fatalf("put to set dead expiry: %v", err)
-	}
-	alive := mkConformRoom(t, rr, app, fixedNow)
-	if _, err := rr.PutValue(alive.AppSlug, alive.ID, "k", []byte("v"), 0, fixedNow); err != nil {
-		t.Fatalf("put to set alive expiry: %v", err)
-	}
-
-	at := fixedNow.Add(2 * time.Hour)
-	refs, err := rr.ExpiredRooms(at)
-	if err != nil {
-		t.Fatalf("expired rooms: %v", err)
-	}
-	if len(refs) != 1 || refs[0].AppSlug != dead.AppSlug || refs[0].ID != dead.ID {
-		t.Fatalf("only the dead room should be expired at %v, got %v", at, refs)
-	}
-
-	deleted, err := rr.DeleteExpiredRoom(refs[0])
-	if err != nil {
-		t.Fatalf("delete expired room: %v", err)
-	}
-	if !deleted {
-		t.Fatalf("DeleteExpiredRoom must report true for a live room record")
-	}
-	if _, err := rr.GetRoom(dead.AppSlug, dead.ID); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("expired room should be gone after DeleteExpiredRoom: %v", err)
-	}
-
-	again, err := rr.ExpiredRooms(at)
-	if err != nil {
-		t.Fatalf("expired rooms (re-scan): %v", err)
-	}
-	if len(again) != 0 {
-		t.Fatalf("re-scan after the pass must see zero expired room references, got %v", again)
-	}
-
-	// The sweep's deleted-count must reflect only real record deletions.
-	deleted, err = rr.DeleteExpiredRoom(refs[0])
-	if err != nil {
-		t.Fatalf("re-processed room reference must no-op, got: %v", err)
-	}
-	if deleted {
-		t.Fatalf("DeleteExpiredRoom must report false when the room record was already gone")
-	}
-
-	if _, err := rr.GetRoom(alive.AppSlug, alive.ID); err != nil {
-		t.Fatalf("active room must survive the expiry pass: %v", err)
-	}
-}
-
-// conformRoomExpirySubSecondOrdering pins that the room expiry index orders by
-// TIME within a shared whole second. Under a variable-width timestamp a room
-// expiring at "...00.5Z" sorts BEFORE a whole-second cutoff "...00Z" and is
-// swept up to ~1s early; the fixed-width format makes byte order == time order.
-func conformRoomExpirySubSecondOrdering(t *testing.T, rr conformanceRoomRepo) {
-	const app = "app12345"
-	base := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
-
-	// Expires half a second into the whole second.
-	late := mkConformRoom(t, rr, app, base)
-	lateWriteAt := base.Add(-domain.RoomRetentionWindow).Add(500 * time.Millisecond)
-	if _, err := rr.PutValue(late.AppSlug, late.ID, "k", []byte("v"), 0, lateWriteAt); err != nil {
-		t.Fatalf("put to set late (.5s) expiry: %v", err)
-	}
-	// Expires at the START of the same whole second.
-	early := mkConformRoom(t, rr, app, base)
-	earlyWriteAt := base.Add(-domain.RoomRetentionWindow)
-	if _, err := rr.PutValue(early.AppSlug, early.ID, "k", []byte("v"), 0, earlyWriteAt); err != nil {
-		t.Fatalf("put to set early (.0s) expiry: %v", err)
-	}
-
-	atStart := base
-	expired, err := rr.ExpiredRooms(atStart)
-	if err != nil {
-		t.Fatalf("expired at .0s: %v", err)
-	}
-	if refsHas(expired, late.AppSlug, late.ID) {
-		t.Fatalf("room expiring at .5s must NOT be expired at a .0s cutoff (sub-second ordering bug), got %v", expired)
-	}
-	if !refsHas(expired, early.AppSlug, early.ID) {
-		t.Fatalf("room expiring at .0s should be inclusive-expired at a .0s cutoff, got %v", expired)
-	}
-
-	// A .4s cutoff proves the boundary is real sub-second time rather than
-	// whole-second rounding.
-	atBelow := base.Add(400 * time.Millisecond)
-	expired, err = rr.ExpiredRooms(atBelow)
-	if err != nil {
-		t.Fatalf("expired at .4s: %v", err)
-	}
-	if refsHas(expired, late.AppSlug, late.ID) {
-		t.Fatalf("room expiring at .5s must NOT be expired at a .4s cutoff, got %v", expired)
-	}
-}
-
 // --- small helpers ---------------------------------------------------------
-
-func refsHas(refs []domain.ExpiredRoom, app domain.Slug, id domain.RoomID) bool {
-	_, ok := refFor(refs, app, id)
-	return ok
-}
-
-func refFor(refs []domain.ExpiredRoom, app domain.Slug, id domain.RoomID) (domain.ExpiredRoom, bool) {
-	for _, ref := range refs {
-		if ref.AppSlug == app && ref.ID == id {
-			return ref, true
-		}
-	}
-	return domain.ExpiredRoom{}, false
-}
 
 // keyN builds a distinct key for the i-th value, base-36 and within
 // MaxRoomKeyLen.

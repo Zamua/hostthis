@@ -18,7 +18,6 @@ func mdPaste(slug, sha string, now time.Time) domain.Paste {
 		Kind:       domain.KindMarkdown,
 		ContentSHA: sha,
 		UpdatedAt:  now,
-		ExpiresAt:  now.Add(7 * 24 * time.Hour),
 	}
 }
 
@@ -196,7 +195,6 @@ func TestHTMLPaste_NoShellTreatment(t *testing.T) {
 		Kind:       domain.KindHTML,
 		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
 		UpdatedAt:  now,
-		ExpiresAt:  now.Add(7 * 24 * time.Hour),
 	}
 	srv := &Server{
 		Pastes:     stubPasteReader{p: paste},

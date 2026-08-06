@@ -400,7 +400,6 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	fmt.Fprintln(sess, url)
 	if res.Paste.Name != "" {
 		_, _ = fmt.Fprintf(sess.Stderr(), "%q.\n", res.Paste.Name)
-	} else {
 	}
 	writeQR(sess.Stderr(), url)
 	_ = sess.Exit(ExitOK)

@@ -47,13 +47,11 @@ func TestShaleReconciler_RebuildsDerivedIndex(t *testing.T) {
 	pA := domain.Paste{
 		Slug: domain.Slug("recon1ab"), Identity: domain.Identity(pasteOwner),
 		Kind: domain.KindHTML, ContentSHA: "sha-recon1", Size: 300,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	pB := domain.Paste{
 		Slug: domain.Slug("recon2cd"), Identity: domain.Identity(pasteOwner),
 		Kind: domain.KindHTML, ContentSHA: "sha-recon2", Size: 200,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	if err := repo.InsertWithQuotaCheck(context.Background(), pA, 0, now); err != nil {
 		t.Fatalf("insert pA: %v", err)
 	}
@@ -128,8 +126,7 @@ func TestShaleReconciler_RebuildsDerivedIndex(t *testing.T) {
 	})
 	site := domain.Site{
 		Slug: siteSlug, Identity: domain.Identity(siteOwner), Manifest: man,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	const wantSiteBytes int64 = 400
 	if err := repo.InsertSiteWithQuotaCheck(context.Background(), site, man.DedupedSize(), 0, now); err != nil {
 		t.Fatalf("deploy site: %v", err)

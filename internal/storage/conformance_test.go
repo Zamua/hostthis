@@ -101,12 +101,10 @@ func runConformanceWithSites(
 	}
 	t.Run(name+"/InsertAndGet", func(t *testing.T) { conformInsertAndGet(t, newRepo(t)) })
 	t.Run(name+"/QuotaConcurrentCeiling", func(t *testing.T) { conformQuotaConcurrentCeiling(t, newRepo(t), caps) })
-	t.Run(name+"/ExpiryQuotaSemantics", func(t *testing.T) { conformExpiryQuotaSemantics(t, newRepo(t), caps) })
 	t.Run(name+"/GetNotFound", func(t *testing.T) { conformGetNotFound(t, newRepo(t)) })
 	t.Run(name+"/DuplicateSlug", func(t *testing.T) { conformDuplicateSlug(t, newRepo(t)) })
 	t.Run(name+"/QuotaRejectsOverCap", func(t *testing.T) { conformQuotaRejectsOverCap(t, newRepo(t)) })
 	t.Run(name+"/QuotaCountsAllVersions", func(t *testing.T) { conformQuotaCountsAllVersions(t, newRepo(t)) })
-	t.Run(name+"/AppendRevivingExpiredPasteChargesFull", func(t *testing.T) { conformAppendRevivingExpiredPasteChargesFull(t, newRepo(t)) })
 	t.Run(name+"/QuotaFreedByDelete", func(t *testing.T) { conformQuotaFreedByDelete(t, newRepo(t)) })
 	t.Run(name+"/QuotaFreedByDeleteVersion", func(t *testing.T) { conformQuotaFreedByDeleteVersion(t, newRepo(t)) })
 	t.Run(name+"/QuotaPerIdentityIndependent", func(t *testing.T) { conformQuotaPerIdentityIndependent(t, newRepo(t)) })
@@ -117,8 +115,6 @@ func runConformanceWithSites(
 	t.Run(name+"/DeleteVersionTombstones", func(t *testing.T) { conformDeleteVersionTombstones(t, newRepo(t)) })
 	t.Run(name+"/VerNumNotReusedAfterTombstone", func(t *testing.T) { conformVerNumNotReused(t, newRepo(t)) })
 	t.Run(name+"/RepoIsNotOwnerGated", func(t *testing.T) { conformRepoIsNotOwnerGated(t, newRepo(t)) })
-	t.Run(name+"/ExpiredPastes", func(t *testing.T) { conformExpiredPastes(t, newRepo(t)) })
-	t.Run(name+"/DeleteExpired", func(t *testing.T) { conformDeleteExpired(t, newRepo(t)) })
 	t.Run(name+"/ReferencedBlobSHAs", func(t *testing.T) { conformReferencedBlobSHAs(t, newRepo(t)) })
 	t.Run(name+"/OwnerStats", func(t *testing.T) { conformOwnerStats(t, newRepo(t)) })
 	t.Run(name+"/SetName", func(t *testing.T) { conformSetName(t, newRepo(t)) })
@@ -143,7 +139,6 @@ func pasteOf(slug, identity string, size int) domain.Paste {
 		PinnedVersion: 0,
 		CreatedAt:     fixedNow,
 		UpdatedAt:     fixedNow,
-		ExpiresAt:     fixedNow.Add(domain.DefaultRetentionWindow),
 	}
 }
 
@@ -185,10 +180,6 @@ func conformInsertAndGet(t *testing.T, r conformanceRepo) {
 	if got.Slug != p.Slug || got.Identity != p.Identity || got.Kind != p.Kind ||
 		got.ContentSHA != p.ContentSHA || got.Size != p.Size || got.Name != p.Name {
 		t.Fatalf("round-trip mismatch:\n got  %+v\n want %+v", got, p)
-	}
-	if !got.CreatedAt.Equal(p.CreatedAt) || !got.ExpiresAt.Equal(p.ExpiresAt) {
-		t.Fatalf("time round-trip mismatch: got %v/%v want %v/%v",
-			got.CreatedAt, got.ExpiresAt, p.CreatedAt, p.ExpiresAt)
 	}
 }
 
@@ -256,35 +247,6 @@ func conformQuotaConcurrentCeiling(t *testing.T, r conformanceRepo, caps conform
 	}
 }
 
-// conformExpiryQuotaSemantics pins how an expired-but-unswept paste affects the
-// owner's quota sum, the one point backends may differ on
-// (conformCaps.ExpiryFreesQuotaAtReadTime).
-func conformExpiryQuotaSemantics(t *testing.T, r conformanceRepo, caps conformCaps) {
-	p := pasteOf("xq123456", "key:xq", 500)
-	p.ExpiresAt = fixedNow.Add(time.Hour)
-	insert(t, r, p)
-
-	// Past expiry, but the sweep has NOT run (the paste row still exists).
-	after := fixedNow.Add(2 * time.Hour)
-	sum, err := r.SumActiveBytesByOwner("key:xq", after)
-	if err != nil {
-		t.Fatalf("sum: %v", err)
-	}
-	if caps.ExpiryFreesQuotaAtReadTime {
-		// Read-time exclusion: an expired paste stops counting the instant it
-		// expires, before any sweep.
-		if sum != 0 {
-			t.Fatalf("read-time expiry: want 0 (expired paste excluded from sum), got %d", sum)
-		}
-	} else {
-		// Sweep-time exclusion: the bytes count until the sweep deletes the
-		// paste, a fail-safe over-count.
-		if sum != 500 {
-			t.Fatalf("sweep-time expiry: want 500 (expired-unswept still counts until sweep), got %d", sum)
-		}
-	}
-}
-
 func conformQuotaRejectsOverCap(t *testing.T, r conformanceRepo) {
 	const cap = 1000
 	// First paste fits exactly at 600.
@@ -313,64 +275,6 @@ func conformQuotaCountsAllVersions(t *testing.T, r conformanceRepo) {
 	// A smaller append that keeps the sum under cap succeeds.
 	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "v1234567", domain.KindHTML, "sha-v-v2b", 300, cap, fixedNow); err != nil {
 		t.Fatalf("append within cap (600+300=900): %v", err)
-	}
-}
-
-// conformAppendRevivingExpiredPasteChargesFull pins that appending to an
-// EXPIRED-but-unswept paste, which REVIVES it by resetting expires_at, charges
-// the FULL post-revival size: existing live versions plus the new one. The
-// owner sum filters expires_at > now, so those existing versions are NOT in
-// `used`, and charging only the new version would let the revived paste come
-// back live durably OVER the cap (docs/SPEC.md "Reviving an expired-but-unswept
-// record charges its FULL post-revival size").
-func conformAppendRevivingExpiredPasteChargesFull(t *testing.T, r conformanceRepo) {
-	const cap = 1000
-
-	// --- reject case: revived total would breach the cap ------------------
-	// Paste v1 = 900, expiring in an hour.
-	pr := pasteOf("rvp12345", "key:rvp", 900)
-	pr.ExpiresAt = fixedNow.Add(time.Hour)
-	insert(t, r, pr)
-
-	// Past expiry, before any sweep: expired-unswept bytes stop counting
-	// (read-time exclusion).
-	after := fixedNow.Add(2 * time.Hour)
-	if sum, err := r.SumActiveBytesByOwner("key:rvp", after); err != nil {
-		t.Fatalf("sum after expiry: %v", err)
-	} else if sum != 0 {
-		t.Fatalf("expired-unswept paste must not count: got %d, want 0", sum)
-	}
-
-	// The append revives the paste, so v1(900) comes back live too. Charging
-	// only v2 would see used(0)+900 <= 1000 and wrongly admit, leaving the
-	// paste live at 1800 over a 1000 cap. Correct charge: 900 + 900 -> reject.
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "rvp12345", domain.KindHTML, "sha-rvp-v2", 900, cap, after); !errors.Is(err, storage.ErrOverUserQuota) {
-		t.Fatalf("reviving an expired paste OVER the cap must be rejected (full post-revival size charged): got %v, want ErrOverUserQuota", err)
-	}
-	// The rejected append left the paste untouched (still expired, still 0).
-	if sum, err := r.SumActiveBytesByOwner("key:rvp", after); err != nil {
-		t.Fatalf("sum after rejected append: %v", err)
-	} else if sum != 0 {
-		t.Fatalf("rejected append must not revive the paste: got %d, want 0 (still expired)", sum)
-	}
-
-	// --- accept case: revived total fits the cap --------------------------
-	// A DIFFERENT owner: paste v1 = 400, expiring in an hour.
-	pf := pasteOf("rvf12345", "key:rvf", 400)
-	pf.ExpiresAt = fixedNow.Add(time.Hour)
-	insert(t, r, pf)
-
-	// Post-revival total 400 + 400 = 800 <= 1000 -> admit. A backend that
-	// double-charged the existing bytes would wrongly reject, so this also
-	// guards against OVER-charging a revival.
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "rvf12345", domain.KindHTML, "sha-rvf-v2", 400, cap, after); err != nil {
-		t.Fatalf("reviving an expired paste WITHIN the cap should succeed (post-revival 800 <= 1000): %v", err)
-	}
-	// The revived paste is now live at v1+v2 = 800 bytes.
-	if sum, err := r.SumActiveBytesByOwner("key:rvf", after); err != nil {
-		t.Fatalf("sum after revive: %v", err)
-	} else if sum != 800 {
-		t.Fatalf("revived paste must count its full post-revival size: got %d, want 800 (v1 400 + v2 400)", sum)
 	}
 }
 
@@ -452,9 +356,6 @@ func conformAppendBumpsVersion(t *testing.T, r conformanceRepo) {
 		t.Fatalf("unpinned head should roll to v2, got sha=%q size=%d kind=%q", p.ContentSHA, p.Size, p.Kind)
 	}
 	// Append resets the retention clock from `now`.
-	if !p.ExpiresAt.Equal(fixedNow.Add(domain.DefaultRetentionWindow)) {
-		t.Fatalf("append should reset expiry to now+window, got %v", p.ExpiresAt)
-	}
 }
 
 func conformPinUnpinRollsHead(t *testing.T, r conformanceRepo) {
@@ -648,109 +549,6 @@ func conformRepoIsNotOwnerGated(t *testing.T, r conformanceRepo) {
 
 // --- contract: expiry ------------------------------------------------
 
-func conformExpiredPastes(t *testing.T, r conformanceRepo) {
-	// One paste expiring soon, one far in the future.
-	soon := pasteOf("ex123456", "key:e", 10)
-	soon.ExpiresAt = fixedNow.Add(time.Hour)
-	insert(t, r, soon)
-
-	far := pasteOf("ex223456", "key:e", 10)
-	far.ExpiresAt = fixedNow.Add(48 * time.Hour)
-	insert(t, r, far)
-
-	// At a time past `soon` but before `far`, only `soon` is expired.
-	at := fixedNow.Add(2 * time.Hour)
-	refs, err := r.ExpiredPastes(at)
-	if err != nil {
-		t.Fatalf("expired pastes: %v", err)
-	}
-	if !refsHaveSlug(refs, "ex123456") {
-		t.Fatalf("ex123456 should be expired at %v, got %v", at, refs)
-	}
-	if refsHaveSlug(refs, "ex223456") {
-		t.Fatalf("ex223456 should NOT be expired at %v, got %v", at, refs)
-	}
-	// Inclusive boundary: expires_at == now counts as expired.
-	atBoundary := fixedNow.Add(time.Hour)
-	refs, err = r.ExpiredPastes(atBoundary)
-	if err != nil {
-		t.Fatalf("expired pastes at boundary: %v", err)
-	}
-	if !refsHaveSlug(refs, "ex123456") {
-		t.Fatalf("expires_at == now should be inclusive-expired, got %v", refs)
-	}
-}
-
-// conformDeleteExpired pins the expiry pass's delete contract (docs/SPEC.md
-// "The storage contract", Expiry): processing a scanned reference deletes the
-// record and reports true, leaves not-yet-expired pastes untouched, and DRAINS
-// the scan, so a re-scan sees zero references and re-processing a reference is
-// an idempotent no-op reporting false.
-func conformDeleteExpired(t *testing.T, r conformanceRepo) {
-	// One expired paste, one still-active one.
-	dead := pasteOf("de123456", "key:d", 10)
-	dead.ExpiresAt = fixedNow.Add(time.Hour)
-	insert(t, r, dead)
-
-	alive := pasteOf("de223456", "key:d", 10)
-	alive.ExpiresAt = fixedNow.Add(48 * time.Hour)
-	insert(t, r, alive)
-
-	at := fixedNow.Add(2 * time.Hour)
-	refs, err := r.ExpiredPastes(at)
-	if err != nil {
-		t.Fatalf("expired pastes: %v", err)
-	}
-	if len(refs) != 1 || refs[0].Slug != "de123456" {
-		t.Fatalf("only de123456 should be expired at %v, got %v", at, refs)
-	}
-
-	deleted, err := r.DeleteExpired(refs[0])
-	if err != nil {
-		t.Fatalf("delete expired: %v", err)
-	}
-	if !deleted {
-		t.Fatalf("DeleteExpired must report true for a live paste record")
-	}
-	if _, err := r.Get("de123456"); err == nil {
-		t.Fatalf("expired paste should be gone after DeleteExpired")
-	}
-
-	// One pass drains what it scanned: a re-scan sees zero references.
-	again, err := r.ExpiredPastes(at)
-	if err != nil {
-		t.Fatalf("expired pastes (re-scan): %v", err)
-	}
-	if len(again) != 0 {
-		t.Fatalf("re-scan after the pass must see zero expired references, got %v", again)
-	}
-
-	// Re-processing reports false, so the sweep's deleted-count only reflects
-	// real paste deletions.
-	deleted, err = r.DeleteExpired(refs[0])
-	if err != nil {
-		t.Fatalf("re-processed reference must no-op, got: %v", err)
-	}
-	if deleted {
-		t.Fatalf("DeleteExpired must report false when the paste record was already gone")
-	}
-
-	// The not-yet-expired paste is untouched throughout.
-	if _, err := r.Get("de223456"); err != nil {
-		t.Fatalf("active paste must survive the expiry pass: %v", err)
-	}
-}
-
-// refsHaveSlug reports whether any expired-paste reference names slug.
-func refsHaveSlug(refs []domain.ExpiredPaste, slug string) bool {
-	for _, ref := range refs {
-		if ref.Slug.String() == slug {
-			return true
-		}
-	}
-	return false
-}
-
 // --- contract: blob GC reference set --------------------------------
 
 func conformReferencedBlobSHAs(t *testing.T, r conformanceRepo) {
@@ -809,12 +607,11 @@ func conformReferencedBlobSHAs(t *testing.T, r conformanceRepo) {
 
 func conformOwnerStats(t *testing.T, r conformanceRepo) {
 	const owner = "key:stats"
-	// Two pastes for the owner with different expiries to check ordering.
+	// Distinct UpdatedAt so the list order is observable rather than a tie.
 	pA := pasteOf("st123456", owner, 100)
-	pA.ExpiresAt = fixedNow.Add(48 * time.Hour) // later
 	insert(t, r, pA)
 	pB := pasteOf("st223456", owner, 200)
-	pB.ExpiresAt = fixedNow.Add(12 * time.Hour) // sooner
+	pB.UpdatedAt = fixedNow.Add(time.Hour)
 	insert(t, r, pB)
 	// A different owner's paste must not leak into the stats.
 	insert(t, r, pasteOf("st323456", "key:other", 500))
@@ -828,7 +625,7 @@ func conformOwnerStats(t *testing.T, r conformanceRepo) {
 		t.Fatalf("count by owner: got %d, want 2", n)
 	}
 
-	// ListByOwner: soonest-to-expire first (pB before pA), owner-scoped.
+	// ListByOwner: most recently updated first (pB before pA), owner-scoped.
 	list, err := r.ListByOwner(owner)
 	if err != nil {
 		t.Fatalf("list by owner: %v", err)
@@ -837,7 +634,7 @@ func conformOwnerStats(t *testing.T, r conformanceRepo) {
 		t.Fatalf("list by owner: got %d pastes, want 2", len(list))
 	}
 	if list[0].Slug != "st223456" || list[1].Slug != "st123456" {
-		t.Fatalf("ListByOwner should be soonest-to-expire first, got %q,%q", list[0].Slug, list[1].Slug)
+		t.Fatalf("ListByOwner should be most-recently-updated first, got %q,%q", list[0].Slug, list[1].Slug)
 	}
 	for _, p := range list {
 		if p.Identity.String() != owner {

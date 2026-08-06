@@ -33,7 +33,6 @@ func buildFullStackServer(t *testing.T) *Server {
 		Kind:       domain.KindHTML,
 		ContentSHA: "sha-paste",
 		UpdatedAt:  now,
-		ExpiresAt:  now.Add(domain.DefaultRetentionWindow),
 	}
 
 	m := domain.NewManifest()
@@ -45,7 +44,6 @@ func buildFullStackServer(t *testing.T) *Server {
 		Manifest:  m,
 		CreatedAt: now,
 		UpdatedAt: now,
-		ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 
 	return &Server{

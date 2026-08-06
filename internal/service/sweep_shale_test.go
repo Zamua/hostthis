@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 )
 
@@ -50,14 +49,9 @@ func (r *recordingOrphanSweeper) SweepBlobOrphans(_ context.Context, now time.Ti
 	return nil
 }
 
-// noopSweepRepo has nothing to expire and no referenced shas. It panics on
-// DeleteExpired so an unexpected expiry surfaces rather than passing silently.
+// noopSweepRepo reports no referenced shas.
 type noopSweepRepo struct{}
 
-func (noopSweepRepo) ExpiredPastes(_ time.Time) ([]domain.ExpiredPaste, error) { return nil, nil }
-func (noopSweepRepo) DeleteExpired(_ domain.ExpiredPaste) (bool, error) {
-	panic("not expected: nothing should expire")
-}
 func (noopSweepRepo) ReferencedBlobSHAs() ([]string, error) { return nil, nil }
 
 // TestSweep_ShalePath_NoGlobalGC: with Blobs nil, Once returns before any
@@ -74,12 +68,9 @@ func TestSweep_ShalePath_NoGlobalGC(t *testing.T) {
 	}
 
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
-	pastes, blobsGCd, err := sweep.Once(now)
+	blobsGCd, err := sweep.Once(now)
 	if err != nil {
 		t.Fatalf("Once: %v", err)
-	}
-	if pastes != 0 {
-		t.Fatalf("nothing should expire: pastes=%d", pastes)
 	}
 	if blobsGCd != 0 {
 		t.Fatalf("shale path must not GC via the global content-addressed sweep: blobsGCd=%d", blobsGCd)

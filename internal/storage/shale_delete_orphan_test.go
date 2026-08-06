@@ -45,7 +45,6 @@ func TestShaleDelete_RacingAppendLeavesNoOrphanVersion(t *testing.T) {
 	for i := range iters {
 		slug := domain.Slug(fmt.Sprintf("orph%04d", i))
 		p := pasteOf(slug.String(), fmt.Sprintf("key:orphan-%d", i), 100)
-		p.ExpiresAt = now.Add(domain.DefaultRetentionWindow)
 		if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 			t.Fatalf("iter %d insert: %v", i, err)
 		}
@@ -108,7 +107,6 @@ func TestShaleUnpin_SkipsTombstonedVersion(t *testing.T) {
 	slug := domain.Slug("shunpin1")
 	p := pasteOf(slug.String(), "key:shunpin", 100)
 	p.ContentSHA = "sha-shunpin-v1"
-	p.ExpiresAt = now.Add(domain.DefaultRetentionWindow)
 	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert: %v", err)
 	}

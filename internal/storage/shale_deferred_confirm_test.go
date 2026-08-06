@@ -39,8 +39,7 @@ func TestShaleDeferredConfirm_ReadableImmediately_IndexAppearsAfterDrain(t *test
 	p := domain.Paste{
 		Slug: domain.Slug("deferab1"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-deferred", Size: 300,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -101,8 +100,7 @@ func TestShaleDeferredConfirm_ReconcilerHealsLostConfirm(t *testing.T) {
 	p := domain.Paste{
 		Slug: domain.Slug("lostcfm1"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-lostconfirm", Size: 250,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert: %v", err)
 	}

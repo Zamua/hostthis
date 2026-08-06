@@ -42,8 +42,7 @@ func TestShaleReprojectionLosesToFresherRefresh(t *testing.T) {
 	p := domain.Paste{
 		Slug: slug, Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-reprorace-v1", Size: 300,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert: %v", err)
 	}

@@ -42,10 +42,7 @@ func TestCreate_QROnStderr_URLOnStdout(t *testing.T) {
 	if strings.ContainsAny(stdout, qrGlyphs) {
 		t.Fatalf("QR glyphs leaked onto stdout: %q", stdout)
 	}
-	// stderr carries the narration AND the QR block.
-	if !strings.Contains(stderr, "expires in 30 days") {
-		t.Fatalf("stderr should mention expiry, got %q", stderr)
-	}
+	// stderr carries the QR block.
 	if !strings.ContainsAny(stderr, qrGlyphs) {
 		t.Fatalf("stderr should contain a rendered QR code, got %q", stderr)
 	}

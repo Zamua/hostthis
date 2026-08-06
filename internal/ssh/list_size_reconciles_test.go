@@ -2,7 +2,6 @@ package ssh
 
 import (
 	"testing"
-	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
@@ -14,7 +13,6 @@ import (
 // StoredBytes, recorded at deploy: the manifest cannot reproduce it, because
 // per-entry compressed sizes are not persisted.
 func TestListSiteSizeIsTheChargedSize(t *testing.T) {
-	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 
 	man := domain.NewManifest()
 	man.Add("index.html", domain.ManifestEntry{SHA: "a", Size: 4000})
@@ -24,7 +22,6 @@ func TestListSiteSizeIsTheChargedSize(t *testing.T) {
 		Slug:        "sitezzz1",
 		Manifest:    man,
 		StoredBytes: 1500, // what the deploy charged
-		ExpiresAt:   now.Add(time.Hour),
 	}
 
 	// The fixture must distinguish the two, or this proves nothing.
@@ -32,7 +29,7 @@ func TestListSiteSizeIsTheChargedSize(t *testing.T) {
 		t.Fatal("degenerate fixture: the charged size must differ from the manifest total")
 	}
 
-	got := newSiteListItem(site, now).SizeBytes
+	got := newSiteListItem(site).SizeBytes
 	if got != site.StoredBytes {
 		t.Fatalf("list reports %d but the quota charged %d; a user adding up a list must arrive at "+
 			"the number whoami shows", got, site.StoredBytes)
@@ -46,16 +43,14 @@ func TestListSiteSizeIsTheChargedSize(t *testing.T) {
 // A paste row must report every live version, not just the served one, since
 // that is what the quota charges.
 func TestListPasteSizeCountsAllLiveVersions(t *testing.T) {
-	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	p := domain.Paste{
 		Slug:          "pastez01",
 		Size:          14266, // the served version
 		StoredBytes:   40890, // every live version, what quota charges
 		LatestVersion: 3,
-		ExpiresAt:     now.Add(time.Hour),
 	}
 
-	item := newPasteListItem(p, now)
+	item := newPasteListItem(p)
 	if item.SizeBytes != p.StoredBytes {
 		t.Fatalf("list reports %d but the quota charges %d; a multi-version paste understates its "+
 			"cost when only the served version is shown", item.SizeBytes, p.StoredBytes)
@@ -70,10 +65,9 @@ func TestListPasteSizeCountsAllLiveVersions(t *testing.T) {
 
 // A single-version paste is unaffected and must NOT trigger the note.
 func TestListSingleVersionPasteIsUnflagged(t *testing.T) {
-	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
-	p := domain.Paste{Slug: "pastez02", Size: 500, StoredBytes: 500, LatestVersion: 1, ExpiresAt: now.Add(time.Hour)}
+	p := domain.Paste{Slug: "pastez02", Size: 500, StoredBytes: 500, LatestVersion: 1}
 
-	item := newPasteListItem(p, now)
+	item := newPasteListItem(p)
 	if item.SizeBytes != 500 {
 		t.Fatalf("single-version size: want 500, got %d", item.SizeBytes)
 	}
@@ -85,10 +79,9 @@ func TestListSingleVersionPasteIsUnflagged(t *testing.T) {
 // A backend whose list read does not carry the total falls back to the served
 // size rather than reporting zero.
 func TestListFallsBackWhenStoredBytesAbsent(t *testing.T) {
-	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
-	p := domain.Paste{Slug: "pastez03", Size: 777, StoredBytes: 0, LatestVersion: 1, ExpiresAt: now.Add(time.Hour)}
+	p := domain.Paste{Slug: "pastez03", Size: 777, StoredBytes: 0, LatestVersion: 1}
 
-	if got := newPasteListItem(p, now).SizeBytes; got != 777 {
+	if got := newPasteListItem(p).SizeBytes; got != 777 {
 		t.Fatalf("want the served size 777 as a fallback, got %d; reporting 0 would make the paste "+
 			"look free", got)
 	}
@@ -100,10 +93,9 @@ func TestListFallsBackWhenStoredBytesAbsent(t *testing.T) {
 // does not say, because a deleted version leaves a paste charged for fewer
 // versions than its number implies.
 func TestListJSONCarriesBothSizes(t *testing.T) {
-	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
-	p := domain.Paste{Slug: "pastez04", Size: 14266, StoredBytes: 40890, LatestVersion: 3, ExpiresAt: now.Add(time.Hour)}
+	p := domain.Paste{Slug: "pastez04", Size: 14266, StoredBytes: 40890, LatestVersion: 3}
 
-	item := newPasteListItem(p, now)
+	item := newPasteListItem(p)
 	if item.SizeBytes != 40890 {
 		t.Fatalf("size_bytes must be the charged total: want 40890, got %d", item.SizeBytes)
 	}
@@ -119,10 +111,9 @@ func TestListJSONCarriesBothSizes(t *testing.T) {
 // A site has no versions, so served_size_bytes is null rather than a duplicate,
 // matching how served_version is null for a site.
 func TestListJSONSiteHasNoServedSize(t *testing.T) {
-	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
-	site := domain.Site{Slug: "sitezzz2", Manifest: domain.NewManifest(), StoredBytes: 500, ExpiresAt: now.Add(time.Hour)}
+	site := domain.Site{Slug: "sitezzz2", Manifest: domain.NewManifest(), StoredBytes: 500}
 
-	item := newSiteListItem(site, now)
+	item := newSiteListItem(site)
 	if item.ServedSizeBytes != nil {
 		t.Fatalf("a site must report served_size_bytes as null, got %v", *item.ServedSizeBytes)
 	}
