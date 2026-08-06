@@ -81,15 +81,27 @@ func shalePrefixKeygateIdentity(identity string) []byte {
 	return shaleKey(prefixKeygateIdentityAll, identity, "/")
 }
 
-// PendingPasteTimeout is how old a status=pending paste may be before the
-// owner's next list ages it to failed (the pod-death backstop: its in-memory bytes
-// never reached the blob store). It must comfortably exceed a healthy blob write
-// plus retries so the age-out never races a live finalizer, while staying
-// short enough that a lost-bytes paste self-heals out of the loading screen
-// within a sweep tick or two. A var, not a const, so tests can shrink it.
-var PendingPasteTimeout = 2 * time.Minute
-
 // --- JSON projections ------------------------------------------------------
+
+// toDomain renders a listing row from the cached entry alone - the whole point
+// of the entry being value-bearing. Fields the listing does not show (the
+// content sha, the blob id) stay zero: a caller needing those reads the
+// authoritative row.
+func (e identityPasteRow) toDomain(slug domain.Slug, owner string) domain.Paste {
+	return domain.Paste{
+		Slug:          slug,
+		Identity:      domain.Identity(owner),
+		Status:        domain.PasteStatusReady,
+		Kind:          domain.ContentKind(e.Kind),
+		Size:          e.Size,
+		StoredBytes:   e.Size,
+		Name:          e.Name,
+		PinnedVersion: e.PinnedVersion,
+		LatestVersion: e.LatestVersion,
+		CreatedAt:     e.CreatedAt,
+		UpdatedAt:     e.UpdatedAt,
+	}
+}
 
 // identityPasteRow is the value-bearing projection stored at
 // identity_pastes/<id>/<slug>. Size caches the paste's LIVE byte sum (its
@@ -103,6 +115,21 @@ type identityPasteRow struct {
 	Name      string    `json:"name"`
 	Size      int       `json:"size"`
 	CreatedAt time.Time `json:"created_at"`
+
+	// Kind, LatestVersion and PinnedVersion are the rest of what a `list` row
+	// renders. With them here the listing needs NO per-item read, so its
+	// latency is flat in the number of pastes an owner holds rather than one
+	// routed round-trip per paste (docs/SPEC.md "Listing is O(1) reads").
+	//
+	// UpdatedAt is the list's sort key, cached for the same reason.
+	//
+	// A zero Kind marks an entry written before these fields existed; the
+	// listing falls back to reading that one row, so an old entry keeps
+	// rendering correctly until its next write refreshes it.
+	Kind          string    `json:"kind,omitempty"`
+	LatestVersion int       `json:"latest_version,omitempty"`
+	PinnedVersion int       `json:"pinned_version,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at,omitempty"`
 
 	// Placeholder marks a fail-closed entry for a slug whose authoritative
 	// record (head or any version row) cannot be decoded:

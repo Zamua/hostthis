@@ -196,6 +196,22 @@ type pasteRow struct {
 	PinnedVersion int       `json:"pinned_version"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
+
+	// LiveBytes and LatestVersion are the paste's totals, maintained in the
+	// SAME {slug} transaction that writes or tombstones a version row. The head
+	// and its versions co-shard, so these are transactionally exact rather than
+	// derived figures that can drift.
+	//
+	// They exist so a reader that already holds the head does not also have to
+	// prefix-scan the version family: `list` is one routed read per item, and
+	// the enumeration entry's cached size is verified against LiveBytes rather
+	// than against a recomputation.
+	//
+	// Zero on a row written before this field existed. Readers treat a zero
+	// LatestVersion as "unknown" and fall back to scanning, so an old row keeps
+	// working until its next write refreshes it.
+	LiveBytes     int `json:"live_bytes,omitempty"`
+	LatestVersion int `json:"latest_version,omitempty"`
 }
 
 type versionRow struct {

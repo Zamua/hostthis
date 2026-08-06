@@ -158,8 +158,8 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	// blob write is deferred to a background finalizer, so only the quota
 	// reserve and the PENDING row happen before the URL is returned. staged.Body
 	// lives in this pod's memory until the finalizer flushes it; a crash in that
-	// window loses the bytes and the reconciler ages the stuck pending to failed
-	// (docs/SPEC.md "Durability trade").
+	// window loses the bytes and the row stays PENDING for good - nothing ages
+	// it out (docs/SPEC.md "Durability trade").
 	initialStatus := domain.PasteStatusPending
 	if u.SyncBlob {
 		initialStatus = domain.PasteStatusReady

@@ -234,10 +234,6 @@ type ShaleConfig struct {
 type ShaleRepo struct {
 	cluster *cluster.Cluster
 
-	// Now is the clock the repair-on-read paths use (the stuck-pending age-out
-	// in ListByOwner). nil means time.Now.
-	Now func() time.Time
-
 	// kv is the blob-capable cluster surface, set ONLY when cfg.BlobStore is
 	// non-nil. It wraps the SAME *Cluster as `cluster` (kv.Cluster() ==
 	// cluster), so every r.cluster.* call site works either way; only the
@@ -687,15 +683,21 @@ func (r *ShaleRepo) Get(slug domain.Slug) (domain.Paste, error) {
 	return row.toDomain(slug), nil
 }
 
-// ListByOwner scans the owner's identity_pastes index on the {id} shard and
-// repairs on read (docs/SPEC.md "Derived indexes and repair-on-read"): a stale
-// entry whose paste row is gone is skipped and queued for removal, and the live
-// {slug} rows are the source of truth for LatestVersion and the head fields.
+// ListByOwner returns the owner's pastes from ONE single-shard prefix scan of
+// identity_pastes/<id>/, rendering each row from the entry's own cached fields.
+// No per-item reads: listing cost is FLAT in how many pastes an owner holds
+// (docs/SPEC.md "Listing is O(1) reads").
 //
-// The other half of repair-on-read, an authoritative paste with NO index entry,
-// A paste with no index entry is unreachable here - but the insert writes the
-// entry FIRST, so that state is not reachable at all (docs/SPEC.md "No periodic
-// reconcile: the index entry is written FIRST").
+// Nothing here validates an entry against its authoritative row. A crash
+// between the two writes of an insert (or a delete) can leave an entry whose
+// paste does not exist, and that entry is simply listed - a deliberate
+// acceptance, not an oversight. Detecting it would mean reading every paste on
+// every listing, which is the cost this design exists to remove.
+//
+// An entry written before the display fields existed carries no Kind and cannot
+// be rendered from the cache, so it is resolved once against its row and
+// rewritten fat. That is a migration path, self-limiting to one read per entry
+// ever - not a validation pass.
 func (r *ShaleRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	if owner == "" {
 		return nil, nil
@@ -704,97 +706,64 @@ func (r *ShaleRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	out := make([]domain.Paste, 0, len(idx))
-	var staleKeys [][]byte
 	for _, item := range idx {
-		slugStr := extractSlug(item.Key)
-		slug := domain.Slug(slugStr)
-		var p pasteRow
-		if err := r.getJSON(shaleKeyPaste(slug), &p); err != nil {
-			if errors.Is(err, ErrNotFound) {
-				// Stale: index points at a paste that no longer exists.
-				staleKeys = append(staleKeys, append([]byte(nil), item.Key...))
-				continue
-			}
-			return nil, err
+		slug := domain.Slug(extractSlug(item.Key))
+		var e identityPasteRow
+		if err := json.Unmarshal(item.Value, &e); err == nil && e.Kind != "" && !e.Placeholder {
+			out = append(out, e.toDomain(slug, owner)) // the common path: zero reads
+			continue
 		}
-		versions, err := r.scanVersions(slug)
+		paste, ok, err := r.upgradeListEntry(owner, slug, item)
 		if err != nil {
 			return nil, err
 		}
-
-		// A pending paste older than the timeout is a pod-death casualty: its
-		// bytes were never written and no finalizer will ever run. Age it to
-		// failed here, on the read that already holds the row, so its bytes
-		// leave the quota scan without a background pass. Only the
-		// detached-store path can produce one at all.
-		if domain.NormalizeStatus(p.Status) == domain.PasteStatusPending &&
-			r.now().Sub(p.CreatedAt) > PendingPasteTimeout {
-			if err := r.MarkFailed(slug); err != nil {
-				r.repoLog().Printf("shale: age out stuck pending %s: %v (retried on the next list)", slug, err)
-			}
-			staleKeys = append(staleKeys, append([]byte(nil), item.Key...))
-			continue
+		if ok {
+			out = append(out, paste)
 		}
-
-		// A FAILED row must not be enumerated and must not be charged: its
-		// bytes never landed. MarkFailed drops the entry, so one surviving here
-		// means that drop was lost - the same repair as a vanished row.
-		if domain.NormalizeStatus(p.Status) == domain.PasteStatusFailed {
-			staleKeys = append(staleKeys, append([]byte(nil), item.Key...))
-			continue
-		}
-
-		paste := p.toDomain(slug)
-		paste.LatestVersion = latestActiveVerNum(versions)
-		// The enumeration entry already caches this paste's live-version sum,
-		// which is the figure the quota charges. Carry it up rather than
-		// re-deriving it: the scan holds it, and recomputing would mean a
-		// per-paste fan-out to the version shards.
-		// This read ALREADY holds the version rows, so the authoritative live sum
-		// is free here. Writing it back is the repair that used to need a
-		// reconcile pass, and it covers both shapes that need one: an entry
-		// whose cached size drifted (a lost best-effort refresh after an append
-		// or a version tombstone) and a LEGACY entry that predates the
-		// value-bearing projection (empty, or a bare marker byte). Guarded on
-		// the value this scan read, so a concurrent write is never clobbered.
-		live := int(liveVersionBytes(versions))
-		var idxRow identityPasteRow
-		decoded := json.Unmarshal(item.Value, &idxRow) == nil
-		switch {
-		case decoded && idxRow.Placeholder:
-			// The placeholder exists because the authoritative row could not be
-			// decoded. This read just decoded it, so the marker is provably
-			// stale - replace it with the truth. Without this a placeholder is
-			// permanent, and a permanent placeholder hard-fails its owner's
-			// quota scan forever: they could never upload again.
-			fixed := identityPasteRow{Name: p.Name, Size: live, CreatedAt: p.CreatedAt}
-			if _, werr := r.guardedPutIndexEntry(item.Key, item.Value, true, fixed); werr != nil {
-				r.repoLog().Printf("shale: clearing stale placeholder for %s: %v (retried on the next list)", slug, werr)
-			}
-			paste.StoredBytes = live
-		case !decoded || idxRow.Size != live:
-			fixed := idxRow
-			fixed.Size = live
-			if !decoded {
-				fixed = identityPasteRow{Name: p.Name, Size: live, CreatedAt: p.CreatedAt}
-			}
-			if _, werr := r.guardedPutIndexEntry(item.Key, item.Value, true, fixed); werr != nil {
-				r.repoLog().Printf("shale: index repair for %s: %v (retried on the next list)", slug, werr)
-			}
-			paste.StoredBytes = live
-		default:
-			paste.StoredBytes = idxRow.Size
-		}
-		out = append(out, paste)
-	}
-	// Best-effort repair: the list is already correct, so a failed delete just
-	// means the entry is re-attempted on the next read.
-	for _, k := range staleKeys {
-		_ = r.cluster.Delete(k)
 	}
 	sortByUpdatedAtDesc(out)
 	return out, nil
+}
+
+// upgradeListEntry renders a pre-fat entry from its authoritative row and
+// rewrites the entry with the display fields, so the slow path runs at most
+// once per entry. An entry whose row is unreadable is skipped rather than
+// repaired: it cannot be rendered, and cleaning it up is explicitly not this
+// listing's job.
+func (r *ShaleRepo) upgradeListEntry(owner string, slug domain.Slug, item scanItem) (domain.Paste, bool, error) {
+	var head pasteRow
+	if err := r.getJSON(shaleKeyPaste(slug), &head); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return domain.Paste{}, false, nil
+		}
+		return domain.Paste{}, false, err
+	}
+	if domain.NormalizeStatus(head.Status) == domain.PasteStatusFailed {
+		return domain.Paste{}, false, nil // its bytes never landed
+	}
+
+	live, latest := head.LiveBytes, head.LatestVersion
+	if latest == 0 {
+		// Predates the head totals: derive them once. The rewrite below stamps
+		// them, so this never repeats for this slug.
+		versions, err := r.scanVersions(slug)
+		if err != nil {
+			return domain.Paste{}, false, err
+		}
+		live, latest = int(liveVersionBytes(versions)), latestActiveVerNum(versions)
+	}
+
+	fresh := identityPasteRow{
+		Name: head.Name, Size: live, CreatedAt: head.CreatedAt,
+		Kind: head.Kind, LatestVersion: latest,
+		PinnedVersion: head.PinnedVersion, UpdatedAt: head.UpdatedAt,
+	}
+	if _, werr := r.guardedPutIndexEntry(item.Key, item.Value, true, fresh); werr != nil {
+		r.repoLog().Printf("shale: index upgrade for %s: %v (retried on a later list)", slug, werr)
+	}
+	return fresh.toDomain(slug, owner), true, nil
 }
 
 func (r *ShaleRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
@@ -818,11 +787,11 @@ func (r *ShaleRepo) GetVersion(slug domain.Slug, ver int) (domain.Version, error
 	return row.toDomain(slug), nil
 }
 
-// CountByOwner returns the owner's count of LIVE pastes. The identity_pastes
-// index is derived and eventually consistent, so it is repaired on read exactly
-// like ListByOwner: an orphan entry whose authoritative pastes/<slug> row is
-// already deleted is not a live paste. A raw len(idx) would over-count those
-// orphans, showing more here than a list shows.
+// CountByOwner returns how many pastes the owner's enumeration index holds.
+// It counts entries and reads no authoritative rows, so it agrees with what
+// ListByOwner renders (docs/SPEC.md "Listing is O(1) reads") - including a
+// phantom entry, which both count and list report. MarkFailed and Delete drop
+// the entry, so neither a failed nor a deleted paste is counted.
 func (r *ShaleRepo) CountByOwner(owner string) (int, error) {
 	if owner == "" {
 		return 0, nil
@@ -831,25 +800,7 @@ func (r *ShaleRepo) CountByOwner(owner string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	live := 0
-	var staleKeys [][]byte
-	for _, item := range idx {
-		slug := domain.Slug(extractSlug(item.Key))
-		var p pasteRow
-		if gerr := r.getJSON(shaleKeyPaste(slug), &p); gerr != nil {
-			if errors.Is(gerr, ErrNotFound) {
-				staleKeys = append(staleKeys, append([]byte(nil), item.Key...))
-				continue
-			}
-			return 0, gerr
-		}
-		live++
-	}
-	// Best-effort repair, as in ListByOwner: the count is already correct.
-	for _, k := range staleKeys {
-		_ = r.cluster.Delete(k)
-	}
-	return live, nil
+	return len(idx), nil
 }
 
 // SumActiveBytesByOwner derives the owner's active PASTE bytes from ONE
@@ -955,15 +906,6 @@ func liveVersionBytes(versions []versionRow) int64 {
 		total += int64(v.Size)
 	}
 	return total
-}
-
-// now is the repo's clock, injectable so a test can drive the pending age-out
-// without sleeping. Defaults to time.Now.
-func (r *ShaleRepo) now() time.Time {
-	if r.Now != nil {
-		return r.Now()
-	}
-	return time.Now().UTC()
 }
 
 // combinedActiveBytes is the per-owner "used" figure the quota checks compare
@@ -1313,6 +1255,9 @@ func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef) 
 		}
 		pr := pasteFromDomain(p)
 		pr.BlobID = blobID
+		// v1 is the only version at insert, so the totals are known exactly.
+		pr.LiveBytes = p.Size
+		pr.LatestVersion = 1
 		if err := shaleTxPutJSON(tx, pasteKey, pr); err != nil {
 			return err
 		}
@@ -1372,9 +1317,13 @@ func (r *ShaleRepo) confirmInsert(p domain.Paste) error {
 	firstSeenKey := shaleKeyIdentityFirstSeen(identity)
 	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
 		if err := shaleTxPutJSON(tx, indexKey, identityPasteRow{
-			Name:      p.Name,
-			Size:      p.Size,
-			CreatedAt: p.CreatedAt,
+			Name:          p.Name,
+			Size:          p.Size,
+			CreatedAt:     p.CreatedAt,
+			Kind:          string(p.Kind),
+			LatestVersion: 1,
+			PinnedVersion: p.PinnedVersion,
+			UpdatedAt:     p.UpdatedAt,
 		}); err != nil {
 			return err
 		}
@@ -1582,6 +1531,10 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKin
 				return err
 			}
 			p.UpdatedAt = now
+			// The totals roll in THIS transaction, so they can never disagree
+			// with the version rows they summarise.
+			p.LiveBytes += size
+			p.LatestVersion = newVer
 			if p.PinnedVersion == 0 {
 				p.contentRef = newV.contentRef // unpinned head rolls to the new version, whole
 			}
@@ -1633,11 +1586,17 @@ func (r *ShaleRepo) refreshIndexProjection(identity string, slug domain.Slug) er
 	if row.Placeholder {
 		return nil // fail-closed placeholder: only a list that decodes the row replaces it
 	}
-	live, err := r.sumLiveVersionBytes(slug)
-	if err != nil {
+	// Refresh from the head row, which carries the totals transactionally: one
+	// routed read instead of a version-family scan.
+	var head pasteRow
+	if err := r.getJSON(shaleKeyPaste(slug), &head); err != nil {
 		return err
 	}
-	row.Size = int(live)
+	row.Size = head.LiveBytes
+	row.Kind = head.Kind
+	row.LatestVersion = head.LatestVersion
+	row.PinnedVersion = head.PinnedVersion
+	row.UpdatedAt = head.UpdatedAt
 	written, err := r.guardedPutIndexEntry(indexKey, expected, true, row)
 	if err != nil {
 		return err
@@ -1783,6 +1742,21 @@ func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 		if err := shaleTxPutJSON(tx, verKey, v); err != nil {
 			return err
 		}
+		// The head's LiveBytes sheds this version's bytes in the SAME
+		// transaction, so the total never disagrees with the rows it
+		// summarises. LatestVersion is untouched: version numbers are never
+		// reused, so tombstoning one does not lower the high-water mark.
+		var head pasteRow
+		if err := shaleTxGetJSON(tx, pasteKey, &head); err != nil {
+			return err
+		}
+		head.LiveBytes -= v.Size
+		if head.LiveBytes < 0 {
+			head.LiveBytes = 0
+		}
+		if err := shaleTxPutJSON(tx, pasteKey, head); err != nil {
+			return err
+		}
 		if v.BlobID != "" {
 			return unbind(v.BlobID)
 		}
@@ -1853,7 +1827,7 @@ func (r *ShaleRepo) ownerOfSlug(slug domain.Slug) string {
 
 func (r *ShaleRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error {
 	pasteKey := shaleKeyPaste(slug)
-	return r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
+	err := r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
 		var p pasteRow
 		if err := shaleTxGetJSON(tx, pasteKey, &p); err != nil {
 			return err
@@ -1870,6 +1844,15 @@ func (r *ShaleRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error
 		p.contentRef = vr.contentRef
 		return shaleTxPutJSON(tx, pasteKey, p)
 	})
+	if err == nil {
+		// The listing renders the pin from the cached entry, so it has to move
+		// with the head. Best-effort: a lost refresh is corrected by the
+		// spot-check on a later list.
+		if rerr := r.refreshIndexProjection(r.ownerOfSlug(slug), slug); rerr != nil {
+			r.repoLog().Printf("shale: index refresh after pin %s: %v (a later list corrects it)", slug, rerr)
+		}
+	}
+	return err
 }
 
 // Unpin clears the pin and rolls the head to the latest LIVE version, the same
@@ -1920,6 +1903,14 @@ func (r *ShaleRepo) Unpin(slug domain.Slug) error {
 	})
 	if errors.Is(txErr, errVerTaken) || errors.Is(txErr, backend.ErrCASConflict) {
 		return fmt.Errorf("shale: unpin %q: %w", slug, ErrConcurrentChange)
+	}
+	if txErr == nil {
+		// The listing renders the pin from the cached entry, so it has to move
+		// with the head. Best-effort: a lost refresh is corrected by the
+		// spot-check on a later list.
+		if err := r.refreshIndexProjection(r.ownerOfSlug(slug), slug); err != nil {
+			r.repoLog().Printf("shale: index refresh after unpin %s: %v (a later list corrects it)", slug, err)
+		}
 	}
 	return txErr
 }

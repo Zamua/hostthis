@@ -118,6 +118,13 @@ func shalePrefixIdentitySites(identity string) []byte {
 type identitySiteRow struct {
 	Size int `json:"size"`
 
+	// CreatedAt/UpdatedAt let `list` render the entry without reading the
+	// authoritative row (docs/SPEC.md "Listing is O(1) reads"). Zero on an
+	// entry written before they existed, which is how the list recognizes one
+	// it must resolve the slow way, once.
+	CreatedAt time.Time `json:"created_at,omitzero"`
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
+
 	// Placeholder marks a fail-closed entry for a slug whose authoritative
 	// sites/<slug> row cannot be decoded: the quota
 	// scan HARD-FAILS on it rather than silently under-counting (docs/SPEC.md
@@ -184,7 +191,7 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(ctx context.Context, s domain.Site,
 	// FIRST"). A crash leaves an entry with no row, which ListSitesByOwner
 	// sees and deletes; the other order leaves a row no single-shard read can
 	// find.
-	if err := r.confirmSiteInsert(identity, slug, dedupedSize); err != nil {
+	if err := r.confirmSiteInsert(s, dedupedSize); err != nil {
 		return fmt.Errorf("site enumeration entry: %w", err)
 	}
 
@@ -213,7 +220,6 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(ctx context.Context, s domain.Site,
 // Returns nil / ErrNotFound / ErrOverUserQuota.
 func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	identity := s.Identity.String()
-	slug := s.Slug.String()
 	newBody := int64(dedupedSize)
 
 	// The redeploy's staged file refs ride this call's context, isolated from
@@ -250,7 +256,7 @@ func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site
 	// Refresh the enumeration entry's cached size on the {id} shard,
 	// best-effort: a lost refresh leaves a stale cached size until the next
 	// list-time repair (bounded drift).
-	if err := r.confirmSiteInsert(identity, slug, dedupedSize); err != nil {
+	if err := r.confirmSiteInsert(s, dedupedSize); err != nil {
 		r.repoLog().Printf("shale: site index refresh for %s: %v (index lag; the owner's next list heals it)", s.Slug, err)
 	}
 	return nil
@@ -470,10 +476,11 @@ func translateCrossShard(err error) error {
 // overwrite), so it also refreshes an in-place re-deploy's cached values.
 // Best-effort: a lost write leaves a missing or stale entry the owner's next list
 // rebuilds, never a failed deploy.
-func (r *ShaleRepo) confirmSiteInsert(identity, slug string, dedupedSize int) error {
-	indexKey := shaleKeyIdentitySite(identity, slug)
+func (r *ShaleRepo) confirmSiteInsert(site domain.Site, dedupedSize int) error {
+	indexKey := shaleKeyIdentitySite(string(site.Identity), string(site.Slug))
+	entry := identitySiteRow{Size: dedupedSize, CreatedAt: site.CreatedAt, UpdatedAt: site.UpdatedAt}
 	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
-		return shaleTxPutJSON(tx, indexKey, identitySiteRow{Size: dedupedSize})
+		return shaleTxPutJSON(tx, indexKey, entry)
 	})
 }
 
@@ -486,10 +493,15 @@ func (r *ShaleRepo) GetSite(slug domain.Slug) (domain.Site, error) {
 	return row.toDomain(slug)
 }
 
-// ListSitesByOwner enumerates the owner's identity_sites/<id>/ index on the
-// {id} shard and re-reads each authoritative sites/<slug> row. A stale index
-// entry whose row is gone is skipped and best-effort deleted
-// (repair-on-read).
+// ListSitesByOwner returns the owner's sites from ONE single-shard prefix scan
+// of identity_sites/<id>/, rendering each from the entry's own cached fields.
+// The paste listing's contract exactly (docs/SPEC.md "Listing is O(1) reads"):
+// no per-item reads, and an entry whose row is gone is listed rather than
+// detected, because detecting it is the cost this design removes.
+//
+// The returned sites carry no Manifest: `list` needs slug, size and timestamp,
+// and loading every site's file map to render a one-line summary is exactly the
+// per-item read being avoided. Callers wanting the manifest use GetSite.
 func (r *ShaleRepo) ListSitesByOwner(owner string, _ time.Time) ([]domain.Site, error) {
 	if owner == "" {
 		return nil, nil
@@ -499,50 +511,48 @@ func (r *ShaleRepo) ListSitesByOwner(owner string, _ time.Time) ([]domain.Site, 
 		return nil, err
 	}
 	out := make([]domain.Site, 0, len(idx))
-	var staleKeys [][]byte
 	for _, item := range idx {
 		slug := domain.Slug(extractSlug(item.Key))
-		var row siteRow
-		if err := r.getJSON(shaleKeySite(slug), &row); err != nil {
-			if errors.Is(err, ErrNotFound) {
-				staleKeys = append(staleKeys, append([]byte(nil), item.Key...))
-				continue
-			}
-			return nil, err
+		var e identitySiteRow
+		if err := json.Unmarshal(item.Value, &e); err == nil && !e.UpdatedAt.IsZero() && !e.Placeholder {
+			out = append(out, domain.Site{
+				Slug: slug, Identity: domain.Identity(owner),
+				StoredBytes: e.Size, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt,
+			})
+			continue
 		}
-		// The read already holds the authoritative row, so correcting a stale
-		// cached size is free here - the repair that used to need a background pass. Guarded on the value this scan read.
-		var idxRow identitySiteRow
-		decoded := json.Unmarshal(item.Value, &idxRow) == nil
-		switch {
-		case decoded && idxRow.Placeholder:
-			// The placeholder exists because the row could not be decoded. This
-			// read just decoded it, so the marker is provably stale. Leaving it
-			// would hard-fail the owner's site quota scan forever.
-			fixed := identitySiteRow{Size: row.DedupedSize}
-			if _, werr := r.guardedPutIndexEntry(item.Key, item.Value, true, fixed); werr != nil {
-				r.repoLog().Printf("shale: clearing stale site placeholder for %s: %v (retried on the next list)", slug, werr)
-			}
-		case !decoded || idxRow.Size != row.DedupedSize:
-			// A drifted cached size, or a LEGACY entry predating the
-			// value-bearing projection (empty or a bare marker byte). Either
-			// way the authoritative row is in hand, so write the truth.
-			fixed := identitySiteRow{Size: row.DedupedSize}
-			if _, werr := r.guardedPutIndexEntry(item.Key, item.Value, true, fixed); werr != nil {
-				r.repoLog().Printf("shale: site index repair for %s: %v (retried on the next list)", slug, werr)
-			}
-		}
-
-		site, err := row.toDomain(slug)
+		site, ok, err := r.upgradeSiteListEntry(owner, slug, item)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, site)
-	}
-	for _, k := range staleKeys {
-		_ = r.cluster.Delete(k)
+		if ok {
+			out = append(out, site)
+		}
 	}
 	return out, nil
+}
+
+// upgradeSiteListEntry renders a pre-timestamp entry from its authoritative row
+// and rewrites the entry with the display fields, so the slow path runs at most
+// once per entry. An entry whose row is unreadable is skipped, not repaired.
+func (r *ShaleRepo) upgradeSiteListEntry(owner string, slug domain.Slug, item scanItem) (domain.Site, bool, error) {
+	var row siteRow
+	if err := r.getJSON(shaleKeySite(slug), &row); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return domain.Site{}, false, nil
+		}
+		return domain.Site{}, false, err
+	}
+	site, err := row.toDomain(slug)
+	if err != nil {
+		return domain.Site{}, false, err
+	}
+	fresh := identitySiteRow{Size: row.DedupedSize, CreatedAt: site.CreatedAt, UpdatedAt: site.UpdatedAt}
+	if _, werr := r.guardedPutIndexEntry(item.Key, item.Value, true, fresh); werr != nil {
+		r.repoLog().Printf("shale: site index upgrade for %s: %v (retried on a later list)", slug, werr)
+	}
+	site.Manifest = domain.Manifest{}
+	return site, true, nil
 }
 
 // SumActiveSiteBytesByOwner derives the identity's active SITE bytes from ONE
