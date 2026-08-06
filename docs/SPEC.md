@@ -3777,13 +3777,9 @@ room-write / read interface is:
 - `DeleteValue(appSlug, id, key, now)` (idempotent; moves `UpdatedAt`)
 - `CountRoomCreates(appSlug, subnet, now, window) (perSubnet, perApp, err)`
 
-and the sweep-side interface is:
-
-- `PruneOldRoomCreates(cutoff) (int, error)`
-
-It drops creation-ledger rows past the rate-limit window: those markers
-can no longer change a future decision, so dropping them keeps the family
-bounded. `DeleteRoom(appSlug, id)` remains on the concrete repos as the
+There is no sweep-side room interface. Creation-ledger rows past the
+rate-limit window are dropped by `CountRoomCreates` itself, on the scan it
+already runs to make the admission decision. `DeleteRoom(appSlug, id)` is the
 idempotent full cascade the owner-facing removal path uses.
 
 #### Room key families (slatedb)
@@ -4683,8 +4679,8 @@ below is chosen to satisfy that invariant; where two policies would both
 satisfy availability, the one that also satisfies the invariant wins.
 
 **Policy 1 - idempotent background sweeps and the reconciler: SKIP +
-LOG, continue.** The room-create prune (`PruneOldRoomCreates`), the
-keygate's lazy in-scan prune, and the reconciler
+LOG, continue.** The keygate's and the room ledger's lazy in-scan prunes,
+and the reconciler
 (`Reconcile` - reproject the `identity_pastes` + `identity_sites`
 enumeration indexes and age out stuck pending pastes) all treat an
 undecodable row as SKIP + LOG and CONTINUE the pass. The reconciler's
@@ -4788,7 +4784,7 @@ The three policies, side by side:
 
 | Scan kind | Examples | On a bad record | Why |
 | --- | --- | --- | --- |
-| Idempotent background sweep / reconciler | `PruneOldRoomCreates`, the keygate's lazy in-scan prune, `Reconcile` (`reconcileIndexes` + `reconcileSiteIndexes` + pending age-out) | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
+| Idempotent background sweep / reconciler | the keygate and room-ledger lazy in-scan prunes, `Reconcile` (`reconcileIndexes` + `reconcileSiteIndexes` + pending age-out) | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
 | User-facing read | `Get`, `ListByOwner`, `ListVersions`, `GetVersion`, site manifest read, room scan / per-key read | HARD-FAIL (unchanged) | a user read of corrupt data should surface an error, not silently skip |
 
 ### Shale-collocated blobs (transactional blob plane)
