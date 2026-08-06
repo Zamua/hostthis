@@ -4,8 +4,6 @@ import (
 	"context"
 	"log"
 	"time"
-
-	"github.com/Zamua/hostthis/internal/domain"
 )
 
 // BlobOrphanSweeper reclaims staged-but-unbound bytes: the only way a blob can
@@ -13,13 +11,6 @@ import (
 // the record that owns it and unbound by that record's delete.
 type BlobOrphanSweeper interface {
 	SweepBlobOrphans(ctx context.Context, now time.Time, grace time.Duration) error
-}
-
-// SweepRooms prunes the room-create ledger. Those markers are a rate limiter's
-// sliding window, not content: past the window a marker can never change a
-// future decision, so dropping it keeps the family bounded.
-type SweepRooms interface {
-	PruneOldRoomCreates(cutoff time.Time) (int, error)
 }
 
 // Sweep reclaims storage. Nothing here is time-based from the user's point of
@@ -33,7 +24,6 @@ type SweepRooms interface {
 type Sweep struct {
 	// Blobs reclaims orphaned bytes; nil disables blob reclamation.
 	Blobs BlobReclaimer
-	Rooms SweepRooms // optional; nil disables the room-create prune
 
 	Interval time.Duration
 	Logger   *log.Logger
@@ -72,20 +62,12 @@ func (s *Sweep) tick() {
 	if err != nil {
 		s.Logger.Printf("sweep: %v", err)
 	}
-	var prunedCreates int
-	if !s.DryRun && s.Rooms != nil {
-		n, err := s.Rooms.PruneOldRoomCreates(now.Add(-domain.RoomCreateWindow))
-		if err != nil {
-			s.Logger.Printf("sweep: prune room_creates: %v", err)
-		}
-		prunedCreates = n
-	}
 	if s.DryRun {
-		s.Logger.Printf("sweep[dry-run]: reclaimed nothing (room-create prune skipped). Set HOSTTHIS_SWEEP_DISABLED=false to enable live cleanup.")
+		s.Logger.Printf("sweep[dry-run]: reclaimed nothing. Set HOSTTHIS_SWEEP_DISABLED=false to enable live cleanup.")
 		return
 	}
-	if blobCount > 0 || prunedCreates > 0 {
-		s.Logger.Printf("sweep: reclaimed %d blob(s), pruned %d room-create row(s)", blobCount, prunedCreates)
+	if blobCount > 0 {
+		s.Logger.Printf("sweep: reclaimed %d blob(s)", blobCount)
 	}
 }
 

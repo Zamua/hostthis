@@ -98,12 +98,9 @@ type siteStore interface {
 	httpapi.SiteReader
 }
 
-// roomStore is the union of every room-side interface the service / sweep
-// layers consume: the room write/read view (service.RoomRepo) and the sweep
-// view (service.SweepRooms).
+// roomStore is the room write/read view the service layer consumes.
 type roomStore interface {
 	service.RoomRepo
-	service.SweepRooms
 }
 
 // buildMetadata reads HOSTTHIS_METADATA_BACKEND and returns the configured

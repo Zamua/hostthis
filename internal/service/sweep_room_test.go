@@ -1,9 +1,6 @@
 package service_test
 
 import (
-	"context"
-	"io"
-	"log"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,17 +10,17 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// TestSweep_PrunesRoomCreates pins that a SWEEP PASS prunes the room-creation
-// rate-limit table once rows fall past the window, keeping it bounded.
+// The room-creation rate-limit table is bounded by the COUNT that already reads
+// it, not by a background pass: a row past the window can no longer change a
+// decision, so the read that would skip it removes it.
 //
-// Driven through Run with an already-canceled context: Run's boot tick runs
-// before the loop's first select, so that is exactly one full pass, and the
-// prune lives on the pass (tick), not in Once. Calling Once and then pruning by
-// hand asserts the test's own setup line and would pass with the sweep's prune
-// deleted entirely.
-func TestSweep_PrunesRoomCreates(t *testing.T) {
+// The observation window below is deliberately WIDER than the rate-limit
+// window. A count taken at the rate-limit width answers "outside the window"
+// and reads 0 whether or not anything was pruned, so it would pass with the
+// prune deleted entirely.
+func TestRoomCreates_CountPrunesPastWindow(t *testing.T) {
 	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "sweep.db"))
+	db, err := storage.Open(filepath.Join(dir, "rooms.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -37,32 +34,17 @@ func TestSweep_PrunesRoomCreates(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	// The fresh row counts toward the rate limit.
-	perSubnet, _, _ := rooms.CountRoomCreates("appz2345", "203.0.113.0/24", now, domain.RoomCreateWindow)
-	if perSubnet != 1 {
-		t.Fatalf("create count = %d, want 1", perSubnet)
-	}
-
-	logger := log.New(io.Discard, "", 0)
-	sweep := service.NewSweep(logger)
-	sweep.Rooms = rooms
-	future := now.Add(domain.RoomCreateWindow + time.Hour)
-	sweep.Now = func() time.Time { return future }
-
-	// The observation window must still REACH the row, or the count answers
-	// "outside the rate-limit window" and reads 0 whether or not anything was
-	// pruned - the boundedness claim would then hold with the prune deleted.
 	wide := domain.RoomCreateWindow + 2*time.Hour
-	if n, _, _ := rooms.CountRoomCreates("appz2345", "203.0.113.0/24", future, wide); n != 1 {
-		t.Fatalf("pre-sweep row count over the wide window = %d, want 1; the fixture cannot observe a prune", n)
+	if n, _, _ := rooms.CountRoomCreates("appz2345", "203.0.113.0/24", now, wide); n != 1 {
+		t.Fatalf("fixture: want the seeded row visible over the wide window, got %d", n)
 	}
 
-	// One sweep pass past the window prunes the creation row.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	sweep.Run(ctx)
-
+	// A count taken past the rate-limit window drops the row on the way past.
+	future := now.Add(domain.RoomCreateWindow + time.Hour)
+	if n, _, _ := rooms.CountRoomCreates("appz2345", "203.0.113.0/24", future, domain.RoomCreateWindow); n != 0 {
+		t.Fatalf("an aged-out row must not count: got %d", n)
+	}
 	if n, _, _ := rooms.CountRoomCreates("appz2345", "203.0.113.0/24", future, wide); n != 0 {
-		t.Fatalf("row count after the sweep pass = %d, want 0; the pass did not prune the room-create table", n)
+		t.Fatalf("the count must have DELETED the aged-out row, not just skipped it; still visible over the wide window: %d", n)
 	}
 }

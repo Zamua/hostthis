@@ -76,11 +76,6 @@ func (s *SlateRoomRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now
 	return s.repo.CountRoomCreates(appSlug, subnet, now, window)
 }
 
-// service.SweepRooms
-func (s *SlateRoomRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
-	return s.repo.PruneOldRoomCreates(cutoff)
-}
-
 // --- JSON row schema -------------------------------------------------------
 
 // roomRow is the persisted shape of a Room record. ByteTotal + KeyCount are
@@ -410,6 +405,7 @@ func (r *SlateRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now tim
 	}
 	cutoff := now.Add(-window).UTC().Format(sortableTimeFormat)
 	prefix := string(prefixAppRoomCreates(appSlug))
+	var expired [][]byte
 	for _, item := range items {
 		rest := strings.TrimPrefix(string(item.Key), prefix)
 		rowSubnet, ts, ok := splitRoomCreateRest(rest)
@@ -417,11 +413,30 @@ func (r *SlateRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now tim
 			continue
 		}
 		if ts <= cutoff {
-			continue // outside the window
+			// Outside the window: it can no longer change any decision, so the
+			// scan that already walked past it drops it (docs/SPEC.md "Room
+			// creation rate limit").
+			expired = append(expired, item.Key)
+			continue
 		}
 		perApp++
 		if rowSubnet == subnet {
 			perSubnet++
+		}
+	}
+	if len(expired) > 0 {
+		tx, terr := r.db.Begin(slatedb.IsolationLevelSnapshot)
+		if terr != nil {
+			return 0, 0, fmt.Errorf("begin prune tx: %w", terr)
+		}
+		for _, k := range expired {
+			if derr := tx.Delete(k); derr != nil {
+				_ = tx.Rollback()
+				return 0, 0, fmt.Errorf("drop expired create marker %s: %w", k, derr)
+			}
+		}
+		if _, cerr := tx.Commit(); cerr != nil {
+			return 0, 0, fmt.Errorf("commit create-marker prune: %w", cerr)
 		}
 	}
 	return perSubnet, perApp, nil
@@ -534,55 +549,6 @@ func (r *SlateRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 		return fmt.Errorf("commit delete room %s/%s: %w", appSlug, id, err)
 	}
 	return nil
-}
-
-// PruneOldRoomCreates deletes roomcreate/ markers whose <ts> is before cutoff.
-// Past the window a ledger marker can never change a future rate-limit
-// decision, so dropping it each tick keeps the family bounded. Returns the
-// number of markers deleted.
-func (r *SlateRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
-	items, err := r.scanPrefix([]byte("roomcreate/"))
-	if err != nil {
-		return 0, err
-	}
-	cutoffStr := cutoff.UTC().Format(sortableTimeFormat)
-	var toDelete [][]byte
-	for _, item := range items {
-		// key shape: roomcreate/<app-slug>/<subnet>/<ts>/<uuid>. The subnet
-		// contains a '/', so peel from the right: strip the trailing uuid and
-		// the ts is then the last segment.
-		k := string(item.Key)
-		uuidSlash := strings.LastIndex(k, "/")
-		if uuidSlash < 0 {
-			continue
-		}
-		beforeUUID := k[:uuidSlash]
-		tsSlash := strings.LastIndex(beforeUUID, "/")
-		if tsSlash < 0 {
-			continue
-		}
-		ts := beforeUUID[tsSlash+1:]
-		if ts < cutoffStr {
-			toDelete = append(toDelete, item.Key)
-		}
-	}
-	if len(toDelete) == 0 {
-		return 0, nil
-	}
-	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
-	if err != nil {
-		return 0, fmt.Errorf("begin tx: %w", err)
-	}
-	for _, k := range toDelete {
-		if err := tx.Delete(k); err != nil {
-			_ = tx.Rollback()
-			return 0, fmt.Errorf("delete room-create marker %s: %w", k, err)
-		}
-	}
-	if _, err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit room-create prune: %w", err)
-	}
-	return len(toDelete), nil
 }
 
 // --- helpers ---------------------------------------------------------------

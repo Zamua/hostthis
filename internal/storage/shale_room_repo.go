@@ -80,11 +80,6 @@ func (s *ShaleRoomRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now
 	return s.repo.CountRoomCreates(appSlug, subnet, now, window)
 }
 
-// service.SweepRooms
-func (s *ShaleRoomRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
-	return s.repo.PruneOldRoomCreates(cutoff)
-}
-
 // --- key builders (mirror the slatedb room layout; sharded on {app-slug}) ---
 
 func shaleKeyRoom(appSlug domain.Slug, id domain.RoomID) []byte {
@@ -522,6 +517,13 @@ func (r *ShaleRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now tim
 			continue
 		}
 		if ts <= cutoff {
+			// Out of window: it can no longer change any decision, so the scan
+			// that already walked past it drops it. That is what keeps the
+			// family bounded with no background pass and no fan-out
+			// (docs/SPEC.md "Room creation rate limit").
+			if err := r.cluster.Delete(item.Key); err != nil {
+				r.repoLog().Printf("roomcreate: drop expired marker %s: %v (it stops counting regardless)", item.Key, err)
+			}
 			continue
 		}
 		perApp++
@@ -614,40 +616,4 @@ func (r *ShaleRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 		return err
 	}
 	return fmt.Errorf("delete room %s/%s: seq fence exhausted after %d retries", appSlug, id, maxFenceRetries)
-}
-
-// PruneOldRoomCreates deletes roomcreate/ markers whose <ts> is before cutoff,
-// found by a cross-shard aggregate and deleted per shard. Past the window a
-// ledger marker can never change a future rate-limit decision, so the sweep
-// drops it each tick to keep the family bounded.
-func (r *ShaleRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
-	items, err := r.aggregateForBackground(prefixRoomCreate)
-	if err != nil {
-		return 0, err
-	}
-	cutoffStr := cutoff.UTC().Format(sortableTimeFormat)
-	deleted := 0
-	for _, item := range items {
-		// key shape: roomcreate/<app-slug>/<subnet>/<ts>/<uuid>. The <ts> is
-		// the SECOND-to-last segment, since the trailing <uuid> disambiguates
-		// same-ms creates, so strip the uuid first.
-		k := string(item.Key)
-		uuidSlash := strings.LastIndex(k, "/")
-		if uuidSlash < 0 {
-			continue
-		}
-		beforeUUID := k[:uuidSlash]
-		tsSlash := strings.LastIndex(beforeUUID, "/")
-		if tsSlash < 0 {
-			continue
-		}
-		ts := beforeUUID[tsSlash+1:]
-		if ts < cutoffStr {
-			if err := r.cluster.Delete(item.Key); err != nil {
-				return deleted, fmt.Errorf("delete room-create marker %s: %w", k, err)
-			}
-			deleted++
-		}
-	}
-	return deleted, nil
 }

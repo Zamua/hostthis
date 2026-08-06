@@ -3953,7 +3953,10 @@ rely on.
   aggregate is the room-tier analogue of the
   sqlite `room_kv`-grouped-by-app sum (`appRoomBytesTx`): bytes leave the
   per-app cap when a room or value is deleted. `CountRoomCreates` scans
-  `roomcreate/<app-slug>/` (per-app), and the per-subnet count walks the same
+  `roomcreate/<app-slug>/` (per-app) and **drops the markers it finds past the
+  window as it goes** - they can no longer change any decision, so the read
+  that would skip them removes them, which is what keeps the family bounded
+  with no background pass and no fan-out. The per-subnet count walks the same
   per-app family and matches the `<subnet>` segment (the same way the slatedb
   `SubnetsForIdentity` walks `keygate/`), counting markers whose fixed-width
   `<ts>` (the second-to-last segment, before the trailing disambiguator

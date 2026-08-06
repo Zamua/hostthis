@@ -172,10 +172,6 @@ func main() {
 		sweepSvc.Blobs = service.CollocatedReclaimer{Sweeper: metadata.BlobOrphanSweeper}
 		logger.Printf("sweep: SweepOrphans reclaims staged-but-unbound objects (grace %s)", service.DefaultOrphanGrace)
 	}
-	if roomRepo != nil {
-		// The room-create rate-limit prune.
-		sweepSvc.Rooms = roomRepo
-	}
 
 	// HOSTTHIS_SWEEP_DISABLED selects DRY-RUN vs LIVE; it is not an on/off
 	// switch and a "disabled" sweep is never a no-op. True means the sweep

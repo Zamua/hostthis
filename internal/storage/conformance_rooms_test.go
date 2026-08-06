@@ -28,7 +28,6 @@ import (
 // backend supporting the rooms tier must satisfy.
 type conformanceRoomRepo interface {
 	service.RoomRepo
-	service.SweepRooms
 }
 
 // roomConformanceStores bundles the three repos a backend's room factory
@@ -446,8 +445,13 @@ func conformRoomCreationRateLimitCounts(t *testing.T, rr conformanceRoomRepo) {
 	}
 }
 
-// conformRoomCreationLedgerPrune: a windowed prune drops past-window ledger
-// rows so the family stays bounded, and the in-window count survives it.
+// conformRoomCreationLedgerPrune: the COUNT drops past-window ledger rows on
+// the way past, so the family stays bounded with no background pass, and the
+// in-window rows survive it.
+//
+// The final observation uses a window WIDER than the rate-limit window. At the
+// rate-limit width an aged-out row reads as absent whether it was deleted or
+// merely skipped, so that check alone would pass with the prune removed.
 func conformRoomCreationLedgerPrune(t *testing.T, rr conformanceRoomRepo) {
 	const app = "app12345"
 	const window = time.Hour
@@ -465,19 +469,23 @@ func conformRoomCreationLedgerPrune(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("create fresh: %v", err)
 	}
 
-	n, err := rr.PruneOldRoomCreates(fixedNow.Add(-window))
-	if err != nil {
-		t.Fatalf("prune: %v", err)
+	wide := 4 * window
+	if n, _, err := rr.CountRoomCreates(app, subnet, fixedNow, wide); err != nil || n != 3 {
+		t.Fatalf("fixture: want all 3 rows visible over the wide window, got %d (err %v)", n, err)
 	}
-	if n != 2 {
-		t.Fatalf("prune should remove the 2 old ledger rows, got %d", n)
-	}
+
+	// A count at the rate-limit width excludes the two aged-out rows AND
+	// removes them.
 	perSubnet, _, err := rr.CountRoomCreates(app, subnet, fixedNow, window)
 	if err != nil {
-		t.Fatalf("count after prune: %v", err)
+		t.Fatalf("count: %v", err)
 	}
 	if perSubnet != 1 {
-		t.Fatalf("post-prune per-subnet count: got %d, want 1", perSubnet)
+		t.Fatalf("aged-out rows must not count: got %d, want 1", perSubnet)
+	}
+	if n, _, err := rr.CountRoomCreates(app, subnet, fixedNow, wide); err != nil || n != 1 {
+		t.Fatalf("the count must have DELETED the 2 aged-out rows, not just skipped them; "+
+			"still visible over the wide window: %d (err %v)", n, err)
 	}
 }
 

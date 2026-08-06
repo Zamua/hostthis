@@ -287,6 +287,13 @@ func (r *RoomKVRepo) DeleteValue(appSlug domain.Slug, id domain.RoomID, key stri
 // the service layer's room-creation rate limit reads before minting a new id.
 func (r *RoomKVRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now time.Time, window time.Duration) (perSubnet, perApp int, err error) {
 	windowStart := formatTime(now.Add(-window))
+	// Drop the rows that just aged out. They cannot change any decision, so the
+	// read that would have skipped them removes them instead - which is what
+	// keeps the table bounded with no background pass (docs/SPEC.md "Room
+	// creation rate limit").
+	if _, err := r.db.Exec(`DELETE FROM room_creates WHERE created_at <= ?`, windowStart); err != nil {
+		return 0, 0, fmt.Errorf("prune expired creates: %w", err)
+	}
 	if err := r.db.QueryRow(`
 		SELECT COUNT(*) FROM room_creates WHERE ip_subnet = ? AND created_at > ?
 	`, subnet, windowStart).Scan(&perSubnet); err != nil {
@@ -321,18 +328,6 @@ func (r *RoomKVRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 		return fmt.Errorf("delete room: %w", err)
 	}
 	return nil
-}
-
-// PruneOldRoomCreates deletes room_creates rows older than cutoff: past the
-// rate-limit window they can never affect a future decision. The sweep calls it
-// each tick so the table stays bounded.
-func (r *RoomKVRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
-	res, err := r.db.Exec(`DELETE FROM room_creates WHERE created_at < ?`, formatTime(cutoff))
-	if err != nil {
-		return 0, fmt.Errorf("prune room creates: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
 }
 
 // SumActiveRoomBytes returns the total stored value bytes across every app's
