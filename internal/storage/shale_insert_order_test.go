@@ -69,3 +69,48 @@ func TestShaleInsertOrder_TakenSlugWritesNoEntry(t *testing.T) {
 		t.Fatalf("holder's bytes after a failed collision: got %d, want 100", got)
 	}
 }
+
+// A fail-closed placeholder must be CLEARED once the authoritative row decodes
+// again. Nothing writes placeholders now that the reconciler is gone, so one
+// left behind by an older build would otherwise be permanent - and a permanent
+// placeholder hard-fails its owner's quota scan forever, locking them out of
+// uploading.
+func TestShaleInsertOrder_ListClearsStalePlaceholder(t *testing.T) {
+	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale insert-order test")
+	}
+	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	const owner = "key:placeholder"
+
+	p := domain.Paste{
+		Slug: "phld1234", Identity: domain.Identity(owner), Kind: domain.KindHTML,
+		ContentSHA: "sha-phld", Size: 250, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// Plant the marker an older build's reconciler would have written.
+	idxKey := storage.IdentityPasteKeyForTest(owner, p.Slug.String())
+	if err := repo.PutRawForTest(idxKey, []byte(`{"placeholder":true}`)); err != nil {
+		t.Fatalf("plant placeholder: %v", err)
+	}
+	if _, err := repo.SumActiveBytesByOwner(owner, now); err == nil {
+		t.Fatalf("fixture: a placeholder must hard-fail the quota scan, or this test proves nothing")
+	}
+
+	if _, err := repo.ListByOwner(owner); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+
+	// The row decodes fine, so the marker was stale and must be gone.
+	got, err := repo.SumActiveBytesByOwner(owner, now)
+	if err != nil {
+		t.Fatalf("the owner must be able to upload again after listing; quota scan still fails: %v", err)
+	}
+	if got != 250 {
+		t.Fatalf("cleared placeholder must be replaced by the real size: got %d, want 250", got)
+	}
+}

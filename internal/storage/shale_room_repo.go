@@ -552,7 +552,7 @@ var errRoomDeleteFenceStale = errors.New("room mutated during delete enumeration
 // own CAS, so a put committing in the window is detected and the whole pass
 // retries. Without the fence a value written in that window survives as a row
 // no scan can reach (its room is gone) and its bytes stay charged to the
-// per-app counter forever, which no reconciler repairs.
+// per-app counter forever, which nothing repairs.
 //
 // Given equal fence values, every delete and the counter decrement land in ONE
 // CAS, so the room and all its values vanish atomically (the shale analogue of

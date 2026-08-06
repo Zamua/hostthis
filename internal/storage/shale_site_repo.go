@@ -26,7 +26,7 @@
 //  2. authoritative write on {slug}, with BOTH sites/<slug> and pastes/<slug>
 //     collision reads in the CAS read-set,
 //  3. write the enumeration entry on {id}, best-effort: a lost write leaves an
-//     entry the reconciler reprojects, never a failed deploy.
+//     entry the owner's next list repairs, never a failed deploy.
 //
 // Check and write are not atomic, so a bounded same-owner over-admit is
 // accepted. See docs/SPEC.md "Scan-derived quota".
@@ -100,7 +100,7 @@ func shaleKeySite(slug domain.Slug) []byte { return []byte("sites/" + slug.Strin
 // is one prefix scan with zero per-entry row reads. It co-shards on <id> with
 // identity_pastes/, so an owner's paste-index and site-index scans each stay
 // single-shard. A LEGACY entry carries a one-byte marker or an empty value and
-// is read through its authoritative row until the reconciler's reprojection
+// is read through its authoritative row until the owner's next list
 // overwrites it with the JSON projection.
 func shaleKeyIdentitySite(identity, slug string) []byte {
 	return []byte("identity_sites/" + identity + "/" + slug)
@@ -112,17 +112,17 @@ func shalePrefixIdentitySites(identity string) []byte {
 
 // identitySiteRow is the value-bearing projection stored at
 // identity_sites/<id>/<slug>: the cached deduped size the site quota scan
-// sums. Derived and eventually consistent - the reconciler rebuilds
-// it from the authoritative sites/<slug> row, so cached-value error is bounded
-// by a reconcile cycle.
+// sums. Derived and eventually consistent - the owner's own list rebuilds it from the
+// authoritative sites/<slug> row, so cached-value error is bounded by that
+// owner's next read.
 type identitySiteRow struct {
 	Size int `json:"size"`
 
-	// Placeholder marks a fail-closed entry the reconciler projects for a
-	// slug whose authoritative sites/<slug> row cannot be decoded: the quota
+	// Placeholder marks a fail-closed entry for a slug whose authoritative
+	// sites/<slug> row cannot be decoded: the quota
 	// scan HARD-FAILS on it rather than silently under-counting (docs/SPEC.md
 	// "Decode tolerance of the quota scan"). Cleared when the row decodes
-	// again or is removed.
+	// again on the owner's next list.
 	Placeholder bool `json:"placeholder,omitempty"`
 }
 
@@ -249,9 +249,9 @@ func (r *ShaleRepo) ReplaceSiteWithQuotaCheck(ctx context.Context, s domain.Site
 
 	// Refresh the enumeration entry's cached size on the {id} shard,
 	// best-effort: a lost refresh leaves a stale cached size until the next
-	// reconciler reprojection (bounded drift).
+	// list-time repair (bounded drift).
 	if err := r.confirmSiteInsert(identity, slug, dedupedSize); err != nil {
-		r.repoLog().Printf("shale: site index refresh for %s: %v (index lag; reconciler will heal)", s.Slug, err)
+		r.repoLog().Printf("shale: site index refresh for %s: %v (index lag; the owner's next list heals it)", s.Slug, err)
 	}
 	return nil
 }
@@ -468,7 +468,7 @@ func translateCrossShard(err error) error {
 // confirmSiteInsert writes the value-bearing identity_sites/<id>/<slug> entry
 // on the {id} shard in one CAS. Called by BOTH insert and replace (idempotent
 // overwrite), so it also refreshes an in-place re-deploy's cached values.
-// Best-effort: a lost write leaves a missing or stale entry the reconciler
+// Best-effort: a lost write leaves a missing or stale entry the owner's next list
 // rebuilds, never a failed deploy.
 func (r *ShaleRepo) confirmSiteInsert(identity, slug string, dedupedSize int) error {
 	indexKey := shaleKeyIdentitySite(identity, slug)
@@ -511,13 +511,18 @@ func (r *ShaleRepo) ListSitesByOwner(owner string, _ time.Time) ([]domain.Site, 
 			return nil, err
 		}
 		// The read already holds the authoritative row, so correcting a stale
-		// cached size is free here - the repair that used to need a reconcile
-		// pass. Guarded on the value this scan read.
+		// cached size is free here - the repair that used to need a background pass. Guarded on the value this scan read.
 		var idxRow identitySiteRow
 		decoded := json.Unmarshal(item.Value, &idxRow) == nil
 		switch {
 		case decoded && idxRow.Placeholder:
-			// Fail-closed marker: left for the quota scan to hard-fail on.
+			// The placeholder exists because the row could not be decoded. This
+			// read just decoded it, so the marker is provably stale. Leaving it
+			// would hard-fail the owner's site quota scan forever.
+			fixed := identitySiteRow{Size: row.DedupedSize}
+			if _, werr := r.guardedPutIndexEntry(item.Key, item.Value, true, fixed); werr != nil {
+				r.repoLog().Printf("shale: clearing stale site placeholder for %s: %v (retried on the next list)", slug, werr)
+			}
 		case !decoded || idxRow.Size != row.DedupedSize:
 			// A drifted cached size, or a LEGACY entry predating the
 			// value-bearing projection (empty or a bare marker byte). Either
@@ -543,8 +548,8 @@ func (r *ShaleRepo) ListSitesByOwner(owner string, _ time.Time) ([]domain.Site, 
 // SumActiveSiteBytesByOwner derives the identity's active SITE bytes from ONE
 // prefix scan of identity_sites/<id>/, summing each value-bearing entry's
 // cached deduped size with zero per-entry row reads. There is no stored site
-// counter: the reconciler rebuilds the cached values from the authoritative
-// rows, so drift is bounded by a reconcile cycle. The service layer adds the
+// counter: the owner's next list rebuilds the cached values from the authoritative
+// rows, so drift is bounded by the owner's next read. The service layer adds the
 // paste-side sum where it needs the combined figure.
 func (r *ShaleRepo) SumActiveSiteBytesByOwner(owner string, _ time.Time) (int64, error) {
 	if owner == "" {
@@ -556,9 +561,9 @@ func (r *ShaleRepo) SumActiveSiteBytesByOwner(owner string, _ time.Time) (int64,
 // sumActiveSiteBytesForOwner scans identity_sites/<owner>/ once and sums each
 // entry's cached size. Fail-closed (Policy 2, a synchronous
 // write-path read): an entry that does not decode, or that carries the
-// reconciler's Placeholder marker, HARD-FAILS the scan. The one exception is a
+// fail-closed Placeholder marker, HARD-FAILS the scan. The one exception is a
 // LEGACY entry recognized by shape (a one-byte marker or an empty value), read
-// through its authoritative sites/<slug> row until the reconciler enriches it.
+// through its authoritative sites/<slug> row until the owner's next list enriches it.
 func (r *ShaleRepo) sumActiveSiteBytesForOwner(owner string) (int64, error) {
 	idx, err := r.scanPrefix(shalePrefixIdentitySites(owner))
 	if err != nil {
@@ -579,7 +584,7 @@ func (r *ShaleRepo) sumActiveSiteBytesForOwner(owner string) (int64, error) {
 			return 0, fmt.Errorf("decode %s: %w", item.Key, err)
 		}
 		if row.Placeholder {
-			return 0, fmt.Errorf("site quota scan: %s is a fail-closed placeholder (authoritative row undecodable; the reconciler clears it once the row is repaired)", item.Key)
+			return 0, fmt.Errorf("site quota scan: %s is a fail-closed placeholder (authoritative row undecodable; a list clears it once the row decodes again)", item.Key)
 		}
 		total += int64(row.Size)
 	}
@@ -595,7 +600,7 @@ func (r *ShaleRepo) legacySiteEntryBytes(indexKey []byte) (int64, error) {
 	var row siteRow
 	if err := r.getJSON(shaleKeySite(slug), &row); err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return 0, nil // stale legacy entry; the reconciler prunes it
+			return 0, nil // stale legacy entry; the owner's next list prunes it
 		}
 		return 0, err
 	}

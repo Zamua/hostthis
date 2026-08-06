@@ -4253,7 +4253,7 @@ backend:
    value-bearing: it caches the paste's live byte size (the sum of its
    non-deleted version sizes).
 2. Sum the cached sizes: HARD-FAIL on an entry that does not decode or that carries the
-   reconciler's fail-closed placeholder marker (see "Decode tolerance of
+   fail-closed placeholder marker (see "Decode tolerance of
    the quota scan"). No authoritative row is read: the check is ONE prefix
    scan with zero per-entry fan-out. (One deliberate exception, the
    upgrade path: a LEGACY paste entry migrated from a slatedb deployment

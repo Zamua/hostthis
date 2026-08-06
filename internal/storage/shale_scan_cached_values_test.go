@@ -85,7 +85,7 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 	// The no-fan-out contract, made observable: a stale-but-decodable entry
 	// whose authoritative rows are ABSENT still contributes its cached values,
 	// because the scan never resolves the head row. Bounded over-count: it
-	// counts until the reconciler prunes it.
+	// counts until the owner's next list prunes it.
 	staleKey := storage.IdentityPasteKeyForTest(owner, "cachegon")
 	writeIndexEntryJSON(t, repo, staleKey, 999, now)
 	if got := mustSum(t, repo, owner, now); got != 200+999 {
@@ -255,7 +255,7 @@ func TestShaleListDoesNotResurrectFailedPasteEntry(t *testing.T) {
 // TestShaleSiteQuotaScanSumsCachedIndexValues is the site mirror: the
 // identity_sites entry is value-bearing (cached deduped size), deploy
 // and replace maintain it, a bare marker entry falls back to the authoritative
-// row until the reconciler enriches it, orphans are pruned globally, and a
+// row until the owner's next list enriches it, orphans are pruned globally, and a
 // fail-closed placeholder hard-fails the scan.
 func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")

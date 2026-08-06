@@ -24,8 +24,7 @@ var errIndexEntryChanged = errors.New("shale: index entry changed since the comp
 // primitive that keeps every recomputed cached-value write (reprojections,
 // append/tombstone refreshes) from clobbering a FRESHER value landed after the
 // computation's snapshot: on a mismatch it skips, returning (false, nil), and
-// the next cycle recomputes from fresher rows (docs/SPEC.md "Periodic
-// reconcile" / "Window C"). The compare runs inside the {id}-shard CAS with the
+// the next read recomputes from fresher rows (docs/SPEC.md "Window C"). The compare runs inside the {id}-shard CAS with the
 // entry in the read-set, so a write landing between the compare and the commit
 // conflicts, and the re-run closure re-compares against the new value and skips.
 func (r *ShaleRepo) guardedPutIndexEntry(key, expected []byte, present bool, row any) (bool, error) {

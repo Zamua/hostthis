@@ -82,9 +82,9 @@ func shalePrefixKeygateIdentity(identity string) []byte {
 }
 
 // PendingPasteTimeout is how old a status=pending paste may be before the
-// reconciler ages it to failed (the pod-death backstop: its in-memory bytes
+// owner's next list ages it to failed (the pod-death backstop: its in-memory bytes
 // never reached the blob store). It must comfortably exceed a healthy blob write
-// plus retries so the reconciler never races a live finalizer, while staying
+// plus retries so the age-out never races a live finalizer, while staying
 // short enough that a lost-bytes paste self-heals out of the loading screen
 // within a sweep tick or two. A var, not a const, so tests can shrink it.
 var PendingPasteTimeout = 2 * time.Minute
@@ -98,18 +98,18 @@ var PendingPasteTimeout = 2 * time.Minute
 // quota"). The entry is derived
 // and eventually consistent: every size-changing write path maintains it and the
 // reconciler rebuilds it from the authoritative pastes/* + versions/* rows, so
-// cached-value error is bounded by a reconcile cycle.
+// cached-value error is bounded by the owner's next read.
 type identityPasteRow struct {
 	Name      string    `json:"name"`
 	Size      int       `json:"size"`
 	CreatedAt time.Time `json:"created_at"`
 
-	// Placeholder marks a fail-closed entry the reconciler projects for a slug
-	// whose authoritative record (head or any version row) cannot be decoded:
+	// Placeholder marks a fail-closed entry for a slug whose authoritative
+	// record (head or any version row) cannot be decoded:
 	// the live sum is uncomputable, so rather than project a partial number (a
 	// silent under-count) the entry carries this marker and the quota scan
 	// HARD-FAILS on it (docs/SPEC.md "Decode tolerance of the quota scan"). It
-	// clears only when the record decodes again or the row is removed; real
+	// clears on the owner's next list once the record decodes again; real
 	// corruption therefore needs an operator repair or raw-key delete, since
 	// Delete/DeleteVersion/the sweep all decode that same row. omitempty keeps
 	// ordinary entries byte-shaped.
