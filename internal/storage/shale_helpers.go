@@ -87,13 +87,22 @@ func shalePrefixKeygateIdentity(identity string) []byte {
 // of the entry being value-bearing. Fields the listing does not show (the
 // content sha, the blob id) stay zero: a caller needing those reads the
 // authoritative row.
+// renderable reports whether the entry carries everything a list row needs, so
+// the listing can skip reading the authoritative row. A zero Kind or ServedSize
+// marks an entry written before that field existed; those take the upgrade path
+// once and are rewritten complete. An empty paste is not creatable, so a zero
+// ServedSize is unambiguous.
+func (e identityPasteRow) renderable() bool {
+	return e.Kind != "" && e.ServedSize > 0 && !e.Placeholder
+}
+
 func (e identityPasteRow) toDomain(slug domain.Slug, owner string) domain.Paste {
 	return domain.Paste{
 		Slug:          slug,
 		Identity:      domain.Identity(owner),
 		Status:        domain.PasteStatusReady,
 		Kind:          domain.ContentKind(e.Kind),
-		Size:          e.Size,
+		Size:          e.ServedSize,
 		StoredBytes:   e.Size,
 		Name:          e.Name,
 		PinnedVersion: e.PinnedVersion,
@@ -126,8 +135,14 @@ type identityPasteRow struct {
 	// A zero Kind marks an entry written before these fields existed; the
 	// listing falls back to reading that one row, so an old entry keeps
 	// rendering correctly until its next write refreshes it.
-	Kind          string    `json:"kind,omitempty"`
-	LatestVersion int       `json:"latest_version,omitempty"`
+	Kind          string `json:"kind,omitempty"`
+	LatestVersion int    `json:"latest_version,omitempty"`
+
+	// ServedSize is the HEAD version's own size, distinct from Size (the live
+	// sum across every non-deleted version). The list shows both: the served
+	// bytes, and the larger total the quota actually charges. Deriving one
+	// from the other is impossible, so both are cached.
+	ServedSize    int       `json:"served_size,omitempty"`
 	PinnedVersion int       `json:"pinned_version,omitempty"`
 	UpdatedAt     time.Time `json:"updated_at,omitempty"`
 

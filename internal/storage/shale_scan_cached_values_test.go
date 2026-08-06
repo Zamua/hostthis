@@ -557,7 +557,7 @@ func writeCachedIndexSize(t *testing.T, repo *storage.ShaleRepo, idxKey []byte, 
 func writeFatIndexEntryJSON(t *testing.T, repo *storage.ShaleRepo, idxKey []byte, size int, at time.Time) {
 	t.Helper()
 	out, err := json.Marshal(map[string]any{
-		"name": "", "size": size, "created_at": at,
+		"name": "", "size": size, "served_size": size, "created_at": at,
 		"kind": string(domain.KindHTML), "latest_version": 1, "updated_at": at,
 	})
 	if err != nil {
@@ -580,5 +580,66 @@ func writeIndexEntryJSON(t *testing.T, repo *storage.ShaleRepo, idxKey []byte, s
 	}
 	if err := repo.PutRawForTest(idxKey, out); err != nil {
 		t.Fatalf("write index entry: %v", err)
+	}
+}
+
+// TestShaleListReportsServedAndStoredSizes pins that a multi-version paste's
+// list row distinguishes the SERVED version's bytes from the total the quota
+// charges, both served from the cached entry with no authoritative read.
+// Collapsing them hides the multi-version size note from every owner.
+func TestShaleListReportsServedAndStoredSizes(t *testing.T) {
+	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale served-size test")
+	}
+	repo := newShaleRepoOnUniqueDB(t, endpoint)
+
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	owner := "key:servedsz"
+	slug := domain.Slug("servedsz")
+	p := domain.Paste{
+		Slug: slug, Identity: domain.Identity(owner), Kind: domain.KindHTML,
+		ContentSHA: "sha-served-v1", Size: 300, CreatedAt: now, UpdatedAt: now}
+	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	repo.WaitPendingConfirms()
+	if _, err := repo.AppendVersionWithQuotaCheck(context.Background(), slug, domain.KindHTML, "sha-served-v2", 50, 0, now); err != nil {
+		t.Fatalf("append v2: %v", err)
+	}
+
+	got, err := repo.ListByOwner(owner)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("list: got %d items, want 1", len(got))
+	}
+	if got[0].Size != 50 {
+		t.Errorf("served size: got %d, want 50 (v2, the head version)", got[0].Size)
+	}
+	if got[0].StoredBytes != 350 {
+		t.Errorf("stored bytes: got %d, want 350 (both live versions)", got[0].StoredBytes)
+	}
+
+	// An entry missing the served size is incomplete, not renderable: the list
+	// must resolve it rather than report zero.
+	idxKey := storage.IdentityPasteKeyForTest(owner, slug.String())
+	incomplete, err := json.Marshal(map[string]any{
+		"name": "", "size": 350, "created_at": now,
+		"kind": string(domain.KindHTML), "latest_version": 2, "updated_at": now,
+	})
+	if err != nil {
+		t.Fatalf("encode incomplete entry: %v", err)
+	}
+	if err := repo.PutRawForTest(idxKey, incomplete); err != nil {
+		t.Fatalf("write incomplete entry: %v", err)
+	}
+	got, err = repo.ListByOwner(owner)
+	if err != nil {
+		t.Fatalf("list (incomplete entry): %v", err)
+	}
+	if len(got) != 1 || got[0].Size != 50 {
+		t.Fatalf("an entry with no served size must be resolved, not rendered as zero: got %+v", got)
 	}
 }
