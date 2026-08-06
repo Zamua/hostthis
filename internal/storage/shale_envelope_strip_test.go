@@ -11,7 +11,8 @@ package storage_test
 // strip it.
 //
 // Pins that they do: drop a strip in scanPrefix / aggregatePrefix and
-// ListVersions / ReferencedBlobSHAs fail with "invalid character" decode errors.
+// ListVersions / the reconciler's reprojection fail with "invalid character"
+// decode errors.
 //
 //	go test -tags slatedb -run TestShaleEnvelopeStrip ./internal/storage
 //
@@ -81,13 +82,19 @@ func TestShaleEnvelopeStrip_ScanPathsDecodeEnvelopedValue(t *testing.T) {
 		t.Fatalf("enveloped version did not round-trip via scanPrefix: %+v", vers)
 	}
 
-	// aggregatePrefix path: the cross-shard scan the blob GC + service-wide
-	// quota pre-check run on.
-	refs, err := repo.ReferencedBlobSHAs()
-	if err != nil {
-		t.Fatalf("ReferencedBlobSHAs over an enveloped version row: %v", err)
+	// aggregatePrefix path: the cross-shard scan the reconciler runs on. Its
+	// reprojection has to decode the enveloped paste AND version rows to
+	// recompute the cached live-byte sum, so a missing strip surfaces as a
+	// wrong (or unwritten) cached size rather than a decode error the caller
+	// sees.
+	idxKey := storage.IdentityPasteKeyForTest(owner, slug.String())
+	if err := repo.DeleteRawForTest(idxKey); err != nil {
+		t.Fatalf("clear index entry before reconcile: %v", err)
 	}
-	if !sliceHasMig(refs, sha) {
-		t.Fatalf("enveloped version sha must be referenced: %v should contain %q", refs, sha)
+	if err := repo.ReconcileForTest(now); err != nil {
+		t.Fatalf("reconcile over an enveloped version row: %v", err)
+	}
+	if got := readCachedIndexSize(t, repo, idxKey); got != p.Size {
+		t.Fatalf("the reconciler must decode the enveloped rows and reproject the live sum: cached size %d, want %d", got, p.Size)
 	}
 }

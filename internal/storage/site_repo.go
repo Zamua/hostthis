@@ -261,40 +261,6 @@ func (r *SiteRepo) Delete(slug domain.Slug) error {
 	return nil
 }
 
-// ReferencedSiteBlobSHAs returns the set of blob SHAs referenced by any site's
-// manifest. The sweep unions this with the paste-side set so a blob shared
-// between a site and a paste, or between two sites, stays alive as long as ANY
-// live record references it.
-func (r *SiteRepo) ReferencedSiteBlobSHAs() ([]string, error) {
-	rows, err := r.db.Query(`SELECT manifest FROM sites`)
-	if err != nil {
-		return nil, fmt.Errorf("site manifests for gc: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	seen := make(map[string]struct{}, 256)
-	for rows.Next() {
-		var manStr string
-		if err := rows.Scan(&manStr); err != nil {
-			return nil, err
-		}
-		man, err := decodeManifest(manStr)
-		if err != nil {
-			return nil, err
-		}
-		for _, sha := range man.SHASet() {
-			seen[sha] = struct{}{}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(seen))
-	for sha := range seen {
-		out = append(out, sha)
-	}
-	return out, nil
-}
-
 // identityActiveBytes sums active bytes owned by one identity across BOTH
 // pastes and sites, inside the caller's tx.
 func identityActiveBytes(tx *sql.Tx, identity string) (int64, error) {

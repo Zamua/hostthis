@@ -64,8 +64,8 @@ func TestShaleMigration_RawValueRoundTrips(t *testing.T) {
 	mustPutRaw(t, repo, storage.LegacyVersionKeyForTest(slug, 1), v1Val)
 	mustPutRaw(t, repo, storage.LegacySlugOwnerKeyForTest(slug), []byte(owner))
 
-	got, err := repo.Get(slug)
-	if err != nil {
+	got, gerr := repo.Get(slug)
+	if gerr != nil {
 		t.Fatalf("Get legacy paste: %v", err)
 	}
 	if got.Slug != p.Slug || got.Identity != p.Identity || got.Kind != p.Kind ||
@@ -91,14 +91,14 @@ func TestShaleMigration_RawValueRoundTrips(t *testing.T) {
 		t.Fatalf("ListVersions over legacy rows: got %+v, want one v1", vers)
 	}
 
-	// The content sha must be in the referenced set (the GC allow-list) or the
-	// blob is collected out from under the migrated paste.
-	refs, err := repo.ReferencedBlobSHAs()
-	if err != nil {
-		t.Fatalf("ReferencedBlobSHAs: %v", err)
+	// The head row's content sha survives the migration: the read path resolves
+	// bytes through it, so losing it strands the paste's content.
+	head, gerr := repo.Get(slug)
+	if gerr != nil {
+		t.Fatalf("Get over legacy rows: %v", gerr)
 	}
-	if !sliceHasMig(refs, p.ContentSHA) {
-		t.Fatalf("legacy paste sha must be referenced post-migration: %v should contain %q", refs, p.ContentSHA)
+	if head.ContentSHA != p.ContentSHA {
+		t.Fatalf("legacy paste sha must survive migration: got %q, want %q", head.ContentSHA, p.ContentSHA)
 	}
 }
 

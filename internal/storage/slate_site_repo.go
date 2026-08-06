@@ -6,8 +6,8 @@
 // InsertWithQuotaCheck) collide with the paste method names on SlateRepo at
 // different signatures, so they cannot both live on SlateRepo. The KV
 // operations live on SlateRepo as `...Site` methods (sharing db and lockQuota)
-// and SlateSiteRepo re-exposes them under the service.SiteRepo +
-// service.SweepSites names by delegating.
+// and SlateSiteRepo re-exposes them under the service.SiteRepo names by
+// delegating.
 //
 // Canonical layout in docs/SPEC.md "Static-site storage on the slatedb
 // (and shale) backend".
@@ -27,7 +27,6 @@ package storage
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -37,14 +36,14 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// SlateSiteRepo is the service.SiteRepo + service.SweepSites adapter over a
-// SlateRepo, delegating to its `...Site` methods so the site repo shares one
-// SlateDB instance (and quota accounting) with the paste repo.
+// SlateSiteRepo is the service.SiteRepo adapter over a SlateRepo, delegating to
+// its `...Site` methods so the site repo shares one SlateDB instance (and quota
+// accounting) with the paste repo.
 type SlateSiteRepo struct {
 	repo *SlateRepo
 }
 
-// NewSlateSiteRepo adapts a SlateRepo to service.SiteRepo + service.SweepSites.
+// NewSlateSiteRepo adapts a SlateRepo to service.SiteRepo.
 func NewSlateSiteRepo(repo *SlateRepo) *SlateSiteRepo { return &SlateSiteRepo{repo: repo} }
 
 // service.SiteRepo
@@ -74,11 +73,8 @@ func (s *SlateSiteRepo) PreClaimSlug(_ context.Context, _ domain.Slug, _ string,
 	return nil
 }
 
-// service.SweepSites (Delete also serves the owner-facing removal path)
+// Delete serves the owner-facing removal path.
 func (s *SlateSiteRepo) Delete(slug domain.Slug) error { return s.repo.DeleteSite(slug) }
-func (s *SlateSiteRepo) ReferencedSiteBlobSHAs() ([]string, error) {
-	return s.repo.ReferencedSiteBlobSHAs()
-}
 
 // --- JSON row schema -------------------------------------------------------
 
@@ -412,33 +408,4 @@ func (r *SlateRepo) DeleteSite(slug domain.Slug) error {
 		return fmt.Errorf("commit site delete %q: %w", slug, err)
 	}
 	return nil
-}
-
-// ReferencedSiteBlobSHAs returns every distinct blob SHA referenced by any live
-// site's manifest. The sweep unions this with the paste-side set, so a blob
-// shared between records survives as long as ANY live record references it.
-func (r *SlateRepo) ReferencedSiteBlobSHAs() ([]string, error) {
-	sites, err := r.scanPrefix(prefixSites)
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[string]struct{}, len(sites))
-	for _, item := range sites {
-		var row siteRow
-		if err := json.Unmarshal(item.Value, &row); err != nil {
-			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
-		}
-		man, err := decodeManifest(row.Manifest)
-		if err != nil {
-			return nil, err
-		}
-		for _, sha := range man.SHASet() {
-			seen[sha] = struct{}{}
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for sha := range seen {
-		out = append(out, sha)
-	}
-	return out, nil
 }

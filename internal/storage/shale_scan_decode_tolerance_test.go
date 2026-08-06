@@ -15,7 +15,7 @@ package storage_test
 //     sweep deletes NOTHING that pass. Skipping would under-count references
 //     and delete a live blob, which is irreversible.
 //
-//   - Policy 3 (user-facing reads): a read of a corrupt record HARD FAILS. The
+//   - Policy 2 (user-facing reads): a read of a corrupt record HARD FAILS. The
 //     user sees an error, not a silent skip.
 //
 //	go test -tags slatedb -run TestShaleDecodeTolerance ./internal/storage
@@ -24,16 +24,11 @@ package storage_test
 
 import (
 	"context"
-	"io"
-	"log"
 	"os"
-	"slices"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
@@ -244,144 +239,9 @@ func TestShaleDecodeTolerance_ReconcileHealsUnindexedUndecodableRow(t *testing.T
 
 // --- Policy 2: blob-GC ref scan fails closed --------------------------------
 
-// fakeBlobs is an in-memory SweepBlobs whose Remove records every deletion, so
-// a test can assert Remove is NEVER called.
-type fakeBlobs struct {
-	mu      sync.Mutex
-	present map[string]struct{}
-	removed []string
-}
+// --- Policy 2: user-facing reads still hard-fail ----------------------------
 
-func newFakeBlobs(shas ...string) *fakeBlobs {
-	b := &fakeBlobs{present: make(map[string]struct{})}
-	for _, s := range shas {
-		b.present[s] = struct{}{}
-	}
-	return b
-}
-
-func (b *fakeBlobs) WalkBlobs(fn func(sha string) error) error {
-	b.mu.Lock()
-	shas := make([]string, 0, len(b.present))
-	for s := range b.present {
-		shas = append(shas, s)
-	}
-	b.mu.Unlock()
-	for _, s := range shas {
-		if err := fn(s); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (b *fakeBlobs) Remove(sha string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.present, sha)
-	b.removed = append(b.removed, sha)
-	return nil
-}
-
-// TestShaleDecodeTolerance_BlobGCFailsClosed pins Policy 2, the data-loss
-// guard: a corrupt pastes/ row makes ReferencedBlobSHAs ABORT (an error, never
-// a partial keep-set), so the Sweep caller deletes NOTHING that pass, including
-// the live blob the corrupt row still references.
-//
-// It also shows what a skip-on-bad change would cost: the corrupt row's sha is
-// not recoverable from the aborted scan, so a skipping scan would omit it from
-// the keep-set and the sweep would delete a live blob.
-func TestShaleDecodeTolerance_BlobGCFailsClosed(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale decode-tolerance test (start dev MinIO first)")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
-
-	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
-
-	// Two pastes referencing DISTINCT blob shas, so the
-	// sweep deletes no pastes and the only question is which blobs it
-	// considers referenced.
-	keep := domain.Paste{
-		Slug: domain.Slug("keeppst1"), Identity: domain.Identity("key:gc"),
-		Kind: domain.KindHTML, ContentSHA: "sha-keep-good", Size: 100,
-		CreatedAt: now, UpdatedAt: now}
-	poisoned := domain.Paste{
-		Slug: domain.Slug("poispst2"), Identity: domain.Identity("key:gc"),
-		Kind: domain.KindHTML, ContentSHA: "sha-keep-poisoned", Size: 100,
-		CreatedAt: now, UpdatedAt: now}
-	if err := repo.InsertWithQuotaCheck(context.Background(), keep, 0, now); err != nil {
-		t.Fatalf("insert keep paste: %v", err)
-	}
-	if err := repo.InsertWithQuotaCheck(context.Background(), poisoned, 0, now); err != nil {
-		t.Fatalf("insert poisoned paste: %v", err)
-	}
-
-	// Both blobs exist on disk; the honest answer is "both still referenced".
-	const keepSHA = "sha-keep-good"
-	const poisonedSHA = "sha-keep-poisoned"
-
-	// Dropping the auto-created v1 version row (same sha) leaves the pastes/
-	// row about to be corrupted as the ONLY reference to poisonedSHA. That is
-	// what makes the fail-closed assertion a real data-loss guard: a
-	// skip-on-bad scan would omit poisonedSHA and the sweep would delete a
-	// live blob.
-	if err := repo.DeleteRawForTest(storage.LegacyVersionKeyForTest(poisoned.Slug, 1)); err != nil {
-		t.Fatalf("drop poisoned v1 version row: %v", err)
-	}
-
-	// Baseline: both shas referenced, proving the fixture itself is sound.
-	baseRefs, err := repo.ReferencedBlobSHAs()
-	if err != nil {
-		t.Fatalf("baseline ReferencedBlobSHAs: %v", err)
-	}
-	if !containsAllSHAs(baseRefs, keepSHA, poisonedSHA) {
-		t.Fatalf("baseline refs %v must contain both %q and %q", baseRefs, keepSHA, poisonedSHA)
-	}
-
-	if err := repo.PutRawForTest(storage.LegacyPasteKeyForTest(poisoned.Slug), corruptJSON); err != nil {
-		t.Fatalf("corrupt poisoned paste row: %v", err)
-	}
-
-	// (a) Repo level: the ref-set scan FAILS CLOSED, never returning a usable
-	//     keep-set that omits the poisoned sha.
-	refs, err := repo.ReferencedBlobSHAs()
-	if err == nil {
-		t.Fatalf("ReferencedBlobSHAs must FAIL CLOSED on a corrupt row; got refs=%v, nil error (a skip-on-bad regression)", refs)
-	}
-	if shaContains(refs, keepSHA) || shaContains(refs, poisonedSHA) {
-		t.Fatalf("failed-closed ReferencedBlobSHAs must not return a partial keep-set; got %v", refs)
-	}
-
-	// (b) Caller level: Sweep.Once, given that erroring ref scan, deletes
-	//     NOTHING, so the live blob the corrupt row references survives.
-	blobs := newFakeBlobs(keepSHA, poisonedSHA)
-	silent := log.New(io.Discard, "", 0)
-	sweep := &service.Sweep{
-		Repo:   repo,
-		Blobs:  service.DetachedStoreReclaimer{Blobs: blobs},
-		Logger: silent,
-		Now:    func() time.Time { return now },
-	}
-	blobsGCd, err := sweep.Once(now)
-	if err == nil {
-		t.Fatalf("Sweep.Once must surface the ref-scan error so the loop logs it; got nil")
-	}
-	if blobsGCd != 0 {
-		t.Fatalf("Sweep.Once must GC zero blobs when the ref scan fails closed; got %d", blobsGCd)
-	}
-	if len(blobs.removed) != 0 {
-		t.Fatalf("DATA LOSS: Sweep removed blobs %v on a fail-closed ref scan; it must delete NOTHING", blobs.removed)
-	}
-	if !blobs.has(keepSHA) || !blobs.has(poisonedSHA) {
-		t.Fatalf("both blobs must survive a fail-closed pass; present=%v", blobs.snapshot())
-	}
-}
-
-// --- Policy 3: user-facing reads still hard-fail ----------------------------
-
-// TestShaleDecodeTolerance_UserReadHardFails pins Policy 3: a user read of a
+// TestShaleDecodeTolerance_UserReadHardFails pins Policy 2: a user read of a
 // corrupt record surfaces an error, so the tolerant background scans cannot
 // have leaked their skip behavior into the per-request read path.
 func TestShaleDecodeTolerance_UserReadHardFails(t *testing.T) {
@@ -411,33 +271,3 @@ func TestShaleDecodeTolerance_UserReadHardFails(t *testing.T) {
 }
 
 // --- helpers ---------------------------------------------------------------
-
-func (b *fakeBlobs) has(sha string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	_, ok := b.present[sha]
-	return ok
-}
-
-func (b *fakeBlobs) snapshot() []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	out := make([]string, 0, len(b.present))
-	for s := range b.present {
-		out = append(out, s)
-	}
-	return out
-}
-
-func shaContains(haystack []string, needle string) bool {
-	return slices.Contains(haystack, needle)
-}
-
-func containsAllSHAs(haystack []string, needles ...string) bool {
-	for _, n := range needles {
-		if !shaContains(haystack, n) {
-			return false
-		}
-	}
-	return true
-}

@@ -13,7 +13,7 @@ package storage_test
 //     contributes its cached values,
 //   - the reconciler's reprojection is the drift healer, rebuilding cached
 //     values and pruning orphans even under an owner with no records left,
-//   - fail-closed (Policy 3): an undecodable entry or a fail-closed
+//   - fail-closed (Policy 2): an undecodable entry or a fail-closed
 //     placeholder HARD-FAILS the scan, since skipping would under-count,
 //   - shale's quota result equals sqlite's on the same op sequence, and an
 //     out-of-band index corruption is healed back to parity.
@@ -135,7 +135,7 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 	}
 }
 
-// TestShaleQuotaScanFailClosed pins Policy 3: an entry that does not decode, or
+// TestShaleQuotaScanFailClosed pins Policy 2: an entry that does not decode, or
 // that carries the reconciler's fail-closed placeholder, HARD-FAILS the check
 // and rejects the upload. Skipping it would under-count and over-admit. The
 // reconciler prunes a bogus entry, restoring the owner's checks.
@@ -163,7 +163,7 @@ func TestShaleQuotaScanFailClosed(t *testing.T) {
 		t.Fatalf("seed corrupt entry: %v", err)
 	}
 	if got, err := repo.SumActiveBytesByOwner(owner, now); err == nil {
-		t.Fatalf("an undecodable entry must HARD-FAIL the quota scan (Policy 3); got %d, nil error", got)
+		t.Fatalf("an undecodable entry must HARD-FAIL the quota scan (Policy 2); got %d, nil error", got)
 	}
 	if err := repo.DeleteRawForTest(badKey); err != nil {
 		t.Fatalf("clear corrupt entry: %v", err)

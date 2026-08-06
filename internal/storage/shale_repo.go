@@ -821,7 +821,7 @@ func (r *ShaleRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, err
 //   - failed pastes are absent by construction (MarkFailed drops the entry;
 //     the reconciler never reprojects a failed row's entry).
 //
-// Fail-closed (Policy 3; this is a synchronous write-path read): an entry that
+// Fail-closed (Policy 2; this is a synchronous write-path read): an entry that
 // does not decode, or that carries the reconciler's Placeholder marker for an
 // undecodable authoritative record, HARD-FAILS the scan, rejecting the upload
 // rather than silently under-counting. The one exception is a LEGACY entry,
@@ -860,7 +860,7 @@ func (r *ShaleRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 // through its authoritative rows, the read-through a migrated deployment needs
 // until the reconciler enriches the entry. An empty value is the only legacy
 // paste shape (unlike sites, pastes have no marker-byte era). A stale entry
-// whose row is gone contributes zero; an undecodable row HARD-FAILS (Policy 3);
+// whose row is gone contributes zero; an undecodable row HARD-FAILS (Policy 2);
 // a live row contributes its live version sum.
 func (r *ShaleRepo) legacyPasteEntryBytes(indexKey []byte) (int64, error) {
 	slug := domain.Slug(extractSlug(indexKey))
@@ -1813,57 +1813,3 @@ func (r *ShaleRepo) Unpin(slug domain.Slug) error {
 }
 
 // --- SweepRepo -------------------------------------------------------------
-
-// ReferencedBlobSHAs returns the set of blob content-SHAs still referenced by a
-// LIVE (non-deleted) version or paste head, aggregated across all {slug}
-// shards. The sweep treats the returned slice as an allow-list: any blob whose
-// sha is NOT in it is GC'd. A tombstoned version's sha is excluded, since a
-// deleted version is content-inaccessible and its blob is GC-eligible.
-// Dedup-safe: a sha shared by another live version stays referenced.
-//
-// Returning 0 referenced shas while pastes exist would make the sweep delete
-// every blob, so an empty result is legitimate only for an empty keyspace: this
-// method never returns nil with a nil error, and the sweep's abort-on-zero-refs
-// guard backstops it.
-func (r *ShaleRepo) ReferencedBlobSHAs() ([]string, error) {
-	pastes, err := r.aggregateForBackground([]byte("pastes/"))
-	if err != nil {
-		return nil, err
-	}
-	versions, err := r.aggregateForBackground([]byte("versions/"))
-	if err != nil {
-		return nil, err
-	}
-	referenced := make(map[string]struct{}, len(pastes)+len(versions))
-	for _, item := range pastes {
-		var p pasteRow
-		if err := json.Unmarshal(item.Value, &p); err != nil {
-			// FAIL CLOSED, never skip. This is the blob-GC keep-set: skipping an
-			// undecodable row UNDER-COUNTS references, so a blob the row still
-			// references looks orphaned and is irreversibly deleted. The sweep
-			// caller treats any error here as "delete nothing this pass". The
-			// deliberate opposite of the Reconcile skip+log policy. See
-			// docs/SPEC.md "Decode tolerance is per-scan-semantics", Policy 2.
-			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
-		}
-		if p.ContentSHA != "" {
-			referenced[p.ContentSHA] = struct{}{}
-		}
-	}
-	for _, item := range versions {
-		var v versionRow
-		if err := json.Unmarshal(item.Value, &v); err != nil {
-			// FAIL CLOSED, as in the paste loop: an under-counted ref-set
-			// deletes a live blob. Policy 2.
-			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
-		}
-		if v.ContentSHA != "" && !v.Deleted {
-			referenced[v.ContentSHA] = struct{}{}
-		}
-	}
-	out := make([]string, 0, len(referenced))
-	for sha := range referenced {
-		out = append(out, sha)
-	}
-	return out, nil
-}

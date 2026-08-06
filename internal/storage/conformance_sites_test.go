@@ -29,7 +29,6 @@ import (
 // sweep's delete and referenced-blob set.
 type conformanceSiteRepo interface {
 	service.SiteRepo
-	service.SweepSites
 }
 
 // siteOf builds a Site with one slug-derived file, stamped at fixedNow with the
@@ -90,7 +89,6 @@ func runSiteConformance(t *testing.T, name string, caps conformCaps, newSites fu
 	t.Run(name+"/Sites/PerOwnerCapCountsBoth", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapCountsBoth(t, r, sr) })
 	t.Run(name+"/Sites/PerOwnerCapConcurrentCeiling", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapConcurrentCeiling(t, caps, r, sr) })
 	t.Run(name+"/Sites/SlugCollisionVsPaste", func(t *testing.T) { r, sr := newSites(t); conformSiteSlugCollisionVsPaste(t, r, sr) })
-	t.Run(name+"/Sites/ReferencedBlobSHAs", func(t *testing.T) { _, sr := newSites(t); conformSiteReferencedBlobSHAs(t, sr) })
 	t.Run(name+"/Sites/DedupedSizeCharged", func(t *testing.T) { _, sr := newSites(t); conformSiteDedupedSizeCharged(t, sr) })
 	t.Run(name+"/Sites/ReplaceInPlace", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceInPlace(t, sr) })
 	t.Run(name+"/Sites/ReplaceNotFoundShape", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceNotFoundShape(t, r, sr) })
@@ -470,45 +468,6 @@ func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conform
 	}
 	if !errors.Is(derr, storage.ErrSlugTaken) {
 		t.Fatalf("duplicate-site-slug error must be storage.ErrSlugTaken (errors.Is), got %v", derr)
-	}
-}
-
-// conformSiteReferencedBlobSHAs pins the site-side referenced-blob set the
-// sweep unions into its keep-alive set, including its deduplication.
-func conformSiteReferencedBlobSHAs(t *testing.T, sr conformanceSiteRepo) {
-	refs, err := sr.ReferencedSiteBlobSHAs()
-	if err != nil {
-		t.Fatalf("referenced site shas (empty): %v", err)
-	}
-	if len(refs) != 0 {
-		t.Fatalf("empty repo should reference no site shas, got %v", refs)
-	}
-
-	man := domain.NewManifest()
-	man.Add("index.html", domain.ManifestEntry{SHA: "sha-ref-index", Size: 10, ContentType: "text/html; charset=utf-8"})
-	man.Add("app.js", domain.ManifestEntry{SHA: "sha-ref-js", Size: 20, ContentType: "text/javascript; charset=utf-8"})
-	// Two paths pointing at the SAME blob: it appears once in the set.
-	man.Add("copy.html", domain.ManifestEntry{SHA: "sha-ref-index", Size: 10, ContentType: "text/html; charset=utf-8"})
-	s := domain.Site{
-		Slug: "rf123456", Identity: "key:rf", Manifest: man,
-		CreatedAt: fixedNow, UpdatedAt: fixedNow}
-	insertSite(t, sr, s)
-
-	refs, err = sr.ReferencedSiteBlobSHAs()
-	if err != nil {
-		t.Fatalf("referenced site shas: %v", err)
-	}
-	if !sliceHas(refs, "sha-ref-index") || !sliceHas(refs, "sha-ref-js") {
-		t.Fatalf("both distinct site blob shas should be referenced, got %v", refs)
-	}
-	count := 0
-	for _, s := range refs {
-		if s == "sha-ref-index" {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Fatalf("a deduped blob sha should appear once in the referenced set, got %d", count)
 	}
 }
 

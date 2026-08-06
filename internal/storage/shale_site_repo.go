@@ -90,9 +90,6 @@ func (s *ShaleSiteRepo) ReleaseSlugClaim(ctx context.Context, slug domain.Slug, 
 
 // service.SweepSites (Delete also serves the owner-facing removal path)
 func (s *ShaleSiteRepo) Delete(slug domain.Slug) error { return s.repo.DeleteSite(slug) }
-func (s *ShaleSiteRepo) ReferencedSiteBlobSHAs() ([]string, error) {
-	return s.repo.ReferencedSiteBlobSHAs()
-}
 
 // --- key builders ----------------------------------------------------------
 
@@ -536,7 +533,7 @@ func (r *ShaleRepo) SumActiveSiteBytesByOwner(owner string, _ time.Time) (int64,
 }
 
 // sumActiveSiteBytesForOwner scans identity_sites/<owner>/ once and sums each
-// entry's cached size. Fail-closed (Policy 3, a synchronous
+// entry's cached size. Fail-closed (Policy 2, a synchronous
 // write-path read): an entry that does not decode, or that carries the
 // reconciler's Placeholder marker, HARD-FAILS the scan. The one exception is a
 // LEGACY entry recognized by shape (a one-byte marker or an empty value), read
@@ -571,7 +568,7 @@ func (r *ShaleRepo) sumActiveSiteBytesForOwner(owner string) (int64, error) {
 // legacySiteEntryBytes resolves a LEGACY (marker-valued) identity_sites entry
 // against its authoritative sites/<slug> row, so a deployment upgrades without
 // a flag day. A stale legacy entry (row gone) is skipped; an undecodable row
-// HARD-FAILS (Policy 3); a live row contributes its DedupedSize.
+// HARD-FAILS (Policy 2); a live row contributes its DedupedSize.
 func (r *ShaleRepo) legacySiteEntryBytes(indexKey []byte) (int64, error) {
 	slug := domain.Slug(extractSlug(indexKey))
 	var row siteRow
@@ -760,41 +757,4 @@ func (r *ShaleRepo) pruneOrphanSiteEntry(slug string) bool {
 		// Live row that raced the snapshot: keep; the next pass reprojects it.
 		return false
 	}
-}
-
-// ReferencedSiteBlobSHAs returns every distinct blob SHA referenced by any
-// live site's manifest, aggregated across all {slug} shards. The sweep unions
-// this with the paste-side referenced set, so a blob shared between records
-// survives as long as ANY live record references it. A site manifest
-// references a blob unconditionally (no per-file tombstone), so a live site
-// with files always contributes a non-empty set.
-func (r *ShaleRepo) ReferencedSiteBlobSHAs() ([]string, error) {
-	sites, err := r.aggregateForBackground(prefixSites)
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[string]struct{}, len(sites))
-	for _, item := range sites {
-		var row siteRow
-		if err := json.Unmarshal(item.Value, &row); err != nil {
-			// FAIL CLOSED, never skip: skipping an undecodable site row would
-			// under-count the blob keep-set, so a blob the manifest still
-			// references would look orphaned and be deleted (irreversible). The
-			// sweep treats any error here as "delete nothing this pass". See
-			// docs/SPEC.md "Decode tolerance is per-scan-semantics", Policy 2.
-			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
-		}
-		man, err := decodeManifest(row.Manifest)
-		if err != nil {
-			return nil, err
-		}
-		for _, sha := range man.SHASet() {
-			seen[sha] = struct{}{}
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for sha := range seen {
-		out = append(out, sha)
-	}
-	return out, nil
 }

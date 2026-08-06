@@ -28,8 +28,6 @@ func TestSweep_PrunesRoomCreates(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	disk, _ := storage.NewBlobStore(filepath.Join(dir, "blobs"))
-	pastes := storage.NewPasteRepo(db)
 	rooms := storage.NewRoomKVRepo(db)
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
@@ -46,7 +44,7 @@ func TestSweep_PrunesRoomCreates(t *testing.T) {
 	}
 
 	logger := log.New(io.Discard, "", 0)
-	sweep := service.NewSweep(pastes, disk, logger)
+	sweep := service.NewSweep(logger)
 	sweep.Rooms = rooms
 	future := now.Add(domain.RoomCreateWindow + time.Hour)
 	sweep.Now = func() time.Time { return future }

@@ -36,7 +36,6 @@ import (
 type conformanceRepo interface {
 	service.PasteRepo
 	service.PasteAdmin
-	service.SweepRepo
 	service.KeyGateRepo
 }
 
@@ -109,7 +108,6 @@ func runConformanceWithSites(
 	t.Run(name+"/DeleteVersionTombstones", func(t *testing.T) { conformDeleteVersionTombstones(t, newRepo(t)) })
 	t.Run(name+"/VerNumNotReusedAfterTombstone", func(t *testing.T) { conformVerNumNotReused(t, newRepo(t)) })
 	t.Run(name+"/RepoIsNotOwnerGated", func(t *testing.T) { conformRepoIsNotOwnerGated(t, newRepo(t)) })
-	t.Run(name+"/ReferencedBlobSHAs", func(t *testing.T) { conformReferencedBlobSHAs(t, newRepo(t)) })
 	t.Run(name+"/OwnerStats", func(t *testing.T) { conformOwnerStats(t, newRepo(t)) })
 	t.Run(name+"/SetName", func(t *testing.T) { conformSetName(t, newRepo(t)) })
 	t.Run(name+"/KeyGateAdmitAndKnown", func(t *testing.T) { conformKeyGateAdmitAndKnown(t, newRepo(t)) })
@@ -541,58 +539,6 @@ func conformRepoIsNotOwnerGated(t *testing.T, r conformanceRepo) {
 }
 
 // --- contract: blob GC reference set --------------------------------
-
-func conformReferencedBlobSHAs(t *testing.T, r conformanceRepo) {
-	// Empty repo: legitimately zero references. The sweep's data-loss guard
-	// depends on telling this apart from a buggy zero.
-	refs, err := r.ReferencedBlobSHAs()
-	if err != nil {
-		t.Fatalf("referenced shas (empty): %v", err)
-	}
-	if len(refs) != 0 {
-		t.Fatalf("empty repo should reference no shas, got %v", refs)
-	}
-
-	// One paste + one extra version -> BOTH shas referenced. The set is an
-	// allow-list: any blob NOT in it is GC'd, and a backend returning an empty
-	// set while pastes exist would trip the sweep's abort-on-zero-refs guard.
-	insert(t, r, pasteOf("gc123456", "key:g", 10)) // v1 sha = sha-gc123456-v1
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "gc123456", domain.KindHTML, "sha-gc-v2", 20, 0, fixedNow); err != nil {
-		t.Fatalf("append v2: %v", err)
-	}
-	refs, err = r.ReferencedBlobSHAs()
-	if err != nil {
-		t.Fatalf("referenced shas: %v", err)
-	}
-	if len(refs) == 0 {
-		t.Fatalf("with pastes present the referenced set MUST be non-empty (sweep guard); got 0")
-	}
-	if !sliceHas(refs, "sha-gc123456-v1") {
-		t.Fatalf("v1 sha should be referenced, got %v", refs)
-	}
-	if !sliceHas(refs, "sha-gc-v2") {
-		t.Fatalf("v2 sha should be referenced, got %v", refs)
-	}
-
-	// CANONICAL RULE: a TOMBSTONED version's sha is NOT in the referenced set,
-	// so its blob is GC-able (a deleted version is app-final, and freeing quota
-	// should free storage). slatedb follows it by filtering !v.Deleted; the
-	// sqlite query has no deleted filter and still references the tombstone.
-	// The assertion below is therefore limited to NON-deleted shas, which both
-	// agree on; extend it once sqlite is brought in line.
-	if err := r.DeleteVersion("gc123456", 2); err != nil {
-		t.Fatalf("tombstone v2: %v", err)
-	}
-	refs, err = r.ReferencedBlobSHAs()
-	if err != nil {
-		t.Fatalf("referenced shas after tombstone: %v", err)
-	}
-	// Shared invariant: the still-live v1 head sha stays referenced, tombstone
-	// or no tombstone.
-	if !sliceHas(refs, "sha-gc123456-v1") {
-		t.Fatalf("live v1 sha must stay referenced after tombstoning v2, got %v", refs)
-	}
-}
 
 // --- contract: owner stats ------------------------------------------
 

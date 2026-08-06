@@ -87,16 +87,14 @@ type metadataBundle struct {
 type metadataRepo interface {
 	service.PasteRepo
 	service.PasteAdmin
-	service.SweepRepo
 	httpapi.PasteReader
 }
 
 // siteStore is the union of every site-side interface the service / http
-// layers consume: the deploy view (service.SiteRepo), the sweep view
-// (service.SweepSites), and the read view (httpapi.SiteReader).
+// layers consume: the deploy view (service.SiteRepo) and the read view
+// (httpapi.SiteReader).
 type siteStore interface {
 	service.SiteRepo
-	service.SweepSites
 	httpapi.SiteReader
 }
 

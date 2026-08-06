@@ -3270,7 +3270,6 @@ through four small Go interfaces declared in `internal/service`:
   `ListVersions`, `GetVersion`, `DeleteVersion`, `CountByOwner`,
   `SumActiveBytesByOwner`, `OwnerFirstSeen`.
 - `SweepRepo` (sweep):
-  `ReferencedBlobSHAs`.
 - `KeyGateRepo` (keygate): `AdmitNewKey`, `SubnetSnapshot`,
   `SubnetsForIdentity`.
 
@@ -3385,29 +3384,6 @@ behaviors are expressed in terms of inputs and observable outputs:
   unguarded, and the overflow is logged). The guard never weakens abort
   semantics: scan/aggregation errors still abort the pass, and dry-run
   (which mutates nothing) neither consults nor updates it.
-- **Sweep / GC.** `ReferencedBlobSHAs` returns the set of blob
-  content-SHAs still referenced by a LIVE (non-deleted) version or
-  paste head: the head SHA of every active paste plus the content SHA
-  of every NON-DELETED version. A tombstoned version's content SHA is
-  excluded, so its blob is GC-able. The method name states what it
-  returns (the allow-list the sweep keeps), so a nil/empty return reads
-  honestly as "keep nothing" rather than the inverted "delete nothing."
-  The sweep removes any blob NOT in this set. Returning an empty set
-  while pastes exist would make the sweep treat every blob as orphan
-  and delete the whole store, so the sweep aborts the GC pass when the
-  referenced set is empty, no pastes were swept this tick, and the blob
-  store is non-empty (a fail-closed guard against a buggy backend,
-  schema misalignment, or partial restore). `ReferencedBlobSHAs` is
-  ALSO fail-closed against an undecodable record: a row it cannot
-  decode aborts the whole scan with an error and the method returns
-  that error (never a partial set). It must NEVER skip a bad record and
-  keep going, because a skipped row under-counts references - a blob a
-  skipped row still pointed at would look unreferenced and be deleted,
-  irreversible data loss. The blob sweep treats any error from
-  `ReferencedBlobSHAs` as "delete nothing this pass." See "Decode
-  tolerance is per-scan-semantics" below for why this scan is the one
-  exception to the skip-and-continue rule the other background scans
-  follow.
 - **Dry-run (observability).** The sweep has two modes, selected by the
   operator's disable flag, and a "disabled" sweep is NEVER a no-op. In
   DRY-RUN mode it runs the full computation (which blobs are orphaned) and
@@ -3467,22 +3443,11 @@ shale backend will run to prove it preserves behavior. Because the
 suite asserts only the observable contract, a backend that passes it is
 a drop-in for the service layer by construction.
 
-**Canonical tombstone-GC rule (and a remaining backend divergence).**
-The chosen rule for whether a TOMBSTONED version's content SHA stays in
-the referenced set is: it does NOT. A deleted version is app-final and
-content-inaccessible, "DeleteVersion frees quota" implies the storage
-is freed too, so the blob is dropped from the referenced set and the
-sweep reclaims it. The slatedb backend already implements this rule
-(its `ReferencedBlobSHAs` filters deleted version rows). The shale
-backend adopts the same rule. The sqlite backend still diverges: its
-`SELECT DISTINCT content_sha FROM versions` has no deleted filter, so a
-tombstoned version's blob is kept until the whole paste dies. That
-divergence is a known open follow-up (bring sqlite in line with the
-canonical rule); the conformance suite asserts only the shared
-invariant both backends agree on (a still-live head SHA is always
-referenced) and pins the divergence as a documented finding rather than
-asserting a value the backends disagree on. Recoverability of a dropped
-tombstoned blob does not depend on the app keeping a reference: it is
+**Tombstoned versions release their bytes.** A deleted version is
+app-final and content-inaccessible, and "DeleteVersion frees quota"
+implies the storage is freed too, so `DeleteVersion` unbinds that
+version's blob in the same transaction that writes the tombstone.
+Recoverability does not depend on the app keeping a reference: it is
 provided beneath the app by object-store versioning plus a
 noncurrent-version lifecycle, an operator-level safety net configured
 outside this repo.
@@ -3522,11 +3487,8 @@ The deploy path's interface is:
 
 and the sweep path's interface is:
 
-- `ReferencedSiteBlobSHAs() ([]string, error)`
-
-It contributes the site family's blob references to the GC keep-set.
-`Delete(slug)` remains on the concrete repos for the owner-facing removal
-path; the sweep does not use it.
+`Delete(slug)` is the owner-facing removal path; it unbinds the site's blobs
+in the same transaction that removes the row.
 
 #### Site key layout (slatedb)
 
@@ -3778,8 +3740,7 @@ deploy a site and read every path back byte-identically (manifest
 round-trip), list/sum a site's bytes by identity, the per-identity quota
 counts SITE bytes (a site fills the owner's quota a paste then sees, and
 vice versa), the slug-collision rejects a slug a paste already owns
-(and a paste rejects a slug a site owns), and `ReferencedSiteBlobSHAs`
-drives the sweep. A backend that passes
+(and a paste rejects a slug a site owns). A backend that passes
 the extended suite is a drop-in for static-site hosting by construction.
 
 ### Room storage on the slatedb (and shale) backend
@@ -4613,7 +4574,7 @@ envelope the non-atomic check-then-write contract already accepts.
 
 **Decode tolerance of the quota scan.** The quota scan runs on the
 synchronous write path and sums the owner's enumeration ENTRIES, so the
-fail-closed unit is the entry (Policy 3, "Decode tolerance is
+fail-closed unit is the entry (Policy 2, "Decode tolerance is
 per-scan-semantics"): an entry that does not decode HARD-FAILS the check,
 rejecting the upload rather than being skipped - skipping would
 UNDER-count and over-admit. (The one deliberate exception is the legacy
@@ -4677,26 +4638,28 @@ counter's exact-but-permanently-drifting ceiling.
 
 ### Cross-shard background operations
 
-One operation is inherently cross-shard: blob GC must collect every
-referenced content SHA across all `{slug}` shards. It uses shale's
-`Aggregate()` fan-out, which snapshots each node's local keyspace in
-parallel and merges the per-node results. Cost is the slowest node's scan
-plus one round-trip, bounded and appropriate for the periodic background
-loop it already runs on.
+**The reconciler is the only one left.** It reprojects the
+`identity_pastes` and `identity_sites` enumeration indexes from the
+authoritative rows, which by definition needs to see every shard. It uses
+shale's `Aggregate()` fan-out, which snapshots each node's local keyspace in
+parallel and merges the per-node results: cost is the slowest node's scan
+plus one round-trip, bounded and appropriate for the background loop it runs
+on.
 
-The keygate is deliberately NOT on this list. Its rows are pruned lazily
-by the single-shard reads that already walk them (see "Sybil rate limit"),
-so the whole family is maintained without a fan-out and without a
-schedule.
+Nothing else fans out, and in each case that is a design choice rather than
+an accident:
 
-The `SweepRepo.ReferencedBlobSHAs` contract is preserved exactly: it
-returns the set of **referenced** SHAs (the allow-list the sweep keeps),
-gathered by aggregating the head SHA of every active paste and the
-content SHA of every non-deleted version across all shards. A
-tombstoned version's content SHA is excluded, the canonical rule above.
-It must never return an empty set while pastes exist, the same
-invariant the single-writer backends hold, and the sweep's
-abort-on-zero-refs guard backstops a backend that wrongly does.
+- **Blob GC** decides reachability from each blob's own co-committed
+  pointer, so there is no global set to collect.
+- **The keygate** prunes lazily, inside the single-shard reads that already
+  walk its rows (see "Sybil rate limit").
+- **Quota** is one single-shard scan of the owner's enumeration index.
+- **Room accounting** is one single-shard scan of the app's families.
+
+**No remaining fan-out acts on ABSENCE.** The reconciler adds and repairs
+entries; a partial pass simply repairs less this time and more next. That is
+the property that used to require a fail-closed decode policy and an
+abort-on-zero-refs guard, and it is now structural rather than defended.
 
 ### Decode tolerance is per-scan-semantics
 
@@ -4806,30 +4769,7 @@ visible to an operator, not silently swallowed forever.
   and re-attempts the rest next tick. Neither partiality can delete live
   content or under-count a quota, so both satisfy the ranking invariant.
 
-**Policy 2 - the blob-GC ref-set scan: FAIL CLOSED, abort, never skip.**
-`ReferencedBlobSHAs` (and its site sibling `ReferencedSiteBlobSHAs`) is
-the one background scan that must NOT skip a bad record. Its output is
-the ALLOW-LIST of blobs the sweep keeps; the sweep deletes every blob NOT
-in the returned set. Skipping an undecodable row here UNDER-COUNTS
-references: a blob that the skipped row still referenced is now absent
-from the keep-set, looks unreferenced, and gets DELETED - irreversible
-data loss, the exact failure the ranking invariant forbids. So a decode
-error in the ref-set scan FAILS CLOSED: it aborts the GC pass and returns
-the error, never a partial set, never a skipped row. The blob sweep
-treats that error (like the existing zero-refs guard) as "do not delete
-ANYTHING this pass." This reinforces, and is the decode-side companion
-to, the existing abort-on-zero-refs guard: both guarantee the sweep never
-deletes a blob on the basis of an incomplete reference picture. A corrupt
-row here costs a deferred GC pass (storage is reclaimed a tick late, once
-the bad row is fixed or ages out), which is always preferable to deleting
-a live blob. The asymmetry with Policy 1 is the whole point: a reconcile
-sweep that skips a row under-DELETES (leaves a record alive one pass too
-long - safe, self-correcting), while a ref-set scan that skips a row
-over-DELETES (drops a live blob - unsafe, irreversible). Same mechanical
-"skip," opposite safety direction, so the ref-set scan gets the opposite
-policy.
-
-**Policy 3 - user-facing reads: UNCHANGED, keep hard-failing.** The
+**Policy 2 - user-facing reads: UNCHANGED, keep hard-failing.** The
 per-request read paths (`Get`, `ListByOwner` / `ListVersions`,
 `GetVersion`, the site manifest read, the room scan / per-key read) are
 NOT made tolerant. A user read that hits a corrupt record SHOULD surface
@@ -4846,16 +4786,15 @@ The three policies, side by side:
 | Scan kind | Examples | On a bad record | Why |
 | --- | --- | --- | --- |
 | Idempotent background sweep / reconciler | `PruneOldRoomCreates`, the keygate's lazy in-scan prune, `Reconcile` (`reconcileIndexes` + `reconcileSiteIndexes` + pending age-out) | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
-| Blob-GC reference set | `ReferencedBlobSHAs`, `ReferencedSiteBlobSHAs` | FAIL CLOSED - abort the GC pass, return error, delete nothing; NEVER skip | skipping under-counts refs -> a live blob looks orphaned and is deleted (irreversible) |
 | User-facing read | `Get`, `ListByOwner`, `ListVersions`, `GetVersion`, site manifest read, room scan / per-key read | HARD-FAIL (unchanged) | a user read of corrupt data should surface an error, not silently skip |
 
 ### Shale-collocated blobs (transactional blob plane)
 
-By default the blob bytes live in a detached content-addressed store (disk or
-S3) decoupled from the metadata: every backend (sqlite, slatedb, shale) shares
-one `BlobStore`, blobs are keyed by content sha alone, and the only blob-GC is
-the global content-addressed sweep (`ReferencedBlobSHAs` + `WalkBlobs` +
-abort-on-zero). That is the model the rest of this spec describes.
+By default the blob bytes live in a detached content-addressed store on disk,
+decoupled from the metadata: every backend (sqlite, slatedb, shale) shares one
+`BlobStore` and blobs are keyed by content sha alone. **That store has no GC.**
+Its bytes are reclaimed only by deleting the store, which is why it is a
+dev/test shape: the deployed shape is the collocated plane below.
 
 A shale backend can OPTIONALLY route its blobs THROUGH the cluster, collocated
 with the metadata on the owning shard and transactionally co-committed. It is
@@ -4937,18 +4876,16 @@ object-store ModTime is older than a generous grace (default one hour, which
 exceeds the longest stage->commit window so an in-flight upload's object is never
 swept). hostthis schedules it in the same periodic sweep loop, per node.
 
-**One reclaimer, selected at composition.** The two planes decide
-reachability by incompatible means: the detached store can only infer it from
-a global keep-set, the collocated plane reads it off a per-blob pointer. The
-sweep therefore holds ONE `BlobReclaimer` rather than two nullable hooks, so
-"both planes wired" and "neither wired" are not representable and no per-tick
-branch has to re-establish which one is live.
+**Reachability is per blob, so no pass acts on absence.** A bound blob's
+pointer is co-committed with the record that owns it and unbound by that
+record's delete, so whether a blob is reachable is a fact about the blob, not
+a conclusion drawn from a set of everything else.
 
-The keep-set is passed as a FUNCTION, not a value. That is what lets the
-collocated plane skip it: resolving it is a cross-shard fan-out, and a plane
-that never consults it must not pay for it. It also means **the fan-out that
-acts on ABSENCE only ever runs on the detached plane** - a deploy with a
-collocated blob bucket never computes it at all.
+That removes an entire failure mode rather than guarding it. The retired
+alternative computed a cluster-wide keep-set and deleted every blob absent
+from it, which meant a partial scan destroyed live data - it needed a
+fail-closed decode policy and an abort-on-zero-refs guard just to be safe.
+Neither is needed now, because there is no set to be incomplete.
 
 **Within-record byte dedup is deferred.** A blob is staged under a fresh random
 blob id each time, so an unchanged file re-staged on a redeploy (or a paste

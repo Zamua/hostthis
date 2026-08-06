@@ -79,7 +79,7 @@ func main() {
 
 	pasteRepo := metadata.Repo
 	keyGateRepo := metadata.KeyGate
-	blobs, blobsSweep, blobsCleanup, err := buildBlobStore(*dataDir, logger)
+	blobs, blobsCleanup, err := buildBlobStore(*dataDir, logger)
 	if err != nil {
 		logger.Fatalf("blob store: %v", err)
 	}
@@ -164,18 +164,13 @@ func main() {
 	keyGate.Window = *freshKeysWindow
 	// Whoami reports per-session subnet and budget info from the keygate.
 	manageSvc.KeyGate = keyGate
-	sweepSvc := service.NewSweep(pasteRepo, blobsSweep, logger)
-	// On the transactional shale-blob path the cluster owns the blobs: a delete
-	// unbinds the pointer inside the metadata-delete transaction, so there is no
-	// global content-addressed GC to run and the collocated plane's reclaimer
-	// takes over. Assigning the one Blobs field is what swaps planes.
+	sweepSvc := service.NewSweep(logger)
+	// A bound blob is unbound by its record's delete, inside that delete's
+	// transaction, so the only reclaimable bytes are staged-but-never-bound
+	// ones. A deploy without a collocated blob plane has nothing to reclaim.
 	if metadata.BlobOrphanSweeper != nil {
 		sweepSvc.Blobs = service.CollocatedReclaimer{Sweeper: metadata.BlobOrphanSweeper}
-		logger.Printf("sweep: shale-blob path - global content-addressed blob GC disabled; SweepOrphans reclaims staged-but-unbound objects (grace %s)", service.DefaultOrphanGrace)
-	}
-	if siteRepo != nil {
-		// Contributes the site family's blob refs to the GC keep-set.
-		sweepSvc.Sites = siteRepo
+		logger.Printf("sweep: SweepOrphans reclaims staged-but-unbound objects (grace %s)", service.DefaultOrphanGrace)
 	}
 	if roomRepo != nil {
 		// The room-create rate-limit prune.
@@ -323,35 +318,32 @@ func main() {
 	_ = httpSrv.Shutdown(shutdownCtx)
 }
 
-// buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured store,
-// narrowed through two interfaces (BlobStore and SweepBlobs). Disk is the only
-// standalone backend. The shale metadata backend does NOT go through this
-// detached store: its ShaleRepo owns a shale-managed blob plane of its own.
-func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, service.SweepBlobs, func(), error) {
+// buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured store.
+// Disk is the only standalone backend. The shale metadata backend does NOT go
+// through this detached store: its ShaleRepo owns a shale-managed blob plane of
+// its own.
+func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, func(), error) {
 	backend := strings.ToLower(envOr("HOSTTHIS_BLOB_BACKEND", "disk"))
 	switch backend {
 	case "", "disk":
 		bs, err := storage.NewBlobStore(filepath.Join(dataDir, "blobs"))
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 		logger.Printf("blobs: disk backend at %s/blobs (zstd-compressed at rest)", dataDir)
-		// Only the upload/manage Put/Get path needs the compression wrapper.
-		// The sweep uses WalkBlobs + Remove, which are sha-only and never touch
-		// a body, so it talks to the raw backend.
-		inner, sweep, cleanup, err := maybeWrapWriteBack(bs, dataDir, logger)
+		inner, cleanup, err := maybeWrapWriteBack(bs, dataDir, logger)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
-		return storage.NewCompressedBlobStore(inner), sweep, cleanup, nil
+		return storage.NewCompressedBlobStore(inner), cleanup, nil
 	default:
-		return nil, nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (only 'disk' is supported as a standalone backend; production uses the shale-collocated blob plane)", backend)
+		return nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (only 'disk' is supported as a standalone backend; production uses the shale-collocated blob plane)", backend)
 	}
 }
 
 // writeBackInner is what maybeWrapWriteBack needs of a durable backend: the
 // Put/Get/GetReader the compression layer wraps, plus the WalkBlobs/Remove the
-// sweep uses.
+// write-back cache's own eviction uses.
 type writeBackInner interface {
 	Put(sha string, r io.Reader, size int64) error
 	Get(sha string) ([]byte, error)
@@ -364,9 +356,9 @@ type writeBackInner interface {
 // cache when HOSTTHIS_BLOB_WRITEBACK=true. Disabled, it returns the durable
 // backend unchanged, preserving strict durable-before-ack. The cleanup func
 // stops the uploaders and is a no-op when disabled.
-func maybeWrapWriteBack(durable writeBackInner, dataDir string, logger *log.Logger) (storage.InnerBlobStore, service.SweepBlobs, func(), error) {
+func maybeWrapWriteBack(durable writeBackInner, dataDir string, logger *log.Logger) (storage.InnerBlobStore, func(), error) {
 	if strings.ToLower(envOr("HOSTTHIS_BLOB_WRITEBACK", "false")) != "true" {
-		return durable, durable, func() {}, nil
+		return durable, func() {}, nil
 	}
 	cfg := storage.WriteBackConfig{
 		Dir:      envOr("HOSTTHIS_BLOB_WRITEBACK_DIR", filepath.Join(dataDir, "blob-cache")),
@@ -375,10 +367,10 @@ func maybeWrapWriteBack(durable writeBackInner, dataDir string, logger *log.Logg
 	}
 	wb, err := storage.NewWriteBackBlobStore(durable, cfg)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("blob write-back cache: %w", err)
+		return nil, nil, fmt.Errorf("blob write-back cache: %w", err)
 	}
 	logger.Printf("blobs: write-back cache ENABLED at %s (max %d bytes); durability window applies, see SPEC", cfg.Dir, cfg.MaxBytes)
-	return wb, wb, wb.Close, nil
+	return wb, wb.Close, nil
 }
 
 // buildCachePurger reads HOSTTHIS_CACHE_BACKEND and returns the configured

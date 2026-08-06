@@ -982,48 +982,6 @@ func (r *SlateRepo) DeleteVersion(slug domain.Slug, ver int) error {
 
 // --- SweepRepo -------------------------------------------------------------
 
-// ReferencedBlobSHAs returns the blob content-SHAs still referenced: the head
-// sha of an active paste, or the content_sha of a NON-DELETED version row. A
-// tombstoned version's sha is excluded, so its blob becomes GC-eligible.
-//
-// The sweep treats the result as an allow-list and deletes every blob not in
-// it, so an empty slice over a populated bucket would wipe the bucket. The
-// sweep guards with abort-on-zero-refs; never stub this method to nil.
-func (r *SlateRepo) ReferencedBlobSHAs() ([]string, error) {
-	pastes, err := r.scanPrefix([]byte("pastes/"))
-	if err != nil {
-		return nil, err
-	}
-	versions, err := r.scanPrefix([]byte("versions/"))
-	if err != nil {
-		return nil, err
-	}
-	referenced := make(map[string]struct{}, len(pastes)+len(versions))
-	for _, item := range pastes {
-		var p pasteRow
-		if err := json.Unmarshal(item.Value, &p); err != nil {
-			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
-		}
-		if p.ContentSHA != "" {
-			referenced[p.ContentSHA] = struct{}{}
-		}
-	}
-	for _, item := range versions {
-		var v versionRow
-		if err := json.Unmarshal(item.Value, &v); err != nil {
-			return nil, fmt.Errorf("decode %s: %w", item.Key, err)
-		}
-		if v.ContentSHA != "" && !v.Deleted {
-			referenced[v.ContentSHA] = struct{}{}
-		}
-	}
-	out := make([]string, 0, len(referenced))
-	for sha := range referenced {
-		out = append(out, sha)
-	}
-	return out, nil
-}
-
 // --- KeyGateRepo (Sybil rate limit) ----------------------------------------
 
 // AdmitNewKey checks the subnet's in-window budget and admits the pair, both
