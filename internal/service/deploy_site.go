@@ -472,7 +472,6 @@ type blobSink struct {
 // would credit nothing, blocking an in-place update for an owner at their cap.
 // The uncompressed DedupedSize is the opposite error, subtracting more than was
 // ever charged and inflating the budget past the real remaining quota.
-//
 func siteExtractBudget(cap, usedPaste, usedSite int64, existing domain.Site) int64 {
 	credit := int64(existing.StoredBytes)
 	used := usedPaste + max(usedSite-credit, 0)

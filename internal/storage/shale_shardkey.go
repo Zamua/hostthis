@@ -127,10 +127,10 @@ var (
 	// Room families (the app-persistence tier). All shard on <app-slug>,
 	// co-locating an app's rooms + values + creation ledger + byte counter on
 	// one shard.
-	prefixRooms         = []byte("rooms/")
-	prefixRoomKV        = []byte("roomkv/")
-	prefixRoomCreate    = []byte("roomcreate/")
-	prefixRoomBytes     = []byte("roombytes/")
+	prefixRooms      = []byte("rooms/")
+	prefixRoomKV     = []byte("roomkv/")
+	prefixRoomCreate = []byte("roomcreate/")
+	prefixRoomBytes  = []byte("roombytes/")
 )
 
 // firstSegment returns the bytes up to (but not including) the first '/' in s,

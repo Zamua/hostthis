@@ -667,7 +667,6 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 	})
 }
 
-
 // reconcileSiteIndexPass reprojects the identity_sites enumeration index from
 // the authoritative sites/ rows across all shards: group each live site under
 // its owner with the cached quota values, then add missing entries, refresh

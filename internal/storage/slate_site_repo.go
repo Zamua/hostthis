@@ -414,7 +414,6 @@ func (r *SlateRepo) DeleteSite(slug domain.Slug) error {
 	return nil
 }
 
-
 // ReferencedSiteBlobSHAs returns every distinct blob SHA referenced by any live
 // site's manifest. The sweep unions this with the paste-side set, so a blob
 // shared between records survives as long as ANY live record references it.

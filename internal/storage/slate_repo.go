@@ -91,7 +91,6 @@ type SlateRepo struct {
 	// from one subnet each read count = limit-1 and all N are admitted.
 	// Striped by subnet hash so different subnets do not contend.
 	keygateLocks [256]sync.Mutex
-
 }
 
 // lockQuota acquires the per-identity quota stripe and returns the unlock. Hold
@@ -982,7 +981,6 @@ func (r *SlateRepo) DeleteVersion(slug domain.Slug, ver int) error {
 }
 
 // --- SweepRepo -------------------------------------------------------------
-
 
 // ReferencedBlobSHAs returns the blob content-SHAs still referenced: the head
 // sha of an active paste, or the content_sha of a NON-DELETED version row. A

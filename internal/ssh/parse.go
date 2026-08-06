@@ -77,4 +77,3 @@ func humanBytes(n int) string {
 		return fmt.Sprintf("%.1fM", float64(n)/(1024*1024))
 	}
 }
-

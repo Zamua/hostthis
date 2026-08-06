@@ -500,7 +500,6 @@ func (r *SlateRepo) sumOneRoomBytes(appSlug domain.Slug, id domain.RoomID) (int6
 
 // --- SweepRooms ------------------------------------------------------------
 
-
 // DeleteRoom removes a room record and EVERY value in
 // its namespace: the slatedb analogue of the sqlite FK cascade, enumerating the
 // value subtree and deleting each in the tx. Idempotent; a missing room is a

@@ -9,7 +9,6 @@ package main
 import (
 	"fmt"
 	"log"
-
 )
 
 func buildMetadataSlate(_ *log.Logger) (*metadataBundle, error) {

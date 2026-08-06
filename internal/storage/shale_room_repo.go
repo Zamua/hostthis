@@ -534,7 +534,6 @@ func (r *ShaleRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now tim
 
 // --- SweepRooms ------------------------------------------------------------
 
-
 // errRoomDeleteFenceStale reports that a mutation landed between DeleteRoom's
 // value enumeration and its commit, so the enumeration no longer describes the
 // room. Never escapes DeleteRoom's retry loop.
