@@ -133,7 +133,6 @@ func (s *Rooms) Create(appSlug domain.Slug, subnet string) (domain.Room, error) 
 			ID:        domain.NewRoomID(),
 			CreatedAt: now,
 			UpdatedAt: now,
-			ExpiresAt: now.Add(domain.RoomRetentionWindow),
 		}
 		err := s.Repo.CreateRoom(room, subnet, s.PerAppByteCap, now)
 		switch {

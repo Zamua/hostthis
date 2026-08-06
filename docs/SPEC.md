@@ -2173,37 +2173,36 @@ multi-pod tier has its own gate on top of this one - the two-relay
 peer harness and the seq conformance pins - specified under "Multi-pod
 relay" (Acceptance criteria).
 
-## Retention
+## Persistence
 
-**Every paste lives for a configurable retention window from its last
-update**, then it's deleted (slug, all versions, content blob if
-unreferenced). The window is an installation-wide operator setting,
-`HOSTTHIS_RETENTION`, defaulting to **30 days**. There is no per-paste
-user control.
+**Pastes, sites and rooms persist indefinitely.** Nothing expires, there is
+no retention window, and no operator setting controls one.
 
-- `HOSTTHIS_RETENTION` accepts a window (`30d`, `7d`, `12h`, any Go
-  duration) or `off` / `never` / `0` to disable expiry entirely.
-- Initial upload: the retention clock starts.
-- Each `update <slug>` resets the clock to the full window from that moment.
-- No `touch` verb, no `--expires` flag. Time-based extension only happens
-  as a side effect of actually changing content.
-- **No-expiry policy.** When retention is `off`, content is stamped with a
-  far-future sentinel (`domain.NeverExpires`), so the periodic sweep's
-  `expires_at < now` check never matches it and the fixed-width expiry index
-  never reaches it on a cutoff scan - the record is simply never swept. The
-  `list` / `versions` surfaces and the post-upload confirmation render its
-  expiry as "never" rather than a date.
+This was not always true: retention was a 30-day window with an
+installation-wide `HOSTTHIS_RETENTION` override, and production had already
+run it disabled for some time before the concept was removed outright.
 
-Rationale for the 30-day default: hostthis is for *shareable rendered
-content* (HTML mockups, Markdown reports, demo prototypes). The default
-use case is "send this link to a coworker this week"; the short window
-forces the asker to re-host if they need it again, which catches stale-link
-rot at the source. An operator running a low-volume or private instance can
-widen the window or turn expiry off via `HOSTTHIS_RETENTION` - long-term
-hosting is not the *default* posture (see "Non-goals") but is a supported
-operator choice.
+The reason for removing it rather than defaulting it off is that a disabled
+feature still costs what an enabled one does. An expiry window means three
+time-ordered indexes, a periodic scan of each, and a sweep whose failure
+modes are all destructive. Keeping that machinery for a setting nobody turns
+on is a standing hazard for no benefit.
 
----
+What follows from having no expiry:
+
+- **Storage only grows.** A paste is removed when its owner deletes it, and
+  never otherwise. The quota is what bounds an identity, and it is now the
+  *only* thing that does.
+- **No clock affects correctness.** Nothing is a function of elapsed time, so
+  no answer changes because a sweep did or did not run.
+- **A link never dies.** Which is the property a paste service is for: a URL
+  shared today resolves in a year.
+
+The Sybil keygate still forgets: it admits a bounded number of new keys per
+IP subnet per rolling window, and that window only means anything if old
+entries are dropped. That is a rate limiter's sliding window, not content
+retention - it stores no user content and deleting it would lock people out
+rather than free space.
 
 ## Verbs (the `ssh hostthis.dev <verb>` surface)
 

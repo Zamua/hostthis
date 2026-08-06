@@ -28,7 +28,6 @@ type Site struct {
 	StoredBytes int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
-	ExpiresAt   time.Time // UpdatedAt + Retention window (or NeverExpires)
 }
 
 // ManifestEntry is one file in a site. ContentType is a function of the

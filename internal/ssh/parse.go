@@ -80,13 +80,6 @@ func humanBytes(n int) string {
 }
 
 // humanExpiresIn formats the EXPIRES_IN cell for a paste/site, rendering the
-// no-expiry sentinel as "never" rather than a nonsensical far-future duration.
-func humanExpiresIn(expiresAt, now time.Time) string {
-	if expiresAt.Equal(domain.NeverExpires) {
-		return "never"
-	}
-	return humanDuration(expiresAt.Sub(now))
-}
 
 // humanDuration renders a remaining time as "2d3h", "3h4m", "5m", "<1m", or
 // "expired".

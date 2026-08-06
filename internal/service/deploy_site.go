@@ -97,8 +97,6 @@ type DeploySite struct {
 	Pastes PasteByteSummer
 	Blob   BlobUnit
 	Now    func() time.Time
-	// Retention stamps a deployed site's ExpiresAt (same policy as pastes).
-	Retention domain.Retention
 	// Logger records outcomes the caller never sees: the compensating release
 	// of a pre-claimed slug runs on the way out of a failed deploy and its own
 	// failure must not replace the deploy's error. nil discards.
@@ -111,10 +109,9 @@ func (d *DeploySite) logf(format string, args ...any) {
 	}
 }
 
-// NewDeploySite wires defaults. The composition root overrides
-// DeploySite.Retention from HOSTTHIS_RETENTION.
+// NewDeploySite wires defaults.
 func NewDeploySite(sites SiteRepo, pastes PasteByteSummer, blob BlobUnit) *DeploySite {
-	return &DeploySite{Sites: sites, Pastes: pastes, Blob: blob, Now: time.Now, Retention: domain.DefaultRetention()}
+	return &DeploySite{Sites: sites, Pastes: pastes, Blob: blob, Now: time.Now}
 }
 
 // ListSites returns the owner's active static sites. Anonymous / empty owners
@@ -237,7 +234,6 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		Manifest:  man,
 		CreatedAt: now,
 		UpdatedAt: now,
-		ExpiresAt: d.Retention.ExpiryFor(now),
 	}
 	deduped := man.CompressedDedupedSize()
 
@@ -436,7 +432,6 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		Manifest:  man,
 		CreatedAt: existing.CreatedAt, // preserved across re-deploys
 		UpdatedAt: now,
-		ExpiresAt: d.Retention.ExpiryFor(now),
 	}
 	deduped := man.CompressedDedupedSize()
 
@@ -482,10 +477,9 @@ type blobSink struct {
 // An expired-but-unswept target is credited NOTHING: usedSite already excludes
 // it, so crediting it would subtract bytes that were never counted.
 func siteExtractBudget(cap, usedPaste, usedSite int64, existing domain.Site, now time.Time) int64 {
-	credit := int64(0)
-	if !domain.IsExpired(existing.ExpiresAt, now) {
-		credit = int64(existing.StoredBytes)
-	}
+	// A site being replaced always credits its bytes back: nothing expires, so
+	// an existing record is always live and always already counted.
+	credit := int64(existing.StoredBytes)
 	used := usedPaste + max(usedSite-credit, 0)
 	return domain.Allowance{Cap: cap, Used: used}.Remaining()
 }

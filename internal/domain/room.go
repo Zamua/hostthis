@@ -18,7 +18,6 @@ type Room struct {
 	ID        RoomID // the UUIDv4 capability
 	CreatedAt time.Time
 	UpdatedAt time.Time // last write (PUT or DELETE); a read does NOT move it
-	ExpiresAt time.Time // UpdatedAt + RoomRetentionWindow
 }
 
 // RoomRetentionWindow is the fixed TTL for a room: it expires this long after
