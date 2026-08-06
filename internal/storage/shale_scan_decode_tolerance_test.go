@@ -360,7 +360,7 @@ func TestShaleDecodeTolerance_BlobGCFailsClosed(t *testing.T) {
 	silent := log.New(io.Discard, "", 0)
 	sweep := &service.Sweep{
 		Repo:   repo,
-		Blobs:  blobs,
+		Blobs:  service.DetachedStoreReclaimer{Blobs: blobs},
 		Logger: silent,
 		Now:    func() time.Time { return now },
 	}
