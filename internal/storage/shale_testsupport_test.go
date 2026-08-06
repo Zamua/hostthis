@@ -54,3 +54,43 @@ func newShaleRepoOnUniqueDB(t *testing.T, endpoint string) *storage.ShaleRepo {
 	t.Cleanup(func() { _ = repo.Close() })
 	return repo
 }
+
+func mustSum(t *testing.T, repo *storage.ShaleRepo, owner string, now time.Time) int {
+	t.Helper()
+	n, err := repo.SumActiveBytesByOwner(owner, now)
+	if err != nil {
+		t.Fatalf("sum active bytes: %v", err)
+	}
+	return n
+}
+
+func mustCount(t *testing.T, repo *storage.ShaleRepo, owner string) int {
+	t.Helper()
+	// CountByOwner reads the identity_pastes index, which InsertWithQuotaCheck
+	// writes from a deferred confirm goroutine; draining makes the count
+	// deterministic. A no-op when nothing is pending.
+	repo.WaitPendingConfirms()
+	n, err := repo.CountByOwner(owner)
+	if err != nil {
+		t.Fatalf("count by owner: %v", err)
+	}
+	return n
+}
+
+func mustSiteSum(t *testing.T, repo *storage.ShaleRepo, owner string, now time.Time) int64 {
+	t.Helper()
+	n, err := repo.SumActiveSiteBytesByOwner(owner, now)
+	if err != nil {
+		t.Fatalf("sum active site bytes: %v", err)
+	}
+	return n
+}
+
+func mustSiteCount(t *testing.T, repo *storage.ShaleRepo, owner string, now time.Time) int {
+	t.Helper()
+	sites, err := repo.ListSitesByOwner(owner, now)
+	if err != nil {
+		t.Fatalf("list sites by owner: %v", err)
+	}
+	return len(sites)
+}

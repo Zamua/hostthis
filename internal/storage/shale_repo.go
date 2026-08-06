@@ -233,6 +233,10 @@ type ShaleConfig struct {
 type ShaleRepo struct {
 	cluster *cluster.Cluster
 
+	// Now is the clock the repair-on-read paths use (the stuck-pending age-out
+	// in ListByOwner). nil means time.Now.
+	Now func() time.Time
+
 	// kv is the blob-capable cluster surface, set ONLY when cfg.BlobStore is
 	// non-nil. It wraps the SAME *Cluster as `cluster` (kv.Cluster() ==
 	// cluster), so every r.cluster.* call site works either way; only the
@@ -712,18 +716,64 @@ func (r *ShaleRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 			}
 			return nil, err
 		}
-		paste := p.toDomain(slug)
 		versions, err := r.scanVersions(slug)
 		if err != nil {
 			return nil, err
 		}
+
+		// A pending paste older than the timeout is a pod-death casualty: its
+		// bytes were never written and no finalizer will ever run. Age it to
+		// failed here, on the read that already holds the row, so its bytes
+		// leave the quota scan without a background pass. Only the
+		// detached-store path can produce one at all.
+		if domain.NormalizeStatus(p.Status) == domain.PasteStatusPending &&
+			r.now().Sub(p.CreatedAt) > PendingPasteTimeout {
+			if err := r.MarkFailed(slug); err != nil {
+				r.repoLog().Printf("shale: age out stuck pending %s: %v (retried on the next list)", slug, err)
+			}
+			staleKeys = append(staleKeys, append([]byte(nil), item.Key...))
+			continue
+		}
+
+		// A FAILED row must not be enumerated and must not be charged: its
+		// bytes never landed. MarkFailed drops the entry, so one surviving here
+		// means that drop was lost - the same repair as a vanished row.
+		if domain.NormalizeStatus(p.Status) == domain.PasteStatusFailed {
+			staleKeys = append(staleKeys, append([]byte(nil), item.Key...))
+			continue
+		}
+
+		paste := p.toDomain(slug)
 		paste.LatestVersion = latestActiveVerNum(versions)
 		// The enumeration entry already caches this paste's live-version sum,
 		// which is the figure the quota charges. Carry it up rather than
 		// re-deriving it: the scan holds it, and recomputing would mean a
 		// per-paste fan-out to the version shards.
+		// This read ALREADY holds the version rows, so the authoritative live sum
+		// is free here. Writing it back is the repair that used to need a
+		// reconcile pass, and it covers both shapes that need one: an entry
+		// whose cached size drifted (a lost best-effort refresh after an append
+		// or a version tombstone) and a LEGACY entry that predates the
+		// value-bearing projection (empty, or a bare marker byte). Guarded on
+		// the value this scan read, so a concurrent write is never clobbered.
+		live := int(liveVersionBytes(versions))
 		var idxRow identityPasteRow
-		if err := json.Unmarshal(item.Value, &idxRow); err == nil && !idxRow.Placeholder {
+		decoded := json.Unmarshal(item.Value, &idxRow) == nil
+		switch {
+		case decoded && idxRow.Placeholder:
+			// A fail-closed placeholder is left exactly as it is: the quota
+			// scan is meant to hard-fail on it until the record is repaired.
+		case !decoded || idxRow.Size != live:
+			fixed := idxRow
+			fixed.Size = live
+			if !decoded {
+				fixed = identityPasteRow{Name: p.Name, Size: live, CreatedAt: p.CreatedAt}
+			}
+			if _, werr := r.guardedPutIndexEntry(item.Key, item.Value, true, fixed); werr != nil {
+				r.repoLog().Printf("shale: index repair for %s: %v (retried on the next list)", slug, werr)
+			}
+			paste.StoredBytes = live
+		default:
 			paste.StoredBytes = idxRow.Size
 		}
 		out = append(out, paste)
@@ -881,6 +931,12 @@ func (r *ShaleRepo) sumLiveVersionBytes(slug domain.Slug) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	return liveVersionBytes(versions), nil
+}
+
+// liveVersionBytes sums the non-deleted rows of an ALREADY-scanned version
+// slice, so a caller holding them (ListByOwner) pays no second scan.
+func liveVersionBytes(versions []versionRow) int64 {
 	var total int64
 	for _, v := range versions {
 		if v.Deleted {
@@ -888,7 +944,16 @@ func (r *ShaleRepo) sumLiveVersionBytes(slug domain.Slug) (int64, error) {
 		}
 		total += int64(v.Size)
 	}
-	return total, nil
+	return total
+}
+
+// now is the repo's clock, injectable so a test can drive the pending age-out
+// without sleeping. Defaults to time.Now.
+func (r *ShaleRepo) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now().UTC()
 }
 
 // combinedActiveBytes is the per-owner "used" figure the quota checks compare
@@ -1126,17 +1191,54 @@ func (r *ShaleRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 		}
 	}
 
-	if err := r.insertAuthoritative(p, binds); err != nil {
+	// Pre-check the slug on the {slug} shard BEFORE writing anything. A taken
+	// slug returns the collision sentinel with no entry written, which is what
+	// stops the upload's re-mint loop stranding one entry per attempt. It is
+	// not atomic with the authoritative insert below - that CAS carries the
+	// authoritative check - so a genuine race still strands one entry, bounded
+	// and pruned by the next ListByOwner.
+	if taken, err := r.slugTaken(p.Slug); err != nil {
 		return err
+	} else if taken {
+		return ErrSlugTaken
 	}
 
-	// Enumeration-index maintenance on the {id} shard. Best-effort: the paste
-	// is already durable, so a failure here is an under-count the reconciler
-	// heals, never a failed upload.
+	// ENTRY FIRST, then the authoritative row. The two live on different shards
+	// and a transaction touches one, so whichever is written second can be lost
+	// to a crash. Written this way the survivor is an entry with no row, which
+	// ListByOwner sees and repairs; the other order leaves a row no single-shard
+	// read can find, which is what used to require a cluster-wide reconcile
+	// pass. See docs/SPEC.md "No periodic reconcile: the index entry is written
+	// FIRST".
 	if err := r.confirmInsert(p); err != nil {
-		r.repoLog().Printf("shale: index maintenance for %s: %v (index lag; reconciler will heal)", p.Slug, err)
+		return fmt.Errorf("enumeration entry: %w", err)
+	}
+
+	if err := r.insertAuthoritative(p, binds); err != nil {
+		// The entry written above is now an orphan. Best-effort removal keeps
+		// the common failure (a slug race) from charging the owner until they
+		// next list; a failure here leaves exactly the case ListByOwner repairs.
+		if derr := r.cluster.Delete(shaleKeyIdentityPaste(p.Identity.String(), p.Slug.String())); derr != nil {
+			r.repoLog().Printf("shale: rollback of enumeration entry for %s: %v (it counts against the owner until their next list)", p.Slug, derr)
+		}
+		return err
 	}
 	return nil
+}
+
+// slugTaken reports whether slug already names a paste or a site. Both keys
+// co-shard with the slug, so this is one shard's read.
+func (r *ShaleRepo) slugTaken(slug domain.Slug) (bool, error) {
+	for _, key := range [][]byte{shaleKeyPaste(slug), shaleKeySite(slug)} {
+		raw, err := r.getRaw(key)
+		if err != nil {
+			return false, fmt.Errorf("slug pre-check %s: %w", key, err)
+		}
+		if raw != nil {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // shaleKVTx is the minimal transaction surface the authoritative writes need.

@@ -639,14 +639,17 @@ freshest uploads, in exchange for hiding the ~250 ms blob-write latency
 from every uploader. The reconciler's age-out makes the failure mode
 observable + self-correcting rather than silent.
 
-### Reconciler: age out stuck pendings
+### Ageing out stuck pendings
 
-The metadata reconciler gains one job: a paste whose `status=pending`
-and whose `created_at` is older than the pending timeout is transitioned
-to `failed`, so its bytes drop out of the quota scan. This is the backstop
-for the pod-death case (the bytes are gone, no finalizer will ever run). It uses
-the same idempotent, decode-tolerant per-row discipline the reconciler's
-other jobs use: one poisoned row never stalls the pass.
+A paste whose `status=pending` and whose `created_at` is older than the
+pending timeout is transitioned to `failed`, so its bytes drop out of the
+quota scan. This is the backstop for the pod-death case: the bytes are gone
+and no finalizer will ever run.
+
+It happens on the owner's own `list`, which already reads each row, rather
+than on a background pass. Only the detached-store path can produce a
+pending paste at all - the shale-collocated path commits READY with the
+bytes already durable - so on the deployed shape this case does not arise.
 
 ## Static site archives
 
@@ -3621,53 +3624,62 @@ entry written before the index was value-bearing carries a one-byte
 marker (shale's `Put` rejects an empty value; an entry migrated from a
 slatedb deployment may be empty): the quota scan recognizes those two
 shapes explicitly and falls back to reading that entry's authoritative
-`sites/<slug>` row until the next reconcile pass overwrites the marker
-with the JSON projection. Sites deployed BEFORE this index existed have no
-entry; the periodic `Reconcile` pass (see below) reprojects every
-`sites/<slug>` row it scans into the per-owner index (adding missing
-entries, refreshing cached values, dropping orphans), the same "reproject
-authoritative rows, drop orphans" heal the paste `reconcileIndexes` runs,
-so a pre-index site is picked up on the next reconcile tick. Being
-idempotent, every pod running it is harmless.
+`sites/<slug>` row, and `ListSitesByOwner` rewrites the entry with the JSON
+projection when it next walks it.
 
-**Periodic reconcile.** `Reconcile` is the metadata backend's maintenance
-pass and IS wired to run periodically in production (a background ticker in
-the composition root, first pass after a short post-boot settle, then every
-~10 min). Each pass reprojects the `identity_pastes` + `identity_sites`
-enumeration indexes from the authoritative `pastes/*` + `versions/*` /
-`sites/*` scans (adding missing entries, refreshing every entry's cached
-quota values, dropping orphans even under owners with no remaining rows -
-including the pre-index backfill above) and ages out crashed pending
-pastes. The site-index reprojection (`reconcileSiteIndexes`) was previously
-reached only through the now-deleted site-reservation pass; it is re-homed
-as a standalone step driven by its own `sites/*` scan so it still runs
-every tick. This index reprojection is the SOLE quota-healing mechanism: it
-closes the crash-between-row-and-index under-count window by making the
-enumeration set complete again, and it bounds cached-value drift (a lost
-size refresh, a stale or orphaned entry) to one pass. The SET part
-of the heal (add/drop entries) is idempotent and race-free, but the cached
-VALUES the entries carry are numbers derived from a point-in-time snapshot
-of the authoritative rows - so a reprojection CAN race a live write's
-fresher refresh (an append that lands after the pass's snapshot but before
-its index write). Every reprojection and refresh index write is therefore
-GUARDED: it commits only if the entry still holds the exact value the
-computation read when it started (a per-entry conditional write through
-the same {id}-shard CAS; the pass snapshots the index BEFORE the
-authoritative scans so a guard pass proves the computed value is at least
-as fresh as the entry). On a guard conflict the write is SKIPPED and
-logged - never retried on the spot - leaving whichever value landed;
-residual staleness is bounded by one reconcile cycle (the next pass
-recomputes from fresher rows and re-guards). Guarded to lose, never to
-clobber: that is what keeps the pass safe under live traffic on any
-cadence.
+**No periodic reconcile: the index entry is written FIRST.** There is no
+maintenance pass, no ticker, and no cross-shard repair job. The write order is
+what removes the need for one.
+
+An insert spans two shards - the enumeration entry on `{id}`, the
+authoritative row on `{slug}` - and a transaction touches only one. Whichever
+is written second can be lost to a crash, so the question is only *which
+inconsistency you would rather have*:
+
+| written first | a crash leaves | visible how |
+| --- | --- | --- |
+| the row | a row with **no entry** | invisible: nothing on the `{id}` shard mentions it, so only a scan of EVERY row on EVERY shard can find it |
+| the entry | an entry with **no row** | visible: the entry is right there in the owner's own index, and the read that walks it discovers the row is gone |
+
+hostthis writes **the entry first**, so the only reachable inconsistency is the
+one a single-shard read can see and fix. `ListByOwner` walks the owner's
+entries, reads each authoritative row, and repairs what it finds:
+
+- an entry whose row is **gone** is deleted (a crashed insert, or a delete that
+  landed on `{slug}` but not `{id}`),
+- an entry whose cached size **disagrees** with the live version rows is
+  rewritten (a lost best-effort refresh after an append or a version
+  tombstone),
+- a row still **pending** past `PendingPasteTimeout` is aged to failed and its
+  entry dropped (a pod died mid-upload on the detached-store path; the
+  shale-collocated path commits READY and has no pending window at all).
+
+That read already fetches both the row and its version rows - it needs them for
+`LatestVersion` - so every repair above is free of extra I/O.
+
+**The slug is pre-checked before the entry is written.** `pastes/<slug>` and
+`sites/<slug>` are read on the `{slug}` shard first, and a taken slug returns
+the collision sentinel with no entry written. Without that, every re-mint in
+the upload's collision-retry loop would strand an entry. The pre-check is not
+atomic with the authoritative insert, so a genuine race still strands one -
+bounded, and pruned by the next `ListByOwner`.
+
+**What this costs, stated plainly.** A crashed insert leaves an entry whose
+cached bytes count against the owner's quota until a `list` prunes it. That is
+an OVER-count: it can wrongly refuse an upload, never wrongly admit one. The
+previous design had the opposite failure - a live paste that counted for
+nothing, so the cap could be genuinely breached - healed silently within a
+reconcile cycle. The trade is deliberate: a fail-safe error the owner can clear
+themselves, in exchange for deleting a cross-shard job whose partial results
+were the most dangerous machinery in the service.
 
 A site deploy spans the `{slug}` shard (the authoritative `sites/<slug>`
 write + the cross-family paste-slug collision read) and the `{id}` shard
 (the enumeration index entry), which is two CASes, but there is no counter to
 reserve against, so the deploy is a plain sequence: check quota (scan), write
-the authoritative `{slug}` row, then write the `identity_sites/<id>/<slug>`
-enumeration entry (value-bearing: the cached deduped size the quota scan
-sums; best-effort, reconciler-healed) - matching
+the `identity_sites/<id>/<slug>` enumeration entry (value-bearing: the cached
+deduped size the quota scan sums), then write the authoritative `{slug}` row -
+entry first, for the reason given above - matching
 sqlite and slatedb - and `StrictIdentityQuotaUnderConcurrency` is `false` (the
 scan-check and the row-write are not atomic; the bounded same-owner
 over-admit is the accepted trade, see "The correctness argument").
@@ -4560,7 +4572,7 @@ the staler sum could land LAST and silently replace the fresher one (and
 the reprojection recurs every cycle, so that clobber would repeat). Every
 such write is therefore guarded to LOSE: it commits only if the entry
 still holds the value its computation started from, and on conflict it
-skips (see "Periodic reconcile"), so a race costs at most one skipped
+skips (see "repair-on-read"), so a race costs at most one skipped
 refresh - the same stale-cache shape as a lost refresh, in whichever
 direction the surviving value errs (too small UNDER-counts, an over-admit
 shaped exactly like Window A; too large OVER-counts, wrongly rejects,

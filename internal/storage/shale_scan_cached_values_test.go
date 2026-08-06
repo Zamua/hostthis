@@ -98,8 +98,8 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 	if got := mustSum(t, repo, owner, now); got != 1+999 {
 		t.Fatalf("the scan sums the cached size (corrupted to 1): got %d, want %d", got, 1+999)
 	}
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if _, err := repo.ListByOwner(owner); err != nil {
+		t.Fatalf("list: %v", err)
 	}
 	if got := readCachedIndexSize(t, repo, idxKey); got != 200 {
 		t.Fatalf("reprojection must rebuild the cached size from the authoritative rows: got %d, want 200", got)
@@ -113,20 +113,28 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 		t.Fatalf("reconcile must prune the stale entry (authoritative paste gone); got %q", raw)
 	}
 
-	// The orphan prune must be GLOBAL: a per-owner reprojection never visits
-	// an owner with no authoritative pastes, so its entry would over-count
-	// forever.
+	// The prune is PER-OWNER: an orphan entry counts against ITS owner until
+	// THAT owner lists. Repair rides the owner's own read, so no other owner's
+	// activity clears it - the deliberate trade for deleting the cross-shard
+	// pass (docs/SPEC.md "No periodic reconcile").
 	orphanOwner := "key:cacheorph"
 	orphanKey := storage.IdentityPasteKeyForTest(orphanOwner, "orphgone")
 	writeIndexEntryJSON(t, repo, orphanKey, 777, now)
 	if got := mustSum(t, repo, orphanOwner, now); got != 777 {
-		t.Fatalf("pre-reconcile orphan sum: got %d, want 777 (cached value counts until pruned)", got)
+		t.Fatalf("orphan sum before its owner lists: got %d, want 777 (cached value counts until pruned)", got)
 	}
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile (orphan): %v", err)
+	if _, err := repo.ListByOwner(owner); err != nil {
+		t.Fatalf("list (other owner): %v", err)
+	}
+	if got := mustSum(t, repo, orphanOwner, now); got != 777 {
+		t.Fatalf("another owner's list must NOT clear this orphan: got %d, want 777", got)
+	}
+	// ITS OWN owner's list clears it.
+	if _, err := repo.ListByOwner(orphanOwner); err != nil {
+		t.Fatalf("list (orphan owner): %v", err)
 	}
 	if got := mustSum(t, repo, orphanOwner, now); got != 0 {
-		t.Fatalf("post-reconcile orphan sum: got %d, want 0 (global prune must cover owners with no rows)", got)
+		t.Fatalf("the orphan's own owner listing must clear it: got %d, want 0", got)
 	}
 	if raw, err := repo.GetRawForTest(orphanKey); err != nil {
 		t.Fatalf("read orphan entry post-reconcile: %v", err)
@@ -180,8 +188,8 @@ func TestShaleQuotaScanFailClosed(t *testing.T) {
 
 	// A placeholder whose authoritative row is ABSENT is bogus: the prune
 	// confirms the row is gone and drops it, restoring the owner's checks.
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if _, err := repo.ListByOwner(owner); err != nil {
+		t.Fatalf("list: %v", err)
 	}
 	if got := mustSum(t, repo, owner, now); got != 100 {
 		t.Fatalf("sum after reconcile prunes the bogus placeholder: got %d, want 100", got)
@@ -193,7 +201,7 @@ func TestShaleQuotaScanFailClosed(t *testing.T) {
 // re-adds a failed row's entry, and the prune drops a leftover one. Without it
 // the quota scan - which sums whatever the index lists, with no per-entry
 // status read - counts a failed paste's bytes forever.
-func TestShaleReconcileDoesNotResurrectFailedPasteEntry(t *testing.T) {
+func TestShaleListDoesNotResurrectFailedPasteEntry(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
 		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale failed-entry test (start dev MinIO first)")
@@ -212,8 +220,8 @@ func TestShaleReconcileDoesNotResurrectFailedPasteEntry(t *testing.T) {
 	}
 
 	// The reprojection must not resurrect the failed paste's entry.
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if _, err := repo.ListByOwner(owner); err != nil {
+		t.Fatalf("list: %v", err)
 	}
 	if raw, err := repo.GetRawForTest(idxKey); err != nil {
 		t.Fatalf("read entry post-reconcile: %v", err)
@@ -231,7 +239,7 @@ func TestShaleReconcileDoesNotResurrectFailedPasteEntry(t *testing.T) {
 	if got := mustSum(t, repo, owner, now); got != 400 {
 		t.Fatalf("leftover failed-paste entry should count until pruned (bounded over-count): got %d, want 400", got)
 	}
-	if err := repo.ReconcileForTest(now); err != nil {
+	if _, err := repo.ListByOwner(owner); err != nil {
 		t.Fatalf("reconcile (leftover): %v", err)
 	}
 	if raw, err := repo.GetRawForTest(idxKey); err != nil {
@@ -306,7 +314,7 @@ func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
 	if got := mustSiteSum(t, repo, owner, now); got != 250 {
 		t.Fatalf("legacy marker entry must fall back to the authoritative row: got %d, want 250", got)
 	}
-	if err := repo.ReconcileForTest(now); err != nil {
+	if _, err := repo.ListSitesByOwner(owner, now); err != nil {
 		t.Fatalf("reconcile (enrich): %v", err)
 	}
 	if got := readCachedIndexSize(t, repo, idxKey); got != 250 {
@@ -316,24 +324,30 @@ func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
 		t.Fatalf("site sum after enrichment: got %d, want 250", got)
 	}
 
-	// Global orphan prune, site side: a stale entry under an owner with no
-	// authoritative sites counts until pruned.
+	// Per-owner orphan prune, site side: a stale entry counts against ITS
+	// owner until THAT owner lists. Repair rides the owner's own read.
 	orphanOwner := "key:sitecorph"
 	orphanKey := storage.IdentitySiteKeyForTest(orphanOwner, "sitegone")
 	writeIndexEntryJSON(t, repo, orphanKey, 777, now)
 	if got := mustSiteSum(t, repo, orphanOwner, now); got != 777 {
-		t.Fatalf("pre-reconcile orphan site sum: got %d, want 777 (cached value counts until pruned)", got)
+		t.Fatalf("orphan site sum before its owner lists: got %d, want 777", got)
 	}
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile (site orphan): %v", err)
+	if _, err := repo.ListSitesByOwner(owner, now); err != nil {
+		t.Fatalf("list (other owner): %v", err)
+	}
+	if got := mustSiteSum(t, repo, orphanOwner, now); got != 777 {
+		t.Fatalf("another owner's list must NOT clear this orphan: got %d, want 777", got)
+	}
+	if _, err := repo.ListSitesByOwner(orphanOwner, now); err != nil {
+		t.Fatalf("list (orphan owner): %v", err)
 	}
 	if got := mustSiteSum(t, repo, orphanOwner, now); got != 0 {
-		t.Fatalf("post-reconcile orphan site sum: got %d, want 0 (global prune)", got)
+		t.Fatalf("the orphan's own owner listing must clear it: got %d, want 0", got)
 	}
 	if raw, err := repo.GetRawForTest(orphanKey); err != nil {
-		t.Fatalf("read orphan site entry post-reconcile: %v", err)
+		t.Fatalf("read orphan site entry post-list: %v", err)
 	} else if len(raw) != 0 {
-		t.Fatalf("reconcile must prune an orphan site entry; got %q", raw)
+		t.Fatalf("the owner's list must prune an orphan site entry; got %q", raw)
 	}
 
 	// Fail-closed placeholder hard-fails the site scan.
@@ -441,8 +455,8 @@ func TestShaleQuotaParityWithSqlite(t *testing.T) {
 		t.Fatalf("corruption did not land in the cached measure: shale=%d sqlite=%d", shaleSum, sqSum)
 	}
 	// ...and the reprojection heals it back to parity.
-	if err := shale.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if _, err := shale.ListByOwner(owner); err != nil {
+		t.Fatalf("list: %v", err)
 	}
 	assertParity("after reconcile heals the corruption")
 }

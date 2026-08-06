@@ -102,19 +102,19 @@ func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
 		t.Fatalf("stale legacy entry must contribute zero: got %d, want 600", got)
 	}
 
-	// Reconcile enriches the empty entry to the JSON projection and prunes the
-	// stale one, retiring the fallback: the cached size equals the live
-	// version sum and the scan agrees.
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	// The owner's own list retires the fallback: it enriches the empty legacy
+	// entry to the JSON projection and prunes the stale one, with no background
+	// pass involved.
+	if _, err := repo.ListByOwner(owner); err != nil {
+		t.Fatalf("list: %v", err)
 	}
 	if got := readCachedIndexSize(t, repo, idxKey); got != 500 {
-		t.Fatalf("reconcile must enrich the legacy entry to the JSON projection: got %d, want 500", got)
+		t.Fatalf("list must enrich the legacy entry to the JSON projection: got %d, want 500", got)
 	}
 	if raw, err := repo.GetRawForTest(staleKey); err != nil {
-		t.Fatalf("read stale legacy entry post-reconcile: %v", err)
+		t.Fatalf("read stale legacy entry post-list: %v", err)
 	} else if len(raw) != 0 {
-		t.Fatalf("reconcile must prune the stale legacy entry; got %q", raw)
+		t.Fatalf("list must prune the stale legacy entry; got %q", raw)
 	}
 	if got := mustSum(t, repo, owner, now); got != 600 {
 		t.Fatalf("sum after enrichment: got %d, want 600", got)

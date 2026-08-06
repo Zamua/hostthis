@@ -116,7 +116,7 @@ func TestShaleLifecycle_MarkFailedReleasesQuota(t *testing.T) {
 	}
 }
 
-func TestShaleLifecycle_ReconcilerAgesOutStuckPending(t *testing.T) {
+func TestShaleLifecycle_ListAgesOutStuckPending(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
 		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale lifecycle test")
@@ -136,9 +136,11 @@ func TestShaleLifecycle_ReconcilerAgesOutStuckPending(t *testing.T) {
 	old := insertPending(t, repo, owner, "stuckold", 250, now.Add(-2*time.Minute))
 	fresh := insertPending(t, repo, owner, "freshpen", 150, now)
 
-	// Reconcile at `now`: old is past the 1-min timeout, fresh is not.
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	// The owner's own list is what ages it out: old is past the 1-min timeout,
+	// fresh is not.
+	repo.Now = func() time.Time { return now }
+	if _, err := repo.ListByOwner(owner); err != nil {
+		t.Fatalf("list: %v", err)
 	}
 
 	gotOld, err := repo.Get(old.Slug)

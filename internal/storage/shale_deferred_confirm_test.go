@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/storage"
 )
 
 func TestShaleDeferredConfirm_ReadableImmediately_IndexAppearsAfterDrain(t *testing.T) {
@@ -81,49 +80,5 @@ func TestShaleDeferredConfirm_ReadableImmediately_IndexAppearsAfterDrain(t *test
 		t.Fatalf("owner first seen: %v", err)
 	} else if !first.Equal(now) {
 		t.Fatalf("OwnerFirstSeen after drain = %v, want %v (confirm sets first-seen)", first, now)
-	}
-}
-
-// TestShaleDeferredConfirm_ReconcilerHealsLostConfirm pins that a lost confirm
-// is healed: the reconciler rebuilds the missing identity_pastes entry. The
-// lost confirm is modeled by dropping the entry after a successful insert,
-// which leaves the same end state (authoritative paste present, no entry).
-func TestShaleDeferredConfirm_ReconcilerHealsLostConfirm(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale deferred-confirm reconcile test (start dev MinIO first)")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
-
-	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
-	owner := "key:lostconfirm"
-	p := domain.Paste{
-		Slug: domain.Slug("lostcfm1"), Identity: domain.Identity(owner),
-		Kind: domain.KindHTML, ContentSHA: "sha-lostconfirm", Size: 250,
-		CreatedAt: now, UpdatedAt: now}
-	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
-		t.Fatalf("insert: %v", err)
-	}
-	repo.WaitPendingConfirms()
-
-	// Drop the entry: the state a crash between the authoritative write and
-	// the confirm leaves.
-	if err := repo.DeleteRawForTest(storage.IdentityPasteKeyForTest(owner, p.Slug.String())); err != nil {
-		t.Fatalf("drop index entry to model lost confirm: %v", err)
-	}
-	if n, err := repo.CountByOwner(owner); err != nil {
-		t.Fatalf("count after drop: %v", err)
-	} else if n != 0 {
-		t.Fatalf("post-drop count = %d, want 0 (index entry gone)", n)
-	}
-
-	// The rebuild is from the authoritative row.
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	if n, err := repo.CountByOwner(owner); err != nil {
-		t.Fatalf("count after reconcile: %v", err)
-	} else if n != 1 {
-		t.Fatalf("post-reconcile count = %d, want 1 (reconciler rebuilt the lost-confirm index entry)", n)
 	}
 }

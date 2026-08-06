@@ -41,7 +41,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/Zamua/shale/backends/slate"
 	"github.com/Zamua/shale/backends/slate/blobstore"
@@ -360,25 +359,6 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		}()
 		logger.Printf("metadata: shale debug endpoint serving %s/debug/shale/state", dbgAddr)
 	}
-
-	// PERIODIC RECONCILE: the sole quota-healing mechanism (contract and
-	// concurrency argument in ShaleRepo.Reconcile). Best-effort: a pass hitting
-	// the post-boot convergence window, or with per-entry write failures, logs
-	// and retries next tick.
-	go func() {
-		const reconcileInterval = 10 * time.Minute
-		timer := time.NewTimer(90 * time.Second) // let the cluster converge past boot first
-		defer timer.Stop()
-		for {
-			<-timer.C
-			if err := repo.Reconcile(time.Now().UTC()); err != nil {
-				logger.Printf("metadata: periodic reconcile: %v (retrying next tick)", err)
-			} else {
-				logger.Printf("metadata: periodic reconcile complete")
-			}
-			timer.Reset(reconcileInterval)
-		}
-	}()
 
 	return bundle, nil
 }

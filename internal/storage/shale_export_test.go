@@ -112,28 +112,6 @@ func (r *ShaleRepo) DeleteRawForTest(key []byte) error {
 	return r.cluster.Delete(key)
 }
 
-// ReconcileForTest exposes Reconcile under a stable test name, keeping the
-// reconciler test's dependency surface explicit.
-func (r *ShaleRepo) ReconcileForTest(now time.Time) error {
-	return r.Reconcile(now)
-}
-
-// SetReconcileBeforeIndexWritesHookForTest installs the test seam that runs
-// after Reconcile captures its snapshots and before the paste reprojection's
-// prune + write loops: the exact window where an unguarded reprojection would
-// clobber a fresher refresh. Pass nil to clear.
-func (r *ShaleRepo) SetReconcileBeforeIndexWritesHookForTest(fn func()) {
-	r.testHookReconcileBeforeIndexWrites = fn
-}
-
-// SetBeforeOrphanPruneDeleteHookForTest installs the test seam that runs inside
-// the orphan prune between the authoritative-row confirm and the entry delete:
-// the window where an unconditional delete would drop a fresh entry. Pass nil
-// to clear.
-func (r *ShaleRepo) SetBeforeOrphanPruneDeleteHookForTest(fn func(key []byte)) {
-	r.testHookBeforeOrphanPruneDelete = fn
-}
-
 // SetGuardedIndexWriteHookForTest installs the fault-injection seam at the top
 // of every guarded index write: a non-nil return from fn fails that write with
 // the returned error. Pass nil to clear.

@@ -134,35 +134,6 @@ func TestReadRetryPolicy_FitsInsideRequestDeadline(t *testing.T) {
 	}
 }
 
-// The background span must outlast a real handoff. The window is bounded by a
-// MOUNT (opening a per-(unit, replica) database from object storage), not an
-// RPC round trip, so it runs to seconds or tens of seconds and scales with
-// backend latency, units per node and cluster size. A shorter span exhausts and
-// fails while still reading like a working retry, so the constant below is
-// sized for this deployment shape and must be re-checked against the operator's
-// own backend rather than trusted as universal.
-func TestBackgroundRetryPolicy_CoversAHandoff(t *testing.T) {
-	const observedHandoffWindow = 21 * time.Second
-	var span time.Duration
-	for i := 0; i < backgroundRetry.attempts-1; i++ {
-		span += backgroundRetry.backoff << i
-	}
-	if span <= observedHandoffWindow {
-		t.Fatalf("background retry spans %v, which does not outlast the %v handoff window it exists to cover; "+
-			"a retry shorter than the window just postpones the same failure", span, observedHandoffWindow)
-	}
-}
-
-// Background fan-outs are NOT request-path, so they may retry more patiently.
-// Pinned so an edit cannot collapse the two policies and silently make
-// background scans as impatient as reads.
-func TestBackgroundRetryPolicy_IsMorePatientThanRead(t *testing.T) {
-	if backgroundRetry.attempts < readRetry.attempts {
-		t.Fatalf("background retry (%d) must be at least as persistent as read (%d)",
-			backgroundRetry.attempts, readRetry.attempts)
-	}
-}
-
 var fastRetry = retryPolicy{attempts: 3, backoff: time.Millisecond}
 
 // The retry must be OBSERVABLE: unobserved, a retry that fires constantly
@@ -230,11 +201,5 @@ func TestRequestPathBudget_FitsAnInteractiveCommand(t *testing.T) {
 	if got := span(readRetry); got > interactiveCeiling {
 		t.Fatalf("request-path retry spans %v, too long to sit in front of an interactive command (ceiling %v)",
 			got, interactiveCeiling)
-	}
-	// The background policy is DELIBERATELY longer than the interactive
-	// ceiling, which is exactly why it must not be applied to a request path.
-	if got := span(backgroundRetry); got <= interactiveCeiling {
-		t.Fatalf("background retry spans %v, which no longer exceeds the interactive ceiling %v; "+
-			"the two policies have collapsed and the caller-context distinction is meaningless", got, interactiveCeiling)
 	}
 }

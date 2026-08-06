@@ -41,7 +41,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/Zamua/shale/pkg/backend"
@@ -180,16 +179,20 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(ctx context.Context, s domain.Site,
 		}
 	}
 
-	if err := r.insertSiteAuthoritative(s, dedupedSize, binds); err != nil {
-		return err
+	// ENTRY FIRST, then the authoritative row - the paste path's reasoning
+	// exactly (docs/SPEC.md "No periodic reconcile: the index entry is written
+	// FIRST"). A crash leaves an entry with no row, which ListSitesByOwner
+	// sees and deletes; the other order leaves a row no single-shard read can
+	// find.
+	if err := r.confirmSiteInsert(identity, slug, dedupedSize); err != nil {
+		return fmt.Errorf("site enumeration entry: %w", err)
 	}
 
-	// Enumeration-index maintenance on the {id} shard, best-effort: a failure
-	// leaves a site the quota scan does not count (a transient under-count the
-	// reconciler heals), never a failed deploy, so the already-durable site
-	// returns success.
-	if err := r.confirmSiteInsert(identity, slug, dedupedSize); err != nil {
-		r.repoLog().Printf("shale: site index maintenance for %s: %v (index lag; reconciler will heal)", s.Slug, err)
+	if err := r.insertSiteAuthoritative(s, dedupedSize, binds); err != nil {
+		if derr := r.cluster.Delete(shaleKeyIdentitySite(identity, slug)); derr != nil {
+			r.repoLog().Printf("shale: rollback of site enumeration entry for %s: %v (it counts against the owner until their next list)", s.Slug, derr)
+		}
+		return err
 	}
 	return nil
 }
@@ -507,6 +510,24 @@ func (r *ShaleRepo) ListSitesByOwner(owner string, _ time.Time) ([]domain.Site, 
 			}
 			return nil, err
 		}
+		// The read already holds the authoritative row, so correcting a stale
+		// cached size is free here - the repair that used to need a reconcile
+		// pass. Guarded on the value this scan read.
+		var idxRow identitySiteRow
+		decoded := json.Unmarshal(item.Value, &idxRow) == nil
+		switch {
+		case decoded && idxRow.Placeholder:
+			// Fail-closed marker: left for the quota scan to hard-fail on.
+		case !decoded || idxRow.Size != row.DedupedSize:
+			// A drifted cached size, or a LEGACY entry predating the
+			// value-bearing projection (empty or a bare marker byte). Either
+			// way the authoritative row is in hand, so write the truth.
+			fixed := identitySiteRow{Size: row.DedupedSize}
+			if _, werr := r.guardedPutIndexEntry(item.Key, item.Value, true, fixed); werr != nil {
+				r.repoLog().Printf("shale: site index repair for %s: %v (retried on the next list)", slug, werr)
+			}
+		}
+
 		site, err := row.toDomain(slug)
 		if err != nil {
 			return nil, err
@@ -662,99 +683,4 @@ func (r *ShaleRepo) DeleteSite(slug domain.Slug) error {
 		}
 		return nil
 	})
-}
-
-// reconcileSiteIndexPass reprojects the identity_sites enumeration index from
-// the authoritative sites/ rows across all shards: group each live site under
-// its owner with the cached quota values, then add missing entries, refresh
-// cached values, and drop orphans. That is what makes a site's bytes count
-// after a crash between the authoritative write and the index write, and what
-// enriches an entry still holding the legacy marker. Every write is an
-// idempotent single-{id}-shard CAS, safe under live traffic.
-func (r *ShaleRepo) reconcileSiteIndexPass() error {
-	// Snapshot the index STRICTLY BEFORE the authoritative sites/ scan: a
-	// baseline that predates the scan is what makes "entry unchanged" prove the
-	// computed value is at least as fresh.
-	siteIdx, err := r.aggregateForBackground(prefixIdentitySitesAll)
-	if err != nil {
-		return fmt.Errorf("reconcile sites: scan identity_sites: %w", err)
-	}
-	siteItems, err := r.aggregateForBackground(prefixSites)
-	if err != nil {
-		return fmt.Errorf("reconcile sites: scan sites: %w", err)
-	}
-	// sitesByOwner drives the reprojection: every authoritative site under its
-	// owner's index with its cached quota values.
-	sitesByOwner := make(map[string]map[string]identitySiteRow)
-	// Tallied, not logged per record. See corrupt_tally.go.
-	var corrupt corruptTally
-	for _, item := range siteItems {
-		slug := strings.TrimPrefix(string(item.Key), "sites/")
-		var row siteRow
-		if err := json.Unmarshal(item.Value, &row); err != nil {
-			// Idempotent reconcile: one poisoned site row must not stall the pass
-			// (Policy 1). Dropping it silently would leave a durable UNDER-count
-			// if its identity_sites entry was ALSO lost, since the quota scan sums
-			// the enumeration entries and an un-indexed undecodable row is
-			// invisible to it. Derive the owner decode-independently from
-			// slug_owner/<slug> and project a fail-closed PLACEHOLDER, so the
-			// owner's next scan hard-fails instead of under-counting. See
-			// docs/SPEC.md "Decode tolerance of the quota scan".
-			owner := r.ownerOfSlug(domain.Slug(slug))
-			if owner == "" {
-				// No slug_owner: the owner cannot be derived and no enumeration
-				// entry can be projected, so the row stays un-enumerated until
-				// repaired. Counted rather than logged per record - the set is not
-				// self-repairing, so per-record logging is an unbounded permanent
-				// cost.
-				corrupt.noteUnrepairable(slug)
-				continue
-			}
-			if sitesByOwner[owner] == nil {
-				sitesByOwner[owner] = make(map[string]identitySiteRow)
-			}
-			sitesByOwner[owner][slug] = identitySiteRow{Placeholder: true}
-			corrupt.notePlaceholder(slug)
-			continue
-		}
-		if sitesByOwner[row.Identity] == nil {
-			sitesByOwner[row.Identity] = make(map[string]identitySiteRow)
-		}
-		sitesByOwner[row.Identity][slug] = identitySiteRow{Size: row.DedupedSize}
-	}
-	if line, ok := corrupt.summary("sites"); ok {
-		r.repoLog().Print(line)
-	}
-	return r.reconcileSiteIndexes(sitesByOwner, siteIdx)
-}
-
-// reconcileSiteIndexes rebuilds the per-owner identity_sites index to match
-// the authoritative sites present, one {id}-shard CAS per entry (a
-// value-bearing overwrite, which is also what enriches a legacy marker entry
-// to the JSON projection). have is the pass's index snapshot, captured BEFORE
-// the authoritative sites/ scan. The mechanics (orphan prune, guarded
-// reprojection, Policy 1 error handling) live in reconcileEnumerationIndex;
-// this wrapper supplies the site family's prefix, key builder, and prune step.
-func (r *ShaleRepo) reconcileSiteIndexes(sitesByOwner map[string]map[string]identitySiteRow, have []scanItem) error {
-	return reconcileEnumerationIndex(r, sitesByOwner, have, prefixIdentitySitesAll,
-		shaleKeyIdentitySite, r.pruneOrphanSiteEntry, "reconcile sites", "identity_sites")
-}
-
-// pruneOrphanSiteEntry classifies one identity_sites entry whose (owner,
-// slug) is missing from the reprojection set, confirming against the
-// authoritative row so a fresh deploy racing the pass snapshot is kept.
-// A site is live or gone, so only a confirmed-gone row prunes.
-func (r *ShaleRepo) pruneOrphanSiteEntry(slug string) bool {
-	var row siteRow
-	switch gerr := r.getJSON(shaleKeySite(domain.Slug(slug)), &row); {
-	case errors.Is(gerr, ErrNotFound):
-		return true
-	case gerr != nil:
-		// Undecodable row: keep the entry; the fail-closed placeholder
-		// projection handles it.
-		return false
-	default:
-		// Live row that raced the snapshot: keep; the next pass reprojects it.
-		return false
-	}
 }
