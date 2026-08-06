@@ -4,7 +4,7 @@ package storage_test
 
 // The scan-derived quota SUMS THE CACHED VALUES of the enumeration entries: one
 // prefix scan, zero per-entry fan-out to the {slug} shards. Each entry caches
-// the paste's live byte sum and expires_at, and the scan trusts exactly those
+// the paste's live byte sum, and the scan trusts exactly that
 // fields. The freshness contract pinned here:
 //
 //   - every size-changing operation maintains the cached size,
@@ -90,13 +90,6 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 	writeIndexEntryJSON(t, repo, staleKey, 999, now)
 	if got := mustSum(t, repo, owner, now); got != 200+999 {
 		t.Fatalf("a stale-but-decodable entry must contribute its cached value (no per-entry fan-out): got %d, want %d", got, 200+999)
-	}
-
-	// An EXPIRED stale entry self-excludes via its cached expires_at.
-	expiredKey := storage.IdentityPasteKeyForTest(owner, "cacheexp")
-	writeIndexEntryJSON(t, repo, expiredKey, 5000, now.Add(-time.Hour))
-	if got := mustSum(t, repo, owner, now); got != 200+999 {
-		t.Fatalf("an expired stale entry must self-exclude (cached expiry): got %d, want %d", got, 200+999)
 	}
 
 	// The cache IS the measure, so out-of-band corruption is reflected by the
@@ -252,7 +245,7 @@ func TestShaleReconcileDoesNotResurrectFailedPasteEntry(t *testing.T) {
 }
 
 // TestShaleSiteQuotaScanSumsCachedIndexValues is the site mirror: the
-// identity_sites entry is value-bearing (cached deduped size + expiry), deploy
+// identity_sites entry is value-bearing (cached deduped size), deploy
 // and replace maintain it, a bare marker entry falls back to the authoritative
 // row until the reconciler enriches it, orphans are pruned globally, and a
 // fail-closed placeholder hard-fails the scan.
@@ -502,7 +495,7 @@ func writeCachedIndexSize(t *testing.T, repo *storage.ShaleRepo, idxKey []byte, 
 }
 
 // writeIndexEntryJSON plants a decodable entry at idxKey with the given cached
-// size + expiry, bypassing the CAS write path. Models an orphaned entry whose
+// size, bypassing the CAS write path. Models an orphaned entry whose
 // authoritative rows may not exist, the shape a crash mid-delete leaves. The
 // field set is the shared subset of identityPasteRow / identitySiteRow, so one
 // helper serves both families.

@@ -300,7 +300,7 @@ func TestShaleDecodeTolerance_BlobGCFailsClosed(t *testing.T) {
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 
-	// Two pastes referencing DISTINCT blob shas, neither expired, so the
+	// Two pastes referencing DISTINCT blob shas, so the
 	// sweep deletes no pastes and the only question is which blobs it
 	// considers referenced.
 	keep := domain.Paste{

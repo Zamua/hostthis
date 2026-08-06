@@ -2,7 +2,7 @@ package storage
 
 // Sqlite-direct room tests, pinning behavior the backend-agnostic conformance
 // suite (conformance_rooms_test.go) does not: reading back an overwritten
-// value, the expiry clock after a PUT and a DELETE, the sqlite-specific empty
+// value, the clock after a PUT and a DELETE, the sqlite-specific empty
 // IndexRef, and SumActiveRoomBytes.
 //
 // newRoomTestRepo / mkRoom are shared with room_isolation_test.go.

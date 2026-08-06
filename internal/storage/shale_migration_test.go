@@ -33,8 +33,8 @@ func TestShaleMigration_RawValueRoundTrips(t *testing.T) {
 
 	// The paste row exactly as a slatedb deployment stores it: a
 	// single-version paste with the head fields denormalized onto the paste
-	// row, a v1 version row, the slug_owner pointer, and the expiry index
-	// marker. No identity_bytes counter and no identity_pastes index, since
+	// row, a v1 version row and the slug_owner pointer. No identity_bytes
+	// counter and no identity_pastes index, since
 	// those are shale-era derived families and the claim under test is that
 	// the AUTHORITATIVE rows decode raw.
 	p := domain.Paste{

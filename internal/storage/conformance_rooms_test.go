@@ -546,7 +546,7 @@ func conformRoomSeqDenseAssignment(t *testing.T, rr conformanceRoomRepo) {
 		{"overwrite k1", func() (uint64, error) { return rr.PutValue(room.AppSlug, room.ID, "k1", []byte("v1b"), 0, fixedNow) }},
 		{"delete k2", func() (uint64, error) { return rr.DeleteValue(room.AppSlug, room.ID, "k2", fixedNow) }},
 		// The idempotent DELETE of an ABSENT key still commits, touching the
-		// retention clock, so it must still assign a seq: a bump with no
+		// room's clock, so it must still assign a seq: a bump with no
 		// frame reads as a permanent hole to a relay subscriber, and a commit
 		// with no bump breaks density.
 		{"delete absent", func() (uint64, error) { return rr.DeleteValue(room.AppSlug, room.ID, "never-existed", fixedNow) }},

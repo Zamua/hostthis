@@ -49,12 +49,6 @@ var fixedNow = time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 // differ by design. Anything NOT expressed here must be identical across
 // backends, so each flag is an explicit, reviewed exception.
 type conformCaps struct {
-	// ExpiryFreesQuotaAtReadTime is true for backends whose owner sum filters
-	// expires_at > now, so an owner reclaims an expired record's quota the
-	// instant it expires rather than at sweep time. All three shipping backends
-	// set it (docs/SPEC.md "Scan-derived quota").
-	ExpiryFreesQuotaAtReadTime bool
-
 	// StrictQuotaUnderConcurrency is true for backends where the check and the
 	// write are one atomic boundary, so a byte cap holds exactly under
 	// concurrent writes. Gates the ROOM per-room cap concurrency test; all
@@ -128,7 +122,7 @@ func runConformanceWithSites(
 // --- helpers ---------------------------------------------------------
 
 // pasteOf builds a v1 paste with a content sha derived from the slug, stamped
-// at fixedNow with the standard retention window.
+// at fixedNow.
 func pasteOf(slug, identity string, size int) domain.Paste {
 	return domain.Paste{
 		Slug:          domain.Slug(slug),
@@ -355,7 +349,6 @@ func conformAppendBumpsVersion(t *testing.T, r conformanceRepo) {
 	if p.ContentSHA != "sha-ab-v2" || p.Size != 20 || p.Kind != domain.KindMarkdown {
 		t.Fatalf("unpinned head should roll to v2, got sha=%q size=%d kind=%q", p.ContentSHA, p.Size, p.Kind)
 	}
-	// Append resets the retention clock from `now`.
 }
 
 func conformPinUnpinRollsHead(t *testing.T, r conformanceRepo) {
@@ -546,8 +539,6 @@ func conformRepoIsNotOwnerGated(t *testing.T, r conformanceRepo) {
 		t.Fatalf("repo Delete is not owner-gated: %v", err)
 	}
 }
-
-// --- contract: expiry ------------------------------------------------
 
 // --- contract: blob GC reference set --------------------------------
 

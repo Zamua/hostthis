@@ -26,14 +26,14 @@ import (
 
 // conformanceSiteRepo is the union of the two site-side service interfaces a
 // static-site backend must satisfy: deploy/read/per-owner byte sum, plus the
-// sweep's expiry scan, delete and referenced-blob set.
+// sweep's delete and referenced-blob set.
 type conformanceSiteRepo interface {
 	service.SiteRepo
 	service.SweepSites
 }
 
 // siteOf builds a Site with one slug-derived file, stamped at fixedNow with the
-// standard retention window. size is that file's, and so the deduped, total.
+// size is that file's, and so the deduped, total.
 func siteOf(slug, identity string, size int) domain.Site {
 	man := domain.NewManifest()
 	man.Add("index.html", domain.ManifestEntry{
@@ -80,7 +80,7 @@ func insertSite(t *testing.T, sr conformanceSiteRepo, s domain.Site) {
 // runSiteConformance runs the site contract subtests. newSites must produce a
 // FRESH paste+site pair sharing one backing store per subtest, or the
 // empty-store assertions do not hold. caps declares the backend's by-design
-// behavior exceptions; sites honor ExpiryFreesQuotaAtReadTime.
+// behavior exceptions.
 func runSiteConformance(t *testing.T, name string, caps conformCaps, newSites func(t *testing.T) (conformanceRepo, conformanceSiteRepo)) {
 	t.Helper()
 	t.Run(name+"/Sites/DeployAndReadBack", func(t *testing.T) { _, sr := newSites(t); conformSiteDeployAndReadBack(t, sr) })
@@ -177,7 +177,7 @@ func conformSiteReplaceInPlace(t *testing.T, sr conformanceSiteRepo) {
 	if !got.CreatedAt.Equal(fixedNow) {
 		t.Fatalf("created_at must be stable across re-deploy: got %v, want %v", got.CreatedAt, fixedNow)
 	}
-	// updated_at and expires_at restart from the re-deploy.
+	// updated_at restarts from the re-deploy.
 	if !got.UpdatedAt.Equal(later) {
 		t.Fatalf("updated_at should be the re-deploy time: got %v, want %v", got.UpdatedAt, later)
 	}

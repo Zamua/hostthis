@@ -13,7 +13,7 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// The sweep deletes expired pastes and GCs their blobs.
+// The sweep GCs blobs no live record references.
 //
 // Uploads go through NewCompressedBlobStore, as the composition root wires
 // them: that wrapper owns the at-rest encoding, and handing the raw disk store
@@ -108,10 +108,9 @@ func TestSweep_KeepsActive(t *testing.T) {
 	}
 
 	sweep := service.NewSweep(repo, blobs, log.New(io.Discard, "", 0))
-	// Well within retention.
-	pastes, _ := sweep.Once(now.Add(time.Hour))
-	if pastes != 0 {
-		t.Fatalf("active paste should not be swept, got %d", pastes)
+	gc, _ := sweep.Once(now)
+	if gc != 0 {
+		t.Fatalf("a live paste's blob must not be collected, got %d", gc)
 	}
 	if _, err := repo.Get(r.Paste.Slug); err != nil {
 		t.Fatalf("paste should still exist: %v", err)
@@ -167,7 +166,7 @@ func TestSweep_GuardsAgainstBuggyRepoZeroRefs(t *testing.T) {
 		}
 	}
 
-	repo := &buggyRepo{} // returns 0 referenced, 0 expired
+	repo := &buggyRepo{} // returns 0 referenced shas
 	sweep := service.NewSweep(repo, blobs, log.New(io.Discard, "", 0))
 
 	gc, err := sweep.Once(time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC))

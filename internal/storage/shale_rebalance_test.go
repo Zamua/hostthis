@@ -144,7 +144,7 @@ func waitMembers(t *testing.T, nodes []*rebalNode, want int, timeout time.Durati
 	t.Fatalf("ring did not converge to %d members within %s: sizes=%v", want, timeout, sizes)
 }
 
-// pasteFor builds a v1 paste at now with the standard retention window. Local
+// pasteFor builds a v1 paste at now. Local
 // to this file so the gate owns its fixtures.
 func pasteFor(slug, identity, name string, size int, now time.Time) domain.Paste {
 	return domain.Paste{

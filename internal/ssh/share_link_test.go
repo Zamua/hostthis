@@ -24,7 +24,7 @@ func slugFromURL(t *testing.T, url string) string {
 
 // TestCreate_QROnStderr_URLOnStdout pins the create contract: the URL is the
 // ONLY thing on stdout, so a `slug=$(... | ssh -T host)` capture stays clean,
-// while the QR renders on stderr alongside the expiry narration.
+// while the QR renders on stderr.
 func TestCreate_QROnStderr_URLOnStdout(t *testing.T) {
 	s := startStack(t)
 	stdout, stderr, exit := s.run("", []byte("<!doctype html><h1>qr</h1>"))
