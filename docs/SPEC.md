@@ -1307,22 +1307,6 @@ informs them):
   limit remains the appropriate layer for raw request-rate abuse, exactly
   as for the paste path.
 
-### Retention
-
-Rooms are ephemeral, consistent with hostthis's whole ethos. **A room
-expires after a fixed window of inactivity: default 30 days since its last
-write** (a `PUT` or `DELETE`; a read does not extend it). On expiry the
-room record and every value in its namespace are deleted by the **same
-periodic sweep** that expires pastes and sites - one more record kind the
-sweep walks, GC'd through the existing expiry-index machinery. This 30-day
-inactivity window is the room tier's own fixed setting, independent of the
-configurable paste/site retention (`HOSTTHIS_RETENTION`): 30 days is long enough that a room
-backing a live app whose participants may return over several weeks (a poll
-open for a month, a retro board a team revisits) survives normal use.
-Still finite, still no user-facing knob, still swept automatically - the
-default is flagged as a starting point, not a contract, and like the paste
-window it is a product opinion, not an operator config.
-
 ### Scope fence
 
 This tier is **KV persistence plus a real-time relay**. The KV verbs
@@ -2178,17 +2162,13 @@ relay" (Acceptance criteria).
 **Pastes, sites and rooms persist indefinitely.** Nothing expires, there is
 no retention window, and no operator setting controls one.
 
-This was not always true: retention was a 30-day window with an
-installation-wide `HOSTTHIS_RETENTION` override, and production had already
-run it disabled for some time before the concept was removed outright.
-
-The reason for removing it rather than defaulting it off is that a disabled
-feature still costs what an enabled one does. An expiry window means three
+A retention window is not a setting that defaults off, because a disabled
+feature costs what an enabled one does. Expiring content requires
 time-ordered indexes, a periodic scan of each, and a sweep whose failure
-modes are all destructive. Keeping that machinery for a setting nobody turns
-on is a standing hazard for no benefit.
+modes are all destructive. That machinery is a standing hazard, and this
+service has no use for what it buys.
 
-What follows from having no expiry:
+What follows:
 
 - **Storage only grows.** A paste is removed when its owner deletes it, and
   never otherwise. The quota is what bounds an identity, and it is now the
@@ -2213,7 +2193,6 @@ With no command and no stdin, the server prints the help banner.
 ```
 cat index.html | ssh -T hostthis.dev
 https://abc12345.hostthis.dev
-expires in 30 days
 <QR code of the URL, on stderr>
 ```
 Reads stdin until EOF or the per-paste cap (10 MiB after compression;
@@ -2234,8 +2213,7 @@ the warning, so their examples stay plain.
 **QR code on create (stderr, always on)**: on a successful upload the
 server also renders a terminal QR code of the URL. The URL stays the
 *only* thing on stdout (the `slug=$(… | ssh -T hostthis.dev)` capture
-contract is unchanged); the QR is written to stderr alongside the
-`expires in 30 days` narration. Per clig.dev, stdout is the
+contract is unchanged); the QR is written to stderr. Per clig.dev, stdout is the
 machine-readable datum and stderr is human-facing narration, so
 `2>/dev/null` cleanly drops the QR for scripts. There is no flag to
 toggle it. The same QR can be re-shown for any existing paste later via
@@ -2245,7 +2223,7 @@ Optional `--name`:
 ```
 cat demo.html | ssh -T hostthis.dev --name "Acme prototype v3"
 https://abc12345.hostthis.dev
-"Acme prototype v3" - expires in 30 days
+"Acme prototype v3"
 <QR code of the URL, on stderr>
 ```
 The name is owner-only metadata for `list`; it never appears in the
@@ -2258,7 +2236,7 @@ one line, no trailing whitespace, no formatting - so pipes Just Work:
 cat foo.html | ssh -T hostthis.dev | pbcopy   # → URL only on the clipboard
 ```
 
-Everything else (expiry note, the QR code, key-onboarding nudge,
+Everything else (the QR code, key-onboarding nudge,
 warnings) prints to stderr. Pipes lose it, but the user's terminal still
 renders it because stderr is a TTY by default.
 
@@ -2270,7 +2248,7 @@ exit code 3. See the `Identity` section above.
 ```
 cat v2.html | ssh -T hostthis.dev abc12345
 https://abc12345.hostthis.dev
-v2 saved - expires in 30 days
+v2 saved
 <QR code of the URL, on stderr>
 ```
 The update path mirrors create: the URL is the only thing on stdout, and
@@ -2299,7 +2277,7 @@ described here. The slug and URL are unchanged either way. Failure modes
 See "Exit codes" below for the canonical mapping.
 
 Update creates a new immutable version under the hood (SHA-keyed blob
-ref) and resets the 30-day retention clock. What the URL serves next
+ref). What the URL serves next
 depends on pin state:
 
 - If the paste is *unpinned* (default for new uploads): the new
@@ -2315,13 +2293,13 @@ See the Pin / Unpin sections below for the full sticky semantics.
 ### List your pastes
 ```
 ssh hostthis.dev list
-SLUG       NAME                  SIZE    KIND      EXPIRES_IN   VERS
-abc12345   Acme prototype v3     1.2k    html      6d22h        v2
-x7y8z9q0   -                      540B   markdown  6d16h        v1
-qrs78901   bugfix.diff           2.1k    diff      6d2h         v1
-mnop4567   Onboarding email      3.8k    html      5d6h         v3 (pinned, latest v5)
-zwy11122   -                     800B    html      4d12h        v3 (pinned)
-portfolio2 -                    213.0k   site      27d4h        -
+SLUG       NAME                  SIZE    KIND      VERS
+abc12345   Acme prototype v3     1.2k    html      v2
+x7y8z9q0   -                      540B   markdown  v1
+qrs78901   bugfix.diff           2.1k    diff      v1
+mnop4567   Onboarding email      3.8k    html      v3 (pinned, latest v5)
+zwy11122   -                     800B    html      v3 (pinned)
+portfolio2 -                    213.0k   site      -
 ```
 **SIZE is what the item COSTS the owner, not the size of what it serves.**
 For a paste that is every LIVE version summed, so a paste at v3 shows more
@@ -2337,16 +2315,13 @@ version NUMBER, not how many versions are stored, and a paste whose v1 was
 deleted is charged for two while still displaying `v3`.
 
 Lists BOTH text pastes AND deployed static **sites** (a site shows
-`KIND=site`, its stored byte total, its expiry, and `-` in `VERS` since
+`KIND=site`, its stored byte total, and `-` in `VERS` since
 sites are not versioned). This matters because a site counts against the
 same 100 MiB per-identity quota as pastes: if `list` omitted sites, an owner
 could hit `would exceed your 100 MiB total quota` with no visible way to see
 or free what is using it (deleting the visible text pastes reclaims almost
 nothing). Listing sites makes the quota legible and the slugs copyable for
-`delete`. Sites reuse the retention policy (`EXPIRES_IN` shows the site's
-actual expiry, `never` only under a no-expiry deploy). Sorted by expiry asc
-(soonest-to-die first, so you notice things about to disappear;
-never-expiring items sort last). `NAME` column shows the user-supplied
+`delete`. Sorted most recently updated first. `NAME` column shows the user-supplied
 label or `-` if none (sites have no label, so `-`). Columns are space-padded so they stay aligned in the terminal no
 matter how long a `NAME` runs (a raw single-tab separator overflows the
 8-column tab stop as soon as one label is wide, shoving every following
@@ -2410,10 +2385,9 @@ ssh hostthis.dev whoami --output json
 **Output contract in `json` mode.** stdout carries ONLY the JSON value
 (per the stdout=machine-datum / stderr=narration split used elsewhere),
 so `... -o json | jq` is clean. Any human footer a command normally
-writes to stderr (e.g. the `versions` pin/expiry footer) is folded into
+writes to stderr (e.g. the `versions` pin footer) is folded into
 the JSON object instead of being printed separately. Timestamps are
-RFC 3339 (`2006-01-02T15:04:05Z`); a never-expiring paste serializes
-`expires_at` as `null`. Sizes are integer bytes (`size_bytes`), not the
+RFC 3339 (`2006-01-02T15:04:05Z`). Sizes are integer bytes (`size_bytes`), not the
 human `2.4k` strings. The JSON is marshaled from a dedicated view shape,
 not the internal domain types, so the wire contract is stable across
 refactors.
@@ -2429,8 +2403,6 @@ stderr line):
     "name": "Acme prototype v3",
     "size_bytes": 1234,
     "kind": "html",
-    "expires_at": "2026-07-31T15:04:05Z",
-    "expires_in_seconds": 604800,
     "served_version": 3,
     "latest_version": 5,
     "pinned_version": 3
@@ -2440,8 +2412,6 @@ stderr line):
     "name": "",
     "size_bytes": 218000,
     "kind": "site",
-    "expires_at": "2026-07-29T09:00:00Z",
-    "expires_in_seconds": 2347200,
     "served_version": null,
     "latest_version": null,
     "pinned_version": null
@@ -2462,20 +2432,15 @@ Both are emitted because json mode prints only the array - the human
 footer never reaches a script - and a consumer cannot infer which figure
 it holds: `served_version` does not say how many versions are charged,
 since a deleted version leaves a paste billed for fewer than its number
-implies. Sites reuse the retention
-policy, so `expires_at` / `expires_in_seconds` carry the site's actual
-expiry (both `null` only under a no-expiry deploy, the same as a
-never-expiring paste).
-`expires_in_seconds` is `null` when `expires_at` is `null`.
+implies.
 
 `versions <slug> -o json` - an object that folds in the stderr footer
-(pin state + paste expiry) around the version array:
+(pin state) around the version array:
 
 ```json
 {
   "slug": "abc12345",
   "pinned_version": 0,
-  "expires_at": "2026-07-31T15:04:05Z",
   "versions": [
     { "version": 4, "created_at": "2026-06-05T15:01:00Z", "size_bytes": 1400, "deleted": false, "current": true },
     { "version": 3, "created_at": "2026-06-05T14:32:00Z", "size_bytes": 1200, "deleted": false, "current": false },
@@ -2528,7 +2493,7 @@ space-joined string, so a multi-word label arrives as several tokens and
 is rejoined; quoting is optional. Omitting the label clears it:
 `ssh hostthis.dev rename abc12345` -> `label cleared.`. (The empty-string
 form `""` cannot survive the ssh argv-join, so no-label is the invocable
-clear path.) Renaming does NOT reset the expiry clock - purely metadata.
+clear path.) Renaming is purely metadata.
 
 ### Get content (read back over ssh)
 ```
@@ -2567,7 +2532,7 @@ what the original upload returned.
 slug already grants read access at that URL - so any caller may `url` /
 `qr` any slug; there is nothing to leak that the URL itself doesn't
 already expose. The verbs DO verify the target **exists and is not
-expired**: a missing or expired slug returns the standard `not found`
+**: an unknown slug returns the standard `not found`
 on stderr and exits 4, the same shape as every other not-found, so the
 behavior is uniform across verbs. A slug that names a deployed static
 site resolves the same way (a site also has a URL).
@@ -2591,16 +2556,16 @@ first. The middle column carries a status marker:
   reused; the size column is `-` since no bytes exist anymore.
 - empty - non-current, non-deleted version (still occupies quota).
 
-Stderr footer carries the pin state plus the expiry:
+Stderr footer carries the pin state:
 
 ```
-unpinned - expires in 6d22h (2026-06-13 14:32 UTC)
+unpinned
 ```
 
 or when pinned:
 
 ```
-pinned to v1 - expires in 6d22h (2026-06-13 14:32 UTC)
+pinned to v1
 ```
 
 Pipe stdout cleanly (`| awk` etc.); footer lives on stderr.
@@ -2614,7 +2579,6 @@ Sets the URL to serve a specific version and makes it sticky:
 subsequent `update`s record new versions but do not change which one
 the URL serves until the user `unpin`s or `pin`s a different one.
 
-Pinning does NOT reset the expiry clock - only `update` does that.
 
 A freshly uploaded paste is *unpinned*: the URL always serves the
 latest version, and each `update` publishes immediately.
@@ -2690,7 +2654,7 @@ canonical user-facing reference and must stay in sync with this section, the
 README, and the landing page.
 
 ```
-Pipe a rendered file in, get a URL out. Pastes expire 30 days after last update.
+Pipe a rendered file in, get a URL out. Pastes persist indefinitely.
 
 UPLOAD
 
@@ -2783,7 +2747,7 @@ The sum of an identity's active pastes' COMPRESSED bytes (counting
 EVERY non-deleted version of an updated paste) cannot exceed
 `UserQuotaBytes` (100 MiB; not operator-configurable). "Identity" is
 the SHA256 fingerprint of the uploader's ssh public key. When pastes
-expire (30 days), get deleted, or have older versions explicitly
+get deleted, or have older versions explicitly
 deleted via `delete <slug> <ver>`, the cap frees up. Over-quota uploads
 error with `would exceed your 100 MiB total quota`.
 
@@ -2844,9 +2808,9 @@ quota); the storage layer never adds the bytes up itself. When a blob
 `Put` is rejected by the object store because the bucket is at its
 quota, the blob store surfaces the `ErrServiceFull` sentinel, and the
 upload / site-deploy services translate it into a graceful
-"service is at capacity; try again after the next expiry" response.
+"service is at capacity; try again later" response.
 Rooms hold no blobs, so a room write never produces `ErrServiceFull`;
-the system recovers as old pastes, sites, and rooms expire and the
+the system recovers as owners delete content and the
 sweep reclaims their bytes, freeing room under the quota.
 
 **Why this lives at the object store, not in the app.** hostthis
@@ -2892,7 +2856,7 @@ Otherwise the session is refused at startup with exit code 6 and the
 stderr line `too many new keys from this network today`.
 
 Storage is a `key_first_seen(identity, ip_subnet, first_seen_at)`
-table, swept by the same periodic worker that deletes expired
+table, pruned by the same periodic worker that GCs orphaned
 pastes - rows past the window are dropped to keep the table
 bounded.
 
@@ -2957,11 +2921,6 @@ forms and they are NOT the same:
 The boundary is inclusive on the allowed side: a total landing exactly on the
 cap is at the limit, not over it. A cap of zero or less means no limit.
 
-**Expiry is inclusive.** Content whose ExpiresAt equals the current instant is
-expired. The no-expiry policy is a far-future sentinel rather than a zero time,
-specifically so that a naive "has this passed" test cannot classify
-never-expiring content as expired and hand it to the sweep.
-
 ### Atomicity
 
 The per-identity quota check and the Sybil admit run inside a single
@@ -3000,7 +2959,6 @@ no half-applied state visible to readers."
   same-identity concurrency admits a BOUNDED overshoot (one in-flight
   upload), backstopped by the object-store bucket quota (see
   "Scan-derived quota" / "The correctness argument")
-- 30-day retention as the long-term release valve
 
 *Not bounded by the protocol* (operator-layer concerns):
 - *Multi-IP Sybil via residential-proxy fleets*. An attacker with 100
@@ -3305,7 +3263,7 @@ through four small Go interfaces declared in `internal/service`:
   `SetPinnedVersion`, `Unpin`, `AppendVersionWithQuotaCheck`,
   `ListVersions`, `GetVersion`, `DeleteVersion`, `CountByOwner`,
   `SumActiveBytesByOwner`, `OwnerFirstSeen`.
-- `SweepRepo` (sweep): `ExpiredPastes`, `DeleteExpired`,
+- `SweepRepo` (sweep):
   `ReferencedBlobSHAs`.
 - `KeyGateRepo` (keygate): `AdmitNewKey`, `DeleteFirstSeenOlderThan`,
   `SubnetSnapshot`, `SubnetsForIdentity`.
@@ -3334,7 +3292,7 @@ One sentinel is domain-owned without being universal:
 landed while this one was deciding what to do, leaving a decision that
 cannot be salvaged without re-reading. The operation applied NOTHING,
 which is what makes a retry safe, and the retry is the CALLER's: an
-interactive verb reports it and the user re-runs, the expiry sweep skips
+interactive verb reports it and the user re-runs, the sweep skips
 that reference and the next pass picks it up (its index entry is still
 standing, because a cascade that failed did not drop it). It lives in
 the domain because the sweep must recognise it without importing an
@@ -3362,7 +3320,7 @@ behaviors are expressed in terms of inputs and observable outputs:
   `AppendVersionWithQuotaCheck` reject (over-quota sentinel) when
   accepting the write would push the identity's active bytes above the
   per-identity cap. Active bytes are summed across every non-deleted
-  version of the identity's non-expired pastes. Quota is freed by
+  version of the identity's pastes. Quota is freed by
   `Delete` (removes the paste and all its versions) and by
   `DeleteVersion` (tombstones one version). Per-identity quotas are
   independent of each other; the durable total-bytes ceiling is a
@@ -3371,7 +3329,7 @@ behaviors are expressed in terms of inputs and observable outputs:
   counting tombstones so numbers are never reused. An unpinned paste's
   head rolls forward to the new version; a pinned paste keeps serving
   its pin. `AppendResult.NewVer` and `AppendResult.WasPinned` (pin
-  state before the append) are returned; both reset the retention
+  state before the append) are returned; both bump the
   clock.
 - **Pin / unpin.** `SetPinnedVersion` makes a version sticky and rolls
   the head to it; `Unpin` clears the pin and rolls the head back to the
@@ -3396,33 +3354,6 @@ behaviors are expressed in terms of inputs and observable outputs:
   regardless of who owns it. IDOR protection (a cross-owner read
   surfacing as not-found) lives in `Manage.requireOwner`. A backend
   must NOT add owner checks; doing so would change observable behavior.
-- **Expiry.** `ExpiredPastes(now)` returns one reference per paste whose
-  `expires_at` is at or before `now` (inclusive boundary): the slug plus,
-  on backends that keep a standalone expiry index (slatedb, shale), an
-  opaque reference to the exact index entry that surfaced it (empty on
-  backends whose scan reads the paste records themselves, like sqlite).
-  Not-yet-expired pastes are excluded and untouched. `DeleteExpired(ref)`
-  processes one reference: it deletes the paste record when it still
-  exists (the same full cascade as `Delete`) and removes the expiry-index
-  entry REGARDLESS of whether the paste record was still there, returning
-  whether a paste record was actually deleted. Removing the index entry
-  unconditionally is the load-bearing half of the contract: an entry
-  whose paste is already gone (e.g. legacy TTL-era state) would otherwise
-  resurface on every pass forever - the scan returns its slug, the
-  idempotent paste delete no-ops on the missing record, and nothing ever
-  touches the entry itself. One pass drains what it scans: a second scan
-  at the same `now` sees zero entries. The sweep counts only real paste
-  deletions (`DeleteExpired` returning true) in its deleted total - so
-  the abort-on-zero-refs data-loss guard below is not defeated by a tick
-  that merely cleaned orphaned index entries - and logs the orphaned
-  entries it cleaned as a separate count. (In dry-run the pass mutates
-  nothing, so its would-expire count is the entry count, an upper bound
-  on real deletions.) Static sites carry the same contract through
-  `SweepSites` (`ExpiredSites` / `DeleteExpiredSite` over the
-  `expiry_sites/` index); see "Static-site storage". Rooms carry it
-  through `SweepRooms` (`ExpiredRooms` / `DeleteExpiredRoom` over the
-  `roomexpiry/` index); see "Room storage on the slatedb (and shale)
-  backend".
 - **Sweep convergence guard (unreachable refs).** "One pass drains what
   it scans" holds only when the store the scan READS is the store the
   deletes WRITE. Real deployments have shown states where they diverge:
@@ -3473,10 +3404,9 @@ behaviors are expressed in terms of inputs and observable outputs:
   follow.
 - **Dry-run (observability).** The sweep has two modes, selected by the
   operator's disable flag, and a "disabled" sweep is NEVER a no-op. In
-  DRY-RUN mode it runs the full computation (which pastes/sites/rooms would
-  expire, which blobs are orphaned) and LOGS each would-be deletion, but
-  mutates nothing - no record deleted, no blob removed, no rate-limit row
-  pruned. In LIVE mode it performs the deletions. Both fail-closed guards
+  DRY-RUN mode it runs the full computation (which blobs are orphaned) and
+  LOGS each would-be deletion, but mutates nothing - no blob removed, no
+  rate-limit row pruned. In LIVE mode it performs the deletions. Both fail-closed guards
   apply in dry-run too: a dry run against a store with an undecodable
   record logs that the blob GC WOULD abort, surfacing the bad record
   without touching anything. Dry-run is how an operator earns confidence
@@ -3485,8 +3415,8 @@ behaviors are expressed in terms of inputs and observable outputs:
   third mode - the disable flag toggles dry-run vs live, and the safety net
   for a live over-deletion is the object store's versioning/soft-delete (a
   wrongly-removed blob is a recoverable prior version, not a hard loss).
-- **Owner stats.** `ListByOwner` returns the owner's active pastes
-  ordered soonest-to-expire first, with `LatestVersion` populated;
+- **Owner stats.** `ListByOwner` returns the owner's pastes ordered most
+  recently updated first, with `LatestVersion` populated;
   `CountByOwner` counts them; `SumActiveBytesByOwner` matches the quota
   math; `OwnerFirstSeen` is the earliest paste `created_at` (zero time
   when none).
@@ -3699,47 +3629,6 @@ enumerates every site exactly as `pastes/` enumerates every paste.
   site stops counting the instant it expires, the same read-time semantics
   the slatedb paste sum has (`conformCaps.ExpiryFreesQuotaAtReadTime =
   true`).
-
-#### Expiry + sweep -> KV mapping
-
-- **`ExpiredSites(now)`.** Prefix-scan `expiry_sites/`; for each
-  `expiry_sites/<ts>/<slug>` key, compare the timestamp segment and return
-  a reference (the `<slug>` plus the entry's full key as the opaque
-  IndexRef) when `ts <= now` (inclusive boundary). The site expiry timestamp
-  is a FIXED-WIDTH RFC3339 with a zero-padded 9-digit nanosecond fraction
-  (`2006-01-02T15:04:05.000000000Z07:00`), so a string compare on the key is
-  byte order == time order EXACTLY, including within a shared whole second.
-  This is NOT `time.RFC3339Nano`: that format drops trailing fractional
-  zeros (so `...00.5Z` sorts BEFORE `...00Z` because `.` < `Z`), which would
-  let a record be swept up to ~1s before its real `ExpiresAt`. The
-  fixed-width format is free here because sites have no prod data yet; the
-  pre-existing PASTE expiry index (`expiry/<rfc3339>/<slug>`) still uses
-  `time.RFC3339Nano` and carries the same latent sub-second sweep skew, but
-  it holds live prod data on slatedb so changing its key format is a
-  migration (re-keying every `expiry/` entry; a format flip alone would
-  orphan the old keys so those pastes would never expire). That migration is
-  a documented follow-up; until then the paste path keeps its current key
-  format unchanged.
-- **`DeleteExpiredSite(ref)`.** The sweep-side delete, mirroring the paste
-  `DeleteExpired`: when the `sites/<slug>` record still exists, run the
-  full owner-facing cascade (`Delete(slug)`: one transaction removing
-  `sites/<slug>`, `identity_sites/<id>/<slug>`, and the DERIVED
-  `expiry_sites/<ExpiresAt>/<slug>`), and then - in every case - remove
-  the exact OBSERVED index entry the scan surfaced (idempotent when the
-  cascade already removed it). Returns whether a site record was actually
-  deleted; only true results count into the sweep's deleted total (which
-  keeps the abort-on-zero-refs data-loss guard honest on a tick where
-  only sites expired), while an orphaned-entry cleanup is reported in the
-  cleaned count instead. `Delete(slug)` itself stays idempotent (a
-  missing row is a no-op) and remains the owner-facing removal path.
-- **`ReferencedSiteBlobSHAs()`.** Prefix-scan `sites/`, decode each
-  manifest, union every distinct `sha` it references. The sweep unions
-  this with the paste-side `ReferencedBlobSHAs` so a blob shared between a
-  site and a paste (or two sites) survives as long as ANY live record
-  references it. A site manifest references a blob unconditionally (a site
-  has no per-file tombstone), so a live site always contributes a non-empty
-  set when it holds files, which keeps the sweep's abort-on-zero-refs guard
-  honest.
 
 #### Shale reuses the layout
 
@@ -4159,62 +4048,6 @@ bounds only the blob-holding kinds (pastes + sites). The removed
 participated in alongside pastes and sites - no longer exists on any
 backend, so there is no cross-kind byte scan for a room PUT to run or to
 fold its bytes into.
-
-#### Expiry + sweep -> KV mapping; the fixed-width TTL timestamp
-
-- **`ExpiredRooms(now)`.** Prefix-scan `roomexpiry/`; for each
-  `roomexpiry/<ts>/<app-slug>/<uuid>` key, compare the timestamp segment
-  and return a reference (the (app-slug, uuid) pair plus the entry's full
-  key as the opaque `IndexRef`) when `ts <= now` (inclusive boundary), so
-  `DeleteExpiredRoom` can remove the EXACT entry the scan surfaced even
-  when the room record is already gone. The room expiry timestamp is a
-  **FIXED-WIDTH** RFC3339 with a
-  zero-padded 9-digit nanosecond fraction (`expirySiteTimeFormat`,
-  `2006-01-02T15:04:05.000000000Z07:00`), the SAME format the site expiry
-  index uses, so a string compare on the key is byte order == time order
-  EXACTLY, including within a shared whole second. This is NOT
-  `time.RFC3339Nano`: that variable-width format drops trailing fractional
-  zeros (so `...00.5Z` sorts BEFORE `...00Z` because `.` < `Z`), which would
-  let a room be swept up to ~1s before its real `ExpiresAt`. The room
-  expiry index is new, with no prod data, so it adopts the fixed-width
-  format from the start - the same lesson the site expiry index learned, not
-  repeated here. The `roomcreate/<app-slug>/<subnet>/<ts>/<uuid>` rate-limit
-  ledger uses the SAME fixed-width `<ts>` so a windowed `ts >= cutoff`
-  comparison is a correct lexical compare too. The **sqlite** backend's
-  `rooms.expires_at` column adopts the SAME fixed-width format
-  (`formatSiteExpiry`, matching its `sites.expires_at` column), and every
-  query that compares against it (`ExpiredRooms`) uses the fixed-width
-  operand, so the sweep's inclusive-boundary
-  sub-second ordering is correct on sqlite too - the `Rooms
-  /ExpirySubSecondOrdering` conformance subtest pins this identically across
-  all three backends. (sqlite has no standalone room-expiry index - the
-  scan reads the `rooms` table itself - so its references carry an empty
-  `IndexRef`.)
-- **`DeleteExpiredRoom(ref)`.** The sweep-side delete, mirroring the paste
-  `DeleteExpired` and site `DeleteExpiredSite`: when the `rooms/<app>/
-  <uuid>` record still exists, run the full cascade (`DeleteRoom(appSlug,
-  id)`: read the record for its `ExpiresAt`, then in one transaction
-  delete the room record, the DERIVED `roomexpiry/<ExpiresAt>/<app>/<uuid>`
-  index entry, and EVERY `roomkv/<app>/<uuid>/` value - the slatedb
-  analogue of the sqlite FK cascade), and then - in every case - remove
-  the exact OBSERVED index entry the scan surfaced (idempotent when the
-  cascade already removed it; a malformed or mismatched `IndexRef` is a
-  fail-closed error, never an arbitrary-key delete). Returns whether a
-  room record was actually deleted; only true results count into the
-  sweep's deleted total (which keeps the abort-on-zero-refs blob-GC guard
-  honest on a tick where only rooms expired - rooms hold no blobs, so they
-  never add to the keep-alive set, but a real room expiry is still a
-  "record expired this tick"), while an orphaned-entry cleanup joins the
-  cleaned count instead. `DeleteRoom` itself stays idempotent (a missing
-  room is a no-op) and remains the internal cascade; the sweep does not
-  call it directly.
-- **`PruneOldRoomCreates(cutoff)`.** Prefix-scan `roomcreate/`, delete every
-  marker whose `<ts>` (the second-to-last segment, before the trailing
-  disambiguator `<uuid>`) is before `cutoff` (`now - RoomCreateWindow`). Past
-  the window a ledger marker can never change a future rate-limit decision, so
-  the sweep drops it each tick to keep the family bounded - the same
-  discipline the key-gate prune (`DeleteFirstSeenOlderThan`) and the sqlite
-  `room_creates` prune use.
 
 #### Shale reuses the layout
 
@@ -5936,18 +5769,6 @@ so no separate base-URL var is needed.
 The purge token is the only long-lived credential hostthis needs for
 the CDN; it's narrowly scoped (zone-level cache-purge only) so leakage
 worst-case is "attacker can purge our cache (slowing us down briefly)".
-
-### Cache-vs-expiry timing
-
-| Scenario | What happens at the CDN |
-| --- | --- |
-| Owner runs `update` on a slug | Purge fires; readers see new content within ~30s globally |
-| Owner runs `delete` on a slug | Purge fires; URL returns 404 within ~30s globally |
-| Paste expires naturally (7d) | No purge; CDN serves cached version for up to max-age (1h) after origin starts 404'ing, then revalidates and updates cache to 404 |
-
-The natural-expiry case is acceptable lag for ephemeral content - a
-recently-expired paste continuing to be reachable for an extra hour
-is not a correctness issue.
 
 ### Switching CDN providers
 
