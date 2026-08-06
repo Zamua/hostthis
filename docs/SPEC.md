@@ -4937,6 +4937,19 @@ object-store ModTime is older than a generous grace (default one hour, which
 exceeds the longest stage->commit window so an in-flight upload's object is never
 swept). hostthis schedules it in the same periodic sweep loop, per node.
 
+**One reclaimer, selected at composition.** The two planes decide
+reachability by incompatible means: the detached store can only infer it from
+a global keep-set, the collocated plane reads it off a per-blob pointer. The
+sweep therefore holds ONE `BlobReclaimer` rather than two nullable hooks, so
+"both planes wired" and "neither wired" are not representable and no per-tick
+branch has to re-establish which one is live.
+
+The keep-set is passed as a FUNCTION, not a value. That is what lets the
+collocated plane skip it: resolving it is a cross-shard fan-out, and a plane
+that never consults it must not pay for it. It also means **the fan-out that
+acts on ABSENCE only ever runs on the detached plane** - a deploy with a
+collocated blob bucket never computes it at all.
+
 **Within-record byte dedup is deferred.** A blob is staged under a fresh random
 blob id each time, so an unchanged file re-staged on a redeploy (or a paste
 reverting to prior content) gets a NEW object and the old one is unbound + swept.

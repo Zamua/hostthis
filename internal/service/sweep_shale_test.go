@@ -54,17 +54,16 @@ type noopSweepRepo struct{}
 
 func (noopSweepRepo) ReferencedBlobSHAs() ([]string, error) { return nil, nil }
 
-// TestSweep_ShalePath_NoGlobalGC: with Blobs nil, Once returns before any
-// WalkBlobs/Remove.
+// The collocated plane reports no global GC: the cluster owns reachability,
+// so there is nothing for a content-addressed walk to reclaim.
 func TestSweep_ShalePath_NoGlobalGC(t *testing.T) {
 	orphans := &recordingOrphanSweeper{}
 	sweep := &service.Sweep{
-		Repo:        noopSweepRepo{},
-		Blobs:       nil, // shale path: the cluster owns the blobs; no global GC
-		BlobOrphans: orphans,
-		Interval:    time.Hour,
-		Logger:      log.New(io.Discard, "", 0),
-		Now:         func() time.Time { return time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC) },
+		Repo:     noopSweepRepo{},
+		Blobs:    service.CollocatedReclaimer{Sweeper: orphans},
+		Interval: time.Hour,
+		Logger:   log.New(io.Discard, "", 0),
+		Now:      func() time.Time { return time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC) },
 	}
 
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
@@ -83,12 +82,11 @@ func TestSweep_ShalePath_TickRunsOrphanSweep(t *testing.T) {
 	orphans := &recordingOrphanSweeper{}
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sweep := &service.Sweep{
-		Repo:        noopSweepRepo{},
-		Blobs:       nil,
-		BlobOrphans: orphans,
-		Interval:    time.Hour,
-		Logger:      log.New(io.Discard, "", 0),
-		Now:         func() time.Time { return now },
+		Repo:     noopSweepRepo{},
+		Blobs:    service.CollocatedReclaimer{Sweeper: orphans},
+		Interval: time.Hour,
+		Logger:   log.New(io.Discard, "", 0),
+		Now:      func() time.Time { return now },
 	}
 
 	// Run does an immediate tick then blocks on the ticker; cancelling first
@@ -108,18 +106,16 @@ func TestSweep_ShalePath_TickRunsOrphanSweep(t *testing.T) {
 	}
 }
 
-// TestSweep_ShalePath_HonorsConfiguredGrace: a non-zero OrphanGrace is threaded
-// to SweepBlobOrphans verbatim (not overridden by the default).
+// A non-zero Grace is threaded to SweepBlobOrphans verbatim, not overridden by
+// the default.
 func TestSweep_ShalePath_HonorsConfiguredGrace(t *testing.T) {
 	orphans := &recordingOrphanSweeper{}
 	sweep := &service.Sweep{
-		Repo:        noopSweepRepo{},
-		Blobs:       nil,
-		BlobOrphans: orphans,
-		OrphanGrace: 3 * time.Hour,
-		Interval:    time.Hour,
-		Logger:      log.New(io.Discard, "", 0),
-		Now:         func() time.Time { return time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC) },
+		Repo:     noopSweepRepo{},
+		Blobs:    service.CollocatedReclaimer{Sweeper: orphans, Grace: 3 * time.Hour},
+		Interval: time.Hour,
+		Logger:   log.New(io.Discard, "", 0),
+		Now:      func() time.Time { return time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC) },
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -134,20 +130,18 @@ func TestSweep_ShalePath_HonorsConfiguredGrace(t *testing.T) {
 	}
 }
 
-// TestSweep_StandalonePath_NoOrphanSweep: the standalone path (Blobs set,
-// BlobOrphans nil) runs the global GC and never the orphan sweep. The two GC
-// mechanisms stay on their own paths.
+// Selecting the detached plane cannot also select the collocated one: one
+// field holds the reclaimer, so the orphan sweep is unreachable from here.
 func TestSweep_StandalonePath_NoOrphanSweep(t *testing.T) {
 	orphans := &recordingOrphanSweeper{}
 	blobs := &recordingBlobs{}
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sweep := &service.Sweep{
-		Repo:        noopSweepRepo{},
-		Blobs:       blobs, // standalone path: the global content-addressed GC
-		BlobOrphans: nil,   // no orphan sweep on the standalone path
-		Interval:    time.Hour,
-		Logger:      log.New(io.Discard, "", 0),
-		Now:         func() time.Time { return now },
+		Repo:     noopSweepRepo{},
+		Blobs:    service.DetachedStoreReclaimer{Blobs: blobs},
+		Interval: time.Hour,
+		Logger:   log.New(io.Discard, "", 0),
+		Now:      func() time.Time { return now },
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

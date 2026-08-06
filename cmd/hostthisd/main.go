@@ -166,12 +166,11 @@ func main() {
 	manageSvc.KeyGate = keyGate
 	sweepSvc := service.NewSweep(pasteRepo, blobsSweep, logger)
 	// On the transactional shale-blob path the cluster owns the blobs: a delete
-	// unbinds the pointer inside the metadata-delete transaction, so the global
-	// content-addressed GC over the detached store is disabled (Blobs=nil) and
-	// SweepOrphans reclaims orphan bytes instead.
+	// unbinds the pointer inside the metadata-delete transaction, so there is no
+	// global content-addressed GC to run and the collocated plane's reclaimer
+	// takes over. Assigning the one Blobs field is what swaps planes.
 	if metadata.BlobOrphanSweeper != nil {
-		sweepSvc.Blobs = nil
-		sweepSvc.BlobOrphans = metadata.BlobOrphanSweeper
+		sweepSvc.Blobs = service.CollocatedReclaimer{Sweeper: metadata.BlobOrphanSweeper}
 		logger.Printf("sweep: shale-blob path - global content-addressed blob GC disabled; SweepOrphans reclaims staged-but-unbound objects (grace %s)", service.DefaultOrphanGrace)
 	}
 	if siteRepo != nil {

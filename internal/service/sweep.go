@@ -49,40 +49,34 @@ type SweepRooms interface {
 // "Persistence"). What remains is garbage collection of bytes and of rate-limit
 // bookkeeping, neither of which is reachable by any request.
 type Sweep struct {
-	Repo  SweepRepo
-	Blobs SweepBlobs // optional; nil on the shale-blob path (see BlobOrphans)
-	Sites SweepSites // optional; nil omits site refs from the keep-set
-	Rooms SweepRooms // optional; nil disables the room-create prune
-	// BlobOrphans is the shale-blob path's orphan-bytes reclaimer, running an
-	// age-gated, mounted-unit-local pass per tick. Exactly one of BlobOrphans
-	// and Blobs is set: the shale-blob path has no whole-store
-	// content-addressed GC to run, the standalone path has no staging step.
-	BlobOrphans BlobOrphanSweeper
-	// OrphanGrace is the age a staged-but-unbound blob object must exceed before
-	// the orphan sweep reclaims it. It MUST exceed the longest stage-to-commit
-	// window, or an in-flight upload's object is swept. Zero falls back to
-	// DefaultOrphanGrace.
-	OrphanGrace time.Duration
-	Interval    time.Duration
-	Logger      *log.Logger
-	Now         func() time.Time
+	Repo SweepRepo
+	// Blobs is the blob plane's reclaimer. Which plane is in play is decided at
+	// composition (see BlobReclaimer); nil disables blob GC entirely.
+	Blobs    BlobReclaimer
+	Sites    SweepSites // optional; nil omits site refs from the keep-set
+	Rooms    SweepRooms // optional; nil disables the room-create prune
+	Interval time.Duration
+	Logger   *log.Logger
+	Now      func() time.Time
 	// DryRun makes the sweep compute and log what it would GC while mutating
 	// nothing, so operators get visibility before trusting a live sweep. A
 	// "disabled" sweep runs in this mode rather than being a silent no-op.
 	DryRun bool
 }
 
-// DefaultOrphanGrace must exceed the longest stage-to-commit window.
-const DefaultOrphanGrace = time.Hour
-
+// NewSweep wires the detached-store plane, the default for dev and for any
+// deploy whose blobs are not shale-collocated.
 func NewSweep(repo SweepRepo, blobs SweepBlobs, logger *log.Logger) *Sweep {
-	return &Sweep{
+	s := &Sweep{
 		Repo:     repo,
-		Blobs:    blobs,
 		Interval: time.Hour,
 		Logger:   logger,
 		Now:      time.Now,
 	}
+	if blobs != nil {
+		s.Blobs = DetachedStoreReclaimer{Blobs: blobs}
+	}
+	return s
 }
 
 func (s *Sweep) Run(ctx context.Context) {
@@ -106,23 +100,12 @@ func (s *Sweep) tick() {
 		s.Logger.Printf("sweep: %v", err)
 	}
 	var prunedCreates int
-	if !s.DryRun {
-		if s.Rooms != nil {
-			n, err := s.Rooms.PruneOldRoomCreates(now.Add(-domain.RoomCreateWindow))
-			if err != nil {
-				s.Logger.Printf("sweep: prune room_creates: %v", err)
-			}
-			prunedCreates = n
+	if !s.DryRun && s.Rooms != nil {
+		n, err := s.Rooms.PruneOldRoomCreates(now.Add(-domain.RoomCreateWindow))
+		if err != nil {
+			s.Logger.Printf("sweep: prune room_creates: %v", err)
 		}
-		if s.BlobOrphans != nil {
-			grace := s.OrphanGrace
-			if grace <= 0 {
-				grace = DefaultOrphanGrace
-			}
-			if err := s.BlobOrphans.SweepBlobOrphans(context.Background(), now, grace); err != nil {
-				s.Logger.Printf("sweep: orphan blob sweep: %v", err)
-			}
-		}
+		prunedCreates = n
 	}
 	if s.DryRun {
 		s.Logger.Printf("sweep[dry-run]: WOULD gc %d blob(s); deleted nothing (room-create prune skipped). Set HOSTTHIS_SWEEP_DISABLED=false to enable live cleanup.", blobCount)
@@ -138,58 +121,34 @@ func (s *Sweep) Once(now time.Time) (blobsGCd int, err error) {
 	if s.Blobs == nil {
 		return 0, nil
 	}
+	return s.Blobs.ReclaimBlobs(context.Background(), ReclaimRequest{
+		Now:     now,
+		DryRun:  s.DryRun,
+		Logger:  s.Logger,
+		KeepSet: s.keepSet,
+	})
+}
 
+// keepSet unions the paste-side and site-side references. It is resolved lazily
+// by the reclaimer, so a plane that does not need it never triggers the
+// cross-shard scan.
+func (s *Sweep) keepSet() (map[string]struct{}, error) {
 	refs, err := s.Repo.ReferencedBlobSHAs()
 	if err != nil {
-		return 0, fmt.Errorf("referenced shas: %w", err)
+		return nil, fmt.Errorf("referenced shas: %w", err)
 	}
-	refSet := make(map[string]struct{}, len(refs))
+	set := make(map[string]struct{}, len(refs))
 	for _, sha := range refs {
-		refSet[sha] = struct{}{}
+		set[sha] = struct{}{}
 	}
 	if s.Sites != nil {
 		siteRefs, err := s.Sites.ReferencedSiteBlobSHAs()
 		if err != nil {
-			return 0, fmt.Errorf("referenced site shas: %w", err)
+			return nil, fmt.Errorf("referenced site shas: %w", err)
 		}
 		for _, sha := range siteRefs {
-			refSet[sha] = struct{}{}
+			set[sha] = struct{}{}
 		}
 	}
-
-	// An empty keep-set alongside a non-empty store is a repo bug, not a store
-	// full of garbage: this pass deletes on ABSENCE, so believing an empty set
-	// deletes everything. Nothing is ever removed on the strength of a set that
-	// came back empty.
-	if len(refSet) == 0 {
-		blobCount := 0
-		if walkErr := s.Blobs.WalkBlobs(func(sha string) error { blobCount++; return nil }); walkErr != nil {
-			return 0, fmt.Errorf("walk blobs (guard): %w", walkErr)
-		}
-		if blobCount > 0 {
-			s.Logger.Printf("sweep: ABORTING blob GC - repo reports 0 referenced shas but blob store has %d objects; suspected repo bug. No blobs deleted.", blobCount)
-			return 0, nil
-		}
-	}
-
-	walkErr := s.Blobs.WalkBlobs(func(sha string) error {
-		if _, ok := refSet[sha]; ok {
-			return nil
-		}
-		if s.DryRun {
-			s.Logger.Printf("sweep[dry-run]: would gc orphan blob %q", sha)
-			blobsGCd++
-			return nil
-		}
-		if err := s.Blobs.Remove(sha); err != nil {
-			s.Logger.Printf("sweep: remove blob %q: %v", sha, err)
-			return nil // one failed file must not abort the walk
-		}
-		blobsGCd++
-		return nil
-	})
-	if walkErr != nil {
-		return blobsGCd, fmt.Errorf("walk blobs: %w", walkErr)
-	}
-	return blobsGCd, nil
+	return set, nil
 }
