@@ -181,7 +181,7 @@ func runCmdWithPty(t *testing.T, cli *xssh.Client, cmd string) (string, string, 
 func TestUpload_Characterization(t *testing.T) {
 	s := startStack(t)
 
-	t.Run("FreshKey_HTML_URLAndExpiryNote", func(t *testing.T) {
+	t.Run("FreshKey_HTML_URLAndQR", func(t *testing.T) {
 		stdout, stderr, exit := s.run("", []byte("<!doctype html><h1>hello</h1>"))
 		if exit != 0 {
 			t.Fatalf("exit: %d (stderr: %q)", exit, stderr)
@@ -202,21 +202,13 @@ func TestUpload_Characterization(t *testing.T) {
 		if _, err := domain.ParseSlug(slug); err != nil {
 			t.Fatalf("server returned malformed slug %q: %v", slug, err)
 		}
-		// stderr leads with the "expires in 30 days" line, then the URL's QR
-		// code, rendered on every create.
-		firstLine := stderr
-		if before, _, ok := strings.Cut(stderr, "\n"); ok {
-			firstLine = before
-		}
-		if firstLine != "expires in 30 days" {
-			t.Fatalf("stderr should start with 'expires in 30 days', got %q", stderr)
-		}
+		// stderr carries the URL's QR code, rendered on every create.
 		if !strings.ContainsAny(stderr, "█▀▄") {
 			t.Fatalf("stderr should contain a rendered QR code, got %q", stderr)
 		}
 	})
 
-	t.Run("FreshKey_Markdown_URLAndExpiryNote", func(t *testing.T) {
+	t.Run("FreshKey_Markdown_URLAndQR", func(t *testing.T) {
 		stdout, stderr, exit := s.run("", []byte("# hello\n\nworld"))
 		if exit != 0 {
 			t.Fatalf("exit: %d (stderr: %q)", exit, stderr)
@@ -224,8 +216,8 @@ func TestUpload_Characterization(t *testing.T) {
 		if !strings.HasPrefix(strings.TrimSpace(stdout), s.httpURL+"/p/") {
 			t.Fatalf("expected URL, got %q", stdout)
 		}
-		if !strings.Contains(stderr, "expires in 30 days") {
-			t.Fatalf("expected expiry note, got %q", stderr)
+		if !strings.ContainsAny(stderr, "█▀▄") {
+			t.Fatalf("expected a QR code on stderr, got %q", stderr)
 		}
 	})
 
@@ -237,9 +229,9 @@ func TestUpload_Characterization(t *testing.T) {
 		if !strings.HasPrefix(strings.TrimSpace(stdout), s.httpURL+"/p/") {
 			t.Fatalf("expected URL, got %q", stdout)
 		}
-		// Pinned stderr format: `"demo". expires in 30 days`.
-		if !strings.Contains(stderr, `"demo". expires in 30 days`) {
-			t.Fatalf(`expected '"demo". expires in 30 days', got %q`, stderr)
+		// Pinned stderr format: `"demo".`
+		if !strings.Contains(stderr, `"demo".`) {
+			t.Fatalf(`expected '"demo".' on stderr, got %q`, stderr)
 		}
 	})
 
@@ -286,9 +278,9 @@ func TestUpdate_Characterization(t *testing.T) {
 		if !strings.HasPrefix(strings.TrimSpace(stdout2), s.httpURL+"/p/") {
 			t.Fatalf("expected URL on stdout, got %q", stdout2)
 		}
-		// Pinned update stderr line: "v2 saved. expires in 30 days".
-		if !strings.Contains(stderr2, "v2 saved. expires in 30 days") {
-			t.Fatalf("expected 'v2 saved. expires in 30 days' on stderr, got %q", stderr2)
+		// Pinned update stderr line: "v2 saved."
+		if !strings.Contains(stderr2, "v2 saved.") {
+			t.Fatalf("expected 'v2 saved.' on stderr, got %q", stderr2)
 		}
 	})
 
@@ -345,17 +337,17 @@ func TestList_Characterization(t *testing.T) {
 		}
 		// Pinned header columns. Output is space-padded, so match on the field
 		// tokens rather than a literal tab-joined string.
-		want := []string{"SLUG", "NAME", "SIZE", "KIND", "EXPIRES_IN", "VERS"}
+		want := []string{"SLUG", "NAME", "SIZE", "KIND", "VERS"}
 		if got := strings.Fields(lines[0]); !reflect.DeepEqual(got, want) {
 			t.Fatalf("list header drift:\n got: %v\nwant: %v", got, want)
 		}
-		// Each row has the header's 6 whitespace-separated columns. These
+		// Each row has the header's 5 whitespace-separated columns. These
 		// fixtures use single-word names and a bare v1 VERS, so field
 		// splitting is unambiguous.
 		for i, ln := range lines[1:] {
 			cols := strings.Fields(ln)
-			if len(cols) != 6 {
-				t.Fatalf("row %d has %d cols, want 6: %q", i+1, len(cols), ln)
+			if len(cols) != len(want) {
+				t.Fatalf("row %d has %d cols, want %d: %q", i+1, len(cols), len(want), ln)
 			}
 		}
 	})
@@ -641,12 +633,9 @@ func TestVersions_Characterization(t *testing.T) {
 		if cols[1] != "current" {
 			t.Fatalf("expected 'current' marker on latest unpinned row, got %q", cols[1])
 		}
-		// The stderr footer carries 'unpinned' + 'expires in'.
+		// The stderr footer carries the pin state.
 		if !strings.Contains(stderr, "unpinned") {
 			t.Fatalf("expected 'unpinned' on footer, got %q", stderr)
-		}
-		if !strings.Contains(stderr, "expires in") {
-			t.Fatalf("expected 'expires in' on footer, got %q", stderr)
 		}
 	})
 
@@ -871,7 +860,7 @@ func TestHelp_Characterization(t *testing.T) {
 // with no PTY and apex "paste.test". emitHelp's no-PTY path uses fmt.Fprintln,
 // which appends a single trailing "\n", so the golden ends with one LF after
 // the closing period.
-const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pastes expire 30 days after last update.\n" +
+const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pastes persist indefinitely.\n" +
 	"\n" +
 	"UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;\n" +
 	"         a QR code of the URL also prints to stderr on success)\n" +

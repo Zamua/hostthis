@@ -228,14 +228,6 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	now := s.nowOrTime()
-	if domain.IsExpired(p.ExpiresAt, now) {
-		// Expired but not yet swept: 404 rather than serve past the
-		// retention window.
-		http.NotFound(w, r)
-		return
-	}
-
 	// Lifecycle status gate (docs/SPEC.md "Paste lifecycle status"). A pending
 	// paste's blob has not landed yet, so it gets a self-refreshing loading
 	// page; only a ready paste reaches the content serve below.
@@ -443,14 +435,6 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 		// the paste path tries next and surfaces its own 404 or 500.
 		return false
 	}
-	now := s.nowOrTime()
-	if domain.IsExpired(site.ExpiresAt, now) {
-		// The slug is owned here, so an expired site 404s rather than falling
-		// through to the paste path.
-		http.NotFound(w, r)
-		return true
-	}
-
 	// SPA fallback: a manifest miss that looks like a client-side ROUTE (no
 	// extension, or ".html") serves the site's root index.html with a 200 so
 	// the SPA's JS loads and routes; a miss that looks like a static ASSET

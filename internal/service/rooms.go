@@ -25,7 +25,7 @@ type RoomRepo interface {
 	// late-join splice contract rides this fence.
 	ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error)
 	// PutValue writes one value, enforcing the per-room + per-app caps and
-	// resetting the retention clock, and returns the mutation's assigned
+	// bumping the room's clock, and returns the mutation's assigned
 	// per-room sequence: dense, +1 per committed mutation, assigned inside the
 	// same transaction that commits the value (SPEC "The per-room sequence:
 	// assignment at commit"). domain.ErrNotFound if the room is gone,
@@ -133,7 +133,6 @@ func (s *Rooms) Create(appSlug domain.Slug, subnet string) (domain.Room, error) 
 			ID:        domain.NewRoomID(),
 			CreatedAt: now,
 			UpdatedAt: now,
-			ExpiresAt: now.Add(domain.RoomRetentionWindow),
 		}
 		err := s.Repo.CreateRoom(room, subnet, s.PerAppByteCap, now)
 		switch {
@@ -199,7 +198,7 @@ func (s *Rooms) Put(appSlug domain.Slug, id domain.RoomID, key string, val []byt
 	}
 }
 
-// Delete removes key (idempotent) and resets the room's retention clock,
+// Delete removes key (idempotent) and bumps the room's clock,
 // returning the assigned per-room sequence. An absent-key delete still commits
 // and so still assigns one: a seq bump with no mirror frame would read as a
 // permanent hole to a relay subscriber. ErrRoomNotFound only when the ROOM does

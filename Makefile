@@ -97,6 +97,17 @@ dev-minio-down:
 # $HOME/.local/lib but is overridable for a different install location.
 # Assumes dev-minio-up has already been run (it provisions both buckets).
 SLATEDB_LIB_DIR ?= $(HOME)/.local/lib
+# Build and test against the go.mod PINS, ignoring any local go.work.
+#
+# The workspace redirects shale to an on-disk checkout, so an ordinary `make
+# test` validates whatever that tree happens to be - not the version a release
+# image is built from. CI never sees this (go.work is gitignored, so a fresh
+# checkout has none), which is why the pinned combination stayed correct while
+# local runs quietly diverged. This target is how to get CI's answer locally.
+test-pinned:
+	GOWORK=off go build ./...
+	GOWORK=off go test ./...
+
 test-conformance-kv:
 	CGO_ENABLED=1 \
 	CGO_LDFLAGS="-L$(SLATEDB_LIB_DIR)" \

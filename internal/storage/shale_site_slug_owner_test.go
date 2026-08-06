@@ -48,7 +48,6 @@ func slugOwnerSite(slug, owner string) domain.Site {
 		Manifest:  man,
 		CreatedAt: slugOwnerTestNow,
 		UpdatedAt: slugOwnerTestNow,
-		ExpiresAt: slugOwnerTestNow.Add(domain.DefaultRetentionWindow),
 	}
 }
 
@@ -170,7 +169,6 @@ func TestShaleSite_SlugOwnerKeptForCommittedRecord(t *testing.T) {
 		Size:       32,
 		CreatedAt:  slugOwnerTestNow,
 		UpdatedAt:  slugOwnerTestNow,
-		ExpiresAt:  slugOwnerTestNow.Add(domain.DefaultRetentionWindow),
 	}
 	if err := repo.InsertWithQuotaCheck(ctx, p, 0, slugOwnerTestNow); err != nil {
 		t.Fatalf("insert paste: %v", err)

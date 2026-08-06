@@ -56,13 +56,13 @@ func TestGuard_DeployBombStoresNothing(t *testing.T) {
 		t.Fatalf("bomb deploy: got %v, want ErrOverQuota", err)
 	}
 
-	// The db is fresh, so any referenced SHA means a site row was persisted.
-	refs, err := sites.ReferencedSiteBlobSHAs()
+	// The db is fresh, so any listed site means a row was persisted.
+	rows, err := sites.ListSitesByOwner(owner, d.Now().UTC())
 	if err != nil {
-		t.Fatalf("referenced site shas: %v", err)
+		t.Fatalf("list sites: %v", err)
 	}
-	if len(refs) != 0 {
-		t.Fatalf("bomb left site rows behind: %v", refs)
+	if len(rows) != 0 {
+		t.Fatalf("bomb left site rows behind: %v", rows)
 	}
 
 	// Zero bytes charged: the abort never crossed the persistence boundary, so
@@ -97,12 +97,12 @@ func TestGuard_DeployTraversalStoresNothing(t *testing.T) {
 	if !errors.Is(err, domain.ErrUnsafeArchive) {
 		t.Fatalf("traversal deploy: got %v, want ErrUnsafeArchive", err)
 	}
-	refs, err := sites.ReferencedSiteBlobSHAs()
+	rows, err := sites.ListSitesByOwner("key:test", d.Now().UTC())
 	if err != nil {
-		t.Fatalf("referenced site shas: %v", err)
+		t.Fatalf("list sites: %v", err)
 	}
-	if len(refs) != 0 {
-		t.Fatalf("traversal left site rows behind: %v", refs)
+	if len(rows) != 0 {
+		t.Fatalf("traversal left site rows behind: %v", rows)
 	}
 }
 
@@ -126,12 +126,12 @@ func TestGuard_DeployManifestSizeCapStoresNothing(t *testing.T) {
 	if !errors.Is(err, domain.ErrTooManyFiles) {
 		t.Fatalf("manifest cap deploy: got %v, want ErrTooManyFiles", err)
 	}
-	refs, err := sites.ReferencedSiteBlobSHAs()
+	rows, err := sites.ListSitesByOwner("key:test", d.Now().UTC())
 	if err != nil {
-		t.Fatalf("referenced site shas: %v", err)
+		t.Fatalf("list sites: %v", err)
 	}
-	if len(refs) != 0 {
-		t.Fatalf("manifest-cap deploy left site rows behind: %v", refs)
+	if len(rows) != 0 {
+		t.Fatalf("manifest-cap deploy left site rows behind: %v", rows)
 	}
 }
 

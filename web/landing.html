@@ -100,7 +100,7 @@ server; verb commands don&rsquo;t need it.</p>
 <div class="indent">
 <p>Publishes HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV or
 JSON document, a profile as a flame graph, structured logs, or plain text
-with linkable lines, {{RETENTION}} at a random subdomain.
+with linkable lines, at a random subdomain.
 One ssh pipe, no signup, no install. Identity is your ssh public key: anyone with
 a different key can read the URL but cannot update, rename, pin, or delete the
 paste.</p>
@@ -122,10 +122,10 @@ any rendered paste's URL for the raw source.</p>
   options.</dd>
 
   <dt>cat <em>file</em> | ssh -T hostthis.dev <em>slug</em></dt>
-  <dd>replace <em>slug</em>&rsquo;s content; resets the retention clock</dd>
+  <dd>replace <em>slug</em>&rsquo;s content; the URL stays the same</dd>
 
   <dt>ssh hostthis.dev <strong>list</strong></dt>
-  <dd>active pastes, soonest to expire first</dd>
+  <dd>your pastes, most recently updated first</dd>
 
   <dt>ssh hostthis.dev <strong>get</strong> <em>slug</em></dt>
   <dd>print content to stdout</dd>
@@ -194,8 +194,8 @@ to other clients and never stored, for ephemeral motion.</p>
 frames embed each value as JSON when it parses as JSON - a value you PUT as a JSON
 object comes back as a nested object, not a quoted string - and as a JSON string
 otherwise. Reading a single key returns the raw bytes.</p>
-<p>Limits: 256 KiB and 256 keys per room; 64 MiB per app; a room expires 30 days
-after its last write. Deployments without a room store return 404.</p>
+<p>Limits: 256 KiB and 256 keys per room; 64 MiB per app. Deployments without a
+room store return 404.</p>
 </div>
 
 <h2>Limits</h2>
@@ -206,8 +206,7 @@ ceiling is typically 50-100 MiB.</p>
 
 <p>Pastes are HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV or
 JSON document, folded stacks as a flame graph, NDJSON logs, or plain text;
-sites are a gzip-tar archive.
-Kept {{RETENTION}} after the last update.</p>
+sites are a gzip-tar archive. Pastes and sites persist indefinitely.</p>
 </div>
 
 <h2>Exit Status</h2>

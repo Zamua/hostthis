@@ -28,7 +28,6 @@ func TestUnpinSkipsTombstonedVersion(t *testing.T) {
 		Size:       10,
 		CreatedAt:  testNow,
 		UpdatedAt:  testNow,
-		ExpiresAt:  testNow.Add(domain.DefaultRetentionWindow),
 	}
 	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, testNow); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -80,7 +79,6 @@ func TestUnpinAllVersionsTombstoned(t *testing.T) {
 		Size:       10,
 		CreatedAt:  testNow,
 		UpdatedAt:  testNow,
-		ExpiresAt:  testNow.Add(domain.DefaultRetentionWindow),
 	}
 	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, testNow); err != nil {
 		t.Fatalf("insert: %v", err)

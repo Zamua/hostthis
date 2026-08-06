@@ -105,16 +105,13 @@ func writeJSON(w io.Writer, v any) error {
 
 // listItemView is one row of `list -o json`: a text paste OR a static site,
 // discriminated by Kind ("site" for sites). The version fields are *int so an
-// unversioned site serializes them as null. Expiry fields are null for a
-// never-expiring item.
+// unversioned site serializes them as null.
 type listItemView struct {
-	Slug             string  `json:"slug"`
-	Name             string  `json:"name"` // "" when unset (not the "-" table sentinel)
-	SizeBytes        int     `json:"size_bytes"`
-	Kind             string  `json:"kind"`               // html/markdown/diff, or "site"
-	ExpiresAt        *string `json:"expires_at"`         // RFC3339, null when never-expires
-	ExpiresInSeconds *int64  `json:"expires_in_seconds"` // null when never-expires
-	ServedVersion    *int    `json:"served_version"`     // null for sites
+	Slug          string `json:"slug"`
+	Name          string `json:"name"` // "" when unset (not the "-" table sentinel)
+	SizeBytes     int    `json:"size_bytes"`
+	Kind          string `json:"kind"`           // html/markdown/diff, or "site"
+	ServedVersion *int   `json:"served_version"` // null for sites
 	// ServedSizeBytes is the bytes of the version being SERVED, where SizeBytes
 	// is every live version (what the quota charges). Null for a site, which
 	// has no versions. Both are given so a consumer never has to infer which
@@ -126,62 +123,56 @@ type listItemView struct {
 	multiVersion  bool
 	LatestVersion *int `json:"latest_version"` // null for sites
 	PinnedVersion *int `json:"pinned_version"` // null for sites; 0 when unpinned
-
-	expiresAt time.Time // raw expiry for merge-sort; not serialized
+	// updatedAt orders the list. Unexported: a sort key, not output.
+	updatedAt time.Time
 }
 
-func newPasteListItem(p domain.Paste, now time.Time) listItemView {
+func newPasteListItem(p domain.Paste) listItemView {
 	servedSize := p.Size
-	at, in := expiryFields(p.ExpiresAt, now)
 	served := servedVersion(p.PinnedVersion, p.LatestVersion)
 	latest := p.LatestVersion
 	pinned := p.PinnedVersion
 	return listItemView{
-		Slug:             string(p.Slug),
-		Name:             p.Name,
-		SizeBytes:        pasteStoredBytes(p),
-		ServedSizeBytes:  &servedSize,
-		multiVersion:     pasteStoredBytes(p) > p.Size,
-		Kind:             string(p.Kind),
-		ExpiresAt:        at,
-		ExpiresInSeconds: in,
-		ServedVersion:    &served,
-		LatestVersion:    &latest,
-		PinnedVersion:    &pinned,
-		expiresAt:        p.ExpiresAt,
+		updatedAt:       p.UpdatedAt,
+		Slug:            string(p.Slug),
+		Name:            p.Name,
+		SizeBytes:       pasteStoredBytes(p),
+		ServedSizeBytes: &servedSize,
+		multiVersion:    pasteStoredBytes(p) > p.Size,
+		Kind:            string(p.Kind),
+		ServedVersion:   &served,
+		LatestVersion:   &latest,
+		PinnedVersion:   &pinned,
 	}
 }
 
 // newSiteListItem maps a domain.Site to a list item. Sites have no label and
 // no versions; SizeBytes is what the quota charged, so a list sums to the
 // figure whoami reports.
-func newSiteListItem(s domain.Site, now time.Time) listItemView {
-	at, in := expiryFields(s.ExpiresAt, now)
+func newSiteListItem(s domain.Site) listItemView {
 	return listItemView{
-		Slug:             string(s.Slug),
-		Name:             "",
-		SizeBytes:        s.StoredBytes,
-		Kind:             "site",
-		ExpiresAt:        at,
-		ExpiresInSeconds: in,
+		updatedAt: s.UpdatedAt,
+		Slug:      string(s.Slug),
+		Name:      "",
+		SizeBytes: s.StoredBytes,
+		Kind:      "site",
 		// version fields nil: sites are not versioned
-		expiresAt: s.ExpiresAt,
 	}
 }
 
-// newListView merges pastes + sites into one slice sorted by expiry ascending,
-// so never-expiring items sort last. Guaranteed non-nil so json renders `[]`
-// rather than `null` when the owner has no active content.
-func newListView(pastes []domain.Paste, sites []domain.Site, now time.Time) []listItemView {
+// newListView merges pastes + sites into one slice, most recently updated
+// first. Guaranteed non-nil so json renders `[]` rather than `null` when the
+// owner has nothing.
+func newListView(pastes []domain.Paste, sites []domain.Site) []listItemView {
 	views := make([]listItemView, 0, len(pastes)+len(sites))
 	for _, p := range pastes {
-		views = append(views, newPasteListItem(p, now))
+		views = append(views, newPasteListItem(p))
 	}
 	for _, s := range sites {
-		views = append(views, newSiteListItem(s, now))
+		views = append(views, newSiteListItem(s))
 	}
 	sort.SliceStable(views, func(i, j int) bool {
-		return views[i].expiresAt.Before(views[j].expiresAt)
+		return views[i].updatedAt.After(views[j].updatedAt)
 	})
 	return views
 }
@@ -235,11 +226,10 @@ func versCol(v listItemView) string {
 }
 
 // versionsView is the `versions <slug> -o json` document. It folds the stderr
-// footer (pin state + paste expiry) into the object around the version array.
+// footer (pin state) into the object around the version array.
 type versionsView struct {
 	Slug          string        `json:"slug"`
 	PinnedVersion int           `json:"pinned_version"` // 0 when unpinned
-	ExpiresAt     *string       `json:"expires_at"`     // RFC3339, null when never-expires
 	Versions      []versionView `json:"versions"`
 }
 
@@ -257,7 +247,6 @@ type versionView struct {
 // non-deleted ver_num when unpinned), passed in because the caller already
 // walks the list for the table render.
 func newVersionsView(slug string, p domain.Paste, vers []domain.Version, servedVer int, now time.Time) versionsView {
-	at, _ := expiryFields(p.ExpiresAt, now)
 	views := make([]versionView, 0, len(vers))
 	for _, v := range vers {
 		vv := versionView{
@@ -275,7 +264,6 @@ func newVersionsView(slug string, p domain.Paste, vers []domain.Version, servedV
 	return versionsView{
 		Slug:          slug,
 		PinnedVersion: p.PinnedVersion,
-		ExpiresAt:     at,
 		Versions:      views,
 	}
 }
@@ -323,19 +311,6 @@ func newWhoamiView(info service.WhoamiInfo) whoamiView {
 		}
 	}
 	return v
-}
-
-// expiryFields renders (expires_at, expires_in_seconds): both nil when the
-// paste never expires, otherwise an RFC3339 timestamp and the whole seconds
-// until expiry, clamped at 0 so an expired-but-unswept paste reads 0 rather
-// than negative.
-func expiryFields(expiresAt, now time.Time) (*string, *int64) {
-	if expiresAt.Equal(domain.NeverExpires) {
-		return nil, nil
-	}
-	at := expiresAt.UTC().Format(time.RFC3339)
-	secs := max(int64(expiresAt.Sub(now).Seconds()), 0)
-	return &at, &secs
 }
 
 // servedVersion is the version the URL serves: the pin when set, else the

@@ -31,12 +31,6 @@ var (
 	// inside its own budget; a handoff outliving that is a cluster problem, not
 	// the blip this covers.
 	readRetry = retryPolicy{attempts: 2, backoff: 150 * time.Millisecond}
-
-	// backgroundRetry is for cross-shard background scans, which nothing waits
-	// on. The span must EXCEED a real handoff (a node holds positions unmounted
-	// for tens of seconds) or it just postpones the same failure; 6 attempts at
-	// a 1s base gives 31s of backoff.
-	backgroundRetry = retryPolicy{attempts: 6, backoff: time.Second}
 )
 
 // retryAcquiring runs fn, retrying only while it refuses with

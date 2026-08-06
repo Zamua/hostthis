@@ -92,7 +92,11 @@ func TestShaleKeygateIndex_ExcludesOutOfWindow(t *testing.T) {
 
 // Pruning an authoritative row must drop its index entry, or the index
 // outlives the fact it describes and the count over-reports without bound.
-func TestShaleKeygateIndex_PruneDropsTheIndexEntry(t *testing.T) {
+// An admission that walks past an out-of-window authoritative row drops it AND
+// its identity-leading view. Without the second delete the derived index
+// outlives its row and whoami over-reports forever, with nothing left to
+// repair it.
+func TestShaleKeygateIndex_AdmissionDropsExpiredRowAndItsEntry(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
 		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale keygate index test")
@@ -107,30 +111,26 @@ func TestShaleKeygateIndex_PruneDropsTheIndexEntry(t *testing.T) {
 		t.Fatalf("admit: %v", err)
 	}
 	// Confirm the entry EXISTS first, against a window wide enough to include
-	// it: otherwise the post-prune assertion passes vacuously when the entry
-	// was never written at all.
+	// it: otherwise the assertion below passes vacuously when the entry was
+	// never written at all.
 	if got, err := repo.SubnetsForIdentity(id, now, 72*time.Hour); err != nil || got != 1 {
-		t.Fatalf("setup: want the index entry present before pruning, got %d (err %v)", got, err)
+		t.Fatalf("setup: want the index entry present before the prune, got %d (err %v)", got, err)
 	}
 
-	deleted, err := repo.DeleteFirstSeenOlderThan(now.Add(-kgWindow))
-	if err != nil {
-		t.Fatalf("prune: %v", err)
-	}
-	if deleted != 1 {
-		t.Fatalf("setup: want 1 authoritative row pruned, got %d", deleted)
+	// Any admission on that subnet scans it, and the scan is what prunes.
+	if _, err := repo.AdmitNewKey("key:someone-else", "10.2.0.0/24", now, 20, kgWindow); err != nil {
+		t.Fatalf("triggering admit: %v", err)
 	}
 
 	if got, err := repo.SubnetsForIdentity(id, now, 72*time.Hour); err != nil || got != 0 {
-		t.Fatalf("want 0 after the authoritative row was pruned, got %d (err %v); a derived index "+
-			"that outlives its row makes whoami over-report forever", got, err)
+		t.Fatalf("want 0 after the admission scan pruned the aged-out row, got %d (err %v); a derived "+
+			"index that outlives its row makes whoami over-report forever", got, err)
 	}
 }
 
-// Reconcile must backfill an entry for a row that has none (a key admitted
-// before the index existed, or a best-effort co-write that failed at admit)
-// and prune an entry whose row is gone.
-func TestShaleKeygateIndex_ReconcileBackfillsAndPrunes(t *testing.T) {
+// The identity-side read prunes its own expired entries, so an entry whose
+// subnet never sees another admission still stops occupying space.
+func TestShaleKeygateIndex_IdentityReadDropsExpiredEntry(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
 		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale keygate index test")
@@ -138,55 +138,22 @@ func TestShaleKeygateIndex_ReconcileBackfillsAndPrunes(t *testing.T) {
 	repo := newShaleRepoOnUniqueDB(t, endpoint)
 
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
-	const id = "key:erin"
+	old := now.Add(-48 * time.Hour)
+	const id = "key:frank"
 
-	// A LEGACY row: an authoritative keygate row with NO identity entry.
-	if err := repo.PutRawForTest(
-		[]byte("keygate/10.3.0.0/24/"+id),
-		[]byte(now.Format(time.RFC3339Nano)),
-	); err != nil {
-		t.Fatalf("seed legacy row: %v", err)
+	entry := []byte("keygate_id/" + id + "/10.4.0.0/24")
+	if err := repo.PutRawForTest(entry, []byte(old.Format(time.RFC3339Nano))); err != nil {
+		t.Fatalf("seed entry: %v", err)
 	}
+	if raw, err := repo.GetRawForTest(entry); err != nil || raw == nil {
+		t.Fatalf("setup: the seeded entry must exist, got %q err %v", raw, err)
+	}
+
+	// The read filters it out AND removes it.
 	if got, err := repo.SubnetsForIdentity(id, now, kgWindow); err != nil || got != 0 {
-		t.Fatalf("setup: a legacy row must start UNINDEXED, got %d (err %v) - if it already "+
-			"counted, this test would not be exercising backfill at all", got, err)
+		t.Fatalf("an out-of-window entry must not count: got %d (err %v)", got, err)
 	}
-
-	// An ORPHAN index entry: no authoritative row behind it.
-	if err := repo.PutRawForTest(
-		[]byte("keygate_id/"+id+"/10.9.9.0/24"),
-		[]byte(now.Format(time.RFC3339Nano)),
-	); err != nil {
-		t.Fatalf("seed orphan index entry: %v", err)
-	}
-
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-
-	// Assert on WHICH entries exist, not the count: the count cannot
-	// distinguish success from two errors cancelling, since an un-backfilled
-	// row contributes 0 and an un-pruned orphan contributes 1.
-	backfilled := []byte("keygate_id/" + id + "/10.3.0.0/24")
-	orphan := []byte("keygate_id/" + id + "/10.9.9.0/24")
-
-	if raw, err := repo.GetRawForTest(backfilled); err != nil || raw == nil {
-		t.Fatalf("reconcile must BACKFILL the identity entry for the legacy row (%s): got %q err %v; "+
-			"without this, every key admitted before the index existed reports 0 subnets forever",
-			backfilled, raw, err)
-	}
-	if raw, err := repo.GetRawForTest(orphan); err == nil && raw != nil {
-		t.Fatalf("reconcile must PRUNE the orphan identity entry (%s) whose authoritative row is gone: "+
-			"got %q; left alone it makes whoami over-report subnets the gate has already forgotten",
-			orphan, raw)
-	}
-
-	// The resulting count is then right for the right reason.
-	got, err := repo.SubnetsForIdentity(id, now, kgWindow)
-	if err != nil {
-		t.Fatalf("SubnetsForIdentity after reconcile: %v", err)
-	}
-	if got != 1 {
-		t.Fatalf("want 1 after reconcile (legacy row backfilled, orphan entry pruned), got %d", got)
+	if raw, err := repo.GetRawForTest(entry); err != nil || raw != nil {
+		t.Fatalf("the read must also DROP the out-of-window entry; still present: %q (err %v)", raw, err)
 	}
 }

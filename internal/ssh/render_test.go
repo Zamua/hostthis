@@ -2,7 +2,6 @@ package ssh
 
 import (
 	"testing"
-	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
@@ -25,7 +24,7 @@ func TestRenderVersCol(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := versCol(newPasteListItem(tc.p, time.Time{}))
+			got := versCol(newPasteListItem(tc.p))
 			if got != tc.want {
 				t.Fatalf("versCol: got %q want %q", got, tc.want)
 			}

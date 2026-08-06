@@ -17,11 +17,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-func buildMetadataSlate(retention domain.Retention, logger *log.Logger) (*metadataBundle, error) {
+func buildMetadataSlate(logger *log.Logger) (*metadataBundle, error) {
 	endpoint := strings.TrimSpace(os.Getenv("HOSTTHIS_METADATA_S3_ENDPOINT"))
 	bucket := strings.TrimSpace(os.Getenv("HOSTTHIS_METADATA_S3_BUCKET"))
 	region := envOr("HOSTTHIS_METADATA_S3_REGION", "us-east-1")
@@ -49,7 +48,6 @@ func buildMetadataSlate(retention domain.Retention, logger *log.Logger) (*metada
 	if err != nil {
 		return nil, fmt.Errorf("open slatedb: %w", err)
 	}
-	repo.Retention = retention
 	logger.Printf("metadata: slatedb bucket=%s db=%s endpoint=%s", bucket, dbName, endpoint)
 	return &metadataBundle{
 		Repo:    repo,

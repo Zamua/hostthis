@@ -92,34 +92,6 @@ func TestRoomsHTTP_CreateUnknownAppIs404(t *testing.T) {
 	}
 }
 
-// TestRoomsHTTP_CreateExpiredAppIs404 pins that the existence gate treats an
-// expired site/paste as gone, drawing the same line the read handlers do.
-func TestRoomsHTTP_CreateExpiredAppIs404(t *testing.T) {
-	dir := t.TempDir()
-	db, err := storage.Open(dir + "/test.db")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	now := time.Now().UTC()
-	expiredSite := domain.Site{
-		Slug:      "appz2345",
-		Identity:  "key:test",
-		Manifest:  domain.NewManifest(),
-		CreatedAt: now.Add(-2 * domain.DefaultRetentionWindow),
-		UpdatedAt: now.Add(-2 * domain.DefaultRetentionWindow),
-		ExpiresAt: now.Add(-time.Hour), // already expired
-	}
-	srv := &Server{
-		ApexDomain: "hostthis.test",
-		Rooms:      service.NewRooms(storage.NewRoomKVRepo(db)),
-		Sites:      stubSiteReader{s: expiredSite},
-	}
-	if w := req(t, srv, http.MethodPost, "appz2345", "/api/rooms", nil); w.Code != http.StatusNotFound {
-		t.Fatalf("create under expired app: code %d, want 404", w.Code)
-	}
-}
-
 // TestRoomsHTTP_CreateLivePasteAppSucceeds pins the spec's "an app is a
 // deployed static site or a paste": a live paste alone is a valid room host.
 func TestRoomsHTTP_CreateLivePasteAppSucceeds(t *testing.T) {
@@ -135,7 +107,6 @@ func TestRoomsHTTP_CreateLivePasteAppSucceeds(t *testing.T) {
 		Kind:       domain.KindHTML,
 		ContentSHA: "sha",
 		UpdatedAt:  now,
-		ExpiresAt:  now.Add(domain.DefaultRetentionWindow),
 	}
 	srv := &Server{
 		ApexDomain: "hostthis.test",

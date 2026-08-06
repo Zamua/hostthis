@@ -332,7 +332,6 @@ func mkRoomWithID(t *testing.T, rooms *service.Rooms, slug, id string) {
 		ID:        domain.RoomID(id),
 		CreatedAt: now,
 		UpdatedAt: now,
-		ExpiresAt: now.Add(domain.RoomRetentionWindow),
 	}
 	if err := rooms.Repo.CreateRoom(room, "203.0.113.0/24", rooms.PerAppByteCap, now); err != nil {
 		t.Fatalf("create room %s/%s: %v", slug, id, err)

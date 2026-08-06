@@ -34,13 +34,11 @@ func TestShaleKeyBuildersRouteToTheirSubject(t *testing.T) {
 		{"version", shaleKeyVersion(slug, 7), string(slug)},
 		{"versions prefix", shalePrefixVersions(slug), string(slug)},
 		{"slug_owner", shaleKeySlugOwner(slug), string(slug)},
-		{"expiry", shaleKeyExpiry(at, slug), string(slug)},
 		{"identity_pastes", shaleKeyIdentityPaste(identity, string(slug)), identity},
 		{"identity_pastes prefix", shalePrefixIdentityPastes(identity), identity},
 		{"identity_first_seen", shaleKeyIdentityFirstSeen(identity), identity},
 
 		{"site", keySite(slug), string(slug)},
-		{"expiry_sites", keyExpirySite(at, slug), string(slug)},
 		{"identity_sites", keyIdentitySite(identity, string(slug)), identity},
 		{"identity_sites prefix", prefixIdentitySites(identity), identity},
 
@@ -49,7 +47,6 @@ func TestShaleKeyBuildersRouteToTheirSubject(t *testing.T) {
 		{"room values prefix", shalePrefixRoomValues(app, roomID), string(app)},
 		{"room create", shaleKeyRoomCreate(app, subnet, roomID, at), string(app)},
 		{"room creates prefix", shalePrefixAppRoomCreates(app), string(app)},
-		{"room expiry", shaleKeyRoomExpiry(at, app, roomID), string(app)},
 		{"room bytes", shaleKeyRoomBytes(app), string(app)},
 
 		// The keygate subnet segment carries its own '/', so the router's
@@ -82,7 +79,6 @@ func TestShaleRoomKeysCoLocate(t *testing.T) {
 		shaleKeyRoom(app, roomID),
 		shaleKeyRoomValue(app, roomID, "k"),
 		shaleKeyRoomCreate(app, "10.0.0.0/24", roomID, at),
-		shaleKeyRoomExpiry(at, app, roomID),
 		shaleKeyRoomBytes(app),
 	}
 	for _, k := range keys {

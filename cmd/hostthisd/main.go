@@ -1,5 +1,5 @@
 // Package main wires the hostthis daemon: SSH server, HTTP server, storage and
-// the periodic expiry sweep, configured from flags and HOSTTHIS_* env.
+// the periodic blob-GC sweep, configured from flags and HOSTTHIS_* env.
 package main
 
 import (
@@ -67,16 +67,7 @@ func main() {
 		logger.Fatalf("--apex-domain is required (or set HOSTTHIS_APEX_DOMAIN). Pass the public domain hostthis serves on, e.g. paste.example.com.")
 	}
 
-	// HOSTTHIS_RETENTION: how long a paste or site lives past its last update
-	// before the sweep evicts it. Injected into the metadata backends and the
-	// upload/site services.
-	retention, err := parseRetention(os.Getenv("HOSTTHIS_RETENTION"), domain.DefaultRetention())
-	if err != nil {
-		logger.Fatalf("%v", err)
-	}
-	logger.Printf("config: retention=%s (paste/site TTL from last update)", retention.Describe())
-
-	metadata, err := buildMetadata(*dataDir, retention, logger)
+	metadata, err := buildMetadata(*dataDir, logger)
 	if err != nil {
 		logger.Fatalf("metadata backend: %v", err)
 	}
@@ -88,7 +79,7 @@ func main() {
 
 	pasteRepo := metadata.Repo
 	keyGateRepo := metadata.KeyGate
-	blobs, blobsSweep, blobsCleanup, err := buildBlobStore(*dataDir, logger)
+	blobs, blobsCleanup, err := buildBlobStore(*dataDir, logger)
 	if err != nil {
 		logger.Fatalf("blob store: %v", err)
 	}
@@ -119,7 +110,6 @@ func main() {
 	}
 	createGate := service.NewCreateAdmission(admissionWidth)
 	uploadSvc := service.NewUpload(service.GateCreates(pasteRepo, createGate), blobUnit)
-	uploadSvc.Retention = retention
 	uploadSvc.Logger = logger // record background blob-finalize outcomes
 	// HOSTTHIS_BLOB_SYNC is a benchmark toggle for a sync-vs-async A/B on one
 	// binary: Create writes the blob inline on the ack path instead of
@@ -135,7 +125,6 @@ func main() {
 	var deploySvc *service.DeploySite
 	if siteRepo != nil {
 		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobUnit)
-		deploySvc.Retention = retention
 		// Without this the compensating slug-claim release fails silently.
 		deploySvc.Logger = logger
 		// The quota cap sums paste + site bytes, so whoami's used_bytes
@@ -175,37 +164,26 @@ func main() {
 	keyGate.Window = *freshKeysWindow
 	// Whoami reports per-session subnet and budget info from the keygate.
 	manageSvc.KeyGate = keyGate
-	sweepSvc := service.NewSweep(pasteRepo, blobsSweep, logger)
-	sweepSvc.KeyGate = keyGate
-	// On the transactional shale-blob path the cluster owns the blobs: a delete
-	// unbinds the pointer inside the metadata-delete transaction, so the global
-	// content-addressed GC over the detached store is disabled (Blobs=nil) and
-	// SweepOrphans reclaims orphan bytes instead.
+	sweepSvc := service.NewSweep(logger)
+	// A bound blob is unbound by its record's delete, inside that delete's
+	// transaction, so the only reclaimable bytes are staged-but-never-bound
+	// ones. A deploy without a collocated blob plane has nothing to reclaim.
 	if metadata.BlobOrphanSweeper != nil {
-		sweepSvc.Blobs = nil
-		sweepSvc.BlobOrphans = metadata.BlobOrphanSweeper
-		logger.Printf("sweep: shale-blob path - global content-addressed blob GC disabled; SweepOrphans reclaims staged-but-unbound objects (grace %s)", service.DefaultOrphanGrace)
-	}
-	if siteRepo != nil {
-		// Site expiry plus site-blob GC protection.
-		sweepSvc.Sites = siteRepo
-	}
-	if roomRepo != nil {
-		// Room inactivity expiry plus the room-create rate-limit prune.
-		sweepSvc.Rooms = roomRepo
+		sweepSvc.Blobs = service.CollocatedReclaimer{Sweeper: metadata.BlobOrphanSweeper}
+		logger.Printf("sweep: SweepOrphans reclaims staged-but-unbound objects (grace %s)", service.DefaultOrphanGrace)
 	}
 
 	// HOSTTHIS_SWEEP_DISABLED selects DRY-RUN vs LIVE; it is not an on/off
 	// switch and a "disabled" sweep is never a no-op. True means the sweep
-	// still runs every interval, computing and LOGGING what it would expire or
-	// GC while mutating nothing, so a risky change can be deployed and the
-	// dry-run log read before flipping to live. See docs/SPEC.md "Dry-run
+	// still runs every interval, computing and LOGGING what it would GC while
+	// mutating nothing, so a risky change can be deployed and the dry-run log
+	// read before flipping to live. See docs/SPEC.md "Dry-run
 	// (observability)".
 	sweepSvc.DryRun = strings.EqualFold(envOr("HOSTTHIS_SWEEP_DISABLED", "false"), "true")
 	if sweepSvc.DryRun {
-		logger.Printf("sweep: DRY-RUN via HOSTTHIS_SWEEP_DISABLED=true - runs every %s, LOGS what it would expire/GC, deletes nothing. Set false to enable live cleanup.", sweepSvc.Interval)
+		logger.Printf("sweep: DRY-RUN via HOSTTHIS_SWEEP_DISABLED=true - runs every %s, LOGS what it would GC, deletes nothing. Set false to enable live cleanup.", sweepSvc.Interval)
 	} else {
-		logger.Printf("sweep: LIVE - periodic expiry + blob GC + key-gate prune every %s", sweepSvc.Interval)
+		logger.Printf("sweep: LIVE - blob GC + rate-limit prunes every %s", sweepSvc.Interval)
 	}
 
 	logger.Printf("config: fresh_keys/subnet=%d per %s (durable total-bytes ceiling is the object-store bucket quota)",
@@ -215,16 +193,10 @@ func main() {
 	if err != nil {
 		logger.Printf("warn: landing not loaded from %q: %v (apex will serve a stub)", *landingPath, err)
 	}
-	// The landing template carries {{APEX}} everywhere a hostname appears and
-	// {{RETENTION}} where the expiry is described, so the page never advertises
-	// a domain or a TTL this deploy does not have.
+	// The landing template carries {{APEX}} everywhere a hostname appears, so
+	// the page never advertises a domain this deploy does not serve.
 	if len(landing) > 0 {
-		s := strings.ReplaceAll(string(landing), "{{APEX}}", *apexDomain)
-		retPhrase := "with no expiry"
-		if retention.Enabled() {
-			retPhrase = "for " + retention.Describe()
-		}
-		landing = []byte(strings.ReplaceAll(s, "{{RETENTION}}", retPhrase))
+		landing = []byte(strings.ReplaceAll(string(landing), "{{APEX}}", *apexDomain))
 	}
 
 	build := buildURL(*scheme, *apexDomain, *urlMode, logger)
@@ -342,35 +314,32 @@ func main() {
 	_ = httpSrv.Shutdown(shutdownCtx)
 }
 
-// buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured store,
-// narrowed through two interfaces (BlobStore and SweepBlobs). Disk is the only
-// standalone backend. The shale metadata backend does NOT go through this
-// detached store: its ShaleRepo owns a shale-managed blob plane of its own.
-func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, service.SweepBlobs, func(), error) {
+// buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured store.
+// Disk is the only standalone backend. The shale metadata backend does NOT go
+// through this detached store: its ShaleRepo owns a shale-managed blob plane of
+// its own.
+func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, func(), error) {
 	backend := strings.ToLower(envOr("HOSTTHIS_BLOB_BACKEND", "disk"))
 	switch backend {
 	case "", "disk":
 		bs, err := storage.NewBlobStore(filepath.Join(dataDir, "blobs"))
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 		logger.Printf("blobs: disk backend at %s/blobs (zstd-compressed at rest)", dataDir)
-		// Only the upload/manage Put/Get path needs the compression wrapper.
-		// The sweep uses WalkBlobs + Remove, which are sha-only and never touch
-		// a body, so it talks to the raw backend.
-		inner, sweep, cleanup, err := maybeWrapWriteBack(bs, dataDir, logger)
+		inner, cleanup, err := maybeWrapWriteBack(bs, dataDir, logger)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
-		return storage.NewCompressedBlobStore(inner), sweep, cleanup, nil
+		return storage.NewCompressedBlobStore(inner), cleanup, nil
 	default:
-		return nil, nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (only 'disk' is supported as a standalone backend; production uses the shale-collocated blob plane)", backend)
+		return nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (only 'disk' is supported as a standalone backend; production uses the shale-collocated blob plane)", backend)
 	}
 }
 
 // writeBackInner is what maybeWrapWriteBack needs of a durable backend: the
 // Put/Get/GetReader the compression layer wraps, plus the WalkBlobs/Remove the
-// sweep uses.
+// write-back cache's own eviction uses.
 type writeBackInner interface {
 	Put(sha string, r io.Reader, size int64) error
 	Get(sha string) ([]byte, error)
@@ -383,9 +352,9 @@ type writeBackInner interface {
 // cache when HOSTTHIS_BLOB_WRITEBACK=true. Disabled, it returns the durable
 // backend unchanged, preserving strict durable-before-ack. The cleanup func
 // stops the uploaders and is a no-op when disabled.
-func maybeWrapWriteBack(durable writeBackInner, dataDir string, logger *log.Logger) (storage.InnerBlobStore, service.SweepBlobs, func(), error) {
+func maybeWrapWriteBack(durable writeBackInner, dataDir string, logger *log.Logger) (storage.InnerBlobStore, func(), error) {
 	if strings.ToLower(envOr("HOSTTHIS_BLOB_WRITEBACK", "false")) != "true" {
-		return durable, durable, func() {}, nil
+		return durable, func() {}, nil
 	}
 	cfg := storage.WriteBackConfig{
 		Dir:      envOr("HOSTTHIS_BLOB_WRITEBACK_DIR", filepath.Join(dataDir, "blob-cache")),
@@ -394,10 +363,10 @@ func maybeWrapWriteBack(durable writeBackInner, dataDir string, logger *log.Logg
 	}
 	wb, err := storage.NewWriteBackBlobStore(durable, cfg)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("blob write-back cache: %w", err)
+		return nil, nil, fmt.Errorf("blob write-back cache: %w", err)
 	}
 	logger.Printf("blobs: write-back cache ENABLED at %s (max %d bytes); durability window applies, see SPEC", cfg.Dir, cfg.MaxBytes)
-	return wb, wb, wb.Close, nil
+	return wb, wb.Close, nil
 }
 
 // buildCachePurger reads HOSTTHIS_CACHE_BACKEND and returns the configured
@@ -491,31 +460,4 @@ func envOrDuration(key string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
-}
-
-// parseRetention reads HOSTTHIS_RETENTION into a policy. Accepted forms,
-// case-insensitive:
-//
-//	""                                 -> the supplied default
-//	"off" / "never" / "none" / "0"     -> no expiry (content is never swept)
-//	"<N>d"                             -> N days (e.g. "30d", "7d")
-//	anything time.ParseDuration takes  -> that duration (e.g. "12h", "720h")
-func parseRetention(raw string, def domain.Retention) (domain.Retention, error) {
-	s := strings.TrimSpace(strings.ToLower(raw))
-	switch s {
-	case "":
-		return def, nil
-	case "off", "never", "none", "disabled", "0":
-		return domain.Retention{Window: 0}, nil
-	}
-	if days, ok := strings.CutSuffix(s, "d"); ok {
-		if n, err := strconv.Atoi(days); err == nil && n >= 0 {
-			return domain.Retention{Window: time.Duration(n) * 24 * time.Hour}, nil
-		}
-	}
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		return def, fmt.Errorf("HOSTTHIS_RETENTION=%q is not valid (use e.g. 30d, 12h, or off)", raw)
-	}
-	return domain.Retention{Window: d}, nil
 }

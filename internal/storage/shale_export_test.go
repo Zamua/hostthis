@@ -112,28 +112,6 @@ func (r *ShaleRepo) DeleteRawForTest(key []byte) error {
 	return r.cluster.Delete(key)
 }
 
-// ReconcileForTest exposes Reconcile under a stable test name, keeping the
-// reconciler test's dependency surface explicit.
-func (r *ShaleRepo) ReconcileForTest(now time.Time) error {
-	return r.Reconcile(now)
-}
-
-// SetReconcileBeforeIndexWritesHookForTest installs the test seam that runs
-// after Reconcile captures its snapshots and before the paste reprojection's
-// prune + write loops: the exact window where an unguarded reprojection would
-// clobber a fresher refresh. Pass nil to clear.
-func (r *ShaleRepo) SetReconcileBeforeIndexWritesHookForTest(fn func()) {
-	r.testHookReconcileBeforeIndexWrites = fn
-}
-
-// SetBeforeOrphanPruneDeleteHookForTest installs the test seam that runs inside
-// the orphan prune between the authoritative-row confirm and the entry delete:
-// the window where an unconditional delete would drop a fresh entry. Pass nil
-// to clear.
-func (r *ShaleRepo) SetBeforeOrphanPruneDeleteHookForTest(fn func(key []byte)) {
-	r.testHookBeforeOrphanPruneDelete = fn
-}
-
 // SetGuardedIndexWriteHookForTest installs the fault-injection seam at the top
 // of every guarded index write: a non-nil return from fn fails that write with
 // the returned error. Pass nil to clear.
@@ -154,11 +132,6 @@ func LegacyVersionKeyForTest(slug domain.Slug, ver int) []byte {
 
 // LegacySlugOwnerKeyForTest returns the "slug_owner/<slug>" key.
 func LegacySlugOwnerKeyForTest(slug domain.Slug) []byte { return shaleKeySlugOwner(slug) }
-
-// LegacyExpiryKeyForTest returns the "expiry/<rfc3339>/<slug>" key.
-func LegacyExpiryKeyForTest(expiresAt time.Time, slug domain.Slug) []byte {
-	return shaleKeyExpiry(expiresAt, slug)
-}
 
 // LegacyPasteValueForTest encodes p into the exact pasteRow JSON a slatedb
 // deployment stored. The migration claim is that ShaleRepo.Get decodes this raw
@@ -196,16 +169,8 @@ func IdentitySiteKeyForTest(identity, slug string) []byte {
 }
 
 // MarkerValueForTest is the non-empty placeholder value index families use
-// (shale rejects empty Put values). Exposed so the migration test can seed the
-// expiry index marker exactly as the backend writes it.
+// (shale rejects empty Put values).
 func MarkerValueForTest() []byte { return markerValue }
-
-// RoomExpiryKeyForTest returns the "roomexpiry/<ts>/<app-slug>/<uuid>" sweep
-// index key, exactly as the backend writes it. Exposed so the orphan-drain test
-// can plant an entry with NO room record behind it.
-func RoomExpiryKeyForTest(expiresAt time.Time, appSlug domain.Slug, id domain.RoomID) []byte {
-	return shaleKeyRoomExpiry(expiresAt, appSlug, id)
-}
 
 // SiteKeyForTest returns the "sites/<slug>" authoritative site row key. Exposed
 // so the decode-tolerance test can seed a poisoned site row and prove

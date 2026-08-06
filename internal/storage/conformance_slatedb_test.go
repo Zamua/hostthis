@@ -34,7 +34,7 @@ func TestConformance_Slate(t *testing.T) {
 	access := envOrDefault("MINIO_TEST_ACCESS_KEY", "admin")
 	secret := envOrDefault("MINIO_TEST_SECRET_KEY", "supersecret")
 
-	caps := conformCaps{ExpiryFreesQuotaAtReadTime: true, StrictQuotaUnderConcurrency: true, StrictIdentityQuotaUnderConcurrency: true}
+	caps := conformCaps{StrictQuotaUnderConcurrency: true, StrictIdentityQuotaUnderConcurrency: true}
 	newSlate := func(t *testing.T) *storage.SlateRepo {
 		// Run epoch plus a monotonic counter: unique per call so each
 		// subtest starts empty, and unique per run so concurrent CI runs

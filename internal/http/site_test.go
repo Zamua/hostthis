@@ -56,7 +56,6 @@ func buildSiteServer(t *testing.T) *Server {
 		Manifest:  m,
 		CreatedAt: now,
 		UpdatedAt: now,
-		ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	return &Server{
 		ApexDomain: "paste.test",
@@ -262,30 +261,6 @@ func TestSite_PathMode(t *testing.T) {
 	}
 }
 
-func TestSite_ExpiredReturns404(t *testing.T) {
-	now := time.Now().UTC()
-	m := domain.NewManifest()
-	m.Add("index.html", domain.ManifestEntry{SHA: "sha-index", Size: 1, ContentType: "text/html; charset=utf-8"})
-	site := domain.Site{
-		Slug: "abc23456", Identity: "key:test", Manifest: m,
-		CreatedAt: now.Add(-2 * domain.DefaultRetentionWindow),
-		UpdatedAt: now.Add(-2 * domain.DefaultRetentionWindow),
-		ExpiresAt: now.Add(-time.Hour), // expired
-	}
-	srv := &Server{
-		ApexDomain: "paste.test",
-		Sites:      stubSiteReader{s: site},
-		Blobs:      stubBlobMap{m: map[string][]byte{"sha-index": []byte("x")}},
-	}
-	r := httptest.NewRequest("GET", "/", nil)
-	r.Host = "abc23456.paste.test"
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
-	if w.Code != 404 {
-		t.Fatalf("expired site: got %d, want 404", w.Code)
-	}
-}
-
 func TestSite_FallsThroughToPasteWhenNoSite(t *testing.T) {
 	// A slug that is NOT a site falls through to the paste path. The stub
 	// paste owning the slug is required: servePasteSlug panics with no paste
@@ -293,8 +268,7 @@ func TestSite_FallsThroughToPasteWhenNoSite(t *testing.T) {
 	now := time.Now().UTC()
 	p := domain.Paste{
 		Slug: "abc23456", Identity: "key:test", Kind: domain.KindHTML,
-		ContentSHA: "sha-p", Size: 5, UpdatedAt: now, ExpiresAt: now.Add(time.Hour),
-	}
+		ContentSHA: "sha-p", Size: 5, UpdatedAt: now}
 	srv := &Server{
 		ApexDomain: "paste.test",
 		Pastes:     stubPasteReader{p: p},

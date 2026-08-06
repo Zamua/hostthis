@@ -16,14 +16,14 @@ type KeyGateRepo interface {
 	// `limitPerSubnet` distinct new fingerprints in the window.
 	AdmitNewKey(identity, subnet string, now time.Time, limitPerSubnet int, window time.Duration) (knownAlready bool, err error)
 
-	// DeleteFirstSeenOlderThan removes rows past the rate-limit window, which
-	// cannot affect any admission decision.
-	DeleteFirstSeenOlderThan(cutoff time.Time) (int, error)
-
 	// SubnetSnapshot returns how many rows from this subnet count toward the
 	// per-subnet cap, and the earliest in-window first_seen: adding `window`
 	// to it gives the moment the next slot frees up. A subnet with no
 	// in-window rows returns (0, time.Time{}).
+	//
+	// Implementations MAY drop the out-of-window rows they walk past. Nothing
+	// reads them again: they are outside the window, so no admission decision
+	// can turn on them.
 	SubnetSnapshot(subnet string, now time.Time, window time.Duration) (freshCount int, oldestFirstSeen time.Time, err error)
 
 	// SubnetsForIdentity returns how many distinct subnets this identity has
@@ -37,6 +37,11 @@ type KeyGateRepo interface {
 // already-recorded pair passes through with no accounting.
 //
 // The SSH server calls Admit once per session, before any verb dispatch.
+//
+// There is no background prune. Rows leave when a read that already walks
+// them notices they are out of window, which keeps the family bounded by the
+// subnets still connecting rather than by every subnet that ever did (see
+// docs/SPEC.md "Sybil rate limit").
 type KeyGate struct {
 	Repo                  KeyGateRepo
 	MaxFreshKeysPerSubnet int
@@ -137,13 +142,6 @@ func (g *KeyGate) Inspect(identity, ipSubnet string) (SessionInfo, error) {
 		SubnetCap:        g.MaxFreshKeysPerSubnet,
 		IdentitySubnets:  idSubnets,
 	}, nil
-}
-
-// PruneOldRows deletes rows older than the rate-limit window, keeping the table
-// bounded. The sweep service calls it every tick.
-func (g *KeyGate) PruneOldRows(now time.Time) (int, error) {
-	cutoff := now.Add(-g.Window)
-	return g.Repo.DeleteFirstSeenOlderThan(cutoff)
 }
 
 // isStorageRateLimitErr reports whether err is the keygate rate-limit sentinel

@@ -17,10 +17,6 @@ func TestShaleShardKey(t *testing.T) {
 		{"version", "versions/abc12345/0001", "abc12345"},
 		{"version high num", "versions/abc12345/0042", "abc12345"},
 		{"slug_owner", "slug_owner/abc12345", "abc12345"},
-		// expiry's slug is the LAST segment, behind an RFC3339 date that
-		// itself contains ':' and '-' but no '/'.
-		{"expiry", "expiry/2026-06-05T12:00:00Z/abc12345", "abc12345"},
-		{"expiry nano", "expiry/2026-06-05T12:00:00.123456789Z/abc12345", "abc12345"},
 
 		// Per-identity derived family -> shard key <id>.
 		{"identity_pastes", "identity_pastes/sha256:deadbeef/abc12345", "sha256:deadbeef"},
@@ -31,26 +27,18 @@ func TestShaleShardKey(t *testing.T) {
 
 		// Static-site per-slug authoritative family -> shard key <slug>.
 		{"site", "sites/abc12345", "abc12345"},
-		// expiry_sites' slug is the LAST segment (like expiry/), and the
-		// '_sites' suffix must NOT make it route as a plain expiry/ key.
-		{"expiry_site", "expiry_sites/2026-06-05T12:00:00Z/abc12345", "abc12345"},
-		{"expiry_site nano", "expiry_sites/2026-06-05T12:00:00.123456789Z/abc12345", "abc12345"},
 
 		// Static-site per-identity derived family -> shard key <id>, so an
 		// owner's site entries co-locate for the single-shard quota scan.
 		{"identity_sites index", "identity_sites/sha256:deadbeef/abc12345", "sha256:deadbeef"},
 
-		// Room families -> shard key <app-slug>: the FIRST segment after the
-		// prefix for rooms/ + roomkv/ + roomcreate/, the SECOND-to-last for
-		// roomexpiry/. The trailing-slash discipline keeps roomkv/ from
-		// matching rooms/.
+		// Room families -> shard key <app-slug>, the FIRST segment after the
+		// prefix. The trailing-slash discipline keeps roomkv/ from matching
+		// rooms/.
 		{"room record", "rooms/app12345/9f8e7d6c-1234-4abc-89de-0123456789ab", "app12345"},
 		{"room value", "roomkv/app12345/9f8e7d6c-1234-4abc-89de-0123456789ab/card/1", "app12345"},
 		{"room create", "roomcreate/app12345/10.0.0.0_24/2026-06-05T12:00:00.000000000Z/9f8e7d6c-1234-4abc-89de-0123456789ab", "app12345"},
 		{"room bytes", "roombytes/app12345", "app12345"},
-		// roomexpiry: app slug is the second-to-last segment, behind a
-		// fixed-width <ts> (contains ':' + '-' + '.', no '/').
-		{"room expiry", "roomexpiry/2026-06-05T12:00:00.000000000Z/app12345/9f8e7d6c-1234-4abc-89de-0123456789ab", "app12345"},
 
 		// Unknown family routes by the whole key.
 		{"unknown", "weird/key/shape", "weird/key/shape"},
@@ -76,12 +64,10 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 		"versions/" + slug + "/0001",
 		"versions/" + slug + "/0009",
 		"slug_owner/" + slug,
-		"expiry/2026-06-05T12:00:00Z/" + slug,
 		// A site's keys co-shard with the same slug, so the site insert's
 		// cross-family paste-slug collision read is single-shard with the
 		// authoritative site write.
 		"sites/" + slug,
-		"expiry_sites/2026-06-05T12:00:00Z/" + slug,
 		// A bref key carries its route shard in the {...} hash tag, so BindBlob
 		// co-commits with the authoritative {slug} write in one single-shard
 		// transaction. The <unit>/<blobid> tail does not affect routing.
@@ -125,7 +111,6 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 		"roomkv/" + app + "/" + uuid + "/some/nested/key",
 		"roomcreate/" + app + "/10.0.0.0_24/2026-06-05T12:00:00.000000000Z/" + uuid,
 		"roombytes/" + app,
-		"roomexpiry/2026-06-05T12:00:00.000000000Z/" + app + "/" + uuid,
 	}
 	for _, k := range roomKeys {
 		if got := string(shaleShardKey([]byte(k))); got != app {

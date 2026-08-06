@@ -12,7 +12,6 @@
 //	rooms/<app-slug>/<uuid>                     JSON room record
 //	roomkv/<app-slug>/<uuid>/<key>              raw value bytes, NOT JSON
 //	roomcreate/<app-slug>/<subnet>/<ts>/<uuid>  empty value, one per create
-//	roomexpiry/<ts>/<app-slug>/<uuid>           empty value, sweep scan index
 //
 // Room values are stored verbatim: hostthis never parses one. Marker families
 // carry empty values, the slatedb index-key convention.
@@ -20,9 +19,9 @@
 // Byte and key totals are not stored on the room record; they are computed by
 // prefix-scanning roomkv/<app>/<uuid>/ at put time.
 //
-// # Fixed-width TTL timestamp
+// # Fixed-width ledger timestamp
 //
-// The <ts> segments use expirySiteTimeFormat (zero-padded 9-digit nanos), so a
+// The <ts> segments use sortableTimeFormat (zero-padded 9-digit nanos), so a
 // string compare on the key is byte order == time order exactly, including
 // within a shared second. time.RFC3339Nano is variable-width and sorts wrong
 // within a second.
@@ -77,17 +76,6 @@ func (s *SlateRoomRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now
 	return s.repo.CountRoomCreates(appSlug, subnet, now, window)
 }
 
-// service.SweepRooms
-func (s *SlateRoomRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
-	return s.repo.ExpiredRooms(now)
-}
-func (s *SlateRoomRepo) DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error) {
-	return s.repo.DeleteExpiredRoom(ref)
-}
-func (s *SlateRoomRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
-	return s.repo.PruneOldRoomCreates(cutoff)
-}
-
 // --- JSON row schema -------------------------------------------------------
 
 // roomRow is the persisted shape of a Room record. ByteTotal + KeyCount are
@@ -103,7 +91,6 @@ func (s *SlateRoomRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
 type roomRow struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
-	ExpiresAt time.Time `json:"expires_at"`
 	ByteTotal int64     `json:"byte_total,omitempty"` // shale-only running per-room byte total
 	KeyCount  int       `json:"key_count,omitempty"`  // shale-only running per-room key count
 	// Seq is the per-room mutation sequence: dense, +1 per committed
@@ -114,7 +101,7 @@ type roomRow struct {
 }
 
 func roomRowFromDomain(r domain.Room) roomRow {
-	return roomRow{CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ExpiresAt: r.ExpiresAt}
+	return roomRow{CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 }
 
 func (row roomRow) toDomain(appSlug domain.Slug, id domain.RoomID) domain.Room {
@@ -123,7 +110,6 @@ func (row roomRow) toDomain(appSlug domain.Slug, id domain.RoomID) domain.Room {
 		ID:        id,
 		CreatedAt: row.CreatedAt,
 		UpdatedAt: row.UpdatedAt,
-		ExpiresAt: row.ExpiresAt,
 	}
 }
 
@@ -152,18 +138,12 @@ func prefixRoomValues(appSlug domain.Slug, id domain.RoomID) []byte {
 // slash-free, so a windowed compare reads the ts as the second-to-last
 // segment.
 func keyRoomCreate(appSlug domain.Slug, subnet string, id domain.RoomID, t time.Time) []byte {
-	return []byte("roomcreate/" + appSlug.String() + "/" + subnet + "/" + t.UTC().Format(expirySiteTimeFormat) + "/" + id.String())
+	return []byte("roomcreate/" + appSlug.String() + "/" + subnet + "/" + t.UTC().Format(sortableTimeFormat) + "/" + id.String())
 }
 
 func prefixAppRoomCreates(appSlug domain.Slug) []byte {
 	return []byte("roomcreate/" + appSlug.String() + "/")
 }
-
-func keyRoomExpiry(t time.Time, appSlug domain.Slug, id domain.RoomID) []byte {
-	return []byte("roomexpiry/" + t.UTC().Format(expirySiteTimeFormat) + "/" + appSlug.String() + "/" + id.String())
-}
-
-func prefixRoomExpiry() []byte { return []byte("roomexpiry/") }
 
 // --- Room operations (on SlateRepo) ----------------------------------------
 
@@ -213,10 +193,6 @@ func (r *SlateRepo) CreateRoom(room domain.Room, subnet string, appCap int64, no
 		_ = tx.Rollback()
 		return fmt.Errorf("put room-create marker: %w", err)
 	}
-	if err := tx.Put(keyRoomExpiry(room.ExpiresAt, room.AppSlug, room.ID), []byte{}); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("put room expiry index: %w", err)
-	}
 	if _, err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit create room %s/%s: %w", room.AppSlug, room.ID, err)
 	}
@@ -224,7 +200,7 @@ func (r *SlateRepo) CreateRoom(room domain.Room, subnet string, appCap int64, no
 }
 
 // GetRoom returns the room record for (appSlug, id) or ErrNotFound. Like the
-// paste/site reads it returns expired-but-unswept rows; the HTTP layer 404s
+// paste/site reads it returns stale rows; the HTTP layer 404s
 // them and the sweep deletes them.
 func (r *SlateRepo) GetRoom(appSlug domain.Slug, id domain.RoomID) (domain.Room, error) {
 	var row roomRow
@@ -300,11 +276,11 @@ func (r *SlateRepo) scanRoomValues(appSlug domain.Slug, id domain.RoomID) (domai
 }
 
 // PutRoomValue writes val under key in room (appSlug, id), enforcing the
-// per-room and per-app caps and resetting the retention clock. It holds the
+// per-room and per-app caps. It holds the
 // per-ROOM quota stripe across the scan and the write so two concurrent writes
 // to the SAME room cannot both pass a stale cap and both commit. Valid because
 // SlateDB is single-writer: only in-process goroutines can race. The cap
-// checks, the upsert, and the clock reset are one snapshot-isolation
+// checks, the upsert, and the clock bump are one snapshot-isolation
 // transaction.
 //
 // Rooms hold no blobs, so a room write touches no object-store quota and has
@@ -354,8 +330,8 @@ func (r *SlateRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 
-	// Room-exists re-check INSIDE the write boundary so a concurrent expiry
-	// sweep cannot delete the room between the service's GetRoom and here.
+	// Room-exists re-check INSIDE the write boundary so a concurrent delete
+	// cannot remove the room between the service's GetRoom and here.
 	var row roomRow
 	if err := txGetJSON(tx, keyRoom(appSlug, id), &row); err != nil {
 		_ = tx.Rollback()
@@ -379,7 +355,7 @@ func (r *SlateRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 	return row.Seq, nil
 }
 
-// DeleteRoomValue removes key from room (appSlug, id) and resets the retention
+// DeleteRoomValue removes key from room (appSlug, id) and bumps the room's
 // clock (a delete is a write). Idempotent: deleting an absent key succeeds and
 // still assigns a seq, because it commits a touch and a seq bump rides every
 // commit. Returns ErrNotFound only when the ROOM itself does not exist.
@@ -408,26 +384,14 @@ func (r *SlateRepo) DeleteRoomValue(appSlug domain.Slug, id domain.RoomID, key s
 	return row.Seq, nil
 }
 
-// txTouchRoom resets the room's retention clock inside the caller's tx,
-// assigns the mutation's per-room sequence, and moves the roomexpiry index
-// entry from the old ExpiresAt to the new one. The per-room stripe every
-// caller holds is what makes the seq increment dense and unique. *row is
-// mutated in place so the caller sees the new clock and assigned seq.
+// txTouchRoom bumps the room's UpdatedAt inside the caller's tx and assigns the
+// mutation's per-room sequence. The per-room stripe every caller holds is what
+// makes the seq increment dense and unique. *row is mutated in place so the
+// caller sees the new clock and assigned seq.
 func (r *SlateRepo) txTouchRoom(tx *slatedb.DbTransaction, appSlug domain.Slug, id domain.RoomID, row *roomRow, now time.Time) error {
-	oldExpiry := row.ExpiresAt
 	row.UpdatedAt = now
-	row.ExpiresAt = now.Add(domain.RoomRetentionWindow)
 	row.Seq++
-	if err := txPutJSON(tx, keyRoom(appSlug, id), *row); err != nil {
-		return err
-	}
-	if err := tx.Delete(keyRoomExpiry(oldExpiry, appSlug, id)); err != nil {
-		return fmt.Errorf("delete old room expiry idx: %w", err)
-	}
-	if err := tx.Put(keyRoomExpiry(row.ExpiresAt, appSlug, id), []byte{}); err != nil {
-		return fmt.Errorf("put new room expiry idx: %w", err)
-	}
-	return nil
+	return txPutJSON(tx, keyRoom(appSlug, id), *row)
 }
 
 // CountRoomCreates returns how many rooms were created from subnet and under
@@ -439,8 +403,9 @@ func (r *SlateRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now tim
 	if err != nil {
 		return 0, 0, err
 	}
-	cutoff := now.Add(-window).UTC().Format(expirySiteTimeFormat)
+	cutoff := now.Add(-window).UTC().Format(sortableTimeFormat)
 	prefix := string(prefixAppRoomCreates(appSlug))
+	var expired [][]byte
 	for _, item := range items {
 		rest := strings.TrimPrefix(string(item.Key), prefix)
 		rowSubnet, ts, ok := splitRoomCreateRest(rest)
@@ -448,11 +413,30 @@ func (r *SlateRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now tim
 			continue
 		}
 		if ts <= cutoff {
-			continue // outside the window
+			// Outside the window: it can no longer change any decision, so the
+			// scan that already walked past it drops it (docs/SPEC.md "Room
+			// creation rate limit").
+			expired = append(expired, item.Key)
+			continue
 		}
 		perApp++
 		if rowSubnet == subnet {
 			perSubnet++
+		}
+	}
+	if len(expired) > 0 {
+		tx, terr := r.db.Begin(slatedb.IsolationLevelSnapshot)
+		if terr != nil {
+			return 0, 0, fmt.Errorf("begin prune tx: %w", terr)
+		}
+		for _, k := range expired {
+			if derr := tx.Delete(k); derr != nil {
+				_ = tx.Rollback()
+				return 0, 0, fmt.Errorf("drop expired create marker %s: %w", k, derr)
+			}
+		}
+		if _, cerr := tx.Commit(); cerr != nil {
+			return 0, 0, fmt.Errorf("commit create-marker prune: %w", cerr)
 		}
 	}
 	return perSubnet, perApp, nil
@@ -476,9 +460,9 @@ func splitRoomCreateRest(rest string) (subnet, ts string, ok bool) {
 }
 
 // SumActiveRoomBytes returns the total stored value bytes across every app's
-// non-expired rooms. Observability and tests only: the durable total-bytes
+// rooms. Observability and tests only: the durable total-bytes
 // ceiling lives at the object store's blob-bucket quota, not here.
-func (r *SlateRepo) SumActiveRoomBytes(now time.Time) (int64, error) {
+func (r *SlateRepo) SumActiveRoomBytes(_ time.Time) (int64, error) {
 	rooms, err := r.scanPrefix([]byte("rooms/"))
 	if err != nil {
 		return 0, err
@@ -488,9 +472,6 @@ func (r *SlateRepo) SumActiveRoomBytes(now time.Time) (int64, error) {
 		var row roomRow
 		if err := json.Unmarshal(item.Value, &row); err != nil {
 			return 0, fmt.Errorf("decode %s: %w", item.Key, err)
-		}
-		if domain.IsExpired(row.ExpiresAt, now) {
-			continue // read-time exclusion: expired-unswept rooms don't count
 		}
 		appSlug, id, ok := parseRoomRecordKey(item.Key)
 		if !ok {
@@ -505,12 +486,8 @@ func (r *SlateRepo) SumActiveRoomBytes(now time.Time) (int64, error) {
 	return total, nil
 }
 
-// sumAppRoomBytes sums the value bytes across ALL of one app's rooms with NO
-// expiry filter, so an expired-but-unswept room's bytes still count toward the
-// per-app cap until the sweep deletes it. The per-app room aggregate is
-// sweep-time on every backend, keeping the cap identical across them. This
-// differs from the per-IDENTITY paste/site quota, which sqlite and slatedb
-// free at read time.
+// sumAppRoomBytes sums the value bytes across ALL of one app's rooms; bytes are
+// freed only by an explicit delete.
 func (r *SlateRepo) sumAppRoomBytes(appSlug domain.Slug) (int64, error) {
 	items, err := r.scanPrefix([]byte("roomkv/" + appSlug.String() + "/"))
 	if err != nil {
@@ -538,35 +515,10 @@ func (r *SlateRepo) sumOneRoomBytes(appSlug domain.Slug, id domain.RoomID) (int6
 
 // --- SweepRooms ------------------------------------------------------------
 
-// ExpiredRooms returns one reference per room whose ExpiresAt is at or before
-// now (inclusive): the (app-slug, room-id) pair plus the entry's full key as
-// the opaque IndexRef, so DeleteExpiredRoom can remove the EXACT entry the
-// scan surfaced even when the room record is already gone. The fixed-width ts
-// segment makes a string compare byte order == time order exactly, correct
-// even within a shared whole second.
-func (r *SlateRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
-	// key shape: roomexpiry/<ts>/<app-slug>/<uuid>
-	return scanExpiredRefs(r.scanPrefix, prefixRoomExpiry(), now, expirySiteTimeFormat, parseExpiredRoomKey)
-}
-
-// DeleteExpiredRoom processes one expired reference: the DeleteRoom cascade
-// when the room record still exists, then, in every case, removal of the exact
-// expiry-index entry the scan surfaced. The cascade removes the DERIVED key;
-// this removes the OBSERVED one, so an entry whose record is already gone
-// still drains instead of resurfacing every pass. Idempotent. Returns whether
-// a room record was actually deleted.
-func (r *SlateRepo) DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error) {
-	var row roomRow
-	return deleteExpiredRef(ref, expiryRoomIndexKey,
-		func() error { return r.getJSON(keyRoom(ref.AppSlug, ref.ID), &row) },
-		func() error { return r.DeleteRoom(ref.AppSlug, ref.ID) },
-		func(entryKey []byte) error { return r.deleteExpiryEntry(entryKey, "room expiry entry") })
-}
-
-// DeleteRoom removes a room record, its expiry index entry, and EVERY value in
+// DeleteRoom removes a room record and EVERY value in
 // its namespace: the slatedb analogue of the sqlite FK cascade, enumerating the
 // value subtree and deleting each in the tx. Idempotent; a missing room is a
-// no-op. The sweep reaches it through DeleteExpiredRoom, not directly.
+// no-op.
 func (r *SlateRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 	var row roomRow
 	if err := r.getJSON(keyRoom(appSlug, id), &row); err != nil {
@@ -587,10 +539,6 @@ func (r *SlateRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 		_ = tx.Rollback()
 		return fmt.Errorf("delete room record: %w", err)
 	}
-	if err := tx.Delete(keyRoomExpiry(row.ExpiresAt, appSlug, id)); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("delete room expiry idx: %w", err)
-	}
 	for _, item := range values {
 		if err := tx.Delete(item.Key); err != nil {
 			_ = tx.Rollback()
@@ -601,55 +549,6 @@ func (r *SlateRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 		return fmt.Errorf("commit delete room %s/%s: %w", appSlug, id, err)
 	}
 	return nil
-}
-
-// PruneOldRoomCreates deletes roomcreate/ markers whose <ts> is before cutoff.
-// Past the window a ledger marker can never change a future rate-limit
-// decision, so dropping it each tick keeps the family bounded. Returns the
-// number of markers deleted.
-func (r *SlateRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
-	items, err := r.scanPrefix([]byte("roomcreate/"))
-	if err != nil {
-		return 0, err
-	}
-	cutoffStr := cutoff.UTC().Format(expirySiteTimeFormat)
-	var toDelete [][]byte
-	for _, item := range items {
-		// key shape: roomcreate/<app-slug>/<subnet>/<ts>/<uuid>. The subnet
-		// contains a '/', so peel from the right: strip the trailing uuid and
-		// the ts is then the last segment.
-		k := string(item.Key)
-		uuidSlash := strings.LastIndex(k, "/")
-		if uuidSlash < 0 {
-			continue
-		}
-		beforeUUID := k[:uuidSlash]
-		tsSlash := strings.LastIndex(beforeUUID, "/")
-		if tsSlash < 0 {
-			continue
-		}
-		ts := beforeUUID[tsSlash+1:]
-		if ts < cutoffStr {
-			toDelete = append(toDelete, item.Key)
-		}
-	}
-	if len(toDelete) == 0 {
-		return 0, nil
-	}
-	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
-	if err != nil {
-		return 0, fmt.Errorf("begin tx: %w", err)
-	}
-	for _, k := range toDelete {
-		if err := tx.Delete(k); err != nil {
-			_ = tx.Rollback()
-			return 0, fmt.Errorf("delete room-create marker %s: %w", k, err)
-		}
-	}
-	if _, err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit room-create prune: %w", err)
-	}
-	return len(toDelete), nil
 }
 
 // --- helpers ---------------------------------------------------------------

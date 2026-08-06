@@ -246,8 +246,8 @@ func TestDeploySite_NowInjectable(t *testing.T) {
 		t.Fatalf("deploy: %v", err)
 	}
 	got, _ := sites.Get(res.Site.Slug)
-	if !got.ExpiresAt.Equal(fixed.Add(domain.DefaultRetentionWindow)) {
-		t.Fatalf("expiry: got %v, want %v", got.ExpiresAt, fixed.Add(domain.DefaultRetentionWindow))
+	if !got.CreatedAt.Equal(fixed) {
+		t.Fatalf("created_at: got %v, want %v", got.CreatedAt, fixed)
 	}
 }
 
@@ -337,36 +337,6 @@ func TestDeployToSlug_FreesOldChargesNewDelta(t *testing.T) {
 	// The freed budget now admits a NEW deploy.
 	if _, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": string(bytes.Repeat([]byte("Z"), 5000))})), owner); err != nil {
 		t.Fatalf("5000B new deploy should fit after the shrink freed budget: %v", err)
-	}
-}
-
-// TestDeployToSlug_ExpiredOldRowNotCredited pins the replace-delta quota
-// against an EXPIRED-but-unswept site. Re-deploying resurrects it, but the old
-// bytes are already excluded from the owner's active sum, so they must NOT be
-// credited back: crediting them would let the owner exceed the per-identity cap
-// by the old site's size.
-func TestDeployToSlug_ExpiredOldRowNotCredited(t *testing.T) {
-	d, _, _ := deployFixture(t)
-	owner := "key:expired"
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	d.Now = func() time.Time { return base }
-
-	// A modest site, comfortably under the cap.
-	old := gzipTar(t, map[string]string{"index.html": string(bytes.Repeat([]byte("A"), 4000))})
-	r, err := d.Deploy(bytes.NewReader(old), owner)
-	if err != nil {
-		t.Fatalf("initial deploy: %v", err)
-	}
-
-	// Advance past the site's retention window: it is now expired but not
-	// yet swept (still present, still owned, Get still returns it).
-	d.Now = func() time.Time { return base.Add(domain.DefaultRetentionWindow + time.Hour) }
-
-	// Re-deploy at a size OVER the cap. With the expired old bytes correctly NOT
-	// credited, the budget is the full empty cap and a >cap archive is rejected.
-	big := gzipTar(t, map[string]string{"index.html": string(bytes.Repeat([]byte("B"), int(domain.UserQuotaBytes)+2000))})
-	if _, err := d.DeployToSlug(r.Site.Slug, bytes.NewReader(big), owner); !errors.Is(err, ErrOverQuota) {
-		t.Fatalf("re-deploy of an EXPIRED site over the cap must be rejected (stale bytes must not be credited): got %v, want ErrOverQuota", err)
 	}
 }
 

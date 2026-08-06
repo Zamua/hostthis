@@ -57,7 +57,6 @@ func mdBenchServer(blobs BlobReader, sha string, updatedAt time.Time) (http.Hand
 		Kind:       domain.KindMarkdown,
 		ContentSHA: sha,
 		UpdatedAt:  updatedAt,
-		ExpiresAt:  updatedAt.Add(7 * 24 * time.Hour),
 	}
 	srv := &Server{
 		Pastes:     stubPasteReader{p: paste},

@@ -105,7 +105,6 @@ func TestBareURL_HTMLPaste_Cacheable(t *testing.T) {
 		Kind:       domain.KindHTML,
 		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
 		UpdatedAt:  now,
-		ExpiresAt:  now.Add(7 * 24 * time.Hour),
 	}
 	cc, _ := cachePosture(t, p, []byte("<!doctype html><h1>x</h1>"), "/p/abc23456", "text/html")
 	if cc != "public, max-age=3600" {

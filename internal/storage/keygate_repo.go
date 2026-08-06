@@ -25,6 +25,11 @@ func NewKeyGateRepo(db *sql.DB) *KeyGateRepo { return &KeyGateRepo{db: db} }
 //
 // The count and the insert are one BEGIN IMMEDIATE transaction, so two
 // concurrent fresh keys from one subnet cannot both win the last slot.
+//
+// The same transaction drops this subnet's out-of-window rows. That is what
+// keeps the table bounded without a background prune: a row outside the window
+// cannot change any admission decision, so the read that walks past it is
+// entitled to remove it (docs/SPEC.md "Sybil rate limit").
 func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPerSubnet int, window time.Duration) (knownAlready bool, err error) {
 	if identity == "" || subnet == "" {
 		return false, fmt.Errorf("identity + subnet required")
@@ -43,8 +48,15 @@ func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitP
 		return false, fmt.Errorf("lookup: %w", err)
 	}
 
-	// Fresh key: count this subnet's in-window fresh-key rows.
+	// Fresh key: drop this subnet's expired rows, then count what remains.
+	// Deleting first means the count below reads a table this transaction has
+	// already cleaned, so the two can never disagree.
 	windowStart := now.Add(-window)
+	if _, err := tx.Exec(`
+		DELETE FROM key_first_seen WHERE ip_subnet = ? AND first_seen_at <= ?
+	`, subnet, formatTime(windowStart)); err != nil {
+		return false, fmt.Errorf("prune expired: %w", err)
+	}
 	var freshCount int
 	if err := tx.QueryRow(`
 		SELECT COUNT(*) FROM key_first_seen
@@ -97,18 +109,6 @@ func (r *KeyGateRepo) SubnetsForIdentity(identity string, now time.Time, window 
 		return 0, fmt.Errorf("subnets for identity: %w", err)
 	}
 	return n, nil
-}
-
-// DeleteFirstSeenOlderThan removes key_first_seen rows older than cutoff. Past
-// the window they can never contribute to a rate-limit count again, and without
-// the prune the table grows forever.
-func (r *KeyGateRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
-	res, err := r.db.Exec(`DELETE FROM key_first_seen WHERE first_seen_at < ?`, formatTime(cutoff))
-	if err != nil {
-		return 0, fmt.Errorf("prune key_first_seen: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
 }
 
 // ErrTooManyNewKeys is returned by AdmitNewKey when the subnet has hit its
