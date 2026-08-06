@@ -24,13 +24,11 @@ var ErrOverUserQuota = domain.ErrOverUserQuota
 // PasteRepo is the sqlite-backed implementation of paste persistence.
 type PasteRepo struct {
 	db *sql.DB
-	// Retention re-stamps ExpiresAt on update. The composition root overrides
 	// the default.
-	Retention domain.Retention
 }
 
 func NewPasteRepo(db *sql.DB) *PasteRepo {
-	return &PasteRepo{db: db, Retention: domain.DefaultRetention()}
+	return &PasteRepo{db: db}
 }
 
 // InsertWithQuotaCheck checks the identity's active bytes against userCap and
@@ -245,7 +243,6 @@ func (r *PasteRepo) Unpin(slug domain.Slug) error {
 type AppendResult = domain.AppendResult
 
 // AppendVersionWithQuotaCheck checks the owning identity against userCap,
-// inserts a version row, resets the retention clock, and (only when the paste
 // is unpinned) rolls the denormalized head fields so the public URL serves the
 // new bytes. A pinned paste records the version without serving it until the
 // owner unpins or repins. All of it runs under one BEGIN IMMEDIATE.
