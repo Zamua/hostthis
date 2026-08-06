@@ -1,7 +1,11 @@
-// ShaleRepo's KeyGateRepo implementation (the Sybil rate limit): admit /
-// snapshot / prune of the keygate/<subnet>/<identity> rows and the
-// identity_first_seen family, each a single-{subnet}- or {id}-shard op. The
-// key layout and transaction model are documented in shale_repo.go.
+// ShaleRepo's KeyGateRepo implementation (the Sybil rate limit): admit and
+// snapshot over the keygate/<subnet>/<identity> rows plus their identity-leading
+// view, each a single-{subnet}- or {identity}-shard op. The key layout and
+// transaction model are documented in shale_repo.go.
+//
+// Out-of-window rows are dropped by the scans that already walk them rather
+// than by a background pass, so the family stays bounded with no cross-shard
+// fan-out and no schedule (docs/SPEC.md "Sybil rate limit").
 
 //go:build slatedb
 
@@ -9,7 +13,6 @@ package storage
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -59,11 +62,17 @@ func (r *ShaleRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 	for _, item := range items {
 		t, perr := time.Parse(time.RFC3339Nano, string(item.Value))
 		if perr != nil {
+			// An undecodable row cannot be shown to be out of window, so it is
+			// left alone rather than deleted: skipping under-counts (the gate
+			// admits one too many), deleting would destroy a row that may still
+			// be inside the window.
 			continue
 		}
 		if t.After(cutoff) {
 			freshCount++
+			continue
 		}
+		r.dropExpiredKeygateRow(item.Key)
 	}
 	if freshCount >= limitPerSubnet {
 		return false, ErrTooManyNewKeys
@@ -120,6 +129,7 @@ func (r *ShaleRepo) SubnetSnapshot(subnet string, now time.Time, window time.Dur
 			continue
 		}
 		if !t.After(cutoff) {
+			r.dropExpiredKeygateRow(item.Key)
 			continue
 		}
 		count++
@@ -160,6 +170,12 @@ func (r *ShaleRepo) SubnetsForIdentity(identity string, now time.Time, window ti
 			continue
 		}
 		if !t.After(cutoff) {
+			// The identity-leading view is derived, so dropping an expired entry
+			// here needs no coordination with the authoritative row: both age out
+			// of the same window.
+			if err := r.cluster.Delete(item.Key); err != nil {
+				r.repoLog().Printf("keygate: drop expired identity entry %s: %v (it stops counting regardless)", item.Key, err)
+			}
 			continue
 		}
 		seen[subnet] = struct{}{}
@@ -167,37 +183,22 @@ func (r *ShaleRepo) SubnetsForIdentity(identity string, now time.Time, window ti
 	return len(seen), nil
 }
 
-func (r *ShaleRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
-	items, err := r.aggregateForBackground([]byte("keygate/"))
-	if err != nil {
-		return 0, err
+// dropExpiredKeygateRow removes one out-of-window authoritative row and its
+// identity-leading view. Best-effort by design: the row is already outside the
+// window, so it counts toward nothing whether or not the delete lands, and a
+// failure must never turn an admission into an error.
+func (r *ShaleRepo) dropExpiredKeygateRow(key []byte) {
+	if err := r.cluster.Delete(key); err != nil {
+		r.repoLog().Printf("keygate: drop expired row %s: %v (it stops counting regardless)", key, err)
+		return
 	}
-	deleted := 0
-	for _, item := range items {
-		t, perr := time.Parse(time.RFC3339Nano, string(item.Value))
-		if perr != nil {
-			continue
-		}
-		if t.Before(cutoff) {
-			if err := r.cluster.Delete(item.Key); err != nil {
-				return deleted, fmt.Errorf("delete %s: %w", item.Key, err)
-			}
-			// Drop the identity-leading view of the same fact. Without it the
-			// derived index outlives the authoritative row and whoami keeps
-			// counting subnets the gate has forgotten: an over-report that
-			// grows without bound, since nothing else removes these.
-			rest := strings.TrimPrefix(string(item.Key), "keygate/")
-			if idx := strings.LastIndex(rest, "/"); idx >= 0 {
-				subnet, identity := rest[:idx], rest[idx+1:]
-				idKey := shaleKeyKeygateIdentity(identity, subnet)
-				if err := r.cluster.Delete(idKey); err != nil {
-					// Best-effort, like the write: the reconciler prunes an
-					// identity entry whose authoritative row is gone.
-					r.repoLog().Printf("keygate: identity index prune for %s failed: %v (next reconcile drops it)", idKey, err)
-				}
-			}
-			deleted++
-		}
+	rest := strings.TrimPrefix(string(key), "keygate/")
+	idx := strings.LastIndex(rest, "/")
+	if idx < 0 {
+		return
 	}
-	return deleted, nil
+	idKey := shaleKeyKeygateIdentity(rest[idx+1:], rest[:idx])
+	if err := r.cluster.Delete(idKey); err != nil {
+		r.repoLog().Printf("keygate: drop expired identity entry %s: %v (it stops counting regardless)", idKey, err)
+	}
 }

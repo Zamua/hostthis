@@ -4,14 +4,13 @@ package storage_test
 
 // A value written at ReplicationFactor>1 is stored wrapped in an LWW envelope
 // (magic byte + Stamp + payload). The cluster layer unwraps only on the
-// single-key Get path: cross-shard Aggregate, single-shard ScanPrefix, and raw
-// CAS tx.Get all hand back the raw stored bytes, which the aggregate / scan /
-// counter consumers decode as JSON or integers. One enveloped record therefore
-// poisons every service-wide quota pre-check and listing unless the scan paths
-// strip it.
+// single-key Get path: single-shard ScanPrefix and raw CAS tx.Get both hand
+// back the raw stored bytes, which their consumers decode as JSON or integers.
+// One enveloped record therefore poisons every listing and quota figure unless
+// the scan paths strip it.
 //
-// Pins that they do: drop a strip in scanPrefix / aggregatePrefix and
-// ListVersions / ReferencedBlobSHAs fail with "invalid character" decode errors.
+// Pins that they do: drop the strip in scanPrefix and ListVersions / the
+// cached-size repair fail with "invalid character" decode errors.
 //
 //	go test -tags slatedb -run TestShaleEnvelopeStrip ./internal/storage
 //
@@ -47,7 +46,6 @@ func TestShaleEnvelopeStrip_ScanPathsDecodeEnvelopedValue(t *testing.T) {
 		Size:       99,
 		CreatedAt:  now,
 		UpdatedAt:  now,
-		ExpiresAt:  now.Add(domain.DefaultRetentionWindow),
 	}
 	pasteVal, err := storage.LegacyPasteValueForTest(p)
 	if err != nil {
@@ -82,13 +80,17 @@ func TestShaleEnvelopeStrip_ScanPathsDecodeEnvelopedValue(t *testing.T) {
 		t.Fatalf("enveloped version did not round-trip via scanPrefix: %+v", vers)
 	}
 
-	// aggregatePrefix path: the cross-shard scan the blob GC + service-wide
-	// quota pre-check run on.
-	refs, err := repo.ReferencedBlobSHAs()
-	if err != nil {
-		t.Fatalf("ReferencedBlobSHAs over an enveloped version row: %v", err)
+	// The repair-on-read path: ListByOwner reads the enveloped version rows to
+	// recompute the live sum, so a missing strip surfaces as a WRONG cached
+	// size rather than a decode error the caller sees. Seed a deliberately
+	// wrong cached size first, or the repair has nothing to correct and the
+	// assertion passes whether or not the strip works.
+	idxKey := storage.IdentityPasteKeyForTest(owner, slug.String())
+	writeIndexEntryJSON(t, repo, idxKey, 1, now)
+	if _, err := repo.ListByOwner(owner); err != nil {
+		t.Fatalf("list over an enveloped version row: %v", err)
 	}
-	if !sliceHasMig(refs, sha) {
-		t.Fatalf("enveloped version sha must be referenced: %v should contain %q", refs, sha)
+	if got := readCachedIndexSize(t, repo, idxKey); got != p.Size {
+		t.Fatalf("the repair must decode the enveloped version row and correct the cached sum: got %d, want %d", got, p.Size)
 	}
 }

@@ -639,14 +639,17 @@ freshest uploads, in exchange for hiding the ~250 ms blob-write latency
 from every uploader. The reconciler's age-out makes the failure mode
 observable + self-correcting rather than silent.
 
-### Reconciler: age out stuck pendings
+### Ageing out stuck pendings
 
-The metadata reconciler gains one job: a paste whose `status=pending`
-and whose `created_at` is older than the pending timeout is transitioned
-to `failed`, so its bytes drop out of the quota scan. This is the backstop
-for the pod-death case (the bytes are gone, no finalizer will ever run). It uses
-the same idempotent, decode-tolerant per-row discipline the reconciler's
-other jobs use: one poisoned row never stalls the pass.
+A paste whose `status=pending` and whose `created_at` is older than the
+pending timeout is transitioned to `failed`, so its bytes drop out of the
+quota scan. This is the backstop for the pod-death case: the bytes are gone
+and no finalizer will ever run.
+
+It happens on the owner's own `list`, which already reads each row, rather
+than on a background pass. Only the detached-store path can produce a
+pending paste at all - the shale-collocated path commits READY with the
+bytes already durable - so on the deployed shape this case does not arise.
 
 ## Static site archives
 
@@ -663,7 +666,7 @@ There is no new verb and no flag. hostthis DETECTS the archive the same
 way it detects Markdown vs HTML (by sniffing the upload), safe-untars
 it, stores each file as a content-addressed blob plus a manifest, and
 serves the directory at `<slug>.hostthis.dev/<path>`. Everything else -
-identity, quota, the retention window, versioning, the security model - is
+identity, quota, versioning, the security model - is
 identical to a single-file paste. A static site is just "a paste that
 happens to be a directory."
 
@@ -760,8 +763,7 @@ A **Site** is a new domain aggregate that lives alongside `Paste`:
 - `Manifest` - the value object mapping each safe relative path to the
   SHA256 of its blob, plus per-file size and a content-type derived
   from the file extension.
-- `CreatedAt` / `UpdatedAt` / `ExpiresAt` - the same fields and the
-  same retention clock a paste carries.
+- `CreatedAt` / `UpdatedAt` - the same fields a paste carries.
 
 The `Manifest` is a pure value object: building it from extracted
 entries, looking a path up in it, and computing each file's
@@ -903,7 +905,7 @@ page. Path mode (`--mode path`, dev-only) collapses every site onto
 the shared apex origin and breaks this isolation exactly as it does for
 pastes; production runs subdomain mode.
 
-### Reuse: identity, quota, retention, versioning
+### Reuse: identity, quota, versioning
 
 Nothing about the product opinions changes for sites:
 
@@ -919,8 +921,6 @@ Nothing about the product opinions changes for sites:
   untar on the UNCOMPRESSED running total (a memory/bomb bound, so the
   guard is at worst more conservative than the charge), so a site can
   never be persisted over-quota.
-- **Retention** is the same retention window as a paste, from last update; a
-  site evicts itself exactly like a paste, no per-site control.
 - **Versioning** reuses the paste-versioning shape where it is low-cost:
   a deploy to an OWNED site slug re-deploys the site in place (same slug,
   same URL, new immutable manifest), so rollback / history ride the
@@ -947,8 +947,8 @@ site-vs-paste, the slug decides new-vs-update.
   exactly (see "Upload (update an existing slug)").
 - **Atomic replace.** The new manifest's blobs are all written first;
   then a single transaction swaps the `sites/<slug>` row (new manifest,
-  new `DedupedSize`, refreshed `UpdatedAt` + `ExpiresAt`) and re-keys
-  the expiry index. The URL keeps serving the OLD manifest until that
+  new `DedupedSize`, refreshed `UpdatedAt`). The URL keeps serving the OLD
+  manifest until that
   swap lands, and serves the new one immediately after; a half-finished
   re-deploy never serves a partial site.
 - **Quota is the replace DELTA.** The owner is charged the new site's
@@ -959,12 +959,10 @@ site-vs-paste, the slug decides new-vs-update.
   mid-untar decompression-bomb guard still bounds extraction against the
   remaining budget so an over-quota archive is rejected before any blob
   lands.
-- **Retention resets.** Like a paste update, the retention clock
-  restarts from the re-deploy time.
 
 A re-deploy to an existing slug NEVER lands as a fresh slug: the slug is
 the explicit target. The fresh-random-slug path is only the no-slug
-create case. The expiry-window `EnsureUnique` slug collision dance (the
+create case. The `EnsureUnique` slug collision dance (the
 random-slug retry loop) does NOT apply to a targeted re-deploy.
 
 ### Byte-identical validation harness
@@ -1034,7 +1032,7 @@ Three nouns, in a strict containment hierarchy:
   both where the app's files live and where its rooms API is served. An
   app's identity is that slug; there is no second registration step. There
   IS, however, an existence requirement: the slug must name a live (non
-  expired) site or paste. `POST /api/rooms` against a slug that names no
+  site or paste. `POST /api/rooms` against a slug that names no
   live app is a **404**, so rooms can only ever be created under a slug an
   operator-facing upload actually provisioned. This ties the per-app
   caps (creation rate limit + aggregate byte cap) to a finite, provisioned
@@ -1169,10 +1167,10 @@ Behavior, endpoint by endpoint:
   `<key>`, creating or overwriting. Subject to the per-room data cap (see
   "Quota and abuse"); a write that would push the room over the cap is
   rejected (HTTP 413) and the prior value is left intact. A successful
-  write resets the room's retention clock (see "Retention").
+  write moves the room's `UpdatedAt`.
 - **DELETE /api/rooms/<uuid>/<key>** removes the value. Idempotent:
   deleting an absent key is a success (the post-condition - "the key is
-  gone" - holds either way). A delete also resets the retention clock,
+  gone" - holds either way). A delete also moves `UpdatedAt`,
   since it is a write to the room.
 
 A malformed UUID (not a parseable UUIDv4) is a **400**, distinct from the
@@ -1212,7 +1210,7 @@ pattern exactly the way the paste repo and the shale `ShaleRepo` do:
   be deployed on, including the slatedb-direct backend prod runs. The
   domain, HTTP, and service layers stay unaware of which backend is wired.
 - The sqlite backend stores rooms in two tables, `rooms`
-  (`(app_slug, room_id)` primary key + the retention clock) and `room_kv`
+  (`(app_slug, room_id)` primary key) and `room_kv`
   (`(app_slug, room_id, key)` primary key + the opaque value, FK-cascade
   on the room), plus a bounded `room_creates` table for the creation rate
   limit. Every read and write is scoped by the `(app_slug, room_id)` pair,
@@ -1280,17 +1278,11 @@ informs them):
 - **Per-app aggregate.** A popular app's rooms in aggregate are bounded by
   **default 64 MiB of room data per app** (and the room-creation rate
   limit caps the growth rate). Past the per-app aggregate, new room
-  creation and new writes for that app return **507** until rooms expire
-  and free space. This is the room-tier analogue of the per-identity paste
+  creation and new writes for that app return **507** until the app deletes
+  rooms or values. This is the room-tier analogue of the per-identity paste
   quota: it stops one app from consuming the whole service. It is flagged
   as a starting default - an operator running many apps may want it lower,
-  a single-app operator higher. **The per-app aggregate is counted at SWEEP
-  time, not read time, on every backend:** an expired-but-not-yet-swept
-  room's bytes still count toward the app's cap until the periodic sweep
-  deletes the room (which cascades its values). This is a deliberate
-  fail-safe choice - the cap can transiently OVER-count an expired-unswept
-  room (rejecting a write slightly early, which the client retries after the
-  sweep) but never UNDER-counts (admitting a write past the real cap). It
+  a single-app operator higher. It
   differs from the per-IDENTITY paste/site quota, which the sqlite + slatedb
   backends free at READ time; the per-app room aggregate is uniformly
   sweep-time so the cap behaves identically across sqlite, slatedb, and
@@ -1306,22 +1298,6 @@ informs them):
   structural bound on a room's growth, and a reverse-proxy per-IP rate
   limit remains the appropriate layer for raw request-rate abuse, exactly
   as for the paste path.
-
-### Retention
-
-Rooms are ephemeral, consistent with hostthis's whole ethos. **A room
-expires after a fixed window of inactivity: default 30 days since its last
-write** (a `PUT` or `DELETE`; a read does not extend it). On expiry the
-room record and every value in its namespace are deleted by the **same
-periodic sweep** that expires pastes and sites - one more record kind the
-sweep walks, GC'd through the existing expiry-index machinery. This 30-day
-inactivity window is the room tier's own fixed setting, independent of the
-configurable paste/site retention (`HOSTTHIS_RETENTION`): 30 days is long enough that a room
-backing a live app whose participants may return over several weeks (a poll
-open for a month, a retro board a team revisits) survives normal use.
-Still finite, still no user-facing knob, still swept automatically - the
-default is flagged as a starting point, not a contract, and like the paste
-window it is a product opinion, not an operator config.
 
 ### Scope fence
 
@@ -1399,7 +1375,7 @@ grants it. On upgrade the server validates two things and rejects
 otherwise, BEFORE completing the WebSocket handshake:
 
 - **The app slug names a LIVE app.** The same existence requirement room
-  creation rides: the slug must name a non-expired site or paste (checked
+  creation rides: the slug must name a site or paste (checked
   via the site + paste readers the router already holds). An upgrade under
   an unprovisioned slug is refused, so the relay cannot be opened under one
   of the ~10^12 well-formed-but-empty slugs. This ties the relay's per-app
@@ -1536,7 +1512,7 @@ flavors, and this is the abuse + correctness lever:
   disconnect + reload, so it lands in the room KV via the SAME
   `RoomRepo.PutValue` / `DeleteValue` the HTTP verbs use - which means it
   rides the SAME per-room and per-app caps and resets the
-  SAME retention clock. A durable mutation is therefore consistent whether
+  SAME clock. A durable mutation is therefore consistent whether
   it arrives over the relay or over `PUT /api/rooms/<uuid>/<key>`: both
   funnel through the one room repo, so the snapshot a future joiner reads
   reflects it identically.
@@ -1558,7 +1534,7 @@ checked path, and gives the live fan-out of a committed change for free.
   message-type tag inside the relayed bytes: a tag inside the payload would
   force hostthis to parse the app's message (breaking the payload-opaque
   property and the isolation argument that rests on it), and it would
-  duplicate the cap-check / retention-clock logic on a second code path. A
+  duplicate the cap-check logic on a second code path. A
   `PUT` that the server mirrors to the hub reuses the entire durable path
   unchanged and adds only the fan-out. The relay's own frames stay pure
   ephemeral broadcast - the server never persists a raw relay frame, so a
@@ -1764,10 +1740,9 @@ abuse. Durable mutations made over the relay ride the EXISTING per-room
 and per-app byte caps unchanged (they go through `PutValue`),
 so the relay opens no new path to grow the durable store past its caps.
 
-The relay adds NO state that survives a room's expiry: when a room is
-swept (its KV deleted after the retention window), any still-open
-connections to it are connections to a now-empty room, and the next
-durable read returns an empty snapshot. Live hubs are pure in-memory
+The relay adds NO state that survives a room's deletion: once a room's KV
+is gone, any still-open connections to it are connections to a now-empty
+room, and the next durable read returns an empty snapshot. Live hubs are pure in-memory
 state, GC'd when the last connection leaves; they are never persisted and
 never participate in the sweep.
 
@@ -1825,7 +1800,7 @@ is best-effort; correctness is a property of the data.
 
 The sequence lives ON the room's authoritative record
 (`rooms/<app-slug>/<uuid>`), which every backend ALREADY rewrites inside
-every durable mutation (the retention-clock touch on PUT and DELETE). It
+every durable mutation (the clock touch on PUT and DELETE). It
 is a `uint64` starting at 0 for a fresh room; each committed mutation
 assigns `seq = prior + 1` in the same transaction that commits the
 value:
@@ -1852,7 +1827,7 @@ suite:
 
 - **Every committed mutation has exactly one seq, and every seq has
   exactly one mirror frame.** This includes the idempotent DELETE of an
-  absent key: it already commits (it touches the retention clock) and
+  absent key: it already commits (it touches the clock) and
   already mirrors, so it assigns a seq like any other mutation. A seq
   bump with no frame would read as a permanent hole (a subscriber would
   re-snapshot for nothing); a frame with no seq could not be spliced.
@@ -1867,7 +1842,7 @@ suite:
   and the client reconnects - correctness is never traded for a stale
   fence).
 
-A swept (expired) room deletes its record and its seq with it; a room
+Deleting a room removes its record and its seq with it; a room
 UUID is never reused (creation mints a fresh UUIDv4), so no subscriber
 can ever observe a room's sequence regress.
 
@@ -2126,7 +2101,7 @@ top discipline the rest of the codebase follows:
   (`ScanRoom`, which reports the snapshot's seq) and durable-write
   (`PutValue` / `DeleteValue`, which return the assigned seq) verbs the
   HTTP KV handlers use - so the relay reuses the durable tier's caps and
-  retention without re-implementing them. Its only other dependencies
+  quota without re-implementing them. Its only other dependencies
   are the two small outbound ports of the multi-pod tier (the `Peers`
   address provider and the per-peer frame publisher; see "Multi-pod
   relay"), both trivially faked in tests.
@@ -2173,37 +2148,32 @@ multi-pod tier has its own gate on top of this one - the two-relay
 peer harness and the seq conformance pins - specified under "Multi-pod
 relay" (Acceptance criteria).
 
-## Retention
+## Persistence
 
-**Every paste lives for a configurable retention window from its last
-update**, then it's deleted (slug, all versions, content blob if
-unreferenced). The window is an installation-wide operator setting,
-`HOSTTHIS_RETENTION`, defaulting to **30 days**. There is no per-paste
-user control.
+**Pastes, sites and rooms persist indefinitely.** Nothing expires, there is
+no retention window, and no operator setting controls one.
 
-- `HOSTTHIS_RETENTION` accepts a window (`30d`, `7d`, `12h`, any Go
-  duration) or `off` / `never` / `0` to disable expiry entirely.
-- Initial upload: the retention clock starts.
-- Each `update <slug>` resets the clock to the full window from that moment.
-- No `touch` verb, no `--expires` flag. Time-based extension only happens
-  as a side effect of actually changing content.
-- **No-expiry policy.** When retention is `off`, content is stamped with a
-  far-future sentinel (`domain.NeverExpires`), so the periodic sweep's
-  `expires_at < now` check never matches it and the fixed-width expiry index
-  never reaches it on a cutoff scan - the record is simply never swept. The
-  `list` / `versions` surfaces and the post-upload confirmation render its
-  expiry as "never" rather than a date.
+A retention window is not a setting that defaults off, because a disabled
+feature costs what an enabled one does. Expiring content requires
+time-ordered indexes, a periodic scan of each, and a sweep whose failure
+modes are all destructive. That machinery is a standing hazard, and this
+service has no use for what it buys.
 
-Rationale for the 30-day default: hostthis is for *shareable rendered
-content* (HTML mockups, Markdown reports, demo prototypes). The default
-use case is "send this link to a coworker this week"; the short window
-forces the asker to re-host if they need it again, which catches stale-link
-rot at the source. An operator running a low-volume or private instance can
-widen the window or turn expiry off via `HOSTTHIS_RETENTION` - long-term
-hosting is not the *default* posture (see "Non-goals") but is a supported
-operator choice.
+What follows:
 
----
+- **Storage only grows.** A paste is removed when its owner deletes it, and
+  never otherwise. The quota is what bounds an identity, and it is now the
+  *only* thing that does.
+- **No clock affects correctness.** Nothing is a function of elapsed time, so
+  no answer changes because a sweep did or did not run.
+- **A link never dies.** Which is the property a paste service is for: a URL
+  shared today resolves in a year.
+
+The Sybil keygate still forgets: it admits a bounded number of new keys per
+IP subnet per rolling window, and that window only means anything if old
+entries are dropped. That is a rate limiter's sliding window, not content
+retention - it stores no user content and deleting it would lock people out
+rather than free space.
 
 ## Verbs (the `ssh hostthis.dev <verb>` surface)
 
@@ -2214,7 +2184,6 @@ With no command and no stdin, the server prints the help banner.
 ```
 cat index.html | ssh -T hostthis.dev
 https://abc12345.hostthis.dev
-expires in 30 days
 <QR code of the URL, on stderr>
 ```
 Reads stdin until EOF or the per-paste cap (10 MiB after compression;
@@ -2235,8 +2204,7 @@ the warning, so their examples stay plain.
 **QR code on create (stderr, always on)**: on a successful upload the
 server also renders a terminal QR code of the URL. The URL stays the
 *only* thing on stdout (the `slug=$(… | ssh -T hostthis.dev)` capture
-contract is unchanged); the QR is written to stderr alongside the
-`expires in 30 days` narration. Per clig.dev, stdout is the
+contract is unchanged); the QR is written to stderr. Per clig.dev, stdout is the
 machine-readable datum and stderr is human-facing narration, so
 `2>/dev/null` cleanly drops the QR for scripts. There is no flag to
 toggle it. The same QR can be re-shown for any existing paste later via
@@ -2246,7 +2214,7 @@ Optional `--name`:
 ```
 cat demo.html | ssh -T hostthis.dev --name "Acme prototype v3"
 https://abc12345.hostthis.dev
-"Acme prototype v3" - expires in 30 days
+"Acme prototype v3"
 <QR code of the URL, on stderr>
 ```
 The name is owner-only metadata for `list`; it never appears in the
@@ -2259,7 +2227,7 @@ one line, no trailing whitespace, no formatting - so pipes Just Work:
 cat foo.html | ssh -T hostthis.dev | pbcopy   # → URL only on the clipboard
 ```
 
-Everything else (expiry note, the QR code, key-onboarding nudge,
+Everything else (the QR code, key-onboarding nudge,
 warnings) prints to stderr. Pipes lose it, but the user's terminal still
 renders it because stderr is a TTY by default.
 
@@ -2271,7 +2239,7 @@ exit code 3. See the `Identity` section above.
 ```
 cat v2.html | ssh -T hostthis.dev abc12345
 https://abc12345.hostthis.dev
-v2 saved - expires in 30 days
+v2 saved
 <QR code of the URL, on stderr>
 ```
 The update path mirrors create: the URL is the only thing on stdout, and
@@ -2300,7 +2268,7 @@ described here. The slug and URL are unchanged either way. Failure modes
 See "Exit codes" below for the canonical mapping.
 
 Update creates a new immutable version under the hood (SHA-keyed blob
-ref) and resets the 30-day retention clock. What the URL serves next
+ref). What the URL serves next
 depends on pin state:
 
 - If the paste is *unpinned* (default for new uploads): the new
@@ -2316,13 +2284,13 @@ See the Pin / Unpin sections below for the full sticky semantics.
 ### List your pastes
 ```
 ssh hostthis.dev list
-SLUG       NAME                  SIZE    KIND      EXPIRES_IN   VERS
-abc12345   Acme prototype v3     1.2k    html      6d22h        v2
-x7y8z9q0   -                      540B   markdown  6d16h        v1
-qrs78901   bugfix.diff           2.1k    diff      6d2h         v1
-mnop4567   Onboarding email      3.8k    html      5d6h         v3 (pinned, latest v5)
-zwy11122   -                     800B    html      4d12h        v3 (pinned)
-portfolio2 -                    213.0k   site      27d4h        -
+SLUG       NAME                  SIZE    KIND      VERS
+abc12345   Acme prototype v3     1.2k    html      v2
+x7y8z9q0   -                      540B   markdown  v1
+qrs78901   bugfix.diff           2.1k    diff      v1
+mnop4567   Onboarding email      3.8k    html      v3 (pinned, latest v5)
+zwy11122   -                     800B    html      v3 (pinned)
+portfolio2 -                    213.0k   site      -
 ```
 **SIZE is what the item COSTS the owner, not the size of what it serves.**
 For a paste that is every LIVE version summed, so a paste at v3 shows more
@@ -2338,16 +2306,13 @@ version NUMBER, not how many versions are stored, and a paste whose v1 was
 deleted is charged for two while still displaying `v3`.
 
 Lists BOTH text pastes AND deployed static **sites** (a site shows
-`KIND=site`, its stored byte total, its expiry, and `-` in `VERS` since
+`KIND=site`, its stored byte total, and `-` in `VERS` since
 sites are not versioned). This matters because a site counts against the
 same 100 MiB per-identity quota as pastes: if `list` omitted sites, an owner
 could hit `would exceed your 100 MiB total quota` with no visible way to see
 or free what is using it (deleting the visible text pastes reclaims almost
 nothing). Listing sites makes the quota legible and the slugs copyable for
-`delete`. Sites reuse the retention policy (`EXPIRES_IN` shows the site's
-actual expiry, `never` only under a no-expiry deploy). Sorted by expiry asc
-(soonest-to-die first, so you notice things about to disappear;
-never-expiring items sort last). `NAME` column shows the user-supplied
+`delete`. Sorted most recently updated first. `NAME` column shows the user-supplied
 label or `-` if none (sites have no label, so `-`). Columns are space-padded so they stay aligned in the terminal no
 matter how long a `NAME` runs (a raw single-tab separator overflows the
 8-column tab stop as soon as one label is wide, shoving every following
@@ -2411,10 +2376,9 @@ ssh hostthis.dev whoami --output json
 **Output contract in `json` mode.** stdout carries ONLY the JSON value
 (per the stdout=machine-datum / stderr=narration split used elsewhere),
 so `... -o json | jq` is clean. Any human footer a command normally
-writes to stderr (e.g. the `versions` pin/expiry footer) is folded into
+writes to stderr (e.g. the `versions` pin footer) is folded into
 the JSON object instead of being printed separately. Timestamps are
-RFC 3339 (`2006-01-02T15:04:05Z`); a never-expiring paste serializes
-`expires_at` as `null`. Sizes are integer bytes (`size_bytes`), not the
+RFC 3339 (`2006-01-02T15:04:05Z`). Sizes are integer bytes (`size_bytes`), not the
 human `2.4k` strings. The JSON is marshaled from a dedicated view shape,
 not the internal domain types, so the wire contract is stable across
 refactors.
@@ -2430,8 +2394,6 @@ stderr line):
     "name": "Acme prototype v3",
     "size_bytes": 1234,
     "kind": "html",
-    "expires_at": "2026-07-31T15:04:05Z",
-    "expires_in_seconds": 604800,
     "served_version": 3,
     "latest_version": 5,
     "pinned_version": 3
@@ -2441,8 +2403,6 @@ stderr line):
     "name": "",
     "size_bytes": 218000,
     "kind": "site",
-    "expires_at": "2026-07-29T09:00:00Z",
-    "expires_in_seconds": 2347200,
     "served_version": null,
     "latest_version": null,
     "pinned_version": null
@@ -2463,20 +2423,15 @@ Both are emitted because json mode prints only the array - the human
 footer never reaches a script - and a consumer cannot infer which figure
 it holds: `served_version` does not say how many versions are charged,
 since a deleted version leaves a paste billed for fewer than its number
-implies. Sites reuse the retention
-policy, so `expires_at` / `expires_in_seconds` carry the site's actual
-expiry (both `null` only under a no-expiry deploy, the same as a
-never-expiring paste).
-`expires_in_seconds` is `null` when `expires_at` is `null`.
+implies.
 
 `versions <slug> -o json` - an object that folds in the stderr footer
-(pin state + paste expiry) around the version array:
+(pin state) around the version array:
 
 ```json
 {
   "slug": "abc12345",
   "pinned_version": 0,
-  "expires_at": "2026-07-31T15:04:05Z",
   "versions": [
     { "version": 4, "created_at": "2026-06-05T15:01:00Z", "size_bytes": 1400, "deleted": false, "current": true },
     { "version": 3, "created_at": "2026-06-05T14:32:00Z", "size_bytes": 1200, "deleted": false, "current": false },
@@ -2529,7 +2484,7 @@ space-joined string, so a multi-word label arrives as several tokens and
 is rejoined; quoting is optional. Omitting the label clears it:
 `ssh hostthis.dev rename abc12345` -> `label cleared.`. (The empty-string
 form `""` cannot survive the ssh argv-join, so no-label is the invocable
-clear path.) Renaming does NOT reset the expiry clock - purely metadata.
+clear path.) Renaming is purely metadata.
 
 ### Get content (read back over ssh)
 ```
@@ -2568,7 +2523,7 @@ what the original upload returned.
 slug already grants read access at that URL - so any caller may `url` /
 `qr` any slug; there is nothing to leak that the URL itself doesn't
 already expose. The verbs DO verify the target **exists and is not
-expired**: a missing or expired slug returns the standard `not found`
+**: an unknown slug returns the standard `not found`
 on stderr and exits 4, the same shape as every other not-found, so the
 behavior is uniform across verbs. A slug that names a deployed static
 site resolves the same way (a site also has a URL).
@@ -2592,16 +2547,16 @@ first. The middle column carries a status marker:
   reused; the size column is `-` since no bytes exist anymore.
 - empty - non-current, non-deleted version (still occupies quota).
 
-Stderr footer carries the pin state plus the expiry:
+Stderr footer carries the pin state:
 
 ```
-unpinned - expires in 6d22h (2026-06-13 14:32 UTC)
+unpinned
 ```
 
 or when pinned:
 
 ```
-pinned to v1 - expires in 6d22h (2026-06-13 14:32 UTC)
+pinned to v1
 ```
 
 Pipe stdout cleanly (`| awk` etc.); footer lives on stderr.
@@ -2615,7 +2570,6 @@ Sets the URL to serve a specific version and makes it sticky:
 subsequent `update`s record new versions but do not change which one
 the URL serves until the user `unpin`s or `pin`s a different one.
 
-Pinning does NOT reset the expiry clock - only `update` does that.
 
 A freshly uploaded paste is *unpinned*: the URL always serves the
 latest version, and each `update` publishes immediately.
@@ -2691,7 +2645,7 @@ canonical user-facing reference and must stay in sync with this section, the
 README, and the landing page.
 
 ```
-Pipe a rendered file in, get a URL out. Pastes expire 30 days after last update.
+Pipe a rendered file in, get a URL out. Pastes persist indefinitely.
 
 UPLOAD
 
@@ -2784,7 +2738,7 @@ The sum of an identity's active pastes' COMPRESSED bytes (counting
 EVERY non-deleted version of an updated paste) cannot exceed
 `UserQuotaBytes` (100 MiB; not operator-configurable). "Identity" is
 the SHA256 fingerprint of the uploader's ssh public key. When pastes
-expire (30 days), get deleted, or have older versions explicitly
+get deleted, or have older versions explicitly
 deleted via `delete <slug> <ver>`, the cap frees up. Over-quota uploads
 error with `would exceed your 100 MiB total quota`.
 
@@ -2845,9 +2799,9 @@ quota); the storage layer never adds the bytes up itself. When a blob
 `Put` is rejected by the object store because the bucket is at its
 quota, the blob store surfaces the `ErrServiceFull` sentinel, and the
 upload / site-deploy services translate it into a graceful
-"service is at capacity; try again after the next expiry" response.
+"service is at capacity; try again later" response.
 Rooms hold no blobs, so a room write never produces `ErrServiceFull`;
-the system recovers as old pastes, sites, and rooms expire and the
+the system recovers as owners delete content and the
 sweep reclaims their bytes, freeing room under the quota.
 
 **Why this lives at the object store, not in the app.** hostthis
@@ -2893,9 +2847,19 @@ Otherwise the session is refused at startup with exit code 6 and the
 stderr line `too many new keys from this network today`.
 
 Storage is a `key_first_seen(identity, ip_subnet, first_seen_at)`
-table, swept by the same periodic worker that deletes expired
-pastes - rows past the window are dropped to keep the table
-bounded.
+table. **Rows past the window are dropped LAZILY, by the reads that
+already touch them**, not by a background worker: an admission for a
+subnet is already scanning that subnet's rows to count them, so it drops
+the out-of-window ones on the way past, and the identity-side read does
+the same for its own key.
+
+Lazy pruning bounds the table by the set of subnets that are still
+CONNECTING, not by the set that ever connected: a subnet that never
+returns keeps its rows. That is deliberate. Those rows are outside the
+window, so they cannot change any admission decision, and each is a few
+dozen bytes. The alternative - a periodic scan of every row in the
+cluster to reclaim them - is a cross-shard fan-out running forever to
+free bytes nobody is short of.
 
 **Two access patterns, therefore two orderings.** The gate is read
 two ways, and they need opposite key orders:
@@ -2922,11 +2886,19 @@ until the table is large.
 
 The identity-leading entry is a DERIVED index. shale's transactions
 are single-shard and the two keys hash to different shards, so it
-cannot be written atomically with the authoritative row; it is
-written best-effort after the admit and REPAIRED by the reconciler,
-exactly like the enumeration indexes. Drift is therefore possible and
-bounded to a display value: a missing entry under-reports the subnet
-count until the next reconcile pass projects it.
+cannot be written atomically with the authoritative row; it is written
+best-effort after the admit. **It is NOT reconciled, and that is the
+point.**
+
+The enumeration indexes are reconciled because they feed a QUOTA, where a
+wrong number durably admits or rejects real work. This one feeds a number
+`whoami` prints. Drift costs a cosmetic inaccuracy, and it is bounded
+without any repair pass: every entry ages out of the rolling window, so a
+missing entry self-corrects the next time that key connects from that
+subnet, and a surplus entry stops counting when the window passes it.
+Reconciling it would mean two cluster-wide scans, on a schedule, forever,
+to keep a display value exact - a standing cross-shard cost paid for
+nothing that can go wrong.
 
 **Implication: same key + different subnet = a fresh registration.**
 A user who connects from a new IP (different ISP, mobile network,
@@ -2957,11 +2929,6 @@ forms and they are NOT the same:
 
 The boundary is inclusive on the allowed side: a total landing exactly on the
 cap is at the limit, not over it. A cap of zero or less means no limit.
-
-**Expiry is inclusive.** Content whose ExpiresAt equals the current instant is
-expired. The no-expiry policy is a far-future sentinel rather than a zero time,
-specifically so that a naive "has this passed" test cannot classify
-never-expiring content as expired and hand it to the sweep.
 
 ### Atomicity
 
@@ -3001,7 +2968,6 @@ no half-applied state visible to readers."
   same-identity concurrency admits a BOUNDED overshoot (one in-flight
   upload), backstopped by the object-store bucket quota (see
   "Scan-derived quota" / "The correctness argument")
-- 30-day retention as the long-term release valve
 
 *Not bounded by the protocol* (operator-layer concerns):
 - *Multi-IP Sybil via residential-proxy fleets*. An attacker with 100
@@ -3306,10 +3272,9 @@ through four small Go interfaces declared in `internal/service`:
   `SetPinnedVersion`, `Unpin`, `AppendVersionWithQuotaCheck`,
   `ListVersions`, `GetVersion`, `DeleteVersion`, `CountByOwner`,
   `SumActiveBytesByOwner`, `OwnerFirstSeen`.
-- `SweepRepo` (sweep): `ExpiredPastes`, `DeleteExpired`,
-  `ReferencedBlobSHAs`.
-- `KeyGateRepo` (keygate): `AdmitNewKey`, `DeleteFirstSeenOlderThan`,
-  `SubnetSnapshot`, `SubnetsForIdentity`.
+- `SweepRepo` (sweep):
+- `KeyGateRepo` (keygate): `AdmitNewKey`, `SubnetSnapshot`,
+  `SubnetsForIdentity`.
 
 Every backend implements all four identically. The observable contract
 those interfaces expose, not the storage internals, is the load-bearing
@@ -3335,7 +3300,7 @@ One sentinel is domain-owned without being universal:
 landed while this one was deciding what to do, leaving a decision that
 cannot be salvaged without re-reading. The operation applied NOTHING,
 which is what makes a retry safe, and the retry is the CALLER's: an
-interactive verb reports it and the user re-runs, the expiry sweep skips
+interactive verb reports it and the user re-runs, the sweep skips
 that reference and the next pass picks it up (its index entry is still
 standing, because a cascade that failed did not drop it). It lives in
 the domain because the sweep must recognise it without importing an
@@ -3363,7 +3328,7 @@ behaviors are expressed in terms of inputs and observable outputs:
   `AppendVersionWithQuotaCheck` reject (over-quota sentinel) when
   accepting the write would push the identity's active bytes above the
   per-identity cap. Active bytes are summed across every non-deleted
-  version of the identity's non-expired pastes. Quota is freed by
+  version of the identity's pastes. Quota is freed by
   `Delete` (removes the paste and all its versions) and by
   `DeleteVersion` (tombstones one version). Per-identity quotas are
   independent of each other; the durable total-bytes ceiling is a
@@ -3372,7 +3337,7 @@ behaviors are expressed in terms of inputs and observable outputs:
   counting tombstones so numbers are never reused. An unpinned paste's
   head rolls forward to the new version; a pinned paste keeps serving
   its pin. `AppendResult.NewVer` and `AppendResult.WasPinned` (pin
-  state before the append) are returned; both reset the retention
+  state before the append) are returned; both bump the
   clock.
 - **Pin / unpin.** `SetPinnedVersion` makes a version sticky and rolls
   the head to it; `Unpin` clears the pin and rolls the head back to the
@@ -3397,33 +3362,6 @@ behaviors are expressed in terms of inputs and observable outputs:
   regardless of who owns it. IDOR protection (a cross-owner read
   surfacing as not-found) lives in `Manage.requireOwner`. A backend
   must NOT add owner checks; doing so would change observable behavior.
-- **Expiry.** `ExpiredPastes(now)` returns one reference per paste whose
-  `expires_at` is at or before `now` (inclusive boundary): the slug plus,
-  on backends that keep a standalone expiry index (slatedb, shale), an
-  opaque reference to the exact index entry that surfaced it (empty on
-  backends whose scan reads the paste records themselves, like sqlite).
-  Not-yet-expired pastes are excluded and untouched. `DeleteExpired(ref)`
-  processes one reference: it deletes the paste record when it still
-  exists (the same full cascade as `Delete`) and removes the expiry-index
-  entry REGARDLESS of whether the paste record was still there, returning
-  whether a paste record was actually deleted. Removing the index entry
-  unconditionally is the load-bearing half of the contract: an entry
-  whose paste is already gone (e.g. legacy TTL-era state) would otherwise
-  resurface on every pass forever - the scan returns its slug, the
-  idempotent paste delete no-ops on the missing record, and nothing ever
-  touches the entry itself. One pass drains what it scans: a second scan
-  at the same `now` sees zero entries. The sweep counts only real paste
-  deletions (`DeleteExpired` returning true) in its deleted total - so
-  the abort-on-zero-refs data-loss guard below is not defeated by a tick
-  that merely cleaned orphaned index entries - and logs the orphaned
-  entries it cleaned as a separate count. (In dry-run the pass mutates
-  nothing, so its would-expire count is the entry count, an upper bound
-  on real deletions.) Static sites carry the same contract through
-  `SweepSites` (`ExpiredSites` / `DeleteExpiredSite` over the
-  `expiry_sites/` index); see "Static-site storage". Rooms carry it
-  through `SweepRooms` (`ExpiredRooms` / `DeleteExpiredRoom` over the
-  `roomexpiry/` index); see "Room storage on the slatedb (and shale)
-  backend".
 - **Sweep convergence guard (unreachable refs).** "One pass drains what
   it scans" holds only when the store the scan READS is the store the
   deletes WRITE. Real deployments have shown states where they diverge:
@@ -3449,35 +3387,11 @@ behaviors are expressed in terms of inputs and observable outputs:
   unguarded, and the overflow is logged). The guard never weakens abort
   semantics: scan/aggregation errors still abort the pass, and dry-run
   (which mutates nothing) neither consults nor updates it.
-- **Sweep / GC.** `ReferencedBlobSHAs` returns the set of blob
-  content-SHAs still referenced by a LIVE (non-deleted) version or
-  paste head: the head SHA of every active paste plus the content SHA
-  of every NON-DELETED version. A tombstoned version's content SHA is
-  excluded, so its blob is GC-able. The method name states what it
-  returns (the allow-list the sweep keeps), so a nil/empty return reads
-  honestly as "keep nothing" rather than the inverted "delete nothing."
-  The sweep removes any blob NOT in this set. Returning an empty set
-  while pastes exist would make the sweep treat every blob as orphan
-  and delete the whole store, so the sweep aborts the GC pass when the
-  referenced set is empty, no pastes were swept this tick, and the blob
-  store is non-empty (a fail-closed guard against a buggy backend,
-  schema misalignment, or partial restore). `ReferencedBlobSHAs` is
-  ALSO fail-closed against an undecodable record: a row it cannot
-  decode aborts the whole scan with an error and the method returns
-  that error (never a partial set). It must NEVER skip a bad record and
-  keep going, because a skipped row under-counts references - a blob a
-  skipped row still pointed at would look unreferenced and be deleted,
-  irreversible data loss. The blob sweep treats any error from
-  `ReferencedBlobSHAs` as "delete nothing this pass." See "Decode
-  tolerance is per-scan-semantics" below for why this scan is the one
-  exception to the skip-and-continue rule the other background scans
-  follow.
 - **Dry-run (observability).** The sweep has two modes, selected by the
   operator's disable flag, and a "disabled" sweep is NEVER a no-op. In
-  DRY-RUN mode it runs the full computation (which pastes/sites/rooms would
-  expire, which blobs are orphaned) and LOGS each would-be deletion, but
-  mutates nothing - no record deleted, no blob removed, no rate-limit row
-  pruned. In LIVE mode it performs the deletions. Both fail-closed guards
+  DRY-RUN mode it runs the full computation (which blobs are orphaned) and
+  LOGS each would-be deletion, but mutates nothing - no blob removed, no
+  rate-limit row pruned. In LIVE mode it performs the deletions. Both fail-closed guards
   apply in dry-run too: a dry run against a store with an undecodable
   record logs that the blob GC WOULD abort, surfacing the bad record
   without touching anything. Dry-run is how an operator earns confidence
@@ -3486,8 +3400,8 @@ behaviors are expressed in terms of inputs and observable outputs:
   third mode - the disable flag toggles dry-run vs live, and the safety net
   for a live over-deletion is the object store's versioning/soft-delete (a
   wrongly-removed blob is a recoverable prior version, not a hard loss).
-- **Owner stats.** `ListByOwner` returns the owner's active pastes
-  ordered soonest-to-expire first, with `LatestVersion` populated;
+- **Owner stats.** `ListByOwner` returns the owner's pastes ordered most
+  recently updated first, with `LatestVersion` populated;
   `CountByOwner` counts them; `SumActiveBytesByOwner` matches the quota
   math; `OwnerFirstSeen` is the earliest paste `created_at` (zero time
   when none).
@@ -3495,9 +3409,9 @@ behaviors are expressed in terms of inputs and observable outputs:
   previously-seen `(identity, subnet)` pair (no accounting), admits a
   fresh pair when the subnet is under its in-window limit, and returns
   the too-many-new-keys sentinel at the limit. Subnets are independent;
-  rows aged past the window stop counting.
-  `DeleteFirstSeenOlderThan(cutoff)` prunes rows older than `cutoff`
-  and returns the count removed.
+  rows aged past the window stop counting, and the admission scan drops
+  them as it passes. There is no separate prune entry point: pruning is a
+  side effect of the reads that already walk the rows.
 
 **Conformance suite.** `internal/storage/conformance_test.go` is a
 backend-agnostic suite that pins exactly the observable contract above.
@@ -3532,22 +3446,11 @@ shale backend will run to prove it preserves behavior. Because the
 suite asserts only the observable contract, a backend that passes it is
 a drop-in for the service layer by construction.
 
-**Canonical tombstone-GC rule (and a remaining backend divergence).**
-The chosen rule for whether a TOMBSTONED version's content SHA stays in
-the referenced set is: it does NOT. A deleted version is app-final and
-content-inaccessible, "DeleteVersion frees quota" implies the storage
-is freed too, so the blob is dropped from the referenced set and the
-sweep reclaims it. The slatedb backend already implements this rule
-(its `ReferencedBlobSHAs` filters deleted version rows). The shale
-backend adopts the same rule. The sqlite backend still diverges: its
-`SELECT DISTINCT content_sha FROM versions` has no deleted filter, so a
-tombstoned version's blob is kept until the whole paste dies. That
-divergence is a known open follow-up (bring sqlite in line with the
-canonical rule); the conformance suite asserts only the shared
-invariant both backends agree on (a still-live head SHA is always
-referenced) and pins the divergence as a documented finding rather than
-asserting a value the backends disagree on. Recoverability of a dropped
-tombstoned blob does not depend on the app keeping a reference: it is
+**Tombstoned versions release their bytes.** A deleted version is
+app-final and content-inaccessible, and "DeleteVersion frees quota"
+implies the storage is freed too, so `DeleteVersion` unbinds that
+version's blob in the same transaction that writes the tombstone.
+Recoverability does not depend on the app keeping a reference: it is
 provided beneath the app by object-store versioning plus a
 noncurrent-version lifecycle, an operator-level safety net configured
 outside this repo.
@@ -3580,45 +3483,27 @@ The deploy path's interface is:
   active SITE bytes only; the deploy path adds the paste-side sum)
 - `ListSitesByOwner(owner) ([]Site, error)` - the identity's active sites,
   so `ssh <apex> list` can show static sites alongside text pastes (a site
-  is a paste that never expires; without this it would silently consume
+  is a paste; without this it would silently consume
   quota the owner cannot see or free). Enumerates the `identity_sites/<id>/`
   index and re-reads each authoritative `sites/<slug>` row (skipping /
-  repairing a stale index entry whose row is gone), read-time expiry
-  filtered, newest-expiry-last to match the paste list ordering.
+  repairing a stale index entry whose row is gone).
 
 and the sweep path's interface is:
 
-- `ExpiredSites(now) ([]domain.ExpiredSite, error)`
-- `DeleteExpiredSite(ref domain.ExpiredSite) (bool, error)`
-- `ReferencedSiteBlobSHAs() ([]string, error)`
-
-The first two mirror the paste `SweepRepo` contract exactly (see "The
-storage contract", Expiry): the scan returns one reference per expired
-entry (the slug plus, on index-backed backends, an opaque reference to
-the exact index entry that surfaced it), and processing a reference
-removes the INDEX ENTRY regardless of whether the site record still
-exists, returning whether a record was actually deleted. Without that,
-an orphaned `expiry_sites/` entry (its record already gone) resurfaces
-on every pass and its no-op record delete is counted as a deletion
-forever. `Delete(slug)` remains on the concrete repos for the
-owner-facing removal path; the sweep does not use it.
+`Delete(slug)` is the owner-facing removal path; it unbinds the site's blobs
+in the same transaction that removes the row.
 
 #### Site key layout (slatedb)
 
 Sites mirror the paste key families. The names are new but the shapes are
 the established ones (`sites/<slug>` parallels `pastes/<slug>`,
-`identity_sites/<id>/<slug>` parallels `identity_pastes/<id>/<slug>`,
-`expiry_sites/<ts>/<slug>` parallels `expiry/<rfc3339>/<slug>` in role).
-The site expiry timestamp is fixed-width (zero-padded 9-digit nanos,
-`2006-01-02T15:04:05.000000000Z07:00`) so its byte order is time order
-exactly; it does NOT reuse the paste index's variable-width `RFC3339Nano`
-(see `ExpiredSites` above for why). Values are JSON unless noted; all
-keys are UTF-8 strings cast to bytes, the same as the paste layout:
+`identity_sites/<id>/<slug>` parallels `identity_pastes/<id>/<slug>`).
+Values are JSON unless noted; all keys are UTF-8 strings cast to bytes,
+the same as the paste layout:
 
 ```
-sites/<slug>                       JSON {Identity, Manifest, DedupedSize, CreatedAt, UpdatedAt, ExpiresAt}
+sites/<slug>                       JSON {Identity, Manifest, DedupedSize, CreatedAt, UpdatedAt}
 identity_sites/<identity>/<slug>   empty value (for "list/sum sites by identity" prefix scan)
-expiry_sites/<ts>/<slug>           empty value (for sweep prefix scan to find sites whose expires_at <= now; ts is fixed-width)
 ```
 
 The `sites/<slug>` row is the authoritative record. The `Manifest` is
@@ -3631,7 +3516,7 @@ bytes; it is `Manifest.CompressedDedupedSize()` at deploy time - the
 distinct-blob total of the STORED (post-zstd) sizes, the number charged
 against quota (matching the paste compressed basis). The two index
 families carry an empty value (the slatedb convention for marker keys,
-mirroring `identity_pastes` and `expiry`).
+mirroring `identity_pastes`).
 
 The site keys live in the SAME keyspace and the SAME SlateDB instance as
 the paste keys, so a single `Db.begin(SnapshotIsolation)` transaction can
@@ -3645,8 +3530,8 @@ enumerates every site exactly as `pastes/` enumerates every paste.
   concurrent same-identity deploys cannot both pass the cap), then:
   1. **Per-identity cap pre-check.** If `userCap > 0`, sum the owner's
      active paste bytes (`identity_pastes/<id>/*` -> non-deleted versions
-     of non-expired pastes) PLUS the owner's active site bytes
-     (`identity_sites/<id>/*` -> `DedupedSize` of non-expired sites),
+     of the owner's pastes) PLUS the owner's site bytes
+     (`identity_sites/<id>/*` -> `DedupedSize`),
      reject with the over-quota sentinel if `owned + deduped` exceeds the
      cap. (Parallels the sqlite `identityActiveBytes`.) There is no
      service-wide byte scan here: the durable total-bytes ceiling is the
@@ -3662,7 +3547,7 @@ enumerates every site exactly as `pastes/` enumerates every paste.
      conflict detection.
   3. **Atomic write.** In one transaction, `Put sites/<slug>` (the JSON
      row), `Put identity_sites/<id>/<slug>` (empty marker), and
-     `Put expiry_sites/<ExpiresAt>/<slug>` (empty marker). All three land
+     (empty marker). Both land
      or none.
 - **Re-deploy (`UpdateWithQuotaCheck`).** Re-deploy to a slug the caller
   already owns. Holds the same per-identity quota stripe, then inside one
@@ -3679,10 +3564,8 @@ enumerates every site exactly as `pastes/` enumerates every paste.
      cap. The durable total-bytes ceiling stays the object-store quota,
      surfaced as `ErrServiceFull` from the blob `Put`.
   3. **Atomic swap.** `Put sites/<slug>` (new manifest, new `DedupedSize`,
-     refreshed `UpdatedAt` + `ExpiresAt`), leave `identity_sites/<id>/<slug>`
-     in place (owner unchanged), and re-key the expiry marker: `Delete`
-     the old `expiry_sites/<oldExpiresAt>/<slug>` and `Put` the new
-     `expiry_sites/<newExpiresAt>/<slug>`. All of it lands or none; the
+     refreshed `UpdatedAt`), leave `identity_sites/<id>/<slug>`
+     in place (owner unchanged). All of it lands or none; the
      old manifest serves until the swap commits. Blobs the old manifest
      referenced are NOT eagerly deleted here - the sweep's
      reference-counted GC reclaims any now-unreferenced blob, exactly as
@@ -3690,57 +3573,12 @@ enumerates every site exactly as `pastes/` enumerates every paste.
 - **Read (`Get`).** Single `Get sites/<slug>`, decode the JSON row,
   decode the manifest. Returns the not-found sentinel for a missing slug,
   and (like the paste `Get` and the sqlite site `Get`) returns
-  expired-but-unswept rows too: the HTTP layer 404s them, the sweep
+  stale rows too: the HTTP layer 404s them, the sweep
   deletes them.
 - **Per-identity site bytes (`SumActiveBytesByOwner`).** Scan
   `identity_sites/<id>/`, `Get` each `sites/<slug>`, sum `DedupedSize` of
-  the rows whose `ExpiresAt > now`. Site-only (the service layer adds the
+  the owner's rows. Site-only (the service layer adds the
   paste sum), matching the sqlite `SiteRepo.SumActiveBytesByOwner`.
-  Read-time expiry filtering (`expires_at > now`) means an expired-unswept
-  site stops counting the instant it expires, the same read-time semantics
-  the slatedb paste sum has (`conformCaps.ExpiryFreesQuotaAtReadTime =
-  true`).
-
-#### Expiry + sweep -> KV mapping
-
-- **`ExpiredSites(now)`.** Prefix-scan `expiry_sites/`; for each
-  `expiry_sites/<ts>/<slug>` key, compare the timestamp segment and return
-  a reference (the `<slug>` plus the entry's full key as the opaque
-  IndexRef) when `ts <= now` (inclusive boundary). The site expiry timestamp
-  is a FIXED-WIDTH RFC3339 with a zero-padded 9-digit nanosecond fraction
-  (`2006-01-02T15:04:05.000000000Z07:00`), so a string compare on the key is
-  byte order == time order EXACTLY, including within a shared whole second.
-  This is NOT `time.RFC3339Nano`: that format drops trailing fractional
-  zeros (so `...00.5Z` sorts BEFORE `...00Z` because `.` < `Z`), which would
-  let a record be swept up to ~1s before its real `ExpiresAt`. The
-  fixed-width format is free here because sites have no prod data yet; the
-  pre-existing PASTE expiry index (`expiry/<rfc3339>/<slug>`) still uses
-  `time.RFC3339Nano` and carries the same latent sub-second sweep skew, but
-  it holds live prod data on slatedb so changing its key format is a
-  migration (re-keying every `expiry/` entry; a format flip alone would
-  orphan the old keys so those pastes would never expire). That migration is
-  a documented follow-up; until then the paste path keeps its current key
-  format unchanged.
-- **`DeleteExpiredSite(ref)`.** The sweep-side delete, mirroring the paste
-  `DeleteExpired`: when the `sites/<slug>` record still exists, run the
-  full owner-facing cascade (`Delete(slug)`: one transaction removing
-  `sites/<slug>`, `identity_sites/<id>/<slug>`, and the DERIVED
-  `expiry_sites/<ExpiresAt>/<slug>`), and then - in every case - remove
-  the exact OBSERVED index entry the scan surfaced (idempotent when the
-  cascade already removed it). Returns whether a site record was actually
-  deleted; only true results count into the sweep's deleted total (which
-  keeps the abort-on-zero-refs data-loss guard honest on a tick where
-  only sites expired), while an orphaned-entry cleanup is reported in the
-  cleaned count instead. `Delete(slug)` itself stays idempotent (a
-  missing row is a no-op) and remains the owner-facing removal path.
-- **`ReferencedSiteBlobSHAs()`.** Prefix-scan `sites/`, decode each
-  manifest, union every distinct `sha` it references. The sweep unions
-  this with the paste-side `ReferencedBlobSHAs` so a blob shared between a
-  site and a paste (or two sites) survives as long as ANY live record
-  references it. A site manifest references a blob unconditionally (a site
-  has no per-file tombstone), so a live site always contributes a non-empty
-  set when it holds files, which keeps the sweep's abort-on-zero-refs guard
-  honest.
 
 #### Shale reuses the layout
 
@@ -3748,7 +3586,7 @@ The shale backend reuses the slatedb site key names + JSON row schema (the
 same way it reuses the paste layout: co-location is by `ShardKeyFn`, not by
 renaming keys). Per-owner BYTE accounting is DERIVED by scanning the
 per-owner ENUMERATION index `identity_sites/<id>/<slug>` and summing the
-cached `(deduped size, expires_at)` each value-bearing entry carries - one
+cached deduped size each value-bearing entry carries - one
 `{id}`-shard scan, zero per-entry row reads, mirroring the paste quota scan
 - and the same enumeration index `ListSitesByOwner` uses to surface a
 user's sites in `list`. There is no site byte counter and no site
@@ -3760,83 +3598,88 @@ map:
 | Key family | Keys | Shard key |
 | --- | --- | --- |
 | Authoritative (per-slug) | `sites/<slug>` | `<slug>` |
-| Expiry index (per-slug) | `expiry_sites/<ts>/<slug>` | `<slug>` (slug is the LAST segment) |
 | Site enumeration index (per-identity) | `identity_sites/<id>/<slug>` | `<id>` |
 
 `sites/<slug>` joins the authoritative `{slug}` family (alongside
-`pastes/<slug>`), `expiry_sites/<ts>/<slug>` shards on its trailing slug
-like `expiry/<date>/<slug>`, and `identity_sites/<id>/<slug>` joins the
+`pastes/<slug>`), and `identity_sites/<id>/<slug>` joins the
 derived `{id}` family so it co-shards with `identity_pastes/<id>/*` (an
 owner's paste-index and site-index scans each stay single-shard). The
-`_sites` suffix keeps these from matching the bare `expiry/` and
+`_sites` suffix keeps these from matching the bare
 `identity_*` prefixes (the trailing-slash anchoring in `shaleShardKey`):
-`expiry_sites/` is not `expiry/`, and `identity_sites/` is not any other
+`identity_sites/` is not any other
 `identity_*` family.
 
 **The `identity_sites/<id>/<slug>` index is value-bearing**: the entry is
-a JSON projection caching the site's deduped size and `expires_at`, which
+a JSON projection caching the site's deduped size, which
 is exactly what `SumActiveSiteBytesByOwner` sums (one `{id}`-shard scan,
 zero per-entry row reads - the site mirror of the paste quota scan).
 `ListSitesByOwner` still re-reads each authoritative `sites/<slug>` row
 (repair-on-read). Because `<id>` is the first segment it co-shards with
 the paste index, so the index write rides a single-shard `{id}` CAS: the
 index-maintenance step after a deploy OR an in-place re-deploy writes the
-entry (the re-deploy refreshes the cached size + expiry), and `DeleteSite`
+entry (the re-deploy refreshes the cached size), and `DeleteSite`
 deletes it. Index touches are best-effort (a lost write leaves a missing
 or stale entry the reconciler heals, never a failed deploy). A LEGACY
 entry written before the index was value-bearing carries a one-byte
 marker (shale's `Put` rejects an empty value; an entry migrated from a
 slatedb deployment may be empty): the quota scan recognizes those two
 shapes explicitly and falls back to reading that entry's authoritative
-`sites/<slug>` row until the next reconcile pass overwrites the marker
-with the JSON projection. Sites deployed BEFORE this index existed have no
-entry; the periodic `Reconcile` pass (see below) reprojects every
-`sites/<slug>` row it scans into the per-owner index (adding missing
-entries, refreshing cached values, dropping orphans), the same "reproject
-authoritative rows, drop orphans" heal the paste `reconcileIndexes` runs,
-so a pre-index site is picked up on the next reconcile tick. Being
-idempotent, every pod running it is harmless.
+`sites/<slug>` row, and `ListSitesByOwner` rewrites the entry with the JSON
+projection when it next walks it.
 
-**Periodic reconcile.** `Reconcile` is the metadata backend's maintenance
-pass and IS wired to run periodically in production (a background ticker in
-the composition root, first pass after a short post-boot settle, then every
-~10 min). Each pass reprojects the `identity_pastes` + `identity_sites`
-enumeration indexes from the authoritative `pastes/*` + `versions/*` /
-`sites/*` scans (adding missing entries, refreshing every entry's cached
-quota values, dropping orphans even under owners with no remaining rows -
-including the pre-index backfill above) and ages out crashed pending
-pastes. The site-index reprojection (`reconcileSiteIndexes`) was previously
-reached only through the now-deleted site-reservation pass; it is re-homed
-as a standalone step driven by its own `sites/*` scan so it still runs
-every tick. This index reprojection is the SOLE quota-healing mechanism: it
-closes the crash-between-row-and-index under-count window by making the
-enumeration set complete again, and it bounds cached-value drift (a lost
-size/expiry refresh, a stale or orphaned entry) to one pass. The SET part
-of the heal (add/drop entries) is idempotent and race-free, but the cached
-VALUES the entries carry are numbers derived from a point-in-time snapshot
-of the authoritative rows - so a reprojection CAN race a live write's
-fresher refresh (an append that lands after the pass's snapshot but before
-its index write). Every reprojection and refresh index write is therefore
-GUARDED: it commits only if the entry still holds the exact value the
-computation read when it started (a per-entry conditional write through
-the same {id}-shard CAS; the pass snapshots the index BEFORE the
-authoritative scans so a guard pass proves the computed value is at least
-as fresh as the entry). On a guard conflict the write is SKIPPED and
-logged - never retried on the spot - leaving whichever value landed;
-residual staleness is bounded by one reconcile cycle (the next pass
-recomputes from fresher rows and re-guards). Guarded to lose, never to
-clobber: that is what keeps the pass safe under live traffic on any
-cadence.
+**No periodic reconcile: the index entry is written FIRST.** There is no
+maintenance pass, no ticker, and no cross-shard repair job. The write order is
+what removes the need for one.
+
+An insert spans two shards - the enumeration entry on `{id}`, the
+authoritative row on `{slug}` - and a transaction touches only one. Whichever
+is written second can be lost to a crash, so the question is only *which
+inconsistency you would rather have*:
+
+| written first | a crash leaves | visible how |
+| --- | --- | --- |
+| the row | a row with **no entry** | invisible: nothing on the `{id}` shard mentions it, so only a scan of EVERY row on EVERY shard can find it |
+| the entry | an entry with **no row** | visible: the entry is right there in the owner's own index, and the read that walks it discovers the row is gone |
+
+hostthis writes **the entry first**, so the only reachable inconsistency is the
+one a single-shard read can see and fix. `ListByOwner` walks the owner's
+entries, reads each authoritative row, and repairs what it finds:
+
+- an entry whose row is **gone** is deleted (a crashed insert, or a delete that
+  landed on `{slug}` but not `{id}`),
+- an entry whose cached size **disagrees** with the live version rows is
+  rewritten (a lost best-effort refresh after an append or a version
+  tombstone),
+- a row still **pending** past `PendingPasteTimeout` is aged to failed and its
+  entry dropped (a pod died mid-upload on the detached-store path; the
+  shale-collocated path commits READY and has no pending window at all).
+
+That read already fetches both the row and its version rows - it needs them for
+`LatestVersion` - so every repair above is free of extra I/O.
+
+**The slug is pre-checked before the entry is written.** `pastes/<slug>` and
+`sites/<slug>` are read on the `{slug}` shard first, and a taken slug returns
+the collision sentinel with no entry written. Without that, every re-mint in
+the upload's collision-retry loop would strand an entry. The pre-check is not
+atomic with the authoritative insert, so a genuine race still strands one -
+bounded, and pruned by the next `ListByOwner`.
+
+**What this costs, stated plainly.** A crashed insert leaves an entry whose
+cached bytes count against the owner's quota until a `list` prunes it. That is
+an OVER-count: it can wrongly refuse an upload, never wrongly admit one. The
+previous design had the opposite failure - a live paste that counted for
+nothing, so the cap could be genuinely breached - healed silently within a
+reconcile cycle. The trade is deliberate: a fail-safe error the owner can clear
+themselves, in exchange for deleting a cross-shard job whose partial results
+were the most dangerous machinery in the service.
 
 A site deploy spans the `{slug}` shard (the authoritative `sites/<slug>`
 write + the cross-family paste-slug collision read) and the `{id}` shard
 (the enumeration index entry), which is two CASes, but there is no counter to
 reserve against, so the deploy is a plain sequence: check quota (scan), write
-the authoritative `{slug}` row, then write the `identity_sites/<id>/<slug>`
-enumeration entry (value-bearing: the cached deduped size + expiry the quota
-scan sums; best-effort, reconciler-healed). Expiry now frees quota at
-READ time (the scan filters the cached `expires_at > now`), so
-`conformCaps.ExpiryFreesQuotaAtReadTime` is `true` for shale sites - matching
+the `identity_sites/<id>/<slug>` enumeration entry (value-bearing: the cached
+deduped size the quota scan sums), then write the authoritative `{slug}` row -
+entry first, for the reason given above - matching
 sqlite and slatedb - and `StrictIdentityQuotaUnderConcurrency` is `false` (the
 scan-check and the row-write are not atomic; the bounded same-owner
 over-admit is the accepted trade, see "The correctness argument").
@@ -3909,15 +3752,14 @@ deploy a site and read every path back byte-identically (manifest
 round-trip), list/sum a site's bytes by identity, the per-identity quota
 counts SITE bytes (a site fills the owner's quota a paste then sees, and
 vice versa), the slug-collision rejects a slug a paste already owns
-(and a paste rejects a slug a site owns), and `ExpiredSites` +
-`DeleteExpiredSite` + `ReferencedSiteBlobSHAs` drive the sweep. A backend that passes
+(and a paste rejects a slug a site owns). A backend that passes
 the extended suite is a drop-in for static-site hosting by construction.
 
 ### Room storage on the slatedb (and shale) backend
 
 The "Rooms (app persistence)" feature persists a **Room** (the owning
-app's slug + a UUIDv4 + a flat key-value namespace) plus a retention clock,
-a creation-rate ledger, and an expiry index. The sqlite backend implements
+app's slug + a UUIDv4 + a flat key-value namespace) plus a creation-rate
+ledger. The sqlite backend implements
 it as the `rooms` / `room_kv` / `room_creates` tables; this section
 specifies the **KV layout** the slatedb and shale backends use so the
 no-auth room-persistence tier runs on those backends too, not only on
@@ -3930,7 +3772,7 @@ blob-GC keep-alive set.
 already interfaces in `internal/service` (`rooms.go`, `sweep.go`),
 satisfied by the sqlite `*storage.RoomKVRepo` today. The slatedb and shale
 backends add types that ALSO satisfy them; the domain layer (`Room`,
-`RoomID`, the pure `RoomKV` cap math, `ExpiredRoom`) is backend-agnostic
+`RoomID`, the pure `RoomKV` cap math) is backend-agnostic
 and unchanged - only the storage layer is backend-specific. The
 room-write / read interface is:
 
@@ -3943,34 +3785,19 @@ room-write / read interface is:
 - `GetValue(appSlug, id, key) ([]byte, error)`
 - `ScanRoom(appSlug, id) (RoomKV, error)`
 - `PutValue(appSlug, id, key, val, appCap, now)` (per-room +
-  per-app caps; resets the retention clock)
-- `DeleteValue(appSlug, id, key, now)` (idempotent; resets the clock)
+  per-app caps; moves `UpdatedAt`)
+- `DeleteValue(appSlug, id, key, now)` (idempotent; moves `UpdatedAt`)
 - `CountRoomCreates(appSlug, subnet, now, window) (perSubnet, perApp, err)`
 
-and the sweep-side interface is:
-
-- `ExpiredRooms(now) ([]domain.ExpiredRoom, error)`
-- `DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error)`
-- `PruneOldRoomCreates(cutoff) (int, error)`
-
-The first two mirror the paste `SweepRepo` / site `SweepSites` contract
-exactly (see "The storage contract", Expiry): the scan returns one
-reference per expired entry (the (app-slug, room-id) pair plus, on
-index-backed backends, an opaque `IndexRef` naming the exact `roomexpiry/`
-entry that surfaced it; empty on sqlite, whose scan reads the `rooms`
-table itself), and processing a reference removes the INDEX ENTRY
-regardless of whether the room record still exists, returning whether a
-record was actually deleted. Without that, an orphaned `roomexpiry/`
-entry (its record already gone) resurfaces on every pass and its no-op
-record delete is counted as a deletion forever - the same pathology the
-paste and site paths fixed. `DeleteRoom(appSlug, id)` remains on the
-concrete repos as the idempotent full cascade the processing step reuses;
-the sweep does not call it directly.
+There is no sweep-side room interface. Creation-ledger rows past the
+rate-limit window are dropped by `CountRoomCreates` itself, on the scan it
+already runs to make the admission decision. `DeleteRoom(appSlug, id)` is the
+idempotent full cascade the owner-facing removal path uses.
 
 #### Room key families (slatedb)
 
 Rooms have MORE key families than sites because they carry per-key values,
-a creation-rate ledger, and an expiry index. Each is co-located in the SAME
+and a creation-rate ledger. Each is co-located in the SAME
 SlateDB instance and the SAME keyspace as the paste + site keys, so a room
 create or write is one `Db.begin(SnapshotIsolation)` transaction and a
 per-app prefix scan over `roomkv/<app-slug>/<uuid>/` enumerates exactly one
@@ -3978,10 +3805,9 @@ room's values. All keys are UTF-8 strings cast to bytes; values are JSON
 unless noted:
 
 ```
-rooms/<app-slug>/<uuid>                    JSON {CreatedAt, UpdatedAt, ExpiresAt} (the room record)
+rooms/<app-slug>/<uuid>                    JSON {CreatedAt, UpdatedAt} (the room record)
 roomkv/<app-slug>/<uuid>/<key>             raw value bytes (the stored KV pair, verbatim; not JSON)
 roomcreate/<app-slug>/<subnet>/<ts>/<uuid> empty value (one per room created; ts is fixed-width; the trailing uuid disambiguates two rooms created at the same ts, see below)
-roomexpiry/<ts>/<app-slug>/<uuid>          empty value (sweep prefix scan to find rooms whose ExpiresAt <= now; ts is fixed-width)
 ```
 
 The `roomcreate` key carries the created room's `<uuid>` as a trailing
@@ -3997,7 +3823,7 @@ strip the two trailing slash-free segments from the right to recover
 `(subnet, ts)`).
 
 The `rooms/<app-slug>/<uuid>` row is the authoritative record. On the
-**slatedb** (and sqlite) backend it holds the retention clock only: the byte
+**slatedb** (and sqlite) backend it holds the clock only: the byte
 and key counts are computed by scanning `roomkv/<app-slug>/<uuid>/` at PUT
 time, the same way the sqlite backend materializes the namespace for the
 pure `RoomKV.CanPut` cap math, serialized by the per-room `lockQuota` stripe
@@ -4013,7 +3839,7 @@ this record: a `seq` field (a `seq` column on sqlite), the dense
 per-room counter the relay's cross-pod ordering rides (see "Multi-pod
 relay: broadcast fan-out ordered by a durable per-room sequence"). It
 is incremented in the SAME transaction / CAS as every value PUT and
-DELETE - the record is already rewritten there for the retention-clock
+DELETE - the record is already rewritten there for the clock
 touch - and returned to the caller as the mutation's position in the
 room's history. The storage contract's share of the design is exactly
 three properties, pinned by the conformance suite: the seq is dense
@@ -4029,9 +3855,9 @@ needed on the KV backends.
 A value is stored **verbatim** (not
 JSON-wrapped): hostthis never parses a room value, so `roomkv/...` holds
 the exact bytes the app PUT, and a Get returns them unchanged. The two
-marker families (`roomcreate/`, `roomexpiry/`) carry an empty value, the
+marker family (`roomcreate/`) carries an empty value, the
 slatedb convention for index keys (mirroring `identity_pastes` /
-`expiry_sites`).
+`identity_sites`).
 
 The `<key>` in `roomkv/<app-slug>/<uuid>/<key>` is the app-chosen key
 validated by `ValidateRoomKey` (non-empty, `<= MaxRoomKeyLen`); the
@@ -4082,7 +3908,7 @@ rely on.
   per-identity), then in one transaction:
   1. **Per-app aggregate pre-check.** If `appCap > 0`, sum the app's
      current room bytes (scan `roomkv/<app-slug>/`, sum value lengths of
-     non-expired rooms) and refuse a new room with the app-rooms-full
+     rooms) and refuse a new room with the app-rooms-full
      sentinel once the app is already at its byte cap. (A brand-new room is
      empty, but bounding creation here keeps a full app from accumulating
      unbounded empty rooms, mirroring the sqlite `CreateRoom`.)
@@ -4090,10 +3916,9 @@ rely on.
      surfaces the slug-taken sentinel so the service retries with a fresh
      UUID (astronomically unlikely for a v4).
   3. **Atomic write.** `Put rooms/<app-slug>/<uuid>` (the JSON record:
-     `CreatedAt = UpdatedAt = now`, `ExpiresAt = now + RoomRetentionWindow`),
-     `Put roomcreate/<app-slug>/<subnet>/<ts>` (empty marker, the
-     rate-limit ledger row), and `Put roomexpiry/<ExpiresAt>/<app-slug>/
-     <uuid>` (empty marker, the sweep index). All land or none.
+     `CreatedAt = UpdatedAt = now`),
+     and `Put roomcreate/<app-slug>/<subnet>/<ts>` (empty marker, the
+     rate-limit ledger row). Both land or neither.
   The creation rate-limit COUNT is read by the service via
   `CountRoomCreates` OUTSIDE this transaction, exactly as on sqlite, so the
   creation gate stays a SOFT bound (N concurrent creators can each read the
@@ -4114,7 +3939,7 @@ rely on.
   inside one transaction:
   1. **Room-exists re-check.** `Get rooms/<app>/<uuid>`; the not-found
      sentinel if the room is gone (re-checked inside the write boundary so
-     a concurrent expiry sweep cannot delete the room between the service's
+     a concurrent delete cannot remove the room between the service's
      `GetRoom` and this write).
   2. **Per-room cap.** Scan `roomkv/<app>/<uuid>/`, materialize the
      `RoomKV`, run the pure domain `CanPut` (byte total `<= MaxRoomBytes`,
@@ -4125,25 +3950,21 @@ rely on.
      the app's room bytes and reject with the app-rooms-full sentinel (507)
      if `total + delta` exceeds `appCap`.
   4. **Upsert + touch.** `Put roomkv/<app>/<uuid>/<key>` (the new value),
-     then reset the retention clock: read the room record, delete the old
-     `roomexpiry/<oldExpiresAt>/...` index entry, write the record with
-     `UpdatedAt = now`, `ExpiresAt = now + RoomRetentionWindow`, and the new
-     `roomexpiry/<newExpiresAt>/...` entry (the same remove-and-re-add the
-     paste expiry index does on append).
+     then touch the room: read the room record and write it back with
+     `UpdatedAt = now`.
 - **Delete (`DeleteValue`).** Re-check the room exists (not-found if gone),
   `Delete roomkv/<app>/<uuid>/<key>` (idempotent: a missing key is a
   no-op - the post-condition "the key is gone" holds either way), then
-  touch the room (a delete is a write, so it resets the clock + the expiry
-  index entry).
+  touch the room (a delete is a write, so it moves `UpdatedAt`).
 - **Per-app room bytes / creation count.** The per-app aggregate sum is a
-  `ScanPrefix roomkv/<app-slug>/` summing value lengths, with NO read-time
-  expiry filter: the per-app room aggregate is the room-tier analogue of the
-  sqlite `room_kv`-grouped-by-app sum (`appRoomBytesTx`), which has no expiry
-  predicate, so an expired-but-unswept room's bytes still count toward the
-  per-app cap until the sweep deletes the room - on EVERY backend
-  (sweep-time per-app expiry, distinct from the per-identity paste/site quota
-  that sqlite + slatedb free at read time). `CountRoomCreates` scans
-  `roomcreate/<app-slug>/` (per-app), and the per-subnet count walks the same
+  `ScanPrefix roomkv/<app-slug>/` summing value lengths: the per-app room
+  aggregate is the room-tier analogue of the
+  sqlite `room_kv`-grouped-by-app sum (`appRoomBytesTx`): bytes leave the
+  per-app cap when a room or value is deleted. `CountRoomCreates` scans
+  `roomcreate/<app-slug>/` (per-app) and **drops the markers it finds past the
+  window as it goes** - they can no longer change any decision, so the read
+  that would skip them removes them, which is what keeps the family bounded
+  with no background pass and no fan-out. The per-subnet count walks the same
   per-app family and matches the `<subnet>` segment (the same way the slatedb
   `SubnetsForIdentity` walks `keygate/`), counting markers whose fixed-width
   `<ts>` (the second-to-last segment, before the trailing disambiguator
@@ -4161,62 +3982,6 @@ participated in alongside pastes and sites - no longer exists on any
 backend, so there is no cross-kind byte scan for a room PUT to run or to
 fold its bytes into.
 
-#### Expiry + sweep -> KV mapping; the fixed-width TTL timestamp
-
-- **`ExpiredRooms(now)`.** Prefix-scan `roomexpiry/`; for each
-  `roomexpiry/<ts>/<app-slug>/<uuid>` key, compare the timestamp segment
-  and return a reference (the (app-slug, uuid) pair plus the entry's full
-  key as the opaque `IndexRef`) when `ts <= now` (inclusive boundary), so
-  `DeleteExpiredRoom` can remove the EXACT entry the scan surfaced even
-  when the room record is already gone. The room expiry timestamp is a
-  **FIXED-WIDTH** RFC3339 with a
-  zero-padded 9-digit nanosecond fraction (`expirySiteTimeFormat`,
-  `2006-01-02T15:04:05.000000000Z07:00`), the SAME format the site expiry
-  index uses, so a string compare on the key is byte order == time order
-  EXACTLY, including within a shared whole second. This is NOT
-  `time.RFC3339Nano`: that variable-width format drops trailing fractional
-  zeros (so `...00.5Z` sorts BEFORE `...00Z` because `.` < `Z`), which would
-  let a room be swept up to ~1s before its real `ExpiresAt`. The room
-  expiry index is new, with no prod data, so it adopts the fixed-width
-  format from the start - the same lesson the site expiry index learned, not
-  repeated here. The `roomcreate/<app-slug>/<subnet>/<ts>/<uuid>` rate-limit
-  ledger uses the SAME fixed-width `<ts>` so a windowed `ts >= cutoff`
-  comparison is a correct lexical compare too. The **sqlite** backend's
-  `rooms.expires_at` column adopts the SAME fixed-width format
-  (`formatSiteExpiry`, matching its `sites.expires_at` column), and every
-  query that compares against it (`ExpiredRooms`) uses the fixed-width
-  operand, so the sweep's inclusive-boundary
-  sub-second ordering is correct on sqlite too - the `Rooms
-  /ExpirySubSecondOrdering` conformance subtest pins this identically across
-  all three backends. (sqlite has no standalone room-expiry index - the
-  scan reads the `rooms` table itself - so its references carry an empty
-  `IndexRef`.)
-- **`DeleteExpiredRoom(ref)`.** The sweep-side delete, mirroring the paste
-  `DeleteExpired` and site `DeleteExpiredSite`: when the `rooms/<app>/
-  <uuid>` record still exists, run the full cascade (`DeleteRoom(appSlug,
-  id)`: read the record for its `ExpiresAt`, then in one transaction
-  delete the room record, the DERIVED `roomexpiry/<ExpiresAt>/<app>/<uuid>`
-  index entry, and EVERY `roomkv/<app>/<uuid>/` value - the slatedb
-  analogue of the sqlite FK cascade), and then - in every case - remove
-  the exact OBSERVED index entry the scan surfaced (idempotent when the
-  cascade already removed it; a malformed or mismatched `IndexRef` is a
-  fail-closed error, never an arbitrary-key delete). Returns whether a
-  room record was actually deleted; only true results count into the
-  sweep's deleted total (which keeps the abort-on-zero-refs blob-GC guard
-  honest on a tick where only rooms expired - rooms hold no blobs, so they
-  never add to the keep-alive set, but a real room expiry is still a
-  "record expired this tick"), while an orphaned-entry cleanup joins the
-  cleaned count instead. `DeleteRoom` itself stays idempotent (a missing
-  room is a no-op) and remains the internal cascade; the sweep does not
-  call it directly.
-- **`PruneOldRoomCreates(cutoff)`.** Prefix-scan `roomcreate/`, delete every
-  marker whose `<ts>` (the second-to-last segment, before the trailing
-  disambiguator `<uuid>`) is before `cutoff` (`now - RoomCreateWindow`). Past
-  the window a ledger marker can never change a future rate-limit decision, so
-  the sweep drops it each tick to keep the family bounded - the same
-  discipline the key-gate prune (`DeleteFirstSeenOlderThan`) and the sqlite
-  `room_creates` prune use.
-
 #### Shale reuses the layout
 
 The shale backend reuses the slatedb room key names + JSON record schema
@@ -4229,18 +3994,14 @@ single-shard operation. The room shard map:
 | Room record (per-app) | `rooms/<app-slug>/<uuid>` | `<app-slug>` |
 | Room value (per-app) | `roomkv/<app-slug>/<uuid>/<key>` | `<app-slug>` |
 | Room-create ledger (per-app) | `roomcreate/<app-slug>/<subnet>/<ts>/<uuid>` | `<app-slug>` |
-| Room expiry index (per-app) | `roomexpiry/<ts>/<app-slug>/<uuid>` | `<app-slug>` |
 
-All four families shard on `<app-slug>`, co-locating an app's rooms, all
-their values, its creation ledger, and its expiry entries on ONE shard -
-the same co-location discipline the `{slug}` / `{id}` / `{subnet}` families
-use, and the reason "load the whole room," "write one key," and "count this
-app's creations" are each single-shard operations rather than cross-shard
-fan-outs. The room-create and room-expiry families take their app slug from
-a non-leading segment, so `shaleShardKey` extracts it by family-aware
-parsing (the expiry key's app slug is its second-to-last segment, between
-the `<ts>` and the trailing `<uuid>`), exactly as it pulls the trailing
-slug out of `expiry/<date>/<slug>` today. The `room`-prefixed family names
+All three families shard on `<app-slug>`, co-locating an app's rooms, all
+their values and its creation ledger on ONE shard - the same co-location
+discipline the `{slug}` / `{id}` / `{subnet}` families use, and the reason
+"load the whole room," "write one key," and "count this app's creations"
+are each single-shard operations rather than cross-shard fan-outs. The
+`<app-slug>` is the first segment after every room family's prefix, so
+`shaleShardKey` extracts it directly. The `room`-prefixed family names
 do not collide with the `pastes/` / `sites/` / `rooms`-vs-`roomkv`
 anchoring (the trailing-slash discipline in `shaleShardKey`:
 `roomkv/` is not `rooms/`).
@@ -4287,14 +4048,9 @@ backed by a discrete COUNTER the CAS can read-check, not by an in-CAS scan:
 The shale room path runs NO service-wide byte sum either: the durable
 total-bytes ceiling is the object-store bucket quota, and a room holds no
 blobs, so the room write is bounded only by the per-room and per-app caps.
-Sweep-time expiry
-semantics (`ExpiryFreesQuotaAtReadTime = false`) apply to the per-app room
-counter (unlike the scan-derived per-identity paste/site quota, which frees at
-read time): a room's bytes leave the per-app counter when the sweep deletes
-the expired room, not at read time, the same fail-safe over-count direction.
-This is because the per-app aggregate IS a maintained counter, decremented by
-the sweep, whereas the per-identity quota is a live scan that filters expiry.
-The
+A room's bytes leave the per-app counter when the room or the value is
+deleted: the per-app aggregate IS a maintained counter, whereas the
+per-identity quota is a live scan. The
 `Rooms/PerRoomCapConcurrentCeiling` conformance subtest fires N concurrent
 distinct-key writes into one room against the structural `MaxRoomBytes` cap and
 asserts the persisted byte total never breaches it - the gate that pins the
@@ -4368,13 +4124,9 @@ gate):
   way the paste repo is not owner-gated; the repo-level conformance pins
   that room creation under any slug succeeds, and the HTTP-layer test pins
   the 404 for a slug that names no live app.)
-- **TTL / sweep.** `ExpiredRooms` returns one reference per room whose
-  `ExpiresAt <= now` (inclusive boundary, correct sub-second ordering via
-  the fixed-width timestamp), `DeleteExpiredRoom` removes the room record
-  (cascading to its values) and the exact observed index entry regardless,
-  reporting whether a record was actually deleted - a re-scan after the
-  pass sees zero references (the drain), and re-processing a reference is
-  an idempotent no-op reporting false.
+- **Delete cascade.** `DeleteRoom` removes the room record and every value
+  in its namespace, and is an idempotent no-op on a room that is already
+  gone.
 
 A backend that passes the extended suite is a drop-in for the
 room-persistence tier by construction.
@@ -4404,9 +4156,8 @@ stay correct under eventual consistency.
 The shale backend (`ShaleRepo`) implements the same four service-layer
 interfaces every metadata backend implements: `PasteRepo` (insert +
 get on the upload path), `PasteAdmin` (list / versions / flags / delete
-+ the per-owner quota and first-seen accessors), `SweepRepo` (expired
-slugs, delete, referenced-blob set), and `KeyGateRepo` (Sybil admission
-+ pruning). No method signature changes; no caller changes.
++ the per-owner quota and first-seen accessors), `SweepRepo` (the
+referenced-blob set), and `KeyGateRepo` (Sybil admission).
 
 The key names are unchanged from the slatedb layout:
 
@@ -4414,7 +4165,6 @@ The key names are unchanged from the slatedb layout:
 pastes/<slug>                      paste row
 versions/<slug>/<NNNN>             version row
 slug_owner/<slug>                  raw identity string
-expiry/<rfc3339>/<slug>            sweep index entry
 identity_pastes/<identity>/<slug>  per-owner enumeration index (value-bearing, see below)
 identity_first_seen/<identity>     cached first-seen timestamp
 keygate/<subnet>/<identity>        Sybil first-seen timestamp
@@ -4422,8 +4172,8 @@ keygate/<subnet>/<identity>        Sybil first-seen timestamp
 
 There is deliberately **no per-owner byte counter** and **no reservation
 marker**. The per-identity quota is DERIVED by scanning the owner's
-`identity_pastes` enumeration index and summing the cached
-`(size, expires_at)` each value-bearing entry carries - one single-shard
+`identity_pastes` enumeration index and summing the cached size each
+value-bearing entry carries - one single-shard
 prefix scan, zero per-entry fan-out (see "Scan-derived quota" below). The
 write paths keep the cached values fresh and the reconciler's reprojection
 heals drift from the authoritative rows. An earlier design kept a
@@ -4450,7 +4200,7 @@ extracts the shard key as follows:
 
 | Key family | Keys | Shard key |
 | --- | --- | --- |
-| Authoritative (per-slug) | `pastes/<slug>`, `versions/<slug>/*`, `slug_owner/<slug>`, `expiry/<date>/<slug>` | `<slug>` |
+| Authoritative (per-slug) | `pastes/<slug>`, `versions/<slug>/*`, `slug_owner/<slug>` | `<slug>` |
 | Derived (per-identity) | `identity_pastes/<id>/*`, `identity_first_seen/<id>` | `<id>` |
 | Sybil gate (per-subnet) | `keygate/<subnet>/*` | `<subnet>` |
 
@@ -4481,8 +4231,8 @@ the owner's used bytes from a scan at check time - not by a maintained
 aggregate counter.
 
 The single-writer backends compute the sum from the authoritative rows.
-sqlite runs `SELECT SUM(size) ... WHERE identity=? AND expires_at>now AND
-deleted=0` inside the insert's serializable transaction. slatedb walks the
+sqlite runs `SELECT SUM(size) ... WHERE identity=? AND deleted=0` inside
+the insert's serializable transaction. slatedb walks the
 owner's `identity_pastes` / `identity_sites` index and reads each live
 row's size under a per-identity `lockQuota` stripe - cheap, because every
 read is a local engine read. On shale those per-record reads are
@@ -4501,11 +4251,9 @@ backend:
 1. Scan the owner's `identity_pastes/<id>/` enumeration index on the
    `{id}` shard (one single-shard prefix scan). Each entry is
    value-bearing: it caches the paste's live byte size (the sum of its
-   non-deleted version sizes) and its `expires_at`.
-2. Sum the cached sizes of the live entries: skip an entry whose cached
-   `expires_at <= now` (an expired paste self-excludes at read time);
-   HARD-FAIL on an entry that does not decode or that carries the
-   reconciler's fail-closed placeholder marker (see "Decode tolerance of
+   non-deleted version sizes).
+2. Sum the cached sizes: HARD-FAIL on an entry that does not decode or that carries the
+   fail-closed placeholder marker (see "Decode tolerance of
    the quota scan"). No authoritative row is read: the check is ONE prefix
    scan with zero per-entry fan-out. (One deliberate exception, the
    upgrade path: a LEGACY paste entry migrated from a slatedb deployment
@@ -4518,7 +4266,7 @@ backend:
    post-cutover reconcile.)
 3. Return the total. `SumActiveSiteBytesByOwner` is the site sibling:
    enumerate `identity_sites/<id>/` and sum each entry's cached deduped
-   size with the same expiry filter and the same fail-closed rules. (A
+   size under the same fail-closed rules. (A
    legacy site entry that still carries the pre-value-bearing marker byte
    or an empty migrated value falls back to reading its authoritative
    `sites/<slug>` row until the reconciler's reprojection enriches it.)
@@ -4529,8 +4277,8 @@ matches `ListByOwner`.
 
 **Sum the cached index values; the write paths keep them fresh.** The
 `identity_pastes` entry is value-bearing (it caches
-`name/size/created_at/expires_at`). The quota scan sums the CACHED
-`(size, expires_at)` directly - the index is both the enumeration AND the
+`name/size/created_at`). The quota scan sums the CACHED size directly -
+the index is both the enumeration AND the
 measure. The alternative (use the index only to enumerate, read every size
 from the authoritative rows) costs one head read plus one version scan per
 enumerated slug, so on a high-cardinality owner every upload's quota check
@@ -4542,7 +4290,7 @@ contract that makes the cached sum safe:
   `size` is the paste's live byte sum (its non-deleted version sizes, the
   same figure the sqlite sum computes). The insert's index write seeds it
   (v1's size); `AppendVersionWithQuotaCheck` refreshes it (together with
-  the reset expiry) after the version commits; `DeleteVersion` refreshes it
+  after the version commits; `DeleteVersion` refreshes it
   after the tombstone commits; `Delete` and `MarkFailed` drop the entry
   outright. Each refresh is a synchronous best-effort `{id}`-shard CAS
   right after the authoritative `{slug}` write, logged on failure - never
@@ -4563,7 +4311,7 @@ contract that makes the cached sum safe:
   point-in-time pass cannot clobber a fresher value a live write landed
   mid-pass - it skips and the next cycle recomputes.
 - **Stale-entry semantics are honest, not exact.** An entry whose paste
-  died of EXPIRY self-excludes (its cached `expires_at` is past). An entry
+  is absent by construction. An entry
   orphaned by a crash mid-`Delete` (or mid-`MarkFailed`) keeps counting
   its cached bytes until the reprojection prunes it - a bounded OVER-count
   that can only wrongly REJECT the owner's next upload, never admit an
@@ -4591,12 +4339,12 @@ counter.** The old three-step reserve -> write -> confirm collapses:
   bytes, so the ceiling holds however an owner splits their quota.
 - **Authoritative write** (one single-shard CAS on the `{slug}` shard,
   unchanged): write `pastes/<slug>` (or `sites/<slug>`), the version row,
-  `slug_owner/<slug>`, and the expiry index entry, with the same
+  `slug_owner/<slug>`, with the same
   slug-collision read-check (reject a slug a paste OR a site already owns).
 - **Index maintenance** (one single-shard CAS on the `{id}` shard): write
   the value-bearing `identity_pastes/<id>/<slug>` (or
   `identity_sites/<id>/<slug>`) enumeration entry - the cached
-  `(size, expires_at)` the quota scan sums - and set
+  size the quota scan sums - and set
   `identity_first_seen/<id>` if absent. It runs synchronously on the
   response path (the entry is the quota's accounting record: a deferred
   write would leave every freshly-inserted paste invisible to the owner's
@@ -4610,7 +4358,7 @@ entry (alongside removing / failing its authoritative rows);
 entry's cached size after the tombstone commits. There is NO counter
 decrement, so a lost drop/refresh is a bounded stale-cache window the
 reprojection heals - not a "markerless residual" to crash-durably protect.
-`DeleteSite` collapses to the slatedb shape (delete the row, the expiry
+`DeleteSite` collapses to the slatedb shape (delete the row, the
 entry, the file-blob binds, and the enumeration entry - no release marker,
 no size-guarded restart loop, no consume).
 
@@ -4636,22 +4384,6 @@ on total bytes regardless. The shale backend runs no service-wide byte
 scan on the write path - only the per-owner enumeration scan, bounded to
 one identity.
 
-**Expiry now frees quota at READ time, converging with the single-writer
-backends.** Because the scan filters the entry's cached
-`expires_at > now` - kept equal to the authoritative expiry by the
-insert/append-side refresh and the reprojection - an expired-but-unswept
-paste stops counting the instant it expires, exactly as sqlite and slatedb
-behave. This REMOVES
-the shale backend's old "one intentional behavior change" (the counter's
-sweep-time-only reclamation): with the counter gone, `conformCaps.
-ExpiryFreesQuotaAtReadTime` flips to `true` for shale, matching the other
-two backends. The scan-based backend now diverges from the single-writer
-backends on exactly one axis instead - strict-vs-bounded quota under
-same-identity concurrency (`StrictIdentityQuotaUnderConcurrency` flips to
-`false` for shale; the separate per-ROOM cap `StrictQuotaUnderConcurrency`
-stays `true`, since a room write is still a strict single-shard CAS) - which
-is the deliberate trade the next sections justify.
-
 ### Derived indexes and repair-on-read
 
 The per-identity family is a derived projection. `identity_pastes` and
@@ -4664,15 +4396,15 @@ index update leaves the index momentarily out of step with the
 authoritative rows. The quota sums the CACHED values of this index
 ("Scan-derived quota"), so the index must uphold two properties for the
 quota to be exact: COMPLETENESS (it eventually lists every live slug, and
-only live slugs) and FRESHNESS (each entry's cached `size` / `expires_at`
-eventually equals the authoritative live sum / expiry). Both are
+only live slugs) and FRESHNESS (each entry's cached `size` eventually
+equals the authoritative live sum). Both are
 idempotently restorable by reprojecting the authoritative rows; neither
 drifts permanently.
 
 Each `identity_pastes/<id>/<slug>` entry is **value-bearing**: it stores a
-denormalized projection (name, size, created-at, expires-at) rather than
+denormalized projection (name, size, created-at) rather than
 the empty marker the single-writer layout uses. The quota scan sums the
-cached `size` / `expires_at` directly, making the entry the owner's
+cached `size` directly, making the entry the owner's
 accounting record; every size-changing write path maintains it and the
 reconciler reprojects it (the freshness contract under "Scan-derived
 quota"). `ListByOwner` uses the index to enumerate and still re-reads each
@@ -4688,7 +4420,7 @@ eventual-consistency gap:
   for removal. The quota scan does NOT resolve entries against the head
   rows (avoiding that fan-out is its point), so a lingering stale entry
   keeps counting its cached bytes until the reconciler prunes it or its
-  cached expiry passes - the bounded over-count documented under
+  entry goes stale - the bounded over-count documented under
   "Scan-derived quota", which can only over-reject, never over-admit.
 
 `ListByOwner` does **not** repair a missing index entry (an
@@ -4714,7 +4446,7 @@ indexes** - plus the unrelated pending-paste age-out:
    missing `identity_pastes` / `identity_sites` entry, refresh every
    projection's cached values (for pastes: the head fields plus the live
    version sum, read from the `versions/*` scan; for sites: the row's
-   deduped size + expiry), and drop orphans. The orphan prune runs against
+   deduped size), and drop orphans. The orphan prune runs against
    a full aggregate of the index family - so an entry lingering under an
    owner with NO remaining authoritative rows is still dropped - and
    confirms each candidate against its authoritative row before deleting,
@@ -4828,7 +4560,7 @@ of per-identity over-admit can exhaust the store.
 reprojection).** The cached sum introduces a third window the
 authoritative-fan-out shape did not have: the enumeration entry can be
 WRONG, not just missing. It opens two ways. CRASH-shaped: a lost
-size/expiry refresh (crash or failed CAS after an append or
+size refresh (crash or failed CAS after an append or
 version-tombstone commits) leaves the entry's cached size stale. An entry
 orphaned by a crash mid-`Delete` or mid-`MarkFailed` keeps counting a dead
 record's cached bytes - an over-count, so admission stays conservative.
@@ -4840,7 +4572,7 @@ the staler sum could land LAST and silently replace the fresher one (and
 the reprojection recurs every cycle, so that clobber would repeat). Every
 such write is therefore guarded to LOSE: it commits only if the entry
 still holds the value its computation started from, and on conflict it
-skips (see "Periodic reconcile"), so a race costs at most one skipped
+skips (see "repair-on-read"), so a race costs at most one skipped
 refresh - the same stale-cache shape as a lost refresh, in whichever
 direction the surviving value errs (too small UNDER-counts, an over-admit
 shaped exactly like Window A; too large OVER-counts, wrongly rejects,
@@ -4851,55 +4583,9 @@ the same way) and prunes entries whose row is gone or failed. This is the
 deliberate trade for a fan-out-free check, and it stays inside the same
 envelope the non-atomic check-then-write contract already accepts.
 
-**Expiry and dedup.** An expired-but-unswept paste stops counting the
-instant it expires, because the scan filters `expires_at > now` on the
-entry's cached expiry, which the insert/append refresh and the
-reprojection keep equal to the authoritative one (a lost refresh is Window
-C, above). A `status=failed` paste is excluded because `MarkFailed` drops
-its enumeration entry (and the reprojection never re-adds a failed row's
-entry), so a crashed-blob upload frees its reserved space as soon as it
-fails, without any counter decrement. A whole-delete drops the entry; a
-version-delete refreshes the entry's cached size; either lost write is
-Window C, healed by the next reprojection - so the **markerless-residual
-crash window that the release marker and offline audit existed to protect
-against still does not exist as a durable state** - it was a property of
-the counter's separate decrement, and the counter is gone. Site dedup is
-unchanged: `DedupedSize` is the deduped physical size stored on the
-`sites/<slug>` row and cached on the site's enumeration entry, so
-identical files across a site still count once.
-
-**Reviving an expired-but-unswept record charges its FULL post-revival
-size.** Read-time expiry exclusion has a corollary every backend must
-enforce, or the "never DURABLY exceed the cap" property fails: because the
-scan EXCLUDES an expired-but-unswept record, any operation that RESETS that
-record's `expires_at` (revives it) has to account for the bytes the scan is
-not currently counting, or it admits a durable over-cap state. An
-expired-but-unswept record contributes 0 to `used`, so reviving it is charged
-as a FRESH write of its full post-revival size. Two operations revive:
-
-- a **site re-deploy** (`ReplaceWithQuotaCheck`) resets `expires_at`. The
-  replace normally credits the OLD row's deduped bytes against the delta, but
-  the credit is gated on the old row being LIVE (`expires_at > now`): an
-  expired old row is not in the scan's `used`, so crediting it would
-  double-subtract and admit an over-cap replace. When the target site is
-  expired the credit is zero, so the replace charges the full new deduped size.
-- a **paste update** (`AppendVersionWithQuotaCheck`) resets `expires_at`,
-  bringing the paste's existing live versions back into the sum. The scan
-  excluded the WHOLE (expired) paste, so `used` counts none of its versions;
-  the check must therefore charge the paste's post-revival total - its existing
-  non-deleted version bytes PLUS the new version, not the new version alone.
-  When the target paste is expired the check adds the sum of its non-deleted
-  version rows to `used` before comparing against the cap.
-
-All three backends enforce this (it is not shale-specific: sqlite and slatedb
-have the same read-time exclusion, so an unguarded append/replace under-charges
-on any of them). The site replace case is pinned by the
-`Sites/ReplaceRevivesExpiredChargesFull` conformance subtest and the append
-case by `AppendRevivingExpiredPasteChargesFull`, so no backend can regress.
-
 **Decode tolerance of the quota scan.** The quota scan runs on the
 synchronous write path and sums the owner's enumeration ENTRIES, so the
-fail-closed unit is the entry (Policy 3, "Decode tolerance is
+fail-closed unit is the entry (Policy 2, "Decode tolerance is
 per-scan-semantics"): an entry that does not decode HARD-FAILS the check,
 rejecting the upload rather than being skipped - skipping would
 UNDER-count and over-admit. (The one deliberate exception is the legacy
@@ -4943,7 +4629,7 @@ raw-key level - the row is then gone, so the next pass's prune drops the
 placeholder; or (3) the row otherwise disappears, same prune. Until one of
 those happens, that owner CANNOT upload - and note the trap: the normal
 self-service paths out are closed too, because `Delete`, `DeleteVersion`,
-and the expiry sweep's per-slug removal all read (and must decode) the
+and the sweep's per-slug removal all read (and must decode) the
 same corrupt row, so they fail on it as well; a persistently undecodable
 record therefore blocks that owner INDEFINITELY, not "until it heals".
 Fail-closed is still the right call - the alternative is silently
@@ -4963,23 +4649,28 @@ counter's exact-but-permanently-drifting ceiling.
 
 ### Cross-shard background operations
 
-Three operations are inherently cross-shard: the expiry sweep scans
-`expiry/*` across all `{slug}` shards, blob GC must collect every
-referenced content SHA across all `{slug}` shards, and the keygate prune
-deletes stale `keygate/*` rows across all `{subnet}` shards. These use
-shale's `Aggregate()` fan-out, which snapshots each node's local
-keyspace in parallel and merges the per-node results. Cost is the
-slowest node's scan plus one round-trip, bounded and appropriate for the
-periodic background loop these operations already run on.
+**The reconciler is the only one left.** It reprojects the
+`identity_pastes` and `identity_sites` enumeration indexes from the
+authoritative rows, which by definition needs to see every shard. It uses
+shale's `Aggregate()` fan-out, which snapshots each node's local keyspace in
+parallel and merges the per-node results: cost is the slowest node's scan
+plus one round-trip, bounded and appropriate for the background loop it runs
+on.
 
-The `SweepRepo.ReferencedBlobSHAs` contract is preserved exactly: it
-returns the set of **referenced** SHAs (the allow-list the sweep keeps),
-gathered by aggregating the head SHA of every active paste and the
-content SHA of every non-deleted version across all shards. A
-tombstoned version's content SHA is excluded, the canonical rule above.
-It must never return an empty set while pastes exist, the same
-invariant the single-writer backends hold, and the sweep's
-abort-on-zero-refs guard backstops a backend that wrongly does.
+Nothing else fans out, and in each case that is a design choice rather than
+an accident:
+
+- **Blob GC** decides reachability from each blob's own co-committed
+  pointer, so there is no global set to collect.
+- **The keygate** prunes lazily, inside the single-shard reads that already
+  walk its rows (see "Sybil rate limit").
+- **Quota** is one single-shard scan of the owner's enumeration index.
+- **Room accounting** is one single-shard scan of the app's families.
+
+**No remaining fan-out acts on ABSENCE.** The reconciler adds and repairs
+entries; a partial pass simply repairs less this time and more next. That is
+the property that used to require a fail-closed decode policy and an
+abort-on-zero-refs guard, and it is now structural rather than defended.
 
 ### Decode tolerance is per-scan-semantics
 
@@ -5000,9 +4691,8 @@ below is chosen to satisfy that invariant; where two policies would both
 satisfy availability, the one that also satisfies the invariant wins.
 
 **Policy 1 - idempotent background sweeps and the reconciler: SKIP +
-LOG, continue.** The expiry sweep (`ExpiredPastes` / `ExpiredRooms`
-and the site-expiry index walk), the keygate prune
-(`DeleteFirstSeenOlderThan` / `PruneOldRoomCreates`), and the reconciler
+LOG, continue.** The keygate's and the room ledger's lazy in-scan prunes,
+and the reconciler
 (`Reconcile` - reproject the `identity_pastes` + `identity_sites`
 enumeration indexes and age out stuck pending pastes) all treat an
 undecodable row as SKIP + LOG and CONTINUE the pass. The reconciler's
@@ -5013,15 +4703,13 @@ blast radius stays one entry, never a frozen pass. The consequence of
 skipping is bounded and self-correcting: that one record is simply not
 processed THIS pass; the next pass (the periodic loop re-runs, e.g. ~10 min
 later) retries it. This is safe ONLY because these operations are
-idempotent and re-run: expiring a slug, pruning a stale keygate marker, and
-reprojecting an enumeration index all produce the same end state whether
-they run once or many times, so deferring one record to a
-later pass costs at most latency, never correctness. A single corrupt row
-must NOT be allowed to abort the whole pass: a hard-fail there would stall
-expiry (pastes/sites/rooms stop being reclaimed), stall the keygate prune
-(the Sybil ledger grows unbounded), and stall the reconciler (drift stops
-being healed) for every healthy record too, until an operator hand-fixes
-the one bad row. The blast radius of one poisoned row must stay one row.
+idempotent and re-run: dropping a stale marker and reprojecting an
+enumeration index both produce the same end state whether they run once or
+many times, so deferring one record to a later pass costs at most latency,
+never correctness. A single corrupt row must NOT be allowed to abort the
+whole pass: a hard-fail there would stall the reconciler (drift stops being
+healed) for every healthy record too, until an operator hand-fixes the one
+bad row. The blast radius of one poisoned row must stay one row.
 This mirrors the keygate admission-count scan, which already does the
 right thing for an idempotent counter (a tolerant parse that skip +
 continues on a bad row). The skip is LOGGED so a persistently-bad row is
@@ -5085,37 +4773,14 @@ visible to an operator, not silently swallowed forever.
 
   Each skip-and-continue pass is therefore PARTIAL by design: it did the
   work for every decodable record and deferred the undecodable ones. A
-  partial expiry pass leaves an expired-but-unswept record (already a
+  partial reconcile pass leaves a stale index entry (already a
   tolerated transient state - the per-app room aggregate, for instance,
-  counts expired-unswept bytes until the sweep catches up, fail-safe in
+  over-counts until the reconciler catches up, fail-safe in
   the over-count direction). A partial reconciler pass heals what it could
   and re-attempts the rest next tick. Neither partiality can delete live
   content or under-count a quota, so both satisfy the ranking invariant.
 
-**Policy 2 - the blob-GC ref-set scan: FAIL CLOSED, abort, never skip.**
-`ReferencedBlobSHAs` (and its site sibling `ReferencedSiteBlobSHAs`) is
-the one background scan that must NOT skip a bad record. Its output is
-the ALLOW-LIST of blobs the sweep keeps; the sweep deletes every blob NOT
-in the returned set. Skipping an undecodable row here UNDER-COUNTS
-references: a blob that the skipped row still referenced is now absent
-from the keep-set, looks unreferenced, and gets DELETED - irreversible
-data loss, the exact failure the ranking invariant forbids. So a decode
-error in the ref-set scan FAILS CLOSED: it aborts the GC pass and returns
-the error, never a partial set, never a skipped row. The blob sweep
-treats that error (like the existing zero-refs guard) as "do not delete
-ANYTHING this pass." This reinforces, and is the decode-side companion
-to, the existing abort-on-zero-refs guard: both guarantee the sweep never
-deletes a blob on the basis of an incomplete reference picture. A corrupt
-row here costs a deferred GC pass (storage is reclaimed a tick late, once
-the bad row is fixed or ages out), which is always preferable to deleting
-a live blob. The asymmetry with Policy 1 is the whole point: an expiry
-sweep that skips a row under-DELETES (leaves a record alive one pass too
-long - safe, self-correcting), while a ref-set scan that skips a row
-over-DELETES (drops a live blob - unsafe, irreversible). Same mechanical
-"skip," opposite safety direction, so the ref-set scan gets the opposite
-policy.
-
-**Policy 3 - user-facing reads: UNCHANGED, keep hard-failing.** The
+**Policy 2 - user-facing reads: UNCHANGED, keep hard-failing.** The
 per-request read paths (`Get`, `ListByOwner` / `ListVersions`,
 `GetVersion`, the site manifest read, the room scan / per-key read) are
 NOT made tolerant. A user read that hits a corrupt record SHOULD surface
@@ -5131,17 +4796,16 @@ The three policies, side by side:
 
 | Scan kind | Examples | On a bad record | Why |
 | --- | --- | --- | --- |
-| Idempotent background sweep / reconciler | `ExpiredPastes`, `ExpiredRooms`, site-expiry walk, `DeleteFirstSeenOlderThan`, `PruneOldRoomCreates`, `Reconcile` (`reconcileIndexes` + `reconcileSiteIndexes` + pending age-out) | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
-| Blob-GC reference set | `ReferencedBlobSHAs`, `ReferencedSiteBlobSHAs` | FAIL CLOSED - abort the GC pass, return error, delete nothing; NEVER skip | skipping under-counts refs -> a live blob looks orphaned and is deleted (irreversible) |
+| Idempotent background sweep / reconciler | the keygate and room-ledger lazy in-scan prunes, `Reconcile` (`reconcileIndexes` + `reconcileSiteIndexes` + pending age-out) | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
 | User-facing read | `Get`, `ListByOwner`, `ListVersions`, `GetVersion`, site manifest read, room scan / per-key read | HARD-FAIL (unchanged) | a user read of corrupt data should surface an error, not silently skip |
 
 ### Shale-collocated blobs (transactional blob plane)
 
-By default the blob bytes live in a detached content-addressed store (disk or
-S3) decoupled from the metadata: every backend (sqlite, slatedb, shale) shares
-one `BlobStore`, blobs are keyed by content sha alone, and the only blob-GC is
-the global content-addressed sweep (`ReferencedBlobSHAs` + `WalkBlobs` +
-abort-on-zero). That is the model the rest of this spec describes.
+By default the blob bytes live in a detached content-addressed store on disk,
+decoupled from the metadata: every backend (sqlite, slatedb, shale) shares one
+`BlobStore` and blobs are keyed by content sha alone. **That store has no GC.**
+Its bytes are reclaimed only by deleting the store, which is why it is a
+dev/test shape: the deployed shape is the collocated plane below.
 
 A shale backend can OPTIONALLY route its blobs THROUGH the cluster, collocated
 with the metadata on the owning shard and transactionally co-committed. It is
@@ -5222,6 +4886,17 @@ age-gated, mounted-unit-local `SweepOrphans` pass reclaims orphan objects whose
 object-store ModTime is older than a generous grace (default one hour, which
 exceeds the longest stage->commit window so an in-flight upload's object is never
 swept). hostthis schedules it in the same periodic sweep loop, per node.
+
+**Reachability is per blob, so no pass acts on absence.** A bound blob's
+pointer is co-committed with the record that owns it and unbound by that
+record's delete, so whether a blob is reachable is a fact about the blob, not
+a conclusion drawn from a set of everything else.
+
+That removes an entire failure mode rather than guarding it. The retired
+alternative computed a cluster-wide keep-set and deleted every blob absent
+from it, which meant a partial scan destroyed live data - it needed a
+fail-closed decode policy and an abort-on-zero-refs guard just to be safe.
+Neither is needed now, because there is no set to be incomplete.
 
 **Within-record byte dedup is deferred.** A blob is staged under a fresh random
 blob id each time, so an unchanged file re-staged on a redeploy (or a paste
@@ -5349,7 +5024,7 @@ Two compatibility details:
 **Upgrading from earlier shale code (pre-value-maintained cached sizes) -
 deployment note.** Entries written by earlier shale versions decode fine
 but their cached `size` was never version-maintained: the old append
-refresh updated only `expires_at`, and the old reconciler projected the
+refresh updated only the cached size, and the old reconciler projected the
 HEAD row's size rather than the live version sum. Expect bounded quota
 slack at upgrade: until the first post-upgrade reconcile pass completes,
 the quota scans sum those stale cached sizes, typically UNDER-counting a
@@ -5542,7 +5217,7 @@ corresponding `ShaleConfig` field zero, so the shale default applies and a
 deployment that sets neither is byte-for-byte unchanged. A value that does
 not parse as a Go duration, or a negative one, is a configuration error:
 the daemon refuses to start rather than running with a silently
-substituted default (the same fail-loud posture as `HOSTTHIS_RETENTION`).
+substituted default.
 
 The knob that earns its keep is the read budget. During a rolling deploy a
 shard briefly hands off between nodes, and a read that lands inside that
@@ -5620,7 +5295,7 @@ patient budget and blocked for the full background span retrying a
 best-effort lookup whose error it then discarded, so a user waited half a
 minute for a value that was thrown away either way.
 
-Cross-shard background scans (the expiry sweep, the referenced-blob set,
+Cross-shard background scans (the referenced-blob set,
 the key-gate prune) retry more patiently, because no request deadline
 bounds them. How MUCH more is set by measurement rather than by feel: a
 node holds its positions unmounted for the length of a handoff, so a
@@ -5719,7 +5394,7 @@ must demonstrate on hostthis's actual data shapes:
    there is no counter that could drift across the move - the worst a move
    could do is delay a not-yet-reprojected index entry, the same transient
    under-count window the reconciler heals in steady state. The same
-   survives-intact contract holds for `slug_owner`, the expiry index
+   survives-intact contract holds for `slug_owner`, the enumeration index
    entries, and the value-bearing `identity_pastes` projections.
 
 This contract is the property the groundwork must **prove on real data**
@@ -5938,18 +5613,6 @@ The purge token is the only long-lived credential hostthis needs for
 the CDN; it's narrowly scoped (zone-level cache-purge only) so leakage
 worst-case is "attacker can purge our cache (slowing us down briefly)".
 
-### Cache-vs-expiry timing
-
-| Scenario | What happens at the CDN |
-| --- | --- |
-| Owner runs `update` on a slug | Purge fires; readers see new content within ~30s globally |
-| Owner runs `delete` on a slug | Purge fires; URL returns 404 within ~30s globally |
-| Paste expires naturally (7d) | No purge; CDN serves cached version for up to max-age (1h) after origin starts 404'ing, then revalidates and updates cache to 404 |
-
-The natural-expiry case is acceptable lag for ephemeral content - a
-recently-expired paste continuing to be reachable for an extra hour
-is not a correctness issue.
-
 ### Switching CDN providers
 
 Replacing Cloudflare with Fastly / Bunny.net / a different provider is:
@@ -6053,11 +5716,11 @@ memory constant regardless of paste size.
 
 ### Abuse reporting
 
-30-day retention is the primary defense - every paste evicts itself in a
-day even if the operator does nothing. For faster takedown, an
-operator can delete a slug's row directly from the sqlite db; the
-next read 404s and the next sweep GCs the blob. A user-facing
-"report this paste" UI is out of scope for v1.
+Content persists until its owner deletes it, so takedown is an operator
+action rather than something the clock does. An operator can delete a
+slug's row directly from the metadata store; the next read 404s and the
+next sweep GCs the blob. A user-facing "report this paste" UI is out of
+scope for v1.
 
 ---
 
@@ -6130,7 +5793,7 @@ HOSTTHIS_READY_MIN_MOUNTED_FRACTION   mount floor in [0, 1]   (default 0.5)
 - **`1`** is the strict end: every desired unit must be mounted.
 - **Malformed or out-of-range values refuse startup** with an error
   naming the variable - the same fail-loud config discipline as
-  `HOSTTHIS_RETENTION` and the shale dispatch timeouts. A typo in a
+  the shale dispatch timeouts. A typo in a
   readiness knob must not silently deploy as some other floor.
 
 ### Non-shale backends
@@ -6201,7 +5864,6 @@ sample production compose.
 - Per-identity quota (10 MiB compressed)
 - Raw-input hard fast-fail (100 MiB, prevents unbounded reads)
 - Blob compression (zstd level 3, all blobs)
-- Retention (30 days)
 - Sandbox headers (X-Frame-Options, Referrer-Policy, Permissions-Policy)
 - Slug alphabet (`abcdefghijkmnpqrstuvwxyz23456789`)
 
@@ -6231,7 +5893,7 @@ object store (a hard, exact ceiling on real physical post-compression /
 post-dedup bytes) and can put hostthis behind a reverse proxy that adds
 per-IP rate limiting on top of the Sybil gate. A rejected `Put` past the
 bucket quota surfaces to the user as a graceful "service is at capacity"
-response, and the system recovers as 30-day expiry + the sweep reclaim
+response, and the system recovers as owners delete content and the sweep reclaims
 bytes back under the quota.
 
 ---
@@ -6257,7 +5919,7 @@ proposal here is real: a gzip-tar of a static site, piped over the
 existing SSH upload surface (no new verb), is detected, safe-untarred,
 stored as content-addressed blobs plus a manifest, and served at
 `<slug>.hostthis.dev/<path>` under the same identity, quota, 30-day
-expiry, and origin-isolation model as an HTML paste. The "Static site
+and origin-isolation model as an HTML paste. The "Static site
 archives" section is the authoritative description; this bullet is kept
 only as the pointer from the future-directions framing it grew out of.
 
@@ -6379,12 +6041,6 @@ comments, but the persistence API lets a USER build them.
 These are interesting but expand the product beyond "host renderable
 content for a short window." Keep the surface small.
 
-- **Long-term storage as the default**. Out of the box every paste expires
-  after the retention window (30 days by default); the product's posture is
-  ephemeral, shareable content, not a permanent CDN. An operator running a
-  private or low-volume instance MAY widen or disable expiry via
-  `HOSTTHIS_RETENTION` (see "Retention"), but that is an operator opt-in, not
-  the public default.
 - **Binary / non-renderable file hosting**. ZIPs, photos, videos,
   arbitrary blobs are out of scope.
 - **Comments / threaded discussion**. Out of scope.
@@ -6405,7 +6061,7 @@ content for a short window." Keep the surface small.
   programmatic reference. Duplicating it as plain text would drift.
 - **GitHub (or any third-party) account linking / OAuth**. ssh keys
   alone carry identity; we don't need a second source of trust.
-- **Operator-configurable per-paste / per-identity caps + retention**.
+- **Operator-configurable per-paste / per-identity caps**.
   Those three are hardcoded as product opinions. The Sybil gate IS
   operator-tunable, and the durable total-bytes ceiling is an
   object-store bucket quota the operator sets at the storage layer (not
@@ -6421,9 +6077,6 @@ without breaking v1 semantics. These are explicit no's, not oversights.
 - **Quota display in `whoami` and `list`**: right now `whoami` shows
   only the active count, not "1.4 MiB / 10 MiB used". Probably worth
   adding so users see the cap approaching before they hit it.
-- **Owner notification when a paste expires?** Expiry is silent today.
-  A "this paste expired N ago" line in the next `list` could surface
-  it. Low priority.
 - **Mermaid as first rendered-format expansion**: confirm the goldmark
   + mermaid SVG renderer choice once we get there; for now Mermaid is
   v2+ and out of scope.

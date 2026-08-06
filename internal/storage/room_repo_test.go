@@ -2,14 +2,13 @@ package storage
 
 // Sqlite-direct room tests, pinning behavior the backend-agnostic conformance
 // suite (conformance_rooms_test.go) does not: reading back an overwritten
-// value, the expiry clock after a PUT and a DELETE, the sqlite-specific empty
+// value, the clock after a PUT and a DELETE, the sqlite-specific empty
 // IndexRef, and SumActiveRoomBytes.
 //
 // newRoomTestRepo / mkRoom are shared with room_isolation_test.go.
 
 import (
 	"bytes"
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -35,7 +34,6 @@ func mkRoom(repo *RoomKVRepo, t *testing.T, app string, now time.Time) domain.Ro
 		ID:        domain.NewRoomID(),
 		CreatedAt: now,
 		UpdatedAt: now,
-		ExpiresAt: now.Add(domain.RoomRetentionWindow),
 	}
 	if err := repo.CreateRoom(room, "10.0.0.0/24", 0, now); err != nil {
 		t.Fatalf("create room: %v", err)
@@ -64,8 +62,8 @@ func TestRoom_Overwrite(t *testing.T) {
 	}
 }
 
-// A PUT and a DELETE each restart the room's retention clock.
-func TestRoom_WriteResetsRetentionClock(t *testing.T) {
+// A PUT and a DELETE each move the room's UpdatedAt.
+func TestRoom_WriteMovesUpdatedAt(t *testing.T) {
 	repo := newRoomTestRepo(t)
 	created := time.Now().UTC().Truncate(time.Second)
 	room := mkRoom(repo, t, "app12345", created)
@@ -75,57 +73,16 @@ func TestRoom_WriteResetsRetentionClock(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 	got, _ := repo.GetRoom(room.AppSlug, room.ID)
-	wantExpiry := later.Add(domain.RoomRetentionWindow)
-	if !got.ExpiresAt.Equal(wantExpiry) {
-		t.Fatalf("put did not reset clock: expires %v, want %v", got.ExpiresAt, wantExpiry)
+	if !got.UpdatedAt.Equal(later) {
+		t.Fatalf("put did not move UpdatedAt: got %v, want %v", got.UpdatedAt, later)
 	}
 	evenLater := later.Add(24 * time.Hour)
 	if _, err := repo.DeleteValue(room.AppSlug, room.ID, "k", evenLater); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	got, _ = repo.GetRoom(room.AppSlug, room.ID)
-	if !got.ExpiresAt.Equal(evenLater.Add(domain.RoomRetentionWindow)) {
-		t.Fatalf("delete did not reset clock: expires %v", got.ExpiresAt)
-	}
-}
-
-// An expired room surfaces with an empty IndexRef on sqlite, and processing
-// that reference deletes the room and cascades to its values.
-func TestRoom_ExpiryAndCascade(t *testing.T) {
-	repo := newRoomTestRepo(t)
-	now := time.Now().UTC()
-	room := mkRoom(repo, t, "app12345", now)
-	_, _ = repo.PutValue(room.AppSlug, room.ID, "k", []byte("v"), 0, now)
-
-	// Nothing expired yet.
-	expired, err := repo.ExpiredRooms(now)
-	if err != nil {
-		t.Fatalf("expired rooms: %v", err)
-	}
-	if len(expired) != 0 {
-		t.Fatalf("room expired prematurely: %d", len(expired))
-	}
-	// IndexRef is empty on sqlite: the scan reads the rooms table itself, with
-	// no standalone index.
-	future := now.Add(domain.RoomRetentionWindow + time.Hour)
-	expired, _ = repo.ExpiredRooms(future)
-	if len(expired) != 1 || expired[0].ID != room.ID || expired[0].IndexRef != "" {
-		t.Fatalf("expired set = %+v", expired)
-	}
-	deleted, err := repo.DeleteExpiredRoom(expired[0])
-	if err != nil {
-		t.Fatalf("delete expired room: %v", err)
-	}
-	if !deleted {
-		t.Fatalf("DeleteExpiredRoom must report true for a live room row")
-	}
-	if _, err := repo.GetRoom(room.AppSlug, room.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("room survived delete: %v", err)
-	}
-	// The cascade left no orphan values.
-	kv, _ := repo.ScanRoom(room.AppSlug, room.ID)
-	if kv.KeyCount() != 0 {
-		t.Fatalf("FK cascade left %d orphan values", kv.KeyCount())
+	if !got.UpdatedAt.Equal(evenLater) {
+		t.Fatalf("delete did not move UpdatedAt: got %v", got.UpdatedAt)
 	}
 }
 

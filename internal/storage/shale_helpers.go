@@ -67,10 +67,6 @@ func shaleKeyIdentityFirstSeen(identity string) []byte {
 	return shaleKey(prefixIdentityFirstSeenAll, identity)
 }
 
-func shaleKeyExpiry(t time.Time, slug domain.Slug) []byte {
-	return shaleKey(prefixExpiryAll, t.UTC().Format(time.RFC3339Nano), "/", slug.String())
-}
-
 func shaleKeyKeygate(subnet, identity string) []byte {
 	return shaleKey(prefixKeygateAll, subnet, "/", identity)
 }
@@ -86,9 +82,9 @@ func shalePrefixKeygateIdentity(identity string) []byte {
 }
 
 // PendingPasteTimeout is how old a status=pending paste may be before the
-// reconciler ages it to failed (the pod-death backstop: its in-memory bytes
+// owner's next list ages it to failed (the pod-death backstop: its in-memory bytes
 // never reached the blob store). It must comfortably exceed a healthy blob write
-// plus retries so the reconciler never races a live finalizer, while staying
+// plus retries so the age-out never races a live finalizer, while staying
 // short enough that a lost-bytes paste self-heals out of the loading screen
 // within a sweep tick or two. A var, not a const, so tests can shrink it.
 var PendingPasteTimeout = 2 * time.Minute
@@ -97,24 +93,23 @@ var PendingPasteTimeout = 2 * time.Minute
 
 // identityPasteRow is the value-bearing projection stored at
 // identity_pastes/<id>/<slug>. Size caches the paste's LIVE byte sum (its
-// non-deleted version sizes) and ExpiresAt its retention deadline, so the quota
-// scan sums exactly these two cached fields in one prefix scan with zero
-// per-entry fan-out (docs/SPEC.md "Scan-derived quota"). The entry is derived
+// non-deleted version sizes), so the quota scan sums exactly that cached field
+// in one prefix scan with zero per-entry fan-out (docs/SPEC.md "Scan-derived
+// quota"). The entry is derived
 // and eventually consistent: every size-changing write path maintains it and the
 // reconciler rebuilds it from the authoritative pastes/* + versions/* rows, so
-// cached-value error is bounded by a reconcile cycle.
+// cached-value error is bounded by the owner's next read.
 type identityPasteRow struct {
 	Name      string    `json:"name"`
 	Size      int       `json:"size"`
 	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at"`
 
-	// Placeholder marks a fail-closed entry the reconciler projects for a slug
-	// whose authoritative record (head or any version row) cannot be decoded:
+	// Placeholder marks a fail-closed entry for a slug whose authoritative
+	// record (head or any version row) cannot be decoded:
 	// the live sum is uncomputable, so rather than project a partial number (a
 	// silent under-count) the entry carries this marker and the quota scan
 	// HARD-FAILS on it (docs/SPEC.md "Decode tolerance of the quota scan"). It
-	// clears only when the record decodes again or the row is removed; real
+	// clears on the owner's next list once the record decodes again; real
 	// corruption therefore needs an operator repair or raw-key delete, since
 	// Delete/DeleteVersion/the sweep all decode that same row. omitempty keeps
 	// ordinary entries byte-shaped.
@@ -231,106 +226,6 @@ func (r *ShaleRepo) scanPrefixOnce(prefix []byte) ([]scanItem, error) {
 			Key:   append([]byte(nil), k...),
 			Value: append([]byte(nil), env.Payload...),
 		})
-	}
-	return out, nil
-}
-
-// aggregateForBackground fans out for a BACKGROUND caller: reconcile, the
-// sweeps, blob GC. Nothing waits on the result, so it retries patiently through
-// a handoff window. That patience is bought for the blob-GC consumer
-// specifically: it acts on ABSENCE (deleting any blob NOT in the referenced
-// set), so a truncated answer deletes live data, where the other consumers
-// merely under-report.
-//
-// Named for the CALLER's context rather than taking a policy argument: whether
-// anything is waiting on the answer is a property the mechanism cannot see, so
-// an interactive fan-out has to declare itself at the call site (with a budget
-// that gives up quickly) instead of inheriting this patient one by default.
-func (r *ShaleRepo) aggregateForBackground(prefix []byte) ([]scanItem, error) {
-	return r.aggregateWith(backgroundRetry, prefix)
-}
-
-// aggregateWith fans out across all shards (cluster.Aggregate) and collects
-// every (key, value) under prefix, deduplicating keys (a key may surface from
-// more than one replica at R>1, with an identical value). It serves the
-// inherently cross-shard operations: the expiry scan, the referenced-blob set,
-// keygate prune / counting.
-//
-// The retry unit is the WHOLE call, never one peer: a refused peer's slice is
-// absent from every other peer's result, so a partial fan-out is not a usable
-// answer. shale guarantees such a refusal is raised rather than silently
-// skipped, both on AggregateResult.Err and through the scan fn.
-func (r *ShaleRepo) aggregateWith(p retryPolicy, prefix []byte) ([]scanItem, error) {
-	var out []scanItem
-	err := retryAcquiring(p, r.repoLog(), "aggregate-prefix", func() error {
-		var aerr error
-		out, aerr = r.aggregatePrefixOnce(prefix)
-		return aerr
-	})
-	return out, err
-}
-
-func (r *ShaleRepo) aggregatePrefixOnce(prefix []byte) ([]scanItem, error) {
-	results := r.cluster.Aggregate(func(b backend.Backend) any {
-		it, err := b.ScanPrefix(prefix)
-		if err != nil {
-			return err
-		}
-		defer it.Close() //nolint:errcheck
-		var local []scanItem
-		for {
-			k, v, err := it.Next()
-			if err != nil {
-				return err
-			}
-			if k == nil && v == nil {
-				break
-			}
-			// The cluster layer wraps on Put and unwraps on Get, but the
-			// Backend, and therefore this raw scan, sees the envelope. The
-			// aggregate consumers (quota sum, blob-ref set, expiry sweep)
-			// expect the decoded payload. cluster.Decode is the universal
-			// strip: a magic-prefixed envelope yields its payload, an
-			// unenveloped value passes through unchanged, and a truncated
-			// envelope is corruption and surfaces rather than being swallowed.
-			env, derr := cluster.Decode(v)
-			if derr != nil {
-				return fmt.Errorf("decode envelope for %q: %w", k, derr)
-			}
-			if isTombstoneEnvelope(env) {
-				// A DELETED key, not a row: the same rule as scanPrefixOnce.
-				// The skip must exist on BOTH paths, since the cross-shard
-				// consumers (reconcile, quota sum, expiry sweep) come through
-				// here and never touch the single-shard scan.
-				continue
-			}
-			local = append(local, scanItem{
-				Key:   append([]byte(nil), k...),
-				Value: append([]byte(nil), env.Payload...),
-			})
-		}
-		return local
-	})
-
-	seen := make(map[string]scanItem)
-	for _, res := range results {
-		if res.Err != nil {
-			return nil, fmt.Errorf("aggregate %s: %w", prefix, res.Err)
-		}
-		switch v := res.Value.(type) {
-		case error:
-			return nil, fmt.Errorf("aggregate %s: %w", prefix, v)
-		case []scanItem:
-			for _, item := range v {
-				seen[string(item.Key)] = item
-			}
-		case nil:
-			// peer with no matching keys
-		}
-	}
-	out := make([]scanItem, 0, len(seen))
-	for _, item := range seen {
-		out = append(out, item)
 	}
 	return out, nil
 }

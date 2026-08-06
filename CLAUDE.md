@@ -78,7 +78,7 @@ agent-attribution lines. Examples:
 ```
 feat(ssh): accept anonymous uploads via 'none' auth method
 fix(http): set Content-Disposition: attachment on unknown content types
-docs(spec): clarify retention TTL behavior for keyed pastes
+docs(spec): clarify version pinning for keyed pastes
 ```
 
 ## Repo layout

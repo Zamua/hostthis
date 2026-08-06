@@ -13,21 +13,18 @@ import (
 // keys or shape fails here.
 
 type jsonPaste struct {
-	Slug             string  `json:"slug"`
-	Name             string  `json:"name"`
-	SizeBytes        int     `json:"size_bytes"`
-	Kind             string  `json:"kind"`
-	ExpiresAt        *string `json:"expires_at"`
-	ExpiresInSeconds *int64  `json:"expires_in_seconds"`
-	ServedVersion    int     `json:"served_version"`
-	LatestVersion    int     `json:"latest_version"`
-	PinnedVersion    int     `json:"pinned_version"`
+	Slug          string `json:"slug"`
+	Name          string `json:"name"`
+	SizeBytes     int    `json:"size_bytes"`
+	Kind          string `json:"kind"`
+	ServedVersion int    `json:"served_version"`
+	LatestVersion int    `json:"latest_version"`
+	PinnedVersion int    `json:"pinned_version"`
 }
 
 type jsonVersions struct {
-	Slug          string  `json:"slug"`
-	PinnedVersion int     `json:"pinned_version"`
-	ExpiresAt     *string `json:"expires_at"`
+	Slug          string `json:"slug"`
+	PinnedVersion int    `json:"pinned_version"`
 	Versions      []struct {
 		Version   int    `json:"version"`
 		CreatedAt string `json:"created_at"`

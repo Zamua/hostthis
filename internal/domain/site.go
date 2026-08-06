@@ -9,7 +9,7 @@ import (
 )
 
 // Site is the aggregate for a static-site upload: a directory of files served
-// off a single slug, sharing Paste's slug shape, identity, and retention clock.
+// off a single slug, sharing Paste's slug shape and identity.
 //
 // The served bytes are addressed indirectly: the Manifest maps each safe
 // relative path to the SHA256 of its uncompressed blob, so the
@@ -28,7 +28,6 @@ type Site struct {
 	StoredBytes int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
-	ExpiresAt   time.Time // UpdatedAt + Retention window (or NeverExpires)
 }
 
 // ManifestEntry is one file in a site. ContentType is a function of the

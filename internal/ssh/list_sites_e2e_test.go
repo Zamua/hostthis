@@ -17,8 +17,8 @@ import (
 )
 
 // TestList_IncludesSites pins that `list` shows deployed sites in both the
-// table and -o json. A site counts against the same quota as pastes but never
-// expires, so an owner who cannot see it can never free what it holds.
+// table and -o json. A site counts against the same quota as pastes, so an
+// owner who cannot see it can never free what it holds.
 func TestList_IncludesSites(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(filepath.Join(dir, "test.db"))
@@ -91,7 +91,6 @@ func TestList_IncludesSites(t *testing.T) {
 		Slug          string `json:"slug"`
 		Kind          string `json:"kind"`
 		SizeBytes     int    `json:"size_bytes"`
-		ExpiresAt     *any   `json:"expires_at"`
 		ServedVersion *int   `json:"served_version"`
 	}
 	if err := json.Unmarshal([]byte(jsonOut.stdout), &items); err != nil {
@@ -102,8 +101,7 @@ func TestList_IncludesSites(t *testing.T) {
 		switch it.Kind {
 		case "site":
 			site++
-			// A null version field is the reliable site discriminator:
-			// independent of the retention policy, unlike expires_at.
+			// A null version field is the site discriminator.
 			if it.ServedVersion != nil {
 				t.Fatalf("site served_version should be null, got %v", *it.ServedVersion)
 			}

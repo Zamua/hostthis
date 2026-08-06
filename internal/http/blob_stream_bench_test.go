@@ -56,7 +56,6 @@ func benchServer(b *testing.B, blobs BlobReader, sha string, updatedAt time.Time
 		Kind:       domain.KindHTML,
 		ContentSHA: sha,
 		UpdatedAt:  updatedAt,
-		ExpiresAt:  updatedAt.Add(7 * 24 * time.Hour),
 	}
 	srv := &Server{
 		Pastes:     stubPasteReader{p: paste},

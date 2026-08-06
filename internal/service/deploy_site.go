@@ -32,9 +32,8 @@ type SiteRepo interface {
 	//     section as the swap, so a same-size re-deploy does not
 	//     double-count and a smaller one frees the diff. ErrServiceFull /
 	//     ErrOverUserQuota on overflow.
-	//   - On success manifest, deduped_size, updated_at, and expires_at are
-	//     replaced from s and the expiry index is re-keyed; slug and
-	//     created_at are unchanged. One transaction: the URL serves the old
+	//   - On success manifest, deduped_size and updated_at are replaced from
+	//     s; slug and created_at are unchanged. One transaction: the URL serves the old
 	//     manifest until it lands, the new one immediately after.
 	ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Site, error)
@@ -47,8 +46,8 @@ type SiteRepo interface {
 	SumActiveBytesByOwner(owner string, now time.Time) (int64, error)
 	// ListSitesByOwner returns the identity's active sites so the SSH `list`
 	// verb can show them alongside pastes: a site counts against the shared
-	// quota but never expires, so without this it silently consumes quota the
-	// owner can neither see nor free. Read-time expiry filtered.
+	// quota, so without this it silently consumes quota the owner can neither
+	// see nor free.
 	ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error)
 	// PreClaimSlug stakes a metadata-only single-shard claim on slug BEFORE
 	// the deploy consumes the one-shot untar stream, so a transactional blob
@@ -97,8 +96,6 @@ type DeploySite struct {
 	Pastes PasteByteSummer
 	Blob   BlobUnit
 	Now    func() time.Time
-	// Retention stamps a deployed site's ExpiresAt (same policy as pastes).
-	Retention domain.Retention
 	// Logger records outcomes the caller never sees: the compensating release
 	// of a pre-claimed slug runs on the way out of a failed deploy and its own
 	// failure must not replace the deploy's error. nil discards.
@@ -111,10 +108,9 @@ func (d *DeploySite) logf(format string, args ...any) {
 	}
 }
 
-// NewDeploySite wires defaults. The composition root overrides
-// DeploySite.Retention from HOSTTHIS_RETENTION.
+// NewDeploySite wires defaults.
 func NewDeploySite(sites SiteRepo, pastes PasteByteSummer, blob BlobUnit) *DeploySite {
-	return &DeploySite{Sites: sites, Pastes: pastes, Blob: blob, Now: time.Now, Retention: domain.DefaultRetention()}
+	return &DeploySite{Sites: sites, Pastes: pastes, Blob: blob, Now: time.Now}
 }
 
 // ListSites returns the owner's active static sites. Anonymous / empty owners
@@ -237,7 +233,6 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		Manifest:  man,
 		CreatedAt: now,
 		UpdatedAt: now,
-		ExpiresAt: d.Retention.ExpiryFor(now),
 	}
 	deduped := man.CompressedDedupedSize()
 
@@ -407,7 +402,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	if err != nil {
 		return SiteResult{}, fmt.Errorf("sum site bytes: %w", err)
 	}
-	budget := siteExtractBudget(int64(domain.UserQuotaBytes), int64(usedPaste), usedSite, existing, now)
+	budget := siteExtractBudget(int64(domain.UserQuotaBytes), int64(usedPaste), usedSite, existing)
 
 	sink := &blobSink{blob: d.Blob, slug: string(slug)}
 	man, err := archive.Untar(body, sink, budget)
@@ -436,7 +431,6 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		Manifest:  man,
 		CreatedAt: existing.CreatedAt, // preserved across re-deploys
 		UpdatedAt: now,
-		ExpiresAt: d.Retention.ExpiryFor(now),
 	}
 	deduped := man.CompressedDedupedSize()
 
@@ -448,7 +442,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	case class == commitOK:
 		return SiteResult{Site: site}, nil
 	case errors.Is(err, domain.ErrNotFound):
-		// Deleted or expiry-swept between the ownership check and the swap.
+		// Deleted between the ownership check and the swap.
 		// Same shape the up-front check would have yielded.
 		return SiteResult{}, ErrNotFound
 	default:
@@ -478,14 +472,8 @@ type blobSink struct {
 // would credit nothing, blocking an in-place update for an owner at their cap.
 // The uncompressed DedupedSize is the opposite error, subtracting more than was
 // ever charged and inflating the budget past the real remaining quota.
-//
-// An expired-but-unswept target is credited NOTHING: usedSite already excludes
-// it, so crediting it would subtract bytes that were never counted.
-func siteExtractBudget(cap, usedPaste, usedSite int64, existing domain.Site, now time.Time) int64 {
-	credit := int64(0)
-	if !domain.IsExpired(existing.ExpiresAt, now) {
-		credit = int64(existing.StoredBytes)
-	}
+func siteExtractBudget(cap, usedPaste, usedSite int64, existing domain.Site) int64 {
+	credit := int64(existing.StoredBytes)
 	used := usedPaste + max(usedSite-credit, 0)
 	return domain.Allowance{Cap: cap, Used: used}.Remaining()
 }

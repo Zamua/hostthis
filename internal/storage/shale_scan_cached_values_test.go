@@ -4,7 +4,7 @@ package storage_test
 
 // The scan-derived quota SUMS THE CACHED VALUES of the enumeration entries: one
 // prefix scan, zero per-entry fan-out to the {slug} shards. Each entry caches
-// the paste's live byte sum and expires_at, and the scan trusts exactly those
+// the paste's live byte sum, and the scan trusts exactly that
 // fields. The freshness contract pinned here:
 //
 //   - every size-changing operation maintains the cached size,
@@ -13,7 +13,7 @@ package storage_test
 //     contributes its cached values,
 //   - the reconciler's reprojection is the drift healer, rebuilding cached
 //     values and pruning orphans even under an owner with no records left,
-//   - fail-closed (Policy 3): an undecodable entry or a fail-closed
+//   - fail-closed (Policy 2): an undecodable entry or a fail-closed
 //     placeholder HARD-FAILS the scan, since skipping would under-count,
 //   - shale's quota result equals sqlite's on the same op sequence, and an
 //     out-of-band index corruption is healed back to parity.
@@ -49,8 +49,7 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 	p := domain.Paste{
 		Slug: slug, Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-cachesz-v1", Size: 300,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
 		t.Fatalf("insert v1: %v", err)
 	}
@@ -86,18 +85,11 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 	// The no-fan-out contract, made observable: a stale-but-decodable entry
 	// whose authoritative rows are ABSENT still contributes its cached values,
 	// because the scan never resolves the head row. Bounded over-count: it
-	// counts until the reconciler prunes it.
+	// counts until the owner's next list prunes it.
 	staleKey := storage.IdentityPasteKeyForTest(owner, "cachegon")
-	writeIndexEntryJSON(t, repo, staleKey, 999, now.Add(domain.DefaultRetentionWindow))
+	writeIndexEntryJSON(t, repo, staleKey, 999, now)
 	if got := mustSum(t, repo, owner, now); got != 200+999 {
 		t.Fatalf("a stale-but-decodable entry must contribute its cached value (no per-entry fan-out): got %d, want %d", got, 200+999)
-	}
-
-	// An EXPIRED stale entry self-excludes via its cached expires_at.
-	expiredKey := storage.IdentityPasteKeyForTest(owner, "cacheexp")
-	writeIndexEntryJSON(t, repo, expiredKey, 5000, now.Add(-time.Hour))
-	if got := mustSum(t, repo, owner, now); got != 200+999 {
-		t.Fatalf("an expired stale entry must self-exclude (cached expiry): got %d, want %d", got, 200+999)
 	}
 
 	// The cache IS the measure, so out-of-band corruption is reflected by the
@@ -106,8 +98,8 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 	if got := mustSum(t, repo, owner, now); got != 1+999 {
 		t.Fatalf("the scan sums the cached size (corrupted to 1): got %d, want %d", got, 1+999)
 	}
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if _, err := repo.ListByOwner(owner); err != nil {
+		t.Fatalf("list: %v", err)
 	}
 	if got := readCachedIndexSize(t, repo, idxKey); got != 200 {
 		t.Fatalf("reprojection must rebuild the cached size from the authoritative rows: got %d, want 200", got)
@@ -121,20 +113,28 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 		t.Fatalf("reconcile must prune the stale entry (authoritative paste gone); got %q", raw)
 	}
 
-	// The orphan prune must be GLOBAL: a per-owner reprojection never visits
-	// an owner with no authoritative pastes, so its entry would over-count
-	// forever.
+	// The prune is PER-OWNER: an orphan entry counts against ITS owner until
+	// THAT owner lists. Repair rides the owner's own read, so no other owner's
+	// activity clears it - the deliberate trade for deleting the cross-shard
+	// pass (docs/SPEC.md "No periodic reconcile").
 	orphanOwner := "key:cacheorph"
 	orphanKey := storage.IdentityPasteKeyForTest(orphanOwner, "orphgone")
-	writeIndexEntryJSON(t, repo, orphanKey, 777, now.Add(domain.DefaultRetentionWindow))
+	writeIndexEntryJSON(t, repo, orphanKey, 777, now)
 	if got := mustSum(t, repo, orphanOwner, now); got != 777 {
-		t.Fatalf("pre-reconcile orphan sum: got %d, want 777 (cached value counts until pruned)", got)
+		t.Fatalf("orphan sum before its owner lists: got %d, want 777 (cached value counts until pruned)", got)
 	}
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile (orphan): %v", err)
+	if _, err := repo.ListByOwner(owner); err != nil {
+		t.Fatalf("list (other owner): %v", err)
+	}
+	if got := mustSum(t, repo, orphanOwner, now); got != 777 {
+		t.Fatalf("another owner's list must NOT clear this orphan: got %d, want 777", got)
+	}
+	// ITS OWN owner's list clears it.
+	if _, err := repo.ListByOwner(orphanOwner); err != nil {
+		t.Fatalf("list (orphan owner): %v", err)
 	}
 	if got := mustSum(t, repo, orphanOwner, now); got != 0 {
-		t.Fatalf("post-reconcile orphan sum: got %d, want 0 (global prune must cover owners with no rows)", got)
+		t.Fatalf("the orphan's own owner listing must clear it: got %d, want 0", got)
 	}
 	if raw, err := repo.GetRawForTest(orphanKey); err != nil {
 		t.Fatalf("read orphan entry post-reconcile: %v", err)
@@ -143,7 +143,7 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 	}
 }
 
-// TestShaleQuotaScanFailClosed pins Policy 3: an entry that does not decode, or
+// TestShaleQuotaScanFailClosed pins Policy 2: an entry that does not decode, or
 // that carries the reconciler's fail-closed placeholder, HARD-FAILS the check
 // and rejects the upload. Skipping it would under-count and over-admit. The
 // reconciler prunes a bogus entry, restoring the owner's checks.
@@ -159,8 +159,7 @@ func TestShaleQuotaScanFailClosed(t *testing.T) {
 	good := domain.Paste{
 		Slug: domain.Slug("qfcgood1"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-qfc", Size: 100,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	if err := repo.InsertWithQuotaCheck(context.Background(), good, 0, now); err != nil {
 		t.Fatalf("insert good: %v", err)
 	}
@@ -172,7 +171,7 @@ func TestShaleQuotaScanFailClosed(t *testing.T) {
 		t.Fatalf("seed corrupt entry: %v", err)
 	}
 	if got, err := repo.SumActiveBytesByOwner(owner, now); err == nil {
-		t.Fatalf("an undecodable entry must HARD-FAIL the quota scan (Policy 3); got %d, nil error", got)
+		t.Fatalf("an undecodable entry must HARD-FAIL the quota scan (Policy 2); got %d, nil error", got)
 	}
 	if err := repo.DeleteRawForTest(badKey); err != nil {
 		t.Fatalf("clear corrupt entry: %v", err)
@@ -189,8 +188,8 @@ func TestShaleQuotaScanFailClosed(t *testing.T) {
 
 	// A placeholder whose authoritative row is ABSENT is bogus: the prune
 	// confirms the row is gone and drops it, restoring the owner's checks.
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if _, err := repo.ListByOwner(owner); err != nil {
+		t.Fatalf("list: %v", err)
 	}
 	if got := mustSum(t, repo, owner, now); got != 100 {
 		t.Fatalf("sum after reconcile prunes the bogus placeholder: got %d, want 100", got)
@@ -202,7 +201,7 @@ func TestShaleQuotaScanFailClosed(t *testing.T) {
 // re-adds a failed row's entry, and the prune drops a leftover one. Without it
 // the quota scan - which sums whatever the index lists, with no per-entry
 // status read - counts a failed paste's bytes forever.
-func TestShaleReconcileDoesNotResurrectFailedPasteEntry(t *testing.T) {
+func TestShaleListDoesNotResurrectFailedPasteEntry(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
 		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale failed-entry test (start dev MinIO first)")
@@ -221,8 +220,8 @@ func TestShaleReconcileDoesNotResurrectFailedPasteEntry(t *testing.T) {
 	}
 
 	// The reprojection must not resurrect the failed paste's entry.
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if _, err := repo.ListByOwner(owner); err != nil {
+		t.Fatalf("list: %v", err)
 	}
 	if raw, err := repo.GetRawForTest(idxKey); err != nil {
 		t.Fatalf("read entry post-reconcile: %v", err)
@@ -236,11 +235,11 @@ func TestShaleReconcileDoesNotResurrectFailedPasteEntry(t *testing.T) {
 	// A leftover entry models a crash between MarkFailed's status flip and its
 	// entry drop: it over-counts for the bounded window, and the prune drops
 	// it even though the head row still exists, because that row is failed.
-	writeIndexEntryJSON(t, repo, idxKey, 400, now.Add(domain.DefaultRetentionWindow))
+	writeIndexEntryJSON(t, repo, idxKey, 400, now)
 	if got := mustSum(t, repo, owner, now); got != 400 {
 		t.Fatalf("leftover failed-paste entry should count until pruned (bounded over-count): got %d, want 400", got)
 	}
-	if err := repo.ReconcileForTest(now); err != nil {
+	if _, err := repo.ListByOwner(owner); err != nil {
 		t.Fatalf("reconcile (leftover): %v", err)
 	}
 	if raw, err := repo.GetRawForTest(idxKey); err != nil {
@@ -254,9 +253,9 @@ func TestShaleReconcileDoesNotResurrectFailedPasteEntry(t *testing.T) {
 }
 
 // TestShaleSiteQuotaScanSumsCachedIndexValues is the site mirror: the
-// identity_sites entry is value-bearing (cached deduped size + expiry), deploy
+// identity_sites entry is value-bearing (cached deduped size), deploy
 // and replace maintain it, a bare marker entry falls back to the authoritative
-// row until the reconciler enriches it, orphans are pruned globally, and a
+// row until the owner's next list enriches it, orphans are pruned globally, and a
 // fail-closed placeholder hard-fails the scan.
 func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
@@ -275,8 +274,7 @@ func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
 	})
 	site := domain.Site{
 		Slug: slug, Identity: domain.Identity(owner), Manifest: man,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	if err := repo.InsertSiteWithQuotaCheck(context.Background(), site, 400, 0, now); err != nil {
 		t.Fatalf("deploy site: %v", err)
 	}
@@ -297,8 +295,7 @@ func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
 	})
 	site2 := domain.Site{
 		Slug: slug, Identity: domain.Identity(owner), Manifest: man2,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	if err := repo.ReplaceSiteWithQuotaCheck(context.Background(), site2, 250, 0, now); err != nil {
 		t.Fatalf("replace site: %v", err)
 	}
@@ -317,7 +314,7 @@ func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
 	if got := mustSiteSum(t, repo, owner, now); got != 250 {
 		t.Fatalf("legacy marker entry must fall back to the authoritative row: got %d, want 250", got)
 	}
-	if err := repo.ReconcileForTest(now); err != nil {
+	if _, err := repo.ListSitesByOwner(owner, now); err != nil {
 		t.Fatalf("reconcile (enrich): %v", err)
 	}
 	if got := readCachedIndexSize(t, repo, idxKey); got != 250 {
@@ -327,24 +324,30 @@ func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
 		t.Fatalf("site sum after enrichment: got %d, want 250", got)
 	}
 
-	// Global orphan prune, site side: a stale entry under an owner with no
-	// authoritative sites counts until pruned.
+	// Per-owner orphan prune, site side: a stale entry counts against ITS
+	// owner until THAT owner lists. Repair rides the owner's own read.
 	orphanOwner := "key:sitecorph"
 	orphanKey := storage.IdentitySiteKeyForTest(orphanOwner, "sitegone")
-	writeIndexEntryJSON(t, repo, orphanKey, 777, now.Add(domain.DefaultRetentionWindow))
+	writeIndexEntryJSON(t, repo, orphanKey, 777, now)
 	if got := mustSiteSum(t, repo, orphanOwner, now); got != 777 {
-		t.Fatalf("pre-reconcile orphan site sum: got %d, want 777 (cached value counts until pruned)", got)
+		t.Fatalf("orphan site sum before its owner lists: got %d, want 777", got)
 	}
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile (site orphan): %v", err)
+	if _, err := repo.ListSitesByOwner(owner, now); err != nil {
+		t.Fatalf("list (other owner): %v", err)
+	}
+	if got := mustSiteSum(t, repo, orphanOwner, now); got != 777 {
+		t.Fatalf("another owner's list must NOT clear this orphan: got %d, want 777", got)
+	}
+	if _, err := repo.ListSitesByOwner(orphanOwner, now); err != nil {
+		t.Fatalf("list (orphan owner): %v", err)
 	}
 	if got := mustSiteSum(t, repo, orphanOwner, now); got != 0 {
-		t.Fatalf("post-reconcile orphan site sum: got %d, want 0 (global prune)", got)
+		t.Fatalf("the orphan's own owner listing must clear it: got %d, want 0", got)
 	}
 	if raw, err := repo.GetRawForTest(orphanKey); err != nil {
-		t.Fatalf("read orphan site entry post-reconcile: %v", err)
+		t.Fatalf("read orphan site entry post-list: %v", err)
 	} else if len(raw) != 0 {
-		t.Fatalf("reconcile must prune an orphan site entry; got %q", raw)
+		t.Fatalf("the owner's list must prune an orphan site entry; got %q", raw)
 	}
 
 	// Fail-closed placeholder hard-fails the site scan.
@@ -380,13 +383,11 @@ func TestShaleQuotaParityWithSqlite(t *testing.T) {
 	p1 := domain.Paste{
 		Slug: domain.Slug("parity1a"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-parity1", Size: 300,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	p2 := domain.Paste{
 		Slug: domain.Slug("parity2b"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-parity2", Size: 200,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 
 	assertParity := func(step string) {
 		t.Helper()
@@ -454,8 +455,8 @@ func TestShaleQuotaParityWithSqlite(t *testing.T) {
 		t.Fatalf("corruption did not land in the cached measure: shale=%d sqlite=%d", shaleSum, sqSum)
 	}
 	// ...and the reprojection heals it back to parity.
-	if err := shale.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if _, err := shale.ListByOwner(owner); err != nil {
+		t.Fatalf("list: %v", err)
 	}
 	assertParity("after reconcile heals the corruption")
 }
@@ -508,17 +509,16 @@ func writeCachedIndexSize(t *testing.T, repo *storage.ShaleRepo, idxKey []byte, 
 }
 
 // writeIndexEntryJSON plants a decodable entry at idxKey with the given cached
-// size + expiry, bypassing the CAS write path. Models an orphaned entry whose
+// size, bypassing the CAS write path. Models an orphaned entry whose
 // authoritative rows may not exist, the shape a crash mid-delete leaves. The
 // field set is the shared subset of identityPasteRow / identitySiteRow, so one
 // helper serves both families.
-func writeIndexEntryJSON(t *testing.T, repo *storage.ShaleRepo, idxKey []byte, size int, expiresAt time.Time) {
+func writeIndexEntryJSON(t *testing.T, repo *storage.ShaleRepo, idxKey []byte, size int, createdAt time.Time) {
 	t.Helper()
 	out, err := json.Marshal(map[string]any{
 		"name":       "",
 		"size":       size,
-		"created_at": expiresAt.Add(-domain.DefaultRetentionWindow),
-		"expires_at": expiresAt,
+		"created_at": createdAt,
 	})
 	if err != nil {
 		t.Fatalf("encode index entry: %v", err)

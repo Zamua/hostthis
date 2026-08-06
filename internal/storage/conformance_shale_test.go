@@ -73,7 +73,7 @@ func TestConformance_Shale(t *testing.T) {
 		t.Cleanup(func() { _ = repo.Close() })
 		return repo
 	}
-	caps := conformCaps{ExpiryFreesQuotaAtReadTime: true, StrictQuotaUnderConcurrency: true, StrictIdentityQuotaUnderConcurrency: false}
+	caps := conformCaps{StrictQuotaUnderConcurrency: true, StrictIdentityQuotaUnderConcurrency: false}
 	newRepo := func(t *testing.T) conformanceRepo { return newShale(t) }
 	// The site repo wraps the SAME ShaleRepo (one cluster handle, one shard
 	// routing), so the cross-quota + cross-family-slug subtests exercise the

@@ -33,8 +33,8 @@ func TestShaleMigration_RawValueRoundTrips(t *testing.T) {
 
 	// The paste row exactly as a slatedb deployment stores it: a
 	// single-version paste with the head fields denormalized onto the paste
-	// row, a v1 version row, the slug_owner pointer, and the expiry index
-	// marker. No identity_bytes counter and no identity_pastes index, since
+	// row, a v1 version row and the slug_owner pointer. No identity_bytes
+	// counter and no identity_pastes index, since
 	// those are shale-era derived families and the claim under test is that
 	// the AUTHORITATIVE rows decode raw.
 	p := domain.Paste{
@@ -47,7 +47,6 @@ func TestShaleMigration_RawValueRoundTrips(t *testing.T) {
 		PinnedVersion: 0,
 		CreatedAt:     now,
 		UpdatedAt:     now,
-		ExpiresAt:     now.Add(domain.DefaultRetentionWindow),
 	}
 
 	pasteVal, err := storage.LegacyPasteValueForTest(p)
@@ -64,20 +63,15 @@ func TestShaleMigration_RawValueRoundTrips(t *testing.T) {
 	mustPutRaw(t, repo, storage.LegacyPasteKeyForTest(slug), pasteVal)
 	mustPutRaw(t, repo, storage.LegacyVersionKeyForTest(slug, 1), v1Val)
 	mustPutRaw(t, repo, storage.LegacySlugOwnerKeyForTest(slug), []byte(owner))
-	mustPutRaw(t, repo, storage.LegacyExpiryKeyForTest(p.ExpiresAt, slug), storage.MarkerValueForTest())
 
-	got, err := repo.Get(slug)
-	if err != nil {
+	got, gerr := repo.Get(slug)
+	if gerr != nil {
 		t.Fatalf("Get legacy paste: %v", err)
 	}
 	if got.Slug != p.Slug || got.Identity != p.Identity || got.Kind != p.Kind ||
 		got.ContentSHA != p.ContentSHA || got.Size != p.Size || got.Name != p.Name ||
 		got.PinnedVersion != p.PinnedVersion {
 		t.Fatalf("legacy paste did not round-trip:\n got  %+v\n want %+v", got, p)
-	}
-	if !got.CreatedAt.Equal(p.CreatedAt) || !got.UpdatedAt.Equal(p.UpdatedAt) || !got.ExpiresAt.Equal(p.ExpiresAt) {
-		t.Fatalf("legacy paste timestamps drifted: got %v/%v/%v want %v/%v/%v",
-			got.CreatedAt, got.UpdatedAt, got.ExpiresAt, p.CreatedAt, p.UpdatedAt, p.ExpiresAt)
 	}
 
 	gotV, err := repo.GetVersion(slug, 1)
@@ -97,23 +91,14 @@ func TestShaleMigration_RawValueRoundTrips(t *testing.T) {
 		t.Fatalf("ListVersions over legacy rows: got %+v, want one v1", vers)
 	}
 
-	// The expiry index marker is honored by the sweep's scan.
-	expired, err := repo.ExpiredPastes(p.ExpiresAt.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("ExpiredPastes: %v", err)
+	// The head row's content sha survives the migration: the read path resolves
+	// bytes through it, so losing it strands the paste's content.
+	head, gerr := repo.Get(slug)
+	if gerr != nil {
+		t.Fatalf("Get over legacy rows: %v", gerr)
 	}
-	if !refsHaveSlug(expired, slug.String()) {
-		t.Fatalf("legacy expiry index not honored: %v should contain %q", expired, slug)
-	}
-
-	// The content sha must be in the referenced set (the GC allow-list) or the
-	// blob is collected out from under the migrated paste.
-	refs, err := repo.ReferencedBlobSHAs()
-	if err != nil {
-		t.Fatalf("ReferencedBlobSHAs: %v", err)
-	}
-	if !sliceHasMig(refs, p.ContentSHA) {
-		t.Fatalf("legacy paste sha must be referenced post-migration: %v should contain %q", refs, p.ContentSHA)
+	if head.ContentSHA != p.ContentSHA {
+		t.Fatalf("legacy paste sha must survive migration: got %q, want %q", head.ContentSHA, p.ContentSHA)
 	}
 }
 

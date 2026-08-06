@@ -108,14 +108,12 @@ func TestSubdomain_OnlyServesRoot(t *testing.T) {
 // edge caching silently.
 func TestPasteRead_CacheHeaders(t *testing.T) {
 	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
-	expiresAt := updatedAt.Add(7 * 24 * time.Hour)
 	body := []byte("<!doctype html><h1>hi</h1>")
 	paste := domain.Paste{
 		Slug:       "abc23456",
 		Kind:       domain.KindHTML,
 		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
 		UpdatedAt:  updatedAt,
-		ExpiresAt:  expiresAt,
 	}
 	srv := &Server{
 		Pastes:     stubPasteReader{p: paste},
@@ -149,7 +147,6 @@ func TestPasteRead_IfNoneMatch304(t *testing.T) {
 		Kind:       domain.KindHTML,
 		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
 		UpdatedAt:  updatedAt,
-		ExpiresAt:  updatedAt.Add(7 * 24 * time.Hour),
 	}
 	srv := &Server{
 		Pastes:     stubPasteReader{p: paste},
@@ -206,7 +203,6 @@ func TestPasteRead_IfModifiedSince304(t *testing.T) {
 		Kind:       domain.KindHTML,
 		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
 		UpdatedAt:  updatedAt,
-		ExpiresAt:  updatedAt.Add(7 * 24 * time.Hour),
 	}
 	srv := &Server{
 		Pastes:     stubPasteReader{p: paste},
@@ -230,10 +226,9 @@ func TestPasteRead_IfModifiedSince304(t *testing.T) {
 func TestPasteRead_PendingServesLoadingPage(t *testing.T) {
 	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	paste := domain.Paste{
-		Slug:      "abc23456",
-		Status:    domain.PasteStatusPending,
-		Kind:      domain.KindHTML,
-		ExpiresAt: now.Add(7 * 24 * time.Hour),
+		Slug:   "abc23456",
+		Status: domain.PasteStatusPending,
+		Kind:   domain.KindHTML,
 	}
 	srv := &Server{
 		Pastes:     stubPasteReader{p: paste},
@@ -268,10 +263,9 @@ func TestPasteRead_PendingServesLoadingPage(t *testing.T) {
 func TestPasteRead_FailedServesErrorPage(t *testing.T) {
 	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	paste := domain.Paste{
-		Slug:      "abc23456",
-		Status:    domain.PasteStatusFailed,
-		Kind:      domain.KindHTML,
-		ExpiresAt: now.Add(7 * 24 * time.Hour),
+		Slug:   "abc23456",
+		Status: domain.PasteStatusFailed,
+		Kind:   domain.KindHTML,
 	}
 	srv := &Server{
 		Pastes:     stubPasteReader{p: paste},
@@ -305,7 +299,6 @@ func TestPasteRead_ReadyServesContent(t *testing.T) {
 		Kind:       domain.KindHTML,
 		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
 		UpdatedAt:  now,
-		ExpiresAt:  now.Add(7 * 24 * time.Hour),
 	}
 	srv := &Server{
 		Pastes:     stubPasteReader{p: paste},
@@ -353,7 +346,6 @@ func TestPasteRead5xxLogsSlugAndError(t *testing.T) {
 		Status:     domain.PasteStatusReady,
 		CreatedAt:  now,
 		UpdatedAt:  now,
-		ExpiresAt:  now.Add(time.Hour),
 	}
 
 	t.Run("blob read failure", func(t *testing.T) {

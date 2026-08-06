@@ -65,9 +65,6 @@ type Upload struct {
 	Sniff domain.MIMESniffer
 	// finalizeWG tracks this instance's in-flight background finalizers.
 	finalizeWG sync.WaitGroup
-	// Retention is the installation's content-TTL policy; it stamps a new
-	// paste's ExpiresAt (UpdatedAt + window, or "never" when disabled).
-	Retention domain.Retention
 	// Logger records background-finalize outcomes: the blob write runs after
 	// Create returned the URL, so a failure there cannot reach the caller.
 	// nil discards.
@@ -83,10 +80,9 @@ type Upload struct {
 	SyncBlob bool
 }
 
-// NewUpload wires defaults; the composition root overrides Upload.Retention
-// from HOSTTHIS_RETENTION.
+// NewUpload wires defaults.
 func NewUpload(repo PasteRepo, blob BlobUnit) *Upload {
-	return &Upload{Repo: repo, Blob: blob, Now: time.Now, Retention: domain.DefaultRetention(), Sniff: mime.Detect}
+	return &Upload{Repo: repo, Blob: blob, Now: time.Now, Sniff: mime.Detect}
 }
 
 func (u *Upload) logf(format string, args ...any) {
@@ -103,7 +99,7 @@ type Result struct {
 // ErrOverQuota is returned when accepting the upload would push the identity's
 // total active COMPRESSED bytes above UserQuotaBytes. The number is derived
 // from the constant so the message cannot drift from the enforced limit.
-var ErrOverQuota = fmt.Errorf("service: would exceed your %d MiB total quota; delete a paste or wait for one to expire", domain.UserQuotaBytes>>20)
+var ErrOverQuota = fmt.Errorf("service: would exceed your %d MiB total quota; delete a paste to free space", domain.UserQuotaBytes>>20)
 
 // ErrRawTooLarge is returned when the raw input exceeded the fast-fail cap.
 // The server stopped reading before any compression check could run.
@@ -117,7 +113,7 @@ var ErrCompressedTooLarge = errors.New("service: upload exceeds 10 MiB compresse
 // object store rejected a blob Put because the bucket is at its configured
 // hard quota (SPEC "Limits -> Durable total-bytes ceiling: an object-store
 // quota").
-var ErrServiceFull = errors.New("service: service is at capacity, try again after the next expiry")
+var ErrServiceFull = errors.New("service: service is at capacity, try again later")
 
 // Create persists a new paste owned by owner, a "key:<fp>" identity built from
 // the uploader's ssh public key fingerprint. That identity gates quota: its
@@ -178,7 +174,6 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		PinnedVersion: 0, // unpinned by default - public URL follows the latest version
 		CreatedAt:     now,
 		UpdatedAt:     now,
-		ExpiresAt:     u.Retention.ExpiryFor(now),
 	}
 	// Retry on slug collision; SlugAlphabet's 32^8 slugs make a collision
 	// inside 5 retries vanishingly unlikely. The quota check lives INSIDE
@@ -237,7 +232,6 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 		PinnedVersion: 0, // unpinned by default - public URL follows the latest version
 		CreatedAt:     now,
 		UpdatedAt:     now,
-		ExpiresAt:     u.Retention.ExpiryFor(now),
 	}
 	ctx := context.Background()
 	const maxRetries = 5

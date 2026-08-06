@@ -39,7 +39,7 @@ var verbDescriptors = map[string]verbDescriptor{
 	"list": {
 		Name:      "list",
 		Signature: "ssh {{apex}} list [-o json]",
-		Description: "List your active pastes, soonest-to-expire first. Empty list " +
+		Description: "List your pastes, most recently updated first. Empty list " +
 			"prints `no active pastes` on stderr.",
 		Examples: []string{
 			"ssh {{apex}} list",
@@ -52,7 +52,7 @@ var verbDescriptors = map[string]verbDescriptor{
 		Description: "Print just the shareable URL for an existing paste (or " +
 			"deployed site) on stdout - handy for re-copying a link without " +
 			"re-uploading. No ownership check (the URL is a public " +
-			"capability), but a missing or expired slug returns `not found` " +
+			"capability), but an unknown slug returns `not found` " +
 			"(exit 4).",
 		Examples: []string{
 			"ssh {{apex}} url abc12345",
@@ -65,7 +65,7 @@ var verbDescriptors = map[string]verbDescriptor{
 		Description: "Re-show an existing paste's link as a scannable QR code. " +
 			"Mirrors create: the URL goes to stdout and the QR block to " +
 			"stderr, so `2>/dev/null` keeps just the URL. No ownership check; " +
-			"a missing or expired slug returns `not found` (exit 4).",
+			"an unknown slug returns `not found` (exit 4).",
 		Examples: []string{
 			"ssh {{apex}} qr abc12345",
 		},
@@ -74,8 +74,7 @@ var verbDescriptors = map[string]verbDescriptor{
 		Name:      "rename",
 		Signature: "ssh {{apex}} rename <slug> \"<name>\"",
 		Description: "Set or change the owner-only label for one of your pastes. " +
-			"Pass an empty string to clear. Renaming does not reset the " +
-			"expiry clock.",
+			"Pass an empty string to clear.",
 		Examples: []string{
 			"ssh {{apex}} rename abc12345 \"design v4\"",
 			"ssh {{apex}} rename abc12345 \"\"",
@@ -100,7 +99,7 @@ var verbDescriptors = map[string]verbDescriptor{
 		Description: "Show the version timeline for one paste, newest first. The " +
 			"middle column marks the currently-served version and any " +
 			"tombstoned (deleted) versions. Footer on stderr shows pin " +
-			"state and expiry.",
+			"state.",
 		Examples: []string{
 			"ssh {{apex}} versions abc12345",
 			"ssh {{apex}} versions abc12345 -o json | jq '.versions'",
@@ -111,8 +110,7 @@ var verbDescriptors = map[string]verbDescriptor{
 		Signature: "ssh {{apex}} pin <slug> <ver>",
 		Description: "Stick the URL to a specific version. Subsequent updates are " +
 			"recorded as new versions but the URL keeps serving the " +
-			"pinned version until you `unpin` or `pin` a different one. " +
-			"Pinning does not reset the expiry clock.",
+			"pinned version until you `unpin` or `pin` a different one.",
 		Examples: []string{
 			"ssh {{apex}} pin abc12345 1",
 			"ssh {{apex}} pin abc12345 v3",

@@ -21,35 +21,17 @@ type SiteRepo struct {
 
 func NewSiteRepo(db *sql.DB) *SiteRepo { return &SiteRepo{db: db} }
 
-// expirySiteTimeFormat is the timestamp layout the site EXPIRY clock uses on
-// every backend: the sqlite sites.expires_at column and the slatedb/shale
-// expiry_sites/<ts>/<slug> index keys. RFC3339 with a FIXED-WIDTH, zero-padded
-// 9-digit nanosecond fraction, so a lexicographic compare (the sqlite TEXT
-// compare AND the KV key prefix scan) is byte order == time order exactly,
-// including within a shared whole second.
+// sortableTimeFormat is RFC3339 with a FIXED-WIDTH, zero-padded 9-digit
+// nanosecond fraction, so a lexicographic compare is byte order == time order
+// exactly, including within a shared whole second. Timestamps embedded in KV
+// index keys use it, since a prefix scan orders by bytes.
 //
 // Deliberately NOT time.RFC3339Nano, which drops trailing fractional zeros:
 // under that variable-width format "...00.5Z" sorts BEFORE "...00Z" (because
-// '.' < 'Z'), so a record could be swept up to ~1s before its real ExpiresAt.
-// The PASTE expiry path uses time.RFC3339Nano and carries that skew; changing
-// it is a re-key migration, since a format flip alone orphans old keys and
-// those pastes then never expire.
-const expirySiteTimeFormat = "2006-01-02T15:04:05.000000000Z07:00"
+// '.' < 'Z'), so a range scan would cut up to ~1s on the wrong side.
+const sortableTimeFormat = "2006-01-02T15:04:05.000000000Z07:00"
 
-// formatSiteExpiry / parseSiteExpiry are the fixed-width site-expiry
-// (de)serializers. Every query comparing against sites.expires_at must use
-// them, so the stored value and the comparison operand share one
-// byte-order == time-order layout.
-func formatSiteExpiry(t time.Time) string { return t.UTC().Format(expirySiteTimeFormat) }
-func parseSiteExpiry(s string) time.Time {
-	t, err := time.Parse(expirySiteTimeFormat, s)
-	if err != nil {
-		// Tolerate an RFC3339Nano value so a read never silently zeroes a
-		// timestamp.
-		return parseTime(s)
-	}
-	return t
-}
+func formatSortableTime(t time.Time) string { return t.UTC().Format(sortableTimeFormat) }
 
 // manifestJSON is the on-disk shape of a Manifest. Private so the JSON
 // representation stays a storage concern rather than a domain one; the domain
@@ -118,13 +100,11 @@ func (r *SiteRepo) InsertWithQuotaCheck(_ context.Context, s domain.Site, dedupe
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	nowStr := formatTime(now)
-	siteNowStr := formatSiteExpiry(now)
 	body := int64(dedupedSize)
 
 	// Per-identity check across BOTH pastes and sites.
 	if userCap > 0 {
-		owned, err := identityActiveBytes(tx, s.Identity.String(), nowStr, siteNowStr)
+		owned, err := identityActiveBytes(tx, s.Identity.String())
 		if err != nil {
 			return err
 		}
@@ -150,10 +130,10 @@ func (r *SiteRepo) InsertWithQuotaCheck(_ context.Context, s domain.Site, dedupe
 
 	if _, err := tx.Exec(`
 		INSERT INTO sites (slug, identity, manifest, deduped_size,
-		                   created_at, updated_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		                   created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
 	`, s.Slug.String(), s.Identity.String(), manStr, dedupedSize,
-		formatTime(s.CreatedAt), formatTime(s.UpdatedAt), formatSiteExpiry(s.ExpiresAt)); err != nil {
+		formatTime(s.CreatedAt), formatTime(s.UpdatedAt)); err != nil {
 		if isUniqueViolation(err) {
 			return ErrSlugTaken
 		}
@@ -163,8 +143,8 @@ func (r *SiteRepo) InsertWithQuotaCheck(_ context.Context, s domain.Site, dedupe
 }
 
 // ReplaceWithQuotaCheck re-deploys an owned site in place, swapping its
-// manifest, deduped size, updated_at and expires_at under the serializable tx
-// while enforcing the per-identity cap against the REPLACE DELTA.
+// manifest, deduped size and updated_at under the serializable tx while
+// enforcing the per-identity cap against the REPLACE DELTA.
 //
 // A slug that is missing OR owned by a different identity returns ErrNotFound,
 // the SAME sentinel either way, so "not yours" is indistinguishable from
@@ -189,17 +169,14 @@ func (r *SiteRepo) ReplaceWithQuotaCheck(_ context.Context, s domain.Site, dedup
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	nowStr := formatTime(now)
-	siteNowStr := formatSiteExpiry(now)
 	body := int64(dedupedSize)
 
 	// Ownership + existence gate, inside the tx so a concurrent delete or
 	// re-deploy cannot race the swap.
 	var ownerStr string
 	var oldDeduped int64
-	var oldLive bool
-	err = tx.QueryRow(`SELECT identity, deduped_size, expires_at > ? FROM sites WHERE slug = ?`, siteNowStr, s.Slug.String()).
-		Scan(&ownerStr, &oldDeduped, &oldLive)
+	err = tx.QueryRow(`SELECT identity, deduped_size FROM sites WHERE slug = ?`, s.Slug.String()).
+		Scan(&ownerStr, &oldDeduped)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -210,21 +187,12 @@ func (r *SiteRepo) ReplaceWithQuotaCheck(_ context.Context, s domain.Site, dedup
 		return ErrNotFound
 	}
 
-	// Credit the old bytes back ONLY if the old row is still live: the active
-	// sums below filter on expiry, so an expired-but-unswept old row is not in
-	// them and crediting it would under-count, admitting an over-quota
-	// re-deploy. Resurrecting an expired site charges the full new size.
-	creditOld := int64(0)
-	if oldLive {
-		creditOld = oldDeduped
-	}
-
 	if userCap > 0 {
-		owned, err := identityActiveBytes(tx, s.Identity.String(), nowStr, siteNowStr)
+		owned, err := identityActiveBytes(tx, s.Identity.String())
 		if err != nil {
 			return err
 		}
-		if err := (domain.Allowance{Cap: userCap, Used: owned}).AdmitReplacing(creditOld, body); err != nil {
+		if err := (domain.Allowance{Cap: userCap, Used: owned}).AdmitReplacing(oldDeduped, body); err != nil {
 			return err
 		}
 	}
@@ -235,12 +203,12 @@ func (r *SiteRepo) ReplaceWithQuotaCheck(_ context.Context, s domain.Site, dedup
 	}
 
 	// created_at is left untouched: the slug's birth time is stable across
-	// re-deploys, while updated_at + expires_at restart the clock.
+	// re-deploys.
 	res, err := tx.Exec(`
 		UPDATE sites
-		SET manifest = ?, deduped_size = ?, updated_at = ?, expires_at = ?
+		SET manifest = ?, deduped_size = ?, updated_at = ?
 		WHERE slug = ? AND identity = ?
-	`, manStr, dedupedSize, formatTime(s.UpdatedAt), formatSiteExpiry(s.ExpiresAt),
+	`, manStr, dedupedSize, formatTime(s.UpdatedAt),
 		s.Slug.String(), s.Identity.String())
 	if err != nil {
 		return fmt.Errorf("replace site %q: %w", s.Slug, err)
@@ -257,16 +225,15 @@ func (r *SiteRepo) ReplaceWithQuotaCheck(_ context.Context, s domain.Site, dedup
 	return tx.Commit()
 }
 
-// Get returns the site for slug, or ErrNotFound. Like PasteRepo.Get it returns
-// expired rows too: the HTTP layer 404s them, the sweep deletes them.
+// Get returns the site for slug, or ErrNotFound.
 func (r *SiteRepo) Get(slug domain.Slug) (domain.Site, error) {
 	row := r.db.QueryRow(`
-		SELECT slug, identity, manifest, deduped_size, created_at, updated_at, expires_at
+		SELECT slug, identity, manifest, deduped_size, created_at, updated_at
 		FROM sites WHERE slug = ?
 	`, slug.String())
-	var slugStr, identStr, manStr, created, updated, expires string
+	var slugStr, identStr, manStr, created, updated string
 	var dedupedSize int
-	if err := row.Scan(&slugStr, &identStr, &manStr, &dedupedSize, &created, &updated, &expires); err != nil {
+	if err := row.Scan(&slugStr, &identStr, &manStr, &dedupedSize, &created, &updated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Site{}, ErrNotFound
 		}
@@ -283,7 +250,6 @@ func (r *SiteRepo) Get(slug domain.Slug) (domain.Site, error) {
 		StoredBytes: dedupedSize,
 		CreatedAt:   parseTime(created),
 		UpdatedAt:   parseTime(updated),
-		ExpiresAt:   parseSiteExpiry(expires),
 	}, nil
 }
 
@@ -295,98 +261,23 @@ func (r *SiteRepo) Delete(slug domain.Slug) error {
 	return nil
 }
 
-// ExpiredSites returns one reference per site whose expires_at is at or before
-// now. The sqlite scan reads the sites table itself (no standalone expiry
-// index to fall out of sync with the records), so IndexRef is always empty and
-// a returned slug always names a live row at scan time.
-func (r *SiteRepo) ExpiredSites(now time.Time) ([]domain.ExpiredSite, error) {
-	rows, err := r.db.Query(`SELECT slug FROM sites WHERE expires_at <= ?`, formatSiteExpiry(now))
-	if err != nil {
-		return nil, fmt.Errorf("expired sites: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	var out []domain.ExpiredSite
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			return nil, err
-		}
-		out = append(out, domain.ExpiredSite{Slug: domain.Slug(s)})
-	}
-	return out, rows.Err()
-}
-
-// DeleteExpiredSite processes one expired reference with the same full-cascade
-// delete as Delete, reporting whether a row was removed. sqlite has no
-// standalone expiry-index entry to clean (the scan IS the sites table), so a
-// missing row is a no-op returning false.
-func (r *SiteRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
-	res, err := r.db.Exec(`DELETE FROM sites WHERE slug = ?`, ref.Slug.String())
-	if err != nil {
-		return false, fmt.Errorf("delete expired site %q: %w", ref.Slug, err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("delete expired site %q: rows affected: %w", ref.Slug, err)
-	}
-	return n > 0, nil
-}
-
-// ReferencedSiteBlobSHAs returns the set of blob SHAs referenced by any site's
-// manifest. The sweep unions this with the paste-side set so a blob shared
-// between a site and a paste, or between two sites, stays alive as long as ANY
-// live record references it.
-func (r *SiteRepo) ReferencedSiteBlobSHAs() ([]string, error) {
-	rows, err := r.db.Query(`SELECT manifest FROM sites`)
-	if err != nil {
-		return nil, fmt.Errorf("site manifests for gc: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	seen := make(map[string]struct{}, 256)
-	for rows.Next() {
-		var manStr string
-		if err := rows.Scan(&manStr); err != nil {
-			return nil, err
-		}
-		man, err := decodeManifest(manStr)
-		if err != nil {
-			return nil, err
-		}
-		for _, sha := range man.SHASet() {
-			seen[sha] = struct{}{}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(seen))
-	for sha := range seen {
-		out = append(out, sha)
-	}
-	return out, nil
-}
-
 // identityActiveBytes sums active bytes owned by one identity across BOTH
-// pastes and sites, inside the caller's tx. It takes two now-strings because
-// pastes.expires_at is stored with formatTime (RFC3339Nano) and
-// sites.expires_at with formatSiteExpiry (fixed-width): each subquery compares
-// its column against the matching-format operand, so a cross-format lexical
-// compare never happens.
-func identityActiveBytes(tx *sql.Tx, identity, nowStr, siteNowStr string) (int64, error) {
+// pastes and sites, inside the caller's tx.
+func identityActiveBytes(tx *sql.Tx, identity string) (int64, error) {
 	var pasteTotal int64
 	if err := tx.QueryRow(`
 		SELECT COALESCE(SUM(v.size), 0)
 		FROM versions v
 		JOIN pastes pp ON pp.slug = v.slug
-		WHERE pp.identity = ? AND pp.expires_at > ? AND v.deleted = 0
+		WHERE pp.identity = ? AND v.deleted = 0
 		  AND pp.status != 'failed'
-	`, identity, nowStr).Scan(&pasteTotal); err != nil {
+	`, identity).Scan(&pasteTotal); err != nil {
 		return 0, fmt.Errorf("identity paste sum: %w", err)
 	}
 	var siteTotal int64
 	if err := tx.QueryRow(`
-		SELECT COALESCE(SUM(deduped_size), 0) FROM sites WHERE identity = ? AND expires_at > ?
-	`, identity, siteNowStr).Scan(&siteTotal); err != nil {
+		SELECT COALESCE(SUM(deduped_size), 0) FROM sites WHERE identity = ?
+	`, identity).Scan(&siteTotal); err != nil {
 		return 0, fmt.Errorf("identity site sum: %w", err)
 	}
 	return pasteTotal + siteTotal, nil
@@ -395,39 +286,38 @@ func identityActiveBytes(tx *sql.Tx, identity, nowStr, siteNowStr string) (int64
 // SumActiveBytesByOwner returns the identity's active SITE bytes only. The
 // service layer adds this to the paste-side sum where it needs the combined
 // figure; site-only here keeps the two repos independent.
-func (r *SiteRepo) SumActiveBytesByOwner(owner string, now time.Time) (int64, error) {
+func (r *SiteRepo) SumActiveBytesByOwner(owner string, _ time.Time) (int64, error) {
 	if owner == "" {
 		return 0, nil
 	}
 	var n sql.NullInt64
 	if err := r.db.QueryRow(`
-		SELECT COALESCE(SUM(deduped_size), 0) FROM sites WHERE identity = ? AND expires_at > ?
-	`, owner, formatSiteExpiry(now)).Scan(&n); err != nil {
+		SELECT COALESCE(SUM(deduped_size), 0) FROM sites WHERE identity = ?
+	`, owner).Scan(&n); err != nil {
 		return 0, fmt.Errorf("sum active site size: %w", err)
 	}
 	return n.Int64, nil
 }
 
-// ListSitesByOwner returns the identity's active sites so the SSH `list` verb
-// can show them alongside text pastes. Expiry is filtered at read time
-// (expires_at > now), mirroring SumActiveBytesByOwner.
-func (r *SiteRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error) {
+// ListSitesByOwner returns the identity's sites so the SSH `list` verb can show
+// them alongside text pastes.
+func (r *SiteRepo) ListSitesByOwner(owner string, _ time.Time) ([]domain.Site, error) {
 	if owner == "" {
 		return nil, nil
 	}
 	rows, err := r.db.Query(`
-		SELECT slug, identity, manifest, deduped_size, created_at, updated_at, expires_at
-		FROM sites WHERE identity = ? AND expires_at > ?
-	`, owner, formatSiteExpiry(now))
+		SELECT slug, identity, manifest, deduped_size, created_at, updated_at
+		FROM sites WHERE identity = ?
+	`, owner)
 	if err != nil {
 		return nil, fmt.Errorf("list sites by owner: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []domain.Site
 	for rows.Next() {
-		var slugStr, identStr, manStr, created, updated, expires string
+		var slugStr, identStr, manStr, created, updated string
 		var dedupedSize int
-		if err := rows.Scan(&slugStr, &identStr, &manStr, &dedupedSize, &created, &updated, &expires); err != nil {
+		if err := rows.Scan(&slugStr, &identStr, &manStr, &dedupedSize, &created, &updated); err != nil {
 			return nil, fmt.Errorf("scan site row: %w", err)
 		}
 		man, err := decodeManifest(manStr)
@@ -441,7 +331,6 @@ func (r *SiteRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site,
 			StoredBytes: dedupedSize,
 			CreatedAt:   parseTime(created),
 			UpdatedAt:   parseTime(updated),
-			ExpiresAt:   parseSiteExpiry(expires),
 		})
 	}
 	return out, rows.Err()

@@ -24,7 +24,7 @@ func slugFromURL(t *testing.T, url string) string {
 
 // TestCreate_QROnStderr_URLOnStdout pins the create contract: the URL is the
 // ONLY thing on stdout, so a `slug=$(... | ssh -T host)` capture stays clean,
-// while the QR renders on stderr alongside the expiry narration.
+// while the QR renders on stderr.
 func TestCreate_QROnStderr_URLOnStdout(t *testing.T) {
 	s := startStack(t)
 	stdout, stderr, exit := s.run("", []byte("<!doctype html><h1>qr</h1>"))
@@ -42,10 +42,7 @@ func TestCreate_QROnStderr_URLOnStdout(t *testing.T) {
 	if strings.ContainsAny(stdout, qrGlyphs) {
 		t.Fatalf("QR glyphs leaked onto stdout: %q", stdout)
 	}
-	// stderr carries the narration AND the QR block.
-	if !strings.Contains(stderr, "expires in 30 days") {
-		t.Fatalf("stderr should mention expiry, got %q", stderr)
-	}
+	// stderr carries the QR block.
 	if !strings.ContainsAny(stderr, qrGlyphs) {
 		t.Fatalf("stderr should contain a rendered QR code, got %q", stderr)
 	}

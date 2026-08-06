@@ -45,7 +45,6 @@ func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
 		Slug: slug, Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-legidx-v2", Size: 200,
 		CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour),
-		ExpiresAt: now.Add(domain.DefaultRetentionWindow),
 	}
 	pasteVal, err := storage.LegacyPasteValueForTest(p)
 	if err != nil {
@@ -63,7 +62,6 @@ func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
 	mustPutRaw(t, repo, storage.LegacyVersionKeyForTest(slug, 1), v1Val)
 	mustPutRaw(t, repo, storage.LegacyVersionKeyForTest(slug, 2), v2Val)
 	mustPutRaw(t, repo, storage.LegacySlugOwnerKeyForTest(slug), []byte(owner))
-	mustPutRaw(t, repo, storage.LegacyExpiryKeyForTest(p.ExpiresAt, slug), storage.MarkerValueForTest())
 
 	idxKey := storage.IdentityPasteKeyForTest(owner, slug.String())
 	if err := repo.PutEmptyBackendForTest(idxKey); err != nil {
@@ -85,8 +83,7 @@ func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
 	fresh := domain.Paste{
 		Slug: domain.Slug("legidx02"), Identity: domain.Identity(owner),
 		Kind: domain.KindHTML, ContentSHA: "sha-legidx-new", Size: 100,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(domain.DefaultRetentionWindow),
-	}
+		CreatedAt: now, UpdatedAt: now}
 	if err := repo.InsertWithQuotaCheck(context.Background(), fresh, 1<<20, now); err != nil {
 		t.Fatalf("quota-checked insert with a legacy empty entry present must succeed: %v", err)
 	}
@@ -105,19 +102,19 @@ func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
 		t.Fatalf("stale legacy entry must contribute zero: got %d, want 600", got)
 	}
 
-	// Reconcile enriches the empty entry to the JSON projection and prunes the
-	// stale one, retiring the fallback: the cached size equals the live
-	// version sum and the scan agrees.
-	if err := repo.ReconcileForTest(now); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	// The owner's own list retires the fallback: it enriches the empty legacy
+	// entry to the JSON projection and prunes the stale one, with no background
+	// pass involved.
+	if _, err := repo.ListByOwner(owner); err != nil {
+		t.Fatalf("list: %v", err)
 	}
 	if got := readCachedIndexSize(t, repo, idxKey); got != 500 {
-		t.Fatalf("reconcile must enrich the legacy entry to the JSON projection: got %d, want 500", got)
+		t.Fatalf("list must enrich the legacy entry to the JSON projection: got %d, want 500", got)
 	}
 	if raw, err := repo.GetRawForTest(staleKey); err != nil {
-		t.Fatalf("read stale legacy entry post-reconcile: %v", err)
+		t.Fatalf("read stale legacy entry post-list: %v", err)
 	} else if len(raw) != 0 {
-		t.Fatalf("reconcile must prune the stale legacy entry; got %q", raw)
+		t.Fatalf("list must prune the stale legacy entry; got %q", raw)
 	}
 	if got := mustSum(t, repo, owner, now); got != 600 {
 		t.Fatalf("sum after enrichment: got %d, want 600", got)

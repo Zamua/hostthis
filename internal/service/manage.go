@@ -90,7 +90,7 @@ func (m *Manage) requireOwner(slug domain.Slug, owner string) (domain.Paste, err
 	return p, nil
 }
 
-// List returns the owner's active pastes, soonest-to-expire first.
+// List returns the owner's pastes.
 func (m *Manage) List(owner string) ([]domain.Paste, error) {
 	if !domain.Identity(owner).IsKeyed() {
 		return nil, ErrEmptyOwner
@@ -120,8 +120,8 @@ type UpdateResult struct {
 	PinnedAt  int // ver_num of the still-served version if WasPinned
 }
 
-// Update appends a new version to an existing slug and resets the retention
-// expiry. On an UNPINNED paste (the default) the new version also becomes the
+// Update appends a new version to an existing slug. On an UNPINNED paste (the
+// default) the new version also becomes the
 // served one; on a PINNED paste the pin holds and the new version is recorded
 // but not served.
 func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint string) (UpdateResult, error) {
@@ -175,7 +175,7 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 		_, terr := classifyCommitErr(err)
 		return UpdateResult{}, terr
 	}
-	p, err := m.Repo.Get(slug) // re-read so caller sees updated UpdatedAt + ExpiresAt
+	p, err := m.Repo.Get(slug) // re-read so caller sees the updated UpdatedAt
 	if err != nil {
 		return UpdateResult{}, err
 	}
@@ -301,7 +301,7 @@ func (m *Manage) servedVersion(slug domain.Slug, pinnedVersion int) (int, error)
 }
 
 // Pin sets which version_num the public URL serves and makes it sticky, so
-// later `update`s do not bump it. Does NOT reset the expiry clock; only Update
+// later `update`s do not bump it. Only Update
 // does that.
 func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version, error) {
 	if _, err := m.requireOwner(slug, owner); err != nil {

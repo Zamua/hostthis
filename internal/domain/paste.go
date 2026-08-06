@@ -61,7 +61,6 @@ type Paste struct {
 	LatestVersion int    // MAX(ver_num) - what an `update` would advance from; 0 if not loaded
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
-	ExpiresAt     time.Time // UpdatedAt + Retention window (or NeverExpires); only `update` moves it
 }
 
 // Version is a snapshot in a paste's history. v1 is the initial upload; each

@@ -16,7 +16,7 @@ import (
 //
 // The relay never writes durable state. Every durable mutation is the app's
 // HTTP KV PUT/DELETE, which the server mirrors to the room's hub, so the relay
-// inherits the durable tier's caps and retention and never opens a second
+// inherits the durable tier's caps and never opens a second
 // persistence path.
 type Snapshotter interface {
 	Scan(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error)

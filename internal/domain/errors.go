@@ -60,7 +60,7 @@ var (
 	// record landed while this one was deciding what to do, and the
 	// decision cannot be salvaged without re-reading. The operation
 	// applied NOTHING, so a retry is safe and is left to the caller: an
-	// interactive verb reports it and the user re-runs, the expiry sweep
+	// interactive verb reports it and the user re-runs, the sweep
 	// skips the ref and the next pass picks it up.
 	//
 	// Backends whose concurrency control cannot lose this way never

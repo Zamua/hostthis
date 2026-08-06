@@ -45,17 +45,17 @@ the content type, pass <code>--name "label"</code> or
 otherwise parses a leading <code>--name</code> as one of its own options.</dd>
 
 <dt><code>cat <em>file</em> | ssh -T hostthis.dev <em>slug</em></code></dt>
-<dd>replace <em>slug</em>'s content; resets the retention clock</dd>
+<dd>replace <em>slug</em>'s content; the URL stays the same</dd>
 
 <dt><code>ssh hostthis.dev list [-o json]</code></dt>
-<dd>active pastes, soonest to expire first</dd>
+<dd>your pastes, most recently updated first</dd>
 
 <dt><code>ssh hostthis.dev get <em>slug</em></code></dt>
 <dd>print content to stdout</dd>
 
 <dt><code>ssh hostthis.dev url <em>slug</em></code></dt>
 <dd>re-show just the URL for any existing paste or site (no ownership
-check; not found on a missing or expired slug)</dd>
+check; not found on an unknown slug)</dd>
 
 <dt><code>ssh hostthis.dev qr <em>slug</em></code></dt>
 <dd>re-show the URL (stdout) and a QR code (stderr) for any existing
@@ -133,8 +133,8 @@ frames embed each value as JSON when it parses as JSON - a value you PUT
 as a JSON object comes back as a nested object, not a quoted string - and
 as a JSON string otherwise. Reading a single key returns the raw bytes.
 
-Limits: 256 KiB and 256 keys per room; 64 MiB per app; a room expires 30
-days after its last write. Deployments without a room store return 404.
+Limits: 256 KiB and 256 keys per room; 64 MiB per app. Deployments without
+a room store return 404.
 
 ## LIMITS
 
@@ -144,7 +144,7 @@ zstd, so the real raw-payload ceiling is typically 50-100 MiB.
 
 Pastes are HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV
 or JSON document, folded stacks as a flame graph, NDJSON logs, or plain
-text; sites are a gzip-tar archive. Retention runs from the last update (`HOSTTHIS_RETENTION`, 30 days by default).
+text; sites are a gzip-tar archive. Pastes and sites persist indefinitely.
 
 ## EXIT STATUS
 
