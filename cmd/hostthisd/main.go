@@ -165,7 +165,6 @@ func main() {
 	// Whoami reports per-session subnet and budget info from the keygate.
 	manageSvc.KeyGate = keyGate
 	sweepSvc := service.NewSweep(pasteRepo, blobsSweep, logger)
-	sweepSvc.KeyGate = keyGate
 	// On the transactional shale-blob path the cluster owns the blobs: a delete
 	// unbinds the pointer inside the metadata-delete transaction, so the global
 	// content-addressed GC over the detached store is disabled (Blobs=nil) and

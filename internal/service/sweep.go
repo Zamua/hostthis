@@ -63,7 +63,6 @@ type Sweep struct {
 	// window, or an in-flight upload's object is swept. Zero falls back to
 	// DefaultOrphanGrace.
 	OrphanGrace time.Duration
-	KeyGate     *KeyGate // optional; nil disables the key_first_seen prune
 	Interval    time.Duration
 	Logger      *log.Logger
 	Now         func() time.Time
@@ -106,15 +105,8 @@ func (s *Sweep) tick() {
 	if err != nil {
 		s.Logger.Printf("sweep: %v", err)
 	}
-	var prunedKeys, prunedCreates int
+	var prunedCreates int
 	if !s.DryRun {
-		if s.KeyGate != nil {
-			n, err := s.KeyGate.PruneOldRows(now)
-			if err != nil {
-				s.Logger.Printf("sweep: prune key_first_seen: %v", err)
-			}
-			prunedKeys = n
-		}
 		if s.Rooms != nil {
 			n, err := s.Rooms.PruneOldRoomCreates(now.Add(-domain.RoomCreateWindow))
 			if err != nil {
@@ -133,12 +125,11 @@ func (s *Sweep) tick() {
 		}
 	}
 	if s.DryRun {
-		s.Logger.Printf("sweep[dry-run]: WOULD gc %d blob(s); deleted nothing (key-gate/room-create prune skipped). Set HOSTTHIS_SWEEP_DISABLED=false to enable live cleanup.", blobCount)
+		s.Logger.Printf("sweep[dry-run]: WOULD gc %d blob(s); deleted nothing (room-create prune skipped). Set HOSTTHIS_SWEEP_DISABLED=false to enable live cleanup.", blobCount)
 		return
 	}
-	if blobCount > 0 || prunedKeys > 0 || prunedCreates > 0 {
-		s.Logger.Printf("sweep: gc'd %d blob(s), pruned %d key-gate row(s), %d room-create row(s)",
-			blobCount, prunedKeys, prunedCreates)
+	if blobCount > 0 || prunedCreates > 0 {
+		s.Logger.Printf("sweep: gc'd %d blob(s), pruned %d room-create row(s)", blobCount, prunedCreates)
 	}
 }
 

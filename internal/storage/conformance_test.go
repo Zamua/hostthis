@@ -116,7 +116,7 @@ func runConformanceWithSites(
 	t.Run(name+"/KeyGateSubnetLimit", func(t *testing.T) { conformKeyGateSubnetLimit(t, newRepo(t)) })
 	t.Run(name+"/KeyGateSubnetsIndependent", func(t *testing.T) { conformKeyGateSubnetsIndependent(t, newRepo(t)) })
 	t.Run(name+"/KeyGateWindowAges", func(t *testing.T) { conformKeyGateWindowAges(t, newRepo(t)) })
-	t.Run(name+"/KeyGatePruneOld", func(t *testing.T) { conformKeyGatePruneOld(t, newRepo(t)) })
+	t.Run(name+"/KeyGateForgetsOutOfWindow", func(t *testing.T) { conformKeyGateForgetsOutOfWindow(t, newRepo(t)) })
 }
 
 // --- helpers ---------------------------------------------------------
@@ -771,34 +771,37 @@ func conformKeyGateWindowAges(t *testing.T, r conformanceRepo) {
 	}
 }
 
-func conformKeyGatePruneOld(t *testing.T, r conformanceRepo) {
+// conformKeyGateForgetsOutOfWindow pins the port-visible half of the lazy
+// prune: a pair whose row has aged past the window is no longer "known", so a
+// later session from it is a FRESH admission that consumes a slot. Backends
+// drop the row at different moments (sqlite inside the admit transaction,
+// shale as the subnet scan walks past it), so the contract is stated in terms
+// of what a caller can observe rather than when the delete lands.
+func conformKeyGateForgetsOutOfWindow(t *testing.T, r conformanceRepo) {
 	const window = 24 * time.Hour
 	old := fixedNow.Add(-48 * time.Hour)
-	for i := range 3 {
-		if _, err := r.AdmitNewKey("key:"+string(rune('a'+i)), "12.0.0.0/24", old, 20, window); err != nil {
-			t.Fatalf("old admit %d: %v", i, err)
-		}
+	if _, err := r.AdmitNewKey("key:stale", "12.0.0.0/24", old, 20, window); err != nil {
+		t.Fatalf("seed admit: %v", err)
 	}
-	// A fresh in-window row that must NOT be pruned.
+	// A fresh in-window row, which must NOT be forgotten.
 	if _, err := r.AdmitNewKey("key:keep", "12.0.0.0/24", fixedNow, 20, window); err != nil {
 		t.Fatalf("fresh admit: %v", err)
 	}
-	// Prune everything older than the window cutoff (now - window).
-	cutoff := fixedNow.Add(-window)
-	n, err := r.DeleteFirstSeenOlderThan(cutoff)
+
+	known, err := r.AdmitNewKey("key:stale", "12.0.0.0/24", fixedNow, 20, window)
 	if err != nil {
-		t.Fatalf("prune: %v", err)
+		t.Fatalf("re-admit of the aged-out pair: %v", err)
 	}
-	if n != 3 {
-		t.Fatalf("prune should remove the 3 old rows, got %d", n)
+	if known {
+		t.Fatalf("a pair whose row aged past the window must re-admit as FRESH (known=false), got known=true")
 	}
-	// The fresh row survives: it still reports known.
-	known, err := r.AdmitNewKey("key:keep", "12.0.0.0/24", fixedNow, 20, window)
+
+	known, err = r.AdmitNewKey("key:keep", "12.0.0.0/24", fixedNow, 20, window)
 	if err != nil {
-		t.Fatalf("post-prune admit of kept key: %v", err)
+		t.Fatalf("re-admit of the in-window pair: %v", err)
 	}
 	if !known {
-		t.Fatalf("the in-window row should survive prune (known=true), got known=false")
+		t.Fatalf("an in-window pair must stay known, got known=false")
 	}
 }
 

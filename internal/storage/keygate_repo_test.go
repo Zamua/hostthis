@@ -65,27 +65,56 @@ func TestKeyGate_OtherSubnetsUnaffected(t *testing.T) {
 	}
 }
 
-func TestKeyGate_DeleteOldRowsFreesSlots(t *testing.T) {
+// Out-of-window rows free their slots AND are dropped by the admission that
+// walks past them: the family stays bounded with no background prune.
+func TestKeyGate_AdmissionDropsOutOfWindowRows(t *testing.T) {
 	r := newKeyGateRepo(t)
-	old := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) // 4 days ago
+	old := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) // 4 days before now
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	for i := range 20 {
-		_, _ = r.AdmitNewKey("key:"+string(rune('a'+i)), "1.2.3.0/24", old, 20, 24*time.Hour)
+		if _, err := r.AdmitNewKey("key:"+string(rune('a'+i)), "1.2.3.0/24", old, 20, 24*time.Hour); err != nil {
+			t.Fatalf("seed admit %d: %v", i, err)
+		}
 	}
-	// Limit hit at `now` even though the rows are old - but only if
-	// the window covers them.
-	_, err := r.AdmitNewKey("key:z", "1.2.3.0/24", now, 20, 24*time.Hour)
-	// Since old is 4 days before now and the window is 24h, the
-	// existing rows are OUTSIDE the window - count returns 0 → admitted.
-	if err != nil {
-		t.Fatalf("expected admission past old rows, got %v", err)
+	if n := countKeygateRows(t, r, "1.2.3.0/24"); n != 20 {
+		t.Fatalf("fixture: want 20 seeded rows, got %d (the prune below could not be observed)", n)
 	}
-	// Pruning old rows shouldn't change behavior beyond shrinking the table.
-	n, err := r.DeleteFirstSeenOlderThan(now.Add(-24 * time.Hour))
-	if err != nil {
-		t.Fatalf("delete old: %v", err)
+
+	// The 20 rows are 4 days old against a 24h window, so they count for
+	// nothing and the 21st key is admitted.
+	if _, err := r.AdmitNewKey("key:z", "1.2.3.0/24", now, 20, 24*time.Hour); err != nil {
+		t.Fatalf("expected admission past out-of-window rows, got %v", err)
 	}
-	if n != 20 {
-		t.Fatalf("expected 20 deletes, got %d", n)
+	// And that same admission removed them: only the new row survives.
+	if n := countKeygateRows(t, r, "1.2.3.0/24"); n != 1 {
+		t.Fatalf("admission must drop the 20 out-of-window rows, leaving only the new one; got %d rows", n)
 	}
+}
+
+// An admission must never drop a row still INSIDE the window: those are the
+// rows the cap is counted from.
+func TestKeyGate_AdmissionKeepsInWindowRows(t *testing.T) {
+	r := newKeyGateRepo(t)
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	recent := now.Add(-time.Hour)
+	for i := range 3 {
+		if _, err := r.AdmitNewKey("key:"+string(rune('a'+i)), "1.2.3.0/24", recent, 20, 24*time.Hour); err != nil {
+			t.Fatalf("seed admit %d: %v", i, err)
+		}
+	}
+	if _, err := r.AdmitNewKey("key:z", "1.2.3.0/24", now, 20, 24*time.Hour); err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	if n := countKeygateRows(t, r, "1.2.3.0/24"); n != 4 {
+		t.Fatalf("in-window rows must survive an admission: want 4, got %d", n)
+	}
+}
+
+func countKeygateRows(t *testing.T, r *KeyGateRepo, subnet string) int {
+	t.Helper()
+	var n int
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM key_first_seen WHERE ip_subnet = ?`, subnet).Scan(&n); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	return n
 }

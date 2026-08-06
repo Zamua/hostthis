@@ -1031,6 +1031,11 @@ func (r *SlateRepo) ReferencedBlobSHAs() ([]string, error) {
 // isolation cannot serialize (concurrent admits write different keys and so
 // raise no conflict), and SlateDB is single-writer, so an in-process lock is
 // the whole boundary.
+//
+// The same transaction drops this subnet's out-of-window rows: they cannot
+// change an admission decision, so the scan that walks past them removes them
+// and the family stays bounded with no background pass (docs/SPEC.md "Sybil
+// rate limit").
 func (r *SlateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPerSubnet int, window time.Duration) (knownAlready bool, err error) {
 	if identity == "" || subnet == "" {
 		return false, errors.New("identity + subnet required")
@@ -1064,10 +1069,17 @@ func (r *SlateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 	for _, item := range items {
 		t, err := time.Parse(time.RFC3339Nano, string(item.Value))
 		if err != nil {
+			// Undecodable: cannot be shown to be out of window, so it is left
+			// alone rather than deleted.
 			continue
 		}
 		if t.After(cutoff) {
 			freshCount++
+			continue
+		}
+		if err := tx.Delete(item.Key); err != nil {
+			_ = tx.Rollback()
+			return false, fmt.Errorf("drop expired keygate row %s: %w", item.Key, err)
 		}
 	}
 	if freshCount >= limitPerSubnet {
@@ -1143,40 +1155,6 @@ func (r *SlateRepo) SubnetsForIdentity(identity string, now time.Time, window ti
 		seen[subnet] = struct{}{}
 	}
 	return len(seen), nil
-}
-
-func (r *SlateRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
-	items, err := r.scanPrefix([]byte("keygate/"))
-	if err != nil {
-		return 0, err
-	}
-	var toDelete [][]byte
-	for _, item := range items {
-		t, err := time.Parse(time.RFC3339Nano, string(item.Value))
-		if err != nil {
-			continue
-		}
-		if t.Before(cutoff) {
-			toDelete = append(toDelete, item.Key)
-		}
-	}
-	if len(toDelete) == 0 {
-		return 0, nil
-	}
-	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
-	if err != nil {
-		return 0, fmt.Errorf("begin tx: %w", err)
-	}
-	for _, k := range toDelete {
-		if err := tx.Delete(k); err != nil {
-			_ = tx.Rollback()
-			return 0, fmt.Errorf("delete %s: %w", k, err)
-		}
-	}
-	if _, err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit keygate prune: %w", err)
-	}
-	return len(toDelete), nil
 }
 
 // --- Sort helpers -----------------------------------------------------------

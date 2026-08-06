@@ -2844,9 +2844,19 @@ Otherwise the session is refused at startup with exit code 6 and the
 stderr line `too many new keys from this network today`.
 
 Storage is a `key_first_seen(identity, ip_subnet, first_seen_at)`
-table, pruned by the same periodic worker that GCs orphaned
-pastes - rows past the window are dropped to keep the table
-bounded.
+table. **Rows past the window are dropped LAZILY, by the reads that
+already touch them**, not by a background worker: an admission for a
+subnet is already scanning that subnet's rows to count them, so it drops
+the out-of-window ones on the way past, and the identity-side read does
+the same for its own key.
+
+Lazy pruning bounds the table by the set of subnets that are still
+CONNECTING, not by the set that ever connected: a subnet that never
+returns keeps its rows. That is deliberate. Those rows are outside the
+window, so they cannot change any admission decision, and each is a few
+dozen bytes. The alternative - a periodic scan of every row in the
+cluster to reclaim them - is a cross-shard fan-out running forever to
+free bytes nobody is short of.
 
 **Two access patterns, therefore two orderings.** The gate is read
 two ways, and they need opposite key orders:
@@ -2873,11 +2883,19 @@ until the table is large.
 
 The identity-leading entry is a DERIVED index. shale's transactions
 are single-shard and the two keys hash to different shards, so it
-cannot be written atomically with the authoritative row; it is
-written best-effort after the admit and REPAIRED by the reconciler,
-exactly like the enumeration indexes. Drift is therefore possible and
-bounded to a display value: a missing entry under-reports the subnet
-count until the next reconcile pass projects it.
+cannot be written atomically with the authoritative row; it is written
+best-effort after the admit. **It is NOT reconciled, and that is the
+point.**
+
+The enumeration indexes are reconciled because they feed a QUOTA, where a
+wrong number durably admits or rejects real work. This one feeds a number
+`whoami` prints. Drift costs a cosmetic inaccuracy, and it is bounded
+without any repair pass: every entry ages out of the rolling window, so a
+missing entry self-corrects the next time that key connects from that
+subnet, and a surplus entry stops counting when the window passes it.
+Reconciling it would mean two cluster-wide scans, on a schedule, forever,
+to keep a display value exact - a standing cross-shard cost paid for
+nothing that can go wrong.
 
 **Implication: same key + different subnet = a fresh registration.**
 A user who connects from a new IP (different ISP, mobile network,
@@ -3253,8 +3271,8 @@ through four small Go interfaces declared in `internal/service`:
   `SumActiveBytesByOwner`, `OwnerFirstSeen`.
 - `SweepRepo` (sweep):
   `ReferencedBlobSHAs`.
-- `KeyGateRepo` (keygate): `AdmitNewKey`, `DeleteFirstSeenOlderThan`,
-  `SubnetSnapshot`, `SubnetsForIdentity`.
+- `KeyGateRepo` (keygate): `AdmitNewKey`, `SubnetSnapshot`,
+  `SubnetsForIdentity`.
 
 Every backend implements all four identically. The observable contract
 those interfaces expose, not the storage internals, is the load-bearing
@@ -3412,9 +3430,9 @@ behaviors are expressed in terms of inputs and observable outputs:
   previously-seen `(identity, subnet)` pair (no accounting), admits a
   fresh pair when the subnet is under its in-window limit, and returns
   the too-many-new-keys sentinel at the limit. Subnets are independent;
-  rows aged past the window stop counting.
-  `DeleteFirstSeenOlderThan(cutoff)` prunes rows older than `cutoff`
-  and returns the count removed.
+  rows aged past the window stop counting, and the admission scan drops
+  them as it passes. There is no separate prune entry point: pruning is a
+  side effect of the reads that already walk the rows.
 
 **Conformance suite.** `internal/storage/conformance_test.go` is a
 backend-agnostic suite that pins exactly the observable contract above.
@@ -4167,7 +4185,7 @@ The shale backend (`ShaleRepo`) implements the same four service-layer
 interfaces every metadata backend implements: `PasteRepo` (insert +
 get on the upload path), `PasteAdmin` (list / versions / flags / delete
 + the per-owner quota and first-seen accessors), `SweepRepo` (the
-referenced-blob set), and `KeyGateRepo` (Sybil admission + pruning). No method signature changes; no caller changes.
+referenced-blob set), and `KeyGateRepo` (Sybil admission).
 
 The key names are unchanged from the slatedb layout:
 
@@ -4659,13 +4677,17 @@ counter's exact-but-permanently-drifting ceiling.
 
 ### Cross-shard background operations
 
-Two operations are inherently cross-shard: blob GC must collect every
-referenced content SHA across all `{slug}` shards, and the keygate prune
-deletes stale `keygate/*` rows across all `{subnet}` shards. These use
-shale's `Aggregate()` fan-out, which snapshots each node's local
-keyspace in parallel and merges the per-node results. Cost is the
-slowest node's scan plus one round-trip, bounded and appropriate for the
-periodic background loop these operations already run on.
+One operation is inherently cross-shard: blob GC must collect every
+referenced content SHA across all `{slug}` shards. It uses shale's
+`Aggregate()` fan-out, which snapshots each node's local keyspace in
+parallel and merges the per-node results. Cost is the slowest node's scan
+plus one round-trip, bounded and appropriate for the periodic background
+loop it already runs on.
+
+The keygate is deliberately NOT on this list. Its rows are pruned lazily
+by the single-shard reads that already walk them (see "Sybil rate limit"),
+so the whole family is maintained without a fan-out and without a
+schedule.
 
 The `SweepRepo.ReferencedBlobSHAs` contract is preserved exactly: it
 returns the set of **referenced** SHAs (the allow-list the sweep keeps),
@@ -4695,8 +4717,8 @@ below is chosen to satisfy that invariant; where two policies would both
 satisfy availability, the one that also satisfies the invariant wins.
 
 **Policy 1 - idempotent background sweeps and the reconciler: SKIP +
-LOG, continue.** The keygate prune
-(`DeleteFirstSeenOlderThan` / `PruneOldRoomCreates`), and the reconciler
+LOG, continue.** The room-create prune (`PruneOldRoomCreates`), the
+keygate's lazy in-scan prune, and the reconciler
 (`Reconcile` - reproject the `identity_pastes` + `identity_sites`
 enumeration indexes and age out stuck pending pastes) all treat an
 undecodable row as SKIP + LOG and CONTINUE the pass. The reconciler's
@@ -4707,15 +4729,13 @@ blast radius stays one entry, never a frozen pass. The consequence of
 skipping is bounded and self-correcting: that one record is simply not
 processed THIS pass; the next pass (the periodic loop re-runs, e.g. ~10 min
 later) retries it. This is safe ONLY because these operations are
-idempotent and re-run: pruning a stale keygate marker and
-reprojecting an enumeration index all produce the same end state whether
-they run once or many times, so deferring one record to a
-later pass costs at most latency, never correctness. A single corrupt row
-must NOT be allowed to abort the whole pass: a hard-fail there would stall
-stall the keygate prune
-(the Sybil ledger grows unbounded), and stall the reconciler (drift stops
-being healed) for every healthy record too, until an operator hand-fixes
-the one bad row. The blast radius of one poisoned row must stay one row.
+idempotent and re-run: dropping a stale marker and reprojecting an
+enumeration index both produce the same end state whether they run once or
+many times, so deferring one record to a later pass costs at most latency,
+never correctness. A single corrupt row must NOT be allowed to abort the
+whole pass: a hard-fail there would stall the reconciler (drift stops being
+healed) for every healthy record too, until an operator hand-fixes the one
+bad row. The blast radius of one poisoned row must stay one row.
 This mirrors the keygate admission-count scan, which already does the
 right thing for an idempotent counter (a tolerant parse that skip +
 continues on a bad row). The skip is LOGGED so a persistently-bad row is
@@ -4825,7 +4845,7 @@ The three policies, side by side:
 
 | Scan kind | Examples | On a bad record | Why |
 | --- | --- | --- | --- |
-| Idempotent background sweep / reconciler | `DeleteFirstSeenOlderThan`, `PruneOldRoomCreates`, `Reconcile` (`reconcileIndexes` + `reconcileSiteIndexes` + pending age-out) | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
+| Idempotent background sweep / reconciler | `PruneOldRoomCreates`, the keygate's lazy in-scan prune, `Reconcile` (`reconcileIndexes` + `reconcileSiteIndexes` + pending age-out) | SKIP + LOG, continue; next pass retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
 | Blob-GC reference set | `ReferencedBlobSHAs`, `ReferencedSiteBlobSHAs` | FAIL CLOSED - abort the GC pass, return error, delete nothing; NEVER skip | skipping under-counts refs -> a live blob looks orphaned and is deleted (irreversible) |
 | User-facing read | `Get`, `ListByOwner`, `ListVersions`, `GetVersion`, site manifest read, room scan / per-key read | HARD-FAIL (unchanged) | a user read of corrupt data should surface an error, not silently skip |
 
