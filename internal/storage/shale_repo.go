@@ -711,7 +711,7 @@ func (r *ShaleRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	for _, item := range idx {
 		slug := domain.Slug(extractSlug(item.Key))
 		var e identityPasteRow
-		if err := json.Unmarshal(item.Value, &e); err == nil && e.Kind != "" && !e.Placeholder {
+		if err := json.Unmarshal(item.Value, &e); err == nil && e.renderable() {
 			out = append(out, e.toDomain(slug, owner)) // the common path: zero reads
 			continue
 		}
@@ -756,7 +756,7 @@ func (r *ShaleRepo) upgradeListEntry(owner string, slug domain.Slug, item scanIt
 	}
 
 	fresh := identityPasteRow{
-		Name: head.Name, Size: live, CreatedAt: head.CreatedAt,
+		Name: head.Name, Size: live, ServedSize: head.Size, CreatedAt: head.CreatedAt,
 		Kind: head.Kind, LatestVersion: latest,
 		PinnedVersion: head.PinnedVersion, UpdatedAt: head.UpdatedAt,
 	}
@@ -1319,6 +1319,7 @@ func (r *ShaleRepo) confirmInsert(p domain.Paste) error {
 		if err := shaleTxPutJSON(tx, indexKey, identityPasteRow{
 			Name:          p.Name,
 			Size:          p.Size,
+			ServedSize:    p.Size,
 			CreatedAt:     p.CreatedAt,
 			Kind:          string(p.Kind),
 			LatestVersion: 1,
@@ -1593,6 +1594,7 @@ func (r *ShaleRepo) refreshIndexProjection(identity string, slug domain.Slug) er
 		return err
 	}
 	row.Size = head.LiveBytes
+	row.ServedSize = head.Size
 	row.Kind = head.Kind
 	row.LatestVersion = head.LatestVersion
 	row.PinnedVersion = head.PinnedVersion
