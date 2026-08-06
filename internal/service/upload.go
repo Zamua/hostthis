@@ -99,7 +99,7 @@ type Result struct {
 // ErrOverQuota is returned when accepting the upload would push the identity's
 // total active COMPRESSED bytes above UserQuotaBytes. The number is derived
 // from the constant so the message cannot drift from the enforced limit.
-var ErrOverQuota = fmt.Errorf("service: would exceed your %d MiB total quota; delete a paste or wait for one to expire", domain.UserQuotaBytes>>20)
+var ErrOverQuota = fmt.Errorf("service: would exceed your %d MiB total quota; delete a paste to free space", domain.UserQuotaBytes>>20)
 
 // ErrRawTooLarge is returned when the raw input exceeded the fast-fail cap.
 // The server stopped reading before any compression check could run.
@@ -113,7 +113,7 @@ var ErrCompressedTooLarge = errors.New("service: upload exceeds 10 MiB compresse
 // object store rejected a blob Put because the bucket is at its configured
 // hard quota (SPEC "Limits -> Durable total-bytes ceiling: an object-store
 // quota").
-var ErrServiceFull = errors.New("service: service is at capacity, try again after the next expiry")
+var ErrServiceFull = errors.New("service: service is at capacity, try again later")
 
 // Create persists a new paste owned by owner, a "key:<fp>" identity built from
 // the uploader's ssh public key fingerprint. That identity gates quota: its

@@ -74,8 +74,6 @@ type Server struct {
 	Logger      *log.Logger
 }
 
-// expiresPhrase renders the retention policy for post-upload confirmations:
-
 // now returns the injected clock, defaulting to time.Now.
 func (s *Server) now() time.Time {
 	if s.Now != nil {
@@ -456,9 +454,9 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 		emitServiceErr(sess, err)
 		return
 	}
-	// Sites count against the same quota as pastes but never expire, so `list`
-	// must show them or the quota is invisible and unfreeable. A nil Deploy
-	// means static-site hosting is disabled.
+	// Sites count against the same quota as pastes, so `list` must show them or
+	// the quota is invisible and unfreeable. A nil Deploy means static-site
+	// hosting is disabled.
 	var sites []domain.Site
 	if s.Deploy != nil {
 		sites, err = s.Deploy.ListSites(owner)
@@ -467,8 +465,7 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 			return
 		}
 	}
-	now := s.now().UTC()
-	items := newListView(pastes, sites, now)
+	items := newListView(pastes, sites)
 
 	if format == formatJSON {
 		// json mode: stdout carries only the array (empty [] when nothing is
@@ -493,7 +490,7 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 	tw := tabwriter.NewWriter(sess, 0, 0, 2, ' ', 0)
 	// SIZE is what the item COSTS the owner, which for a paste is every live
 	// version. That is what makes the column sum to whoami.
-	_, _ = fmt.Fprintln(tw, "SLUG\tNAME\tSIZE\tKIND\tEXPIRES_IN\tVERS")
+	_, _ = fmt.Fprintln(tw, "SLUG\tNAME\tSIZE\tKIND\tVERS")
 	for _, it := range items {
 		name := it.Name
 		if name == "" {
@@ -534,8 +531,8 @@ func (s *Server) verbGet(sess gossh.Session, owner string, argv []string) {
 // -- url / qr ----------------------------------------------------------------
 
 // verbURL prints the shareable URL for an existing slug on stdout. No
-// ownership check (the URL is a public capability), but the target must exist
-// and be unexpired, otherwise the standard not-found.
+// ownership check (the URL is a public capability), but the target must exist,
+// otherwise the standard not-found.
 func (s *Server) verbURL(sess gossh.Session, argv []string) {
 	slug, err := requireSlug(argv)
 	if err != nil {
@@ -573,9 +570,9 @@ func (s *Server) verbQR(sess gossh.Session, argv []string) {
 	_ = sess.Exit(ExitOK)
 }
 
-// resolveExistingURL resolves slug to its shareable URL when it names a live
-// (existing, unexpired) paste or, failing that, a live static site; false when
-// no such slug exists. Reusing BuildURL keeps the result byte-identical to what
+// resolveExistingURL resolves slug to its shareable URL when it names an
+// existing paste or, failing that, a static site; false when no such slug
+// exists. Reusing BuildURL keeps the result byte-identical to what
 // the original upload returned. No ownership check: knowing the slug already
 // grants read access at the URL.
 func (s *Server) resolveExistingURL(slug domain.Slug) (string, bool) {
@@ -747,8 +744,8 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 	}
 
 	if format == formatJSON {
-		// json mode: stdout carries only the object; the pin/expiry footer
-		// (normally on stderr) folds into the document.
+		// json mode: stdout carries only the object; the pin footer (normally
+		// on stderr) folds into the document.
 		if err := writeJSON(sess, newVersionsView(string(slug), p, vers, servedVer, now)); err != nil {
 			emitServiceErr(sess, err)
 			return
@@ -780,7 +777,7 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 	if p.PinnedVersion != 0 {
 		pinNote = fmt.Sprintf("pinned to v%d", p.PinnedVersion)
 	}
-	_, _ = fmt.Fprintf(sess.Stderr(), "%s. never expires\n", pinNote)
+	_, _ = fmt.Fprintln(sess.Stderr(), pinNote)
 	_ = sess.Exit(ExitOK)
 }
 
@@ -932,10 +929,9 @@ func emitHelp(sess gossh.Session, apex string) {
 	fmt.Fprintln(sess.Stderr(), text)
 }
 
-// helpTextTemplate is the canonical user-facing help. {{apex}}, {{retention}}
-// and {{quota}} are substituted at render time, so the text is correct under
-// any deployment.
-const helpTextTemplate = `Pipe a rendered file in, get a URL out. {{retention}}
+// helpTextTemplate is the canonical user-facing help. {{apex}} and {{quota}}
+// are substituted at render time, so the text is correct under any deployment.
+const helpTextTemplate = `Pipe a rendered file in, get a URL out. Pastes persist indefinitely.
 
 UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;
          a QR code of the URL also prints to stderr on success)

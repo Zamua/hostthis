@@ -14,9 +14,8 @@
 //
 // # Key layout
 //
-//	sites/<slug>                       JSON {Identity, Manifest, DedupedSize, CreatedAt, UpdatedAt, ExpiresAt}
+//	sites/<slug>                       JSON {Identity, Manifest, DedupedSize, CreatedAt, UpdatedAt}
 //	identity_sites/<identity>/<slug>   empty value (list/sum sites by identity)
-//	expiry_sites/<rfc3339>/<slug>      empty value (sweep prefix scan)
 //
 // Manifests use the same encodeManifest/decodeManifest as the sqlite backend,
 // so the on-wire manifest shape is identical across backends. DedupedSize is
@@ -77,12 +76,6 @@ func (s *SlateSiteRepo) PreClaimSlug(_ context.Context, _ domain.Slug, _ string,
 
 // service.SweepSites (Delete also serves the owner-facing removal path)
 func (s *SlateSiteRepo) Delete(slug domain.Slug) error { return s.repo.DeleteSite(slug) }
-func (s *SlateSiteRepo) ExpiredSites(now time.Time) ([]domain.ExpiredSite, error) {
-	return s.repo.ExpiredSites(now)
-}
-func (s *SlateSiteRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
-	return s.repo.DeleteExpiredSite(ref)
-}
 func (s *SlateSiteRepo) ReferencedSiteBlobSHAs() ([]string, error) {
 	return s.repo.ReferencedSiteBlobSHAs()
 }
@@ -97,7 +90,6 @@ type siteRow struct {
 	DedupedSize int       `json:"deduped_size"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
-	ExpiresAt   time.Time `json:"expires_at"`
 
 	// FileBlobs maps a file's content sha to the shale-blob id its bytes were
 	// staged under. The manifest references files by sha, so this side-table is
@@ -118,7 +110,6 @@ func (r *SlateRepo) siteRowFromDomain(s domain.Site, dedupedSize int) (siteRow, 
 		DedupedSize: dedupedSize,
 		CreatedAt:   s.CreatedAt,
 		UpdatedAt:   s.UpdatedAt,
-		ExpiresAt:   s.ExpiresAt,
 	}, nil
 }
 
@@ -134,7 +125,6 @@ func (row siteRow) toDomain(slug domain.Slug) (domain.Site, error) {
 		StoredBytes: row.DedupedSize,
 		CreatedAt:   row.CreatedAt,
 		UpdatedAt:   row.UpdatedAt,
-		ExpiresAt:   row.ExpiresAt,
 	}, nil
 }
 
@@ -153,12 +143,6 @@ func keyIdentitySite(identity, slug string) []byte {
 func prefixIdentitySites(identity string) []byte {
 	return shaleKey(prefixIdentitySitesAll, identity, "/")
 }
-
-func keyExpirySite(t time.Time, slug domain.Slug) []byte {
-	return shaleKey(prefixExpirySitesAll, t.UTC().Format(expirySiteTimeFormat), "/", slug.String())
-}
-
-func prefixExpirySites() []byte { return shaleKey(prefixExpirySitesAll) }
 
 // --- Site KV operations (on SlateRepo) -------------------------------------
 
@@ -234,10 +218,6 @@ func (r *SlateRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, use
 		_ = tx.Rollback()
 		return fmt.Errorf("put identity-site index: %w", err)
 	}
-	if err := tx.Put(keyExpirySite(s.ExpiresAt, s.Slug), []byte{}); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("put site expiry index: %w", err)
-	}
 	if _, err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit site insert %q: %w", s.Slug, err)
 	}
@@ -245,14 +225,14 @@ func (r *SlateRepo) InsertSiteWithQuotaCheck(s domain.Site, dedupedSize int, use
 }
 
 // ReplaceSiteWithQuotaCheck re-deploys an existing OWNED site in place,
-// swapping its row and re-keying its expiry index, enforcing the per-identity
-// cap against the REPLACE DELTA.
+// swapping its row and enforcing the per-identity cap against the REPLACE
+// DELTA.
 //
 // A missing row OR a foreign-owned row both collapse to ErrNotFound (the SAME
 // sentinel a missing slug yields), so existence and ownership never leak.
 //
-// Quota: the per-identity sum already includes the old (live) row, so the
-// post-swap total is (owned - oldDeduped + body). The durable total-bytes
+// Quota: the per-identity sum already includes the old row, so the post-swap
+// total is (owned - oldDeduped + body). The durable total-bytes
 // ceiling is NOT checked here (it is the object-store bucket quota).
 //
 // Concurrency: the per-identity quota stripe is held across the sum + the
@@ -279,13 +259,7 @@ func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, us
 	if existing.Identity != s.Identity.String() {
 		return ErrNotFound
 	}
-	// Credit the old bytes back ONLY if the old row is still live: the sums
-	// below filter on expiry, so an expired-but-unswept row is not in them and
-	// crediting it would under-count and admit an over-quota re-deploy.
-	creditOld := int64(0)
-	if !domain.IsExpired(existing.ExpiresAt, now) {
-		creditOld = int64(existing.DedupedSize)
-	}
+	creditOld := int64(existing.DedupedSize)
 
 	if userCap > 0 {
 		ownerPaste, err := r.sumActiveBytesForOwner(s.Identity.String(), now)
@@ -335,24 +309,13 @@ func (r *SlateRepo) ReplaceSiteWithQuotaCheck(s domain.Site, dedupedSize int, us
 		_ = tx.Rollback()
 		return err
 	}
-	// Re-key the expiry index so the sweep sees the restarted retention clock.
-	if !inTx.ExpiresAt.Equal(s.ExpiresAt) {
-		if err := tx.Delete(keyExpirySite(inTx.ExpiresAt, s.Slug)); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("delete old site expiry index: %w", err)
-		}
-	}
-	if err := tx.Put(keyExpirySite(s.ExpiresAt, s.Slug), []byte{}); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("put site expiry index: %w", err)
-	}
 	if _, err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit site replace %q: %w", s.Slug, err)
 	}
 	return nil
 }
 
-// GetSite returns the site for slug, or ErrNotFound. Expired-but-unswept rows
+// GetSite returns the site for slug, or ErrNotFound. Stale rows
 // are returned too: the HTTP layer 404s them, the sweep deletes them.
 func (r *SlateRepo) GetSite(slug domain.Slug) (domain.Site, error) {
 	var row siteRow
@@ -371,11 +334,9 @@ func (r *SlateRepo) SumActiveSiteBytesByOwner(owner string, now time.Time) (int6
 	return r.sumActiveSiteBytesForOwner(owner, now)
 }
 
-// sumActiveSiteBytesForOwner walks identity_sites/<owner>/ and sums DedupedSize
-// of rows whose ExpiresAt > now. The expiry filter is at READ time, so an
-// expired-unswept site stops counting the instant it expires
-// (conformCaps.ExpiryFreesQuotaAtReadTime = true on slatedb).
-func (r *SlateRepo) sumActiveSiteBytesForOwner(owner string, now time.Time) (int64, error) {
+// sumActiveSiteBytesForOwner walks identity_sites/<owner>/ and sums each row's
+// DedupedSize.
+func (r *SlateRepo) sumActiveSiteBytesForOwner(owner string, _ time.Time) (int64, error) {
 	idx, err := r.scanPrefix(prefixIdentitySites(owner))
 	if err != nil {
 		return 0, err
@@ -390,18 +351,15 @@ func (r *SlateRepo) sumActiveSiteBytesForOwner(owner string, now time.Time) (int
 			}
 			return 0, err
 		}
-		if domain.IsExpired(row.ExpiresAt, now) {
-			continue
-		}
 		total += int64(row.DedupedSize)
 	}
 	return total, nil
 }
 
-// ListSitesByOwner returns the active (non-expired) sites for owner, re-reading
-// each authoritative sites/<slug> row. Same scan and read-time expiry filter as
-// sumActiveSiteBytesForOwner; a stale index entry whose row is gone is skipped.
-func (r *SlateRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error) {
+// ListSitesByOwner returns the owner's sites, re-reading each authoritative
+// sites/<slug> row. Same scan as sumActiveSiteBytesForOwner; a stale index entry
+// whose row is gone is skipped.
+func (r *SlateRepo) ListSitesByOwner(owner string, _ time.Time) ([]domain.Site, error) {
 	if owner == "" {
 		return nil, nil
 	}
@@ -418,9 +376,6 @@ func (r *SlateRepo) ListSitesByOwner(owner string, now time.Time) ([]domain.Site
 				continue // stale index entry
 			}
 			return nil, err
-		}
-		if domain.IsExpired(row.ExpiresAt, now) {
-			continue
 		}
 		site, err := row.toDomain(slug)
 		if err != nil {
@@ -453,39 +408,12 @@ func (r *SlateRepo) DeleteSite(slug domain.Slug) error {
 		_ = tx.Rollback()
 		return fmt.Errorf("delete identity-site index: %w", err)
 	}
-	if err := tx.Delete(keyExpirySite(row.ExpiresAt, slug)); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("delete site expiry index: %w", err)
-	}
 	if _, err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit site delete %q: %w", slug, err)
 	}
 	return nil
 }
 
-// ExpiredSites returns one reference per site whose ExpiresAt is at or before
-// now (inclusive): the slug plus the entry's full key as the opaque IndexRef,
-// so DeleteExpiredSite can remove the EXACT entry the scan surfaced even when
-// the site record is already gone. Site expiry keys use the fixed-width
-// expirySiteTimeFormat, so byte order is time order exactly and a string
-// compare is correct even within a shared whole second. The cutoff is formatted
-// with the SAME layout to keep the compare aligned.
-func (r *SlateRepo) ExpiredSites(now time.Time) ([]domain.ExpiredSite, error) {
-	return scanExpiredRefs(r.scanPrefix, prefixExpirySites(), now, expirySiteTimeFormat, parseExpiredSiteKey)
-}
-
-// DeleteExpiredSite processes one expired reference: the full DeleteSite
-// cascade when the record still exists, and in every case removal of the exact
-// expiry-index entry the scan surfaced (the cascade removes the DERIVED key,
-// this the OBSERVED one). Idempotent, and reports whether a record was
-// actually deleted. See docs/SPEC.md "Static-site storage" (sweep path).
-func (r *SlateRepo) DeleteExpiredSite(ref domain.ExpiredSite) (bool, error) {
-	var row siteRow
-	return deleteExpiredRef(ref, expirySiteIndexKey,
-		func() error { return r.getJSON(keySite(ref.Slug), &row) },
-		func() error { return r.DeleteSite(ref.Slug) },
-		func(entryKey []byte) error { return r.deleteExpiryEntry(entryKey, "site expiry entry") })
-}
 
 // ReferencedSiteBlobSHAs returns every distinct blob SHA referenced by any live
 // site's manifest. The sweep unions this with the paste-side set, so a blob

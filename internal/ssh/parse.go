@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
@@ -79,27 +78,3 @@ func humanBytes(n int) string {
 	}
 }
 
-// humanExpiresIn formats the EXPIRES_IN cell for a paste/site, rendering the
-
-// humanDuration renders a remaining time as "2d3h", "3h4m", "5m", "<1m", or
-// "expired".
-func humanDuration(d time.Duration) string {
-	if d <= 0 {
-		return "expired"
-	}
-	if d < time.Minute {
-		return "<1m"
-	}
-	totalHours := int(d.Hours())
-	days := totalHours / 24
-	hours := totalHours - days*24
-	minutes := int(d.Minutes()) - totalHours*60
-	switch {
-	case days >= 1:
-		return fmt.Sprintf("%dd%dh", days, hours)
-	case hours >= 1:
-		return fmt.Sprintf("%dh%dm", hours, minutes)
-	default:
-		return fmt.Sprintf("%dm", minutes)
-	}
-}

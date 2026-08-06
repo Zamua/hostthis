@@ -81,7 +81,7 @@ func slatedbLogLevel(s string) (slatedb.LogLevel, bool) {
 
 // openShaleRepoFromEnv builds the shale ShaleRepo from the HOSTTHIS_* env and
 // nothing else: no background reconcile loop, no blob-unit wiring, no debug
-// server, just the opened repo with its retention set. The caller owns
+// server, just the opened repo. The caller owns
 // repo.Close().
 //
 // registerGRPC (optional, nil for callers that want the bare repo) is the
@@ -89,7 +89,7 @@ func slatedbLogLevel(s string) (slatedb.LogLevel, bool) {
 // NewShaleRepo calls it with the cluster gRPC server before serving, so
 // composition-root services (the relay's peer fan-out) ride the same listener +
 // advertised address shale forwarding uses.
-func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger, registerGRPC func(*grpc.Server)) (*storage.ShaleRepo, error) {
+func openShaleRepoFromEnv(logger *log.Logger, registerGRPC func(*grpc.Server)) (*storage.ShaleRepo, error) {
 	if lvl, on := slatedbLogLevel(os.Getenv("HOSTTHIS_SLATEDB_LOG_LEVEL")); on {
 		if err := slatedb.InitLogging(lvl, nil); err != nil {
 			logger.Printf("metadata: slatedb InitLogging failed: %v", err)
@@ -252,7 +252,6 @@ func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger, regist
 	if err != nil {
 		return nil, fmt.Errorf("open shale: %w", err)
 	}
-	repo.Retention = retention
 	if bindAddr == "" {
 		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d shards=%d awaitDurable=%t fenceGC=%t blobBucket=%q endpoint=%s",
 			nodeID, bucket, dbName, replicationFactor, unitCount, awaitDurable, reapFenceWALs, blobBucket, endpoint)
@@ -268,7 +267,7 @@ func openShaleRepoFromEnv(retention domain.Retention, logger *log.Logger, regist
 // transactional blob unit, the optional debug endpoint, and the periodic
 // Reconcile loop. The audit subcommand deliberately bypasses it: it wants the
 // bare repo with no background loops.
-func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metadataBundle, error) {
+func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 	// Multi-pod relay peer transport (SPEC "Multi-pod relay: the peer
 	// transport"). The RECEIVER must exist before the repo opens: its Register
 	// method is the opaque func(*grpc.Server) hook NewShaleRepo calls when it
@@ -294,7 +293,7 @@ func buildMetadataShale(retention domain.Retention, logger *log.Logger) (*metada
 		return nil, err
 	}
 
-	repo, err := openShaleRepoFromEnv(retention, logger, relayRecv.Register)
+	repo, err := openShaleRepoFromEnv(logger, relayRecv.Register)
 	if err != nil {
 		return nil, err
 	}

@@ -15,7 +15,6 @@
 //	slug_owner/<slug>                  raw identity, for visitor-side lookup
 //	identity_pastes/<identity>/<slug>  empty value, for list-by-identity
 //	identity_first_seen/<identity>     RFC3339, cached MIN(created_at)
-//	expiry/<rfc3339>/<slug>            empty value, for the sweep scan
 //	keygate/<subnet>/<identity>        RFC3339 first-seen, Sybil rate limit
 //
 // # Atomicity
@@ -93,9 +92,6 @@ type SlateRepo struct {
 	// Striped by subnet hash so different subnets do not contend.
 	keygateLocks [256]sync.Mutex
 
-	// Retention is the content-TTL policy used to (re)stamp ExpiresAt on
-	// update. Defaults to the 30-day policy; the composition root overrides it.
-	Retention domain.Retention
 }
 
 // lockQuota acquires the per-identity quota stripe and returns the unlock. Hold
@@ -158,7 +154,7 @@ func NewSlateRepo(cfg SlateConfig) (*SlateRepo, error) {
 		store.Destroy()
 		return nil, fmt.Errorf("open slatedb: %w", err)
 	}
-	return &SlateRepo{db: db, store: store, Retention: domain.DefaultRetention()}, nil
+	return &SlateRepo{db: db, store: store}, nil
 }
 
 // Close flushes pending writes and shuts down the underlying SlateDB.
@@ -201,7 +197,6 @@ type pasteRow struct {
 	PinnedVersion int       `json:"pinned_version"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
-	ExpiresAt     time.Time `json:"expires_at"`
 }
 
 type versionRow struct {
@@ -223,7 +218,6 @@ func (p pasteRow) toDomain(slug domain.Slug) domain.Paste {
 		PinnedVersion: p.PinnedVersion,
 		CreatedAt:     p.CreatedAt,
 		UpdatedAt:     p.UpdatedAt,
-		ExpiresAt:     p.ExpiresAt,
 	}
 }
 
@@ -238,7 +232,6 @@ func pasteFromDomain(p domain.Paste) pasteRow {
 		PinnedVersion: p.PinnedVersion,
 		CreatedAt:     p.CreatedAt,
 		UpdatedAt:     p.UpdatedAt,
-		ExpiresAt:     p.ExpiresAt,
 	}
 }
 
@@ -278,12 +271,6 @@ func keyIdentityFirstSeen(identity string) []byte {
 	return []byte("identity_first_seen/" + identity)
 }
 
-func keyExpiry(t time.Time, slug domain.Slug) []byte {
-	return []byte("expiry/" + t.UTC().Format(time.RFC3339Nano) + "/" + slug.String())
-}
-
-func prefixExpiry() []byte { return []byte("expiry/") }
-
 func keyKeygate(subnet, identity string) []byte {
 	return []byte("keygate/" + subnet + "/" + identity)
 }
@@ -291,7 +278,7 @@ func keyKeygate(subnet, identity string) []byte {
 func prefixKeygateSubnet(subnet string) []byte { return []byte("keygate/" + subnet + "/") }
 
 // extractSlug takes the segment after the last '/', the slug in
-// "identity_pastes/<identity>/<slug>" and "expiry/<rfc3339>/<slug>".
+// "identity_pastes/<identity>/<slug>".
 func extractSlug(key []byte) string {
 	s := string(key)
 	idx := strings.LastIndex(s, "/")
@@ -411,7 +398,7 @@ func (r *SlateRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 		p.LatestVersion = latest
 		out = append(out, p)
 	}
-	sortByExpiresAt(out) // matches sqlite ORDER BY expires_at ASC
+	sortByUpdatedAtDesc(out) // matches sqlite ORDER BY updated_at DESC
 	return out, nil
 }
 
@@ -477,9 +464,9 @@ func (r *SlateRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, err
 }
 
 // sumActiveBytesForOwner walks every paste indexed under
-// identity_pastes/<owner>/ and sums the sizes of non-deleted version rows
-// attached to pastes whose expires_at > now.
-func (r *SlateRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, error) {
+// identity_pastes/<owner>/ and sums the sizes of their non-deleted version
+// rows.
+func (r *SlateRepo) sumActiveBytesForOwner(owner string, _ time.Time) (int64, error) {
 	idx, err := r.scanPrefix(prefixIdentityPastes(owner))
 	if err != nil {
 		return 0, err
@@ -494,9 +481,6 @@ func (r *SlateRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 				continue // stale index entry
 			}
 			return 0, err
-		}
-		if domain.IsExpired(p.ExpiresAt, now) {
-			continue // expired pastes don't count toward quota
 		}
 		versions, err := r.scanPrefix(prefixVersions(slug))
 		if err != nil {
@@ -516,11 +500,7 @@ func (r *SlateRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, 
 	return total, nil
 }
 
-// sumLiveVersionBytesForSlug sums a paste's non-deleted version rows: its
-// post-revival byte contribution. An append to an EXPIRED-unswept paste resets
-// its expiry while the owner sum still excludes it, so the quota check charges
-// this sum PLUS the new version (docs/SPEC.md "Reviving an expired-but-unswept
-// record charges its FULL post-revival size").
+// sumLiveVersionBytesForSlug sums a paste's non-deleted version rows.
 func (r *SlateRepo) sumLiveVersionBytesForSlug(slug domain.Slug) (int64, error) {
 	items, err := r.scanPrefix(prefixVersions(slug))
 	if err != nil {
@@ -665,10 +645,6 @@ func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 		_ = tx.Rollback()
 		return fmt.Errorf("put identity-paste index: %w", err)
 	}
-	if err := tx.Put(keyExpiry(p.ExpiresAt, p.Slug), []byte{}); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("put expiry index: %w", err)
-	}
 
 	// identity_first_seen is write-once: sqlite derives it as MIN(created_at)
 	// across paste rows, so overwriting here would move it forward.
@@ -692,8 +668,8 @@ func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 }
 
 func (r *SlateRepo) Delete(slug domain.Slug) error {
-	// Identity and expires_at are the secondary-index keys, so the row must
-	// be read before it can be removed.
+	// Identity is a secondary-index key, so the row must be read before it can
+	// be removed.
 	var p pasteRow
 	if err := r.getJSON(keyPaste(slug), &p); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -727,10 +703,6 @@ func (r *SlateRepo) Delete(slug domain.Slug) error {
 	if err := tx.Delete(keyIdentityPaste(p.Identity, slug.String())); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("delete identity-paste index: %w", err)
-	}
-	if err := tx.Delete(keyExpiry(p.ExpiresAt, slug)); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("delete expiry index: %w", err)
 	}
 	if _, err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit delete %q: %w", slug, err)
@@ -934,21 +906,7 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		if err != nil {
 			return AppendResult{}, fmt.Errorf("identity site sum: %w", err)
 		}
-		// The owner sums filter expires_at > now, so an expired paste's
-		// existing versions are NOT in ownerPaste, yet the append below
-		// resets expires_at and brings them back. Charging the new version
-		// alone would leave the revived paste durably over the cap
-		// (docs/SPEC.md "Reviving an expired-but-unswept record charges its
-		// FULL post-revival size").
-		charge := body
-		if domain.IsExpired(existing.ExpiresAt, now) {
-			revived, err := r.sumLiveVersionBytesForSlug(slug)
-			if err != nil {
-				return AppendResult{}, fmt.Errorf("revived version sum: %w", err)
-			}
-			charge += revived
-		}
-		if err := (domain.Allowance{Cap: userCap, Used: ownerPaste + ownerSite}).Admit(charge); err != nil {
+		if err := (domain.Allowance{Cap: userCap, Used: ownerPaste + ownerSite}).Admit(body); err != nil {
 			return AppendResult{}, err
 		}
 	}
@@ -968,7 +926,6 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		}
 	}
 	newVer := maxVer + 1
-	expires := r.Retention.ExpiryFor(now)
 
 	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
 	if err != nil {
@@ -989,23 +946,13 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		return AppendResult{}, err
 	}
 
-	// The expiry entry is re-keyed, not updated: the timestamp is in the key.
-	if err := tx.Delete(keyExpiry(p.ExpiresAt, slug)); err != nil {
-		_ = tx.Rollback()
-		return AppendResult{}, fmt.Errorf("delete old expiry idx: %w", err)
-	}
 	p.UpdatedAt = now
-	p.ExpiresAt = expires
 	if p.PinnedVersion == 0 {
 		p.contentRef = newV.contentRef // an unpinned head rolls whole, never one field
 	}
 	if err := txPutJSON(tx, keyPaste(slug), p); err != nil {
 		_ = tx.Rollback()
 		return AppendResult{}, err
-	}
-	if err := tx.Put(keyExpiry(p.ExpiresAt, slug), []byte{}); err != nil {
-		_ = tx.Rollback()
-		return AppendResult{}, fmt.Errorf("put new expiry idx: %w", err)
 	}
 	if _, err := tx.Commit(); err != nil {
 		return AppendResult{}, fmt.Errorf("commit append %q: %w", slug, err)
@@ -1036,46 +983,6 @@ func (r *SlateRepo) DeleteVersion(slug domain.Slug, ver int) error {
 
 // --- SweepRepo -------------------------------------------------------------
 
-// ExpiredPastes returns one reference per expired entry: the slug plus the
-// entry's full key as the opaque IndexRef, so DeleteExpired can remove the
-// EXACT entry that surfaced the slug even once the paste record is gone.
-func (r *SlateRepo) ExpiredPastes(now time.Time) ([]domain.ExpiredPaste, error) {
-	// expiry/<rfc3339>/<slug>: the timestamp segment compares lexically.
-	return scanExpiredRefs(r.scanPrefix, prefixExpiry(), now, time.RFC3339Nano, parseExpiredPasteKey)
-}
-
-// DeleteExpired processes one expired reference: the full Delete cascade when
-// the paste record still exists, then, in EVERY case, removal of the exact
-// expiry-index entry the scan surfaced. That unconditional removal stops an
-// orphaned entry resurfacing on every scan forever and self-heals an entry
-// whose key drifted from the paste row's ExpiresAt: the cascade removes the
-// DERIVED key, this removes the OBSERVED one. Idempotent. Reports whether a
-// paste record was actually deleted. docs/SPEC.md "The storage contract".
-func (r *SlateRepo) DeleteExpired(ref domain.ExpiredPaste) (bool, error) {
-	var p pasteRow
-	return deleteExpiredRef(ref, expiryIndexKey,
-		func() error { return r.getJSON(keyPaste(ref.Slug), &p) },
-		func() error { return r.Delete(ref.Slug) },
-		func(entryKey []byte) error { return r.deleteExpiryEntry(entryKey, "expiry entry") })
-}
-
-// deleteExpiryEntry removes one expiry-index entry in its own tx. label names
-// the family ("expiry entry", "site expiry entry", "room expiry entry") so the
-// error strings stay attributable.
-func (r *SlateRepo) deleteExpiryEntry(entryKey []byte, label string) error {
-	tx, err := r.db.Begin(slatedb.IsolationLevelSnapshot)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	if err := tx.Delete(entryKey); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("delete %s %s: %w", label, entryKey, err)
-	}
-	if _, err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit delete %s %s: %w", label, entryKey, err)
-	}
-	return nil
-}
 
 // ReferencedBlobSHAs returns the blob content-SHAs still referenced: the head
 // sha of an active paste, or the content_sha of a NON-DELETED version row. A
@@ -1279,9 +1186,9 @@ func (r *SlateRepo) DeleteFirstSeenOlderThan(cutoff time.Time) (int, error) {
 // Insertion sorts: these slices are one owner's pastes or one paste's versions,
 // small enough that sort.Slice's reflection costs more than it saves.
 
-func sortByExpiresAt(ps []domain.Paste) {
+func sortByUpdatedAtDesc(ps []domain.Paste) {
 	for i := 1; i < len(ps); i++ {
-		for j := i; j > 0 && ps[j].ExpiresAt.Before(ps[j-1].ExpiresAt); j-- {
+		for j := i; j > 0 && ps[j].UpdatedAt.After(ps[j-1].UpdatedAt); j-- {
 			ps[j], ps[j-1] = ps[j-1], ps[j]
 		}
 	}

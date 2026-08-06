@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Zamua/hostthis/internal/domain"
 	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/relay"
 	"github.com/Zamua/hostthis/internal/service"
@@ -112,15 +111,15 @@ type roomStore interface {
 // buildMetadata reads HOSTTHIS_METADATA_BACKEND and returns the configured
 // bundle, defaulting to sqlite. The slatedb and shale branches error with a
 // clear message when the binary was built without `-tags slatedb`.
-func buildMetadata(dataDir string, retention domain.Retention, logger *log.Logger) (*metadataBundle, error) {
+func buildMetadata(dataDir string, logger *log.Logger) (*metadataBundle, error) {
 	backend := strings.ToLower(envOr("HOSTTHIS_METADATA_BACKEND", "sqlite"))
 	switch backend {
 	case "sqlite":
-		return buildMetadataSqlite(dataDir, retention, logger)
+		return buildMetadataSqlite(dataDir, logger)
 	case "slatedb":
-		return buildMetadataSlate(retention, logger)
+		return buildMetadataSlate(logger)
 	case "shale":
-		return buildMetadataShale(retention, logger)
+		return buildMetadataShale(logger)
 	default:
 		return nil, fmt.Errorf("unknown HOSTTHIS_METADATA_BACKEND %q (want sqlite|slatedb|shale)", backend)
 	}
@@ -128,7 +127,7 @@ func buildMetadata(dataDir string, retention domain.Retention, logger *log.Logge
 
 // buildMetadataSqlite is the always-compiled default, opening
 // <data-dir>/hostthis.db.
-func buildMetadataSqlite(dataDir string, retention domain.Retention, logger *log.Logger) (*metadataBundle, error) {
+func buildMetadataSqlite(dataDir string, logger *log.Logger) (*metadataBundle, error) {
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("mkdir data-dir: %w", err)
 	}
@@ -138,7 +137,6 @@ func buildMetadataSqlite(dataDir string, retention domain.Retention, logger *log
 	}
 	logger.Printf("metadata: sqlite at %s", filepath.Join(dataDir, "hostthis.db"))
 	pasteRepo := storage.NewPasteRepo(db)
-	pasteRepo.Retention = retention
 	return &metadataBundle{
 		Repo:    pasteRepo,
 		KeyGate: storage.NewKeyGateRepo(db),

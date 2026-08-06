@@ -64,10 +64,10 @@ func (r *RoomKVRepo) CreateRoom(room domain.Room, subnet string, appCap int64, n
 	}
 
 	if _, err := tx.Exec(`
-		INSERT INTO rooms (app_slug, room_id, created_at, updated_at, expires_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO rooms (app_slug, room_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?)
 	`, room.AppSlug.String(), room.ID.String(),
-		formatTime(room.CreatedAt), formatTime(room.UpdatedAt), formatSiteExpiry(room.ExpiresAt)); err != nil {
+		formatTime(room.CreatedAt), formatTime(room.UpdatedAt)); err != nil {
 		if isUniqueViolation(err) {
 			return ErrSlugTaken
 		}
@@ -83,16 +83,14 @@ func (r *RoomKVRepo) CreateRoom(room domain.Room, subnet string, appCap int64, n
 	return tx.Commit()
 }
 
-// GetRoom returns the room record for (appSlug, id), or ErrNotFound. Like the
-// paste/site reads it returns expired-but-unswept rows: the HTTP layer 404s
-// them, the sweep deletes them.
+// GetRoom returns the room record for (appSlug, id), or ErrNotFound.
 func (r *RoomKVRepo) GetRoom(appSlug domain.Slug, id domain.RoomID) (domain.Room, error) {
 	row := r.db.QueryRow(`
-		SELECT app_slug, room_id, created_at, updated_at, expires_at
+		SELECT app_slug, room_id, created_at, updated_at
 		FROM rooms WHERE app_slug = ? AND room_id = ?
 	`, appSlug.String(), id.String())
-	var appStr, idStr, created, updated, expires string
-	if err := row.Scan(&appStr, &idStr, &created, &updated, &expires); err != nil {
+	var appStr, idStr, created, updated string
+	if err := row.Scan(&appStr, &idStr, &created, &updated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Room{}, ErrNotFound
 		}
@@ -103,7 +101,6 @@ func (r *RoomKVRepo) GetRoom(appSlug domain.Slug, id domain.RoomID) (domain.Room
 		ID:        domain.RoomID(idStr),
 		CreatedAt: parseTime(created),
 		UpdatedAt: parseTime(updated),
-		ExpiresAt: parseSiteExpiry(expires), // fixed-width column
 	}, nil
 }
 
@@ -185,12 +182,12 @@ func (r *RoomKVRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.Roo
 // PutValue writes val under key in room (appSlug, id), in ONE serializable tx:
 // re-check the room exists (ErrNotFound), enforce the per-room byte + key-count
 // caps via the pure domain CanPut (ErrRoomDataFull) and the per-app aggregate
-// on the delta (ErrAppRoomsFull), upsert the value, reset the retention clock.
+// on the delta (ErrAppRoomsFull), upsert the value, bump the room's clock.
 //
 // The single tx is what stops two concurrent writes to the same room both
 // passing a stale cap check and both committing. The room-exists re-check must
-// be inside it too, so a concurrent expiry sweep cannot delete the room between
-// the service's GetRoom and this write.
+// be inside it too, so a concurrent delete cannot remove the room between the
+// service's GetRoom and this write.
 //
 // Rooms hold no blobs, so this path touches no object-store quota and has no
 // service-wide byte cap (SPEC "Rooms -> Quota and abuse -> Durable total-bytes
@@ -257,8 +254,7 @@ func (r *RoomKVRepo) PutValue(appSlug domain.Slug, id domain.RoomID, key string,
 	return seq, tx.Commit()
 }
 
-// DeleteValue removes key and resets the room's retention clock (a delete is a
-// write). Idempotent: deleting an absent key succeeds. Returns ErrNotFound only
+// DeleteValue removes key and bumps the room's clock (a delete is a write). Idempotent: deleting an absent key succeeds. Returns ErrNotFound only
 // when the ROOM does not exist.
 //
 // Returns the assigned per-room sequence, like PutValue. The absent-key delete
@@ -316,53 +312,8 @@ func (r *RoomKVRepo) AppRoomBytes(appSlug domain.Slug) (int64, error) {
 	return n.Int64, nil
 }
 
-// ExpiredRooms returns one reference per room whose expires_at is at or before
-// now. The scan reads the rooms table itself - there is no standalone expiry
-// index to fall out of sync - so IndexRef is always empty and a returned
-// reference always named a live row at scan time.
-func (r *RoomKVRepo) ExpiredRooms(now time.Time) ([]domain.ExpiredRoom, error) {
-	rows, err := r.db.Query(`
-		SELECT app_slug, room_id FROM rooms WHERE expires_at <= ?
-	`, formatSiteExpiry(now))
-	if err != nil {
-		return nil, fmt.Errorf("expired rooms: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	var out []domain.ExpiredRoom
-	for rows.Next() {
-		var ref domain.ExpiredRoom
-		var appStr, idStr string
-		if err := rows.Scan(&appStr, &idStr); err != nil {
-			return nil, err
-		}
-		ref.AppSlug = domain.Slug(appStr)
-		ref.ID = domain.RoomID(idStr)
-		out = append(out, ref)
-	}
-	return out, rows.Err()
-}
-
-// DeleteExpiredRoom processes one expired reference with the same full-cascade
-// delete as DeleteRoom, reporting whether a row was removed. There is no
-// expiry-index entry to clean (the scan IS the rooms table), so a missing row
-// is a no-op returning false.
-func (r *RoomKVRepo) DeleteExpiredRoom(ref domain.ExpiredRoom) (bool, error) {
-	res, err := r.db.Exec(`
-		DELETE FROM rooms WHERE app_slug = ? AND room_id = ?
-	`, ref.AppSlug.String(), ref.ID.String())
-	if err != nil {
-		return false, fmt.Errorf("delete expired room %s/%s: %w", ref.AppSlug, ref.ID, err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("delete expired room %s/%s: rows affected: %w", ref.AppSlug, ref.ID, err)
-	}
-	return n > 0, nil
-}
-
 // DeleteRoom removes a room and, via the FK cascade, every value in its
-// namespace. Idempotent. The sweep reaches it through DeleteExpiredRoom rather
-// than calling it directly.
+// namespace. Idempotent.
 func (r *RoomKVRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 	if _, err := r.db.Exec(`
 		DELETE FROM rooms WHERE app_slug = ? AND room_id = ?
@@ -385,32 +336,30 @@ func (r *RoomKVRepo) PruneOldRoomCreates(cutoff time.Time) (int, error) {
 }
 
 // SumActiveRoomBytes returns the total stored value bytes across every app's
-// non-expired rooms. Observability only: the durable total-bytes ceiling lives
+// rooms. Observability only: the durable total-bytes ceiling lives
 // at the object store (the blob bucket quota), not in a sum of room bytes.
-func (r *RoomKVRepo) SumActiveRoomBytes(now time.Time) (int64, error) {
+func (r *RoomKVRepo) SumActiveRoomBytes(_ time.Time) (int64, error) {
 	tx, err := r.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
-	total, err := activeRoomBytesTx(tx, formatSiteExpiry(now))
+	total, err := activeRoomBytesTx(tx)
 	if err != nil {
 		return 0, err
 	}
 	return total, tx.Commit()
 }
 
-// activeRoomBytesTx sums stored value bytes across every app's non-expired
-// rooms inside the caller's tx. nowStr must be the fixed-width formatSiteExpiry
-// form, since that column's byte order is time order only in that layout.
-func activeRoomBytesTx(tx *sql.Tx, nowStr string) (int64, error) {
+// activeRoomBytesTx sums stored value bytes across every app's rooms inside the
+// caller's tx.
+func activeRoomBytesTx(tx *sql.Tx) (int64, error) {
 	var n sql.NullInt64
 	if err := tx.QueryRow(`
 		SELECT COALESCE(SUM(kv.val_size), 0)
 		FROM room_kv kv
 		JOIN rooms ro ON ro.app_slug = kv.app_slug AND ro.room_id = kv.room_id
-		WHERE ro.expires_at > ?
-	`, nowStr).Scan(&n); err != nil {
+	`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("sum active room bytes (tx): %w", err)
 	}
 	return n.Int64, nil
@@ -420,7 +369,7 @@ func activeRoomBytesTx(tx *sql.Tx, nowStr string) (int64, error) {
 
 // roomExistsTx returns ErrNotFound when (appSlug, id) names no room. Called
 // inside PutValue/DeleteValue so existence is re-checked within the same
-// serializable boundary as the write, closing the race with the expiry sweep.
+// serializable boundary as the write, closing the race with a concurrent delete.
 func roomExistsTx(tx *sql.Tx, appSlug domain.Slug, id domain.RoomID) error {
 	var one int
 	err := tx.QueryRow(`
@@ -459,12 +408,8 @@ func scanRoomTx(tx *sql.Tx, appSlug domain.Slug, id domain.RoomID) (domain.RoomK
 	return kv, rows.Err()
 }
 
-// appRoomBytesTx sums an app's stored value bytes inside the caller's tx with
-// NO expiry predicate: every room_kv row counts, including rows of an
-// expired-but-unswept room. Deliberate, and matched by the other backends - the
-// per-app room aggregate is sweep-time, unlike the per-identity paste/site
-// quota, which frees at read time. Fail-safe direction: the cap can transiently
-// OVER-count (reject a write slightly early) but never under-count.
+// appRoomBytesTx sums an app's stored value bytes inside the caller's tx: every
+// room_kv row counts, and bytes are freed only by an explicit delete.
 func appRoomBytesTx(tx *sql.Tx, appSlug string) (int64, error) {
 	var n sql.NullInt64
 	if err := tx.QueryRow(`
@@ -475,16 +420,15 @@ func appRoomBytesTx(tx *sql.Tx, appSlug string) (int64, error) {
 	return n.Int64, nil
 }
 
-// touchRoomTx resets the retention clock and assigns the mutation's per-room
-// sequence (seq = prior + 1, in the same UPDATE), returning it. Every write
-// calls it; the serializable tx is what makes the increment dense and unique
-// under concurrent same-room writers.
+// touchRoomTx bumps updated_at and assigns the mutation's per-room sequence
+// (seq = prior + 1, in the same UPDATE), returning it. Every write calls it; the
+// serializable tx is what makes the increment dense and unique under concurrent
+// same-room writers.
 func touchRoomTx(tx *sql.Tx, appSlug domain.Slug, id domain.RoomID, now time.Time) (uint64, error) {
-	expires := now.Add(domain.RoomRetentionWindow)
 	if _, err := tx.Exec(`
-		UPDATE rooms SET updated_at = ?, expires_at = ?, seq = seq + 1
+		UPDATE rooms SET updated_at = ?, seq = seq + 1
 		WHERE app_slug = ? AND room_id = ?
-	`, formatTime(now), formatSiteExpiry(expires), appSlug.String(), id.String()); err != nil {
+	`, formatTime(now), appSlug.String(), id.String()); err != nil {
 		return 0, fmt.Errorf("touch room: %w", err)
 	}
 	var seq uint64

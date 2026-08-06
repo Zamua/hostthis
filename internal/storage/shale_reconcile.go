@@ -139,7 +139,7 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 			if pastesByOwner[owner] == nil {
 				pastesByOwner[owner] = make(map[string]identityPasteRow)
 			}
-			// Fail-closed placeholder: name/size/expiry are unreadable and the
+			// Fail-closed placeholder: name and size are unreadable and the
 			// quota scan sums the CACHED size, so a zero-value entry would
 			// silently under-count. The placeholder marker makes the owner's
 			// next quota scan HARD-FAIL instead (docs/SPEC.md "Decode tolerance
@@ -169,7 +169,6 @@ func (r *ShaleRepo) Reconcile(now time.Time) error {
 				Name:      p.Name,
 				Size:      int(liveBytes[slug]),
 				CreatedAt: p.CreatedAt,
-				ExpiresAt: p.ExpiresAt,
 			}
 		}
 		// Deferred until after the index rebuild (see stalePending).

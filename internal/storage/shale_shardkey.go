@@ -21,7 +21,6 @@ import (
 //	pastes/<slug>                  -> <slug>
 //	versions/<slug>/<NNNN>         -> <slug>
 //	slug_owner/<slug>              -> <slug>
-//	expiry/<rfc3339>/<slug>        -> <slug>      (LAST segment; slugs are
 //	                                               slash-free and RFC3339 has no
 //	                                               '/', so this is unambiguous)
 //	identity_pastes/<id>/<slug>    -> <id>
@@ -30,14 +29,12 @@ import (
 //	keygate_id/<identity>/<subnet> -> <identity>  (identity-leading view)
 //
 //	sites/<slug>                   -> <slug>
-//	expiry_sites/<ts>/<slug>       -> <slug>      (LAST segment)
 //	identity_sites/<id>/<slug>     -> <id>
 //
 //	rooms/<app-slug>/<uuid>            -> <app-slug>
 //	roomkv/<app-slug>/<uuid>/<key>     -> <app-slug>
 //	roomcreate/<app-slug>/<subnet>/<ts> -> <app-slug>
 //	roombytes/<app-slug>               -> <app-slug>
-//	roomexpiry/<ts>/<app-slug>/<uuid>  -> <app-slug>  (SECOND-to-last segment)
 //
 // An unrecognised key falls back to the full key as its own shard key: it
 // routes deterministically and cannot collide families.
@@ -51,28 +48,18 @@ func shaleShardKey(key []byte) []byte {
 	case bytes.HasPrefix(key, prefixBref):
 		return ring.ShardKey(key)
 
-	// Per-slug authoritative family. All shard on the slug, which is the
-	// FIRST segment after the family prefix for every member except
-	// expiry, whose date segment sits between the prefix and the slug.
+	// Per-slug authoritative family. All shard on the slug, the FIRST segment
+	// after the family prefix.
 	case bytes.HasPrefix(key, prefixPastes):
 		return firstSegment(key[len(prefixPastes):])
 	case bytes.HasPrefix(key, prefixVersionsAll):
 		return firstSegment(key[len(prefixVersionsAll):])
 	case bytes.HasPrefix(key, prefixSlugOwner):
 		return firstSegment(key[len(prefixSlugOwner):])
-	case bytes.HasPrefix(key, prefixExpiryAll):
-		// expiry/<rfc3339>/<slug>: the slug is the LAST segment. Slugs
-		// are slash-free and RFC3339 has no '/', so the last '/' splits
-		// the date from the slug unambiguously.
-		return lastSegment(key[len(prefixExpiryAll):])
 
 	// Per-slug static-site authoritative family.
 	case bytes.HasPrefix(key, prefixSites):
 		return firstSegment(key[len(prefixSites):])
-	case bytes.HasPrefix(key, prefixExpirySitesAll):
-		// expiry_sites/<rfc3339>/<slug>: slug is the LAST segment. The '_sites'
-		// suffix keeps it from matching expiry/.
-		return lastSegment(key[len(prefixExpirySitesAll):])
 
 	// Per-identity derived family. All shard on the id, the first segment
 	// after the family prefix.
@@ -94,11 +81,10 @@ func shaleShardKey(key []byte) []byte {
 		return firstSegment(key[len(prefixIdentitySitesAll):])
 
 	// Per-app room family (the app-persistence tier). All room families shard
-	// on the <app-slug> so an app's rooms, values, creation ledger, expiry
-	// entries and byte counter co-locate on ONE shard, making "write one key" /
-	// "load the whole room" / "count this app's creations" single-shard ops.
-	// The <app-slug> is the FIRST segment after the prefix for rooms/ + roomkv/
-	// + roomcreate/, but the SECOND-to-last for roomexpiry/.
+	// on the <app-slug> so an app's rooms, values, creation ledger and byte
+	// counter co-locate on ONE shard, making "write one key" / "load the whole
+	// room" / "count this app's creations" single-shard ops. The <app-slug> is
+	// the FIRST segment after the prefix for every room family.
 	case bytes.HasPrefix(key, prefixRooms):
 		return firstSegment(key[len(prefixRooms):])
 	case bytes.HasPrefix(key, prefixRoomKV):
@@ -107,16 +93,6 @@ func shaleShardKey(key []byte) []byte {
 		return firstSegment(key[len(prefixRoomCreate):])
 	case bytes.HasPrefix(key, prefixRoomBytes):
 		return firstSegment(key[len(prefixRoomBytes):])
-	case bytes.HasPrefix(key, prefixRoomExpiryAll):
-		// roomexpiry/<ts>/<app-slug>/<uuid>: the <ts> is fixed-width (no '/')
-		// and slug + uuid are slash-free, so strip the leading <ts> then take
-		// the first of the remaining "<app-slug>/<uuid>".
-		rest := key[len(prefixRoomExpiryAll):]
-		if _, after, ok := bytes.Cut(rest, []byte{'/'}); ok {
-			return firstSegment(after)
-		}
-		return rest
-
 	// Per-subnet Sybil-gate family.
 	case bytes.HasPrefix(key, prefixKeygateAll):
 		return firstSegment(key[len(prefixKeygateAll):])
@@ -130,7 +106,7 @@ func shaleShardKey(key []byte) []byte {
 // Family prefixes, declared as package vars so shaleShardKey compares
 // against shared byte slices rather than re-allocating on every call.
 // The trailing '/' is intentional: it anchors each prefix to a full path
-// segment so e.g. "expiry/" never matches "expiry_sites/".
+// segment so e.g. "rooms/" never matches "roomkv/".
 var (
 	// prefixBref matches shale's internal blob-pointer keys
 	// (bref/{<routeShard>}/<unit>/<blobid>).
@@ -139,7 +115,6 @@ var (
 	prefixPastes               = []byte("pastes/")
 	prefixVersionsAll          = []byte("versions/")
 	prefixSlugOwner            = []byte("slug_owner/")
-	prefixExpiryAll            = []byte("expiry/")
 	prefixIdentityPastesAll    = []byte("identity_pastes/")
 	prefixIdentityFirstSeenAll = []byte("identity_first_seen/")
 	prefixKeygateIdentityAll   = []byte("keygate_id/")
@@ -147,17 +122,15 @@ var (
 
 	// Static-site families. identity_sites/ is the per-owner enumeration index.
 	prefixSites            = []byte("sites/")
-	prefixExpirySitesAll   = []byte("expiry_sites/")
 	prefixIdentitySitesAll = []byte("identity_sites/")
 
 	// Room families (the app-persistence tier). All shard on <app-slug>,
-	// co-locating an app's rooms + values + creation ledger + expiry index +
-	// byte counter on one shard.
+	// co-locating an app's rooms + values + creation ledger + byte counter on
+	// one shard.
 	prefixRooms         = []byte("rooms/")
 	prefixRoomKV        = []byte("roomkv/")
 	prefixRoomCreate    = []byte("roomcreate/")
 	prefixRoomBytes     = []byte("roombytes/")
-	prefixRoomExpiryAll = []byte("roomexpiry/")
 )
 
 // firstSegment returns the bytes up to (but not including) the first '/' in s,

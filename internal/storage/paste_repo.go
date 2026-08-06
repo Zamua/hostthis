@@ -24,7 +24,6 @@ var ErrOverUserQuota = domain.ErrOverUserQuota
 // PasteRepo is the sqlite-backed implementation of paste persistence.
 type PasteRepo struct {
 	db *sql.DB
-	// the default.
 }
 
 func NewPasteRepo(db *sql.DB) *PasteRepo {
@@ -50,13 +49,11 @@ func (r *PasteRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	nowStr := formatTime(now)
-	siteNowStr := formatSiteExpiry(now)
 	body := int64(p.Size)
 
 	// The check spans BOTH pastes and sites. Tombstoned versions contribute 0.
 	if userCap > 0 {
-		ownerTotal, err := identityActiveBytes(tx, p.Identity.String(), nowStr, siteNowStr)
+		ownerTotal, err := identityActiveBytes(tx, p.Identity.String())
 		if err != nil {
 			return err
 		}
@@ -77,12 +74,12 @@ func (r *PasteRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 	if _, err := tx.Exec(`
 		INSERT INTO pastes (slug, identity, status, kind, content_sha, size, name,
 		                    pinned_version,
-		                    created_at, updated_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                    created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, p.Slug.String(), p.Identity.String(), string(domain.NormalizeStatus(string(p.Status))),
 		string(p.Kind), p.ContentSHA, p.Size, p.Name,
 		p.PinnedVersion,
-		formatTime(p.CreatedAt), formatTime(p.UpdatedAt), formatTime(p.ExpiresAt)); err != nil {
+		formatTime(p.CreatedAt), formatTime(p.UpdatedAt)); err != nil {
 		if isUniqueViolation(err) {
 			return ErrSlugTaken
 		}
@@ -97,20 +94,19 @@ func (r *PasteRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 	return tx.Commit()
 }
 
-// Get returns the paste for slug, or ErrNotFound. Expired pastes are still
-// returned: the HTTP layer 404s them and the sweep deletes them.
+// Get returns the paste for slug, or ErrNotFound.
 func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
 	row := r.db.QueryRow(`
 		SELECT slug, identity, status, kind, content_sha, size, name,
 		       pinned_version,
-		       created_at, updated_at, expires_at
+		       created_at, updated_at
 		FROM pastes WHERE slug = ?
 	`, slug.String())
 	return scanPaste(row)
 }
 
-// ListByOwner returns an owner's active pastes ordered by expires_at ascending
-// (soonest to die first, what `list` shows). An empty identity returns no rows.
+// ListByOwner returns an owner's pastes, most recently updated first (what
+// `list` shows). An empty identity returns no rows.
 func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	if owner == "" {
 		return nil, nil
@@ -120,10 +116,10 @@ func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	rows, err := r.db.Query(`
 		SELECT p.slug, p.identity, p.status, p.kind, p.content_sha, p.size, p.name,
 		       p.pinned_version,
-		       p.created_at, p.updated_at, p.expires_at,
+		       p.created_at, p.updated_at,
 		       COALESCE((SELECT MAX(ver_num) FROM versions v WHERE v.slug = p.slug AND v.deleted = 0), 1) AS latest_version
 		FROM pastes p WHERE p.identity = ?
-		ORDER BY p.expires_at ASC
+		ORDER BY p.updated_at DESC
 	`, owner)
 	if err != nil {
 		return nil, fmt.Errorf("list by owner: %w", err)
@@ -248,10 +244,7 @@ type AppendResult = domain.AppendResult
 // owner unpins or repins. All of it runs under one BEGIN IMMEDIATE.
 //
 // The charge is the new version's bytes; older versions keep counting until the
-// parent paste expires or is deleted. An EXPIRED-unswept paste is the
-// exception: identityActiveBytes excludes it, but the UPDATE below revives it,
-// so the charge is its FULL post-revival size (existing non-deleted version
-// bytes plus the new version) or the revived paste durably exceeds the cap.
+// paste is deleted (the FK cascade frees both).
 //
 // ctx exists to satisfy service.PasteAdmin; the sqlite path ignores it.
 func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (AppendResult, error) {
@@ -262,15 +255,11 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 	defer tx.Rollback() //nolint:errcheck
 
 	nowStr := formatTime(now)
-	siteNowStr := formatSiteExpiry(now)
 	body := int64(size)
 
-	// The pastes.expires_at column is written with formatTime (RFC3339Nano), so
-	// it must be compared against nowStr, NOT siteNowStr.
 	var ownerIdentity string
 	var existingPin int
-	var pasteLive bool
-	if err := tx.QueryRow(`SELECT identity, pinned_version, expires_at > ? FROM pastes WHERE slug = ?`, nowStr, slug.String()).Scan(&ownerIdentity, &existingPin, &pasteLive); err != nil {
+	if err := tx.QueryRow(`SELECT identity, pinned_version FROM pastes WHERE slug = ?`, slug.String()).Scan(&ownerIdentity, &existingPin); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return AppendResult{}, ErrNotFound
 		}
@@ -279,23 +268,11 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 
 	// The check spans BOTH pastes and sites. Tombstoned versions contribute 0.
 	if userCap > 0 {
-		ownerTotal, err := identityActiveBytes(tx, ownerIdentity, nowStr, siteNowStr)
+		ownerTotal, err := identityActiveBytes(tx, ownerIdentity)
 		if err != nil {
 			return AppendResult{}, err
 		}
-		// identityActiveBytes filters expires_at > now, so an expired paste's
-		// existing versions are absent from ownerTotal, yet the UPDATE below
-		// revives them. Add them to the charge, or the revived paste durably
-		// exceeds the cap.
-		charge := body
-		if !pasteLive {
-			var revived int64
-			if err := tx.QueryRow(`SELECT COALESCE(SUM(size), 0) FROM versions WHERE slug = ? AND deleted = 0`, slug.String()).Scan(&revived); err != nil {
-				return AppendResult{}, fmt.Errorf("revived version sum: %w", err)
-			}
-			charge += revived
-		}
-		if err := (domain.Allowance{Cap: userCap, Used: ownerTotal}).Admit(charge); err != nil {
+		if err := (domain.Allowance{Cap: userCap, Used: ownerTotal}).Admit(body); err != nil {
 			return AppendResult{}, err
 		}
 	}
@@ -307,7 +284,6 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		return AppendResult{}, fmt.Errorf("max ver: %w", err)
 	}
 	newVer := maxVer + 1
-	expires := r.Retention.ExpiryFor(now)
 	if _, err := tx.Exec(`
 		INSERT INTO versions (slug, ver_num, kind, content_sha, size, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
@@ -321,18 +297,18 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		if _, err := tx.Exec(`
 			UPDATE pastes
 			SET kind = ?, content_sha = ?, size = ?,
-			    updated_at = ?, expires_at = ?
+			    updated_at = ?
 			WHERE slug = ?
-		`, string(kind), contentSHA, size, nowStr, formatTime(expires), slug.String()); err != nil {
+		`, string(kind), contentSHA, size, nowStr, slug.String()); err != nil {
 			return AppendResult{}, fmt.Errorf("update paste head (unpinned): %w", err)
 		}
 	} else {
 		// Pinned: bump only the clock.
 		if _, err := tx.Exec(`
 			UPDATE pastes
-			SET updated_at = ?, expires_at = ?
+			SET updated_at = ?
 			WHERE slug = ?
-		`, nowStr, formatTime(expires), slug.String()); err != nil {
+		`, nowStr, slug.String()); err != nil {
 			return AppendResult{}, fmt.Errorf("update paste head (pinned): %w", err)
 		}
 	}
@@ -431,10 +407,10 @@ func (r *PasteRepo) CountByOwner(owner string) (int, error) {
 }
 
 // SumActiveSizeByOwner totals the identity's live bytes: every VERSION row
-// under a non-expired paste. Summing versions rather than pastes is what
-// accounts for update history, since each update leaves a version row on disk
-// until the parent paste expires or is deleted (the FK cascade frees both).
-func (r *PasteRepo) SumActiveSizeByOwner(owner string, now time.Time) (int64, error) {
+// under one of its pastes. Summing versions rather than pastes is what accounts
+// for update history, since each update leaves a version row on disk until the
+// paste is deleted (the FK cascade frees both).
+func (r *PasteRepo) SumActiveSizeByOwner(owner string, _ time.Time) (int64, error) {
 	if owner == "" {
 		return 0, nil
 	}
@@ -443,9 +419,9 @@ func (r *PasteRepo) SumActiveSizeByOwner(owner string, now time.Time) (int64, er
 		SELECT COALESCE(SUM(v.size), 0)
 		FROM versions v
 		JOIN pastes p ON p.slug = v.slug
-		WHERE p.identity = ? AND p.expires_at > ? AND v.deleted = 0
+		WHERE p.identity = ? AND v.deleted = 0
 		  AND p.status != 'failed'
-	`, owner, formatTime(now)).Scan(&n)
+	`, owner).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("sum active size: %w", err)
 	}
@@ -483,10 +459,10 @@ func (r *PasteRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 // column order shifts.
 func scanPaste(s scanner) (domain.Paste, error) {
 	var p domain.Paste
-	var slugStr, identStr, status, kind, created, updated, expires string
+	var slugStr, identStr, status, kind, created, updated string
 	if err := s.Scan(&slugStr, &identStr, &status, &kind, &p.ContentSHA, &p.Size, &p.Name,
 		&p.PinnedVersion,
-		&created, &updated, &expires); err != nil {
+		&created, &updated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Paste{}, ErrNotFound
 		}
@@ -498,17 +474,16 @@ func scanPaste(s scanner) (domain.Paste, error) {
 	p.Kind = domain.ContentKind(kind)
 	p.CreatedAt = parseTime(created)
 	p.UpdatedAt = parseTime(updated)
-	p.ExpiresAt = parseTime(expires)
 	return p, nil
 }
 
 // scanPasteWithLatest is scanPaste plus the latest_version column.
 func scanPasteWithLatest(s scanner) (domain.Paste, error) {
 	var p domain.Paste
-	var slugStr, identStr, status, kind, created, updated, expires string
+	var slugStr, identStr, status, kind, created, updated string
 	if err := s.Scan(&slugStr, &identStr, &status, &kind, &p.ContentSHA, &p.Size, &p.Name,
 		&p.PinnedVersion,
-		&created, &updated, &expires,
+		&created, &updated,
 		&p.LatestVersion); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Paste{}, ErrNotFound
@@ -521,7 +496,6 @@ func scanPasteWithLatest(s scanner) (domain.Paste, error) {
 	p.Kind = domain.ContentKind(kind)
 	p.CreatedAt = parseTime(created)
 	p.UpdatedAt = parseTime(updated)
-	p.ExpiresAt = parseTime(expires)
 	return p, nil
 }
 

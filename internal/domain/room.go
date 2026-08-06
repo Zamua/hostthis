@@ -20,11 +20,6 @@ type Room struct {
 	UpdatedAt time.Time // last write (PUT or DELETE); a read does NOT move it
 }
 
-// RoomRetentionWindow is the fixed TTL for a room: it expires this long after
-// its last write. Longer than a paste's share-this-week lifetime because a
-// room backs a live app whose participants return over weeks.
-const RoomRetentionWindow = 30 * 24 * time.Hour
-
 // Per-room data caps, sized for app STATE rather than files. A write that
 // would push the room past EITHER cap is rejected with the prior state intact.
 const (
@@ -46,7 +41,7 @@ const MaxRoomValueBytes = MaxRoomBytes
 
 // MaxAppRoomBytes bounds one app's rooms in aggregate so a single app cannot
 // consume the whole service. Past it, new room creation and new writes for
-// that app are refused until rooms expire. Tunable default.
+// that app are refused until the app deletes rooms or values. Tunable default.
 const MaxAppRoomBytes = 64 << 20 // 64 MiB
 
 // Room-creation rate-limit defaults (SPEC.md "Quota and abuse"). Creation is

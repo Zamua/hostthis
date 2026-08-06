@@ -105,8 +105,7 @@ func writeJSON(w io.Writer, v any) error {
 
 // listItemView is one row of `list -o json`: a text paste OR a static site,
 // discriminated by Kind ("site" for sites). The version fields are *int so an
-// unversioned site serializes them as null. Expiry fields are null for a
-// never-expiring item.
+// unversioned site serializes them as null.
 type listItemView struct {
 	Slug          string `json:"slug"`
 	Name          string `json:"name"` // "" when unset (not the "-" table sentinel)
@@ -128,12 +127,13 @@ type listItemView struct {
 	updatedAt time.Time
 }
 
-func newPasteListItem(p domain.Paste, now time.Time) listItemView {
+func newPasteListItem(p domain.Paste) listItemView {
 	servedSize := p.Size
 	served := servedVersion(p.PinnedVersion, p.LatestVersion)
 	latest := p.LatestVersion
 	pinned := p.PinnedVersion
 	return listItemView{
+		updatedAt:       p.UpdatedAt,
 		Slug:            string(p.Slug),
 		Name:            p.Name,
 		SizeBytes:       pasteStoredBytes(p),
@@ -149,7 +149,7 @@ func newPasteListItem(p domain.Paste, now time.Time) listItemView {
 // newSiteListItem maps a domain.Site to a list item. Sites have no label and
 // no versions; SizeBytes is what the quota charged, so a list sums to the
 // figure whoami reports.
-func newSiteListItem(s domain.Site, now time.Time) listItemView {
+func newSiteListItem(s domain.Site) listItemView {
 	return listItemView{
 		updatedAt: s.UpdatedAt,
 		Slug:      string(s.Slug),
@@ -160,19 +160,17 @@ func newSiteListItem(s domain.Site, now time.Time) listItemView {
 	}
 }
 
-// newListView merges pastes + sites into one slice sorted by expiry ascending,
-// so never-expiring items sort last. Guaranteed non-nil so json renders `[]`
-// rather than `null` when the owner has no active content.
-func newListView(pastes []domain.Paste, sites []domain.Site, now time.Time) []listItemView {
+// newListView merges pastes + sites into one slice, most recently updated
+// first. Guaranteed non-nil so json renders `[]` rather than `null` when the
+// owner has nothing.
+func newListView(pastes []domain.Paste, sites []domain.Site) []listItemView {
 	views := make([]listItemView, 0, len(pastes)+len(sites))
 	for _, p := range pastes {
-		views = append(views, newPasteListItem(p, now))
+		views = append(views, newPasteListItem(p))
 	}
 	for _, s := range sites {
-		views = append(views, newSiteListItem(s, now))
+		views = append(views, newSiteListItem(s))
 	}
-	// Most recently updated first. The old order was soonest-to-expire, which
-	// stopped meaning anything when nothing expires.
 	sort.SliceStable(views, func(i, j int) bool {
 		return views[i].updatedAt.After(views[j].updatedAt)
 	})
@@ -228,7 +226,7 @@ func versCol(v listItemView) string {
 }
 
 // versionsView is the `versions <slug> -o json` document. It folds the stderr
-// footer (pin state + paste expiry) into the object around the version array.
+// footer (pin state) into the object around the version array.
 type versionsView struct {
 	Slug          string        `json:"slug"`
 	PinnedVersion int           `json:"pinned_version"` // 0 when unpinned

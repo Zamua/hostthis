@@ -67,10 +67,6 @@ func shaleKeyIdentityFirstSeen(identity string) []byte {
 	return shaleKey(prefixIdentityFirstSeenAll, identity)
 }
 
-func shaleKeyExpiry(t time.Time, slug domain.Slug) []byte {
-	return shaleKey(prefixExpiryAll, t.UTC().Format(time.RFC3339Nano), "/", slug.String())
-}
-
 func shaleKeyKeygate(subnet, identity string) []byte {
 	return shaleKey(prefixKeygateAll, subnet, "/", identity)
 }
@@ -97,9 +93,9 @@ var PendingPasteTimeout = 2 * time.Minute
 
 // identityPasteRow is the value-bearing projection stored at
 // identity_pastes/<id>/<slug>. Size caches the paste's LIVE byte sum (its
-// non-deleted version sizes) and ExpiresAt its retention deadline, so the quota
-// scan sums exactly these two cached fields in one prefix scan with zero
-// per-entry fan-out (docs/SPEC.md "Scan-derived quota"). The entry is derived
+// non-deleted version sizes), so the quota scan sums exactly that cached field
+// in one prefix scan with zero per-entry fan-out (docs/SPEC.md "Scan-derived
+// quota"). The entry is derived
 // and eventually consistent: every size-changing write path maintains it and the
 // reconciler rebuilds it from the authoritative pastes/* + versions/* rows, so
 // cached-value error is bounded by a reconcile cycle.
@@ -107,7 +103,6 @@ type identityPasteRow struct {
 	Name      string    `json:"name"`
 	Size      int       `json:"size"`
 	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at"`
 
 	// Placeholder marks a fail-closed entry the reconciler projects for a slug
 	// whose authoritative record (head or any version row) cannot be decoded:
@@ -253,7 +248,7 @@ func (r *ShaleRepo) aggregateForBackground(prefix []byte) ([]scanItem, error) {
 // aggregateWith fans out across all shards (cluster.Aggregate) and collects
 // every (key, value) under prefix, deduplicating keys (a key may surface from
 // more than one replica at R>1, with an identical value). It serves the
-// inherently cross-shard operations: the expiry scan, the referenced-blob set,
+// inherently cross-shard operations: the referenced-blob set,
 // keygate prune / counting.
 //
 // The retry unit is the WHOLE call, never one peer: a refused peer's slice is
@@ -288,7 +283,7 @@ func (r *ShaleRepo) aggregatePrefixOnce(prefix []byte) ([]scanItem, error) {
 			}
 			// The cluster layer wraps on Put and unwraps on Get, but the
 			// Backend, and therefore this raw scan, sees the envelope. The
-			// aggregate consumers (quota sum, blob-ref set, expiry sweep)
+			// aggregate consumers (quota sum, blob-ref set)
 			// expect the decoded payload. cluster.Decode is the universal
 			// strip: a magic-prefixed envelope yields its payload, an
 			// unenveloped value passes through unchanged, and a truncated
@@ -300,7 +295,7 @@ func (r *ShaleRepo) aggregatePrefixOnce(prefix []byte) ([]scanItem, error) {
 			if isTombstoneEnvelope(env) {
 				// A DELETED key, not a row: the same rule as scanPrefixOnce.
 				// The skip must exist on BOTH paths, since the cross-shard
-				// consumers (reconcile, quota sum, expiry sweep) come through
+				// consumers (reconcile, quota sum) come through
 				// here and never touch the single-shard scan.
 				continue
 			}

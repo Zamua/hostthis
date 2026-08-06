@@ -170,10 +170,6 @@ func (s *Sweep) Once(now time.Time) (blobsGCd int, err error) {
 	// full of garbage: this pass deletes on ABSENCE, so believing an empty set
 	// deletes everything. Nothing is ever removed on the strength of a set that
 	// came back empty.
-	//
-	// The check used to be conditional on no records having been swept this
-	// tick. With expiry gone nothing is ever swept, so it is now unconditional
-	// - which is both simpler and strictly safer than what it replaced.
 	if len(refSet) == 0 {
 		blobCount := 0
 		if walkErr := s.Blobs.WalkBlobs(func(sha string) error { blobCount++; return nil }); walkErr != nil {
