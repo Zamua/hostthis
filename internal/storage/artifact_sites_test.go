@@ -204,7 +204,15 @@ func (f fakeLegacy) ListSitesByOwner(string, time.Time) ([]domain.Site, error) {
 }
 
 func (f fakeLegacy) SumActiveBytesByOwner(string, time.Time) (int64, error) {
+	if len(f.sites) == 0 {
+		return 0, nil
+	}
 	return f.bytes, nil
+}
+
+func (f fakeLegacy) Delete(slug domain.Slug) error {
+	delete(f.sites, slug)
+	return nil
 }
 
 // A directory deployed before the collapse keeps serving, keeps listing, and
@@ -262,5 +270,53 @@ func TestArtifactSites_FallsBackToLegacyRows(t *testing.T) {
 	}
 	if sum != 70 {
 		t.Fatalf("legacy sum = %d, want 70", sum)
+	}
+}
+
+// Redeploying a directory that predates the collapse must WORK, and must leave
+// it as an artifact. Without this a legacy site becomes permanently
+// un-redeployable the moment the artifact path is wired.
+func TestArtifactSites_RedeployMigratesALegacyRow(t *testing.T) {
+	repo := newPebbleShaleRepo(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	owner := domain.Identity("key:owner-s")
+
+	old := domain.Site{
+		Slug: "legacy23", Identity: owner,
+		Manifest: twoFileManifest("sha-old"), CreatedAt: now, UpdatedAt: now,
+	}
+	sites := storage.NewArtifactSites(repo, fakeLegacy{
+		sites: map[domain.Slug]domain.Site{old.Slug: old}, bytes: 49,
+	})
+
+	next := old
+	next.Manifest = twoFileManifest("sha-new")
+	if err := sites.ReplaceWithQuotaCheck(context.Background(), next, 55, 0, now); err != nil {
+		t.Fatalf("redeploy of a legacy directory: %v", err)
+	}
+
+	got, err := sites.Get(old.Slug)
+	if err != nil {
+		t.Fatalf("get after redeploy: %v", err)
+	}
+	if e, _ := got.Manifest.Lookup("/"); e.SHA != "sha-new" {
+		t.Fatalf("served root = %q, want the redeployed sha-new", e.SHA)
+	}
+	// It must now be an ARTIFACT, or it stays on the legacy path forever.
+	p, err := repo.Get(old.Slug)
+	if err != nil {
+		t.Fatalf("redeploy did not create an artifact: %v", err)
+	}
+	if p.Kind != domain.KindSite {
+		t.Fatalf("artifact kind = %q, want site", p.Kind)
+	}
+
+	// The legacy row must be GONE. Leaving it would have the owner listed and
+	// charged for the same directory twice, once through each family.
+	if listed, lerr := sites.ListSitesByOwner(owner.String(), now); lerr != nil || len(listed) != 0 {
+		t.Fatalf("legacy row survived the migration: %+v (err %v)", listed, lerr)
+	}
+	if sum, serr := sites.SumActiveBytesByOwner(owner.String(), now); serr != nil || sum != 0 {
+		t.Fatalf("legacy charge survived the migration: %d (err %v)", sum, serr)
 	}
 }

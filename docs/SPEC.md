@@ -807,6 +807,17 @@ normal way a directory is iterated on, and charging cumulatively would turn the
 ordinary workflow into a quota cliff. Retention is a feature to add
 deliberately, not a side effect of this collapse.
 
+**A redeploy is the migration.** A directory deployed before the collapse has
+no artifact, so redeploying it writes one and drops the legacy row. That is not
+only a convenience: without it a legacy directory becomes permanently
+un-redeployable the moment the artifact path is wired. The artifact is written
+FIRST, so a failure between the two steps leaves the old row readable rather
+than losing it.
+
+The legacy row cannot be kept as a rollback escape hatch. A directory present
+in both families is enumerated by both, so its owner would see it twice and be
+charged for it twice.
+
 **One artifact appears in one listing.** A directory is an artifact, so it is
 enumerated by the artifact index. Anything that also reports it as a site would
 show it twice and charge it twice - the same trap in two places. During the
