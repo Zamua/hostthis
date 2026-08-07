@@ -44,6 +44,14 @@ type ManifestEntry struct {
 	// single-document artifact keeps the kind it was detected as, while an
 	// ordinary file inside a directory leaves it empty and is served raw.
 	Kind string
+
+	// BlobID is where this file's bytes are stored on the transactional blob
+	// path, which addresses blobs by id rather than by content hash. Carried
+	// per ENTRY so a manifest is self-sufficient: resolving a file needs the
+	// manifest alone, with no side-table to keep in step with it.
+	//
+	// Empty on the content-addressed paths, where the sha IS the address.
+	BlobID string
 }
 
 // Manifest maps each safe, site-root-relative path to its blob ref. Pure

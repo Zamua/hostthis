@@ -302,11 +302,10 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		// ShaleSiteRepo shares the same shale cluster (shard routing +
 		// per-shard CAS) as the paste repo, so a non-nil Sites lights up
 		// archive hosting on shale.
-		// NOT yet storage.ArtifactSites: the artifact insert binds ONE blob,
-		// and a directory needs every file blob bound on the manifest shard
-		// (see storage.ArtifactSites). Flipping this before that gap closes
-		// would stage a deploy's files and leave them unreadable.
-		Sites: storage.NewShaleSiteRepo(repo),
+		// A directory is an artifact. The old site family is the read-only
+		// fallback, so deploys predating the collapse keep serving until a
+		// redeploy migrates them.
+		Sites: storage.NewArtifactSites(repo, storage.NewShaleSiteRepo(repo)),
 		// ShaleRoomRepo shares the same cluster, co-locating every room family
 		// on the {app-slug} shard.
 		Rooms: storage.NewShaleRoomRepo(repo),

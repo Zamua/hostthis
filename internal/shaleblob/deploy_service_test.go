@@ -58,7 +58,7 @@ func gzipTar(t *testing.T, files map[string]string) []byte {
 func newShaleDeploy(t *testing.T) (*service.DeploySite, *shaleblob.Unit, *storage.ShaleRepo) {
 	t.Helper()
 	repo, unit, _ := newBlobRepo(t) // skips when MinIO is absent
-	sites := storage.NewShaleSiteRepo(repo)
+	sites := storage.NewArtifactSites(repo, nil)
 	// ShaleRepo satisfies service.PasteByteSummer.
 	d := service.NewDeploySite(sites, repo, unit)
 	return d, unit, repo
@@ -159,9 +159,12 @@ func TestDeploySite_Shale_RedeployDropsRemovedFile(t *testing.T) {
 		}
 	}
 
-	// The dropped file's sha does not resolve.
-	if _, rerr := readAll(t, unit, string(slug), aboutSHAv1); !isNotFound(rerr) {
-		t.Fatalf("read dropped about.html (sha %s) after redeploy = %v, want not-found", aboutSHAv1, rerr)
+	// The dropped file STAYS readable: a redeploy appends a version and the
+	// previous one still references the file, which is what makes rolling back
+	// to it meaningful. Its bytes are released when that version is deleted,
+	// not when the next deploy stops naming it.
+	if _, rerr := readAll(t, unit, string(slug), aboutSHAv1); rerr != nil {
+		t.Fatalf("dropped about.html (sha %s) must remain readable through v1: %v", aboutSHAv1, rerr)
 	}
 }
 
@@ -171,7 +174,7 @@ func TestDeploySite_Shale_RedeployDropsRemovedFile(t *testing.T) {
 // taken slug.
 func TestDeploySite_Shale_PreClaimRejectsTakenSlug(t *testing.T) {
 	d, _, repo := newShaleDeploy(t)
-	sites := storage.NewShaleSiteRepo(repo)
+	sites := storage.NewArtifactSites(repo, nil)
 	ctx := context.Background()
 	now := d.Now().UTC()
 

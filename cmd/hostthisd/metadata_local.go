@@ -36,7 +36,7 @@ func buildMetadataLocal(dataDir string, logger *log.Logger) (*metadataBundle, er
 	return &metadataBundle{
 		Repo:    repo,
 		KeyGate: repo,
-		Sites:   storage.NewShaleSiteRepo(repo),
+		Sites:   storage.NewArtifactSites(repo, storage.NewShaleSiteRepo(repo)),
 		Rooms:   storage.NewShaleRoomRepo(repo),
 		// Writes span shards even on one node, so the same boot sweep that
 		// settles a half-finished write in production applies here.
