@@ -283,15 +283,7 @@ func main() {
 	// nothing: the residue it clears was already there (docs/SPEC.md "Durable
 	// intent").
 	if metadata.IntentSweeper != nil {
-		go func() {
-			settled, err := metadata.IntentSweeper.SweepIntents(ctx, time.Now().UTC())
-			if err != nil {
-				logger.Printf("intent sweep: %v (a later boot retries; nothing is lost)", err)
-			}
-			if settled > 0 {
-				logger.Printf("intent sweep: settled %d half-finished write(s) on this node's units", settled)
-			}
-		}()
+		go runIntentSweep(ctx, metadata, logger)
 	}
 
 	select {
@@ -479,4 +471,44 @@ func envOrDuration(key string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
+}
+
+// intentSweepSettleWait bounds how long the boot sweep waits for this node's
+// units to finish mounting. Listening is NOT late enough: the servers bind
+// while positions are still being acquired, and a scan then fails with
+// "owned positions still acquiring". Since every boot loses that same race, a
+// sweep that gave up on the first error would never run at all.
+const (
+	intentSweepSettleWait = 3 * time.Minute
+	intentSweepPoll       = 2 * time.Second
+)
+
+// runIntentSweep waits for the node to report ready, then settles durable
+// intents once.
+//
+// Gating the SWEEP on readiness is safe; gating readiness on the sweep would
+// not be. Readiness depends only on mount progress, so there is no cycle -
+// whereas a cold cluster whose nodes each waited to sweep before serving could
+// never start (docs/SPEC.md "Durable intent").
+func runIntentSweep(ctx context.Context, metadata *metadataBundle, logger *log.Logger) {
+	deadline := time.Now().Add(intentSweepSettleWait)
+	for metadata.Readiness != nil && !metadata.Readiness.Ready() {
+		if time.Now().After(deadline) {
+			logger.Printf("intent sweep: units still settling after %s; skipping this boot (the next one retries, and nothing is lost meanwhile)", intentSweepSettleWait)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(intentSweepPoll):
+		}
+	}
+	settled, err := metadata.IntentSweeper.SweepIntents(ctx, time.Now().UTC())
+	if err != nil {
+		logger.Printf("intent sweep: %v (the next boot retries; nothing is lost)", err)
+		return
+	}
+	if settled > 0 {
+		logger.Printf("intent sweep: settled %d half-finished write(s) on this node's units", settled)
+	}
 }
