@@ -274,3 +274,79 @@ func TestShaleIntentCompletedInsertLeavesNoIntent(t *testing.T) {
 		t.Fatalf("a completed insert must forget its intent: got %+v", out)
 	}
 }
+
+// A site deploy has the paste path's dual write, so it needs the same
+// protection. This also exercises the resolver's site branch, which reads
+// sites/<slug> and rolls back identity_sites/<id>/<slug>.
+func TestShaleIntentSweepRollsBackACrashedSiteDeploy(t *testing.T) {
+	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("MINIO_TEST_ENDPOINT not set; skipping site intent test")
+	}
+	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	owner := "key:intsite"
+	slug := "intsite1"
+
+	// A crashed deploy: site entry written, sites/<slug> never landed.
+	idxKey := storage.IdentitySiteKeyForTest(owner, slug)
+	entry, err := json.Marshal(map[string]any{
+		"size": 900, "created_at": now.Add(-time.Hour), "updated_at": now.Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("encode site entry: %v", err)
+	}
+	if err := repo.PutRawForTest(idxKey, entry); err != nil {
+		t.Fatalf("write site entry: %v", err)
+	}
+	stored, err := repo.GetRawForTest(idxKey)
+	if err != nil {
+		t.Fatalf("read guard: %v", err)
+	}
+	if err := repo.IntentLogForTest().Begin(context.Background(), durable.Intent{
+		ID: durable.ID(slug), Kind: durable.KindDeploySite, Scope: durable.Scope(owner),
+		Subject: slug, Reached: []durable.StepName{storage.StepEntryWritten},
+		Guard: stored, StartedAt: now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("begin intent: %v", err)
+	}
+
+	if got := mustSiteSum(t, repo, owner, now); got != 900 {
+		t.Fatalf("fixture: the site phantom must charge quota, got %d", got)
+	}
+	if _, err := repo.SweepIntents(context.Background(), now); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if got := mustSiteSum(t, repo, owner, now); got != 0 {
+		t.Fatalf("the rollback must release the site phantom's bytes: got %d, want 0", got)
+	}
+}
+
+// A completed site deploy leaves no intent for a sweep to act on.
+func TestShaleIntentCompletedSiteDeployLeavesNoIntent(t *testing.T) {
+	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("MINIO_TEST_ENDPOINT not set; skipping site intent cleanup test")
+	}
+	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	owner := "key:intsitec"
+
+	man := domain.NewManifest()
+	man.Add("index.html", domain.ManifestEntry{
+		SHA: "sha-intsitec", Size: 300, ContentType: "text/html; charset=utf-8",
+	})
+	site := domain.Site{
+		Slug: "intstc11", Identity: domain.Identity(owner), Manifest: man,
+		CreatedAt: now, UpdatedAt: now}
+	if err := repo.InsertSiteWithQuotaCheck(context.Background(), site, 300, 0, now); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	out, err := repo.IntentLogForTest().Outstanding(context.Background(), durable.Scope(owner))
+	if err != nil {
+		t.Fatalf("outstanding: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("a completed site deploy must forget its intent: got %+v", out)
+	}
+}
