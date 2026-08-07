@@ -275,6 +275,25 @@ func main() {
 	// run to log what it would clean.
 	go sweepSvc.Run(ctx)
 
+	// Settle durable intents left by a process death mid-write, ONCE, and only
+	// now: deciding an intent reads the shard holding its authoritative row,
+	// which may not be mounted anywhere until the cluster is up. Gating
+	// readiness on it would deadlock a cold cluster - no node could serve until
+	// it swept, and none could sweep until one served. Running late costs
+	// nothing: the residue it clears was already there (docs/SPEC.md "Durable
+	// intent").
+	if metadata.IntentSweeper != nil {
+		go func() {
+			settled, err := metadata.IntentSweeper.SweepIntents(ctx, time.Now().UTC())
+			if err != nil {
+				logger.Printf("intent sweep: %v (a later boot retries; nothing is lost)", err)
+			}
+			if settled > 0 {
+				logger.Printf("intent sweep: settled %d half-finished write(s) on this node's units", settled)
+			}
+		}()
+	}
+
 	select {
 	case <-ctx.Done():
 		logger.Printf("signal received; shutting down")

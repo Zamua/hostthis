@@ -47,6 +47,7 @@ import (
 	"github.com/Zamua/shale/pkg/cluster"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/durable"
 )
 
 // ShaleSiteRepo adapts a ShaleRepo to service.SiteRepo + service.SweepSites,
@@ -186,20 +187,45 @@ func (r *ShaleRepo) InsertSiteWithQuotaCheck(ctx context.Context, s domain.Site,
 		}
 	}
 
+	// T0: the intent, before anything else. A site deploy has the paste path's
+	// dual write exactly, so it gets the same protection (docs/SPEC.md "Durable
+	// intent").
+	intent := durable.Intent{
+		ID: durable.ID(slug), Kind: durable.KindDeploySite,
+		Scope: durable.Scope(identity), Subject: slug, StartedAt: now,
+	}
+	if err := r.intents.Begin(ctx, intent); err != nil {
+		return fmt.Errorf("durable intent: %w", err)
+	}
+
 	// ENTRY FIRST, then the authoritative row - the paste path's reasoning
-	// exactly (docs/SPEC.md "No periodic reconcile: the index entry is written
-	// FIRST"). A crash leaves an entry with no row, which ListSitesByOwner
-	// sees and deletes; the other order leaves a row no single-shard read can
-	// find.
+	// exactly. A crash leaves an entry with no row, which the boot sweep rolls
+	// back; the other order leaves a row no single-shard read can find.
+	entryKey := shaleKeyIdentitySite(identity, slug)
 	if err := r.confirmSiteInsert(s, dedupedSize); err != nil {
 		return fmt.Errorf("site enumeration entry: %w", err)
 	}
+	guard, gerr := r.getRaw(entryKey)
+	if gerr != nil {
+		r.repoLog().Printf("shale: reading the intent guard for site %s: %v (a rollback will skip rather than risk a fresher entry)", s.Slug, gerr)
+	}
+	intent.Guard = guard
+	if err := r.intents.Begin(ctx, withStep(intent, StepEntryWritten)); err != nil {
+		r.repoLog().Printf("shale: recording the entry step for site %s: %v (a sweep will still roll back, using the row check alone)", s.Slug, err)
+	}
 
 	if err := r.insertSiteAuthoritative(s, dedupedSize, binds); err != nil {
-		if derr := r.cluster.Delete(shaleKeyIdentitySite(identity, slug)); derr != nil {
-			r.repoLog().Printf("shale: rollback of site enumeration entry for %s: %v (it counts against the owner until their next list)", s.Slug, derr)
+		if _, derr := r.guardedDeleteIndexEntry(entryKey, guard); derr != nil {
+			r.repoLog().Printf("shale: rollback of site enumeration entry for %s: %v (a sweep will retry it)", s.Slug, derr)
+		} else if cerr := r.intents.Complete(ctx, intent.ID, intent.Scope); cerr != nil {
+			r.repoLog().Printf("shale: forgetting the intent for site %s: %v (a sweep will retry it)", s.Slug, cerr)
 		}
 		return err
+	}
+
+	// T3: durable now, so the intent has nothing left to protect.
+	if err := r.intents.Complete(ctx, intent.ID, intent.Scope); err != nil {
+		r.repoLog().Printf("shale: forgetting the intent for site %s: %v (a sweep rolls it forward)", s.Slug, err)
 	}
 	return nil
 }

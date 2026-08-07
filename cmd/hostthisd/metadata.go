@@ -11,11 +11,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/relay"
@@ -70,6 +72,15 @@ type metadataBundle struct {
 	// objects, age-gated, mounted-unit-local); main schedules it in the sweep
 	// loop. nil elsewhere, where the global content-addressed sweep is the GC.
 	BlobOrphanSweeper service.BlobOrphanSweeper
+	// IntentSweeper is an OPTIONAL backend-supplied boot sweep that settles
+	// durable intents left by a process death mid-write. Supplied only by a
+	// backend whose writes span shards; a single-transaction backend has no
+	// half-finished state to settle. Run ONCE after the server is listening -
+	// never before, because settling an intent reads a shard that may not be
+	// mounted anywhere during a cold start (docs/SPEC.md "Durable intent").
+	IntentSweeper interface {
+		SweepIntents(ctx context.Context, now time.Time) (int, error)
+	}
 	// RelayPeer is the OPTIONAL multi-pod relay peer transport (multi-node
 	// shale only). nil keeps the relay pod-local.
 	RelayPeer *relayPeerTransport
