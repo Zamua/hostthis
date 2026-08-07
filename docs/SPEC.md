@@ -836,6 +836,16 @@ Files live in the content-addressed `BlobStore`: each is `Put` under its
 sha256, so identical files across versions, across artifacts, and across owners
 are stored once.
 
+On the transactional blob path, where blobs are addressed by ID rather than by
+hash, each manifest entry carries its own blob id. A manifest is therefore
+self-sufficient: resolving a file needs the manifest alone, with no side-table
+to keep in step with it. A redeploy stages only the files that CHANGED, so an
+entry with no newly staged blob keeps the id a previous deploy bound.
+
+The flat descriptor's blob id is the ROOT entry's. Pairing the root's content
+hash with an arbitrary one of a directory's staged blobs would resolve the root
+to some other file's bytes.
+
 A directory is written through the SAME insert a document uses: the caller
 supplies a manifest, which is carried into the stored descriptor verbatim. A
 caller that supplies none leaves it empty and the insert synthesizes the

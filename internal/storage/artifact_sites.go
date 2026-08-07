@@ -33,15 +33,7 @@ type LegacySites interface {
 
 // ArtifactSites adapts an artifact repo onto the site port, falling back to the
 // legacy family for rows the collapse has not reached.
-//
-// NOT YET WIRED IN PRODUCTION. On the shale-collocated blob path a deploy
-// stages every file under the slug's shard and binds them at commit; the
-// artifact insert binds only the ONE blob a document has, so a directory's
-// files would stage and never bind, leaving them unreadable. Closing that gap
-// means carrying each file's blob id on its manifest entry (replacing the
-// legacy FileBlobs side-table) and binding every staged ref in the insert's
-// transaction. Until then the composition root keeps the legacy site repo and
-// this type is exercised by its own tests plus the detached-store paths.
+
 type ArtifactSites struct {
 	repo   *ShaleRepo
 	legacy LegacySites // nil when there is nothing left to fall back to

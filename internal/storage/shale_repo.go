@@ -952,6 +952,18 @@ func (r *ShaleRepo) ResolveBlobID(slug domain.Slug, contentSHA string) (string, 
 				return v.BlobID, nil
 			}
 		}
+		// A file INSIDE a directory: its sha names a manifest entry rather than
+		// a version's served content, so the entry carries its own blob id.
+		// The head first (the common read), then any other live version, so a
+		// pinned or rolled-back directory still resolves its files.
+		if id := manifestBlobID(p.decode(), contentSHA); id != "" {
+			return id, nil
+		}
+		for _, v := range versions {
+			if id := manifestBlobID(v.decode(), contentSHA); id != "" {
+				return id, nil
+			}
+		}
 		return "", ErrNotFound
 	}
 	if !errors.Is(perr, ErrNotFound) {
@@ -970,6 +982,17 @@ func (r *ShaleRepo) ResolveBlobID(slug domain.Slug, contentSHA string) (string, 
 		return id, nil
 	}
 	return "", ErrNotFound
+}
+
+// manifestBlobID returns the blob id the manifest records for contentSHA, or ""
+// when no entry names it.
+func manifestBlobID(m domain.Manifest, contentSHA string) string {
+	for _, e := range m.Files {
+		if e.SHA == contentSHA && e.BlobID != "" {
+			return e.BlobID
+		}
+	}
+	return ""
 }
 
 // blobRefFor reconstructs the BlobRef that unbinds blobid's pointer under
@@ -1171,8 +1194,10 @@ func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef) 
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return fmt.Errorf("site slug check: %w", err)
 		}
-		v1Ref := contentRefFromDomain(p)
-		v1Ref.BlobID = blobID
+		stamped := p
+		stamped.Manifest = stampManifestBlobIDs(p.Manifest, refs)
+		v1Ref := contentRefFromDomain(stamped)
+		v1Ref.BlobID = servedBlobID(stamped, blobID)
 		v1 := newVersionRow(1, v1Ref, p.CreatedAt)
 		pr := pasteFromDomain(p)
 		// The head serves v1, so it takes v1's descriptor WHOLE - the same roll
@@ -1203,6 +1228,49 @@ func firstBlobID(refs []cluster.BlobRef) string {
 		return ""
 	}
 	return refs[0].BlobID
+}
+
+// servedBlobID is the blob the flat descriptor points at: the ROOT entry's,
+// when a manifest says which one that is.
+//
+// A directory stages many blobs, and the first of them is an arbitrary file -
+// pairing it with the root's ContentSHA would resolve the root to some other
+// file's bytes. Falls back to the supplied id for an artifact with no manifest,
+// where there is only one blob to mean.
+func servedBlobID(p domain.Paste, fallback string) string {
+	if e, ok := p.Manifest.Files[domain.Root]; ok && e.BlobID != "" {
+		return e.BlobID
+	}
+	if e, ok := p.Manifest.Lookup("/"); ok && e.BlobID != "" {
+		return e.BlobID
+	}
+	return fallback
+}
+
+// stampManifestBlobIDs copies each staged ref's blob id onto the manifest entry
+// naming the same sha, so a manifest resolves its own files with no side-table.
+//
+// A sha with no staged ref keeps whatever it already carried: a redeploy only
+// stages the files that CHANGED, and the unchanged ones must keep pointing at
+// the blobs a previous deploy bound.
+func stampManifestBlobIDs(m domain.Manifest, refs []cluster.BlobRef) domain.Manifest {
+	if len(m.Files) == 0 || len(refs) == 0 {
+		return m
+	}
+	byID := make(map[string]string, len(refs))
+	for _, ref := range refs {
+		if ref.ContentHash != "" && ref.BlobID != "" {
+			byID[ref.ContentHash] = ref.BlobID
+		}
+	}
+	out := domain.NewManifest()
+	for path, e := range m.Files {
+		if id, ok := byID[e.SHA]; ok {
+			e.BlobID = id
+		}
+		out.Add(path, e)
+	}
+	return out
 }
 
 // fileBlobsFromRefs builds the site row's sha -> blob-id side-table from the
@@ -1370,7 +1438,7 @@ func (r *ShaleRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 // file's size.
 func (r *ShaleRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, m domain.Manifest, root domain.ManifestEntry, size int, userCap int64, now time.Time) (AppendResult, error) {
 	ref := contentRef{Kind: string(domain.KindSite), ContentSHA: root.SHA, Size: size}
-	enc, err := encodeManifest(m)
+	enc, err := encodeManifest(stampManifestBlobIDs(m, pendingBindsFromContext(ctx)))
 	if err != nil {
 		return AppendResult{}, fmt.Errorf("encode manifest: %w", err)
 	}
