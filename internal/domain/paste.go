@@ -63,8 +63,17 @@ type Paste struct {
 	UpdatedAt     time.Time
 }
 
-// Version is a snapshot in a paste's history. v1 is the initial upload; each
-// `update` writes a new row with ver_num+1.
+// Version is a whole-MANIFEST snapshot in an artifact's history. v1 is the
+// initial upload; each `update` or redeploy writes a new row with ver_num+1.
+//
+// The manifest is what makes ONE artifact type enough for both a single
+// document and a directory: a document is a one-entry manifest at Root, a
+// directory is an N-entry one, and nothing downstream needs to distinguish
+// them (docs/SPEC.md "One artifact, not two aggregates").
+//
+// Kind/ContentSHA/Size describe the ROOT entry. They are retained while the
+// storage layers are collapsed onto Manifest; once every reader takes the
+// manifest they go away, and RootKind/RootSHA/RootSize are what remain.
 //
 // Deleted=true is a tombstone: the row stays so version numbers are never
 // reused and `versions` still shows the history, but the blob bytes are gone
@@ -77,6 +86,52 @@ type Version struct {
 	Size       int
 	CreatedAt  time.Time
 	Deleted    bool
+
+	// Manifest is the version's content. Empty on a version read by a backend
+	// that has not been collapsed yet, which is why the accessors below fall
+	// back to the flat fields rather than assuming it is populated.
+	Manifest Manifest
+}
+
+// Root is the manifest path a single-document artifact serves at. Naming it
+// makes the one-entry case explicit rather than a convention repeated at call
+// sites.
+const Root = "/"
+
+// IsSingle reports whether this version is a single document rather than a
+// directory.
+//
+// This is the ONLY place the paste-vs-site distinction survives, and it is now
+// a question about a manifest rather than about a type. A version with no
+// manifest is treated as single, which is what every pre-collapse backend
+// produces.
+func (v Version) IsSingle() bool { return len(v.Manifest.Files) <= 1 }
+
+// RootKind is the render kind of the root entry, falling back to the flat Kind
+// for a version whose backend has not been collapsed onto the manifest yet.
+func (v Version) RootKind() ContentKind {
+	if e, ok := v.Manifest.Files[Root]; ok && e.Kind != "" {
+		return ContentKind(e.Kind)
+	}
+	return v.Kind
+}
+
+// RootSHA is the blob behind the root entry, with the same fallback.
+func (v Version) RootSHA() string {
+	if e, ok := v.Manifest.Files[Root]; ok && e.SHA != "" {
+		return e.SHA
+	}
+	return v.ContentSHA
+}
+
+// RootSize is the root entry's size, with the same fallback. The CHARGED size
+// is the manifest's deduped total, which counts every file - conflating the two
+// under-charges a directory to the size of its index page.
+func (v Version) RootSize() int {
+	if e, ok := v.Manifest.Files[Root]; ok && e.Size != 0 {
+		return e.Size
+	}
+	return v.Size
 }
 
 // HashContent returns the canonical content hash blobs are addressed by, and
