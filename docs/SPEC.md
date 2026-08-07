@@ -3705,25 +3705,60 @@ the intent, a crashed insert is INDISTINGUISHABLE from a phantom that a
 concurrent uploader is legitimately mid-way through creating, which is why
 nothing could safely act on one.
 
-**Resolution is lazy and scoped to one owner.** It rides operations that
-already read the owner's `{id}` shard - the listing and the quota scan - so it
-adds one prefix scan on a shard the caller is already talking to, and that scan
-returns nothing in the normal case. It does NOT run at startup: a booting
-process does not know which owners have outstanding intents, and finding out
-means scanning every shard, which would reintroduce the cross-shard fan-out
-this design has none of.
+**Resolution is a node-local boot sweep.** Each node, once it is serving,
+scans the intents on the units it has MOUNTED and resolves them. That scan is
+local: it walks this node's own storage, so it involves no network fan-out even
+though the intent family logically spans every shard. Across the fleet every
+unit is covered, because every unit is mounted by someone.
 
-The consequence is worth stating rather than hiding: an owner who never comes
-back keeps their phantom indefinitely. That is acceptable because the residue
-only affects that owner's own quota - a dormant one harms nobody else.
+It runs after the node goes live, not before. Deciding an intent's outcome
+requires reading the authoritative row, which lives on a DIFFERENT shard - one
+that may not be mounted anywhere yet during a cold start. Gating readiness on
+that read would deadlock a cold cluster: no node could serve until it swept,
+and no node could sweep until some node served. Going live first costs nothing,
+because the residue it cleans up was already there.
 
-**Resolution must be idempotent and must lose to live traffic.** Two processes
-can resolve the same intent while the owner re-uploads the same slug. Every
-step is safe to re-run, and the compensating delete is VALUE-GUARDED: it
-removes the entry only while that entry still holds the payload the intent
-describes, so a fresh re-upload's entry survives. There are no locks and no
-leases; concurrent resolvers converge because each step is idempotent and each
-decision is driven by an existence check rather than by elapsed time.
+**Resolution rolls FORWARD or BACK; it decides by looking.** An incomplete
+intent has two shapes and they need opposite treatments:
+
+| authoritative row | meaning | action |
+| --- | --- | --- |
+| present | the write succeeded; only the bookkeeping was lost | forget the intent |
+| absent | the write never landed | drop the entry, then forget the intent |
+
+Treating every incomplete intent as a rollback would DELETE live pastes whose
+only fault was losing the final step. The row's existence is the discriminator,
+and it is read per intent - affordable because the normal outstanding count is
+zero.
+
+**An intent younger than the resolve grace is left alone.** This is the part
+that is not optional. Which pod HANDLES a request is chosen by the load
+balancer; which pod STORES that request's intent is chosen by hashing the
+owner. The two are unrelated, so a node's own local intents are routinely
+created by uploads that OTHER nodes are handling right now. A sweeping node
+therefore sees in-flight work, and an intent that is mid-flight is
+indistinguishable from one whose process died.
+
+The value guard does not help here: a live upload's entry MATCHES the intent
+that describes it, so a guarded delete would fire and take the entry out from
+under a running request. Only elapsed time separates the two cases. The grace
+MUST exceed the longest plausible upload, the same contract the blob plane's
+orphan grace already carries.
+
+So the existence check decides WHAT to do, and the grace decides WHETHER it is
+safe to act yet. Both are required; neither substitutes for the other.
+
+**Resolution is idempotent and loses to live traffic.** Several nodes can
+resolve concurrently - units are replicated, so more than one node may hold a
+given intent. Every step is safe to re-run, and the compensating delete is
+VALUE-GUARDED: it removes the entry only while that entry still holds the
+payload the intent describes, so a re-upload that landed after the crash
+survives. There are no locks and no leases.
+
+A read that already touches an owner's `{id}` shard (the listing, the quota
+scan) MAY resolve that owner's outstanding intents opportunistically. That is
+an optimization, not the mechanism - correctness rests on the boot sweep, so an
+owner who never returns is still cleaned up.
 
 **The durability mechanism is a port, not a layer.** The intent log is defined
 as a narrow interface in terms of intent and resolution - begin, advance,
