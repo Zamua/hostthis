@@ -31,8 +31,6 @@
 // Check and write are not atomic, so a bounded same-owner over-admit is
 // accepted. See docs/SPEC.md "Scan-derived quota".
 
-//go:build slatedb
-
 package storage
 
 import (

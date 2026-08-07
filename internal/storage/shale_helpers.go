@@ -5,8 +5,6 @@
 // holds the config, lifecycle and core CRUD; see its package comment for the key
 // layout and transaction model.
 
-//go:build slatedb
-
 package storage
 
 import (
@@ -153,7 +151,7 @@ type identityPasteRow struct {
 	// from the other is impossible, so both are cached.
 	ServedSize    int       `json:"served_size,omitempty"`
 	PinnedVersion int       `json:"pinned_version,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at"`
 
 	// Placeholder marks an entry whose authoritative record (head or any
 	// version row) could not be decoded, so its live sum is unknown. The quota

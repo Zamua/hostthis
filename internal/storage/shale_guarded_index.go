@@ -1,8 +1,6 @@
 // Guarded index-entry writes: the conditional {id}-shard CAS the repair-on-read
 // paths use so a correction never clobbers a fresher concurrent write.
 
-//go:build slatedb
-
 package storage
 
 import (

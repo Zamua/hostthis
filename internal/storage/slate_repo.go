@@ -171,97 +171,6 @@ func (r *SlateRepo) Close() error {
 
 // --- JSON row schemas ------------------------------------------------------
 
-// contentRef is the served-content descriptor: the four fields that together
-// name the stored bytes a paste version points at. They travel as ONE value (a
-// version row carries its own, a paste head carries the SERVED version's) so
-// "make version V the served one" is a single whole-value assignment and no
-// field can be repointed without the others. Moving ContentSHA while leaving
-// BlobID behind would make the head serve the wrong blob under value
-// separation, where the read seam resolves bytes by BlobID.
-//
-// Embedded ANONYMOUSLY in pasteRow and versionRow so the four keys stay at the
-// top level of the JSON.
-type contentRef struct {
-	Kind       string `json:"kind"`
-	ContentSHA string `json:"content_sha"`
-	BlobID     string `json:"blob_id,omitempty"` // shale-blob path: the staged blob id GetBlob needs; "" on the standalone sha-keyed path
-	Size       int    `json:"size"`
-}
-
-type pasteRow struct {
-	Identity      string    `json:"identity"`
-	Status        string    `json:"status,omitempty"` // pending|ready|failed; "" reads as ready
-	contentRef              // the SERVED version's descriptor, promoted to flat JSON
-	Name          string    `json:"name"`
-	PinnedVersion int       `json:"pinned_version"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
-
-	// LiveBytes and LatestVersion are the paste's totals, maintained in the
-	// SAME {slug} transaction that writes or tombstones a version row. The head
-	// and its versions co-shard, so these are transactionally exact rather than
-	// derived figures that can drift.
-	//
-	// They exist so a reader that already holds the head does not also have to
-	// prefix-scan the version family: `list` is one routed read per item, and
-	// the enumeration entry's cached size is verified against LiveBytes rather
-	// than against a recomputation.
-	//
-	// Zero on a row written before this field existed. Readers treat a zero
-	// LatestVersion as "unknown" and fall back to scanning, so an old row keeps
-	// working until its next write refreshes it.
-	LiveBytes     int `json:"live_bytes,omitempty"`
-	LatestVersion int `json:"latest_version,omitempty"`
-}
-
-type versionRow struct {
-	VerNum     int       `json:"ver_num"`
-	contentRef           // this version's descriptor
-	CreatedAt  time.Time `json:"created_at"`
-	Deleted    bool      `json:"deleted"`
-}
-
-func (p pasteRow) toDomain(slug domain.Slug) domain.Paste {
-	return domain.Paste{
-		Slug:          slug,
-		Identity:      domain.Identity(p.Identity),
-		Status:        domain.NormalizeStatus(p.Status),
-		Kind:          domain.ContentKind(p.Kind),
-		ContentSHA:    p.ContentSHA,
-		Size:          p.Size,
-		Name:          p.Name,
-		PinnedVersion: p.PinnedVersion,
-		CreatedAt:     p.CreatedAt,
-		UpdatedAt:     p.UpdatedAt,
-	}
-}
-
-func pasteFromDomain(p domain.Paste) pasteRow {
-	return pasteRow{
-		Identity: p.Identity.String(),
-		Status:   string(domain.NormalizeStatus(string(p.Status))),
-		// domain.Paste carries no BlobID (a storage/value-separation
-		// detail); the insert path sets the head's BlobID after this.
-		contentRef:    contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, Size: p.Size},
-		Name:          p.Name,
-		PinnedVersion: p.PinnedVersion,
-		CreatedAt:     p.CreatedAt,
-		UpdatedAt:     p.UpdatedAt,
-	}
-}
-
-func (v versionRow) toDomain(slug domain.Slug) domain.Version {
-	return domain.Version{
-		Slug:       slug,
-		VerNum:     v.VerNum,
-		Kind:       domain.ContentKind(v.Kind),
-		ContentSHA: v.ContentSHA,
-		Size:       v.Size,
-		CreatedAt:  v.CreatedAt,
-		Deleted:    v.Deleted,
-	}
-}
-
 // --- Key builders ----------------------------------------------------------
 
 func keyPaste(slug domain.Slug) []byte { return shaleKey(prefixPastes, slug.String()) }
@@ -291,17 +200,6 @@ func keyKeygate(subnet, identity string) []byte {
 }
 
 func prefixKeygateSubnet(subnet string) []byte { return []byte("keygate/" + subnet + "/") }
-
-// extractSlug takes the segment after the last '/', the slug in
-// "identity_pastes/<identity>/<slug>".
-func extractSlug(key []byte) string {
-	s := string(key)
-	idx := strings.LastIndex(s, "/")
-	if idx < 0 {
-		return s
-	}
-	return s[idx+1:]
-}
 
 // --- Generic helpers -------------------------------------------------------
 
@@ -369,11 +267,6 @@ func (r *SlateRepo) scanPrefix(prefix []byte) ([]scanItem, error) {
 		out = append(out, scanItem{Key: k, Value: v})
 	}
 	return out, nil
-}
-
-type scanItem struct {
-	Key   []byte
-	Value []byte
 }
 
 // --- PasteReader / PasteAdmin reads ----------------------------------------
@@ -1135,19 +1028,3 @@ func (r *SlateRepo) SubnetsForIdentity(identity string, now time.Time, window ti
 
 // Insertion sorts: these slices are one owner's pastes or one paste's versions,
 // small enough that sort.Slice's reflection costs more than it saves.
-
-func sortByUpdatedAtDesc(ps []domain.Paste) {
-	for i := 1; i < len(ps); i++ {
-		for j := i; j > 0 && ps[j].UpdatedAt.After(ps[j-1].UpdatedAt); j-- {
-			ps[j], ps[j-1] = ps[j-1], ps[j]
-		}
-	}
-}
-
-func sortVersionsDesc(vs []domain.Version) {
-	for i := 1; i < len(vs); i++ {
-		for j := i; j > 0 && vs[j].VerNum > vs[j-1].VerNum; j-- {
-			vs[j], vs[j-1] = vs[j-1], vs[j]
-		}
-	}
-}

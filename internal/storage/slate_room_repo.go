@@ -88,31 +88,6 @@ func (s *SlateRoomRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now
 // fields. A room is only ever written by one backend's store, so the
 // shale-only totals are inert on the others; omitempty keeps them out of the
 // slatedb/sqlite-written JSON entirely.
-type roomRow struct {
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	ByteTotal int64     `json:"byte_total,omitempty"` // shale-only running per-room byte total
-	KeyCount  int       `json:"key_count,omitempty"`  // shale-only running per-room key count
-	// Seq is the per-room mutation sequence: dense, +1 per committed
-	// PUT/DELETE, bumped by the touch every mutation performs on this record.
-	// Maintained by both the slatedb and shale backends. A missing field
-	// reads as 0. See SPEC "The per-room sequence: assignment at commit".
-	Seq uint64 `json:"seq,omitempty"`
-}
-
-func roomRowFromDomain(r domain.Room) roomRow {
-	return roomRow{CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
-}
-
-func (row roomRow) toDomain(appSlug domain.Slug, id domain.RoomID) domain.Room {
-	return domain.Room{
-		AppSlug:   appSlug,
-		ID:        id,
-		CreatedAt: row.CreatedAt,
-		UpdatedAt: row.UpdatedAt,
-	}
-}
-
 // --- Key builders ----------------------------------------------------------
 
 func keyRoom(appSlug domain.Slug, id domain.RoomID) []byte {
@@ -440,23 +415,6 @@ func (r *SlateRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now tim
 		}
 	}
 	return perSubnet, perApp, nil
-}
-
-// splitRoomCreateRest parses "<subnet>/<ts>/<uuid>" (a roomcreate key with the
-// "roomcreate/<app-slug>/" prefix stripped) into (subnet, ts). The subnet
-// itself contains a '/' (e.g. "1.2.3.0/24"), so the split works from the RIGHT,
-// peeling the two trailing slash-free segments.
-func splitRoomCreateRest(rest string) (subnet, ts string, ok bool) {
-	lastSlash := strings.LastIndex(rest, "/")
-	if lastSlash < 0 {
-		return "", "", false
-	}
-	beforeUUID := rest[:lastSlash] // "<subnet>/<ts>"
-	tsSlash := strings.LastIndex(beforeUUID, "/")
-	if tsSlash < 0 {
-		return "", "", false
-	}
-	return beforeUUID[:tsSlash], beforeUUID[tsSlash+1:], true
 }
 
 // SumActiveRoomBytes returns the total stored value bytes across every app's
