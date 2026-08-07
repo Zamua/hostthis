@@ -25,7 +25,7 @@ func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
 
 const wsTestApex = "hostthis.test"
 
-// wsTestServer wires a real Rooms service over a real sqlite repo plus a relay,
+// wsTestServer wires a real Rooms service over a real metadata repo plus a relay,
 // fronted by an httptest.Server, so tests dial real WebSocket connections
 // through the full mux + upgrade handler.
 func wsTestServer(t *testing.T, limits relay.Limits) (*httptest.Server, *service.Rooms, *relay.Relay) {

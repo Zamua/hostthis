@@ -6,7 +6,7 @@ package ssh_test
 // Conventions:
 //   - One sub-test per spec behavior bullet, each asserting a concrete
 //     stdout/stderr/exit shape rather than a vague match.
-//   - The fixture uses the startStack pattern (real sqlite, blob store, ssh
+//   - The fixture uses the startStack pattern (real metadata repo, blob store, ssh
 //     client and ssh server), so assertions exercise the full handler path.
 //   - Names are Test<Area>_Characterization_<Case>, so `go test -run
 //     Characterization` selects them.
@@ -284,7 +284,7 @@ func TestUpdate_Characterization(t *testing.T) {
 		other := startStack(t)
 		stdout, _, _ := other.run("", []byte("<!doctype html><p>foreign</p>"))
 		foreignSlug := extractSlug(stdout)
-		// The two stacks use disjoint sqlite dbs, so the slug does not exist
+		// The two stacks use disjoint stores, so the slug does not exist
 		// in `s`, but the assertion is the same as "wrong owner": a not-found
 		// shape. ParseSlug succeeds, so the dispatcher routes through
 		// verbUpload's update path.
@@ -1297,10 +1297,9 @@ func TestConcurrent_Characterization(t *testing.T) {
 	// (5 attempts) suffices across N inserts and that per-session handshake
 	// teardown leaks no state.
 	//
-	// Sequential, not parallel: a single sqlite connection under the default
-	// modernc.org/sqlite busy timeout can surface SQLITE_BUSY on truly
-	// concurrent inserts as a generic exit 1. Many quick sequential uploads
-	// are the guaranteed-no-BUSY envelope and the realistic workload.
+	// Sequential, not parallel: what is pinned here is the collision retry
+	// across N inserts, not write concurrency, and many quick sequential
+	// uploads are the realistic workload.
 	s := startStack(t)
 	const N = 6
 	urls := map[string]struct{}{}

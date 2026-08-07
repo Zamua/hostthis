@@ -21,7 +21,7 @@ import (
 	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
-// siteStack is a full real stack (sqlite + blob store + http surface + ssh
+// siteStack is a full real stack (metadata + blob store + http surface + ssh
 // server) with the site-deploy path WIRED, so the tests below can pin that a
 // plain .html still routes to a paste and only a gzip-tar routes to a site.
 type siteStack struct {

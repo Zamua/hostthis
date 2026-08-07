@@ -316,7 +316,7 @@ func maxVerNum(versions []versionRow) int {
 }
 
 // latestActiveVerNum returns the highest NON-deleted version number, or 1
-// when none are live (matches sqlite COALESCE(..., 1)).
+// when none are live (the same answer a MIN-of-live-versions query gives).
 func latestActiveVerNum(versions []versionRow) int {
 	latest := 0
 	for _, v := range versions {

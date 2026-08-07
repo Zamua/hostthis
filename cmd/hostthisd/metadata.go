@@ -2,7 +2,7 @@
 //
 // HOSTTHIS_METADATA_BACKEND picks one of:
 //
-//	sqlite   PasteRepo, the default, no build tag required
+//	local    shale on the local storage engine, the default, no build tag required
 //	slatedb  SlateRepo, requires -tags slatedb
 //	shale    ShaleRepo, requires -tags slatedb
 //

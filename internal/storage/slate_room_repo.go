@@ -82,12 +82,12 @@ func (s *SlateRoomRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now
 // maintained ONLY by the shale backend: shale validates the per-room cap
 // inside a single-shard CAS, and a CAS read-set cannot include a ScanPrefix
 // (no phantom protection), so it needs a discrete in-record total the read-set
-// can carry. slatedb + sqlite leave both at zero and compute the per-room cap
+// can carry. slatedb leaves both at zero and computes the per-room cap
 // by materializing the namespace under a serialized writer (slatedb's per-room
-// lockQuota stripe, sqlite's serializable tx), so they never read these
+// lockQuota stripe), so it never reads these
 // fields. A room is only ever written by one backend's store, so the
 // shale-only totals are inert on the others; omitempty keeps them out of the
-// slatedb/sqlite-written JSON entirely.
+// slatedb-written JSON entirely.
 // --- Key builders ----------------------------------------------------------
 
 func keyRoom(appSlug domain.Slug, id domain.RoomID) []byte {
@@ -474,7 +474,7 @@ func (r *SlateRepo) sumOneRoomBytes(appSlug domain.Slug, id domain.RoomID) (int6
 // --- SweepRooms ------------------------------------------------------------
 
 // DeleteRoom removes a room record and EVERY value in
-// its namespace: the slatedb analogue of the sqlite FK cascade, enumerating the
+// its namespace: the slatedb analogue of a relational FK cascade, enumerating the
 // value subtree and deleting each in the tx. Idempotent; a missing room is a
 // no-op.
 func (r *SlateRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {

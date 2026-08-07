@@ -121,7 +121,7 @@ type siteRow struct {
 	// FileBlobs maps a file's content sha to the shale-blob id its bytes were
 	// staged under. The manifest references files by sha, so this side-table is
 	// how the read path resolves sha -> blobid for GetBlob. Empty on the
-	// standalone paths (sqlite / slatedb / disk), where a file is
+	// standalone paths (local / slatedb / disk), where a file is
 	// content-addressed by sha alone.
 	FileBlobs map[string]string `json:"file_blobs,omitempty"`
 }

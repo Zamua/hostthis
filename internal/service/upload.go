@@ -190,7 +190,7 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		// A staging failure means the row never commits.
 		return u.createTransactional(staged, owner, name, kind, now)
 	}
-	// Detached-store path (sqlite / slatedb / shale-without-a-blob-bucket): the
+	// Detached-store path (local / slatedb / shale-without-a-blob-bucket): the
 	// blob write is deferred to a background finalizer, so only the quota
 	// reserve and the PENDING row happen before the URL is returned. staged.Body
 	// lives in this pod's memory until the finalizer flushes it; a crash in that

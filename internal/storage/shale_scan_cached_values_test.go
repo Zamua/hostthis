@@ -14,7 +14,7 @@ package storage_test
 //     never pruned,
 //   - fail-closed (Policy 2): an undecodable entry or a fail-closed
 //     placeholder HARD-FAILS the scan, since skipping would under-count,
-//   - shale's quota result equals sqlite's on the same op sequence.
+//   - shale's quota result equals the true live total on the same op sequence.
 //
 //	go test -tags slatedb -run 'TestShaleQuotaScan|TestShaleSiteQuotaScan|TestShaleListDoesNotResurrect|TestShaleQuotaParity' ./internal/storage
 //

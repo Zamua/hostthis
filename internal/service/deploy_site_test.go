@@ -15,7 +15,7 @@ import (
 	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
-// deployFixture wires real sqlite repos + a real compressed blob store so
+// deployFixture wires real metadata repos + a real compressed blob store so
 // the test exercises the actual untar → blob → manifest → persist path.
 func deployFixture(t *testing.T) (*DeploySite, *storage.ShaleSiteRepo, *storage.CompressedBlobStore) {
 	t.Helper()
