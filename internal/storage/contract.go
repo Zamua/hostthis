@@ -51,12 +51,15 @@ type entryJSON struct {
 	// CompSize is the stored post-compression size, the quota basis. Omitted
 	// when unknown, where the uncompressed Size is the fallback.
 	CompSize int `json:"csize,omitempty"`
+	// BID is the transactional blob path's address for this file. Omitted on
+	// the content-addressed paths, where SHA is the address.
+	BID string `json:"bid,omitempty"`
 }
 
 func encodeManifest(m domain.Manifest) (string, error) {
 	mj := manifestJSON{Files: make(map[string]entryJSON, len(m.Files))}
 	for p, e := range m.Files {
-		mj.Files[p] = entryJSON{SHA: e.SHA, Size: e.Size, CT: e.ContentType, Kind: e.Kind, CompSize: e.CompressedSize}
+		mj.Files[p] = entryJSON{SHA: e.SHA, Size: e.Size, CT: e.ContentType, Kind: e.Kind, CompSize: e.CompressedSize, BID: e.BlobID}
 	}
 	b, err := json.Marshal(mj)
 	if err != nil {
@@ -72,7 +75,7 @@ func decodeManifest(s string) (domain.Manifest, error) {
 	}
 	m := domain.NewManifest()
 	for p, e := range mj.Files {
-		m.Add(p, domain.ManifestEntry{SHA: e.SHA, Size: e.Size, ContentType: e.CT, Kind: e.Kind, CompressedSize: e.CompSize})
+		m.Add(p, domain.ManifestEntry{SHA: e.SHA, Size: e.Size, ContentType: e.CT, Kind: e.Kind, CompressedSize: e.CompSize, BlobID: e.BID})
 	}
 	return m, nil
 }
