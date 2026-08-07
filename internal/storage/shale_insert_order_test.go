@@ -107,3 +107,46 @@ func TestShaleInsertOrder_ListClearsStalePlaceholder(t *testing.T) {
 		t.Fatalf("cleared placeholder must be replaced by the real size: got %d, want 250", got)
 	}
 }
+
+// A collision the pre-check cannot catch still rolls the entry back.
+//
+// The superseding insert skips the pre-check by design, so its only collision
+// signal is the authoritative CAS refusing. When the slug turns out to belong
+// to a DIFFERENT identity the entry this call wrote is an orphan: keeping it
+// charges a would-be owner for something they do not have, and lists it.
+func TestShaleInsertOrder_SupersedingCollisionRollsBackTheEntry(t *testing.T) {
+	repo := newShaleRepoForTest(t)
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+
+	const holder = "key:order-c"
+	const other = "key:order-d"
+	slug := domain.Slug("ordr5678")
+
+	held := domain.Paste{
+		Slug: slug, Identity: domain.Identity(holder), Kind: domain.KindHTML,
+		ContentSHA: "sha-order-3", Size: 100, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := repo.InsertWithQuotaCheck(context.Background(), held, 0, now); err != nil {
+		t.Fatalf("seed insert: %v", err)
+	}
+
+	clash := domain.Paste{
+		Slug: slug, Identity: domain.Identity(other), Kind: domain.KindSite,
+		ContentSHA: "sha-order-4", Size: 400, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := repo.InsertSupersedingSite(context.Background(), clash, 0, now); !errors.Is(err, storage.ErrSlugTaken) {
+		t.Fatalf("superseding a slug another identity holds: got %v, want ErrSlugTaken", err)
+	}
+
+	if got := mustSum(t, repo, other, now); got != 0 {
+		t.Fatalf("a refused supersede must charge the would-be owner nothing; got %d bytes", got)
+	}
+	if raw, err := repo.GetRawForTest(storage.IdentityPasteKeyForTest(other, slug.String())); err != nil {
+		t.Fatalf("read would-be entry: %v", err)
+	} else if len(raw) != 0 {
+		t.Fatalf("a refused supersede must leave NO enumeration entry; found %q", raw)
+	}
+	if got := mustSum(t, repo, holder, now); got != 100 {
+		t.Fatalf("holder's bytes after a failed collision: got %d, want 100", got)
+	}
+}

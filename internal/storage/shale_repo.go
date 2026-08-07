@@ -1135,9 +1135,32 @@ func (r *ShaleRepo) insertArtifact(ctx context.Context, p domain.Paste, userCap 
 	}
 
 	if err := r.insertAuthoritative(p, binds, supersedesSite); err != nil {
-		// The entry written above is now an orphan. Best-effort removal keeps
-		// the common failure (a slug race) from charging the owner; if it fails,
-		// the intent stays and a sweep finishes the job.
+		// Whose row now holds the slug decides whether the entry above is an
+		// orphan at all. Both callers of a concurrent insert write that ONE
+		// entry key, so the loser's guard matches what the winner left and the
+		// rollback below would delete an entry the winner's row depends on -
+		// stranding an artifact that serves every file and reports its
+		// versions while being absent from its owner's listing and free.
+		switch owner, oerr := r.artifactOwner(p.Slug); {
+		case oerr != nil:
+			// Unreadable is not absent. Deleting on a guess risks exactly the
+			// stranding above; keeping it over-counts, which is the direction
+			// this path already prefers, and the intent left behind is what
+			// lets a sweep settle it.
+			r.repoLog().Printf("shale: resolving the owner of %s after a failed insert: %v (keeping the enumeration entry for a sweep)", p.Slug, oerr)
+			return err
+		case owner == p.Identity:
+			// A concurrent caller wrote the SAME artifact. The entry describes
+			// it correctly, so it stays and the intent is discharged.
+			if cerr := r.intents.Complete(ctx, intent.ID, intent.Scope); cerr != nil {
+				r.repoLog().Printf("shale: forgetting the intent for %s: %v (a sweep will retry it)", p.Slug, cerr)
+			}
+			return err
+		}
+		// A different identity holds the slug, or nothing does: the entry
+		// written above is an orphan. Best-effort removal keeps the common
+		// failure (a slug race) from charging the owner; if it fails, the
+		// intent stays and a sweep finishes the job.
 		if _, derr := r.guardedDeleteIndexEntry(entryKey, guard); derr != nil {
 			r.repoLog().Printf("shale: rollback of enumeration entry for %s: %v (a sweep will retry it)", p.Slug, derr)
 		} else if cerr := r.intents.Complete(ctx, intent.ID, intent.Scope); cerr != nil {
@@ -1983,3 +2006,20 @@ func (r *ShaleRepo) Unpin(slug domain.Slug) error {
 }
 
 // --- SweepRepo -------------------------------------------------------------
+
+// artifactOwner reports which identity holds slug, and the empty identity when
+// no artifact does.
+//
+// A read failure is returned rather than folded into "nobody holds it": the two
+// answers call for opposite actions, and treating an unreadable row as absent
+// is what removes a live enumeration entry.
+func (r *ShaleRepo) artifactOwner(slug domain.Slug) (domain.Identity, error) {
+	p, err := r.Get(slug)
+	if errors.Is(err, ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return p.Identity, nil
+}

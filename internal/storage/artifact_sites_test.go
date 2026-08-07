@@ -7,6 +7,7 @@ package storage_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -519,5 +520,66 @@ func TestArtifactSites_MigrationCarriesFileBlobIDs(t *testing.T) {
 		if e.SHA == "" {
 			t.Fatalf("migrated entry %q has no address: %+v", path, e)
 		}
+	}
+}
+
+// Two drains racing on the same directory leave it LISTED and CHARGED.
+//
+// The migration writes the enumeration entry before the authoritative row, on a
+// different shard, and removes the entry if the row write fails. Two callers
+// converting the same directory both write that one entry, so the loser's
+// rollback is aimed at a key the winner has already claimed. Deleting it there
+// strands the artifact: it serves every file and reports its versions, while
+// being invisible in its owner's listing and costing them nothing.
+//
+// Concurrent by construction rather than incidental: a node runs the drain from
+// more than one place, and at R>1 more than one node mounts the unit holding
+// the entry.
+func TestArtifactSites_ConcurrentSweepsKeepTheDirectoryListed(t *testing.T) {
+	repo := newPebbleShaleRepo(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	owner := domain.Identity("key:owner-race")
+	slug := domain.Slug("racesw23")
+
+	legacy := storage.NewShaleSiteRepo(repo)
+	if err := legacy.InsertWithQuotaCheck(context.Background(), domain.Site{
+		Slug: slug, Identity: owner,
+		Manifest: twoFileManifest("sha-race"), CreatedAt: now, UpdatedAt: now,
+	}, 49, 0, now); err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+
+	sites := storage.NewArtifactSites(repo, legacy)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for range 2 {
+		wg.Go(func() {
+			<-start
+			// Errors are the point of the race, not a failure: exactly one
+			// caller converts and the other loses the slug.
+			_, _ = sites.SweepLegacySites(context.Background(), now)
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	if _, err := repo.Get(slug); err != nil {
+		t.Fatalf("the directory did not survive the race: %v", err)
+	}
+	listed, err := repo.ListByOwner(owner.String())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Slug != slug {
+		t.Fatalf("owner's listing = %+v, want exactly %s: the artifact exists and serves, "+
+			"but the losing rollback removed the entry the listing reads", listed, slug)
+	}
+	sum, err := repo.SumActiveBytesByOwner(owner.String(), now)
+	if err != nil {
+		t.Fatalf("sum: %v", err)
+	}
+	if sum != 49 {
+		t.Fatalf("owner charged %d, want 49: the entry carries the charge, so losing it "+
+			"hosts the directory for free", sum)
 	}
 }
