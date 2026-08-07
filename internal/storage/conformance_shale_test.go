@@ -94,3 +94,11 @@ func TestConformance_Shale(t *testing.T) {
 	}
 	runConformanceWithSites(t, "shale", caps, newRepo, newSites, newRooms)
 }
+
+// envOrDefault reads an override, falling back when unset.
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}

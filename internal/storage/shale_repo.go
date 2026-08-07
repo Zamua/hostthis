@@ -1,9 +1,8 @@
 // Package storage's shale-backed metadata implementation.
 //
-// ShaleRepo satisfies the same service-layer interfaces as PasteRepo and
-// SlateRepo, but talks to a shale cluster.Cluster, which routes each key to the
-// node owning its shard. The slate backend is its per-node KV engine, so the
-// cluster layer above it is the whole difference from SlateRepo.
+// ShaleRepo talks to a shale cluster.Cluster, which routes each key to the node
+// owning its shard. The storage engine beneath the cluster is a build-time
+// choice (shale_backing.go); nothing here names one.
 //
 // Design: docs/SPEC.md "Shale-backed metadata storage". Needs cgo +
 // libslatedb_uniffi.
@@ -225,7 +224,7 @@ type ShaleConfig struct {
 }
 
 // ShaleRepo is the shale-cluster-backed metadata store, satisfying the same
-// service-layer interfaces as SlateRepo. Every operation goes through the
+// service-layer interfaces. Every operation goes through the
 // cluster handle, which routes per-shard via shaleShardKey and commits
 // single-shard writes through per-shard CAS.
 //

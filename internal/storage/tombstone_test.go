@@ -67,8 +67,7 @@ func TestIsTombstoneEnvelope_SurvivesRoundTrip(t *testing.T) {
 
 // The invariant the tombstone skip rests on: no shale write may store an empty
 // value. An empty-value Put would make that row family invisible to every scan,
-// silently and with no error raised. SlateRepo is exempt: its empty markers are
-// correct and it has its own scan path.
+// silently and with no error raised.
 func TestNoShaleWriteStoresAnEmptyValue(t *testing.T) {
 	files, err := filepath.Glob("shale_*.go")
 	if err != nil {
