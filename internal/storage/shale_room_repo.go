@@ -35,6 +35,7 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -244,9 +245,11 @@ func (r *ShaleRepo) GetRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 // union scan, or bracketing the scan and fence reads on the same member set.
 // Pinned by TestShaleRoomSeqFence_ReplicationBar.
 func (r *ShaleRepo) ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error) {
-	const maxFenceRetries = 5
 	prefix := string(shalePrefixRoomValues(appSlug, id))
-	for range maxFenceRetries {
+	for attempt := range maxFenceRetries {
+		if attempt > 0 {
+			fenceBackoff(attempt - 1)
+		}
 		before, err := r.roomSeq(appSlug, id)
 		if err != nil {
 			return domain.RoomKV{}, err
@@ -328,78 +331,80 @@ func (r *ShaleRepo) PutRoomValue(appSlug domain.Slug, id domain.RoomID, key stri
 	// commit wrote.
 	var assigned uint64
 
-	err := r.cluster.Transact(valueKey, func(tx backend.Transaction) error {
-		// Re-checking existence INSIDE the write boundary is what stops a
-		// concurrent delete removing the room between the service's GetRoom and
-		// this write. It also puts the record in the read-set,
-		// which is what serializes two DISTINCT-key writers to the same room.
-		var row roomRow
-		if err := shaleTxGetJSON(tx, roomKey, &row); err != nil {
-			return err // ErrNotFound if the room is gone
-		}
-
-		// The delta is against the value this CAS will overwrite, and on
-		// DECODED lengths, so accounting matches the other backends exactly.
-		prior := 0
-		isNewKey := true
-		if cur, err := tx.Get(valueKey); err == nil {
-			prior = shaleDecodedRoomValueLen(cur)
-			isNewKey = false
-		} else if !errors.Is(err, backend.ErrNotFound) {
-			return fmt.Errorf("re-read room value: %w", err)
-		}
-		delta := int64(len(val) - prior)
-
-		// STRICT per-room cap: the same byte + key-count checks as
-		// domain.RoomKV.CanPut, but against the record's running totals (in
-		// the read-set) rather than a materialized namespace, so the CAS
-		// makes them race-safe.
-		newByteTotal := row.ByteTotal + delta
-		if newByteTotal > int64(domain.MaxRoomBytes) {
-			return ErrRoomDataFull
-		}
-		newKeyCount := row.KeyCount
-		if isNewKey {
-			newKeyCount++
-		}
-		if newKeyCount > domain.MaxRoomKeys {
-			return ErrRoomDataFull
-		}
-
-		// STRICT per-app aggregate: read-check-increment the counter in the
-		// same CAS, charging only a positive delta. Skipped entirely on a
-		// zero delta, where no cap decision and no counter write can follow:
-		// reading it would only widen the read set and buy spurious retries.
-		if delta != 0 {
-			cur, err := txGetCounter(tx, counterKey)
-			if err != nil {
-				return err
+	err := retryContended(func() error {
+		return r.cluster.Transact(valueKey, func(tx backend.Transaction) error {
+			// Re-checking existence INSIDE the write boundary is what stops a
+			// concurrent delete removing the room between the service's GetRoom and
+			// this write. It also puts the record in the read-set,
+			// which is what serializes two DISTINCT-key writers to the same room.
+			var row roomRow
+			if err := shaleTxGetJSON(tx, roomKey, &row); err != nil {
+				return err // ErrNotFound if the room is gone
 			}
-			if appCap > 0 && delta > 0 && cur+delta > appCap {
-				return ErrAppRoomsFull
+
+			// The delta is against the value this CAS will overwrite, and on
+			// DECODED lengths, so accounting matches the other backends exactly.
+			prior := 0
+			isNewKey := true
+			if cur, err := tx.Get(valueKey); err == nil {
+				prior = shaleDecodedRoomValueLen(cur)
+				isNewKey = false
+			} else if !errors.Is(err, backend.ErrNotFound) {
+				return fmt.Errorf("re-read room value: %w", err)
 			}
-			if newTotal := cur + delta; newTotal != cur {
-				if err := tx.Put(counterKey, formatCounter(newTotal)); err != nil {
+			delta := int64(len(val) - prior)
+
+			// STRICT per-room cap: the same byte + key-count checks as
+			// domain.RoomKV.CanPut, but against the record's running totals (in
+			// the read-set) rather than a materialized namespace, so the CAS
+			// makes them race-safe.
+			newByteTotal := row.ByteTotal + delta
+			if newByteTotal > int64(domain.MaxRoomBytes) {
+				return ErrRoomDataFull
+			}
+			newKeyCount := row.KeyCount
+			if isNewKey {
+				newKeyCount++
+			}
+			if newKeyCount > domain.MaxRoomKeys {
+				return ErrRoomDataFull
+			}
+
+			// STRICT per-app aggregate: read-check-increment the counter in the
+			// same CAS, charging only a positive delta. Skipped entirely on a
+			// zero delta, where no cap decision and no counter write can follow:
+			// reading it would only widen the read set and buy spurious retries.
+			if delta != 0 {
+				cur, err := txGetCounter(tx, counterKey)
+				if err != nil {
 					return err
 				}
+				if appCap > 0 && delta > 0 && cur+delta > appCap {
+					return ErrAppRoomsFull
+				}
+				if newTotal := cur + delta; newTotal != cur {
+					if err := tx.Put(counterKey, formatCounter(newTotal)); err != nil {
+						return err
+					}
+				}
 			}
-		}
 
-		// Sentinel-prefixed so an empty app value still stores a non-empty
-		// payload, which is what shale's Put requires.
-		if err := tx.Put(valueKey, shaleEncodeRoomValue(val)); err != nil {
-			return fmt.Errorf("put room value: %w", err)
-		}
+			// Sentinel-prefixed so an empty app value still stores a non-empty
+			// payload, which is what shale's Put requires.
+			if err := tx.Put(valueKey, shaleEncodeRoomValue(val)); err != nil {
+				return fmt.Errorf("put room value: %w", err)
+			}
 
-		// The touch bumps the clock, commits the running totals, and assigns
-		// the seq, all inside this CAS.
-		row.ByteTotal = newByteTotal
-		row.KeyCount = newKeyCount
-		if err := shaleTxTouchRoom(tx, appSlug, id, &row, now); err != nil {
-			return err
-		}
-		assigned = row.Seq
-		return nil
+			// The touch bumps the clock, commits the running totals, and assigns
+			// the seq, all inside this CAS.
+			row.ByteTotal = newByteTotal
+			row.KeyCount = newKeyCount
+			if err := shaleTxTouchRoom(tx, appSlug, id, &row, now); err != nil {
+				return err
+			}
+			assigned = row.Seq
+			return nil
+		})
 	})
 	if err != nil {
 		// AMBIGUOUS-COMMIT CAVEAT (SPEC "Multi-pod relay -> Delivery
@@ -429,48 +434,50 @@ func (r *ShaleRepo) DeleteRoomValue(appSlug domain.Slug, id domain.RoomID, key s
 	roomKey := shaleKeyRoom(appSlug, id)
 	counterKey := shaleKeyRoomBytes(appSlug)
 	var assigned uint64
-	err := r.cluster.Transact(valueKey, func(tx backend.Transaction) error {
-		var row roomRow
-		if err := shaleTxGetJSON(tx, roomKey, &row); err != nil {
-			return err // ErrNotFound if the room is gone
-		}
-		// Freed bytes are the DECODED length, so the decrement matches the
-		// increment PutValue made.
-		freed := int64(0)
-		deletedKey := false
-		if cur, err := tx.Get(valueKey); err == nil {
-			freed = int64(shaleDecodedRoomValueLen(cur))
-			deletedKey = true
-			if err := tx.Delete(valueKey); err != nil {
-				return fmt.Errorf("delete room value: %w", err)
+	err := retryContended(func() error {
+		return r.cluster.Transact(valueKey, func(tx backend.Transaction) error {
+			var row roomRow
+			if err := shaleTxGetJSON(tx, roomKey, &row); err != nil {
+				return err // ErrNotFound if the room is gone
 			}
-		} else if !errors.Is(err, backend.ErrNotFound) {
-			return fmt.Errorf("read room value for delete: %w", err)
-		}
-		if freed > 0 {
-			cur, err := txGetCounter(tx, counterKey)
-			if err != nil {
+			// Freed bytes are the DECODED length, so the decrement matches the
+			// increment PutValue made.
+			freed := int64(0)
+			deletedKey := false
+			if cur, err := tx.Get(valueKey); err == nil {
+				freed = int64(shaleDecodedRoomValueLen(cur))
+				deletedKey = true
+				if err := tx.Delete(valueKey); err != nil {
+					return fmt.Errorf("delete room value: %w", err)
+				}
+			} else if !errors.Is(err, backend.ErrNotFound) {
+				return fmt.Errorf("read room value for delete: %w", err)
+			}
+			if freed > 0 {
+				cur, err := txGetCounter(tx, counterKey)
+				if err != nil {
+					return err
+				}
+				if err := tx.Put(counterKey, formatCounter(cur-freed)); err != nil {
+					return err
+				}
+			}
+			// Only a present key that was actually removed changes the totals.
+			if deletedKey {
+				row.ByteTotal -= freed
+				if row.ByteTotal < 0 {
+					row.ByteTotal = 0
+				}
+				if row.KeyCount > 0 {
+					row.KeyCount--
+				}
+			}
+			if err := shaleTxTouchRoom(tx, appSlug, id, &row, now); err != nil {
 				return err
 			}
-			if err := tx.Put(counterKey, formatCounter(cur-freed)); err != nil {
-				return err
-			}
-		}
-		// Only a present key that was actually removed changes the totals.
-		if deletedKey {
-			row.ByteTotal -= freed
-			if row.ByteTotal < 0 {
-				row.ByteTotal = 0
-			}
-			if row.KeyCount > 0 {
-				row.KeyCount--
-			}
-		}
-		if err := shaleTxTouchRoom(tx, appSlug, id, &row, now); err != nil {
-			return err
-		}
-		assigned = row.Seq
-		return nil
+			assigned = row.Seq
+			return nil
+		})
 	})
 	if err != nil {
 		// Same ambiguous-commit caveat as PutRoomValue: an error here may
@@ -533,6 +540,52 @@ func (r *ShaleRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now tim
 
 // --- SweepRooms ------------------------------------------------------------
 
+// Fence retry budget. A fence attempt is only satisfied by a window with NO
+// interleaved commit, so retrying is a race against the writers - and retrying
+// IMMEDIATELY re-enters the same contention that just lost. The backoff is what
+// creates a gap wide enough for a burst to drain; without it a fence under
+// sustained concurrent writes cannot converge however many attempts it is given.
+//
+// Jittered so N concurrent scanners do not retry in lockstep and keep colliding.
+const (
+	maxFenceRetries = 8
+	fenceBackoffMin = 500 * time.Microsecond
+	fenceBackoffMax = 40 * time.Millisecond
+)
+
+// fenceBackoff sleeps before fence attempt n (0-based), doubling to a cap with
+// full jitter.
+func fenceBackoff(n int) {
+	d := min(fenceBackoffMin<<min(n, 16), fenceBackoffMax)
+	time.Sleep(fenceBackoffMin + time.Duration(rand.Int64N(int64(d))))
+}
+
+// retryContended re-runs a room mutation whose transaction exhausted its own
+// CAS budget.
+//
+// Concurrent writers to one room contend on the SAME room record: every
+// mutation bumps its seq, so the record is in every writer's read set by
+// design (that is what serializes them). Under a burst the cluster's internal
+// OCC budget can run out, which surfaces as backend.ErrCASConflict rather than
+// as a completed write. That is contention, not a fault, and the caller's write
+// is still valid - so it is retried after a backoff wide enough for the burst
+// to drain, instead of being reported to a client as a failure.
+//
+// Matches ONLY ErrCASConflict: any other error is a real failure and is
+// returned untouched.
+func retryContended(fn func() error) error {
+	var err error
+	for attempt := range maxFenceRetries {
+		if attempt > 0 {
+			fenceBackoff(attempt - 1)
+		}
+		if err = fn(); !errors.Is(err, backend.ErrCASConflict) {
+			return err
+		}
+	}
+	return err
+}
+
 // errRoomDeleteFenceStale reports that a mutation landed between DeleteRoom's
 // value enumeration and its commit, so the enumeration no longer describes the
 // room. Never escapes DeleteRoom's retry loop.
@@ -555,10 +608,12 @@ var errRoomDeleteFenceStale = errors.New("room mutated during delete enumeration
 // CAS, so the room and all its values vanish atomically (the shale analogue of
 // the sqlite FK cascade).
 func (r *ShaleRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
-	const maxFenceRetries = 5
 	roomKey := shaleKeyRoom(appSlug, id)
 	counterKey := shaleKeyRoomBytes(appSlug)
-	for range maxFenceRetries {
+	for attempt := range maxFenceRetries {
+		if attempt > 0 {
+			fenceBackoff(attempt - 1)
+		}
 		var row roomRow
 		if err := r.getJSON(roomKey, &row); err != nil {
 			if errors.Is(err, ErrNotFound) {
