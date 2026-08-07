@@ -350,3 +350,55 @@ func TestShaleIntentCompletedSiteDeployLeavesNoIntent(t *testing.T) {
 		t.Fatalf("a completed site deploy must forget its intent: got %+v", out)
 	}
 }
+
+// The owner's own listing settles their residue, so a phantom does not have to
+// wait for a pod restart. The boot sweep stays the guarantee; this is what makes
+// it fast in practice.
+func TestShaleIntentListResolvesWithoutARestart(t *testing.T) {
+	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("MINIO_TEST_ENDPOINT not set; skipping resolve-on-read test")
+	}
+	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	now := time.Now().UTC()
+	owner := "key:onread"
+
+	// Aged past the grace, so it is eligible the moment someone looks.
+	crashedInsert(t, repo, owner, "onread11", 400, now.Add(-2*storage.ResolveGrace))
+	if got := mustSum(t, repo, owner, now); got != 400 {
+		t.Fatalf("fixture: the phantom must charge quota first, got %d", got)
+	}
+
+	// No sweep, no restart - just the owner listing.
+	list, err := repo.ListByOwner(owner)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("the listing must not render a phantom it just settled: got %+v", list)
+	}
+	if got := mustSum(t, repo, owner, now); got != 0 {
+		t.Fatalf("the listing must release the phantom's bytes: got %d, want 0", got)
+	}
+}
+
+// A FRESH intent must survive a listing exactly as it survives a sweep: another
+// node may be mid-write, and a read is not a licence to skip the grace.
+func TestShaleIntentListRespectsTheGrace(t *testing.T) {
+	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("MINIO_TEST_ENDPOINT not set; skipping resolve-on-read grace test")
+	}
+	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	now := time.Now().UTC()
+	owner := "key:onreadfresh"
+
+	crashedInsert(t, repo, owner, "onrdfrsh", 300, now)
+
+	if _, err := repo.ListByOwner(owner); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if got := mustSum(t, repo, owner, now); got != 300 {
+		t.Fatalf("a listing must not settle an in-flight intent: got %d, want 300", got)
+	}
+}

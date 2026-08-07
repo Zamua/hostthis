@@ -711,6 +711,11 @@ func (r *ShaleRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	if owner == "" {
 		return nil, nil
 	}
+	// Settle this owner's half-finished writes FIRST, so the listing below does
+	// not render a phantom the very next scan would have removed. Best-effort
+	// and usually a no-op (docs/SPEC.md "Durable intent").
+	r.resolveOwnerIntents(context.Background(), owner, time.Now().UTC())
+
 	idx, err := r.scanPrefix(shalePrefixIdentityPastes(owner))
 	if err != nil {
 		return nil, err
