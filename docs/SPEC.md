@@ -817,25 +817,26 @@ for one file or two hundred.
 
 ### Serving a directory
 
-**One lookup serves everything.** `<slug>.hostthis.dev/<path>` resolves the
-slug to its artifact, looks `<path>` up in the served version's manifest, and
-streams the referenced blob with the content-type derived from the extension.
-Directory handling:
+One head read answers every request. The head carries the served version's
+whole descriptor including its manifest, so resolving a request path is a
+manifest lookup on a value already in hand - not a head read followed by a
+version read, and not a site lookup followed by a paste lookup.
 
-- `/` and any `/<dir>/` serve that directory's `index.html` if one exists in
-  the manifest. On a one-entry manifest, `/` serves that entry.
-- A path that maps to a manifest entry serves that file.
-- An unmatched path is resolved by the **SPA fallback** (below): a path that
-  looks like a client-side ROUTE serves the root `index.html`, while a path
-  that looks like a genuinely-missing ASSET returns **404**.
+**The shape is DECLARED, never inferred.** An artifact whose kind is `site` is
+a directory; anything else is a document. Counting manifest entries would get a
+one-file directory wrong, serving it rendered instead of handing back its
+bytes.
 
-The read path used to try the site family FIRST and fall through to the paste
-family, so every single-file view paid a routed read that always missed before
-the read it actually wanted - two reads on the hottest path in the service.
-With one family there is one read.
+A document answers only at its own URL. A deeper path under it is a 404: paths
+inside an artifact are a directory's affair.
 
-A single-file artifact still 404s every path but `/`, but that now falls out of
-its manifest having one entry rather than from a separate code path.
+Lookup resolves either shape. A document keys its single entry at `/`, having
+no filename to be known by; a directory keys files by path and answers `/` with
+its index. The root lookup checks `/` first and then `index.html`, so one
+function serves both.
+
+A slug with no artifact falls back to a legacy site row, the separate family
+that predates the unified model. That fallback is what the migration removes.
 
 ### SPA fallback (route vs. asset)
 

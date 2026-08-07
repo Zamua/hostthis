@@ -283,3 +283,71 @@ func TestSite_FallsThroughToPasteWhenNoSite(t *testing.T) {
 		t.Fatalf("paste fallthrough: code=%d body=%q", w.Code, w.Body.String())
 	}
 }
+
+// A directory artifact serves its files from the HEAD's manifest, with no site
+// row involved. Pins the unified read path: the same manifest lookup the legacy
+// site path uses, reached through the artifact instead.
+func TestArtifact_DirectoryServesFromHeadManifest(t *testing.T) {
+	now := time.Now().UTC()
+	m := domain.NewManifest()
+	m.Add("index.html", domain.ManifestEntry{SHA: "sha-index", Size: 5, ContentType: "text/html"})
+	m.Add("app.css", domain.ManifestEntry{SHA: "sha-css", Size: 3, ContentType: "text/css"})
+
+	srv := &Server{
+		ApexDomain: "paste.test",
+		Pastes: stubPasteReader{p: domain.Paste{
+			Slug: "abcd2345", Identity: "key:test",
+			// The KIND declares the shape; the manifest holds the content.
+			Kind: domain.KindSite, UpdatedAt: now, Manifest: m,
+		}},
+		Blobs: stubBlobMap{m: map[string][]byte{
+			"sha-index": []byte("index"),
+			"sha-css":   []byte("css"),
+		}},
+	}
+
+	for _, c := range []struct{ path, body, ct string }{
+		{"/", "index", "text/html"},
+		{"/app.css", "css", "text/css"},
+	} {
+		r := httptest.NewRequest("GET", c.path, nil)
+		r.Host = "abcd2345.paste.test"
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		if w.Code != 200 || w.Body.String() != c.body {
+			t.Fatalf("%s: code=%d body=%q, want 200/%q", c.path, w.Code, w.Body.String(), c.body)
+		}
+		if got := w.Header().Get("Content-Type"); got != c.ct {
+			t.Fatalf("%s: content-type %q, want %q", c.path, got, c.ct)
+		}
+	}
+}
+
+// A document artifact answers only at its own URL: a deeper path is not a file
+// inside it.
+func TestArtifact_DocumentRejectsDeepPaths(t *testing.T) {
+	srv := &Server{
+		ApexDomain: "paste.test",
+		Pastes: stubPasteReader{p: domain.Paste{
+			Slug: "wxyz6789", Identity: "key:test", Kind: domain.KindHTML,
+			ContentSHA: "sha-d", Size: 3, UpdatedAt: time.Now().UTC()}},
+		Blobs: stubBlobMap{m: map[string][]byte{"sha-d": []byte("doc")}},
+	}
+	// The bare URL must SERVE, or the 404 below would prove only that the
+	// request never reached the document path.
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Host = "wxyz6789.paste.test"
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+	if w.Code != 200 || w.Body.String() != "doc" {
+		t.Fatalf("document at its own URL: code=%d body=%q, want 200/doc", w.Code, w.Body.String())
+	}
+
+	r = httptest.NewRequest("GET", "/deeper/path", nil)
+	r.Host = "wxyz6789.paste.test"
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+	if w.Code != 404 {
+		t.Fatalf("deep path into a document: code=%d, want 404", w.Code)
+	}
+}

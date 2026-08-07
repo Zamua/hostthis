@@ -159,6 +159,15 @@ func (m Manifest) Lookup(reqPath string) (ManifestEntry, bool) {
 	clean := strings.TrimPrefix(reqPath, "/")
 
 	if clean == "" || strings.HasSuffix(clean, "/") {
+		// A single document keys its one entry at Root, having no filename to
+		// be known by; a directory keys files by their path and answers "/"
+		// with its index. Checking Root first is what lets one lookup resolve
+		// either shape.
+		if clean == "" {
+			if e, ok := m.Files[Root]; ok {
+				return e, true
+			}
+		}
 		idx := clean + "index.html"
 		if e, ok := m.Files[idx]; ok {
 			return e, true

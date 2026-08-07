@@ -111,14 +111,7 @@ func (s *Server) Handler() http.Handler {
 				s.handleRoomsAPI(w, r, slug, rest)
 				return
 			}
-			if s.serveSiteIfExists(w, r, slug, r.URL.Path) {
-				return
-			}
-			if r.URL.Path != "/" {
-				http.NotFound(w, r)
-				return
-			}
-			s.servePasteSlug(w, r, slug)
+			s.serveArtifact(w, r, slug, r.URL.Path)
 			return
 		}
 		// Path mode: /p/<slug> (paste) or /p/<slug>/<path...> (site) on the
@@ -145,15 +138,7 @@ func (s *Server) Handler() http.Handler {
 				s.handleRoomsAPI(w, r, slug, rest)
 				return
 			}
-			if s.serveSiteIfExists(w, r, slug, sitePath) {
-				return
-			}
-			// Not a site: a paste serves only at the bare slug path.
-			if sitePath != "/" {
-				http.NotFound(w, r)
-				return
-			}
-			s.servePasteSlug(w, r, slug)
+			s.serveArtifact(w, r, slug, sitePath)
 			return
 		}
 		if r.URL.Path == "/" {
@@ -217,10 +202,27 @@ func (s *Server) serveLanding(w http.ResponseWriter, _ *http.Request) {
 
 // servePasteSlug serves a paste with its sandboxing headers. Both the
 // subdomain and the path routes funnel through here.
-func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug domain.Slug) {
+// serveArtifact resolves reqPath against the artifact owning slug.
+//
+// ONE head read decides everything: the head carries the served version's whole
+// descriptor, including its manifest, so a directory's file lookup and a
+// document's render both answer from it. A slug with no artifact falls back to
+// a legacy site row, which is a separate family predating the unified model.
+func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request, slug domain.Slug, reqPath string) {
+	// A deploy may wire either surface alone, so neither reader is assumed
+	// present; the same nil-safety the site reader has always had.
+	if s.Pastes == nil {
+		if !s.serveSiteIfExists(w, r, slug, reqPath) {
+			http.NotFound(w, r)
+		}
+		return
+	}
 	p, err := s.Pastes.Get(slug)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
+			if s.serveSiteIfExists(w, r, slug, reqPath) {
+				return
+			}
 			http.NotFound(w, r)
 			return
 		}
@@ -228,6 +230,25 @@ func (s *Server) servePasteSlug(w http.ResponseWriter, r *http.Request, slug dom
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	// The SHAPE is declared by the artifact's kind, never inferred from how
+	// many entries its manifest holds: a directory of one file is still a
+	// directory, and serving it as a document would render it instead of
+	// handing back the bytes.
+	if p.Kind == domain.KindSite {
+		s.serveFromManifest(w, r, slug, p.Manifest, p.UpdatedAt, reqPath)
+		return
+	}
+	// A document answers only at its own URL; deeper paths belong to a
+	// directory.
+	if reqPath != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	s.servePaste(w, r, slug, p)
+}
+
+// servePaste serves a single-document artifact with its sandboxing headers.
+func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.Slug, p domain.Paste) {
 	// Lifecycle status gate (docs/SPEC.md "Paste lifecycle status"). A pending
 	// paste's blob has not landed yet, so it gets a self-refreshing loading
 	// page; only a ready paste reaches the content serve below.
@@ -435,16 +456,24 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 		// the paste path tries next and surfaces its own 404 or 500.
 		return false
 	}
+	s.serveFromManifest(w, r, slug, site.Manifest, site.UpdatedAt, reqPath)
+	return true
+}
+
+// serveFromManifest resolves reqPath against a manifest and writes the file.
+// The one implementation both artifact shapes go through: a directory
+// artifact's manifest and a legacy site row's manifest are the same value.
+func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug domain.Slug, manifest domain.Manifest, updatedAt time.Time, reqPath string) {
 	// SPA fallback: a manifest miss that looks like a client-side ROUTE (no
 	// extension, or ".html") serves the site's root index.html with a 200 so
 	// the SPA's JS loads and routes; a miss that looks like a static ASSET
 	// stays a 404. The decision is a pure domain function; see
 	// domain.Manifest.LookupWithSPAFallback + SPEC.md "SPA fallback (route
 	// vs. asset)". A fallback hit is byte-identical to requesting "/".
-	entry, hit, _ := site.Manifest.LookupWithSPAFallback(reqPath)
+	entry, hit, _ := manifest.LookupWithSPAFallback(reqPath)
 	if !hit {
 		http.NotFound(w, r)
-		return true
+		return
 	}
 
 	// Site files are served RAW, secured by per-subdomain origin isolation
@@ -461,18 +490,18 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()")
 	h.Set("Cache-Control", "public, no-cache")
-	h.Set("Last-Modified", site.UpdatedAt.UTC().Format(http.TimeFormat))
+	h.Set("Last-Modified", updatedAt.UTC().Format(http.TimeFormat))
 
 	etag := `"` + entry.SHA + `"`
 	h.Set("ETag", etag)
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
-		return true
+		return
 	}
 	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
-		if since, err := http.ParseTime(ims); err == nil && !site.UpdatedAt.UTC().Truncate(time.Second).After(since) {
+		if since, err := http.ParseTime(ims); err == nil && !updatedAt.UTC().Truncate(time.Second).After(since) {
 			w.WriteHeader(http.StatusNotModified)
-			return true
+			return
 		}
 	}
 
@@ -481,7 +510,7 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 	if err != nil {
 		s.logf("warn: site read 500: slug=%s file blob read: %v", slug, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
-		return true
+		return
 	}
 	defer rc.Close() //nolint:errcheck
 	ct := entry.ContentType
@@ -490,7 +519,6 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 	}
 	h.Set("Content-Type", ct)
 	_, _ = io.Copy(w, rc)
-	return true
 }
 
 // shellCSP locks down every client-render shell response: no default sources,
