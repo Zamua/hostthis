@@ -146,15 +146,12 @@ type identityPasteRow struct {
 	PinnedVersion int       `json:"pinned_version,omitempty"`
 	UpdatedAt     time.Time `json:"updated_at,omitempty"`
 
-	// Placeholder marks a fail-closed entry for a slug whose authoritative
-	// record (head or any version row) cannot be decoded:
-	// the live sum is uncomputable, so rather than project a partial number (a
-	// silent under-count) the entry carries this marker and the quota scan
-	// HARD-FAILS on it (docs/SPEC.md "Decode tolerance of the quota scan"). It
-	// clears on the owner's next list once the record decodes again; real
-	// corruption therefore needs an operator repair or raw-key delete, since
-	// Delete/DeleteVersion/the sweep all decode that same row. omitempty keeps
-	// ordinary entries byte-shaped.
+	// Placeholder marks an entry whose authoritative record (head or any
+	// version row) could not be decoded, so its live sum is unknown. The quota
+	// scan counts it as zero and continues, and a write to that slug replaces
+	// it with real values once the record decodes again. Nothing writes one any
+	// more; the field is read so a store from an older deployment still behaves.
+	// omitempty keeps ordinary entries byte-shaped.
 	Placeholder bool `json:"placeholder,omitempty"`
 }
 

@@ -170,13 +170,12 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 	}
 }
 
-// TestShaleQuotaScanFailClosed pins Policy 2: an entry that does not decode,
-// or that carries a fail-closed placeholder, HARD-FAILS the check and rejects
-// the upload. Skipping it would under-count and over-admit. Nothing writes a
-// placeholder any more, so one can only arrive from a store an older
-// deployment wrote; nothing clears it either, which is the operator-repair
-// contract stated in docs/SPEC.md.
-func TestShaleQuotaScanFailClosed(t *testing.T) {
+// TestShaleQuotaScanFailsOpen pins that an entry the scan cannot read counts as
+// ZERO and does not stop the scan: the owner is under-charged for those bytes
+// and keeps working, rather than being locked out of uploading by damage they
+// did not cause. Both unreadable shapes are covered - undecodable JSON, and the
+// placeholder marker an older deployment wrote for an undecodable record.
+func TestShaleQuotaScanFailsOpen(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
 		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale fail-closed test (start dev MinIO first)")
@@ -194,34 +193,36 @@ func TestShaleQuotaScanFailClosed(t *testing.T) {
 	}
 	repo.WaitPendingConfirms()
 
-	// Undecodable ENTRY: hard-fail.
 	badKey := storage.IdentityPasteKeyForTest(owner, "qfcbad11")
-	if err := repo.PutRawForTest(badKey, corruptJSON); err != nil {
-		t.Fatalf("seed corrupt entry: %v", err)
-	}
-	if got, err := repo.SumActiveBytesByOwner(owner, now); err == nil {
-		t.Fatalf("an undecodable entry must HARD-FAIL the quota scan (Policy 2); got %d, nil error", got)
-	}
-	if err := repo.DeleteRawForTest(badKey); err != nil {
-		t.Fatalf("clear corrupt entry: %v", err)
-	}
-
-	// Fail-closed PLACEHOLDER entry, the shape an older deployment projected
-	// for an undecodable authoritative record: hard-fail.
-	if err := repo.PutRawForTest(badKey, []byte(`{"placeholder":true}`)); err != nil {
-		t.Fatalf("seed placeholder entry: %v", err)
-	}
-	if got, err := repo.SumActiveBytesByOwner(owner, now); err == nil {
-		t.Fatalf("a fail-closed placeholder entry must HARD-FAIL the quota scan; got %d, nil error", got)
-	}
-
-	// No read clears it: the owner stays locked out until an operator removes
-	// the entry. Fail-safe (refuses writes) rather than silently under-counting.
-	if _, err := repo.ListByOwner(owner); err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if _, err := repo.SumActiveBytesByOwner(owner, now); err == nil {
-		t.Fatal("a list must not clear a placeholder; the scan must still hard-fail")
+	for _, tc := range []struct {
+		name  string
+		value []byte
+	}{
+		{"undecodable entry", corruptJSON},
+		{"placeholder marker", []byte(`{"placeholder":true}`)},
+	} {
+		if err := repo.PutRawForTest(badKey, tc.value); err != nil {
+			t.Fatalf("seed %s: %v", tc.name, err)
+		}
+		got, err := repo.SumActiveBytesByOwner(owner, now)
+		if err != nil {
+			t.Fatalf("%s must not fail the scan: %v", tc.name, err)
+		}
+		if got != 100 {
+			t.Errorf("%s must count as zero: got %d, want 100 (the good paste alone)", tc.name, got)
+		}
+		// Under-charged, not locked out: the owner can still upload.
+		probe := domain.Paste{
+			Slug: domain.Slug("qfcprb" + tc.name[:2]), Identity: domain.Identity(owner),
+			Kind: domain.KindHTML, ContentSHA: "sha-probe-" + tc.name[:2], Size: 10,
+			CreatedAt: now, UpdatedAt: now}
+		if err := repo.InsertWithQuotaCheck(context.Background(), probe, 1000, now); err != nil {
+			t.Errorf("an owner with an unreadable entry must still be able to upload (%s): %v", tc.name, err)
+		}
+		repo.WaitPendingConfirms()
+		if err := repo.Delete(probe.Slug); err != nil {
+			t.Fatalf("cleanup probe: %v", err)
+		}
 	}
 	if err := repo.DeleteRawForTest(badKey); err != nil {
 		t.Fatalf("operator repair: %v", err)
@@ -378,13 +379,17 @@ func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
 		t.Fatal("the orphan site entry must survive: nothing deletes on absence")
 	}
 
-	// Fail-closed placeholder hard-fails the site scan.
+	// A placeholder site entry fails OPEN: counted as zero, scan continues.
 	badKey := storage.IdentitySiteKeyForTest(owner, "sitebad1")
 	if err := repo.PutRawForTest(badKey, []byte(`{"placeholder":true}`)); err != nil {
 		t.Fatalf("seed placeholder site entry: %v", err)
 	}
-	if got, err := repo.SumActiveSiteBytesByOwner(owner, now); err == nil {
-		t.Fatalf("a fail-closed placeholder site entry must HARD-FAIL the scan; got %d, nil error", got)
+	got, err := repo.SumActiveSiteBytesByOwner(owner, now)
+	if err != nil {
+		t.Fatalf("a placeholder site entry must not fail the scan: %v", err)
+	}
+	if got != 250 {
+		t.Fatalf("placeholder must count as zero: got %d, want 250 (the live site alone)", got)
 	}
 }
 

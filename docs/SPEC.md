@@ -4248,20 +4248,19 @@ backend:
    `{id}` shard (one single-shard prefix scan). Each entry is
    value-bearing: it caches the paste's live byte size (the sum of its
    non-deleted version sizes).
-2. Sum the cached sizes: HARD-FAIL on an entry that does not decode or that carries the
-   fail-closed placeholder marker (see "Decode tolerance of
-   the quota scan"). No authoritative row is read: the check is ONE prefix
-   scan with zero per-entry fan-out. (One deliberate exception, the
-   upgrade path: a LEGACY paste entry migrated from a slatedb deployment
-   carries an EMPTY value - the slatedb layout stored `identity_pastes`
-   as bare markers - and is read through its authoritative `pastes/<slug>`
-   row plus live version sum, exactly the slatedb per-entry semantics,
-   until the owner's next list enriches it with the full projection.
-   Without this fallback an empty migrated entry would hard-fail EVERY
-   quota-checked create for that owner until that list.)
+2. Sum the cached sizes: an entry that cannot be read - undecodable, or
+   carrying the placeholder marker - counts as ZERO and the scan continues
+   (see "Unreadable entries fail OPEN"). No authoritative row is read: the
+   check is ONE prefix scan with zero per-entry fan-out. (One deliberate
+   exception, the upgrade path: a LEGACY paste entry migrated from a
+   slatedb deployment carries an EMPTY value - the slatedb layout stored
+   `identity_pastes` as bare markers - and is read through its
+   authoritative `pastes/<slug>` row plus live version sum, exactly the
+   slatedb per-entry semantics, until the owner's next list enriches it
+   with the full projection.)
 3. Return the total. `SumActiveSiteBytesByOwner` is the site sibling:
    enumerate `identity_sites/<id>/` and sum each entry's cached deduped
-   size under the same fail-closed rules. (A
+   size under the same rules. (A
    legacy site entry that still carries the pre-value-bearing marker byte
    or an empty migrated value falls back to reading its authoritative
    `sites/<slug>` row until the owner's next list enriches it.)
@@ -4351,7 +4350,7 @@ over-count direction - not a "markerless residual" to crash-durably protect.
 entry, the file-blob binds, and the enumeration entry - no release marker,
 no size-guarded restart loop, no consume).
 
-**Why the cap can never be DURABLY exceeded.** The used-bytes figure the
+**How far the cap can be exceeded, and why that is bounded.** The used-bytes figure the
 check sums is the owner's enumeration entries - a projection - but the
 authoritative rows stay the source of truth: the write paths refresh the
 projection around every `{slug}`-shard commit. Two windows exist, both
@@ -4451,17 +4450,24 @@ gap the pass genuinely closed - a live row with NO entry, from a crash between
 the two writes - was closed instead by REVERSING the write order, so that gap
 can no longer be created.
 
-#### The correctness argument: never DURABLY exceed the cap
+#### The correctness argument: a bounded, non-compounding error
 
 The counter design chased an **exact, strict** ceiling and paid for it with
 cross-shard machinery that still drifted. The scan design targets a weaker
-but sufficient and self-healing property:
+property, and it is worth stating exactly rather than aspirationally:
 
-**The property that matters: an identity's DURABLE used bytes never exceed
-the cap.** "Durable" excludes the momentary in-flight state of a request
-that has not finished; once the system quiesces, a fresh scan of any
-owner's authoritative rows is `<= cap`. There are exactly two windows where
-a scan disagrees with durable truth, and both are bounded to one record.
+**The property that matters: the error in an identity's used-bytes figure
+is bounded by a per-record amount and cannot compound.** It is NOT that
+the cap is never exceeded - it can be, durably, by an unreadable entry's
+bytes (see "Unreadable entries fail OPEN") or transiently by a concurrent
+same-owner pair. What the design guarantees is that no single failure
+propagates beyond the one record it touched, so the figure degrades
+gracefully instead of drifting without limit the way a stored aggregate on
+a foreign shard does. Total service bytes are separately hard-capped by
+the object-store bucket quota, which is what actually bounds resource use.
+
+There are four windows where a scan disagrees with durable truth, all
+bounded to one record each.
 
 **Window A - crash between the two writes (bounded OVER-count).** A write
 commits the `{id}` enumeration entry first, then the authoritative `{slug}`
@@ -4534,22 +4540,51 @@ the price of deleting the reconciler, and it is affordable precisely
 because the error cannot compound: an aggregate on a foreign shard drifts
 without limit, a per-record cache is wrong by one record.
 
-**Decode tolerance of the quota scan.** The quota scan runs on the
-synchronous write path and sums the owner's enumeration ENTRIES, so the
-fail-closed unit is the entry (Policy 2, "Decode tolerance is
-per-scan-semantics"): an entry that does not decode HARD-FAILS the check,
-rejecting the upload rather than being skipped - skipping would
-UNDER-count and over-admit. (The one deliberate exception is the legacy
-upgrade path, recognized by SHAPE: a SITE entry holding the
-pre-value-bearing marker byte or an empty migrated value, or a PASTE
-entry holding an empty migrated value - the slatedb layout stored both
-index families as bare markers, and pastes never had a marker-byte era,
-so an empty value is the only legacy paste shape - is read through its
+**Window D - an unreadable entry (bounded UNDER-count, permanent).** An
+entry the scan cannot decode counts as zero, so its bytes are grandfathered
+until the record is repaired. Unlike A/B/C this one does not settle on its
+own. It is the deliberate cost of not locking an owner out; the reasoning,
+the bound, and the logging are in the next section.
+
+**Unreadable entries fail OPEN.** The quota scan runs on the synchronous
+write path and sums the owner's enumeration ENTRIES. An entry it cannot
+read - undecodable JSON, or the placeholder marker for an undecodable
+authoritative record - counts as ZERO and the scan continues.
+
+The owner is therefore UNDER-charged for exactly those bytes, and those
+bytes are effectively grandfathered: nothing recomputes them, so they stay
+free until that slug is written again or the entry is repaired. That is
+the deliberate choice. The alternative, refusing the scan, locks a person
+out of uploading anything because of data damage they did not cause and
+cannot fix - and the paths that would let them clean it up themselves
+(`Delete`, `DeleteVersion`) must decode the same broken record, so they
+fail too. A lockout with no self-service exit is a worse outcome than an
+under-charge.
+
+What bounds the under-charge: it is one record's bytes per unreadable
+entry, it cannot compound across an owner, and the global object-store
+bucket quota (`ErrServiceFull` from the blob `Put`, see
+"Limits -> Durable total-bytes ceiling") still hard-caps total service
+bytes regardless of how any per-identity sum errs. The per-identity cap is
+a fairness mechanism, not the thing standing between the service and a
+full disk.
+
+Skips are LOGGED as one summary line per scan carrying the count plus a
+bounded sample, never one line per entry - an unreadable entry is
+permanent until repaired, so per-row logging would be a standing cost
+proportional to accumulated debris rather than to anything actionable. A
+clean scan logs nothing, so log volume stays the signal: a steady count is
+known debris, a growing one means something is still producing them.
+
+The legacy upgrade path is recognized by SHAPE: a SITE entry holding the
+pre-value-bearing marker byte or an empty migrated value, or a PASTE entry
+holding an empty migrated value - the slatedb layout stored both index
+families as bare markers, and pastes never had a marker-byte era, so an
+empty value is the only legacy paste shape - is read through its
 authoritative row (for a paste, the row plus its live version sum) until
-the owner's next list enriches it. Only a value that is neither a
-recognized legacy shape nor valid JSON fails. A legacy entry whose
-authoritative row is GONE contributes zero; one whose row is undecodable
-hard-fails, same as any other authoritative decode failure.)
+the owner's next list enriches it. A legacy entry whose authoritative row
+is GONE contributes zero; one whose row is UNDECODABLE also contributes
+zero and is counted as a skip, the same fail-open rule.
 
 **An undecodable authoritative row no longer reaches the quota at all.**
 The scan reads only entries, and a corrupt `pastes/<slug>` row leaves its
@@ -4557,30 +4592,40 @@ enumeration entry perfectly readable, so the owner keeps being charged the
 right number and keeps being able to upload. Only reads OF THAT PASTE
 fail. This is a direct consequence of deleting the reconciler: the pass
 used to discover corrupt rows by scanning them, and had to decide what to
-do about one, which is why the fail-closed PLACEHOLDER entry existed (an
-entry marked `placeholder: true`, carrying no usable cached value, that
-HARD-FAILS the owner's next quota scan rather than silently
-under-counting). Nothing writes a placeholder now.
+do about one, which is why the PLACEHOLDER entry existed (an entry marked
+`placeholder: true`, carrying no usable cached value). Nothing writes a
+placeholder now.
 
 The placeholder READERS are kept, and are purely an upgrade concern: a
 store written by a deployment that ran the reconciler may still hold them.
-A placeholder hard-fails the quota scan exactly as before, and the owner's
-next `list` clears it - the listing reads that entry's authoritative row
-on the legacy-upgrade path and rewrites the entry with real values. An
-owner whose store holds a placeholder for a row that is STILL undecodable
-cannot upload until an operator repairs or raw-key-deletes the record;
-note the trap that made this worth documenting, that the self-service ways
-out are closed too, because `Delete` and `DeleteVersion` must decode the
-same corrupt row and fail on it as well.
+Such an entry counts as zero and is logged as a skip, so its owner is
+under-charged for that paste and otherwise unaffected. Two things clear it:
+the owner's next `list`, which reads that entry's authoritative row on the
+legacy-upgrade path and rewrites the entry with real values, and any write
+to that slug, which holds the head row already. If the record is still
+undecodable neither can, and those bytes simply stay free until an
+operator repairs the record - which is the whole point of failing open
+here, because the self-service ways out are closed too: `Delete` and
+`DeleteVersion` must decode that same corrupt row and fail on it as well.
+An owner in that state would otherwise be permanently unable to upload
+anything, with no action available to them that would fix it.
 
-Taken together: the ceiling can be over-enforced (Window A's phantom
+Taken together, the ceiling can be over-enforced (Window A's phantom
 entry, Window C's stale-large cache), transiently over-admitted (Window
-B), or under-enforced (Window C's stale-small cache), each by a bounded
-per-record amount, but an identity's used bytes can never DURABLY sit
-above the cap once its writes settle - and total service bytes are
-hard-capped by the bucket quota regardless. That is the deliberate trade
-the scan design makes versus the counter's
-exact-but-permanently-drifting ceiling.
+B), or under-enforced (Window C's stale-small cache and an unreadable
+entry), each by a bounded per-record amount.
+
+Be precise about the resulting guarantee, because failing open weakened
+it. An identity's durable used bytes can sit ABOVE the cap, by the total
+of whatever entries the scan could not read. That is not a transient
+window that settles; those bytes are grandfathered until the record is
+repaired. What remains true is the property that actually protects the
+service: the error is bounded by one record per unreadable entry, it
+cannot compound, and total bytes across every identity are hard-capped by
+the object-store bucket quota regardless of how any per-identity sum errs.
+The per-identity cap is a fairness mechanism; the bucket quota is the
+thing standing between the service and a full disk, and it does not depend
+on any of this.
 
 ### Cross-shard background operations
 
@@ -4615,16 +4660,18 @@ it visits, and any row can in principle be corrupt or undecodable (a
 truncated value from a partial restore, a schema-version it cannot read,
 a torn write). How a scan reacts to one undecodable row is NOT uniform:
 it is dictated by the scan's SEMANTICS, because the safe failure
-direction differs per scan. There are exactly two policies, and which
+direction differs per scan. There are exactly three policies, and which
 one a given scan uses is load-bearing for correctness.
 
-**The invariant that ranks all three: no decode-tolerance path may ever
-cause a referenced blob to be deleted or a quota to be under-counted.**
-A scan may do less work this pass (skip a row, retry next pass) or refuse
-to act at all (abort the pass), but it may never take an action that
-deletes live content or admits a write past the real cap. Every policy
-below is chosen to satisfy that invariant; where two policies would both
-satisfy availability, the one that also satisfies the invariant wins.
+**The invariant that ranks both: no decode-tolerance path may ever cause a
+referenced blob to be DELETED.** Destroying someone's bytes is the only
+unrecoverable outcome here, so it is the one thing no tolerance policy may
+risk. Everything else is a recoverable error and is ranked below
+availability: a quota that under-counts costs fairness and is bounded by
+the bucket quota; a quota that refuses to compute costs a person the
+ability to use the service at all, with no way to fix it themselves. So
+the quota scan fails OPEN (see "Unreadable entries fail OPEN") while the
+blob paths stay conservative.
 
 **Policy 1 - idempotent lazy prunes: SKIP + LOG, continue.** The keygate's
 and the room ledger's lazy in-scan prunes treat an undecodable row as SKIP
@@ -4667,11 +4714,14 @@ visible to an operator, not silently swallowed forever.
     empty values, which is why the index families use a one-byte marker). This
     is LIVE DATA - an owner's enumeration entry, which the quota scan sums.
 
-  Skipping the second would UNDER-COUNT a quota with no error surfaced
-  anywhere, which the ranking invariant forbids outright. The test is
-  therefore "stamped AND empty", never "empty": a bare value decodes with the
-  zero stamp, while a real envelope always carries the commit stamp it was
-  written under.
+  Conflating them would drop LIVE data from the sum, and unlike a genuinely
+  unreadable entry - which fails open deliberately, is counted, and is logged -
+  this one is silently avoidable: a bare marker's size IS recoverable by
+  reading its authoritative row. Discarding a value the scan could have
+  computed is a bug in any failure-direction policy. The test is therefore
+  "stamped AND empty", never "empty": a bare value decodes with the zero
+  stamp, while a real envelope always carries the commit stamp it was written
+  under.
 
   **The log is a PER-PASS SUMMARY, never one line per row.** This matters
   because "retried next read" is not the same as "eventually repaired": a
@@ -4704,15 +4754,28 @@ plausible-looking-but-incomplete result. These paths are synchronous,
 user-observed, and not idempotent retries of a background loop, so the
 right behavior is to fail loudly on the one request that touched the bad
 row - the user (or operator) sees a real error rather than silent data
-loss in the response body. Tolerance is a property of the BACKGROUND
-loops only; the foreground read surface is unchanged.
+loss in the response body.
 
-The two policies, side by side:
+The quota scan is synchronous too but is NOT covered by this policy,
+because the two differ in what the user can do about the failure. A failed
+`Get` tells someone one paste is broken; everything else still works. A
+failed quota scan tells them they cannot upload at all, including the
+uploads that would let them replace or delete the broken thing. Same
+tolerance question, opposite safe answer.
+
+**Policy 3 - the quota scan: COUNT AS ZERO + summary log, continue.**
+Covered in full under "Unreadable entries fail OPEN". An unreadable entry
+contributes nothing and the scan returns a number rather than an error, so
+the owner is under-charged and keeps working. Bounded per record, logged
+per scan, and backstopped by the object-store bucket quota.
+
+The three policies, side by side:
 
 | Scan kind | Examples | On a bad record | Why |
 | --- | --- | --- | --- |
 | Idempotent lazy prune | the keygate and room-ledger in-scan prunes | SKIP + LOG, continue; a later read retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
-| User-facing read | `Get`, `ListVersions`, `GetVersion`, site manifest read, room scan / per-key read, and the quota scan's per-ENTRY decode | HARD-FAIL | a user read of corrupt data should surface an error, not silently skip |
+| User-facing read | `Get`, `ListVersions`, `GetVersion`, site manifest read, room scan / per-key read | HARD-FAIL | a user read of corrupt data should surface an error, not silently skip |
+| Quota scan | `SumActiveBytesByOwner`, `SumActiveSiteBytesByOwner` | COUNT AS ZERO + summary log, continue | refusing locks a person out over damage they cannot fix; the under-charge is bounded per record and the bucket quota still caps total bytes |
 
 ### Shale-collocated blobs (transactional blob plane)
 
