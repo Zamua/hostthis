@@ -80,21 +80,6 @@ func (s *SlateSiteRepo) Delete(slug domain.Slug) error { return s.repo.DeleteSit
 
 // siteRow is the persisted shape of a Site. Manifest holds the exact string
 // encodeManifest produces, the same compact JSON the sqlite backend stores.
-type siteRow struct {
-	Identity    string    `json:"identity"`
-	Manifest    string    `json:"manifest"`
-	DedupedSize int       `json:"deduped_size"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-
-	// FileBlobs maps a file's content sha to the shale-blob id its bytes were
-	// staged under. The manifest references files by sha, so this side-table is
-	// how the read path resolves sha -> blobid for GetBlob. Empty on the
-	// standalone paths (sqlite / slatedb / disk), where a file is
-	// content-addressed by sha alone.
-	FileBlobs map[string]string `json:"file_blobs,omitempty"`
-}
-
 func (r *SlateRepo) siteRowFromDomain(s domain.Site, dedupedSize int) (siteRow, error) {
 	manStr, err := encodeManifest(s.Manifest)
 	if err != nil {
@@ -106,21 +91,6 @@ func (r *SlateRepo) siteRowFromDomain(s domain.Site, dedupedSize int) (siteRow, 
 		DedupedSize: dedupedSize,
 		CreatedAt:   s.CreatedAt,
 		UpdatedAt:   s.UpdatedAt,
-	}, nil
-}
-
-func (row siteRow) toDomain(slug domain.Slug) (domain.Site, error) {
-	man, err := decodeManifest(row.Manifest)
-	if err != nil {
-		return domain.Site{}, err
-	}
-	return domain.Site{
-		Slug:        slug,
-		Identity:    domain.Identity(row.Identity),
-		Manifest:    man,
-		StoredBytes: row.DedupedSize,
-		CreatedAt:   row.CreatedAt,
-		UpdatedAt:   row.UpdatedAt,
 	}, nil
 }
 

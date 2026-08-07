@@ -7,8 +7,6 @@
 // than by a background pass, so the family stays bounded with no cross-shard
 // fan-out and no schedule (docs/SPEC.md "Sybil rate limit").
 
-//go:build slatedb
-
 package storage
 
 import (

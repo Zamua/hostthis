@@ -1,8 +1,6 @@
 // Resolving durable intents: deciding whether a half-finished write should be
 // completed or undone, and the boot sweep that drives it.
 
-//go:build slatedb
-
 package storage
 
 import (

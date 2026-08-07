@@ -30,9 +30,6 @@
 //
 // Every room key co-shards, so a put is a single-shard
 // read-check-validate-write with no reserve/confirm split.
-//
-//go:build slatedb
-
 package storage
 
 import (

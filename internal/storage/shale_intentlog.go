@@ -2,8 +2,6 @@
 // keyed by scope, so listing one scope's outstanding work is a single-shard
 // prefix scan rather than a keyspace-wide fan-out.
 
-//go:build slatedb
-
 package storage
 
 import (
@@ -12,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/durable"
@@ -88,10 +87,8 @@ func (r *ShaleIntentLog) Advance(_ context.Context, id durable.ID, scope durable
 		if err := json.Unmarshal(payload, &row); err != nil {
 			return fmt.Errorf("decode intent %s: %w", key, err)
 		}
-		for _, s := range row.Reached {
-			if s == string(step) {
-				return nil // idempotent
-			}
+		if slices.Contains(row.Reached, string(step)) {
+			return nil // idempotent
 		}
 		row.Reached = append(row.Reached, string(step))
 		return shaleTxPutJSON(tx, key, row)
