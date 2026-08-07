@@ -537,7 +537,7 @@ durably reserved + named, not after the bytes finish landing in the
 object store.
 
 This whole section describes the DETACHED-store path (the default - local,
-slatedb, and shale-without-a-blob-bucket), where the blob write happens after
+and shale-without-a-blob-bucket), where the blob write happens after
 the metadata commit. On the shale-collocated blob path (`HOSTTHIS_SHALE_BLOB_BUCKET`
 set, see "Shale-collocated blobs") this model COLLAPSES: the bytes are staged
 durably before the metadata commits and the pointer co-commits with the row, so
@@ -1240,7 +1240,7 @@ existence of any specific room.
 
 Room data is small JSON/bytes blobs - app STATE, not files - so it lives
 in the **metadata backend** hostthis already runs (the configurable
-metadata store: the local engine for single-host, slatedb / shale for the
+metadata store: the local engine for single-host, shale for the
 object-store-backed and horizontally-scaled deploys), NOT in the
 content-addressed BlobStore. The BlobStore is for the larger,
 dedupe-worthy file bytes of pastes and sites; room values are small,
@@ -1262,10 +1262,10 @@ pattern exactly the way the paste repo and the shale `ShaleRepo` do:
   small service-layer interface (a `RoomRepo` declared in
   `internal/service`, the same way `PasteRepo` / `PasteAdmin` /
   `SweepRepo` / `KeyGateRepo` are; the sweep-side view is `SweepRooms`).
-  All three metadata backends implement it - **local** (single-host),
-  **slatedb** (object-store-backed), and **shale** (horizontally-scaled
-  cluster) - so the `/api/rooms` surface runs on every backend hostthis can
-  be deployed on, including the slatedb-direct backend prod runs. The
+  Both metadata backends implement it - **local** (single-host) and
+  **shale** (horizontally-scaled cluster) - so the `/api/rooms` surface runs
+  on every backend hostthis can be deployed on, including the shale backend
+  prod runs. The
   domain, HTTP, and service layers stay unaware of which backend is wired.
 - Every backend models a room as a set of key families co-located in the
   one metadata keyspace, so a room read or write is a single transaction
@@ -1274,7 +1274,7 @@ pattern exactly the way the paste repo and the shale `ShaleRepo` do:
   KEY, not by a filter a caller could forget. The full layout,
   the cap + isolation + rate-limit + TTL mapping onto KV ops, and the
   fixed-width TTL timestamp are specified under **"Room storage on the
-  slatedb (and shale) backend"** below (near the metadata-backend section,
+  shale backend"** below (near the metadata-backend section,
   alongside the parallel static-site layout). The single-writer backends
   store the same logical rows; the observable contract is identical across
   backends, the way it is for the paste and site families, and the
@@ -1336,9 +1336,9 @@ informs them):
   quota: it stops one app from consuming the whole service. It is flagged
   as a starting default - an operator running many apps may want it lower,
   a single-app operator higher. It
-  differs from the per-IDENTITY paste/site quota, which the local + slatedb
+  differs from the per-IDENTITY paste/site quota, which the local + shaledb
   backends free at READ time; the per-app room aggregate is uniformly
-  sweep-time so the cap behaves identically across local, slatedb, and
+  sweep-time so the cap behaves identically across local and
   shale.
 - **Durable total-bytes ceiling.** Room data does NOT carry its own
   service-wide byte scan. Rooms hold no blobs (a room value lives entirely
@@ -1866,8 +1866,7 @@ value:
   seq and writes exactly prior + 1. Density and uniqueness fall out of
   the same conflict that makes the per-room cap strict; no new race
   surface is added.
-- **slatedb**: the same record field, incremented under the per-room
-  serialized-writer stripe that already serializes the cap math.
+
 - **local**: the shale mechanism above; only the storage engine beneath
   the cluster differs.
 
@@ -2075,7 +2074,7 @@ heals through the standard reconnect + snapshot + splice path.
 
 #### The degenerate case: zero peers
 
-Every single-pod deploy (local, slatedb-direct, single-node shale) has
+Every single-pod deploy (local, single-node shale) has
 an empty peer set: no peer gRPC service is registered (there is no
 multi-node server to register on), the sender is inert, and the relay
 is exactly the single-pod relay - same seq assignment, same
@@ -2995,7 +2994,7 @@ mechanism depends on the metadata backend in use:
 
 - **local backend** - the same single-shard CAS the shale backend
   uses; only the engine beneath the cluster differs.
-- **slatedb backend** - `Db.begin(IsolationLevel.SnapshotIsolation)`
+- **shale backend** - `Db.begin(IsolationLevel.SnapshotIsolation)`
   with a `WriteBatch` for the actual multi-key writes; SlateDB's
   manifest-level fencing ensures only one writer is alive at a time
   across processes.
@@ -3014,7 +3013,7 @@ no half-applied state visible to readers."
   physical bytes (post-compression, post-dedup), enforced by the storage
   layer, not an app-level scan
 - Concurrent per-identity quota races → atomic transactions on the
-  single-writer backends (local / slatedb); on the sharded shale backend
+  single-writer local backend; on the sharded shale backend
   the quota check is a scan that is not atomic with the write, so
   same-identity concurrency admits a BOUNDED overshoot (one in-flight
   upload), backstopped by the object-store bucket quota (see
@@ -3235,26 +3234,28 @@ and the local cache.
 
 The metadata layer (paste rows, version rows, identity quota
 counters, slug-to-identity index, Sybil key_first_seen rows) is
-pluggable. Two ship here, and shale (below) is the third:
+pluggable. Two ship:
 
 - **local** - a single-node shale cluster on this build's local
   storage engine, persisted under `<data-dir>/metadata`. The
   default. Zero configuration and no external services, which is
   what a fresh clone and `make run` want.
-- **slatedb** - embedded LSM-tree store with all data persisted to
-  an S3-compatible object store (MinIO, R2, S3, GCS, ABS). Same
-  HOSTTHIS_S3_* env vars as the blob backend, plus an explicit
-  bucket name so metadata and blobs can live in separate buckets.
+- **shale** - the same cluster over an S3-compatible object store
+  (MinIO, R2, S3, GCS, ABS), sharded and replicated across nodes.
+  Production. Specified in full under "Shale-backed metadata
+  storage" below.
 
-The service layer talks to a small set of interfaces
-(`PasteAdmin`, `KeyGateRepo`, `SweepRepo`) implemented by both
-backends. Domain layer + HTTP/SSH adapters are unaware of which is
-in use. Switching is one env var:
+Both are the SAME repo over a different storage engine, chosen at
+build time (see "The storage-engine seam"), so there is one
+implementation of every behaviour rather than one per backend. The
+service layer talks to a small set of interfaces (`PasteAdmin`,
+`KeyGateRepo`, `SweepRepo`); the domain layer and the HTTP/SSH
+adapters are unaware of which is in use. Switching is one env var:
 
 ```
 HOSTTHIS_METADATA_BACKEND=local                   # default
-HOSTTHIS_METADATA_BACKEND=slatedb                 # opt-in
-HOSTTHIS_METADATA_S3_BUCKET=hostthis-metadata     # required for slatedb
+HOSTTHIS_METADATA_BACKEND=shale                   # production
+HOSTTHIS_METADATA_S3_BUCKET=hostthis-metadata     # required for shale
 # (S3 endpoint/credentials reused from HOSTTHIS_S3_*)
 ```
 
@@ -3286,7 +3287,7 @@ Every write that touches multiple keys is committed atomically:
   rows) + (slug pointer delete). All land or none; the freed bytes leave
   the owner's quota simply because the next scan no longer sees them.
 
-the local engine enforces this via the cluster CAS; slatedb via
+the local engine enforces this via the cluster CAS; shale via
 `Db.begin(IsolationLevel.SnapshotIsolation)` with `WriteBatch`. On the
 shale backend the `{slug}`-shard rows above commit atomically as one CAS,
 and the owner's `{id}`-shard enumeration index entry is a separate
@@ -3303,7 +3304,6 @@ combos:
 | metadata | blob | shape |
 | --- | --- | --- |
 | local | disk | single-host, no cloud deps (dev) |
-| slatedb | disk | stateless metadata in the cloud, local-disk blobs (dev/test) |
 | shale | shale-collocated | production: blobs live IN the shale cluster's object store, co-committed with metadata (see "Shale-collocated blobs"); the standalone `BlobStore` is bypassed |
 
 The detached cloud (`s3`) standalone blob backend was retired; production's
@@ -3547,12 +3547,12 @@ The stored row and key shapes are engine-independent by construction
 by the next, which is what makes the engine a build-time choice rather
 than a migration.
 
-### Static-site storage on the slatedb (and shale) backend
+### Static-site storage
 
 The "Static site archives" feature persists a **Site** (slug -> owner +
 Manifest + timestamps) the same way a paste persists, through a small
 `SiteRepo` service-layer interface. This section specifies the **KV
-layout** the slatedb and shale backends use. The blobs a site references
+layout** the shale backend uses. The blobs a site references
 are unchanged: each extracted file is `Put` under its SHA256 into the
 content-addressed `BlobStore`. **Only the manifest plus the site
 metadata live in the metadata backend.** Identical files dedupe at the
@@ -3582,7 +3582,7 @@ and the sweep path's interface is:
 `Delete(slug)` is the owner-facing removal path; it unbinds the site's blobs
 in the same transaction that removes the row.
 
-#### Site key layout (slatedb)
+#### Site key layout
 
 Sites mirror the paste key families. The names are new but the shapes are
 the established ones (`sites/<slug>` parallels `pastes/<slug>`,
@@ -3603,7 +3603,7 @@ read) so the quota scans never have to decode every manifest just to sum
 bytes; it is `Manifest.CompressedDedupedSize()` at deploy time - the
 distinct-blob total of the STORED (post-zstd) sizes, the number charged
 against quota (matching the paste compressed basis). The two index
-families carry an empty value (the slatedb convention for marker keys,
+families carry an empty value (the convention for marker keys,
 mirroring `identity_pastes`).
 
 The site keys live in the SAME keyspace and the SAME SlateDB instance as
@@ -3668,7 +3668,7 @@ enumerates every site exactly as `pastes/` enumerates every paste.
 
 #### Shale reuses the layout
 
-The shale backend reuses the slatedb site key names + JSON row schema (the
+The site key names + JSON row schema are shared (the
 same way it reuses the paste layout: co-location is by `ShardKeyFn`, not by
 renaming keys). Per-owner BYTE accounting is DERIVED by scanning the
 per-owner ENUMERATION index `identity_sites/<id>/<slug>` and summing the
@@ -3707,7 +3707,7 @@ entry (the re-deploy refreshes the cached size), and `DeleteSite`
 deletes it. Index touches are best-effort (a lost write leaves a missing
 or stale entry, never a failed deploy). A LEGACY entry written before the
 index was value-bearing carries a one-byte marker (shale's `Put` rejects an
-empty value; an entry migrated from a slatedb deployment may be empty): the
+empty value; an entry written before the index carried one may be empty): the
 quota scan recognizes those two shapes explicitly and falls back to reading
 that entry's authoritative `sites/<slug>` row, and `ListSitesByOwner`
 rewrites the entry with the full projection the first time it walks it.
@@ -3882,7 +3882,7 @@ bounded query) cheap.
 
 The default implementation stores intents in the metadata cluster. Nothing
 above the repository knows that: the application service and the repository
-port are unchanged, and a backend with a single transaction (slatedb)
+port are unchanged, and a backend with a single transaction
 has no dual write and therefore no intent log at all.
 
 One optimization is deliberately NOT taken. Intents and enumeration entries
@@ -3899,7 +3899,7 @@ reserve against, so the deploy is a plain sequence: check quota (scan), write
 the `identity_sites/<id>/<slug>` enumeration entry (value-bearing: the cached
 deduped size the quota scan sums), then write the authoritative `{slug}` row -
 entry first, for the reason given above - matching
-slatedb - and `StrictIdentityQuotaUnderConcurrency` is `false` (the
+a single-transaction backend - and `StrictIdentityQuotaUnderConcurrency` is `false` (the
 scan-check and the row-write are not atomic; the bounded same-owner
 over-admit is the accepted trade, see "The correctness argument").
 
@@ -3942,13 +3942,11 @@ site or a paste, never both, in both directions. Neither path leaves a marker
 any background pass must complete - the only per-owner `{id}` state a
 deploy or delete writes is the enumeration index entry.
 
-**Status: slatedb AND shale are both implemented + conformance-tested.**
-Prod runs the slatedb-direct backend, so the slatedb site impl is the
-load-bearing deliverable; the shale site impl is the same layout, now sharing
+**Status: implemented + conformance-tested.** Prod runs shale, which shares
 the scan-derived quota shape (the enumeration index + the cross-family
-collision read). Both run the SAME conformance site subtests under the
-SAME factory, so each backend is a drop-in for static-site hosting by
-construction.
+collision read) with the rest of the artifact families. Every backend runs the
+SAME conformance site subtests under the SAME factory, so each is a drop-in for
+static-site hosting by construction.
 
 #### Wiring: widen the metadata bundle's `Sites` field
 
@@ -3957,8 +3955,7 @@ interface (the deploy view) plus the `service.SweepSites` view (the sweep
 view), rather than any backend's concrete type, so any backend's site
 impl can be assigned. The bundle stays nil-safe: a backend
 that does not supply a site impl leaves the field nil and static-site
-hosting stays disabled there, exactly as before; once slatedb (and shale)
-supply a non-nil value, archive hosting lights up on those backends.
+hosting stays disabled there.
 
 #### Conformance
 
@@ -3972,12 +3969,11 @@ vice versa), the slug-collision rejects a slug a paste already owns
 (and a paste rejects a slug a site owns). A backend that passes
 the extended suite is a drop-in for static-site hosting by construction.
 
-### Room storage on the slatedb (and shale) backend
+### Room storage
 
 The "Rooms (app persistence)" feature persists a **Room** (the owning
 app's slug + a UUIDv4 + a flat key-value namespace) plus a creation-rate
-ledger. This section specifies the **KV layout** the slatedb and shale
-backends use. Rooms hold no blobs: a room value is small, mutable app STATE that
+ledger. This section specifies the **KV layout** the shale backend uses. Rooms hold no blobs: a room value is small, mutable app STATE that
 lives entirely in the metadata backend (the content-addressed `BlobStore`
 is untouched), so unlike pastes and sites a room contributes nothing to the
 blob-GC keep-alive set.
@@ -4007,7 +4003,7 @@ rate-limit window are dropped by `CountRoomCreates` itself, on the scan it
 already runs to make the admission decision. `DeleteRoom(appSlug, id)` is the
 idempotent full cascade the owner-facing removal path uses.
 
-#### Room key families (slatedb)
+#### Room key families
 
 Rooms have MORE key families than sites because they carry per-key values,
 and a creation-rate ledger. Each is co-located in the SAME
@@ -4035,7 +4031,7 @@ strip the two trailing slash-free segments from the right to recover
 `(subnet, ts)`).
 
 The `rooms/<app-slug>/<uuid>` row is the authoritative record. On the
-**slatedb** backend it holds the clock only: the byte and key counts are
+single-writer local backend it holds the clock only: the byte and key counts are
 computed by scanning `roomkv/<app-slug>/<uuid>/` at PUT time, which
 materializes the namespace for the pure `RoomKV.CanPut` cap math,
 serialized by the per-room `lockQuota` stripe. The **shale** backend
@@ -4057,7 +4053,7 @@ room's history. The storage contract's share of the design is exactly
 three properties, pinned by the conformance suite: the seq is dense
 (+1 per committed mutation, no gaps at the source, concurrent writers
 never share or skip one), it is assigned at commit, and `ScanRoom`
-reports the exact seq its snapshot reflects (slatedb reads it
+reports the exact seq its snapshot reflects (a single-transaction backend reads it
 inside the scan's own transaction / stripe; shale, whose CAS read-set
 cannot carry a scan, runs the read-scan-reread seq fence and retries on
 motion). A legacy record with no `seq` field decodes as 0, so the first
@@ -4068,7 +4064,7 @@ A value is stored **verbatim** (not
 JSON-wrapped): hostthis never parses a room value, so `roomkv/...` holds
 the exact bytes the app PUT, and a Get returns them unchanged. The two
 marker family (`roomcreate/`) carries an empty value, the
-slatedb convention for index keys (mirroring `identity_pastes` /
+convention for index keys (mirroring `identity_pastes` /
 `identity_sites`).
 
 The `<key>` in `roomkv/<app-slug>/<uuid>/<key>` is the app-chosen key
@@ -4099,7 +4095,7 @@ guarantees fall out of the key shape, not a runtime filter:
 - **Nonexistent-room 404, no existence leak on the per-key path.** A
   per-key Get is a single `Get roomkv/<app>/<uuid>/<key>`: a missing key
   in a real room and a key under a nonexistent room both return the
-  not-found sentinel (the same `ErrNotFound` the slatedb paste / site Get
+  not-found sentinel (the same `ErrNotFound` the paste / site Get
   returns), so the per-key path cannot distinguish "no such room" from "no
   such key." The service layer does the `GetRoom` existence check
   separately where it needs the whole-room-scan 200-vs-404 distinction
@@ -4175,7 +4171,7 @@ rely on.
   window as it goes** - they can no longer change any decision, so the read
   that would skip them removes them, which is what keeps the family bounded
   with no background pass and no fan-out. The per-subnet count walks the same
-  per-app family and matches the `<subnet>` segment (the same way the slatedb
+  per-app family and matches the `<subnet>` segment (the same way
   `SubnetsForIdentity` walks `keygate/`), counting markers whose fixed-width
   `<ts>` (the second-to-last segment, before the trailing disambiguator
   `<uuid>`) is within the window.
@@ -4194,7 +4190,7 @@ fold its bytes into.
 
 #### Shale reuses the layout
 
-The shale backend reuses the slatedb room key names + JSON record schema
+The room key names + JSON record schema
 (co-location is by `shaleShardKey`, not by renaming keys), joining the room
 families to the existing shard-family scheme so a room read or write is a
 single-shard operation. The room shard map:
@@ -4217,7 +4213,7 @@ anchoring (the trailing-slash discipline in `shaleShardKey`:
 `roomkv/` is not `rooms/`).
 
 The strict-isolation, per-room-cap, and per-app-aggregate-cap properties
-carry over from the slatedb layout unchanged. Both the per-room cap and the
+carry over unchanged. Both the per-room cap and the
 per-app aggregate cap are STRICT under concurrency on shale, but they are
 enforced by two DIFFERENT read-set members of the one `{app-slug}`-shard CAS,
 because a CAS read-set is a set of discrete key checks (shale forbids
@@ -4249,7 +4245,7 @@ backed by a discrete COUNTER the CAS can read-check, not by an in-CAS scan:
   the now-updated `byte_total` / `key_count`, and the per-room cap is recomputed
   against the fresh totals. So the per-room ceiling holds no matter how the
   writes interleave (`conformCaps.StrictQuotaUnderConcurrency = true`). The
-  totals are maintained ONLY by the shale backend (slatedb leaves them
+  totals are maintained ONLY by the sharded shale backend (a single-writer one leaves them
   unset and computes the per-room cap by materializing the namespace under a
   serialized writer - its per-room `lockQuota` stripe - so it needs no
   stored total); since a room is only ever
@@ -4269,35 +4265,31 @@ per-room strictness above on every `StrictQuotaUnderConcurrency` backend.
 **Empty room values on shale.** shale's `Put` rejects empty values (the
 empty payload is reserved for delete tombstones), but a room value may
 legitimately be the empty byte string (`PUT`ting `""` is valid app state on
-slatedb). To keep the verbatim-round-trip contract IDENTICAL across every
+a local engine). To keep the verbatim-round-trip contract IDENTICAL across every
 backend, a stored shale room value is prefixed with one sentinel
 byte; the decode strips it to return the app's exact bytes (including the
 empty string). All room BYTE accounting (the per-app counter, the per-room
 cap) charges the DECODED length, so the byte totals
-match slatedb exactly - an empty value counts as 0 bytes. This is a
+match exactly - an empty value counts as 0 bytes. This is a
 shale-internal encoding detail; the observable Get/Scan contract is the same
 verbatim bytes on every backend, and the conformance `Rooms/RoundTrip`
 subtest exercises an empty value to pin it.
 
-**Status: slatedb AND shale are both implemented + conformance-tested.**
-Prod runs the slatedb-direct backend, so the slatedb room impl is the
-load-bearing deliverable that lights up `/api/rooms` on prod; the shale room
-impl is the same layout co-located on the per-app shard. Both run the SAME
-conformance room subtests under the SAME factory, the way every backend
-already does for pastes and sites, so each is a drop-in for the
-room-persistence tier by construction.
+**Status: implemented + conformance-tested.** Prod runs shale, whose room
+layout is co-located on the per-app shard. Every backend runs the SAME
+conformance room subtests under the SAME factory, the way it already does for
+pastes and sites, so each is a drop-in for the room-persistence tier by
+construction.
 
 #### Wiring: widen the metadata bundle's `Rooms` field
 
 `cmd/hostthisd/metadata.go` holds `Rooms` as a `roomStore` interface (the
 `service.RoomRepo` write/read view plus the `service.SweepRooms` sweep view,
 the union the service + sweep layers consume) rather than any backend's
-concrete type, so any backend's room impl can be assigned - mirroring exactly how the `Sites` field was widened from
-`*storage.SiteRepo` to the `siteStore` interface. The bundle stays nil-safe:
+concrete type, so any backend's room impl can be assigned - mirroring how the
+`Sites` field is held as the `siteStore` interface. The bundle stays nil-safe:
 a backend that does not supply a room impl leaves the field nil and the
-`/api/rooms` surface stays disabled there, as before; once slatedb (and
-shale) supply a non-nil value, room persistence lights up on those backends,
-so the slatedb-direct prod deploy serves `/api/rooms`.
+`/api/rooms` surface stays disabled there.
 
 #### Conformance
 
@@ -4343,7 +4335,7 @@ room-persistence tier by construction.
 
 ## Shale-backed metadata storage (horizontal scale)
 
-The local and slatedb backends above are single-writer: one process
+The local backend above is single-writer: one process
 owns the keyspace, transactions serialize through one engine. That caps
 sustained write throughput and ties durability to one node's liveness.
 A third metadata backend, **shale**, removes both ceilings by sharding
@@ -4367,7 +4359,7 @@ get on the upload path), `PasteAdmin` (list / versions / flags / delete
 + the per-owner quota and first-seen accessors), `SweepRepo` (the
 referenced-blob set), and `KeyGateRepo` (Sybil admission).
 
-The key names are unchanged from the slatedb layout:
+The key names:
 
 ```
 pastes/<slug>                      paste row
@@ -4439,7 +4431,7 @@ the owner's used bytes from a scan at check time - not by a maintained
 aggregate counter.
 
 The single-writer backends compute the sum from the authoritative rows
-inside the insert's own transaction. slatedb walks the
+inside the insert's own transaction. The local engine walks the
 owner's `identity_pastes` / `identity_sites` index and reads each live
 row's size under a per-identity `lockQuota` stripe - cheap, because every
 read is a local engine read. On shale those per-record reads are
@@ -4464,10 +4456,10 @@ backend:
    (see "Unreadable entries fail OPEN"). No authoritative row is read: the
    check is ONE prefix scan with zero per-entry fan-out. (One deliberate
    exception, the upgrade path: a LEGACY paste entry migrated from a
-   slatedb deployment carries an EMPTY value - the slatedb layout stored
+   older deployment carries an EMPTY value - that layout stored
    `identity_pastes` as bare markers - and is read through its
    authoritative `pastes/<slug>` row plus live version sum, exactly the
-   slatedb per-entry semantics, until the owner's next list enriches it
+   pre-enrichment per-entry semantics, until the owner's next list enriches it
    with the full projection.)
 3. Return the total. `SumActiveSiteBytesByOwner` is the site sibling:
    enumerate `identity_sites/<id>/` and sum each entry's cached deduped
@@ -4557,7 +4549,7 @@ entry (alongside removing / failing its authoritative rows);
 entry's cached size after the tombstone commits. There is NO counter
 decrement, so a lost drop/refresh mis-counts exactly one record in the
 over-count direction - not a "markerless residual" to crash-durably protect.
-`DeleteSite` collapses to the slatedb shape (delete the row, the
+`DeleteSite` collapses to (delete the row, the
 entry, the file-blob binds, and the enumeration entry - no release marker,
 no size-guarded restart loop, no consume).
 
@@ -4709,7 +4701,7 @@ uploads from the SAME identity can both scan the pre-upload state, both pass
 the smaller upload's size. This is the strictness the counter's atomic
 reserve-CAS bought and the scan gives up: `conformCaps.
 StrictIdentityQuotaUnderConcurrency` flips to `false` for shale (and so
-for the local backend, which is shale on a local engine). slatedb keeps it
+for the local backend, which is shale on a local engine). A single-transaction backend keeps it
 `true` - its per-identity check is atomic with the write, via a
 per-identity `lockQuota` stripe. The separate per-ROOM cap `StrictQuotaUnderConcurrency` stays
 `true` on shale - a room write is a single-shard CAS with the per-app counter
@@ -4789,7 +4781,7 @@ known debris, a growing one means something is still producing them.
 
 The legacy upgrade path is recognized by SHAPE: a SITE entry holding the
 pre-value-bearing marker byte or an empty migrated value, or a PASTE entry
-holding an empty migrated value - the slatedb layout stored both index
+holding an empty migrated value - the older layout stored both index
 families as bare markers, and pastes never had a marker-byte era, so an
 empty value is the only legacy paste shape - is read through its
 authoritative row (for a paste, the row plus its live version sum) until
@@ -5065,7 +5057,7 @@ paste commits READY directly - no pending row, no loading page, no background
 finalizer, no `MarkReady`/`MarkFailed` flip. If staging fails the row never
 commits (the SSH client gets the error, the quota reservation is released); if
 it succeeds the bind + row co-commit or neither lands. The pending model is KEPT
-unchanged for the detached-store path (local / slatedb / shale-without-a-blob-
+unchanged for the detached-store path (local / shale-without-a-blob-
 bucket), where it is still correct.
 
 **Orphan-bytes reclamation.** A crash between staging and the bind leaves a
@@ -5097,7 +5089,7 @@ dedup is a later follow-up.
 
 The backend ships at `ReplicationFactor = 1` first: one node per shard,
 no replicas, no last-write-wins envelope cost on the read path. At R=1
-a single-node cluster is functionally equivalent to the slatedb backend
+a single-node cluster is functionally equivalent to a single-writer one
 (same object store, same keys, same single owner of the keyspace), so
 the cutover is low-risk and reversible.
 
@@ -5179,14 +5171,14 @@ runtime + repo carry no migration logic - they only select the mode from
 
 Migration is in-place: same bucket, same object store, same key names.
 The `ShardKeyFn` provides co-location by routing, so **no key is
-renamed or rewritten** on cutover. An existing slatedb deployment's keys
+renamed or rewritten** on cutover. An existing deployment's keys
 are read by the shale backend as-is.
 
 Two compatibility details:
 
 - **Raw values decode as zero-stamp envelopes.** At R>1 shale wraps each
   value in a last-write-wins envelope. A value written without an
-  envelope (every existing slatedb value) decodes as a zero-stamp
+  envelope (every pre-cutover value) decodes as a zero-stamp
   envelope: it loses any comparison against a stamped write and is
   re-stamped on its next write. This is graceful, requires no offline
   conversion, and at R=1 the envelope is not used at all.
@@ -5194,11 +5186,11 @@ Two compatibility details:
   to seed.** The per-identity quota is scan-derived, so a cutover needs no
   offline backfill of any stored aggregate. The one derived structure the
   quota scan reads THROUGH is the `identity_pastes` / `identity_sites`
-  enumeration index. An existing slatedb deployment already maintains
+  enumeration index. An existing deployment already maintains
   those indexes, so they carry over as-is - but as EMPTY values (the
-  slatedb marker convention), so until the owner's next list enriches them
+  marker convention), so until the owner's next list enriches them
   the quota scan reads each such entry through its authoritative rows (the
-  legacy fallback under "Scan-derived quota"), paying the slatedb-shaped
+  legacy fallback under "Scan-derived quota"), paying the legacy-shaped
   per-entry fan-out for exactly those entries and never hard-failing on the
   shape. This is a graceful, idempotent, no-downtime heal driven by live
   traffic - not a one-time offline step and not a correctness precondition
@@ -5537,7 +5529,7 @@ node joins, the consistent-hash ring reassigns roughly half the shards to
 it, and the cluster **physically migrates** the keys of the reassigned
 shards from the old owner's backend to the new owner's backend. This is a
 live movement of authoritative data between two storage engines, the same
-class of operation as the slatedb-to-shale migration above, and it must be
+class of operation as the cutover migration above, and it must be
 **lossless**: no key may be dropped, and no key's value may regress to a
 stale or empty state, across the transition.
 
@@ -5981,7 +5973,7 @@ HOSTTHIS_READY_MIN_MOUNTED_FRACTION   mount floor in [0, 1]   (default 0.5)
 
 ### Non-shale backends
 
-The local and single-node slatedb backends have no mount concept: an open failure
+The local backend has no mount concept: an open failure
 there fails startup outright, so a process that is up IS ready.
 `/readyz` returns 200 whenever the process is up - equivalent in gate
 behavior to `/healthz`, but kept as a distinct endpoint so probe wiring
