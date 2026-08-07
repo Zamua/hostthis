@@ -869,6 +869,12 @@ never in both places (listed twice, charged twice) and never in neither (lost).
 The charged size carries over verbatim - a migration must not re-price what the
 owner is already paying.
 
+**Only a directory's own identity may supersede it**, checked inside that
+transaction against the legacy row's recorded owner rather than trusted from the
+caller. Every caller does check first, so this refuses nothing they would ask
+for; it is stated here because the shape a caller that forgot would take is slug
+takeover - one identity's artifact standing where another's directory was.
+
 A directory is written through the SAME insert a document uses: the caller
 supplies a manifest, which is carried into the stored descriptor verbatim. A
 caller that supplies none leaves it empty and the insert synthesizes the
