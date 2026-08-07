@@ -260,6 +260,18 @@ func (row siteRow) toDomain(slug domain.Slug) (domain.Site, error) {
 	if err != nil {
 		return domain.Site{}, err
 	}
+	// Fold the row's sha -> blob-id side-table onto the entries it describes.
+	// The manifest then addresses its own files, which is what the artifact
+	// families expect and what a migration carries forward: a directory moved
+	// without these cannot resolve a single file.
+	for path, e := range man.Files {
+		if e.BlobID == "" {
+			if id, ok := row.FileBlobs[e.SHA]; ok && id != "" {
+				e.BlobID = id
+				man.Files[path] = e
+			}
+		}
+	}
 	return domain.Site{
 		Slug:        slug,
 		Identity:    domain.Identity(row.Identity),

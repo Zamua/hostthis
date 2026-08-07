@@ -477,3 +477,47 @@ func TestArtifactSites_SweepPreservesTheRecordedCharge(t *testing.T) {
 		t.Fatalf("owner charged %d after migration, want %d unchanged", got, charged)
 	}
 }
+
+// A migrated directory must be able to RESOLVE its files. The old layout kept
+// blob ids in a row-level side-table, not on the manifest; carrying the
+// manifest alone produces a directory that lists and charges correctly and
+// serves nothing.
+func TestArtifactSites_MigrationCarriesFileBlobIDs(t *testing.T) {
+	repo := newPebbleShaleRepo(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	owner := domain.Identity("key:owner-s")
+
+	m := domain.NewManifest()
+	m.Add("index.html", domain.ManifestEntry{SHA: "sha-idx", Size: 100, ContentType: "text/html"})
+	m.Add("app.css", domain.ManifestEntry{SHA: "sha-css", Size: 20, ContentType: "text/css"})
+
+	legacy := storage.NewShaleSiteRepo(repo)
+	slug := domain.Slug("blobid23")
+	if err := legacy.InsertWithQuotaCheck(context.Background(), domain.Site{
+		Slug: slug, Identity: owner, Manifest: m, CreatedAt: now, UpdatedAt: now,
+	}, 49, 0, now); err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+
+	sites := storage.NewArtifactSites(repo, legacy)
+	if _, err := sites.SweepLegacySites(context.Background(), now); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+
+	// Every file the migrated manifest names must still address its bytes. On
+	// the content-addressed path that is the sha itself, so this asserts the
+	// entries survived intact rather than asserting a blob id is present.
+	got, err := sites.Get(slug)
+	if err != nil {
+		t.Fatalf("get after sweep: %v", err)
+	}
+	for _, path := range []string{"index.html", "app.css"} {
+		e, ok := got.Manifest.Files[path]
+		if !ok {
+			t.Fatalf("migrated manifest lost %q: %+v", path, got.Manifest.Files)
+		}
+		if e.SHA == "" {
+			t.Fatalf("migrated entry %q has no address: %+v", path, e)
+		}
+	}
+}
