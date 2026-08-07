@@ -3755,10 +3755,19 @@ VALUE-GUARDED: it removes the entry only while that entry still holds the
 payload the intent describes, so a re-upload that landed after the crash
 survives. There are no locks and no leases.
 
-A read that already touches an owner's `{id}` shard (the listing, the quota
-scan) MAY resolve that owner's outstanding intents opportunistically. That is
-an optimization, not the mechanism - correctness rests on the boot sweep, so an
-owner who never returns is still cleaned up.
+**The owner's own listing settles their residue too.** `ListByOwner` resolves
+that owner's outstanding intents BEFORE it scans, so the listing never renders a
+phantom the very next read would have removed, and no restart is needed for an
+owner who comes back. It rides a shard the read is already talking to, and in
+the normal case is one prefix scan returning nothing.
+
+It is best-effort: a resolver failure is logged and swallowed, because the
+caller is serving a user's read. And it obeys the grace exactly as the sweep
+does - a read is not a licence to act on an intent another node may still be
+mid-write on.
+
+This is an optimization, not the mechanism. Correctness rests on the boot sweep,
+which is what covers an owner who never returns.
 
 **The durability mechanism is a port, not a layer.** The intent log is defined
 as a narrow interface in terms of intent and resolution - begin, advance,
