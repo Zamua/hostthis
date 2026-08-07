@@ -1172,17 +1172,20 @@ func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef) 
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return fmt.Errorf("site slug check: %w", err)
 		}
+		v1 := newVersionRow(1,
+			contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, BlobID: blobID, Size: p.Size},
+			p.CreatedAt)
 		pr := pasteFromDomain(p)
-		pr.BlobID = blobID
+		// The head serves v1, so it takes v1's descriptor WHOLE - the same roll
+		// an append and a pin perform. Building the head's copy separately is
+		// how the two drift.
+		pr.contentRef = v1.contentRef
 		// v1 is the only version at insert, so the totals are known exactly.
 		pr.LiveBytes = p.Size
 		pr.LatestVersion = 1
 		if err := shaleTxPutJSON(tx, pasteKey, pr); err != nil {
 			return err
 		}
-		v1 := newVersionRow(1,
-			contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, BlobID: blobID, Size: p.Size},
-			p.CreatedAt)
 		if err := shaleTxPutJSON(tx, shaleKeyVersion(p.Slug, 1), v1); err != nil {
 			return err
 		}

@@ -65,8 +65,8 @@ func TestVersionRow_MultiEntryManifestRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	row := versionRow{VerNum: 1, Manifest: enc,
-		contentRef: contentRef{Kind: string(domain.KindHTML), ContentSHA: "sha-index", Size: 100}}
+	row := versionRow{VerNum: 1,
+		contentRef: contentRef{Kind: string(domain.KindHTML), ContentSHA: "sha-index", Size: 100, Manifest: enc}}
 
 	got := row.toDomain(domain.Slug("site1234"))
 	if got.IsSingle() {

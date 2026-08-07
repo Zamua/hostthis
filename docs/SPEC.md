@@ -787,6 +787,12 @@ Every version WRITTEN from here on carries one, including a single document,
 whose manifest is simply of length one at `/`. That is what lets a reader stop
 asking which shape it holds.
 
+The manifest lives INSIDE the served-content descriptor, not beside it, so the
+head's existing "the whole served descriptor rolls, never one field" invariant
+carries it. Insert, append, pin and unpin all roll the head from the version it
+serves, which is why the head can answer a path lookup on its own - one read,
+not a head read followed by a version read.
+
 Two consequences worth stating:
 
 **Multi-file artifacts gain version history, pin, and rollback.** Under the old
