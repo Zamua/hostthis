@@ -1357,6 +1357,29 @@ func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
 // is then refreshed on the {id} shard, which is what starts the new version's
 // bytes counting.
 func (r *ShaleRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (AppendResult, error) {
+	return r.appendVersion(ctx, slug,
+		contentRef{Kind: string(kind), ContentSHA: contentSHA, Size: size}, userCap, now)
+}
+
+// AppendManifestVersion appends a version whose content is a whole manifest -
+// the multi-entry shape a directory redeploy writes. Otherwise identical to
+// AppendVersionWithQuotaCheck: same quota check, same head roll, same
+// single-shard boundary.
+//
+// root describes the entry a listing shows; size is the version's CHARGED
+// bytes, which for a directory is its deduped blob total rather than the root
+// file's size.
+func (r *ShaleRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, m domain.Manifest, root domain.ManifestEntry, size int, userCap int64, now time.Time) (AppendResult, error) {
+	ref := contentRef{Kind: string(domain.KindSite), ContentSHA: root.SHA, Size: size}
+	enc, err := encodeManifest(m)
+	if err != nil {
+		return AppendResult{}, fmt.Errorf("encode manifest: %w", err)
+	}
+	ref.Manifest = enc
+	return r.appendVersion(ctx, slug, ref, userCap, now)
+}
+
+func (r *ShaleRepo) appendVersion(ctx context.Context, slug domain.Slug, ref contentRef, userCap int64, now time.Time) (AppendResult, error) {
 	// Read the staged refs once and pass them down, isolating this append from
 	// any concurrent same-slug write.
 	binds := pendingBindsFromContext(ctx)
@@ -1366,7 +1389,7 @@ func (r *ShaleRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 		return AppendResult{}, err
 	}
 	identity := existing.Identity
-	body := int64(size)
+	body := int64(ref.Size)
 
 	if userCap > 0 {
 		used, err := r.combinedActiveBytes(identity, now)
@@ -1380,7 +1403,7 @@ func (r *ShaleRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 		}
 	}
 
-	res, err := r.appendAuthoritative(slug, kind, contentSHA, size, now, binds)
+	res, err := r.appendAuthoritative(slug, ref, now, binds)
 	if err != nil {
 		return AppendResult{}, err
 	}
@@ -1414,7 +1437,7 @@ var ErrConcurrentChange = domain.ErrConcurrentChange
 //     it first, so the ExpectAbsent read-check fails validation: ErrCASConflict.
 //
 // MAX(ver_num) counts tombstones, so version numbers are never reused.
-func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, now time.Time, refs []cluster.BlobRef) (AppendResult, error) {
+func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now time.Time, refs []cluster.BlobRef) (AppendResult, error) {
 	pasteKey := shaleKeyPaste(slug)
 	// The blob id lands on the new version row and, when the head is unpinned
 	// (so the public URL follows this version), on the paste head row too.
@@ -1443,16 +1466,16 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKin
 			}
 			wasPinned = p.PinnedVersion != 0
 
-			newV := newVersionRow(newVer,
-				contentRef{Kind: string(kind), ContentSHA: contentSHA, BlobID: blobID, Size: size},
-				now)
+			vRef := ref
+			vRef.BlobID = blobID
+			newV := newVersionRow(newVer, vRef, now)
 			if err := shaleTxPutJSON(tx, verKey, newV); err != nil {
 				return err
 			}
 			p.UpdatedAt = now
 			// The totals roll in THIS transaction, so they can never disagree
 			// with the version rows they summarise.
-			p.LiveBytes += size
+			p.LiveBytes += ref.Size
 			p.LatestVersion = newVer
 			if p.PinnedVersion == 0 {
 				p.contentRef = newV.contentRef // unpinned head rolls to the new version, whole
