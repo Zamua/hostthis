@@ -1,4 +1,4 @@
-// ShaleRepo's shared low-level helpers: the key builders (mirroring SlateRepo's
+// ShaleRepo's shared low-level helpers: the key builders (mirroring the
 // key layout), the identity_pastes JSON projection row, the get/scan primitives
 // (single-shard reads, prefix scans, the cross-shard aggregate), the version-set
 // helpers, and the counter / JSON-envelope / tx codec helpers. shale_repo.go
@@ -21,7 +21,7 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// --- key builders (mirror SlateRepo's layout) ------------------------------
+// --- key builders ----------------------------------------------------------
 
 // shaleKey joins a family prefix with the rest of a key. The prefix is always
 // one of the vars shaleShardKey routes on, never a re-spelled literal: a key
