@@ -39,6 +39,9 @@ type Sweep struct {
 	// node owns is still settling while a rollout is in flight: a sweep that
 	// runs then can legitimately see nothing, and nothing would run again.
 	LegacySites LegacySiteSweeper
+	// legacyReported gates the zero-result report to the first pass. Touched
+	// only from the loop goroutine.
+	legacyReported bool
 
 	Interval time.Duration
 	Logger   *log.Logger
@@ -98,7 +101,11 @@ func (s *Sweep) sweepLegacySites() {
 	if err != nil {
 		s.Logger.Printf("sweep: legacy sites: %v (retried next pass)", err)
 	}
-	if moved > 0 {
+	// The first pass reports even a zero result. A drain that speaks only when
+	// it moves something is indistinguishable from one that was never wired,
+	// and those call for opposite responses: wait, or go fix the wiring.
+	if moved > 0 || !s.legacyReported {
+		s.legacyReported = true
 		s.Logger.Printf("sweep: migrated %d legacy directory(s)", moved)
 	}
 }

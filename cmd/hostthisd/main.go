@@ -304,9 +304,6 @@ func main() {
 	if metadata.IntentSweeper != nil {
 		go runIntentSweep(ctx, metadata, logger)
 	}
-	if metadata.LegacySiteSweeper != nil {
-		go runLegacySiteSweep(ctx, metadata, logger)
-	}
 
 	select {
 	case <-ctx.Done():
@@ -502,21 +499,6 @@ func envOrDuration(key string, fallback time.Duration) time.Duration {
 // refusal readiness is waiting on - so a second gate here would only duplicate
 // it, and readiness at the mount FLOOR is not the same condition as "this
 // node's own units are scannable" anyway.
-// runLegacySiteSweep drains the pre-unification site family. Same timing rule
-// as the intent sweep: converting a row writes to the artifact families, which
-// live on DIFFERENT shards that may be unmounted during a cold start.
-func runLegacySiteSweep(ctx context.Context, metadata *metadataBundle, logger *log.Logger) {
-	moved, err := metadata.LegacySiteSweeper.SweepLegacySites(ctx, time.Now().UTC())
-	if err != nil {
-		logger.Printf("legacy-site sweep: %v (the next boot retries; nothing is lost)", err)
-		return
-	}
-	// Reported even at zero. A drain that logs only when it moves something is
-	// indistinguishable from one that was never wired, and those two call for
-	// opposite responses: wait, or go fix the composition root.
-	logger.Printf("legacy-site sweep: migrated %d directory(s) on this node's units", moved)
-}
-
 func runIntentSweep(ctx context.Context, metadata *metadataBundle, logger *log.Logger) {
 	settled, err := metadata.IntentSweeper.SweepIntents(ctx, time.Now().UTC())
 	if err != nil {
