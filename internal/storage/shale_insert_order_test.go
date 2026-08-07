@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage_test
 
 // The insert writes the enumeration entry BEFORE the authoritative row, so the
@@ -13,7 +11,6 @@ package storage_test
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
@@ -25,11 +22,7 @@ import (
 // pre-check every attempt of the upload's re-mint loop would strand an entry
 // that counts against the owner's quota until they next list.
 func TestShaleInsertOrder_TakenSlugWritesNoEntry(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale insert-order test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 
 	const first = "key:order-a"
@@ -76,11 +69,7 @@ func TestShaleInsertOrder_TakenSlugWritesNoEntry(t *testing.T) {
 // keeps that paste for free until something replaces the marker with the real
 // size.
 func TestShaleInsertOrder_ListClearsStalePlaceholder(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale insert-order test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 	const owner = "key:placeholder"
 

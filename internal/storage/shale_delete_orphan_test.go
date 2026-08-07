@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage_test
 
 // Pins two shale {slug}-shard rules the audit found broken together:
@@ -15,7 +13,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -25,11 +22,7 @@ import (
 )
 
 func TestShaleDelete_RacingAppendLeavesNoOrphanVersion(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; start dev MinIO first")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Now().UTC()
 
 	// The window is delete's scan-to-commit gap. Racing both calls from a
@@ -97,11 +90,7 @@ func TestShaleDelete_RacingAppendLeavesNoOrphanVersion(t *testing.T) {
 }
 
 func TestShaleUnpin_SkipsTombstonedVersion(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; start dev MinIO first")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Now().UTC()
 
 	slug := domain.Slug("shunpin1")

@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage_test
 
 // Confirm-step tests for the shale backend.
@@ -19,7 +17,6 @@ package storage_test
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -27,11 +24,7 @@ import (
 )
 
 func TestShaleDeferredConfirm_ReadableImmediately_IndexAppearsAfterDrain(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale deferred-confirm test (start dev MinIO first)")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	owner := "key:deferred"
