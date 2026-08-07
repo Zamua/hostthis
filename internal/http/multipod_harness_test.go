@@ -51,7 +51,7 @@ type pod struct {
 	ts    *httptest.Server
 }
 
-// multiPod is N pods over one shared sqlite store, bridged by memBridge.
+// multiPod is N pods over one shared metadata store, bridged by memBridge.
 type multiPod struct {
 	t    *testing.T
 	pods []*pod
@@ -82,7 +82,7 @@ func (b *memBridge) Publish(key relay.RoomKey, f relay.Frame) {
 	}
 }
 
-// buildMultiPod stands up n pods over one fresh sqlite store. bridged selects
+// buildMultiPod stands up n pods over one fresh metadata store. bridged selects
 // the peer wiring: true wires the memBridge into every pod's relay (the
 // multi-pod deploy), false leaves every relay with a nil publisher (the
 // zero-peer relay, which on a multi-pod deploy is the bug).

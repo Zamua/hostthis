@@ -14,7 +14,7 @@ import (
 
 // buildFullStackServer wires all three read surfaces on one Server, each at its
 // own slug: a single-file paste, a static-site archive, and the rooms API over a
-// real sqlite repo. Fixture for the no-regression checks, which pin that rooms
+// real metadata repo. Fixture for the no-regression checks, which pin that rooms
 // are purely additive (SPEC: "Rooms are additive ... they introduce no change to
 // the paste or the site/archive read-and-write behavior").
 func buildFullStackServer(t *testing.T) *Server {

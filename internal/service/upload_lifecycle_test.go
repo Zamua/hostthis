@@ -85,7 +85,7 @@ type testBlobStore interface {
 	blobReadStore
 }
 
-// newStackWithBlobs wires the real sqlite repo with a caller-supplied blob
+// newStackWithBlobs wires the real metadata repo with a caller-supplied blob
 // store (wrapped in the StandaloneBlobUnit seam) plus a finalize-done signal so
 // tests can wait deterministically.
 func newStackWithBlobs(t *testing.T, blobs testBlobStore) (*Upload, *storage.ShaleRepo, chan struct{}) {

@@ -1,7 +1,7 @@
 package http
 
 // The real-gRPC seam: two in-process pods, each a Server + relay.Relay over
-// ONE shared sqlite store, bridged by the REAL relaygrpc client/server
+// ONE shared metadata store, bridged by the REAL relaygrpc client/server
 // transport over loopback listeners rather than the in-process memBridge.
 //
 //   - each pod runs a grpc.Server with the relaygrpc.Receiver registered via
@@ -48,7 +48,7 @@ type fixedPeers []string
 
 func (p fixedPeers) Addresses() []string { return p }
 
-// buildGRPCPair stands up two pods over one shared sqlite store, bridged
+// buildGRPCPair stands up two pods over one shared metadata store, bridged
 // by the real gRPC transport in both directions.
 func buildGRPCPair(t *testing.T) [2]*grpcPod {
 	t.Helper()

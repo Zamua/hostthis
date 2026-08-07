@@ -17,7 +17,7 @@ import (
 	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
-// newRealStack builds the upload service backed by real sqlite and a real blob
+// newRealStack builds the upload service backed by real metadata and a real blob
 // store under t.TempDir(): the same stack production runs, no mocks.
 func newRealStack(t *testing.T) *Upload {
 	t.Helper()

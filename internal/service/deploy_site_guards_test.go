@@ -10,8 +10,8 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// The safe-untar guards at the SERVICE boundary, driven against real sqlite +
-// a real compressed blob store: a tripped guard must leave NOTHING durable (no
+// The safe-untar guards at the SERVICE boundary, driven against a real
+// metadata repo + a real compressed blob store: a tripped guard must leave NOTHING durable (no
 // site row, no active bytes charged). The happy path and the error-surface
 // mapping live in deploy_site_test.go.
 

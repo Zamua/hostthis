@@ -606,7 +606,7 @@ var errRoomDeleteFenceStale = errors.New("room mutated during delete enumeration
 //
 // Given equal fence values, every delete and the counter decrement land in ONE
 // CAS, so the room and all its values vanish atomically (the shale analogue of
-// the sqlite FK cascade).
+// a relational FK cascade).
 func (r *ShaleRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 	roomKey := shaleKeyRoom(appSlug, id)
 	counterKey := shaleKeyRoomBytes(appSlug)
