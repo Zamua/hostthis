@@ -77,6 +77,14 @@ type metadataBundle struct {
 	IntentSweeper interface {
 		SweepIntents(ctx context.Context, now time.Time) (int, error)
 	}
+	// LegacySiteSweeper is an OPTIONAL backend-supplied boot sweep that drains
+	// the pre-unification site family onto the artifact families. Runs beside
+	// the intent sweep and under the same rule: after the node is serving,
+	// never before. nil once no legacy rows can exist, which is when the old
+	// family is deleted outright.
+	LegacySiteSweeper interface {
+		SweepLegacySites(ctx context.Context, now time.Time) (int, error)
+	}
 	// RelayPeer is the OPTIONAL multi-pod relay peer transport (multi-node
 	// shale only). nil keeps the relay pod-local.
 	RelayPeer *relayPeerTransport

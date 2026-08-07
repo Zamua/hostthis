@@ -320,3 +320,58 @@ func TestArtifactSites_RedeployMigratesALegacyRow(t *testing.T) {
 		t.Fatalf("legacy charge survived the migration: %d (err %v)", sum, serr)
 	}
 }
+
+// The sweep drains directories nobody redeploys. Without it a legacy row lives
+// forever on the fallback and the old family can never be deleted.
+//
+// Uses the REAL legacy repo, not a fake: the sweep finds rows by scanning the
+// cluster's site family, so a fake holding them in memory would prove nothing.
+func TestArtifactSites_SweepMigratesUntouchedRows(t *testing.T) {
+	repo := newPebbleShaleRepo(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	owner := domain.Identity("key:owner-s")
+
+	legacy := storage.NewShaleSiteRepo(repo)
+	slugs := []domain.Slug{"sweepa23", "sweepb23"}
+	for _, slug := range slugs {
+		s := domain.Site{
+			Slug: slug, Identity: owner,
+			Manifest: twoFileManifest("sha-" + string(slug)), CreatedAt: now, UpdatedAt: now,
+		}
+		if err := legacy.InsertWithQuotaCheck(context.Background(), s, 49, 0, now); err != nil {
+			t.Fatalf("seed legacy %s: %v", slug, err)
+		}
+	}
+	sites := storage.NewArtifactSites(repo, legacy)
+
+	moved, err := sites.SweepLegacySites(context.Background(), now)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if moved != len(slugs) {
+		t.Fatalf("migrated %d, want %d", moved, len(slugs))
+	}
+
+	for _, slug := range slugs {
+		p, gerr := repo.Get(slug)
+		if gerr != nil {
+			t.Fatalf("%s did not become an artifact: %v", slug, gerr)
+		}
+		if p.Kind != domain.KindSite || len(p.Manifest.Files) != 2 {
+			t.Fatalf("%s migrated wrong: kind=%q files=%d", slug, p.Kind, len(p.Manifest.Files))
+		}
+		// The legacy row must be gone, or it is listed and charged twice.
+		if _, lerr := legacy.Get(slug); !errors.Is(lerr, domain.ErrNotFound) {
+			t.Fatalf("legacy row for %s survived the sweep: %v", slug, lerr)
+		}
+	}
+
+	// A second sweep is a no-op rather than a re-migration.
+	again, err := sites.SweepLegacySites(context.Background(), now)
+	if err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if again != 0 {
+		t.Fatalf("second sweep migrated %d, want 0: the family is drained", again)
+	}
+}
