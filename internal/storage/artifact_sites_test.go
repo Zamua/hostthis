@@ -441,3 +441,39 @@ func TestArtifactSites_SweepClearsOrphanedEntries(t *testing.T) {
 		t.Fatalf("served root = %q, want sha-redeployed", e.SHA)
 	}
 }
+
+// A migration must carry the RECORDED charge. The old layout did not persist
+// per-entry compressed sizes, so recomputing from the manifest yields zero and
+// makes every migrated directory free.
+func TestArtifactSites_SweepPreservesTheRecordedCharge(t *testing.T) {
+	repo := newPebbleShaleRepo(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	owner := domain.Identity("key:owner-s")
+
+	// A manifest with NO compressed sizes, exactly as the old layout stored it.
+	m := domain.NewManifest()
+	m.Add("index.html", domain.ManifestEntry{SHA: "sha-i", Size: 100, ContentType: "text/html"})
+	m.Add("app.css", domain.ManifestEntry{SHA: "sha-c", Size: 20, ContentType: "text/css"})
+	if m.CompressedDedupedSize() != 0 {
+		t.Fatalf("fixture must have no compressed sizes, else this proves nothing")
+	}
+
+	legacy := storage.NewShaleSiteRepo(repo)
+	const charged = 929612
+	if err := legacy.InsertWithQuotaCheck(context.Background(), domain.Site{
+		Slug: "charge23", Identity: owner, Manifest: m, CreatedAt: now, UpdatedAt: now,
+	}, charged, 0, now); err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+
+	if _, err := storage.NewArtifactSites(repo, legacy).SweepLegacySites(context.Background(), now); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	got, err := repo.SumActiveBytesByOwner(owner.String(), now)
+	if err != nil {
+		t.Fatalf("sum: %v", err)
+	}
+	if got != charged {
+		t.Fatalf("owner charged %d after migration, want %d unchanged", got, charged)
+	}
+}
