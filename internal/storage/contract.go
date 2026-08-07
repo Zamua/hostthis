@@ -44,12 +44,19 @@ type entryJSON struct {
 	SHA  string `json:"sha"`
 	Size int    `json:"size"`
 	CT   string `json:"ct"`
+	// Kind is the RENDER kind, strictly richer than CT: several kinds share
+	// text/plain and are told apart by sniffing, not by extension. Omitted for
+	// an ordinary file inside a directory, which is served raw.
+	Kind string `json:"kind,omitempty"`
+	// CompSize is the stored post-compression size, the quota basis. Omitted
+	// when unknown, where the uncompressed Size is the fallback.
+	CompSize int `json:"csize,omitempty"`
 }
 
 func encodeManifest(m domain.Manifest) (string, error) {
 	mj := manifestJSON{Files: make(map[string]entryJSON, len(m.Files))}
 	for p, e := range m.Files {
-		mj.Files[p] = entryJSON{SHA: e.SHA, Size: e.Size, CT: e.ContentType}
+		mj.Files[p] = entryJSON{SHA: e.SHA, Size: e.Size, CT: e.ContentType, Kind: e.Kind, CompSize: e.CompressedSize}
 	}
 	b, err := json.Marshal(mj)
 	if err != nil {
@@ -65,7 +72,7 @@ func decodeManifest(s string) (domain.Manifest, error) {
 	}
 	m := domain.NewManifest()
 	for p, e := range mj.Files {
-		m.Add(p, domain.ManifestEntry{SHA: e.SHA, Size: e.Size, ContentType: e.CT})
+		m.Add(p, domain.ManifestEntry{SHA: e.SHA, Size: e.Size, ContentType: e.CT, Kind: e.Kind, CompressedSize: e.CompSize})
 	}
 	return m, nil
 }

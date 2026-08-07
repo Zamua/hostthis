@@ -774,6 +774,19 @@ MANIFEST, not a single blob reference:
 Per-file versioning was rejected: it gives no coherent answer to "what did this
 look like at version 3" and no sensible pin target.
 
+**Stored shape.** The version row carries the encoded manifest alongside the
+flat root descriptor (kind, sha, size) it already had. The flat fields are
+RETAINED rather than replaced: a row written before versions carried a manifest
+has no other description of its content, and resolves through them via
+`Version.RootKind` / `RootSHA` / `RootSize`. So the manifest is additive - no
+migration, and an old row is readable unchanged. A manifest that fails to
+decode falls back the same way rather than failing the read, since the content
+it describes is still perfectly readable.
+
+Every version WRITTEN from here on carries one, including a single document,
+whose manifest is simply of length one at `/`. That is what lets a reader stop
+asking which shape it holds.
+
 Two consequences worth stating:
 
 **Multi-file artifacts gain version history, pin, and rollback.** Under the old
