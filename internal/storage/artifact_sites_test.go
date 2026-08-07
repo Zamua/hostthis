@@ -285,9 +285,11 @@ func TestArtifactSites_RedeployMigratesALegacyRow(t *testing.T) {
 		Slug: "legacy23", Identity: owner,
 		Manifest: twoFileManifest("sha-old"), CreatedAt: now, UpdatedAt: now,
 	}
-	sites := storage.NewArtifactSites(repo, fakeLegacy{
-		sites: map[domain.Slug]domain.Site{old.Slug: old}, bytes: 49,
-	})
+	legacy := storage.NewShaleSiteRepo(repo)
+	if err := legacy.InsertWithQuotaCheck(context.Background(), old, 49, 0, now); err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+	sites := storage.NewArtifactSites(repo, legacy)
 
 	next := old
 	next.Manifest = twoFileManifest("sha-new")
@@ -311,10 +313,10 @@ func TestArtifactSites_RedeployMigratesALegacyRow(t *testing.T) {
 		t.Fatalf("artifact kind = %q, want site", p.Kind)
 	}
 
-	// The legacy row must be GONE. Leaving it would have the owner listed and
-	// charged for the same directory twice, once through each family.
+	// The legacy row AND its enumeration entry must be gone. Leaving either
+	// would have the owner listed and charged for the same directory twice.
 	if listed, lerr := sites.ListSitesByOwner(owner.String(), now); lerr != nil || len(listed) != 0 {
-		t.Fatalf("legacy row survived the migration: %+v (err %v)", listed, lerr)
+		t.Fatalf("legacy rows survived the migration: %+v (err %v)", listed, lerr)
 	}
 	if sum, serr := sites.SumActiveBytesByOwner(owner.String(), now); serr != nil || sum != 0 {
 		t.Fatalf("legacy charge survived the migration: %d (err %v)", sum, serr)
@@ -383,5 +385,59 @@ func TestArtifactSites_SweepMigratesUntouchedRows(t *testing.T) {
 	}
 	if again != 0 {
 		t.Fatalf("second sweep migrated %d, want 0: the family is drained", again)
+	}
+}
+
+// An entry whose row is already gone - a directory converted by a redeploy, or
+// by a sweep that did not finish - must still be cleared. Scanning the
+// authoritative rows would never see it, which is exactly the case that leaves
+// a directory listed twice.
+func TestArtifactSites_SweepClearsOrphanedEntries(t *testing.T) {
+	repo := newPebbleShaleRepo(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	owner := domain.Identity("key:owner-s")
+
+	legacy := storage.NewShaleSiteRepo(repo)
+	sites := storage.NewArtifactSites(repo, legacy)
+	slug := domain.Slug("orphan23")
+
+	seed := domain.Site{
+		Slug: slug, Identity: owner,
+		Manifest: twoFileManifest("sha-orphan"), CreatedAt: now, UpdatedAt: now,
+	}
+	if err := legacy.InsertWithQuotaCheck(context.Background(), seed, 49, 0, now); err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+	// Convert it WITHOUT dropping the entry - exactly the state a crash between
+	// the two steps leaves, since they cannot share a transaction.
+	if err := repo.InsertSupersedingSite(context.Background(), domain.Paste{
+		Slug: slug, Identity: owner, Status: domain.PasteStatusReady,
+		Kind: domain.KindSite, ContentSHA: "sha-redeployed", Size: 55,
+		CreatedAt: now, UpdatedAt: now,
+		Manifest: twoFileManifest("sha-redeployed"),
+	}, 0, now); err != nil {
+		t.Fatalf("supersede: %v", err)
+	}
+
+	// Precondition: the entry really is orphaned, or this test proves nothing.
+	if stale, err := legacy.ListSitesByOwner(owner.String(), now); err != nil || len(stale) == 0 {
+		t.Fatalf("expected an orphaned entry to clear: got %+v (err %v)", stale, err)
+	}
+
+	if _, err := sites.SweepLegacySites(context.Background(), now); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	stale, err := legacy.ListSitesByOwner(owner.String(), now)
+	if err != nil {
+		t.Fatalf("legacy list: %v", err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("orphaned entry survived the sweep: %+v", stale)
+	}
+	// The directory still serves from its artifact.
+	if got, gerr := sites.Get(slug); gerr != nil {
+		t.Fatalf("get after sweep: %v", gerr)
+	} else if e, _ := got.Manifest.Lookup("/"); e.SHA != "sha-redeployed" {
+		t.Fatalf("served root = %q, want sha-redeployed", e.SHA)
 	}
 }
