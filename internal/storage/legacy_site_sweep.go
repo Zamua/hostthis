@@ -157,10 +157,14 @@ func (a *ArtifactSites) migrateLegacySite(ctx context.Context, e legacySiteEntry
 		Status:     domain.PasteStatusReady,
 		Kind:       domain.KindSite,
 		ContentSHA: root.SHA,
-		Size:       site.Manifest.CompressedDedupedSize(),
-		CreatedAt:  site.CreatedAt,
-		UpdatedAt:  site.UpdatedAt,
-		Manifest:   site.Manifest,
+		// The row's RECORDED charge, never a recomputation: the per-entry
+		// compressed sizes were not persisted by the old layout, so deriving
+		// it from the manifest yields zero and silently makes the directory
+		// free. A migration must not re-price what the owner already pays.
+		Size:      site.StoredBytes,
+		CreatedAt: site.CreatedAt,
+		UpdatedAt: site.UpdatedAt,
+		Manifest:  site.Manifest,
 		// 0: the sweep MOVES bytes the owner is already charged for.
 	}, 0, now); err != nil {
 		return err
