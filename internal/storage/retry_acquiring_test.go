@@ -134,6 +134,26 @@ func TestReadRetryPolicy_FitsInsideRequestDeadline(t *testing.T) {
 	}
 }
 
+// The boot sweep's budget must OUTLAST mount acquisition, which is the opposite
+// requirement to readRetry's. It runs once at startup with nothing waiting on
+// it, so being slow is free - but being too short is not: every boot loses the
+// acquiring race, so a budget that expires first means the sweep never runs at
+// all, silently.
+func TestBootRetryPolicy_OutlastsMountAcquisition(t *testing.T) {
+	// A generous view of how long a node's own positions take to acquire.
+	const observedMountSettle = 60 * time.Second
+
+	worst := time.Duration(0)
+	for i := 0; i < bootRetry.attempts-1; i++ {
+		worst += bootRetry.backoff << i
+	}
+	if worst < observedMountSettle {
+		t.Fatalf("boot retry spans only %v, under the %v a mount can take; "+
+			"raise bootRetry.attempts or its backoff, or the sweep silently never runs",
+			worst, observedMountSettle)
+	}
+}
+
 var fastRetry = retryPolicy{attempts: 3, backoff: time.Millisecond}
 
 // The retry must be OBSERVABLE: unobserved, a retry that fires constantly
