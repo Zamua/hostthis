@@ -799,13 +799,15 @@ Two consequences worth stating:
 split, a redeploy destroyed the previous state and a bad deploy was
 unrecoverable. Uniform versioning removes that cliff.
 
-**A redeploy costs the same as it always did.** It appends the new manifest as
-a version, then tombstones the one it supersedes, so the charge is the new
-content's size and a smaller redeploy still frees bytes. Retaining every
-version would be the uniform rule, but redeploying a slug in place is the
-normal way a directory is iterated on, and charging cumulatively would turn the
-ordinary workflow into a quota cliff. Retention is a feature to add
-deliberately, not a side effect of this collapse.
+**A redeploy is an update.** It appends the new manifest as a version and the
+previous one stays live, so a directory pins, rolls back and rolls forward like
+any other artifact. An update has never thrown away what it replaced, and a
+directory is not an exception.
+
+It therefore charges like an update: every live version counts against quota,
+and an owner reclaims bytes by deleting versions they no longer want. Blob
+dedup keeps the growth proportional to what actually changed - a redeploy
+touching one file of two hundred stores and charges for one blob.
 
 **A redeploy is the migration.** A directory deployed before the collapse has
 no artifact, so redeploying it writes one and drops the legacy row. That is not
