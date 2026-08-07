@@ -91,3 +91,53 @@ func TestPebbleBacking_RefusesMultiBackend(t *testing.T) {
 		t.Fatal("UnitCount=4 opened on a local engine; want an error")
 	}
 }
+
+// The served version's manifest rolls onto the head, so ONE read of the head
+// resolves a request path. Pins the roll through a real repo rather than
+// through the row type, because the roll happens at the six head-write sites.
+func TestPebbleBacking_HeadCarriesServedManifest(t *testing.T) {
+	repo := newPebbleShaleRepo(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	p := domain.Paste{
+		Slug: domain.Slug("manif001"), Identity: domain.Identity("owner-m"),
+		Status: domain.PasteStatusReady, Kind: domain.KindMarkdown,
+		ContentSHA: "sha-v1", Size: 11, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	head, err := repo.Get(p.Slug)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	// Asserting the ENTRY, not the Root accessors: those fall back to the flat
+	// fields, so they answer correctly even when no manifest was stored and
+	// would let a broken roll pass unnoticed.
+	e, ok := head.Manifest.Files[domain.Root]
+	if !ok {
+		t.Fatalf("head carries no root manifest entry: %+v", head.Manifest.Files)
+	}
+	if e.SHA != "sha-v1" || e.Size != 11 || e.Kind != string(domain.KindMarkdown) {
+		t.Fatalf("head root entry = %+v, want sha-v1/11/markdown", e)
+	}
+
+	// An append rolls the WHOLE served descriptor, so the head's manifest must
+	// follow the new version rather than keeping v1's.
+	if _, err := repo.AppendVersionWithQuotaCheck(
+		context.Background(), p.Slug, domain.KindHTML, "sha-v2", 22, 0, now); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	head, err = repo.Get(p.Slug)
+	if err != nil {
+		t.Fatalf("get after append: %v", err)
+	}
+	e, ok = head.Manifest.Files[domain.Root]
+	if !ok {
+		t.Fatalf("head lost its manifest on the roll: %+v", head.Manifest.Files)
+	}
+	if e.SHA != "sha-v2" || e.Size != 22 || e.Kind != string(domain.KindHTML) {
+		t.Fatalf("head manifest did not roll to v2: %+v", e)
+	}
+}
