@@ -49,7 +49,7 @@ func TestDeploySiteAndServe(t *testing.T) {
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	repo := storagetest.NewRepo(t)
-	sites := storage.NewShaleSiteRepo(storagetest.NewRepo(t))
+	sites := storage.NewArtifactSites(storagetest.NewRepo(t), nil)
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 	deploy := service.NewDeploySite(sites, repo, blobUnit)
@@ -201,7 +201,7 @@ func TestDeploySite_NoWebContentRejected(t *testing.T) {
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	repo := storagetest.NewRepo(t)
-	sites := storage.NewShaleSiteRepo(storagetest.NewRepo(t))
+	sites := storage.NewArtifactSites(storagetest.NewRepo(t), nil)
 
 	sshListener := mustListen(t)
 	sshAddr := sshListener.Addr().String()

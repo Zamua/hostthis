@@ -799,17 +799,19 @@ Two consequences worth stating:
 split, a redeploy destroyed the previous state and a bad deploy was
 unrecoverable. Uniform versioning removes that cliff.
 
-This changes what a redeploy COSTS, and the change is deliberate. Under the
-split, a redeploy replaced the manifest and freed the old bytes. As an artifact
-it appends a version, and every live version charges quota - exactly what
-updating a document has always done. Uniformity is the point: a redeploy that
-kept the old bytes free while a document update did not would be the modeling
-difference this whole design removes. An owner reclaims the bytes the same way
-they always have, by deleting versions they no longer want.
+**A redeploy costs the same as it always did.** It appends the new manifest as
+a version, then tombstones the one it supersedes, so the charge is the new
+content's size and a smaller redeploy still frees bytes. Retaining every
+version would be the uniform rule, but redeploying a slug in place is the
+normal way a directory is iterated on, and charging cumulatively would turn the
+ordinary workflow into a quota cliff. Retention is a feature to add
+deliberately, not a side effect of this collapse.
 
-Blob dedup blunts the cost sharply: a redeploy that changes one file of two
-hundred stores one blob and charges for one blob. Only genuinely new bytes
-accumulate.
+**One artifact appears in one listing.** A directory is an artifact, so it is
+enumerated by the artifact index. Anything that also reports it as a site would
+show it twice and charge it twice - the same trap in two places. During the
+migration the site surface therefore reports ONLY rows the artifact families do
+not yet cover, and that set empties as the migration runs.
 
 **Unchanged files cost nothing across versions.** Blobs are content-addressed
 and were already deduped within a manifest; the same dedup now spans versions,

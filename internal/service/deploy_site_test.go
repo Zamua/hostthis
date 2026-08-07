@@ -17,7 +17,7 @@ import (
 
 // deployFixture wires real metadata repos + a real compressed blob store so
 // the test exercises the actual untar → blob → manifest → persist path.
-func deployFixture(t *testing.T) (*DeploySite, *storage.ShaleSiteRepo, *storage.CompressedBlobStore) {
+func deployFixture(t *testing.T) (*DeploySite, *storage.ArtifactSites, *storage.CompressedBlobStore) {
 	t.Helper()
 	dir := t.TempDir()
 	disk, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
@@ -25,10 +25,22 @@ func deployFixture(t *testing.T) (*DeploySite, *storage.ShaleSiteRepo, *storage.
 		t.Fatalf("blob store: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(disk)
-	sites := storage.NewShaleSiteRepo(storagetest.NewRepo(t))
+	sites := storage.NewArtifactSites(storagetest.NewRepo(t), nil)
 	pastes := storagetest.NewRepo(t)
 	d := NewDeploySite(sites, pastes, NewStandaloneBlobUnit(blobs))
 	return d, sites, blobs
+}
+
+// ownerCharge is the identity's charged bytes. A directory is an artifact, so
+// its bytes live in the ARTIFACT sum - the site port reports zero to avoid
+// counting them twice (storage.ArtifactSites.SumActiveBytesByOwner).
+func ownerCharge(t *testing.T, owner string) int64 {
+	t.Helper()
+	n, err := storagetest.NewRepo(t).SumActiveBytesByOwner(owner, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("owner charge: %v", err)
+	}
+	return int64(n)
 }
 
 func gzipTar(t *testing.T, files map[string]string) []byte {
@@ -162,7 +174,7 @@ func TestDeploySite_OverQuota(t *testing.T) {
 // charged number equals the manifest's CompressedDedupedSize, not the
 // uncompressed sum.
 func TestDeploySite_ChargesCompressedSize(t *testing.T) {
-	d, sites, _ := deployFixture(t)
+	d, _, _ := deployFixture(t)
 	owner := "key:compress"
 	// Highly compressible content: 200 KB of a repeated byte squashes tiny.
 	raw := bytes.Repeat([]byte("A"), 200_000)
@@ -170,7 +182,7 @@ func TestDeploySite_ChargesCompressedSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
-	used, _ := sites.SumActiveBytesByOwner(owner, time.Now().UTC())
+	used := ownerCharge(t, owner)
 	compressed := int64(r.Site.Manifest.CompressedDedupedSize())
 	uncompressed := int64(r.Site.Manifest.DedupedSize())
 	if used != compressed {
@@ -265,7 +277,7 @@ func TestDeployToSlug_ReplacesInPlace(t *testing.T) {
 	}
 	slug := r1.Site.Slug
 	created := r1.Site.CreatedAt
-	used1, _ := sites.SumActiveBytesByOwner(owner, time.Now().UTC())
+	used1 := ownerCharge(t, owner)
 
 	// Re-deploy v2 with DIFFERENT, smaller content to the SAME slug.
 	v2 := gzipTar(t, map[string]string{
@@ -294,7 +306,7 @@ func TestDeployToSlug_ReplacesInPlace(t *testing.T) {
 
 	// Quota delta: the owner's bytes reflect v2's COMPRESSED deduped size
 	// only (the quota basis), NOT v1+v2.
-	used2, _ := sites.SumActiveBytesByOwner(owner, time.Now().UTC())
+	used2 := ownerCharge(t, owner)
 	wantV2 := int64(r2.Site.Manifest.CompressedDedupedSize())
 	if used2 != wantV2 {
 		t.Fatalf("replace must charge the new (compressed) size only: owner sum got %d, want %d (used1 was %d)", used2, wantV2, used1)
