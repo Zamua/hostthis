@@ -58,7 +58,7 @@ func gzipTar(t *testing.T, files map[string]string) []byte {
 func newShaleDeploy(t *testing.T) (*service.DeploySite, *shaleblob.Unit, *storage.ShaleRepo) {
 	t.Helper()
 	repo, unit, _ := newBlobRepo(t) // skips when MinIO is absent
-	sites := storage.NewArtifactSites(repo, nil)
+	sites := storage.NewShaleSiteRepo(repo)
 	// ShaleRepo satisfies service.PasteByteSummer.
 	d := service.NewDeploySite(sites, repo, unit)
 	return d, unit, repo
@@ -171,7 +171,7 @@ func TestDeploySite_Shale_RedeployDropsRemovedFile(t *testing.T) {
 // taken slug.
 func TestDeploySite_Shale_PreClaimRejectsTakenSlug(t *testing.T) {
 	d, _, repo := newShaleDeploy(t)
-	sites := storage.NewArtifactSites(repo, nil)
+	sites := storage.NewShaleSiteRepo(repo)
 	ctx := context.Background()
 	now := d.Now().UTC()
 
