@@ -14,15 +14,12 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/relay"
 	"github.com/Zamua/hostthis/internal/service"
-	"github.com/Zamua/hostthis/internal/storage"
 )
 
 // relayPeerTransport is the multi-pod relay peer transport a metadata backend
@@ -115,39 +112,19 @@ type roomStore interface {
 }
 
 // buildMetadata reads HOSTTHIS_METADATA_BACKEND and returns the configured
-// bundle, defaulting to sqlite. The slatedb and shale branches error with a
-// clear message when the binary was built without `-tags slatedb`.
+// bundle, defaulting to the local engine. Every branch errors with a clear
+// message when this build cannot serve it: `local` needs a build WITHOUT
+// -tags slatedb, `slatedb` and `shale` need one WITH it.
 func buildMetadata(dataDir string, logger *log.Logger) (*metadataBundle, error) {
-	backend := strings.ToLower(envOr("HOSTTHIS_METADATA_BACKEND", "sqlite"))
+	backend := strings.ToLower(envOr("HOSTTHIS_METADATA_BACKEND", "local"))
 	switch backend {
-	case "sqlite":
-		return buildMetadataSqlite(dataDir, logger)
+	case "local":
+		return buildMetadataLocal(dataDir, logger)
 	case "slatedb":
 		return buildMetadataSlate(logger)
 	case "shale":
 		return buildMetadataShale(logger)
 	default:
-		return nil, fmt.Errorf("unknown HOSTTHIS_METADATA_BACKEND %q (want sqlite|slatedb|shale)", backend)
+		return nil, fmt.Errorf("unknown HOSTTHIS_METADATA_BACKEND %q (want local|slatedb|shale)", backend)
 	}
-}
-
-// buildMetadataSqlite is the always-compiled default, opening
-// <data-dir>/hostthis.db.
-func buildMetadataSqlite(dataDir string, logger *log.Logger) (*metadataBundle, error) {
-	if err := os.MkdirAll(dataDir, 0o750); err != nil {
-		return nil, fmt.Errorf("mkdir data-dir: %w", err)
-	}
-	db, err := storage.Open(filepath.Join(dataDir, "hostthis.db"))
-	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
-	}
-	logger.Printf("metadata: sqlite at %s", filepath.Join(dataDir, "hostthis.db"))
-	pasteRepo := storage.NewPasteRepo(db)
-	return &metadataBundle{
-		Repo:    pasteRepo,
-		KeyGate: storage.NewKeyGateRepo(db),
-		Sites:   storage.NewSiteRepo(db),
-		Rooms:   storage.NewRoomKVRepo(db),
-		Close:   db.Close,
-	}, nil
 }

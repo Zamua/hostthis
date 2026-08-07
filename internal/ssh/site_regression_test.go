@@ -18,6 +18,7 @@ import (
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // siteStack is a full real stack (sqlite + blob store + http surface + ssh
@@ -32,19 +33,14 @@ type siteStack struct {
 func newSiteStack(t *testing.T) *siteStack {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
-	repo := storage.NewPasteRepo(db)
-	sites := storage.NewSiteRepo(db)
+	repo := storagetest.NewRepo(t)
+	sites := storage.NewShaleSiteRepo(storagetest.NewRepo(t))
 
 	httpSrv := httptest.NewServer((&httpapi.Server{
 		Pastes: repo, Sites: sites, Blobs: blobUnit, ApexDomain: "paste.test",

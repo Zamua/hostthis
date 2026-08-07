@@ -18,12 +18,9 @@ import (
 	"github.com/Zamua/shale/backends/pebble"
 )
 
-// openBacking opens one in-memory pebble database.
-//
-// EPHEMERAL: the store lives in the process and is gone when it exits. That is
-// the point for tests, and it is why a deployment must build with -tags
-// slatedb - see cmd/hostthisd/metadata_shale.go, which reads the same config
-// either way.
+// openBacking opens one pebble database, on disk at cfg.LocalDir or in memory
+// when that is empty. Local either way: a node's store is its own, so this
+// cannot back a multi-node deployment.
 //
 // Multi-backend mode is not offered. Units are mounted and FENCED through a
 // storageunit.BackendFactory, whose epoch contract is a property of a SHARED
@@ -35,16 +32,18 @@ func openBacking(cfg ShaleConfig) (*backing, error) {
 		return nil, fmt.Errorf("shale: UnitCount %d requires a shared backing store; rebuild with -tags slatedb", cfg.UnitCount)
 	}
 
-	// DbName is only a label here: an in-memory FS is private to this handle,
-	// so two repos in one process cannot collide whatever they are called.
-	name := cfg.DbName
-	if name == "" {
-		name = "hostthis"
+	pc := pebble.Config{Dir: cfg.LocalDir}
+	if pc.Dir == "" {
+		// DbName is only a label here: an in-memory FS is private to this
+		// handle, so two repos in one process cannot collide whatever they are
+		// called.
+		pc.Dir = cfg.DbName
+		if pc.Dir == "" {
+			pc.Dir = "hostthis"
+		}
+		pc.Options = &pebbledb.Options{FS: vfs.NewMem()}
 	}
-	be, err := pebble.New(pebble.Config{
-		Dir:     name,
-		Options: &pebbledb.Options{FS: vfs.NewMem()},
-	})
+	be, err := pebble.New(pc)
 	if err != nil {
 		return nil, fmt.Errorf("shale: open pebble backend: %w", err)
 	}

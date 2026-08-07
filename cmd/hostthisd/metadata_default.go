@@ -1,6 +1,6 @@
-// metadata_default.go - stub for the slatedb branch when the binary
-// is NOT built with -tags slatedb. The real impl is in
-// metadata_slatedb.go which has the matching build tag.
+// metadata_default.go - stubs for the branches this build cannot serve. The
+// real impls are in metadata_slatedb.go / metadata_shale.go, which carry the
+// matching build tag.
 
 //go:build !slatedb
 

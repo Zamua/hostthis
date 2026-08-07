@@ -3,13 +3,13 @@ package http
 import (
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // buildFullStackServer wires all three read surfaces on one Server, each at its
@@ -19,12 +19,6 @@ import (
 // the paste or the site/archive read-and-write behavior").
 func buildFullStackServer(t *testing.T) *Server {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "full.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 
 	now := time.Now().UTC()
 
@@ -50,7 +44,7 @@ func buildFullStackServer(t *testing.T) *Server {
 		ApexDomain: "hostthis.test",
 		Pastes:     stubPasteReader{p: paste},
 		Sites:      stubSiteReader{s: site},
-		Rooms:      service.NewRooms(storage.NewRoomKVRepo(db)),
+		Rooms:      service.NewRooms(storage.NewShaleRoomRepo(storagetest.NewRepo(t))),
 		Blobs: stubBlobMap{m: map[string][]byte{
 			"sha-paste":      []byte("<!doctype html><h1>a paste</h1>"),
 			"sha-site-index": []byte("<h1>site home</h1>"),

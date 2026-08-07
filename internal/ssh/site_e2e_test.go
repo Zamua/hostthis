@@ -20,6 +20,7 @@ import (
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 func makeSiteArchive(t *testing.T, files map[string]string) []byte {
@@ -41,19 +42,14 @@ func makeSiteArchive(t *testing.T, files map[string]string) []byte {
 // sandbox headers, and whose route-shaped misses fall back to the root index.
 func TestDeploySiteAndServe(t *testing.T) {
 	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
-	repo := storage.NewPasteRepo(db)
-	sites := storage.NewSiteRepo(db)
+	repo := storagetest.NewRepo(t)
+	sites := storage.NewShaleSiteRepo(storagetest.NewRepo(t))
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 	deploy := service.NewDeploySite(sites, repo, blobUnit)
@@ -198,19 +194,14 @@ func TestDeploySiteAndServe(t *testing.T) {
 // a nonzero exit and an explanatory stderr line.
 func TestDeploySite_NoWebContentRejected(t *testing.T) {
 	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blobs: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
-	repo := storage.NewPasteRepo(db)
-	sites := storage.NewSiteRepo(db)
+	repo := storagetest.NewRepo(t)
+	sites := storage.NewShaleSiteRepo(storagetest.NewRepo(t))
 
 	sshListener := mustListen(t)
 	sshAddr := sshListener.Addr().String()
