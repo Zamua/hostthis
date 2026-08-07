@@ -1172,9 +1172,9 @@ func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef) 
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return fmt.Errorf("site slug check: %w", err)
 		}
-		v1 := newVersionRow(1,
-			contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, BlobID: blobID, Size: p.Size},
-			p.CreatedAt)
+		v1Ref := contentRefFromDomain(p)
+		v1Ref.BlobID = blobID
+		v1 := newVersionRow(1, v1Ref, p.CreatedAt)
 		pr := pasteFromDomain(p)
 		// The head serves v1, so it takes v1's descriptor WHOLE - the same roll
 		// an append and a pin perform. Building the head's copy separately is
