@@ -536,11 +536,9 @@ func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 		_ = tx.Rollback()
 		return err
 	}
-	v1 := versionRow{
-		VerNum:     1,
-		contentRef: contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, Size: p.Size},
-		CreatedAt:  p.CreatedAt,
-	}
+	v1 := newVersionRow(1,
+		contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, Size: p.Size},
+		p.CreatedAt)
 	if err := txPutJSON(tx, keyVersion(p.Slug, 1), v1); err != nil {
 		_ = tx.Rollback()
 		return err
@@ -844,11 +842,9 @@ func (r *SlateRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.S
 		_ = tx.Rollback()
 		return AppendResult{}, err
 	}
-	newV := versionRow{
-		VerNum:     newVer,
-		contentRef: contentRef{Kind: string(kind), ContentSHA: contentSHA, Size: size},
-		CreatedAt:  now,
-	}
+	newV := newVersionRow(newVer,
+		contentRef{Kind: string(kind), ContentSHA: contentSHA, Size: size},
+		now)
 	if err := txPutJSON(tx, keyVersion(slug, newVer), newV); err != nil {
 		_ = tx.Rollback()
 		return AppendResult{}, err
