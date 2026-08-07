@@ -851,11 +851,17 @@ silent content mixup rather than an error.
 
 A directory deployed before the collapse migrates when redeployed, but one
 nobody touches would sit on the legacy read path forever - and the old family
-cannot be deleted while any row remains. A boot sweep converts the rest: a
-node-local scan of the site family on the units THIS node mounted, no fan-out,
-run once after the node is serving. It runs late for the same reason the intent
-sweep does: converting a row writes to families on other shards, which may not
-be mounted anywhere during a cold start.
+cannot be deleted while any row remains. A sweep converts the rest: a
+node-local scan of the site family on the units THIS node mounted, no fan-out.
+It runs late for the same reason the intent sweep does - converting a row writes
+to families on other shards, which may not be mounted anywhere during a cold
+start - so a first pass runs once the node is serving.
+
+It then repeats on the sweep interval until it converges. Which units a node
+owns is still settling while a rollout is in flight, so a pass that runs then
+can legitimately see nothing, and a once-only pass would never run again. Each
+pass reports what it moved even when that is nothing, because a drain that is
+silent when idle cannot be told from one that was never wired.
 
 Each conversion is ONE transaction. The two families co-shard on the slug, so
 the artifact is written and the legacy row deleted together: the directory is
