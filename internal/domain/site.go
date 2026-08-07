@@ -37,6 +37,13 @@ type ManifestEntry struct {
 	Size           int    // uncompressed bytes (for display)
 	CompressedSize int    // stored post-zstd bytes; the quota basis (matches how pastes charge)
 	ContentType    string // by extension; see contentTypeByExt
+
+	// Kind is the RENDER kind (markdown, diff, flamegraph, ...), strictly
+	// richer than ContentType: several kinds share text/plain and are told
+	// apart by sniffing content, not by extension. Carried per entry so a
+	// single-document artifact keeps the kind it was detected as, while an
+	// ordinary file inside a directory leaves it empty and is served raw.
+	Kind string
 }
 
 // Manifest maps each safe, site-root-relative path to its blob ref. Pure

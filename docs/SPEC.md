@@ -737,66 +737,86 @@ Any guard tripping aborts the whole deploy: a half-extracted site is
 never persisted and never served (deploys are atomic - see Versioning
 below).
 
-### The Site + Manifest model
+### One artifact, not two aggregates
 
-A **Site** is a new domain aggregate that lives alongside `Paste`:
+There is ONE stored thing. A paste and a site are the same aggregate at
+different cardinalities, and modelling them separately was a mistake that cost
+a duplicate implementation of every cross-cutting concern.
 
-- `Slug` - the same 8-char slug shape pastes use, drawn from the same
-  alphabet, so a site and a paste are indistinguishable from the URL.
-- `Identity` - the owner, the uploader's SSH key fingerprint, exactly
-  as for a paste.
-- `Manifest` - the value object mapping each safe relative path to the
-  SHA256 of its blob, plus per-file size and a content-type derived
-  from the file extension.
-- `CreatedAt` / `UpdatedAt` - the same fields a paste carries.
+An **Artifact** is a slug, an owner, and a versioned **Manifest**:
 
-The `Manifest` is a pure value object: building it from extracted
-entries, looking a path up in it, and computing each file's
-content-type-by-extension are I/O-free domain operations with no
-storage or HTTP dependency, matching the domain-purity rule.
+- `Slug` - 8 chars from one alphabet and ONE namespace. A slug names exactly
+  one artifact; the cross-family collision read that used to keep pastes and
+  sites from colliding is gone, because there is no second family to collide
+  with.
+- `Identity` - the owner's SSH key fingerprint. Quota and capability gate.
+- `Manifest` - the value object mapping each safe relative path to its blob
+  (sha256, size, content-type-by-extension).
+- `PinnedVersion` / `LatestVersion`, `CreatedAt` / `UpdatedAt` - as before.
+
+**A single document is a one-entry manifest at `/`.** That is the whole
+difference between what used to be called a paste and what used to be called a
+site: how many entries the manifest holds. Nothing in storage, quota,
+enumeration, listing, deletion, or crash recovery distinguishes them.
+
+The `Manifest` stays a pure value object: building it, looking a path up in it,
+and deriving content-type from an extension are I/O-free domain operations.
+
+### A version is a whole-manifest snapshot
+
+Versioning applies to the artifact, uniformly. `versions/<slug>/<N>` holds a
+MANIFEST, not a single blob reference:
+
+- updating a single-file artifact writes a new one-entry manifest,
+- redeploying a multi-file artifact writes a new N-entry manifest,
+- `pin` selects a version, so it means the same thing for both.
+
+Per-file versioning was rejected: it gives no coherent answer to "what did this
+look like at version 3" and no sensible pin target.
+
+Two consequences worth stating:
+
+**Multi-file artifacts gain version history, pin, and rollback.** Under the old
+split, a redeploy destroyed the previous state and a bad deploy was
+unrecoverable. Uniform versioning removes that cliff.
+
+**Unchanged files cost nothing across versions.** Blobs are content-addressed
+and were already deduped within a manifest; the same dedup now spans versions,
+so a redeploy that changes one file of two hundred stores one blob.
 
 ### Storage
 
-Sites reuse the existing content-addressed `BlobStore` for their files:
-each extracted file is `Put` under its SHA256 key, so identical files
-across deploys (and across different sites) **dedupe for free** - the
-same vendored `react.min.js` in ten deploys is stored once. The blob
-layer is unchanged; a site is just many blob writes plus one manifest.
+Files live in the content-addressed `BlobStore`: each is `Put` under its
+sha256, so identical files across versions, across artifacts, and across owners
+are stored once.
 
-A new **SiteRepo** persists / gets / deletes Site records (slug ->
-owner + manifest + timestamps) next to the existing paste repo,
-behind a small service-layer interface the same way the paste repos
-are. It carries `Identity` on every record and is queried by slug,
-so the same owner-gating and not-found-on-cross-owner behavior the
-pastes get applies to sites. The repo is implemented on every metadata
-backend (sqlite as a `sites` table, slatedb / shale as a `sites/<slug>`
-KV layout), so static-site hosting runs no matter which backend is wired;
-see "Static-site storage on the slatedb (and shale) backend" under
-"Metadata storage backends" for the KV layout.
+One **ArtifactRepo** persists, gets and deletes artifacts on every metadata
+backend. There is no second repository, no second enumeration index, no second
+quota scan, and no second entry in the durable-intent vocabulary. Quota is the
+deduped blob total across an artifact's non-deleted versions - the same rule
+for one file or two hundred.
 
 ### Serving a directory
 
-A site is served by the same HTTP surface that serves pastes, with the
-same origin-isolation property: `<slug>.hostthis.dev/<path>` resolves
-the slug to its Site, looks `<path>` up in the manifest, and streams
-the referenced blob with the content-type derived from the path's
-extension. Directory handling:
+**One lookup serves everything.** `<slug>.hostthis.dev/<path>` resolves the
+slug to its artifact, looks `<path>` up in the served version's manifest, and
+streams the referenced blob with the content-type derived from the extension.
+Directory handling:
 
-- `/` and any `/<dir>/` serve that directory's `index.html` if one
-  exists in the manifest.
+- `/` and any `/<dir>/` serve that directory's `index.html` if one exists in
+  the manifest. On a one-entry manifest, `/` serves that entry.
 - A path that maps to a manifest entry serves that file.
-- An unmatched path is resolved by the **SPA fallback** (below): a path
-  that looks like a client-side ROUTE serves the root `index.html`, while
-  a path that looks like a genuinely-missing ASSET returns **404**.
+- An unmatched path is resolved by the **SPA fallback** (below): a path that
+  looks like a client-side ROUTE serves the root `index.html`, while a path
+  that looks like a genuinely-missing ASSET returns **404**.
 
-Unlike a single-file paste - which serves only at `/` on its subdomain
-and 404s every other path - a site serves its whole path space off the
-subdomain root, because a site is a directory by definition. A slug is
-EITHER a site or a paste, never both: the read path tries the site
-table first and falls back to the paste table, and slug generation
-checks both tables for collisions. The bare directory name `/<dir>`
-(no trailing slash) also resolves to `/<dir>/index.html` so links work
-with or without the slash.
+The read path used to try the site family FIRST and fall through to the paste
+family, so every single-file view paid a routed read that always missed before
+the read it actually wanted - two reads on the hottest path in the service.
+With one family there is one read.
+
+A single-file artifact still 404s every path but `/`, but that now falls out of
+its manifest having one entry rather than from a separate code path.
 
 ### SPA fallback (route vs. asset)
 
