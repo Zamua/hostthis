@@ -103,17 +103,20 @@ func (a *ArtifactSites) SweepLegacySites(ctx context.Context, now time.Time) (in
 // migration must not re-price what the owner is already paying. The cap is
 // skipped for the same reason - these bytes are already counted.
 func (a *ArtifactSites) migrateLegacySite(ctx context.Context, slug domain.Slug, now time.Time) error {
-	if _, err := a.repo.Get(slug); err == nil {
-		return nil // already an artifact
-	} else if !errors.Is(err, ErrNotFound) {
-		return err
-	}
 	site, err := a.legacy.Get(slug)
 	if err != nil {
 		return err
 	}
+	// Already converted, by a redeploy or an earlier sweep that did not finish:
+	// all that is left is the owner-sharded entry, which is a SECOND copy of the
+	// directory in that owner's listing until it goes.
+	if _, gerr := a.repo.Get(slug); gerr == nil {
+		return a.repo.DropLegacySiteEntry(site.Identity.String(), slug)
+	} else if !errors.Is(gerr, ErrNotFound) {
+		return gerr
+	}
 	root, _ := site.Manifest.Lookup("/")
-	return a.repo.InsertSupersedingSite(ctx, domain.Paste{
+	if err := a.repo.InsertSupersedingSite(ctx, domain.Paste{
 		Slug:       site.Slug,
 		Identity:   site.Identity,
 		Status:     domain.PasteStatusReady,
@@ -123,5 +126,11 @@ func (a *ArtifactSites) migrateLegacySite(ctx context.Context, slug domain.Slug,
 		CreatedAt:  site.CreatedAt,
 		UpdatedAt:  site.UpdatedAt,
 		Manifest:   site.Manifest,
-	}, now)
+	}, now); err != nil {
+		return err
+	}
+	// The entry shards on the OWNER, so it cannot ride the transaction above.
+	// A failure here leaves a duplicate listing rather than a lost directory,
+	// and the next sweep clears it through the already-converted path.
+	return a.repo.DropLegacySiteEntry(site.Identity.String(), slug)
 }

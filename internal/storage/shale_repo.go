@@ -1029,6 +1029,29 @@ func (r *ShaleRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 	return r.insertArtifact(ctx, p, userCap, now, false)
 }
 
+// DropLegacySiteEntry removes a migrated directory's OLD enumeration entry.
+//
+// Separate from the superseding insert because it shards on the OWNER while the
+// row and the artifact shard on the slug: one transaction cannot span both.
+// Idempotent, so the sweep that retries it costs nothing.
+//
+// It must happen, and a listing is why: the entry carries its own rendered
+// values, so a reader never opens the row it points at. An orphaned entry is
+// therefore not a harmless dangling pointer - it is a second copy of the
+// directory in the owner's listing.
+func (r *ShaleRepo) DropLegacySiteEntry(owner string, slug domain.Slug) error {
+	key := shaleKeyIdentitySite(owner, slug.String())
+	return r.cluster.Transact(key, func(tx backend.Transaction) error {
+		if _, err := tx.Get(key); err != nil {
+			if errors.Is(err, backend.ErrNotFound) {
+				return nil // already gone
+			}
+			return err
+		}
+		return tx.Delete(key)
+	})
+}
+
 // InsertSupersedingSite writes an artifact for a slug the legacy site family
 // still holds, deleting that row in the SAME transaction.
 //
