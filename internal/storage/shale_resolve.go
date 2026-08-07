@@ -218,3 +218,35 @@ func splitIntentKey(k []byte) (scope, id string, ok bool) {
 	}
 	return string(s), string(i), true
 }
+
+// resolveOwnerIntents settles the owner's outstanding intents opportunistically,
+// riding a read that is already talking to their {id} shard.
+//
+// This is why a phantom does not have to wait for a pod restart. The boot sweep
+// remains the guarantee - it covers owners who never come back - but in practice
+// the owner's own next listing clears their own residue.
+//
+// BEST-EFFORT: a failure here is logged and swallowed. The caller is serving a
+// user's read, and a resolver problem must never turn that into an error. Cost
+// in the normal case is one prefix scan on a shard the caller is already
+// reading, returning nothing.
+func (r *ShaleRepo) resolveOwnerIntents(ctx context.Context, owner string, now time.Time) {
+	if owner == "" {
+		return
+	}
+	out, err := r.intents.Outstanding(ctx, durable.Scope(owner))
+	if err != nil {
+		r.repoLog().Printf("shale: listing outstanding intents for %s: %v (the boot sweep still covers them)", owner, err)
+		return
+	}
+	if len(out) == 0 {
+		return
+	}
+	settled, err := r.ResolveIntents(ctx, out, now)
+	if err != nil {
+		r.repoLog().Printf("shale: resolve-on-read for %s: %v (the boot sweep still covers them)", owner, err)
+	}
+	if settled > 0 {
+		r.repoLog().Printf("shale: resolve-on-read settled %d half-finished write(s) for %s", settled, owner)
+	}
+}
