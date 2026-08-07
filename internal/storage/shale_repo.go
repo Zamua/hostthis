@@ -56,8 +56,6 @@
 // shale_guarded_index.go.
 // Site and room tiers and shard-key routing live in their own files.
 
-//go:build slatedb
-
 package storage
 
 import (
@@ -73,7 +71,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Zamua/shale/backends/slate"
 	"github.com/Zamua/shale/pkg/backend"
 	"github.com/Zamua/shale/pkg/blob"
 	"github.com/Zamua/shale/pkg/cluster"
@@ -83,7 +80,6 @@ import (
 	"github.com/Zamua/shale/pkg/storageunit"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
-	slatedb "slatedb.io/slatedb-go/uniffi"
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/durable"
@@ -275,22 +271,10 @@ type ShaleRepo struct {
 	// WaitPendingConfirms are the drain seam Close and the tests join on.
 	confirmWG sync.WaitGroup
 
-	// cache is the slatedb SST block + metadata cache shared by the slate
-	// backend (nil when CacheBytes==0). Operator-owned uniffi handle; Close
-	// Destroys it after the cluster (and its backend) have shut down.
-	cache *slatedb.DbCache
-
-	// fenceGCSettings is the slatedb Settings object that enables the fence-WAL
-	// garbage collector (see ShaleConfig.ReapFenceWALs), forwarded verbatim to
-	// every unit's DbBuilder by the slate backend. An operator-owned uniffi
-	// handle Close Destroys after the cluster (and its backends) shut down.
-	fenceGCSettings *slatedb.Settings
-
-	// closeFactory releases the multi-backend slate Backing after the cluster
-	// shuts down: cluster.Close closes the mounted unit databases, this is the
-	// backing-level net that flushes/closes anything left. Nil in
-	// single-backend mode, where cluster.Close owns the single backend.
-	closeFactory func() error
+	// backing is the opened storage engine (shale_backing.go). The cluster owns
+	// the unit databases it mounted; this holds whatever sits UNDER them, and
+	// Close releases it once they have shut down.
+	backing *backing
 
 	// Test seams (nil in production; set only through the _test exports). The
 	// repair paths' race windows are microseconds wide, so the tests that pin
@@ -324,41 +308,6 @@ func (r *ShaleRepo) repoLog() *log.Logger {
 		return r.logger
 	}
 	return log.Default()
-}
-
-// slateConfigFromShale maps a ShaleConfig to the slate.Config used to open the
-// per-node backend. Pure, so the WriteOptions wiring is unit-testable without a
-// live object store. The S3 fields copy straight through; the only logic is the
-// durability knob, and nil WriteOptions is slate's AwaitDurable=true.
-func slateConfigFromShale(cfg ShaleConfig) slate.Config {
-	sc := slate.Config{
-		Bucket:    cfg.Bucket,
-		DbName:    cfg.DbName,
-		Endpoint:  cfg.Endpoint,
-		Region:    cfg.Region,
-		AccessKey: cfg.AccessKey,
-		SecretKey: cfg.SecretKey,
-		UseSSL:    cfg.UseSSL,
-	}
-	if cfg.RelaxedDurability {
-		sc.WriteOptions = &slatedb.WriteOptions{AwaitDurable: false}
-	}
-	return sc
-}
-
-// newFenceWALGCSettings builds a slatedb Settings with the fence-WAL garbage
-// collector enabled. ONLY dry_run is flipped: every other GC category and the
-// conservative min_age (slatedb's 300s default) stay untouched, so the GC reaps
-// superseded fence WAL objects and never a data WAL or a still-live fence. See
-// ShaleConfig.ReapFenceWALs. The returned handle is operator-owned: the caller
-// forwards it to the slate backend and Destroys it on shutdown.
-func newFenceWALGCSettings() (*slatedb.Settings, error) {
-	s := slatedb.SettingsDefault()
-	if err := s.Set("garbage_collector_options.wal_fence_options.dry_run", "false"); err != nil {
-		s.Destroy()
-		return nil, err
-	}
-	return s, nil
 }
 
 // NewShaleRepo opens a shale cluster over a fresh slate backend. The caller
@@ -397,51 +346,18 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		advertiseGRPCAddr = l.Addr().String()
 	}
 
-	sc := slateConfigFromShale(cfg)
-	// Without a block cache slatedb re-fetches SST blocks from the object store
-	// on every read: on a distributed-MinIO backend that is a self-inflicted
-	// read storm, the same hot SSTs fetched hundreds of times a second. Close
-	// Destroys the handle after the cluster shuts down.
-	var cache *slatedb.DbCache
-	if cfg.CacheBytes > 0 {
-		c, cerr := slatedb.DbCacheNewMokaCache(slatedb.MokaCacheOptions{MaxCapacity: cfg.CacheBytes})
-		if cerr != nil {
-			if lis != nil {
-				_ = lis.Close()
-			}
-			return nil, fmt.Errorf("shale: build slatedb block cache: %w", cerr)
+	// The storage engine, chosen at build time (shale_backing.go). Opened
+	// before the cluster because the cluster mounts it.
+	bk, err := openBacking(cfg)
+	if err != nil {
+		if lis != nil {
+			_ = lis.Close()
 		}
-		sc.Cache = c
-		cache = c
-	}
-
-	// The slate backend forwards these Settings verbatim to every unit's
-	// DbBuilder (both the single-backend slate.Config and the multi-backend
-	// BackingConfig below). Built before cleanup so the closure Destroys it on
-	// any later open error.
-	var fenceGCSettings *slatedb.Settings
-	if cfg.ReapFenceWALs {
-		s, sErr := newFenceWALGCSettings()
-		if sErr != nil {
-			if cache != nil {
-				cache.Destroy()
-			}
-			if lis != nil {
-				_ = lis.Close()
-			}
-			return nil, fmt.Errorf("shale: build fence-WAL GC settings: %w", sErr)
-		}
-		sc.Settings = s
-		fenceGCSettings = s
+		return nil, err
 	}
 
 	cleanup := func() {
-		if cache != nil {
-			cache.Destroy()
-		}
-		if fenceGCSettings != nil {
-			fenceGCSettings.Destroy()
-		}
+		_ = bk.releaseAll()
 		if lis != nil {
 			_ = lis.Close()
 		}
@@ -494,45 +410,7 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		}
 	}
 
-	var closeFactory func() error
-	if cfg.UnitCount > 0 {
-		// MULTI-BACKEND (sharded): UnitCount independent slatedb unit databases
-		// under cfg.DbName as the shared key-prefix, distributed across the ring
-		// and routed per key by ShardKeyFn (docs/SPEC.md "Sharded metadata").
-		uc, ucErr := storageunit.NewUnitCount(cfg.UnitCount)
-		if ucErr != nil {
-			cleanup()
-			return nil, fmt.Errorf("shale: invalid UnitCount %d (must be a power of two): %w", cfg.UnitCount, ucErr)
-		}
-		backing, bErr := slate.NewBacking(slate.BackingConfig{
-			Bucket:                   cfg.Bucket,
-			Endpoint:                 cfg.Endpoint,
-			Region:                   cfg.Region,
-			AccessKey:                cfg.AccessKey,
-			SecretKey:                cfg.SecretKey,
-			UseSSL:                   cfg.UseSSL,
-			KeyPrefix:                cfg.DbName,
-			Cache:                    cache,
-			Settings:                 fenceGCSettings,
-			RelaxedReplicaDurability: cfg.RelaxedDurability,
-		})
-		if bErr != nil {
-			cleanup()
-			return nil, fmt.Errorf("shale: open slate backing: %w", bErr)
-		}
-		handle := backing.Handle()
-		clusterCfg.BackendFactory = handle
-		clusterCfg.UnitCount = uc
-		closeFactory = handle.Close
-	} else {
-		// SINGLE-BACKEND: one slatedb database.
-		be, beErr := slate.New(sc)
-		if beErr != nil {
-			cleanup()
-			return nil, fmt.Errorf("shale: open slate backend: %w", beErr)
-		}
-		clusterCfg.Backend = be
-	}
+	bk.applyTo(&clusterCfg)
 
 	// Declarative resharding needs BOTH a multi-backend cluster (nothing to
 	// reshard otherwise) and a shared CAS arbiter to coordinate the generation
@@ -551,11 +429,6 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	if cfg.BlobStore != nil {
 		bkv, berr := cluster.NewBlobKV(clusterCfg)
 		if berr != nil {
-			if closeFactory != nil {
-				_ = closeFactory()
-			} else if clusterCfg.Backend != nil {
-				_ = clusterCfg.Backend.Close()
-			}
 			cleanup()
 			return nil, fmt.Errorf("shale: open blob cluster: %w", berr)
 		}
@@ -564,11 +437,6 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	} else {
 		c, oerr := cluster.Open(clusterCfg)
 		if oerr != nil {
-			if closeFactory != nil {
-				_ = closeFactory()
-			} else if clusterCfg.Backend != nil {
-				_ = clusterCfg.Backend.Close()
-			}
 			cleanup()
 			return nil, fmt.Errorf("shale: open cluster: %w", oerr)
 		}
@@ -576,16 +444,14 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	}
 
 	r := &ShaleRepo{
-		cluster:         cl,
-		intents:         NewShaleIntentLog(cl, cfg.Logger),
-		kv:              kv,
-		logger:          cfg.Logger,
-		bindAddr:        cfg.BindAddr,
-		grpcAddr:        advertiseGRPCAddr,
-		nodeID:          cfg.NodeID,
-		cache:           cache,
-		fenceGCSettings: fenceGCSettings,
-		closeFactory:    closeFactory,
+		cluster:  cl,
+		intents:  NewShaleIntentLog(cl, cfg.Logger),
+		kv:       kv,
+		logger:   cfg.Logger,
+		bindAddr: cfg.BindAddr,
+		grpcAddr: advertiseGRPCAddr,
+		nodeID:   cfg.NodeID,
+		backing:  bk,
 	}
 
 	// Stand up the peer-forwarding server the cluster advertised via gossip but
@@ -634,23 +500,10 @@ func (r *ShaleRepo) Close() error {
 	if r.cluster != nil {
 		err = r.cluster.Close()
 	}
-	// Release the slate Backing only after the cluster closed its mounted units.
-	if r.closeFactory != nil {
-		if ferr := r.closeFactory(); ferr != nil && err == nil {
-			err = ferr
-		}
-	}
-	// AFTER the cluster (and its slate backend) shut down, so no in-flight read
-	// still references it.
-	if r.cache != nil {
-		r.cache.Destroy()
-		r.cache = nil
-	}
-	// Same ordering: the opened units captured their GC config at Build time, so
-	// nothing references this handle once they have shut down.
-	if r.fenceGCSettings != nil {
-		r.fenceGCSettings.Destroy()
-		r.fenceGCSettings = nil
+	// Only after the cluster closed its mounted units: they read through the
+	// engine resources this releases, so a live unit must never outlive them.
+	if berr := r.backing.releaseUnowned(); berr != nil && err == nil {
+		err = berr
 	}
 	return err
 }

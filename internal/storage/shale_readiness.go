@@ -2,8 +2,6 @@
 // liveness"): pass-throughs to the embedded cluster so the composition root
 // can gate /readyz on mount state without storage exporting the cluster.
 
-//go:build slatedb
-
 package storage
 
 import "github.com/Zamua/shale/pkg/cluster"

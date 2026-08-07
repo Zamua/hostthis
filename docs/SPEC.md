@@ -3459,6 +3459,41 @@ provided beneath the app by object-store versioning plus a
 noncurrent-version lifecycle, an operator-level safety net configured
 outside this repo.
 
+### The storage-engine seam
+
+`ShaleRepo` does not name a storage engine. Everything it implements -
+the key layout, the durable intents, the scan-derived quota, the
+guarded index writes - is engine-independent, and one function chooses
+what the cluster mounts underneath:
+
+```go
+func openBacking(cfg ShaleConfig) (*backing, error)
+```
+
+It has two implementations, selected by build tag:
+
+| build | engine | units | durability |
+| --- | --- | --- | --- |
+| `-tags slatedb` | slate (SlateDB on an object store) | single or `UnitCount` sharded | durable, shared |
+| default | pebble, in memory | single only | process-lifetime |
+
+The default build therefore compiles and exercises the WHOLE shale
+implementation with no cgo, no native library and no object store, so
+`go test ./...` covers code that previously only a tagged build could
+even compile.
+
+Pebble refuses `UnitCount > 0` rather than quietly serving one unit.
+Units are mounted and FENCED through a `storageunit.BackendFactory`
+whose epoch contract is a property of a store that outlives a node; a
+process-local engine has nothing to fence against. Answering a request
+for sharded storage with unsharded storage would be a silent
+downgrade, so it is an error.
+
+The stored row and key shapes are engine-independent by construction
+(`internal/storage/rows.go`): a row written by one engine is readable
+by the next, which is what makes the engine a build-time choice rather
+than a migration.
+
 ### Static-site storage on the slatedb (and shale) backend
 
 The "Static site archives" feature persists a **Site** (slug -> owner +
