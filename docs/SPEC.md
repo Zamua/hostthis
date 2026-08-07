@@ -842,9 +842,26 @@ self-sufficient: resolving a file needs the manifest alone, with no side-table
 to keep in step with it. A redeploy stages only the files that CHANGED, so an
 entry with no newly staged blob keeps the id a previous deploy bound.
 
-The flat descriptor's blob id is the ROOT entry's. Pairing the root's content
-hash with an arbitrary one of a directory's staged blobs would resolve the root
-to some other file's bytes.
+The flat descriptor's blob id is the ROOT entry's, on every write path that
+sets one. Pairing the root's content hash with an arbitrary one of a
+directory's staged blobs resolves the root to some other file's bytes - a
+silent content mixup rather than an error.
+
+### Draining the legacy site family
+
+A directory deployed before the collapse migrates when redeployed, but one
+nobody touches would sit on the legacy read path forever - and the old family
+cannot be deleted while any row remains. A boot sweep converts the rest: a
+node-local scan of the site family on the units THIS node mounted, no fan-out,
+run once after the node is serving. It runs late for the same reason the intent
+sweep does: converting a row writes to families on other shards, which may not
+be mounted anywhere during a cold start.
+
+Each conversion is ONE transaction. The two families co-shard on the slug, so
+the artifact is written and the legacy row deleted together: the directory is
+never in both places (listed twice, charged twice) and never in neither (lost).
+The charged size carries over verbatim - a migration must not re-price what the
+owner is already paying.
 
 A directory is written through the SAME insert a document uses: the caller
 supplies a manifest, which is carried into the stored descriptor verbatim. A
