@@ -104,6 +104,12 @@ type ShaleConfig struct {
 	UseSSL    bool   // false -> slate sets AWS_ALLOW_HTTP=true (MinIO dev)
 	DbName    string // logical db name within the bucket; key prefix for SlateDB files
 
+	// LocalDir is the on-disk location for a build whose engine is LOCAL (see
+	// shale_backing.go). Empty means keep the store in memory, which is what a
+	// test wants. The object-store engine ignores it: its location is the
+	// bucket plus DbName above.
+	LocalDir string
+
 	// UnitCount selects the backend SHAPE. Zero opens the single-backend path:
 	// one slatedb database per node. A value >= 1, which MUST be a power of two,
 	// selects MULTI-BACKEND (sharded) mode: the keyspace is partitioned into
@@ -323,9 +329,8 @@ func (r *ShaleRepo) repoLog() *log.Logger {
 // when GRPCAddr is ":0": the real port is known only after Listen, and a peer
 // forwarding to the advertised address must reach the one actually served.
 func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
-	if cfg.Bucket == "" {
-		return nil, fmt.Errorf("ShaleConfig.Bucket required")
-	}
+	// Bucket is NOT checked here: it is an object-store field, and whether one
+	// is required is the engine's business (shale_backing.go).
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("ShaleConfig.NodeID required")
 	}

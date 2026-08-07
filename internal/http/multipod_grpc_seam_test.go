@@ -30,6 +30,7 @@ import (
 	"github.com/Zamua/hostthis/internal/relay/relaygrpc"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // grpcPod is one pod of the seam fixture: the HTTP surface + relay plus
@@ -51,13 +52,7 @@ func (p fixedPeers) Addresses() []string { return p }
 // by the real gRPC transport in both directions.
 func buildGRPCPair(t *testing.T) [2]*grpcPod {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := storage.Open(dir + "/seam.db")
-	if err != nil {
-		t.Fatalf("open shared store: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	repo := storage.NewRoomKVRepo(db)
+	repo := storage.NewShaleRoomRepo(storagetest.NewRepo(t))
 
 	var pods [2]*grpcPod
 	for i := range pods {

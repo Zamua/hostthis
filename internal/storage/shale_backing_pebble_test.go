@@ -22,7 +22,6 @@ func newPebbleShaleRepo(t *testing.T) *storage.ShaleRepo {
 	t.Helper()
 	repo, err := storage.NewShaleRepo(storage.ShaleConfig{
 		NodeID:            "pebble-node",
-		Bucket:            "unused-by-a-local-engine",
 		DbName:            fmt.Sprintf("pebble-%s", t.Name()),
 		ReplicationFactor: 1,
 	})
@@ -84,7 +83,6 @@ func TestPebbleBacking_RoundTrip(t *testing.T) {
 func TestPebbleBacking_RefusesMultiBackend(t *testing.T) {
 	_, err := storage.NewShaleRepo(storage.ShaleConfig{
 		NodeID:            "pebble-node",
-		Bucket:            "unused-by-a-local-engine",
 		DbName:            "pebble-units",
 		ReplicationFactor: 1,
 		UnitCount:         4,

@@ -43,7 +43,7 @@ technical layer.
   its own package(s) and imports *nothing* from infrastructure - no
   SQL, no SSH, no HTTP, no third-party SDKs. It's plain Go data + pure
   functions you can test without spinning up anything.
-- Infrastructure adapters (sqlite repo, SSH server, HTTP handlers,
+- Infrastructure adapters (metadata repo, SSH server, HTTP handlers,
   filesystem blob store) live in separate packages and depend on the
   domain. The domain never depends back.
 - Application services orchestrate use cases by composing the domain
@@ -64,7 +64,7 @@ code they cover, not a follow-up.
   pins the *current* behavior first, then change the code + the test
   together. Keeps regressions visible.
 - Prefer integration tests over unit tests where the boundary is real
-  (sqlite, real SSH session via in-memory listener, etc.) - they catch
+  (a real metadata repo, a real SSH session via in-memory listener, etc.) - they catch
   more, mock less. Reserve unit tests for pure domain logic where
   there's nothing to integrate.
 - A PR that "adds a feature without tests" doesn't ship. The spec edit
@@ -87,7 +87,7 @@ docs(spec): clarify version pinning for keyed pastes
 cmd/hostthisd/       single binary entry point
 internal/
   domain/            pure types + invariants (no I/O)
-  storage/           sqlite repos + on-disk blob store
+  storage/           metadata repos + on-disk blob store
   service/           use cases (upload, manage, sweep)
   ssh/               gliderlabs ssh server + verb dispatch
   http/              apex landing + paste read surface

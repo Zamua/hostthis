@@ -28,7 +28,6 @@ import (
 	"maps"
 	nethttp "net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -37,6 +36,7 @@ import (
 	"github.com/Zamua/hostthis/internal/relay"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // --- the in-process multi-pod fixture ---------------------------------------
@@ -88,13 +88,7 @@ func (b *memBridge) Publish(key relay.RoomKey, f relay.Frame) {
 // zero-peer relay, which on a multi-pod deploy is the bug).
 func buildMultiPod(t *testing.T, n int, bridged bool) *multiPod {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "multipod.db"))
-	if err != nil {
-		t.Fatalf("open shared store: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	repo := storage.NewRoomKVRepo(db)
+	repo := storage.NewShaleRoomRepo(storagetest.NewRepo(t))
 
 	h := &multiPod{t: t, alive: make([]bool, n)}
 	for i := range n {

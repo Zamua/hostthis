@@ -14,6 +14,7 @@ import (
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // newRealStack builds the upload service backed by real sqlite and a real blob
@@ -21,17 +22,12 @@ import (
 func newRealStack(t *testing.T) *Upload {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blobs: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
-	u := NewUpload(storage.NewPasteRepo(db), NewStandaloneBlobUnit(blobs))
+	u := NewUpload(storagetest.NewRepo(t), NewStandaloneBlobUnit(blobs))
 	// The blob write finalizes in a background goroutine: drain in-flight
 	// finalizers before the TempDir is torn down so the async write cannot race
 	// the cleanup.
@@ -181,13 +177,7 @@ func (r *slugTakenNTimesRepo) InsertWithQuotaCheck(ctx context.Context, p domain
 // silent remints, which leave committed orphan row-sets on backends whose
 // insert retry can misread its own committed write, are never invisible.
 func TestUpload_Create_LogsSlugRemint(t *testing.T) {
-	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	repo := &slugTakenNTimesRepo{PasteRepo: storage.NewPasteRepo(db), failures: 2}
+	repo := &slugTakenNTimesRepo{PasteRepo: storagetest.NewRepo(t), failures: 2}
 	u := NewUpload(repo, NewStandaloneBlobUnit(newFakeBlobs()))
 	var buf bytes.Buffer
 	u.Logger = log.New(&buf, "", 0)

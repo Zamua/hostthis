@@ -3,26 +3,20 @@ package service
 import (
 	"bytes"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // newRoomsSvc wires a Rooms service over the real sqlite-backed repo so the
 // rate-limit + cap + isolation behavior is exercised end-to-end.
 func newRoomsSvc(t *testing.T) (*Rooms, *fixedClock) {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	clk := &fixedClock{t: time.Now().UTC().Truncate(time.Second)}
-	svc := NewRooms(storage.NewRoomKVRepo(db))
+	svc := NewRooms(storage.NewShaleRoomRepo(storagetest.NewRepo(t)))
 	svc.Now = clk.now
 	return svc, clk
 }

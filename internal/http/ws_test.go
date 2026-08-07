@@ -7,7 +7,6 @@ import (
 	"io"
 	nethttp "net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,6 +18,7 @@ import (
 	"github.com/Zamua/hostthis/internal/relay"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
@@ -30,13 +30,7 @@ const wsTestApex = "hostthis.test"
 // through the full mux + upgrade handler.
 func wsTestServer(t *testing.T, limits relay.Limits) (*httptest.Server, *service.Rooms, *relay.Relay) {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	rooms := service.NewRooms(storage.NewRoomKVRepo(db))
+	rooms := service.NewRooms(storage.NewShaleRoomRepo(storagetest.NewRepo(t)))
 	rl := relay.NewRelay(rooms, limits)
 	srv := &Server{
 		ApexDomain: wsTestApex,

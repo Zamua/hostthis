@@ -23,6 +23,7 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // readAllRC drains a ReadCloser to bytes (the caller still owns Close).
@@ -113,11 +114,6 @@ func TestUpload_Create_Shale_CountsTowardQuota(t *testing.T) {
 // finalizer flips it to READY and writes the blob.
 func TestUpload_Create_Standalone_PendingPathIntact(t *testing.T) {
 	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blobs: %v", err)
@@ -127,7 +123,7 @@ func TestUpload_Create_Standalone_PendingPathIntact(t *testing.T) {
 	if standalone.IsTransactional() {
 		t.Fatalf("standalone unit IsTransactional() = true, want false")
 	}
-	repo := storage.NewPasteRepo(db)
+	repo := storagetest.NewRepo(t)
 	u := service.NewUpload(repo, standalone)
 
 	raw := []byte("<!doctype html><h1>standalone create</h1>")

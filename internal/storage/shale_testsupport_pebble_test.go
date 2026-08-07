@@ -24,7 +24,6 @@ func newShaleRepoForTest(t *testing.T) *storage.ShaleRepo {
 	seq := pebbleSupportSeq.Add(1)
 	repo, err := storage.NewShaleRepo(storage.ShaleConfig{
 		NodeID:            fmt.Sprintf("pebble-node-%d", seq),
-		Bucket:            "unused-by-a-local-engine",
 		DbName:            fmt.Sprintf("pebble-support-%d", seq),
 		ReplicationFactor: 1,
 	})

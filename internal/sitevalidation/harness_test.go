@@ -30,6 +30,7 @@ import (
 	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 const apexDomain = "paste.test"
@@ -154,20 +155,14 @@ func deployFixture(t *testing.T, demo string) ([]distFile, deployedSite) {
 	t.Helper()
 	dir := t.TempDir()
 
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
 	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
-	pastes := storage.NewPasteRepo(db)
-	sites := storage.NewSiteRepo(db)
+	pastes := storagetest.NewRepo(t)
+	sites := storage.NewShaleSiteRepo(storagetest.NewRepo(t))
 	deploy := service.NewDeploySite(sites, pastes, blobUnit)
 
 	files := readDist(t, fixtureDist(t, demo))

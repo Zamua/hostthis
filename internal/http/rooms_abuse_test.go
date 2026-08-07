@@ -9,6 +9,7 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // reqXFF POSTs /api/rooms with a chosen RemoteAddr and an optional
@@ -76,15 +77,9 @@ func TestRoomsHTTP_XFFTrustedWhenOptedIn(t *testing.T) {
 // naming no live app 404s, so an attacker cannot rotate through the ~10^12 slug
 // space to mint a fresh per-app budget under each one.
 func TestRoomsHTTP_CreateUnknownAppIs404(t *testing.T) {
-	dir := t.TempDir()
-	db, err := storage.Open(dir + "/test.db")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	srv := &Server{
 		ApexDomain: "hostthis.test",
-		Rooms:      service.NewRooms(storage.NewRoomKVRepo(db)),
+		Rooms:      service.NewRooms(storage.NewShaleRoomRepo(storagetest.NewRepo(t))),
 		// No Sites, no Pastes: no slug resolves to a live app.
 	}
 	if w := req(t, srv, http.MethodPost, "appz2345", "/api/rooms", nil); w.Code != http.StatusNotFound {
@@ -95,12 +90,6 @@ func TestRoomsHTTP_CreateUnknownAppIs404(t *testing.T) {
 // TestRoomsHTTP_CreateLivePasteAppSucceeds pins the spec's "an app is a
 // deployed static site or a paste": a live paste alone is a valid room host.
 func TestRoomsHTTP_CreateLivePasteAppSucceeds(t *testing.T) {
-	dir := t.TempDir()
-	db, err := storage.Open(dir + "/test.db")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	now := time.Now().UTC()
 	livePaste := domain.Paste{
 		Slug:       "appz2345",
@@ -110,7 +99,7 @@ func TestRoomsHTTP_CreateLivePasteAppSucceeds(t *testing.T) {
 	}
 	srv := &Server{
 		ApexDomain: "hostthis.test",
-		Rooms:      service.NewRooms(storage.NewRoomKVRepo(db)),
+		Rooms:      service.NewRooms(storage.NewShaleRoomRepo(storagetest.NewRepo(t))),
 		Pastes:     stubPasteReader{p: livePaste},
 	}
 	if w := req(t, srv, http.MethodPost, "appz2345", "/api/rooms", nil); w.Code != http.StatusCreated {

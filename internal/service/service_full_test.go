@@ -9,6 +9,7 @@ import (
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // fullBlobStore models the object store rejecting a Put at its bucket quota:
@@ -74,12 +75,7 @@ func TestUpload_BlobQuotaDrivesFinalizeToFailed(t *testing.T) {
 // error.
 func TestManageUpdate_BlobQuotaSurfacesServiceFull(t *testing.T) {
 	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	repo := storage.NewPasteRepo(db)
+	repo := storagetest.NewRepo(t)
 
 	// An owned paste, so Update reaches the blob write instead of being
 	// rejected by the owner check.
@@ -106,18 +102,12 @@ func TestManageUpdate_BlobQuotaSurfacesServiceFull(t *testing.T) {
 // TestDeploySite_BlobQuotaSurfacesServiceFull pins that the blob Put rejection
 // propagates out through the safe-untar sink as ErrServiceFull.
 func TestDeploySite_BlobQuotaSurfacesServiceFull(t *testing.T) {
-	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	sites := storage.NewSiteRepo(db)
-	pastes := storage.NewPasteRepo(db)
+	sites := storage.NewShaleSiteRepo(storagetest.NewRepo(t))
+	pastes := storagetest.NewRepo(t)
 	d := NewDeploySite(sites, pastes, fullBlobUnit(t))
 
 	arc := gzipTar(t, map[string]string{"index.html": "<!doctype html><h1>hi</h1>"})
-	_, err = d.Deploy(bytes.NewReader(arc), "key:owner")
+	_, err := d.Deploy(bytes.NewReader(arc), "key:owner")
 	if !errors.Is(err, ErrServiceFull) {
 		t.Fatalf("blob-quota deploy = %v, want service.ErrServiceFull", err)
 	}

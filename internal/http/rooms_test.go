@@ -6,13 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // liveAppSiteReader treats EVERY parseable slug as a live site, standing in
@@ -35,13 +35,7 @@ func (liveAppSiteReader) Get(slug domain.Slug) (domain.Site, error) {
 // sqlite repo, in subdomain mode, so a request runs mux -> service -> storage.
 func buildRoomServer(t *testing.T) *Server {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	rooms := service.NewRooms(storage.NewRoomKVRepo(db))
+	rooms := service.NewRooms(storage.NewShaleRoomRepo(storagetest.NewRepo(t)))
 	return &Server{
 		ApexDomain: "hostthis.test",
 		Rooms:      rooms,

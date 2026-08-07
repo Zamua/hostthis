@@ -20,6 +20,9 @@ import (
 // call and are Destroyed by the returned release, so every failure path below
 // tears down what it already built rather than leaking a uniffi object.
 func openBacking(cfg ShaleConfig) (*backing, error) {
+	if cfg.Bucket == "" {
+		return nil, fmt.Errorf("ShaleConfig.Bucket required by the object-store engine")
+	}
 	sc := slateConfigFromShale(cfg)
 
 	// Without a block cache slatedb re-fetches SST blocks from the object store

@@ -33,6 +33,7 @@ import (
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // ---------------------------------------------------------------------------
@@ -46,8 +47,8 @@ type gatedStack struct {
 	t           *testing.T
 	httpURL     string
 	sshAddr     string
-	repo        *storage.PasteRepo
-	keyGateRepo *storage.KeyGateRepo
+	repo        *storage.ShaleRepo
+	keyGateRepo *storage.ShaleRepo
 	keyGate     *service.KeyGate
 }
 
@@ -56,22 +57,17 @@ type gatedStack struct {
 func startGatedStack(t *testing.T, freshKeysPerSubnet int) *gatedStack {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blobs: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
-	repo := storage.NewPasteRepo(db)
+	repo := storagetest.NewRepo(t)
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 	manage := service.NewManage(repo, blobUnit)
-	kgRepo := storage.NewKeyGateRepo(db)
+	kgRepo := storagetest.NewRepo(t)
 	keyGate := service.NewKeyGate(kgRepo)
 	keyGate.MaxFreshKeysPerSubnet = freshKeysPerSubnet
 	manage.KeyGate = keyGate
@@ -1041,22 +1037,17 @@ func startProxyProtoStack(t *testing.T, freshKeysPerSubnet int) *proxyProtoStack
 	t.Helper()
 	t.Setenv("HOSTTHIS_SSH_PROXY_PROTOCOL", "true")
 	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blobs: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
-	repo := storage.NewPasteRepo(db)
+	repo := storagetest.NewRepo(t)
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 	manage := service.NewManage(repo, blobUnit)
-	kgRepo := storage.NewKeyGateRepo(db)
+	kgRepo := storagetest.NewRepo(t)
 	kg := service.NewKeyGate(kgRepo)
 	kg.MaxFreshKeysPerSubnet = freshKeysPerSubnet
 	manage.KeyGate = kg

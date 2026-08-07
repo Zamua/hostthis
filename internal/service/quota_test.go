@@ -10,22 +10,18 @@ import (
 
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
-func newStack(t *testing.T) (*service.Upload, *service.Manage, *storage.PasteRepo) {
+func newStack(t *testing.T) (*service.Upload, *service.Manage, *storage.ShaleRepo) {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "q.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blobs: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
-	repo := storage.NewPasteRepo(db)
+	repo := storagetest.NewRepo(t)
 	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(blobs))
 	// Blobs are written by a background finalizer goroutine. Drain it before
 	// the t.TempDir() cleanup (registered above, so LIFO runs it later)
