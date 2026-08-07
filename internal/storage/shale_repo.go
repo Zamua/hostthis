@@ -1026,6 +1026,20 @@ func (r *ShaleRepo) blobRefFor(routeKey []byte, blobID string) cluster.BlobRef {
 // subsequent scan must see this paste. A crash between the two leaves a paste
 // the index does not list: a bounded under-count the owner's next list heals.
 func (r *ShaleRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error {
+	return r.insertArtifact(ctx, p, userCap, now, false)
+}
+
+// InsertSupersedingSite writes an artifact for a slug the legacy site family
+// still holds, deleting that row in the SAME transaction.
+//
+// The two families co-shard on the slug, so this is atomic: the directory is
+// never in both places (listed twice, charged twice) and never in neither
+// (lost). That is why the migration cannot be an insert followed by a delete.
+func (r *ShaleRepo) InsertSupersedingSite(ctx context.Context, p domain.Paste, now time.Time) error {
+	return r.insertArtifact(ctx, p, 0, now, true)
+}
+
+func (r *ShaleRepo) insertArtifact(ctx context.Context, p domain.Paste, userCap int64, now time.Time, supersedesSite bool) error {
 	identity := p.Identity.String()
 	body := int64(p.Size)
 
@@ -1049,10 +1063,16 @@ func (r *ShaleRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 	// not atomic with the authoritative insert below - that CAS carries the
 	// authoritative check - so a genuine race still strands one entry, bounded
 	// and pruned by the next ListByOwner.
-	if taken, err := r.slugTaken(p.Slug); err != nil {
-		return err
-	} else if taken {
-		return ErrSlugTaken
+	//
+	// Skipped when superseding: the migration KNOWS the slug is held, by the
+	// very row it is replacing, and the authoritative CAS below is what
+	// actually enforces the rule.
+	if !supersedesSite {
+		if taken, err := r.slugTaken(p.Slug); err != nil {
+			return err
+		} else if taken {
+			return ErrSlugTaken
+		}
 	}
 
 	// T0: record the intent BEFORE touching anything. Written first so its
@@ -1087,7 +1107,7 @@ func (r *ShaleRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 		r.repoLog().Printf("shale: recording the entry step for %s: %v (a sweep will still roll back, using the row check alone)", p.Slug, err)
 	}
 
-	if err := r.insertAuthoritative(p, binds); err != nil {
+	if err := r.insertAuthoritative(p, binds, supersedesSite); err != nil {
 		// The entry written above is now an orphan. Best-effort removal keeps
 		// the common failure (a slug race) from charging the owner; if it fails,
 		// the intent stays and a sweep finishes the job.
@@ -1175,7 +1195,7 @@ func (r *ShaleRepo) runAuthoritative(pinKey []byte, refs []cluster.BlobRef, body
 // A staged blob in refs is BOUND in this same transaction, so the pointer
 // co-commits with the row and the blob id lands on both the head and the v1
 // version row.
-func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef) error {
+func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef, supersedesSite bool) error {
 	pasteKey := shaleKeyPaste(p.Slug)
 	blobID := firstBlobID(refs)
 	return r.runAuthoritative(pasteKey, refs, func(tx shaleKVTx, bind func() error) error {
@@ -1190,7 +1210,14 @@ func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef) 
 		// pastes/<slug>, so this stays a same-shard read inside the CAS; the
 		// site insert carries the reciprocal check.
 		if _, err := tx.Get(shaleKeySite(p.Slug)); err == nil {
-			return ErrSlugTaken
+			if !supersedesSite {
+				return ErrSlugTaken
+			}
+			// Migrating: the row this artifact replaces goes in the same
+			// transaction, so the slug is never owned by both families.
+			if derr := tx.Delete(shaleKeySite(p.Slug)); derr != nil {
+				return fmt.Errorf("supersede site row: %w", derr)
+			}
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return fmt.Errorf("site slug check: %w", err)
 		}
@@ -1534,7 +1561,10 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now ti
 			wasPinned = p.PinnedVersion != 0
 
 			vRef := ref
-			vRef.BlobID = blobID
+			// The ROOT's blob, not an arbitrary one of the staged set: pairing
+			// the root's ContentSHA with another file's blob resolves the root
+			// to that file's bytes.
+			vRef.BlobID = servedBlobID(domain.Paste{Manifest: ref.decode()}, blobID)
 			newV := newVersionRow(newVer, vRef, now)
 			if err := shaleTxPutJSON(tx, verKey, newV); err != nil {
 				return err

@@ -296,16 +296,15 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 	if err != nil {
 		return nil, err
 	}
+	sites := storage.NewArtifactSites(repo, storage.NewShaleSiteRepo(repo))
 	bundle := &metadataBundle{
 		Repo:    repo,
 		KeyGate: repo,
-		// ShaleSiteRepo shares the same shale cluster (shard routing +
-		// per-shard CAS) as the paste repo, so a non-nil Sites lights up
-		// archive hosting on shale.
-		// A directory is an artifact. The old site family is the read-only
-		// fallback, so deploys predating the collapse keep serving until a
-		// redeploy migrates them.
-		Sites: storage.NewArtifactSites(repo, storage.NewShaleSiteRepo(repo)),
+		// A directory is an artifact, sharing the same cluster (shard routing
+		// + per-shard CAS) as every other. The old site family is the
+		// read-only fallback, so deploys predating the collapse keep serving
+		// until they are migrated.
+		Sites: sites,
 		// ShaleRoomRepo shares the same cluster, co-locating every room family
 		// on the {app-slug} shard.
 		Rooms: storage.NewShaleRoomRepo(repo),
@@ -347,6 +346,8 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 	// Shale writes span two shards, so it is the one backend that can be left
 	// with a half-finished write to settle.
 	bundle.IntentSweeper = repo
+	// Drains the pre-unification site family onto the artifact families.
+	bundle.LegacySiteSweeper = sites
 
 	// OPTIONAL live-diagnosis endpoint. With HOSTTHIS_SHALE_DEBUG_ADDR set (e.g.
 	// ":6060"), serve the embedded cluster's per-position handoff dump at
