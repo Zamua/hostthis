@@ -504,3 +504,28 @@ func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
 	s.handles = append(s.handles, handle)
 	return sha, compressedSize, nil
 }
+
+// ArchiveAdapter presents DeploySite as the upload service's ArchiveDeployer,
+// so one Create call handles both cardinalities and no transport has to know
+// there are two services behind it.
+//
+// It exists only while the two services are separate. When they merge it goes
+// away with them - it maps the multi-file result onto the shared Result rather
+// than converting between two lasting shapes.
+type ArchiveAdapter struct{ Deployer *DeploySite }
+
+func (a ArchiveAdapter) Deploy(body io.Reader, owner string) (Result, error) {
+	res, err := a.Deployer.Deploy(body, owner)
+	if err != nil {
+		return Result{}, err
+	}
+	// Only the slug and owner are read downstream; the manifest stays on the
+	// stored artifact rather than being copied into the response.
+	return Result{Paste: domain.Paste{
+		Slug:      res.Site.Slug,
+		Identity:  res.Site.Identity,
+		Kind:      domain.KindSite,
+		CreatedAt: res.Site.CreatedAt,
+		UpdatedAt: res.Site.UpdatedAt,
+	}}, nil
+}
