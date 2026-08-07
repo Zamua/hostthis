@@ -3794,6 +3794,19 @@ the upload's collision-retry loop would strand an entry. The pre-check is not
 atomic with the authoritative insert, so a genuine race still strands one -
 bounded, and left as a phantom.
 
+**A failed insert rolls back only an entry that is genuinely an orphan.** When
+the authoritative write fails, the entry written first is normally removed, so a
+collision does not charge a would-be owner. It is KEPT in two cases: when the
+slug's row turns out to belong to the same identity, and when that row cannot be
+read at all. Two callers inserting the same artifact write the one entry key, so
+the loser's rollback would otherwise delete an entry the winner's row depends on
+- producing the row with no entry above, the state this whole ordering exists to
+avoid, and reached by a path no crash-window argument covers. It is the worse
+failure in that table arrived at deliberately: the artifact serves every file
+and reports its versions while being absent from its owner's listing and free of
+charge. An unreadable row counts as the same case rather than as absence,
+because the two call for opposite actions and only one of them can be undone.
+
 **What a crash costs, and what bounds it.** A crashed insert leaves an entry
 whose cached bytes count against the owner's quota and shows a slug in their
 list that does not resolve. That is an OVER-count: it can wrongly refuse an
