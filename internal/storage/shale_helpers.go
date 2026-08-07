@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"time"
 
@@ -61,6 +62,14 @@ func shaleKeyIdentityPaste(identity, slug string) []byte {
 
 func shalePrefixIdentityPastes(identity string) []byte {
 	return shaleKey(prefixIdentityPastesAll, identity, "/")
+}
+
+func shaleKeyIntent(scope, id string) []byte {
+	return shaleKey(prefixIntentsAll, scope, "/", id)
+}
+
+func shalePrefixIntents(scope string) []byte {
+	return shaleKey(prefixIntentsAll, scope, "/")
 }
 
 func shaleKeyIdentityFirstSeen(identity string) []byte {
@@ -220,17 +229,24 @@ func (r *ShaleRepo) getRaw(key []byte) ([]byte, error) {
 // it.Next() as readily as from the open. A half-consumed iterator is not a
 // usable answer, so a retry restarts from the beginning.
 func (r *ShaleRepo) scanPrefix(prefix []byte) ([]scanItem, error) {
+	return scanPrefixOn(r.cluster, r.repoLog(), prefix)
+}
+
+// scanPrefixOn is the cluster-level scan, taken as a function rather than a
+// ShaleRepo method so the intent log can share the same retry and
+// envelope-stripping rules without owning a repo.
+func scanPrefixOn(c *cluster.Cluster, lg *log.Logger, prefix []byte) ([]scanItem, error) {
 	var out []scanItem
-	err := retryAcquiring(readRetry, r.repoLog(), "scan-prefix", func() error {
+	err := retryAcquiring(readRetry, lg, "scan-prefix", func() error {
 		var serr error
-		out, serr = r.scanPrefixOnce(prefix)
+		out, serr = scanPrefixOnceOn(c, prefix)
 		return serr
 	})
 	return out, err
 }
 
-func (r *ShaleRepo) scanPrefixOnce(prefix []byte) ([]scanItem, error) {
-	it, err := r.cluster.ScanPrefix(prefix)
+func scanPrefixOnceOn(c *cluster.Cluster, prefix []byte) ([]scanItem, error) {
+	it, err := c.ScanPrefix(prefix)
 	if err != nil {
 		return nil, fmt.Errorf("scan prefix %s: %w", prefix, err)
 	}
