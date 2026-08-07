@@ -60,9 +60,42 @@ type pasteRow struct {
 
 type versionRow struct {
 	VerNum     int       `json:"ver_num"`
-	contentRef           // this version's descriptor
+	contentRef           // the ROOT entry's descriptor, promoted to flat JSON
 	CreatedAt  time.Time `json:"created_at"`
 	Deleted    bool      `json:"deleted"`
+
+	// Manifest is the version's whole content: an encoded path -> entry map. A
+	// document is one entry at "/", a directory is N; nothing above this
+	// distinguishes them (docs/SPEC.md "A version is a whole-manifest
+	// snapshot").
+	//
+	// Empty on a row written before versions carried one, which is why the
+	// flat contentRef above is RETAINED rather than replaced: it is what those
+	// rows resolve through (domain.Version.RootKind and friends). Omitted when
+	// empty so an old row round-trips byte-identically.
+	Manifest string `json:"manifest,omitempty"`
+}
+
+// newVersionRow builds a version row from its root descriptor, synthesizing the
+// one-entry manifest that describes it.
+//
+// Every version written from here on carries a manifest, so a reader never has
+// to ask which shape it is holding - the single-file case is simply a manifest
+// of length one.
+func newVersionRow(verNum int, ref contentRef, createdAt time.Time) versionRow {
+	row := versionRow{VerNum: verNum, contentRef: ref, CreatedAt: createdAt}
+	m := domain.NewManifest()
+	m.Add(domain.Root, domain.ManifestEntry{
+		SHA:  ref.ContentSHA,
+		Size: ref.Size,
+		Kind: ref.Kind,
+	})
+	// A manifest that cannot be encoded would only cost the row its redundant
+	// copy of the flat fields, so the row is still written without it.
+	if enc, err := encodeManifest(m); err == nil {
+		row.Manifest = enc
+	}
+	return row
 }
 
 func (p pasteRow) toDomain(slug domain.Slug) domain.Paste {
@@ -95,7 +128,7 @@ func pasteFromDomain(p domain.Paste) pasteRow {
 }
 
 func (v versionRow) toDomain(slug domain.Slug) domain.Version {
-	return domain.Version{
+	out := domain.Version{
 		Slug:       slug,
 		VerNum:     v.VerNum,
 		Kind:       domain.ContentKind(v.Kind),
@@ -104,6 +137,16 @@ func (v versionRow) toDomain(slug domain.Slug) domain.Version {
 		CreatedAt:  v.CreatedAt,
 		Deleted:    v.Deleted,
 	}
+	// An undecodable manifest leaves the version resolving through its flat
+	// fields, which is the same path a pre-manifest row takes. Dropping the
+	// whole version because its redundant copy is corrupt would lose content
+	// that is still perfectly readable.
+	if v.Manifest != "" {
+		if m, err := decodeManifest(v.Manifest); err == nil {
+			out.Manifest = m
+		}
+	}
+	return out
 }
 
 type scanItem struct {

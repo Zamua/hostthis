@@ -1180,11 +1180,9 @@ func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef) 
 		if err := shaleTxPutJSON(tx, pasteKey, pr); err != nil {
 			return err
 		}
-		v1 := versionRow{
-			VerNum:     1,
-			contentRef: contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, BlobID: blobID, Size: p.Size},
-			CreatedAt:  p.CreatedAt,
-		}
+		v1 := newVersionRow(1,
+			contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, BlobID: blobID, Size: p.Size},
+			p.CreatedAt)
 		if err := shaleTxPutJSON(tx, shaleKeyVersion(p.Slug, 1), v1); err != nil {
 			return err
 		}
@@ -1442,11 +1440,9 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, kind domain.ContentKin
 			}
 			wasPinned = p.PinnedVersion != 0
 
-			newV := versionRow{
-				VerNum:     newVer,
-				contentRef: contentRef{Kind: string(kind), ContentSHA: contentSHA, BlobID: blobID, Size: size},
-				CreatedAt:  now,
-			}
+			newV := newVersionRow(newVer,
+				contentRef{Kind: string(kind), ContentSHA: contentSHA, BlobID: blobID, Size: size},
+				now)
 			if err := shaleTxPutJSON(tx, verKey, newV); err != nil {
 				return err
 			}
