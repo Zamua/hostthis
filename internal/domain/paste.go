@@ -61,6 +61,45 @@ type Paste struct {
 	LatestVersion int    // MAX(ver_num) - what an `update` would advance from; 0 if not loaded
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+
+	// Manifest is the SERVED version's content in full, rolled onto the head
+	// with the rest of that version's descriptor. A document is one entry at
+	// Root, a directory is N, so one lookup resolves a request path for either
+	// (docs/SPEC.md "Serving a directory").
+	//
+	// Empty on an artifact stored before versions carried a manifest; the flat
+	// fields above are what those resolve through, via the Root accessors.
+	Manifest Manifest
+}
+
+// IsSingle reports whether the served version holds a single document, the
+// shape a paste has always had. A manifest-less artifact counts as single: its
+// flat fields describe exactly one blob.
+func (p Paste) IsSingle() bool { return len(p.Manifest.Files) <= 1 }
+
+// RootKind is the render kind of the root entry, falling back to the flat Kind
+// for an artifact whose stored row carries no manifest.
+func (p Paste) RootKind() ContentKind {
+	if e, ok := p.Manifest.Files[Root]; ok && e.Kind != "" {
+		return ContentKind(e.Kind)
+	}
+	return p.Kind
+}
+
+// RootSHA is the root entry's sha, falling back to the flat ContentSHA.
+func (p Paste) RootSHA() string {
+	if e, ok := p.Manifest.Files[Root]; ok && e.SHA != "" {
+		return e.SHA
+	}
+	return p.ContentSHA
+}
+
+// RootSize is the root entry's size, falling back to the flat Size.
+func (p Paste) RootSize() int {
+	if e, ok := p.Manifest.Files[Root]; ok && e.SHA != "" {
+		return e.Size
+	}
+	return p.Size
 }
 
 // Version is a whole-MANIFEST snapshot in an artifact's history. v1 is the

@@ -30,6 +30,36 @@ type contentRef struct {
 	ContentSHA string `json:"content_sha"`
 	BlobID     string `json:"blob_id,omitempty"` // shale-blob path: the staged blob id GetBlob needs; "" on the standalone sha-keyed path
 	Size       int    `json:"size"`
+
+	// Manifest is the described content in full: an encoded path -> entry map.
+	// A document is one entry at "/", a directory is N; nothing above this
+	// distinguishes them (docs/SPEC.md "A version is a whole-manifest
+	// snapshot").
+	//
+	// It lives HERE, inside the descriptor, so that the head's
+	// "p.contentRef = v.contentRef" roll carries it with the rest rather than
+	// needing its own assignment at each of the six sites that roll a head.
+	//
+	// Empty on a row written before this existed, which is why the flat fields
+	// above are RETAINED rather than replaced: those rows have no other
+	// description of their content. Omitted when empty so an old row
+	// round-trips byte-identically.
+	Manifest string `json:"manifest,omitempty"`
+}
+
+// decode returns the described manifest, or the zero Manifest when the row
+// carries none or an unreadable one. A corrupt manifest degrades to the flat
+// fields rather than failing the read: the content it describes is still
+// perfectly readable.
+func (c contentRef) decode() domain.Manifest {
+	if c.Manifest == "" {
+		return domain.Manifest{}
+	}
+	m, err := decodeManifest(c.Manifest)
+	if err != nil {
+		return domain.Manifest{}
+	}
+	return m
 }
 
 type pasteRow struct {
@@ -63,17 +93,6 @@ type versionRow struct {
 	contentRef           // the ROOT entry's descriptor, promoted to flat JSON
 	CreatedAt  time.Time `json:"created_at"`
 	Deleted    bool      `json:"deleted"`
-
-	// Manifest is the version's whole content: an encoded path -> entry map. A
-	// document is one entry at "/", a directory is N; nothing above this
-	// distinguishes them (docs/SPEC.md "A version is a whole-manifest
-	// snapshot").
-	//
-	// Empty on a row written before versions carried one, which is why the
-	// flat contentRef above is RETAINED rather than replaced: it is what those
-	// rows resolve through (domain.Version.RootKind and friends). Omitted when
-	// empty so an old row round-trips byte-identically.
-	Manifest string `json:"manifest,omitempty"`
 }
 
 // newVersionRow builds a version row from its root descriptor, synthesizing the
@@ -84,6 +103,9 @@ type versionRow struct {
 // of length one.
 func newVersionRow(verNum int, ref contentRef, createdAt time.Time) versionRow {
 	row := versionRow{VerNum: verNum, contentRef: ref, CreatedAt: createdAt}
+	if ref.Manifest != "" {
+		return row // the caller described the content itself
+	}
 	m := domain.NewManifest()
 	m.Add(domain.Root, domain.ManifestEntry{
 		SHA:  ref.ContentSHA,
@@ -99,7 +121,7 @@ func newVersionRow(verNum int, ref contentRef, createdAt time.Time) versionRow {
 }
 
 func (p pasteRow) toDomain(slug domain.Slug) domain.Paste {
-	return domain.Paste{
+	out := domain.Paste{
 		Slug:          slug,
 		Identity:      domain.Identity(p.Identity),
 		Status:        domain.NormalizeStatus(p.Status),
@@ -111,6 +133,8 @@ func (p pasteRow) toDomain(slug domain.Slug) domain.Paste {
 		CreatedAt:     p.CreatedAt,
 		UpdatedAt:     p.UpdatedAt,
 	}
+	out.Manifest = p.decode()
+	return out
 }
 
 func pasteFromDomain(p domain.Paste) pasteRow {
@@ -141,11 +165,7 @@ func (v versionRow) toDomain(slug domain.Slug) domain.Version {
 	// fields, which is the same path a pre-manifest row takes. Dropping the
 	// whole version because its redundant copy is corrupt would lose content
 	// that is still perfectly readable.
-	if v.Manifest != "" {
-		if m, err := decodeManifest(v.Manifest); err == nil {
-			out.Manifest = m
-		}
-	}
+	out.Manifest = v.decode()
 	return out
 }
 

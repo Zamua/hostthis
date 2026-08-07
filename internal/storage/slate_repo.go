@@ -532,13 +532,17 @@ func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 		return ErrSlugTaken
 	}
 
-	if err := txPutJSON(tx, keyPaste(p.Slug), pasteFromDomain(p)); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
 	v1 := newVersionRow(1,
 		contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, Size: p.Size},
 		p.CreatedAt)
+	pr := pasteFromDomain(p)
+	// The head serves v1, so it takes v1's descriptor WHOLE - the same roll an
+	// append and a pin perform.
+	pr.contentRef = v1.contentRef
+	if err := txPutJSON(tx, keyPaste(p.Slug), pr); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
 	if err := txPutJSON(tx, keyVersion(p.Slug, 1), v1); err != nil {
 		_ = tx.Rollback()
 		return err
