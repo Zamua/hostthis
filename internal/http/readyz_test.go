@@ -107,7 +107,7 @@ func TestReadyz_Ready200WithCounts(t *testing.T) {
 	}
 }
 
-// TestReadyz_NilProberAlwaysReady pins the non-shale path (sqlite,
+// TestReadyz_NilProberAlwaysReady pins the non-shale path (slatedb,
 // single-node slatedb, and every fixture that wires no prober): with no
 // ReadinessProber, process-up IS ready, with zero counts in the body.
 func TestReadyz_NilProberAlwaysReady(t *testing.T) {

@@ -57,7 +57,7 @@ type conformCaps struct {
 
 	// StrictIdentityQuotaUnderConcurrency is true for backends that enforce the
 	// per-IDENTITY paste/site byte cap exactly under concurrent uploads from
-	// one identity: sqlite (serializable insert transaction) and slatedb (a
+	// one identity: slatedb (a
 	// per-identity lockQuota stripe held across the sum + the write, valid
 	// because SlateDB is single-writer, so only in-process goroutines race).
 	// FALSE for shale, whose scan-and-compare is NOT atomic with the
@@ -720,7 +720,7 @@ func conformKeyGateWindowAges(t *testing.T, r conformanceRepo) {
 // conformKeyGateForgetsOutOfWindow pins the port-visible half of the lazy
 // prune: a pair whose row has aged past the window is no longer "known", so a
 // later session from it is a FRESH admission that consumes a slot. Backends
-// drop the row at different moments (sqlite inside the admit transaction,
+// drop the row at different moments (slatedb inside the admit transaction,
 // shale as the subnet scan walks past it), so the contract is stated in terms
 // of what a caller can observe rather than when the delete lands.
 func conformKeyGateForgetsOutOfWindow(t *testing.T, r conformanceRepo) {

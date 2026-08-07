@@ -21,7 +21,7 @@ import (
 	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
-// updateStack is a full real stack (sqlite + blob store + http + ssh) with both
+// updateStack is a full real stack (metadata + blob store + http + ssh) with both
 // the paste-manage and site-deploy paths wired, plus PERSISTENT keyed clients:
 // re-deploying to the same slug must come from the same identity, which a
 // per-call fresh-key helper cannot express.

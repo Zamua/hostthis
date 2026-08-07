@@ -1,5 +1,4 @@
-// SlateDB-backed static-site persistence: the twin of site_repo.go (the sqlite
-// SiteRepo). The site key families live in the SAME SlateDB instance as the
+// SlateDB-backed static-site persistence. The site key families live in the SAME SlateDB instance as the
 // paste keys, so a site insert + its indexes commit in one transaction.
 //
 // The site interface method names (Get, Delete, SumActiveBytesByOwner,
@@ -17,7 +16,7 @@
 //	sites/<slug>                       JSON {Identity, Manifest, DedupedSize, CreatedAt, UpdatedAt}
 //	identity_sites/<identity>/<slug>   empty value (list/sum sites by identity)
 //
-// Manifests use the same encodeManifest/decodeManifest as the sqlite backend,
+// Manifests use the same encodeManifest/decodeManifest as the other backends used,
 // so the on-wire manifest shape is identical across backends. DedupedSize is
 // stored on the row so quota scans never decode a manifest just to sum bytes.
 
@@ -79,7 +78,7 @@ func (s *SlateSiteRepo) Delete(slug domain.Slug) error { return s.repo.DeleteSit
 // --- JSON row schema -------------------------------------------------------
 
 // siteRow is the persisted shape of a Site. Manifest holds the exact string
-// encodeManifest produces, the same compact JSON the sqlite backend stores.
+// encodeManifest produces, the same compact JSON every backend stores.
 func (r *SlateRepo) siteRowFromDomain(s domain.Site, dedupedSize int) (siteRow, error) {
 	manStr, err := encodeManifest(s.Manifest)
 	if err != nil {
@@ -116,7 +115,7 @@ func prefixIdentitySites(identity string) []byte {
 // bytes alongside paste bytes), rejects a slug already taken by a paste OR a
 // site, and writes the site row + its two index entries in one transaction.
 //
-// Charged bytes are dedupedSize (distinct blobs only), matching sqlite. The
+// Charged bytes are dedupedSize (distinct blobs only), matching the other backends. The
 // per-identity quota stripe is held across the sum + the write so two
 // concurrent same-identity deploys cannot both pass the cap. The durable
 // total-bytes ceiling is NOT checked here: it is the object-store bucket

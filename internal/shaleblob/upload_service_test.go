@@ -9,7 +9,7 @@
 //
 // The shale case wires Upload with a blob-capable ShaleRepo (real
 // slate-over-MinIO metadata, in-memory blobmem byte plane) + the shaleblob.Unit
-// seam; the standalone case wires sqlite + the detached disk store.
+// seam; the standalone case wires the local metadata repo + the detached disk store.
 
 package shaleblob_test
 

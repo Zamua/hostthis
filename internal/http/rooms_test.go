@@ -32,7 +32,7 @@ func (liveAppSiteReader) Get(slug domain.Slug) (domain.Site, error) {
 }
 
 // buildRoomServer wires a Server with the real Rooms service over a real
-// sqlite repo, in subdomain mode, so a request runs mux -> service -> storage.
+// metadata repo, in subdomain mode, so a request runs mux -> service -> storage.
 func buildRoomServer(t *testing.T) *Server {
 	t.Helper()
 	rooms := service.NewRooms(storage.NewShaleRoomRepo(storagetest.NewRepo(t)))

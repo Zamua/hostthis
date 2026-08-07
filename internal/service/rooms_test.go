@@ -11,7 +11,7 @@ import (
 	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
-// newRoomsSvc wires a Rooms service over the real sqlite-backed repo so the
+// newRoomsSvc wires a Rooms service over the real metadata-backed repo so the
 // rate-limit + cap + isolation behavior is exercised end-to-end.
 func newRoomsSvc(t *testing.T) (*Rooms, *fixedClock) {
 	t.Helper()

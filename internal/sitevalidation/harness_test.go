@@ -1,7 +1,7 @@
 // Package sitevalidation is the test-only byte-identical validation harness for
 // static-site hosting. It deploys real framework-built site fixtures through the
 // SAME archive pipeline an ssh tar upload hits (service.DeploySite over a real
-// sqlite repo and compressed blob store), fetches every built file back over the
+// metadata repo and compressed blob store), fetches every built file back over the
 // real HTTP serving surface, and asserts the served bytes are BYTE-IDENTICAL to
 // the fixture with the content type the extension implies.
 //
@@ -148,7 +148,7 @@ func (d deployedSite) get(t *testing.T, urlPath string) *http.Response {
 	return resp
 }
 
-// deployFixture stands up real sqlite, compressed-blob and site repos, deploys
+// deployFixture stands up real metadata repo, compressed-blob and site repos, deploys
 // the fixture's dist/ through the production DeploySite use case, and fronts
 // those same repos with the real HTTP handler.
 func deployFixture(t *testing.T, demo string) ([]distFile, deployedSite) {

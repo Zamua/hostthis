@@ -397,7 +397,7 @@ func conformSitePerOwnerCapCountsBoth(t *testing.T, r conformanceRepo, sr confor
 // bytes that land never exceed the cap. A backend that checked paste and site
 // quota on separate, non-serialized paths could overshoot the combined total
 // while each kind alone held its ceiling. Each backend serializes both kinds on
-// one thing: sqlite a serializable tx, shale the same {id} shard CAS, slatedb
+// one thing: slatedb a serializable tx, shale the same {id} shard CAS, slatedb
 // the per-identity lockQuota stripe.
 func conformSitePerOwnerCapConcurrentCeiling(t *testing.T, caps conformCaps, r conformanceRepo, sr conformanceSiteRepo) {
 	const (

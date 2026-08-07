@@ -1,5 +1,5 @@
 // SlateDB-backed metadata implementation, satisfying the same service-layer
-// interfaces as the sqlite backend; cmd/hostthisd picks one via
+// interfaces as the other backends used; cmd/hostthisd picks one via
 // HOSTTHIS_METADATA_BACKEND and the rest of the app is unaware. Spec:
 // docs/SPEC.md "Metadata storage backends". Needs cgo + libslatedb_uniffi on
 // the loader path.
@@ -306,7 +306,7 @@ func (r *SlateRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 		p.LatestVersion = latest
 		out = append(out, p)
 	}
-	sortByUpdatedAtDesc(out) // matches sqlite ORDER BY updated_at DESC
+	sortByUpdatedAtDesc(out) // newest first
 	return out, nil
 }
 
@@ -329,7 +329,7 @@ func (r *SlateRepo) latestActiveVersion(slug domain.Slug) (int, error) {
 		}
 	}
 	if latest == 0 {
-		latest = 1 // matches sqlite COALESCE(..., 1)
+		latest = 1 // no live version: the head still names v1
 	}
 	return latest, nil
 }
@@ -441,7 +441,7 @@ func (r *SlateRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 		}
 		out = append(out, v.toDomain(slug))
 	}
-	sortVersionsDesc(out) // matches sqlite ORDER BY ver_num DESC
+	sortVersionsDesc(out) // newest version first
 	return out, nil
 }
 
@@ -488,7 +488,7 @@ func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 	body := int64(p.Size)
 	if userCap > 0 {
 		// The per-owner cap counts BOTH paste and site bytes, symmetric with
-		// the site deploy path and with sqlite's identityActiveBytes.
+		// the site deploy path and with the per-identity sum.
 		// Without the site term an 800-byte site plus a 300-byte paste would
 		// pass a 1000-byte cap.
 		ownerPaste, err := r.sumActiveBytesForOwner(p.Identity.String(), now)
@@ -554,7 +554,7 @@ func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 		return fmt.Errorf("put identity-paste index: %w", err)
 	}
 
-	// identity_first_seen is write-once: sqlite derives it as MIN(created_at)
+	// identity_first_seen is write-once: it is the MIN(created_at)
 	// across paste rows, so overwriting here would move it forward.
 	fsKey := keyIdentityFirstSeen(p.Identity.String())
 	fs, err := tx.Get(fsKey)
@@ -581,7 +581,7 @@ func (r *SlateRepo) Delete(slug domain.Slug) error {
 	var p pasteRow
 	if err := r.getJSON(keyPaste(slug), &p); err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return nil // idempotent, like sqlite's DELETE on a missing row
+			return nil // idempotent: deleting a missing row is not an error
 		}
 		return err
 	}
