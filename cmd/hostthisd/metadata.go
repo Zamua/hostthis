@@ -3,7 +3,6 @@
 // HOSTTHIS_METADATA_BACKEND picks one of:
 //
 //	local    shale on the local storage engine, the default, no build tag required
-//	slatedb  SlateRepo, requires -tags slatedb
 //	shale    ShaleRepo, requires -tags slatedb
 //
 // See docs/SPEC.md "Metadata storage backends".
@@ -112,19 +111,17 @@ type roomStore interface {
 }
 
 // buildMetadata reads HOSTTHIS_METADATA_BACKEND and returns the configured
-// bundle, defaulting to the local engine. Every branch errors with a clear
+// bundle, defaulting to the local engine. Each branch errors with a clear
 // message when this build cannot serve it: `local` needs a build WITHOUT
-// -tags slatedb, `slatedb` and `shale` need one WITH it.
+// -tags slatedb, `shale` needs one WITH it.
 func buildMetadata(dataDir string, logger *log.Logger) (*metadataBundle, error) {
 	backend := strings.ToLower(envOr("HOSTTHIS_METADATA_BACKEND", "local"))
 	switch backend {
 	case "local":
 		return buildMetadataLocal(dataDir, logger)
-	case "slatedb":
-		return buildMetadataSlate(logger)
 	case "shale":
 		return buildMetadataShale(logger)
 	default:
-		return nil, fmt.Errorf("unknown HOSTTHIS_METADATA_BACKEND %q (want local|slatedb|shale)", backend)
+		return nil, fmt.Errorf("unknown HOSTTHIS_METADATA_BACKEND %q (want local|shale)", backend)
 	}
 }
