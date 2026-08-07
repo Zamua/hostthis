@@ -799,6 +799,18 @@ Two consequences worth stating:
 split, a redeploy destroyed the previous state and a bad deploy was
 unrecoverable. Uniform versioning removes that cliff.
 
+This changes what a redeploy COSTS, and the change is deliberate. Under the
+split, a redeploy replaced the manifest and freed the old bytes. As an artifact
+it appends a version, and every live version charges quota - exactly what
+updating a document has always done. Uniformity is the point: a redeploy that
+kept the old bytes free while a document update did not would be the modeling
+difference this whole design removes. An owner reclaims the bytes the same way
+they always have, by deleting versions they no longer want.
+
+Blob dedup blunts the cost sharply: a redeploy that changes one file of two
+hundred stores one blob and charges for one blob. Only genuinely new bytes
+accumulate.
+
 **Unchanged files cost nothing across versions.** Blobs are content-addressed
 and were already deduped within a manifest; the same dedup now spans versions,
 so a redeploy that changes one file of two hundred stores one blob.
