@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"log"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,10 +17,12 @@ import (
 // owns is still settling during a rollout, so a single early pass can see
 // nothing and nothing would run again.
 func TestSweep_DrainsLegacySitesEveryTick(t *testing.T) {
-	var calls int
+	// Atomic: the loop runs on its own goroutine, so a plain counter is a race
+	// the detector fails on rather than a flake to live with.
+	var calls atomic.Int64
 	s := service.NewSweep(log.New(io.Discard, "", 0))
 	s.LegacySites = legacySweeperFunc(func(context.Context, time.Time) (int, error) {
-		calls++
+		calls.Add(1)
 		return 0, nil
 	})
 	s.Interval = time.Millisecond
@@ -27,14 +30,14 @@ func TestSweep_DrainsLegacySitesEveryTick(t *testing.T) {
 	go s.Run(ctx)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if calls >= 3 {
+		if calls.Load() >= 3 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	cancel()
-	if calls < 3 {
-		t.Fatalf("legacy sweep ran %d time(s); a once-at-boot pass cannot converge", calls)
+	if n := calls.Load(); n < 3 {
+		t.Fatalf("legacy sweep ran %d time(s); a once-at-boot pass cannot converge", n)
 	}
 }
 
