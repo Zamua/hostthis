@@ -21,9 +21,24 @@ type BlobOrphanSweeper interface {
 // No pass here deletes on ABSENCE from a scanned set, so no partial answer can
 // destroy live data - a property the old content-addressed keep-set could only
 // approximate with a guard.
+// LegacySiteSweeper drains directories that predate the artifact model.
+type LegacySiteSweeper interface {
+	SweepLegacySites(ctx context.Context, now time.Time) (int, error)
+}
+
 type Sweep struct {
 	// Blobs reclaims orphaned bytes; nil disables blob reclamation.
 	Blobs BlobReclaimer
+
+	// LegacySites drains a pre-unification family onto the current one. nil
+	// when nothing is left to drain, which is the steady state - this is a
+	// MIGRATION riding the loop until it converges, not a standing job, and it
+	// goes when the family it drains does.
+	//
+	// It belongs on a schedule rather than at boot alone because which units a
+	// node owns is still settling while a rollout is in flight: a sweep that
+	// runs then can legitimately see nothing, and nothing would run again.
+	LegacySites LegacySiteSweeper
 
 	Interval time.Duration
 	Logger   *log.Logger
@@ -68,6 +83,23 @@ func (s *Sweep) tick() {
 	}
 	if blobCount > 0 {
 		s.Logger.Printf("sweep: reclaimed %d blob(s)", blobCount)
+	}
+	s.sweepLegacySites()
+}
+
+// sweepLegacySites drains what it can see this pass. Errors are logged, never
+// propagated: a migration that cannot finish must not stop the reclamation the
+// rest of this tick performs.
+func (s *Sweep) sweepLegacySites() {
+	if s.LegacySites == nil {
+		return
+	}
+	moved, err := s.LegacySites.SweepLegacySites(context.Background(), s.Now().UTC())
+	if err != nil {
+		s.Logger.Printf("sweep: legacy sites: %v (retried next pass)", err)
+	}
+	if moved > 0 {
+		s.Logger.Printf("sweep: migrated %d legacy directory(s)", moved)
 	}
 }
 
