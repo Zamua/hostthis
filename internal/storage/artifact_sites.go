@@ -25,6 +25,10 @@ type LegacySites interface {
 	Get(domain.Slug) (domain.Site, error)
 	ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error)
 	SumActiveBytesByOwner(owner string, now time.Time) (int64, error)
+	// Delete drops a row the artifact families have taken over. Not a
+	// convenience: a migrated directory left in both places is listed twice and
+	// charged twice.
+	Delete(domain.Slug) error
 }
 
 // ArtifactSites adapts an artifact repo onto the site port, falling back to the
@@ -117,6 +121,13 @@ func (a *ArtifactSites) InsertWithQuotaCheck(ctx context.Context, s domain.Site,
 // sentinel, so "not yours" stays indistinguishable from "does not exist".
 func (a *ArtifactSites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	existing, err := a.repo.Get(s.Slug)
+	if errors.Is(err, ErrNotFound) {
+		// No artifact yet, so this is a directory deployed before the collapse.
+		// Redeploying MIGRATES it: the new manifest lands as an artifact, which
+		// is also what stops a legacy row becoming permanently
+		// un-redeployable once the artifact path is wired.
+		return a.migrateOnReplace(ctx, s, dedupedSize, userCap, now)
+	}
 	if err != nil {
 		return err
 	}
@@ -183,4 +194,28 @@ func (a *ArtifactSites) PreClaimSlug(ctx context.Context, slug domain.Slug, owne
 // ReleaseSlugClaim drops a claim whose deploy never landed.
 func (a *ArtifactSites) ReleaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) error {
 	return a.repo.ReleaseSiteSlugClaim(ctx, slug, owner)
+}
+
+// migrateOnReplace turns a legacy directory into an artifact by writing the
+// redeployed manifest through the ordinary insert.
+//
+// The legacy row is dropped once the artifact lands. It cannot be kept as a
+// rollback escape hatch: a directory present in both families is enumerated by
+// both, so the owner would see it twice and be charged for it twice. The
+// artifact is written FIRST, so a failure between the two steps leaves the row
+// still readable rather than losing it.
+func (a *ArtifactSites) migrateOnReplace(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+	prior, err := a.legacyGet(s.Slug)
+	if err != nil {
+		return err // genuinely absent: the not-found a replace should report
+	}
+	if prior.Identity != s.Identity {
+		return ErrNotFound
+	}
+	fresh := s
+	fresh.CreatedAt = prior.CreatedAt // the artifact inherits the original age
+	if err := a.InsertWithQuotaCheck(ctx, fresh, dedupedSize, userCap, now); err != nil {
+		return err
+	}
+	return a.legacy.Delete(s.Slug)
 }
