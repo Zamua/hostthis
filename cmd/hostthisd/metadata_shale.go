@@ -341,6 +341,9 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 		bundle.BlobUnit = unit
 		bundle.BlobOrphanSweeper = repo
 	}
+	// Shale writes span two shards, so it is the one backend that can be left
+	// with a half-finished write to settle.
+	bundle.IntentSweeper = repo
 
 	// OPTIONAL live-diagnosis endpoint. With HOSTTHIS_SHALE_DEBUG_ADDR set (e.g.
 	// ":6060"), serve the embedded cluster's per-position handoff dump at

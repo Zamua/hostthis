@@ -86,6 +86,7 @@ import (
 	slatedb "slatedb.io/slatedb-go/uniffi"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/durable"
 )
 
 // ShaleConfig captures the parameters needed to open a shale cluster over the
@@ -246,6 +247,13 @@ type ShaleRepo struct {
 	// persistently-bad row is still visible to an operator. The blob-GC ref-set
 	// scans never use it: they fail closed rather than skip.
 	logger *log.Logger
+
+	// intents records in-flight multi-shard writes so a process death cannot
+	// lose the knowledge that cleanup is owed. It is a durable.Log, never a
+	// concrete store: which mechanism provides durability is not this type's
+	// business (docs/SPEC.md "The durability mechanism is a port, not a layer").
+	// Defaults to the metadata cluster's own implementation.
+	intents durable.Log
 
 	// grpcAddr is the ACTUAL bound forwarding address advertised to peers
 	// (lis.Addr().String()), or "" in single-node mode. bindAddr mirrors the
@@ -569,6 +577,7 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 
 	r := &ShaleRepo{
 		cluster:         cl,
+		intents:         NewShaleIntentLog(cl, cfg.Logger),
 		kv:              kv,
 		logger:          cfg.Logger,
 		bindAddr:        cfg.BindAddr,
@@ -1161,27 +1170,68 @@ func (r *ShaleRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 		return ErrSlugTaken
 	}
 
+	// T0: record the intent BEFORE touching anything. Written first so its
+	// ABSENCE is unambiguous - no intent means nothing was attempted. That is
+	// what lets a later sweep act at all (docs/SPEC.md "Durable intent").
+	intent := durable.Intent{
+		ID: durable.ID(p.Slug.String()), Kind: durable.KindCreatePaste,
+		Scope: durable.Scope(p.Identity.String()), Subject: p.Slug.String(),
+		StartedAt: now,
+	}
+	if err := r.intents.Begin(ctx, intent); err != nil {
+		return fmt.Errorf("durable intent: %w", err)
+	}
+
 	// ENTRY FIRST, then the authoritative row. The two live on different shards
 	// and a transaction touches one, so whichever is written second can be lost
-	// to a crash. Written this way the survivor is an entry with no row, which
-	// ListByOwner sees and repairs; the other order leaves a row no single-shard
-	// read can find, which is what used to require a cluster-wide reconcile
-	// pass. See docs/SPEC.md "No periodic reconcile: the index entry is written
-	// FIRST".
+	// to a crash. Written this way the survivor is an entry with no row - the
+	// direction that over-counts rather than breaching the cap, and the one a
+	// sweep can find from the owner's own shard.
+	entryKey := shaleKeyIdentityPaste(p.Identity.String(), p.Slug.String())
 	if err := r.confirmInsert(p); err != nil {
 		return fmt.Errorf("enumeration entry: %w", err)
+	}
+	// The guard is the entry exactly as written, so a rollback can tell it apart
+	// from a re-upload that landed after a crash.
+	guard, gerr := r.getRaw(entryKey)
+	if gerr != nil {
+		r.repoLog().Printf("shale: reading the intent guard for %s: %v (a rollback will skip rather than risk a fresher entry)", p.Slug, gerr)
+	}
+	intent.Guard = guard
+	if err := r.intents.Begin(ctx, withStep(intent, StepEntryWritten)); err != nil {
+		r.repoLog().Printf("shale: recording the entry step for %s: %v (a sweep will still roll back, using the row check alone)", p.Slug, err)
 	}
 
 	if err := r.insertAuthoritative(p, binds); err != nil {
 		// The entry written above is now an orphan. Best-effort removal keeps
-		// the common failure (a slug race) from charging the owner until they
-		// next list; a failure here leaves exactly the case ListByOwner repairs.
-		if derr := r.cluster.Delete(shaleKeyIdentityPaste(p.Identity.String(), p.Slug.String())); derr != nil {
-			r.repoLog().Printf("shale: rollback of enumeration entry for %s: %v (it counts against the owner until their next list)", p.Slug, derr)
+		// the common failure (a slug race) from charging the owner; if it fails,
+		// the intent stays and a sweep finishes the job.
+		if _, derr := r.guardedDeleteIndexEntry(entryKey, guard); derr != nil {
+			r.repoLog().Printf("shale: rollback of enumeration entry for %s: %v (a sweep will retry it)", p.Slug, derr)
+		} else if cerr := r.intents.Complete(ctx, intent.ID, intent.Scope); cerr != nil {
+			r.repoLog().Printf("shale: forgetting the intent for %s: %v (a sweep will retry it)", p.Slug, cerr)
 		}
 		return err
 	}
+
+	// T3: the write is durable, so the intent has nothing left to protect.
+	// Losing this leaves an intent whose row EXISTS, which a sweep rolls
+	// forward - it never deletes a live paste.
+	if err := r.intents.Complete(ctx, intent.ID, intent.Scope); err != nil {
+		r.repoLog().Printf("shale: forgetting the intent for %s: %v (a sweep rolls it forward)", p.Slug, err)
+	}
 	return nil
+}
+
+// withStep returns the intent with step recorded, so Begin can re-write it
+// without a separate Advance round trip on the response path.
+func withStep(in durable.Intent, step durable.StepName) durable.Intent {
+	if in.HasReached(step) {
+		return in
+	}
+	out := in
+	out.Reached = append(append([]durable.StepName(nil), in.Reached...), step)
+	return out
 }
 
 // slugTaken reports whether slug already names a paste or a site. Both keys

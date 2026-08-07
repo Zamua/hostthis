@@ -67,6 +67,8 @@ func shaleShardKey(key []byte) []byte {
 		return firstSegment(key[len(prefixIdentityPastesAll):])
 	case bytes.HasPrefix(key, prefixIdentityFirstSeenAll):
 		return firstSegment(key[len(prefixIdentityFirstSeenAll):])
+	case bytes.HasPrefix(key, prefixIntentsAll):
+		return firstSegment(key[len(prefixIntentsAll):])
 
 	// Shards on the identity so one key's subnet entries co-locate and the
 	// lookup is a single-shard prefix scan. Without a case here the family
@@ -117,8 +119,14 @@ var (
 	prefixSlugOwner            = []byte("slug_owner/")
 	prefixIdentityPastesAll    = []byte("identity_pastes/")
 	prefixIdentityFirstSeenAll = []byte("identity_first_seen/")
-	prefixKeygateIdentityAll   = []byte("keygate_id/")
-	prefixKeygateAll           = []byte("keygate/")
+
+	// Durable-intent family: intents/<scope>/<id>. Shards on the SCOPE (the
+	// owner), which is what makes listing one owner's outstanding intents a
+	// single-shard prefix scan on the shard its enumeration entries already
+	// live on (docs/SPEC.md "Durable intent").
+	prefixIntentsAll         = []byte("intents/")
+	prefixKeygateIdentityAll = []byte("keygate_id/")
+	prefixKeygateAll         = []byte("keygate/")
 
 	// Static-site families. identity_sites/ is the per-owner enumeration index.
 	prefixSites            = []byte("sites/")

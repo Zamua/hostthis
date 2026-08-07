@@ -64,3 +64,38 @@ func (r *ShaleRepo) guardedPutIndexEntry(key, expected []byte, present bool, row
 	}
 	return true, nil
 }
+
+// guardedDeleteIndexEntry removes the entry at key ONLY IF it still holds
+// expected, the payload the intent that owns this cleanup recorded. It is the
+// delete sibling of guardedPutIndexEntry and exists for one reason: between a
+// crashed insert and the sweep that cleans up after it, the owner may have
+// re-uploaded the same slug. An unguarded delete would eat that fresh entry.
+//
+// Reports whether it deleted. A mismatch (or an already-absent entry) is
+// (false, nil): someone else won, which is the correct outcome, not an error.
+func (r *ShaleRepo) guardedDeleteIndexEntry(key, expected []byte) (bool, error) {
+	err := r.cluster.Transact(key, func(tx backend.Transaction) error {
+		cur, gerr := tx.Get(key) // records the read-check
+		if errors.Is(gerr, backend.ErrNotFound) {
+			return errIndexEntryChanged // already gone
+		}
+		if gerr != nil {
+			return gerr
+		}
+		payload, serr := stripEnvelope(cur)
+		if serr != nil {
+			return serr
+		}
+		if !bytes.Equal(payload, expected) {
+			return errIndexEntryChanged // a fresher write owns this entry now
+		}
+		return tx.Delete(key)
+	})
+	if errors.Is(err, errIndexEntryChanged) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}

@@ -26,6 +26,10 @@ const internalPrefix = "github.com/Zamua/hostthis/internal/"
 //	mime, render      mechanisms holding no business knowledge, so they sit
 //	                  BELOW domain and must not reach it; domain consumes them
 //	                  through a port instead (DetectKind takes a MIMESniffer).
+//	durable           the same shape for crash recovery: an intent-log port and
+//	                  its value types, knowing nothing about pastes. storage
+//	                  consumes it, so which mechanism provides durability never
+//	                  reaches service or a transport.
 //	domain            pure types and rules.
 //	archive, cache    mechanisms that speak in domain values.
 //	storage           repository adapters.
@@ -38,16 +42,17 @@ const internalPrefix = "github.com/Zamua/hostthis/internal/"
 var layerPolicy = map[string][]string{
 	"mime":            {},
 	"render":          {},
+	"durable":         {},
 	"domain":          {},
 	"archive":         {"domain"},
 	"cache":           {"domain"},
-	"storage":         {"domain"},
+	"storage":         {"domain", "durable"},
 	"service":         {"archive", "domain", "mime"},
 	"relay":           {"domain"},
 	"relay/relaygrpc": {"domain", "relay"},
 	"http":            {"archive", "domain", "mime", "relay", "service"},
 	"ssh":             {"archive", "domain", "mime", "service"},
-	"shaleblob":       {"archive", "domain", "mime", "service", "storage"},
+	"shaleblob":       {"archive", "domain", "durable", "mime", "service", "storage"},
 
 	// Test-only harness: the importable package is empty, so what is pinned
 	// here is that it STAYS empty. Its _test.go files wire whole stacks, which

@@ -16,6 +16,7 @@ import (
 	"github.com/Zamua/shale/pkg/cluster"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/durable"
 )
 
 // ClusterForTest exposes the underlying shale cluster handle so the multi-node
@@ -176,3 +177,7 @@ func MarkerValueForTest() []byte { return markerValue }
 // so the decode-tolerance test can seed a poisoned site row and prove
 // Reconcile's site-index reprojection skips and continues (Policy 1).
 func SiteKeyForTest(slug domain.Slug) []byte { return shaleKeySite(slug) }
+
+// IntentLogForTest exposes the repo's durable log so crash-boundary tests can
+// plant an intent the way a dead process would have left one.
+func (r *ShaleRepo) IntentLogForTest() durable.Log { return r.intents }

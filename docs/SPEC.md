@@ -3659,15 +3659,127 @@ the upload's collision-retry loop would strand an entry. The pre-check is not
 atomic with the authoritative insert, so a genuine race still strands one -
 bounded, and left as a phantom.
 
-**What this costs, stated plainly.** A crashed insert leaves an entry whose
-cached bytes count against the owner's quota permanently, and shows a slug in
-their list that does not resolve. That is an OVER-count: it can wrongly refuse
-an upload, never wrongly admit one. The previous design had the opposite
-failure - a live paste that counted for nothing, so the cap could be genuinely
-breached - healed silently within a reconcile cycle. The trade is deliberate: a
-visible, fail-safe error the owner can clear themselves, in exchange for
-deleting a cross-shard job whose partial results were the most dangerous
-machinery in the service.
+**What a crash costs, and what bounds it.** A crashed insert leaves an entry
+whose cached bytes count against the owner's quota and shows a slug in their
+list that does not resolve. That is an OVER-count: it can wrongly refuse an
+upload, never wrongly admit one. The previous design had the opposite failure -
+a live paste that counted for nothing, so the cap could be genuinely breached.
+
+The residue is not permanent, because the operation records a DURABLE INTENT
+before it starts (below). Its lifetime is bounded by the owner's next request
+rather than by a background pass, so no cross-shard job is reintroduced to get
+that bound.
+
+### Durable intent: the saga survives the process
+
+The compensating action already exists - an authoritative write that FAILS
+deletes the entry it just wrote. The gap is narrower than "the write order is
+wrong": it is that this compensation lives on the handling goroutine's stack,
+so a process death is the one failure that loses the knowledge that cleanup is
+owed.
+
+The fix is to persist that knowledge BEFORE acting. The ordering property that
+makes it work is that the intent is written FIRST, so its ABSENCE is
+unambiguous: no intent means nothing was attempted, and there is nothing to
+recover. (Contrast two-phase commit, whose decision record sits in the MIDDLE
+of the protocol - which is why 2PC needs a resolver for in-doubt state and this
+does not.)
+
+```
+T0  record intent                      durable
+T1  write identity_pastes entry        {id} shard
+T2  write pastes row + version rows    {slug} shard
+T3  forget the intent                  durable
+```
+
+| crash after | on disk | resolution |
+| --- | --- | --- |
+| T0 | intent only | nothing was written; forget the intent |
+| T1 | intent + entry | row absent -> drop the entry, forget the intent |
+| T2 | intent + entry + row | the write succeeded; forget the intent |
+| T3 | clean | - |
+
+Every state is distinguishable from the intent plus one existence check, and
+each has one defined action. That is the property the design turns on: without
+the intent, a crashed insert is INDISTINGUISHABLE from a phantom that a
+concurrent uploader is legitimately mid-way through creating, which is why
+nothing could safely act on one.
+
+**Resolution is a node-local boot sweep.** Each node, once it is serving,
+scans the intents on the units it has MOUNTED and resolves them. That scan is
+local: it walks this node's own storage, so it involves no network fan-out even
+though the intent family logically spans every shard. Across the fleet every
+unit is covered, because every unit is mounted by someone.
+
+It runs after the node goes live, not before. Deciding an intent's outcome
+requires reading the authoritative row, which lives on a DIFFERENT shard - one
+that may not be mounted anywhere yet during a cold start. Gating readiness on
+that read would deadlock a cold cluster: no node could serve until it swept,
+and no node could sweep until some node served. Going live first costs nothing,
+because the residue it cleans up was already there.
+
+**Resolution rolls FORWARD or BACK; it decides by looking.** An incomplete
+intent has two shapes and they need opposite treatments:
+
+| authoritative row | meaning | action |
+| --- | --- | --- |
+| present | the write succeeded; only the bookkeeping was lost | forget the intent |
+| absent | the write never landed | drop the entry, then forget the intent |
+
+Treating every incomplete intent as a rollback would DELETE live pastes whose
+only fault was losing the final step. The row's existence is the discriminator,
+and it is read per intent - affordable because the normal outstanding count is
+zero.
+
+**An intent younger than the resolve grace is left alone.** This is the part
+that is not optional. Which pod HANDLES a request is chosen by the load
+balancer; which pod STORES that request's intent is chosen by hashing the
+owner. The two are unrelated, so a node's own local intents are routinely
+created by uploads that OTHER nodes are handling right now. A sweeping node
+therefore sees in-flight work, and an intent that is mid-flight is
+indistinguishable from one whose process died.
+
+The value guard does not help here: a live upload's entry MATCHES the intent
+that describes it, so a guarded delete would fire and take the entry out from
+under a running request. Only elapsed time separates the two cases. The grace
+MUST exceed the longest plausible upload, the same contract the blob plane's
+orphan grace already carries.
+
+So the existence check decides WHAT to do, and the grace decides WHETHER it is
+safe to act yet. Both are required; neither substitutes for the other.
+
+**Resolution is idempotent and loses to live traffic.** Several nodes can
+resolve concurrently - units are replicated, so more than one node may hold a
+given intent. Every step is safe to re-run, and the compensating delete is
+VALUE-GUARDED: it removes the entry only while that entry still holds the
+payload the intent describes, so a re-upload that landed after the crash
+survives. There are no locks and no leases.
+
+A read that already touches an owner's `{id}` shard (the listing, the quota
+scan) MAY resolve that owner's outstanding intents opportunistically. That is
+an optimization, not the mechanism - correctness rests on the boot sweep, so an
+owner who never returns is still cleaned up.
+
+**The durability mechanism is a port, not a layer.** The intent log is defined
+as a narrow interface in terms of intent and resolution - begin, advance,
+complete, and list-outstanding-for-one-owner - with no key, value, shard, or
+workflow vocabulary in it. The steps are recorded as DATA rather than closures,
+because resolution may run in a different process than the one that began the
+work. `Outstanding` is scoped to a single owner rather than global, which is
+what keeps both this implementation (one prefix scan) and any other one (a
+bounded query) cheap.
+
+The default implementation stores intents in the metadata cluster. Nothing
+above the repository knows that: the application service and the repository
+port are unchanged, and a backend with a single transaction (sqlite, slatedb)
+has no dual write and therefore no intent log at all.
+
+One optimization is deliberately NOT taken. Intents and enumeration entries
+both shard by owner, so T0 and T1 could commit as one CAS, removing that gap
+entirely. It is declined because it would require intents to live in this
+specific cluster, co-sharded with the entries - which is exactly the coupling
+the port exists to avoid. The extra recoverable state is the price of keeping
+the mechanism swappable.
 
 A site deploy spans the `{slug}` shard (the authoritative `sites/<slug>`
 write + the cross-family paste-slug collision read) and the `{id}` shard
