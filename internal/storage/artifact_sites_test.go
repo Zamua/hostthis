@@ -365,6 +365,16 @@ func TestArtifactSites_SweepMigratesUntouchedRows(t *testing.T) {
 			t.Fatalf("legacy row for %s survived the sweep: %v", slug, lerr)
 		}
 	}
+	// And its ENUMERATION entry, which is what a listing actually reads: the
+	// entry renders from its own cached values, so an orphan is a second copy
+	// of the directory rather than a dangling pointer.
+	stale, err := legacy.ListSitesByOwner(owner.String(), now)
+	if err != nil {
+		t.Fatalf("legacy list: %v", err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("legacy enumeration entries survived the sweep: %+v", stale)
+	}
 
 	// A second sweep is a no-op rather than a re-migration.
 	again, err := sites.SweepLegacySites(context.Background(), now)
