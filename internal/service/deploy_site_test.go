@@ -304,16 +304,33 @@ func TestDeployToSlug_ReplacesInPlace(t *testing.T) {
 		t.Fatalf("v2 file about.html missing from manifest: %+v", got.Manifest.Files)
 	}
 
-	// Quota delta: the owner's bytes reflect v2's COMPRESSED deduped size
-	// only (the quota basis), NOT v1+v2.
+	// A redeploy is an UPDATE: it appends a version and the previous one stays
+	// live, so the owner is charged for both and can roll back to either. The
+	// new version's own bytes must be part of that, and dedup means the growth
+	// is only what actually changed rather than the whole redeploy.
 	used2 := ownerCharge(t, owner)
+	if used2 <= used1 {
+		t.Fatalf("a redeploy must ADD its version's bytes: used1 %d, used2 %d", used1, used2)
+	}
+	grew := used2 - used1
 	wantV2 := int64(r2.Site.Manifest.CompressedDedupedSize())
-	if used2 != wantV2 {
-		t.Fatalf("replace must charge the new (compressed) size only: owner sum got %d, want %d (used1 was %d)", used2, wantV2, used1)
+	if grew > wantV2 {
+		t.Fatalf("a redeploy must charge at most its own size: grew %d, v2 is %d", grew, wantV2)
 	}
-	if used2 >= used1 {
-		t.Fatalf("a smaller re-deploy must FREE bytes: used1 %d, used2 %d", used1, used2)
+
+	// Both versions are addressable, which is what rollback needs.
+	vs, err := versionsOf(t, slug)
+	if err != nil {
+		t.Fatalf("versions: %v", err)
 	}
+	if len(vs) != 2 {
+		t.Fatalf("versions = %d, want 2 (a redeploy keeps what it replaced)", len(vs))
+	}
+}
+
+func versionsOf(t *testing.T, slug domain.Slug) ([]domain.Version, error) {
+	t.Helper()
+	return storagetest.NewRepo(t).ListVersions(slug)
 }
 
 // TestDeployToSlug_FreesOldChargesNewDelta pins the replace-delta quota math:

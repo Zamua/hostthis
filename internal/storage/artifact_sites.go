@@ -109,21 +109,18 @@ func (a *ArtifactSites) InsertWithQuotaCheck(ctx context.Context, s domain.Site,
 	}, userCap, now)
 }
 
-// ReplaceWithQuotaCheck re-deploys an existing directory: it appends the new
-// manifest as a version, then tombstones the one it supersedes.
+// ReplaceWithQuotaCheck re-deploys an existing directory by APPENDING the new
+// manifest as a version.
 //
-// The tombstone is what keeps a redeploy's COST unchanged. Leaving prior
-// versions live would charge every redeploy cumulatively, and redeploying a
-// slug in place is the normal way a directory is iterated on - so uniform
-// version retention would turn the ordinary workflow into a quota cliff.
-// Retention is a feature to add deliberately, not a side effect of the
-// collapse.
+// Prior versions stay live, exactly as they do for a document, so a directory
+// pins, rolls back and rolls forward like anything else. That is the point of
+// one artifact model: a redeploy is an update, and an update has never thrown
+// away what it replaced.
 //
-// NOT atomic across the two steps: a failure between them leaves the previous
-// version live and the owner over-charged until the next redeploy or an
-// explicit version delete. That direction is the safe one - the new content is
-// already serving, and the error is visible in the owner's own listing rather
-// than silently losing bytes.
+// It therefore CHARGES like an update too - every live version counts against
+// quota, and an owner reclaims bytes by deleting versions they no longer want.
+// Blob dedup keeps the cost proportional to what actually changed: a redeploy
+// touching one file of two hundred stores and charges for one blob.
 //
 // Ownership is enforced here rather than inside the append: a slug that is not
 // a directory, and one owned by another identity, both yield the not-found
@@ -143,24 +140,9 @@ func (a *ArtifactSites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site
 	if existing.Kind != domain.KindSite || existing.Identity != s.Identity {
 		return ErrNotFound
 	}
-	live, err := a.repo.ListVersions(s.Slug)
-	if err != nil {
-		return err
-	}
 	root, _ := s.Manifest.Lookup("/")
-	res, err := a.repo.AppendManifestVersion(ctx, s.Slug, s.Manifest, root, dedupedSize, userCap, now)
-	if err != nil {
-		return err
-	}
-	for _, v := range live {
-		if v.Deleted || v.VerNum == res.NewVer {
-			continue
-		}
-		if derr := a.repo.DeleteVersion(s.Slug, v.VerNum); derr != nil {
-			return derr
-		}
-	}
-	return nil
+	_, err = a.repo.AppendManifestVersion(ctx, s.Slug, s.Manifest, root, dedupedSize, userCap, now)
+	return err
 }
 
 func (a *ArtifactSites) Delete(slug domain.Slug) error { return a.repo.Delete(slug) }
