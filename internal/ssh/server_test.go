@@ -19,6 +19,7 @@ import (
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // TestUploadAndServe pins the end-to-end round trip: a real ssh client pipes
@@ -26,11 +27,6 @@ import (
 // returned URL yields the same bytes with the expected sandbox headers.
 func TestUploadAndServe(t *testing.T) {
 	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
@@ -38,7 +34,7 @@ func TestUploadAndServe(t *testing.T) {
 	// Compression wrapper mirrors the production wiring in cmd/hostthisd.
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
-	repo := storage.NewPasteRepo(db)
+	repo := storagetest.NewRepo(t)
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 

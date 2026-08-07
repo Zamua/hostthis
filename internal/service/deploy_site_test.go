@@ -12,25 +12,21 @@ import (
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // deployFixture wires real sqlite repos + a real compressed blob store so
 // the test exercises the actual untar → blob → manifest → persist path.
-func deployFixture(t *testing.T) (*DeploySite, *storage.SiteRepo, *storage.CompressedBlobStore) {
+func deployFixture(t *testing.T) (*DeploySite, *storage.ShaleSiteRepo, *storage.CompressedBlobStore) {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	disk, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(disk)
-	sites := storage.NewSiteRepo(db)
-	pastes := storage.NewPasteRepo(db)
+	sites := storage.NewShaleSiteRepo(storagetest.NewRepo(t))
+	pastes := storagetest.NewRepo(t)
 	d := NewDeploySite(sites, pastes, NewStandaloneBlobUnit(blobs))
 	return d, sites, blobs
 }

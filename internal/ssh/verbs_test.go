@@ -18,6 +18,7 @@ import (
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // stack is the per-test bundle of services + listener addresses for driving
@@ -26,7 +27,7 @@ type stack struct {
 	t           *testing.T
 	httpURL     string
 	sshAddr     string
-	repo        *storage.PasteRepo
+	repo        *storage.ShaleRepo
 	blobs       *storage.CompressedBlobStore
 	upload      *service.Upload
 	keyedClient *xssh.Client
@@ -82,11 +83,6 @@ func newAnonClient(t *testing.T, addr string) *xssh.Client {
 func startStack(t *testing.T) *stack {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatalf("blobs: %v", err)
@@ -95,7 +91,7 @@ func startStack(t *testing.T) *stack {
 	// go through the compression layer; only the sweep talks raw.
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
-	repo := storage.NewPasteRepo(db)
+	repo := storagetest.NewRepo(t)
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 	manage := service.NewManage(repo, blobUnit)

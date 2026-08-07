@@ -1,13 +1,13 @@
 package service_test
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // The room-creation rate-limit table is bounded by the COUNT that already reads
@@ -19,13 +19,7 @@ import (
 // and reads 0 whether or not anything was pruned, so it would pass with the
 // prune deleted entirely.
 func TestRoomCreates_CountPrunesPastWindow(t *testing.T) {
-	dir := t.TempDir()
-	db, err := storage.Open(filepath.Join(dir, "rooms.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	rooms := storage.NewRoomKVRepo(db)
+	rooms := storage.NewShaleRoomRepo(storagetest.NewRepo(t))
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	roomsSvc := service.NewRooms(rooms)

@@ -24,7 +24,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -374,19 +373,16 @@ func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
 	}
 }
 
-// TestShaleQuotaParityWithSqlite drives the same op sequence (inserts, appends,
-// version tombstones) against both backends and asserts the quota sums agree at
-// every step, then corrupts shale's index entry out-of-band and asserts that
-// the slug's own next write - not any background pass - restores parity.
-func TestShaleQuotaParityWithSqlite(t *testing.T) {
+// Pins that the scan's cached per-entry sizes stay equal to the owner's true
+// live bytes across inserts, appends and version tombstones, that corrupting a
+// cached size is NOT healed by a read, and that the slug's own next write is
+// what restores it.
+//
+// The expected total is computed from the ops rather than compared against a
+// second backend: the property is that the cache tracks the truth, and the
+// truth is a sum this test already knows.
+func TestShaleQuotaTracksLiveBytes(t *testing.T) {
 	shale := newShaleRepoForTest(t)
-
-	db, err := storage.Open(filepath.Join(t.TempDir(), "parity.db"))
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	sq := storage.NewPasteRepo(db)
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	owner := "key:parity"
@@ -399,70 +395,49 @@ func TestShaleQuotaParityWithSqlite(t *testing.T) {
 		Kind: domain.KindHTML, ContentSHA: "sha-parity2", Size: 200,
 		CreatedAt: now, UpdatedAt: now}
 
-	assertParity := func(step string) {
+	assertSum := func(step string, want int) {
 		t.Helper()
-		shaleSum, err := shale.SumActiveBytesByOwner(owner, now)
+		got, err := shale.SumActiveBytesByOwner(owner, now)
 		if err != nil {
-			t.Fatalf("%s: shale sum: %v", step, err)
+			t.Fatalf("%s: sum: %v", step, err)
 		}
-		sqSum, err := sq.SumActiveBytesByOwner(owner, now)
-		if err != nil {
-			t.Fatalf("%s: sqlite sum: %v", step, err)
-		}
-		if shaleSum != sqSum {
-			t.Fatalf("%s: quota parity broken: shale=%d sqlite=%d", step, shaleSum, sqSum)
+		if got != want {
+			t.Fatalf("%s: live bytes = %d, want %d", step, got, want)
 		}
 	}
 
 	for _, ins := range []domain.Paste{p1, p2} {
 		if err := shale.InsertWithQuotaCheck(context.Background(), ins, 0, now); err != nil {
-			t.Fatalf("shale insert %s: %v", ins.Slug, err)
-		}
-		if err := sq.InsertWithQuotaCheck(context.Background(), ins, 0, now); err != nil {
-			t.Fatalf("sqlite insert %s: %v", ins.Slug, err)
+			t.Fatalf("insert %s: %v", ins.Slug, err)
 		}
 	}
 	shale.WaitPendingConfirms()
-	assertParity("after inserts")
+	assertSum("after inserts", 500) // 300 + 200
 
 	if _, err := shale.AppendVersionWithQuotaCheck(context.Background(), p1.Slug, domain.KindHTML, "sha-parity1-v2", 150, 0, now); err != nil {
-		t.Fatalf("shale append: %v", err)
+		t.Fatalf("append: %v", err)
 	}
-	if _, err := sq.AppendVersionWithQuotaCheck(context.Background(), p1.Slug, domain.KindHTML, "sha-parity1-v2", 150, 0, now); err != nil {
-		t.Fatalf("sqlite append: %v", err)
-	}
-	assertParity("after append")
+	assertSum("after append", 650) // + 150
 
 	if err := shale.DeleteVersion(p1.Slug, 1); err != nil {
-		t.Fatalf("shale tombstone: %v", err)
+		t.Fatalf("tombstone: %v", err)
 	}
-	if err := sq.DeleteVersion(p1.Slug, 1); err != nil {
-		t.Fatalf("sqlite tombstone: %v", err)
-	}
-	assertParity("after tombstone")
+	assertSum("after tombstone", 350) // - 300
 
 	if _, err := shale.AppendVersionWithQuotaCheck(context.Background(), p2.Slug, domain.KindHTML, "sha-parity2-v2", 50, 0, now); err != nil {
-		t.Fatalf("shale append p2: %v", err)
+		t.Fatalf("append p2: %v", err)
 	}
-	if _, err := sq.AppendVersionWithQuotaCheck(context.Background(), p2.Slug, domain.KindHTML, "sha-parity2-v2", 50, 0, now); err != nil {
-		t.Fatalf("sqlite append p2: %v", err)
-	}
-	assertParity("after second append")
+	assertSum("after second append", 400) // + 50
 
-	// The divergence proves the corruption landed in the thing the scan
-	// sums...
+	// The divergence proves the corruption landed in the thing the scan sums...
 	idxKey := storage.IdentityPasteKeyForTest(owner, p1.Slug.String())
 	writeCachedIndexSize(t, shale, idxKey, 999999)
-	shaleSum, err := shale.SumActiveBytesByOwner(owner, now)
+	corrupted, err := shale.SumActiveBytesByOwner(owner, now)
 	if err != nil {
-		t.Fatalf("shale sum (corrupted): %v", err)
+		t.Fatalf("sum (corrupted): %v", err)
 	}
-	sqSum, err := sq.SumActiveBytesByOwner(owner, now)
-	if err != nil {
-		t.Fatalf("sqlite sum: %v", err)
-	}
-	if shaleSum == sqSum {
-		t.Fatalf("corruption did not land in the cached measure: shale=%d sqlite=%d", shaleSum, sqSum)
+	if corrupted == 400 {
+		t.Fatalf("corruption did not land in the cached measure: sum still %d", corrupted)
 	}
 	// ...a list does NOT heal it - nothing reads the authoritative rows...
 	if _, err := shale.ListByOwner(owner); err != nil {
@@ -472,14 +447,11 @@ func TestShaleQuotaParityWithSqlite(t *testing.T) {
 		t.Fatalf("a list must not heal the corrupted cache: got %d, want 999999", got)
 	}
 
-	// ...and the slug's own next write is what restores parity.
+	// ...and the slug's own next write is what restores it.
 	if _, err := shale.AppendVersionWithQuotaCheck(context.Background(), p1.Slug, domain.KindHTML, "sha-parity1-v3", 25, 0, now); err != nil {
-		t.Fatalf("shale append p1 v3: %v", err)
+		t.Fatalf("append p1 v3: %v", err)
 	}
-	if _, err := sq.AppendVersionWithQuotaCheck(context.Background(), p1.Slug, domain.KindHTML, "sha-parity1-v3", 25, 0, now); err != nil {
-		t.Fatalf("sqlite append p1 v3: %v", err)
-	}
-	assertParity("after the slug's own next write restores parity")
+	assertSum("after the slug's own next write restores the cache", 425) // + 25
 }
 
 // --- helpers ---------------------------------------------------------------

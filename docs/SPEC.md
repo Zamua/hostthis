@@ -536,7 +536,7 @@ acknowledgement, so the uploader gets a URL back as soon as the paste is
 durably reserved + named, not after the bytes finish landing in the
 object store.
 
-This whole section describes the DETACHED-store path (the default - sqlite,
+This whole section describes the DETACHED-store path (the default - local,
 slatedb, and shale-without-a-blob-bucket), where the blob write happens after
 the metadata commit. On the shale-collocated blob path (`HOSTTHIS_SHALE_BLOB_BUCKET`
 set, see "Shale-collocated blobs") this model COLLAPSES: the bytes are staged
@@ -595,7 +595,7 @@ additive migration with no flag day.
 
 Quota is enforced HERE, synchronously, by the same quota check used
 before (a scan of the owner's live rows on shale; a serialized in-transaction
-sum on sqlite/slatedb). An over-quota upload is rejected before any URL is
+sum on the single-transaction backends). An over-quota upload is rejected before any URL is
 handed out: the async split does not weaken the quota gate.
 
 ### Finalize: the asynchronous half
@@ -994,7 +994,7 @@ The harness ships four committed site fixtures under
   real file served directly, never via the fallback.
 
 For each fixture the harness tars the build output, deploys it through the
-real `DeploySite` use case over a real sqlite repo + content-addressed
+real `DeploySite` use case over a real repo + content-addressed
 blob store, then fetches every built file back over the real HTTP serving
 surface and asserts the served bytes are byte-identical to the fixture
 file, the content-type matches the extension, `/` serves the root
@@ -1187,7 +1187,7 @@ existence of any specific room.
 
 Room data is small JSON/bytes blobs - app STATE, not files - so it lives
 in the **metadata backend** hostthis already runs (the configurable
-metadata store: sqlite for single-host, slatedb / shale for the
+metadata store: the local engine for single-host, slatedb / shale for the
 object-store-backed and horizontally-scaled deploys), NOT in the
 content-addressed BlobStore. The BlobStore is for the larger,
 dedupe-worthy file bytes of pastes and sites; room values are small,
@@ -1209,12 +1209,12 @@ pattern exactly the way the paste repo and the shale `ShaleRepo` do:
   small service-layer interface (a `RoomRepo` declared in
   `internal/service`, the same way `PasteRepo` / `PasteAdmin` /
   `SweepRepo` / `KeyGateRepo` are; the sweep-side view is `SweepRooms`).
-  All three metadata backends implement it - **sqlite** (single-host),
+  All three metadata backends implement it - **local** (single-host),
   **slatedb** (object-store-backed), and **shale** (horizontally-scaled
   cluster) - so the `/api/rooms` surface runs on every backend hostthis can
   be deployed on, including the slatedb-direct backend prod runs. The
   domain, HTTP, and service layers stay unaware of which backend is wired.
-- The sqlite backend stores rooms in two tables, `rooms`
+- The local backend stores rooms the same way the shale backend does
   (`(app_slug, room_id)` primary key) and `room_kv`
   (`(app_slug, room_id, key)` primary key + the opaque value, FK-cascade
   on the room), plus a bounded `room_creates` table for the creation rate
@@ -1288,9 +1288,9 @@ informs them):
   quota: it stops one app from consuming the whole service. It is flagged
   as a starting default - an operator running many apps may want it lower,
   a single-app operator higher. It
-  differs from the per-IDENTITY paste/site quota, which the sqlite + slatedb
+  differs from the per-IDENTITY paste/site quota, which the local + slatedb
   backends free at READ time; the per-app room aggregate is uniformly
-  sweep-time so the cap behaves identically across sqlite, slatedb, and
+  sweep-time so the cap behaves identically across local, slatedb, and
   shale.
 - **Durable total-bytes ceiling.** Room data does NOT carry its own
   service-wide byte scan. Rooms hold no blobs (a room value lives entirely
@@ -1820,7 +1820,7 @@ value:
   surface is added.
 - **slatedb**: the same record field, incremented under the per-room
   serialized-writer stripe that already serializes the cap math.
-- **sqlite**: a `seq` column on the `rooms` table, incremented in the
+- **local**: the room record's `seq`, incremented in the
   same serializable transaction as the value write.
 
 `RoomRepo.PutValue` and `RoomRepo.DeleteValue` return the assigned seq
@@ -1838,7 +1838,7 @@ suite:
   re-snapshot for nothing); a frame with no seq could not be spliced.
 - **`ScanRoom` reports the exact seq its snapshot reflects.** The
   snapshot's `S` must satisfy: every mutation with seq <= S is in the
-  state, no mutation with seq > S is. sqlite and slatedb read the seq
+  state, no mutation with seq > S is. The single-transaction backends read the seq
   inside the same transaction / stripe as the scan, so the fence is
   free. shale cannot put a prefix scan inside a CAS, so `ScanRoom` runs
   a **seq fence**: read the record's seq, scan the namespace, re-read
@@ -2027,7 +2027,7 @@ heals through the standard reconnect + snapshot + splice path.
 
 #### The degenerate case: zero peers
 
-Every single-pod deploy (sqlite, slatedb-direct, single-node shale) has
+Every single-pod deploy (local, slatedb-direct, single-node shale) has
 an empty peer set: no peer gRPC service is registered (there is no
 multi-node server to register on), the sender is inert, and the relay
 is exactly the single-pod relay - same seq assignment, same
@@ -2945,8 +2945,8 @@ a bucket quota and surfaces as `ErrServiceFull` from the blob `Put`, off
 the metadata write path entirely.) The underlying
 mechanism depends on the metadata backend in use:
 
-- **sqlite backend** - `BEGIN IMMEDIATE` (via `database/sql`
-  `LevelSerializable`, which the modernc sqlite driver translates).
+- **local backend** - the same single-shard CAS the shale backend
+  uses; only the engine beneath the cluster differs.
   `busy_timeout(5000)` makes contention wait up to 5s rather than
   fail fast.
 - **slatedb backend** - `Db.begin(IsolationLevel.SnapshotIsolation)`
@@ -2968,7 +2968,7 @@ no half-applied state visible to readers."
   physical bytes (post-compression, post-dedup), enforced by the storage
   layer, not an app-level scan
 - Concurrent per-identity quota races → atomic transactions on the
-  single-writer backends (sqlite / slatedb); on the sharded shale backend
+  single-writer backends (local / slatedb); on the sharded shale backend
   the quota check is a scan that is not atomic with the write, so
   same-identity concurrency admits a BOUNDED overshoot (one in-flight
   upload), backstopped by the object-store bucket quota (see
@@ -3191,9 +3191,10 @@ The metadata layer (paste rows, version rows, identity quota
 counters, slug-to-identity index, Sybil key_first_seen rows) is
 pluggable. Two backends ship:
 
-- **sqlite** - single `<data-dir>/hostthis.db` file, WAL mode,
-  `BEGIN IMMEDIATE` transactions. The default. Zero operational
-  overhead, perfect for single-host deployments.
+- **local** - a single-node shale cluster on this build's local
+  storage engine, persisted under `<data-dir>/metadata`. The
+  default. Zero configuration and no external services, which is
+  what a fresh clone and `make run` want.
 - **slatedb** - embedded LSM-tree store with all data persisted to
   an S3-compatible object store (MinIO, R2, S3, GCS, ABS). Same
   HOSTTHIS_S3_* env vars as the blob backend, plus an explicit
@@ -3205,7 +3206,7 @@ backends. Domain layer + HTTP/SSH adapters are unaware of which is
 in use. Switching is one env var:
 
 ```
-HOSTTHIS_METADATA_BACKEND=sqlite                  # default
+HOSTTHIS_METADATA_BACKEND=local                   # default
 HOSTTHIS_METADATA_BACKEND=slatedb                 # opt-in
 HOSTTHIS_METADATA_S3_BUCKET=hostthis-metadata     # required for slatedb
 # (S3 endpoint/credentials reused from HOSTTHIS_S3_*)
@@ -3239,7 +3240,7 @@ Every write that touches multiple keys is committed atomically:
   rows) + (slug pointer delete). All land or none; the freed bytes leave
   the owner's quota simply because the next scan no longer sees them.
 
-sqlite enforces this via `BEGIN IMMEDIATE`; slatedb via
+the local engine enforces this via the cluster CAS; slatedb via
 `Db.begin(IsolationLevel.SnapshotIsolation)` with `WriteBatch`. On the
 shale backend the `{slug}`-shard rows above commit atomically as one CAS,
 and the owner's `{id}`-shard enumeration index entry is a separate
@@ -3255,7 +3256,7 @@ combos:
 
 | metadata | blob | shape |
 | --- | --- | --- |
-| sqlite | disk | single-host, no cloud deps (dev) |
+| local | disk | single-host, no cloud deps (dev) |
 | slatedb | disk | stateless metadata in the cloud, local-disk blobs (dev/test) |
 | shale | shale-collocated | production: blobs live IN the shale cluster's object store, co-committed with metadata (see "Shale-collocated blobs"); the standalone `BlobStore` is bypassed |
 
@@ -3440,9 +3441,9 @@ WithQuotaCheck` with caps set to 0 (the documented "no quota
 enforcement" path), so no backend needs an extra unchecked helper.
 
 Each backend supplies a tiny factory and calls `runConformance` with
-it. The default `go test ./...` run exercises the sqlite backend (no
-build tag, no cgo, no external services). The same suite runs against
-the slatedb backend under `-tags slatedb` (which also needs cgo +
+it. The default `go test ./...` run exercises the shale backend on the
+local storage engine (no build tag, no cgo, no external services). The
+same suite runs against the slatedb backend under `-tags slatedb` (which also needs cgo +
 `libslatedb` on the loader path, and a live S3 endpoint via
 `MINIO_TEST_ENDPOINT`, skipping cleanly when unset), and is the
 acceptance gate the future
@@ -3841,7 +3842,7 @@ bounded query) cheap.
 
 The default implementation stores intents in the metadata cluster. Nothing
 above the repository knows that: the application service and the repository
-port are unchanged, and a backend with a single transaction (sqlite, slatedb)
+port are unchanged, and a backend with a single transaction (slatedb)
 has no dual write and therefore no intent log at all.
 
 One optimization is deliberately NOT taken. Intents and enumeration entries
@@ -3858,7 +3859,7 @@ reserve against, so the deploy is a plain sequence: check quota (scan), write
 the `identity_sites/<id>/<slug>` enumeration entry (value-bearing: the cached
 deduped size the quota scan sums), then write the authoritative `{slug}` row -
 entry first, for the reason given above - matching
-sqlite and slatedb - and `StrictIdentityQuotaUnderConcurrency` is `false` (the
+slatedb - and `StrictIdentityQuotaUnderConcurrency` is `false` (the
 scan-check and the row-write are not atomic; the bounded same-owner
 over-admit is the accepted trade, see "The correctness argument").
 
@@ -3876,7 +3877,7 @@ site-only owner sum).
 The per-owner cap is SYMMETRIC across both kinds: a deploy of EITHER kind
 checks the owner's COMBINED paste + site bytes against `userCap`, so the
 ceiling holds no matter how an owner splits their quota between pastes and
-sites. This matches the sqlite `identityActiveBytes`, which sums both kinds
+sites. This sums both kinds
 and is read by BOTH the paste insert and the site deploy. Concretely:
   - a SITE deploy's check scans BOTH the paste sum and the site sum and
     verifies `paste + site + deduped <= userCap`, and

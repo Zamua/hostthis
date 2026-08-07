@@ -58,6 +58,12 @@ var layerPolicy = map[string][]string{
 	// here is that it STAYS empty. Its _test.go files wire whole stacks, which
 	// is legitimate and is why the graph below is production-only.
 	"sitevalidation": {},
+
+	// Test-only fixture: opens the metadata repo other packages' tests build
+	// on, so it reaches storage by design. Nothing in production may import it,
+	// which the "no adapter reachable from service" rules below enforce because
+	// it is not in any production package's allowed set.
+	"storagetest": {"domain", "durable", "storage"},
 }
 
 // Dependencies point inward: domain depends on nothing, service and storage on
