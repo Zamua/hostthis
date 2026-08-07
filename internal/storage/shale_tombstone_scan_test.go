@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage_test
 
 // A deleted key must be invisible to the scan path, as it already is to
@@ -10,7 +8,6 @@ package storage_test
 // removes the key outright, so a Delete-based test would assert nothing.
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -20,11 +17,7 @@ import (
 )
 
 func TestShaleTombstone_DeletedRowIsInvisibleToScan(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale tombstone test (start dev MinIO first)")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	owner := "key:tombstone"

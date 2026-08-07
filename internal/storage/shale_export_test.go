@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage
 
 // Test-only exports for the shale migration + reconciler tests, which live in

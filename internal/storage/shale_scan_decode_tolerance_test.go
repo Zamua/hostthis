@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage_test
 
 // Decode-tolerance policy tests for the shale background scans, pinned against
@@ -24,7 +22,6 @@ package storage_test
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -48,11 +45,7 @@ var corruptJSON = []byte("this-is-not-json{")
 // corrupt record surfaces an error, so the tolerant background scans cannot
 // have leaked their skip behavior into the per-request read path.
 func TestShaleDecodeTolerance_UserReadHardFails(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale decode-tolerance test (start dev MinIO first)")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	p := domain.Paste{

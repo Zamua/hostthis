@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage_test
 
 // A value written at ReplicationFactor>1 is stored wrapped in an LWW envelope
@@ -17,7 +15,6 @@ package storage_test
 // Skips unless MINIO_TEST_ENDPOINT is set.
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -27,11 +24,7 @@ import (
 )
 
 func TestShaleEnvelopeStrip_ScanPathsDecodeEnvelopedValue(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping envelope-strip test (start dev MinIO first)")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 
 	now := time.Date(2026, 6, 12, 12, 0, 0, 0, time.UTC)
 	slug := domain.Slug("envel123")

@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage_test
 
 // The identity-leading keygate index. Two things can go wrong with a derived
@@ -9,7 +7,6 @@ package storage_test
 //	go test -tags slatedb -run TestShaleKeygateIndex ./internal/storage
 
 import (
-	"os"
 	"testing"
 	"time"
 )
@@ -19,11 +16,7 @@ const kgWindow = 24 * time.Hour
 // The index must agree with the authoritative rows across multiple subnets and
 // multiple identities.
 func TestShaleKeygateIndex_CountsSubnetsForIdentity(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale keygate index test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 
 	const me = "key:alice"
@@ -64,11 +57,7 @@ func TestShaleKeygateIndex_CountsSubnetsForIdentity(t *testing.T) {
 
 // Out-of-window entries must not count.
 func TestShaleKeygateIndex_ExcludesOutOfWindow(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale keygate index test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	old := now.Add(-48 * time.Hour)
@@ -97,11 +86,7 @@ func TestShaleKeygateIndex_ExcludesOutOfWindow(t *testing.T) {
 // outlives its row and whoami over-reports forever, with nothing left to
 // repair it.
 func TestShaleKeygateIndex_AdmissionDropsExpiredRowAndItsEntry(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale keygate index test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	old := now.Add(-48 * time.Hour)
@@ -131,11 +116,7 @@ func TestShaleKeygateIndex_AdmissionDropsExpiredRowAndItsEntry(t *testing.T) {
 // The identity-side read prunes its own expired entries, so an entry whose
 // subnet never sees another admission still stops occupying space.
 func TestShaleKeygateIndex_IdentityReadDropsExpiredEntry(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale keygate index test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	old := now.Add(-48 * time.Hour)

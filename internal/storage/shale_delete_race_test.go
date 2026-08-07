@@ -1,11 +1,8 @@
-//go:build slatedb
-
 package storage_test
 
 import (
 	"context"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -22,11 +19,7 @@ import (
 // whichever way the race resolves, so the owner's true live bytes equal exactly
 // the keeper: the sum must never fall below that floor.
 func TestShaleDelete_VsDeleteVersionSameSlug_NoUnderCount(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; start dev MinIO first")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Now().UTC()
 
 	const (

@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage_test
 
 // Migrated-slatedb identity_pastes entries and the paste quota scan.
@@ -18,7 +16,6 @@ package storage_test
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -27,11 +24,7 @@ import (
 )
 
 func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale legacy-entry test (start dev MinIO first)")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
 	owner := "key:legidx"

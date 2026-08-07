@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage_test
 
 // Migration round-trip for the shale backend, against the REAL slate library.
@@ -15,7 +13,6 @@ package storage_test
 // Skips cleanly unless MINIO_TEST_ENDPOINT is set.
 
 import (
-	"os"
 	"slices"
 	"testing"
 	"time"
@@ -109,11 +106,7 @@ func TestShaleMigration_RawValueRoundTrips(t *testing.T) {
 // configured.
 func newShaleRepoForMigration(t *testing.T) *storage.ShaleRepo {
 	t.Helper()
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale migration test (start dev MinIO first)")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	return repo
 }
 

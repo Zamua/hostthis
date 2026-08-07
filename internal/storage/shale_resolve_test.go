@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage_test
 
 // The durable-intent contract, pinned at each crash boundary:
@@ -20,7 +18,6 @@ package storage_test
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"testing"
 	"time"
 
@@ -63,11 +60,7 @@ func crashedInsert(t *testing.T, repo *storage.ShaleRepo, owner, slug string, si
 }
 
 func TestShaleIntentSweepRollsBackAnEntryWithNoRow(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping intent sweep test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	owner := "key:introll"
 
@@ -96,11 +89,7 @@ func TestShaleIntentSweepRollsBackAnEntryWithNoRow(t *testing.T) {
 // A crash after T2 leaves a REAL paste whose intent was never forgotten.
 // Rolling that back would delete live content, so the sweep must roll forward.
 func TestShaleIntentSweepRollsForwardWhenTheRowLanded(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping intent sweep test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	owner := "key:intfwd"
 	slug := domain.Slug("intfwd11")
@@ -144,11 +133,7 @@ func TestShaleIntentSweepRollsForwardWhenTheRowLanded(t *testing.T) {
 // The grace is the only thing separating an in-flight upload on another node
 // from an abandoned one. Without it the sweep deletes live work.
 func TestShaleIntentSweepLeavesFreshIntentsAlone(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping intent grace test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	owner := "key:intfresh"
 
@@ -186,11 +171,7 @@ func TestShaleIntentSweepLeavesFreshIntentsAlone(t *testing.T) {
 // intent and then completes it - leaving the sweep nothing to resolve and the
 // guard unexercised. That version of this test passed with the guard removed.
 func TestShaleIntentRollbackSparesAFresherEntry(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping intent guard test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	owner := "key:intguard"
 	slug := "intgrd11"
@@ -229,11 +210,7 @@ func TestShaleIntentRollbackSparesAFresherEntry(t *testing.T) {
 
 // Units are replicated, so more than one node can resolve the same intent.
 func TestShaleIntentSweepIsIdempotent(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping intent idempotence test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	owner := "key:intidem"
 
@@ -250,11 +227,7 @@ func TestShaleIntentSweepIsIdempotent(t *testing.T) {
 
 // A completed insert must leave nothing behind for a sweep to find.
 func TestShaleIntentCompletedInsertLeavesNoIntent(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping intent cleanup test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	owner := "key:intclean"
 
@@ -279,11 +252,7 @@ func TestShaleIntentCompletedInsertLeavesNoIntent(t *testing.T) {
 // protection. This also exercises the resolver's site branch, which reads
 // sites/<slug> and rolls back identity_sites/<id>/<slug>.
 func TestShaleIntentSweepRollsBackACrashedSiteDeploy(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping site intent test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	owner := "key:intsite"
 	slug := "intsite1"
@@ -324,11 +293,7 @@ func TestShaleIntentSweepRollsBackACrashedSiteDeploy(t *testing.T) {
 
 // A completed site deploy leaves no intent for a sweep to act on.
 func TestShaleIntentCompletedSiteDeployLeavesNoIntent(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping site intent cleanup test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	owner := "key:intsitec"
 
@@ -355,11 +320,7 @@ func TestShaleIntentCompletedSiteDeployLeavesNoIntent(t *testing.T) {
 // wait for a pod restart. The boot sweep stays the guarantee; this is what makes
 // it fast in practice.
 func TestShaleIntentListResolvesWithoutARestart(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping resolve-on-read test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Now().UTC()
 	owner := "key:onread"
 
@@ -385,11 +346,7 @@ func TestShaleIntentListResolvesWithoutARestart(t *testing.T) {
 // A FRESH intent must survive a listing exactly as it survives a sweep: another
 // node may be mid-write, and a read is not a licence to skip the grace.
 func TestShaleIntentListRespectsTheGrace(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping resolve-on-read grace test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Now().UTC()
 	owner := "key:onreadfresh"
 
