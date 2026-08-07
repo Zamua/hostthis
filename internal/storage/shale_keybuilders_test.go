@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage
 
 import (
@@ -38,9 +36,9 @@ func TestShaleKeyBuildersRouteToTheirSubject(t *testing.T) {
 		{"identity_pastes prefix", shalePrefixIdentityPastes(identity), identity},
 		{"identity_first_seen", shaleKeyIdentityFirstSeen(identity), identity},
 
-		{"site", keySite(slug), string(slug)},
-		{"identity_sites", keyIdentitySite(identity, string(slug)), identity},
-		{"identity_sites prefix", prefixIdentitySites(identity), identity},
+		{"site", shaleKeySite(slug), string(slug)},
+		{"identity_sites", shaleKeyIdentitySite(identity, string(slug)), identity},
+		{"identity_sites prefix", shalePrefixIdentitySites(identity), identity},
 
 		{"room", shaleKeyRoom(app, roomID), string(app)},
 		{"room value", shaleKeyRoomValue(app, roomID, "a/b"), string(app)},

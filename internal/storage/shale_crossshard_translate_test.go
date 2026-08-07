@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage
 
 // Pins the storage-boundary translation of shale's cross-shard guard sentinel

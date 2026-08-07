@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage_test
 
 // Lifecycle-status tests for the shale backend: MarkReady / MarkFailed
@@ -12,7 +10,6 @@ package storage_test
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -44,11 +41,7 @@ func insertPending(t *testing.T, repo *storage.ShaleRepo, owner, slug string, si
 }
 
 func TestShaleLifecycle_MarkReady(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale lifecycle test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	owner := "key:life-ready"
 
@@ -74,11 +67,7 @@ func TestShaleLifecycle_MarkReady(t *testing.T) {
 }
 
 func TestShaleLifecycle_MarkFailedReleasesQuota(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale lifecycle test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	owner := "key:life-fail"
 

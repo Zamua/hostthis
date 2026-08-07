@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage_test
 
 // The scan-derived quota SUMS THE CACHED VALUES of the enumeration entries: one
@@ -26,7 +24,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -36,11 +33,7 @@ import (
 )
 
 func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale cached-values test (start dev MinIO first)")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	owner := "key:cachesz"
@@ -176,11 +169,7 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 // did not cause. Both unreadable shapes are covered - undecodable JSON, and the
 // placeholder marker an older deployment wrote for an undecodable record.
 func TestShaleQuotaScanFailsOpen(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale fail-closed test (start dev MinIO first)")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	owner := "key:qfc"
@@ -237,11 +226,7 @@ func TestShaleQuotaScanFailsOpen(t *testing.T) {
 // leftover entry from a crash mid-MarkFailed is a phantom like any other -
 // counted, listed, and cleared only by its owner.
 func TestShaleListDoesNotResurrectFailedPasteEntry(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale failed-entry test (start dev MinIO first)")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	owner := "key:failstay"
@@ -295,11 +280,7 @@ func TestShaleListDoesNotResurrectFailedPasteEntry(t *testing.T) {
 // row until the owner's next list enriches it, orphans are never pruned, and a
 // fail-closed placeholder hard-fails the scan.
 func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale site cached-values test (start dev MinIO first)")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	owner := "key:sitecache"
@@ -398,11 +379,7 @@ func TestShaleSiteQuotaScanSumsCachedIndexValues(t *testing.T) {
 // every step, then corrupts shale's index entry out-of-band and asserts that
 // the slug's own next write - not any background pass - restores parity.
 func TestShaleQuotaParityWithSqlite(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale/sqlite parity test (start dev MinIO first)")
-	}
-	shale := newShaleRepoOnUniqueDB(t, endpoint)
+	shale := newShaleRepoForTest(t)
 
 	db, err := storage.Open(filepath.Join(t.TempDir(), "parity.db"))
 	if err != nil {
@@ -593,11 +570,7 @@ func writeIndexEntryJSON(t *testing.T, repo *storage.ShaleRepo, idxKey []byte, s
 // charges, both served from the cached entry with no authoritative read.
 // Collapsing them hides the multi-version size note from every owner.
 func TestShaleListReportsServedAndStoredSizes(t *testing.T) {
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale served-size test")
-	}
-	repo := newShaleRepoOnUniqueDB(t, endpoint)
+	repo := newShaleRepoForTest(t)
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	owner := "key:servedsz"

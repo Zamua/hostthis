@@ -3482,6 +3482,12 @@ implementation with no cgo, no native library and no object store, so
 `go test ./...` covers code that previously only a tagged build could
 even compile.
 
+The shale tests name no engine: each build supplies `newShaleRepoFor-
+Test`, and the SAME test bodies run on pebble by default and on slate
+under `-tags slatedb` with a live endpoint. Only the tests that
+configure sharding or open a raw slate handle stay tagged, because a
+local engine has neither.
+
 Pebble refuses `UnitCount > 0` rather than quietly serving one unit.
 Units are mounted and FENCED through a `storageunit.BackendFactory`
 whose epoch contract is a property of a store that outlives a node; a

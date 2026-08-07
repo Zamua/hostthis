@@ -1,5 +1,3 @@
-//go:build slatedb
-
 package storage_test
 
 // slug_owner lifecycle for SITES, pinned against the REAL shale backend.
@@ -16,7 +14,6 @@ package storage_test
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
@@ -53,11 +50,7 @@ func slugOwnerSite(slug, owner string) domain.Site {
 
 func slugOwnerRepo(t *testing.T) *storage.ShaleRepo {
 	t.Helper()
-	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale slug_owner test (start dev MinIO first)")
-	}
-	return newShaleRepoOnUniqueDB(t, endpoint)
+	return newShaleRepoForTest(t)
 }
 
 func slugOwnerPresent(t *testing.T, repo *storage.ShaleRepo, slug domain.Slug) bool {
