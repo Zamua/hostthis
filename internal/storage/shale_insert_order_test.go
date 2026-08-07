@@ -70,11 +70,11 @@ func TestShaleInsertOrder_TakenSlugWritesNoEntry(t *testing.T) {
 	}
 }
 
-// A fail-closed placeholder must be CLEARED once the authoritative row decodes
-// again. Nothing writes placeholders now that the reconciler is gone, so one
-// left behind by an older build would otherwise be permanent - and a permanent
-// placeholder hard-fails its owner's quota scan forever, locking them out of
-// uploading.
+// A placeholder must be CLEARED once the authoritative row decodes again.
+// Nothing writes placeholders now, so one left behind by an older build would
+// otherwise be permanent - and a placeholder counts as zero bytes, so its owner
+// keeps that paste for free until something replaces the marker with the real
+// size.
 func TestShaleInsertOrder_ListClearsStalePlaceholder(t *testing.T) {
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -97,8 +97,12 @@ func TestShaleInsertOrder_ListClearsStalePlaceholder(t *testing.T) {
 	if err := repo.PutRawForTest(idxKey, []byte(`{"placeholder":true}`)); err != nil {
 		t.Fatalf("plant placeholder: %v", err)
 	}
-	if _, err := repo.SumActiveBytesByOwner(owner, now); err == nil {
-		t.Fatalf("fixture: a placeholder must hard-fail the quota scan, or this test proves nothing")
+	// Fixture: the marker must actually suppress the charge, or clearing it
+	// below proves nothing.
+	if got, err := repo.SumActiveBytesByOwner(owner, now); err != nil {
+		t.Fatalf("a placeholder must not fail the scan: %v", err)
+	} else if got != 0 {
+		t.Fatalf("fixture: a placeholder must count as zero, got %d", got)
 	}
 
 	if _, err := repo.ListByOwner(owner); err != nil {
@@ -108,7 +112,7 @@ func TestShaleInsertOrder_ListClearsStalePlaceholder(t *testing.T) {
 	// The row decodes fine, so the marker was stale and must be gone.
 	got, err := repo.SumActiveBytesByOwner(owner, now)
 	if err != nil {
-		t.Fatalf("the owner must be able to upload again after listing; quota scan still fails: %v", err)
+		t.Fatalf("quota scan after clearing: %v", err)
 	}
 	if got != 250 {
 		t.Fatalf("cleared placeholder must be replaced by the real size: got %d, want 250", got)

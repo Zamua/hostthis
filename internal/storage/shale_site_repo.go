@@ -125,11 +125,11 @@ type identitySiteRow struct {
 	CreatedAt time.Time `json:"created_at,omitzero"`
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
 
-	// Placeholder marks a fail-closed entry for a slug whose authoritative
-	// sites/<slug> row cannot be decoded: the quota
-	// scan HARD-FAILS on it rather than silently under-counting (docs/SPEC.md
-	// "Decode tolerance of the quota scan"). Cleared when the row decodes
-	// again on the owner's next list.
+	// Placeholder marks an entry whose authoritative sites/<slug> row could not
+	// be decoded, so its size is unknown. The quota scan counts it as zero and
+	// continues (docs/SPEC.md "Unreadable entries fail OPEN"). Nothing writes
+	// one any more; the field is read so a store from an older deployment still
+	// behaves.
 	Placeholder bool `json:"placeholder,omitempty"`
 }
 
@@ -569,42 +569,49 @@ func (r *ShaleRepo) SumActiveSiteBytesByOwner(owner string, _ time.Time) (int64,
 }
 
 // sumActiveSiteBytesForOwner scans identity_sites/<owner>/ once and sums each
-// entry's cached size. Fail-closed (Policy 2, a synchronous
-// write-path read): an entry that does not decode, or that carries the
-// fail-closed Placeholder marker, HARD-FAILS the scan. The one exception is a
-// LEGACY entry recognized by shape (a one-byte marker or an empty value), read
-// through its authoritative sites/<slug> row until the owner's next list enriches it.
+// entry's cached size. Fail OPEN, the paste scan's contract exactly: an entry
+// that cannot be read counts as ZERO and the scan continues, under-charging the
+// owner rather than locking them out. A LEGACY entry recognized by shape (a
+// one-byte marker or an empty value) is read through its authoritative
+// sites/<slug> row until the owner's next list enriches it.
 func (r *ShaleRepo) sumActiveSiteBytesForOwner(owner string) (int64, error) {
 	idx, err := r.scanPrefix(shalePrefixIdentitySites(owner))
 	if err != nil {
 		return 0, err
 	}
 	var total int64
+	var skips scanSkips
 	for _, item := range idx {
 		if len(item.Value) == 0 || bytes.Equal(item.Value, markerValue) {
 			n, err := r.legacySiteEntryBytes(item.Key)
 			if err != nil {
-				return 0, err
+				skips.add(item.Key, err)
+				continue
 			}
 			total += n
 			continue
 		}
 		var row identitySiteRow
 		if err := json.Unmarshal(item.Value, &row); err != nil {
-			return 0, fmt.Errorf("decode %s: %w", item.Key, err)
+			skips.add(item.Key, err)
+			continue
 		}
 		if row.Placeholder {
-			return 0, fmt.Errorf("site quota scan: %s is a fail-closed placeholder (authoritative row undecodable; a list clears it once the row decodes again)", item.Key)
+			skips.add(item.Key, errUnreadableRecord)
+			continue
 		}
 		total += int64(row.Size)
 	}
+	skips.report(r, owner, "site")
 	return total, nil
 }
 
 // legacySiteEntryBytes resolves a LEGACY (marker-valued) identity_sites entry
 // against its authoritative sites/<slug> row, so a deployment upgrades without
-// a flag day. A stale legacy entry (row gone) is skipped; an undecodable row
-// HARD-FAILS (Policy 2); a live row contributes its DedupedSize.
+// a flag day. A stale legacy entry (row gone) is skipped; an undecodable row is
+// reported to the caller, which counts it as zero and keeps going
+// (docs/SPEC.md "Unreadable entries fail OPEN"); a live row contributes its
+// DedupedSize.
 func (r *ShaleRepo) legacySiteEntryBytes(indexKey []byte) (int64, error) {
 	slug := domain.Slug(extractSlug(indexKey))
 	var row siteRow
