@@ -1263,6 +1263,18 @@ func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef, 
 			if !supersedesSite {
 				return ErrSlugTaken
 			}
+			// Only the row's OWN identity may supersede it. Every caller
+			// already checks, so this enforces nothing new today - it moves the
+			// rule inside the transaction that acts on it, because the shape a
+			// forgetful caller would take is slug takeover: one identity
+			// replacing another's directory with its own.
+			var prior siteRow
+			if derr := shaleTxGetJSON(tx, shaleKeySite(p.Slug), &prior); derr != nil {
+				return fmt.Errorf("supersede owner check: %w", derr)
+			}
+			if prior.Identity != p.Identity.String() {
+				return ErrSlugTaken
+			}
 			// Migrating: the row this artifact replaces goes in the same
 			// transaction, so the slug is never owned by both families.
 			if derr := tx.Delete(shaleKeySite(p.Slug)); derr != nil {

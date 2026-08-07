@@ -150,3 +150,51 @@ func TestShaleInsertOrder_SupersedingCollisionRollsBackTheEntry(t *testing.T) {
 		t.Fatalf("holder's bytes after a failed collision: got %d, want 100", got)
 	}
 }
+
+// A directory can only be superseded by the identity that owns it.
+//
+// The migration paths all check ownership before calling, so this pins the rule
+// where it is enforced rather than where it is currently remembered. Without it
+// the superseding insert replaces any legacy directory it is pointed at, which
+// is slug takeover: B's artifact standing where A's directory was.
+func TestShaleInsertOrder_SupersedingRequiresTheRowsOwner(t *testing.T) {
+	repo := newShaleRepoForTest(t)
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+
+	const holder = "key:order-e"
+	const other = "key:order-f"
+	slug := domain.Slug("ordr9abc")
+
+	// Built inline: this file is untagged, so it compiles in the slatedb build
+	// too, where the shared manifest helper does not exist.
+	held := domain.NewManifest()
+	held.Add("index.html", domain.ManifestEntry{
+		SHA: "sha-owner", Size: 100, CompressedSize: 40, ContentType: "text/html"})
+
+	legacy := storage.NewShaleSiteRepo(repo)
+	if err := legacy.InsertWithQuotaCheck(context.Background(), domain.Site{
+		Slug: slug, Identity: domain.Identity(holder),
+		Manifest: held, CreatedAt: now, UpdatedAt: now,
+	}, 40, 0, now); err != nil {
+		t.Fatalf("seed legacy site: %v", err)
+	}
+
+	steal := domain.Paste{
+		Slug: slug, Identity: domain.Identity(other), Kind: domain.KindSite,
+		ContentSHA: "sha-steal", Size: 400, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := repo.InsertSupersedingSite(context.Background(), steal, 0, now); !errors.Is(err, storage.ErrSlugTaken) {
+		t.Fatalf("superseding another identity's directory: got %v, want ErrSlugTaken", err)
+	}
+	// The holder's directory is untouched, and still theirs.
+	survived, err := legacy.Get(slug)
+	if err != nil {
+		t.Fatalf("the holder's directory did not survive: %v", err)
+	}
+	if survived.Identity != domain.Identity(holder) {
+		t.Fatalf("directory changed hands: owner is now %q", survived.Identity)
+	}
+	if got := mustSum(t, repo, other, now); got != 0 {
+		t.Fatalf("a refused takeover charged the would-be owner %d bytes", got)
+	}
+}
