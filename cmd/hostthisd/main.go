@@ -183,6 +183,21 @@ func main() {
 	// mutating nothing, so a risky change can be deployed and the dry-run log
 	// read before flipping to live. See docs/SPEC.md "Dry-run
 	// (observability)".
+	// Interval is operator-tunable so a migration can be watched converging
+	// rather than waited out. Invalid or absent leaves the default.
+	if v := strings.TrimSpace(os.Getenv("HOSTTHIS_SWEEP_INTERVAL")); v != "" {
+		if d, derr := time.ParseDuration(v); derr == nil && d > 0 {
+			sweepSvc.Interval = d
+			logger.Printf("sweep: interval overridden to %s", d)
+		} else {
+			logger.Printf("sweep: ignoring HOSTTHIS_SWEEP_INTERVAL=%q", v)
+		}
+	}
+	// The migration rides the loop so it converges regardless of which units
+	// this node owned at boot (docs/SPEC.md "Draining the legacy site family").
+	if metadata.LegacySiteSweeper != nil {
+		sweepSvc.LegacySites = metadata.LegacySiteSweeper
+	}
 	sweepSvc.DryRun = strings.EqualFold(envOr("HOSTTHIS_SWEEP_DISABLED", "false"), "true")
 	if sweepSvc.DryRun {
 		logger.Printf("sweep: DRY-RUN via HOSTTHIS_SWEEP_DISABLED=true - runs every %s, LOGS what it would GC, deletes nothing. Set false to enable live cleanup.", sweepSvc.Interval)
