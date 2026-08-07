@@ -162,7 +162,7 @@ func deployFixture(t *testing.T, demo string) ([]distFile, deployedSite) {
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	pastes := storagetest.NewRepo(t)
-	sites := storage.NewShaleSiteRepo(storagetest.NewRepo(t))
+	sites := storage.NewArtifactSites(storagetest.NewRepo(t), nil)
 	deploy := service.NewDeploySite(sites, pastes, blobUnit)
 
 	files := readDist(t, fixtureDist(t, demo))

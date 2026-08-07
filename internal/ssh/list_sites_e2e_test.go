@@ -28,7 +28,7 @@ func TestList_IncludesSites(t *testing.T) {
 	}
 	blobUnit := service.NewStandaloneBlobUnit(storage.NewCompressedBlobStore(rawBlobs))
 	repo := storagetest.NewRepo(t)
-	sites := storage.NewShaleSiteRepo(storagetest.NewRepo(t))
+	sites := storage.NewArtifactSites(storagetest.NewRepo(t), nil)
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 
@@ -76,9 +76,10 @@ func TestList_IncludesSites(t *testing.T) {
 	if siteRow == "" {
 		t.Fatalf("no site row (kind=site) in list output:\n%s", out.stdout)
 	}
-	// A site is not versioned, so its VERS column is "-" (the last field).
-	if f := strings.Fields(siteRow); f[len(f)-1] != "-" {
-		t.Fatalf("site VERS column should be '-', got %q in %q", f[len(f)-1], siteRow)
+	// A directory is an artifact, so it IS versioned and shows a version like
+	// any other. The old "-" marked the shape it no longer has.
+	if f := strings.Fields(siteRow); f[len(f)-1] != "v1" {
+		t.Fatalf("site VERS column should be 'v1', got %q in %q", f[len(f)-1], siteRow)
 	}
 
 	// --- json output ---
@@ -97,9 +98,10 @@ func TestList_IncludesSites(t *testing.T) {
 		switch it.Kind {
 		case "site":
 			site++
-			// A null version field is the site discriminator.
-			if it.ServedVersion != nil {
-				t.Fatalf("site served_version should be null, got %v", *it.ServedVersion)
+			// Kind is the discriminator; a directory carries a real served
+			// version now, so a null one would mean it lost its history.
+			if it.ServedVersion == nil || *it.ServedVersion != 1 {
+				t.Fatalf("site served_version should be 1, got %v", it.ServedVersion)
 			}
 			if it.SizeBytes <= 0 {
 				t.Fatalf("site size_bytes should be positive, got %d", it.SizeBytes)

@@ -67,7 +67,7 @@ func TestGuard_DeployBombStoresNothing(t *testing.T) {
 
 	// Zero bytes charged: the abort never crossed the persistence boundary, so
 	// a follow-up deploy has the whole budget available.
-	used, err := sites.SumActiveBytesByOwner(owner, d.Now().UTC())
+	used := ownerCharge(t, owner)
 	if err != nil {
 		t.Fatalf("sum active: %v", err)
 	}

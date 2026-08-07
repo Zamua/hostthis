@@ -102,7 +102,7 @@ func TestManageUpdate_BlobQuotaSurfacesServiceFull(t *testing.T) {
 // TestDeploySite_BlobQuotaSurfacesServiceFull pins that the blob Put rejection
 // propagates out through the safe-untar sink as ErrServiceFull.
 func TestDeploySite_BlobQuotaSurfacesServiceFull(t *testing.T) {
-	sites := storage.NewShaleSiteRepo(storagetest.NewRepo(t))
+	sites := storage.NewArtifactSites(storagetest.NewRepo(t), nil)
 	pastes := storagetest.NewRepo(t)
 	d := NewDeploySite(sites, pastes, fullBlobUnit(t))
 

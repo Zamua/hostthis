@@ -25,7 +25,7 @@ func twoFileManifest(indexSHA string) domain.Manifest {
 
 func TestArtifactSites_InsertGetAndList(t *testing.T) {
 	repo := newPebbleShaleRepo(t)
-	sites := storage.NewArtifactSites(repo)
+	sites := storage.NewArtifactSites(repo, nil)
 	now := time.Now().UTC().Truncate(time.Second)
 	owner := domain.Identity("key:owner-s")
 
@@ -45,12 +45,22 @@ func TestArtifactSites_InsertGetAndList(t *testing.T) {
 		t.Fatalf("round trip = %+v", got)
 	}
 
+	// The site listing reports LEGACY rows only: an artifact-backed directory
+	// is already in the artifact listing the caller concatenates this onto, so
+	// returning it here too would show it twice.
 	listed, err := sites.ListSitesByOwner(owner.String(), now)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(listed) != 1 || listed[0].Slug != s.Slug {
-		t.Fatalf("list = %+v, want just %s", listed, s.Slug)
+	if len(listed) != 0 {
+		t.Fatalf("list = %+v, want empty: the artifact listing already carries it", listed)
+	}
+	arts, err := repo.ListByOwner(owner.String())
+	if err != nil {
+		t.Fatalf("artifact list: %v", err)
+	}
+	if len(arts) != 1 || arts[0].Slug != s.Slug || arts[0].Kind != domain.KindSite {
+		t.Fatalf("artifact listing = %+v, want the directory", arts)
 	}
 }
 
@@ -58,7 +68,7 @@ func TestArtifactSites_InsertGetAndList(t *testing.T) {
 // served raw through the directory path.
 func TestArtifactSites_DocumentIsNotASite(t *testing.T) {
 	repo := newPebbleShaleRepo(t)
-	sites := storage.NewArtifactSites(repo)
+	sites := storage.NewArtifactSites(repo, nil)
 	now := time.Now().UTC().Truncate(time.Second)
 
 	if err := repo.InsertWithQuotaCheck(context.Background(), domain.Paste{
@@ -84,7 +94,7 @@ func TestArtifactSites_DocumentIsNotASite(t *testing.T) {
 // so reporting them again would bill every directory twice.
 func TestArtifactSites_SumIsZeroToAvoidDoubleCounting(t *testing.T) {
 	repo := newPebbleShaleRepo(t)
-	sites := storage.NewArtifactSites(repo)
+	sites := storage.NewArtifactSites(repo, nil)
 	now := time.Now().UTC().Truncate(time.Second)
 	owner := "key:owner-s"
 
@@ -118,7 +128,7 @@ func TestArtifactSites_SumIsZeroToAvoidDoubleCounting(t *testing.T) {
 // rollback a document has.
 func TestArtifactSites_RedeployAppendsAVersion(t *testing.T) {
 	repo := newPebbleShaleRepo(t)
-	sites := storage.NewArtifactSites(repo)
+	sites := storage.NewArtifactSites(repo, nil)
 	now := time.Now().UTC().Truncate(time.Second)
 	owner := domain.Identity("key:owner-s")
 
@@ -155,7 +165,7 @@ func TestArtifactSites_RedeployAppendsAVersion(t *testing.T) {
 // sentinel a missing slug yields.
 func TestArtifactSites_ReplaceRejectsForeignOwner(t *testing.T) {
 	repo := newPebbleShaleRepo(t)
-	sites := storage.NewArtifactSites(repo)
+	sites := storage.NewArtifactSites(repo, nil)
 	now := time.Now().UTC().Truncate(time.Second)
 
 	s := domain.Site{
@@ -168,5 +178,89 @@ func TestArtifactSites_ReplaceRejectsForeignOwner(t *testing.T) {
 	s.Identity = "key:owner-b"
 	if err := sites.ReplaceWithQuotaCheck(context.Background(), s, 49, 0, now); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("foreign replace = %v, want not-found", err)
+	}
+}
+
+// fakeLegacy stands in for the pre-unification site family.
+type fakeLegacy struct {
+	sites map[domain.Slug]domain.Site
+	bytes int64
+}
+
+func (f fakeLegacy) Get(slug domain.Slug) (domain.Site, error) {
+	s, ok := f.sites[slug]
+	if !ok {
+		return domain.Site{}, storage.ErrNotFound
+	}
+	return s, nil
+}
+
+func (f fakeLegacy) ListSitesByOwner(string, time.Time) ([]domain.Site, error) {
+	var out []domain.Site
+	for _, s := range f.sites {
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+func (f fakeLegacy) SumActiveBytesByOwner(string, time.Time) (int64, error) {
+	return f.bytes, nil
+}
+
+// A directory deployed before the collapse keeps serving, keeps listing, and
+// keeps being charged, until the migration moves it.
+func TestArtifactSites_FallsBackToLegacyRows(t *testing.T) {
+	repo := newPebbleShaleRepo(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	owner := domain.Identity("key:owner-s")
+
+	old := domain.Site{
+		Slug: "oldsite2", Identity: owner,
+		Manifest: twoFileManifest("sha-old"), CreatedAt: now, UpdatedAt: now,
+	}
+	sites := storage.NewArtifactSites(repo, fakeLegacy{
+		sites: map[domain.Slug]domain.Site{old.Slug: old}, bytes: 70,
+	})
+
+	got, err := sites.Get(old.Slug)
+	if err != nil {
+		t.Fatalf("legacy get: %v", err)
+	}
+	if len(got.Manifest.Files) != 2 {
+		t.Fatalf("legacy site lost its manifest: %+v", got)
+	}
+
+	// A NEW directory lands as an artifact; both must list.
+	fresh := domain.Site{
+		Slug: "newsite2", Identity: owner,
+		Manifest: twoFileManifest("sha-new"), CreatedAt: now, UpdatedAt: now,
+	}
+	if err := sites.InsertWithQuotaCheck(context.Background(), fresh, 49, 0, now); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	// Each shape is listed exactly once, from the family that owns it.
+	listed, err := sites.ListSitesByOwner(owner.String(), now)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Slug != old.Slug {
+		t.Fatalf("site listing = %+v, want just the legacy row", listed)
+	}
+	arts, err := repo.ListByOwner(owner.String())
+	if err != nil {
+		t.Fatalf("artifact list: %v", err)
+	}
+	if len(arts) != 1 || arts[0].Slug != fresh.Slug {
+		t.Fatalf("artifact listing = %+v, want just the new directory", arts)
+	}
+
+	// The legacy bytes are NOT in the artifact sum, so they must still be
+	// reported here or the owner is under-charged mid-migration.
+	sum, err := sites.SumActiveBytesByOwner(owner.String(), now)
+	if err != nil {
+		t.Fatalf("sum: %v", err)
+	}
+	if sum != 70 {
+		t.Fatalf("legacy sum = %d, want 70", sum)
 	}
 }
