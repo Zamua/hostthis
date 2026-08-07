@@ -5,6 +5,7 @@
 package service
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -63,6 +64,9 @@ type Upload struct {
 	// rule, an adapter supplies the algorithm. Overridable so a test can drive
 	// a branch without hunting for bytes that sniff a particular way.
 	Sniff domain.MIMESniffer
+	// Archive handles the multi-file shape. nil disables archive uploads, which
+	// is what a deploy with no site support wants.
+	Archive ArchiveDeployer
 	// finalizeWG tracks this instance's in-flight background finalizers.
 	finalizeWG sync.WaitGroup
 	// Logger records background-finalize outcomes: the blob write runs after
@@ -96,9 +100,24 @@ type Result struct {
 	Paste domain.Paste
 }
 
+// ArchiveDeployer is the multi-file half of an upload, injected so Create can
+// own the whole decision rather than leaving it to the transport.
+//
+// It is a PORT, not the concrete deploy service: upload does not import it, so
+// the two can be merged without a circular dependency and the transport keeps
+// one entry point either way (docs/SPEC.md "One artifact, not two aggregates").
+type ArchiveDeployer interface {
+	Deploy(body io.Reader, owner string) (Result, error)
+}
+
 // ErrOverQuota is returned when accepting the upload would push the identity's
 // total active COMPRESSED bytes above UserQuotaBytes. The number is derived
 // from the constant so the message cannot drift from the enforced limit.
+// archivePeek is the buffered-reader size for the gzip-magic peek. Only 2
+// bytes are examined; the buffer just has to be large enough that the peek
+// cannot short-read.
+const archivePeek = 512
+
 var ErrOverQuota = fmt.Errorf("service: would exceed your %d MiB total quota; delete a paste to free space", domain.UserQuotaBytes>>20)
 
 // ErrRawTooLarge is returned when the raw input exceeded the fast-fail cap.
@@ -124,6 +143,23 @@ var ErrServiceFull = errors.New("service: service is at capacity, try again late
 // prefix so the source is never re-read. Unsupported types return
 // domain.ErrUnsupportedKind for the caller to surface verbatim.
 func (u *Upload) Create(body io.Reader, owner string, name string, typeHint string) (Result, error) {
+	// A gzip-tar archive is the SAME artifact at a different cardinality, so
+	// the decision is made HERE rather than by each transport: one entry point,
+	// one place that knows both shapes exist (docs/SPEC.md "One artifact, not
+	// two aggregates").
+	//
+	// It must happen BEFORE staging, which consumes and compresses the stream -
+	// the archive path needs the original bytes. The peek is non-destructive:
+	// the buffered reader replays the prefix downstream either way.
+	if u.Archive != nil && typeHint == "" {
+		peeked := bufio.NewReaderSize(body, archivePeek)
+		head, _ := peeked.Peek(2)
+		if domain.HasGzipMagic(head) {
+			return u.Archive.Deploy(peeked, owner)
+		}
+		body = peeked
+	}
+
 	staged, err := streamUpload(body)
 	switch {
 	case errors.Is(err, errRawCapExceeded):
@@ -140,9 +176,9 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	if err != nil {
 		return Result{}, err
 	}
-	// KindSite (a gzip-tar archive) must go through the deploy pipeline and its
-	// untar guards. Reaching the single-file paste path with it would persist
-	// the raw gzip as a paste and skip every one of them.
+	// Reaching here with an archive means the peek above did not catch it -
+	// only possible when no ArchiveDeployer is wired. Persisting the raw gzip
+	// as a single document would skip every untar guard.
 	if kind == domain.KindSite {
 		return Result{}, domain.ErrUnsupportedKind
 	}

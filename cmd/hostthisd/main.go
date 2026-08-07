@@ -127,6 +127,10 @@ func main() {
 		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobUnit)
 		// Without this the compensating slug-claim release fails silently.
 		deploySvc.Logger = logger
+		// One entry point: Create now dispatches the multi-file shape itself,
+		// so no transport forks on content (docs/SPEC.md "One artifact, not two
+		// aggregates").
+		uploadSvc.Archive = service.ArchiveAdapter{Deployer: deploySvc}
 		// The quota cap sums paste + site bytes, so whoami's used_bytes
 		// under-counts without this.
 		manageSvc.SiteBytes = siteRepo
