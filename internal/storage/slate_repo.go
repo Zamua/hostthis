@@ -532,9 +532,7 @@ func (r *SlateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, user
 		return ErrSlugTaken
 	}
 
-	v1 := newVersionRow(1,
-		contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, Size: p.Size},
-		p.CreatedAt)
+	v1 := newVersionRow(1, contentRefFromDomain(p), p.CreatedAt)
 	pr := pasteFromDomain(p)
 	// The head serves v1, so it takes v1's descriptor WHOLE - the same roll an
 	// append and a pin perform.

@@ -141,3 +141,58 @@ func TestPebbleBacking_HeadCarriesServedManifest(t *testing.T) {
 		t.Fatalf("head manifest did not roll to v2: %+v", e)
 	}
 }
+
+// A directory is stored through the SAME insert a document uses: its manifest
+// simply has more than one entry. Pins that no site-specific write path is
+// needed to persist one.
+func TestPebbleBacking_DirectoryArtifactRoundTrips(t *testing.T) {
+	repo := newPebbleShaleRepo(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	m := domain.NewManifest()
+	m.Add("index.html", domain.ManifestEntry{
+		SHA: "sha-idx", Size: 100, CompressedSize: 40, ContentType: "text/html"})
+	m.Add("app.css", domain.ManifestEntry{
+		SHA: "sha-css", Size: 20, CompressedSize: 9, ContentType: "text/css"})
+
+	p := domain.Paste{
+		Slug: domain.Slug("dirart23"), Identity: domain.Identity("owner-d"),
+		Status: domain.PasteStatusReady, Kind: domain.KindSite,
+		ContentSHA: "sha-idx", Size: 100,
+		CreatedAt: now, UpdatedAt: now,
+		Manifest: m,
+	}
+	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, now); err != nil {
+		t.Fatalf("insert directory: %v", err)
+	}
+
+	head, err := repo.Get(p.Slug)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if head.Kind != domain.KindSite {
+		t.Fatalf("kind = %q, want site", head.Kind)
+	}
+	if head.IsSingle() {
+		t.Fatalf("a two-file directory must not read back as single: %+v", head.Manifest.Files)
+	}
+	css, ok := head.Manifest.Files["app.css"]
+	if !ok {
+		t.Fatalf("head lost a manifest entry: %+v", head.Manifest.Files)
+	}
+	if css.SHA != "sha-css" || css.CompressedSize != 9 || css.ContentType != "text/css" {
+		t.Fatalf("css entry = %+v", css)
+	}
+
+	// The v1 row must describe the same content, since the head serves it.
+	vs, err := repo.ListVersions(p.Slug)
+	if err != nil {
+		t.Fatalf("versions: %v", err)
+	}
+	if len(vs) != 1 {
+		t.Fatalf("versions = %d, want 1", len(vs))
+	}
+	if len(vs[0].Manifest.Files) != 2 {
+		t.Fatalf("v1 manifest = %+v, want the same 2 entries", vs[0].Manifest.Files)
+	}
+}

@@ -137,13 +137,27 @@ func (p pasteRow) toDomain(slug domain.Slug) domain.Paste {
 	return out
 }
 
+// contentRefFromDomain builds the stored descriptor for an artifact's served
+// content. A caller that supplied a manifest (a directory, or any multi-entry
+// artifact) has it carried through verbatim; one that did not leaves it empty
+// and the insert synthesizes the one-entry form from the flat fields.
+func contentRefFromDomain(p domain.Paste) contentRef {
+	ref := contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, Size: p.Size}
+	if len(p.Manifest.Files) > 0 {
+		if enc, err := encodeManifest(p.Manifest); err == nil {
+			ref.Manifest = enc
+		}
+	}
+	return ref
+}
+
 func pasteFromDomain(p domain.Paste) pasteRow {
 	return pasteRow{
 		Identity: p.Identity.String(),
 		Status:   string(domain.NormalizeStatus(string(p.Status))),
 		// domain.Paste carries no BlobID (a storage/value-separation
 		// detail); the insert path sets the head's BlobID after this.
-		contentRef:    contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, Size: p.Size},
+		contentRef:    contentRefFromDomain(p),
 		Name:          p.Name,
 		PinnedVersion: p.PinnedVersion,
 		CreatedAt:     p.CreatedAt,

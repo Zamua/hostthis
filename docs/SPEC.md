@@ -809,6 +809,12 @@ Files live in the content-addressed `BlobStore`: each is `Put` under its
 sha256, so identical files across versions, across artifacts, and across owners
 are stored once.
 
+A directory is written through the SAME insert a document uses: the caller
+supplies a manifest, which is carried into the stored descriptor verbatim. A
+caller that supplies none leaves it empty and the insert synthesizes the
+one-entry form from the flat fields, so a document needs to know nothing about
+manifests. There is no site-specific write path.
+
 One **ArtifactRepo** persists, gets and deletes artifacts on every metadata
 backend. There is no second repository, no second enumeration index, no second
 quota scan, and no second entry in the durable-intent vocabulary. Quota is the
