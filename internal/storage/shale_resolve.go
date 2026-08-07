@@ -144,26 +144,35 @@ func (r *ShaleRepo) intentEntryKey(in durable.Intent) []byte {
 // be mounted anywhere yet during a cold start - gating readiness on that read
 // would deadlock a cold cluster.
 func (r *ShaleRepo) SweepIntents(ctx context.Context, now time.Time) (int, error) {
-	it, err := r.cluster.LocalScanPrefix(prefixIntentsAll)
+	// Retried on ErrAcquiring with a boot-sized budget: this runs while the
+	// node's own positions may still be acquiring, and that refusal resolves on
+	// its own. Without the retry the sweep fails on every boot, which is
+	// indistinguishable from a feature that does not exist.
+	var found []durable.Intent
+	err := retryAcquiring(bootRetry, r.repoLog(), "intent-sweep", func() error {
+		found = nil
+		it, err := r.cluster.LocalScanPrefix(prefixIntentsAll)
+		if err != nil {
+			return err
+		}
+		defer it.Close() //nolint:errcheck
+		for {
+			k, v, err := it.Next()
+			if err != nil {
+				return err
+			}
+			if k == nil && v == nil {
+				return nil
+			}
+			in, ok := decodeLocalIntent(k, v)
+			if !ok {
+				continue // tombstone or unreadable; the log's own scan reports those
+			}
+			found = append(found, in)
+		}
+	})
 	if err != nil {
 		return 0, err
-	}
-	defer it.Close() //nolint:errcheck
-
-	var found []durable.Intent
-	for {
-		k, v, err := it.Next()
-		if err != nil {
-			return 0, err
-		}
-		if k == nil && v == nil {
-			break
-		}
-		in, ok := decodeLocalIntent(k, v)
-		if !ok {
-			continue // tombstone or unreadable; the log's own scan reports those
-		}
-		found = append(found, in)
 	}
 	if len(found) == 0 {
 		return 0, nil
