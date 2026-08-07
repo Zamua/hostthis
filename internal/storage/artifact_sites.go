@@ -182,11 +182,10 @@ func (a *ArtifactSites) ReleaseSlugClaim(ctx context.Context, slug domain.Slug, 
 // migrateOnReplace turns a legacy directory into an artifact by writing the
 // redeployed manifest through the ordinary insert.
 //
-// The legacy row is dropped once the artifact lands. It cannot be kept as a
-// rollback escape hatch: a directory present in both families is enumerated by
-// both, so the owner would see it twice and be charged for it twice. The
-// artifact is written FIRST, so a failure between the two steps leaves the row
-// still readable rather than losing it.
+// The legacy row is superseded in the SAME transaction as the artifact write,
+// so the slug is never owned by both families. It cannot be kept as a rollback
+// escape hatch: a directory present in both is enumerated by both, so the owner
+// would see it twice and be charged for it twice.
 func (a *ArtifactSites) migrateOnReplace(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
 	prior, err := a.legacyGet(s.Slug)
 	if err != nil {
@@ -195,10 +194,22 @@ func (a *ArtifactSites) migrateOnReplace(ctx context.Context, s domain.Site, ded
 	if prior.Identity != s.Identity {
 		return ErrNotFound
 	}
-	fresh := s
-	fresh.CreatedAt = prior.CreatedAt // the artifact inherits the original age
-	if err := a.InsertWithQuotaCheck(ctx, fresh, dedupedSize, userCap, now); err != nil {
+	root, _ := s.Manifest.Lookup("/")
+	if err := a.repo.InsertSupersedingSite(ctx, domain.Paste{
+		Slug:       s.Slug,
+		Identity:   s.Identity,
+		Status:     domain.PasteStatusReady,
+		Kind:       domain.KindSite,
+		ContentSHA: root.SHA,
+		Size:       dedupedSize,
+		CreatedAt:  prior.CreatedAt, // the artifact inherits the original age
+		UpdatedAt:  s.UpdatedAt,
+		Manifest:   s.Manifest,
+	}, userCap, now); err != nil {
 		return err
 	}
-	return a.legacy.Delete(s.Slug)
+	// The entry shards on the OWNER, so it cannot ride the transaction above.
+	// A failure here leaves a duplicate listing rather than a lost directory,
+	// and the boot sweep clears it.
+	return a.repo.DropLegacySiteEntry(s.Identity.String(), s.Slug)
 }

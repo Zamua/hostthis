@@ -1058,8 +1058,12 @@ func (r *ShaleRepo) DropLegacySiteEntry(owner string, slug domain.Slug) error {
 // The two families co-shard on the slug, so this is atomic: the directory is
 // never in both places (listed twice, charged twice) and never in neither
 // (lost). That is why the migration cannot be an insert followed by a delete.
-func (r *ShaleRepo) InsertSupersedingSite(ctx context.Context, p domain.Paste, now time.Time) error {
-	return r.insertArtifact(ctx, p, 0, now, true)
+//
+// userCap is enforced exactly as an ordinary insert enforces it. A sweep passes
+// 0 ("no cap") because it is MOVING bytes the owner is already charged for; a
+// redeploy passes the real cap, because it is writing new content.
+func (r *ShaleRepo) InsertSupersedingSite(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error {
+	return r.insertArtifact(ctx, p, userCap, now, true)
 }
 
 func (r *ShaleRepo) insertArtifact(ctx context.Context, p domain.Paste, userCap int64, now time.Time, supersedesSite bool) error {
