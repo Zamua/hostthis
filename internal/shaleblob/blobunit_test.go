@@ -558,3 +558,41 @@ func TestSweep_CountsOnlyWhatItActuallyReclaimed(t *testing.T) {
 		t.Fatalf("%d objects remain after a sweep that reported reclaiming them", got)
 	}
 }
+
+// An upload with live staged records IS reported as a candidate.
+//
+// The whole sweep hangs off this scan. If it silently returned nothing the
+// reclaimed count would be a truthful zero forever and every abandoned upload
+// would leak, with no error anywhere to say so.
+//
+// The converse - that a COMMITTED upload's cleared records are NOT reported -
+// cannot be pinned here. Clearing at ReplicationFactor 1 is a real delete, so
+// the scan cannot see it either way; the empty-payload envelope that a scan
+// hands back only exists at RF>1. That case is verified on staging (RF=2),
+// where it is observable.
+func TestSweep_ReportsAnUploadWithLiveStagedRecords(t *testing.T) {
+	repo, unit, _ := newBlobRepo(t)
+	ctx := context.Background()
+	slug := domain.Slug("candid01")
+
+	owned, err := unit.BeginUpload(ctx, string(slug))
+	if err != nil {
+		t.Fatalf("BeginUpload: %v", err)
+	}
+	if _, err := unit.Stage(owned, string(slug), "sha-cand", encode(t, []byte("staged"))); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+
+	slugs, err := repo.StagedUploadsLocalForTest()
+	if err != nil {
+		t.Fatalf("candidate scan: %v", err)
+	}
+	for _, s := range slugs {
+		if s == slug {
+			return
+		}
+	}
+	t.Fatalf("the candidate scan did not report %s, which has staged records: a scan that "+
+		"comes back empty makes the sweep a permanent no-op that reports success (got %v)",
+		slug, slugs)
+}

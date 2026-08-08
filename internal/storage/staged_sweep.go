@@ -66,12 +66,20 @@ func (r *ShaleRepo) SweepStagedBytes(ctx context.Context, now time.Time) (int, e
 	return reclaimed, firstErr
 }
 
-// stagedUploadsLocal returns every slug with staged records on this node's units.
+// stagedUploadsLocal returns every slug with LIVE staged records on this node's
+// units.
 //
-// It reports candidates only. Whether an upload is old enough to touch is
-// reclaimStagedBytes' decision, made from a fresh read of the records - so a
-// tombstone or an unreadable record here costs nothing, and this scan never
-// has to be right about anything except which slugs exist.
+// Tombstones are skipped. A cleared record is a deleted key, and a deleted key
+// keeps returning from a scan until compaction - so counting them would report
+// every upload that ever committed as an upload with staged bytes, which is the
+// opposite of what the number is read as.
+//
+// An UNREADABLE record still counts. Skipping it would hide bytes nothing can
+// name; counting it hands the slug to reclaimStagedBytes, which refuses the
+// whole upload and logs, so the failure is visible instead of silent.
+//
+// Everything else is left to reclaimStagedBytes, which re-reads the records: how
+// old they are, and whether they are worth acting on at all.
 func (r *ShaleRepo) stagedUploadsLocal() ([]domain.Slug, error) {
 	seen := make(map[domain.Slug]struct{})
 	err := retryAcquiring(bootRetry, r.repoLog(), "staged-sweep", func() error {
@@ -89,6 +97,9 @@ func (r *ShaleRepo) stagedUploadsLocal() ([]domain.Slug, error) {
 			if k == nil && v == nil {
 				return nil
 			}
+			if isTombstone(v) {
+				continue
+			}
 			if slug, ok := slugFromStagedKey(k); ok {
 				seen[slug] = struct{}{}
 			}
@@ -105,6 +116,12 @@ func (r *ShaleRepo) stagedUploadsLocal() ([]domain.Slug, error) {
 	return out, nil
 }
 
+// StagedUploadsLocalForTest exposes the candidate scan so the blob-plane suite
+// can assert on WHICH uploads it reports, which the reclaimed count cannot show.
+func (r *ShaleRepo) StagedUploadsLocalForTest() ([]domain.Slug, error) {
+	return r.stagedUploadsLocal()
+}
+
 // slugFromStagedKey pulls the slug back out of staged/<slug>/<blobid>. A slug
 // contains no slash, so one cut is enough.
 func slugFromStagedKey(k []byte) (domain.Slug, bool) {
@@ -117,4 +134,12 @@ func slugFromStagedKey(k []byte) (domain.Slug, bool) {
 		return "", false
 	}
 	return domain.Slug(s), true
+}
+
+// isTombstone reports whether a scanned record is a deleted key. LocalScanPrefix
+// returns the stored bytes, so the envelope comes off here; a value that will
+// not decode is NOT a tombstone, and deliberately stays a candidate.
+func isTombstone(v []byte) bool {
+	payload, err := stripEnvelope(v)
+	return err == nil && len(payload) == 0
 }
