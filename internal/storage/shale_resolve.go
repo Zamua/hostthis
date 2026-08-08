@@ -8,7 +8,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/Zamua/shale/pkg/blob"
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/durable"
@@ -92,7 +95,64 @@ func (r *ShaleRepo) resolveIntent(ctx context.Context, in durable.Intent) error 
 			return err
 		}
 	}
+	// Reclaim the bytes this upload staged, BEFORE forgetting the intent: the
+	// records are the only thing that knows they exist, and an intent forgotten
+	// first leaves them unreachable forever.
+	//
+	// Run on BOTH paths, not just the rollback. A roll-forward normally has no
+	// records left (its commit cleared them), but that clear is best-effort, so
+	// a survivor lands here - where the blob is bound, unstaging refuses, and
+	// the record is cleared. Self-correcting rather than conditional.
+	if err := r.reclaimStagedBytes(ctx, domain.Slug(in.Subject)); err != nil {
+		return err
+	}
 	return r.intents.Complete(ctx, in.ID, in.Scope)
+}
+
+// ReclaimStagedBytesForTest exposes the reclamation so the blob-plane suite can
+// drive it: the behaviour is only meaningful with a real blob store, which
+// lives in another package.
+func (r *ShaleRepo) ReclaimStagedBytesForTest(ctx context.Context, slug domain.Slug) error {
+	return r.reclaimStagedBytes(ctx, slug)
+}
+
+// reclaimStagedBytes deletes the objects this upload staged and never bound.
+//
+// FENCE FIRST. Bumping the epoch before deleting anything is what makes a
+// resumed writer's bind abort rather than race: it will fail its ownership
+// check and never bind bytes that are on their way out. Delete-then-fence
+// leaves a window where it binds bytes that are already gone, which is
+// committed metadata pointing at nothing - a 404 no scan can repair.
+//
+// A bound ref is a SKIP, not a failure: blob.ErrBound means the write landed
+// after all, so those bytes belong to a live paste. Any other per-ref error
+// stops that ref and the pass, leaving the records for the next one - a missed
+// reclamation is a leak, and a leak is always preferable to deleting live data.
+func (r *ShaleRepo) reclaimStagedBytes(ctx context.Context, slug domain.Slug) error {
+	if r.kv == nil {
+		return nil // no blob plane: nothing was ever staged through it
+	}
+	refs, err := r.StagedRefs(slug)
+	if err != nil {
+		return fmt.Errorf("staged refs for %s: %w", slug, err)
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	if _, ferr := r.FenceBlobOwnership(ctx, slug); ferr != nil {
+		return fmt.Errorf("fence %s before unstaging: %w", slug, ferr)
+	}
+	for _, ref := range refs {
+		switch uerr := r.kv.UnstageBlob(ctx, ref); {
+		case uerr == nil:
+		case errors.Is(uerr, blob.ErrBound):
+			// Bound after all: the write committed. Leave the bytes alone.
+		default:
+			return fmt.Errorf("unstage %s/%s: %w", ref.Unit, ref.BlobID, uerr)
+		}
+	}
+	r.repoLog().Printf("shale: reclaimed %d staged blob(s) for %s", len(refs), slug)
+	return r.ClearStagedRefs(ctx, slug)
 }
 
 // subjectRowExists reports whether the authoritative row the intent describes

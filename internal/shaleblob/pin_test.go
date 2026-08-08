@@ -37,10 +37,7 @@ func TestPin_ServesPinnedVersionBytes(t *testing.T) {
 	rawV1 := []byte("<h1>PIN-V1-original-bytes</h1>")
 	shaV1 := "sha-pinblob-v1"
 	bodyV1 := encode(t, rawV1)
-	h1, err := unit.Stage(ctx, slug, shaV1, bodyV1)
-	if err != nil {
-		t.Fatalf("Stage v1: %v", err)
-	}
+	h1 := stageOwned(t, unit, &ctx, slug, shaV1, bodyV1)
 	p := mkPaste(slug, "owner-pin", shaV1, len(bodyV1), now)
 	if err := unit.Commit(ctx, []service.BlobHandle{h1}, func(ctx context.Context) error {
 		return repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
@@ -52,10 +49,7 @@ func TestPin_ServesPinnedVersionBytes(t *testing.T) {
 	rawV2 := []byte("<h1>PIN-V2-newer-different-bytes</h1>")
 	shaV2 := "sha-pinblob-v2"
 	bodyV2 := encode(t, rawV2)
-	h2, err := unit.Stage(ctx, slug, shaV2, bodyV2)
-	if err != nil {
-		t.Fatalf("Stage v2: %v", err)
-	}
+	h2 := stageOwned(t, unit, &ctx, slug, shaV2, bodyV2)
 	if err := unit.Commit(ctx, []service.BlobHandle{h2}, func(ctx context.Context) error {
 		_, aerr := repo.AppendVersionWithQuotaCheck(ctx, domain.Slug(slug), domain.KindHTML, shaV2, len(bodyV2), int64(domain.UserQuotaBytes), now)
 		return aerr
