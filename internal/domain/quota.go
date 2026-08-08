@@ -53,13 +53,3 @@ func (a Allowance) Admit(incoming int64) error {
 // credit a same-size redeploy is charged twice, so an identity at its limit
 // could never update in place.
 //
-// Separate from Admit rather than Admit(new-old) so the call site states intent
-// and cannot invert the sign.
-func (a Allowance) AdmitReplacing(oldBytes, newBytes int64) error {
-	if a.Unlimited() {
-		return nil
-	}
-	// Floored at zero: a credit exceeding the total would manufacture headroom.
-	credited := max(a.Used-oldBytes, 0)
-	return Allowance{Cap: a.Cap, Used: credited}.Admit(newBytes)
-}

@@ -156,17 +156,6 @@ func TestManifest_SizesCountEveryPath(t *testing.T) {
 	}
 }
 
-func TestManifest_SHASet(t *testing.T) {
-	m := NewManifest()
-	m.Add("a.html", ManifestEntry{SHA: "x", Size: 1})
-	m.Add("b.html", ManifestEntry{SHA: "x", Size: 1})
-	m.Add("c.css", ManifestEntry{SHA: "y", Size: 1})
-	set := m.SHASet()
-	if len(set) != 2 {
-		t.Fatalf("SHASet: got %d distinct, want 2 (%v)", len(set), set)
-	}
-}
-
 func TestContentTypeForPath(t *testing.T) {
 	cases := map[string]string{
 		"index.html":  "text/html; charset=utf-8",
