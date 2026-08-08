@@ -454,7 +454,8 @@ func envOrDuration(key string, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-// runIntentSweep settles durable intents once, after the node is serving.
+// runIntentSweep settles durable intents and reclaims abandoned staged bytes
+// once, after the node is serving.
 //
 // It does NOT wait for readiness first. The scan itself retries while the
 // node's positions are still acquiring (storage.bootRetry), which is the same
@@ -462,12 +463,23 @@ func envOrDuration(key string, fallback time.Duration) time.Duration {
 // it, and readiness at the mount FLOOR is not the same condition as "this
 // node's own units are scannable" anyway.
 func runIntentSweep(ctx context.Context, metadata *metadataBundle, logger *log.Logger) {
-	settled, err := metadata.IntentSweeper.SweepIntents(ctx, time.Now().UTC())
+	now := time.Now().UTC()
+	settled, err := metadata.IntentSweeper.SweepIntents(ctx, now)
 	if err != nil {
 		logger.Printf("intent sweep: %v (the next boot retries; nothing is lost)", err)
+	} else if settled > 0 {
+		logger.Printf("intent sweep: settled %d half-finished write(s) on this node's units", settled)
+	}
+
+	// Runs even when the intent sweep failed: the two settle different things,
+	// and bytes nothing points at are not worth withholding over a metadata
+	// problem.
+	reclaimed, err := metadata.IntentSweeper.SweepStagedBytes(ctx, now)
+	if err != nil {
+		logger.Printf("staged sweep: %v (the next boot retries; the bytes stay put)", err)
 		return
 	}
-	if settled > 0 {
-		logger.Printf("intent sweep: settled %d half-finished write(s) on this node's units", settled)
+	if reclaimed > 0 {
+		logger.Printf("staged sweep: reclaimed the staged bytes of %d abandoned upload(s)", reclaimed)
 	}
 }

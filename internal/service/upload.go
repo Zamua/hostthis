@@ -273,10 +273,16 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 	const maxRetries = 5
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		p.Slug = domain.NewRandomSlug()
+		// Ownership before the first staged byte, and per ATTEMPT: each retry
+		// mints a new slug, so it is a different upload to own.
+		attemptCtx, berr := u.Blob.BeginUpload(ctx, string(p.Slug))
+		if berr != nil {
+			return Result{}, berr
+		}
 		// Staging before the insert means a staging failure aborts WITHOUT a
 		// metadata row and with no quota charged; the reserve still runs inside
 		// InsertWithQuotaCheck, so an over-quota upload is still rejected.
-		handle, err := u.Blob.Stage(ctx, string(p.Slug), staged.SHA, staged.Body)
+		handle, err := u.Blob.Stage(attemptCtx, string(p.Slug), staged.SHA, staged.Body)
 		if err != nil {
 			// A Put rejected by the bucket quota surfaces
 			// storage.ErrServiceFull (the durable total-bytes ceiling).
@@ -285,7 +291,7 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 			}
 			return Result{}, fmt.Errorf("blob write: %w", err)
 		}
-		err = u.Blob.Commit(ctx, []BlobHandle{handle}, func(ctx context.Context) error {
+		err = u.Blob.Commit(attemptCtx, []BlobHandle{handle}, func(ctx context.Context) error {
 			return u.Repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
 		})
 		switch class, terr := classifyCommitErr(err); class {

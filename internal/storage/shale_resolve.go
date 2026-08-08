@@ -8,7 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/Zamua/shale/pkg/blob"
+	"github.com/Zamua/shale/pkg/cluster"
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/durable"
@@ -52,7 +56,7 @@ func (r *ShaleRepo) ResolveIntents(ctx context.Context, intents []durable.Intent
 		if now.Sub(in.StartedAt) < ResolveGrace {
 			continue // may still be in flight on another node
 		}
-		if err := r.resolveIntent(ctx, in); err != nil {
+		if err := r.resolveIntent(ctx, in, now); err != nil {
 			r.repoLog().Printf("shale: resolving intent %s (%s %s): %v", in.ID, in.Kind, in.Subject, err)
 			if firstErr == nil {
 				firstErr = err
@@ -77,7 +81,7 @@ func (r *ShaleRepo) ResolveIntents(ctx context.Context, intents []durable.Intent
 // intent is forgotten, so a crash mid-resolve leaves the intent in place and
 // the next sweep repeats the work. Forgetting first would strand the entry as a
 // phantom with nothing left to describe it.
-func (r *ShaleRepo) resolveIntent(ctx context.Context, in durable.Intent) error {
+func (r *ShaleRepo) resolveIntent(ctx context.Context, in durable.Intent, now time.Time) error {
 	if in.Kind != durable.KindCreatePaste && in.Kind != durable.KindDeploySite {
 		// An intent this build does not understand. Leave it: a newer build may
 		// own it, and deleting work we cannot interpret is how data disappears.
@@ -92,7 +96,75 @@ func (r *ShaleRepo) resolveIntent(ctx context.Context, in durable.Intent) error 
 			return err
 		}
 	}
+	// Reclaim the bytes this upload staged, BEFORE forgetting the intent: an
+	// intent forgotten first leaves nothing pointing at them until the next
+	// boot sweep, so the two halves of one abandonment would settle at
+	// different times.
+	//
+	// Run on BOTH paths, not just the rollback. A roll-forward normally has no
+	// records left (its commit cleared them), but that clear is best-effort, so
+	// a survivor lands here - where the blob is bound, unstaging refuses, and
+	// the record is cleared. Self-correcting rather than conditional.
+	if err := r.reclaimStagedBytes(ctx, domain.Slug(in.Subject), now); err != nil {
+		return err
+	}
 	return r.intents.Complete(ctx, in.ID, in.Scope)
+}
+
+// reclaimStagedBytes deletes the objects this upload staged and never bound.
+//
+// FENCE FIRST. Bumping the epoch before deleting anything is what makes a
+// resumed writer's bind abort rather than race: it will fail its ownership
+// check and never bind bytes that are on their way out. Delete-then-fence
+// leaves a window where it binds bytes that are already gone, which is
+// committed metadata pointing at nothing - a 404 no scan can repair.
+//
+// A bound ref is a SKIP, not a failure: blob.ErrBound means the write landed
+// after all, so those bytes belong to a live paste. Any other per-ref error
+// stops that ref and the pass, leaving the records for the next one - a missed
+// reclamation is a leak, and a leak is always preferable to deleting live data.
+//
+// The grace gate lives HERE rather than in each caller, because it guards the
+// destructive act and every path to that act must carry it. Age is measured
+// from the NEWEST record, which is time since the upload last made progress: an
+// upload staging a large site for an hour keeps writing records and so stays
+// fresh, where oldest-first would reclaim bytes out from under a running deploy.
+func (r *ShaleRepo) reclaimStagedBytes(ctx context.Context, slug domain.Slug, now time.Time) error {
+	if r.kv == nil {
+		return nil // no blob plane: nothing was ever staged through it
+	}
+	recs, err := r.stagedRecords(slug)
+	if err != nil {
+		return fmt.Errorf("staged refs for %s: %w", slug, err)
+	}
+	if len(recs) == 0 {
+		return nil
+	}
+	refs := make([]cluster.BlobRef, len(recs))
+	newest := time.Time{}
+	for i, rec := range recs {
+		refs[i] = rec.Ref
+		if rec.At.After(newest) {
+			newest = rec.At
+		}
+	}
+	if now.Sub(newest) < ResolveGrace {
+		return nil // may still be staging on another node
+	}
+	if _, ferr := r.FenceBlobOwnership(ctx, slug); ferr != nil {
+		return fmt.Errorf("fence %s before unstaging: %w", slug, ferr)
+	}
+	for _, ref := range refs {
+		switch uerr := r.kv.UnstageBlob(ctx, ref); {
+		case uerr == nil:
+		case errors.Is(uerr, blob.ErrBound):
+			// Bound after all: the write committed. Leave the bytes alone.
+		default:
+			return fmt.Errorf("unstage %s/%s: %w", ref.Unit, ref.BlobID, uerr)
+		}
+	}
+	r.repoLog().Printf("shale: reclaimed %d staged blob(s) for %s", len(refs), slug)
+	return r.ClearStagedRefs(ctx, slug)
 }
 
 // subjectRowExists reports whether the authoritative row the intent describes

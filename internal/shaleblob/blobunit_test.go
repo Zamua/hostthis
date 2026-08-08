@@ -21,6 +21,7 @@ import (
 
 	"github.com/Zamua/shale/pkg/blob"
 	"github.com/Zamua/shale/pkg/blob/blobmem"
+	"github.com/Zamua/shale/pkg/cluster"
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
@@ -118,10 +119,7 @@ func TestReaderAtomicCreate(t *testing.T) {
 	body := encode(t, raw)
 
 	// Staged without committing: the bytes are durable but unreferenced.
-	h, err := unit.Stage(ctx, "atomicslug", sha, body)
-	if err != nil {
-		t.Fatalf("Stage: %v", err)
-	}
+	h := stageOwned(t, unit, &ctx, "atomicslug", sha, body)
 	// No metadata row resolves the blob id yet, so the read must 404.
 	if _, rerr := readAll(t, unit, "atomicslug", sha); !isNotFound(rerr) {
 		t.Fatalf("read before commit = %v, want not-found", rerr)
@@ -162,10 +160,7 @@ func TestAtomicDelete(t *testing.T) {
 	sha := "sha-del-1"
 	body := encode(t, raw)
 
-	h, err := unit.Stage(ctx, "delslug", sha, body)
-	if err != nil {
-		t.Fatalf("Stage: %v", err)
-	}
+	h := stageOwned(t, unit, &ctx, "delslug", sha, body)
 	p := mkPaste("delslug", "owner-d", sha, len(body), now)
 	if err := unit.Commit(ctx, []service.BlobHandle{h}, func(ctx context.Context) error {
 		return repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
@@ -199,10 +194,7 @@ func TestVersions_BindAndRead(t *testing.T) {
 	rawV1 := []byte("<h1>v1</h1>")
 	shaV1 := "sha-v1"
 	bodyV1 := encode(t, rawV1)
-	h1, err := unit.Stage(ctx, "verslug", shaV1, bodyV1)
-	if err != nil {
-		t.Fatalf("Stage v1: %v", err)
-	}
+	h1 := stageOwned(t, unit, &ctx, "verslug", shaV1, bodyV1)
 	p := mkPaste("verslug", "owner-v", shaV1, len(bodyV1), now)
 	if err := unit.Commit(ctx, []service.BlobHandle{h1}, func(ctx context.Context) error {
 		return repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
@@ -214,10 +206,7 @@ func TestVersions_BindAndRead(t *testing.T) {
 	rawV2 := []byte("<h1>v2 newer</h1>")
 	shaV2 := "sha-v2"
 	bodyV2 := encode(t, rawV2)
-	h2, err := unit.Stage(ctx, "verslug", shaV2, bodyV2)
-	if err != nil {
-		t.Fatalf("Stage v2: %v", err)
-	}
+	h2 := stageOwned(t, unit, &ctx, "verslug", shaV2, bodyV2)
 	if err := unit.Commit(ctx, []service.BlobHandle{h2}, func(ctx context.Context) error {
 		_, aerr := repo.AppendVersionWithQuotaCheck(ctx, domain.Slug("verslug"), domain.KindHTML, shaV2, len(bodyV2), int64(domain.UserQuotaBytes), now)
 		return aerr
@@ -255,8 +244,8 @@ func TestSites_BindAllAndRedeployDrops(t *testing.T) {
 	rawAbout := []byte("<!doctype html><h1>about</h1>")
 	shaIndex := "sha-site-index"
 	shaAbout := "sha-site-about"
-	h1 := stageFile(t, unit, "siteslug", shaIndex, rawIndex)
-	h2 := stageFile(t, unit, "siteslug", shaAbout, rawAbout)
+	h1 := stageFile(t, unit, &ctx, "siteslug", shaIndex, rawIndex)
+	h2 := stageFile(t, unit, &ctx, "siteslug", shaAbout, rawAbout)
 
 	man := domain.NewManifest()
 	man.Add("index.html", domain.ManifestEntry{SHA: shaIndex, Size: len(rawIndex), ContentType: "text/html"})
@@ -288,8 +277,8 @@ func TestSites_BindAllAndRedeployDrops(t *testing.T) {
 	shaIndex2 := "sha-site-index2"
 	shaContact := "sha-site-contact"
 	now2 := now.Add(time.Minute)
-	n1 := stageFile(t, unit, "siteslug", shaIndex2, rawIndex2)
-	n2 := stageFile(t, unit, "siteslug", shaContact, rawContact)
+	n1 := stageFile(t, unit, &ctx, "siteslug", shaIndex2, rawIndex2)
+	n2 := stageFile(t, unit, &ctx, "siteslug", shaContact, rawContact)
 
 	man2 := domain.NewManifest()
 	man2.Add("index.html", domain.ManifestEntry{SHA: shaIndex2, Size: len(rawIndex2), ContentType: "text/html"})
@@ -309,21 +298,36 @@ func TestSites_BindAllAndRedeployDrops(t *testing.T) {
 	if out, err := readAll(t, unit, "siteslug", shaContact); err != nil || !bytes.Equal(out, rawContact) {
 		t.Fatalf("read contact v2 = (%q, %v), want %q", out, err, rawContact)
 	}
-	// The dropped file's blob is unbound.
-	if _, err := readAll(t, unit, "siteslug", shaAbout); !isNotFound(err) {
-		t.Fatalf("read dropped about after redeploy = %v, want not-found", err)
+	// v1's blobs are STILL BOUND, and that is the contract now: a re-deploy
+	// appends a version rather than replacing one, so v1 stays live and
+	// rollable-back and its bytes have to survive. Unbinding them here would
+	// make a rollback serve a manifest whose files are gone.
+	//
+	// This assertion used to be the reverse, from when a re-deploy destroyed
+	// what it replaced.
+	if out, err := readAll(t, unit, "siteslug", shaAbout); err != nil || !bytes.Equal(out, rawAbout) {
+		t.Fatalf("v1's dropped file must survive the re-deploy: (%q, %v), want %q. "+
+			"A retained version whose blobs are unbound cannot be rolled back to",
+			out, err, rawAbout)
 	}
-	// So is the OLD index blob: the manifest now maps index.html to shaIndex2.
-	if _, err := readAll(t, unit, "siteslug", shaIndex); !isNotFound(err) {
-		t.Fatalf("read old index sha after redeploy = %v, want not-found", err)
+	if out, err := readAll(t, unit, "siteslug", shaIndex); err != nil || !bytes.Equal(out, rawIndex) {
+		t.Fatalf("v1's index blob must survive the re-deploy: (%q, %v), want %q", out, err, rawIndex)
 	}
 }
 
 // stageFile stages one site file through StageStream, which encodes the
 // uncompressed bytes, mirroring the deploy sink.
-func stageFile(t *testing.T, unit *shaleblob.Unit, slug, sha string, raw []byte) service.BlobHandle {
+// stageFile stages one file of a multi-file deploy, claiming ownership the way
+// the deploy service does. ctx is updated in place because the epoch has to
+// reach the Commit that binds these handles.
+func stageFile(t *testing.T, unit *shaleblob.Unit, ctx *context.Context, slug, sha string, raw []byte) service.BlobHandle {
 	t.Helper()
-	h, err := unit.StageStream(context.Background(), slug, sha, bytes.NewReader(raw), int64(len(raw)))
+	owned, err := unit.BeginUpload(*ctx, slug)
+	if err != nil {
+		t.Fatalf("BeginUpload %s: %v", slug, err)
+	}
+	*ctx = owned
+	h, err := unit.StageStream(*ctx, slug, sha, bytes.NewReader(raw), int64(len(raw)))
 	if err != nil {
 		t.Fatalf("StageStream %s: %v", sha, err)
 	}
@@ -358,4 +362,157 @@ func listKeys(ctx context.Context, bs *blobmem.Store) map[string]struct{} {
 		out[info.Key] = struct{}{}
 	}
 	return out
+}
+
+// An abandoned upload's bytes are reclaimed, and a committed one's are not.
+//
+// This is the whole point of the saga: bytes staged by an upload that died
+// before committing are deleted from the object store on recovery, while bytes
+// belonging to a write that landed are left alone. Both halves in one test,
+// because the dangerous failure is not "fails to reclaim" - it is "reclaims the
+// wrong one", and only comparing the two catches that.
+func TestReclaimStagedBytes_AbandonedGoesCommittedStays(t *testing.T) {
+	repo, unit, bs := newBlobRepo(t)
+	ctx := context.Background()
+
+	// An upload that COMMITS: stage, then bind through a real metadata write.
+	live := domain.Slug("livepast")
+	liveCtx, err := unit.BeginUpload(ctx, string(live))
+	if err != nil {
+		t.Fatalf("begin live: %v", err)
+	}
+	lh, err := unit.Stage(liveCtx, string(live), "sha-live", encode(t, []byte("live bytes")))
+	if err != nil {
+		t.Fatalf("stage live: %v", err)
+	}
+	if err := unit.Commit(liveCtx, []service.BlobHandle{lh}, func(c context.Context) error {
+		return repo.InsertWithQuotaCheck(c, domain.Paste{
+			Slug: live, Identity: "key:live", Kind: domain.KindHTML,
+			ContentSHA: "sha-live", Size: 10,
+			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		}, 0, time.Now().UTC())
+	}); err != nil {
+		t.Fatalf("commit live: %v", err)
+	}
+
+	// An upload that DIES after staging: no commit, so its records survive.
+	dead := domain.Slug("deadpast")
+	deadCtx, err := unit.BeginUpload(ctx, string(dead))
+	if err != nil {
+		t.Fatalf("begin dead: %v", err)
+	}
+	if _, err := unit.Stage(deadCtx, string(dead), "sha-dead", encode(t, []byte("abandoned bytes"))); err != nil {
+		t.Fatalf("stage dead: %v", err)
+	}
+
+	if got := countObjects(ctx, bs); got != 2 {
+		t.Fatalf("fixture: %d objects staged, want 2 (one live, one abandoned)", got)
+	}
+
+	// Recovery reclaims the abandoned upload. Driven through the production
+	// sweep, which sees BOTH slugs in one pass - so "reclaims the wrong one"
+	// is reachable here rather than excluded by only ever pointing it at the
+	// slug we expect it to delete.
+	past := time.Now().UTC().Add(24 * time.Hour)
+	if _, err := repo.SweepStagedBytes(ctx, past); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if got := countObjects(ctx, bs); got != 1 {
+		t.Fatalf("after reclaiming the abandoned upload: %d objects, want 1", got)
+	}
+
+	// And the case ErrBound actually guards: a committed upload whose records
+	// SURVIVED, because clearing them is best-effort and can fail. Re-record
+	// the bound ref to reproduce that, since a successful commit clears them
+	// and reclaim would otherwise return early without ever unstaging - passing
+	// for the wrong reason.
+	liveRef, ok := lh.Ref.(cluster.BlobRef)
+	if !ok {
+		t.Fatal("handle carries no cluster.BlobRef")
+	}
+	if err := repo.RecordStagedRef(ctx, live, liveRef); err != nil {
+		t.Fatalf("re-record the bound ref: %v", err)
+	}
+	if _, err := repo.SweepStagedBytes(ctx, past); err != nil {
+		t.Fatalf("sweep with a surviving bound record: %v", err)
+	}
+	if got := countObjects(ctx, bs); got != 1 {
+		t.Fatalf("reclaiming a COMMITTED upload deleted its bytes: %d objects left, want 1. "+
+			"A live paste now 404s and no scan can put it back", got)
+	}
+	// The committed paste still reads back.
+	if out, rerr := readAll(t, unit, string(live), "sha-live"); rerr != nil || string(out) != "live bytes" {
+		t.Fatalf("committed paste unreadable after reclaim: (%q, %v)", out, rerr)
+	}
+}
+
+// stageOwned claims blob ownership and then stages, which is the sequence the
+// service layer performs. Staging without the claim binds nothing: the fence
+// fails closed, deliberately, so a path that forgets cannot silently skip it.
+//
+// It updates ctx in place because the epoch rides the context all the way to
+// Commit, and a test that staged with one context and committed with another
+// would drop it.
+func stageOwned(t *testing.T, unit *shaleblob.Unit, ctx *context.Context, slug, sha string, body []byte) service.BlobHandle {
+	t.Helper()
+	owned, err := unit.BeginUpload(*ctx, slug)
+	if err != nil {
+		t.Fatalf("BeginUpload %s: %v", slug, err)
+	}
+	*ctx = owned
+	h, err := unit.Stage(*ctx, slug, sha, body)
+	if err != nil {
+		t.Fatalf("Stage %s: %v", slug, err)
+	}
+	return h
+}
+
+// An upload that dies DURING staging is reclaimed by the sweep.
+//
+// This is the likeliest abandonment - a long multi-file deploy interrupted
+// partway - and it is the case the intent-driven sweep can miss, because the
+// intent is opened by the INSERT, which such an upload never reaches. If the
+// only record of those bytes is unreachable from recovery, they leak forever
+// and the whole feature does not cover its main case.
+func TestSweep_ReclaimsAnUploadThatDiedWhileStaging(t *testing.T) {
+	repo, unit, bs := newBlobRepo(t)
+	ctx := context.Background()
+	slug := domain.Slug("diedstag")
+
+	owned, err := unit.BeginUpload(ctx, string(slug))
+	if err != nil {
+		t.Fatalf("BeginUpload: %v", err)
+	}
+	// Two files staged, then the process dies: no insert, so no commit.
+	for _, f := range []struct{ sha, body string }{{"sha-d1", "one"}, {"sha-d2", "two"}} {
+		if _, err := unit.Stage(owned, string(slug), f.sha, encode(t, []byte(f.body))); err != nil {
+			t.Fatalf("stage %s: %v", f.sha, err)
+		}
+	}
+	if got := countObjects(ctx, bs); got != 2 {
+		t.Fatalf("fixture: %d objects staged, want 2", got)
+	}
+
+	// A sweep running NOW must leave it alone: from the outside an upload
+	// still staging is indistinguishable from an abandoned one, and only the
+	// grace separates them. Without this half, a sweep that ignored the grace
+	// entirely would still pass the assertion below.
+	if _, err := repo.SweepStagedBytes(ctx, time.Now().UTC()); err != nil {
+		t.Fatalf("sweep within the grace: %v", err)
+	}
+	if got := countObjects(ctx, bs); got != 2 {
+		t.Fatalf("a sweep inside the grace reclaimed %d of 2 objects: it cannot tell a "+
+			"running upload from a dead one, so it deletes bytes out from under live deploys",
+			2-got)
+	}
+
+	// Past the grace, it must reach them.
+	if _, err := repo.SweepStagedBytes(ctx, time.Now().UTC().Add(24*time.Hour)); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if got := countObjects(ctx, bs); got != 0 {
+		t.Fatalf("after the sweep: %d objects remain, want 0. An upload that died while "+
+			"STAGING left bytes the sweep never reached - the likeliest abandonment is "+
+			"the one not covered", got)
+	}
 }

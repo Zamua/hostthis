@@ -71,6 +71,12 @@ type metadataBundle struct {
 	// mounted anywhere during a cold start (docs/SPEC.md "Durable intent").
 	IntentSweeper interface {
 		SweepIntents(ctx context.Context, now time.Time) (int, error)
+		// SweepStagedBytes reclaims the objects an abandoned upload staged and
+		// never bound. Separate from the intent sweep because it settles a
+		// different thing: an intent decides half-written METADATA, while
+		// staged bytes are left by appends, redeploys and by uploads that died
+		// before any intent existed (docs/SPEC.md "Staged blob bytes").
+		SweepStagedBytes(ctx context.Context, now time.Time) (int, error)
 	}
 	// RelayPeer is the OPTIONAL multi-pod relay peer transport (multi-node
 	// shale only). nil keeps the relay pod-local.

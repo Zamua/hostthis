@@ -38,10 +38,7 @@ func TestConcurrentSameSlugBindsOwnBlob(t *testing.T) {
 	rawV1 := []byte("<!doctype html><h1>v1 seed</h1>")
 	shaV1 := "sha-conc-v1"
 	bodyV1 := encode(t, rawV1)
-	h1, err := unit.Stage(ctx, slug, shaV1, bodyV1)
-	if err != nil {
-		t.Fatalf("Stage v1: %v", err)
-	}
+	h1 := stageOwned(t, unit, &ctx, slug, shaV1, bodyV1)
 	p := mkPaste(slug, "owner-conc", shaV1, len(bodyV1), now)
 	if err := unit.Commit(ctx, []service.BlobHandle{h1}, func(ctx context.Context) error {
 		return repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)

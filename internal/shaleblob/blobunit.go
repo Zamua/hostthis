@@ -21,7 +21,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 
 	"github.com/Zamua/shale/pkg/blob"
 	"github.com/Zamua/shale/pkg/cluster"
@@ -36,6 +38,20 @@ func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
 // Unit adapts a blob-capable ShaleRepo to the service.BlobUnit seam.
 type Unit struct {
 	repo *storage.ShaleRepo
+	// Logf reports a best-effort failure the caller must not be failed for.
+	// nil uses the standard logger; a deployment that threads its own logger
+	// sets it at the composition root.
+	Logf func(format string, args ...any)
+}
+
+// logf reports through Logf when set, and the standard logger otherwise, so a
+// best-effort failure is never silent.
+func (u *Unit) logf(format string, args ...any) {
+	if u.Logf != nil {
+		u.Logf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
 }
 
 // New builds the transactional shale-blob seam over repo, which MUST have a
@@ -56,7 +72,26 @@ func (u *Unit) Stage(ctx context.Context, slug, sha string, body []byte) (servic
 	if err != nil {
 		return service.BlobHandle{}, err
 	}
+	if rerr := u.recordStaged(ctx, slug, ref); rerr != nil {
+		return service.BlobHandle{}, rerr
+	}
 	return service.BlobHandle{Slug: slug, SHA: sha, Ref: ref}, nil
+}
+
+// recordStaged remembers a ref the instant its bytes land, so a death before
+// the commit leaves an exact list to reclaim rather than bytes nothing recorded.
+//
+// Per object rather than batched at the end: a batch loses precisely the blobs a
+// mid-upload crash strands, which is the case this exists for.
+//
+// A failed record FAILS THE STAGE. Continuing would put bytes on disk that
+// nothing remembers - the leak this is closing - and the upload can be retried,
+// so refusing costs a retry where proceeding costs a permanent orphan.
+func (u *Unit) recordStaged(ctx context.Context, slug string, ref cluster.BlobRef) error {
+	if err := u.repo.RecordStagedRef(ctx, domain.Slug(slug), ref); err != nil {
+		return fmt.Errorf("shaleblob: record staged ref for %s: %w", slug, err)
+	}
+	return nil
 }
 
 // StageStream stages a site-deploy file. The sink hands UNCOMPRESSED bytes but
@@ -72,6 +107,9 @@ func (u *Unit) StageStream(ctx context.Context, slug, sha string, r io.Reader, _
 	ref, err := u.repo.StageBlobStream(ctx, u.repo.RouteKeyForSlug(slug), bytesReader(body), int64(len(body)), sha)
 	if err != nil {
 		return service.BlobHandle{}, err
+	}
+	if rerr := u.recordStaged(ctx, slug, ref); rerr != nil {
+		return service.BlobHandle{}, rerr
 	}
 	return service.BlobHandle{Slug: slug, SHA: sha, Ref: ref}, nil
 }
@@ -98,7 +136,31 @@ func (u *Unit) Commit(ctx context.Context, handles []service.BlobHandle, metaWri
 		}
 		refs = append(refs, ref)
 	}
-	return metaWrite(storage.WithPendingBinds(ctx, refs))
+	if err := metaWrite(storage.WithPendingBinds(ctx, refs)); err != nil {
+		return err
+	}
+	// The write committed, so these bytes are bound. A staged record that
+	// outlives its commit is a standing instruction to delete live data, so
+	// clearing is part of committing, not housekeeping.
+	//
+	// Best-effort: the metadata is already durable and reporting failure here
+	// would fail a write that succeeded. A record left behind is re-cleared by
+	// the next resolution, which finds the blob bound and skips it.
+	slug := handles[0].Slug
+	if cerr := u.repo.ClearStagedRefs(ctx, domain.Slug(slug)); cerr != nil {
+		u.logf("shaleblob: clearing staged records for %s: %v (the next resolution re-clears them)", slug, cerr)
+	}
+	return nil
+}
+
+// BeginUpload claims the slug's blob-ownership epoch and returns a context
+// carrying it, so the commit can verify it still holds when it binds.
+func (u *Unit) BeginUpload(ctx context.Context, slug string) (context.Context, error) {
+	epoch, err := u.repo.ClaimBlobOwnership(ctx, domain.Slug(slug))
+	if err != nil {
+		return ctx, fmt.Errorf("shaleblob: claim blob ownership for %s: %w", slug, err)
+	}
+	return storage.WithBlobOwnerEpoch(ctx, epoch), nil
 }
 
 // Read streams the stored object for (slug, sha) through the magic-peek + zstd
