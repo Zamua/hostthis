@@ -203,6 +203,15 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		}()
 	}
 
+	// Ownership before the first staged byte: bytes staged outside it are
+	// outside what the commit checks, so recovery could reclaim them while
+	// this deploy still binds.
+	uploadCtx, berr := d.Blob.BeginUpload(ctx, string(slug))
+	if berr != nil {
+		return SiteResult{}, berr
+	}
+	ctx = uploadCtx
+
 	sink := &blobSink{blob: d.Blob, slug: string(slug)}
 	man, err := archive.Untar(body, sink, budget)
 	switch {
@@ -404,6 +413,13 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	}
 	budget := siteExtractBudget(int64(domain.UserQuotaBytes), int64(usedPaste), usedSite, existing)
 
+	// Ownership before the first staged byte, exactly as the fresh deploy does:
+	// a re-deploy stages into an existing slug and is equally reclaimable.
+	ctx, berr := d.Blob.BeginUpload(context.Background(), string(slug))
+	if berr != nil {
+		return SiteResult{}, berr
+	}
+
 	sink := &blobSink{blob: d.Blob, slug: string(slug)}
 	man, err := archive.Untar(body, sink, budget)
 	switch {
@@ -435,7 +451,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	stored := sink.stagedBytes
 
 	// The swapped manifest and the staged-file binds commit as one unit.
-	err = d.Blob.Commit(context.Background(), sink.handles, func(ctx context.Context) error {
+	err = d.Blob.Commit(ctx, sink.handles, func(ctx context.Context) error {
 		return d.Sites.ReplaceWithQuotaCheck(ctx, site, stored, int64(domain.UserQuotaBytes), now)
 	})
 	switch class, terr := classifyCommitErr(err); {

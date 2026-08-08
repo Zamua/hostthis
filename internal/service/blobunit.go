@@ -20,6 +20,19 @@ import (
 // the implementations in internal/storage, and the domain types never
 // reference a handle.
 type BlobUnit interface {
+	// BeginUpload takes ownership of a slug's staged bytes and returns a
+	// context carrying it, which the caller MUST use for the staging and the
+	// Commit that follow.
+	//
+	// It exists because recovery may reclaim an upload it believes died, and
+	// the writer may not have: ownership is what lets the commit detect that it
+	// was taken over and abort, instead of binding metadata to bytes recovery
+	// is deleting. An adapter with no such hazard returns ctx unchanged.
+	//
+	// Called ONCE, before the first Stage. Claiming later than the first staged
+	// byte leaves those bytes outside the ownership the commit checks.
+	BeginUpload(ctx context.Context, slug string) (context.Context, error)
+
 	// Stage durably writes a record's blob from an ALREADY magic+zstd-encoded
 	// in-memory body. Used by the single-file paste/version paths, whose
 	// streaming pipeline has already produced the encoded staging buffer.

@@ -206,3 +206,7 @@ func TestDeploy_KeepsPreClaimOnSuccess(t *testing.T) {
 		t.Fatalf("released %v on a committed deploy; the marker belongs to the site", sites.released)
 	}
 }
+
+func (txTestBlobUnit) BeginUpload(ctx context.Context, _ string) (context.Context, error) {
+	return ctx, nil
+}

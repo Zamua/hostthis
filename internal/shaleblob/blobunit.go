@@ -153,6 +153,16 @@ func (u *Unit) Commit(ctx context.Context, handles []service.BlobHandle, metaWri
 	return nil
 }
 
+// BeginUpload claims the slug's blob-ownership epoch and returns a context
+// carrying it, so the commit can verify it still holds when it binds.
+func (u *Unit) BeginUpload(ctx context.Context, slug string) (context.Context, error) {
+	epoch, err := u.repo.ClaimBlobOwnership(ctx, domain.Slug(slug))
+	if err != nil {
+		return ctx, fmt.Errorf("shaleblob: claim blob ownership for %s: %w", slug, err)
+	}
+	return storage.WithBlobOwnerEpoch(ctx, epoch), nil
+}
+
 // Read streams the stored object for (slug, sha) through the magic-peek + zstd
 // decode, so the caller sees decompressed bytes (same contract as the
 // standalone GetReader). ctx is tied to the returned reader's Close because
