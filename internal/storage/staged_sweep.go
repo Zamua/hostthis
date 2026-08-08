@@ -12,7 +12,8 @@ import (
 )
 
 // SweepStagedBytes reclaims the staged objects of uploads that stopped making
-// progress, and reports how many uploads it settled.
+// progress, and reports how many uploads it actually reclaimed - never how many
+// it looked at.
 //
 // Driven by the staged records rather than by durable intents, because the two
 // answer different questions. An intent tracks a paste CREATION - it exists to
