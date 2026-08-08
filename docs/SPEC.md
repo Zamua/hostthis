@@ -2837,10 +2837,17 @@ The per-identity quota and the per-paste cap are DELIBERATELY DIFFERENT
 numbers: 100 MiB total, 10 MiB for any single paste. They were equal
 historically, on the reasoning that one number is easier to reason
 about, but they constrain different things and one of them is bounded by
-memory rather than policy. A single upload is staged in RAM before it is
-written, so the per-paste cap is what protects a small node from one
-large request; the per-identity quota is a fairness limit on accumulated
-storage and costs nothing at request time. Raising the total therefore
+memory rather than policy. The per-paste cap bounds one request's
+declared size; the per-identity quota is a fairness limit on accumulated
+storage and costs nothing at request time.
+
+**Writes are constant-memory.** An upload is never held whole in RAM. The
+body streams through the compressor into the object store, hashing as it
+goes, and the staged length is not known in advance - the blob port takes
+`SizeUnknown` and the adapter uses a streaming multipart upload. Memory
+per in-flight upload is the compressor window plus a copy buffer, not the
+payload, so N concurrent large deploys cost N small constant amounts
+rather than N times the file size. Raising the total therefore
 does not imply raising the per-request ceiling, and they should be
 expected to diverge again. Static **sites** count against the same cap and on the same
 basis: the total of their files' COMPRESSED sizes, as reported by the

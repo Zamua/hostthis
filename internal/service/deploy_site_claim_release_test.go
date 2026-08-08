@@ -10,6 +10,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"testing"
@@ -73,12 +75,14 @@ func (txTestBlobUnit) Stage(context.Context, string, string, []byte) (BlobHandle
 	return BlobHandle{}, nil
 }
 
-func (txTestBlobUnit) StageEncoding(_ context.Context, slug, sha string, r io.Reader) (BlobHandle, int, error) {
-	n, err := io.Copy(io.Discard, r)
+func (txTestBlobUnit) StageEncoding(_ context.Context, slug string, r io.Reader) (BlobHandle, string, int, error) {
+	hasher := sha256.New()
+	n, err := io.Copy(hasher, r)
 	if err != nil {
-		return BlobHandle{}, 0, err
+		return BlobHandle{}, "", 0, err
 	}
-	return BlobHandle{Slug: slug, SHA: sha}, int(n), nil
+	sha := hex.EncodeToString(hasher.Sum(nil))
+	return BlobHandle{Slug: slug, SHA: sha}, sha, int(n), nil
 }
 
 func (txTestBlobUnit) StageStream(_ context.Context, slug, sha string, r io.Reader, _ int64) (BlobHandle, error) {

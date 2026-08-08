@@ -238,14 +238,20 @@ var _ service.BlobUnit = (*Unit)(nil)
 // StageEncoding encodes to the at-rest format, stages those exact bytes, and
 // returns the compressed size EXCLUDING the framing prefix: the basis quota
 // charges, matching how a paste charges its post-zstd size.
-func (u *Unit) StageEncoding(ctx context.Context, slug, sha string, r io.Reader) (service.BlobHandle, int, error) {
-	body, err := storage.EncodeCompressedBody(r)
+func (u *Unit) StageEncoding(ctx context.Context, slug string, r io.Reader) (service.BlobHandle, string, int, error) {
+	// SizeUnknown, deliberately: the encoded length cannot be known without
+	// encoding the whole body first, which is exactly the buffer this avoids.
+	// The adapter falls back to a streaming multipart upload.
+	enc := storage.EncodeCompressedStream(r)
+	ref, err := u.repo.StageBlobStream(ctx, u.repo.RouteKeyForSlug(slug), enc, blob.SizeUnknown, "")
 	if err != nil {
-		return service.BlobHandle{}, 0, err
+		return service.BlobHandle{}, "", 0, err
 	}
-	h, err := u.Stage(ctx, slug, sha, body)
-	if err != nil {
-		return service.BlobHandle{}, 0, err
+	// Valid only now: StageBlobStream has read the stream to EOF.
+	sha := enc.SHA()
+	ref.ContentHash = sha
+	if rerr := u.recordStaged(ctx, slug, ref); rerr != nil {
+		return service.BlobHandle{}, "", 0, rerr
 	}
-	return h, len(body) - storage.CompressedBodyPrefixLen, nil
+	return service.BlobHandle{Slug: slug, SHA: sha, Ref: ref}, sha, enc.CompressedSize(), nil
 }
