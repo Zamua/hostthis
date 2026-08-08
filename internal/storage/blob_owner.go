@@ -107,11 +107,15 @@ func (r *ShaleRepo) FenceBlobOwnership(_ context.Context, slug domain.Slug) (int
 // anything if it commits atomically with the bind it guards. A separate read
 // would re-open the window it exists to close.
 //
-// epoch 0 means the caller never claimed ownership - the paths that do not stage
-// blobs at all - and skips the check rather than failing it.
+// A zero epoch REFUSES. It means blobs are being bound by a path that never
+// claimed ownership, so nothing would stop recovery reclaiming them mid-write -
+// and the check is only reached when there are refs to bind, so there is no
+// legitimate blob-bearing caller without a claim. Skipping instead would make a
+// forgotten claim invisible: the fence would silently not apply to that path,
+// which is worse than not having one, because we would believe we did.
 func checkBlobOwnership(tx shaleKVTx, slug domain.Slug, epoch int64) error {
 	if epoch == 0 {
-		return nil
+		return fmt.Errorf("%w: slug %s bound blobs without claiming ownership", ErrFenced, slug)
 	}
 	key := shaleKeyBlobOwner(slug)
 	cur, err := txReadEpoch(tx, key)

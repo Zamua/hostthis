@@ -67,9 +67,12 @@ func TestCheckBlobOwnership(t *testing.T) {
 			wantErr: ErrFenced,
 		},
 		{
-			name:  "no claim skips the check",
-			tx:    fakeTx{vals: map[string][]byte{key: []byte("9")}},
-			epoch: 0,
+			// The check is only reached when refs are being bound, so a caller
+			// here without a claim is a wiring omission, not a benign case.
+			name:    "binding without a claim is refused, not skipped",
+			tx:      fakeTx{vals: map[string][]byte{key: []byte("9")}},
+			epoch:   0,
+			wantErr: ErrFenced,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

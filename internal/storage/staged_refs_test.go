@@ -24,7 +24,6 @@ import (
 func TestStagedRefs_RoundTripIsByteExact(t *testing.T) {
 	repo := newShaleRepoForTest(t)
 	ctx := context.Background()
-	const scope = "key:staged-owner"
 	slug := domain.Slug("stagd123")
 
 	want := cluster.BlobRef{
@@ -33,11 +32,11 @@ func TestStagedRefs_RoundTripIsByteExact(t *testing.T) {
 		BlobID:     "0193f2c1-8a4b-7c3d-9e1f-2a3b4c5d6e7f",
 		Size:       4096,
 	}
-	if err := repo.RecordStagedRef(ctx, scope, slug, want); err != nil {
+	if err := repo.RecordStagedRef(ctx, slug, want); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
-	got, err := repo.StagedRefs(scope, slug)
+	got, err := repo.StagedRefs(slug)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
@@ -62,27 +61,23 @@ func TestStagedRefs_RoundTripIsByteExact(t *testing.T) {
 	}
 }
 
-// Records are per-upload and per-owner: one upload's list never contains
-// another's, or recovery for one paste would delete a different paste's bytes.
+// Records are per-upload: one slug's list never contains another's, or recovery
+// for one paste would delete a different paste's bytes.
 func TestStagedRefs_ScopedToTheirUpload(t *testing.T) {
 	repo := newShaleRepoForTest(t)
 	ctx := context.Background()
 
 	mine := cluster.BlobRef{Unit: "0-1", RouteShard: []byte("a"), BlobID: "blob-mine", Size: 1}
 	otherSlug := cluster.BlobRef{Unit: "0-1", RouteShard: []byte("a"), BlobID: "blob-other-slug", Size: 1}
-	otherOwner := cluster.BlobRef{Unit: "0-1", RouteShard: []byte("a"), BlobID: "blob-other-owner", Size: 1}
 
-	if err := repo.RecordStagedRef(ctx, "key:a", "aaaa1111", mine); err != nil {
+	if err := repo.RecordStagedRef(ctx, "aaaa1111", mine); err != nil {
 		t.Fatalf("record mine: %v", err)
 	}
-	if err := repo.RecordStagedRef(ctx, "key:a", "bbbb2222", otherSlug); err != nil {
+	if err := repo.RecordStagedRef(ctx, "bbbb2222", otherSlug); err != nil {
 		t.Fatalf("record other slug: %v", err)
 	}
-	if err := repo.RecordStagedRef(ctx, "key:b", "aaaa1111", otherOwner); err != nil {
-		t.Fatalf("record other owner: %v", err)
-	}
 
-	got, err := repo.StagedRefs("key:a", "aaaa1111")
+	got, err := repo.StagedRefs("aaaa1111")
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
@@ -97,24 +92,23 @@ func TestStagedRefs_ScopedToTheirUpload(t *testing.T) {
 func TestStagedRefs_ClearedOnCommit(t *testing.T) {
 	repo := newShaleRepoForTest(t)
 	ctx := context.Background()
-	const scope = "key:clear"
 	slug := domain.Slug("clear123")
 
 	for _, id := range []string{"b1", "b2", "b3"} {
-		if err := repo.RecordStagedRef(ctx, scope, slug, cluster.BlobRef{
+		if err := repo.RecordStagedRef(ctx, slug, cluster.BlobRef{
 			Unit: "0-2", RouteShard: []byte("r"), BlobID: id, Size: 10,
 		}); err != nil {
 			t.Fatalf("record %s: %v", id, err)
 		}
 	}
-	if got, _ := repo.StagedRefs(scope, slug); len(got) != 3 {
+	if got, _ := repo.StagedRefs(slug); len(got) != 3 {
 		t.Fatalf("fixture: recorded %d refs, want 3", len(got))
 	}
 
-	if err := repo.ClearStagedRefs(ctx, scope, slug); err != nil {
+	if err := repo.ClearStagedRefs(ctx, slug); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
-	got, err := repo.StagedRefs(scope, slug)
+	got, err := repo.StagedRefs(slug)
 	if err != nil {
 		t.Fatalf("read after clear: %v", err)
 	}
@@ -124,7 +118,7 @@ func TestStagedRefs_ClearedOnCommit(t *testing.T) {
 	}
 
 	// Idempotent: a partial clear must converge, not fail.
-	if err := repo.ClearStagedRefs(ctx, scope, slug); err != nil {
+	if err := repo.ClearStagedRefs(ctx, slug); err != nil {
 		t.Fatalf("second clear must be a no-op, got %v", err)
 	}
 }

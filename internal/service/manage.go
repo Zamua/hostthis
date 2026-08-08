@@ -155,6 +155,12 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 	// Commit binds the staged blob with the AppendVersion metadata write. On
 	// the standalone path Stage writes the bytes and Commit runs only the
 	// metadata write, keeping the blob-first ordering.
+	// Ownership before the staged byte: an appended version stages into an
+	// existing slug and is as reclaimable as a fresh upload.
+	ctx, berr := m.Blob.BeginUpload(ctx, string(slug))
+	if berr != nil {
+		return UpdateResult{}, berr
+	}
 	handle, err := m.Blob.Stage(ctx, string(slug), staged.SHA, staged.Body)
 	if err != nil {
 		// A blob Put rejected by the object store's bucket quota surfaces

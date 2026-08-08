@@ -81,6 +81,13 @@ func (u *StandaloneBlobUnit) IsTransactional() bool { return false }
 
 var _ BlobUnit = (*StandaloneBlobUnit)(nil)
 
+// BeginUpload is a no-op on the standalone path: its Stage writes bytes that
+// are immediately durable and content-addressed, so there is no staged-but-
+// unowned window for a recovery to reclaim and therefore nothing to fence.
+func (u *StandaloneBlobUnit) BeginUpload(ctx context.Context, _ string) (context.Context, error) {
+	return ctx, nil
+}
+
 // StageEncoding implements BlobUnit for the standalone path, on the same
 // contract as the transactional adapter: encode to the at-rest format, stage
 // it, report the compressed size excluding the framing prefix.

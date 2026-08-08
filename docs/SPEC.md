@@ -3863,6 +3863,51 @@ on that shard and is already written at claim time. That key's value is read by
 two other paths and exists in production with a plain-identity format; widening
 it would be a live-format migration for no gain over one new key.
 
+### Staged blob bytes: what the intent does not cover
+
+The durable intent settles half-written METADATA. It cannot settle staged BYTES,
+for a reason that is structural rather than incidental: an intent is opened by
+the insert, and the likeliest abandonment never reaches the insert. A multi-file
+site deploy interrupted partway has staged real objects and opened no intent at
+all. Routing byte reclamation through intents would therefore miss its principal
+case, and would additionally have to invent an intent for appends and redeploys,
+which stage bytes without creating anything.
+
+So the two are settled by two mechanisms over two records.
+
+**Each staged object is recorded before the next file is staged**, at
+`staged/<slug>/<blobid>`, holding the whole blob ref and the time it was staged.
+Sharded on the SLUG, so an upload's records, its authoritative row, the bref they
+become and the ownership epoch that guards them all live on one shard. One key
+per object, so appending a record is O(1) rather than rewriting a growing list.
+
+The ref is stored WHOLE, never field by field. Both the bound-ref guard and the
+delete key are derived from its fields, so a field lost in the round-trip does
+not fail loudly: it addresses a different key than the bind wrote, reads as
+"unbound" for a blob that is bound, and deletes committed bytes.
+
+**The records are cleared when the write COMMITS.** Those bytes are bound now,
+and a record outliving its commit is a standing instruction to delete live data.
+
+**A sweep reclaims what is left**, scanning `staged/` on the units this node has
+mounted, once, after the node is serving. Every unit is mounted by someone, so
+the fleet covers the keyspace with no node fanning out. It is a boot pass, not a
+periodic job.
+
+**Age is measured from the newest record of an upload**, which is time since it
+last made progress. An upload staging a large site for an hour keeps writing
+records and so stays fresh; measuring from the oldest would reclaim bytes out
+from under a running deploy. The grace is the same one the intent sweep uses, and
+carries the same requirement: it must exceed the longest plausible upload.
+
+**A bound ref is skipped, not failed.** Refusal to unstage means the write landed
+after all and those bytes belong to a live paste. Any other error stops the pass
+and leaves the records for the next one: a missed reclamation is a leak, and a
+leak is always preferable to deleting live data.
+
+**Recovery fences before it deletes**, as above - the fence and the records are
+one mechanism, and neither is safe alone.
+
 ### Durable intent: the saga survives the process
 
 The compensating action already exists - an authoritative write that FAILS
@@ -5152,12 +5197,11 @@ unchanged for the detached-store path (local / shale-without-a-blob-
 bucket), where it is still correct.
 
 **Orphan-bytes reclamation.** A crash between staging and the bind leaves a
-staged-but-unbound object (a unit-local orphan). On this path the global
-content-addressed sweep is NOT run (the cluster owns the blobs); instead an
-age-gated, mounted-unit-local `SweepOrphans` pass reclaims orphan objects whose
-object-store ModTime is older than a generous grace (default one hour, which
-exceeds the longest stage->commit window so an in-flight upload's object is never
-swept). hostthis schedules it in the same periodic sweep loop, per node.
+staged-but-unbound object. It is reclaimed from the RECORD the upload wrote
+before staging each file, not by scanning the object store for what looks
+unreferenced ("Staged blob bytes", below). No global content-addressed sweep is
+run on this path, and none is needed: reclamation acts on a positive record of a
+specific object rather than on the absence of a reference.
 
 **Reachability is per blob, so no pass acts on absence.** A bound blob's
 pointer is co-committed with the record that owns it and unbound by that
@@ -5172,9 +5216,17 @@ Neither is needed now, because there is no set to be incomplete.
 
 **Within-record byte dedup is deferred.** A blob is staged under a fresh random
 blob id each time, so an unchanged file re-staged on a redeploy (or a paste
-reverting to prior content) gets a NEW object and the old one is unbound + swept.
-This is correct (no leak) but re-uploads unchanged bytes; true content-sha-keyed
-dedup is a later follow-up.
+reverting to prior content) gets a NEW object. Nothing deduplicates; a blob id
+is not derived from content.
+
+**Bytes whose pointer was deleted are a known leak.** Unbinding removes the
+POINTER, not the object, and the staged record that would locate the object is
+cleared at commit - so once a blob is bound, deleting the record that owns it
+leaves bytes nothing points at and nothing can name. This does not affect a
+user's quota, which is computed from the metadata rows, and it cannot serve
+stale content, since nothing resolves to an unbound blob. It is a storage cost
+only, and it is accepted deliberately: the alternative is a cluster-wide keep-set
+scan, which is the fail-open shape this design exists to avoid.
 
 ### Deploy arc: replication factor 1, then scale out
 
