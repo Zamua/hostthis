@@ -165,3 +165,25 @@ func (r *ShaleRepo) ClearStagedRefs(_ context.Context, slug domain.Slug) error {
 	}
 	return nil
 }
+
+// txRecordOrphanedRef records, inside the caller's transaction, a blob whose
+// pointer that same transaction is removing.
+//
+// A delete unbinds the POINTER and leaves the object. Without this the bytes are
+// unreachable: the record that located them was cleared when the write
+// committed, so nothing names them and no sweep can find them.
+//
+// Written in the SAME transaction as the unbind, which is possible because
+// staged/, pastes/ and versions/ all shard on the slug. Both failure directions
+// are safe: a record without its unbind names a still-bound blob, which
+// unstaging refuses; an unbind without its record leaks, exactly as before.
+func txRecordOrphanedRef(tx shaleKVTx, slug domain.Slug, ref cluster.BlobRef, now time.Time) error {
+	if ref.BlobID == "" {
+		return fmt.Errorf("shale: record orphaned ref for %s: empty blob id", slug)
+	}
+	enc, err := json.Marshal(stagedRecord{Ref: ref, At: now})
+	if err != nil {
+		return fmt.Errorf("shale: encode orphaned ref for %s: %w", slug, err)
+	}
+	return tx.Put(shaleKeyStaged(slug.String(), ref.BlobID), enc)
+}

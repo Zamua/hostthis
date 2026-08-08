@@ -5219,14 +5219,25 @@ blob id each time, so an unchanged file re-staged on a redeploy (or a paste
 reverting to prior content) gets a NEW object. Nothing deduplicates; a blob id
 is not derived from content.
 
-**Bytes whose pointer was deleted are a known leak.** Unbinding removes the
-POINTER, not the object, and the staged record that would locate the object is
-cleared at commit - so once a blob is bound, deleting the record that owns it
-leaves bytes nothing points at and nothing can name. This does not affect a
-user's quota, which is computed from the metadata rows, and it cannot serve
-stale content, since nothing resolves to an unbound blob. It is a storage cost
-only, and it is accepted deliberately: the alternative is a cluster-wide keep-set
-scan, which is the fail-open shape this design exists to avoid.
+**A delete records the bytes it orphans.** Unbinding removes the POINTER, not the
+object. On its own that would leave bytes nothing points at and nothing can name,
+because the staged record that located them was cleared at commit.
+
+So the delete writes a new one. In the SAME transaction that unbinds a version's
+pointer, it records that blob's ref under `staged/<slug>/<blobid>` - the identical
+shape a staging upload writes, so the existing sweep reclaims it with no new
+machinery. `staged/`, `pastes/` and `versions/` all shard on the slug, which is
+what lets the record co-commit with the unbind rather than race it.
+
+The two failure directions are both safe. If the record lands and the unbind does
+not, the record names a blob that is still bound, and unstaging refuses it. If the
+unbind lands and the record does not, the bytes leak exactly as they did before.
+Neither can delete live data.
+
+This is the same discipline as the upload path, applied to the other end of the
+lifecycle: record the compensating action before performing it, and reclaim from
+a positive record of a specific object rather than from a scan that concludes
+something is unreferenced.
 
 ### Deploy arc: replication factor 1, then scale out
 
