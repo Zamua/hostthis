@@ -84,23 +84,26 @@ func runSiteConformance(t *testing.T, name string, caps conformCaps, newSites fu
 	t.Helper()
 	t.Run(name+"/Sites/DeployAndReadBack", func(t *testing.T) { _, sr := newSites(t); conformSiteDeployAndReadBack(t, sr) })
 	t.Run(name+"/Sites/GetNotFound", func(t *testing.T) { _, sr := newSites(t); conformSiteGetNotFound(t, sr) })
-	t.Run(name+"/Sites/SumByIdentity", func(t *testing.T) { _, sr := newSites(t); conformSiteSumByIdentity(t, sr) })
+	t.Run(name+"/Sites/SumByIdentity", func(t *testing.T) { r, sr := newSites(t); conformSiteSumByIdentity(t, r, sr) })
 	t.Run(name+"/Sites/QuotaCountsSiteBytes", func(t *testing.T) { _, sr := newSites(t); conformSiteQuotaCountsSiteBytes(t, sr) })
 	t.Run(name+"/Sites/PerOwnerCapCountsBoth", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapCountsBoth(t, r, sr) })
 	t.Run(name+"/Sites/PerOwnerCapConcurrentCeiling", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapConcurrentCeiling(t, caps, r, sr) })
 	t.Run(name+"/Sites/SlugCollisionVsPaste", func(t *testing.T) { r, sr := newSites(t); conformSiteSlugCollisionVsPaste(t, r, sr) })
-	t.Run(name+"/Sites/DedupedSizeCharged", func(t *testing.T) { _, sr := newSites(t); conformSiteDedupedSizeCharged(t, sr) })
-	t.Run(name+"/Sites/ReplaceInPlace", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceInPlace(t, sr) })
+	t.Run(name+"/Sites/DedupedSizeCharged", func(t *testing.T) { r, sr := newSites(t); conformSiteDedupedSizeCharged(t, r, sr) })
+	t.Run(name+"/Sites/ReplaceInPlace", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceInPlace(t, r, sr) })
 	t.Run(name+"/Sites/ReplaceNotFoundShape", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceNotFoundShape(t, r, sr) })
-	t.Run(name+"/Sites/ReplaceDeltaQuota", func(t *testing.T) { _, sr := newSites(t); conformSiteReplaceDeltaQuota(t, sr) })
-	t.Run(name+"/Sites/ListByOwner", func(t *testing.T) { _, sr := newSites(t); conformSiteListByOwner(t, sr) })
+	t.Run(name+"/Sites/ReplaceChargesEachVersion", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceChargesEachVersion(t, r, sr) })
+	t.Run(name+"/Sites/ListByOwner", func(t *testing.T) { r, sr := newSites(t); conformSiteListByOwner(t, r, sr) })
 }
 
-// conformSiteListByOwner pins ListSitesByOwner: exactly the owner's active
-// sites, never another owner's, tracking the enumeration index across the
-// deploy/delete lifecycle. It is what makes sites visible in `ssh <apex> list`,
-// so the shared quota stays legible and reclaimable.
-func conformSiteListByOwner(t *testing.T, sr conformanceSiteRepo) {
+// conformSiteListByOwner pins the owner's listing: exactly their active
+// directories, never another owner's, tracked across the deploy/delete
+// lifecycle. It is what makes a directory visible in `ssh <apex> list`, so the
+// shared quota stays legible and reclaimable.
+//
+// Read through the ARTIFACT listing, because that is where a directory lives:
+// there is no second enumeration index to consult.
+func conformSiteListByOwner(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	ownerA, ownerB := "key:AAAA", "key:BBBB"
 	insertSite(t, sr, siteOf("aone1111", ownerA, 100))
 	insertSite(t, sr, siteOf("atwo2222", ownerA, 200))
@@ -108,16 +111,19 @@ func conformSiteListByOwner(t *testing.T, sr conformanceSiteRepo) {
 
 	slugsOf := func(owner string) map[string]bool {
 		t.Helper()
-		got, err := sr.ListSitesByOwner(owner, fixedNow)
+		got, err := r.ListByOwner(owner)
 		if err != nil {
-			t.Fatalf("list sites %s: %v", owner, err)
+			t.Fatalf("list %s: %v", owner, err)
 		}
 		m := make(map[string]bool, len(got))
-		for _, s := range got {
-			if string(s.Identity) != owner {
-				t.Fatalf("owner leak: %s listed under %s", s.Identity, owner)
+		for _, p := range got {
+			if p.Kind != domain.KindSite {
+				continue
 			}
-			m[string(s.Slug)] = true
+			if string(p.Identity) != owner {
+				t.Fatalf("owner leak: %s listed under %s", p.Identity, owner)
+			}
+			m[string(p.Slug)] = true
 		}
 		return m
 	}
@@ -150,7 +156,7 @@ func conformSiteListByOwner(t *testing.T, sr conformanceSiteRepo) {
 // conformSiteReplaceInPlace pins the core re-deploy contract: replacing an
 // owned site swaps the manifest while keeping the slug and created_at stable,
 // so rollback and history ride the same identity.
-func conformSiteReplaceInPlace(t *testing.T, sr conformanceSiteRepo) {
+func conformSiteReplaceInPlace(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	const slug = "rp123456"
 	v1 := siteOfV(slug, "key:rp", 100, "v1")
 	insertSite(t, sr, v1)
@@ -179,13 +185,16 @@ func conformSiteReplaceInPlace(t *testing.T, sr conformanceSiteRepo) {
 	if !got.UpdatedAt.Equal(later) {
 		t.Fatalf("updated_at should be the re-deploy time: got %v, want %v", got.UpdatedAt, later)
 	}
-	// The owner's live site bytes are the NEW size only, not 100+250.
-	used, err := sr.SumActiveBytesByOwner("key:rp", later)
+	// BOTH versions are charged. A re-deploy appends rather than replacing, so
+	// the prior version stays live and rollable-back, and its bytes are still
+	// on disk: 100 + 250. This is the contract version retention chose - the
+	// old family credited the displaced bytes because it destroyed them.
+	used, err := r.SumActiveBytesByOwner("key:rp", later)
 	if err != nil {
 		t.Fatalf("sum after replace: %v", err)
 	}
-	if used != 250 {
-		t.Fatalf("replace must not double-count: owner sum got %d, want 250", used)
+	if used != 350 {
+		t.Fatalf("both live versions must be charged: owner sum got %d, want 350", used)
 	}
 }
 
@@ -225,40 +234,41 @@ func conformSiteReplaceNotFoundShape(t *testing.T, r conformanceRepo, sr conform
 	}
 }
 
-// conformSiteReplaceDeltaQuota pins that a replace charges the DELTA (old bytes
-// credited, new bytes charged), not the full new size: same-size nets zero,
-// smaller frees the difference, larger is rejected when the post-swap total
-// would breach the cap.
-func conformSiteReplaceDeltaQuota(t *testing.T, sr conformanceSiteRepo) {
+// conformSiteReplaceChargesEachVersion pins what version retention costs: a
+// re-deploy APPENDS, so the prior version stays live and its bytes stay on
+// disk, and the cap is enforced against the running total rather than against
+// the newest version alone.
+//
+// This replaces an older contract where a re-deploy credited the bytes it
+// displaced. That was correct when a re-deploy destroyed the old manifest; it
+// is wrong now that the old version is still there to roll back to.
+func conformSiteReplaceChargesEachVersion(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	const cap = 1000
-	// Owner sits at 800 of a 1000 cap.
-	if err := sr.InsertWithQuotaCheck(context.Background(), siteOfV("rq123456", "key:rq", 800, "v1"), 800, cap, fixedNow); err != nil {
-		t.Fatalf("seed 800 under cap: %v", err)
+	if err := sr.InsertWithQuotaCheck(context.Background(), siteOfV("rq123456", "key:rq", 300, "v1"), 300, cap, fixedNow); err != nil {
+		t.Fatalf("seed 300 under cap: %v", err)
 	}
-	// Same-size re-deploy nets zero: 800 - 800 + 800 = 800 <= 1000 -> ok.
-	if err := sr.ReplaceWithQuotaCheck(context.Background(), siteOfV("rq123456", "key:rq", 800, "v2"), 800, cap, fixedNow); err != nil {
-		t.Fatalf("same-size re-deploy should net zero: %v", err)
+	// A re-deploy fits while the TOTAL fits: 300 + 300 <= 1000.
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), siteOfV("rq123456", "key:rq", 300, "v2"), 300, cap, fixedNow); err != nil {
+		t.Fatalf("re-deploy within cap: %v", err)
 	}
-	// A LARGER re-deploy breaches the cap: 800 - 800 + 1100 = 1100 > 1000.
-	if err := sr.ReplaceWithQuotaCheck(context.Background(), siteOfV("rq123456", "key:rq", 1100, "v3"), 1100, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+	used, err := r.SumActiveBytesByOwner("key:rq", fixedNow)
+	if err != nil {
+		t.Fatalf("sum after re-deploy: %v", err)
+	}
+	if used != 600 {
+		t.Fatalf("both versions charged: got %d, want 600", used)
+	}
+	// And is refused once the total would breach it: 600 + 500 > 1000.
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), siteOfV("rq123456", "key:rq", 500, "v3"), 500, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("over-cap re-deploy: got %v, want ErrOverUserQuota", err)
 	}
-	// The rejected replace left the row at v2/800 (no partial mutation).
-	used, err := sr.SumActiveBytesByOwner("key:rq", fixedNow)
+	// The refusal left nothing behind.
+	used, err = r.SumActiveBytesByOwner("key:rq", fixedNow)
 	if err != nil {
-		t.Fatalf("sum after rejected replace: %v", err)
+		t.Fatalf("sum after refusal: %v", err)
 	}
-	if used != 800 {
-		t.Fatalf("rejected over-cap replace must not change bytes: got %d, want 800", used)
-	}
-	// A SMALLER re-deploy frees the diff: 800 - 800 + 300 = 300, then a fresh
-	// 600-byte site fits (300 + 600 = 900 <= 1000) where it would NOT have at
-	// the original 800 (800 + 600 = 1400 > 1000).
-	if err := sr.ReplaceWithQuotaCheck(context.Background(), siteOfV("rq123456", "key:rq", 300, "v4"), 300, cap, fixedNow); err != nil {
-		t.Fatalf("smaller re-deploy should free the diff: %v", err)
-	}
-	if err := sr.InsertWithQuotaCheck(context.Background(), siteOfV("rq223456", "key:rq", 600, "v1"), 600, cap, fixedNow); err != nil {
-		t.Fatalf("follow-up 600 should fit after the shrink (300+600=900): %v", err)
+	if used != 600 {
+		t.Fatalf("a refused re-deploy must not change bytes: got %d, want 600", used)
 	}
 }
 
@@ -306,23 +316,23 @@ func conformSiteGetNotFound(t *testing.T, sr conformanceSiteRepo) {
 	}
 }
 
-func conformSiteSumByIdentity(t *testing.T, sr conformanceSiteRepo) {
+func conformSiteSumByIdentity(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	insertSite(t, sr, siteOf("ss123456", "key:ss", 100))
 	insertSite(t, sr, siteOf("ss223456", "key:ss", 250))
 	// A different owner's site must not leak into the sum.
 	insertSite(t, sr, siteOf("ss323456", "key:other", 500))
 
-	used, err := sr.SumActiveBytesByOwner("key:ss", fixedNow)
+	used, err := r.SumActiveBytesByOwner("key:ss", fixedNow)
 	if err != nil {
-		t.Fatalf("sum active site bytes: %v", err)
+		t.Fatalf("sum active bytes: %v", err)
 	}
 	if used != 350 {
 		t.Fatalf("sum active site bytes by owner: got %d, want 350", used)
 	}
 	// Unknown owner -> zero, no error.
-	used, err = sr.SumActiveBytesByOwner("key:nobody", fixedNow)
+	used, err = r.SumActiveBytesByOwner("key:nobody", fixedNow)
 	if err != nil {
-		t.Fatalf("sum active site bytes (unknown): %v", err)
+		t.Fatalf("sum active bytes (unknown): %v", err)
 	}
 	if used != 0 {
 		t.Fatalf("unknown owner site sum should be 0, got %d", used)
@@ -473,7 +483,7 @@ func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conform
 
 // conformSiteDedupedSizeCharged pins that quota is charged the DEDUPED size
 // (distinct blobs), not the sum over all paths.
-func conformSiteDedupedSizeCharged(t *testing.T, sr conformanceSiteRepo) {
+func conformSiteDedupedSizeCharged(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	man := domain.NewManifest()
 	man.Add("a.html", domain.ManifestEntry{SHA: "sha-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
 	man.Add("b.html", domain.ManifestEntry{SHA: "sha-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
@@ -486,7 +496,7 @@ func conformSiteDedupedSizeCharged(t *testing.T, sr conformanceSiteRepo) {
 		t.Fatalf("DedupedSize should be 400 (one distinct blob), got %d", got)
 	}
 	insertSite(t, sr, s)
-	used, err := sr.SumActiveBytesByOwner("key:dd", fixedNow)
+	used, err := r.SumActiveBytesByOwner("key:dd", fixedNow)
 	if err != nil {
 		t.Fatalf("sum: %v", err)
 	}

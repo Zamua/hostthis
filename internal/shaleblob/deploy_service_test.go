@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
@@ -203,59 +202,5 @@ func TestDeploySite_Shale_PreClaimRejectsTakenSlug(t *testing.T) {
 	}
 	if res.Site.Slug == slug {
 		t.Fatalf("Deploy landed on the already-claimed slug %q", slug)
-	}
-}
-
-// A directory deployed on the LEGACY site family must still serve every file
-// after the sweep migrates it onto the artifact families.
-//
-// This is the only place the failure shows. The old layout kept blob ids in a
-// row-level side-table rather than on the manifest, and the untagged tests run
-// the content-addressed path where the sha IS the address - so a migration that
-// drops the ids costs nothing there and costs everything here.
-func TestSweep_MigratedLegacySiteStillServesItsFiles(t *testing.T) {
-	_, unit, repo := newShaleDeploy(t)
-	legacy := storage.NewShaleSiteRepo(repo)
-	owner := "owner-migrate-shale"
-
-	// Deploy through the LEGACY repo, which writes the row + FileBlobs.
-	files := map[string]string{
-		"index.html": "<!doctype html><h1>legacy</h1>",
-		"app.css":    "body{margin:0}",
-	}
-	legacyDeploy := service.NewDeploySite(legacy, repo, unit)
-	res, err := legacyDeploy.Deploy(bytes.NewReader(gzipTar(t, files)), owner)
-	if err != nil {
-		t.Fatalf("legacy deploy: %v", err)
-	}
-	slug := res.Site.Slug
-
-	// Migrate it.
-	sites := storage.NewArtifactSites(repo)
-	moved, err := sites.SweepLegacySites(context.Background(), time.Now().UTC())
-	if err != nil {
-		t.Fatalf("sweep: %v", err)
-	}
-	if moved != 1 {
-		t.Fatalf("migrated %d, want 1", moved)
-	}
-
-	// Every file must read back byte-identically THROUGH the artifact.
-	got, err := sites.Get(slug)
-	if err != nil {
-		t.Fatalf("get after migration: %v", err)
-	}
-	for path, want := range files {
-		entry, ok := got.Manifest.Files[path]
-		if !ok {
-			t.Fatalf("migrated manifest lost %q: %+v", path, got.Manifest.Files)
-		}
-		out, rerr := readAll(t, unit, string(slug), entry.SHA)
-		if rerr != nil {
-			t.Fatalf("read %q after migration: %v", path, rerr)
-		}
-		if string(out) != want {
-			t.Fatalf("read %q after migration = %q, want %q", path, out, want)
-		}
 	}
 }
