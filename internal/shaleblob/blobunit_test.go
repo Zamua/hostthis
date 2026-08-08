@@ -583,3 +583,129 @@ func TestSweep_ReportsAnUploadWithLiveStagedRecords(t *testing.T) {
 		"comes back empty makes the sweep a permanent no-op that reports success (got %v)",
 		slug, slugs)
 }
+
+// Deleting a paste reclaims its bytes, and leaves every other paste's alone.
+//
+// Unbinding removes the POINTER; the object outlives it. Before the delete
+// recorded what it orphaned, those bytes were unreachable forever - the record
+// that located them was cleared at commit, so nothing named them.
+//
+// Both halves in one test, because the dangerous failure is not "fails to
+// reclaim", it is "reclaims the wrong one".
+func TestDelete_ReclaimsItsBytesAndSparesTheOthers(t *testing.T) {
+	repo, unit, bs := newBlobRepo(t)
+	ctx := context.Background()
+
+	create := func(slug domain.Slug, sha, body string) {
+		t.Helper()
+		owned, err := unit.BeginUpload(ctx, string(slug))
+		if err != nil {
+			t.Fatalf("BeginUpload %s: %v", slug, err)
+		}
+		h, err := unit.Stage(owned, string(slug), sha, encode(t, []byte(body)))
+		if err != nil {
+			t.Fatalf("stage %s: %v", slug, err)
+		}
+		if err := unit.Commit(owned, []service.BlobHandle{h}, func(c context.Context) error {
+			return repo.InsertWithQuotaCheck(c, domain.Paste{
+				Slug: slug, Identity: "key:deltest", Kind: domain.KindHTML,
+				ContentSHA: sha, Size: len(body),
+				CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+			}, 0, time.Now().UTC())
+		}); err != nil {
+			t.Fatalf("commit %s: %v", slug, err)
+		}
+	}
+
+	const doomed, keeper = domain.Slug("doomed01"), domain.Slug("keeper01")
+	create(doomed, "sha-doomed", "bytes that should go")
+	create(keeper, "sha-keeper", "bytes that must stay")
+	if got := countObjects(ctx, bs); got != 2 {
+		t.Fatalf("fixture: %d objects, want 2", got)
+	}
+
+	if err := repo.Delete(doomed); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	// The delete removed the pointer. The object is still there until a sweep.
+	if got := countObjects(ctx, bs); got != 2 {
+		t.Fatalf("fixture: delete removed %d object(s) synchronously; this test is "+
+			"about what the SWEEP reclaims", 2-got)
+	}
+
+	if _, err := repo.SweepStagedBytes(ctx, time.Now().UTC().Add(24*time.Hour)); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+
+	if got := countObjects(ctx, bs); got != 1 {
+		t.Fatalf("after the sweep: %d objects, want 1. A deleted paste's bytes are "+
+			"unreachable unless the delete recorded what it orphaned", got)
+	}
+	// And the survivor is the RIGHT one: the keeper still reads back.
+	if out, err := readAll(t, unit, string(keeper), "sha-keeper"); err != nil || string(out) != "bytes that must stay" {
+		t.Fatalf("the sweep reclaimed the wrong paste's bytes: keeper reads (%q, %v)", out, err)
+	}
+}
+
+// Deleting ONE version reclaims that version's bytes and leaves the others.
+//
+// The sharpest case for "reclaims the wrong one": two blobs under the SAME
+// slug, so a reclamation keyed on the slug rather than the ref would take both
+// and leave the surviving version serving nothing.
+func TestDeleteVersion_ReclaimsOnlyThatVersionsBytes(t *testing.T) {
+	repo, unit, bs := newBlobRepo(t)
+	ctx := context.Background()
+	slug := domain.Slug("twovers1")
+
+	owned, err := unit.BeginUpload(ctx, string(slug))
+	if err != nil {
+		t.Fatalf("BeginUpload: %v", err)
+	}
+	h1, err := unit.Stage(owned, string(slug), "sha-v1", encode(t, []byte("version one")))
+	if err != nil {
+		t.Fatalf("stage v1: %v", err)
+	}
+	if err := unit.Commit(owned, []service.BlobHandle{h1}, func(c context.Context) error {
+		return repo.InsertWithQuotaCheck(c, domain.Paste{
+			Slug: slug, Identity: "key:vers", Kind: domain.KindHTML,
+			ContentSHA: "sha-v1", Size: 11,
+			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		}, 0, time.Now().UTC())
+	}); err != nil {
+		t.Fatalf("commit v1: %v", err)
+	}
+
+	owned2, err := unit.BeginUpload(ctx, string(slug))
+	if err != nil {
+		t.Fatalf("BeginUpload v2: %v", err)
+	}
+	h2, err := unit.Stage(owned2, string(slug), "sha-v2", encode(t, []byte("version two")))
+	if err != nil {
+		t.Fatalf("stage v2: %v", err)
+	}
+	if err := unit.Commit(owned2, []service.BlobHandle{h2}, func(c context.Context) error {
+		_, aerr := repo.AppendVersionWithQuotaCheck(c, slug, domain.KindHTML, "sha-v2", 11, 0, time.Now().UTC())
+		return aerr
+	}); err != nil {
+		t.Fatalf("commit v2: %v", err)
+	}
+	if got := countObjects(ctx, bs); got != 2 {
+		t.Fatalf("fixture: %d objects, want 2 (one per version)", got)
+	}
+
+	if err := repo.DeleteVersion(slug, 1); err != nil {
+		t.Fatalf("delete version 1: %v", err)
+	}
+	if _, err := repo.SweepStagedBytes(ctx, time.Now().UTC().Add(24*time.Hour)); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+
+	if got := countObjects(ctx, bs); got != 1 {
+		t.Fatalf("after deleting v1 and sweeping: %d objects, want 1", got)
+	}
+	// v2 must still serve. If the sweep took both, this is where it shows.
+	if out, err := readAll(t, unit, string(slug), "sha-v2"); err != nil || string(out) != "version two" {
+		t.Fatalf("deleting v1 destroyed v2's bytes: v2 reads (%q, %v). A reclamation "+
+			"keyed on the slug rather than the ref takes every version's blob", out, err)
+	}
+}
