@@ -168,43 +168,6 @@ func main() {
 	keyGate.Window = *freshKeysWindow
 	// Whoami reports per-session subnet and budget info from the keygate.
 	manageSvc.KeyGate = keyGate
-	sweepSvc := service.NewSweep(logger)
-	// A bound blob is unbound by its record's delete, inside that delete's
-	// transaction, so the only reclaimable bytes are staged-but-never-bound
-	// ones. A deploy without a collocated blob plane has nothing to reclaim.
-	if metadata.BlobOrphanSweeper != nil {
-		sweepSvc.Blobs = service.CollocatedReclaimer{Sweeper: metadata.BlobOrphanSweeper}
-		logger.Printf("sweep: SweepOrphans reclaims staged-but-unbound objects (grace %s)", service.DefaultOrphanGrace)
-	}
-
-	// HOSTTHIS_SWEEP_DISABLED selects DRY-RUN vs LIVE; it is not an on/off
-	// switch and a "disabled" sweep is never a no-op. True means the sweep
-	// still runs every interval, computing and LOGGING what it would GC while
-	// mutating nothing, so a risky change can be deployed and the dry-run log
-	// read before flipping to live. See docs/SPEC.md "Dry-run
-	// (observability)".
-	// Interval is operator-tunable so a migration can be watched converging
-	// rather than waited out. Invalid or absent leaves the default.
-	if v := strings.TrimSpace(os.Getenv("HOSTTHIS_SWEEP_INTERVAL")); v != "" {
-		if d, derr := time.ParseDuration(v); derr == nil && d > 0 {
-			sweepSvc.Interval = d
-			logger.Printf("sweep: interval overridden to %s", d)
-		} else {
-			logger.Printf("sweep: ignoring HOSTTHIS_SWEEP_INTERVAL=%q", v)
-		}
-	}
-	// The migration rides the loop so it converges regardless of which units
-	// this node owned at boot (docs/SPEC.md "Draining the legacy site family").
-	if metadata.LegacySiteSweeper != nil {
-		sweepSvc.LegacySites = metadata.LegacySiteSweeper
-	}
-	sweepSvc.DryRun = strings.EqualFold(envOr("HOSTTHIS_SWEEP_DISABLED", "false"), "true")
-	if sweepSvc.DryRun {
-		logger.Printf("sweep: DRY-RUN via HOSTTHIS_SWEEP_DISABLED=true - runs every %s, LOGS what it would GC, deletes nothing. Set false to enable live cleanup.", sweepSvc.Interval)
-	} else {
-		logger.Printf("sweep: LIVE - blob GC + rate-limit prunes every %s", sweepSvc.Interval)
-	}
-
 	logger.Printf("config: fresh_keys/subnet=%d per %s (durable total-bytes ceiling is the object-store bucket quota)",
 		*freshKeysLimit, *freshKeysWindow)
 
@@ -292,7 +255,6 @@ func main() {
 	// The sweep loop always runs: HOSTTHIS_SWEEP_DISABLED selects dry-run vs
 	// live, it does not gate the goroutine, because a dry-run sweep must still
 	// run to log what it would clean.
-	go sweepSvc.Run(ctx)
 
 	// Settle durable intents left by a process death mid-write, ONCE, and only
 	// now: deciding an intent reads the shard holding its authoritative row,

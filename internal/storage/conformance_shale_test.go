@@ -80,7 +80,7 @@ func TestConformance_Shale(t *testing.T) {
 	// real interaction rather than two isolated clusters.
 	newSites := func(t *testing.T) (conformanceRepo, conformanceSiteRepo) {
 		repo := newShale(t)
-		return repo, storage.NewShaleSiteRepo(repo)
+		return repo, storage.NewArtifactSites(repo)
 	}
 	// Room, paste and site repos all wrap the SAME ShaleRepo, so the cross-kind
 	// service-wide cap subtest exercises the real interaction.
@@ -89,7 +89,7 @@ func TestConformance_Shale(t *testing.T) {
 		return roomConformanceStores{
 			Rooms: storage.NewShaleRoomRepo(repo),
 			Paste: repo,
-			Site:  storage.NewShaleSiteRepo(repo),
+			Site:  storage.NewArtifactSites(repo),
 		}
 	}
 	runConformanceWithSites(t, "shale", caps, newRepo, newSites, newRooms)

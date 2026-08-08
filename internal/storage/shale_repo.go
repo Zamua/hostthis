@@ -786,19 +786,12 @@ func liveVersionBytes(versions []versionRow) int64 {
 }
 
 // combinedActiveBytes is the per-owner "used" figure the quota checks compare
-// against the cap before an authoritative write. The cap spans both kinds, so
-// it must sum PASTE and SITE bytes: two single-shard scans of cached
-// enumeration-entry values, no per-entry fan-out.
+// against the cap before an authoritative write. One family holds every kind,
+// so it is a single-shard scan of cached enumeration-entry values with no
+// per-entry fan-out.
 func (r *ShaleRepo) combinedActiveBytes(owner string, now time.Time) (int64, error) {
-	pasteBytes, err := r.SumActiveBytesByOwner(owner, now)
-	if err != nil {
-		return 0, err
-	}
-	siteBytes, err := r.SumActiveSiteBytesByOwner(owner, now)
-	if err != nil {
-		return 0, err
-	}
-	return int64(pasteBytes) + siteBytes, nil
+	used, err := r.SumActiveBytesByOwner(owner, now)
+	return int64(used), err
 }
 
 func (r *ShaleRepo) OwnerFirstSeen(owner string) (time.Time, error) {
@@ -969,18 +962,6 @@ func (r *ShaleRepo) ResolveBlobID(slug domain.Slug, contentSHA string) (string, 
 	if !errors.Is(perr, ErrNotFound) {
 		return "", perr
 	}
-	// Not a paste: try a site file.
-	var sr siteRow
-	serr := r.getJSON(shaleKeySite(slug), &sr)
-	if serr != nil {
-		if errors.Is(serr, ErrNotFound) {
-			return "", ErrNotFound
-		}
-		return "", serr
-	}
-	if id, ok := sr.FileBlobs[contentSHA]; ok && id != "" {
-		return id, nil
-	}
 	return "", ErrNotFound
 }
 
@@ -1026,47 +1007,10 @@ func (r *ShaleRepo) blobRefFor(routeKey []byte, blobID string) cluster.BlobRef {
 // subsequent scan must see this paste. A crash between the two leaves a paste
 // the index does not list: a bounded under-count the owner's next list heals.
 func (r *ShaleRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error {
-	return r.insertArtifact(ctx, p, userCap, now, false)
+	return r.insertArtifact(ctx, p, userCap, now)
 }
 
-// DropLegacySiteEntry removes a migrated directory's OLD enumeration entry.
-//
-// Separate from the superseding insert because it shards on the OWNER while the
-// row and the artifact shard on the slug: one transaction cannot span both.
-// Idempotent, so the sweep that retries it costs nothing.
-//
-// It must happen, and a listing is why: the entry carries its own rendered
-// values, so a reader never opens the row it points at. An orphaned entry is
-// therefore not a harmless dangling pointer - it is a second copy of the
-// directory in the owner's listing.
-func (r *ShaleRepo) DropLegacySiteEntry(owner string, slug domain.Slug) error {
-	key := shaleKeyIdentitySite(owner, slug.String())
-	return r.cluster.Transact(key, func(tx backend.Transaction) error {
-		if _, err := tx.Get(key); err != nil {
-			if errors.Is(err, backend.ErrNotFound) {
-				return nil // already gone
-			}
-			return err
-		}
-		return tx.Delete(key)
-	})
-}
-
-// InsertSupersedingSite writes an artifact for a slug the legacy site family
-// still holds, deleting that row in the SAME transaction.
-//
-// The two families co-shard on the slug, so this is atomic: the directory is
-// never in both places (listed twice, charged twice) and never in neither
-// (lost). That is why the migration cannot be an insert followed by a delete.
-//
-// userCap is enforced exactly as an ordinary insert enforces it. A sweep passes
-// 0 ("no cap") because it is MOVING bytes the owner is already charged for; a
-// redeploy passes the real cap, because it is writing new content.
-func (r *ShaleRepo) InsertSupersedingSite(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error {
-	return r.insertArtifact(ctx, p, userCap, now, true)
-}
-
-func (r *ShaleRepo) insertArtifact(ctx context.Context, p domain.Paste, userCap int64, now time.Time, supersedesSite bool) error {
+func (r *ShaleRepo) insertArtifact(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error {
 	identity := p.Identity.String()
 	body := int64(p.Size)
 
@@ -1090,16 +1034,10 @@ func (r *ShaleRepo) insertArtifact(ctx context.Context, p domain.Paste, userCap 
 	// not atomic with the authoritative insert below - that CAS carries the
 	// authoritative check - so a genuine race still strands one entry, bounded
 	// and pruned by the next ListByOwner.
-	//
-	// Skipped when superseding: the migration KNOWS the slug is held, by the
-	// very row it is replacing, and the authoritative CAS below is what
-	// actually enforces the rule.
-	if !supersedesSite {
-		if taken, err := r.slugTaken(p.Slug); err != nil {
-			return err
-		} else if taken {
-			return ErrSlugTaken
-		}
+	if taken, err := r.slugTaken(p.Slug); err != nil {
+		return err
+	} else if taken {
+		return ErrSlugTaken
 	}
 
 	// T0: record the intent BEFORE touching anything. Written first so its
@@ -1134,7 +1072,7 @@ func (r *ShaleRepo) insertArtifact(ctx context.Context, p domain.Paste, userCap 
 		r.repoLog().Printf("shale: recording the entry step for %s: %v (a sweep will still roll back, using the row check alone)", p.Slug, err)
 	}
 
-	if err := r.insertAuthoritative(p, binds, supersedesSite); err != nil {
+	if err := r.insertAuthoritative(p, binds); err != nil {
 		// Whose row now holds the slug decides whether the entry above is an
 		// orphan at all. Both callers of a concurrent insert write that ONE
 		// entry key, so the loser's guard matches what the winner left and the
@@ -1189,10 +1127,10 @@ func withStep(in durable.Intent, step durable.StepName) durable.Intent {
 	return out
 }
 
-// slugTaken reports whether slug already names a paste or a site. Both keys
-// co-shard with the slug, so this is one shard's read.
+// slugTaken reports whether slug already names an artifact. The key co-shards
+// with the slug, so this is one shard's read.
 func (r *ShaleRepo) slugTaken(slug domain.Slug) (bool, error) {
-	for _, key := range [][]byte{shaleKeyPaste(slug), shaleKeySite(slug)} {
+	for _, key := range [][]byte{shaleKeyPaste(slug)} {
 		raw, err := r.getRaw(key)
 		if err != nil {
 			return false, fmt.Errorf("slug pre-check %s: %w", key, err)
@@ -1220,11 +1158,11 @@ type shaleKVTx interface {
 // once and the two paths cannot drift.
 func (r *ShaleRepo) runAuthoritative(pinKey []byte, refs []cluster.BlobRef, body func(tx shaleKVTx, bind func() error) error) error {
 	if len(refs) == 0 || r.kv == nil {
-		return r.cluster.Transact(pinKey, func(tx backend.Transaction) error {
+		return translateCrossShard(r.cluster.Transact(pinKey, func(tx backend.Transaction) error {
 			return body(tx, func() error { return nil })
-		})
+		}))
 	}
-	return r.kv.Transact(pinKey, func(tx *cluster.BlobTx) error {
+	return translateCrossShard(r.kv.Transact(pinKey, func(tx *cluster.BlobTx) error {
 		return body(tx, func() error {
 			for _, ref := range refs {
 				if err := tx.BindBlob(ref); err != nil {
@@ -1233,19 +1171,18 @@ func (r *ShaleRepo) runAuthoritative(pinKey []byte, refs []cluster.BlobRef, body
 			}
 			return nil
 		})
-	})
+	}))
 }
 
 // insertAuthoritative writes the {slug}-shard rows in one CAS transaction: the
-// paste row, the v1 version row and slug_owner. The
-// slug-collision check (reject if pastes/<slug> OR sites/<slug> exists) is part
-// of the transaction's read-set, so a racing insert of the same slug as either
-// kind conflicts.
+// artifact row, the v1 version row and slug_owner. The slug-collision check is
+// part of the transaction's read-set, so a racing insert of the same slug
+// conflicts.
 //
 // A staged blob in refs is BOUND in this same transaction, so the pointer
 // co-commits with the row and the blob id lands on both the head and the v1
 // version row.
-func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef, supersedesSite bool) error {
+func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef) error {
 	pasteKey := shaleKeyPaste(p.Slug)
 	blobID := firstBlobID(refs)
 	return r.runAuthoritative(pasteKey, refs, func(tx shaleKVTx, bind func() error) error {
@@ -1255,33 +1192,6 @@ func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef, 
 			return ErrSlugTaken
 		} else if !errors.Is(err, backend.ErrNotFound) {
 			return fmt.Errorf("slug check: %w", err)
-		}
-		// A slug is EITHER a paste or a site. sites/<slug> co-shards with
-		// pastes/<slug>, so this stays a same-shard read inside the CAS; the
-		// site insert carries the reciprocal check.
-		if _, err := tx.Get(shaleKeySite(p.Slug)); err == nil {
-			if !supersedesSite {
-				return ErrSlugTaken
-			}
-			// Only the row's OWN identity may supersede it. Every caller
-			// already checks, so this enforces nothing new today - it moves the
-			// rule inside the transaction that acts on it, because the shape a
-			// forgetful caller would take is slug takeover: one identity
-			// replacing another's directory with its own.
-			var prior siteRow
-			if derr := shaleTxGetJSON(tx, shaleKeySite(p.Slug), &prior); derr != nil {
-				return fmt.Errorf("supersede owner check: %w", derr)
-			}
-			if prior.Identity != p.Identity.String() {
-				return ErrSlugTaken
-			}
-			// Migrating: the row this artifact replaces goes in the same
-			// transaction, so the slug is never owned by both families.
-			if derr := tx.Delete(shaleKeySite(p.Slug)); derr != nil {
-				return fmt.Errorf("supersede site row: %w", derr)
-			}
-		} else if !errors.Is(err, backend.ErrNotFound) {
-			return fmt.Errorf("site slug check: %w", err)
 		}
 		stamped := p
 		stamped.Manifest = stampManifestBlobIDs(p.Manifest, refs)
