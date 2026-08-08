@@ -35,7 +35,7 @@ var shaleConformSeq atomic.Int64
 // A missing or renamed method fails the tagged build here rather than as an
 // opaque type error inside the factory closures below.
 var _ conformanceRepo = (*storage.ShaleRepo)(nil)
-var _ conformanceSiteRepo = (*storage.ShaleSiteRepo)(nil)
+var _ conformanceSiteRepo = (*storage.ArtifactSites)(nil)
 var _ conformanceRoomRepo = (*storage.ShaleRoomRepo)(nil)
 
 func TestConformance_Shale(t *testing.T) {
