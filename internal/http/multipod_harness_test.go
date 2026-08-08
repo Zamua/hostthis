@@ -93,7 +93,22 @@ func buildMultiPod(t *testing.T, n int, bridged bool) *multiPod {
 	h := &multiPod{t: t, alive: make([]bool, n)}
 	for i := range n {
 		rooms := service.NewRooms(repo)
-		rl := relay.NewRelay(rooms, relay.NewLimits())
+		// A send buffer sized to the whole burst, not the production default.
+		//
+		// The relay drops a client whose buffer fills faster than it drains and
+		// expects it to reconnect (relay.Serve: "a room bursting faster than the
+		// send buffer during the read drops this joiner as a laggard"). These
+		// tests use a minimal client that does NOT reconnect, so with the
+		// 16-frame default a late joiner racing two concurrent writers is
+		// dropped and the test reports a lost frame it never lost.
+		//
+		// Sizing past the burst removes the laggard policy from tests that are
+		// about DELIVERY. Verified: at SendBuffer=2 this harness reproduces both
+		// CI symptoms exactly ("no snapshot frame arrived" and "splice stalled
+		// at seq N waiting for 50").
+		limits := relay.NewLimits()
+		limits.SendBuffer = 256
+		rl := relay.NewRelay(rooms, limits)
 		if bridged {
 			rl.SetPeerPublisher(&memBridge{h: h, self: i})
 		}
