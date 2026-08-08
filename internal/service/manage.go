@@ -126,6 +126,9 @@ type UpdateResult struct {
 // but not served.
 func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint string) (UpdateResult, error) {
 	staged, err := streamUpload(body)
+	// The spill file lives only as long as this request; without this every
+	// upload leaves one behind.
+	defer staged.discard()
 	switch {
 	case errors.Is(err, errRawCapExceeded):
 		return UpdateResult{}, ErrRawTooLarge
@@ -161,7 +164,7 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 	if berr != nil {
 		return UpdateResult{}, berr
 	}
-	handle, err := m.Blob.Stage(ctx, string(slug), staged.SHA, staged.Body)
+	handle, err := m.Blob.StagePrecompressed(ctx, string(slug), staged.SHA, staged.File, staged.encodedSize())
 	if err != nil {
 		// A blob Put rejected by the object store's bucket quota surfaces
 		// storage.ErrServiceFull (the durable total-bytes ceiling), which the

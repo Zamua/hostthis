@@ -161,6 +161,14 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	}
 
 	staged, err := streamUpload(body)
+	// Freed here EXCEPT where ownership transfers to the finalize goroutine,
+	// which discards it itself once the background write is done.
+	transferred := false
+	defer func() {
+		if !transferred {
+			staged.discard()
+		}
+	}()
 	switch {
 	case errors.Is(err, errRawCapExceeded):
 		return Result{}, ErrRawTooLarge
@@ -225,14 +233,16 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 			if u.SyncBlob {
 				// Benchmark path: the row is already committed ready, so write
 				// the blob inline with no MarkReady flip.
-				if _, berr := u.Blob.Stage(context.Background(), string(p.Slug), staged.SHA, staged.Body); berr != nil {
+				if _, berr := u.Blob.StagePrecompressed(context.Background(), string(p.Slug), staged.SHA, staged.File, staged.encodedSize()); berr != nil {
 					u.logf("upload: sync blob write %s: %v", p.Slug, berr)
 				}
 				return Result{Paste: p}, nil
 			}
 			// Metadata committed as pending: hand the URL back and finish the
 			// blob write in the background.
-			u.startFinalize(p.Slug, staged.SHA, staged.Body)
+			// Ownership of the spill file transfers to the goroutine.
+			transferred = true
+			u.startFinalize(p.Slug, staged)
 			return Result{Paste: p}, nil
 		case commitSlugTaken:
 			// Logged so a remint burst shows up in the service log instead of
@@ -282,7 +292,7 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 		// Staging before the insert means a staging failure aborts WITHOUT a
 		// metadata row and with no quota charged; the reserve still runs inside
 		// InsertWithQuotaCheck, so an over-quota upload is still rejected.
-		handle, err := u.Blob.Stage(attemptCtx, string(p.Slug), staged.SHA, staged.Body)
+		handle, err := u.Blob.StagePrecompressed(attemptCtx, string(p.Slug), staged.SHA, staged.File, staged.encodedSize())
 		if err != nil {
 			// A Put rejected by the bucket quota surfaces
 			// storage.ErrServiceFull (the durable total-bytes ceiling).
@@ -323,9 +333,16 @@ func (u *Upload) WaitFinalize() { u.finalizeWG.Wait() }
 
 // startFinalize runs the background half of Create (write the blob, then flip
 // the paste's status) so the SSH/HTTP caller never blocks on the blob write.
-func (u *Upload) startFinalize(slug domain.Slug, sha string, body []byte) {
+func (u *Upload) startFinalize(slug domain.Slug, staged stagedUpload) {
 	u.finalizeWG.Go(func() {
-		u.finalize(slug, sha, body)
+		// The goroutine owns the spill file: the request has already returned.
+		defer staged.discard()
+		body, err := io.ReadAll(staged.File)
+		if err != nil {
+			u.logf("upload: reading staged body %s: %v", slug, err)
+			return
+		}
+		u.finalize(slug, staged.SHA, body)
 		if u.onFinalizeDone != nil {
 			u.onFinalizeDone()
 		}

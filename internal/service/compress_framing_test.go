@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/Zamua/hostthis/internal/storage"
@@ -35,9 +36,9 @@ func TestStreamUploadMatchesStorageAtRestFormat(t *testing.T) {
 			if err != nil {
 				t.Fatalf("EncodeCompressedBody: %v", err)
 			}
-			if !bytes.Equal(staged.Body, want) {
+			if !bytes.Equal(stagedBytes(t, staged), want) {
 				t.Fatalf("at-rest body differs between the streaming upload path and the storage encoder:\n stream: %d bytes, prefix %x\nstorage: %d bytes, prefix %x",
-					len(staged.Body), head(staged.Body, 8), len(want), head(want, 8))
+					len(stagedBytes(t, staged)), head(stagedBytes(t, staged), 8), len(want), head(want, 8))
 			}
 			if got, exp := staged.CompressedSize, len(want)-storage.CompressedBodyPrefixLen; got != exp {
 				t.Fatalf("CompressedSize = %d, want %d (storage body minus framing prefix)", got, exp)
@@ -86,4 +87,21 @@ func mixedRedundancyBytes(words int) []byte {
 		}
 	}
 	return buf.Bytes()
+}
+
+// stagedBytes reads a staged upload's spill file, for tests that assert on the
+// at-rest bytes. The body is no longer held in memory.
+func stagedBytes(t *testing.T, s stagedUpload) []byte {
+	t.Helper()
+	if s.File == nil {
+		return nil
+	}
+	if _, err := s.File.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("rewind staged spill: %v", err)
+	}
+	b, err := io.ReadAll(s.File)
+	if err != nil {
+		t.Fatalf("read staged spill: %v", err)
+	}
+	return b
 }

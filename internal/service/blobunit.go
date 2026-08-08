@@ -39,6 +39,11 @@ type BlobUnit interface {
 	// Metadata-first ordering (for the pending model) is the caller's choice
 	// of when to Stage relative to its metadata write.
 	Stage(ctx context.Context, slug, sha string, body []byte) (BlobHandle, error)
+	// StagePrecompressed stages bytes that are ALREADY in the at-rest format,
+	// streaming them from r rather than taking them whole. size is the exact
+	// encoded length, which lets the object store pick a sane part size - an
+	// unknown length makes it allocate a full multipart part buffer instead.
+	StagePrecompressed(ctx context.Context, slug, sha string, r io.Reader, size int64) (BlobHandle, error)
 
 	// StageEncoding encodes UNCOMPRESSED bytes into the adapter's at-rest
 	// format, stages them, and reports the quota-relevant compressed size.

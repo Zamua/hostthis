@@ -79,6 +79,19 @@ func (u *Unit) Stage(ctx context.Context, slug, sha string, body []byte) (servic
 	return service.BlobHandle{Slug: slug, SHA: sha, Ref: ref}, nil
 }
 
+// StagePrecompressed is Stage from a reader: the caller has already produced the
+// at-rest bytes and knows their length, so nothing needs to hold them.
+func (u *Unit) StagePrecompressed(ctx context.Context, slug, sha string, r io.Reader, size int64) (service.BlobHandle, error) {
+	ref, err := u.repo.StageBlobStream(ctx, u.repo.RouteKeyForSlug(slug), r, size, sha)
+	if err != nil {
+		return service.BlobHandle{}, err
+	}
+	if rerr := u.recordStaged(ctx, slug, ref); rerr != nil {
+		return service.BlobHandle{}, rerr
+	}
+	return service.BlobHandle{Slug: slug, SHA: sha, Ref: ref}, nil
+}
+
 // recordStaged remembers a ref the instant its bytes land, so a death before
 // the commit leaves an exact list to reclaim rather than bytes nothing recorded.
 //
