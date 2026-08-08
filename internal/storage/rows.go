@@ -188,21 +188,6 @@ type scanItem struct {
 	Value []byte
 }
 
-type siteRow struct {
-	Identity    string    `json:"identity"`
-	Manifest    string    `json:"manifest"`
-	DedupedSize int       `json:"deduped_size"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-
-	// FileBlobs maps a file's content sha to the shale-blob id its bytes were
-	// staged under. The manifest references files by sha, so this side-table is
-	// how the read path resolves sha -> blobid for GetBlob. Empty on the
-	// standalone paths (local / slatedb / disk), where a file is
-	// content-addressed by sha alone.
-	FileBlobs map[string]string `json:"file_blobs,omitempty"`
-}
-
 type roomRow struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -253,33 +238,6 @@ func sortVersionsDesc(vs []domain.Version) {
 			vs[j], vs[j-1] = vs[j-1], vs[j]
 		}
 	}
-}
-
-func (row siteRow) toDomain(slug domain.Slug) (domain.Site, error) {
-	man, err := decodeManifest(row.Manifest)
-	if err != nil {
-		return domain.Site{}, err
-	}
-	// Fold the row's sha -> blob-id side-table onto the entries it describes.
-	// The manifest then addresses its own files, which is what the artifact
-	// families expect and what a migration carries forward: a directory moved
-	// without these cannot resolve a single file.
-	for path, e := range man.Files {
-		if e.BlobID == "" {
-			if id, ok := row.FileBlobs[e.SHA]; ok && id != "" {
-				e.BlobID = id
-				man.Files[path] = e
-			}
-		}
-	}
-	return domain.Site{
-		Slug:        slug,
-		Identity:    domain.Identity(row.Identity),
-		Manifest:    man,
-		StoredBytes: row.DedupedSize,
-		CreatedAt:   row.CreatedAt,
-		UpdatedAt:   row.UpdatedAt,
-	}, nil
 }
 
 // splitRoomCreateRest parses "<subnet>/<ts>/<uuid>" (a roomcreate key with the
