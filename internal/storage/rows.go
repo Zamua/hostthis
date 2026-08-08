@@ -137,9 +137,9 @@ func (p pasteRow) toDomain(slug domain.Slug) domain.Paste {
 	return out
 }
 
-// contentRefFromDomain builds the stored descriptor for an artifact's served
+// contentRefFromDomain builds the stored descriptor for a paste's served
 // content. A caller that supplied a manifest (a directory, or any multi-entry
-// artifact) has it carried through verbatim; one that did not leaves it empty
+// paste) has it carried through verbatim; one that did not leaves it empty
 // and the insert synthesizes the one-entry form from the flat fields.
 func contentRefFromDomain(p domain.Paste) contentRef {
 	ref := contentRef{Kind: string(p.Kind), ContentSHA: p.ContentSHA, Size: p.Size}

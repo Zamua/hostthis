@@ -296,11 +296,11 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	sites := storage.NewArtifactSites(repo)
+	sites := storage.NewSites(repo)
 	bundle := &metadataBundle{
 		Repo:    repo,
 		KeyGate: repo,
-		// A directory is an artifact, sharing the same cluster (shard routing
+		// A directory is a paste, sharing the same cluster (shard routing
 		// + per-shard CAS) as every other.
 		Sites: sites,
 		// ShaleRoomRepo shares the same cluster, co-locating every room family

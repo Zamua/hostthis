@@ -11,10 +11,10 @@ import (
 	"testing"
 )
 
-// Every metadata bundle serves directories through the artifact adapter.
+// Every metadata bundle serves directories through the paste adapter.
 //
 // Untagged so it runs even in a build that does not compile the shale bundle.
-// Wiring the site surface to something other than the artifact adapter compiles
+// Wiring the site surface to something other than the paste adapter compiles
 // and serves, so nothing else fails; the guard is what makes the substitution
 // visible.
 func TestEveryMetadataBundleWiresTheArtifactSiteAdapter(t *testing.T) {
@@ -34,10 +34,10 @@ func TestEveryMetadataBundleWiresTheArtifactSiteAdapter(t *testing.T) {
 		}
 		for _, w := range scanBundleWiring(fset, f) {
 			builders = append(builders, file+":"+w.builder)
-			if !w.sitesIsArtifact {
+			if !w.sitesIsAdapter {
 				t.Errorf("%s:%d %s wires Sites to %s, not %s.\n"+
 					"The bare legacy repo serves correctly, so nothing fails - it just never migrates.",
-					file, w.line, w.builder, describeWiring(w.sites), artifactSitesCtor)
+					file, w.line, w.builder, describeWiring(w.sites), sitesCtor)
 			}
 		}
 	}
@@ -51,11 +51,11 @@ func TestEveryMetadataBundleWiresTheArtifactSiteAdapter(t *testing.T) {
 }
 
 const (
-	// artifactSitesCtor builds the site surface that reads and writes the
-	// artifact families, falling back to the legacy one it drains.
-	artifactSitesCtor = "NewArtifactSites"
-	bundleType        = "metadataBundle"
-	sitesField        = "Sites"
+	// sitesCtor builds the site surface that reads and writes the
+	// paste families, falling back to the legacy one it drains.
+	sitesCtor  = "NewSites"
+	bundleType = "metadataBundle"
+	sitesField = "Sites"
 )
 
 type bundleWiring struct {
@@ -63,8 +63,8 @@ type bundleWiring struct {
 	line    int
 	// sites is the wiring expression in source form, for the failure message;
 	// empty means the field was never wired at all.
-	sites           string
-	sitesIsArtifact bool
+	sites          string
+	sitesIsAdapter bool
 }
 
 // scanBundleWiring reports how each bundle builder in f wires its site surface.
@@ -72,7 +72,7 @@ type bundleWiring struct {
 // AST rather than text: the two fields are wired in two different shapes (a
 // composite-literal element and a later field assignment), either can name a
 // local or call the constructor inline, and a grep cannot tell the value bound
-// to the artifact adapter from a same-named local bound to the legacy repo -
+// to the paste adapter from a same-named local bound to the legacy repo -
 // which is the substitution that matters.
 func scanBundleWiring(fset *token.FileSet, f *ast.File) []bundleWiring {
 	var out []bundleWiring
@@ -93,7 +93,7 @@ func scanBundleWiring(fset *token.FileSet, f *ast.File) []bundleWiring {
 			if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
 				return true
 			}
-			if id, ok := as.Lhs[0].(*ast.Ident); ok && callsArtifactSitesCtor(as.Rhs[0]) {
+			if id, ok := as.Lhs[0].(*ast.Ident); ok && callsSitesCtor(as.Rhs[0]) {
 				adapters[id.Name] = true
 			}
 			return true
@@ -102,7 +102,7 @@ func scanBundleWiring(fset *token.FileSet, f *ast.File) []bundleWiring {
 		record := func(field string, val ast.Expr) {
 			switch field {
 			case sitesField:
-				w.sites, w.sitesIsArtifact = exprSource(fset, val), isArtifactAdapter(val, adapters)
+				w.sites, w.sitesIsAdapter = exprSource(fset, val), isSitesAdapter(val, adapters)
 			}
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -152,26 +152,26 @@ func isBundleLit(lit *ast.CompositeLit) bool {
 	return ok && id.Name == bundleType
 }
 
-// isArtifactAdapter reports whether e is the artifact site adapter: the
+// isSitesAdapter reports whether e is the paste site adapter: the
 // constructor called inline, or a local bound to it.
-func isArtifactAdapter(e ast.Expr, adapters map[string]bool) bool {
-	if callsArtifactSitesCtor(e) {
+func isSitesAdapter(e ast.Expr, adapters map[string]bool) bool {
+	if callsSitesCtor(e) {
 		return true
 	}
 	id, ok := e.(*ast.Ident)
 	return ok && adapters[id.Name]
 }
 
-func callsArtifactSitesCtor(e ast.Expr) bool {
+func callsSitesCtor(e ast.Expr) bool {
 	call, ok := e.(*ast.CallExpr)
 	if !ok {
 		return false
 	}
 	switch fn := call.Fun.(type) {
 	case *ast.Ident:
-		return fn.Name == artifactSitesCtor
+		return fn.Name == sitesCtor
 	case *ast.SelectorExpr:
-		return fn.Sel.Name == artifactSitesCtor
+		return fn.Sel.Name == sitesCtor
 	}
 	return false
 }
@@ -205,7 +205,7 @@ func TestScanBundleWiring(t *testing.T) {
 			name: "composite-literal wiring",
 			src: `package main
 func buildMetadataLocal() (*metadataBundle, error) {
-	sites := storage.NewArtifactSites(repo, storage.NewShaleSiteRepo(repo))
+	sites := storage.NewSites(repo, storage.NewShaleSiteRepo(repo))
 	return &metadataBundle{Sites: sites, LegacySiteSweeper: sites}, nil
 }`,
 			wantBuilders: 1, wantSites: true,
@@ -214,7 +214,7 @@ func buildMetadataLocal() (*metadataBundle, error) {
 			name: "field assigned after construction",
 			src: `package main
 func buildMetadataShale() (*metadataBundle, error) {
-	sites := storage.NewArtifactSites(repo, storage.NewShaleSiteRepo(repo))
+	sites := storage.NewSites(repo, storage.NewShaleSiteRepo(repo))
 	bundle := &metadataBundle{Sites: sites}
 	bundle.LegacySiteSweeper = sites
 	return bundle, nil
@@ -225,8 +225,8 @@ func buildMetadataShale() (*metadataBundle, error) {
 			name: "constructor called inline",
 			src: `package main
 func buildMetadataShale() (*metadataBundle, error) {
-	bundle := &metadataBundle{Sites: storage.NewArtifactSites(repo, legacy)}
-	bundle.LegacySiteSweeper = storage.NewArtifactSites(repo, legacy)
+	bundle := &metadataBundle{Sites: storage.NewSites(repo, legacy)}
+	bundle.LegacySiteSweeper = storage.NewSites(repo, legacy)
 	return bundle, nil
 }`,
 			wantBuilders: 1, wantSites: true,
@@ -263,9 +263,9 @@ func buildMetadataShale() (*metadataBundle, error) {
 			if tc.wantBuilders == 0 {
 				return
 			}
-			if got[0].sitesIsArtifact != tc.wantSites {
-				t.Errorf("sitesIsArtifact = %v (wired to %q), want %v",
-					got[0].sitesIsArtifact, got[0].sites, tc.wantSites)
+			if got[0].sitesIsAdapter != tc.wantSites {
+				t.Errorf("sitesIsAdapter = %v (wired to %q), want %v",
+					got[0].sitesIsAdapter, got[0].sites, tc.wantSites)
 			}
 		})
 	}

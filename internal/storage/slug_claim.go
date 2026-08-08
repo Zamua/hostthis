@@ -24,7 +24,7 @@ import (
 //
 // A claim is durable and no sweep reclaims one, so a deploy that does not commit
 // under the slug MUST hand it back via ReleaseSlugClaim or the slug is spent.
-// Only a crash in that window leaves a marker with no artifact, and a later
+// Only a crash in that window leaves a marker with no paste, and a later
 // insert minting the slug overwrites it unconditionally.
 //
 // owner and now are accepted for symmetry with the seam; a claim is a stake, not
@@ -37,9 +37,9 @@ func (r *ShaleRepo) PreClaimSlug(_ context.Context, slug domain.Slug, owner stri
 		if _, err := tx.Get(pasteKey); err == nil {
 			return ErrSlugTaken
 		} else if !errors.Is(err, backend.ErrNotFound) {
-			return fmt.Errorf("preclaim artifact check: %w", err)
+			return fmt.Errorf("preclaim paste check: %w", err)
 		}
-		// slug_owner present means an artifact owns the slug OR a concurrent
+		// slug_owner present means a paste owns the slug OR a concurrent
 		// deploy claimed it first; either way it is taken.
 		if _, err := tx.Get(ownerKey); err == nil {
 			return ErrSlugTaken
@@ -55,7 +55,7 @@ func (r *ShaleRepo) PreClaimSlug(_ context.Context, slug domain.Slug, owner stri
 // rejects any slug carrying a marker, and nothing else removes one.
 //
 // A single {slug}-shard CAS deleting slug_owner/<slug> IFF it still holds
-// owner's stake AND no artifact exists. Both reads join the read-set, so a
+// owner's stake AND no paste exists. Both reads join the read-set, so a
 // racing insert that makes the marker load-bearing conflicts instead of losing
 // its owner pointer, and an ambiguous commit that actually landed keeps its
 // marker. A missing or foreign claim is a no-op, so a repeated release is
@@ -81,7 +81,7 @@ func (r *ShaleRepo) ReleaseSlugClaim(_ context.Context, slug domain.Slug, owner 
 		if _, err := tx.Get(pasteKey); err == nil {
 			return nil // the deploy landed after all
 		} else if !errors.Is(err, backend.ErrNotFound) {
-			return fmt.Errorf("release artifact check: %w", err)
+			return fmt.Errorf("release paste check: %w", err)
 		}
 		return tx.Delete(ownerKey)
 	})

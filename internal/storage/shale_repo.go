@@ -1077,9 +1077,9 @@ func (r *ShaleRepo) insertArtifact(ctx context.Context, p domain.Paste, userCap 
 		// orphan at all. Both callers of a concurrent insert write that ONE
 		// entry key, so the loser's guard matches what the winner left and the
 		// rollback below would delete an entry the winner's row depends on -
-		// stranding an artifact that serves every file and reports its
+		// stranding a paste that serves every file and reports its
 		// versions while being absent from its owner's listing and free.
-		switch owner, oerr := r.artifactOwner(p.Slug); {
+		switch owner, oerr := r.pasteOwner(p.Slug); {
 		case oerr != nil:
 			// Unreadable is not absent. Deleting on a guess risks exactly the
 			// stranding above; keeping it over-counts, which is the direction
@@ -1088,7 +1088,7 @@ func (r *ShaleRepo) insertArtifact(ctx context.Context, p domain.Paste, userCap 
 			r.repoLog().Printf("shale: resolving the owner of %s after a failed insert: %v (keeping the enumeration entry for a sweep)", p.Slug, oerr)
 			return err
 		case owner == p.Identity:
-			// A concurrent caller wrote the SAME artifact. The entry describes
+			// A concurrent caller wrote the SAME paste. The entry describes
 			// it correctly, so it stays and the intent is discharged.
 			if cerr := r.intents.Complete(ctx, intent.ID, intent.Scope); cerr != nil {
 				r.repoLog().Printf("shale: forgetting the intent for %s: %v (a sweep will retry it)", p.Slug, cerr)
@@ -1127,7 +1127,7 @@ func withStep(in durable.Intent, step durable.StepName) durable.Intent {
 	return out
 }
 
-// slugTaken reports whether slug already names an artifact. The key co-shards
+// slugTaken reports whether slug already names a paste. The key co-shards
 // with the slug, so this is one shard's read.
 func (r *ShaleRepo) slugTaken(slug domain.Slug) (bool, error) {
 	for _, key := range [][]byte{shaleKeyPaste(slug)} {
@@ -1175,7 +1175,7 @@ func (r *ShaleRepo) runAuthoritative(pinKey []byte, refs []cluster.BlobRef, body
 }
 
 // insertAuthoritative writes the {slug}-shard rows in one CAS transaction: the
-// artifact row, the v1 version row and slug_owner. The slug-collision check is
+// paste row, the v1 version row and slug_owner. The slug-collision check is
 // part of the transaction's read-set, so a racing insert of the same slug
 // conflicts.
 //
@@ -1234,7 +1234,7 @@ func firstBlobID(refs []cluster.BlobRef) string {
 //
 // A directory stages many blobs, and the first of them is an arbitrary file -
 // pairing it with the root's ContentSHA would resolve the root to some other
-// file's bytes. Falls back to the supplied id for an artifact with no manifest,
+// file's bytes. Falls back to the supplied id for a paste with no manifest,
 // where there is only one blob to mean.
 func servedBlobID(p domain.Paste, fallback string) string {
 	if e, ok := p.Manifest.Files[domain.Root]; ok && e.BlobID != "" {
@@ -1929,13 +1929,13 @@ func (r *ShaleRepo) Unpin(slug domain.Slug) error {
 
 // --- SweepRepo -------------------------------------------------------------
 
-// artifactOwner reports which identity holds slug, and the empty identity when
-// no artifact does.
+// pasteOwner reports which identity holds slug, and the empty identity when
+// no paste does.
 //
 // A read failure is returned rather than folded into "nobody holds it": the two
 // answers call for opposite actions, and treating an unreadable row as absent
 // is what removes a live enumeration entry.
-func (r *ShaleRepo) artifactOwner(slug domain.Slug) (domain.Identity, error) {
+func (r *ShaleRepo) pasteOwner(slug domain.Slug) (domain.Identity, error) {
 	p, err := r.Get(slug)
 	if errors.Is(err, ErrNotFound) {
 		return "", nil

@@ -17,7 +17,7 @@ import (
 
 // deployFixture wires real metadata repos + a real compressed blob store so
 // the test exercises the actual untar → blob → manifest → persist path.
-func deployFixture(t *testing.T) (*DeploySite, *storage.ArtifactSites, *storage.CompressedBlobStore) {
+func deployFixture(t *testing.T) (*DeploySite, *storage.Sites, *storage.CompressedBlobStore) {
 	t.Helper()
 	dir := t.TempDir()
 	disk, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
@@ -25,15 +25,15 @@ func deployFixture(t *testing.T) (*DeploySite, *storage.ArtifactSites, *storage.
 		t.Fatalf("blob store: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(disk)
-	sites := storage.NewArtifactSites(storagetest.NewRepo(t))
+	sites := storage.NewSites(storagetest.NewRepo(t))
 	pastes := storagetest.NewRepo(t)
 	d := NewDeploySite(sites, pastes, NewStandaloneBlobUnit(blobs))
 	return d, sites, blobs
 }
 
-// ownerCharge is the identity's charged bytes. A directory is an artifact, so
+// ownerCharge is the identity's charged bytes. A directory is a paste, so
 // its bytes live in the ARTIFACT sum - the site port reports zero to avoid
-// counting them twice (storage.ArtifactSites.SumActiveBytesByOwner).
+// counting them twice (storage.Sites.SumActiveBytesByOwner).
 func ownerCharge(t *testing.T, owner string) int64 {
 	t.Helper()
 	n, err := storagetest.NewRepo(t).SumActiveBytesByOwner(owner, time.Now().UTC())

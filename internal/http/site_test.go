@@ -284,9 +284,9 @@ func TestSite_FallsThroughToPasteWhenNoSite(t *testing.T) {
 	}
 }
 
-// A directory artifact serves its files from the HEAD's manifest, with no site
+// A directory serves its files from the HEAD's manifest, with no site
 // row involved. Pins the unified read path: the same manifest lookup the legacy
-// site path uses, reached through the artifact instead.
+// site path uses, reached through the paste instead.
 func TestArtifact_DirectoryServesFromHeadManifest(t *testing.T) {
 	now := time.Now().UTC()
 	m := domain.NewManifest()
@@ -323,7 +323,7 @@ func TestArtifact_DirectoryServesFromHeadManifest(t *testing.T) {
 	}
 }
 
-// A document artifact answers only at its own URL: a deeper path is not a file
+// A document paste answers only at its own URL: a deeper path is not a file
 // inside it.
 func TestArtifact_DocumentRejectsDeepPaths(t *testing.T) {
 	srv := &Server{

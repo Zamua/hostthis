@@ -1,4 +1,4 @@
-// The site port served by the artifact families.
+// The site port served by the paste family.
 
 //go:build !slatedb
 
@@ -25,7 +25,7 @@ func twoFileManifest(indexSHA string) domain.Manifest {
 
 func TestArtifactSites_InsertGetAndList(t *testing.T) {
 	repo := newPebbleShaleRepo(t)
-	sites := storage.NewArtifactSites(repo)
+	sites := storage.NewSites(repo)
 	now := time.Now().UTC().Truncate(time.Second)
 	owner := domain.Identity("key:owner-s")
 
@@ -45,22 +45,22 @@ func TestArtifactSites_InsertGetAndList(t *testing.T) {
 		t.Fatalf("round trip = %+v", got)
 	}
 
-	// The site listing reports LEGACY rows only: an artifact-backed directory
-	// is already in the artifact listing the caller concatenates this onto, so
+	// The site listing reports LEGACY rows only: a paste-backed directory
+	// is already in the paste listing the caller concatenates this onto, so
 	// returning it here too would show it twice.
 	listed, err := sites.ListSitesByOwner(owner.String(), now)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if len(listed) != 0 {
-		t.Fatalf("list = %+v, want empty: the artifact listing already carries it", listed)
+		t.Fatalf("list = %+v, want empty: the paste listing already carries it", listed)
 	}
 	arts, err := repo.ListByOwner(owner.String())
 	if err != nil {
-		t.Fatalf("artifact list: %v", err)
+		t.Fatalf("paste list: %v", err)
 	}
 	if len(arts) != 1 || arts[0].Slug != s.Slug || arts[0].Kind != domain.KindSite {
-		t.Fatalf("artifact listing = %+v, want the directory", arts)
+		t.Fatalf("paste listing = %+v, want the directory", arts)
 	}
 }
 
@@ -68,7 +68,7 @@ func TestArtifactSites_InsertGetAndList(t *testing.T) {
 // served raw through the directory path.
 func TestArtifactSites_DocumentIsNotASite(t *testing.T) {
 	repo := newPebbleShaleRepo(t)
-	sites := storage.NewArtifactSites(repo)
+	sites := storage.NewSites(repo)
 	now := time.Now().UTC().Truncate(time.Second)
 
 	if err := repo.InsertWithQuotaCheck(context.Background(), domain.Paste{
@@ -94,7 +94,7 @@ func TestArtifactSites_DocumentIsNotASite(t *testing.T) {
 // so reporting them again would bill every directory twice.
 func TestArtifactSites_SumIsZeroToAvoidDoubleCounting(t *testing.T) {
 	repo := newPebbleShaleRepo(t)
-	sites := storage.NewArtifactSites(repo)
+	sites := storage.NewSites(repo)
 	now := time.Now().UTC().Truncate(time.Second)
 	owner := "key:owner-s"
 
@@ -106,13 +106,13 @@ func TestArtifactSites_SumIsZeroToAvoidDoubleCounting(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	// The artifact sum must ALREADY carry the charge...
-	artifactSum, err := repo.SumActiveBytesByOwner(owner, now)
+	// The paste sum must ALREADY carry the charge...
+	pasteSum, err := repo.SumActiveBytesByOwner(owner, now)
 	if err != nil {
-		t.Fatalf("artifact sum: %v", err)
+		t.Fatalf("paste sum: %v", err)
 	}
-	if artifactSum != 49 {
-		t.Fatalf("artifact sum = %d, want the directory's 49", artifactSum)
+	if pasteSum != 49 {
+		t.Fatalf("paste sum = %d, want the directory's 49", pasteSum)
 	}
 	// ...so the site sum must add nothing.
 	siteSum, err := sites.SumActiveBytesByOwner(owner, now)
@@ -120,7 +120,7 @@ func TestArtifactSites_SumIsZeroToAvoidDoubleCounting(t *testing.T) {
 		t.Fatalf("site sum: %v", err)
 	}
 	if siteSum != 0 {
-		t.Fatalf("site sum = %d, want 0: the artifact sum already counts it", siteSum)
+		t.Fatalf("site sum = %d, want 0: the paste sum already counts it", siteSum)
 	}
 }
 
@@ -128,7 +128,7 @@ func TestArtifactSites_SumIsZeroToAvoidDoubleCounting(t *testing.T) {
 // rollback a document has.
 func TestArtifactSites_RedeployAppendsAVersion(t *testing.T) {
 	repo := newPebbleShaleRepo(t)
-	sites := storage.NewArtifactSites(repo)
+	sites := storage.NewSites(repo)
 	now := time.Now().UTC().Truncate(time.Second)
 	owner := domain.Identity("key:owner-s")
 
@@ -165,7 +165,7 @@ func TestArtifactSites_RedeployAppendsAVersion(t *testing.T) {
 // sentinel a missing slug yields.
 func TestArtifactSites_ReplaceRejectsForeignOwner(t *testing.T) {
 	repo := newPebbleShaleRepo(t)
-	sites := storage.NewArtifactSites(repo)
+	sites := storage.NewSites(repo)
 	now := time.Now().UTC().Truncate(time.Second)
 
 	s := domain.Site{

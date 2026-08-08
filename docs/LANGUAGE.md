@@ -39,6 +39,12 @@ is how a private synonym becomes a public one.
 Replace `artifact` with `paste`. Where the sentence is specifically about the
 many-file case, use `site`.
 
+Done. One trap worth knowing if a similar rename comes up: a handful of those
+occurrences were the ORDINARY ENGLISH word - "a storage-side numbering
+artifact", meaning a byproduct - and a blind substitution turned them into
+nonsense ("a storage-side numbering paste"). Read the prose diff; do not trust
+the count reaching zero.
+
 **`directory` and `document` are not nouns for our things.** Use `site` and
 `paste`. `directory` is fine as plain English for a folder inside an uploaded
 tarball, because that is what it is; it is not a synonym for `site`.
