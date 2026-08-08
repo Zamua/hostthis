@@ -34,21 +34,3 @@ func mustCount(t *testing.T, repo *storage.ShaleRepo, owner string) int {
 	}
 	return n
 }
-
-func mustSiteSum(t *testing.T, repo *storage.ShaleRepo, owner string, now time.Time) int64 {
-	t.Helper()
-	n, err := repo.SumActiveSiteBytesByOwner(owner, now)
-	if err != nil {
-		t.Fatalf("sum active site bytes: %v", err)
-	}
-	return n
-}
-
-func mustSiteCount(t *testing.T, repo *storage.ShaleRepo, owner string, now time.Time) int {
-	t.Helper()
-	sites, err := repo.ListSitesByOwner(owner, now)
-	if err != nil {
-		t.Fatalf("list sites by owner: %v", err)
-	}
-	return len(sites)
-}

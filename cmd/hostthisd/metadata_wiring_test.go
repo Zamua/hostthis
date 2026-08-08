@@ -11,15 +11,12 @@ import (
 	"testing"
 )
 
-// Every metadata bundle serves directories through the artifact adapter, and
-// arms the legacy drain with that same value.
+// Every metadata bundle serves directories through the artifact adapter.
 //
-// Untagged so CI runs it: the shale bundle is behind the slatedb tag, which no
-// CI job builds. The failure it guards has no symptom anywhere else. Handing
-// the bundle the bare legacy repo compiles, boots, serves every request and
-// passes every other test - the only difference is that no directory ever
-// migrates, and the drain says nothing about it, because a nil sweeper is
-// skipped silently at both call sites.
+// Untagged so it runs even in a build that does not compile the shale bundle.
+// Wiring the site surface to something other than the artifact adapter compiles
+// and serves, so nothing else fails; the guard is what makes the substitution
+// visible.
 func TestEveryMetadataBundleWiresTheArtifactSiteAdapter(t *testing.T) {
 	files, err := filepath.Glob("metadata*.go")
 	if err != nil {
@@ -42,12 +39,6 @@ func TestEveryMetadataBundleWiresTheArtifactSiteAdapter(t *testing.T) {
 					"The bare legacy repo serves correctly, so nothing fails - it just never migrates.",
 					file, w.line, w.builder, describeWiring(w.sites), artifactSitesCtor)
 			}
-			if !w.sweeperIsArtifact {
-				t.Errorf("%s:%d %s wires %s to %s, not the %s value.\n"+
-					"A nil or mismatched sweeper is skipped without a log at both call sites, so the "+
-					"migration reports nothing and looks like it found nothing to do.",
-					file, w.line, w.builder, sweeperField, describeWiring(w.sweeper), artifactSitesCtor)
-			}
 		}
 	}
 	// Without this the guard passes vacuously the moment the bundle type is
@@ -65,18 +56,15 @@ const (
 	artifactSitesCtor = "NewArtifactSites"
 	bundleType        = "metadataBundle"
 	sitesField        = "Sites"
-	sweeperField      = "LegacySiteSweeper"
 )
 
 type bundleWiring struct {
 	builder string
 	line    int
-	// sites / sweeper are the wiring expressions in source form, for the
-	// failure message; empty means the field was never wired at all.
-	sites             string
-	sweeper           string
-	sitesIsArtifact   bool
-	sweeperIsArtifact bool
+	// sites is the wiring expression in source form, for the failure message;
+	// empty means the field was never wired at all.
+	sites           string
+	sitesIsArtifact bool
 }
 
 // scanBundleWiring reports how each bundle builder in f wires its site surface.
@@ -115,8 +103,6 @@ func scanBundleWiring(fset *token.FileSet, f *ast.File) []bundleWiring {
 			switch field {
 			case sitesField:
 				w.sites, w.sitesIsArtifact = exprSource(fset, val), isArtifactAdapter(val, adapters)
-			case sweeperField:
-				w.sweeper, w.sweeperIsArtifact = exprSource(fset, val), isArtifactAdapter(val, adapters)
 			}
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -210,10 +196,10 @@ func exprSource(fset *token.FileSet, e ast.Expr) string {
 // recognise.
 func TestScanBundleWiring(t *testing.T) {
 	for _, tc := range []struct {
-		name                 string
-		src                  string
-		wantBuilders         int
-		wantSites, wantSweep bool
+		name         string
+		src          string
+		wantBuilders int
+		wantSites    bool
 	}{
 		{
 			name: "composite-literal wiring",
@@ -222,7 +208,7 @@ func buildMetadataLocal() (*metadataBundle, error) {
 	sites := storage.NewArtifactSites(repo, storage.NewShaleSiteRepo(repo))
 	return &metadataBundle{Sites: sites, LegacySiteSweeper: sites}, nil
 }`,
-			wantBuilders: 1, wantSites: true, wantSweep: true,
+			wantBuilders: 1, wantSites: true,
 		},
 		{
 			name: "field assigned after construction",
@@ -233,7 +219,7 @@ func buildMetadataShale() (*metadataBundle, error) {
 	bundle.LegacySiteSweeper = sites
 	return bundle, nil
 }`,
-			wantBuilders: 1, wantSites: true, wantSweep: true,
+			wantBuilders: 1, wantSites: true,
 		},
 		{
 			name: "constructor called inline",
@@ -243,7 +229,7 @@ func buildMetadataShale() (*metadataBundle, error) {
 	bundle.LegacySiteSweeper = storage.NewArtifactSites(repo, legacy)
 	return bundle, nil
 }`,
-			wantBuilders: 1, wantSites: true, wantSweep: true,
+			wantBuilders: 1, wantSites: true,
 		},
 		{
 			name: "legacy repo wired as the site surface",
@@ -253,28 +239,7 @@ func buildMetadataShale() (*metadataBundle, error) {
 	bundle := &metadataBundle{Sites: sites}
 	return bundle, nil
 }`,
-			wantBuilders: 1, wantSites: false, wantSweep: false,
-		},
-		{
-			name: "adapter built but the drain left unarmed",
-			src: `package main
-func buildMetadataShale() (*metadataBundle, error) {
-	sites := storage.NewArtifactSites(repo, storage.NewShaleSiteRepo(repo))
-	bundle := &metadataBundle{Sites: sites}
-	return bundle, nil
-}`,
-			wantBuilders: 1, wantSites: true, wantSweep: false,
-		},
-		{
-			name: "drain armed with something other than the adapter",
-			src: `package main
-func buildMetadataShale() (*metadataBundle, error) {
-	sites := storage.NewArtifactSites(repo, legacy)
-	bundle := &metadataBundle{Sites: sites}
-	bundle.LegacySiteSweeper = legacy
-	return bundle, nil
-}`,
-			wantBuilders: 1, wantSites: true, wantSweep: false,
+			wantBuilders: 1, wantSites: false,
 		},
 		{
 			name: "build-tag stub constructs no bundle",
@@ -301,10 +266,6 @@ func buildMetadataShale() (*metadataBundle, error) {
 			if got[0].sitesIsArtifact != tc.wantSites {
 				t.Errorf("sitesIsArtifact = %v (wired to %q), want %v",
 					got[0].sitesIsArtifact, got[0].sites, tc.wantSites)
-			}
-			if got[0].sweeperIsArtifact != tc.wantSweep {
-				t.Errorf("sweeperIsArtifact = %v (wired to %q), want %v",
-					got[0].sweeperIsArtifact, got[0].sweeper, tc.wantSweep)
 			}
 		})
 	}

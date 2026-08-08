@@ -100,12 +100,7 @@ func (r *ShaleRepo) resolveIntent(ctx context.Context, in durable.Intent) error 
 // unreadable, and the one thing a resolver must never do is roll back over a
 // record it could not read.
 func (r *ShaleRepo) subjectRowExists(in durable.Intent) (bool, error) {
-	slug := domain.Slug(in.Subject)
-	key := shaleKeyPaste(slug)
-	if in.Kind == durable.KindDeploySite {
-		key = shaleKeySite(slug)
-	}
-	raw, err := r.getRaw(key)
+	raw, err := r.getRaw(shaleKeyPaste(domain.Slug(in.Subject)))
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return false, nil
@@ -123,9 +118,6 @@ func (r *ShaleRepo) subjectRowExists(in durable.Intent) (bool, error) {
 }
 
 func (r *ShaleRepo) intentEntryKey(in durable.Intent) []byte {
-	if in.Kind == durable.KindDeploySite {
-		return shaleKeyIdentitySite(string(in.Scope), in.Subject)
-	}
 	return shaleKeyIdentityPaste(string(in.Scope), in.Subject)
 }
 

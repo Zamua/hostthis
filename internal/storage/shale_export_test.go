@@ -158,23 +158,9 @@ func IdentityPasteKeyForTest(identity, slug string) []byte {
 	return shaleKeyIdentityPaste(identity, slug)
 }
 
-// IdentitySiteKeyForTest returns the "identity_sites/<id>/<slug>" per-owner
-// site enumeration-index key: the {id}-shard entry a deploy writes, DeleteSite
-// drops, and the reconciler reprojects. Exposed so the reconciler test can drop
-// it while the authoritative site still exists and prove the reconciler
-// rebuilds it.
-func IdentitySiteKeyForTest(identity, slug string) []byte {
-	return shaleKeyIdentitySite(identity, slug)
-}
-
 // MarkerValueForTest is the non-empty placeholder value index families use
 // (shale rejects empty Put values).
 func MarkerValueForTest() []byte { return markerValue }
-
-// SiteKeyForTest returns the "sites/<slug>" authoritative site row key. Exposed
-// so the decode-tolerance test can seed a poisoned site row and prove
-// Reconcile's site-index reprojection skips and continues (Policy 1).
-func SiteKeyForTest(slug domain.Slug) []byte { return shaleKeySite(slug) }
 
 // IntentLogForTest exposes the repo's durable log so crash-boundary tests can
 // plant an intent the way a dead process would have left one.

@@ -2,10 +2,10 @@ package storage_test
 
 // slug_owner lifecycle for SITES, pinned against the REAL shale backend.
 //
-// PreClaimSiteSlug writes a durable slug_owner marker and rejects any slug that
+// PreClaimSlug writes a durable slug_owner marker and rejects any slug that
 // already carries one, so every marker left behind removes a slug from the site
-// namespace permanently. Two paths have to give it back: DeleteSite (the site
-// is gone) and ReleaseSiteSlugClaim (the deploy never committed).
+// namespace permanently. Two paths have to give it back: the delete (the
+// is gone) and ReleaseSlugClaim (the deploy never committed).
 //
 //	go test -tags slatedb -run TestShaleSite_SlugOwner ./internal/storage
 //
@@ -25,7 +25,7 @@ import (
 // The shale site repo carries the compensating half of the pre-claim port; the
 // deploy path finds it by type assertion, so a rename would silently disable
 // the release.
-var _ service.SlugClaimReleaser = (*storage.ShaleSiteRepo)(nil)
+var _ service.SlugClaimReleaser = (*storage.ArtifactSites)(nil)
 
 const slugOwnerTestOwner = "key:claimant"
 
@@ -70,25 +70,25 @@ func TestShaleSite_SlugOwnerReleasedOnDelete(t *testing.T) {
 	ctx := context.Background()
 	slug := domain.Slug("delsite1")
 
-	if err := repo.PreClaimSiteSlug(ctx, slug, slugOwnerTestOwner, slugOwnerTestNow); err != nil {
-		t.Fatalf("PreClaimSiteSlug: %v", err)
+	if err := repo.PreClaimSlug(ctx, slug, slugOwnerTestOwner, slugOwnerTestNow); err != nil {
+		t.Fatalf("PreClaimSlug: %v", err)
 	}
 	if !slugOwnerPresent(t, repo, slug) {
 		t.Fatal("pre-claim did not write slug_owner")
 	}
 	site := slugOwnerSite(slug.String(), slugOwnerTestOwner)
-	if err := repo.InsertSiteWithQuotaCheck(ctx, site, 64, 0, slugOwnerTestNow); err != nil {
-		t.Fatalf("InsertSiteWithQuotaCheck: %v", err)
+	if err := storage.NewArtifactSites(repo).InsertWithQuotaCheck(ctx, site, 64, 0, slugOwnerTestNow); err != nil {
+		t.Fatalf("InsertWithQuotaCheck: %v", err)
 	}
 
-	if err := repo.DeleteSite(slug); err != nil {
-		t.Fatalf("DeleteSite: %v", err)
+	if err := storage.NewArtifactSites(repo).Delete(slug); err != nil {
+		t.Fatalf("Delete: %v", err)
 	}
 	if slugOwnerPresent(t, repo, slug) {
-		t.Fatal("slug_owner survived DeleteSite: the slug is burned out of the site namespace")
+		t.Fatal("slug_owner survived the delete: the slug is burned permanently")
 	}
 	// The observable consequence: the slug can be deployed again.
-	if err := repo.PreClaimSiteSlug(ctx, slug, slugOwnerTestOwner, slugOwnerTestNow); err != nil {
+	if err := repo.PreClaimSlug(ctx, slug, slugOwnerTestOwner, slugOwnerTestNow); err != nil {
 		t.Fatalf("re-claim after delete: %v, want nil", err)
 	}
 }
@@ -101,28 +101,28 @@ func TestShaleSite_SlugOwnerReleasedOnAbortedDeploy(t *testing.T) {
 	ctx := context.Background()
 	slug := domain.Slug("abort111")
 
-	if err := repo.PreClaimSiteSlug(ctx, slug, slugOwnerTestOwner, slugOwnerTestNow); err != nil {
-		t.Fatalf("PreClaimSiteSlug: %v", err)
+	if err := repo.PreClaimSlug(ctx, slug, slugOwnerTestOwner, slugOwnerTestNow); err != nil {
+		t.Fatalf("PreClaimSlug: %v", err)
 	}
-	if err := repo.ReleaseSiteSlugClaim(ctx, slug, slugOwnerTestOwner); err != nil {
-		t.Fatalf("ReleaseSiteSlugClaim: %v", err)
+	if err := repo.ReleaseSlugClaim(ctx, slug, slugOwnerTestOwner); err != nil {
+		t.Fatalf("ReleaseSlugClaim: %v", err)
 	}
 	if slugOwnerPresent(t, repo, slug) {
 		t.Fatal("slug_owner survived the release")
 	}
-	if err := repo.PreClaimSiteSlug(ctx, slug, slugOwnerTestOwner, slugOwnerTestNow); err != nil {
+	if err := repo.PreClaimSlug(ctx, slug, slugOwnerTestOwner, slugOwnerTestNow); err != nil {
 		t.Fatalf("re-claim after release: %v, want nil", err)
 	}
 
 	// Idempotent: a repeated release of an already-released claim is a no-op,
 	// and it must not drop the claim just re-staked by a different call.
-	if err := repo.ReleaseSiteSlugClaim(ctx, slug, "key:someone-else"); err != nil {
+	if err := repo.ReleaseSlugClaim(ctx, slug, "key:someone-else"); err != nil {
 		t.Fatalf("release of a foreign claim: %v, want nil", err)
 	}
 	if !slugOwnerPresent(t, repo, slug) {
 		t.Fatal("release dropped another identity's claim")
 	}
-	if err := repo.ReleaseSiteSlugClaim(ctx, domain.Slug("neverset"), slugOwnerTestOwner); err != nil {
+	if err := repo.ReleaseSlugClaim(ctx, domain.Slug("neverset"), slugOwnerTestOwner); err != nil {
 		t.Fatalf("release of an unclaimed slug: %v, want nil", err)
 	}
 }
@@ -136,20 +136,20 @@ func TestShaleSite_SlugOwnerKeptForCommittedRecord(t *testing.T) {
 	ctx := context.Background()
 
 	siteSlug := domain.Slug("livesite")
-	if err := repo.PreClaimSiteSlug(ctx, siteSlug, slugOwnerTestOwner, slugOwnerTestNow); err != nil {
-		t.Fatalf("PreClaimSiteSlug: %v", err)
+	if err := repo.PreClaimSlug(ctx, siteSlug, slugOwnerTestOwner, slugOwnerTestNow); err != nil {
+		t.Fatalf("PreClaimSlug: %v", err)
 	}
 	site := slugOwnerSite(siteSlug.String(), slugOwnerTestOwner)
-	if err := repo.InsertSiteWithQuotaCheck(ctx, site, 64, 0, slugOwnerTestNow); err != nil {
-		t.Fatalf("InsertSiteWithQuotaCheck: %v", err)
+	if err := storage.NewArtifactSites(repo).InsertWithQuotaCheck(ctx, site, 64, 0, slugOwnerTestNow); err != nil {
+		t.Fatalf("InsertWithQuotaCheck: %v", err)
 	}
-	if err := repo.ReleaseSiteSlugClaim(ctx, siteSlug, slugOwnerTestOwner); err != nil {
-		t.Fatalf("ReleaseSiteSlugClaim: %v", err)
+	if err := repo.ReleaseSlugClaim(ctx, siteSlug, slugOwnerTestOwner); err != nil {
+		t.Fatalf("ReleaseSlugClaim: %v", err)
 	}
 	if !slugOwnerPresent(t, repo, siteSlug) {
 		t.Fatal("release dropped the marker of a committed site")
 	}
-	if err := repo.PreClaimSiteSlug(ctx, siteSlug, slugOwnerTestOwner, slugOwnerTestNow); !errors.Is(err, storage.ErrSlugTaken) {
+	if err := repo.PreClaimSlug(ctx, siteSlug, slugOwnerTestOwner, slugOwnerTestNow); !errors.Is(err, storage.ErrSlugTaken) {
 		t.Fatalf("re-claim of a live site slug = %v, want ErrSlugTaken", err)
 	}
 
@@ -167,8 +167,8 @@ func TestShaleSite_SlugOwnerKeptForCommittedRecord(t *testing.T) {
 		t.Fatalf("insert paste: %v", err)
 	}
 	// Same identity, so only the committed-record check can save the marker.
-	if err := repo.ReleaseSiteSlugClaim(ctx, pasteSlug, slugOwnerTestOwner); err != nil {
-		t.Fatalf("ReleaseSiteSlugClaim over a paste: %v", err)
+	if err := repo.ReleaseSlugClaim(ctx, pasteSlug, slugOwnerTestOwner); err != nil {
+		t.Fatalf("ReleaseSlugClaim over a paste: %v", err)
 	}
 	if !slugOwnerPresent(t, repo, pasteSlug) {
 		t.Fatal("release dropped a live paste's slug_owner")

@@ -25,7 +25,7 @@ func deployFixture(t *testing.T) (*DeploySite, *storage.ArtifactSites, *storage.
 		t.Fatalf("blob store: %v", err)
 	}
 	blobs := storage.NewCompressedBlobStore(disk)
-	sites := storage.NewArtifactSites(storagetest.NewRepo(t), nil)
+	sites := storage.NewArtifactSites(storagetest.NewRepo(t))
 	pastes := storagetest.NewRepo(t)
 	d := NewDeploySite(sites, pastes, NewStandaloneBlobUnit(blobs))
 	return d, sites, blobs
