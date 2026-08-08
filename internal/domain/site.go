@@ -339,33 +339,30 @@ func (m Manifest) HasWebContent() bool {
 	return false
 }
 
-// DedupedSize returns the total UNCOMPRESSED bytes the manifest's DISTINCT
-// blobs occupy: two paths pointing at the same blob (identical file content)
-// count once. Display figure; CompressedDedupedSize is the quota basis.
-func (m Manifest) DedupedSize() int {
-	seen := make(map[string]int, len(m.Files))
-	for _, e := range m.Files {
-		seen[e.SHA] = e.Size
-	}
+// Size is the total UNCOMPRESSED bytes of every file, counted per PATH.
+//
+// Not folded by content hash. Two paths holding identical bytes are two files
+// on disk, because a blob id is minted fresh per staged file rather than
+// derived from the content, so counting them once would describe a store we do
+// not have.
+func (m Manifest) Size() int {
 	var total int
-	for _, sz := range seen {
-		total += sz
+	for _, e := range m.Files {
+		total += e.Size
 	}
 	return total
 }
 
-// CompressedDedupedSize is the distinct-blob total of the STORED (post-zstd)
-// sizes, the number charged against the per-identity quota (matching how
-// pastes charge). Dedup is by SHA, so a file referenced N times counts its
-// compressed size once.
-func (m Manifest) CompressedDedupedSize() int {
-	seen := make(map[string]int, len(m.Files))
-	for _, e := range m.Files {
-		seen[e.SHA] = e.CompressedSize
-	}
+// CompressedSize is the total STORED (post-zstd) bytes of every file, counted
+// per PATH, on the same not-folded basis as Size.
+//
+// This is the quota basis. The deploy charges what staging reported it wrote
+// rather than calling this, so the two are independent computations of the same
+// quantity - which is what makes this a usable oracle in a test.
+func (m Manifest) CompressedSize() int {
 	var total int
-	for _, sz := range seen {
-		total += sz
+	for _, e := range m.Files {
+		total += e.CompressedSize
 	}
 	return total
 }

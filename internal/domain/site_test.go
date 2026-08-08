@@ -138,13 +138,21 @@ func TestManifest_HasWebContent(t *testing.T) {
 	}
 }
 
-func TestManifest_DedupedSize(t *testing.T) {
+// Size and CompressedSize count PER PATH, not per distinct hash.
+//
+// Two paths holding the same content are two objects on disk - a blob id is
+// minted fresh per staged file - so folding them by SHA would report a store we
+// do not have, and under-charge for bytes we did write.
+func TestManifest_SizesCountEveryPath(t *testing.T) {
 	m := NewManifest()
-	m.Add("a.html", ManifestEntry{SHA: "x", Size: 100})
-	m.Add("b.html", ManifestEntry{SHA: "x", Size: 100}) // the same blob, counted once
-	m.Add("c.css", ManifestEntry{SHA: "y", Size: 50})
-	if got := m.DedupedSize(); got != 150 {
-		t.Fatalf("DedupedSize: got %d, want 150", got)
+	m.Add("a.html", ManifestEntry{SHA: "x", Size: 100, CompressedSize: 40})
+	m.Add("b.html", ManifestEntry{SHA: "x", Size: 100, CompressedSize: 40}) // same bytes, still stored
+	m.Add("c.css", ManifestEntry{SHA: "y", Size: 50, CompressedSize: 20})
+	if got := m.Size(); got != 250 {
+		t.Fatalf("Size: got %d, want 250 (both x paths counted)", got)
+	}
+	if got := m.CompressedSize(); got != 100 {
+		t.Fatalf("CompressedSize: got %d, want 100 (both x paths counted)", got)
 	}
 }
 

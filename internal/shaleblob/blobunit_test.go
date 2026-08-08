@@ -305,7 +305,7 @@ func TestSites_BindAllAndRedeployDrops(t *testing.T) {
 		UpdatedAt: now,
 	}
 	if err := unit.Commit(ctx, []service.BlobHandle{h1, h2}, func(ctx context.Context) error {
-		return storage.NewArtifactSites(repo).InsertWithQuotaCheck(ctx, site, man.DedupedSize(), int64(domain.UserQuotaBytes), now)
+		return storage.NewArtifactSites(repo).InsertWithQuotaCheck(ctx, site, man.Size(), int64(domain.UserQuotaBytes), now)
 	}); err != nil {
 		t.Fatalf("Commit site v1: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestSites_BindAllAndRedeployDrops(t *testing.T) {
 	site2.Manifest = man2
 	site2.UpdatedAt = now2
 	if err := unit.Commit(ctx, []service.BlobHandle{n1, n2}, func(ctx context.Context) error {
-		return storage.NewArtifactSites(repo).ReplaceWithQuotaCheck(ctx, site2, man2.DedupedSize(), int64(domain.UserQuotaBytes), now2)
+		return storage.NewArtifactSites(repo).ReplaceWithQuotaCheck(ctx, site2, man2.Size(), int64(domain.UserQuotaBytes), now2)
 	}); err != nil {
 		t.Fatalf("Commit site v2 (redeploy): %v", err)
 	}

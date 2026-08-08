@@ -171,7 +171,7 @@ func TestDeploySite_OverQuota(t *testing.T) {
 
 // TestDeploySite_ChargesCompressedSize pins that a site is charged its
 // COMPRESSED (post-zstd) size against quota, matching how pastes charge: the
-// charged number equals the manifest's CompressedDedupedSize, not the
+// charged number equals the manifest's CompressedSize, not the
 // uncompressed sum.
 func TestDeploySite_ChargesCompressedSize(t *testing.T) {
 	d, _, _ := deployFixture(t)
@@ -183,8 +183,8 @@ func TestDeploySite_ChargesCompressedSize(t *testing.T) {
 		t.Fatalf("deploy: %v", err)
 	}
 	used := ownerCharge(t, owner)
-	compressed := int64(r.Site.Manifest.CompressedDedupedSize())
-	uncompressed := int64(r.Site.Manifest.DedupedSize())
+	compressed := int64(r.Site.Manifest.CompressedSize())
+	uncompressed := int64(r.Site.Manifest.Size())
 	if used != compressed {
 		t.Fatalf("charge should equal compressed size: used %d, compressed %d", used, compressed)
 	}
@@ -313,7 +313,7 @@ func TestDeployToSlug_ReplacesInPlace(t *testing.T) {
 		t.Fatalf("a redeploy must ADD its version's bytes: used1 %d, used2 %d", used1, used2)
 	}
 	grew := used2 - used1
-	wantV2 := int64(r2.Site.Manifest.CompressedDedupedSize())
+	wantV2 := int64(r2.Site.Manifest.CompressedSize())
 	if grew > wantV2 {
 		t.Fatalf("a redeploy must charge at most its own size: grew %d, v2 is %d", grew, wantV2)
 	}

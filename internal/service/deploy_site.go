@@ -476,7 +476,7 @@ type blobSink struct {
 //
 // The credit is StoredBytes, the figure the deploy charged and usedSite sums.
 // It is NOT derivable from the manifest: per-entry compressed sizes are not
-// persisted, so a loaded manifest's CompressedDedupedSize is 0 and crediting it
+// persisted, so a loaded manifest's CompressedSize is 0 and crediting it
 // would credit nothing, blocking an in-place update for an owner at their cap.
 // The uncompressed DedupedSize is the opposite error, subtracting more than was
 // ever charged and inflating the budget past the real remaining quota.
