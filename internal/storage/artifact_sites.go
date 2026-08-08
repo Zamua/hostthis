@@ -53,9 +53,9 @@ func siteFromArtifact(p domain.Paste) domain.Site {
 
 // InsertWithQuotaCheck stores a new directory as an artifact.
 //
-// dedupedSize is the CHARGED size: a directory's distinct blob total, which is
+// storedBytes is the CHARGED size: a directory's distinct blob total, which is
 // what the quota counts, rather than the root file's size.
-func (a *ArtifactSites) InsertWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+func (a *ArtifactSites) InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error {
 	root, _ := s.Manifest.Lookup("/")
 	return a.repo.InsertWithQuotaCheck(ctx, domain.Paste{
 		Slug:       s.Slug,
@@ -63,7 +63,7 @@ func (a *ArtifactSites) InsertWithQuotaCheck(ctx context.Context, s domain.Site,
 		Status:     domain.PasteStatusReady,
 		Kind:       domain.KindSite,
 		ContentSHA: root.SHA,
-		Size:       dedupedSize,
+		Size:       storedBytes,
 		CreatedAt:  s.CreatedAt,
 		UpdatedAt:  s.UpdatedAt,
 		Manifest:   s.Manifest,
@@ -86,7 +86,7 @@ func (a *ArtifactSites) InsertWithQuotaCheck(ctx context.Context, s domain.Site,
 // Ownership is enforced here rather than inside the append: a slug that is not
 // a directory, and one owned by another identity, both yield the not-found
 // sentinel, so "not yours" stays indistinguishable from "does not exist".
-func (a *ArtifactSites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error {
+func (a *ArtifactSites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error {
 	existing, err := a.repo.Get(s.Slug)
 	if err != nil {
 		return err
@@ -95,7 +95,7 @@ func (a *ArtifactSites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site
 		return ErrNotFound
 	}
 	root, _ := s.Manifest.Lookup("/")
-	_, err = a.repo.AppendManifestVersion(ctx, s.Slug, s.Manifest, root, dedupedSize, userCap, now)
+	_, err = a.repo.AppendManifestVersion(ctx, s.Slug, s.Manifest, root, storedBytes, userCap, now)
 	return err
 }
 
