@@ -64,6 +64,23 @@ slug_from_url() {
   printf '%s' "${rest%%.*}"
 }
 
+# A transcript of the whole run, written before the first step so a failure is
+# diagnosable after the fact rather than only while someone is watching it.
+#
+# The FILE gets everything: each step's output, and an xtrace line carrying the
+# exact command, its expansion, a timestamp and a source line. The CONSOLE gets
+# the same minus the xtrace, which would otherwise bury the result.
+#
+# The split is done by filtering at the tee rather than with BASH_XTRACEFD,
+# which needs bash 4.1 and is SILENTLY IGNORED on the bash 3.2 that macOS
+# ships - it sends the trace to stderr instead, burying the console with no
+# error to say so.
+SMOKE_LOG="${SMOKE_LOG:-${TMPDIR:-/tmp}/hostthis-smoke-$(printf '%s' "$HOST" | tr -c 'A-Za-z0-9._-' '_')-$(date -u +%Y%m%dT%H%M%SZ).log}"
+mkdir -p "$(dirname "$SMOKE_LOG")" 2>/dev/null || true
+exec > >(tee -a "$SMOKE_LOG" | grep -Ev --line-buffered '^\++\[trace\]') 2>&1
+PS4='+[trace] $(date -u +%H:%M:%S) ${BASH_SOURCE##*/}:${LINENO}: '
+set -x
+
 PASS=0
 FAIL=0
 FAILED=()
@@ -508,6 +525,9 @@ printf "%s %d / %s %d\n" "$(green PASS)" "$PASS" "$(red FAIL)" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
   printf "Failed steps:\n"
   for f in "${FAILED[@]}"; do printf "  - %s\n" "$f"; done
+  printf "\nFull transcript, with the exact command and output for each step:\n  %s\n" "$SMOKE_LOG"
+  printf "Keep it. A transient failure is only diagnosable from the run that saw it.\n"
   exit 1
 fi
+printf "transcript: %s\n" "$SMOKE_LOG"
 exit 0
