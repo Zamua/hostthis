@@ -1672,9 +1672,16 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 	}
 	var txErr error
 	if r.kv != nil {
+		now := time.Now().UTC()
 		txErr = r.kv.Transact(pasteKey, func(tx *cluster.BlobTx) error {
 			return delBody(tx, func(blobID string) error {
-				return tx.UnbindBlob(r.blobRefFor(pasteKey, blobID))
+				ref := r.blobRefFor(pasteKey, blobID)
+				if err := tx.UnbindBlob(ref); err != nil {
+					return err
+				}
+				// Co-commits with the unbind: the object outlives its pointer,
+				// so without a record naming it nothing could ever find it.
+				return txRecordOrphanedRef(tx, slug, ref, now)
 			})
 		})
 	} else {
@@ -1761,9 +1768,14 @@ func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 	}
 	var txErr error
 	if r.kv != nil {
+		now := time.Now().UTC()
 		txErr = r.kv.Transact(verKey, func(tx *cluster.BlobTx) error {
 			return verBody(tx, func(blobID string) error {
-				return tx.UnbindBlob(r.blobRefFor(pasteKey, blobID))
+				ref := r.blobRefFor(pasteKey, blobID)
+				if err := tx.UnbindBlob(ref); err != nil {
+					return err
+				}
+				return txRecordOrphanedRef(tx, slug, ref, now)
 			})
 		})
 	} else {
