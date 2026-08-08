@@ -33,9 +33,7 @@ func buildMetadataLocal(dataDir string, logger *log.Logger) (*metadataBundle, er
 		return nil, fmt.Errorf("open local metadata: %w", err)
 	}
 	logger.Printf("metadata: local shale at %s", dir)
-	// One value, used as both the site surface and the sweeper that drains the
-	// family it falls back to.
-	sites := storage.NewArtifactSites(repo, storage.NewShaleSiteRepo(repo))
+	sites := storage.NewArtifactSites(repo)
 	return &metadataBundle{
 		Repo:    repo,
 		KeyGate: repo,
@@ -43,8 +41,7 @@ func buildMetadataLocal(dataDir string, logger *log.Logger) (*metadataBundle, er
 		Rooms:   storage.NewShaleRoomRepo(repo),
 		// Writes span shards even on one node, so the same boot sweep that
 		// settles a half-finished write in production applies here.
-		IntentSweeper:     repo,
-		LegacySiteSweeper: sites,
-		Close:             repo.Close,
+		IntentSweeper: repo,
+		Close:         repo.Close,
 	}, nil
 }

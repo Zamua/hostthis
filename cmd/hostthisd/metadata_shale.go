@@ -296,14 +296,12 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	sites := storage.NewArtifactSites(repo, storage.NewShaleSiteRepo(repo))
+	sites := storage.NewArtifactSites(repo)
 	bundle := &metadataBundle{
 		Repo:    repo,
 		KeyGate: repo,
 		// A directory is an artifact, sharing the same cluster (shard routing
-		// + per-shard CAS) as every other. The old site family is the
-		// read-only fallback, so deploys predating the collapse keep serving
-		// until they are migrated.
+		// + per-shard CAS) as every other.
 		Sites: sites,
 		// ShaleRoomRepo shares the same cluster, co-locating every room family
 		// on the {app-slug} shard.
@@ -332,8 +330,7 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 	}
 
 	// Transactional shale-blob seam: when the repo opened a blob plane, supply
-	// the shaleblob.Unit (pointer co-commits with metadata) + schedule
-	// SweepOrphans for orphan-bytes reclamation.
+	// the shaleblob.Unit, whose pointer co-commits with the metadata.
 	if repo.HasBlobPlane() {
 		unit, uErr := shaleblob.New(repo)
 		if uErr != nil {
@@ -341,13 +338,10 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 			return nil, fmt.Errorf("build shale blob unit: %w", uErr)
 		}
 		bundle.BlobUnit = unit
-		bundle.BlobOrphanSweeper = repo
 	}
 	// Shale writes span two shards, so it is the one backend that can be left
 	// with a half-finished write to settle.
 	bundle.IntentSweeper = repo
-	// Drains the pre-unification site family onto the artifact families.
-	bundle.LegacySiteSweeper = sites
 
 	// OPTIONAL live-diagnosis endpoint. With HOSTTHIS_SHALE_DEBUG_ADDR set (e.g.
 	// ":6060"), serve the embedded cluster's per-position handoff dump at

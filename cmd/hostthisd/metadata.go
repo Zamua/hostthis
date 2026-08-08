@@ -63,11 +63,6 @@ type metadataBundle struct {
 	// decoupled from the metadata plane. See docs/SPEC.md "Shale-collocated
 	// blobs".
 	BlobUnit service.BlobUnit
-	// BlobOrphanSweeper is an OPTIONAL backend-supplied orphan-bytes
-	// reclaimer. On the shale-blob path it is SweepOrphans (staged-but-unbound
-	// objects, age-gated, mounted-unit-local); main schedules it in the sweep
-	// loop. nil elsewhere, where the global content-addressed sweep is the GC.
-	BlobOrphanSweeper service.BlobOrphanSweeper
 	// IntentSweeper is an OPTIONAL backend-supplied boot sweep that settles
 	// durable intents left by a process death mid-write. Supplied only by a
 	// backend whose writes span shards; a single-transaction backend has no
@@ -76,14 +71,6 @@ type metadataBundle struct {
 	// mounted anywhere during a cold start (docs/SPEC.md "Durable intent").
 	IntentSweeper interface {
 		SweepIntents(ctx context.Context, now time.Time) (int, error)
-	}
-	// LegacySiteSweeper is an OPTIONAL backend-supplied boot sweep that drains
-	// the pre-unification site family onto the artifact families. Runs beside
-	// the intent sweep and under the same rule: after the node is serving,
-	// never before. nil once no legacy rows can exist, which is when the old
-	// family is deleted outright.
-	LegacySiteSweeper interface {
-		SweepLegacySites(ctx context.Context, now time.Time) (int, error)
 	}
 	// RelayPeer is the OPTIONAL multi-pod relay peer transport (multi-node
 	// shale only). nil keeps the relay pod-local.

@@ -28,7 +28,7 @@ func TestList_IncludesSites(t *testing.T) {
 	}
 	blobUnit := service.NewStandaloneBlobUnit(storage.NewCompressedBlobStore(rawBlobs))
 	repo := storagetest.NewRepo(t)
-	sites := storage.NewArtifactSites(storagetest.NewRepo(t), nil)
+	sites := storage.NewArtifactSites(storagetest.NewRepo(t))
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 

@@ -29,14 +29,14 @@ func TestConformance_Local(t *testing.T) {
 	// exercise the real interaction rather than two isolated keyspaces.
 	newSites := func(t *testing.T) (conformanceRepo, conformanceSiteRepo) {
 		repo := storagetest.NewRepo(t)
-		return repo, storage.NewShaleSiteRepo(repo)
+		return repo, storage.NewArtifactSites(repo)
 	}
 	newRooms := func(t *testing.T) roomConformanceStores {
 		repo := storagetest.NewRepo(t)
 		return roomConformanceStores{
 			Rooms: storage.NewShaleRoomRepo(repo),
 			Paste: repo,
-			Site:  storage.NewShaleSiteRepo(repo),
+			Site:  storage.NewArtifactSites(repo),
 		}
 	}
 	runConformanceWithSites(t, "local", caps, newRepo, newSites, newRooms)

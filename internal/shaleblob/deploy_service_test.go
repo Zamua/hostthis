@@ -59,7 +59,7 @@ func gzipTar(t *testing.T, files map[string]string) []byte {
 func newShaleDeploy(t *testing.T) (*service.DeploySite, *shaleblob.Unit, *storage.ShaleRepo) {
 	t.Helper()
 	repo, unit, _ := newBlobRepo(t) // skips when MinIO is absent
-	sites := storage.NewArtifactSites(repo, nil)
+	sites := storage.NewArtifactSites(repo)
 	// ShaleRepo satisfies service.PasteByteSummer.
 	d := service.NewDeploySite(sites, repo, unit)
 	return d, unit, repo
@@ -175,7 +175,7 @@ func TestDeploySite_Shale_RedeployDropsRemovedFile(t *testing.T) {
 // taken slug.
 func TestDeploySite_Shale_PreClaimRejectsTakenSlug(t *testing.T) {
 	d, _, repo := newShaleDeploy(t)
-	sites := storage.NewArtifactSites(repo, nil)
+	sites := storage.NewArtifactSites(repo)
 	ctx := context.Background()
 	now := d.Now().UTC()
 
@@ -231,7 +231,7 @@ func TestSweep_MigratedLegacySiteStillServesItsFiles(t *testing.T) {
 	slug := res.Site.Slug
 
 	// Migrate it.
-	sites := storage.NewArtifactSites(repo, legacy)
+	sites := storage.NewArtifactSites(repo)
 	moved, err := sites.SweepLegacySites(context.Background(), time.Now().UTC())
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
