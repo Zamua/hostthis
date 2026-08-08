@@ -76,6 +76,12 @@ func shaleShardKey(key []byte) []byte {
 	case bytes.HasPrefix(key, prefixStagedAll):
 		return firstSegment(key[len(prefixStagedAll):])
 
+	// blobowner/<slug>: the fence epoch a bind checks. Shards on the SLUG so it
+	// co-shards with the bref it guards - the check runs inside the bind's
+	// transaction, which is pinned on the slug and cannot read another shard.
+	case bytes.HasPrefix(key, prefixBlobOwnerAll):
+		return firstSegment(key[len(prefixBlobOwnerAll):])
+
 	// Shards on the identity so one key's subnet entries co-locate and the
 	// lookup is a single-shard prefix scan. Without a case here the family
 	// hashes the whole key and scatters, forcing a cross-shard fan-out whose
@@ -132,6 +138,7 @@ var (
 	// live on (docs/SPEC.md "Durable intent").
 	prefixIntentsAll         = []byte("intents/")
 	prefixStagedAll          = []byte("staged/")
+	prefixBlobOwnerAll       = []byte("blobowner/")
 	prefixKeygateIdentityAll = []byte("keygate_id/")
 	prefixKeygateAll         = []byte("keygate/")
 
