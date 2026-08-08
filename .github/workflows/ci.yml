@@ -51,12 +51,65 @@ jobs:
       - name: test
         run: go test ./...
 
-  # NOTE: this job covers the DEFAULT (sqlite) build tag only. The slatedb /
-  # shale metadata backend (build tag 'slatedb') needs the libslatedb_uniffi
-  # cdylib (cgo) + a MinIO service container to build and test, so it is not
-  # run here yet. Follow-up: add a 'go-slatedb' job that stages the cdylib
-  # (release asset or Rust build) + a minio service, then runs
-  #   go build -tags slatedb ./...
-  #   go vet  -tags slatedb ./...
-  #   go fix -diff -tags slatedb ./...   # modernize-check the tagged files too
-  #   go test -tags slatedb ./internal/storage/   # against the minio service
+  # The tag production actually runs. The default job above never compiles the
+  # slatedb files, so a break there has no symptom until a deploy - which is how
+  # a composition-root regression once shipped green.
+  go-slatedb:
+    runs-on: ubuntu-latest
+    env:
+      # Keep aligned with Dockerfile.slatedb's SLATEDB_VERSION and the
+      # slatedb-go version pinned in go.mod.
+      SLATEDB_VERSION: v0.13.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # The cdylib is ~30 MB of Rust that changes only when SLATEDB_VERSION
+      # does, so it is cached on that key rather than rebuilt every run.
+      - name: cache libslatedb_uniffi
+        id: slatedb-lib
+        uses: actions/cache@v4
+        with:
+          path: prebuilt/libslatedb_uniffi.so
+          key: libslatedb-uniffi-${{ env.SLATEDB_VERSION }}-${{ runner.os }}
+
+      - name: build libslatedb_uniffi
+        if: steps.slatedb-lib.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake
+          git clone --depth 1 --branch "$SLATEDB_VERSION" \
+            https://github.com/slatedb/slatedb.git /tmp/slatedb
+          cargo build --release --manifest-path /tmp/slatedb/Cargo.toml -p slatedb-uniffi
+          mkdir -p prebuilt
+          cp /tmp/slatedb/target/release/libslatedb_uniffi.so prebuilt/
+
+      - name: stage the cdylib on the linker + loader path
+        run: |
+          sudo cp prebuilt/libslatedb_uniffi.so /usr/local/lib/
+          sudo ldconfig
+
+      - name: build
+        run: go build -tags slatedb ./...
+        env:
+          CGO_ENABLED: '1'
+          CGO_LDFLAGS: -L/usr/local/lib
+
+      - name: vet
+        run: go vet -tags slatedb ./...
+        env:
+          CGO_ENABLED: '1'
+          CGO_LDFLAGS: -L/usr/local/lib
+
+      # No MinIO service: the tests that need one skip on an unset
+      # MINIO_TEST_ENDPOINT, so this covers everything that does not.
+      - name: test
+        run: go test -tags slatedb ./...
+        env:
+          CGO_ENABLED: '1'
+          CGO_LDFLAGS: -L/usr/local/lib
+          LD_LIBRARY_PATH: /usr/local/lib
