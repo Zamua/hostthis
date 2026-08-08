@@ -71,7 +71,7 @@ func siteOfV(slug, identity string, size int, v string) domain.Site {
 // insertSite deploys a site with no caps (caps=0 -> no quota enforcement).
 func insertSite(t *testing.T, sr conformanceSiteRepo, s domain.Site) {
 	t.Helper()
-	if err := sr.InsertWithQuotaCheck(context.Background(), s, s.Manifest.DedupedSize(), 0, fixedNow); err != nil {
+	if err := sr.InsertWithQuotaCheck(context.Background(), s, s.Manifest.Size(), 0, fixedNow); err != nil {
 		t.Fatalf("insert site %q: %v", s.Slug, err)
 	}
 }
@@ -89,7 +89,7 @@ func runSiteConformance(t *testing.T, name string, caps conformCaps, newSites fu
 	t.Run(name+"/Sites/PerOwnerCapCountsBoth", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapCountsBoth(t, r, sr) })
 	t.Run(name+"/Sites/PerOwnerCapConcurrentCeiling", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapConcurrentCeiling(t, caps, r, sr) })
 	t.Run(name+"/Sites/SlugCollisionVsPaste", func(t *testing.T) { r, sr := newSites(t); conformSiteSlugCollisionVsPaste(t, r, sr) })
-	t.Run(name+"/Sites/DedupedSizeCharged", func(t *testing.T) { r, sr := newSites(t); conformSiteDedupedSizeCharged(t, r, sr) })
+	t.Run(name+"/Sites/EveryPathCharged", func(t *testing.T) { r, sr := newSites(t); conformSiteEveryPathCharged(t, r, sr) })
 	t.Run(name+"/Sites/ReplaceInPlace", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceInPlace(t, r, sr) })
 	t.Run(name+"/Sites/ReplaceNotFoundShape", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceNotFoundShape(t, r, sr) })
 	t.Run(name+"/Sites/ReplaceChargesEachVersion", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceChargesEachVersion(t, r, sr) })
@@ -165,7 +165,7 @@ func conformSiteReplaceInPlace(t *testing.T, r conformanceRepo, sr conformanceSi
 	v2 := siteOfV(slug, "key:rp", 250, "v2")
 	v2.CreatedAt = later // a hostile caller can't move created_at via the row
 	v2.UpdatedAt = later
-	if err := sr.ReplaceWithQuotaCheck(context.Background(), v2, v2.Manifest.DedupedSize(), 0, later); err != nil {
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), v2, v2.Manifest.Size(), 0, later); err != nil {
 		t.Fatalf("replace in place: %v", err)
 	}
 
@@ -205,14 +205,14 @@ func conformSiteReplaceInPlace(t *testing.T, r conformanceRepo, sr conformanceSi
 func conformSiteReplaceNotFoundShape(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	// Missing slug: never deployed.
 	miss := siteOfV("rmiss123", "key:owner", 50, "v1")
-	if err := sr.ReplaceWithQuotaCheck(context.Background(), miss, miss.Manifest.DedupedSize(), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), miss, miss.Manifest.Size(), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("replace of missing slug: got %v, want ErrNotFound", err)
 	}
 
 	// Foreign-owned: alice's site, replaced as mallory.
 	insertSite(t, sr, siteOfV("rfor1234", "key:alice", 100, "v1"))
 	foreign := siteOfV("rfor1234", "key:mallory", 100, "v2")
-	if err := sr.ReplaceWithQuotaCheck(context.Background(), foreign, foreign.Manifest.DedupedSize(), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), foreign, foreign.Manifest.Size(), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("replace of foreign-owned site: got %v, want ErrNotFound (no ownership leak)", err)
 	}
 	// The rejected replace left the owner's row untouched.
@@ -229,7 +229,7 @@ func conformSiteReplaceNotFoundShape(t *testing.T, r conformanceRepo, sr conform
 		t.Fatalf("seed paste: %v", err)
 	}
 	asPaste := siteOfV("rpaste12", "key:owner", 10, "v1")
-	if err := sr.ReplaceWithQuotaCheck(context.Background(), asPaste, asPaste.Manifest.DedupedSize(), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), asPaste, asPaste.Manifest.Size(), 0, fixedNow); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("replace targeting a paste-only slug: got %v, want ErrNotFound", err)
 	}
 }
@@ -481,9 +481,13 @@ func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conform
 	}
 }
 
-// conformSiteDedupedSizeCharged pins that quota is charged the DEDUPED size
-// (distinct blobs), not the sum over all paths.
-func conformSiteDedupedSizeCharged(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
+// conformSiteEveryPathCharged pins that quota counts every PATH, not every
+// distinct hash.
+//
+// Nothing in the store deduplicates - a blob id is minted fresh per staged file
+// - so three paths holding the same bytes are three objects on disk. Charging
+// once would bill for a third of what was written.
+func conformSiteEveryPathCharged(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	man := domain.NewManifest()
 	man.Add("a.html", domain.ManifestEntry{SHA: "sha-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
 	man.Add("b.html", domain.ManifestEntry{SHA: "sha-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
@@ -491,16 +495,16 @@ func conformSiteDedupedSizeCharged(t *testing.T, r conformanceRepo, sr conforman
 	s := domain.Site{
 		Slug: "dd123456", Identity: "key:dd", Manifest: man,
 		CreatedAt: fixedNow, UpdatedAt: fixedNow}
-	// Three paths, one distinct blob: 400, not 1200.
-	if got := s.Manifest.DedupedSize(); got != 400 {
-		t.Fatalf("DedupedSize should be 400 (one distinct blob), got %d", got)
+	// Three paths of identical content: three copies stored, so 1200.
+	if got := s.Manifest.Size(); got != 1200 {
+		t.Fatalf("Size should be 1200 (three paths), got %d", got)
 	}
 	insertSite(t, sr, s)
 	used, err := r.SumActiveBytesByOwner("key:dd", fixedNow)
 	if err != nil {
 		t.Fatalf("sum: %v", err)
 	}
-	if used != 400 {
-		t.Fatalf("deduped size charged: got %d, want 400 (three paths, one blob)", used)
+	if used != 1200 {
+		t.Fatalf("every stored path charged: got %d, want 1200 (three paths, three objects)", used)
 	}
 }

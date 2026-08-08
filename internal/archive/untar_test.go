@@ -256,7 +256,7 @@ func TestSafeUntar_CorruptTarInGzip(t *testing.T) {
 	}
 }
 
-func TestSafeUntar_DedupesIdenticalFiles(t *testing.T) {
+func TestSafeUntar_IdenticalFilesShareASHAButNotAnEntry(t *testing.T) {
 	same := "<h1>same bytes</h1>"
 	arc := makeGzipTar(t, []tarEntry{
 		{name: "index.html", body: same},
@@ -269,9 +269,11 @@ func TestSafeUntar_DedupesIdenticalFiles(t *testing.T) {
 	if man.Files["index.html"].SHA != man.Files["copy.html"].SHA {
 		t.Fatalf("identical files should share a SHA")
 	}
-	// DedupedSize counts the shared blob once.
-	if want := len(same); man.DedupedSize() != want {
-		t.Fatalf("deduped size: got %d, want %d", man.DedupedSize(), want)
+	// The SHA identifies the content; it does not collapse the two files. Each
+	// path is its own manifest entry and its own object on disk, so the size
+	// counts both.
+	if want := 2 * len(same); man.Size() != want {
+		t.Fatalf("size: got %d, want %d (both paths counted)", man.Size(), want)
 	}
 }
 
