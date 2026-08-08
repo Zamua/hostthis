@@ -70,6 +70,12 @@ func shaleShardKey(key []byte) []byte {
 	case bytes.HasPrefix(key, prefixIntentsAll):
 		return firstSegment(key[len(prefixIntentsAll):])
 
+	// Staged-blob records: staged/<scope>/<slug>/<blobid>. Shards on the SCOPE,
+	// the same shard as the intent that owns them, so recovery reads an
+	// intent and its staged list from one shard rather than two.
+	case bytes.HasPrefix(key, prefixStagedAll):
+		return firstSegment(key[len(prefixStagedAll):])
+
 	// Shards on the identity so one key's subnet entries co-locate and the
 	// lookup is a single-shard prefix scan. Without a case here the family
 	// hashes the whole key and scatters, forcing a cross-shard fan-out whose
@@ -125,6 +131,7 @@ var (
 	// single-shard prefix scan on the shard its enumeration entries already
 	// live on (docs/SPEC.md "Durable intent").
 	prefixIntentsAll         = []byte("intents/")
+	prefixStagedAll          = []byte("staged/")
 	prefixKeygateIdentityAll = []byte("keygate_id/")
 	prefixKeygateAll         = []byte("keygate/")
 
