@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/Zamua/shale/pkg/backend"
 	"github.com/Zamua/shale/pkg/cluster"
@@ -44,11 +45,21 @@ func shalePrefixStaged(slug string) []byte {
 // key-forming field; a corrupted-but-present route shard it cannot. Marshalling
 // the struct is also what lets a field shale adds later ride along without this
 // code being taught about it.
+// stagedRecord is one staged object: the ref, and when it was staged.
+//
+// The time is what lets a sweep distinguish an upload that DIED from one still
+// running - the two look identical by any other measure, since a live upload's
+// records are exactly what an abandoned one leaves behind.
+type stagedRecord struct {
+	Ref cluster.BlobRef `json:"ref"`
+	At  time.Time       `json:"at"`
+}
+
 func (r *ShaleRepo) RecordStagedRef(_ context.Context, slug domain.Slug, ref cluster.BlobRef) error {
 	if ref.BlobID == "" {
 		return fmt.Errorf("shale: record staged ref for %s: empty blob id", slug)
 	}
-	enc, err := json.Marshal(ref)
+	enc, err := json.Marshal(stagedRecord{Ref: ref, At: time.Now().UTC()})
 	if err != nil {
 		return fmt.Errorf("shale: encode staged ref for %s: %w", slug, err)
 	}
@@ -66,8 +77,22 @@ func (r *ShaleRepo) RecordStagedRef(_ context.Context, slug domain.Slug, ref clu
 // PARTIALLY readable one could delete the wrong object, so neither is a choice
 // this function is entitled to make.
 func (r *ShaleRepo) StagedRefs(slug domain.Slug) ([]cluster.BlobRef, error) {
+	recs, err := r.stagedRecords(slug)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]cluster.BlobRef, len(recs))
+	for i, rec := range recs {
+		out[i] = rec.Ref
+	}
+	return out, nil
+}
+
+// stagedRecords is StagedRefs with the staging times kept, which is what the
+// grace gate needs.
+func (r *ShaleRepo) stagedRecords(slug domain.Slug) ([]stagedRecord, error) {
 	prefix := shalePrefixStaged(slug.String())
-	var out []cluster.BlobRef
+	var out []stagedRecord
 	err := retryAcquiring(bootRetry, r.repoLog(), "staged-refs", func() error {
 		out = nil
 		it, err := r.cluster.ScanPrefix(prefix)
@@ -90,11 +115,11 @@ func (r *ShaleRepo) StagedRefs(slug domain.Slug) ([]cluster.BlobRef, error) {
 			if len(payload) == 0 {
 				continue // tombstone: the record is already cleared
 			}
-			var ref cluster.BlobRef
-			if uerr := json.Unmarshal(payload, &ref); uerr != nil {
+			var rec stagedRecord
+			if uerr := json.Unmarshal(payload, &rec); uerr != nil {
 				return fmt.Errorf("decode staged record %s: %w", k, uerr)
 			}
-			out = append(out, ref)
+			out = append(out, rec)
 		}
 	})
 	return out, err

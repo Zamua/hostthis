@@ -409,9 +409,13 @@ func TestReclaimStagedBytes_AbandonedGoesCommittedStays(t *testing.T) {
 		t.Fatalf("fixture: %d objects staged, want 2 (one live, one abandoned)", got)
 	}
 
-	// Recovery reclaims the abandoned upload.
-	if err := repo.ReclaimStagedBytesForTest(ctx, dead); err != nil {
-		t.Fatalf("reclaim abandoned: %v", err)
+	// Recovery reclaims the abandoned upload. Driven through the production
+	// sweep, which sees BOTH slugs in one pass - so "reclaims the wrong one"
+	// is reachable here rather than excluded by only ever pointing it at the
+	// slug we expect it to delete.
+	past := time.Now().UTC().Add(24 * time.Hour)
+	if _, err := repo.SweepStagedBytes(ctx, past); err != nil {
+		t.Fatalf("sweep: %v", err)
 	}
 	if got := countObjects(ctx, bs); got != 1 {
 		t.Fatalf("after reclaiming the abandoned upload: %d objects, want 1", got)
@@ -429,8 +433,8 @@ func TestReclaimStagedBytes_AbandonedGoesCommittedStays(t *testing.T) {
 	if err := repo.RecordStagedRef(ctx, live, liveRef); err != nil {
 		t.Fatalf("re-record the bound ref: %v", err)
 	}
-	if err := repo.ReclaimStagedBytesForTest(ctx, live); err != nil {
-		t.Fatalf("reclaim committed: %v", err)
+	if _, err := repo.SweepStagedBytes(ctx, past); err != nil {
+		t.Fatalf("sweep with a surviving bound record: %v", err)
 	}
 	if got := countObjects(ctx, bs); got != 1 {
 		t.Fatalf("reclaiming a COMMITTED upload deleted its bytes: %d objects left, want 1. "+
@@ -461,4 +465,54 @@ func stageOwned(t *testing.T, unit *shaleblob.Unit, ctx *context.Context, slug, 
 		t.Fatalf("Stage %s: %v", slug, err)
 	}
 	return h
+}
+
+// An upload that dies DURING staging is reclaimed by the sweep.
+//
+// This is the likeliest abandonment - a long multi-file deploy interrupted
+// partway - and it is the case the intent-driven sweep can miss, because the
+// intent is opened by the INSERT, which such an upload never reaches. If the
+// only record of those bytes is unreachable from recovery, they leak forever
+// and the whole feature does not cover its main case.
+func TestSweep_ReclaimsAnUploadThatDiedWhileStaging(t *testing.T) {
+	repo, unit, bs := newBlobRepo(t)
+	ctx := context.Background()
+	slug := domain.Slug("diedstag")
+
+	owned, err := unit.BeginUpload(ctx, string(slug))
+	if err != nil {
+		t.Fatalf("BeginUpload: %v", err)
+	}
+	// Two files staged, then the process dies: no insert, so no commit.
+	for _, f := range []struct{ sha, body string }{{"sha-d1", "one"}, {"sha-d2", "two"}} {
+		if _, err := unit.Stage(owned, string(slug), f.sha, encode(t, []byte(f.body))); err != nil {
+			t.Fatalf("stage %s: %v", f.sha, err)
+		}
+	}
+	if got := countObjects(ctx, bs); got != 2 {
+		t.Fatalf("fixture: %d objects staged, want 2", got)
+	}
+
+	// A sweep running NOW must leave it alone: from the outside an upload
+	// still staging is indistinguishable from an abandoned one, and only the
+	// grace separates them. Without this half, a sweep that ignored the grace
+	// entirely would still pass the assertion below.
+	if _, err := repo.SweepStagedBytes(ctx, time.Now().UTC()); err != nil {
+		t.Fatalf("sweep within the grace: %v", err)
+	}
+	if got := countObjects(ctx, bs); got != 2 {
+		t.Fatalf("a sweep inside the grace reclaimed %d of 2 objects: it cannot tell a "+
+			"running upload from a dead one, so it deletes bytes out from under live deploys",
+			2-got)
+	}
+
+	// Past the grace, it must reach them.
+	if _, err := repo.SweepStagedBytes(ctx, time.Now().UTC().Add(24*time.Hour)); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if got := countObjects(ctx, bs); got != 0 {
+		t.Fatalf("after the sweep: %d objects remain, want 0. An upload that died while "+
+			"STAGING left bytes the sweep never reached - the likeliest abandonment is "+
+			"the one not covered", got)
+	}
 }
