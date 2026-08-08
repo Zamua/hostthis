@@ -342,26 +342,13 @@ func isStorageNotFound(err error) bool {
 	return err != nil && errors.Is(err, storage.ErrNotFound)
 }
 
-func countObjects(ctx context.Context, bs *blobmem.Store) int {
-	n := 0
-	for _, err := range bs.List(ctx, "blob/") {
-		if err != nil {
-			continue
-		}
-		n++
-	}
-	return n
-}
-
-func listKeys(ctx context.Context, bs *blobmem.Store) map[string]struct{} {
-	out := make(map[string]struct{})
-	for info, err := range bs.List(ctx, "blob/") {
-		if err != nil {
-			continue
-		}
-		out[info.Key] = struct{}{}
-	}
-	return out
+// countObjects reports how many blob objects the byte plane holds.
+//
+// Every object in this store arrives through the upload path, which stages
+// under blob/, so the store's total IS the blob count. Nothing in these tests
+// writes to it directly.
+func countObjects(_ context.Context, bs *blobmem.Store) int {
+	return bs.Len()
 }
 
 // An abandoned upload's bytes are reclaimed, and a committed one's are not.
