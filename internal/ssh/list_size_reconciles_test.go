@@ -25,7 +25,7 @@ func TestListSiteSizeIsTheChargedSize(t *testing.T) {
 	}
 
 	// The fixture must distinguish the two, or this proves nothing.
-	if site.StoredBytes == man.DedupedSize() {
+	if site.StoredBytes == man.Size() {
 		t.Fatal("degenerate fixture: the charged size must differ from the manifest total")
 	}
 
@@ -34,7 +34,7 @@ func TestListSiteSizeIsTheChargedSize(t *testing.T) {
 		t.Fatalf("list reports %d but the quota charged %d; a user adding up a list must arrive at "+
 			"the number whoami shows", got, site.StoredBytes)
 	}
-	if got == man.DedupedSize() {
+	if got == man.Size() {
 		t.Fatalf("list is reporting the UNCOMPRESSED manifest total (%d), which overstates the site's "+
 			"cost and does not sum to the quota line", got)
 	}

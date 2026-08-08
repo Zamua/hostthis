@@ -17,7 +17,7 @@ func siteWith(uncompressed, stored int) domain.Site {
 
 // The replace budget must credit the site's STORED size.
 //
-// A site is charged as CompressedDedupedSize, so usedSite sums compressed
+// A site is charged as CompressedSize, so usedSite sums compressed
 // bytes. Crediting the uncompressed size subtracts more than was ever added,
 // inflating the budget handed to the untar guard and letting a re-deploy expand
 // past the owner's real remaining quota.
@@ -46,14 +46,14 @@ func TestSiteExtractBudget_CreditsTheCompressedSize(t *testing.T) {
 //
 // siteExtractBudget reads StoredBytes; the two wrong answers are the manifest's
 // uncompressed DedupedSize and its (unpersisted, therefore 0)
-// CompressedDedupedSize. Comparing only the two manifest figures leaves the one
+// CompressedSize. Comparing only the two manifest figures leaves the one
 // value the function actually reads unpinned, so a fixture whose StoredBytes
 // happened to equal DedupedSize would satisfy both tests while proving nothing.
 func TestSiteExtractBudget_CandidateCreditsAreDistinguishable(t *testing.T) {
 	existing := siteWith(400, 100)
 	stored := existing.StoredBytes
-	deduped := existing.Manifest.DedupedSize()
-	compressed := existing.Manifest.CompressedDedupedSize()
+	deduped := existing.Manifest.Size()
+	compressed := existing.Manifest.CompressedSize()
 	if stored == deduped || stored == compressed || deduped == compressed {
 		t.Fatalf("fixture is degenerate: stored=%d deduped=%d compressed=%d must be pairwise distinct, "+
 			"or the budget assertion cannot tell which credit was used", stored, deduped, compressed)
