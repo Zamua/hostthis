@@ -105,7 +105,7 @@ func (r *ShaleRepo) resolveIntent(ctx context.Context, in durable.Intent, now ti
 	// records left (its commit cleared them), but that clear is best-effort, so
 	// a survivor lands here - where the blob is bound, unstaging refuses, and
 	// the record is cleared. Self-correcting rather than conditional.
-	if err := r.reclaimStagedBytes(ctx, domain.Slug(in.Subject), now); err != nil {
+	if _, err := r.reclaimStagedBytes(ctx, domain.Slug(in.Subject), now); err != nil {
 		return err
 	}
 	return r.intents.Complete(ctx, in.ID, in.Scope)
@@ -129,16 +129,20 @@ func (r *ShaleRepo) resolveIntent(ctx context.Context, in durable.Intent, now ti
 // from the NEWEST record, which is time since the upload last made progress: an
 // upload staging a large site for an hour keeps writing records and so stays
 // fresh, where oldest-first would reclaim bytes out from under a running deploy.
-func (r *ShaleRepo) reclaimStagedBytes(ctx context.Context, slug domain.Slug, now time.Time) error {
+// Reports whether it actually reclaimed. A caller counting "did not error" as
+// "reclaimed" would report deletions on every upload it merely looked at and
+// left alone, which is the kind of false signal that makes an operator trust a
+// mechanism that is doing nothing.
+func (r *ShaleRepo) reclaimStagedBytes(ctx context.Context, slug domain.Slug, now time.Time) (bool, error) {
 	if r.kv == nil {
-		return nil // no blob plane: nothing was ever staged through it
+		return false, nil // no blob plane: nothing was ever staged through it
 	}
 	recs, err := r.stagedRecords(slug)
 	if err != nil {
-		return fmt.Errorf("staged refs for %s: %w", slug, err)
+		return false, fmt.Errorf("staged refs for %s: %w", slug, err)
 	}
 	if len(recs) == 0 {
-		return nil
+		return false, nil
 	}
 	refs := make([]cluster.BlobRef, len(recs))
 	newest := time.Time{}
@@ -149,10 +153,10 @@ func (r *ShaleRepo) reclaimStagedBytes(ctx context.Context, slug domain.Slug, no
 		}
 	}
 	if now.Sub(newest) < ResolveGrace {
-		return nil // may still be staging on another node
+		return false, nil // may still be staging on another node
 	}
 	if _, ferr := r.FenceBlobOwnership(ctx, slug); ferr != nil {
-		return fmt.Errorf("fence %s before unstaging: %w", slug, ferr)
+		return false, fmt.Errorf("fence %s before unstaging: %w", slug, ferr)
 	}
 	for _, ref := range refs {
 		switch uerr := r.kv.UnstageBlob(ctx, ref); {
@@ -160,11 +164,11 @@ func (r *ShaleRepo) reclaimStagedBytes(ctx context.Context, slug domain.Slug, no
 		case errors.Is(uerr, blob.ErrBound):
 			// Bound after all: the write committed. Leave the bytes alone.
 		default:
-			return fmt.Errorf("unstage %s/%s: %w", ref.Unit, ref.BlobID, uerr)
+			return false, fmt.Errorf("unstage %s/%s: %w", ref.Unit, ref.BlobID, uerr)
 		}
 	}
 	r.repoLog().Printf("shale: reclaimed %d staged blob(s) for %s", len(refs), slug)
-	return r.ClearStagedRefs(ctx, slug)
+	return true, r.ClearStagedRefs(ctx, slug)
 }
 
 // subjectRowExists reports whether the authoritative row the intent describes

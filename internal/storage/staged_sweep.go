@@ -40,7 +40,7 @@ func (r *ShaleRepo) SweepStagedBytes(ctx context.Context, now time.Time) (int, e
 	if len(slugs) == 0 {
 		return 0, nil
 	}
-	var settled int
+	var reclaimed int
 	var firstErr error
 	for _, slug := range slugs {
 		// reclaimStagedBytes applies the grace itself, so an upload still in
@@ -49,18 +49,21 @@ func (r *ShaleRepo) SweepStagedBytes(ctx context.Context, now time.Time) (int, e
 		// One bad upload does not stop the sweep: this runs at boot on a
 		// serving node, and a single unreclaimable record must not deny the
 		// sweep to every other.
-		if rerr := r.reclaimStagedBytes(ctx, slug, now); rerr != nil {
+		did, rerr := r.reclaimStagedBytes(ctx, slug, now)
+		if rerr != nil {
 			r.repoLog().Printf("shale: reclaiming staged bytes for %s: %v", slug, rerr)
 			if firstErr == nil {
 				firstErr = rerr
 			}
 			continue
 		}
-		settled++
+		if did {
+			reclaimed++
+		}
 	}
 	r.repoLog().Printf("shale: staged sweep: %d upload(s) with staged bytes on mounted units, %d past the %s grace and reclaimed",
-		len(slugs), settled, ResolveGrace)
-	return settled, firstErr
+		len(slugs), reclaimed, ResolveGrace)
+	return reclaimed, firstErr
 }
 
 // stagedUploadsLocal returns every slug with staged records on this node's units.
