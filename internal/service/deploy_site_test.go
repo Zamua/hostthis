@@ -403,3 +403,37 @@ func TestDeployToSlug_ForeignSlug(t *testing.T) {
 		t.Fatalf("rejected foreign re-deploy mutated the owner's manifest: %+v", got.Manifest.Files)
 	}
 }
+
+// The charge is the post-compression bytes staging actually wrote.
+//
+// Two paths holding IDENTICAL content are two objects on disk, because a blob id
+// is minted fresh per staged file rather than derived from the content. The
+// quota therefore counts both. Folding them by hash would bill for one copy of
+// bytes we stored twice.
+func TestDeploySite_ChargesEveryStoredCopy(t *testing.T) {
+	body := "<!doctype html><h1>same bytes</h1>"
+
+	d, _, _ := deployFixture(t)
+	if _, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": body})), "key:one"); err != nil {
+		t.Fatalf("deploy one: %v", err)
+	}
+	single := ownerCharge(t, "key:one")
+
+	// The same bytes at a second path: stored twice, so charged twice.
+	if _, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{
+		"index.html": body,
+		"copy.html":  body,
+	})), "key:two"); err != nil {
+		t.Fatalf("deploy two: %v", err)
+	}
+	dup := ownerCharge(t, "key:two")
+
+	if single <= 0 {
+		t.Fatalf("fixture: a one-file deploy must charge something, got %d", single)
+	}
+	if dup != 2*single {
+		t.Fatalf("two identical files charged %d, want %d (twice the one-file charge): "+
+			"the store writes both, so folding them by hash bills for bytes we did store",
+			dup, 2*single)
+	}
+}

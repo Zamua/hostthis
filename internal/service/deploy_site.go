@@ -18,7 +18,7 @@ import (
 // SiteRepo is the persistence interface the site-deploy + site-read
 // services need. internal/storage.SiteRepo satisfies it.
 type SiteRepo interface {
-	InsertWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error
+	InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error
 	// ReplaceWithQuotaCheck re-deploys an EXISTING owned site in place,
 	// atomically swapping its manifest for s.Manifest under the same
 	// serializable boundary InsertWithQuotaCheck uses. s.Slug names the
@@ -28,14 +28,14 @@ type SiteRepo interface {
 	//     both return domain.ErrNotFound: the same sentinel a missing slug
 	//     yields, so "not yours" is indistinguishable from "does not exist".
 	//   - The quota check is the REPLACE DELTA, evaluated against
-	//     (existing_owned - old_deduped + dedupedSize) in the SAME critical
+	//     (existing_owned - old_deduped + storedBytes) in the SAME critical
 	//     section as the swap, so a same-size re-deploy does not
 	//     double-count and a smaller one frees the diff. ErrServiceFull /
 	//     ErrOverUserQuota on overflow.
 	//   - On success manifest, deduped_size and updated_at are replaced from
 	//     s; slug and created_at are unchanged. One transaction: the URL serves the old
 	//     manifest until it lands, the new one immediately after.
-	ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, dedupedSize int, userCap int64, now time.Time) error
+	ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Site, error)
 	// Delete removes a site by slug. Ownership is enforced by the caller, so
 	// Delete itself takes no owner.
@@ -234,7 +234,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	deduped := man.CompressedDedupedSize()
+	stored := sink.stagedBytes
 
 	// Transactional path: the slug is pre-claimed and the files staged under
 	// it, so the authoritative insert co-binds every pointer on the {slug}
@@ -243,7 +243,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	// not re-untar anyway.
 	if d.Blob.IsTransactional() {
 		err := d.Blob.Commit(ctx, sink.handles, func(ctx context.Context) error {
-			return d.Sites.InsertWithQuotaCheck(ctx, site, deduped, int64(domain.UserQuotaBytes), now)
+			return d.Sites.InsertWithQuotaCheck(ctx, site, stored, int64(domain.UserQuotaBytes), now)
 		})
 		res, ferr := finalizeDeploy(site, err)
 		committed = ferr == nil
@@ -258,7 +258,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	for range maxDeployRetries {
 		site.Slug = domain.NewRandomSlug()
 		err := d.Blob.Commit(ctx, sink.handles, func(ctx context.Context) error {
-			return d.Sites.InsertWithQuotaCheck(ctx, site, deduped, int64(domain.UserQuotaBytes), now)
+			return d.Sites.InsertWithQuotaCheck(ctx, site, stored, int64(domain.UserQuotaBytes), now)
 		})
 		switch class, terr := classifyCommitErr(err); class {
 		case commitOK:
@@ -432,11 +432,11 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		CreatedAt: existing.CreatedAt, // preserved across re-deploys
 		UpdatedAt: now,
 	}
-	deduped := man.CompressedDedupedSize()
+	stored := sink.stagedBytes
 
 	// The swapped manifest and the staged-file binds commit as one unit.
 	err = d.Blob.Commit(context.Background(), sink.handles, func(ctx context.Context) error {
-		return d.Sites.ReplaceWithQuotaCheck(ctx, site, deduped, int64(domain.UserQuotaBytes), now)
+		return d.Sites.ReplaceWithQuotaCheck(ctx, site, stored, int64(domain.UserQuotaBytes), now)
 	})
 	switch class, terr := classifyCommitErr(err); {
 	case class == commitOK:
@@ -451,15 +451,23 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 }
 
 // blobSink implements domain.FileSink: it buffers one file's bytes, hashes
-// them (content-addressing is by UNCOMPRESSED bytes, matching the rest of the
-// store, so identical files dedupe across deploys and sites), stages them
-// through the blob seam, and returns the SHA the manifest references. It
-// collects each staged handle so the deploy can Commit the manifest and the
-// binds as one unit after the untar.
+// them, stages them through the blob seam, and returns the SHA the manifest
+// references. It collects each staged handle so the deploy can Commit the
+// manifest and the binds as one unit after the untar.
+//
+// The SHA identifies content; it does NOT deduplicate it. Every file staged
+// here is written as its own object under a freshly minted blob id, so two
+// identical files - in one archive, across re-deploys, or across owners - are
+// two copies on disk.
+//
+// stagedBytes is the running total of what staging actually wrote, which is
+// what the deploy charges. Summing the reported footprint is the only figure
+// that cannot drift from the disk, because it IS what went to the disk.
 type blobSink struct {
-	blob    BlobUnit
-	slug    string
-	handles []BlobHandle
+	blob        BlobUnit
+	slug        string
+	handles     []BlobHandle
+	stagedBytes int
 }
 
 // siteExtractBudget is the byte budget for a replace deploy's untar guard: the
@@ -502,6 +510,7 @@ func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
 		return "", 0, fmt.Errorf("blob put %q: %w", p, err)
 	}
 	s.handles = append(s.handles, handle)
+	s.stagedBytes += compressedSize
 	return sha, compressedSize, nil
 }
 
