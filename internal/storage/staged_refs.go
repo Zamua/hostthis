@@ -15,19 +15,22 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// shaleKeyStaged builds staged/<scope>/<slug>/<blobid>.
+// shaleKeyStaged builds staged/<slug>/<blobid>.
 //
-// Scope leads, so these shard with the intent that owns them (shale_shardkey.go)
-// and one node reads both. Slug is in the key so a single upload's records are
-// one prefix, and blobid last so each staged object is its own key: appending a
-// record is O(1) rather than a growing value rewritten per file.
-func shaleKeyStaged(scope, slug, blobID string) []byte {
-	return []byte("staged/" + scope + "/" + slug + "/" + blobID)
+// Sharded on the SLUG, which puts these on the same shard as the paste row, the
+// bref they describe and the blobowner fence that guards them - everything about
+// one upload in one place. Recovery finds the slug on the intent it is
+// resolving, so reaching them is a routed read rather than a scan.
+//
+// Blobid last so each staged object is its own key: appending a record is O(1),
+// where a growing value would be rewritten once per file.
+func shaleKeyStaged(slug, blobID string) []byte {
+	return []byte("staged/" + slug + "/" + blobID)
 }
 
 // shalePrefixStaged is every staged record for one upload.
-func shalePrefixStaged(scope, slug string) []byte {
-	return []byte("staged/" + scope + "/" + slug + "/")
+func shalePrefixStaged(slug string) []byte {
+	return []byte("staged/" + slug + "/")
 }
 
 // RecordStagedRef durably remembers one staged blob object before the upload
@@ -41,7 +44,7 @@ func shalePrefixStaged(scope, slug string) []byte {
 // key-forming field; a corrupted-but-present route shard it cannot. Marshalling
 // the struct is also what lets a field shale adds later ride along without this
 // code being taught about it.
-func (r *ShaleRepo) RecordStagedRef(ctx context.Context, scope string, slug domain.Slug, ref cluster.BlobRef) error {
+func (r *ShaleRepo) RecordStagedRef(_ context.Context, slug domain.Slug, ref cluster.BlobRef) error {
 	if ref.BlobID == "" {
 		return fmt.Errorf("shale: record staged ref for %s: empty blob id", slug)
 	}
@@ -49,7 +52,7 @@ func (r *ShaleRepo) RecordStagedRef(ctx context.Context, scope string, slug doma
 	if err != nil {
 		return fmt.Errorf("shale: encode staged ref for %s: %w", slug, err)
 	}
-	key := shaleKeyStaged(scope, slug.String(), ref.BlobID)
+	key := shaleKeyStaged(slug.String(), ref.BlobID)
 	return r.cluster.Transact(key, func(tx backend.Transaction) error {
 		return tx.Put(key, enc)
 	})
@@ -62,8 +65,8 @@ func (r *ShaleRepo) RecordStagedRef(ctx context.Context, scope string, slug doma
 // unreadable entry would leak rather than mislead - but silently dropping a
 // PARTIALLY readable one could delete the wrong object, so neither is a choice
 // this function is entitled to make.
-func (r *ShaleRepo) StagedRefs(scope string, slug domain.Slug) ([]cluster.BlobRef, error) {
-	prefix := shalePrefixStaged(scope, slug.String())
+func (r *ShaleRepo) StagedRefs(slug domain.Slug) ([]cluster.BlobRef, error) {
+	prefix := shalePrefixStaged(slug.String())
 	var out []cluster.BlobRef
 	err := retryAcquiring(bootRetry, r.repoLog(), "staged-refs", func() error {
 		out = nil
@@ -104,8 +107,8 @@ func (r *ShaleRepo) StagedRefs(scope string, slug domain.Slug) ([]cluster.BlobRe
 // called after recovery unstages them, where it is ordinary cleanup.
 //
 // Idempotent, so a partial clear converges on the next pass.
-func (r *ShaleRepo) ClearStagedRefs(ctx context.Context, scope string, slug domain.Slug) error {
-	prefix := shalePrefixStaged(scope, slug.String())
+func (r *ShaleRepo) ClearStagedRefs(_ context.Context, slug domain.Slug) error {
+	prefix := shalePrefixStaged(slug.String())
 	var keys [][]byte
 	err := retryAcquiring(bootRetry, r.repoLog(), "staged-refs-clear", func() error {
 		keys = nil
