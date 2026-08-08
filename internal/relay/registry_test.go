@@ -300,7 +300,7 @@ func TestRegistry_LastLeaveDuringAdmitDoesNotOrphanJoin(t *testing.T) {
 // commit on a room with NO live connections neither creates nor leaks a hub:
 // with no local subscribers the fan-out is skipped and the mirror is returned
 // for the peer publish. A joiner racing such a commit is caught up by its
-// snapshot's exact S, not by a hub-side artifact.
+// snapshot's exact S, not by anything the hub left behind.
 func TestRegistry_CommitOnRoomWithNoSubscribersLeavesNoHub(t *testing.T) {
 	r := NewRegistry(NewLimits())
 	key := testKey()

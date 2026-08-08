@@ -111,7 +111,7 @@ func (s *Server) Handler() http.Handler {
 				s.handleRoomsAPI(w, r, slug, rest)
 				return
 			}
-			s.serveArtifact(w, r, slug, r.URL.Path)
+			s.serveSlug(w, r, slug, r.URL.Path)
 			return
 		}
 		// Path mode: /p/<slug> (paste) or /p/<slug>/<path...> (site) on the
@@ -138,7 +138,7 @@ func (s *Server) Handler() http.Handler {
 				s.handleRoomsAPI(w, r, slug, rest)
 				return
 			}
-			s.serveArtifact(w, r, slug, sitePath)
+			s.serveSlug(w, r, slug, sitePath)
 			return
 		}
 		if r.URL.Path == "/" {
@@ -202,13 +202,13 @@ func (s *Server) serveLanding(w http.ResponseWriter, _ *http.Request) {
 
 // servePasteSlug serves a paste with its sandboxing headers. Both the
 // subdomain and the path routes funnel through here.
-// serveArtifact resolves reqPath against the artifact owning slug.
+// servePaste resolves reqPath against the paste owning slug.
 //
 // ONE head read decides everything: the head carries the served version's whole
 // descriptor, including its manifest, so a directory's file lookup and a
-// document's render both answer from it. A slug with no artifact falls back to
-// a legacy site row, which is a separate family predating the unified model.
-func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request, slug domain.Slug, reqPath string) {
+// single file's render both answer from it. There is one family: a slug with no
+// paste is not found.
+func (s *Server) serveSlug(w http.ResponseWriter, r *http.Request, slug domain.Slug, reqPath string) {
 	// A deploy may wire either surface alone, so neither reader is assumed
 	// present; the same nil-safety the site reader has always had.
 	if s.Pastes == nil {
@@ -230,7 +230,7 @@ func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request, slug doma
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	// The SHAPE is declared by the artifact's kind, never inferred from how
+	// The SHAPE is declared by the paste's kind, never inferred from how
 	// many entries its manifest holds: a directory of one file is still a
 	// directory, and serving it as a document would render it instead of
 	// handing back the bytes.
@@ -247,7 +247,7 @@ func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request, slug doma
 	s.servePaste(w, r, slug, p)
 }
 
-// servePaste serves a single-document artifact with its sandboxing headers.
+// servePaste serves a resolved single-file paste with its sandboxing headers.
 func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.Slug, p domain.Paste) {
 	// Lifecycle status gate (docs/SPEC.md "Paste lifecycle status"). A pending
 	// paste's blob has not landed yet, so it gets a self-refreshing loading
@@ -461,8 +461,8 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 }
 
 // serveFromManifest resolves reqPath against a manifest and writes the file.
-// The one implementation both artifact shapes go through: a directory
-// artifact's manifest and a legacy site row's manifest are the same value.
+// The one implementation both paste shapes go through: a directory
+// paste's manifest is the same value whatever its cardinality.
 func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug domain.Slug, manifest domain.Manifest, updatedAt time.Time, reqPath string) {
 	// SPA fallback: a manifest miss that looks like a client-side ROUTE (no
 	// extension, or ".html") serves the site's root index.html with a 200 so

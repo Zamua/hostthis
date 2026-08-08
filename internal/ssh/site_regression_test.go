@@ -40,7 +40,7 @@ func newSiteStack(t *testing.T) *siteStack {
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	repo := storagetest.NewRepo(t)
-	sites := storage.NewArtifactSites(storagetest.NewRepo(t))
+	sites := storage.NewSites(storagetest.NewRepo(t))
 
 	httpSrv := httptest.NewServer((&httpapi.Server{
 		Pastes: repo, Sites: sites, Blobs: blobUnit, ApexDomain: "paste.test",

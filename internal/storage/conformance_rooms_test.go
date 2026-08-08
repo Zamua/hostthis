@@ -581,7 +581,7 @@ func conformRoomSeqDenseAssignment(t *testing.T, rr conformanceRoomRepo) {
 // conformRoomSeqConcurrentWritersUniqueDense: concurrent same-room writers on
 // distinct keys receive seqs that are all unique and together form the dense
 // range 1..N. This is what makes a hole in the relay's live stream MEAN a lost
-// frame rather than a storage-side numbering artifact.
+// frame rather than a gap the storage-side numbering left.
 func conformRoomSeqConcurrentWritersUniqueDense(t *testing.T, rr conformanceRoomRepo) {
 	room := mkConformRoom(t, rr, "app12345", fixedNow)
 	const writers = 4

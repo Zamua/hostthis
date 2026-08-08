@@ -75,7 +75,7 @@ func newUpdateStackBlobs(t *testing.T, decorate func(*storage.CompressedBlobStor
 	}
 	blobUnit := service.NewStandaloneBlobUnit(blobs)
 	repo := storagetest.NewRepo(t)
-	sites := storage.NewArtifactSites(storagetest.NewRepo(t))
+	sites := storage.NewSites(storagetest.NewRepo(t))
 
 	httpSrv := httptest.NewServer((&httpapi.Server{
 		Pastes: repo, Sites: sites, Blobs: blobUnit, ApexDomain: "paste.test",

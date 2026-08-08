@@ -25,7 +25,7 @@ import (
 // The shale site repo carries the compensating half of the pre-claim port; the
 // deploy path finds it by type assertion, so a rename would silently disable
 // the release.
-var _ service.SlugClaimReleaser = (*storage.ArtifactSites)(nil)
+var _ service.SlugClaimReleaser = (*storage.Sites)(nil)
 
 const slugOwnerTestOwner = "key:claimant"
 
@@ -77,11 +77,11 @@ func TestShaleSite_SlugOwnerReleasedOnDelete(t *testing.T) {
 		t.Fatal("pre-claim did not write slug_owner")
 	}
 	site := slugOwnerSite(slug.String(), slugOwnerTestOwner)
-	if err := storage.NewArtifactSites(repo).InsertWithQuotaCheck(ctx, site, 64, 0, slugOwnerTestNow); err != nil {
+	if err := storage.NewSites(repo).InsertWithQuotaCheck(ctx, site, 64, 0, slugOwnerTestNow); err != nil {
 		t.Fatalf("InsertWithQuotaCheck: %v", err)
 	}
 
-	if err := storage.NewArtifactSites(repo).Delete(slug); err != nil {
+	if err := storage.NewSites(repo).Delete(slug); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if slugOwnerPresent(t, repo, slug) {
@@ -140,7 +140,7 @@ func TestShaleSite_SlugOwnerKeptForCommittedRecord(t *testing.T) {
 		t.Fatalf("PreClaimSlug: %v", err)
 	}
 	site := slugOwnerSite(siteSlug.String(), slugOwnerTestOwner)
-	if err := storage.NewArtifactSites(repo).InsertWithQuotaCheck(ctx, site, 64, 0, slugOwnerTestNow); err != nil {
+	if err := storage.NewSites(repo).InsertWithQuotaCheck(ctx, site, 64, 0, slugOwnerTestNow); err != nil {
 		t.Fatalf("InsertWithQuotaCheck: %v", err)
 	}
 	if err := repo.ReleaseSlugClaim(ctx, siteSlug, slugOwnerTestOwner); err != nil {

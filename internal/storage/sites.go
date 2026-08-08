@@ -1,6 +1,6 @@
-// The site surface, served by the artifact families.
+// The site surface, served by the paste family.
 //
-// A directory IS an artifact whose version manifest holds N entries, so this
+// A directory IS a paste whose version manifest holds N entries, so this
 // satisfies the service's SiteRepo port without a second key family, a second
 // enumeration index, or a second quota scan. It exists so the service layer
 // keeps one vocabulary; when that vocabulary collapses too, the port goes.
@@ -14,23 +14,23 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// ArtifactSites adapts an artifact repo onto the site port.
+// Sites adapts the paste repo onto the site port.
 
-type ArtifactSites struct {
+type Sites struct {
 	repo *ShaleRepo
 }
 
-func NewArtifactSites(repo *ShaleRepo) *ArtifactSites {
-	return &ArtifactSites{repo: repo}
+func NewSites(repo *ShaleRepo) *Sites {
+	return &Sites{repo: repo}
 }
 
-// Get returns the directory artifact owning slug.
+// Get returns the directory owning slug.
 //
 // A slug that is a DOCUMENT reads as not-found, not as a one-file site: the
 // caller asked for a directory, and answering with a document would let a
 // paste be served through the site path. The shape is read from the kind, not
 // inferred from the manifest's size.
-func (a *ArtifactSites) Get(slug domain.Slug) (domain.Site, error) {
+func (a *Sites) Get(slug domain.Slug) (domain.Site, error) {
 	p, err := a.repo.Get(slug)
 	if err != nil {
 		return domain.Site{}, err
@@ -51,11 +51,11 @@ func siteFromArtifact(p domain.Paste) domain.Site {
 	}
 }
 
-// InsertWithQuotaCheck stores a new directory as an artifact.
+// InsertWithQuotaCheck stores a new directory as a paste.
 //
 // storedBytes is the CHARGED size: a directory's distinct blob total, which is
 // what the quota counts, rather than the root file's size.
-func (a *ArtifactSites) InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error {
+func (a *Sites) InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error {
 	root, _ := s.Manifest.Lookup("/")
 	return a.repo.InsertWithQuotaCheck(ctx, domain.Paste{
 		Slug:       s.Slug,
@@ -75,7 +75,7 @@ func (a *ArtifactSites) InsertWithQuotaCheck(ctx context.Context, s domain.Site,
 //
 // Prior versions stay live, exactly as they do for a document, so a directory
 // pins, rolls back and rolls forward like anything else. That is the point of
-// one artifact model: a redeploy is an update, and an update has never thrown
+// one paste model: a redeploy is an update, and an update has never thrown
 // away what it replaced.
 //
 // It therefore CHARGES like an update too - every live version counts against
@@ -86,7 +86,7 @@ func (a *ArtifactSites) InsertWithQuotaCheck(ctx context.Context, s domain.Site,
 // Ownership is enforced here rather than inside the append: a slug that is not
 // a directory, and one owned by another identity, both yield the not-found
 // sentinel, so "not yours" stays indistinguishable from "does not exist".
-func (a *ArtifactSites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error {
+func (a *Sites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error {
 	existing, err := a.repo.Get(s.Slug)
 	if err != nil {
 		return err
@@ -99,30 +99,30 @@ func (a *ArtifactSites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site
 	return err
 }
 
-func (a *ArtifactSites) Delete(slug domain.Slug) error { return a.repo.Delete(slug) }
+func (a *Sites) Delete(slug domain.Slug) error { return a.repo.Delete(slug) }
 
 // SumActiveBytesByOwner reports ZERO, and that is not a stub.
 //
-// A directory IS an artifact, so its bytes are already in the artifact sum the
+// A directory IS a paste, so its bytes are already in the paste sum the
 // service adds this to. Reporting them again would bill every directory twice.
-func (a *ArtifactSites) SumActiveBytesByOwner(string, time.Time) (int64, error) {
+func (a *Sites) SumActiveBytesByOwner(string, time.Time) (int64, error) {
 	return 0, nil
 }
 
 // ListSitesByOwner returns NOTHING, for the reason the sum returns zero: a
-// directory is already in the artifact listing the caller concatenates this
+// directory is already in the paste listing the caller concatenates this
 // onto, so returning it here would show it twice.
-func (a *ArtifactSites) ListSitesByOwner(string, time.Time) ([]domain.Site, error) {
+func (a *Sites) ListSitesByOwner(string, time.Time) ([]domain.Site, error) {
 	return nil, nil
 }
 
-// PreClaimSlug stakes the artifact claim, so a directory's files stage on the
+// PreClaimSlug stakes the paste claim, so a directory's files stage on the
 // same shard its manifest commits to.
-func (a *ArtifactSites) PreClaimSlug(ctx context.Context, slug domain.Slug, owner string, now time.Time) error {
+func (a *Sites) PreClaimSlug(ctx context.Context, slug domain.Slug, owner string, now time.Time) error {
 	return a.repo.PreClaimSlug(ctx, slug, owner, now)
 }
 
 // ReleaseSlugClaim drops a claim whose deploy never landed.
-func (a *ArtifactSites) ReleaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) error {
+func (a *Sites) ReleaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) error {
 	return a.repo.ReleaseSlugClaim(ctx, slug, owner)
 }

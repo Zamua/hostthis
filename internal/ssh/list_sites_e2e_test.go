@@ -28,7 +28,7 @@ func TestList_IncludesSites(t *testing.T) {
 	}
 	blobUnit := service.NewStandaloneBlobUnit(storage.NewCompressedBlobStore(rawBlobs))
 	repo := storagetest.NewRepo(t)
-	sites := storage.NewArtifactSites(storagetest.NewRepo(t))
+	sites := storage.NewSites(storagetest.NewRepo(t))
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 
@@ -76,7 +76,7 @@ func TestList_IncludesSites(t *testing.T) {
 	if siteRow == "" {
 		t.Fatalf("no site row (kind=site) in list output:\n%s", out.stdout)
 	}
-	// A directory is an artifact, so it IS versioned and shows a version like
+	// A directory is a paste, so it IS versioned and shows a version like
 	// any other. The old "-" marked the shape it no longer has.
 	if f := strings.Fields(siteRow); f[len(f)-1] != "v1" {
 		t.Fatalf("site VERS column should be 'v1', got %q in %q", f[len(f)-1], siteRow)

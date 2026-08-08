@@ -529,7 +529,7 @@ func (a ArchiveAdapter) Deploy(body io.Reader, owner string) (Result, error) {
 		return Result{}, err
 	}
 	// Only the slug and owner are read downstream; the manifest stays on the
-	// stored artifact rather than being copied into the response.
+	// stored paste rather than being copied into the response.
 	return Result{Paste: domain.Paste{
 		Slug:      res.Site.Slug,
 		Identity:  res.Site.Identity,

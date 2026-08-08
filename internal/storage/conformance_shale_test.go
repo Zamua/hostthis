@@ -35,7 +35,7 @@ var shaleConformSeq atomic.Int64
 // A missing or renamed method fails the tagged build here rather than as an
 // opaque type error inside the factory closures below.
 var _ conformanceRepo = (*storage.ShaleRepo)(nil)
-var _ conformanceSiteRepo = (*storage.ArtifactSites)(nil)
+var _ conformanceSiteRepo = (*storage.Sites)(nil)
 var _ conformanceRoomRepo = (*storage.ShaleRoomRepo)(nil)
 
 func TestConformance_Shale(t *testing.T) {
@@ -80,7 +80,7 @@ func TestConformance_Shale(t *testing.T) {
 	// real interaction rather than two isolated clusters.
 	newSites := func(t *testing.T) (conformanceRepo, conformanceSiteRepo) {
 		repo := newShale(t)
-		return repo, storage.NewArtifactSites(repo)
+		return repo, storage.NewSites(repo)
 	}
 	// Room, paste and site repos all wrap the SAME ShaleRepo, so the cross-kind
 	// service-wide cap subtest exercises the real interaction.
@@ -89,7 +89,7 @@ func TestConformance_Shale(t *testing.T) {
 		return roomConformanceStores{
 			Rooms: storage.NewShaleRoomRepo(repo),
 			Paste: repo,
-			Site:  storage.NewArtifactSites(repo),
+			Site:  storage.NewSites(repo),
 		}
 	}
 	runConformanceWithSites(t, "shale", caps, newRepo, newSites, newRooms)

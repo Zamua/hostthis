@@ -33,7 +33,7 @@ func buildMetadataLocal(dataDir string, logger *log.Logger) (*metadataBundle, er
 		return nil, fmt.Errorf("open local metadata: %w", err)
 	}
 	logger.Printf("metadata: local shale at %s", dir)
-	sites := storage.NewArtifactSites(repo)
+	sites := storage.NewSites(repo)
 	return &metadataBundle{
 		Repo:    repo,
 		KeyGate: repo,
