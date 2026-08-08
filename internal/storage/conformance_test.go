@@ -19,7 +19,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -752,9 +751,3 @@ func conformKeyGateForgetsOutOfWindow(t *testing.T, r conformanceRepo) {
 }
 
 // --- small slice helpers --------------------------------------------
-
-// sliceHas is named to avoid colliding with other contains helpers in this
-// test package.
-func sliceHas(ss []string, want string) bool {
-	return slices.Contains(ss, want)
-}

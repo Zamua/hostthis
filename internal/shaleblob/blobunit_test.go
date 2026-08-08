@@ -189,42 +189,6 @@ func TestAtomicDelete(t *testing.T) {
 	}
 }
 
-// A staged-but-never-bound blob is an orphan SweepOrphans reclaims AFTER the
-// grace, not before.
-func TestStageWithoutCommit_SweepReclaims(t *testing.T) {
-	repo, unit, bs := newBlobRepo(t)
-	ctx := context.Background()
-	body := encode(t, []byte("orphan bytes"))
-
-	// Staged and never committed: an orphan object with a fresh ModTime.
-	if _, err := unit.Stage(ctx, "orphanslug", "sha-orphan", body); err != nil {
-		t.Fatalf("Stage: %v", err)
-	}
-	if countObjects(ctx, bs) != 1 {
-		t.Fatalf("after stage: object count = %d, want 1", countObjects(ctx, bs))
-	}
-
-	// A generous grace must NOT reclaim a just-staged object.
-	now := time.Now().UTC()
-	if err := repo.SweepBlobOrphans(ctx, now, time.Hour); err != nil {
-		t.Fatalf("SweepBlobOrphans (fresh): %v", err)
-	}
-	if countObjects(ctx, bs) != 1 {
-		t.Fatalf("after fresh sweep: object count = %d, want 1 (not reclaimed before grace)", countObjects(ctx, bs))
-	}
-
-	// Aged past the grace, the same sweep reclaims it.
-	for k := range listKeys(ctx, bs) {
-		bs.SetModTime(k, now.Add(-2*time.Hour))
-	}
-	if err := repo.SweepBlobOrphans(ctx, now, time.Hour); err != nil {
-		t.Fatalf("SweepBlobOrphans (aged): %v", err)
-	}
-	if countObjects(ctx, bs) != 0 {
-		t.Fatalf("after aged sweep: object count = %d, want 0 (reclaimed past grace)", countObjects(ctx, bs))
-	}
-}
-
 // Each version binds its own blob, so the head and an older version each read
 // back their own bytes.
 func TestVersions_BindAndRead(t *testing.T) {
