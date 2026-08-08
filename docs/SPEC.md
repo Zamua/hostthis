@@ -3831,38 +3831,37 @@ before it starts (below). Its lifetime is bounded by the owner's next request
 rather than by a background pass, so no cross-shard job is reintroduced to get
 that bound.
 
-### Staged blob bytes: the half the intent did not cover
+### Fencing the writer recovery took over from
 
-The intent above covers the METADATA halves of a write. It does not cover the
-BYTES, and the ordering is why: an upload streams and stages its blobs FIRST,
-and only then does the insert open the intent. At the moment the intent exists
-the bytes are already staged, so a death before that point leaves bytes with no
-record that they were ever attempted. That is not a saga yet - a saga records
-the compensating action BEFORE performing the action; this recorded it after
-the risky part was done.
+Recording the staged bytes is not enough on its own. Recovery is BY DESIGN a
+second process reading persisted records, so the writer it is recovering may not
+actually be dead - a partition, a long GC pause, or a pod that resumes can leave
+it alive and about to bind. If it binds while recovery unstages, committed
+metadata ends up pointing at bytes that are gone: a 404 on a paste the writer
+was told it had created, and no scan can put it back.
 
-Closing it needs the staged object keys written down as they are staged, so
-recovery reclaims an EXACT RECORDED LIST rather than scanning and deleting
-whatever is absent from a computed set. Acting on absence is the failure mode
-the whole blob design exists to avoid: a torn scan deletes live data and no
-re-run undoes it.
+So recovery must FENCE the original writer before it deletes anything.
 
-**One record per staged blob**, at `staged/<scope>/<slug>/<blobid>`, written
-immediately after the object lands and before the next file is read. It shards
-on the SCOPE, so an owner's staged records co-locate with the intent that owns
-them and recovery reads both from the shard it is already on.
+**A per-slug ownership record, `blobowner/<slug>`, holding an epoch.** An upload
+claims the epoch before it stages its first byte. Its bind co-commits a check
+that the record still carries the epoch it claimed. Recovery BUMPS the epoch
+before unstaging. A resumed writer's bind therefore aborts on a stale epoch
+instead of binding bytes that are about to vanish, and the ordering - bump, then
+delete - is what makes the abort certain rather than likely.
 
-**The record is the whole ref, encoded verbatim.** shale derives both the guard
-read and the delete key from the ref's fields, so a field lost or corrupted in
-this round-trip does not fail loudly - it addresses a DIFFERENT key than the
-bind wrote, reads "unbound" for a blob that is bound, and deletes committed
-bytes. A missing field is caught by shale's validation; a corrupted-but-present
-route shard is not. So the encoder takes the struct whole and never names
-individual fields, and a field shale adds later rides along without this code
-being taught about it.
+**Why its own key, on the slug's shard.** The check has to happen INSIDE the
+transaction that binds, and that transaction is pinned on the slug, so the
+record has to co-shard with the bref it guards. The durable intent cannot serve:
+it shards on the IDENTITY so the boot sweep can scan one owner's intents
+node-locally, which is a different shard, and a transaction pinned on the slug
+cannot read it. (shale's design note prescribed putting the ownership check on
+the intent; that assumed a layout where the two co-shard, which is not this one.
+The requirement is only that the epoch live where the bind can read it.)
 
-The records are dropped when the intent completes: a committed write's bytes
-are bound and must never be unstaged.
+It is also deliberately NOT folded into `slug_owner/<slug>`, which already sits
+on that shard and is already written at claim time. That key's value is read by
+two other paths and exists in production with a plain-identity format; widening
+it would be a live-format migration for no gain over one new key.
 
 ### Durable intent: the saga survives the process
 

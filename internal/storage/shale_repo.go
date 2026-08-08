@@ -1053,7 +1053,7 @@ func (r *ShaleRepo) insertArtifact(ctx context.Context, p domain.Paste, userCap 
 		r.repoLog().Printf("shale: recording the entry step for %s: %v (a sweep will still roll back, using the row check alone)", p.Slug, err)
 	}
 
-	if err := r.insertAuthoritative(p, binds); err != nil {
+	if err := r.insertAuthoritative(p, binds, blobOwnerEpochFromContext(ctx)); err != nil {
 		// Whose row now holds the slug decides whether the entry above is an
 		// orphan at all. Both callers of a concurrent insert write that ONE
 		// entry key, so the loser's guard matches what the winner left and the
@@ -1137,7 +1137,15 @@ type shaleKVTx interface {
 // the plain cluster transaction otherwise. body receives a bind callback that
 // is a no-op on the no-bind path, so the collision/read-set logic is written
 // once and the two paths cannot drift.
-func (r *ShaleRepo) runAuthoritative(pinKey []byte, refs []cluster.BlobRef, body func(tx shaleKVTx, bind func() error) error) error {
+// bindFence is what runAuthoritative needs to verify the caller still owns the
+// bytes it is about to bind. The zero value skips the check, which is every
+// path that stages no blobs.
+type bindFence struct {
+	slug  domain.Slug
+	epoch int64
+}
+
+func (r *ShaleRepo) runAuthoritative(pinKey []byte, refs []cluster.BlobRef, fence bindFence, body func(tx shaleKVTx, bind func() error) error) error {
 	if len(refs) == 0 || r.kv == nil {
 		return translateCrossShard(r.cluster.Transact(pinKey, func(tx backend.Transaction) error {
 			return body(tx, func() error { return nil })
@@ -1145,6 +1153,20 @@ func (r *ShaleRepo) runAuthoritative(pinKey []byte, refs []cluster.BlobRef, body
 	}
 	return translateCrossShard(r.kv.Transact(pinKey, func(tx *cluster.BlobTx) error {
 		return body(tx, func() error {
+			// The fence, checked INSIDE the binding transaction and before the
+			// first bind. Recovery bumps the epoch before it unstages, so a
+			// writer it took over aborts here instead of binding bytes that are
+			// already gone (docs/SPEC.md "Fencing the writer recovery took over
+			// from"). The read joins this transaction's read-set, so a fence
+			// landing mid-commit conflicts rather than racing.
+			//
+			// It lives here, at the single point every bind passes through,
+			// rather than in each caller: a per-caller check is one a new write
+			// path silently omits, and the omission has no symptom until a
+			// recovery races a resumed writer.
+			if err := checkBlobOwnership(tx, fence.slug, fence.epoch); err != nil {
+				return err
+			}
 			for _, ref := range refs {
 				if err := tx.BindBlob(ref); err != nil {
 					return err
@@ -1163,10 +1185,10 @@ func (r *ShaleRepo) runAuthoritative(pinKey []byte, refs []cluster.BlobRef, body
 // A staged blob in refs is BOUND in this same transaction, so the pointer
 // co-commits with the row and the blob id lands on both the head and the v1
 // version row.
-func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef) error {
+func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef, epoch int64) error {
 	pasteKey := shaleKeyPaste(p.Slug)
 	blobID := firstBlobID(refs)
-	return r.runAuthoritative(pasteKey, refs, func(tx shaleKVTx, bind func() error) error {
+	return r.runAuthoritative(pasteKey, refs, bindFence{slug: p.Slug, epoch: epoch}, func(tx shaleKVTx, bind func() error) error {
 		// This Get is also the ExpectAbsent read-check that makes a concurrent
 		// insert of the same slug conflict.
 		if _, err := tx.Get(pasteKey); err == nil {
@@ -1432,7 +1454,7 @@ func (r *ShaleRepo) appendVersion(ctx context.Context, slug domain.Slug, ref con
 		}
 	}
 
-	res, err := r.appendAuthoritative(slug, ref, now, binds)
+	res, err := r.appendAuthoritative(slug, ref, now, binds, blobOwnerEpochFromContext(ctx))
 	if err != nil {
 		return AppendResult{}, err
 	}
@@ -1466,7 +1488,7 @@ var ErrConcurrentChange = domain.ErrConcurrentChange
 //     it first, so the ExpectAbsent read-check fails validation: ErrCASConflict.
 //
 // MAX(ver_num) counts tombstones, so version numbers are never reused.
-func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now time.Time, refs []cluster.BlobRef) (AppendResult, error) {
+func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now time.Time, refs []cluster.BlobRef, epoch int64) (AppendResult, error) {
 	pasteKey := shaleKeyPaste(slug)
 	// The blob id lands on the new version row and, when the head is unpinned
 	// (so the public URL follows this version), on the paste head row too.
@@ -1481,7 +1503,7 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now ti
 		verKey := shaleKeyVersion(slug, newVer)
 
 		var wasPinned bool
-		txErr := r.runAuthoritative(pasteKey, refs, func(tx shaleKVTx, bind func() error) error {
+		txErr := r.runAuthoritative(pasteKey, refs, bindFence{slug: slug, epoch: epoch}, func(tx shaleKVTx, bind func() error) error {
 			var p pasteRow
 			if err := shaleTxGetJSON(tx, pasteKey, &p); err != nil {
 				return err
