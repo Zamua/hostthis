@@ -105,7 +105,7 @@ type Result struct {
 //
 // It is a PORT, not the concrete deploy service: upload does not import it, so
 // the two can be merged without a circular dependency and the transport keeps
-// one entry point either way (docs/SPEC.md "One artifact, not two aggregates").
+// one entry point either way (docs/SPEC.md "One paste, not two aggregates").
 type ArchiveDeployer interface {
 	Deploy(body io.Reader, owner string) (Result, error)
 }
@@ -143,9 +143,9 @@ var ErrServiceFull = errors.New("service: service is at capacity, try again late
 // prefix so the source is never re-read. Unsupported types return
 // domain.ErrUnsupportedKind for the caller to surface verbatim.
 func (u *Upload) Create(body io.Reader, owner string, name string, typeHint string) (Result, error) {
-	// A gzip-tar archive is the SAME artifact at a different cardinality, so
+	// A gzip-tar archive is the SAME paste at a different cardinality, so
 	// the decision is made HERE rather than by each transport: one entry point,
-	// one place that knows both shapes exist (docs/SPEC.md "One artifact, not
+	// one place that knows both shapes exist (docs/SPEC.md "One paste, not
 	// two aggregates").
 	//
 	// It must happen BEFORE staging, which consumes and compresses the stream -

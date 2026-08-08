@@ -67,18 +67,18 @@ type Paste struct {
 	// Root, a directory is N, so one lookup resolves a request path for either
 	// (docs/SPEC.md "Serving a directory").
 	//
-	// Empty on an artifact stored before versions carried a manifest; the flat
+	// Empty on a paste stored before versions carried a manifest; the flat
 	// fields above are what those resolve through, via the Root accessors.
 	Manifest Manifest
 }
 
 // IsSingle reports whether the served version holds a single document, the
-// shape a paste has always had. A manifest-less artifact counts as single: its
+// shape a paste has always had. A manifest-less paste counts as single: its
 // flat fields describe exactly one blob.
 func (p Paste) IsSingle() bool { return len(p.Manifest.Files) <= 1 }
 
 // RootKind is the render kind of the root entry, falling back to the flat Kind
-// for an artifact whose stored row carries no manifest.
+// for a paste whose stored row carries no manifest.
 func (p Paste) RootKind() ContentKind {
 	if e, ok := p.Manifest.Files[Root]; ok && e.Kind != "" {
 		return ContentKind(e.Kind)
@@ -102,13 +102,13 @@ func (p Paste) RootSize() int {
 	return p.Size
 }
 
-// Version is a whole-MANIFEST snapshot in an artifact's history. v1 is the
+// Version is a whole-MANIFEST snapshot in a paste's history. v1 is the
 // initial upload; each `update` or redeploy writes a new row with ver_num+1.
 //
-// The manifest is what makes ONE artifact type enough for both a single
+// The manifest is what makes ONE paste type enough for both a single
 // document and a directory: a document is a one-entry manifest at Root, a
 // directory is an N-entry one, and nothing downstream needs to distinguish
-// them (docs/SPEC.md "One artifact, not two aggregates").
+// them (docs/SPEC.md "One paste, not two aggregates").
 //
 // Kind/ContentSHA/Size describe the ROOT entry. They are retained while the
 // storage layers are collapsed onto Manifest; once every reader takes the
@@ -132,7 +132,7 @@ type Version struct {
 	Manifest Manifest
 }
 
-// Root is the manifest path a single-document artifact serves at. Naming it
+// Root is the manifest path a single-document paste serves at. Naming it
 // makes the one-entry case explicit rather than a convention repeated at call
 // sites.
 const Root = "/"
