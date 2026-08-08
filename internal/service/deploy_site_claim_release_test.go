@@ -75,6 +75,13 @@ func (txTestBlobUnit) Stage(context.Context, string, string, []byte) (BlobHandle
 	return BlobHandle{}, nil
 }
 
+func (txTestBlobUnit) StagePrecompressed(_ context.Context, slug, sha string, r io.Reader, _ int64) (BlobHandle, error) {
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		return BlobHandle{}, err
+	}
+	return BlobHandle{Slug: slug, SHA: sha}, nil
+}
+
 func (txTestBlobUnit) StageEncoding(_ context.Context, slug string, r io.Reader) (BlobHandle, string, int, error) {
 	hasher := sha256.New()
 	n, err := io.Copy(hasher, r)
