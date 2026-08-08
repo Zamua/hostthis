@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 
 	"github.com/Zamua/shale/pkg/blob"
 	"github.com/Zamua/shale/pkg/cluster"
@@ -239,19 +240,41 @@ var _ service.BlobUnit = (*Unit)(nil)
 // returns the compressed size EXCLUDING the framing prefix: the basis quota
 // charges, matching how a paste charges its post-zstd size.
 func (u *Unit) StageEncoding(ctx context.Context, slug string, r io.Reader) (service.BlobHandle, string, int, error) {
-	// SizeUnknown, deliberately: the encoded length cannot be known without
-	// encoding the whole body first, which is exactly the buffer this avoids.
-	// The adapter falls back to a streaming multipart upload.
-	enc := storage.EncodeCompressedStream(r)
-	ref, err := u.repo.StageBlobStream(ctx, u.repo.RouteKeyForSlug(slug), enc, blob.SizeUnknown, "")
+	// Encoded to a temp file first, NOT streamed with an unknown length.
+	//
+	// A pipe with blob.SizeUnknown looks like the streaming answer and is worse:
+	// an object store that does not know the total allocates a full multipart
+	// part buffer, which is fixed-size and can exceed the payload. Measured on a
+	// live deployment, that cost 128 MiB of RSS growth for a 32 MiB upload
+	// against 61 MiB for the buffering it was meant to replace.
+	//
+	// Spilling to disk keeps memory to the compressor window while still giving
+	// the store an exact size, so it can pick a sane part size.
+	f, err := os.CreateTemp(stagingDir(), "hostthis-stage-*")
+	if err != nil {
+		return service.BlobHandle{}, "", 0, fmt.Errorf("shaleblob: staging temp: %w", err)
+	}
+	defer os.Remove(f.Name()) //nolint:errcheck
+	defer f.Close()           //nolint:errcheck
+
+	size, sha, err := storage.EncodeCompressedTo(f, r)
 	if err != nil {
 		return service.BlobHandle{}, "", 0, err
 	}
-	// Valid only now: StageBlobStream has read the stream to EOF.
-	sha := enc.SHA()
-	ref.ContentHash = sha
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return service.BlobHandle{}, "", 0, fmt.Errorf("shaleblob: rewind staged temp: %w", err)
+	}
+	ref, err := u.repo.StageBlobStream(ctx, u.repo.RouteKeyForSlug(slug), f, size, sha)
+	if err != nil {
+		return service.BlobHandle{}, "", 0, err
+	}
 	if rerr := u.recordStaged(ctx, slug, ref); rerr != nil {
 		return service.BlobHandle{}, "", 0, rerr
 	}
-	return service.BlobHandle{Slug: slug, SHA: sha, Ref: ref}, sha, enc.CompressedSize(), nil
+	return service.BlobHandle{Slug: slug, SHA: sha, Ref: ref}, sha, int(size) - storage.CompressedBodyPrefixLen, nil
 }
+
+// stagingDir is where an in-flight upload spills while it is encoded. Defaults
+// to the OS temp dir; HOSTTHIS_STAGING_DIR points it at a volume with room when
+// the container's writable layer is small.
+func stagingDir() string { return os.Getenv("HOSTTHIS_STAGING_DIR") }
