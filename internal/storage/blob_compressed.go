@@ -354,3 +354,33 @@ func EncodeCompressedStream(r io.Reader) *EncodedStream {
 	}()
 	return out
 }
+
+// EncodeCompressedTo streams magic + zstd(r) into w, returning the bytes written
+// and the sha256 of the RAW input.
+//
+// Exists so a caller can encode to a file and learn the exact at-rest length
+// WITHOUT holding the body: staging with a known size lets the object store
+// choose a sane part size, where an unknown length makes it allocate a full
+// multipart part buffer - measured at 128 MiB of RSS growth for a 32 MiB upload,
+// worse than the buffering this replaced.
+func EncodeCompressedTo(w io.Writer, r io.Reader) (int64, string, error) {
+	counter := &byteCounter{}
+	counted := io.MultiWriter(w, counter)
+	if _, err := counted.Write(magicV1[:]); err != nil {
+		return 0, "", fmt.Errorf("compressed blob write magic: %w", err)
+	}
+	enc, err := zstd.NewWriter(counted, zstd.WithEncoderLevel(compressionLevel))
+	if err != nil {
+		return 0, "", fmt.Errorf("compressed blob: zstd writer: %w", err)
+	}
+	hasher := sha256.New()
+	// Hash the RAW bytes: the sha identifies content, not its stored form.
+	if _, err := io.Copy(io.MultiWriter(enc, hasher), r); err != nil {
+		_ = enc.Close()
+		return 0, "", err
+	}
+	if err := enc.Close(); err != nil {
+		return 0, "", fmt.Errorf("compressed blob: zstd close: %w", err)
+	}
+	return counter.n, hex.EncodeToString(hasher.Sum(nil)), nil
+}
