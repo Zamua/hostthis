@@ -884,7 +884,7 @@ manifests. There is no site-specific write path.
 One **ArtifactRepo** persists, gets and deletes artifacts on every metadata
 backend. There is no second repository, no second enumeration index, no second
 quota scan, and no second entry in the durable-intent vocabulary. Quota is the
-deduped blob total across an artifact's non-deleted versions - the same rule
+stored-byte total across an artifact's non-deleted versions - the same rule
 for one file or two hundred.
 
 ### Serving a directory
@@ -2843,8 +2843,15 @@ large request; the per-identity quota is a fairness limit on accumulated
 storage and costs nothing at request time. Raising the total therefore
 does not imply raising the per-request ceiling, and they should be
 expected to diverge again. Static **sites** count against the same cap and on the same
-basis: the deduped total of their files' COMPRESSED sizes (see "Static
-site archives → Quota"). A user can spend their quota as one 10 MiB
+basis: the total of their files' COMPRESSED sizes, as reported by the
+staging that wrote them (see "Static site archives → Quota").
+
+That total is NOT folded by content hash. Nothing in the store
+deduplicates: a blob id is minted fresh for every file staged, so two
+identical files - in one archive, across re-deploys, or across owners -
+are two objects on disk and are charged as two. Summing what staging
+reported is therefore the only figure that cannot drift from the disk,
+because it is what went to the disk. A user can spend their quota as one 10 MiB
 paste, ten 1 MiB pastes, a static site, or any mix.
 
 Deleted versions (via `delete <slug> <ver>`) contribute zero bytes to the
