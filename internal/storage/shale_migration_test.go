@@ -13,7 +13,6 @@ package storage_test
 // Skips cleanly unless MINIO_TEST_ENDPOINT is set.
 
 import (
-	"slices"
 	"testing"
 	"time"
 
@@ -115,8 +114,4 @@ func mustPutRaw(t *testing.T, repo *storage.ShaleRepo, key, value []byte) {
 	if err := repo.PutRawForTest(key, value); err != nil {
 		t.Fatalf("raw put %s: %v", key, err)
 	}
-}
-
-func sliceHasMig(ss []string, want string) bool {
-	return slices.Contains(ss, want)
 }

@@ -150,15 +150,6 @@ func firstSegment(s []byte) []byte {
 	return s
 }
 
-// lastSegment returns the bytes after the last '/' in s, or all of s if there
-// is no '/'.
-func lastSegment(s []byte) []byte {
-	if i := bytes.LastIndexByte(s, '/'); i >= 0 {
-		return s[i+1:]
-	}
-	return s
-}
-
 // shaleKeyKeygateIdentity is the identity-leading view of a keygate fact, so
 // "which subnets has this key been seen in" is a narrow prefix scan rather than
 // a scan of every keygate row. A KV store cannot derive one key ordering from

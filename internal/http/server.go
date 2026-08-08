@@ -71,13 +71,6 @@ func (s *Server) logf(format string, args ...any) {
 	}
 }
 
-func (s *Server) nowOrTime() time.Time {
-	if s.Now != nil {
-		return s.Now().UTC()
-	}
-	return time.Now().UTC()
-}
-
 // Handler returns the mux the caller binds with http.ListenAndServe.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()

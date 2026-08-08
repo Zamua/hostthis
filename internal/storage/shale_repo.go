@@ -286,15 +286,6 @@ type ShaleRepo struct {
 	// the guarded index writes inject a concurrent operation at the exact point
 	// the window opens.
 	//
-	// testHookReconcileBeforeIndexWrites runs after Reconcile has captured ALL
-	// its snapshots (the enumeration index plus the authoritative
-	// pastes/versions scans) and before the paste reprojection's prune + write
-	// loops: the widest point of the snapshot-to-write window.
-	testHookReconcileBeforeIndexWrites func()
-	// testHookBeforeOrphanPruneDelete runs inside the orphan prune, after the
-	// authoritative-row confirm and before the entry delete: the TOCTOU window
-	// a same-slug delete-then-redeploy can race.
-	testHookBeforeOrphanPruneDelete func(key []byte)
 	// testHookGuardedIndexWrite runs at the top of every guarded index write; a
 	// non-nil return fails that write. Fault injection for the Policy-1 pin:
 	// one entry's write failure must not stall the rest of the reprojection.
@@ -878,16 +869,6 @@ func (r *ShaleRepo) GetBlobStream(ctx context.Context, routeKey []byte, blobid s
 	return r.kv.GetBlob(ctx, routeKey, blobid)
 }
 
-// SweepBlobOrphans reclaims staged-but-unbound blob objects under this node's
-// mounted units, age-gated by grace. A no-op on the metadata-only path; the
-// caller gates on HasBlobPlane.
-func (r *ShaleRepo) SweepBlobOrphans(ctx context.Context, now time.Time, grace time.Duration) error {
-	if r.kv == nil {
-		return nil
-	}
-	return r.kv.SweepOrphans(ctx, now, grace)
-}
-
 // HasBlobPlane reports whether this repo runs the transactional shale-blob
 // path. The cmd wiring uses it to pick ShaleBlobUnit over StandaloneBlobUnit
 // and to schedule SweepOrphans.
@@ -1268,24 +1249,6 @@ func stampManifestBlobIDs(m domain.Manifest, refs []cluster.BlobRef) domain.Mani
 			e.BlobID = id
 		}
 		out.Add(path, e)
-	}
-	return out
-}
-
-// fileBlobsFromRefs builds the site row's sha -> blob-id side-table from the
-// staged file refs, so the read path can resolve a manifest sha to the blob id
-// GetBlob needs. A site dedups identical files, and keying on sha is what makes
-// two manifest paths sharing content collapse onto one blob id. Returns nil for
-// no refs, which omitempty keeps out of the row.
-func fileBlobsFromRefs(refs []cluster.BlobRef) map[string]string {
-	if len(refs) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(refs))
-	for _, ref := range refs {
-		if ref.ContentHash != "" {
-			out[ref.ContentHash] = ref.BlobID
-		}
 	}
 	return out
 }

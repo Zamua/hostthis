@@ -3,7 +3,6 @@ package domain
 import (
 	"errors"
 	"path"
-	"sort"
 	"strings"
 	"time"
 )
@@ -375,21 +374,6 @@ func (m Manifest) PathTextBytes() int {
 		n += len(p)
 	}
 	return n
-}
-
-// SHASet returns the set of distinct blob SHAs the manifest references. The
-// storage layer uses it for GC accounting: which blobs a live site keeps alive.
-func (m Manifest) SHASet() []string {
-	seen := make(map[string]struct{}, len(m.Files))
-	for _, e := range m.Files {
-		seen[e.SHA] = struct{}{}
-	}
-	out := make([]string, 0, len(seen))
-	for sha := range seen {
-		out = append(out, sha)
-	}
-	sort.Strings(out) // deterministic order for stable serialization/tests
-	return out
 }
 
 // contentTypeByExt maps a file extension to a content-type, purely by name,
