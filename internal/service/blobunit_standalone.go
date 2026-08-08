@@ -93,6 +93,17 @@ func (u *StandaloneBlobUnit) BeginUpload(ctx context.Context, _ string) (context
 // StageEncoding implements BlobUnit for the standalone path, on the same
 // contract as the transactional adapter: encode to the at-rest format, stage
 // it, report the compressed size excluding the framing prefix.
+// StagePrecompressed reads the body whole. This is the local dev/test store,
+// writing to a disk it owns, and its Put takes a slice - it carries none of the
+// multi-node blob plane's constraints.
+func (u *StandaloneBlobUnit) StagePrecompressed(ctx context.Context, slug, sha string, r io.Reader, _ int64) (BlobHandle, error) {
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return BlobHandle{}, err
+	}
+	return u.Stage(ctx, slug, sha, body)
+}
+
 func (u *StandaloneBlobUnit) StageEncoding(ctx context.Context, slug string, r io.Reader) (BlobHandle, string, int, error) {
 	// Hash on the way past so the caller never needs a second pass over the
 	// body, matching the shale path's contract. This backend still encodes into

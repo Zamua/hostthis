@@ -34,7 +34,7 @@ func stage(t *testing.T, u *StandaloneBlobUnit, slug string, raw []byte) (string
 	if err != nil {
 		t.Fatalf("streamUpload: %v", err)
 	}
-	h, err := u.Stage(context.Background(), slug, staged.SHA, staged.Body)
+	h, err := u.Stage(context.Background(), slug, staged.SHA, stagedBytes(t, staged))
 	if err != nil {
 		t.Fatalf("Stage: %v", err)
 	}

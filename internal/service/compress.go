@@ -1,12 +1,12 @@
 package service
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/klauspost/compress/zstd"
 
@@ -28,8 +28,11 @@ const blobCompressionLevel = zstd.SpeedDefault
 // Body is magic-prefixed + zstd-encoded, ready for
 // BlobStore.PutPrecompressed; CompressedSize excludes the 4-byte magic.
 type stagedUpload struct {
-	SHA            string
-	Body           []byte
+	SHA string
+	// File holds the at-rest bytes, spilled to disk rather than kept in memory
+	// so peak memory does not track the payload. Positioned at 0 and owned by
+	// the caller, which MUST close and remove it.
+	File           *os.File
 	RawSize        int
 	CompressedSize int
 	// Prefix holds the leading uncompressed bytes so callers can classify the
@@ -63,8 +66,19 @@ var errCompressedCapExceeded = errors.New("compressed cap exceeded")
 func streamUpload(r io.Reader) (stagedUpload, error) {
 	// Staging starts with the magic header so PutPrecompressed is a straight
 	// write with no further wrapping.
-	staging := bytes.NewBuffer(make([]byte, 0, 64*1024))
-	staging.Write(blobMagicV1[:])
+	// Spilled to a temp file, not a buffer: an upload must not cost its own size
+	// in RAM. The caller owns the file and removes it.
+	f, ferr := os.CreateTemp(os.Getenv("HOSTTHIS_STAGING_DIR"), "hostthis-paste-*")
+	if ferr != nil {
+		return stagedUpload{}, fmt.Errorf("staging temp: %w", ferr)
+	}
+	written := &byteCount{}
+	staging := io.MultiWriter(f, written)
+	if _, err := staging.Write(blobMagicV1[:]); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return stagedUpload{}, err
+	}
 
 	cap := &cappedWriter{inner: staging, limit: domain.MaxPasteBytes + len(blobMagicV1)}
 
@@ -87,15 +101,22 @@ func streamUpload(r io.Reader) (stagedUpload, error) {
 	}
 	// zstd can emit a final block on Close that crosses the compressed cap,
 	// past the cappedWriter's per-Write check.
-	if staging.Len() > domain.MaxPasteBytes+len(blobMagicV1) {
+	if written.n > domain.MaxPasteBytes+len(blobMagicV1) {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
 		return stagedUpload{}, errCompressedCapExceeded
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return stagedUpload{}, fmt.Errorf("rewind staged paste: %w", err)
 	}
 
 	return stagedUpload{
 		SHA:            hex.EncodeToString(hasher.Sum(nil)),
-		Body:           staging.Bytes(),
+		File:           f,
 		RawSize:        rawCount.n,
-		CompressedSize: staging.Len() - len(blobMagicV1),
+		CompressedSize: written.n - len(blobMagicV1),
 		Prefix:         prefix.bytes(),
 	}, nil
 }
@@ -169,3 +190,22 @@ func (p *prefixBuffer) Write(b []byte) (int, error) {
 }
 
 func (p *prefixBuffer) bytes() []byte { return p.buf }
+
+// byteCount tallies what passed through, so the encoded length is known without
+// holding the bytes.
+type byteCount struct{ n int }
+
+func (c *byteCount) Write(p []byte) (int, error) { c.n += len(p); return len(p), nil }
+
+// encodedSize is the exact at-rest length, magic included - what a size-aware
+// stage needs.
+func (s stagedUpload) encodedSize() int64 { return int64(s.CompressedSize + len(blobMagicV1)) }
+
+// discard closes and removes a staged upload's spill file. Safe on a zero value.
+func (s stagedUpload) discard() {
+	if s.File == nil {
+		return
+	}
+	_ = s.File.Close()
+	_ = os.Remove(s.File.Name())
+}
