@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 )
 
@@ -91,14 +93,20 @@ func (u *StandaloneBlobUnit) BeginUpload(ctx context.Context, _ string) (context
 // StageEncoding implements BlobUnit for the standalone path, on the same
 // contract as the transactional adapter: encode to the at-rest format, stage
 // it, report the compressed size excluding the framing prefix.
-func (u *StandaloneBlobUnit) StageEncoding(ctx context.Context, slug, sha string, r io.Reader) (BlobHandle, int, error) {
-	body, size, err := u.store.EncodeBody(r)
+func (u *StandaloneBlobUnit) StageEncoding(ctx context.Context, slug string, r io.Reader) (BlobHandle, string, int, error) {
+	// Hash on the way past so the caller never needs a second pass over the
+	// body, matching the shale path's contract. This backend still encodes into
+	// memory - it is the local dev/test store, writing to a disk it owns, and
+	// carries none of the multi-node blob plane's constraints.
+	hasher := sha256.New()
+	body, size, err := u.store.EncodeBody(io.TeeReader(r, hasher))
 	if err != nil {
-		return BlobHandle{}, 0, err
+		return BlobHandle{}, "", 0, err
 	}
+	sha := hex.EncodeToString(hasher.Sum(nil))
 	h, err := u.Stage(ctx, slug, sha, body)
 	if err != nil {
-		return BlobHandle{}, 0, err
+		return BlobHandle{}, "", 0, err
 	}
-	return h, size, nil
+	return h, sha, size, nil
 }

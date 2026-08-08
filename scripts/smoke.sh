@@ -426,6 +426,52 @@ echo "$help_unk" | grep -q "unknown verb" \
   && ok "help unknown shows banner with prefix, exit 0" \
   || bad "help unknown" "rc=$help_unk_rc out=$help_unk"
 
+# ---- 14b. streamed upload: large body, and an aborted one ------------------
+# These exist because the write path must be CONSTANT-MEMORY. It buffered whole
+# files once, so peak memory tracked the payload and a few concurrent deploys
+# could exhaust a small node.
+#
+# Incompressible input on purpose: zstd must not be able to shrink the work and
+# hide a buffer. The size is deliberately larger than any inline path.
+#
+# This asserts the upload SUCCEEDS and reads back intact. It cannot see the
+# server's memory - that is measured by the operator-side deploy check, which
+# samples RSS while this runs.
+step "streamed upload: ${SMOKE_STREAM_MB:-8} MiB incompressible body"
+stream_mb="${SMOKE_STREAM_MB:-8}"
+stream_dir="$(mktemp -d)"
+mkdir -p "$stream_dir/site"
+dd if=/dev/urandom of="$stream_dir/site/big.bin" bs=1048576 count="$stream_mb" 2>/dev/null
+printf '<!doctype html><h1>stream</h1>' > "$stream_dir/site/index.html"
+stream_url=$(tar czf - -C "$stream_dir" site 2>/dev/null | $SSH "$HOST" 2>/dev/null | grep -oE 'https?://[^ ]+' | head -1)
+if [ -n "$stream_url" ]; then
+  ok "streamed ${stream_mb} MiB upload accepted"
+  got=$(curl -s -o /dev/null -w '%{size_download}' "${stream_url%/}/big.bin" 2>/dev/null)
+  want=$((stream_mb * 1048576))
+  [ "$got" = "$want" ] \
+    && ok "streamed body reads back intact ($got bytes)" \
+    || bad "streamed body round-trip" "read back $got bytes, want $want"
+  slug_from_url "$stream_url" >> /tmp/hostthis-smoke.slugs
+else
+  bad "streamed upload" "no URL returned for a ${stream_mb} MiB body"
+fi
+
+# An upload killed mid-flight must not wedge the service or serve a partial
+# site. The bytes it staged are left for the reclamation sweep, which is the
+# designed outcome - this asserts the SERVICE survives, not that nothing leaks.
+step "aborted upload does not wedge the service"
+(tar czf - -C "$stream_dir" site 2>/dev/null; :) | $SSH "$HOST" >/dev/null 2>&1 &
+abort_pid=$!
+sleep 2
+kill -9 $abort_pid 2>/dev/null
+wait $abort_pid 2>/dev/null
+rm -rf "$stream_dir"
+if $SSH "$HOST" whoami >/dev/null 2>&1; then
+  ok "service healthy after an aborted upload"
+else
+  bad "aborted upload" "service did not answer whoami afterwards"
+fi
+
 # ---- 15. session without a key is rejected ---------------------------------
 step "no-key session is rejected"
 nokey=$(ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o PreferredAuthentications=password \

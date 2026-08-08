@@ -1,10 +1,7 @@
 package service
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -503,26 +500,21 @@ func siteExtractBudget(cap, usedPaste, usedSite int64, existing domain.Site) int
 }
 
 func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
-	// Buffering the whole file is bounded: the untar's decompression-bomb
-	// guard admitted these bytes against the running total, so this holds at
-	// most one file and the whole site is at most the per-identity quota.
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, r); err != nil {
-		// Propagate the cap-exceeded sentinel unchanged so SafeUntar can
-		// distinguish it from a real I/O error.
+	// No buffer. The body streams through the compressor into the object store,
+	// hashing as it goes, so an in-flight file costs the compressor window and a
+	// copy buffer rather than its own size. Buffering here previously made peak
+	// memory a function of the QUOTA - the untar guard admits up to the owner's
+	// remaining allowance, so one file could be ~100 MiB of RAM on a 2 GB node.
+	//
+	// The sha comes back from the staging rather than being computed first;
+	// needing it up front is what required holding the whole file.
+	handle, sha, compressedSize, err := s.blob.StageEncoding(context.Background(), s.slug, r)
+	if err != nil {
+		// The untar's cap sentinel has to survive so SafeUntar can tell a
+		// too-large archive from a real I/O failure.
 		if errors.Is(err, domain.ErrArchiveTooLarge) {
 			return "", 0, domain.ErrArchiveTooLarge
 		}
-		return "", 0, fmt.Errorf("read file %q: %w", p, err)
-	}
-	bodyBytes := buf.Bytes()
-	sum := sha256.Sum256(bodyBytes)
-	sha := hex.EncodeToString(sum[:])
-	// StageEncoding reports the exact on-disk footprint, which is what the
-	// deploy charges against quota. It excludes the 4-byte magic prefix, so
-	// the basis matches how pastes charge their post-zstd size (compress.go).
-	handle, compressedSize, err := s.blob.StageEncoding(context.Background(), s.slug, sha, bytes.NewReader(bodyBytes))
-	if err != nil {
 		return "", 0, fmt.Errorf("blob put %q: %w", p, err)
 	}
 	s.handles = append(s.handles, handle)

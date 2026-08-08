@@ -47,7 +47,7 @@ type BlobUnit interface {
 	// which charges the post-compression size against quota) does not have to
 	// know the encoder or the framing. The adapter owns the format; the port
 	// reports the number.
-	StageEncoding(ctx context.Context, slug, sha string, r io.Reader) (BlobHandle, int, error)
+	StageEncoding(ctx context.Context, slug string, r io.Reader) (BlobHandle, string, int, error)
 
 	// StageStream durably writes a record's blob by streaming r
 	// (UNCOMPRESSED; the storage layer compresses at rest). size is the
