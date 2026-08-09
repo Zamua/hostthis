@@ -6158,6 +6158,64 @@ probe result must never be cached.
 
 ---
 
+## Metrics
+
+The service publishes Prometheus metrics on a **separate listener**,
+`HOSTTHIS_METRICS_ADDR` (default `:9091`).
+
+Separate, not a path on the public mux, and that is a security boundary
+rather than a style choice. `/healthz` and `/readyz` answer on any Host
+without authentication; a `/metrics` route beside them would publish
+request rates, verb mix and failure counts to anyone who asked. The
+metrics port is never routed by the ingress.
+
+### Why the SSH surface needs this
+
+SSH is the primary interface, and it is the one an operator cannot see
+from outside. A reverse proxy handles SSH as plain TCP, so it can report
+how many connections are open and nothing more: no command counts, no
+durations, no failures. Every question about what users actually do -
+which verbs run, how long an upload takes, how often the gate refuses a
+key - can only be answered from inside the process.
+
+### What is exported
+
+| metric | type | labels |
+| --- | --- | --- |
+| `hostthis_ssh_commands_total` | counter | `verb`, `outcome` |
+| `hostthis_ssh_command_duration_seconds` | histogram | `verb` |
+
+Plus the standard Go runtime and process collectors.
+
+`outcome` is one of `ok`, `refused` (the Sybil gate), `incomplete` (the
+session ended without reporting an exit code, i.e. the client hung up),
+or `error_<code>` for a structured exit code.
+
+`incomplete` is deliberately distinct from `ok`. Both are "not an error",
+and collapsing them would hide clients dropping mid-command.
+
+### Label cardinality is a correctness property
+
+`verb` is derived from the first SSH argument, which is entirely
+attacker-controlled. It is mapped through the verb registry: recognised
+names pass through, everything else becomes `unknown`. Without that
+mapping, anyone could grow the series count without limit by sending
+random verbs - a memory-exhaustion path on the metrics server, reachable
+by an unauthenticated stranger.
+
+An empty command maps to `upload`, since piping content with no verb is
+the service's primary path and deserves its own series.
+
+### Where it is measured
+
+Instrumentation lives in a middleware wrapping the whole SSH chain, not
+inside any verb. Two consequences: no verb carries observability code,
+and sessions the gate refuses are counted too - they never reach the
+dispatcher, and a rising refusal rate is exactly the kind of thing worth
+seeing.
+
+---
+
 ## Self-hosting
 
 The public `hostthis.dev` is the default deploy, but the same Go binary

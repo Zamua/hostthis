@@ -72,7 +72,24 @@ type Server struct {
 	Now         func() time.Time // clock; defaults to time.Now when nil
 	BuildURL    URLBuilder
 	Logger      *log.Logger
+	// Metrics is optional; nil records nothing. Kept as a port so this package
+	// carries no Prometheus dependency and tests can assert on calls.
+	Metrics CommandRecorder
 }
+
+// metrics returns the injected recorder, or a no-op when none was wired. The
+// nil check lives here rather than at each call site so instrumentation can
+// never be the reason a session fails.
+func (s *Server) metrics() CommandRecorder {
+	if s.Metrics == nil {
+		return noopRecorder{}
+	}
+	return s.Metrics
+}
+
+type noopRecorder struct{}
+
+func (noopRecorder) RecordCommand(string, string, time.Duration) {}
 
 // now returns the injected clock, defaulting to time.Now.
 func (s *Server) now() time.Time {
@@ -113,6 +130,8 @@ func (s *Server) ListenAndServe() error {
 			s.terminalMiddleware(),
 			s.ratelimitMiddleware(),
 			s.keyRequiredMiddleware(),
+			// Outermost, so it also counts sessions the gate refuses.
+			s.metricsMiddleware(),
 		),
 		// Refuse port-forwarding, agent-forwarding, X11 and subsystem
 		// (sftp/scp) channels: sessions are single-command exchanges that need
