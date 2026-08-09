@@ -20,8 +20,13 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/cache"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/Zamua/hostthis/internal/domain"
 	httpapi "github.com/Zamua/hostthis/internal/http"
+	"github.com/Zamua/hostthis/internal/metrics"
 	"github.com/Zamua/hostthis/internal/relay"
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
@@ -33,6 +38,7 @@ func main() {
 		dataDir         = flag.String("data-dir", envOr("HOSTTHIS_DATA_DIR", "./data"), "where metadata + blobs live")
 		sshAddr         = flag.String("ssh-addr", envOr("HOSTTHIS_SSH_ADDR", ":2222"), "ssh listen address")
 		httpAddr        = flag.String("http-addr", envOr("HOSTTHIS_HTTP_ADDR", ":8080"), "http listen address")
+		metricsAddr     = flag.String("metrics-addr", envOr("HOSTTHIS_METRICS_ADDR", ":9091"), "prometheus metrics listen address (never route this publicly)")
 		apexDomain      = flag.String("apex-domain", os.Getenv("HOSTTHIS_APEX_DOMAIN"), "public apex (required; e.g. paste.example.com)")
 		urlMode         = flag.String("mode", envOr("HOSTTHIS_URL_MODE", "path"), "url mode: subdomain (prod) | path (dev)")
 		scheme          = flag.String("scheme", envOr("HOSTTHIS_PUBLIC_SCHEME", "https"), "public URL scheme (https for prod, http for local dev)")
@@ -190,6 +196,13 @@ func main() {
 	cachePurger := buildCachePurger(logger, *scheme, *apexDomain, *urlMode)
 	pasteMgr := service.NewCacheInvalidating(manageSvc, cachePurger)
 
+	// Own registry rather than the default one: what this process publishes is
+	// then exactly what is registered here, with no collectors arriving via a
+	// dependency's init().
+	metricsReg := prometheus.NewRegistry()
+	metricsReg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	appMetrics := metrics.New(metricsReg)
+
 	sshServer := &hostssh.Server{
 		Addr:        *sshAddr,
 		HostKeyPath: filepath.Join(*dataDir, "ssh_host_ed25519_key"),
@@ -202,6 +215,7 @@ func main() {
 		KeyGate:     keyGate,
 		BuildURL:    build,
 		Logger:      logger,
+		Metrics:     appMetrics,
 	}
 	if siteRepo != nil {
 		sshServer.Sites = siteRepo
@@ -228,6 +242,16 @@ func main() {
 	if roomRelay != nil {
 		httpServer.Relay = roomRelay
 	}
+	// Metrics listen on their OWN port, never the public one. The public mux
+	// answers /healthz on any Host without auth, so adding /metrics there
+	// would publish request rates, verb mix and failure counts to anyone who
+	// asked. A separate listener is not routed by the ingress at all.
+	metricsSrv := &http.Server{
+		Addr:              *metricsAddr,
+		Handler:           promhttp.HandlerFor(metricsReg, promhttp.HandlerOpts{}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
 	httpSrv := &http.Server{
 		Addr:    *httpAddr,
 		Handler: httpServer.Handler(),
@@ -246,11 +270,15 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	errs := make(chan error, 2)
+	errs := make(chan error, 3)
 	go func() { errs <- sshServer.ListenAndServe() }()
 	go func() {
 		logger.Printf("http: listening on %s", *httpAddr)
 		errs <- httpSrv.ListenAndServe()
+	}()
+	go func() {
+		logger.Printf("metrics: listening on %s", *metricsAddr)
+		errs <- metricsSrv.ListenAndServe()
 	}()
 	// The sweep loop always runs: HOSTTHIS_SWEEP_DISABLED selects dry-run vs
 	// live, it does not gate the goroutine, because a dry-run sweep must still
