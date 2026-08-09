@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	httppprof "net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -246,9 +247,25 @@ func main() {
 	// answers /healthz on any Host without auth, so adding /metrics there
 	// would publish request rates, verb mix and failure counts to anyone who
 	// asked. A separate listener is not routed by the ingress at all.
+	// pprof rides the same private listener. A goroutine dump taken during a
+	// slow command names the call it is blocked in, which counters and CPU
+	// profiles cannot; and pprof exposes stacks and heap contents, so it must
+	// never appear on the public mux. Explicit routes rather than importing
+	// net/http/pprof for its side effect on DefaultServeMux, which this
+	// process never serves.
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.HandlerFor(metricsReg, promhttp.HandlerOpts{}))
+	metricsMux.HandleFunc("/debug/pprof/", httppprof.Index)
+	metricsMux.HandleFunc("/debug/pprof/cmdline", httppprof.Cmdline)
+	metricsMux.HandleFunc("/debug/pprof/profile", httppprof.Profile)
+	metricsMux.HandleFunc("/debug/pprof/symbol", httppprof.Symbol)
+	metricsMux.HandleFunc("/debug/pprof/trace", httppprof.Trace)
 	metricsSrv := &http.Server{
-		Addr:              *metricsAddr,
-		Handler:           promhttp.HandlerFor(metricsReg, promhttp.HandlerOpts{}),
+		Addr:    *metricsAddr,
+		Handler: metricsMux,
+		// Generous where the public server is strict: a 30s CPU profile or an
+		// execution trace legitimately holds the response open far longer than
+		// any public request may.
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
