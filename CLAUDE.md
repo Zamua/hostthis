@@ -81,6 +81,32 @@ fix(http): set Content-Disposition: attachment on unknown content types
 docs(spec): clarify version pinning for keyed pastes
 ```
 
+## Engineering principles
+
+Standing design rules for this codebase. They bind every change; a PR that
+violates one either fixes its approach or changes the principle here first,
+in the same spirit as spec-first. The list grows as decisions get made.
+
+1. **No in-memory buffering of payloads.** The service is constant-memory by
+   design: request and response bodies stream end to end, and resident memory
+   must never track payload size. When a size must be known before storage
+   accepts the bytes (a checksum, a length header), spill to a temp file -
+   disk is the buffer, never the heap. A code path that reads a whole body
+   into memory is a defect even when every current caller is small.
+
+2. **No scans on the request path.** Prefix scans over churned key ranges
+   cost object-store round trips that grow with an owner's LIFETIME activity,
+   because replicated deletes leave markers scans must walk forever. Anything
+   a user waits on reads point-gettable state: maintained documents and
+   aggregates, updated transactionally at write time. Scans are for boot-time
+   sweeps and offline reconciliation only.
+
+3. **Fail open on unreadable data.** One undecodable record may cost accuracy
+   (an under-count, a skipped row, a logged skip) but must never cost
+   availability. Any path where a single damaged record can block reads,
+   writes, or repair for a whole owner is a defect - the repair path
+   especially must tolerate the very damage it exists to repair.
+
 ## Repo layout
 
 ```

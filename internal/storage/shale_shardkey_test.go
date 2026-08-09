@@ -21,6 +21,7 @@ func TestShaleShardKey(t *testing.T) {
 		// Per-identity derived family -> shard key <id>.
 		{"identity_pastes", "identity_pastes/sha256:deadbeef/abc12345", "sha256:deadbeef"},
 		{"identity_first_seen", "identity_first_seen/sha256:deadbeef", "sha256:deadbeef"},
+		{"owner_doc", "owner_doc/sha256:deadbeef", "sha256:deadbeef"},
 
 		// Per-subnet Sybil-gate family -> shard key <subnet>.
 		{"keygate", "keygate/10.0.0.0_24/sha256:deadbeef", "10.0.0.0_24"},
@@ -88,6 +89,9 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 		// an owner's paste + site entries land on one shard and each quota
 		// prefix scan is single-shard.
 		"identity_sites/" + id + "/" + slug,
+		// The owner doc must co-shard with the row families it is maintained
+		// alongside, or the doc update turns every {id}-shard CAS cross-shard.
+		"owner_doc/" + id,
 	}
 	for _, k := range idKeys {
 		if got := string(shaleShardKey([]byte(k))); got != id {

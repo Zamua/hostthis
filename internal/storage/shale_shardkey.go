@@ -25,6 +25,7 @@ import (
 //	                                               '/', so this is unambiguous)
 //	identity_pastes/<id>/<slug>    -> <id>
 //	identity_first_seen/<id>       -> <id>
+//	owner_doc/<id>                 -> <id>
 //	keygate/<subnet>/<identity>    -> <subnet>    (Sybil admission)
 //	keygate_id/<identity>/<subnet> -> <identity>  (identity-leading view)
 //
@@ -69,6 +70,12 @@ func shaleShardKey(key []byte) []byte {
 		return firstSegment(key[len(prefixIdentityFirstSeenAll):])
 	case bytes.HasPrefix(key, prefixIntentsAll):
 		return firstSegment(key[len(prefixIntentsAll):])
+
+	// owner_doc/<id>: the single-document owner index. Shards on the id so it
+	// joins the same {id}-shard CAS transactions that maintain the legacy
+	// identity_* row families.
+	case bytes.HasPrefix(key, prefixOwnerDocAll):
+		return firstSegment(key[len(prefixOwnerDocAll):])
 
 	// Staged-blob records: staged/<slug>/<blobid>. Shards on the SLUG, so they
 	// co-shard with the paste row, the bref they describe and the blobowner
@@ -131,6 +138,10 @@ var (
 	prefixSlugOwner            = []byte("slug_owner/")
 	prefixIdentityPastesAll    = []byte("identity_pastes/")
 	prefixIdentityFirstSeenAll = []byte("identity_first_seen/")
+
+	// Owner document: one JSON value per identity replacing the row-per-paste
+	// index for reads (docs/SPEC.md "The owner document (v2 owner index)").
+	prefixOwnerDocAll = []byte("owner_doc/")
 
 	// Durable-intent family: intents/<scope>/<id>. Shards on the SCOPE (the
 	// owner), which is what makes listing one owner's outstanding intents a
