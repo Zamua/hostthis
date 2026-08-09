@@ -84,6 +84,9 @@ func TestShaleQuotaScanLegacyEmptyPasteEntry(t *testing.T) {
 	if got := mustSum(t, repo, owner, now); got != 600 {
 		t.Fatalf("sum after insert: got %d, want 600", got)
 	}
+	// The insert healed the owner doc; drop it so the rest of the test keeps
+	// exercising the pre-doc legacy scan and list-time enrichment it pins.
+	deleteOwnerDoc(t, repo, owner)
 
 	// An entry whose authoritative row is GONE contributes zero rather than
 	// failing or counting phantom bytes.

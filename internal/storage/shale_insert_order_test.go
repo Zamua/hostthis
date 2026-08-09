@@ -81,6 +81,10 @@ func TestShaleInsertOrder_ListClearsStalePlaceholder(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
+	// Pre-doc owner: the placeholder contract belongs to the legacy scan, which
+	// only a doc-less owner reads through.
+	deleteOwnerDoc(t, repo, owner)
+
 	// Plant the marker an older build's reconciler would have written.
 	idxKey := storage.IdentityPasteKeyForTest(owner, p.Slug.String())
 	if err := repo.PutRawForTest(idxKey, []byte(`{"placeholder":true}`)); err != nil {

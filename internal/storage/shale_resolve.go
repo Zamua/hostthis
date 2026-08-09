@@ -92,7 +92,7 @@ func (r *ShaleRepo) resolveIntent(ctx context.Context, in durable.Intent, now ti
 		return err
 	}
 	if !present && in.HasReached(StepEntryWritten) {
-		if _, err := r.guardedDeleteIndexEntry(r.intentEntryKey(in), in.Guard); err != nil {
+		if _, err := r.guardedDropOwnerEntry(string(in.Scope), in.Subject, in.Guard); err != nil {
 			return err
 		}
 	}

@@ -78,7 +78,9 @@ func TestShaleQuotaScanSumsCachedIndexValues(t *testing.T) {
 	// The no-fan-out contract, made observable: a stale-but-decodable entry
 	// whose authoritative rows are ABSENT still contributes its cached values,
 	// because the scan never resolves the head row. Bounded over-count: it
-	// counts until the owner's next list prunes it.
+	// counts until the owner's next list prunes it. A legacy-scan contract, so
+	// the owner is put back in the pre-doc shape first.
+	deleteOwnerDoc(t, repo, owner)
 	staleKey := storage.IdentityPasteKeyForTest(owner, "cachegon")
 	writeIndexEntryJSON(t, repo, staleKey, 999, now)
 	if got := mustSum(t, repo, owner, now); got != 200+999 {
@@ -192,6 +194,9 @@ func TestShaleQuotaScanFailsOpen(t *testing.T) {
 		if err := repo.PutRawForTest(badKey, tc.value); err != nil {
 			t.Fatalf("seed %s: %v", tc.name, err)
 		}
+		// Fail-open is a legacy-scan contract; each write above may have healed
+		// the doc, which would satisfy the assertion without scanning at all.
+		deleteOwnerDoc(t, repo, owner)
 		got, err := repo.SumActiveBytesByOwner(owner, now)
 		if err != nil {
 			t.Fatalf("%s must not fail the scan: %v", tc.name, err)
@@ -253,7 +258,9 @@ func TestShaleListDoesNotResurrectFailedPasteEntry(t *testing.T) {
 
 	// A leftover entry models a crash between MarkFailed's status flip and its
 	// entry drop. It over-counts permanently: the failed row is never read, so
-	// nothing can tell this entry from a live one.
+	// nothing can tell this entry from a live one. A legacy-scan contract, so
+	// the owner is put back in the pre-doc shape first.
+	deleteOwnerDoc(t, repo, owner)
 	writeIndexEntryJSON(t, repo, idxKey, 400, now)
 	if got := mustSum(t, repo, owner, now); got != 400 {
 		t.Fatalf("leftover failed-paste entry counts: got %d, want 400", got)
@@ -329,7 +336,10 @@ func TestShaleQuotaTracksLiveBytes(t *testing.T) {
 	}
 	assertSum("after second append", 400) // + 50
 
-	// The divergence proves the corruption landed in the thing the scan sums...
+	// The divergence proves the corruption landed in the thing the scan sums.
+	// The cached-entry contract belongs to the legacy scan, so the owner is put
+	// back in the pre-doc shape first.
+	deleteOwnerDoc(t, shale, owner)
 	idxKey := storage.IdentityPasteKeyForTest(owner, p1.Slug.String())
 	writeCachedIndexSize(t, shale, idxKey, 999999)
 	corrupted, err := shale.SumActiveBytesByOwner(owner, now)

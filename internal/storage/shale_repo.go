@@ -564,6 +564,14 @@ func (r *ShaleRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	// and usually a no-op (docs/SPEC.md "Durable intent").
 	r.resolveOwnerIntents(context.Background(), owner, time.Now().UTC())
 
+	// Doc-first: one point Get renders the whole list. The legacy scan below
+	// serves only pre-migration owners, READ-ONLY (it never writes the doc).
+	if doc, err := r.getOwnerDoc(owner); err != nil {
+		return nil, err
+	} else if doc != nil {
+		return doc.listRows(owner), nil
+	}
+
 	idx, err := r.scanPrefix(shalePrefixIdentityPastes(owner))
 	if err != nil {
 		return nil, err
@@ -595,37 +603,48 @@ func (r *ShaleRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 // repaired: it cannot be rendered, and cleaning it up is explicitly not this
 // listing's job.
 func (r *ShaleRepo) upgradeListEntry(owner string, slug domain.Slug, item scanItem) (domain.Paste, bool, error) {
+	fresh, ok, err := r.freshRowFromHead(slug)
+	if err != nil || !ok {
+		return domain.Paste{}, false, err
+	}
+	if _, werr := r.guardedPutIndexEntry(item.Key, item.Value, true, fresh, nil); werr != nil {
+		r.repoLog().Printf("shale: index upgrade for %s: %v (retried on a later list)", slug, werr)
+	}
+	return fresh.toDomain(slug, owner), true, nil
+}
+
+// freshRowFromHead derives the full projection row from the authoritative
+// {slug} rows: the read-through for an entry that cannot render from its
+// cached fields, shared by the list-walk upgrade and the owner-doc heal.
+// ok=false when the paste is gone or failed, so the entry renders nothing.
+func (r *ShaleRepo) freshRowFromHead(slug domain.Slug) (identityPasteRow, bool, error) {
 	var head pasteRow
 	if err := r.getJSON(shaleKeyPaste(slug), &head); err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return domain.Paste{}, false, nil
+			return identityPasteRow{}, false, nil
 		}
-		return domain.Paste{}, false, err
+		return identityPasteRow{}, false, err
 	}
 	if domain.NormalizeStatus(head.Status) == domain.PasteStatusFailed {
-		return domain.Paste{}, false, nil // its bytes never landed
+		return identityPasteRow{}, false, nil // its bytes never landed
 	}
 
 	live, latest := head.LiveBytes, head.LatestVersion
 	if latest == 0 {
-		// Predates the head totals: derive them once. The rewrite below stamps
-		// them, so this never repeats for this slug.
+		// Predates the head totals: derive them once. The caller's rewrite
+		// stamps them, so this never repeats for this slug.
 		versions, err := r.scanVersions(slug)
 		if err != nil {
-			return domain.Paste{}, false, err
+			return identityPasteRow{}, false, err
 		}
 		live, latest = int(liveVersionBytes(versions)), latestActiveVerNum(versions)
 	}
 
-	fresh := identityPasteRow{
+	return identityPasteRow{
 		Name: head.Name, Size: live, ServedSize: head.Size, CreatedAt: head.CreatedAt,
 		Kind: head.Kind, LatestVersion: latest,
 		PinnedVersion: head.PinnedVersion, UpdatedAt: head.UpdatedAt,
-	}
-	if _, werr := r.guardedPutIndexEntry(item.Key, item.Value, true, fresh); werr != nil {
-		r.repoLog().Printf("shale: index upgrade for %s: %v (retried on a later list)", slug, werr)
-	}
-	return fresh.toDomain(slug, owner), true, nil
+	}, true, nil
 }
 
 func (r *ShaleRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
@@ -658,6 +677,11 @@ func (r *ShaleRepo) CountByOwner(owner string) (int, error) {
 	if owner == "" {
 		return 0, nil
 	}
+	if doc, err := r.getOwnerDoc(owner); err != nil {
+		return 0, err
+	} else if doc != nil {
+		return len(doc.Pastes), nil
+	}
 	idx, err := r.scanPrefix(shalePrefixIdentityPastes(owner))
 	if err != nil {
 		return 0, err
@@ -676,7 +700,14 @@ func (r *ShaleRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, err
 	if owner == "" {
 		return 0, nil
 	}
-	total, err := r.sumActiveBytesForOwner(owner, now)
+	// Doc-first: the quota figure is one point Get. The legacy scan serves
+	// only pre-migration owners.
+	if doc, err := r.getOwnerDoc(owner); err != nil {
+		return 0, err
+	} else if doc != nil {
+		return int(doc.summary().PasteBytes), nil
+	}
+	total, err := r.sumActiveBytesForOwner(owner)
 	if err != nil {
 		return 0, err
 	}
@@ -702,7 +733,7 @@ func (r *ShaleRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, err
 // summarised in one log line per scan. A LEGACY entry, recognized by shape (an
 // EMPTY value, the bare-marker convention an in-place migration carries over),
 // is read through its authoritative rows until their next list enriches it.
-func (r *ShaleRepo) sumActiveBytesForOwner(owner string, now time.Time) (int64, error) {
+func (r *ShaleRepo) sumActiveBytesForOwner(owner string) (int64, error) {
 	idx, err := r.scanPrefix(shalePrefixIdentityPastes(owner))
 	if err != nil {
 		return 0, err
@@ -789,6 +820,17 @@ func (r *ShaleRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 	if owner == "" {
 		return time.Time{}, nil
 	}
+	if doc, err := r.getOwnerDoc(owner); err != nil {
+		return time.Time{}, err
+	} else if doc != nil {
+		return doc.FirstSeen, nil
+	}
+	return r.legacyOwnerFirstSeen(owner)
+}
+
+// legacyOwnerFirstSeen reads the identity_first_seen key, the pre-doc
+// representation the heal seeds the doc's FirstSeen from.
+func (r *ShaleRepo) legacyOwnerFirstSeen(owner string) (time.Time, error) {
 	raw, err := r.getRaw(shaleKeyIdentityFirstSeen(owner))
 	if err != nil {
 		return time.Time{}, err
@@ -1079,8 +1121,10 @@ func (r *ShaleRepo) insertArtifact(ctx context.Context, p domain.Paste, userCap 
 		// A different identity holds the slug, or nothing does: the entry
 		// written above is an orphan. Best-effort removal keeps the common
 		// failure (a slug race) from charging the owner; if it fails, the
-		// intent stays and a sweep finishes the job.
-		if _, derr := r.guardedDeleteIndexEntry(entryKey, guard); derr != nil {
+		// intent stays and a sweep finishes the job. The doc entry drops in
+		// the same CAS: doc-first reads have no pruning path, so a doc
+		// phantom would over-count this owner permanently.
+		if _, derr := r.guardedDropOwnerEntry(p.Identity.String(), p.Slug.String(), guard); derr != nil {
 			r.repoLog().Printf("shale: rollback of enumeration entry for %s: %v (a sweep will retry it)", p.Slug, derr)
 		} else if cerr := r.intents.Complete(ctx, intent.ID, intent.Scope); cerr != nil {
 			r.repoLog().Printf("shale: forgetting the intent for %s: %v (a sweep will retry it)", p.Slug, cerr)
@@ -1275,37 +1319,51 @@ func stampManifestBlobIDs(m domain.Manifest, refs []cluster.BlobRef) domain.Mani
 	return out
 }
 
-// confirmInsert writes the identity_pastes index entry and sets
-// identity_first_seen if absent, on the {id} shard in one CAS. The entry is
-// what SumActiveBytesByOwner sums (its cached size seeds at v1's size, the
-// paste's whole live sum at insert) and how ListByOwner / CountByOwner
-// enumerate. Idempotent: a re-run overwrites the same entry and leaves an
-// already-set first-seen untouched.
+// confirmInsert writes the identity_pastes index entry, sets
+// identity_first_seen if absent, and updates the owner doc, on the {id} shard
+// in one CAS. The entry is what SumActiveBytesByOwner sums (its cached size
+// seeds at v1's size, the paste's whole live sum at insert) and how
+// ListByOwner / CountByOwner enumerate. Idempotent: a re-run overwrites the
+// same entry and leaves an already-set first-seen untouched.
 func (r *ShaleRepo) confirmInsert(p domain.Paste) error {
 	identity := p.Identity.String()
 	slug := p.Slug.String()
 	indexKey := shaleKeyIdentityPaste(identity, slug)
 	firstSeenKey := shaleKeyIdentityFirstSeen(identity)
+	entry := identityPasteRow{
+		Name:          p.Name,
+		Size:          p.Size,
+		ServedSize:    p.Size,
+		CreatedAt:     p.CreatedAt,
+		Kind:          string(p.Kind),
+		LatestVersion: 1,
+		PinnedVersion: p.PinnedVersion,
+		UpdatedAt:     p.UpdatedAt,
+	}
+	candidate, err := r.ownerDocCandidate(identity)
+	if err != nil {
+		return err
+	}
 	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
-		if err := shaleTxPutJSON(tx, indexKey, identityPasteRow{
-			Name:          p.Name,
-			Size:          p.Size,
-			ServedSize:    p.Size,
-			CreatedAt:     p.CreatedAt,
-			Kind:          string(p.Kind),
-			LatestVersion: 1,
-			PinnedVersion: p.PinnedVersion,
-			UpdatedAt:     p.UpdatedAt,
-		}); err != nil {
+		if err := shaleTxPutJSON(tx, indexKey, entry); err != nil {
 			return err
 		}
 		// Write-if-absent keeps this a MIN(created_at).
 		if _, err := tx.Get(firstSeenKey); errors.Is(err, backend.ErrNotFound) {
-			return tx.Put(firstSeenKey, []byte(p.CreatedAt.UTC().Format(time.RFC3339Nano)))
+			if perr := tx.Put(firstSeenKey, []byte(p.CreatedAt.UTC().Format(time.RFC3339Nano))); perr != nil {
+				return perr
+			}
 		} else if err != nil {
 			return err
 		}
-		return nil
+		return r.txApplyOwnerDoc(tx, identity, candidate, func(doc *ownerDoc) {
+			doc.Pastes[slug] = ownerDocPasteFromRow(entry)
+			// Set-if-zero preserves the MIN semantics: an existing owner's
+			// first-seen arrives via the doc or the heal seed.
+			if doc.FirstSeen.IsZero() {
+				doc.FirstSeen = p.CreatedAt.UTC()
+			}
+		})
 	})
 }
 
@@ -1384,17 +1442,9 @@ func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
 	if err != nil || !transitioned {
 		return err
 	}
-	// Step 2: drop the enumeration-index entry on the {id} shard so the failed
-	// paste leaves ListByOwner and stops being enumerated at all.
-	indexKey := shaleKeyIdentityPaste(identity, slug.String())
-	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
-		if _, err := tx.Get(indexKey); err == nil {
-			return tx.Delete(indexKey)
-		} else if !errors.Is(err, backend.ErrNotFound) {
-			return err
-		}
-		return nil
-	})
+	// Step 2: drop the enumeration entry and the doc entry on the {id} shard
+	// so the failed paste leaves ListByOwner and stops being enumerated at all.
+	return r.dropOwnerEntry(identity, slug.String())
 }
 
 // AppendVersionWithQuotaCheck appends a new version. The per-owner cap is
@@ -1551,29 +1601,39 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now ti
 	return AppendResult{}, fmt.Errorf("shale: append %q: could not allocate a free version number after %d attempts", slug, maxRenumberAttempts)
 }
 
-// refreshIndexProjection updates the owner's identity_pastes projection after a
-// size-changing {slug} write: it recomputes the paste's live byte sum from the
-// authoritative version rows into the cached size.
+// refreshIndexProjection updates the owner's identity_pastes projection and
+// owner doc after a size-changing {slug} write: it recomputes the paste's
+// live byte sum from the authoritative version rows into the cached size.
 //
 // One {id}-shard CAS, GUARDED: the entry's payload is captured BEFORE the
 // recompute and the write commits only if the entry still holds it, so two
 // concurrent same-slug refreshes cannot land older-sum-last. The loser SKIPS
 // rather than clobbering the fresher sum, costing at most one cycle of
 // staleness that the next list converges; there is no recompute retry on the
-// response path (docs/SPEC.md "Scan-derived quota" / "Window C").
+// response path (docs/SPEC.md "Scan-derived quota" / "Window C"). The doc
+// update rides the SAME transaction, so entry and doc move together or not
+// at all.
 //
-// A missing entry is left missing and a LEGACY empty entry left for the
-// list-time enrichment (meanwhile the quota scan reads it through the
-// authoritative rows). A Placeholder has no trustworthy fields to preserve, so
+// A missing or LEGACY-empty entry is refreshed through the doc when the doc
+// carries the slug (doc-first reads have no list-time enrichment, so nothing
+// else would ever unfreeze that entry), and left for the list-time enrichment
+// on a pre-doc owner. A Placeholder has no trustworthy fields to preserve, so
 // it is left whole rather than part-patched.
 func (r *ShaleRepo) refreshIndexProjection(identity string, slug domain.Slug) error {
+	if identity == "" {
+		return nil // paste gone mid-flight; the best-effort refresh has no subject
+	}
 	indexKey := shaleKeyIdentityPaste(identity, slug.String())
 	expected, err := r.getRaw(indexKey)
 	if err != nil {
 		return err
 	}
+	candidate, err := r.ownerDocCandidate(identity)
+	if err != nil {
+		return err
+	}
 	if len(expected) == 0 {
-		return nil // absent, or legacy-empty; the owner's next list handles both
+		return r.refreshFromEmptyEntry(identity, slug, candidate)
 	}
 	var row identityPasteRow
 	if err := json.Unmarshal(expected, &row); err != nil {
@@ -1594,9 +1654,66 @@ func (r *ShaleRepo) refreshIndexProjection(identity string, slug domain.Slug) er
 	row.LatestVersion = head.LatestVersion
 	row.PinnedVersion = head.PinnedVersion
 	row.UpdatedAt = head.UpdatedAt
-	written, err := r.guardedPutIndexEntry(indexKey, expected, true, row)
+	written, err := r.guardedPutIndexEntry(indexKey, expected, true, row, func(tx backend.Transaction) error {
+		return r.txApplyOwnerDoc(tx, identity, candidate, func(doc *ownerDoc) {
+			doc.Pastes[slug.String()] = ownerDocPasteFromRow(row)
+		})
+	})
 	if err != nil {
 		return err
+	}
+	if !written {
+		r.repoLog().Printf("shale: index refresh %s skipped: entry changed during the recompute (a concurrent write landed; the next list converges)", indexKey)
+	}
+	return nil
+}
+
+// refreshFromEmptyEntry refreshes a slug whose legacy entry is absent or the
+// old empty-marker shape. A pre-doc owner is left for the list-time
+// enrichment; for a doc-present owner that enrichment never runs (lists read
+// the doc), so the doc entry is refreshed from the head row HERE and a real
+// legacy row is written alongside (the dual-write). The doc mutation UPDATES,
+// never creates: entry-absence gives the guard nothing to compare, so a
+// racing whole-paste delete must win by the slug simply being gone from the
+// doc when the mutation runs.
+func (r *ShaleRepo) refreshFromEmptyEntry(identity string, slug domain.Slug, candidate *ownerDoc) error {
+	doc, err := r.getOwnerDoc(identity)
+	if err != nil {
+		return err
+	}
+	if doc == nil {
+		return nil // pre-doc owner; the next list enriches the legacy entry
+	}
+	if _, ok := doc.Pastes[slug.String()]; !ok {
+		return nil // neither representation carries it; a refresh never creates
+	}
+	fresh, ok, err := r.freshRowFromHead(slug)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil // gone or failed; the delete / fail paths own removal
+	}
+	indexKey := shaleKeyIdentityPaste(identity, slug.String())
+	post := func(tx backend.Transaction) error {
+		return r.txApplyOwnerDoc(tx, identity, candidate, func(d *ownerDoc) {
+			if _, ok := d.Pastes[slug.String()]; ok {
+				d.Pastes[slug.String()] = ownerDocPasteFromRow(fresh)
+			}
+		})
+	}
+	// The snapshot cannot tell an empty-marker entry from an absent one, so
+	// each shape gets its own guarded attempt; a value landing concurrently
+	// fails both guards and wins.
+	written, err := r.guardedPutIndexEntry(indexKey, nil, true, fresh, post)
+	if err != nil {
+		return err
+	}
+	if !written {
+		written, err = r.guardedPutIndexEntry(indexKey, nil, false, fresh, post)
+		if err != nil {
+			return err
+		}
 	}
 	if !written {
 		r.repoLog().Printf("shale: index refresh %s skipped: entry changed during the recompute (a concurrent write landed; the next list converges)", indexKey)
@@ -1699,17 +1816,9 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 		return txErr
 	}
 
-	// Drop the enumeration-index entry on the {id} shard so the paste leaves
-	// the owner's scan. Idempotent.
-	indexKey := shaleKeyIdentityPaste(head.Identity, slug.String())
-	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
-		if _, err := tx.Get(indexKey); err == nil {
-			return tx.Delete(indexKey)
-		} else if !errors.Is(err, backend.ErrNotFound) {
-			return err
-		}
-		return nil
-	})
+	// Drop the enumeration entry and the doc entry on the {id} shard so the
+	// paste leaves the owner's scan and doc render. Idempotent.
+	return r.dropOwnerEntry(head.Identity, slug.String())
 }
 
 // DeleteVersion tombstones a single version: it stays visible in the list
@@ -1807,20 +1916,38 @@ func (r *ShaleRepo) SetName(slug domain.Slug, name string) error {
 	}); err != nil {
 		return err
 	}
-	// Best-effort refresh of the denormalized name in the index projection.
-	indexKey := shaleKeyIdentityPaste(r.ownerOfSlug(slug), slug.String())
-	_ = r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
+	// Refresh the denormalized name in the index projection and the owner
+	// doc, in one {id}-shard CAS. Errors PROPAGATE: the doc is what the
+	// listing renders, so a swallowed failure here is a rename that reported
+	// success while staying invisible.
+	identity := r.ownerOfSlug(slug)
+	if identity == "" {
+		return nil // paste gone mid-flight; nothing to refresh
+	}
+	candidate, err := r.ownerDocCandidate(identity)
+	if err != nil {
+		return err
+	}
+	indexKey := shaleKeyIdentityPaste(identity, slug.String())
+	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
 		var row identityPasteRow
-		if err := shaleTxGetJSON(tx, indexKey, &row); err != nil {
-			if errors.Is(err, ErrNotFound) {
-				return nil
-			}
-			return err
+		gerr := shaleTxGetJSON(tx, indexKey, &row)
+		if gerr != nil && !errors.Is(gerr, ErrNotFound) {
+			return gerr
 		}
-		row.Name = name
-		return shaleTxPutJSON(tx, indexKey, row)
+		if gerr == nil {
+			row.Name = name
+			if perr := shaleTxPutJSON(tx, indexKey, row); perr != nil {
+				return perr
+			}
+		}
+		return r.txApplyOwnerDoc(tx, identity, candidate, func(doc *ownerDoc) {
+			if e, ok := doc.Pastes[slug.String()]; ok {
+				e.Name = name
+				doc.Pastes[slug.String()] = e
+			}
+		})
 	})
-	return nil
 }
 
 // ownerOfSlug resolves a slug's owner identity from slug_owner in one

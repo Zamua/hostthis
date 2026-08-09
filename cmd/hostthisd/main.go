@@ -138,9 +138,6 @@ func main() {
 		// so no transport forks on content (docs/SPEC.md "One paste, not two
 		// aggregates").
 		uploadSvc.Archive = service.ArchiveAdapter{Deployer: deploySvc}
-		// The quota cap sums paste + site bytes, so whoami's used_bytes
-		// under-counts without this.
-		manageSvc.SiteBytes = siteRepo
 	}
 
 	// Rooms: the no-auth, capability-based app-persistence tier under
