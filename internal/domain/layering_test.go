@@ -40,8 +40,13 @@ const internalPrefix = "github.com/Zamua/hostthis/internal/"
 //	                  service port, so it alone may see both. Anything else
 //	                  needing both belongs in cmd/hostthisd.
 var layerPolicy = map[string][]string{
-	"mime":            {},
-	"render":          {},
+	"mime":   {},
+	"render": {},
+	// Collectors only. It reaches nothing internal and must stay that way: the
+	// consumer declares a recorder port and this package satisfies it, so an
+	// entry here would mean instrumentation had started reaching into the
+	// layers it observes.
+	"metrics":         {},
 	"durable":         {},
 	"domain":          {},
 	"archive":         {"domain"},
