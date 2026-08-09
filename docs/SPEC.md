@@ -6169,6 +6169,14 @@ without authentication; a `/metrics` route beside them would publish
 request rates, verb mix and failure counts to anyone who asked. The
 metrics port is never routed by the ingress.
 
+The same listener serves Go's pprof endpoints under `/debug/pprof/`.
+Wait-dominated latency is invisible to counters and to CPU profiles
+alike; a goroutine dump taken during a slow command shows exactly which
+call it is blocked in, which is the question a latency investigation
+actually asks. pprof exposes stacks and heap contents, so it inherits
+the same rule as `/metrics`: private listener only, never the public
+mux.
+
 ### Why the SSH surface needs this
 
 SSH is the primary interface, and it is the one an operator cannot see
