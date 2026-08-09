@@ -25,7 +25,11 @@ var errIndexEntryChanged = errors.New("shale: index entry changed since the comp
 // the next read recomputes from fresher rows (docs/SPEC.md "Window C"). The compare runs inside the {id}-shard CAS with the
 // entry in the read-set, so a write landing between the compare and the commit
 // conflicts, and the re-run closure re-compares against the new value and skips.
-func (r *ShaleRepo) guardedPutIndexEntry(key, expected []byte, present bool, row any) (bool, error) {
+//
+// post, when non-nil, runs inside the SAME transaction after the put, so a
+// companion write (the owner-doc update) commits with the entry or not at
+// all. It runs only when the guard passed.
+func (r *ShaleRepo) guardedPutIndexEntry(key, expected []byte, present bool, row any, post func(tx backend.Transaction) error) (bool, error) {
 	if r.testHookGuardedIndexWrite != nil {
 		if err := r.testHookGuardedIndexWrite(key); err != nil {
 			return false, err
@@ -52,7 +56,13 @@ func (r *ShaleRepo) guardedPutIndexEntry(key, expected []byte, present bool, row
 				return errIndexEntryChanged
 			}
 		}
-		return shaleTxPutJSON(tx, key, row)
+		if err := shaleTxPutJSON(tx, key, row); err != nil {
+			return err
+		}
+		if post != nil {
+			return post(tx)
+		}
+		return nil
 	})
 	if errors.Is(err, errIndexEntryChanged) {
 		return false, nil
@@ -64,14 +74,16 @@ func (r *ShaleRepo) guardedPutIndexEntry(key, expected []byte, present bool, row
 }
 
 // guardedDeleteIndexEntry removes the entry at key ONLY IF it still holds
-// expected, the payload the intent that owns this cleanup recorded. It is the
-// delete sibling of guardedPutIndexEntry and exists for one reason: between a
-// crashed insert and the sweep that cleans up after it, the owner may have
-// re-uploaded the same slug. An unguarded delete would eat that fresh entry.
+// expected, the payload the intent that owns this cleanup recorded. The guard
+// exists because between a crashed insert and the sweep that cleans up after
+// it, the owner may have re-uploaded the same slug, and an unguarded delete
+// would eat that fresh entry. post, when non-nil, runs inside the same
+// transaction after the delete, only when the guard passed.
 //
 // Reports whether it deleted. A mismatch (or an already-absent entry) is
-// (false, nil): someone else won, which is the correct outcome, not an error.
-func (r *ShaleRepo) guardedDeleteIndexEntry(key, expected []byte) (bool, error) {
+// (false, nil) and commits nothing: someone else won, which is the correct
+// outcome, not an error.
+func (r *ShaleRepo) guardedDeleteIndexEntry(key, expected []byte, post func(tx backend.Transaction) error) (bool, error) {
 	err := r.cluster.Transact(key, func(tx backend.Transaction) error {
 		cur, gerr := tx.Get(key) // records the read-check
 		if errors.Is(gerr, backend.ErrNotFound) {
@@ -87,7 +99,13 @@ func (r *ShaleRepo) guardedDeleteIndexEntry(key, expected []byte) (bool, error) 
 		if !bytes.Equal(payload, expected) {
 			return errIndexEntryChanged // a fresher write owns this entry now
 		}
-		return tx.Delete(key)
+		if derr := tx.Delete(key); derr != nil {
+			return derr
+		}
+		if post != nil {
+			return post(tx)
+		}
+		return nil
 	})
 	if errors.Is(err, errIndexEntryChanged) {
 		return false, nil
@@ -96,4 +114,22 @@ func (r *ShaleRepo) guardedDeleteIndexEntry(key, expected []byte) (bool, error) 
 		return false, err
 	}
 	return true, nil
+}
+
+// guardedDropOwnerEntry is the rollback paths' guarded delete of an
+// enumeration entry, with the owner doc's entry dropped in the same CAS: a
+// doc-present owner never consults the legacy rows again, so a rollback that
+// removed only the row would leave a doc phantom no read prunes. A guard
+// mismatch touches NEITHER representation; the fresher write's own path
+// maintains the doc.
+func (r *ShaleRepo) guardedDropOwnerEntry(identity, slug string, expected []byte) (bool, error) {
+	candidate, err := r.ownerDocCandidate(identity)
+	if err != nil {
+		return false, err
+	}
+	return r.guardedDeleteIndexEntry(shaleKeyIdentityPaste(identity, slug), expected, func(tx backend.Transaction) error {
+		return r.txApplyOwnerDoc(tx, identity, candidate, func(doc *ownerDoc) {
+			delete(doc.Pastes, slug)
+		})
+	})
 }

@@ -28,6 +28,11 @@ type PasteAdmin interface {
 	CountByOwner(owner string) (int, error)
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
 	OwnerFirstSeen(owner string) (time.Time, error)
+	// OwnerSummary is whoami's roll-up in one call: count + first-seen +
+	// paste bytes + site bytes. The used total is PasteBytes + SiteBytes,
+	// so a repo whose site bytes already live in the paste sum reports
+	// SiteBytes zero.
+	OwnerSummary(owner string, now time.Time) (domain.OwnerSummary, error)
 }
 
 // ErrNotOwner is returned by an owner-gated operation when the requesting
@@ -52,20 +57,11 @@ var ErrInvalidName = errors.New("service: name must be 1–60 printable Unicode 
 type Manage struct {
 	// Sniff classifies bytes for DetectKind's text-only rule. A PORT
 	// (domain.MIMESniffer).
-	Sniff     domain.MIMESniffer
-	Repo      PasteAdmin
-	Blob      BlobUnit       // Show (ReadAll), Update (Stage+Commit), Delete (UnbindOnDelete)
-	KeyGate   *KeyGate       // optional; populates WhoamiInfo.Session when set
-	SiteBytes SiteByteSummer // optional; when set, Whoami's used_bytes includes static-site bytes
-	Now       func() time.Time
-}
-
-// SiteByteSummer returns an identity's active static-site bytes. Whoami adds
-// them to the paste-byte sum so used_bytes reflects the SAME paste+site total
-// the quota check enforces. Nil on a metadata backend with no site repo, in
-// which case Whoami reports paste bytes only.
-type SiteByteSummer interface {
-	SumActiveBytesByOwner(owner string, now time.Time) (int64, error)
+	Sniff   domain.MIMESniffer
+	Repo    PasteAdmin
+	Blob    BlobUnit // Show (ReadAll), Update (Stage+Commit), Delete (UnbindOnDelete)
+	KeyGate *KeyGate // optional; populates WhoamiInfo.Session when set
+	Now     func() time.Time
 }
 
 func NewManage(repo PasteAdmin, blob BlobUnit) *Manage {
@@ -357,33 +353,17 @@ func (m *Manage) Whoami(owner, subnet string) (WhoamiInfo, error) {
 	if !domain.Identity(owner).IsKeyed() {
 		return WhoamiInfo{}, ErrEmptyOwner
 	}
-	active, err := m.Repo.CountByOwner(owner)
+	sum, err := m.Repo.OwnerSummary(owner, m.Now().UTC())
 	if err != nil {
 		return WhoamiInfo{}, err
-	}
-	first, err := m.Repo.OwnerFirstSeen(owner)
-	if err != nil {
-		return WhoamiInfo{}, err
-	}
-	used, err := m.Repo.SumActiveBytesByOwner(owner, m.Now().UTC())
-	if err != nil {
-		return WhoamiInfo{}, err
-	}
-	// Include static-site bytes so used_bytes matches the paste+site total the
-	// quota check enforces; without this it under-reports and disagrees with
-	// the write-check that rejects at the combined cap.
-	if m.SiteBytes != nil {
-		siteUsed, err := m.SiteBytes.SumActiveBytesByOwner(owner, m.Now().UTC())
-		if err != nil {
-			return WhoamiInfo{}, err
-		}
-		used += int(siteUsed)
 	}
 	info := WhoamiInfo{
-		Identity:   owner,
-		Active:     active,
-		FirstSeen:  first,
-		UsedBytes:  used,
+		Identity:  owner,
+		Active:    sum.Active,
+		FirstSeen: sum.FirstSeen,
+		// Paste + site bytes: the same combined total the quota check
+		// enforces, so whoami never under-reports against the cap.
+		UsedBytes:  int(sum.PasteBytes + sum.SiteBytes),
 		QuotaBytes: domain.UserQuotaBytes,
 	}
 	if m.KeyGate != nil && subnet != "" {

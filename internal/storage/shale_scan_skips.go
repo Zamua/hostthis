@@ -42,9 +42,27 @@ func (s *scanSkips) report(r *ShaleRepo, owner, plane string) {
 		plane, owner, s.n, plural(s.n), strings.Join(s.sample, "; "))
 }
 
+// reportHeal is the owner-doc heal walk's summary, same per-pass discipline.
+// A skipped record is left out of the doc (the under-count direction) and
+// restored by that slug's next write.
+func (s *scanSkips) reportHeal(r *ShaleRepo, owner string) {
+	if s.n == 0 {
+		return
+	}
+	r.repoLog().Printf("shale: owner-doc heal for %s skipped %d unreadable record%s (left out of the doc; a slug's next write restores its entry): %s",
+		owner, s.n, pluralS(s.n), strings.Join(s.sample, "; "))
+}
+
 func plural(n int) string {
 	if n == 1 {
 		return "y"
 	}
 	return "ies"
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }

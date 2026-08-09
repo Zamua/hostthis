@@ -3838,6 +3838,77 @@ before it starts (below). Its lifetime is bounded by the owner's next request
 rather than by a background pass, so no cross-shard job is reintroduced to get
 that bound.
 
+### The owner document (v2 owner index)
+
+The owner's index is ONE document, not a family of rows:
+
+```
+owner_doc/<identity>    JSON {first_seen, pastes: [entry...], sites: [entry...]}
+```
+
+Each entry mirrors what the per-row index cached (slug, kind, name, size,
+latest/pinned version, created), so `list` renders and the quota sums from
+the doc alone. The key starts with the identity, so it lives on the same
+`{id}` shard as the legacy row families and joins the exact transactions
+that used to maintain them.
+
+**Why a document.** The row-per-paste index made same-owner writes
+contention-free, and that was the wrong trade. Reads and quota checks pay
+a prefix scan whose range grows with LIFETIME churn, because at
+replication factor >1 a deleted entry is a tombstone the engine must walk
+forever, and an object-store LSM's scan path bypasses the block cache, so
+that walk is paid against the object store every time. Same-owner write
+concurrency is rare in practice; read cost is paid on every whoami, list,
+and upload. The document reverses the trade: reads and quota checks become
+one doc Get - and point reads, unlike scans, go through the configured
+block cache, so the warm path does not touch the object store at all.
+Concurrent same-owner writes now contend on the doc's single-shard CAS and
+retry; that serialization is accepted, deliberately, and there is NO cap
+on entries per owner (revisit only if a real owner's doc ever becomes a
+problem).
+
+**Reads.** `OwnerSummary` (whoami: count + bytes + first_seen),
+`ListByOwner`, and the quota sum each read the doc with ONE Get. A
+directory is a paste, so sites list and sum through the paste family and
+the doc's `sites` map stays empty this release (it exists for the site
+families' own follow-up migration). `ListByOwner` additionally keeps its
+resolve-on-read step - a prefix scan of the owner's outstanding `intents/`
+- BEFORE the doc read, so a listing is one doc Get plus the owner's intent
+resolution, not a bare point Get; that residual scan is a known cost, left
+in place deliberately. When no doc exists (a pre-migration owner), reads
+fall back to the legacy row scan, READ-ONLY: the fallback never writes the
+doc, so reads stay free of write races by construction.
+
+**Writes.** Every mutation that maintained a legacy index row - paste
+insert (the saga's T1 entry step), Delete, MarkFailed, Rename, pin/unpin,
+the list-walk projection refresh, and the site deploy / re-deploy / delete
+index touches - now updates the doc inside the SAME single-shard `{id}`
+transaction. A mutation that finds no doc HEALS first: it builds the doc
+from the legacy rows (the same walk the legacy list used, pruning stale
+entries), then applies itself, then writes doc + legacy rows together.
+Heal-on-write rather than heal-on-read means the first mutation migrates
+the owner atomically under the shard CAS, and two racing first-writes
+serialize on that CAS - the loser re-reads and finds the doc already
+present.
+
+**Dual representation, this release.** Writes maintain BOTH the doc and
+the legacy rows, so rolling back to the previous binary loses nothing (it
+just resumes scanning rows the doc release also kept true). The doc is
+authoritative the moment it exists: readers never consult legacy rows for
+an owner with a doc. A later release drops the legacy writes and the
+fallback read; the dead rows then cost nothing, because nothing scans
+them, and their bytes wait on engine-level garbage collection with no
+urgency.
+
+`first_seen` folds into the doc (seeded from the legacy
+`identity_first_seen` key during heal); the legacy key keeps being written
+alongside until the drop release, same as the row families.
+
+**Deliberately unchanged here:** the per-slug `versions/` family and the
+keygate families migrate to their own single-doc shapes in follow-up
+releases; the staged-refs and intent families stay row-shaped (boot-path
+only, never on a user's request path).
+
 ### Fencing the writer recovery took over from
 
 Recording the staged bytes is not enough on its own. Recovery is BY DESIGN a

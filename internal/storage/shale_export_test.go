@@ -158,6 +158,11 @@ func IdentityPasteKeyForTest(identity, slug string) []byte {
 	return shaleKeyIdentityPaste(identity, slug)
 }
 
+// OwnerDocKeyForTest returns the "owner_doc/<identity>" key. Deleting it turns
+// an owner back into the pre-migration shape (legacy rows only), which is how
+// the heal-on-write and read-fallback tests set their stage.
+func OwnerDocKeyForTest(identity string) []byte { return shaleKeyOwnerDoc(identity) }
+
 // MarkerValueForTest is the non-empty placeholder value index families use
 // (shale rejects empty Put values).
 func MarkerValueForTest() []byte { return markerValue }
