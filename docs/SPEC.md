@@ -3478,7 +3478,11 @@ behaviors are expressed in terms of inputs and observable outputs:
   clock.
 - **Pin / unpin.** `SetPinnedVersion` makes a version sticky and rolls
   the head to it; `Unpin` clears the pin and rolls the head back to the
-  latest non-deleted version.
+  latest non-deleted version. Both refusals are the repo's own, decided
+  inside the rolling transaction: `SetPinnedVersion` refuses a
+  tombstoned target (version-deleted sentinel), whose blob is already
+  unbound, and `Unpin` refuses (versions-incomplete sentinel) when the
+  version set cannot be read in full, rather than rolling backwards.
 - **DeleteVersion tombstones (content-inaccessible, blob GC-able).**
   Flips a version's deleted flag, leaving the metadata row so the
   number is not reused and history stays auditable. `ListVersions`
@@ -3490,8 +3494,11 @@ behaviors are expressed in terms of inputs and observable outputs:
   against quota. Recoverability of the dropped blob is provided beneath
   the app by object-store versioning plus a noncurrent-version
   lifecycle (an operator-level safety net, not an app feature). The
-  repo does NOT enforce refuse-current / refuse-pinned-current: those
-  guards live in `Manage.DeleteVersion`, not the repo. Whole-paste
+  repo enforces refuse-current / refuse-pinned-current itself, inside
+  the tombstone's own transaction (version-served sentinel), so a head
+  roll committing after any earlier check cannot slip the served
+  version through; `Manage.DeleteVersion` pre-checks the same rule
+  first for the friendly message. Whole-paste
   `Delete` is a full removal (the paste leaves every listing; there is
   nothing left to show versions of) and is unaffected by this rule.
 - **Owner-gating is a service-layer concern.** The repos are NOT
@@ -4203,11 +4210,15 @@ The two oracles answer different questions, so they are consumed differently:
   document cannot answer and the transaction cannot re-scan, so it REFUSES.
   Neither rolls the head onto a record it cannot vouch for.
 
-A heal on an unaccountable document lets the ROWS win every number they cover,
-rather than only filling gaps. Filling would leave the misdescribed record in
-place and then stamp the merged document with a matching generation, cementing
-the lie as trustworthy and blinding the oracle for good; a number the walk
-could not READ keeps the document's copy, which beats dropping a version. The
+A heal on an unaccountable document REBUILDS the set from the rows: the rows
+win every number they cover, and a record only the distrusted document holds
+is DROPPED rather than carried over. Filling would leave the misdescribed
+record in place and then stamp the merged document with a matching generation,
+cementing the lie as trustworthy and blinding the oracle for good - and a
+kept record the walk could not read would be stamped the same way, handing
+every later gate a record nothing vouches for. A number the walk saw but could
+not read therefore reads as TRUNCATION, which the gates already refuse on, and
+the numbering floor keeps its number reserved either way. The
 fill-versus-rebuild choice is made INSIDE the transaction from the document and
 the head as that transaction reads them, so a mutation that landed since the
 walk (which moved both together, and so reads as accountable) wins over the
@@ -4229,7 +4240,7 @@ about what it lacks. Operations divide on exactly that:
 | `pin` / `GetVersion` of a number the document lacks | REFUSE as unavailable, not as not-found | answer from the legacy ROWS | an absence in a truncated list is not knowledge, and not-found is a confident wrong answer; an unaccountable document may be wrong about a number it HOLDS too, and the rows are what the offending binary maintained |
 | append | proceed | proceed | it needs a NUMBER, and the high-water mark below reserves the numbers the document cannot see |
 | `versions`, the quota sums, the live-byte sum, blob-id resolution | proceed | proceed | each needs only what is present and none of them acts on it; the miss is a render or a count that is slightly wrong, in the direction the quota policy already accepts (above) |
-| per-version `delete` | proceed | proceed on the re-healed set | what "is this served" is decided FROM is the head, never the version list, and the subject is the record the transaction is about to flip - argued below; the heal it runs first rebuilds an unaccountable document from the rows |
+| per-version `delete` | proceed | proceed on the re-healed set | what "is this served" is decided FROM is the head, never the version list, and the subject is the record the transaction is about to flip - argued below; the heal it runs first rebuilds an unaccountable document from the rows, and a number only that distrusted document named refuses as unreadable, because the rebuilt set no longer holds it |
 | `pin` of a TOMBSTONED number | REFUSE | REFUSE, from the row | its blob is already unbound, so the roll would publish bytes the reclaimer is coming for; the refusal is taken inside the rolling transaction, on whichever record that transaction resolves |
 | whole-paste `delete` | proceed | proceed | its cascade is not derived from the document at all, argued below |
 
@@ -4237,6 +4248,14 @@ The refusal is its own sentinel, distinct from not-found, and the verbs report
 it verbatim ("this paste's version list could not be read in full, nothing was
 applied"). Collapsing it into not-found would be the same confident wrong
 answer one layer up.
+
+A version write can also abort RETRYABLY rather than refuse. One planned while
+the stored document was believable carries no heal seed, so a transaction that
+then meets a document that is undecodable or that the head no longer accounts
+for has nothing safe to rebuild from - starting from an empty document would
+silently drop every version. Nothing is applied, and the per-version delete
+surfaces the concurrent-change sentinel; the caller's retry re-plans, and that
+plan meets the damage and walks the legacy rows.
 
 The per-version delete earns its row rather than asserting it, and it earns it
 WITHOUT the document. Its guard refuses to tombstone the version the URL
@@ -5812,8 +5831,11 @@ because here the failure is not confined to the one record the user asked
 about. The carve-out is bounded by the truncation bit being STORED and
 CONSULTED rather than assumed away: `GetVersion` of a number a truncated
 document lacks answers "could not be read in full", never not-found, so no
-caller receives a confident wrong answer; `unpin` and `pin` refuse outright;
-and the `versions` render marks nothing "current" that the URL is not serving.
+caller receives a confident wrong answer; `unpin` refuses outright; `pin`
+refuses a number the document lacks, and a tombstoned target anywhere, while a
+live number the truncated document holds still rolls (the document is
+authoritative for what it holds); and the `versions` render marks nothing
+"current" that the URL is not serving.
 What Policy 2 forbids is a plausible-looking-but-incomplete result presented
 as complete, and none of these does that.
 

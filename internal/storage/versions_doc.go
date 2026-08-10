@@ -206,14 +206,17 @@ func (d *versionsDoc) latestLive() (versionRow, bool) {
 // could not read it.
 func (d *versionsDoc) fillFrom(seed *versionsDoc) { d.merge(seed, false) }
 
-// rebuildFrom lets the SEED win every number it holds, for a document the
+// rebuildFrom replaces d's record set with the SEED's, for a document the
 // head's generation says a binary without this logic modified. Filling would
 // leave the misdescribed record in place and then stamp the result with a
 // matching generation, which cements the lie as trustworthy and blinds the
 // oracle permanently. The legacy rows the seed was walked from are the truth in
 // that state, because rows are the only representation such a binary
-// maintains. A number the seed could NOT read keeps d's record, which beats
-// dropping a version outright.
+// maintains. A record ONLY the distrusted document holds is dropped for the
+// same reason: keeping it would stamp it trustworthy too, and a destructive
+// gate would then act on a record nothing vouches for. A number the walk saw
+// but could not read then reads as truncation, which every gate already
+// refuses on; the numbering floor survives regardless, so no number is reused.
 func (d *versionsDoc) rebuildFrom(seed *versionsDoc) { d.merge(seed, true) }
 
 // merge folds a heal walk's seed into d and re-decides completeness. It is the
@@ -224,8 +227,11 @@ func (d *versionsDoc) merge(seed *versionsDoc, seedWins bool) {
 	if seed == nil {
 		return
 	}
+	if seedWins {
+		d.Versions = nil
+	}
 	for _, v := range seed.Versions {
-		if _, held := d.find(v.VerNum); !held || seedWins {
+		if _, held := d.find(v.VerNum); !held {
 			d.upsert(v)
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -118,5 +119,54 @@ func TestVersionsDoc_DeleteRefusesTheServedVersionOverAnUnaccountableDocument(t 
 	// what is served rather than on the damage.
 	if _, err := manage.DeleteVersion(slug, owner, 1); err != nil {
 		t.Fatalf("an unserved version must still free over the same document: %v", err)
+	}
+}
+
+// A record ONLY an unaccountable document holds is vouched by nothing: the
+// generation proves a binary without this logic modified the set, and the row
+// - the representation that binary maintained - will not read. The rebuild
+// drops the record rather than stamping it trustworthy, so the delete refuses
+// the number as unreadable instead of guarding and unbinding from it.
+func TestVersionsDoc_DeleteRefusesARecordOnlyTheUnaccountableDocumentHolds(t *testing.T) {
+	repo := newShaleRepoForTest(t)
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	slug := domain.Slug("vguard02")
+	ctx := context.Background()
+
+	p := domain.Paste{
+		Slug: slug, Identity: "key:vguard2", Kind: domain.KindHTML,
+		ContentSHA: "sha-vguard2-v1", Size: 300, CreatedAt: now, UpdatedAt: now}
+	if err := repo.InsertWithQuotaCheck(ctx, p, 0, now); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	repo.WaitPendingConfirms()
+	for i, size := range []int{200, 100} {
+		if _, err := repo.AppendVersionWithQuotaCheck(ctx, slug, domain.KindHTML,
+			fmt.Sprintf("sha-vguard2-v%d", i+2), size, 0, now); err != nil {
+			t.Fatalf("append v%d: %v", i+2, err)
+		}
+	}
+	stripHeadVersionsGen(t, repo, slug)
+	if err := repo.PutRawForTest(storage.LegacyVersionKeyForTest(slug, 2), truncatedEnvelope); err != nil {
+		t.Fatalf("truncate v2's row envelope: %v", err)
+	}
+
+	if err := repo.DeleteVersion(slug, 2); !errors.Is(err, storage.ErrVersionsIncomplete) {
+		t.Fatalf("a record nothing vouches for must refuse as unreadable, got %v", err)
+	}
+	// The refusal is the one number's, never the paste's: a readable unserved
+	// version still frees over the same damage.
+	if err := repo.DeleteVersion(slug, 1); err != nil {
+		t.Fatalf("a readable version must still free: %v", err)
+	}
+	nums, _, complete := versionsDocFields(t, repo, slug)
+	if complete {
+		t.Fatal("the rebuilt document must record the truncation")
+	}
+	if !reflect.DeepEqual(nums, []int{1, 3}) {
+		t.Fatalf("the rebuilt document must not carry the unvouched record, got %v", nums)
+	}
+	if _, err := repo.GetVersion(slug, 2); !errors.Is(err, storage.ErrVersionsIncomplete) {
+		t.Fatalf("the gated read must answer unavailable, not not-found, got %v", err)
 	}
 }
