@@ -290,6 +290,11 @@ type ShaleRepo struct {
 	// non-nil return fails that write. Fault injection for the Policy-1 pin:
 	// one entry's write failure must not stall the rest of the reprojection.
 	testHookGuardedIndexWrite func(key []byte) error
+
+	// testHookVersionScan runs at the top of scanVersions, so a test can count
+	// version-family scans and prove the append fast path performs none when the
+	// cache is present.
+	testHookVersionScan func(slug domain.Slug)
 }
 
 // WaitPendingConfirms blocks until every background confirm goroutine has
@@ -1592,45 +1597,105 @@ func (r *ShaleRepo) appendVersion(ctx context.Context, slug domain.Slug, ref con
 }
 
 // errVerTaken signals that the candidate version number was already present at
-// read time inside a {slug} transaction, so the pre-scan the closure was built
-// from is stale. The closure aborts with it (Transact returns a non-conflict fn
+// read time inside a {slug} transaction, so the mark the closure numbered from
+// is stale-low. The closure aborts with it (Transact returns a non-conflict fn
 // error verbatim). Never escapes the function that raises it.
 var errVerTaken = errors.New("shale: candidate version number already taken")
+
+// errNeedScan aborts an append attempt that found the version cache ABSENT (a
+// pre-cache paste). The fast path numbers from point reads, but a cache-absent
+// paste needs a rows scan both to number safely (a pre-LatestVersion head mark
+// reads zero) and to rebuild the cache, and ScanPrefix cannot run inside a CAS
+// tx. The caller scans OUTSIDE the tx and retries. Never escapes the function.
+var errNeedScan = errors.New("shale: append needs a version scan to migrate a pre-cache paste")
 
 // ErrConcurrentChange aliases the domain-owned sentinel, matching how the rest
 // of the storage error vocabulary is re-exported.
 var ErrConcurrentChange = domain.ErrConcurrentChange
 
-// appendAuthoritative writes the new version row on the {slug} shard. The next
-// version number comes from a pre-scan outside the
-// tx, so two race outcomes are retried by re-scanning for a fresh number:
+// appendAuthoritative writes the new version row on the {slug} shard and numbers
+// it from the head's monotonic high-water mark, NOT a version scan.
 //
-//   - the candidate version key is ALREADY present at read time inside the tx
-//     (a concurrent append committed it after the scan): errVerTaken,
-//   - the candidate key is absent at read time but a concurrent append commits
-//     it first, so the ExpectAbsent read-check fails validation: ErrCASConflict.
+// Fast path (the cache is present): the candidate is
+// max(head.LatestVersion, cache max)+1, computed from reads the transaction
+// already performs. No scan. The ExpectAbsent read-check on the candidate key is
+// the backstop: a stale-LOW mark, or a concurrent append that committed the
+// number first, proposes a TAKEN number; the check rejects it (errVerTaken at
+// read time, ErrCASConflict at commit time) and the retry scans to recover the
+// true max and advance past it. A stale-HIGH mark only skips numbers, and gaps
+// are fine. So a version number is NEVER reused: not under a stale-low mark, not
+// under concurrent appends, and not for a tombstoned number (a tombstone keeps
+// its row and never lowers the mark, so the mark, the cache and the scan all
+// still count it).
 //
-// MAX(ver_num) counts tombstones, so version numbers are never reused.
+// Migration path (the cache is absent, a pre-cache paste): one scan OUTSIDE the
+// tx recovers the true max (covering a pre-LatestVersion head whose mark reads
+// zero) and rebuilds the cache. After it the paste is cache-present and its
+// appends rejoin the fast path.
+//
+// The cache is maintained in the SAME {slug} transaction with no rescan: the new
+// row is upserted onto the in-tx read of the present cache, or the rebuilt set
+// is stamped on the migration path. The in-tx read records a read-check, so a
+// concurrent append or tombstone conflicts and the committing attempt always
+// upserts onto the fresh set. A stale cache is harmless regardless (docs/SPEC.md
+// "The version index cache").
 func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now time.Time, refs []cluster.BlobRef, epoch int64) (AppendResult, error) {
 	pasteKey := shaleKeyPaste(slug)
 	// The blob id lands on the new version row and, when the head is unpinned
 	// (so the public URL follows this version), on the paste head row too.
 	blobID := firstBlobID(refs)
 	const maxRenumberAttempts = 16
-	for range maxRenumberAttempts {
-		versions, err := r.scanVersions(slug)
-		if err != nil {
-			return AppendResult{}, err
-		}
-		newVer := maxVerNum(versions) + 1
-		verKey := shaleKeyVersion(slug, newVer)
 
+	// scanned holds the version rows on the migration and collision-recovery
+	// attempts; the fast path never fills it. needScan latches once an attempt
+	// aborts, so every following attempt re-scans FRESH (a stale scan would
+	// re-propose a number a concurrent append already took).
+	var scanned []versionRow
+	var haveScan bool
+	needScan := false
+
+	for range maxRenumberAttempts {
+		haveScan = false
+		if needScan {
+			vs, err := r.scanVersions(slug)
+			if err != nil {
+				return AppendResult{}, err
+			}
+			scanned, haveScan = vs, true
+		}
+
+		var newVer int
 		var wasPinned bool
 		txErr := r.runAuthoritative(pasteKey, refs, bindFence{slug: slug, epoch: epoch}, func(tx shaleKVTx, bind func() error) error {
 			var p pasteRow
 			if err := shaleTxGetJSON(tx, pasteKey, &p); err != nil {
 				return err
 			}
+			// Read the disposable cache in-tx: its read-check keeps the upsert
+			// below on a fresh set, and its max lifts a pre-LatestVersion head.
+			// Absent => a pre-cache paste a scan must migrate, signalled out
+			// because ScanPrefix cannot run in a CAS tx.
+			cachedRows, cachePresent, cerr := txReadVersionsDoc(tx, slug)
+			if cerr != nil {
+				return cerr
+			}
+			if !cachePresent && !haveScan {
+				return errNeedScan
+			}
+
+			// Number from the monotonic high-water mark, lifted by the cache max
+			// and, on a recovery attempt, the scanned true max. Never a live-only
+			// figure, so a tombstoned number is never reused.
+			floor := p.LatestVersion
+			if cachePresent {
+				floor = max(floor, maxVerNum(cachedRows))
+			}
+			if haveScan {
+				floor = max(floor, maxVerNum(scanned))
+			}
+			newVer = floor + 1
+			verKey := shaleKeyVersion(slug, newVer)
+
 			// Reading the candidate key records an ExpectAbsent read-check, so a
 			// concurrent commit of it after this read conflicts at Commit time.
 			if _, gerr := tx.Get(verKey); gerr == nil {
@@ -1651,7 +1716,8 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now ti
 			}
 			p.UpdatedAt = now
 			// The totals roll in THIS transaction, so they can never disagree
-			// with the version rows they summarise.
+			// with the version rows they summarise. LatestVersion advances to
+			// newVer, healing a stale-low mark the recovery scan corrected.
 			p.LiveBytes += ref.Size
 			p.LatestVersion = newVer
 			if p.PinnedVersion == 0 {
@@ -1660,12 +1726,15 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now ti
 			if err := shaleTxPutJSON(tx, pasteKey, p); err != nil {
 				return err
 			}
-			// Refresh the disposable cache with the full set: the pre-tx scan
-			// plus the new row, whole, in this {slug} transaction. A concurrent
-			// tombstone this scan predates only leaves the cache slightly stale,
-			// which is harmless (docs/SPEC.md "The version index cache").
-			full := append(append([]versionRow(nil), versions...), newV)
-			if err := txPutVersionsDoc(tx, slug, full); err != nil {
+			// Maintain the cache with no rescan: upsert onto the present set, or
+			// stamp the rebuilt set from the migration scan.
+			base := cachedRows
+			if !cachePresent {
+				base = scanned
+			}
+			doc := versionsDoc{Versions: append([]versionRow(nil), base...)}
+			doc.upsert(newV)
+			if err := txPutVersionsDoc(tx, slug, doc.Versions); err != nil {
 				return err
 			}
 			return bind()
@@ -1673,8 +1742,10 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now ti
 		switch {
 		case txErr == nil:
 			return AppendResult{NewVer: newVer, WasPinned: wasPinned}, nil
-		case errors.Is(txErr, errVerTaken) || errors.Is(txErr, backend.ErrCASConflict):
-			continue // re-scan + re-number
+		case errors.Is(txErr, errNeedScan) ||
+			errors.Is(txErr, errVerTaken) || errors.Is(txErr, backend.ErrCASConflict):
+			needScan = true // migrate or recover: re-scan FRESH next attempt
+			continue
 		default:
 			return AppendResult{}, txErr
 		}

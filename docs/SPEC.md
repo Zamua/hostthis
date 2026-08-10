@@ -3960,8 +3960,12 @@ destructive-decision input on a disposable copy.
 
 A read served from a stale document yields a slightly-out-of-date listing, a
 slightly-off byte sum, or one extra row scan. None is a correctness stake,
-because nothing that DESTROYS data reads the document, and the next write that
-changes the version set rewrites it.
+because nothing that DESTROYS data reads the document. A write that changes the
+version set maintains it in the same transaction: insert seeds it, an append
+upserts its new row onto the present document, a per-version delete flips its
+record, and unpin re-stamps it whole from the scan it already holds. Only a
+change made behind the document's back (an old binary that predates the cache)
+leaves an entry stale, until a whole re-stamp (unpin) reconciles it.
 
 **Destructive operations decide from the rows and the head, never from the
 document.** This is the load-bearing rule that makes the cache disposable,
@@ -4004,16 +4008,25 @@ cause a destructive mistake. That is the whole safety argument.
 
 **Numbering also leaves the version scan.** An append takes the next number
 from the head's monotonic high-water mark (`LatestVersion`, which a tombstone
-never lowers) read inside its transaction, with the transaction's absent-check
-on the candidate version key as the backstop that turns any staleness into a
-retry rather than a collision. A pre-`LatestVersion` row (the field reads zero)
-falls back to the scan. So on the production blob path the request path scans
-the version family only for the two destructive verbs that inherently need the
-whole authoritative set, unpin and whole-paste delete; every other version
-operation is point reads plus the cache (per-version delete names the served
-version by blob id, a point read). The sha-keyed dev path has no blob id, so a
-per-version delete there additionally scans the rows to name the newest live
-version - still the authoritative rows, never the cache.
+never lowers), lifted by the cache's max version, both read inside its
+transaction. The transaction's absent-check on the candidate version key is the
+backstop that turns any staleness into a retry rather than a collision: a
+stale-low mark proposes a taken number, the check rejects it, and the retry
+scans the rows to recover the true max and advance past it (a stale-high mark
+only skips numbers, and gaps are fine). So a version number is never reused,
+even under a stale-low mark, concurrent appends, or a tombstoned number - the
+mark, the cache and the scan all count a tombstone, whose row and number
+persist. A pre-cache paste (no cache document) scans once to number and to
+rebuild the cache; that same scan recovers the number for a pre-`LatestVersion`
+head whose mark reads zero. After it the paste is cache-present and numbers from
+the mark with no scan. So on the production blob path the request path scans the
+version family only for the two destructive verbs that inherently need the whole
+authoritative set, unpin and whole-paste delete, plus these numbering recovery
+and pre-cache migration fall-backs; every other version operation is point reads
+plus the cache (per-version delete names the served version by blob id, a point
+read). The sha-keyed dev path has no blob id, so a per-version delete there
+additionally scans the rows to name the newest live version - still the
+authoritative rows, never the cache.
 
 **No trust machinery.** Because a stale document is harmless and no destructive
 op reads it, there is nothing to detect: NO generation counter, NO completeness
@@ -4049,8 +4062,11 @@ direction of a rolling deploy is safe by the same argument:
   listing or byte sum (never a correctness stake), and every destructive op
   still decides from the rows and the head the old binary DID write, so none is
   misled - it cannot free the served blob or roll the head onto a descriptor the
-  rows do not carry, because those come from head and row, not the document. The
-  next new-binary write to that paste rewrites the document from the rows.
+  rows do not carry, because those come from head and row, not the document. A
+  new-binary append upserts only its own new row, so an entry the old binary
+  changed stays stale until unpin re-stamps the whole document from a scan; the
+  staleness stays harmless meanwhile, and once every binary is new nothing writes
+  behind the document's back again.
 - *A rollback* is that same case: the document simply stops being maintained
   until a new binary returns, and meanwhile reads fall back or return
   slightly-stale answers. Nothing the old binary does to a document-present

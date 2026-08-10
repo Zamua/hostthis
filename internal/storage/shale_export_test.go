@@ -118,6 +118,13 @@ func (r *ShaleRepo) SetGuardedIndexWriteHookForTest(fn func(key []byte) error) {
 	r.testHookGuardedIndexWrite = fn
 }
 
+// SetVersionScanHookForTest installs a counter seam at the top of scanVersions,
+// so a test can prove a cache-present append performs no version-family scan and
+// a cache-absent (migration) append performs exactly one. Pass nil to clear.
+func (r *ShaleRepo) SetVersionScanHookForTest(fn func(slug domain.Slug)) {
+	r.testHookVersionScan = fn
+}
+
 // --- legacy-value builders (the slatedb on-disk shape) ---------------------
 
 // LegacyPasteKeyForTest returns the authoritative "pastes/<slug>" key. The
@@ -176,6 +183,23 @@ func PasteRowValueWithBlobForTest(p domain.Paste, blobID string) []byte {
 		panic(err)
 	}
 	return b
+}
+
+// ForceHeadLatestVersionForTest rewrites the paste head's LatestVersion mark to
+// n, so a test can simulate a STALE-LOW high-water mark (a corrupted or legacy
+// mark that under-counts the true max) and prove numbering still never reuses a
+// number. It reads the current head, sets the mark, and writes it straight back.
+func (r *ShaleRepo) ForceHeadLatestVersionForTest(slug domain.Slug, n int) error {
+	var p pasteRow
+	if err := r.getJSON(shaleKeyPaste(slug), &p); err != nil {
+		return err
+	}
+	p.LatestVersion = n
+	body, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	return r.PutRawForTest(shaleKeyPaste(slug), body)
 }
 
 // VersionCacheRecordForTest is one planted or read cache record.

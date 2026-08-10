@@ -288,6 +288,9 @@ func scanPrefixOnceOn(c *cluster.Cluster, prefix []byte) ([]scanItem, error) {
 // scanVersions returns a slug's decoded version rows, scanned from the {slug}
 // shard OUTSIDE any transaction.
 func (r *ShaleRepo) scanVersions(slug domain.Slug) ([]versionRow, error) {
+	if r.testHookVersionScan != nil {
+		r.testHookVersionScan(slug)
+	}
 	items, err := r.scanPrefix(shalePrefixVersions(slug))
 	if err != nil {
 		return nil, err

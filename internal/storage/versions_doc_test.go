@@ -402,9 +402,10 @@ func TestVersionCache_TruncatedEnvelopeFallsBack(t *testing.T) {
 }
 
 // (f) An "old binary" write (a row flipped WITHOUT touching the cache) leaves the
-// cache stale, yet no destructive op is misled (they read the rows), and the
-// next new-binary write refreshes the cache. This is the rolling-deploy safety
-// argument as a test.
+// cache stale, yet no destructive op is misled (they read the rows). A new append
+// upserts ONLY its own row (no rescan), so it does NOT heal the row-level
+// staleness; a whole re-stamp (unpin) does. This is the rolling-deploy safety
+// argument as a test, and it pins that append maintains the cache by upsert.
 func TestVersionCache_OldBinaryWriteLeavesStaleCacheButStaysSafe(t *testing.T) {
 	repo := newShaleRepoForTest(t)
 	slug := domain.Slug("vcob0001")
@@ -420,36 +421,54 @@ func TestVersionCache_OldBinaryWriteLeavesStaleCacheButStaysSafe(t *testing.T) {
 	}
 	mustPutRaw(t, repo, storage.LegacyVersionKeyForTest(slug, 1), oldRow)
 
-	// The cache is now STALE: it still shows v1 as live.
-	recs, ok, err := repo.ReadVersionCacheForTest(slug)
-	if err != nil || !ok {
-		t.Fatalf("read stale cache: ok=%v err=%v", ok, err)
-	}
-	staleV1Live := false
-	for _, r := range recs {
-		if r.VerNum == 1 && !r.Deleted {
-			staleV1Live = true
+	assertCacheShowsV1Live := func(label string) {
+		t.Helper()
+		recs, ok, err := repo.ReadVersionCacheForTest(slug)
+		if err != nil || !ok {
+			t.Fatalf("%s: cache absent/unreadable: ok=%v err=%v", label, ok, err)
+		}
+		for _, r := range recs {
+			if r.VerNum == 1 && r.Deleted {
+				t.Fatalf("%s: expected the stale cache to still show v1 LIVE, got it deleted: %+v", label, recs)
+			}
 		}
 	}
-	if !staleV1Live {
-		t.Fatalf("fixture: the old-binary row write should have left the cache showing v1 live: %+v", recs)
-	}
+	// The cache is now STALE: it still shows v1 as live.
+	assertCacheShowsV1Live("after the old-binary row tombstone")
 
-	// Destructive ops are UNAFFECTED: the served-version guard reads the rows and
-	// sees v3 served, v1 not (even though the stale cache shows v1 live).
-	if served, err := repo.IsVersionServed(slug, 3); err != nil || !served {
-		t.Fatalf("IsVersionServed(v3) = %v, %v; want true from the rows", served, err)
+	assertServedSafe := func(label string, servedVer int) {
+		t.Helper()
+		// The served-version guard reads the rows and the head: the newest live
+		// version is served, and v1 (tombstoned) never is, despite the stale cache.
+		if served, err := repo.IsVersionServed(slug, servedVer); err != nil || !served {
+			t.Fatalf("%s: IsVersionServed(v%d) = %v, %v; want true from the rows", label, servedVer, served, err)
+		}
+		if served, err := repo.IsVersionServed(slug, 1); err != nil || served {
+			t.Fatalf("%s: IsVersionServed(v1) = %v, %v; want false (v1 tombstoned in the rows)", label, served, err)
+		}
 	}
-	if served, err := repo.IsVersionServed(slug, 1); err != nil || served {
-		t.Fatalf("IsVersionServed(v1) = %v, %v; want false (v1 tombstoned in the rows)", served, err)
-	}
+	assertServedSafe("with the stale cache", 3)
 
-	// A new-binary write REFRESHES the cache from the rows: append v4, and the
-	// cache now reflects v1 as deleted, so the cheap read is correct again.
+	// A new append UPSERTS its own row with no rescan, so it does NOT heal the
+	// row-level staleness: the cache still shows v1 live and the cheap read stays
+	// stale (all four versions read as live). Destructive ops remain safe.
 	vcAppend(t, repo, slug, "sha-vcob-v4", 400)
-	got := vcListSummary(t, repo, slug)
-	want := []verSummary{{4, false}, {3, false}, {2, false}, {1, true}}
-	if !sameSummary(got, want) {
-		t.Fatalf("after a new-binary write, ListVersions = %+v, want %+v (refresh broken)", got, want)
+	assertCacheShowsV1Live("after a new-binary append")
+	assertServedSafe("after a new-binary append", 4)
+	stale := vcListSummary(t, repo, slug)
+	staleWant := []verSummary{{4, false}, {3, false}, {2, false}, {1, false}}
+	if !sameSummary(stale, staleWant) {
+		t.Fatalf("append must not rescan: ListVersions = %+v, want the stale %+v (append should upsert, not heal)", stale, staleWant)
+	}
+
+	// A whole re-stamp (unpin) scans the rows and rewrites the document, healing
+	// the stale entry: the cheap read now reflects v1 as deleted.
+	if err := repo.Unpin(slug); err != nil {
+		t.Fatalf("unpin (whole re-stamp): %v", err)
+	}
+	healed := vcListSummary(t, repo, slug)
+	healedWant := []verSummary{{4, false}, {3, false}, {2, false}, {1, true}}
+	if !sameSummary(healed, healedWant) {
+		t.Fatalf("after a whole re-stamp, ListVersions = %+v, want %+v (heal broken)", healed, healedWant)
 	}
 }

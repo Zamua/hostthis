@@ -73,6 +73,27 @@ func txPutVersionsDoc(tx shaleKVTx, slug domain.Slug, rows []versionRow) error {
 	return shaleTxPutJSON(tx, shaleKeyVersionsDoc(slug), versionsDoc{Versions: rows})
 }
 
+// txReadVersionsDoc reads and decodes the disposable version cache inside a
+// {slug} transaction, recording a read-check so a concurrent write of the cache
+// conflicts and the reader upserts onto a fresh set. Present and decodable =>
+// (rows, true, nil). Absent OR undecodable => (nil, false, nil): the caller
+// migrates or repairs from a rows scan (fail open, the same discipline the
+// cheap-read fallback keeps). Only a transport error propagates.
+func txReadVersionsDoc(tx shaleKVTx, slug domain.Slug) ([]versionRow, bool, error) {
+	raw, err := tx.Get(shaleKeyVersionsDoc(slug))
+	if errors.Is(err, backend.ErrNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	doc, derr := decodeVersionsDoc(raw)
+	if derr != nil {
+		return nil, false, nil // undecodable: rebuild from the rows
+	}
+	return doc.Versions, true, nil
+}
+
 // txMarkVersionDeletedInCache flips v's Deleted flag in the cache when the cache
 // EXISTS, inside the tombstone's {slug} transaction. A pre-cache paste (no doc)
 // is left untouched: building one here would need a scan the tombstone
