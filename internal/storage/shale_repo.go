@@ -1625,7 +1625,7 @@ func (r *ShaleRepo) appendVersion(ctx context.Context, slug domain.Slug, ref con
 		}
 	}
 
-	res, err := r.appendAuthoritative(slug, ref, now, binds, blobOwnerEpochFromContext(ctx), markFromHead(existing))
+	res, err := r.appendAuthoritative(slug, ref, now, binds, blobOwnerEpochFromContext(ctx), markFromHead(existing), identOf(existing))
 	if err != nil {
 		return AppendResult{}, err
 	}
@@ -1685,7 +1685,7 @@ var ErrConcurrentChange = domain.ErrConcurrentChange
 // The mark counts tombstones and never lowers, so version numbers are never
 // reused. An append proceeds on a TRUNCATED document: it needs a NUMBER, and
 // the mark reserves the numbers the heal could not read.
-func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now time.Time, refs []cluster.BlobRef, epoch int64, headMark versionMark) (AppendResult, error) {
+func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now time.Time, refs []cluster.BlobRef, epoch int64, headMark versionMark, owner pasteIdent) (AppendResult, error) {
 	pasteKey := shaleKeyPaste(slug)
 	// The blob id lands on the new version row and, when the head is unpinned
 	// (so the public URL follows this version), on the paste head row too.
@@ -1699,6 +1699,9 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now ti
 		plan, heal, err := r.versionsDocPlan(slug, mark)
 		if err != nil {
 			return AppendResult{}, err
+		}
+		if heal != nil {
+			heal.planIdent = owner
 		}
 		newVer := max(mark.latest+1, plan.nextVerNum())
 		verKey := shaleKeyVersion(slug, newVer)
@@ -1729,7 +1732,7 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now ti
 				return err
 			}
 			gen := genFromHead(p)
-			if err := r.txApplyVersionsDoc(tx, slug, heal, gen, func(doc *versionsDoc) error {
+			if err := r.txApplyVersionsDoc(tx, slug, heal, gen, identOf(p), func(doc *versionsDoc) error {
 				// The tx-read document is the authority on the number: a
 				// racing append that landed after the plan makes this
 				// disagree, and re-planning is the fix.
@@ -1773,6 +1776,11 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now ti
 			// way on the same stale reading.
 			mark.gen = 0
 			continue
+		case errors.Is(txErr, errVersionsSeedForeign):
+			// The slug was re-minted as a different paste in the plan-to-tx
+			// window; a retry would re-plan against the same outer identity and
+			// mismatch again, so this append cannot proceed.
+			return AppendResult{}, fmt.Errorf("shale: append %q: %w", slug, ErrConcurrentChange)
 		default:
 			return AppendResult{}, txErr
 		}
@@ -2123,6 +2131,9 @@ func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 	if err != nil {
 		return err
 	}
+	if heal != nil {
+		heal.planIdent = identOf(p)
+	}
 	// The tombstone proceeds on a TRUNCATED document for a target the document
 	// HOLDS: the document is a subset of the true set, so its newest live
 	// version is never higher than the true one, which keeps the service's
@@ -2160,7 +2171,7 @@ func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 			return err
 		}
 		gen := genFromHead(head)
-		if err := r.txApplyVersionsDoc(tx, slug, heal, gen, func(doc *versionsDoc) error {
+		if err := r.txApplyVersionsDoc(tx, slug, heal, gen, identOf(head), func(doc *versionsDoc) error {
 			v, ok := doc.find(ver)
 			if !ok {
 				if !doc.Complete {
@@ -2237,6 +2248,12 @@ func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 		// The document decoded when the tombstone was planned and not inside
 		// the transaction, so nothing was applied and the re-plan is the whole
 		// fix: its read meets the damage and walks the legacy rows.
+		return fmt.Errorf("shale: delete version %q/%d: %w", slug, ver, ErrConcurrentChange)
+	}
+	if errors.Is(txErr, errVersionsSeedForeign) {
+		// The slug was re-minted as a different paste in the plan-to-tx window,
+		// so the plan's seed is foreign to the paste the transaction found;
+		// nothing was applied and the re-plan runs against the new paste.
 		return fmt.Errorf("shale: delete version %q/%d: %w", slug, ver, ErrConcurrentChange)
 	}
 	if txErr != nil {
@@ -2453,8 +2470,10 @@ func (r *ShaleRepo) unpinFromDoc(slug domain.Slug) error {
 // NEXT version key is read ExpectAbsent inside the tx. An append that lands
 // after the scan is then either visible to that read or fails the read-check,
 // and both routes abort rather than commit a head chosen from a stale version
-// set. The scan itself refuses to decode a damaged row, so this path can no
-// more roll off a truncated set than the document path can.
+// set. A row that cannot be read means the set cannot be read in full, so the
+// roll REFUSES with the versions-incomplete sentinel rather than rolling off a
+// truncated set - the same refusal the document path makes, spelled so the verb
+// reports it instead of surfacing a raw envelope-strip error.
 //
 // The probe detects a writer that ADDS a number and nothing else. A per-version
 // delete MODIFIES an existing row, leaving the probe key untouched, so the roll
@@ -2466,9 +2485,20 @@ func (r *ShaleRepo) unpinFromDoc(slug domain.Slug) error {
 func (r *ShaleRepo) unpinFromLegacyRows(slug domain.Slug) error {
 	pasteKey := shaleKeyPaste(slug)
 	docKey := shaleKeyVersionsDoc(slug)
-	versions, err := r.scanVersions(slug)
+	items, err := r.scanPrefixTolerant(shalePrefixVersions(slug))
 	if err != nil {
 		return err
+	}
+	versions := make([]versionRow, 0, len(items))
+	for _, item := range items {
+		if item.Damaged != nil {
+			return fmt.Errorf("shale: unpin %q: %w", slug, ErrVersionsIncomplete)
+		}
+		var v versionRow
+		if derr := json.Unmarshal(item.Value, &v); derr != nil {
+			return fmt.Errorf("shale: unpin %q: %w", slug, ErrVersionsIncomplete)
+		}
+		versions = append(versions, v)
 	}
 	var latest *versionRow
 	for i := range versions {

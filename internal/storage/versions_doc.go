@@ -11,12 +11,14 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Zamua/shale/pkg/backend"
 
@@ -33,6 +35,47 @@ func shaleKeyVersionsDoc(slug domain.Slug) []byte {
 // from. Starting from an empty document would silently drop every version.
 // Nothing is applied; the caller re-plans, and that plan walks the legacy rows.
 var errVersionsDocUnseeded = errors.New("shale: versions doc undecodable with no heal seed")
+
+// errVersionsSeedForeign is returned when a heal SEED is applied in a
+// transaction whose head names a DIFFERENT paste than the seed was walked for:
+// the slug was deleted and re-minted in the plan-to-tx window. The seed's
+// records belong to a paste that no longer exists, so folding them into the new
+// paste installs foreign versions. Nothing is applied; the caller re-plans.
+var errVersionsSeedForeign = errors.New("shale: versions heal seed belongs to a re-minted paste")
+
+// pasteIdent is a paste's IMMUTABLE identity: its owner and its creation
+// instant, both fixed for the paste's life. A heal seed carries the pair it was
+// walked for so the transaction that applies it can prove it is the SAME paste,
+// not a re-mint that took the slug in the plan-to-tx window.
+type pasteIdent struct {
+	identity  string
+	createdAt time.Time
+}
+
+func identOf(p pasteRow) pasteIdent {
+	return pasteIdent{identity: p.Identity, createdAt: p.CreatedAt}
+}
+
+// same compares by instant rather than == because a JSON round-trip drops the
+// monotonic clock the wall time would otherwise carry.
+func (a pasteIdent) same(b pasteIdent) bool {
+	return a.identity == b.identity && a.createdAt.Equal(b.createdAt)
+}
+
+// docFingerprint reduces a raw stored document to an envelope-independent
+// identity: the stripped payload when it strips, the raw bytes when the
+// envelope itself is damaged, nil when absent. Two reads of an UNCHANGED value
+// fingerprint equal; any content change (including absent<->present) differs. A
+// spurious inequality only forces a conservative re-heal, so it fails safe.
+func docFingerprint(raw []byte) []byte {
+	if len(raw) == 0 {
+		return nil
+	}
+	if payload, err := stripEnvelope(raw); err == nil {
+		return payload
+	}
+	return raw
+}
 
 // versionMark is what the HEAD row says about the version set: the numbering
 // floor and the generation the set is at. Both come off ONE head read, so a
@@ -90,6 +133,15 @@ type versionsDoc struct {
 	// no longer read.
 	mark    int
 	skipped []int
+
+	// planFP and planIdent tie a heal SEED to the document it read and the paste
+	// it was walked for. The seed is walked OUTSIDE the transaction that applies
+	// it, so a mutation racing that window can make it STALE (planFP: the
+	// document the transaction reads differs from the one the walk saw) or
+	// FOREIGN (planIdent: the slug was re-minted as a different paste). Neither
+	// is stored; a plan-time scan snapshot cannot confer trust at a later commit.
+	planFP    []byte
+	planIdent pasteIdent
 }
 
 func (d *versionsDoc) find(ver int) (versionRow, bool) {
@@ -376,9 +428,24 @@ func (r *ShaleRepo) versionsDocPlan(slug domain.Slug, mark versionMark) (plan *v
 	if hook := r.testHookVersionsDocPlanned; hook != nil {
 		defer hook(slug)
 	}
-	stored, err := r.getVersionsDoc(slug)
+	// The RAW value is read so its fingerprint can be captured: the transaction
+	// compares it against the document it reads to decide whether a mutation
+	// raced this seed. An undecodable value keeps stored nil (the walk repairs
+	// it) but still fingerprints, so a repair that leaves the SAME damaged bytes
+	// reads as unchanged.
+	rawStored, err := r.getStored(shaleKeyVersionsDoc(slug))
 	if err != nil {
 		return nil, nil, err
+	}
+	planFP := docFingerprint(rawStored)
+	var stored *versionsDoc
+	if len(rawStored) > 0 {
+		var d versionsDoc
+		if derr := decodeVersionsDoc(rawStored, &d); derr != nil {
+			r.logUndecodableVersionsDoc(slug, derr)
+		} else {
+			stored = &d
+		}
 	}
 	if stored != nil && stored.Complete && !stored.stale(mark) {
 		return stored, nil, nil
@@ -399,6 +466,7 @@ func (r *ShaleRepo) versionsDocPlan(slug domain.Slug, mark versionMark) (plan *v
 	} else {
 		merged.fillFrom(seed)
 	}
+	merged.planFP = planFP
 	return merged, merged, nil
 }
 
@@ -496,23 +564,43 @@ func verNumFromKey(key []byte) int {
 // joins the transaction's read set: two racing first-writes serialize on the
 // shard CAS, and the retried loser re-reads and finds the winner's document.
 //
-// gen is the generation the transaction read off the HEAD and will stamp on
-// both records, so the two always move together.
+// gen is the generation the transaction read off the HEAD; cur is that head's
+// IDENTITY. Both come from the SAME in-transaction head read.
 //
-// Whether the seed FILLS or REBUILDS is decided HERE rather than at plan time,
-// from the document and the head as this transaction reads them. A mutation
-// that landed since the plan moved both together, so it reads as accountable
-// and its records win over the older seed; a binary without this logic moved
-// neither, so its rows win instead. Deciding from the plan's snapshot would
-// rebuild over a newer document, undoing a tombstone that committed in between.
+// A heal seed is walked OUTSIDE this transaction, so a plan-time scan snapshot
+// cannot confer trust at a later commit. Two checks against in-transaction
+// state guard it:
+//
+//   - IDENTITY. A seed whose planIdent differs from cur was walked for a paste
+//     this slug no longer holds (a delete + re-mint in the plan-to-tx window).
+//     Folding it would install foreign versions, so it is discarded and the
+//     caller re-plans (errVersionsSeedForeign).
+//   - STABILITY. A seed may STAMP the document trusted (complete + accountable)
+//     ONLY when the document it read is the one this transaction reads: a
+//     new-binary mutation always rewrites the document, so an unchanged
+//     document proves none raced. When the document CHANGED in the window the
+//     seed is a stale snapshot - the merged document is still written (the
+//     rows' truth is cached, reads improve) but left INCOMPLETE and
+//     UNACCOUNTABLE, so pin falls back to the rows and unpin/GetVersion refuse
+//     rather than acting on records a plan-time scan vouched for. The next quiet
+//     mutation re-heals it, so a healthy paste still converges.
+//
+// Whether the seed FILLS or REBUILDS is decided HERE from the document and the
+// head as this transaction reads them. A mutation that landed since the plan
+// moved both together, so it reads as accountable and its records win over the
+// older seed; a binary without this logic moved neither, so its rows win.
 //
 // Absent or UNDECODABLE, the seed IS the document: the legacy rows it was
 // walked from are still dual-written and true, so the overwrite is the repair,
 // and aborting instead would wedge every write for the paste behind one corrupt
 // value.
-func (r *ShaleRepo) txApplyVersionsDoc(tx shaleKVTx, slug domain.Slug, heal *versionsDoc, gen versionGen, mutate func(*versionsDoc) error) error {
+func (r *ShaleRepo) txApplyVersionsDoc(tx shaleKVTx, slug domain.Slug, heal *versionsDoc, gen versionGen, cur pasteIdent, mutate func(*versionsDoc) error) error {
 	docKey := shaleKeyVersionsDoc(slug)
+	if heal != nil && !heal.planIdent.same(cur) {
+		return errVersionsSeedForeign
+	}
 	var doc versionsDoc
+	var txFP []byte
 	raw, gerr := tx.Get(docKey)
 	switch {
 	case errors.Is(gerr, backend.ErrNotFound):
@@ -520,6 +608,7 @@ func (r *ShaleRepo) txApplyVersionsDoc(tx shaleKVTx, slug domain.Slug, heal *ver
 	case gerr != nil:
 		return fmt.Errorf("tx get %s: %w", docKey, gerr)
 	default:
+		txFP = docFingerprint(raw)
 		derr := decodeVersionsDoc(raw, &doc)
 		switch {
 		case derr != nil && heal == nil:
@@ -545,7 +634,14 @@ func (r *ShaleRepo) txApplyVersionsDoc(tx shaleKVTx, slug domain.Slug, heal *ver
 	if err := mutate(&doc); err != nil {
 		return err
 	}
-	doc.Gen = gen.next
+	if heal != nil && !bytes.Equal(heal.planFP, txFP) {
+		// A seed the window changed under is, for trust, the same as a heal that
+		// skipped a row: written so reads improve, but vouched for by nothing.
+		doc.Complete = false
+		doc.Gen = 0
+	} else {
+		doc.Gen = gen.next // head and document move together
+	}
 	return shaleTxPutJSON(tx, docKey, doc)
 }
 

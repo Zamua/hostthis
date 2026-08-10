@@ -3482,7 +3482,12 @@ behaviors are expressed in terms of inputs and observable outputs:
   inside the rolling transaction: `SetPinnedVersion` refuses a
   tombstoned target (version-deleted sentinel), whose blob is already
   unbound, and `Unpin` refuses (versions-incomplete sentinel) when the
-  version set cannot be read in full, rather than rolling backwards.
+  version set cannot be read in full, rather than rolling backwards. The
+  sentinel is the refusal on BOTH the document path and the
+  pre-migration legacy-row fallback: a version row that cannot be read
+  (undecodable JSON or a damaged LWW envelope) makes the set unreadable
+  in full, so the legacy path returns the same versions-incomplete
+  sentinel rather than surfacing a raw strip/decode error.
 - **DeleteVersion tombstones (content-inaccessible, blob GC-able).**
   Flips a version's deleted flag, leaving the metadata row so the
   number is not reused and history stays auditable. `ListVersions`
@@ -4231,6 +4236,43 @@ detect that with, since such a binary moves no counter this one can read. It
 takes a concurrently-running previous binary mutating the SAME paste inside
 that window, and the paste's next mutation under two like binaries repairs it.
 
+**A plan-time seed does not confer trust at a later commit.** The heal walk
+runs OUTSIDE the transaction that applies it, so the seed is a scan snapshot of
+a moment that has passed by the time the transaction commits. It may be WRITTEN
+- caching the rows' truth improves reads - but it may STAMP the document trusted
+(complete AND accountable) only when two things hold against IN-TRANSACTION
+state, because only the transaction's own reads establish the set at commit
+time:
+
+- STABILITY. The document the walk read must be the one the transaction reads.
+  A binary carrying this logic dual-writes, so every mutation it makes rewrites
+  the document; an UNCHANGED document therefore proves no such mutation raced
+  the window, and the only row changes it permits are the previous binary's,
+  the residual window already named. When the document CHANGED in the window the
+  seed is stale - a concurrent per-version delete may have tombstoned and
+  unbound a version the seed still shows live - so the rebuilt or filled
+  document is written but left INCOMPLETE and UNACCOUNTABLE. Every gate then
+  refuses (`unpin`, `GetVersion` of a held number) or falls back to the rows
+  (`pin`) rather than acting on a record a passed moment vouched for, and the
+  next quiet mutation re-heals it. This is the skip rule extended: a seed
+  applied in a DIFFERENT transaction than the one that walked it is, for trust,
+  the same as a row the walk skipped.
+- IDENTITY. The seed carries the IMMUTABLE identity of the paste it was walked
+  for - the owner and the creation instant. A slug deleted and re-minted in the
+  window is a DIFFERENT paste under the same key; folding the old paste's
+  records into the new one installs foreign versions. The transaction compares
+  the seed's identity against the head it reads and, on a mismatch, DISCARDS the
+  seed and re-plans (the concurrent-change sentinel) rather than folding.
+
+A healthy paste still converges, and in a bounded number of mutations. A clean
+pre-migration paste's first mutation reads no document at plan time and none at
+the transaction, so the stability check holds (absent equals absent) and the
+walk's own findings - no skipped row, the head's mark covered - stamp the
+document complete and accountable in ONE mutation. More generally, each mutation
+either converges (a quiet window: the document is stable, so the seed is
+trusted) or defers by one (a raced window: the document is left untrusted); under
+eventual quiescence the next mutation converges.
+
 A truncated document is authoritative for what it HOLDS and says nothing
 about what it lacks. Operations divide on exactly that:
 
@@ -4369,11 +4411,17 @@ adopted by the next write, and a previous binary's tombstone is adopted by the
 next write. Only a mutation converges a document: a read never writes one.
 Damage that persists keeps the flags false, which is the point.
 
-A tombstone that turns out to be a NO-OP still rewrites the head, because it
-still wrote the document (a heal it applied, a generation it stamped) and the
-two must move together. Leaving the head behind would make the document
-unaccountable to it and refuse every gated operation on the paste until some
-unrelated write happened to fix it.
+A no-op tombstone divides on WHERE the no-op is discovered. One discovered
+INSIDE the transaction - the record the transaction reads is already deleted -
+still rewrites the head, because the transaction still wrote the document (a
+heal it applied, a generation it stamped) and the two must move together;
+leaving the head behind would make the document unaccountable to it and refuse
+every gated operation on the paste until some unrelated write happened to fix
+it. One discovered at PLAN time - the planned view already shows the target
+deleted - never enters a transaction at all: the delete returns success having
+written nothing, so the head and its generation are unchanged. That is safe
+because nothing was healed or stamped, so there is no document left needing a
+matching head.
 
 **Fail open governs reads and the write SURFACE, never the CONTENT of a
 write.** Failing open means damage must not cost availability: a read

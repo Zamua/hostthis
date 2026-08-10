@@ -1925,3 +1925,233 @@ func TestVersionsDoc_UndecodableReportRearmsAfterARepair(t *testing.T) {
 		t.Fatalf("a corruption after a repair must be reported again: %d lines, want 2:\n%s", n, logs.String())
 	}
 }
+
+// --- p. a plan-time seed applied in a later transaction cannot confer trust --
+
+// D-STALE. A heal seed is walked OUTSIDE the transaction that applies it. In the
+// plan-to-tx window a concurrent (new-binary) tombstone unbinds a version's blob
+// and rewrites the document; a following (old-binary) head rewrite drops
+// versions_gen, so the tombstone's own transaction meets an UNACCOUNTABLE
+// document and rebuilds from the STALE seed - which still shows the tombstoned
+// version live. The rebuilt document must NOT be stamped complete/accountable,
+// or a later unpin rolls the head onto the unbound blob.
+func TestVersionsDoc_StaleSeedRebuildStaysUntrustedNotRolledOnto(t *testing.T) {
+	repo := newBlobShaleRepoForTest(t)
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	slug := domain.Slug("vsld001")
+	owner := "key:vsld"
+
+	insertWithBlob(t, repo, slug, owner, "sha-vsld-v1", now)
+	appendWithBlob(t, repo, slug, "sha-vsld-v2", now)
+	appendWithBlob(t, repo, slug, "sha-vsld-v3", now)
+	// Pin v1 so the head does not serve v2, and unpin still has a roll to make.
+	v1, err := repo.GetVersion(slug, 1)
+	if err != nil {
+		t.Fatalf("get v1: %v", err)
+	}
+	if err := repo.SetPinnedVersion(slug, v1); err != nil {
+		t.Fatalf("pin v1: %v", err)
+	}
+	// An unaccountable document at plan time forces the rebuild path, and the
+	// seed captures v2 LIVE.
+	stripHeadVersionsGen(t, repo, slug)
+
+	// In the plan-to-tx window: a real tombstone of v2 (unbinds its blob and
+	// rewrites the document), then an old-binary head rewrite that drops the
+	// generation so the outer transaction meets an unaccountable document.
+	var fired bool
+	repo.SetVersionsDocPlannedHookForTest(func(s domain.Slug) {
+		if fired || s != slug {
+			return
+		}
+		fired = true
+		if derr := repo.DeleteVersion(slug, 2); derr != nil {
+			t.Fatalf("concurrent tombstone of v2: %v", derr)
+		}
+		stripHeadVersionsGen(t, repo, slug)
+	})
+	err = repo.DeleteVersion(slug, 3)
+	repo.SetVersionsDocPlannedHookForTest(nil)
+	if !fired {
+		t.Fatal("the window hook never fired, so this test proves nothing")
+	}
+	if err != nil {
+		t.Fatalf("tombstone v3 across the window: %v", err)
+	}
+
+	// The rebuild reinstated v2 from the stale seed, but nothing may trust it:
+	// not complete, not accountable.
+	if _, _, complete := versionsDocFields(t, repo, slug); complete {
+		t.Fatal("a document rebuilt from a plan-time seed the window changed must not be complete")
+	}
+	if gen := versionsDocGen(t, repo, slug); gen != 0 {
+		t.Fatalf("an untrusted rebuild must not stamp a matching generation, got gen %d", gen)
+	}
+
+	// The gate holds: unpin refuses rather than rolling the head onto v2, whose
+	// blob the concurrent tombstone already unbound.
+	if err := repo.Unpin(slug); !errors.Is(err, storage.ErrVersionsIncomplete) {
+		t.Fatalf("unpin over an untrusted rebuild: got %v, want ErrVersionsIncomplete", err)
+	}
+	head, err := repo.Get(slug)
+	if err != nil {
+		t.Fatalf("get after the refused unpin: %v", err)
+	}
+	if head.PinnedVersion != 1 || head.ContentSHA != "sha-vsld-v1" {
+		t.Fatalf("a refused unpin must apply nothing: pin=%d sha=%q", head.PinnedVersion, head.ContentSHA)
+	}
+	// A pin of v2 falls back to the row the concurrent tombstone flipped, and
+	// refuses it rather than publishing the unbound blob.
+	v2, err := repo.GetVersion(slug, 2)
+	if err != nil {
+		t.Fatalf("get v2: %v", err)
+	}
+	if !v2.Deleted {
+		t.Fatalf("fixture: v2 must read as tombstoned, got %+v", v2)
+	}
+	if err := repo.SetPinnedVersion(slug, v2); !errors.Is(err, storage.ErrVersionDeleted) {
+		t.Fatalf("pin of the concurrently-tombstoned v2: got %v, want ErrVersionDeleted", err)
+	}
+
+	// Convergence: one quiet mutation re-heals from the rows (v2 tombstoned) and
+	// the document becomes trusted again.
+	appendWithBlob(t, repo, slug, "sha-vsld-v4", now)
+	if _, _, complete := versionsDocFields(t, repo, slug); !complete {
+		t.Fatal("a quiet mutation must re-heal the document to complete")
+	}
+	docGen := versionsDocGen(t, repo, slug)
+	_, headGen := headFields(t, repo, slug)
+	if docGen == 0 || docGen != headGen {
+		t.Fatalf("the re-heal must re-establish the generation: doc %d head %d", docGen, headGen)
+	}
+	if got, gerr := repo.GetVersion(slug, 2); gerr != nil || !got.Deleted {
+		t.Fatalf("the re-heal must keep v2 tombstoned: %+v err=%v", got, gerr)
+	}
+}
+
+// --- q. a seed is proven to pertain to the paste it is applied to -----------
+
+// D-PASTE. A heal seed walked for paste P1 must not be folded into a DIFFERENT
+// paste P2 that re-minted the slug in the plan-to-tx window. The seed carries
+// P1's identity; the transaction reads P2's head, so it discards the foreign
+// seed rather than installing P1's versions into P2's document.
+func TestVersionsDoc_ForeignSeedIsNotFoldedIntoAReMintedPaste(t *testing.T) {
+	repo := newShaleRepoForTest(t)
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	slug := domain.Slug("vpst001")
+	ctx := context.Background()
+
+	// P1: three versions, owned by O1.
+	p1 := domain.Paste{
+		Slug: slug, Identity: "key:vpst-1", Kind: domain.KindHTML,
+		ContentSHA: "sha-vpst1-v1", Size: 300, CreatedAt: now, UpdatedAt: now}
+	if err := repo.InsertWithQuotaCheck(ctx, p1, 0, now); err != nil {
+		t.Fatalf("insert P1: %v", err)
+	}
+	repo.WaitPendingConfirms()
+	for i, size := range []int{200, 100} {
+		if _, err := repo.AppendVersionWithQuotaCheck(ctx, slug, domain.KindHTML,
+			fmt.Sprintf("sha-vpst1-v%d", i+2), size, 0, now); err != nil {
+			t.Fatalf("append P1 v%d: %v", i+2, err)
+		}
+	}
+	// Force DeleteVersion(v3) to walk a seed at plan time.
+	stripHeadVersionsGen(t, repo, slug)
+
+	// In the plan-to-tx window: delete P1 and re-mint the slug as P2, a
+	// DIFFERENT owner holding only its own v1.
+	var fired bool
+	repo.SetVersionsDocPlannedHookForTest(func(s domain.Slug) {
+		if fired || s != slug {
+			return
+		}
+		fired = true
+		if derr := repo.Delete(slug); derr != nil {
+			t.Fatalf("delete P1: %v", derr)
+		}
+		p2 := domain.Paste{
+			Slug: slug, Identity: "key:vpst-2", Kind: domain.KindHTML,
+			ContentSHA: "sha-vpst2-v1", Size: 50, CreatedAt: now, UpdatedAt: now}
+		if derr := repo.InsertWithQuotaCheck(ctx, p2, 0, now); derr != nil {
+			t.Fatalf("re-mint P2: %v", derr)
+		}
+		repo.WaitPendingConfirms()
+	})
+	err := repo.DeleteVersion(slug, 3)
+	repo.SetVersionsDocPlannedHookForTest(nil)
+	if !fired {
+		t.Fatal("the re-mint hook never fired, so this test proves nothing")
+	}
+	if !errors.Is(err, storage.ErrConcurrentChange) {
+		t.Fatalf("tombstone across a re-mint: got %v, want ErrConcurrentChange", err)
+	}
+
+	// P2's document holds ONLY its own v1: P1's v2 and v3 were not folded in.
+	nums, _, complete := versionsDocFields(t, repo, slug)
+	if !reflect.DeepEqual(nums, []int{1}) || !complete {
+		t.Fatalf("P2's document must hold only its own v1: versions %v complete %v", nums, complete)
+	}
+	head, err := repo.Get(slug)
+	if err != nil {
+		t.Fatalf("get P2: %v", err)
+	}
+	if head.ContentSHA != "sha-vpst2-v1" {
+		t.Fatalf("P2 must serve its own v1, got sha %q", head.ContentSHA)
+	}
+	if vers, verr := repo.ListVersions(slug); verr != nil || !reflect.DeepEqual(verNums(vers), []int{1}) {
+		t.Fatalf("P2's version list must be [1]: %v err=%v", verNums(vers), verr)
+	}
+	// The re-plan runs against P2: deleting a version P2 lacks is not-found, not
+	// a fold of P1's records.
+	if err := repo.DeleteVersion(slug, 3); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("re-planned tombstone of a version P2 lacks: got %v, want ErrNotFound", err)
+	}
+}
+
+// --- r. the pre-migration unpin refuses incomplete on an unreadable row -----
+
+// The legacy fallback returns the versions-incomplete sentinel when a version
+// row cannot be read, rather than surfacing a raw envelope-strip/decode error:
+// the set cannot be read in full, so the roll must not pick a "newest live" from
+// a truncated scan.
+func TestVersionsDoc_LegacyUnpinRefusesIncompleteOnAnUnreadableRow(t *testing.T) {
+	repo := newShaleRepoForTest(t)
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	slug := domain.Slug("vlgu001")
+	ctx := context.Background()
+
+	p := domain.Paste{
+		Slug: slug, Identity: "key:vlgu", Kind: domain.KindHTML,
+		ContentSHA: "sha-vlgu-v1", Size: 300, CreatedAt: now, UpdatedAt: now}
+	if err := repo.InsertWithQuotaCheck(ctx, p, 0, now); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	repo.WaitPendingConfirms()
+	if _, err := repo.AppendVersionWithQuotaCheck(ctx, slug, domain.KindHTML, "sha-vlgu-v2", 200, 0, now); err != nil {
+		t.Fatalf("append v2: %v", err)
+	}
+	v1, err := repo.GetVersion(slug, 1)
+	if err != nil {
+		t.Fatalf("get v1: %v", err)
+	}
+	if err := repo.SetPinnedVersion(slug, v1); err != nil {
+		t.Fatalf("pin v1: %v", err)
+	}
+	// Pre-migration shape (no document) with an unreadable version row.
+	deleteVersionsDoc(t, repo, slug)
+	if err := repo.PutRawForTest(storage.LegacyVersionKeyForTest(slug, 2), corruptJSON); err != nil {
+		t.Fatalf("corrupt legacy v2: %v", err)
+	}
+
+	if err := repo.Unpin(slug); !errors.Is(err, storage.ErrVersionsIncomplete) {
+		t.Fatalf("legacy unpin over an unreadable row: got %v, want ErrVersionsIncomplete", err)
+	}
+	// Nothing applied: the pin stands.
+	head, err := repo.Get(slug)
+	if err != nil {
+		t.Fatalf("get after the refused unpin: %v", err)
+	}
+	if head.PinnedVersion != 1 {
+		t.Fatalf("a refused unpin must apply nothing: pin=%d", head.PinnedVersion)
+	}
+}
