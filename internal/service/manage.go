@@ -24,6 +24,10 @@ type PasteAdmin interface {
 	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (domain.AppendResult, error)
 	ListVersions(domain.Slug) ([]domain.Version, error)
 	GetVersion(domain.Slug, int) (domain.Version, error)
+	// IsVersionServed reports whether ver is the version the URL serves,
+	// decided from the authoritative head + rows (never a disposable read
+	// cache), so the delete guard below can never free the served blob.
+	IsVersionServed(domain.Slug, int) (bool, error)
 	DeleteVersion(domain.Slug, int) error
 	CountByOwner(owner string) (int, error)
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
@@ -256,8 +260,7 @@ var ErrVersionCurrentlyServed = errors.New("service: version is currently served
 //
 // The freed byte count is the row's pre-deletion size column.
 func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (DeleteVersionResult, error) {
-	p, err := m.requireOwner(slug, owner)
-	if err != nil {
+	if _, err := m.requireOwner(slug, owner); err != nil {
 		return DeleteVersionResult{}, err
 	}
 	if verNum < 1 {
@@ -271,11 +274,14 @@ func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (Dele
 		return DeleteVersionResult{VerNum: verNum, FreedBytes: 0}, ErrVersionAlreadyDeleted
 	}
 
-	servedVer, err := m.servedVersion(slug, p.PinnedVersion)
+	// The served-version guard decides from the authoritative head + rows, not
+	// from any read cache (docs/SPEC.md "The version index cache"): a stale
+	// cache must never let this free the served version's blob.
+	served, err := m.Repo.IsVersionServed(slug, verNum)
 	if err != nil {
 		return DeleteVersionResult{}, err
 	}
-	if servedVer == verNum {
+	if served {
 		return DeleteVersionResult{}, ErrVersionCurrentlyServed
 	}
 
@@ -285,24 +291,6 @@ func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (Dele
 	// No cache purge: the served bytes did not change, only an older
 	// version's bytes that no URL surface exposed.
 	return DeleteVersionResult{VerNum: verNum, FreedBytes: target.Size}, nil
-}
-
-// servedVersion returns the ver_num the URL currently serves for slug.
-// Mirrors the read path: pinned wins, else MAX(non-deleted ver_num).
-func (m *Manage) servedVersion(slug domain.Slug, pinnedVersion int) (int, error) {
-	if pinnedVersion > 0 {
-		return pinnedVersion, nil
-	}
-	versions, err := m.Repo.ListVersions(slug)
-	if err != nil {
-		return 0, err
-	}
-	for _, v := range versions {
-		if !v.Deleted {
-			return v.VerNum, nil
-		}
-	}
-	return 0, nil // no live versions: unreachable for an active paste
 }
 
 // Pin sets which version_num the public URL serves and makes it sticky, so

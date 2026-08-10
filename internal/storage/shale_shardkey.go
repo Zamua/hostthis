@@ -20,6 +20,7 @@ import (
 //
 //	pastes/<slug>                  -> <slug>
 //	versions/<slug>/<NNNN>         -> <slug>
+//	versions_doc/<slug>            -> <slug>
 //	slug_owner/<slug>              -> <slug>
 //	                                               slash-free and RFC3339 has no
 //	                                               '/', so this is unambiguous)
@@ -55,6 +56,13 @@ func shaleShardKey(key []byte) []byte {
 		return firstSegment(key[len(prefixPastes):])
 	case bytes.HasPrefix(key, prefixVersionsAll):
 		return firstSegment(key[len(prefixVersionsAll):])
+	// versions_doc/<slug>: the disposable version index cache. It co-shards with
+	// versions/<slug>/* and the paste head so it joins the {slug} transactions
+	// that write those rows. The trailing '/' on prefixVersionsAll ("versions/")
+	// keeps "versions_doc/" from matching it, so this needs its own case or it
+	// would fall to the whole-key fallback and land on the wrong shard.
+	case bytes.HasPrefix(key, prefixVersionsDocAll):
+		return firstSegment(key[len(prefixVersionsDocAll):])
 	case bytes.HasPrefix(key, prefixSlugOwner):
 		return firstSegment(key[len(prefixSlugOwner):])
 
@@ -133,8 +141,11 @@ var (
 	// (bref/{<routeShard>}/<unit>/<blobid>).
 	prefixBref = []byte("bref/")
 
-	prefixPastes               = []byte("pastes/")
-	prefixVersionsAll          = []byte("versions/")
+	prefixPastes      = []byte("pastes/")
+	prefixVersionsAll = []byte("versions/")
+	// Disposable version index cache: versions_doc/<slug>, co-sharded with the
+	// version rows it copies (docs/SPEC.md "The version index cache").
+	prefixVersionsDocAll       = []byte("versions_doc/")
 	prefixSlugOwner            = []byte("slug_owner/")
 	prefixIdentityPastesAll    = []byte("identity_pastes/")
 	prefixIdentityFirstSeenAll = []byte("identity_first_seen/")
