@@ -107,18 +107,22 @@ func (r *ShaleIntentLog) Complete(_ context.Context, id durable.ID, scope durabl
 
 // Outstanding lists the scope's un-completed intents. An undecodable row is
 // SKIPPED rather than failing the call: this runs inside ordinary reads, and one
-// bad intent must not break a user's listing. The skip is logged - an intent
-// nothing can parse is work nothing will ever resolve, so it needs an operator.
+// bad intent must not break a user's listing. The tolerant scan skips a
+// TRUNCATED envelope (the R>1 damage shape) the same way the JSON check below
+// skips a bad payload, so the fail-open claim holds for envelope-level damage
+// too. The skip is logged - an intent nothing can parse is work nothing will
+// ever resolve, so it needs an operator.
 func (r *ShaleIntentLog) Outstanding(_ context.Context, scope durable.Scope) ([]durable.Intent, error) {
-	items, err := scanPrefixOn(r.cluster, r.log(), shalePrefixIntents(string(scope)))
+	items, err := scanPrefixTolerant(r.cluster, r.log(), shalePrefixIntents(string(scope)))
 	if err != nil {
 		return nil, err
 	}
 	out := make([]durable.Intent, 0, len(items))
 	var skipped int
 	for _, item := range items {
-		// scanPrefixOn already stripped the envelope and dropped tombstones, so
-		// item.Value is the payload a completed intent would not have.
+		// The tolerant scan already stripped the envelope and dropped tombstones
+		// (and skipped any envelope damage), so item.Value is the payload a
+		// completed intent would not have.
 		var row intentRow
 		if err := json.Unmarshal(item.Value, &row); err != nil {
 			skipped++

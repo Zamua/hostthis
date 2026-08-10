@@ -27,8 +27,8 @@ func TestClassifyCommitErr(t *testing.T) {
 		{"service full wrapped", fmt.Errorf("blob put: %w", storage.ErrServiceFull), commitServiceFull, ErrServiceFull},
 		{"over user quota bare", storage.ErrOverUserQuota, commitOverQuota, ErrOverQuota},
 		{"over user quota wrapped", fmt.Errorf("insert: %w", domain.ErrOverUserQuota), commitOverQuota, ErrOverQuota},
-		{"slug taken bare", storage.ErrSlugTaken, commitSlugTaken, SlugTakenErr},
-		{"slug taken wrapped", fmt.Errorf("preclaim: %w", domain.ErrSlugTaken), commitSlugTaken, SlugTakenErr},
+		{"slug taken bare", storage.ErrSlugTaken, commitSlugTaken, ErrSlugTaken},
+		{"slug taken wrapped", fmt.Errorf("preclaim: %w", domain.ErrSlugTaken), commitSlugTaken, ErrSlugTaken},
 		{"unclassified passes through", other, commitOther, other},
 		{"slug lookalike text is unclassified", errors.New("room slug validation failed"), commitOther, nil},
 	}

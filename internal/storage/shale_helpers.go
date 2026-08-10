@@ -217,6 +217,46 @@ func (r *ShaleRepo) getRaw(key []byte) ([]byte, error) {
 	return payload, nil
 }
 
+// getRawFailOpen reads key like getRaw but treats an UNREADABLE row as
+// unreadable-absent: it returns (nil, nil) and logs, so a fail-open caller
+// proceeds as if the row were absent instead of erroring on it.
+//
+// Unreadable covers both layers envelope damage can surface at, because at R>1
+// the two are indistinguishable to the caller and both must fail the same way:
+//   - the strip layer here (a raw enveloped value handed back on the R=1 /
+//     leftover-envelope path), and
+//   - the cluster read itself (at R>1 cluster.Get decodes each replica's
+//     envelope internally, so a truncated envelope on every replica surfaces as
+//     a non-retryable decode error from the read, never reaching stripEnvelope).
+//
+// retryAcquiring has already retried the transient/acquiring class, so a
+// surviving non-not-found error is a durable read failure the fall-through is
+// meant to absorb. Only a fail-open CALLER may use this, and only where its
+// fall-through is safe (the keygate own-row falls through to the full subnet
+// gate, which is stricter, not looser); a named-record read stays on getRaw so
+// damage reaches the user.
+func (r *ShaleRepo) getRawFailOpen(key []byte) ([]byte, error) {
+	var raw []byte
+	err := retryAcquiring(readRetry, r.repoLog(), "get", func() error {
+		var gerr error
+		raw, gerr = r.cluster.Get(key)
+		return gerr
+	})
+	if err != nil {
+		if errors.Is(err, backend.ErrNotFound) {
+			return nil, nil
+		}
+		r.repoLog().Printf("shale: %s unreadable (%v); a fail-open read treated it as absent", key, err)
+		return nil, nil
+	}
+	payload, serr := stripEnvelope(raw)
+	if serr != nil {
+		r.repoLog().Printf("shale: %s envelope undecodable (%v); a fail-open read treated it as absent", key, serr)
+		return nil, nil
+	}
+	return payload, nil
+}
+
 // scanPrefix collects every (key, value) under prefix from the OWNING shard via
 // the routed cluster.ScanPrefix. Used for single-shard list/prefix queries (a
 // paste's versions, an owner's pastes, a subnet's keygate rows); cross-shard
@@ -228,6 +268,13 @@ func (r *ShaleRepo) getRaw(key []byte) ([]byte, error) {
 // usable answer, so a retry restarts from the beginning.
 func (r *ShaleRepo) scanPrefix(prefix []byte) ([]scanItem, error) {
 	return scanPrefixOn(r.cluster, r.repoLog(), prefix)
+}
+
+// scanPrefixTolerant is scanPrefix's fail-open variant for the aggregate,
+// display-only readers (the keygate admission count + whoami snapshots): an
+// envelope-damaged record is skipped, not surfaced.
+func (r *ShaleRepo) scanPrefixTolerant(prefix []byte) ([]scanItem, error) {
+	return scanPrefixTolerant(r.cluster, r.repoLog(), prefix)
 }
 
 // scanPrefixOn is the cluster-level scan, taken as a function rather than a
@@ -279,6 +326,64 @@ func scanPrefixOnceOn(c *cluster.Cluster, prefix []byte) ([]scanItem, error) {
 			Key:   append([]byte(nil), k...),
 			Value: append([]byte(nil), env.Payload...),
 		})
+	}
+	return out, nil
+}
+
+// scanPrefixTolerant is scanPrefixOn's fail-open twin: a record whose LWW
+// envelope will not decode (a TRUNCATED envelope, the R>1 damage shape) is
+// SKIPPED and counted rather than aborting the whole scan. It exists so a path
+// documented fail-open survives envelope-level damage exactly as it survives
+// the per-record JSON-decode skip its callers already perform: one damaged
+// record must never deny a whole aggregate to every other.
+//
+// It is NOT for a Policy-2 reader answering about a SPECIFIC named record: such
+// a reader must surface damage to its user and so stays on scanPrefixOn
+// (docs/SPEC.md engineering principle 3, "Fail open on unreadable data").
+func scanPrefixTolerant(c *cluster.Cluster, lg *log.Logger, prefix []byte) ([]scanItem, error) {
+	var out []scanItem
+	err := retryAcquiring(readRetry, lg, "scan-prefix-tolerant", func() error {
+		var serr error
+		out, serr = scanPrefixOnceTolerant(c, lg, prefix)
+		return serr
+	})
+	return out, err
+}
+
+func scanPrefixOnceTolerant(c *cluster.Cluster, lg *log.Logger, prefix []byte) ([]scanItem, error) {
+	it, err := c.ScanPrefix(prefix)
+	if err != nil {
+		return nil, fmt.Errorf("scan prefix %s: %w", prefix, err)
+	}
+	defer it.Close() //nolint:errcheck
+	var out []scanItem
+	var damaged int
+	for {
+		k, v, err := it.Next()
+		if err != nil {
+			return nil, fmt.Errorf("scan next %s: %w", prefix, err)
+		}
+		if k == nil && v == nil {
+			break
+		}
+		env, derr := cluster.Decode(v)
+		if derr != nil {
+			// A truncated envelope, not a decodable value: the strict twin would
+			// abort the whole scan here. Skip-and-count so the fail-open caller
+			// keeps its other records.
+			damaged++
+			continue
+		}
+		if isTombstoneEnvelope(env) {
+			continue // a delete, not a row; matches cluster.Get reporting not-found
+		}
+		out = append(out, scanItem{
+			Key:   append([]byte(nil), k...),
+			Value: append([]byte(nil), env.Payload...),
+		})
+	}
+	if damaged > 0 && lg != nil {
+		lg.Printf("shale: %d undecodable record(s) under %s skipped (envelope damage); a fail-open scan continued", damaged, prefix)
 	}
 	return out, nil
 }

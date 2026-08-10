@@ -81,7 +81,7 @@ func TestShaleSite_SlugOwnerReleasedOnDelete(t *testing.T) {
 		t.Fatalf("InsertWithQuotaCheck: %v", err)
 	}
 
-	if err := storage.NewSites(repo).Delete(slug); err != nil {
+	if err := storage.NewSites(repo).Delete(slug, site.Identity, site.CreatedAt); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if slugOwnerPresent(t, repo, slug) {

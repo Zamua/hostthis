@@ -137,7 +137,7 @@ func conformSiteListByOwner(t *testing.T, r conformanceRepo, sr conformanceSiteR
 
 	// A delete must drop out of the listing, leaving A's other site and B
 	// untouched.
-	if err := sr.Delete("aone1111"); err != nil {
+	if err := sr.Delete("aone1111", "key:AAAA", fixedNow); err != nil {
 		t.Fatalf("delete site: %v", err)
 	}
 	if a := slugsOf(ownerA); len(a) != 1 || !a["atwo2222"] || a["aone1111"] {

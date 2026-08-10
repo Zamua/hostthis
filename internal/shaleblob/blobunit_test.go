@@ -171,7 +171,7 @@ func TestAtomicDelete(t *testing.T) {
 		t.Fatalf("read after commit: %v", rerr)
 	}
 
-	if err := repo.Delete(domain.Slug("delslug")); err != nil {
+	if err := repo.Delete(domain.Slug("delslug"), p.Identity, p.CreatedAt); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if _, gerr := repo.Get(domain.Slug("delslug")); !isStorageNotFound(gerr) {
@@ -624,7 +624,11 @@ func TestDelete_ReclaimsItsBytesAndSparesTheOthers(t *testing.T) {
 		t.Fatalf("fixture: %d objects, want 2", got)
 	}
 
-	if err := repo.Delete(doomed); err != nil {
+	doomedP, err := repo.Get(doomed)
+	if err != nil {
+		t.Fatalf("get doomed: %v", err)
+	}
+	if err := repo.Delete(doomed, doomedP.Identity, doomedP.CreatedAt); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	// The delete removed the pointer. The object is still there until a sweep.

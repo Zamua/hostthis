@@ -49,7 +49,7 @@ func TestShaleDelete_RacingAppendLeavesNoOrphanVersion(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			time.Sleep(time.Duration(i) * stepDelay)
-			_ = repo.Delete(slug)
+			_ = repo.Delete(slug, p.Identity, p.CreatedAt)
 		}()
 		go func() {
 			defer wg.Done()

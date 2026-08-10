@@ -40,7 +40,7 @@ func (r *claimSiteRepo) Get(domain.Slug) (domain.Site, error) {
 	return domain.Site{}, domain.ErrNotFound
 }
 
-func (r *claimSiteRepo) Delete(domain.Slug) error { return nil }
+func (r *claimSiteRepo) Delete(domain.Slug, domain.Identity, time.Time) error { return nil }
 
 func (r *claimSiteRepo) SumActiveBytesByOwner(string, time.Time) (int64, error) { return 0, nil }
 

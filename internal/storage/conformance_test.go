@@ -279,7 +279,7 @@ func conformQuotaFreedByDelete(t *testing.T, r conformanceRepo) {
 		t.Fatalf("pre-delete 300 should be over quota: %v", err)
 	}
 	// Delete the 900 paste, freeing all its bytes.
-	if err := r.Delete("d1234567"); err != nil {
+	if err := r.Delete("d1234567", "key:d", fixedNow); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if err := r.InsertWithQuotaCheck(context.Background(), pasteOf("d2234567", "key:d", 300), cap, fixedNow); err != nil {
@@ -528,11 +528,14 @@ func conformRepoIsNotOwnerGated(t *testing.T, r conformanceRepo) {
 	if got.Identity.String() != "key:alice" {
 		t.Fatalf("got identity %q, want key:alice", got.Identity)
 	}
-	// SetName + Delete take no owner and succeed for any caller.
-	if err := r.SetName("og123456", "renamed"); err != nil {
+	// SetName + Delete name the paste's OWN identity + CreatedAt (a concurrency
+	// guard against a delete+re-mint of the slug, NOT a session-owner check):
+	// any caller holding the paste can name them, so IDOR gating still lives
+	// only in the service layer.
+	if err := r.SetName("og123456", "renamed", got.Identity, got.CreatedAt); err != nil {
 		t.Fatalf("repo SetName is not owner-gated: %v", err)
 	}
-	if err := r.Delete("og123456"); err != nil {
+	if err := r.Delete("og123456", got.Identity, got.CreatedAt); err != nil {
 		t.Fatalf("repo Delete is not owner-gated: %v", err)
 	}
 }
@@ -610,7 +613,7 @@ func conformOwnerStats(t *testing.T, r conformanceRepo) {
 	// CountByOwner counts only LIVE pastes and must AGREE with ListByOwner even
 	// when a delete leaves a stale derived-index entry behind: a raw
 	// len(index) count would over-report the orphan.
-	if err := r.Delete("st223456"); err != nil {
+	if err := r.Delete("st223456", domain.Identity(owner), fixedNow); err != nil {
 		t.Fatalf("delete for count-repair regression: %v", err)
 	}
 	n, err = r.CountByOwner(owner)
@@ -628,7 +631,7 @@ func conformOwnerStats(t *testing.T, r conformanceRepo) {
 
 func conformSetName(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("sn123456", "key:s", 10))
-	if err := r.SetName("sn123456", "my label"); err != nil {
+	if err := r.SetName("sn123456", "my label", "key:s", fixedNow); err != nil {
 		t.Fatalf("set name: %v", err)
 	}
 	p, _ := r.Get("sn123456")
@@ -636,7 +639,7 @@ func conformSetName(t *testing.T, r conformanceRepo) {
 		t.Fatalf("set name: got %q, want %q", p.Name, "my label")
 	}
 	// Empty string clears the label.
-	if err := r.SetName("sn123456", ""); err != nil {
+	if err := r.SetName("sn123456", "", "key:s", fixedNow); err != nil {
 		t.Fatalf("clear name: %v", err)
 	}
 	p, _ = r.Get("sn123456")

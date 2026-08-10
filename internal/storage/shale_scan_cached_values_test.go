@@ -213,7 +213,7 @@ func TestShaleQuotaScanFailsOpen(t *testing.T) {
 			t.Errorf("an owner with an unreadable entry must still be able to upload (%s): %v", tc.name, err)
 		}
 		repo.WaitPendingConfirms()
-		if err := repo.Delete(probe.Slug); err != nil {
+		if err := repo.Delete(probe.Slug, probe.Identity, probe.CreatedAt); err != nil {
 			t.Fatalf("cleanup probe: %v", err)
 		}
 	}
@@ -272,7 +272,7 @@ func TestShaleListDoesNotResurrectFailedPasteEntry(t *testing.T) {
 		t.Fatalf("a list must not drop the leftover entry: got %d, want 400", got)
 	}
 	// Delete is the owner's way out, and it works on the entry alone.
-	if err := repo.Delete(p.Slug); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := repo.Delete(p.Slug, p.Identity, p.CreatedAt); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("delete: %v", err)
 	}
 	if got := mustSum(t, repo, owner, now); got != 0 {

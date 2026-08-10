@@ -251,24 +251,55 @@ func decodeOwnerDoc(raw []byte, out *ownerDoc) error {
 // dropOwnerEntry removes slug from the owner's enumeration index and doc in
 // one {id}-shard CAS, the shared tail of Delete and MarkFailed. Idempotent on
 // a missing entry.
-func (r *ShaleRepo) dropOwnerEntry(identity, slug string) error {
+//
+// GUARDED against a re-mint in the {slug}->{id} window: the {slug} write that
+// removed the paste frees the slug, so a same-owner re-mint can write a fresh
+// entry + doc entry (a new CreatedAt) before this drop lands. Each
+// representation is removed ONLY when it still carries wantCreatedAt, the
+// immutable stamp of the paste that was removed; an entry with a different
+// stamp is the re-mint's and is left alone, so the drop cannot strand the new
+// paste as a phantom (serves files, absent from list, uncounted for quota).
+// CreatedAt is preserved across every in-place mutation (append, pin, rename,
+// reprojection), so a legitimate same-paste entry always still matches. An
+// undecodable entry is left too (fail open): it cannot be confirmed to be the
+// removed paste's.
+func (r *ShaleRepo) dropOwnerEntry(identity, slug string, wantCreatedAt time.Time) error {
 	indexKey := shaleKeyIdentityPaste(identity, slug)
 	candidate, err := r.ownerDocCandidate(identity)
 	if err != nil {
 		return err
 	}
 	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
-		if _, err := tx.Get(indexKey); err == nil {
-			if derr := tx.Delete(indexKey); derr != nil {
-				return derr
+		if raw, gerr := tx.Get(indexKey); gerr == nil {
+			if entryStampMatches(raw, wantCreatedAt) {
+				if derr := tx.Delete(indexKey); derr != nil {
+					return derr
+				}
 			}
-		} else if !errors.Is(err, backend.ErrNotFound) {
-			return err
+		} else if !errors.Is(gerr, backend.ErrNotFound) {
+			return gerr
 		}
 		return r.txApplyOwnerDoc(tx, identity, candidate, func(doc *ownerDoc) {
-			delete(doc.Pastes, slug)
+			if e, ok := doc.Pastes[slug]; ok && e.CreatedAt.Equal(wantCreatedAt) {
+				delete(doc.Pastes, slug)
+			}
 		})
 	})
+}
+
+// entryStampMatches reports whether a raw enumeration-entry value decodes and
+// carries CreatedAt == want. Envelope-level damage or an undecodable payload
+// reads as NO match, so a guarded drop leaves a record it cannot confirm.
+func entryStampMatches(raw []byte, want time.Time) bool {
+	payload, err := stripEnvelope(raw)
+	if err != nil {
+		return false
+	}
+	var row identityPasteRow
+	if json.Unmarshal(payload, &row) != nil {
+		return false
+	}
+	return row.CreatedAt.Equal(want)
 }
 
 // OwnerSummary answers whoami's count + first-seen + byte-sum with ONE read

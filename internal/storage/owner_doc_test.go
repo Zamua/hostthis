@@ -65,7 +65,7 @@ func TestOwnerDoc_FirstMutationHealsFromLegacyRows(t *testing.T) {
 
 	// One mutation migrates the owner: the doc must reappear carrying the
 	// pre-existing entries, not just the mutation's subject.
-	if err := repo.SetName(a.Slug, "renamed"); err != nil {
+	if err := repo.SetName(a.Slug, "renamed", a.Identity, a.CreatedAt); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 	if !ownerDocPresent(t, repo, owner) {
@@ -190,7 +190,7 @@ func TestOwnerDoc_DocRenderMatchesLegacyRender(t *testing.T) {
 	}
 	repo.WaitPendingConfirms()
 
-	if err := repo.SetName(p1.Slug, "labelled"); err != nil {
+	if err := repo.SetName(p1.Slug, "labelled", p1.Identity, p1.CreatedAt); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 	if _, err := repo.AppendVersionWithQuotaCheck(ctx, p2.Slug, domain.KindMarkdown, "sha-doceq-b2", 50, 0, now.Add(-30*time.Minute)); err != nil {
@@ -203,7 +203,7 @@ func TestOwnerDoc_DocRenderMatchesLegacyRender(t *testing.T) {
 	if err := repo.SetPinnedVersion(p2.Slug, v1); err != nil {
 		t.Fatalf("pin: %v", err)
 	}
-	if err := repo.Delete(gone.Slug); err != nil {
+	if err := repo.Delete(gone.Slug, gone.Identity, gone.CreatedAt); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
@@ -547,7 +547,7 @@ func TestOwnerDoc_CorruptDocReadsFallBackAndWriteRebuilds(t *testing.T) {
 	}
 
 	// The next mutation replaces the corrupt doc with a good one.
-	if err := repo.SetName(a.Slug, "fixed"); err != nil {
+	if err := repo.SetName(a.Slug, "fixed", a.Identity, a.CreatedAt); err != nil {
 		t.Fatalf("rename over a corrupt doc must rebuild it, not fail: %v", err)
 	}
 	raw, err := repo.GetRawForTest(storage.OwnerDocKeyForTest(owner))

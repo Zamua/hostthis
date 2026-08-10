@@ -273,3 +273,11 @@ func MarkerValueForTest() []byte { return markerValue }
 // IntentLogForTest exposes the repo's durable log so crash-boundary tests can
 // plant an intent the way a dead process would have left one.
 func (r *ShaleRepo) IntentLogForTest() durable.Log { return r.intents }
+
+// KeygateKeyForTest returns the "keygate/<subnet>/<identity>" authoritative
+// row key, so a test can plant a deliberately damaged keygate value.
+func KeygateKeyForTest(subnet, identity string) []byte { return shaleKeyKeygate(subnet, identity) }
+
+// IntentKeyForTest returns the "intents/<scope>/<id>" key, so a test can plant a
+// damaged intent row under a scope.
+func IntentKeyForTest(scope, id string) []byte { return shaleKeyIntent(scope, id) }

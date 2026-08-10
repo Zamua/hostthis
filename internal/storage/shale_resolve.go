@@ -193,10 +193,6 @@ func (r *ShaleRepo) subjectRowExists(in durable.Intent) (bool, error) {
 	return true, nil
 }
 
-func (r *ShaleRepo) intentEntryKey(in durable.Intent) []byte {
-	return shaleKeyIdentityPaste(string(in.Scope), in.Subject)
-}
-
 // SweepIntents is the boot sweep: it resolves every intent stored on the units
 // THIS node has mounted.
 //
