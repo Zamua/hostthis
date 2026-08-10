@@ -505,8 +505,11 @@ func shaleTxTouchRoom(tx backend.Transaction, appSlug domain.Slug, id domain.Roo
 // via a single-shard ScanPrefix on roomcreate/<app>/: the per-app count is
 // every in-window row, the per-subnet count the subset whose <subnet> segment
 // matches. The fixed-width <ts> on each marker is what the window compares.
+// The markers are KEY-only, so the scan is the TOLERANT one: a damaged value
+// carries no information this count uses, and refusing on it would deny room
+// creation for the whole app over a byte nothing here reads.
 func (r *ShaleRepo) CountRoomCreates(appSlug domain.Slug, subnet string, now time.Time, window time.Duration) (perSubnet, perApp int, err error) {
-	items, err := r.scanPrefix(shalePrefixAppRoomCreates(appSlug))
+	items, err := r.scanPrefixTolerant(shalePrefixAppRoomCreates(appSlug))
 	if err != nil {
 		return 0, 0, err
 	}
@@ -621,7 +624,11 @@ func (r *ShaleRepo) DeleteRoom(appSlug domain.Slug, id domain.RoomID) error {
 			}
 			return err
 		}
-		// The value keys and their total freed bytes, outside the tx.
+		// The value keys and their total freed bytes, outside the tx. STRICT on
+		// purpose: this scan is not just a key set, it is the byte total the
+		// app's counter is decremented by, and a record skipped here would
+		// mis-charge that counter permanently. Refusing applies nothing, so the
+		// delete is retryable once the value is repaired.
 		values, err := r.scanPrefix(shalePrefixRoomValues(appSlug, id))
 		if err != nil {
 			return err

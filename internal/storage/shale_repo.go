@@ -310,6 +310,17 @@ type ShaleRepo struct {
 	// number covers exactly the key set the cascade removes, whichever of the
 	// two reads the window sits behind.
 	testHookVersionsCascadeMidRead func(slug domain.Slug)
+
+	// testHookOwnerEntryDropping runs before the owner-entry drop's {id}
+	// transaction. Re-minting the slug there is what proves the created-time
+	// guard tells a re-mint from the paste the drop was aimed at.
+	testHookOwnerEntryDropping func(identity, slug string)
+
+	// testHookLegacyUnpinScanned runs between the pre-migration unpin's version
+	// scan and its transaction. Tombstoning the chosen version there, or
+	// planting a document, reaches the two states the candidate-key probe
+	// cannot detect on its own.
+	testHookLegacyUnpinScanned func(slug domain.Slug)
 }
 
 // WaitPendingConfirms blocks until every background confirm goroutine has
@@ -592,7 +603,12 @@ func (r *ShaleRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 		return doc.listRows(owner), nil
 	}
 
-	idx, err := r.scanPrefix(shalePrefixIdentityPastes(owner))
+	// Tolerant: an entry damaged at the ENVELOPE layer is read through its
+	// authoritative row by the upgrade path below, the same way one whose JSON
+	// will not decode is. A strict scan would instead deny the owner their whole
+	// listing over one entry, which is the failure mode the read-through exists
+	// to prevent.
+	idx, err := r.scanPrefixTolerant(shalePrefixIdentityPastes(owner))
 	if err != nil {
 		return nil, err
 	}
@@ -726,7 +742,9 @@ func (r *ShaleRepo) CountByOwner(owner string) (int, error) {
 	} else if doc != nil {
 		return len(doc.Pastes), nil
 	}
-	idx, err := r.scanPrefix(shalePrefixIdentityPastes(owner))
+	// Tolerant, so the count agrees with what ListByOwner renders: both walk
+	// the same entries, and a damaged value still has a countable KEY.
+	idx, err := r.scanPrefixTolerant(shalePrefixIdentityPastes(owner))
 	if err != nil {
 		return 0, err
 	}
@@ -778,13 +796,24 @@ func (r *ShaleRepo) SumActiveBytesByOwner(owner string, now time.Time) (int, err
 // EMPTY value, the bare-marker convention an in-place migration carries over),
 // is read through its authoritative rows until their next list enriches it.
 func (r *ShaleRepo) sumActiveBytesForOwner(owner string) (int64, error) {
-	idx, err := r.scanPrefix(shalePrefixIdentityPastes(owner))
+	// Tolerant: a strict scan aborts on ENVELOPE damage before any per-record
+	// decision, which turns one bad entry into the lock-out this fail-open rule
+	// exists to prevent.
+	idx, err := r.scanPrefixTolerant(shalePrefixIdentityPastes(owner))
 	if err != nil {
 		return 0, err
 	}
 	var total int64
 	var skips scanSkips
 	for _, item := range idx {
+		if item.Damaged != nil {
+			// Counted as zero, like any entry that cannot be read. Checked
+			// BEFORE the empty-value branch below: a damaged record carries no
+			// value either, and reading it as the legacy empty MARKER would send
+			// a corrupt entry down the authoritative read-through.
+			skips.add(item.Key, item.Damaged)
+			continue
+		}
 		if len(item.Value) == 0 {
 			n, err := r.legacyPasteEntryBytes(item.Key)
 			if err != nil {
@@ -1180,10 +1209,23 @@ func (r *ShaleRepo) insertArtifact(ctx context.Context, p domain.Paste, userCap 
 				r.repoLog().Printf("shale: forgetting the intent for %s: %v (a sweep will retry it)", p.Slug, cerr)
 			}
 			return err
+		case owner == "":
+			// NOBODY holds the slug as of this read, and this read is OUTSIDE
+			// the transaction that would act on it, on a different shard from
+			// the entry, so it cannot be moved inside one. A same-identity
+			// sibling committing its row after it leaves a guard that still
+			// MATCHES, and the rollback would then delete the entry that
+			// sibling's row depends on. The sweep asks the same question after
+			// the resolve grace, when the answer can no longer change under it,
+			// so the decision is deferred there rather than taken on a reading
+			// that is stale by construction.
+			r.repoLog().Printf("shale: nothing holds %s after a failed insert (keeping the enumeration entry; the intent sweep settles it once the answer is stable)", p.Slug)
+			return err
 		}
-		// A different identity holds the slug, or nothing does: the entry
-		// written above is an orphan. Best-effort removal keeps the common
-		// failure (a slug race) from charging the owner; if it fails, the
+		// A DIFFERENT identity holds the slug: positive evidence that the entry
+		// written above is an orphan, since no sibling of ours could have
+		// claimed a slug someone else holds. Best-effort removal keeps the
+		// common failure (a slug race) from charging the owner; if it fails, the
 		// intent stays and a sweep finishes the job. The doc entry drops in
 		// the same CAS: doc-first reads have no pruning path, so a doc
 		// phantom would over-count this owner permanently.
@@ -1486,6 +1528,7 @@ func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
 	// Step 1: flip the {slug}-shard status and capture the owner, so step 2 can
 	// find the index entry. A paste that is not pending has nothing to release.
 	var identity string
+	var createdAt time.Time
 	var transitioned bool
 	err := r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
 		transitioned = false // reset on CAS retry
@@ -1507,7 +1550,7 @@ func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
 		if domain.NormalizeStatus(p.Status) != domain.PasteStatusPending {
 			return nil // only a pending paste transitions
 		}
-		identity = p.Identity
+		identity, createdAt = p.Identity, p.CreatedAt
 		p.Status = string(domain.PasteStatusFailed)
 		if err := shaleTxPutJSON(tx, pasteKey, p); err != nil {
 			return err
@@ -1520,7 +1563,9 @@ func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
 	}
 	// Step 2: drop the enumeration entry and the doc entry on the {id} shard
 	// so the failed paste leaves ListByOwner and stops being enumerated at all.
-	return r.dropOwnerEntry(identity, slug.String())
+	// The paste ROW survives this transition, so the slug does not return to the
+	// mint and the created-time guard has nothing to hold it back.
+	return r.dropOwnerEntry(identity, slug.String(), createdAt)
 }
 
 // AppendVersionWithQuotaCheck appends a new version. The per-owner cap is
@@ -1599,6 +1644,18 @@ func (r *ShaleRepo) appendVersion(ctx context.Context, slug domain.Slug, ref con
 // from is stale. The closure aborts with it (Transact returns a non-conflict fn
 // error verbatim). Never escapes the function that raises it.
 var errVerTaken = errors.New("shale: candidate version number already taken")
+
+// errVerChanged signals that a version chosen OUTSIDE a transaction is no
+// longer the record the choice assumed when the transaction re-read it: a
+// concurrent tombstone. The candidate-key probe cannot see it - that probe
+// tests an ABSENT number, and a tombstone rewrites a number that is present.
+// Never escapes the function that raises it.
+var errVerChanged = errors.New("shale: chosen version changed since it was read")
+
+// errVersionsDocAppeared signals that a document exists inside a transaction
+// that was dispatched down the pre-migration row path. Never escapes the
+// function that raises it.
+var errVersionsDocAppeared = errors.New("shale: versions doc appeared since the dispatch read")
 
 // ErrConcurrentChange aliases the domain-owned sentinel, matching how the rest
 // of the storage error vocabulary is re-exported.
@@ -1795,9 +1852,15 @@ func (r *ShaleRepo) refreshIndexProjection(identity string, slug domain.Slug) er
 // enrichment; for a doc-present owner that enrichment never runs (lists read
 // the doc), so the doc entry is refreshed from the head row HERE and a real
 // legacy row is written alongside (the dual-write). The doc mutation UPDATES,
-// never creates: entry-absence gives the guard nothing to compare, so a
-// racing whole-paste delete must win by the slug simply being gone from the
-// doc when the mutation runs.
+// never creates: entry-absence gives the legacy guard nothing to compare, so
+// the doc's own membership is the guard.
+//
+// That membership is decided INSIDE the transaction. The doc read below is a
+// pre-filter that saves a head read; on its own it would let a whole-paste
+// delete commit in the window and still satisfy the absent-guard, CREATING a
+// legacy entry for a paste that is gone. Both the doc and the entry live on the
+// {id} shard, so the in-transaction answer serializes against that delete: the
+// slug missing from the doc aborts the whole transaction and nothing is written.
 func (r *ShaleRepo) refreshFromEmptyEntry(identity string, slug domain.Slug, candidate *ownerDoc) error {
 	doc, err := r.getOwnerDoc(identity)
 	if err != nil {
@@ -1818,11 +1881,19 @@ func (r *ShaleRepo) refreshFromEmptyEntry(identity string, slug domain.Slug, can
 	}
 	indexKey := shaleKeyIdentityPaste(identity, slug.String())
 	post := func(tx backend.Transaction) error {
-		return r.txApplyOwnerDoc(tx, identity, candidate, func(d *ownerDoc) {
+		held := false
+		if err := r.txApplyOwnerDoc(tx, identity, candidate, func(d *ownerDoc) {
 			if _, ok := d.Pastes[slug.String()]; ok {
 				d.Pastes[slug.String()] = ownerDocPasteFromRow(fresh)
+				held = true
 			}
-		})
+		}); err != nil {
+			return err
+		}
+		if !held {
+			return errIndexEntryChanged // the paste left the owner's index since the pre-filter
+		}
+		return nil
 	}
 	// The snapshot cannot tell an empty-marker entry from an absent one, so
 	// each shape gets its own guarded attempt; a value landing concurrently
@@ -1867,7 +1938,18 @@ func (r *ShaleRepo) refreshFromEmptyEntry(identity string, slug domain.Slug, can
 // spends a full CAS budget on the conflict, so a second retry layer here would
 // only re-run an exhausted one; and the version set is read OUTSIDE the tx, so
 // the only fix for a stale read is to start over from the caller.
+//
+// The owner's entry lives on a DIFFERENT shard, so it cannot drop in the same
+// transaction and its removal is a second step that can fail on its own. Once
+// the {slug} rows are gone nothing identifies the owner any more - the head and
+// slug_owner both went with them - so a retry finds nothing to do and the entry
+// would be a permanent phantom, counted against the owner's quota and listed as
+// a slug that does not resolve. A DURABLE INTENT recorded before the cascade is
+// what makes that step recoverable: it names the owner, the slug and the entry
+// bytes, and the sweep (boot, and the owner's own next listing) finishes the
+// removal against a row that is by then stably absent.
 func (r *ShaleRepo) Delete(slug domain.Slug) error {
+	ctx := context.Background()
 	pasteKey := shaleKeyPaste(slug)
 	docKey := shaleKeyVersionsDoc(slug)
 	var head pasteRow
@@ -1880,6 +1962,10 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 	cascade, err := r.deleteCascade(slug, head.LatestVersion)
 	if err != nil {
 		return err
+	}
+	intent, ierr := r.beginDeleteIntent(ctx, head.Identity, slug)
+	if ierr != nil {
+		return ierr
 	}
 	// The mark counts tombstones, so this is the number a racing append would
 	// claim next.
@@ -1953,16 +2039,67 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 	switch {
 	case txErr == nil:
 	case errors.Is(txErr, errVerTaken) || errors.Is(txErr, backend.ErrCASConflict):
+		r.forgetDeleteIntent(ctx, intent) // nothing was applied
 		return fmt.Errorf("shale: delete %q: %w", slug, ErrConcurrentChange)
 	case errors.Is(txErr, ErrNotFound):
+		r.forgetDeleteIntent(ctx, intent)
 		return nil // a concurrent delete cascaded first; idempotent
 	default:
+		r.forgetDeleteIntent(ctx, intent)
 		return txErr
 	}
 
 	// Drop the enumeration entry and the doc entry on the {id} shard so the
-	// paste leaves the owner's scan and doc render. Idempotent.
-	return r.dropOwnerEntry(head.Identity, slug.String())
+	// paste leaves the owner's scan and doc render. Idempotent. The intent is
+	// discharged only once that lands; a failure leaves it, and the sweep
+	// repeats this step.
+	if err := r.dropOwnerEntry(head.Identity, slug.String(), head.CreatedAt); err != nil {
+		return fmt.Errorf("shale: delete %q: dropping the owner entry: %w (the intent sweep retries it)", slug, err)
+	}
+	r.forgetDeleteIntent(ctx, intent)
+	return nil
+}
+
+// beginDeleteIntent records that the owner's enumeration entry for slug must be
+// removed, BEFORE the {slug} rows that name the owner are destroyed. The entry's
+// own bytes ride along as the compensating delete's guard, so a re-mint of the
+// slug that rewrote the entry is never eaten by a late sweep.
+//
+// An entry that cannot be read leaves the guard empty, which the guarded delete
+// treats as "match nothing" - the phantom then survives, which beats a sweep
+// deleting an entry it could not identify.
+//
+// A head with no identity has no owner index to clean up, so it records
+// nothing: the zero intent's Complete is a no-op.
+func (r *ShaleRepo) beginDeleteIntent(ctx context.Context, identity string, slug domain.Slug) (durable.Intent, error) {
+	if identity == "" {
+		return durable.Intent{}, nil
+	}
+	guard, gerr := r.getRaw(shaleKeyIdentityPaste(identity, slug.String()))
+	if gerr != nil {
+		r.repoLog().Printf("shale: reading the delete guard for %s: %v (a sweep will skip rather than risk a fresher entry)", slug, gerr)
+	}
+	in := durable.Intent{
+		ID: durable.ID(slug.String()), Kind: durable.KindDeletePaste,
+		Scope: durable.Scope(identity), Subject: slug.String(),
+		Guard: guard, StartedAt: time.Now().UTC(),
+	}
+	if err := r.intents.Begin(ctx, in); err != nil {
+		return durable.Intent{}, fmt.Errorf("durable intent: %w", err)
+	}
+	return in, nil
+}
+
+// forgetDeleteIntent discharges the delete intent. A lost Complete leaves an
+// intent whose subject row is absent, which the sweep settles by repeating a
+// removal that is idempotent.
+func (r *ShaleRepo) forgetDeleteIntent(ctx context.Context, in durable.Intent) {
+	if in.ID == "" {
+		return
+	}
+	if err := r.intents.Complete(ctx, in.ID, in.Scope); err != nil {
+		r.repoLog().Printf("shale: forgetting the delete intent for %s: %v (a sweep will retry it)", in.Subject, err)
+	}
 }
 
 // DeleteVersion tombstones a single version: it stays visible in the list
@@ -1971,6 +2108,11 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 // index-projection refresh after the tombstone commits; a lost refresh is a
 // bounded stale-cache window the owner's next list heals. Re-deleting an
 // already-tombstoned version is a no-op.
+//
+// The version the URL serves is refused with ErrVersionServed, decided from the
+// head and the record the TRANSACTION reads. Everything below the transaction
+// is planning: a plan is a snapshot, and the one check whose subject a
+// concurrent pin can move under it has to be re-taken where the act happens.
 func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 	// Existence gate: a missing paste yields ErrNotFound.
 	var p pasteRow
@@ -2002,8 +2144,8 @@ func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 	// the same <slug>, so the unbind co-commits in one single-shard transaction.
 	// Each version's blob has a unique stage-minted id (no within-record dedup),
 	// so no live sibling references it and the unbind is unconditional; the
-	// served head version cannot be deleted (the service guards it), so the
-	// head's blob id is never the one unbound here.
+	// served version refuses below, from the head this transaction reads, so
+	// the head's blob id is never the one unbound here.
 	pasteKey := shaleKeyPaste(slug)
 
 	verBody := func(tx shaleKVTx, unbind func(blobID string) error) error {
@@ -2029,6 +2171,15 @@ func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 			if v.Deleted {
 				alreadyDeleted = true
 				return nil
+			}
+			// The served-version guard, on the two operands this transaction
+			// already holds. The service refuses first for the message, but a
+			// pin or an unpin committing between that refusal and this
+			// transaction moves the head onto this very version, and a guard
+			// read outside the transaction that acts cannot see it. Here the
+			// guard and the act cannot be split.
+			if headServesVersion(head, v) {
+				return ErrVersionServed
 			}
 			v.Deleted = true
 			doc.upsert(v)
@@ -2100,14 +2251,30 @@ func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 	return nil
 }
 
+// SetName sets the paste's human label on the {slug} shard, then carries it
+// into the owner's index projection and document on the {id} shard.
+//
+// The identity comes OUT of the renaming transaction rather than from a
+// separate slug_owner read. A whole-paste delete returns the slug to the mint,
+// so a second read can resolve it to a DIFFERENT owner who has since re-minted
+// it, and the rename would then be written into that owner's index for a paste
+// it does not describe. Taken from the row this call renamed, the projection
+// can only ever target the paste that was renamed.
+//
+// Its created time rides along for the same reason one shard down: the same
+// owner re-minting the slug leaves an entry the rename must not touch, so an
+// entry created strictly after the renamed paste is left alone.
 func (r *ShaleRepo) SetName(slug domain.Slug, name string) error {
 	pasteKey := shaleKeyPaste(slug)
+	var identity string
+	var createdAt time.Time
 	if err := r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
 		var p pasteRow
 		if err := shaleTxGetJSON(tx, pasteKey, &p); err != nil {
 			return err
 		}
 		p.Name = name
+		identity, createdAt = p.Identity, p.CreatedAt
 		return shaleTxPutJSON(tx, pasteKey, p)
 	}); err != nil {
 		return err
@@ -2116,9 +2283,8 @@ func (r *ShaleRepo) SetName(slug domain.Slug, name string) error {
 	// doc, in one {id}-shard CAS. Errors PROPAGATE: the doc is what the
 	// listing renders, so a swallowed failure here is a rename that reported
 	// success while staying invisible.
-	identity := r.ownerOfSlug(slug)
 	if identity == "" {
-		return nil // paste gone mid-flight; nothing to refresh
+		return nil // a row with no owner; nothing to refresh
 	}
 	candidate, err := r.ownerDocCandidate(identity)
 	if err != nil {
@@ -2128,17 +2294,19 @@ func (r *ShaleRepo) SetName(slug domain.Slug, name string) error {
 	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
 		var row identityPasteRow
 		gerr := shaleTxGetJSON(tx, indexKey, &row)
-		if gerr != nil && !errors.Is(gerr, ErrNotFound) {
+		switch {
+		case errors.Is(gerr, ErrNotFound):
+			// No cached entry to relabel; the doc below still carries the name.
+		case gerr != nil:
 			return gerr
-		}
-		if gerr == nil {
+		case !row.CreatedAt.After(createdAt):
 			row.Name = name
 			if perr := shaleTxPutJSON(tx, indexKey, row); perr != nil {
 				return perr
 			}
 		}
 		return r.txApplyOwnerDoc(tx, identity, candidate, func(doc *ownerDoc) {
-			if e, ok := doc.Pastes[slug.String()]; ok {
+			if e, ok := doc.Pastes[slug.String()]; ok && !e.CreatedAt.After(createdAt) {
 				e.Name = name
 				doc.Pastes[slug.String()] = e
 			}
@@ -2149,6 +2317,14 @@ func (r *ShaleRepo) SetName(slug domain.Slug, name string) error {
 // ownerOfSlug resolves a slug's owner identity from slug_owner in one
 // {slug}-shard read. Returns "" if the paste is gone, which makes the
 // best-effort index refresh it feeds a harmless no-op.
+//
+// Its callers are PROJECTION refreshes only, which is why the read may sit
+// outside their transaction. A delete plus a re-mint by a different owner
+// resolves to that new owner, and the refresh then rebuilds THAT owner's entry
+// from the head - which is their own paste's head, so the answer is correct for
+// whoever the slug now belongs to. A path that carried a value from the old
+// paste would have to take its identity out of the row it read instead: see
+// SetName.
 func (r *ShaleRepo) ownerOfSlug(slug domain.Slug) string {
 	raw, err := r.getRaw(shaleKeySlugOwner(slug))
 	if err != nil || raw == nil {
@@ -2157,6 +2333,10 @@ func (r *ShaleRepo) ownerOfSlug(slug domain.Slug) string {
 	return string(raw)
 }
 
+// SetPinnedVersion rolls the head onto a named version and makes it sticky.
+// A TOMBSTONED target is refused with ErrVersionDeleted from inside the
+// transaction: its blob is already unbound, so the pin would publish bytes the
+// reclaimer is coming for.
 func (r *ShaleRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error {
 	pasteKey := shaleKeyPaste(slug)
 	err := r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
@@ -2204,6 +2384,12 @@ func (r *ShaleRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error
 // delete, which leaves the newest record claiming to be live while its blob is
 // already unbound). The document is repaired by the paste's next write, and the
 // unpin then rolls to the version the refusal preserved.
+//
+// The DISPATCH read below is outside any transaction, so the row path re-takes
+// it inside its own and hands back ErrConcurrentChange when a document turns
+// out to exist. A document that will not DECODE reads as absent to both, which
+// is deliberate: the rows are what repairs it, so the row path has to stay
+// reachable for such a paste.
 func (r *ShaleRepo) Unpin(slug domain.Slug) error {
 	doc, err := r.getVersionsDoc(slug)
 	if err != nil {
@@ -2269,8 +2455,17 @@ func (r *ShaleRepo) unpinFromDoc(slug domain.Slug) error {
 // and both routes abort rather than commit a head chosen from a stale version
 // set. The scan itself refuses to decode a damaged row, so this path can no
 // more roll off a truncated set than the document path can.
+//
+// The probe detects a writer that ADDS a number and nothing else. A per-version
+// delete MODIFIES an existing row, leaving the probe key untouched, so the roll
+// TARGET is re-read inside the transaction and its descriptor taken from there:
+// otherwise a tombstone committing after the scan would put the head on a blob
+// that same tombstone unbound. The DISPATCH is re-taken too - a document
+// appearing after the caller chose this path means the decision belongs to
+// unpinFromDoc, which applies the completeness gate this path has no way to.
 func (r *ShaleRepo) unpinFromLegacyRows(slug domain.Slug) error {
 	pasteKey := shaleKeyPaste(slug)
+	docKey := shaleKeyVersionsDoc(slug)
 	versions, err := r.scanVersions(slug)
 	if err != nil {
 		return err
@@ -2290,6 +2485,10 @@ func (r *ShaleRepo) unpinFromLegacyRows(slug domain.Slug) error {
 	// MAX(ver_num) counts tombstones, so this is the number a racing
 	// append would claim next.
 	nextVerKey := shaleKeyVersion(slug, maxVerNum(versions)+1)
+	targetKey := shaleKeyVersion(slug, latest.VerNum)
+	if hook := r.testHookLegacyUnpinScanned; hook != nil {
+		hook(slug)
+	}
 
 	txErr := r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
 		var p pasteRow
@@ -2301,10 +2500,32 @@ func (r *ShaleRepo) unpinFromLegacyRows(slug domain.Slug) error {
 		} else if !errors.Is(gerr, backend.ErrNotFound) {
 			return gerr
 		}
+		// An UNDECODABLE document also reads as absent to the dispatch, and the
+		// rows are what repairs that, so only a document that decodes hands the
+		// roll back.
+		switch raw, gerr := tx.Get(docKey); {
+		case gerr == nil:
+			var fresh versionsDoc
+			if decodeVersionsDoc(raw, &fresh) == nil {
+				return errVersionsDocAppeared
+			}
+		case !errors.Is(gerr, backend.ErrNotFound):
+			return gerr
+		}
+		var target versionRow
+		if err := shaleTxGetJSON(tx, targetKey, &target); err != nil {
+			return err
+		}
+		if target.Deleted || target.VerNum != latest.VerNum {
+			return errVerChanged
+		}
 		p.PinnedVersion = 0
-		p.contentRef = latest.contentRef // whole served descriptor rolls to the latest live version
+		p.contentRef = target.contentRef // whole served descriptor rolls to the latest live version
 		return shaleTxPutJSON(tx, pasteKey, p)
 	})
+	if errors.Is(txErr, errVerChanged) || errors.Is(txErr, errVersionsDocAppeared) {
+		return fmt.Errorf("shale: unpin %q: %w", slug, ErrConcurrentChange)
+	}
 	if errors.Is(txErr, errVerTaken) || errors.Is(txErr, backend.ErrCASConflict) {
 		return fmt.Errorf("shale: unpin %q: %w", slug, ErrConcurrentChange)
 	}

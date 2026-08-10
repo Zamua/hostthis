@@ -78,4 +78,16 @@ var (
 	// Backends that hold no version list of their own never produce it,
 	// so the conformance suite does not require it.
 	ErrVersionsIncomplete = errors.New("storage: version list could not be read in full")
+
+	// ErrVersionServed is returned by a per-version delete whose target is
+	// the version the URL serves, decided INSIDE the transaction that would
+	// tombstone it. The service refuses first for the message; this is the
+	// answer that cannot be raced, so a pin landing after that refusal
+	// still cannot unbind the bytes the head resolves.
+	ErrVersionServed = errors.New("storage: version is currently served by the URL")
+
+	// ErrVersionDeleted is returned by a head roll whose target is a
+	// tombstoned version. Its blob is already unbound and queued for
+	// reclamation, so serving it would 404. The operation applied NOTHING.
+	ErrVersionDeleted = errors.New("storage: version is deleted")
 )

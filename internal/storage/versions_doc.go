@@ -326,12 +326,20 @@ func (r *ShaleRepo) clearUndecodableVersionsDocLatch(slug domain.Slug) {
 // fallback never writes the document, so reads stay free of write races by
 // construction.
 //
-// UNGATED: no head read is spent on the staleness oracle, because no caller
-// here ACTS on the answer. What that admits is a version the document lists
-// wrongly - short by one the head's mark would have named, or live when a
-// previous binary tombstoned it - so these callers render or count slightly
-// wrong rather than destroy anything. The reads that would act on it
-// (versionsDocGated, the in-transaction roll) pay for the head.
+// UNGATED: no head read is spent on the staleness oracle. What that admits is a
+// version the document lists wrongly - short by one the head's mark would have
+// named, or live when a previous binary tombstoned it - so an answer built from
+// this list can be wrong in either direction. Its callers render or count from
+// it: the version listing, the projection's live-byte sum, blob-id resolution.
+//
+// A GATE must not be built on it, and specifically must not be built on it
+// while its subject comes from somewhere else. The trustworthiness of this list
+// is unknown, so a guard reading here and a target read through
+// versionsDocGated disagree on exactly the document neither of them judged the
+// same way - which is how a destructive gate lets through the version it exists
+// to protect. A caller that ACTS reads a source it has established
+// (versionsDocGated, the in-transaction roll), or derives its answer from the
+// head and the record it already holds.
 func (r *ShaleRepo) versionSet(slug domain.Slug) ([]versionRow, error) {
 	doc, err := r.getVersionsDoc(slug)
 	if err != nil {
@@ -396,12 +404,17 @@ func (r *ShaleRepo) versionsDocPlan(slug domain.Slug, mark versionMark) (plan *v
 // document missing a version while looking authoritative, so the skipped
 // NUMBERS ride on the seed and fillFrom decides which of them are still holes.
 //
+// The scan is the TOLERANT one, so damage at the ENVELOPE layer skips the same
+// way damage at the JSON layer does. A strict scan fails before any per-record
+// decision, which would put the paste's whole write surface behind the one
+// value this walk exists to route around.
+//
 // The mark is seeded from every legacy KEY the walk saw and from the head's
 // latest_version, which is what makes "numbers are never reused" hold through
 // damage: a version's number is in its KEY, and a key is readable even when its
 // value is not.
 func (r *ShaleRepo) healVersionsDoc(slug domain.Slug, mark int) (*versionsDoc, error) {
-	items, err := r.scanPrefix(shalePrefixVersions(slug))
+	items, err := r.scanPrefixTolerant(shalePrefixVersions(slug))
 	if err != nil {
 		return nil, err
 	}
@@ -419,6 +432,10 @@ func (r *ShaleRepo) healVersionsDoc(slug domain.Slug, mark int) (*versionsDoc, e
 	for _, item := range items {
 		keyNum := verNumFromKey(item.Key)
 		raise(keyNum)
+		if item.Damaged != nil {
+			skip(item.Key, keyNum, item.Damaged)
+			continue
+		}
 		var v versionRow
 		if derr := json.Unmarshal(item.Value, &v); derr != nil {
 			skip(item.Key, keyNum, derr)
@@ -556,6 +573,13 @@ func (r *ShaleRepo) txWriteVersionsDoc(tx shaleKVTx, slug domain.Slug, doc versi
 // merely lack it, so rolling the head onto a record it holds is exactly the
 // destructive act the check exists to stop. The legacy row below is what that
 // binary maintained.
+//
+// A TOMBSTONED record is refused, on both paths. A tombstone unbinds the
+// version's blob and queues the bytes for reclamation, so rolling the head onto
+// one publishes an object that is already going away - and needs no race to
+// reach: delete an unserved version, then pin it. The refusal is HERE, inside
+// the rolling transaction, so a delete committing after the caller's own check
+// is refused too.
 func (r *ShaleRepo) txServedRefForVersion(tx shaleKVTx, slug domain.Slug, ver int, mark versionMark) (contentRef, error) {
 	docKey := shaleKeyVersionsDoc(slug)
 	raw, gerr := tx.Get(docKey)
@@ -564,6 +588,9 @@ func (r *ShaleRepo) txServedRefForVersion(tx shaleKVTx, slug domain.Slug, ver in
 		var doc versionsDoc
 		if derr := decodeVersionsDoc(raw, &doc); derr == nil && doc.accountable(mark) {
 			if v, ok := doc.find(ver); ok {
+				if v.Deleted {
+					return contentRef{}, ErrVersionDeleted
+				}
 				return v.contentRef, nil
 			}
 			doc.applyHead(mark)
@@ -580,6 +607,9 @@ func (r *ShaleRepo) txServedRefForVersion(tx shaleKVTx, slug domain.Slug, ver in
 	var vr versionRow
 	if err := shaleTxGetJSON(tx, shaleKeyVersion(slug, ver), &vr); err != nil {
 		return contentRef{}, err
+	}
+	if vr.Deleted {
+		return contentRef{}, ErrVersionDeleted
 	}
 	return vr.contentRef, nil
 }
@@ -639,6 +669,11 @@ type versionCascade struct {
 // neither can be read the number is logged and the bytes stay bound, a leak of
 // bytes rather than of a live version.
 //
+// That holds for damage at the ENVELOPE layer as well, which is why the scan is
+// the TOLERANT one: a strict scan cannot get past the value, and the delete is
+// the only operation that could remove it. A paste that cannot be deleted is a
+// worse outcome than a blob left bound.
+//
 // The DOCUMENT IS READ FIRST, and the order is load-bearing. The probe number
 // must equal the number a racing append claims, and an append claims one past
 // everything it can see, so every observation that raises the probe has to be
@@ -657,7 +692,7 @@ func (r *ShaleRepo) deleteCascade(slug domain.Slug, mark int) (versionCascade, e
 	if hook := r.testHookVersionsCascadeMidRead; hook != nil {
 		hook(slug)
 	}
-	items, err := r.scanPrefix(shalePrefixVersions(slug))
+	items, err := r.scanPrefixTolerant(shalePrefixVersions(slug))
 	if err != nil {
 		return versionCascade{}, err
 	}
@@ -680,6 +715,10 @@ func (r *ShaleRepo) deleteCascade(slug domain.Slug, mark int) (versionCascade, e
 		out.verKeys = append(out.verKeys, append([]byte(nil), item.Key...))
 		keyNum := verNumFromKey(item.Key)
 		raise(keyNum)
+		if item.Damaged != nil {
+			unreadable[keyNum] = true
+			continue
+		}
 		var v versionRow
 		if derr := json.Unmarshal(item.Value, &v); derr != nil {
 			unreadable[keyNum] = true

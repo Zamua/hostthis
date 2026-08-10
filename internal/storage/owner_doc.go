@@ -164,6 +164,13 @@ func (r *ShaleRepo) logUndecodableOwnerDoc(identity string, cause error) {
 // propagating would let one corrupt sibling brick the owner's entire write
 // surface (and wedge the intent sweep). A skipped entry is simply absent
 // from the candidate; that slug's next write restores it.
+//
+// The scan is the TOLERANT one, because a fail-open walk cannot be built on a
+// strict scan: damage at the ENVELOPE layer aborts before any per-record
+// decision, which puts the owner's whole write surface behind exactly the one
+// value this walk exists to route around. An entry that arrives damaged is
+// read through its authoritative head, the same repair a value that will not
+// decode gets.
 func (r *ShaleRepo) ownerDocCandidate(identity string) (*ownerDoc, error) {
 	if identity == "" {
 		return nil, nil
@@ -190,7 +197,7 @@ func (r *ShaleRepo) ownerDocCandidate(identity string) (*ownerDoc, error) {
 		skips.add(shaleKeyIdentityFirstSeen(identity), ferr)
 	}
 	cand.FirstSeen = first
-	idx, err := r.scanPrefix(shalePrefixIdentityPastes(identity))
+	idx, err := r.scanPrefixTolerant(shalePrefixIdentityPastes(identity))
 	if err != nil {
 		return nil, err
 	}
@@ -271,24 +278,65 @@ func decodeOwnerDoc(raw []byte, out *ownerDoc) error {
 // dropOwnerEntry removes slug from the owner's enumeration index and doc in
 // one {id}-shard CAS, the shared tail of Delete and MarkFailed. Idempotent on
 // a missing entry.
-func (r *ShaleRepo) dropOwnerEntry(identity, slug string) error {
+//
+// createdAt is the created time of the paste being removed, and it is the
+// GUARD. The decision to remove was taken in a different transaction on the
+// {slug} shard, and a whole-paste delete returns the slug to the mint, so the
+// same owner can re-mint it before this runs - at which point an unconditional
+// delete removes the FRESH paste from its owner's listing and quota, with no
+// read path that would ever put it back. An entry created strictly AFTER the
+// paste this call is removing describes a different paste and is left alone.
+//
+// Anything else removes: an equal or older stamp is this paste's own entry
+// (a projection can lag, never lead), a zero stamp is a pre-migration entry
+// that says nothing, and an UNREADABLE entry says nothing either. Removal is
+// the direction that fails toward the phantom being cleaned up, and only the
+// one provable case holds it back.
+func (r *ShaleRepo) dropOwnerEntry(identity, slug string, createdAt time.Time) error {
 	indexKey := shaleKeyIdentityPaste(identity, slug)
 	candidate, err := r.ownerDocCandidate(identity)
 	if err != nil {
 		return err
 	}
+	if hook := r.testHookOwnerEntryDropping; hook != nil {
+		hook(identity, slug)
+	}
 	return r.cluster.Transact(indexKey, func(tx backend.Transaction) error {
-		if _, err := tx.Get(indexKey); err == nil {
+		raw, gerr := tx.Get(indexKey)
+		switch {
+		case errors.Is(gerr, backend.ErrNotFound):
+			// Nothing to remove; the doc below may still hold it.
+		case gerr != nil:
+			return gerr
+		case !entryIsNewerThan(raw, createdAt):
 			if derr := tx.Delete(indexKey); derr != nil {
 				return derr
 			}
-		} else if !errors.Is(err, backend.ErrNotFound) {
-			return err
 		}
 		return r.txApplyOwnerDoc(tx, identity, candidate, func(doc *ownerDoc) {
+			if e, held := doc.Pastes[slug]; held && e.CreatedAt.After(createdAt) {
+				return
+			}
 			delete(doc.Pastes, slug)
 		})
 	})
+}
+
+// entryIsNewerThan reports whether a stored index entry describes a paste
+// created strictly after createdAt - the one state in which a removal aimed at
+// an older paste must not fire. An entry that will not decode says nothing
+// about which paste it describes, so it is NOT newer: the answer that lets the
+// phantom be cleaned up.
+func entryIsNewerThan(raw []byte, createdAt time.Time) bool {
+	payload, err := stripEnvelope(raw)
+	if err != nil {
+		return false
+	}
+	var row identityPasteRow
+	if err := json.Unmarshal(payload, &row); err != nil {
+		return false
+	}
+	return row.CreatedAt.After(createdAt)
 }
 
 // OwnerSummary answers whoami's count + first-seen + byte-sum with ONE read
@@ -306,7 +354,9 @@ func (r *ShaleRepo) OwnerSummary(owner string, now time.Time) (domain.OwnerSumma
 	if doc != nil {
 		return doc.summary(), nil
 	}
-	idx, err := r.scanPrefix(shalePrefixIdentityPastes(owner))
+	// Tolerant: the count is taken from the KEYS, and the byte sum below fails
+	// open per record, so a damaged value must not deny the owner their whoami.
+	idx, err := r.scanPrefixTolerant(shalePrefixIdentityPastes(owner))
 	if err != nil {
 		return domain.OwnerSummary{}, err
 	}

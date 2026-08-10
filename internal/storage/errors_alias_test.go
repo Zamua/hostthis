@@ -28,6 +28,9 @@ func TestSentinelAliases(t *testing.T) {
 		{"ErrRoomDataFull", storage.ErrRoomDataFull, domain.ErrRoomDataFull, "storage: room is at its data cap"},
 		{"ErrAppRoomsFull", storage.ErrAppRoomsFull, domain.ErrAppRoomsFull, "storage: app room storage is at capacity"},
 		{"ErrTooManyNewKeys", storage.ErrTooManyNewKeys, domain.ErrTooManyNewKeys, "storage: too many new keys from this network"},
+		{"ErrVersionsIncomplete", storage.ErrVersionsIncomplete, domain.ErrVersionsIncomplete, "storage: version list could not be read in full"},
+		{"ErrVersionServed", storage.ErrVersionServed, domain.ErrVersionServed, "storage: version is currently served by the URL"},
+		{"ErrVersionDeleted", storage.ErrVersionDeleted, domain.ErrVersionDeleted, "storage: version is deleted"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

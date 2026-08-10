@@ -51,7 +51,10 @@ func (r *ShaleRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 	// Count fresh in-window rows from a pre-scan (outside the tx). This count is
 	// NOT fenced by the transaction below: see the cap-is-approximate note on
 	// the doc comment.
-	items, err := r.scanPrefix(shalePrefixKeygateSubnet(subnet))
+	// Tolerant: every branch below already skips a row it cannot parse, and a
+	// strict scan would instead deny every admission in the subnet over one
+	// damaged value - closing the door on legitimate keys, not on an attacker.
+	items, err := r.scanPrefixTolerant(shalePrefixKeygateSubnet(subnet))
 	if err != nil {
 		return false, err
 	}
@@ -112,9 +115,11 @@ func (r *ShaleRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 }
 
 // SubnetSnapshot counts in-window rows for a subnet and finds the oldest
-// first_seen among them. Single-shard scan on the {subnet} shard.
+// first_seen among them. Single-shard scan on the {subnet} shard, TOLERANT:
+// an unparseable row is skipped either way, so envelope damage must not turn
+// the whole snapshot into an error.
 func (r *ShaleRepo) SubnetSnapshot(subnet string, now time.Time, window time.Duration) (int, time.Time, error) {
-	items, err := r.scanPrefix(shalePrefixKeygateSubnet(subnet))
+	items, err := r.scanPrefixTolerant(shalePrefixKeygateSubnet(subnet))
 	if err != nil {
 		return 0, time.Time{}, err
 	}
@@ -151,8 +156,9 @@ func (r *ShaleRepo) SubnetsForIdentity(identity string, now time.Time, window ti
 	// SINGLE-SHARD: keygate_id/ shards on the identity (see shaleShardKey), so
 	// every entry for this key lives on one unit and this is a local prefix
 	// scan. Without that co-location even a narrow prefix costs a full
-	// fan-out, which is the whole point of the index.
-	items, err := r.scanPrefix(shalePrefixKeygateIdentity(identity))
+	// fan-out, which is the whole point of the index. TOLERANT: the loop skips
+	// any row it cannot parse, so damage costs an under-count, not an error.
+	items, err := r.scanPrefixTolerant(shalePrefixKeygateIdentity(identity))
 	if err != nil {
 		return 0, err
 	}

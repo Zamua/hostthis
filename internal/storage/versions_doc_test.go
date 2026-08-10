@@ -1570,7 +1570,8 @@ func TestVersionsDoc_PreviousBinaryTombstoneIsCaughtByTheGeneration(t *testing.T
 
 // A pin must not roll the head onto a record an unaccountable document holds
 // either: pin reads the descriptor from INSIDE its own transaction, so the same
-// check has to guard that read.
+// check has to guard that read. Here the ROW carries a tombstone the document
+// does not, and the refusal is the proof of which one the pin consulted.
 func TestVersionsDoc_PinOverAnUnaccountableDocumentUsesTheRow(t *testing.T) {
 	repo := newShaleRepoForTest(t)
 	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
@@ -1590,8 +1591,8 @@ func TestVersionsDoc_PinOverAnUnaccountableDocumentUsesTheRow(t *testing.T) {
 	previousBinaryTombstoneVersion(t, repo, slug, 2)
 
 	// The document still describes v2 as live content. The pin must resolve
-	// its descriptor from the row instead, which is what the previous binary
-	// maintained.
+	// from the row instead, which is what the previous binary maintained - and
+	// the row says v2 is a tombstone, so the roll is refused.
 	target, err := repo.GetVersion(slug, 2)
 	if err != nil {
 		t.Fatalf("get v2: %v", err)
@@ -1599,15 +1600,91 @@ func TestVersionsDoc_PinOverAnUnaccountableDocumentUsesTheRow(t *testing.T) {
 	if !target.Deleted {
 		t.Fatalf("fixture: v2 must read as tombstoned, got %+v", target)
 	}
+	if err := repo.SetPinnedVersion(slug, target); !errors.Is(err, storage.ErrVersionDeleted) {
+		t.Fatalf("a pin resolved from the row must refuse its tombstone, got %v", err)
+	}
+	head, err := repo.Get(slug)
+	if err != nil {
+		t.Fatalf("get after the refused pin: %v", err)
+	}
+	if head.PinnedVersion != 0 {
+		t.Fatalf("a refused pin must apply nothing, got pin=%d", head.PinnedVersion)
+	}
+}
+
+// The descriptor a pin rolls comes from the ROW when the document is
+// unaccountable, which only a divergence between the two can show: the document
+// here names a blob that was never staged, and the head must not end up
+// carrying it.
+func TestVersionsDoc_PinOverAnUnaccountableDocumentTakesTheRowsDescriptor(t *testing.T) {
+	repo := newShaleRepoForTest(t)
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	slug := domain.Slug("vgen0007")
+	ctx := context.Background()
+
+	p := domain.Paste{
+		Slug: slug, Identity: "key:vgen7", Kind: domain.KindHTML,
+		ContentSHA: "sha-vgen7-v1", Size: 300, CreatedAt: now, UpdatedAt: now}
+	if err := repo.InsertWithQuotaCheck(ctx, p, 0, now); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	repo.WaitPendingConfirms()
+	if _, err := repo.AppendVersionWithQuotaCheck(ctx, slug, domain.KindHTML, "sha-vgen7-v2", 200, 0, now); err != nil {
+		t.Fatalf("append v2: %v", err)
+	}
+	setDocVersionSHA(t, repo, slug, 1, "sha-vgen7-FROM-THE-DOCUMENT")
+	stripHeadVersionsGen(t, repo, slug)
+
+	target, err := repo.GetVersion(slug, 1)
+	if err != nil {
+		t.Fatalf("get v1: %v", err)
+	}
 	if err := repo.SetPinnedVersion(slug, target); err != nil {
-		t.Fatalf("pin v2: %v", err)
+		t.Fatalf("pin v1: %v", err)
 	}
 	head, err := repo.Get(slug)
 	if err != nil {
 		t.Fatalf("get after pin: %v", err)
 	}
-	if head.PinnedVersion != 2 || head.ContentSHA != "sha-vgen2-v2" {
-		t.Fatalf("pin must roll the row's descriptor: pin=%d sha=%q", head.PinnedVersion, head.ContentSHA)
+	if head.PinnedVersion != 1 || head.ContentSHA != "sha-vgen7-v1" {
+		t.Fatalf("pin must roll the ROW's descriptor: pin=%d sha=%q", head.PinnedVersion, head.ContentSHA)
+	}
+}
+
+// setDocVersionSHA rewrites one record's content sha inside the stored
+// document, so the document and the legacy row disagree about the same number.
+func setDocVersionSHA(t *testing.T, repo *storage.ShaleRepo, slug domain.Slug, ver int, sha string) {
+	t.Helper()
+	key := storage.VersionsDocKeyForTest(slug)
+	raw, err := repo.GetRawForTest(key)
+	if err != nil || len(raw) == 0 {
+		t.Fatalf("read versions doc: err=%v len=%d", err, len(raw))
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode versions doc: %v", err)
+	}
+	held, _ := doc["versions"].([]any)
+	patched := false
+	for _, entry := range held {
+		rec, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("unexpected version record shape %T", entry)
+		}
+		if n, ok := rec["ver_num"].(float64); ok && int(n) == ver {
+			rec["content_sha"] = sha
+			patched = true
+		}
+	}
+	if !patched {
+		t.Fatalf("fixture: v%d was not in the document", ver)
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encode versions doc: %v", err)
+	}
+	if err := repo.PutRawForTest(key, out); err != nil {
+		t.Fatalf("write versions doc: %v", err)
 	}
 }
 

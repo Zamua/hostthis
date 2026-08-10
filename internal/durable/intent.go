@@ -39,6 +39,12 @@ type Kind string
 const (
 	KindCreatePaste Kind = "create_paste"
 	KindDeploySite  Kind = "deploy_site"
+
+	// KindDeletePaste covers the reverse asymmetry: the authoritative rows go
+	// first and the owner's enumeration entry follows on another shard, so
+	// once the rows are gone nothing left identifies the owner and a retry of
+	// the operation has no subject to work from.
+	KindDeletePaste Kind = "delete_paste"
 )
 
 // StepName names one step of an operation. Steps are recorded as DATA, never as

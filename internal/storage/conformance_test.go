@@ -499,8 +499,20 @@ func conformVerNumNotReused(t *testing.T, r conformanceRepo) {
 	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "vn123456", domain.KindHTML, "sha-vn-v2", 10, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
-	// Tombstone v2, then append again: the next number must be 3, since
-	// MAX(ver_num) counts tombstones.
+	// The append made v2 the served version, and the repo refuses to unbind
+	// what the URL resolves.
+	if err := r.DeleteVersion("vn123456", 2); !errors.Is(err, storage.ErrVersionServed) {
+		t.Fatalf("deleting the served version must be refused, got %v", err)
+	}
+	v1, err := r.GetVersion("vn123456", 1)
+	if err != nil {
+		t.Fatalf("get v1: %v", err)
+	}
+	if err := r.SetPinnedVersion("vn123456", v1); err != nil {
+		t.Fatalf("pin v1: %v", err)
+	}
+	// Tombstone the now-unserved v2, then append again: the next number must be
+	// 3, since MAX(ver_num) counts tombstones.
 	if err := r.DeleteVersion("vn123456", 2); err != nil {
 		t.Fatalf("delete v2: %v", err)
 	}

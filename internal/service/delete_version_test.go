@@ -77,6 +77,30 @@ func TestDeleteVersion_RefusesPinnedCurrent(t *testing.T) {
 	}
 }
 
+// The guard reads the HEAD's own served descriptor, so two versions holding
+// byte-identical content are indistinguishable and BOTH refuse. `pin` names the
+// served one, which frees the other - the remedy the refusal already states.
+func TestDeleteVersion_IdenticalContentRefusesUntilPinNamesTheServedOne(t *testing.T) {
+	upload, manage, _ := newStack(t)
+	owner := "key:dv-identical"
+	r, err := upload.Create(bytes.NewReader(htmlBody(1000)), owner, "", "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(1000)), ""); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if _, err := manage.DeleteVersion(r.Paste.Slug, owner, 1); !errors.Is(err, service.ErrVersionCurrentlyServed) {
+		t.Fatalf("a version the head's descriptor cannot be told from the served one must refuse, got %v", err)
+	}
+	if _, err := manage.Pin(r.Paste.Slug, owner, 2); err != nil {
+		t.Fatalf("pin v2: %v", err)
+	}
+	if _, err := manage.DeleteVersion(r.Paste.Slug, owner, 1); err != nil {
+		t.Fatalf("with the pin naming v2, v1 must free: %v", err)
+	}
+}
+
 func TestDeleteVersion_AlreadyDeleted(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	owner := "key:dv-already"
@@ -84,7 +108,9 @@ func TestDeleteVersion_AlreadyDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(1000)), ""); err != nil {
+	// Distinct bytes: the served-version guard reads the head's descriptor, so
+	// v1 has to be distinguishable from the v2 the URL serves.
+	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(1200)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if _, err := manage.DeleteVersion(r.Paste.Slug, owner, 1); err != nil {
@@ -114,7 +140,7 @@ func TestDeleteVersion_VersionsListShowsTombstone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(1000)), ""); err != nil {
+	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(1200)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if _, err := manage.DeleteVersion(r.Paste.Slug, owner, 1); err != nil {

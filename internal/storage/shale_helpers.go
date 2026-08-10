@@ -249,20 +249,40 @@ func (r *ShaleRepo) scanPrefix(prefix []byte) ([]scanItem, error) {
 	return scanPrefixOn(r.cluster, r.repoLog(), prefix)
 }
 
+// scanPrefixTolerant is scanPrefix for the FAIL-OPEN callers - the versions-doc
+// heal walk and the whole-paste delete's cascade. A record whose LWW ENVELOPE
+// will not decode comes back with Damaged set instead of failing the scan, so
+// it reaches the same per-record skip those callers already apply to a record
+// whose JSON will not decode.
+//
+// The strip sits one layer BELOW that decode, so without this a single
+// truncated envelope aborts the walk before any per-record decision is made,
+// and the two operations it blocks are exactly the ones that would repair or
+// remove the damaged value. NOT for the callers whose answer must cover every
+// record (the blob-GC ref set, user-facing reads): those still hard-fail, since
+// a short answer there deletes live bytes or reports a confident wrong result.
+func (r *ShaleRepo) scanPrefixTolerant(prefix []byte) ([]scanItem, error) {
+	return scanPrefixRetrying(r.cluster, r.repoLog(), prefix, true)
+}
+
 // scanPrefixOn is the cluster-level scan, taken as a function rather than a
 // ShaleRepo method so the intent log can share the same retry and
 // envelope-stripping rules without owning a repo.
 func scanPrefixOn(c *cluster.Cluster, lg *log.Logger, prefix []byte) ([]scanItem, error) {
+	return scanPrefixRetrying(c, lg, prefix, false)
+}
+
+func scanPrefixRetrying(c *cluster.Cluster, lg *log.Logger, prefix []byte, tolerant bool) ([]scanItem, error) {
 	var out []scanItem
 	err := retryAcquiring(readRetry, lg, "scan-prefix", func() error {
 		var serr error
-		out, serr = scanPrefixOnceOn(c, prefix)
+		out, serr = scanPrefixOnceOn(c, prefix, tolerant)
 		return serr
 	})
 	return out, err
 }
 
-func scanPrefixOnceOn(c *cluster.Cluster, prefix []byte) ([]scanItem, error) {
+func scanPrefixOnceOn(c *cluster.Cluster, prefix []byte, tolerant bool) ([]scanItem, error) {
 	it, err := c.ScanPrefix(prefix)
 	if err != nil {
 		return nil, fmt.Errorf("scan prefix %s: %w", prefix, err)
@@ -281,10 +301,18 @@ func scanPrefixOnceOn(c *cluster.Cluster, prefix []byte) ([]scanItem, error) {
 		// R>1. Stripping lets consumers (keygate timestamps, version rows,
 		// owner pastes) decode the payload exactly as cluster.Get hands it to
 		// them. Idempotent for unenveloped values; a truncated envelope is
-		// corruption and surfaces as an error.
+		// corruption, which a tolerant scan hands to its caller as a damaged
+		// record and a strict one refuses.
 		env, derr := cluster.Decode(v)
 		if derr != nil {
-			return nil, fmt.Errorf("scan strip %s: %w", prefix, derr)
+			if !tolerant {
+				return nil, fmt.Errorf("scan strip %s: %w", prefix, derr)
+			}
+			out = append(out, scanItem{
+				Key:     append([]byte(nil), k...),
+				Damaged: fmt.Errorf("scan strip %s: %w", prefix, derr),
+			})
+			continue
 		}
 		if isTombstoneEnvelope(env) {
 			// A DELETED key, not a row. Skipping is what makes this scan agree

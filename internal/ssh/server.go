@@ -1066,6 +1066,8 @@ func emitServiceErr(sess gossh.Session, err error) {
 		fmt.Fprintln(sess.Stderr(), "hostthis: not found")
 	case errors.Is(err, service.ErrInvalidName):
 		fmt.Fprintln(sess.Stderr(), "hostthis: name must be 1–60 printable chars, no newlines")
+	case errors.Is(err, service.ErrVersionDeleted):
+		fmt.Fprintln(sess.Stderr(), "hostthis: that version is deleted; its bytes are gone, so it cannot be served")
 	case errors.Is(err, domain.ErrUnsupportedKind):
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrUnsupportedKind.Error())
 	case errors.Is(err, domain.ErrNoWebContent):

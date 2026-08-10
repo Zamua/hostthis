@@ -110,6 +110,27 @@ type versionRow struct {
 	Deleted    bool      `json:"deleted"`
 }
 
+// headServesVersion reports whether the head serves v, the gate on the one
+// operation that can unbind a version's bytes.
+//
+// Both operands are records, never a version LIST, so the question is
+// answerable inside the transaction that acts on it. A pinned head names the
+// number; an unpinned head carries the served version's descriptor WHOLE, so a
+// content sha that differs PROVES v is not served.
+//
+// Two versions holding byte-identical content are indistinguishable and BOTH
+// count as served. That refuses too much rather than unbinding what the URL
+// resolves, and `pin` names the served one explicitly to free the other. The
+// blob id would separate them, but the service applies this same rule one layer
+// up on a value that carries no blob id, and a guard that answers differently at
+// the two layers is worse than one that refuses a case it cannot split.
+func headServesVersion(head pasteRow, v versionRow) bool {
+	if head.PinnedVersion > 0 {
+		return v.VerNum == head.PinnedVersion
+	}
+	return v.ContentSHA == head.ContentSHA
+}
+
 // newVersionRow builds a version row from its root descriptor, synthesizing the
 // one-entry manifest that describes it.
 //
@@ -201,6 +222,12 @@ func (v versionRow) toDomain(slug domain.Slug) domain.Version {
 type scanItem struct {
 	Key   []byte
 	Value []byte
+
+	// Damaged is the envelope-strip failure of a record only the TOLERANT scan
+	// hands back, nil on every other record. Value is nil alongside it: the KEY
+	// is all such a record still offers, and it is enough to skip a number or
+	// remove a key.
+	Damaged error
 }
 
 type roomRow struct {

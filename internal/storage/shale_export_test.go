@@ -137,6 +137,23 @@ func (r *ShaleRepo) SetVersionsCascadeMidReadHookForTest(fn func(slug domain.Slu
 	r.testHookVersionsCascadeMidRead = fn
 }
 
+// SetOwnerEntryDroppingHookForTest installs the fault-injection seam that runs
+// just before the owner-entry drop's {id} transaction. Re-minting the slug from
+// fn is the only way to reach the window where the {slug} rows are already gone
+// and a fresh paste holds the same key. Pass nil to clear.
+func (r *ShaleRepo) SetOwnerEntryDroppingHookForTest(fn func(identity, slug string)) {
+	r.testHookOwnerEntryDropping = fn
+}
+
+// SetLegacyUnpinScannedHookForTest installs the fault-injection seam between
+// the pre-migration unpin's version scan and its transaction. Tombstoning the
+// chosen version from fn, or planting a document, is the only way to reach the
+// two states the candidate-key probe cannot see - it tests an ABSENT number,
+// and neither of those writes one. Pass nil to clear.
+func (r *ShaleRepo) SetLegacyUnpinScannedHookForTest(fn func(slug domain.Slug)) {
+	r.testHookLegacyUnpinScanned = fn
+}
+
 // --- legacy-value builders (the slatedb on-disk shape) ---------------------
 
 // LegacyPasteKeyForTest returns the authoritative "pastes/<slug>" key. The

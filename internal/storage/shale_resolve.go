@@ -81,8 +81,16 @@ func (r *ShaleRepo) ResolveIntents(ctx context.Context, intents []durable.Intent
 // intent is forgotten, so a crash mid-resolve leaves the intent in place and
 // the next sweep repeats the work. Forgetting first would strand the entry as a
 // phantom with nothing left to describe it.
+//
+// A DELETE intent reads the same table with the roles swapped: its rows are
+// removed FIRST, so an absent row is the proof its cascade committed and the
+// owner's entry is the residue. Either kind therefore acts only on an absent
+// row, which is also why the grace matters: it is what makes that reading
+// stable rather than a snapshot a concurrent write can move.
 func (r *ShaleRepo) resolveIntent(ctx context.Context, in durable.Intent, now time.Time) error {
-	if in.Kind != durable.KindCreatePaste && in.Kind != durable.KindDeploySite {
+	switch in.Kind {
+	case durable.KindCreatePaste, durable.KindDeploySite, durable.KindDeletePaste:
+	default:
 		// An intent this build does not understand. Leave it: a newer build may
 		// own it, and deleting work we cannot interpret is how data disappears.
 		return nil
@@ -91,7 +99,13 @@ func (r *ShaleRepo) resolveIntent(ctx context.Context, in durable.Intent, now ti
 	if err != nil {
 		return err
 	}
-	if !present && in.HasReached(StepEntryWritten) {
+	// A DELETE reaches the same conclusion from the opposite direction: the row
+	// being absent means its cascade committed, so the owner's entry is the last
+	// trace and must go. A PRESENT row means the slug was re-minted, and the
+	// entry then describes that new paste - the roll-forward is to leave it.
+	// Both kinds therefore act only on an absent row, and the value guard is
+	// what keeps a re-mint that reused the entry key safe either way.
+	if !present && (in.Kind == durable.KindDeletePaste || in.HasReached(StepEntryWritten)) {
 		if _, err := r.guardedDropOwnerEntry(string(in.Scope), in.Subject, in.Guard); err != nil {
 			return err
 		}

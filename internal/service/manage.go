@@ -247,6 +247,10 @@ var ErrVersionAlreadyDeleted = errors.New("service: version already deleted")
 // URL serves. Freeing it requires `pin` to a different version, or `unpin`.
 var ErrVersionCurrentlyServed = errors.New("service: version is currently served by the URL; pin a different version first")
 
+// ErrVersionDeleted is returned by Pin when the target version is a tombstone.
+// Its bytes are already unbound, so serving it would 404.
+var ErrVersionDeleted = errors.New("service: version is deleted; it has no bytes left to serve")
+
 // DeleteVersion frees a single version's blob bytes (tombstones the row).
 // Refused when:
 //   - paste doesn't exist or owner doesn't match → ErrNotFound
@@ -276,15 +280,17 @@ func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (Dele
 		return DeleteVersionResult{VerNum: verNum, FreedBytes: 0}, ErrVersionAlreadyDeleted
 	}
 
-	servedVer, err := m.servedVersion(slug, p.PinnedVersion)
-	if err != nil {
-		return DeleteVersionResult{}, err
-	}
-	if servedVer == verNum {
+	if servedByHead(p, target) {
 		return DeleteVersionResult{}, ErrVersionCurrentlyServed
 	}
 
 	if err := m.Repo.DeleteVersion(slug, verNum); err != nil {
+		if errors.Is(err, domain.ErrVersionServed) {
+			// A pin landed between the check above and the tombstone's
+			// transaction. The repo re-took the guard where it acts, so this
+			// is the same refusal arriving late.
+			return DeleteVersionResult{}, ErrVersionCurrentlyServed
+		}
 		return DeleteVersionResult{}, err
 	}
 	// No cache purge: the served bytes did not change, only an older
@@ -292,27 +298,40 @@ func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (Dele
 	return DeleteVersionResult{VerNum: verNum, FreedBytes: target.Size}, nil
 }
 
-// servedVersion returns the ver_num the URL currently serves for slug.
-// Mirrors the read path: pinned wins, else MAX(non-deleted ver_num).
-func (m *Manage) servedVersion(slug domain.Slug, pinnedVersion int) (int, error) {
-	if pinnedVersion > 0 {
-		return pinnedVersion, nil
+// servedByHead reports whether target is the version the URL serves. It is a
+// PRE-CHECK: it produces the refusal's message from values this call already
+// holds, and the authoritative answer is the identical rule re-taken inside the
+// repo's tombstone transaction, where a concurrent pin cannot move the head
+// between the check and the act.
+//
+// Guard and subject are ONE source read at ONE instant - the head this call
+// resolved, and the target record itself. A guard derived from a separate
+// version LIST can disagree with the source the target came from (the list a
+// document, the target a legacy row, or the reverse), and a guard that
+// disagrees with its own subject is how the owner tombstones the exact version
+// the URL is serving.
+//
+// The head is the thing that actually serves, and every roll assigns a
+// version's descriptor to it WHOLE, so a served target always carries the
+// head's content sha and a mismatch PROVES the target is not served. What a sha
+// cannot separate is two versions holding byte-identical content: both then
+// refuse, which is the safe direction, and `pin` names the served one
+// explicitly and frees the other - the remedy the refusal already states.
+func servedByHead(p domain.Paste, target domain.Version) bool {
+	if p.PinnedVersion > 0 {
+		return target.VerNum == p.PinnedVersion
 	}
-	versions, err := m.Repo.ListVersions(slug)
-	if err != nil {
-		return 0, err
-	}
-	for _, v := range versions {
-		if !v.Deleted {
-			return v.VerNum, nil
-		}
-	}
-	return 0, nil // no live versions: unreachable for an active paste
+	return target.ContentSHA == p.ContentSHA
 }
 
 // Pin sets which version_num the public URL serves and makes it sticky, so
 // later `update`s do not bump it. Only Update
 // does that.
+//
+// A TOMBSTONED version is refused: its blob is already unbound and queued for
+// reclamation, so the roll would point the URL at bytes that are going away.
+// The check here is a PRE-CHECK for the message; the repo re-takes it inside
+// the rolling transaction, which is the answer a concurrent delete cannot move.
 func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version, error) {
 	if _, err := m.requireOwner(slug, owner); err != nil {
 		return domain.Version{}, err
@@ -327,7 +346,14 @@ func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version
 		}
 		return domain.Version{}, ErrNotFound
 	}
+	if ver.Deleted {
+		return domain.Version{}, ErrVersionDeleted
+	}
 	if err := m.Repo.SetPinnedVersion(slug, ver); err != nil {
+		if errors.Is(err, domain.ErrVersionDeleted) {
+			// A delete landed between the check above and the roll.
+			return domain.Version{}, ErrVersionDeleted
+		}
 		return domain.Version{}, err
 	}
 	return ver, nil

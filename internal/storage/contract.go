@@ -24,6 +24,8 @@ var (
 	ErrOverUserQuota  = domain.ErrOverUserQuota
 
 	ErrVersionsIncomplete = domain.ErrVersionsIncomplete
+	ErrVersionServed      = domain.ErrVersionServed
+	ErrVersionDeleted     = domain.ErrVersionDeleted
 )
 
 type AppendResult = domain.AppendResult

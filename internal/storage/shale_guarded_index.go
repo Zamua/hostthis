@@ -122,6 +122,12 @@ func (r *ShaleRepo) guardedDeleteIndexEntry(key, expected []byte, post func(tx b
 // removed only the row would leave a doc phantom no read prunes. A guard
 // mismatch touches NEITHER representation; the fresher write's own path
 // maintains the doc.
+//
+// The doc entry carries no guard of its own, and needs none: every write
+// maintains both representations in ONE {id}-shard transaction, so a re-mint
+// that reached the doc entry also rewrote the row - and the row's byte guard
+// then fails for both. The two cannot diverge in the direction that would
+// matter here.
 func (r *ShaleRepo) guardedDropOwnerEntry(identity, slug string, expected []byte) (bool, error) {
 	candidate, err := r.ownerDocCandidate(identity)
 	if err != nil {
