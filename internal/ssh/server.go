@@ -723,6 +723,28 @@ func parseVersionArg(s string) (int, error) {
 
 // -- versions / pin ---------------------------------------------------------
 
+// servedVersionOf is the version the URL SERVES, which is what the render marks
+// "current" (docs/SPEC.md "versions"). It is derived from the HEAD's served
+// descriptor, never from the newest live entry in the list: the two agree only
+// while the list is whole, and over a truncated one - a version index that
+// could not be read in full - the newest entry is not what the URL serves, so
+// marking it would state a falsehood about the one thing this view exists to
+// report. A head the list cannot account for leaves the column blank.
+//
+// vers is newest-first, so the first sha match is the highest-numbered one,
+// which is the one an unpinned head rolled to.
+func servedVersionOf(p domain.Paste, vers []domain.Version) int {
+	if p.PinnedVersion != 0 {
+		return p.PinnedVersion
+	}
+	for _, v := range vers {
+		if !v.Deleted && v.ContentSHA == p.ContentSHA {
+			return v.VerNum
+		}
+	}
+	return 0
+}
+
 func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 	format, rest, err := parseOutputFormat(argv)
 	if err != nil {
@@ -748,18 +770,7 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 	}
 	now := s.now().UTC()
 
-	// With no pin, the served version is the highest non-deleted ver_num.
-	// ListVersions is newest-first including tombstones, so the first
-	// non-deleted entry is it.
-	servedVer := p.PinnedVersion
-	if servedVer == 0 {
-		for _, v := range vers {
-			if !v.Deleted {
-				servedVer = v.VerNum
-				break
-			}
-		}
-	}
+	servedVer := servedVersionOf(p, vers)
 
 	if format == formatJSON {
 		// json mode: stdout carries only the object; the pin footer (normally
@@ -1063,6 +1074,10 @@ func emitServiceErr(sess gossh.Session, err error) {
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrUnsafeArchive.Error())
 	case errors.Is(err, domain.ErrTooManyFiles):
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrTooManyFiles.Error())
+	case errors.Is(err, domain.ErrVersionsIncomplete):
+		// Its own answer, distinct from not-found: the list is truncated, so
+		// nothing can be said about what it lacks. Nothing was applied.
+		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: this paste's version list could not be read in full, nothing was applied")
 	case errors.Is(err, domain.ErrConcurrentChange):
 		// Nothing was applied, so re-running is the whole fix. Say that,
 		// rather than leaking the sentinel's "storage:" wording.

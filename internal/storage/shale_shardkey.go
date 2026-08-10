@@ -20,6 +20,7 @@ import (
 //
 //	pastes/<slug>                  -> <slug>
 //	versions/<slug>/<NNNN>         -> <slug>
+//	versions_doc/<slug>            -> <slug>
 //	slug_owner/<slug>              -> <slug>
 //	                                               slash-free and RFC3339 has no
 //	                                               '/', so this is unambiguous)
@@ -55,6 +56,11 @@ func shaleShardKey(key []byte) []byte {
 		return firstSegment(key[len(prefixPastes):])
 	case bytes.HasPrefix(key, prefixVersionsAll):
 		return firstSegment(key[len(prefixVersionsAll):])
+	// versions_doc/<slug>: the single-document version index. Shards on the
+	// slug so it joins the same {slug}-shard CAS transactions that maintain the
+	// head and the legacy version rows.
+	case bytes.HasPrefix(key, prefixVersionsDocAll):
+		return firstSegment(key[len(prefixVersionsDocAll):])
 	case bytes.HasPrefix(key, prefixSlugOwner):
 		return firstSegment(key[len(prefixSlugOwner):])
 
@@ -133,8 +139,15 @@ var (
 	// (bref/{<routeShard>}/<unit>/<blobid>).
 	prefixBref = []byte("bref/")
 
-	prefixPastes               = []byte("pastes/")
-	prefixVersionsAll          = []byte("versions/")
+	prefixPastes      = []byte("pastes/")
+	prefixVersionsAll = []byte("versions/")
+
+	// Versions document: one JSON value per paste replacing the row-per-version
+	// family for reads (docs/SPEC.md "The versions document (v2 version
+	// index)"). Distinct from prefixVersionsAll by the trailing '_', so neither
+	// prefix matches the other's keys.
+	prefixVersionsDocAll = []byte("versions_doc/")
+
 	prefixSlugOwner            = []byte("slug_owner/")
 	prefixIdentityPastesAll    = []byte("identity_pastes/")
 	prefixIdentityFirstSeenAll = []byte("identity_first_seen/")

@@ -615,3 +615,104 @@ func TestOwnerDoc_EmptyLegacyEntryStillRefreshesTheDoc(t *testing.T) {
 		t.Fatalf("the refresh must rewrite the legacy entry as a real row: got size %d, want 500", got)
 	}
 }
+
+// Damage at the ENVELOPE layer - the LWW magic byte followed by a header that
+// runs off the end, which is the shape a partially written value takes at
+// replication factor >1 - fails one layer below invalid JSON, before anything
+// is parsed. The fail-open path has to treat the two alike: read it as a read
+// FAILURE instead and the per-owner outage the fallback exists to prevent
+// arrives through the other door, taking the quota check every upload waits on
+// with it.
+func TestOwnerDoc_TruncatedEnvelopeDegradesLikeUndecodableJSON(t *testing.T) {
+	repo := newShaleRepoForTest(t)
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	owner := "key:docenv"
+	ctx := context.Background()
+
+	p := domain.Paste{
+		Slug: "docenv0a", Identity: domain.Identity(owner), Kind: domain.KindHTML,
+		ContentSHA: "sha-docenv-a", Size: 300, CreatedAt: now, UpdatedAt: now}
+	if err := repo.InsertWithQuotaCheck(ctx, p, 0, now); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	repo.WaitPendingConfirms()
+	if err := repo.PutRawForTest(storage.OwnerDocKeyForTest(owner), truncatedEnvelope); err != nil {
+		t.Fatalf("truncate the doc's envelope: %v", err)
+	}
+
+	list, err := repo.ListByOwner(owner)
+	if err != nil {
+		t.Fatalf("list over a truncated envelope must fall back, not fail: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("fallback list: got %d rows, want 1", len(list))
+	}
+	if got := mustSum(t, repo, owner, now); got != 300 {
+		t.Fatalf("fallback sum: got %d, want 300", got)
+	}
+	if _, err := repo.OwnerSummary(owner, now); err != nil {
+		t.Fatalf("fallback summary: %v", err)
+	}
+
+	// An upload must still land: the quota check reads this value first.
+	second := domain.Paste{
+		Slug: "docenv0b", Identity: domain.Identity(owner), Kind: domain.KindHTML,
+		ContentSHA: "sha-docenv-b", Size: 200, CreatedAt: now, UpdatedAt: now}
+	if err := repo.InsertWithQuotaCheck(ctx, second, 10_000, now); err != nil {
+		t.Fatalf("insert over a truncated envelope must rebuild the doc, not fail: %v", err)
+	}
+	repo.WaitPendingConfirms()
+	raw, err := repo.GetRawForTest(storage.OwnerDocKeyForTest(owner))
+	if err != nil || !json.Valid(raw) {
+		t.Fatalf("rebuilt doc must decode: err=%v raw=%q", err, raw)
+	}
+	if got := mustSum(t, repo, owner, now); got != 500 {
+		t.Fatalf("sum after the rebuild: got %d, want 500", got)
+	}
+}
+
+// The undecodable-doc report is met on EVERY read - every list, every whoami,
+// every upload's quota check - so it latches per owner rather than logging per
+// read, and the latch clears when a write repairs the value so a LATER
+// corruption of the same owner is still reported.
+func TestOwnerDoc_UndecodableReportsOncePerOwnerAndRearmsAfterARepair(t *testing.T) {
+	repo := newShaleRepoForTest(t)
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	owner := "key:doclog"
+	ctx := context.Background()
+
+	p := domain.Paste{
+		Slug: "doclog0a", Identity: domain.Identity(owner), Kind: domain.KindHTML,
+		ContentSHA: "sha-doclog-a", Size: 300, CreatedAt: now, UpdatedAt: now}
+	if err := repo.InsertWithQuotaCheck(ctx, p, 0, now); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	repo.WaitPendingConfirms()
+
+	logs := captureRepoLog(t)
+	reports := func() int {
+		return countLogLines(logs, "owner doc for "+owner+" undecodable", "reads fall back")
+	}
+	damageReadRepair := func(name string) {
+		t.Helper()
+		if err := repo.PutRawForTest(storage.OwnerDocKeyForTest(owner), corruptJSON); err != nil {
+			t.Fatalf("%s: corrupt the doc: %v", name, err)
+		}
+		for range 5 {
+			if _, err := repo.ListByOwner(owner); err != nil {
+				t.Fatalf("%s: list over a corrupt doc: %v", name, err)
+			}
+		}
+		if err := repo.SetName(p.Slug, name); err != nil {
+			t.Fatalf("%s: repairing rename: %v", name, err)
+		}
+	}
+	damageReadRepair("first")
+	if n := reports(); n != 1 {
+		t.Fatalf("5 reads of one damaged doc logged %d lines, want 1:\n%s", n, logs.String())
+	}
+	damageReadRepair("second")
+	if n := reports(); n != 2 {
+		t.Fatalf("a corruption after a repair must be reported again: %d lines, want 2:\n%s", n, logs.String())
+	}
+}

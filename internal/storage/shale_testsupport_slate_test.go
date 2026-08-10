@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Zamua/shale/pkg/blob/blobmem"
+
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
@@ -65,4 +67,24 @@ func newShaleRepoForTest(t *testing.T) *storage.ShaleRepo {
 		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale test (start dev MinIO first)")
 	}
 	return newShaleRepoOnUniqueDB(t, endpoint)
+}
+
+// newBlobShaleRepoForTest is the same repo with the transactional blob plane
+// wired to an in-memory byte store, so a test can assert on blob POINTERS
+// (bref keys) rather than only on metadata. Without a blob plane every unbind
+// is a no-op and a leaked blob is invisible.
+func newBlobShaleRepoForTest(t *testing.T) *storage.ShaleRepo {
+	t.Helper()
+	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("MINIO_TEST_ENDPOINT not set; skipping shale test (start dev MinIO first)")
+	}
+	cfg := uniqueShaleConfig(endpoint)
+	cfg.BlobStore = blobmem.New()
+	repo, err := storage.NewShaleRepo(cfg)
+	if err != nil {
+		t.Fatalf("NewShaleRepo (blob): %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	return repo
 }

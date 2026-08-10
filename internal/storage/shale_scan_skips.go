@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
 // errUnreadableRecord is why a placeholder entry has no usable size: the
@@ -51,6 +53,20 @@ func (s *scanSkips) reportHeal(r *ShaleRepo, owner string) {
 	}
 	r.repoLog().Printf("shale: owner-doc heal for %s skipped %d unreadable record%s (left out of the doc; a slug's next write restores its entry): %s",
 		owner, s.n, pluralS(s.n), strings.Join(s.sample, "; "))
+}
+
+// reportVersionHeal is the versions-doc heal walk's summary. A skipped record
+// marks the document incomplete unless it already holds one, so the operator
+// repairs from this line before the refusals lift. Unlike the owner-wide scans
+// the FULL number set is named, not a sample: the count is bounded by the
+// paste's versions, and a number the line omits is one the operator cannot act
+// on. The capped sample carries the per-row cause alongside.
+func (s *scanSkips) reportVersionHeal(r *ShaleRepo, slug domain.Slug, numbers []int) {
+	if s.n == 0 {
+		return
+	}
+	r.repoLog().Printf("shale: versions-doc heal for %s skipped %d unreadable row%s, versions %v (the document is marked INCOMPLETE unless it already holds them, so unpin refuses until they are repaired; their numbers stay reserved): %s",
+		slug, s.n, pluralS(s.n), numbers, strings.Join(s.sample, "; "))
 }
 
 func plural(n int) string {

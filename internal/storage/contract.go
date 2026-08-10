@@ -22,6 +22,8 @@ var (
 	ErrAppRoomsFull   = domain.ErrAppRoomsFull
 	ErrRoomDataFull   = domain.ErrRoomDataFull
 	ErrOverUserQuota  = domain.ErrOverUserQuota
+
+	ErrVersionsIncomplete = domain.ErrVersionsIncomplete
 )
 
 type AppendResult = domain.AppendResult

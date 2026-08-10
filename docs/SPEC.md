@@ -764,7 +764,7 @@ and deriving content-type from an extension are I/O-free domain operations.
 
 ### A version is a whole-manifest snapshot
 
-Versioning applies to the artifact, uniformly. `versions/<slug>/<N>` holds a
+Versioning applies to the artifact, uniformly. A version record holds a
 MANIFEST, not a single blob reference:
 
 - updating a single-file artifact writes a new one-entry manifest,
@@ -774,14 +774,15 @@ MANIFEST, not a single blob reference:
 Per-file versioning was rejected: it gives no coherent answer to "what did this
 look like at version 3" and no sensible pin target.
 
-**Stored shape.** The version row carries the encoded manifest alongside the
-flat root descriptor (kind, sha, size) it already had. The flat fields are
-RETAINED rather than replaced: a row written before versions carried a manifest
-has no other description of its content, and resolves through them via
-`Version.RootKind` / `RootSHA` / `RootSize`. So the manifest is additive - no
-migration, and an old row is readable unchanged. A manifest that fails to
-decode falls back the same way rather than failing the read, since the content
-it describes is still perfectly readable.
+**Stored shape.** A version record - one entry of the version document, and
+the `versions/<slug>/<N>` row dual-written alongside it - carries the encoded
+manifest next to the flat root descriptor (kind, sha, size) it already had. The
+flat fields are RETAINED rather than replaced: a record written before versions
+carried a manifest has no other description of its content, and resolves through
+them via `Version.RootKind` / `RootSHA` / `RootSize`. So the manifest is
+additive - no migration, and an old record is readable unchanged. A manifest
+that fails to decode falls back the same way rather than failing the read, since
+the content it describes is still perfectly readable.
 
 Every version WRITTEN from here on carries one, including a single document,
 whose manifest is simply of length one at `/`. That is what lets a reader stop
@@ -2532,8 +2533,12 @@ implies.
 ```
 
 `size_bytes` is `null` for a deleted (tombstoned) version - the bytes are
-gone. `current` marks the served version (the pin, or MAX non-deleted
-ver_num when unpinned).
+gone. `current` marks the version the URL SERVES, read off the HEAD: the
+pin, or when unpinned the listed version whose content matches what the head
+serves. That agrees with MAX non-deleted `ver_num` whenever the list is
+whole, and only then - see `versions` above. When the head names content no
+listed version accounts for, NO entry is `current`, since marking one would
+state a falsehood about the single thing this view exists to report.
 
 `whoami -o json` - an object; `quota_bytes` is `null` when the owner has
 no quota cap, and `session` is `null` when the keygate isn't wired or the
@@ -2631,8 +2636,13 @@ v1          2026-06-05 11:22 UTC  0.9k
 Stdout: space-padded aligned rows (same rationale as `list`), newest
 first. The middle column carries a status marker:
 
-- `current` - the version the URL is currently serving (the
-  pinned ver_num or `MAX(non-deleted ver_num)` when unpinned).
+- `current` - the version the URL is currently serving. It is read off the
+  HEAD, not off the list: the pinned ver_num, or when unpinned the listed
+  version whose content matches what the head serves. Those agree with
+  `MAX(non-deleted ver_num)` whenever the list is whole, and only then - over
+  a list the version index could not read in full the newest listed entry is
+  not what the URL serves, so a head the list cannot account for leaves the
+  column empty rather than marking the wrong row.
 - `deleted` - the blob bytes were freed via `delete <slug> <ver>`. The
   metadata row remains as a tombstone so the version number isn't
   reused; the size column is `-` since no bytes exist anymore.
@@ -3904,10 +3914,372 @@ urgency.
 `identity_first_seen` key during heal); the legacy key keeps being written
 alongside until the drop release, same as the row families.
 
-**Deliberately unchanged here:** the per-slug `versions/` family and the
-keygate families migrate to their own single-doc shapes in follow-up
-releases; the staged-refs and intent families stay row-shaped (boot-path
-only, never on a user's request path).
+**Deliberately unchanged here:** the keygate families migrate to their own
+single-doc shape in a follow-up release; the staged-refs and intent families
+stay row-shaped (boot-path only, never on a user's request path). The per-slug
+`versions/` family has its own document, one level down; it is next.
+
+### The versions document (v2 version index)
+
+A paste's version list is ONE document, not a family of rows:
+
+```
+versions_doc/<slug>   JSON {versions: [record...], high_water: N, complete: bool, gen: N}
+```
+
+Each record is a version WHOLE: its number, its created time, its deleted
+flag, and its full served descriptor - kind, content sha, blob id, size and
+MANIFEST. The key starts with the slug, so the document lives on the same
+`{slug}` shard as `pastes/<slug>` and the `versions/<slug>/<NNNN>` rows and
+joins the exact transactions that maintain them.
+
+**Why a document.** The same trade as the owner document, one level down.
+Every version operation was a `versions/<slug>/` prefix scan: the `versions`
+render, append's numbering, unpin's latest-live choice, the whole-paste
+delete's cascade set, the quota read-through's live sum, and the read seam's
+blob-id resolution. At replication factor >1 a scanned range is walked
+tombstone-and-all forever, and an object-store LSM's scan path bypasses the
+block cache, so that walk is paid against the object store every time. The
+document makes each of those one point Get, through the cache. Concurrent
+same-slug writes contend on the document's single-shard CAS and retry, which
+costs nothing new: they already serialized on the head row, which every
+append and tombstone rewrites.
+
+**Why its OWN document rather than a field of the paste row.** Two reasons,
+both load-bearing.
+
+*A head roll must be answerable from ONE read.* `pin` and `unpin` repoint the
+head's served descriptor at another version, and that descriptor includes the
+MANIFEST ("A version is a whole-manifest snapshot"). A list holding only each
+version's small fields would force the roll to read a second record, the
+per-version row, which may be damaged - and every treatment of that damage is
+a defect. Rolling the head with an empty manifest 404s a directory at every
+path. Refusing the roll leaves a directory that cannot be rolled back at all
+whenever one sibling row is unreadable. Splitting the two also means telling
+"could not be read" apart from "read fine, describes no files", which is the
+same failure wearing a second face and hands the destructive write in through
+whichever case the guard did not name. Full records remove the question: one
+point read yields everything a roll needs.
+
+*Keeping it out of the paste row keeps it off the serving path.*
+`pastes/<slug>` carries the SERVED version's descriptor, manifest included,
+and a served request is answered from that row alone. Its size tracks the one
+manifest it serves and never grows with history. A list of full records is
+unbounded by construction, so it has to live where its growth cannot reach
+the row a request reads. That is what turns the size cliff below from an
+outage into a degradation.
+
+**Reads.** `ListVersions`, `GetVersion`, the quota read-through's live-byte
+sum, the list-time projection refresh, and the read seam's blob-id resolution
+read the document with ONE Get where they scanned. When no document exists (a
+pre-migration paste) they fall back to the legacy version rows, READ-ONLY:
+the fallback never writes the document, so reads stay free of write races by
+construction. On that fallback a damaged row HARD-FAILS the read rather than
+being skipped, because there is no truncation bit on that path to carry the
+caveat (see "Policy 2"); the paste's first version write heals it into a
+document and it joins the tolerant path from then on. An UNDECODABLE document reads as absent, loudly - the legacy
+rows are still dual-written and true, so failing the read would turn one
+corrupt value into a per-paste outage, and the paste's next mutation rebuilds
+the document. Undecodable means BOTH layers: a damaged LWW envelope fails the
+strip before any JSON is parsed, and it is the shape a partially written value
+actually takes at replication factor >1, so reading it as a read FAILURE would
+put the per-paste outage back through the other door - including on the
+whole-paste delete, the one operation that could clear the damage.
+
+A read whose ANSWER depends on the document describing every version correctly
+- `GetVersion`, which gates `pin` and the per-version delete - spends one more
+point Get on the head, because the head's numbering mark and generation are
+what tell a document that can be acted on from one that cannot (below). None of
+the reads that pay for it is a served request.
+
+The reads that do NOT pay - `ListVersions`, the quota read-through's live-byte
+sum, the list-time projection refresh, blob-id resolution - are ungated because
+none of them ACTS on the answer. What that admits is a list that is short by a
+version, or that describes a tombstoned version as live, so those reads render
+or count slightly wrong and destroy nothing. Note the direction on the quota
+sum: the live-byte figure feeds the owner's USED bytes, so a short list
+under-CHARGES and can admit a write the true sum would have refused. That is
+the direction the quota policy already fails on purpose (an entry it cannot
+read at all counts as ZERO), for the reason given there: refusing instead locks
+a person out of the uploads that would let them replace or delete the damaged
+thing. Gating it would cost a head Get per paste on the path an upload waits
+behind and has no better answer to give - the alternatives are that lockout, or
+a version-row scan on the request path, which is what the document exists to
+remove. The over-admit is bounded by one paste's live bytes, and the
+object-store bucket quota still caps the total.
+
+**Writes.** Insert (which writes v1), append, the per-version tombstone and
+the whole-paste delete's cascade each maintain the document inside the SAME
+single-shard `{slug}` transaction that writes the version rows. `pin` and
+`unpin` do not change the set; they READ it for the descriptor they roll onto
+the head.
+
+A mutation that finds no document HEALS first: it builds one from the legacy
+rows, applies itself, and writes document and rows together. Heal-on-write
+rather than heal-on-read means the first mutation migrates the paste
+atomically under the shard CAS, and two racing first-writes serialize on that
+CAS - the loser re-reads and finds the document already present. The heal walk
+runs OUTSIDE the transaction that applies it, because a scan is unsupported
+inside a CAS transaction; the transaction re-reads the document key, so a
+racing first-write is settled by the shard CAS rather than by that snapshot.
+
+A heal seed only ever FILLS what the document it merges into lacks; it never
+overwrites a record that document holds. The document is authoritative for
+what it holds, and the seed is walked outside the transaction that applies it,
+so an overwrite could undo a tombstone that committed in between. It also
+means a record the document already holds survives a walk that can no longer
+read the row it came from.
+
+**A document can be TRUNCATED two ways, and the same bit records both.** A
+legacy row the heal cannot read is SKIPPED, never propagated: one damaged
+record must never brick a paste's write surface. And an append by a binary
+that predates the document writes a version row and bumps the head's
+`latest_version` without touching the document, which every rolling deploy and
+every rollback produces. Both leave a document missing a real version while
+looking authoritative, and that shape is the dangerous one - a truncated list,
+trusted, is how "roll back to the newest live version" rolls a site BACKWARDS
+and supersedes the newer version permanently.
+
+So the document carries one bit, `complete`, and it answers a single question:
+does this document hold every version that exists? Two pieces of evidence say
+it does not, and both are checked wherever the bit is:
+
+- a row the walk SKIPPED whose number the document does not hold, and
+- the head's `latest_version` naming a number ABOVE every record the document
+  holds. The mark moves only when a version row is written, so a document below
+  it is missing a version that exists. Numbering already reads the mark for
+  exactly this reason; every gate reads it too.
+
+One bit rather than a stored set: every gate asks the same single question,
+and a set would be a second thing to keep true. A paste created by this
+release starts complete; only those two conditions truncate it.
+
+**A COUNTER detects an addition and never a modification, so the document is
+also stamped with a GENERATION.** Truncation is not the only way a document
+stops being true. The previous binary's per-version delete flips a legacy row's
+`deleted` flag: it adds no version, so `latest_version` does not move, and it
+knows nothing of the document, so the document does not move either. The set
+keeps its size while a record inside it becomes a LIE - a version the document
+swears is live whose blob that same delete already unbound. No count-based
+oracle can see that, and no write repairs it, because nothing has any reason to
+think a repair is owed. An `unpin` would then roll the head onto unbound bytes.
+
+The head therefore carries `versions_gen`, bumped by EVERY transaction that
+writes the document (insert, append, the per-version tombstone), and the
+document stores the generation it was built from. The two are written in the
+SAME transaction, so they agree by construction, and a document is believed
+only while they still do. A mismatch means something outside this binary moved
+one of them, which is exactly the state a repair is owed for.
+
+Absence is the load-bearing half. A binary without this field re-marshals the
+head through a struct that does not carry it, so the field DISAPPEARS from any
+head such a binary rewrites. An absent generation under a document that claims
+one is therefore positive evidence that a binary without this logic touched the
+row, not a missing default - which is why zero on either side is a mismatch
+rather than a wildcard. It costs no read: every version mutation already writes
+the head, and every gate already reads it for the numbering mark.
+
+The two oracles answer different questions, so they are consumed differently:
+
+- `complete` says the document is RIGHT about what it holds and short of what
+  it lacks. A gated operation refuses on a number the document lacks and
+  proceeds on one it holds.
+- the generation says the document may be WRONG about what it holds. A gated
+  read then treats it as absent and answers from the legacy rows, which are
+  what the offending binary maintained; the in-transaction head rolls (`pin`,
+  `unpin`) refuse rather than roll a record they cannot vouch for.
+
+A heal on an unaccountable document lets the ROWS win every number they cover,
+rather than only filling gaps. Filling would leave the misdescribed record in
+place and then stamp the merged document with a matching generation, cementing
+the lie as trustworthy and blinding the oracle for good; a number the walk
+could not READ keeps the document's copy, which beats dropping a version. The
+fill-versus-rebuild choice is made INSIDE the transaction from the document and
+the head as that transaction reads them, so a mutation that landed since the
+walk (which moved both together, and so reads as accountable) wins over the
+older seed instead of being undone by it.
+
+One residual window is worth naming rather than implying: a binary without the
+generation writing between the heal walk and the transaction that applies it
+leaves a seed that predates its row flip, and the transaction has nothing to
+detect that with, since such a binary moves no counter this one can read. It
+takes a concurrently-running previous binary mutating the SAME paste inside
+that window, and the paste's next mutation under two like binaries repairs it.
+
+A truncated document is authoritative for what it HOLDS and says nothing
+about what it lacks. Operations divide on exactly that:
+
+| operation | on a truncated document | on an unaccountable one | why |
+| --- | --- | --- | --- |
+| `unpin` | REFUSE | REFUSE | it rolls the head to the newest LIVE version; a truncated list's newest is not the newest, and an unaccountable one's newest may be a version already tombstoned and unbound. Either roll supersedes a good version permanently or serves bytes that are gone |
+| `pin` / `GetVersion` of a number the document lacks | REFUSE as unavailable, not as not-found | answer from the legacy ROWS | an absence in a truncated list is not knowledge, and not-found is a confident wrong answer; an unaccountable document may be wrong about a number it HOLDS too, and the rows are what the offending binary maintained |
+| append | proceed | proceed | it needs a NUMBER, and the high-water mark below reserves the numbers the document cannot see |
+| `versions`, the quota sums, the live-byte sum, blob-id resolution | proceed | proceed | each needs only what is present and none of them acts on it; the miss is a render or a count that is slightly wrong, in the direction the quota policy already accepts (above) |
+| per-version `delete` | proceed | proceed on the re-healed set | its served-version guard stays exact for any target the document holds, argued below; the heal it runs first rebuilds an unaccountable document from the rows |
+| whole-paste `delete` | proceed | proceed | its cascade is not derived from the document at all, argued below |
+
+The refusal is its own sentinel, distinct from not-found, and the verbs report
+it verbatim ("this paste's version list could not be read in full, nothing was
+applied"). Collapsing it into not-found would be the same confident wrong
+answer one layer up.
+
+The per-version delete earns its row rather than asserting it. The guard
+refuses to tombstone the version the URL serves, which when unpinned is the
+newest live one. The document is a SUBSET of the true set, so its newest live
+version is never HIGHER than the true one, and if the served version is in the
+document at all then it IS the document's newest live. A target the document
+holds is therefore refused exactly when it is served. A truncated list can
+refuse too much; it can never tombstone what the URL is serving.
+
+**The whole-paste delete's cascade comes from the version PREFIX, not from the
+document.** Every other operation can be made safe by refusing on a truncated
+document, but this one cannot: refusing does not just cost the owner an
+operation, it means a paste can become undeletable, and a cascade that misses
+a version leaves a row and a bound blob alive while the slug returns to the
+mint, so the next paste to take that slug inherits them. The prefix IS every
+row, so a scan of it cannot miss one whatever the document says. The blob ids
+come from the rows and the document both, which is what recovers the blob of a
+row that will not decode. The cost is one scan on an operation that is not on
+any request path, which is the one place this design spends a scan on purpose.
+
+A row that will not decode still has its KEY removed by the cascade - the
+owner asked for the paste to be gone, and removing a value manufactures
+nothing (contrast the tombstone below, which would have to WRITE one). If
+neither the row nor the document can name its blob id, the number is logged
+and the bytes stay bound: a leak of bytes rather than of a live version.
+
+**The cascade's guard must cover exactly the key set the cascade will remove,
+and that makes the ORDER of its two reads load-bearing.** The delete reads the
+next version number ExpectAbsent inside its transaction, so an append racing
+the enumeration either aborts the delete or joins its key set. That probe is
+one past everything the enumeration saw, and it works only because an append
+claims one past everything IT can see: a row the scan missed is then the very
+number the probe tests. So every observation that raises the probe has to be at
+least as old as the scan - the head's mark first, then the document, then the
+key scan. Read the document AFTER the scan instead and an append committing in
+between contributes its own number to the probe while its ROW stays out of the
+key set: the probe steps past the row it was meant to catch, the guard passes,
+and the delete commits leaving a live version under a deleted paste whose slug
+has already returned to the mint.
+
+**Neither flag is permanent, and clearing them needs no operator step beyond
+the repair.** Every mutation on a document that is incomplete, behind the mark
+or unaccountable re-runs the heal walk and re-decides from what that walk
+found. So a transient read failure clears on the next write, a row repaired as
+the log line instructs is adopted by the next write, a rolled-back append is
+adopted by the next write, and a previous binary's tombstone is adopted by the
+next write. Only a mutation converges a document: a read never writes one.
+Damage that persists keeps the flags false, which is the point.
+
+A tombstone that turns out to be a NO-OP still rewrites the head, because it
+still wrote the document (a heal it applied, a generation it stamped) and the
+two must move together. Leaving the head behind would make the document
+unaccountable to it and refuse every gated operation on the paste until some
+unrelated write happened to fix it.
+
+**Fail open governs reads and the write SURFACE, never the CONTENT of a
+write.** Failing open means damage must not cost availability: a read
+degrades, and an owner can still write. It is not a licence to COMPLETE a
+write with data that destroys a working artifact. Refusing an operation
+preserves availability; completing it destructively does not. Every refusal
+above is that distinction applied - each would otherwise complete by dropping
+or superseding a version that is still perfectly good.
+
+**A row that could not be READ is never overwritten.** The tombstone flips the
+legacy row's deleted flag IN PLACE, so it reads that row first; a row that
+will not decode is left EXACTLY as it is and the skip is logged. It is never
+replaced by a record rebuilt from the document. Overwriting would destroy the
+bytes a repair needs AND manufacture a row that reads back cleanly while
+describing content it does not have, and a readable-but-wrong row defeats
+every guard that keys off readability, one layer removed from where the damage
+is. The document is authoritative, so the tombstone has landed regardless;
+what is lost is the legacy copy's agreement, which matters only to a rollback
+(below).
+
+**Numbering never reuses a number.** The next version number is `max(the
+document's high_water, the highest number in the document, the head's
+latest_version) + 1`. The mark never lowers: a tombstone does not lower it, and
+neither does a heal that could not read a row. Every legacy KEY the heal walked
+feeds it, whether or not that key's value decoded, which is what makes the
+invariant hold through damage - a version's NUMBER is in its KEY, and a key is
+readable even when its value is not, so a version the heal skipped still has
+its number reserved and its row is never written over. A record whose own
+`ver_num` disagrees with its key raises the mark past BOTH numbers and is
+skipped rather than filed: it cannot be placed, and filing it under either
+number would answer confidently about a version that is not there.
+
+The head's `latest_version` is in that maximum on EVERY append rather than at
+heal time only, because it is the one place a number issued WITHOUT the
+document is recorded: the previous binary appends by writing a row and bumping
+that mark, so a rollback and roll-forward leaves a document that is behind the
+rows and whose own next number is already taken. That same comparison is one of
+the two staleness oracles above, so such an append is both numbered past and
+repaired by the walk the plan then runs. The generation is deliberately NOT in
+that maximum: numbering asks which numbers are SPENT, and only a
+monotonically-rising number answers that, while the generation asks whether the
+SET can be believed. A document nothing can vouch for still numbers correctly,
+because the mark reserves what it cannot see. A candidate key found present
+also raises the retry's floor, which is what gives the renumber loop its
+progress guarantee.
+While the legacy rows are still written the candidate key additionally joins
+the transaction's read set ExpectAbsent, because the dual write needs that key
+free.
+
+**Dual representation, this release.** Writes maintain BOTH the document and
+the `versions/<slug>/<NNNN>` rows, so rolling back to the previous binary
+loses nothing: it resumes scanning rows this release also kept true. The
+document is authoritative the moment it exists - readers never consult the
+rows for a paste that has one - and every record is whole, so nothing on a
+migrated paste needs a row for its content either. Their remaining purpose
+this release is the rollback. A later release drops the legacy writes and the
+fallback read.
+
+One rollback gap is worth naming rather than implying: a tombstone whose
+legacy row would not decode is recorded in the document only, so the previous
+binary would show that version live while its blob is already unbound. It
+takes damage arriving between the heal and the tombstone to reach it.
+
+**The size failure mode, and why no cap is needed.** A record carries a whole
+manifest, and a manifest is bounded only by the untar caps (5000 files, 1 MiB
+of path text), so one maximal site version is on the order of a megabyte and a
+handful of them exceeds the cluster's per-message ceiling (the gRPC default
+receive limit, 4 MiB). There is deliberately NO cap on versions per paste.
+
+The consequence, stated plainly rather than left to be discovered: the write
+that would cross the ceiling is the write that fails, and it fails leaving the
+paste serving exactly what it served; a document a peer cannot receive makes
+version OPERATIONS fail while the head keeps answering every request.
+Degraded, not dark. That containment is real only because the head answers
+FIRST and WHOLE (below), so a document that will not read cannot fail a
+request the head could have served; it is a property of WHERE the list lives
+rather than of how large it is allowed to grow. The same growth inside the
+paste row would be fatal instead:
+past the ceiling the head cannot be read, a row that cannot be read cannot be
+rewritten smaller, and every operation on the paste - including the delete
+that would clear it - reads that row first. While dual representation lasts
+there is a second floor under it, since an unreadable document still falls
+back to the rows.
+
+**No served request needs the document, and the resolution ORDER is what makes
+that true.** `pastes/<slug>` carries the served version's whole descriptor and
+its whole manifest, so every sha a served request can name - the served
+document's own, or any file inside the served directory - is answerable from
+that one row. The read seam's blob-id resolution therefore consults the head
+first and in full: the served sha, then the head's manifest. Only a sha the
+head cannot answer - a version the URL is NOT serving, reached by `show <ver>`
+- goes on to the version records. Resolving against the records first would
+have put the document on the serving path by the back door, where one value
+that will not read is a 500 for every asset of a static site rather than a
+failure of the version operations alone.
+
+**Deliberately unchanged here:** the serving path above all - a served request
+still reads the head row; the head's `live_bytes` and `latest_version` totals
+(the head gains `versions_gen` and nothing else);
+the service-layer guards (owner gating, the served-version delete refusal,
+pin validation); the
+blob-orphan records a delete co-commits; the keygate families; and the
+staged-refs and intent families, which stay row-shaped because nothing on a
+user's request path reads them.
 
 ### Fencing the writer recovery took over from
 
@@ -4577,8 +4949,10 @@ The key names:
 
 ```
 pastes/<slug>                      paste row
-versions/<slug>/<NNNN>             version row
+versions_doc/<slug>                version index (one document, authoritative)
+versions/<slug>/<NNNN>             version row (dual-written, for rollback)
 slug_owner/<slug>                  raw identity string
+owner_doc/<identity>               owner index (one document, authoritative)
 identity_pastes/<identity>/<slug>  per-owner enumeration index (value-bearing, see below)
 identity_first_seen/<identity>     cached first-seen timestamp
 keygate/<subnet>/<identity>        Sybil first-seen timestamp
@@ -4614,8 +4988,8 @@ extracts the shard key as follows:
 
 | Key family | Keys | Shard key |
 | --- | --- | --- |
-| Authoritative (per-slug) | `pastes/<slug>`, `versions/<slug>/*`, `slug_owner/<slug>` | `<slug>` |
-| Derived (per-identity) | `identity_pastes/<id>/*`, `identity_first_seen/<id>` | `<id>` |
+| Authoritative (per-slug) | `pastes/<slug>`, `versions_doc/<slug>`, `versions/<slug>/*`, `slug_owner/<slug>` | `<slug>` |
+| Derived (per-identity) | `identity_pastes/<id>/*`, `identity_first_seen/<id>`, `owner_doc/<id>` | `<id>` |
 | Sybil gate (per-subnet) | `keygate/<subnet>/*` | `<subnet>` |
 
 The authoritative family is the source of truth for a paste's existence
@@ -4704,12 +5078,14 @@ contract that makes the cached sum safe:
   after the tombstone commits; `Delete` and `MarkFailed` drop the entry
   outright. Each refresh is a synchronous best-effort `{id}`-shard CAS
   right after the authoritative `{slug}` write, logged on failure - never
-  a failed operation. Because the refreshed sum is recomputed from a
-  version scan OUTSIDE the index CAS, each refresh is GUARDED: it captures
-  the entry's value before recomputing and commits only if the entry still
-  holds it, skipping on conflict (two concurrent same-slug refreshes
-  cannot land older-sum-last; the loser skips). No retry loop on the
-  response path.
+  a failed operation. The refreshed sum is READ off the head row, which
+  carries `live_bytes` and `latest_version` transactionally with the
+  versions they summarise - one routed point Get, no version enumeration of
+  any kind. That read is still OUTSIDE the index CAS, so each refresh is
+  GUARDED: it captures the entry's value before reading and commits only if
+  the entry still holds it, skipping on conflict (two concurrent same-slug
+  refreshes cannot land older-sum-last; the loser skips). No retry loop on
+  the response path.
 - **A lost refresh is permanent, and bounded to one record.** Nothing
   rebuilds the cached values in the background. A crash or a failed index
   CAS between the authoritative write and the index write leaves that one
@@ -4790,8 +5166,9 @@ one identity.
 ### Derived indexes and repair-on-read
 
 The per-identity family is a derived projection. `identity_pastes` and
-`identity_first_seen` are not the source of truth; the `pastes/*` and
-`versions/*` rows on the `{slug}` shards are. The derived entries are
+`identity_first_seen` are not the source of truth; the `pastes/*` rows and
+`versions_doc/*` documents on the `{slug}` shards are (with the `versions/*`
+rows dual-written alongside for the rollback). The derived entries are
 written by the index-maintenance step and by the update / delete paths,
 in transactions separate from the authoritative write. They are therefore
 **eventually consistent**: a crash between the authoritative write and the
@@ -5155,6 +5532,16 @@ visible to an operator, not silently swallowed forever.
   the level: a steady count is known debris, a growing one means something
   is still producing corrupt rows.
 
+  The same bound applies to a damaged value a READ path meets rather than a
+  scan: an undecodable versions document is met on every read of that paste,
+  so it is reported once per slug per process, not once per read. And where
+  the operator is expected to REPAIR from the line rather than merely notice
+  it, the line names the full set: the versions-doc heal lists every skipped
+  version NUMBER (bounded by the paste's versions) alongside the capped
+  sample of per-row causes, because a number the line omits is one the
+  operator cannot act on. A sample is right for an owner-wide scan, whose
+  skip set is unbounded; it is wrong for a per-paste repair instruction.
+
   Each skip-and-continue pass is therefore PARTIAL by design: it did the
   work for every decodable record and deferred the undecodable ones. A
   partial prune leaves a stale marker one more cycle - already a tolerated
@@ -5163,8 +5550,7 @@ visible to an operator, not silently swallowed forever.
   invariant.
 
 **Policy 2 - user-facing reads: hard-fail.** The per-request read paths
-(`Get`, `ListVersions`, `GetVersion`, the site manifest read, the room
-scan / per-key read) are
+(`Get`, the site manifest read, the room scan / per-key read) are
 NOT made tolerant. A user read that hits a corrupt record SHOULD surface
 an error to that user, not silently skip the record and return a
 plausible-looking-but-incomplete result. These paths are synchronous,
@@ -5172,6 +5558,33 @@ user-observed, and not idempotent retries of a background loop, so the
 right behavior is to fail loudly on the one request that touched the bad
 row - the user (or operator) sees a real error rather than silent data
 loss in the response body.
+
+**The version reads are the one carve-out, and they pay for it by SAYING so.**
+`ListVersions` and `GetVersion` answer from the versions document, which is
+built by a heal that fails open (see "The versions document"), so they can meet
+a list that is known to be short. Hard-failing there would mean one damaged
+version row takes down every version operation on the paste, including the
+delete that would clear it - Policy 2's own reasoning turned against it,
+because here the failure is not confined to the one record the user asked
+about. The carve-out is bounded by the truncation bit being STORED and
+CONSULTED rather than assumed away: `GetVersion` of a number a truncated
+document lacks answers "could not be read in full", never not-found, so no
+caller receives a confident wrong answer; `unpin` and `pin` refuse outright;
+and the `versions` render marks nothing "current" that the URL is not serving.
+What Policy 2 forbids is a plausible-looking-but-incomplete result presented
+as complete, and none of these does that.
+
+**The carve-out is the DOCUMENT's, and a pre-migration paste has none.** Until
+a paste's first version write heals it, both reads fall back to the legacy
+version rows, and there they are Policy 2: `ListVersions` fails the whole read
+on a row that will not decode, and `GetVersion` fails on the one row it asked
+for. That is a state this release keeps for a paste's whole life if nothing
+ever writes it again, so it is the answer for an untouched paste rather than a
+transient. It is also the only honest one available: there is no truncation bit
+on that path to carry the caveat, so the alternative is a short list presented
+as whole - exactly what Policy 2 forbids. The heal that a single version write
+performs is what moves the paste into the carve-out, and from then on a damaged
+row costs it a marked-truncated list instead of a failed read.
 
 The quota scan is synchronous too but is NOT covered by this policy,
 because the two differ in what the user can do about the failure. A failed
@@ -5186,12 +5599,14 @@ contributes nothing and the scan returns a number rather than an error, so
 the owner is under-charged and keeps working. Bounded per record, logged
 per scan, and backstopped by the object-store bucket quota.
 
-The three policies, side by side:
+The policies side by side, with the version reads' carve-out on its own row:
 
 | Scan kind | Examples | On a bad record | Why |
 | --- | --- | --- | --- |
 | Idempotent lazy prune | the keygate and room-ledger in-scan prunes | SKIP + LOG, continue; a later read retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
-| User-facing read | `Get`, `ListVersions`, `GetVersion`, site manifest read, room scan / per-key read | HARD-FAIL | a user read of corrupt data should surface an error, not silently skip |
+| User-facing read | `Get`, site manifest read, room scan / per-key read | HARD-FAIL | a user read of corrupt data should surface an error, not silently skip |
+| Version read, paste WITH a document | `ListVersions`, `GetVersion` | RENDER what the document holds, and report the list as truncated | hard-failing lets one damaged row take down every version operation including the delete that would clear it; the truncation is stored, so nothing is presented as complete |
+| Version read, pre-migration paste | the same two, over the legacy rows | HARD-FAIL | there is no truncation bit on that path, so the only alternative is a short list presented as whole; the paste's first version write heals it into the row above |
 | Quota scan | `SumActiveBytesByOwner`, `SumActiveSiteBytesByOwner` | COUNT AS ZERO + summary log, continue | refusing locks a person out over damage they cannot fix; the under-charge is bounded per record and the bucket quota still caps total bytes |
 
 ### Shale-collocated blobs (transactional blob plane)
@@ -5304,8 +5719,9 @@ because the staged record that located them was cleared at commit.
 So the delete writes a new one. In the SAME transaction that unbinds a version's
 pointer, it records that blob's ref under `staged/<slug>/<blobid>` - the identical
 shape a staging upload writes, so the existing sweep reclaims it with no new
-machinery. `staged/`, `pastes/` and `versions/` all shard on the slug, which is
-what lets the record co-commit with the unbind rather than race it.
+machinery. `staged/`, `pastes/`, `versions_doc/` and `versions/` all shard on
+the slug, which is what lets the record co-commit with the unbind rather than
+race it.
 
 The two failure directions are both safe. If the record lands and the unbind does
 not, the record names a blob that is still bound, and unstaging refuses it. If the
@@ -5792,8 +6208,8 @@ must demonstrate on hostthis's actual data shapes:
    applied to the losing side of a cutover.
 4. **The quota-relevant keys survive the move.** The per-identity quota
    is scan-derived, so what must survive a rebalance is the authoritative
-   `pastes/*` / `versions/*` / `sites/*` rows (the source of truth the
-   scan sums) and the per-owner `identity_pastes/<id>/*` /
+   `pastes/*` / `versions_doc/*` / `versions/*` / `sites/*` records (the
+   source of truth the sum reads) and the per-owner `identity_pastes/<id>/*` /
    `identity_sites/<id>/*` enumeration index (the set the scan walks). All
    are ordinary keys on their shards; when a shard migrates they move with
    it like any other key and arrive on the new owner byte-for-byte

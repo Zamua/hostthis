@@ -265,6 +265,11 @@ func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (Dele
 	}
 	target, err := m.Repo.GetVersion(slug, verNum)
 	if err != nil {
+		if errors.Is(err, domain.ErrVersionsIncomplete) {
+			// An absence in a list known to be truncated is not knowledge, so
+			// it must not be reported as not-found.
+			return DeleteVersionResult{}, err
+		}
 		return DeleteVersionResult{}, ErrNotFound
 	}
 	if target.Deleted {
@@ -317,6 +322,9 @@ func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version
 	}
 	ver, err := m.Repo.GetVersion(slug, verNum)
 	if err != nil {
+		if errors.Is(err, domain.ErrVersionsIncomplete) {
+			return domain.Version{}, err
+		}
 		return domain.Version{}, ErrNotFound
 	}
 	if err := m.Repo.SetPinnedVersion(slug, ver); err != nil {

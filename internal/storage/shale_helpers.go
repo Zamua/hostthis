@@ -194,10 +194,18 @@ func (r *ShaleRepo) getJSON(key []byte, out any) error {
 	return nil
 }
 
-// getRaw reads a value via routed Get, returning (nil, nil) when absent. Like
-// getJSON it strips the LWW envelope cluster.Get leaves on at R=1 / multi, so
-// callers see the payload rather than the wrapper.
-func (r *ShaleRepo) getRaw(key []byte) ([]byte, error) {
+// getStored reads a value via routed Get and hands back the STORED bytes,
+// envelope and all, returning (nil, nil) when absent.
+//
+// It exists for the readers that must fail OPEN on a damaged value. Envelope
+// damage - a partially written value at replication factor >1, where the magic
+// byte is present and the header runs off the end - is corruption of exactly
+// the kind those readers exist to tolerate, but it fails one layer BELOW the
+// decode: strip it here and the failure arrives as a read error that cannot be
+// told from a cluster fault, so the fail-open branch never sees it and one
+// damaged value bricks every operation on its subject. Callers that strip
+// themselves meet it as the decode failure it is.
+func (r *ShaleRepo) getStored(key []byte) ([]byte, error) {
 	var raw []byte
 	err := retryAcquiring(readRetry, r.repoLog(), "get", func() error {
 		var gerr error
@@ -209,6 +217,17 @@ func (r *ShaleRepo) getRaw(key []byte) ([]byte, error) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get %s: %w", key, err)
+	}
+	return raw, nil
+}
+
+// getRaw reads a value via routed Get, returning (nil, nil) when absent. Like
+// getJSON it strips the LWW envelope cluster.Get leaves on at R=1 / multi, so
+// callers see the payload rather than the wrapper.
+func (r *ShaleRepo) getRaw(key []byte) ([]byte, error) {
+	raw, err := r.getStored(key)
+	if err != nil {
+		return nil, err
 	}
 	payload, serr := stripEnvelope(raw)
 	if serr != nil {

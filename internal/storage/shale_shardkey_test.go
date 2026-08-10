@@ -16,6 +16,7 @@ func TestShaleShardKey(t *testing.T) {
 		{"paste", "pastes/abc12345", "abc12345"},
 		{"version", "versions/abc12345/0001", "abc12345"},
 		{"version high num", "versions/abc12345/0042", "abc12345"},
+		{"versions_doc", "versions_doc/abc12345", "abc12345"},
 		{"slug_owner", "slug_owner/abc12345", "abc12345"},
 
 		// Per-identity derived family -> shard key <id>.
@@ -64,6 +65,10 @@ func TestShaleShardKeyFamilyColocation(t *testing.T) {
 		"pastes/" + slug,
 		"versions/" + slug + "/0001",
 		"versions/" + slug + "/0009",
+		// The versions document must co-shard with the head and the rows it is
+		// maintained alongside, or every version write turns cross-shard. The
+		// trailing '_' keeps it out of the versions/ family and vice versa.
+		"versions_doc/" + slug,
 		"slug_owner/" + slug,
 		// A site's keys co-shard with the same slug, so the site insert's
 		// cross-family paste-slug collision read is single-shard with the

@@ -66,4 +66,16 @@ var (
 	// Backends whose concurrency control cannot lose this way never
 	// produce it, so the conformance suite does not require it.
 	ErrConcurrentChange = errors.New("storage: changed concurrently, retry")
+
+	// ErrVersionsIncomplete is returned when an operation needs a paste's
+	// version list to be CORRECT and the stored list is known to be
+	// missing entries: a repair walk could not read some of the records it
+	// was built from, or the list is behind a version that demonstrably
+	// exists. It is distinct from not-found on purpose: an absence in a
+	// truncated list is not knowledge, and answering not-found would be a
+	// confident wrong answer. The operation applied NOTHING.
+	//
+	// Backends that hold no version list of their own never produce it,
+	// so the conformance suite does not require it.
+	ErrVersionsIncomplete = errors.New("storage: version list could not be read in full")
 )

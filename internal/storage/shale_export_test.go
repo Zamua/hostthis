@@ -118,6 +118,25 @@ func (r *ShaleRepo) SetGuardedIndexWriteHookForTest(fn func(key []byte) error) {
 	r.testHookGuardedIndexWrite = fn
 }
 
+// SetVersionsDocPlannedHookForTest installs the fault-injection seam that runs
+// once a version write has planned its document state, before the transaction
+// re-reads it. Damaging the document from fn is the only way to reach the
+// window where the plan carries no heal seed and the transaction finds a value
+// it cannot decode. Pass nil to clear.
+func (r *ShaleRepo) SetVersionsDocPlannedHookForTest(fn func(slug domain.Slug)) {
+	r.testHookVersionsDocPlanned = fn
+}
+
+// SetVersionsCascadeMidReadHookForTest installs the fault-injection seam
+// BETWEEN the whole-paste delete's two enumeration reads. Committing a version
+// from fn is the only way to test that the cascade's ExpectAbsent probe covers
+// exactly the keys it will remove: the window sits behind whichever read runs
+// first, so a swap of the two makes a version escape the cascade. Pass nil to
+// clear.
+func (r *ShaleRepo) SetVersionsCascadeMidReadHookForTest(fn func(slug domain.Slug)) {
+	r.testHookVersionsCascadeMidRead = fn
+}
+
 // --- legacy-value builders (the slatedb on-disk shape) ---------------------
 
 // LegacyPasteKeyForTest returns the authoritative "pastes/<slug>" key. The
@@ -156,6 +175,22 @@ func LegacyVersionValueForTest(verNum int, kind domain.ContentKind, contentSHA s
 // per-owner enumeration-index key.
 func IdentityPasteKeyForTest(identity, slug string) []byte {
 	return shaleKeyIdentityPaste(identity, slug)
+}
+
+// VersionsDocKeyForTest returns the "versions_doc/<slug>" key. Deleting it
+// turns a paste back into the pre-migration shape (legacy version rows only),
+// which is how the heal-on-write and read-fallback tests set their stage.
+func VersionsDocKeyForTest(slug domain.Slug) []byte { return shaleKeyVersionsDoc(slug) }
+
+// LegacyVersionManifestValueForTest encodes a version row carrying an explicit
+// manifest string, so a test can plant a row whose manifest is absent,
+// undecodable or empty.
+func LegacyVersionManifestValueForTest(verNum int, kind domain.ContentKind, contentSHA string, size int, createdAt time.Time, manifest string) ([]byte, error) {
+	return json.Marshal(versionRow{
+		VerNum:     verNum,
+		contentRef: contentRef{Kind: string(kind), ContentSHA: contentSHA, Size: size, Manifest: manifest},
+		CreatedAt:  createdAt,
+	})
 }
 
 // OwnerDocKeyForTest returns the "owner_doc/<identity>" key. Deleting it turns

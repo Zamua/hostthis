@@ -178,3 +178,35 @@ func TestNewWhoamiView(t *testing.T) {
 		}
 	})
 }
+
+// "current" marks the version the URL serves. A truncated version list (one the
+// index could not be read in full) must not move the marker onto whatever entry
+// happens to be newest in it.
+func TestServedVersionOf(t *testing.T) {
+	v := func(n int, sha string, deleted bool) domain.Version {
+		return domain.Version{VerNum: n, ContentSHA: sha, Deleted: deleted}
+	}
+	// Newest-first, the order ListVersions renders.
+	whole := []domain.Version{v(3, "sha-v3", false), v(2, "sha-v2", false), v(1, "sha-v1", false)}
+	truncated := []domain.Version{v(2, "sha-v2", false), v(1, "sha-v1", false)} // v3 missing
+
+	cases := []struct {
+		name string
+		head domain.Paste
+		vers []domain.Version
+		want int
+	}{
+		{"pinned wins outright", domain.Paste{PinnedVersion: 1, ContentSHA: "sha-v1"}, whole, 1},
+		{"unpinned marks the served sha", domain.Paste{ContentSHA: "sha-v3"}, whole, 3},
+		{"tombstoned entries are skipped", domain.Paste{ContentSHA: "sha-v2"},
+			[]domain.Version{v(3, "sha-v3", true), v(2, "sha-v2", false)}, 2},
+		{"a list missing the served version marks nothing", domain.Paste{ContentSHA: "sha-v3"}, truncated, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := servedVersionOf(tc.head, tc.vers); got != tc.want {
+				t.Fatalf("servedVersionOf: got v%d, want v%d", got, tc.want)
+			}
+		})
+	}
+}

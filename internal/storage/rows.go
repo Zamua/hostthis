@@ -86,6 +86,21 @@ type pasteRow struct {
 	// working until its next write refreshes it.
 	LiveBytes     int `json:"live_bytes,omitempty"`
 	LatestVersion int `json:"latest_version,omitempty"`
+
+	// VersionsGen is the version SET's generation, bumped by every transaction
+	// that writes the versions document and stamped on that document too. It is
+	// the second half of the staleness oracle: LatestVersion is monotone, so it
+	// detects a version ADDED behind the document's back but never one
+	// MODIFIED, and a per-version delete by a binary that predates the document
+	// flips a version row's deleted flag while moving neither the mark nor the
+	// document. The generation moves for both.
+	//
+	// Zero means ABSENT, and absence is evidence rather than a default: a
+	// binary without this field re-marshals the head through a struct that does
+	// not carry it, so the field disappears from any row such a binary
+	// rewrites. A document claiming a generation over a head that has none is
+	// therefore known stale.
+	VersionsGen int `json:"versions_gen,omitempty"`
 }
 
 type versionRow struct {

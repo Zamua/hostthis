@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/Zamua/shale/pkg/blob/blobmem"
+
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
@@ -29,6 +31,26 @@ func newShaleRepoForTest(t *testing.T) *storage.ShaleRepo {
 	})
 	if err != nil {
 		t.Fatalf("NewShaleRepo: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	return repo
+}
+
+// newBlobShaleRepoForTest is the same repo with the transactional blob plane
+// wired to an in-memory byte store, so a test can assert on blob POINTERS
+// (bref keys) rather than only on metadata. Without a blob plane every unbind
+// is a no-op and a leaked blob is invisible.
+func newBlobShaleRepoForTest(t *testing.T) *storage.ShaleRepo {
+	t.Helper()
+	seq := pebbleSupportSeq.Add(1)
+	repo, err := storage.NewShaleRepo(storage.ShaleConfig{
+		NodeID:            fmt.Sprintf("pebble-blob-node-%d", seq),
+		DbName:            fmt.Sprintf("pebble-blob-support-%d", seq),
+		ReplicationFactor: 1,
+		BlobStore:         blobmem.New(),
+	})
+	if err != nil {
+		t.Fatalf("NewShaleRepo (blob): %v", err)
 	}
 	t.Cleanup(func() { _ = repo.Close() })
 	return repo

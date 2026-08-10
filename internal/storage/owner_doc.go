@@ -117,20 +117,36 @@ func (d *ownerDoc) listRows(owner string) []domain.Paste {
 // dual-written and true, so failing the read would turn one corrupt value
 // into a per-owner outage, and the owner's next mutation rebuilds the doc
 // from those rows (txApplyOwnerDoc's repair path).
+//
+// Undecodable means BOTH layers. A damaged LWW envelope fails the strip before
+// any JSON is parsed, and it is the shape a partially written value actually
+// takes at replication factor >1; treating it as a read failure would put the
+// per-owner outage back through the other door.
 func (r *ShaleRepo) getOwnerDoc(identity string) (*ownerDoc, error) {
-	payload, err := r.getRaw(shaleKeyOwnerDoc(identity))
+	stored, err := r.getStored(shaleKeyOwnerDoc(identity))
 	if err != nil {
 		return nil, err
 	}
-	if len(payload) == 0 {
+	if len(stored) == 0 {
 		return nil, nil
 	}
 	var doc ownerDoc
-	if err := json.Unmarshal(payload, &doc); err != nil {
-		r.repoLog().Printf("shale: owner doc for %s undecodable (%v); reads fall back to the legacy rows until a write rebuilds it", identity, err)
+	if err := decodeOwnerDoc(stored, &doc); err != nil {
+		r.logUndecodableOwnerDoc(identity, err)
 		return nil, nil
 	}
 	return &doc, nil
+}
+
+// logUndecodableOwnerDoc reports a doc that will not decode ONCE per owner per
+// process. Every list, quota check and upload meets the same damaged value, so
+// logging per read would turn one corrupt value into an unbounded log stream
+// (docs/SPEC.md "The log is a PER-PASS SUMMARY, never one line per row").
+func (r *ShaleRepo) logUndecodableOwnerDoc(identity string, cause error) {
+	if _, seen := r.ownerDocLogged.LoadOrStore(identity, struct{}{}); seen {
+		return
+	}
+	r.repoLog().Printf("shale: owner doc for %s undecodable (%v); reads fall back to the legacy rows until a write rebuilds it", identity, cause)
 }
 
 // ownerDocCandidate builds the heal-on-write seed for an owner with no doc
@@ -152,17 +168,17 @@ func (r *ShaleRepo) ownerDocCandidate(identity string) (*ownerDoc, error) {
 	if identity == "" {
 		return nil, nil
 	}
-	payload, err := r.getRaw(shaleKeyOwnerDoc(identity))
+	stored, err := r.getStored(shaleKeyOwnerDoc(identity))
 	if err != nil {
 		return nil, err
 	}
-	if len(payload) > 0 {
+	if len(stored) > 0 {
 		var doc ownerDoc
-		if json.Unmarshal(payload, &doc) == nil {
+		if decodeOwnerDoc(stored, &doc) == nil {
 			return nil, nil
 		}
-		// Undecodable doc: build the seed from the legacy rows so the write
-		// rebuilds it in place.
+		// Undecodable doc, envelope damage included: build the seed from the
+		// legacy rows so the write rebuilds it in place.
 	}
 	cand := &ownerDoc{
 		Pastes: map[string]ownerDocPaste{},
@@ -227,6 +243,10 @@ func (r *ShaleRepo) txApplyOwnerDoc(tx shaleKVTx, identity string, candidate *ow
 				doc = candidate.clone()
 			}
 			r.repoLog().Printf("shale: owner doc for %s undecodable (%v); rebuilding it from the legacy rows", identity, derr)
+			// Re-arm the read-side report: the latch describes damage this
+			// write just replaced, and holding it would silence the NEXT
+			// corruption of the same owner.
+			r.ownerDocLogged.Delete(identity)
 		}
 	}
 	if doc.Pastes == nil {
