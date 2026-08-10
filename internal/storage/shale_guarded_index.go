@@ -50,7 +50,13 @@ func (r *ShaleRepo) guardedPutIndexEntry(key, expected []byte, present bool, row
 			}
 			payload, serr := stripEnvelope(cur)
 			if serr != nil {
-				return serr
+				// A truncated envelope on the CURRENT entry: it cannot be shown to
+				// still hold `expected`, so treat it as a mismatch and skip, the
+				// documented outcome, rather than propagating. Overwriting on a
+				// value we cannot read would clobber it from a stale computation;
+				// this is a repair/rollback path that must fail open.
+				r.repoLog().Printf("shale: guarded index write %s: current entry envelope undecodable (%v); skipping as a mismatch", key, serr)
+				return errIndexEntryChanged
 			}
 			if !bytes.Equal(payload, expected) {
 				return errIndexEntryChanged
@@ -94,7 +100,13 @@ func (r *ShaleRepo) guardedDeleteIndexEntry(key, expected []byte, post func(tx b
 		}
 		payload, serr := stripEnvelope(cur)
 		if serr != nil {
-			return serr
+			// A truncated envelope on the CURRENT entry: it cannot be confirmed to
+			// still hold `expected`, so skip rather than delete on a value we
+			// cannot read. This is a rollback/cleanup path that must fail open;
+			// deleting the wrong entry is far worse than leaving a damaged one for
+			// the next reprojection.
+			r.repoLog().Printf("shale: guarded index delete %s: current entry envelope undecodable (%v); skipping as a mismatch", key, serr)
+			return errIndexEntryChanged
 		}
 		if !bytes.Equal(payload, expected) {
 			return errIndexEntryChanged // a fresher write owns this entry now

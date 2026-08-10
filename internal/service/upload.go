@@ -48,9 +48,9 @@ type BlobStore interface {
 	EncodeBody(r io.Reader) (body []byte, payloadSize int, err error)
 }
 
-// SlugTakenErr is returned when the internal slug re-mint retry budget is
+// ErrSlugTaken is returned when the internal slug re-mint retry budget is
 // exhausted.
-var SlugTakenErr = errors.New("service: slug taken (after retries)")
+var ErrSlugTaken = errors.New("service: slug taken (after retries)")
 
 // Upload is the application service for new paste creation.
 type Upload struct {
@@ -254,7 +254,7 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 			return Result{}, terr
 		}
 	}
-	return Result{}, SlugTakenErr
+	return Result{}, ErrSlugTaken
 }
 
 // createTransactional is the shale-collocated Create: stage the (already
@@ -319,7 +319,7 @@ func (u *Upload) createTransactional(staged stagedUpload, owner, name string, ki
 			return Result{}, terr
 		}
 	}
-	return Result{}, SlugTakenErr
+	return Result{}, ErrSlugTaken
 }
 
 // WaitFinalize blocks until every background finalize this Upload started has

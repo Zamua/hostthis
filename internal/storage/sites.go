@@ -99,7 +99,9 @@ func (a *Sites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, stored
 	return err
 }
 
-func (a *Sites) Delete(slug domain.Slug) error { return a.repo.Delete(slug) }
+func (a *Sites) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
+	return a.repo.Delete(slug, wantIdentity, wantCreatedAt)
+}
 
 // SumActiveBytesByOwner reports ZERO, and that is not a stub.
 //

@@ -41,8 +41,12 @@ func (r *ShaleRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 	}
 	rowKey := shaleKeyKeygate(subnet, identity)
 
-	// Fast path: already known (single-shard read, no accounting).
-	if raw, err := r.getRaw(rowKey); err != nil {
+	// Fast path: already known (single-shard read, no accounting). Fail-open on
+	// envelope damage: a truncated own-row falls through to the accounting path
+	// (which re-checks the row inside the tx) rather than turning admission into
+	// an error. The gate is an aggregate admission control, not a named-record
+	// reader, so it fails open the same way the count below already does.
+	if raw, err := r.getRawFailOpen(rowKey); err != nil {
 		return false, err
 	} else if raw != nil {
 		return true, nil
@@ -50,8 +54,10 @@ func (r *ShaleRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 
 	// Count fresh in-window rows from a pre-scan (outside the tx). This count is
 	// NOT fenced by the transaction below: see the cap-is-approximate note on
-	// the doc comment.
-	items, err := r.scanPrefix(shalePrefixKeygateSubnet(subnet))
+	// the doc comment. Tolerant: an envelope-damaged sibling row is skipped
+	// (under-counting, the same fail-open direction an unparseable timestamp
+	// takes) rather than failing the admission.
+	items, err := r.scanPrefixTolerant(shalePrefixKeygateSubnet(subnet))
 	if err != nil {
 		return false, err
 	}
@@ -114,7 +120,8 @@ func (r *ShaleRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPer
 // SubnetSnapshot counts in-window rows for a subnet and finds the oldest
 // first_seen among them. Single-shard scan on the {subnet} shard.
 func (r *ShaleRepo) SubnetSnapshot(subnet string, now time.Time, window time.Duration) (int, time.Time, error) {
-	items, err := r.scanPrefix(shalePrefixKeygateSubnet(subnet))
+	// Display-only fail-open: an envelope-damaged row is skipped, never surfaced.
+	items, err := r.scanPrefixTolerant(shalePrefixKeygateSubnet(subnet))
 	if err != nil {
 		return 0, time.Time{}, err
 	}
@@ -151,8 +158,9 @@ func (r *ShaleRepo) SubnetsForIdentity(identity string, now time.Time, window ti
 	// SINGLE-SHARD: keygate_id/ shards on the identity (see shaleShardKey), so
 	// every entry for this key lives on one unit and this is a local prefix
 	// scan. Without that co-location even a narrow prefix costs a full
-	// fan-out, which is the whole point of the index.
-	items, err := r.scanPrefix(shalePrefixKeygateIdentity(identity))
+	// fan-out, which is the whole point of the index. Tolerant: display-only, so
+	// an envelope-damaged row is skipped rather than failing whoami.
+	items, err := r.scanPrefixTolerant(shalePrefixKeygateIdentity(identity))
 	if err != nil {
 		return 0, err
 	}

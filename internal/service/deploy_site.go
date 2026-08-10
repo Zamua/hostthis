@@ -34,9 +34,12 @@ type SiteRepo interface {
 	//     manifest until it lands, the new one immediately after.
 	ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Site, error)
-	// Delete removes a site by slug. Ownership is enforced by the caller, so
-	// Delete itself takes no owner.
-	Delete(domain.Slug) error
+	// Delete removes a site by slug. The caller-authorized identity + CreatedAt
+	// are threaded so the storage layer re-checks them inside its {slug}
+	// transaction: the service ownership check is outside any transaction, so a
+	// delete+re-mint of the slug by another identity in the window would
+	// otherwise let this delete destroy the new owner's paste.
+	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 	// SumActiveBytesByOwner returns the identity's active SITE bytes. The
 	// deploy path adds the paste-side sum to compute the budget the untar may
 	// fill before the persistence-time check.
@@ -275,7 +278,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 			return SiteResult{}, terr
 		}
 	}
-	return SiteResult{}, SlugTakenErr
+	return SiteResult{}, ErrSlugTaken
 }
 
 // Delete removes an owned static site by slug. A non-site slug and a
@@ -295,7 +298,11 @@ func (d *DeploySite) Delete(slug domain.Slug, owner string) error {
 	if existing.Identity.String() != owner {
 		return ErrNotFound
 	}
-	return d.Sites.Delete(slug)
+	// The ownership check above is a pre-check; the authoritative re-check
+	// happens inside Delete's {slug} transaction against existing's identity +
+	// CreatedAt, so a delete+re-mint of the slug in the window cannot destroy
+	// the new owner's paste.
+	return d.Sites.Delete(slug, existing.Identity, existing.CreatedAt)
 }
 
 // preClaimSlug mints a fresh random slug and stakes a metadata-only claim on
@@ -316,7 +323,7 @@ func (d *DeploySite) preClaimSlug(ctx context.Context, owner string, now time.Ti
 			return "", err
 		}
 	}
-	return "", SlugTakenErr
+	return "", ErrSlugTaken
 }
 
 // releaseSlugClaim undoes a pre-claim no site was committed under. Best-effort:
@@ -342,7 +349,7 @@ func finalizeDeploy(site domain.Site, err error) (SiteResult, error) {
 	case class == commitOK:
 		return SiteResult{Site: site}, nil
 	case class != commitOther:
-		// Includes slug-taken, which surfaces as the clean SlugTakenErr: the
+		// Includes slug-taken, which surfaces as the clean ErrSlugTaken: the
 		// pre-claim holds the slot and the consumed stream cannot re-untar.
 		return SiteResult{}, terr
 	case isCrossShard(err):
