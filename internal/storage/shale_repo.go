@@ -648,7 +648,9 @@ func (r *ShaleRepo) freshRowFromHead(slug domain.Slug) (identityPasteRow, bool, 
 }
 
 func (r *ShaleRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
-	versions, err := r.scanVersions(slug)
+	// A cheap read: serve from the disposable cache, falling back to the rows
+	// when it is absent or unreadable (docs/SPEC.md "The version index cache").
+	versions, err := r.versionRowsForRead(slug)
 	if err != nil {
 		return nil, err
 	}
@@ -666,6 +668,51 @@ func (r *ShaleRepo) GetVersion(slug domain.Slug, ver int) (domain.Version, error
 		return domain.Version{}, err
 	}
 	return row.toDomain(slug), nil
+}
+
+// IsVersionServed reports whether ver is the version the paste's URL currently
+// serves. It backs the per-version delete guard, so it decides from the
+// authoritative HEAD and version ROWS and NEVER the disposable cache: a stale
+// cache must not be able to let the guard free the served version's blob
+// (docs/SPEC.md "Destructive operations decide from the rows and the head").
+//
+// Pinned: the pinned number, from the head alone. Unpinned: the head serves the
+// newest live version, named EXACTLY by its blob id on the blob path (a point
+// read of the target row, no scan) and, on the sha-keyed dev path that has no
+// blob id, by the newest non-deleted ver_num from a rows scan (a content sha is
+// not unique per version, so it cannot identify one).
+func (r *ShaleRepo) IsVersionServed(slug domain.Slug, ver int) (bool, error) {
+	var head pasteRow
+	if err := r.getJSON(shaleKeyPaste(slug), &head); err != nil {
+		return false, err
+	}
+	if head.PinnedVersion != 0 {
+		return ver == head.PinnedVersion, nil
+	}
+	if head.BlobID != "" {
+		var v versionRow
+		if err := r.getJSON(shaleKeyVersion(slug, ver), &v); err != nil {
+			return false, err
+		}
+		return v.BlobID == head.BlobID, nil
+	}
+	versions, err := r.scanVersions(slug)
+	if err != nil {
+		return false, err
+	}
+	return ver == newestLiveVerNum(versions), nil
+}
+
+// newestLiveVerNum returns the highest non-deleted ver_num, or 0 when none are
+// live. Distinct from latestActiveVerNum, which floors at 1.
+func newestLiveVerNum(versions []versionRow) int {
+	n := 0
+	for _, v := range versions {
+		if !v.Deleted && v.VerNum > n {
+			n = v.VerNum
+		}
+	}
+	return n
 }
 
 // CountByOwner returns how many pastes the owner's enumeration index holds.
@@ -784,10 +831,14 @@ func (r *ShaleRepo) legacyPasteEntryBytes(indexKey []byte) (int64, error) {
 	return r.sumLiveVersionBytes(slug)
 }
 
-// sumLiveVersionBytes sums the sizes of a paste's non-deleted version rows on
-// the {slug} shard.
+// sumLiveVersionBytes sums the sizes of a paste's non-deleted versions, the
+// legacy quota fall-through the head's cached LiveBytes does not already answer.
+// A cheap read: it prefers the disposable cache and falls back to the rows
+// (docs/SPEC.md "The version index cache"). A stale cache only slightly
+// over/under-counts, the same bounded drift the scan-derived quota already
+// tolerates.
 func (r *ShaleRepo) sumLiveVersionBytes(slug domain.Slug) (int64, error) {
-	versions, err := r.scanVersions(slug)
+	versions, err := r.versionRowsForRead(slug)
 	if err != nil {
 		return 0, err
 	}
@@ -953,37 +1004,54 @@ func (r *ShaleRepo) RouteKeyForSlug(slug string) []byte {
 func (r *ShaleRepo) ResolveBlobID(slug domain.Slug, contentSHA string) (string, error) {
 	var p pasteRow
 	perr := r.getJSON(shaleKeyPaste(slug), &p)
-	if perr == nil {
-		if p.ContentSHA == contentSHA && p.BlobID != "" {
-			return p.BlobID, nil
+	if perr != nil {
+		if errors.Is(perr, ErrNotFound) {
+			return "", ErrNotFound
 		}
-		// Not the head's served sha: a pinned version, or manage Show of a
-		// specific version.
-		versions, verr := r.scanVersions(slug)
-		if verr != nil {
-			return "", verr
-		}
+		return "", perr
+	}
+	// The head answers the SERVED sha with no version lookup at all - the common
+	// read for an HTML/markdown paste. This never consults the cache, so serving
+	// is untouched.
+	if p.ContentSHA == contentSHA && p.BlobID != "" {
+		return p.BlobID, nil
+	}
+	// A NON-served version's sha (a pinned or Show'd version, or a file inside a
+	// directory). A cheap read: try the disposable cache first, and on a per-sha
+	// MISS fall back to the authoritative rows - a stale cache lacking the
+	// version costs one extra scan here, never a wrong not-found (docs/SPEC.md
+	// "The version index cache").
+	resolve := func(versions []versionRow) string {
 		for _, v := range versions {
 			if v.ContentSHA == contentSHA && v.BlobID != "" {
-				return v.BlobID, nil
+				return v.BlobID
 			}
 		}
-		// A file INSIDE a directory: its sha names a manifest entry rather than
-		// a version's served content, so the entry carries its own blob id.
-		// The head first (the common read), then any other live version, so a
-		// pinned or rolled-back directory still resolves its files.
+		// A file INSIDE a directory: its sha names a manifest entry rather than a
+		// version's served content, so the entry carries its own blob id. The
+		// head first (the common read), then any other live version, so a pinned
+		// or rolled-back directory still resolves its files.
 		if id := manifestBlobID(p.decode(), contentSHA); id != "" {
-			return id, nil
+			return id
 		}
 		for _, v := range versions {
 			if id := manifestBlobID(v.decode(), contentSHA); id != "" {
-				return id, nil
+				return id
 			}
 		}
-		return "", ErrNotFound
+		return ""
 	}
-	if !errors.Is(perr, ErrNotFound) {
-		return "", perr
+	if cached, ok := r.cachedVersionRows(slug); ok {
+		if id := resolve(cached); id != "" {
+			return id, nil
+		}
+	}
+	versions, verr := r.scanVersions(slug)
+	if verr != nil {
+		return "", verr
+	}
+	if id := resolve(versions); id != "" {
+		return id, nil
 	}
 	return "", ErrNotFound
 }
@@ -1260,6 +1328,11 @@ func (r *ShaleRepo) insertAuthoritative(p domain.Paste, refs []cluster.BlobRef, 
 			return err
 		}
 		if err := tx.Put(shaleKeySlugOwner(p.Slug), []byte(p.Identity.String())); err != nil {
+			return err
+		}
+		// Seed the disposable version cache with v1, in this same {slug}
+		// transaction (docs/SPEC.md "The version index cache").
+		if err := txPutVersionsDoc(tx, p.Slug, []versionRow{v1}); err != nil {
 			return err
 		}
 		return bind()
@@ -1587,6 +1660,14 @@ func (r *ShaleRepo) appendAuthoritative(slug domain.Slug, ref contentRef, now ti
 			if err := shaleTxPutJSON(tx, pasteKey, p); err != nil {
 				return err
 			}
+			// Refresh the disposable cache with the full set: the pre-tx scan
+			// plus the new row, whole, in this {slug} transaction. A concurrent
+			// tombstone this scan predates only leaves the cache slightly stale,
+			// which is harmless (docs/SPEC.md "The version index cache").
+			full := append(append([]versionRow(nil), versions...), newV)
+			if err := txPutVersionsDoc(tx, slug, full); err != nil {
+				return err
+			}
 			return bind()
 		})
 		switch {
@@ -1785,7 +1866,18 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 				return err
 			}
 		}
-		return tx.Delete(shaleKeySlugOwner(slug))
+		if err := tx.Delete(shaleKeySlugOwner(slug)); err != nil {
+			return err
+		}
+		// Drop the disposable cache in the same {slug} transaction. Guarded: a
+		// pre-cache paste has none, and a needless tombstone-delete is avoided.
+		docKey := shaleKeyVersionsDoc(slug)
+		if _, gerr := tx.Get(docKey); gerr == nil {
+			return tx.Delete(docKey)
+		} else if !errors.Is(gerr, backend.ErrNotFound) {
+			return gerr
+		}
+		return nil
 	}
 	var txErr error
 	if r.kv != nil {
@@ -1868,6 +1960,12 @@ func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 			head.LiveBytes = 0
 		}
 		if err := shaleTxPutJSON(tx, pasteKey, head); err != nil {
+			return err
+		}
+		// Follow-on: flip the tombstone in the disposable cache when it exists,
+		// in this same {slug} transaction. A pre-cache paste is left cache-less
+		// (no scan to build one here); its reads fall back to the rows.
+		if err := txMarkVersionDeletedInCache(tx, slug, v); err != nil {
 			return err
 		}
 		if v.BlobID != "" {
@@ -2035,7 +2133,14 @@ func (r *ShaleRepo) Unpin(slug domain.Slug) error {
 		}
 		p.PinnedVersion = 0
 		p.contentRef = latest.contentRef // whole served descriptor rolls to the latest live version
-		return shaleTxPutJSON(tx, pasteKey, p)
+		if err := shaleTxPutJSON(tx, pasteKey, p); err != nil {
+			return err
+		}
+		// Free refresh: unpin already holds the authoritative scan, so re-stamp
+		// the disposable cache from it in this same {slug} transaction. The head
+		// was chosen from the rows, never the cache (docs/SPEC.md "The version
+		// index cache").
+		return txPutVersionsDoc(tx, slug, versions)
 	})
 	if errors.Is(txErr, errVerTaken) || errors.Is(txErr, backend.ErrCASConflict) {
 		return fmt.Errorf("shale: unpin %q: %w", slug, ErrConcurrentChange)

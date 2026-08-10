@@ -132,6 +132,85 @@ func LegacyVersionKeyForTest(slug domain.Slug, ver int) []byte {
 // LegacySlugOwnerKeyForTest returns the "slug_owner/<slug>" key.
 func LegacySlugOwnerKeyForTest(slug domain.Slug) []byte { return shaleKeySlugOwner(slug) }
 
+// VersionsDocKeyForTest returns the "versions_doc/<slug>" disposable cache key,
+// so a test can plant a deliberately-wrong or damaged cache and prove reads
+// fall back and destructive ops are unaffected.
+func VersionsDocKeyForTest(slug domain.Slug) []byte { return shaleKeyVersionsDoc(slug) }
+
+// VersionsDocValueForTest encodes a version cache document from (verNum, sha,
+// size, deleted) tuples - the shape a test plants to stand in a wrong cache.
+func VersionsDocValueForTest(recs []VersionCacheRecordForTest) ([]byte, error) {
+	doc := versionsDoc{}
+	for _, rec := range recs {
+		doc.Versions = append(doc.Versions, versionRow{
+			VerNum:     rec.VerNum,
+			contentRef: contentRef{Kind: string(domain.KindHTML), ContentSHA: rec.ContentSHA, BlobID: rec.BlobID, Size: rec.Size},
+			Deleted:    rec.Deleted,
+		})
+	}
+	return json.Marshal(doc)
+}
+
+// VersionRowValueForTest encodes a single authoritative version row carrying a
+// blob id - the production (blob-plane) row shape the served-guard blob-id
+// branch reads.
+func VersionRowValueForTest(verNum int, contentSHA, blobID string, size int, deleted bool) []byte {
+	b, err := json.Marshal(versionRow{
+		VerNum:     verNum,
+		contentRef: contentRef{Kind: string(domain.KindHTML), ContentSHA: contentSHA, BlobID: blobID, Size: size},
+		Deleted:    deleted,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// PasteRowValueWithBlobForTest encodes a paste head row whose served descriptor
+// carries a blob id - the production head shape (domain.Paste omits blob ids).
+func PasteRowValueWithBlobForTest(p domain.Paste, blobID string) []byte {
+	row := pasteFromDomain(p)
+	row.BlobID = blobID
+	b, err := json.Marshal(row)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// VersionCacheRecordForTest is one planted or read cache record.
+type VersionCacheRecordForTest struct {
+	VerNum     int
+	ContentSHA string
+	BlobID     string
+	Size       int
+	Deleted    bool
+}
+
+// ReadVersionCacheForTest returns the disposable version cache's records and
+// whether it is present + decodable, so a test can assert a write refreshed it
+// or that an old-binary write left it stale.
+func (r *ShaleRepo) ReadVersionCacheForTest(slug domain.Slug) ([]VersionCacheRecordForTest, bool, error) {
+	raw, err := r.getRaw(shaleKeyVersionsDoc(slug))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(raw) == 0 {
+		return nil, false, nil
+	}
+	var doc versionsDoc
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, false, err
+	}
+	out := make([]VersionCacheRecordForTest, 0, len(doc.Versions))
+	for _, v := range doc.Versions {
+		out = append(out, VersionCacheRecordForTest{
+			VerNum: v.VerNum, ContentSHA: v.ContentSHA, BlobID: v.BlobID, Size: v.Size, Deleted: v.Deleted,
+		})
+	}
+	return out, true, nil
+}
+
 // LegacyPasteValueForTest encodes p into the exact pasteRow JSON a slatedb
 // deployment stored. The migration claim is that ShaleRepo.Get decodes this raw
 // value with no conversion step.
