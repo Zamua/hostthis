@@ -3904,10 +3904,177 @@ urgency.
 `identity_first_seen` key during heal); the legacy key keeps being written
 alongside until the drop release, same as the row families.
 
-**Deliberately unchanged here:** the per-slug `versions/` family and the
-keygate families migrate to their own single-doc shapes in follow-up
-releases; the staged-refs and intent families stay row-shaped (boot-path
-only, never on a user's request path).
+**Deliberately unchanged here:** the keygate families migrate to their own
+single-doc shapes in follow-up releases; the staged-refs and intent families
+stay row-shaped (boot-path only, never on a user's request path). The per-slug
+`versions/` family is handled differently: its rows stay authoritative and it
+gains a DISPOSABLE read cache, not a single-doc migration - see "The version
+index cache" below.
+
+### The version index cache
+
+Per-slug version history has ONE cache document, a disposable copy of the
+authoritative rows:
+
+```
+versions_doc/<slug>   JSON { versions: [ version record, ... ] }
+```
+
+Each record is a version row verbatim: its number, its served descriptor
+(kind, sha, blob id, size, manifest), its created-at, and its deleted flag.
+The key leads with the slug, so the shard-key function must classify it to
+`<slug>` - the `versions/` case does NOT match `versions_doc/` (the trailing
+slash anchors it), so without its own case the key would fall to the whole-key
+fallback and land on the wrong shard. Classified to `<slug>`, the document
+co-shards with `versions/<slug>/*` and the paste head, and joins the very
+`{slug}` transactions that write those rows.
+
+**It is a cache, not a second source of truth.** The legacy
+`versions/<slug>/<N>` rows STAY authoritative and permanent. The document
+caches them so the hot reads stop being prefix scans of a range that grows
+with a paste's whole redeploy history: every append adds a number, every
+per-version delete leaves a tombstone the scan must walk forever at
+replication factor >1, and the scan path bypasses the block cache. There is
+NO migration off the rows, NO cleanup release, and NO moment when the two
+share authority. The rows are read to rebuild the document; the document is
+never read to decide anything that changes the rows.
+
+**Which reads it serves, and how they fall back.** The reads that would
+otherwise scan the version family read the document instead: `ListVersions`
+(the `versions` listing), the per-paste live-version byte sum (the legacy
+quota fall-through the head's cached `LiveBytes` does not already answer), and
+the read seam's blob-id resolution for a NON-served version's sha
+(`ResolveBlobID`, after the head has answered the served sha). Each falls back
+to scanning the rows when the document is absent (a paste written before the
+cache existed) or unreadable (fail open). Blob resolution additionally falls
+back on a per-sha MISS, so a stale document that lacks a version costs an extra
+row scan there rather than a wrong not-found. The fallback is READ-ONLY - it
+never writes the document - so a read never races a write over it, the same
+discipline the owner-doc fallback keeps.
+
+`GetVersion` is deliberately NOT served from the document. It is a point read
+of one row, not a scan, so the goal (kill the prefix scans) does not need it
+cached; and its only callers are inputs to a destructive decision, which the
+rule below keeps on the rows. Caching it would buy nothing and put a
+destructive-decision input on a disposable copy.
+
+A read served from a stale document yields a slightly-out-of-date listing, a
+slightly-off byte sum, or one extra row scan. None is a correctness stake,
+because nothing that DESTROYS data reads the document. A write that changes the
+version set maintains it in the same transaction: insert seeds it, an append
+upserts its new row onto the present document, a per-version delete flips its
+record, and unpin re-stamps it whole from the scan it already holds. Only a
+change made behind the document's back (an old binary that predates the cache)
+leaves an entry stale, until a whole re-stamp (unpin) reconciles it.
+
+**Destructive operations decide from the rows and the head, never from the
+document.** This is the load-bearing rule that makes the cache disposable,
+walked per operation:
+
+- **Per-version delete** reads the target's ROW (a point read) to confirm it
+  exists and is not already a tombstone, and decides "is this the served
+  version" against the HEAD - the head IS what serves. When pinned, the head's
+  pinned number names it with no read of the set. When unpinned, the head
+  serves the newest live version, named EXACTLY by its blob id (a point read of
+  the target row against the head's blob id) on the blob path; on the sha-keyed
+  dev path the head carries no blob id and a content sha is not unique per
+  version, so the newest live version is read from the authoritative ROWS
+  instead. Either way the decision reads the rows and the head, never the cache
+  (the served-version refusal lives in the service guard; the repo tombstone
+  stays policy-free, so a raw repo delete of any version still works). After the
+  guard passes, the tombstone flips the row and, when the cache is present,
+  flips that record in it too, in the SAME `{slug}` transaction; a pre-cache
+  paste is left cache-less rather than scanned to build one. A stale cache
+  cannot make this free the served version's blob, because the served identity
+  came from the head and the rows.
+- **Pin N** reads row N (a point read) inside the pinning transaction and rolls
+  the head onto that row's descriptor. The row read is authoritative, so a stale
+  cache can never influence which descriptor the head takes, and a nonexistent
+  row N is refused by the in-transaction read. Pin changes only the head, not
+  the version set, so it leaves the cache untouched.
+- **Unpin** needs the newest LIVE version - the one decision that needs the
+  whole set. It reads that from the ROWS (a cold scan of `versions/<slug>/*`,
+  acceptable because unpin is the rarest verb), picks the newest non-deleted,
+  rolls the head, and re-stamps the document from the scan it already holds (a
+  free refresh). It never consults the document to choose the head.
+- **Whole-paste delete** enumerates the rows (it must, to unbind every
+  version's blob and remove every row), cascades them in one `{slug}`
+  transaction, and drops the document. It reads the authoritative rows, never
+  the document; a document left behind would be harmless anyway, since nothing
+  reads an absent paste's version cache (the head answers not-found first).
+
+Because no destructive decision reads the document, a stale document cannot
+cause a destructive mistake. That is the whole safety argument.
+
+**Numbering also leaves the version scan.** An append takes the next number
+from the head's monotonic high-water mark (`LatestVersion`, which a tombstone
+never lowers), lifted by the cache's max version, both read inside its
+transaction. The transaction's absent-check on the candidate version key is the
+backstop that turns any staleness into a retry rather than a collision: a
+stale-low mark proposes a taken number, the check rejects it, and the retry
+scans the rows to recover the true max and advance past it (a stale-high mark
+only skips numbers, and gaps are fine). So a version number is never reused,
+even under a stale-low mark, concurrent appends, or a tombstoned number - the
+mark, the cache and the scan all count a tombstone, whose row and number
+persist. A pre-cache paste (no cache document) scans once to number and to
+rebuild the cache; that same scan recovers the number for a pre-`LatestVersion`
+head whose mark reads zero. After it the paste is cache-present and numbers from
+the mark with no scan. So on the production blob path the request path scans the
+version family only for the two destructive verbs that inherently need the whole
+authoritative set, unpin and whole-paste delete, plus these numbering recovery
+and pre-cache migration fall-backs; every other version operation is point reads
+plus the cache (per-version delete names the served version by blob id, a point
+read). The sha-keyed dev path has no blob id, so a per-version delete there
+additionally scans the rows to name the newest live version - still the
+authoritative rows, never the cache.
+
+**No trust machinery.** Because a stale document is harmless and no destructive
+op reads it, there is nothing to detect: NO generation counter, NO completeness
+flag, NO staleness fingerprint, NO heal-on-write that trusts the document. Any
+signal that tried to certify the document as fresh would exist only to let a
+destructive op trust it, which the rule above forbids - so if one appears, a
+destructive op is reading the cache, and the fix is to move that decision back
+onto the rows or the head, not to add the signal.
+
+**The serving path is untouched.** `pastes/<slug>` carries the served version's
+whole descriptor, manifest included, and a served request reads only that. The
+document changes nothing about how a paste is served: the read seam answers a
+served sha from the head FIRST and consults the document only for a NON-served
+version's sha, which itself falls back to the row.
+
+**Size, and why there is no cap.** The document holds full records including
+manifests, so a redeploy-heavy site's document can grow large. Because it is
+off the serving path and never authoritative, an oversized or unreadable
+document degrades to exactly the pre-cache behavior: the cheap reads fall back
+to scanning the rows, and the paste keeps serving and stays fully correct, only
+without the read speedup. So there is no size cap and no eviction. A document
+that ever became a real problem for a real paste would simply be left unwritten
+and its reads would scan (an operator decision to revisit only if it happens).
+
+**Deploy: a stale cache is harmless, so no single-flight is required.** Every
+direction of a rolling deploy is safe by the same argument:
+
+- *A new binary reading a pre-cache paste* finds no document and scans the rows
+  - the pre-cache path, correct.
+- *An old binary writing a paste that already has a document* writes the rows
+  without touching the document, leaving it stale. Every consequence is
+  harmless: the cheap reads served from the stale document return a slightly-old
+  listing or byte sum (never a correctness stake), and every destructive op
+  still decides from the rows and the head the old binary DID write, so none is
+  misled - it cannot free the served blob or roll the head onto a descriptor the
+  rows do not carry, because those come from head and row, not the document. A
+  new-binary append upserts only its own new row, so an entry the old binary
+  changed stays stale until unpin re-stamps the whole document from a scan; the
+  staleness stays harmless meanwhile, and once every binary is new nothing writes
+  behind the document's back again.
+- *A rollback* is that same case: the document simply stops being maintained
+  until a new binary returns, and meanwhile reads fall back or return
+  slightly-stale answers. Nothing the old binary does to a document-present
+  paste is unsafe.
+
+There is therefore no ordering constraint between the row write and the
+document write beyond co-committing them in the one `{slug}` transaction, and
+the release ships WITHOUT a single-flight deploy requirement.
 
 ### Fencing the writer recovery took over from
 
@@ -4578,6 +4745,7 @@ The key names:
 ```
 pastes/<slug>                      paste row
 versions/<slug>/<NNNN>             version row
+versions_doc/<slug>                disposable version index cache (rows stay authoritative; see "The version index cache")
 slug_owner/<slug>                  raw identity string
 identity_pastes/<identity>/<slug>  per-owner enumeration index (value-bearing, see below)
 identity_first_seen/<identity>     cached first-seen timestamp
@@ -5172,6 +5340,11 @@ user-observed, and not idempotent retries of a background loop, so the
 right behavior is to fail loudly on the one request that touched the bad
 row - the user (or operator) sees a real error rather than silent data
 loss in the response body.
+
+For `ListVersions` this hard-fail is on the authoritative version ROWS. An
+unreadable version index CACHE document (see "The version index cache") is
+NOT a corrupt record under this policy but a disposable accelerator, so it
+falls open to scanning the rows, and the rows' own hard-fail then applies.
 
 The quota scan is synchronous too but is NOT covered by this policy,
 because the two differ in what the user can do about the failure. A failed
