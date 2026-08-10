@@ -82,7 +82,7 @@ func TestUpload_Create_LookalikeErrorIsNotARemint(t *testing.T) {
 	if !errors.Is(err, errSlugLookalike) {
 		t.Fatalf("Create = %v, want the repo's own error surfaced verbatim", err)
 	}
-	if errors.Is(err, SlugTakenErr) {
+	if errors.Is(err, ErrSlugTaken) {
 		t.Fatalf("Create = %v; a non-collision error must not exhaust the remint budget", err)
 	}
 	if repo.calls != 1 {

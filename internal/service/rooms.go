@@ -146,7 +146,7 @@ func (s *Rooms) Create(appSlug domain.Slug, subnet string) (domain.Room, error) 
 			return domain.Room{}, err
 		}
 	}
-	return domain.Room{}, SlugTakenErr
+	return domain.Room{}, ErrSlugTaken
 }
 
 // Get returns one value from a room. The room-existence check makes a missing

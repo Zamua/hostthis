@@ -51,7 +51,7 @@ func TestShaleDelete_VsDeleteVersionSameSlug_NoUnderCount(t *testing.T) {
 
 		var wg sync.WaitGroup
 		wg.Add(2)
-		go func() { defer wg.Done(); _ = repo.Delete(victim) }()
+		go func() { defer wg.Done(); _ = repo.Delete(victim, vic.Identity, vic.CreatedAt) }()
 		go func() { defer wg.Done(); _ = repo.DeleteVersion(victim, 2) }()
 		wg.Wait()
 

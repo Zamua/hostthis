@@ -1488,6 +1488,7 @@ func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
 	// Step 1: flip the {slug}-shard status and capture the owner, so step 2 can
 	// find the index entry. A paste that is not pending has nothing to release.
 	var identity string
+	var createdAt time.Time
 	var transitioned bool
 	err := r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
 		transitioned = false // reset on CAS retry
@@ -1510,6 +1511,7 @@ func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
 			return nil // only a pending paste transitions
 		}
 		identity = p.Identity
+		createdAt = p.CreatedAt
 		p.Status = string(domain.PasteStatusFailed)
 		if err := shaleTxPutJSON(tx, pasteKey, p); err != nil {
 			return err
@@ -1520,9 +1522,11 @@ func (r *ShaleRepo) MarkFailed(slug domain.Slug) error {
 	if err != nil || !transitioned {
 		return err
 	}
-	// Step 2: drop the enumeration entry and the doc entry on the {id} shard
-	// so the failed paste leaves ListByOwner and stops being enumerated at all.
-	return r.dropOwnerEntry(identity, slug.String())
+	// Step 2: drop the enumeration entry and the doc entry on the {id} shard so
+	// the failed paste leaves ListByOwner and stops being enumerated at all.
+	// Guarded by the failed paste's CreatedAt so a concurrent re-mint of the
+	// slug keeps its own fresh entry.
+	return r.dropOwnerEntry(identity, slug.String(), createdAt)
 }
 
 // AppendVersionWithQuotaCheck appends a new version. The per-owner cap is
@@ -1612,6 +1616,24 @@ var errNeedScan = errors.New("shale: append needs a version scan to migrate a pr
 // ErrConcurrentChange aliases the domain-owned sentinel, matching how the rest
 // of the storage error vocabulary is re-exported.
 var ErrConcurrentChange = domain.ErrConcurrentChange
+
+// errIdentityChanged aborts an owner-gated {slug} write whose head no longer
+// belongs to the paste the caller authorized: a delete+re-mint of the same slug
+// committed in the window between the caller's ownership read and this
+// transaction, so acting would touch a DIFFERENT paste (another owner's, or the
+// same owner's new one). The in-tx head read joins the transaction's read-set,
+// so a re-mint racing the commit conflicts instead of slipping through. Mapped
+// to ErrConcurrentChange; never escapes the storage layer.
+var errIdentityChanged = errors.New("shale: paste identity changed since the caller's read")
+
+// pasteHeadIs reports whether a head row still describes the paste instance the
+// caller authorized. Identity + CreatedAt together name one paste: CreatedAt is
+// set once at insert and immutable, so a re-mint (necessarily a new insert) can
+// never reproduce it, and Identity catches a re-mint by a different owner even
+// in the impossible event the stamps collided.
+func pasteHeadIs(head pasteRow, wantIdentity domain.Identity, wantCreatedAt time.Time) bool {
+	return head.Identity == wantIdentity.String() && head.CreatedAt.Equal(wantCreatedAt)
+}
 
 // appendAuthoritative writes the new version row on the {slug} shard and numbers
 // it from the head's monotonic high-water mark, NOT a version scan.
@@ -1890,7 +1912,13 @@ func (r *ShaleRepo) refreshFromEmptyEntry(identity string, slug domain.Slug, can
 // spends a full CAS budget on the conflict, so a second retry layer here would
 // only re-run an exhausted one; and the version set is read OUTSIDE the tx, so
 // the only fix for a stale scan is to start over from the caller.
-func (r *ShaleRepo) Delete(slug domain.Slug) error {
+// wantIdentity + wantCreatedAt name the exact paste instance the caller
+// authorized (from its own ownership read). They are re-checked INSIDE the
+// {slug} transaction against the head that transaction reads: the service-layer
+// ownership check happens OUTSIDE any transaction, so on its own it cannot stop
+// a delete+re-mint of the same slug from committing in the window and having
+// this delete destroy the NEW owner's paste.
+func (r *ShaleRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
 	pasteKey := shaleKeyPaste(slug)
 	var head pasteRow
 	if err := r.getJSON(pasteKey, &head); err != nil {
@@ -1898,6 +1926,12 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 			return nil
 		}
 		return err
+	}
+	// A cheap out-of-tx reject for the common mismatch, so the version scan is
+	// skipped when the paste already changed under the caller. The AUTHORITATIVE
+	// check is the in-tx one below; this read can itself be stale.
+	if !pasteHeadIs(head, wantIdentity, wantCreatedAt) {
+		return fmt.Errorf("shale: delete %q: %w", slug, ErrConcurrentChange)
 	}
 	versions, err := r.scanVersions(slug)
 	if err != nil {
@@ -1912,9 +1946,17 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 	// them after the grace. unbind is a no-op on the metadata-only path,
 	// where the global content-addressed sweep reclaims instead.
 	delBody := func(tx shaleKVTx, unbind func(blobID string) error) error {
-		// Read the head inside the tx so a racing append conflicts.
-		if _, err := tx.Get(pasteKey); err != nil {
-			return err
+		// Read the head inside the tx so a racing append conflicts, AND confirm
+		// it is still the paste the caller authorized: a delete+re-mint of this
+		// slug in the window leaves a different paste here, and deleting it would
+		// destroy the new owner's data. Absence is idempotent (a concurrent
+		// delete cascaded first); a mismatch aborts.
+		var cur pasteRow
+		if err := shaleTxGetJSON(tx, pasteKey, &cur); err != nil {
+			return err // ErrNotFound -> idempotent; mapped below
+		}
+		if !pasteHeadIs(cur, wantIdentity, wantCreatedAt) {
+			return errIdentityChanged
 		}
 		if _, gerr := tx.Get(nextVerKey); gerr == nil {
 			return errVerTaken
@@ -1971,7 +2013,7 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 	}
 	switch {
 	case txErr == nil:
-	case errors.Is(txErr, errVerTaken) || errors.Is(txErr, backend.ErrCASConflict):
+	case errors.Is(txErr, errIdentityChanged) || errors.Is(txErr, errVerTaken) || errors.Is(txErr, backend.ErrCASConflict):
 		return fmt.Errorf("shale: delete %q: %w", slug, ErrConcurrentChange)
 	case errors.Is(txErr, ErrNotFound):
 		return nil // a concurrent delete cascaded first; idempotent
@@ -1980,8 +2022,9 @@ func (r *ShaleRepo) Delete(slug domain.Slug) error {
 	}
 
 	// Drop the enumeration entry and the doc entry on the {id} shard so the
-	// paste leaves the owner's scan and doc render. Idempotent.
-	return r.dropOwnerEntry(head.Identity, slug.String())
+	// paste leaves the owner's scan and doc render. Guarded by CreatedAt so a
+	// same-owner re-mint in this window keeps its fresh entry. Idempotent.
+	return r.dropOwnerEntry(wantIdentity.String(), slug.String(), wantCreatedAt)
 }
 
 // DeleteVersion tombstones a single version: it stays visible in the list
@@ -2073,26 +2116,35 @@ func (r *ShaleRepo) DeleteVersion(slug domain.Slug, ver int) error {
 	return nil
 }
 
-func (r *ShaleRepo) SetName(slug domain.Slug, name string) error {
+// wantIdentity + wantCreatedAt name the paste the caller authorized. The head
+// rename re-checks them INSIDE the {slug} transaction: without it a delete +
+// re-mint of the slug by another owner in the window makes the first tx relabel
+// the NEW owner's paste, and the confirmed identity is then reused for the
+// index/doc write rather than a fresh out-of-tx read that could resolve to the
+// wrong owner.
+func (r *ShaleRepo) SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
 	pasteKey := shaleKeyPaste(slug)
 	if err := r.cluster.Transact(pasteKey, func(tx backend.Transaction) error {
 		var p pasteRow
 		if err := shaleTxGetJSON(tx, pasteKey, &p); err != nil {
 			return err
 		}
+		if !pasteHeadIs(p, wantIdentity, wantCreatedAt) {
+			return errIdentityChanged
+		}
 		p.Name = name
 		return shaleTxPutJSON(tx, pasteKey, p)
 	}); err != nil {
+		if errors.Is(err, errIdentityChanged) {
+			return fmt.Errorf("shale: rename %q: %w", slug, ErrConcurrentChange)
+		}
 		return err
 	}
-	// Refresh the denormalized name in the index projection and the owner
-	// doc, in one {id}-shard CAS. Errors PROPAGATE: the doc is what the
-	// listing renders, so a swallowed failure here is a rename that reported
-	// success while staying invisible.
-	identity := r.ownerOfSlug(slug)
-	if identity == "" {
-		return nil // paste gone mid-flight; nothing to refresh
-	}
+	// Refresh the denormalized name in the index projection and the owner doc,
+	// in one {id}-shard CAS, for the SAME identity the head write just confirmed.
+	// Errors PROPAGATE: the doc is what the listing renders, so a swallowed
+	// failure here is a rename that reported success while staying invisible.
+	identity := wantIdentity.String()
 	candidate, err := r.ownerDocCandidate(identity)
 	if err != nil {
 		return err
@@ -2104,14 +2156,16 @@ func (r *ShaleRepo) SetName(slug domain.Slug, name string) error {
 		if gerr != nil && !errors.Is(gerr, ErrNotFound) {
 			return gerr
 		}
-		if gerr == nil {
+		// Guard each representation by CreatedAt: a re-mint landing between the
+		// two transactions must not have its fresh entry/doc row relabelled.
+		if gerr == nil && row.CreatedAt.Equal(wantCreatedAt) {
 			row.Name = name
 			if perr := shaleTxPutJSON(tx, indexKey, row); perr != nil {
 				return perr
 			}
 		}
 		return r.txApplyOwnerDoc(tx, identity, candidate, func(doc *ownerDoc) {
-			if e, ok := doc.Pastes[slug.String()]; ok {
+			if e, ok := doc.Pastes[slug.String()]; ok && e.CreatedAt.Equal(wantCreatedAt) {
 				e.Name = name
 				doc.Pastes[slug.String()] = e
 			}

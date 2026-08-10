@@ -17,8 +17,13 @@ import (
 type PasteAdmin interface {
 	Get(domain.Slug) (domain.Paste, error)
 	ListByOwner(owner string) ([]domain.Paste, error)
-	Delete(domain.Slug) error
-	SetName(domain.Slug, string) error
+	// Delete and SetName take the caller-authorized paste identity + CreatedAt
+	// so the storage layer can re-check them INSIDE its {slug} transaction: the
+	// service ownership check runs outside any transaction, so a delete+re-mint
+	// of the same slug in the window would otherwise let the op hit a different
+	// paste. CreatedAt is immutable per paste, so it names the exact instance.
+	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
+	SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 	SetPinnedVersion(domain.Slug, domain.Version) error
 	Unpin(domain.Slug) error
 	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (domain.AppendResult, error)
@@ -198,7 +203,8 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 
 // Rename sets the human label. Empty string clears it.
 func (m *Manage) Rename(slug domain.Slug, owner, name string) error {
-	if _, err := m.requireOwner(slug, owner); err != nil {
+	p, err := m.requireOwner(slug, owner)
+	if err != nil {
 		return err
 	}
 	if name != "" {
@@ -206,7 +212,9 @@ func (m *Manage) Rename(slug domain.Slug, owner, name string) error {
 			return ErrInvalidName
 		}
 	}
-	return m.Repo.SetName(slug, name)
+	// requireOwner is a pre-check for a clean error; the authoritative owner
+	// re-check happens inside SetName's {slug} transaction.
+	return m.Repo.SetName(slug, name, p.Identity, p.CreatedAt)
 }
 
 // Delete removes a paste and its versions (FK cascade).
@@ -215,7 +223,10 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 	if err != nil {
 		return err
 	}
-	if err := m.Repo.Delete(slug); err != nil {
+	// requireOwner is a pre-check for a clean error; the authoritative owner
+	// re-check happens inside Delete's {slug} transaction, so a delete+re-mint
+	// of the slug by another identity in the window cannot destroy their paste.
+	if err := m.Repo.Delete(slug, p.Identity, p.CreatedAt); err != nil {
 		return err
 	}
 	// Unbind the paste's blob references. A no-op on the standalone path,
