@@ -187,6 +187,15 @@ type ShaleConfig struct {
 	WriteTimeout time.Duration
 	ReadTimeout  time.Duration
 
+	// TombstoneGrace is forwarded to cluster.Config.TombstoneGracePeriod: at
+	// R>1, tombstones older than this are purged natively when a replica
+	// position mounts, so the backend's compaction can reclaim them. Zero
+	// disables the purge. Eligibility (R>1, write-ack bar covering all
+	// replicas) is decided inside shale. Operator env:
+	// HOSTTHIS_METADATA_TOMBSTONE_GRACE (docs/SPEC.md "Tombstone purge:
+	// reclaiming replicated deletes").
+	TombstoneGrace time.Duration
+
 	// Logger receives the skip lines from the tolerant background scans (the
 	// / repair-on-read) when they hit an undecodable record. nil falls back to
 	// log.Default(). It never affects the blob-GC ref-set scans, which fail
@@ -382,6 +391,8 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		// Zero leaves cluster.Open's 5s per-dispatch deadline.
 		WriteTimeout: cfg.WriteTimeout,
 		ReadTimeout:  cfg.ReadTimeout,
+		// Zero disables the mount-time tombstone purge.
+		TombstoneGracePeriod: cfg.TombstoneGrace,
 		// ReadQuorum, not ReadNearest: at R>1 ReadNearest decides on the first
 		// replica to answer and treats a NotFound as usable, so a read served by
 		// a still-backfilling replica (a freshly joined node) could return

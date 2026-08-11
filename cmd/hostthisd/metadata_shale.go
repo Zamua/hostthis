@@ -21,6 +21,9 @@
 //   HOSTTHIS_SHALE_READ_TIMEOUT       (Go duration, e.g. "8s"; unset/empty =
 //                                      shale's 5s default; malformed fails startup)
 //   HOSTTHIS_SHALE_WRITE_TIMEOUT      (same, for the per-dispatch write deadline)
+//   HOSTTHIS_METADATA_TOMBSTONE_GRACE (Go duration, e.g. "168h"; unset/empty =
+//                                      tombstone purge disabled; malformed fails
+//                                      startup)
 //
 // With BIND_ADDR unset the node runs single-node: no gossip, no ring routing,
 // every op local. Setting it brings up memberlist + gRPC forwarding and joins
@@ -150,6 +153,12 @@ func openShaleRepoFromEnv(logger *log.Logger, registerGRPC func(*grpc.Server)) (
 	if err != nil {
 		return nil, err
 	}
+	// Mount-time tombstone purge grace window; zero = disabled. See docs/
+	// SPEC.md "Tombstone purge: reclaiming replicated deletes".
+	tombstoneGrace, err := tombstoneGraceFromEnv()
+	if err != nil {
+		return nil, err
+	}
 
 	// Multi-node peer-discovery config. A non-empty bind addr is the
 	// switch that takes the cluster out of the single-node path.
@@ -243,6 +252,7 @@ func openShaleRepoFromEnv(logger *log.Logger, registerGRPC func(*grpc.Server)) (
 		ReapFenceWALs:     reapFenceWALs,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
+		TombstoneGrace:    tombstoneGrace,
 		Logger:            logger,
 		BlobStore:         blobStore,
 		ConditionalStore:  condStore,
