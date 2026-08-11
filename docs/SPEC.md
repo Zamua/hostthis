@@ -5782,6 +5782,43 @@ the same HA deployment that runs R=2 across distinct nodes. The flag is
 threaded to the slate backend's per-write `WriteOptions`; leaving it at the
 default keeps the byte-exact durable path.
 
+#### Tombstone purge: reclaiming replicated deletes
+
+At R>1 a delete cannot simply erase a key: it must replicate as a fact, so
+shale writes a tombstone marker that shadows the old value on every
+replica. Those markers are live KV to the backend and, left alone,
+accumulate forever - every prefix scan over a churned range walks every
+tombstone ever written there, which is the read-amplification failure mode
+the "no scans on the request path" principle exists to avoid. Shale
+(v0.18.0+) can purge them: when a replica position mounts, tombstones older
+than a configured grace window are deleted natively, and the backend's own
+compaction then reclaims the bytes.
+
+```
+HOSTTHIS_METADATA_TOMBSTONE_GRACE   (Go duration, e.g. "168h"; unset/empty
+                                     = purge disabled, shale's default)
+```
+
+The value threads to shale's `TombstoneGracePeriod` unchanged. Unset or
+empty leaves it zero (disabled), so a deployment that does not opt in is
+byte-for-byte unchanged. A malformed or negative value is a configuration
+error: the daemon refuses to start rather than running with a silently
+substituted default, matching the timeout knobs below.
+
+Operationally: the purge runs only when a position mounts, so a restart is
+the trigger; a deployment sees reclamation after its next rollout, not on a
+background schedule. Eligibility is decided inside shale (R>1 with the
+write-ack bar covering all replicas; an ineligible config logs one refusal
+line and purges nothing), so no hostthis-side validation exists to drift
+out of sync. Size the grace to dominate cross-node clock skew plus the
+write-durability window by a wide margin - and note the accepted caveat
+documented with shale's purge spec: under relaxed durability
+(`HOSTTHIS_METADATA_AWAIT_DURABLE=false`, above) a crash can strand a
+divergence that a later purge turns into a resurrected value. A generous
+grace (days, not minutes) keeps that window negligible for this workload;
+a deployment that cannot accept it at all should pair purging with awaited
+durability.
+
 #### Dispatch deadlines: the read/write timeout knobs
 
 Every clustered metadata op runs under a per-dispatch deadline: the shale
