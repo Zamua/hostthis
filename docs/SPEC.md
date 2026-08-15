@@ -2313,20 +2313,43 @@ https://abc12345.hostthis.dev
 The name is owner-only metadata for `list`; it never appears in the
 URL. Names are 1–60 chars, any printable Unicode except newlines.
 
-**Flags need a `--` terminator.** Every documented flag form places `--`
-between the host and the flag:
+**A flag directly after the host needs a `--` terminator.** An upload has no
+verb, so its flag would be the first thing after the destination, and `ssh`
+eats it. Upload flags therefore require `--`:
 
 ```
 cat doc.md | ssh -T hostthis.dev -- --name "design notes"
 ```
 
-This is not a hostthis quirk, and it is not optional. After `ssh` consumes
-the destination it *resumes* parsing the remaining arguments as its own
-options, so a bare `--name` is read by `ssh`, never sent, and the upload
-dies client-side with `illegal option -- -` before the server is contacted.
-Quoting the flags as a single argument does not help: `getopt` only checks
-for a leading `-`. The `--` terminator ends option parsing, and everything
-after it is passed through as the remote command.
+Verb commands do NOT need it, and must not be written with one, because the
+verb itself protects the flags that follow:
+
+```
+ssh hostthis.dev list -o json
+```
+
+The rule comes from `ssh`, not from hostthis. After `ssh` consumes the
+destination it *resumes* parsing the remaining arguments as its own options,
+but `getopt` stops at the first argument that does not begin with `-`. A
+verb (`list`, `whoami`, `versions`) is such an argument, so parsing halts
+there and everything after it is passed through untouched. An upload has no
+verb, so a bare `--name` is the first token `ssh` re-examines, and it is
+consumed client-side - the server is never contacted. Quoting the flags as a
+single argument does not help, since `getopt` only tests for a leading `-`.
+
+To tell which side rejected a flag, run it with no stdin so no paste is
+created, and read the error:
+
+```
+ssh hostthis.dev -- --not-a-real-flag
+hostthis: unexpected argument "--not-a-real-flag"     <- reached the server
+
+ssh hostthis.dev --not-a-real-flag                    (WRONG, for contrast)
+hostthis.dev: illegal option -- -                     <- ssh ate it
+```
+
+An error naming the *host* as the program is `ssh`'s own `getopt` failing,
+because by then it has advanced past its `argv[0]`.
 
 Verified on OpenSSH 10.2p1 (macOS) and 9.6p1 (Linux); the behaviour comes
 from portable OpenSSH itself, so it is not platform-specific. Server-side
