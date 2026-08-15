@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"io"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -61,12 +62,34 @@ func (c *CacheInvalidating) Update(slug domain.Slug, owner string, body io.Reade
 	return res, err
 }
 
+// Delete purges even on error, unlike its siblings. A failed update leaves the
+// cached bytes correct; a failed delete may not, because the removal can land
+// and the call still report an error, and the edge would then serve deleted
+// content until max-age expires. Purging a paste that survived is harmless, so
+// the ambiguous case resolves toward purging.
+//
+// The pre-mutation rejections are excluded, and that exclusion is load-bearing:
+// without it, attempting to delete a slug you do not own would purge it, letting
+// any caller spend the CDN's finite purge budget on paste they have no rights to.
 func (c *CacheInvalidating) Delete(slug domain.Slug, owner string) error {
 	err := c.PasteManager.Delete(slug, owner)
-	if err == nil {
+	if err == nil || mayHaveMutated(err) {
 		_ = c.purger.PurgePaste(slug)
 	}
 	return err
+}
+
+// mayHaveMutated reports whether a delete error leaves it unknown that the paste
+// survived. Only the ownership pre-check's rejections prove no write was
+// attempted; every other failure is ambiguous by construction.
+func mayHaveMutated(err error) bool {
+	switch {
+	case errors.Is(err, ErrNotFound),
+		errors.Is(err, ErrNotOwner),
+		errors.Is(err, ErrEmptyOwner):
+		return false
+	}
+	return true
 }
 
 func (c *CacheInvalidating) Pin(slug domain.Slug, owner string, verNum int) (domain.Version, error) {

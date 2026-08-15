@@ -6201,6 +6201,23 @@ Operations that fire a purge:
 `rename` does NOT purge - the name is owner-only metadata, not part of
 the public response. Same with `versions`/`list`/`whoami`/`get`.
 
+**`delete` purges even when it reports failure.** The other three purge
+only on success, which is right for them: if an update did not happen,
+the cached bytes are still correct. A delete is different, because it can
+report an error *after* the paste is already gone - a transient storage
+error partway through, for instance - and then the URL serves deleted
+content from the edge until `max-age` expires, up to an hour. Since
+purging a paste that still exists is harmless (the next reader simply
+re-fetches it), a delete purges unless the error proves nothing was
+touched.
+
+"Nothing was touched" means the pre-mutation rejections only:
+`ErrNotFound`, `ErrNotOwner` and `ErrEmptyOwner`, all raised by the
+ownership pre-check before any write is attempted. Excluding them is not
+an optimisation - it is what stops an unrelated caller from forcing
+purges on slugs they do not own by attempting deletes, which would spend
+the CDN's finite purge budget on request.
+
 The interface lives in the service layer; no production code - not even
 the verb service that performs the mutation - knows which CDN is in
 front, or that one is in front at all:
