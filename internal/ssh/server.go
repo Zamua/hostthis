@@ -952,10 +952,11 @@ func emitHelp(sess gossh.Session, apex string) {
 const helpTextTemplate = `Pipe a rendered file in, get a URL out. Pastes persist indefinitely.
 
 UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;
+         -- is required before any flag, or ssh parses it as its own;
          a QR code of the URL also prints to stderr on success)
 
     cat foo.html   | ssh -T {{apex}}
-    cat doc.md     | ssh -T {{apex}} --name "design notes"
+    cat doc.md     | ssh -T {{apex}} -- --name "design notes"
     git diff       | ssh -T {{apex}}                 rendered as a diff
     cat chart.mmd  | ssh -T {{apex}}                 mermaid diagram
     cat report.pdf | ssh -T {{apex}}                 paged pdf viewer
@@ -964,7 +965,7 @@ UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;
     cat cpu.folded | ssh -T {{apex}}                 interactive flame graph
     cat app.ndjson | ssh -T {{apex}}                 log viewer (query + histogram)
     cat nginx.conf | ssh -T {{apex}}                 text with linkable lines
-    cat x.txt      | ssh -T {{apex}} --type csv      force a renderer
+    cat x.txt      | ssh -T {{apex}} -- --type csv   force a renderer
 
 UPDATE & MANAGE (owner only; ssh key authenticates)
 

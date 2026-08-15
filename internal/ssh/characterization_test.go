@@ -859,10 +859,11 @@ func TestHelp_Characterization(t *testing.T) {
 const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pastes persist indefinitely.\n" +
 	"\n" +
 	"UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;\n" +
+	"         -- is required before any flag, or ssh parses it as its own;\n" +
 	"         a QR code of the URL also prints to stderr on success)\n" +
 	"\n" +
 	"    cat foo.html   | ssh -T paste.test\n" +
-	"    cat doc.md     | ssh -T paste.test --name \"design notes\"\n" +
+	"    cat doc.md     | ssh -T paste.test -- --name \"design notes\"\n" +
 	"    git diff       | ssh -T paste.test                 rendered as a diff\n" +
 	"    cat chart.mmd  | ssh -T paste.test                 mermaid diagram\n" +
 	"    cat report.pdf | ssh -T paste.test                 paged pdf viewer\n" +
@@ -871,7 +872,7 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"    cat cpu.folded | ssh -T paste.test                 interactive flame graph\n" +
 	"    cat app.ndjson | ssh -T paste.test                 log viewer (query + histogram)\n" +
 	"    cat nginx.conf | ssh -T paste.test                 text with linkable lines\n" +
-	"    cat x.txt      | ssh -T paste.test --type csv      force a renderer\n" +
+	"    cat x.txt      | ssh -T paste.test -- --type csv   force a renderer\n" +
 	"\n" +
 	"UPDATE & MANAGE (owner only; ssh key authenticates)\n" +
 	"\n" +
