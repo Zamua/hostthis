@@ -2301,15 +2301,37 @@ machine-readable datum and stderr is human-facing narration, so
 toggle it. The same QR can be re-shown for any existing paste later via
 the `qr` verb (below).
 
-Optional `--name`:
+Optional `--name`. The `--` terminator is required: without it `ssh` parses
+the flag as its own option and fails before the server sees it (see "Flags
+need a `--` terminator" below).
 ```
-cat demo.html | ssh -T hostthis.dev --name "Acme prototype v3"
+cat demo.html | ssh -T hostthis.dev -- --name "Acme prototype v3"
 https://abc12345.hostthis.dev
 "Acme prototype v3"
 <QR code of the URL, on stderr>
 ```
 The name is owner-only metadata for `list`; it never appears in the
 URL. Names are 1–60 chars, any printable Unicode except newlines.
+
+**Flags need a `--` terminator.** Every documented flag form places `--`
+between the host and the flag:
+
+```
+cat doc.md | ssh -T hostthis.dev -- --name "design notes"
+```
+
+This is not a hostthis quirk, and it is not optional. After `ssh` consumes
+the destination it *resumes* parsing the remaining arguments as its own
+options, so a bare `--name` is read by `ssh`, never sent, and the upload
+dies client-side with `illegal option -- -` before the server is contacted.
+Quoting the flags as a single argument does not help: `getopt` only checks
+for a leading `-`. The `--` terminator ends option parsing, and everything
+after it is passed through as the remote command.
+
+Verified on OpenSSH 10.2p1 (macOS) and 9.6p1 (Linux); the behaviour comes
+from portable OpenSSH itself, so it is not platform-specific. Server-side
+parsing is unaffected - the server accepts `--name` and `--type` exactly as
+specified - so this constrains only how the client must be invoked.
 
 **stdout vs stderr discipline**: the URL is the *only* thing on stdout -
 one line, no trailing whitespace, no formatting - so pipes Just Work:
@@ -2741,7 +2763,7 @@ Pipe a rendered file in, get a URL out. Pastes persist indefinitely.
 UPLOAD
 
     cat foo.html | ssh -T hostthis.dev
-    cat doc.md   | ssh -T hostthis.dev --name "design notes"
+    cat doc.md   | ssh -T hostthis.dev -- --name "design notes"
 
     (-T silences the ssh "pseudo-terminal will not be allocated" warning
      on piped uploads. A QR code of the URL prints to stderr on success.)
