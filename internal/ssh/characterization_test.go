@@ -859,7 +859,8 @@ func TestHelp_Characterization(t *testing.T) {
 const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pastes persist indefinitely.\n" +
 	"\n" +
 	"UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;\n" +
-	"         -- is required before any flag, or ssh parses it as its own;\n" +
+	"         -- is required before an UPLOAD flag, or ssh parses it as its\n" +
+	"         own; verb flags like -o json are already safe;\n" +
 	"         a QR code of the URL also prints to stderr on success)\n" +
 	"\n" +
 	"    cat foo.html   | ssh -T paste.test\n" +

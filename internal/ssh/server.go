@@ -952,7 +952,8 @@ func emitHelp(sess gossh.Session, apex string) {
 const helpTextTemplate = `Pipe a rendered file in, get a URL out. Pastes persist indefinitely.
 
 UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;
-         -- is required before any flag, or ssh parses it as its own;
+         -- is required before an UPLOAD flag, or ssh parses it as its
+         own; verb flags like -o json are already safe;
          a QR code of the URL also prints to stderr on success)
 
     cat foo.html   | ssh -T {{apex}}
