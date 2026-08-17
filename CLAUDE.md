@@ -118,6 +118,7 @@ internal/
   ssh/               gliderlabs ssh server + verb dispatch
   http/              apex landing + paste read surface
   render/            markdown → sanitized HTML
+e2e/                 browser suite behind the `e2e` build tag
 web/landing.html     embedded apex landing page
 docs/SPEC.md         product spec; source of truth for behavior
 Dockerfile           multi-stage build; distroless static image
@@ -175,6 +176,42 @@ curl <that URL>
 
 The binary defaults to `--mode path` (apex/p/&lt;slug&gt; URLs) for dev. Use
 `--mode subdomain` only for production deploys with a wildcard cert.
+
+### Browser e2e
+
+The renderers are the product: a paste is served as a fixed HTML shell that
+fetches the raw bytes and renders them client-side. A shell whose bundle 404s
+or throws serves a blank page while every status code stays 200, so
+`scripts/smoke.sh` cannot see it. The `e2e/` suite is what does.
+
+```
+make e2e        # run it; needs a local Chrome
+make e2e-ci     # same, plus JUnit at results.xml and screenshots for the PR report
+make e2e E2E_FLAGS='-run TestMermaidRender -v'   # one flow
+```
+
+Every file in `e2e/` carries `//go:build e2e`, so the untagged build never sees
+the package and `make test` needs no browser. A test starts a real `hostthisd`
+on ephemeral ports with a temp data dir, uploads over SSH the way a user does,
+and drives headless Chrome through chromedp. No staging, no MinIO, no network
+dependency. Set `E2E_CHROME_PATH` if Chrome is installed somewhere the driver
+does not look.
+
+**A screenshot is evidence, not an assertion.** Every test asserts a semantic
+DOM signal (an element, its text, a count, a state change) and records
+screenshots beside it for a human to review. Pixel diffing and golden images
+are excluded on purpose: font rasterization differs between a CI runner and a
+laptop, and that flake ends with the suite being ignored.
+
+The output contract is [`docs/E2E-REPORTS.md`](docs/E2E-REPORTS.md): JUnit at
+`results.xml`, plus one directory per flow under `$E2E_ARTIFACTS` (default
+`./artifacts`) holding `NN-label.png` steps and a `meta.json` whose `nodeid` is
+the Go test function owning the flow. That name is how the pull-request report
+attaches a filmstrip to a result, so a renamed test needs its flow renamed with
+it. Screenshots accumulate across local runs; `make clean` removes them.
+
+A test adds no product behavior, so the spec-first rule has nothing to bite on
+here: extending this suite does not edit `docs/SPEC.md`.
 
 ## Deploy
 

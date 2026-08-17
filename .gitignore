@@ -36,3 +36,7 @@ testdata/sitefixtures/*/.vite/
 
 # local POC apps (black-box dogfooding against the public surface; not shipped)
 pocs/
+
+# e2e output: screenshots ($E2E_ARTIFACTS default) and the JUnit report
+/artifacts/
+/results.xml
