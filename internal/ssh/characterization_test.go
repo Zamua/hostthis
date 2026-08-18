@@ -1147,6 +1147,27 @@ func TestProxyProtocol_Characterization(t *testing.T) {
 	})
 }
 
+// A headerless connection is refused when PROXY parsing is enabled: only the
+// reverse proxy should reach this listener and it always sends a header, so
+// serving a bare connection would attribute the client to the proxy itself.
+func TestProxyProtocol_HeaderlessConnectionRefused(t *testing.T) {
+	p := startProxyProtoStack(t, 10)
+	c, err := net.DialTimeout("tcp", p.sshAddr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close() //nolint:errcheck
+	// An SSH client hello, not a PROXY header. The listener must refuse the
+	// connection rather than run a handshake attributed to 127.0.0.1.
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = c.Write([]byte("SSH-2.0-probe\r\n"))
+	buf := make([]byte, 64)
+	n, rerr := c.Read(buf)
+	if rerr == nil && strings.HasPrefix(string(buf[:n]), "SSH-") {
+		t.Fatalf("headerless connection was served an SSH banner %q; REQUIRE policy is not in effect", string(buf[:n]))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 12. PTY/no-PTY behavior on a second verb (list)
 // ---------------------------------------------------------------------------

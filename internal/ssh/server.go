@@ -107,6 +107,8 @@ func (s *Server) now() time.Time {
 // parsed and RemoteAddr() carries the real client IP. Required whenever SSH
 // sits behind a TCP router: without it every session appears to originate from
 // the forwarder and the Sybil per-subnet limit collapses to a global cap.
+// With the flag set the header is mandatory: a headerless connection is
+// refused rather than served with the forwarder's own address.
 func (s *Server) ListenAndServe() error {
 	signer, err := s.hostSigner()
 	if err != nil {
@@ -146,8 +148,20 @@ func (s *Server) ListenAndServe() error {
 		return fmt.Errorf("listen %s: %w", s.Addr, err)
 	}
 	if strings.EqualFold(os.Getenv("HOSTTHIS_SSH_PROXY_PROTOCOL"), "true") {
-		ln = &proxyproto.Listener{Listener: ln}
-		s.Logger.Printf("ssh: PROXY protocol parsing enabled (real client IPs come from PROXY headers)")
+		// REQUIRE, explicitly: with parsing enabled, only the reverse proxy
+		// should be able to reach this listener, and it always sends a header.
+		// A headerless connection means the front door was bypassed, and
+		// serving it would attribute the client to the proxy's own address,
+		// which is exactly what keygate subnet accounting must not do. This is
+		// also the library's v0.15 default for unconfigured listeners; stating
+		// it here keeps the refusal a decision rather than an inheritance.
+		ln = &proxyproto.Listener{
+			Listener: ln,
+			ConnPolicy: func(proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
+				return proxyproto.REQUIRE, nil
+			},
+		}
+		s.Logger.Printf("ssh: PROXY protocol required (real client IPs from PROXY headers; headerless connections refused)")
 	}
 	s.Logger.Printf("ssh: listening on %s", s.Addr)
 	err = srv.Serve(ln)
