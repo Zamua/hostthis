@@ -14,7 +14,7 @@
 
 # SlateDB tag to clone + build. Keep aligned with the slatedb-go
 # version pinned in go.mod (slatedb.io/slatedb-go).
-ARG SLATEDB_VERSION=v0.13.1
+ARG SLATEDB_VERSION=v0.14.1
 
 # ---- uniffi-build stage -----------------------------------------------------
 FROM rust:1.91-slim-bookworm AS uniffi-build
