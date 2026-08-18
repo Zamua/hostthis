@@ -1348,7 +1348,15 @@ informs them):
   TCP `RemoteAddr` by default, NOT from any client-supplied header. A
   client-controlled `X-Forwarded-For` is ignored unless the operator
   explicitly opts in by setting `HOSTTHIS_HTTP_TRUST_XFF=true` - the same
-  discipline the SSH side uses for `HOSTTHIS_SSH_PROXY_PROTOCOL`. Trusting
+  discipline the SSH side uses for `HOSTTHIS_SSH_PROXY_PROTOCOL`, and on
+  the SSH side the trust is enforced both ways: with the flag set, the
+  listener REQUIRES a PROXY header and refuses a connection that arrives
+  without one. A headerless connection there means something bypassed the
+  reverse proxy, and serving it would attribute the client to the proxy's
+  own address - precisely the mis-accounting the flag exists to prevent.
+  Deployments that enable the flag must therefore route ALL ssh traffic
+  through the header-sending proxy; a direct dial to the listener is
+  refused by design. Trusting
   a client header by default is a rate-limit bypass: an attacker would set
   a fresh `X-Forwarded-For` per `POST` and land in a new per-IP bucket each
   time. When `HOSTTHIS_HTTP_TRUST_XFF=true` is set (because hostthis sits
