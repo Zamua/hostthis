@@ -28,6 +28,9 @@ const (
 // cold fetch of a renderer's own libraries, not just a paint.
 const browserTimeout = 90 * time.Second
 
+// browserLaunchAttempts bounds the launch retry above.
+const browserLaunchAttempts = 2
+
 // Browser is a headless tab plus every error its page reported. The error log
 // is the cheap half of the blank-page check: a shell whose bundle 404s or
 // throws renders nothing and says so only here.
@@ -70,20 +73,45 @@ func NewBrowser(t *testing.T) *Browser {
 		opts = append(opts, chromedp.ExecPath(path))
 	}
 
-	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
-	t.Cleanup(cancelAlloc)
-	tabCtx, cancelTab := chromedp.NewContext(allocCtx)
-	t.Cleanup(cancelTab)
-	ctx, cancelTimeout := context.WithTimeout(tabCtx, browserTimeout)
-	t.Cleanup(cancelTimeout)
+	// Launching Chrome is retried once against a FRESH allocator. A CI runner
+	// under load can miss the DevTools websocket handshake, and that failure has
+	// nothing to do with the renderer a test is here to check: observed once as
+	// "websocket url timeout reached" on a comments-only diff, green on rerun.
+	// A second attempt cannot mask a real defect, because a browser that cannot
+	// start fails both times; the retry only removes a startup race from the
+	// verdict. Retrying in place would not work - a dead allocator stays dead,
+	// so each attempt builds its own.
+	var b *Browser
+	var lastErr error
+	for attempt := 1; attempt <= browserLaunchAttempts; attempt++ {
+		allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
+		tabCtx, cancelTab := chromedp.NewContext(allocCtx)
+		ctx, cancelTimeout := context.WithTimeout(tabCtx, browserTimeout)
 
-	b := &Browser{Ctx: ctx}
-	chromedp.ListenTarget(ctx, b.record)
+		cand := &Browser{Ctx: ctx}
+		chromedp.ListenTarget(ctx, cand.record)
 
-	// Log.enable is what surfaces a script tag whose src 404s: a failed
-	// subresource throws no JS exception and reaches the Log domain only.
-	if err := chromedp.Run(ctx, cdplog.Enable()); err != nil {
-		t.Fatalf("start chrome: %v (set E2E_CHROME_PATH if it is installed somewhere unusual)", err)
+		// Log.enable both forces the launch and surfaces a script tag whose src
+		// 404s: a failed subresource throws no JS exception and reaches the Log
+		// domain only.
+		lastErr = chromedp.Run(ctx, cdplog.Enable())
+		if lastErr == nil {
+			t.Cleanup(cancelTimeout)
+			t.Cleanup(cancelTab)
+			t.Cleanup(cancelAlloc)
+			b = cand
+			break
+		}
+		// Tear the failed attempt down immediately rather than deferring to
+		// cleanup, so a retry never races a half-dead browser.
+		cancelTimeout()
+		cancelTab()
+		cancelAlloc()
+		t.Logf("chrome launch attempt %d/%d failed: %v", attempt, browserLaunchAttempts, lastErr)
+	}
+	if b == nil {
+		t.Fatalf("start chrome after %d attempts: %v (set E2E_CHROME_PATH if it is installed somewhere unusual)",
+			browserLaunchAttempts, lastErr)
 	}
 	return b
 }
