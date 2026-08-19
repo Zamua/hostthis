@@ -263,6 +263,10 @@ type ShaleConfig struct {
 type ShaleRepo struct {
 	cluster *cluster.Cluster
 
+	// nowForTest overrides the heal's clock (DropStaleOwnerEntry's age guard);
+	// nil in production means time.Now.
+	nowForTest func() time.Time
+
 	// kv is the blob-capable cluster surface, set ONLY when cfg.BlobStore is
 	// non-nil. It wraps the SAME *Cluster as `cluster` (kv.Cluster() ==
 	// cluster), so every r.cluster.* call site works either way; only the
