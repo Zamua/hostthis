@@ -59,7 +59,7 @@ jobs:
     env:
       # Keep aligned with Dockerfile.slatedb's SLATEDB_VERSION and the
       # slatedb-go version pinned in go.mod.
-      SLATEDB_VERSION: v0.14.1
+      SLATEDB_VERSION: v0.15.0
     steps:
       - uses: actions/checkout@v4
 

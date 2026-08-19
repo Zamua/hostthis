@@ -7,7 +7,7 @@ toolchain go1.26.4
 require (
 	github.com/Zamua/shale v0.18.1
 	github.com/Zamua/shale/backends/pebble v0.3.0
-	github.com/Zamua/shale/backends/slate v0.15.0
+	github.com/Zamua/shale/backends/slate v0.16.0
 	github.com/charmbracelet/ssh v0.1.0
 	github.com/charmbracelet/wish v1.4.7
 	github.com/chromedp/cdproto v0.0.0-20260804232424-e85f50dbfd32
@@ -23,7 +23,7 @@ require (
 	golang.org/x/crypto v0.55.0
 	google.golang.org/grpc v1.83.0
 	google.golang.org/protobuf v1.36.12
-	slatedb.io/slatedb-go v0.14.1
+	slatedb.io/slatedb-go v0.15.0
 )
 
 // Local co-development replaces so the slatedb-tagged ShaleRepo builds
