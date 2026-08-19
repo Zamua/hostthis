@@ -2037,16 +2037,15 @@ landed in the room's order.
   delivery hook, and a frame arriving before wiring completes (a boot
   race) is dropped - correct, since no client can be connected before
   the HTTP server is up.
-- **Peer discovery: the ring membership the cluster already gossips.**
+- **Peer discovery: the ring membership the cluster already tracks.**
   The cluster's member list carries each live pod's advertised gRPC
   address - exactly the address the relay should dial - kept current by
-  the same gossip that tracks joins, leaves, and deploy churn, fresher
+  the same coordination that tracks joins, leaves, and deploy churn, fresher
   than any DNS view and free of a second discovery mechanism. The relay
   consumes it through a narrow `Peers` port (the current peer addresses,
   self excluded) so tests inject a static list and a future non-shale
   multi-pod shape could plug a DNS-based provider without touching the
-  relay. (The operator-side headless service that seeds gossip remains
-  just that - the seed; membership is the live truth.)
+  relay.
 - **Delivery semantics: best-effort per peer, isolated per peer, and
   never on the commit path.** The origin enqueues the frame on a
   bounded per-peer outbound queue (the enqueue never blocks; a full
@@ -5667,7 +5666,7 @@ unaffected, since the check fires only when a bind address is present.
 a shared CAS arbiter (the homogeneous bootstrap, where every pod wires the same
 `ConditionalStore`), `HOSTTHIS_SHALE_UNIT_COUNT` is a LIVE target, not just an
 initial shape: changing it to another power of two and redeploying drives an
-ONLINE, lossless reshard to the new count. The cluster gossips each member's
+ONLINE, lossless reshard to the new count. The cluster tracks each member's
 declared count; when every live member agrees on a new value, shale's
 decentralized arbiter retargets and the units split (or merge) WHILE SERVING -
 no downtime, no operator copy. Value-separated blobs survive the reshard because
@@ -5755,43 +5754,42 @@ configured as one shale node:
   distinct `DbName` / object-store prefix). A key's bytes physically live
   in exactly one node's database (at replication factor 1). No two nodes
   share a database.
-- **Gossip membership.** With the default gossip coordinator (see
-  "Coordination is a pluggable choice" below), each node binds a memberlist
-  address (`BindAddr`, host:port). A **non-empty `BindAddr` is what enables
-  multi-node mode**; with it empty the node runs the single-node path
-  described above, every op local, no gossip, no ring routing. This is the
-  back-compat guarantee: an existing single-node deployment that sets none
-  of the multi-node config behaves exactly as it does today. (The CAS
-  coordinator enables multi-node mode without a `BindAddr`, but only by
-  explicit opt-in, so the guarantee stands.)
+- **Membership.** Selecting the CAS coordinator (see "Coordination is a
+  pluggable choice" below) is what enables multi-node mode; with it unset the
+  node runs the single-node path described above, every op local, no ring
+  routing. Membership is one document in the conditional store: no mesh, no
+  bind port, no seed list. The SWIM/gossip adapter that once provided this,
+  and its `BindAddr` / `Seeds` configuration, was removed upstream; the
+  retired environment variables are refused at startup rather than ignored,
+  because a manifest still setting them describes a cluster shape that no
+  longer exists.
 - **Peer forwarding.** Each node advertises a gRPC service address
   (`GRPCAddr`, host:port) that it broadcasts to peers as their forwarding
   target. A request that hashes to a shard another node owns is forwarded
   over gRPC to that owner and served from the owner's local backend; the
   caller sees a normal result and never learns the op crossed a node
-  boundary. `GRPCAddr` is required whenever `BindAddr` is set.
+  boundary. `GRPCAddr` is required in multi-node mode.
 
-  The cluster layer advertises `GRPCAddr` via gossip but does **not** itself
+  The cluster layer advertises `GRPCAddr` to peers but does **not** itself
   stand up the listener that peers forward to: serving that address is the
   host process's responsibility. In hostthis the metadata adapter owns it.
-  When `BindAddr` is non-empty the adapter binds a TCP listener, passes the
+  In multi-node mode the adapter binds a TCP listener, passes the
   listener's **actual** bound address into the cluster as `GRPCAddr` (so the
   advertised address is exactly the one served, which matters when the
   configured port is `:0` / OS-assigned), registers the cluster's RPC
   handlers (Put/Get/Delete/ScanPrefix/CommitCAS/MigrateRange) on a gRPC
   server, and serves in the background. Closing the adapter gracefully stops
   that server and closes the listener, releasing the port with no leaked
-  goroutine. When `BindAddr` is empty the adapter binds **no** listener and
-  starts **no** server: the single-node path is byte-for-byte today's
-  behavior, the back-compat guarantee. Without this serving step a
-  multi-node deployment would gossip a live-looking `GRPCAddr` that no
+  goroutine. In single-node mode the adapter binds **no** listener and
+  starts **no** server. Without this serving step a
+  multi-node deployment would advertise a live-looking `GRPCAddr` that no
   process answers, so every forwarded request would hit a dead port; the
   rebalance safety contract below depends on the forwarding path being real.
-- **Discovery via seeds.** A joining node is given one or more `Seeds`
-  (the `BindAddr` of already-running nodes) to bootstrap gossip. An empty
-  seed list means "this node is the founder / seed"; the first node starts
-  with no seeds and later nodes seed off it. Once gossip converges every
-  node holds the same ring snapshot.
+- **Discovery through the membership document.** A starting node reads the
+  document in the shared conditional store: the first to create it founds the
+  cluster, the rest observe it and join. Every pod ships identical config -
+  there is no founder/joiner asymmetry to express, because the distinction is
+  decided at runtime by who wins the create.
 - **Homogeneous bootstrap (optional).** The seed-based discovery above has
   an asymmetry: one node is the *founder* (empty seeds, forms the cluster
   generation) and the rest are *joiners* (seed off the founder's address).
@@ -5971,35 +5969,36 @@ leave it at the default.
 #### Coordination is a pluggable choice
 
 Who owns which storage unit is decided by a coordination adapter, not by the
-cluster itself. Two exist upstream: gossip (SWIM membership plus a
-consistent-hash ring) and a CAS/lease adapter that keeps one membership
-document in the conditional store and renews per-node leases against it.
-hostthis can run either; one env var selects the adapter:
+cluster itself. Upstream ships one: a CAS/lease adapter that keeps a single
+membership document in the conditional store and renews per-node leases
+against it. One env var selects it:
 
 ```
-HOSTTHIS_SHALE_COORDINATOR   "" | "gossip" | "cas"   (default "")
+HOSTTHIS_SHALE_COORDINATOR   "" | "cas"   (default "")
 ```
 
-- **`""`** is today's behavior, byte for byte: the gossip adapter is
-  passed iff `HOSTTHIS_SHALE_BIND_ADDR` is set, and with it unset the node
-  runs single-node, passing no coordinator at all. The default changes
-  nothing for any existing deployment.
-- **`"gossip"`**, the explicit spelling, additionally REQUIRES
-  `HOSTTHIS_SHALE_BIND_ADDR`. An operator who writes the word expects a
-  cluster; without a bind address each pod would boot as its own
-  single-node cluster over the shared bucket, a fence-fighting fleet no
-  per-pod check can otherwise detect. Deliberate single-node deploys leave
-  the coordinator unset. No existing deployment sets the variable, so the
-  tightening costs nothing.
-- **`"cas"`** passes the CAS/lease adapter. There is no SWIM mesh: no
-  memberlist bind port, no seed list, no headless-service DNS. Membership
-  is one JSON document in the shared conditional store, so the mode
-  requires `HOSTTHIS_SHALE_HOMOGENEOUS=true` (the homogeneous bootstrap is
-  what constructs that store), which in turn requires the sharded
-  multi-backend shape (`HOSTTHIS_SHALE_UNIT_COUNT` > 0).
+- **`""`** is the single-node path: no coordinator is passed, every op is
+  local, and no gRPC listener is bound.
+- **`"cas"`** is multi-node. There is no mesh: no bind port, no seed list,
+  no headless-service DNS. Membership is one JSON document in the shared
+  conditional store, so the mode requires `HOSTTHIS_SHALE_HOMOGENEOUS=true`
+  (the homogeneous bootstrap is what constructs that store), which in turn
+  requires the sharded multi-backend shape (`HOSTTHIS_SHALE_UNIT_COUNT` > 0).
   `HOSTTHIS_SHALE_GRPC_ADDR` is still required: peer forwarding is
   transport, not coordination, and does not change with the adapter.
-- **Any other value** refuses startup, naming the variable.
+- **Any other value** refuses startup, naming the variable - including
+  `"gossip"`, whose adapter was removed upstream. An operator writing that
+  word expects a cluster, and silently giving them a single node is the
+  failure this refusal exists to prevent.
+
+**The retired mesh knobs are refused, not ignored.** `HOSTTHIS_SHALE_BIND_ADDR`
+and `HOSTTHIS_SHALE_SEEDS` configured the removed SWIM adapter. Nothing reads
+them now, so the daemon refuses to start if either is PRESENT - blank included.
+Rejecting on presence rather than on a non-empty value is deliberate: blanking
+was how an overlay neutralised a base manifest it could not edit during the CAS
+migration, and once the base no longer sets them, a blank reappearing means
+someone is reconstructing a shape that does not exist. Ignoring it is how a node
+boots believing it joined a mesh that was never there.
 
 Setting `HOSTTHIS_SHALE_BIND_ADDR` or `HOSTTHIS_SHALE_SEEDS` together with
 `"cas"` refuses startup, naming the variables involved. A mixed config is
@@ -6203,14 +6202,14 @@ groundwork and gates the deploy step below.
 
 #### Deploy shape is a separate, gated step
 
-Wiring the multi-node config into the application (the `BindAddr` /
-`GRPCAddr` / `Seeds` / replication-factor surface) and proving the
+Wiring the multi-node config into the application (the coordinator /
+`GRPCAddr` / replication-factor surface) and proving the
 rebalance is lossless is application-level groundwork. **Reshaping the
 deployment to actually run more than one node is a separate step, gated on
 this groundwork being green.** The intended runtime shape, when that step
 is taken, is a stable-identity replica set (a StatefulSet, each pod a node
 with a durable per-node identity and its own object-store prefix), fronted
-by a headless service for peer gossip discovery and a load balancer for
+by a load balancer for
 client traffic, scaled out one node at a time so each join triggers one
 bounded rebalance. None of that orchestration is built here; this section
 specifies only the application behavior and the safety contract the
