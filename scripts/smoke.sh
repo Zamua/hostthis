@@ -93,17 +93,42 @@ step() { printf "[%s] %s\n" "$(yellow "····")" "$*"; }
 ok()   { PASS=$((PASS+1)); printf "[%s] %s\n" "$(green "PASS")" "$*"; }
 bad()  { FAIL=$((FAIL+1)); FAILED+=("$1"); printf "[%s] %s\n" "$(red "FAIL")" "$1"; [ -n "${2:-}" ] && printf "       %s\n" "$2"; }
 
+# smoke_delete removes one paste, best-effort but never silently: cleanup must
+# not fail the run, yet a swallowed delete failure is how a stranded paste sits
+# invisible across runs. Any failure prints a loud line with the slug and exit
+# code, so the transcript shows what was left behind.
+smoke_delete() {
+  local slug="$1" rc=0
+  $SSH -n "$HOST" delete "$slug" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'WARN: cleanup delete %s failed (exit %d); the paste may be stranded in the smoke account\n' "$slug" "$rc"
+  fi
+  return 0
+}
+
 trap 'cleanup' EXIT
 cleanup() {
-  # Best-effort delete of any pastes created. `ssh -n` keeps ssh from
-  # slurping the loop's stdin (the slug list) - without it only the
-  # first slug is deleted.
-  [ -f /tmp/hostthis-smoke.slugs ] || return 0
+  # Best-effort delete of any pastes created. `ssh -n` (inside smoke_delete)
+  # keeps ssh from slurping the loop's stdin (the slug list) - without it only
+  # the first slug is deleted.
+  if [ -f /tmp/hostthis-smoke.slugs ]; then
+    while IFS= read -r slug; do
+      [ -n "$slug" ] && smoke_delete "$slug"
+    done < /tmp/hostthis-smoke.slugs
+    # Keep the persistent key ($KEY) for reuse; only drop the slug list.
+    rm -f /tmp/hostthis-smoke.slugs
+  fi
+  # The slug list is not complete: a SITE can be minted without ever entering
+  # it (the aborted-upload probe can finish server-side before the kill lands;
+  # a killed run never reaches its append). The smoke account holds only smoke
+  # artifacts, so enumerate it and delete whatever remains. `list -ojson`
+  # covers sites (a directory is a paste, kind "site") and a site deletes
+  # through the same delete verb.
+  $SSH -n "$HOST" list -ojson 2>/dev/null | jq -r '.[].slug' 2>/dev/null | \
   while IFS= read -r slug; do
-    $SSH -n "$HOST" delete "$slug" >/dev/null 2>&1 || true
-  done < /tmp/hostthis-smoke.slugs
-  # Keep the persistent key ($KEY) for reuse; only drop the slug list.
-  rm -f /tmp/hostthis-smoke.slugs
+    [ -n "$slug" ] && smoke_delete "$slug"
+  done
+  return 0
 }
 
 if [ -f "$KEY" ]; then
@@ -119,7 +144,7 @@ fi
 # cleanup ran. Delete them so the "active: 0" precondition below holds.
 step "setup: clearing any pastes left by a prior run"
 $SSH "$HOST" list -ojson 2>/dev/null | jq -r '.[].slug' | while IFS= read -r s; do
-  [ -n "$s" ] && $SSH -n "$HOST" delete "$s" >/dev/null 2>&1 || true
+  [ -n "$s" ] && smoke_delete "$s"
 done
 
 # ---- 1. whoami (pre-upload) ------------------------------------------------

@@ -287,6 +287,105 @@ func (r *ShaleRepo) dropOwnerEntry(identity, slug string, wantCreatedAt time.Tim
 	})
 }
 
+// DropStaleOwnerEntry removes slug from the owner's OWN index - the owner-doc
+// entry and the identity_pastes enumeration row - when the authoritative
+// pastes/<slug> row is ABSENT: the residue a death between Delete's {slug}
+// transaction and its {id}-shard index drop strands (insert's entry-first
+// order can strand the same shape). Reports whether anything was dropped
+// (docs/SPEC.md "Delete heals its own lost tail").
+//
+// Ordering is load-bearing: the stamp is captured BEFORE the row-absence
+// gate, so the CAS can only ever drop the entry generation that was observed
+// before absence was proven. A re-mint landing after the stamp read writes a
+// fresh CreatedAt and the CAS misses it. Capturing the stamp after the gate
+// would hand a racing re-mint's fresh stamp to the CAS - the gate and the
+// subject read at two instants, the exact shape the v1.4.1 audit removed.
+//
+// The stamp must also be OLD (staleEntryGrace): confirmInsert writes the
+// index entry before the paste row commits, so a mid-insert entry is
+// row-absent, self-stamped, and would pass both the gate and its own stamp
+// check - no reordering can defend state whose row does not exist yet. Age
+// can: a mid-insert entry is milliseconds old, while real lost-tail residue
+// is minutes old before any delete retries it. Too-young entries are left
+// for a later retry.
+//
+// A slug whose row EXISTS - any owner, including a settled re-mint - drops
+// nothing and reports false, so the caller keeps answering plain not-found
+// and existence never leaks. An UNREADABLE row also drops nothing (fail
+// open: unreadable is not absent).
+//
+// BOTH representations go in the one CAS. Dropping only the doc entry would
+// leave the renderable enumeration row, and ownerDocCandidate copies a
+// renderable row into a rebuilt doc without reading its paste - the phantom
+// would return with the next doc rebuild.
+//
+// Cost: at most three point Gets plus one single-shard CAS. No scans on this
+// path for a doc-holding owner (the candidate walk inside dropOwnerEntry
+// early-returns on a decodable doc); a docless owner's reads already pay the
+// scan shape.
+func (r *ShaleRepo) DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, error) {
+	if owner == "" {
+		return false, nil
+	}
+	stamp, present, err := r.staleEntryStamp(owner, slug.String())
+	if err != nil || !present {
+		return false, err
+	}
+	if r.clockNow().Sub(stamp) < staleEntryGrace {
+		return false, nil
+	}
+	raw, err := r.getRaw(shaleKeyPaste(slug))
+	if err != nil || len(raw) > 0 {
+		return false, nil
+	}
+	if err := r.dropOwnerEntry(owner, slug.String(), stamp); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// staleEntryGrace is the minimum age of an index entry the heal will touch.
+// It only needs to dominate the insert path's entry-first window (milliseconds
+// to seconds under a handoff stall); an hour costs nothing because lost-tail
+// residue is discovered on a HUMAN retry timescale.
+const staleEntryGrace = time.Hour
+
+// clockNow is the heal's clock seam; tests age entries by overriding it.
+func (r *ShaleRepo) clockNow() time.Time {
+	if r.nowForTest != nil {
+		return r.nowForTest()
+	}
+	return time.Now().UTC()
+}
+
+// staleEntryStamp reads the CreatedAt guard for the owner's index entry: the
+// doc entry's when the owner holds a doc, the enumeration row's for a pre-doc
+// owner. present=false when neither carries the slug or the row does not
+// decode (fail open: an unconfirmable entry is left alone, mirroring
+// entryStampMatches).
+func (r *ShaleRepo) staleEntryStamp(owner, slug string) (time.Time, bool, error) {
+	doc, err := r.getOwnerDoc(owner)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if doc != nil {
+		e, ok := doc.Pastes[slug]
+		return e.CreatedAt, ok, nil
+	}
+	raw, err := r.getRaw(shaleKeyIdentityPaste(owner, slug))
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if len(raw) == 0 {
+		return time.Time{}, false, nil
+	}
+	var row identityPasteRow
+	if json.Unmarshal(raw, &row) != nil {
+		return time.Time{}, false, nil
+	}
+	return row.CreatedAt, true, nil
+}
+
 // entryStampMatches reports whether a raw enumeration-entry value decodes and
 // carries CreatedAt == want. Envelope-level damage or an undecodable payload
 // reads as NO match, so a guarded drop leaves a record it cannot confirm.

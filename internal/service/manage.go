@@ -42,6 +42,18 @@ type PasteAdmin interface {
 	// so a repo whose site bytes already live in the paste sum reports
 	// SiteBytes zero.
 	OwnerSummary(owner string, now time.Time) (domain.OwnerSummary, error)
+	// DropStaleOwnerEntry removes slug from owner's OWN index (both the
+	// owner-doc entry and the enumeration row, in one guarded write) when
+	// the authoritative paste row is ABSENT and the entry is old enough to
+	// be residue rather than a mid-insert: the leftovers a crash between
+	// Delete's two transactions strands. When a paste row exists - any
+	// owner - or the entry is young, it drops nothing and reports false,
+	// so callers keep existence collapsed to not-found. TRUE means the
+	// guarded drop was ATTEMPTED against the stamp it captured; a
+	// stamp-changing race makes the write a no-op, which a later delete
+	// retries. A repo whose delete cannot strand such residue satisfies
+	// this by always reporting false.
+	DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, error)
 }
 
 // ErrNotOwner is returned by an owner-gated operation when the requesting
@@ -217,11 +229,31 @@ func (m *Manage) Rename(slug domain.Slug, owner, name string) error {
 	return m.Repo.SetName(slug, name, p.Identity, p.CreatedAt)
 }
 
-// Delete removes a paste and its versions (FK cascade).
+// Delete removes a paste and its versions (FK cascade). A delete whose paste
+// row is already gone but whose slug lingers in the caller's own index heals
+// that residue and succeeds (docs/SPEC.md "Delete heals its own lost tail").
 func (m *Manage) Delete(slug domain.Slug, owner string) error {
 	p, err := m.requireOwner(slug, owner)
 	if err != nil {
-		return err
+		if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		// A crash between delete's two transactions strands the slug in the
+		// caller's own index with no paste row behind it: every read counts
+		// it, and every verb refuses before reaching it. Dropping that
+		// residue IS this verb's job - the caller asked for "this slug gone
+		// from my account" - so the heal lives here, not in a maintenance
+		// pass. The repo drops nothing unless the row is absent AND the slug
+		// sits in the CALLER's own index, so a live slug - whoever owns it -
+		// still answers exactly not-found and existence never leaks.
+		healed, herr := m.Repo.DropStaleOwnerEntry(slug, owner)
+		if herr != nil {
+			return fmt.Errorf("heal stale owner entry: %w", herr)
+		}
+		if !healed {
+			return ErrNotFound
+		}
+		return nil
 	}
 	// requireOwner is a pre-check for a clean error; the authoritative owner
 	// re-check happens inside Delete's {slug} transaction, so a delete+re-mint
