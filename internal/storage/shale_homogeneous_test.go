@@ -20,8 +20,8 @@ import (
 )
 
 // startHomogNode brings up a node via the production storage.NewShaleRepo path
-// with a shared ConditionalStore wired, taking the cond store, seeds, unit
-// count, and replication factor explicitly so a test can drive the form-vs-join
+// with a shared ConditionalStore wired, taking the cond store, unit count,
+// and replication factor explicitly so a test can drive the form-vs-join
 // marker decision.
 func startHomogNode(t *testing.T, id, dbName string, cs storageunit.ConditionalStore, unitCount, rf int) *rebalNode {
 	t.Helper()

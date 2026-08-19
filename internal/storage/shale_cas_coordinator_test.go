@@ -1,5 +1,5 @@
 // CAS-coordinator config guards: pins that ShaleConfig.Coordinator refuses a
-// nil ConditionalStore, gossip config, a missing GRPCAddr, and an unknown
+// nil ConditionalStore, a missing GRPCAddr, and an unknown
 // value. Untagged on purpose: every guard fires before the storage engine
 // opens, so the pins run in any build with nothing installed. The positive
 // path (a cluster actually coordinating over the document) needs multi-backend

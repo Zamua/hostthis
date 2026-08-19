@@ -425,9 +425,9 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		BlobStore:        cfg.BlobStore,
 		ConditionalStore: cfg.ConditionalStore,
 	}
-	// Cold-start patience: a joiner re-sweeps its seeds for the cluster
-	// generation up to GenLearnBudget (shale default 180s), so a still-mounting
-	// seed is waited for instead of crash-looping the joiner. Raise it for a
+	// Cold-start patience: a joiner re-reads the membership document for the
+	// cluster generation up to GenLearnBudget (shale default 180s), so a
+	// still-mounting founder is waited for instead of crash-looping the joiner. Raise it for a
 	// slow backend; shorten it plus SHALE_DEBUG_MOUNT_DELAY to reproduce a
 	// crash-loop on a real cluster.
 	if v := strings.TrimSpace(os.Getenv("SHALE_GEN_LEARN_BUDGET")); v != "" {

@@ -44,7 +44,6 @@ import (
 type rebalNode struct {
 	id       string
 	repo     *storage.ShaleRepo
-	bindAddr string
 	grpcAddr string
 }
 
