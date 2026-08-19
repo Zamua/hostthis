@@ -2740,6 +2740,52 @@ from prior `delete <slug> <ver>` calls). Reuses the slug for future
 random generation. No undo. No confirm prompt (ssh sessions don't
 tty cleanly; the verb is explicit enough).
 
+**Delete heals its own lost tail (row absent, index entry present).** A
+whole-paste delete is two transactions: the `{slug}` CAS removes the
+paste row, its versions, the slug binding and the blob binds; a
+follow-on `{id}`-shard CAS drops the owner's enumeration row and
+owner-document entry together. No durable intent covers a delete, so a
+process death (or a refused handoff) between the two strands the second
+half: the paste is gone, but the caller's own index still carries the
+slug. Every owner read counts that entry (list, whoami, the quota sum -
+no read validates entries against rows, see "Phantom entries are
+accepted, not repaired"), and every owner verb refuses at its ownership
+read, which needs the very row that is gone. Insert's entry-first order
+can strand the same shape (entry written, crash before the row, intent
+lost).
+
+`delete <slug>` is the repair verb for that residue. When the paste row
+is ABSENT but the slug still sits in the CALLER'S OWN index (their
+owner document, or their enumeration row for a pre-doc owner), the
+delete drops BOTH index representations in the same guarded
+single-shard `{id}` CAS the normal delete tail uses, and reports
+`deleted.` (exit 0). Success, not not-found, is the honest answer: the
+caller's intent - this slug no longer exists under my account - is
+exactly the state the verb just made true. Not-found would leave an
+entry counted forever that no verb can reach.
+
+The heal cannot leak or touch anyone else's paste:
+
+- When a paste row EXISTS under the slug - whoever owns it, including a
+  re-mint after the caller's copy was removed - the response stays
+  exactly the standard not-found and nothing is dropped. The heal fires
+  only on row-absent + slug-present-in-the-caller's-own-index, so
+  existence never leaks.
+- The drop is guarded by the index entry's immutable `created_at`
+  stamp, the same guard the normal delete tail carries: a same-owner
+  re-mint racing the heal holds a fresh stamp and keeps its entry.
+- Cost is point reads plus one single-shard CAS. No scans.
+
+Both representations must go in the one CAS. Dropping only the document
+entry would leave the renderable enumeration row behind, and a later
+document rebuild (the heal-on-write walk) copies renderable entries
+from their cached fields without consulting the paste row - the phantom
+would come back. The contract is service-level and backend-independent:
+a delete whose paste row is gone but whose entry lingers in the
+caller's own index succeeds and removes the entry. A backend that
+cannot strand such residue (a single-transaction delete) satisfies it
+vacuously.
+
 **Per-version delete (free bytes; keep the history row):**
 ```
 ssh hostthis.dev delete abc12345 2
@@ -3957,6 +4003,19 @@ urgency.
 `identity_first_seen` key during heal); the legacy key keeps being written
 alongside until the drop release, same as the row families.
 
+**A lost delete tail is curable by the owner's own delete.** Delete's
+`{slug}` transaction and its `{id}`-shard index drop commit separately,
+and no durable intent covers a delete, so a death between the two leaves
+the doc entry AND the enumeration row behind with no paste row - a
+phantom every doc-first read reports and no other verb can remove
+(each refuses at its ownership read, which needs the missing row).
+`delete <slug>` detects that shape and drops both representations in
+one stamp-guarded `{id}` CAS, then reports success - see "Delete
+(permanent)". Both must go together: the doc-rebuild walk
+(`ownerDocCandidate`) trusts a renderable enumeration row without
+reading its paste, so a surviving row would resurrect the phantom into
+any rebuilt doc.
+
 **Deliberately unchanged here:** the keygate families migrate to their own
 single-doc shapes in follow-up releases; the staged-refs and intent families
 stay row-shaped (boot-path only, never on a user's request path). The per-slug
@@ -5057,7 +5116,9 @@ paste does not exist. Such an entry is LISTED, and clicking through to it
 - Its cached bytes keep counting against the owner's quota. That is an
   OVER-count, which can only wrongly REFUSE the owner's next upload, never
   admit one over the cap. The fail-safe direction.
-- `Delete` on a phantom drops the entry, so the owner can clear one directly.
+- `Delete` on a phantom drops the entry - both the enumeration row and the
+  owner-document entry, in one stamp-guarded CAS - and reports success, so
+  the owner can clear one directly (see "Delete (permanent)").
 
 The same holds for a paste stuck `pending` past its upload (the detached-store
 path's pod-death case): nothing ages it to `failed`, so it keeps its entry and

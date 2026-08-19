@@ -281,3 +281,15 @@ func KeygateKeyForTest(subnet, identity string) []byte { return shaleKeyKeygate(
 // IntentKeyForTest returns the "intents/<scope>/<id>" key, so a test can plant a
 // damaged intent row under a scope.
 func IntentKeyForTest(scope, id string) []byte { return shaleKeyIntent(scope, id) }
+
+// SetNowForTest overrides the heal age-guard's clock. nil restores time.Now.
+func (r *ShaleRepo) SetNowForTest(now func() time.Time) { r.nowForTest = now }
+
+// IdentityPasteRowForTest marshals the enumeration-row JSON a paste would
+// carry, for tests planting rows with deliberate stamps.
+func IdentityPasteRowForTest(p domain.Paste) any {
+	return identityPasteRow{
+		Size: p.Size, CreatedAt: p.CreatedAt, Kind: string(p.Kind),
+		LatestVersion: 1, ServedSize: p.Size, UpdatedAt: p.UpdatedAt,
+	}
+}
