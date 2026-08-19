@@ -27,6 +27,7 @@ package storage_test
 import (
 	"context"
 	"fmt"
+	"github.com/Zamua/shale/pkg/storageunit"
 	"net"
 	"os"
 	"sort"
@@ -73,19 +74,12 @@ func loopback(port int) string { return fmt.Sprintf("127.0.0.1:%d", port) }
 // horizontal-write-scaling shape the gate is about. GRPCAddr "127.0.0.1:0"
 // takes an OS-assigned port, read back via repo.GRPCAddr() for a sibling to
 // reference.
-func startRebalNode(t *testing.T, id, dbName, seedBind string) *rebalNode {
+func startRebalNode(t *testing.T, id, dbName string, cs storageunit.ConditionalStore) *rebalNode {
 	t.Helper()
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	bucket := envOrDefault("MINIO_TEST_METADATA_BUCKET", "hostthis-metadata")
 	access := envOrDefault("MINIO_TEST_ACCESS_KEY", "admin")
 	secret := envOrDefault("MINIO_TEST_SECRET_KEY", "supersecret")
-
-	bindAddr := loopback(freeTCPPort(t))
-
-	var seeds []string
-	if seedBind != "" {
-		seeds = []string{seedBind}
-	}
 
 	repo, err := storage.NewShaleRepo(storage.ShaleConfig{
 		NodeID:            id,
@@ -96,11 +90,11 @@ func startRebalNode(t *testing.T, id, dbName, seedBind string) *rebalNode {
 		SecretKey:         secret,
 		UseSSL:            false,
 		DbName:            dbName,
-		BindAddr:          bindAddr,
+		Coordinator:       storage.CoordinatorCAS,
 		GRPCAddr:          "127.0.0.1:0", // OS-assigned; the repo serves the actual port
-		Seeds:             seeds,
+		ConditionalStore:  cs,
 		ReplicationFactor: 1,
-		// Multi-node REQUIRES sharding: a bind address with UnitCount 0 is
+		// Multi-node REQUIRES sharding: the cas coordinator with UnitCount 0 is
 		// refused at cluster.Open.
 		UnitCount: 4,
 	})
@@ -111,7 +105,6 @@ func startRebalNode(t *testing.T, id, dbName, seedBind string) *rebalNode {
 	n := &rebalNode{
 		id:       id,
 		repo:     repo,
-		bindAddr: bindAddr,
 		grpcAddr: repo.GRPCAddr(), // ACTUAL bound forwarding addr a peer would use
 	}
 	t.Cleanup(n.close)
@@ -174,7 +167,8 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 	// disjoint prefix trees, B opens empty units, and A's data is invisible -
 	// a spurious ASSERTION 1 data-loss failure with nothing actually lost.
 	dbName := fmt.Sprintf("rebal-%d", epoch)
-	nodeA := startRebalNode(t, "rebal-A", dbName, "")
+	cs := storageunit.NewMemConditionalStore()
+	nodeA := startRebalNode(t, "rebal-A", dbName, cs)
 
 	// --- the dataset, written through node A's PUBLIC api ---
 	//
@@ -276,7 +270,7 @@ func TestShaleRebalance_TwoNodeLossless(t *testing.T) {
 	t.Logf("BEFORE: node A holds %d local keys; node B not yet joined", keysBeforeA)
 
 	// --- node B joins -> 2-node ring -> rebalance ---
-	nodeB := startRebalNode(t, "rebal-B", dbName, nodeA.bindAddr)
+	nodeB := startRebalNode(t, "rebal-B", dbName, cs)
 	nodes := []*rebalNode{nodeA, nodeB}
 	waitMembers(t, nodes, 2, 15*time.Second)
 	t.Logf("ring converged to 2 members")

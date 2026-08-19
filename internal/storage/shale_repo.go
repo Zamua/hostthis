@@ -75,7 +75,6 @@ import (
 	"github.com/Zamua/shale/pkg/cluster"
 	"github.com/Zamua/shale/pkg/coord"
 	"github.com/Zamua/shale/pkg/coord/cas"
-	"github.com/Zamua/shale/pkg/coord/gossip"
 	"github.com/Zamua/shale/pkg/rpc"
 	"github.com/Zamua/shale/pkg/storageunit"
 	"google.golang.org/grpc"
@@ -86,9 +85,8 @@ import (
 )
 
 // CoordinatorCAS selects the CAS/lease coordination adapter for
-// ShaleConfig.Coordinator: membership as one document in the ConditionalStore
-// instead of a SWIM mesh. The empty string keeps the default path, gossip iff
-// BindAddr is set.
+// ShaleConfig.Coordinator: membership as one document in the ConditionalStore.
+// It is the only clustered adapter; the empty string is single-node.
 const CoordinatorCAS = "cas"
 
 // ShaleConfig captures the parameters needed to open a shale cluster over the
@@ -96,10 +94,9 @@ const CoordinatorCAS = "cas"
 // SlateDB-on-object-storage engine); NodeID, the peer-discovery fields, and the
 // consistency knobs are the cluster-layer additions.
 //
-// BindAddr selects the topology under the default coordinator: empty is
-// single-node (every op local, no gossip, no ring routing), non-empty brings up
-// memberlist + gRPC forwarding and joins the ring. Coordinator == CoordinatorCAS
-// is multi-node with no memberlist at all. ShardKeyFn and the per-family
+// Coordinator selects the topology: empty is single-node (every op local, no
+// ring routing), CoordinatorCAS is multi-node over the membership document,
+// with gRPC forwarding and ring routing. ShardKeyFn and the per-family
 // co-location are identical at every node count.
 type ShaleConfig struct {
 	NodeID    string // stable node identity; required by cluster.Open
@@ -130,28 +127,17 @@ type ShaleConfig struct {
 	// HOSTTHIS_SHALE_UNIT_COUNT.
 	UnitCount int
 
-	// BindAddr is the host:port memberlist listens on. NON-EMPTY enables
-	// multi-node mode (gossip membership, ring routing, gRPC forwarding,
-	// rebalance on membership change); empty resolves every op to the local
-	// backend.
-	BindAddr string
-
 	// GRPCAddr is this node's gRPC forwarding address, broadcast to peers as
-	// their forwarding target. Required whenever BindAddr is set (cluster.Open
-	// errors otherwise). Ignored in single-node mode.
+	// their forwarding target. Required in multi-node mode (cluster.Open errors
+	// otherwise). Ignored in single-node mode.
 	GRPCAddr string
 
-	// Seeds are other nodes' BindAddrs, used to bootstrap gossip discovery.
-	// Empty means this node is the seed/founder. Ignored in single-node mode.
-	Seeds []string
-
-	// Coordinator selects the coordination adapter. Empty is the default path:
-	// gossip iff BindAddr is set, single-node otherwise. CoordinatorCAS selects
-	// the CAS/lease adapter, coordinating through one membership document in
-	// ConditionalStore (required then) with no memberlist mesh, so BindAddr and
-	// Seeds must be empty; GRPCAddr is still required, because peer forwarding
-	// is transport, not coordination. Operator env: HOSTTHIS_SHALE_COORDINATOR
-	// (docs/SPEC.md "Coordination is a pluggable choice").
+	// Coordinator selects the coordination adapter. Empty is single-node.
+	// CoordinatorCAS coordinates through one membership document in
+	// ConditionalStore (required then); GRPCAddr is still required, because
+	// peer forwarding is transport, not coordination. Operator env:
+	// HOSTTHIS_SHALE_COORDINATOR (docs/SPEC.md "Coordination is a pluggable
+	// choice").
 	Coordinator string
 
 	// ReplicationFactor is forwarded to cluster.Config. Zero is normalized to 1
@@ -254,7 +240,7 @@ type ShaleConfig struct {
 // cluster handle, which routes per-shard via shaleShardKey and commits
 // single-shard writes through per-shard CAS.
 //
-// In multi-node mode (cfg.BindAddr != "", or a cas Coordinator) the repo ALSO
+// In multi-node mode (a cas Coordinator) the repo ALSO
 // owns the process-level gRPC peer-forwarding server: cluster.Open advertises
 // the node's GRPCAddr via the coordinator but does not stand up the listener
 // peers forward routed reads/writes/migrations to (docs/SPEC.md "Peer
@@ -288,12 +274,11 @@ type ShaleRepo struct {
 	intents durable.Log
 
 	// grpcAddr is the ACTUAL bound forwarding address advertised to peers
-	// (lis.Addr().String()), or "" in single-node mode. bindAddr mirrors the
-	// memberlist bind address a second node seeds off. nodeID is this node's
-	// stable cluster identity, used to exclude self from PeerGRPCAddrs.
+	// grpcAddr is the address peers dial for forwarding: what the listener
+	// actually bound (lis.Addr().String()), or "" in single-node mode.
 	grpcAddr string
-	bindAddr string
-	nodeID   string
+
+	nodeID string
 
 	// grpcSrv + grpcLis are the peer-forwarding server and its listener, set
 	// only in multi-node mode. Close GracefulStops the server, which drains
@@ -368,14 +353,8 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		if cfg.ConditionalStore == nil {
 			return nil, fmt.Errorf("shale: Coordinator %q requires a ConditionalStore (the membership document's store)", CoordinatorCAS)
 		}
-		// A node coordinating over the document while its peers gossip (or the
-		// reverse) is two half-clusters fencing each other's units; the env
-		// layer refuses this too, naming the env vars.
-		if cfg.BindAddr != "" || len(cfg.Seeds) > 0 {
-			return nil, fmt.Errorf("shale: BindAddr/Seeds are gossip config and must be empty with Coordinator %q", CoordinatorCAS)
-		}
 	}
-	multiNode := cfg.BindAddr != "" || casCoord
+	multiNode := casCoord
 
 	// Bind before opening the cluster so the advertised GRPCAddr is the address
 	// actually served (resolving the ":0" / OS-assigned-port case).
@@ -383,7 +362,7 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	advertiseGRPCAddr := cfg.GRPCAddr
 	if multiNode {
 		if cfg.GRPCAddr == "" {
-			return nil, fmt.Errorf("shale: GRPCAddr required in multi-node mode (BindAddr or a cas Coordinator set)")
+			return nil, fmt.Errorf("shale: GRPCAddr required in multi-node mode (a cas Coordinator set)")
 		}
 		l, err := net.Listen("tcp", cfg.GRPCAddr)
 		if err != nil {
@@ -412,9 +391,8 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 
 	// Coordination adapter: shale exposes membership behind a Coordinator port.
 	// A nil Coordinator IS the single-node path, so it needs no special case
-	// below. gossip is SWIM + consistent hash over BindAddr/Seeds. cas keeps
-	// one membership document in the ConditionalStore, no mesh and no extra
-	// port; the adapter's default key under the MinIO store's KeyPrefix (the
+	// below. cas keeps one membership document in the ConditionalStore, no mesh
+	// and no extra port; the adapter's default key under the MinIO store's KeyPrefix (the
 	// DB name) places that document at <dbName>/__coord/members, which
 	// isolates clusters sharing a bucket and collides with nothing (unit data
 	// lives under <dbName>u<N>/... prefixes). Constructed unstarted either
@@ -423,11 +401,6 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	switch {
 	case casCoord:
 		coordinator = cas.New(cas.Config{Store: cfg.ConditionalStore})
-	case cfg.BindAddr != "":
-		coordinator = gossip.New(gossip.Config{
-			BindAddr: cfg.BindAddr,
-			Seeds:    cfg.Seeds,
-		})
 	}
 
 	clusterCfg := cluster.Config{
@@ -473,7 +446,7 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 	// Declarative resharding needs BOTH a multi-backend cluster (nothing to
 	// reshard otherwise) and a shared CAS arbiter to coordinate the generation
 	// advance. With both, the cluster drives the reshard target from the
-	// unanimously gossiped declared count, so redeploying every pod with a
+	// unanimously declared count, so redeploying every pod with a
 	// different power-of-two HOSTTHIS_SHALE_UNIT_COUNT triggers an online,
 	// lossless split/merge (docs/SPEC.md "Online resharding").
 	clusterCfg.DeclarativeReshard = clusterCfg.BackendFactory != nil && clusterCfg.ConditionalStore != nil
@@ -506,13 +479,12 @@ func NewShaleRepo(cfg ShaleConfig) (*ShaleRepo, error) {
 		intents:  NewShaleIntentLog(cl, cfg.Logger),
 		kv:       kv,
 		logger:   cfg.Logger,
-		bindAddr: cfg.BindAddr,
 		grpcAddr: advertiseGRPCAddr,
 		nodeID:   cfg.NodeID,
 		backing:  bk,
 	}
 
-	// Stand up the peer-forwarding server the cluster advertised via gossip but
+	// Stand up the peer-forwarding server the cluster advertised but
 	// does not serve itself.
 	if lis != nil {
 		// The cluster's inter-node client keepalives every 30s WITH
@@ -570,11 +542,6 @@ func (r *ShaleRepo) Close() error {
 // advertised to peers, or "" in single-node mode. The configured GRPCAddr may
 // have been ":0", so the served port is only knowable post-bind.
 func (r *ShaleRepo) GRPCAddr() string { return r.grpcAddr }
-
-// BindAddr returns this node's memberlist bind address, or "" when no
-// memberlist runs (single-node mode, or the cas coordinator). A second gossip
-// node passes it as its Seeds entry to join this node's ring.
-func (r *ShaleRepo) BindAddr() string { return r.bindAddr }
 
 // PeerGRPCAddrs returns the CURRENT gRPC addresses of every OTHER live cluster
 // member, read from the coordinator's ring membership. These are the addresses

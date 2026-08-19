@@ -13,15 +13,11 @@
 // Cluster-layer additions:
 //   HOSTTHIS_NODE_ID                  (default os.Hostname(), or "hostthis-1")
 //   HOSTTHIS_SHALE_REPLICATION_FACTOR (default 1)
-//   HOSTTHIS_SHALE_BIND_ADDR          (host:port; NON-EMPTY enables multi-node
-//                                      mode under the default coordinator)
 //   HOSTTHIS_SHALE_GRPC_ADDR          (host:port; required in multi-node mode)
-//   HOSTTHIS_SHALE_SEEDS              (comma-separated peer BIND_ADDRs; empty = seed node)
-//   HOSTTHIS_SHALE_COORDINATOR        (""|"gossip" = today's behavior; "cas" =
-//                                      CAS/lease coordination over the
-//                                      homogeneous conditional store, no
-//                                      memberlist mesh; BIND_ADDR/SEEDS must be
-//                                      unset then, HOMOGENEOUS=true required)
+//   HOSTTHIS_SHALE_COORDINATOR        ("" = single-node; "cas" = CAS/lease
+//                                      coordination over the homogeneous
+//                                      conditional store, HOMOGENEOUS=true
+//                                      required)
 //   HOSTTHIS_METADATA_AWAIT_DURABLE   (true|false; default true; false = relaxed
 //                                      durability/fast-ack, only safe at RF>=2)
 //   HOSTTHIS_SHALE_READ_TIMEOUT       (Go duration, e.g. "8s"; unset/empty =
@@ -31,11 +27,11 @@
 //                                      tombstone purge disabled; malformed fails
 //                                      startup)
 //
-// With BIND_ADDR unset (and the default coordinator) the node runs
-// single-node: no gossip, no ring routing, every op local. Setting it brings up
-// memberlist + gRPC forwarding and joins the ring; COORDINATOR=cas joins the
-// ring through the membership document instead, with no bind port at all
-// (docs/SPEC.md "Multi-node shale", "Coordination is a pluggable choice").
+// With COORDINATOR unset the node runs single-node: no ring routing, every op
+// local. COORDINATOR=cas joins the ring through the membership document, with
+// no mesh and no extra port (docs/SPEC.md "Multi-node shale", "Coordination is
+// a pluggable choice"). The retired SWIM knobs HOSTTHIS_SHALE_BIND_ADDR and
+// HOSTTHIS_SHALE_SEEDS are REFUSED at startup if present, blank included.
 //
 // ReadConsistency is fixed at ReadQuorum inside NewShaleRepo, so there is no env
 // var. Quorum is required at R>1, where ReadNearest could return a
@@ -168,13 +164,12 @@ func openShaleRepoFromEnv(logger *log.Logger, registerGRPC func(*grpc.Server)) (
 		return nil, err
 	}
 
-	// Multi-node peer-discovery config. Under the default coordinator a
-	// non-empty bind addr is the switch that takes the cluster out of the
-	// single-node path; the cas coordinator is multi-node with no bind addr.
-	bindAddr := strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_BIND_ADDR"))
+	// Multi-node means the cas coordinator: membership is the document in the
+	// conditional store, and no mesh knob selects the topology any more.
 	grpcAddr := strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_GRPC_ADDR"))
-	seedsRaw := os.Getenv("HOSTTHIS_SHALE_SEEDS")
-	seeds := parseSeeds(seedsRaw)
+	if err := checkRetiredCoordinatorEnv(); err != nil {
+		return nil, err
+	}
 	coordMode, err := shaleCoordinatorFromEnv()
 	if err != nil {
 		return nil, err
@@ -191,13 +186,13 @@ func openShaleRepoFromEnv(logger *log.Logger, registerGRPC func(*grpc.Server)) (
 	// allocated, so a refusal needs no cleanup path. Validated here rather than
 	// in the cluster layer so the operator gets an error naming the env var they
 	// set, not one about internal config fields.
-	if err := checkUnitCountForMode(unitCount, bindAddr); err != nil {
+	if err := checkUnitCountForMode(unitCount, coordMode); err != nil {
 		return nil, err
 	}
-	if err := checkCoordinatorConfig(coordMode, bindAddr, seedsRaw, homogeneous); err != nil {
+	if err := checkCoordinatorConfig(coordMode, homogeneous); err != nil {
 		return nil, err
 	}
-	if err := checkHomogeneousForMode(homogeneous, unitCount, bindAddr, coordMode); err != nil {
+	if err := checkHomogeneousForMode(homogeneous, unitCount, coordMode); err != nil {
 		return nil, err
 	}
 
@@ -256,9 +251,7 @@ func openShaleRepoFromEnv(logger *log.Logger, registerGRPC func(*grpc.Server)) (
 		SecretKey:         secretKey,
 		UseSSL:            useSSL,
 		DbName:            dbName,
-		BindAddr:          bindAddr,
 		GRPCAddr:          grpcAddr,
-		Seeds:             seeds,
 		Coordinator:       coordMode,
 		ReplicationFactor: replicationFactor,
 		RelaxedDurability: !awaitDurable,
@@ -280,9 +273,6 @@ func openShaleRepoFromEnv(logger *log.Logger, registerGRPC func(*grpc.Server)) (
 	case coordMode == storage.CoordinatorCAS:
 		logger.Printf("metadata: shale (multi-node, cas coordinator) node=%s grpc=%s rf=%d shards=%d awaitDurable=%t fenceGC=%t blobBucket=%q bucket=%s db=%s endpoint=%s",
 			nodeID, grpcAddr, replicationFactor, unitCount, awaitDurable, reapFenceWALs, blobBucket, bucket, dbName, endpoint)
-	case bindAddr != "":
-		logger.Printf("metadata: shale (multi-node, gossip) node=%s bind=%s grpc=%s seeds=%d rf=%d shards=%d awaitDurable=%t fenceGC=%t homogeneous=%t blobBucket=%q bucket=%s db=%s endpoint=%s",
-			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, unitCount, awaitDurable, reapFenceWALs, homogeneous, blobBucket, bucket, dbName, endpoint)
 	default:
 		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d shards=%d awaitDurable=%t fenceGC=%t blobBucket=%q endpoint=%s",
 			nodeID, bucket, dbName, replicationFactor, unitCount, awaitDurable, reapFenceWALs, blobBucket, endpoint)
@@ -410,21 +400,4 @@ func stripScheme(endpoint string) string {
 	s = strings.TrimPrefix(s, "https://")
 	s = strings.TrimPrefix(s, "http://")
 	return strings.TrimSuffix(s, "/")
-}
-
-// parseSeeds splits a comma-separated HOSTTHIS_SHALE_SEEDS value into peer bind
-// addresses, dropping empty entries so a trailing comma or an all-whitespace
-// value yields nil, which cluster.Open reads as "this node is the seed".
-func parseSeeds(raw string) []string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
-	}
-	var out []string
-	for part := range strings.SplitSeq(raw, ",") {
-		if s := strings.TrimSpace(part); s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
 }

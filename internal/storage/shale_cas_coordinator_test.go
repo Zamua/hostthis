@@ -32,23 +32,6 @@ func TestShaleCASCoordinator_ConfigGuards(t *testing.T) {
 		}
 	})
 
-	t.Run("gossip config alongside cas is refused", func(t *testing.T) {
-		_, err := storage.NewShaleRepo(storage.ShaleConfig{
-			NodeID:           "cas-guard-2",
-			DbName:           "cas-guard",
-			Coordinator:      storage.CoordinatorCAS,
-			GRPCAddr:         "127.0.0.1:0",
-			BindAddr:         "127.0.0.1:7946",
-			ConditionalStore: storageunit.NewMemConditionalStore(),
-		})
-		if err == nil {
-			t.Fatal("want error for cas coordinator with a BindAddr, got nil")
-		}
-		if !strings.Contains(err.Error(), "BindAddr") {
-			t.Fatalf("error %q does not name BindAddr", err)
-		}
-	})
-
 	t.Run("missing GRPCAddr is refused", func(t *testing.T) {
 		_, err := storage.NewShaleRepo(storage.ShaleConfig{
 			NodeID:           "cas-guard-3",
