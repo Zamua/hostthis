@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.26.4
 
 require (
-	github.com/Zamua/shale v0.19.0
+	github.com/Zamua/shale v0.20.0
 	github.com/Zamua/shale/backends/pebble v0.3.0
 	github.com/Zamua/shale/backends/slate v0.17.0
 	github.com/charmbracelet/ssh v0.1.0
@@ -44,7 +44,7 @@ require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/buraksezer/consistent v0.10.0 // indirect
+	github.com/buraksezer/consistent v1.0.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/charmbracelet/bubbletea v1.3.4 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
