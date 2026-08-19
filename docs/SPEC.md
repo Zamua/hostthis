@@ -5694,12 +5694,15 @@ configured as one shale node:
   distinct `DbName` / object-store prefix). A key's bytes physically live
   in exactly one node's database (at replication factor 1). No two nodes
   share a database.
-- **Gossip membership.** Each node binds a memberlist address (`BindAddr`,
-  host:port). A **non-empty `BindAddr` is what enables multi-node mode**;
-  with it empty the node runs the single-node path described above, every
-  op local, no gossip, no ring routing. This is the back-compat guarantee:
-  an existing single-node deployment that sets none of the multi-node
-  config behaves exactly as it does today.
+- **Gossip membership.** With the default gossip coordinator (see
+  "Coordination is a pluggable choice" below), each node binds a memberlist
+  address (`BindAddr`, host:port). A **non-empty `BindAddr` is what enables
+  multi-node mode**; with it empty the node runs the single-node path
+  described above, every op local, no gossip, no ring routing. This is the
+  back-compat guarantee: an existing single-node deployment that sets none
+  of the multi-node config behaves exactly as it does today. (The CAS
+  coordinator enables multi-node mode without a `BindAddr`, but only by
+  explicit opt-in, so the guarantee stands.)
 - **Peer forwarding.** Each node advertises a gRPC service address
   (`GRPCAddr`, host:port) that it broadcasts to peers as their forwarding
   target. A request that hashes to a shard another node owns is forwarded
@@ -5758,7 +5761,10 @@ configured as one shale node:
   wired. Adopting an existing seed-formed cluster is a matter of pre-seeding
   the `__cluster/init` marker to that cluster's live `{gen, count}` before
   the homogeneous pods boot, so they all join the live data with no form
-  contention.
+  contention. Multi-node mode here means `HOSTTHIS_SHALE_BIND_ADDR` set
+  **or** `HOSTTHIS_SHALE_COORDINATOR=cas` (which has no bind address at
+  all; see "Coordination is a pluggable choice"). Under the CAS coordinator
+  the same store carries the membership document too.
 
 The shard-key function (`{slug}` / `{id}` / `{subnet}` co-location) is
 unchanged across node counts: it decides which shard a key belongs to,
@@ -5907,12 +5913,69 @@ Who owns which storage unit is decided by a coordination adapter, not by the
 cluster itself. Two exist upstream: gossip (SWIM membership plus a
 consistent-hash ring) and a CAS/lease adapter that keeps one membership
 document in the conditional store and renews per-node leases against it.
+hostthis can run either; one env var selects the adapter:
 
-This deployment passes the GOSSIP adapter explicitly. That is a deliberate
-choice rather than a default: a single-node deployment passes no coordinator
-at all (which is what an empty bind address meant before the port existed),
-and any change of adapter is a separate, independently verifiable change from
-a dependency upgrade. Keeping those in different blast radii means a surprise
+```
+HOSTTHIS_SHALE_COORDINATOR   "" | "gossip" | "cas"   (default "")
+```
+
+- **`""`** is today's behavior, byte for byte: the gossip adapter is
+  passed iff `HOSTTHIS_SHALE_BIND_ADDR` is set, and with it unset the node
+  runs single-node, passing no coordinator at all. The default changes
+  nothing for any existing deployment.
+- **`"gossip"`**, the explicit spelling, additionally REQUIRES
+  `HOSTTHIS_SHALE_BIND_ADDR`. An operator who writes the word expects a
+  cluster; without a bind address each pod would boot as its own
+  single-node cluster over the shared bucket, a fence-fighting fleet no
+  per-pod check can otherwise detect. Deliberate single-node deploys leave
+  the coordinator unset. No existing deployment sets the variable, so the
+  tightening costs nothing.
+- **`"cas"`** passes the CAS/lease adapter. There is no SWIM mesh: no
+  memberlist bind port, no seed list, no headless-service DNS. Membership
+  is one JSON document in the shared conditional store, so the mode
+  requires `HOSTTHIS_SHALE_HOMOGENEOUS=true` (the homogeneous bootstrap is
+  what constructs that store), which in turn requires the sharded
+  multi-backend shape (`HOSTTHIS_SHALE_UNIT_COUNT` > 0).
+  `HOSTTHIS_SHALE_GRPC_ADDR` is still required: peer forwarding is
+  transport, not coordination, and does not change with the adapter.
+- **Any other value** refuses startup, naming the variable.
+
+Setting `HOSTTHIS_SHALE_BIND_ADDR` or `HOSTTHIS_SHALE_SEEDS` together with
+`"cas"` refuses startup, naming the variables involved. A mixed config is
+the mixed-fleet outage in miniature: pods coordinating over gossip and pods
+coordinating over the document are two half-clusters, each believing it
+owns units the other is serving, each fencing the other's mounts on every
+reconcile. The ownership epochs keep that from corrupting anything, so what
+it costs is availability - units bounce between the halves and requests
+refuse.
+
+Be precise about what the refusal covers: it makes a SINGLE POD's mixed
+config unrepresentable, nothing more. The fleet-level mix - old pods still
+on gossip, new pods on the document, every pod's config individually valid -
+arises from any ROLLING flip of the coordinator setting, and no per-pod
+startup check can see it. The adapter switch is therefore a full-stop
+operation by decree: scale the fleet to zero (gracefully, so the
+relaxed-durability window drains), flip the configuration, scale back up.
+Never roll it. That protection is operator choreography, not code, and this
+paragraph is where it is written down.
+
+The membership document lives in the same conditional store the
+homogeneous bootstrap already shares: the metadata bucket, key-prefixed by
+the metadata DB name. It lands at `<dbName>/__coord/members`, beside the
+`<dbName>/__cluster/init` marker. The prefix isolates clusters sharing one
+bucket, and the key collides with nothing else: unit data lives under
+`<dbName>u<N>/...` prefixes.
+
+Under `"cas"` there is no founder/joiner asymmetry left to configure. Who
+forms and who joins is decided at runtime by who wins the document create,
+so every pod ships IDENTICAL config, the same property the homogeneous
+bootstrap already established for the generation marker. A stale document
+surviving a rollback is safe to reuse: its lease counters are frozen, and
+frozen counters expire on the new members' first polls.
+
+Whichever adapter runs is passed explicitly rather than implied, so any
+change of adapter is a separate, independently verifiable change from a
+dependency upgrade. Keeping those in different blast radii means a surprise
 after either one never raises the question of which caused it.
 
 The coordinator is ADVISORY: it says who SHOULD hold a unit. The storage

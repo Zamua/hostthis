@@ -13,9 +13,15 @@
 // Cluster-layer additions:
 //   HOSTTHIS_NODE_ID                  (default os.Hostname(), or "hostthis-1")
 //   HOSTTHIS_SHALE_REPLICATION_FACTOR (default 1)
-//   HOSTTHIS_SHALE_BIND_ADDR          (host:port; NON-EMPTY enables multi-node mode)
-//   HOSTTHIS_SHALE_GRPC_ADDR          (host:port; required when BIND_ADDR is set)
+//   HOSTTHIS_SHALE_BIND_ADDR          (host:port; NON-EMPTY enables multi-node
+//                                      mode under the default coordinator)
+//   HOSTTHIS_SHALE_GRPC_ADDR          (host:port; required in multi-node mode)
 //   HOSTTHIS_SHALE_SEEDS              (comma-separated peer BIND_ADDRs; empty = seed node)
+//   HOSTTHIS_SHALE_COORDINATOR        (""|"gossip" = today's behavior; "cas" =
+//                                      CAS/lease coordination over the
+//                                      homogeneous conditional store, no
+//                                      memberlist mesh; BIND_ADDR/SEEDS must be
+//                                      unset then, HOMOGENEOUS=true required)
 //   HOSTTHIS_METADATA_AWAIT_DURABLE   (true|false; default true; false = relaxed
 //                                      durability/fast-ack, only safe at RF>=2)
 //   HOSTTHIS_SHALE_READ_TIMEOUT       (Go duration, e.g. "8s"; unset/empty =
@@ -25,9 +31,11 @@
 //                                      tombstone purge disabled; malformed fails
 //                                      startup)
 //
-// With BIND_ADDR unset the node runs single-node: no gossip, no ring routing,
-// every op local. Setting it brings up memberlist + gRPC forwarding and joins
-// the ring (docs/SPEC.md "Multi-node shale").
+// With BIND_ADDR unset (and the default coordinator) the node runs
+// single-node: no gossip, no ring routing, every op local. Setting it brings up
+// memberlist + gRPC forwarding and joins the ring; COORDINATOR=cas joins the
+// ring through the membership document instead, with no bind port at all
+// (docs/SPEC.md "Multi-node shale", "Coordination is a pluggable choice").
 //
 // ReadConsistency is fixed at ReadQuorum inside NewShaleRepo, so there is no env
 // var. Quorum is required at R>1, where ReadNearest could return a
@@ -160,11 +168,18 @@ func openShaleRepoFromEnv(logger *log.Logger, registerGRPC func(*grpc.Server)) (
 		return nil, err
 	}
 
-	// Multi-node peer-discovery config. A non-empty bind addr is the
-	// switch that takes the cluster out of the single-node path.
+	// Multi-node peer-discovery config. Under the default coordinator a
+	// non-empty bind addr is the switch that takes the cluster out of the
+	// single-node path; the cas coordinator is multi-node with no bind addr.
 	bindAddr := strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_BIND_ADDR"))
 	grpcAddr := strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_GRPC_ADDR"))
-	seeds := parseSeeds(os.Getenv("HOSTTHIS_SHALE_SEEDS"))
+	seedsRaw := os.Getenv("HOSTTHIS_SHALE_SEEDS")
+	seeds := parseSeeds(seedsRaw)
+	coordMode, err := shaleCoordinatorFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	homogeneous := strings.EqualFold(strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_HOMOGENEOUS")), "true")
 
 	if bucket == "" {
 		return nil, fmt.Errorf("HOSTTHIS_METADATA_S3_BUCKET is required for shale backend")
@@ -177,6 +192,12 @@ func openShaleRepoFromEnv(logger *log.Logger, registerGRPC func(*grpc.Server)) (
 	// in the cluster layer so the operator gets an error naming the env var they
 	// set, not one about internal config fields.
 	if err := checkUnitCountForMode(unitCount, bindAddr); err != nil {
+		return nil, err
+	}
+	if err := checkCoordinatorConfig(coordMode, bindAddr, seedsRaw, homogeneous); err != nil {
+		return nil, err
+	}
+	if err := checkHomogeneousForMode(homogeneous, unitCount, bindAddr, coordMode); err != nil {
 		return nil, err
 	}
 
@@ -206,19 +227,12 @@ func openShaleRepoFromEnv(logger *log.Logger, registerGRPC func(*grpc.Server)) (
 	// the DB name, so the __cluster/init marker is one shared object for every
 	// pod) lets cluster.Open decide form-vs-join at runtime against the marker
 	// instead of the founder/joiner seed asymmetry; every pod runs identical
-	// config. Requires multi-backend (sharded) + multi-node mode: the marker's
-	// durable {gen, count} records the unit count, meaningless without sharding,
-	// and the solo-start/form race only arises across gossiping pods. See
+	// config. Under COORDINATOR=cas the same store also carries the membership
+	// document, at <dbName>/__coord/members thanks to the KeyPrefix. The gate
+	// (sharded + multi-node mode) ran with the other env checks above. See
 	// docs/SPEC.md "Homogeneous bootstrap (optional)".
 	var condStore storageunit.ConditionalStore
-	homogeneous := strings.EqualFold(strings.TrimSpace(os.Getenv("HOSTTHIS_SHALE_HOMOGENEOUS")), "true")
 	if homogeneous {
-		if unitCount <= 0 {
-			return nil, fmt.Errorf("HOSTTHIS_SHALE_HOMOGENEOUS=true requires multi-backend mode (HOSTTHIS_SHALE_UNIT_COUNT > 0)")
-		}
-		if bindAddr == "" {
-			return nil, fmt.Errorf("HOSTTHIS_SHALE_HOMOGENEOUS=true requires multi-node mode (HOSTTHIS_SHALE_BIND_ADDR set)")
-		}
 		cs, csErr := slate.NewMinioConditionalStore(slate.MinioConditionalStoreConfig{
 			EndpointHost: stripScheme(endpoint),
 			AccessKey:    accessKey,
@@ -245,6 +259,7 @@ func openShaleRepoFromEnv(logger *log.Logger, registerGRPC func(*grpc.Server)) (
 		BindAddr:          bindAddr,
 		GRPCAddr:          grpcAddr,
 		Seeds:             seeds,
+		Coordinator:       coordMode,
 		ReplicationFactor: replicationFactor,
 		RelaxedDurability: !awaitDurable,
 		UnitCount:         unitCount,
@@ -261,12 +276,16 @@ func openShaleRepoFromEnv(logger *log.Logger, registerGRPC func(*grpc.Server)) (
 	if err != nil {
 		return nil, fmt.Errorf("open shale: %w", err)
 	}
-	if bindAddr == "" {
+	switch {
+	case coordMode == storage.CoordinatorCAS:
+		logger.Printf("metadata: shale (multi-node, cas coordinator) node=%s grpc=%s rf=%d shards=%d awaitDurable=%t fenceGC=%t blobBucket=%q bucket=%s db=%s endpoint=%s",
+			nodeID, grpcAddr, replicationFactor, unitCount, awaitDurable, reapFenceWALs, blobBucket, bucket, dbName, endpoint)
+	case bindAddr != "":
+		logger.Printf("metadata: shale (multi-node, gossip) node=%s bind=%s grpc=%s seeds=%d rf=%d shards=%d awaitDurable=%t fenceGC=%t homogeneous=%t blobBucket=%q bucket=%s db=%s endpoint=%s",
+			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, unitCount, awaitDurable, reapFenceWALs, homogeneous, blobBucket, bucket, dbName, endpoint)
+	default:
 		logger.Printf("metadata: shale (single-node) node=%s bucket=%s db=%s rf=%d shards=%d awaitDurable=%t fenceGC=%t blobBucket=%q endpoint=%s",
 			nodeID, bucket, dbName, replicationFactor, unitCount, awaitDurable, reapFenceWALs, blobBucket, endpoint)
-	} else {
-		logger.Printf("metadata: shale (multi-node) node=%s bind=%s grpc=%s seeds=%d rf=%d shards=%d awaitDurable=%t fenceGC=%t homogeneous=%t blobBucket=%q bucket=%s db=%s endpoint=%s",
-			nodeID, bindAddr, grpcAddr, len(seeds), replicationFactor, unitCount, awaitDurable, reapFenceWALs, homogeneous, blobBucket, bucket, dbName, endpoint)
 	}
 	return repo, nil
 }
@@ -325,8 +344,8 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 	}
 	logger.Printf("readiness: /readyz mount floor minMountedFraction=%g (0 disables the floor)", minMountedFraction)
 	// Multi-node: supply the relay peer transport. The publisher fans every
-	// frame out to the CURRENT peer set, discovered per publish from the ring
-	// membership the cluster gossips (self excluded), adapted onto the relay's
+	// frame out to the CURRENT peer set, discovered per publish from the
+	// coordinator's ring membership (self excluded), adapted onto the relay's
 	// narrow Peers port so the relay stays storage-agnostic. main wires
 	// Publisher + Bind into the relay and Closes the publisher at shutdown.
 	if repo.GRPCAddr() != "" {
@@ -374,7 +393,7 @@ func buildMetadataShale(logger *log.Logger) (*metadataBundle, error) {
 	return bundle, nil
 }
 
-// shalePeers adapts the ShaleRepo's gossiped ring-membership view onto the
+// shalePeers adapts the ShaleRepo's coordinated ring-membership view onto the
 // relay's Peers port (current peer gRPC addresses, self excluded). Defined at
 // the composition root so storage stays relay-agnostic and the relay stays
 // storage-agnostic.
