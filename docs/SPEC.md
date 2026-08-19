@@ -6000,24 +6000,16 @@ migration, and once the base no longer sets them, a blank reappearing means
 someone is reconstructing a shape that does not exist. Ignoring it is how a node
 boots believing it joined a mesh that was never there.
 
-Setting `HOSTTHIS_SHALE_BIND_ADDR` or `HOSTTHIS_SHALE_SEEDS` together with
-`"cas"` refuses startup, naming the variables involved. A mixed config is
-the mixed-fleet outage in miniature: pods coordinating over gossip and pods
-coordinating over the document are two half-clusters, each believing it
-owns units the other is serving, each fencing the other's mounts on every
-reconcile. The ownership epochs keep that from corrupting anything, so what
-it costs is availability - units bounce between the halves and requests
-refuse.
-
-Be precise about what the refusal covers: it makes a SINGLE POD's mixed
-config unrepresentable, nothing more. The fleet-level mix - old pods still
-on gossip, new pods on the document, every pod's config individually valid -
-arises from any ROLLING flip of the coordinator setting, and no per-pod
-startup check can see it. The adapter switch is therefore a full-stop
-operation by decree: scale the fleet to zero (gracefully, so the
-relaxed-durability window drains), flip the configuration, scale back up.
-Never roll it. That protection is operator choreography, not code, and this
-paragraph is where it is written down.
+There is no second adapter left to mix with, so the two-half-cluster hazard
+that shaped this section is now unrepresentable rather than merely refused:
+a fleet can only coordinate one way. The historical shape is worth keeping in
+mind if a second adapter is ever added - pods on different adapters cannot see
+each other, each half believes it owns units the other serves, and they fence
+each other's mounts on every reconcile. Ownership epochs bound that to an
+availability outage rather than corruption, and no per-pod startup check can
+detect it, because every individual config is valid. If that day comes, the
+switch is a full-stop operation by decree: scale to zero (gracefully, so the
+relaxed-durability window drains), flip, scale up. Never roll it.
 
 The membership document lives in the same conditional store the
 homogeneous bootstrap already shares: the metadata bucket, key-prefixed by
