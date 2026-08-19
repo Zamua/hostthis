@@ -23,14 +23,12 @@ import (
 // with a shared ConditionalStore wired, taking the cond store, seeds, unit
 // count, and replication factor explicitly so a test can drive the form-vs-join
 // marker decision.
-func startHomogNode(t *testing.T, id, dbName string, seeds []string, cs storageunit.ConditionalStore, unitCount, rf int) *rebalNode {
+func startHomogNode(t *testing.T, id, dbName string, cs storageunit.ConditionalStore, unitCount, rf int) *rebalNode {
 	t.Helper()
 	endpoint := os.Getenv("MINIO_TEST_ENDPOINT")
 	bucket := envOrDefault("MINIO_TEST_METADATA_BUCKET", "hostthis-metadata")
 	access := envOrDefault("MINIO_TEST_ACCESS_KEY", "admin")
 	secret := envOrDefault("MINIO_TEST_SECRET_KEY", "supersecret")
-
-	bindAddr := loopback(freeTCPPort(t))
 
 	repo, err := storage.NewShaleRepo(storage.ShaleConfig{
 		NodeID:            id,
@@ -41,9 +39,8 @@ func startHomogNode(t *testing.T, id, dbName string, seeds []string, cs storageu
 		SecretKey:         secret,
 		UseSSL:            false,
 		DbName:            dbName,
-		BindAddr:          bindAddr,
 		GRPCAddr:          "127.0.0.1:0", // OS-assigned; the repo serves the actual port
-		Seeds:             seeds,
+		Coordinator:       storage.CoordinatorCAS,
 		ReplicationFactor: rf,
 		UnitCount:         unitCount,
 		ConditionalStore:  cs,
@@ -55,7 +52,6 @@ func startHomogNode(t *testing.T, id, dbName string, seeds []string, cs storageu
 	n := &rebalNode{
 		id:       id,
 		repo:     repo,
-		bindAddr: bindAddr,
 		grpcAddr: repo.GRPCAddr(),
 	}
 	t.Cleanup(n.close)
@@ -65,14 +61,15 @@ func startHomogNode(t *testing.T, id, dbName string, seeds []string, cs storageu
 // TestShaleHomogeneous_MarkerBootstrap pins the homogeneous path end to end
 // over the real backend:
 //
-//   - Node A is configured with a seed it CANNOT reach. Without a
-//     ConditionalStore that config fails Open (the cluster refuses to fork a
-//     joiner whose seeds are unreachable). WITH the shared store wired,
-//     AllowSoloStart lets it come up solo and FORM the cluster by writing the
-//     __cluster/init marker.
+//   - Node A comes up alone against an empty store and FORMS the cluster by
+//     writing the __cluster/init marker.
 //   - The marker records the durable {gen:0, count:N}.
-//   - Node B, carrying A's real address and the SAME store, joins gossip and
-//     reads the marker (adopts gen 0, no second form).
+//   - Node B, sharing the SAME store, joins through the membership document
+//     and reads the marker (adopts gen 0, no second form).
+//
+// The unreachable-seed premise this test once carried retired with the gossip
+// adapter: seeds no longer exist, so AllowSoloStart has no unreachable-join to
+// rescue and there is nothing left to pin there.
 //   - A write through A is readable through B, so R=2 routing over the
 //     homogeneously-bootstrapped ring round-trips.
 func TestShaleHomogeneous_MarkerBootstrap(t *testing.T) {
@@ -91,11 +88,7 @@ func TestShaleHomogeneous_MarkerBootstrap(t *testing.T) {
 	// "__cluster/init".
 	cs := storageunit.NewMemConditionalStore()
 
-	// A seed that resolves but has nothing listening (freeTCPPort closes its
-	// probe listener). Node A's join to it fails, so only AllowSoloStart,
-	// active because the store is wired, keeps Open from erroring.
-	deadSeed := loopback(freeTCPPort(t))
-	nodeA := startHomogNode(t, "homog-A", dbName, []string{deadSeed}, cs, units, 2)
+	nodeA := startHomogNode(t, "homog-A", dbName, cs, units, 2)
 
 	data, _, err := cs.Get("__cluster/init")
 	if err != nil {
@@ -105,9 +98,9 @@ func TestShaleHomogeneous_MarkerBootstrap(t *testing.T) {
 		t.Fatalf("marker should record unit count %d, got %q", units, data)
 	}
 
-	// Node B seeds off A's real address and shares the store: it joins gossip
+	// Node B shares the store, so it joins through the membership document
 	// and adopts gen 0 from the marker rather than forming a second cluster.
-	nodeB := startHomogNode(t, "homog-B", dbName, []string{nodeA.bindAddr}, cs, units, 2)
+	nodeB := startHomogNode(t, "homog-B", dbName, cs, units, 2)
 	waitMembers(t, []*rebalNode{nodeA, nodeB}, 2, 30*time.Second)
 
 	// R=2 round-trip: write through A, read through B. The slug uses only

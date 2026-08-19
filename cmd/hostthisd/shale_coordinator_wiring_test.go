@@ -22,6 +22,8 @@ func TestOpenShaleRepoFromEnvWiresCoordinatorGuards(t *testing.T) {
 	t.Setenv("HOSTTHIS_SHALE_HOMOGENEOUS", "true")
 	t.Setenv("HOSTTHIS_SHALE_COORDINATOR", "cas")
 	t.Setenv("HOSTTHIS_SHALE_GRPC_ADDR", "127.0.0.1:0")
+	// A retired mesh knob still present in the environment: the real startup
+	// path must refuse it, which is what pins the guard's call site.
 	t.Setenv("HOSTTHIS_SHALE_BIND_ADDR", "127.0.0.1:7946")
 
 	logger := log.New(io.Discard, "", 0)

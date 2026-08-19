@@ -85,9 +85,6 @@ func TestShaleCASCluster_TwoNodesOneDocument(t *testing.T) {
 	cs := storageunit.NewMemConditionalStore()
 	nodeA := startCASNode(t, "casco-A", dbName, cs, units, 2)
 
-	if nodeA.repo.BindAddr() != "" {
-		t.Fatalf("cas coordinator must run no memberlist, got bind addr %q", nodeA.repo.BindAddr())
-	}
 	if nodeA.repo.GRPCAddr() == "" {
 		t.Fatal("multi-node cas cluster must bind and advertise a gRPC forwarding address")
 	}
