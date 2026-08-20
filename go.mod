@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.26.4
 
 require (
-	github.com/Zamua/shale v0.20.0
+	github.com/Zamua/shale v0.21.0
 	github.com/Zamua/shale/backends/pebble v0.3.0
 	github.com/Zamua/shale/backends/slate v0.17.0
 	github.com/charmbracelet/ssh v0.1.0
