@@ -1,7 +1,7 @@
 package storage
 
 // Pins the storage-boundary translation of shale's cross-shard guard sentinel
-// into the domain vocabulary (translateCrossShard in shale_site_repo.go). No
+// into the domain vocabulary (translateCrossShard in crossshard.go). No
 // cluster is needed: the guard fires client-side in the tx buffer before any
 // commit, and every layer between it and the deploy service's isCrossShard
 // check passes the error through verbatim or %w-wraps it, so error identity is
