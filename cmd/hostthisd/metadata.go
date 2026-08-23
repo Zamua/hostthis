@@ -122,7 +122,9 @@ func buildMetadata(dataDir string, logger *log.Logger) (*metadataBundle, error) 
 		return buildMetadataLocal(dataDir, logger)
 	case "shale":
 		return buildMetadataShale(logger)
+	case "celld":
+		return buildMetadataCelld(logger)
 	default:
-		return nil, fmt.Errorf("unknown HOSTTHIS_METADATA_BACKEND %q (want local|shale)", backend)
+		return nil, fmt.Errorf("unknown HOSTTHIS_METADATA_BACKEND %q (want local|shale|celld)", backend)
 	}
 }
