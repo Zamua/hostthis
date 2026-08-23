@@ -43,7 +43,7 @@ type roomCount struct {
 
 func readCount(t *testing.T, base, room string) roomCount {
 	t.Helper()
-	resp, err := http.Get(fmt.Sprintf("%s/rooms/count?room=%s", base, room))
+	resp, err := http.Get(fmt.Sprintf("%s/room/count?room=%s", base, room))
 	if err != nil {
 		t.Fatalf("count %s: %v", room, err)
 	}
@@ -57,7 +57,7 @@ func readCount(t *testing.T, base, room string) roomCount {
 
 func dialRoom(t *testing.T, ctx context.Context, base, room string) *websocket.Conn {
 	t.Helper()
-	u := strings.Replace(base, "http", "ws", 1) + "/rooms/join?room=" + room
+	u := strings.Replace(base, "http", "ws", 1) + "/room/join?room=" + room
 	c, _, err := websocket.Dial(ctx, u, nil)
 	if err != nil {
 		t.Fatalf("dial %s: %v", room, err)
