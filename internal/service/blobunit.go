@@ -85,11 +85,6 @@ type BlobUnit interface {
 	// (stored) byte length. The caller MUST Close the returned reader.
 	Read(ctx context.Context, slug, sha string) (io.ReadCloser, int64, error)
 
-	// ReadAll returns a record's full DECOMPRESSED blob bytes buffered in
-	// memory, for where the whole document is needed at once (markdown render,
-	// owner-controlled Show).
-	ReadAll(ctx context.Context, slug, sha string) ([]byte, error)
-
 	// UnbindOnDelete removes a record's blob references as part of the
 	// record's metadata delete. On the standalone path this is a NO-OP: the
 	// bytes are content-addressed and reclaimed by the global sweep once no

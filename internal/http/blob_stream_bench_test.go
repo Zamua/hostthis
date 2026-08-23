@@ -31,13 +31,19 @@ func (d *discardResponseWriter) WriteHeader(int)             {}
 
 // bufferingBlobReader buffers the whole decompressed blob per Read: the
 // full-payload-per-GET baseline the streaming serve path is measured against.
+//
+// It drains the inner STREAM to build that baseline rather than calling a
+// buffering port method, because the port deliberately no longer offers one -
+// the only way to allocate per payload now is to do it here, on purpose.
 type bufferingBlobReader struct{ inner BlobReader }
 
-func (b bufferingBlobReader) ReadAll(ctx context.Context, slug, sha string) ([]byte, error) {
-	return b.inner.ReadAll(ctx, slug, sha)
-}
 func (b bufferingBlobReader) Read(ctx context.Context, slug, sha string) (io.ReadCloser, int64, error) {
-	body, err := b.inner.ReadAll(ctx, slug, sha)
+	rc, _, err := b.inner.Read(ctx, slug, sha)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rc.Close() //nolint:errcheck
+	body, err := io.ReadAll(rc)
 	if err != nil {
 		return nil, 0, err
 	}

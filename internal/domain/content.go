@@ -59,10 +59,11 @@ var ErrUnsupportedKind = errors.New(
 	"hostthis only accepts content it can render (html, markdown, diff, mermaid, pdf, csv, json, flamegraph)")
 
 // MaxPasteBytes is the per-paste size cap, measured in COMPRESSED bytes
-// (post-zstd, as written to the blob store). A single upload is staged in RAM
-// before it is written, so this is what stops one request exhausting a small
-// node. Typical HTML/Markdown compresses 5-10x, so ~50-100 MiB of raw text
-// fits under it.
+// (post-zstd, as written to the blob store). It bounds what one identity can
+// spend per record and what one request can commit to storage; it is NOT a
+// memory guard, because no path holds a payload whole (docs/SPEC.md "Writes are
+// constant-memory"). Typical HTML/Markdown compresses 5-10x, so ~50-100 MiB of
+// raw text fits under it.
 const MaxPasteBytes = 10 << 20 // 10 MiB
 
 // UserQuotaBytes caps the total compressed size of an identity's active pastes,

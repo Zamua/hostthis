@@ -551,12 +551,16 @@ func (s *Server) verbGet(sess gossh.Session, owner string, argv []string) {
 		_ = sess.Exit(ExitUsage)
 		return
 	}
-	_, body, err := s.Manage.Show(slug, owner)
+	_, rc, err := s.Manage.Show(slug, owner)
 	if err != nil {
 		emitServiceErr(sess, err)
 		return
 	}
-	_, _ = sess.Write(body)
+	defer rc.Close() //nolint:errcheck
+	// Copied, never buffered: the paste is served decompressed, so holding it
+	// whole would size this verb's memory to the document rather than to a copy
+	// buffer (docs/SPEC.md "Reads are constant-memory too").
+	_, _ = io.Copy(sess, rc)
 	_ = sess.Exit(ExitOK)
 }
 

@@ -2951,6 +2951,15 @@ expected to diverge again. Static **sites** count against the same cap and on th
 basis: the total of their files' COMPRESSED sizes, as reported by the
 staging that wrote them (see "Static site archives → Quota").
 
+**Reads are constant-memory too.** Every path that serves stored bytes
+streams them: the HTTP raw read, a static site's files, and the `get`
+verb all copy from the blob port's reader straight to the client. A read
+therefore costs a copy buffer regardless of whether the paste is a
+kilobyte or the 10 MiB ceiling, and the decompressed size — which can be
+an order of magnitude larger — never lands in the heap at all. The port
+also offers a buffering read for a caller that genuinely needs the whole
+document at once; no serving path uses it.
+
 That total is NOT folded by content hash. Nothing in the store
 deduplicates: a blob id is minted fresh for every file staged, so two
 identical files - in one archive, across re-deploys, or across owners -

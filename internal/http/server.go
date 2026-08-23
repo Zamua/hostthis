@@ -30,13 +30,13 @@ type SiteReader interface {
 	Get(domain.Slug) (domain.Site, error)
 }
 
-// BlobReader is the read side of the per-record blob seam. Read streams, so a
-// serve path can io.Copy without a full-payload allocation per GET; ReadAll
-// buffers. Both take the record's slug plus its content sha: the standalone
-// backend keys by sha alone and ignores the slug, the transactional shale
-// backend routes on it. service.BlobUnit satisfies this.
+// BlobReader is the read side of the per-record blob seam. It offers ONLY a
+// streaming read: no serving path may allocate per payload, so the seam does
+// not expose a way to (docs/SPEC.md "Reads are constant-memory too"). It takes
+// the record's slug plus its content sha: the standalone backend keys by sha
+// alone and ignores the slug, the transactional shale backend routes on it.
+// service.BlobUnit satisfies this.
 type BlobReader interface {
-	ReadAll(ctx context.Context, slug, sha string) ([]byte, error)
 	Read(ctx context.Context, slug, sha string) (io.ReadCloser, int64, error)
 }
 

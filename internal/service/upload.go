@@ -337,24 +337,24 @@ func (u *Upload) startFinalize(slug domain.Slug, staged stagedUpload) {
 	u.finalizeWG.Go(func() {
 		// The goroutine owns the spill file: the request has already returned.
 		defer staged.discard()
-		body, err := io.ReadAll(staged.File)
-		if err != nil {
-			u.logf("upload: reading staged body %s: %v", slug, err)
-			return
-		}
-		u.finalize(slug, staged.SHA, body)
+		u.finalize(slug, staged)
 		if u.onFinalizeDone != nil {
 			u.onFinalizeDone()
 		}
 	})
 }
 
-// finalize writes the held bytes and transitions the paste: ready on success,
+// finalize writes the staged bytes and transitions the paste: ready on success,
 // failed (reservation released) otherwise. The repo guards the transitions so a
 // finalize racing the reconciler's age-out cannot resurrect a failed paste.
 // Errors are logged, not returned: the caller already has its URL.
-func (u *Upload) finalize(slug domain.Slug, sha string, body []byte) {
-	if _, err := u.Blob.Stage(context.Background(), string(slug), sha, body); err != nil {
+//
+// Streams from the spill file rather than taking a body: this path is
+// per-upload and runs in the background, so buffering here made resident memory
+// scale with concurrent uploads times payload size (docs/SPEC.md "Writes are
+// constant-memory").
+func (u *Upload) finalize(slug domain.Slug, staged stagedUpload) {
+	if _, err := u.Blob.StagePrecompressed(context.Background(), string(slug), staged.SHA, staged.File, staged.encodedSize()); err != nil {
 		// Flip to failed and release the reservation so the paste stops
 		// charging quota and a read serves the error page.
 		u.logf("upload: finalize %s: blob write failed: %v", slug, err)
