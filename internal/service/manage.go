@@ -115,17 +115,24 @@ func (m *Manage) List(owner string) ([]domain.Paste, error) {
 	return m.Repo.ListByOwner(owner)
 }
 
-// Show returns the bytes + paste metadata for owner-controlled read.
-func (m *Manage) Show(slug domain.Slug, owner string) (domain.Paste, []byte, error) {
+// Show streams the bytes + paste metadata for owner-controlled read. The
+// caller MUST Close the reader.
+//
+// It streams rather than buffering because the bytes it serves are the
+// DECOMPRESSED document, which can be an order of magnitude larger than the
+// compressed per-paste cap that bounds everything else; buffering made this the
+// largest allocation the service could be asked for (docs/SPEC.md "Reads are
+// constant-memory too").
+func (m *Manage) Show(slug domain.Slug, owner string) (domain.Paste, io.ReadCloser, error) {
 	p, err := m.requireOwner(slug, owner)
 	if err != nil {
 		return domain.Paste{}, nil, err
 	}
-	body, err := m.Blob.ReadAll(context.Background(), string(slug), p.ContentSHA)
+	rc, _, err := m.Blob.Read(context.Background(), string(slug), p.ContentSHA)
 	if err != nil {
 		return domain.Paste{}, nil, fmt.Errorf("blob: %w", err)
 	}
-	return p, body, nil
+	return p, rc, nil
 }
 
 // UpdateResult tells the SSH layer whether the paste was pinned at update
