@@ -35,11 +35,10 @@ type PasteRepo interface {
 // S3-shaped backends to set Content-Length; the disk impl accepts it for
 // interface uniformity. PutPrecompressed takes a body that is already
 // magic-prefixed + zstd-encoded, so the streaming upload path does not re-encode
-// its staging buffer. Get returns the full UNCOMPRESSED bytes in memory.
+// its staging buffer.
 type BlobStore interface {
 	Put(sha string, r io.Reader, size int64) error
 	PutPrecompressed(sha string, body []byte) error
-	Get(sha string) ([]byte, error)
 
 	// EncodeBody encodes UNCOMPRESSED bytes into the store's at-rest format and
 	// reports the payload size EXCLUDING the framing prefix: the basis quota
