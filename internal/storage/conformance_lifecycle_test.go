@@ -20,21 +20,46 @@ package storage_test
 // comment rather than "fixing" it.
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-func lifecyclePaste(t *testing.T, r conformanceRepo, slug, identity string, size int) domain.Paste {
+// lifecycleRepo is the NARROW surface these assertions actually touch, rather
+// than the whole lifecycleRepo. Stating it separately is what lets a partial
+// adapter be gated by this suite before it implements every port method: a
+// backend under construction can satisfy the create lifecycle and be held to it
+// immediately, instead of the suite being unusable until the last method lands.
+type lifecycleRepo interface {
+	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
+	Get(domain.Slug) (domain.Paste, error)
+	MarkReady(domain.Slug) error
+	MarkFailed(domain.Slug) error
+	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
+}
+
+// lifecycleInsert mirrors the suite's insert helper against the narrow surface.
+func lifecycleInsert(t *testing.T, r lifecycleRepo, p domain.Paste) {
+	t.Helper()
+	if err := r.InsertWithQuotaCheck(context.Background(), p, 0, fixedNow); err != nil {
+		t.Fatalf("insert %q: %v", p.Slug, err)
+	}
+	if d, ok := r.(pendingConfirmsDrainer); ok {
+		d.WaitPendingConfirms()
+	}
+}
+
+func lifecyclePaste(t *testing.T, r lifecycleRepo, slug, identity string, size int) domain.Paste {
 	t.Helper()
 	p := pasteOf(slug, identity, size)
 	p.Status = domain.PasteStatusPending
-	insert(t, r, p)
-	drainConfirms(r)
+	lifecycleInsert(t, r, p)
 	return p
 }
 
-func statusOf(t *testing.T, r conformanceRepo, slug domain.Slug) domain.PasteStatus {
+func statusOf(t *testing.T, r lifecycleRepo, slug domain.Slug) domain.PasteStatus {
 	t.Helper()
 	got, err := r.Get(slug)
 	if err != nil {
@@ -45,7 +70,7 @@ func statusOf(t *testing.T, r conformanceRepo, slug domain.Slug) domain.PasteSta
 
 // A paste inserted PENDING is readable as PENDING. The status is persisted
 // state, not something derived at read time.
-func conformPendingIsObservable(t *testing.T, r conformanceRepo) {
+func conformPendingIsObservable(t *testing.T, r lifecycleRepo) {
 	p := lifecyclePaste(t, r, "lc123456", "key:lifecycle", 100)
 	if got := statusOf(t, r, p.Slug); got != domain.PasteStatusPending {
 		t.Fatalf("status after pending insert = %q; want %q", got, domain.PasteStatusPending)
@@ -53,7 +78,7 @@ func conformPendingIsObservable(t *testing.T, r conformanceRepo) {
 }
 
 // The forward transition every create must be able to reach.
-func conformPendingReachesReady(t *testing.T, r conformanceRepo) {
+func conformPendingReachesReady(t *testing.T, r lifecycleRepo) {
 	p := lifecyclePaste(t, r, "lc223456", "key:lifecycle", 100)
 	if err := r.MarkReady(p.Slug); err != nil {
 		t.Fatalf("MarkReady: %v", err)
@@ -66,7 +91,7 @@ func conformPendingReachesReady(t *testing.T, r conformanceRepo) {
 // The failure transition, and its side effect: a failed paste stops charging
 // the owner. Without the release, a backend could report the right status while
 // silently holding quota an owner cannot free.
-func conformPendingReachesFailedAndReleasesQuota(t *testing.T, r conformanceRepo) {
+func conformPendingReachesFailedAndReleasesQuota(t *testing.T, r lifecycleRepo) {
 	const owner = "key:lifecycle-quota"
 	p := lifecyclePaste(t, r, "lc323456", owner, 700)
 
@@ -96,7 +121,7 @@ func conformPendingReachesFailedAndReleasesQuota(t *testing.T, r conformanceRepo
 // cannot be walked back to READY. A finalizer that was slow enough for the
 // reconciler to age its paste out must not resurrect it, or a reader sees a
 // paste whose bytes were already reclaimed.
-func conformFailedIsTerminal(t *testing.T, r conformanceRepo) {
+func conformFailedIsTerminal(t *testing.T, r lifecycleRepo) {
 	p := lifecyclePaste(t, r, "lc423456", "key:lifecycle", 100)
 	if err := r.MarkFailed(p.Slug); err != nil {
 		t.Fatalf("MarkFailed: %v", err)
@@ -113,7 +138,7 @@ func conformFailedIsTerminal(t *testing.T, r conformanceRepo) {
 
 // Repetition is harmless in both directions. Two resolvers may race, and a
 // retry must not turn a settled paste into an error.
-func conformStatusTransitionsAreIdempotent(t *testing.T, r conformanceRepo) {
+func conformStatusTransitionsAreIdempotent(t *testing.T, r lifecycleRepo) {
 	p := lifecyclePaste(t, r, "lc523456", "key:lifecycle", 100)
 	for i := range 3 {
 		if err := r.MarkReady(p.Slug); err != nil {
@@ -138,7 +163,7 @@ func conformStatusTransitionsAreIdempotent(t *testing.T, r conformanceRepo) {
 // Neither transition invents a paste. A slug that was never inserted stays
 // absent, and the call is not an error: the caller cannot distinguish "already
 // resolved" from "never existed" and must not have to.
-func conformStatusOnMissingPasteIsNoOp(t *testing.T, r conformanceRepo) {
+func conformStatusOnMissingPasteIsNoOp(t *testing.T, r lifecycleRepo) {
 	const missing = domain.Slug("lc623456")
 	if err := r.MarkReady(missing); err != nil {
 		t.Fatalf("MarkReady on a missing paste = %v; want nil", err)
@@ -155,11 +180,10 @@ func conformStatusOnMissingPasteIsNoOp(t *testing.T, r conformanceRepo) {
 // endpoint reached from PENDING. This is what lets an adapter that binds bytes
 // inside the metadata commit skip the pending window entirely while satisfying
 // the same contract.
-func conformReadyAtInsertIsLegal(t *testing.T, r conformanceRepo) {
+func conformReadyAtInsertIsLegal(t *testing.T, r lifecycleRepo) {
 	p := pasteOf("lc723456", "key:lifecycle", 100)
 	p.Status = domain.PasteStatusReady
-	insert(t, r, p)
-	drainConfirms(r)
+	lifecycleInsert(t, r, p)
 	if got := statusOf(t, r, p.Slug); got != domain.PasteStatusReady {
 		t.Fatalf("status after a ready insert = %q; want %q", got, domain.PasteStatusReady)
 	}
@@ -173,7 +197,7 @@ func conformReadyAtInsertIsLegal(t *testing.T, r conformanceRepo) {
 
 // runLifecycleConformance is the entry point, called from the same place the
 // other suites are.
-func runLifecycleConformance(t *testing.T, name string, newRepo func(t *testing.T) conformanceRepo) {
+func runLifecycleConformance(t *testing.T, name string, newRepo func(t *testing.T) lifecycleRepo) {
 	t.Helper()
 	t.Run(name+"/PendingIsObservable", func(t *testing.T) { conformPendingIsObservable(t, newRepo(t)) })
 	t.Run(name+"/PendingReachesReady", func(t *testing.T) { conformPendingReachesReady(t, newRepo(t)) })
