@@ -83,6 +83,8 @@ export class Identity {
         return this.firstSeen();
       case "drop":
         return this.drop(await request.json());
+      case "touch":
+        return this.touch(await request.json());
       default:
         return new Response("unknown op\n", { status: 404 });
     }
@@ -208,6 +210,25 @@ export class Identity {
     return Response.json({ dropped: had });
   }
 
+  // Keeps the denormalised summary in step with a mutation of the paste row.
+  // Denormalising anything MUTABLE makes every mutation a two-cell write; the
+  // alternative is a listing that serves stale contents, and the shale backend
+  // does not, so neither may this one.
+  async touch(body) {
+    const entries = (await this.state.storage.get("entries")) ?? {};
+    const e = entries[body.slug];
+    if (!e) {
+      return Response.json({ updated: false });
+    }
+    for (const k of ["name", "status", "size", "kind"]) {
+      if (body[k] !== undefined && body[k] !== null) {
+        e[k] = body[k];
+      }
+    }
+    await this.state.storage.put("entries", entries);
+    return Response.json({ updated: true });
+  }
+
   // The ONLY intent read, and it is scope-bounded by construction: a cell cannot see
   // another scope's storage, so the property the KV backend has to maintain by
   // key layout is structural here.
@@ -288,6 +309,8 @@ export class Paste {
         return this.get();
       case "status":
         return this.setStatus(await request.json());
+      case "rename":
+        return this.rename(await request.json());
       default:
         return new Response("unknown op\n", { status: 404 });
     }
@@ -304,6 +327,21 @@ export class Paste {
       return new Response("not found\n", { status: 404 });
     }
     return Response.json(row);
+  }
+
+  // Guarded by owner and creation time, so a rename cannot land on a slug that
+  // was deleted and re-minted by someone else in between.
+  async rename(body) {
+    const row = await this.state.storage.get("row");
+    if (!row) {
+      return Response.json({ changed: false, reason: "absent" });
+    }
+    if (row.identity !== body.identity || row.createdAt !== body.createdAt) {
+      return Response.json({ changed: false, reason: "not-owner" });
+    }
+    row.name = body.name;
+    await this.state.storage.put("row", row);
+    return Response.json({ changed: true });
   }
 
   // Only a still-PENDING row transitions, so a late finalizer cannot resurrect

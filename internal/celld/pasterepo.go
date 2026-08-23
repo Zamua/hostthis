@@ -338,3 +338,36 @@ func (r *PasteRepo) DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, e
 	}
 	return res.Dropped, nil
 }
+
+// SetName renames a paste. TWO cells, because the identity summary carries the
+// name so that a listing is one point read: the row is authoritative and the
+// summary must follow it, or the owner's listing serves a name that is no
+// longer true. The row is written FIRST, so a failure between them leaves the
+// listing stale rather than leaving it authoritative over a row that never
+// changed.
+//
+// Denormalising a mutable field is what makes this two-cell rather than
+// mechanical. That is the cost of the listing being a point read, taken
+// deliberately.
+func (r *PasteRepo) SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
+	var res struct {
+		Changed bool   `json:"changed"`
+		Reason  string `json:"reason"`
+	}
+	if _, err := r.call(context.Background(), http.MethodPost, "/paste/rename", "slug", slug.String(),
+		map[string]any{
+			"name": name, "identity": wantIdentity.String(),
+			"createdAt": wantCreatedAt.UTC().UnixMilli(),
+		}, &res); err != nil {
+		return err
+	}
+	if !res.Changed {
+		if res.Reason == "absent" {
+			return domain.ErrNotFound
+		}
+		return domain.ErrNotFound // a foreign or re-minted slug is not this owner's paste
+	}
+	_, err := r.call(context.Background(), http.MethodPost, "/identity/touch", "scope",
+		wantIdentity.String(), map[string]any{"slug": slug.String(), "name": name}, nil)
+	return err
+}
