@@ -92,6 +92,10 @@ func (n namespacedRepo) DropStaleOwnerEntry(s domain.Slug, o string) (bool, erro
 	return n.inner.DropStaleOwnerEntry(n.slug(s), n.owner(o))
 }
 
+func (n namespacedRepo) Delete(s domain.Slug, want domain.Identity, at time.Time) error {
+	return n.inner.Delete(n.slug(s), domain.Identity(n.owner(want.String())), at)
+}
+
 func (n namespacedRepo) SetName(s domain.Slug, name string, want domain.Identity, at time.Time) error {
 	return n.inner.SetName(n.slug(s), name, domain.Identity(n.owner(want.String())), at)
 }

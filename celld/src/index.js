@@ -324,6 +324,8 @@ export class Paste {
         return this.setStatus(await request.json());
       case "rename":
         return this.rename(await request.json());
+      case "remove":
+        return this.remove(await request.json());
       default:
         return new Response("unknown op\n", { status: 404 });
     }
@@ -355,6 +357,20 @@ export class Paste {
     row.name = body.name;
     await this.state.storage.put("row", row);
     return Response.json({ changed: true });
+  }
+
+  // Guarded the same way a rename is: a slug deleted and re-minted by someone
+  // else must not be removable by a stale request holding the old identity.
+  async remove(body) {
+    const row = await this.state.storage.get("row");
+    if (!row) {
+      return Response.json({ removed: false, reason: "absent" });
+    }
+    if (row.identity !== body.identity || row.createdAt !== body.createdAt) {
+      return Response.json({ removed: false, reason: "not-owner" });
+    }
+    await this.state.storage.delete("row");
+    return Response.json({ removed: true });
   }
 
   // Only a still-PENDING row transitions, so a late finalizer cannot resurrect
