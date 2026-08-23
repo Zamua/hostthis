@@ -259,10 +259,25 @@ per-room cost is stable and the memory from the first batch was largely
 reclaimed rather than retained. **Roughly 0.45 MB per connected room**, well
 under the ~8 MB/cell figure quoted for celld generally.
 
-Two honest limits. These rooms hold almost no state, so a real room carrying its
-KV would cost more. And RSS drifts back toward baseline over minutes rather than
-returning promptly, with no eviction lines in the log, so reclamation is visible
-in the numbers but its mechanism is not confirmed.
+One honest limit: these rooms hold almost no state, so a real room carrying its
+KV would cost more.
+
+**The reclamation is idle EVICTION, not garbage collection, and it is silent.**
+RSS drifts back over minutes with no eviction lines in the log, which leaves two
+candidate mechanisms. They are distinguishable in the bucket: a cell's
+`cells/<Class>:<id>/own.json` names the node holding it.
+
+    Room:      50 of 50 sampled -> {"node": "", "epoch": 2}   UNOWNED
+    IntentLog: 13 of 13 sampled -> {"node": "", "epoch": 1}   UNOWNED
+
+Every idle cell had been fenced and published unowned. So `CELLD_IDLE_EVICT_S`
+does what it claims, the dormant-cell argument for the port holds, and the only
+gap is that eviction is not logged at the default level. Slow-looking RSS is the
+allocator, not retained cells.
+
+(Reading those objects needs the `:` in the key percent-encoded in the SigV4
+canonical URI; sending it raw returns `SignatureDoesNotMatch`, which looks like
+a permissions problem and is not.)
 
 **Rooms are not the memory problem the brief feared.** At this cost, a node
 holds thousands of connected rooms before memory is the binding constraint.
