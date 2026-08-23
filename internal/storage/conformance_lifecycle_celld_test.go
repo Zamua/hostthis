@@ -92,6 +92,10 @@ func (n namespacedRepo) DropStaleOwnerEntry(s domain.Slug, o string) (bool, erro
 	return n.inner.DropStaleOwnerEntry(n.slug(s), n.owner(o))
 }
 
+func (n namespacedRepo) SetName(s domain.Slug, name string, want domain.Identity, at time.Time) error {
+	return n.inner.SetName(n.slug(s), name, domain.Identity(n.owner(want.String())), at)
+}
+
 func TestOwnerIndexConformance_Celld(t *testing.T) {
 	base := os.Getenv("CELLD_TEST_ENDPOINT")
 	if base == "" {

@@ -29,6 +29,7 @@ type ownerIndexRepo interface {
 	CountByOwner(owner string) (int, error)
 	OwnerFirstSeen(owner string) (time.Time, error)
 	DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, error)
+	SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 }
 
 func ownerInsert(t *testing.T, r ownerIndexRepo, p domain.Paste) {
@@ -139,6 +140,42 @@ func conformDropStaleEntryOnlyWhenAbsent(t *testing.T, r ownerIndexRepo) {
 	}
 }
 
+// FRESHNESS, which membership does not imply. The first four properties are
+// about WHICH pastes a listing contains; none of them notices a listing that
+// keeps serving an old name. A backend that denormalises anything mutable into
+// its index - which both of these do, for good reasons - can pass all four
+// while showing the owner stale contents.
+//
+// Measured against shale before being asserted: its listing DOES reflect a
+// rename, so freshness is part of the contract rather than an artifact, and a
+// second backend does not get to be lazier.
+func conformOwnerListReflectsMutation(t *testing.T, r ownerIndexRepo) {
+	const owner = "key:oi-fresh"
+	p := pasteOf("oi923456", owner, 10)
+	p.Name = "before"
+	ownerInsert(t, r, p)
+
+	if err := r.SetName(p.Slug, "after", domain.Identity(owner), p.CreatedAt); err != nil {
+		t.Fatalf("SetName: %v", err)
+	}
+	if d, ok := r.(pendingConfirmsDrainer); ok {
+		d.WaitPendingConfirms()
+	}
+
+	got, err := r.ListByOwner(owner)
+	if err != nil {
+		t.Fatalf("ListByOwner: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("listing = %d pastes; want 1", len(got))
+	}
+	if got[0].Name != "after" {
+		t.Fatalf("listing shows name %q after a rename to %q; the index is stale. "+
+			"A denormalised summary must be written by the mutation, not only by the insert.",
+			got[0].Name, "after")
+	}
+}
+
 func runOwnerIndexConformance(t *testing.T, name string, newRepo func(t *testing.T) ownerIndexRepo) {
 	t.Helper()
 	t.Run(name+"/OwnerListIsScopedAndComplete", func(t *testing.T) {
@@ -148,5 +185,8 @@ func runOwnerIndexConformance(t *testing.T, name string, newRepo func(t *testing
 	t.Run(name+"/OwnerFirstSeenIsStable", func(t *testing.T) { conformOwnerFirstSeenIsStable(t, newRepo(t)) })
 	t.Run(name+"/DropStaleEntryOnlyWhenAbsent", func(t *testing.T) {
 		conformDropStaleEntryOnlyWhenAbsent(t, newRepo(t))
+	})
+	t.Run(name+"/OwnerListReflectsMutation", func(t *testing.T) {
+		conformOwnerListReflectsMutation(t, newRepo(t))
 	})
 }
