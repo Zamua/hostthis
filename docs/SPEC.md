@@ -5569,6 +5569,15 @@ it succeeds the bind + row co-commit or neither lands. The pending model is KEPT
 unchanged for the detached-store path (local / shale-without-a-blob-
 bucket), where it is still correct.
 
+**Which of the two happens is DATA, not a branch on the backend.** The blob
+adapter declares the status a freshly committed record carries, and the create
+flow is one path driven by that value: READY means the adapter binds the bytes
+inside the metadata commit, so they are staged first and no finalizer is owed;
+PENDING means they land after, so the caller owes one. PENDING is a legal state
+any adapter may report rather than an artifact of one backend, and the read
+surface renders whatever status it actually got. A new adapter answers with a
+value instead of adding a branch above the port.
+
 **Orphan-bytes reclamation.** A crash between staging and the bind leaves a
 staged-but-unbound object. It is reclaimed from the RECORD the upload wrote
 before staging each file, not by scanning the object store for what looks
