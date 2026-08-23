@@ -31,6 +31,7 @@ type ownerIndexRepo interface {
 	DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, error)
 	SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
+	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 }
 
 func chargedBytes(t *testing.T, r ownerIndexRepo, owner string) (int, error) {
@@ -245,6 +246,57 @@ func conformReleaseIsIdempotent(t *testing.T, r ownerIndexRepo) {
 	}
 }
 
+// Deleting stops the charge and removes the listing entry, and both must hold
+// together: a paste absent from the listing while still charging is quota an
+// owner cannot see or free, and one charging nothing while still listed offers
+// them something that no longer exists.
+//
+// Also pins the ownership guard, because delete is destructive: a slug deleted
+// and re-minted by someone else must not be removable by a request holding the
+// old owner's details.
+func conformDeleteReleasesAndDelists(t *testing.T, r ownerIndexRepo) {
+	const owner = "key:oi-delete"
+	doomed := pasteOf("oic23456", owner, 700)
+	keep := pasteOf("oid23456", owner, 300)
+	ownerInsert(t, r, doomed)
+	ownerInsert(t, r, keep)
+
+	// A foreign owner cannot delete it.
+	if err := r.Delete(doomed.Slug, domain.Identity("key:someone-else"), doomed.CreatedAt); err == nil {
+		t.Fatal("a foreign identity deleted a paste it does not own")
+	}
+	if n, err := chargedBytes(t, r, owner); err != nil || n != 1000 {
+		t.Fatalf("charged = %d after a refused delete (err %v); want 1000 unchanged", n, err)
+	}
+
+	if err := r.Delete(doomed.Slug, domain.Identity(owner), doomed.CreatedAt); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if d, ok := r.(pendingConfirmsDrainer); ok {
+		d.WaitPendingConfirms()
+	}
+
+	n, err := chargedBytes(t, r, owner)
+	if err != nil {
+		t.Fatalf("charged after delete: %v", err)
+	}
+	if n != 300 {
+		t.Fatalf("charged = %d after deleting the 700; want 300, the survivor", n)
+	}
+	got, err := r.ListByOwner(owner)
+	if err != nil {
+		t.Fatalf("ListByOwner: %v", err)
+	}
+	for _, p := range got {
+		if p.Slug == doomed.Slug {
+			t.Fatalf("%s still listed after deletion; the listing and the charge must agree", p.Slug)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("listing = %d pastes; want 1, the survivor", len(got))
+	}
+}
+
 func runOwnerIndexConformance(t *testing.T, name string, newRepo func(t *testing.T) ownerIndexRepo) {
 	t.Helper()
 	t.Run(name+"/OwnerListIsScopedAndComplete", func(t *testing.T) {
@@ -259,4 +311,5 @@ func runOwnerIndexConformance(t *testing.T, name string, newRepo func(t *testing
 		conformOwnerListReflectsMutation(t, newRepo(t))
 	})
 	t.Run(name+"/ReleaseIsIdempotent", func(t *testing.T) { conformReleaseIsIdempotent(t, newRepo(t)) })
+	t.Run(name+"/DeleteReleasesAndDelists", func(t *testing.T) { conformDeleteReleasesAndDelists(t, newRepo(t)) })
 }

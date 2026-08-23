@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -107,6 +108,22 @@ func (r *PasteRepo) call(ctx context.Context, method, path, key, val string, bod
 		return 0, fmt.Errorf("celld: %s: %w", path, err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
+	// 404 and 409 are ANSWERS, not faults: callers map them to domain sentinels
+	// (not-found, over-quota). Wrapping them as errors would hide the sentinel
+	// behind a transport failure - which it did, until the owner-index suite
+	// caught it.
+	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound &&
+		resp.StatusCode != http.StatusConflict {
+		// Carry the cell's own explanation up. The identity cell refuses an
+		// impossible charge total and says WHICH value it refused; discarding
+		// that would trade a legible failure for a bare status code, and the
+		// number is the whole diagnostic.
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if len(detail) > 0 {
+			return resp.StatusCode, fmt.Errorf("celld: %s: status %d: %s", path, resp.StatusCode, detail)
+		}
+		return resp.StatusCode, nil
+	}
 	if out != nil && resp.StatusCode < 300 {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 			return resp.StatusCode, fmt.Errorf("celld: decode %s: %w", path, err)
@@ -131,11 +148,11 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 			"startedAt": now.UTC().UnixMilli(),
 		},
 	}, nil)
+	if status == http.StatusConflict {
+		return domain.ErrOverUserQuota // an expected refusal, not a fault
+	}
 	if err != nil {
 		return err
-	}
-	if status == http.StatusConflict {
-		return domain.ErrOverUserQuota
 	}
 	if status >= 300 {
 		return fmt.Errorf("celld: reserve: unexpected status %d", status)
@@ -369,5 +386,46 @@ func (r *PasteRepo) SetName(slug domain.Slug, name string, wantIdentity domain.I
 	}
 	_, err := r.call(context.Background(), http.MethodPost, "/identity/touch", "scope",
 		wantIdentity.String(), map[string]any{"slug": slug.String(), "name": name}, nil)
+	return err
+}
+
+// Delete removes a paste and stops charging its owner.
+//
+// TWO cells, not three. The index entry and the quota reservation are the SAME
+// record - the identity cell stores a per-slug entry carrying the size, and the
+// charged total is the sum over those entries - so dropping the entry releases
+// the quota in one write. They cannot diverge, because there is nothing to keep
+// in step.
+//
+// ORDER: the row first, then the entry.
+//
+// A crash between them leaves the row gone with its index entry still present,
+// which is precisely what DropStaleOwnerEntry repairs and what the owner-index
+// conformance pins. The other order would free the owner's quota while the
+// paste still exists, letting them exceed their cap - the money-losing
+// direction, and the one no repair path is watching for. So the step that is
+// irreversible in the wrong direction goes last, where the fewest crashes can
+// reach it.
+func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
+	var res struct {
+		Removed bool   `json:"removed"`
+		Reason  string `json:"reason"`
+	}
+	if _, err := r.call(context.Background(), http.MethodPost, "/paste/remove", "slug", slug.String(),
+		map[string]any{
+			"identity":  wantIdentity.String(),
+			"createdAt": wantCreatedAt.UTC().UnixMilli(),
+		}, &res); err != nil {
+		return err
+	}
+	if !res.Removed {
+		// Absent and foreign are the same answer to the caller: this is not
+		// your paste to delete, and saying which would leak existence.
+		return domain.ErrNotFound
+	}
+	// Releases the quota by un-counting the slug, which is idempotent by
+	// construction: a resolver replaying this cannot under-charge.
+	_, err := r.call(context.Background(), http.MethodPost, "/identity/release", "scope",
+		wantIdentity.String(), map[string]any{"slug": slug.String()}, nil)
 	return err
 }
