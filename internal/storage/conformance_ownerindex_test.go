@@ -32,6 +32,8 @@ type ownerIndexRepo interface {
 	SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
 	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
+	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, kind domain.ContentKind,
+		contentSHA string, size int, userCap int64, now time.Time) (domain.AppendResult, error)
 }
 
 func chargedBytes(t *testing.T, r ownerIndexRepo, owner string) (int, error) {
@@ -297,6 +299,42 @@ func conformDeleteReleasesAndDelists(t *testing.T, r ownerIndexRepo) {
 	}
 }
 
+// A new version changes what a paste COSTS, so the charge must follow it.
+//
+// Measured against shale before being asserted: appending a 300-byte version to
+// a 700-byte paste charges 1000, so every retained version counts and a version
+// write is on the quota path. A backend whose identity index carries the size -
+// which is how a listing stays a point read - therefore has to update it here
+// too, or the owner is charged for a paste they no longer have.
+//
+// The gap this closes: DeleteReleasesAndDelists pins that charge and listing
+// agree after a DELETE. Nothing pinned that they agree after an UPDATE, which
+// is exactly where a silent drift would live - redeploy-in-place is a
+// first-class workflow, not an edge case.
+func conformVersionChangesTheCharge(t *testing.T, r ownerIndexRepo) {
+	const owner = "key:oi-version"
+	p := pasteOf("oie23456", owner, 700)
+	ownerInsert(t, r, p)
+
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), p.Slug,
+		domain.KindHTML, "sha-v2", 300, 0, fixedNow); err != nil {
+		t.Fatalf("AppendVersionWithQuotaCheck: %v", err)
+	}
+	if d, ok := r.(pendingConfirmsDrainer); ok {
+		d.WaitPendingConfirms()
+	}
+
+	n, err := chargedBytes(t, r, owner)
+	if err != nil {
+		t.Fatalf("charged after appending a version: %v", err)
+	}
+	if n != 1000 {
+		t.Fatalf("charged = %d after appending 300 to a 700-byte paste; want 1000. "+
+			"Every retained version counts, so a denormalised size must be updated by the "+
+			"version write and not only by the insert.", n)
+	}
+}
+
 func runOwnerIndexConformance(t *testing.T, name string, newRepo func(t *testing.T) ownerIndexRepo) {
 	t.Helper()
 	t.Run(name+"/OwnerListIsScopedAndComplete", func(t *testing.T) {
@@ -312,4 +350,5 @@ func runOwnerIndexConformance(t *testing.T, name string, newRepo func(t *testing
 	})
 	t.Run(name+"/ReleaseIsIdempotent", func(t *testing.T) { conformReleaseIsIdempotent(t, newRepo(t)) })
 	t.Run(name+"/DeleteReleasesAndDelists", func(t *testing.T) { conformDeleteReleasesAndDelists(t, newRepo(t)) })
+	t.Run(name+"/VersionChangesTheCharge", func(t *testing.T) { conformVersionChangesTheCharge(t, newRepo(t)) })
 }

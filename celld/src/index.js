@@ -326,6 +326,8 @@ export class Paste {
         return this.rename(await request.json());
       case "remove":
         return this.remove(await request.json());
+      case "append":
+        return this.append(await request.json());
       default:
         return new Response("unknown op\n", { status: 404 });
     }
@@ -357,6 +359,29 @@ export class Paste {
     row.name = body.name;
     await this.state.storage.put("row", row);
     return Response.json({ changed: true });
+  }
+
+  // Appends a version. Version numbers never reuse a retired one, so the
+  // counter is stored rather than derived from the list length.
+  async append(body) {
+    const row = await this.state.storage.get("row");
+    if (!row) {
+      return Response.json({ appended: false, reason: "absent" });
+    }
+    const versions = (await this.state.storage.get("versions")) ?? [];
+    const nextVer = ((await this.state.storage.get("maxVer")) ?? 1) + 1;
+    versions.push({ ver: nextVer, kind: body.kind, contentSha: body.contentSha, size: body.size });
+    await this.state.storage.put("versions", versions);
+    await this.state.storage.put("maxVer", nextVer);
+    const wasPinned = (row.pinnedVersion ?? 0) !== 0;
+    if (!wasPinned) {
+      // The public URL follows the latest version unless explicitly pinned.
+      row.contentSha = body.contentSha;
+      row.kind = body.kind;
+      row.size = (row.size ?? 0) + body.size;
+      await this.state.storage.put("row", row);
+    }
+    return Response.json({ appended: true, ver: nextVer, wasPinned, totalSize: row.size ?? 0 });
   }
 
   // Guarded the same way a rename is: a slug deleted and re-minted by someone

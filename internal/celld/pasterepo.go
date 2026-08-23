@@ -429,3 +429,57 @@ func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantC
 		wantIdentity.String(), map[string]any{"slug": slug.String()}, nil)
 	return err
 }
+
+// AppendVersionWithQuotaCheck adds a version and re-charges the owner.
+//
+// TWO cells on the QUOTA path, which is why it is not a paste-cell-local
+// operation: every retained version counts against the cap - measured against
+// shale, where appending 300 to a 700-byte paste charges 1000 - and the
+// identity entry carries the size that a listing reads. Leaving the entry alone
+// would under-charge the owner and show a stale size in their listing.
+//
+// Quota is checked BEFORE the version lands, in the identity cell, so a refused
+// append leaves no version behind. Then the row, then the entry: same ordering
+// as the rest, so a crash leaves an under-counted charge that a reconcile can
+// correct rather than a version nobody is charged for.
+func (r *PasteRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug,
+	kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time,
+) (domain.AppendResult, error) {
+	got, err := r.Get(slug)
+	if err != nil {
+		return domain.AppendResult{}, err
+	}
+	owner := got.Identity.String()
+
+	if userCap > 0 {
+		have, err := r.SumActiveBytesByOwner(owner, now)
+		if err != nil {
+			return domain.AppendResult{}, err
+		}
+		if int64(have+size) > userCap {
+			return domain.AppendResult{}, domain.ErrOverUserQuota
+		}
+	}
+
+	var res struct {
+		Appended  bool `json:"appended"`
+		Ver       int  `json:"ver"`
+		WasPinned bool `json:"wasPinned"`
+		TotalSize int  `json:"totalSize"`
+	}
+	if _, err := r.call(ctx, http.MethodPost, "/paste/append", "slug", slug.String(),
+		map[string]any{"kind": string(kind), "contentSha": contentSHA, "size": size}, &res); err != nil {
+		return domain.AppendResult{}, err
+	}
+	if !res.Appended {
+		return domain.AppendResult{}, domain.ErrNotFound
+	}
+
+	// The charge follows the version. Absolute, not a delta: re-running this
+	// with the same total is a no-op, where "add size" would double-charge.
+	if _, err := r.call(ctx, http.MethodPost, "/identity/touch", "scope", owner,
+		map[string]any{"slug": slug.String(), "size": res.TotalSize}, nil); err != nil {
+		return domain.AppendResult{}, err
+	}
+	return domain.AppendResult{NewVer: res.Ver, WasPinned: res.WasPinned}, nil
+}
