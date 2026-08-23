@@ -7,9 +7,19 @@
   "compatibility_date": "2025-01-01",
   "durable_objects": {
     "bindings": [
-      { "name": "INTENTS", "class_name": "IntentLog" },
+      { "name": "IDENTITY", "class_name": "Identity" },
+      { "name": "PASTES", "class_name": "Paste" },
       { "name": "ROOMS", "class_name": "Room" }
     ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["IntentLog", "Room"] }]
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["IntentLog", "Room"] },
+    // Identity supersedes IntentLog: the cell owns the owner's quota and index
+    // as well as its intents, so a create's first step is one atomic event.
+    // `celld deploy` rejects renamed_classes, so this is a NEW class and
+    // IntentLog stays declared as a stub to keep the v1 migration resolvable.
+    // Intents written under the old class are stranded, which is acceptable
+    // only because this is an experiment with disposable state.
+    { "tag": "v2", "new_sqlite_classes": ["Identity", "Paste"] }
+  ]
 }
