@@ -359,6 +359,10 @@ export class Paste {
         return this.setStatus(await request.json());
       case "rename":
         return this.rename(await request.json());
+      case "claim":
+        return this.claim(await request.json());
+      case "unclaim":
+        return this.unclaim(await request.json());
       case "remove":
         return this.remove(await request.json());
       case "append":
@@ -375,11 +379,52 @@ export class Paste {
   }
 
   async put(body) {
+    // The slug namespace is global, and this cell IS the slug, so uniqueness is
+    // enforced here or nowhere: an unconditional write would let a second
+    // upload silently clobber the first owner's paste.
+    if (await this.state.storage.get("row")) {
+      return Response.json({ error: "slug-taken" }, { status: 409 });
+    }
+    const claim = await this.state.storage.get("claim");
+    if (claim && claim.owner !== body.row.identity) {
+      return Response.json({ error: "slug-taken" }, { status: 409 });
+    }
     // baseSize is v1's contribution: the version list holds only APPENDED
     // versions, so the total is v1 plus those. Without it, deleting an appended
     // version would recompute a total that has silently dropped v1.
     body.row.baseSize = body.row.size;
     await this.state.storage.put("row", body.row);
+    if (claim) {
+      await this.state.storage.delete("claim");
+    }
+    return new Response(null, { status: 204 });
+  }
+
+  // A slug held before its content exists, so a multi-file deploy can stage
+  // against the slug it will commit under. Same-owner re-claim is idempotent:
+  // a retry must not turn into a collision with itself.
+  async claim(body) {
+    if (await this.state.storage.get("row")) {
+      return Response.json({ error: "slug-taken" }, { status: 409 });
+    }
+    const claim = await this.state.storage.get("claim");
+    if (claim && claim.owner !== body.owner) {
+      return Response.json({ error: "slug-taken" }, { status: 409 });
+    }
+    if (!claim) {
+      await this.state.storage.put("claim", { owner: body.owner, at: body.now });
+    }
+    return new Response(null, { status: 204 });
+  }
+
+  // Releasing is deliberately narrow: it drops nothing once a row exists, and
+  // nothing owned by anyone else, so a repeated or late abandon cannot remove a
+  // slug something was actually committed under.
+  async unclaim(body) {
+    const claim = await this.state.storage.get("claim");
+    if (claim && claim.owner === body.owner && !(await this.state.storage.get("row"))) {
+      await this.state.storage.delete("claim");
+    }
     return new Response(null, { status: 204 });
   }
 
@@ -415,17 +460,25 @@ export class Paste {
     }
     const versions = (await this.state.storage.get("versions")) ?? [];
     const nextVer = ((await this.state.storage.get("maxVer")) ?? 1) + 1;
-    versions.push({ ver: nextVer, kind: body.kind, contentSha: body.contentSha, size: body.size });
+    versions.push({
+      ver: nextVer, kind: body.kind, contentSha: body.contentSha, size: body.size,
+      manifest: body.manifest ?? null,
+    });
     await this.state.storage.put("versions", versions);
     await this.state.storage.put("maxVer", nextVer);
+    // Bumped whether or not the head rolls: a pinned paste that gains a version
+    // has still been updated, and the timestamp reports the paste's last change,
+    // not the served version's.
+    row.updatedAt = body.now ?? row.updatedAt;
     const wasPinned = (row.pinnedVersion ?? 0) !== 0;
     if (!wasPinned) {
       // The public URL follows the latest version unless explicitly pinned.
       row.contentSha = body.contentSha;
       row.kind = body.kind;
+      row.manifest = body.manifest ?? null;
       row.size = (row.size ?? 0) + body.size;
-      await this.state.storage.put("row", row);
     }
+    await this.state.storage.put("row", row);
     return Response.json({ appended: true, ver: nextVer, wasPinned, totalSize: row.size ?? 0 });
   }
 

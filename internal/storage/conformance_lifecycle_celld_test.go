@@ -26,6 +26,7 @@ import (
 
 	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/storage"
 )
 
 var celldLifecycleSeq atomic.Int64
@@ -46,6 +47,43 @@ func celldNamespace() string {
 type namespacedRepo struct {
 	inner  *celld.PasteRepo
 	prefix string
+	// The paste and keygate surfaces are separate types in the adapter, and the
+	// full conformanceRepo wants both. Composed here rather than in the adapter:
+	// production wires them as separate fields, so merging them for the suite's
+	// convenience would be the test shaping the design.
+	kg namespacedKeygate
+}
+
+func (n namespacedRepo) AdmitNewKey(identity, subnet string, now time.Time, limit int,
+	window time.Duration,
+) (bool, error) {
+	return n.kg.AdmitNewKey(identity, subnet, now, limit, window)
+}
+
+func (n namespacedRepo) SubnetSnapshot(subnet string, now time.Time, window time.Duration) (int, time.Time, error) {
+	return n.kg.SubnetSnapshot(subnet, now, window)
+}
+
+func (n namespacedRepo) SubnetsForIdentity(identity string, now time.Time, window time.Duration) (int, error) {
+	return n.kg.SubnetsForIdentity(identity, now, window)
+}
+
+// The suite's site half needs a repo whose Sites view shares the SAME cells as
+// its paste view, or the cross-quota and slug-collision subtests exercise two
+// unrelated stores. Namespacing both through one prefix is what keeps them the
+// same store.
+func (n namespacedRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, m domain.Manifest,
+	root domain.ManifestEntry, size int, userCap int64, now time.Time,
+) (storage.AppendResult, error) {
+	return n.inner.AppendManifestVersion(ctx, n.slug(slug), m, root, size, userCap, now)
+}
+
+func (n namespacedRepo) PreClaimSlug(ctx context.Context, slug domain.Slug, owner string, now time.Time) error {
+	return n.inner.PreClaimSlug(ctx, n.slug(slug), n.owner(owner), now)
+}
+
+func (n namespacedRepo) ReleaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) error {
+	return n.inner.ReleaseSlugClaim(ctx, n.slug(slug), n.owner(owner))
 }
 
 func (n namespacedRepo) slug(s domain.Slug) domain.Slug {
@@ -65,9 +103,13 @@ func (n namespacedRepo) Get(s domain.Slug) (domain.Paste, error) {
 	if err != nil {
 		return domain.Paste{}, err
 	}
-	// Hand back the identifiers the caller used, or the suite's assertions
-	// would be reading the harness rather than the adapter.
+	// Hand back BOTH identifiers the caller used, or the suite's assertions
+	// would be reading the harness rather than the adapter. The identity matters
+	// as much as the slug: storage.Sites compares the stored owner against the
+	// caller's on every replace, so a prefix left on one side of that comparison
+	// turns an owned site into a not-found.
 	got.Slug = s
+	got.Identity = domain.Identity(strings.TrimPrefix(got.Identity.String(), n.prefix))
 	return got, nil
 }
 
@@ -127,10 +169,7 @@ func TestOwnerIndexConformance_Celld(t *testing.T) {
 		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld owner-index conformance")
 	}
 	runOwnerIndexConformance(t, "celld", func(t *testing.T) ownerIndexRepo {
-		return namespacedRepo{
-			inner:  celld.NewPasteRepo(base, nil),
-			prefix: celldNamespace(),
-		}
+		return newNamespacedCelld(base)
 	})
 }
 
@@ -140,10 +179,7 @@ func TestLifecycleConformance_Celld(t *testing.T) {
 		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld lifecycle conformance")
 	}
 	runLifecycleConformance(t, "celld", func(t *testing.T) lifecycleRepo {
-		return namespacedRepo{
-			inner:  celld.NewPasteRepo(base, nil),
-			prefix: celldNamespace(),
-		}
+		return newNamespacedCelld(base)
 	})
 }
 
@@ -181,4 +217,70 @@ func TestKeygateConformance_Celld(t *testing.T) {
 			prefix: celldNamespace() + "-",
 		}
 	})
+}
+
+// The site surface needs no celld-specific adapter: storage.Sites is pure
+// vocabulary over the paste repo, so the celld repo drops straight into it.
+// That this compiles at all is the claim being made.
+var _ storage.SiteBackingRepo = (*celld.PasteRepo)(nil)
+
+// newNamespacedCelld builds a paste+keygate view sharing ONE namespace, so the
+// site suite's cross-quota subtests see a single store.
+func newNamespacedCelld(base string) namespacedRepo {
+	ns := celldNamespace()
+	return namespacedRepo{
+		inner:  celld.NewPasteRepo(base, nil),
+		prefix: ns,
+		kg:     namespacedKeygate{inner: celld.NewKeyGateRepo(base, nil), prefix: ns + "-"},
+	}
+}
+
+func TestSiteConformance_Celld(t *testing.T) {
+	base := os.Getenv("CELLD_TEST_ENDPOINT")
+	if base == "" {
+		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld site conformance")
+	}
+	// A cell decides inside one event, so both byte caps hold exactly under
+	// concurrency - unlike shale, whose per-identity check is a scan outside the
+	// write and admits a bounded overshoot.
+	caps := conformCaps{StrictQuotaUnderConcurrency: true, StrictIdentityQuotaUnderConcurrency: true}
+	runSiteConformance(t, "celld", caps, func(t *testing.T) (conformanceRepo, conformanceSiteRepo) {
+		r := newNamespacedCelld(base)
+		return r, storage.NewSites(r)
+	})
+}
+
+// The remaining PasteAdmin surface, forwarded through the namespace. Mechanical
+// by nature: the suite's fixed slugs have to reach the same cells the rest of
+// the wrapper addresses.
+func (n namespacedRepo) GetVersion(s domain.Slug, ver int) (domain.Version, error) {
+	got, err := n.inner.GetVersion(n.slug(s), ver)
+	if err != nil {
+		return domain.Version{}, err
+	}
+	got.Slug = s
+	return got, nil
+}
+
+func (n namespacedRepo) ListVersions(s domain.Slug) ([]domain.Version, error) {
+	got, err := n.inner.ListVersions(n.slug(s))
+	for i := range got {
+		got[i].Slug = s
+	}
+	return got, err
+}
+
+func (n namespacedRepo) IsVersionServed(s domain.Slug, ver int) (bool, error) {
+	return n.inner.IsVersionServed(n.slug(s), ver)
+}
+
+func (n namespacedRepo) SetPinnedVersion(s domain.Slug, v domain.Version) error {
+	v.Slug = n.slug(s)
+	return n.inner.SetPinnedVersion(n.slug(s), v)
+}
+
+func (n namespacedRepo) Unpin(s domain.Slug) error { return n.inner.Unpin(n.slug(s)) }
+
+func (n namespacedRepo) OwnerSummary(o string, at time.Time) (domain.OwnerSummary, error) {
+	return n.inner.OwnerSummary(n.owner(o), at)
 }
