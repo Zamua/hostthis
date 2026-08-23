@@ -200,3 +200,37 @@ than days. It establishes the mechanism, not behaviour under fleet load or over
 a real TTL horizon. It also says nothing about the JS `setTimeout` gate, which
 is a separate question that still needs measuring on v0.3.0 before anything is
 built on WebSocket or RPC paths.
+
+---
+
+# Deployment requirements the adapter cannot choose for itself
+
+Learned from `infra/boardtogether/DEPLOY.md` and from the boardtogether agent,
+who have run celld in production since 2026-08-13. Copied rather than derived.
+
+- **`CELLD_IDLE_EVICT_S` must be set explicitly.** 0.2.0 stopped evicting idle
+  cells by default, so without it a cell never scales down on a timer: every
+  paste anyone touches stays resident at roughly 8 MB until the node hits its
+  memory-pressure threshold and sheds the LRU idle ones. That is a slow leak
+  with a cliff, not hibernation, and it undercuts the "dormant pastes are nearly
+  free" argument that motivated the port. 300 is the value boardtogether landed
+  on. Verified indirectly here: the alarm probe ran with 5 and eviction did
+  happen, so the mechanism works when configured.
+- **Pin the image by digest**, as the fleet already does.
+- **:8080 for ingress, :8081 peer-only behind a NetworkPolicy** that must never
+  be exposed. Credentials in a Secret.
+- **A fleet serves ONE application.** hostthis gets its own bucket rather than a
+  prefix on boardtogether's: a prefix isolates the deploy pointer, because
+  `deploy/current.json` is relative to it, but NOT the credential. Their staging
+  user is scoped to the whole bucket, so a shared prefix would share write
+  access with anyone holding that key.
+
+**Rooms will not scale down.** celld does not shed a cell with active work or a
+live host WebSocket, and an outbound WebSocket pins its cell resident. A room
+cell therefore holds its memory for as long as anyone is connected. That is
+correct behaviour, and it means rooms are the part of hostthis whose footprint
+tracks concurrent users rather than dormant content.
+
+For sizing: the celld pod serving boardtogether in production sits at 7m CPU and
+34Mi against a 640Mi limit, so the runtime is cheap. Resident cell count is what
+moves the number, at roughly 8 MB each.
