@@ -411,15 +411,25 @@ naming as one rather than three:
 The consequence, which follows from the second and was not designed for:
 **the charged total is a FUNCTION of the paste cells' current contents, not an
 accumulated history.** It cannot drift irrecoverably, because it can be
-recomputed: read each entry's slug, sum the retained bytes in its paste cell,
-and compare against what the identity cell stores. A divergence is a bug
-findable before a user notices their quota is wrong.
+recomputed and compared against what the identity cell stores. A divergence is a
+bug findable before a user notices their quota is wrong.
 
-That check is not built. What matters is that the PROPERTY exists, because it is
-easy to destroy by accident: the moment someone optimises `touch` into an
-increment for a plausible-looking reason, the total becomes a history again and
-nothing announces that it happened. If that optimisation is ever proposed, this
-is the thing being traded away.
+**Reconstructible from the PASTE CELL'S OWN ACCOUNTING, not from the version
+list.** That distinction is the whole warning. The version list holds only
+APPENDED versions; v1's bytes live in the row as `baseSize`. So the obvious way
+to write the repair - iterate the versions, sum their sizes, compare - silently
+under-charges every paste that has ever had a version deleted, and it would look
+correct in review. Ask the paste cell for its total; do not re-derive one.
+
+That check is not built. What matters is that the PROPERTY exists, because there
+are now TWO ways to lose it and neither announces itself:
+
+1. optimising `touch` into an increment, which turns the total back into a
+   history
+2. recomputing from the version list instead of the paste cell, which is a
+   repair tool that quietly makes the numbers wrong - worse than no repair tool
+
+If either is ever proposed, this is what is being traded away.
 
 ## Append and DeleteVersion are not mirror images
 
