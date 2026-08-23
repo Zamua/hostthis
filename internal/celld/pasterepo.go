@@ -94,6 +94,18 @@ func (r pasteRow) domain() domain.Paste {
 	}
 }
 
+// isCellAnswer reports whether a status is part of the adapter's vocabulary
+// rather than a failure. Kept as a list so adding a new one is a deliberate
+// edit, not a widened comparison.
+func isCellAnswer(status int) bool {
+	switch status {
+	case http.StatusNotFound, http.StatusConflict,
+		http.StatusRequestEntityTooLarge, http.StatusInsufficientStorage:
+		return true
+	}
+	return false
+}
+
 func (r *PasteRepo) call(ctx context.Context, method, path, key, val string, body, out any) (int, error) {
 	// The routing param is MERGED rather than appended: a path may already carry
 	// query params of its own, and a second bare "?" makes the whole string one
@@ -123,12 +135,15 @@ func (r *PasteRepo) call(ctx context.Context, method, path, key, val string, bod
 		return 0, fmt.Errorf("celld: %s: %w", path, err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
-	// 404 and 409 are ANSWERS, not faults: callers map them to domain sentinels
-	// (not-found, over-quota). Wrapping them as errors would hide the sentinel
-	// behind a transport failure - which it did, until the owner-index suite
-	// caught it.
-	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound &&
-		resp.StatusCode != http.StatusConflict {
+	// Some statuses are ANSWERS, not faults: the caller maps them to domain
+	// sentinels (not-found, slug taken, over quota, at capacity). Wrapping one
+	// as an error hides the sentinel behind a transport failure, and the caller's
+	// switch on it becomes unreachable - which is what happened to 404/409 until
+	// the owner-index suite caught it, and to 413/507 until the room suite did.
+	//
+	// A status not on this list means the cell did something the adapter does not
+	// model, which IS a fault.
+	if resp.StatusCode >= 400 && !isCellAnswer(resp.StatusCode) {
 		// Carry the cell's own explanation up. The identity cell refuses an
 		// impossible charge total and says WHICH value it refused; discarding
 		// that would trade a legible failure for a bare status code, and the
@@ -735,3 +750,8 @@ func (r *PasteRepo) ReleaseSlugClaim(ctx context.Context, slug domain.Slug, owne
 		map[string]any{"owner": owner}, nil)
 	return err
 }
+
+// urlQuery escapes a value for a query string. Named rather than inlined so
+// every call site escapes, which is what keeps a key containing & or = from
+// silently becoming two parameters.
+func urlQuery(v string) string { return url.QueryEscape(v) }

@@ -299,6 +299,18 @@ export class Identity {
 // Hibernatable sockets are INBOUND and accepted by the runtime, so the cell can
 // be evicted while clients stay connected. That is the opposite of an OUTBOUND
 // Durable Object socket, which upstream says does not survive a cell move.
+// A ROOM cell: one app room's key/value state and its live sockets.
+//
+// The cell IS the room, so the dense per-room sequence and the per-room caps
+// need no coordination: a cell handles one event at a time, which is exactly
+// the serialization a "+1 per committed mutation" counter requires. On a
+// sharded store the same guarantee costs a CAS per write.
+//
+// The per-APP cap cannot live here, because the app spans rooms. The caller
+// passes the app's OTHER rooms' bytes so both caps are still decided in one
+// event; that figure can be stale under concurrent writes to sibling rooms,
+// which is a bounded overshoot on the app cap only. The per-ROOM cap stays
+// exact.
 export class Room {
   constructor(state) {
     this.state = state;
@@ -306,13 +318,28 @@ export class Room {
 
   async fetch(request) {
     const url = new URL(request.url);
-    if (url.pathname.endsWith("/count")) {
+    const op = url.pathname.split("/").pop();
+    if (op === "count") {
       return Response.json({
         sockets: this.state.getWebSockets().length,
         // Survives hibernation, so a non-zero value after a move proves the
         // cell was restored rather than freshly created.
         seen: (await this.state.storage.get("seen")) ?? 0,
       });
+    }
+    switch (op) {
+      case "create":
+        return this.create(await request.json());
+      case "meta":
+        return this.meta();
+      case "get":
+        return this.getValue(url.searchParams.get("key"));
+      case "scan":
+        return this.scan();
+      case "put":
+        return this.put(await request.json());
+      case "del":
+        return this.del(await request.json());
     }
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket\n", { status: 426 });
@@ -323,6 +350,104 @@ export class Room {
     // the runtime evict the cell while the socket stays open.
     this.state.acceptWebSocket(server);
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async create(body) {
+    if (await this.state.storage.get("meta")) {
+      return Response.json({ created: false });
+    }
+    await this.state.storage.put("meta", {
+      appSlug: body.appSlug, id: body.id,
+      createdAt: body.createdAt, updatedAt: body.updatedAt,
+    });
+    return Response.json({ created: true });
+  }
+
+  async meta() {
+    const meta = await this.state.storage.get("meta");
+    if (!meta) {
+      return new Response("not found\n", { status: 404 });
+    }
+    return Response.json(meta);
+  }
+
+  async getValue(key) {
+    if (!(await this.state.storage.get("meta"))) {
+      return new Response("not found\n", { status: 404 });
+    }
+    const kv = (await this.state.storage.get("kv")) ?? {};
+    if (!Object.hasOwn(kv, key)) {
+      return new Response("not found\n", { status: 404 });
+    }
+    return Response.json({ value: kv[key] });
+  }
+
+  async scan() {
+    if (!(await this.state.storage.get("meta"))) {
+      return new Response("not found\n", { status: 404 });
+    }
+    return Response.json({
+      values: (await this.state.storage.get("kv")) ?? {},
+      seq: (await this.state.storage.get("seq")) ?? 0,
+    });
+  }
+
+  // Both caps are decided BEFORE anything is written, so a rejected write
+  // leaves the prior state exactly as it was - which is the contract callers
+  // rely on to retry.
+  async put(body) {
+    const meta = await this.state.storage.get("meta");
+    if (!meta) {
+      return new Response("not found\n", { status: 404 });
+    }
+    const kv = (await this.state.storage.get("kv")) ?? {};
+    const bytes = (await this.state.storage.get("bytes")) ?? 0;
+    const size = b64len(body.value);
+    const prior = Object.hasOwn(kv, body.key) ? b64len(kv[body.key]) : 0;
+    const next = bytes - prior + size;
+
+    if (!Object.hasOwn(kv, body.key) && body.keyCap > 0 &&
+        Object.keys(kv).length >= body.keyCap) {
+      return Response.json({ error: "room-full" }, { status: 413 });
+    }
+    if (body.roomCap > 0 && next > body.roomCap) {
+      return Response.json({ error: "room-full" }, { status: 413 });
+    }
+    if (body.appCap > 0 && body.otherBytes + next > body.appCap) {
+      return Response.json({ error: "app-full" }, { status: 507 });
+    }
+
+    kv[body.key] = body.value;
+    const seq = ((await this.state.storage.get("seq")) ?? 0) + 1;
+    meta.updatedAt = body.now;
+    await this.state.storage.put("kv", kv);
+    await this.state.storage.put("bytes", next);
+    await this.state.storage.put("seq", seq);
+    await this.state.storage.put("meta", meta);
+    return Response.json({ seq, bytes: next });
+  }
+
+  // An absent key still commits and still consumes a sequence number: a client
+  // splicing a live stream onto a snapshot reads a skipped seq as a lost frame,
+  // so a silent no-op here would look like data loss downstream.
+  async del(body) {
+    const meta = await this.state.storage.get("meta");
+    if (!meta) {
+      return new Response("not found\n", { status: 404 });
+    }
+    const kv = (await this.state.storage.get("kv")) ?? {};
+    let bytes = (await this.state.storage.get("bytes")) ?? 0;
+    if (Object.hasOwn(kv, body.key)) {
+      bytes -= b64len(kv[body.key]);
+      delete kv[body.key];
+    }
+    const seq = ((await this.state.storage.get("seq")) ?? 0) + 1;
+    meta.updatedAt = body.now;
+    await this.state.storage.put("kv", kv);
+    await this.state.storage.put("bytes", bytes);
+    await this.state.storage.put("seq", seq);
+    await this.state.storage.put("meta", meta);
+    return Response.json({ seq, bytes });
   }
 
   async webSocketMessage(ws, message) {
@@ -336,6 +461,22 @@ export class Room {
     // cell believed happened.
     await this.state.storage.put("lastClose", { code, reason, wasClean });
   }
+}
+
+// Decoded length of a base64 payload, without decoding it. Room values are
+// arbitrary bytes and travel base64-encoded, but every cap is stated in the
+// app's OWN bytes, so the encoded length would charge 4/3 of the truth.
+function b64len(b64) {
+  if (!b64) {
+    return 0;
+  }
+  let pad = 0;
+  if (b64.endsWith("==")) {
+    pad = 2;
+  } else if (b64.endsWith("=")) {
+    pad = 1;
+  }
+  return (b64.length * 3) / 4 - pad;
 }
 
 // The PASTE cell: one row, addressed by slug. Separate from the identity cell
@@ -359,6 +500,14 @@ export class Paste {
         return this.setStatus(await request.json());
       case "rename":
         return this.rename(await request.json());
+      case "roomcreated":
+        return this.roomCreated(await request.json());
+      case "roomcounts":
+        return this.roomCounts(new URL(request.url).searchParams);
+      case "roomothers":
+        return this.roomOthers(new URL(request.url).searchParams.get("room"));
+      case "roomsettle":
+        return this.roomSettle(await request.json());
       case "claim":
         return this.claim(await request.json());
       case "unclaim":
@@ -397,6 +546,68 @@ export class Paste {
     if (claim) {
       await this.state.storage.delete("claim");
     }
+    return new Response(null, { status: 204 });
+  }
+
+  // --- app-scoped room accounting -------------------------------------------
+  //
+  // Rooms belong to an app, and the app slug IS this cell, so the creation
+  // ledger and the per-app byte total live here rather than in any room. A room
+  // cannot answer "how many rooms did this subnet just create" without seeing
+  // its siblings, and cells cannot see each other.
+  //
+  // This works on a cell with NO row: an app's rooms are not gated on the app
+  // having been deployed yet.
+
+  async roomCreated(body) {
+    const ledger = (await this.state.storage.get("roomLedger")) ?? [];
+    ledger.push({ id: body.id, subnet: body.subnet, at: body.at });
+    await this.state.storage.put("roomLedger", ledger);
+    return new Response(null, { status: 204 });
+  }
+
+  // Counts and PRUNES in one pass: rows past the window are dropped as they are
+  // walked, so the ledger stays bounded by recent activity with no background
+  // sweep. Nothing reads a dropped row - it is outside every window a caller
+  // can ask about.
+  async roomCounts(params) {
+    const now = Number(params.get("now"));
+    const windowMs = Number(params.get("window"));
+    const subnet = params.get("subnet");
+    const ledger = (await this.state.storage.get("roomLedger")) ?? [];
+    const live = ledger.filter((e) => now - e.at < windowMs);
+    if (live.length !== ledger.length) {
+      await this.state.storage.put("roomLedger", live);
+    }
+    return Response.json({
+      perSubnet: live.filter((e) => e.subnet === subnet).length,
+      perApp: live.length,
+    });
+  }
+
+  // The app's room bytes EXCLUDING one room, which is what that room needs to
+  // decide the app cap inside its own single event.
+  async roomOthers(roomID) {
+    const bytes = (await this.state.storage.get("roomBytes")) ?? {};
+    let total = 0;
+    for (const [id, n] of Object.entries(bytes)) {
+      if (id !== roomID) {
+        total += n;
+      }
+    }
+    return Response.json({ otherBytes: total });
+  }
+
+  // ABSOLUTE per room, never a delta: re-running a settle with the same total
+  // is a no-op, where "add n" would double-charge a retry. The same reason the
+  // identity cell charges pastes absolutely.
+  async roomSettle(body) {
+    const bytes = (await this.state.storage.get("roomBytes")) ?? {};
+    if (bytes[body.room] === body.bytes) {
+      return new Response(null, { status: 204 });
+    }
+    bytes[body.room] = body.bytes;
+    await this.state.storage.put("roomBytes", bytes);
     return new Response(null, { status: 204 });
   }
 
@@ -636,7 +847,7 @@ export default {
     if (url.pathname === "/healthz") {
       return new Response("ok\n");
     }
-    if (url.pathname.startsWith("/rooms/")) {
+    if (url.pathname.startsWith("/room/")) {
       const room = url.searchParams.get("room");
       if (!room) {
         return new Response("room required\n", { status: 400 });

@@ -284,3 +284,66 @@ func (n namespacedRepo) Unpin(s domain.Slug) error { return n.inner.Unpin(n.slug
 func (n namespacedRepo) OwnerSummary(o string, at time.Time) (domain.OwnerSummary, error) {
 	return n.inner.OwnerSummary(n.owner(o), at)
 }
+
+// namespacedRooms keeps each run's app slugs distinct, for the reason the paste
+// wrapper does: cells are durable and the suite's app slugs are fixed.
+type namespacedRooms struct {
+	inner  *celld.RoomRepo
+	prefix string
+}
+
+func (n namespacedRooms) app(s domain.Slug) domain.Slug { return domain.Slug(n.prefix + string(s)) }
+
+func (n namespacedRooms) CreateRoom(room domain.Room, subnet string, appCap int64, now time.Time) error {
+	room.AppSlug = n.app(room.AppSlug)
+	return n.inner.CreateRoom(room, n.prefix+subnet, appCap, now)
+}
+
+func (n namespacedRooms) GetRoom(app domain.Slug, id domain.RoomID) (domain.Room, error) {
+	got, err := n.inner.GetRoom(n.app(app), id)
+	if err != nil {
+		return domain.Room{}, err
+	}
+	got.AppSlug = app
+	return got, nil
+}
+
+func (n namespacedRooms) GetValue(app domain.Slug, id domain.RoomID, key string) ([]byte, error) {
+	return n.inner.GetValue(n.app(app), id, key)
+}
+
+func (n namespacedRooms) ScanRoom(app domain.Slug, id domain.RoomID) (domain.RoomKV, error) {
+	return n.inner.ScanRoom(n.app(app), id)
+}
+
+func (n namespacedRooms) PutValue(app domain.Slug, id domain.RoomID, key string, val []byte,
+	appCap int64, now time.Time,
+) (uint64, error) {
+	return n.inner.PutValue(n.app(app), id, key, val, appCap, now)
+}
+
+func (n namespacedRooms) DeleteValue(app domain.Slug, id domain.RoomID, key string, now time.Time) (uint64, error) {
+	return n.inner.DeleteValue(n.app(app), id, key, now)
+}
+
+func (n namespacedRooms) CountRoomCreates(app domain.Slug, subnet string, now time.Time,
+	window time.Duration,
+) (int, int, error) {
+	return n.inner.CountRoomCreates(n.app(app), n.prefix+subnet, now, window)
+}
+
+func TestRoomConformance_Celld(t *testing.T) {
+	base := os.Getenv("CELLD_TEST_ENDPOINT")
+	if base == "" {
+		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld room conformance")
+	}
+	caps := conformCaps{StrictQuotaUnderConcurrency: true, StrictIdentityQuotaUnderConcurrency: true}
+	runRoomConformance(t, "celld", caps, func(t *testing.T) roomConformanceStores {
+		r := newNamespacedCelld(base)
+		return roomConformanceStores{
+			Rooms: namespacedRooms{inner: celld.NewRoomRepo(base, nil), prefix: r.prefix},
+			Paste: r,
+			Site:  storage.NewSites(r),
+		}
+	})
+}
