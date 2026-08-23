@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -88,7 +89,15 @@ func (r pasteRow) domain() domain.Paste {
 }
 
 func (r *PasteRepo) call(ctx context.Context, method, path, key, val string, body, out any) (int, error) {
-	u := fmt.Sprintf("%s%s?%s=%s", r.base, path, key, url.QueryEscape(val))
+	// The routing param is MERGED rather than appended: a path may already carry
+	// query params of its own, and a second bare "?" makes the whole string one
+	// unparseable query, which presents as the cell rejecting a param that is
+	// plainly in the URL.
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	u := fmt.Sprintf("%s%s%s%s=%s", r.base, path, sep, key, url.QueryEscape(val))
 	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)

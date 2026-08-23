@@ -9,7 +9,8 @@
     "bindings": [
       { "name": "IDENTITY", "class_name": "Identity" },
       { "name": "PASTES", "class_name": "Paste" },
-      { "name": "ROOMS", "class_name": "Room" }
+      { "name": "ROOMS", "class_name": "Room" },
+      { "name": "SUBNETS", "class_name": "Subnet" }
     ]
   },
   "migrations": [
@@ -20,6 +21,7 @@
     // IntentLog stays declared as a stub to keep the v1 migration resolvable.
     // Intents written under the old class are stranded, which is acceptable
     // only because this is an experiment with disposable state.
-    { "tag": "v2", "new_sqlite_classes": ["Identity", "Paste"] }
+    { "tag": "v2", "new_sqlite_classes": ["Identity", "Paste"] },
+    { "tag": "v3", "new_sqlite_classes": ["Subnet"] }
   ]
 }
