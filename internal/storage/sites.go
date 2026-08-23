@@ -15,13 +15,28 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// Sites adapts the paste repo onto the site port.
-
-type Sites struct {
-	repo *ShaleRepo
+// SiteBackingRepo is the slice of a paste repo the site surface needs.
+//
+// An interface rather than a concrete repo because the translation below is
+// pure vocabulary - directory to paste and back - with nothing backend-specific
+// in it. Naming the six methods it actually uses lets every backend share this
+// one implementation instead of each writing its own copy of the same mapping.
+type SiteBackingRepo interface {
+	Get(domain.Slug) (domain.Paste, error)
+	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
+	AppendManifestVersion(ctx context.Context, slug domain.Slug, m domain.Manifest,
+		root domain.ManifestEntry, size int, userCap int64, now time.Time) (AppendResult, error)
+	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
+	PreClaimSlug(ctx context.Context, slug domain.Slug, owner string, now time.Time) error
+	ReleaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) error
 }
 
-func NewSites(repo *ShaleRepo) *Sites {
+// Sites adapts the paste repo onto the site port.
+type Sites struct {
+	repo SiteBackingRepo
+}
+
+func NewSites(repo SiteBackingRepo) *Sites {
 	return &Sites{repo: repo}
 }
 

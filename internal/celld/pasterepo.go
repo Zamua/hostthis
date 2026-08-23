@@ -64,6 +64,10 @@ type pasteRow struct {
 	PinnedVersion int    `json:"pinnedVersion"`
 	CreatedAt     int64  `json:"createdAt"`
 	UpdatedAt     int64  `json:"updatedAt"`
+
+	// The SERVED version's file set. A single-document paste carries a
+	// one-entry manifest, so the site surface needs no second shape.
+	Manifest domain.Manifest `json:"manifest"`
 }
 
 func rowOf(p domain.Paste) pasteRow {
@@ -74,6 +78,7 @@ func rowOf(p domain.Paste) pasteRow {
 		PinnedVersion: p.PinnedVersion,
 		CreatedAt:     p.CreatedAt.UTC().UnixMilli(),
 		UpdatedAt:     p.UpdatedAt.UTC().UnixMilli(),
+		Manifest:      p.Manifest,
 	}
 }
 
@@ -85,6 +90,7 @@ func (r pasteRow) domain() domain.Paste {
 		PinnedVersion: r.PinnedVersion,
 		CreatedAt:     time.UnixMilli(r.CreatedAt).UTC(),
 		UpdatedAt:     time.UnixMilli(r.UpdatedAt).UTC(),
+		Manifest:      r.Manifest,
 	}
 }
 
@@ -174,6 +180,11 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 			map[string]any{"slug": p.Slug.String(), "intentId": intentID}, nil)
 		if err != nil {
 			return err
+		}
+		if status == http.StatusConflict {
+			// The upload path retries on this sentinel with a fresh slug, so it
+			// must survive as itself rather than as a status code.
+			return domain.ErrSlugTaken
 		}
 		return fmt.Errorf("celld: paste put: unexpected status %d", status)
 	}
@@ -477,7 +488,10 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 		TotalSize int  `json:"totalSize"`
 	}
 	if _, err := r.call(ctx, http.MethodPost, "/paste/append", "slug", slug.String(),
-		map[string]any{"kind": string(kind), "contentSha": contentSHA, "size": size}, &res); err != nil {
+		map[string]any{
+			"kind": string(kind), "contentSha": contentSHA, "size": size,
+			"now": now.UTC().UnixMilli(),
+		}, &res); err != nil {
 		return domain.AppendResult{}, err
 	}
 	if !res.Appended {
@@ -496,10 +510,11 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 // ListVersions is a single-cell read: the appended versions live beside the row.
 func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	var wire []struct {
-		Ver        int    `json:"ver"`
-		Kind       string `json:"kind"`
-		ContentSHA string `json:"contentSha"`
-		Size       int    `json:"size"`
+		Ver        int             `json:"ver"`
+		Kind       string          `json:"kind"`
+		ContentSHA string          `json:"contentSha"`
+		Size       int             `json:"size"`
+		Manifest   domain.Manifest `json:"manifest"`
 	}
 	status, err := r.call(context.Background(), http.MethodGet, "/paste/versions", "slug", slug.String(), nil, &wire)
 	if err != nil {
@@ -512,7 +527,7 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	for _, w := range wire {
 		out = append(out, domain.Version{
 			Slug: slug, VerNum: w.Ver, Kind: domain.ContentKind(w.Kind),
-			ContentSHA: w.ContentSHA, Size: w.Size,
+			ContentSHA: w.ContentSHA, Size: w.Size, Manifest: w.Manifest,
 		})
 	}
 	return out, nil
@@ -640,4 +655,83 @@ func (r *PasteRepo) OwnerSummary(owner string, now time.Time) (domain.OwnerSumma
 		return domain.OwnerSummary{}, err
 	}
 	return domain.OwnerSummary{Active: active, FirstSeen: first, PasteBytes: bytes}, nil
+}
+
+// --- the site surface -------------------------------------------------------
+//
+// A directory IS a paste whose version carries N manifest entries, so these
+// three methods are all storage.Sites needs to run on cells: no site class, no
+// second quota, no second enumeration index. The slug namespace stays global
+// because the paste cell IS the slug.
+
+// AppendManifestVersion appends a version whose content is a file set.
+//
+// The same two-cell shape as AppendVersionWithQuotaCheck and for the same
+// reason: quota is checked first against an ABSOLUTE total, so a refusal leaves
+// nothing behind, and the charge follows the version rather than preceding it.
+func (r *PasteRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, m domain.Manifest,
+	root domain.ManifestEntry, size int, userCap int64, now time.Time,
+) (domain.AppendResult, error) {
+	got, err := r.Get(slug)
+	if err != nil {
+		return domain.AppendResult{}, err
+	}
+	owner := got.Identity.String()
+
+	if userCap > 0 {
+		have, err := r.SumActiveBytesByOwner(owner, now)
+		if err != nil {
+			return domain.AppendResult{}, err
+		}
+		if int64(have+size) > userCap {
+			return domain.AppendResult{}, domain.ErrOverUserQuota
+		}
+	}
+
+	var res struct {
+		Appended  bool `json:"appended"`
+		Ver       int  `json:"ver"`
+		WasPinned bool `json:"wasPinned"`
+		TotalSize int  `json:"totalSize"`
+	}
+	if _, err := r.call(ctx, http.MethodPost, "/paste/append", "slug", slug.String(),
+		map[string]any{
+			"kind": string(domain.KindSite), "contentSha": root.SHA,
+			"size": size, "manifest": m, "now": now.UTC().UnixMilli(),
+		}, &res); err != nil {
+		return domain.AppendResult{}, err
+	}
+	if !res.Appended {
+		return domain.AppendResult{}, domain.ErrNotFound
+	}
+	if _, err := r.call(ctx, http.MethodPost, "/identity/touch", "scope", owner,
+		map[string]any{"slug": slug.String(), "size": res.TotalSize}, nil); err != nil {
+		return domain.AppendResult{}, err
+	}
+	return domain.AppendResult{NewVer: res.Ver, WasPinned: res.WasPinned}, nil
+}
+
+// PreClaimSlug holds a slug before its content exists, so a deploy stages
+// against the slug it will commit under.
+func (r *PasteRepo) PreClaimSlug(ctx context.Context, slug domain.Slug, owner string, now time.Time) error {
+	status, err := r.call(ctx, http.MethodPost, "/paste/claim", "slug", slug.String(),
+		map[string]any{"owner": owner, "now": now.UTC().UnixMilli()}, nil)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusConflict {
+		return domain.ErrSlugTaken
+	}
+	if status >= 300 {
+		return fmt.Errorf("celld: claim %s: unexpected status %d", slug, status)
+	}
+	return nil
+}
+
+// ReleaseSlugClaim gives back a slug whose deploy never landed. A no-op on an
+// absent, foreign or already-committed slug, so a repeated abandon is harmless.
+func (r *PasteRepo) ReleaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) error {
+	_, err := r.call(ctx, http.MethodPost, "/paste/unclaim", "slug", slug.String(),
+		map[string]any{"owner": owner}, nil)
+	return err
 }
