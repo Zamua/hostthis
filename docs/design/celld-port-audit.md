@@ -312,3 +312,57 @@ Three consequences:
 A rolling deploy therefore drops every room connection. With one replica that is
 unavoidable; with more, it is still per-cell rather than per-node, because the
 cell moves regardless of which node the client reached.
+
+---
+
+# Decision: four cell classes, with a measurement behind it
+
+The class name is part of a cell's storage key (`cells/<Class>:<id>/...`) and
+`celld deploy` REJECTS `renamed_classes`, so the taxonomy is effectively
+permanent once prod holds data. That makes it worth deciding deliberately rather
+than inheriting from a sketch.
+
+`Paste`, `Identity`, `Subnet`, `Room`.
+
+**Why not one class with structured ids.** The suggestion was that ids stay
+under our control while class names do not, so `paste:<slug>` in a single class
+would keep future taxonomy changes cheap. It does not: `idFromName` HASHES the
+name, so the key is `cells/Room:<64 hex>` and the original name is not
+recoverable. Changing a naming scheme orphans the old cells exactly as changing
+a class does. The two options differ only on RENAMES, which are cosmetic;
+RE-PARTITIONING is a data migration under both. Since the expensive case is
+symmetric, per-kind classes win on call-site clarity and per-class SQLite
+separation.
+
+**The risk that decision carries** is that `Identity` should have been two
+cells. Every upload touches it twice - reserve, then confirm - and a cell is
+single-threaded, so one owner's uploads serialize there by construction. If that
+is a bottleneck, splitting it later is the expensive symmetric migration above.
+
+## Measured: the identity cell is not the constraint
+
+Concurrent inserts from ONE identity, against a control of the same N inserts
+across N DISTINCT identities. The control is the measurement: rising latency
+with rising N proves nothing by itself, because HTTP, the client and the node
+all contend too. The DIFFERENCE isolates the shared cell's single thread.
+
+    n     shared wall/p50/p99        distinct wall/p50/p99      ratio
+    1      80ms /  80ms /  80ms       82ms /  82ms /  82ms      0.97x
+    4     953ms / 344ms / 619ms      683ms / 224ms / 356ms      1.40x
+    8     638ms / 443ms / 564ms      505ms / 298ms / 437ms      1.26x
+    16    619ms / 559ms / 599ms      581ms / 307ms / 508ms      1.07x
+    32    946ms / 637ms / 680ms      760ms / 478ms / 751ms      1.24x
+
+**About 1.2x, and flat in N.** True serialization would compound: N requests
+through one thread would cost roughly N times a single request while the
+distinct arm scaled out, so the ratio would climb with N. It does not.
+
+**Both arms are pre-warmed, and that correction changed the answer.** The first
+run showed shared FASTER than distinct at every N above 1, which was a confound
+rather than a result: the distinct arm was paying to activate N cold cells while
+the shared arm activated one, so it measured activation, not serialization. A
+discarded warm-up burst in both arms removed it.
+
+So the four classes are committed with evidence rather than judgement. Not
+claimed: trivial payloads, one node, N up to 32, and 32 concurrent uploads from
+a single identity is already well past what this service sees.
