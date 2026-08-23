@@ -92,6 +92,7 @@ func runConformanceWithSites(
 		runRoomConformance(t, name, caps, newRooms)
 	}
 	runLifecycleConformance(t, name, func(t *testing.T) lifecycleRepo { return newRepo(t) })
+	runOwnerIndexConformance(t, name, func(t *testing.T) ownerIndexRepo { return newRepo(t) })
 	t.Run(name+"/InsertAndGet", func(t *testing.T) { conformInsertAndGet(t, newRepo(t)) })
 	t.Run(name+"/QuotaConcurrentCeiling", func(t *testing.T) { conformQuotaConcurrentCeiling(t, newRepo(t), caps) })
 	t.Run(name+"/GetNotFound", func(t *testing.T) { conformGetNotFound(t, newRepo(t)) })

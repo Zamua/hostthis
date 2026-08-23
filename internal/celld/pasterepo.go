@@ -124,7 +124,8 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 	//    rejected upload leaves nothing behind.
 	status, err := r.call(ctx, http.MethodPost, "/identity/reserve", "scope", owner, map[string]any{
 		"slug": p.Slug.String(), "size": p.Size, "userCap": userCap,
-		"now": now.UTC().UnixMilli(),
+		"now": now.UTC().UnixMilli(), "status": string(p.Status),
+		"kind": string(p.Kind), "name": p.Name, "contentSha": p.ContentSHA,
 		"intent": map[string]any{
 			"id": intentID, "kind": "create_paste", "subject": p.Slug.String(),
 			"startedAt": now.UTC().UnixMilli(),
@@ -227,4 +228,113 @@ func (r *PasteRepo) SumActiveBytesByOwner(owner string, _ time.Time) (int, error
 		return 0, fmt.Errorf("celld: identity bytes: unexpected status %d", status)
 	}
 	return res.Bytes, nil
+}
+
+// --- owner-facing reads -----------------------------------------------------
+//
+// All four answer from the identity cell's maintained summary rather than by
+// visiting each paste cell. Fetching N paste cells to build one listing would
+// be N cross-cell reads on a request path, which is the scan the architecture
+// forbids wearing a different hat (CLAUDE.md engineering principle 2).
+
+type ownerEntry struct {
+	Slug       string `json:"slug"`
+	Size       int    `json:"size"`
+	Status     string `json:"status"`
+	At         int64  `json:"at"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	ContentSHA string `json:"contentSha"`
+}
+
+func (r *PasteRepo) ownerEntries(owner string) ([]ownerEntry, error) {
+	var out []ownerEntry
+	status, err := r.call(context.Background(), http.MethodGet, "/identity/list", "scope", owner, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 300 {
+		return nil, fmt.Errorf("celld: identity list: unexpected status %d", status)
+	}
+	return out, nil
+}
+
+// ListByOwner returns the owner's pastes oldest first. A FAILED paste is
+// excluded: it charges nothing and cannot be served, so showing it in a listing
+// would offer the owner something they cannot act on.
+func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
+	entries, err := r.ownerEntries(owner)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Paste, 0, len(entries))
+	for _, e := range entries {
+		if domain.PasteStatus(e.Status) == domain.PasteStatusFailed {
+			continue
+		}
+		at := time.UnixMilli(e.At).UTC()
+		out = append(out, domain.Paste{
+			Slug: domain.Slug(e.Slug), Identity: domain.Identity(owner),
+			Status: domain.PasteStatus(e.Status), Kind: domain.ContentKind(e.Kind),
+			ContentSHA: e.ContentSHA, Size: e.Size, Name: e.Name,
+			CreatedAt: at, UpdatedAt: at,
+		})
+	}
+	return out, nil
+}
+
+func (r *PasteRepo) CountByOwner(owner string) (int, error) {
+	entries, err := r.ownerEntries(owner)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, e := range entries {
+		if domain.PasteStatus(e.Status) != domain.PasteStatusFailed {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// OwnerFirstSeen is stamped by the identity cell on its first reservation, so
+// it survives every paste being deleted.
+func (r *PasteRepo) OwnerFirstSeen(owner string) (time.Time, error) {
+	var res struct {
+		FirstSeen int64 `json:"firstSeen"`
+	}
+	status, err := r.call(context.Background(), http.MethodGet, "/identity/firstSeen", "scope", owner, nil, &res)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if status >= 300 {
+		return time.Time{}, fmt.Errorf("celld: identity firstSeen: unexpected status %d", status)
+	}
+	if res.FirstSeen == 0 {
+		return time.Time{}, nil
+	}
+	return time.UnixMilli(res.FirstSeen).UTC(), nil
+}
+
+// DropStaleOwnerEntry removes an index entry whose paste is gone. The ABSENCE
+// is established here, against the paste cell, before the index is touched:
+// dropping first would delete a live paste's index entry if the read were
+// merely slow.
+func (r *PasteRepo) DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, error) {
+	if owner == "" {
+		return false, nil
+	}
+	if _, err := r.Get(slug); err == nil {
+		return false, nil // the paste exists; the entry is not stale
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return false, err
+	}
+	var res struct {
+		Dropped bool `json:"dropped"`
+	}
+	if _, err := r.call(context.Background(), http.MethodPost, "/identity/drop", "scope", owner,
+		map[string]any{"slug": slug.String()}, &res); err != nil {
+		return false, err
+	}
+	return res.Dropped, nil
 }
