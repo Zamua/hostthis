@@ -332,6 +332,8 @@ export class Paste {
         return this.listVersions();
       case "delversion":
         return this.deleteVersion(await request.json());
+      case "pin":
+        return this.pin(await request.json());
       default:
         return new Response("unknown op\n", { status: 404 });
     }
@@ -416,6 +418,20 @@ export class Paste {
       await this.state.storage.put("row", row);
     }
     return Response.json({ deleted: true, totalSize: total });
+  }
+
+  // Pin changes which version the public URL SERVES, not what is retained, so
+  // it never touches the charge and stays inside this cell. Verified against
+  // the identity summary rather than assumed: the summary carries name, status,
+  // size and kind, and none of those move when a pin does.
+  async pin(body) {
+    const row = await this.state.storage.get("row");
+    if (!row) {
+      return Response.json({ pinned: false, reason: "absent" });
+    }
+    row.pinnedVersion = body.ver ?? 0;
+    await this.state.storage.put("row", row);
+    return Response.json({ pinned: true, ver: row.pinnedVersion });
   }
 
   // Guarded the same way a rename is: a slug deleted and re-minted by someone

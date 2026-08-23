@@ -543,3 +543,92 @@ func (r *PasteRepo) DeleteVersion(slug domain.Slug, ver int) error {
 		got.Identity.String(), map[string]any{"slug": slug.String(), "size": res.TotalSize}, nil)
 	return err
 }
+
+// GetVersion reads one retained version. Single-cell.
+func (r *PasteRepo) GetVersion(slug domain.Slug, ver int) (domain.Version, error) {
+	all, err := r.ListVersions(slug)
+	if err != nil {
+		return domain.Version{}, err
+	}
+	for _, v := range all {
+		if v.VerNum == ver {
+			return v, nil
+		}
+	}
+	return domain.Version{}, domain.ErrNotFound
+}
+
+// IsVersionServed reports whether a version is the one the public URL resolves
+// to: the pin when set, otherwise the latest. Single-cell.
+func (r *PasteRepo) IsVersionServed(slug domain.Slug, ver int) (bool, error) {
+	got, err := r.Get(slug)
+	if err != nil {
+		return false, err
+	}
+	if got.PinnedVersion != 0 {
+		return got.PinnedVersion == ver, nil
+	}
+	all, err := r.ListVersions(slug)
+	if err != nil {
+		return false, err
+	}
+	latest := 1 // v1 lives in the row; the list holds only appended versions
+	for _, v := range all {
+		if v.VerNum > latest {
+			latest = v.VerNum
+		}
+	}
+	return ver == latest, nil
+}
+
+// SetPinnedVersion and Unpin change what the public URL SERVES, not what is
+// retained, so neither touches the charge and both stay inside the paste cell.
+// Checked against the identity summary rather than assumed: it carries name,
+// status, size and kind, and a pin moves none of them.
+func (r *PasteRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error {
+	return r.setPin(slug, ver.VerNum)
+}
+
+func (r *PasteRepo) Unpin(slug domain.Slug) error { return r.setPin(slug, 0) }
+
+func (r *PasteRepo) setPin(slug domain.Slug, ver int) error {
+	var res struct {
+		Pinned bool `json:"pinned"`
+	}
+	if _, err := r.call(context.Background(), http.MethodPost, "/paste/pin", "slug", slug.String(),
+		map[string]any{"ver": ver}, &res); err != nil {
+		return err
+	}
+	if !res.Pinned {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+// OwnerSummary is the `whoami` view. One point read of the identity cell, which
+// already holds every entry it charges for, plus the first-seen stamp.
+//
+// SiteBytes is zero: sites are not yet on celld, so reporting anything else
+// would be inventing a number. That is a gap in the port's coverage rather than
+// a property of the backend, and it is named here so a reader does not mistake
+// an unimplemented surface for an empty one.
+func (r *PasteRepo) OwnerSummary(owner string, now time.Time) (domain.OwnerSummary, error) {
+	entries, err := r.ownerEntries(owner)
+	if err != nil {
+		return domain.OwnerSummary{}, err
+	}
+	var active int
+	var bytes int64
+	for _, e := range entries {
+		if domain.PasteStatus(e.Status) == domain.PasteStatusFailed {
+			continue
+		}
+		active++
+		bytes += int64(e.Size)
+	}
+	first, err := r.OwnerFirstSeen(owner)
+	if err != nil {
+		return domain.OwnerSummary{}, err
+	}
+	return domain.OwnerSummary{Active: active, FirstSeen: first, PasteBytes: bytes}, nil
+}
