@@ -92,6 +92,12 @@ func (n namespacedRepo) DropStaleOwnerEntry(s domain.Slug, o string) (bool, erro
 	return n.inner.DropStaleOwnerEntry(n.slug(s), n.owner(o))
 }
 
+func (n namespacedRepo) AppendVersionWithQuotaCheck(ctx context.Context, s domain.Slug,
+	kind domain.ContentKind, sha string, size int, cap int64, at time.Time,
+) (domain.AppendResult, error) {
+	return n.inner.AppendVersionWithQuotaCheck(ctx, n.slug(s), kind, sha, size, cap, at)
+}
+
 func (n namespacedRepo) Delete(s domain.Slug, want domain.Identity, at time.Time) error {
 	return n.inner.Delete(n.slug(s), domain.Identity(n.owner(want.String())), at)
 }
