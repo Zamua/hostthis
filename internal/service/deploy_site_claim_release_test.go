@@ -113,7 +113,7 @@ func (txTestBlobUnit) ReadAll(context.Context, string, string) ([]byte, error) {
 
 func (txTestBlobUnit) UnbindOnDelete(context.Context, string, []string) error { return nil }
 
-func (txTestBlobUnit) IsTransactional() bool { return true }
+func (txTestBlobUnit) InitialStatus() domain.PasteStatus { return domain.PasteStatusReady }
 
 func claimDeployFixture(t *testing.T) (*DeploySite, *claimSiteRepo) {
 	t.Helper()

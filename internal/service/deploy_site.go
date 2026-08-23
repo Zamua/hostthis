@@ -186,7 +186,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	// insert retry loop.
 	var slug domain.Slug
 	committed := false
-	if d.Blob.IsTransactional() {
+	if d.bindsAtCommit() {
 		s, err := d.preClaimSlug(ctx, owner, now)
 		if err != nil {
 			return SiteResult{}, err
@@ -250,7 +250,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	// shard in one CAS. One attempt suffices because the pre-claim already
 	// holds the slot; the body is consumed, so a commit-time collision could
 	// not re-untar anyway.
-	if d.Blob.IsTransactional() {
+	if d.bindsAtCommit() {
 		err := d.Blob.Commit(ctx, sink.handles, func(ctx context.Context) error {
 			return d.Sites.InsertWithQuotaCheck(ctx, site, stored, int64(domain.UserQuotaBytes), now)
 		})
@@ -552,4 +552,17 @@ func (a ArchiveAdapter) Deploy(body io.Reader, owner string) (Result, error) {
 		CreatedAt: res.Site.CreatedAt,
 		UpdatedAt: res.Site.UpdatedAt,
 	}}, nil
+}
+
+// bindsAtCommit reports whether the blob unit binds bytes inside the metadata
+// commit, which is what forces the slug to be fixed BEFORE the untar: a staged
+// ref's route is captured from the slug, so the bind and the row must agree on
+// it. Derived from the status a commit produces rather than from a capability
+// predicate.
+//
+// TODO: slug reservation is shale's mechanism for this, not a domain
+// operation. PreClaimSlug / ReleaseSlugClaim belong below the port, which
+// removes this branch entirely.
+func (d *DeploySite) bindsAtCommit() bool {
+	return d.Blob.InitialStatus() == domain.PasteStatusReady
 }
