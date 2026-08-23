@@ -77,6 +77,12 @@ export class Identity {
         return this.confirm(await request.json());
       case "bytes":
         return this.bytes();
+      case "list":
+        return this.list();
+      case "firstSeen":
+        return this.firstSeen();
+      case "drop":
+        return this.drop(await request.json());
       default:
         return new Response("unknown op\n", { status: 404 });
     }
@@ -121,7 +127,21 @@ export class Identity {
     if (body.userCap > 0 && active + body.size > body.userCap) {
       return Response.json({ error: "over-quota", active }, { status: 409 });
     }
-    entries[body.slug] = { size: body.size, status: "pending", at: body.now ?? 0 };
+    // A denormalised SUMMARY, not a pointer. Answering ListByOwner by fetching
+    // each paste cell would be N cross-cell reads on a request path; the
+    // identity cell therefore carries what a listing needs, written once here.
+    entries[body.slug] = {
+      size: body.size,
+      status: body.status ?? "pending",
+      at: body.now ?? 0,
+      kind: body.kind ?? "",
+      name: body.name ?? "",
+      contentSha: body.contentSha ?? "",
+    };
+    const firstSeen = await this.state.storage.get("firstSeen");
+    if (firstSeen === undefined || firstSeen === null) {
+      await this.state.storage.put("firstSeen", body.now ?? 0);
+    }
     await this.state.storage.put("entries", entries);
     if (body.intent) {
       await this.state.storage.put(intentKey(body.intent.id), toRow(body.intent));
@@ -162,6 +182,30 @@ export class Identity {
     return Response.json({
       bytes: Object.values(entries).reduce((n, e) => n + (e.size ?? 0), 0),
     });
+  }
+
+  // The owner's listing, from the maintained summary rather than a scan.
+  async list() {
+    const entries = (await this.state.storage.get("entries")) ?? {};
+    const out = Object.entries(entries).map(([slug, e]) => ({ slug, ...e }));
+    out.sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+    return Response.json(out);
+  }
+
+  async firstSeen() {
+    return Response.json({ firstSeen: (await this.state.storage.get("firstSeen")) ?? 0 });
+  }
+
+  // Removes an index entry whose paste no longer exists. The caller has already
+  // established the absence; the cell only owns the index.
+  async drop(body) {
+    const entries = (await this.state.storage.get("entries")) ?? {};
+    const had = Object.hasOwn(entries, body.slug);
+    if (had) {
+      delete entries[body.slug];
+      await this.state.storage.put("entries", entries);
+    }
+    return Response.json({ dropped: had });
   }
 
   // The ONLY intent read, and it is scope-bounded by construction: a cell cannot see
