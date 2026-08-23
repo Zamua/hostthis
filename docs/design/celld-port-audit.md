@@ -364,5 +364,31 @@ the shared arm activated one, so it measured activation, not serialization. A
 discarded warm-up burst in both arms removed it.
 
 So the four classes are committed with evidence rather than judgement. Not
-claimed: trivial payloads, one node, N up to 32, and 32 concurrent uploads from
-a single identity is already well past what this service sees.
+claimed: trivial payloads, N up to 32, and 32 concurrent uploads from a single
+identity is already well past what this service sees. And ONE NODE, which means
+no peer tunnel: at two or more replicas the identity cell may be owned by a node
+other than the ingress, adding a hop these numbers do not include. That only
+matters if the fleet grows past one, but the numbers do not cover it.
+
+## Open question: CELLD_IDLE_EVICT_S is inherited, not chosen
+
+The side finding above is the bigger one and it changes which knob matters.
+**Activation dominates serialization at this scale.** The binding cost is not
+one cell being busy, it is many cells waking up - and for a mostly-dormant paste
+service that is the normal regime rather than an edge case.
+
+That makes `CELLD_IDLE_EVICT_S` the main cost dial rather than a memory setting,
+and it is currently 300 because that is what boardtogether picked for a
+different workload. Both directions cost something real:
+
+- **shorter**: less resident memory, but MORE activations, and activation is the
+  dominant cost on exactly the dormant-heavy pattern hostthis has.
+- **longer**: fewer activations, but more resident cells and a slow climb toward
+  the 80% pressure threshold, where celld sheds under duress rather than on a
+  timer.
+
+There is a minimum on that curve and we have both instruments to find it: the
+eviction check reads ownership without activating anything, and the concurrency
+harness measures activation cost directly. Sweeping the window against a
+dormant-heavy access pattern would locate 300 on it. 300 may well be fine; the
+point is that nobody has checked.
