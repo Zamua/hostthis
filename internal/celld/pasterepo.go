@@ -483,3 +483,63 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 	}
 	return domain.AppendResult{NewVer: res.Ver, WasPinned: res.WasPinned}, nil
 }
+
+// ListVersions is a single-cell read: the appended versions live beside the row.
+func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
+	var wire []struct {
+		Ver        int    `json:"ver"`
+		Kind       string `json:"kind"`
+		ContentSHA string `json:"contentSha"`
+		Size       int    `json:"size"`
+	}
+	status, err := r.call(context.Background(), http.MethodGet, "/paste/versions", "slug", slug.String(), nil, &wire)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		return nil, domain.ErrNotFound
+	}
+	out := make([]domain.Version, 0, len(wire))
+	for _, w := range wire {
+		out = append(out, domain.Version{
+			Slug: slug, VerNum: w.Ver, Kind: domain.ContentKind(w.Kind),
+			ContentSHA: w.ContentSHA, Size: w.Size,
+		})
+	}
+	return out, nil
+}
+
+// DeleteVersion removes a retained version and re-charges the owner.
+//
+// TWO cells, like append, but NOT its mirror image. Append can be refused, so
+// it checks quota first and a rejection leaves nothing behind. This cannot be
+// refused, so there is nothing to check and the only question is order:
+//
+// the version goes FIRST, then the new total.
+//
+// A crash between them leaves the owner charged for bytes that are gone, which
+// over-charges - conservative, visible to the owner, and repairable, because an
+// absolute total is reconstructible from the paste cell. The other order frees
+// the charge while the bytes remain, which under-charges silently and is the
+// direction nothing watches.
+func (r *PasteRepo) DeleteVersion(slug domain.Slug, ver int) error {
+	got, err := r.Get(slug)
+	if err != nil {
+		return err
+	}
+	var res struct {
+		Deleted   bool `json:"deleted"`
+		TotalSize int  `json:"totalSize"`
+	}
+	if _, err := r.call(context.Background(), http.MethodPost, "/paste/delversion", "slug", slug.String(),
+		map[string]any{"ver": ver}, &res); err != nil {
+		return err
+	}
+	if !res.Deleted {
+		return domain.ErrNotFound
+	}
+	// Settle from the total the paste cell computed, not from a delta.
+	_, err = r.call(context.Background(), http.MethodPost, "/identity/touch", "scope",
+		got.Identity.String(), map[string]any{"slug": slug.String(), "size": res.TotalSize}, nil)
+	return err
+}

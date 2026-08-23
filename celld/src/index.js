@@ -328,12 +328,20 @@ export class Paste {
         return this.remove(await request.json());
       case "append":
         return this.append(await request.json());
+      case "versions":
+        return this.listVersions();
+      case "delversion":
+        return this.deleteVersion(await request.json());
       default:
         return new Response("unknown op\n", { status: 404 });
     }
   }
 
   async put(body) {
+    // baseSize is v1's contribution: the version list holds only APPENDED
+    // versions, so the total is v1 plus those. Without it, deleting an appended
+    // version would recompute a total that has silently dropped v1.
+    body.row.baseSize = body.row.size;
     await this.state.storage.put("row", body.row);
     return new Response(null, { status: 204 });
   }
@@ -382,6 +390,32 @@ export class Paste {
       await this.state.storage.put("row", row);
     }
     return Response.json({ appended: true, ver: nextVer, wasPinned, totalSize: row.size ?? 0 });
+  }
+
+  async listVersions() {
+    return Response.json((await this.state.storage.get("versions")) ?? []);
+  }
+
+  // Cannot be refused, so there is nothing to check first. Returns the paste's
+  // new total so the caller can settle the charge from a value this cell
+  // computed, rather than by adjusting a number it holds separately.
+  async deleteVersion(body) {
+    const versions = (await this.state.storage.get("versions")) ?? [];
+    const idx = versions.findIndex((v) => v.ver === body.ver);
+    if (idx < 0) {
+      return Response.json({ deleted: false, reason: "absent" });
+    }
+    versions.splice(idx, 1);
+    await this.state.storage.put("versions", versions);
+    // A retired version number is never reused, which is why maxVer is stored
+    // rather than derived from this list.
+    const row = await this.state.storage.get("row");
+    const total = versions.reduce((n, v) => n + (v.size ?? 0), 0) + (row?.baseSize ?? 0);
+    if (row) {
+      row.size = total;
+      await this.state.storage.put("row", row);
+    }
+    return Response.json({ deleted: true, totalSize: total });
   }
 
   // Guarded the same way a rename is: a slug deleted and re-minted by someone
