@@ -1,0 +1,12 @@
+{
+  // hostthis's celld application. ONE application per fleet: a second
+  // `celld deploy` to the same bucket replaces this one, silently, so this
+  // fleet's bucket is hostthis's alone (docs/design/celld-port-audit.md).
+  "name": "hostthis",
+  "main": "src/index.js",
+  "compatibility_date": "2025-01-01",
+  "durable_objects": {
+    "bindings": [{ "name": "INTENTS", "class_name": "IntentLog" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["IntentLog"] }]
+}
