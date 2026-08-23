@@ -10,6 +10,23 @@ import (
 // TestRoomWireValue pins the room-value wire encoding byte-for-byte: the client
 // splice contract requires the HTTP scan handler and the relay frames to encode
 // a value identically, so the exact output bytes are contract.
+// The property the invalid-UTF-8 case actually cares about: the bytes become
+// the replacement character. Stated on the decoded value so a change in how
+// encoding/json spells it cannot fail a behaviour that has not changed.
+func TestRoomWireValue_InvalidUTF8BecomesReplacementRunes(t *testing.T) {
+	got := domain.RoomWireValue([]byte{0xff, 0xfe})
+	if !json.Valid(got) {
+		t.Fatalf("RoomWireValue produced invalid JSON: %s", got)
+	}
+	var decoded string
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("decode %s: %v", got, err)
+	}
+	if decoded != "\ufffd\ufffd" {
+		t.Fatalf("decoded = %q, want two U+FFFD replacement runes", decoded)
+	}
+}
+
 func TestRoomWireValue(t *testing.T) {
 	cases := []struct {
 		name string
@@ -36,8 +53,11 @@ func TestRoomWireValue(t *testing.T) {
 
 		// Control chars escape per encoding/json's string rules.
 		{"control chars", []byte{0x00, 0x01, 'a', '\n'}, "\"\\u0000\\u0001a\\n\""},
-		// Invalid UTF-8 coerces to U+FFFD.
-		{"invalid utf8", []byte{0xff, 0xfe}, `"\ufffd\ufffd"`},
+		// Invalid UTF-8 coerces to U+FFFD. Asserted on the DECODED value below
+		// rather than here, because encoding/json is free to emit the
+		// replacement character either escaped (\ufffd) or literally, and Go
+		// 1.27 changed which. Both are valid JSON for the same string, so
+		// pinning the byte form pinned the toolchain rather than the behaviour.
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
