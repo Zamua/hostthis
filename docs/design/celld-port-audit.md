@@ -392,3 +392,47 @@ eviction check reads ownership without activating anything, and the concurrency
 harness measures activation cost directly. Sweeping the window against a
 dormant-heavy access pattern would locate 300 on it. 300 may well be fine; the
 point is that nobody has checked.
+
+---
+
+# The quota is reconstructible, and that is worth protecting
+
+One idea has now been applied three times in this adapter, and it is worth
+naming as one rather than three:
+
+- **membership over arithmetic** for release: "this slug is no longer counted"
+  rather than "subtract N", so a replayed release cannot under-charge
+- **absolute over incremental** for the charge: a version write sets the entry's
+  size to the paste's new total rather than adding to it, so a replayed write is
+  a no-op
+- **readable state over invisible mechanism** for the eviction check: assert on
+  ownership records in the bucket rather than trust a process that logs nothing
+
+The consequence, which follows from the second and was not designed for:
+**the charged total is a FUNCTION of the paste cells' current contents, not an
+accumulated history.** It cannot drift irrecoverably, because it can be
+recomputed: read each entry's slug, sum the retained bytes in its paste cell,
+and compare against what the identity cell stores. A divergence is a bug
+findable before a user notices their quota is wrong.
+
+That check is not built. What matters is that the PROPERTY exists, because it is
+easy to destroy by accident: the moment someone optimises `touch` into an
+increment for a plausible-looking reason, the total becomes a history again and
+nothing announces that it happened. If that optimisation is ever proposed, this
+is the thing being traded away.
+
+## Append and DeleteVersion are not mirror images
+
+Both are two-cell writes on the quota path, and their ORDER differs because
+their failure modes do:
+
+- **Append can be refused**, so quota is checked FIRST, in the identity cell. A
+  rejected append leaves no version behind - the same shape as create.
+- **DeleteVersion cannot be refused.** There is nothing to check, so the only
+  question is ordering: remove the version from the paste cell, THEN write the
+  new total. A crash between them leaves the owner charged for bytes that are
+  gone, which is conservative and repairable by the recomputation above. The
+  other order frees the charge while the bytes remain, which is the money-losing
+  direction and the one nothing is watching for.
+
+So append is check-then-write, delete is write-then-settle.
