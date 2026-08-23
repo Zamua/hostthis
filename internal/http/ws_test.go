@@ -263,13 +263,13 @@ func TestRelay_StuckClientDoesNotStallTheRoom(t *testing.T) {
 	expectSnapshot(t, ctx, sender)
 
 	// fast drains promptly; stuck never reads again.
-	var fastGot int32
+	var fastGot atomic.Int32
 	go func() {
 		for {
 			if _, _, err := fast.Read(ctx); err != nil {
 				return
 			}
-			atomic.AddInt32(&fastGot, 1)
+			fastGot.Add(1)
 		}
 	}()
 
@@ -294,12 +294,12 @@ func TestRelay_StuckClientDoesNotStallTheRoom(t *testing.T) {
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if atomic.LoadInt32(&fastGot) >= 50 {
+		if fastGot.Load() >= 50 {
 			return // room flowing for fast despite the stuck peer
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("fast received only %d frames with a stuck peer present: room stalled on the laggard", atomic.LoadInt32(&fastGot))
+	t.Fatalf("fast received only %d frames with a stuck peer present: room stalled on the laggard", fastGot.Load())
 }
 
 func TestRelay_HeartbeatReapsDeadConnection(t *testing.T) {
