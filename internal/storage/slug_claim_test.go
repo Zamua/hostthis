@@ -22,10 +22,10 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// The shale site repo carries the compensating half of the pre-claim port; the
+// The shale site repo carries the compensating half of the slug port; the
 // deploy path finds it by type assertion, so a rename would silently disable
-// the release.
-var _ service.SlugClaimReleaser = (*storage.Sites)(nil)
+// the abandonment.
+var _ service.SlugAbandoner = (*storage.Sites)(nil)
 
 const slugOwnerTestOwner = "key:claimant"
 

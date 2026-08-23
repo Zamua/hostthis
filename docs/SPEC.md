@@ -5542,10 +5542,17 @@ that self-heals when a later paste insert that mints that slug overwrites the ke
 (there is NO dedicated slug_owner sweep; until such a paste reuses it, the only
 effect is that one slug staying un-pre-claimable for a future site deploy, in a
 32^8 space), never an unreadable site. A redeploy (`DeployToSlug`) already targets a known existing
-slug, so it stages under the real slug directly and needs no pre-claim. On the
-detached-store path the slug routes no blob (blobs are content-sha-keyed), so no
-pre-claim runs: the slug is minted in the post-untar insert retry loop where the
-authoritative insert is the collision authority.
+slug, so it stages under the real slug directly and needs no pre-claim.
+
+**Taking the slug is one operation for every backend.** The deploy asks its
+repository for the slug it will commit under and gets one back; whether that
+answer was durably reserved is the adapter's business, not the service's. An
+adapter that routes staged files by slug reserves, so a collision at commit
+cannot happen; one that content-addresses its blobs need not, and the commit
+retry covers a lost race by asking for another slug from the same place rather
+than minting its own. Every deploy that does not commit hands the slug back,
+which is a no-op for an adapter that reserved nothing. The service therefore has
+one path here, with no branch on which backend it holds.
 
 **Reader-atomic create + atomic delete.** A reader sees a row WITH its blob or
 neither - never a row pointing at bytes that are not there, and never bytes a
