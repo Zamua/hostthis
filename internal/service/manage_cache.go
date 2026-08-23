@@ -13,7 +13,7 @@ import (
 // verb service itself.
 type PasteManager interface {
 	List(owner string) ([]domain.Paste, error)
-	Show(slug domain.Slug, owner string) (domain.Paste, []byte, error)
+	Show(slug domain.Slug, owner string) (domain.Paste, io.ReadCloser, error)
 	Update(slug domain.Slug, owner string, body io.Reader, typeHint string) (UpdateResult, error)
 	Rename(slug domain.Slug, owner, name string) error
 	Delete(slug domain.Slug, owner string) error
