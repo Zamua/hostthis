@@ -278,8 +278,7 @@ func (s *Server) writeRoomError(w http.ResponseWriter, r *http.Request, err erro
 	case errors.Is(err, service.ErrRoomNotFound):
 		http.NotFound(w, r)
 	case errors.Is(err, service.ErrRoomCreateRateLimited):
-		var rl *service.RoomRateLimit
-		if errors.As(err, &rl) {
+		if rl, ok := errors.AsType[*service.RoomRateLimit](err); ok {
 			w.Header().Set("Retry-After", strconv.Itoa(int(rl.Window.Seconds())))
 		}
 		http.Error(w, "room creation rate limit reached\n", http.StatusTooManyRequests)
