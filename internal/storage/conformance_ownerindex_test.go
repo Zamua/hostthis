@@ -34,6 +34,7 @@ type ownerIndexRepo interface {
 	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, kind domain.ContentKind,
 		contentSHA string, size int, userCap int64, now time.Time) (domain.AppendResult, error)
+	DeleteVersion(domain.Slug, int) error
 }
 
 func chargedBytes(t *testing.T, r ownerIndexRepo, owner string) (int, error) {
@@ -335,6 +336,40 @@ func conformVersionChangesTheCharge(t *testing.T, r ownerIndexRepo) {
 	}
 }
 
+// Deleting a version gives its bytes back. The mirror of
+// VersionChangesTheCharge, and needed separately because the two operations are
+// NOT mirror images: append can be refused and so checks quota first, while a
+// version delete cannot be refused and only has an ordering question.
+func conformDeleteVersionRefundsTheCharge(t *testing.T, r ownerIndexRepo) {
+	const owner = "key:oi-delver"
+	p := pasteOf("oif23456", owner, 700)
+	ownerInsert(t, r, p)
+
+	res, err := r.AppendVersionWithQuotaCheck(context.Background(), p.Slug,
+		domain.KindHTML, "sha-v2", 300, 0, fixedNow)
+	if err != nil {
+		t.Fatalf("AppendVersionWithQuotaCheck: %v", err)
+	}
+	if n, err := chargedBytes(t, r, owner); err != nil || n != 1000 {
+		t.Fatalf("charged = %d after the append (err %v); want 1000", n, err)
+	}
+
+	if err := r.DeleteVersion(p.Slug, res.NewVer); err != nil {
+		t.Fatalf("DeleteVersion(%d): %v", res.NewVer, err)
+	}
+	if d, ok := r.(pendingConfirmsDrainer); ok {
+		d.WaitPendingConfirms()
+	}
+	n, err := chargedBytes(t, r, owner)
+	if err != nil {
+		t.Fatalf("charged after deleting the version: %v", err)
+	}
+	if n != 700 {
+		t.Fatalf("charged = %d after deleting a 300-byte version from a 1000-byte total; "+
+			"want 700. Deleted versions contribute zero bytes.", n)
+	}
+}
+
 func runOwnerIndexConformance(t *testing.T, name string, newRepo func(t *testing.T) ownerIndexRepo) {
 	t.Helper()
 	t.Run(name+"/OwnerListIsScopedAndComplete", func(t *testing.T) {
@@ -351,4 +386,7 @@ func runOwnerIndexConformance(t *testing.T, name string, newRepo func(t *testing
 	t.Run(name+"/ReleaseIsIdempotent", func(t *testing.T) { conformReleaseIsIdempotent(t, newRepo(t)) })
 	t.Run(name+"/DeleteReleasesAndDelists", func(t *testing.T) { conformDeleteReleasesAndDelists(t, newRepo(t)) })
 	t.Run(name+"/VersionChangesTheCharge", func(t *testing.T) { conformVersionChangesTheCharge(t, newRepo(t)) })
+	t.Run(name+"/DeleteVersionRefundsTheCharge", func(t *testing.T) {
+		conformDeleteVersionRefundsTheCharge(t, newRepo(t))
+	})
 }

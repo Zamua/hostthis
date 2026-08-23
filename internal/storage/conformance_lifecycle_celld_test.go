@@ -98,6 +98,10 @@ func (n namespacedRepo) AppendVersionWithQuotaCheck(ctx context.Context, s domai
 	return n.inner.AppendVersionWithQuotaCheck(ctx, n.slug(s), kind, sha, size, cap, at)
 }
 
+func (n namespacedRepo) DeleteVersion(s domain.Slug, ver int) error {
+	return n.inner.DeleteVersion(n.slug(s), ver)
+}
+
 func (n namespacedRepo) Delete(s domain.Slug, want domain.Identity, at time.Time) error {
 	return n.inner.Delete(n.slug(s), domain.Identity(n.owner(want.String())), at)
 }
