@@ -93,6 +93,10 @@ func TestConformance_Shale(t *testing.T) {
 		}
 	}
 	runConformanceWithSites(t, "shale", caps, newRepo, newSites, newRooms)
+	// Keygate is its own entry rather than a parameter of the shared runner:
+	// only some backends implement admission at all, and a backend without it
+	// should simply not run the suite instead of passing a nil factory through.
+	runKeygateConformance(t, "shale", func(t *testing.T) keygateRepo { return newShale(t) })
 }
 
 // envOrDefault reads an override, falling back when unset.

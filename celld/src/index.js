@@ -85,6 +85,11 @@ export class Identity {
         return this.drop(await request.json());
       case "touch":
         return this.touch(await request.json());
+      case "notesubnet":
+        return this.noteSubnet(await request.json());
+      case "subnets":
+        return this.subnets(Number(new URL(request.url).searchParams.get("now")),
+          Number(new URL(request.url).searchParams.get("window")));
       default:
         return new Response("unknown op\n", { status: 404 });
     }
@@ -240,6 +245,36 @@ export class Identity {
     }
     await this.state.storage.put("entries", entries);
     return Response.json({ updated: true });
+  }
+
+  // The reverse keygate index. Without it, "how many subnets is this key on"
+  // would have to visit every subnet cell - the fan-out the shale adapter
+  // avoids with an identity-sharded index for exactly the same reason.
+  async noteSubnet(body) {
+    const subnets = (await this.state.storage.get("subnets")) ?? {};
+    if (!Object.hasOwn(subnets, body.subnet)) {
+      subnets[body.subnet] = body.now;
+      await this.state.storage.put("subnets", subnets);
+    }
+    return new Response(null, { status: 204 });
+  }
+
+  async subnets(now, windowMs) {
+    const subnets = (await this.state.storage.get("subnets")) ?? {};
+    let changed = false;
+    let n = 0;
+    for (const [cidr, at] of Object.entries(subnets)) {
+      if (now - at >= windowMs) {
+        delete subnets[cidr];
+        changed = true;
+      } else {
+        n++;
+      }
+    }
+    if (changed) {
+      await this.state.storage.put("subnets", subnets);
+    }
+    return Response.json({ count: n });
   }
 
   // The ONLY intent read, and it is scope-bounded by construction: a cell cannot see
@@ -473,6 +508,75 @@ export class IntentLog {
   }
 }
 
+// A SUBNET cell: the Sybil admission rows for one network.
+//
+// The subnet is the rate-limit unit, so it is the cell. Admission is a
+// check-and-record that must not interleave - two keys racing the last slot
+// would both be admitted if the count and the write were separate steps - and a
+// cell is single-threaded, so the whole decision is one event by construction.
+// That is the same property the identity cell gives the quota check.
+export class Subnet {
+  constructor(state) {
+    this.state = state;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    const op = url.pathname.split("/").pop();
+    const body = request.method === "POST" ? await request.json() : {};
+    switch (op) {
+      case "admit":
+        return this.admit(body);
+      case "snapshot":
+        return this.snapshot(Number(url.searchParams.get("now")), Number(url.searchParams.get("window")));
+      default:
+        return new Response("unknown op\n", { status: 404 });
+    }
+  }
+
+  // Rows outside the window are dropped as they are walked past: nothing reads
+  // them again, because no admission decision can turn on a row the window has
+  // already excluded.
+  async live(now, windowMs) {
+    const rows = (await this.state.storage.get("rows")) ?? {};
+    let changed = false;
+    for (const [id, firstSeen] of Object.entries(rows)) {
+      if (now - firstSeen >= windowMs) {
+        delete rows[id];
+        changed = true;
+      }
+    }
+    if (changed) {
+      await this.state.storage.put("rows", rows);
+    }
+    return rows;
+  }
+
+  async admit(body) {
+    const rows = await this.live(body.now, body.window);
+    if (Object.hasOwn(rows, body.identity)) {
+      // Already on file: no rate-limit accounting, and the first-seen stamp
+      // must not move or a returning key would refresh its own window.
+      return Response.json({ knownAlready: true, admitted: true });
+    }
+    if (Object.keys(rows).length >= body.limit) {
+      return Response.json({ knownAlready: false, admitted: false });
+    }
+    rows[body.identity] = body.now;
+    await this.state.storage.put("rows", rows);
+    return Response.json({ knownAlready: false, admitted: true });
+  }
+
+  async snapshot(now, windowMs) {
+    const rows = await this.live(now, windowMs);
+    const stamps = Object.values(rows);
+    return Response.json({
+      freshCount: stamps.length,
+      oldestFirstSeen: stamps.length ? Math.min(...stamps) : 0,
+    });
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -485,6 +589,13 @@ export default {
         return new Response("room required\n", { status: 400 });
       }
       return env.ROOMS.get(env.ROOMS.idFromName(room)).fetch(request);
+    }
+    if (url.pathname.startsWith("/subnet/")) {
+      const subnet = url.searchParams.get("subnet");
+      if (!subnet) {
+        return new Response("subnet required\n", { status: 400 });
+      }
+      return env.SUBNETS.get(env.SUBNETS.idFromName(subnet)).fetch(request);
     }
     if (url.pathname.startsWith("/paste/")) {
       const slug = url.searchParams.get("slug");
