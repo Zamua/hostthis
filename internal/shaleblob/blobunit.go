@@ -214,12 +214,12 @@ func (u *Unit) UnbindOnDelete(_ context.Context, _ string, _ []string) error {
 	return nil
 }
 
-// IsTransactional is true: BindBlob runs inside the authoritative {slug} write,
-// so a Stage->Commit makes the row and its bytes visible together. Upload.Create
-// keys off this to commit a paste READY directly, with no pending row and no
-// finalizer (docs/SPEC.md "Pending-collapse: a shale-collocated paste commits
-// READY directly").
-func (u *Unit) IsTransactional() bool { return true }
+// InitialStatus is READY: BindBlob runs inside the authoritative {slug} write,
+// so the bytes are durable and bound by the time the record commits. There is
+// no window in which a reader can see the record without them.
+func (u *Unit) InitialStatus() domain.PasteStatus {
+	return domain.PasteStatusReady
+}
 
 // ctxCancelReadCloser cancels the stream's ctx on Close, satisfying the
 // lifetime contract on BlobKV.GetBlob: the bound ctx must outlive the reader.

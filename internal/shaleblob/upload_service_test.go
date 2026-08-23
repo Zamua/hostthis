@@ -46,8 +46,8 @@ func TestUpload_Create_Shale_BindsAndReadsBack(t *testing.T) {
 	// The wired seam must be transactional, so Create takes the READY-direct
 	// path; otherwise the standalone path runs and the assertions below never
 	// exercise the bind.
-	if !unit.IsTransactional() {
-		t.Fatalf("shale unit IsTransactional() = false, want true")
+	if unit.InitialStatus() != domain.PasteStatusReady {
+		t.Fatalf("shale unit InitialStatus() = %q, want ready: it binds bytes in the metadata commit", unit.InitialStatus())
 	}
 
 	raw := []byte("<!doctype html><h1>shale create</h1>")
@@ -120,8 +120,8 @@ func TestUpload_Create_Standalone_PendingPathIntact(t *testing.T) {
 	}
 	blobs := storage.NewCompressedBlobStore(rawBlobs)
 	standalone := service.NewStandaloneBlobUnit(blobs)
-	if standalone.IsTransactional() {
-		t.Fatalf("standalone unit IsTransactional() = true, want false")
+	if standalone.InitialStatus() != domain.PasteStatusPending {
+		t.Fatalf("standalone unit InitialStatus() = %q, want pending: the bytes land after the commit", standalone.InitialStatus())
 	}
 	repo := storagetest.NewRepo(t)
 	u := service.NewUpload(repo, standalone)

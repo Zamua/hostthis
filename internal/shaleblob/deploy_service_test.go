@@ -73,8 +73,8 @@ func TestDeploySite_Shale_FirstDeployBindsAndReadsBack(t *testing.T) {
 	// Only a transactional seam takes the pre-claim branch. A false here means
 	// the standalone post-untar-mint path runs instead and nothing below
 	// exercises the cross-shard bind.
-	if !unit.IsTransactional() {
-		t.Fatalf("shale unit IsTransactional() = false, want true")
+	if unit.InitialStatus() != domain.PasteStatusReady {
+		t.Fatalf("shale unit InitialStatus() = %q, want ready: it binds bytes in the metadata commit", unit.InitialStatus())
 	}
 
 	files := map[string]string{

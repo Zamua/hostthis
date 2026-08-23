@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
 // blobReadStore is the read surface StandaloneBlobUnit needs on top of the
@@ -72,10 +74,12 @@ func (u *StandaloneBlobUnit) UnbindOnDelete(_ context.Context, _ string, _ []str
 	return nil
 }
 
-// IsTransactional is false: the bytes land in a detached store with no
-// co-commit, so Upload.Create keeps the pending/finalizer model on this path
-// (commit a PENDING row, write the bytes in the background, flip to ready).
-func (u *StandaloneBlobUnit) IsTransactional() bool { return false }
+// InitialStatus is PENDING: the bytes land in a detached store with no
+// co-commit, so a record commits before they are durable and the caller owes a
+// finalize.
+func (u *StandaloneBlobUnit) InitialStatus() domain.PasteStatus {
+	return domain.PasteStatusPending
+}
 
 var _ BlobUnit = (*StandaloneBlobUnit)(nil)
 

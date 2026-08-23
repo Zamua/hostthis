@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"io"
+
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
 // BlobUnit is the per-record blob lifecycle seam: stage the bytes, commit them
@@ -92,18 +94,19 @@ type BlobUnit interface {
 	// directly. It exists so the services delete uniformly across backends.
 	UnbindOnDelete(ctx context.Context, slug string, shas []string) error
 
-	// IsTransactional reports whether this unit binds a record's blob inside
-	// the SAME transaction the metadata commits in, so a Stage->Commit makes
-	// the row and its bytes visible together.
+	// InitialStatus is the status a record carries the moment its metadata
+	// commits through this unit.
 	//
-	// It is the one place a service path varies by backend capability:
-	// Upload.Create uses it to choose between READY-direct (no pending window,
-	// no finalizer) and the detached-store pending/finalizer model (PENDING
-	// row first, bytes in the background, then flip to ready). A transactional
-	// unit MUST honor the bind metaWrite threads off the Commit context. See
-	// docs/SPEC.md "Pending-collapse: a shale-collocated paste commits READY
-	// directly".
-	IsTransactional() bool
+	// READY means the unit binds the bytes inside the metadata commit, so the
+	// caller must stage them BEFORE committing and owes no follow-up. PENDING
+	// means the bytes land after the commit, so the caller owes a finalize and
+	// a reader may observe the record before its bytes exist.
+	//
+	// It is a VALUE, not a capability predicate, on purpose: the services ask
+	// what state a commit produces, which is a domain question, rather than
+	// what kind of backend they hold. A new adapter answers it instead of
+	// adding a branch above the port.
+	InitialStatus() domain.PasteStatus
 }
 
 // BlobHandle is the opaque token Stage / StageStream return and Commit

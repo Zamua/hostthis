@@ -190,26 +190,21 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		return Result{}, domain.ErrUnsupportedKind
 	}
 	now := u.Now().UTC()
-	if u.Blob.IsTransactional() {
-		// Shale-collocated: the row and its bytes become visible together, so
-		// there is no pending window and no finalizer (docs/SPEC.md
-		// "Pending-collapse: a shale-collocated paste commits READY directly").
-		// A staging failure means the row never commits.
-		return u.createTransactional(staged, owner, name, kind, now)
-	}
-	// Detached-store path (local / slatedb / shale-without-a-blob-bucket): the
-	// blob write is deferred to a background finalizer, so only the quota
-	// reserve and the PENDING row happen before the URL is returned. staged.Body
-	// lives in this pod's memory until the finalizer flushes it; a crash in that
-	// window loses the bytes and the row stays PENDING for good - nothing ages
-	// it out (docs/SPEC.md "Durability trade").
-	initialStatus := domain.PasteStatusPending
+	// The adapter declares the status a freshly committed paste carries; the
+	// service does not ask what KIND of backend it holds. READY means the
+	// adapter binds the bytes in the metadata commit, so they must be staged
+	// first. PENDING means they land after, so a finalizer is owed. One value
+	// decides both, and a new adapter answers it rather than adding a branch
+	// (docs/SPEC.md "Pending-collapse").
+	status := u.Blob.InitialStatus()
 	if u.SyncBlob {
-		initialStatus = domain.PasteStatusReady
+		// Benchmark toggle: force the synchronous shape on an adapter that
+		// would otherwise defer, so the two can be A/B'd on one binary.
+		status = domain.PasteStatusReady
 	}
 	p := domain.Paste{
 		Identity:      domain.Identity(owner),
-		Status:        initialStatus,
+		Status:        status,
 		Kind:          kind,
 		ContentSHA:    staged.SHA,
 		Size:          staged.CompressedSize,
@@ -226,92 +221,53 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	const maxRetries = 5
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		p.Slug = domain.NewRandomSlug()
-		err := u.Repo.InsertWithQuotaCheck(context.Background(), p, int64(domain.UserQuotaBytes), now)
-		switch class, terr := classifyCommitErr(err); class {
-		case commitOK:
-			if u.SyncBlob {
-				// Benchmark path: the row is already committed ready, so write
-				// the blob inline with no MarkReady flip.
-				if _, berr := u.Blob.StagePrecompressed(context.Background(), string(p.Slug), staged.SHA, staged.File, staged.encodedSize()); berr != nil {
-					u.logf("upload: sync blob write %s: %v", p.Slug, berr)
+		ctx := context.Background()
+		var handles []BlobHandle
+		if status == domain.PasteStatusReady {
+			// Ownership before the first staged byte, and per ATTEMPT: each
+			// retry mints a new slug, so it is a different upload to own.
+			attemptCtx, berr := u.Blob.BeginUpload(ctx, string(p.Slug))
+			if berr != nil {
+				return Result{}, berr
+			}
+			ctx = attemptCtx
+			// Staging before the insert means a staging failure aborts WITHOUT
+			// a metadata row and with no quota charged. It also has to happen
+			// inside the retry loop: a staged ref's route is captured from the
+			// slug, so a re-mint must re-stage or the bind and the row would
+			// disagree about which shard they live on.
+			handle, err := u.Blob.StagePrecompressed(ctx, string(p.Slug), staged.SHA, staged.File, staged.encodedSize())
+			if err != nil {
+				// A Put rejected by the bucket quota surfaces
+				// storage.ErrServiceFull (the durable total-bytes ceiling).
+				if class, terr := classifyCommitErr(err); class != commitOther {
+					return Result{}, terr
 				}
-				return Result{Paste: p}, nil
+				return Result{}, fmt.Errorf("blob write: %w", err)
 			}
-			// Metadata committed as pending: hand the URL back and finish the
-			// blob write in the background.
-			// Ownership of the spill file transfers to the goroutine.
-			transferred = true
-			u.startFinalize(p.Slug, staged)
-			return Result{Paste: p}, nil
-		case commitSlugTaken:
-			// Logged so a remint burst shows up in the service log instead of
-			// being silent.
-			u.logf("upload: slug %s taken, re-minting (attempt %d/%d)", p.Slug, attempt, maxRetries)
-			continue
-		default:
-			// The translated triad sentinel, or the raw error verbatim.
-			return Result{}, terr
+			handles = []BlobHandle{handle}
 		}
-	}
-	return Result{}, ErrSlugTaken
-}
-
-// createTransactional is the shale-collocated Create: stage the (already
-// magic+zstd) body, then commit the row READY with the blob bound in the SAME
-// transaction, so the bytes are durable before the metadata commit and a reader
-// never sees a row without its blob. No pending status, no finalizer, no
-// SyncBlob toggle on this path.
-//
-// Staging happens INSIDE the retry loop because the staged ref's route shard is
-// captured from the slug: the bind co-commits with the row only when both use
-// the SAME slug. A collision re-mints and re-stages, and the orphan sweep
-// reclaims the first staged-but-unbound object.
-func (u *Upload) createTransactional(staged stagedUpload, owner, name string, kind domain.ContentKind, now time.Time) (Result, error) {
-	p := domain.Paste{
-		Identity:      domain.Identity(owner),
-		Status:        domain.PasteStatusReady, // co-committed with the bind; no pending window
-		Kind:          kind,
-		ContentSHA:    staged.SHA,
-		Size:          staged.CompressedSize,
-		Name:          name,
-		PinnedVersion: 0, // unpinned by default - public URL follows the latest version
-		CreatedAt:     now,
-		UpdatedAt:     now,
-	}
-	ctx := context.Background()
-	const maxRetries = 5
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		p.Slug = domain.NewRandomSlug()
-		// Ownership before the first staged byte, and per ATTEMPT: each retry
-		// mints a new slug, so it is a different upload to own.
-		attemptCtx, berr := u.Blob.BeginUpload(ctx, string(p.Slug))
-		if berr != nil {
-			return Result{}, berr
-		}
-		// Staging before the insert means a staging failure aborts WITHOUT a
-		// metadata row and with no quota charged; the reserve still runs inside
-		// InsertWithQuotaCheck, so an over-quota upload is still rejected.
-		handle, err := u.Blob.StagePrecompressed(attemptCtx, string(p.Slug), staged.SHA, staged.File, staged.encodedSize())
-		if err != nil {
-			// A Put rejected by the bucket quota surfaces
-			// storage.ErrServiceFull (the durable total-bytes ceiling).
-			if class, terr := classifyCommitErr(err); class != commitOther {
-				return Result{}, terr
-			}
-			return Result{}, fmt.Errorf("blob write: %w", err)
-		}
-		err = u.Blob.Commit(attemptCtx, []BlobHandle{handle}, func(ctx context.Context) error {
+		// Commit binds the handles and writes the row as ONE unit where the
+		// adapter can, and is a plain metadata write where it cannot. Both go
+		// through it so the service has one commit call, not one per protocol.
+		err := u.Blob.Commit(ctx, handles, func(ctx context.Context) error {
 			return u.Repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
 		})
 		switch class, terr := classifyCommitErr(err); class {
 		case commitOK:
+			if status == domain.PasteStatusPending {
+				// The bytes land after the row, so the caller gets its URL now
+				// and the finalizer flips the status when they are durable.
+				// Ownership of the spill file transfers to the goroutine.
+				transferred = true
+				u.startFinalize(p.Slug, staged)
+			}
 			return Result{Paste: p}, nil
 		case commitSlugTaken:
-			// Re-mint and re-stage so the new ref co-routes to the new slug's
-			// shard; the prior staged object ages out via the orphan sweep.
-			// Logged so a remint burst, which strands those objects, is
-			// visible.
-			u.logf("upload: slug %s taken, re-minting + re-staging (attempt %d/%d)", p.Slug, attempt, maxRetries)
+			// Logged so a remint burst shows up in the service log instead of
+			// being silent. On the staging path it also strands the object the
+			// previous attempt staged, which the orphan sweep reclaims.
+			u.logf("upload: slug %s taken, re-minting (attempt %d/%d)", p.Slug, attempt, maxRetries)
 			continue
 		default:
 			// The translated triad sentinel, or the raw error verbatim.
