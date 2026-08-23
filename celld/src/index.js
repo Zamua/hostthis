@@ -109,11 +109,65 @@ export class IntentLog {
   }
 }
 
+
+// A room cell: hibernatable WebSocket fan-out, which is what hostthis rooms
+// need and the part of celld with the thinnest upstream test coverage (their
+// limitations page flags close codes and cross-node reconnection).
+//
+// Hibernatable sockets are INBOUND and accepted by the runtime, so the cell can
+// be evicted while clients stay connected. That is the opposite of an OUTBOUND
+// Durable Object socket, which upstream says does not survive a cell move.
+export class Room {
+  constructor(state) {
+    this.state = state;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/count")) {
+      return Response.json({
+        sockets: this.state.getWebSockets().length,
+        // Survives hibernation, so a non-zero value after a move proves the
+        // cell was restored rather than freshly created.
+        seen: (await this.state.storage.get("seen")) ?? 0,
+      });
+    }
+    if (request.headers.get("Upgrade") !== "websocket") {
+      return new Response("expected websocket\n", { status: 426 });
+    }
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    // acceptWebSocket, not server.accept(): the hibernatable form is what lets
+    // the runtime evict the cell while the socket stays open.
+    this.state.acceptWebSocket(server);
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async webSocketMessage(ws, message) {
+    const seen = ((await this.state.storage.get("seen")) ?? 0) + 1;
+    await this.state.storage.put("seen", seen);
+    ws.send(JSON.stringify({ echo: String(message), seen }));
+  }
+
+  async webSocketClose(ws, code, reason, wasClean) {
+    // Recorded so a client-side close code can be checked against what the
+    // cell believed happened.
+    await this.state.storage.put("lastClose", { code, reason, wasClean });
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") {
       return new Response("ok\n");
+    }
+    if (url.pathname.startsWith("/rooms/")) {
+      const room = url.searchParams.get("room");
+      if (!room) {
+        return new Response("room required\n", { status: 400 });
+      }
+      return env.ROOMS.get(env.ROOMS.idFromName(room)).fetch(request);
     }
     if (!url.pathname.startsWith("/intents/")) {
       return new Response("not found\n", { status: 404 });
