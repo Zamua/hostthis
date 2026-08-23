@@ -234,3 +234,66 @@ tracks concurrent users rather than dormant content.
 For sizing: the celld pod serving boardtogether in production sits at 7m CPU and
 34Mi against a 640Mi limit, so the runtime is cheap. Resident cell count is what
 moves the number, at roughly 8 MB each.
+
+---
+
+# Measured: what rooms cost, and what happens to a client when the cell moves
+
+Rooms were measured before the remaining adapters because they are the only
+part that could send the port back to the topology: celld does not shed a cell
+with a live host WebSocket, so a room holds memory for as long as anyone is
+connected. Probe is a `Room` Durable Object using HIBERNATABLE (inbound)
+sockets, in `celld/src/index.js`, driven from `internal/celld/roomprobe_test.go`.
+
+## Resident cost: about 0.45 MB per connected room
+
+| | pod RSS |
+| --- | --- |
+| baseline, no rooms | 32 Mi |
+| 100 connected rooms | 78 Mi |
+| after disconnect, ~10 min | 45 Mi |
+| a SECOND 100 rooms | 90 Mi |
+
+The second batch is what makes the first meaningful: +46 Mi then +45 Mi, so the
+per-room cost is stable and the memory from the first batch was largely
+reclaimed rather than retained. **Roughly 0.45 MB per connected room**, well
+under the ~8 MB/cell figure quoted for celld generally.
+
+Two honest limits. These rooms hold almost no state, so a real room carrying its
+KV would cost more. And RSS drifts back toward baseline over minutes rather than
+returning promptly, with no eviction lines in the log, so reclamation is visible
+in the numbers but its mechanism is not confirmed.
+
+**Rooms are not the memory problem the brief feared.** At this cost, a node
+holds thousands of connected rooms before memory is the binding constraint.
+
+## A moved cell closes the client's socket with NO close code
+
+The reading that matters, and the one upstream's limitations page flags as its
+thinnest coverage.
+
+    client observed on move: status=StatusCode(-1)
+                             err=failed to read frame header: EOF
+
+Measured twice, and the second time WITHOUT the confound that invalidated the
+first. The obvious method - port-forward to a pod, kill that pod - cannot
+distinguish celld closing the socket from the port-forward dying with the pod.
+So the real measurement connects the client through pod A, kills pod B, and
+confirms pod A is still serving afterwards (`HTTP 200`). The client's own
+ingress was healthy throughout and its socket still died.
+
+Three consequences:
+
+1. **The socket does not survive the cell moving**, even when the client's
+   ingress node is alive. "Each node can be the WebSocket ingress for each cell
+   through the peer tunnel" does not mean the connection survives a handoff.
+2. **There is no close code to branch on.** A client sees a bare EOF, not 1001
+   or 1012. Any reconnect story keyed on a close code would silently never fire.
+3. So reconnect must be **unconditional on any disconnect, with backoff**. That
+   is what hostthis's existing WebSocket lifecycle already does, so rooms on
+   celld need no new client behaviour - but a design that assumed a clean close
+   would have been wrong.
+
+A rolling deploy therefore drops every room connection. With one replica that is
+unavoidable; with more, it is still per-cell rather than per-node, because the
+cell moves regardless of which node the client reached.
