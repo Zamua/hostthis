@@ -124,6 +124,9 @@ export class Identity {
   // concurrent upload by the same owner cannot interleave between them. That is
   // what makes the per-identity cap exact rather than best-effort.
   async reserve(body) {
+    if (typeof body.size !== "number" || body.size < 0) {
+      return Response.json({ error: "negative-size" }, { status: 400 });
+    }
     const entries = (await this.state.storage.get("entries")) ?? {};
     const active = Object.values(entries).reduce((n, e) => n + (e.size ?? 0), 0);
     if (body.userCap > 0 && active + body.size > body.userCap) {
@@ -181,9 +184,19 @@ export class Identity {
   // already holds every entry it charges for.
   async bytes() {
     const entries = (await this.state.storage.get("entries")) ?? {};
-    return Response.json({
-      bytes: Object.values(entries).reduce((n, e) => n + (e.size ?? 0), 0),
-    });
+    const total = Object.values(entries).reduce((n, e) => n + (e.size ?? 0), 0);
+    // A negative charge cannot arise from any legal sequence of reserves and
+    // releases: membership makes it unreachable, and every size is checked
+    // non-negative on the way in. Refusing it here means a regression to
+    // arithmetic release - where a replayed release double-subtracts - is loud
+    // at the moment it happens rather than silent until a test happens to look.
+    if (total < 0) {
+      return Response.json(
+        { error: "impossible-state", detail: `charged total ${total} is negative` },
+        { status: 500 },
+      );
+    }
+    return Response.json({ bytes: total });
   }
 
   // The owner's listing, from the maintained summary rather than a scan.
