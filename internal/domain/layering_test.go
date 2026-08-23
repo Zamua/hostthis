@@ -59,6 +59,12 @@ var layerPolicy = map[string][]string{
 	"ssh":             {"archive", "domain", "mime", "service"},
 	"shaleblob":       {"archive", "domain", "durable", "mime", "service", "storage"},
 
+	// The celld backend. It reaches ONLY the ports it implements, never
+	// storage: celld is an alternative to the shale adapter, not a layer on
+	// top of it, so an entry for "storage" here would mean the experiment had
+	// grown a dependency on the thing it is meant to replace.
+	"celld": {"durable"},
+
 	// Test-only harness: the importable package is empty, so what is pinned
 	// here is that it STAYS empty. Its _test.go files wire whole stacks, which
 	// is legitimate and is why the graph below is production-only.
