@@ -174,17 +174,19 @@ func TestDeploySite_Shale_RedeployDropsRemovedFile(t *testing.T) {
 // taken slug.
 func TestDeploySite_Shale_PreClaimRejectsTakenSlug(t *testing.T) {
 	d, _, repo := newShaleDeploy(t)
-	sites := storage.NewSites(repo)
 	ctx := context.Background()
 	now := d.Now().UTC()
+	// Driven against the repo's own reservation, not the SiteRepo port: the
+	// port speaks NewSlug and mints internally, so a same-slug collision can
+	// only be exercised where the mechanism lives.
 
 	// Re-claiming the SAME slug collides, so the claim is durable and
 	// serializing, not advisory.
 	slug := domain.NewRandomSlug()
-	if err := sites.PreClaimSlug(ctx, slug, "owner-x", now); err != nil {
+	if err := repo.PreClaimSlug(ctx, slug, "owner-x", now); err != nil {
 		t.Fatalf("first PreClaimSlug(%q): %v", slug, err)
 	}
-	err := sites.PreClaimSlug(ctx, slug, "owner-x", now)
+	err := repo.PreClaimSlug(ctx, slug, "owner-x", now)
 	if err == nil {
 		t.Fatalf("second PreClaimSlug(%q) = nil, want slug-taken", slug)
 	}

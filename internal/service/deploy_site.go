@@ -49,35 +49,34 @@ type SiteRepo interface {
 	// quota, so without this it silently consumes quota the owner can neither
 	// see nor free.
 	ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error)
-	// PreClaimSlug stakes a metadata-only single-shard claim on slug BEFORE
-	// the deploy consumes the one-shot untar stream, so a transactional blob
-	// path can stage every file under slug's shard and the manifest and blob
-	// pointers co-route to the SAME shard at commit. It is a cheap existence
-	// claim, NOT a blob reservation: no two-store coupling, no quota charge.
-	// Returns domain.ErrSlugTaken if slug is already a paste or a site, so the
-	// caller re-mints and re-claims before reading the body.
+	// NewSlug returns the slug this deploy will commit under, chosen before the
+	// one-shot archive stream is consumed.
 	//
-	// On the standalone blob path the slug routes no blob, so this is a no-op
-	// returning nil and the caller mints in the post-untar insert retry loop
-	// where the authoritative insert is the collision authority.
-	PreClaimSlug(ctx context.Context, slug domain.Slug, owner string, now time.Time) error
+	// The caller stages every file under it and commits under it, so an
+	// adapter whose commit binds staged refs reserves it durably here and a
+	// collision at commit becomes impossible. One that does not need a
+	// reservation may simply mint. Either way the service asks a domain
+	// question - which slug is this deploy - rather than reaching for a
+	// backend's reservation mechanism.
+	//
+	// The caller pairs it with AbandonSlug for any deploy that does not commit.
+	NewSlug(ctx context.Context, owner string, now time.Time) (domain.Slug, error)
 }
 
-// SlugClaimReleaser is the compensating half of SiteRepo.PreClaimSlug: it drops
-// a claim no record was committed under, so a deploy that aborts after staking
-// one (unreadable archive, no web content, a failed commit) does not remove the
-// slug from the namespace for good. The claim is durable and no other path
-// undoes it.
+// SlugAbandoner is the compensating half of SiteRepo.NewSlug: it drops a slug
+// no record was committed under, so a deploy that aborts after taking one
+// (unreadable archive, no web content, a failed commit) does not remove it from
+// the namespace for good.
 //
-// Optional rather than part of SiteRepo: a backend whose PreClaimSlug is a
-// no-op has nothing to release, and the deploy path skips the compensation when
-// the repo does not implement this.
+// Optional: an adapter whose NewSlug reserves nothing has nothing to abandon,
+// and the deploy path skips the compensation when the repo does not implement
+// this.
 //
-// An implementation MUST NOT drop a claim a paste or site was actually
-// committed under, and MUST be a no-op on an absent or foreign claim so a
-// repeated release is harmless.
-type SlugClaimReleaser interface {
-	ReleaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) error
+// An implementation MUST NOT drop a slug a paste or site was actually committed
+// under, and MUST be a no-op on an absent or foreign slug so a repeated
+// abandonment is harmless.
+type SlugAbandoner interface {
+	AbandonSlug(ctx context.Context, slug domain.Slug, owner string) error
 }
 
 // PasteByteSummer is the slice of the paste repo the deploy path needs for
@@ -184,24 +183,25 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	// untar. On the standalone path blobs are content-sha-keyed and the slug
 	// routes nothing, so it stays empty here and is minted in the post-untar
 	// insert retry loop.
-	var slug domain.Slug
-	committed := false
-	if d.bindsAtCommit() {
-		s, err := d.preClaimSlug(ctx, owner, now)
-		if err != nil {
-			return SiteResult{}, err
-		}
-		slug = s
-		// The claim is durable and nothing else ever drops it, so every exit
-		// from here that does not commit a site under slug has to undo it or
-		// the slug leaves the namespace permanently. A deferred compensation
-		// covers the untar, manifest and commit failures alike, plus a panic.
-		defer func() {
-			if !committed {
-				d.releaseSlugClaim(ctx, slug, owner)
-			}
-		}()
+	// The adapter decides the slug and whether taking it reserves anything, so
+	// this path is the same for every backend. It happens BEFORE the untar
+	// because the stream is one-shot: a slug chosen afterwards could not be
+	// staged under.
+	slug, err := d.Sites.NewSlug(ctx, owner, now)
+	if err != nil {
+		return SiteResult{}, err
 	}
+	committed := false
+	// A reserved slug is durable and nothing else drops it, so every exit that
+	// does not commit a site under it has to give it back or it leaves the
+	// namespace permanently. The deferred compensation covers the untar,
+	// manifest and commit failures alike, plus a panic. It is a no-op for an
+	// adapter that reserved nothing.
+	defer func() {
+		if !committed {
+			d.abandonSlug(ctx, slug, owner)
+		}
+	}()
 
 	// Ownership before the first staged byte: bytes staged outside it are
 	// outside what the commit checks, so recovery could reclaim them while
@@ -237,7 +237,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	}
 
 	site := domain.Site{
-		Slug:      slug, // empty on the standalone path; set below in the loop
+		Slug:      slug,
 		Identity:  domain.Identity(owner),
 		Manifest:  man,
 		CreatedAt: now,
@@ -245,38 +245,31 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	}
 	stored := sink.stagedBytes
 
-	// Transactional path: the slug is pre-claimed and the files staged under
-	// it, so the authoritative insert co-binds every pointer on the {slug}
-	// shard in one CAS. One attempt suffices because the pre-claim already
-	// holds the slot; the body is consumed, so a commit-time collision could
-	// not re-untar anyway.
-	if d.bindsAtCommit() {
+	// One commit per slug. The slug came from the adapter BEFORE staging, so an
+	// adapter that reserves cannot lose a race here and never iterates; one
+	// that reserves nothing can, and takes another slug from the same place
+	// rather than minting its own. The body is already consumed, so a retry
+	// re-commits the SAME staged handles under a new slug, which is only sound
+	// because an adapter that routes by slug is also one that reserves.
+	for attempt := range maxDeployRetries {
+		if attempt > 0 {
+			d.abandonSlug(ctx, site.Slug, owner)
+			next, nerr := d.Sites.NewSlug(ctx, owner, now)
+			if nerr != nil {
+				return SiteResult{}, nerr
+			}
+			site.Slug = next
+			slug = next // keep the deferred compensation pointed at the live slug
+		}
 		err := d.Blob.Commit(ctx, sink.handles, func(ctx context.Context) error {
 			return d.Sites.InsertWithQuotaCheck(ctx, site, stored, int64(domain.UserQuotaBytes), now)
 		})
+		if isSlugTaken(err) {
+			continue
+		}
 		res, ferr := finalizeDeploy(site, err)
 		committed = ferr == nil
 		return res, ferr
-	}
-
-	// Standalone path: mint the slug in a retry loop. The mid-untar guard
-	// already bounded the bytes, but the persistence-time check closes the race
-	// where two concurrent deploys from the same identity each pass the
-	// pre-untar budget read and then both insert. The files are already durable
-	// and content-sha-keyed, so re-minting on a collision needs no re-untar.
-	for range maxDeployRetries {
-		site.Slug = domain.NewRandomSlug()
-		err := d.Blob.Commit(ctx, sink.handles, func(ctx context.Context) error {
-			return d.Sites.InsertWithQuotaCheck(ctx, site, stored, int64(domain.UserQuotaBytes), now)
-		})
-		switch class, terr := classifyCommitErr(err); class {
-		case commitOK:
-			return SiteResult{Site: site}, nil
-		case commitSlugTaken:
-			continue
-		default:
-			return SiteResult{}, terr
-		}
 	}
 	return SiteResult{}, ErrSlugTaken
 }
@@ -305,38 +298,17 @@ func (d *DeploySite) Delete(slug domain.Slug, owner string) error {
 	return d.Sites.Delete(slug, existing.Identity, existing.CreatedAt)
 }
 
-// preClaimSlug mints a fresh random slug and stakes a metadata-only claim on
-// it, retrying on collision until it lands a free slug or exhausts the budget.
-// The returned slug is the shard every file stages under. The claim is a cheap
-// existence stake (no blob reservation, no quota charge); the authoritative
-// insert remains the final collision authority.
-func (d *DeploySite) preClaimSlug(ctx context.Context, owner string, now time.Time) (domain.Slug, error) {
-	for range maxDeployRetries {
-		slug := domain.NewRandomSlug()
-		err := d.Sites.PreClaimSlug(ctx, slug, owner, now)
-		switch {
-		case err == nil:
-			return slug, nil
-		case isSlugTaken(err):
-			continue
-		default:
-			return "", err
-		}
-	}
-	return "", ErrSlugTaken
-}
-
-// releaseSlugClaim undoes a pre-claim no site was committed under. Best-effort:
-// a failure re-leaks the claim (one slug of a 32^8 space) and must never
-// replace the deploy error the caller is about to see. A backend whose
-// PreClaimSlug is a no-op implements no releaser and needs none.
-func (d *DeploySite) releaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) {
-	rel, ok := d.Sites.(SlugClaimReleaser)
+// abandonSlug gives back a slug no site was committed under. Best-effort: the
+// deploy already failed and the caller has its error, so a failure here is
+// logged rather than surfaced. An adapter whose NewSlug reserved nothing
+// implements no abandoner and needs none.
+func (d *DeploySite) abandonSlug(ctx context.Context, slug domain.Slug, owner string) {
+	ab, ok := d.Sites.(SlugAbandoner)
 	if !ok {
 		return
 	}
-	if err := rel.ReleaseSlugClaim(ctx, slug, owner); err != nil {
-		d.logf("deploy: release slug claim %s: %v", slug, err)
+	if err := ab.AbandonSlug(ctx, slug, owner); err != nil {
+		d.logf("deploy: abandoning slug %s for %s: %v", slug, owner, err)
 	}
 }
 
@@ -552,17 +524,4 @@ func (a ArchiveAdapter) Deploy(body io.Reader, owner string) (Result, error) {
 		CreatedAt: res.Site.CreatedAt,
 		UpdatedAt: res.Site.UpdatedAt,
 	}}, nil
-}
-
-// bindsAtCommit reports whether the blob unit binds bytes inside the metadata
-// commit, which is what forces the slug to be fixed BEFORE the untar: a staged
-// ref's route is captured from the slug, so the bind and the row must agree on
-// it. Derived from the status a commit produces rather than from a capability
-// predicate.
-//
-// TODO: slug reservation is shale's mechanism for this, not a domain
-// operation. PreClaimSlug / ReleaseSlugClaim belong below the port, which
-// removes this branch entirely.
-func (d *DeploySite) bindsAtCommit() bool {
-	return d.Blob.InitialStatus() == domain.PasteStatusReady
 }

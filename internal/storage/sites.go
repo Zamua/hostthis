@@ -9,6 +9,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -118,13 +119,28 @@ func (a *Sites) ListSitesByOwner(string, time.Time) ([]domain.Site, error) {
 	return nil, nil
 }
 
-// PreClaimSlug stakes the paste claim, so a directory's files stage on the
-// same shard its manifest commits to.
-func (a *Sites) PreClaimSlug(ctx context.Context, slug domain.Slug, owner string, now time.Time) error {
-	return a.repo.PreClaimSlug(ctx, slug, owner, now)
+// NewSlug mints a slug and reserves it, so a directory's files stage on the
+// same shard its manifest commits to. Reserving here is what makes the caller's
+// commit collision-free; the retry budget covers a mint that loses a race to a
+// concurrent deploy before the reservation lands.
+func (a *Sites) NewSlug(ctx context.Context, owner string, now time.Time) (domain.Slug, error) {
+	const attempts = 5
+	for range attempts {
+		slug := domain.NewRandomSlug()
+		err := a.repo.PreClaimSlug(ctx, slug, owner, now)
+		switch {
+		case err == nil:
+			return slug, nil
+		case errors.Is(err, domain.ErrSlugTaken):
+			continue
+		default:
+			return "", err
+		}
+	}
+	return "", domain.ErrSlugTaken
 }
 
-// ReleaseSlugClaim drops a claim whose deploy never landed.
-func (a *Sites) ReleaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) error {
+// AbandonSlug gives back a slug whose deploy never landed.
+func (a *Sites) AbandonSlug(ctx context.Context, slug domain.Slug, owner string) error {
 	return a.repo.ReleaseSlugClaim(ctx, slug, owner)
 }
