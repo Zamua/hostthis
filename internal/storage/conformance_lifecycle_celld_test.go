@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -64,6 +65,44 @@ func (n namespacedRepo) MarkFailed(s domain.Slug) error { return n.inner.MarkFai
 
 func (n namespacedRepo) SumActiveBytesByOwner(o string, at time.Time) (int, error) {
 	return n.inner.SumActiveBytesByOwner(n.owner(o), at)
+}
+
+func (n namespacedRepo) ListByOwner(o string) ([]domain.Paste, error) {
+	got, err := n.inner.ListByOwner(n.owner(o))
+	if err != nil {
+		return nil, err
+	}
+	// Hand back the identifiers the caller used, or the suite reads the harness.
+	for i := range got {
+		got[i].Slug = domain.Slug(strings.TrimPrefix(string(got[i].Slug), n.prefix))
+		got[i].Identity = domain.Identity(o)
+	}
+	return got, nil
+}
+
+func (n namespacedRepo) CountByOwner(o string) (int, error) {
+	return n.inner.CountByOwner(n.owner(o))
+}
+
+func (n namespacedRepo) OwnerFirstSeen(o string) (time.Time, error) {
+	return n.inner.OwnerFirstSeen(n.owner(o))
+}
+
+func (n namespacedRepo) DropStaleOwnerEntry(s domain.Slug, o string) (bool, error) {
+	return n.inner.DropStaleOwnerEntry(n.slug(s), n.owner(o))
+}
+
+func TestOwnerIndexConformance_Celld(t *testing.T) {
+	base := os.Getenv("CELLD_TEST_ENDPOINT")
+	if base == "" {
+		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld owner-index conformance")
+	}
+	runOwnerIndexConformance(t, "celld", func(t *testing.T) ownerIndexRepo {
+		return namespacedRepo{
+			inner:  celld.NewPasteRepo(base, nil),
+			prefix: fmt.Sprintf("c%d", celldLifecycleSeq.Add(1)),
+		}
+	})
 }
 
 func TestLifecycleConformance_Celld(t *testing.T) {
