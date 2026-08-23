@@ -107,6 +107,22 @@ in the same spirit as spec-first. The list grows as decisions get made.
    writes, or repair for a whole owner is a defect - the repair path
    especially must tolerate the very damage it exists to repair.
 
+## Tests: assert the property, not the spelling
+
+An over-specified test disguises itself as an upstream bug, which is how it
+survives. `TestRoomWireValue/invalid_utf8` asserted the JSON ENCODING FORM of a
+replacement character - Go 1.27 emits U+FFFD literally where older Go escaped it
+as a `\uFFFD` sequence - when the behaviour it cared about was that invalid
+UTF-8 becomes U+FFFD. Both spellings are valid JSON for the same string, so the
+test pinned the toolchain rather than the code, and it went unowned because it
+read as a Go problem.
+
+Rule: when an assertion compares a SERIALIZED form - JSON text, wire bytes,
+formatted output - decode it and assert the value instead, unless the encoding
+itself is the property under test (escaping of control characters, say). Surveyed
+2026-08-23: this was the only instance in the tree, so the class is small, but it
+comes due all at once on a toolchain move.
+
 ## Repo layout
 
 ```
