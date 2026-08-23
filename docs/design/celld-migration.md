@@ -75,24 +75,39 @@ write. celld cannot. The celld adapter therefore lands on the existing
 detached-store path: stage refs, commit metadata, reconcile, sweep orphans.
 That machinery already exists for the local and slatedb backends.
 
-## 5. Hot cells: design for this or the port regresses
+## 5. Hot cells: the write paths, not the read paths
 
 One cell is one thread and there are no replicas, because sole ownership is the
-design. shale's answer to a hot key is R>1 with `Nearest` reads, so R nodes can
-serve it. celld has no such answer.
+design. shale's answer to a hot key is R>1 with `Nearest` reads; celld has no
+such answer.
 
-So: **paste bodies must not be read through cells.** Serve them as static
-assets from the bucket, or from the existing blob store, and keep the cell for
-metadata and mutation only. celld serves static assets natively and the request
-never touches a cell.
+Hot **reads** are already handled: a CDN fronts paste delivery, and bodies
+should continue to be served as static content rather than read through a cell.
+Keep that true and read load is a non-issue.
 
-A naive port that reads bodies through cells will be worse under load than
-shale is today. This is the single most important design constraint in the
-experiment.
+The risks that survive a CDN are all on the write and session paths, in
+descending order of concern:
+
+1. **The subnet keygate cell.** `KeyGate.Admit` runs once per SSH session,
+   before any verb dispatch, keyed by IP subnet. Subnets are shared
+   involuntarily: a university, an office behind NAT, a CGNAT range. One cell
+   per subnet puts every session from that network through a single thread
+   before any work begins. In shale this is one key on one shard that can
+   serve concurrently and, at R>1, from more than one node. **This is the
+   sharpest regression risk in the migration.** Consider sharding the cell
+   name below the subnet, or keeping keygate on a different store.
+2. **Room cells.** Live WebSocket traffic that no CDN can absorb, serialized
+   per room. Probably acceptable, since a room is a small group by nature, but
+   it should be measured rather than assumed.
+3. **The identity cell.** Every upload touches it for quota and the paste
+   index. A script or CI key doing bulk concurrent uploads serializes there.
+4. **Paste cell writes.** These serialize, but a paste has one owner pushing
+   to it, so serialization is correct rather than a bottleneck.
 
 Related asymmetry worth measuring: waking an inactive cell pays a restore from
-the bucket. shale has no per-key activation cost. Expect cheap storage with an
-occasional cold-start spike, rather than shale's uniform latency at uniform
+the bucket, and a CDN miss on a dormant paste is exactly when that happens.
+shale has no per-key activation cost. Expect cheap storage with an occasional
+cold-start spike at the p99, rather than shale's uniform latency at uniform
 cost.
 
 ## 6. What scales better, and what does not
