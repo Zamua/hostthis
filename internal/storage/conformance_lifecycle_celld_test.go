@@ -30,6 +30,17 @@ import (
 
 var celldLifecycleSeq atomic.Int64
 
+// A per-PROCESS nonce, not just a counter. The counter restarts at 1 every run
+// while the cells it names are durable, so two runs of the same suite share a
+// namespace and the second one inherits the first's admissions and quota - which
+// surfaces as a never-seen key reporting knownAlready, an error that looks like
+// an adapter bug and is not.
+var celldRunNonce = fmt.Sprintf("%x", time.Now().UnixNano()&0xffffff)
+
+func celldNamespace() string {
+	return fmt.Sprintf("c%s%d", celldRunNonce, celldLifecycleSeq.Add(1))
+}
+
 // namespacedRepo rewrites slugs and owners into a per-run namespace, so the
 // suite's fixed identifiers do not collide across runs against a durable fleet.
 type namespacedRepo struct {
@@ -118,7 +129,7 @@ func TestOwnerIndexConformance_Celld(t *testing.T) {
 	runOwnerIndexConformance(t, "celld", func(t *testing.T) ownerIndexRepo {
 		return namespacedRepo{
 			inner:  celld.NewPasteRepo(base, nil),
-			prefix: fmt.Sprintf("c%d", celldLifecycleSeq.Add(1)),
+			prefix: celldNamespace(),
 		}
 	})
 }
@@ -131,7 +142,43 @@ func TestLifecycleConformance_Celld(t *testing.T) {
 	runLifecycleConformance(t, "celld", func(t *testing.T) lifecycleRepo {
 		return namespacedRepo{
 			inner:  celld.NewPasteRepo(base, nil),
-			prefix: fmt.Sprintf("c%d", celldLifecycleSeq.Add(1)),
+			prefix: celldNamespace(),
+		}
+	})
+}
+
+// namespacedKeygate keeps each run's identities and subnets distinct, for the
+// same reason namespacedRepo does: celld cells are durable with no teardown, so
+// a rerun that reused a subnet would inherit the previous run's admissions and
+// read as a spurious cap refusal.
+type namespacedKeygate struct {
+	inner  *celld.KeyGateRepo
+	prefix string
+}
+
+func (n namespacedKeygate) AdmitNewKey(identity, subnet string, now time.Time, limit int,
+	window time.Duration,
+) (bool, error) {
+	return n.inner.AdmitNewKey(n.prefix+identity, n.prefix+subnet, now, limit, window)
+}
+
+func (n namespacedKeygate) SubnetSnapshot(subnet string, now time.Time, window time.Duration) (int, time.Time, error) {
+	return n.inner.SubnetSnapshot(n.prefix+subnet, now, window)
+}
+
+func (n namespacedKeygate) SubnetsForIdentity(identity string, now time.Time, window time.Duration) (int, error) {
+	return n.inner.SubnetsForIdentity(n.prefix+identity, now, window)
+}
+
+func TestKeygateConformance_Celld(t *testing.T) {
+	base := os.Getenv("CELLD_TEST_ENDPOINT")
+	if base == "" {
+		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld keygate conformance")
+	}
+	runKeygateConformance(t, "celld", func(t *testing.T) keygateRepo {
+		return namespacedKeygate{
+			inner:  celld.NewKeyGateRepo(base, nil),
+			prefix: celldNamespace() + "-",
 		}
 	})
 }
