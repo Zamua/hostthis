@@ -46,21 +46,22 @@ func (r *claimSiteRepo) SumActiveBytesByOwner(string, time.Time) (int64, error) 
 
 func (r *claimSiteRepo) ListSitesByOwner(string, time.Time) ([]domain.Site, error) { return nil, nil }
 
-func (r *claimSiteRepo) PreClaimSlug(_ context.Context, slug domain.Slug, _ string, _ time.Time) error {
+func (r *claimSiteRepo) NewSlug(_ context.Context, _ string, _ time.Time) (domain.Slug, error) {
+	slug := domain.NewRandomSlug()
 	r.claimed = append(r.claimed, slug)
-	return nil
+	return slug, nil
 }
 
-func (r *claimSiteRepo) ReleaseSlugClaim(_ context.Context, slug domain.Slug, _ string) error {
+func (r *claimSiteRepo) AbandonSlug(_ context.Context, slug domain.Slug, _ string) error {
 	r.released = append(r.released, slug)
 	return nil
 }
 
 var (
-	_ SiteRepo          = (*claimSiteRepo)(nil)
-	_ SlugClaimReleaser = (*claimSiteRepo)(nil)
-	_ PasteByteSummer   = zeroPasteBytes{}
-	_ BlobUnit          = txTestBlobUnit{}
+	_ SiteRepo        = (*claimSiteRepo)(nil)
+	_ SlugAbandoner   = (*claimSiteRepo)(nil)
+	_ PasteByteSummer = zeroPasteBytes{}
+	_ BlobUnit        = txTestBlobUnit{}
 )
 
 type zeroPasteBytes struct{}
