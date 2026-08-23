@@ -8,12 +8,13 @@ import (
 )
 
 // blobReadStore is the read surface StandaloneBlobUnit needs on top of the
-// write+buffered-read BlobStore the services already hold: GetReader streams
-// the decompressed bytes, Get buffers them. Declared here rather than imported
-// from http so the service layer does not depend on the http package.
+// write-side BlobStore the services already hold. Streaming only: the service
+// layer has no buffering blob read, so no caller here can size an allocation to
+// a payload (docs/SPEC.md "Reads are constant-memory too"). Declared here rather
+// than imported from http so the service layer does not depend on the http
+// package.
 type blobReadStore interface {
 	GetReader(sha string) (io.ReadCloser, int64, error)
-	Get(sha string) ([]byte, error)
 }
 
 // StandaloneBlobUnit adapts the detached content-addressed blob store (a
@@ -63,11 +64,6 @@ func (u *StandaloneBlobUnit) Commit(ctx context.Context, _ []BlobHandle, metaWri
 // by content sha alone.
 func (u *StandaloneBlobUnit) Read(_ context.Context, _ /*slug*/, sha string) (io.ReadCloser, int64, error) {
 	return u.store.GetReader(sha)
-}
-
-// ReadAll returns the full decompressed bytes for sha.
-func (u *StandaloneBlobUnit) ReadAll(_ context.Context, _ /*slug*/, sha string) ([]byte, error) {
-	return u.store.Get(sha)
 }
 
 // UnbindOnDelete is a no-op: the global content-addressed sweep reclaims blobs

@@ -62,14 +62,6 @@ func TestStandalone_StageRead_RoundTrip(t *testing.T) {
 	if !bytes.Equal(got, raw) {
 		t.Fatalf("Read bytes: got %q, want %q", got, raw)
 	}
-
-	gotAll, err := u.ReadAll(context.Background(), "slug0001", sha)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-	if !bytes.Equal(gotAll, raw) {
-		t.Fatalf("ReadAll bytes: got %q, want %q", gotAll, raw)
-	}
 }
 
 // The streaming-stage path used by the site deploy sink round-trips: bytes go
@@ -82,9 +74,9 @@ func TestStandalone_StageStream_RoundTrip(t *testing.T) {
 	if _, err := u.StageStream(context.Background(), "site0001", sha, bytes.NewReader(raw), int64(len(raw))); err != nil {
 		t.Fatalf("StageStream: %v", err)
 	}
-	got, err := u.ReadAll(context.Background(), "site0001", sha)
+	got, err := readStream(t, u, "site0001", sha)
 	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
+		t.Fatalf("Read: %v", err)
 	}
 	if !bytes.Equal(got, raw) {
 		t.Fatalf("StageStream round-trip: got %q, want %q", got, raw)
@@ -126,9 +118,9 @@ func TestStandalone_UnbindOnDelete_IsNoop(t *testing.T) {
 	if err := u.UnbindOnDelete(context.Background(), "slug0003", []string{sha}); err != nil {
 		t.Fatalf("UnbindOnDelete: %v", err)
 	}
-	got, err := u.ReadAll(context.Background(), "slug0003", sha)
+	got, err := readStream(t, u, "slug0003", sha)
 	if err != nil {
-		t.Fatalf("ReadAll after unbind (should still exist): %v", err)
+		t.Fatalf("Read after unbind (should still exist): %v", err)
 	}
 	if !bytes.Equal(got, raw) {
 		t.Fatalf("bytes after unbind: got %q, want %q", got, raw)
@@ -142,7 +134,18 @@ func TestStandalone_Read_NotFound(t *testing.T) {
 	if _, _, err := u.Read(context.Background(), "slug0004", "deadbeef"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("Read missing: got %v, want storage.ErrNotFound", err)
 	}
-	if _, err := u.ReadAll(context.Background(), "slug0004", "deadbeef"); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("ReadAll missing: got %v, want storage.ErrNotFound", err)
+}
+
+// readStream drains the adapter's streaming read. The seam offers no buffering
+// read - a caller that wants the whole document allocates it deliberately, here
+// in a test, rather than through the port (docs/SPEC.md "Reads are
+// constant-memory too").
+func readStream(t *testing.T, u *StandaloneBlobUnit, slug, sha string) ([]byte, error) {
+	t.Helper()
+	rc, _, err := u.Read(context.Background(), slug, sha)
+	if err != nil {
+		return nil, err
 	}
+	defer rc.Close() //nolint:errcheck
+	return io.ReadAll(rc)
 }

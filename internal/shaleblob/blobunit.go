@@ -207,17 +207,6 @@ func (u *Unit) Read(ctx context.Context, slug, sha string) (io.ReadCloser, int64
 	return &ctxCancelReadCloser{rc: dec, cancel: cancel}, size, nil
 }
 
-// ReadAll buffers the full decompressed blob, for the paths that need the
-// whole document at once.
-func (u *Unit) ReadAll(ctx context.Context, slug, sha string) ([]byte, error) {
-	rc, _, err := u.Read(ctx, slug, sha)
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close() //nolint:errcheck
-	return io.ReadAll(rc)
-}
-
 // UnbindOnDelete is a no-op: the unbind is folded into the metadata-delete
 // transaction (ShaleRepo.Delete / DeleteVersion / DeleteSite), so the bytes go
 // unreferenced atomically with the row removal.
