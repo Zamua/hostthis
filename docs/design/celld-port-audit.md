@@ -150,3 +150,53 @@ it were the contract.
    the start rather than discovered at integration.
 
 Doing 3 before 2 means the suite cannot tell whether the adapter is right.
+
+---
+
+# Measured: do durable alarms fire on an idle cell?
+
+The audit recommended alarms for intent resolution and TTL expiry. That advice
+was unverified, and `infra/boardtogether/celld/README.md` documents a timer gap
+that would have invalidated it: timers polled only while an event runs, so one
+coming due on an IDLE cell fires on the next event rather than on time. A
+dormant paste cell is exactly that case.
+
+Boardtogether could not answer from operations - their cells heartbeat every 25s
+so they have never exercised an untouched alarm - but they made the right
+distinction: the README gap is about JS `setTimeout`, while the proposal rests
+on durable `ctx.storage.setAlarm`. Different machinery, so it needed measuring
+rather than inferring.
+
+**Measured against stock v0.3.0** (the digest the fleet pins), a probe cell whose
+`alarm()` handler records `firedAt` in its own storage. Recording inside the
+handler is the discriminator: observing from outside necessarily wakes the cell,
+so only the handler can say when it actually ran.
+
+| case | config | due -> fired |
+| --- | --- | --- |
+| idle cell, 60s alarm | evict 5s | **+6 ms** |
+| slow orphan scan, 30s alarm | evict 5s, waker tick 30s | **+7 ms** |
+| far alarm, residency defeated | evict 5s, residency 1s, waker tick 5s, 300s alarm | **+4 ms** |
+| node killed mid-flight | as above, 90s alarm, node down ~10s across the window | **+20 ms** |
+
+Every observation happened 30 to 45 seconds AFTER the fire, so none of these is
+the alarm being triggered by the act of looking.
+
+**Conclusion: durable alarms fire on time on evicted cells, and survive a node
+restart. The alarms recommendation stands.** Three things it is worth being
+precise about:
+
+- The near-alarm residency window does not explain it. Forcing
+  `CELLD_ALARM_RESIDENT_MS=1000` against a 300-second alarm still fired at +4 ms.
+- The orphan scan interval does not bound it either. A 30-second
+  `CELLD_WAKER_TICK_MS` still produced +7 ms, so the waker is not a coarse poll
+  that fires late by up to a tick.
+- An alarm armed before a node dies still fires after a different process picks
+  the cell up. That matters because a 7-day TTL will span deploys by
+  construction.
+
+**Limits of this measurement.** One node, one cell, local MinIO, minutes rather
+than days. It establishes the mechanism, not behaviour under fleet load or over
+a real TTL horizon. It also says nothing about the JS `setTimeout` gate, which
+is a separate question that still needs measuring on v0.3.0 before anything is
+built on WebSocket or RPC paths.
