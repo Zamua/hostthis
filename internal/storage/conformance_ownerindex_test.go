@@ -30,6 +30,12 @@ type ownerIndexRepo interface {
 	OwnerFirstSeen(owner string) (time.Time, error)
 	DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, error)
 	SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error
+	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
+}
+
+func chargedBytes(t *testing.T, r ownerIndexRepo, owner string) (int, error) {
+	t.Helper()
+	return r.SumActiveBytesByOwner(owner, fixedNow)
 }
 
 func ownerInsert(t *testing.T, r ownerIndexRepo, p domain.Paste) {
@@ -176,6 +182,69 @@ func conformOwnerListReflectsMutation(t *testing.T, r ownerIndexRepo) {
 	}
 }
 
+// A REPEATED DELETE does not double-release.
+//
+// NOTE what this does and does not reach. At the port, the only observable is
+// calling the delete twice, and both backends are protected there by a status
+// guard: the second call sees an already-settled record and does no release at
+// all. So this pins the GUARD, which is real protection worth having pinned.
+//
+// It does NOT pin release itself being idempotent. A resolver replaying after a
+// crash calls release directly, below the guard, and no port-level assertion
+// can see that. Verified the hard way: an arithmetic-release sabotage in the
+// celld adapter PASSED this test, because the guard stopped the second call
+// before it reached the sabotaged code. The internal invariant is pinned in
+// internal/celld instead, where the release can be driven directly.
+//
+// Creation reserves and confirms; deletion RELEASES, and release carries an
+// idempotency requirement reservation does not. A resolver gives at-least-once,
+// so a crash between releasing and discharging its intent means the release
+// runs again. Expressed as arithmetic - "subtract N from the charged total" -
+// that second run under-charges the owner permanently, and nothing surfaces it:
+// the number is simply wrong forever.
+//
+// Expressed as MEMBERSHIP - "ensure this slug is no longer counted" - re-running
+// is a no-op by construction, and the mechanism only has to promise
+// at-least-once. This asserts the observable consequence rather than the
+// implementation: releasing twice must leave the same total as releasing once.
+func conformReleaseIsIdempotent(t *testing.T, r ownerIndexRepo) {
+	const owner = "key:oi-replay"
+	p := pasteOf("oia23456", owner, 700)
+	p.Status = domain.PasteStatusPending
+	ownerInsert(t, r, p)
+
+	// A second paste stays live, so the assertion distinguishes "released once"
+	// from "released into the negative": with arithmetic double-release the
+	// total would fall BELOW the survivor's size.
+	keep := pasteOf("oib23456", owner, 300)
+	ownerInsert(t, r, keep)
+
+	if err := r.MarkFailed(p.Slug); err != nil {
+		t.Fatalf("MarkFailed: %v", err)
+	}
+	after, err := chargedBytes(t, r, owner)
+	if err != nil {
+		t.Fatalf("charged after first release: %v", err)
+	}
+	if after != 300 {
+		t.Fatalf("charged = %d after releasing the 700; want 300, the survivor", after)
+	}
+
+	// The replay. A resolver that ran twice must not charge differently.
+	if err := r.MarkFailed(p.Slug); err != nil {
+		t.Fatalf("MarkFailed replay: %v", err)
+	}
+	replayed, err := chargedBytes(t, r, owner)
+	if err != nil {
+		t.Fatalf("charged after replay: %v", err)
+	}
+	if replayed != after {
+		t.Fatalf("charged = %d after a REPLAYED release, was %d. Release must be membership "+
+			"(\"this slug is no longer counted\"), not arithmetic (\"subtract N\"), because a "+
+			"resolver only promises at-least-once.", replayed, after)
+	}
+}
+
 func runOwnerIndexConformance(t *testing.T, name string, newRepo func(t *testing.T) ownerIndexRepo) {
 	t.Helper()
 	t.Run(name+"/OwnerListIsScopedAndComplete", func(t *testing.T) {
@@ -189,4 +258,5 @@ func runOwnerIndexConformance(t *testing.T, name string, newRepo func(t *testing
 	t.Run(name+"/OwnerListReflectsMutation", func(t *testing.T) {
 		conformOwnerListReflectsMutation(t, newRepo(t))
 	})
+	t.Run(name+"/ReleaseIsIdempotent", func(t *testing.T) { conformReleaseIsIdempotent(t, newRepo(t)) })
 }
