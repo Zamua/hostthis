@@ -78,7 +78,7 @@ func TestRoomProbe_EchoAndPersist(t *testing.T) {
 	defer c.Close(websocket.StatusNormalClosure, "done") //nolint:errcheck
 
 	for i := range 3 {
-		if err := c.Write(ctx, websocket.MessageText, []byte(fmt.Sprintf("hello-%d", i))); err != nil {
+		if err := c.Write(ctx, websocket.MessageText, fmt.Appendf(nil, "hello-%d", i)); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
 		_, data, err := c.Read(ctx)
