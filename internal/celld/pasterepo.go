@@ -172,7 +172,8 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 	status, err := r.call(ctx, http.MethodPost, "/identity/reserve", "scope", owner, map[string]any{
 		"slug": p.Slug.String(), "size": p.Size, "userCap": userCap,
 		"now": now.UTC().UnixMilli(), "status": string(p.Status),
-		"kind": string(p.Kind), "name": p.Name, "contentSha": p.ContentSHA,
+		"updatedAt": p.UpdatedAt.UTC().UnixMilli(),
+		"kind":      string(p.Kind), "name": p.Name, "contentSha": p.ContentSHA,
 		"intent": map[string]any{
 			"id": intentID, "kind": "create_paste", "subject": p.Slug.String(),
 			"startedAt": now.UTC().UnixMilli(),
@@ -297,6 +298,12 @@ type ownerEntry struct {
 	Kind       string `json:"kind"`
 	Name       string `json:"name"`
 	ContentSHA string `json:"contentSha"`
+
+	// UpdatedAt orders the listing and LatestVersion is displayed in it. Both
+	// are denormalised into the identity cell so a listing stays a POINT READ:
+	// fetching them from each paste cell would make one listing N round trips.
+	UpdatedAt     int64 `json:"updatedAt"`
+	LatestVersion int   `json:"latestVersion"`
 }
 
 func (r *PasteRepo) ownerEntries(owner string) ([]ownerEntry, error) {
@@ -325,11 +332,19 @@ func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 			continue
 		}
 		at := time.UnixMilli(e.At).UTC()
+		updated := at
+		if e.UpdatedAt != 0 {
+			updated = time.UnixMilli(e.UpdatedAt).UTC()
+		}
+		latest := e.LatestVersion
+		if latest == 0 {
+			latest = 1 // every live paste has at least v1
+		}
 		out = append(out, domain.Paste{
 			Slug: domain.Slug(e.Slug), Identity: domain.Identity(owner),
 			Status: domain.PasteStatus(e.Status), Kind: domain.ContentKind(e.Kind),
 			ContentSHA: e.ContentSHA, Size: e.Size, Name: e.Name,
-			CreatedAt: at, UpdatedAt: at,
+			CreatedAt: at, UpdatedAt: updated, LatestVersion: latest,
 		})
 	}
 	return out, nil
@@ -420,7 +435,9 @@ func (r *PasteRepo) SetName(slug domain.Slug, name string, wantIdentity domain.I
 		return domain.ErrNotFound // a foreign or re-minted slug is not this owner's paste
 	}
 	_, err := r.call(context.Background(), http.MethodPost, "/identity/touch", "scope",
-		wantIdentity.String(), map[string]any{"slug": slug.String(), "name": name}, nil)
+		wantIdentity.String(), map[string]any{
+			"slug": slug.String(), "name": name, "at": time.Now().UTC().UnixMilli(),
+		}, nil)
 	return err
 }
 
@@ -516,7 +533,12 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 	// The charge follows the version. Absolute, not a delta: re-running this
 	// with the same total is a no-op, where "add size" would double-charge.
 	if _, err := r.call(ctx, http.MethodPost, "/identity/touch", "scope", owner,
-		map[string]any{"slug": slug.String(), "size": res.TotalSize}, nil); err != nil {
+		map[string]any{
+			"slug": slug.String(), "size": res.TotalSize,
+			// The owner's listing is ordered by this, so an update that does not
+			// carry a time silently sorts as if it never happened.
+			"at": now.UTC().UnixMilli(), "latestVersion": res.Ver,
+		}, nil); err != nil {
 		return domain.AppendResult{}, err
 	}
 	return domain.AppendResult{NewVer: res.Ver, WasPinned: res.WasPinned}, nil
@@ -529,6 +551,8 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 		Kind       string          `json:"kind"`
 		ContentSHA string          `json:"contentSha"`
 		Size       int             `json:"size"`
+		CreatedAt  int64           `json:"createdAt"`
+		Deleted    bool            `json:"deleted"`
 		Manifest   domain.Manifest `json:"manifest"`
 	}
 	status, err := r.call(context.Background(), http.MethodGet, "/paste/versions", "slug", slug.String(), nil, &wire)
@@ -543,6 +567,7 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 		out = append(out, domain.Version{
 			Slug: slug, VerNum: w.Ver, Kind: domain.ContentKind(w.Kind),
 			ContentSHA: w.ContentSHA, Size: w.Size, Manifest: w.Manifest,
+			CreatedAt: time.UnixMilli(w.CreatedAt).UTC(), Deleted: w.Deleted,
 		})
 	}
 	return out, nil
@@ -579,7 +604,10 @@ func (r *PasteRepo) DeleteVersion(slug domain.Slug, ver int) error {
 	}
 	// Settle from the total the paste cell computed, not from a delta.
 	_, err = r.call(context.Background(), http.MethodPost, "/identity/touch", "scope",
-		got.Identity.String(), map[string]any{"slug": slug.String(), "size": res.TotalSize}, nil)
+		got.Identity.String(), map[string]any{
+			"slug": slug.String(), "size": res.TotalSize,
+			"at": time.Now().UTC().UnixMilli(),
+		}, nil)
 	return err
 }
 
@@ -720,7 +748,12 @@ func (r *PasteRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug,
 		return domain.AppendResult{}, domain.ErrNotFound
 	}
 	if _, err := r.call(ctx, http.MethodPost, "/identity/touch", "scope", owner,
-		map[string]any{"slug": slug.String(), "size": res.TotalSize}, nil); err != nil {
+		map[string]any{
+			"slug": slug.String(), "size": res.TotalSize,
+			// The owner's listing is ordered by this, so an update that does not
+			// carry a time silently sorts as if it never happened.
+			"at": now.UTC().UnixMilli(), "latestVersion": res.Ver,
+		}, nil); err != nil {
 		return domain.AppendResult{}, err
 	}
 	return domain.AppendResult{NewVer: res.Ver, WasPinned: res.WasPinned}, nil
