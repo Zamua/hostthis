@@ -304,6 +304,7 @@ type ownerEntry struct {
 	// fetching them from each paste cell would make one listing N round trips.
 	UpdatedAt     int64 `json:"updatedAt"`
 	LatestVersion int   `json:"latestVersion"`
+	PinnedVersion int   `json:"pinnedVersion"`
 }
 
 func (r *PasteRepo) ownerEntries(owner string) ([]ownerEntry, error) {
@@ -345,6 +346,7 @@ func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 			Status: domain.PasteStatus(e.Status), Kind: domain.ContentKind(e.Kind),
 			ContentSHA: e.ContentSHA, Size: e.Size, Name: e.Name,
 			CreatedAt: at, UpdatedAt: updated, LatestVersion: latest,
+			PinnedVersion: e.PinnedVersion,
 		})
 	}
 	return out, nil
@@ -658,6 +660,10 @@ func (r *PasteRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error
 
 func (r *PasteRepo) Unpin(slug domain.Slug) error { return r.setPin(slug, 0) }
 
+// setPin also updates the owner index, which renders the listing from its own
+// denormalised entry: without this the pin is honoured when serving but
+// invisible in `list`, so an owner cannot see which version their URL is stuck
+// to. Found by migrating a pinned paste and reading the listing afterwards.
 func (r *PasteRepo) setPin(slug domain.Slug, ver int) error {
 	var res struct {
 		Pinned bool `json:"pinned"`
@@ -669,6 +675,19 @@ func (r *PasteRepo) setPin(slug domain.Slug, ver int) error {
 	if !res.Pinned {
 		return domain.ErrNotFound
 	}
+	// TWO cells: the pin belongs to the paste, but the listing reads the owner
+	// index. The paste cell went first, so a crash between them leaves the pin
+	// in effect but not displayed - a stale label, never a URL serving the wrong
+	// version.
+	got, err := r.Get(slug)
+	if err != nil {
+		return nil //nolint:nilerr // the pin landed; only its label is stale
+	}
+	_, _ = r.call(context.Background(), http.MethodPost, "/identity/touch", "scope",
+		got.Identity.String(), map[string]any{
+			"slug": slug.String(), "pinnedVersion": ver,
+			"size": got.Size, "kind": string(got.Kind),
+		}, nil)
 	return nil
 }
 
