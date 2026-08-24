@@ -255,8 +255,26 @@ func main() {
 func verifyPaste(src *storage.ShaleRepo, srcBlobs service.BlobUnit,
 	dst *celld.PasteRepo, dstBlobs service.BlobUnit, p domain.Paste,
 ) error {
+	srcVersAll, err := src.ListVersions(p.Slug)
+	if err != nil {
+		return fmt.Errorf("list source versions: %w", err)
+	}
+	srcLive := 0
+	for _, v := range srcVersAll {
+		if !v.Deleted {
+			srcLive++
+		}
+	}
+
 	got, err := dst.Get(p.Slug)
 	if err != nil {
+		// The migrator skips a paste whose every version is tombstoned - there
+		// is nothing to carry - so for THAT paste absence is the correct
+		// outcome, and reporting it as a failure would teach the operator to
+		// ignore the one line that matters.
+		if srcLive == 0 && errors.Is(err, domain.ErrNotFound) {
+			return nil
+		}
 		return fmt.Errorf("absent in destination: %w", err)
 	}
 	if got.Kind != p.Kind && len(p.Manifest.Files) == 0 {
@@ -269,16 +287,7 @@ func verifyPaste(src *storage.ShaleRepo, srcBlobs service.BlobUnit,
 		return fmt.Errorf("pin v%d, source v%d", got.PinnedVersion, p.PinnedVersion)
 	}
 
-	srcVers, err := src.ListVersions(p.Slug)
-	if err != nil {
-		return fmt.Errorf("list source versions: %w", err)
-	}
-	live := 0
-	for _, v := range srcVers {
-		if !v.Deleted {
-			live++
-		}
-	}
+	srcVers, live := srcVersAll, srcLive
 	dstVers, err := dst.ListVersions(p.Slug)
 	if err != nil {
 		return fmt.Errorf("list destination versions: %w", err)
