@@ -8,7 +8,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/relay"
+	"github.com/Zamua/hostthis/internal/roomwire"
 )
 
 // wsKey is the reserved trailing segment that turns a room path into the
@@ -17,26 +17,19 @@ import (
 // room's path space without colliding with a stored value.
 const wsKey = "ws"
 
-// RoomRelay is the relay surface the HTTP layer needs to stand up a WebSocket
-// connection for a room. internal/relay.Relay satisfies it. Optional: when
-// nil, the /ws path 404s.
+// RoomRelay is the real-time surface the HTTP layer needs to stand up a
+// WebSocket connection for a room. internal/celld.RoomProxy satisfies it.
+// Optional: when nil, the /ws path 404s.
 type RoomRelay interface {
 	// Admit reserves a connection slot under the per-room / per-app /
 	// total-rooms caps, returning the roomwire admission sentinels for the
 	// HTTP layer to map to a status. Called BEFORE the websocket handshake.
-	Admit(key relay.RoomKey) (uint64, error)
+	Admit(key roomwire.RoomKey) (uint64, error)
 	// Serve runs the accepted connection's lifecycle (snapshot, stream,
 	// heartbeat) and blocks until it ends.
-	Serve(ctx context.Context, key relay.RoomKey, id uint64, ws *websocket.Conn)
+	Serve(ctx context.Context, key roomwire.RoomKey, id uint64, ws *websocket.Conn)
 	// Release frees a slot reserved by Admit but never handed to Serve.
-	Release(key relay.RoomKey, id uint64)
-	// CommitAndMirror runs a durable write's KV commit with no relay lock
-	// held, so a slow commit never stalls the room, then broadcasts the live
-	// mirror locally and publishes it to the peer pods. The commit callback
-	// must build the mirror frame AFTER the write so it carries the per-room
-	// sequence the commit assigned, which is what orders and de-duplicates it
-	// at every subscriber.
-	CommitAndMirror(key relay.RoomKey, commit func() (relay.Frame, error)) error
+	Release(key roomwire.RoomKey, id uint64)
 }
 
 // handleRoomWS performs the WebSocket upgrade for a room's relay, reached for
@@ -72,7 +65,7 @@ func (s *Server) handleRoomWS(w http.ResponseWriter, r *http.Request, appSlug do
 		return
 	}
 
-	key := relay.RoomKey{App: appSlug, ID: id}
+	key := roomwire.RoomKey{App: appSlug, ID: id}
 
 	// Caps are enforced BEFORE the handshake, so an over-limit upgrade is
 	// refused with a normal HTTP status and no socket is accepted for it.
@@ -118,9 +111,9 @@ func wsAcceptOptions(apexDomain string) *websocket.AcceptOptions {
 // rooms still succeed.
 func writeRelayAdmitError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, relay.ErrRoomFull), errors.Is(err, relay.ErrAppFull):
+	case errors.Is(err, roomwire.ErrRoomFull), errors.Is(err, roomwire.ErrAppFull):
 		http.Error(w, "room connection limit reached\n", http.StatusTooManyRequests)
-	case errors.Is(err, relay.ErrTooManyRooms):
+	case errors.Is(err, roomwire.ErrTooManyRooms):
 		http.Error(w, "relay at capacity\n", http.StatusServiceUnavailable)
 	default:
 		http.Error(w, "internal error\n", http.StatusInternalServerError)

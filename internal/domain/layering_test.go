@@ -53,16 +53,13 @@ var layerPolicy = map[string][]string{
 	// implementations (the hub relay and the celld proxy) speak it, and it may
 	// never grow machinery, or the implementations start sharing more than
 	// words.
-	"roomwire":        {"domain"},
-	"archive":         {"domain"},
-	"cache":           {"domain"},
-	"storage":         {"domain", "durable"},
-	"service":         {"archive", "domain", "mime"},
-	"relay":           {"domain", "roomwire"},
-	"relay/relaygrpc": {"domain", "relay", "roomwire"},
-	"http":            {"archive", "domain", "mime", "relay", "roomwire", "service"},
-	"ssh":             {"archive", "domain", "mime", "service"},
-	"shaleblob":       {"archive", "domain", "durable", "mime", "service", "storage"},
+	"roomwire": {"domain"},
+	"archive":  {"domain"},
+	"cache":    {"domain"},
+	"storage":  {"domain", "durable"},
+	"service":  {"archive", "domain", "mime"},
+	"http":     {"archive", "domain", "mime", "roomwire", "service"},
+	"ssh":      {"archive", "domain", "mime", "service"},
 
 	// The celld backend. Domain because it implements domain-shaped ports, and
 	// durable for the intent log it satisfies. NOT storage: celld is an

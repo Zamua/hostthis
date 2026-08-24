@@ -17,30 +17,8 @@ import (
 	"time"
 
 	httpapi "github.com/Zamua/hostthis/internal/http"
-	"github.com/Zamua/hostthis/internal/relay"
 	"github.com/Zamua/hostthis/internal/service"
 )
-
-// relayPeerTransport is the multi-pod relay peer transport a metadata backend
-// supplies when it runs a peer-reachable gRPC server (multi-node shale). A
-// single-pod backend leaves the bundle field nil, which keeps the relay's nil
-// publisher: the zero-peer degenerate case, byte-for-byte the single-pod
-// relay. The fields are relay-port types only, so the untagged build stays
-// free of the transport's gRPC dependency. See docs/SPEC.md "Multi-pod relay:
-// the peer transport".
-type relayPeerTransport struct {
-	// Publisher is the outbound per-peer fan-out main wires into the relay
-	// via SetPeerPublisher.
-	Publisher relay.PeerPublisher
-	// Bind late-binds the receive path's local-delivery hook (the relay's
-	// DeliverFromPeer) once the relay exists. The relay is constructed after
-	// the repo, so the receiver starts unbound and drops early frames: a boot
-	// race, correct by design.
-	Bind func(func(relay.RoomKey, relay.Frame))
-	// Close stops the publisher's sender goroutines and closes its client
-	// connections; main calls it during shutdown, after CloseAll.
-	Close func()
-}
 
 // metadataBundle is everything the rest of the binary needs from a metadata
 // backend.
@@ -78,14 +56,8 @@ type metadataBundle struct {
 		// before any intent existed (docs/SPEC.md "Staged blob bytes").
 		SweepStagedBytes(ctx context.Context, now time.Time) (int, error)
 	}
-	// RelayPeer is the OPTIONAL multi-pod relay peer transport (multi-node
-	// shale only). nil keeps the relay pod-local.
-	RelayPeer *relayPeerTransport
-	// RoomRelay is an OPTIONAL replacement for the in-process hub relay. The
-	// celld backend supplies its cell proxy here: the room cell is the
-	// broadcast point, so the hub machinery and the peer fan-out must both be
-	// bypassed - wiring them anyway would deliver every frame twice on the
-	// pod that handled the write and zero times on the others.
+	// RoomRelay is the real-time layer: the cell proxy, since the room cell is
+	// the broadcast point. nil disables the /ws surface.
 	RoomRelay httpapi.RoomRelay
 	// Readiness is the OPTIONAL readiness predicate behind /readyz
 	// (docs/SPEC.md "Readiness vs liveness"). The shale backend supplies its
@@ -122,15 +94,17 @@ type roomStore interface {
 // message when this build cannot serve it: `local` needs a build WITHOUT
 // -tags slatedb, `shale` needs one WITH it.
 func buildMetadata(dataDir string, logger *log.Logger) (*metadataBundle, error) {
-	backend := strings.ToLower(envOr("HOSTTHIS_METADATA_BACKEND", "local"))
+	// Two backends since the shale adapter's removal: celld is the production
+	// metadata plane, and memory is the zero-dependency dev/test engine - the
+	// SAME MemRepo the conformance suite runs on every `go test ./...`, so what
+	// `make run` exercises is contract-identical to what production runs.
+	backend := strings.ToLower(envOr("HOSTTHIS_METADATA_BACKEND", "memory"))
 	switch backend {
-	case "local":
-		return buildMetadataLocal(dataDir, logger)
-	case "shale":
-		return buildMetadataShale(logger)
 	case "celld":
 		return buildMetadataCelld(logger)
+	case "memory":
+		return buildMetadataMemory(dataDir, logger)
 	default:
-		return nil, fmt.Errorf("unknown HOSTTHIS_METADATA_BACKEND %q (want local|shale|celld)", backend)
+		return nil, fmt.Errorf("unknown HOSTTHIS_METADATA_BACKEND %q (want celld|memory; shale was removed in v2.1)", backend)
 	}
 }

@@ -44,7 +44,7 @@ func buildFullStackServer(t *testing.T) *Server {
 		ApexDomain: "hostthis.test",
 		Pastes:     stubPasteReader{p: paste},
 		Sites:      stubSiteReader{s: site},
-		Rooms:      service.NewRooms(storage.NewShaleRoomRepo(storagetest.NewRepo(t))),
+		Rooms:      service.NewRooms(storage.NewMemRoomRepo(storagetest.NewRepo(t))),
 		Blobs: stubBlobMap{m: map[string][]byte{
 			"sha-paste":      []byte("<!doctype html><h1>a paste</h1>"),
 			"sha-site-index": []byte("<h1>site home</h1>"),

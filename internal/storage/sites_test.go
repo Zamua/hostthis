@@ -24,7 +24,7 @@ func twoFileManifest(indexSHA string) domain.Manifest {
 }
 
 func TestArtifactSites_InsertGetAndList(t *testing.T) {
-	repo := newPebbleShaleRepo(t)
+	repo := storage.NewMemRepo()
 	sites := storage.NewSites(repo)
 	now := time.Now().UTC().Truncate(time.Second)
 	owner := domain.Identity("key:owner-s")
@@ -67,7 +67,7 @@ func TestArtifactSites_InsertGetAndList(t *testing.T) {
 // A DOCUMENT must not be reachable through the site port, or a paste could be
 // served raw through the directory path.
 func TestArtifactSites_DocumentIsNotASite(t *testing.T) {
-	repo := newPebbleShaleRepo(t)
+	repo := storage.NewMemRepo()
 	sites := storage.NewSites(repo)
 	now := time.Now().UTC().Truncate(time.Second)
 
@@ -93,7 +93,7 @@ func TestArtifactSites_DocumentIsNotASite(t *testing.T) {
 // A directory's bytes are already in the ARTIFACT sum the service adds this to,
 // so reporting them again would bill every directory twice.
 func TestArtifactSites_SumIsZeroToAvoidDoubleCounting(t *testing.T) {
-	repo := newPebbleShaleRepo(t)
+	repo := storage.NewMemRepo()
 	sites := storage.NewSites(repo)
 	now := time.Now().UTC().Truncate(time.Second)
 	owner := "key:owner-s"
@@ -127,7 +127,7 @@ func TestArtifactSites_SumIsZeroToAvoidDoubleCounting(t *testing.T) {
 // A redeploy APPENDS a version, which is what gives a directory the history and
 // rollback a document has.
 func TestArtifactSites_RedeployAppendsAVersion(t *testing.T) {
-	repo := newPebbleShaleRepo(t)
+	repo := storage.NewMemRepo()
 	sites := storage.NewSites(repo)
 	now := time.Now().UTC().Truncate(time.Second)
 	owner := domain.Identity("key:owner-s")
@@ -164,7 +164,7 @@ func TestArtifactSites_RedeployAppendsAVersion(t *testing.T) {
 // Another identity's directory is not replaceable, and says so with the same
 // sentinel a missing slug yields.
 func TestArtifactSites_ReplaceRejectsForeignOwner(t *testing.T) {
-	repo := newPebbleShaleRepo(t)
+	repo := storage.NewMemRepo()
 	sites := storage.NewSites(repo)
 	now := time.Now().UTC().Truncate(time.Second)
 
