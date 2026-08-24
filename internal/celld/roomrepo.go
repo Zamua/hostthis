@@ -44,22 +44,15 @@ func roomKey(app domain.Slug, id domain.RoomID) string {
 	return app.String() + "|" + id.String()
 }
 
-func (r *RoomRepo) CreateRoom(room domain.Room, subnet string, appCap int64, now time.Time) error {
-	ctx := context.Background()
-	if _, err := r.paste().call(ctx, http.MethodPost, "/room/create", "room",
+// CreateRoom is ONE call: the room cell records itself and writes the app's
+// creation-ledger entry cell to cell, inside its own event.
+func (r *RoomRepo) CreateRoom(room domain.Room, subnet string, _ int64, now time.Time) error {
+	_, err := r.paste().call(context.Background(), http.MethodPost, "/room/create", "room",
 		roomKey(room.AppSlug, room.ID), map[string]any{
 			"appSlug": room.AppSlug.String(), "id": room.ID.String(),
 			"createdAt": room.CreatedAt.UTC().UnixMilli(),
 			"updatedAt": room.UpdatedAt.UTC().UnixMilli(),
-		}, nil); err != nil {
-		return err
-	}
-	// The ledger entry follows the room, so a crash between them under-counts
-	// the rate limit for one creation rather than recording a room that does
-	// not exist.
-	_, err := r.paste().call(ctx, http.MethodPost, "/paste/roomcreated", "slug",
-		room.AppSlug.String(), map[string]any{
-			"id": room.ID.String(), "subnet": subnet, "at": now.UTC().UnixMilli(),
+			"subnet":    subnet, "at": now.UTC().UnixMilli(),
 		}, nil)
 	return err
 }
@@ -130,26 +123,17 @@ func (r *RoomRepo) ScanRoom(app domain.Slug, id domain.RoomID) (domain.RoomKV, e
 	return out, nil
 }
 
-// PutValue writes one key, enforcing the per-room caps and the app's budget.
-//
-// Both caps are decided inside the room cell's single event, so a rejected
-// write leaves the prior state untouched. The app's other-room bytes are read
-// first and handed in: that figure can be stale if a sibling room is written
-// concurrently, a bounded overshoot on the APP cap only. The per-room cap is
-// exact because the room's own bytes are read in the same event that writes.
+// PutValue writes one key: ONE call. The room cell enforces its own caps in
+// its event and asks the app's paste cell for the per-app budget CELL TO CELL,
+// so that cap is exact and a rejected write leaves the prior state untouched.
 func (r *RoomRepo) PutValue(app domain.Slug, id domain.RoomID, key string, val []byte,
 	appCap int64, now time.Time,
 ) (uint64, error) {
-	ctx := context.Background()
-	other, err := r.otherRoomBytes(ctx, app, id)
-	if err != nil {
-		return 0, err
-	}
 	var res struct {
 		Seq   uint64 `json:"seq"`
 		Bytes int    `json:"bytes"`
 	}
-	status, err := r.paste().call(ctx, http.MethodPost, "/room/put", "room", roomKey(app, id),
+	status, err := r.paste().call(context.Background(), http.MethodPost, "/room/put", "room", roomKey(app, id),
 		map[string]any{
 			"key": key, "value": base64.StdEncoding.EncodeToString(val),
 			// The frame encoding computed HERE, with the same encoder the HTTP
@@ -158,7 +142,7 @@ func (r *RoomRepo) PutValue(app domain.Slug, id domain.RoomID, key string, val [
 			// rule exists in exactly one place.
 			"wire":    string(domain.RoomWireValue(val)),
 			"roomCap": domain.MaxRoomBytes, "keyCap": domain.MaxRoomKeys,
-			"appCap": appCap, "otherBytes": other, "now": now.UTC().UnixMilli(),
+			"appCap": appCap, "now": now.UTC().UnixMilli(),
 		}, &res)
 	if err != nil {
 		return 0, err
@@ -174,16 +158,15 @@ func (r *RoomRepo) PutValue(app domain.Slug, id domain.RoomID, key string, val [
 	if status >= 300 {
 		return 0, fmt.Errorf("celld: room put: unexpected status %d", status)
 	}
-	return res.Seq, r.settle(ctx, app, id, res.Bytes)
+	return res.Seq, nil
 }
 
 func (r *RoomRepo) DeleteValue(app domain.Slug, id domain.RoomID, key string, now time.Time) (uint64, error) {
-	ctx := context.Background()
 	var res struct {
 		Seq   uint64 `json:"seq"`
 		Bytes int    `json:"bytes"`
 	}
-	status, err := r.paste().call(ctx, http.MethodPost, "/room/del", "room", roomKey(app, id),
+	status, err := r.paste().call(context.Background(), http.MethodPost, "/room/del", "room", roomKey(app, id),
 		map[string]any{"key": key, "now": now.UTC().UnixMilli()}, &res)
 	if err != nil {
 		return 0, err
@@ -194,7 +177,7 @@ func (r *RoomRepo) DeleteValue(app domain.Slug, id domain.RoomID, key string, no
 	if status >= 300 {
 		return 0, fmt.Errorf("celld: room delete: unexpected status %d", status)
 	}
-	return res.Seq, r.settle(ctx, app, id, res.Bytes)
+	return res.Seq, nil
 }
 
 // CountRoomCreates reads the app's creation ledger, which also prunes it.
@@ -212,23 +195,4 @@ func (r *RoomRepo) CountRoomCreates(app domain.Slug, subnet string, now time.Tim
 		return 0, 0, err
 	}
 	return res.PerSubnet, res.PerApp, nil
-}
-
-func (r *RoomRepo) otherRoomBytes(ctx context.Context, app domain.Slug, id domain.RoomID) (int, error) {
-	var res struct {
-		OtherBytes int `json:"otherBytes"`
-	}
-	u := "/paste/roomothers?room=" + urlQuery(id.String())
-	if _, err := r.paste().call(ctx, http.MethodGet, u, "slug", app.String(), nil, &res); err != nil {
-		return 0, err
-	}
-	return res.OtherBytes, nil
-}
-
-// settle records the room's ABSOLUTE total against the app. Absolute, not a
-// delta, so a retry is a no-op where "add n" would double-charge.
-func (r *RoomRepo) settle(ctx context.Context, app domain.Slug, id domain.RoomID, bytes int) error {
-	_, err := r.paste().call(ctx, http.MethodPost, "/paste/roomsettle", "slug", app.String(),
-		map[string]any{"room": id.String(), "bytes": bytes}, nil)
-	return err
 }
