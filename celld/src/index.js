@@ -324,8 +324,69 @@ export class Identity {
 // which is a bounded overshoot on the app cap only. The per-ROOM cap stays
 // exact.
 export class Room {
-  constructor(state) {
+  constructor(state, env) {
     this.state = state;
+    this.env = env;
+  }
+
+  // The app's paste cell, which owns the per-app room budget and the creation
+  // ledger. Reached CELL TO CELL from inside this room's event: the app cell
+  // decides against its own current totals, so the per-app cap is exact, and
+  // the caller pays one round trip instead of three.
+  // The room's whole state as ONE document: five separate keys made a commit
+  // five sequential storage writes, which was most of a write's latency. A
+  // room is capped at 256 KiB of values, so one document is always small.
+  async loadRoom() {
+    let doc = await this.state.storage.get("state");
+    if (doc === undefined) {
+      // A room written before the single-document layout: assemble once from
+      // the legacy keys; the next commit persists the consolidated form.
+      const meta = await this.state.storage.get("meta");
+      if (meta === undefined) {
+        return undefined;
+      }
+      doc = {
+        meta,
+        kv: (await this.state.storage.get("kv")) ?? {},
+        wire: (await this.state.storage.get("wire")) ?? {},
+        bytes: (await this.state.storage.get("bytes")) ?? 0,
+        seq: (await this.state.storage.get("seq")) ?? 0,
+      };
+    }
+    return doc;
+  }
+
+  async saveRoom(doc) {
+    await this.state.storage.put("state", doc);
+  }
+
+  // Broadcast to every connected socket, dead ones dropped silently: send() on
+  // a closing socket throws, and one dead client must not cost the rest their
+  // frame.
+  broadcast(frame) {
+    const data = JSON.stringify(frame);
+    for (const ws of this.state.getWebSockets()) {
+      try {
+        ws.send(data);
+      } catch {
+        // reaped by the runtime; nothing to do
+      }
+    }
+  }
+
+  appCell(appSlug) {
+    return this.env.PASTES.get(this.env.PASTES.idFromName(appSlug));
+  }
+
+  async appCall(appSlug, op, body) {
+    const res = await this.appCell(appSlug).fetch(
+      new Request(`https://cell/paste/${op}?slug=${encodeURIComponent(appSlug)}`, {
+        method: "POST",
+        body: JSON.stringify(body),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    return res;
   }
 
   async fetch(request) {
@@ -364,160 +425,192 @@ export class Room {
     // The snapshot goes out in the SAME event that attaches the socket, so no
     // mutation can land between the state read and the attach - the atomicity
     // the multi-pod design had to buy with the seq splice contract.
-    server.send(JSON.stringify({
-      type: "snapshot",
-      seq: (await this.state.storage.get("seq")) ?? 0,
-      state: await this.wireState(),
-    }));
+    {
+      const doc = await this.loadRoom();
+      const state = {};
+      if (doc) {
+        for (const k of Object.keys(doc.kv)) {
+          state[k] = Object.hasOwn(doc.wire, k) ? JSON.parse(doc.wire[k]) : null;
+        }
+      }
+      server.send(JSON.stringify({ type: "snapshot", seq: doc ? doc.seq : 0, state }));
+    }
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async create(body) {
-    if (await this.state.storage.get("meta")) {
+    if (await this.loadRoom()) {
       return Response.json({ created: false });
     }
-    await this.state.storage.put("meta", {
-      appSlug: body.appSlug, id: body.id,
-      createdAt: body.createdAt, updatedAt: body.updatedAt,
+    await this.saveRoom({
+      meta: {
+        appSlug: body.appSlug, id: body.id,
+        createdAt: body.createdAt, updatedAt: body.updatedAt,
+      },
+      kv: {}, wire: {}, bytes: 0, seq: 0,
+    });
+    // The ledger entry follows the room within this event: a crash between
+    // them under-counts the rate limit for one creation rather than recording
+    // a room that does not exist.
+    await this.appCall(body.appSlug, "roomcreated", {
+      id: body.id, subnet: body.subnet, at: body.at,
     });
     return Response.json({ created: true });
   }
 
   async meta() {
-    const meta = await this.state.storage.get("meta");
-    if (!meta) {
+    const doc = await this.loadRoom();
+    if (!doc) {
       return new Response("not found\n", { status: 404 });
     }
-    return Response.json(meta);
+    return Response.json(doc.meta);
   }
 
   async getValue(key) {
-    if (!(await this.state.storage.get("meta"))) {
+    const doc = await this.loadRoom();
+    if (!doc) {
       return new Response("not found\n", { status: 404 });
     }
-    const kv = (await this.state.storage.get("kv")) ?? {};
-    if (!Object.hasOwn(kv, key)) {
+    if (!Object.hasOwn(doc.kv, key)) {
       return new Response("not found\n", { status: 404 });
     }
-    return Response.json({ value: kv[key] });
+    return Response.json({ value: doc.kv[key] });
   }
 
   async scan() {
-    if (!(await this.state.storage.get("meta"))) {
+    const doc = await this.loadRoom();
+    if (!doc) {
       return new Response("not found\n", { status: 404 });
     }
-    return Response.json({
-      values: (await this.state.storage.get("kv")) ?? {},
-      seq: (await this.state.storage.get("seq")) ?? 0,
-    });
+    return Response.json({ values: doc.kv, seq: doc.seq });
   }
 
-  // Both caps are decided BEFORE anything is written, so a rejected write
-  // leaves the prior state exactly as it was - which is the contract callers
-  // rely on to retry.
+  // Caps are decided before anything is written, so a rejected write leaves
+  // the prior state untouched.
+  //
+  // THE HOT PATH IS ONE STORAGE READ AND ONE STORAGE WRITE, with no cross-cell
+  // call before the commit. The input gate stays closed across storage awaits
+  // but opens across an outbound fetch, so any budget call between the read
+  // and the write either races or must be locked/retried - and both repairs
+  // measured slower than the design they replaced.
+  //
+  // The per-app cap is enforced against a room-local HINT of the app's other
+  // rooms' bytes, refreshed by every settle. A write the hint says would cross
+  // the cap takes the PRECISE path: check-and-record in the app cell's event
+  // before committing. Exact at the boundary and exact serially; concurrent
+  // sibling-room writes can overshoot by their in-flight window - the bounded
+  // approximation the sharded backend documented, bought back deliberately.
   async put(body) {
-    const meta = await this.state.storage.get("meta");
-    if (!meta) {
-      return new Response("not found\n", { status: 404 });
-    }
-    const kv = (await this.state.storage.get("kv")) ?? {};
-    const bytes = (await this.state.storage.get("bytes")) ?? 0;
-    const size = b64len(body.value);
-    const prior = Object.hasOwn(kv, body.key) ? b64len(kv[body.key]) : 0;
-    const next = bytes - prior + size;
+    for (let attempt = 0; attempt < 64; attempt++) {
+      const doc = await this.loadRoom();
+      if (!doc) {
+        return new Response("not found\n", { status: 404 });
+      }
+      const seq0 = doc.seq;
+      const size = b64len(body.value);
+      const prior = Object.hasOwn(doc.kv, body.key) ? b64len(doc.kv[body.key]) : 0;
+      const next = doc.bytes - prior + size;
 
-    if (!Object.hasOwn(kv, body.key) && body.keyCap > 0 &&
-        Object.keys(kv).length >= body.keyCap) {
-      return Response.json({ error: "room-full" }, { status: 413 });
-    }
-    if (body.roomCap > 0 && next > body.roomCap) {
-      return Response.json({ error: "room-full" }, { status: 413 });
-    }
-    if (body.appCap > 0 && body.otherBytes + next > body.appCap) {
-      return Response.json({ error: "app-full" }, { status: 507 });
-    }
+      if (!Object.hasOwn(doc.kv, body.key) && body.keyCap > 0 &&
+          Object.keys(doc.kv).length >= body.keyCap) {
+        return Response.json({ error: "room-full" }, { status: 413 });
+      }
+      if (body.roomCap > 0 && next > body.roomCap) {
+        return Response.json({ error: "room-full" }, { status: 413 });
+      }
+      if (body.appCap > 0 && (this.othersHint === undefined ||
+          this.othersHint + next > body.appCap)) {
+        const budget = await this.appCall(doc.meta.appSlug, "roombudget", {
+          room: doc.meta.id, bytes: next, appCap: body.appCap,
+        });
+        let out = null;
+        try {
+          out = await budget.json();
+        } catch {
+          // fell through with out null
+        }
+        if (out && typeof out.others === "number") {
+          this.othersHint = out.others;
+        }
+        if (budget.status === 507) {
+          return Response.json({ error: "app-full" }, { status: 507 });
+        }
+        if (!budget.ok) {
+          return Response.json({ error: "app-budget-unavailable" }, { status: 502 });
+        }
+        // The fetch opened the gate; if any mutation interleaved, decide again.
+        const fresh = await this.loadRoom();
+        if (!fresh || fresh.seq !== seq0) {
+          continue;
+        }
+      }
 
-    kv[body.key] = body.value;
-    const seq = ((await this.state.storage.get("seq")) ?? 0) + 1;
-    meta.updatedAt = body.now;
-    const wire = (await this.state.storage.get("wire")) ?? {};
-    if (body.wire !== undefined && body.wire !== null) {
-      wire[body.key] = body.wire;
-      await this.state.storage.put("wire", wire);
+      // Gate-closed from here through the write.
+      doc.kv[body.key] = body.value;
+      if (body.wire !== undefined && body.wire !== null) {
+        doc.wire[body.key] = body.wire;
+      }
+      doc.bytes = next;
+      doc.seq = seq0 + 1;
+      doc.meta.updatedAt = body.now;
+      await this.saveRoom(doc);
+      this.broadcast({
+        type: "put", seq: doc.seq, key: body.key,
+        value: Object.hasOwn(doc.wire, body.key) ? JSON.parse(doc.wire[body.key]) : null,
+      });
+      // The settle is FIRE-AND-FORGET: the app's record is an absolute total
+      // that the next mutation re-states, so a lost settle self-heals, and
+      // awaiting it would put an app-cell queue on every write's latency.
+      this.appCall(doc.meta.appSlug, "roombudget", { room: doc.meta.id, bytes: next, appCap: 0 })
+        .then(async (r) => {
+          try {
+            const out = await r.json();
+            if (out && typeof out.others === "number") {
+              this.othersHint = out.others;
+            }
+          } catch {
+            // hint unchanged
+          }
+        })
+        .catch(() => {});
+      return Response.json({ seq: doc.seq, bytes: next });
     }
-    await this.state.storage.put("kv", kv);
-    await this.state.storage.put("bytes", next);
-    await this.state.storage.put("seq", seq);
-    await this.state.storage.put("meta", meta);
-    // The mirror frame leaves in the same single-threaded event that assigned
-    // seq, so frames are emitted in seq order by construction.
-    this.broadcast({
-      type: "put", seq, key: body.key,
-      value: Object.hasOwn(wire, body.key) ? JSON.parse(wire[body.key]) : null,
-    });
-    return Response.json({ seq, bytes: next });
+    return Response.json({ error: "contended" }, { status: 503 });
   }
 
   // An absent key still commits and still consumes a sequence number: a client
   // splicing a live stream onto a snapshot reads a skipped seq as a lost frame,
   // so a silent no-op here would look like data loss downstream.
   async del(body) {
-    const meta = await this.state.storage.get("meta");
-    if (!meta) {
+    const doc = await this.loadRoom();
+    if (!doc) {
       return new Response("not found\n", { status: 404 });
     }
-    const kv = (await this.state.storage.get("kv")) ?? {};
-    let bytes = (await this.state.storage.get("bytes")) ?? 0;
-    if (Object.hasOwn(kv, body.key)) {
-      bytes -= b64len(kv[body.key]);
-      delete kv[body.key];
-      const wire = (await this.state.storage.get("wire")) ?? {};
-      if (Object.hasOwn(wire, body.key)) {
-        delete wire[body.key];
-        await this.state.storage.put("wire", wire);
-      }
+    if (Object.hasOwn(doc.kv, body.key)) {
+      doc.bytes -= b64len(doc.kv[body.key]);
+      delete doc.kv[body.key];
+      delete doc.wire[body.key];
     }
-    const seq = ((await this.state.storage.get("seq")) ?? 0) + 1;
-    meta.updatedAt = body.now;
-    await this.state.storage.put("kv", kv);
-    await this.state.storage.put("bytes", bytes);
-    await this.state.storage.put("seq", seq);
-    await this.state.storage.put("meta", meta);
-    this.broadcast({ type: "delete", seq, key: body.key });
-    return Response.json({ seq, bytes });
+    doc.seq++;
+    doc.meta.updatedAt = body.now;
+    await this.saveRoom(doc);
+    this.broadcast({ type: "delete", seq: doc.seq, key: body.key });
+    // Fire-and-forget for the same self-healing-absolute-total reason as put.
+    this.appCall(doc.meta.appSlug, "roombudget", { room: doc.meta.id, bytes: doc.bytes, appCap: 0 })
+      .then(async (r) => {
+        try {
+          const out = await r.json();
+          if (out && typeof out.others === "number") {
+            this.othersHint = out.others;
+          }
+        } catch {
+          // hint unchanged
+        }
+      })
+      .catch(() => {});
+    return Response.json({ seq: doc.seq, bytes: doc.bytes });
   }
 
-  // The snapshot's state object. Values come from the wire cache the adapter
-  // fills on every put - the encoding rule (raw JSON passes, bytes become a
-  // JSON string) lives in Go, and the cell never interprets the bytes. A key
-  // written before the cache existed falls back to null rather than guessing.
-  async wireState() {
-    const wire = (await this.state.storage.get("wire")) ?? {};
-    const kv = (await this.state.storage.get("kv")) ?? {};
-    const state = {};
-    for (const k of Object.keys(kv)) {
-      state[k] = Object.hasOwn(wire, k) ? JSON.parse(wire[k]) : null;
-    }
-    return state;
-  }
-
-  // Broadcast to every connected socket, dead ones dropped silently: send() on
-  // a closing socket throws, and one dead client must not cost the rest their
-  // frame.
-  broadcast(frame) {
-    const data = JSON.stringify(frame);
-    for (const ws of this.state.getWebSockets()) {
-      try {
-        ws.send(data);
-      } catch {
-        // reaped by the runtime; nothing to do
-      }
-    }
-  }
-
-  // Client-to-server messages are not part of the room protocol: the durable
-  // surface is the HTTP KV API, and accepting mutations over the socket would
-  // be a second write path with none of the caps. Ignored, not echoed.
   async webSocketMessage() {}
 
   async webSocketClose(ws, code, reason, wasClean) {
@@ -568,10 +661,8 @@ export class Paste {
         return this.roomCreated(await request.json());
       case "roomcounts":
         return this.roomCounts(new URL(request.url).searchParams);
-      case "roomothers":
-        return this.roomOthers(new URL(request.url).searchParams.get("room"));
-      case "roomsettle":
-        return this.roomSettle(await request.json());
+      case "roombudget":
+        return this.roomBudget(await request.json());
       case "claim":
         return this.claim(await request.json());
       case "unclaim":
@@ -655,30 +746,37 @@ export class Paste {
     });
   }
 
-  // The app's room bytes EXCLUDING one room, which is what that room needs to
-  // decide the app cap inside its own single event.
-  async roomOthers(roomID) {
+  // Check-and-record for one room's proposed new byte total, in one event, so
+  // the per-app cap is EXACT: every budget decision for this app serializes
+  // here, and a refusal records nothing.
+  //
+  // The recorded figure is ABSOLUTE per room, never a delta: re-running with
+  // the same total is a no-op, where "add n" would double-charge a retry. The
+  // same reason the identity cell charges pastes absolutely.
+  async roomBudget(body) {
     const bytes = (await this.state.storage.get("roomBytes")) ?? {};
-    let total = 0;
-    for (const [id, n] of Object.entries(bytes)) {
-      if (id !== roomID) {
-        total += n;
+    if (body.appCap > 0) {
+      let others = 0;
+      for (const [id, n] of Object.entries(bytes)) {
+        if (id !== body.room) {
+          others += n;
+        }
+      }
+      if (others + body.bytes > body.appCap) {
+        return Response.json({ error: "app-full", others }, { status: 507 });
       }
     }
-    return Response.json({ otherBytes: total });
-  }
-
-  // ABSOLUTE per room, never a delta: re-running a settle with the same total
-  // is a no-op, where "add n" would double-charge a retry. The same reason the
-  // identity cell charges pastes absolutely.
-  async roomSettle(body) {
-    const bytes = (await this.state.storage.get("roomBytes")) ?? {};
-    if (bytes[body.room] === body.bytes) {
-      return new Response(null, { status: 204 });
+    if (bytes[body.room] !== body.bytes) {
+      bytes[body.room] = body.bytes;
+      await this.state.storage.put("roomBytes", bytes);
     }
-    bytes[body.room] = body.bytes;
-    await this.state.storage.put("roomBytes", bytes);
-    return new Response(null, { status: 204 });
+    let others = 0;
+    for (const [id, n] of Object.entries(bytes)) {
+      if (id !== body.room) {
+        others += n;
+      }
+    }
+    return Response.json({ others });
   }
 
   // A slug held before its content exists, so a multi-file deploy can stage
