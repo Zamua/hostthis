@@ -51,3 +51,25 @@ jobs:
       - name: test
         run: go test ./...
 
+  # The celld-gated suites against a real fleet: MinIO + the celld runtime on
+  # the runner, the worker deployed from this checkout. This is the job that
+  # exercises the PRODUCTION metadata plane; the plain `go` job covers the
+  # memory backend.
+  celld:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: stand up the fleet
+        run: ./scripts/ci-celld-up.sh
+
+      - name: storage conformance (celld)
+        run: CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 go test -count=1 ./internal/storage -run 'TestConformance_Celld'
+
+      - name: live room contract (handler -> proxy -> cell)
+        run: CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 go test -count=1 ./internal/http -run 'TestLiveRoom'

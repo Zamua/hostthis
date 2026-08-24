@@ -40,3 +40,4 @@ pocs/
 # e2e output: screenshots ($E2E_ARTIFACTS default) and the JUnit report
 /artifacts/
 /results.xml
+.ci-esbuild/
