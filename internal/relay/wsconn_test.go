@@ -81,7 +81,7 @@ func TestServe_WriteTimeoutFromConfiguredPingTimeout(t *testing.T) {
 
 	key := RoomKey{App: domain.Slug("appz2345"), ID: domain.RoomID("11111111-2222-3333-4444-555555555555")}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, id, err := rl.Admit(key)
+		id, err := rl.Admit(key)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusTooManyRequests)
 			return

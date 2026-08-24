@@ -22,10 +22,9 @@ const wsKey = "ws"
 // nil, the /ws path 404s.
 type RoomRelay interface {
 	// Admit reserves a connection slot under the per-room / per-app /
-	// total-rooms caps, returning relay.ErrRoomFull / ErrAppFull /
-	// ErrTooManyRooms for the HTTP layer to map to a status. Called BEFORE
-	// the websocket handshake.
-	Admit(key relay.RoomKey) (*relay.Hub, uint64, error)
+	// total-rooms caps, returning the roomwire admission sentinels for the
+	// HTTP layer to map to a status. Called BEFORE the websocket handshake.
+	Admit(key relay.RoomKey) (uint64, error)
 	// Serve runs the accepted connection's lifecycle (snapshot, stream,
 	// heartbeat) and blocks until it ends.
 	Serve(ctx context.Context, key relay.RoomKey, id uint64, ws *websocket.Conn)
@@ -77,7 +76,7 @@ func (s *Server) handleRoomWS(w http.ResponseWriter, r *http.Request, appSlug do
 
 	// Caps are enforced BEFORE the handshake, so an over-limit upgrade is
 	// refused with a normal HTTP status and no socket is accepted for it.
-	_, connID, err := s.Relay.Admit(key)
+	connID, err := s.Relay.Admit(key)
 	if err != nil {
 		writeRelayAdmitError(w, err)
 		return

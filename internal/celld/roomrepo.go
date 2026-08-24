@@ -152,6 +152,11 @@ func (r *RoomRepo) PutValue(app domain.Slug, id domain.RoomID, key string, val [
 	status, err := r.paste().call(ctx, http.MethodPost, "/room/put", "room", roomKey(app, id),
 		map[string]any{
 			"key": key, "value": base64.StdEncoding.EncodeToString(val),
+			// The frame encoding computed HERE, with the same encoder the HTTP
+			// handlers use: the cell echoes it into snapshots and mirror frames
+			// without interpreting the bytes, so the subtle raw-JSON-or-string
+			// rule exists in exactly one place.
+			"wire":    string(domain.RoomWireValue(val)),
 			"roomCap": domain.MaxRoomBytes, "keyCap": domain.MaxRoomKeys,
 			"appCap": appCap, "otherBytes": other, "now": now.UTC().UnixMilli(),
 		}, &res)

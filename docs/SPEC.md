@@ -2150,6 +2150,49 @@ suite additionally pins the sequence semantics on every backend: dense
 `DeleteValue` return it, concurrent same-room writers never share or
 skip a seq, and `ScanRoom`'s S is exact under concurrent writes.
 
+### Celld backend: the room cell is the broadcast point (no peer fan-out)
+
+The peer fan-out above exists because on the sharded backend NO pod owns a
+room: every pod's hub holds a fraction of the room's sockets, so frames must be
+pushed to every pod. The celld backend removes the premise instead of scaling
+the workaround: exactly one cell owns each room, so the cell is the natural
+broadcast point and the pods stop holding room state at all.
+
+**The shape: a 1:1 socket proxy.** hostthisd still terminates the client's
+WebSocket - the public surface, origin policy, connection caps and heartbeat
+stay where authentication already lives, and the cell runtime's worker port
+stays cluster-internal - but instead of joining an in-process hub, the handler
+dials the room's cell and pipes frames verbatim in both directions. One client
+socket, one upstream socket, no shared state on the pod beyond a connection
+counter for the caps.
+
+**Broadcast happens inside the cell's write event.** A durable PUT or DELETE
+reaches the room cell over HTTP from whichever pod handled it; the cell applies
+the write, assigns the dense per-room seq, and broadcasts the mirror frame to
+its connected sockets - all within its single-threaded event. The properties
+the multi-pod design had to buy with the seq contract fall out for free:
+
+- **Ordering**: one writer thread assigns seq and broadcasts in the same
+  event, so frames leave the cell in seq order. No cross-pod race exists.
+- **No loss between pods**: there is no pod-to-pod hop to lose a frame on.
+  The seq contract stays on the wire regardless: clients still splice
+  snapshots and detect holes, because a PROXIED socket can still drop.
+- **Snapshot atomicity**: the join handler reads state and seq in the same
+  event that attaches the socket, so a snapshot can never miss a frame
+  committed between read and attach.
+
+**The wire encoding stays in Go.** A room value is arbitrary bytes, and the
+frame encoding (raw JSON passes through, anything else becomes a JSON string)
+is subtle enough to own once: the storage adapter computes the wire form with
+the same encoder the HTTP handlers use and sends it alongside each write. The
+cell stores it and echoes it into snapshots and mirror frames without ever
+interpreting the bytes.
+
+The client contract is unchanged: same endpoint, same frames, same splice
+rules. `CommitAndMirror` still runs the durable write, but the frame it builds
+is discarded - the mirror is the cell's job now, and mirroring from the pod as
+well would deliver every frame twice.
+
 ### Sandbox and security posture
 
 The relay introduces no new trust boundary beyond the room-UUID
