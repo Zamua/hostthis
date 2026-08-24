@@ -22,9 +22,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -104,6 +107,7 @@ func env(k, d string) string {
 
 func main() {
 	dry := flag.Bool("dry-run", false, "report what would move, write nothing")
+	verify := flag.Bool("verify", false, "compare the destination against the source, write nothing")
 	flag.Parse()
 	logger := log.New(os.Stderr, "migrate ", log.LstdFlags)
 
@@ -179,12 +183,23 @@ func main() {
 			skipped++
 			return nil
 		}
-		if _, err := dstRepo.Get(p.Slug); err == nil {
-			skipped++
-			return nil
-		} else if !errors.Is(err, domain.ErrNotFound) {
-			logger.Printf("%s: probe destination: %v", p.Slug, err)
-			failed++
+		if !*verify {
+			if _, err := dstRepo.Get(p.Slug); err == nil {
+				skipped++
+				return nil
+			} else if !errors.Is(err, domain.ErrNotFound) {
+				logger.Printf("%s: probe destination: %v", p.Slug, err)
+				failed++
+				return nil
+			}
+		}
+		if *verify {
+			if err := verifyPaste(src, srcBlobs, dstRepo, dstBlobs, p); err != nil {
+				logger.Printf("VERIFY FAIL %s: %v", p.Slug, err)
+				failed++
+				return nil
+			}
+			moved++
 			return nil
 		}
 		if *dry {
@@ -227,6 +242,82 @@ func main() {
 	if failed > 0 {
 		os.Exit(1)
 	}
+}
+
+// verifyPaste re-reads one migrated paste from the DESTINATION and compares it
+// against the source: the row's user-visible fields, the live version count,
+// and the sha256 of every blob as the destination actually serves it.
+//
+// The comparison hashes bytes read back through the destination's own read
+// path, not bucket objects: what matters is what a user would receive, and a
+// correct object behind a broken read path must fail this.
+func verifyPaste(src *storage.ShaleRepo, srcBlobs service.BlobUnit,
+	dst *celld.PasteRepo, dstBlobs service.BlobUnit, p domain.Paste,
+) error {
+	got, err := dst.Get(p.Slug)
+	if err != nil {
+		return fmt.Errorf("absent in destination: %w", err)
+	}
+	if got.Kind != p.Kind && len(p.Manifest.Files) == 0 {
+		return fmt.Errorf("kind %q, source %q", got.Kind, p.Kind)
+	}
+	if got.Name != p.Name {
+		return fmt.Errorf("name %q, source %q", got.Name, p.Name)
+	}
+	if got.PinnedVersion != p.PinnedVersion {
+		return fmt.Errorf("pin v%d, source v%d", got.PinnedVersion, p.PinnedVersion)
+	}
+
+	srcVers, err := src.ListVersions(p.Slug)
+	if err != nil {
+		return fmt.Errorf("list source versions: %w", err)
+	}
+	live := 0
+	for _, v := range srcVers {
+		if !v.Deleted {
+			live++
+		}
+	}
+	dstVers, err := dst.ListVersions(p.Slug)
+	if err != nil {
+		return fmt.Errorf("list destination versions: %w", err)
+	}
+	dstLive := 0
+	for _, v := range dstVers {
+		if !v.Deleted {
+			dstLive++
+		}
+	}
+	if dstLive != live {
+		return fmt.Errorf("%d live versions, source %d", dstLive, live)
+	}
+
+	ctx := context.Background()
+	for _, v := range srcVers {
+		if v.Deleted {
+			continue
+		}
+		for _, want := range versionSHAs(v) {
+			if want == "" {
+				continue
+			}
+			body, _, err := dstBlobs.Read(ctx, p.Slug.String(), want)
+			if err != nil {
+				return fmt.Errorf("v%d blob %s unreadable in destination: %w", v.VerNum, want, err)
+			}
+			h := sha256.New()
+			_, cerr := io.Copy(h, body)
+			_ = body.Close()
+			if cerr != nil {
+				return fmt.Errorf("v%d blob %s read: %w", v.VerNum, want, cerr)
+			}
+			if got := hex.EncodeToString(h.Sum(nil)); got != want {
+				return fmt.Errorf("v%d blob sha %s, want %s", v.VerNum, got, want)
+			}
+		}
+	}
+	_ = srcBlobs
+	return nil
 }
 
 // versionSHAs lists every content sha a version references: one per manifest
