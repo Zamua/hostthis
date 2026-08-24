@@ -115,3 +115,5 @@ require (
 	gopkg.in/ini.v1 v1.67.3 // indirect
 	rsc.io/qr v0.2.0 // indirect
 )
+
+replace github.com/Zamua/shale => /Users/zamua/Dropbox/workspace/macmini/shale
