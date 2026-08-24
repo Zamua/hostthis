@@ -45,8 +45,10 @@ func buildMetadataCelld(logger *log.Logger) (*metadataBundle, error) {
 		// cell, and a cell settles its own half-finished writes on the next
 		// touch. There is no cross-shard state for a boot sweep to find.
 		//
-		// RelayPeer is nil: a room is owned by one cell, so there is no
-		// second pod holding the same room to fan out to.
+		// RoomRelay: the cell proxy. Every pod pipes each client socket to the
+		// room's cell, which broadcasts inside its own write event - the reason
+		// this backend needs no peer fan-out at any replica count.
+		RoomRelay: celld.NewRoomProxy(base),
 		//
 		// Readiness is nil - always ready. celld has no mount floor to reach;
 		// a cell activates on demand.

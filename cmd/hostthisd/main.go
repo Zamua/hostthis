@@ -151,8 +151,10 @@ func main() {
 	// "Real-time room relay (WebSocket)"). It depends on the rooms service only
 	// for the late-join snapshot; persistence goes through the HTTP PUT/DELETE
 	// mirror. Per-room hubs are in-memory and per-pod. Nil without a room repo.
+	// A backend that brings its own real-time layer (the celld cell proxy)
+	// replaces the hub relay entirely; the hub is built only as the default.
 	var roomRelay *relay.Relay
-	if roomsSvc != nil {
+	if roomsSvc != nil && metadata.RoomRelay == nil {
 		roomRelay = relay.NewRelay(roomsSvc, relay.NewLimits())
 	}
 
@@ -239,6 +241,10 @@ func main() {
 	}
 	if roomRelay != nil {
 		httpServer.Relay = roomRelay
+	}
+	if metadata.RoomRelay != nil {
+		httpServer.Relay = metadata.RoomRelay
+		logger.Printf("relay: backend-supplied room relay (cell proxy); hub relay not built")
 	}
 	// Metrics listen on their OWN port, never the public one. The public mux
 	// answers /healthz on any Host without auth, so adding /metrics there

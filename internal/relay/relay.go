@@ -8,6 +8,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/roomwire"
 )
 
 // Snapshotter is the relay's ONLY dependency on the durable tier: it reads the
@@ -27,8 +28,8 @@ type Snapshotter interface {
 // proxy idle defaults (traefik / nginx 60-120 s) so the heartbeat also keeps a
 // legitimately-quiet connection alive through the proxy.
 const (
-	PingInterval = 20 * time.Second
-	PingTimeout  = 10 * time.Second
+	PingInterval = roomwire.PingInterval
+	PingTimeout  = roomwire.PingTimeout
 )
 
 // Relay is the real-time room relay service: it owns the Registry, reads the
@@ -86,8 +87,12 @@ func (rl *Relay) SetHeartbeat(interval, timeout time.Duration) {
 // maps to a status. Must be called BEFORE completing the websocket handshake,
 // so an over-limit upgrade is refused with a normal HTTP status and no socket
 // is ever accepted for it.
-func (rl *Relay) Admit(key RoomKey) (*Hub, uint64, error) {
-	return rl.reg.admit(key)
+// Admit returns only the connection id: the hub is registry internals, and
+// returning it once leaked into the HTTP port's signature, forcing every other
+// implementation to import this package for a value the caller discarded.
+func (rl *Relay) Admit(key RoomKey) (uint64, error) {
+	_, id, err := rl.reg.admit(key)
+	return id, err
 }
 
 // Release frees a slot reserved by Admit that was never handed to Serve: the

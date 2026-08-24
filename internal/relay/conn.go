@@ -8,29 +8,14 @@
 // drop-a-laggard, reap, teardown) is testable without real sockets.
 package relay
 
-import "github.com/Zamua/hostthis/internal/domain"
+import "github.com/Zamua/hostthis/internal/roomwire"
 
-// RoomKey identifies one relay hub. Including the app slug makes cross-app
-// isolation structural: the same room UUID under a different app resolves to a
-// different hub, with no filter a handler could forget. Mirrors the
-// (app-slug, room-uuid, key) shape the durable KV tier namespaces by.
-type RoomKey struct {
-	App domain.Slug
-	ID  domain.RoomID
-}
+// RoomKey and Frame are the shared room vocabulary, defined in roomwire so the
+// celld proxy can speak them without importing this package's hub machinery.
+type RoomKey = roomwire.RoomKey
 
-// Frame is one relay message: opaque bytes plus the WebSocket message type, so
-// a frame round-trips with the flavor the sender chose. The server never parses
-// or stamps Data. Server-originated control envelopes (the late-join snapshot,
-// the live mirror of a durable PUT) are JSON text frames the client
-// distinguishes by their own structure.
-type Frame struct {
-	// Binary is carried through uninterpreted so the receiving socket
-	// re-emits the message type the sender used.
-	Binary bool
-	// Data is the app's payload, fanned out verbatim.
-	Data []byte
-}
+// Frame aliases the shared frame shape; see roomwire.Frame.
+type Frame = roomwire.Frame
 
 // Conn is the per-client connection the Hub broadcasts to. Implementations
 // must honour:

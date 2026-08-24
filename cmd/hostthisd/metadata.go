@@ -81,6 +81,12 @@ type metadataBundle struct {
 	// RelayPeer is the OPTIONAL multi-pod relay peer transport (multi-node
 	// shale only). nil keeps the relay pod-local.
 	RelayPeer *relayPeerTransport
+	// RoomRelay is an OPTIONAL replacement for the in-process hub relay. The
+	// celld backend supplies its cell proxy here: the room cell is the
+	// broadcast point, so the hub machinery and the peer fan-out must both be
+	// bypassed - wiring them anyway would deliver every frame twice on the
+	// pod that handled the write and zero times on the others.
+	RoomRelay httpapi.RoomRelay
 	// Readiness is the OPTIONAL readiness predicate behind /readyz
 	// (docs/SPEC.md "Readiness vs liveness"). The shale backend supplies its
 	// mount-floor prober; a backend with no mount concept leaves it nil, which
