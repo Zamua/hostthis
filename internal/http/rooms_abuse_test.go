@@ -79,7 +79,7 @@ func TestRoomsHTTP_XFFTrustedWhenOptedIn(t *testing.T) {
 func TestRoomsHTTP_CreateUnknownAppIs404(t *testing.T) {
 	srv := &Server{
 		ApexDomain: "hostthis.test",
-		Rooms:      service.NewRooms(storage.NewShaleRoomRepo(storagetest.NewRepo(t))),
+		Rooms:      service.NewRooms(storage.NewMemRoomRepo(storagetest.NewRepo(t))),
 		// No Sites, no Pastes: no slug resolves to a live app.
 	}
 	if w := req(t, srv, http.MethodPost, "appz2345", "/api/rooms", nil); w.Code != http.StatusNotFound {
@@ -99,7 +99,7 @@ func TestRoomsHTTP_CreateLivePasteAppSucceeds(t *testing.T) {
 	}
 	srv := &Server{
 		ApexDomain: "hostthis.test",
-		Rooms:      service.NewRooms(storage.NewShaleRoomRepo(storagetest.NewRepo(t))),
+		Rooms:      service.NewRooms(storage.NewMemRoomRepo(storagetest.NewRepo(t))),
 		Pastes:     stubPasteReader{p: livePaste},
 	}
 	if w := req(t, srv, http.MethodPost, "appz2345", "/api/rooms", nil); w.Code != http.StatusCreated {

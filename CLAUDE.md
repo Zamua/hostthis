@@ -157,27 +157,23 @@ make docker-up     # docker compose up; same ports; data persists in ./data
 make docker-down   # tear down
 ```
 
-### Blob backends: disk standalone + shale-collocated
+### Backends: memory + celld metadata, disk + s3 blobs
 
-There is ONE standalone blob backend, `disk` (the default), used for dev/
-test. The detached `s3` standalone backend (and its disk->S3 migration
-binaries) was retired once the shale-collocated blob plane became the
-production cloud-blob path - see `docs/SPEC.md` "Shale-collocated blobs".
+Two metadata backends: `memory` (the default; in-process, ephemeral, what
+dev/test/e2e run) and `celld` (production; a cell runtime reached over HTTP,
+see `docs/SPEC.md` "Celld-backed metadata storage"). Two blob backends:
+`disk` (default) and `s3` (production; content-addressed, same key layout as
+disk).
 
-Production blobs go THROUGH the shale cluster (the metadata's object store,
-a distinct blob bucket via `HOSTTHIS_SHALE_BLOB_BUCKET`), co-committed with
-the metadata. Its tests use a real shale metadata cluster (MinIO) for the
-metadata plane and a pure-Go in-memory `blob.Store` (`blobmem`) for the byte
-plane, so no live blob object store is needed:
+The conformance suite is the contract between them: it runs against the
+memory backend on every `go test ./...`, and against a live celld fleet when
+`CELLD_TEST_ENDPOINT` names one. The s3 blob tests need a local MinIO:
 
 ```
-make dev-minio-up         # MinIO at :9000 (metadata bucket hostthis-metadata)
-make test-conformance-kv  # slatedb + shale metadata conformance (needs -tags slatedb + MinIO)
+make dev-minio-up         # MinIO at :9000
+go test ./internal/storage -run TestS3Blob   # needs MINIO_TEST_ENDPOINT=http://localhost:9000
 make dev-minio-down       # teardown (with volume wipe)
 ```
-
-The shale-blob seam tests live in `internal/shaleblob` (-tags slatedb;
-skipped unless `MINIO_TEST_ENDPOINT` is set).
 
 Quick smoke from another terminal once it's live:
 

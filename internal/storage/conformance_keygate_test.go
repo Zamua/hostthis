@@ -23,6 +23,8 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
+const kgWindow = 24 * time.Hour
+
 type keygateRepo interface {
 	AdmitNewKey(identity, subnet string, now time.Time, limitPerSubnet int, window time.Duration) (bool, error)
 	SubnetSnapshot(subnet string, now time.Time, window time.Duration) (int, time.Time, error)

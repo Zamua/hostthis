@@ -35,7 +35,7 @@ func (liveAppSiteReader) Get(slug domain.Slug) (domain.Site, error) {
 // metadata repo, in subdomain mode, so a request runs mux -> service -> storage.
 func buildRoomServer(t *testing.T) *Server {
 	t.Helper()
-	rooms := service.NewRooms(storage.NewShaleRoomRepo(storagetest.NewRepo(t)))
+	rooms := service.NewRooms(storage.NewMemRoomRepo(storagetest.NewRepo(t)))
 	return &Server{
 		ApexDomain: "hostthis.test",
 		Rooms:      rooms,

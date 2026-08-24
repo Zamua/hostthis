@@ -88,7 +88,7 @@ type testBlobStore interface {
 // newStackWithBlobs wires the real metadata repo with a caller-supplied blob
 // store (wrapped in the StandaloneBlobUnit seam) plus a finalize-done signal so
 // tests can wait deterministically.
-func newStackWithBlobs(t *testing.T, blobs testBlobStore) (*Upload, *storage.ShaleRepo, chan struct{}) {
+func newStackWithBlobs(t *testing.T, blobs testBlobStore) (*Upload, *storage.MemRepo, chan struct{}) {
 	t.Helper()
 	repo := storagetest.NewRepo(t)
 	u := NewUpload(repo, NewStandaloneBlobUnit(blobs))
