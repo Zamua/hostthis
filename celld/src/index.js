@@ -324,8 +324,43 @@ export class Identity {
 // which is a bounded overshoot on the app cap only. The per-ROOM cap stays
 // exact.
 export class Room {
-  constructor(state) {
+  constructor(state, env) {
     this.state = state;
+    this.env = env;
+    // Serializes MUTATIONS. A cell's event is not exclusive across an awaited
+    // outbound fetch - the input gate opens during it, precisely so cell-to-cell
+    // calls cannot deadlock - so two puts can interleave at the budget call and
+    // both decide against the same starting state. A promise chain restores the
+    // one-writer-at-a-time property; it is in-memory, which is sound because
+    // exactly one instance owns a room and every storage write lands before the
+    // response that depends on it.
+    this.writeLock = Promise.resolve();
+  }
+
+  withWriteLock(fn) {
+    const run = this.writeLock.then(fn, fn);
+    // The chain must survive a rejection or one failed put poisons the room.
+    this.writeLock = run.then(() => {}, () => {});
+    return run;
+  }
+
+  // The app's paste cell, which owns the per-app room budget and the creation
+  // ledger. Reached CELL TO CELL from inside this room's event: the app cell
+  // decides against its own current totals, so the per-app cap is exact, and
+  // the caller pays one round trip instead of three.
+  appCell(appSlug) {
+    return this.env.PASTES.get(this.env.PASTES.idFromName(appSlug));
+  }
+
+  async appCall(appSlug, op, body) {
+    const res = await this.appCell(appSlug).fetch(
+      new Request(`https://cell/paste/${op}?slug=${encodeURIComponent(appSlug)}`, {
+        method: "POST",
+        body: JSON.stringify(body),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    return res;
   }
 
   async fetch(request) {
@@ -348,10 +383,14 @@ export class Room {
         return this.getValue(url.searchParams.get("key"));
       case "scan":
         return this.scan();
-      case "put":
-        return this.put(await request.json());
-      case "del":
-        return this.del(await request.json());
+      case "put": {
+        const b = await request.json();
+        return this.withWriteLock(() => this.put(b));
+      }
+      case "del": {
+        const b = await request.json();
+        return this.withWriteLock(() => this.del(b));
+      }
     }
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket\n", { status: 426 });
@@ -379,6 +418,12 @@ export class Room {
     await this.state.storage.put("meta", {
       appSlug: body.appSlug, id: body.id,
       createdAt: body.createdAt, updatedAt: body.updatedAt,
+    });
+    // The ledger entry follows the room within this event: a crash between
+    // them under-counts the rate limit for one creation rather than recording
+    // a room that does not exist.
+    await this.appCall(body.appSlug, "roomcreated", {
+      id: body.id, subnet: body.subnet, at: body.at,
     });
     return Response.json({ created: true });
   }
@@ -433,8 +478,17 @@ export class Room {
     if (body.roomCap > 0 && next > body.roomCap) {
       return Response.json({ error: "room-full" }, { status: 413 });
     }
-    if (body.appCap > 0 && body.otherBytes + next > body.appCap) {
+    // Check-and-record in ONE app-cell event, so the cap is exact and a
+    // refusal records nothing. Room caps were checked first: they need no
+    // other cell, and failing them must not touch the app's totals.
+    const budget = await this.appCall(meta.appSlug, "roombudget", {
+      room: meta.id, bytes: next, appCap: body.appCap ?? 0,
+    });
+    if (budget.status === 507) {
       return Response.json({ error: "app-full" }, { status: 507 });
+    }
+    if (!budget.ok) {
+      return Response.json({ error: "app-budget-unavailable" }, { status: 502 });
     }
 
     kv[body.key] = body.value;
@@ -483,6 +537,9 @@ export class Room {
     await this.state.storage.put("bytes", bytes);
     await this.state.storage.put("seq", seq);
     await this.state.storage.put("meta", meta);
+    // Record the freed bytes with the app; a delete can never be refused, so
+    // appCap 0 makes this an unconditional settle.
+    await this.appCall(meta.appSlug, "roombudget", { room: meta.id, bytes, appCap: 0 });
     this.broadcast({ type: "delete", seq, key: body.key });
     return Response.json({ seq, bytes });
   }
@@ -568,10 +625,8 @@ export class Paste {
         return this.roomCreated(await request.json());
       case "roomcounts":
         return this.roomCounts(new URL(request.url).searchParams);
-      case "roomothers":
-        return this.roomOthers(new URL(request.url).searchParams.get("room"));
-      case "roomsettle":
-        return this.roomSettle(await request.json());
+      case "roombudget":
+        return this.roomBudget(await request.json());
       case "claim":
         return this.claim(await request.json());
       case "unclaim":
@@ -655,29 +710,30 @@ export class Paste {
     });
   }
 
-  // The app's room bytes EXCLUDING one room, which is what that room needs to
-  // decide the app cap inside its own single event.
-  async roomOthers(roomID) {
+  // Check-and-record for one room's proposed new byte total, in one event, so
+  // the per-app cap is EXACT: every budget decision for this app serializes
+  // here, and a refusal records nothing.
+  //
+  // The recorded figure is ABSOLUTE per room, never a delta: re-running with
+  // the same total is a no-op, where "add n" would double-charge a retry. The
+  // same reason the identity cell charges pastes absolutely.
+  async roomBudget(body) {
     const bytes = (await this.state.storage.get("roomBytes")) ?? {};
-    let total = 0;
-    for (const [id, n] of Object.entries(bytes)) {
-      if (id !== roomID) {
-        total += n;
+    if (body.appCap > 0) {
+      let others = 0;
+      for (const [id, n] of Object.entries(bytes)) {
+        if (id !== body.room) {
+          others += n;
+        }
+      }
+      if (others + body.bytes > body.appCap) {
+        return Response.json({ error: "app-full" }, { status: 507 });
       }
     }
-    return Response.json({ otherBytes: total });
-  }
-
-  // ABSOLUTE per room, never a delta: re-running a settle with the same total
-  // is a no-op, where "add n" would double-charge a retry. The same reason the
-  // identity cell charges pastes absolutely.
-  async roomSettle(body) {
-    const bytes = (await this.state.storage.get("roomBytes")) ?? {};
-    if (bytes[body.room] === body.bytes) {
-      return new Response(null, { status: 204 });
+    if (bytes[body.room] !== body.bytes) {
+      bytes[body.room] = body.bytes;
+      await this.state.storage.put("roomBytes", bytes);
     }
-    bytes[body.room] = body.bytes;
-    await this.state.storage.put("roomBytes", bytes);
     return new Response(null, { status: 204 });
   }
 

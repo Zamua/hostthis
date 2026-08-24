@@ -4372,6 +4372,11 @@ of the storage key path and the runtime rejects renames once data exists.
   EXACT.
 - **Room** - one cell per app room: the KV, the dense per-room sequence, and
   the live WebSocket fan-out (see "the room cell is the broadcast point").
+  A room write that must respect the per-APP budget asks the app's paste cell
+  directly, CELL TO CELL, inside the room's own event: one hostthisd round
+  trip, and the app cell decides the budget against its own current totals -
+  which makes the per-app cap EXACT, where a caller-supplied
+  "other rooms' bytes" figure was stale under concurrency by construction.
 
 ### Writes that span two cells
 
