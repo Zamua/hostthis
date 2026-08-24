@@ -128,6 +128,9 @@ export class Identity {
   // the reservation and the intent record are one event on one thread, so a
   // concurrent upload by the same owner cannot interleave between them. That is
   // what makes the per-identity cap exact rather than best-effort.
+  // updatedAt is recorded from the paste itself, not from the clock: the owner
+  // listing is ordered by it, and a paste created with an explicit UpdatedAt
+  // must sort where that value says, not where its insertion happened to fall.
   async reserve(body) {
     if (typeof body.size !== "number" || body.size < 0) {
       return Response.json({ error: "negative-size" }, { status: 400 });
@@ -144,6 +147,10 @@ export class Identity {
       size: body.size,
       status: body.status ?? "pending",
       at: body.now ?? 0,
+      updatedAt: body.updatedAt ?? body.now ?? 0,
+      // Denormalised so the owner listing needs no fan-out over paste cells:
+      // one entry per slug already, and the version number rides along with it.
+      latestVersion: 1,
       kind: body.kind ?? "",
       name: body.name ?? "",
       contentSha: body.contentSha ?? "",
@@ -208,7 +215,9 @@ export class Identity {
   async list() {
     const entries = (await this.state.storage.get("entries")) ?? {};
     const out = Object.entries(entries).map(([slug, e]) => ({ slug, ...e }));
-    out.sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+    // MOST RECENTLY UPDATED FIRST. Falls back to creation time for an entry
+    // never updated, so a fresh owner still lists in a stable order.
+    out.sort((a, b) => ((b.updatedAt ?? b.at ?? 0) - (a.updatedAt ?? a.at ?? 0)));
     return Response.json(out);
   }
 
@@ -238,7 +247,10 @@ export class Identity {
     if (!e) {
       return Response.json({ updated: false });
     }
-    for (const k of ["name", "status", "size", "kind"]) {
+    if (body.at !== undefined && body.at !== null) {
+      e.updatedAt = body.at;
+    }
+    for (const k of ["name", "status", "size", "kind", "latestVersion"]) {
       if (body[k] !== undefined && body[k] !== null) {
         e[k] = body[k];
       }
@@ -538,11 +550,17 @@ export class Paste {
     if (claim && claim.owner !== body.row.identity) {
       return Response.json({ error: "slug-taken" }, { status: 409 });
     }
-    // baseSize is v1's contribution: the version list holds only APPENDED
-    // versions, so the total is v1 plus those. Without it, deleting an appended
-    // version would recompute a total that has silently dropped v1.
-    body.row.baseSize = body.row.size;
+    // v1 is SEEDED into the version list rather than living only on the row.
+    // Keeping it off the list made every reader special-case it - the listing
+    // omitted it, and the byte total needed a separate baseSize to add it back.
+    // One list with every version in it removes both.
     await this.state.storage.put("row", body.row);
+    await this.state.storage.put("versions", [{
+      ver: 1, kind: body.row.kind, contentSha: body.row.contentSha,
+      size: body.row.size, createdAt: body.row.createdAt, deleted: false,
+      manifest: body.row.manifest ?? null,
+    }]);
+    await this.state.storage.put("maxVer", 1);
     if (claim) {
       await this.state.storage.delete("claim");
     }
@@ -673,7 +691,7 @@ export class Paste {
     const nextVer = ((await this.state.storage.get("maxVer")) ?? 1) + 1;
     versions.push({
       ver: nextVer, kind: body.kind, contentSha: body.contentSha, size: body.size,
-      manifest: body.manifest ?? null,
+      createdAt: body.now, deleted: false, manifest: body.manifest ?? null,
     });
     await this.state.storage.put("versions", versions);
     await this.state.storage.put("maxVer", nextVer);
@@ -682,19 +700,20 @@ export class Paste {
     // not the served version's.
     row.updatedAt = body.now ?? row.updatedAt;
     const wasPinned = (row.pinnedVersion ?? 0) !== 0;
-    if (!wasPinned) {
-      // The public URL follows the latest version unless explicitly pinned.
-      row.contentSha = body.contentSha;
-      row.kind = body.kind;
-      row.manifest = body.manifest ?? null;
-      row.size = (row.size ?? 0) + body.size;
-    }
+    this.rollServed(row, versions);
     await this.state.storage.put("row", row);
-    return Response.json({ appended: true, ver: nextVer, wasPinned, totalSize: row.size ?? 0 });
+    // The CHARGE counts every live version, pinned or not - a pin changes which
+    // version is served, never which are retained - so it is deliberately a
+    // different number from row.size.
+    const charged = versions.reduce((n, v) => (v.deleted ? n : n + (v.size ?? 0)), 0);
+    return Response.json({ appended: true, ver: nextVer, wasPinned, totalSize: charged });
   }
 
+  // NEWEST FIRST, which is the order every reader wants and none should have to
+  // impose: a listing sorted by insertion leaks the storage order into the UI.
   async listVersions() {
-    return Response.json((await this.state.storage.get("versions")) ?? []);
+    const versions = (await this.state.storage.get("versions")) ?? [];
+    return Response.json([...versions].sort((a, b) => b.ver - a.ver));
   }
 
   // Cannot be refused, so there is nothing to check first. Returns the paste's
@@ -702,21 +721,58 @@ export class Paste {
   // computed, rather than by adjusting a number it holds separately.
   async deleteVersion(body) {
     const versions = (await this.state.storage.get("versions")) ?? [];
-    const idx = versions.findIndex((v) => v.ver === body.ver);
-    if (idx < 0) {
+    const v = versions.find((x) => x.ver === body.ver);
+    if (!v) {
       return Response.json({ deleted: false, reason: "absent" });
     }
-    versions.splice(idx, 1);
+    if (v.deleted) {
+      // Already tombstoned: a no-op, NOT a not-found. Re-deleting must be safe,
+      // because a retry cannot tell whether its first attempt landed.
+      return Response.json({
+        deleted: true,
+        totalSize: versions.reduce((n, x) => (x.deleted ? n : n + (x.size ?? 0)), 0),
+      });
+    }
+    // TOMBSTONED, not removed. The row stays in the listing marked deleted so a
+    // reader can tell "this version was retired" from "this version never
+    // existed", and so its number is visibly never reused.
+    v.deleted = true;
     await this.state.storage.put("versions", versions);
-    // A retired version number is never reused, which is why maxVer is stored
-    // rather than derived from this list.
     const row = await this.state.storage.get("row");
-    const total = versions.reduce((n, v) => n + (v.size ?? 0), 0) + (row?.baseSize ?? 0);
+    const total = versions.reduce((n, x) => (x.deleted ? n : n + (x.size ?? 0)), 0);
     if (row) {
-      row.size = total;
+      // Deleting the served version rolls the head onto the next live one.
+      if (row.pinnedVersion === body.ver) {
+        row.pinnedVersion = 0;
+      }
+      this.rollServed(row, versions);
       await this.state.storage.put("row", row);
     }
     return Response.json({ deleted: true, totalSize: total });
+  }
+
+  // Roll the row onto the version the public URL serves: the pin when set,
+  // otherwise the newest live one. The row's kind, sha, manifest and size are a
+  // VIEW of that version, so every mutation that can change which version is
+  // served has to pass through here or the view goes stale - which is how a pin
+  // ended up moving the marker without moving the content.
+  //
+  // row.size is the SERVED version's size, NOT the sum of live versions. The
+  // quota total is a different number, kept in the identity cell, and conflating
+  // them makes a multi-version paste report its whole history as its size.
+  rollServed(row, versions) {
+    const live = versions.filter((v) => !v.deleted);
+    if (!live.length) {
+      return;
+    }
+    const pinned = row.pinnedVersion
+      ? live.find((v) => v.ver === row.pinnedVersion)
+      : null;
+    const v = pinned ?? live.reduce((a, b) => (b.ver > a.ver ? b : a));
+    row.contentSha = v.contentSha;
+    row.kind = v.kind;
+    row.manifest = v.manifest ?? null;
+    row.size = v.size;
   }
 
   // Pin changes which version the public URL SERVES, not what is retained, so
@@ -729,6 +785,7 @@ export class Paste {
       return Response.json({ pinned: false, reason: "absent" });
     }
     row.pinnedVersion = body.ver ?? 0;
+    this.rollServed(row, (await this.state.storage.get("versions")) ?? []);
     await this.state.storage.put("row", row);
     return Response.json({ pinned: true, ver: row.pinnedVersion });
   }

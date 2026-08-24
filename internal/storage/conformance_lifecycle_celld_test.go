@@ -163,26 +163,6 @@ func (n namespacedRepo) SetName(s domain.Slug, name string, want domain.Identity
 	return n.inner.SetName(n.slug(s), name, domain.Identity(n.owner(want.String())), at)
 }
 
-func TestOwnerIndexConformance_Celld(t *testing.T) {
-	base := os.Getenv("CELLD_TEST_ENDPOINT")
-	if base == "" {
-		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld owner-index conformance")
-	}
-	runOwnerIndexConformance(t, "celld", func(t *testing.T) ownerIndexRepo {
-		return newNamespacedCelld(base)
-	})
-}
-
-func TestLifecycleConformance_Celld(t *testing.T) {
-	base := os.Getenv("CELLD_TEST_ENDPOINT")
-	if base == "" {
-		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld lifecycle conformance")
-	}
-	runLifecycleConformance(t, "celld", func(t *testing.T) lifecycleRepo {
-		return newNamespacedCelld(base)
-	})
-}
-
 // namespacedKeygate keeps each run's identities and subnets distinct, for the
 // same reason namespacedRepo does: celld cells are durable with no teardown, so
 // a rerun that reused a subnet would inherit the previous run's admissions and
@@ -206,19 +186,6 @@ func (n namespacedKeygate) SubnetsForIdentity(identity string, now time.Time, wi
 	return n.inner.SubnetsForIdentity(n.prefix+identity, now, window)
 }
 
-func TestKeygateConformance_Celld(t *testing.T) {
-	base := os.Getenv("CELLD_TEST_ENDPOINT")
-	if base == "" {
-		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld keygate conformance")
-	}
-	runKeygateConformance(t, "celld", func(t *testing.T) keygateRepo {
-		return namespacedKeygate{
-			inner:  celld.NewKeyGateRepo(base, nil),
-			prefix: celldNamespace() + "-",
-		}
-	})
-}
-
 // The site surface needs no celld-specific adapter: storage.Sites is pure
 // vocabulary over the paste repo, so the celld repo drops straight into it.
 // That this compiles at all is the claim being made.
@@ -233,21 +200,6 @@ func newNamespacedCelld(base string) namespacedRepo {
 		prefix: ns,
 		kg:     namespacedKeygate{inner: celld.NewKeyGateRepo(base, nil), prefix: ns + "-"},
 	}
-}
-
-func TestSiteConformance_Celld(t *testing.T) {
-	base := os.Getenv("CELLD_TEST_ENDPOINT")
-	if base == "" {
-		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld site conformance")
-	}
-	// A cell decides inside one event, so both byte caps hold exactly under
-	// concurrency - unlike shale, whose per-identity check is a scan outside the
-	// write and admits a bounded overshoot.
-	caps := conformCaps{StrictQuotaUnderConcurrency: true, StrictIdentityQuotaUnderConcurrency: true}
-	runSiteConformance(t, "celld", caps, func(t *testing.T) (conformanceRepo, conformanceSiteRepo) {
-		r := newNamespacedCelld(base)
-		return r, storage.NewSites(r)
-	})
 }
 
 // The remaining PasteAdmin surface, forwarded through the namespace. Mechanical
@@ -332,18 +284,34 @@ func (n namespacedRooms) CountRoomCreates(app domain.Slug, subnet string, now ti
 	return n.inner.CountRoomCreates(n.app(app), n.prefix+subnet, now, window)
 }
 
-func TestRoomConformance_Celld(t *testing.T) {
+// The FULL contract suite against celld, not a subset.
+//
+// It ran as three partial entries first - lifecycle, owner index, sites - and
+// the paste ADMIN surface fell in the gap between them: versions, pins and
+// tombstones went unverified, and a staging smoke run found two real defects
+// there that no test would have. A backend either passes the whole contract or
+// its gaps are found by someone else.
+func TestConformance_Celld(t *testing.T) {
 	base := os.Getenv("CELLD_TEST_ENDPOINT")
 	if base == "" {
-		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld room conformance")
+		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld conformance")
 	}
+	// Both byte caps are strict: a cell decides inside one event, where shale's
+	// per-identity check is a scan outside the write.
 	caps := conformCaps{StrictQuotaUnderConcurrency: true, StrictIdentityQuotaUnderConcurrency: true}
-	runRoomConformance(t, "celld", caps, func(t *testing.T) roomConformanceStores {
+	newRepo := func(t *testing.T) conformanceRepo { return newNamespacedCelld(base) }
+	newSites := func(t *testing.T) (conformanceRepo, conformanceSiteRepo) {
+		r := newNamespacedCelld(base)
+		return r, storage.NewSites(r)
+	}
+	newRooms := func(t *testing.T) roomConformanceStores {
 		r := newNamespacedCelld(base)
 		return roomConformanceStores{
 			Rooms: namespacedRooms{inner: celld.NewRoomRepo(base, nil), prefix: r.prefix},
 			Paste: r,
 			Site:  storage.NewSites(r),
 		}
-	})
+	}
+	runConformanceWithSites(t, "celld", caps, newRepo, newSites, newRooms)
+	runKeygateConformance(t, "celld", func(t *testing.T) keygateRepo { return newNamespacedCelld(base).kg })
 }
