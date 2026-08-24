@@ -46,16 +46,21 @@ var layerPolicy = map[string][]string{
 	// consumer declares a recorder port and this package satisfies it, so an
 	// entry here would mean instrumentation had started reaching into the
 	// layers it observes.
-	"metrics":         {},
-	"durable":         {},
-	"domain":          {},
+	"metrics": {},
+	"durable": {},
+	"domain":  {},
+	// The shared room-realtime vocabulary. A LEAF like domain: both relay
+	// implementations (the hub relay and the celld proxy) speak it, and it may
+	// never grow machinery, or the implementations start sharing more than
+	// words.
+	"roomwire":        {"domain"},
 	"archive":         {"domain"},
 	"cache":           {"domain"},
 	"storage":         {"domain", "durable"},
 	"service":         {"archive", "domain", "mime"},
-	"relay":           {"domain"},
-	"relay/relaygrpc": {"domain", "relay"},
-	"http":            {"archive", "domain", "mime", "relay", "service"},
+	"relay":           {"domain", "roomwire"},
+	"relay/relaygrpc": {"domain", "relay", "roomwire"},
+	"http":            {"archive", "domain", "mime", "relay", "roomwire", "service"},
 	"ssh":             {"archive", "domain", "mime", "service"},
 	"shaleblob":       {"archive", "domain", "durable", "mime", "service", "storage"},
 
@@ -64,7 +69,7 @@ var layerPolicy = map[string][]string{
 	// alternative to the shale adapter, not a layer on top of it, so an entry
 	// for "storage" here would mean the experiment had grown a dependency on
 	// the thing it is meant to replace.
-	"celld": {"domain", "durable"},
+	"celld": {"domain", "durable", "roomwire"},
 
 	// Test-only harness: the importable package is empty, so what is pinned
 	// here is that it STAYS empty. Its _test.go files wire whole stacks, which

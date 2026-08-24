@@ -361,6 +361,14 @@ export class Room {
     // acceptWebSocket, not server.accept(): the hibernatable form is what lets
     // the runtime evict the cell while the socket stays open.
     this.state.acceptWebSocket(server);
+    // The snapshot goes out in the SAME event that attaches the socket, so no
+    // mutation can land between the state read and the attach - the atomicity
+    // the multi-pod design had to buy with the seq splice contract.
+    server.send(JSON.stringify({
+      type: "snapshot",
+      seq: (await this.state.storage.get("seq")) ?? 0,
+      state: await this.wireState(),
+    }));
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -432,10 +440,21 @@ export class Room {
     kv[body.key] = body.value;
     const seq = ((await this.state.storage.get("seq")) ?? 0) + 1;
     meta.updatedAt = body.now;
+    const wire = (await this.state.storage.get("wire")) ?? {};
+    if (body.wire !== undefined && body.wire !== null) {
+      wire[body.key] = body.wire;
+      await this.state.storage.put("wire", wire);
+    }
     await this.state.storage.put("kv", kv);
     await this.state.storage.put("bytes", next);
     await this.state.storage.put("seq", seq);
     await this.state.storage.put("meta", meta);
+    // The mirror frame leaves in the same single-threaded event that assigned
+    // seq, so frames are emitted in seq order by construction.
+    this.broadcast({
+      type: "put", seq, key: body.key,
+      value: Object.hasOwn(wire, body.key) ? JSON.parse(wire[body.key]) : null,
+    });
     return Response.json({ seq, bytes: next });
   }
 
@@ -452,6 +471,11 @@ export class Room {
     if (Object.hasOwn(kv, body.key)) {
       bytes -= b64len(kv[body.key]);
       delete kv[body.key];
+      const wire = (await this.state.storage.get("wire")) ?? {};
+      if (Object.hasOwn(wire, body.key)) {
+        delete wire[body.key];
+        await this.state.storage.put("wire", wire);
+      }
     }
     const seq = ((await this.state.storage.get("seq")) ?? 0) + 1;
     meta.updatedAt = body.now;
@@ -459,14 +483,42 @@ export class Room {
     await this.state.storage.put("bytes", bytes);
     await this.state.storage.put("seq", seq);
     await this.state.storage.put("meta", meta);
+    this.broadcast({ type: "delete", seq, key: body.key });
     return Response.json({ seq, bytes });
   }
 
-  async webSocketMessage(ws, message) {
-    const seen = ((await this.state.storage.get("seen")) ?? 0) + 1;
-    await this.state.storage.put("seen", seen);
-    ws.send(JSON.stringify({ echo: String(message), seen }));
+  // The snapshot's state object. Values come from the wire cache the adapter
+  // fills on every put - the encoding rule (raw JSON passes, bytes become a
+  // JSON string) lives in Go, and the cell never interprets the bytes. A key
+  // written before the cache existed falls back to null rather than guessing.
+  async wireState() {
+    const wire = (await this.state.storage.get("wire")) ?? {};
+    const kv = (await this.state.storage.get("kv")) ?? {};
+    const state = {};
+    for (const k of Object.keys(kv)) {
+      state[k] = Object.hasOwn(wire, k) ? JSON.parse(wire[k]) : null;
+    }
+    return state;
   }
+
+  // Broadcast to every connected socket, dead ones dropped silently: send() on
+  // a closing socket throws, and one dead client must not cost the rest their
+  // frame.
+  broadcast(frame) {
+    const data = JSON.stringify(frame);
+    for (const ws of this.state.getWebSockets()) {
+      try {
+        ws.send(data);
+      } catch {
+        // reaped by the runtime; nothing to do
+      }
+    }
+  }
+
+  // Client-to-server messages are not part of the room protocol: the durable
+  // surface is the HTTP KV API, and accepting mutations over the socket would
+  // be a second write path with none of the caps. Ignored, not echoed.
+  async webSocketMessage() {}
 
   async webSocketClose(ws, code, reason, wasClean) {
     // Recorded so a client-side close code can be checked against what the

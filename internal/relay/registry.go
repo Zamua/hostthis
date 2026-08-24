@@ -2,6 +2,8 @@ package relay
 
 import (
 	"errors"
+
+	"github.com/Zamua/hostthis/internal/roomwire"
 	"sync"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -44,8 +46,8 @@ type Limits struct {
 
 // SPEC defaults (SPEC.md "Limits and abuse posture").
 const (
-	DefaultMaxConnsPerRoom = 64
-	DefaultMaxConnsPerApp  = 1024
+	DefaultMaxConnsPerRoom = roomwire.DefaultMaxConnsPerRoom
+	DefaultMaxConnsPerApp  = roomwire.DefaultMaxConnsPerApp
 	DefaultMaxRooms        = 4096
 	DefaultMaxMessageBytes = 32 << 10 // 32 KiB
 	DefaultSendBuffer      = 16
@@ -67,13 +69,11 @@ func NewLimits() Limits {
 // Admission errors the upgrade handler maps to HTTP status codes. Relay-layer
 // sentinels, so the HTTP handler never reaches into the registry's internals.
 var (
-	// ErrRoomFull: the per-room connection cap is hit. HTTP 429.
-	ErrRoomFull = errors.New("relay: room connection cap reached")
-	// ErrAppFull: the per-app aggregate connection cap is hit. HTTP 429.
-	ErrAppFull = errors.New("relay: app connection cap reached")
-	// ErrTooManyRooms: the live-room cap is hit and this upgrade would create
-	// a NEW hub. HTTP 503; joins to already-live rooms still succeed.
-	ErrTooManyRooms = errors.New("relay: too many active relay rooms")
+	// The admission sentinels live in roomwire so both relay implementations
+	// return the SAME instances and one status mapping serves either.
+	ErrRoomFull     = roomwire.ErrRoomFull
+	ErrAppFull      = roomwire.ErrAppFull
+	ErrTooManyRooms = roomwire.ErrTooManyRooms
 	// errHubGone is internal: the hub for a reserved connection vanished
 	// before the late-join completed (a shutdown race), so the connection is
 	// closed without registering.
