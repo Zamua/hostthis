@@ -366,8 +366,31 @@ func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlob
 			return nil, nil, err
 		}
 		return storage.NewCompressedBlobStore(inner), cleanup, nil
+	case "s3":
+		// The celld backend holds no bytes, so the byte plane needs a durable
+		// home of its own. Content-addressed, exactly like disk: interchangeable
+		// layouts mean moving between them is a key rename, never a re-encode.
+		bs, err := storage.NewS3BlobStore(storage.S3BlobConfig{
+			Endpoint:  envOr("HOSTTHIS_S3_ENDPOINT", ""),
+			Bucket:    envOr("HOSTTHIS_S3_BUCKET", ""),
+			Region:    envOr("HOSTTHIS_S3_REGION", "us-east-1"),
+			AccessKey: envOr("HOSTTHIS_S3_ACCESS_KEY", ""),
+			SecretKey: envOr("HOSTTHIS_S3_SECRET_KEY", ""),
+			UseSSL:    strings.EqualFold(envOr("HOSTTHIS_S3_USE_SSL", "false"), "true"),
+			Prefix:    envOr("HOSTTHIS_S3_BLOB_PREFIX", "blob"),
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		logger.Printf("blobs: s3 backend at %s/%s (zstd-compressed at rest)",
+			envOr("HOSTTHIS_S3_BUCKET", ""), envOr("HOSTTHIS_S3_BLOB_PREFIX", "blob"))
+		inner, cleanup, err := maybeWrapWriteBack(bs, dataDir, logger)
+		if err != nil {
+			return nil, nil, err
+		}
+		return storage.NewCompressedBlobStore(inner), cleanup, nil
 	default:
-		return nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (only 'disk' is supported as a standalone backend; production uses the shale-collocated blob plane)", backend)
+		return nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|s3; the shale metadata backend supplies its own collocated blob plane instead)", backend)
 	}
 }
 
