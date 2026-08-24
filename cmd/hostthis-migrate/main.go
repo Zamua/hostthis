@@ -199,6 +199,7 @@ func main() {
 				failed++
 				return nil
 			}
+			fmt.Printf("verified %s\n", p.Slug)
 			moved++
 			return nil
 		}
