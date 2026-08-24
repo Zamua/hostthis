@@ -250,7 +250,7 @@ export class Identity {
     if (body.at !== undefined && body.at !== null) {
       e.updatedAt = body.at;
     }
-    for (const k of ["name", "status", "size", "kind", "latestVersion"]) {
+    for (const k of ["name", "status", "size", "kind", "latestVersion", "pinnedVersion"]) {
       if (body[k] !== undefined && body[k] !== null) {
         e[k] = body[k];
       }
