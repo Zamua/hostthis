@@ -12,6 +12,7 @@ import (
 	"fmt"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/durable"
 )
 
 var (
@@ -79,3 +80,9 @@ func decodeManifest(s string) (domain.Manifest, error) {
 	}
 	return m, nil
 }
+
+// StepEntryWritten marks a create's enumeration entry as durably written, so a
+// sweep resolving the intent knows whether an entry may need rolling back. The
+// step NAME is part of the durable-log contract across backends, which is why
+// it survives the shale adapter that first defined it.
+const StepEntryWritten durable.StepName = "entry"

@@ -13,7 +13,7 @@ import (
 	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
-func newStack(t *testing.T) (*service.Upload, *service.Manage, *storage.ShaleRepo) {
+func newStack(t *testing.T) (*service.Upload, *service.Manage, *storage.MemRepo) {
 	t.Helper()
 	dir := t.TempDir()
 	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))

@@ -537,11 +537,11 @@ durably reserved + named, not after the bytes finish landing in the
 object store.
 
 This whole section describes the DETACHED-store path (the default - local,
-and shale-without-a-blob-bucket), where the blob write happens after
-the metadata commit. On the shale-collocated blob path (`HOSTTHIS_SHALE_BLOB_BUCKET`
-set, see "Shale-collocated blobs") this model COLLAPSES: the bytes are staged
+where the blob write happens after
+the metadata commit. On a backend that binds bytes inside the metadata
+commit this model COLLAPSES: the bytes are staged
 durably before the metadata commits and the pointer co-commits with the row, so
-there is no window between row and bytes - a shale-collocated paste commits
+there is no window between row and bytes - such a paste commits
 `ready` directly and the pending machinery below does not run for it.
 
 ### Why it exists
@@ -594,7 +594,7 @@ additive migration with no flag day.
 4. return the URL.
 
 Quota is enforced HERE, synchronously, by the same quota check used
-before (a scan of the owner's live rows on shale; a serialized in-transaction
+before (a serialized in-transaction
 sum on the single-transaction backends). An over-quota upload is rejected before any URL is
 handed out: the async split does not weaken the quota gate.
 
@@ -624,7 +624,7 @@ regression the feature introduces, and it is bounded:
 - A paste stuck `pending` STAYS pending: nothing ages it out (see
   "Phantom entries are accepted, not repaired"). It keeps its charged
   bytes and shows a loading screen until its owner deletes it. This is the
-  detached-store path only - the shale-collocated path prod runs commits
+  detached-store path only - a bind-inside-commit backend commits
   READY with the bytes already durable, so it has no pending window at all.
 - Nothing that was previously durable becomes less durable: a `ready`
   paste is exactly as durable as before (blob in object store, metadata
@@ -1109,7 +1109,7 @@ not remember. **Rooms** add the missing piece - a small persistence tier
 so a deployed static-site app can store and load state without an account
 system and without any server-side app code. This is the first real cut
 of the "A persistence API" bullet under "Future directions"; that bullet
-called for a per-app KV store fronted by a thin HTTP layer over shale,
+called for a per-app KV store fronted by a thin HTTP layer over the metadata backend,
 and this section makes the no-auth, capability-based form of it real.
 
 The deliberately-scoped commitment for this tier: **a key-value store
@@ -1279,7 +1279,7 @@ existence of any specific room.
 
 Room data is small JSON/bytes blobs - app STATE, not files - so it lives
 in the **metadata backend** hostthis already runs (the configurable
-metadata store: the local engine for single-host, shale for the
+metadata store: the memory engine for dev, celld for the
 object-store-backed and horizontally-scaled deploys), NOT in the
 content-addressed BlobStore. The BlobStore is for the larger,
 dedupe-worthy file bytes of pastes and sites; room values are small,
@@ -1288,7 +1288,7 @@ explicitly out of scope for rooms - an app that needs to host files uses
 the archive/site feature, not a room value.
 
 The implementation follows the existing repo-behind-a-service-interface
-pattern exactly the way the paste repo and the shale `ShaleRepo` do:
+pattern exactly the way the paste repo does:
 
 - A new domain aggregate, **`Room`** (slug-of-the-owning-app + room id +
   the key-value namespace as a value object), lives in `internal/domain`
@@ -1302,8 +1302,8 @@ pattern exactly the way the paste repo and the shale `ShaleRepo` do:
   `internal/service`, the same way `PasteRepo` / `PasteAdmin` /
   `SweepRepo` / `KeyGateRepo` are; the sweep-side view is `SweepRooms`).
   Both metadata backends implement it - **local** (single-host) and
-  **shale** (horizontally-scaled cluster) - so the `/api/rooms` surface runs
-  on every backend hostthis can be deployed on, including the shale backend
+  **celld** (one cell per room) - so the `/api/rooms` surface runs
+  on every backend hostthis can be deployed on, including the production one
   prod runs. The
   domain, HTTP, and service layers stay unaware of which backend is wired.
 - Every backend models a room as a set of key families co-located in the
@@ -1313,7 +1313,7 @@ pattern exactly the way the paste repo and the shale `ShaleRepo` do:
   KEY, not by a filter a caller could forget. The full layout,
   the cap + isolation + rate-limit + TTL mapping onto KV ops, and the
   fixed-width TTL timestamp are specified under **"Room storage on the
-  shale backend"** below (near the metadata-backend section,
+  celld backend"** below (near the metadata-backend section,
   alongside the parallel static-site layout). The single-writer backends
   store the same logical rows; the observable contract is identical across
   backends, the way it is for the paste and site families, and the
@@ -1383,10 +1383,10 @@ informs them):
   quota: it stops one app from consuming the whole service. It is flagged
   as a starting default - an operator running many apps may want it lower,
   a single-app operator higher. It
-  differs from the per-IDENTITY paste/site quota, which the local + shaledb
+  differs from the per-IDENTITY paste/site quota, which the memory
   backends free at READ time; the per-app room aggregate is uniformly
   sweep-time so the cap behaves identically across local and
-  shale.
+  the celld backend, whose per-room caps are decided inside one cell event.
 - **Durable total-bytes ceiling.** Room data does NOT carry its own
   service-wide byte scan. Rooms hold no blobs (a room value lives entirely
   in the metadata backend, not the content-addressed `BlobStore`), so a
@@ -1846,309 +1846,15 @@ room, and the next durable read returns an empty snapshot. Live hubs are pure in
 state, GC'd when the last connection leaves; they are never persisted and
 never participate in the sweep.
 
-### Multi-pod relay: broadcast fan-out ordered by a durable per-room sequence
+### Why there is no pod-to-pod fan-out
 
-A single-pod relay is complete on one process: every connection to a
-room terminates on the pod, the room's hub IS the room, and a broadcast
-reaches everyone. A multi-pod deploy (the sharded shale backend runs
-several hostthisd pods behind one non-sticky ingress) breaks that
-silently: two clients in the same room land on different pods, each
-pod's in-memory hub sees only its own sockets, and a durable PUT
-handled by pod A mirrors only to A's connections - with N pods and
-random routing, roughly (N-1)/N of live mirrors never reach a given
-client. The durable KV stays correct throughout (every pod routes reads
-and writes through the one storage cluster); it is only the LIVE delta
-that splits. This section is the cross-pod design.
-
-**The shape: every pod fans out to every pod, and ordering rides the
-data, not the topology.** A frame's origin pod broadcasts it locally and
-publishes it to every peer pod, which broadcasts it to its own local
-connections. That alone would be unordered and lossy (two pods' fan-outs
-race; a peer can be down), so the durable stream is made correct by the
-**per-room sequence**: a dense counter the storage backend assigns at
-commit, carried on every mirror frame and on every snapshot. Subscribers
-order by seq, de-duplicate by seq, and DETECT loss by seq (dense means a
-hole is visible); a detected hole is healed by re-snapshotting. Delivery
-is best-effort; correctness is a property of the data.
-
-#### Rejected alternatives
-
-- **Sticky-by-room (route a room's sockets to its shard owner) -
-  rejected for deploy re-homing.** A rolling deploy of the sharded
-  backend migrates shard ownership between pods mid-roll (the surge
-  deploy hands every unit off with zero interruption). Connections
-  pinned to the owner would re-home on every rollout and every ring
-  change, turning routine deploys into room-wide reconnect storms, and
-  the ingress would have to resolve slug -> current owner (a ring lookup
-  no standard ingress does, racing the very handoffs it must follow).
-  Sticky also caps a room at one pod's connection budget and makes that
-  pod's death the whole room's outage. The clean co-location property it
-  promised (the node that commits pushes the delta) is instead recovered
-  by the sequence: ANY pod can commit, because the order is in the data.
-- **A pub/sub backplane (Redis / NATS) - rejected as a second
-  distributed system.** It decouples placement from fan-out, but adds a
-  new deployment to run and secure, a per-message hop, and its own
-  ordering surface, to solve a fan-out of N where N is a handful of
-  pods. Direct peer fan-out costs O(pods) per frame and reuses transport
-  the deploy already has. The recipient list is deliberately behind a
-  port (see "The peer transport") so **interest-based fan-out** - publish
-  a room's frames only to pods with live subscribers to that room - can
-  replace "all peers" later as a pure optimization, with no protocol or
-  contract change.
-
-#### The per-room sequence: assignment at commit
-
-The sequence lives ON the room's authoritative record
-(`rooms/<app-slug>/<uuid>`), which every backend ALREADY rewrites inside
-every durable mutation (the clock touch on PUT and DELETE). It
-is a `uint64` starting at 0 for a fresh room; each committed mutation
-assigns `seq = prior + 1` in the same transaction that commits the
-value:
-
-- **shale**: a `seq` field on the room record, incremented inside the
-  existing single-shard `{app-slug}` CAS. The record is already in every
-  mutation's CAS read-set (the strict per-room cap mechanism), so two
-  concurrent writers to the same room - even to distinct keys - conflict
-  on the record, the loser retries, and each commit observes the prior
-  seq and writes exactly prior + 1. Density and uniqueness fall out of
-  the same conflict that makes the per-room cap strict; no new race
-  surface is added.
-
-- **local**: the shale mechanism above; only the storage engine beneath
-  the cluster differs.
-
-`RoomRepo.PutValue` and `RoomRepo.DeleteValue` return the assigned seq
-to the caller: the storage layer is the assignment point because the seq
-is durable room state (it must survive the pod that assigned it), and
-storage owns the record it rides on. Two invariants make gap detection
-sound, and both are contract, pinned by the backend-agnostic conformance
-suite:
-
-- **Every committed mutation has exactly one seq, and every seq has
-  exactly one mirror frame.** This includes the idempotent DELETE of an
-  absent key: it already commits (it touches the clock) and
-  already mirrors, so it assigns a seq like any other mutation. A seq
-  bump with no frame would read as a permanent hole (a subscriber would
-  re-snapshot for nothing); a frame with no seq could not be spliced.
-- **`ScanRoom` reports the exact seq its snapshot reflects.** The
-  snapshot's `S` must satisfy: every mutation with seq <= S is in the
-  state, no mutation with seq > S is. The single-transaction backends read the seq
-  inside the same transaction / stripe as the scan, so the fence is
-  free. shale cannot put a prefix scan inside a CAS, so `ScanRoom` runs
-  a **seq fence**: read the record's seq, scan the namespace, re-read
-  the seq; equal means no commit interleaved and the scan is exactly the
-  state at S; changed means retry (bounded; on exhaustion the join fails
-  and the client reconnects - correctness is never traded for a stale
-  fence).
-
-Deleting a room removes its record and its seq with it; a room
-UUID is never reused (creation mints a fresh UUIDv4), so no subscriber
-can ever observe a room's sequence regress.
-
-#### The wire format: seq on every durable frame
-
-The two server-originated control envelopes gain a `seq` field:
-
-```
-{"type":"snapshot", "seq":S, "state":{...}}          the late-join snapshot
-{"type":"put",      "seq":N, "key":"...", "value":...}  live mirror of a PUT
-{"type":"delete",   "seq":N, "key":"..."}            live mirror of a DELETE
-```
-
-Ephemeral peer frames are untouched: payload-opaque, no envelope, no
-seq. They are stale-the-instant-they-are-sent signals with no ordering
-contract; the room sequence orders only the durable stream.
-
-This is a **coordinated frame-format and client-contract change**, and
-the spec says so explicitly rather than pretending compatibility: the
-added `seq` field is additive JSON (an old client ignores it and keeps
-working against a single-pod deploy), but the no-dup guarantee MOVES
-from a server-side lock to the client's discard rule, so a client that
-predates the sequence can observe duplicates on a multi-pod deploy. The
-tier's consumers are few and version with the service; client and
-server adopt the sequence in the same release.
-
-#### The client splice contract
-
-The client keeps `lastSeq`, initialized by the snapshot:
-
-1. **On snapshot**: replace local state with `state`, set
-   `lastSeq = S`. (The snapshot is always the first frame the server
-   sends on a connection.)
-2. **On a durable frame with seq n**:
-   - `n <= lastSeq`: discard (already reflected; this is the no-dup
-     rule).
-   - `n == lastSeq + 1`: apply, advance `lastSeq`.
-   - `n > lastSeq + 1`: hold the frame in a small pending set and start
-     a short gap timer. Out-of-order arrival is NORMAL, not
-     exceptional - two writes committed via different pods race their
-     fan-outs - so the client splices, it does not panic: when the
-     missing seqs arrive, apply the run in order and clear the timer;
-     if the timer fires (a couple of seconds), the frame is lost -
-     resync.
-3. **Resync = reconnect.** Close the socket and rejoin; the fresh
-   snapshot-then-stream is the one resync path and it is already
-   correct. There is deliberately no in-band "resend me seq N" request:
-   every client -> server frame is broadcast to peers as an ephemeral
-   frame (the relay is payload-opaque and has no client control
-   channel), and the server retains no frame history to serve a replay
-   from.
-
-A client's own PUT comes back to it as a seq'd mirror frame (the mirror
-is server-originated and fanned to everyone, sender included). That is
-by design: the HTTP 204 says "durable"; the frame says where the write
-landed in the room's order.
-
-#### The peer transport
-
-- **Protocol.** A hostthis-owned gRPC service (its proto lives in the
-  relay bounded context), one RPC: publish a frame to a peer, carrying
-  `(app_slug, room_id, binary, data)`. The frame body is opaque to the
-  transport - a durable mirror's seq rides inside `data`, an ephemeral
-  frame has none - so the peer tier needs no schema knowledge and the
-  envelope can evolve without touching the proto.
-- **Receive path.** The receiving pod resolves its LOCAL hub for
-  `(app_slug, room_id)` and broadcasts the frame as server-originated
-  (from = 0: every local connection receives it; the originating socket,
-  if any, lives on the origin pod, which already excluded it from its
-  own local fan-out). No local hub means no local subscribers: the frame
-  is dropped, correct because the live path never carries correctness.
-  A received frame is delivered locally ONLY - never re-forwarded. The
-  origin pod is the single fan-out point (full mesh, TTL 1), so no
-  routing loops exist by construction.
-- **What fans out.** Both flavors: a durable mirror (after its commit)
-  and an ephemeral client frame (as it is broadcast locally). Ephemeral
-  frames get cross-pod delivery for free on the same path; their loss
-  or reordering needs no machinery because they carry no contract.
-- **Listener: registered on the gRPC server the sharded backend already
-  runs.** In multi-node mode hostthis itself constructs the peer
-  forwarding server (`internal/storage.NewShaleRepo` binds the
-  listener, creates the `grpc.Server`, registers shale's node service
-  on it, and serves it; the server is hostthis-owned code, not buried
-  in the shale library). The relay's peer service registers on that
-  same server via a generic registrar hook on the storage config,
-  wired at the composition root. One advertised address per pod, one
-  listener lifecycle, and the address is one every peer can already
-  reach - it is the same one shale forwarding uses. The storage package
-  stays relay-agnostic (an opaque `func(*grpc.Server)` hook); the relay
-  stays storage-agnostic (it implements a gRPC service and consumes two
-  small ports). The receiver's local-delivery target is late-bound: the
-  relay is constructed after the repo, so the receiver holds a settable
-  delivery hook, and a frame arriving before wiring completes (a boot
-  race) is dropped - correct, since no client can be connected before
-  the HTTP server is up.
-- **Peer discovery: the ring membership the cluster already tracks.**
-  The cluster's member list carries each live pod's advertised gRPC
-  address - exactly the address the relay should dial - kept current by
-  the same coordination that tracks joins, leaves, and deploy churn, fresher
-  than any DNS view and free of a second discovery mechanism. The relay
-  consumes it through a narrow `Peers` port (the current peer addresses,
-  self excluded) so tests inject a static list and a future non-shale
-  multi-pod shape could plug a DNS-based provider without touching the
-  relay.
-- **Delivery semantics: best-effort per peer, isolated per peer, and
-  never on the commit path.** The origin enqueues the frame on a
-  bounded per-peer outbound queue (the enqueue never blocks; a full
-  queue drops the frame) drained by a per-peer sender goroutine over a
-  long-lived client connection. A slow, full, or unreachable peer costs
-  the writer NOTHING: the commit already returned (the HTTP 204
-  reflects durability, never liveness), the local mirror already ran,
-  and other peers' queues are independent. No peer error ever fails or
-  delays a durable write. A dropped durable frame is DETECTABLE at
-  every affected subscriber via the dense seq (the splice contract
-  re-snapshots); a dropped ephemeral frame is harmless by definition.
-  The known bound: a subscriber behind a missed durable frame learns of
-  the gap only when the NEXT durable frame arrives, so a then-quiet
-  room can stay visually stale until then - the durable KV is never
-  wrong, only the live view is late. Accepted for now; the client
-  lifecycle's heartbeat + visibilitychange reconnects bound it in
-  practice, and a periodic room-seq beacon is the named future fix if
-  it bites. A second, rarer producer of the same symptom is an
-  **ambiguous commit**: the storage write LANDS but the committer
-  observes an error (a timeout that raced the CAS round trip), so a seq
-  was consumed and no mirror frame is ever broadcast for it - not
-  locally, not to any peer (the handler surfaces the error to the app,
-  yet the write is durable). Every subscriber then sees a hole at that
-  seq that only the NEXT durable frame exposes, and a then-quiet room
-  stays visually stale until one arrives. Same accepted bound, same
-  named future fix: the periodic room-seq beacon closes both.
-- **Trust boundary.** The peer service rides the same cluster-internal
-  listener the shale forwarding port already uses: pod-to-pod traffic
-  inside the deployment's network boundary, never exposed on the public
-  ingress. Every per-connection abuse limit (frame size, inbound rate)
-  is enforced at the ORIGIN pod against the client socket BEFORE any
-  peer fan-out, so peer input is trusted to the same degree shale's own
-  forwarded writes are; the receiver re-checks a frame size cap on
-  arrival as cheap defense in depth. That receiver cap is sized to the
-  LARGEST legal frame on this channel, which is NOT the client-socket
-  cap: a durable mirror carries a committed room value verbatim (up to
-  the room value cap, set by the HTTP PUT path, several times the
-  client-socket frame cap) inside a JSON envelope whose string encoding
-  can inflate non-JSON bytes up to 6x (worst-case escaping). Sizing the
-  receiver to the client-socket cap would silently sever cross-pod
-  mirrors for every legal value above it - a whole value class whose
-  remote subscribers would stall until the next durable frame exposed
-  the gap.
-
-#### Drain hint: reconnect-before-shutdown
-
-WebSockets die with their pod - that is accepted, and the reconnect +
-snapshot path heals it. The drain hint makes the heal proactive: a new
-server-originated control envelope
-
-```
-{"type":"reconnect"}
-```
-
-(no seq - it is not a room mutation) is broadcast once to EVERY local
-connection the moment the process receives its termination signal,
-BEFORE the HTTP server stops accepting and before the final close of
-live connections. In a rolling deploy the terminating pod keeps serving
-through its grace window, so a client acting on the hint reconnects
-while its old socket still works - the new join lands on a surviving
-pod through the normal ingress, a make-before-break re-home instead of
-a hard cut. The process-side half of that window is
-`HOSTTHIS_DRAIN_GRACE` (a Go duration, default `3s`): after the hint is
-broadcast the process keeps serving - existing sockets flow, new joins
-are still admitted - for that long before the final close, so the hint
-has time to flush and a hint-acting client re-homes make-before-break.
-`0` disables the pause (hint then immediate close). Clients SHOULD apply small random jitter (a few seconds)
-before reconnecting so a large room does not thundering-herd the
-survivors. The hint is an optimization, never load-bearing: a client
-that ignores it is closed at actual shutdown with a normal closure and
-heals through the standard reconnect + snapshot + splice path.
-
-#### The degenerate case: zero peers
-
-Every single-pod deploy (local, single-node shale) has
-an empty peer set: no peer gRPC service is registered (there is no
-multi-node server to register on), the sender is inert, and the relay
-is exactly the single-pod relay - same seq assignment, same
-register-then-snapshot join, same client contract (the splice
-degenerates to "discard <= S, frames arrive in order"). One code path,
-no mode flag; the multi-pod machinery is the peer set being non-empty.
-The drain hint fires on a single pod too: there is nowhere else to go,
-so clients bounce back after the restart, which is today's behavior
-made explicit.
-
-#### Acceptance criteria
-
-The multi-pod gate, stated as observable behavior:
-
-- **Two clients on different pods receive every put/delete mirror.**
-- **Late-join during concurrent cross-pod writes has no gap and no
-  dup.**
-- **A killed pod's clients resync via reconnect+snapshot with the
-  splice holding.**
-
-Pinned by an in-process two-relay harness (two `Relay` instances over
-the same storage backend, bridged by an in-memory implementation of the
-peer port - no real network needed for the correctness core), plus a
-real-gRPC seam test for the transport adapter. The storage conformance
-suite additionally pins the sequence semantics on every backend: dense
-+1 per committed mutation with no gaps at the source, `PutValue` /
-`DeleteValue` return it, concurrent same-room writers never share or
-skip a seq, and `ScanRoom`'s S is exact under concurrent writes.
+An earlier multi-pod design fanned every frame from its origin pod to every
+peer pod, made correct by the dense per-room sequence (order by seq,
+de-duplicate by seq, detect loss by the hole). The SEQ CONTRACT survives - it
+is what lets a client splice a snapshot onto the live stream, and the wire
+format still carries it - but the fan-out machinery does not, because the
+premise is gone: exactly one cell owns each room, so there is no second pod
+holding the same room to fan out to.
 
 ### Celld backend: the room cell is the broadcast point (no peer fan-out)
 
@@ -3139,7 +2845,7 @@ of every keygate row in the cluster on an interactive command, whose
 cost grows with total admissions across all users and is invisible
 until the table is large.
 
-The identity-leading entry is a DERIVED index. shale's transactions
+The identity-leading entry is a DERIVED index. Cross-scope transactions
 are single-shard and the two keys hash to different shards, so it
 cannot be written atomically with the authoritative row; it is written
 best-effort after the admit. **It is NOT reconciled, and that is the
@@ -3195,9 +2901,9 @@ a bucket quota and surfaces as `ErrServiceFull` from the blob `Put`, off
 the metadata write path entirely.) The underlying
 mechanism depends on the metadata backend in use:
 
-- **local backend** - the same single-shard CAS the shale backend
+- **memory backend** - one mutex over the store, so the check and the write
   uses; only the engine beneath the cluster differs.
-- **shale backend** - `Db.begin(IsolationLevel.SnapshotIsolation)`
+- **celld backend** - the room cell's single-threaded event
   with a `WriteBatch` for the actual multi-key writes; SlateDB's
   manifest-level fencing ensures only one writer is alive at a time
   across processes.
@@ -3216,7 +2922,7 @@ no half-applied state visible to readers."
   physical bytes (post-compression, post-dedup), enforced by the storage
   layer, not an app-level scan
 - Concurrent per-identity quota races → atomic transactions on the
-  single-writer local backend; on the sharded shale backend
+  single-writer memory backend; on the celld backend
   the quota check is a scan that is not atomic with the write, so
   same-identity concurrency admits a BOUNDED overshoot (one in-flight
   upload), backstopped by the object-store bucket quota (see
@@ -3284,13 +2990,12 @@ any single directory's entry count manageable. Linux page cache absorbs
 hot blob reads. Fine up to a few tens of GB and a few thousand
 identities. This is the dev/test standalone backend.
 
-Production runs the shale metadata backend, whose blobs go through the
-**shale-collocated blob plane** (the cluster owns a MinIO/S3 object store
-directly; see "Shale-collocated blobs"), not through this standalone
+Production runs the celld metadata backend with the content-addressed s3
+blob store, not through this standalone
 `BlobStore` at all. A detached standalone `s3` backend used to exist as a
-third option; it was retired once the shale-collocated path subsumed the
+third option; it was retired once a cloud path subsumed the
 only production use of a cloud object store for blobs. The standalone path
-is now disk-only (dev/test); cloud blobs are the shale cluster's concern.
+is disk (dev/test) or s3 (production).
 
 ### On-disk format
 
@@ -3319,7 +3024,7 @@ Writes:
 Object/file naming is the sha256 of the ORIGINAL (uncompressed)
 bytes - dedup happens on logical content, not on the compressed
 representation. Two pastes with identical bytes share one stored object.
-The same magic+zstd format is used by the shale-collocated blob plane, so
+The same magic+zstd format is shared by every blob backend, so
 a blob's stored bytes are identical whichever path wrote them.
 
 ### One standalone backend (disk)
@@ -3327,9 +3032,8 @@ a blob's stored bytes are identical whichever path wrote them.
 The standalone blob path ships exactly one backend, `disk`, which is also
 the default - there is no backend to switch between. A detached `s3`
 standalone backend (and its disk->S3 migration helpers) used to exist; it
-was retired once the shale-collocated blob plane became the production
-path for cloud object storage. Production blobs live in the shale cluster's
-own object store (see "Shale-collocated blobs"), reached through the
+was retired and later reborn as the content-addressed s3 backend, which is
+the production byte plane, reached through the
 metadata backend, not through this standalone `BlobStore`.
 
 ### Local-disk write-back cache (optional, opt-in)
@@ -3344,7 +3048,7 @@ sits in front of the durable backend.
 NB this cache existed to hide the latency of the *detached cloud* standalone
 backend, which has been retired - the standalone path is now disk-only, so
 its `Put` is already local and the cache is effectively dormant there. The
-production blob path (shale-collocated) instead hides the slow object-store
+production blob path instead hides the slow object-store
 `Put` by STAGING the bytes durably before the metadata commits (it does not
 use this cache). The machinery below is retained for any future remote
 standalone backend; it is correct but currently has no remote `Put` to
@@ -3439,13 +3143,13 @@ The metadata layer (paste rows, version rows, identity quota
 counters, slug-to-identity index, Sybil key_first_seen rows) is
 pluggable. Two ship:
 
-- **local** - a single-node shale cluster on this build's local
+- **memory** - the in-process MemRepo, ephemeral by design, on this build's local
   storage engine, persisted under `<data-dir>/metadata`. The
   default. Zero configuration and no external services, which is
   what a fresh clone and `make run` want.
-- **shale** - the same cluster over an S3-compatible object store
+- **celld** - a cell runtime over an S3-compatible object store
   (MinIO, R2, S3, GCS, ABS), sharded and replicated across nodes.
-  Production. Specified in full under "Shale-backed metadata
+  Production. Specified in full under "Celld-backed metadata
   storage" below.
 
 Both are the SAME repo over a different storage engine, chosen at
@@ -3457,8 +3161,8 @@ adapters are unaware of which is in use. Switching is one env var:
 
 ```
 HOSTTHIS_METADATA_BACKEND=local                   # default
-HOSTTHIS_METADATA_BACKEND=shale                   # production
-HOSTTHIS_METADATA_S3_BUCKET=hostthis-metadata     # required for shale
+HOSTTHIS_METADATA_BACKEND=celld                   # production
+HOSTTHIS_CELLD_ENDPOINT=http://celld:8080         # required for celld
 # (S3 endpoint/credentials reused from HOSTTHIS_S3_*)
 ```
 
@@ -3490,11 +3194,11 @@ Every write that touches multiple keys is committed atomically:
   rows) + (slug pointer delete). All land or none; the freed bytes leave
   the owner's quota simply because the next scan no longer sees them.
 
-the local engine enforces this via the cluster CAS; shale via
+the memory engine enforces this under its mutex; celld via
 `Db.begin(IsolationLevel.SnapshotIsolation)` with `WriteBatch`. On the
-shale backend the `{slug}`-shard rows above commit atomically as one CAS,
+celld backend the slug's rows commit inside the paste cell's event,
 and the owner's `{id}`-shard enumeration index entry is a separate
-best-effort write, ordered BEFORE it (see "Scan-derived quota"); the quota is never a stored AGGREGATE on any backend (shale
+best-effort write, ordered BEFORE it (see "Scan-derived quota"); the quota is never re-derived by scanning on the request path (
 caches per-record sizes on the enumeration entries, each rebuildable from
 its authoritative rows).
 
@@ -3507,12 +3211,12 @@ combos:
 | metadata | blob | shape |
 | --- | --- | --- |
 | local | disk | single-host, no cloud deps (dev) |
-| shale | shale-collocated | production: blobs live IN the shale cluster's object store, co-committed with metadata (see "Shale-collocated blobs"); the standalone `BlobStore` is bypassed |
+| celld | s3 | production: content-addressed objects in an S3-compatible bucket |
 
 The detached cloud (`s3`) standalone blob backend was retired; production's
-cloud blobs are the shale cluster's concern, reached through the metadata
+cloud blobs are the s3 backend's concern, reached through the standalone
 backend, not a separate `HOSTTHIS_BLOB_BACKEND` selection. Bucket-per-domain
-is still recommended on the shale path: the metadata bucket and the
+is still recommended in production: the fleet bucket and the
 collocated blob bucket (`HOSTTHIS_SHALE_BLOB_BUCKET`) are distinct, so
 IAM/credential rotation can differ for metadata vs blobs.
 
@@ -3690,13 +3394,12 @@ WithQuotaCheck` with caps set to 0 (the documented "no quota
 enforcement" path), so no backend needs an extra unchecked helper.
 
 Each backend supplies a tiny factory and calls `runConformance` with
-it. The default `go test ./...` run exercises the shale backend on the
+it. The default `go test ./...` run exercises the memory backend; the
 local storage engine (no build tag, no cgo, no external services). The
-same suite runs against the slatedb backend under `-tags slatedb` (which also needs cgo +
-`libslatedb` on the loader path, and a live S3 endpoint via
+same suite runs against a live celld fleet (via
 `MINIO_TEST_ENDPOINT`, skipping cleanly when unset), and is the
 acceptance gate the future
-shale backend will run to prove it preserves behavior. Because the
+celld backend will run to prove it preserves behavior. Because the
 suite asserts only the observable contract, a backend that passes it is
 a drop-in for the service layer by construction.
 
@@ -3709,53 +3412,31 @@ provided beneath the app by object-store versioning plus a
 noncurrent-version lifecycle, an operator-level safety net configured
 outside this repo.
 
-### The storage-engine seam
+### The two backends and the conformance gate
 
-`ShaleRepo` does not name a storage engine. Everything it implements -
-the key layout, the durable intents, the scan-derived quota, the
-guarded index writes - is engine-independent, and one function chooses
-what the cluster mounts underneath:
+`HOSTTHIS_METADATA_BACKEND` selects the metadata plane:
 
-```go
-func openBacking(cfg ShaleConfig) (*backing, error)
-```
+- **memory** (default) - `storage.MemRepo`, an in-process implementation of
+  every port under one mutex. Ephemeral by design; the dev, test and e2e
+  engine. Being single-mutex makes it the STRICTEST backend: every
+  check-then-write is atomic, so anything admitted concurrently here is
+  admissible everywhere.
+- **celld** - the production plane, specified under "Celld-backed metadata
+  storage".
 
-It has two implementations, selected by build tag:
+What keeps two implementations honest is the conformance suite, not
+inspection: the same assertions run against MemRepo on every
+`go test ./...` and against a live celld fleet when `CELLD_TEST_ENDPOINT`
+names one. A behavior difference between backends is, by construction, a
+failing test in one of them.
 
-| build | engine | units | durability |
-| --- | --- | --- | --- |
-| `-tags slatedb` | slate (SlateDB on an object store) | single or `UnitCount` sharded | durable, shared |
-| default | pebble, in memory | single only | process-lifetime |
-
-The default build therefore compiles and exercises the WHOLE shale
-implementation with no cgo, no native library and no object store, so
-`go test ./...` covers code that previously only a tagged build could
-even compile.
-
-The shale tests name no engine: each build supplies `newShaleRepoFor-
-Test`, and the SAME test bodies run on pebble by default and on slate
-under `-tags slatedb` with a live endpoint. Only the tests that
-configure sharding or open a raw slate handle stay tagged, because a
-local engine has neither.
-
-Pebble refuses `UnitCount > 0` rather than quietly serving one unit.
-Units are mounted and FENCED through a `storageunit.BackendFactory`
-whose epoch contract is a property of a store that outlives a node; a
-process-local engine has nothing to fence against. Answering a request
-for sharded storage with unsharded storage would be a silent
-downgrade, so it is an error.
-
-The stored row and key shapes are engine-independent by construction
-(`internal/storage/rows.go`): a row written by one engine is readable
-by the next, which is what makes the engine a build-time choice rather
-than a migration.
 
 ### Static-site storage
 
 The "Static site archives" feature persists a **Site** (slug -> owner +
 Manifest + timestamps) the same way a paste persists, through a small
 `SiteRepo` service-layer interface. This section specifies the **KV
-layout** the shale backend uses. The blobs a site references
+layout** a KV-shaped backend uses. The blobs a site references
 are unchanged: each extracted file is `Put` under its SHA256 into the
 content-addressed `BlobStore`. **Only the manifest plus the site
 metadata live in the metadata backend.** Identical files dedupe at the
@@ -3868,125 +3549,6 @@ enumerates every site exactly as `pastes/` enumerates every paste.
 - **Per-identity site bytes (`SumActiveBytesByOwner`).** Scan
   `identity_sites/<id>/`, `Get` each `sites/<slug>`, sum `DedupedSize` of
   the owner's rows. Site-only: the service layer adds the paste sum.
-
-#### Shale reuses the layout
-
-The site key names + JSON row schema are shared (the
-same way it reuses the paste layout: co-location is by `ShardKeyFn`, not by
-renaming keys). Per-owner BYTE accounting is DERIVED by scanning the
-per-owner ENUMERATION index `identity_sites/<id>/<slug>` and summing the
-cached deduped size each value-bearing entry carries - one
-`{id}`-shard scan, zero per-entry row reads, mirroring the paste quota scan
-- and the same enumeration index `ListSitesByOwner` uses to surface a
-user's sites in `list`. There is no site byte counter and no site
-reservation/release marker: the deploy/replace paths write the cached
-values in the same step that writes the row, so a drift needs a crash
-between the two and costs one record's bytes in the over-count direction. The full site shard
-map:
-
-| Key family | Keys | Shard key |
-| --- | --- | --- |
-| Authoritative (per-slug) | `sites/<slug>` | `<slug>` |
-| Site enumeration index (per-identity) | `identity_sites/<id>/<slug>` | `<id>` |
-
-`sites/<slug>` joins the authoritative `{slug}` family (alongside
-`pastes/<slug>`), and `identity_sites/<id>/<slug>` joins the
-derived `{id}` family so it co-shards with `identity_pastes/<id>/*` (an
-owner's paste-index and site-index scans each stay single-shard). The
-`_sites` suffix keeps these from matching the bare
-`identity_*` prefixes (the trailing-slash anchoring in `shaleShardKey`):
-`identity_sites/` is not any other
-`identity_*` family.
-
-**The `identity_sites/<id>/<slug>` index is value-bearing**: the entry is
-a JSON projection caching the site's deduped size, which
-is exactly what `SumActiveSiteBytesByOwner` sums (one `{id}`-shard scan,
-zero per-entry row reads - the site mirror of the paste quota scan).
-`ListSitesByOwner` renders from the same cached entries with no per-item
-read (docs/SPEC.md "Listing is O(1) reads"). Because `<id>` is the first segment it co-shards with
-the paste index, so the index write rides a single-shard `{id}` CAS: the
-index-maintenance step after a deploy OR an in-place re-deploy writes the
-entry (the re-deploy refreshes the cached size), and `DeleteSite`
-deletes it. Index touches are best-effort (a lost write leaves a missing
-or stale entry, never a failed deploy). A LEGACY entry written before the
-index was value-bearing carries a one-byte marker (shale's `Put` rejects an
-empty value; an entry written before the index carried one may be empty): the
-quota scan recognizes those two shapes explicitly and falls back to reading
-that entry's authoritative `sites/<slug>` row, and `ListSitesByOwner`
-rewrites the entry with the full projection the first time it walks it.
-
-**The head row carries the paste's live totals.** `pastes/<slug>` stores
-`live_bytes` (the sum of its non-deleted version sizes) and `latest_version`
-alongside the served descriptor. Both are maintained in the SAME `{slug}`
-transaction that writes or tombstones a version row, so they are
-transactionally exact rather than a derived figure that can drift - the head
-and its versions co-shard, so there is nothing to co-ordinate.
-
-That is what makes `list` one routed read per item instead of two: the read
-that proves the paste exists also supplies its kind, pin, latest version and
-live bytes, with no prefix scan of the version family. It is also what the
-enumeration entry's cached size is verified against, so the repair below
-compares to an authoritative number rather than to a recomputation.
-
-**No periodic reconcile: the index entry is written FIRST.** There is no
-maintenance pass, no ticker, and no cross-shard repair job. The write order is
-what removes the need for one.
-
-An insert spans two shards - the enumeration entry on `{id}`, the
-authoritative row on `{slug}` - and a transaction touches only one. Whichever
-is written second can be lost to a crash, so the question is only *which
-inconsistency you would rather have*:
-
-| written first | a crash leaves | visible how |
-| --- | --- | --- |
-| the row | a row with **no entry** | invisible: nothing on the `{id}` shard mentions it, so only a scan of EVERY row on EVERY shard can find it |
-| the entry | an entry with **no row** | visible: the entry is right there in the owner's own index, and it is listed to its owner |
-
-hostthis writes **the entry first**, so the surviving inconsistency is the
-harmless one. An entry with no row is a PHANTOM: it appears in the owner's
-list and its slug 404s. It is not repaired, and nothing scans for it - see
-"Phantom entries are accepted, not repaired". Its cached bytes keep counting
-against the owner's quota, which is the fail-safe direction (it can refuse an
-upload, never admit one past the cap), and the owner can clear it by deleting
-it.
-
-The rejected order is the dangerous one for a reason worth stating: a row with
-no entry is not merely harder to find, it is unfindable without scanning every
-row on every shard - and it UNDER-counts, so the cap can be genuinely
-breached. Flipping the write order does not make the crash window smaller; it
-makes what survives the crash safe to ignore, which is what allowed the repair
-job to be deleted rather than replaced.
-
-**The slug is pre-checked before the entry is written.** `pastes/<slug>` and
-`sites/<slug>` are read on the `{slug}` shard first, and a taken slug returns
-the collision sentinel with no entry written. Without that, every re-mint in
-the upload's collision-retry loop would strand an entry. The pre-check is not
-atomic with the authoritative insert, so a genuine race still strands one -
-bounded, and left as a phantom.
-
-**A failed insert rolls back only an entry that is genuinely an orphan.** When
-the authoritative write fails, the entry written first is normally removed, so a
-collision does not charge a would-be owner. It is KEPT in two cases: when the
-slug's row turns out to belong to the same identity, and when that row cannot be
-read at all. Two callers inserting the same artifact write the one entry key, so
-the loser's rollback would otherwise delete an entry the winner's row depends on
-- producing the row with no entry above, the state this whole ordering exists to
-avoid, and reached by a path no crash-window argument covers. It is the worse
-failure in that table arrived at deliberately: the artifact serves every file
-and reports its versions while being absent from its owner's listing and free of
-charge. An unreadable row counts as the same case rather than as absence,
-because the two call for opposite actions and only one of them can be undone.
-
-**What a crash costs, and what bounds it.** A crashed insert leaves an entry
-whose cached bytes count against the owner's quota and shows a slug in their
-list that does not resolve. That is an OVER-count: it can wrongly refuse an
-upload, never wrongly admit one. The previous design had the opposite failure -
-a live paste that counted for nothing, so the cap could be genuinely breached.
-
-The residue is not permanent, because the operation records a DURABLE INTENT
-before it starts (below). Its lifetime is bounded by the owner's next request
-rather than by a background pass, so no cross-shard job is reintroduced to get
-that bound.
 
 ### The owner document (v2 owner index)
 
@@ -4262,7 +3824,7 @@ transaction that binds, and that transaction is pinned on the slug, so the
 record has to co-shard with the bref it guards. The durable intent cannot serve:
 it shards on the IDENTITY so the boot sweep can scan one owner's intents
 node-locally, which is a different shard, and a transaction pinned on the slug
-cannot read it. (shale's design note prescribed putting the ownership check on
+cannot read it. (An earlier design note prescribed putting the ownership check on
 the intent; that assumed a layout where the two co-shard, which is not this one.
 The requirement is only that the epoch live where the bind can read it.)
 
@@ -4473,9 +4035,9 @@ site bytes were ignored: e.g. an 800-byte site plus a 300-byte paste under a
 though the symmetric site direction correctly rejects it. The
 `Sites/PerOwnerCapCountsBoth` conformance subtest pins both directions.
 
-The durable total-bytes ceiling is NOT a shale aggregate scan: it is the
+The durable total-bytes ceiling is NOT an aggregate scan: it is the
 object-store bucket quota (see "Limits → Durable total-bytes ceiling"),
-surfaced as `ErrServiceFull` from the blob `Put`. The shale site repo runs
+surfaced as `ErrServiceFull` from the blob `Put`. The site repo runs
 no service-wide byte sum on the deploy path; only the per-identity scan
 (bounded to one owner's slugs) gates a deploy at the app layer.
 
@@ -4486,7 +4048,7 @@ site or a paste, never both, in both directions. Neither path leaves a marker
 any background pass must complete - the only per-owner `{id}` state a
 deploy or delete writes is the enumeration index entry.
 
-**Status: implemented + conformance-tested.** Prod runs shale, which shares
+**Status: implemented + conformance-tested.** Prod runs celld, which shares
 the scan-derived quota shape (the enumeration index + the cross-family
 collision read) with the rest of the artifact families. Every backend runs the
 SAME conformance site subtests under the SAME factory, so each is a drop-in for
@@ -4517,7 +4079,7 @@ the extended suite is a drop-in for static-site hosting by construction.
 
 The "Rooms (app persistence)" feature persists a **Room** (the owning
 app's slug + a UUIDv4 + a flat key-value namespace) plus a creation-rate
-ledger. This section specifies the **KV layout** the shale backend uses. Rooms hold no blobs: a room value is small, mutable app STATE that
+ledger. This section specifies the room model. Rooms hold no blobs: a room value is small, mutable app STATE that
 lives entirely in the metadata backend (the content-addressed `BlobStore`
 is untouched), so unlike pastes and sites a room contributes nothing to the
 blob-GC keep-alive set.
@@ -4578,12 +4140,12 @@ The `rooms/<app-slug>/<uuid>` row is the authoritative record. On the
 single-writer local backend it holds the clock only: the byte and key counts are
 computed by scanning `roomkv/<app-slug>/<uuid>/` at PUT time, which
 materializes the namespace for the pure `RoomKV.CanPut` cap math,
-serialized by the per-room `lockQuota` stripe. The **shale** backend
+serialized by the per-room `lockQuota` stripe. The **celld** backend
 additionally
 stores a running `byte_total` + `key_count` on this record (the `roomRow`
-shale-only fields), because shale validates the per-room cap inside a CAS and a
+backend-internal fields), because the room cell validates the per-room cap inside its event and a
 CAS read-set cannot carry a scan, so it needs a discrete in-record total the
-read-set can read-check (see "Shale reuses the layout" -> "Per-room cap
+read-set can read-check (a cap the writer
 (strict)").
 
 EVERY backend additionally maintains the room's **durable sequence** on
@@ -4598,7 +4160,7 @@ three properties, pinned by the conformance suite: the seq is dense
 (+1 per committed mutation, no gaps at the source, concurrent writers
 never share or skip one), it is assigned at commit, and `ScanRoom`
 reports the exact seq its snapshot reflects (a single-transaction backend reads it
-inside the scan's own transaction / stripe; shale, whose CAS read-set
+inside the scan's own transaction / stripe; a backend whose read-set
 cannot carry a scan, runs the read-scan-reread seq fence and retries on
 motion). A legacy record with no `seq` field decodes as 0, so the first
 post-upgrade mutation assigns 1 - no migration of existing rooms is
@@ -4732,99 +4294,6 @@ participated in alongside pastes and sites - no longer exists on any
 backend, so there is no cross-kind byte scan for a room PUT to run or to
 fold its bytes into.
 
-#### Shale reuses the layout
-
-The room key names + JSON record schema
-(co-location is by `shaleShardKey`, not by renaming keys), joining the room
-families to the existing shard-family scheme so a room read or write is a
-single-shard operation. The room shard map:
-
-| Key family | Keys | Shard key |
-| --- | --- | --- |
-| Room record (per-app) | `rooms/<app-slug>/<uuid>` | `<app-slug>` |
-| Room value (per-app) | `roomkv/<app-slug>/<uuid>/<key>` | `<app-slug>` |
-| Room-create ledger (per-app) | `roomcreate/<app-slug>/<subnet>/<ts>/<uuid>` | `<app-slug>` |
-
-All three families shard on `<app-slug>`, co-locating an app's rooms, all
-their values and its creation ledger on ONE shard - the same co-location
-discipline the `{slug}` / `{id}` / `{subnet}` families use, and the reason
-"load the whole room," "write one key," and "count this app's creations"
-are each single-shard operations rather than cross-shard fan-outs. The
-`<app-slug>` is the first segment after every room family's prefix, so
-`shaleShardKey` extracts it directly. The `room`-prefixed family names
-do not collide with the `pastes/` / `sites/` / `rooms`-vs-`roomkv`
-anchoring (the trailing-slash discipline in `shaleShardKey`:
-`roomkv/` is not `rooms/`).
-
-The strict-isolation, per-room-cap, and per-app-aggregate-cap properties
-carry over unchanged. Both the per-room cap and the
-per-app aggregate cap are STRICT under concurrency on shale, but they are
-enforced by two DIFFERENT read-set members of the one `{app-slug}`-shard CAS,
-because a CAS read-set is a set of discrete key checks (shale forbids
-`ScanPrefix` inside a transaction - a scanned range has no cheap phantom
-protection), so a cap whose magnitude is "the sum over a key range" must be
-backed by a discrete COUNTER the CAS can read-check, not by an in-CAS scan:
-
-- **Per-app aggregate cap (strict).** A per-app room-byte counter
-  `roombytes/<app-slug>` is read-checked and incremented inside the
-  `{app-slug}` value-write CAS, so two concurrent writers to the SAME app
-  cannot both pass a stale per-app sum and overshoot `appCap`. This counter is
-  legitimate where the per-identity paste/site byte counter was not: because
-  all five room families (the four above + this counter) share the one
-  `{app-slug}` shard, a room create or write is already single-shard, so the
-  value write + the counter update are ONE atomic CAS - there is no cross-shard
-  split between the counted rows and the counter, so it cannot drift the way a
-  per-identity counter (rows on `{slug}`, counter on `{id}`) would. That is
-  exactly why the per-identity quota is scan-derived while this per-app
-  aggregate stays a counter.
-- **Per-room cap (strict).** The per-room byte total + key count are stored ON
-  the room record (`rooms/<app-slug>/<uuid>`, the `roomRow` `byte_total` +
-  `key_count` fields, shale-only) and validated against `MaxRoomBytes` /
-  `MaxRoomKeys` INSIDE the same CAS. The room record is already read-checked in
-  the read-set (the room-exists re-check) and rewritten on every PUT / DELETE
-  (the clock touch), so two concurrent writers to DISTINCT keys of the same
-  room - which target different value keys and so would NOT conflict on the
-  value-key read-check alone - DO conflict on the shared room-record read-check:
-  the second writer's CAS conflicts after the first commits, the retry re-reads
-  the now-updated `byte_total` / `key_count`, and the per-room cap is recomputed
-  against the fresh totals. So the per-room ceiling holds no matter how the
-  writes interleave (`conformCaps.StrictQuotaUnderConcurrency = true`). The
-  totals are maintained ONLY by the sharded shale backend (a single-writer one leaves them
-  unset and computes the per-room cap by materializing the namespace under a
-  serialized writer - its per-room `lockQuota` stripe - so it needs no
-  stored total); since a room is only ever
-  written by one backend's store, the shale-only fields are inert on the others.
-
-The shale room path runs NO service-wide byte sum either: the durable
-total-bytes ceiling is the object-store bucket quota, and a room holds no
-blobs, so the room write is bounded only by the per-room and per-app caps.
-A room's bytes leave the per-app counter when the room or the value is
-deleted: the per-app aggregate IS a maintained counter, whereas the
-per-identity quota is a live scan. The
-`Rooms/PerRoomCapConcurrentCeiling` conformance subtest fires N concurrent
-distinct-key writes into one room against the structural `MaxRoomBytes` cap and
-asserts the persisted byte total never breaches it - the gate that pins the
-per-room strictness above on every `StrictQuotaUnderConcurrency` backend.
-
-**Empty room values on shale.** shale's `Put` rejects empty values (the
-empty payload is reserved for delete tombstones), but a room value may
-legitimately be the empty byte string (`PUT`ting `""` is valid app state on
-a local engine). To keep the verbatim-round-trip contract IDENTICAL across every
-backend, a stored shale room value is prefixed with one sentinel
-byte; the decode strips it to return the app's exact bytes (including the
-empty string). All room BYTE accounting (the per-app counter, the per-room
-cap) charges the DECODED length, so the byte totals
-match exactly - an empty value counts as 0 bytes. This is a
-shale-internal encoding detail; the observable Get/Scan contract is the same
-verbatim bytes on every backend, and the conformance `Rooms/RoundTrip`
-subtest exercises an empty value to pin it.
-
-**Status: implemented + conformance-tested.** Prod runs shale, whose room
-layout is co-located on the per-app shard. Every backend runs the SAME
-conformance room subtests under the SAME factory, the way it already does for
-pastes and sites, so each is a drop-in for the room-persistence tier by
-construction.
-
 #### Wiring: widen the metadata bundle's `Rooms` field
 
 `cmd/hostthisd/metadata.go` holds `Rooms` as a `roomStore` interface (the
@@ -4877,1405 +4346,70 @@ room-persistence tier by construction.
 
 ---
 
-## Shale-backed metadata storage (horizontal scale)
+## Celld-backed metadata storage (production)
+
+The production metadata plane is a celld fleet: a Rust runtime embedding V8
+that owns named CELLS - each a private SQLite database with exactly one owner,
+fenced by conditional writes against object storage. hostthisd reaches it over
+HTTP through `internal/celld`; the cell application itself lives in
+`celld/src/index.js` and is deployed to the fleet's bucket.
+
+### The cell taxonomy
+
+Four classes, and the taxonomy is effectively PERMANENT: class names are part
+of the storage key path and the runtime rejects renames once data exists.
+
+- **Paste** - one cell per slug: the row, the version list (v1 seeded, one
+  list holds every version, tombstones retained, numbers never reused), and
+  the slug claim used by multi-file site deploys. The slug namespace is
+  global because the cell IS the slug.
+- **Identity** - one cell per owner: the enumeration entries the listing
+  renders (denormalised name, kind, size, latest and pinned version, so a
+  listing is one point read), the quota charge, the first-seen stamp, the
+  durable intents, and the keygate reverse index.
+- **Subnet** - one cell per network: the Sybil admission rows. Admission is a
+  check-and-record inside one single-threaded event, so the per-subnet cap is
+  EXACT.
+- **Room** - one cell per app room: the KV, the dense per-room sequence, and
+  the live WebSocket fan-out (see "the room cell is the broadcast point").
+
+### Writes that span two cells
+
+A create touches the identity cell (quota reserve) and the paste cell (the
+row); nothing transacts across cells. The seam is the same durable-intent saga
+the spec's intent section describes: reserve records an intent, the row is
+written, confirm discharges the intent, and a crash between them leaves an
+intent that resolution settles on the next touch. Charges are recorded as
+ABSOLUTE per-slug totals, never deltas, so replaying a settle converges
+instead of double-charging; releases are membership-based (drop the entry),
+so replaying a release cannot over-refund.
+
+### What a cell's single thread buys
+
+Every check-then-write inside one cell - the quota check, the room caps, slug
+uniqueness, keygate admission - happens within one event, so those invariants
+hold exactly without any cross-node machinery. The trade is that EVERY
+metadata operation is a network call, and a dormant cell pays an activation
+on first touch. Idle cells are evicted (`CELLD_IDLE_EVICT_S`) back to bucket
+objects, which is what makes a mostly-dormant paste service cheap to keep.
+
+### Blobs: a content-addressed object store
+
+celld holds no bytes. The byte plane is `HOSTTHIS_BLOB_BACKEND=s3`: the same
+five-method content-addressed contract the disk store satisfies
+(`blob/<sha256[:2]>/<sha256>`, zstd-compressed at rest), over any
+S3-compatible bucket. Blob dedup, the orphan sweep and the pending/finalize
+model are unchanged from the standalone design; there is no transactional
+pointer co-commit, which is exactly what the pending model exists to cover.
+
+### Operational shape
+
+A fleet serves ONE application - a second deploy replaces the current one
+silently - so hostthis owns its fleet and its bucket outright. The worker
+port is unauthenticated by design and must stay cluster-internal
+(NetworkPolicy); hostthisd is the only public surface. hostthisd itself is
+stateless above the object store and scales horizontally.
 
-The local backend above is single-writer: one process
-owns the keyspace, transactions serialize through one engine. That caps
-sustained write throughput and ties durability to one node's liveness.
-A third metadata backend, **shale**, removes both ceilings by sharding
-the keyspace across a cluster of nodes, each holding a slice, with
-optional replication for high availability.
-
-Shale is a KV cluster (consistent-hash ring over a shared object-store
-backend) that exposes per-shard compare-and-swap transactions and a
-cross-shard fan-out for admin scans. The metadata layer talks to it
-through the same service interfaces as the other two backends, so the
-domain, SSH, and HTTP layers are unaware of the choice. This section
-describes how the existing key layout maps onto shards, how quota stays
-strict across shard boundaries, and how the derived per-identity indexes
-stay correct under eventual consistency.
-
-### Same interfaces, same key names
-
-The shale backend (`ShaleRepo`) implements the same four service-layer
-interfaces every metadata backend implements: `PasteRepo` (insert +
-get on the upload path), `PasteAdmin` (list / versions / flags / delete
-+ the per-owner quota and first-seen accessors), `SweepRepo` (the
-referenced-blob set), and `KeyGateRepo` (Sybil admission).
-
-The key names:
-
-```
-pastes/<slug>                      paste row
-versions/<slug>/<NNNN>             version row
-versions_doc/<slug>                disposable version index cache (rows stay authoritative; see "The version index cache")
-slug_owner/<slug>                  raw identity string
-identity_pastes/<identity>/<slug>  per-owner enumeration index (value-bearing, see below)
-identity_first_seen/<identity>     cached first-seen timestamp
-keygate/<subnet>/<identity>        Sybil first-seen timestamp
-```
-
-There is deliberately **no per-owner byte counter** and **no reservation
-marker**. The per-identity quota is DERIVED by scanning the owner's
-`identity_pastes` enumeration index and summing the cached size each
-value-bearing entry carries - one single-shard
-prefix scan, zero per-entry fan-out (see "Scan-derived quota" below). The
-write paths keep the cached values fresh, in the same step that writes the
-row they describe. An earlier design kept a
-stored `identity_bytes/<id>` counter maintained by a cross-shard
-reservation pattern (reserve -> write -> confirm, plus reservation and
-release markers, a background reservation reconciler pass, a crash-durable
-release-marker delete, and an offline audit). It was removed: a stored
-numeric aggregate that lives on a shard SEPARATE from the rows it counts
-cannot be idempotently healed (a scan can only OVERWRITE it, and an
-online overwrite races the writes it is trying to sum), so it drifts
-permanently. A scan over a SET - the enumeration index, each entry written
-alongside the row it projects - cannot durably drift the way a foreign-shard
-aggregate does: an error is confined to the one record whose write was lost. All the reservation/marker/audit machinery existed ONLY to keep
-that counter correct, so it is deleted with the counter.
-
-Co-location across shards is achieved by a custom shard-key function,
-**not** by renaming keys. The cluster is opened with a `ShardKeyFn` that
-extracts a shard key from each full key per its family.
-
-### Three shard families
-
-Every key belongs to exactly one of three families. The `ShardKeyFn`
-extracts the shard key as follows:
-
-| Key family | Keys | Shard key |
-| --- | --- | --- |
-| Authoritative (per-slug) | `pastes/<slug>`, `versions/<slug>/*`, `slug_owner/<slug>` | `<slug>` |
-| Derived (per-identity) | `identity_pastes/<id>/*`, `identity_first_seen/<id>` | `<id>` |
-| Sybil gate (per-subnet) | `keygate/<subnet>/*` | `<subnet>` |
-
-The authoritative family is the source of truth for a paste's existence
-and content. The derived family is a denormalized projection of it,
-sharded by owner so that "list my pastes" is a single-shard scan rather
-than a full-keyspace scan. "How many bytes do I own" is the same
-single-shard enumeration scan, summing the cached size each entry carries -
-no fan-out to the `{slug}` shards at all (the write paths maintain the
-cached values; see "Scan-derived quota").
-The Sybil gate family is sharded by subnet so admission decisions for one
-subnet touch one shard.
-
-Because every key in a family hashes to the same shard key, a
-transaction that touches **only one family's keys for one subject** is
-a single-shard transaction and commits through shale's per-shard CAS
-(`Transact(pinKey, fn)`: read-modify-write under optimistic concurrency,
-retried on conflict, returning a conflict-exhausted error if it cannot
-converge). A write that spans families (a slug's authoritative row plus
-its owner's derived counter) is **not** one transaction: it is a
-sequence of single-shard transactions on different shards, and the
-design below is what keeps that sequence correct.
-
-### Scan-derived quota (never durably exceeds the cap)
-
-Per-identity quota (the 10 MiB compressed cap) is enforced by **deriving**
-the owner's used bytes from a scan at check time - not by a maintained
-aggregate counter.
-
-The single-writer backends compute the sum from the authoritative rows
-inside the insert's own transaction. The local engine walks the
-owner's `identity_pastes` / `identity_sites` index and reads each live
-row's size under a per-identity `lockQuota` stripe - cheap, because every
-read is a local engine read. On shale those per-record reads are
-cross-shard RPCs, so the shale backend sums the CACHED values its
-value-bearing enumeration entries carry instead (one single-shard scan;
-the write paths keep the cache converged with the authoritative rows,
-below). Shale also cannot wrap the check and the write
-in one transaction (they touch different shards), so the check and the
-write are two steps rather than one, which relaxes strictness under
-same-identity concurrency (below) but never allows a DURABLE breach of
-the cap.
-
-**How the scan works.** `SumActiveBytesByOwner(owner)` on the shale
-backend:
-
-1. Scan the owner's `identity_pastes/<id>/` enumeration index on the
-   `{id}` shard (one single-shard prefix scan). Each entry is
-   value-bearing: it caches the paste's live byte size (the sum of its
-   non-deleted version sizes).
-2. Sum the cached sizes: an entry that cannot be read - undecodable, or
-   carrying the placeholder marker - counts as ZERO and the scan continues
-   (see "Unreadable entries fail OPEN"). No authoritative row is read: the
-   check is ONE prefix scan with zero per-entry fan-out. (One deliberate
-   exception, the upgrade path: a LEGACY paste entry migrated from a
-   older deployment carries an EMPTY value - that layout stored
-   `identity_pastes` as bare markers - and is read through its
-   authoritative `pastes/<slug>` row plus live version sum, exactly the
-   pre-enrichment per-entry semantics, until the owner's next list enriches it
-   with the full projection.)
-3. Return the total. `SumActiveSiteBytesByOwner` is the site sibling:
-   enumerate `identity_sites/<id>/` and sum each entry's cached deduped
-   size under the same rules. (A
-   legacy site entry that still carries the pre-value-bearing marker byte
-   or an empty migrated value falls back to reading its authoritative
-   `sites/<slug>` row until the owner's next list enriches it.)
-
-`CountByOwner` uses the same enumeration scan (count the entries), so its
-count matches what `ListByOwner` renders.
-
-**Sum the cached index values; the write paths keep them fresh.** The
-`identity_pastes` entry is value-bearing (it caches
-`name/size/created_at`). The quota scan sums the CACHED size directly -
-the index is both the enumeration AND the
-measure. The alternative (use the index only to enumerate, read every size
-from the authoritative rows) costs one head read plus one version scan per
-enumerated slug, so on a high-cardinality owner every upload's quota check
-becomes thousands of sequential cross-shard reads; the cached sum is O(1)
-scans regardless of how many pastes the owner holds. The freshness
-contract that makes the cached sum safe:
-
-- **Every size-changing operation maintains the cached size.** The cached
-  `size` is the paste's live byte sum (its non-deleted version sizes, the
-  same figure a scan of the authoritative rows computes). The insert's index write seeds it
-  (v1's size); `AppendVersionWithQuotaCheck` refreshes it (together with
-  after the version commits; `DeleteVersion` refreshes it
-  after the tombstone commits; `Delete` and `MarkFailed` drop the entry
-  outright. Each refresh is a synchronous best-effort `{id}`-shard CAS
-  right after the authoritative `{slug}` write, logged on failure - never
-  a failed operation. Because the refreshed sum is recomputed from a
-  version scan OUTSIDE the index CAS, each refresh is GUARDED: it captures
-  the entry's value before recomputing and commits only if the entry still
-  holds it, skipping on conflict (two concurrent same-slug refreshes
-  cannot land older-sum-last; the loser skips). No retry loop on the
-  response path.
-- **A lost refresh is permanent, and bounded to one record.** Nothing
-  rebuilds the cached values in the background. A crash or a failed index
-  CAS between the authoritative write and the index write leaves that one
-  entry's cached size wrong until the next write to that same slug
-  refreshes it. The error is confined to one record's bytes - it cannot
-  accumulate across an owner the way a foreign-shard aggregate does - and
-  the owner can clear it outright by deleting the paste.
-- **Stale-entry semantics are honest, not exact.** An entry orphaned by a
-  crash mid-`Delete` (or mid-`MarkFailed`) keeps counting its cached bytes
-  - a bounded OVER-count that can only wrongly REJECT the owner's next
-  upload, never admit an over-cap write. Writing the entry BEFORE the row
-  means the mirror UNDER-count (a live row with no entry) can no longer be
-  created by a crash.
-
-The trade, stated plainly: the previous shape was exact whenever the index
-was COMPLETE but paid O(owner's slugs) cross-shard reads per check; this
-shape is exact whenever the index is complete AND fresh, and pays O(1)
-scans per check. Both shapes sit on the same non-atomic check-then-write
-foundation, so neither ever made the check strict; the cached sum trades a
-narrow permanent per-record error for the fan-out (see "The correctness
-argument").
-
-**The write path is a plain row write plus index maintenance - no
-counter.** The old three-step reserve -> write -> confirm collapses:
-
-- **Check** (before the write): scan the owner's combined paste + site
-  used bytes (the two scans above, added) and reject with the over-quota
-  error if `used + body > cap`. A zero `userCap` means "no cap" and skips
-  the check. This is the SYMMETRIC combined check every backend does
-  (the per-identity sum spans both kinds): a paste insert counts the
-  owner's site bytes too, and a site deploy counts the owner's paste
-  bytes, so the ceiling holds however an owner splits their quota.
-- **Authoritative write** (one single-shard CAS on the `{slug}` shard,
-  unchanged): write `pastes/<slug>` (or `sites/<slug>`), the version row,
-  `slug_owner/<slug>`, with the same
-  slug-collision read-check (reject a slug a paste OR a site already owns).
-- **Index maintenance** (one single-shard CAS on the `{id}` shard): write
-  the value-bearing `identity_pastes/<id>/<slug>` (or
-  `identity_sites/<id>/<slug>`) enumeration entry - the cached
-  size the quota scan sums - and set
-  `identity_first_seen/<id>` if absent. It runs synchronously on the
-  response path (the entry is the quota's accounting record: a deferred
-  write would leave every freshly-inserted paste invisible to the owner's
-  next check). It is ordered BEFORE the authoritative write, so a crash
-  cannot leave a live row the scan under-counts; the reverse residue - an
-  entry with no row - is the accepted phantom. No byte counter is touched anywhere - there is none.
-
-`Delete` / `MarkFailed` shed a paste's bytes by dropping its enumeration
-entry (alongside removing / failing its authoritative rows);
-`DeleteVersion` sheds the tombstoned version's bytes by refreshing the
-entry's cached size after the tombstone commits. There is NO counter
-decrement, so a lost drop/refresh mis-counts exactly one record in the
-over-count direction - not a "markerless residual" to crash-durably protect.
-`DeleteSite` collapses to (delete the row, the
-entry, the file-blob binds, and the enumeration entry - no release marker,
-no size-guarded restart loop, no consume).
-
-**How far the cap can be exceeded, and why that is bounded.** The used-bytes figure the
-check sums is the owner's enumeration entries - a projection - but the
-authoritative rows stay the source of truth: the write paths refresh the
-projection around every `{slug}`-shard commit. Two windows exist, both
-bounded to one record (detailed under "The correctness argument" below):
-(a) two concurrent same-identity uploads can both pass the check before
-either writes, a bounded over-admit; (b) a stale cached value or an
-orphaned entry - a lost size refresh after an append/tombstone, or an
-entry whose delete lost the index drop - mis-counts by that one record's
-bytes, in the over-count direction, until that slug is next written.
-Writing the entry first removes the third window the earlier order had (a
-live row the index does not enumerate, an UNDER-count). Neither remaining
-window can make the owner's DURABLE used bytes exceed the cap by more than
-the bounded amounts above,
-and the global object-store bucket quota (`ErrServiceFull` from the blob
-`Put`, see "Limits -> Durable total-bytes ceiling") is the hard backstop
-on total bytes regardless. The shale backend runs no service-wide byte
-scan on the write path - only the per-owner enumeration scan, bounded to
-one identity.
-
-### Derived indexes and repair-on-read
-
-The per-identity family is a derived projection. `identity_pastes` and
-`identity_first_seen` are not the source of truth; the `pastes/*` and
-`versions/*` rows on the `{slug}` shards are. The derived entries are
-written by the index-maintenance step and by the update / delete paths,
-in transactions separate from the authoritative write. They are therefore
-**eventually consistent**: a crash between the authoritative write and the
-index update leaves the index momentarily out of step with the
-authoritative rows. The quota sums the CACHED values of this index
-("Scan-derived quota"), so the index must uphold two properties for the
-quota to be exact: COMPLETENESS (it lists every live slug) and FRESHNESS
-(each entry's cached `size` equals the authoritative live sum).
-Completeness is structural - the entry is written BEFORE the row, so a
-live row without an entry cannot be produced by a crash. Freshness is
-maintained by each size-changing write and is not restored in the
-background: a lost refresh is a permanent error confined to that one
-record, in the over-count direction.
-
-Each `identity_pastes/<id>/<slug>` entry is **value-bearing**: it stores a
-denormalized projection of everything a listing renders - name, size,
-created-at, kind, latest version, pinned version, updated-at - rather than the
-empty marker the single-writer layout uses. The entry is therefore BOTH the
-enumeration and the display: `ListByOwner` scans the owner's prefix on the
-`{id}` shard and renders each row from the entry it just read, with no
-authoritative read at all. `identity_sites/<id>/<slug>` is the same shape for
-sites (size plus the two timestamps).
-
-**Listing is O(1) reads.** One single-shard prefix scan serves the whole list,
-whether the owner has three pastes or three thousand. This is the property the
-fat entry exists to buy. Resolving each entry against its authoritative row
-would cost a head read plus a version scan per item - on a high-cardinality
-owner, thousands of sequential cross-shard reads to render one screen - and it
-is precisely what this layout removes.
-
-**Phantom entries are accepted, not repaired.** Writing the entry before the
-authoritative row (above) means a crash between the two leaves an entry whose
-paste does not exist. Such an entry is LISTED, and clicking through to it
-404s. That is a deliberate choice, not an oversight:
-
-- Detecting a phantom requires reading the authoritative row, which is the
-  per-item read the O(1) listing exists to avoid. There is no cheap partial
-  version: an entry is only provably phantom once its row has been read, so
-  any detection at all restores O(n).
-- The failure is visible and self-explanatory - the owner sees a slug that
-  does not resolve - rather than silent.
-- Its cached bytes keep counting against the owner's quota. That is an
-  OVER-count, which can only wrongly REFUSE the owner's next upload, never
-  admit one over the cap. The fail-safe direction.
-- `Delete` on a phantom drops the entry - both the enumeration row and the
-  owner-document entry, in one stamp-guarded CAS - and reports success, so
-  the owner can clear one directly (see "Delete (permanent)").
-
-The same holds for a paste stuck `pending` past its upload (the detached-store
-path's pod-death case): nothing ages it to `failed`, so it keeps its entry and
-its charged bytes. The shale-collocated path prod runs commits READY and has
-no pending window at all, so this is confined to the detached-store
-deployments.
-
-**The one slow path is a one-time upgrade.** An entry written before the
-display fields existed cannot be rendered from the cache. The listing detects
-that by shape (a paste entry with no `kind`, a site entry with no
-`updated_at`), reads its authoritative row once, renders from that, and
-rewrites the entry fat. Every subsequent listing takes the fast path. This is
-a migration ramp with a fixed total cost - one read per pre-existing entry,
-ever - not a validation pass. An entry whose row is unreadable during the
-upgrade is skipped rather than repaired or deleted, for the reason above.
-
-The upgrade's rewrite is GUARDED: it commits only if the entry still holds the
-value the scan read, so two concurrent listings (or a listing racing a live
-write) cannot land the older projection last. The loser skips and logs.
-
-**There is no reconciler and no background reprojection.** An earlier design
-ran a periodic pass that rebuilt every entry from the authoritative rows,
-pruned orphans, and aged out stuck pendings. It was deleted along with the
-counter it once healed. What replaced it is not a cheaper reconciler but the
-decision that the drift it healed does not need healing: a stale cached size
-over-counts in the safe direction, a phantom is visible and clearable, and the
-gap the pass genuinely closed - a live row with NO entry, from a crash between
-the two writes - was closed instead by REVERSING the write order, so that gap
-can no longer be created.
-
-#### The correctness argument: a bounded, non-compounding error
-
-The counter design chased an **exact, strict** ceiling and paid for it with
-cross-shard machinery that still drifted. The scan design targets a weaker
-property, and it is worth stating exactly rather than aspirationally:
-
-**The property that matters: the error in an identity's used-bytes figure
-is bounded by a per-record amount and cannot compound.** It is NOT that
-the cap is never exceeded - it can be, durably, by an unreadable entry's
-bytes (see "Unreadable entries fail OPEN") or transiently by a concurrent
-same-owner pair. What the design guarantees is that no single failure
-propagates beyond the one record it touched, so the figure degrades
-gracefully instead of drifting without limit the way a stored aggregate on
-a foreign shard does. Total service bytes are separately hard-capped by
-the object-store bucket quota, which is what actually bounds resource use.
-
-There are four windows where a scan disagrees with durable truth, all
-bounded to one record each.
-
-**Window A - crash between the two writes (bounded OVER-count).** A write
-commits the `{id}` enumeration entry first, then the authoritative `{slug}`
-row second (two shards, two CASes). Which of the two orderings is used
-decides which inconsistency a crash can produce, and this order was chosen
-so the surviving one is the harmless direction:
-
-- **entry first** (what hostthis does): a crash leaves an ENTRY WITH NO
-  ROW. The quota scan counts its cached bytes, so the owner is
-  **OVER-counted** - they may be refused slightly early. Fail-safe: the cap
-  cannot be breached this way. The entry is visible in the owner's own
-  list, and deleting it clears the charge.
-- **row first** (the earlier order): a crash leaves a ROW WITH NO ENTRY.
-  The scan cannot see it, so the owner is **UNDER-counted** and can write
-  past the cap - and nothing short of a full cross-shard scan of every
-  `pastes/*` row can even find it.
-
-The cost of the chosen order is the phantom listing entry ("Phantom
-entries are accepted, not repaired"); the benefit is that the only
-unbounded-to-find, cap-breaching residue is structurally unreachable. On
-the happy path the row write is the very next CAS after the entry write,
-so the window is microseconds and widens only on an actual process death.
-
-**Window B - two concurrent same-identity uploads (bounded OVER-admit).**
-The quota CHECK (the scan) and the row WRITE are not one transaction, so two
-uploads from the SAME identity can both scan the pre-upload state, both pass
-`used + body <= cap`, and both write. The ceiling is then exceeded by up to
-the smaller upload's size. This is the strictness the counter's atomic
-reserve-CAS bought and the scan gives up: `conformCaps.
-StrictIdentityQuotaUnderConcurrency` flips to `false` for shale (and so
-for the local backend, which is shale on a local engine). A single-transaction backend keeps it
-`true` - its per-identity check is atomic with the write, via a
-per-identity `lockQuota` stripe. The separate per-ROOM cap `StrictQuotaUnderConcurrency` stays
-`true` on shale - a room write is a single-shard CAS with the per-app counter
-in the read-set, still strict - so only the per-identity axis relaxes. It is
-acceptable for three reasons: (1) one identity = one key = one person, and a person racing
-their own uploads to squeak a few hundred KB past a 10 MiB cap is not a
-threat model worth atomic cross-shard coordination; (2) the over-admit is
-BOUNDED - it is the number of truly-concurrent same-identity uploads times
-the per-upload size, not an unbounded leak, and it is a one-time overshoot,
-not a permanent drift (every subsequent upload scans the now-larger set and
-is measured correctly); (3) the global **object-store bucket quota** is the
-hard backstop on TOTAL bytes across all identities (`ErrServiceFull` from
-the blob `Put`, see "Limits -> Durable total-bytes ceiling"), so no amount
-of per-identity over-admit can exhaust the store.
-
-**Window C - stale cached values and orphaned entries (bounded to one
-record, permanent).** The cached sum introduces a window the
-authoritative-fan-out shape did not have: the enumeration entry can be
-WRONG, not just missing. It opens two ways. CRASH-shaped: a lost
-size refresh (crash or failed CAS after an append or
-version-tombstone commits) leaves the entry's cached size stale. An entry
-orphaned by a crash mid-`Delete` or mid-`MarkFailed` keeps counting a dead
-record's cached bytes - an over-count, so admission stays conservative.
-RACE-shaped: the cached value is a number recomputed outside the index
-CAS, so two writers of the same entry can hold sums computed from
-different authoritative states - two concurrent same-slug refreshes, or a
-listing's legacy upgrade racing one. Unguarded, the staler sum could land
-LAST and silently replace the fresher one. Every such write is therefore
-guarded to LOSE: it commits only if the entry still holds the value its
-computation started from, and on conflict it skips, so a race costs at
-most one skipped refresh - the same stale-cache shape as a lost refresh,
-in whichever direction the surviving value errs (too small UNDER-counts,
-an over-admit; too large OVER-counts, wrongly rejects, never admits).
-
-Nothing repairs this in the background. The error is bounded by one
-record's bytes per crash/race, does not accumulate across an owner, and is
-cleared whenever that slug is next written or deleted. That permanence is
-the price of deleting the reconciler, and it is affordable precisely
-because the error cannot compound: an aggregate on a foreign shard drifts
-without limit, a per-record cache is wrong by one record.
-
-**Window D - an unreadable entry (bounded UNDER-count, permanent).** An
-entry the scan cannot decode counts as zero, so its bytes are grandfathered
-until the record is repaired. Unlike A/B/C this one does not settle on its
-own. It is the deliberate cost of not locking an owner out; the reasoning,
-the bound, and the logging are in the next section.
-
-**Unreadable entries fail OPEN.** The quota scan runs on the synchronous
-write path and sums the owner's enumeration ENTRIES. An entry it cannot
-read - undecodable JSON, or the placeholder marker for an undecodable
-authoritative record - counts as ZERO and the scan continues.
-
-The owner is therefore UNDER-charged for exactly those bytes, and those
-bytes are effectively grandfathered: nothing recomputes them, so they stay
-free until that slug is written again or the entry is repaired. That is
-the deliberate choice. The alternative, refusing the scan, locks a person
-out of uploading anything because of data damage they did not cause and
-cannot fix - and the paths that would let them clean it up themselves
-(`Delete`, `DeleteVersion`) must decode the same broken record, so they
-fail too. A lockout with no self-service exit is a worse outcome than an
-under-charge.
-
-What bounds the under-charge: it is one record's bytes per unreadable
-entry, it cannot compound across an owner, and the global object-store
-bucket quota (`ErrServiceFull` from the blob `Put`, see
-"Limits -> Durable total-bytes ceiling") still hard-caps total service
-bytes regardless of how any per-identity sum errs. The per-identity cap is
-a fairness mechanism, not the thing standing between the service and a
-full disk.
-
-Skips are LOGGED as one summary line per scan carrying the count plus a
-bounded sample, never one line per entry - an unreadable entry is
-permanent until repaired, so per-row logging would be a standing cost
-proportional to accumulated debris rather than to anything actionable. A
-clean scan logs nothing, so log volume stays the signal: a steady count is
-known debris, a growing one means something is still producing them.
-
-The legacy upgrade path is recognized by SHAPE: a SITE entry holding the
-pre-value-bearing marker byte or an empty migrated value, or a PASTE entry
-holding an empty migrated value - the older layout stored both index
-families as bare markers, and pastes never had a marker-byte era, so an
-empty value is the only legacy paste shape - is read through its
-authoritative row (for a paste, the row plus its live version sum) until
-the owner's next list enriches it. A legacy entry whose authoritative row
-is GONE contributes zero; one whose row is UNDECODABLE also contributes
-zero and is counted as a skip, the same fail-open rule.
-
-**An undecodable authoritative row no longer reaches the quota at all.**
-The scan reads only entries, and a corrupt `pastes/<slug>` row leaves its
-enumeration entry perfectly readable, so the owner keeps being charged the
-right number and keeps being able to upload. Only reads OF THAT PASTE
-fail. This is a direct consequence of deleting the reconciler: the pass
-used to discover corrupt rows by scanning them, and had to decide what to
-do about one, which is why the PLACEHOLDER entry existed (an entry marked
-`placeholder: true`, carrying no usable cached value). Nothing writes a
-placeholder now.
-
-The placeholder READERS are kept, and are purely an upgrade concern: a
-store written by a deployment that ran the reconciler may still hold them.
-Such an entry counts as zero and is logged as a skip, so its owner is
-under-charged for that paste and otherwise unaffected. Two things clear it:
-the owner's next `list`, which reads that entry's authoritative row on the
-legacy-upgrade path and rewrites the entry with real values, and any write
-to that slug, which holds the head row already. If the record is still
-undecodable neither can, and those bytes simply stay free until an
-operator repairs the record - which is the whole point of failing open
-here, because the self-service ways out are closed too: `Delete` and
-`DeleteVersion` must decode that same corrupt row and fail on it as well.
-An owner in that state would otherwise be permanently unable to upload
-anything, with no action available to them that would fix it.
-
-Taken together, the ceiling can be over-enforced (Window A's phantom
-entry, Window C's stale-large cache), transiently over-admitted (Window
-B), or under-enforced (Window C's stale-small cache and an unreadable
-entry), each by a bounded per-record amount.
-
-Be precise about the resulting guarantee, because failing open weakened
-it. An identity's durable used bytes can sit ABOVE the cap, by the total
-of whatever entries the scan could not read. That is not a transient
-window that settles; those bytes are grandfathered until the record is
-repaired. What remains true is the property that actually protects the
-service: the error is bounded by one record per unreadable entry, it
-cannot compound, and total bytes across every identity are hard-capped by
-the object-store bucket quota regardless of how any per-identity sum errs.
-The per-identity cap is a fairness mechanism; the bucket quota is the
-thing standing between the service and a full disk, and it does not depend
-on any of this.
-
-### Cross-shard background operations
-
-**There are none.** No operation in the metadata plane fans out across
-shards, and in each case that is a design choice rather than an accident:
-
-- **Quota** is one single-shard scan of the owner's enumeration index.
-- **Listing** is the same scan, rendered from the entries it returns.
-- **Blob GC** decides reachability from each blob's own co-committed
-  pointer, so there is no global set to collect.
-- **The keygate** prunes lazily, inside the single-shard reads that already
-  walk its rows (see "Sybil rate limit").
-- **Room accounting** is one single-shard scan of the app's families.
-
-The single remaining BACKGROUND job is the blob-plane orphan sweep, which
-runs per mounted storage unit against the object store rather than
-fanning out across the metadata keyspace.
-
-**Nothing acts on ABSENCE.** Every delete in the system is justified by a
-positive fact about the record itself - a blob's own staged-and-unbound
-pointer, an entry's own expiry - never by a record failing to appear in
-some scanned set. That is the property that used to require a fail-closed
-decode policy and an abort-on-zero-refs guard, and it is now structural
-rather than defended. It is also why a phantom enumeration entry is
-LISTED rather than pruned: pruning it would mean deleting on the strength
-of an absence.
-
-### Decode tolerance is per-scan-semantics
-
-Every background scan that walks the metadata keyspace decodes each row
-it visits, and any row can in principle be corrupt or undecodable (a
-truncated value from a partial restore, a schema-version it cannot read,
-a torn write). How a scan reacts to one undecodable row is NOT uniform:
-it is dictated by the scan's SEMANTICS, because the safe failure
-direction differs per scan. There are exactly three policies, and which
-one a given scan uses is load-bearing for correctness.
-
-**The invariant that ranks both: no decode-tolerance path may ever cause a
-referenced blob to be DELETED.** Destroying someone's bytes is the only
-unrecoverable outcome here, so it is the one thing no tolerance policy may
-risk. Everything else is a recoverable error and is ranked below
-availability: a quota that under-counts costs fairness and is bounded by
-the bucket quota; a quota that refuses to compute costs a person the
-ability to use the service at all, with no way to fix it themselves. So
-the quota scan fails OPEN (see "Unreadable entries fail OPEN") while the
-blob paths stay conservative.
-
-**Policy 1 - idempotent lazy prunes: SKIP + LOG, continue.** The keygate's
-and the room ledger's lazy in-scan prunes treat an undecodable row as SKIP
-+ LOG and CONTINUE the pass. The consequence of skipping is bounded and
-self-correcting: that one record is simply not processed by THIS read; a
-later read that walks the same range retries it. This is safe ONLY because
-these operations are idempotent and re-run: dropping a stale marker
-produces the same end state whether it runs once or many times, so
-deferring one record costs at most latency, never correctness. A single
-corrupt row must NOT be allowed to abort the whole pass: a hard-fail there
-would stall the prune for every healthy record too, until an operator
-hand-fixes the one bad row. The blast radius of one poisoned row must stay
-one row.
-This mirrors the keygate admission-count scan, which already does the
-right thing for an idempotent counter (a tolerant parse that skip +
-continues on a bad row). The skip is LOGGED so a persistently-bad row is
-visible to an operator, not silently swallowed forever.
-
-  **A DELETED key is not a corrupt row: tombstones are skipped by the scan.**
-  At R>1 a delete is not a removal. shale turns it into an empty-payload
-  tombstone write, so the key keeps a stamped envelope carrying no payload.
-  `cluster.Get` resolves that to not-found, but a raw prefix scan hands the
-  stored bytes back, so a scan consumer sees the deleted key as an item whose
-  value is empty. An empty value does NOT present as "absent" to a consumer -
-  it presents as CORRUPT, because decoding empty input fails. Every deleted
-  record would therefore reappear as a phantom undecodable row on every pass,
-  permanently: it has no owner to derive (the owner mapping was deleted with
-  it), so it falls in the unrepairable class above, and deletes are ordinary
-  traffic, so the phantom set only grows. The scan therefore drops tombstones,
-  which simply makes it agree with the semantics `Get` already has.
-
-  **Emptiness alone does NOT identify a tombstone, and conflating the two is
-  a quota-correctness bug.** Two distinct things arrive as an empty payload:
-
-  - a TOMBSTONE: a STAMPED envelope with no payload. A deleted key. Skipped.
-  - a LEGACY BARE MARKER: a genuinely empty stored value with NO envelope.
-    The pre-shale engine stored enumeration-index entries as bare empty
-    markers and the migration is in place, so scans still encounter those raw
-    empty bytes even though no shale write can produce one (its Put rejects
-    empty values, which is why the index families use a one-byte marker). This
-    is LIVE DATA - an owner's enumeration entry, which the quota scan sums.
-
-  Conflating them would drop LIVE data from the sum, and unlike a genuinely
-  unreadable entry - which fails open deliberately, is counted, and is logged -
-  this one is silently avoidable: a bare marker's size IS recoverable by
-  reading its authoritative row. Discarding a value the scan could have
-  computed is a bug in any failure-direction policy. The test is therefore
-  "stamped AND empty", never "empty": a bare value decodes with the zero
-  stamp, while a real envelope always carries the commit stamp it was written
-  under.
-
-  **The log is a PER-PASS SUMMARY, never one line per row.** This matters
-  because "retried next read" is not the same as "eventually repaired": a
-  row that stays undecodable is re-found by every pass that walks it,
-  forever. Per-row logging is then not a bounded diagnostic but a PERMANENT
-  cost proportional to accumulated debris rather than to anything an
-  operator can act on. At scale that cost is not cosmetic: the log volume
-  alone can consume enough CPU to starve the request path, degrading
-  interactive reads by orders of magnitude while every behavioural check
-  still passes, because nothing about the service's RESPONSES is wrong.
-  Each pass therefore emits at most ONE line per scan, carrying the COUNT
-  plus a bounded sample of slugs; a clean pass emits nothing, so log volume
-  stays the signal. The actionable reading is the derivative rather than
-  the level: a steady count is known debris, a growing one means something
-  is still producing corrupt rows.
-
-  Each skip-and-continue pass is therefore PARTIAL by design: it did the
-  work for every decodable record and deferred the undecodable ones. A
-  partial prune leaves a stale marker one more cycle - already a tolerated
-  state, and fail-safe in the over-count direction. That partiality cannot
-  delete live content or under-count a quota, so it satisfies the ranking
-  invariant.
-
-**Policy 2 - user-facing reads: hard-fail.** The per-request read paths
-(`Get`, `ListVersions`, `GetVersion`, the site manifest read, the room
-scan / per-key read) are
-NOT made tolerant. A user read that hits a corrupt record SHOULD surface
-an error to that user, not silently skip the record and return a
-plausible-looking-but-incomplete result. These paths are synchronous,
-user-observed, and not idempotent retries of a background loop, so the
-right behavior is to fail loudly on the one request that touched the bad
-row - the user (or operator) sees a real error rather than silent data
-loss in the response body.
-
-For `ListVersions` this hard-fail is on the authoritative version ROWS. An
-unreadable version index CACHE document (see "The version index cache") is
-NOT a corrupt record under this policy but a disposable accelerator, so it
-falls open to scanning the rows, and the rows' own hard-fail then applies.
-
-The quota scan is synchronous too but is NOT covered by this policy,
-because the two differ in what the user can do about the failure. A failed
-`Get` tells someone one paste is broken; everything else still works. A
-failed quota scan tells them they cannot upload at all, including the
-uploads that would let them replace or delete the broken thing. Same
-tolerance question, opposite safe answer.
-
-**Policy 3 - the quota scan: COUNT AS ZERO + summary log, continue.**
-Covered in full under "Unreadable entries fail OPEN". An unreadable entry
-contributes nothing and the scan returns a number rather than an error, so
-the owner is under-charged and keeps working. Bounded per record, logged
-per scan, and backstopped by the object-store bucket quota.
-
-The three policies, side by side:
-
-| Scan kind | Examples | On a bad record | Why |
-| --- | --- | --- | --- |
-| Idempotent lazy prune | the keygate and room-ledger in-scan prunes | SKIP + LOG, continue; a later read retries | idempotent, re-runs; partial work is safe; one bad row must not stall the whole pass |
-| User-facing read | `Get`, `ListVersions`, `GetVersion`, site manifest read, room scan / per-key read | HARD-FAIL | a user read of corrupt data should surface an error, not silently skip |
-| Quota scan | `SumActiveBytesByOwner`, `SumActiveSiteBytesByOwner` | COUNT AS ZERO + summary log, continue | refusing locks a person out over damage they cannot fix; the under-charge is bounded per record and the bucket quota still caps total bytes |
-
-### Shale-collocated blobs (transactional blob plane)
-
-By default the blob bytes live in a detached content-addressed store on disk,
-decoupled from the metadata: every backend shares one
-`BlobStore` and blobs are keyed by content sha alone. **That store has no GC.**
-Its bytes are reclaimed only by deleting the store, which is why it is a
-dev/test shape: the deployed shape is the collocated plane below.
-
-A shale backend can OPTIONALLY route its blobs THROUGH the cluster, collocated
-with the metadata on the owning shard and transactionally co-committed. It is
-enabled by `HOSTTHIS_SHALE_BLOB_BUCKET` (a distinct blob bucket on the same
-object store the metadata uses); unset keeps the detached-store model.
-
-**The byte plane goes node -> object store directly.** A blob is staged by
-streaming its bytes to a final, unit-keyed object OUTSIDE any transaction (no
-shard lease held for the multi-second upload). The bytes never cross the cluster
-RPC boundary - only a small pointer routes through the ring. After staging, the
-bytes are durable but UNREFERENCED: no reader can reach them until a pointer is
-bound.
-
-**The pointer co-commits with the metadata.** A staged blob is bound by writing
-its pointer at an internal `bref/{<slug>}/<unit>/<blobid>` key in the SAME
-single-shard transaction that writes the paste / version / site row. The hash
-tag `{<slug>}` routes the pointer to the SAME shard as `pastes/<slug>` (the
-custom `ShardKeyFn` honors it), so the bind and the metadata write commit
-together in one CAS. The row carries the staged `blob_id` (a paste/version row's
-`blob_id` field; a site row's `file_blobs` sha->id side-table) so a read
-resolves the blob to fetch. Each write's staged refs are scoped to that single
-call (carried on its own context, not a shared per-slug stash), so two
-concurrent writes on one slug - two updates, an update vs a delete, two
-redeploys - each bind their OWN blob; one call can never bind another's bytes
-or commit a row with no bind.
-
-**A site deploy stages every file under a pre-claimed slug.** Because a file's
-pointer co-commits with the manifest on the manifest's `{slug}` shard, every
-file must be STAGED under that same slug's route key, or its `bref/{<slug>}/...`
-hash tag routes to a different shard than the manifest pins and the bind is
-rejected by the cross-shard guard. A paste / version already knows its slug when
-it stages; a FIRST-time site deploy does not (the slug is random) and the untar
-stream is one-shot (it cannot be re-read to re-route). So a first deploy mints
-and pre-claims its slug BEFORE the untar, via a metadata-only single-shard claim
-(`slug_owner/<slug>` written iff the slug is free as a paste AND a site AND not
-already claimed), then stages every file under it. The pre-claim is a cheap
-existence stake, NOT a blob reservation: no two-store coupling, no quota charge,
-no in-flight-blob protection (there is none to protect - the files are staged
-reader-invisible and the bind co-commits with the manifest). A collision re-mints
-a fresh slug before the stream is consumed; the authoritative insert remains the
-final collision authority. A crash after a successful claim but before the commit
-leaves a `slug_owner/<slug>` marker with no site row - a harmless metadata leak
-that self-heals when a later paste insert that mints that slug overwrites the key
-(there is NO dedicated slug_owner sweep; until such a paste reuses it, the only
-effect is that one slug staying un-pre-claimable for a future site deploy, in a
-32^8 space), never an unreadable site. A redeploy (`DeployToSlug`) already targets a known existing
-slug, so it stages under the real slug directly and needs no pre-claim.
-
-**Taking the slug is one operation for every backend.** The deploy asks its
-repository for the slug it will commit under and gets one back; whether that
-answer was durably reserved is the adapter's business, not the service's. An
-adapter that routes staged files by slug reserves, so a collision at commit
-cannot happen; one that content-addresses its blobs need not, and the commit
-retry covers a lost race by asking for another slug from the same place rather
-than minting its own. Every deploy that does not commit hands the slug back,
-which is a no-op for an adapter that reserved nothing. The service therefore has
-one path here, with no branch on which backend it holds.
-
-**Reader-atomic create + atomic delete.** A reader sees a row WITH its blob or
-neither - never a row pointing at bytes that are not there, and never bytes a
-reader can reach without a committed row. A delete unbinds the pointer in the
-SAME transaction that removes the metadata, so the bytes go unreferenced exactly
-when the row vanishes. (A delete of a paste unbinds every version's blob; a
-version tombstone unbinds that version's blob; a site delete or a redeploy
-unbinds the dropped files' blobs - all folded into the authoritative `{slug}`
-transaction.)
-
-**Pending-collapse: a shale-collocated paste commits READY directly.** The
-async pending/finalizer model (below, "Paste lifecycle status") exists because
-the detached-store blob write happens AFTER the metadata commits, leaving a
-window where the row is live but the bytes are not yet written. On the shale-
-collocated path that window does not exist: the bytes are durable (staged)
-BEFORE the metadata commit, and the bind makes them visible together. So the
-paste commits READY directly - no pending row, no loading page, no background
-finalizer, no `MarkReady`/`MarkFailed` flip. If staging fails the row never
-commits (the SSH client gets the error, the quota reservation is released); if
-it succeeds the bind + row co-commit or neither lands. The pending model is KEPT
-unchanged for the detached-store path (local / shale-without-a-blob-
-bucket), where it is still correct.
-
-**Which of the two happens is DATA, not a branch on the backend.** The blob
-adapter declares the status a freshly committed record carries, and the create
-flow is one path driven by that value: READY means the adapter binds the bytes
-inside the metadata commit, so they are staged first and no finalizer is owed;
-PENDING means they land after, so the caller owes one. PENDING is a legal state
-any adapter may report rather than an artifact of one backend, and the read
-surface renders whatever status it actually got. A new adapter answers with a
-value instead of adding a branch above the port.
-
-**Orphan-bytes reclamation.** A crash between staging and the bind leaves a
-staged-but-unbound object. It is reclaimed from the RECORD the upload wrote
-before staging each file, not by scanning the object store for what looks
-unreferenced ("Staged blob bytes", below). No global content-addressed sweep is
-run on this path, and none is needed: reclamation acts on a positive record of a
-specific object rather than on the absence of a reference.
-
-**Reachability is per blob, so no pass acts on absence.** A bound blob's
-pointer is co-committed with the record that owns it and unbound by that
-record's delete, so whether a blob is reachable is a fact about the blob, not
-a conclusion drawn from a set of everything else.
-
-That removes an entire failure mode rather than guarding it. The retired
-alternative computed a cluster-wide keep-set and deleted every blob absent
-from it, which meant a partial scan destroyed live data - it needed a
-fail-closed decode policy and an abort-on-zero-refs guard just to be safe.
-Neither is needed now, because there is no set to be incomplete.
-
-**Within-record byte dedup is deferred.** A blob is staged under a fresh random
-blob id each time, so an unchanged file re-staged on a redeploy (or a paste
-reverting to prior content) gets a NEW object. Nothing deduplicates; a blob id
-is not derived from content.
-
-**A delete records the bytes it orphans.** Unbinding removes the POINTER, not the
-object. On its own that would leave bytes nothing points at and nothing can name,
-because the staged record that located them was cleared at commit.
-
-So the delete writes a new one. In the SAME transaction that unbinds a version's
-pointer, it records that blob's ref under `staged/<slug>/<blobid>` - the identical
-shape a staging upload writes, so the existing sweep reclaims it with no new
-machinery. `staged/`, `pastes/` and `versions/` all shard on the slug, which is
-what lets the record co-commit with the unbind rather than race it.
-
-The two failure directions are both safe. If the record lands and the unbind does
-not, the record names a blob that is still bound, and unstaging refuses it. If the
-unbind lands and the record does not, the bytes leak exactly as they did before.
-Neither can delete live data.
-
-This is the same discipline as the upload path, applied to the other end of the
-lifecycle: record the compensating action before performing it, and reclaim from
-a positive record of a specific object rather than from a scan that concludes
-something is unreferenced.
-
-### Deploy arc: replication factor 1, then scale out
-
-The backend ships at `ReplicationFactor = 1` first: one node per shard,
-no replicas, no last-write-wins envelope cost on the read path. At R=1
-a single-node cluster is functionally equivalent to a single-writer one
-(same object store, same keys, same single owner of the keyspace), so
-the cutover is low-risk and reversible.
-
-Scaling to `N = 2` nodes with `ReplicationFactor = 2` is then a
-configuration change, not a code change. The read path uses
-`ReadQuorum`: a read collects a quorum of replicas (both, at R=2) and
-resolves by last-write-wins, preferring a present value over a
-`NotFound`. This is required at R>1: `ReadNearest` decides on the FIRST
-replica to answer and treats a `NotFound` as a usable answer, so a read
-served by a replica that is still backfilling (a freshly joined node,
-before its rebalance pull completes) could return `NotFound` for a key
-that demonstrably exists on the other replica. `ReadQuorum` reads both
-and the present value wins. The reservation quota pattern is unaffected:
-shale's last-write-wins-on-write rule (a replica applies an incoming
-write only if its stamp is strictly newer) still makes the owner-local
-CAS the single source of write ordering for its shard. At `R = 1` a
-quorum IS the single replica, so `ReadQuorum` reads exactly what
-`ReadNearest` would (one read, no extra hop, no envelope comparison) -
-the change is behavior-identical at R=1 and only takes effect at R>1.
-
-#### Sharded metadata (multi-backend mode)
-
-By default (`UnitCount = 0`) the shale backend opens a SINGLE slatedb
-database per node (the deploy arc above). Setting `UnitCount = N` (a power
-of two) selects MULTI-BACKEND mode: the keyspace is partitioned into N
-units, each a SEPARATE slatedb database, and a key routes to
-`UnitForHash(ShardKeyFn(key), N)`. Units distribute across the cluster's
-nodes by the consistent-hash ring; at `R > 1` each unit is replicated to R
-nodes. Co-location is preserved: the `ShardKeyFn` routes a whole `{tag}`
-set's keys to one unit, so a single-shard CAS stays in one database.
-
-The trade-off is concrete: each unit is a full slatedb instance (its own
-memtable, WAL, manifest, compaction goroutines) per owning replica, so N
-units at R replicas is up to N*R slatedb instances spread across the nodes.
-On small deployments keep N small; the cost of a large fixed N is real RAM
-+ goroutines, not just on-disk layout. `UnitCount = 0` (single-backend)
-stays the default and is byte-for-byte the prior behavior. The mode is
-selected per deployment via the operator env `HOSTTHIS_SHALE_UNIT_COUNT`
-(`0` = single-backend; a power of two = that many shards). It composes with
-replication + relaxed durability unchanged: `ReplicationFactor`,
-`ReadQuorum`, and the relaxed-durability knob apply per unit exactly as
-they do for the single backend.
-
-`0` is only meaningful for a SINGLE-NODE deployment. Combining it with a
-bind address - i.e. asking to join a cluster while declining to shard - is
-a configuration error and the daemon refuses to start, naming the env var.
-It is not silently downgraded to a single-node backend, because that
-failure is invisible in exactly the way that matters: the node comes up
-healthy, serves reads and writes, and looks indistinguishable from a
-clustered peer right up until the replication it was supposed to provide
-is needed. A refused boot is loud, immediate, and attributable; a quietly
-un-clustered production node is none of those. Single-node deployments are
-unaffected, since the check fires only when a bind address is present.
-
-**Online resharding (declarative).** Once a deployment is in sharded mode with
-a shared CAS arbiter (the homogeneous bootstrap, where every pod wires the same
-`ConditionalStore`), `HOSTTHIS_SHALE_UNIT_COUNT` is a LIVE target, not just an
-initial shape: changing it to another power of two and redeploying drives an
-ONLINE, lossless reshard to the new count. The cluster tracks each member's
-declared count; when every live member agrees on a new value, shale's
-decentralized arbiter retargets and the units split (or merge) WHILE SERVING -
-no downtime, no operator copy. Value-separated blobs survive the reshard because
-their pointer keys are generation-independent (the token-free bref). This is
-distinct from the single-backend -> sharded migration below, which remains a
-one-time copy. The runtime enables this whenever the cluster is multi-backend
-AND a `ConditionalStore` is present; a single-backend deployment never reshards.
-
-Migration to sharded mode is NOT in-place. Unlike the single-backend
-cutover (same bucket, same key names), the multi-backend layout stores each
-unit under its own object-store prefix, so an existing single-backend
-deployment's data must be COPIED into the sharded layout once. That copy is
-a one-time operator step (read the source keys, write them into a fresh
-sharded cluster whose normal routing shards them) performed with a brief
-downtime; it lives in the operator's infra tooling, NOT in this app. The
-runtime + repo carry no migration logic - they only select the mode from
-`UnitCount`.
-
-### Migration
-
-Migration is in-place: same bucket, same object store, same key names.
-The `ShardKeyFn` provides co-location by routing, so **no key is
-renamed or rewritten** on cutover. An existing deployment's keys
-are read by the shale backend as-is.
-
-Two compatibility details:
-
-- **Raw values decode as zero-stamp envelopes.** At R>1 shale wraps each
-  value in a last-write-wins envelope. A value written without an
-  envelope (every pre-cutover value) decodes as a zero-stamp
-  envelope: it loses any comparison against a stamped write and is
-  re-stamped on its next write. This is graceful, requires no offline
-  conversion, and at R=1 the envelope is not used at all.
-- **The per-owner enumeration index self-backfills; there is no counter
-  to seed.** The per-identity quota is scan-derived, so a cutover needs no
-  offline backfill of any stored aggregate. The one derived structure the
-  quota scan reads THROUGH is the `identity_pastes` / `identity_sites`
-  enumeration index. An existing deployment already maintains
-  those indexes, so they carry over as-is - but as EMPTY values (the
-  marker convention), so until the owner's next list enriches them
-  the quota scan reads each such entry through its authoritative rows (the
-  legacy fallback under "Scan-derived quota"), paying the legacy-shaped
-  per-entry fan-out for exactly those entries and never hard-failing on the
-  shape. This is a graceful, idempotent, no-downtime heal driven by live
-  traffic - not a one-time offline step and not a correctness precondition
-  for enabling quota. A paste or site that lacks an index entry entirely is
-  NOT picked up: nothing scans the authoritative rows to find it, so it
-  stays un-enumerated and uncharged. Writing the entry first means normal
-  operation cannot produce one; a store carrying such rows from an older
-  deployment needs an out-of-band backfill.
-
-**Upgrading from earlier shale code (pre-value-maintained cached sizes) -
-deployment note.** Entries written by earlier shale versions decode fine
-but their cached `size` was never version-maintained. Expect bounded quota
-slack at upgrade: the quota scans sum those stale cached sizes, typically
-UNDER-counting a multi-version paste's owner (head size <= live sum). With
-no background reprojection, each such entry is corrected by the next write
-to its own slug rather than by a pass, so the slack persists on untouched
-pastes. It is bounded per record and cannot compound.
-
-**Upgrading to the fat enumeration entry - deployment note.** Entries
-written before the listing's display fields existed carry no `kind` (or,
-for sites, no `updated_at`). The first `list` per owner resolves each such
-entry against its authoritative row and rewrites it fat, so that one
-listing costs the old per-item reads and every later listing is O(1). No
-migration step is required and no downtime is involved; the cost is one
-slow listing per owner, once.
-
-### Multi-node shale (horizontal write scaling)
-
-Everything above runs correctly on a single shale node: one process owns
-the whole ring, every shard resolves to the local backend, and the
-shard-key function plus the scan-derived per-identity quota are already in
-place so the same code is correct at any node count. This subsection describes the
-multi-node shape that turns that single-writer-equivalent deployment into
-a horizontally write-scaled one, and the data-safety contract the cluster
-must honor when nodes join or leave.
-
-#### The two-node shape
-
-A multi-node deployment runs N identical hostthisd processes, each
-configured as one shale node:
-
-- **Its own backend.** Each node opens its own slatedb database (a
-  distinct `DbName` / object-store prefix). A key's bytes physically live
-  in exactly one node's database (at replication factor 1). No two nodes
-  share a database.
-- **Membership.** Selecting the CAS coordinator (see "Coordination is a
-  pluggable choice" below) is what enables multi-node mode; with it unset the
-  node runs the single-node path described above, every op local, no ring
-  routing. Membership is one document in the conditional store: no mesh, no
-  bind port, no seed list. The SWIM/gossip adapter that once provided this,
-  and its `BindAddr` / `Seeds` configuration, was removed upstream; the
-  retired environment variables are refused at startup rather than ignored,
-  because a manifest still setting them describes a cluster shape that no
-  longer exists.
-- **Peer forwarding.** Each node advertises a gRPC service address
-  (`GRPCAddr`, host:port) that it broadcasts to peers as their forwarding
-  target. A request that hashes to a shard another node owns is forwarded
-  over gRPC to that owner and served from the owner's local backend; the
-  caller sees a normal result and never learns the op crossed a node
-  boundary. `GRPCAddr` is required in multi-node mode.
-
-  The cluster layer advertises `GRPCAddr` to peers but does **not** itself
-  stand up the listener that peers forward to: serving that address is the
-  host process's responsibility. In hostthis the metadata adapter owns it.
-  In multi-node mode the adapter binds a TCP listener, passes the
-  listener's **actual** bound address into the cluster as `GRPCAddr` (so the
-  advertised address is exactly the one served, which matters when the
-  configured port is `:0` / OS-assigned), registers the cluster's RPC
-  handlers (Put/Get/Delete/ScanPrefix/CommitCAS/MigrateRange) on a gRPC
-  server, and serves in the background. Closing the adapter gracefully stops
-  that server and closes the listener, releasing the port with no leaked
-  goroutine. In single-node mode the adapter binds **no** listener and
-  starts **no** server. Without this serving step a
-  multi-node deployment would advertise a live-looking `GRPCAddr` that no
-  process answers, so every forwarded request would hit a dead port; the
-  rebalance safety contract below depends on the forwarding path being real.
-- **Discovery through the membership document.** A starting node reads the
-  document in the shared conditional store: the first to create it founds the
-  cluster, the rest observe it and join. Every pod ships identical config -
-  there is no founder/joiner asymmetry to express, because the distinction is
-  decided at runtime by who wins the create.
-- **Homogeneous bootstrap (optional).** The seed-based discovery above has
-  an asymmetry: one node is the *founder* (empty seeds, forms the cluster
-  generation) and the rest are *joiners* (seed off the founder's address).
-  That asymmetry is a deploy wart - the founder is a special pod, and if it
-  is recreated while joiners are live they cannot learn the generation from
-  a fresh founder. The homogeneous alternative removes the special pod: when
-  a shared `ConditionalStore` (a create-if-absent / compare-and-set object
-  arbiter over the metadata object store) is configured, **every** node
-  carries the *same* seed list (a headless Service that resolves to all
-  pods) and decides form-vs-join at runtime against a `__cluster/init`
-  marker in the shared store. On boot a node tries to join; the first one up
-  reaches no peer, so `AllowSoloStart` (active only when a `ConditionalStore`
-  is wired) lets it come up solo and contend to **form** by writing the
-  marker `{gen, count}` with `PutIfAbsent`; exactly one node wins, and the
-  rest read the existing marker and **join**, adopting its durable
-  `{gen, count}`. No founder, no role split: one StatefulSet of identical
-  pods. The marker is also the restart-safe generation source - a full
-  cluster restart reads it and resumes the right generation instead of
-  re-forming gen 0.
-
-  hostthis opts in via `HOSTTHIS_SHALE_HOMOGENEOUS=true` (multi-backend
-  sharded mode only): the metadata adapter builds a MinIO-backed
-  `ConditionalStore` over the **same** metadata bucket the units use,
-  namespaced by the metadata DB name (so the marker is the same object for
-  every pod), and passes it into the cluster. Unset (the default) keeps the
-  seed-based bootstrap above byte-for-byte, so existing seed/joiner
-  deployments are unaffected; the marker is only consulted when the store is
-  wired. Adopting an existing seed-formed cluster is a matter of pre-seeding
-  the `__cluster/init` marker to that cluster's live `{gen, count}` before
-  the homogeneous pods boot, so they all join the live data with no form
-  contention. Multi-node mode here means `HOSTTHIS_SHALE_BIND_ADDR` set
-  **or** `HOSTTHIS_SHALE_COORDINATOR=cas` (which has no bind address at
-  all; see "Coordination is a pluggable choice"). Under the CAS coordinator
-  the same store carries the membership document too.
-
-The shard-key function (`{slug}` / `{id}` / `{subnet}` co-location) is
-unchanged across node counts: it decides which shard a key belongs to,
-and the ring decides which node owns that shard. Co-location still holds,
-so a single-family-single-subject transaction is still a single-shard CAS,
-now resolved to whichever node owns that shard.
-
-#### Where the throughput win comes from
-
-On a single node every write serializes through one backend. On N nodes
-the ring spreads shards roughly evenly across nodes, so writes to keys on
-**different shards** are committed in parallel by **different nodes'
-backends**. A workload of independent uploads (different slugs, different
-owners) fans its CAS commits across the cluster instead of queueing them
-behind one writer, and sustained write throughput scales roughly with
-node count. Writes that contend on the **same** shard (the same owner's
-quota counter, the same slug's authoritative row) still serialize, by
-design: that serialization is what keeps quota strict and the
-authoritative rows consistent. The win is on the independent-write axis,
-which is where hostthis's write load actually lives (many small uploads
-from many owners), not on hot-key contention.
-
-#### R=1 vs R=2: throughput versus availability
-
-Replication factor is a deployment choice with a direct tradeoff:
-
-- **R=1 (shard, no replica).** Each key lives on exactly one node. Maximum
-  write throughput (no replica fan-out, no last-writer-wins envelope on
-  the read path) and minimum storage. The cost is availability: if a node
-  goes down, the shards it owned are unreadable and unwritable until it
-  comes back, because there is no second copy to promote. A node-down event
-  is a gap, not data loss, **provided the node returns** with its backend
-  intact (the bytes are durable in that node's object-store database). At
-  R=1 a permanently-lost node's shards are lost.
-- **R=2 (replicate).** Each key lives on two nodes; a write is acked per
-  the write-consistency setting and reads resolve a last-writer-wins
-  winner. A single node down does not interrupt service (the surviving
-  replica serves the shard) and a permanently-lost node loses nothing.
-  The cost is that R=2 does **not** add write throughput: every write now
-  lands on two backends, so the per-write work doubles even as the node
-  count grows. R=2 buys high availability, not horizontal write scaling.
-
-The two goals (throughput, availability) pull in opposite directions; a
-deployment picks the point on that axis it needs. The horizontal-write-
-scaling deployment this section motivates is R=1. A deployment that values
-uptime over peak write rate runs R=2 and accepts that the throughput
-ceiling is the per-node ceiling.
-
-#### Relaxed durability: fast-ack at the memtable
-
-Durability is a *backend* concern: the shale cluster layer is durability-
-agnostic, and the slate backend decides when a write is acked. By default a
-write is acked only after the underlying slatedb flushes it durably to
-object storage (`AwaitDurable=true`), which adds a flush round-trip
-(~100ms) to every commit. Since a single paste upload is several commits,
-that durable-flush latency, not the sharding, is the dominant write-
-throughput ceiling.
-
-`HOSTTHIS_METADATA_AWAIT_DURABLE` (default `true`) exposes the slate
-backend's relaxed-durability mode. Set it to `false` and the backend acks
-at memtable insert (microseconds) and flushes to object storage in the
-background, removing the per-commit object-store round-trip from the hot
-path. This is the largest single write-throughput win available, larger
-than the horizontal sharding gain.
-
-The tradeoff is a bounded loss window: a write that has been acked but not
-yet background-flushed is lost if its node crashes before the flush. This
-is **only safe paired with R>=2 on anti-affinity-separated nodes**: a
-second replica holds the write through the flush window, so the write
-survives unless *every* replica crashes inside the same flush interval (a
-correlated failure). Relaxed durability at R=1 is unsafe - a single crash
-loses un-flushed writes with no second copy - so the knob is intended for
-the same HA deployment that runs R=2 across distinct nodes. The flag is
-threaded to the slate backend's per-write `WriteOptions`; leaving it at the
-default keeps the byte-exact durable path.
-
-#### Tombstone purge: reclaiming replicated deletes
-
-At R>1 a delete cannot simply erase a key: it must replicate as a fact, so
-shale writes a tombstone marker that shadows the old value on every
-replica. Those markers are live KV to the backend and, left alone,
-accumulate forever - every prefix scan over a churned range walks every
-tombstone ever written there, which is the read-amplification failure mode
-the "no scans on the request path" principle exists to avoid. Shale
-(v0.18.0+) can purge them: when a replica position mounts, tombstones older
-than a configured grace window are deleted natively, and the backend's own
-compaction then reclaims the bytes.
-
-```
-HOSTTHIS_METADATA_TOMBSTONE_GRACE   (Go duration, e.g. "168h"; unset/empty
-                                     = purge disabled, shale's default)
-```
-
-The value threads to shale's `TombstoneGracePeriod` unchanged. Unset or
-empty leaves it zero (disabled), so a deployment that does not opt in is
-byte-for-byte unchanged. A malformed or negative value is a configuration
-error: the daemon refuses to start rather than running with a silently
-substituted default, matching the timeout knobs below.
-
-Operationally: the purge runs only when a position mounts, so a restart is
-the trigger; a deployment sees reclamation after its next rollout, not on a
-background schedule. Eligibility is decided inside shale (R>1 with the
-write-ack bar covering all replicas; an ineligible config logs one refusal
-line and purges nothing), so no hostthis-side validation exists to drift
-out of sync. Size the grace to dominate cross-node clock skew plus the
-write-durability window by a wide margin - and note the accepted caveat
-documented with shale's purge spec: under relaxed durability
-(`HOSTTHIS_METADATA_AWAIT_DURABLE=false`, above) a crash can strand a
-divergence that a later purge turns into a resurrected value. A generous
-grace (days, not minutes) keeps that window negligible for this workload;
-a deployment that cannot accept it at all should pair purging with awaited
-durability.
-
-#### Dispatch deadlines: the read/write timeout knobs
-
-Every clustered metadata op runs under a per-dispatch deadline: the shale
-cluster bounds each read dispatch and each write dispatch, defaulting both
-to 5s. Two operator envs override them:
-
-```
-HOSTTHIS_SHALE_READ_TIMEOUT    per-dispatch read deadline    (unset = shale default, 5s)
-HOSTTHIS_SHALE_WRITE_TIMEOUT   per-dispatch write deadline   (unset = shale default, 5s)
-```
-
-Both parse as Go durations (`8s`, `500ms`). Unset or empty leaves the
-corresponding `ShaleConfig` field zero, so the shale default applies and a
-deployment that sets neither is byte-for-byte unchanged. A value that does
-not parse as a Go duration, or a negative one, is a configuration error:
-the daemon refuses to start rather than running with a silently
-substituted default.
-
-The knob that earns its keep is the read budget. During a rolling deploy a
-shard briefly hands off between nodes, and a read that lands inside that
-sub-second handoff window re-polls until the shard settles - but only for
-as long as the read deadline allows. Under the 5s default a rare handoff
-that outlives the budget surfaces as a client error; raising the read
-deadline (e.g. `8s`) converts that tail case into added latency instead.
-The write deadline exists for the same class of reason (a heavyweight CAS
-commit on a bloated unit can stall past 5s; the bulk migration tooling has
-always raised these budgets internally), but serving deploys normally
-leave it at the default.
-
-#### Coordination is a pluggable choice
-
-Who owns which storage unit is decided by a coordination adapter, not by the
-cluster itself. Upstream ships one: a CAS/lease adapter that keeps a single
-membership document in the conditional store and renews per-node leases
-against it. One env var selects it:
-
-```
-HOSTTHIS_SHALE_COORDINATOR   "" | "cas"   (default "")
-```
-
-- **`""`** is the single-node path: no coordinator is passed, every op is
-  local, and no gRPC listener is bound.
-- **`"cas"`** is multi-node. There is no mesh: no bind port, no seed list,
-  no headless-service DNS. Membership is one JSON document in the shared
-  conditional store, so the mode requires `HOSTTHIS_SHALE_HOMOGENEOUS=true`
-  (the homogeneous bootstrap is what constructs that store), which in turn
-  requires the sharded multi-backend shape (`HOSTTHIS_SHALE_UNIT_COUNT` > 0).
-  `HOSTTHIS_SHALE_GRPC_ADDR` is still required: peer forwarding is
-  transport, not coordination, and does not change with the adapter.
-- **Any other value** refuses startup, naming the variable - including
-  `"gossip"`, whose adapter was removed upstream. An operator writing that
-  word expects a cluster, and silently giving them a single node is the
-  failure this refusal exists to prevent.
-
-**The retired mesh knobs are refused, not ignored.** `HOSTTHIS_SHALE_BIND_ADDR`
-and `HOSTTHIS_SHALE_SEEDS` configured the removed SWIM adapter. Nothing reads
-them now, so the daemon refuses to start if either is PRESENT - blank included.
-Rejecting on presence rather than on a non-empty value is deliberate: blanking
-was how an overlay neutralised a base manifest it could not edit during the CAS
-migration, and once the base no longer sets them, a blank reappearing means
-someone is reconstructing a shape that does not exist. Ignoring it is how a node
-boots believing it joined a mesh that was never there.
-
-There is no second adapter left to mix with, so the two-half-cluster hazard
-that shaped this section is now unrepresentable rather than merely refused:
-a fleet can only coordinate one way. The historical shape is worth keeping in
-mind if a second adapter is ever added - pods on different adapters cannot see
-each other, each half believes it owns units the other serves, and they fence
-each other's mounts on every reconcile. Ownership epochs bound that to an
-availability outage rather than corruption, and no per-pod startup check can
-detect it, because every individual config is valid. If that day comes, the
-switch is a full-stop operation by decree: scale to zero (gracefully, so the
-relaxed-durability window drains), flip, scale up. Never roll it.
-
-The membership document lives in the same conditional store the
-homogeneous bootstrap already shares: the metadata bucket, key-prefixed by
-the metadata DB name. It lands at `<dbName>/__coord/members`, beside the
-`<dbName>/__cluster/init` marker. The prefix isolates clusters sharing one
-bucket, and the key collides with nothing else: unit data lives under
-`<dbName>u<N>/...` prefixes.
-
-Under `"cas"` there is no founder/joiner asymmetry left to configure. Who
-forms and who joins is decided at runtime by who wins the document create,
-so every pod ships IDENTICAL config, the same property the homogeneous
-bootstrap already established for the generation marker. A stale document
-surviving a rollback is safe to reuse: its lease counters are frozen, and
-frozen counters expire on the new members' first polls.
-
-Whichever adapter runs is passed explicitly rather than implied, so any
-change of adapter is a separate, independently verifiable change from a
-dependency upgrade. Keeping those in different blast radii means a surprise
-after either one never raises the question of which caused it.
-
-The coordinator is ADVISORY: it says who SHOULD hold a unit. The storage
-epoch is AUTHORITATIVE - a unit is only writable by whoever opened its
-database at the highest epoch. So a coordinator that is wrong, slow, or
-partitioned is an availability problem, never a correctness one. That
-separation is what makes swapping adapters a bounded risk.
-
-#### Retrying the handoff refusal
-
-The read budget above is the FIRST line of defence for the handoff window:
-shale re-polls inside it, so a blip shorter than the budget never reaches
-the caller. This is the second line, for a window that outlives it.
-
-When a unit is mid-handoff, a routed op can refuse with a typed signal
-meaning "this is bounded by a mount completing, not by an outage" -
-nothing external has to recover for a retry to succeed. shale exposes that
-as a matchable sentinel identically whether the refusal was raised locally
-or forwarded from a peer, so the caller never has to know which. It does
-NOT re-route within the same op, so without a retry the refusal reaches the
-client as a request failure even though the work is about to become
-possible.
-
-Every non-transactional cluster read therefore retries on exactly that
-signal, and on nothing else:
-
-- A bare `Unavailable` is NOT retried. It is overloaded with genuine
-  peer-down, and retrying a real outage converts a clean fast failure into
-  a slow one while adding load precisely when the cluster is struggling.
-- A deadline expiry is NOT retried. When some legs are acquiring and others
-  are genuinely down and the window outlives the read budget, the op
-  terminates as a deadline, and from the caller's side that is
-  indistinguishable from ordinary slowness. It falls through to normal
-  error handling.
-
-Reads on the request path are bounded by arithmetic, not taste: an attempt
-can burn the entire read budget before refusing, so the attempt count times
-the budget, plus backoff, must fit inside the HTTP response deadline with
-margin left for rendering. A test pins that relationship, so raising either
-the attempt count or the read budget without re-examining the response
-deadline fails the build rather than silently shipping a retry that
-outlives the response.
-
-The budget is chosen by the CALLER's context, not by the shape of the
-call. Whether anything is waiting on a result is a property of the caller,
-which the mechanism cannot see, so the cross-shard fan-out is exposed as
-two operations rather than one with a tunable: a request-path form that
-gives up quickly, and a background form that waits. A single shared entry
-point invited the opposite mistake - an interactive command inherited the
-patient budget and blocked for the full background span retrying a
-best-effort lookup whose error it then discarded, so a user waited half a
-minute for a value that was thrown away either way.
-
-Cross-shard background scans (the referenced-blob set,
-the key-gate prune) retry more patiently, because no request deadline
-bounds them. How MUCH more is set by measurement rather than by feel: a
-node holds its positions unmounted for the length of a handoff, so a
-background retry span shorter than a realistic handoff is not patience, it
-merely postpones the same failure. The span is pinned by a test against an
-observed handoff window, and blocking a periodic background job for that
-long is free because none of the three consumers is latency-sensitive. They and they retry as a WHOLE CALL rather than per-peer: a refused
-peer's slice is absent from every other peer's result, so a partial fan-out
-is never a usable answer. The patience is bought for one consumer in
-particular. Blob GC acts on ABSENCE - it deletes any blob NOT in the
-referenced set - so consuming a truncated set destroys live data, whereas
-the other two consumers merely under-report and self-correct on the next
-pass. That asymmetry is the general rule for any fan-out consumer: a
-partial result is dangerous exactly when the code acts on absence rather
-than on presence.
-
-#### The value envelope and the strip-on-read invariant
-
-At R>1 shale wraps every stored value in a last-writer-wins envelope (a
-magic byte + a (timestamp, node-id) stamp + the opaque payload) so the read
-fan-out can pick a winner across replicas. The cluster layer adds the
-envelope on write and removes it on exactly ONE read path: the single-key
-**replicated** Get. Every other read primitive `ShaleRepo` uses returns the
-**raw stored bytes**, envelope included:
-
-- a cross-shard aggregate scan (`aggregatePrefix`),
-- a single-shard prefix scan (`scanPrefix`),
-- a CAS transaction's `tx.Get` (counters, markers, JSON reads), and
-- even a single-key Get on an R=1 or multi-backend node (the cluster only
-  unwraps in the replicated-Get path, not the plain backend read).
-
-`ShaleRepo` therefore treats every raw read as potentially-enveloped and
-strips the envelope before decoding it, via a single `stripEnvelope` step
-that is a **no-op for raw / pre-envelope values** (they carry no magic byte,
-so they pass through unchanged). This invariant holds at every decode site:
-both scan helpers, the per-owner and room-byte counters, the reservation
-markers, the JSON CAS reads, the room values, and the single-key paste /
-version reads. No hostthis payload begins with the envelope magic byte (JSON
-rows begin `{`, counters are ASCII digits, markers / timestamps / the
-`slug_owner` pointer are text, room values carry a `v` sentinel), so the
-strip never misfires on a legitimate raw value.
-
-The invariant is **not optional even on an R=1 deployment**: a value written
-while the cluster briefly ran at R>1 stays enveloped on disk until it is next
-overwritten, and an R=1 reader must still decode it. Stripping on every read
-path is what makes a mixed R=1 / R>1 value population transparent to every
-consumer, so a deployment can change replication factor without an offline
-rewrite of existing values.
-
-#### The rebalance safety contract (lossless data movement)
-
-The crux of multi-node operation is what happens when membership changes.
-Today (single node) all data lives in one node's backend. When a second
-node joins, the consistent-hash ring reassigns roughly half the shards to
-it, and the cluster **physically migrates** the keys of the reassigned
-shards from the old owner's backend to the new owner's backend. This is a
-live movement of authoritative data between two storage engines, the same
-class of operation as the cutover migration above, and it must be
-**lossless**: no key may be dropped, and no key's value may regress to a
-stale or empty state, across the transition.
-
-The contract the cluster guarantees, and that the groundwork tests below
-must demonstrate on hostthis's actual data shapes:
-
-1. **Copy-before-delete cutover.** A migrating shard is streamed from the
-   source node's backend to the destination's backend and the
-   destination's copy is verified (a checksum over the streamed
-   key/value bytes) **before** the source deletes its local copy. The
-   source keeps serving reads of the shard until the destination
-   acknowledges the stream; only after that acknowledgement does a grace
-   window elapse and the source sweep the now-foreign keys. The source
-   never deletes a key it has not confirmed the destination received.
-   A failed or interrupted stream (destination crash, checksum mismatch,
-   timeout) leaves the source's copy in place and the next evaluation
-   retries; it does not advance to the delete step.
-2. **Reads stay correct throughout.** During the window in which a shard
-   is in flight, a read that lands on the destination (because the ring
-   already names it the new owner) is transparently served from the
-   source, which still holds the authoritative copy. A reader never sees
-   not-found for a key that exists; it sees the source's value until
-   cutover completes, then the destination's identical copy.
-3. **Writes are guarded, not lost.** A write that lands on a shard
-   mid-migration is rejected with a retry-after signal rather than being
-   silently applied to a copy that is about to be superseded. The client
-   retries after the shard settles on its new owner. A write is never
-   applied to the losing side of a cutover.
-4. **The quota-relevant keys survive the move.** The per-identity quota
-   is scan-derived, so what must survive a rebalance is the authoritative
-   `pastes/*` / `versions/*` / `sites/*` rows (the source of truth the
-   scan sums) and the per-owner `identity_pastes/<id>/*` /
-   `identity_sites/<id>/*` enumeration index (the set the scan walks). All
-   are ordinary keys on their shards; when a shard migrates they move with
-   it like any other key and arrive on the new owner byte-for-byte
-   identical, still readable via gRPC forwarding from any node. Because the
-   quota reads live rows through the index rather than a stored aggregate,
-   there is no counter that could drift across the move - an entry moves
-   with its shard carrying the same cached values it already held. The same
-   survives-intact contract holds for `slug_owner`, the enumeration index
-   entries, and the value-bearing `identity_pastes` projections.
-
-This contract is the property the groundwork must **prove on real data**
-before any live multi-node deployment. The proof is an integration test
-that populates a node with the full set of hostthis data shapes, joins a
-second node, lets the ring rebalance, and asserts that every shape, the
-quota counter most pointedly, is still readable through the cluster with
-its original value after roughly half the keyspace has physically moved
-to the new node. A rebalance that loses or corrupts data fails this test;
-that failure, if it occurs, is the single most important finding of the
-groundwork and gates the deploy step below.
-
-#### Deploy shape is a separate, gated step
-
-Wiring the multi-node config into the application (the coordinator /
-`GRPCAddr` / replication-factor surface) and proving the
-rebalance is lossless is application-level groundwork. **Reshaping the
-deployment to actually run more than one node is a separate step, gated on
-this groundwork being green.** The intended runtime shape, when that step
-is taken, is a stable-identity replica set (a StatefulSet, each pod a node
-with a durable per-node identity and its own object-store prefix), fronted
-by a load balancer for
-client traffic, scaled out one node at a time so each join triggers one
-bounded rebalance. None of that orchestration is built here; this section
-specifies only the application behavior and the safety contract the
-deploy step depends on.
-
----
 
 ## Edge caching
 
@@ -6621,7 +4755,7 @@ probe must never be turned away.
 
 ### The failure class /readyz exists for
 
-Degraded boot on the shale backend deliberately lets a pod come up with
+Degraded boot on a sharded backend deliberately let a pod come up with
 storage units still unmounted: the process is up (liveness passes) and
 the reconcile keeps retrying the mounts. That is the right per-pod
 availability call, but it creates a rollout hazard: if the readiness
@@ -6634,63 +4768,14 @@ state stalls that rollout at the FIRST new pod: it never goes ready,
 the rollout cannot proceed, the old pods keep serving, and the operator
 reads the cause straight off the probe body.
 
-### The shale readiness predicate (mount floor)
+### Per-backend readiness
 
-On the shale metadata backend, `/readyz` returns 200 iff
-`cluster.Ready(minMountedFraction)` holds: the pod has mounted at least
-`ceil(f * desired)` of the storage-unit positions it currently owns.
-The predicate's edge contract is shale's (see the shale SPEC "Mount
-readiness"): `desired == 0` is vacuously ready, so a pod with no
-assigned positions (mid-join, legacy single-backend mode) never wedges
-its own rollout.
-
-The fraction is the operator knob:
-
-```
-HOSTTHIS_READY_MIN_MOUNTED_FRACTION   mount floor in [0, 1]   (default 0.5)
-```
-
-- **Default `0.5`**: HALF the desired units must be mounted. This
-  catches the uniform-failure class - a pod where every open fails has
-  0 mounted, and 0 never passes any floor above 0 - while tolerating a
-  pod briefly below full mounts mid-handoff or mid-join, so a healthy
-  rollout keeps moving.
-- **`0` disables the floor entirely**: `/readyz` is then always 200 (no
-  mount floor - readiness reduces to process-up, the same gate as
-  `/healthz`). The semantics live in the shale predicate (`f <= 0`
-  clamps to "no floor requested"), not in a hostthis special case, and
-  the response body still reports the live counts.
-- **`1`** is the strict end: every desired unit must be mounted.
-- **Malformed or out-of-range values refuse startup** with an error
-  naming the variable - the same fail-loud config discipline as
-  the shale dispatch timeouts. A typo in a
-  readiness knob must not silently deploy as some other floor.
-
-### Non-shale backends
-
-The local backend has no mount concept: an open failure
-there fails startup outright, so a process that is up IS ready.
-`/readyz` returns 200 whenever the process is up - equivalent in gate
-behavior to `/healthz`, but kept as a distinct endpoint so probe wiring
-never changes when the metadata backend does.
-
-### Response body (diagnosable with curl)
-
-`/readyz` responds with the mount counts as JSON in BOTH directions
-(200 and 503), so a stalled rollout is diagnosable with a curl against
-the stuck pod - no debug endpoint, no shell in the image required:
-
-```
-{"ready":false,"desired":8,"mounted":0,"pending":8,"failedOpen":8,"lastAcquireError":"open unit 0: ..."}
-```
-
-`desired` / `mounted` / `pending` / `failedOpen` are the shale
-mount-readiness counts (all zero on non-shale backends and on a legacy
-single-backend shale node); `lastAcquireError` is one representative
-acquire error, omitted when there is none. The body is `no-store`: a
-probe result must never be cached.
-
----
+Neither current backend has a warm-up phase, so `/readyz` is the liveness
+answer: a process that is up is ready. The celld backend's cells activate on
+demand - there is no mount floor to wait for - and the memory backend has
+nothing to open at all. The endpoint stays split from `/healthz` so a backend
+with a real warm-up (the shale cluster's mount floor was one) can wire a
+prober without touching handlers.
 
 ## Metrics
 
@@ -6779,7 +4864,7 @@ file). Defaults in parens:
 
 # Standalone blob backend (dev/test; disk-only)
                          / HOSTTHIS_BLOB_BACKEND            disk                                    (disk)
-# Production blobs go through the shale-collocated plane instead:
+# Production blobs go to the content-addressed s3 backend instead:
                          / HOSTTHIS_SHALE_BLOB_BUCKET       blob bucket on the metadata object store (unset = detached store)
 
 # CDN / cache purger
@@ -6817,9 +4902,8 @@ sample production compose.
   (`HOSTTHIS_CREATE_ADMISSION_WIDTH`, default 2; see "Limits →
   Same-identity create admission")
 - Readiness mount floor (`HOSTTHIS_READY_MIN_MOUNTED_FRACTION`,
-  default 0.5, shale backend only; see "Readiness vs liveness")
 - Standalone blob backend (`HOSTTHIS_BLOB_BACKEND=disk`, disk-only;
-  production uses the shale-collocated blob plane via
+  production uses the s3 blob backend via
   `HOSTTHIS_SHALE_BLOB_BUCKET`, not a standalone backend)
 - CDN cache purger (`HOSTTHIS_CACHE_BACKEND=noop|cloudflare`) and its
   credential (`HOSTTHIS_CF_PURGE_TOKEN`)
@@ -6844,7 +4928,7 @@ capability-based **Rooms** KV store - see "Rooms (app persistence)" above;
 what remains a PROPOSAL here is the richer end-user AUTH model layered on
 top of rooms (the JWT-verifying / browser-keypair identity spectrum below).
 Each deliberately revisits some of the v1 Non-goals below (a scope
-expansion, not an accident). The throughline: shale (the distributed K-V)
+expansion, not an accident). The throughline: the metadata plane
 is the persistence layer for both, and the differentiator across both is
 the SSH-native, no-account, your-key-is-your-identity model.
 
@@ -6874,7 +4958,7 @@ is still renderable content, just multi-file).
 ### A persistence API (a backend for small apps)
 
 Pair static hosting with a small backend so users host REAL apps, not just
-static pages. The engine already exists: shale.
+static pages. The engine already exists: the room KV.
 
 **The no-auth first cut of this has SHIPPED as Rooms - see "Rooms (app
 persistence)" above.** That section is the authoritative description of the
@@ -6888,8 +4972,8 @@ tier deliberately does not). The shape and trust model here describe that
 later tier; the Rooms section is what is real today.
 
 - **Shape**: a per-app KV / document store. An app gets a namespace (a key
-  prefix) in shale; its frontend hits `<app>.hostthis.dev/api/kv/<key>`
-  (GET/PUT/DELETE), persisted in shale. A thin HTTP layer over the K-V. No
+  prefix); its frontend hits `<app>.hostthis.dev/api/kv/<key>`
+  (GET/PUT/DELETE), persisted in the metadata plane. A thin HTTP layer over the K-V. No
   server-side functions and no reactive subscriptions: running arbitrary
   user code is a sandboxing + security cliff, so this is NOT a FaaS.
   (The shipped Rooms tier is this shape with the room UUID as the access
@@ -6936,7 +5020,7 @@ later tier; the Rooms section is what is real today.
     Same verification path for turnkey and BYO; the developer picks per app.
 - **What it unlocks** (apps someone would actually ship): a self-hosted
   comments / guestbook widget (a Disqus replacement); a poll / voting app
-  (shale's per-shard CAS already does atomic single-shard counts); a high-score /
+  (a cell's event already does atomic counts); a high-score /
   save-state for browser games; a form backend ("Formspree over SSH"); URL
   shorteners, visitor counters, feature flags.
 - **The product fork to decide first.** Offering "Sign in with hostthis"

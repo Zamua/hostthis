@@ -19,7 +19,7 @@ import (
 // and reads 0 whether or not anything was pruned, so it would pass with the
 // prune deleted entirely.
 func TestRoomCreates_CountPrunesPastWindow(t *testing.T) {
-	rooms := storage.NewShaleRoomRepo(storagetest.NewRepo(t))
+	rooms := storage.NewMemRoomRepo(storagetest.NewRepo(t))
 
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	roomsSvc := service.NewRooms(rooms)

@@ -27,7 +27,7 @@ type stack struct {
 	t           *testing.T
 	httpURL     string
 	sshAddr     string
-	repo        *storage.ShaleRepo
+	repo        *storage.MemRepo
 	blobs       *storage.CompressedBlobStore
 	upload      *service.Upload
 	keyedClient *xssh.Client

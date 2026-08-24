@@ -28,7 +28,6 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/metrics"
-	"github.com/Zamua/hostthis/internal/relay"
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
@@ -151,24 +150,6 @@ func main() {
 	// "Real-time room relay (WebSocket)"). It depends on the rooms service only
 	// for the late-join snapshot; persistence goes through the HTTP PUT/DELETE
 	// mirror. Per-room hubs are in-memory and per-pod. Nil without a room repo.
-	// A backend that brings its own real-time layer (the celld cell proxy)
-	// replaces the hub relay entirely; the hub is built only as the default.
-	var roomRelay *relay.Relay
-	if roomsSvc != nil && metadata.RoomRelay == nil {
-		roomRelay = relay.NewRelay(roomsSvc, relay.NewLimits())
-	}
-
-	// Multi-pod relay peer fan-out (SPEC "Multi-pod relay"). A multi-node shale
-	// backend supplies both directions: an outbound publisher that fans frames
-	// to every peer pod over the cluster gRPC tier, and a late-bound receive
-	// hook that broadcasts a peer's frames into this pod's local hubs. A
-	// single-pod backend leaves RelayPeer nil, the zero-peer degenerate case.
-	if roomRelay != nil && metadata.RelayPeer != nil {
-		roomRelay.SetPeerPublisher(metadata.RelayPeer.Publisher)
-		metadata.RelayPeer.Bind(roomRelay.DeliverFromPeer)
-		logger.Printf("relay: multi-pod peer fan-out wired (publish + receive on the cluster gRPC tier)")
-	}
-
 	keyGate := service.NewKeyGate(keyGateRepo)
 	keyGate.MaxFreshKeysPerSubnet = *freshKeysLimit
 	keyGate.Window = *freshKeysWindow
@@ -239,12 +220,9 @@ func main() {
 	if roomsSvc != nil {
 		httpServer.Rooms = roomsSvc
 	}
-	if roomRelay != nil {
-		httpServer.Relay = roomRelay
-	}
 	if metadata.RoomRelay != nil {
 		httpServer.Relay = metadata.RoomRelay
-		logger.Printf("relay: backend-supplied room relay (cell proxy); hub relay not built")
+		logger.Printf("relay: cell proxy (the room cell is the broadcast point)")
 	}
 	// Metrics listen on their OWN port, never the public one. The public mux
 	// answers /healthz on any Host without auth, so adding /metrics there
@@ -324,30 +302,15 @@ func main() {
 		}
 	}
 
-	// Drain hint, grace window, then close (SPEC "Drain hint:
-	// reconnect-before-shutdown"). The hint fires BEFORE the HTTP server stops
-	// accepting, and the process keeps serving through HOSTTHIS_DRAIN_GRACE (0
-	// disables) so the hint flushes and clients acting on it reconnect
-	// make-before-break onto a surviving pod.
-	if roomRelay != nil {
-		roomRelay.AnnounceDrain()
-		if grace := envOrDuration("HOSTTHIS_DRAIN_GRACE", 3*time.Second); grace > 0 {
-			logger.Printf("relay: drain hint broadcast; serving through %s grace before close", grace)
-			time.Sleep(grace)
-		}
-	}
+	// No drain hint: a proxied socket dies with the pod, and the client heals
+	// through reconnect + snapshot + splice, which it must be able to do anyway
+	// because a MOVED CELL drops its socket with no close code.
 
 	// http.Server.Shutdown does not track hijacked WebSockets, so closing them
 	// here unblocks their request goroutines and lets clients reconnect on
 	// their backoff schedule rather than hammering instantly.
-	if roomRelay != nil {
-		roomRelay.Registry().CloseAll()
-	}
 
 	// Local fan-out is done, so drop the outbound peer queues and connections.
-	if metadata.RelayPeer != nil {
-		metadata.RelayPeer.Close()
-	}
 
 	shutdownCtx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer scancel()

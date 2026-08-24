@@ -47,8 +47,8 @@ type gatedStack struct {
 	t           *testing.T
 	httpURL     string
 	sshAddr     string
-	repo        *storage.ShaleRepo
-	keyGateRepo *storage.ShaleRepo
+	repo        *storage.MemRepo
+	keyGateRepo *storage.MemRepo
 	keyGate     *service.KeyGate
 }
 

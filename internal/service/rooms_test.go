@@ -16,7 +16,7 @@ import (
 func newRoomsSvc(t *testing.T) (*Rooms, *fixedClock) {
 	t.Helper()
 	clk := &fixedClock{t: time.Now().UTC().Truncate(time.Second)}
-	svc := NewRooms(storage.NewShaleRoomRepo(storagetest.NewRepo(t)))
+	svc := NewRooms(storage.NewMemRoomRepo(storagetest.NewRepo(t)))
 	svc.Now = clk.now
 	return svc, clk
 }

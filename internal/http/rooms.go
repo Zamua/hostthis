@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/relay"
 	"github.com/Zamua/hostthis/internal/service"
 )
 
@@ -219,24 +218,11 @@ func (s *Server) putRoomValue(w http.ResponseWriter, r *http.Request, appSlug do
 		return
 	}
 	// The mirror frame is built INSIDE the commit callback because it carries
-	// the per-room sequence the durable write assigns. That sequence, not any
-	// lock, is what keeps a join racing this PUT from double-applying or
-	// missing it: the client discards frames with seq <= its snapshot's
-	// (SPEC.md "Persistence and late-join"). The commit runs with NO relay
-	// lock held, so a slow storage write never stalls the live fan-out. The
-	// relay never PERSISTS a frame; every change commits through the one
-	// cap-checked PutValue path.
-	if s.Relay != nil {
-		err = s.Relay.CommitAndMirror(relay.RoomKey{App: appSlug, ID: id}, func() (relay.Frame, error) {
-			seq, perr := s.Rooms.Put(appSlug, id, key, body)
-			if perr != nil {
-				return relay.Frame{}, perr
-			}
-			return relay.EncodePut(seq, key, body), nil
-		})
-	} else {
-		_, err = s.Rooms.Put(appSlug, id, key, body)
-	}
+	// The live mirror is NOT built here: the room cell broadcasts the frame
+	// inside the same single-threaded event that commits the write and assigns
+	// its per-room seq. Mirroring from this pod as well would deliver every
+	// frame twice.
+	_, err = s.Rooms.Put(appSlug, id, key, body)
 	if err != nil {
 		s.writeRoomError(w, r, err)
 		return
@@ -249,20 +235,9 @@ func (s *Server) deleteRoomValue(w http.ResponseWriter, r *http.Request, appSlug
 		http.Error(w, "invalid key\n", http.StatusBadRequest)
 		return
 	}
-	// See putRoomValue for why the frame is built inside the callback: it
-	// carries the assigned seq, which is what makes a racing join correct.
+	// See putRoomValue: the cell mirrors its own commits.
 	var err error
-	if s.Relay != nil {
-		err = s.Relay.CommitAndMirror(relay.RoomKey{App: appSlug, ID: id}, func() (relay.Frame, error) {
-			seq, derr := s.Rooms.Delete(appSlug, id, key)
-			if derr != nil {
-				return relay.Frame{}, derr
-			}
-			return relay.EncodeDelete(seq, key), nil
-		})
-	} else {
-		_, err = s.Rooms.Delete(appSlug, id, key)
-	}
+	_, err = s.Rooms.Delete(appSlug, id, key)
 	if err != nil {
 		s.writeRoomError(w, r, err)
 		return

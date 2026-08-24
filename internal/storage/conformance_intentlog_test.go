@@ -28,7 +28,6 @@ import (
 
 	"github.com/Zamua/hostthis/internal/durable"
 	"github.com/Zamua/hostthis/internal/storage"
-	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 type intentLogFactory func(t *testing.T) durable.Log
@@ -266,14 +265,5 @@ func runIntentLogConformance(t *testing.T, name string, newLog intentLogFactory)
 func TestIntentLogConformance_Mem(t *testing.T) {
 	runIntentLogConformance(t, "mem", func(t *testing.T) durable.Log {
 		return durable.NewMemLog()
-	})
-}
-
-// The stored implementation, on whatever engine the build selects - the same
-// seam storagetest.NewRepo uses for the storage conformance suite.
-func TestIntentLogConformance_Shale(t *testing.T) {
-	runIntentLogConformance(t, "shale", func(t *testing.T) durable.Log {
-		repo := storagetest.NewRepo(t)
-		return storage.NewShaleIntentLog(repo.ClusterForTest(), nil)
 	})
 }

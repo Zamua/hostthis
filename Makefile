@@ -1,5 +1,5 @@
 .PHONY: help build test smoke dev run docker-build docker-up docker-down \
-        dev-minio-up dev-minio-down test-conformance-kv e2e e2e-ci \
+        dev-minio-up dev-minio-down e2e e2e-ci \
         fmt vet clean data-dir-perms rebuild-site-fixtures
 
 # Default goal: show the help text rather than silently no-op.
@@ -23,8 +23,7 @@ help:
 	@echo "  make docker-build  build the container image (tag hostthis:dev)"
 	@echo "  make docker-up     bring up local compose stack"
 	@echo "  make docker-down   tear it down"
-	@echo "  make dev-minio-up  start local MinIO for the slatedb/shale metadata + shale-blob tests"
-	@echo "  make test-conformance-kv  run slatedb+shale conformance (needs -tags slatedb + MinIO)"
+	@echo "  make dev-minio-up  start local MinIO for the s3 blob-store tests"
 	@echo "  make fmt / vet     gofmt / go vet"
 	@echo "  make rebuild-site-fixtures  rebuild the vite SPA test fixtures (needs npm)"
 	@echo "  make clean         remove ./bin, ./data and the e2e output"
@@ -108,7 +107,7 @@ docker-up: data-dir-perms
 docker-down:
 	docker compose down
 
-# -- Dev MinIO (for the slatedb/shale metadata + shale-blob tests) ----------
+# -- Dev MinIO (for the s3 blob-store tests) --------------------------------
 
 dev-minio-up:
 	docker compose -f deploy/dev/docker-compose.yml up -d
@@ -117,35 +116,6 @@ dev-minio-up:
 
 dev-minio-down:
 	docker compose -f deploy/dev/docker-compose.yml down -v
-
-# Runs the slatedb + shale backend conformance suites against the local
-# MinIO (hostthis-metadata bucket). Needs the slatedb build tag, cgo, and
-# libslatedb_uniffi on the loader path. SLATEDB_LIB_DIR defaults to
-# $HOME/.local/lib but is overridable for a different install location.
-# Assumes dev-minio-up has already been run (it provisions both buckets).
-SLATEDB_LIB_DIR ?= $(HOME)/.local/lib
-# Build and test against the go.mod PINS, ignoring any local go.work.
-#
-# The workspace redirects shale to an on-disk checkout, so an ordinary `make
-# test` validates whatever that tree happens to be - not the version a release
-# image is built from. CI never sees this (go.work is gitignored, so a fresh
-# checkout has none), which is why the pinned combination stayed correct while
-# local runs quietly diverged. This target is how to get CI's answer locally.
-test-pinned:
-	GOWORK=off go build ./...
-	GOWORK=off go test ./...
-
-test-conformance-kv:
-	CGO_ENABLED=1 \
-	CGO_LDFLAGS="-L$(SLATEDB_LIB_DIR)" \
-	DYLD_LIBRARY_PATH="$(SLATEDB_LIB_DIR)" \
-	LD_LIBRARY_PATH="$(SLATEDB_LIB_DIR)" \
-	MINIO_TEST_ENDPOINT=http://localhost:9000 \
-	MINIO_TEST_METADATA_BUCKET=hostthis-metadata \
-	MINIO_TEST_ACCESS_KEY=admin \
-	MINIO_TEST_SECRET_KEY=supersecret \
-	go test -tags slatedb -count=1 ./internal/storage \
-		-run 'TestConformance_Slate|TestConformance_Shale'
 
 # Compose mounts ./data into the container under distroless's nonroot uid
 # (65532). Make sure the host dir is writable by that uid.
