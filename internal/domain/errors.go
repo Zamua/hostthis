@@ -44,26 +44,11 @@ var (
 	// cap. The service layer maps it to a 507.
 	ErrAppRoomsFull = errors.New("storage: app room storage is at capacity")
 
+	// ErrVersionCurrentlyServed is returned when a version mutation would
+	// remove the bytes currently selected by the paste's serving head.
+	ErrVersionCurrentlyServed = errors.New("storage: version is currently served")
+
 	// ErrTooManyNewKeys is returned by AdmitNewKey when the subnet has
 	// hit its fresh-key quota for the window (the Sybil rate limit).
 	ErrTooManyNewKeys = errors.New("storage: too many new keys from this network")
-
-	// ErrCrossShardDeploy is the domain translation of a sharded backend
-	// rejecting a site deploy whose staged file pointer routed to a different
-	// shard than the manifest. The shale storage layer translates its backend
-	// sentinel into this one at the boundary, keeping the original in the wrap
-	// chain, so the deploy service classifies it without importing any backend
-	// package.
-	ErrCrossShardDeploy = errors.New("storage: cross-shard deploy commit rejected")
-
-	// ErrConcurrentChange is returned when another write to the same
-	// record landed while this one was deciding what to do, and the
-	// decision cannot be salvaged without re-reading. The operation
-	// applied NOTHING, so a retry is safe and is left to the caller: an
-	// interactive verb reports it and the user re-runs, the sweep
-	// skips the ref and the next pass picks it up.
-	//
-	// Backends whose concurrency control cannot lose this way never
-	// produce it, so the conformance suite does not require it.
-	ErrConcurrentChange = errors.New("storage: changed concurrently, retry")
 )

@@ -3,126 +3,19 @@ package service
 import (
 	"context"
 	"io"
-
-	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// BlobUnit is the per-record blob lifecycle seam: stage the bytes, commit them
-// alongside the record's metadata, read them back, unbind them on delete,
-// WITHOUT exposing the storage mechanism. Both the standalone detached-store
-// path and the transactional shale path satisfy it, so upload / manage /
-// deploy_site / http-read run against ONE shape regardless of backend.
-//
-// The "record" is a paste or a site, identified by its slug. A blob is
-// identified within a record by its content sha. The seam maps (slug, sha) to
-// an opaque BlobHandle the commit threads through; the services never inspect
-// a handle's internals.
-//
-// The domain stays pure: BlobUnit and BlobHandle live in the service layer,
-// the implementations in internal/storage, and the domain types never
-// reference a handle.
+// BlobUnit is the detached content-addressed byte plane used by application
+// services. Metadata commits name blobs by SHA; reclamation is a separate
+// reachability sweep.
 type BlobUnit interface {
-	// BeginUpload takes ownership of a slug's staged bytes and returns a
-	// context carrying it, which the caller MUST use for the staging and the
-	// Commit that follow.
-	//
-	// It exists because recovery may reclaim an upload it believes died, and
-	// the writer may not have: ownership is what lets the commit detect that it
-	// was taken over and abort, instead of binding metadata to bytes recovery
-	// is deleting. An adapter with no such hazard returns ctx unchanged.
-	//
-	// Called ONCE, before the first Stage. Claiming later than the first staged
-	// byte leaves those bytes outside the ownership the commit checks.
-	BeginUpload(ctx context.Context, slug string) (context.Context, error)
+	// StagePrecompressed persists bytes already in the at-rest format.
+	StagePrecompressed(ctx context.Context, sha string, r io.Reader, size int64) error
 
-	// Stage durably writes a record's blob from an ALREADY magic+zstd-encoded
-	// in-memory body. Used by the single-file paste/version paths, whose
-	// streaming pipeline has already produced the encoded staging buffer.
-	// Metadata-first ordering (for the pending model) is the caller's choice
-	// of when to Stage relative to its metadata write.
-	Stage(ctx context.Context, slug, sha string, body []byte) (BlobHandle, error)
-	// StagePrecompressed stages bytes that are ALREADY in the at-rest format,
-	// streaming them from r rather than taking them whole. size is the exact
-	// encoded length, which lets the object store pick a sane part size - an
-	// unknown length makes it allocate a full multipart part buffer instead.
-	StagePrecompressed(ctx context.Context, slug, sha string, r io.Reader, size int64) (BlobHandle, error)
+	// StageEncoding encodes and persists uncompressed bytes, returning their SHA
+	// and quota-relevant stored size.
+	StageEncoding(ctx context.Context, r io.Reader) (sha string, storedSize int, err error)
 
-	// StageEncoding encodes UNCOMPRESSED bytes into the adapter's at-rest
-	// format, stages them, and reports the quota-relevant compressed size.
-	//
-	// It exists so a caller needing the on-disk footprint (the site deploy,
-	// which charges the post-compression size against quota) does not have to
-	// know the encoder or the framing. The adapter owns the format; the port
-	// reports the number.
-	StageEncoding(ctx context.Context, slug string, r io.Reader) (BlobHandle, string, int, error)
-
-	// StageStream durably writes a record's blob by streaming r
-	// (UNCOMPRESSED; the storage layer compresses at rest). size is the
-	// expected uncompressed length.
-	//
-	// NO production caller: the site deploy stages through StageEncoding,
-	// which also reports the compressed size it charges against quota. Both
-	// adapters implement StageStream and their own tests cover it, but a
-	// service reaching for it here would be the first to travel that path.
-	StageStream(ctx context.Context, slug, sha string, r io.Reader, size int64) (BlobHandle, error)
-
-	// Commit persists a record's metadata AND binds every staged handle as ONE
-	// unit. On the standalone path Stage already wrote the bytes durably, so
-	// the bind is a no-op and Commit just runs metaWrite. On the transactional
-	// shale path Commit binds the handles in the SAME transaction metaWrite's
-	// writes commit in.
-	//
-	// metaWrite receives a context.Context, NOT the ambient one: the shale
-	// path derives a per-Commit child context carrying THIS call's staged
-	// refs, so the metadata write binds exactly this call's blobs even when
-	// two same-slug Commits run concurrently. The closure MUST thread the
-	// context it is given into the repo's metadata-write method; passing a
-	// different context silently drops the binds.
-	//
-	// metaWrite is the source of truth for slug-collision retries and quota
-	// errors: Commit returns its error verbatim.
-	Commit(ctx context.Context, handles []BlobHandle, metaWrite func(context.Context) error) error
-
-	// Read streams a record's blob bytes, DECOMPRESSED, with the inner
-	// (stored) byte length. The caller MUST Close the returned reader.
-	Read(ctx context.Context, slug, sha string) (io.ReadCloser, int64, error)
-
-	// UnbindOnDelete removes a record's blob references as part of the
-	// record's metadata delete. On the standalone path this is a NO-OP: the
-	// bytes are content-addressed and reclaimed by the global sweep once no
-	// live record references their sha, so a delete never removes bytes
-	// directly. It exists so the services delete uniformly across backends.
-	UnbindOnDelete(ctx context.Context, slug string, shas []string) error
-
-	// InitialStatus is the status a record carries the moment its metadata
-	// commits through this unit.
-	//
-	// READY means the unit binds the bytes inside the metadata commit, so the
-	// caller must stage them BEFORE committing and owes no follow-up. PENDING
-	// means the bytes land after the commit, so the caller owes a finalize and
-	// a reader may observe the record before its bytes exist.
-	//
-	// It is a VALUE, not a capability predicate, on purpose: the services ask
-	// what state a commit produces, which is a domain question, rather than
-	// what kind of backend they hold. A new adapter answers it instead of
-	// adding a branch above the port.
-	InitialStatus() domain.PasteStatus
-}
-
-// BlobHandle is the opaque token Stage / StageStream return and Commit
-// consumes. Only handles a Stage call produced are valid to Commit; a zero
-// BlobHandle is meaningless to the seam.
-type BlobHandle struct {
-	// Slug + SHA identify the staged blob on the standalone path. The field
-	// set is internal to the seam and may grow without affecting callers,
-	// which only ever pass handles back into Commit.
-	Slug string
-	SHA  string
-
-	// Ref is the opaque, implementation-private staged-blob reference the
-	// transactional shale path threads from Stage/StageStream into Commit. It
-	// holds a cluster.BlobRef, typed as any so the service package stays free
-	// of the shale/cluster dependency and its cgo/slatedb build tag. The
-	// standalone path leaves it nil.
-	Ref any
+	// Read streams the decompressed bytes addressed by sha.
+	Read(ctx context.Context, sha string) (io.ReadCloser, int64, error)
 }

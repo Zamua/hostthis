@@ -11,6 +11,7 @@ package http
 // state.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -155,6 +156,39 @@ func TestLiveRoom_BroadcastReachesEveryClientInOrder(t *testing.T) {
 			}
 			last = f.Seq
 		}
+	}
+}
+
+// Ephemeral frames reach peers byte-identically without echoing to their sender.
+func TestLiveRoom_EphemeralFrameReachesPeersOnly(t *testing.T) {
+	ts, slug := liveCelldServer(t)
+	id := liveCreateRoom(t, ts, slug)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	sender := liveDialRoom(t, ctx, ts, slug, id)
+	defer sender.Close(websocket.StatusNormalClosure, "") //nolint:errcheck
+	peer := liveDialRoom(t, ctx, ts, slug, id)
+	defer peer.Close(websocket.StatusNormalClosure, "") //nolint:errcheck
+	liveRead(t, ctx, sender)
+	liveRead(t, ctx, peer)
+
+	want := []byte{0x00, 0x01, 0xfe, 0xff}
+	if err := sender.Write(ctx, websocket.MessageBinary, want); err != nil {
+		t.Fatalf("send ephemeral frame: %v", err)
+	}
+	typ, got, err := peer.Read(ctx)
+	if err != nil {
+		t.Fatalf("peer read ephemeral frame: %v", err)
+	}
+	if typ != websocket.MessageBinary || !bytes.Equal(got, want) {
+		t.Fatalf("peer frame type=%v bytes=%v, want binary %v", typ, got, want)
+	}
+
+	noEcho, stop := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer stop()
+	if _, got, err := sender.Read(noEcho); err == nil {
+		t.Fatalf("sender received its own ephemeral frame %v", got)
 	}
 }
 

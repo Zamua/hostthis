@@ -3,6 +3,9 @@ package celld
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,28 +20,20 @@ import (
 
 // PasteRepo is the celld implementation of the paste persistence port.
 //
-// A create spans TWO cells and celld has no transaction across them, which is
-// the same condition that forced the durable intent log on shale: the row is
-// addressed by slug because a reader arrives holding one, and the owner's index
-// and quota are addressed by identity because the index reader arrives holding
-// that. No single cell can serve both.
+// A create spans two cells and celld has no transaction across them. The row is
+// addressed by slug; the owner's index and quota are addressed by identity.
 //
 // The sequence is therefore:
 //
-//  1. identity cell, ONE event: check quota, reserve it, record the intent.
-//     A cell is single-threaded, so no concurrent upload by the same owner can
-//     interleave between the check and the reservation - which is what makes
-//     the per-identity cap exact rather than best-effort.
-//  2. paste cell: write the row.
-//  3. identity cell: confirm the entry and discharge the intent.
+//  1. Identity cell: atomically admit quota, reserve bytes, and record intent.
+//  2. Paste cell: write the row.
+//  3. Identity cell: confirm the entry and discharge the intent.
 //
 // The ORDER is deliberate. Reserving first and failing at step 2 leaves an
 // entry charged with no row, which the owner sees as a paste that is briefly
-// pending and then reconciled away. Writing the row first would instead leave a
-// row visible by slug and absent from its owner's listing, which is an orphan
-// nothing is accounted for. Charging first is the recoverable failure, and it
-// is recoverable precisely because the intent sits in the cell that owns both
-// the quota and the index, so resolution needs no coordination.
+// pending. The intent's exact row fingerprint lets recovery either confirm that
+// row or fence the generation in the Paste cell before releasing its charge.
+// Writing the row first would instead leave a visible, uncharged orphan.
 type PasteRepo struct {
 	base   string
 	client *http.Client
@@ -56,6 +51,7 @@ func NewPasteRepo(base string, c *http.Client) *PasteRepo {
 type pasteRow struct {
 	Slug          string `json:"slug"`
 	Identity      string `json:"identity"`
+	Generation    string `json:"generation"`
 	Status        string `json:"status"`
 	Kind          string `json:"kind"`
 	ContentSHA    string `json:"contentSha"`
@@ -73,7 +69,8 @@ type pasteRow struct {
 func rowOf(p domain.Paste) pasteRow {
 	return pasteRow{
 		Slug: p.Slug.String(), Identity: p.Identity.String(),
-		Status: string(p.Status), Kind: string(p.Kind),
+		Generation: p.Generation,
+		Status:     string(p.Status), Kind: string(p.Kind),
 		ContentSHA: p.ContentSHA, Size: p.Size, Name: p.Name,
 		PinnedVersion: p.PinnedVersion,
 		CreatedAt:     p.CreatedAt.UTC().UnixMilli(),
@@ -82,10 +79,28 @@ func rowOf(p domain.Paste) pasteRow {
 	}
 }
 
+func createFingerprint(row pasteRow) (string, error) {
+	body, err := json.Marshal(row)
+	if err != nil {
+		return "", fmt.Errorf("celld: fingerprint paste row: %w", err)
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func newOpaqueID(prefix string) (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("celld: generate %s id: %w", prefix, err)
+	}
+	return prefix + ":" + hex.EncodeToString(raw[:]), nil
+}
+
 func (r pasteRow) domain() domain.Paste {
 	return domain.Paste{
 		Slug: domain.Slug(r.Slug), Identity: domain.Identity(r.Identity),
-		Status: domain.PasteStatus(r.Status), Kind: domain.ContentKind(r.Kind),
+		Generation: r.Generation,
+		Status:     domain.PasteStatus(r.Status), Kind: domain.ContentKind(r.Kind),
 		ContentSHA: r.ContentSHA, Size: r.Size, Name: r.Name,
 		PinnedVersion: r.PinnedVersion,
 		CreatedAt:     time.UnixMilli(r.CreatedAt).UTC(),
@@ -154,8 +169,8 @@ func (r *PasteRepo) call(ctx context.Context, method, path, key, val string, bod
 		}
 		return resp.StatusCode, nil
 	}
-	if out != nil && resp.StatusCode < 300 {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	if out != nil {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil && !errors.Is(err, io.EOF) {
 			return resp.StatusCode, fmt.Errorf("celld: decode %s: %w", path, err)
 		}
 	}
@@ -165,22 +180,41 @@ func (r *PasteRepo) call(ctx context.Context, method, path, key, val string, bod
 // InsertWithQuotaCheck runs the three-step create described on the type.
 func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error {
 	owner := p.Identity.String()
-	intentID := "create:" + p.Slug.String()
+	generation := p.Generation
+	if generation == "" {
+		generated, err := newOpaqueID("generation")
+		if err != nil {
+			return err
+		}
+		generation = generated
+	}
+	intentID := "create:" + p.Slug.String() + ":" + generation
+	wireRow := rowOf(p)
+	wireRow.Generation = generation
+	fingerprint, err := createFingerprint(wireRow)
+	if err != nil {
+		return err
+	}
 
 	// 1. Reserve. Over-quota is refused HERE, before any row exists, so a
 	//    rejected upload leaves nothing behind.
 	status, err := r.call(ctx, http.MethodPost, "/identity/reserve", "scope", owner, map[string]any{
-		"slug": p.Slug.String(), "size": p.Size, "userCap": userCap,
+		"slug": p.Slug.String(), "generation": generation,
+		"size": p.Size, "userCap": userCap,
 		"now": now.UTC().UnixMilli(), "status": string(p.Status),
 		"updatedAt": p.UpdatedAt.UTC().UnixMilli(),
 		"kind":      string(p.Kind), "name": p.Name, "contentSha": p.ContentSHA,
 		"intent": map[string]any{
 			"id": intentID, "kind": "create_paste", "subject": p.Slug.String(),
-			"startedAt": now.UTC().UnixMilli(),
+			"fingerprint": fingerprint,
+			"startedAt":   now.UTC().UnixMilli(),
 		},
 	}, nil)
+	if status == http.StatusInsufficientStorage {
+		return domain.ErrOverUserQuota
+	}
 	if status == http.StatusConflict {
-		return domain.ErrOverUserQuota // an expected refusal, not a fault
+		return domain.ErrSlugTaken
 	}
 	if err != nil {
 		return err
@@ -189,82 +223,107 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 		return fmt.Errorf("celld: reserve: unexpected status %d", status)
 	}
 
-	// 2. The row. A failure here is compensated, not left dangling.
-	if status, err = r.call(ctx, http.MethodPost, "/paste/put", "slug", p.Slug.String(),
-		map[string]any{"row": rowOf(p)}, nil); err != nil || status >= 300 {
+	// 2. A lost response is ambiguous: retry the exact generation once so the
+	//    cell's same-generation replay can prove whether the row landed.
+	putBody := map[string]any{
+		"row": wireRow, "generation": generation, "fingerprint": fingerprint,
+	}
+	for range 2 {
+		status, err = r.call(ctx, http.MethodPost, "/paste/put", "slug", p.Slug.String(), putBody, nil)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		// The durable intent owns resolution. Releasing here could erase a row
+		// whose successful response was the only thing lost.
+		return err
+	}
+	if status == http.StatusConflict {
 		_, _ = r.call(ctx, http.MethodPost, "/identity/release", "scope", owner,
-			map[string]any{"slug": p.Slug.String(), "intentId": intentID}, nil)
-		if err != nil {
-			return err
-		}
-		if status == http.StatusConflict {
-			// The upload path retries on this sentinel with a fresh slug, so it
-			// must survive as itself rather than as a status code.
-			return domain.ErrSlugTaken
-		}
+			map[string]any{
+				"slug": p.Slug.String(), "generation": generation, "intentId": intentID,
+			}, nil)
+		return domain.ErrSlugTaken
+	}
+	if status >= 300 {
 		return fmt.Errorf("celld: paste put: unexpected status %d", status)
 	}
 
 	// 3. Confirm. The intent is discharged only once the row is durable.
-	if _, err = r.call(ctx, http.MethodPost, "/identity/confirm", "scope", owner,
-		map[string]any{"slug": p.Slug.String(), "status": string(p.Status), "intentId": intentID}, nil); err != nil {
-		// The row and the reservation both exist, so the paste is correct; only
-		// the intent lingers, and resolution clears it. Not an error the caller
-		// can act on.
+	status, err = r.call(ctx, http.MethodPost, "/identity/confirm", "scope", owner,
+		map[string]any{
+			"slug": p.Slug.String(), "generation": generation,
+			"status": string(p.Status), "intentId": intentID,
+		}, nil)
+	if err != nil {
+		// The resolver observes the matching row and completes the confirm.
 		return nil
+	}
+	if status >= 300 {
+		return fmt.Errorf("celld: confirm: unexpected status %d", status)
 	}
 	return nil
 }
 
-func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
+func (r *PasteRepo) getRow(slug domain.Slug) (pasteRow, error) {
 	var row pasteRow
 	status, err := r.call(context.Background(), http.MethodGet, "/paste/get", "slug", slug.String(), nil, &row)
 	if err != nil {
-		return domain.Paste{}, err
+		return pasteRow{}, err
 	}
 	if status == http.StatusNotFound {
-		return domain.Paste{}, domain.ErrNotFound
+		return pasteRow{}, domain.ErrNotFound
 	}
 	if status >= 300 {
-		return domain.Paste{}, fmt.Errorf("celld: paste get: unexpected status %d", status)
+		return pasteRow{}, fmt.Errorf("celld: paste get: unexpected status %d", status)
+	}
+	return row, nil
+}
+
+func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
+	row, err := r.getRow(slug)
+	if err != nil {
+		return domain.Paste{}, err
 	}
 	return row.domain(), nil
 }
 
 // MarkReady advances a still-pending paste. Absent or already-settled is a
 // no-op rather than an error: a late finalizer racing the reconciler is normal.
-func (r *PasteRepo) MarkReady(slug domain.Slug) error {
-	_, err := r.call(context.Background(), http.MethodPost, "/paste/status", "slug", slug.String(),
-		map[string]any{"status": string(domain.PasteStatusReady)}, nil)
-	return err
+func (r *PasteRepo) MarkReady(paste domain.Paste) error {
+	status, err := r.call(context.Background(), http.MethodPost, "/paste/status", "slug", paste.Slug.String(),
+		map[string]any{
+			"status": string(domain.PasteStatusReady), "generation": paste.Generation,
+		}, nil)
+	if err != nil {
+		return err
+	}
+	if status >= 300 {
+		return fmt.Errorf("celld: ready transition: unexpected status %d", status)
+	}
+	return nil
 }
 
-// MarkFailed settles the row AND releases the reservation, so a failed paste
-// stops charging its owner. Two cells again, and the row is settled first: a
-// released reservation with a still-pending row would under-count while the
-// paste is still visible.
-func (r *PasteRepo) MarkFailed(slug domain.Slug) error {
-	var res struct {
-		Changed bool `json:"changed"`
+// MarkFailed persists the failed row before driving its absolute allocation to
+// zero. The Paste cell owns retries, so a lost response cannot strand quota.
+func (r *PasteRepo) MarkFailed(paste domain.Paste) error {
+	if paste.Generation == "" {
+		return fmt.Errorf("celld: failed paste has no accounting generation")
 	}
-	if _, err := r.call(context.Background(), http.MethodPost, "/paste/status", "slug", slug.String(),
-		map[string]any{"status": string(domain.PasteStatusFailed)}, &res); err != nil {
-		return err
-	}
-	if !res.Changed {
-		// Not pending, so nothing was un-counted and nothing should be released.
-		return nil
-	}
-	got, err := r.Get(slug)
+	status, err := r.callArtifactMutation(context.Background(), "/paste/status", paste.Slug,
+		map[string]any{
+			"status":     string(domain.PasteStatusFailed),
+			"generation": paste.Generation,
+			"opId":       "fail:" + paste.Generation,
+		}, nil)
 	if err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
-			return nil
-		}
 		return err
 	}
-	_, err = r.call(context.Background(), http.MethodPost, "/identity/release", "scope",
-		got.Identity.String(), map[string]any{"slug": slug.String()}, nil)
-	return err
+	if status >= 300 {
+		return fmt.Errorf("celld: fail accounting: unexpected status %d", status)
+	}
+	return nil
 }
 
 // SumActiveBytesByOwner reads the identity cell's maintained aggregate. A point
@@ -291,13 +350,15 @@ func (r *PasteRepo) SumActiveBytesByOwner(owner string, _ time.Time) (int, error
 // forbids wearing a different hat (CLAUDE.md engineering principle 2).
 
 type ownerEntry struct {
-	Slug       string `json:"slug"`
-	Size       int    `json:"size"`
-	Status     string `json:"status"`
-	At         int64  `json:"at"`
-	Kind       string `json:"kind"`
-	Name       string `json:"name"`
-	ContentSHA string `json:"contentSha"`
+	Slug        string `json:"slug"`
+	Size        int    `json:"size"`
+	ChargedSize int    `json:"chargedSize"`
+	ServedSize  int    `json:"servedSize"`
+	Status      string `json:"status"`
+	At          int64  `json:"at"`
+	Kind        string `json:"kind"`
+	Name        string `json:"name"`
+	ContentSHA  string `json:"contentSha"`
 
 	// UpdatedAt orders the listing and LatestVersion is displayed in it. Both
 	// are denormalised into the identity cell so a listing stays a POINT READ:
@@ -344,7 +405,8 @@ func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 		out = append(out, domain.Paste{
 			Slug: domain.Slug(e.Slug), Identity: domain.Identity(owner),
 			Status: domain.PasteStatus(e.Status), Kind: domain.ContentKind(e.Kind),
-			ContentSHA: e.ContentSHA, Size: e.Size, Name: e.Name,
+			ContentSHA: e.ContentSHA, Size: e.ServedSize, StoredBytes: e.ChargedSize,
+			Name:      e.Name,
 			CreatedAt: at, UpdatedAt: updated, LatestVersion: latest,
 			PinnedVersion: e.PinnedVersion,
 		})
@@ -436,11 +498,7 @@ func (r *PasteRepo) SetName(slug domain.Slug, name string, wantIdentity domain.I
 		}
 		return domain.ErrNotFound // a foreign or re-minted slug is not this owner's paste
 	}
-	_, err := r.call(context.Background(), http.MethodPost, "/identity/touch", "scope",
-		wantIdentity.String(), map[string]any{
-			"slug": slug.String(), "name": name, "at": time.Now().UTC().UnixMilli(),
-		}, nil)
-	return err
+	return nil
 }
 
 // Delete removes a paste and stops charging its owner.
@@ -461,89 +519,90 @@ func (r *PasteRepo) SetName(slug domain.Slug, name string, wantIdentity domain.I
 // irreversible in the wrong direction goes last, where the fewest crashes can
 // reach it.
 func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
-	var res struct {
-		Removed bool   `json:"removed"`
-		Reason  string `json:"reason"`
-	}
-	if _, err := r.call(context.Background(), http.MethodPost, "/paste/remove", "slug", slug.String(),
-		map[string]any{
-			"identity":  wantIdentity.String(),
-			"createdAt": wantCreatedAt.UTC().UnixMilli(),
-		}, &res); err != nil {
+	row, err := r.getRow(slug)
+	if err != nil {
 		return err
 	}
+	opID, err := newOpaqueID("remove")
+	if err != nil {
+		return err
+	}
+	var res struct {
+		Removed bool `json:"removed"`
+	}
+	status, err := r.callArtifactMutation(context.Background(), "/paste/remove", slug,
+		map[string]any{
+			"opId": opID, "generation": row.Generation,
+			"identity":  wantIdentity.String(),
+			"createdAt": wantCreatedAt.UTC().UnixMilli(),
+		}, &res)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusConflict {
+		return fmt.Errorf("celld: remove accounting conflict")
+	}
 	if !res.Removed {
-		// Absent and foreign are the same answer to the caller: this is not
-		// your paste to delete, and saying which would leak existence.
 		return domain.ErrNotFound
 	}
-	// Releases the quota by un-counting the slug, which is idempotent by
-	// construction: a resolver replaying this cannot under-charge.
-	_, err := r.call(context.Background(), http.MethodPost, "/identity/release", "scope",
-		wantIdentity.String(), map[string]any{"slug": slug.String()}, nil)
-	return err
+	return nil
 }
 
-// AppendVersionWithQuotaCheck adds a version and re-charges the owner.
-//
-// TWO cells on the QUOTA path, which is why it is not a paste-cell-local
-// operation: every retained version counts against the cap - measured against
-// shale, where appending 300 to a 700-byte paste charges 1000 - and the
-// identity entry carries the size that a listing reads. Leaving the entry alone
-// would under-charge the owner and show a stale size in their listing.
-//
-// Quota is checked BEFORE the version lands, in the identity cell, so a refused
-// append leaves no version behind. Then the row, then the entry: same ordering
-// as the rest, so a crash leaves an under-counted charge that a reconcile can
-// correct rather than a version nobody is charged for.
-func (r *PasteRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug,
-	kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time,
+func (r *PasteRepo) callArtifactMutation(ctx context.Context, path string, slug domain.Slug,
+	body, out any,
+) (int, error) {
+	var status int
+	var err error
+	for range 2 {
+		status, err = r.call(ctx, http.MethodPost, path, "slug", slug.String(), body, out)
+		if err == nil {
+			return status, nil
+		}
+	}
+	return status, err
+}
+
+func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, generation string,
+	kind domain.ContentKind, contentSHA string, size int, manifest domain.Manifest,
+	userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
-	got, err := r.Get(slug)
+	if generation == "" {
+		return domain.AppendResult{}, domain.ErrNotFound
+	}
+	opID, err := newOpaqueID("append")
 	if err != nil {
 		return domain.AppendResult{}, err
 	}
-	owner := got.Identity.String()
-
-	if userCap > 0 {
-		have, err := r.SumActiveBytesByOwner(owner, now)
-		if err != nil {
-			return domain.AppendResult{}, err
-		}
-		if int64(have+size) > userCap {
-			return domain.AppendResult{}, domain.ErrOverUserQuota
-		}
-	}
-
 	var res struct {
 		Appended  bool `json:"appended"`
 		Ver       int  `json:"ver"`
 		WasPinned bool `json:"wasPinned"`
-		TotalSize int  `json:"totalSize"`
 	}
-	if _, err := r.call(ctx, http.MethodPost, "/paste/append", "slug", slug.String(),
-		map[string]any{
-			"kind": string(kind), "contentSha": contentSHA, "size": size,
-			"now": now.UTC().UnixMilli(),
-		}, &res); err != nil {
+	status, err := r.callArtifactMutation(ctx, "/paste/append", slug, map[string]any{
+		"opId": opID, "generation": generation, "userCap": userCap,
+		"kind": string(kind), "contentSha": contentSHA, "size": size,
+		"manifest": manifest, "now": now.UTC().UnixMilli(),
+	}, &res)
+	if status == http.StatusInsufficientStorage {
+		return domain.AppendResult{}, domain.ErrOverUserQuota
+	}
+	if err != nil {
 		return domain.AppendResult{}, err
+	}
+	if status == http.StatusConflict {
+		return domain.AppendResult{}, fmt.Errorf("celld: append accounting conflict")
 	}
 	if !res.Appended {
 		return domain.AppendResult{}, domain.ErrNotFound
 	}
-
-	// The charge follows the version. Absolute, not a delta: re-running this
-	// with the same total is a no-op, where "add size" would double-charge.
-	if _, err := r.call(ctx, http.MethodPost, "/identity/touch", "scope", owner,
-		map[string]any{
-			"slug": slug.String(), "size": res.TotalSize,
-			// The owner's listing is ordered by this, so an update that does not
-			// carry a time silently sorts as if it never happened.
-			"at": now.UTC().UnixMilli(), "latestVersion": res.Ver,
-		}, nil); err != nil {
-		return domain.AppendResult{}, err
-	}
 	return domain.AppendResult{NewVer: res.Ver, WasPinned: res.WasPinned}, nil
+}
+
+// AppendVersionWithQuotaCheck atomically reserves charge and publishes one version.
+func (r *PasteRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, generation string,
+	kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time,
+) (domain.AppendResult, error) {
+	return r.appendArtifact(ctx, slug, generation, kind, contentSHA, size, domain.Manifest{}, userCap, now)
 }
 
 // ListVersions is a single-cell read: the appended versions live beside the row.
@@ -588,29 +647,33 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 // absolute total is reconstructible from the paste cell. The other order frees
 // the charge while the bytes remain, which under-charges silently and is the
 // direction nothing watches.
-func (r *PasteRepo) DeleteVersion(slug domain.Slug, ver int) error {
-	got, err := r.Get(slug)
+func (r *PasteRepo) DeleteVersion(slug domain.Slug, generation string, ver int) error {
+	if generation == "" {
+		return domain.ErrNotFound
+	}
+	opID, err := newOpaqueID("delete-version")
 	if err != nil {
 		return err
 	}
 	var res struct {
-		Deleted   bool `json:"deleted"`
-		TotalSize int  `json:"totalSize"`
+		Deleted bool   `json:"deleted"`
+		Error   string `json:"error"`
 	}
-	if _, err := r.call(context.Background(), http.MethodPost, "/paste/delversion", "slug", slug.String(),
-		map[string]any{"ver": ver}, &res); err != nil {
+	status, err := r.callArtifactMutation(context.Background(), "/paste/delversion", slug,
+		map[string]any{"opId": opID, "generation": generation, "ver": ver}, &res)
+	if err != nil {
 		return err
+	}
+	if status == http.StatusConflict {
+		if res.Error == "version-served" {
+			return domain.ErrVersionCurrentlyServed
+		}
+		return fmt.Errorf("celld: delete-version accounting conflict")
 	}
 	if !res.Deleted {
 		return domain.ErrNotFound
 	}
-	// Settle from the total the paste cell computed, not from a delta.
-	_, err = r.call(context.Background(), http.MethodPost, "/identity/touch", "scope",
-		got.Identity.String(), map[string]any{
-			"slug": slug.String(), "size": res.TotalSize,
-			"at": time.Now().UTC().UnixMilli(),
-		}, nil)
-	return err
+	return nil
 }
 
 // GetVersion reads one retained version. Single-cell.
@@ -654,40 +717,40 @@ func (r *PasteRepo) IsVersionServed(slug domain.Slug, ver int) (bool, error) {
 // retained, so neither touches the charge and both stay inside the paste cell.
 // Checked against the identity summary rather than assumed: it carries name,
 // status, size and kind, and a pin moves none of them.
-func (r *PasteRepo) SetPinnedVersion(slug domain.Slug, ver domain.Version) error {
-	return r.setPin(slug, ver.VerNum)
+func (r *PasteRepo) SetPinnedVersion(slug domain.Slug, generation string, ver domain.Version) error {
+	return r.setPin(slug, generation, ver.VerNum)
 }
 
-func (r *PasteRepo) Unpin(slug domain.Slug) error { return r.setPin(slug, 0) }
+func (r *PasteRepo) Unpin(slug domain.Slug, generation string) error {
+	return r.setPin(slug, generation, 0)
+}
 
 // setPin also updates the owner index, which renders the listing from its own
 // denormalised entry: without this the pin is honoured when serving but
 // invisible in `list`, so an owner cannot see which version their URL is stuck
 // to. Found by migrating a pinned paste and reading the listing afterwards.
-func (r *PasteRepo) setPin(slug domain.Slug, ver int) error {
+func (r *PasteRepo) setPin(slug domain.Slug, generation string, ver int) error {
+	if generation == "" {
+		return domain.ErrNotFound
+	}
+	opID, err := newOpaqueID("pin")
+	if err != nil {
+		return err
+	}
 	var res struct {
 		Pinned bool `json:"pinned"`
 	}
-	if _, err := r.call(context.Background(), http.MethodPost, "/paste/pin", "slug", slug.String(),
-		map[string]any{"ver": ver}, &res); err != nil {
+	status, err := r.callArtifactMutation(context.Background(), "/paste/pin", slug,
+		map[string]any{"opId": opID, "generation": generation, "ver": ver}, &res)
+	if err != nil {
 		return err
+	}
+	if status == http.StatusConflict {
+		return fmt.Errorf("celld: pin accounting conflict")
 	}
 	if !res.Pinned {
 		return domain.ErrNotFound
 	}
-	// TWO cells: the pin belongs to the paste, but the listing reads the owner
-	// index. The paste cell went first, so a crash between them leaves the pin
-	// in effect but not displayed - a stale label, never a URL serving the wrong
-	// version.
-	got, err := r.Get(slug)
-	if err != nil {
-		return nil //nolint:nilerr // the pin landed; only its label is stale
-	}
-	_, _ = r.call(context.Background(), http.MethodPost, "/identity/touch", "scope",
-		got.Identity.String(), map[string]any{
-			"slug": slug.String(), "pinnedVersion": ver,
-			"size": got.Size, "kind": string(got.Kind),
-		}, nil)
 	return nil
 }
 
@@ -710,7 +773,7 @@ func (r *PasteRepo) OwnerSummary(owner string, now time.Time) (domain.OwnerSumma
 			continue
 		}
 		active++
-		bytes += int64(e.Size)
+		bytes += int64(e.ChargedSize)
 	}
 	first, err := r.OwnerFirstSeen(owner)
 	if err != nil {
@@ -726,81 +789,11 @@ func (r *PasteRepo) OwnerSummary(owner string, now time.Time) (domain.OwnerSumma
 // second quota, no second enumeration index. The slug namespace stays global
 // because the paste cell IS the slug.
 
-// AppendManifestVersion appends a version whose content is a file set.
-//
-// The same two-cell shape as AppendVersionWithQuotaCheck and for the same
-// reason: quota is checked first against an ABSOLUTE total, so a refusal leaves
-// nothing behind, and the charge follows the version rather than preceding it.
-func (r *PasteRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, m domain.Manifest,
-	root domain.ManifestEntry, size int, userCap int64, now time.Time,
+// AppendManifestVersion appends a retained file-set version.
+func (r *PasteRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string,
+	m domain.Manifest, root domain.ManifestEntry, size int, userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
-	got, err := r.Get(slug)
-	if err != nil {
-		return domain.AppendResult{}, err
-	}
-	owner := got.Identity.String()
-
-	if userCap > 0 {
-		have, err := r.SumActiveBytesByOwner(owner, now)
-		if err != nil {
-			return domain.AppendResult{}, err
-		}
-		if int64(have+size) > userCap {
-			return domain.AppendResult{}, domain.ErrOverUserQuota
-		}
-	}
-
-	var res struct {
-		Appended  bool `json:"appended"`
-		Ver       int  `json:"ver"`
-		WasPinned bool `json:"wasPinned"`
-		TotalSize int  `json:"totalSize"`
-	}
-	if _, err := r.call(ctx, http.MethodPost, "/paste/append", "slug", slug.String(),
-		map[string]any{
-			"kind": string(domain.KindSite), "contentSha": root.SHA,
-			"size": size, "manifest": m, "now": now.UTC().UnixMilli(),
-		}, &res); err != nil {
-		return domain.AppendResult{}, err
-	}
-	if !res.Appended {
-		return domain.AppendResult{}, domain.ErrNotFound
-	}
-	if _, err := r.call(ctx, http.MethodPost, "/identity/touch", "scope", owner,
-		map[string]any{
-			"slug": slug.String(), "size": res.TotalSize,
-			// The owner's listing is ordered by this, so an update that does not
-			// carry a time silently sorts as if it never happened.
-			"at": now.UTC().UnixMilli(), "latestVersion": res.Ver,
-		}, nil); err != nil {
-		return domain.AppendResult{}, err
-	}
-	return domain.AppendResult{NewVer: res.Ver, WasPinned: res.WasPinned}, nil
-}
-
-// PreClaimSlug holds a slug before its content exists, so a deploy stages
-// against the slug it will commit under.
-func (r *PasteRepo) PreClaimSlug(ctx context.Context, slug domain.Slug, owner string, now time.Time) error {
-	status, err := r.call(ctx, http.MethodPost, "/paste/claim", "slug", slug.String(),
-		map[string]any{"owner": owner, "now": now.UTC().UnixMilli()}, nil)
-	if err != nil {
-		return err
-	}
-	if status == http.StatusConflict {
-		return domain.ErrSlugTaken
-	}
-	if status >= 300 {
-		return fmt.Errorf("celld: claim %s: unexpected status %d", slug, status)
-	}
-	return nil
-}
-
-// ReleaseSlugClaim gives back a slug whose deploy never landed. A no-op on an
-// absent, foreign or already-committed slug, so a repeated abandon is harmless.
-func (r *PasteRepo) ReleaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) error {
-	_, err := r.call(ctx, http.MethodPost, "/paste/unclaim", "slug", slug.String(),
-		map[string]any{"owner": owner}, nil)
-	return err
+	return r.appendArtifact(ctx, slug, generation, domain.KindSite, root.SHA, size, m, userCap, now)
 }
 
 // urlQuery escapes a value for a query string. Named rather than inlined so

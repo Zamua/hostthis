@@ -77,17 +77,15 @@ func insertSite(t *testing.T, sr conformanceSiteRepo, s domain.Site) {
 }
 
 // runSiteConformance runs the site contract subtests. newSites must produce a
-// FRESH paste+site pair sharing one backing store per subtest, or the
-// empty-store assertions do not hold. caps declares the backend's by-design
-// behavior exceptions.
-func runSiteConformance(t *testing.T, name string, caps conformCaps, newSites func(t *testing.T) (conformanceRepo, conformanceSiteRepo)) {
+// fresh paste/site pair sharing one backing store per subtest.
+func runSiteConformance(t *testing.T, name string, newSites func(t *testing.T) (conformanceRepo, conformanceSiteRepo)) {
 	t.Helper()
 	t.Run(name+"/Sites/DeployAndReadBack", func(t *testing.T) { _, sr := newSites(t); conformSiteDeployAndReadBack(t, sr) })
 	t.Run(name+"/Sites/GetNotFound", func(t *testing.T) { _, sr := newSites(t); conformSiteGetNotFound(t, sr) })
 	t.Run(name+"/Sites/SumByIdentity", func(t *testing.T) { r, sr := newSites(t); conformSiteSumByIdentity(t, r, sr) })
 	t.Run(name+"/Sites/QuotaCountsSiteBytes", func(t *testing.T) { _, sr := newSites(t); conformSiteQuotaCountsSiteBytes(t, sr) })
 	t.Run(name+"/Sites/PerOwnerCapCountsBoth", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapCountsBoth(t, r, sr) })
-	t.Run(name+"/Sites/PerOwnerCapConcurrentCeiling", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapConcurrentCeiling(t, caps, r, sr) })
+	t.Run(name+"/Sites/PerOwnerCapConcurrentCeiling", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapConcurrentCeiling(t, r, sr) })
 	t.Run(name+"/Sites/SlugCollisionVsPaste", func(t *testing.T) { r, sr := newSites(t); conformSiteSlugCollisionVsPaste(t, r, sr) })
 	t.Run(name+"/Sites/EveryPathCharged", func(t *testing.T) { r, sr := newSites(t); conformSiteEveryPathCharged(t, r, sr) })
 	t.Run(name+"/Sites/ReplaceInPlace", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceInPlace(t, r, sr) })
@@ -272,14 +270,21 @@ func conformSiteReplaceChargesEachVersion(t *testing.T, r conformanceRepo, sr co
 	}
 }
 
-// conformSiteDeployAndReadBack pins that a multi-file manifest round-trips
-// through the backend's encoding identically: sha, size and content-type per
-// path, plus the site's timestamps.
+// conformSiteDeployAndReadBack pins the complete manifest value across backends.
 func conformSiteDeployAndReadBack(t *testing.T, sr conformanceSiteRepo) {
 	man := domain.NewManifest()
-	man.Add("index.html", domain.ManifestEntry{SHA: "sha-rb-index", Size: 100, ContentType: "text/html; charset=utf-8"})
-	man.Add("assets/app.js", domain.ManifestEntry{SHA: "sha-rb-js", Size: 200, ContentType: "text/javascript; charset=utf-8"})
-	man.Add("style.css", domain.ManifestEntry{SHA: "sha-rb-css", Size: 50, ContentType: "text/css; charset=utf-8"})
+	man.Add("index.html", domain.ManifestEntry{
+		SHA: "sha-rb-index", Size: 100, CompressedSize: 73,
+		ContentType: "text/html; charset=utf-8", Kind: "html",
+	})
+	man.Add("assets/app.js", domain.ManifestEntry{
+		SHA: "sha-rb-js", Size: 200, CompressedSize: 121,
+		ContentType: "text/javascript; charset=utf-8", Kind: "javascript",
+	})
+	man.Add("style.css", domain.ManifestEntry{
+		SHA: "sha-rb-css", Size: 50, CompressedSize: 42,
+		ContentType: "text/css; charset=utf-8", Kind: "css",
+	})
 	s := domain.Site{
 		Slug:      "rb123456",
 		Identity:  "key:rb",
@@ -304,7 +309,9 @@ func conformSiteDeployAndReadBack(t *testing.T, sr conformanceSiteRepo) {
 		if !ok {
 			t.Fatalf("manifest missing path %q after round-trip", p)
 		}
-		if ge.SHA != want.SHA || ge.Size != want.Size || ge.ContentType != want.ContentType {
+		if ge.SHA != want.SHA || ge.Size != want.Size ||
+			ge.CompressedSize != want.CompressedSize ||
+			ge.ContentType != want.ContentType || ge.Kind != want.Kind {
 			t.Fatalf("manifest entry %q mismatch: got %+v, want %+v", p, ge, want)
 		}
 	}
@@ -397,19 +404,14 @@ func conformSitePerOwnerCapCountsBoth(t *testing.T, r conformanceRepo, sr confor
 	}
 
 	// The append path counts site bytes too: at cap, any append is rejected.
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "pb2pst1", domain.KindHTML, "sha-pb2-v2", 1, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "pb2pst1", generationOf("pb2pst1"), domain.KindHTML, "sha-pb2-v2", 1, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("append at full combined cap should be rejected (site bytes must count): got %v", err)
 	}
 }
 
-// conformSitePerOwnerCapConcurrentCeiling pins the COMBINED per-owner ceiling
-// under concurrent CROSS-KIND deploys: however the interleaving falls, the
-// bytes that land never exceed the cap. A backend that checked paste and site
-// quota on separate, non-serialized paths could overshoot the combined total
-// while each kind alone held its ceiling. Each backend serializes both kinds on
-// one thing: slatedb a serializable tx, shale the same {id} shard CAS, slatedb
-// the per-identity lockQuota stripe.
-func conformSitePerOwnerCapConcurrentCeiling(t *testing.T, caps conformCaps, r conformanceRepo, sr conformanceSiteRepo) {
+// conformSitePerOwnerCapConcurrentCeiling pins the combined per-owner ceiling
+// under concurrent cross-kind deploys.
+func conformSitePerOwnerCapConcurrentCeiling(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	const (
 		body = 100
 		k    = 3
@@ -436,11 +438,6 @@ func conformSitePerOwnerCapConcurrentCeiling(t *testing.T, caps conformCaps, r c
 		}(i)
 	}
 	wg.Wait()
-	if !caps.StrictIdentityQuotaUnderConcurrency {
-		t.Logf("backend does not guarantee strict cross-kind per-identity quota under concurrency (scan-based over-admit): %d records x %dB = %dB landed, cap %dB",
-			landed, body, landed*body, cap)
-		return
-	}
 	if landed*body > cap {
 		t.Fatalf("combined per-owner quota ceiling breached under cross-kind concurrency: %d records x %dB = %dB landed, cap %dB",
 			landed, body, landed*body, cap)

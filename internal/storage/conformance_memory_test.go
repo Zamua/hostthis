@@ -14,9 +14,6 @@ import (
 )
 
 func TestConformance_Memory(t *testing.T) {
-	// Both strict: every check-then-write runs under one mutex, so whatever a
-	// concurrent burst lands, no cap is ever exceeded.
-	caps := conformCaps{StrictQuotaUnderConcurrency: true, StrictIdentityQuotaUnderConcurrency: true}
 	newRepo := func(t *testing.T) conformanceRepo { return storage.NewMemRepo() }
 	newSites := func(t *testing.T) (conformanceRepo, conformanceSiteRepo) {
 		repo := storage.NewMemRepo()
@@ -30,6 +27,6 @@ func TestConformance_Memory(t *testing.T) {
 			Site:  storage.NewSites(repo),
 		}
 	}
-	runConformanceWithSites(t, "memory", caps, newRepo, newSites, newRooms)
+	runConformanceWithSites(t, "memory", newRepo, newSites, newRooms)
 	runKeygateConformance(t, "memory", func(t *testing.T) keygateRepo { return storage.NewMemRepo() })
 }

@@ -2,27 +2,17 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"fmt"
 	"io"
-
-	"github.com/Zamua/hostthis/internal/domain"
+	"os"
 )
 
-// blobReadStore is the read surface StandaloneBlobUnit needs on top of the
-// write-side BlobStore the services already hold. Streaming only: the service
-// layer has no buffering blob read, so no caller here can size an allocation to
-// a payload (docs/SPEC.md "Reads are constant-memory too"). Declared here rather
-// than imported from http so the service layer does not depend on the http
-// package.
+// blobReadStore is the streaming read surface used by StandaloneBlobUnit.
 type blobReadStore interface {
 	GetReader(sha string) (io.ReadCloser, int64, error)
 }
 
-// StandaloneBlobUnit adapts the detached content-addressed blob store (a
-// *storage.CompressedBlobStore) to the BlobUnit seam. Bytes are durable the
-// moment Stage/StageStream returns, so the ordering is blob-first and Commit
-// has nothing to bind.
+// StandaloneBlobUnit adapts a content-addressed store to the service byte port.
 type StandaloneBlobUnit struct {
 	store interface {
 		BlobStore
@@ -30,7 +20,6 @@ type StandaloneBlobUnit struct {
 	}
 }
 
-// NewStandaloneBlobUnit wraps a content-addressed blob store as a BlobUnit.
 func NewStandaloneBlobUnit(store interface {
 	BlobStore
 	blobReadStore
@@ -38,86 +27,34 @@ func NewStandaloneBlobUnit(store interface {
 	return &StandaloneBlobUnit{store: store}
 }
 
-// Stage writes the precompressed body and returns its (slug, sha) handle.
-func (u *StandaloneBlobUnit) Stage(_ context.Context, slug, sha string, body []byte) (BlobHandle, error) {
-	if err := u.store.PutPrecompressed(sha, body); err != nil {
-		return BlobHandle{}, err
+func (u *StandaloneBlobUnit) StagePrecompressed(_ context.Context, sha string, r io.Reader, size int64) error {
+	return u.store.PutPrecompressed(sha, r, size)
+}
+
+func (u *StandaloneBlobUnit) StageEncoding(ctx context.Context, r io.Reader) (string, int, error) {
+	staged, err := os.CreateTemp("", "hostthis-blob-*")
+	if err != nil {
+		return "", 0, fmt.Errorf("create blob spill: %w", err)
 	}
-	return BlobHandle{Slug: slug, SHA: sha}, nil
-}
+	name := staged.Name()
+	defer os.Remove(name) //nolint:errcheck
+	defer staged.Close()  //nolint:errcheck
 
-// StageStream streams r (uncompressed) into the store, which compresses it
-// at rest, and returns the (slug, sha) handle.
-func (u *StandaloneBlobUnit) StageStream(_ context.Context, slug, sha string, r io.Reader, size int64) (BlobHandle, error) {
-	if err := u.store.Put(sha, r, size); err != nil {
-		return BlobHandle{}, err
+	sha, size, total, err := u.store.EncodeTo(staged, r)
+	if err != nil {
+		return "", 0, err
 	}
-	return BlobHandle{Slug: slug, SHA: sha}, nil
+	if _, err := staged.Seek(0, io.SeekStart); err != nil {
+		return "", 0, fmt.Errorf("rewind blob spill: %w", err)
+	}
+	if err := u.StagePrecompressed(ctx, sha, staged, total); err != nil {
+		return "", 0, err
+	}
+	return sha, size, nil
 }
 
-// Commit runs the record's metadata write. The staged bytes are already
-// durable, so there is nothing to bind: Commit returns metaWrite's error
-// verbatim, preserving the caller's slug-collision / quota error handling.
-func (u *StandaloneBlobUnit) Commit(ctx context.Context, _ []BlobHandle, metaWrite func(context.Context) error) error {
-	return metaWrite(ctx)
-}
-
-// Read streams the decompressed bytes for sha. slug is unused: blobs are keyed
-// by content sha alone.
-func (u *StandaloneBlobUnit) Read(_ context.Context, _ /*slug*/, sha string) (io.ReadCloser, int64, error) {
+func (u *StandaloneBlobUnit) Read(_ context.Context, sha string) (io.ReadCloser, int64, error) {
 	return u.store.GetReader(sha)
 }
 
-// UnbindOnDelete is a no-op: the global content-addressed sweep reclaims blobs
-// no live record references, so a delete never removes bytes directly.
-func (u *StandaloneBlobUnit) UnbindOnDelete(_ context.Context, _ string, _ []string) error {
-	return nil
-}
-
-// InitialStatus is PENDING: the bytes land in a detached store with no
-// co-commit, so a record commits before they are durable and the caller owes a
-// finalize.
-func (u *StandaloneBlobUnit) InitialStatus() domain.PasteStatus {
-	return domain.PasteStatusPending
-}
-
 var _ BlobUnit = (*StandaloneBlobUnit)(nil)
-
-// BeginUpload is a no-op on the standalone path: its Stage writes bytes that
-// are immediately durable and content-addressed, so there is no staged-but-
-// unowned window for a recovery to reclaim and therefore nothing to fence.
-func (u *StandaloneBlobUnit) BeginUpload(ctx context.Context, _ string) (context.Context, error) {
-	return ctx, nil
-}
-
-// StageEncoding implements BlobUnit for the standalone path, on the same
-// contract as the transactional adapter: encode to the at-rest format, stage
-// it, report the compressed size excluding the framing prefix.
-// StagePrecompressed reads the body whole. This is the local dev/test store,
-// writing to a disk it owns, and its Put takes a slice - it carries none of the
-// multi-node blob plane's constraints.
-func (u *StandaloneBlobUnit) StagePrecompressed(ctx context.Context, slug, sha string, r io.Reader, _ int64) (BlobHandle, error) {
-	body, err := io.ReadAll(r)
-	if err != nil {
-		return BlobHandle{}, err
-	}
-	return u.Stage(ctx, slug, sha, body)
-}
-
-func (u *StandaloneBlobUnit) StageEncoding(ctx context.Context, slug string, r io.Reader) (BlobHandle, string, int, error) {
-	// Hash on the way past so the caller never needs a second pass over the
-	// body, matching the shale path's contract. This backend still encodes into
-	// memory - it is the local dev/test store, writing to a disk it owns, and
-	// carries none of the multi-node blob plane's constraints.
-	hasher := sha256.New()
-	body, size, err := u.store.EncodeBody(io.TeeReader(r, hasher))
-	if err != nil {
-		return BlobHandle{}, "", 0, err
-	}
-	sha := hex.EncodeToString(hasher.Sum(nil))
-	h, err := u.Stage(ctx, slug, sha, body)
-	if err != nil {
-		return BlobHandle{}, "", 0, err
-	}
-	return h, sha, size, nil
-}

@@ -1,7 +1,5 @@
 // The site port served by the paste family.
 
-//go:build !slatedb
-
 package storage_test
 
 import (

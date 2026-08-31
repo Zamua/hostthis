@@ -1,10 +1,6 @@
 // metadata_celld.go - celld-backed metadataBundle.
 //
-// Needs no build tag and no cgo: celld is reached over HTTP, so this backend
-// builds in the plain toolchain where `shale` needs -tags slatedb plus the
-// slatedb cdylib on the loader path.
-//
-//	HOSTTHIS_CELLD_ENDPOINT  (required, e.g. http://celld:8080)
+// HOSTTHIS_CELLD_ENDPOINT is required, for example http://celld:8080.
 
 package main
 
@@ -32,25 +28,9 @@ func buildMetadataCelld(logger *log.Logger) (*metadataBundle, error) {
 	return &metadataBundle{
 		Repo:    repo,
 		KeyGate: celld.NewKeyGateRepo(base, client),
-		// The SAME storage.Sites the shale backend uses. A site is a paste with
-		// Kind=site, so the translation is pure vocabulary and belongs to
-		// neither backend.
-		Sites: storage.NewSites(repo),
-		Rooms: celld.NewRoomRepo(base, client),
-
-		// BlobUnit stays nil: celld holds no bytes, so the blob plane keeps its
-		// standalone detached store rather than pretending to co-commit.
-		//
-		// IntentSweeper is nil because the intent log lives IN the identity
-		// cell, and a cell settles its own half-finished writes on the next
-		// touch. There is no cross-shard state for a boot sweep to find.
-		//
-		// RoomRelay: the cell proxy. Every pod pipes each client socket to the
-		// room's cell, which broadcasts inside its own write event - the reason
-		// this backend needs no peer fan-out at any replica count.
+		Sites:   storage.NewSites(repo),
+		Rooms:   celld.NewRoomRepo(base, client),
+		// Every socket terminates at its Room cell, which owns broadcast order.
 		RoomRelay: celld.NewRoomProxy(base),
-		//
-		// Readiness is nil - always ready. celld has no mount floor to reach;
-		// a cell activates on demand.
 	}, nil
 }

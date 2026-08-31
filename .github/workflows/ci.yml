@@ -19,6 +19,10 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       # Formatting: every file must be gofmt-clean.
       - name: gofmt
         run: |
@@ -49,12 +53,11 @@ jobs:
         run: go build ./...
 
       - name: test
-        run: go test ./...
+        run: make test
 
-  # The celld-gated suites against a real fleet: MinIO + the celld runtime on
-  # the runner, the worker deployed from this checkout. This is the job that
-  # exercises the PRODUCTION metadata plane; the plain `go` job covers the
-  # memory backend.
+  # The celld-gated suites run against `celld dev`, which uses the production
+  # Worker runtime with a local persistent object store. A separate operator
+  # gate qualifies object-store restore behavior against MinIO.
   celld:
     runs-on: ubuntu-latest
     steps:
@@ -65,11 +68,45 @@ jobs:
           go-version: '1.26'
           cache: true
 
-      - name: stand up the fleet
-        run: ./scripts/ci-celld-up.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
-      - name: storage conformance (celld)
-        run: CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 go test -count=1 ./internal/storage -run 'TestConformance_Celld'
+      - name: install pinned celld
+        env:
+          CELLD_ARCHIVE_SHA256: 0488628597154725db2f61f85434fb381e1b2535d1e9f097c6d20727cd337973
+        run: |
+          curl -fsSL https://github.com/denoland/celld/releases/download/v0.4.0/celld-x86_64-unknown-linux-gnu.gz \
+            -o "$RUNNER_TEMP/celld.gz"
+          printf '%s  %s\n' "$CELLD_ARCHIVE_SHA256" "$RUNNER_TEMP/celld.gz" | sha256sum -c -
+          gunzip -c "$RUNNER_TEMP/celld.gz" > "$RUNNER_TEMP/celld"
+          chmod +x "$RUNNER_TEMP/celld"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
-      - name: live room contract (handler -> proxy -> cell)
-        run: CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 go test -count=1 ./internal/http -run 'TestLiveRoom'
+      - name: celld storage and room contracts
+        run: |
+          celld dev ./celld --host 127.0.0.1 --port 8087 --logs >"$RUNNER_TEMP/celld-dev.log" 2>&1 &
+          celld_pid=$!
+          trap 'kill "$celld_pid" 2>/dev/null || true' EXIT
+
+          ready=false
+          for _ in $(seq 1 60); do
+            if ! kill -0 "$celld_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/celld-dev.log"
+              exit 1
+            fi
+            if curl -fsS http://127.0.0.1:8087/.well-known/celld/health >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            cat "$RUNNER_TEMP/celld-dev.log"
+            exit 1
+          fi
+
+          CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
+            go test -count=1 ./internal/storage -run 'TestConformance_Celld'
+          CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
+            go test -count=1 ./internal/http -run 'TestLiveRoom'

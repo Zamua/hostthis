@@ -34,7 +34,7 @@ func (b stubBlobMap) ReadAll(_ context.Context, _, sha string) ([]byte, error) {
 	return body, nil
 }
 
-func (b stubBlobMap) Read(_ context.Context, _, sha string) (io.ReadCloser, int64, error) {
+func (b stubBlobMap) Read(_ context.Context, sha string) (io.ReadCloser, int64, error) {
 	body, ok := b.m[sha]
 	if !ok {
 		return nil, 0, storage.ErrNotFound

@@ -35,8 +35,8 @@ import (
 type lifecycleRepo interface {
 	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Paste, error)
-	MarkReady(domain.Slug) error
-	MarkFailed(domain.Slug) error
+	MarkReady(domain.Paste) error
+	MarkFailed(domain.Paste) error
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
 }
 
@@ -80,7 +80,7 @@ func conformPendingIsObservable(t *testing.T, r lifecycleRepo) {
 // The forward transition every create must be able to reach.
 func conformPendingReachesReady(t *testing.T, r lifecycleRepo) {
 	p := lifecyclePaste(t, r, "lc223456", "key:lifecycle", 100)
-	if err := r.MarkReady(p.Slug); err != nil {
+	if err := r.MarkReady(p); err != nil {
 		t.Fatalf("MarkReady: %v", err)
 	}
 	if got := statusOf(t, r, p.Slug); got != domain.PasteStatusReady {
@@ -102,7 +102,7 @@ func conformPendingReachesFailedAndReleasesQuota(t *testing.T, r lifecycleRepo) 
 	if before != 700 {
 		t.Fatalf("charged bytes before failure = %d; want 700, a pending paste charges immediately", before)
 	}
-	if err := r.MarkFailed(p.Slug); err != nil {
+	if err := r.MarkFailed(p); err != nil {
 		t.Fatalf("MarkFailed: %v", err)
 	}
 	if got := statusOf(t, r, p.Slug); got != domain.PasteStatusFailed {
@@ -123,11 +123,11 @@ func conformPendingReachesFailedAndReleasesQuota(t *testing.T, r lifecycleRepo) 
 // paste whose bytes were already reclaimed.
 func conformFailedIsTerminal(t *testing.T, r lifecycleRepo) {
 	p := lifecyclePaste(t, r, "lc423456", "key:lifecycle", 100)
-	if err := r.MarkFailed(p.Slug); err != nil {
+	if err := r.MarkFailed(p); err != nil {
 		t.Fatalf("MarkFailed: %v", err)
 	}
 	// Not an error: a late finalizer calling this is a race, not a fault.
-	if err := r.MarkReady(p.Slug); err != nil {
+	if err := r.MarkReady(p); err != nil {
 		t.Fatalf("MarkReady on a failed paste = %v; want nil, a late finalizer is a race not a fault", err)
 	}
 	if got := statusOf(t, r, p.Slug); got != domain.PasteStatusFailed {
@@ -141,7 +141,7 @@ func conformFailedIsTerminal(t *testing.T, r lifecycleRepo) {
 func conformStatusTransitionsAreIdempotent(t *testing.T, r lifecycleRepo) {
 	p := lifecyclePaste(t, r, "lc523456", "key:lifecycle", 100)
 	for i := range 3 {
-		if err := r.MarkReady(p.Slug); err != nil {
+		if err := r.MarkReady(p); err != nil {
 			t.Fatalf("MarkReady #%d: %v", i, err)
 		}
 	}
@@ -151,7 +151,7 @@ func conformStatusTransitionsAreIdempotent(t *testing.T, r lifecycleRepo) {
 	// A READY paste does not fall back to FAILED either: only a PENDING paste
 	// is still in flight, so this is the same guard as FailedIsTerminal from
 	// the other side.
-	if err := r.MarkFailed(p.Slug); err != nil {
+	if err := r.MarkFailed(p); err != nil {
 		t.Fatalf("MarkFailed on a ready paste = %v; want nil", err)
 	}
 	if got := statusOf(t, r, p.Slug); got != domain.PasteStatusReady {
@@ -164,14 +164,14 @@ func conformStatusTransitionsAreIdempotent(t *testing.T, r lifecycleRepo) {
 // absent, and the call is not an error: the caller cannot distinguish "already
 // resolved" from "never existed" and must not have to.
 func conformStatusOnMissingPasteIsNoOp(t *testing.T, r lifecycleRepo) {
-	const missing = domain.Slug("lc623456")
+	missing := domain.Paste{Slug: "lc623456", Generation: "generation-missing"}
 	if err := r.MarkReady(missing); err != nil {
 		t.Fatalf("MarkReady on a missing paste = %v; want nil", err)
 	}
 	if err := r.MarkFailed(missing); err != nil {
 		t.Fatalf("MarkFailed on a missing paste = %v; want nil", err)
 	}
-	if _, err := r.Get(missing); err == nil {
+	if _, err := r.Get(missing.Slug); err == nil {
 		t.Fatal("a status transition created a paste that was never inserted")
 	}
 }
@@ -187,7 +187,7 @@ func conformReadyAtInsertIsLegal(t *testing.T, r lifecycleRepo) {
 	if got := statusOf(t, r, p.Slug); got != domain.PasteStatusReady {
 		t.Fatalf("status after a ready insert = %q; want %q", got, domain.PasteStatusReady)
 	}
-	if err := r.MarkReady(p.Slug); err != nil {
+	if err := r.MarkReady(p); err != nil {
 		t.Fatalf("MarkReady on an already-ready paste = %v; want nil", err)
 	}
 	if got := statusOf(t, r, p.Slug); got != domain.PasteStatusReady {

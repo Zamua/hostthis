@@ -10,18 +10,8 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// RoomRepo is the celld implementation of app room storage.
-//
-// The room IS the cell, which is what makes the dense per-room sequence free:
-// "+1 per committed mutation" needs the mutations serialized, and a cell handles
-// one event at a time. On a sharded store the same guarantee costs a CAS per
-// write.
-//
-// The per-APP budget cannot live in a room, because the app spans rooms. It
-// lives in the app's paste cell - the app slug already addresses one - alongside
-// the creation ledger. So a room write is two cells, and the order is the one
-// used everywhere else here: the authoritative state first, the derived total
-// after, so a crash between them OVER-charges rather than under-charging.
+// RoomRepo stores each room in one celld cell. The app's Paste cell coordinates
+// exact byte allocations across sibling rooms.
 type RoomRepo struct {
 	base   string
 	client *http.Client
@@ -44,17 +34,27 @@ func roomKey(app domain.Slug, id domain.RoomID) string {
 	return app.String() + "|" + id.String()
 }
 
-// CreateRoom is ONE call: the room cell records itself and writes the app's
-// creation-ledger entry cell to cell, inside its own event.
-func (r *RoomRepo) CreateRoom(room domain.Room, subnet string, _ int64, now time.Time) error {
-	_, err := r.paste().call(context.Background(), http.MethodPost, "/room/create", "room",
+// CreateRoom records the room and its app-scoped creation ledger through one
+// Room-cell request.
+func (r *RoomRepo) CreateRoom(room domain.Room, subnet string, appCap int64, now time.Time) error {
+	status, err := r.paste().call(context.Background(), http.MethodPost, "/room/create", "room",
 		roomKey(room.AppSlug, room.ID), map[string]any{
 			"appSlug": room.AppSlug.String(), "id": room.ID.String(),
 			"createdAt": room.CreatedAt.UTC().UnixMilli(),
 			"updatedAt": room.UpdatedAt.UTC().UnixMilli(),
 			"subnet":    subnet, "at": now.UTC().UnixMilli(),
+			"appCap": appCap,
 		}, nil)
-	return err
+	if err != nil {
+		return err
+	}
+	if status == http.StatusInsufficientStorage {
+		return domain.ErrAppRoomsFull
+	}
+	if status >= 300 {
+		return fmt.Errorf("celld: room create: unexpected status %d", status)
+	}
+	return nil
 }
 
 func (r *RoomRepo) GetRoom(app domain.Slug, id domain.RoomID) (domain.Room, error) {

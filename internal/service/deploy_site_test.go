@@ -61,7 +61,25 @@ func gzipTar(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-// incompressible returns n bytes of random data. Sites charge their COMPRESSED
+func gzipTarEntries(t *testing.T, files [][2]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, file := range files {
+		name, body := file[0], file[1]
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatalf("hdr %q: %v", name, err)
+		}
+		if _, err := tw.Write([]byte(body)); err != nil {
+			t.Fatalf("body %q: %v", name, err)
+		}
+	}
+	_ = tw.Close()
+	_ = gz.Close()
+	return buf.Bytes()
+}
+
 // size, so a "fill the budget" fixture must be incompressible for its charge to
 // be ~n; repeated bytes would squash to nothing.
 func incompressible(t *testing.T, n int) string {
@@ -193,6 +211,26 @@ func TestDeploySite_ChargesCompressedSize(t *testing.T) {
 	}
 	if compressed >= uncompressed/10 {
 		t.Fatalf("compressible site should charge <<10%% of raw: compressed %d vs uncompressed %d", compressed, uncompressed)
+	}
+}
+
+func TestDeploySite_ChargesOnlyFinalNormalizedManifestPaths(t *testing.T) {
+	d, _, _ := deployFixture(t)
+	owner := "key:duplicate-path"
+	archive := gzipTarEntries(t, [][2]string{
+		{"./index.html", "first body"},
+		{"index.html", "replacement body"},
+	})
+
+	result, err := d.Deploy(bytes.NewReader(archive), owner)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	if got := ownerCharge(t, owner); got != int64(result.Site.Manifest.CompressedSize()) {
+		t.Fatalf("charge includes discarded staging writes: got %d, final manifest %d", got, result.Site.Manifest.CompressedSize())
+	}
+	if len(result.Site.Manifest.Files) != 1 {
+		t.Fatalf("normalized duplicate should leave one path, got %d", len(result.Site.Manifest.Files))
 	}
 }
 

@@ -1,28 +1,42 @@
 # hostthis on celld
 
-Experimental second backend for the metadata plane. shale remains the default;
-this exists to be measured against it.
+This directory contains hostthis's production metadata Worker. The Go service
+reaches its HTTP and WebSocket routes through the `internal/celld` adapter;
+public SSH and HTTP remain owned by `hostthisd`.
 
-`src/index.js` is the Worker plus the Durable Object classes. The Go side talks
-to it over HTTP from `internal/celld`, because celld serves HTTP and WebSocket
-only and hostthis's interface is SSH: `internal/ssh` stays a Go process and
-becomes a client.
+## Local development
 
-## One application per fleet
+Install celld v0.4.0, then run the Worker with celld's local runtime:
 
-A celld fleet serves exactly one application. `deploy/current.json` at the root
-of the deploy prefix names one script, so a second `celld deploy` against the
-same bucket replaces whatever was there, with no error at deploy time and no
-warning at startup. hostthis therefore gets its own bucket and its own nodes,
-sharing only the MinIO cluster.
+```sh
+celld dev --port 8087
+```
+
+Run that command from this directory. It watches the Worker source and preserves
+local durable state under `.celld/dev`. Stop celld before deleting that directory
+to reset the state.
+
+From the repository root, the live adapter suites target the local listener:
+
+```sh
+CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
+  go test -count=1 ./internal/storage -run TestConformance_Celld
+CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
+  go test -count=1 ./internal/http -run TestLiveRoom
+```
+
+`npm test` runs the Worker-level atomicity and crash-boundary suite without a
+runtime.
 
 ## Cell topology
 
-| cell | holds |
+| cell | owns |
 | --- | --- |
-| `<scope>` (owner identity) | that owner's outstanding durable intents |
+| Identity | one owner's index, quota state, and durable intents |
+| Paste | one slug's metadata and versions, or one app's room allocation ledger |
+| Room | one room's metadata, key/value state, sequence, and sockets |
+| Subnet | one subnet's fresh-identity admission window |
 
-The intent log is scoped to the owner because that is the recovery unit, and
-because a paste's row and its owner index live in different cells with no
-transaction spanning them - the same condition that made the intent log
-necessary on shale.
+A celld fleet serves one Worker application. Paste and site payloads remain in
+the provider-neutral content-addressed blob store; celld owns metadata and room
+state only.

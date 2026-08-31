@@ -21,9 +21,8 @@ const wsKey = "ws"
 // WebSocket connection for a room. internal/celld.RoomProxy satisfies it.
 // Optional: when nil, the /ws path 404s.
 type RoomRelay interface {
-	// Admit reserves a connection slot under the per-room / per-app /
-	// total-rooms caps, returning the roomwire admission sentinels for the
-	// HTTP layer to map to a status. Called BEFORE the websocket handshake.
+	// Admit reserves a connection slot under the per-room and per-app caps.
+	// Called before the WebSocket handshake.
 	Admit(key roomwire.RoomKey) (uint64, error)
 	// Serve runs the accepted connection's lifecycle (snapshot, stream,
 	// heartbeat) and blocks until it ends.
@@ -40,8 +39,7 @@ type RoomRelay interface {
 //   - the app slug names a LIVE app, else 404
 //   - the room EXISTS, else 404: a relay to a never-created room has nothing
 //     to back its late-join snapshot
-//   - the connection caps admit it, else 429 (room/app full) or 503 (too many
-//     active relay rooms)
+//   - the connection caps admit it, else 429
 //   - the request is a real Upgrade with an allowed Origin, enforced by
 //     websocket.Accept, which writes its own 400/426
 func (s *Server) handleRoomWS(w http.ResponseWriter, r *http.Request, appSlug domain.Slug, id domain.RoomID) {
@@ -105,16 +103,12 @@ func wsAcceptOptions(apexDomain string) *websocket.AcceptOptions {
 	}
 }
 
-// writeRelayAdmitError maps the relay admission sentinels to status codes: a
-// room / app connection cap is 429; the service-wide live-room cap is 503,
-// which only refuses an upgrade that would create a NEW hub, so joins to live
-// rooms still succeed.
 func writeRelayAdmitError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, roomwire.ErrRelayDraining):
+		http.Error(w, "service restarting\n", http.StatusServiceUnavailable)
 	case errors.Is(err, roomwire.ErrRoomFull), errors.Is(err, roomwire.ErrAppFull):
 		http.Error(w, "room connection limit reached\n", http.StatusTooManyRequests)
-	case errors.Is(err, roomwire.ErrTooManyRooms):
-		http.Error(w, "relay at capacity\n", http.StatusServiceUnavailable)
 	default:
 		http.Error(w, "internal error\n", http.StatusInternalServerError)
 	}
