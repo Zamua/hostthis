@@ -183,10 +183,14 @@ export class Identity {
         if (existing.generation !== generation) {
           return Response.json({ error: "slug-taken" }, { status: 409 });
         }
-        if (chargedSize(existing) !== body.size) {
-          return Response.json({ error: "reservation-mismatch" }, { status: 409 });
+        // Replay tolerance exists for response loss inside one unresolved
+        // create. A discharged intent means that create completed, so a
+        // repeat is a duplicate insert, not a retry.
+        if (await tx.get(intentKey(body.intent.id)) === undefined) {
+          return Response.json({ error: "slug-taken" }, { status: 409 });
         }
-        if (body.intent && existing.createFingerprint !== body.intent.fingerprint) {
+        if (chargedSize(existing) !== body.size ||
+            existing.createFingerprint !== body.intent.fingerprint) {
           return Response.json({ error: "reservation-mismatch" }, { status: 409 });
         }
         const active = Object.values(entries).reduce((n, e) => n + chargedSize(e), 0);

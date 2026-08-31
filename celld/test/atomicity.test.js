@@ -186,6 +186,32 @@ test("Identity.reserve requires a valid create intent before charging", async ()
   }
 });
 
+test("Identity.reserve replays only an unresolved create and refuses a completed one", async () => {
+  const storage = new FakeStorage();
+  const identity = new Identity(state(storage));
+  const body = {
+    slug: "slugone1", generation: "generation-1", size: 3, userCap: 10,
+    status: "pending", now: 1,
+    intent: {
+      id: "create:slugone1:generation-1", kind: "create_paste",
+      subject: "slugone1", fingerprint: "fingerprint-1",
+    },
+  };
+  assert.equal((await identity.reserve(body)).status, 200);
+  const replay = await responseJSON(await identity.reserve(structuredClone(body)));
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.replayed, true);
+
+  assert.equal((await identity.confirm({
+    slug: "slugone1", generation: "generation-1", status: "ready",
+    intentId: "create:slugone1:generation-1",
+  })).status, 204);
+  const repeated = await responseJSON(await identity.reserve(structuredClone(body)));
+  assert.equal(repeated.status, 409);
+  assert.equal(repeated.body.error, "slug-taken");
+  assert.equal(storage.data.get("entries").slugone1.status, "ready");
+});
+
 test("Identity serializes concurrent quota reservations", async () => {
   const storage = new FakeStorage();
   const identity = new Identity(serialState(storage));

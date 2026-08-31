@@ -289,9 +289,11 @@ func (p *RoomProxy) Serve(ctx context.Context, key roomwire.RoomKey, id uint64, 
 		relayCancel()
 		return
 	}
-	locallyCanceled := ctx.Err() != nil
-	relayCancel()
-	if locallyCanceled {
+	// The close frame must reach the wire before relayCancel: canceling the
+	// context of a blocked Read tears the connection down abruptly, which
+	// races the graceful close into an EOF. The deferred relayCancel runs
+	// after the deferred closes.
+	if ctx.Err() != nil {
 		return
 	}
 	var closeErr websocket.CloseError

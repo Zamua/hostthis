@@ -169,7 +169,9 @@ func (r *PasteRepo) call(ctx context.Context, method, path, key, val string, bod
 		}
 		return resp.StatusCode, nil
 	}
-	if out != nil {
+	// Answer statuses >= 300 carry sentinel meaning, not a decodable body: a
+	// cell 404 says "not found\n", which is no caller's JSON.
+	if out != nil && resp.StatusCode < 300 {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil && !errors.Is(err, io.EOF) {
 			return resp.StatusCode, fmt.Errorf("celld: decode %s: %w", path, err)
 		}

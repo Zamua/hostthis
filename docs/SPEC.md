@@ -2902,9 +2902,11 @@ monotonic versions make response loss and delayed delivery safe.
 
 A first-version create reserves the Identity charge and persists a create intent
 with an opaque fingerprint of the exact Paste row in one transaction. Paste
-publication records the same fingerprint. Replaying the same generation succeeds
-only when its fingerprint matches; a same-generation request with different
-content is a conflict. Recovery atomically inspects the Paste cell and, when the
+publication records the same fingerprint. While the intent is outstanding,
+replaying the same generation succeeds only when its fingerprint matches; a
+same-generation request with different content is a conflict, and once the
+intent is discharged a repeated reservation for the slug is refused as taken
+regardless of fingerprint. Recovery atomically inspects the Paste cell and, when the
 matching row is absent, fences that generation against every late `put` before it
 releases the reservation. When the row is present, recovery requires the matching
 fingerprint and confirms from the row's authoritative status. Confirmation may
