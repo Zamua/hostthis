@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pre-commit hook for shale.
+# Pre-commit checks for hostthis.
 #
 # What it checks (Go-only; no-op when no .go files are staged):
 #   1. gofmt    every staged .go file is properly formatted
@@ -62,9 +62,7 @@ fi
 
 # 3. go fix modernize check: in Go 1.26 'go fix' is the modernizer suite.
 #    '-diff' prints pending modernizations without applying; non-empty output
-#    means un-modernized idioms are staged. (Default tags only; the cdylib
-#    isn't assumed present, so slatedb-tagged files are checked by running
-#    'go fix ./...' manually + the future slatedb CI job.)
+#    means un-modernized idioms are staged.
 #    GOWORK=off for the same reason as vet above. Note this step FAILS OPEN by
 #    construction: '2>/dev/null || true' turns any error into empty output,
 #    which reads as "nothing pending" and passes. So if the module graph will

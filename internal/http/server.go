@@ -30,14 +30,9 @@ type SiteReader interface {
 	Get(domain.Slug) (domain.Site, error)
 }
 
-// BlobReader is the read side of the per-record blob seam. It offers ONLY a
-// streaming read: no serving path may allocate per payload, so the seam does
-// not expose a way to (docs/SPEC.md "Reads are constant-memory too"). It takes
-// the record's slug plus its content sha: the standalone backend keys by sha
-// alone and ignores the slug, the transactional shale backend routes on it.
-// service.BlobUnit satisfies this.
+// BlobReader is the streaming read side of the content-addressed byte plane.
 type BlobReader interface {
-	Read(ctx context.Context, slug, sha string) (io.ReadCloser, int64, error)
+	Read(ctx context.Context, sha string) (io.ReadCloser, int64, error)
 }
 
 // Server bundles the dependencies.
@@ -52,12 +47,7 @@ type Server struct {
 	// Color labels the replica in blue/green deploys, echoed in the
 	// X-Backend-Color header on /healthz. Empty for single-replica deploys.
 	Color string
-	// Readiness gates /readyz (docs/SPEC.md "Readiness vs liveness") with the
-	// metadata backend's readiness predicate. Optional; nil means always
-	// ready, for backends with no mount concept whose open failures already
-	// fail startup.
-	Readiness ReadinessProber
-	Now       func() time.Time
+	Now   func() time.Time
 	// Logf, when set, receives one warn line per 5xx served by the paste/site
 	// read path (docs/SPEC.md "5xx observability on the read surface"): slug +
 	// underlying error, so a read 500 is attributable from the logs while the
@@ -79,11 +69,7 @@ func (s *Server) Handler() http.Handler {
 	// asset names, so the prefix cannot reach any other path.
 	mux.HandleFunc("/_hostthis/", s.serveAsset)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// /healthz and /readyz answer on any Host, ungated, and ask different
-		// questions: /healthz is liveness (process up, a restart signal),
-		// /readyz applies the metadata backend's readiness predicate so a
-		// rollout stalls on a pod that cannot mount its storage instead of
-		// replacing the fleet. See docs/SPEC.md "Readiness vs liveness".
+		// Health endpoints answer on any Host and never enter slug routing.
 		if r.URL.Path == "/healthz" {
 			s.serveHealthz(w, r)
 			return
@@ -299,7 +285,7 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 	// buffers the whole payload; the body is byte-identical to a buffered read
 	// + write, and server memory stays constant regardless of paste size.
 	streamBlob := func(ct, what string) {
-		rc, _, err := s.Blobs.Read(r.Context(), string(slug), p.ContentSHA)
+		rc, _, err := s.Blobs.Read(r.Context(), p.ContentSHA)
 		if err != nil {
 			s.logf("warn: paste read 500: slug=%s %s blob read: %v", slug, what, err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -499,7 +485,7 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 	}
 
 	// Streamed so a GET never buffers the whole asset.
-	rc, _, err := s.Blobs.Read(r.Context(), string(slug), entry.SHA)
+	rc, _, err := s.Blobs.Read(r.Context(), entry.SHA)
 	if err != nil {
 		s.logf("warn: site read 500: slug=%s file blob read: %v", slug, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

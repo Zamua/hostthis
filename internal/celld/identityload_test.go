@@ -3,13 +3,12 @@ package celld_test
 // Does the identity cell become a bottleneck under concurrent uploads from ONE
 // owner?
 //
-// Every upload touches that cell twice - once to check quota and reserve, once
-// to confirm - and a cell is single-threaded, so one owner's uploads serialize
-// there by construction. The question is whether that serialization is cheap
-// enough to live with, or whether Identity should have been two cells. Class
-// names are in the storage key path and celld rejects renamed_classes, so the
-// taxonomy is effectively permanent once prod has data: this is worth measuring
-// before that, not after.
+// Every upload mutates that cell twice: once to reserve quota and once to
+// confirm. Those mutations use blockConcurrencyWhile, so one owner's uploads
+// contend on the same serialized section. The question is whether that cost is
+// material relative to uploads spread across distinct identities. Class names
+// are part of persistent routing and cannot be renamed after production data
+// exists, so this is measured before deployment.
 //
 // THE CONTROL IS THE POINT. Rising latency with rising N proves nothing on its
 // own - HTTP, the client, the port-forward and the node all contend too. So the
@@ -83,11 +82,8 @@ func TestIdentityCellUnderConcurrentUploads(t *testing.T) {
 	repo := celld.NewPasteRepo(base, nil)
 	run := time.Now().UnixNano() % 100000
 
-	// WARM FIRST. Without this the distinct-identity arm pays to activate N cold
-	// cells while the shared arm activates one, so the comparison measures
-	// activation rather than serialization - which is the opposite of the
-	// question. A discarded warm-up burst makes every cell resident in both
-	// arms, leaving the shared cell's single thread as the only difference.
+	// Warm both arms so the comparison isolates contention in the shared
+	// blockConcurrencyWhile section rather than cell activation.
 	t.Log("N | shared-identity wall/p50/p99 | distinct-identity wall/p50/p99 | shared:distinct wall")
 	for _, n := range []int{1, 4, 8, 16, 32} {
 		shared := fmt.Sprintf("key:load%d-s%d", run, n)
@@ -106,6 +102,6 @@ func TestIdentityCellUnderConcurrentUploads(t *testing.T) {
 			dw.Round(time.Millisecond), pctl(dl, 0.5).Round(time.Millisecond), pctl(dl, 0.99).Round(time.Millisecond),
 			ratio)
 	}
-	t.Log("both arms pre-warmed, so the ratio isolates the shared cell's single thread")
+	t.Log("both arms pre-warmed, so the ratio isolates shared serialization")
 	t.Log("ratio near 1.0 means the identity cell is not the constraint at this concurrency")
 }

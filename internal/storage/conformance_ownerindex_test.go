@@ -9,9 +9,8 @@ package storage_test
 //
 // The property that matters across backends is not how the index is stored but
 // that it AGREES with the pastes: everything inserted appears, nothing failed
-// appears, and an entry whose paste has vanished can be repaired away. shale
-// maintains a derived document; celld keeps a denormalised summary in the
-// identity cell. Both must produce the same answers.
+// appears, and an entry whose paste has vanished can be repaired away. The
+// celld adapter keeps a denormalized summary in the identity cell.
 
 import (
 	"context"
@@ -24,7 +23,7 @@ import (
 type ownerIndexRepo interface {
 	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Paste, error)
-	MarkFailed(domain.Slug) error
+	MarkFailed(domain.Paste) error
 	ListByOwner(owner string) ([]domain.Paste, error)
 	CountByOwner(owner string) (int, error)
 	OwnerFirstSeen(owner string) (time.Time, error)
@@ -32,9 +31,9 @@ type ownerIndexRepo interface {
 	SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
 	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
-	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, kind domain.ContentKind,
+	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, generation string, kind domain.ContentKind,
 		contentSHA string, size int, userCap int64, now time.Time) (domain.AppendResult, error)
-	DeleteVersion(domain.Slug, int) error
+	DeleteVersion(domain.Slug, string, int) error
 }
 
 func chargedBytes(t *testing.T, r ownerIndexRepo, owner string) (int, error) {
@@ -88,7 +87,7 @@ func conformOwnerListExcludesFailed(t *testing.T, r ownerIndexRepo) {
 	p := pasteOf("oi423456", owner, 10)
 	p.Status = domain.PasteStatusPending
 	ownerInsert(t, r, p)
-	if err := r.MarkFailed(p.Slug); err != nil {
+	if err := r.MarkFailed(p); err != nil {
 		t.Fatalf("MarkFailed: %v", err)
 	}
 	got, err := r.ListByOwner(owner)
@@ -150,15 +149,8 @@ func conformDropStaleEntryOnlyWhenAbsent(t *testing.T, r ownerIndexRepo) {
 	}
 }
 
-// FRESHNESS, which membership does not imply. The first four properties are
-// about WHICH pastes a listing contains; none of them notices a listing that
-// keeps serving an old name. A backend that denormalises anything mutable into
-// its index - which both of these do, for good reasons - can pass all four
-// while showing the owner stale contents.
-//
-// Measured against shale before being asserted: its listing DOES reflect a
-// rename, so freshness is part of the contract rather than an artifact, and a
-// second backend does not get to be lazier.
+// The listing must reflect mutable fields, not only membership. A backend can
+// otherwise list every paste while serving stale names.
 func conformOwnerListReflectsMutation(t *testing.T, r ownerIndexRepo) {
 	const owner = "key:oi-fresh"
 	p := pasteOf("oi923456", owner, 10)
@@ -223,7 +215,7 @@ func conformReleaseIsIdempotent(t *testing.T, r ownerIndexRepo) {
 	keep := pasteOf("oib23456", owner, 300)
 	ownerInsert(t, r, keep)
 
-	if err := r.MarkFailed(p.Slug); err != nil {
+	if err := r.MarkFailed(p); err != nil {
 		t.Fatalf("MarkFailed: %v", err)
 	}
 	after, err := chargedBytes(t, r, owner)
@@ -235,7 +227,7 @@ func conformReleaseIsIdempotent(t *testing.T, r ownerIndexRepo) {
 	}
 
 	// The replay. A resolver that ran twice must not charge differently.
-	if err := r.MarkFailed(p.Slug); err != nil {
+	if err := r.MarkFailed(p); err != nil {
 		t.Fatalf("MarkFailed replay: %v", err)
 	}
 	replayed, err := chargedBytes(t, r, owner)
@@ -300,24 +292,14 @@ func conformDeleteReleasesAndDelists(t *testing.T, r ownerIndexRepo) {
 	}
 }
 
-// A new version changes what a paste COSTS, so the charge must follow it.
-//
-// Measured against shale before being asserted: appending a 300-byte version to
-// a 700-byte paste charges 1000, so every retained version counts and a version
-// write is on the quota path. A backend whose identity index carries the size -
-// which is how a listing stays a point read - therefore has to update it here
-// too, or the owner is charged for a paste they no longer have.
-//
-// The gap this closes: DeleteReleasesAndDelists pins that charge and listing
-// agree after a DELETE. Nothing pinned that they agree after an UPDATE, which
-// is exactly where a silent drift would live - redeploy-in-place is a
-// first-class workflow, not an edge case.
+// Every retained version is charged, so changing the version set must update
+// both the aggregate charge and the point-readable owner summary.
 func conformVersionChangesTheCharge(t *testing.T, r ownerIndexRepo) {
 	const owner = "key:oi-version"
 	p := pasteOf("oie23456", owner, 700)
 	ownerInsert(t, r, p)
 
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), p.Slug,
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), p.Slug, p.Generation,
 		domain.KindHTML, "sha-v2", 300, 0, fixedNow); err != nil {
 		t.Fatalf("AppendVersionWithQuotaCheck: %v", err)
 	}
@@ -345,7 +327,7 @@ func conformDeleteVersionRefundsTheCharge(t *testing.T, r ownerIndexRepo) {
 	p := pasteOf("oif23456", owner, 700)
 	ownerInsert(t, r, p)
 
-	res, err := r.AppendVersionWithQuotaCheck(context.Background(), p.Slug,
+	_, err := r.AppendVersionWithQuotaCheck(context.Background(), p.Slug, p.Generation,
 		domain.KindHTML, "sha-v2", 300, 0, fixedNow)
 	if err != nil {
 		t.Fatalf("AppendVersionWithQuotaCheck: %v", err)
@@ -354,8 +336,8 @@ func conformDeleteVersionRefundsTheCharge(t *testing.T, r ownerIndexRepo) {
 		t.Fatalf("charged = %d after the append (err %v); want 1000", n, err)
 	}
 
-	if err := r.DeleteVersion(p.Slug, res.NewVer); err != nil {
-		t.Fatalf("DeleteVersion(%d): %v", res.NewVer, err)
+	if err := r.DeleteVersion(p.Slug, p.Generation, 1); err != nil {
+		t.Fatalf("DeleteVersion(1): %v", err)
 	}
 	if d, ok := r.(pendingConfirmsDrainer); ok {
 		d.WaitPendingConfirms()
@@ -364,9 +346,9 @@ func conformDeleteVersionRefundsTheCharge(t *testing.T, r ownerIndexRepo) {
 	if err != nil {
 		t.Fatalf("charged after deleting the version: %v", err)
 	}
-	if n != 700 {
-		t.Fatalf("charged = %d after deleting a 300-byte version from a 1000-byte total; "+
-			"want 700. Deleted versions contribute zero bytes.", n)
+	if n != 300 {
+		t.Fatalf("charged = %d after deleting a 700-byte version from a 1000-byte total; "+
+			"want 300. Deleted versions contribute zero bytes.", n)
 	}
 }
 

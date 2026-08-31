@@ -154,7 +154,7 @@ func TestWriteBack_UnderCapPutSkipsEvictionWalk(t *testing.T) {
 	logs.Reset()
 
 	body := []byte("well under the cap")
-	if err := wb.PutPrecompressed(wbShaOf(body), body); err != nil {
+	if err := wb.PutPrecompressed(wbShaOf(body), bytes.NewReader(body), int64(len(body))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	if strings.Contains(logs.String(), "eviction scan error") {

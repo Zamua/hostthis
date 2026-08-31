@@ -46,8 +46,8 @@ func (r *countingCreateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Pa
 }
 
 func (r *countingCreateRepo) Get(domain.Slug) (domain.Paste, error) { return domain.Paste{}, nil }
-func (r *countingCreateRepo) MarkReady(domain.Slug) error           { return nil }
-func (r *countingCreateRepo) MarkFailed(domain.Slug) error          { return nil }
+func (r *countingCreateRepo) MarkReady(domain.Paste) error          { return nil }
+func (r *countingCreateRepo) MarkFailed(domain.Paste) error         { return nil }
 
 func (r *countingCreateRepo) insideNow() int {
 	r.mu.Lock()

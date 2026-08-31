@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -31,9 +32,92 @@ type fakeBlobs struct {
 
 func newFakeBlobs() *fakeBlobs { return &fakeBlobs{stored: map[string][]byte{}} }
 
-func (f *fakeBlobs) PutPrecompressed(sha string, body []byte) error {
+type syncOrderBlob struct {
+	stageCalls int
+	stageErr   error
+}
+
+func (b *syncOrderBlob) StagePrecompressed(context.Context, string, io.Reader, int64) error {
+	b.stageCalls++
+	return b.stageErr
+}
+func (*syncOrderBlob) StageEncoding(context.Context, io.Reader) (string, int, error) {
+	return "", 0, errors.New("unexpected encoding")
+}
+func (*syncOrderBlob) Read(context.Context, string) (io.ReadCloser, int64, error) {
+	return nil, 0, errors.New("unexpected read")
+}
+
+type syncOrderRepo struct {
+	blob        *syncOrderBlob
+	insertCalls int
+	markCalls   int
+	inserted    domain.Paste
+}
+
+func (r *syncOrderRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, _ int64, _ time.Time) error {
+	if r.blob.stageCalls == 0 {
+		return errors.New("metadata inserted before bytes")
+	}
+	r.insertCalls++
+	r.inserted = p
+	return nil
+}
+func (*syncOrderRepo) Get(domain.Slug) (domain.Paste, error) {
+	return domain.Paste{}, domain.ErrNotFound
+}
+func (r *syncOrderRepo) MarkReady(domain.Paste) error  { r.markCalls++; return nil }
+func (r *syncOrderRepo) MarkFailed(domain.Paste) error { r.markCalls++; return nil }
+
+// Sync mode makes ready metadata visible only after its bytes are durable.
+func TestUpload_SyncBlobOrdersBytesBeforeReadyMetadata(t *testing.T) {
+	blob := &syncOrderBlob{}
+	repo := &syncOrderRepo{blob: blob}
+	u := NewUpload(repo, blob)
+	u.SyncBlob = true
+
+	res, err := u.Create(bytes.NewReader([]byte("# body")), "key:owner", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if blob.stageCalls != 1 || repo.insertCalls != 1 {
+		t.Fatalf("stage/insert calls = %d/%d, want 1/1", blob.stageCalls, repo.insertCalls)
+	}
+	if res.Paste.Status != domain.PasteStatusReady || repo.inserted.Status != domain.PasteStatusReady {
+		t.Fatalf("result/inserted status = %q/%q, want ready", res.Paste.Status, repo.inserted.Status)
+	}
+	if repo.markCalls != 0 {
+		t.Fatalf("status transition calls = %d, want 0", repo.markCalls)
+	}
+}
+
+// A failed synchronous byte write leaves no metadata behind.
+func TestUpload_SyncBlobWriteFailureSkipsMetadata(t *testing.T) {
+	writeErr := errors.New("blob unavailable")
+	blob := &syncOrderBlob{stageErr: writeErr}
+	repo := &syncOrderRepo{blob: blob}
+	u := NewUpload(repo, blob)
+	u.SyncBlob = true
+
+	_, err := u.Create(bytes.NewReader([]byte("# body")), "key:owner", "", "")
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("Create = %v, want blob error", err)
+	}
+	if repo.insertCalls != 0 || repo.markCalls != 0 {
+		t.Fatalf("insert/status calls = %d/%d, want 0/0", repo.insertCalls, repo.markCalls)
+	}
+}
+
+func (f *fakeBlobs) PutPrecompressed(sha string, body io.Reader, size int64) error {
 	if f.holdPut != nil {
 		<-f.holdPut
+	}
+	b, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	if int64(len(b)) != size {
+		return errors.New("precompressed size mismatch")
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -41,16 +125,12 @@ func (f *fakeBlobs) PutPrecompressed(sha string, body []byte) error {
 	if f.failPut {
 		return errors.New("simulated blob write failure")
 	}
-	f.stored[sha] = append([]byte(nil), body...)
+	f.stored[sha] = b
 	return nil
 }
 
 func (f *fakeBlobs) Put(sha string, r io.Reader, size int64) error {
-	b, err := io.ReadAll(r)
-	if err != nil {
-		return err
-	}
-	return f.PutPrecompressed(sha, b)
+	return f.PutPrecompressed(sha, r, size)
 }
 
 func (f *fakeBlobs) Get(sha string) ([]byte, error) {
@@ -134,6 +214,49 @@ func TestUpload_Create_ReturnsPending(t *testing.T) {
 	// Release the finalizer and drain it so cleanup does not strand it.
 	close(blobs.holdPut)
 	waitFinalize(t, done)
+}
+
+// A finalizer cannot settle a replacement that reuses the slug.
+func TestUpload_Finalize_FencesReplacementIncarnation(t *testing.T) {
+	for _, failPut := range []bool{false, true} {
+		name := "ready"
+		if failPut {
+			name = "failed"
+		}
+		t.Run(name, func(t *testing.T) {
+			blobs := newFakeBlobs()
+			blobs.holdPut = make(chan struct{})
+			blobs.failPut = failPut
+			u, repo, done := newStackWithBlobs(t, blobs)
+
+			res, err := u.Create(bytes.NewReader([]byte("<p>old</p>")), "owner", "", "")
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			old := res.Paste
+			if err := repo.Delete(old.Slug, old.Identity, old.CreatedAt); err != nil {
+				t.Fatalf("delete old incarnation: %v", err)
+			}
+			replacement := old
+			replacement.Generation = domain.NewPasteGeneration()
+			replacement.ContentSHA = "replacement-sha"
+			replacement.Size = 1
+			replacement.Status = domain.PasteStatusPending
+			if err := repo.InsertWithQuotaCheck(context.Background(), replacement, 0, replacement.CreatedAt); err != nil {
+				t.Fatalf("insert replacement: %v", err)
+			}
+
+			close(blobs.holdPut)
+			waitFinalize(t, done)
+			got, err := repo.Get(old.Slug)
+			if err != nil {
+				t.Fatalf("get replacement: %v", err)
+			}
+			if got.Generation != replacement.Generation || got.Status != domain.PasteStatusPending {
+				t.Fatalf("replacement generation/status = %q/%q, want %q/pending", got.Generation, got.Status, replacement.Generation)
+			}
+		})
+	}
 }
 
 // Happy path: the background finalizer writes the blob + flips to ready.
@@ -228,12 +351,17 @@ func TestUpload_Create_QuotaEnforcedSynchronously(t *testing.T) {
 	waitFinalize(t, done)
 }
 
-// EncodeBody delegates to the REAL encoder so a size assertion measures what
-// production measures; a hand-rolled length here would hide a size regression.
-func (f *fakeBlobs) EncodeBody(r io.Reader) ([]byte, int, error) {
-	body, err := storage.EncodeCompressedBody(r)
+// EncodeTo delegates to the real encoder so size assertions use the production
+// at-rest format.
+func (f *fakeBlobs) EncodeTo(w io.Writer, r io.Reader) (string, int, int64, error) {
+	raw, err := io.ReadAll(r)
 	if err != nil {
-		return nil, 0, err
+		return "", 0, 0, err
 	}
-	return body, len(body) - storage.CompressedBodyPrefixLen, nil
+	body, err := storage.EncodeCompressedBody(bytes.NewReader(raw))
+	if err != nil {
+		return "", 0, 0, err
+	}
+	n, err := w.Write(body)
+	return domain.HashContent(raw), len(body) - storage.CompressedBodyPrefixLen, int64(n), err
 }

@@ -1,10 +1,8 @@
-# Dev-only docker compose: stands up a local MinIO so the slatedb/shale
-# metadata backends and the shale-collocated blob plane can be exercised
-# end-to-end without paying for cloud storage.
+# Dev-only MinIO for the S3 blob adapter integration tests.
 #
 # Usage:
 #   docker compose -f deploy/dev/docker-compose.yml up -d
-#   make test-conformance-kv      # slatedb + shale conformance against this MinIO
+#   MINIO_TEST_ENDPOINT=http://localhost:9000 go test ./internal/storage -run TestS3Blob
 #   docker compose -f deploy/dev/docker-compose.yml down -v
 #
 # Console UI: http://localhost:9001 (admin / supersecret)
@@ -29,16 +27,6 @@ services:
       timeout: 3s
       retries: 5
 
-  # one-shot job that creates the test buckets so the integration tests
-  # don't have to. Idempotent - re-running is a no-op. Two buckets:
-  #   - hostthis-metadata: the SlateDB state the slate/shale conformance
-  #     runs write (NewSlateRepo / NewShaleRepo). SlateDB does NOT
-  #     auto-create its bucket, so without this the slatedb + shale
-  #     conformance fails on a fresh dev-minio-up until the bucket is made
-  #     by hand.
-  #   - hostthis-blobs:    the byte plane for the shale-collocated blob
-  #     tests (the metadata cluster's blob.Store; the shale-blob unit
-  #     tests use blobmem, but a live shale-blob run targets this bucket).
   bucket-init:
     image: minio/mc:latest
     container_name: hostthis-dev-bucket-init
@@ -48,8 +36,7 @@ services:
     entrypoint: >
       sh -c '
         mc alias set local http://minio:9000 admin supersecret &&
-        mc mb --ignore-existing local/hostthis-blobs &&
-        mc mb --ignore-existing local/hostthis-metadata
+        mc mb --ignore-existing local/hostthis-blobs
       '
 
 volumes:

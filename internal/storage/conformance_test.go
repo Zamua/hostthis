@@ -43,58 +43,26 @@ type conformanceRepo interface {
 // sub-second drift on any backend.
 var fixedNow = time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 
-// conformCaps declares the points where a backend's observable behavior may
-// differ by design. Anything NOT expressed here must be identical across
-// backends, so each flag is an explicit, reviewed exception.
-type conformCaps struct {
-	// StrictQuotaUnderConcurrency is true for backends where the check and the
-	// write are one atomic boundary, so a byte cap holds exactly under
-	// concurrent writes. Gates the ROOM per-room cap concurrency test; all
-	// three backends hold it. The per-IDENTITY quota is gated separately
-	// because the two strictness properties diverge on shale.
-	StrictQuotaUnderConcurrency bool
-
-	// StrictIdentityQuotaUnderConcurrency is true for backends that enforce the
-	// per-IDENTITY paste/site byte cap exactly under concurrent uploads from
-	// one identity: slatedb (a
-	// per-identity lockQuota stripe held across the sum + the write, valid
-	// because SlateDB is single-writer, so only in-process goroutines race).
-	// FALSE for shale, whose scan-and-compare is NOT atomic with the
-	// authoritative write: two concurrent uploads from one identity can both
-	// land, a bounded over-admit backstopped by the bucket quota (docs/SPEC.md
-	// "Scan-derived quota"). Gates conformQuotaConcurrentCeiling (paste) +
-	// conformSitePerOwnerCapConcurrentCeiling (site).
-	StrictIdentityQuotaUnderConcurrency bool
-}
-
 // runConformanceWithSites runs the paste contract suite against the backend
-// newRepo produces (a fresh, empty repo per call), plus the site suite when
-// newSites is non-nil and the room suite when newRooms is non-nil. name labels
-// the subtests so failures identify the backend; caps declares its by-design
-// exceptions.
-//
-// The site/room factories MUST return repos sharing the backing store of the
-// paste repo from the same call, or the cross-quota and cross-family subtests
-// exercise nothing real.
+// newRepo produces, plus the site and room suites when their factories are set.
 func runConformanceWithSites(
 	t *testing.T,
 	name string,
-	caps conformCaps,
 	newRepo func(t *testing.T) conformanceRepo,
 	newSites func(t *testing.T) (conformanceRepo, conformanceSiteRepo),
 	newRooms func(t *testing.T) roomConformanceStores,
 ) {
 	t.Helper()
 	if newSites != nil {
-		runSiteConformance(t, name, caps, newSites)
+		runSiteConformance(t, name, newSites)
 	}
 	if newRooms != nil {
-		runRoomConformance(t, name, caps, newRooms)
+		runRoomConformance(t, name, newRooms)
 	}
 	runLifecycleConformance(t, name, func(t *testing.T) lifecycleRepo { return newRepo(t) })
 	runOwnerIndexConformance(t, name, func(t *testing.T) ownerIndexRepo { return newRepo(t) })
 	t.Run(name+"/InsertAndGet", func(t *testing.T) { conformInsertAndGet(t, newRepo(t)) })
-	t.Run(name+"/QuotaConcurrentCeiling", func(t *testing.T) { conformQuotaConcurrentCeiling(t, newRepo(t), caps) })
+	t.Run(name+"/QuotaConcurrentCeiling", func(t *testing.T) { conformQuotaConcurrentCeiling(t, newRepo(t)) })
 	t.Run(name+"/GetNotFound", func(t *testing.T) { conformGetNotFound(t, newRepo(t)) })
 	t.Run(name+"/DuplicateSlug", func(t *testing.T) { conformDuplicateSlug(t, newRepo(t)) })
 	t.Run(name+"/QuotaRejectsOverCap", func(t *testing.T) { conformQuotaRejectsOverCap(t, newRepo(t)) })
@@ -122,9 +90,12 @@ func runConformanceWithSites(
 
 // pasteOf builds a v1 paste with a content sha derived from the slug, stamped
 // at fixedNow.
+func generationOf(slug string) string { return "generation-" + slug }
+
 func pasteOf(slug, identity string, size int) domain.Paste {
 	return domain.Paste{
 		Slug:          domain.Slug(slug),
+		Generation:    generationOf(slug),
 		Identity:      domain.Identity(identity),
 		Kind:          domain.KindHTML,
 		ContentSHA:    "sha-" + slug + "-v1",
@@ -198,12 +169,8 @@ func conformDuplicateSlug(t *testing.T, r conformanceRepo) {
 
 // --- contract: quota -------------------------------------------------
 
-// conformQuotaConcurrentCeiling pins the CEILING under concurrency: N
-// goroutines insert distinct pastes for ONE identity against a per-owner cap
-// admitting only K, and the bytes that land never exceed the cap however the
-// inserts interleave. Gated on caps.StrictIdentityQuotaUnderConcurrency, since
-// a scan-based per-identity check over-admits by a bounded amount by design.
-func conformQuotaConcurrentCeiling(t *testing.T, r conformanceRepo, caps conformCaps) {
+// conformQuotaConcurrentCeiling pins the strict ceiling under concurrency.
+func conformQuotaConcurrentCeiling(t *testing.T, r conformanceRepo) {
 	const (
 		body = 100
 		k    = 3
@@ -226,14 +193,6 @@ func conformQuotaConcurrentCeiling(t *testing.T, r conformanceRepo, caps conform
 		}(i)
 	}
 	wg.Wait()
-	if !caps.StrictIdentityQuotaUnderConcurrency {
-		// A scan-based per-identity check is not atomic with the authoritative
-		// write, so a bounded same-owner over-admit can breach the ceiling.
-		// Record it rather than asserting strictness.
-		t.Logf("backend does not guarantee strict per-identity quota under concurrency (scan-based over-admit): %d pastes x %dB = %dB landed, cap %dB",
-			landed, body, landed*body, cap)
-		return
-	}
 	if landed*body > cap {
 		t.Fatalf("quota ceiling breached under concurrency: %d pastes x %dB = %dB landed, cap %dB",
 			landed, body, landed*body, cap)
@@ -261,12 +220,12 @@ func conformQuotaCountsAllVersions(t *testing.T, r conformanceRepo) {
 	}
 	// Append v2 = 600 → total 1200 > 1000 → reject. Pins "all non-deleted
 	// versions count toward quota," not just the head.
-	_, err := r.AppendVersionWithQuotaCheck(context.Background(), "v1234567", domain.KindHTML, "sha-v-v2", 600, cap, fixedNow)
+	_, err := r.AppendVersionWithQuotaCheck(context.Background(), "v1234567", generationOf("v1234567"), domain.KindHTML, "sha-v-v2", 600, cap, fixedNow)
 	if !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("append over cap: got %v, want ErrOverUserQuota", err)
 	}
 	// A smaller append that keeps the sum under cap succeeds.
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "v1234567", domain.KindHTML, "sha-v-v2b", 300, cap, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "v1234567", generationOf("v1234567"), domain.KindHTML, "sha-v-v2b", 300, cap, fixedNow); err != nil {
 		t.Fatalf("append within cap (600+300=900): %v", err)
 	}
 }
@@ -294,19 +253,19 @@ func conformQuotaFreedByDeleteVersion(t *testing.T, r conformanceRepo) {
 	if err := r.InsertWithQuotaCheck(context.Background(), pasteOf("dv123456", "key:dv", 300), cap, fixedNow); err != nil {
 		t.Fatalf("v1 insert 300: %v", err)
 	}
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dv123456", domain.KindHTML, "sha-dv-v2", 600, cap, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dv123456", generationOf("dv123456"), domain.KindHTML, "sha-dv-v2", 600, cap, fixedNow); err != nil {
 		t.Fatalf("v2 append 600 (total 900): %v", err)
 	}
 	// v3 = 300 would be 1200 > 1000.
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dv123456", domain.KindHTML, "sha-dv-v3", 300, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dv123456", generationOf("dv123456"), domain.KindHTML, "sha-dv-v3", 300, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("v3 pre-tombstone should be over quota: %v", err)
 	}
 	// Tombstone v1 (300), freeing those bytes.
-	if err := r.DeleteVersion("dv123456", 1); err != nil {
+	if err := r.DeleteVersion("dv123456", generationOf("dv123456"), 1); err != nil {
 		t.Fatalf("delete version 1: %v", err)
 	}
 	// Now 600 used → v3 of 300 fits.
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dv123456", domain.KindHTML, "sha-dv-v3b", 300, cap, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dv123456", generationOf("dv123456"), domain.KindHTML, "sha-dv-v3b", 300, cap, fixedNow); err != nil {
 		t.Fatalf("v3 post-tombstone should fit: %v", err)
 	}
 }
@@ -330,7 +289,7 @@ func conformQuotaPerIdentityIndependent(t *testing.T, r conformanceRepo) {
 
 func conformAppendBumpsVersion(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("ab123456", "key:a", 10))
-	res, err := r.AppendVersionWithQuotaCheck(context.Background(), "ab123456", domain.KindMarkdown, "sha-ab-v2", 20, 0, fixedNow)
+	res, err := r.AppendVersionWithQuotaCheck(context.Background(), "ab123456", generationOf("ab123456"), domain.KindMarkdown, "sha-ab-v2", 20, 0, fixedNow)
 	if err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
@@ -352,7 +311,7 @@ func conformAppendBumpsVersion(t *testing.T, r conformanceRepo) {
 
 func conformPinUnpinRollsHead(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("pu123456", "key:p", 10))
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "pu123456", domain.KindHTML, "sha-pu-v2", 20, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "pu123456", generationOf("pu123456"), domain.KindHTML, "sha-pu-v2", 20, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
 	// Pin to v1: head rolls back to v1's bytes.
@@ -360,7 +319,7 @@ func conformPinUnpinRollsHead(t *testing.T, r conformanceRepo) {
 	if err != nil {
 		t.Fatalf("get v1: %v", err)
 	}
-	if err := r.SetPinnedVersion("pu123456", v1); err != nil {
+	if err := r.SetPinnedVersion("pu123456", generationOf("pu123456"), v1); err != nil {
 		t.Fatalf("pin v1: %v", err)
 	}
 	p, _ := r.Get("pu123456")
@@ -368,7 +327,7 @@ func conformPinUnpinRollsHead(t *testing.T, r conformanceRepo) {
 		t.Fatalf("pin should roll head to v1, got pinned=%d sha=%q size=%d", p.PinnedVersion, p.ContentSHA, p.Size)
 	}
 	// Unpin: head rolls forward to latest (v2).
-	if err := r.Unpin("pu123456"); err != nil {
+	if err := r.Unpin("pu123456", generationOf("pu123456")); err != nil {
 		t.Fatalf("unpin: %v", err)
 	}
 	p, _ = r.Get("pu123456")
@@ -379,15 +338,15 @@ func conformPinUnpinRollsHead(t *testing.T, r conformanceRepo) {
 
 func conformAppendRespectsPin(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("ap123456", "key:a", 10))
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "ap123456", domain.KindHTML, "sha-ap-v2", 20, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "ap123456", generationOf("ap123456"), domain.KindHTML, "sha-ap-v2", 20, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
 	v1, _ := r.GetVersion("ap123456", 1)
-	if err := r.SetPinnedVersion("ap123456", v1); err != nil {
+	if err := r.SetPinnedVersion("ap123456", generationOf("ap123456"), v1); err != nil {
 		t.Fatalf("pin v1: %v", err)
 	}
 	// Append v3 while pinned: WasPinned=true, head stays on v1.
-	res, err := r.AppendVersionWithQuotaCheck(context.Background(), "ap123456", domain.KindHTML, "sha-ap-v3", 30, 0, fixedNow)
+	res, err := r.AppendVersionWithQuotaCheck(context.Background(), "ap123456", generationOf("ap123456"), domain.KindHTML, "sha-ap-v3", 30, 0, fixedNow)
 	if err != nil {
 		t.Fatalf("append v3 (pinned): %v", err)
 	}
@@ -407,10 +366,10 @@ func conformAppendRespectsPin(t *testing.T, r conformanceRepo) {
 // version back.
 func conformPinOlderAfterMultipleAppends(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("po123456", "key:p", 10))
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "po123456", domain.KindHTML, "sha-po-v2", 20, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "po123456", generationOf("po123456"), domain.KindHTML, "sha-po-v2", 20, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "po123456", domain.KindHTML, "sha-po-v3", 30, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "po123456", generationOf("po123456"), domain.KindHTML, "sha-po-v3", 30, 0, fixedNow); err != nil {
 		t.Fatalf("append v3: %v", err)
 	}
 	// Unpinned through all three appends: head followed to v3.
@@ -426,7 +385,7 @@ func conformPinOlderAfterMultipleAppends(t *testing.T, r conformanceRepo) {
 		t.Fatalf("v1 row carries the head's sha %q - version rows are leaking the head content", v1.ContentSHA)
 	}
 	// Pin v1 (two versions behind the head): head must roll back to v1's bytes.
-	if err := r.SetPinnedVersion("po123456", v1); err != nil {
+	if err := r.SetPinnedVersion("po123456", generationOf("po123456"), v1); err != nil {
 		t.Fatalf("pin v1: %v", err)
 	}
 	if p, _ := r.Get("po123456"); p.PinnedVersion != 1 || p.ContentSHA != v1.ContentSHA || p.Size != 10 {
@@ -437,14 +396,14 @@ func conformPinOlderAfterMultipleAppends(t *testing.T, r conformanceRepo) {
 	if err != nil {
 		t.Fatalf("get v2: %v", err)
 	}
-	if err := r.SetPinnedVersion("po123456", v2); err != nil {
+	if err := r.SetPinnedVersion("po123456", generationOf("po123456"), v2); err != nil {
 		t.Fatalf("pin v2: %v", err)
 	}
 	if p, _ := r.Get("po123456"); p.PinnedVersion != 2 || p.ContentSHA != "sha-po-v2" || p.Size != 20 {
 		t.Fatalf("pin v2 must roll head to v2, got pinned=%d sha=%q size=%d", p.PinnedVersion, p.ContentSHA, p.Size)
 	}
 	// Unpin: head rolls forward to the latest (v3).
-	if err := r.Unpin("po123456"); err != nil {
+	if err := r.Unpin("po123456", generationOf("po123456")); err != nil {
 		t.Fatalf("unpin: %v", err)
 	}
 	if p, _ := r.Get("po123456"); p.PinnedVersion != 0 || p.ContentSHA != "sha-po-v3" || p.Size != 30 {
@@ -454,10 +413,10 @@ func conformPinOlderAfterMultipleAppends(t *testing.T, r conformanceRepo) {
 
 func conformDeleteVersionTombstones(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("dt123456", "key:d", 10))
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dt123456", domain.KindHTML, "sha-dt-v2", 20, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dt123456", generationOf("dt123456"), domain.KindHTML, "sha-dt-v2", 20, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
-	if err := r.DeleteVersion("dt123456", 1); err != nil {
+	if err := r.DeleteVersion("dt123456", generationOf("dt123456"), 1); err != nil {
 		t.Fatalf("delete v1: %v", err)
 	}
 	// The tombstoned row stays in ListVersions, flagged deleted.
@@ -491,22 +450,29 @@ func conformDeleteVersionTombstones(t *testing.T, r conformanceRepo) {
 	}
 	// Re-deleting an already-tombstoned version is a repo-level no-op: the
 	// service layer, not the repo, maps repeats to ErrVersionAlreadyDeleted.
-	if err := r.DeleteVersion("dt123456", 1); err != nil {
+	if err := r.DeleteVersion("dt123456", generationOf("dt123456"), 1); err != nil {
 		t.Fatalf("re-delete tombstone should be a no-op at the repo level, got %v", err)
 	}
 }
 
 func conformVerNumNotReused(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("vn123456", "key:v", 10))
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "vn123456", domain.KindHTML, "sha-vn-v2", 10, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "vn123456", generationOf("vn123456"), domain.KindHTML, "sha-vn-v2", 10, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
+	}
+	v1, err := r.GetVersion("vn123456", 1)
+	if err != nil {
+		t.Fatalf("get v1: %v", err)
+	}
+	if err := r.SetPinnedVersion("vn123456", generationOf("vn123456"), v1); err != nil {
+		t.Fatalf("pin v1: %v", err)
 	}
 	// Tombstone v2, then append again: the next number must be 3, since
 	// MAX(ver_num) counts tombstones.
-	if err := r.DeleteVersion("vn123456", 2); err != nil {
+	if err := r.DeleteVersion("vn123456", generationOf("vn123456"), 2); err != nil {
 		t.Fatalf("delete v2: %v", err)
 	}
-	res, err := r.AppendVersionWithQuotaCheck(context.Background(), "vn123456", domain.KindHTML, "sha-vn-v3", 10, 0, fixedNow)
+	res, err := r.AppendVersionWithQuotaCheck(context.Background(), "vn123456", generationOf("vn123456"), domain.KindHTML, "sha-vn-v3", 10, 0, fixedNow)
 	if err != nil {
 		t.Fatalf("append after tombstone: %v", err)
 	}
@@ -583,6 +549,9 @@ func conformOwnerStats(t *testing.T, r conformanceRepo) {
 		}
 		if p.LatestVersion < 1 {
 			t.Fatalf("ListByOwner should populate LatestVersion, got %d", p.LatestVersion)
+		}
+		if p.StoredBytes != p.Size {
+			t.Fatalf("one-version listing must expose equal served and stored bytes: size=%d stored=%d", p.Size, p.StoredBytes)
 		}
 	}
 
@@ -721,12 +690,9 @@ func conformKeyGateWindowAges(t *testing.T, r conformanceRepo) {
 	}
 }
 
-// conformKeyGateForgetsOutOfWindow pins the port-visible half of the lazy
-// prune: a pair whose row has aged past the window is no longer "known", so a
-// later session from it is a FRESH admission that consumes a slot. Backends
-// drop the row at different moments (slatedb inside the admit transaction,
-// shale as the subnet scan walks past it), so the contract is stated in terms
-// of what a caller can observe rather than when the delete lands.
+// conformKeyGateForgetsOutOfWindow pins the observable lazy-prune contract: an
+// aged-out pair is fresh on its next admission regardless of when physical
+// deletion occurs.
 func conformKeyGateForgetsOutOfWindow(t *testing.T, r conformanceRepo) {
 	const window = 24 * time.Hour
 	old := fixedNow.Add(-48 * time.Hour)

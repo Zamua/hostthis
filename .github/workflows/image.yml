@@ -1,7 +1,5 @@
-# Builds the production image (Dockerfile.slatedb) on a native amd64 runner and
-# pushes it to ghcr. Exists because the operator box is arm64: the Rust uniffi
-# stage under qemu emulation takes an hour and gets OOM-killed, while a native
-# runner builds it in minutes. Trigger by hand with the git tag to build.
+# Builds the tagged production image on a native amd64 runner and pushes it to
+# GHCR. Trigger by hand only after the tag exists on main.
 name: image
 on:
   workflow_dispatch:
@@ -17,7 +15,7 @@ permissions:
 jobs:
   build-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,7 +32,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.slatedb
+          file: Dockerfile
           platforms: linux/amd64
           push: true
           tags: ghcr.io/zamua/hostthis:${{ inputs.tag }}
