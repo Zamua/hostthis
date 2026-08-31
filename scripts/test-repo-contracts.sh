@@ -10,7 +10,12 @@ for dead_file in internal/celld/intentlog.go internal/durable/intent.go internal
 done
 grep -q 'file: Dockerfile' "$root/.github/workflows/image.yml"
 ! grep -q 'Dockerfile\.slatedb' "$root/.github/workflows/image.yml"
-grep -q 'celld dev ./celld' "$root/.github/workflows/ci.yml"
+# CI runs upstream celld in the production shape (deploy + node against an
+# object store), never the removed custom runner and never the Linux dev
+# watcher, whose own state writes restart-storm the application.
+grep -q 'celld deploy ./celld --bucket' "$root/.github/workflows/ci.yml"
+grep -q -- '--listen 127.0.0.1:8087' "$root/.github/workflows/ci.yml"
+! grep -q 'celld dev' "$root/.github/workflows/ci.yml"
 grep -q '"no_bundle": true' "$root/celld/wrangler.jsonc"
 ! grep -q 'esbuild@' "$root/.github/workflows/ci.yml"
 ! grep -q 'hostthis-metadata' "$root/deploy/dev/docker-compose.yml"
