@@ -110,3 +110,9 @@ jobs:
             go test -count=1 ./internal/storage -run 'TestConformance_Celld'
           CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
             go test -count=1 ./internal/http -run 'TestLiveRoom'
+
+      # The dev runtime's own log is the only diagnostic when it dies
+      # mid-suite, which presents as connection-refused test noise.
+      - name: celld dev log
+        if: always()
+        run: tail -n 200 "$RUNNER_TEMP/celld-dev.log" || true
