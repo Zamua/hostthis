@@ -16,6 +16,15 @@ Run that command from this directory. It watches the Worker source and preserves
 local durable state under `.celld/dev`. Stop celld before deleting that directory
 to reset the state.
 
+On Linux the dev watcher can observe its own `.celld/dev` writes and restart
+the application continuously, dropping connections. For an automation-grade
+local fleet, run the production shape against any S3-compatible store instead:
+
+```sh
+celld deploy . --bucket s3://<bucket> --endpoint <s3-endpoint>
+celld --bucket s3://<bucket> --endpoint <s3-endpoint> --listen 127.0.0.1:8087
+```
+
 From the repository root, the live adapter suites target the local listener:
 
 ```sh

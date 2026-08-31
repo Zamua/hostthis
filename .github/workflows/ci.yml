@@ -83,16 +83,32 @@ jobs:
           chmod +x "$RUNNER_TEMP/celld"
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
+      # A real node against MinIO, not `celld dev`: the dev watcher polls the
+      # project directory, sees its own PROJECT/.celld state writes on Linux,
+      # and restart-storms the application, dropping mid-suite connections.
       - name: celld storage and room contracts
         run: |
-          celld dev ./celld --host 127.0.0.1 --port 8087 --logs >"$RUNNER_TEMP/celld-dev.log" 2>&1 &
+          docker run -d --name ci-minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=admin -e MINIO_ROOT_PASSWORD=supersecret \
+            minio/minio:latest server /data
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null && break
+            sleep 1
+          done
+          docker run --rm --network host --entrypoint sh minio/mc:latest -c \
+            'mc alias set local http://127.0.0.1:9000 admin supersecret >/dev/null && mc mb local/ci-fleet'
+
+          export AWS_ACCESS_KEY_ID=admin AWS_SECRET_ACCESS_KEY=supersecret
+          celld deploy ./celld --bucket s3://ci-fleet --endpoint http://127.0.0.1:9000
+          celld --bucket s3://ci-fleet --endpoint http://127.0.0.1:9000 \
+            --listen 127.0.0.1:8087 >"$RUNNER_TEMP/celld-node.log" 2>&1 &
           celld_pid=$!
           trap 'kill "$celld_pid" 2>/dev/null || true' EXIT
 
           ready=false
           for _ in $(seq 1 60); do
             if ! kill -0 "$celld_pid" 2>/dev/null; then
-              cat "$RUNNER_TEMP/celld-dev.log"
+              cat "$RUNNER_TEMP/celld-node.log"
               exit 1
             fi
             if curl -fsS http://127.0.0.1:8087/.well-known/celld/health >/dev/null; then
@@ -102,7 +118,7 @@ jobs:
             sleep 1
           done
           if [ "$ready" != true ]; then
-            cat "$RUNNER_TEMP/celld-dev.log"
+            cat "$RUNNER_TEMP/celld-node.log"
             exit 1
           fi
 
@@ -111,8 +127,8 @@ jobs:
           CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
             go test -count=1 ./internal/http -run 'TestLiveRoom'
 
-      # The dev runtime's own log is the only diagnostic when it dies
-      # mid-suite, which presents as connection-refused test noise.
-      - name: celld dev log
+      # The node's own log is the only diagnostic when it dies mid-suite,
+      # which presents as connection-refused test noise.
+      - name: celld node log
         if: always()
-        run: tail -n 200 "$RUNNER_TEMP/celld-dev.log" || true
+        run: tail -n 200 "$RUNNER_TEMP/celld-node.log" || true
