@@ -77,30 +77,14 @@ func main() {
 	if err != nil {
 		logger.Fatalf("metadata backend: %v", err)
 	}
-	defer func() {
-		if err := metadata.Close(); err != nil {
-			logger.Printf("metadata close: %v", err)
-		}
-	}()
-
 	pasteRepo := metadata.Repo
 	keyGateRepo := metadata.KeyGate
 	blobs, blobsCleanup, err := buildBlobStore(*dataDir, logger)
 	if err != nil {
 		logger.Fatalf("blob store: %v", err)
 	}
-	defer blobsCleanup()
 
-	// The per-record blob seam. A shale backend with a blob store configured
-	// supplies a transactional shaleblob.Unit that co-commits the blob pointer
-	// with the metadata; every other backend uses the standalone adapter over
-	// the detached content-addressed store. The services see one shape either
-	// way.
-	var blobUnit service.BlobUnit = service.NewStandaloneBlobUnit(blobs)
-	if metadata.BlobUnit != nil {
-		blobUnit = metadata.BlobUnit
-		logger.Printf("blobs: transactional shale-collocated blob plane (pointer co-commits with metadata)")
-	}
+	blobUnit := service.NewStandaloneBlobUnit(blobs)
 
 	siteRepo := metadata.Sites
 	roomRepo := metadata.Rooms
@@ -131,8 +115,6 @@ func main() {
 	var deploySvc *service.DeploySite
 	if siteRepo != nil {
 		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobUnit)
-		// Without this the compensating slug-claim release fails silently.
-		deploySvc.Logger = logger
 		// One entry point: Create now dispatches the multi-file shape itself,
 		// so no transport forks on content (docs/SPEC.md "One paste, not two
 		// aggregates").
@@ -208,11 +190,7 @@ func main() {
 		LandingHTML: landing,
 		ApexDomain:  *apexDomain,
 		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),
-		// Readiness gates /readyz on the metadata backend's predicate (the
-		// shale mount floor); nil on a backend with no mount concept, which the
-		// server reads as always-ready. /healthz stays pure liveness.
-		Readiness: metadata.Readiness,
-		Logf:      logger.Printf,
+		Logf:        logger.Printf,
 	}
 	if siteRepo != nil {
 		httpServer.Sites = siteRepo
@@ -220,8 +198,14 @@ func main() {
 	if roomsSvc != nil {
 		httpServer.Rooms = roomsSvc
 	}
+	var relayDrain relayShutdowner = idleRelay{}
 	if metadata.RoomRelay != nil {
 		httpServer.Relay = metadata.RoomRelay
+		lifecycle, ok := metadata.RoomRelay.(relayShutdowner)
+		if !ok {
+			logger.Fatalf("cell relay does not implement the shutdown lifecycle")
+		}
+		relayDrain = lifecycle
 		logger.Printf("relay: cell proxy (the room cell is the broadcast point)")
 	}
 	// Metrics listen on their OWN port, never the public one. The public mux
@@ -282,17 +266,6 @@ func main() {
 	// live, it does not gate the goroutine, because a dry-run sweep must still
 	// run to log what it would clean.
 
-	// Settle durable intents left by a process death mid-write, ONCE, and only
-	// now: deciding an intent reads the shard holding its authoritative row,
-	// which may not be mounted anywhere until the cluster is up. Gating
-	// readiness on it would deadlock a cold cluster - no node could serve until
-	// it swept, and none could sweep until one served. Running late costs
-	// nothing: the residue it clears was already there (docs/SPEC.md "Durable
-	// intent").
-	if metadata.IntentSweeper != nil {
-		go runIntentSweep(ctx, metadata, logger)
-	}
-
 	select {
 	case <-ctx.Done():
 		logger.Printf("signal received; shutting down")
@@ -302,25 +275,23 @@ func main() {
 		}
 	}
 
-	// No drain hint: a proxied socket dies with the pod, and the client heals
-	// through reconnect + snapshot + splice, which it must be able to do anyway
-	// because a MOVED CELL drops its socket with no close code.
-
-	// http.Server.Shutdown does not track hijacked WebSockets, so closing them
-	// here unblocks their request goroutines and lets clients reconnect on
-	// their backoff schedule rather than hammering instantly.
-
-	// Local fan-out is done, so drop the outbound peer queues and connections.
-
-	shutdownCtx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, scancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer scancel()
-	_ = httpSrv.Shutdown(shutdownCtx)
+	if err := shutdownDaemon(
+		shutdownCtx,
+		20*time.Second,
+		httpSrv,
+		metricsSrv,
+		relayDrain,
+		sshServer,
+		uploadSvc.WaitFinalize,
+		blobsCleanup,
+	); err != nil {
+		logger.Printf("shutdown: %v", err)
+	}
 }
 
 // buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured store.
-// Disk is the only standalone backend. The shale metadata backend does NOT go
-// through this detached store: its ShaleRepo owns a shale-managed blob plane of
-// its own.
 func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, func(), error) {
 	backend := strings.ToLower(envOr("HOSTTHIS_BLOB_BACKEND", "disk"))
 	switch backend {
@@ -359,7 +330,7 @@ func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlob
 		}
 		return storage.NewCompressedBlobStore(inner), cleanup, nil
 	default:
-		return nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|s3; the shale metadata backend supplies its own collocated blob plane instead)", backend)
+		return nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|s3)", backend)
 	}
 }
 
@@ -486,34 +457,4 @@ func envOrDuration(key string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
-}
-
-// runIntentSweep settles durable intents and reclaims abandoned staged bytes
-// once, after the node is serving.
-//
-// It does NOT wait for readiness first. The scan itself retries while the
-// node's positions are still acquiring (storage.bootRetry), which is the same
-// refusal readiness is waiting on - so a second gate here would only duplicate
-// it, and readiness at the mount FLOOR is not the same condition as "this
-// node's own units are scannable" anyway.
-func runIntentSweep(ctx context.Context, metadata *metadataBundle, logger *log.Logger) {
-	now := time.Now().UTC()
-	settled, err := metadata.IntentSweeper.SweepIntents(ctx, now)
-	if err != nil {
-		logger.Printf("intent sweep: %v (the next boot retries; nothing is lost)", err)
-	} else if settled > 0 {
-		logger.Printf("intent sweep: settled %d half-finished write(s) on this node's units", settled)
-	}
-
-	// Runs even when the intent sweep failed: the two settle different things,
-	// and bytes nothing points at are not worth withholding over a metadata
-	// problem.
-	reclaimed, err := metadata.IntentSweeper.SweepStagedBytes(ctx, now)
-	if err != nil {
-		logger.Printf("staged sweep: %v (the next boot retries; the bytes stay put)", err)
-		return
-	}
-	if reclaimed > 0 {
-		logger.Printf("staged sweep: reclaimed the staged bytes of %d abandoned upload(s)", reclaimed)
-	}
 }

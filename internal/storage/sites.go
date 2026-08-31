@@ -9,7 +9,6 @@ package storage
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -24,11 +23,9 @@ import (
 type SiteBackingRepo interface {
 	Get(domain.Slug) (domain.Paste, error)
 	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
-	AppendManifestVersion(ctx context.Context, slug domain.Slug, m domain.Manifest,
+	AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string, m domain.Manifest,
 		root domain.ManifestEntry, size int, userCap int64, now time.Time) (AppendResult, error)
 	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
-	PreClaimSlug(ctx context.Context, slug domain.Slug, owner string, now time.Time) error
-	ReleaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) error
 }
 
 // Sites adapts the paste repo onto the site port.
@@ -75,6 +72,7 @@ func (a *Sites) InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedB
 	root, _ := s.Manifest.Lookup("/")
 	return a.repo.InsertWithQuotaCheck(ctx, domain.Paste{
 		Slug:       s.Slug,
+		Generation: domain.NewPasteGeneration(),
 		Identity:   s.Identity,
 		Status:     domain.PasteStatusReady,
 		Kind:       domain.KindSite,
@@ -94,10 +92,9 @@ func (a *Sites) InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedB
 // one paste model: a redeploy is an update, and an update has never thrown
 // away what it replaced.
 //
-// It therefore CHARGES like an update too - every live version counts against
-// quota, and an owner reclaims bytes by deleting versions they no longer want.
-// Blob dedup keeps the cost proportional to what actually changed: a redeploy
-// touching one file of two hundred stores and charges for one blob.
+// It therefore CHARGES like an update too: each live manifest version counts
+// in full against quota, even when its blobs are physically deduplicated. An
+// owner reclaims the logical charge by deleting versions they no longer want.
 //
 // Ownership is enforced here rather than inside the append: a slug that is not
 // a directory, and one owned by another identity, both yield the not-found
@@ -111,7 +108,9 @@ func (a *Sites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, stored
 		return ErrNotFound
 	}
 	root, _ := s.Manifest.Lookup("/")
-	_, err = a.repo.AppendManifestVersion(ctx, s.Slug, s.Manifest, root, storedBytes, userCap, now)
+	_, err = a.repo.AppendManifestVersion(
+		ctx, s.Slug, existing.Generation, s.Manifest, root, storedBytes, userCap, now,
+	)
 	return err
 }
 
@@ -132,30 +131,4 @@ func (a *Sites) SumActiveBytesByOwner(string, time.Time) (int64, error) {
 // onto, so returning it here would show it twice.
 func (a *Sites) ListSitesByOwner(string, time.Time) ([]domain.Site, error) {
 	return nil, nil
-}
-
-// NewSlug mints a slug and reserves it, so a directory's files stage on the
-// same shard its manifest commits to. Reserving here is what makes the caller's
-// commit collision-free; the retry budget covers a mint that loses a race to a
-// concurrent deploy before the reservation lands.
-func (a *Sites) NewSlug(ctx context.Context, owner string, now time.Time) (domain.Slug, error) {
-	const attempts = 5
-	for range attempts {
-		slug := domain.NewRandomSlug()
-		err := a.repo.PreClaimSlug(ctx, slug, owner, now)
-		switch {
-		case err == nil:
-			return slug, nil
-		case errors.Is(err, domain.ErrSlugTaken):
-			continue
-		default:
-			return "", err
-		}
-	}
-	return "", domain.ErrSlugTaken
-}
-
-// AbandonSlug gives back a slug whose deploy never landed.
-func (a *Sites) AbandonSlug(ctx context.Context, slug domain.Slug, owner string) error {
-	return a.repo.ReleaseSlugClaim(ctx, slug, owner)
 }

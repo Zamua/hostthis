@@ -804,10 +804,11 @@ previous one stays live, so a directory pins, rolls back and rolls forward like
 any other artifact. An update has never thrown away what it replaced, and a
 directory is not an exception.
 
-It therefore charges like an update: every live version counts against quota,
-and an owner reclaims bytes by deleting versions they no longer want. Blob
-dedup keeps the growth proportional to what actually changed - a redeploy
-touching one file of two hundred stores and charges for one blob.
+It therefore charges like an update: every live version counts against quota.
+Each version's charge is the sum of every final manifest path's compressed size.
+The same content hash may refer to one physical blob, but logical quota charges
+each retained path in each retained version. An owner reclaims bytes only by
+deleting versions they no longer retain.
 
 **A redeploy is the migration.** A directory deployed before the collapse has
 no artifact, so redeploying it writes one and drops the legacy row. That is not
@@ -826,9 +827,11 @@ show it twice and charge it twice - the same trap in two places. During the
 migration the site surface therefore reports ONLY rows the artifact families do
 not yet cover, and that set empties as the migration runs.
 
-**Unchanged files cost nothing across versions.** Blobs are content-addressed
-and were already deduped within a manifest; the same dedup now spans versions,
-so a redeploy that changes one file of two hundred stores one blob.
+**Unchanged files reuse physical storage, not logical quota.** Blobs are
+content-addressed across paths, versions, artifacts, and owners. Reusing an
+existing hash writes no second physical object. It still contributes its
+compressed size to every final manifest path that retains it, so physical
+storage deduplication can never weaken a user's quota ceiling.
 
 ### Storage
 
@@ -1008,16 +1011,16 @@ Nothing about the product opinions changes for sites:
 
 - **Identity** is the SSH key fingerprint, the same account a paste
   upload uses, gated by the same Sybil per-subnet admission.
-- **Quota** counts the manifest's DEDUPED total blob size against the
-  SAME per-identity cap (see "Limits → Per-identity quota"), using the
-  **stored (post-zstd) COMPRESSED** size per distinct blob -
-  `Manifest.CompressedDedupedSize()` - so a site is charged its real
-  on-disk footprint, exactly as a paste is charged its compressed size.
-  (Each entry keeps its uncompressed `Size` for display; the compressed
-  size is the quota basis.) The decompression-bomb guard still aborts the
-  untar on the UNCOMPRESSED running total (a memory/bomb bound, so the
-  guard is at worst more conservative than the charge), so a site can
-  never be persisted over-quota.
+- **Quota** counts every path in every retained version against the SAME
+  per-identity cap, using each final manifest entry's stored (post-zstd)
+  compressed size. It does not deduplicate repeated content hashes for quota:
+  content-addressing is a physical storage optimization, while quota is the
+  logical amount retained for the owner. Each entry keeps its uncompressed
+  `Size` for display; `CompressedSize` is the quota basis. The untar guard
+  separately bounds the uncompressed running total against the owner's remaining
+  allowance. The persisted charge is computed from the final normalized
+  manifest, so duplicate archive entries that overwrite one path do not charge
+  discarded staging attempts.
 - **Versioning** reuses the paste-versioning shape where it is low-cost:
   a deploy to an OWNED site slug re-deploys the site in place (same slug,
   same URL, new immutable manifest), so rollback / history ride the
@@ -1042,20 +1045,14 @@ site-vs-paste, the slug decides new-vs-update.
   other not-found, so a non-owner cannot probe for which slugs exist
   or who owns them. This matches the paste-update ownership posture
   exactly (see "Upload (update an existing slug)").
-- **Atomic replace.** The new manifest's blobs are all written first;
-  then a single transaction swaps the `sites/<slug>` row (new manifest,
-  new `DedupedSize`, refreshed `UpdatedAt`). The URL keeps serving the OLD
-  manifest until that
-  swap lands, and serves the new one immediately after; a half-finished
-  re-deploy never serves a partial site.
-- **Quota is the replace DELTA.** The owner is charged the new site's
-  deduped bytes and credited the old site's deduped bytes in the SAME
-  atomic check, so re-deploying a same-size site does not double-count,
-  and a smaller re-deploy frees the difference. The per-identity cap is
-  evaluated against `existing_owned - old_deduped + new_deduped`. The
-  mid-untar decompression-bomb guard still bounds extraction against the
-  remaining budget so an over-quota archive is rejected before any blob
-  lands.
+- **Atomic append.** Every blob in the final manifest is staged first. The
+  metadata operation then admits and publishes one immutable manifest version.
+  The old served version remains visible until publication finishes, and a
+  half-finished deploy never serves a partial site.
+- **Quota charges the appended version in full.** A redeploy retains every prior
+  live version, so it receives no replacement credit. Admission evaluates the
+  owner's existing all-live charge plus the final manifest's logical compressed
+  size. Deleting a version later releases exactly that version's charge.
 
 A re-deploy to an existing slug NEVER lands as a fresh slug: the slug is
 the explicit target. The fresh-random-slug path is only the no-slug
@@ -1112,12 +1109,11 @@ of the "A persistence API" bullet under "Future directions"; that bullet
 called for a per-app KV store fronted by a thin HTTP layer over the metadata backend,
 and this section makes the no-auth, capability-based form of it real.
 
-The deliberately-scoped commitment for this tier: **a key-value store
-keyed by an unguessable room UUID, with strict per-room isolation, served
-under the deployed app's own subdomain.** No accounts, no JWT, no
-WebSockets - those are later tiers (see "Scope fence" below). What ships
-is enough to build a collaborative app with no signup: a when2meet, a
-shared list, a poll, a retro board.
+The deliberately-scoped commitment for this tier is **a key-value store keyed
+by an unguessable room UUID, with strict per-room isolation, plus a generic
+same-room WebSocket relay under the deployed app's own origin.** No accounts,
+JWTs, or server-side app functions ship with it. This is enough to build a
+collaborative app with no signup: a when2meet, shared list, poll, or retro board.
 
 ### The model: an app, a room, a namespace
 
@@ -1287,37 +1283,19 @@ mutable, and per-room, so they belong with the metadata. Large blobs are
 explicitly out of scope for rooms - an app that needs to host files uses
 the archive/site feature, not a room value.
 
-The implementation follows the existing repo-behind-a-service-interface
-pattern exactly the way the paste repo does:
+The implementation follows the existing repo-behind-service pattern:
 
-- A new domain aggregate, **`Room`** (slug-of-the-owning-app + room id +
-  the key-value namespace as a value object), lives in `internal/domain`
-  alongside `Paste` and `Site` and imports nothing from infrastructure.
-  The namespace is a pure value object: putting, getting, deleting, and
-  scanning keys, plus computing the room's total byte size and key count
-  for the cap check, are all I/O-free domain operations.
-- A new **`RoomKVRepo`** in `internal/storage` persists rooms with
-  namespaced keys and is queried by `(app-slug, room-uuid)`, behind a
-  small service-layer interface (a `RoomRepo` declared in
-  `internal/service`, the same way `PasteRepo` / `PasteAdmin` /
-  `SweepRepo` / `KeyGateRepo` are; the sweep-side view is `SweepRooms`).
-  Both metadata backends implement it - **local** (single-host) and
-  **celld** (one cell per room) - so the `/api/rooms` surface runs
-  on every backend hostthis can be deployed on, including the production one
-  prod runs. The
-  domain, HTTP, and service layers stay unaware of which backend is wired.
-- Every backend models a room as a set of key families co-located in the
-  one metadata keyspace, so a room read or write is a single transaction
-  or prefix scan. Every read and write is scoped by the
-  `(app_slug, room_id)` pair, so the namespace boundary is enforced by the
-  KEY, not by a filter a caller could forget. The full layout,
-  the cap + isolation + rate-limit + TTL mapping onto KV ops, and the
-  fixed-width TTL timestamp are specified under **"Room storage on the
-  celld backend"** below (near the metadata-backend section,
-  alongside the parallel static-site layout). The single-writer backends
-  store the same logical rows; the observable contract is identical across
-  backends, the way it is for the paste and site families, and the
-  backend-agnostic conformance suite pins them identical.
+- Pure `Room` and `RoomKV` domain types live in `internal/domain` and import no
+  infrastructure. They own identifiers, values, byte/key counts, and cap checks.
+- The `RoomRepo` port in `internal/service` exposes creation, point reads,
+  snapshots, PUT, DELETE, and creation-ledger counts. The service applies use-case
+  policy; HTTP only translates requests and responses.
+- The memory adapter and celld adapter implement the same port. Memory keeps exact
+  app aggregates under one mutex. Celld stores one whole Room document per Room
+  cell and coordinates app-wide allocations through the app's Paste cell.
+- Every address includes `(app_slug, room_id)`, so cross-app isolation is
+  structural rather than a filter. The backend-agnostic conformance suite pins
+  the observable contract.
 
 The slug-must-name-a-live-app **existence requirement** is enforced at the
 HTTP layer (it reads the site + paste readers the router already holds),
@@ -1376,17 +1354,17 @@ informs them):
   - generous for those, tight enough that a room cannot be turned into a
   free file host.
 - **Per-app aggregate.** A popular app's rooms in aggregate are bounded by
-  **default 64 MiB of room data per app** (and the room-creation rate
-  limit caps the growth rate). Past the per-app aggregate, new room
-  creation and new writes for that app return **507** until the app deletes
-  rooms or values. This is the room-tier analogue of the per-identity paste
-  quota: it stops one app from consuming the whole service. It is flagged
-  as a starting default - an operator running many apps may want it lower,
-  a single-app operator higher. It
-  differs from the per-IDENTITY paste/site quota, which the memory
-  backends free at READ time; the per-app room aggregate is uniformly
-  sweep-time so the cap behaves identically across local and
-  the celld backend, whose per-room caps are decided inside one cell event.
+  **default 64 MiB of room value bytes per app** (and the room-creation rate
+  limit caps the growth rate). The ceiling is exact across sibling rooms and
+  concurrent writes. A mutation that would exceed it returns **507** with its
+  prior room state intact. A new room is also refused with 507 while the app is
+  already at its ceiling, so a full app cannot accumulate empty room records.
+  Deletes and smaller replacements commit first. Capacity release is attempted
+  in the same turn and a durable alarm retries it, so success may be reported
+  before a sibling observes the freed capacity. The coordinator may temporarily
+  charge MORE than the committed room bytes while recovering an interrupted
+  mutation, but it must never charge less. This is the room-tier analogue of
+  the per-identity paste quota: one app cannot consume the whole service.
 - **Durable total-bytes ceiling.** Room data does NOT carry its own
   service-wide byte scan. Rooms hold no blobs (a room value lives entirely
   in the metadata backend, not the content-addressed `BlobStore`), so a
@@ -1430,570 +1408,86 @@ live site or paste names no app, so room creation under it is a 404.
 
 ## Real-time room relay (WebSocket)
 
-The KV verbs above make a room **collaborative on refresh**: a participant
-sees another's writes on the next read. That is enough for a poll or a
-shared list, but not for the headline app this tier exists to unlock - a
-**when2meet** where everyone paints a calendar and watches each other's
-availability fill in LIVE. Polling `GET /api/rooms/<uuid>` on an interval
-is the workaround and it is bad: too slow to feel live, too chatty to
-scale, and it never catches the moment between two polls.
+Rooms expose one generic same-origin WebSocket endpoint:
 
-The real-time relay closes that gap with **one generic per-room WebSocket
-endpoint** layered on the SAME room. hostthis runs **no app-specific
-server logic**: it is a dumb live channel. A message from one client in a
-room is fanned out, verbatim, to every OTHER client in that same room.
-The clients hold all the app logic (the when2meet's grid, the retro
-board's cards); hostthis is the live wire plus the durable backing store.
-This is the deliberately-client-authoritative model the "A persistence
-API" future-directions bullet describes ("no reactive subscriptions" was
-the line drawn against a FaaS - a generic broadcast relay is NOT app code,
-so it sits on the right side of that line), made real for the no-auth
-capability tier.
-
-### The endpoint and the room-UUID capability
-
-The relay is served by the same HTTP surface that serves the KV verbs,
-under the app's own subdomain, at a reserved `/api/rooms/<uuid>/ws` path:
-
-```
-GET (Upgrade: websocket)   /api/rooms/<uuid>/ws
+```text
+GET (Upgrade: websocket) /api/rooms/<uuid>/ws
 ```
 
-- Production (subdomain mode): `wss://<app-slug>.hostthis.dev/api/rooms/<uuid>/ws`.
-- Dev (path mode): `ws://<apex>/p/<app-slug>/api/rooms/<uuid>/ws`.
+The app slug must name a live paste or site, and the UUID must name an existing
+room. A malformed UUID is refused before upgrade; an unknown app or room is a
+404. The normal same-origin policy rejects a third-party browser origin. The
+room UUID remains the entire participant capability.
 
-The path lives under the existing `/api/rooms` carve-out, so it is never
-shadowed by a manifest file, and `/ws` is a reserved trailing segment a
-room KEY can never name (a key path is `/api/rooms/<uuid>/<key>`; the
-relay claims `<key> == "ws"` for the upgrade, the one key the KV verbs do
-not serve as data). Because the relay shares the app's origin, the app's
-own JavaScript opens it same-origin with no CORS dance.
+### Cell-owned fan-out
 
-**The room UUID is the entire access model, exactly as it is for the KV
-verbs.** Holding the UUID lets you join that room's relay; nothing else
-grants it. On upgrade the server validates two things and rejects
-otherwise, BEFORE completing the WebSocket handshake:
+`hostthisd` terminates the public socket and opens one cluster-internal socket
+to the Room cell. The Go proxy owns origin policy, per-process connection
+admission, and the client-facing heartbeat. It pipes text and binary frames in
+both directions without interpreting them. The upstream socket is not pinged,
+so a quiet hibernatable Room is not woken merely to prove liveness.
 
-- **The app slug names a LIVE app.** The same existence requirement room
-  creation rides: the slug must name a site or paste (checked
-  via the site + paste readers the router already holds). An upgrade under
-  an unprovisioned slug is refused, so the relay cannot be opened under one
-  of the ~10^12 well-formed-but-empty slugs. This ties the relay's per-app
-  connection caps to the same finite, provisioned set of apps the KV caps
-  are tied to.
-- **The UUID is a canonical UUIDv4 that names an existing room.** A
-  malformed id is refused at the boundary (the same `ParseRoomID` the KV
-  path uses); a well-formed-but-nonexistent room is refused too (a relay to
-  a room that was never created has nothing to back its late-join snapshot).
-  A holder of a real UUID is the only party who can open the channel.
+The Room cell is the only broadcast point. Exactly one cell owns one room, so
+there is no pod mesh and no cross-stream ordering problem.
 
-A rejected upgrade is refused with a normal HTTP status (not a 101), so a
-client's WebSocket open fails cleanly: a malformed UUID is a **400**, an
-unknown app slug or nonexistent room is a **404** (the
-existence-not-leaked shape, same as the KV path), an over-limit room or
-app is a **429**, and a non-Upgrade request to the `/ws` path is a **426
-Upgrade Required**. No relay is ever stood up for a request that fails
-validation, so a forged or guessed id reaches no hub.
+Two frame classes share the socket:
 
-### Strict isolation: a connection joins exactly one room
+- **Durable mirror.** A successful HTTP room PUT or DELETE commits the Room
+  document and dense sequence first. The cell then sends a JSON `put` or
+  `delete` frame carrying that sequence to every connected socket. Output gating
+  prevents a send from escaping before the local commit is durable. The send is
+  not itself durable: a cell stop after commit can omit it. Clients reconnect for
+  a fresh snapshot when they observe a sequence gap or resume from suspension.
+- **Ephemeral relay.** A client-sent text or binary frame is copied
+  byte-identically to every OTHER socket in that Room, never back to its sender,
+  never to another room or app, and never to storage. Text objects whose `type`
+  is `snapshot`, `put`, or `delete` are reserved for server control frames and
+  close the sending socket rather than reaching peers. Durable changes continue
+  to use the HTTP KV path so the byte caps and sequence exist in one place.
 
-A WebSocket connection is bound at upgrade time to the **one** room whose
-`(app-slug, room-uuid)` it connected with, and it can never affect any
-other. The isolation is the same structural property the KV key shape
-gives the durable tier, lifted to the live tier:
+A client-sent ephemeral frame may carry at most 32 KiB, bounding one sender's
+fan-out amplification explicitly rather than inheriting the WebSocket library's
+default. Server-generated snapshot and mirror frames may carry up to 2 MiB so a
+full 256 KiB room still fits after worst-case JSON escaping. The Go proxy applies
+these asymmetric limits at the two read boundaries. A dead or closing peer is
+skipped without blocking the remaining fan-out.
 
-- **A message never crosses to another room.** The connection is
-  registered in exactly one per-room hub (keyed by `(app-slug, room-uuid)`);
-  a broadcast is fanned out only to the other members of THAT hub. There is
-  no cross-hub path - a client cannot address, subscribe to, or leak into
-  another room even within the same app.
-- **A message never crosses to another app.** The hub key's outermost
-  segment is the app slug, so an identical room-UUID-shaped string under a
-  different app resolves to a different hub. One app's live traffic is
-  disjoint from another's, structurally, not by a filter a handler could
-  forget.
-- **The relay carries no cross-room addressing in its payload.** hostthis
-  does not interpret the message, so there is no "target room" field a
-  client could set; the connection's bound room is the only destination,
-  fixed at upgrade and immutable for the connection's life.
+### Snapshot and sequence contract
 
-hostthis does not parse the relayed payload at all: it is opaque bytes /
-JSON the app chose, fanned out verbatim. The only server-side
-interpretation is the connection-lifecycle control frames (ping/pong, the
-late-join snapshot framing, and the optional durable-write convention
-below), never the app's message contents.
+The first server frame is:
 
-### Persistence and late-join: the KV is the durable state, the relay is the live delta
+```json
+{ "type": "snapshot", "seq": 17, "state": { "key": "value" } }
+```
 
-This is the crux of "no gap, no dup." The relay integrates with the room
-KV (the durable tier specified above) so a client that JOINS - including a
-client that reloaded the page mid-session - is caught up to the current
-state and then sees every subsequent change exactly once.
+The Room attaches the hibernatable socket and reads the local Room document in
+one input turn, so no local mutation can splice between attachment and snapshot.
+Every later durable mirror has a sequence strictly greater than the snapshot it
+follows. The sequence is dense: exactly +1 for every committed PUT or DELETE,
+including deletion of an absent key.
 
-**The model: snapshot-then-stream, ordered by the room's durable
-sequence.** Every durable mutation (a committed PUT or DELETE) is
-assigned a **dense per-room sequence number at commit** - `seq` - by the
-storage backend, inside the same transaction that commits the write (the
-assignment mechanics are specified in "Multi-pod relay" below). The
-snapshot and every live mirror frame carry it, and it - not any lock -
-is what makes late-join correct. On a successful upgrade the server:
+A client applies mirrors above its snapshot sequence, discards a duplicate at
+or below it, and reconnects for a new full snapshot when it detects a gap. No
+frame history or per-client durable cursor exists. A reconnect is a fresh join,
+which makes browser reload and foreground recovery the same path.
 
-1. **Registers the connection in the hub FIRST**, so every mirror frame
-   broadcast from that instant on is queued for the joiner. The queue
-   holds a reserved first-frame slot the snapshot will fill; the writer
-   sends nothing until the snapshot is in it, so the snapshot is still
-   the first frame ON THE WIRE even though live frames may already be
-   buffered behind it.
-2. **Then reads the room KV snapshot** (`RoomRepo.ScanRoom`) and sends it
-   as that first frame, tagged as the snapshot control envelope and
-   stamped with the exact sequence number `S` its state reflects. The
-   envelope's `state` object is the same key -> value object
-   `GET /api/rooms/<uuid>` returns, so the same client code that loads
-   state on a cold HTTP start consumes it.
-3. **The live stream follows.** The client applies a mirror frame with
-   seq > S and discards a frame with seq <= S (its effect is already in
-   the snapshot).
+### Lifecycle and bounds
 
-Register-then-snapshot plus the sequence is what makes late-join
-correct, and unlike the earlier hub-lock formulation it holds across
-pods (the full cross-pod derivation, and the reasons the design moved
-off the lock, are in "Multi-pod relay" below):
+Each Go process admits at most 64 connections for one room and 1024 across one
+app. These are process resource bounds, not global audience limits. A refused
+admission returns 429 before the WebSocket handshake. Each connection is
+released exactly once when dialing fails or either side closes.
 
-- **No gap.** A mirror frame for seq N is only ever broadcast AFTER
-  mutation N durably committed, and the snapshot read observes every
-  commit that precedes its start. So a frame the joiner MISSED (one
-  broadcast before it registered) came from a commit that landed before
-  the snapshot read began, is therefore IN the snapshot, and has
-  seq <= S; a frame from any later commit finds the connection already
-  registered and is delivered live. Every change is in the snapshot or
-  in the stream.
-- **No dup.** A change CAN arrive in both (a frame broadcast inside the
-  join window is also caught by the snapshot read that follows the
-  register). The sequence de-duplicates it: the client discards every
-  frame with seq <= S, so the change is APPLIED exactly once. hostthis
-  is payload-opaque and makes no idempotency assumption about the app's
-  bytes (an app that treats a live mirror as a delta / increment /
-  append corrupts on a double-apply), which is why the discard rule is
-  keyed on the exact snapshot sequence, never on a heuristic.
-- **Gaps are detectable.** The sequence is DENSE - exactly +1 per
-  committed mutation, a counter, not a timestamp - so a subscriber that
-  holds seq N and receives seq N+2 KNOWS a frame is missing and resyncs
-  (the splice contract in "Multi-pod relay"). Live delivery is
-  best-effort; DETECTION is guaranteed by the data.
+The Go proxy pings the public client every 20 seconds and requires a pong within
+10 seconds. This is below normal reverse-proxy idle timeouts and reaps dead
+mobile connections. The canonical browser client also reconnects with
+exponential backoff and jitter, reconnects immediately on foreground recovery,
+and buffers only bounded durable actions while disconnected.
 
-Because correctness rides the sequence, the durable commit does NOT run
-under the room's hub lock: the hub lock guards the connection set only,
-and a room's live broadcasts never stall behind a durable write's
-object-storage round trip. (An earlier single-pod formulation held the
-hub lock across the commit + mirror as one critical section to get the
-no-dup guarantee; the sequence carries that guarantee now - and carries
-it cross-pod, which no pod-local lock can - so the lock shrinks back to
-a pure membership mutex.) The durable path remains the LOW-frequency
-one (a finished availability cell, a placed card, a final vote); the
-high-frequency live texture (cursors, strokes-in-progress at 60 Hz)
-rides ephemeral raw relay frames, which carry no seq and never touch
-the durable tier. An app with high-frequency DURABLE writes should
-batch its commits or move motion to ephemeral frames.
-
-**What persists vs what is ephemeral.** The relay separates two message
-flavors, and this is the abuse + correctness lever:
-
-- **Ephemeral (broadcast only, NOT persisted).** High-frequency live
-  signals: a cursor position, a stroke-in-progress, a "user is dragging
-  the selection." These are fanned out to peers and never written to the
-  KV. They are the live texture of the session; a client that joins later
-  does not need them (they are stale the instant they are sent), so they
-  cost zero KV writes. This is what keeps the relay from forcing a durable
-  write per frame at 60 Hz - the thing that would make the KV the
-  bottleneck and blow the per-room cap in seconds.
-- **Durable (broadcast AND persisted to the KV).** The committed state: a
-  finished availability cell, a placed retro card, a final vote. The
-  durable set is what a late joiner must see, so it must survive a full
-  disconnect + reload, so it lands in the room KV via the SAME
-  `RoomRepo.PutValue` / `DeleteValue` the HTTP verbs use - which means it
-  rides the SAME per-room and per-app caps and resets the
-  SAME clock. A durable mutation is therefore consistent whether
-  it arrives over the relay or over `PUT /api/rooms/<uuid>/<key>`: both
-  funnel through the one room repo, so the snapshot a future joiner reads
-  reflects it identically.
-
-**How a client signals which flavor a message is.** hostthis stays generic
-by NOT inventing an app protocol, but it must know which messages to
-persist. The chosen convention: the durable path is the EXISTING HTTP KV
-verb, and the relay is broadcast-only by default. An app that wants a
-change to be both durable AND pushed live does the durable write with `PUT
-/api/rooms/<uuid>/<key>` (which the server commits, then mirrors to the
-room's connected clients on EVERY pod as a live message tagged with the
-key and the mutation's room sequence - the sequence, not a lock, is what
-keeps a join racing the PUT from double-applying or missing it; see
-above), and uses raw relay frames only for ephemeral signals. This keeps the relay payload-opaque (no reserved fields in the
-app's bytes), makes the durable write go through the one audited cap-
-checked path, and gives the live fan-out of a committed change for free.
-
-  Why route durable writes through the HTTP verb rather than a
-  message-type tag inside the relayed bytes: a tag inside the payload would
-  force hostthis to parse the app's message (breaking the payload-opaque
-  property and the isolation argument that rests on it), and it would
-  duplicate the cap-check logic on a second code path. A
-  `PUT` that the server mirrors to the hub reuses the entire durable path
-  unchanged and adds only the fan-out. The relay's own frames stay pure
-  ephemeral broadcast - the server never persists a raw relay frame, so a
-  flood of relay frames can never grow the durable store (see "Limits").
-  An app whose every change is durable simply does every change as a `PUT`
-  and uses the relay only to LOWER its latency (the live mirror), or not at
-  all; an app with a lot of ephemeral motion uses raw relay frames for the
-  motion and `PUT`s only the committed deltas.
-
-**Reconnect is just join again.** A reconnecting client - the canonical
-case is a page reload or a backgrounded PWA resuming - opens a fresh
-WebSocket, gets a fresh snapshot-then-stream, and is caught up with no gap
-and no dup by the exact same mechanism as a first-time joiner. The server
-holds no per-client durable session state across a disconnect: a
-connection is not assumed unique or permanent, and a client may have zero,
-one, or several live connections to the same room at once (two tabs).
-Re-syncing from the KV snapshot on every (re)connect is what makes the
-relay reconnect-friendly - there is deliberately no incremental "replay
-me everything since sequence N" protocol to get wrong. The room sequence
-orders, de-duplicates, and detects loss; it never drives a replay (the
-server retains no per-room frame history). The durable KV is always the
-authoritative full state and a fresh snapshot is always correct.
-
-### Connection lifecycle (the finicky core)
-
-This is what separates a relay that feels solid from one that drops
-messages and leaks goroutines. The server side and the client side each
-own four pieces; they interlock.
-
-**Server side.**
-
-- **Per-room hub.** A hub is the in-memory registry for one room's live
-  connections, keyed by `(app-slug, room-uuid)`. It owns the set of
-  connected clients, the register / unregister path, and the broadcast
-  fan-out. A hub is created lazily on the first connection to a room and
-  torn down when its last connection leaves (no idle empty hubs linger).
-  The hub registry (the map of room-key -> hub) and each hub's client set
-  are the two in-memory structures, and BOTH are bounded (see "Limits").
-  These are two separate locks - the global registry lock (the hub map plus
-  the per-app + total-rooms counters) and each hub's own lock (its client
-  set) - and the per-room isolation is a LATENCY property as well as a
-  correctness one: an upgrade's admission does the global-lock work (the
-  per-app / total-rooms cap check, the lazy hub-create) and then RELEASES
-  the global lock BEFORE it takes the target hub's lock for the per-room cap
-  check + register. So a join to one room never holds the global lock while
-  waiting on another room's hub lock. Neither lock is ever held across
-  I/O: the durable commit runs outside the hub lock (the room sequence,
-  not the lock, carries the no-gap / no-dup guarantee - see "Persistence
-  and late-join"), and the join's snapshot read runs after the register,
-  also outside it. A hub lock is held only for map mutation and the
-  wait-free buffer enqueues of a fan-out, so one room's contention stays
-  local to that room and no room's broadcasts stall behind storage.
-
-  Decoupling admission from the global lock opens a window: between an
-  admission reserving its per-app slot (and releasing the global lock) and
-  registering its reservation into the hub, the hub is momentarily empty
-  from the perspective of any other goroutine. A concurrent leave that
-  empties the hub fires its empty-hub teardown in that window and would
-  remove the very hub the admission is about to register into, orphaning
-  the registration (it lands in a hub no longer in the map, so it misses
-  live frames) and leaking its per-app slot (a later release finds no
-  hub and skips the decrement). A PENDING-ADMIT guard closes this: the
-  registry tracks a per-room count of in-flight admissions, incremented
-  under the global lock when the slot is reserved (before the lock is
-  released) and decremented under it once the register has run. Every
-  hub-removal path - the empty-hub teardown the last leave fires, the
-  laggard-drop path that empties a hub, and an admission's own
-  per-room-cap rollback - removes a hub only when it is empty AND has zero
-  in-flight admissions, so a hub an admission is about to register into is
-  never torn out. The guard keeps the admission decoupled (it still holds no
-  global lock while taking the hub lock to register), so the per-room
-  isolation above is preserved; it only narrows "the hub is idle" to also
-  mean "no admission is mid-flight into it." (A durable write, for its
-  part, never creates a hub: the mirror fan-out looks the hub up and a
-  missing hub just means no local subscribers - the frame is dropped
-  locally, exactly as a peer-received frame for a subscriber-less room
-  is.)
-- **Server heartbeat (ping/pong) to reap dead connections.** The server
-  sends a WebSocket ping to each connection on a fixed interval and expects
-  a pong back within a deadline; a connection that misses the pong deadline
-  is considered dead and is closed and unregistered. This is what detects a
-  client that vanished without a clean close (a killed PWA, a dropped
-  mobile link, a yanked cable) - TCP alone can take minutes to notice, and
-  an idle proxy will cut the connection silently. The server ping interval
-  is chosen UNDER the proxy idle timeout (the relay runs behind traefik /
-  nginx, whose idle defaults are 60-120 s), so the heartbeat also keeps a
-  legitimately-quiet connection alive through the proxy. The server both
-  SENDS its own pings AND tolerates client-initiated pings (responds with a
-  pong, treated as a liveness no-op) - the client lifecycle below pings on
-  its own ~25 s cadence and the server must not punish it for that.
-- **Backpressure: a slow client must never block the room.** Each
-  connection has a **bounded per-client send buffer**. The broadcast path
-  writes to each connection's buffer and returns immediately; a dedicated
-  per-connection writer goroutine drains the buffer to the socket. If a
-  client is slow or stuck and its buffer is FULL when a broadcast tries to
-  enqueue, the server does NOT block the broadcast waiting for that one
-  client (head-of-line blocking the whole room on the slowest member) - it
-  **drops that client**: closes the connection and unregisters it. A
-  laggard is ejected, never tolerated at the cost of everyone else's
-  latency. The bound is small (a handful of frames): a client that cannot
-  keep up with a handful of buffered frames is not a viable live
-  participant and is better off reconnecting (which re-syncs it from the
-  KV snapshot cleanly). The broadcast is therefore wait-free with respect
-  to any individual client. Dropping a laggard reclaims its connection
-  accounting (the per-room hub slot AND the per-app aggregate counter) the
-  same way a clean leave does - the drop path is a real disconnect, not a
-  shortcut that forgets the counters, so a room that drops laggards under
-  load does not slowly leak its per-app connection budget.
-- **Clean disconnect handling.** Every connection close - clean client
-  close, heartbeat-timeout reap, slow-client drop, server shutdown -
-  unregisters the connection from its hub, decrements the per-app
-  connection counter exactly once, and stops its reader and writer
-  goroutines, with no leaked goroutine, no dangling map entry, and no
-  leaked connection-count slot. Each disconnect decrements the per-app
-  counter exactly once regardless of which path tore the connection down
-  (a clean unregister and a backpressure drop must not BOTH decrement, and
-  neither must SKIP it). The last connection leaving a room tears the hub
-  down. Server shutdown closes all connections with a normal-closure status
-  so clients reconnect on the client backoff schedule rather than hammering
-  instantly.
-- **Read bound.** The reader applies a max message size per inbound frame
-  (see "Limits"); a frame over the cap closes the connection. Liveness is
-  the heartbeat's job, not the reader's: the server's ping/pong loop is the
-  sole reaper, and it cannot be starved (it runs in its own goroutine on a
-  fixed ticker, independent of whether the reader is blocked on a quiet
-  socket). A connection that goes silent is therefore reaped by the missed
-  pong, so the reader needs no separate per-read deadline as a backstop -
-  one reaper, sufficient, with no second timeout to keep consistent with the
-  heartbeat window.
-
-**Client side (the relay must SUPPORT this; the POC implements it).** The
-server is built so the canonical 4-piece client lifecycle works against
-it. This is the same lifecycle every production WebSocket client needs;
-the relay's job is to not fight it:
-
-1. **Heartbeat ping every ~25 s** (under the proxy idle default). The
-   server treats a client ping as a liveness no-op and pongs it. A quiet
-   connection stays alive across an idle network and a suspended PWA.
-2. **Auto-reconnect with exponential backoff + jitter** on close. Start
-   ~500 ms, double each attempt, cap ~30 s, jitter to avoid a thundering
-   herd if many clients reconnect at once (a server restart drops every
-   connection in a room simultaneously). The server is reconnect-friendly:
-   a reconnecting client re-syncs from the KV snapshot, so backoff costs a
-   little latency, never correctness.
-3. **`visibilitychange` recovery.** When a tab / PWA returns to the
-   foreground, force-reconnect immediately rather than waiting out the
-   backoff - iOS aggressively suspends backgrounded WebSockets, and the
-   snapshot-then-stream rejoin catches the client up on whatever it missed.
-4. **Send buffer (client-side).** Queue actions submitted while
-   disconnected (capped), flush them on the next reconnect after the
-   snapshot handshake. Durable actions a client took offline are `PUT`s
-   that retry on reconnect; ephemeral signals taken offline are simply
-   dropped (they are stale).
-
-The server makes no assumption that a connection is unique or permanent,
-so all four client pieces are safe: a reconnect is a new join, a duplicate
-connection from the same client is just another hub member, and a missed
-heartbeat is reaped without corrupting room state (the durable state lives
-in the KV, untouched by a connection dying).
-
-### Limits and abuse posture
-
-The relay is a new always-open, push-capable surface, so every in-memory
-structure is bounded and the abuse posture is the room-UUID capability
-plus these caps - **no new auth**, consistent with the rest of the tier.
-Each limit has a concrete default flagged as a starting point (tunable as
-real usage informs it):
-
-- **Max concurrent connections per room** (default **64**). A room is a
-  small collaborative session (a team's retro, a friend group's
-  when2meet); past this, new upgrades to that room are refused **429**.
-  This bounds one hub's client-set size and one room's fan-out cost (a
-  broadcast is O(connections)).
-- **Max concurrent connections per app** (default **1024**). Bounds the
-  total live connections any one app's rooms hold open in aggregate, the
-  live-tier analogue of the per-app aggregate byte cap. Past it, new
-  upgrades under that app are refused **429**.
-- **Cap on total active relay rooms** (a service-wide bound on the number
-  of live hubs, default sized to the node's memory budget). Bounds the hub
-  registry itself so the count of distinct live rooms cannot grow
-  unbounded. Past it, an upgrade that would create a NEW hub is refused
-  **503**; joins to already-live rooms still succeed.
-- **Max message size per inbound frame** (default **32 KiB**). An app's
-  live message is small (a cursor, a cell, a card); a frame over the cap
-  closes the connection. This bounds per-frame memory and stops a single
-  giant frame from being a memory-amplification vector. (It is independent
-  of the per-room DURABLE byte cap, which the `PUT` path enforces; a relay
-  frame is never persisted, so it is bounded for memory, not for storage.)
-- **Per-connection send rate limit** (default a small frames-per-second
-  ceiling, e.g. **120 msg/s**). A client that exceeds its inbound rate is
-  throttled or dropped, so one hostile connection cannot saturate a room's
-  fan-out (every inbound frame is multiplied by the room's connection
-  count on the way out). This is the relay's analogue of the room-creation
-  rate limit on the KV side.
-
-The bounded per-client send buffer (the backpressure mechanism above) is
-itself a per-connection memory bound. Together these cap connections,
-rooms, per-frame bytes, in-flight buffered bytes, and message rate - every
-axis a hostile client could push on. A reverse-proxy per-IP connection
-limit remains the appropriate outer layer for raw connection-flood abuse,
-exactly the division of labor the KV path documents for request-rate
-abuse. Durable mutations made over the relay ride the EXISTING per-room
-and per-app byte caps unchanged (they go through `PutValue`),
-so the relay opens no new path to grow the durable store past its caps.
-
-The relay adds NO state that survives a room's deletion: once a room's KV
-is gone, any still-open connections to it are connections to a now-empty
-room, and the next durable read returns an empty snapshot. Live hubs are pure in-memory
-state, GC'd when the last connection leaves; they are never persisted and
-never participate in the sweep.
-
-### Why there is no pod-to-pod fan-out
-
-An earlier multi-pod design fanned every frame from its origin pod to every
-peer pod, made correct by the dense per-room sequence (order by seq,
-de-duplicate by seq, detect loss by the hole). The SEQ CONTRACT survives - it
-is what lets a client splice a snapshot onto the live stream, and the wire
-format still carries it - but the fan-out machinery does not, because the
-premise is gone: exactly one cell owns each room, so there is no second pod
-holding the same room to fan out to.
-
-### Celld backend: the room cell is the broadcast point (no peer fan-out)
-
-The peer fan-out above exists because on the sharded backend NO pod owns a
-room: every pod's hub holds a fraction of the room's sockets, so frames must be
-pushed to every pod. The celld backend removes the premise instead of scaling
-the workaround: exactly one cell owns each room, so the cell is the natural
-broadcast point and the pods stop holding room state at all.
-
-**The shape: a 1:1 socket proxy.** hostthisd still terminates the client's
-WebSocket - the public surface, origin policy, connection caps and heartbeat
-stay where authentication already lives, and the cell runtime's worker port
-stays cluster-internal - but instead of joining an in-process hub, the handler
-dials the room's cell and pipes frames verbatim in both directions. One client
-socket, one upstream socket, no shared state on the pod beyond a connection
-counter for the caps.
-
-**Broadcast happens inside the cell's write event.** A durable PUT or DELETE
-reaches the room cell over HTTP from whichever pod handled it; the cell applies
-the write, assigns the dense per-room seq, and broadcasts the mirror frame to
-its connected sockets - all within its single-threaded event. The properties
-the multi-pod design had to buy with the seq contract fall out for free:
-
-- **Ordering**: one writer thread assigns seq and broadcasts in the same
-  event, so frames leave the cell in seq order. No cross-pod race exists.
-- **No loss between pods**: there is no pod-to-pod hop to lose a frame on.
-  The seq contract stays on the wire regardless: clients still splice
-  snapshots and detect holes, because a PROXIED socket can still drop.
-- **Snapshot atomicity**: the join handler reads state and seq in the same
-  event that attaches the socket, so a snapshot can never miss a frame
-  committed between read and attach.
-
-**The wire encoding stays in Go.** A room value is arbitrary bytes, and the
-frame encoding (raw JSON passes through, anything else becomes a JSON string)
-is subtle enough to own once: the storage adapter computes the wire form with
-the same encoder the HTTP handlers use and sends it alongside each write. The
-cell stores it and echoes it into snapshots and mirror frames without ever
-interpreting the bytes.
-
-The client contract is unchanged: same endpoint, same frames, same splice
-rules. `CommitAndMirror` still runs the durable write, but the frame it builds
-is discarded - the mirror is the cell's job now, and mirroring from the pod as
-well would deliver every frame twice.
-
-### Sandbox and security posture
-
-The relay introduces no new trust boundary beyond the room-UUID
-capability and the origin isolation the rest of hostthis relies on:
-
-- **Origin isolation is unchanged.** The WebSocket is served on the app's
-  own subdomain (`<app-slug>.hostthis.dev`), the same origin as the app's
-  files and its KV API. A browser's same-origin policy keeps one app's
-  relay unreachable as a cross-origin target from another paste's JS in the
-  normal way; the relay rides the per-subdomain origin boundary that
-  already separates pastes and sites. (Path mode collapses origins for dev,
-  the same documented caveat the rest of hostthis carries - path mode is
-  dev-only and breaks origin isolation; a production relay deploy runs
-  subdomain mode.)
-- **Origin / Host checks on upgrade.** The WebSocket upgrade validates that
-  the request's `Host` resolves to a real app slug (the existence check
-  above) and applies an Origin policy appropriate to a same-origin app API:
-  cross-origin upgrade attempts that a browser would gate by CORS are
-  refused, so a third-party page cannot open a victim app's relay from a
-  visitor's browser. The room UUID remains the capability for any party who
-  legitimately holds it (the app's own JS, a shared link), exactly as the
-  KV verbs treat it.
-- **The payload is opaque and never executed.** hostthis relays bytes; it
-  never renders, parses, or runs a relayed message. A relayed frame is data
-  fanned out to peers' JavaScript, which the app's own code interprets
-  inside its own origin - the same "treat any URL on hostthis.dev as
-  untrusted user content" posture the HTML-sandboxing section sets, now
-  extended to "treat any relayed message as untrusted app data," handled
-  entirely by the app's client code, never by hostthis.
-- **No amplification past the caps.** The per-frame size cap, the
-  per-connection rate limit, the per-room / per-app connection caps, and
-  the bounded send buffer together bound the fan-out amplification (one
-  inbound frame -> N outbound frames) so the relay cannot be turned into a
-  DoS multiplier. A relay frame is never persisted, so it cannot grow the
-  durable store; a durable write over the relay rides the existing byte
-  caps; the capability + the caps are the whole abuse posture, no new auth.
-
-### DDD shape: the hub as a bounded context
-
-The relay is its own bounded context, kept thin at the edges and pure
-where it can be, matching the domain-pure / infra-separate / services-on-
-top discipline the rest of the codebase follows:
-
-- **The hub / relay service is the bounded context** (connection registry,
-  broadcast fan-out, lifecycle). It depends on the room KV ONLY through the
-  existing small `service.RoomRepo` interface - the same snapshot
-  (`ScanRoom`, which reports the snapshot's seq) and durable-write
-  (`PutValue` / `DeleteValue`, which return the assigned seq) verbs the
-  HTTP KV handlers use - so the relay reuses the durable tier's caps and
-  quota without re-implementing them. Its only other dependencies
-  are the two small outbound ports of the multi-pod tier (the `Peers`
-  address provider and the per-peer frame publisher; see "Multi-pod
-  relay"), both trivially faked in tests.
-- **The connection is an interface, not a concrete socket.** The hub talks
-  to a connection abstraction (send a frame, close, identity) so the hub
-  logic - register, broadcast, drop-a-laggard, reap-on-heartbeat-timeout,
-  tear-down-the-empty-hub - is unit-testable WITHOUT real sockets, with a
-  fake connection that records what it received and can be made to block /
-  fill its buffer to exercise the backpressure path. The pure hub logic is
-  the testable core; the real `coder/websocket` connection is one adapter.
-- **The HTTP WS-upgrade handler is thin.** It authenticates the room
-  (validate slug exists + UUID parses + room exists, the same checks the KV
-  path runs), enforces the connection caps, performs the upgrade, and hands
-  the connection to the hub. It carries no app logic and no relay state of
-  its own. This is the same translation-layer-only shape the existing
-  `/api/rooms` handlers have.
-- **The library.** The relay uses a maintained, context-native Go
-  WebSocket library - **`coder/websocket`** (the maintained successor to
-  `nhooyr.io/websocket`), whose `context.Context`-first read/write API and
-  built-in ping/pong fit the lifecycle above and the codebase's
-  context-aware shape. It is added via `go.mod`. (The long-lived WebSocket
-  connection is hijacked out from under the `http.Server`'s
-  `ReadTimeout` / `WriteTimeout`, which bound the short request/response
-  paths and must NOT reap a live relay connection; the relay manages its
-  own per-connection read/write deadlines via the heartbeat instead.)
-
-### Testing: the multi-client harness is the gate
-
-Per the TDD discipline, the relay does not ship without the integration
-test that pins the spec'd behavior. The gate is a **multi-client harness**:
-two or more clients join one room and the test asserts the observable
-contract end to end - a message from one client reaches the others and not
-itself; a late joiner gets the snapshot then the live stream with no gap
-and no dup; a reconnecting client re-syncs cleanly; a slow client is
-dropped without stalling the room's broadcast to the others; a heartbeat-
-timeout connection is reaped; strict isolation holds (a connection in room
-A never sees room B's or another app's traffic); and the connection / room
-/ frame-size / rate limits each reject past their bound. The pure hub
-logic is additionally unit-tested against a fake connection (no real
-socket) for the register / broadcast / backpressure / reap / teardown
-paths. The WebSocket tests run under `-race` so a data race in the hub's
-concurrent register / broadcast / unregister path fails the build. The
-multi-pod tier has its own gate on top of this one - the two-relay
-peer harness and the seq conformance pins - specified under "Multi-pod
-relay" (Acceptance criteria).
+The live celld harness is the acceptance gate: multiple clients receive durable
+frames in sequence; a late join receives an exact snapshot splice; ephemeral
+text and binary frames reach peers only; room and app isolation hold; deletes
+mirror correctly; reconnect works; and admission slots are reclaimed.
 
 ## Persistence
 
@@ -2680,46 +2174,32 @@ get deleted, or have older versions explicitly
 deleted via `delete <slug> <ver>`, the cap frees up. Over-quota uploads
 error with `would exceed your 100 MiB total quota`.
 
-The per-identity quota and the per-paste cap are DELIBERATELY DIFFERENT
-numbers: 100 MiB total, 10 MiB for any single paste. They were equal
-historically, on the reasoning that one number is easier to reason
-about, but they constrain different things and one of them is bounded by
-memory rather than policy. The per-paste cap bounds one request's
-declared size; the per-identity quota is a fairness limit on accumulated
-storage and costs nothing at request time.
+The per-identity quota and per-paste cap are distinct: 100 MiB total and
+10 MiB for one paste. The per-paste cap bounds one request's compressed
+payload; the per-identity quota bounds accumulated logical storage.
 
-**Writes are constant-memory.** An upload is never held whole in RAM. The
-body streams through the compressor into the object store, hashing as it
-goes, and the staged length is not known in advance - the blob port takes
-`SizeUnknown` and the adapter uses a streaming multipart upload. Memory
-per in-flight upload is the compressor window plus a copy buffer, not the
-payload, so N concurrent large deploys cost N small constant amounts
-rather than N times the file size. Raising the total therefore
-does not imply raising the per-request ceiling, and they should be
-expected to diverge again. Static **sites** count against the same cap and on the same
-basis: the total of their files' COMPRESSED sizes, as reported by the
-staging that wrote them (see "Static site archives → Quota").
+**Writes are constant-memory.** A single-document upload compresses into a
+temporary spill file while hashing and counting it, then streams that file to
+the blob store. A static-site file follows the same spill-then-stream shape.
+Resident memory is bounded by compressor and copy buffers rather than payload
+size. Static sites count against the same identity cap using each manifest
+path's compressed size.
 
 **Reads are constant-memory too.** Every path that serves stored bytes
 streams them: the HTTP raw read, a static site's files, and the `get`
 verb all copy from the blob port's reader straight to the client. A read
 therefore costs a copy buffer regardless of whether the paste is a
-kilobyte or the 10 MiB ceiling, and the decompressed size — which can be
-an order of magnitude larger — never lands in the heap at all. The port
-also offers a buffering read for a caller that genuinely needs the whole
-document at once; no serving path uses it.
+kilobyte or the 10 MiB ceiling, and the decompressed size never lands in the
+heap.
 
-That total is NOT folded by content hash. Nothing in the store
-deduplicates: a blob id is minted fresh for every file staged, so two
-identical files - in one archive, across re-deploys, or across owners -
-are two objects on disk and are charged as two. Summing what staging
-reported is therefore the only figure that cannot drift from the disk,
-because it is what went to the disk. A user can spend their quota as one 10 MiB
-paste, ten 1 MiB pastes, a static site, or any mix.
+Blob storage is content-addressed by the uncompressed SHA-256, so identical
+content shares one physical object. Quota is logical rather than physical:
+every manifest path and every live version carries its own compressed-byte
+charge even when their content hashes match.
 
-Deleted versions (via `delete <slug> <ver>`) contribute zero bytes to the
-quota even though the metadata row remains as a tombstone - only the
-blob bytes are gone.
+Deleted versions contribute zero bytes to logical quota and are inaccessible.
+Their metadata remains as a tombstone; physical content-addressed objects are
+not synchronously deleted.
 
 ### Same-identity create admission: a width-2 gate
 
@@ -2893,24 +2373,22 @@ cap is at the limit, not over it. A cap of zero or less means no limit.
 
 ### Atomicity
 
-The per-identity quota check and the Sybil admit run inside a single
-atomic transaction so concurrent writers serialize at the transaction
-boundary instead of racing a stale SUM check. (The durable total-bytes
-ceiling is NOT part of this transaction: it lives at the object store as
-a bucket quota and surfaces as `ErrServiceFull` from the blob `Put`, off
-the metadata write path entirely.) The underlying
-mechanism depends on the metadata backend in use:
+The per-identity quota check, Paste transitions, and Sybil admission are
+serialized inside their owning aggregate. The durable total-bytes ceiling is
+separate: it lives at the object store as a bucket quota and surfaces as
+`ErrServiceFull` from blob `Put`.
 
-- **memory backend** - one mutex over the store, so the check and the write
-  uses; only the engine beneath the cluster differs.
-- **celld backend** - the room cell's single-threaded event
-  with a `WriteBatch` for the actual multi-key writes; SlateDB's
-  manifest-level fencing ensures only one writer is alive at a time
-  across processes.
+- **Memory backend.** One mutex covers the store. Maintained per-owner and
+  per-app aggregates make quota decisions point-addressed and exact.
+- **Celld backend.** v0.4 may serve several events concurrently, so every
+  check-and-mutate route in Identity, Paste, Room, and Subnet runs under
+  `blockConcurrencyWhile`. Local multi-key transitions use one storage
+  transaction or batch. Room's cross-cell byte invariant additionally uses the
+  versioned escrow protocol above.
 
-The service layer treats both backends identically; the atomicity
-contract is "the multi-row write either fully lands or doesn't, with
-no half-applied state visible to readers."
+The service layer treats both backends identically: a local multi-record
+transition fully lands or remains at its prior state, and concurrent admission
+cannot race a stale check.
 
 ### Threat model: what's bounded and what isn't
 
@@ -2921,12 +2399,9 @@ no half-applied state visible to readers."
 - All identities combined → the object-store bucket quota on real
   physical bytes (post-compression, post-dedup), enforced by the storage
   layer, not an app-level scan
-- Concurrent per-identity quota races → atomic transactions on the
-  single-writer memory backend; on the celld backend
-  the quota check is a scan that is not atomic with the write, so
-  same-identity concurrency admits a BOUNDED overshoot (one in-flight
-  upload), backstopped by the object-store bucket quota (see
-  "Scan-derived quota" / "The correctness argument")
+- Concurrent per-identity and per-app quota races → serialized aggregate-local
+  decisions on both backends; the Room escrow protocol preserves the cross-cell
+  app ceiling
 
 *Not bounded by the protocol* (operator-layer concerns):
 - *Multi-IP Sybil via residential-proxy fleets*. An attacker with 100
@@ -2950,52 +2425,40 @@ no half-applied state visible to readers."
 
 ## Blob storage backends
 
-Blob bytes are content-addressed by SHA256 and stored via a small
-`BlobStore` interface declared by the service layer:
+Blob bytes are independent of metadata. The service uses one
+content-addressed blob port and selects its adapter with
+`HOSTTHIS_BLOB_BACKEND`:
 
-```go
-type BlobStore interface {
-    Put(sha string, r io.Reader, size int64) error
-    Get(sha string) ([]byte, error)
-}
-
-type SweepBlobs interface {
-    WalkBlobs(fn func(sha string) error) error
-    Remove(sha string) error
-}
+```text
+HOSTTHIS_BLOB_BACKEND=disk    # default
+HOSTTHIS_BLOB_BACKEND=s3      # production
 ```
 
-The service layer never imports a specific backend - it depends only on
-those four methods. The standalone backend is selected via the
-`HOSTTHIS_BLOB_BACKEND` env var at startup.
+Both adapters key the same compressed representation by the SHA256 of the
+original bytes. Metadata therefore stores a content identity, never a provider
+URL, filesystem path, or object-store key. Changing providers does not change
+the domain or metadata shape.
 
-**`Put` and the `ErrServiceFull` sentinel.** When an underlying object
-store rejects a `Put` because the bucket is at its configured quota (a
-`507 Insufficient Storage` / quota-exceeded response from MinIO or an
-equivalent backend), the blob store maps that rejection to the
-`ErrServiceFull` sentinel rather than a generic 500. This is the single
-place the durable total-bytes ceiling is enforced (see "Limits →
-Durable total-bytes ceiling: an object-store quota"): the app runs no
-service-wide byte scan, so `ErrServiceFull` originates from the storage
-layer's rejection, and the upload / site-deploy services translate it
-into the graceful "service is at capacity" response. A backend with no
-quota concept (the local `disk` backend) never returns it; the ceiling
-is then whatever the host filesystem allows, an operator concern.
+**`Put` and the `ErrServiceFull` sentinel.** When an object store rejects a
+write because its bucket quota is exhausted, the S3 adapter maps that response
+to `ErrServiceFull`. Upload and site-deploy services translate the sentinel into
+the graceful "service is at capacity" result. The application performs no
+service-wide byte scan. The disk adapter has no bucket quota and therefore
+cannot produce this result.
 
 ### Available backends
 
-`disk` (default, the only standalone backend): bytes live on local disk
-under `<data-dir>/blobs/<sha256[:2]>/<sha256>`. Two-character sharding keeps
-any single directory's entry count manageable. Linux page cache absorbs
-hot blob reads. Fine up to a few tens of GB and a few thousand
-identities. This is the dev/test standalone backend.
+- **`disk`** stores each object at
+  `<data-dir>/blobs/<sha256[:2]>/<sha256>`. It is the local development and test
+  default.
+- **`s3`** stores each object at
+  `<prefix>/<sha256[:2]>/<sha256>` in the configured bucket. It is the durable
+  production byte plane. Endpoint, bucket, region, credentials, TLS, and prefix
+  come from `HOSTTHIS_S3_*` settings.
 
-Production runs the celld metadata backend with the content-addressed s3
-blob store, not through this standalone
-`BlobStore` at all. A detached standalone `s3` backend used to exist as a
-third option; it was retired once a cloud path subsumed the
-only production use of a cloud object store for blobs. The standalone path
-is disk (dev/test) or s3 (production).
+Neither adapter is supplied by the metadata backend. Production combines celld
+metadata with S3 blobs; local development normally combines memory metadata with
+disk blobs.
 
 ### On-disk format
 
@@ -3027,35 +2490,16 @@ representation. Two pastes with identical bytes share one stored object.
 The same magic+zstd format is shared by every blob backend, so
 a blob's stored bytes are identical whichever path wrote them.
 
-### One standalone backend (disk)
-
-The standalone blob path ships exactly one backend, `disk`, which is also
-the default - there is no backend to switch between. A detached `s3`
-standalone backend (and its disk->S3 migration helpers) used to exist; it
-was retired and later reborn as the content-addressed s3 backend, which is
-the production byte plane, reached through the
-metadata backend, not through this standalone `BlobStore`.
-
 ### Local-disk write-back cache (optional, opt-in)
 
-A blob `Put` against a remote object store dominates upload latency: most
-of a paste's wall-clock time is spent inside the `PutObject` call (hundreds
-of ms), while the local hashing + compression and the metadata writes are
-each a few ms. For deploys that can tolerate a small durability window in
-exchange for a fast upload ack, an optional **local-disk write-back cache**
-sits in front of the durable backend.
+A blob `Put` against S3 dominates upload latency, while local hashing,
+compression, and metadata writes are comparatively small. For deploys that can
+tolerate a local-durability window, an optional **local-disk write-back cache**
+can sit in front of either blob adapter. It is useful in practice only for a
+remote adapter.
 
-NB this cache existed to hide the latency of the *detached cloud* standalone
-backend, which has been retired - the standalone path is now disk-only, so
-its `Put` is already local and the cache is effectively dormant there. The
-production blob path instead hides the slow object-store
-`Put` by STAGING the bytes durably before the metadata commits (it does not
-use this cache). The machinery below is retained for any future remote
-standalone backend; it is correct but currently has no remote `Put` to
-front.
-
-It is **off by default**. The strict, ship-it-durable-before-ack
-behavior described above is unchanged unless an operator opts in with:
+It is **off by default**. The strict, durable-before-ack behavior is unchanged
+unless an operator opts in with:
 
 ```
 HOSTTHIS_BLOB_WRITEBACK=true            # enable the write-back cache (default false)
@@ -3063,8 +2507,8 @@ HOSTTHIS_BLOB_WRITEBACK_DIR=<path>      # local cache dir (default <data-dir>/bl
 HOSTTHIS_BLOB_WRITEBACK_MAX_BYTES=<n>   # soft cap on cache size in bytes (default 1 GiB)
 ```
 
-When enabled, the cache wraps the configured durable backend (`disk`) and
-changes the blob path as follows:
+When enabled, the cache wraps the configured blob adapter and changes the blob
+path as follows:
 
 - **`Put` writes locally first, uploads asynchronously.** The bytes (the
   already-compressed, magic-prefixed stored representation) are written
@@ -3139,86 +2583,37 @@ and the local cache.
 
 ## Metadata storage backends
 
-The metadata layer (paste rows, version rows, identity quota
-counters, slug-to-identity index, Sybil key_first_seen rows) is
-pluggable. Two ship:
+Two adapters implement the application's metadata ports:
 
-- **memory** - the in-process MemRepo, ephemeral by design, on this build's local
-  storage engine, persisted under `<data-dir>/metadata`. The
-  default. Zero configuration and no external services, which is
-  what a fresh clone and `make run` want.
-- **celld** - a cell runtime over an S3-compatible object store
-  (MinIO, R2, S3, GCS, ABS), sharded and replicated across nodes.
-  Production. Specified in full under "Celld-backed metadata
-  storage" below.
+- **memory** - the default in-process adapter. It is ephemeral, requires no
+  external service, and is used by local development and most tests.
+- **celld** - the production adapter. Identity, Paste, Room, and Subnet cells
+  own durable metadata over a celld fleet's object store.
 
-Both are the SAME repo over a different storage engine, chosen at
-build time (see "The storage-engine seam"), so there is one
-implementation of every behaviour rather than one per backend. The
-service layer talks to a small set of interfaces (`PasteAdmin`,
-`KeyGateRepo`, `SweepRepo`); the domain layer and the HTTP/SSH
-adapters are unaware of which is in use. Switching is one env var:
+The service and transport layers depend only on domain-shaped ports. The
+backend-agnostic conformance suite runs the same behavior against memory and a
+live celld Worker.
 
-```
-HOSTTHIS_METADATA_BACKEND=local                   # default
+```text
+HOSTTHIS_METADATA_BACKEND=memory                  # default
 HOSTTHIS_METADATA_BACKEND=celld                   # production
 HOSTTHIS_CELLD_ENDPOINT=http://celld:8080         # required for celld
-# (S3 endpoint/credentials reused from HOSTTHIS_S3_*)
 ```
 
-### Why pluggable
+### Atomicity contract
 
-- **Stepping stone to multi-region.** SlateDB-on-MinIO validates the
-  cloud-object-store metadata path locally. Same code then points at
-  R2 in production with one env var change - no app rebuild.
-- **Stateless containers.** With SlateDB, the container holds no
-  durable state; killing it and bringing it up elsewhere is safe.
-  A local engine ties data to a host path.
-- **Scaling headroom.** A local engine caps sustained writes at
-  single-writer throughput. SlateDB batches writes into SSTables and
-  tolerates higher rates.
+The memory adapter serializes every check-and-mutate operation under one mutex.
+The celld Worker serializes mutating events per cell and commits local multi-key
+transitions with one storage transaction or batch. Cross-cell invariants use the
+durable protocols specified in the celld section below; they are not one global
+transaction.
 
-### Atomicity contract (both backends)
+### Blob and operator boundary
 
-Every write that touches multiple keys is committed atomically:
-
-- New paste = (paste row) + (v1 version row) + (slug-to-identity
-  pointer). All three land or none. The owner's used bytes are DERIVED by
-  scanning the version rows (the row carries the identity), so there is
-  no separate quota counter to bump.
-- Update = (new version row) + (paste head pointer update if
-  unpinned). Both land or neither.
-- Per-version delete = (version tombstone). The tombstoned version drops
-  out of the next quota scan; no counter to decrement.
-- Whole-paste delete = (paste row delete) + (cascade to all version
-  rows) + (slug pointer delete). All land or none; the freed bytes leave
-  the owner's quota simply because the next scan no longer sees them.
-
-the memory engine enforces this under its mutex; celld via
-`Db.begin(IsolationLevel.SnapshotIsolation)` with `WriteBatch`. On the
-celld backend the slug's rows commit inside the paste cell's event,
-and the owner's `{id}`-shard enumeration index entry is a separate
-best-effort write, ordered BEFORE it (see "Scan-derived quota"); the quota is never re-derived by scanning on the request path (
-caches per-record sizes on the enumeration entries, each rebuildable from
-its authoritative rows).
-
-### Compose & operator config
-
-The standalone blob backend (`HOSTTHIS_BLOB_BACKEND`, disk-only) and the
-metadata backend (`HOSTTHIS_METADATA_BACKEND`) are independent. Reasonable
-combos:
-
-| metadata | blob | shape |
-| --- | --- | --- |
-| local | disk | single-host, no cloud deps (dev) |
-| celld | s3 | production: content-addressed objects in an S3-compatible bucket |
-
-The detached cloud (`s3`) standalone blob backend was retired; production's
-cloud blobs are the s3 backend's concern, reached through the standalone
-backend, not a separate `HOSTTHIS_BLOB_BACKEND` selection. Bucket-per-domain
-is still recommended in production: the fleet bucket and the
-collocated blob bucket (`HOSTTHIS_SHALE_BLOB_BUCKET`) are distinct, so
-IAM/credential rotation can differ for metadata vs blobs.
+Metadata and payload storage are independent ports. Local development combines
+the memory adapter with the disk BlobStore. Production combines celld metadata
+with the content-addressed S3 BlobStore. The celld fleet bucket and payload
+bucket are separate security and lifecycle domains.
 
 ### The storage contract and its conformance suite
 
@@ -3393,16 +2788,6 @@ Pastes are created through `InsertWithQuotaCheck` / `AppendVersion-
 WithQuotaCheck` with caps set to 0 (the documented "no quota
 enforcement" path), so no backend needs an extra unchecked helper.
 
-Each backend supplies a tiny factory and calls `runConformance` with
-it. The default `go test ./...` run exercises the memory backend; the
-local storage engine (no build tag, no cgo, no external services). The
-same suite runs against a live celld fleet (via
-`MINIO_TEST_ENDPOINT`, skipping cleanly when unset), and is the
-acceptance gate the future
-celld backend will run to prove it preserves behavior. Because the
-suite asserts only the observable contract, a backend that passes it is
-a drop-in for the service layer by construction.
-
 **Tombstoned versions release their bytes.** A deleted version is
 app-final and content-inaccessible, and "DeleteVersion frees quota"
 implies the storage is freed too, so `DeleteVersion` unbinds that
@@ -3433,988 +2818,401 @@ failing test in one of them.
 
 ### Static-site storage
 
-The "Static site archives" feature persists a **Site** (slug -> owner +
-Manifest + timestamps) the same way a paste persists, through a small
-`SiteRepo` service-layer interface. This section specifies the **KV
-layout** a KV-shaped backend uses. The blobs a site references
-are unchanged: each extracted file is `Put` under its SHA256 into the
-content-addressed `BlobStore`. **Only the manifest plus the site
-metadata live in the metadata backend.** Identical files dedupe at the
-blob layer regardless of which metadata backend is wired.
+A static site is a paste whose version kind is `site` and whose manifest maps
+safe relative paths to content-addressed blob descriptors. The root manifest
+entry is `/`. Site files live in the configured `BlobStore`; metadata stores
+only the paste row, version descriptors, and manifest.
 
-**The `SiteRepo` and `SweepSites` interfaces are the contract.** Both are
-already interfaces in `internal/service` (`deploy_site.go`, `sweep.go`).
-Each backend adds a type that satisfies them; the domain layer (`Site`,
-`Manifest`, the safe-untar guards) is backend-agnostic and unchanged.
-The deploy path's interface is:
+`storage.Sites` translates the `service.SiteRepo` vocabulary onto the same
+`PasteRepo` used by documents. There is no second site key family, owner index,
+or quota sum:
 
-- `InsertWithQuotaCheck(s Site, dedupedSize int, userCap, now)`
-- `UpdateWithQuotaCheck(s Site, oldDeduped, newDeduped int, userCap, now)`
-  - re-deploy to an OWNED slug in place; charges the replace delta
-- `Get(slug) (Site, error)`
-- `SumActiveBytesByOwner(owner, now) (int64, error)` (the identity's
-  active SITE bytes only; the deploy path adds the paste-side sum)
-- `ListSitesByOwner(owner) ([]Site, error)` - the identity's active sites,
-  so `ssh <apex> list` can show static sites alongside text pastes (a site
-  is a paste; without this it would silently consume
-  quota the owner cannot see or free). Enumerates the `identity_sites/<id>/`
-  index and re-reads each authoritative `sites/<slug>` row (skipping /
-  repairing a stale index entry whose row is gone).
+- A first deploy inserts one site-kind paste.
+- A redeploy appends a manifest version. Prior live versions remain available
+  for pin, rollback, roll-forward, and per-version deletion.
+- Each version is charged by every manifest path's compressed size. Shared
+  content deduplicates only the physical object in the `BlobStore`.
+- List and owner-byte accounting use the paste projection, where sites already
+  appear, so the site adapter returns no duplicate listing or sum.
+- Files are staged by content hash before a slug is chosen. A slug collision
+  retries the metadata insert without rewriting the archive.
+- Reads reject a document-kind paste as not found rather than treating its
+  one-file manifest as a directory.
 
-and the sweep path's interface is:
+This representation makes paste/site slug collision impossible by construction:
+one slug names one paste aggregate and its version history. Memory and celld
+backends run the same site conformance suite, including manifest round-trip,
+version charging, quota interaction, ownership privacy, and slug reservation.
 
-`Delete(slug)` is the owner-facing removal path; it unbinds the site's blobs
-in the same transaction that removes the row.
+### Artifact accounting on celld
 
-#### Site key layout
+The Paste cell owns authoritative versions, the served projection, a monotonic
+`accountingVersion`, and any pending cross-cell operation. The Identity cell owns
+the owner's exact all-artifact charge and point-readable listing. For every
+artifact `a`:
 
-Sites mirror the paste key families. The names are new but the shapes are
-the established ones (`sites/<slug>` parallels `pastes/<slug>`,
-`identity_sites/<id>/<slug>` parallels `identity_pastes/<id>/<slug>`).
-Values are JSON unless noted; all keys are UTF-8 strings cast to bytes,
-the same as the paste layout:
-
-```
-sites/<slug>                       JSON {Identity, Manifest, DedupedSize, CreatedAt, UpdatedAt}
-identity_sites/<identity>/<slug>   empty value (for "list/sum sites by identity" prefix scan)
+```text
+publishedCharge[a] <= allocatedCharge[a]
+sum(allocatedCharge[a]) <= ownerCap
 ```
 
-The `sites/<slug>` row is the authoritative record. The `Manifest` is
-encoded as the compact `{"files": {"<path>": {"sha","size","ct"}}}`
-JSON every backend stores, so the on-wire manifest shape is identical
-across backends (path -> sha + size + content-type). `DedupedSize` is stored on the row (not recomputed on
-read) so the quota scans never have to decode every manifest just to sum
-bytes; it is `Manifest.CompressedDedupedSize()` at deploy time - the
-distinct-blob total of the STORED (post-zstd) sizes, the number charged
-against quota (matching the paste compressed basis). The two index
-families carry an empty value (the convention for marker keys,
-mirroring `identity_pastes`).
+Stable state has equality. Growth reserves first and publishes second. Shrink or
+whole deletion tombstones locally first and releases second. Recovery may
+conservatively overcharge, but no visible retained version may be uncharged.
 
-The site keys live in the SAME keyspace and the SAME SlateDB instance as
-the paste keys, so a single `Db.begin(SnapshotIsolation)` transaction can
-touch both families atomically and a single prefix scan over `sites/`
-enumerates every site exactly as `pastes/` enumerates every paste.
+Each incarnation of a slug carries an opaque `generation`. Every accounting,
+projection, delete, and recovery call includes it. Identity rejects a generation
+that does not match its current entry, and permanent operation receipts remain
+keyed by `(slug, generation, operation ID)`. A delayed call from an artifact that was deleted
+and re-minted can therefore neither charge, release, nor rewrite the new
+artifact.
 
-#### Operations -> KV mapping
+The Identity decision record is:
 
-- **Deploy (`InsertWithQuotaCheck`).** Holds the per-identity quota
-  stripe (the same `lockQuota(identity)` the paste insert uses, so two
-  concurrent same-identity deploys cannot both pass the cap), then:
-  1. **Per-identity cap pre-check.** If `userCap > 0`, sum the owner's
-     active paste bytes (`identity_pastes/<id>/*` -> non-deleted versions
-     of the owner's pastes) PLUS the owner's site bytes
-     (`identity_sites/<id>/*` -> `DedupedSize`),
-     reject with the over-quota sentinel if `owned + deduped` exceeds the
-     cap. There is no
-     service-wide byte scan here: the durable total-bytes ceiling is the
-     object-store bucket quota (see "Limits"), surfaced as `ErrServiceFull`
-     from the blob `Put` when a deploy's blobs would overrun it.
-  2. **Slug-collision check, BOTH directions.** Inside the transaction,
-     read `sites/<slug>` AND `pastes/<slug>`; if either exists, reject with
-     the slug-taken sentinel (whose message contains "slug" so the deploy
-     service retries with a fresh slug). A slug is EITHER a site or a
-     paste, never both, in either backend: the site insert rejects a slug a
-     paste already owns, and the paste insert (unchanged) already rejects a
-     slug another paste owns. The read participates in snapshot-isolation
-     conflict detection.
-  3. **Atomic write.** In one transaction, `Put sites/<slug>` (the JSON
-     row), `Put identity_sites/<id>/<slug>` (empty marker), and
-     (empty marker). Both land
-     or none.
-- **Re-deploy (`UpdateWithQuotaCheck`).** Re-deploy to a slug the caller
-  already owns. Holds the same per-identity quota stripe, then inside one
-  transaction:
-  1. **Read `sites/<slug>`.** If missing, OR present but owned by a
-     different identity, return the not-found sentinel (the service layer
-     surfaces it as *not found*, exit 4, no existence leak). The read
-     participates in snapshot-isolation conflict detection.
-  2. **Quota pre-check on the DELTA.** The per-identity sum subtracts the
-     OLD row's `DedupedSize` and adds the new manifest's `DedupedSize`, so
-     an in-place re-deploy is charged only the delta (a same-size re-deploy
-     is a no-op against quota; a smaller one frees bytes). Reject with the
-     over-quota sentinel if the post-delta total exceeds the per-identity
-     cap. The durable total-bytes ceiling stays the object-store quota,
-     surfaced as `ErrServiceFull` from the blob `Put`.
-  3. **Atomic swap.** `Put sites/<slug>` (new manifest, new `DedupedSize`,
-     refreshed `UpdatedAt`), leave `identity_sites/<id>/<slug>`
-     in place (owner unchanged). All of it lands or none; the
-     old manifest serves until the swap commits. Blobs the old manifest
-     referenced are NOT eagerly deleted here - the sweep's
-     reference-counted GC reclaims any now-unreferenced blob, exactly as
-     it does after a paste version churns.
-- **Read (`Get`).** Single `Get sites/<slug>`, decode the JSON row,
-  decode the manifest. Returns the not-found sentinel for a missing slug,
-  and (like the paste `Get`) returns stale rows too: the HTTP layer
-  404s them, the sweep deletes them.
-- **Per-identity site bytes (`SumActiveBytesByOwner`).** Scan
-  `identity_sites/<id>/`, `Get` each `sites/<slug>`, sum `DedupedSize` of
-  the owner's rows. Site-only: the service layer adds the paste sum.
-
-### The owner document (v2 owner index)
-
-The owner's index is ONE document, not a family of rows:
-
-```
-owner_doc/<identity>    JSON {first_seen, pastes: [entry...], sites: [entry...]}
+```text
+{ version, allocated, target }
 ```
 
-Each entry mirrors what the per-row index cached (slug, kind, name, size,
-latest/pinned version, created), so `list` renders and the quota sums from
-the doc alone. The key starts with the identity, so it lives on the same
-`{id}` shard as the legacy row families and joins the exact transactions
-that used to maintain them.
-
-**Why a document.** The row-per-paste index made same-owner writes
-contention-free, and that was the wrong trade. Reads and quota checks pay
-a prefix scan whose range grows with LIFETIME churn, because at
-replication factor >1 a deleted entry is a tombstone the engine must walk
-forever, and an object-store LSM's scan path bypasses the block cache, so
-that walk is paid against the object store every time. Same-owner write
-concurrency is rare in practice; read cost is paid on every whoami, list,
-and upload. The document reverses the trade: reads and quota checks become
-one doc Get - and point reads, unlike scans, go through the configured
-block cache, so the warm path does not touch the object store at all.
-Concurrent same-owner writes now contend on the doc's single-shard CAS and
-retry; that serialization is accepted, deliberately, and there is NO cap
-on entries per owner (revisit only if a real owner's doc ever becomes a
-problem).
-
-**Reads.** `OwnerSummary` (whoami: count + bytes + first_seen),
-`ListByOwner`, and the quota sum each read the doc with ONE Get. A
-directory is a paste, so sites list and sum through the paste family and
-the doc's `sites` map stays empty this release (it exists for the site
-families' own follow-up migration). `ListByOwner` additionally keeps its
-resolve-on-read step - a prefix scan of the owner's outstanding `intents/`
-- BEFORE the doc read, so a listing is one doc Get plus the owner's intent
-resolution, not a bare point Get; that residual scan is a known cost, left
-in place deliberately. When no doc exists (a pre-migration owner), reads
-fall back to the legacy row scan, READ-ONLY: the fallback never writes the
-doc, so reads stay free of write races by construction.
-
-**Writes.** Every mutation that maintained a legacy index row - paste
-insert (the saga's T1 entry step), Delete, MarkFailed, Rename, pin/unpin,
-the list-walk projection refresh, and the site deploy / re-deploy / delete
-index touches - now updates the doc inside the SAME single-shard `{id}`
-transaction. A mutation that finds no doc HEALS first: it builds the doc
-from the legacy rows (the same walk the legacy list used, pruning stale
-entries), then applies itself, then writes doc + legacy rows together.
-Heal-on-write rather than heal-on-read means the first mutation migrates
-the owner atomically under the shard CAS, and two racing first-writes
-serialize on that CAS - the loser re-reads and finds the doc already
-present.
-
-**Dual representation, this release.** Writes maintain BOTH the doc and
-the legacy rows, so rolling back to the previous binary loses nothing (it
-just resumes scanning rows the doc release also kept true). The doc is
-authoritative the moment it exists: readers never consult legacy rows for
-an owner with a doc. A later release drops the legacy writes and the
-fallback read; the dead rows then cost nothing, because nothing scans
-them, and their bytes wait on engine-level garbage collection with no
-urgency.
-
-`first_seen` folds into the doc (seeded from the legacy
-`identity_first_seen` key during heal); the legacy key keeps being written
-alongside until the drop release, same as the row families.
-
-**A lost delete tail is curable by the owner's own delete.** Delete's
-`{slug}` transaction and its `{id}`-shard index drop commit separately,
-and no durable intent covers a delete, so a death between the two leaves
-the doc entry AND the enumeration row behind with no paste row - a
-phantom every doc-first read reports and no other verb can remove
-(each refuses at its ownership read, which needs the missing row).
-`delete <slug>` detects that shape and drops both representations in
-one stamp-guarded `{id}` CAS, then reports success - see "Delete
-(permanent)". Both must go together: the doc-rebuild walk
-(`ownerDocCandidate`) trusts a renderable enumeration row without
-reading its paste, so a surviving row would resurrect the phantom into
-any rebuilt doc.
-
-**Deliberately unchanged here:** the keygate families migrate to their own
-single-doc shapes in follow-up releases; the staged-refs and intent families
-stay row-shaped (boot-path only, never on a user's request path). The per-slug
-`versions/` family is handled differently: its rows stay authoritative and it
-gains a DISPOSABLE read cache, not a single-doc migration - see "The version
-index cache" below.
-
-### The version index cache
-
-Per-slug version history has ONE cache document, a disposable copy of the
-authoritative rows:
-
-```
-versions_doc/<slug>   JSON { versions: [ version record, ... ] }
-```
-
-Each record is a version row verbatim: its number, its served descriptor
-(kind, sha, blob id, size, manifest), its created-at, and its deleted flag.
-The key leads with the slug, so the shard-key function must classify it to
-`<slug>` - the `versions/` case does NOT match `versions_doc/` (the trailing
-slash anchors it), so without its own case the key would fall to the whole-key
-fallback and land on the wrong shard. Classified to `<slug>`, the document
-co-shards with `versions/<slug>/*` and the paste head, and joins the very
-`{slug}` transactions that write those rows.
-
-**It is a cache, not a second source of truth.** The legacy
-`versions/<slug>/<N>` rows STAY authoritative and permanent. The document
-caches them so the hot reads stop being prefix scans of a range that grows
-with a paste's whole redeploy history: every append adds a number, every
-per-version delete leaves a tombstone the scan must walk forever at
-replication factor >1, and the scan path bypasses the block cache. There is
-NO migration off the rows, NO cleanup release, and NO moment when the two
-share authority. The rows are read to rebuild the document; the document is
-never read to decide anything that changes the rows.
-
-**Which reads it serves, and how they fall back.** The reads that would
-otherwise scan the version family read the document instead: `ListVersions`
-(the `versions` listing), the per-paste live-version byte sum (the legacy
-quota fall-through the head's cached `LiveBytes` does not already answer), and
-the read seam's blob-id resolution for a NON-served version's sha
-(`ResolveBlobID`, after the head has answered the served sha). Each falls back
-to scanning the rows when the document is absent (a paste written before the
-cache existed) or unreadable (fail open). Blob resolution additionally falls
-back on a per-sha MISS, so a stale document that lacks a version costs an extra
-row scan there rather than a wrong not-found. The fallback is READ-ONLY - it
-never writes the document - so a read never races a write over it, the same
-discipline the owner-doc fallback keeps.
-
-`GetVersion` is deliberately NOT served from the document. It is a point read
-of one row, not a scan, so the goal (kill the prefix scans) does not need it
-cached; and its only callers are inputs to a destructive decision, which the
-rule below keeps on the rows. Caching it would buy nothing and put a
-destructive-decision input on a disposable copy.
-
-A read served from a stale document yields a slightly-out-of-date listing, a
-slightly-off byte sum, or one extra row scan. None is a correctness stake,
-because nothing that DESTROYS data reads the document. A write that changes the
-version set maintains it in the same transaction: insert seeds it, an append
-upserts its new row onto the present document, a per-version delete flips its
-record, and unpin re-stamps it whole from the scan it already holds. Only a
-change made behind the document's back (an old binary that predates the cache)
-leaves an entry stale, until a whole re-stamp (unpin) reconciles it.
-
-**Destructive operations decide from the rows and the head, never from the
-document.** This is the load-bearing rule that makes the cache disposable,
-walked per operation:
-
-- **Per-version delete** reads the target's ROW (a point read) to confirm it
-  exists and is not already a tombstone, and decides "is this the served
-  version" against the HEAD - the head IS what serves. When pinned, the head's
-  pinned number names it with no read of the set. When unpinned, the head
-  serves the newest live version, named EXACTLY by its blob id (a point read of
-  the target row against the head's blob id) on the blob path; on the sha-keyed
-  dev path the head carries no blob id and a content sha is not unique per
-  version, so the newest live version is read from the authoritative ROWS
-  instead. Either way the decision reads the rows and the head, never the cache
-  (the served-version refusal lives in the service guard; the repo tombstone
-  stays policy-free, so a raw repo delete of any version still works). After the
-  guard passes, the tombstone flips the row and, when the cache is present,
-  flips that record in it too, in the SAME `{slug}` transaction; a pre-cache
-  paste is left cache-less rather than scanned to build one. A stale cache
-  cannot make this free the served version's blob, because the served identity
-  came from the head and the rows.
-- **Pin N** reads row N (a point read) inside the pinning transaction and rolls
-  the head onto that row's descriptor. The row read is authoritative, so a stale
-  cache can never influence which descriptor the head takes, and a nonexistent
-  row N is refused by the in-transaction read. Pin changes only the head, not
-  the version set, so it leaves the cache untouched.
-- **Unpin** needs the newest LIVE version - the one decision that needs the
-  whole set. It reads that from the ROWS (a cold scan of `versions/<slug>/*`,
-  acceptable because unpin is the rarest verb), picks the newest non-deleted,
-  rolls the head, and re-stamps the document from the scan it already holds (a
-  free refresh). It never consults the document to choose the head.
-- **Whole-paste delete** enumerates the rows (it must, to unbind every
-  version's blob and remove every row), cascades them in one `{slug}`
-  transaction, and drops the document. It reads the authoritative rows, never
-  the document; a document left behind would be harmless anyway, since nothing
-  reads an absent paste's version cache (the head answers not-found first).
-
-Because no destructive decision reads the document, a stale document cannot
-cause a destructive mistake. That is the whole safety argument.
-
-**Numbering also leaves the version scan.** An append takes the next number
-from the head's monotonic high-water mark (`LatestVersion`, which a tombstone
-never lowers), lifted by the cache's max version, both read inside its
-transaction. The transaction's absent-check on the candidate version key is the
-backstop that turns any staleness into a retry rather than a collision: a
-stale-low mark proposes a taken number, the check rejects it, and the retry
-scans the rows to recover the true max and advance past it (a stale-high mark
-only skips numbers, and gaps are fine). So a version number is never reused,
-even under a stale-low mark, concurrent appends, or a tombstoned number - the
-mark, the cache and the scan all count a tombstone, whose row and number
-persist. A pre-cache paste (no cache document) scans once to number and to
-rebuild the cache; that same scan recovers the number for a pre-`LatestVersion`
-head whose mark reads zero. After it the paste is cache-present and numbers from
-the mark with no scan. So on the production blob path the request path scans the
-version family only for the two destructive verbs that inherently need the whole
-authoritative set, unpin and whole-paste delete, plus these numbering recovery
-and pre-cache migration fall-backs; every other version operation is point reads
-plus the cache (per-version delete names the served version by blob id, a point
-read). The sha-keyed dev path has no blob id, so a per-version delete there
-additionally scans the rows to name the newest live version - still the
-authoritative rows, never the cache.
-
-**No trust machinery.** Because a stale document is harmless and no destructive
-op reads it, there is nothing to detect: NO generation counter, NO completeness
-flag, NO staleness fingerprint, NO heal-on-write that trusts the document. Any
-signal that tried to certify the document as fresh would exist only to let a
-destructive op trust it, which the rule above forbids - so if one appears, a
-destructive op is reading the cache, and the fix is to move that decision back
-onto the rows or the head, not to add the signal.
-
-**The serving path is untouched.** `pastes/<slug>` carries the served version's
-whole descriptor, manifest included, and a served request reads only that. The
-document changes nothing about how a paste is served: the read seam answers a
-served sha from the head FIRST and consults the document only for a NON-served
-version's sha, which itself falls back to the row.
-
-**Size, and why there is no cap.** The document holds full records including
-manifests, so a redeploy-heavy site's document can grow large. Because it is
-off the serving path and never authoritative, an oversized or unreadable
-document degrades to exactly the pre-cache behavior: the cheap reads fall back
-to scanning the rows, and the paste keeps serving and stays fully correct, only
-without the read speedup. So there is no size cap and no eviction. A document
-that ever became a real problem for a real paste would simply be left unwritten
-and its reads would scan (an operator decision to revisit only if it happens).
-
-**Deploy: a stale cache is harmless, so no single-flight is required.** Every
-direction of a rolling deploy is safe by the same argument:
-
-- *A new binary reading a pre-cache paste* finds no document and scans the rows
-  - the pre-cache path, correct.
-- *An old binary writing a paste that already has a document* writes the rows
-  without touching the document, leaving it stale. Every consequence is
-  harmless: the cheap reads served from the stale document return a slightly-old
-  listing or byte sum (never a correctness stake), and every destructive op
-  still decides from the rows and the head the old binary DID write, so none is
-  misled - it cannot free the served blob or roll the head onto a descriptor the
-  rows do not carry, because those come from head and row, not the document. A
-  new-binary append upserts only its own new row, so an entry the old binary
-  changed stays stale until unpin re-stamps the whole document from a scan; the
-  staleness stays harmless meanwhile, and once every binary is new nothing writes
-  behind the document's back again.
-- *A rollback* is that same case: the document simply stops being maintained
-  until a new binary returns, and meanwhile reads fall back or return
-  slightly-stale answers. Nothing the old binary does to a document-present
-  paste is unsafe.
-
-There is therefore no ordering constraint between the row write and the
-document write beyond co-committing them in the one `{slug}` transaction, and
-the release ships WITHOUT a single-flight deploy requirement.
-
-### Fencing the writer recovery took over from
-
-Recording the staged bytes is not enough on its own. Recovery is BY DESIGN a
-second process reading persisted records, so the writer it is recovering may not
-actually be dead - a partition, a long GC pause, or a pod that resumes can leave
-it alive and about to bind. If it binds while recovery unstages, committed
-metadata ends up pointing at bytes that are gone: a 404 on a paste the writer
-was told it had created, and no scan can put it back.
-
-So recovery must FENCE the original writer before it deletes anything.
-
-**A per-slug ownership record, `blobowner/<slug>`, holding an epoch.** An upload
-claims the epoch before it stages its first byte. Its bind co-commits a check
-that the record still carries the epoch it claimed. Recovery BUMPS the epoch
-before unstaging. A resumed writer's bind therefore aborts on a stale epoch
-instead of binding bytes that are about to vanish, and the ordering - bump, then
-delete - is what makes the abort certain rather than likely.
-
-**Why its own key, on the slug's shard.** The check has to happen INSIDE the
-transaction that binds, and that transaction is pinned on the slug, so the
-record has to co-shard with the bref it guards. The durable intent cannot serve:
-it shards on the IDENTITY so the boot sweep can scan one owner's intents
-node-locally, which is a different shard, and a transaction pinned on the slug
-cannot read it. (An earlier design note prescribed putting the ownership check on
-the intent; that assumed a layout where the two co-shard, which is not this one.
-The requirement is only that the epoch live where the bind can read it.)
-
-It is also deliberately NOT folded into `slug_owner/<slug>`, which already sits
-on that shard and is already written at claim time. That key's value is read by
-two other paths and exists in production with a plain-identity format; widening
-it would be a live-format migration for no gain over one new key.
-
-### Staged blob bytes: what the intent does not cover
-
-The durable intent settles half-written METADATA. It cannot settle staged BYTES,
-for a reason that is structural rather than incidental: an intent is opened by
-the insert, and the likeliest abandonment never reaches the insert. A multi-file
-site deploy interrupted partway has staged real objects and opened no intent at
-all. Routing byte reclamation through intents would therefore miss its principal
-case, and would additionally have to invent an intent for appends and redeploys,
-which stage bytes without creating anything.
-
-So the two are settled by two mechanisms over two records.
-
-**Each staged object is recorded before the next file is staged**, at
-`staged/<slug>/<blobid>`, holding the whole blob ref and the time it was staged.
-Sharded on the SLUG, so an upload's records, its authoritative row, the bref they
-become and the ownership epoch that guards them all live on one shard. One key
-per object, so appending a record is O(1) rather than rewriting a growing list.
-
-The ref is stored WHOLE, never field by field. Both the bound-ref guard and the
-delete key are derived from its fields, so a field lost in the round-trip does
-not fail loudly: it addresses a different key than the bind wrote, reads as
-"unbound" for a blob that is bound, and deletes committed bytes.
-
-**The records are cleared when the write COMMITS.** Those bytes are bound now,
-and a record outliving its commit is a standing instruction to delete live data.
-
-**A sweep reclaims what is left**, scanning `staged/` on the units this node has
-mounted, once, after the node is serving. Every unit is mounted by someone, so
-the fleet covers the keyspace with no node fanning out. It is a boot pass, not a
-periodic job.
-
-**Age is measured from the newest record of an upload**, which is time since it
-last made progress. An upload staging a large site for an hour keeps writing
-records and so stays fresh; measuring from the oldest would reclaim bytes out
-from under a running deploy. The grace is the same one the intent sweep uses, and
-carries the same requirement: it must exceed the longest plausible upload.
-
-**A bound ref is skipped, not failed.** Refusal to unstage means the write landed
-after all and those bytes belong to a live paste. Any other error stops the pass
-and leaves the records for the next one: a missed reclamation is a leak, and a
-leak is always preferable to deleting live data.
-
-**Recovery fences before it deletes**, as above - the fence and the records are
-one mechanism, and neither is safe alone.
-
-### Durable intent: the saga survives the process
-
-The compensating action already exists - an authoritative write that FAILS
-deletes the entry it just wrote. The gap is narrower than "the write order is
-wrong": it is that this compensation lives on the handling goroutine's stack,
-so a process death is the one failure that loses the knowledge that cleanup is
-owed.
-
-The fix is to persist that knowledge BEFORE acting. The ordering property that
-makes it work is that the intent is written FIRST, so its ABSENCE is
-unambiguous: no intent means nothing was attempted, and there is nothing to
-recover. (Contrast two-phase commit, whose decision record sits in the MIDDLE
-of the protocol - which is why 2PC needs a resolver for in-doubt state and this
-does not.)
-
-```
-T0  record intent                      durable
-T1  write identity_pastes entry        {id} shard
-T2  write pastes row + version rows    {slug} shard
-T3  forget the intent                  durable
-```
-
-| crash after | on disk | resolution |
-| --- | --- | --- |
-| T0 | intent only | nothing was written; forget the intent |
-| T1 | intent + entry | row absent -> drop the entry, forget the intent |
-| T2 | intent + entry + row | the write succeeded; forget the intent |
-| T3 | clean | - |
-
-Every state is distinguishable from the intent plus one existence check, and
-each has one defined action. That is the property the design turns on: without
-the intent, a crashed insert is INDISTINGUISHABLE from a phantom that a
-concurrent uploader is legitimately mid-way through creating, which is why
-nothing could safely act on one.
-
-**Resolution is a node-local boot sweep.** Each node, once it is serving,
-scans the intents on the units it has MOUNTED and resolves them. That scan is
-local: it walks this node's own storage, so it involves no network fan-out even
-though the intent family logically spans every shard. Across the fleet every
-unit is covered, because every unit is mounted by someone.
-
-It runs after the node goes live, not before. Deciding an intent's outcome
-requires reading the authoritative row, which lives on a DIFFERENT shard - one
-that may not be mounted anywhere yet during a cold start. Gating readiness on
-that read would deadlock a cold cluster: no node could serve until it swept,
-and no node could sweep until some node served. Going live first costs nothing,
-because the residue it cleans up was already there.
-
-**Resolution rolls FORWARD or BACK; it decides by looking.** An incomplete
-intent has two shapes and they need opposite treatments:
-
-| authoritative row | meaning | action |
-| --- | --- | --- |
-| present | the write succeeded; only the bookkeeping was lost | forget the intent |
-| absent | the write never landed | drop the entry, then forget the intent |
-
-Treating every incomplete intent as a rollback would DELETE live pastes whose
-only fault was losing the final step. The row's existence is the discriminator,
-and it is read per intent - affordable because the normal outstanding count is
-zero.
-
-**An intent younger than the resolve grace is left alone.** This is the part
-that is not optional. Which pod HANDLES a request is chosen by the load
-balancer; which pod STORES that request's intent is chosen by hashing the
-owner. The two are unrelated, so a node's own local intents are routinely
-created by uploads that OTHER nodes are handling right now. A sweeping node
-therefore sees in-flight work, and an intent that is mid-flight is
-indistinguishable from one whose process died.
-
-The value guard does not help here: a live upload's entry MATCHES the intent
-that describes it, so a guarded delete would fire and take the entry out from
-under a running request. Only elapsed time separates the two cases. The grace
-MUST exceed the longest plausible upload, the same contract the blob plane's
-orphan grace already carries.
-
-So the existence check decides WHAT to do, and the grace decides WHETHER it is
-safe to act yet. Both are required; neither substitutes for the other.
-
-**Resolution is idempotent and loses to live traffic.** Several nodes can
-resolve concurrently - units are replicated, so more than one node may hold a
-given intent. Every step is safe to re-run, and the compensating delete is
-VALUE-GUARDED: it removes the entry only while that entry still holds the
-payload the intent describes, so a re-upload that landed after the crash
-survives. There are no locks and no leases.
-
-**The owner's own listing settles their residue too.** `ListByOwner` resolves
-that owner's outstanding intents BEFORE it scans, so the listing never renders a
-phantom the very next read would have removed, and no restart is needed for an
-owner who comes back. It rides a shard the read is already talking to, and in
-the normal case is one prefix scan returning nothing.
-
-It is best-effort: a resolver failure is logged and swallowed, because the
-caller is serving a user's read. And it obeys the grace exactly as the sweep
-does - a read is not a licence to act on an intent another node may still be
-mid-write on.
-
-This is an optimization, not the mechanism. Correctness rests on the boot sweep,
-which is what covers an owner who never returns.
-
-**The durability mechanism is a port, not a layer.** The intent log is defined
-as a narrow interface in terms of intent and resolution - begin, advance,
-complete, and list-outstanding-for-one-owner - with no key, value, shard, or
-workflow vocabulary in it. The steps are recorded as DATA rather than closures,
-because resolution may run in a different process than the one that began the
-work. `Outstanding` is scoped to a single owner rather than global, which is
-what keeps both this implementation (one prefix scan) and any other one (a
-bounded query) cheap.
-
-The default implementation stores intents in the metadata cluster. Nothing
-above the repository knows that: the application service and the repository
-port are unchanged, and a backend with a single transaction
-has no dual write and therefore no intent log at all.
-
-One optimization is deliberately NOT taken. Intents and enumeration entries
-both shard by owner, so T0 and T1 could commit as one CAS, removing that gap
-entirely. It is declined because it would require intents to live in this
-specific cluster, co-sharded with the entries - which is exactly the coupling
-the port exists to avoid. The extra recoverable state is the price of keeping
-the mechanism swappable.
-
-A site deploy spans the `{slug}` shard (the authoritative `sites/<slug>`
-write + the cross-family paste-slug collision read) and the `{id}` shard
-(the enumeration index entry), which is two CASes, but there is no counter to
-reserve against, so the deploy is a plain sequence: check quota (scan), write
-the `identity_sites/<id>/<slug>` enumeration entry (value-bearing: the cached
-deduped size the quota scan sums), then write the authoritative `{slug}` row -
-entry first, for the reason given above - matching
-a single-transaction backend - and `StrictIdentityQuotaUnderConcurrency` is `false` (the
-scan-check and the row-write are not atomic; the bounded same-owner
-over-admit is the accepted trade, see "The correctness argument").
-
-**The two sums stay disjoint (paste sum + site sum).** The deploy service
-computes the per-owner budget as `UserQuota - paste_bytes - site_bytes`,
-reading the paste sum and the site sum SEPARATELY and adding them, so the two
-scans MUST count disjoint sets: `SumActiveBytesByOwner` sums the owner's
-`identity_pastes` entries, and `SumActiveSiteBytesByOwner` sums the owner's
-`identity_sites` entries. Because pastes and sites live in disjoint key
-families enumerated by disjoint indexes, adding the two sums never
-double-counts, and
-`SumActiveSiteBytesByOwner` stays site-only (the conformance contract: a
-site-only owner sum).
-
-The per-owner cap is SYMMETRIC across both kinds: a deploy of EITHER kind
-checks the owner's COMBINED paste + site bytes against `userCap`, so the
-ceiling holds no matter how an owner splits their quota between pastes and
-sites. This sums both kinds
-and is read by BOTH the paste insert and the site deploy. Concretely:
-  - a SITE deploy's check scans BOTH the paste sum and the site sum and
-    verifies `paste + site + deduped <= userCap`, and
-  - a PASTE insert / append's check scans BOTH sums and verifies
-    `paste + site + body <= userCap`.
-Without the second of those, a paste could be accepted while the owner's
-site bytes were ignored: e.g. an 800-byte site plus a 300-byte paste under a
-1000-byte cap would wrongly admit the paste (combined 1100 > 1000) even
-though the symmetric site direction correctly rejects it. The
-`Sites/PerOwnerCapCountsBoth` conformance subtest pins both directions.
-
-The durable total-bytes ceiling is NOT an aggregate scan: it is the
-object-store bucket quota (see "Limits → Durable total-bytes ceiling"),
-surfaced as `ErrServiceFull` from the blob `Put`. The site repo runs
-no service-wide byte sum on the deploy path; only the per-identity scan
-(bounded to one owner's slugs) gates a deploy at the app layer.
-
-The cross-family paste-slug collision read is added to the site
-authoritative write (reject a slug a paste owns), and the paste
-authoritative write already rejects a slug a site owns, so a slug is EITHER a
-site or a paste, never both, in both directions. Neither path leaves a marker
-any background pass must complete - the only per-owner `{id}` state a
-deploy or delete writes is the enumeration index entry.
-
-**Status: implemented + conformance-tested.** Prod runs celld, which shares
-the scan-derived quota shape (the enumeration index + the cross-family
-collision read) with the rest of the artifact families. Every backend runs the
-SAME conformance site subtests under the SAME factory, so each is a drop-in for
-static-site hosting by construction.
-
-#### Wiring: widen the metadata bundle's `Sites` field
-
-`cmd/hostthisd/metadata.go` holds `Sites` as the `service.SiteRepo`
-interface (the deploy view) plus the `service.SweepSites` view (the sweep
-view), rather than any backend's concrete type, so any backend's site
-impl can be assigned. The bundle stays nil-safe: a backend
-that does not supply a site impl leaves the field nil and static-site
-hosting stays disabled there.
-
-#### Conformance
-
-The backend-agnostic conformance suite is extended with site operations so
-every backend is pinned to behave IDENTICALLY for sites, the
-same way they are pinned for pastes. The site contract the suite asserts:
-deploy a site and read every path back byte-identically (manifest
-round-trip), list/sum a site's bytes by identity, the per-identity quota
-counts SITE bytes (a site fills the owner's quota a paste then sees, and
-vice versa), the slug-collision rejects a slug a paste already owns
-(and a paste rejects a slug a site owns). A backend that passes
-the extended suite is a drop-in for static-site hosting by construction.
+Its transition matches the Room escrow protocol: older versions are stale; the
+current version is an idempotent replay only for the same target; skipped
+versions and target mismatches are errors; shrink is always granted; growth is
+granted only when replacing the artifact's allocation keeps the owner's total at
+or below the cap. Granted and refused decisions persist. The generic listing
+projection endpoint cannot mutate `allocated`.
+
+An append stores the complete candidate version and pending operation with an
+alarm, obtains the Identity grant, publishes the version and served head, then
+updates the guarded Identity projection. A refusal clears the pending operation
+without publishing. A version delete first writes its tombstone and rolls the
+served head, then settles the lower absolute charge. Pin and unpin keep the
+absolute charge unchanged but use the same version fence and recovery path to
+refresh served size, kind, pin, and latest-version projection. A `pending` to
+`failed` transition publishes the failed row and a target-zero operation together;
+the alarm drives the same guarded decision and drop path, so response loss cannot
+strand either a charge or a projection. Whole deletion
+keeps a tombstone fence until Identity confirms a guarded zero allocation and
+removes the current listing entry. Only then can the Paste cell accept a new
+incarnation.
+
+Every pending operation and its immediate alarm are persisted together. The
+alarm and the next mutation resume pending work before doing anything new.
+Permanent operation receipts make a repeated request return the original result
+instead of appending a second version. Absolute targets, generation guards, and
+monotonic versions make response loss and delayed delivery safe.
+
+A first-version create reserves the Identity charge and persists a create intent
+with an opaque fingerprint of the exact Paste row in one transaction. Paste
+publication records the same fingerprint. While the intent is outstanding,
+replaying the same generation succeeds only when its fingerprint matches; a
+same-generation request with different content is a conflict, and once the
+intent is discharged a repeated reservation for the slug is refused as taken
+regardless of fingerprint. Recovery atomically inspects the Paste cell and, when the
+matching row is absent, fences that generation against every late `put` before it
+releases the reservation. When the row is present, recovery requires the matching
+fingerprint and confirms from the row's authoritative status. Confirmation may
+advance `pending` to a terminal status but cannot regress a terminal projection.
+Malformed or unknown create intents retain their alarm rather than silently
+stranding an unowned reservation.
+
+The owner listing exposes two different quantities:
+
+- `StoredBytes` is the sum of all non-deleted version charges for the artifact.
+- `Size` is the currently served version's charge.
+
+Pinning changes `Size` and served kind/content, never `StoredBytes`. Owner totals
+sum `StoredBytes` only.
+
+Before traffic resumes, every existing Paste cell is reconciled by stable cell
+ID. Each artifact's slug must derive that exact ID through the Paste namespace;
+a mismatched logical name is refused before mutation. Reconciliation refuses
+pending, malformed, unreadable, duplicate, or conflicting state; computes charge
+from every non-deleted version (a failed artifact retains its served descriptor
+but charges zero); derives the served projection from the head; assigns a
+deterministic opaque legacy generation from the stable cell ID when absent; and
+idempotently seeds Identity without applying a new quota refusal to
+already-retained data. Every Paste inventory entry must be classified exactly
+once. Each owner's reconciled allocation set, count, and charge sum must exactly
+match its Identity point read, including zero-byte allocations, and every listing
+projection must match the authoritative Paste result.
 
 ### Room storage
 
-The "Rooms (app persistence)" feature persists a **Room** (the owning
-app's slug + a UUIDv4 + a flat key-value namespace) plus a creation-rate
-ledger. This section specifies the room model. Rooms hold no blobs: a room value is small, mutable app STATE that
-lives entirely in the metadata backend (the content-addressed `BlobStore`
-is untouched), so unlike pastes and sites a room contributes nothing to the
-blob-GC keep-alive set.
+Rooms persist small mutable app state through the `service.RoomRepo` port:
 
-**The `RoomRepo` and `SweepRooms` interfaces are the contract.** Both are
-already interfaces in `internal/service` (`rooms.go`, `sweep.go`). Each
-backend adds a type that satisfies them; the domain layer (`Room`,
-`RoomID`, the pure `RoomKV` cap math) is backend-agnostic
-and unchanged - only the storage layer is backend-specific. The
-room-write / read interface is:
+- `CreateRoom(room, subnet, appCap, now)` creates an empty room, records its
+  creation-ledger row, and refuses creation while the app is already at its
+  byte ceiling.
+- `GetRoom`, `GetValue`, and `ScanRoom` read one room.
+- `PutValue(..., appCap, now)` enforces the per-room and per-app ceilings and
+  returns the mutation's dense room sequence.
+- `DeleteValue(..., now)` is idempotent and also consumes one room sequence.
+- `CountRoomCreates(..., window)` counts and prunes the soft creation-rate
+  ledger.
 
-- `CreateRoom(room Room, subnet, appCap, now)` (mint an empty room, record
-  the creation-accounting row, enforce the per-app aggregate cap; the
-  creation rate-limit DECISION is made by the service via
-  `CountRoomCreates` BEFORE this call, so the gate is a soft bound while the
-  per-app byte cap is a hard one)
-- `GetRoom(appSlug, id) (Room, error)`
-- `GetValue(appSlug, id, key) ([]byte, error)`
-- `ScanRoom(appSlug, id) (RoomKV, error)`
-- `PutValue(appSlug, id, key, val, appCap, now)` (per-room +
-  per-app caps; moves `UpdatedAt`)
-- `DeleteValue(appSlug, id, key, now)` (idempotent; moves `UpdatedAt`)
-- `CountRoomCreates(appSlug, subnet, now, window) (perSubnet, perApp, err)`
+There is no room-retention or full-room-delete interface. Rooms persist
+indefinitely. Creation-ledger entries are the only room records removed by
+elapsed time, because they are rate-limit state rather than user content.
 
-There is no sweep-side room interface. Creation-ledger rows past the
-rate-limit window are dropped by `CountRoomCreates` itself, on the scan it
-already runs to make the admission decision. `DeleteRoom(appSlug, id)` is the
-idempotent full cascade the owner-facing removal path uses.
+The memory adapter stores the room aggregate under one mutex. One critical
+section checks both byte ceilings, mutates the namespace, and increments the
+sequence, so its cap and sequence are exact.
 
-#### Room key families
+The celld adapter uses two cells through the same port:
 
-Rooms have MORE key families than sites because they carry per-key values,
-and a creation-rate ledger. Each is co-located in the SAME
-SlateDB instance and the SAME keyspace as the paste + site keys, so a room
-create or write is one `Db.begin(SnapshotIsolation)` transaction and a
-per-app prefix scan over `roomkv/<app-slug>/<uuid>/` enumerates exactly one
-room's values. All keys are UTF-8 strings cast to bytes; values are JSON
-unless noted:
+- The **Room** cell owns one room's metadata, KV document, byte count, dense
+  sequence, pending budget operation, recovery alarm, and hibernatable sockets.
+- The app's **Paste** cell owns the creation ledger and point-addressed byte
+  allocation for every room under that app. It does not require a paste row, so
+  site-backed apps use the same app-slug coordinator.
 
-```
-rooms/<app-slug>/<uuid>                    JSON {CreatedAt, UpdatedAt} (the room record)
-roomkv/<app-slug>/<uuid>/<key>             raw value bytes (the stored KV pair, verbatim; not JSON)
-roomcreate/<app-slug>/<subnet>/<ts>/<uuid> empty value (one per room created; ts is fixed-width; the trailing uuid disambiguates two rooms created at the same ts, see below)
+This is a distributed invariant, not a transaction. It follows an escrow rule.
+For every room `r`:
+
+```text
+actual[r] <= allocated[r]
+sum(allocated[r]) <= appCap
 ```
 
-The `roomcreate` key carries the created room's `<uuid>` as a trailing
-segment: a KV key is unique, so without the `<uuid>` two rooms created
-under the same `(app, subnet)` within
-the same fixed-width `<ts>` (the same nanosecond, common when a test or a
-script mints rooms in a tight loop) would collide on one key and overwrite,
-undercounting the rate-limit ledger. The `<uuid>` makes each creation a
-distinct key. The `<ts>` is then the SECOND-to-last segment for the windowed
-count + prune compares (the `<subnet>` itself contains a `/`, so both parsers
-strip the two trailing slash-free segments from the right to recover
-`(subnet, ts)`).
+`actual` is the byte count committed in the Room cell. `allocated` is the
+coordinator's durable charge. These two inequalities prove that committed room
+bytes cannot exceed the app ceiling. Stable state has equality; recovery may
+overcharge temporarily but must never undercharge.
 
-The `rooms/<app-slug>/<uuid>` row is the authoritative record. On the
-single-writer local backend it holds the clock only: the byte and key counts are
-computed by scanning `roomkv/<app-slug>/<uuid>/` at PUT time, which
-materializes the namespace for the pure `RoomKV.CanPut` cap math,
-serialized by the per-room `lockQuota` stripe. The **celld** backend
-additionally
-stores a running `byte_total` + `key_count` on this record (the `roomRow`
-backend-internal fields), because the room cell validates the per-room cap inside its event and a
-CAS read-set cannot carry a scan, so it needs a discrete in-record total the
-read-set can read-check (a cap the writer
-(strict)").
+#### Versioned room-budget protocol
 
-EVERY backend additionally maintains the room's **durable sequence** on
-this record: a `seq` field, the dense
-per-room counter the relay's cross-pod ordering rides (see "Multi-pod
-relay: broadcast fan-out ordered by a durable per-room sequence"). It
-is incremented in the SAME transaction / CAS as every value PUT and
-DELETE - the record is already rewritten there for the clock
-touch - and returned to the caller as the mutation's position in the
-room's history. The storage contract's share of the design is exactly
-three properties, pinned by the conformance suite: the seq is dense
-(+1 per committed mutation, no gaps at the source, concurrent writers
-never share or skip one), it is assigned at commit, and `ScanRoom`
-reports the exact seq its snapshot reflects (a single-transaction backend reads it
-inside the scan's own transaction / stripe; a backend whose read-set
-cannot carry a scan, runs the read-scan-reread seq fence and retries on
-motion). A legacy record with no `seq` field decodes as 0, so the first
-post-upgrade mutation assigns 1 - no migration of existing rooms is
-needed on the KV backends.
+Each Room document stores a `budgetVersion` separate from the user-visible
+mutation `seq`. A rejected or interrupted budget attempt advances the budget
+version without consuming a mutation sequence. While an attempt is incomplete,
+the document also stores:
 
-A value is stored **verbatim** (not
-JSON-wrapped): hostthis never parses a room value, so `roomkv/...` holds
-the exact bytes the app PUT, and a Get returns them unchanged. The two
-marker family (`roomcreate/`) carries an empty value, the
-convention for index keys (mirroring `identity_pastes` /
-`identity_sites`).
+```text
+pending = {
+  targetBytes,
+  appCap,
+  mutation: { key, value, wire, now } // present only for growth
+}
+```
 
-The `<key>` in `roomkv/<app-slug>/<uuid>/<key>` is the app-chosen key
-validated by `ValidateRoomKey` (non-empty, `<= MaxRoomKeyLen`); the
-`<uuid>` is the canonical lowercase 8-4-4-4-12 form `ParseRoomID` returns,
-so a forged or wrong-version id is rejected at the HTTP boundary before it
-can ever reach a key builder. The `<app-slug>` is the validated 8-char
-slug. None of these three segments can contain a `/` that would let one
-room's key prefix collide with another's (see Strict isolation below).
+The enclosing document's `budgetVersion` is the pending version. A pending
+operation with `mutation` is growth; one without it is release. The format does
+not persist duplicate version or phase fields that could disagree during
+recovery.
 
-#### Strict isolation is structural in the key shape
+The pending operation and its immediate recovery alarm are persisted or removed
+in the same local storage transaction. Every Room PUT and DELETE runs under
+`blockConcurrencyWhile`, which makes the dense sequence and whole-document
+mutation exact under v0.4's concurrent event model; the pending state makes a
+cross-cell wait and finite reset safe.
 
-Every value key is `roomkv/<app-slug>/<uuid>/<key>`, the namespacing
-triple `(app-slug, room-uuid, key)` in path order. The isolation
-guarantees fall out of the key shape, not a runtime filter:
+The coordinator stores an aggregate allocated total plus one point-addressed
+record per room:
 
-- **Cross-room.** A Get / Put / Delete builds the key from the
-  request's own `<uuid>`, so a request carrying room A's UUID can only ever
-  address keys under `roomkv/<app>/A/`; it cannot read or write
-  `roomkv/<app>/B/...`. A whole-room scan is `ScanPrefix
-  roomkv/<app-slug>/<uuid>/` - bounded to exactly one room's subtree, so it
-  cannot enumerate another room.
-- **Cross-app.** The app slug is the outermost variable segment, so
-  `roomkv/app1/<uuid>/...` and `roomkv/app2/<uuid>/...` are disjoint
-  subtrees even for an identical UUID. The per-app prefix scans
-  (`roomkv/<app-slug>/`, `roomcreate/<app-slug>/`) are anchored at the app
-  segment, so one app's aggregate / creation count never sees another's.
-- **Nonexistent-room 404, no existence leak on the per-key path.** A
-  per-key Get is a single `Get roomkv/<app>/<uuid>/<key>`: a missing key
-  in a real room and a key under a nonexistent room both return the
-  not-found sentinel (the same `ErrNotFound` the paste / site Get
-  returns), so the per-key path cannot distinguish "no such room" from "no
-  such key." The service layer does the `GetRoom` existence check
-  separately where it needs the whole-room-scan 200-vs-404 distinction
-  (the existence signal scoped to a holder of the 122-bit UUID, per the
-  Strict-isolation section above).
+```text
+{ version, allocated, target }
+```
 
-Because the UUID is validated up front and the segments are slash-free,
-there is no key whose prefix is another room's, and a guessed or forged id
-addresses an empty subtree - the same "the identifier IS the capability,
-the storage layer enforces the namespace boundary" posture pastes and sites
-rely on.
+A replay is granted exactly when `target == allocated`; storing a separate
+boolean would create two representations of the same decision.
 
-#### Operations -> KV mapping
+Its `decide(room, version, targetBytes, appCap)` transition is one local
+transaction:
 
-- **Create (`CreateRoom`).** Holds the **per-app** quota stripe (the
-  `lockQuota(app-slug)` analogue of the paste / site per-identity stripe,
-  here keyed on the app slug because the room aggregate cap is per-app, not
-  per-identity), then in one transaction:
-  1. **Per-app aggregate pre-check.** If `appCap > 0`, sum the app's
-     current room bytes (scan `roomkv/<app-slug>/`, sum value lengths of
-     rooms) and refuse a new room with the app-rooms-full
-     sentinel once the app is already at its byte cap. (A brand-new room is
-     empty, but bounding creation here keeps a full app from accumulating
-     unbounded empty rooms.)
-  2. **Collision check.** Read `rooms/<app-slug>/<uuid>`; an existing row
-     surfaces the slug-taken sentinel so the service retries with a fresh
-     UUID (astronomically unlikely for a v4).
-  3. **Atomic write.** `Put rooms/<app-slug>/<uuid>` (the JSON record:
-     `CreatedAt = UpdatedAt = now`),
-     and `Put roomcreate/<app-slug>/<subnet>/<ts>` (empty marker, the
-     rate-limit ledger row). Both land or neither.
-  The creation rate-limit COUNT is read by the service via
-  `CountRoomCreates` OUTSIDE this transaction, so the
-  creation gate stays a SOFT bound (N concurrent creators can each read the
-  same in-window count and all pass) while the per-app byte cap is the hard
-  structural bound enforced inside the tx.
-- **Per-key read (`GetValue`).** Single `Get roomkv/<app>/<uuid>/<key>`,
-  return the bytes verbatim or the not-found sentinel.
-- **Whole-room scan (`ScanRoom`).** `ScanPrefix roomkv/<app>/<uuid>/`,
-  rebuild the `RoomKV` map (strip the key prefix to recover each app-chosen
-  `<key>`). An existing room with no values scans to an empty (non-nil)
-  namespace; the service layer's prior `GetRoom` is what turns a
-  nonexistent room into a 404 rather than an empty 200.
-- **Write (`PutValue`).** Holds the **per-room** quota stripe
-  (`lockQuota(app-slug + "/" + uuid)`) across the read + write, so two
-  concurrent writes to the SAME room cannot both pass a stale cap check and
-  both commit (valid because SlateDB is single-writer: only in-process
-  goroutines can race, and the stripe serializes same-room writers). Then,
-  inside one transaction:
-  1. **Room-exists re-check.** `Get rooms/<app>/<uuid>`; the not-found
-     sentinel if the room is gone (re-checked inside the write boundary so
-     a concurrent delete cannot remove the room between the service's
-     `GetRoom` and this write).
-  2. **Per-room cap.** Scan `roomkv/<app>/<uuid>/`, materialize the
-     `RoomKV`, run the pure domain `CanPut` (byte total `<= MaxRoomBytes`,
-     key count `<= MaxRoomKeys`, value `<= MaxRoomValueBytes`); reject with
-     the room-data-full sentinel (413) on a fail, prior value intact.
-  3. **Per-app aggregate cap.** Charge only the byte DELTA (replacing a key
-     frees its old bytes). If `appCap > 0` and the delta is positive, sum
-     the app's room bytes and reject with the app-rooms-full sentinel (507)
-     if `total + delta` exceeds `appCap`.
-  4. **Upsert + touch.** `Put roomkv/<app>/<uuid>/<key>` (the new value),
-     then touch the room: read the room record and write it back with
-     `UpdatedAt = now`.
-- **Delete (`DeleteValue`).** Re-check the room exists (not-found if gone),
-  `Delete roomkv/<app>/<uuid>/<key>` (idempotent: a missing key is a
-  no-op - the post-condition "the key is gone" holds either way), then
-  touch the room (a delete is a write, so it moves `UpdatedAt`).
-- **Per-app room bytes / creation count.** The per-app aggregate sum is a
-  `ScanPrefix roomkv/<app-slug>/` summing value lengths: bytes leave the
-  per-app cap when a room or value is deleted. `CountRoomCreates` scans
-  `roomcreate/<app-slug>/` (per-app) and **drops the markers it finds past the
-  window as it goes** - they can no longer change any decision, so the read
-  that would skip them removes them, which is what keeps the family bounded
-  with no background pass and no fan-out. The per-subnet count walks the same
-  per-app family and matches the `<subnet>` segment (the same way
-  `SubnetsForIdentity` walks `keygate/`), counting markers whose fixed-width
-  `<ts>` (the second-to-last segment, before the trailing disambiguator
-  `<uuid>`) is within the window.
+1. An older version is stale and changes nothing.
+2. The current version is an idempotent replay only when `targetBytes` equals
+   `target`; it derives and returns the persisted decision.
+3. Anything other than the next version is a protocol error.
+4. A target no larger than the current allocation is always granted, even if an
+   operator lowered the cap below current usage.
+5. Growth is granted only when replacing the room's allocation with the target
+   keeps the aggregate at or below `appCap`.
+6. Granted and refused decisions both persist the version and target. A refused
+   replay can therefore never become granted later because capacity changed.
 
-#### No service-wide byte scan on the room path
+`appCap` is persisted with the Room's pending operation so alarm recovery replays
+exactly the original decision. A replay of the current version and target returns
+the persisted 200 or 507 outcome even if the caller supplies a different cap.
+Older versions, skipped versions, and the same version with a different target
+return 409 without changing state. Malformed versions or targets return 400.
 
-Rooms run NO service-wide byte sum. The room write path is gated only by
-the per-room cap and the per-app aggregate; a room holds no blobs, so it
-touches no object-store quota, and the durable total-bytes ceiling (the
-object-store bucket quota, see "Limits → Durable total-bytes ceiling")
-bounds only the blob-holding kinds (pastes + sites). The removed
-`sumServiceWideActiveBytes` aggregate - which the room path once
-participated in alongside pastes and sites - no longer exists on any
-backend, so there is no cross-kind byte scan for a room PUT to run or to
-fold its bytes into.
+A zero-byte allocation record is retained as a version fence against delayed
+older calls.
 
-#### Wiring: widen the metadata bundle's `Rooms` field
+Mutation order depends on the byte delta:
 
-`cmd/hostthisd/metadata.go` holds `Rooms` as a `roomStore` interface (the
-`service.RoomRepo` write/read view plus the `service.SweepRooms` sweep view,
-the union the service + sweep layers consume) rather than any backend's
-concrete type, so any backend's room impl can be assigned - mirroring how the
-`Sites` field is held as the `siteStore` interface. The bundle stays nil-safe:
-a backend that does not supply a room impl leaves the field nil and the
-`/api/rooms` surface stays disabled there.
+- **Growth: reserve, then commit.** The Room transaction advances the budget
+  version, stores the complete pending mutation, and arms its alarm. It then
+  awaits `decide`. Refusal clears the pending operation without changing KV or
+  `seq`. A grant lets one Room transaction apply KV, bytes, timestamp, and
+  `seq+1`, then clear the pending operation and alarm. The allocation is never
+  below actual bytes.
+- **Shrink: commit, then release.** One Room transaction applies KV, bytes,
+  timestamp, and `seq+1`, advances the budget version, stores a pending release,
+  and arms its alarm. The committed mutation may return success immediately;
+  `decide` is attempted in the same turn and the alarm retries it after a
+  transient failure. This can delay capacity reuse but cannot undercharge the
+  Room or turn a committed user mutation into an error response.
+- **Equal-size mutation.** The Room commits locally and increments `seq`; its
+  exact allocation does not change, so no coordinator call is needed. Deleting
+  an absent key follows this path and still consumes a sequence.
 
-#### Conformance
+The alarm replays `pending` before any later mutation. It re-arms itself before
+an outbound call. On a transient failure it leaves the durable operation in
+place and schedules another attempt after a bounded one-second delay, preventing
+a tight durable-alarm loop. A pending growth replays the persisted coordinator
+decision and either applies or clears the exact saved mutation. A pending
+release replays the release and clears. `(room, budgetVersion)` is the internal
+idempotency key, so callers need no operation token and delayed calls cannot
+overwrite newer accounting.
 
-The backend-agnostic conformance suite is extended with room operations so
-every backend is pinned to behave IDENTICALLY for rooms, the
-same way they are pinned for pastes and sites. The room contract the suite
-asserts (each subtest must FAIL on intentionally-weakened code, the TDD
-gate):
+The runtime output gate is part of this proof. A cell-to-cell decision cannot be
+observed before the Room's pending state is durability-proven, and its response
+cannot be observed before the coordinator decision is durable. Output gating
+does not replace the pending operation, version fence, local transaction, or
+recovery alarm.
 
-- **Round-trip.** Create a room, PUT values under several keys, GET each
-  back byte-identically, SCAN the whole namespace and observe every pair.
-- **Cross-room + cross-app ISOLATION.** A second room's UUID (and an
-  identical-UUID-shaped string under a second app) cannot read, write, or
-  scan the first room's data; a scan is bounded to exactly one room's
-  subtree. This subtest must FAIL if the namespacing is weakened (a key
-  builder that dropped the app or room segment, a scan whose prefix was
-  broadened).
-- **Nonexistent-room 404.** A per-key GET / PUT / DELETE on a well-formed
-  but nonexistent room returns the not-found sentinel - the same shape as a
-  missing key in a real room (no per-key existence leak).
-- **Per-room cap.** A PUT that would push the room past `MaxRoomBytes` or
-  `MaxRoomKeys` is rejected, prior value intact.
-- **Per-app aggregate cap.** A PUT that would push the app's total room
-  bytes past `appCap` is rejected (the per-app structural bound; rooms run
-  no service-wide byte scan, the durable ceiling being the object-store
-  bucket quota).
-- **Creation rate limit.** The per-subnet and per-app in-window counts the
-  service gates on are accurate after N creations, and a windowed prune
-  drops past-window ledger rows.
-- **App-existence 404.** (Pinned at the HTTP layer, where the existence
-  gate lives - the room repo itself is not app-existence-gated, the same
-  way the paste repo is not owner-gated; the repo-level conformance pins
-  that room creation under any slug succeeds, and the HTTP-layer test pins
-  the 404 for a slug that names no live app.)
-- **Delete cascade.** `DeleteRoom` removes the room record and every value
-  in its namespace, and is an idempotent no-op on a room that is already
-  gone.
+Room creation performs a serialized coordinator preflight. That decision is the
+creation's byte-admission linearization point: a sibling growth serialized after
+it may fill the final byte without retroactively invalidating the earlier empty
+room. If the app's allocation is already at the cap when the preflight runs, it
+returns 507 before the empty Room record is created. It records the soft creation-ledger row before the Room document, so an
+unavailable ledger cannot leave a persisted room whose ID was never returned.
+A failed Room commit may leave one conservative ledger row until its normal
+window expires. The creation-rate decision remains a soft service-layer gate;
+the byte ceiling remains hard.
 
-A backend that passes the extended suite is a drop-in for the
-room-persistence tier by construction.
+#### Upgrade and conformance
+
+A legacy absolute `roomBytes` map is not accepted as exact migration evidence:
+delayed settlements may be stale and detached settlements may be missing. Before
+adopting the versioned protocol over legacy data, writes stop and an authoritative
+inventory supplies every persisted Room cell's stable runtime ID to a
+cluster-internal reconciliation route. Each non-empty Room must contain a
+canonical UUIDv4, and `(app slug + "|" + UUID)` must derive the inventoried stable
+ID through the Room namespace before any seed occurs. Each cell is classified as
+empty or its Room document is validated and used to idempotently seed the app
+coordinator from the document's actual byte count.
+
+Validation refuses pending operations, malformed metadata or wire maps, invalid
+base64, a stored byte count that differs from the KV document, unsafe sequences,
+versions, or timestamps, and a conflicting existing allocation record. Duplicate
+identity is keyed by `(app slug, UUID)`, not UUID alone. Every inventory entry must
+be classified exactly once; empty is distinct from malformed or unreadable. A
+response-lost seed is safe to retry and cannot double-charge. Reconciliation is
+complete only when each app's exact allocation set, count, byte sum, and canonical
+set digest equal the coordinator point read, including retained zero-byte version
+fences. Existing actual bytes above the configured cap are preserved and reported
+as over-cap; equal-size writes and shrink remain available until usage falls below
+it.
+
+Every backend runs the same observable conformance cases: round-trip, reserved
+object-property keys, cross-room and cross-app isolation, nonexistent-room
+shape, room byte/key ceilings, exact serial and concurrent app ceilings,
+immediate cross-room capacity release, creation refusal at a full app, creation
+ledger behavior, and dense sequences. Deterministic Worker tests additionally
+sabotage every durable boundary and replay accepted, refused, stale, reordered,
+and same-version/different-target coordinator calls.
 
 ---
 
 ## Celld-backed metadata storage (production)
 
-The production metadata plane is a celld fleet: a Rust runtime embedding V8
-that owns named CELLS - each a private SQLite database with exactly one owner,
-fenced by conditional writes against object storage. hostthisd reaches it over
-HTTP through `internal/celld`; the cell application itself lives in
-`celld/src/index.js` and is deployed to the fleet's bucket.
+The production metadata adapter is a celld Worker reached over cluster-internal
+HTTP. Each named cell owns a private SQLite database, and celld fences ownership
+and durability through the fleet's object store. The public Go service remains
+the translation layer: it owns SSH/HTTP policy and calls service ports whose
+celld adapters translate to Worker requests.
 
-### The cell taxonomy
+### Cell taxonomy
 
-Four classes, and the taxonomy is effectively PERMANENT: class names are part
-of the storage key path and the runtime rejects renames once data exists.
+Four active classes are permanent because class names participate in stored
+identity:
 
-- **Paste** - one cell per slug: the row, the version list (v1 seeded, one
-  list holds every version, tombstones retained, numbers never reused), and
-  the slug claim used by multi-file site deploys. The slug namespace is
-  global because the cell IS the slug.
-- **Identity** - one cell per owner: the enumeration entries the listing
-  renders (denormalised name, kind, size, latest and pinned version, so a
-  listing is one point read), the quota charge, the first-seen stamp, the
+- **Identity**, one per owner: quota entries, listing summaries, first-seen,
   durable intents, and the keygate reverse index.
-- **Subnet** - one cell per network: the Sybil admission rows. Admission is a
-  check-and-record inside one single-threaded event, so the per-subnet cap is
-  EXACT.
-- **Room** - one cell per app room: the KV, the dense per-room sequence, and
-  the live WebSocket fan-out (see "the room cell is the broadcast point").
-  A room write that must respect the per-APP budget asks the app's paste cell
-  directly, CELL TO CELL, inside the room's own event: one hostthisd round
-  trip, and the app cell decides the budget against its own current totals -
-  which makes the per-app cap EXACT, where a caller-supplied
-  "other rooms' bytes" figure was stale under concurrency by construction.
+- **Paste**, one per app slug: paste row, versions, claim, and the app-scoped
+  room creation and byte-budget coordinator. Room accounting works without a
+  paste row, so a static site can own rooms under the same slug.
+- **Room**, one per `(app slug, room UUID)`: room document, dense sequence,
+  pending budget operation, recovery alarm, and hibernatable sockets.
+- **Subnet**, one per source network: Sybil-admission rows.
 
-### Writes that span two cells
+The deprecated `IntentLog` class remains only so the original migration stays
+resolvable. No request routes to it.
 
-A create touches the identity cell (quota reserve) and the paste cell (the
-row); nothing transacts across cells. The seam is the same durable-intent saga
-the spec's intent section describes: reserve records an intent, the row is
-written, confirm discharges the intent, and a crash between them leaves an
-intent that resolution settles on the next touch. Charges are recorded as
-ABSOLUTE per-slug totals, never deltas, so replaying a settle converges
-instead of double-charging; releases are membership-based (drop the entry),
-so replaying a release cannot over-refund.
+Paste artifact state and app-room accounting are distinct logical aggregates
+co-located in one physical cell because both are addressed by the app slug. This
+reuses the existing permanent class and avoids a second app-slug coordinator;
+room methods do not depend on a paste row.
 
-### What a cell's single thread buys
+### Concurrency and local atomicity
 
-Every check-then-write inside one cell - the quota check, the room caps, slug
-uniqueness, keygate admission - happens within one event, so those invariants
-hold exactly without any cross-node machinery. The trade is that EVERY
-metadata operation is a network call, and a dormant cell pays an activation
-on first touch. Idle cells are evicted (`CELLD_IDLE_EVICT_S`) back to bucket
-objects, which is what makes a mostly-dormant paste service cheap to keep.
+A v0.4 cell may serve several fetches concurrently. Local storage-shaped awaits
+remain in the same input turn, while a real cell call or fetch opens an
+interleaving point. Code must not rely on the phrase "one event at a time."
 
-### Blobs: a content-addressed object store
+A same-cell invariant uses one local commit. Pure grouped puts use one
+`storage.put(Map)`; transitions mixing puts and deletes use
+`storage.transaction()`. The identity reserve/confirm/release and paste
+put/append/delete-version transitions therefore expose either their complete old
+state or complete new state after a stop, never a partial combination.
 
-celld holds no bytes. The byte plane is `HOSTTHIS_BLOB_BACKEND=s3`: the same
-five-method content-addressed contract the disk store satisfies
-(`blob/<sha256[:2]>/<sha256>`, zstd-compressed at rest), over any
-S3-compatible bucket. Blob dedup, the orphan sweep and the pending/finalize
-model are unchanged from the standalone design; there is no transactional
-pointer co-commit, which is exactly what the pending model exists to cover.
+The Room's app-byte protocol is the only path that intentionally spans cells.
+It persists a versioned pending operation before the outbound call and uses
+`blockConcurrencyWhile` only around that bounded state machine. The protocol is
+specified under "Room storage."
 
-### Operational shape
+### Input and output gates
 
-A fleet serves ONE application - a second deploy replaces the current one
-silently - so hostthis owns its fleet and its bucket outright. The worker
-port is unauthenticated by design and must stay cluster-internal
-(NetworkPolicy); hostthisd is the only public surface. hostthisd itself is
-stateless above the object store and scales horizontally.
+The input gate keeps storage-shaped awaits in one local turn, but it opens on
+outbound cell calls. The output gate holds HTTP responses, cell-call responses,
+queue delivery, and WebSocket sends until relevant local durability is proven.
+It does not execute an unowned promise, combine several local commits into a
+transaction, or create a distributed transaction. Every asynchronous operation
+must be awaited or owned by `state.waitUntil`, and every multi-key invariant
+must still use one local transaction or batch.
 
+### Worker deployment generations
+
+The fleet reads `deploy/current.json` periodically and can adopt it immediately
+through the release-matched operator reload endpoint. Adoption does not restart
+the node. New requests use the new Worker generation, existing requests finish
+on the old generation, and resident Room cells move at safe points with their
+storage and hibernatable sockets. Adjacent generations can call each other, so
+an application release must keep its internal cell protocol compatible for the
+old-generation residency window.
+
+A failed generation build leaves the prior deployment serving. Hot adoption is
+used only when adjacent Worker generations preserve the internal protocol during
+the residency window.
+
+### Binding fit
+
+Hostthis keeps its domain cells rather than forcing v0.4's partial service
+bindings into different semantics:
+
+- Workers KV does not provide the compound exact quota and ordered mutation
+  transitions owned by Identity, Paste, Room, and Subnet.
+- Queues and Workflows are asynchronous and cannot decide a synchronous room or
+  upload admission response.
+- R2 does not replace the existing provider-neutral, content-addressed BlobStore
+  contract and its S3 adapter.
+- Service bindings do not remove hostthis's app/room protocol or public policy
+  boundary.
+
+The unified peer tunnel is a runtime transport improvement. It replaces no
+hostthis adapter or domain rule.
+
+### Blob and operational boundaries
+
+Paste and site payloads stay outside celld in the content-addressed S3
+BlobStore. Room values are small mutable metadata and remain in Room cells.
+Blob deduplication, pending/finalize, and orphan collection are unchanged.
+
+One fleet bucket serves one Worker application. The Worker and operator routes
+are unauthenticated and remain cluster-internal behind NetworkPolicy;
+`hostthisd` is the only public surface. Worker health and runtime health are
+separate: `/healthz` checks the hostthis Worker, while
+`/.well-known/celld/health` is the node lifecycle probe.
 
 ## Edge caching
 
@@ -4733,54 +3531,19 @@ scope for v1.
 
 ---
 
-## Readiness vs liveness (health endpoints)
+## Health endpoints
 
-The HTTP listener serves two probe endpoints, and they answer two
-DIFFERENT questions on purpose:
+The HTTP listener serves two process-health endpoints ahead of Host-based routing:
 
-- **`/healthz` - liveness.** "Is this process up?" Returns `200 ok`
-  whenever the HTTP server can respond, and NEVER gates on storage
-  state. It echoes `X-Backend-Color` when the replica is color-labeled.
-  This is the restart signal: an orchestrator that sees liveness fail
-  should restart the process. Storage health stays OUT of it, because a
-  restart cannot repair an unmountable backing store - restart-looping
-  a pod whose store cannot open only destroys the retry progress its
-  running process was making.
-- **`/readyz` - readiness.** "Should this replica receive traffic, and
-  may a rollout proceed past it?" Returns `200` iff the metadata
-  backend's readiness predicate passes, `503 Service Unavailable`
-  otherwise. An orchestrator points its READINESS probe here; its
-  liveness (and startup) probes stay on `/healthz`. A readiness-failing
-  pod must be held out of rotation, never restarted.
+- **`/healthz`** returns `200 ok` whenever the HTTP server responds and echoes
+  `X-Backend-Color` when the replica is color-labeled. Kubernetes uses it for
+  startup, readiness, and liveness.
+- **`/readyz`** is a compatibility endpoint returning `{"ready":true}`. Current
+  metadata adapters have no application-side activation phase: memory is local,
+  and celld activates cells on demand.
 
-Both are served on the same HTTP listener/port as the paste surface,
-routed by path ahead of any Host-based routing (they answer on any Host
-header), and both are deliberately un-gated: no auth, no keygate - a
-probe must never be turned away.
-
-### The failure class /readyz exists for
-
-Degraded boot on a sharded backend deliberately let a pod come up with
-storage units still unmounted: the process is up (liveness passes) and
-the reconcile keeps retrying the mounts. That is the right per-pod
-availability call, but it creates a rollout hazard: if the readiness
-probe points at a liveness signal, a fleet-wide config error (a bad
-credential, a bad bucket - anything that makes EVERY unit open fail on
-every NEW pod) still reports each new pod "ready". A surge rollout then
-replaces the entire fleet with pods that have mounted NOTHING and
-"completes" while writes are down. Gating readiness on actual mount
-state stalls that rollout at the FIRST new pod: it never goes ready,
-the rollout cannot proceed, the old pods keep serving, and the operator
-reads the cause straight off the probe body.
-
-### Per-backend readiness
-
-Neither current backend has a warm-up phase, so `/readyz` is the liveness
-answer: a process that is up is ready. The celld backend's cells activate on
-demand - there is no mount floor to wait for - and the memory backend has
-nothing to open at all. The endpoint stays split from `/healthz` so a backend
-with a real warm-up (the shale cluster's mount floor was one) can wire a
-prober without touching handlers.
+Both answer on any Host without authentication. They expose no metadata, storage
+counters, or operator controls.
 
 ## Metrics
 
@@ -4867,10 +3630,22 @@ file). Defaults in parens:
 --fresh-keys-per-subnet  / HOSTTHIS_FRESH_KEYS_PER_SUBNET   sybil-gate threshold                    (20)
 --fresh-keys-window      / HOSTTHIS_FRESH_KEYS_WINDOW       sybil-gate rolling window               (24h)
 
-# Standalone blob backend (dev/test; disk-only)
-                         / HOSTTHIS_BLOB_BACKEND            disk                                    (disk)
-# Production blobs go to the content-addressed s3 backend instead:
-                         / HOSTTHIS_SHALE_BLOB_BUCKET       blob bucket on the metadata object store (unset = detached store)
+# Metadata backend
+                         / HOSTTHIS_METADATA_BACKEND        memory | celld                         (memory)
+                         / HOSTTHIS_CELLD_ENDPOINT          celld Worker base URL                  (required for celld)
+
+# Blob backend
+                         / HOSTTHIS_BLOB_BACKEND            disk | s3                              (disk)
+                         / HOSTTHIS_S3_ENDPOINT             S3-compatible endpoint                (provider default)
+                         / HOSTTHIS_S3_BUCKET               payload bucket                         (required for s3)
+                         / HOSTTHIS_S3_REGION               bucket region                         (us-east-1)
+                         / HOSTTHIS_S3_ACCESS_KEY           S3 access key                         (required for s3)
+                         / HOSTTHIS_S3_SECRET_KEY           S3 secret key                         (required for s3)
+                         / HOSTTHIS_S3_USE_SSL              endpoint uses TLS                     (false)
+                         / HOSTTHIS_S3_BLOB_PREFIX          object-key prefix                     (blob)
+                         / HOSTTHIS_BLOB_WRITEBACK          enable local write-back cache         (false)
+                         / HOSTTHIS_BLOB_WRITEBACK_DIR      write-back cache directory            (<data-dir>/blob-cache)
+                         / HOSTTHIS_BLOB_WRITEBACK_MAX_BYTES soft cache ceiling                   (1 GiB)
 
 # CDN / cache purger
                          / HOSTTHIS_CACHE_BACKEND           noop | cloudflare                       (noop)
@@ -4882,6 +3657,27 @@ file). Defaults in parens:
 The runtime container reads the same env vars. The operator supplies
 a docker-compose (or equivalent) file out of band; this repo ships no
 sample production compose.
+
+### Process shutdown
+
+`SIGINT` and `SIGTERM` start one bounded shutdown sequence. Room relay admission
+stops synchronously; an upgrade racing a new room socket receives HTTP 503.
+Public HTTP, private metrics, and existing room relays then drain concurrently.
+Active room sockets receive WebSocket 1012 with `service restart`; sockets that
+do not close are force-closed before the process exits.
+
+SSH stops accepting new connections at the same time and receives at most 20
+seconds for existing sessions. The server then force-closes every remaining SSH
+connection. Session drain covers command handlers, not just sockets: a handler
+whose connection was force-closed or lost may still be inside metadata work, so
+both graceful shutdown and force close return only after every admitted handler
+has finished. A handshake accepted before shutdown that completes afterward is
+refused before its command dispatches. Upload finalizers are waited only after
+SSH can no longer start one, and blob write-back cleanup starts only after those
+finalizers finish. The whole sequence has a 35-second hard bound. Work still
+blocked at that point is left to the documented pending-state and startup
+recovery protocols. The 20-second and 35-second limits are product constants,
+not operator knobs.
 
 ### What's hardcoded vs operator-tunable
 
@@ -4906,10 +3702,9 @@ sample production compose.
 - Same-identity create admission width
   (`HOSTTHIS_CREATE_ADMISSION_WIDTH`, default 2; see "Limits →
   Same-identity create admission")
-- Readiness mount floor (`HOSTTHIS_READY_MIN_MOUNTED_FRACTION`,
-- Standalone blob backend (`HOSTTHIS_BLOB_BACKEND=disk`, disk-only;
-  production uses the s3 blob backend via
-  `HOSTTHIS_SHALE_BLOB_BUCKET`, not a standalone backend)
+- Metadata backend (`HOSTTHIS_METADATA_BACKEND=memory|celld`) and celld endpoint
+- Blob backend (`HOSTTHIS_BLOB_BACKEND=disk|s3`), S3 connection settings, and
+  optional local write-back cache
 - CDN cache purger (`HOSTTHIS_CACHE_BACKEND=noop|cloudflare`) and its
   credential (`HOSTTHIS_CF_PURGE_TOKEN`)
 

@@ -12,9 +12,6 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// newStandaloneUnit builds a StandaloneBlobUnit over a real compressed disk
-// blob store, the same stack the composition root wires, so the seam is
-// exercised end to end with no mocks and no network.
 func newStandaloneUnit(t *testing.T) (*StandaloneBlobUnit, *storage.CompressedBlobStore) {
 	t.Helper()
 	disk, err := storage.NewBlobStore(filepath.Join(t.TempDir(), "blobs"))
@@ -25,124 +22,107 @@ func newStandaloneUnit(t *testing.T) (*StandaloneBlobUnit, *storage.CompressedBl
 	return NewStandaloneBlobUnit(store), store
 }
 
-// stage encodes raw bytes the way the streaming upload pipeline does and stages
-// them. Stage takes precompressed bytes because the upload service always hands
-// it an already-encoded body, so streamUpload produces them here too.
-func stage(t *testing.T, u *StandaloneBlobUnit, slug string, raw []byte) (string, BlobHandle) {
+func stage(t *testing.T, u *StandaloneBlobUnit, raw []byte) string {
 	t.Helper()
 	staged, err := streamUpload(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("streamUpload: %v", err)
 	}
-	h, err := u.Stage(context.Background(), slug, staged.SHA, stagedBytes(t, staged))
-	if err != nil {
-		t.Fatalf("Stage: %v", err)
+	defer staged.discard()
+	if err := u.StagePrecompressed(
+		context.Background(), staged.SHA, staged.File, staged.encodedSize(),
+	); err != nil {
+		t.Fatalf("StagePrecompressed: %v", err)
 	}
-	return staged.SHA, h
+	return staged.SHA
 }
 
-// Staged bytes read back DECOMPRESSED and byte-identical through both Read
-// (streaming) and ReadAll (buffered).
-func TestStandalone_StageRead_RoundTrip(t *testing.T) {
+type streamIdentityStore struct {
+	want     io.Reader
+	gotSame  bool
+	gotSize  int64
+	gotBytes []byte
+}
+
+func (s *streamIdentityStore) Put(string, io.Reader, int64) error { return nil }
+func (s *streamIdentityStore) PutPrecompressed(_ string, r io.Reader, size int64) error {
+	s.gotSame = r == s.want
+	s.gotSize = size
+	var err error
+	s.gotBytes, err = io.ReadAll(r)
+	return err
+}
+func (s *streamIdentityStore) EncodeTo(io.Writer, io.Reader) (string, int, int64, error) {
+	return "", 0, 0, errors.New("unexpected encode")
+}
+func (s *streamIdentityStore) GetReader(string) (io.ReadCloser, int64, error) {
+	return nil, 0, errors.New("unexpected read")
+}
+
+// StagePrecompressed forwards the spill stream instead of materializing it.
+func TestStandalone_StagePrecompressedStreamsOriginalReader(t *testing.T) {
+	body := bytes.NewReader([]byte("encoded body"))
+	store := &streamIdentityStore{want: body}
+	u := NewStandaloneBlobUnit(store)
+
+	if err := u.StagePrecompressed(context.Background(), "sha", body, 12); err != nil {
+		t.Fatalf("StagePrecompressed: %v", err)
+	}
+	if !store.gotSame {
+		t.Fatal("store received a replacement reader; the byte plane buffered the spill")
+	}
+	if store.gotSize != 12 || string(store.gotBytes) != "encoded body" {
+		t.Fatalf("forwarded size/body = %d/%q", store.gotSize, store.gotBytes)
+	}
+}
+
+func TestStandalone_StagePrecompressedRead_RoundTrip(t *testing.T) {
 	u, _ := newStandaloneUnit(t)
 	raw := []byte("<!doctype html><h1>round trip</h1>")
-	sha, _ := stage(t, u, "slug0001", raw)
+	sha := stage(t, u, raw)
 
-	rc, _, err := u.Read(context.Background(), "slug0001", sha)
+	got, err := readStream(t, u, sha)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
-	}
-	got, err := io.ReadAll(rc)
-	if cerr := rc.Close(); cerr != nil {
-		t.Fatalf("Close: %v", cerr)
-	}
-	if err != nil {
-		t.Fatalf("read all from stream: %v", err)
 	}
 	if !bytes.Equal(got, raw) {
 		t.Fatalf("Read bytes: got %q, want %q", got, raw)
 	}
 }
 
-// The streaming-stage path used by the site deploy sink round-trips: bytes go
-// in uncompressed through StageStream and read back identical.
-func TestStandalone_StageStream_RoundTrip(t *testing.T) {
+func TestStandalone_StageEncodingRead_RoundTrip(t *testing.T) {
 	u, _ := newStandaloneUnit(t)
 	raw := []byte("body{margin:0}\n/* a stylesheet a site file would carry */")
-	sha := domain.HashContent(raw)
 
-	if _, err := u.StageStream(context.Background(), "site0001", sha, bytes.NewReader(raw), int64(len(raw))); err != nil {
-		t.Fatalf("StageStream: %v", err)
+	sha, stored, err := u.StageEncoding(context.Background(), bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("StageEncoding: %v", err)
 	}
-	got, err := readStream(t, u, "site0001", sha)
+	if sha != domain.HashContent(raw) {
+		t.Fatalf("sha = %q, want %q", sha, domain.HashContent(raw))
+	}
+	if stored <= 0 {
+		t.Fatalf("stored size = %d, want positive", stored)
+	}
+	got, err := readStream(t, u, sha)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
 	if !bytes.Equal(got, raw) {
-		t.Fatalf("StageStream round-trip: got %q, want %q", got, raw)
+		t.Fatalf("StageEncoding round-trip: got %q, want %q", got, raw)
 	}
 }
 
-// Commit runs the metadata closure exactly once and returns its error verbatim,
-// so a caller's retry/translate switch sees it unchanged.
-func TestStandalone_Commit_RunsMetaWrite(t *testing.T) {
-	u, _ := newStandaloneUnit(t)
-	_, h := stage(t, u, "slug0002", []byte("<p>commit</p>"))
-
-	calls := 0
-	if err := u.Commit(context.Background(), []BlobHandle{h}, func(context.Context) error {
-		calls++
-		return nil
-	}); err != nil {
-		t.Fatalf("Commit (ok): %v", err)
-	}
-	if calls != 1 {
-		t.Fatalf("metaWrite call count: got %d, want 1", calls)
-	}
-
-	sentinel := errors.New("metadata write failed")
-	if err := u.Commit(context.Background(), []BlobHandle{h}, func(context.Context) error {
-		return sentinel
-	}); !errors.Is(err, sentinel) {
-		t.Fatalf("Commit (err): got %v, want %v", err, sentinel)
-	}
-}
-
-// UnbindOnDelete does NOT remove bytes on the standalone path: the global
-// content-addressed sweep owns reclamation, not a per-record unbind.
-func TestStandalone_UnbindOnDelete_IsNoop(t *testing.T) {
-	u, _ := newStandaloneUnit(t)
-	raw := []byte("<p>still here after unbind</p>")
-	sha, _ := stage(t, u, "slug0003", raw)
-
-	if err := u.UnbindOnDelete(context.Background(), "slug0003", []string{sha}); err != nil {
-		t.Fatalf("UnbindOnDelete: %v", err)
-	}
-	got, err := readStream(t, u, "slug0003", sha)
-	if err != nil {
-		t.Fatalf("Read after unbind (should still exist): %v", err)
-	}
-	if !bytes.Equal(got, raw) {
-		t.Fatalf("bytes after unbind: got %q, want %q", got, raw)
-	}
-}
-
-// Reading a never-staged sha surfaces storage.ErrNotFound through the seam,
-// which upstream turns into a 404 or a loading retry.
 func TestStandalone_Read_NotFound(t *testing.T) {
 	u, _ := newStandaloneUnit(t)
-	if _, _, err := u.Read(context.Background(), "slug0004", "deadbeef"); !errors.Is(err, storage.ErrNotFound) {
+	if _, _, err := u.Read(context.Background(), "deadbeef"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("Read missing: got %v, want storage.ErrNotFound", err)
 	}
 }
 
-// readStream drains the adapter's streaming read. The seam offers no buffering
-// read - a caller that wants the whole document allocates it deliberately, here
-// in a test, rather than through the port (docs/SPEC.md "Reads are
-// constant-memory too").
-func readStream(t *testing.T, u *StandaloneBlobUnit, slug, sha string) ([]byte, error) {
+func readStream(t *testing.T, u *StandaloneBlobUnit, sha string) ([]byte, error) {
 	t.Helper()
-	rc, _, err := u.Read(context.Background(), slug, sha)
+	rc, _, err := u.Read(context.Background(), sha)
 	if err != nil {
 		return nil, err
 	}

@@ -21,7 +21,8 @@ func (f fullBlobStore) Put(sha string, r io.Reader, size int64) error {
 	_, _ = io.Copy(io.Discard, r)
 	return storage.ErrServiceFull
 }
-func (f fullBlobStore) PutPrecompressed(sha string, body []byte) error {
+func (f fullBlobStore) PutPrecompressed(sha string, body io.Reader, size int64) error {
+	_, _ = io.Copy(io.Discard, body)
 	return storage.ErrServiceFull
 }
 func (f fullBlobStore) Get(sha string) ([]byte, error) { return f.real.Get(sha) }
@@ -113,12 +114,7 @@ func TestDeploySite_BlobQuotaSurfacesServiceFull(t *testing.T) {
 	}
 }
 
-// EncodeBody delegates to the real at-rest encoder rather than faking a size:
-// a fabricated length here would let a size regression pass.
-func (f fullBlobStore) EncodeBody(r io.Reader) ([]byte, int, error) {
-	body, err := storage.EncodeCompressedBody(r)
-	if err != nil {
-		return nil, 0, err
-	}
-	return body, len(body) - storage.CompressedBodyPrefixLen, nil
+// EncodeTo delegates to the real at-rest encoder.
+func (f fullBlobStore) EncodeTo(w io.Writer, r io.Reader) (string, int, int64, error) {
+	return f.real.EncodeTo(w, r)
 }

@@ -1,22 +1,12 @@
 package storage_test
 
-// Backend-agnostic conformance for the Sybil admission gate.
-//
-// The gate's contract is a rate limit, and a rate limit is only meaningful if
-// every backend enforces the same one. shale spreads it over two key families
-// on two shards; celld puts the decision in a subnet cell and the reverse index
-// in the identity cell. Both must answer the same questions the same way.
-//
-// EVERY ASSERTION HERE IS SERIAL, deliberately. shale documents its cap as
-// APPROXIMATE under concurrency: the in-window count is a pre-scan outside the
-// transaction, so two first-sight keys in one subnet can both commit having
-// each seen a count one below the limit. A cell decides inside a single event,
-// so celld's cap is exact. Asserting exactness under concurrency would pin the
-// stricter backend and fail the incumbent, which would make this suite an
-// invention rather than the contract.
+// Backend-agnostic conformance for the Sybil admission gate. The subnet cap is
+// exact under concurrency; the identity reverse index is derived after admission.
 
 import (
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -214,6 +204,54 @@ func conformKeygateReadmitDoesNotRefresh(t *testing.T, r keygateRepo) {
 	}
 }
 
+func conformKeygateConcurrentCapIsExact(t *testing.T, r keygateRepo) {
+	const subnet, limit, attempts = "10.14.0.0/24", 7, 32
+	type result struct {
+		known bool
+		err   error
+	}
+
+	start := make(chan struct{})
+	results := make(chan result, attempts)
+	var wg sync.WaitGroup
+	for i := range attempts {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			known, err := r.AdmitNewKey(fmt.Sprintf("kg:race-%02d", i), subnet, fixedNow, limit, kgWindow)
+			results <- result{known: known, err: err}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	admitted := 0
+	refused := 0
+	for got := range results {
+		switch {
+		case got.err == nil && !got.known:
+			admitted++
+		case errors.Is(got.err, domain.ErrTooManyNewKeys):
+			refused++
+		default:
+			t.Fatalf("concurrent admission returned (known=%v, err=%v)", got.known, got.err)
+		}
+	}
+	if admitted != limit || refused != attempts-limit {
+		t.Fatalf("concurrent admissions = %d admitted, %d refused; want %d and %d",
+			admitted, refused, limit, attempts-limit)
+	}
+	n, _, err := r.SubnetSnapshot(subnet, fixedNow, kgWindow)
+	if err != nil {
+		t.Fatalf("snapshot after concurrent admissions: %v", err)
+	}
+	if n != limit {
+		t.Fatalf("snapshot after concurrent admissions = %d rows; want exact cap %d", n, limit)
+	}
+}
+
 func runKeygateConformance(t *testing.T, name string, newRepo func(t *testing.T) keygateRepo) {
 	t.Helper()
 	t.Run(name+"/FirstAdmitIsFresh", func(t *testing.T) { conformKeygateFirstAdmitIsFresh(t, newRepo(t)) })
@@ -228,4 +266,5 @@ func runKeygateConformance(t *testing.T, name string, newRepo func(t *testing.T)
 		conformKeygateSubnetsForIdentityExpires(t, newRepo(t))
 	})
 	t.Run(name+"/ReadmitDoesNotRefresh", func(t *testing.T) { conformKeygateReadmitDoesNotRefresh(t, newRepo(t)) })
+	t.Run(name+"/ConcurrentCapIsExact", func(t *testing.T) { conformKeygateConcurrentCapIsExact(t, newRepo(t)) })
 }

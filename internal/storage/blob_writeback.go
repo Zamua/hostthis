@@ -156,43 +156,35 @@ func (w *WriteBackBlobStore) Put(sha string, r io.Reader, size int64) error {
 	if len(sha) < 2 {
 		return fmt.Errorf("writeback: sha too short")
 	}
-	// Buffered so the bytes can be written locally and read back for the
-	// upload. Callers pass an in-memory body via PutPrecompressed, so this is
-	// the staging buffer the upload service already holds, not an extra copy
-	// of unbounded size.
-	body, err := io.ReadAll(r)
-	if err != nil {
-		return fmt.Errorf("writeback read body: %w", err)
-	}
-	// Dedup hit: skip the local write and the enqueue entirely.
 	if w.durableHas(sha) {
 		return nil
 	}
-	if err := w.writeLocal(sha, body); err != nil {
+	if err := w.writeLocalFrom(sha, r, size); err != nil {
 		return err
 	}
 	w.enqueue(sha)
-	// Opportunistic, so a long-running process does not grow the cache
-	// unbounded between uploads.
 	w.evictIfNeeded()
 	return nil
 }
 
-// PutPrecompressed takes the body already in its stored (compressed,
-// magic-prefixed) representation, mirroring the other backends.
-func (w *WriteBackBlobStore) PutPrecompressed(sha string, body []byte) error {
-	return w.Put(sha, bytes.NewReader(body), int64(len(body)))
+// PutPrecompressed streams a body already in its stored representation.
+func (w *WriteBackBlobStore) PutPrecompressed(sha string, body io.Reader, size int64) error {
+	return w.Put(sha, body, size)
 }
 
 // writeLocal atomically writes body to the cache (tmp + fsync + rename).
 func (w *WriteBackBlobStore) writeLocal(sha string, body []byte) error {
+	return w.writeLocalFrom(sha, bytes.NewReader(body), int64(len(body)))
+}
+
+func (w *WriteBackBlobStore) writeLocalFrom(sha string, body io.Reader, size int64) error {
 	dir := filepath.Join(w.dir, sha[:2])
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("writeback mkdir %q: %w", dir, err)
 	}
 	dst := w.blobPath(sha)
 	if _, err := os.Stat(dst); err == nil {
-		return nil // already cached locally
+		return nil
 	}
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
@@ -200,9 +192,14 @@ func (w *WriteBackBlobStore) writeLocal(sha string, body []byte) error {
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) //nolint:errcheck
-	if _, err := tmp.Write(body); err != nil {
+	n, err := io.Copy(tmp, body)
+	if err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("writeback write: %w", err)
+	}
+	if size >= 0 && n != size {
+		_ = tmp.Close()
+		return fmt.Errorf("writeback size mismatch: wrote %d bytes, want %d", n, size)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
@@ -214,7 +211,7 @@ func (w *WriteBackBlobStore) writeLocal(sha string, body []byte) error {
 	if err := os.Rename(tmpName, dst); err != nil {
 		return fmt.Errorf("writeback rename: %w", err)
 	}
-	w.diskBytes.Add(int64(len(body)))
+	w.diskBytes.Add(n)
 	return nil
 }
 

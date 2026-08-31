@@ -24,16 +24,16 @@ type PasteAdmin interface {
 	// paste. CreatedAt is immutable per paste, so it names the exact instance.
 	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 	SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error
-	SetPinnedVersion(domain.Slug, domain.Version) error
-	Unpin(domain.Slug) error
-	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (domain.AppendResult, error)
+	SetPinnedVersion(domain.Slug, string, domain.Version) error
+	Unpin(domain.Slug, string) error
+	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, generation string, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (domain.AppendResult, error)
 	ListVersions(domain.Slug) ([]domain.Version, error)
 	GetVersion(domain.Slug, int) (domain.Version, error)
 	// IsVersionServed reports whether ver is the version the URL serves,
 	// decided from the authoritative head + rows (never a disposable read
 	// cache), so the delete guard below can never free the served blob.
 	IsVersionServed(domain.Slug, int) (bool, error)
-	DeleteVersion(domain.Slug, int) error
+	DeleteVersion(domain.Slug, string, int) error
 	CountByOwner(owner string) (int, error)
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
 	OwnerFirstSeen(owner string) (time.Time, error)
@@ -80,7 +80,7 @@ type Manage struct {
 	// (domain.MIMESniffer).
 	Sniff   domain.MIMESniffer
 	Repo    PasteAdmin
-	Blob    BlobUnit // Show (ReadAll), Update (Stage+Commit), Delete (UnbindOnDelete)
+	Blob    BlobUnit // content-addressed writes and streaming reads
 	KeyGate *KeyGate // optional; populates WhoamiInfo.Session when set
 	Now     func() time.Time
 }
@@ -128,7 +128,7 @@ func (m *Manage) Show(slug domain.Slug, owner string) (domain.Paste, io.ReadClos
 	if err != nil {
 		return domain.Paste{}, nil, err
 	}
-	rc, _, err := m.Blob.Read(context.Background(), string(slug), p.ContentSHA)
+	rc, _, err := m.Blob.Read(context.Background(), p.ContentSHA)
 	if err != nil {
 		return domain.Paste{}, nil, fmt.Errorf("blob: %w", err)
 	}
@@ -179,31 +179,16 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 	}
 	now := m.Now().UTC()
 	ctx := context.Background()
-	// Commit binds the staged blob with the AppendVersion metadata write. On
-	// the standalone path Stage writes the bytes and Commit runs only the
-	// metadata write, keeping the blob-first ordering.
-	// Ownership before the staged byte: an appended version stages into an
-	// existing slug and is as reclaimable as a fresh upload.
-	ctx, berr := m.Blob.BeginUpload(ctx, string(slug))
-	if berr != nil {
-		return UpdateResult{}, berr
-	}
-	handle, err := m.Blob.StagePrecompressed(ctx, string(slug), staged.SHA, staged.File, staged.encodedSize())
-	if err != nil {
-		// A blob Put rejected by the object store's bucket quota surfaces
-		// storage.ErrServiceFull (the durable total-bytes ceiling), which the
-		// shared classifier turns into the graceful "at capacity" response.
+	if err := m.Blob.StagePrecompressed(ctx, staged.SHA, staged.File, staged.encodedSize()); err != nil {
 		if class, terr := classifyCommitErr(err); class != commitOther {
 			return UpdateResult{}, terr
 		}
 		return UpdateResult{}, fmt.Errorf("blob write: %w", err)
 	}
-	var res domain.AppendResult
-	err = m.Blob.Commit(ctx, []BlobHandle{handle}, func(ctx context.Context) error {
-		var aerr error
-		res, aerr = m.Repo.AppendVersionWithQuotaCheck(ctx, slug, kind, staged.SHA, staged.CompressedSize, int64(domain.UserQuotaBytes), now)
-		return aerr
-	})
+	res, err := m.Repo.AppendVersionWithQuotaCheck(
+		ctx, slug, existing.Generation, kind, staged.SHA, staged.CompressedSize,
+		int64(domain.UserQuotaBytes), now,
+	)
 	if err != nil {
 		_, terr := classifyCommitErr(err)
 		return UpdateResult{}, terr
@@ -268,12 +253,6 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 	if err := m.Repo.Delete(slug, p.Identity, p.CreatedAt); err != nil {
 		return err
 	}
-	// Unbind the paste's blob references. A no-op on the standalone path,
-	// where the global sweep reclaims unreferenced content-addressed blobs;
-	// naming the delete-side lifecycle keeps the call uniform across backends.
-	// The error is swallowed on purpose: the metadata is already gone and the
-	// sweep is the backstop.
-	_ = m.Blob.UnbindOnDelete(context.Background(), string(slug), []string{p.ContentSHA})
 	return nil
 }
 
@@ -310,7 +289,8 @@ var ErrVersionCurrentlyServed = errors.New("service: version is currently served
 //
 // The freed byte count is the row's pre-deletion size column.
 func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (DeleteVersionResult, error) {
-	if _, err := m.requireOwner(slug, owner); err != nil {
+	paste, err := m.requireOwner(slug, owner)
+	if err != nil {
 		return DeleteVersionResult{}, err
 	}
 	if verNum < 1 {
@@ -335,7 +315,10 @@ func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (Dele
 		return DeleteVersionResult{}, ErrVersionCurrentlyServed
 	}
 
-	if err := m.Repo.DeleteVersion(slug, verNum); err != nil {
+	if err := m.Repo.DeleteVersion(slug, paste.Generation, verNum); err != nil {
+		if errors.Is(err, domain.ErrVersionCurrentlyServed) {
+			return DeleteVersionResult{}, ErrVersionCurrentlyServed
+		}
 		return DeleteVersionResult{}, err
 	}
 	// No cache purge: the served bytes did not change, only an older
@@ -347,7 +330,8 @@ func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (Dele
 // later `update`s do not bump it. Only Update
 // does that.
 func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version, error) {
-	if _, err := m.requireOwner(slug, owner); err != nil {
+	paste, err := m.requireOwner(slug, owner)
+	if err != nil {
 		return domain.Version{}, err
 	}
 	if verNum < 1 {
@@ -357,7 +341,7 @@ func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version
 	if err != nil {
 		return domain.Version{}, ErrNotFound
 	}
-	if err := m.Repo.SetPinnedVersion(slug, ver); err != nil {
+	if err := m.Repo.SetPinnedVersion(slug, paste.Generation, ver); err != nil {
 		return domain.Version{}, err
 	}
 	return ver, nil
@@ -366,10 +350,11 @@ func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version
 // Unpin clears a sticky pin, reverting the URL to "always serve the latest
 // version".
 func (m *Manage) Unpin(slug domain.Slug, owner string) error {
-	if _, err := m.requireOwner(slug, owner); err != nil {
+	paste, err := m.requireOwner(slug, owner)
+	if err != nil {
 		return err
 	}
-	if err := m.Repo.Unpin(slug); err != nil {
+	if err := m.Repo.Unpin(slug, paste.Generation); err != nil {
 		return err
 	}
 	return nil

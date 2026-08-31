@@ -12,11 +12,8 @@ import (
 )
 
 // Every metadata bundle serves directories through the paste adapter.
-//
-// Untagged so it runs even in a build that does not compile the shale bundle.
-// Wiring the site surface to something other than the paste adapter compiles
-// and serves, so nothing else fails; the guard is what makes the substitution
-// visible.
+// Wiring the site surface directly to a repository compiles and serves, so the
+// guard makes the substitution visible.
 func TestEveryMetadataBundleWiresTheArtifactSiteAdapter(t *testing.T) {
 	files, err := filepath.Glob("metadata*.go")
 	if err != nil {
@@ -35,8 +32,7 @@ func TestEveryMetadataBundleWiresTheArtifactSiteAdapter(t *testing.T) {
 		for _, w := range scanBundleWiring(fset, f) {
 			builders = append(builders, file+":"+w.builder)
 			if !w.sitesIsAdapter {
-				t.Errorf("%s:%d %s wires Sites to %s, not %s.\n"+
-					"The bare legacy repo serves correctly, so nothing fails - it just never migrates.",
+				t.Errorf("%s:%d %s wires Sites to %s, not %s.",
 					file, w.line, w.builder, describeWiring(w.sites), sitesCtor)
 			}
 		}
@@ -51,8 +47,7 @@ func TestEveryMetadataBundleWiresTheArtifactSiteAdapter(t *testing.T) {
 }
 
 const (
-	// sitesCtor builds the site surface that reads and writes the
-	// paste families, falling back to the legacy one it drains.
+	// sitesCtor builds the site surface over the unified paste family.
 	sitesCtor  = "NewSites"
 	bundleType = "metadataBundle"
 	sitesField = "Sites"
@@ -71,9 +66,8 @@ type bundleWiring struct {
 //
 // AST rather than text: the two fields are wired in two different shapes (a
 // composite-literal element and a later field assignment), either can name a
-// local or call the constructor inline, and a grep cannot tell the value bound
-// to the paste adapter from a same-named local bound to the legacy repo -
-// which is the substitution that matters.
+// local or call the constructor inline, and a grep cannot resolve the value
+// bound to a same-named local.
 func scanBundleWiring(fset *token.FileSet, f *ast.File) []bundleWiring {
 	var out []bundleWiring
 	for _, decl := range f.Decls {
@@ -205,18 +199,17 @@ func TestScanBundleWiring(t *testing.T) {
 			name: "composite-literal wiring",
 			src: `package main
 func buildMetadataLocal() (*metadataBundle, error) {
-	sites := storage.NewSites(repo, storage.NewShaleSiteRepo(repo))
-	return &metadataBundle{Sites: sites, LegacySiteSweeper: sites}, nil
+	sites := storage.NewSites(repo)
+	return &metadataBundle{Sites: sites}, nil
 }`,
 			wantBuilders: 1, wantSites: true,
 		},
 		{
 			name: "field assigned after construction",
 			src: `package main
-func buildMetadataShale() (*metadataBundle, error) {
-	sites := storage.NewSites(repo, storage.NewShaleSiteRepo(repo))
-	bundle := &metadataBundle{Sites: sites}
-	bundle.LegacySiteSweeper = sites
+func buildMetadataCelld() (*metadataBundle, error) {
+	bundle := &metadataBundle{}
+	bundle.Sites = storage.NewSites(repo)
 	return bundle, nil
 }`,
 			wantBuilders: 1, wantSites: true,
@@ -224,28 +217,27 @@ func buildMetadataShale() (*metadataBundle, error) {
 		{
 			name: "constructor called inline",
 			src: `package main
-func buildMetadataShale() (*metadataBundle, error) {
-	bundle := &metadataBundle{Sites: storage.NewSites(repo, legacy)}
-	bundle.LegacySiteSweeper = storage.NewSites(repo, legacy)
+func buildMetadataCelld() (*metadataBundle, error) {
+	bundle := &metadataBundle{Sites: storage.NewSites(repo)}
 	return bundle, nil
 }`,
 			wantBuilders: 1, wantSites: true,
 		},
 		{
-			name: "legacy repo wired as the site surface",
+			name: "repository wired directly as the site surface",
 			src: `package main
-func buildMetadataShale() (*metadataBundle, error) {
-	sites := storage.NewShaleSiteRepo(repo)
+func buildMetadataCelld() (*metadataBundle, error) {
+	sites := storage.NewMemRepo()
 	bundle := &metadataBundle{Sites: sites}
 	return bundle, nil
 }`,
 			wantBuilders: 1, wantSites: false,
 		},
 		{
-			name: "build-tag stub constructs no bundle",
+			name: "stub constructs no bundle",
 			src: `package main
-func buildMetadataShale() (*metadataBundle, error) {
-	return nil, fmt.Errorf("requires -tags slatedb")
+func buildMetadataCelld() (*metadataBundle, error) {
+	return nil, errDisabled
 }`,
 			wantBuilders: 0,
 		},

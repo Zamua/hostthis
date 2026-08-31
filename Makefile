@@ -38,6 +38,8 @@ build:
 
 test:
 	go test ./...
+	npm --prefix celld test
+	./scripts/test-repo-contracts.sh
 
 # Run locally (no container) - useful for fast iteration. Defaults to
 # path mode so wildcard DNS isn't required.
@@ -112,7 +114,7 @@ docker-down:
 dev-minio-up:
 	docker compose -f deploy/dev/docker-compose.yml up -d
 	@echo "minio: http://localhost:9000 (s3 api)  http://localhost:9001 (console: admin/supersecret)"
-	@echo "buckets 'hostthis-metadata' (+ 'hostthis-blobs' for the shale-blob byte plane) are auto-created by the init container"
+	@echo "buckets used by the s3 blob-store tests are created by the init container"
 
 dev-minio-down:
 	docker compose -f deploy/dev/docker-compose.yml down -v

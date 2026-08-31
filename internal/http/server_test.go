@@ -5,12 +5,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	stdhttp "net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/roomwire"
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
@@ -26,8 +28,16 @@ func (s stubPasteReader) Get(slug domain.Slug) (domain.Paste, error) {
 type stubBlobReader struct{ body []byte }
 
 func (s stubBlobReader) ReadAll(_ context.Context, _, _ string) ([]byte, error) { return s.body, nil }
-func (s stubBlobReader) Read(_ context.Context, _, _ string) (io.ReadCloser, int64, error) {
+func (s stubBlobReader) Read(_ context.Context, _ string) (io.ReadCloser, int64, error) {
 	return io.NopCloser(bytes.NewReader(s.body)), int64(len(s.body)), nil
+}
+
+func TestWriteRelayAdmitErrorMapsDrainingToUnavailable(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeRelayAdmitError(w, roomwire.ErrRelayDraining)
+	if w.Code != stdhttp.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
 }
 
 func TestSlugFromHost(t *testing.T) {
@@ -324,7 +334,7 @@ type failingBlobReader struct{ err error }
 func (f failingBlobReader) ReadAll(_ context.Context, _, _ string) ([]byte, error) {
 	return nil, f.err
 }
-func (f failingBlobReader) Read(_ context.Context, _, _ string) (io.ReadCloser, int64, error) {
+func (f failingBlobReader) Read(_ context.Context, _ string) (io.ReadCloser, int64, error) {
 	return nil, 0, f.err
 }
 

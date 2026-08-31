@@ -34,13 +34,17 @@ type MemRoomRepo struct{ r *MemRepo }
 
 func NewMemRoomRepo(r *MemRepo) *MemRoomRepo { return &MemRoomRepo{r: r} }
 
-func (m *MemRoomRepo) CreateRoom(room domain.Room, subnet string, _ int64, now time.Time) error {
+func (m *MemRoomRepo) CreateRoom(room domain.Room, subnet string, appCap int64, now time.Time) error {
 	m.r.mu.Lock()
 	defer m.r.mu.Unlock()
 	k := memRoomKey{app: room.AppSlug, id: room.ID}
-	if _, exists := m.r.rooms[k]; !exists {
-		m.r.rooms[k] = &memRoom{meta: room, kv: make(map[string][]byte)}
+	if _, exists := m.r.rooms[k]; exists {
+		return nil
 	}
+	if appCap > 0 && m.r.roomBytes[room.AppSlug] >= appCap {
+		return ErrAppRoomsFull
+	}
+	m.r.rooms[k] = &memRoom{meta: room, kv: make(map[string][]byte)}
 	m.r.roomLedger[room.AppSlug] = append(m.r.roomLedger[room.AppSlug], memRoomCreate{subnet: subnet, at: now})
 	return nil
 }
@@ -110,16 +114,12 @@ func (m *MemRoomRepo) PutValue(app domain.Slug, id domain.RoomID, key string, va
 		return 0, ErrRoomDataFull
 	}
 	if appCap > 0 {
-		others := 0
-		for k, o := range m.r.rooms {
-			if k.app == app && o != rm {
-				others += o.bytes
-			}
-		}
-		if int64(others+next) > appCap {
+		total := m.r.roomBytes[app] - int64(rm.bytes) + int64(next)
+		if total > appCap {
 			return 0, ErrAppRoomsFull
 		}
 	}
+	m.r.roomBytes[app] += int64(next - rm.bytes)
 	rm.kv[key] = append([]byte(nil), val...)
 	rm.bytes = next
 	rm.seq++
@@ -139,6 +139,7 @@ func (m *MemRoomRepo) DeleteValue(app domain.Slug, id domain.RoomID, key string,
 	}
 	if v, had := rm.kv[key]; had {
 		rm.bytes -= len(v)
+		m.r.roomBytes[app] -= int64(len(v))
 		delete(rm.kv, key)
 	}
 	rm.seq++

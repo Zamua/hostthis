@@ -47,6 +47,7 @@ func NormalizeStatus(s string) PasteStatus {
 // (8 chars over a 32-char alphabet), so the access model is "share the URL".
 type Paste struct {
 	Slug       Slug
+	Generation string      // opaque incarnation fence; changes when a slug is re-minted
 	Identity   Identity    // "key:<fp>" or "ip:<subnet>" - quota AND capability gate
 	Status     PasteStatus // pending | ready | failed (blob-write lifecycle)
 	Kind       ContentKind // html | markdown of the currently-served version
@@ -178,6 +179,15 @@ func (v Version) RootSize() int {
 func HashContent(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// NewPasteGeneration returns an opaque token that identifies one slug incarnation.
+func NewPasteGeneration() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		panic("hostthis: crypto/rand failure: " + err.Error())
+	}
+	return hex.EncodeToString(raw[:])
 }
 
 // NewRandomSlug returns a fresh random Slug drawn from SlugAlphabet using

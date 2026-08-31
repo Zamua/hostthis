@@ -37,8 +37,8 @@ func (d *discardResponseWriter) WriteHeader(int)             {}
 // the only way to allocate per payload now is to do it here, on purpose.
 type bufferingBlobReader struct{ inner BlobReader }
 
-func (b bufferingBlobReader) Read(ctx context.Context, slug, sha string) (io.ReadCloser, int64, error) {
-	rc, _, err := b.inner.Read(ctx, slug, sha)
+func (b bufferingBlobReader) Read(ctx context.Context, sha string) (io.ReadCloser, int64, error) {
+	rc, _, err := b.inner.Read(ctx, sha)
 	if err != nil {
 		return nil, 0, err
 	}

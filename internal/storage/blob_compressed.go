@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"hash"
 	"io"
 	"sync"
 
@@ -76,11 +75,9 @@ type innerBlobStore interface {
 // satisfies it and slots between this layer and the durable backend.
 type InnerBlobStore = innerBlobStore
 
-// PutPrecompressed writes a body that is ALREADY zstd-encoded with the magic
-// prefix in place, for the service-layer streaming upload path that encodes
-// incrementally as stdin arrives.
-func (c *CompressedBlobStore) PutPrecompressed(sha string, body []byte) error {
-	return c.Inner.Put(sha, bytes.NewReader(body), int64(len(body)))
+// PutPrecompressed streams a body already encoded in the at-rest format.
+func (c *CompressedBlobStore) PutPrecompressed(sha string, body io.Reader, size int64) error {
+	return c.Inner.Put(sha, body, size)
 }
 
 // magic prefix for blobs written by this layer.
@@ -125,15 +122,8 @@ func (c *CompressedBlobStore) Put(sha string, r io.Reader, _ int64) error {
 // than hardcoding it.
 const CompressedBodyPrefixLen = len(magicV1)
 
-// EncodeCompressedBody returns `magic + zstd(r)` buffered in memory: the exact
-// at-rest format Put writes and DecodeCompressedStream reads. The shale-blob
-// stage path streams to BlobKV.StageBlob rather than through
-// CompressedBlobStore.Put, and calls this so a site file is stored in the same
-// format as a paste. The body is bounded by one file (the untar's per-file
-// cap), so buffering is safe.
-//
-// Not the only encoder of this format: the service-layer streaming upload path
-// re-implements it to hash, cap and encode stdin in a single pass. See magicV1.
+// EncodeCompressedBody returns `magic + zstd(r)` buffered in memory. The body
+// must already be bounded by the caller's per-file cap.
 func EncodeCompressedBody(r io.Reader) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.Grow(int(estimatedCompressedSize(0)))
@@ -194,10 +184,8 @@ func (c *CompressedBlobStore) GetReader(sha string) (io.ReadCloser, int64, error
 	return dec, size, nil
 }
 
-// DecodeCompressedStream wraps a raw stored blob stream in a reader yielding
-// the DECOMPRESSED bytes, closing the underlying reader on Close (including on
-// any error path). Shared by the standalone GetReader and the shale-blob read
-// path so both decode identically. label names the blob in error messages.
+// DecodeCompressedStream wraps a stored blob stream with decompression and
+// closes the underlying reader on every error path. label identifies failures.
 func DecodeCompressedStream(rc io.ReadCloser, label string) (io.ReadCloser, error) {
 	// A blob shorter than the header is not an error: io.ReadFull signals it
 	// with ErrUnexpectedEOF / EOF, and the short read simply fails the magic
@@ -272,115 +260,34 @@ func estimatedCompressedSize(uncompressed int) int {
 	return len(magicV1) + uncompressed/2 // optimistic; Buffer grows if needed
 }
 
-// EncodeBody implements the service-side BlobStore encoder, returning the
-// at-rest body and the payload size excluding the framing prefix, so a caller
-// needing the on-disk footprint does not redo the framing arithmetic.
-func (s *CompressedBlobStore) EncodeBody(r io.Reader) ([]byte, int, error) {
-	body, err := EncodeCompressedBody(r)
-	if err != nil {
-		return nil, 0, err
-	}
-	return body, len(body) - CompressedBodyPrefixLen, nil
+type countingWriter struct {
+	w io.Writer
+	n int64
 }
 
-// EncodedStream is a lazily-encoded upload body: magic + zstd(raw), produced as
-// the reader is consumed rather than assembled first.
-//
-// SHA and CompressedSize are only valid once the reader has been read to EOF.
-// Nothing here is known in advance, which is the point: knowing either would
-// require holding the whole body.
-type EncodedStream struct {
-	io.Reader
-	hasher  hash.Hash
-	counter *byteCounter
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	w.n += int64(n)
+	return n, err
 }
 
-// SHA is the hex sha256 of the RAW bytes, which is what a record stores and
-// what the site manifest keys on. Valid after the reader reaches EOF.
-func (e *EncodedStream) SHA() string { return hex.EncodeToString(e.hasher.Sum(nil)) }
-
-// CompressedSize is the at-rest footprint EXCLUDING the magic prefix, matching
-// how pastes charge quota. Valid after the reader reaches EOF.
-func (e *EncodedStream) CompressedSize() int { return int(e.counter.n) - len(magicV1) }
-
-type byteCounter struct{ n int64 }
-
-func (c *byteCounter) Write(p []byte) (int, error) { c.n += int64(len(p)); return len(p), nil }
-
-// EncodeCompressedStream wraps r so it yields the at-rest format without ever
-// materialising it.
-//
-// The pipe is what makes this constant-memory: the compressor writes only as
-// fast as the object store reads, so an in-flight upload costs the zstd window
-// and a copy buffer regardless of how large the file is.
-//
-// The raw bytes are hashed on the way past, so the caller gets the sha WITHOUT
-// a second pass - which is what previously forced the whole file into memory,
-// since the sha had to be known before staging could start.
-//
-// A read error propagates through CloseWithError, so a truncated upload fails
-// the stage rather than silently storing a short object.
-func EncodeCompressedStream(r io.Reader) *EncodedStream {
-	pr, pw := io.Pipe()
-	hasher := sha256.New()
-	counter := &byteCounter{}
-	out := &EncodedStream{Reader: pr, hasher: hasher, counter: counter}
-
-	go func() {
-		// Every byte handed to the pipe is counted, so CompressedSize is the
-		// real at-rest length rather than an estimate.
-		counted := io.MultiWriter(pw, counter)
-		if _, err := counted.Write(magicV1[:]); err != nil {
-			_ = pw.CloseWithError(err)
-			return
-		}
-		enc, err := zstd.NewWriter(counted, zstd.WithEncoderLevel(compressionLevel))
-		if err != nil {
-			_ = pw.CloseWithError(fmt.Errorf("compressed blob: zstd writer: %w", err))
-			return
-		}
-		// Hash the RAW bytes, not the encoded ones: the sha identifies content,
-		// not its storage representation.
-		if _, err := io.Copy(io.MultiWriter(enc, hasher), r); err != nil {
-			_ = enc.Close()
-			_ = pw.CloseWithError(err)
-			return
-		}
-		if err := enc.Close(); err != nil {
-			_ = pw.CloseWithError(fmt.Errorf("compressed blob: zstd close: %w", err))
-			return
-		}
-		_ = pw.Close()
-	}()
-	return out
-}
-
-// EncodeCompressedTo streams magic + zstd(r) into w, returning the bytes written
-// and the sha256 of the RAW input.
-//
-// Exists so a caller can encode to a file and learn the exact at-rest length
-// WITHOUT holding the body: staging with a known size lets the object store
-// choose a sane part size, where an unknown length makes it allocate a full
-// multipart part buffer - measured at 128 MiB of RSS growth for a 32 MiB upload,
-// worse than the buffering this replaced.
-func EncodeCompressedTo(w io.Writer, r io.Reader) (int64, string, error) {
-	counter := &byteCounter{}
-	counted := io.MultiWriter(w, counter)
+// EncodeTo writes the at-rest representation while hashing the raw bytes.
+func (s *CompressedBlobStore) EncodeTo(w io.Writer, r io.Reader) (string, int, int64, error) {
+	counted := &countingWriter{w: w}
 	if _, err := counted.Write(magicV1[:]); err != nil {
-		return 0, "", fmt.Errorf("compressed blob write magic: %w", err)
+		return "", 0, 0, fmt.Errorf("compressed blob write magic: %w", err)
 	}
 	enc, err := zstd.NewWriter(counted, zstd.WithEncoderLevel(compressionLevel))
 	if err != nil {
-		return 0, "", fmt.Errorf("compressed blob: zstd writer: %w", err)
+		return "", 0, 0, fmt.Errorf("compressed blob: zstd writer: %w", err)
 	}
 	hasher := sha256.New()
-	// Hash the RAW bytes: the sha identifies content, not its stored form.
 	if _, err := io.Copy(io.MultiWriter(enc, hasher), r); err != nil {
 		_ = enc.Close()
-		return 0, "", err
+		return "", 0, 0, fmt.Errorf("compressed blob encode: %w", err)
 	}
 	if err := enc.Close(); err != nil {
-		return 0, "", fmt.Errorf("compressed blob: zstd close: %w", err)
+		return "", 0, 0, fmt.Errorf("compressed blob close encoder: %w", err)
 	}
-	return counter.n, hex.EncodeToString(hasher.Sum(nil)), nil
+	return hex.EncodeToString(hasher.Sum(nil)), int(counted.n) - CompressedBodyPrefixLen, counted.n, nil
 }

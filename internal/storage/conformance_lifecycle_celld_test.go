@@ -2,11 +2,10 @@ package storage_test
 
 // The celld entry into the paste lifecycle conformance.
 //
-// This is the first celld adapter whose operation spans TWO cells with no
-// transaction between them - the row is addressed by slug, the quota and index
-// by identity - so it is where the intent log stops being a justified design
-// and has to actually carry a create. Passing the same assertions the shale
-// backend passes is the only evidence that it does.
+// This adapter spans two cells without a cross-cell transaction: the row is
+// addressed by slug, while quota and index state are addressed by identity.
+// The conformance suite proves that the intent protocol preserves lifecycle
+// behavior across that boundary.
 //
 // Skipped unless CELLD_TEST_ENDPOINT names a running fleet.
 //
@@ -72,18 +71,10 @@ func (n namespacedRepo) SubnetsForIdentity(identity string, now time.Time, windo
 // its paste view, or the cross-quota and slug-collision subtests exercise two
 // unrelated stores. Namespacing both through one prefix is what keeps them the
 // same store.
-func (n namespacedRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, m domain.Manifest,
-	root domain.ManifestEntry, size int, userCap int64, now time.Time,
+func (n namespacedRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string,
+	m domain.Manifest, root domain.ManifestEntry, size int, userCap int64, now time.Time,
 ) (storage.AppendResult, error) {
-	return n.inner.AppendManifestVersion(ctx, n.slug(slug), m, root, size, userCap, now)
-}
-
-func (n namespacedRepo) PreClaimSlug(ctx context.Context, slug domain.Slug, owner string, now time.Time) error {
-	return n.inner.PreClaimSlug(ctx, n.slug(slug), n.owner(owner), now)
-}
-
-func (n namespacedRepo) ReleaseSlugClaim(ctx context.Context, slug domain.Slug, owner string) error {
-	return n.inner.ReleaseSlugClaim(ctx, n.slug(slug), n.owner(owner))
+	return n.inner.AppendManifestVersion(ctx, n.slug(slug), generation, m, root, size, userCap, now)
 }
 
 func (n namespacedRepo) slug(s domain.Slug) domain.Slug {
@@ -113,8 +104,16 @@ func (n namespacedRepo) Get(s domain.Slug) (domain.Paste, error) {
 	return got, nil
 }
 
-func (n namespacedRepo) MarkReady(s domain.Slug) error  { return n.inner.MarkReady(n.slug(s)) }
-func (n namespacedRepo) MarkFailed(s domain.Slug) error { return n.inner.MarkFailed(n.slug(s)) }
+func (n namespacedRepo) MarkReady(p domain.Paste) error {
+	p.Slug = n.slug(p.Slug)
+	p.Identity = domain.Identity(n.owner(p.Identity.String()))
+	return n.inner.MarkReady(p)
+}
+func (n namespacedRepo) MarkFailed(p domain.Paste) error {
+	p.Slug = n.slug(p.Slug)
+	p.Identity = domain.Identity(n.owner(p.Identity.String()))
+	return n.inner.MarkFailed(p)
+}
 
 func (n namespacedRepo) SumActiveBytesByOwner(o string, at time.Time) (int, error) {
 	return n.inner.SumActiveBytesByOwner(n.owner(o), at)
@@ -145,14 +144,14 @@ func (n namespacedRepo) DropStaleOwnerEntry(s domain.Slug, o string) (bool, erro
 	return n.inner.DropStaleOwnerEntry(n.slug(s), n.owner(o))
 }
 
-func (n namespacedRepo) AppendVersionWithQuotaCheck(ctx context.Context, s domain.Slug,
+func (n namespacedRepo) AppendVersionWithQuotaCheck(ctx context.Context, s domain.Slug, generation string,
 	kind domain.ContentKind, sha string, size int, cap int64, at time.Time,
 ) (domain.AppendResult, error) {
-	return n.inner.AppendVersionWithQuotaCheck(ctx, n.slug(s), kind, sha, size, cap, at)
+	return n.inner.AppendVersionWithQuotaCheck(ctx, n.slug(s), generation, kind, sha, size, cap, at)
 }
 
-func (n namespacedRepo) DeleteVersion(s domain.Slug, ver int) error {
-	return n.inner.DeleteVersion(n.slug(s), ver)
+func (n namespacedRepo) DeleteVersion(s domain.Slug, generation string, ver int) error {
+	return n.inner.DeleteVersion(n.slug(s), generation, ver)
 }
 
 func (n namespacedRepo) Delete(s domain.Slug, want domain.Identity, at time.Time) error {
@@ -226,12 +225,14 @@ func (n namespacedRepo) IsVersionServed(s domain.Slug, ver int) (bool, error) {
 	return n.inner.IsVersionServed(n.slug(s), ver)
 }
 
-func (n namespacedRepo) SetPinnedVersion(s domain.Slug, v domain.Version) error {
+func (n namespacedRepo) SetPinnedVersion(s domain.Slug, generation string, v domain.Version) error {
 	v.Slug = n.slug(s)
-	return n.inner.SetPinnedVersion(n.slug(s), v)
+	return n.inner.SetPinnedVersion(n.slug(s), generation, v)
 }
 
-func (n namespacedRepo) Unpin(s domain.Slug) error { return n.inner.Unpin(n.slug(s)) }
+func (n namespacedRepo) Unpin(s domain.Slug, generation string) error {
+	return n.inner.Unpin(n.slug(s), generation)
+}
 
 func (n namespacedRepo) OwnerSummary(o string, at time.Time) (domain.OwnerSummary, error) {
 	return n.inner.OwnerSummary(n.owner(o), at)
@@ -296,9 +297,6 @@ func TestConformance_Celld(t *testing.T) {
 	if base == "" {
 		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld conformance")
 	}
-	// Both byte caps are strict: a cell decides inside one event, where shale's
-	// per-identity check is a scan outside the write.
-	caps := conformCaps{StrictQuotaUnderConcurrency: true, StrictIdentityQuotaUnderConcurrency: true}
 	newRepo := func(t *testing.T) conformanceRepo { return newNamespacedCelld(base) }
 	newSites := func(t *testing.T) (conformanceRepo, conformanceSiteRepo) {
 		r := newNamespacedCelld(base)
@@ -312,6 +310,6 @@ func TestConformance_Celld(t *testing.T) {
 			Site:  storage.NewSites(r),
 		}
 	}
-	runConformanceWithSites(t, "celld", caps, newRepo, newSites, newRooms)
+	runConformanceWithSites(t, "celld", newRepo, newSites, newRooms)
 	runKeygateConformance(t, "celld", func(t *testing.T) keygateRepo { return newNamespacedCelld(base).kg })
 }

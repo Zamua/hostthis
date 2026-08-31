@@ -5,6 +5,7 @@ package ssh
 
 import (
 	"bufio"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -19,6 +20,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -75,6 +77,13 @@ type Server struct {
 	// Metrics is optional; nil records nothing. Kept as a port so this package
 	// carries no Prometheus dependency and tests can assert on calls.
 	Metrics CommandRecorder
+
+	lifecycleMu    sync.Mutex
+	server         *gossh.Server
+	listener       net.Listener
+	stopping       bool
+	activeSessions int
+	sessionsZero   chan struct{}
 }
 
 // metrics returns the injected recorder, or a no-op when none was wired. The
@@ -91,12 +100,100 @@ type noopRecorder struct{}
 
 func (noopRecorder) RecordCommand(string, string, time.Duration) {}
 
+func (s *Server) sessionLifecycleMiddleware() wish.Middleware {
+	return func(next gossh.Handler) gossh.Handler {
+		return func(sess gossh.Session) {
+			if !s.beginSession() {
+				_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: service restarting")
+				_ = sess.Exit(ExitErr)
+				return
+			}
+			defer s.endSession()
+			next(sess)
+		}
+	}
+}
+
 // now returns the injected clock, defaulting to time.Now.
 func (s *Server) now() time.Time {
 	if s.Now != nil {
 		return s.Now()
 	}
 	return time.Now()
+}
+
+func (s *Server) beginSession() bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.stopping {
+		return false
+	}
+	if s.activeSessions == 0 {
+		s.sessionsZero = make(chan struct{})
+	}
+	s.activeSessions++
+	return true
+}
+
+func (s *Server) endSession() {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	s.activeSessions--
+	if s.activeSessions == 0 {
+		close(s.sessionsZero)
+	}
+}
+
+func (s *Server) waitSessions(ctx context.Context) error {
+	s.lifecycleMu.Lock()
+	if s.activeSessions == 0 {
+		s.lifecycleMu.Unlock()
+		return nil
+	}
+	zero := s.sessionsZero
+	s.lifecycleMu.Unlock()
+	select {
+	case <-zero:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.lifecycleMu.Lock()
+	s.stopping = true
+	srv := s.server
+	listener := s.listener
+	s.lifecycleMu.Unlock()
+	if listener != nil {
+		_ = listener.Close()
+	}
+	var shutdownErr error
+	if srv != nil {
+		if err := srv.Shutdown(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
+			shutdownErr = err
+		}
+	}
+	return errors.Join(shutdownErr, s.waitSessions(ctx))
+}
+
+func (s *Server) Close() error {
+	s.lifecycleMu.Lock()
+	s.stopping = true
+	srv := s.server
+	listener := s.listener
+	s.lifecycleMu.Unlock()
+	if listener != nil {
+		_ = listener.Close()
+	}
+	var closeErr error
+	if srv != nil {
+		if err := srv.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			closeErr = err
+		}
+	}
+	return errors.Join(closeErr, s.waitSessions(context.Background()))
 }
 
 // ListenAndServe blocks, returning whatever the listener returns (nil after a
@@ -132,8 +229,10 @@ func (s *Server) ListenAndServe() error {
 			s.terminalMiddleware(),
 			s.ratelimitMiddleware(),
 			s.keyRequiredMiddleware(),
-			// Outermost, so it also counts sessions the gate refuses.
+			// Counts every admitted session, including ones the gates refuse.
 			s.metricsMiddleware(),
+			// Outermost: shutdown fences new handlers and waits for every active one.
+			s.sessionLifecycleMiddleware(),
 		),
 		// Refuse port-forwarding, agent-forwarding, X11 and subsystem
 		// (sftp/scp) channels: sessions are single-command exchanges that need
@@ -163,6 +262,23 @@ func (s *Server) ListenAndServe() error {
 		}
 		s.Logger.Printf("ssh: PROXY protocol required (real client IPs from PROXY headers; headerless connections refused)")
 	}
+	s.lifecycleMu.Lock()
+	if s.stopping {
+		s.lifecycleMu.Unlock()
+		_ = ln.Close()
+		_ = srv.Close()
+		return nil
+	}
+	s.server = srv
+	s.listener = ln
+	s.lifecycleMu.Unlock()
+	defer func() {
+		s.lifecycleMu.Lock()
+		if s.server == srv {
+			s.listener = nil
+		}
+		s.lifecycleMu.Unlock()
+	}()
 	s.Logger.Printf("ssh: listening on %s", s.Addr)
 	err = srv.Serve(ln)
 	if errors.Is(err, net.ErrClosed) {
@@ -1083,14 +1199,6 @@ func emitServiceErr(sess gossh.Session, err error) {
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrUnsafeArchive.Error())
 	case errors.Is(err, domain.ErrTooManyFiles):
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrTooManyFiles.Error())
-	case errors.Is(err, domain.ErrConcurrentChange):
-		// Nothing was applied, so re-running is the whole fix. Say that,
-		// rather than leaking the sentinel's "storage:" wording.
-		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: another change landed first, nothing was applied. try again")
-	case errors.Is(err, service.ErrDeployFailed):
-		// Show a clean retryable message, not the raw backend sentinel the
-		// wrapped cause carries.
-		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: site deploy failed, please retry")
 	default:
 		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
 	}

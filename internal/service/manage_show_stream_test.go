@@ -44,7 +44,7 @@ type streamOnlyBlobUnit struct {
 	reads int
 }
 
-func (u *streamOnlyBlobUnit) Read(context.Context, string, string) (io.ReadCloser, int64, error) {
+func (u *streamOnlyBlobUnit) Read(context.Context, string) (io.ReadCloser, int64, error) {
 	u.reads++
 	return io.NopCloser(strings.NewReader(u.body)), int64(len(u.body)), nil
 }

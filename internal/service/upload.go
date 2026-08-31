@@ -27,24 +27,16 @@ type PasteRepo interface {
 	// also releases its reservation), so a late finalizer cannot resurrect a
 	// reconciler-failed paste; both no-op on a missing or non-pending paste.
 	// docs/SPEC.md "Paste lifecycle status".
-	MarkReady(domain.Slug) error
-	MarkFailed(domain.Slug) error
+	MarkReady(domain.Paste) error
+	MarkFailed(domain.Paste) error
 }
 
-// BlobStore writes and reads content-addressed bytes. Put's size is required by
-// S3-shaped backends to set Content-Length; the disk impl accepts it for
-// interface uniformity. PutPrecompressed takes a body that is already
-// magic-prefixed + zstd-encoded, so the streaming upload path does not re-encode
-// its staging buffer.
+// BlobStore owns the at-rest encoding and writes content-addressed bytes.
+// Known lengths let S3-shaped backends avoid unknown-size multipart buffering.
 type BlobStore interface {
 	Put(sha string, r io.Reader, size int64) error
-	PutPrecompressed(sha string, body []byte) error
-
-	// EncodeBody encodes UNCOMPRESSED bytes into the store's at-rest format and
-	// reports the payload size EXCLUDING the framing prefix: the basis quota
-	// charges. Declared here so a caller needing the on-disk footprint asks the
-	// component that owns the format instead of redoing the framing arithmetic.
-	EncodeBody(r io.Reader) (body []byte, payloadSize int, err error)
+	PutPrecompressed(sha string, r io.Reader, size int64) error
+	EncodeTo(w io.Writer, r io.Reader) (sha string, payloadSize int, totalSize int64, err error)
 }
 
 // ErrSlugTaken is returned when the internal slug re-mint retry budget is
@@ -54,9 +46,7 @@ var ErrSlugTaken = errors.New("service: slug taken (after retries)")
 // Upload is the application service for new paste creation.
 type Upload struct {
 	Repo PasteRepo
-	// Blob is the per-record blob lifecycle seam (Stage/Commit/Read/
-	// UnbindOnDelete). On the standalone path the metadata row commits first
-	// and the finalizer Stages the bytes in the background.
+	// Blob is the content-addressed byte plane.
 	Blob BlobUnit
 	Now  func() time.Time
 	// Sniff is the port DetectKind's text-only rule calls: the domain owns the
@@ -190,20 +180,13 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		return Result{}, domain.ErrUnsupportedKind
 	}
 	now := u.Now().UTC()
-	// The adapter declares the status a freshly committed paste carries; the
-	// service does not ask what KIND of backend it holds. READY means the
-	// adapter binds the bytes in the metadata commit, so they must be staged
-	// first. PENDING means they land after, so a finalizer is owed. One value
-	// decides both, and a new adapter answers it rather than adding a branch
-	// (docs/SPEC.md "Pending-collapse").
-	status := u.Blob.InitialStatus()
+	status := domain.PasteStatusPending
 	if u.SyncBlob {
-		// Benchmark toggle: force the synchronous shape on an adapter that
-		// would otherwise defer, so the two can be A/B'd on one binary.
 		status = domain.PasteStatusReady
 	}
 	p := domain.Paste{
 		Identity:      domain.Identity(owner),
+		Generation:    domain.NewPasteGeneration(),
 		Status:        status,
 		Kind:          kind,
 		ContentSHA:    staged.SHA,
@@ -222,37 +205,17 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		p.Slug = domain.NewRandomSlug()
 		ctx := context.Background()
-		var handles []BlobHandle
 		if status == domain.PasteStatusReady {
-			// Ownership before the first staged byte, and per ATTEMPT: each
-			// retry mints a new slug, so it is a different upload to own.
-			attemptCtx, berr := u.Blob.BeginUpload(ctx, string(p.Slug))
-			if berr != nil {
-				return Result{}, berr
-			}
-			ctx = attemptCtx
-			// Staging before the insert means a staging failure aborts WITHOUT
-			// a metadata row and with no quota charged. It also has to happen
-			// inside the retry loop: a staged ref's route is captured from the
-			// slug, so a re-mint must re-stage or the bind and the row would
-			// disagree about which shard they live on.
-			handle, err := u.Blob.StagePrecompressed(ctx, string(p.Slug), staged.SHA, staged.File, staged.encodedSize())
-			if err != nil {
-				// A Put rejected by the bucket quota surfaces
-				// storage.ErrServiceFull (the durable total-bytes ceiling).
+			// The benchmark path writes bytes before metadata. A failed write
+			// therefore cannot leave a ready row pointing at absent content.
+			if err := u.Blob.StagePrecompressed(ctx, staged.SHA, staged.File, staged.encodedSize()); err != nil {
 				if class, terr := classifyCommitErr(err); class != commitOther {
 					return Result{}, terr
 				}
 				return Result{}, fmt.Errorf("blob write: %w", err)
 			}
-			handles = []BlobHandle{handle}
 		}
-		// Commit binds the handles and writes the row as ONE unit where the
-		// adapter can, and is a plain metadata write where it cannot. Both go
-		// through it so the service has one commit call, not one per protocol.
-		err := u.Blob.Commit(ctx, handles, func(ctx context.Context) error {
-			return u.Repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
-		})
+		err := u.Repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
 		switch class, terr := classifyCommitErr(err); class {
 		case commitOK:
 			if status == domain.PasteStatusPending {
@@ -260,13 +223,10 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 				// and the finalizer flips the status when they are durable.
 				// Ownership of the spill file transfers to the goroutine.
 				transferred = true
-				u.startFinalize(p.Slug, staged)
+				u.startFinalize(p, staged)
 			}
 			return Result{Paste: p}, nil
 		case commitSlugTaken:
-			// Logged so a remint burst shows up in the service log instead of
-			// being silent. On the staging path it also strands the object the
-			// previous attempt staged, which the orphan sweep reclaims.
 			u.logf("upload: slug %s taken, re-minting (attempt %d/%d)", p.Slug, attempt, maxRetries)
 			continue
 		default:
@@ -288,11 +248,11 @@ func (u *Upload) WaitFinalize() { u.finalizeWG.Wait() }
 
 // startFinalize runs the background half of Create (write the blob, then flip
 // the paste's status) so the SSH/HTTP caller never blocks on the blob write.
-func (u *Upload) startFinalize(slug domain.Slug, staged stagedUpload) {
+func (u *Upload) startFinalize(paste domain.Paste, staged stagedUpload) {
 	u.finalizeWG.Go(func() {
 		// The goroutine owns the spill file: the request has already returned.
 		defer staged.discard()
-		u.finalize(slug, staged)
+		u.finalize(paste, staged)
 		if u.onFinalizeDone != nil {
 			u.onFinalizeDone()
 		}
@@ -308,21 +268,21 @@ func (u *Upload) startFinalize(slug domain.Slug, staged stagedUpload) {
 // per-upload and runs in the background, so buffering here made resident memory
 // scale with concurrent uploads times payload size (docs/SPEC.md "Writes are
 // constant-memory").
-func (u *Upload) finalize(slug domain.Slug, staged stagedUpload) {
-	if _, err := u.Blob.StagePrecompressed(context.Background(), string(slug), staged.SHA, staged.File, staged.encodedSize()); err != nil {
+func (u *Upload) finalize(paste domain.Paste, staged stagedUpload) {
+	if err := u.Blob.StagePrecompressed(context.Background(), staged.SHA, staged.File, staged.encodedSize()); err != nil {
 		// Flip to failed and release the reservation so the paste stops
 		// charging quota and a read serves the error page.
-		u.logf("upload: finalize %s: blob write failed: %v", slug, err)
-		if ferr := u.Repo.MarkFailed(slug); ferr != nil {
-			u.logf("upload: finalize %s: mark failed: %v", slug, ferr)
+		u.logf("upload: finalize %s: blob write failed: %v", paste.Slug, err)
+		if ferr := u.Repo.MarkFailed(paste); ferr != nil {
+			u.logf("upload: finalize %s: mark failed: %v", paste.Slug, ferr)
 		}
 		return
 	}
-	if err := u.Repo.MarkReady(slug); err != nil {
+	if err := u.Repo.MarkReady(paste); err != nil {
 		// The bytes ARE durable and only the status flip failed, so the paste
 		// stays pending and is served as a loading page until something flips
 		// it. Nothing retries the flip, so surface it loudly.
-		u.logf("upload: finalize %s: mark ready: %v", slug, err)
+		u.logf("upload: finalize %s: mark ready: %v", paste.Slug, err)
 	}
 }
 

@@ -19,7 +19,7 @@ import (
 type fakeDurable struct {
 	mu         sync.Mutex
 	objs       map[string][]byte
-	putCalls   int32
+	putCalls   atomic.Int32
 	failFirst  int32 // fail this many Put attempts before succeeding
 	failAlways bool  // every Put fails, so entries stay permanently pinned
 	putErr     error // error to return while failing
@@ -30,7 +30,7 @@ func newFakeDurable() *fakeDurable {
 }
 
 func (f *fakeDurable) Put(sha string, r io.Reader, size int64) error {
-	atomic.AddInt32(&f.putCalls, 1)
+	f.putCalls.Add(1)
 	body, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -129,7 +129,7 @@ func TestWriteBack_PutLocalThenAsyncUpload(t *testing.T) {
 	body := []byte("hello write-back cache")
 	sha := wbShaOf(body)
 
-	if err := wb.PutPrecompressed(sha, body); err != nil {
+	if err := wb.PutPrecompressed(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	if _, err := os.Stat(wb.blobPath(sha)); err != nil {
@@ -154,7 +154,7 @@ func TestWriteBack_GetCacheThenDurable(t *testing.T) {
 
 	body := []byte("read path content")
 	sha := wbShaOf(body)
-	if err := wb.PutPrecompressed(sha, body); err != nil {
+	if err := wb.PutPrecompressed(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	got, err := wb.Get(sha)
@@ -190,7 +190,7 @@ func TestWriteBack_UploaderRetries(t *testing.T) {
 
 	body := []byte("retry me")
 	sha := wbShaOf(body)
-	if err := wb.PutPrecompressed(sha, body); err != nil {
+	if err := wb.PutPrecompressed(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	if !wb.drainForTest(2 * time.Second) {
@@ -199,7 +199,7 @@ func TestWriteBack_UploaderRetries(t *testing.T) {
 	if !durable.has(sha) {
 		t.Fatal("blob not durable after retries")
 	}
-	if got := atomic.LoadInt32(&durable.putCalls); got < 4 {
+	if got := durable.putCalls.Load(); got < 4 {
 		t.Fatalf("expected at least 4 Put attempts (3 fail + 1 ok), got %d", got)
 	}
 }
@@ -244,7 +244,7 @@ func TestWriteBack_PinnedNotEvicted(t *testing.T) {
 		body := bytes.Repeat([]byte{byte('a' + i)}, 40) // ~200 bytes total, over the 64 cap
 		sha := wbShaOf(body)
 		shas = append(shas, sha)
-		if err := wb.PutPrecompressed(sha, body); err != nil {
+		if err := wb.PutPrecompressed(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 			t.Fatalf("Put %d: %v", i, err)
 		}
 	}
@@ -269,7 +269,7 @@ func TestWriteBack_EvictionAfterUpload(t *testing.T) {
 		body := bytes.Repeat([]byte{byte('a' + i)}, 40)
 		sha := wbShaOf(body)
 		shas = append(shas, sha)
-		if err := wb.PutPrecompressed(sha, body); err != nil {
+		if err := wb.PutPrecompressed(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 			t.Fatalf("Put %d: %v", i, err)
 		}
 	}
@@ -299,17 +299,17 @@ func TestWriteBack_DurableDedupSkip(t *testing.T) {
 	body := []byte("already durable")
 	sha := wbShaOf(body)
 	_ = durable.Put(sha, bytes.NewReader(body), int64(len(body)))
-	before := atomic.LoadInt32(&durable.putCalls)
+	before := durable.putCalls.Load()
 
 	wb := newTestWriteBack(t, durable, WriteBackConfig{})
-	if err := wb.PutPrecompressed(sha, body); err != nil {
+	if err := wb.PutPrecompressed(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	if _, err := os.Stat(wb.blobPath(sha)); err == nil {
 		t.Fatal("expected no local cache write on durable dedup hit")
 	}
 	wb.drainForTest(200 * time.Millisecond)
-	if got := atomic.LoadInt32(&durable.putCalls); got != before {
+	if got := durable.putCalls.Load(); got != before {
 		t.Fatalf("expected no extra durable Put on dedup hit, calls went %d -> %d", before, got)
 	}
 	// The read still works, falling through to durable.

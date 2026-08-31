@@ -26,19 +26,12 @@ const internalPrefix = "github.com/Zamua/hostthis/internal/"
 //	mime, render      mechanisms holding no business knowledge, so they sit
 //	                  BELOW domain and must not reach it; domain consumes them
 //	                  through a port instead (DetectKind takes a MIMESniffer).
-//	durable           the same shape for crash recovery: an intent-log port and
-//	                  its value types, knowing nothing about pastes. storage
-//	                  consumes it, so which mechanism provides durability never
-//	                  reaches service or a transport.
 //	domain            pure types and rules.
 //	archive, cache    mechanisms that speak in domain values.
 //	storage           repository adapters.
 //	service           use cases; declares the ports, never names an adapter.
 //	relay, relaygrpc  the room relay and its gRPC peer transport.
 //	http, ssh         transports; they reach service, never an adapter.
-//	shaleblob         the single adapter binding a storage-side blob unit to a
-//	                  service port, so it alone may see both. Anything else
-//	                  needing both belongs in cmd/hostthisd.
 var layerPolicy = map[string][]string{
 	"mime":   {},
 	"render": {},
@@ -47,7 +40,6 @@ var layerPolicy = map[string][]string{
 	// entry here would mean instrumentation had started reaching into the
 	// layers it observes.
 	"metrics": {},
-	"durable": {},
 	"domain":  {},
 	// The shared room-realtime vocabulary. A LEAF like domain: both relay
 	// implementations (the hub relay and the celld proxy) speak it, and it may
@@ -56,17 +48,14 @@ var layerPolicy = map[string][]string{
 	"roomwire": {"domain"},
 	"archive":  {"domain"},
 	"cache":    {"domain"},
-	"storage":  {"domain", "durable"},
+	"storage":  {"domain"},
 	"service":  {"archive", "domain", "mime"},
 	"http":     {"archive", "domain", "mime", "roomwire", "service"},
 	"ssh":      {"archive", "domain", "mime", "service"},
 
-	// The celld backend. Domain because it implements domain-shaped ports, and
-	// durable for the intent log it satisfies. NOT storage: celld is an
-	// alternative to the shale adapter, not a layer on top of it, so an entry
-	// for "storage" here would mean the experiment had grown a dependency on
-	// the thing it is meant to replace.
-	"celld": {"domain", "durable", "roomwire"},
+	// The celld backend implements domain-shaped ports directly. It does not
+	// depend on the in-process storage adapter.
+	"celld": {"domain", "roomwire"},
 
 	// Test-only harness: the importable package is empty, so what is pinned
 	// here is that it STAYS empty. Its _test.go files wire whole stacks, which
@@ -77,7 +66,7 @@ var layerPolicy = map[string][]string{
 	// on, so it reaches storage by design. Nothing in production may import it,
 	// which the "no adapter reachable from service" rules below enforce because
 	// it is not in any production package's allowed set.
-	"storagetest": {"domain", "durable", "storage"},
+	"storagetest": {"domain", "storage"},
 }
 
 // Dependencies point inward: domain depends on nothing, service and storage on
@@ -204,17 +193,16 @@ func internalPackageDirs(t *testing.T, root string) []string {
 }
 
 // internalDependencyGraph maps each internal package to the internal packages
-// it reaches, transitively. The slatedb tag is required rather than optional:
-// internal/shaleblob exists only under it, and a package go list cannot see is
-// a package this guard cannot check.
+// it reaches, transitively. The default build must load every package, or an
+// unloadable package could escape this guard.
 func internalDependencyGraph(t *testing.T) map[string][]string {
 	t.Helper()
-	cmd := exec.Command("go", "list", "-tags", "slatedb", "-f", `{{.ImportPath}} {{join .Deps " "}}`, "../...")
+	cmd := exec.Command("go", "list", "-f", `{{.ImportPath}} {{join .Deps " "}}`, "../...")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("go list -tags slatedb ../...: %v\n%s", err, stderr.String())
+		t.Fatalf("go list ../...: %v\n%s", err, stderr.String())
 	}
 
 	graph := make(map[string][]string)
@@ -268,12 +256,12 @@ func TestLayerViolationsFailsClosed(t *testing.T) {
 	}{
 		{
 			name: "package with no policy entry",
-			dirs: []string{"domain", "mime", "relay", "shaleblob", "storage"},
+			dirs: []string{"adapterx", "domain", "mime", "relay", "storage"},
 			graph: map[string][]string{
 				"domain": {}, "mime": {}, "relay": {"domain"}, "storage": {"domain"},
-				"shaleblob": {"storage"},
+				"adapterx": {"storage"},
 			},
-			want: "UNGUARDED PACKAGE: internal/shaleblob",
+			want: "UNGUARDED PACKAGE: internal/adapterx",
 		},
 		{
 			name: "outward import into an adapter",

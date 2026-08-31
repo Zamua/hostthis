@@ -11,17 +11,12 @@ import (
 
 // KeyGateRepo is the celld implementation of Sybil admission.
 //
-// The SUBNET is the rate-limit unit, so it is the cell: admission is a
-// check-and-record that must not interleave, and a single-threaded cell makes
-// the whole decision one event. Two keys racing the last slot cannot both be
-// admitted, which a separate count-then-write could not promise.
+// The SUBNET is the rate-limit unit, so it is the cell. The Worker serializes
+// each admission through blockConcurrencyWhile, making the check and record one
+// exact decision.
 //
-// SubnetsForIdentity asks an IDENTITY-scoped question - how many networks is
-// this key grandfathered on - which the subnet cells cannot answer without
-// visiting all of them. So admission also records the subnet in the identity
-// cell, and the query is a point read. That is the same reverse index the shale
-// adapter maintains, and for the same stated reason: without it, a narrow
-// prefix still costs a full fan-out.
+// SubnetsForIdentity asks how many networks one key is grandfathered on. Admission
+// maintains that reverse index in the Identity cell so the query stays a point read.
 type KeyGateRepo struct {
 	base   string
 	client *http.Client
@@ -57,13 +52,6 @@ func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitP
 		return false, err
 	}
 	if !res.Admitted {
-		// The same sentinel shale returns, because the service classifies on it.
-		// NOTE the semantic difference underneath: shale documents this cap as
-		// APPROXIMATE, since its count is a pre-scan outside the transaction and
-		// two first-sight keys can both commit under the limit. A cell decides
-		// inside one event, so here the cap is exact. Stricter, and no caller can
-		// tell - but the conformance suite must not assert exactness, or it would
-		// pin celld's behaviour and fail the incumbent.
 		return false, domain.ErrTooManyNewKeys
 	}
 	if !res.KnownAlready {

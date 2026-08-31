@@ -49,9 +49,9 @@ type slowFinalizeBlobs struct {
 	delay time.Duration
 }
 
-func (s *slowFinalizeBlobs) PutPrecompressed(sha string, body []byte) error {
+func (s *slowFinalizeBlobs) PutPrecompressed(sha string, body io.Reader, size int64) error {
 	time.Sleep(s.delay)
-	return s.CompressedBlobStore.PutPrecompressed(sha, body)
+	return s.CompressedBlobStore.PutPrecompressed(sha, body, size)
 }
 
 func newUpdateStack(t *testing.T) *updateStack {

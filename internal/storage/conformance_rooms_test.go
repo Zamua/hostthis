@@ -55,9 +55,8 @@ func mkConformRoom(t *testing.T, rr conformanceRoomRepo, app string, now time.Ti
 }
 
 // runRoomConformance runs the room contract subtests. newRooms must produce a
-// FRESH store bundle per subtest, since the empty-store assertions depend on
-// it. caps declares the backend's by-design behavior exceptions.
-func runRoomConformance(t *testing.T, name string, caps conformCaps, newRooms func(t *testing.T) roomConformanceStores) {
+// fresh store bundle per subtest.
+func runRoomConformance(t *testing.T, name string, newRooms func(t *testing.T) roomConformanceStores) {
 	t.Helper()
 	t.Run(name+"/Rooms/RoundTrip", func(t *testing.T) { conformRoomRoundTrip(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/CrossRoomIsolation", func(t *testing.T) { conformRoomCrossRoomIsolation(t, newRooms(t).Rooms) })
@@ -65,9 +64,14 @@ func runRoomConformance(t *testing.T, name string, caps conformCaps, newRooms fu
 	t.Run(name+"/Rooms/NonexistentRoom404", func(t *testing.T) { conformRoomNonexistent404(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/PerRoomByteCap", func(t *testing.T) { conformRoomPerRoomByteCap(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/PerRoomKeyCap", func(t *testing.T) { conformRoomPerRoomKeyCap(t, newRooms(t).Rooms) })
-	t.Run(name+"/Rooms/PerRoomCapConcurrentCeiling", func(t *testing.T) { conformRoomPerRoomCapConcurrentCeiling(t, newRooms(t).Rooms, caps) })
+	t.Run(name+"/Rooms/PerRoomCapConcurrentCeiling", func(t *testing.T) { conformRoomPerRoomCapConcurrentCeiling(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/PerAppAggregateCap", func(t *testing.T) { conformRoomPerAppAggregateCap(t, newRooms(t).Rooms) })
+	t.Run(name+"/Rooms/PerAppAggregateSiblingGrowth", func(t *testing.T) { conformRoomPerAppAggregateSiblingGrowth(t, newRooms(t).Rooms) })
+	t.Run(name+"/Rooms/PerAppAggregateConcurrentCeiling", func(t *testing.T) { conformRoomPerAppAggregateConcurrentCeiling(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/DeleteFreesCap", func(t *testing.T) { conformRoomDeleteFreesCap(t, newRooms(t).Rooms) })
+	t.Run(name+"/Rooms/DeleteFreesSiblingCap", func(t *testing.T) { conformRoomDeleteFreesSiblingCap(t, newRooms(t).Rooms) })
+	t.Run(name+"/Rooms/CreationAtFullApp", func(t *testing.T) { conformRoomCreationAtFullApp(t, newRooms(t).Rooms) })
+	t.Run(name+"/Rooms/ReservedObjectKeys", func(t *testing.T) { conformRoomReservedObjectKeys(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/CreationRateLimitCounts", func(t *testing.T) { conformRoomCreationRateLimitCounts(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/CreationLedgerPrune", func(t *testing.T) { conformRoomCreationLedgerPrune(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/AppExistenceNotRepoGated", func(t *testing.T) { conformRoomAppExistenceNotRepoGated(t, newRooms(t).Rooms) })
@@ -264,13 +268,9 @@ func conformRoomPerRoomKeyCap(t *testing.T, rr conformanceRoomRepo) {
 	}
 }
 
-// conformRoomPerRoomCapConcurrentCeiling pins the per-room cap CEILING under
-// concurrency: n writers race for the k slots MaxRoomBytes admits, and the
-// bytes that land never exceed the cap however the writes interleave. Fails if
-// a backend declaring StrictQuotaUnderConcurrency drops the per-room
-// serialization, letting two writers read a stale namespace, both pass CanPut,
-// and both commit.
-func conformRoomPerRoomCapConcurrentCeiling(t *testing.T, rr conformanceRoomRepo, caps conformCaps) {
+// conformRoomPerRoomCapConcurrentCeiling pins the per-room ceiling under
+// concurrent writers.
+func conformRoomPerRoomCapConcurrentCeiling(t *testing.T, rr conformanceRoomRepo) {
 	room := mkConformRoom(t, rr, "app12345", fixedNow)
 	// body chosen so exactly k values fit under MaxRoomBytes and the (k+1)-th
 	// would breach it; n > k writers race for the k slots.
@@ -297,11 +297,6 @@ func conformRoomPerRoomCapConcurrentCeiling(t *testing.T, rr conformanceRoomRepo
 	}
 	wg.Wait()
 
-	if !caps.StrictQuotaUnderConcurrency {
-		t.Logf("backend does not guarantee strict per-room cap under concurrency: %d values x %dB = %dB landed, cap %dB",
-			landed, body, landed*int64(body), int64(domain.MaxRoomBytes))
-		return
-	}
 	if landed*int64(body) > int64(domain.MaxRoomBytes) {
 		t.Fatalf("per-room cap ceiling breached under concurrency: %d values x %dB = %dB landed, cap %dB",
 			landed, body, landed*int64(body), int64(domain.MaxRoomBytes))
@@ -339,6 +334,81 @@ func conformRoomPerAppAggregateCap(t *testing.T, rr conformanceRoomRepo) {
 	roomC := mkConformRoom(t, rr, "app99999", fixedNow)
 	if _, err := rr.PutValue(roomC.AppSlug, roomC.ID, "k", make([]byte, 90), appCap, fixedNow); err != nil {
 		t.Fatalf("different app should have its own budget: %v", err)
+	}
+}
+
+// A room's earlier budget observation cannot hide later sibling growth.
+func conformRoomPerAppAggregateSiblingGrowth(t *testing.T, rr conformanceRoomRepo) {
+	const (
+		app    = "app12345"
+		appCap = 100
+	)
+	roomA := mkConformRoom(t, rr, app, fixedNow)
+	roomB := mkConformRoom(t, rr, app, fixedNow)
+	if _, err := rr.PutValue(roomA.AppSlug, roomA.ID, "k", make([]byte, 40), appCap, fixedNow); err != nil {
+		t.Fatalf("seed room A: %v", err)
+	}
+	if _, err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 40), appCap, fixedNow); err != nil {
+		t.Fatalf("seed room B: %v", err)
+	}
+	if _, err := rr.PutValue(roomA.AppSlug, roomA.ID, "k", make([]byte, 70), appCap, fixedNow); !errors.Is(err, storage.ErrAppRoomsFull) {
+		t.Fatalf("stale sibling total admitted 70+40 bytes: got %v, want ErrAppRoomsFull", err)
+	}
+	got, err := rr.GetValue(roomA.AppSlug, roomA.ID, "k")
+	if err != nil {
+		t.Fatalf("get rejected room A value: %v", err)
+	}
+	if len(got) != 40 {
+		t.Fatalf("rejected growth changed room A to %d bytes, want 40", len(got))
+	}
+}
+
+// Concurrent sibling growth must keep the persisted app total at or below cap.
+func conformRoomPerAppAggregateConcurrentCeiling(t *testing.T, rr conformanceRoomRepo) {
+	const (
+		app     = "app12345"
+		appCap  = 100
+		rooms   = 4
+		initial = 10
+		grown   = 40
+	)
+	roomSet := make([]domain.Room, rooms)
+	for i := range roomSet {
+		roomSet[i] = mkConformRoom(t, rr, app, fixedNow)
+		if _, err := rr.PutValue(roomSet[i].AppSlug, roomSet[i].ID, "k", make([]byte, initial), appCap, fixedNow); err != nil {
+			t.Fatalf("seed room %d: %v", i, err)
+		}
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range roomSet {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, err := rr.PutValue(roomSet[i].AppSlug, roomSet[i].ID, "k", make([]byte, grown), appCap, fixedNow)
+			if err != nil && !errors.Is(err, storage.ErrAppRoomsFull) {
+				t.Errorf("grow room %d: %v", i, err)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	if t.Failed() {
+		return
+	}
+
+	total := 0
+	for i, room := range roomSet {
+		kv, err := rr.ScanRoom(room.AppSlug, room.ID)
+		if err != nil {
+			t.Fatalf("scan room %d: %v", i, err)
+		}
+		total += kv.TotalBytes()
+	}
+	if total > appCap {
+		t.Fatalf("persisted app bytes exceed cap after sibling race: %d > %d", total, appCap)
 	}
 }
 
@@ -388,6 +458,74 @@ func conformRoomDeleteFreesCap(t *testing.T, rr conformanceRoomRepo) {
 	}
 	if kv.TotalBytes() != domain.MaxRoomBytes {
 		t.Fatalf("room bytes after reclaim = %d, want %d (anchor + reclaimed)", kv.TotalBytes(), domain.MaxRoomBytes)
+	}
+}
+
+// A completed delete must free capacity for a sibling room immediately.
+func conformRoomDeleteFreesSiblingCap(t *testing.T, rr conformanceRoomRepo) {
+	const (
+		app    = "app12345"
+		appCap = 100
+	)
+	roomA := mkConformRoom(t, rr, app, fixedNow)
+	roomB := mkConformRoom(t, rr, app, fixedNow)
+	if _, err := rr.PutValue(roomA.AppSlug, roomA.ID, "k", make([]byte, 60), appCap, fixedNow); err != nil {
+		t.Fatalf("seed room A: %v", err)
+	}
+	if _, err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 40), appCap, fixedNow); err != nil {
+		t.Fatalf("seed room B: %v", err)
+	}
+	if _, err := rr.DeleteValue(roomA.AppSlug, roomA.ID, "k", fixedNow); err != nil {
+		t.Fatalf("delete room A value: %v", err)
+	}
+	if _, err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 100), appCap, fixedNow); err != nil {
+		t.Fatalf("grow room B into capacity freed by A: %v", err)
+	}
+}
+
+// A full app cannot mint more durable room records.
+func conformRoomCreationAtFullApp(t *testing.T, rr conformanceRoomRepo) {
+	const (
+		app    = "app12345"
+		appCap = 100
+	)
+	roomA := mkConformRoom(t, rr, app, fixedNow)
+	if _, err := rr.PutValue(roomA.AppSlug, roomA.ID, "k", make([]byte, appCap), appCap, fixedNow); err != nil {
+		t.Fatalf("fill app: %v", err)
+	}
+	roomB := domain.Room{
+		AppSlug: app, ID: domain.NewRoomID(), CreatedAt: fixedNow, UpdatedAt: fixedNow,
+	}
+	if err := rr.CreateRoom(roomB, "10.0.0.0/24", appCap, fixedNow); !errors.Is(err, storage.ErrAppRoomsFull) {
+		t.Fatalf("create at full app: got %v, want ErrAppRoomsFull", err)
+	}
+	if _, err := rr.GetRoom(roomB.AppSlug, roomB.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("rejected room was persisted: %v", err)
+	}
+}
+
+// User-controlled keys that name JavaScript object properties remain ordinary data.
+func conformRoomReservedObjectKeys(t *testing.T, rr conformanceRoomRepo) {
+	room := mkConformRoom(t, rr, "app12345", fixedNow)
+	for _, key := range []string{"__proto__", "constructor", "prototype"} {
+		want := []byte("value-for-" + key)
+		if _, err := rr.PutValue(room.AppSlug, room.ID, key, want, 0, fixedNow); err != nil {
+			t.Fatalf("put %q: %v", key, err)
+		}
+		got, err := rr.GetValue(room.AppSlug, room.ID, key)
+		if err != nil {
+			t.Fatalf("get %q: %v", key, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("get %q = %q, want %q", key, got, want)
+		}
+	}
+	kv, err := rr.ScanRoom(room.AppSlug, room.ID)
+	if err != nil {
+		t.Fatalf("scan reserved keys: %v", err)
+	}
+	if kv.KeyCount() != 3 {
+		t.Fatalf("scan reserved keys count = %d, want 3", kv.KeyCount())
 	}
 }
 

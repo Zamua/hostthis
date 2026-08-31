@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/archive"
@@ -49,34 +48,6 @@ type SiteRepo interface {
 	// quota, so without this it silently consumes quota the owner can neither
 	// see nor free.
 	ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error)
-	// NewSlug returns the slug this deploy will commit under, chosen before the
-	// one-shot archive stream is consumed.
-	//
-	// The caller stages every file under it and commits under it, so an
-	// adapter whose commit binds staged refs reserves it durably here and a
-	// collision at commit becomes impossible. One that does not need a
-	// reservation may simply mint. Either way the service asks a domain
-	// question - which slug is this deploy - rather than reaching for a
-	// backend's reservation mechanism.
-	//
-	// The caller pairs it with AbandonSlug for any deploy that does not commit.
-	NewSlug(ctx context.Context, owner string, now time.Time) (domain.Slug, error)
-}
-
-// SlugAbandoner is the compensating half of SiteRepo.NewSlug: it drops a slug
-// no record was committed under, so a deploy that aborts after taking one
-// (unreadable archive, no web content, a failed commit) does not remove it from
-// the namespace for good.
-//
-// Optional: an adapter whose NewSlug reserves nothing has nothing to abandon,
-// and the deploy path skips the compensation when the repo does not implement
-// this.
-//
-// An implementation MUST NOT drop a slug a paste or site was actually committed
-// under, and MUST be a no-op on an absent or foreign slug so a repeated
-// abandonment is harmless.
-type SlugAbandoner interface {
-	AbandonSlug(ctx context.Context, slug domain.Slug, owner string) error
 }
 
 // PasteByteSummer is the slice of the paste repo the deploy path needs for
@@ -95,16 +66,6 @@ type DeploySite struct {
 	Pastes PasteByteSummer
 	Blob   BlobUnit
 	Now    func() time.Time
-	// Logger records outcomes the caller never sees: the compensating release
-	// of a pre-claimed slug runs on the way out of a failed deploy and its own
-	// failure must not replace the deploy's error. nil discards.
-	Logger *log.Logger
-}
-
-func (d *DeploySite) logf(format string, args ...any) {
-	if d.Logger != nil {
-		d.Logger.Printf(format, args...)
-	}
 }
 
 // NewDeploySite wires defaults.
@@ -129,16 +90,7 @@ type SiteResult struct {
 // ErrEmptySite is returned when an archive safe-untars to zero files.
 var ErrEmptySite = errors.New("service: archive contains no files")
 
-// ErrDeployFailed is the generic site-deploy failure for an unexpected backend
-// error the deploy path cannot translate to a specific cause. Defensive: the
-// pre-claim stages files under the manifest's own shard, so a cross-shard bind
-// should never fire. If a routing regression makes one surface, this keeps the
-// raw backend sentinel out of the SSH client's output; the operator sees the
-// real error in the logs.
-var ErrDeployFailed = errors.New("service: site deploy failed")
-
-// maxDeployRetries bounds the slug-mint retry budget for both the pre-claim
-// loop (transactional path) and the post-untar insert loop (standalone path).
+// maxDeployRetries bounds the slug reservation retry budget.
 const maxDeployRetries = 5
 
 // Deploy reads a gzip-tar archive from body, untars it safely, stores the
@@ -175,44 +127,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	budget := max(int64(domain.UserQuotaBytes)-int64(usedPaste)-usedSite, 0)
 
 	ctx := context.Background()
-
-	// On the TRANSACTIONAL blob path a file's blob pointer co-commits with the
-	// manifest on the manifest's {slug} shard, so every file MUST stage under
-	// the real slug or the bind cross-shards. The stream is one-shot and
-	// cannot be re-untarred to re-route, so the slug is pre-claimed BEFORE the
-	// untar. On the standalone path blobs are content-sha-keyed and the slug
-	// routes nothing, so it stays empty here and is minted in the post-untar
-	// insert retry loop.
-	// The adapter decides the slug and whether taking it reserves anything, so
-	// this path is the same for every backend. It happens BEFORE the untar
-	// because the stream is one-shot: a slug chosen afterwards could not be
-	// staged under.
-	slug, err := d.Sites.NewSlug(ctx, owner, now)
-	if err != nil {
-		return SiteResult{}, err
-	}
-	committed := false
-	// A reserved slug is durable and nothing else drops it, so every exit that
-	// does not commit a site under it has to give it back or it leaves the
-	// namespace permanently. The deferred compensation covers the untar,
-	// manifest and commit failures alike, plus a panic. It is a no-op for an
-	// adapter that reserved nothing.
-	defer func() {
-		if !committed {
-			d.abandonSlug(ctx, slug, owner)
-		}
-	}()
-
-	// Ownership before the first staged byte: bytes staged outside it are
-	// outside what the commit checks, so recovery could reclaim them while
-	// this deploy still binds.
-	uploadCtx, berr := d.Blob.BeginUpload(ctx, string(slug))
-	if berr != nil {
-		return SiteResult{}, berr
-	}
-	ctx = uploadCtx
-
-	sink := &blobSink{blob: d.Blob, slug: string(slug)}
+	sink := &blobSink{blob: d.Blob}
 	man, err := archive.Untar(body, sink, budget)
 	switch {
 	case errors.Is(err, domain.ErrArchiveTooLarge):
@@ -237,39 +152,22 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	}
 
 	site := domain.Site{
-		Slug:      slug,
 		Identity:  domain.Identity(owner),
 		Manifest:  man,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	stored := sink.stagedBytes
+	stored := man.CompressedSize()
 
-	// One commit per slug. The slug came from the adapter BEFORE staging, so an
-	// adapter that reserves cannot lose a race here and never iterates; one
-	// that reserves nothing can, and takes another slug from the same place
-	// rather than minting its own. The body is already consumed, so a retry
-	// re-commits the SAME staged handles under a new slug, which is only sound
-	// because an adapter that routes by slug is also one that reserves.
-	for attempt := range maxDeployRetries {
-		if attempt > 0 {
-			d.abandonSlug(ctx, site.Slug, owner)
-			next, nerr := d.Sites.NewSlug(ctx, owner, now)
-			if nerr != nil {
-				return SiteResult{}, nerr
-			}
-			site.Slug = next
-			slug = next // keep the deferred compensation pointed at the live slug
-		}
-		err := d.Blob.Commit(ctx, sink.handles, func(ctx context.Context) error {
-			return d.Sites.InsertWithQuotaCheck(ctx, site, stored, int64(domain.UserQuotaBytes), now)
-		})
+	// Staged blobs are content-addressed, so a slug collision only retries the
+	// metadata insert. The one-shot archive never needs to be read again.
+	for range maxDeployRetries {
+		site.Slug = domain.NewRandomSlug()
+		err := d.Sites.InsertWithQuotaCheck(ctx, site, stored, int64(domain.UserQuotaBytes), now)
 		if isSlugTaken(err) {
 			continue
 		}
-		res, ferr := finalizeDeploy(site, err)
-		committed = ferr == nil
-		return res, ferr
+		return finalizeDeploy(site, err)
 	}
 	return SiteResult{}, ErrSlugTaken
 }
@@ -298,59 +196,24 @@ func (d *DeploySite) Delete(slug domain.Slug, owner string) error {
 	return d.Sites.Delete(slug, existing.Identity, existing.CreatedAt)
 }
 
-// abandonSlug gives back a slug no site was committed under. Best-effort: the
-// deploy already failed and the caller has its error, so a failure here is
-// logged rather than surfaced. An adapter whose NewSlug reserved nothing
-// implements no abandoner and needs none.
-func (d *DeploySite) abandonSlug(ctx context.Context, slug domain.Slug, owner string) {
-	ab, ok := d.Sites.(SlugAbandoner)
-	if !ok {
-		return
-	}
-	if err := ab.AbandonSlug(ctx, slug, owner); err != nil {
-		d.logf("deploy: abandoning slug %s for %s: %v", slug, owner, err)
-	}
-}
-
-// finalizeDeploy translates the transactional insert's error into the deploy
-// service's vocabulary. A cross-shard bind error, which the pre-claim is
-// designed to prevent, is caught defensively and mapped to ErrDeployFailed so
-// a raw backend sentinel never reaches the SSH client.
+// finalizeDeploy translates storage sentinels into the deploy service vocabulary.
 func finalizeDeploy(site domain.Site, err error) (SiteResult, error) {
 	switch class, terr := classifyCommitErr(err); {
 	case class == commitOK:
 		return SiteResult{Site: site}, nil
 	case class != commitOther:
-		// Includes slug-taken, which surfaces as the clean ErrSlugTaken: the
-		// pre-claim holds the slot and the consumed stream cannot re-untar.
 		return SiteResult{}, terr
-	case isCrossShard(err):
-		return SiteResult{}, fmt.Errorf("%w: %v", ErrDeployFailed, err)
 	default:
 		return SiteResult{}, err
 	}
 }
 
-// isCrossShard reports whether err is domain.ErrCrossShardDeploy through any
-// wrapping. The service never imports a backend package: the shale storage
-// layer translates its backend's cross-shard guard error into the domain
-// sentinel at the boundary, and this checks that. With the pre-claim in place
-// a deploy's binds always co-route, so it should never match.
-func isCrossShard(err error) bool {
-	return errors.Is(err, domain.ErrCrossShardDeploy)
-}
-
-// DeployToSlug re-deploys a SITE at an existing owned slug in place. Same
-// pipeline as Deploy, but it targets slug instead of minting one and charges
-// the REPLACE DELTA against the owner's quota rather than the full new size.
+// DeployToSlug appends a SITE version at an existing owned slug. Same pipeline
+// as Deploy, but it targets slug instead of minting one and charges the complete
+// retained version.
 //
-// A slug that is not a site, or is a site owned by someone else, returns
-// ErrNotFound: the same shape any not-found yields, so a non-owner cannot
-// probe which slugs exist or who owns them. The mid-untar budget EXCLUDES this
-// site's current deduped bytes, so a same-size re-deploy has the same headroom
-// the original deploy did; ReplaceWithQuotaCheck applies the precise delta
-// atomically.
-//
+// The untar budget is the owner's remaining allowance. Prior versions remain
+// retained and charged, so a targeted redeploy receives no replacement credit.
 // Returns:
 //   - ErrEmptyOwner: anonymous / empty identity
 //   - ErrNotFound: slug is not a site owned by owner
@@ -375,10 +238,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		return SiteResult{}, ErrNotFound
 	}
 
-	// Budget for the untar's decompression-bomb guard: the per-identity cap
-	// minus everything else the owner holds (all pastes + all OTHER sites).
-	// usedSite includes the target site, so its deduped bytes are credited
-	// back below.
+	// Every retained version remains charged, including the currently served one.
 	usedPaste, err := d.Pastes.SumActiveBytesByOwner(owner, now)
 	if err != nil {
 		return SiteResult{}, fmt.Errorf("sum paste bytes: %w", err)
@@ -387,16 +247,10 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	if err != nil {
 		return SiteResult{}, fmt.Errorf("sum site bytes: %w", err)
 	}
-	budget := siteExtractBudget(int64(domain.UserQuotaBytes), int64(usedPaste), usedSite, existing)
+	budget := siteExtractBudget(int64(domain.UserQuotaBytes), int64(usedPaste), usedSite)
 
-	// Ownership before the first staged byte, exactly as the fresh deploy does:
-	// a re-deploy stages into an existing slug and is equally reclaimable.
-	ctx, berr := d.Blob.BeginUpload(context.Background(), string(slug))
-	if berr != nil {
-		return SiteResult{}, berr
-	}
-
-	sink := &blobSink{blob: d.Blob, slug: string(slug)}
+	ctx := context.Background()
+	sink := &blobSink{blob: d.Blob}
 	man, err := archive.Untar(body, sink, budget)
 	switch {
 	case errors.Is(err, domain.ErrArchiveTooLarge):
@@ -424,12 +278,9 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		CreatedAt: existing.CreatedAt, // preserved across re-deploys
 		UpdatedAt: now,
 	}
-	stored := sink.stagedBytes
+	stored := man.CompressedSize()
 
-	// The swapped manifest and the staged-file binds commit as one unit.
-	err = d.Blob.Commit(ctx, sink.handles, func(ctx context.Context) error {
-		return d.Sites.ReplaceWithQuotaCheck(ctx, site, stored, int64(domain.UserQuotaBytes), now)
-	})
+	err = d.Sites.ReplaceWithQuotaCheck(ctx, site, stored, int64(domain.UserQuotaBytes), now)
 	switch class, terr := classifyCommitErr(err); {
 	case class == commitOK:
 		return SiteResult{Site: site}, nil
@@ -442,40 +293,15 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	}
 }
 
-// blobSink implements domain.FileSink: it buffers one file's bytes, hashes
-// them, stages them through the blob seam, and returns the SHA the manifest
-// references. It collects each staged handle so the deploy can Commit the
-// manifest and the binds as one unit after the untar.
-//
-// The SHA identifies content; it does NOT deduplicate it. Every file staged
-// here is written as its own object under a freshly minted blob id, so two
-// identical files - in one archive, across re-deploys, or across owners - are
-// two copies on disk.
-//
-// stagedBytes is the running total of what staging actually wrote, which is
-// what the deploy charges. Summing the reported footprint is the only figure
-// that cannot drift from the disk, because it IS what went to the disk.
+// blobSink streams each file through the detached byte plane.
 type blobSink struct {
-	blob        BlobUnit
-	slug        string
-	handles     []BlobHandle
-	stagedBytes int
+	blob BlobUnit
 }
 
-// siteExtractBudget is the byte budget for a replace deploy's untar guard: the
-// identity cap minus everything the owner holds, crediting back the site being
-// replaced.
-//
-// The credit is StoredBytes, the figure the deploy charged and usedSite sums.
-// It is NOT derivable from the manifest: per-entry compressed sizes are not
-// persisted, so a loaded manifest's CompressedSize is 0 and crediting it
-// would credit nothing, blocking an in-place update for an owner at their cap.
-// The uncompressed DedupedSize is the opposite error, subtracting more than was
-// ever charged and inflating the budget past the real remaining quota.
-func siteExtractBudget(cap, usedPaste, usedSite int64, existing domain.Site) int64 {
-	credit := int64(existing.StoredBytes)
-	used := usedPaste + max(usedSite-credit, 0)
-	return domain.Allowance{Cap: cap, Used: used}.Remaining()
+// siteExtractBudget is the unallocated owner quota available to the next
+// retained manifest version.
+func siteExtractBudget(cap, usedPaste, usedSite int64) int64 {
+	return domain.Allowance{Cap: cap, Used: usedPaste + usedSite}.Remaining()
 }
 
 func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
@@ -487,7 +313,7 @@ func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
 	//
 	// The sha comes back from the staging rather than being computed first;
 	// needing it up front is what required holding the whole file.
-	handle, sha, compressedSize, err := s.blob.StageEncoding(context.Background(), s.slug, r)
+	sha, compressedSize, err := s.blob.StageEncoding(context.Background(), r)
 	if err != nil {
 		// The untar's cap sentinel has to survive so SafeUntar can tell a
 		// too-large archive from a real I/O failure.
@@ -496,8 +322,6 @@ func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
 		}
 		return "", 0, fmt.Errorf("blob put %q: %w", p, err)
 	}
-	s.handles = append(s.handles, handle)
-	s.stagedBytes += compressedSize
 	return sha, compressedSize, nil
 }
 

@@ -66,8 +66,8 @@ func (r *slugLookalikeErrRepo) InsertWithQuotaCheck(context.Context, domain.Past
 func (r *slugLookalikeErrRepo) Get(domain.Slug) (domain.Paste, error) {
 	return domain.Paste{}, storage.ErrNotFound
 }
-func (r *slugLookalikeErrRepo) MarkReady(domain.Slug) error  { return nil }
-func (r *slugLookalikeErrRepo) MarkFailed(domain.Slug) error { return nil }
+func (r *slugLookalikeErrRepo) MarkReady(domain.Paste) error  { return nil }
+func (r *slugLookalikeErrRepo) MarkFailed(domain.Paste) error { return nil }
 
 // TestUpload_Create_LookalikeErrorIsNotARemint pins the classification
 // CONSEQUENCE: an insert failure whose text contains "slug" but is not the
@@ -161,48 +161,5 @@ func TestKeyGateAdmit_RateLimitClassification(t *testing.T) {
 				t.Fatalf("Admit = %v, want the repo error surfaced verbatim", err)
 			}
 		})
-	}
-}
-
-// --- 2c: isCrossShard --------------------------------------------------------
-
-// TestFinalizeDeploy_CrossShardClassification pins the defensive translation
-// boundary in finalizeDeploy:
-//
-//   - a genuine cross-shard commit rejection (the domain sentinel the shale
-//     storage layer translates the backend guard error into, under any further
-//     wrapping) maps to ErrDeployFailed, so the raw backend text never reaches
-//     the SSH client;
-//   - an unrelated error whose TEXT contains "cross-shard" (say a user file
-//     named cross-shard.txt in a failing blob put) surfaces verbatim.
-func TestFinalizeDeploy_CrossShardClassification(t *testing.T) {
-	site := domain.Site{Slug: "testslug"}
-
-	// The storage-path shape: the backend guard sentinel translated into the
-	// domain sentinel at the storage boundary (both kept in the chain), then
-	// wrapped again by an outer layer. Identity must survive every layer.
-	backendGuard := errors.New("backend: cross-shard transaction not supported")
-	translated := fmt.Errorf("%w: %w", domain.ErrCrossShardDeploy, backendGuard)
-	outer := fmt.Errorf("insert site: %w", translated)
-
-	_, err := finalizeDeploy(site, outer)
-	if !errors.Is(err, ErrDeployFailed) {
-		t.Fatalf("finalizeDeploy(cross-shard) = %v, want ErrDeployFailed", err)
-	}
-	if errors.Is(err, backendGuard) || errors.Is(err, domain.ErrCrossShardDeploy) {
-		// finalizeDeploy renders the cause into the message (operator log)
-		// but must not leak the raw sentinels onward as matchable identity;
-		// the service vocabulary above this point is ErrDeployFailed.
-		t.Fatalf("finalizeDeploy(cross-shard) = %v; cause must be rendered, not re-wrapped", err)
-	}
-
-	// cross-shard TEXT without the sentinel is not a commit rejection.
-	lookalike := fmt.Errorf("blob put %q: upstream rejected", "cross-shard.txt")
-	_, err = finalizeDeploy(site, lookalike)
-	if !errors.Is(err, lookalike) {
-		t.Fatalf("finalizeDeploy(lookalike) = %v, want the error surfaced verbatim", err)
-	}
-	if errors.Is(err, ErrDeployFailed) {
-		t.Fatalf("finalizeDeploy(lookalike) = %v; text containing 'cross-shard' must not classify", err)
 	}
 }
