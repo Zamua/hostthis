@@ -1112,16 +1112,24 @@ export class Room {
     if (doc.pending) {
       return Response.json({ error: "pending-budget-operation" }, { status: 409 });
     }
-    if (typeof doc.meta?.appSlug !== "string" || doc.meta.appSlug === "" ||
-        typeof doc.meta?.id !== "string" || !UUID_V4.test(doc.meta.id) ||
-        !Number.isSafeInteger(doc.meta.createdAt) || doc.meta.createdAt < 0 ||
-        !Number.isSafeInteger(doc.meta.updatedAt) || doc.meta.updatedAt < doc.meta.createdAt ||
-        !Number.isSafeInteger(doc.bytes) || doc.bytes < 0 ||
-        !Number.isSafeInteger(doc.seq) || doc.seq < 0 ||
-        !Number.isSafeInteger(doc.budgetVersion) || doc.budgetVersion < 0 ||
-        doc.kv === null || typeof doc.kv !== "object" || Array.isArray(doc.kv) ||
-        doc.wire === null || typeof doc.wire !== "object" || Array.isArray(doc.wire)) {
-      return Response.json({ error: "invalid-room-document" }, { status: 422 });
+    // Each check names itself: the route is cluster-internal and a refused
+    // migration document is undiagnosable from a bare 422.
+    const documentChecks = [
+      ["app-slug", typeof doc.meta?.appSlug === "string" && doc.meta.appSlug !== ""],
+      ["room-uuid", typeof doc.meta?.id === "string" && UUID_V4.test(doc.meta.id)],
+      ["created-at", Number.isSafeInteger(doc.meta?.createdAt) && doc.meta.createdAt >= 0],
+      ["updated-at", Number.isSafeInteger(doc.meta?.updatedAt) && doc.meta.updatedAt >= doc.meta.createdAt],
+      ["bytes", Number.isSafeInteger(doc.bytes) && doc.bytes >= 0],
+      ["seq", Number.isSafeInteger(doc.seq) && doc.seq >= 0],
+      ["budget-version", Number.isSafeInteger(doc.budgetVersion) && doc.budgetVersion >= 0],
+      ["kv-map", doc.kv !== null && typeof doc.kv === "object" && !Array.isArray(doc.kv)],
+      ["wire-map", doc.wire !== null && typeof doc.wire === "object" && !Array.isArray(doc.wire)],
+    ];
+    const failedCheck = documentChecks.find(([, ok]) => !ok);
+    if (failedCheck) {
+      return Response.json(
+        { error: "invalid-room-document", reason: failedCheck[0] }, { status: 422 },
+      );
     }
     const logicalName = `${doc.meta.appSlug}|${doc.meta.id}`;
     let expectedCellID;
@@ -1136,22 +1144,34 @@ export class Room {
     const keys = Object.keys(doc.kv);
     if (Object.keys(doc.wire).length !== keys.length ||
         keys.some((key) => !Object.hasOwn(doc.wire, key))) {
-      return Response.json({ error: "invalid-room-document" }, { status: 422 });
+      return Response.json(
+        { error: "invalid-room-document", reason: "wire-key-set" }, { status: 422 },
+      );
     }
     let actual = 0;
     for (const [key, value] of Object.entries(doc.kv)) {
-      if (typeof value !== "string" || value.length % 4 !== 0 || !BASE64.test(value) ||
-          typeof doc.wire[key] !== "string") {
-        return Response.json({ error: "invalid-room-document" }, { status: 422 });
+      if (typeof value !== "string" || value.length % 4 !== 0 || !BASE64.test(value)) {
+        return Response.json(
+          { error: "invalid-room-document", reason: "value-base64" }, { status: 422 },
+        );
+      }
+      if (typeof doc.wire[key] !== "string") {
+        return Response.json(
+          { error: "invalid-room-document", reason: "wire-value" }, { status: 422 },
+        );
       }
       try {
         JSON.parse(doc.wire[key]);
       } catch {
-        return Response.json({ error: "invalid-room-document" }, { status: 422 });
+        return Response.json(
+          { error: "invalid-room-document", reason: "wire-json" }, { status: 422 },
+        );
       }
       actual += b64len(value);
       if (!Number.isSafeInteger(actual)) {
-        return Response.json({ error: "invalid-room-document" }, { status: 422 });
+        return Response.json(
+          { error: "invalid-room-document", reason: "byte-overflow" }, { status: 422 },
+        );
       }
     }
     if (actual !== doc.bytes) {
