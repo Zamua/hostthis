@@ -2922,18 +2922,13 @@ The owner listing exposes two different quantities:
 Pinning changes `Size` and served kind/content, never `StoredBytes`. Owner totals
 sum `StoredBytes` only.
 
-Before traffic resumes, every existing Paste cell is reconciled by stable cell
-ID. Each artifact's slug must derive that exact ID through the Paste namespace;
-a mismatched logical name is refused before mutation. Reconciliation refuses
-pending, malformed, unreadable, duplicate, or conflicting state; computes charge
-from every non-deleted version (a failed artifact retains its served descriptor
-but charges zero); derives the served projection from the head; assigns a
-deterministic opaque legacy generation from the stable cell ID when absent; and
-idempotently seeds Identity without applying a new quota refusal to
-already-retained data. Every Paste inventory entry must be classified exactly
-once. Each owner's reconciled allocation set, count, and charge sum must exactly
-match its Identity point read, including zero-byte allocations, and every listing
-projection must match the authoritative Paste result.
+A legacy artifact row that predates generations adopts lazily, on first
+mutation: the Paste cell assigns a fresh opaque generation, derives the charge
+from its live versions, and idempotently seeds the Identity account before the
+mutation proceeds; no quota refusal applies to already-retained data. A caller
+holding the legacy row (an empty generation) addresses that incarnation; an
+empty generation against an adopted row remains a conflict. Reads serve legacy
+rows unchanged. There is no offline reconciliation pass and no flag day.
 
 ### Room storage
 
@@ -3082,27 +3077,14 @@ the byte ceiling remains hard.
 
 #### Upgrade and conformance
 
-A legacy absolute `roomBytes` map is not accepted as exact migration evidence:
-delayed settlements may be stale and detached settlements may be missing. Before
-adopting the versioned protocol over legacy data, writes stop and an authoritative
-inventory supplies every persisted Room cell's stable runtime ID to a
-cluster-internal reconciliation route. Each non-empty Room must contain a
-canonical UUIDv4, and `(app slug + "|" + UUID)` must derive the inventoried stable
-ID through the Room namespace before any seed occurs. Each cell is classified as
-empty or its Room document is validated and used to idempotently seed the app
-coordinator from the document's actual byte count.
-
-Validation refuses pending operations, malformed metadata or wire maps, invalid
-base64, a stored byte count that differs from the KV document, unsafe sequences,
-versions, or timestamps, and a conflicting existing allocation record. Duplicate
-identity is keyed by `(app slug, UUID)`, not UUID alone. Every inventory entry must
-be classified exactly once; empty is distinct from malformed or unreadable. A
-response-lost seed is safe to retry and cannot double-charge. Reconciliation is
-complete only when each app's exact allocation set, count, byte sum, and canonical
-set digest equal the coordinator point read, including retained zero-byte version
-fences. Existing actual bytes above the configured cap are preserved and reported
-as over-cap; equal-size writes and shrink remain available until usage falls below
-it.
+Legacy Rooms adopt the versioned protocol lazily. A document without a budget
+version reads as version zero, and its first growth charges the room's full
+absolute target through the normal decide path, so the coordinator's aggregate
+converges toward exactness as rooms are touched; until then the app ceiling is
+enforced against the touched subset, which can only under-count, never block
+retained data. Missing wire entries on pre-relay rooms serve as `null` in
+snapshots, exactly as they did before the relay existed. There is no offline
+Room reconciliation pass.
 
 Every backend runs the same observable conformance cases: round-trip, reserved
 object-property keys, cross-room and cross-app isolation, nonexistent-room

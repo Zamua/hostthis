@@ -7,8 +7,6 @@ const CREATE_ABORT_PREFIX = "create-abort:";
 const ARTIFACT_ACCOUNT_PREFIX = "artifact-account:";
 const ARTIFACT_PENDING = "artifactPending";
 const ARTIFACT_RECEIPT_PREFIX = "artifact-receipt:";
-const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 function artifactAccountKey(slug, generation) {
   return `${ARTIFACT_ACCOUNT_PREFIX}${slug}:${generation}`;
@@ -87,8 +85,6 @@ export class Identity {
         return this.bytes();
       case "list":
         return this.list();
-      case "allocations":
-        return this.allocations();
       case "firstSeen":
         return this.firstSeen();
     }
@@ -410,46 +406,6 @@ export class Identity {
     // never updated, so a fresh owner still lists in a stable order.
     out.sort((a, b) => ((b.updatedAt ?? b.at ?? 0) - (a.updatedAt ?? a.at ?? 0)));
     return Response.json(out);
-  }
-
-  async allocations() {
-    const entries = (await this.state.storage.get("entries")) ?? {};
-    const stored = await this.state.storage.list({ prefix: ARTIFACT_ACCOUNT_PREFIX });
-    const allocations = [];
-    let total = 0;
-    for (const [key, record] of stored) {
-      const scoped = key.slice(ARTIFACT_ACCOUNT_PREFIX.length);
-      const separator = scoped.indexOf(":");
-      if (separator < 1 || !record ||
-          !Number.isSafeInteger(record.version) || record.version < 0 ||
-          !Number.isSafeInteger(record.allocated) || record.allocated < 0 ||
-          !Number.isSafeInteger(record.target) || record.target < 0) {
-        return Response.json({ error: "invalid-artifact-allocation" }, { status: 500 });
-      }
-      total += record.allocated;
-      if (!Number.isSafeInteger(total)) {
-        return Response.json({ error: "invalid-artifact-allocation" }, { status: 500 });
-      }
-      allocations.push({
-        slug: scoped.slice(0, separator),
-        generation: scoped.slice(separator + 1),
-        version: record.version,
-        allocated: record.allocated,
-        target: record.target,
-      });
-    }
-    allocations.sort((a, b) => a.slug.localeCompare(b.slug) || a.generation.localeCompare(b.generation));
-    const projections = Object.entries(entries).map(([slug, entry]) => ({
-      slug,
-      ...entry,
-      chargedSize: chargedSize(entry),
-      servedSize: entry.servedSize ?? entry.size ?? 0,
-    })).sort((a, b) => a.slug.localeCompare(b.slug));
-    const projectionTotal = projections.reduce((sum, entry) => sum + entry.chargedSize, 0);
-    if (!Number.isSafeInteger(projectionTotal) || projectionTotal < 0) {
-      return Response.json({ error: "invalid-artifact-allocation" }, { status: 500 });
-    }
-    return Response.json({ total, projectionTotal, allocations, projections });
   }
 
   async firstSeen() {
@@ -806,8 +762,6 @@ export class Room {
         return this.put(await request.json());
       case "del":
         return this.del(await request.json());
-      case "reconcile":
-        return this.state.blockConcurrencyWhile(() => this.reconcileAllocation(url.searchParams.get("id")));
     }
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket\n", { status: 426 });
@@ -1104,114 +1058,6 @@ export class Room {
     return { outcome: "complete", doc };
   }
 
-  async reconcileAllocation(stableCellID) {
-    const doc = await this.loadRoom();
-    if (!doc) {
-      return Response.json({ empty: true });
-    }
-    if (doc.pending) {
-      return Response.json({ error: "pending-budget-operation" }, { status: 409 });
-    }
-    // Each check names itself: the route is cluster-internal and a refused
-    // migration document is undiagnosable from a bare 422.
-    const documentChecks = [
-      ["app-slug", typeof doc.meta?.appSlug === "string" && doc.meta.appSlug !== ""],
-      ["room-uuid", typeof doc.meta?.id === "string" && UUID_V4.test(doc.meta.id)],
-      ["created-at", Number.isSafeInteger(doc.meta?.createdAt) && doc.meta.createdAt >= 0],
-      ["updated-at", Number.isSafeInteger(doc.meta?.updatedAt) && doc.meta.updatedAt >= doc.meta.createdAt],
-      ["bytes", Number.isSafeInteger(doc.bytes) && doc.bytes >= 0],
-      ["seq", Number.isSafeInteger(doc.seq) && doc.seq >= 0],
-      ["budget-version", Number.isSafeInteger(doc.budgetVersion) && doc.budgetVersion >= 0],
-      ["kv-map", doc.kv !== null && typeof doc.kv === "object" && !Array.isArray(doc.kv)],
-      ["wire-map", doc.wire !== null && typeof doc.wire === "object" && !Array.isArray(doc.wire)],
-    ];
-    const failedCheck = documentChecks.find(([, ok]) => !ok);
-    if (failedCheck) {
-      return Response.json(
-        { error: "invalid-room-document", reason: failedCheck[0] }, { status: 422 },
-      );
-    }
-    const logicalName = `${doc.meta.appSlug}|${doc.meta.id}`;
-    let expectedCellID;
-    try {
-      expectedCellID = this.env.ROOMS.idFromName(logicalName).toString();
-    } catch {
-      return Response.json({ error: "invalid-room-cell-name" }, { status: 422 });
-    }
-    if (typeof stableCellID !== "string" || expectedCellID !== stableCellID) {
-      return Response.json({ error: "room-cell-name-mismatch" }, { status: 422 });
-    }
-    const keys = Object.keys(doc.kv);
-    if (Object.keys(doc.wire).length !== keys.length ||
-        keys.some((key) => !Object.hasOwn(doc.wire, key))) {
-      return Response.json(
-        { error: "invalid-room-document", reason: "wire-key-set" }, { status: 422 },
-      );
-    }
-    let actual = 0;
-    for (const [key, value] of Object.entries(doc.kv)) {
-      if (typeof value !== "string" || value.length % 4 !== 0 || !BASE64.test(value)) {
-        return Response.json(
-          { error: "invalid-room-document", reason: "value-base64" }, { status: 422 },
-        );
-      }
-      if (typeof doc.wire[key] !== "string") {
-        return Response.json(
-          { error: "invalid-room-document", reason: "wire-value" }, { status: 422 },
-        );
-      }
-      try {
-        JSON.parse(doc.wire[key]);
-      } catch {
-        return Response.json(
-          { error: "invalid-room-document", reason: "wire-json" }, { status: 422 },
-        );
-      }
-      actual += b64len(value);
-      if (!Number.isSafeInteger(actual)) {
-        return Response.json(
-          { error: "invalid-room-document", reason: "byte-overflow" }, { status: 422 },
-        );
-      }
-    }
-    if (actual !== doc.bytes) {
-      return Response.json({
-        error: "room-byte-mismatch", stored: doc.bytes, actual,
-      }, { status: 422 });
-    }
-
-    let response;
-    let seeded;
-    try {
-      response = await this.appCall(doc.meta.appSlug, "roomseed", {
-        room: doc.meta.id,
-        version: doc.budgetVersion,
-        targetBytes: actual,
-      });
-      seeded = await response.json();
-    } catch {
-      return Response.json({ error: "app-budget-unavailable" }, { status: 502 });
-    }
-    if (!response.ok) {
-      return Response.json({ error: "allocation-seed-conflict", detail: seeded }, {
-        status: response.status,
-      });
-    }
-    return Response.json({
-      logicalName,
-      appSlug: doc.meta.appSlug,
-      room: doc.meta.id,
-      bytes: actual,
-      keyCount: keys.length,
-      seq: doc.seq,
-      createdAt: doc.meta.createdAt,
-      updatedAt: doc.meta.updatedAt,
-      budgetVersion: doc.budgetVersion,
-      seeded: seeded.seeded,
-      total: seeded.total,
-    });
-  }
-
   broadcastPut(doc, key) {
     this.broadcast({
       type: "put", seq: doc.seq, key,
@@ -1292,8 +1138,6 @@ export class Paste {
         return this.get();
       case "versions":
         return this.listVersions();
-      case "roomallocation":
-        return this.roomAllocation();
     }
     return this.state.blockConcurrencyWhile(async () => {
       switch (op) {
@@ -1313,8 +1157,6 @@ export class Paste {
           return this.roomPreflight(await request.json());
         case "roomdecide":
           return this.roomDecide(await request.json());
-        case "roomseed":
-          return this.roomSeed(await request.json());
         case "remove":
           return this.remove(await request.json());
         case "append":
@@ -1323,8 +1165,6 @@ export class Paste {
           return this.deleteVersion(await request.json());
         case "pin":
           return this.pin(await request.json());
-        case "reconcile":
-          return this.reconcile(url.searchParams.get("id"));
         default:
           return new Response("unknown op\n", { status: 404 });
       }
@@ -1443,79 +1283,6 @@ export class Paste {
     return Response.json({ total });
   }
 
-  async roomAllocation() {
-    const total = (await this.state.storage.get("roomAllocated")) ?? 0;
-    if (!Number.isSafeInteger(total) || total < 0) {
-      return Response.json({ error: "invalid-room-allocation" }, { status: 500 });
-    }
-    const stored = await this.state.storage.list({ prefix: "roomAllocation:" });
-    const allocations = [];
-    for (const [key, record] of stored) {
-      if (!record || !Number.isSafeInteger(record.version) || record.version < 0 ||
-          !Number.isSafeInteger(record.allocated) || record.allocated < 0 ||
-          !Number.isSafeInteger(record.target) || record.target < 0) {
-        return Response.json({ error: "invalid-room-allocation" }, { status: 500 });
-      }
-      allocations.push({
-        room: key.slice("roomAllocation:".length),
-        version: record.version,
-        allocated: record.allocated,
-        target: record.target,
-      });
-    }
-    allocations.sort((a, b) => a.room.localeCompare(b.room));
-    return Response.json({ total, allocations });
-  }
-
-  async roomSeed(body) {
-    if (typeof body.room !== "string" || body.room === "" ||
-        !Number.isSafeInteger(body.version) || body.version < 0 ||
-        !Number.isSafeInteger(body.targetBytes) || body.targetBytes < 0) {
-      return Response.json({ error: "invalid-allocation-seed" }, { status: 400 });
-    }
-    return this.state.storage.transaction(async (tx) => {
-      const key = `roomAllocation:${body.room}`;
-      const current = await tx.get(key);
-      const total = (await tx.get("roomAllocated")) ?? 0;
-      if (!Number.isSafeInteger(total) || total < 0) {
-        return Response.json({ error: "invalid-room-allocation" }, { status: 500 });
-      }
-      if (current !== undefined) {
-        if (current.version === body.version &&
-            current.allocated === body.targetBytes &&
-            current.target === body.targetBytes) {
-          return Response.json({
-            seeded: false,
-            version: current.version,
-            allocated: current.allocated,
-            total,
-          });
-        }
-        return Response.json({
-          error: "allocation-seed-conflict",
-          version: current.version,
-          allocated: current.allocated,
-          target: current.target,
-          total,
-        }, { status: 409 });
-      }
-      const nextTotal = total + body.targetBytes;
-      if (!Number.isSafeInteger(nextTotal)) {
-        return Response.json({ error: "invalid-allocation-seed" }, { status: 400 });
-      }
-      await tx.put(new Map([
-        [key, { version: body.version, allocated: body.targetBytes, target: body.targetBytes }],
-        ["roomAllocated", nextTotal],
-      ]));
-      return Response.json({
-        seeded: true,
-        version: body.version,
-        allocated: body.targetBytes,
-        total: nextTotal,
-      });
-    });
-  }
-
   async roomDecide(body) {
     if (!Number.isSafeInteger(body.version) || body.version < 1 ||
         !Number.isSafeInteger(body.targetBytes) || body.targetBytes < 0) {
@@ -1582,121 +1349,64 @@ export class Paste {
     return Response.json(row);
   }
 
-  async reconcile(stableCellID) {
-    if (await this.state.storage.get(ARTIFACT_PENDING)) {
-      return Response.json({ error: "pending-artifact-operation" }, { status: 409 });
-    }
-    const row = await this.state.storage.get("row");
-    if (!row) {
-      const roomLedger = await this.state.storage.get("roomLedger");
-      const roomAllocated = await this.state.storage.get("roomAllocated");
-      const roomAllocations = await this.state.storage.list({ prefix: "roomAllocation:" });
-      if (roomLedger !== undefined || roomAllocated !== undefined || roomAllocations.size > 0) {
-        return Response.json({ artifact: false, coordinator: true });
+  // A legacy row (no generation) adopts on first mutation: assign a fresh
+  // generation, then idempotently seed the Identity account from live versions
+  // before any accounting decision runs against it, or a decide would add the
+  // legacy entry's charge a second time. The generation persists before the
+  // seed so a response-lost seed retries under the SAME incarnation. A caller
+  // holding the legacy row addresses it with an empty generation; an empty
+  // generation against an adopted row stays a conflict, because real callers
+  // re-read the row between attempts.
+  async requireAdoptedGeneration(row, body) {
+    if (row.generation) {
+      if (row.generation !== body.generation) {
+        return Response.json({ error: "generation-mismatch" }, { status: 409 });
       }
-      const tombstone = await this.state.storage.get("artifactTombstone");
-      if (tombstone) {
-        return Response.json({ artifact: false, tombstone: true, generation: tombstone.generation });
+    } else {
+      if (body.generation) {
+        return Response.json({ error: "generation-mismatch" }, { status: 409 });
       }
-      return new Response("not found\n", { status: 404 });
-    }
-    const versions = (await this.state.storage.get("versions")) ?? [];
-    const validVersions = Array.isArray(versions) && versions.length > 0 &&
-      versions.every((version) => version &&
-        Number.isSafeInteger(version.ver) && version.ver > 0 &&
-        Number.isSafeInteger(version.size) && version.size >= 0 &&
-        typeof version.deleted === "boolean");
-    const versionNumbers = validVersions ? versions.map((version) => version.ver) : [];
-    const latestVersion = versionNumbers.length ? Math.max(...versionNumbers) : 0;
-    if (typeof row.slug !== "string" || !row.slug ||
-        typeof row.identity !== "string" || !row.identity ||
-        !Number.isSafeInteger(row.size) || row.size < 0 ||
-        !validVersions || new Set(versionNumbers).size !== versionNumbers.length) {
-      return Response.json({ error: "invalid-artifact-document" }, { status: 422 });
-    }
-    let expectedCellID;
-    try {
-      expectedCellID = this.env.PASTES.idFromName(row.slug).toString();
-    } catch {
-      return Response.json({ error: "invalid-paste-cell-name" }, { status: 422 });
-    }
-    if (typeof stableCellID !== "string" || expectedCellID !== stableCellID) {
-      return Response.json({ error: "paste-cell-name-mismatch" }, { status: 422 });
-    }
-    this.rollServed(row, versions);
-    if (!row.generation) {
-      row.generation = `legacy:${stableCellID}`;
+      row.generation = crypto.randomUUID();
       row.accountingVersion = 0;
-    }
-    await this.state.storage.transaction(async (tx) => {
-      await tx.put(new Map([["row", row], ["maxVer", latestVersion]]));
-    });
-    const charge = row.status === "failed" ? 0 : this.liveCharge(versions);
-    let response;
-    let seed;
-    try {
-      response = await this.identityCall(row.identity, "artifactseed", {
-        slug: row.slug,
-        generation: row.generation,
-        charge,
-        servedSize: row.size,
-        status: row.status,
-        createdAt: row.createdAt,
-        updatedAt: row.updatedAt,
-        latestVersion,
-        pinnedVersion: row.pinnedVersion ?? 0,
-        kind: row.kind,
-        name: row.name ?? "",
-        contentSha: row.contentSha ?? "",
+      await this.state.storage.transaction(async (tx) => {
+        await tx.put(new Map([["row", row], ["legacyAdoptionPending", true]]));
       });
-      seed = await response.json();
-    } catch {
-      return Response.json({ error: "identity-unavailable" }, { status: 502 });
     }
-    if (!response.ok) {
-      return Response.json({ error: "artifact-seed-conflict", detail: seed }, { status: response.status });
-    }
-    row.accountingVersion = seed.version;
-    await this.state.storage.put("row", row);
-    let projected;
-    try {
-      projected = await this.identityCall(row.identity, "artifactproject", {
-        slug: row.slug,
-        generation: row.generation,
-        version: seed.version,
-        servedSize: row.size,
-        status: row.status,
-        kind: row.kind,
-        name: row.name ?? "",
-        contentSha: row.contentSha ?? "",
-        latestVersion,
-        pinnedVersion: row.pinnedVersion ?? 0,
-        updatedAt: row.updatedAt ?? row.createdAt ?? 0,
+    if (await this.state.storage.get("legacyAdoptionPending")) {
+      const versions = (await this.state.storage.get("versions")) ?? [];
+      const charge = row.status === "failed" ? 0 : this.liveCharge(versions);
+      let response;
+      let seed;
+      try {
+        response = await this.identityCall(row.identity, "artifactseed", {
+          slug: row.slug,
+          generation: row.generation,
+          charge,
+          servedSize: row.size,
+          status: row.status,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+          latestVersion: (await this.state.storage.get("maxVer")) ?? 1,
+          pinnedVersion: row.pinnedVersion ?? 0,
+          kind: row.kind,
+          name: row.name ?? "",
+          contentSha: row.contentSha ?? "",
+        });
+        seed = await response.json();
+      } catch {
+        return Response.json({ error: "identity-unavailable" }, { status: 502 });
+      }
+      if (!response.ok) {
+        return Response.json({ error: "adoption-seed-conflict", detail: seed }, { status: response.status });
+      }
+      row.accountingVersion = seed.version;
+      await this.state.storage.transaction(async (tx) => {
+        await tx.put("row", row);
+        await tx.delete("legacyAdoptionPending");
       });
-    } catch {
-      return Response.json({ error: "identity-unavailable" }, { status: 502 });
     }
-    if (!projected.ok) {
-      return Response.json({ error: "artifact-projection-conflict" }, { status: projected.status });
-    }
-    return Response.json({
-      artifact: true,
-      logicalName: row.slug,
-      slug: row.slug,
-      owner: row.identity,
-      generation: row.generation,
-      charge,
-      servedSize: row.size,
-      accountingVersion: seed.version,
-      status: row.status,
-      kind: row.kind,
-      name: row.name ?? "",
-      contentSha: row.contentSha ?? "",
-      latestVersion,
-      pinnedVersion: row.pinnedVersion ?? 0,
-      updatedAt: row.updatedAt ?? row.createdAt ?? 0,
-      seeded: seed.seeded,
-    });
+    body.generation = row.generation;
+    return null;
   }
 
   // Guarded by owner and creation time, so a rename cannot land on a slug that
@@ -1981,11 +1691,16 @@ export class Paste {
   }
 
   async mutationReceipt(generation, opId) {
-    if (typeof generation !== "string" || !generation) {
+    if (typeof generation !== "string") {
       return Response.json({ error: "missing-generation" }, { status: 400 });
     }
     if (typeof opId !== "string" || !opId) {
       return Response.json({ error: "missing-operation-id" }, { status: 400 });
+    }
+    // An empty generation addresses a legacy row: no receipt scope exists
+    // until adoption assigns one, and the adoption gate decides its fate.
+    if (!generation) {
+      return null;
     }
     const receipt = await this.state.storage.get(this.receiptKey(generation, opId));
     if (receipt) {
@@ -2019,11 +1734,9 @@ export class Paste {
     if (!row) {
       return Response.json({ appended: false, reason: "absent" });
     }
-    if (!row.generation) {
-      return Response.json({ error: "artifact-unreconciled" }, { status: 409 });
-    }
-    if (row.generation !== body.generation) {
-      return Response.json({ error: "generation-mismatch" }, { status: 409 });
+    const refused = await this.requireAdoptedGeneration(row, body);
+    if (refused) {
+      return refused;
     }
     const versions = (await this.state.storage.get("versions")) ?? [];
     const nextVer = ((await this.state.storage.get("maxVer")) ?? 1) + 1;
@@ -2082,11 +1795,9 @@ export class Paste {
     if (!row) {
       return Response.json({ deleted: false, reason: "absent" });
     }
-    if (!row.generation) {
-      return Response.json({ error: "artifact-unreconciled" }, { status: 409 });
-    }
-    if (row.generation !== body.generation) {
-      return Response.json({ error: "generation-mismatch" }, { status: 409 });
+    const refused = await this.requireAdoptedGeneration(row, body);
+    if (refused) {
+      return refused;
     }
     const versions = (await this.state.storage.get("versions")) ?? [];
     const version = versions.find((candidate) => candidate.ver === body.ver);
@@ -2176,11 +1887,9 @@ export class Paste {
     if (!row) {
       return Response.json({ pinned: false, reason: "absent" });
     }
-    if (!row.generation) {
-      return Response.json({ error: "artifact-unreconciled" }, { status: 409 });
-    }
-    if (row.generation !== body.generation) {
-      return Response.json({ error: "generation-mismatch" }, { status: 409 });
+    const refused = await this.requireAdoptedGeneration(row, body);
+    if (refused) {
+      return refused;
     }
     const versions = (await this.state.storage.get("versions")) ?? [];
     const wanted = body.ver ?? 0;
@@ -2228,11 +1937,9 @@ export class Paste {
     if (row.identity !== body.identity || row.createdAt !== body.createdAt) {
       return Response.json({ removed: false, reason: "not-owner" });
     }
-    if (!row.generation) {
-      return Response.json({ error: "artifact-unreconciled" }, { status: 409 });
-    }
-    if (row.generation !== body.generation) {
-      return Response.json({ error: "generation-mismatch" }, { status: 409 });
+    const refused = await this.requireAdoptedGeneration(row, body);
+    if (refused) {
+      return refused;
     }
     const receipt = { status: 200, body: { removed: true } };
     const version = (row.accountingVersion ?? 0) + 1;
@@ -2276,11 +1983,9 @@ export class Paste {
     if (!row) {
       return Response.json({ changed: false, reason: "absent" });
     }
-    if (!row.generation) {
-      return Response.json({ error: "artifact-unreconciled" }, { status: 409 });
-    }
-    if (row.generation !== body.generation) {
-      return Response.json({ error: "generation-mismatch" }, { status: 409 });
+    const refused = await this.requireAdoptedGeneration(row, body);
+    if (refused) {
+      return refused;
     }
     if (!["pending", "failed"].includes(row.status)) {
       return Response.json({ changed: false, reason: "not-pending", status: row.status });
@@ -2426,46 +2131,6 @@ export class Subnet {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname === "/admin/room/reconcile") {
-      const id = url.searchParams.get("id");
-      if (!id) {
-        return new Response("cell id required\n", { status: 400 });
-      }
-      try {
-        return env.ROOMS.get(env.ROOMS.idFromString(id)).fetch(request);
-      } catch {
-        return new Response("invalid cell id\n", { status: 400 });
-      }
-    }
-    if (url.pathname === "/admin/paste/reconcile") {
-      const id = url.searchParams.get("id");
-      if (!id) {
-        return new Response("cell id required\n", { status: 400 });
-      }
-      try {
-        return env.PASTES.get(env.PASTES.idFromString(id)).fetch(request);
-      } catch {
-        return new Response("invalid cell id\n", { status: 400 });
-      }
-    }
-    if (url.pathname === "/admin/identity/allocation") {
-      const owner = url.searchParams.get("owner");
-      if (!owner) {
-        return new Response("owner required\n", { status: 400 });
-      }
-      return env.IDENTITY.get(env.IDENTITY.idFromName(owner)).fetch(
-        new Request(`https://cell/identity/allocations?scope=${encodeURIComponent(owner)}`),
-      );
-    }
-    if (url.pathname === "/admin/app/allocation") {
-      const slug = url.searchParams.get("slug");
-      if (!slug) {
-        return new Response("slug required\n", { status: 400 });
-      }
-      return env.PASTES.get(env.PASTES.idFromName(slug)).fetch(
-        new Request(`https://cell/paste/roomallocation?slug=${encodeURIComponent(slug)}`),
-      );
-    }
     if (url.pathname === "/healthz") {
       return new Response("ok\n");
     }
