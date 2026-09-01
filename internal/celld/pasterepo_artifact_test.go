@@ -110,3 +110,53 @@ func TestOwnerListingSeparatesServedAndChargedBytes(t *testing.T) {
 		t.Fatalf("size/stored = %d/%d, want 2/6", listed[0].Size, listed[0].StoredBytes)
 	}
 }
+
+// A legacy row is addressed with an empty generation; the adapter must hand
+// it to the cell, whose adoption path owns the outcome, rather than refuse
+// locally with not-found.
+func TestMutationsPassAnEmptyLegacyGenerationThrough(t *testing.T) {
+	var mu sync.Mutex
+	generations := map[string]any{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		mu.Lock()
+		generations[req.URL.Path] = body["generation"]
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch req.URL.Path {
+		case "/paste/append":
+			_, _ = w.Write([]byte(`{"appended":true,"ver":2,"wasPinned":false}`))
+		case "/paste/delversion":
+			_, _ = w.Write([]byte(`{"deleted":true}`))
+		case "/paste/pin":
+			_, _ = w.Write([]byte(`{"pinned":true}`))
+		default:
+			t.Fatalf("unexpected path %q", req.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	repo := NewPasteRepo(server.URL, server.Client())
+	if _, err := repo.AppendVersionWithQuotaCheck(
+		context.Background(), "legacy12", "", domain.KindMarkdown, "sha-v2", 4, 10, time.Unix(8, 0),
+	); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if err := repo.DeleteVersion("legacy12", "", 1); err != nil {
+		t.Fatalf("delete version: %v", err)
+	}
+	if err := repo.SetPinnedVersion("legacy12", "", domain.Version{VerNum: 1}); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	for path, generation := range generations {
+		if generation != "" {
+			t.Fatalf("%s sent generation %#v, want empty", path, generation)
+		}
+	}
+	if len(generations) != 3 {
+		t.Fatalf("paths = %d, want 3", len(generations))
+	}
+}

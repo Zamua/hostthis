@@ -568,9 +568,8 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 	kind domain.ContentKind, contentSHA string, size int, manifest domain.Manifest,
 	userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
-	if generation == "" {
-		return domain.AppendResult{}, domain.ErrNotFound
-	}
+	// An empty generation addresses a legacy row; the cell adopts it on this
+	// mutation (docs/SPEC.md "lazy adoption").
 	opID, err := newOpaqueID("append")
 	if err != nil {
 		return domain.AppendResult{}, err
@@ -650,9 +649,6 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 // the charge while the bytes remain, which under-charges silently and is the
 // direction nothing watches.
 func (r *PasteRepo) DeleteVersion(slug domain.Slug, generation string, ver int) error {
-	if generation == "" {
-		return domain.ErrNotFound
-	}
 	opID, err := newOpaqueID("delete-version")
 	if err != nil {
 		return err
@@ -732,9 +728,6 @@ func (r *PasteRepo) Unpin(slug domain.Slug, generation string) error {
 // invisible in `list`, so an owner cannot see which version their URL is stuck
 // to. Found by migrating a pinned paste and reading the listing afterwards.
 func (r *PasteRepo) setPin(slug domain.Slug, generation string, ver int) error {
-	if generation == "" {
-		return domain.ErrNotFound
-	}
 	opID, err := newOpaqueID("pin")
 	if err != nil {
 		return err
