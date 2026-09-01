@@ -859,7 +859,7 @@ test("Paste rejects an old incarnation without mutating the replacement allocati
   assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 2);
 });
 
-test("Paste reconciliation seeds a legacy incarnation exactly and survives response loss", async () => {
+test("Paste legacy row adopts on first mutation and survives response loss", async () => {
   const pasteSeed = artifactPasteSeed();
   delete pasteSeed.get("row").generation;
   delete pasteSeed.get("row").accountingVersion;
@@ -869,83 +869,32 @@ test("Paste reconciliation seeds a legacy incarnation exactly and survives respo
   const h = artifactHarness({ pasteSeed, identitySeed });
   h.transport.failAfter = 1;
 
-  assert.equal((await h.paste().reconcile(PASTE_CELL_ID)).status, 502);
+  const first = await h.paste().append({ ...appendBody("legacy-op"), generation: "" });
+  assert.equal(first.status, 502);
   const generation = h.pasteStorage.data.get("row").generation;
-  assert.equal(generation, `legacy:${PASTE_CELL_ID}`);
-  assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 2);
+  assert.ok(generation);
+  assert.equal(h.pasteStorage.data.get("legacyAdoptionPending"), true);
 
-  const reconciled = await responseJSON(await h.paste().reconcile(PASTE_CELL_ID));
-  assert.equal(reconciled.status, 200);
-  assert.equal(reconciled.body.generation, generation);
-  assert.equal(reconciled.body.charge, 2);
-  assert.equal(reconciled.body.seeded, false);
-  assert.equal(h.identityStorage.data.get("entries").slugone1.generation, generation);
-  assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 2);
-});
-
-test("Paste reconciliation refuses a stable ID that does not match its slug", async () => {
-  const pasteSeed = artifactPasteSeed();
-  delete pasteSeed.get("row").generation;
-  delete pasteSeed.get("row").accountingVersion;
-  const h = artifactHarness({ pasteSeed });
-
-  const response = await h.paste().reconcile(ROOM_CELL_ID);
-  assert.equal(response.status, 422);
-  assert.equal(h.pasteStorage.data.get("row").generation, undefined);
-  assert.equal(h.transport.calls.length, 0);
-});
-
-test("Paste reconciliation derives the served head from live versions", async () => {
-  const pasteSeed = artifactPasteSeed();
-  const row = pasteSeed.get("row");
-  delete row.generation;
-  delete row.accountingVersion;
-  Object.assign(row, { kind: "markdown", contentSha: "deleted-v2", size: 100 });
-  pasteSeed.set("versions", [
-    {
-      ver: 1, kind: "html", contentSha: "live-v1", size: 1,
-      createdAt: 7, deleted: false, manifest: null,
-    },
-    {
-      ver: 2, kind: "markdown", contentSha: "deleted-v2", size: 100,
-      createdAt: 8, deleted: true, manifest: null,
-    },
-  ]);
-  pasteSeed.set("maxVer", 2);
-  const identitySeed = new Map([["entries", {
-    slugone1: { size: 101, status: "ready", at: 7, updatedAt: 8 },
-  }]]);
-  const h = artifactHarness({ pasteSeed, identitySeed });
-
-  const reconciled = await responseJSON(await h.paste().reconcile(PASTE_CELL_ID));
-  assert.equal(reconciled.status, 200);
-  assert.equal(reconciled.body.charge, 1);
-  assert.equal(reconciled.body.servedSize, 1);
-  assert.equal(h.pasteStorage.data.get("row").contentSha, "live-v1");
-  assert.equal(h.pasteStorage.data.get("row").kind, "html");
-  assert.equal(h.pasteStorage.data.get("row").size, 1);
+  const retried = await responseJSON(await h.paste().append({
+    ...appendBody("legacy-op"), generation,
+  }));
+  assert.equal(retried.status, 200);
+  assert.equal(retried.body.appended, true);
+  assert.equal(h.pasteStorage.data.get("legacyAdoptionPending"), undefined);
+  assert.equal(h.pasteStorage.data.get("row").generation, generation);
   const entry = h.identityStorage.data.get("entries").slugone1;
-  assert.equal(entry.chargedSize, 1);
-  assert.equal(entry.servedSize, 1);
+  assert.equal(entry.generation, generation);
+  assert.equal(entry.chargedSize, 6);
 });
 
-test("Paste reconciliation routes by exact stable cell id", async () => {
+test("Paste empty generation against an adopted row is a conflict", async () => {
   const h = artifactHarness();
-  let addressed;
-  const env = {
-    PASTES: {
-      idFromString(id) { addressed = id; return `parsed:${id}`; },
-      get(id) {
-        assert.equal(id, `parsed:${PASTE_CELL_ID}`);
-        return { fetch: (request) => h.paste().fetch(request) };
-      },
-    },
-  };
-  const result = await worker.fetch(new Request(
-    `https://worker/admin/paste/reconcile?id=${PASTE_CELL_ID}`, { method: "POST" },
-  ), env);
-  assert.equal(result.status, 200);
-  assert.equal(addressed, PASTE_CELL_ID);
+  const refused = await responseJSON(await h.paste().append({
+    ...appendBody("empty-generation"), generation: "",
+  }));
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error, "generation-mismatch");
+  assert.equal(h.pasteStorage.data.get("versions").length, 1);
 });
 
 test("Paste rename persists a guarded projection through response loss", async () => {
@@ -1146,25 +1095,6 @@ test("Subnet serializes concurrent admissions at the limit", async () => {
   assert.equal(Object.keys(storage.data.get("rows")).length, 1);
 });
 
-test("Identity allocation point read includes zero-byte fences and projections", async () => {
-  const seed = artifactIdentitySeed();
-  seed.set("artifact-account:removed1:generation-zero", {
-    version: 4, allocated: 0, target: 0,
-  });
-  const result = await responseJSON(await new Identity(state(new FakeStorage(seed))).fetch(
-    new Request("https://cell/identity/allocations?scope=owner"),
-  ));
-  assert.equal(result.status, 200);
-  assert.equal(result.body.total, 2);
-  assert.deepStrictEqual(result.body.allocations, [
-    { slug: "removed1", generation: "generation-zero", version: 4, allocated: 0, target: 0 },
-    { slug: "slugone1", generation: "generation-1", version: 0, allocated: 2, target: 2 },
-  ]);
-  assert.equal(result.body.projections.length, 1);
-  assert.equal(result.body.projections[0].slug, "slugone1");
-  assert.equal(result.body.projections[0].chargedSize, 2);
-});
-
 test("Paste room coordinator persists grants and exact replays", async () => {
   const storage = new FakeStorage(budgetSeed());
   const paste = new Paste(state(storage));
@@ -1229,74 +1159,6 @@ test("Paste room coordinator rejects malformed decisions without mutation", asyn
     assert.equal((await decide(new Paste(state(storage)), body)).status, 400);
     assert.deepStrictEqual(storage.data, before);
   }
-});
-
-test("Paste room migration seed is atomic and idempotent", async () => {
-  const storage = new FakeStorage();
-  const paste = new Paste(state(storage));
-
-  assert.deepStrictEqual(await responseJSON(await paste.roomSeed({
-    room: "11111111-1111-4111-8111-111111111111", version: 0, targetBytes: 4,
-  })), {
-    status: 200,
-    body: { seeded: true, version: 0, allocated: 4, total: 4 },
-  });
-  const complete = clone(storage.data);
-  assert.deepStrictEqual(await responseJSON(await paste.roomSeed({
-    room: "11111111-1111-4111-8111-111111111111", version: 0, targetBytes: 4,
-  })), {
-    status: 200,
-    body: { seeded: false, version: 0, allocated: 4, total: 4 },
-  });
-  assert.deepStrictEqual(storage.data, complete);
-
-  assert.equal((await paste.roomSeed({ room: "11111111-1111-4111-8111-111111111111", version: 0, targetBytes: 5 })).status, 409);
-  assert.equal((await paste.roomSeed({ room: "11111111-1111-4111-8111-111111111111", version: 1, targetBytes: 4 })).status, 409);
-  assert.deepStrictEqual(storage.data, complete);
-  assert.deepStrictEqual(await responseJSON(await paste.roomAllocation()), {
-    status: 200,
-    body: {
-      total: 4,
-      allocations: [{
-        room: ROOM_ID, version: 0, allocated: 4, target: 4,
-      }],
-    },
-  });
-});
-
-test("Paste room allocation point read includes zero-byte fences", async () => {
-  const storage = new FakeStorage(budgetSeed(4, 0));
-  const result = await responseJSON(await new Paste(state(storage)).roomAllocation());
-  assert.equal(result.status, 200);
-  assert.equal(result.body.total, 4);
-  assert.equal(result.body.allocations.length, 2);
-  assert.deepStrictEqual(result.body.allocations[1], {
-    room: "r2", version: 0, allocated: 0, target: 0,
-  });
-});
-
-test("Paste room migration seed rejects malformed input without mutation", async () => {
-  for (const body of [
-    { room: "", version: 0, targetBytes: 1 },
-    { room: "11111111-1111-4111-8111-111111111111", version: -1, targetBytes: 1 },
-    { room: "11111111-1111-4111-8111-111111111111", version: 0.5, targetBytes: 1 },
-    { room: "11111111-1111-4111-8111-111111111111", version: 0, targetBytes: -1 },
-    { room: "11111111-1111-4111-8111-111111111111", version: 0, targetBytes: Number.MAX_SAFE_INTEGER },
-  ]) {
-    const storage = new FakeStorage(new Map([["roomAllocated", 1]]));
-    const before = clone(storage.data);
-    assert.equal((await new Paste(state(storage)).roomSeed(body)).status, 400);
-    assert.deepStrictEqual(storage.data, before);
-  }
-});
-
-test("Paste room migration seed commits record and aggregate atomically", async () => {
-  await assertCrashAtomic({
-    seed: new Map(),
-    invoke: (storage) => new Paste(state(storage)).roomSeed({
-      room: "11111111-1111-4111-8111-111111111111", version: 0, targetBytes: 4,
-    }),
-  });
 });
 
 test("Paste room coordinator commits record and aggregate atomically", async () => {
@@ -1429,74 +1291,6 @@ test("Room serializes concurrent equal-size mutations", async () => {
     { status: 200, body: { seq: 9, bytes: 4 } },
   ]);
   assert.equal(storage.data.get("state").seq, 9);
-});
-
-test("Room migration seeds its exact allocation through a cell ID route", async () => {
-  const h = roomHarness({ pasteSeed: new Map() });
-  let addressed;
-  const env = {
-    ROOMS: {
-      idFromString(id) { addressed = id; return `parsed:${id}`; },
-      get(id) {
-        assert.equal(id, `parsed:${ROOM_CELL_ID}`);
-        return { fetch: (request) => h.room().fetch(request) };
-      },
-    },
-  };
-  const result = await responseJSON(await worker.fetch(
-    new Request(`https://worker/admin/room/reconcile?id=${ROOM_CELL_ID}`, { method: "POST" }), env,
-  ));
-  assert.equal(addressed, ROOM_CELL_ID);
-  assert.deepStrictEqual(result, {
-    status: 200,
-    body: {
-      logicalName: `appslug1|${ROOM_ID}`,
-      appSlug: "appslug1", room: ROOM_ID, bytes: 4,
-      keyCount: 1, seq: 7, createdAt: 1, updatedAt: 1,
-      budgetVersion: 0, seeded: true, total: 4,
-    },
-  });
-  assert.deepStrictEqual(h.pasteStorage.data.get("roomAllocation:11111111-1111-4111-8111-111111111111"), {
-    version: 0, allocated: 4, target: 4,
-  });
-});
-
-test("Room migration refuses malformed or mismatched logical identity before seeding", async () => {
-  const malformed = roomDoc();
-  malformed.meta.id = "not-a-uuid";
-  const malformedHarness = roomHarness({ room: malformed, pasteSeed: new Map() });
-  assert.equal((await malformedHarness.room().reconcileAllocation(ROOM_CELL_ID)).status, 422);
-  assert.equal(malformedHarness.transport.calls.length, 0);
-
-  const mismatched = roomHarness({ pasteSeed: new Map() });
-  assert.equal((await mismatched.room().reconcileAllocation(PASTE_CELL_ID)).status, 422);
-  assert.equal(mismatched.transport.calls.length, 0);
-});
-
-test("Room migration retry repairs a response-lost seed without double charge", async () => {
-  const h = roomHarness({ pasteSeed: new Map() });
-  h.transport.failAfter = 1;
-  assert.equal((await h.room().reconcileAllocation(ROOM_CELL_ID)).status, 502);
-  assert.equal(h.pasteStorage.data.get("roomAllocated"), 4);
-
-  const result = await responseJSON(await h.room().reconcileAllocation(ROOM_CELL_ID));
-  assert.equal(result.status, 200);
-  assert.equal(result.body.seeded, false);
-  assert.equal(result.body.total, 4);
-  assert.equal(h.pasteStorage.data.get("roomAllocated"), 4);
-});
-
-test("Room migration classifies pending, inconsistent, and empty cells distinctly", async () => {
-  const pending = roomDoc();
-  pending.pending = { targetBytes: 6, appCap: 10, mutation: putBody("aaaaaa") };
-  assert.equal((await roomHarness({ room: pending }).room().reconcileAllocation(ROOM_CELL_ID)).status, 409);
-
-  const inconsistent = roomDoc();
-  inconsistent.bytes = 3;
-  assert.equal((await roomHarness({ room: inconsistent }).room().reconcileAllocation(ROOM_CELL_ID)).status, 422);
-
-  const empty = await responseJSON(await roomHarness({ room: null }).room().reconcileAllocation(ROOM_CELL_ID));
-  assert.deepStrictEqual(empty, { status: 200, body: { empty: true } });
 });
 
 test("Room shrink succeeds after commit when allocation release is unavailable", async () => {
