@@ -190,6 +190,31 @@ func (r *PasteRepo) call(ctx context.Context, method, path, key, val string, bod
 	return resp.StatusCode, nil
 }
 
+var notFound = map[int]error{http.StatusNotFound: domain.ErrNotFound}
+
+// answer maps the outcome of one call: a listed status returns its sentinel,
+// any other status past 2xx is a fault naming op.
+func answer(op string, status int, err error, answers map[int]error) error {
+	if err != nil {
+		return err
+	}
+	if mapped, ok := answers[status]; ok {
+		return mapped
+	}
+	if status >= 300 {
+		return fmt.Errorf("celld: %s: unexpected status %d", op, status)
+	}
+	return nil
+}
+
+// ask is call with its status mapped by answer.
+func (r *PasteRepo) ask(ctx context.Context, op, method, path, key, val string, body, out any,
+	answers map[int]error,
+) error {
+	status, err := r.call(ctx, method, path, key, val, body, out)
+	return answer(op, status, err, answers)
+}
+
 // InsertWithQuotaCheck runs the three-step create described on the type.
 func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error {
 	owner := p.Identity.String()
@@ -211,7 +236,7 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 
 	// 1. Reserve. Over-quota is refused HERE, before any row exists, so a
 	//    rejected upload leaves nothing behind.
-	status, err := r.call(ctx, http.MethodPost, "/identity/reserve", "scope", owner, map[string]any{
+	if err := r.ask(ctx, "reserve", http.MethodPost, "/identity/reserve", "scope", owner, map[string]any{
 		"slug": p.Slug.String(), "generation": generation,
 		"size": p.Size, "userCap": userCap,
 		"now": now.UTC().UnixMilli(), "status": string(p.Status),
@@ -222,74 +247,49 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 			"fingerprint": fingerprint,
 			"startedAt":   now.UTC().UnixMilli(),
 		},
-	}, nil)
-	if status == http.StatusInsufficientStorage {
-		return domain.ErrOverUserQuota
-	}
-	if status == http.StatusConflict {
-		return domain.ErrSlugTaken
-	}
-	if err != nil {
+	}, nil, map[int]error{
+		http.StatusInsufficientStorage: domain.ErrOverUserQuota,
+		http.StatusConflict:            domain.ErrSlugTaken,
+	}); err != nil {
 		return err
-	}
-	if status >= 300 {
-		return fmt.Errorf("celld: reserve: unexpected status %d", status)
 	}
 
 	// 2. A lost response is ambiguous: retry the exact generation once so the
-	//    cell's same-generation replay can prove whether the row landed.
-	putBody := map[string]any{
+	//    cell's same-generation replay can prove whether the row landed. A
+	//    transport failure is NOT released: the durable intent owns resolution,
+	//    and releasing could erase a row whose success response was lost.
+	status, err := r.callArtifactMutation(ctx, "/paste/put", p.Slug, map[string]any{
 		"row": wireRow, "generation": generation, "fingerprint": fingerprint,
-	}
-	for range 2 {
-		status, err = r.call(ctx, http.MethodPost, "/paste/put", "slug", p.Slug.String(), putBody, nil)
-		if err == nil {
-			break
+	}, nil)
+	if err := answer("paste put", status, err, map[int]error{http.StatusConflict: domain.ErrSlugTaken}); err != nil {
+		if errors.Is(err, domain.ErrSlugTaken) {
+			_, _ = r.call(ctx, http.MethodPost, "/identity/release", "scope", owner,
+				map[string]any{
+					"slug": p.Slug.String(), "generation": generation, "intentId": intentID,
+				}, nil)
 		}
-	}
-	if err != nil {
-		// The durable intent owns resolution. Releasing here could erase a row
-		// whose successful response was the only thing lost.
 		return err
 	}
-	if status == http.StatusConflict {
-		_, _ = r.call(ctx, http.MethodPost, "/identity/release", "scope", owner,
-			map[string]any{
-				"slug": p.Slug.String(), "generation": generation, "intentId": intentID,
-			}, nil)
-		return domain.ErrSlugTaken
-	}
-	if status >= 300 {
-		return fmt.Errorf("celld: paste put: unexpected status %d", status)
-	}
 
-	// 3. Confirm. The intent is discharged only once the row is durable.
+	// 3. Confirm. The intent is discharged only once the row is durable. A
+	//    lost response is fine: the resolver observes the matching row and
+	//    completes the confirm.
 	status, err = r.call(ctx, http.MethodPost, "/identity/confirm", "scope", owner,
 		map[string]any{
 			"slug": p.Slug.String(), "generation": generation,
 			"status": string(p.Status), "intentId": intentID,
 		}, nil)
 	if err != nil {
-		// The resolver observes the matching row and completes the confirm.
 		return nil
 	}
-	if status >= 300 {
-		return fmt.Errorf("celld: confirm: unexpected status %d", status)
-	}
-	return nil
+	return answer("confirm", status, nil, nil)
 }
 
 func (r *PasteRepo) getRow(slug domain.Slug) (pasteRow, error) {
 	var row pasteRow
-	status, err := r.call(context.Background(), http.MethodGet, "/paste/get", "slug", slug.String(), nil, &row)
-	if err != nil {
+	if err := r.ask(context.Background(), "paste get", http.MethodGet, "/paste/get", "slug", slug.String(),
+		nil, &row, notFound); err != nil {
 		return pasteRow{}, err
-	}
-	if status == http.StatusNotFound {
-		return pasteRow{}, domain.ErrNotFound
-	}
-	if status >= 300 {
-		return pasteRow{}, fmt.Errorf("celld: paste get: unexpected status %d", status)
 	}
 	return row, nil
 }
@@ -305,17 +305,10 @@ func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
 // MarkReady advances a still-pending paste. Absent or already-settled is a
 // no-op rather than an error: a late finalizer racing the reconciler is normal.
 func (r *PasteRepo) MarkReady(paste domain.Paste) error {
-	status, err := r.call(context.Background(), http.MethodPost, "/paste/status", "slug", paste.Slug.String(),
-		map[string]any{
+	return r.ask(context.Background(), "ready transition", http.MethodPost, "/paste/status", "slug",
+		paste.Slug.String(), map[string]any{
 			"status": string(domain.PasteStatusReady), "generation": paste.Generation,
-		}, nil)
-	if err != nil {
-		return err
-	}
-	if status >= 300 {
-		return fmt.Errorf("celld: ready transition: unexpected status %d", status)
-	}
-	return nil
+		}, nil, nil)
 }
 
 // MarkFailed persists the failed row before driving its absolute allocation to
@@ -330,13 +323,7 @@ func (r *PasteRepo) MarkFailed(paste domain.Paste) error {
 			"generation": paste.Generation,
 			"opId":       "fail:" + paste.Generation,
 		}, nil)
-	if err != nil {
-		return err
-	}
-	if status >= 300 {
-		return fmt.Errorf("celld: fail accounting: unexpected status %d", status)
-	}
-	return nil
+	return answer("fail accounting", status, err, nil)
 }
 
 // SumActiveBytesByOwner reads the identity cell's maintained aggregate. A point
@@ -345,12 +332,9 @@ func (r *PasteRepo) SumActiveBytesByOwner(owner string, _ time.Time) (int, error
 	var res struct {
 		Bytes int `json:"bytes"`
 	}
-	status, err := r.call(context.Background(), http.MethodGet, "/identity/bytes", "scope", owner, nil, &res)
-	if err != nil {
+	if err := r.ask(context.Background(), "identity bytes", http.MethodGet, "/identity/bytes", "scope", owner,
+		nil, &res, nil); err != nil {
 		return 0, err
-	}
-	if status >= 300 {
-		return 0, fmt.Errorf("celld: identity bytes: unexpected status %d", status)
 	}
 	return res.Bytes, nil
 }
@@ -383,12 +367,9 @@ type ownerEntry struct {
 
 func (r *PasteRepo) ownerEntries(owner string) ([]ownerEntry, error) {
 	var out []ownerEntry
-	status, err := r.call(context.Background(), http.MethodGet, "/identity/list", "scope", owner, nil, &out)
-	if err != nil {
+	if err := r.ask(context.Background(), "identity list", http.MethodGet, "/identity/list", "scope", owner,
+		nil, &out, nil); err != nil {
 		return nil, err
-	}
-	if status >= 300 {
-		return nil, fmt.Errorf("celld: identity list: unexpected status %d", status)
 	}
 	return out, nil
 }
@@ -433,12 +414,9 @@ func (r *PasteRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 	var res struct {
 		FirstSeen int64 `json:"firstSeen"`
 	}
-	status, err := r.call(context.Background(), http.MethodGet, "/identity/firstSeen", "scope", owner, nil, &res)
-	if err != nil {
+	if err := r.ask(context.Background(), "identity firstSeen", http.MethodGet, "/identity/firstSeen", "scope",
+		owner, nil, &res, nil); err != nil {
 		return time.Time{}, err
-	}
-	if status >= 300 {
-		return time.Time{}, fmt.Errorf("celld: identity firstSeen: unexpected status %d", status)
 	}
 	if res.FirstSeen == 0 {
 		return time.Time{}, nil
