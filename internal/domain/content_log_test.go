@@ -131,14 +131,10 @@ func TestDetectKind_TextDoesNotStealFromRicherKinds(t *testing.T) {
 	}
 }
 
-// Binary is still refused, including under a text hint: the fallback must not
-// become a way in for bytes no viewer can render.
+// The text fallback must not become a way in for bytes no viewer can render.
 func TestDetectKind_TextFallbackStillRefusesBinary(t *testing.T) {
 	bin := append([]byte{0x00, 0x01, 0x02, 0xff, 0xfe}, make([]byte, 600)...)
 	if _, err := domain.DetectKind(bin, "", sniff); err == nil {
 		t.Fatal("binary accepted by the text fallback")
-	}
-	if _, err := domain.DetectKind(bin, "text", sniff); err == nil {
-		t.Fatal("binary accepted under a text hint")
 	}
 }

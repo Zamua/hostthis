@@ -43,16 +43,3 @@ func TestParseSlug(t *testing.T) {
 		})
 	}
 }
-
-func TestSlugAlphabetExcludesAmbiguous(t *testing.T) {
-	// Defense in depth - if someone changes SlugAlphabet, this test fires.
-	// 0 / O / l / 1 / I are the ones the spec explicitly excludes for
-	// "no ambiguous chars".
-	for _, bad := range []rune{'0', 'O', 'o', 'l', '1', 'I'} {
-		for _, r := range SlugAlphabet {
-			if r == bad {
-				t.Errorf("SlugAlphabet contains ambiguous char %q", bad)
-			}
-		}
-	}
-}

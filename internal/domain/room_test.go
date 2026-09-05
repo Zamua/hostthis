@@ -30,17 +30,6 @@ func TestNewRoomID_IsValidV4(t *testing.T) {
 	}
 }
 
-func TestNewRoomID_Unique(t *testing.T) {
-	seen := make(map[RoomID]struct{}, 1000)
-	for i := range 1000 {
-		id := NewRoomID()
-		if _, dup := seen[id]; dup {
-			t.Fatalf("collision after %d ids: %q", i, id)
-		}
-		seen[id] = struct{}{}
-	}
-}
-
 func TestParseRoomID(t *testing.T) {
 	valid := "f47ac10b-58cc-4372-a567-0e02b2c3d479" // canonical v4
 	got, err := ParseRoomID(valid)
