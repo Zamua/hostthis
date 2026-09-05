@@ -47,6 +47,7 @@ func textContentJS(sel string) string {
 // The csv viewer renders a real table and sorts it on a header click. Numeric
 // columns sort by value, and the source order is recoverable from row ids.
 func TestCSVRender(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, []byte(csvFixture), UploadOpts{Type: "csv", Name: "csv proof"})
 

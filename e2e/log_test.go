@@ -104,6 +104,7 @@ const (
 // time histogram, and the query box narrows the view to exactly the matching
 // records and restores it when cleared.
 func TestLogRender(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, []byte(logFixture), UploadOpts{Type: "log", Name: "log proof"})
 

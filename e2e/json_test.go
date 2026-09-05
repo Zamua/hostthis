@@ -90,6 +90,7 @@ const readJSONSQLResult = `(() => {
 // live filter, and its SQL console loads the paste through read_json_auto,
 // where a numeric ORDER BY proves score was typed as a number rather than text.
 func TestJSONRender(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, []byte(jsonFixture), UploadOpts{Type: "json", Name: "json proof"})
 

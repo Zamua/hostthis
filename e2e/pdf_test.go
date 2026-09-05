@@ -82,6 +82,7 @@ const readPDFRender = `(() => {
 // with a selectable text layer over it, reports the page count, and leaves
 // both paging controls disabled on a one-page document.
 func TestPDFRender(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, []byte(pdfFixture), UploadOpts{Type: "pdf", Name: "pdf proof"})
 

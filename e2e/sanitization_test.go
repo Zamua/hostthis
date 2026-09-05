@@ -102,6 +102,7 @@ var sanitizerCases = []struct {
 // HTML on hostthis' own origin, so a marked or DOMPurify bump that stops
 // stripping has to fail here.
 func TestSanitization(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	br := NewBrowser(t)
 	// The decoy image's 404 is the fixture doing its job. Scoped to that exact

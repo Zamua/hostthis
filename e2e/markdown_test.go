@@ -75,6 +75,7 @@ const readMarkdownRender = `(() => {
 // The markdown shell turns an uploaded document into a rendered DOM: heading,
 // inline emphasis, table, blockquote, language-tagged fence and task list.
 func TestMarkdownRender(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, []byte(markdownFixture), UploadOpts{
 		Type: "md",

@@ -63,6 +63,7 @@ const probeFlame = `(() => {
 // The flamegraph shell lays frames out as width-is-share boxes, zooms into a
 // clicked frame, and resets back to the whole profile.
 func TestFlamegraphRender(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, []byte(flamegraphFixture), UploadOpts{
 		Type: "flamegraph",

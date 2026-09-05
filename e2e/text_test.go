@@ -97,6 +97,7 @@ const readDeepLink = `(() => {
 // anchor, a gutter click that cites a line in the fragment, and a #L10-L20
 // arrival that selects the range and brings it into view.
 func TestTextRender(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, textFixture(), UploadOpts{Type: "txt", Name: "text proof"})
 

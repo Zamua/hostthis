@@ -14,6 +14,7 @@ import (
 // The harness end to end: an ssh upload yields a URL whose shell renders the
 // markdown into the DOM, with nothing logged as an error.
 func TestHarness(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, []byte("# harness\n\nrendered in the browser.\n"), UploadOpts{
 		Type: "md",
@@ -45,6 +46,7 @@ func TestHarness(t *testing.T) {
 // A script the page asked for and did not get is reported, so a clean error log
 // is evidence rather than a filter that swallows everything.
 func TestHarnessReportsMissingSubresource(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, []byte("# probe\n"), UploadOpts{Type: "md"})
 

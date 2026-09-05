@@ -40,6 +40,7 @@ index 3333333..4444444 100644
  import "testing"
  
  func TestGreet(t *testing.T) {
+	t.Parallel()
 +	t.Parallel()
  	if greet("x") == "" {
  		t.Fatal("empty greeting")
@@ -71,6 +72,7 @@ const sidePressedJS = `document.getElementById("btn-side").getAttribute("aria-pr
 // code, and rebuilds the layout when the side-by-side toggle is pressed. A
 // bare git-diff body reaches the same shell with no --type hint.
 func TestDiffRender(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, []byte(diffFixture), UploadOpts{Type: "diff", Name: "diff proof"})
 

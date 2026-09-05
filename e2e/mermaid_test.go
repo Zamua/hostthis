@@ -35,6 +35,7 @@ type diagram struct {
 // code stays 200. An svg carrying this source's nodes and edges exists only if
 // mermaid.js actually ran.
 func TestMermaidRender(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, []byte(mermaidSource), UploadOpts{Type: "mermaid", Name: "mermaid proof"})
 
