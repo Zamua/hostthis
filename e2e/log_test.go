@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"context"
 	"slices"
 	"strings"
 	"testing"
@@ -104,6 +103,7 @@ const (
 // time histogram, and the query box narrows the view to exactly the matching
 // records and restores it when cleared.
 func TestLogRender(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, []byte(logFixture), UploadOpts{Type: "log", Name: "log proof"})
 
@@ -111,17 +111,7 @@ func TestLogRender(t *testing.T) {
 	flow := NewFlow(t, br, "log-render")
 	br.Open(t, paste.URL)
 
-	// Scoped under the browser cap so a stuck render leaves a live context to
-	// screenshot from; waiting on br.Ctx would burn the budget and kill it.
-	renderCtx, cancel := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancel()
-	if err := chromedp.Run(renderCtx,
-		chromedp.WaitVisible(logSettled, chromedp.ByQuery),
-	); err != nil {
-		flow.Shot("stuck")
-		t.Fatalf("log shell never settled: %v\n#log: %q\npage errors: %v",
-			err, logText(t, br), br.Errors())
-	}
+	flow.settle("render", "log", chromedp.WaitVisible(logSettled, chromedp.ByQuery))
 	flow.Shot("rendered")
 
 	var got logRender
@@ -129,7 +119,7 @@ func TestLogRender(t *testing.T) {
 		t.Fatalf("probe rendered page: %v", err)
 	}
 	if got.Recs != 20 {
-		t.Fatalf("rendered %d row(s), want 20\n#log: %q", got.Recs, logText(t, br))
+		t.Fatalf("rendered %d row(s), want 20\n#log: %q", got.Recs, elementText(br, "log"))
 	}
 	if want := "20 records"; got.Meta != want {
 		t.Errorf("meta = %q, want %q", got.Meta, want)
@@ -151,16 +141,10 @@ func TestLogRender(t *testing.T) {
 		t.Errorf("nonzero buckets = %d all / %d lit, want 20 / 20", got.Nonzero, got.Lit)
 	}
 
-	filterCtx, cancelFilter := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancelFilter()
-	if err := chromedp.Run(filterCtx,
+	flow.settle("filter", "log",
 		chromedp.SendKeys("#q", logQuery, chromedp.ByQuery),
 		chromedp.Poll(logFilteredDone, nil),
-	); err != nil {
-		flow.Shot("stuck-filter")
-		t.Fatalf("query %q never narrowed the view to 4 rows: %v\n#log: %q\npage errors: %v",
-			logQuery, err, logText(t, br), br.Errors())
-	}
+	)
 	flow.Shot("filtered")
 
 	var f logFiltered
@@ -182,44 +166,13 @@ func TestLogRender(t *testing.T) {
 		t.Errorf("filtered histogram lights %d bucket(s), want 4", f.Lit)
 	}
 
-	clearCtx, cancelClear := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancelClear()
-	if err := chromedp.Run(clearCtx,
+	flow.settle("clear-query", "meta",
 		// Real backspaces rather than a scripted value reset: the shell
 		// re-renders on the input events a user produces.
 		chromedp.SendKeys("#q", strings.Repeat(kb.Backspace, len(logQuery)), chromedp.ByQuery),
 		chromedp.Poll(logRestoredDone, nil),
-	); err != nil {
-		flow.Shot("stuck-clear")
-		t.Fatalf("clearing the query never restored 20 rows: %v\nmeta: %q\npage errors: %v",
-			err, metaText(t, br), br.Errors())
-	}
+	)
 	flow.Shot("restored")
 
 	br.AssertNoPageErrors(t)
-}
-
-// logText is what the shell left in its mount, for a failure message.
-func logText(t *testing.T, br *Browser) string {
-	t.Helper()
-	return elementText(t, br, "log")
-}
-
-func metaText(t *testing.T, br *Browser) string {
-	t.Helper()
-	return elementText(t, br, "meta")
-}
-
-func elementText(t *testing.T, br *Browser, id string) string {
-	t.Helper()
-	var s string
-	if err := chromedp.Run(br.Ctx,
-		chromedp.Evaluate(`(document.getElementById("`+id+`") || {}).textContent || ""`, &s),
-	); err != nil {
-		return "unreadable: " + err.Error()
-	}
-	if len(s) > 200 {
-		s = s[:200]
-	}
-	return s
 }

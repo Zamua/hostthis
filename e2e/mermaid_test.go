@@ -3,10 +3,8 @@
 package e2e
 
 import (
-	"context"
 	"slices"
 	"testing"
-	"time"
 
 	"github.com/chromedp/chromedp"
 )
@@ -22,11 +20,6 @@ const mermaidSource = `flowchart TD
 
 var wantNodeLabels = []string{"Upload over ssh", "Sniff the kind", "Mermaid shell", "Markdown shell"}
 
-// renderTimeout bounds the wait for mermaid to settle. Shorter than the browser
-// budget so a shell that never settles reports that, rather than spending the
-// rest of the test's time on it.
-const renderTimeout = 30 * time.Second
-
 // diagram is the shape of the rendered svg, read back out of the page.
 type diagram struct {
 	Nodes      int      `json:"nodes"`
@@ -41,6 +34,7 @@ type diagram struct {
 // code stays 200. An svg carrying this source's nodes and edges exists only if
 // mermaid.js actually ran.
 func TestMermaidRender(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, []byte(mermaidSource), UploadOpts{Type: "mermaid", Name: "mermaid proof"})
 
@@ -50,15 +44,9 @@ func TestMermaidRender(t *testing.T) {
 
 	// Both outcomes end the shell's work, so waiting on the pair reports a
 	// failed render as the message the shell wrote instead of as a timeout.
-	renderCtx, cancel := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancel()
-	if err := chromedp.Run(renderCtx,
+	flow.settle("render", "content",
 		chromedp.WaitVisible("#content svg, #content .err", chromedp.ByQuery),
-	); err != nil {
-		flow.Shot("stuck")
-		t.Fatalf("shell settled on neither a diagram nor an error: %v\n#content: %q\npage errors: %v",
-			err, contentText(t, br), br.Errors())
-	}
+	)
 	flow.Shot("rendered")
 
 	var shellErr string
@@ -105,18 +93,3 @@ const probeDiagram = `(() => {
     height: box.height,
   };
 })()`
-
-// contentText is what the shell left on screen, for a failure message.
-func contentText(t *testing.T, br *Browser) string {
-	t.Helper()
-	var s string
-	if err := chromedp.Run(br.Ctx,
-		chromedp.Evaluate(`(document.getElementById("content") || {}).textContent || ""`, &s),
-	); err != nil {
-		return "unreadable: " + err.Error()
-	}
-	if len(s) > 200 {
-		s = s[:200]
-	}
-	return s
-}
