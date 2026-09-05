@@ -2157,6 +2157,121 @@ startup (`HOSTTHIS_LANDING` path) and a reverse proxy in front can
 serve the same bytes directly for efficiency. Single file, no JS,
 no external assets.
 
+## Room push (scheduled Web Push)
+
+A static app can persist and sync state through rooms, but it cannot say
+"time to clean" at eight in the morning: a page cannot schedule a notification
+for when it is closed, and Web Push needs a server that holds subscriptions,
+keeps VAPID keys, and sends at the right moment. Room push is that server, kept
+to the rooms model: no accounts, no server-side app code, the room UUID is the
+only capability.
+
+### Surface
+
+All under the deployed app's own origin, next to the rooms API:
+
+```text
+GET    /api/push/key                            -> { "key": "<VAPID public key, base64url>" }
+PUT    /api/rooms/<uuid>/push/subscriptions     PushSubscription JSON          -> 204
+DELETE /api/rooms/<uuid>/push/subscriptions     { "endpoint": "..." }          -> 204
+GET    /api/rooms/<uuid>/push/subscriptions     -> [{ "endpoint": "...", "added": "<RFC 3339>" }]
+PUT    /api/rooms/<uuid>/push/schedule          Schedule                       -> 204
+GET    /api/rooms/<uuid>/push/schedule          -> Schedule (empty items when unset)
+POST   /api/rooms/<uuid>/push/test              -> 202 { "sent": n, "pruned": n }
+```
+
+`push` and every key under `push/` are reserved path segments of the room
+API, carved out before the KV verbs exactly as `ws` is; a KV key named `push`
+or starting with `push/` is refused with 400. Room keys with other shapes
+(`push:2026-09-06`) are ordinary data.
+
+A `PushSubscription` is the browser's JSON: `endpoint` (an `https` URL of at
+most 1 KiB), `keys.p256dh` (the 65-byte uncompressed P-256 point, base64url)
+and `keys.auth` (16 bytes, base64url). Subscriptions are deduplicated by
+endpoint; a repeated PUT refreshes the keys. Anyone holding the room link can
+add a device, which is the trust model rooms already have.
+
+A `Schedule` is:
+
+```json
+{
+  "tz": "America/New_York",
+  "items": [
+    { "id": "morning", "at": "08:00", "days": [1, 2, 3, 4, 5, 6],
+      "title": "Rota", "bodyKey": "push:{date}", "url": "/?room=<uuid>#/", "tag": "rota-today" },
+    { "id": "once", "when": "2026-09-12T08:00:00-04:00", "title": "Rota", "body": "Deep clean" }
+  ]
+}
+```
+
+- `tz` is an IANA zone the runtime knows. `at` is `HH:MM` local time in `tz`
+  and `days` is a non-empty set of weekdays (0 = Sunday); a one-shot item
+  carries `when` (RFC 3339 with offset) instead of `at` and `days`.
+- `id` is 1 to 32 characters of `[A-Za-z0-9_-]`, unique within the schedule.
+  `title` is at most 64 characters, `url` at most 512, `tag` at most 64.
+- Exactly one of `body` (at most 1 KiB) or `bodyKey` (a valid room key, in
+  which `{date}` is substituted with the local date in `tz`, e.g.
+  `2026-09-06`) is present. The body is read from the room at send time, so
+  the server runs no app logic: the app pre-writes the next days' summaries
+  and a missing key means nothing is sent for that day.
+- PUT replaces the whole schedule; an empty `items` list clears it. Validation
+  refuses the whole document; nothing is applied partially.
+
+### Delivery
+
+Delivery is Web Push (RFC 8030) with `aes128gcm` content encoding (RFC 8291)
+and a VAPID `Authorization` header (RFC 8292), sent with `TTL: 86400` and
+normal urgency. The notification payload is the JSON object
+`{ "title", "body", "url", "tag" }`; a payload over 2 KiB is skipped, never
+truncated. A `404` or `410` from the push service deletes that subscription.
+Other failures are not retried within a fire; the next scheduled fire is the
+retry. Nothing is recorded about who received what.
+
+The Room cell owns the whole feature: the subscription list, the schedule,
+per-subscription daily send counters, the timer, encryption, and the outbound
+HTTP to the push services. The runtime's cells make outbound requests and carry
+the WebCrypto primitives the protocol needs (ECDH and ECDSA on P-256, HMAC for
+HKDF, AES-GCM); a subscriber's raw `p256dh` point is imported through its SPKI
+wrapping. A `test` send runs inline in the request and reports what it did.
+
+One P-256 VAPID key pair exists per app, generated on first use and held by the
+app's own cell beside its room coordinator. No route returns the private key.
+A Room cell never holds it either: it asks the app cell for a signed VAPID
+token per push-service origin (`aud` is the origin, `sub` names the apex,
+`exp` is 12 hours out) and caches nothing across fires.
+
+### Timer
+
+A room with a non-empty schedule keeps one due instant: the earliest next fire
+across its items, computed in `tz`. A room without a schedule keeps no timer
+and costs nothing. The Room cell has exactly one alarm, already used by the
+budget recovery protocol, so both concerns share it: the alarm handler resumes
+any pending budget operation and then fires any due push items, and every
+re-arm sets the alarm to the earlier of the two deadlines rather than clearing
+it. A budget concern that no longer needs the alarm must not disarm a pending
+push fire.
+
+When the alarm fires, every item whose due instant has passed fires once. A due
+instant more than 15 minutes in the past is skipped rather than replayed: a
+stale reminder is worse than none. A fired or skipped one-shot item is removed
+from the schedule. A recurring item's next due instant is then recomputed. Daily
+send counters are keyed by the local date in `tz`; the ninth send to one
+subscription in one local day is skipped.
+
+Push state lives in the Room cell beside the room document but outside the KV
+namespace: it is not part of a scan or snapshot, does not count against the
+room byte ceiling, and is bounded only by its own caps. The memory backend
+stores subscriptions and schedules with the same validation and reports the
+public key, but delivers nothing: push delivery is a celld feature, and the
+conformance suite pins the storage contract on both backends.
+
+### Caps
+
+- 16 subscriptions and 16 schedule items per room.
+- 2 KiB payload; subscription endpoint at most 1 KiB.
+- 8 sends per subscription per local day.
+- One `test` per room per minute (429 with `Retry-After`).
+
 ## Limits
 
 A per-identity quota and an SSH-handshake gate, each enforced atomically
@@ -2241,6 +2356,10 @@ quota); the storage layer never adds the bytes up itself. When a blob
 quota, the blob store surfaces the `ErrServiceFull` sentinel, and the
 upload / site-deploy services translate it into a graceful
 "service is at capacity; try again later" response.
+Room push adds its own caps (16 subscriptions and 16 schedule items per
+room, 2 KiB payload, 8 sends per subscription per local day, one test per
+minute); see "Room push".
+
 Rooms hold no blobs, so a room write never produces `ErrServiceFull`;
 the system recovers as owners delete content and the
 sweep reclaims their bytes, freeing room under the quota.
@@ -3111,11 +3230,12 @@ identity:
 
 - **Identity**, one per owner: quota entries, listing summaries, first-seen,
   durable intents, and the keygate reverse index.
-- **Paste**, one per app slug: paste row, versions, claim, and the app-scoped
-  room creation and byte-budget coordinator. Room accounting works without a
+- **Paste**, one per app slug: paste row, versions, claim, the app-scoped
+  room creation and byte-budget coordinator, and the app's VAPID key pair. Room accounting works without a
   paste row, so a static site can own rooms under the same slug.
 - **Room**, one per `(app slug, room UUID)`: room document, dense sequence,
-  pending budget operation, recovery alarm, and hibernatable sockets.
+  pending budget operation, push subscriptions, schedule and send counters, the
+  shared alarm, and hibernatable sockets.
 - **Subnet**, one per source network: Sybil-admission rows.
 
 The deprecated `IntentLog` class remains only so the original migration stays
