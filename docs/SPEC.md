@@ -45,8 +45,7 @@ renderer (marked + DOMPurify); the shell fetches the raw Markdown bytes
 The server streams the raw bytes with `io.Copy`, so its memory stays
 constant regardless of paste size, mirroring the HTML serve path. The
 shell follows the same sandboxing rules as user-supplied HTML, and
-DOMPurify sanitizes the rendered output in the browser the same way the
-old server-side bluemonday pass did.
+DOMPurify sanitizes the rendered output in the browser.
 
 A **diff** paste is a unified diff (`git diff` / `diff -u` output). It is
 served exactly like Markdown - a fixed, content-independent HTML shell
@@ -665,9 +664,6 @@ delete verb tries the paste first, then falls through to an
 owner-checked site delete; a non-site / foreign slug collapses to
 not-found, no existence leak).
 
-This is the now-real form of the "Static directory hosting" bullet
-under "Future directions"; the persistence-API bullet there stays a
-proposal.
 
 ### Detection: gzip-tar as a format
 
@@ -1104,10 +1100,9 @@ regenerate.
 Static sites can SHIP, but a static site has no backend: it can render,
 not remember. **Rooms** add the missing piece - a small persistence tier
 so a deployed static-site app can store and load state without an account
-system and without any server-side app code. This is the first real cut
-of the "A persistence API" bullet under "Future directions"; that bullet
-called for a per-app KV store fronted by a thin HTTP layer over the metadata backend,
-and this section makes the no-auth, capability-based form of it real.
+system and without any server-side app code: a per-app KV store fronted
+by a thin HTTP layer over the metadata backend, in its no-auth,
+capability-based form (the auth tier is under "Future directions").
 
 The deliberately-scoped commitment for this tier is **a key-value store keyed
 by an unguessable room UUID, with strict per-room isolation, plus a generic
@@ -1386,8 +1381,8 @@ a later tier with its own design:
 
 - **NO per-user auth / JWT / "Sign in with hostthis."** The room UUID IS
   the access capability; there are no accounts, no roles, no token
-  verification in this tier. The "A persistence API" future-directions
-  bullet describes a richer end-user identity spectrum (capability token,
+  verification in this tier. "End-user auth on rooms" under "Future
+  directions" describes a richer end-user identity spectrum (capability token,
   browser keypair, JWT-verifying resource server with a turnkey-or-BYO
   issuer) that lets an app enforce `request.user == resource.owner`
   rules - that is a deliberately-separate LATER tier layered on top of
@@ -3605,35 +3600,21 @@ A paste's HTML cannot:
 Treat any URL on hostthis.dev as untrusted user content - same as you'd
 treat a codepen, a gist, or a github.io page.
 
-### Markdown rendering
+### Markdown and diff rendering
 
-Markdown is rendered to HTML in the visitor's browser. A Markdown read
-returns a fixed, content-independent HTML shell that loads a bundled
-client-side renderer (`marked`) and sanitizer (`DOMPurify`); the shell
-fetches the raw Markdown bytes (via `?raw`) and renders them into the page. DOMPurify strips event handlers,
-`javascript:` URLs, and dangerous tags before the HTML is inserted, so
-uploaded Markdown still can NOT execute JS even though uploaded HTML can
-- DOMPurify is the safety net for the markdown path, replacing the old
-server-side bluemonday pass. The server never renders Markdown on the
-read path, which keeps its memory constant regardless of paste size
-(it streams the raw bytes with `io.Copy`, like the HTML path).
-
-### Diff rendering
-
-A diff paste follows the same model as Markdown. A diff read returns a
-fixed, content-independent HTML shell that loads a bundled client-side
-renderer (`diff2html`) and syntax highlighter (`highlight.js`), both
-vendored as embedded assets served from `/_hostthis/...` (no runtime
-CDN); the shell fetches the raw diff bytes (via `?raw`) and renders them
-into the page with diff2html.
-The view defaults to **line-by-line** with a toggle to **side-by-side**,
-the choice persisted in `localStorage`; code is syntax-highlighted, and
-the page is dark-mode aware via `prefers-color-scheme`. The diff shell is
-served under the same `Content-Security-Policy` as the Markdown shell
-(`script-src 'self'`, `connect-src 'self'`, no inline script), so the
-only scripts that run are the vendored renderer + bootstrap. The server
-never renders the diff: it streams the raw bytes with `io.Copy`, keeping
-memory constant regardless of paste size.
+Markdown and diff pastes render in the visitor's browser. A read returns
+a fixed, content-independent HTML shell that loads a vendored client-side
+renderer served from `/_hostthis/...` (no runtime CDN): `marked` plus
+`DOMPurify` for Markdown, `diff2html` plus `highlight.js` for diffs. The
+shell fetches the raw bytes via `?raw` and renders them; the server never
+renders on the read path and streams those bytes with `io.Copy`, so its
+memory stays constant regardless of paste size. DOMPurify strips event
+handlers, `javascript:` URLs and dangerous tags, so uploaded Markdown
+cannot execute JS even though uploaded HTML can. Both shells run under the
+same `Content-Security-Policy` (`script-src 'self'`, `connect-src 'self'`,
+no inline script). The diff view defaults to line-by-line with a
+side-by-side toggle persisted in `localStorage`, is syntax-highlighted,
+and follows `prefers-color-scheme`.
 
 ### Abuse reporting
 
@@ -3761,6 +3742,9 @@ file). Defaults in parens:
                          / HOSTTHIS_BLOB_WRITEBACK_DIR      write-back cache directory            (<data-dir>/blob-cache)
                          / HOSTTHIS_BLOB_WRITEBACK_MAX_BYTES soft cache ceiling                   (1 GiB)
 
+# Limits
+                         / HOSTTHIS_CREATE_ADMISSION_WIDTH  same-identity create admission width    (2)
+
 # CDN / cache purger
                          / HOSTTHIS_CACHE_BACKEND           noop | cloudflare                       (noop)
                          / HOSTTHIS_CF_PURGE_TOKEN          CF token (Cache:Purge scope only)       (required if cloudflare)
@@ -3793,97 +3777,34 @@ blocked at that point is left to the documented pending-state and startup
 recovery protocols. The 20-second and 35-second limits are product constants,
 not operator knobs.
 
-### What's hardcoded vs operator-tunable
+### What's hardcoded
 
-*Hardcoded* (product opinions, not knobs):
-- Per-paste cap (10 MiB compressed)
-- Per-identity quota (10 MiB compressed)
-- Raw-input hard fast-fail (100 MiB, prevents unbounded reads)
-- Blob compression (zstd level 3, all blobs)
-- Sandbox headers (X-Frame-Options, Referrer-Policy, Permissions-Policy)
-- Slug alphabet (`abcdefghijkmnpqrstuvwxyz23456789`)
-
-*Operator-tunable*:
-- Listen addresses (`--ssh-addr`, `--http-addr`)
-- Public surface (`--apex-domain`, `--mode`, `--scheme`)
-- Data location (`--data-dir`, `--landing`)
-- Durable total-bytes ceiling: a quota on the blob bucket at the object
-  store (e.g. a MinIO bucket quota), NOT an app flag - hostthis carries
-  no `--storage-cap-bytes` knob (see "Limits → Durable total-bytes
-  ceiling")
-- Sybil gate (`--fresh-keys-per-subnet`, `--fresh-keys-window`,
-  both can be tightened or relaxed for the operator's threat model)
-- Same-identity create admission width
-  (`HOSTTHIS_CREATE_ADMISSION_WIDTH`, default 2; see "Limits →
-  Same-identity create admission")
-- Metadata backend (`HOSTTHIS_METADATA_BACKEND=memory|celld`) and celld endpoint
-- Blob backend (`HOSTTHIS_BLOB_BACKEND=disk|s3`), S3 connection settings, and
-  optional local write-back cache
-- CDN cache purger (`HOSTTHIS_CACHE_BACKEND=noop|cloudflare`) and its
-  credential (`HOSTTHIS_CF_PURGE_TOKEN`)
-
-Operators worried about disk pressure set the blob bucket's quota at the
-object store (a hard, exact ceiling on real physical post-compression /
-post-dedup bytes) and can put hostthis behind a reverse proxy that adds
-per-IP rate limiting on top of the Sybil gate. A rejected `Put` past the
-bucket quota surfaces to the user as a graceful "service is at capacity"
-response, and the system recovers as owners delete content and the sweep reclaims
-bytes back under the quota.
+Everything not in the table above is a product opinion, not a knob: the
+per-paste cap (10 MiB compressed), the per-identity quota (100 MiB
+compressed), the raw-input fast-fail (100 MiB, prevents unbounded reads),
+blob compression (zstd level 3, all blobs), the sandbox headers
+(X-Frame-Options, Referrer-Policy, Permissions-Policy), and the slug
+alphabet (`abcdefghijkmnpqrstuvwxyz23456789`). The durable total-bytes
+ceiling is a quota on the blob bucket at the object store, not an app flag
+(see "Limits"): a `Put` rejected past it surfaces as a graceful "service is
+at capacity" response, and the system recovers as owners delete content
+and the sweep reclaims bytes. Per-IP rate limiting on top of the Sybil
+gate is a reverse-proxy concern.
 
 ---
 
 ## Future directions (proposed, not built)
 
-These are bigger bets that would grow hostthis from "host a renderable file
-for 30 days" toward "deploy a small real app over SSH, no account." The first
-of them (static directory hosting) has SHIPPED - see "Static site archives"
-above. The persistence API has now shipped its FIRST CUT too - the no-auth,
-capability-based **Rooms** KV store - see "Rooms (app persistence)" above;
-what remains a PROPOSAL here is the richer end-user AUTH model layered on
-top of rooms (the JWT-verifying / browser-keypair identity spectrum below).
-Each deliberately revisits some of the v1 Non-goals below (a scope
-expansion, not an accident). The throughline: the metadata plane
-is the persistence layer for both, and the differentiator across both is
-the SSH-native, no-account, your-key-is-your-identity model.
+What remains proposed is an end-user AUTH model layered on top of Rooms
+(see "Rooms (app persistence)" for the shipped, capability-only tier):
+verifiable identity per app user, so an app can enforce "user A cannot
+overwrite user B's record," which the Rooms tier deliberately does not.
+The throughline holds: the metadata plane is the persistence layer, and
+the differentiator is the SSH-native, no-account, your-key-is-your-identity
+model. This revisits the "Comments / threaded discussion" non-goal:
+hostthis would not build comments, but a USER could.
 
-### Static directory hosting (serve a whole site)
-
-**This is now SHIPPED - see "Static site archives" above.** What was a
-proposal here is real: a gzip-tar of a static site, piped over the
-existing SSH upload surface (no new verb), is detected, safe-untarred,
-stored as content-addressed blobs plus a manifest, and served at
-`<slug>.hostthis.dev/<path>` under the same identity, quota, 30-day
-and origin-isolation model as an HTML paste. The "Static site
-archives" section is the authoritative description; this bullet is kept
-only as the pointer from the future-directions framing it grew out of.
-
-What shipped vs the original sketch: detection is gzip-tar only (plain
-tar and zip stay out of scope); a default-on SPA fallback serves the
-root `index.html` for an unmatched ROUTE while a missing ASSET still
-404s (see "SPA fallback (route vs. asset)"); and the security story is
-the existing origin-isolation boundary (raw files on their own
-subdomain), not a "strict CSP" - the same posture HTML pastes already
-have, so no new trust boundary was introduced.
-
-This is "Surge.sh / Netlify-drop", but SSH-native and no-signup. It
-revisited the "Binary / non-renderable file hosting" non-goal (a site
-is still renderable content, just multi-file).
-
-### A persistence API (a backend for small apps)
-
-Pair static hosting with a small backend so users host REAL apps, not just
-static pages. The engine already exists: the room KV.
-
-**The no-auth first cut of this has SHIPPED as Rooms - see "Rooms (app
-persistence)" above.** That section is the authoritative description of the
-shipped shape: a per-app KV store keyed by an unguessable room UUID
-(`<app>.hostthis.dev/api/rooms/<uuid>/<key>`, GET/PUT/DELETE), with strict
-per-room isolation, no accounts, persisted over the metadata backend. The
-bullets below are the REMAINING proposal - the richer end-user AUTH model
-that would layer verifiable identity on top of rooms (so an app can enforce
-"user A cannot overwrite user B's record," which the capability-only Rooms
-tier deliberately does not). The shape and trust model here describe that
-later tier; the Rooms section is what is real today.
+### End-user auth on rooms
 
 - **Shape**: a per-app KV / document store. An app gets a namespace (a key
   prefix); its frontend hits `<app>.hostthis.dev/api/kv/<key>`
@@ -3947,33 +3868,18 @@ later tier; the Rooms section is what is real today.
   walled garden, because BYO is always the escape hatch. Leaning ecosystem
   vs host is a product call, bigger than the mechanism.
 
-Revisits the "Comments / threaded discussion" non-goal: we would not build
-comments, but the persistence API lets a USER build them.
-
-**Open design questions:**
-
-- Static (now shipped; these are remaining refinements, not blockers):
-  the SPA fallback has SHIPPED default-on (serve the root `index.html`
-  for an unmatched route, 404 a missing asset - see "SPA fallback
-  (route vs. asset)"); what remains open is custom subdomains, and a
-  per-site opt-OUT flag if a site ever wants hard 404s on unknown
-  routes. Deploy atomicity and the per-identity (rather than per-site)
-  quota are already settled - see "Static site archives".
-- Persistence: the no-auth Rooms tier has SHIPPED (see "Rooms (app
-  persistence)"), which settles per-app namespacing, rate-limiting + abuse
-  on the writable public API, and quota accounting for app data vs paste
-  data. What remains open is the AUTH tier on top of it: the rule model
-  (identity + ownership constraints evaluated server-side); the
-  JWT-verifying resource-server design + the turnkey-vs-BYO issuer config +
-  the browser-keypair signature path; and who pays for a turnkey "Sign in
-  with hostthis" tier (the ecosystem-vs-host product call).
+**Open design questions:** the rule model (identity + ownership
+constraints evaluated server-side); the JWT-verifying resource-server
+design, the turnkey-vs-BYO issuer config and the browser-keypair signature
+path; and who pays for a turnkey "Sign in with hostthis" tier (the
+ecosystem-vs-host product call).
 
 ---
 
 ## Non-goals (explicitly out of v1 scope)
 
 These are interesting but expand the product beyond "host renderable
-content for a short window." Keep the surface small.
+content." Keep the surface small.
 
 - **Binary / non-renderable file hosting**. ZIPs, photos, videos,
   arbitrary blobs are out of scope.
@@ -3988,33 +3894,13 @@ content for a short window." Keep the surface small.
 - **Custom domains** (`pastes.mycompany.com`). The wildcard subdomain
   pattern covers branding-via-slug well enough.
 - **Email notifications**. The ssh response IS the notification.
-- **MCP server**. The apex landing page is already terse, factual, and
-  curl-able by any LLM; a separate machine-doc surface would just
-  duplicate it.
-- **Separate `/llms.txt`**. Same reason - the landing page IS the
-  programmatic reference. Duplicating it as plain text would drift.
+- **MCP server, or a separate `/llms.txt`**. The apex landing page is
+  already terse, factual, and curl-able by any LLM; it IS the programmatic
+  reference, and a second machine-doc surface would duplicate it and drift.
 - **GitHub (or any third-party) account linking / OAuth**. ssh keys
   alone carry identity; we don't need a second source of trust.
-- **Operator-configurable per-paste / per-identity caps**.
-  Those three are hardcoded as product opinions. The Sybil gate IS
-  operator-tunable, and the durable total-bytes ceiling is an
-  object-store bucket quota the operator sets at the storage layer (not
-  an app flag) - see "Limits" and the self-hosting flag table.
+- **Operator-configurable per-paste / per-identity caps**. Hardcoded
+  product opinions; see "Self-hosting" for what is a knob.
 
 If real demand surfaces for any of these later, they can be added
 without breaking v1 semantics. These are explicit no's, not oversights.
-
----
-
-## Open questions
-
-- **Quota display in `whoami` and `list`**: right now `whoami` shows
-  only the active count, not "1.4 MiB / 10 MiB used". Probably worth
-  adding so users see the cap approaching before they hit it.
-- **Mermaid as first rendered-format expansion**: confirm the goldmark
-  + mermaid SVG renderer choice once we get there; for now Mermaid is
-  v2+ and out of scope.
-- **Render cache for Markdown**: no longer relevant - rendering moved
-  to the browser, so there is no server-side render to cache. The raw
-  bytes and the fixed shell are both content-addressable and CDN-cacheable
-  on their own.
