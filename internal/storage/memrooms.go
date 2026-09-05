@@ -20,6 +20,7 @@ type memRoom struct {
 	kv    map[string][]byte
 	bytes int
 	seq   uint64
+	push  memRoomPush
 }
 
 type memRoomCreate struct {
