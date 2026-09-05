@@ -35,7 +35,7 @@ type ManifestEntry struct {
 	SHA            string // sha256 of the file's uncompressed bytes
 	Size           int    // uncompressed bytes (for display)
 	CompressedSize int    // stored post-zstd bytes; the quota basis (matches how pastes charge)
-	ContentType    string // by extension; see contentTypeByExt
+	ContentType    string // by extension; see ContentTypeForPath
 
 	// Kind is the RENDER kind (markdown, diff, flamegraph, ...), strictly
 	// richer than ContentType: several kinds share text/plain and are told
@@ -358,30 +358,16 @@ func (m Manifest) CompressedSize() int {
 	return total
 }
 
-// PathTextBytes returns the total byte length of all path keys, so the untar
-// can bound manifest metadata footprint (MaxManifestBytes).
-func (m Manifest) PathTextBytes() int {
-	var n int
-	for p := range m.Files {
-		n += len(p)
-	}
-	return n
-}
-
-// contentTypeByExt maps a file extension to a content-type, purely by name,
+// ContentTypeForPath maps a file extension to a content-type, purely by name,
 // through fileTypes. An unknown extension gets application/octet-stream so it
 // is served as a download, never mislabeled as text/html (which would let
 // arbitrary bytes run as script on the origin).
 //
 // The ONE place content-type is decided for site files: it is a domain
 // decision (a property of the name), not an infrastructure one.
-func contentTypeByExt(p string) string {
+func ContentTypeForPath(p string) string {
 	if ft, ok := fileTypes[strings.ToLower(path.Ext(p))]; ok {
 		return ft.contentType
 	}
 	return "application/octet-stream"
 }
-
-// ContentTypeForPath exposes contentTypeByExt so the mapping has exactly one
-// definition.
-func ContentTypeForPath(p string) string { return contentTypeByExt(p) }

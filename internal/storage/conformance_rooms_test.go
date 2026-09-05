@@ -121,7 +121,7 @@ func conformRoomRoundTrip(t *testing.T, rr conformanceRoomRepo) {
 		t.Fatalf("scan key count: got %d, want %d", kv.KeyCount(), len(pairs))
 	}
 	for k, want := range pairs {
-		got, ok := kv.Get(k)
+		got, ok := kv.Values[k]
 		if !ok {
 			t.Fatalf("scan missing key %q", k)
 		}
@@ -309,8 +309,8 @@ func conformRoomPerRoomCapConcurrentCeiling(t *testing.T, rr conformanceRoomRepo
 	if err != nil {
 		t.Fatalf("scan after race: %v", err)
 	}
-	if kv.TotalBytes() > domain.MaxRoomBytes {
-		t.Fatalf("persisted room bytes exceed cap after race: %d > %d", kv.TotalBytes(), domain.MaxRoomBytes)
+	if roomBytes(kv) > domain.MaxRoomBytes {
+		t.Fatalf("persisted room bytes exceed cap after race: %d > %d", roomBytes(kv), domain.MaxRoomBytes)
 	}
 }
 
@@ -407,7 +407,7 @@ func conformRoomPerAppAggregateConcurrentCeiling(t *testing.T, rr conformanceRoo
 		if err != nil {
 			t.Fatalf("scan room %d: %v", i, err)
 		}
-		total += kv.TotalBytes()
+		total += roomBytes(kv)
 	}
 	if total > appCap {
 		t.Fatalf("persisted app bytes exceed cap after sibling race: %d > %d", total, appCap)
@@ -458,8 +458,8 @@ func conformRoomDeleteFreesCap(t *testing.T, rr conformanceRoomRepo) {
 	if _, ok := kv.Values["doomed"]; ok {
 		t.Fatalf("deleted key 'doomed' is still present after delete + reclaim")
 	}
-	if kv.TotalBytes() != domain.MaxRoomBytes {
-		t.Fatalf("room bytes after reclaim = %d, want %d (anchor + reclaimed)", kv.TotalBytes(), domain.MaxRoomBytes)
+	if roomBytes(kv) != domain.MaxRoomBytes {
+		t.Fatalf("room bytes after reclaim = %d, want %d (anchor + reclaimed)", roomBytes(kv), domain.MaxRoomBytes)
 	}
 }
 
@@ -851,4 +851,14 @@ func errScanInexact(seq, keys uint64) error {
 	return errors.New("scan fence inexact: snapshot claims seq " +
 		strconv.FormatUint(seq, 10) + " but holds " + strconv.FormatUint(keys, 10) +
 		" keys (each committed mutation added exactly one key, so they must match)")
+}
+
+// roomBytes is the value-byte sum of a scanned room, the quantity the
+// per-room and per-app byte caps bound.
+func roomBytes(kv domain.RoomKV) int {
+	n := 0
+	for _, v := range kv.Values {
+		n += len(v)
+	}
+	return n
 }

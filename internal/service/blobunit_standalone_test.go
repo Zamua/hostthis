@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
@@ -98,8 +97,8 @@ func TestStandalone_StageEncodingRead_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StageEncoding: %v", err)
 	}
-	if sha != domain.HashContent(raw) {
-		t.Fatalf("sha = %q, want %q", sha, domain.HashContent(raw))
+	if sha != sha256Hex(raw) {
+		t.Fatalf("sha = %q, want %q", sha, sha256Hex(raw))
 	}
 	if stored <= 0 {
 		t.Fatalf("stored size = %d, want positive", stored)
