@@ -27,9 +27,8 @@ const (
 	MaxServerFrameBytes int64 = 2 << 20
 )
 
-// Per-pod connection caps. They bound one pod's resource use, not a room's
-// global audience, and both implementations enforce the same numbers so a
-// deploy cannot change limits by swapping backends.
+// Per-pod connection caps: they bound one pod's resource use, not a room's
+// global audience.
 const (
 	DefaultMaxConnsPerRoom = 64
 	DefaultMaxConnsPerApp  = 1024

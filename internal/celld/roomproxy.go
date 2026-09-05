@@ -13,21 +13,6 @@ import (
 	"github.com/Zamua/hostthis/internal/roomwire"
 )
 
-// RoomProxy is the celld backend's real-time layer: a 1:1 WebSocket proxy from
-// each client socket to the room's cell, which is the broadcast point.
-//
-// It satisfies the same RoomRelay surface the hub relay does, so the HTTP layer
-// cannot tell the backends apart - but it holds no room state. The cell sends
-// the snapshot in the event that attaches the upstream socket and mirrors every
-// durable write to its sockets in the event that commits it, which is what
-// makes cross-pod delivery a non-problem rather than a solved one: there is no
-// pod-to-pod hop to lose a frame on.
-//
-// What stays here is exactly what belongs to the pod: the public handshake and
-// origin policy (enforced by the caller before Serve), the connection caps, and
-// the client-facing heartbeat. The cell's sockets are hibernatable and are
-// deliberately never pinged from this side - waking a dormant cell every 20s
-// per connection would defeat the hibernation.
 type relayReservation struct {
 	key     roomwire.RoomKey
 	cancel  context.CancelFunc
@@ -36,6 +21,17 @@ type relayReservation struct {
 	dialing bool
 }
 
+// RoomProxy is the celld backend's real-time layer: a 1:1 WebSocket proxy from
+// each client socket to the room's cell, which is the broadcast point. It holds
+// no room state: the cell sends the snapshot in the event that attaches the
+// upstream socket and mirrors every durable write in the event that commits
+// it, so there is no pod-to-pod hop to lose a frame on.
+//
+// What stays here belongs to the pod: the handshake and origin policy
+// (enforced by the caller before Serve), the connection caps, and the
+// client-facing heartbeat. The cell's sockets are hibernatable and are never
+// pinged from this side; waking a dormant cell every 20s per connection would
+// defeat the hibernation.
 type RoomProxy struct {
 	base string
 
@@ -60,10 +56,8 @@ func NewRoomProxy(base string) *RoomProxy {
 	}
 }
 
-// Admit reserves a connection slot under the same caps and sentinels the hub
-// relay enforces, so the HTTP layer's status mapping keeps working unchanged.
-// The caps are PER POD, as they were for the hub: they bound this pod's
-// resource use, not the room's global audience.
+// Admit reserves a connection slot. The caps are PER POD: they bound this
+// pod's resource use, not the room's global audience.
 func (p *RoomProxy) Admit(key roomwire.RoomKey) (uint64, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -253,9 +247,8 @@ func (p *RoomProxy) Serve(ctx context.Context, key roomwire.RoomKey, id uint64, 
 		}
 	}()
 
-	// The client-facing heartbeat, identical to the hub relay's: ping under the
-	// proxy idle timeouts, reap on a missed pong. The upstream socket is never
-	// pinged - see the type comment.
+	// The client-facing heartbeat: ping under the proxy idle timeouts, reap on
+	// a missed pong. The upstream socket is never pinged (see the type comment).
 	go func() {
 		t := time.NewTicker(roomwire.PingInterval)
 		defer t.Stop()
@@ -288,10 +281,10 @@ func (p *RoomProxy) Serve(ctx context.Context, key roomwire.RoomKey, id uint64, 
 		relayCancel()
 		return
 	}
-	// The close frame must reach the wire before relayCancel: canceling the
-	// context of a blocked Read tears the connection down abruptly, which
-	// races the graceful close into an EOF. The deferred relayCancel runs
-	// after the deferred closes.
+	// The close frame must reach the wire before relayCancel: canceling a
+	// blocked Read's context tears the connection down abruptly, racing the
+	// graceful close into an EOF. The deferred relayCancel runs after the
+	// deferred closes.
 	if ctx.Err() != nil {
 		return
 	}

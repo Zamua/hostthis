@@ -1,12 +1,10 @@
 // Package metrics owns this process's Prometheus collectors.
 //
-// It exists because the SSH surface is otherwise unobservable. A reverse proxy
-// routes SSH as plain TCP, so it can report how many connections are open and
-// nothing else: no command counts, no durations, no failures. Everything about
-// what users actually do here has to come from inside the process.
+// The SSH surface is otherwise unobservable: a reverse proxy routes SSH as
+// plain TCP and can report open connections and nothing else, so command
+// counts, durations and failures have to come from inside the process.
 //
-// Deliberately narrow. Each collector below answers a question worth asking of
-// a running deployment; anything that only answers "what is the code doing" is
+// Deliberately narrow: anything that only answers "what is the code doing" is
 // a log line, not a metric.
 package metrics
 
@@ -46,13 +44,9 @@ func New(reg prometheus.Registerer) *Metrics {
 	return m
 }
 
-// RecordCommand records one handled command.
-//
-// CARDINALITY: verb and outcome must both come from bounded sets. They are
-// derived from user input, and a caller that passed the raw first argument
-// through would let anyone mint unbounded label values by sending random verbs,
-// which grows the series count without limit. Callers map unknown input to a
-// fixed placeholder.
+// RecordCommand records one handled command. verb and outcome must both come
+// from bounded sets: passing the raw first argument through would let anyone
+// grow the series count without limit by sending random verbs.
 func (m *Metrics) RecordCommand(verb, outcome string, d time.Duration) {
 	if m == nil {
 		return

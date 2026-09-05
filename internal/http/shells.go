@@ -12,12 +12,9 @@ import (
 
 // A clientShell is one kind's fixed, content-independent render page: the
 // browser fetches the paste's raw bytes via ?raw and renders them, so server
-// memory stays constant regardless of paste size.
-//
-// Every field a shell needs is declared here rather than in per-kind functions
-// so adding a kind is a table entry. The asset namespace (/_hostthis/<name>) is
-// FLAT and shared across shells, which is what lets the markdown shell
-// lazy-load the mermaid renderer that the mermaid shell owns.
+// memory stays constant regardless of paste size. Adding a kind is a table
+// entry. The asset namespace (/_hostthis/<name>) is FLAT and shared across
+// shells, which lets the markdown shell lazy-load the mermaid renderer.
 type clientShell struct {
 	// version tags the response ETag and is substituted for __VER__ in the
 	// shell's asset URLs as a ?v= cache-buster. The assets are served
@@ -32,12 +29,9 @@ type clientShell struct {
 	// path traversal or arbitrary embedded-file disclosure is possible.
 	assets map[string]string
 	// csp overrides shellCSP for shells whose renderer needs a capability the
-	// baseline denies. Empty means the baseline.
-	//
-	// Per-shell rather than one widened global policy: the markdown and HTML
-	// shells must keep the strictest policy that works, and a single policy
-	// permissive enough for every renderer would hand every paste the union of
-	// what any renderer needs.
+	// baseline denies. Empty means the baseline. Per-shell rather than one
+	// widened global policy, which would hand every paste the union of what
+	// any renderer needs.
 	csp string
 }
 
@@ -63,12 +57,10 @@ const wasmWorkerCSP = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval';
 	"form-action 'none'; frame-ancestors 'none'"
 
 // html returns the shell page with its version stamped into the asset URLs and
-// the kind stamped into the root element.
-//
-// The kind is passed to the page rather than left for the script to sniff:
-// one shell serves both csv and json, the server already classified the bytes
-// at upload, and a viewer that re-derives that can disagree with the stored
-// kind on a file that is ambiguous (a JSON array of arrays is also a table).
+// the kind stamped into the root element. The kind is passed rather than
+// sniffed client-side: one shell serves both csv and json, and a viewer that
+// re-derives the kind can disagree with the stored one on an ambiguous file (a
+// JSON array of arrays is also a table).
 func (s *clientShell) html(kind domain.ContentKind) []byte {
 	b, err := s.fs.ReadFile(s.dir + "/shell.html")
 	if err != nil {
@@ -164,9 +156,8 @@ var assetSource = func() map[string]*clientShell {
 }()
 
 // serveAsset serves a single whitelisted client-render asset under
-// /_hostthis/<name>. The assets are immutable (vendored libs pinned by version,
-// the bootstrap + CSS tied to the shell version), so they get a year-long
-// immutable cache.
+// /_hostthis/<name>. The assets are immutable (pinned by the shell version in
+// their URLs), so they get a year-long immutable cache.
 func (s *Server) serveAsset(w http.ResponseWriter, r *http.Request) {
 	name := path.Base(r.URL.Path)
 	sh, ok := assetSource[name]

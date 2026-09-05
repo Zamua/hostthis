@@ -173,16 +173,12 @@ func (s *Server) serveLanding(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(s.LandingHTML)
 }
 
-// serveSlug resolves reqPath against the paste owning slug. Both the subdomain
-// and the path routes funnel through here.
-//
-// ONE head read decides everything: the head carries the served version's whole
-// descriptor, including its manifest, so a directory's file lookup and a
-// single file's render both answer from it. There is one family: a slug with no
-// paste is not found.
+// serveSlug resolves reqPath against the paste owning slug. ONE head read
+// decides everything: the head carries the served version's whole descriptor,
+// manifest included, so a directory's file lookup and a single file's render
+// both answer from it.
 func (s *Server) serveSlug(w http.ResponseWriter, r *http.Request, slug domain.Slug, reqPath string) {
-	// A deploy may wire either surface alone, so neither reader is assumed
-	// present; the same nil-safety the site reader has always had.
+	// A deploy may wire either surface alone.
 	if s.Pastes == nil {
 		if !s.serveSiteIfExists(w, r, slug, reqPath) {
 			http.NotFound(w, r)
@@ -241,19 +237,15 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 	// only bounds the staleness of passive expiry.
 	h.Set("Cache-Control", "public, max-age=3600")
 
-	// A client-rendered kind (markdown, diff) serves either the raw bytes,
-	// only under an explicit ?raw query, or the fixed client-render shell at
-	// the bare URL. There is no Accept negotiation, so each URL is a SINGLE
-	// representation and safe to edge-cache under the max-age set above. See
-	// docs/SPEC.md "The bare URL always serves the shell (no Accept
-	// negotiation)".
+	// A client-rendered kind serves the raw bytes only under an explicit ?raw,
+	// else the fixed shell. No Accept negotiation, so each URL is a SINGLE
+	// representation and safe to edge-cache (docs/SPEC.md "The bare URL always
+	// serves the shell").
 	shell := shellFor(p.Kind)
 	rawWanted := shell != nil && wantsRaw(r)
 
 	// ETag is the content SHA for HTML and for any raw body. The shell is
-	// content-INDEPENDENT, so it validates on its shell version instead: two
-	// different pastes yield the same shell ETag, and a shell change
-	// propagates within max-age or immediately via the deploy-time purge.
+	// content-INDEPENDENT, so it validates on its shell version instead.
 	etag := `"` + p.ContentSHA + `"`
 	if shell != nil && !rawWanted {
 		etag = `"` + shell.version + `"`
@@ -262,9 +254,8 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 		return
 	}
 
-	// streamBlob copies the stored bytes out under ct. Streamed so a GET never
-	// buffers the whole payload; the body is byte-identical to a buffered read
-	// + write, and server memory stays constant regardless of paste size.
+	// streamBlob copies the stored bytes out under ct without buffering, so
+	// server memory stays constant regardless of paste size.
 	streamBlob := func(ct, what string) {
 		rc, _, err := s.Blobs.Read(r.Context(), p.ContentSHA)
 		if err != nil {
@@ -283,10 +274,8 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 		return
 	}
 
-	// Every other kind is client-rendered: no server-side render, just the raw
-	// bytes (under an explicit ?raw) or the fixed shell that fetches and
-	// renders them. The vendored libraries and the ?raw fetch are all
-	// same-origin under shellCSP.
+	// Every other kind is client-rendered: raw bytes under ?raw, else the shell
+	// that fetches them same-origin under shellCSP.
 	if shell == nil {
 		s.logf("warn: paste read 500: slug=%s unsupported stored kind %q", slug, p.Kind)
 		http.Error(w, "unsupported kind", http.StatusInternalServerError)
@@ -409,15 +398,12 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 }
 
 // serveFromManifest resolves reqPath against a manifest and writes the file.
-// The one implementation both paste shapes go through: a directory
-// paste's manifest is the same value whatever its cardinality.
+// The one implementation both paste shapes go through.
 func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug domain.Slug, manifest domain.Manifest, updatedAt time.Time, reqPath string) {
-	// SPA fallback: a manifest miss that looks like a client-side ROUTE (no
-	// extension, or ".html") serves the site's root index.html with a 200 so
-	// the SPA's JS loads and routes; a miss that looks like a static ASSET
-	// stays a 404. The decision is a pure domain function; see
-	// domain.Manifest.LookupWithSPAFallback + SPEC.md "SPA fallback (route
-	// vs. asset)". A fallback hit is byte-identical to requesting "/".
+	// SPA fallback: a miss that looks like a client-side ROUTE serves the root
+	// index.html with a 200; a miss that looks like a static ASSET stays a 404
+	// (domain.Manifest.LookupWithSPAFallback, SPEC.md "SPA fallback (route vs.
+	// asset)"). A fallback hit is byte-identical to requesting "/".
 	entry, hit, _ := manifest.LookupWithSPAFallback(reqPath)
 	if !hit {
 		http.NotFound(w, r)
@@ -429,10 +415,9 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 	// headers as an HTML paste.
 	//
 	// no-cache, unlike a paste's max-age: under max-age a browser serves a
-	// site's sub-resources from cache without revalidating, so a re-deploy
-	// stays invisible until each asset expires (the SPA stale-bundle trap).
-	// no-cache revalidates every file against its content-SHA ETag: a cheap
-	// 304 when unchanged, fresh bytes when not.
+	// site's sub-resources without revalidating, so a re-deploy stays invisible
+	// until each asset expires. no-cache revalidates every file against its
+	// content-SHA ETag, a cheap 304 when unchanged.
 	h := w.Header()
 	setSandboxHeaders(h)
 	h.Set("Permissions-Policy", permissionsPolicy)

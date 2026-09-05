@@ -28,9 +28,8 @@ type memRoomCreate struct {
 	at     time.Time
 }
 
-// MemRoomRepo is the service.RoomRepo view of a MemRepo. A separate type only
-// so the composition mirrors production wiring, where the room repo is its own
-// adapter object.
+// MemRoomRepo is the service.RoomRepo view of a MemRepo. A separate type so
+// the composition mirrors production wiring.
 type MemRoomRepo struct{ r *MemRepo }
 
 func NewMemRoomRepo(r *MemRepo) *MemRoomRepo { return &MemRoomRepo{r: r} }

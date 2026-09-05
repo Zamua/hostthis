@@ -42,17 +42,14 @@ type PasteAdmin interface {
 	// so a repo whose site bytes already live in the paste sum reports
 	// SiteBytes zero.
 	OwnerSummary(owner string, now time.Time) (domain.OwnerSummary, error)
-	// DropStaleOwnerEntry removes slug from owner's OWN index (both the
-	// owner-doc entry and the enumeration row, in one guarded write) when
-	// the authoritative paste row is ABSENT and the entry is old enough to
-	// be residue rather than a mid-insert: the leftovers a crash between
-	// Delete's two transactions strands. When a paste row exists - any
-	// owner - or the entry is young, it drops nothing and reports false,
-	// so callers keep existence collapsed to not-found. TRUE means the
-	// guarded drop was ATTEMPTED against the stamp it captured; a
-	// stamp-changing race makes the write a no-op, which a later delete
-	// retries. A repo whose delete cannot strand such residue satisfies
-	// this by always reporting false.
+	// DropStaleOwnerEntry removes slug from owner's OWN index when the
+	// authoritative paste row is ABSENT and the entry is old enough to be
+	// residue rather than a mid-insert (a crash between Delete's two
+	// transactions strands one). When a paste row exists, any owner, or the
+	// entry is young, it drops nothing and reports false, so existence stays
+	// collapsed to not-found. True means the guarded drop was attempted; a
+	// stamp-changing race makes it a no-op a later delete retries. A repo whose
+	// delete cannot strand residue always reports false.
 	DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, error)
 }
 
@@ -114,11 +111,9 @@ func (m *Manage) List(owner string) ([]domain.Paste, error) {
 // Show streams the bytes + paste metadata for owner-controlled read. The
 // caller MUST Close the reader.
 //
-// It streams rather than buffering because the bytes it serves are the
-// DECOMPRESSED document, which can be an order of magnitude larger than the
-// compressed per-paste cap that bounds everything else; buffering made this the
-// largest allocation the service could be asked for (docs/SPEC.md "Reads are
-// constant-memory too").
+// Streamed: the DECOMPRESSED document can be an order of magnitude larger than
+// the compressed per-paste cap that bounds everything else (docs/SPEC.md
+// "Reads are constant-memory too").
 func (m *Manage) Show(slug domain.Slug, owner string) (domain.Paste, io.ReadCloser, error) {
 	p, err := m.requireOwner(slug, owner)
 	if err != nil {
@@ -140,14 +135,11 @@ type UpdateResult struct {
 	PinnedAt  int // ver_num of the still-served version if WasPinned
 }
 
-// Update appends a new version to an existing slug. On an UNPINNED paste (the
-// default) the new version also becomes the
-// served one; on a PINNED paste the pin holds and the new version is recorded
-// but not served.
+// Update appends a new version to an existing slug. On an UNPINNED paste the
+// new version also becomes the served one; on a PINNED paste the pin holds and
+// the new version is recorded but not served.
 func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint string) (UpdateResult, error) {
 	staged, err := streamUpload(body)
-	// The spill file lives only as long as this request; without this every
-	// upload leaves one behind.
 	defer staged.discard()
 	switch {
 	case errors.Is(err, errRawCapExceeded):
@@ -212,8 +204,6 @@ func (m *Manage) Rename(slug domain.Slug, owner, name string) error {
 			return ErrInvalidName
 		}
 	}
-	// requireOwner is a pre-check for a clean error; the authoritative owner
-	// re-check happens inside SetName's {slug} transaction.
 	return m.Repo.SetName(slug, name, p.Identity, p.CreatedAt)
 }
 
@@ -226,14 +216,11 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 		if !errors.Is(err, ErrNotFound) {
 			return err
 		}
-		// A crash between delete's two transactions strands the slug in the
-		// caller's own index with no paste row behind it: every read counts
-		// it, and every verb refuses before reaching it. Dropping that
-		// residue IS this verb's job - the caller asked for "this slug gone
-		// from my account" - so the heal lives here, not in a maintenance
-		// pass. The repo drops nothing unless the row is absent AND the slug
-		// sits in the CALLER's own index, so a live slug - whoever owns it -
-		// still answers exactly not-found and existence never leaks.
+		// A crash between delete's two transactions can strand the slug in the
+		// caller's own index with no row behind it. Dropping that residue is
+		// this verb's job. The repo drops nothing unless the row is absent AND
+		// the slug sits in the CALLER's index, so a live slug, whoever owns it,
+		// still answers not-found.
 		healed, herr := m.Repo.DropStaleOwnerEntry(slug, owner)
 		if herr != nil {
 			return fmt.Errorf("heal stale owner entry: %w", herr)
@@ -243,9 +230,6 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 		}
 		return nil
 	}
-	// requireOwner is a pre-check for a clean error; the authoritative owner
-	// re-check happens inside Delete's {slug} transaction, so a delete+re-mint
-	// of the slug by another identity in the window cannot destroy their paste.
 	return m.Repo.Delete(slug, p.Identity, p.CreatedAt)
 }
 
@@ -319,9 +303,7 @@ func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (Dele
 	return DeleteVersionResult{VerNum: verNum, FreedBytes: target.Size}, nil
 }
 
-// Pin sets which version_num the public URL serves and makes it sticky, so
-// later `update`s do not bump it. Only Update
-// does that.
+// Pin makes the public URL serve verNum and stick there across later updates.
 func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version, error) {
 	paste, err := m.requireOwner(slug, owner)
 	if err != nil {

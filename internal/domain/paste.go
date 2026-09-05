@@ -48,25 +48,19 @@ type Paste struct {
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 
-	// Manifest is the SERVED version's content in full, rolled onto the head
-	// with the rest of that version's descriptor. A document is one entry at
-	// Root, a directory is N, so one lookup resolves a request path for either
-	// (docs/SPEC.md "Serving a directory").
-	//
-	// Empty when the stored row carries no manifest; the flat fields above
-	// describe that paste's one blob.
+	// Manifest is the SERVED version's content in full. A document is one
+	// entry at Root, a directory is N, so one lookup resolves a request path
+	// for either (docs/SPEC.md "Serving a directory"). Empty when the stored
+	// row carries no manifest; the flat fields above describe the one blob.
 	Manifest Manifest
 }
 
 // Version is a whole-MANIFEST snapshot in a paste's history. v1 is the
 // initial upload; each `update` or redeploy writes a new row with ver_num+1.
-//
-// The manifest is what makes ONE paste type enough for both a single
-// document and a directory: a document is a one-entry manifest at Root, a
-// directory is an N-entry one, and nothing downstream needs to distinguish
-// them (docs/SPEC.md "One paste, not two aggregates").
-//
-// Kind/ContentSHA/Size describe the ROOT entry.
+// The manifest is what makes ONE paste type enough for both a document (one
+// entry at Root) and a directory (N entries); nothing downstream distinguishes
+// them (docs/SPEC.md "One paste, not two aggregates"). Kind/ContentSHA/Size
+// describe the ROOT entry.
 //
 // Deleted=true is a tombstone: the row stays so version numbers are never
 // reused and `versions` still shows the history, but the blob bytes are gone
@@ -85,9 +79,7 @@ type Version struct {
 	Manifest Manifest
 }
 
-// Root is the manifest path a single-document paste serves at. Naming it
-// makes the one-entry case explicit rather than a convention repeated at call
-// sites.
+// Root is the manifest path a single-document paste serves at.
 const Root = "/"
 
 // NewPasteGeneration returns an opaque token that identifies one slug incarnation.

@@ -51,8 +51,7 @@ func Untar(src io.Reader, sink domain.FileSink, quotaBudget int64) (domain.Manif
 const legacyTypeRegA = '\x00'
 
 // entryOf maps a tar header onto the domain's format-neutral entry. The switch
-// lists ALLOWED types only, so an exotic type flag falls through to EntryOther
-// (which the domain rejects) instead of defaulting into "allowed".
+// lists ALLOWED types only, so an exotic type flag falls through to EntryOther.
 func entryOf(hdr *tar.Header) domain.ArchiveEntry {
 	kind := domain.EntryOther
 	switch hdr.Typeflag {

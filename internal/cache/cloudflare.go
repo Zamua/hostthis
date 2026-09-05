@@ -82,8 +82,7 @@ func (c *Cloudflare) purgeURLs(urls []string) error {
 		c.logf("%v (urls=%v)", err, urls)
 		return err
 	}
-	// Low-volume (one per edit/delete/pin/unpin), so success is logged too:
-	// it keeps the integration observable before any edge caching exists.
+	// Low-volume (one per mutation), so success is logged too.
 	c.logf("cache: purged %v", urls)
 	return nil
 }

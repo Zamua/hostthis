@@ -62,9 +62,8 @@ type WriteBackBlobStore struct {
 	stopOne sync.Once
 
 	// diskBytes is a running count of the cached blob bytes so the common
-	// under-cap Put skips the full-directory walk. Any walk resyncs it, and
-	// the accounting only ever errs high (one extra walk), never low (a
-	// skipped eviction).
+	// under-cap Put skips the directory walk. Any walk resyncs it; it only ever
+	// errs high (one extra walk), never low (a skipped eviction).
 	diskBytes atomic.Int64
 
 	// mu guards inFlight (shas queued or uploading) and closed, so the same
@@ -231,11 +230,10 @@ func (w *WriteBackBlobStore) enqueue(sha string) {
 		return
 	default:
 	}
-	// Queue full: attempt the upload here rather than block the caller on the
-	// queue or drop the work. sha stays in flight for the attempt so eviction
-	// leaves it alone. A failure hands off to ONE tracked retry goroutine with
-	// the workers' bounded backoff; re-entering enqueue instead would spawn an
-	// unbounded chain that hammers the failing backend and outlives Close.
+	// Queue full: upload here rather than block the caller or drop the work.
+	// sha stays in flight so eviction leaves it alone. A failure hands off to
+	// ONE tracked retry goroutine; re-entering enqueue would spawn an unbounded
+	// chain that hammers the failing backend and outlives Close.
 	err := w.uploadOnce(sha)
 	if err == nil {
 		w.releaseInFlight(sha)
@@ -334,8 +332,7 @@ func (w *WriteBackBlobStore) uploadOnce(sha string) error {
 	}
 	if err := w.durable.Put(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 		if errors.Is(err, ErrServiceFull) {
-			// Durable store at quota. No marker is written, so the blob stays
-			// pinned locally, which is correct: it is not durable yet.
+			// Durable store at quota: no marker, so the blob stays pinned locally.
 			return err
 		}
 		return err
@@ -452,9 +449,8 @@ type cacheEntry struct {
 // durable copy of its bytes and is never evicted, so the cap is soft under a
 // burst of uploads the backend has not absorbed yet.
 func (w *WriteBackBlobStore) evictIfNeeded() {
-	// Put calls this every time, so answer from the running count when the
-	// cache is nowhere near the cap: the walk below costs a stat per cached
-	// file, which a multi-file site deploy would otherwise pay per Put.
+	// Answer from the running count when under the cap: the walk below costs a
+	// stat per cached file, which a site deploy would otherwise pay per Put.
 	before := w.diskBytes.Load()
 	if before <= w.maxBytes {
 		return
