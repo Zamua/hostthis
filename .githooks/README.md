@@ -13,9 +13,12 @@ After that, every commit you make from this clone runs the hooks below.
 
 Runs against the staged Go files (no-op when none are staged):
 
-1. `gofmt -l` on each staged `.go` file. Fails if any are not formatted.
-2. `go vet ./...` across the default build.
-3. `golangci-lint run --new-from-rev HEAD --fix=false`, if the tool is on
+1. `gofmt -l` on each staged `.go` file. Fails if any are not formatted, or
+   if one does not parse.
+2. `GOWORK=off go vet ./...`, the configuration that ships.
+3. `GOWORK=off go fix -diff ./...` must print nothing: pending modernizations
+   fail the commit (run `go fix ./...`).
+4. `golangci-lint run --new-from-rev HEAD --fix=false`, if the tool is on
    `PATH`. The hook prints a warning and skips this step when
    `golangci-lint` is not installed, so a fresh contributor isn't blocked.
 
