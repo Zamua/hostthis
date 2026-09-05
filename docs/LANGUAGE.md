@@ -29,21 +29,9 @@ true of a site, and the only difference is how many files its manifest holds.
 
 ## What goes
 
-**`artifact` is retired.** It arrived with the paste/site collapse and duplicates
-`paste` exactly. It is also three syllables where the thing it names already had
-one. Measured before writing this: `paste` appears ~1,300 times and `site`
-~1,060, against `artifact`'s ~93 - so the cheap rename is the newcomer, not the
-entrenched word. Ten of those 93 had already reached user-facing packages, which
-is how a private synonym becomes a public one.
-
-Replace `artifact` with `paste`. Where the sentence is specifically about the
-many-file case, use `site`.
-
-Done. One trap worth knowing if a similar rename comes up: a handful of those
-occurrences were the ORDINARY ENGLISH word - "a storage-side numbering
-artifact", meaning a byproduct - and a blind substitution turned them into
-nonsense ("a storage-side numbering paste"). Read the prose diff; do not trust
-the count reaching zero.
+**`artifact` is not a noun for our things.** Use `paste`, or `site` where the
+sentence is specifically about the many-file case. The ordinary English word
+(a byproduct, "a numbering artifact") is fine.
 
 **`directory` and `document` are not nouns for our things.** Use `site` and
 `paste`. `directory` is fine as plain English for a folder inside an uploaded
