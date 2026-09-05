@@ -2,93 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import worker, { Identity, Paste, Room, Subnet } from "../src/index.js";
-
-class SimulatedCrash extends Error {}
-
-const PASTE_CELL_ID = "a".repeat(64);
-const ROOM_CELL_ID = "b".repeat(64);
-const ROOM_ID = "11111111-1111-4111-8111-111111111111";
-
-function fakeCellID(value) {
-  return { toString() { return value; } };
-}
-
-function clone(value) {
-  return value === undefined ? undefined : structuredClone(value);
-}
-
-class FakeStorage {
-  constructor(seed = new Map(), staged = false, alarm = null) {
-    this.data = new Map([...seed].map(([key, value]) => [key, clone(value)]));
-    this.staged = staged;
-    this.alarm = alarm;
-    this.commits = 0;
-    this.crashAfter = Infinity;
-  }
-
-  async get(key) {
-    return clone(this.data.get(key));
-  }
-
-  async put(keyOrEntries, value) {
-    const entries = typeof keyOrEntries === "string"
-      ? [[keyOrEntries, value]]
-      : keyOrEntries instanceof Map
-        ? [...keyOrEntries]
-        : Object.entries(keyOrEntries);
-    for (const [key, entry] of entries) {
-      this.data.set(String(key), clone(entry));
-    }
-    this.afterCommit();
-  }
-
-  async delete(keyOrKeys) {
-    const keys = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
-    for (const key of keys) {
-      this.data.delete(String(key));
-    }
-    this.afterCommit();
-  }
-
-  async list({ prefix = "" } = {}) {
-    return new Map([...this.data]
-      .filter(([key]) => key.startsWith(prefix))
-      .map(([key, value]) => [key, clone(value)]));
-  }
-
-  async getAlarm() {
-    return this.alarm;
-  }
-
-  async setAlarm(at) {
-    this.alarm = at;
-    this.afterCommit();
-  }
-
-  async deleteAlarm() {
-    this.alarm = null;
-    this.afterCommit();
-  }
-
-  async transaction(callback) {
-    const tx = new FakeStorage(this.data, true, this.alarm);
-    const result = await callback(tx);
-    this.data = tx.data;
-    this.alarm = tx.alarm;
-    this.afterCommit();
-    return result;
-  }
-
-  afterCommit() {
-    if (this.staged) {
-      return;
-    }
-    this.commits++;
-    if (this.commits === this.crashAfter) {
-      throw new SimulatedCrash("process stopped after a durable commit");
-    }
-  }
-}
+import {
+  FakeStorage, PASTE_CELL_ID, ROOM_CELL_ID, ROOM_ID, SimulatedCrash,
+  clone, fakeCellID, putBody, roomDoc, state,
+} from "./harness.js";
 
 async function assertCrashAtomic({ seed, invoke }) {
   const initial = new FakeStorage(seed).data;
@@ -135,15 +52,6 @@ function serialState(storage) {
       tail = run.catch(() => {});
       return run;
     },
-  };
-}
-
-function state(storage) {
-  return {
-    storage,
-    acceptWebSocket() {},
-    getWebSockets() { return []; },
-    blockConcurrencyWhile(callback) { return callback(); },
   };
 }
 
@@ -1044,30 +952,6 @@ async function decide(paste, body) {
   return { status: response.status, body: await response.json() };
 }
 
-function roomDoc(bytes = 4) {
-  const text = "a".repeat(bytes);
-  return {
-    meta: { appSlug: "appslug1", id: "11111111-1111-4111-8111-111111111111", createdAt: 1, updatedAt: 1 },
-    kv: { key: Buffer.from(text).toString("base64") },
-    wire: { key: JSON.stringify(text) },
-    bytes,
-    seq: 7,
-    budgetVersion: 0,
-  };
-}
-
-function putBody(text, appCap = 10) {
-  return {
-    key: "key",
-    value: Buffer.from(text).toString("base64"),
-    wire: JSON.stringify(text),
-    roomCap: 100,
-    keyCap: 10,
-    appCap,
-    now: 9,
-  };
-}
-
 function roomHarness({ room = roomDoc(), pasteSeed = budgetSeed() } = {}) {
   const roomStorage = new FakeStorage(room ? new Map([["state", room]]) : new Map());
   const pasteStorage = new FakeStorage(pasteSeed);
@@ -1288,7 +1172,7 @@ test("Room alarm retries a transient coordinator failure", async () => {
 });
 
 test("Room shrink commits before releasing sibling capacity", async () => {
-  const h = roomHarness({ room: roomDoc(6), pasteSeed: budgetSeed(6, 4) });
+  const h = roomHarness({ room: roomDoc({ bytes: 6 }), pasteSeed: budgetSeed(6, 4) });
   const result = await responseJSON(await h.room().put(putBody("aa")));
   assert.deepStrictEqual(result, { status: 200, body: { seq: 8, bytes: 2 } });
   assert.equal(h.roomStorage.data.get("state").bytes, 2);
@@ -1322,7 +1206,7 @@ test("Room serializes concurrent equal-size mutations", async () => {
 });
 
 test("Room shrink succeeds after commit when allocation release is unavailable", async () => {
-  const h = roomHarness({ room: roomDoc(6), pasteSeed: budgetSeed(6, 4) });
+  const h = roomHarness({ room: roomDoc({ bytes: 6 }), pasteSeed: budgetSeed(6, 4) });
   h.transport.failBefore = 1;
   const result = await responseJSON(await h.room().put(putBody("aa")));
   assert.deepStrictEqual(result, { status: 200, body: { seq: 8, bytes: 2 } });
