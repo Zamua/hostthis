@@ -2,8 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -14,8 +12,8 @@ import (
 	"time"
 )
 
-// fakeDurable is an in-memory durableBlobStore that can be told to fail Put a
-// fixed number of times, or always, and counts the attempts.
+// fakeDurable is an in-memory BlobStore that records what a Put persisted and
+// can be told to fail Put a fixed number of times, or always.
 type fakeDurable struct {
 	mu         sync.Mutex
 	objs       map[string][]byte
@@ -77,9 +75,17 @@ func (f *fakeDurable) has(sha string) bool {
 	return ok
 }
 
-func wbShaOf(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+func (f *fakeDurable) rawSize(sha string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.objs[sha])
+}
+
+// putRaw stores bytes as-is, bypassing any wrapper's encoding.
+func (f *fakeDurable) putRaw(sha string, body []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.objs[sha] = append([]byte(nil), body...)
 }
 
 func newTestWriteBack(t *testing.T, durable durableBlobStore, cfg WriteBackConfig) *WriteBackBlobStore {
@@ -105,7 +111,7 @@ func TestWriteBack_PutLocalThenAsyncUpload(t *testing.T) {
 	wb := newTestWriteBack(t, durable, WriteBackConfig{})
 
 	body := []byte("hello write-back cache")
-	sha := wbShaOf(body)
+	sha := shaOf(body)
 
 	if err := wb.PutPrecompressed(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 		t.Fatalf("Put: %v", err)
@@ -131,7 +137,7 @@ func TestWriteBack_GetCacheThenDurable(t *testing.T) {
 	wb := newTestWriteBack(t, durable, WriteBackConfig{})
 
 	body := []byte("read path content")
-	sha := wbShaOf(body)
+	sha := shaOf(body)
 	if err := wb.PutPrecompressed(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -167,7 +173,7 @@ func TestWriteBack_UploaderRetries(t *testing.T) {
 	wb := newTestWriteBack(t, durable, WriteBackConfig{})
 
 	body := []byte("retry me")
-	sha := wbShaOf(body)
+	sha := shaOf(body)
 	if err := wb.PutPrecompressed(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -187,7 +193,7 @@ func TestWriteBack_UploaderRetries(t *testing.T) {
 func TestWriteBack_StartupRescanReenqueues(t *testing.T) {
 	dir := t.TempDir()
 	body := []byte("survived a crash")
-	sha := wbShaOf(body)
+	sha := shaOf(body)
 
 	// Seed the cache dir as a prior process would leave it after dying between
 	// the local write and the upload: blob present, NO ".up" marker.
@@ -220,7 +226,7 @@ func TestWriteBack_PinnedNotEvicted(t *testing.T) {
 	var shas []string
 	for i := range 5 {
 		body := bytes.Repeat([]byte{byte('a' + i)}, 40) // ~200 bytes total, over the 64 cap
-		sha := wbShaOf(body)
+		sha := shaOf(body)
 		shas = append(shas, sha)
 		if err := wb.PutPrecompressed(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 			t.Fatalf("Put %d: %v", i, err)
@@ -245,7 +251,7 @@ func TestWriteBack_EvictionAfterUpload(t *testing.T) {
 	var shas []string
 	for i := range 5 {
 		body := bytes.Repeat([]byte{byte('a' + i)}, 40)
-		sha := wbShaOf(body)
+		sha := shaOf(body)
 		shas = append(shas, sha)
 		if err := wb.PutPrecompressed(sha, bytes.NewReader(body), int64(len(body))); err != nil {
 			t.Fatalf("Put %d: %v", i, err)
@@ -275,7 +281,7 @@ func TestWriteBack_EvictionAfterUpload(t *testing.T) {
 func TestWriteBack_DurableDedupSkip(t *testing.T) {
 	durable := newFakeDurable()
 	body := []byte("already durable")
-	sha := wbShaOf(body)
+	sha := shaOf(body)
 	_ = durable.Put(sha, bytes.NewReader(body), int64(len(body)))
 	before := durable.putCalls.Load()
 
