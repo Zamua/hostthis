@@ -191,6 +191,22 @@ test("Identity rejects a competing generation for one owner slug", async () => {
   assert.equal(storage.data.get("entries").slugone1.status, "pending");
 });
 
+// An empty or non-string generation is refused before any read.
+test("Identity refuses a malformed generation without touching storage", async () => {
+  const seed = new Map([["entries", { slugone1: {
+    generation: "generation-a", size: 3, status: "pending", at: 1, updatedAt: 1,
+  } }]]);
+  for (const generation of [undefined, "", 7, null]) {
+    const storage = new FakeStorage(seed);
+    const identity = new Identity(state(storage));
+    const body = { slug: "slugone1", generation, status: "ready" };
+    assert.equal((await identity.confirm(body)).status, 400, String(generation));
+    assert.equal((await identity.release(body)).status, 400, String(generation));
+    assert.equal(storage.commits, 0, String(generation));
+    assert.deepStrictEqual(storage.data, new FakeStorage(seed).data, String(generation));
+  }
+});
+
 test("Identity.confirm commits readiness and intent removal together", async () => {
   const seed = new Map([
     ["entries", { newslug2: {
