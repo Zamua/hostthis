@@ -147,7 +147,10 @@ function state(storage) {
   };
 }
 
-test("Identity.reserve commits quota, first-seen, and intent together", async () => {
+test("Identity.reserve commits quota, first-seen, and intent together", async (t) => {
+  const realNow = Date.now;
+  Date.now = () => 1_000_000;
+  t.after(() => { Date.now = realNow; });
   const seed = new Map([["entries", {
     existing1: { size: 2, status: "ready", at: 1, updatedAt: 1 },
   }]]);
@@ -328,6 +331,12 @@ function createIntentBody() {
   };
 }
 
+// Backdates a create intent past the recovery grace so alarm() acts on it.
+function ageIntent(h, id) {
+  const key = `intent:${id}`;
+  h.identityStorage.data.set(key, { ...h.identityStorage.data.get(key), reservedAt: 0 });
+}
+
 test("Identity create alarm confirms a matching paste generation", async () => {
   const h = createIntentHarness();
   const body = createIntentBody();
@@ -342,6 +351,7 @@ test("Identity create alarm confirms a matching paste generation", async () => {
     },
   })).status, 204);
 
+  ageIntent(h, body.intent.id);
   await h.identity.alarm();
   assert.equal(h.identityStorage.data.get("entries").newslug2.status, "pending");
   assert.equal(h.identityStorage.data.get(`intent:${body.intent.id}`), undefined);
@@ -353,6 +363,7 @@ test("Identity create alarm releases a definitely absent paste", async () => {
   const body = createIntentBody();
   assert.equal((await h.identity.reserve(body)).status, 200);
 
+  ageIntent(h, body.intent.id);
   await h.identity.alarm();
   assert.equal(h.identityStorage.data.get("entries").newslug2, undefined);
   assert.equal(h.identityStorage.data.get(`intent:${body.intent.id}`), undefined);
@@ -366,6 +377,7 @@ test("Identity create alarm retains intent across a transient paste failure", as
   assert.equal((await h.identity.reserve(body)).status, 200);
   h.transport.failGet = 1;
 
+  ageIntent(h, body.intent.id);
   await h.identity.alarm();
   assert.notEqual(h.identityStorage.data.get(`intent:${body.intent.id}`), undefined);
   assert.equal(h.identityStorage.data.get("entries").newslug2.generation, body.generation);
@@ -377,6 +389,7 @@ test("Identity create alarm fences a late put before releasing quota", async () 
   const body = createIntentBody();
   assert.equal((await h.identity.reserve(body)).status, 200);
 
+  ageIntent(h, body.intent.id);
   await h.identity.alarm();
   assert.equal(h.identityStorage.data.get("entries").newslug2, undefined);
   assert.equal((await h.paste.put({
@@ -406,6 +419,7 @@ test("Identity create alarm confirms the Paste row status monotonically", async 
   entries.newslug2.status = "ready";
   h.identityStorage.data.set("entries", entries);
 
+  ageIntent(h, body.intent.id);
   await h.identity.alarm();
   assert.equal(h.identityStorage.data.get("entries").newslug2.status, "ready");
   assert.equal(h.identityStorage.data.get(`intent:${body.intent.id}`), undefined);
@@ -424,6 +438,7 @@ test("Identity create alarm retains a conflicting same-generation row", async ()
     },
   })).status, 204);
 
+  ageIntent(h, body.intent.id);
   await h.identity.alarm();
   assert.notEqual(h.identityStorage.data.get(`intent:${body.intent.id}`), undefined);
   assert.equal(h.identityStorage.data.get("entries").newslug2.status, "pending");
@@ -432,15 +447,15 @@ test("Identity create alarm retains a conflicting same-generation row", async ()
 
 test("Identity create alarm leaves an in-flight create alone until the grace elapses", async () => {
   const h = createIntentHarness();
-  const now = Date.now();
-  const body = { ...createIntentBody(), now };
+  const body = createIntentBody();
+  const before = Date.now();
   assert.equal((await h.identity.reserve(body)).status, 200);
-  assert.equal(h.identityStorage.alarm, now + 30_000);
+  assert.ok(h.identityStorage.alarm >= before + 30_000);
 
   await h.identity.alarm();
   assert.notEqual(h.identityStorage.data.get(`intent:${body.intent.id}`), undefined);
   assert.equal(h.identityStorage.data.get("entries").newslug2.generation, body.generation);
-  assert.equal(h.identityStorage.alarm, now + 30_000);
+  assert.ok(h.identityStorage.alarm >= before + 30_000);
 });
 
 test("Identity create alarm retains malformed and unknown intents", async () => {

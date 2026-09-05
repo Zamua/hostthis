@@ -226,7 +226,8 @@ export class Identity {
       if (firstSeen === undefined || firstSeen === null) {
         updates.set("firstSeen", body.now ?? 0);
       }
-      const now = body.now ?? Date.now();
+      // The cell clock, not the caller's: recovery is scheduled against it.
+      const now = Date.now();
       updates.set(intentKey(body.intent.id), {
         ...toRow({ ...body.intent, generation, status: body.status ?? "pending" }),
         reservedAt: now,
