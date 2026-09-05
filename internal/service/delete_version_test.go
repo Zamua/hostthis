@@ -1,42 +1,40 @@
-package service_test
+package service
 
 import (
 	"bytes"
 	"errors"
 	"testing"
-
-	"github.com/Zamua/hostthis/internal/service"
 )
 
 func TestDeleteVersion_FreesQuota(t *testing.T) {
-	withSmallQuota(t, 10<<20)
+	withSmallQuota(t, 1<<20)
 	upload, manage, _ := newStack(t)
 	owner := "key:dv-quota"
 
-	// v1 = 3M, v2 = 6M -> 9M used (v2 serves, v1 idle)
-	// v3 = 3M would total 12M -> ErrOverQuota
-	// delete-version v1 frees 3M -> 6M, so v3 then fits at 9M
-	r, err := upload.Create(bytes.NewReader(htmlBody(3_000_000)), owner, "", "")
+	// v1 = 300K, v2 = 600K -> 900K used (v2 serves, v1 idle)
+	// v3 = 300K would total 1.2M -> ErrOverQuota
+	// delete-version v1 frees 300K -> 600K, so v3 then fits at 900K
+	r, err := upload.Create(bytes.NewReader(htmlBody(300_000)), owner, "", "")
 	if err != nil {
 		t.Fatalf("create v1: %v", err)
 	}
-	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(6_000_000)), ""); err != nil {
+	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(600_000)), ""); err != nil {
 		t.Fatalf("update v2: %v", err)
 	}
 	// Baseline: the v3 attempt fails before delete-version.
-	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(3_000_000)), ""); !errors.Is(err, service.ErrOverQuota) {
+	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(300_000)), ""); !errors.Is(err, ErrOverQuota) {
 		t.Fatalf("expected over-quota baseline, got %v", err)
 	}
 	dr, err := manage.DeleteVersion(r.Paste.Slug, owner, 1)
 	if err != nil {
 		t.Fatalf("DeleteVersion v1: %v", err)
 	}
-	if dr.VerNum != 1 || dr.FreedBytes < 2_500_000 {
+	if dr.VerNum != 1 || dr.FreedBytes < 250_000 {
 		t.Fatalf("delete result unexpected: %+v", dr)
 	}
 	// With v1 freed, v3 should now fit.
-	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(3_000_000)), ""); err != nil {
-		t.Fatalf("after delete-version v1, 3M update should fit: %v", err)
+	if _, err := manage.Update(r.Paste.Slug, owner, bytes.NewReader(htmlBody(300_000)), ""); err != nil {
+		t.Fatalf("after delete-version v1, 300K update should fit: %v", err)
 	}
 }
 
@@ -49,7 +47,7 @@ func TestDeleteVersion_RefusesCurrent(t *testing.T) {
 	}
 	// v1 is the only version, so it is the served one.
 	_, err = manage.DeleteVersion(r.Paste.Slug, owner, 1)
-	if !errors.Is(err, service.ErrVersionCurrentlyServed) {
+	if !errors.Is(err, ErrVersionCurrentlyServed) {
 		t.Fatalf("expected ErrVersionCurrentlyServed, got %v", err)
 	}
 }
@@ -68,7 +66,7 @@ func TestDeleteVersion_RefusesPinnedCurrent(t *testing.T) {
 	if _, err := manage.Pin(r.Paste.Slug, owner, 1); err != nil {
 		t.Fatalf("pin: %v", err)
 	}
-	if _, err := manage.DeleteVersion(r.Paste.Slug, owner, 1); !errors.Is(err, service.ErrVersionCurrentlyServed) {
+	if _, err := manage.DeleteVersion(r.Paste.Slug, owner, 1); !errors.Is(err, ErrVersionCurrentlyServed) {
 		t.Fatalf("expected ErrVersionCurrentlyServed for pinned v1, got %v", err)
 	}
 	// v2 is not served (pin holds v1), so it should delete.
@@ -90,7 +88,7 @@ func TestDeleteVersion_AlreadyDeleted(t *testing.T) {
 	if _, err := manage.DeleteVersion(r.Paste.Slug, owner, 1); err != nil {
 		t.Fatalf("first delete: %v", err)
 	}
-	if _, err := manage.DeleteVersion(r.Paste.Slug, owner, 1); !errors.Is(err, service.ErrVersionAlreadyDeleted) {
+	if _, err := manage.DeleteVersion(r.Paste.Slug, owner, 1); !errors.Is(err, ErrVersionAlreadyDeleted) {
 		t.Fatalf("expected ErrVersionAlreadyDeleted, got %v", err)
 	}
 }
@@ -102,7 +100,7 @@ func TestDeleteVersion_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := manage.DeleteVersion(r.Paste.Slug, owner, 99); !errors.Is(err, service.ErrNotFound) {
+	if _, err := manage.DeleteVersion(r.Paste.Slug, owner, 99); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for nonexistent ver, got %v", err)
 	}
 }

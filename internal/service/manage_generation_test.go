@@ -101,66 +101,56 @@ func assertReplacementUnchanged(t *testing.T, repo *storage.MemRepo, want domain
 
 // Owner authorization for one incarnation cannot mutate its replacement.
 func TestManageMutationsFenceReplacementIncarnation(t *testing.T) {
-	t.Run("update", func(t *testing.T) {
-		inner := storage.NewMemRepo()
-		old := seedGenerationPaste(t, inner)
-		repo := &generationSwapRepo{MemRepo: inner}
-		replacement := armGenerationReplacement(t, repo, old)
-		manage := NewManage(repo, NewStandaloneBlobUnit(newFakeBlobs()))
+	for _, tc := range []struct {
+		name string
+		// seed prepares the old incarnation beyond the bare paste.
+		seed func(t *testing.T, inner *storage.MemRepo, old domain.Paste)
+		// mutate runs the verb under test as the old incarnation's owner.
+		mutate func(m *Manage, old domain.Paste) error
+	}{
+		{"update", nil, func(m *Manage, old domain.Paste) error {
+			_, err := m.Update(old.Slug, old.Identity.String(), bytes.NewBufferString("# update"), "")
+			return err
+		}},
+		{"pin", nil, func(m *Manage, old domain.Paste) error {
+			_, err := m.Pin(old.Slug, old.Identity.String(), 1)
+			return err
+		}},
+		{"unpin", func(t *testing.T, inner *storage.MemRepo, old domain.Paste) {
+			v1, err := inner.GetVersion(old.Slug, 1)
+			if err != nil {
+				t.Fatalf("get v1: %v", err)
+			}
+			if err := inner.SetPinnedVersion(old.Slug, old.Generation, v1); err != nil {
+				t.Fatalf("seed pin: %v", err)
+			}
+		}, func(m *Manage, old domain.Paste) error {
+			return m.Unpin(old.Slug, old.Identity.String())
+		}},
+		{"delete version", func(t *testing.T, inner *storage.MemRepo, old domain.Paste) {
+			if _, err := inner.AppendVersionWithQuotaCheck(context.Background(), old.Slug, old.Generation,
+				domain.KindHTML, "old-v2", 4, 0, old.UpdatedAt.Add(time.Second)); err != nil {
+				t.Fatalf("append v2: %v", err)
+			}
+		}, func(m *Manage, old domain.Paste) error {
+			_, err := m.DeleteVersion(old.Slug, old.Identity.String(), 1)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := storage.NewMemRepo()
+			old := seedGenerationPaste(t, inner)
+			if tc.seed != nil {
+				tc.seed(t, inner, old)
+			}
+			repo := &generationSwapRepo{MemRepo: inner}
+			replacement := armGenerationReplacement(t, repo, old)
+			manage := NewManage(repo, NewStandaloneBlobUnit(newFakeBlobs()))
 
-		if _, err := manage.Update(old.Slug, old.Identity.String(), bytes.NewBufferString("# update"), ""); !errors.Is(err, storage.ErrNotFound) {
-			t.Fatalf("update error = %v, want ErrNotFound", err)
-		}
-		assertReplacementUnchanged(t, inner, replacement)
-	})
-
-	t.Run("pin", func(t *testing.T) {
-		inner := storage.NewMemRepo()
-		old := seedGenerationPaste(t, inner)
-		repo := &generationSwapRepo{MemRepo: inner}
-		replacement := armGenerationReplacement(t, repo, old)
-		manage := NewManage(repo, NewStandaloneBlobUnit(newFakeBlobs()))
-
-		if _, err := manage.Pin(old.Slug, old.Identity.String(), 1); !errors.Is(err, storage.ErrNotFound) {
-			t.Fatalf("pin error = %v, want ErrNotFound", err)
-		}
-		assertReplacementUnchanged(t, inner, replacement)
-	})
-
-	t.Run("unpin", func(t *testing.T) {
-		inner := storage.NewMemRepo()
-		old := seedGenerationPaste(t, inner)
-		v1, err := inner.GetVersion(old.Slug, 1)
-		if err != nil {
-			t.Fatalf("get v1: %v", err)
-		}
-		if err := inner.SetPinnedVersion(old.Slug, old.Generation, v1); err != nil {
-			t.Fatalf("seed pin: %v", err)
-		}
-		repo := &generationSwapRepo{MemRepo: inner}
-		replacement := armGenerationReplacement(t, repo, old)
-		manage := NewManage(repo, NewStandaloneBlobUnit(newFakeBlobs()))
-
-		if err := manage.Unpin(old.Slug, old.Identity.String()); !errors.Is(err, storage.ErrNotFound) {
-			t.Fatalf("unpin error = %v, want ErrNotFound", err)
-		}
-		assertReplacementUnchanged(t, inner, replacement)
-	})
-
-	t.Run("delete version", func(t *testing.T) {
-		inner := storage.NewMemRepo()
-		old := seedGenerationPaste(t, inner)
-		if _, err := inner.AppendVersionWithQuotaCheck(context.Background(), old.Slug, old.Generation,
-			domain.KindHTML, "old-v2", 4, 0, old.UpdatedAt.Add(time.Second)); err != nil {
-			t.Fatalf("append v2: %v", err)
-		}
-		repo := &generationSwapRepo{MemRepo: inner}
-		replacement := armGenerationReplacement(t, repo, old)
-		manage := NewManage(repo, NewStandaloneBlobUnit(newFakeBlobs()))
-
-		if _, err := manage.DeleteVersion(old.Slug, old.Identity.String(), 1); !errors.Is(err, storage.ErrNotFound) {
-			t.Fatalf("delete-version error = %v, want ErrNotFound", err)
-		}
-		assertReplacementUnchanged(t, inner, replacement)
-	})
+			if err := tc.mutate(manage, old); !errors.Is(err, storage.ErrNotFound) {
+				t.Fatalf("%s error = %v, want ErrNotFound", tc.name, err)
+			}
+			assertReplacementUnchanged(t, inner, replacement)
+		})
+	}
 }
