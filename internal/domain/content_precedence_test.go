@@ -7,9 +7,7 @@ import "testing"
 //
 // An internal test on purpose: the assertion that matters is that the fixture
 // SATISFIES BOTH gates, which is only checkable from inside the package. A
-// fixture that trips just one gate proves nothing about their order, and an
-// earlier version of this test had exactly that defect - reordering the gates
-// left it green.
+// fixture that trips just one gate proves nothing about their order.
 func TestGateOrder_JSONBeatsCSV(t *testing.T) {
 	// JSONL with three keys per line: three lines, three consistent
 	// comma-separated fields, so it is a well-formed CSV too.
@@ -23,7 +21,7 @@ func TestGateOrder_JSONBeatsCSV(t *testing.T) {
 			"order of the two gates is not what this test observes")
 	}
 
-	got, err := DetectKind(body, "", func(b []byte) string { return "text/plain; charset=utf-8" })
+	got, err := DetectKind(body, "", stubSniffer("text/plain; charset=utf-8"))
 	if err != nil {
 		t.Fatalf("DetectKind: %v", err)
 	}
@@ -41,7 +39,7 @@ func TestGateOrder_FencedDiffIsMarkdown(t *testing.T) {
 	if !hunkHeaderRe.Match(doc) {
 		t.Fatal("degenerate fixture: it must carry a hunk header, or it proves nothing")
 	}
-	got, err := DetectKind(doc, "", func([]byte) string { return "text/plain; charset=utf-8" })
+	got, err := DetectKind(doc, "", stubSniffer("text/plain; charset=utf-8"))
 	if err != nil {
 		t.Fatalf("DetectKind: %v", err)
 	}
@@ -55,7 +53,7 @@ func TestGateOrder_FencedDiffIsMarkdown(t *testing.T) {
 // its own content, after the hunk header, and is still a diff.
 func TestGateOrder_DiffOfMarkdownIsStillDiff(t *testing.T) {
 	doc := []byte("--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # Title\n-```js\n+```ts\n")
-	got, err := DetectKind(doc, "", func([]byte) string { return "text/plain; charset=utf-8" })
+	got, err := DetectKind(doc, "", stubSniffer("text/plain; charset=utf-8"))
 	if err != nil {
 		t.Fatalf("DetectKind: %v", err)
 	}

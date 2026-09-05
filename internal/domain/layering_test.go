@@ -15,11 +15,8 @@ const internalPrefix = "github.com/Zamua/hostthis/internal/"
 
 // layerPolicy states the architecture positively: for every package under
 // internal/, the COMPLETE set of internal packages it may reach, directly or
-// transitively. Two rules make it fail closed - anything a package reaches
-// that is not on its list is a violation, and a package directory with no
-// entry here is itself a violation. A package added tomorrow is therefore
-// guarded the moment it exists, rather than whenever someone remembers to
-// extend a ban list.
+// transitively. It fails closed: anything a package reaches that is not on its
+// list is a violation, and a package directory with no entry is itself one.
 //
 // Inward to outward:
 //
@@ -34,16 +31,12 @@ const internalPrefix = "github.com/Zamua/hostthis/internal/"
 //	http, ssh         transports; they reach service, never an adapter.
 var layerPolicy = map[string][]string{
 	"mime": {},
-	// Collectors only. It reaches nothing internal and must stay that way: the
-	// consumer declares a recorder port and this package satisfies it, so an
-	// entry here would mean instrumentation had started reaching into the
-	// layers it observes.
+	// Collectors only: the consumer declares a recorder port and this package
+	// satisfies it, so it must never reach the layers it observes.
 	"metrics": {},
 	"domain":  {},
-	// The shared room-realtime vocabulary. A LEAF like domain: both relay
-	// implementations (the hub relay and the celld proxy) speak it, and it may
-	// never grow machinery, or the implementations start sharing more than
-	// words.
+	// The shared room-realtime vocabulary. A leaf like domain: both relay
+	// implementations speak it, and it may never grow machinery.
 	"roomwire": {"domain"},
 	"archive":  {"domain"},
 	"cache":    {"domain"},
@@ -52,20 +45,26 @@ var layerPolicy = map[string][]string{
 	"http":     {"archive", "domain", "mime", "roomwire", "service"},
 	"ssh":      {"archive", "domain", "mime", "service"},
 
-	// The celld backend implements domain-shaped ports directly. It does not
+	// The celld backend implements domain-shaped ports directly and does not
 	// depend on the in-process storage adapter.
 	"celld": {"domain", "roomwire"},
 
-	// Test-only harness: the importable package is empty, so what is pinned
-	// here is that it STAYS empty. Its _test.go files wire whole stacks, which
-	// is legitimate and is why the graph below is production-only.
+	// Test-only harness: the importable package is empty and must stay so. Its
+	// _test.go files wire whole stacks, which is why the graph is production-only.
 	"sitevalidation": {},
 
-	// Test-only fixture: opens the metadata repo other packages' tests build
-	// on, so it reaches storage by design. Nothing in production may import it,
-	// which the "no adapter reachable from service" rules below enforce because
-	// it is not in any production package's allowed set.
+	// Test-only fixture that opens the metadata repo other packages' tests
+	// build on. Nothing in production may import it, which holds because it is
+	// in no production package's allowed set.
 	"storagetest": {"domain", "storage"},
+}
+
+// domainBannedStd are the stdlib packages the domain may not reach, even
+// transitively: each is a MECHANISM (transport, wire format, storage,
+// process). Pure computation over values the domain already holds is fine,
+// which is why crypto, encoding/json and regexp are absent.
+var domainBannedStd = []string{
+	"net/http", "net", "archive/tar", "archive/zip", "compress/gzip", "database/sql", "os/exec",
 }
 
 // Dependencies point inward: domain depends on nothing, service and storage on
@@ -74,32 +73,33 @@ var layerPolicy = map[string][]string{
 // wrong way.
 func TestLayeringDependenciesPointInward(t *testing.T) {
 	dirs := internalPackageDirs(t, "..")
-	graph := internalDependencyGraph(t)
+	graph, std := internalDependencyGraph(t)
 
 	for _, v := range layerViolations(layerPolicy, dirs, graph) {
 		t.Error(v)
 	}
+	for _, b := range domainBannedStd {
+		if slices.Contains(std["domain"], b) {
+			t.Errorf("DOMAIN PURITY VIOLATION: internal/domain depends on %q; declare a port and have an adapter supply it", b)
+		}
+	}
 }
 
 // layerViolations reports every way an observed package set and dependency
-// graph departs from policy. It performs no I/O so the guard itself can be
-// exercised against a synthetic graph.
+// graph departs from policy. No I/O, so the guard itself can be exercised
+// against a synthetic graph.
 func layerViolations(policy map[string][]string, dirs []string, graph map[string][]string) []string {
 	var out []string
 
 	for _, pkg := range dirs {
 		allowed, governed := policy[pkg]
 		if !governed {
-			out = append(out, "UNGUARDED PACKAGE: internal/"+pkg+" has no layerPolicy entry.\n"+
-				"Every package under internal/ must declare the complete set of internal packages it may "+
-				"reach, so that a new package is denied by default rather than silently exempt.")
+			out = append(out, "UNGUARDED PACKAGE: internal/"+pkg+" has no layerPolicy entry; a new package is denied by default")
 			continue
 		}
 		deps, listed := graph[pkg]
 		if !listed {
-			out = append(out, "UNCHECKED PACKAGE: internal/"+pkg+" exists on disk but go list did not report it, "+
-				"so its dependencies were never inspected. Fix the build constraints or the list invocation; "+
-				"an unloadable package is an unguarded one.")
+			out = append(out, "UNCHECKED PACKAGE: internal/"+pkg+" is on disk but go list did not report it; an unloadable package is an unguarded one")
 			continue
 		}
 		for _, dep := range deps {
@@ -107,36 +107,29 @@ func layerViolations(policy map[string][]string, dirs []string, graph map[string
 				continue
 			}
 			out = append(out, "LAYERING VIOLATION: internal/"+pkg+" reaches internal/"+dep+
-				" (directly or transitively).\nDependencies must point inward. If "+pkg+" needs something from "+
-				dep+", either move the type to domain (if it is a pure value) or declare a port in the consumer "+
-				"and have "+dep+" implement it. Widening layerPolicy is the last resort, not the first.")
+				"; move the type to domain or declare a port in the consumer, widening layerPolicy is the last resort")
 		}
 	}
 
 	for pkg := range policy {
 		if !slices.Contains(dirs, pkg) {
-			out = append(out, "STALE POLICY ENTRY: layerPolicy names internal/"+pkg+", which does not exist. "+
-				"Remove the entry so the map keeps describing the tree.")
+			out = append(out, "STALE POLICY ENTRY: layerPolicy names internal/"+pkg+", which does not exist")
 		}
 	}
 
 	// A package inherits whatever its permitted imports may reach, so an
-	// allow-list that is not closed under the policy describes a graph that
-	// cannot occur and would report spurious violations the first time the
-	// intermediate package grew a dependency.
+	// allow-list not closed under the policy describes an impossible graph.
 	for pkg, allowed := range policy {
 		for _, dep := range allowed {
 			inherited, governed := policy[dep]
 			if !governed {
-				out = append(out, "POLICY NAMES UNKNOWN PACKAGE: internal/"+pkg+" is allowed to reach internal/"+
-					dep+", which has no layerPolicy entry.")
+				out = append(out, "POLICY NAMES UNKNOWN PACKAGE: internal/"+pkg+" may reach internal/"+dep+", which has no layerPolicy entry")
 				continue
 			}
 			for _, indirect := range inherited {
 				if !slices.Contains(allowed, indirect) {
 					out = append(out, "POLICY NOT CLOSED: internal/"+pkg+" may reach internal/"+dep+
-						", which may reach internal/"+indirect+", but internal/"+indirect+
-						" is missing from "+pkg+"'s list.")
+						", which may reach internal/"+indirect+", missing from "+pkg+"'s list")
 				}
 			}
 		}
@@ -146,9 +139,8 @@ func layerViolations(policy map[string][]string, dirs []string, graph map[string
 	return out
 }
 
-// internalPackageDirs enumerates the packages that actually exist on disk.
-// Reading the tree rather than a hand-written list is what makes the guard
-// fail closed: a package nobody added to layerPolicy still shows up here.
+// internalPackageDirs enumerates the packages that exist on disk. Reading the
+// tree rather than a hand-written list is what makes the guard fail closed.
 func internalPackageDirs(t *testing.T, root string) []string {
 	t.Helper()
 	var dirs []string
@@ -183,18 +175,18 @@ func internalPackageDirs(t *testing.T, root string) []string {
 	if err != nil {
 		t.Fatalf("walk %s: %v", root, err)
 	}
-	// Guard the guard: an empty or tiny package list makes every loop above
-	// pass while checking nothing.
+	// Guard the guard: a tiny package list makes every check pass vacuously.
 	if len(dirs) < 8 {
-		t.Fatalf("found %d packages under %s, which cannot be right; this guard would pass vacuously", len(dirs), root)
+		t.Fatalf("found %d packages under %s, which cannot be right", len(dirs), root)
 	}
 	return dirs
 }
 
 // internalDependencyGraph maps each internal package to the internal packages
-// it reaches, transitively. The default build must load every package, or an
-// unloadable package could escape this guard.
-func internalDependencyGraph(t *testing.T) map[string][]string {
+// it reaches transitively, and separately to its non-internal (stdlib and
+// module) deps. The default build must load every package, or an unloadable
+// package could escape this guard.
+func internalDependencyGraph(t *testing.T) (internal, external map[string][]string) {
 	t.Helper()
 	cmd := exec.Command("go", "list", "-f", `{{.ImportPath}} {{join .Deps " "}}`, "../...")
 	var stderr bytes.Buffer
@@ -204,7 +196,7 @@ func internalDependencyGraph(t *testing.T) map[string][]string {
 		t.Fatalf("go list ../...: %v\n%s", err, stderr.String())
 	}
 
-	graph := make(map[string][]string)
+	internal, external = map[string][]string{}, map[string][]string{}
 	for line := range strings.SplitSeq(string(out), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
@@ -214,20 +206,25 @@ func internalDependencyGraph(t *testing.T) map[string][]string {
 		if !ok {
 			continue
 		}
-		deps := []string{}
+		internal[pkg] = []string{}
 		for _, d := range fields[1:] {
 			if dep, ok := strings.CutPrefix(d, internalPrefix); ok {
-				deps = append(deps, dep)
+				internal[pkg] = append(internal[pkg], dep)
+			} else {
+				external[pkg] = append(external[pkg], d)
 			}
 		}
-		graph[pkg] = deps
 	}
-	return graph
+	// Guard the guard: a dependency list this short means go list saw nothing.
+	if len(external["domain"]) < 5 {
+		t.Fatalf("go list returned %d deps for internal/domain, which cannot be right", len(external["domain"]))
+	}
+	return internal, external
 }
 
-// The guard must catch the shapes a hand-listed ban map structurally cannot:
-// a package with no entry at all, and an outward import whose target the
-// author happened not to name.
+// The guard catches the shapes a hand-listed ban map structurally cannot: a
+// package with no entry, an outward import whose target the author did not
+// name, and an allow-list not closed under the policy.
 func TestLayerViolationsFailsClosed(t *testing.T) {
 	policy := map[string][]string{
 		"mime":    {},
@@ -248,10 +245,11 @@ func TestLayerViolationsFailsClosed(t *testing.T) {
 	}
 
 	cases := []struct {
-		name  string
-		dirs  []string
-		graph map[string][]string
-		want  string
+		name   string
+		policy map[string][]string
+		dirs   []string
+		graph  map[string][]string
+		want   string
 	}{
 		{
 			name: "package with no policy entry",
@@ -293,74 +291,31 @@ func TestLayerViolationsFailsClosed(t *testing.T) {
 			graph: clean,
 			want:  "STALE POLICY ENTRY: layerPolicy names internal/storage",
 		},
+		{
+			name: "policy not closed under itself",
+			policy: map[string][]string{
+				"domain":  {},
+				"archive": {"domain"},
+				"service": {"archive"}, // reaches domain through archive, but omits it
+			},
+			dirs: []string{"archive", "domain", "service"},
+			graph: map[string][]string{
+				"domain": {}, "archive": {"domain"}, "service": {"archive", "domain"},
+			},
+			want: "POLICY NOT CLOSED:",
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := layerViolations(policy, tc.dirs, tc.graph)
+			p := tc.policy
+			if p == nil {
+				p = policy
+			}
+			got := layerViolations(p, tc.dirs, tc.graph)
 			if !slices.ContainsFunc(got, func(v string) bool { return strings.HasPrefix(v, tc.want) }) {
 				t.Errorf("no violation starting with %q; got %v", tc.want, got)
 			}
 		})
-	}
-}
-
-// An allow-list that is not closed under the policy describes an impossible
-// graph, so the closure rule has to be able to fire.
-func TestLayerViolationsRejectsAnUnclosedPolicy(t *testing.T) {
-	policy := map[string][]string{
-		"domain":  {},
-		"archive": {"domain"},
-		"service": {"archive"}, // reaches domain through archive, but omits it
-	}
-	dirs := []string{"archive", "domain", "service"}
-	graph := map[string][]string{
-		"domain": {}, "archive": {"domain"}, "service": {"archive", "domain"},
-	}
-
-	got := layerViolations(policy, dirs, graph)
-	if !slices.ContainsFunc(got, func(v string) bool { return strings.HasPrefix(v, "POLICY NOT CLOSED:") }) {
-		t.Errorf("unclosed policy not reported; got %v", got)
-	}
-}
-
-// The domain must not depend on infrastructure, and stdlib counts. A package
-// is banned when it represents a MECHANISM (transport, wire format, storage,
-// process); pure computation over values the domain already holds is fine,
-// which is why crypto, encoding/json and regexp are not listed.
-func TestDomainDoesNotDependOnInfrastructure(t *testing.T) {
-	banned := []string{
-		"net/http",      // a transport
-		"net",           // sockets
-		"archive/tar",   // a wire format
-		"archive/zip",   //
-		"compress/gzip", //
-		"database/sql",  // storage
-		"os/exec",       // process
-	}
-
-	out, err := exec.Command("go", "list", "-deps", "../domain").Output()
-	if err != nil {
-		t.Fatalf("go list -deps domain: %v", err)
-	}
-	deps := make(map[string]bool)
-	for line := range strings.SplitSeq(string(out), "\n") {
-		deps[strings.TrimSpace(line)] = true
-	}
-
-	for _, b := range banned {
-		if deps[b] {
-			t.Errorf("DOMAIN PURITY VIOLATION: internal/domain depends on %q.\n"+
-				"That is a mechanism (transport / wire format / storage / process), not a business rule. "+
-				"Declare a PORT in the domain - an interface or function type naming the capability - and "+
-				"have an adapter supply it, the way DetectKind takes a MIMESniffer.", b)
-		}
-	}
-
-	// Guard the guard: an empty or tiny dependency list makes the loop above
-	// pass while checking nothing.
-	if len(deps) < 5 {
-		t.Fatalf("go list returned %d deps for internal/domain, which cannot be right; "+
-			"this guard would pass vacuously", len(deps))
 	}
 }

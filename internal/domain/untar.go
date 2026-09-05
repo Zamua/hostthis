@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"path"
@@ -8,12 +9,10 @@ import (
 )
 
 // gzipMagic is the two-byte gzip member header (RFC 1952).
-var gzipMagic = [2]byte{0x1f, 0x8b}
+var gzipMagic = []byte{0x1f, 0x8b}
 
 // HasGzipMagic reports whether b begins with the gzip magic bytes.
-func HasGzipMagic(b []byte) bool {
-	return len(b) >= 2 && b[0] == gzipMagic[0] && b[1] == gzipMagic[1]
-}
+func HasGzipMagic(b []byte) bool { return bytes.HasPrefix(b, gzipMagic) }
 
 // FileSink receives one safe, fully-validated regular file from the archive.
 // SafeUntar streams the file's bytes to the sink so the caller can hash +

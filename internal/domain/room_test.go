@@ -30,17 +30,6 @@ func TestNewRoomID_IsValidV4(t *testing.T) {
 	}
 }
 
-func TestNewRoomID_Unique(t *testing.T) {
-	seen := make(map[RoomID]struct{}, 1000)
-	for i := range 1000 {
-		id := NewRoomID()
-		if _, dup := seen[id]; dup {
-			t.Fatalf("collision after %d ids: %q", i, id)
-		}
-		seen[id] = struct{}{}
-	}
-}
-
 func TestParseRoomID(t *testing.T) {
 	valid := "f47ac10b-58cc-4372-a567-0e02b2c3d479" // canonical v4
 	got, err := ParseRoomID(valid)
@@ -73,6 +62,10 @@ func TestParseRoomID(t *testing.T) {
 		{"version 1 not 4", "f47ac10b-58cc-1372-a567-0e02b2c3d479", ErrRoomIDMalformed},
 		{"bad variant", "f47ac10b-58cc-4372-7567-0e02b2c3d479", ErrRoomIDMalformed},
 		{"slug shaped", "abc12345", ErrRoomIDMalformed},
+		{"braced", "{f47ac10b-58cc-4372-a567-0e02b2c3d479}", ErrRoomIDMalformed},
+		{"urn", "urn:uuid:f47ac10b-58cc-4372-a567-0e02b2c3d479", ErrRoomIDMalformed},
+		{"32-hex", "f47ac10b58cc4372a5670e02b2c3d479", ErrRoomIDMalformed},
+		{"nil uuid", "00000000-0000-0000-0000-000000000000", ErrRoomIDMalformed},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

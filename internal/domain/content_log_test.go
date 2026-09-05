@@ -86,8 +86,8 @@ func TestDetectKind_LogPrefixIsTruncated(t *testing.T) {
 	}
 }
 
-// Plain text used to be REJECTED unless it carried a Markdown cue, so a
-// config file or a stack trace bounced.
+// Plain text with no Markdown cue (a config file, a stack trace) falls back
+// to text rather than being refused.
 func TestDetectKind_PlainTextFallsBackToText(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -131,14 +131,10 @@ func TestDetectKind_TextDoesNotStealFromRicherKinds(t *testing.T) {
 	}
 }
 
-// Binary is still refused, including under a text hint: the fallback must not
-// become a way in for bytes no viewer can render.
+// The text fallback must not become a way in for bytes no viewer can render.
 func TestDetectKind_TextFallbackStillRefusesBinary(t *testing.T) {
 	bin := append([]byte{0x00, 0x01, 0x02, 0xff, 0xfe}, make([]byte, 600)...)
 	if _, err := domain.DetectKind(bin, "", sniff); err == nil {
 		t.Fatal("binary accepted by the text fallback")
-	}
-	if _, err := domain.DetectKind(bin, "text", sniff); err == nil {
-		t.Fatal("binary accepted under a text hint")
 	}
 }

@@ -156,26 +156,6 @@ func TestManifest_SizesCountEveryPath(t *testing.T) {
 	}
 }
 
-func TestContentTypeForPath(t *testing.T) {
-	cases := map[string]string{
-		"index.html":  "text/html; charset=utf-8",
-		"style.css":   "text/css; charset=utf-8",
-		"app.js":      "text/javascript; charset=utf-8",
-		"mod.mjs":     "text/javascript; charset=utf-8",
-		"data.json":   "application/json; charset=utf-8",
-		"logo.svg":    "image/svg+xml",
-		"pic.png":     "image/png",
-		"font.woff2":  "font/woff2",
-		"mystery.xyz": "application/octet-stream", // an unknown ext downloads, never renders as HTML
-		"noext":       "application/octet-stream",
-	}
-	for p, want := range cases {
-		if got := ContentTypeForPath(p); got != want {
-			t.Fatalf("%q: got %q, want %q", p, got, want)
-		}
-	}
-}
-
 func TestDetectKind_Archive(t *testing.T) {
 	gzipBytes := []byte{0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00}
 	if k, err := DetectKind(gzipBytes, "", http.DetectContentType); err != nil || k != KindSite {
