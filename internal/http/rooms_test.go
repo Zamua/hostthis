@@ -44,16 +44,28 @@ func buildRoomServer(t *testing.T) *Server {
 	}
 }
 
-// req issues a request against the app subdomain <slug>.hostthis.test.
-func req(t *testing.T, srv *Server, method, slug, path string, body []byte) *httptest.ResponseRecorder {
+// reqOpt adjusts one request before it is served.
+type reqOpt func(*http.Request)
+
+// from sets the TCP source address.
+func from(addr string) reqOpt { return func(r *http.Request) { r.RemoteAddr = addr } }
+
+// xff sets X-Forwarded-For.
+func xff(v string) reqOpt { return func(r *http.Request) { r.Header.Set("X-Forwarded-For", v) } }
+
+// req issues a request against the app subdomain <slug>.hostthis.test from a
+// fixed source address unless an option overrides it.
+func req(t *testing.T, srv *Server, method, slug, path string, body []byte, opts ...reqOpt) *httptest.ResponseRecorder {
 	t.Helper()
-	var r *http.Request
+	var rd io.Reader
 	if body != nil {
-		r = httptest.NewRequest(method, "http://"+slug+".hostthis.test"+path, bytes.NewReader(body))
-	} else {
-		r = httptest.NewRequest(method, "http://"+slug+".hostthis.test"+path, nil)
+		rd = bytes.NewReader(body)
 	}
+	r := httptest.NewRequest(method, "http://"+slug+".hostthis.test"+path, rd)
 	r.RemoteAddr = "203.0.113.5:40000"
+	for _, o := range opts {
+		o(r)
+	}
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
 	return w

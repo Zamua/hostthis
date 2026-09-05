@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	stdhttp "net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -61,14 +62,33 @@ func buildSiteServer(t *testing.T) *Server {
 	}
 }
 
-func TestSite_ServesFilesAndIndex(t *testing.T) {
-	srv := buildSiteServer(t)
-	mux := srv.Handler()
+// siteGet issues one GET against the site fixture in subdomain or path mode.
+func siteGet(t *testing.T, mux stdhttp.Handler, pathMode bool, p string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest("GET", p, nil)
+	r.Host = "abc23456.paste.test"
+	if pathMode {
+		if p == "/" {
+			p = ""
+		}
+		r = httptest.NewRequest("GET", "/p/abc23456"+p, nil)
+		r.Host = "paste.test"
+	}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	return w
+}
+
+// A site resolves identically in subdomain and path mode: real files and
+// directory indexes serve with their recorded types, a route-shaped miss
+// serves the root index.html, and an asset-shaped miss 404s.
+func TestSite_Serves(t *testing.T) {
+	mux := buildSiteServer(t).Handler()
 	cases := []struct {
 		path  string
 		code  int
-		body  string
-		ctype string
+		body  string // checked only on 200
+		ctype string // checked only on 200
 	}{
 		{"/", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
 		{"/index.html", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
@@ -76,83 +96,32 @@ func TestSite_ServesFilesAndIndex(t *testing.T) {
 		{"/blog/", 200, "<h1>blog</h1>", "text/html; charset=utf-8"},
 		{"/blog", 200, "<h1>blog</h1>", "text/html; charset=utf-8"},
 		{"/data.bin", 200, "\x00\x01\x02", "application/octet-stream"},
-		// SPA fallback: a ".html" miss is a client-side route and serves the
-		// root index.html; a ".css" miss is a real missing asset and 404s.
-		{"/missing.html", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
+		{"/about", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
+		{"/users/123/edit", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
+		{"/about.html", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
 		{"/blog/missing.css", 404, "", ""},
 	}
-	for _, c := range cases {
-		t.Run(c.path, func(t *testing.T) {
-			r := httptest.NewRequest("GET", c.path, nil)
-			r.Host = "abc23456.paste.test"
-			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, r)
-			if w.Code != c.code {
-				t.Fatalf("code: got %d, want %d", w.Code, c.code)
-			}
-			if c.code != 200 {
-				return
-			}
-			if w.Body.String() != c.body {
-				t.Fatalf("body: got %q, want %q", w.Body.String(), c.body)
-			}
-			if ct := w.Header().Get("Content-Type"); ct != c.ctype {
-				t.Fatalf("content-type: got %q, want %q", ct, c.ctype)
-			}
-		})
-	}
-}
-
-// TestSite_SPAFallback pins route-vs-asset behavior over the real handler: a
-// route-shaped miss serves the ROOT index.html, an asset-shaped miss 404s, and
-// real files and directory indexes are unaffected.
-func TestSite_SPAFallback(t *testing.T) {
-	srv := buildSiteServer(t)
-	mux := srv.Handler()
-
-	cases := []struct {
-		name  string
-		path  string
-		code  int
-		body  string // checked only on 200
-		ctype string // checked only on 200
-	}{
-		// Real files / indexes resolve directly, with no fallback.
-		{"root", "/", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
-		{"dir index", "/blog/", 200, "<h1>blog</h1>", "text/html; charset=utf-8"},
-		{"real file", "/css/style.css", 200, "body{}", "text/css; charset=utf-8"},
-
-		// Route-shaped misses serve the ROOT index.html via the fallback.
-		{"no-ext route", "/about", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
-		{"deep route", "/users/123", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
-		{"nested route", "/users/123/edit", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
-		{"html route", "/about.html", 200, "<h1>root</h1>", "text/html; charset=utf-8"},
-
-		// Asset-shaped misses 404.
-		{"missing js", "/assets/nope.js", 404, "", ""},
-		{"missing css", "/styles/gone.css", 404, "", ""},
-		{"missing png", "/img/missing.png", 404, "", ""},
-		{"missing woff2", "/fonts/x.woff2", 404, "", ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			r := httptest.NewRequest("GET", c.path, nil)
-			r.Host = "abc23456.paste.test"
-			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, r)
-			if w.Code != c.code {
-				t.Fatalf("code: got %d, want %d", w.Code, c.code)
-			}
-			if c.code != 200 {
-				return
-			}
-			if w.Body.String() != c.body {
-				t.Fatalf("body: got %q, want %q", w.Body.String(), c.body)
-			}
-			if ct := w.Header().Get("Content-Type"); ct != c.ctype {
-				t.Fatalf("content-type: got %q, want %q", ct, c.ctype)
-			}
-		})
+	for _, mode := range []struct {
+		name     string
+		pathMode bool
+	}{{"subdomain", false}, {"path", true}} {
+		for _, c := range cases {
+			t.Run(mode.name+c.path, func(t *testing.T) {
+				w := siteGet(t, mux, mode.pathMode, c.path)
+				if w.Code != c.code {
+					t.Fatalf("code: got %d, want %d", w.Code, c.code)
+				}
+				if c.code != 200 {
+					return
+				}
+				if w.Body.String() != c.body {
+					t.Fatalf("body: got %q, want %q", w.Body.String(), c.body)
+				}
+				if ct := w.Header().Get("Content-Type"); ct != c.ctype {
+					t.Fatalf("content-type: got %q, want %q", ct, c.ctype)
+				}
+			})
+		}
 	}
 }
 
@@ -218,38 +187,6 @@ func TestSite_SandboxHeaders(t *testing.T) {
 	}
 	if h.Get("ETag") != `"sha-index"` {
 		t.Fatalf("etag: got %q", h.Get("ETag"))
-	}
-}
-
-func TestSite_PathMode(t *testing.T) {
-	srv := buildSiteServer(t)
-	mux := srv.Handler()
-	// Path-mode requests on the apex Host (no slug subdomain).
-	cases := []struct {
-		path string
-		code int
-		body string
-	}{
-		{"/p/abc23456", 200, "<h1>root</h1>"},
-		{"/p/abc23456/css/style.css", 200, "body{}"},
-		{"/p/abc23456/blog/", 200, "<h1>blog</h1>"},
-		// The SPA fallback applies in path mode too.
-		{"/p/abc23456/missing.html", 200, "<h1>root</h1>"},
-		{"/p/abc23456/missing.js", 404, ""},
-	}
-	for _, c := range cases {
-		t.Run(c.path, func(t *testing.T) {
-			r := httptest.NewRequest("GET", c.path, nil)
-			r.Host = "paste.test"
-			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, r)
-			if w.Code != c.code {
-				t.Fatalf("code: got %d, want %d", w.Code, c.code)
-			}
-			if c.code == 200 && w.Body.String() != c.body {
-				t.Fatalf("body: got %q, want %q", w.Body.String(), c.body)
-			}
-		})
 	}
 }
 
