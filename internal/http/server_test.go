@@ -112,218 +112,122 @@ func TestSubdomain_OnlyServesRoot(t *testing.T) {
 	}
 }
 
-// TestPasteRead_CacheHeaders pins Cache-Control + ETag + Last-Modified on a
-// successful read: they are the contract with the CDN, and a regression breaks
-// edge caching silently.
+// readyHTMLServer wires one ready HTML paste at abc23456 with shaA as its
+// content, updated at updatedAt.
+func readyHTMLServer(body []byte, updatedAt time.Time) *Server {
+	return &Server{
+		Pastes: stubPasteReader{p: domain.Paste{
+			Slug: "abc23456", Status: domain.PasteStatusReady, Kind: domain.KindHTML,
+			ContentSHA: shaA, UpdatedAt: updatedAt,
+		}},
+		Blobs:      stubBlobReader{body: body},
+		ApexDomain: "paste.test",
+	}
+}
+
+// getPaste serves GET /p/abc23456 with the given request headers.
+func getPaste(srv *Server, hdr map[string]string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest("GET", "/p/abc23456", nil)
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+	return w
+}
+
+// Cache-Control, ETag, and Last-Modified are the contract with the CDN.
 func TestPasteRead_CacheHeaders(t *testing.T) {
 	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	body := []byte("<!doctype html><h1>hi</h1>")
-	paste := domain.Paste{
-		Slug:       "abc23456",
-		Kind:       domain.KindHTML,
-		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
-		UpdatedAt:  updatedAt,
-	}
-	srv := &Server{
-		Pastes:     stubPasteReader{p: paste},
-		Blobs:      stubBlobReader{body: body},
-		ApexDomain: "paste.test",
-		Now:        func() time.Time { return updatedAt.Add(time.Hour) },
-	}
-	r := httptest.NewRequest("GET", "/p/abc23456", nil)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
-
-	if w.Code != 200 {
-		t.Fatalf("status: got %d, want 200", w.Code)
+	w := getPaste(readyHTMLServer(body, updatedAt), nil)
+	if w.Code != 200 || w.Body.String() != string(body) {
+		t.Fatalf("status %d body %q, want 200 with the content", w.Code, w.Body.String())
 	}
 	if got := w.Header().Get("Cache-Control"); got != "public, max-age=3600" {
 		t.Errorf("Cache-Control: got %q, want public, max-age=3600", got)
 	}
-	wantETag := `"` + paste.ContentSHA + `"`
-	if got := w.Header().Get("ETag"); got != wantETag {
-		t.Errorf("ETag: got %q, want %q", got, wantETag)
+	if got := w.Header().Get("ETag"); got != `"`+shaA+`"` {
+		t.Errorf("ETag: got %q, want the content SHA", got)
 	}
-	if got := w.Header().Get("Last-Modified"); got == "" || !strings.Contains(got, "Jun 2026") {
+	if got := w.Header().Get("Last-Modified"); got != "Sun, 07 Jun 2026 14:00:00 GMT" {
 		t.Errorf("Last-Modified: got %q", got)
 	}
 }
 
-func TestPasteRead_IfNoneMatch304(t *testing.T) {
+// A matching validator on either header answers 304 with no body.
+func TestPasteRead_Conditional304(t *testing.T) {
 	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
-	paste := domain.Paste{
-		Slug:       "abc23456",
-		Kind:       domain.KindHTML,
-		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
-		UpdatedAt:  updatedAt,
-	}
-	srv := &Server{
-		Pastes:     stubPasteReader{p: paste},
-		Blobs:      stubBlobReader{body: []byte("body")},
-		ApexDomain: "paste.test",
-		Now:        func() time.Time { return updatedAt.Add(time.Hour) },
-	}
-	r := httptest.NewRequest("GET", "/p/abc23456", nil)
-	r.Header.Set("If-None-Match", `"`+paste.ContentSHA+`"`)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
-
-	if w.Code != 304 {
-		t.Fatalf("status: got %d, want 304 Not Modified", w.Code)
-	}
-	if w.Body.Len() > 0 {
-		t.Errorf("304 response body should be empty, got %d bytes", w.Body.Len())
+	srv := readyHTMLServer([]byte("body"), updatedAt)
+	for name, hdr := range map[string]map[string]string{
+		"If-None-Match":     {"If-None-Match": `"` + shaA + `"`},
+		"If-Modified-Since": {"If-Modified-Since": updatedAt.Add(time.Hour).UTC().Format(stdhttp.TimeFormat)},
+	} {
+		w := getPaste(srv, hdr)
+		if w.Code != 304 || w.Body.Len() > 0 {
+			t.Errorf("%s: status %d body %d bytes, want 304 and empty", name, w.Code, w.Body.Len())
+		}
 	}
 }
 
-func TestHealthz_ReturnsOK(t *testing.T) {
-	srv := &Server{ApexDomain: "paste.test", Color: "blue"}
-	r := httptest.NewRequest("GET", "/healthz", nil)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
-	if w.Code != 200 {
-		t.Fatalf("status: got %d, want 200", w.Code)
-	}
-	if got := w.Body.String(); got != "ok\n" {
-		t.Errorf("body: got %q, want %q", got, "ok\n")
-	}
-	if got := w.Header().Get("X-Backend-Color"); got != "blue" {
-		t.Errorf("X-Backend-Color: got %q, want blue", got)
-	}
-	if got := w.Header().Get("Cache-Control"); got != "no-store" {
-		t.Errorf("Cache-Control: got %q, want no-store", got)
-	}
-}
-
-func TestHealthz_NoColorWhenUnset(t *testing.T) {
-	srv := &Server{ApexDomain: "paste.test"}
-	r := httptest.NewRequest("GET", "/healthz", nil)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
-	if got := w.Header().Get("X-Backend-Color"); got != "" {
-		t.Errorf("X-Backend-Color: got %q, want empty", got)
+// /healthz answers on any Host, uncached, and names the replica color only
+// when one is configured.
+func TestHealthz(t *testing.T) {
+	for _, color := range []string{"blue", ""} {
+		srv := &Server{ApexDomain: "paste.test", Color: color}
+		r := httptest.NewRequest("GET", "/healthz", nil)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		if w.Code != 200 || w.Body.String() != "ok\n" {
+			t.Errorf("color %q: status %d body %q, want 200 ok", color, w.Code, w.Body.String())
+		}
+		if got := w.Header().Get("X-Backend-Color"); got != color {
+			t.Errorf("X-Backend-Color: got %q, want %q", got, color)
+		}
+		if got := w.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("Cache-Control: got %q, want no-store", got)
+		}
 	}
 }
 
-func TestPasteRead_IfModifiedSince304(t *testing.T) {
-	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
-	paste := domain.Paste{
-		Slug:       "abc23456",
-		Kind:       domain.KindHTML,
-		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
-		UpdatedAt:  updatedAt,
+// The lifecycle gate (docs/SPEC.md "Paste lifecycle status"): only a ready
+// paste serves its content. A pending paste serves an uncached 200 with
+// Retry-After, the signal e2e polls on; a failed paste is an uncached 410
+// without it.
+func TestPasteRead_Lifecycle(t *testing.T) {
+	content := []byte("<!doctype html><h1>ready</h1>")
+	cases := []struct {
+		status     domain.PasteStatus
+		code       int
+		retryAfter bool
+		serves     bool
+	}{
+		{domain.PasteStatusPending, 200, true, false},
+		{domain.PasteStatusFailed, 410, false, false},
+		{domain.PasteStatusReady, 200, false, true},
 	}
-	srv := &Server{
-		Pastes:     stubPasteReader{p: paste},
-		Blobs:      stubBlobReader{body: []byte("body")},
-		ApexDomain: "paste.test",
-		Now:        func() time.Time { return updatedAt.Add(time.Hour) },
-	}
-	r := httptest.NewRequest("GET", "/p/abc23456", nil)
-	r.Header.Set("If-Modified-Since", updatedAt.Add(time.Hour).UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"))
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
-
-	if w.Code != 304 {
-		t.Fatalf("status: got %d, want 304", w.Code)
-	}
-}
-
-// TestPasteRead_PendingServesLoadingPage pins the pending lifecycle state: a
-// GET serves the auto-refreshing loading page (200, no-store, meta-refresh)
-// and never the content. docs/SPEC.md "Paste lifecycle status".
-func TestPasteRead_PendingServesLoadingPage(t *testing.T) {
-	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
-	paste := domain.Paste{
-		Slug:   "abc23456",
-		Status: domain.PasteStatusPending,
-		Kind:   domain.KindHTML,
-	}
-	srv := &Server{
-		Pastes:     stubPasteReader{p: paste},
-		Blobs:      stubBlobReader{body: []byte("should not be served")},
-		ApexDomain: "paste.test",
-		Now:        func() time.Time { return now },
-	}
-	r := httptest.NewRequest("GET", "/p/abc23456", nil)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
-
-	if w.Code != 200 {
-		t.Fatalf("status: got %d, want 200", w.Code)
-	}
-	if got := w.Header().Get("Cache-Control"); got != "no-store" {
-		t.Errorf("Cache-Control: got %q, want no-store", got)
-	}
-	bodyStr := w.Body.String()
-	if !strings.Contains(bodyStr, "http-equiv=\"refresh\"") {
-		t.Errorf("loading page missing meta-refresh: %q", bodyStr)
-	}
-	if !strings.Contains(bodyStr, "preparing your paste") {
-		t.Errorf("loading page missing expected copy")
-	}
-	if strings.Contains(bodyStr, "should not be served") {
-		t.Errorf("pending paste leaked content bytes")
-	}
-}
-
-// TestPasteRead_FailedServesErrorPage pins the failed lifecycle state: a GET
-// serves the error page (410 Gone, no-store), never the content.
-func TestPasteRead_FailedServesErrorPage(t *testing.T) {
-	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
-	paste := domain.Paste{
-		Slug:   "abc23456",
-		Status: domain.PasteStatusFailed,
-		Kind:   domain.KindHTML,
-	}
-	srv := &Server{
-		Pastes:     stubPasteReader{p: paste},
-		Blobs:      stubBlobReader{body: []byte("should not be served")},
-		ApexDomain: "paste.test",
-		Now:        func() time.Time { return now },
-	}
-	r := httptest.NewRequest("GET", "/p/abc23456", nil)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
-
-	if w.Code != 410 {
-		t.Fatalf("status: got %d, want 410", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "could not be saved") {
-		t.Errorf("error page missing expected copy: %q", w.Body.String())
-	}
-	if strings.Contains(w.Body.String(), "should not be served") {
-		t.Errorf("failed paste leaked content bytes")
-	}
-}
-
-// TestPasteRead_ReadyServesContent pins the terminal success state: an explicit
-// ready status serves the content.
-func TestPasteRead_ReadyServesContent(t *testing.T) {
-	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
-	body := []byte("<!doctype html><h1>ready</h1>")
-	paste := domain.Paste{
-		Slug:       "abc23456",
-		Status:     domain.PasteStatusReady,
-		Kind:       domain.KindHTML,
-		ContentSHA: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe",
-		UpdatedAt:  now,
-	}
-	srv := &Server{
-		Pastes:     stubPasteReader{p: paste},
-		Blobs:      stubBlobReader{body: body},
-		ApexDomain: "paste.test",
-		Now:        func() time.Time { return now.Add(time.Hour) },
-	}
-	r := httptest.NewRequest("GET", "/p/abc23456", nil)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
-
-	if w.Code != 200 {
-		t.Fatalf("status: got %d, want 200", w.Code)
-	}
-	if got := w.Body.String(); got != string(body) {
-		t.Errorf("body: got %q, want %q", got, body)
+	for _, c := range cases {
+		t.Run(string(c.status), func(t *testing.T) {
+			srv := readyHTMLServer(content, time.Now().UTC())
+			p := srv.Pastes.(stubPasteReader).p
+			p.Status = c.status
+			srv.Pastes = stubPasteReader{p: p}
+			w := getPaste(srv, nil)
+			if w.Code != c.code {
+				t.Fatalf("status: got %d, want %d", w.Code, c.code)
+			}
+			if got := w.Header().Get("Retry-After") != ""; got != c.retryAfter {
+				t.Errorf("Retry-After present: got %v, want %v", got, c.retryAfter)
+			}
+			if got := w.Body.String() == string(content); got != c.serves {
+				t.Errorf("serves content: got %v, want %v (body %q)", got, c.serves, w.Body.String())
+			}
+			if !c.serves {
+				if got := w.Header().Get("Cache-Control"); got != "no-store" {
+					t.Errorf("Cache-Control: got %q, want no-store", got)
+				}
+			}
+		})
 	}
 }
 

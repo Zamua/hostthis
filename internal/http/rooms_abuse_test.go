@@ -12,18 +12,10 @@ import (
 	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
-// reqXFF POSTs /api/rooms with a chosen RemoteAddr and an optional
-// X-Forwarded-For, so a test can probe per-IP bucketing under forged headers.
-func reqXFF(t *testing.T, srv *Server, slug, remoteAddr, xff string) *httptest.ResponseRecorder {
+// create POSTs /api/rooms from remoteAddr with the given X-Forwarded-For.
+func create(t *testing.T, srv *Server, slug, remoteAddr, forwarded string) *httptest.ResponseRecorder {
 	t.Helper()
-	r := httptest.NewRequest(http.MethodPost, "http://"+slug+".hostthis.test/api/rooms", nil)
-	r.RemoteAddr = remoteAddr
-	if xff != "" {
-		r.Header.Set("X-Forwarded-For", xff)
-	}
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
-	return w
+	return req(t, srv, http.MethodPost, slug, "/api/rooms", nil, from(remoteAddr), xff(forwarded))
 }
 
 // TestRoomsHTTP_XFFNotTrustedByDefault pins that with HOSTTHIS_HTTP_TRUST_XFF
@@ -38,11 +30,11 @@ func TestRoomsHTTP_XFFNotTrustedByDefault(t *testing.T) {
 	const slug = "appz2345"
 	const realAddr = "203.0.113.5:40000"
 
-	if w := reqXFF(t, srv, slug, realAddr, "1.2.3.4"); w.Code != http.StatusCreated {
+	if w := create(t, srv, slug, realAddr, "1.2.3.4"); w.Code != http.StatusCreated {
 		t.Fatalf("first create: code %d body %q", w.Code, w.Body.String())
 	}
 	// Same RemoteAddr, a different forged XFF: 429, not a fresh bucket.
-	if w := reqXFF(t, srv, slug, realAddr, "5.6.7.8"); w.Code != http.StatusTooManyRequests {
+	if w := create(t, srv, slug, realAddr, "5.6.7.8"); w.Code != http.StatusTooManyRequests {
 		t.Fatalf("XFF rotation bypassed the per-IP cap: code %d, want 429", w.Code)
 	}
 }
@@ -62,13 +54,13 @@ func TestRoomsHTTP_XFFTrustedWhenOptedIn(t *testing.T) {
 	// The left-most entry is client-claimed and must be ignored. Buckets are
 	// /24-masked, so client Y below has to sit in a different /24 to be
 	// distinguishable from client X.
-	if w := reqXFF(t, srv, slug, proxyAddr, "spoofed, 203.0.113.10"); w.Code != http.StatusCreated {
+	if w := create(t, srv, slug, proxyAddr, "spoofed, 203.0.113.10"); w.Code != http.StatusCreated {
 		t.Fatalf("client X first create: code %d body %q", w.Code, w.Body.String())
 	}
-	if w := reqXFF(t, srv, slug, proxyAddr, "other-spoof, 203.0.113.10"); w.Code != http.StatusTooManyRequests {
+	if w := create(t, srv, slug, proxyAddr, "other-spoof, 203.0.113.10"); w.Code != http.StatusTooManyRequests {
 		t.Fatalf("client X second create: code %d, want 429", w.Code)
 	}
-	if w := reqXFF(t, srv, slug, proxyAddr, "198.51.100.7"); w.Code != http.StatusCreated {
+	if w := create(t, srv, slug, proxyAddr, "198.51.100.7"); w.Code != http.StatusCreated {
 		t.Fatalf("client Y create: code %d, want 201 (its own bucket)", w.Code)
 	}
 }

@@ -84,49 +84,19 @@ func (s *Server) Handler() http.Handler {
 		// the paste fallback serves ONLY at "/" so a browser's automatic
 		// favicon fetch does not receive the paste HTML labeled text/html.
 		if slug, ok := s.slugFromHost(r.Host); ok {
-			// The /api/rooms surface is handled BEFORE the static-file lookup
-			// so a manifest file can never shadow the API, and the API is
-			// served even for a paste-only slug that owns no site.
-			if rest, ok := roomAPIPath(r.URL.Path); ok {
-				s.handleRoomsAPI(w, r, slug, rest)
-				return
-			}
-			if r.URL.Path == pushKeyPath {
-				s.handlePushKey(w, r, slug)
-				return
-			}
-			s.serveSlug(w, r, slug, r.URL.Path)
+			s.route(w, r, slug, r.URL.Path)
 			return
 		}
 		// Path mode: /p/<slug> (paste) or /p/<slug>/<path...> (site) on the
 		// apex.
 		if after, ok := strings.CutPrefix(r.URL.Path, "/p/"); ok {
-			rest := after
-			// "/p/abc12345" -> slug "abc12345", path "/".
-			// "/p/abc12345/css/x.css" -> slug "abc12345", path "/css/x.css".
-			slugStr := rest
-			sitePath := "/"
-			if i := strings.IndexByte(rest, '/'); i >= 0 {
-				slugStr = rest[:i]
-				sitePath = rest[i:]
-			}
+			slugStr, rest, _ := strings.Cut(after, "/")
 			slug, err := domain.ParseSlug(slugStr)
 			if err != nil {
 				http.NotFound(w, r)
 				return
 			}
-			// Same carve-out as subdomain mode: the rooms API is handled
-			// before the static-file lookup so a manifest file never shadows
-			// it.
-			if rest, ok := roomAPIPath(sitePath); ok {
-				s.handleRoomsAPI(w, r, slug, rest)
-				return
-			}
-			if sitePath == pushKeyPath {
-				s.handlePushKey(w, r, slug)
-				return
-			}
-			s.serveSlug(w, r, slug, sitePath)
+			s.route(w, r, slug, "/"+rest)
 			return
 		}
 		if r.URL.Path == "/" {
@@ -136,6 +106,21 @@ func (s *Server) Handler() http.Handler {
 		http.NotFound(w, r)
 	})
 	return mux
+}
+
+// route dispatches one request for slug's origin: the rooms API and the push
+// key are carved out BEFORE the static-file lookup so a manifest file can
+// never shadow them, and they answer even for a paste-only slug.
+func (s *Server) route(w http.ResponseWriter, r *http.Request, slug domain.Slug, path string) {
+	if rest, ok := roomAPIPath(path); ok {
+		s.handleRoomsAPI(w, r, slug, rest)
+		return
+	}
+	if path == pushKeyPath {
+		s.handlePushKey(w, r, slug)
+		return
+	}
+	s.serveSlug(w, r, slug, path)
 }
 
 func (s *Server) serveHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -188,9 +173,8 @@ func (s *Server) serveLanding(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(s.LandingHTML)
 }
 
-// servePasteSlug serves a paste with its sandboxing headers. Both the
-// subdomain and the path routes funnel through here.
-// servePaste resolves reqPath against the paste owning slug.
+// serveSlug resolves reqPath against the paste owning slug. Both the subdomain
+// and the path routes funnel through here.
 //
 // ONE head read decides everything: the head carries the served version's whole
 // descriptor, including its manifest, so a directory's file lookup and a
@@ -249,16 +233,13 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 		return
 	}
 
-	// Sandboxing headers per SPEC.md HTML-sandboxing section.
 	h := w.Header()
-	h.Set("X-Frame-Options", "DENY")
-	h.Set("Referrer-Policy", "no-referrer")
-	h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()")
+	setSandboxHeaders(h)
+	h.Set("Permissions-Policy", permissionsPolicy)
 
 	// An update/delete fires an explicit purge via CachePurger, so max-age
 	// only bounds the staleness of passive expiry.
 	h.Set("Cache-Control", "public, max-age=3600")
-	h.Set("Last-Modified", p.UpdatedAt.UTC().Format(http.TimeFormat))
 
 	// A client-rendered kind (markdown, diff) serves either the raw bytes,
 	// only under an explicit ?raw query, or the fixed client-render shell at
@@ -277,17 +258,8 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 	if shell != nil && !rawWanted {
 		etag = `"` + shell.version + `"`
 	}
-	h.Set("ETag", etag)
-
-	if etagMatches(r.Header.Get("If-None-Match"), etag) {
-		w.WriteHeader(http.StatusNotModified)
+	if notModified(w, r, etag, p.UpdatedAt) {
 		return
-	}
-	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
-		if since, err := http.ParseTime(ims); err == nil && !p.UpdatedAt.UTC().Truncate(time.Second).After(since) {
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
 	}
 
 	// streamBlob copies the stored bytes out under ct. Streamed so a GET never
@@ -333,16 +305,16 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 	_, _ = w.Write(shell.html(p.Kind))
 }
 
-// loadingPageHTML is the body served for a pending paste. The meta refresh
-// (no JS required) re-checks every second until the finalizer flips the paste
-// to ready.
-const loadingPageHTML = `<!doctype html>
+// statusPage renders the pending and failed pages from one skeleton. The
+// refresh meta and the per-page rules are substituted, not conditional, so
+// each page is exactly its head plus its card.
+func statusPage(title, refresh, style, card string) string {
+	return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="1">
-<title>preparing your paste</title>
+` + refresh + `<title>` + title + `</title>
 <style>
   :root { color-scheme: light dark; }
   html, body { height: 100%; margin: 0; }
@@ -351,7 +323,22 @@ const loadingPageHTML = `<!doctype html>
     font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
     background: #0e0e10; color: #e6e6e6;
   }
-  .card { text-align: center; padding: 2rem; }
+` + style + `</style>
+</head>
+<body>
+  <div class="card">
+` + card + `  </div>
+</body>
+</html>
+`
+}
+
+// loadingPageHTML is the body served for a pending paste. The meta refresh
+// (no JS required) re-checks every second until the finalizer flips the paste
+// to ready.
+var loadingPageHTML = statusPage("preparing your paste",
+	"<meta http-equiv=\"refresh\" content=\"1\">\n",
+	`  .card { text-align: center; padding: 2rem; }
   .dot {
     display: inline-block; width: .6rem; height: .6rem; margin: 0 .15rem;
     border-radius: 50%; background: currentColor; opacity: .25;
@@ -361,55 +348,29 @@ const loadingPageHTML = `<!doctype html>
   .dot:nth-child(3) { animation-delay: .3s; }
   @keyframes pulse { 0%,100% { opacity: .25; } 50% { opacity: 1; } }
   .muted { color: #8a8a8a; margin-top: .75rem; font-size: 13px; }
-</style>
-</head>
-<body>
-  <div class="card">
-    <div><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+`,
+	`    <div><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
     <p>preparing your paste</p>
     <p class="muted">this page refreshes automatically</p>
-  </div>
-</body>
-</html>
-`
+`)
 
 // failedPageHTML is the body served for a failed paste, one whose blob write
 // never completed. No auto-refresh: the content will never arrive.
-const failedPageHTML = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>paste unavailable</title>
-<style>
-  :root { color-scheme: light dark; }
-  html, body { height: 100%; margin: 0; }
-  body {
-    display: flex; align-items: center; justify-content: center;
-    font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: #0e0e10; color: #e6e6e6;
-  }
-  .card { text-align: center; padding: 2rem; max-width: 28rem; }
+var failedPageHTML = statusPage("paste unavailable", "",
+	`  .card { text-align: center; padding: 2rem; max-width: 28rem; }
   h1 { font-size: 1.1rem; margin: 0 0 .5rem; }
   .muted { color: #8a8a8a; font-size: 13px; }
-</style>
-</head>
-<body>
-  <div class="card">
-    <h1>this paste could not be saved</h1>
+`,
+	`    <h1>this paste could not be saved</h1>
     <p class="muted">the upload did not finish writing to storage. try uploading it again.</p>
-  </div>
-</body>
-</html>
-`
+`)
 
 // servePending serves the loading page for a pending paste. no-store is
 // required: a cached 200 freezes the loading screen even after the paste goes
 // ready.
 func (s *Server) servePending(w http.ResponseWriter, _ *http.Request) {
 	h := w.Header()
-	h.Set("X-Frame-Options", "DENY")
-	h.Set("Referrer-Policy", "no-referrer")
+	setSandboxHeaders(h)
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
 	h.Set("Retry-After", "1")
@@ -422,8 +383,7 @@ func (s *Server) servePending(w http.ResponseWriter, _ *http.Request) {
 // paste out of any naive success cache.
 func (s *Server) serveFailed(w http.ResponseWriter, _ *http.Request) {
 	h := w.Header()
-	h.Set("X-Frame-Options", "DENY")
-	h.Set("Referrer-Policy", "no-referrer")
+	setSandboxHeaders(h)
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusGone)
@@ -474,23 +434,11 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 	// no-cache revalidates every file against its content-SHA ETag: a cheap
 	// 304 when unchanged, fresh bytes when not.
 	h := w.Header()
-	h.Set("X-Frame-Options", "DENY")
-	h.Set("Referrer-Policy", "no-referrer")
-	h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()")
+	setSandboxHeaders(h)
+	h.Set("Permissions-Policy", permissionsPolicy)
 	h.Set("Cache-Control", "public, no-cache")
-	h.Set("Last-Modified", updatedAt.UTC().Format(http.TimeFormat))
-
-	etag := `"` + entry.SHA + `"`
-	h.Set("ETag", etag)
-	if etagMatches(r.Header.Get("If-None-Match"), etag) {
-		w.WriteHeader(http.StatusNotModified)
+	if notModified(w, r, `"`+entry.SHA+`"`, updatedAt) {
 		return
-	}
-	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
-		if since, err := http.ParseTime(ims); err == nil && !updatedAt.UTC().Truncate(time.Second).After(since) {
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
 	}
 
 	// Streamed so a GET never buffers the whole asset.
@@ -507,6 +455,37 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 	}
 	h.Set("Content-Type", ct)
 	_, _ = io.Copy(w, rc)
+}
+
+// permissionsPolicy denies the powerful browser features a served page could
+// otherwise request.
+const permissionsPolicy = "camera=(), microphone=(), geolocation=(), usb=(), payment=()"
+
+// setSandboxHeaders applies the framing and referrer lockdown every response
+// from a paste origin carries (docs/SPEC.md HTML-sandboxing section).
+func setSandboxHeaders(h http.Header) {
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Referrer-Policy", "no-referrer")
+}
+
+// notModified sets the response validators (ETag, Last-Modified) and answers
+// a conditional GET with a bodiless 304 when either client validator matches.
+// True means the response is written.
+func notModified(w http.ResponseWriter, r *http.Request, etag string, updatedAt time.Time) bool {
+	h := w.Header()
+	h.Set("Last-Modified", updatedAt.UTC().Format(http.TimeFormat))
+	h.Set("ETag", etag)
+	if etagMatches(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return true
+	}
+	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
+		if since, err := http.ParseTime(ims); err == nil && !updatedAt.UTC().Truncate(time.Second).After(since) {
+			w.WriteHeader(http.StatusNotModified)
+			return true
+		}
+	}
+	return false
 }
 
 // shellCSP locks down every client-render shell response: no default sources,
