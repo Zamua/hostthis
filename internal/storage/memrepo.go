@@ -209,11 +209,6 @@ func (r *MemRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	return out, nil
 }
 
-func (r *MemRepo) CountByOwner(owner string) (int, error) {
-	list, _ := r.ListByOwner(owner)
-	return len(list), nil
-}
-
 func (r *MemRepo) SumActiveBytesByOwner(owner string, _ time.Time) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -457,9 +452,3 @@ func (r *MemRepo) SubnetsForIdentity(identity string, now time.Time, window time
 	}
 	return n, nil
 }
-
-// WaitPendingConfirms is a no-op: every MemRepo write is synchronous, so there
-// is never a deferred confirm to drain. It exists because callers written for
-// backends with asynchronous index confirms drain before asserting, through
-// the pendingConfirmsDrainer seam.
-func (r *MemRepo) WaitPendingConfirms() {}

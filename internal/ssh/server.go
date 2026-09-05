@@ -38,8 +38,8 @@ import (
 // so a code is never reassigned; docs/SPEC.md "Exit codes" mirrors it.
 //
 // 5 is permanently unused: service.requireOwner collapses non-owner reads to
-// ErrNotFound so existence cannot leak across identities, meaning the SSH
-// surface never observes ErrNotOwner. A new code takes the next free slot.
+// ErrNotFound so existence cannot leak across identities, so no distinct
+// not-owner error reaches the SSH surface. A new code takes the next free slot.
 
 // URLBuilder renders a slug as its public URL.
 type URLBuilder func(domain.Slug) string
@@ -1205,9 +1205,9 @@ func emitServiceErr(sess gossh.Session, err error) {
 	_ = sess.Exit(exitForServiceErr(err))
 }
 
-// exitForServiceErr maps a service-layer error to its exit code. ErrNotOwner is
-// deliberately absent: every owner-gated path in service.Manage collapses
-// not-owner to ErrNotFound so existence cannot leak across identities, so a
+// exitForServiceErr maps a service-layer error to its exit code. There is no
+// not-owner code: every owner-gated path in service.Manage collapses not-owner
+// to ErrNotFound so existence cannot leak across identities, so a
 // foreign-identity verb attempt and a missing slug both exit ExitNotFound.
 func exitForServiceErr(err error) int {
 	switch {

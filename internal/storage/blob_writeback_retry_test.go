@@ -52,10 +52,6 @@ func (p *parkingDurable) GetReader(string) (io.ReadCloser, int64, error) {
 	return nil, 0, ErrNotFound
 }
 
-func (p *parkingDurable) WalkBlobs(func(sha string) error) error { return nil }
-
-func (p *parkingDurable) Remove(string) error { return nil }
-
 func (p *parkingDurable) count(sha string) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -126,9 +122,6 @@ func TestWriteBack_ShortNamesDoNotPanic(t *testing.T) {
 		t.Fatalf("scanEntries: %v", err)
 	}
 	wb.evictIfNeeded()
-	if err := wb.Remove("x"); err != nil {
-		t.Fatalf("Remove(short sha): %v", err)
-	}
 }
 
 // A Put well under the byte cap does not walk the whole cache directory.

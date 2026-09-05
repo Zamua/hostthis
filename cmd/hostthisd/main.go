@@ -1,5 +1,5 @@
-// Package main wires the hostthis daemon: SSH server, HTTP server, storage and
-// the periodic blob-GC sweep, configured from flags and HOSTTHIS_* env.
+// Package main wires the hostthis daemon: SSH server, HTTP server and storage,
+// configured from flags and HOSTTHIS_* env.
 package main
 
 import (
@@ -250,8 +250,8 @@ func main() {
 		MaxHeaderBytes:    8 << 10, // 8 KiB
 	}
 
-	// Both servers and the sweep run concurrently; the first signalling event
-	// wins and tears them all down.
+	// The servers run concurrently; the first signalling event wins and tears
+	// them all down.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -265,10 +265,6 @@ func main() {
 		logger.Printf("metrics: listening on %s", *metricsAddr)
 		errs <- metricsSrv.ListenAndServe()
 	}()
-	// The sweep loop always runs: HOSTTHIS_SWEEP_DISABLED selects dry-run vs
-	// live, it does not gate the goroutine, because a dry-run sweep must still
-	// run to log what it would clean.
-
 	select {
 	case <-ctx.Done():
 		logger.Printf("signal received; shutting down")
@@ -338,14 +334,11 @@ func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlob
 }
 
 // writeBackInner is what maybeWrapWriteBack needs of a durable backend: the
-// Put/Get/GetReader the compression layer wraps, plus the WalkBlobs/Remove the
-// write-back cache's own eviction uses.
+// Put/Get/GetReader the compression layer wraps.
 type writeBackInner interface {
 	Put(sha string, r io.Reader, size int64) error
 	Get(sha string) ([]byte, error)
 	GetReader(sha string) (io.ReadCloser, int64, error)
-	WalkBlobs(fn func(sha string) error) error
-	Remove(sha string) error
 }
 
 // maybeWrapWriteBack fronts the durable backend with the local-disk write-back

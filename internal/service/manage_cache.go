@@ -84,9 +84,7 @@ func (c *CacheInvalidating) Delete(slug domain.Slug, owner string) error {
 // attempted; every other failure is ambiguous by construction.
 func mayHaveMutated(err error) bool {
 	switch {
-	case errors.Is(err, ErrNotFound),
-		errors.Is(err, ErrNotOwner),
-		errors.Is(err, ErrEmptyOwner):
+	case errors.Is(err, ErrNotFound), errors.Is(err, ErrEmptyOwner):
 		return false
 	}
 	return true

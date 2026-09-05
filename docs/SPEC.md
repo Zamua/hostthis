@@ -2754,8 +2754,8 @@ through four small Go interfaces declared in `internal/service`:
 - `PasteRepo` (upload): `InsertWithQuotaCheck`, `Get`.
 - `PasteAdmin` (manage): `Get`, `ListByOwner`, `Delete`, `SetName`,
   `SetPinnedVersion`, `Unpin`, `AppendVersionWithQuotaCheck`,
-  `ListVersions`, `GetVersion`, `DeleteVersion`, `CountByOwner`,
-  `SumActiveBytesByOwner`, `OwnerFirstSeen`.
+  `ListVersions`, `GetVersion`, `DeleteVersion`, `SumActiveBytesByOwner`,
+  `OwnerFirstSeen`, `OwnerSummary`.
 - `SweepRepo` (sweep):
 - `KeyGateRepo` (keygate): `AdmitNewKey`, `SubnetSnapshot`,
   `SubnetsForIdentity`.
@@ -2886,9 +2886,9 @@ behaviors are expressed in terms of inputs and observable outputs:
   wrongly-removed blob is a recoverable prior version, not a hard loss).
 - **Owner stats.** `ListByOwner` returns the owner's pastes ordered most
   recently updated first, with `LatestVersion` populated;
-  `CountByOwner` counts them; `SumActiveBytesByOwner` matches the quota
-  math; `OwnerFirstSeen` is the earliest paste `created_at` (zero time
-  when none).
+  `OwnerSummary.Active` counts them; `SumActiveBytesByOwner` matches the
+  quota math; `OwnerFirstSeen` is the earliest paste `created_at` (zero
+  time when none).
 - **KeyGate.** `AdmitNewKey` reports `knownAlready=true` for a
   previously-seen `(identity, subnet)` pair (no accounting), admits a
   fresh pair when the subnet is under its in-window limit, and returns
@@ -3456,8 +3456,8 @@ re-fetches it), a delete purges unless the error proves nothing was
 touched.
 
 "Nothing was touched" means the pre-mutation rejections only:
-`ErrNotFound`, `ErrNotOwner` and `ErrEmptyOwner`, all raised by the
-ownership pre-check before any write is attempted. Excluding them is not
+`ErrNotFound` and `ErrEmptyOwner`, both raised by the ownership pre-check
+before any write is attempted. Excluding them is not
 an optimisation - it is what stops an unrelated caller from forcing
 purges on slugs they do not own by attempting deletes, which would spend
 the CDN's finite purge budget on request.
@@ -3616,9 +3616,7 @@ uploaded Markdown still can NOT execute JS even though uploaded HTML can
 - DOMPurify is the safety net for the markdown path, replacing the old
 server-side bluemonday pass. The server never renders Markdown on the
 read path, which keeps its memory constant regardless of paste size
-(it streams the raw bytes with `io.Copy`, like the HTML path). The
-in-repo `internal/render` package and `cmd/render-md` dev tool are
-retained for offline use but are no longer on the live read path.
+(it streams the raw bytes with `io.Copy`, like the HTML path).
 
 ### Diff rendering
 

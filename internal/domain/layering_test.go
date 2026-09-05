@@ -23,8 +23,8 @@ const internalPrefix = "github.com/Zamua/hostthis/internal/"
 //
 // Inward to outward:
 //
-//	mime, render      mechanisms holding no business knowledge, so they sit
-//	                  BELOW domain and must not reach it; domain consumes them
+//	mime              a mechanism holding no business knowledge, so it sits
+//	                  BELOW domain and must not reach it; domain consumes it
 //	                  through a port instead (DetectKind takes a MIMESniffer).
 //	domain            pure types and rules.
 //	archive, cache    mechanisms that speak in domain values.
@@ -33,8 +33,7 @@ const internalPrefix = "github.com/Zamua/hostthis/internal/"
 //	relay, relaygrpc  the room relay and its gRPC peer transport.
 //	http, ssh         transports; they reach service, never an adapter.
 var layerPolicy = map[string][]string{
-	"mime":   {},
-	"render": {},
+	"mime": {},
 	// Collectors only. It reaches nothing internal and must stay that way: the
 	// consumer declares a recorder port and this package satisfies it, so an
 	// entry here would mean instrumentation had started reaching into the

@@ -35,9 +35,8 @@ func TestDeletePurgesUnlessNothingWasTouched(t *testing.T) {
 		// would let any caller spend the CDN purge budget on slugs they do
 		// not own.
 		{"not found", service.ErrNotFound, false},
-		{"not owner", service.ErrNotOwner, false},
 		{"anonymous", service.ErrEmptyOwner, false},
-		{"wrapped not owner", fmt.Errorf("check: %w", service.ErrNotOwner), false},
+		{"wrapped not found", fmt.Errorf("check: %w", service.ErrNotFound), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			purger := &recordingPurger{}

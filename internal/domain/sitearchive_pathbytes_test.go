@@ -38,8 +38,12 @@ func TestSiteExtractor_PathBytesMatchesManifest(t *testing.T) {
 			t.Fatalf("add %q: %v", name, err)
 		}
 	}
-	if e.pathBytes != e.man.PathTextBytes() {
-		t.Fatalf("carried path bytes %d != manifest path bytes %d", e.pathBytes, e.man.PathTextBytes())
+	want := 0
+	for p := range e.man.Files {
+		want += len(p)
+	}
+	if e.pathBytes != want {
+		t.Fatalf("carried path bytes %d != manifest path bytes %d", e.pathBytes, want)
 	}
 }
 

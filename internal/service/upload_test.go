@@ -3,6 +3,8 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -56,7 +58,7 @@ func TestUpload_Create_HTML(t *testing.T) {
 	if res.Paste.Size <= 0 || res.Paste.Size > len(body)*2+64 {
 		t.Fatalf("size: got %d, want positive ~within 2x of %d", res.Paste.Size, len(body))
 	}
-	if res.Paste.ContentSHA != domain.HashContent(body) {
+	if res.Paste.ContentSHA != sha256Hex(body) {
 		t.Fatalf("sha mismatch")
 	}
 	if _, err := domain.ParseSlug(string(res.Paste.Slug)); err != nil {
@@ -201,4 +203,10 @@ func TestUpload_Create_LogsSlugRemint(t *testing.T) {
 			t.Fatalf("remint log missing %q\nlog:\n%s", want, logged)
 		}
 	}
+}
+
+// sha256Hex is the content address the blob path stores bytes under.
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }

@@ -46,9 +46,6 @@ func lifecycleInsert(t *testing.T, r lifecycleRepo, p domain.Paste) {
 	if err := r.InsertWithQuotaCheck(context.Background(), p, 0, fixedNow); err != nil {
 		t.Fatalf("insert %q: %v", p.Slug, err)
 	}
-	if d, ok := r.(pendingConfirmsDrainer); ok {
-		d.WaitPendingConfirms()
-	}
 }
 
 func lifecyclePaste(t *testing.T, r lifecycleRepo, slug, identity string, size int) domain.Paste {

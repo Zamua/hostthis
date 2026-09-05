@@ -70,28 +70,6 @@ func (f *fakeDurable) GetReader(sha string) (io.ReadCloser, int64, error) {
 	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
 }
 
-func (f *fakeDurable) WalkBlobs(fn func(sha string) error) error {
-	f.mu.Lock()
-	keys := make([]string, 0, len(f.objs))
-	for k := range f.objs {
-		keys = append(keys, k)
-	}
-	f.mu.Unlock()
-	for _, k := range keys {
-		if err := fn(k); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (f *fakeDurable) Remove(sha string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.objs, sha)
-	return nil
-}
-
 func (f *fakeDurable) has(sha string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

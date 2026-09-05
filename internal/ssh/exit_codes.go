@@ -5,9 +5,9 @@ package ssh
 // a value's meaning never changes, and a new meaning takes the next free slot.
 // The source of truth; docs/SPEC.md > "Exit codes" mirrors it.
 //
-// 5 is documented-but-dead and stays that way. The SSH surface never observes
-// ErrNotOwner: service.requireOwner collapses non-owner reads to ErrNotFound so
-// existence cannot leak across identities.
+// 5 is documented-but-dead and stays that way: service.requireOwner collapses
+// non-owner reads to ErrNotFound so existence cannot leak across identities,
+// and no distinct not-owner error reaches the SSH surface.
 const (
 	ExitOK          = 0 // success
 	ExitErr         = 1 // generic / unclassified failure
