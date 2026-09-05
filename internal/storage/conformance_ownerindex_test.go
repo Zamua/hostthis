@@ -41,20 +41,13 @@ func chargedBytes(t *testing.T, r ownerIndexRepo, owner string) (int, error) {
 	return r.SumActiveBytesByOwner(owner, fixedNow)
 }
 
-func ownerInsert(t *testing.T, r ownerIndexRepo, p domain.Paste) {
-	t.Helper()
-	if err := r.InsertWithQuotaCheck(context.Background(), p, 0, fixedNow); err != nil {
-		t.Fatalf("insert %q: %v", p.Slug, err)
-	}
-}
-
 // Everything inserted for an owner appears in that owner's listing, and nobody
 // else's does.
 func conformOwnerListIsScopedAndComplete(t *testing.T, r ownerIndexRepo) {
 	const mine, theirs = "key:oi-mine", "key:oi-theirs"
-	ownerInsert(t, r, pasteOf("oi123456", mine, 10))
-	ownerInsert(t, r, pasteOf("oi223456", mine, 20))
-	ownerInsert(t, r, pasteOf("oi323456", theirs, 30))
+	insert(t, r, pasteOf("oi123456", mine, 10))
+	insert(t, r, pasteOf("oi223456", mine, 20))
+	insert(t, r, pasteOf("oi323456", theirs, 30))
 
 	got, err := r.ListByOwner(mine)
 	if err != nil {
@@ -83,7 +76,7 @@ func conformOwnerListExcludesFailed(t *testing.T, r ownerIndexRepo) {
 	const owner = "key:oi-failed"
 	p := pasteOf("oi423456", owner, 10)
 	p.Status = domain.PasteStatusPending
-	ownerInsert(t, r, p)
+	insert(t, r, p)
 	if err := r.MarkFailed(p); err != nil {
 		t.Fatalf("MarkFailed: %v", err)
 	}
@@ -102,7 +95,7 @@ func conformOwnerListExcludesFailed(t *testing.T, r ownerIndexRepo) {
 // the pastes and does not move when a later one is added.
 func conformOwnerFirstSeenIsStable(t *testing.T, r ownerIndexRepo) {
 	const owner = "key:oi-firstseen"
-	ownerInsert(t, r, pasteOf("oi523456", owner, 10))
+	insert(t, r, pasteOf("oi523456", owner, 10))
 	first, err := r.OwnerFirstSeen(owner)
 	if err != nil {
 		t.Fatalf("OwnerFirstSeen: %v", err)
@@ -110,7 +103,7 @@ func conformOwnerFirstSeenIsStable(t *testing.T, r ownerIndexRepo) {
 	if first.IsZero() {
 		t.Fatal("OwnerFirstSeen is zero after an insert; want the first reservation's time")
 	}
-	ownerInsert(t, r, pasteOf("oi623456", owner, 10))
+	insert(t, r, pasteOf("oi623456", owner, 10))
 	again, err := r.OwnerFirstSeen(owner)
 	if err != nil {
 		t.Fatalf("OwnerFirstSeen after a second insert: %v", err)
@@ -126,7 +119,7 @@ func conformOwnerFirstSeenIsStable(t *testing.T, r ownerIndexRepo) {
 func conformDropStaleEntryOnlyWhenAbsent(t *testing.T, r ownerIndexRepo) {
 	const owner = "key:oi-stale"
 	p := pasteOf("oi723456", owner, 10)
-	ownerInsert(t, r, p)
+	insert(t, r, p)
 
 	dropped, err := r.DropStaleOwnerEntry(p.Slug, owner)
 	if err != nil {
@@ -152,7 +145,7 @@ func conformOwnerListReflectsMutation(t *testing.T, r ownerIndexRepo) {
 	const owner = "key:oi-fresh"
 	p := pasteOf("oi923456", owner, 10)
 	p.Name = "before"
-	ownerInsert(t, r, p)
+	insert(t, r, p)
 
 	if err := r.SetName(p.Slug, "after", domain.Identity(owner), p.CreatedAt); err != nil {
 		t.Fatalf("SetName: %v", err)
@@ -201,13 +194,13 @@ func conformReleaseIsIdempotent(t *testing.T, r ownerIndexRepo) {
 	const owner = "key:oi-replay"
 	p := pasteOf("oia23456", owner, 700)
 	p.Status = domain.PasteStatusPending
-	ownerInsert(t, r, p)
+	insert(t, r, p)
 
 	// A second paste stays live, so the assertion distinguishes "released once"
 	// from "released into the negative": with arithmetic double-release the
 	// total would fall BELOW the survivor's size.
 	keep := pasteOf("oib23456", owner, 300)
-	ownerInsert(t, r, keep)
+	insert(t, r, keep)
 
 	if err := r.MarkFailed(p); err != nil {
 		t.Fatalf("MarkFailed: %v", err)
@@ -247,8 +240,8 @@ func conformDeleteReleasesAndDelists(t *testing.T, r ownerIndexRepo) {
 	const owner = "key:oi-delete"
 	doomed := pasteOf("oic23456", owner, 700)
 	keep := pasteOf("oid23456", owner, 300)
-	ownerInsert(t, r, doomed)
-	ownerInsert(t, r, keep)
+	insert(t, r, doomed)
+	insert(t, r, keep)
 
 	// A foreign owner cannot delete it.
 	if err := r.Delete(doomed.Slug, domain.Identity("key:someone-else"), doomed.CreatedAt); err == nil {
@@ -288,7 +281,7 @@ func conformDeleteReleasesAndDelists(t *testing.T, r ownerIndexRepo) {
 func conformVersionChangesTheCharge(t *testing.T, r ownerIndexRepo) {
 	const owner = "key:oi-version"
 	p := pasteOf("oie23456", owner, 700)
-	ownerInsert(t, r, p)
+	insert(t, r, p)
 
 	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), p.Slug, p.Generation,
 		domain.KindHTML, "sha-v2", 300, 0, fixedNow); err != nil {
@@ -313,7 +306,7 @@ func conformVersionChangesTheCharge(t *testing.T, r ownerIndexRepo) {
 func conformDeleteVersionRefundsTheCharge(t *testing.T, r ownerIndexRepo) {
 	const owner = "key:oi-delver"
 	p := pasteOf("oif23456", owner, 700)
-	ownerInsert(t, r, p)
+	insert(t, r, p)
 
 	_, err := r.AppendVersionWithQuotaCheck(context.Background(), p.Slug, p.Generation,
 		domain.KindHTML, "sha-v2", 300, 0, fixedNow)

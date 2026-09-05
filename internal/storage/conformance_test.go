@@ -29,13 +29,12 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// conformanceRepo is the union of the four service-layer interfaces a metadata
+// conformanceRepo is the union of the service-layer interfaces a metadata
 // backend must satisfy. Any type satisfying it can be driven through
 // runConformanceWithSites, whether it is one struct or several sharing a db.
 type conformanceRepo interface {
 	service.PasteRepo
 	service.PasteAdmin
-	service.KeyGateRepo
 }
 
 // fixedNow is the reference clock for the suite. Truncated to the
@@ -79,11 +78,6 @@ func runConformanceWithSites(
 	t.Run(name+"/RepoIsNotOwnerGated", func(t *testing.T) { conformRepoIsNotOwnerGated(t, newRepo(t)) })
 	t.Run(name+"/OwnerStats", func(t *testing.T) { conformOwnerStats(t, newRepo(t)) })
 	t.Run(name+"/SetName", func(t *testing.T) { conformSetName(t, newRepo(t)) })
-	t.Run(name+"/KeyGateAdmitAndKnown", func(t *testing.T) { conformKeyGateAdmitAndKnown(t, newRepo(t)) })
-	t.Run(name+"/KeyGateSubnetLimit", func(t *testing.T) { conformKeyGateSubnetLimit(t, newRepo(t)) })
-	t.Run(name+"/KeyGateSubnetsIndependent", func(t *testing.T) { conformKeyGateSubnetsIndependent(t, newRepo(t)) })
-	t.Run(name+"/KeyGateWindowAges", func(t *testing.T) { conformKeyGateWindowAges(t, newRepo(t)) })
-	t.Run(name+"/KeyGateForgetsOutOfWindow", func(t *testing.T) { conformKeyGateForgetsOutOfWindow(t, newRepo(t)) })
 }
 
 // --- helpers ---------------------------------------------------------
@@ -108,7 +102,9 @@ func pasteOf(slug, identity string, size int) domain.Paste {
 
 // insert creates a paste with no caps (caps=0 = no quota enforcement) and
 // fails the test on error.
-func insert(t *testing.T, r conformanceRepo, p domain.Paste) {
+func insert(t *testing.T, r interface {
+	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
+}, p domain.Paste) {
 	t.Helper()
 	if err := r.InsertWithQuotaCheck(context.Background(), p, 0, fixedNow); err != nil {
 		t.Fatalf("insert %q: %v", p.Slug, err)
@@ -602,107 +598,3 @@ func conformSetName(t *testing.T, r conformanceRepo) {
 		t.Fatalf("clear name: got %q, want empty", p.Name)
 	}
 }
-
-// --- contract: key gate ---------------------------------------------
-
-func conformKeyGateAdmitAndKnown(t *testing.T, r conformanceRepo) {
-	const window = 24 * time.Hour
-	known, err := r.AdmitNewKey("key:abc", "1.2.3.0/24", fixedNow, 20, window)
-	if err != nil {
-		t.Fatalf("first admit: %v", err)
-	}
-	if known {
-		t.Fatalf("first sight of (key, subnet) should report known=false")
-	}
-	// Same pair again → known, no accounting.
-	known, err = r.AdmitNewKey("key:abc", "1.2.3.0/24", fixedNow.Add(time.Hour), 20, window)
-	if err != nil {
-		t.Fatalf("second admit: %v", err)
-	}
-	if !known {
-		t.Fatalf("returning pair should report known=true")
-	}
-}
-
-func conformKeyGateSubnetLimit(t *testing.T, r conformanceRepo) {
-	const (
-		window = 24 * time.Hour
-		limit  = 5
-	)
-	for i := range limit {
-		if _, err := r.AdmitNewKey("key:"+string(rune('a'+i)), "9.9.9.0/24", fixedNow, limit, window); err != nil {
-			t.Fatalf("admit %d under limit: %v", i, err)
-		}
-	}
-	// The (limit+1)th fresh key from this subnet is refused.
-	if _, err := r.AdmitNewKey("key:z", "9.9.9.0/24", fixedNow, limit, window); !errors.Is(err, storage.ErrTooManyNewKeys) {
-		t.Fatalf("over-limit admit: got %v, want ErrTooManyNewKeys", err)
-	}
-}
-
-func conformKeyGateSubnetsIndependent(t *testing.T, r conformanceRepo) {
-	const (
-		window = 24 * time.Hour
-		limit  = 3
-	)
-	for i := range limit {
-		if _, err := r.AdmitNewKey("key:"+string(rune('a'+i)), "10.0.0.0/24", fixedNow, limit, window); err != nil {
-			t.Fatalf("fill subnet A %d: %v", i, err)
-		}
-	}
-	// A different subnet has its own untouched budget.
-	if _, err := r.AdmitNewKey("key:fresh", "10.0.1.0/24", fixedNow, limit, window); err != nil {
-		t.Fatalf("different subnet should have its own budget: %v", err)
-	}
-}
-
-func conformKeyGateWindowAges(t *testing.T, r conformanceRepo) {
-	const (
-		window = 24 * time.Hour
-		limit  = 2
-	)
-	old := fixedNow.Add(-48 * time.Hour) // outside the 24h window
-	for i := range limit {
-		if _, err := r.AdmitNewKey("key:"+string(rune('a'+i)), "11.0.0.0/24", old, limit, window); err != nil {
-			t.Fatalf("old admit %d: %v", i, err)
-		}
-	}
-	// The old rows are outside the window, so a fresh key is admitted even
-	// though the subnet holds `limit` total rows.
-	if _, err := r.AdmitNewKey("key:new", "11.0.0.0/24", fixedNow, limit, window); err != nil {
-		t.Fatalf("aged-out rows should free the budget: %v", err)
-	}
-}
-
-// conformKeyGateForgetsOutOfWindow pins the observable lazy-prune contract: an
-// aged-out pair is fresh on its next admission regardless of when physical
-// deletion occurs.
-func conformKeyGateForgetsOutOfWindow(t *testing.T, r conformanceRepo) {
-	const window = 24 * time.Hour
-	old := fixedNow.Add(-48 * time.Hour)
-	if _, err := r.AdmitNewKey("key:stale", "12.0.0.0/24", old, 20, window); err != nil {
-		t.Fatalf("seed admit: %v", err)
-	}
-	// A fresh in-window row, which must NOT be forgotten.
-	if _, err := r.AdmitNewKey("key:keep", "12.0.0.0/24", fixedNow, 20, window); err != nil {
-		t.Fatalf("fresh admit: %v", err)
-	}
-
-	known, err := r.AdmitNewKey("key:stale", "12.0.0.0/24", fixedNow, 20, window)
-	if err != nil {
-		t.Fatalf("re-admit of the aged-out pair: %v", err)
-	}
-	if known {
-		t.Fatalf("a pair whose row aged past the window must re-admit as FRESH (known=false), got known=true")
-	}
-
-	known, err = r.AdmitNewKey("key:keep", "12.0.0.0/24", fixedNow, 20, window)
-	if err != nil {
-		t.Fatalf("re-admit of the in-window pair: %v", err)
-	}
-	if !known {
-		t.Fatalf("an in-window pair must stay known, got known=false")
-	}
-}
-
-// --- small slice helpers --------------------------------------------
