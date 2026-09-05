@@ -7,9 +7,8 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// RoomRepo is the persistence contract the Rooms service needs, declared here
-// rather than in storage so the service layer owns it (as with PasteRepo /
-// SiteRepo / SweepRepo / KeyGateRepo). internal/storage.RoomKVRepo satisfies it.
+// RoomRepo is the persistence contract the Rooms service needs.
+// storage.MemRoomRepo and celld.RoomRepo satisfy it.
 type RoomRepo interface {
 	// CreateRoom records a new empty room + its creation-accounting row,
 	// enforcing the per-app aggregate cap. ErrSlugTaken if (app, id)
@@ -25,13 +24,12 @@ type RoomRepo interface {
 	// late-join splice contract rides this fence.
 	ScanRoom(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error)
 	// PutValue writes one value, enforcing the per-room + per-app caps and
-	// bumping the room's clock, and returns the mutation's assigned
-	// per-room sequence: dense, +1 per committed mutation, assigned inside the
-	// same transaction that commits the value (SPEC "The per-room sequence:
-	// assignment at commit"). domain.ErrNotFound if the room is gone,
-	// domain.ErrRoomDataFull / domain.ErrAppRoomsFull on caps. Rooms hold no
-	// blobs, so this path touches no object-store quota and has no
-	// service-wide byte cap.
+	// bumping the room's clock, and returns the mutation's per-room sequence:
+	// dense, +1 per committed mutation, assigned in the transaction that
+	// commits the value (SPEC "The per-room sequence: assignment at commit").
+	// domain.ErrNotFound if the room is gone, domain.ErrRoomDataFull /
+	// domain.ErrAppRoomsFull on caps. Rooms hold no blobs, so no object-store
+	// quota applies.
 	PutValue(appSlug domain.Slug, id domain.RoomID, key string, val []byte, appCap int64, now time.Time) (uint64, error)
 	// DeleteValue removes one value (idempotent) and resets the clock,
 	// returning the assigned per-room sequence (an absent-key delete still
@@ -106,11 +104,10 @@ func (e *RoomRateLimit) Is(target error) bool { return target == ErrRoomCreateRa
 // On rate-limit returns *RoomRateLimit (also errors.Is ErrRoomCreateRateLimited).
 // On per-app aggregate full returns ErrAppRoomsCap.
 //
-// The rate-limit count is read OUTSIDE the CreateRoom transaction, making the
-// creation gate a SOFT bound: N concurrent creators can each observe the same
-// in-window count and all pass before their accounting rows commit, slightly
-// overshooting the cap. Accepted for a coarse abuse bound; the hard bounds are
-// the per-app aggregate and service-wide byte caps, enforced inside the tx.
+// The rate-limit count is read OUTSIDE the CreateRoom transaction, so the
+// creation gate is a SOFT bound: concurrent creators can all observe the same
+// count and overshoot the cap slightly. Accepted for a coarse abuse bound; the
+// hard bound is the per-app aggregate byte cap, enforced inside the tx.
 func (s *Rooms) Create(appSlug domain.Slug, subnet string) (domain.Room, error) {
 	now := s.now()
 
@@ -198,11 +195,10 @@ func (s *Rooms) Put(appSlug domain.Slug, id domain.RoomID, key string, val []byt
 	}
 }
 
-// Delete removes key (idempotent) and bumps the room's clock,
-// returning the assigned per-room sequence. An absent-key delete still commits
-// and so still assigns one: a seq bump with no mirror frame would read as a
-// permanent hole to a relay subscriber. ErrRoomNotFound only when the ROOM does
-// not exist; deleting an absent key in a real room is a success. key must
+// Delete removes key (idempotent), bumps the room's clock and returns the
+// assigned per-room sequence. An absent-key delete still commits and assigns
+// one: a seq bump with no mirror frame would read as a permanent hole to a
+// relay subscriber. ErrRoomNotFound only when the ROOM does not exist. key must
 // already be validated.
 func (s *Rooms) Delete(appSlug domain.Slug, id domain.RoomID, key string) (uint64, error) {
 	now := s.now()

@@ -59,25 +59,20 @@ const (
 var ErrUnsupportedKind = errors.New(
 	"hostthis only accepts content it can render (html, markdown, diff, mermaid, pdf, csv, json, flamegraph)")
 
-// MaxPasteBytes is the per-paste size cap, measured in COMPRESSED bytes
-// (post-zstd, as written to the blob store). It bounds what one identity can
-// spend per record and what one request can commit to storage; it is NOT a
-// memory guard, because no path holds a payload whole (docs/SPEC.md "Writes are
-// constant-memory"). Typical HTML/Markdown compresses 5-10x, so ~50-100 MiB of
-// raw text fits under it.
+// MaxPasteBytes is the per-paste size cap in COMPRESSED bytes (post-zstd, as
+// written to the blob store). It bounds what one request can commit to
+// storage; it is NOT a memory guard, because no path holds a payload whole
+// (docs/SPEC.md "Writes are constant-memory"). Typical HTML/Markdown
+// compresses 5-10x.
 const MaxPasteBytes = 10 << 20 // 10 MiB
 
 // UserQuotaBytes caps the total compressed size of an identity's active pastes,
-// counting every non-deleted version. "Identity" is the ssh key fingerprint for
-// keyed uploads or the client IP subnet for anonymous ones.
-//
-// Deliberately larger than MaxPasteBytes: this is a fairness limit on
-// accumulated storage that costs nothing at request time, so raising it does
-// not imply raising the per-request ceiling.
+// counting every non-deleted version. A fairness limit on accumulated storage,
+// independent of the per-request ceiling MaxPasteBytes.
 //
 // A var, not a const, so tests can shrink it: driving a total over the real
-// limit would otherwise mean compressing 100+ MiB of high-entropy data per
-// test. Production never writes to it.
+// limit would otherwise mean compressing 100+ MiB per test. Production never
+// writes to it.
 var UserQuotaBytes = 100 << 20 // 100 MiB
 
 // HardRawByteCap fast-fails on RAW input bytes: the server stops reading after
@@ -90,26 +85,19 @@ const HardRawByteCap = 100 << 20 // 100 MiB
 // sniffing algorithms this feeds are all defined over a bounded prefix.
 const MIMESniffLen = 512
 
-// SniffPrefixLen is how many leading bytes the upload pipeline must capture
-// for DetectKind. It is far larger than MIMESniffLen because the MIME sniff
-// and the format heuristics need different amounts of evidence: the former is
-// defined over 512 bytes, the latter need whole lines. One folded stack line
-// from a real profile averages ~600 bytes, so a 512-byte window can contain no
-// complete line at all and no line-based gate can fire.
+// SniffPrefixLen is how many leading bytes the upload pipeline captures for
+// DetectKind. Larger than MIMESniffLen because the format heuristics need
+// whole lines: one folded stack line can exceed 512 bytes, so a MIME-sized
+// window can hold no complete line and no line-based gate can fire.
 const SniffPrefixLen = 8192
 
 // MIMESniffer reports a media type for a byte prefix, e.g. "text/plain;
-// charset=utf-8" or "application/octet-stream".
-//
-// A PORT, not an implementation: the one obvious implementation lives in
-// net/http, a transport package the domain must not depend on. What belongs
-// here is the RULE the sniff feeds - content must sniff as some flavour of
-// text, so a binary payload is rejected even when labelled "html". That rule is
-// the security control that stops a type hint short-circuiting detection; the
-// algorithm behind it is not.
-//
-// Adapters supply http.DetectContentType; a test supplies whatever exercises
-// its branch, without having to construct bytes that sniff a particular way.
+// charset=utf-8". A PORT: the obvious implementation is net/http, which the
+// domain must not depend on. The domain owns the RULE the sniff feeds (content
+// must sniff as some flavour of text, so a binary payload is rejected even
+// when labelled "html"), which is the security control that stops a type hint
+// short-circuiting detection. Adapters supply http.DetectContentType; a test
+// supplies whatever exercises its branch.
 type MIMESniffer func(b []byte) string
 
 // DetectKind classifies an upload prefix as a ContentKind, or returns
@@ -128,12 +116,9 @@ func DetectKind(b []byte, hint string, sniffMIME MIMESniffer) (ContentKind, erro
 
 	// Binary branches, by explicit format signature: the SSH pipe carries no
 	// filename. A text hint disqualifies them, so a gzip or PDF stream cannot
-	// be relabelled as HTML, mirroring the textual branches rejecting binary
-	// bytes under a text hint. These are magic-gated, never a fallback for
-	// bytes that failed to classify.
-	//
-	// Whether a tar with web content is inside a gzip stream is the
-	// safe-untar's question, not this gate's.
+	// be relabelled as HTML. Magic-gated, never a fallback for bytes that
+	// failed to classify. Whether a tar with web content is inside the gzip
+	// stream is the safe-untar's question.
 	if HasGzipMagic(b) && (hint == "" || hint == "tgz" || hint == "tar.gz" ||
 		strings.HasPrefix(hint, "application/gzip") || strings.HasPrefix(hint, "application/x-gzip")) {
 		return KindSite, nil
@@ -283,14 +268,11 @@ func looksLikeMermaid(b []byte) bool {
 // looksLikeFolded reports whether the content is a folded stack profile:
 // every line "frame;frame;frame <count>".
 //
-// Runs before the CSV gate. A C++ or Rust frame carries commas inside its
-// argument list, so a profile of such a binary presents a consistent comma
-// count per line and would otherwise sniff as CSV.
-//
-// The gate is EVERY line, not most: a profile is machine-generated and
-// perfectly uniform, so one prose line is enough to prove it is not one. The
-// semicolon requirement is what keeps an ordinary numbered list out, since
-// "item 1 / item 2" also ends every line in a count.
+// Runs before the CSV gate: a C++ or Rust frame carries commas in its argument
+// list, so such a profile would otherwise sniff as CSV. The gate is EVERY
+// line, not most: a profile is machine-generated and uniform, so one prose
+// line proves it is not one. The semicolon requirement keeps an ordinary
+// numbered list out.
 func looksLikeFolded(b []byte) bool {
 	s := string(b)
 	if len(s) > 8192 {
@@ -351,14 +333,11 @@ var logBodyFields = []string{"level", "log.level", "severity", "lvl", "levelname
 
 // looksLikeLog reports whether the content is structured logs as NDJSON.
 //
-// Runs BEFORE looksLikeJSON, which would otherwise claim the same bytes: logs
-// ARE valid JSONL, and rendering a log as a collapsible tree is correct and
-// useless.
-//
-// The gate is a timestamp AND a level-or-message, because a timestamp alone
-// admits any time series and a message alone admits most config. Only a
-// majority of lines need to match: a real capture carries blank lines and, in
-// OpenSearch bulk NDJSON, action lines that are not records at all.
+// Runs BEFORE looksLikeJSON, which would otherwise claim the same bytes and
+// render a log as a tree. The gate is a timestamp AND a level-or-message: a
+// timestamp alone admits any time series, a message alone most config. Only a
+// majority of lines need to match, since a real capture carries blank lines
+// and OpenSearch bulk action lines.
 func looksLikeLog(b []byte) bool {
 	s := string(b)
 	if len(s) > SniffPrefixLen {
@@ -446,14 +425,11 @@ func looksLikeJSON(b []byte) bool {
 // it is markdown.
 var csvDelimiters = []rune{',', '\t'}
 
-// looksLikeCSV reports whether the prefix is delimiter-separated tabular text.
-//
-// The gate is a CONSISTENT field count of at least 3 across at least 3 lines.
-// Two-column data is given up deliberately: prose wraps at punctuation, so
-// "Hello, world" over two lines is a consistent 2-field table, and a false
-// positive renders a paragraph as a spreadsheet. Three fields across three
-// lines effectively never occurs in prose, and a real 2-column CSV still
-// renders as a table under `--type csv`.
+// looksLikeCSV reports whether the prefix is delimiter-separated tabular text:
+// a CONSISTENT field count of at least 3 across at least 3 lines. Two-column
+// data is given up deliberately: prose wraps at punctuation, so "Hello, world"
+// over two lines is a consistent 2-field table. A real 2-column CSV still
+// renders under `--type csv`.
 func looksLikeCSV(b []byte) bool {
 	s := string(b)
 	if len(s) > 4096 {
@@ -545,20 +521,15 @@ func looksLikeMarkdown(b []byte) bool {
 var hunkHeaderRe = regexp.MustCompile(`@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@`)
 
 // looksLikeDiff reports whether the first 1 KB is a unified diff. The hunk
-// header alone gates: `diff --git`, `--- ` / `+++ `, and `Index:` are neither
-// sufficient nor required, so prose, source, or a markdown list carrying
-// `+`/`-` lines is never mis-detected. The bias is deliberate, since a false
-// positive renders normal text through diff2html (visibly broken) while a
-// false negative just falls through to markdown/HTML.
+// header alone gates: `diff --git`, `--- ` / `+++ ` and `Index:` are neither
+// sufficient nor required, so a markdown list carrying `+`/`-` lines is never
+// mis-detected. A false positive renders text through diff2html (visibly
+// broken); a false negative falls through to markdown.
 //
-// A hunk header that appears AFTER a markdown code fence is QUOTED, not the
-// document's own format: that is a design doc showing a diff, and it must
-// render as markdown so its prose renders too. The markdown viewer draws such
-// a fence through the same diff renderer, so nothing is lost by classifying it
-// as markdown.
-//
-// The ordering test is what keeps a real diff OF a markdown file working: its
-// hunk header comes first and the fence is part of the diffed content.
+// A hunk header AFTER a markdown code fence is QUOTED, a design doc showing a
+// diff, and must render as markdown so its prose renders too; the markdown
+// viewer draws the fence through the same diff renderer. The ordering test
+// keeps a real diff OF a markdown file working: its hunk header comes first.
 func looksLikeDiff(b []byte) bool {
 	if len(b) > 1024 {
 		b = b[:1024]

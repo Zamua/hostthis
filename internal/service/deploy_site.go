@@ -15,38 +15,24 @@ import (
 // services need. internal/storage.SiteRepo satisfies it.
 type SiteRepo interface {
 	InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error
-	// ReplaceWithQuotaCheck re-deploys an EXISTING owned site in place,
-	// atomically swapping its manifest for s.Manifest under the same
-	// serializable boundary InsertWithQuotaCheck uses. s.Slug names the
-	// target; s.Identity is the connecting key.
-	//
-	//   - A slug that is not a site, and a site owned by another identity,
-	//     both return domain.ErrNotFound: the same sentinel a missing slug
-	//     yields, so "not yours" is indistinguishable from "does not exist".
-	//   - The quota check is the REPLACE DELTA, evaluated against
-	//     (existing_owned - old_deduped + storedBytes) in the SAME critical
-	//     section as the swap, so a same-size re-deploy does not
-	//     double-count and a smaller one frees the diff. ErrServiceFull /
-	//     ErrOverUserQuota on overflow.
-	//   - On success manifest, deduped_size and updated_at are replaced from
-	//     s; slug and created_at are unchanged. One transaction: the URL serves the old
-	//     manifest until it lands, the new one immediately after.
+	// ReplaceWithQuotaCheck re-deploys an EXISTING owned site in place. s.Slug
+	// names the target; s.Identity is the connecting key. A slug that is not a
+	// site, and a site owned by another identity, both return
+	// domain.ErrNotFound, so "not yours" is indistinguishable from "does not
+	// exist". ErrServiceFull / ErrOverUserQuota on quota overflow.
 	ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Site, error)
-	// Delete removes a site by slug. The caller-authorized identity + CreatedAt
-	// are threaded so the storage layer re-checks them inside its {slug}
-	// transaction: the service ownership check is outside any transaction, so a
-	// delete+re-mint of the slug by another identity in the window would
-	// otherwise let this delete destroy the new owner's paste.
+	// Delete re-checks wantIdentity + wantCreatedAt inside its {slug}
+	// transaction, so a delete+re-mint of the slug by another identity in the
+	// window cannot destroy the new owner's paste.
 	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 	// SumActiveBytesByOwner returns the identity's active SITE bytes. The
 	// deploy path adds the paste-side sum to compute the budget the untar may
 	// fill before the persistence-time check.
 	SumActiveBytesByOwner(owner string, now time.Time) (int64, error)
-	// ListSitesByOwner returns the identity's active sites so the SSH `list`
-	// verb can show them alongside pastes: a site counts against the shared
-	// quota, so without this it silently consumes quota the owner can neither
-	// see nor free.
+	// ListSitesByOwner returns the identity's active sites. A site counts
+	// against the shared quota, so `list` must show it or the quota is
+	// invisible and unfreeable.
 	ListSitesByOwner(owner string, now time.Time) ([]domain.Site, error)
 }
 
@@ -56,11 +42,10 @@ type PasteByteSummer interface {
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
 }
 
-// DeploySite is the application service for a static-site upload. It
-// safe-untars the archive, stores each file as a content-addressed blob,
-// builds the manifest, and persists the Site, enforcing the per-identity quota
-// BOTH mid-untar (the decompression-bomb guard) AND at persistence time (the
-// atomic check in InsertWithQuotaCheck).
+// DeploySite is the application service for a static-site upload: safe-untar,
+// content-addressed blob per file, manifest, persisted Site. The per-identity
+// quota is enforced BOTH mid-untar (the decompression-bomb guard) AND at
+// persistence time (InsertWithQuotaCheck).
 type DeploySite struct {
 	Sites  SiteRepo
 	Pastes PasteByteSummer
@@ -94,11 +79,8 @@ var ErrEmptySite = errors.New("service: archive contains no files")
 const maxDeployRetries = 5
 
 // Deploy reads a gzip-tar archive from body, untars it safely, stores the
-// files, and persists a new Site owned by owner.
-//
-// body is the SAME live stream a single-file upload reads, consumed once
-// mid-untar, so peak memory is one file at a time, never the whole inflated
-// archive.
+// files, and persists a new Site owned by owner. body is consumed once,
+// mid-untar, so peak memory is one file at a time, never the inflated archive.
 //
 // Returns:
 //   - domain.ErrUnsupportedKind: not a valid gzip-tar, or holds no web content
@@ -141,13 +123,11 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 }
 
 // extract safe-untars body into staged blobs under the owner's remaining
-// budget and returns the manifest. The untar's decompression-bomb guard
-// aborts the instant the running uncompressed total would cross that budget,
-// so a site can never be extracted (let alone persisted) over-quota.
-//
-// Object-store bucket-quota rejections translate via the classifier;
-// ErrUnsafeArchive / ErrTooManyFiles / ErrNoWebContent are unclassified and
-// surface verbatim so the SSH layer can message them precisely.
+// budget and returns the manifest. The decompression-bomb guard aborts the
+// instant the running total would cross that budget, so a site can never be
+// extracted over-quota. Bucket-quota rejections translate via the classifier;
+// ErrUnsafeArchive / ErrTooManyFiles / ErrNoWebContent surface verbatim so the
+// SSH layer can message them precisely.
 func (d *DeploySite) extract(body io.Reader, owner string, now time.Time) (domain.Manifest, error) {
 	usedPaste, err := d.Pastes.SumActiveBytesByOwner(owner, now)
 	if err != nil {
@@ -193,10 +173,6 @@ func (d *DeploySite) Delete(slug domain.Slug, owner string) error {
 	if existing.Identity.String() != owner {
 		return ErrNotFound
 	}
-	// The ownership check above is a pre-check; the authoritative re-check
-	// happens inside Delete's {slug} transaction against existing's identity +
-	// CreatedAt, so a delete+re-mint of the slug in the window cannot destroy
-	// the new owner's paste.
 	return d.Sites.Delete(slug, existing.Identity, existing.CreatedAt)
 }
 
@@ -230,8 +206,6 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		return SiteResult{}, ErrNotFound
 	}
 
-	// Every retained version remains charged, including the currently served
-	// one, so the budget is the owner's unallocated headroom.
 	man, err := d.extract(body, owner, now)
 	if err != nil {
 		return SiteResult{}, err
@@ -269,14 +243,11 @@ func siteExtractBudget(cap, usedPaste, usedSite int64) int64 {
 }
 
 func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
-	// No buffer. The body streams through the compressor into the object store,
+	// No buffer: the body streams through the compressor into the object store,
 	// hashing as it goes, so an in-flight file costs the compressor window and a
-	// copy buffer rather than its own size. Buffering here previously made peak
-	// memory a function of the QUOTA - the untar guard admits up to the owner's
-	// remaining allowance, so one file could be ~100 MiB of RAM on a 2 GB node.
-	//
-	// The sha comes back from the staging rather than being computed first;
-	// needing it up front is what required holding the whole file.
+	// copy buffer rather than its own size. The untar guard admits a single file
+	// up to the owner's whole remaining allowance, so buffering would size peak
+	// memory to the QUOTA.
 	sha, compressedSize, err := s.blob.StageEncoding(context.Background(), r)
 	if err != nil {
 		// The untar's cap sentinel has to survive so SafeUntar can tell a
@@ -292,10 +263,6 @@ func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
 // ArchiveAdapter presents DeploySite as the upload service's ArchiveDeployer,
 // so one Create call handles both cardinalities and no transport has to know
 // there are two services behind it.
-//
-// It exists only while the two services are separate. When they merge it goes
-// away with them - it maps the multi-file result onto the shared Result rather
-// than converting between two lasting shapes.
 type ArchiveAdapter struct{ Deployer *DeploySite }
 
 func (a ArchiveAdapter) Deploy(body io.Reader, owner string) (Result, error) {

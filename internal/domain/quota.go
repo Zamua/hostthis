@@ -15,9 +15,6 @@ func (a Allowance) Unlimited() bool { return a.Cap <= 0 }
 
 // Remaining is how many more bytes the identity may take, floored at zero.
 // Meaningless when Unlimited: a caller needing that case must check first.
-//
-// The site upload path uses it as an extraction budget, before the archive's
-// expanded size is known.
 func (a Allowance) Remaining() int64 {
 	if a.Unlimited() {
 		return 0

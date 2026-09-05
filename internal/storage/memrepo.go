@@ -10,17 +10,13 @@ import (
 )
 
 // MemRepo is the in-process metadata plane: every port the services consume,
-// over plain maps under one mutex.
+// over plain maps under one mutex. Tests and `HOSTTHIS_METADATA_BACKEND=memory`
+// use it; the same conformance suite the celld backend passes keeps it honest.
+// It is EPHEMERAL and says so at startup.
 //
-// It exists for two consumers. Tests get a fast, dependency-free repo that the
-// SAME conformance suite the celld backend passes keeps honest - an assertion
-// that passes here and fails there is a backend bug, not a fixture artifact.
-// Dev gets `HOSTTHIS_METADATA_BACKEND=memory`, the zero-setup `make run` path;
-// it is EPHEMERAL by design and says so at startup.
-//
-// One mutex, deliberately. Every check-then-write (quota, caps, keygate
-// windows) is atomic under it, which makes this the STRICTEST backend:
-// anything admitted concurrently here is admissible everywhere.
+// One mutex, deliberately: every check-then-write (quota, caps, keygate
+// windows) is atomic under it, which makes this the STRICTEST backend.
+// Anything admitted concurrently here is admissible everywhere.
 type MemRepo struct {
 	mu sync.Mutex
 
@@ -78,7 +74,8 @@ func (p *memPaste) chargedBytes() int {
 	return total
 }
 
-// live, otherwise the newest live version.
+// served is the pinned version when it is live, otherwise the newest live
+// version.
 func (p *memPaste) served() (domain.Version, bool) {
 	live := p.liveVersions()
 	if len(live) == 0 {
@@ -94,9 +91,8 @@ func (p *memPaste) served() (domain.Version, bool) {
 	return live[len(live)-1], true
 }
 
-// rollServed mirrors the served version's display fields onto the row. The
-// row's kind, sha, manifest and size are a VIEW of the served version; every
-// mutation that can change which version is served passes through here.
+// rollServed copies the served version's fields onto the row: the row's kind,
+// sha, manifest and size are a VIEW of the served version.
 func (p *memPaste) rollServed() {
 	v, ok := p.served()
 	if !ok {
@@ -109,9 +105,8 @@ func (p *memPaste) rollServed() {
 	p.row.LatestVersion = p.maxVer
 }
 
-// chargedBytes is one owner's quota charge: the sum of every LIVE version's
-// size across their non-failed pastes. Distinct from any row's Size, which is
-// the served version's alone.
+// chargedBytes is one owner's quota charge: every LIVE version's size across
+// their non-failed pastes, not just the served version's.
 func (r *MemRepo) chargedBytes(owner string) int {
 	total := 0
 	for _, p := range r.pastes {
@@ -179,8 +174,7 @@ func (r *MemRepo) MarkFailed(paste domain.Paste) error {
 
 // setStatus advances a PENDING paste and nothing else. Ready and failed are
 // TERMINAL: a late finalizer racing the reconciler must not resurrect a failed
-// paste or fail a served one, and an absent slug is a no-op for the same
-// late-racer reason.
+// paste or fail a served one. An absent slug is a no-op for the same reason.
 func (r *MemRepo) setStatus(paste domain.Paste, st domain.PasteStatus) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -239,10 +233,8 @@ func (r *MemRepo) OwnerSummary(owner string, _ time.Time) (domain.OwnerSummary, 
 	return sum, nil
 }
 
-// DropStaleOwnerEntry repairs an index entry whose paste is gone. One map
-// holds row and index here, so a stale entry CANNOT exist and there is never
-// anything to drop - the honest answer is always false, which is also what
-// protects a live paste from a mistaken repair.
+// DropStaleOwnerEntry always reports false: one map holds row and index here,
+// so a stale entry cannot exist.
 func (r *MemRepo) DropStaleOwnerEntry(domain.Slug, string) (bool, error) {
 	return false, nil
 }

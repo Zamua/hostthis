@@ -4,19 +4,16 @@ import "encoding/json"
 
 // RoomWireValue is the SINGLE encoding of a stored room value onto any JSON
 // wire surface. Bytes that already parse as JSON are embedded raw, so a value
-// the app PUT as an object comes back NESTED rather than as a string of escaped
-// text; anything else becomes a JSON string of the verbatim bytes, so opaque
-// bytes round-trip without corrupting the surrounding object.
+// the app PUT as an object comes back NESTED; anything else becomes a JSON
+// string of the verbatim bytes, so opaque bytes round-trip.
 //
-// The HTTP scan handler and the relay's snapshot / put mirror frames MUST
-// encode a value byte-identically: the client splice contract treats a relay
-// snapshot and a cold-start HTTP scan as interchangeable (docs/SPEC.md "Rooms",
-// "The client splice contract"). Defining it once, as a pure function of the
-// value bytes, is what makes it a domain invariant rather than transport detail.
+// The HTTP scan handler and the relay's snapshot / mirror frames MUST encode a
+// value byte-identically: the client splice contract treats a relay snapshot
+// and a cold-start HTTP scan as interchangeable (docs/SPEC.md "The client
+// splice contract").
 //
-// The returned RawMessage is always valid JSON: json.Marshal of a Go string
-// cannot fail (invalid UTF-8 is coerced to U+FFFD), and the "null" fallback is
-// defensive.
+// The result is always valid JSON: json.Marshal of a Go string cannot fail
+// (invalid UTF-8 is coerced to U+FFFD); the "null" fallback is defensive.
 func RoomWireValue(v []byte) json.RawMessage {
 	if RoomValueIsJSON(v) {
 		return json.RawMessage(v)

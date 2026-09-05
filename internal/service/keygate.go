@@ -38,10 +38,9 @@ type KeyGateRepo interface {
 //
 // The SSH server calls Admit once per session, before any verb dispatch.
 //
-// There is no background prune. Rows leave when a read that already walks
-// them notices they are out of window, which keeps the family bounded by the
-// subnets still connecting rather than by every subnet that ever did (see
-// docs/SPEC.md "Sybil rate limit").
+// There is no background prune: rows leave when a read that already walks them
+// finds them out of window, so the family is bounded by the subnets still
+// connecting (docs/SPEC.md "Sybil rate limit").
 type KeyGate struct {
 	Repo                  KeyGateRepo
 	MaxFreshKeysPerSubnet int

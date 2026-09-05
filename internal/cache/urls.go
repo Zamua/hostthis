@@ -7,20 +7,14 @@ import (
 )
 
 // pasteCacheURLs returns every CDN cache key a paste is reachable at, so a
-// purge leaves nothing stale. PROVIDER-AGNOSTIC: which URLs a paste occupies
-// is a property of hostthis's URL scheme, so every adapter shares this policy
-// and differs only in how it submits the list to its purge API.
+// purge leaves nothing stale. Provider-agnostic: every adapter shares this
+// policy and differs only in how it submits the list.
 //
-// A markdown paste serves its content-independent render shell at the base URL
-// and the actual bytes at "?raw=1", a SEPARATE cache entry the shell fetches
-// client-side, so BOTH must be purged or an edit shows stale content until
-// max-age expires. An HTML paste only uses the base URL; purging the extra
-// "?raw=1" is a harmless no-op at the edge.
-//
-// The "?raw=1" suffix MUST match what the render shell fetches
-// (internal/http/assets/mdshell/md.js). TestMdShell_FetchesRawQuery pins the
-// two in lockstep so a change to md.js's query cannot silently break
-// markdown-edit invalidation.
+// A client-rendered paste serves its shell at the base URL and the bytes at
+// "?raw=1", a SEPARATE cache entry, so BOTH must be purged or an edit shows
+// stale content until max-age expires. For an HTML paste the extra purge is a
+// harmless no-op. The "?raw=1" suffix MUST match what the render shell
+// fetches; TestMdShell_FetchesRawQuery pins the two.
 func pasteCacheURLs(scheme, apex, mode string, slug domain.Slug) []string {
 	if scheme == "" {
 		scheme = "https"

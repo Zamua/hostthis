@@ -8,12 +8,9 @@ import (
 )
 
 // Site is the aggregate for a static-site upload: a directory of files served
-// off a single slug, sharing Paste's slug shape and identity.
-//
-// The served bytes are addressed indirectly: the Manifest maps each safe
-// relative path to the SHA256 of its uncompressed blob, so the
-// content-addressed BlobStore dedupes identical files across deploys and
-// across sites for free.
+// off a single slug. The Manifest maps each safe relative path to the SHA256
+// of its uncompressed blob, so the content-addressed BlobStore dedupes
+// identical files across deploys and sites.
 type Site struct {
 	Slug     Slug
 	Identity Identity // owner; "key:<fp>" - quota AND ownership gate
@@ -37,11 +34,10 @@ type ManifestEntry struct {
 	CompressedSize int    // stored post-zstd bytes; the quota basis (matches how pastes charge)
 	ContentType    string // by extension; see ContentTypeForPath
 
-	// Kind is the RENDER kind (markdown, diff, flamegraph, ...), strictly
-	// richer than ContentType: several kinds share text/plain and are told
-	// apart by sniffing content, not by extension. Carried per entry so a
-	// single-document paste keeps the kind it was detected as, while an
-	// ordinary file inside a directory leaves it empty and is served raw.
+	// Kind is the RENDER kind (markdown, diff, ...), richer than ContentType:
+	// several kinds share text/plain and are told apart by sniffing. A
+	// single-document paste keeps its detected kind; a file inside a directory
+	// leaves it empty and is served raw.
 	Kind string
 }
 
@@ -68,14 +64,10 @@ const (
 	// count.
 	MaxManifestBytes = 1 << 20 // 1 MiB of path text
 	// MaxSiteBytes caps the total UNCOMPRESSED bytes a single site may extract
-	// to. The decompression-bomb guard aborts the untar the instant the running
-	// total would exceed this OR the identity's available quota, whichever is
-	// smaller.
-	//
-	// Declared as its own value rather than an alias of UserQuotaBytes because
-	// that is a var (test-shrinkable) and a const cannot reference one. The two
-	// must stay equal; MaxSiteBytesMatchesQuota pins that so a quota change
-	// cannot silently leave the untar guard behind.
+	// to; the effective cap is the smaller of this and the identity's remaining
+	// quota. Its own value rather than an alias of UserQuotaBytes because that
+	// is a var and a const cannot reference one; MaxSiteBytesMatchesQuota pins
+	// the two equal.
 	MaxSiteBytes = 100 << 20 // 100 MiB, tracking UserQuotaBytes
 )
 
@@ -126,11 +118,9 @@ func (m Manifest) commonLeadingDir() string {
 }
 
 // StripCommonLeadingDir removes a single shared top-level directory from every
-// path when ALL files live under it, so the natural `tar czf - site/` serves
-// index.html at the root instead of 404ing there. No-op when files are already
-// at the root or span multiple top-level directories. Stripping a shared
-// prefix preserves distinctness, so it can never collide two entries onto one
-// key.
+// path when ALL files live under it, so `tar czf - site/` serves index.html at
+// the root. No-op otherwise. Stripping a shared prefix preserves distinctness,
+// so it can never collide two entries onto one key.
 func (m *Manifest) StripCommonLeadingDir() {
 	dir := m.commonLeadingDir()
 	if dir == "" {
@@ -194,15 +184,13 @@ type fileType struct {
 	asset       bool
 }
 
-// fileTypes is the ONE table of known file extensions. Holding the content
-// type and the asset flag on a single entry is what keeps them from diverging:
-// an extension cannot be admitted as an asset while having no content type.
+// fileTypes is the ONE table of known file extensions, so an extension cannot
+// be admitted as an asset while having no content type.
 //
-// Enumerating the ASSET set rather than the route set is what makes a novel
-// route shape default to the SPA index instead of a 404. ".html" is
-// deliberately not an asset: a missing ".html" path is a pre-rendered route the
-// build did not emit, so it routes through the SPA too. See SPEC.md "SPA
-// fallback (route vs. asset)".
+// Enumerating the ASSET set rather than the route set makes a novel route
+// shape default to the SPA index instead of a 404. ".html" is deliberately not
+// an asset: a missing ".html" path is a pre-rendered route the build did not
+// emit, so it routes through the SPA too (SPEC.md "SPA fallback").
 var fileTypes = map[string]fileType{
 	// Markup + prose: known types, but a miss is a ROUTE, not a 404.
 	".html": {contentType: "text/html; charset=utf-8"},
@@ -288,17 +276,14 @@ func looksLikeAsset(reqPath string) bool {
 	return ok
 }
 
-// LookupWithSPAFallback resolves reqPath like Lookup, but on a miss applies
-// the SPA fallback: a path that looks like a client-side ROUTE (no extension,
-// or a ".html" one) resolves to the site's ROOT index.html, while a missing
-// static ASSET stays a miss.
+// LookupWithSPAFallback resolves reqPath like Lookup, but on a miss a path
+// that looks like a client-side ROUTE (no extension, or ".html") resolves to
+// the site's ROOT index.html, while a missing static ASSET stays a miss.
 //
-// Three outcomes encoded in two bools:
-//   - hit && !viaFallback: a direct manifest entry, served normally.
-//   - hit && viaFallback: the root index.html for a client-side route; the
-//     HTTP layer still responds 200, exactly as if "/" were requested.
-//   - !hit (viaFallback always false): a 404. Covers a missing asset AND a
-//     route on a site with no root index.html to fall back to.
+//   - hit && !viaFallback: a direct manifest entry.
+//   - hit && viaFallback: the root index.html for a client-side route, served
+//     200 exactly as if "/" were requested.
+//   - !hit: a 404, a missing asset or a route on a site with no root index.
 func (m Manifest) LookupWithSPAFallback(reqPath string) (entry ManifestEntry, hit, viaFallback bool) {
 	if e, ok := m.Lookup(reqPath); ok {
 		return e, true, false
@@ -329,12 +314,10 @@ func (m Manifest) HasWebContent() bool {
 	return false
 }
 
-// Size is the total UNCOMPRESSED bytes of every file, counted per PATH.
-//
-// Not folded by content hash. Two paths holding identical bytes are two files
-// on disk, because a blob id is minted fresh per staged file rather than
-// derived from the content, so counting them once would describe a store we do
-// not have.
+// Size is the total UNCOMPRESSED bytes of every file, counted per PATH, not
+// folded by content hash: a blob id is minted per staged file rather than
+// derived from the content, so two paths holding identical bytes are two
+// stored files.
 func (m Manifest) Size() int {
 	var total int
 	for _, e := range m.Files {
@@ -344,11 +327,7 @@ func (m Manifest) Size() int {
 }
 
 // CompressedSize is the total STORED (post-zstd) bytes of every file, counted
-// per PATH, on the same not-folded basis as Size.
-//
-// This is the quota basis. The deploy charges what staging reported it wrote
-// rather than calling this, so the two are independent computations of the same
-// quantity - which is what makes this a usable oracle in a test.
+// per PATH on the same basis as Size. The quota basis.
 func (m Manifest) CompressedSize() int {
 	var total int
 	for _, e := range m.Files {

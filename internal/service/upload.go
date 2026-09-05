@@ -49,9 +49,8 @@ type Upload struct {
 	// Blob is the content-addressed byte plane.
 	Blob BlobUnit
 	Now  func() time.Time
-	// Sniff is the port DetectKind's text-only rule calls: the domain owns the
-	// rule, an adapter supplies the algorithm. Overridable so a test can drive
-	// a branch without hunting for bytes that sniff a particular way.
+	// Sniff is the domain.MIMESniffer port. Overridable so a test can drive a
+	// branch without hunting for bytes that sniff a particular way.
 	Sniff domain.MIMESniffer
 	// Archive handles the multi-file shape. nil disables archive uploads, which
 	// is what a deploy with no site support wants.
@@ -99,14 +98,14 @@ type ArchiveDeployer interface {
 	Deploy(body io.Reader, owner string) (Result, error)
 }
 
-// ErrOverQuota is returned when accepting the upload would push the identity's
-// total active COMPRESSED bytes above UserQuotaBytes. The number is derived
-// from the constant so the message cannot drift from the enforced limit.
 // archivePeek is the buffered-reader size for the gzip-magic peek. Only 2
 // bytes are examined; the buffer just has to be large enough that the peek
 // cannot short-read.
 const archivePeek = 512
 
+// ErrOverQuota is returned when accepting the upload would push the identity's
+// total active COMPRESSED bytes above UserQuotaBytes. The number is derived
+// from the constant so the message cannot drift from the enforced limit.
 var ErrOverQuota = fmt.Errorf("service: would exceed your %d MiB total quota; delete a paste to free space", domain.UserQuotaBytes>>20)
 
 // ErrRawTooLarge is returned when the raw input exceeded the fast-fail cap.
@@ -127,19 +126,14 @@ var ErrServiceFull = errors.New("service: service is at capacity, try again late
 // the uploader's ssh public key fingerprint. That identity gates quota: its
 // active pastes plus this body cannot exceed UserQuotaBytes.
 //
-// body is consumed in a single streaming pass (hash + compress + count, peak
-// memory ~MaxPasteBytes), and type detection runs on the captured 512-byte
-// prefix so the source is never re-read. Unsupported types return
+// body is consumed in a single streaming pass; type detection runs on the
+// captured prefix so the source is never re-read. Unsupported types return
 // domain.ErrUnsupportedKind for the caller to surface verbatim.
 func (u *Upload) Create(body io.Reader, owner string, name string, typeHint string) (Result, error) {
-	// A gzip-tar archive is the SAME paste at a different cardinality, so
-	// the decision is made HERE rather than by each transport: one entry point,
-	// one place that knows both shapes exist (docs/SPEC.md "One paste, not
-	// two aggregates").
-	//
-	// It must happen BEFORE staging, which consumes and compresses the stream -
-	// the archive path needs the original bytes. The peek is non-destructive:
-	// the buffered reader replays the prefix downstream either way.
+	// A gzip-tar archive is the SAME paste at a different cardinality, so the
+	// decision is made here, once, rather than by each transport (docs/SPEC.md
+	// "One paste, not two aggregates"). It must precede staging, which consumes
+	// the stream; the peek is non-destructive.
 	if u.Archive != nil && typeHint == "" {
 		peeked := bufio.NewReaderSize(body, archivePeek)
 		head, _ := peeked.Peek(2)
@@ -239,11 +233,8 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 
 // WaitFinalize blocks until every background finalize this Upload started has
 // completed, so a graceful shutdown does not strand pending pastes for the
-// reconciler to age out.
-//
-// Per-instance. A package-level WaitGroup would make one Upload's WaitFinalize
-// block on every other instance's in-flight work, coupling unrelated servers
-// and any tests that run in parallel.
+// reconciler to age out. Per-instance: a package-level WaitGroup would couple
+// unrelated servers and parallel tests.
 func (u *Upload) WaitFinalize() { u.finalizeWG.Wait() }
 
 // startFinalize runs the background half of Create (write the blob, then flip
@@ -264,9 +255,8 @@ func (u *Upload) startFinalize(paste domain.Paste, staged stagedUpload) {
 // finalize racing the reconciler's age-out cannot resurrect a failed paste.
 // Errors are logged, not returned: the caller already has its URL.
 //
-// Streams from the spill file rather than taking a body: this path is
-// per-upload and runs in the background, so buffering here made resident memory
-// scale with concurrent uploads times payload size (docs/SPEC.md "Writes are
+// Streams from the spill file: buffering would make resident memory scale with
+// concurrent uploads times payload size (docs/SPEC.md "Writes are
 // constant-memory").
 func (u *Upload) finalize(paste domain.Paste, staged stagedUpload) {
 	if err := u.Blob.StagePrecompressed(context.Background(), staged.SHA, staged.File, staged.encodedSize()); err != nil {

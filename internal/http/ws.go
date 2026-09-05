@@ -55,9 +55,8 @@ func (s *Server) handleRoomWS(w http.ResponseWriter, r *http.Request, appSlug do
 		return
 	}
 
-	// Any error here, not-found OR a backend read error, refuses the upgrade
-	// as a 404: no relay stands up for a room whose existence is unconfirmed,
-	// and the two cases stay indistinguishable.
+	// Not-found OR a backend read error refuses the upgrade as a 404: no relay
+	// stands up for a room whose existence is unconfirmed.
 	if _, err := s.Rooms.Scan(appSlug, id); err != nil {
 		http.NotFound(w, r)
 		return
@@ -82,11 +81,9 @@ func (s *Server) handleRoomWS(w http.ResponseWriter, r *http.Request, appSlug do
 		return
 	}
 
-	// Serve blocks for the connection's lifetime. The websocket is hijacked
-	// out from under the http.Server's ReadTimeout / WriteTimeout, which must
-	// NOT reap a live relay connection; the relay keeps its own per-connection
-	// deadlines via the heartbeat. r.Context() is cancelled when the
-	// underlying connection drops, bounding the connection's life.
+	// Serve blocks for the connection's lifetime. The hijacked socket is
+	// outside http.Server's Read/WriteTimeout; the relay's heartbeat bounds it,
+	// and r.Context() cancels when the underlying connection drops.
 	s.Relay.Serve(r.Context(), key, connID, conn)
 }
 

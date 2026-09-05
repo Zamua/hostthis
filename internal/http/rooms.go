@@ -35,16 +35,14 @@ type RoomService interface {
 // path and the static-file path cannot collide.
 const roomAPIPrefix = "/api/rooms"
 
-// roomMaxBodyBytes bounds a single PUT body so a hostile client cannot stream
-// an unbounded body into memory. A value this large is already over the
+// roomMaxBodyBytes bounds a PUT body. A body this large is already over the
 // per-room cap, so the service layer surfaces the precise 413.
 const roomMaxBodyBytes = domain.MaxRoomValueBytes + 1
 
 // roomAPIPath reports whether reqPath addresses the rooms API and returns the
 // remainder after roomAPIPrefix. It matches the prefix exactly or as a whole
 // path segment, but NOT a longer first segment like "/api/roomsX", which is a
-// normal site path. This keeps the carve-out tight: everything else falls
-// through to the static-site / paste path.
+// normal site path.
 func roomAPIPath(reqPath string) (rest string, ok bool) {
 	if reqPath == roomAPIPrefix {
 		return "", true
@@ -58,11 +56,9 @@ func roomAPIPath(reqPath string) (rest string, ok bool) {
 // handleRoomsAPI serves the /api/rooms surface for appSlug. apiPath is the
 // request path with roomAPIPrefix stripped: "" / "/" is the collection,
 // "/<uuid>" is a room, "/<uuid>/<key>" is one value. Returns true once it has
-// handled the request; the caller must then return.
-//
-// The router calls this BEFORE the static-site lookup so a manifest file can
-// never shadow the API prefix. Any slug owning a site OR a live paste gets the
-// API; room CREATION additionally requires a live app (see createRoom).
+// handled the request. Runs BEFORE the static-site lookup so a manifest file
+// can never shadow the API prefix; room CREATION additionally requires a live
+// app (see createRoom).
 func (s *Server) handleRoomsAPI(w http.ResponseWriter, r *http.Request, appSlug domain.Slug, apiPath string) bool {
 	if s.Rooms == nil {
 		http.NotFound(w, r)
@@ -180,8 +176,7 @@ func (s *Server) scanRoom(w http.ResponseWriter, r *http.Request, appSlug domain
 		s.writeRoomError(w, r, err)
 		return
 	}
-	// One JSON object, key -> value, each value embedded as raw JSON when it
-	// parses as JSON, else as a JSON string of the verbatim bytes.
+	// One JSON object, key -> value, encoded by domain.RoomWireValue.
 	out := make(map[string]json.RawMessage, kv.KeyCount())
 	for k, v := range kv.Values {
 		out[k] = domain.RoomWireValue(v)
@@ -223,11 +218,9 @@ func (s *Server) putRoomValue(w http.ResponseWriter, r *http.Request, appSlug do
 		http.Error(w, "read body\n", http.StatusBadRequest)
 		return
 	}
-	// The mirror frame is built INSIDE the commit callback because it carries
-	// The live mirror is NOT built here: the room cell broadcasts the frame
-	// inside the same single-threaded event that commits the write and assigns
-	// its per-room seq. Mirroring from this pod as well would deliver every
-	// frame twice.
+	// The live mirror is NOT built here: the room cell broadcasts the frame in
+	// the same event that commits the write and assigns its seq, so mirroring
+	// from this pod would deliver every frame twice.
 	_, err = s.Rooms.Put(appSlug, id, key, body)
 	if err != nil {
 		s.writeRoomError(w, r, err)
@@ -290,14 +283,11 @@ func trustXFFEnv() bool {
 // clientSubnet derives the canonical /24 (IPv4) or /48 (IPv6) subnet of the
 // requester for the per-IP room-creation rate limit.
 //
-// By DEFAULT the address comes from the TCP RemoteAddr only. Trusting
-// X-Forwarded-For by default would be a rate-limit bypass: an attacker could
-// set a fresh value per POST and land in a new per-IP bucket each time.
-//
+// By DEFAULT the address is the TCP RemoteAddr only: trusting X-Forwarded-For
+// would be a rate-limit bypass, a fresh value per POST landing in a new bucket.
 // With HOSTTHIS_HTTP_TRUST_XFF=true the RIGHT-MOST X-Forwarded-For value is
-// used: the hop the trusted proxy itself recorded, which the client cannot
-// forge past the proxy. The left-most value is fully attacker-controlled. An
-// unparseable address becomes the stable "unknown" bucket.
+// used, the hop the trusted proxy itself recorded; the left-most is fully
+// attacker-controlled. An unparseable address becomes the "unknown" bucket.
 func clientSubnet(r *http.Request) string {
 	host := ""
 	if trustXFFEnv() {

@@ -25,13 +25,10 @@ const (
 )
 
 // classifyCommitErr is the ONE translation of the storage commit-error triad
-// (service-full, over-user-quota, slug-taken) into the service vocabulary.
-// Every write path repeats this exact mapping, so it lives here once and the
-// call sites keep only their path-specific cases.
-//
-// The returned error is nil for commitOK, the service sentinel for the triad
-// classes, and err itself (the same value) for commitOther. Sentinels are
-// matched with errors.Is, so wrapping anywhere in the storage stack is fine.
+// (service-full, over-user-quota, slug-taken) into the service vocabulary, so
+// call sites keep only their path-specific cases. The returned error is nil
+// for commitOK, the service sentinel for the triad, and err itself for
+// commitOther. Sentinels match with errors.Is, so wrapping is fine.
 func classifyCommitErr(err error) (commitErrClass, error) {
 	switch {
 	case err == nil:

@@ -10,11 +10,10 @@ import (
 
 // DefaultCreateAdmissionWidth is the number of same-identity creates admitted
 // to the metadata commit concurrently (docs/SPEC.md "Same-identity create
-// admission: a width-2 gate"). Width 2 leaves a lone create, plus one
-// overlapping follower, fully concurrent so the common case pays nothing. The
-// cap matters because N same-owner commits contending at a CAS boundary
-// amplify each other's retries (every loser re-runs its commit), so the
-// concurrency is bounded before the storage tier rather than inside it.
+// admission: a width-2 gate"). Width 2 leaves a lone create plus one overlapping
+// follower fully concurrent. N same-owner commits contending at a CAS boundary
+// amplify each other's retries, so concurrency is bounded before the storage
+// tier rather than inside it.
 const DefaultCreateAdmissionWidth = 2
 
 // CreateAdmission is a per-key counting semaphore: each key admits at most

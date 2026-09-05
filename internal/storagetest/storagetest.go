@@ -1,6 +1,5 @@
 // Package storagetest opens a metadata repo for tests in other packages: one
-// in-memory MemRepo per test, honest because the same conformance suite the
-// celld backend passes runs against it on every `go test ./...`.
+// in-memory MemRepo per test.
 package storagetest
 
 import (
@@ -15,13 +14,11 @@ var (
 	repos = map[*testing.T]*storage.MemRepo{}
 )
 
-// NewRepo returns t's repo, opening it on first call.
-//
-// ONE store per test, however many times it is called. Pastes and sites share
-// a slug namespace and guard it with a cross-family read, so handing a test
-// two independent stores would let a collision the real system rejects go
-// unnoticed. Wrap it in storage.NewSites / storage.NewMemRoomRepo for the
-// site and room views.
+// NewRepo returns t's repo, opening it on first call: ONE store per test,
+// however many times it is called, because pastes and sites share a slug
+// namespace and two independent stores would let a collision the real system
+// rejects go unnoticed. Wrap it in storage.NewSites / storage.NewMemRoomRepo
+// for the site and room views.
 func NewRepo(t *testing.T) *storage.MemRepo {
 	t.Helper()
 	mu.Lock()

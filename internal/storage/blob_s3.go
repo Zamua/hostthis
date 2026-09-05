@@ -12,20 +12,16 @@ import (
 )
 
 // S3BlobStore is a content-addressed blob store over an S3-compatible bucket.
-// Bytes live at <prefix>/<sha256[:2]>/<sha256>, mirroring the disk store's
-// layout so the two are interchangeable and a migration between them is a key
-// rename rather than a re-encoding.
+// Bytes live at <prefix>/<sha256[:2]>/<sha256>, the disk store's layout, so a
+// migration between them is a key rename rather than a re-encoding.
 //
-// It answers the SAME five-method contract the disk store does and nothing
-// more. That is deliberate: a blob is content-addressed and immutable, so two
-// writers racing one sha write identical bytes and last-write-wins is correct
-// rather than merely tolerated. None of the machinery a mutable keyspace needs
-// - placement, fencing, single-owner enforcement, consensus - has anything to
-// do here, and the object store already replicates.
+// A blob is immutable and content-addressed, so two writers racing one sha
+// write identical bytes and last-write-wins is correct; no placement, fencing
+// or consensus is needed here.
 //
-// Like the disk store it holds whatever bytes it is handed and does NOT satisfy
-// service.BlobStore: the at-rest encoding belongs to CompressedBlobStore, and
-// every wiring path goes through that wrapper.
+// Like the disk store it does NOT satisfy service.BlobStore: the at-rest
+// encoding belongs to CompressedBlobStore, and every wiring path goes through
+// that wrapper.
 type S3BlobStore struct {
 	client *minio.Client
 	bucket string
@@ -40,9 +36,8 @@ type S3BlobConfig struct {
 	AccessKey string
 	SecretKey string
 	UseSSL    bool
-	// Prefix namespaces the blobs inside the bucket. It lets a bucket already
-	// holding another system's objects take these without collision, which is
-	// what allows a migration to run with both readers live on one bucket.
+	// Prefix namespaces the blobs inside the bucket, so a bucket already
+	// holding another system's objects can take these without collision.
 	Prefix string
 }
 
@@ -70,12 +65,9 @@ func (s *S3BlobStore) key(sha string) string {
 	return s.prefix + "/" + sha[:2] + "/" + sha
 }
 
-// Put streams r to the content-addressed key.
-//
-// size is REQUIRED to be accurate when known: a negative length makes the
-// client buffer a full multipart part to discover the length, which would put
-// the payload back on the heap that the streaming upload path exists to keep it
-// off. Callers that genuinely do not know pass -1 and accept that cost.
+// Put streams r to the content-addressed key. size must be accurate when
+// known: a negative length makes the client buffer a whole multipart part to
+// discover it. Callers that genuinely do not know pass -1 and accept that cost.
 func (s *S3BlobStore) Put(sha string, r io.Reader, size int64) error {
 	if len(sha) < 2 {
 		return errors.New("blob: sha too short")
@@ -97,9 +89,8 @@ func (s *S3BlobStore) GetReader(sha string) (io.ReadCloser, int64, error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("blob s3: get %s: %w", sha, err)
 	}
-	// GetObject is lazy: a missing key surfaces on the first Stat/Read, not
-	// here, so the not-found translation has to happen against Stat or the
-	// caller receives a reader that fails later as an opaque transport error.
+	// GetObject is lazy: a missing key surfaces on the first Stat/Read, so the
+	// not-found translation happens against Stat.
 	info, err := obj.Stat()
 	if err != nil {
 		_ = obj.Close()

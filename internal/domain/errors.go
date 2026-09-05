@@ -2,18 +2,13 @@ package domain
 
 import "errors"
 
-// The persistence-outcome sentinel vocabulary: the business outcomes every
-// storage backend must agree on and every caller matches with errors.Is (see
-// docs/SPEC.md "The storage contract and its conformance suite"). The domain
-// owns the vocabulary, the backends return it, the services translate it.
+// The persistence-outcome sentinel vocabulary every storage backend returns
+// and every caller matches with errors.Is (docs/SPEC.md "The storage contract
+// and its conformance suite"). The storage package re-exports each under a
+// storage.Err... alias of the SAME value, so errors.Is holds under either name.
 //
-// The storage package re-exports each sentinel under a storage.Err... alias of
-// the SAME error value, so errors.Is identity holds whichever name a caller
-// matches against.
-//
-// The message text is stable contract, "storage:" prefix included, because
-// sentinel messages reach user-facing output (SSH stderr, HTTP error bodies).
-// Do not edit the strings.
+// The message text is stable contract, "storage:" prefix included: sentinel
+// messages reach user-facing output (SSH stderr, HTTP error bodies).
 var (
 	// ErrNotFound is returned by any repo when a lookup misses.
 	ErrNotFound = errors.New("storage: not found")

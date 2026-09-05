@@ -81,14 +81,11 @@ func (c *cell) call(ctx context.Context, method, path, key, val string, body, ou
 		return 0, err
 	}
 	defer resp.Body.Close() //nolint:errcheck
-	// Answer statuses are returned, never wrapped: wrapping one as an error
-	// would hide the sentinel behind a transport failure. A status off the
-	// list is a fault: the cell did something the adapter does not model.
+	// Answer statuses are returned, never wrapped, or the sentinel would hide
+	// behind a transport failure. A status off the list is a fault.
 	if resp.StatusCode >= 400 && !isCellAnswer(resp.StatusCode) {
-		// Carry the cell's own explanation up. The identity cell refuses an
-		// impossible charge total and says WHICH value it refused; discarding
-		// that would trade a legible failure for a bare status code, and the
-		// number is the whole diagnostic.
+		// Carry the cell's own explanation up: the identity cell says WHICH
+		// value it refused, and the number is the whole diagnostic.
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		if len(detail) > 0 {
 			return resp.StatusCode, fmt.Errorf("celld: %s: status %d: %s", path, resp.StatusCode, detail)

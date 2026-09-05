@@ -90,9 +90,8 @@ func main() {
 
 	// Per-identity create admission (docs/SPEC.md "Same-identity create
 	// admission"): same-identity creates beyond the width queue BEFORE the
-	// metadata commit, so a one-owner create storm cannot amplify in the
-	// storage tier's CAS layer, while other identities pass independently.
-	// A repo decorator, so the upload service stays admission-unaware.
+	// metadata commit, so a one-owner storm cannot amplify in the storage
+	// tier's CAS layer. A repo decorator, so the upload service stays unaware.
 	admissionWidth := envParse("HOSTTHIS_CREATE_ADMISSION_WIDTH", service.DefaultCreateAdmissionWidth, strconv.Atoi, "an integer")
 	if admissionWidth < 1 {
 		logger.Fatalf("HOSTTHIS_CREATE_ADMISSION_WIDTH must be >= 1, got %d", admissionWidth)
@@ -114,9 +113,8 @@ func main() {
 	var deploySvc *service.DeploySite
 	if siteRepo != nil {
 		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobUnit)
-		// One entry point: Create now dispatches the multi-file shape itself,
-		// so no transport forks on content (docs/SPEC.md "One paste, not two
-		// aggregates").
+		// Create dispatches the multi-file shape itself, so no transport forks
+		// on content (docs/SPEC.md "One paste, not two aggregates").
 		uploadSvc.Archive = service.ArchiveAdapter{Deployer: deploySvc}
 	}
 
@@ -129,10 +127,6 @@ func main() {
 		roomPushSvc = service.NewRoomPush(roomRepo)
 	}
 
-	// Relay: the real-time per-room WebSocket layer over the rooms tier (SPEC
-	// "Real-time room relay (WebSocket)"). It depends on the rooms service only
-	// for the late-join snapshot; persistence goes through the HTTP PUT/DELETE
-	// mirror. Per-room hubs are in-memory and per-pod. Nil without a room repo.
 	keyGate := service.NewKeyGate(keyGateRepo)
 	keyGate.MaxFreshKeysPerSubnet = *freshKeysLimit
 	keyGate.Window = *freshKeysWindow
@@ -153,15 +147,13 @@ func main() {
 
 	build := buildURL(*scheme, *apexDomain, *urlMode, logger)
 
-	// The decorator wraps the verb service so a mutation transparently
-	// invalidates the edge cache for the affected slug, keeping the verb
-	// service cache-unaware (SPEC "Active invalidation: CachePurger"). Noop
-	// unless a CDN is configured.
+	// A decorator, so a mutation invalidates the edge cache for its slug while
+	// the verb service stays cache-unaware (SPEC "Active invalidation:
+	// CachePurger"). Noop unless a CDN is configured.
 	cachePurger := buildCachePurger(logger, *scheme, *apexDomain, *urlMode)
 	pasteMgr := service.NewCacheInvalidating(manageSvc, cachePurger)
 
-	// Own registry rather than the default one: what this process publishes is
-	// then exactly what is registered here, with no collectors arriving via a
+	// Own registry rather than the default one, so no collector arrives via a
 	// dependency's init().
 	metricsReg := prometheus.NewRegistry()
 	metricsReg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
@@ -210,16 +202,11 @@ func main() {
 		relayDrain = lifecycle
 		logger.Printf("relay: cell proxy (the room cell is the broadcast point)")
 	}
-	// Metrics listen on their OWN port, never the public one. The public mux
-	// answers /healthz on any Host without auth, so adding /metrics there
-	// would publish request rates, verb mix and failure counts to anyone who
-	// asked. A separate listener is not routed by the ingress at all.
-	// pprof rides the same private listener. A goroutine dump taken during a
-	// slow command names the call it is blocked in, which counters and CPU
-	// profiles cannot; and pprof exposes stacks and heap contents, so it must
-	// never appear on the public mux. Explicit routes rather than importing
-	// net/http/pprof for its side effect on DefaultServeMux, which this
-	// process never serves.
+	// Metrics and pprof listen on their OWN port, never the public one: the
+	// public mux answers /healthz on any Host without auth, and /metrics there
+	// would publish request rates and failure counts to anyone, while pprof
+	// exposes stacks and heap contents. Explicit pprof routes rather than
+	// importing net/http/pprof for its DefaultServeMux side effect.
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.HandlerFor(metricsReg, promhttp.HandlerOpts{}))
 	metricsMux.HandleFunc("/debug/pprof/", httppprof.Index)
@@ -304,9 +291,6 @@ func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlob
 		logger.Printf("blobs: disk backend at %s/blobs (zstd-compressed at rest)", dataDir)
 		raw = bs
 	case "s3":
-		// The celld backend holds no bytes, so the byte plane needs a durable
-		// home of its own. Content-addressed, exactly like disk: interchangeable
-		// layouts mean moving between them is a key rename, never a re-encode.
 		bs, err := storage.NewS3BlobStore(storage.S3BlobConfig{
 			Endpoint:  envOr("HOSTTHIS_S3_ENDPOINT", ""),
 			Bucket:    envOr("HOSTTHIS_S3_BUCKET", ""),
@@ -405,11 +389,10 @@ func envOr(key, fallback string) string {
 
 // envParse reads key through parse, or returns fallback when it is unset.
 //
-// A malformed value is a configuration ERROR, not a reason to fall back. The
-// operator set the variable deliberately, and silently substituting the default
-// leaves the startup log confirming a value they never got. Exits rather than
-// returning an error because these are read during flag setup, before there is
-// anywhere to return one to.
+// A malformed value is a configuration ERROR, not a reason to fall back:
+// silently substituting the default leaves the startup log confirming a value
+// the operator never got. Exits because these are read during flag setup,
+// before there is anywhere to return an error to.
 func envParse[T any](key string, fallback T, parse func(string) (T, error), want string) T {
 	v := os.Getenv(key)
 	if v == "" {

@@ -1,7 +1,5 @@
-// metadata.go - pluggable metadata backend selector.
-//
-// HOSTTHIS_METADATA_BACKEND selects memory or celld. See docs/SPEC.md
-// "Metadata storage backends".
+// HOSTTHIS_METADATA_BACKEND selects the metadata backend, memory or celld
+// (docs/SPEC.md "Metadata storage backends").
 
 package main
 
@@ -26,8 +24,7 @@ type metadataBundle struct {
 }
 
 // metadataRepo is the union of every service-layer / http-layer interface the
-// metadata backend has to satisfy. Defined here rather than in
-// internal/service because it is a wiring-layer concern.
+// metadata backend has to satisfy: a wiring-layer concern.
 type metadataRepo interface {
 	service.PasteRepo
 	service.PasteAdmin

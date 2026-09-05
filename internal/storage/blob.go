@@ -10,13 +10,12 @@ import (
 )
 
 // BlobStore is a content-addressed on-disk store. Bytes live at
-// <root>/<sha256[:2]>/<sha256> so directory fanout stays sane; records pointing
-// at the same bytes share one file.
+// <root>/<sha256[:2]>/<sha256>; records pointing at the same bytes share one
+// file.
 //
-// It stores whatever bytes it is handed and does NOT satisfy service.BlobStore:
-// the at-rest encoding is CompressedBlobStore's, and every wiring path must
-// pass through that wrapper. Giving the raw store the encoder methods would let
-// a mis-wiring compile and then serve undecoded bytes.
+// It does NOT satisfy service.BlobStore: the at-rest encoding is
+// CompressedBlobStore's. Giving the raw store the encoder methods would let a
+// mis-wiring compile and then serve undecoded bytes.
 type BlobStore struct {
 	root string
 }
@@ -30,8 +29,7 @@ func NewBlobStore(root string) (*BlobStore, error) {
 
 // Put streams r into the content-addressed location for sha. An existing file
 // at the destination is trusted as-is: only a sha256 collision could reach it
-// with different bytes. size is accepted for parity with S3-shaped backends
-// that need Content-Length up front; the disk store does not need it.
+// with different bytes. size is for parity with S3-shaped backends.
 func (b *BlobStore) Put(sha string, r io.Reader, size int64) error {
 	if len(sha) < 2 {
 		return fmt.Errorf("blob: sha too short")

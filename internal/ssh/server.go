@@ -36,18 +36,16 @@ import (
 // URLBuilder renders a slug as its public URL.
 type URLBuilder func(domain.Slug) string
 
-// PasteReader is the by-slug read the SSH layer needs beyond the verb service,
-// used to mark which version `versions` currently serves. Depending on this
-// rather than the verb service's repo keeps the SSH layer decoupled from how
-// Manage is composed, in particular from the cache-invalidating decorator.
+// PasteReader is the by-slug read `versions` uses to mark the served version.
+// Separate from the verb service so the SSH layer stays decoupled from how
+// Manage is composed (the cache-invalidating decorator).
 type PasteReader interface {
 	Get(domain.Slug) (domain.Paste, error)
 }
 
-// SiteReader resolves a deployed static-site slug to its URL for `url` / `qr`.
-// Optional: nil means those verbs resolve paste slugs only. Like PasteReader
-// the lookup is not owner-scoped - the URL is a public capability, so resolving
-// a live slug leaks nothing the URL doesn't.
+// SiteReader resolves a deployed static-site slug for `url` / `qr`. Optional:
+// nil means those verbs resolve paste slugs only. Not owner-scoped: the URL is
+// a public capability, so resolving a live slug leaks nothing the URL doesn't.
 type SiteReader interface {
 	Get(domain.Slug) (domain.Site, error)
 }
@@ -192,12 +190,10 @@ func (s *Server) Close() error {
 // clean shutdown or net.ErrClosed).
 //
 // HOSTTHIS_SSH_PROXY_PROTOCOL=true wraps the listener so PROXY protocol v1/v2
-// headers from a TCP-level forwarder (traefik, haproxy, nginx stream) are
-// parsed and RemoteAddr() carries the real client IP. Required whenever SSH
-// sits behind a TCP router: without it every session appears to originate from
-// the forwarder and the Sybil per-subnet limit collapses to a global cap.
-// With the flag set the header is mandatory: a headerless connection is
-// refused rather than served with the forwarder's own address.
+// headers from a TCP-level forwarder are parsed and RemoteAddr() carries the
+// real client IP. Required behind a TCP router: without it every session
+// appears to originate from the forwarder and the Sybil per-subnet limit
+// collapses to a global cap. With the flag set the header is mandatory.
 func (s *Server) ListenAndServe() error {
 	signer, err := s.hostSigner()
 	if err != nil {
@@ -239,13 +235,10 @@ func (s *Server) ListenAndServe() error {
 		return fmt.Errorf("listen %s: %w", s.Addr, err)
 	}
 	if strings.EqualFold(os.Getenv("HOSTTHIS_SSH_PROXY_PROTOCOL"), "true") {
-		// REQUIRE, explicitly: with parsing enabled, only the reverse proxy
-		// should be able to reach this listener, and it always sends a header.
-		// A headerless connection means the front door was bypassed, and
-		// serving it would attribute the client to the proxy's own address,
-		// which is exactly what keygate subnet accounting must not do. This is
-		// also the library's v0.15 default for unconfigured listeners; stating
-		// it here keeps the refusal a decision rather than an inheritance.
+		// REQUIRE, explicitly: only the reverse proxy should reach this
+		// listener, and it always sends a header. A headerless connection means
+		// the front door was bypassed, and serving it would attribute the client
+		// to the proxy's own address in keygate subnet accounting.
 		ln = &proxyproto.Listener{
 			Listener: ln,
 			ConnPolicy: func(proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
@@ -461,20 +454,18 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		emitUsageErr(sess, err)
 		return
 	}
-	// The live session reader goes straight to the service layer, which streams
-	// it through hash + compress + raw-counter (HardRawByteCap on the input
-	// side, MaxPasteBytes on the compressed side). Buffering the body here
-	// would peak memory at HardRawByteCap per concurrent upload.
+	// The live session reader goes straight to the service layer's streaming
+	// pipeline; buffering the body here would peak memory at HardRawByteCap
+	// per concurrent upload.
 	limited := io.LimitReader(sess, int64(domain.HardRawByteCap)+1)
 
 	if args.Slug != "" {
 		// Update path.
 		slug, _ := domain.ParseSlug(args.Slug)
 
-		// A gzip-tar archive piped at an owned site slug re-deploys in place.
-		// The gzip magic decides site-vs-paste, the slug positional decides
-		// new-vs-update. The peek is non-destructive: the buffered reader
-		// replays the prefix downstream. Anything else is a paste update.
+		// A gzip-tar archive piped at an owned site slug re-deploys in place:
+		// the gzip magic decides site-vs-paste, the slug positional decides
+		// new-vs-update. The peek is non-destructive.
 		if s.Deploy != nil && args.Type == "" {
 			peeked := bufio.NewReaderSize(limited, 512)
 			if head, _ := peeked.Peek(2); domain.HasGzipMagic(head) {
@@ -514,8 +505,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	}
 
 	// Create path. A gzip magic prefix (with no explicit type hint) routes to
-	// the site deploy; everything else is a single-file paste. The peek is
-	// non-destructive: the buffered reader replays the prefix downstream.
+	// the site deploy; everything else is a single-file paste.
 	peeked := bufio.NewReaderSize(limited, 512)
 	if s.Deploy != nil && args.Type == "" {
 		if head, _ := peeked.Peek(2); domain.HasGzipMagic(head) {
@@ -536,11 +526,10 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	s.emitURL(sess, res.Paste.Slug)
 }
 
-// emitSite ends a site deploy or in-place re-deploy with the same shape of
-// response a single-file upload gets, so `tar czf - site/ | ssh <apex>` needs
-// no verb and no flag. A slug naming a foreign-owned site, or no site at all,
-// exits with a not-found byte-identical to any other, so a non-owner cannot
-// probe existence or ownership. Sites have no name field, so --name is ignored.
+// emitSite ends a site deploy with the same response shape a single-file
+// upload gets. A foreign-owned or absent site exits with a not-found
+// byte-identical to any other, so a non-owner cannot probe existence or
+// ownership. Sites have no name field, so --name is ignored.
 func (s *Server) emitSite(sess gossh.Session, res service.SiteResult, err error) {
 	if err != nil {
 		emitServiceErr(sess, err)
@@ -603,11 +592,9 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 	}
 	// The header goes on stdout, not stderr: stdout/stderr interleaving is
 	// non-deterministic over ssh, so a stderr header can arrive after the rows.
-	// tabwriter space-pads the columns so a long NAME cannot push every later
-	// column out of alignment.
 	tw := tabwriter.NewWriter(sess, 0, 0, 2, ' ', 0)
-	// SIZE is what the item COSTS the owner, which for a paste is every live
-	// version. That is what makes the column sum to whoami.
+	// SIZE is what the item COSTS the owner (every live version for a paste),
+	// so the column sums to whoami.
 	_, _ = fmt.Fprintln(tw, "SLUG\tNAME\tSIZE\tKIND\tVERS")
 	for _, it := range items {
 		name := it.Name
@@ -618,9 +605,9 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 			it.Slug, name, humanBytes(it.SizeBytes), it.Kind, versCol(it))
 	}
 	_ = tw.Flush()
-	// Only when a row actually costs more than it serves. VERS shows the SERVED
-	// version number, not how many are stored, so it cannot explain the gap on
-	// its own: a paste at v3 with v1 deleted is charged for two.
+	// VERS shows the SERVED version number, not how many are stored, so it
+	// cannot explain the gap on its own: a paste at v3 with v1 deleted is
+	// charged for two.
 	if MultiVersionNote(items) {
 		_, _ = fmt.Fprintln(sess.Stderr(),
 			"\nSIZE counts every live version. Run `versions <slug>` for the per-version breakdown.")
@@ -642,9 +629,8 @@ func (s *Server) verbGet(sess gossh.Session, owner string, argv []string) {
 		return
 	}
 	defer rc.Close() //nolint:errcheck
-	// Copied, never buffered: the paste is served decompressed, so holding it
-	// whole would size this verb's memory to the document rather than to a copy
-	// buffer (docs/SPEC.md "Reads are constant-memory too").
+	// Copied, never buffered: the paste is served decompressed (docs/SPEC.md
+	// "Reads are constant-memory too").
 	_, _ = io.Copy(sess, rc)
 	_ = sess.Exit(ExitOK)
 }
@@ -675,10 +661,8 @@ func (s *Server) verbURL(sess gossh.Session, argv []string, qr bool) {
 }
 
 // resolveExistingURL resolves slug to its shareable URL when it names an
-// existing paste or, failing that, a static site; false when no such slug
-// exists. Reusing BuildURL keeps the result byte-identical to what
-// the original upload returned. No ownership check: knowing the slug already
-// grants read access at the URL.
+// existing paste or, failing that, a static site. No ownership check: knowing
+// the slug already grants read access at the URL.
 func (s *Server) resolveExistingURL(slug domain.Slug) (string, bool) {
 	if s.Pastes != nil {
 		if p, err := s.Pastes.Get(slug); err == nil {
@@ -970,10 +954,9 @@ func (s *Server) verbWhoami(sess gossh.Session, owner string, argv []string) {
 // -- help -------------------------------------------------------------------
 
 // verbHelp dispatches help requests. No args emits the global banner, which
-// characterization tests pin byte-exact. One arg naming a known verb (including
-// doc-only aliases like `put` / `get`) emits verb help; anything else prefixes
-// an `unknown verb` line and falls back to the banner, still exiting 0 because
-// help is what was asked for.
+// characterization tests pin byte-exact. One arg naming a known verb emits verb
+// help; anything else prefixes an `unknown verb` line and falls back to the
+// banner, still exiting 0 because help is what was asked for.
 func (s *Server) verbHelp(sess gossh.Session, rest []string) {
 	if len(rest) == 0 {
 		emitHelp(sess, s.apex())
@@ -1185,16 +1168,12 @@ func ipSubnet(ip net.IP) string {
 }
 
 // fingerprintKey returns an ssh public key's SHA256 fingerprint as
-// "SHA256:<lowercase hex>". This deliberately does NOT match `ssh-keygen -lf`,
-// which prints the same digest in unpadded base64.
+// "SHA256:<lowercase hex>", deliberately NOT `ssh-keygen -lf`'s base64.
 //
-// The value is the durable primary key of every identity: pastes, sites, quota
-// rows and keygate rows are all keyed by it. Re-encoding it re-keys every
-// identity and orphans all of their content, so the encoding must not change.
-//
-// Hex is also slash-free, which the keygate and identity key parsers depend on:
-// they split "keygate/<subnet>/<identity>" on the LAST '/', which base64 (whose
-// alphabet includes '/') would break.
+// The value is the durable primary key of every identity; re-encoding it would
+// re-key every identity and orphan all of their content. Hex is also
+// slash-free, which key parsers splitting "keygate/<subnet>/<identity>" on the
+// last '/' depend on.
 func fingerprintKey(pk gossh.PublicKey) string {
 	wire := pk.Marshal()
 	sum := sha256.Sum256(wire)

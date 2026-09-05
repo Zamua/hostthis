@@ -1,6 +1,5 @@
-// metadata_celld.go - celld-backed metadataBundle.
-//
-// HOSTTHIS_CELLD_ENDPOINT is required, for example http://celld:8080.
+// The celld-backed metadataBundle. HOSTTHIS_CELLD_ENDPOINT is required, for
+// example http://celld:8080.
 
 package main
 

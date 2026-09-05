@@ -73,9 +73,8 @@ func NewSiteExtractor(quotaBudget int64) *SiteExtractor {
 // The byte cap is enforced on what is actually READ from body, not on ent.Size:
 // a header that under-reports could stream past a cap that already approved it.
 func (e *SiteExtractor) Add(ent ArchiveEntry, body io.Reader, sink FileSink) error {
-	// TOTAL entries are bounded, not just admitted files: directories and paths
-	// that clean away return early, so counting only files would leave an
-	// archive of a million directories unbounded.
+	// TOTAL entries are bounded, not just admitted files, or an archive of a
+	// million directories would be unbounded.
 	e.entries++
 	if e.entries > MaxSiteFiles {
 		return fmt.Errorf("%w: more than %d archive entries", ErrTooManyFiles, MaxSiteFiles)

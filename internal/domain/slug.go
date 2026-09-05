@@ -17,11 +17,9 @@ const SlugAlphabet = "abcdefghijkmnpqrstuvwxyz23456789"
 // SlugLength is the number of characters in a generated slug.
 const SlugLength = 8
 
-// Slug is a paste identifier that lives in a URL.
-//
-// A value object rather than a bare string so the rest of the domain can
-// require valid slugs at compile time. Persisted slugs are re-validated on
-// read by passing through ParseSlug.
+// Slug is a paste identifier that lives in a URL. A value object rather than a
+// bare string so the rest of the domain can require valid slugs at compile
+// time; persisted slugs are re-validated on read through ParseSlug.
 type Slug string
 
 var (

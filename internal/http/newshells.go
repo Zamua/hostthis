@@ -4,8 +4,7 @@ import "embed"
 
 // mermaidShellFS holds the client-side Mermaid render assets. The renderer is
 // large (~3.4 MB), which is why the MARKDOWN shell loads it lazily and only
-// when a fetched document actually contains a mermaid fence; a prose paste
-// never pays for it. This shell, serving a bare diagram, always needs it.
+// when a document contains a mermaid fence. This shell always needs it.
 //
 //go:embed assets/mermaidshell/*
 var mermaidShellFS embed.FS
@@ -37,13 +36,10 @@ var pdfShellAssets = map[string]string{
 }
 
 // dataShellFS holds the tabular/tree viewer for csv and json. ONE shell serves
-// both kinds: the table, the stats, the deep-link handling, and the SQL console
-// are identical, and the two differ only in how bytes become rows. Splitting
-// them would duplicate all of that to vary a parser.
+// both kinds: they differ only in how bytes become rows.
 //
-// duckdb-eh.wasm is 35 MB and is fetched ONLY when the SQL console is opened.
-// Sorting, filtering, and column stats are computed in plain JS and never touch
-// it, so the default view stays as fast as any other shell.
+// duckdb-eh.wasm is 35 MB and is fetched ONLY when the SQL console is opened;
+// sorting, filtering and column stats are plain JS and never touch it.
 //
 //go:embed assets/datashell/*
 var dataShellFS embed.FS
@@ -84,8 +80,7 @@ var flameShellAssets = map[string]string{
 }
 
 // textShellFS holds the plain-text viewer. Its line gutter and range selection
-// come from the common assets, since a log viewer needs exactly the same
-// behaviour and two copies is how they drift apart.
+// come from the common assets, shared with the log viewer.
 //
 //go:embed assets/textshell/*
 var textShellFS embed.FS

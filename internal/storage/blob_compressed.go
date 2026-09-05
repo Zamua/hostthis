@@ -12,14 +12,11 @@ import (
 )
 
 // zstdDecoderPool reuses streaming zstd decoders across blob reads. A fresh
-// zstd.NewReader allocates a large working set (window / history buffers +
-// decode scratch, ~10 MiB at the klauspost defaults) INDEPENDENT of the blob
-// size, so paying it per GET would dominate the serve path's allocations.
-// Pooling pays it once and reuses it via Decoder.Reset; the GC reaps the pool
-// under memory pressure, so idle footprint stays bounded.
+// zstd.NewReader allocates a large working set (~10 MiB at the klauspost
+// defaults) INDEPENDENT of the blob size, so paying it per GET would dominate
+// the serve path's allocations. The GC reaps the pool under memory pressure.
 //
-// New never returns nil: zstd.NewReader(nil) only errors on invalid options,
-// and none are passed.
+// New never returns nil: zstd.NewReader(nil) only errors on invalid options.
 var zstdDecoderPool = sync.Pool{
 	New: func() any {
 		d, _ := zstd.NewReader(nil)
@@ -53,11 +50,8 @@ func putPooledDecoder(d *zstd.Decoder) {
 
 // CompressedBlobStore wraps another BlobStore and transparently zstd-encodes on
 // Put, decodes on Get. The at-rest format carries a 4-byte magic prefix; a blob
-// without it is returned as-is, so uncompressed blobs stay readable.
-//
-// Compression lives in the storage layer so callers above keep thinking in
-// original uncompressed bytes, and dedup stays keyed on the sha256 of those
-// original bytes.
+// without it is returned as-is, so uncompressed blobs stay readable. Callers
+// above keep thinking in original bytes, and dedup stays keyed on their sha256.
 type CompressedBlobStore struct {
 	Inner innerBlobStore
 }
@@ -89,16 +83,10 @@ func (c *CompressedBlobStore) PutPrecompressed(sha string, body io.Reader, size 
 //
 // Cheap to inspect on every Get, and distinct enough that no real
 // HTML/Markdown blob matches by accident.
-//
-// Mirrored: the service-layer streaming upload path holds its own copy of these
-// bytes and of compressionLevel, because it must not import this package. A
-// change here has to land there too;
-// service.TestStreamUploadMatchesStorageAtRestFormat pins the two encoders
-// byte-identical.
 var magicV1 = [4]byte{'H', 'Z', 0x00, 0x01}
 
-// SpeedDefault (level 3): ratio close to the slower levels on HTML/text, at
-// roughly 500 MB/s encode and 1 GB/s decode. Mirrored service-side, see magicV1.
+// SpeedDefault (level 3): ratio close to the slower levels on HTML/text at a
+// fraction of their cost.
 const compressionLevel = zstd.SpeedDefault
 
 // NewCompressedBlobStore wraps inner with the compression layer.
@@ -146,8 +134,7 @@ func EncodeCompressedBody(r io.Reader) ([]byte, error) {
 }
 
 // Get returns the UNCOMPRESSED bytes for sha. A blob without the magic header
-// is returned as-is, so an uncompressed blob stays readable without a mass
-// rewrite of the store.
+// is returned as-is.
 func (c *CompressedBlobStore) Get(sha string) ([]byte, error) {
 	body, err := c.Inner.Get(sha)
 	if err != nil {
@@ -188,9 +175,8 @@ func (c *CompressedBlobStore) GetReader(sha string) (io.ReadCloser, int64, error
 // DecodeCompressedStream wraps a stored blob stream with decompression and
 // closes the underlying reader on every error path. label identifies failures.
 func DecodeCompressedStream(rc io.ReadCloser, label string) (io.ReadCloser, error) {
-	// A blob shorter than the header is not an error: io.ReadFull signals it
-	// with ErrUnexpectedEOF / EOF, and the short read simply fails the magic
-	// check and is served through unwrapped.
+	// A blob shorter than the header is not an error: the short read fails the
+	// magic check and is served through unwrapped.
 	hdr := make([]byte, len(magicV1))
 	n, rerr := io.ReadFull(rc, hdr)
 	if rerr != nil && rerr != io.ErrUnexpectedEOF && rerr != io.EOF {

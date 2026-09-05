@@ -24,9 +24,8 @@ func NewRoomRepo(base string, c *http.Client) *RoomRepo {
 }
 
 // roomKey addresses the cell. The app slug leads so a room is unreachable
-// without knowing which app it belongs to, which is what makes the cross-app
-// isolation a property of addressing rather than of a check someone must
-// remember to write.
+// without its app: cross-app isolation is a property of addressing, not of a
+// check someone must remember to write.
 func roomKey(app domain.Slug, id domain.RoomID) string {
 	return app.String() + "|" + id.String()
 }
@@ -78,9 +77,8 @@ func (r *RoomRepo) GetValue(app domain.Slug, id domain.RoomID, key string) ([]by
 	if status == http.StatusNotFound {
 		return nil, domain.ErrNotFound
 	}
-	// A stored empty value is a real value, and []byte(nil) and []byte{} are
-	// indistinguishable to a caller comparing bytes - but not to one comparing
-	// against nil, so the non-nil empty slice is returned deliberately.
+	// A stored empty value is a real value; the non-nil empty slice keeps it
+	// distinguishable from absence for callers comparing against nil.
 	if wire.Value == nil {
 		return []byte{}, nil
 	}
