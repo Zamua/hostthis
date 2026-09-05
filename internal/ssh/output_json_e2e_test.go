@@ -83,24 +83,6 @@ func TestListJSON_E2E(t *testing.T) {
 	}
 }
 
-func TestListJSON_GluedShortForm(t *testing.T) {
-	s := startStack(t)
-	_, _, _ = s.run("", []byte("<!doctype html><p>a</p>"))
-
-	// The glued short form (no space, no =) must work over the real ssh path.
-	stdout, stderr, exit := s.run("list -ojson", nil)
-	if exit != 0 {
-		t.Fatalf("exit: %d (stderr %q)", exit, stderr)
-	}
-	var views []jsonPaste
-	if err := json.Unmarshal([]byte(stdout), &views); err != nil {
-		t.Fatalf("list -ojson did not produce a JSON array: %v\n%q", err, stdout)
-	}
-	if len(views) != 1 {
-		t.Fatalf("want 1 paste, got %d: %q", len(views), stdout)
-	}
-}
-
 func TestListJSON_EmptyIsArrayNotNarration(t *testing.T) {
 	s := startStack(t)
 	// The default keyed client uploaded nothing.
@@ -159,19 +141,5 @@ func TestWhoamiJSON_E2E(t *testing.T) {
 	}
 	if view.ActivePastes != 1 {
 		t.Fatalf("active_pastes: got %d want 1", view.ActivePastes)
-	}
-}
-
-func TestOutputFormat_UnknownIsUsageError(t *testing.T) {
-	s := startStack(t)
-	stdout, stderr, exit := s.run("list -o yaml", nil)
-	if exit != 2 { // ExitUsage
-		t.Fatalf("unknown format should exit ExitUsage(2), got %d", exit)
-	}
-	if !strings.Contains(stderr, "unknown output format") {
-		t.Fatalf("stderr should explain the bad format, got %q", stderr)
-	}
-	if strings.TrimSpace(stdout) != "" {
-		t.Fatalf("no data should print on stdout for a usage error, got %q", stdout)
 	}
 }

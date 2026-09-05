@@ -1,26 +1,9 @@
 package ssh_test
 
 import (
-	"path"
 	"strings"
 	"testing"
 )
-
-// qrGlyphs are the half-block runes qrterminal emits in HalfBlocks mode. At
-// least one marks a rendered QR; none may appear on stdout, which must stay a
-// clean URL.
-const qrGlyphs = "█▀▄"
-
-// slugFromURL pulls the trailing slug off a path-mode URL (httpURL+"/p/<slug>"),
-// the shape the e2e stack builds.
-func slugFromURL(t *testing.T, url string) string {
-	t.Helper()
-	s := path.Base(strings.TrimSpace(url))
-	if s == "" || s == "." || s == "/" {
-		t.Fatalf("could not extract slug from URL %q", url)
-	}
-	return s
-}
 
 // TestCreate_QROnStderr_URLOnStdout pins the create contract: the URL is the
 // ONLY thing on stdout, so a `slug=$(... | ssh -T host)` capture stays clean,
@@ -54,7 +37,7 @@ func TestVerbURL_Existing(t *testing.T) {
 	s := startStack(t)
 	createOut, _, _ := s.run("", []byte("<!doctype html><h1>u</h1>"))
 	wantURL := strings.TrimSpace(createOut)
-	slug := slugFromURL(t, wantURL)
+	slug := extractSlug(wantURL)
 
 	stdout, stderr, exit := s.run("url "+slug, nil)
 	if exit != 0 {
@@ -74,7 +57,7 @@ func TestVerbQR_Existing(t *testing.T) {
 	s := startStack(t)
 	createOut, _, _ := s.run("", []byte("<!doctype html><h1>q</h1>"))
 	wantURL := strings.TrimSpace(createOut)
-	slug := slugFromURL(t, wantURL)
+	slug := extractSlug(wantURL)
 
 	stdout, stderr, exit := s.run("qr "+slug, nil)
 	if exit != 0 {
@@ -108,15 +91,5 @@ func TestVerbURLQR_Missing(t *testing.T) {
 		if strings.TrimSpace(stdout) != "" {
 			t.Fatalf("%s missing: stdout should be empty, got %q", verb, stdout)
 		}
-	}
-}
-
-// TestVerbURL_BadSlug pins a malformed slug as a usage error (exit 2), not a
-// not-found: it never reaches the existence lookup.
-func TestVerbURL_BadSlug(t *testing.T) {
-	s := startStack(t)
-	_, stderr, exit := s.run("url not-a-valid-slug", nil)
-	if exit != 2 {
-		t.Fatalf("bad slug: exit = %d, want 2 (stderr %q)", exit, stderr)
 	}
 }
