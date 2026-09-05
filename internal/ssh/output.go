@@ -13,15 +13,11 @@ import (
 )
 
 // The SSH adapter's PRESENTATION contract for the read verbs (`list`,
-// `versions`, `whoami`): domain types in, human table or machine-readable JSON
-// out.
-//
-//   - The JSON wire shape is a set of dedicated *view* structs, NOT the domain
-//     types. Marshaling domain.Paste directly would leak internal field names
-//     and couple the wire format to refactors; the view structs are the
-//     published contract (docs/SPEC.md).
-//   - Machine consumers get real types: integer bytes, RFC 3339 timestamps (or
-//     null), never the human "2.4k" / "13m" strings.
+// `versions`, `whoami`): domain types in, human table or JSON out. The JSON
+// wire shape is dedicated view structs, NOT the domain types, so the published
+// contract (docs/SPEC.md) is decoupled from refactors. Machine consumers get
+// real types: integer bytes, RFC 3339 timestamps or null, never the human
+// "2.4k" / "13m" strings.
 
 // outputFormat is the value of the `-o` / `--output` selector.
 type outputFormat string
@@ -31,12 +27,10 @@ const (
 	formatJSON  outputFormat = "json"  // stable JSON document on stdout
 )
 
-// parseOutputFormat extracts a kubectl-style output selector from anywhere in
-// a verb's argument list and returns the format plus the remaining positional
-// args. Every pflag-style spelling is accepted: `-o <fmt>`, `--output <fmt>`,
-// `-o=<fmt>`, `--output=<fmt>`, and the glued short form `-o<fmt>` (e.g.
-// `-ojson`). Absent flag => formatTable. An unrecognized value, or a bare `-o`,
-// is a usage error the caller maps to ExitUsage.
+// parseOutputFormat extracts a kubectl-style output selector (`-o <fmt>`,
+// `--output <fmt>`, `-o=<fmt>`, `--output=<fmt>`, `-o<fmt>`) from anywhere in
+// argv and returns the format plus the remaining positional args. Absent means
+// formatTable; an unrecognized value or a bare `-o` is a usage error.
 func parseOutputFormat(argv []string) (outputFormat, []string, error) {
 	format := formatTable
 	rest := make([]string, 0, len(argv))
@@ -113,9 +107,8 @@ type listItemView struct {
 	Kind          string `json:"kind"`           // html/markdown/diff, or "site"
 	ServedVersion *int   `json:"served_version"` // null for sites
 	// ServedSizeBytes is the bytes of the version being SERVED, where SizeBytes
-	// is every live version (what the quota charges). Null for a site, which
-	// has no versions. Both are given so a consumer never has to infer which
-	// number it is holding: served_version alone cannot tell, since a deleted
+	// is every live version (what the quota charges). Null for a site. Both are
+	// given because served_version alone cannot tell them apart: a deleted
 	// version leaves a paste charged for fewer versions than its number implies.
 	ServedSizeBytes *int `json:"served_size_bytes"`
 	// multiVersion marks a row whose STORED size exceeds the served version's,

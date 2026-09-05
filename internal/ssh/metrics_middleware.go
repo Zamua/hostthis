@@ -16,11 +16,9 @@ type CommandRecorder interface {
 	RecordCommand(verb, outcome string, d time.Duration)
 }
 
-// exitRecorder wraps a session to capture the exit code a verb reports.
-//
-// Verbs signal their result by calling sess.Exit; nothing is returned up the
-// middleware chain. Embedding the session and intercepting that one call is
-// what makes the outcome observable without touching a single verb.
+// exitRecorder wraps a session to capture the exit code a verb reports. Verbs
+// signal their result only by calling sess.Exit, so intercepting that call is
+// what makes the outcome observable without touching a verb.
 type exitRecorder struct {
 	gossh.Session
 	code int
@@ -48,12 +46,10 @@ func (s *Server) metricsMiddleware() wish.Middleware {
 	}
 }
 
-// verbLabel maps an argv to a BOUNDED label value.
-//
-// The first argument is attacker-controlled, so it can never become a label
-// directly: that would let anyone grow the series count without limit by
-// sending random verbs. Only names in the verb registry pass through; anything
-// else collapses to "unknown".
+// verbLabel maps an argv to a BOUNDED label value. The first argument is
+// attacker-controlled and would let anyone grow the series count without
+// limit; only names in the verb registry pass through, anything else
+// collapses to "unknown".
 func verbLabel(argv []string) string {
 	switch {
 	case len(argv) == 0:
