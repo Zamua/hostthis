@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -154,55 +155,17 @@ func DetectKind(b []byte, hint string, sniffMIME MIMESniffer) (ContentKind, erro
 
 	// Hint path: the label picks the renderer, but the bytes must still
 	// sniff as some flavour of text. Binary is rejected even under a
-	// "html" hint.
-	switch {
-	case hint == "html" || strings.HasPrefix(hint, "text/html"):
-		if !strings.HasPrefix(ct, "text/") {
-			return "", ErrUnsupportedKind
+	// "html" hint. An unrecognized hint rejects without falling back to
+	// sniffing.
+	if hint != "" {
+		for _, h := range textHints {
+			if slices.Contains(h.exact, hint) || hasAnyPrefix(hint, h.prefixes) {
+				if !strings.HasPrefix(ct, "text/") {
+					return "", ErrUnsupportedKind
+				}
+				return h.kind, nil
+			}
 		}
-		return KindHTML, nil
-	case hint == "md" || hint == "markdown" || strings.HasPrefix(hint, "text/markdown"):
-		if !strings.HasPrefix(ct, "text/") {
-			return "", ErrUnsupportedKind
-		}
-		return KindMarkdown, nil
-	case hint == "diff" || hint == "patch" || strings.HasPrefix(hint, "text/x-diff") || strings.HasPrefix(hint, "text/x-patch"):
-		if !strings.HasPrefix(ct, "text/") {
-			return "", ErrUnsupportedKind
-		}
-		return KindDiff, nil
-	case hint == "mermaid" || hint == "mmd" || strings.HasPrefix(hint, "text/vnd.mermaid"):
-		if !strings.HasPrefix(ct, "text/") {
-			return "", ErrUnsupportedKind
-		}
-		return KindMermaid, nil
-	case hint == "csv" || hint == "tsv" || strings.HasPrefix(hint, "text/csv") || strings.HasPrefix(hint, "text/tab-separated-values"):
-		if !strings.HasPrefix(ct, "text/") {
-			return "", ErrUnsupportedKind
-		}
-		return KindCSV, nil
-	case hint == "json" || hint == "jsonl" || hint == "ndjson" || strings.HasPrefix(hint, "application/json"):
-		if !strings.HasPrefix(ct, "text/") {
-			return "", ErrUnsupportedKind
-		}
-		return KindJSON, nil
-	case hint == "flamegraph" || hint == "flame" || hint == "folded":
-		if !strings.HasPrefix(ct, "text/") {
-			return "", ErrUnsupportedKind
-		}
-		return KindFlamegraph, nil
-	case hint == "log" || hint == "logs" || hint == "ndjson-log":
-		if !strings.HasPrefix(ct, "text/") {
-			return "", ErrUnsupportedKind
-		}
-		return KindLog, nil
-	case hint == "text" || hint == "txt" || strings.HasPrefix(hint, "text/plain"):
-		if !strings.HasPrefix(ct, "text/") {
-			return "", ErrUnsupportedKind
-		}
-		return KindText, nil
-	case hint != "":
-		// An unrecognized hint rejects without falling back to sniffing.
 		return "", ErrUnsupportedKind
 	}
 
@@ -244,6 +207,33 @@ func DetectKind(b []byte, hint string, sniffMIME MIMESniffer) (ContentKind, erro
 	default:
 		return "", ErrUnsupportedKind
 	}
+}
+
+// textHints maps a caller-supplied type hint (a bare word or a media type
+// prefix, lowercased) to the textual kind it selects.
+var textHints = []struct {
+	exact    []string
+	prefixes []string
+	kind     ContentKind
+}{
+	{[]string{"html"}, []string{"text/html"}, KindHTML},
+	{[]string{"md", "markdown"}, []string{"text/markdown"}, KindMarkdown},
+	{[]string{"diff", "patch"}, []string{"text/x-diff", "text/x-patch"}, KindDiff},
+	{[]string{"mermaid", "mmd"}, []string{"text/vnd.mermaid"}, KindMermaid},
+	{[]string{"csv", "tsv"}, []string{"text/csv", "text/tab-separated-values"}, KindCSV},
+	{[]string{"json", "jsonl", "ndjson"}, []string{"application/json"}, KindJSON},
+	{[]string{"flamegraph", "flame", "folded"}, nil, KindFlamegraph},
+	{[]string{"log", "logs", "ndjson-log"}, nil, KindLog},
+	{[]string{"text", "txt"}, []string{"text/plain"}, KindText},
+}
+
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // pdfMagic opens every PDF document. The version digits that follow are not
