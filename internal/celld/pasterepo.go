@@ -26,11 +26,11 @@ import (
 //  2. Paste cell: write the row.
 //  3. Identity cell: confirm the entry and discharge the intent.
 //
-// The ORDER is deliberate. Reserving first and failing at step 2 leaves an
-// entry charged with no row, which the owner sees as a paste that is briefly
-// pending. The intent's exact row fingerprint lets recovery either confirm that
-// row or fence the generation in the Paste cell before releasing its charge.
-// Writing the row first would instead leave a visible, uncharged orphan.
+// Reserving first and failing at step 2 leaves an entry charged with no row,
+// which the owner sees as a briefly pending paste; the intent's row
+// fingerprint lets recovery confirm that row or fence the generation before
+// releasing its charge. Writing the row first would instead leave a visible,
+// uncharged orphan.
 type PasteRepo struct{ *cell }
 
 func NewPasteRepo(base string, c *http.Client) *PasteRepo { return &PasteRepo{newCell(base, c)} }
@@ -240,9 +240,8 @@ type ownerEntry struct {
 	Name        string `json:"name"`
 	ContentSHA  string `json:"contentSha"`
 
-	// UpdatedAt orders the listing and LatestVersion is displayed in it. Both
-	// are denormalised into the identity cell so a listing stays a POINT READ:
-	// fetching them from each paste cell would make one listing N round trips.
+	// UpdatedAt and LatestVersion are denormalised into the identity cell so a
+	// listing stays a POINT READ rather than N round trips.
 	UpdatedAt     int64 `json:"updatedAt"`
 	LatestVersion int   `json:"latestVersion"`
 	PinnedVersion int   `json:"pinnedVersion"`
@@ -331,15 +330,9 @@ func (r *PasteRepo) DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, e
 }
 
 // SetName renames a paste. TWO cells, because the identity summary carries the
-// name so that a listing is one point read: the row is authoritative and the
-// summary must follow it, or the owner's listing serves a name that is no
-// longer true. The row is written FIRST, so a failure between them leaves the
-// listing stale rather than leaving it authoritative over a row that never
-// changed.
-//
-// Denormalising a mutable field is what makes this two-cell rather than
-// mechanical. That is the cost of the listing being a point read, taken
-// deliberately.
+// name so that a listing is one point read. The row is authoritative and is
+// written FIRST, so a failure between them leaves the listing stale rather
+// than authoritative over a row that never changed.
 func (r *PasteRepo) SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
 	var res struct {
 		Changed bool `json:"changed"`
@@ -484,17 +477,11 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 
 // DeleteVersion removes a retained version and re-charges the owner.
 //
-// TWO cells, like append, but NOT its mirror image. Append can be refused, so
-// it checks quota first and a rejection leaves nothing behind. This cannot be
-// refused, so there is nothing to check and the only question is order:
-//
-// the version goes FIRST, then the new total.
-//
-// A crash between them leaves the owner charged for bytes that are gone, which
-// over-charges - conservative, visible to the owner, and repairable, because an
-// absolute total is reconstructible from the paste cell. The other order frees
-// the charge while the bytes remain, which under-charges silently and is the
-// direction nothing watches.
+// TWO cells: the version goes FIRST, then the new total. A crash between them
+// leaves the owner charged for bytes that are gone, which over-charges:
+// conservative, visible, and repairable from the paste cell. The other order
+// frees the charge while the bytes remain, which under-charges silently and is
+// the direction nothing watches.
 func (r *PasteRepo) DeleteVersion(slug domain.Slug, generation string, ver int) error {
 	opID, err := newOpaqueID("delete-version")
 	if err != nil {

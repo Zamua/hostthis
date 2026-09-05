@@ -9,14 +9,11 @@ import (
 	"time"
 )
 
-// KeyGateRepo is the celld implementation of Sybil admission.
-//
-// The SUBNET is the rate-limit unit, so it is the cell. The Worker serializes
-// each admission through blockConcurrencyWhile, making the check and record one
-// exact decision.
-//
-// SubnetsForIdentity asks how many networks one key is grandfathered on. Admission
-// maintains that reverse index in the Identity cell so the query stays a point read.
+// KeyGateRepo is the celld implementation of Sybil admission. The SUBNET is
+// the rate-limit unit, so it is the cell, and the cell serializes each
+// admission so check and record are one exact decision. Admission also
+// maintains the identity cell's reverse index so SubnetsForIdentity stays a
+// point read.
 type KeyGateRepo struct {
 	*cell
 }
