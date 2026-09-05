@@ -2,93 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import worker, { Identity, Paste, Room, Subnet } from "../src/index.js";
-
-class SimulatedCrash extends Error {}
-
-const PASTE_CELL_ID = "a".repeat(64);
-const ROOM_CELL_ID = "b".repeat(64);
-const ROOM_ID = "11111111-1111-4111-8111-111111111111";
-
-function fakeCellID(value) {
-  return { toString() { return value; } };
-}
-
-function clone(value) {
-  return value === undefined ? undefined : structuredClone(value);
-}
-
-class FakeStorage {
-  constructor(seed = new Map(), staged = false, alarm = null) {
-    this.data = new Map([...seed].map(([key, value]) => [key, clone(value)]));
-    this.staged = staged;
-    this.alarm = alarm;
-    this.commits = 0;
-    this.crashAfter = Infinity;
-  }
-
-  async get(key) {
-    return clone(this.data.get(key));
-  }
-
-  async put(keyOrEntries, value) {
-    const entries = typeof keyOrEntries === "string"
-      ? [[keyOrEntries, value]]
-      : keyOrEntries instanceof Map
-        ? [...keyOrEntries]
-        : Object.entries(keyOrEntries);
-    for (const [key, entry] of entries) {
-      this.data.set(String(key), clone(entry));
-    }
-    this.afterCommit();
-  }
-
-  async delete(keyOrKeys) {
-    const keys = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
-    for (const key of keys) {
-      this.data.delete(String(key));
-    }
-    this.afterCommit();
-  }
-
-  async list({ prefix = "" } = {}) {
-    return new Map([...this.data]
-      .filter(([key]) => key.startsWith(prefix))
-      .map(([key, value]) => [key, clone(value)]));
-  }
-
-  async getAlarm() {
-    return this.alarm;
-  }
-
-  async setAlarm(at) {
-    this.alarm = at;
-    this.afterCommit();
-  }
-
-  async deleteAlarm() {
-    this.alarm = null;
-    this.afterCommit();
-  }
-
-  async transaction(callback) {
-    const tx = new FakeStorage(this.data, true, this.alarm);
-    const result = await callback(tx);
-    this.data = tx.data;
-    this.alarm = tx.alarm;
-    this.afterCommit();
-    return result;
-  }
-
-  afterCommit() {
-    if (this.staged) {
-      return;
-    }
-    this.commits++;
-    if (this.commits === this.crashAfter) {
-      throw new SimulatedCrash("process stopped after a durable commit");
-    }
-  }
-}
+import {
+  FakeStorage, PASTE_CELL_ID, ROOM_CELL_ID, ROOM_ID, SimulatedCrash,
+  clone, fakeCellID, putBody, roomDoc, state,
+} from "./harness.js";
 
 async function assertCrashAtomic({ seed, invoke }) {
   const initial = new FakeStorage(seed).data;
@@ -108,6 +25,28 @@ async function assertCrashAtomic({ seed, invoke }) {
     const isComplete = mapEqual(storage.data, complete);
     assert.ok(isInitial || isComplete,
       `commit boundary ${boundary} left partial state:\n${formatMap(storage.data)}`);
+  }
+}
+
+// Sweeps every local commit boundary of a paste operation: a reference run
+// counts the commits, then each boundary gets a fresh harness crashed there,
+// recovered through the pending alarm, and handed to `converged`. Counting from
+// the reference run keeps a newly added commit inside the sweep.
+async function assertCrashConverges({ harness, invoke, converged }) {
+  const reference = harness();
+  await invoke(reference, "reference");
+  const commits = reference.pasteStorage.commits;
+  assert.ok(commits > 0, "reference run committed nothing");
+  for (let boundary = 1; boundary <= commits; boundary++) {
+    const h = harness();
+    h.pasteStorage.crashAfter = boundary;
+    await assert.rejects(() => invoke(h, `crash-${boundary}`), SimulatedCrash);
+    h.pasteStorage.commits = 0;
+    h.pasteStorage.crashAfter = Infinity;
+    if (h.pasteStorage.data.get("artifactPending")) {
+      await h.paste().alarm();
+    }
+    await converged(h);
   }
 }
 
@@ -135,15 +74,6 @@ function serialState(storage) {
       tail = run.catch(() => {});
       return run;
     },
-  };
-}
-
-function state(storage) {
-  return {
-    storage,
-    acceptWebSocket() {},
-    getWebSockets() { return []; },
-    blockConcurrencyWhile(callback) { return callback(); },
   };
 }
 
@@ -508,23 +438,18 @@ test("Paste.put commits row, version seed, and counter together", async () => {
 });
 
 test("Paste append converges after every local commit crash", async () => {
-  for (const boundary of [1, 2, 3]) {
-    const h = artifactHarness();
-    h.pasteStorage.crashAfter = boundary;
-    await assert.rejects(() => h.paste().append(appendBody(`append-crash-${boundary}`)), SimulatedCrash);
-
-    h.pasteStorage.commits = 0;
-    h.pasteStorage.crashAfter = Infinity;
-    if (h.pasteStorage.data.get("artifactPending")) {
-      await h.paste().alarm();
-    }
-    assert.equal(h.pasteStorage.data.get("versions").length, 2);
-    assert.equal(h.pasteStorage.data.get("maxVer"), 2);
-    assert.equal(h.pasteStorage.data.get("row").accountingVersion, 1);
-    assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
-    assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
-    assert.equal(h.pasteStorage.alarm, null);
-  }
+  await assertCrashConverges({
+    harness: artifactHarness,
+    invoke: (h, run) => h.paste().append(appendBody(`append-${run}`)),
+    converged(h) {
+      assert.equal(h.pasteStorage.data.get("versions").length, 2);
+      assert.equal(h.pasteStorage.data.get("maxVer"), 2);
+      assert.equal(h.pasteStorage.data.get("row").accountingVersion, 1);
+      assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
+      assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+      assert.equal(h.pasteStorage.alarm, null);
+    },
+  });
 });
 
 test("Paste serializes concurrent version appends", async () => {
@@ -545,25 +470,20 @@ test("Paste serializes concurrent version appends", async () => {
 });
 
 test("Paste delete converges after every local commit crash", async () => {
-  for (const boundary of [1, 2, 3]) {
-    const h = deletableArtifactHarness();
-    h.pasteStorage.crashAfter = boundary;
-    await assert.rejects(() => h.paste().deleteVersion({
-      opId: `delete-crash-${boundary}`, generation: "generation-1", ver: 1,
-    }), SimulatedCrash);
-
-    h.pasteStorage.commits = 0;
-    h.pasteStorage.crashAfter = Infinity;
-    if (h.pasteStorage.data.get("artifactPending")) {
-      await h.paste().alarm();
-    }
-    assert.equal(h.pasteStorage.data.get("versions")[0].deleted, true);
-    assert.equal(h.pasteStorage.data.get("row").size, 4);
-    assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 4);
-    assert.equal(h.identityStorage.data.get("entries").slugone1.servedSize, 4);
-    assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
-    assert.equal(h.pasteStorage.alarm, null);
-  }
+  await assertCrashConverges({
+    harness: deletableArtifactHarness,
+    invoke: (h, run) => h.paste().deleteVersion({
+      opId: `delete-${run}`, generation: "generation-1", ver: 1,
+    }),
+    converged(h) {
+      assert.equal(h.pasteStorage.data.get("versions")[0].deleted, true);
+      assert.equal(h.pasteStorage.data.get("row").size, 4);
+      assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 4);
+      assert.equal(h.identityStorage.data.get("entries").slugone1.servedSize, 4);
+      assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+      assert.equal(h.pasteStorage.alarm, null);
+    },
+  });
 });
 
 function artifactPasteSeed({ generation = "generation-1", charge = 2 } = {}) {
@@ -637,7 +557,9 @@ function artifactHarness(options = {}) {
   };
 }
 
-function deletableArtifactHarness() {
+// Two versions with the second served, so version 1 is deletable. `pinned`
+// pins the row to version 2 instead of serving it as the latest.
+function deletableArtifactHarness({ pinned = false } = {}) {
   const pasteSeed = artifactPasteSeed();
   pasteSeed.get("versions").push({
     ver: 2, kind: "markdown", contentSha: "v2", size: 4,
@@ -651,8 +573,12 @@ function deletableArtifactHarness() {
   const identitySeed = artifactIdentitySeed({ charge: 6 });
   const entry = identitySeed.get("entries").slugone1;
   entry.servedSize = 4;
-  entry.latestVersion = 2;
-  entry.contentSha = "v2";
+  if (pinned) {
+    row.pinnedVersion = 2;
+  } else {
+    entry.latestVersion = 2;
+    entry.contentSha = "v2";
+  }
   return artifactHarness({ pasteSeed, identitySeed });
 }
 
@@ -756,20 +682,7 @@ test("Paste delete commits before an unavailable allocation release", async () =
 });
 
 test("Paste delete refuses the version served at commit time", async () => {
-  const pasteSeed = artifactPasteSeed();
-  pasteSeed.get("versions").push({
-    ver: 2, kind: "markdown", contentSha: "v2", size: 4,
-    createdAt: 8, deleted: false, manifest: null,
-  });
-  pasteSeed.set("maxVer", 2);
-  const row = pasteSeed.get("row");
-  row.pinnedVersion = 2;
-  row.kind = "markdown";
-  row.contentSha = "v2";
-  row.size = 4;
-  const identitySeed = artifactIdentitySeed({ charge: 6 });
-  identitySeed.get("entries").slugone1.servedSize = 4;
-  const h = artifactHarness({ pasteSeed, identitySeed });
+  const h = deletableArtifactHarness({ pinned: true });
 
   const deleted = await responseJSON(await h.paste().deleteVersion({
     opId: "delete-served", generation: "generation-1", ver: 2,
@@ -783,18 +696,7 @@ test("Paste delete refuses the version served at commit time", async () => {
 });
 
 test("Paste pin fences unchanged charge and projects the served version", async () => {
-  const pasteSeed = artifactPasteSeed();
-  pasteSeed.get("versions").push({
-    ver: 2, kind: "markdown", contentSha: "v2", size: 4,
-    createdAt: 8, deleted: false, manifest: null,
-  });
-  pasteSeed.set("maxVer", 2);
-  pasteSeed.get("row").size = 4;
-  pasteSeed.get("row").kind = "markdown";
-  pasteSeed.get("row").contentSha = "v2";
-  const identitySeed = artifactIdentitySeed({ charge: 6 });
-  identitySeed.get("entries").slugone1.servedSize = 4;
-  const h = artifactHarness({ pasteSeed, identitySeed });
+  const h = deletableArtifactHarness();
 
   assert.deepStrictEqual(await responseJSON(await h.paste().pin({
     opId: "pin-1", generation: "generation-1", ver: 1,
@@ -993,29 +895,24 @@ test("Paste removal clears a failed incarnation whose allocation is already abse
 });
 
 test("Paste failure converges after every local commit crash", async () => {
-  for (const boundary of [1, 2, 3]) {
-    const pasteSeed = artifactPasteSeed();
-    pasteSeed.get("row").status = "pending";
-    const identitySeed = artifactIdentitySeed();
-    identitySeed.get("entries").slugone1.status = "pending";
-    const h = artifactHarness({ pasteSeed, identitySeed });
-    h.pasteStorage.crashAfter = boundary;
-    const body = {
-      status: "failed", generation: "generation-1",
-      opId: `fail-crash-${boundary}`,
-    };
-
-    await assert.rejects(() => h.paste().setStatus(body), SimulatedCrash);
-    h.pasteStorage.commits = 0;
-    h.pasteStorage.crashAfter = Infinity;
-    if (h.pasteStorage.data.get("artifactPending")) {
-      await h.paste().alarm();
-    }
-    assert.equal(h.pasteStorage.data.get("row").status, "failed");
-    assert.equal(h.identityStorage.data.get("entries").slugone1, undefined);
-    assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
-    assert.equal(h.pasteStorage.alarm, null);
-  }
+  await assertCrashConverges({
+    harness() {
+      const pasteSeed = artifactPasteSeed();
+      pasteSeed.get("row").status = "pending";
+      const identitySeed = artifactIdentitySeed();
+      identitySeed.get("entries").slugone1.status = "pending";
+      return artifactHarness({ pasteSeed, identitySeed });
+    },
+    invoke: (h, run) => h.paste().setStatus({
+      status: "failed", generation: "generation-1", opId: `fail-${run}`,
+    }),
+    converged(h) {
+      assert.equal(h.pasteStorage.data.get("row").status, "failed");
+      assert.equal(h.identityStorage.data.get("entries").slugone1, undefined);
+      assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+      assert.equal(h.pasteStorage.alarm, null);
+    },
+  });
 });
 
 test("Identity projection cannot mutate a replacement generation", async () => {
@@ -1042,30 +939,6 @@ function budgetSeed(a = 4, b = 4) {
 async function decide(paste, body) {
   const response = await paste.roomDecide({ room: "11111111-1111-4111-8111-111111111111", appCap: 10, ...body });
   return { status: response.status, body: await response.json() };
-}
-
-function roomDoc(bytes = 4) {
-  const text = "a".repeat(bytes);
-  return {
-    meta: { appSlug: "appslug1", id: "11111111-1111-4111-8111-111111111111", createdAt: 1, updatedAt: 1 },
-    kv: { key: Buffer.from(text).toString("base64") },
-    wire: { key: JSON.stringify(text) },
-    bytes,
-    seq: 7,
-    budgetVersion: 0,
-  };
-}
-
-function putBody(text, appCap = 10) {
-  return {
-    key: "key",
-    value: Buffer.from(text).toString("base64"),
-    wire: JSON.stringify(text),
-    roomCap: 100,
-    keyCap: 10,
-    appCap,
-    now: 9,
-  };
 }
 
 function roomHarness({ room = roomDoc(), pasteSeed = budgetSeed() } = {}) {
@@ -1288,7 +1161,7 @@ test("Room alarm retries a transient coordinator failure", async () => {
 });
 
 test("Room shrink commits before releasing sibling capacity", async () => {
-  const h = roomHarness({ room: roomDoc(6), pasteSeed: budgetSeed(6, 4) });
+  const h = roomHarness({ room: roomDoc({ bytes: 6 }), pasteSeed: budgetSeed(6, 4) });
   const result = await responseJSON(await h.room().put(putBody("aa")));
   assert.deepStrictEqual(result, { status: 200, body: { seq: 8, bytes: 2 } });
   assert.equal(h.roomStorage.data.get("state").bytes, 2);
@@ -1322,7 +1195,7 @@ test("Room serializes concurrent equal-size mutations", async () => {
 });
 
 test("Room shrink succeeds after commit when allocation release is unavailable", async () => {
-  const h = roomHarness({ room: roomDoc(6), pasteSeed: budgetSeed(6, 4) });
+  const h = roomHarness({ room: roomDoc({ bytes: 6 }), pasteSeed: budgetSeed(6, 4) });
   h.transport.failBefore = 1;
   const result = await responseJSON(await h.room().put(putBody("aa")));
   assert.deepStrictEqual(result, { status: 200, body: { seq: 8, bytes: 2 } });

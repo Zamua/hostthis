@@ -4,68 +4,9 @@ import test from "node:test";
 import {
   Paste, Room, encryptPush, signVapid, localDate, nextDue, zonedToUTC,
 } from "../src/index.js";
+import { FakeStorage, ROOM_ID, putBody, roomDoc, state } from "./harness.js";
 
-const ROOM_ID = "11111111-1111-4111-8111-111111111111";
 const HOUR = 3600 * 1000;
-
-function clone(value) {
-  return value === undefined ? undefined : structuredClone(value);
-}
-
-class FakeStorage {
-  constructor(seed = new Map(), alarm = null) {
-    this.data = new Map([...seed].map(([key, value]) => [key, clone(value)]));
-    this.alarm = alarm;
-  }
-
-  async get(key) {
-    return clone(this.data.get(key));
-  }
-
-  async put(keyOrEntries, value) {
-    const entries = typeof keyOrEntries === "string"
-      ? [[keyOrEntries, value]]
-      : keyOrEntries instanceof Map ? [...keyOrEntries] : Object.entries(keyOrEntries);
-    for (const [key, entry] of entries) {
-      this.data.set(String(key), clone(entry));
-    }
-  }
-
-  async delete(keyOrKeys) {
-    for (const key of Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys]) {
-      this.data.delete(String(key));
-    }
-  }
-
-  async getAlarm() {
-    return this.alarm;
-  }
-
-  async setAlarm(at) {
-    this.alarm = at;
-  }
-
-  async deleteAlarm() {
-    this.alarm = null;
-  }
-
-  async transaction(callback) {
-    const tx = new FakeStorage(this.data, this.alarm);
-    const result = await callback(tx);
-    this.data = tx.data;
-    this.alarm = tx.alarm;
-    return result;
-  }
-}
-
-function state(storage) {
-  return {
-    storage,
-    acceptWebSocket() {},
-    getWebSockets() { return []; },
-    blockConcurrencyWhile(callback) { return callback(); },
-  };
-}
 
 function b64u(bytes) {
   return Buffer.from(bytes).toString("base64url");
@@ -176,13 +117,6 @@ test("Paste pushkey generates one VAPID pair and pushsign never leaks the privat
   }
 });
 
-function roomDoc(kv = {}) {
-  return {
-    meta: { appSlug: "appslug1", id: ROOM_ID, createdAt: 1, updatedAt: 1 },
-    kv, wire: {}, bytes: 0, seq: 0, budgetVersion: 0,
-  };
-}
-
 function subscription(n = 1, overrides = {}) {
   return {
     endpoint: `https://fcm.googleapis.com/fcm/send/${n}`,
@@ -191,7 +125,7 @@ function subscription(n = 1, overrides = {}) {
   };
 }
 
-function harness({ room = roomDoc(), push, service = {}, env: extra = {} } = {}) {
+function harness({ room = roomDoc({ kv: {} }), push, service = {}, env: extra = {} } = {}) {
   const seed = new Map();
   if (room) {
     seed.set("state", room);
@@ -412,13 +346,6 @@ test("Room schedule arms the shared alarm at the earliest due instant", async ()
   assert.equal(h.push().nextFireAt, Date.parse("2026-09-06T12:00:00Z"));
 });
 
-function putBody(text) {
-  return {
-    key: "key", value: Buffer.from(text).toString("base64"), wire: JSON.stringify(text),
-    roomCap: 100, keyCap: 10, appCap: 10, now: 9,
-  };
-}
-
 test("Room budget completion does not disarm a pending push fire", async () => {
   const h = harness();
   const now = Date.parse("2026-09-05T15:00:00Z");
@@ -473,7 +400,7 @@ test("Room alarm retry keeps the earlier of budget retry and push due", async ()
 });
 
 async function arrange(h, { now, items, subs = [subscription(1)], kv = {}, tz = "America/New_York" }) {
-  const doc = roomDoc(kv);
+  const doc = roomDoc({ kv });
   h.roomStorage.data.set("state", doc);
   for (const sub of subs) {
     assert.equal((await h.call("pushsubput", { ...sub, now })).status, 204);
