@@ -285,11 +285,3 @@ func (u *Upload) finalize(paste domain.Paste, staged stagedUpload) {
 		u.logf("upload: finalize %s: mark ready: %v", paste.Slug, err)
 	}
 }
-
-// isSlugTaken matches the slug-collision sentinel (domain.ErrSlugTaken, aliased
-// as storage.ErrSlugTaken) by identity through any wrapping, never by message
-// text: an unrelated error mentioning "slug" must surface verbatim rather than
-// burn the remint budget.
-func isSlugTaken(err error) bool {
-	return errors.Is(err, domain.ErrSlugTaken)
-}

@@ -2,6 +2,7 @@ package cache
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -91,10 +92,8 @@ func TestCloudflare_PurgePaste_Success(t *testing.T) {
 	if err := json.Unmarshal([]byte(gotBody), &parsed); err != nil {
 		t.Fatalf("body unmarshal: %v", err)
 	}
-	want := []string{
-		"https://abc12345.paste.test/",
-		"https://abc12345.paste.test/?raw=1",
-	}
+	// The purged set is exactly what pasteCacheURLs names for the config.
+	want := pasteCacheURLs("https", "paste.test", "subdomain", "abc12345")
 	if !reflect.DeepEqual(parsed.Files, want) {
 		t.Errorf("purged files:\n got  %v\n want %v", parsed.Files, want)
 	}
@@ -116,14 +115,14 @@ func TestCloudflare_PurgePaste_Non2xx(t *testing.T) {
 		},
 	}
 	err := c.PurgePaste(domain.Slug("abc12345"))
-	if err == nil {
-		t.Fatal("expected error on 403, got nil")
+	if !errors.Is(err, ErrPurgeRejected) {
+		t.Fatalf("PurgePaste on 403 = %v, want ErrPurgeRejected", err)
 	}
-	if !strings.Contains(err.Error(), "non-2xx") {
-		t.Errorf("error %q should mention non-2xx", err.Error())
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("error %q should carry the status", err.Error())
 	}
-	if !strings.Contains(logbuf.String(), "non-2xx") {
-		t.Errorf("expected log line on failure, got %q", logbuf.String())
+	if !strings.Contains(logbuf.String(), "403") {
+		t.Errorf("expected the failure logged with its status, got %q", logbuf.String())
 	}
 }
 

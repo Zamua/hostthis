@@ -204,6 +204,21 @@ func conformKeygateReadmitDoesNotRefresh(t *testing.T, r keygateRepo) {
 	}
 }
 
+// An aged-out pair is fresh on its next admission regardless of when physical
+// deletion occurs; an in-window pair stays known.
+func conformKeygateForgetsOutOfWindow(t *testing.T, r keygateRepo) {
+	const subnet = "10.15.0.0/24"
+	old := fixedNow.Add(-2 * kgWindow)
+	kgAdmit(t, r, "kg:stale", subnet, old, 20)
+	kgAdmit(t, r, "kg:keep", subnet, fixedNow, 20)
+	if known := kgAdmit(t, r, "kg:stale", subnet, fixedNow, 20); known {
+		t.Fatal("a pair whose row aged past the window must re-admit as fresh")
+	}
+	if known := kgAdmit(t, r, "kg:keep", subnet, fixedNow, 20); !known {
+		t.Fatal("an in-window pair must stay known")
+	}
+}
+
 func conformKeygateConcurrentCapIsExact(t *testing.T, r keygateRepo) {
 	const subnet, limit, attempts = "10.14.0.0/24", 7, 32
 	type result struct {
@@ -266,5 +281,6 @@ func runKeygateConformance(t *testing.T, name string, newRepo func(t *testing.T)
 		conformKeygateSubnetsForIdentityExpires(t, newRepo(t))
 	})
 	t.Run(name+"/ReadmitDoesNotRefresh", func(t *testing.T) { conformKeygateReadmitDoesNotRefresh(t, newRepo(t)) })
+	t.Run(name+"/ForgetsOutOfWindow", func(t *testing.T) { conformKeygateForgetsOutOfWindow(t, newRepo(t)) })
 	t.Run(name+"/ConcurrentCapIsExact", func(t *testing.T) { conformKeygateConcurrentCapIsExact(t, newRepo(t)) })
 }

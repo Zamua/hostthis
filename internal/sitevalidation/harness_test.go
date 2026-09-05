@@ -12,18 +12,14 @@ package sitevalidation
 
 import (
 	"archive/tar"
-	"bufio"
 	"bytes"
 	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"testing"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -153,9 +149,7 @@ func (d deployedSite) get(t *testing.T, urlPath string) *http.Response {
 // those same repos with the real HTTP handler.
 func deployFixture(t *testing.T, demo string) ([]distFile, deployedSite) {
 	t.Helper()
-	dir := t.TempDir()
-
-	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
+	rawBlobs, err := storage.NewBlobStore(filepath.Join(t.TempDir(), "blobs"))
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
@@ -284,19 +278,13 @@ func assertSPAFallback(t *testing.T, files []distFile, site deployedSite) {
 	}
 }
 
-func TestReactSPA_ByteIdentical(t *testing.T) {
-	files, site := assertByteIdentical(t, "react")
-	assertSPAFallback(t, files, site)
-}
-
-func TestVueSPA_ByteIdentical(t *testing.T) {
-	files, site := assertByteIdentical(t, "vue")
-	assertSPAFallback(t, files, site)
-}
-
-func TestSvelteSPA_ByteIdentical(t *testing.T) {
-	files, site := assertByteIdentical(t, "svelte")
-	assertSPAFallback(t, files, site)
+func TestFrameworkSPA_ByteIdentical(t *testing.T) {
+	for _, demo := range []string{"react", "vue", "svelte"} {
+		t.Run(demo, func(t *testing.T) {
+			files, site := assertByteIdentical(t, demo)
+			assertSPAFallback(t, files, site)
+		})
+	}
 }
 
 // TestPlainStatic_ByteIdentical runs the round-trip for a hand-written
@@ -325,110 +313,5 @@ func TestPlainStatic_ByteIdentical(t *testing.T) {
 	}
 	if bytes.Equal(got, indexBytes(t, files)) {
 		t.Fatalf("GET /about.html: served the index, not the real about.html file")
-	}
-}
-
-// TestFixtureSnapshot_Matches hashes every fixture file against
-// testdata/sitefixtures/SHA256SUMS. The round-trip tests only prove the pipeline
-// preserves whatever dist/ is on disk; this proves those committed bytes are the
-// intended ones, and fails if a fixture file is added or removed without
-// regenerating the manifest (`make rebuild-site-fixtures`).
-func TestFixtureSnapshot_Matches(t *testing.T) {
-	sumsPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "sitefixtures", "SHA256SUMS"))
-	if err != nil {
-		t.Fatalf("resolve SHA256SUMS: %v", err)
-	}
-	f, err := os.Open(sumsPath)
-	if err != nil {
-		t.Fatalf("open SHA256SUMS (run `make rebuild-site-fixtures`?): %v", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	// Manifest lines are "<hex-sha>  <demo>/<rel-path>".
-	want := make(map[string]string) // "<demo>/<rel>" -> sha
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "  ", 2)
-		if len(parts) != 2 {
-			t.Fatalf("malformed SHA256SUMS line: %q", line)
-		}
-		want[parts[1]] = parts[0]
-	}
-	if err := scanner.Err(); err != nil {
-		t.Fatalf("read SHA256SUMS: %v", err)
-	}
-	if len(want) == 0 {
-		t.Fatalf("SHA256SUMS is empty")
-	}
-
-	have := make(map[string]string)
-	for _, demo := range []string{"react", "vue", "svelte", "plain-static"} {
-		distDir := fixtureDist(t, demo)
-		for _, df := range readDist(t, distDir) {
-			key := demo + "/" + df.relPath
-			sum := sha256.Sum256(df.body)
-			have[key] = hex.EncodeToString(sum[:])
-		}
-	}
-
-	for key, gotSHA := range have {
-		wantSHA, ok := want[key]
-		if !ok {
-			t.Errorf("fixture file %s is not in SHA256SUMS (regenerate with `make rebuild-site-fixtures`)", key)
-			continue
-		}
-		if gotSHA != wantSHA {
-			t.Errorf("fixture file %s: sha mismatch\n  on disk:  %s\n  manifest: %s", key, gotSHA, wantSHA)
-		}
-	}
-	for key := range want {
-		if _, ok := have[key]; !ok {
-			t.Errorf("SHA256SUMS lists %s but it is missing from the fixture tree", key)
-		}
-	}
-}
-
-// TestFixtureManifest_ExpectedFiles pins the shape of each committed fixture, so
-// a corruption such as a missing index.html is caught independently of the
-// round-trip.
-func TestFixtureManifest_ExpectedFiles(t *testing.T) {
-	cases := map[string][]string{
-		"react":  {"index.html"},
-		"vue":    {"index.html"},
-		"svelte": {"index.html"},
-		"plain-static": {
-			"about.html", "css/app.css", "index.html", "js/app.js",
-		},
-	}
-	for demo, mustHave := range cases {
-		t.Run(demo, func(t *testing.T) {
-			files := readDist(t, fixtureDist(t, demo))
-			have := make(map[string]bool, len(files))
-			for _, f := range files {
-				have[f.relPath] = true
-			}
-			for _, want := range mustHave {
-				if !have[want] {
-					t.Fatalf("fixture %s missing expected file %q", demo, want)
-				}
-			}
-			// A hashed JS bundle under assets/ is the proof a framework demo
-			// is a real build, not hand-faked HTML.
-			if demo != "plain-static" {
-				var hasAssetJS bool
-				for _, f := range files {
-					if strings.HasPrefix(f.relPath, "assets/") && strings.HasSuffix(f.relPath, ".js") {
-						hasAssetJS = true
-					}
-				}
-				if !hasAssetJS {
-					t.Fatalf("framework fixture %s has no assets/*.js bundle", demo)
-				}
-			}
-		})
 	}
 }

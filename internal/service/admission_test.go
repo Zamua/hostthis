@@ -12,8 +12,10 @@ import (
 
 // countingCreateRepo counts simultaneous InsertWithQuotaCheck entrants (the
 // number the gate must bound) and can hold one identity's inserts open on a
-// channel, so a test can wedge one owner while probing another.
+// channel, so a test can wedge one owner while probing another. The embedded
+// nil PasteRepo makes any other call panic.
 type countingCreateRepo struct {
+	PasteRepo
 	mu        sync.Mutex
 	inside    int
 	maxInside int
@@ -44,10 +46,6 @@ func (r *countingCreateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Pa
 	r.mu.Unlock()
 	return nil
 }
-
-func (r *countingCreateRepo) Get(domain.Slug) (domain.Paste, error) { return domain.Paste{}, nil }
-func (r *countingCreateRepo) MarkReady(domain.Paste) error          { return nil }
-func (r *countingCreateRepo) MarkFailed(domain.Paste) error         { return nil }
 
 func (r *countingCreateRepo) insideNow() int {
 	r.mu.Lock()

@@ -97,8 +97,8 @@ const maxDeployRetries = 5
 // files, and persists a new Site owned by owner.
 //
 // body is the SAME live stream a single-file upload reads, consumed once
-// mid-untar, so peak memory is one file at a time (buffered to hash +
-// compress before the blob write), never the whole inflated archive.
+// mid-untar, so peak memory is one file at a time, never the whole inflated
+// archive.
 //
 // Returns:
 //   - domain.ErrUnsupportedKind: not a valid gzip-tar, or holds no web content
@@ -111,44 +111,9 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		return SiteResult{}, ErrEmptyOwner
 	}
 	now := d.Now().UTC()
-
-	// The per-identity cap minus what the owner already has alive across
-	// pastes AND sites. The untar's decompression-bomb guard aborts the
-	// instant the running uncompressed total would cross this, so a site can
-	// never be extracted (let alone persisted) over-quota.
-	usedPaste, err := d.Pastes.SumActiveBytesByOwner(owner, now)
+	man, err := d.extract(body, owner, now)
 	if err != nil {
-		return SiteResult{}, fmt.Errorf("sum paste bytes: %w", err)
-	}
-	usedSite, err := d.Sites.SumActiveBytesByOwner(owner, now)
-	if err != nil {
-		return SiteResult{}, fmt.Errorf("sum site bytes: %w", err)
-	}
-	budget := max(int64(domain.UserQuotaBytes)-int64(usedPaste)-usedSite, 0)
-
-	ctx := context.Background()
-	sink := &blobSink{blob: d.Blob}
-	man, err := archive.Untar(body, sink, budget)
-	switch {
-	case errors.Is(err, domain.ErrArchiveTooLarge):
-		return SiteResult{}, ErrOverQuota
-	case errors.Is(err, domain.ErrUnsupportedKind):
-		return SiteResult{}, domain.ErrUnsupportedKind
-	case err != nil:
-		// A blob Put rejected by the object store's bucket quota propagates
-		// through the sink and the classifier turns it into the graceful
-		// "service is at capacity" response. ErrUnsafeArchive /
-		// ErrTooManyFiles / ErrNoWebContent are unclassified and surface
-		// verbatim so the SSH layer can message them precisely.
-		_, terr := classifyCommitErr(err)
-		return SiteResult{}, terr
-	}
-
-	if len(man.Files) == 0 {
-		return SiteResult{}, ErrEmptySite
-	}
-	if !man.HasWebContent() {
-		return SiteResult{}, domain.ErrNoWebContent
+		return SiteResult{}, err
 	}
 
 	site := domain.Site{
@@ -163,13 +128,52 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	// metadata insert. The one-shot archive never needs to be read again.
 	for range maxDeployRetries {
 		site.Slug = domain.NewRandomSlug()
-		err := d.Sites.InsertWithQuotaCheck(ctx, site, stored, int64(domain.UserQuotaBytes), now)
-		if isSlugTaken(err) {
+		err := d.Sites.InsertWithQuotaCheck(context.Background(), site, stored, int64(domain.UserQuotaBytes), now)
+		if errors.Is(err, domain.ErrSlugTaken) {
 			continue
 		}
-		return finalizeDeploy(site, err)
+		if _, terr := classifyCommitErr(err); terr != nil {
+			return SiteResult{}, terr
+		}
+		return SiteResult{Site: site}, nil
 	}
 	return SiteResult{}, ErrSlugTaken
+}
+
+// extract safe-untars body into staged blobs under the owner's remaining
+// budget and returns the manifest. The untar's decompression-bomb guard
+// aborts the instant the running uncompressed total would cross that budget,
+// so a site can never be extracted (let alone persisted) over-quota.
+//
+// Object-store bucket-quota rejections translate via the classifier;
+// ErrUnsafeArchive / ErrTooManyFiles / ErrNoWebContent are unclassified and
+// surface verbatim so the SSH layer can message them precisely.
+func (d *DeploySite) extract(body io.Reader, owner string, now time.Time) (domain.Manifest, error) {
+	usedPaste, err := d.Pastes.SumActiveBytesByOwner(owner, now)
+	if err != nil {
+		return domain.Manifest{}, fmt.Errorf("sum paste bytes: %w", err)
+	}
+	usedSite, err := d.Sites.SumActiveBytesByOwner(owner, now)
+	if err != nil {
+		return domain.Manifest{}, fmt.Errorf("sum site bytes: %w", err)
+	}
+	budget := siteExtractBudget(int64(domain.UserQuotaBytes), int64(usedPaste), usedSite)
+
+	man, err := archive.Untar(body, &blobSink{blob: d.Blob}, budget)
+	switch {
+	case errors.Is(err, domain.ErrArchiveTooLarge):
+		return domain.Manifest{}, ErrOverQuota
+	case errors.Is(err, domain.ErrUnsupportedKind):
+		return domain.Manifest{}, domain.ErrUnsupportedKind
+	case err != nil:
+		_, terr := classifyCommitErr(err)
+		return domain.Manifest{}, terr
+	case len(man.Files) == 0:
+		return domain.Manifest{}, ErrEmptySite
+	case !man.HasWebContent():
+		return domain.Manifest{}, domain.ErrNoWebContent
+	}
+	return man, nil
 }
 
 // Delete removes an owned static site by slug. A non-site slug and a
@@ -194,18 +198,6 @@ func (d *DeploySite) Delete(slug domain.Slug, owner string) error {
 	// CreatedAt, so a delete+re-mint of the slug in the window cannot destroy
 	// the new owner's paste.
 	return d.Sites.Delete(slug, existing.Identity, existing.CreatedAt)
-}
-
-// finalizeDeploy translates storage sentinels into the deploy service vocabulary.
-func finalizeDeploy(site domain.Site, err error) (SiteResult, error) {
-	switch class, terr := classifyCommitErr(err); {
-	case class == commitOK:
-		return SiteResult{Site: site}, nil
-	case class != commitOther:
-		return SiteResult{}, terr
-	default:
-		return SiteResult{}, err
-	}
 }
 
 // DeployToSlug appends a SITE version at an existing owned slug. Same pipeline
@@ -238,37 +230,11 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		return SiteResult{}, ErrNotFound
 	}
 
-	// Every retained version remains charged, including the currently served one.
-	usedPaste, err := d.Pastes.SumActiveBytesByOwner(owner, now)
+	// Every retained version remains charged, including the currently served
+	// one, so the budget is the owner's unallocated headroom.
+	man, err := d.extract(body, owner, now)
 	if err != nil {
-		return SiteResult{}, fmt.Errorf("sum paste bytes: %w", err)
-	}
-	usedSite, err := d.Sites.SumActiveBytesByOwner(owner, now)
-	if err != nil {
-		return SiteResult{}, fmt.Errorf("sum site bytes: %w", err)
-	}
-	budget := siteExtractBudget(int64(domain.UserQuotaBytes), int64(usedPaste), usedSite)
-
-	ctx := context.Background()
-	sink := &blobSink{blob: d.Blob}
-	man, err := archive.Untar(body, sink, budget)
-	switch {
-	case errors.Is(err, domain.ErrArchiveTooLarge):
-		return SiteResult{}, ErrOverQuota
-	case errors.Is(err, domain.ErrUnsupportedKind):
-		return SiteResult{}, domain.ErrUnsupportedKind
-	case err != nil:
-		// Object-store bucket-quota rejections translate via the classifier;
-		// untar-guard errors are unclassified and surface verbatim.
-		_, terr := classifyCommitErr(err)
-		return SiteResult{}, terr
-	}
-
-	if len(man.Files) == 0 {
-		return SiteResult{}, ErrEmptySite
-	}
-	if !man.HasWebContent() {
-		return SiteResult{}, domain.ErrNoWebContent
+		return SiteResult{}, err
 	}
 
 	site := domain.Site{
@@ -278,9 +244,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		CreatedAt: existing.CreatedAt, // preserved across re-deploys
 		UpdatedAt: now,
 	}
-	stored := man.CompressedSize()
-
-	err = d.Sites.ReplaceWithQuotaCheck(ctx, site, stored, int64(domain.UserQuotaBytes), now)
+	err = d.Sites.ReplaceWithQuotaCheck(context.Background(), site, man.CompressedSize(), int64(domain.UserQuotaBytes), now)
 	switch class, terr := classifyCommitErr(err); {
 	case class == commitOK:
 		return SiteResult{Site: site}, nil

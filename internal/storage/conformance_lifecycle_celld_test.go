@@ -46,25 +46,9 @@ func celldNamespace() string {
 type namespacedRepo struct {
 	inner  *celld.PasteRepo
 	prefix string
-	// The paste and keygate surfaces are separate types in the adapter, and the
-	// full conformanceRepo wants both. Composed here rather than in the adapter:
-	// production wires them as separate fields, so merging them for the suite's
-	// convenience would be the test shaping the design.
+	// Production wires the paste and keygate surfaces as separate fields, so
+	// the suite composes them here rather than merging them in the adapter.
 	kg namespacedKeygate
-}
-
-func (n namespacedRepo) AdmitNewKey(identity, subnet string, now time.Time, limit int,
-	window time.Duration,
-) (bool, error) {
-	return n.kg.AdmitNewKey(identity, subnet, now, limit, window)
-}
-
-func (n namespacedRepo) SubnetSnapshot(subnet string, now time.Time, window time.Duration) (int, time.Time, error) {
-	return n.kg.SubnetSnapshot(subnet, now, window)
-}
-
-func (n namespacedRepo) SubnetsForIdentity(identity string, now time.Time, window time.Duration) (int, error) {
-	return n.kg.SubnetsForIdentity(identity, now, window)
 }
 
 // The suite's site half needs a repo whose Sites view shares the SAME cells as

@@ -7,7 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -16,16 +18,20 @@ import (
 )
 
 // recordingSink captures every file Untar hands it, computing the SHA the same
-// way the real blob sink does (over uncompressed bytes).
+// way the real blob sink does (over uncompressed bytes), and the total bytes
+// it was handed across all files.
 type recordingSink struct {
 	files map[string][]byte
+	total int64
 }
 
 func newRecordingSink() *recordingSink { return &recordingSink{files: map[string][]byte{}} }
 
 func (s *recordingSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
 	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, r); err != nil {
+	n, err := io.Copy(&buf, r)
+	s.total += n
+	if err != nil {
 		// Propagate the cap sentinel unchanged, like the production sink.
 		if errors.Is(err, domain.ErrArchiveTooLarge) {
 			return "", 0, domain.ErrArchiveTooLarge
@@ -121,62 +127,41 @@ func TestSafeUntar_HappyPath(t *testing.T) {
 	}
 }
 
-func TestSafeUntar_RejectsSymlink(t *testing.T) {
-	arc := makeGzipTar(t, []tarEntry{
-		{name: "index.html", body: "<h1>ok</h1>"},
-		{name: "evil", typeflag: tar.TypeSymlink, linkname: "/etc/passwd"},
-	})
-	_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
-	if !errors.Is(err, domain.ErrUnsafeArchive) {
-		t.Fatalf("symlink: got %v, want domain.ErrUnsafeArchive", err)
+// TestUntar_RejectsUnsafeEntries pins every entry-shape guard: a non-regular
+// type or an escaping path is ErrUnsafeArchive, and no unsafe path reaches
+// the sink. The valid index makes the rejection unambiguously the guard
+// firing rather than an empty archive.
+func TestUntar_RejectsUnsafeEntries(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry tarEntry
+	}{
+		{"symlink", tarEntry{name: "evil", typeflag: tar.TypeSymlink, linkname: "/etc/passwd"}},
+		{"hardlink", tarEntry{name: "b", typeflag: tar.TypeLink, linkname: "index.html"}},
+		{"char device", tarEntry{name: "dev", typeflag: tar.TypeChar}},
+		{"block device", tarEntry{name: "dev", typeflag: tar.TypeBlock}},
+		{"fifo", tarEntry{name: "dev", typeflag: tar.TypeFifo}},
+		{"relative climb", tarEntry{name: "../escape.html", body: "x"}},
+		{"double climb", tarEntry{name: "../../etc/passwd", body: "x"}},
+		{"climb after descent", tarEntry{name: "a/../../b.html", body: "x"}},
+		{"climb after two descents", tarEntry{name: "foo/../../bar.html", body: "x"}},
+		{"absolute path", tarEntry{name: "/absolute.html", body: "x"}},
+		{"backslash climb", tarEntry{name: `..\windows\evil.html`, body: "x"}},
 	}
-}
-
-func TestSafeUntar_RejectsHardlink(t *testing.T) {
-	arc := makeGzipTar(t, []tarEntry{
-		{name: "a.html", body: "<h1>ok</h1>"},
-		{name: "b", typeflag: tar.TypeLink, linkname: "a.html"},
-	})
-	_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
-	if !errors.Is(err, domain.ErrUnsafeArchive) {
-		t.Fatalf("hardlink: got %v, want domain.ErrUnsafeArchive", err)
-	}
-}
-
-func TestSafeUntar_RejectsDeviceAndFifo(t *testing.T) {
-	for _, tf := range []byte{tar.TypeChar, tar.TypeBlock, tar.TypeFifo} {
-		arc := makeGzipTar(t, []tarEntry{{name: "dev", typeflag: tf}})
-		_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
-		if !errors.Is(err, domain.ErrUnsafeArchive) {
-			t.Fatalf("typeflag %d: got %v, want domain.ErrUnsafeArchive", tf, err)
-		}
-	}
-}
-
-func TestSafeUntar_RejectsTraversal(t *testing.T) {
-	cases := []string{
-		"../escape.html",
-		"../../etc/passwd",
-		"a/../../b.html",
-		"/absolute.html",
-		"foo/../../bar.html",
-	}
-	for _, name := range cases {
-		t.Run(name, func(t *testing.T) {
-			arc := makeGzipTar(t, []tarEntry{{name: name, body: "x"}})
-			_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			arc := makeGzipTar(t, []tarEntry{{name: "index.html", body: "<h1>ok</h1>"}, c.entry})
+			sink := newRecordingSink()
+			_, err := archive.Untar(bytes.NewReader(arc), sink, int64(domain.UserQuotaBytes))
 			if !errors.Is(err, domain.ErrUnsafeArchive) {
-				t.Fatalf("path %q: got %v, want domain.ErrUnsafeArchive", name, err)
+				t.Fatalf("%s: got %v, want domain.ErrUnsafeArchive", c.name, err)
+			}
+			for p := range sink.files {
+				if p != "index.html" {
+					t.Fatalf("%s: unsafe entry %q reached the sink", c.name, p)
+				}
 			}
 		})
-	}
-}
-
-func TestSafeUntar_RejectsBackslashTraversal(t *testing.T) {
-	arc := makeGzipTar(t, []tarEntry{{name: `..\windows\evil.html`, body: "x"}})
-	_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
-	if !errors.Is(err, domain.ErrUnsafeArchive) {
-		t.Fatalf("backslash: got %v, want domain.ErrUnsafeArchive", err)
 	}
 }
 
@@ -190,21 +175,6 @@ func TestSafeUntar_AllowsDotSlashPrefix(t *testing.T) {
 	}
 	if _, ok := man.Files["index.html"]; !ok {
 		t.Fatalf("expected cleaned path index.html, got %v", keys(man.Files))
-	}
-}
-
-func TestSafeUntar_DecompressionBombAbortsMidStream(t *testing.T) {
-	// One file far larger than the cap. The cap is enforced on the bytes as
-	// they stream, so this aborts long before the whole file inflates.
-	big := strings.Repeat("A", 4<<20) // 4 MiB
-	arc := makeGzipTar(t, []tarEntry{
-		{name: "index.html", body: "<h1>hi</h1>"},
-		{name: "big.html", body: big},
-	})
-	// Budget of 1 MiB: the 4 MiB file must trip the guard.
-	_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), 1<<20)
-	if !errors.Is(err, domain.ErrArchiveTooLarge) {
-		t.Fatalf("bomb: got %v, want domain.ErrArchiveTooLarge", err)
 	}
 }
 
@@ -228,7 +198,7 @@ func TestSafeUntar_FileCountCap(t *testing.T) {
 	entries := make([]tarEntry, 0, domain.MaxSiteFiles+2)
 	entries = append(entries, tarEntry{name: "index.html", body: "x"})
 	for i := range domain.MaxSiteFiles + 1 {
-		entries = append(entries, tarEntry{name: "f" + itoa(i) + ".txt", body: "y"})
+		entries = append(entries, tarEntry{name: "f" + strconv.Itoa(i) + ".txt", body: "y"})
 	}
 	_, err := archive.Untar(bytes.NewReader(makeGzipTar(t, entries)), newRecordingSink(), int64(domain.UserQuotaBytes))
 	if !errors.Is(err, domain.ErrTooManyFiles) {
@@ -277,26 +247,65 @@ func TestSafeUntar_IdenticalFilesShareASHAButNotAnEntry(t *testing.T) {
 	}
 }
 
-// -- tiny helpers (avoid pulling strconv into the test for two callers) --
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[i:])
-}
-
 func keys(m map[string]domain.ManifestEntry) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestGuard_BombAbortsBeforeFullExpansion pins that the bomb guard checks the
+// running UNCOMPRESSED total as bytes stream, not after inflating the whole
+// file: an entry 64x the cap must abort having read at most cap+1 bytes.
+func TestGuard_BombAbortsBeforeFullExpansion(t *testing.T) {
+	const cap = 256 << 10 // 256 KiB budget
+	bomb := strings.Repeat("A", 64*cap)
+	arc := makeGzipTar(t, []tarEntry{
+		{name: "index.html", body: "<h1>hi</h1>"},
+		{name: "bomb.html", body: bomb},
+	})
+
+	sink := newRecordingSink()
+	_, err := archive.Untar(bytes.NewReader(arc), sink, cap)
+	if !errors.Is(err, domain.ErrArchiveTooLarge) {
+		t.Fatalf("bomb: got %v, want domain.ErrArchiveTooLarge", err)
+	}
+	// The +1 is the lookahead probe that detects overflow.
+	if sink.total > cap+1 {
+		t.Fatalf("bomb read %d bytes, want <= cap+1 (%d): full expansion not aborted mid-stream", sink.total, cap+1)
+	}
+}
+
+// TestGuard_ManifestPathTextCapRejected pins that total manifest path text is
+// bounded by domain.MaxManifestBytes independent of the file count.
+func TestGuard_ManifestPathTextCapRejected(t *testing.T) {
+	// Each path is ~900 bytes (< domain.MaxSitePathLen 1024), so the path text
+	// crosses domain.MaxManifestBytes (1 MiB) at ~1165 entries, well before
+	// domain.MaxSiteFiles (5000). 2000 entries is safely over.
+	const pathLen = 900
+	stem := strings.Repeat("a", pathLen-len(".html")-6) // leave room for index + ext
+	entries := make([]tarEntry, 0, 2001)
+	entries = append(entries, tarEntry{name: "index.html", body: "<h1>ok</h1>"})
+	for i := range 2000 {
+		entries = append(entries, tarEntry{name: fmt.Sprintf("dir%06d%s.html", i, stem), body: "x"})
+	}
+	_, err := archive.Untar(bytes.NewReader(makeGzipTar(t, entries)), newRecordingSink(), int64(domain.UserQuotaBytes))
+	if !errors.Is(err, domain.ErrTooManyFiles) {
+		t.Fatalf("manifest path-text cap: got %v, want domain.ErrTooManyFiles", err)
+	}
+}
+
+// TestGuard_PerPathLengthCapRejected pins domain.MaxSitePathLen: one absurdly
+// long path is rejected even though the file count and manifest size are tiny.
+func TestGuard_PerPathLengthCapRejected(t *testing.T) {
+	long := strings.Repeat("z", domain.MaxSitePathLen+10) + ".html"
+	arc := makeGzipTar(t, []tarEntry{
+		{name: "index.html", body: "<h1>ok</h1>"},
+		{name: long, body: "x"},
+	})
+	_, err := archive.Untar(bytes.NewReader(arc), newRecordingSink(), int64(domain.UserQuotaBytes))
+	if !errors.Is(err, domain.ErrTooManyFiles) {
+		t.Fatalf("per-path length cap: got %v, want domain.ErrTooManyFiles", err)
+	}
 }

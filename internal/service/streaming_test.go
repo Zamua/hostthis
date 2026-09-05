@@ -1,41 +1,35 @@
-package service_test
+package service
 
 import (
 	"errors"
 	"io"
 	"runtime"
-	"strings"
 	"testing"
-
-	"github.com/Zamua/hostthis/internal/service"
 )
 
-// dripReader hands out a bounded chunk per Read, counting calls and bytes, so
-// a test can tell streaming apart from a single io.ReadAll.
+// dripReader records the largest buffer a Read was asked to fill and the
+// bytes handed out, so a test can tell bounded streaming apart from a slurp
+// that grows its buffer with the body.
 type dripReader struct {
-	src   io.Reader
-	chunk int
-	calls int
-	total int
+	src    io.Reader
+	maxLen int
+	total  int
 }
 
 func (d *dripReader) Read(p []byte) (int, error) {
-	d.calls++
-	if d.chunk > 0 && len(p) > d.chunk {
-		p = p[:d.chunk]
-	}
+	d.maxLen = max(d.maxLen, len(p))
 	n, err := d.src.Read(p)
 	d.total += n
 	return n, err
 }
 
-// TestUpload_StreamsInChunks pins that the upload path does not slurp the whole
-// body into one buffer: at 4 KiB per Read a 4 MiB body takes ~1000 calls, where
-// an io.ReadAll would take 1-3.
+// TestUpload_StreamsInChunks pins that the upload path reads the body through
+// a bounded buffer: io.Copy asks for 32 KiB at a time, while an io.ReadAll
+// grows its buffer past the body and asks for MiBs.
 func TestUpload_StreamsInChunks(t *testing.T) {
 	upload, _, _ := newStack(t)
-	body := htmlBody(4 << 20) // 4 MiB high-entropy ASCII
-	drip := &dripReader{src: bytesReaderFor(body), chunk: 4096}
+	body := htmlBody(4 << 20)
+	drip := &dripReader{src: bytesReaderFor(body)}
 
 	res, err := upload.Create(drip, "key:streamtest", "", "")
 	if err != nil {
@@ -44,10 +38,8 @@ func TestUpload_StreamsInChunks(t *testing.T) {
 	if res.Paste.Size <= 0 {
 		t.Fatalf("compressed size should be positive, got %d", res.Paste.Size)
 	}
-	// A deliberately loose floor: anything over 100 calls rules out a single
-	// io.ReadAll, and the real figure is in the thousands.
-	if drip.calls < 100 {
-		t.Fatalf("expected hundreds+ Read calls, got %d (body slurped via io.ReadAll?)", drip.calls)
+	if drip.maxLen > 256<<10 {
+		t.Fatalf("largest Read buffer = %d bytes; the body is being slurped rather than streamed", drip.maxLen)
 	}
 	if drip.total != len(body) {
 		t.Fatalf("drip count mismatch: total=%d want=%d", drip.total, len(body))
@@ -98,7 +90,7 @@ func TestUpload_RawCapTrips(t *testing.T) {
 		body[i] = 'a'
 	}
 	_, err := upload.Create(bytesReaderFor(body), "key:rawcap", "", "")
-	if !errors.Is(err, service.ErrRawTooLarge) {
+	if !errors.Is(err, ErrRawTooLarge) {
 		t.Fatalf("expected ErrRawTooLarge for >100 MiB raw input, got %v", err)
 	}
 }
@@ -110,11 +102,13 @@ func TestUpload_CompressedCapTrips(t *testing.T) {
 	upload, _, _ := newStack(t)
 	body := htmlBody(11 << 20)
 	_, err := upload.Create(bytesReaderFor(body), "key:csizecap", "", "")
-	if !errors.Is(err, service.ErrCompressedTooLarge) {
+	if !errors.Is(err, ErrCompressedTooLarge) {
 		t.Fatalf("expected ErrCompressedTooLarge for ~11 MiB high-entropy, got %v", err)
 	}
 }
 
+// bytesReaderFor wraps b in a plain io.Reader with no WriterTo, so io.Copy
+// takes the buffered path a live socket would.
 func bytesReaderFor(b []byte) io.Reader {
 	return &readerWrap{b: b}
 }
@@ -132,6 +126,3 @@ func (r *readerWrap) Read(p []byte) (int, error) {
 	r.pos += n
 	return n, nil
 }
-
-// Anchors the strings import against helper churn.
-var _ = strings.Repeat

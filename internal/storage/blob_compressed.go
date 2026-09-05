@@ -72,7 +72,8 @@ type innerBlobStore interface {
 
 // InnerBlobStore is the exported alias of innerBlobStore, so wiring code in
 // cmd/ can name the type the compression layer wraps. The write-back cache
-// satisfies it and slots between this layer and the durable backend.
+// both satisfies it and fronts one: it sits BELOW the compression layer and
+// moves only opaque already-compressed bytes keyed by sha.
 type InnerBlobStore = innerBlobStore
 
 // PutPrecompressed streams a body already encoded in the at-rest format.

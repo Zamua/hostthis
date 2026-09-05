@@ -1,11 +1,10 @@
-package service_test
+package service
 
 import (
 	"testing"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
 	"github.com/Zamua/hostthis/internal/storagetest"
 )
@@ -21,20 +20,19 @@ import (
 func TestRoomCreates_CountPrunesPastWindow(t *testing.T) {
 	rooms := storage.NewMemRoomRepo(storagetest.NewRepo(t))
 
-	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
-	roomsSvc := service.NewRooms(rooms)
-	roomsSvc.Now = func() time.Time { return now }
+	roomsSvc := NewRooms(rooms)
+	roomsSvc.Now = func() time.Time { return fixedNow }
 	if _, err := roomsSvc.Create("appz2345", "203.0.113.0/24"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
 	wide := domain.RoomCreateWindow + 2*time.Hour
-	if n, _, _ := rooms.CountRoomCreates("appz2345", "203.0.113.0/24", now, wide); n != 1 {
+	if n, _, _ := rooms.CountRoomCreates("appz2345", "203.0.113.0/24", fixedNow, wide); n != 1 {
 		t.Fatalf("fixture: want the seeded row visible over the wide window, got %d", n)
 	}
 
 	// A count taken past the rate-limit window drops the row on the way past.
-	future := now.Add(domain.RoomCreateWindow + time.Hour)
+	future := fixedNow.Add(domain.RoomCreateWindow + time.Hour)
 	if n, _, _ := rooms.CountRoomCreates("appz2345", "203.0.113.0/24", future, domain.RoomCreateWindow); n != 0 {
 		t.Fatalf("an aged-out row must not count: got %d", n)
 	}
