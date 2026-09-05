@@ -72,9 +72,9 @@ var (
 	ErrRoomIDMalformed = errors.New("room id is not a valid UUIDv4")
 )
 
-// NewRoomID mints a fresh random UUIDv4 using crypto/rand. It never returns an
-// error: crypto/rand.Read fails only when the OS entropy source is broken,
-// where a panic is the right outcome.
+// NewRoomID mints a fresh random UUIDv4 from crypto/rand. It never returns an
+// error: the entropy source failing is a broken host, where a panic is the
+// right outcome.
 func NewRoomID() RoomID {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -89,46 +89,21 @@ func NewRoomID() RoomID {
 // and lowercased. Use it at every boundary where untrusted input becomes a
 // RoomID: HTTP path segments, repo reads.
 //
-// Validation is strict: exactly 36 chars in 8-4-4-4-12 layout, hex outside the
-// hyphen positions, version nibble == 4, variant nibble in {8,9,a,b}. Tighter
-// than "any UUID shape" so a forged id of the wrong version is rejected as
-// malformed (400) rather than treated as a real-but-absent room (404).
+// Validation is strict: exactly the 36-char 8-4-4-4-12 hex layout, version 4,
+// RFC 4122 variant. Tighter than "any UUID shape" so a forged id of the wrong
+// version or form is malformed (400) rather than a real-but-absent room (404).
 func ParseRoomID(s string) (RoomID, error) {
 	if s == "" {
 		return "", ErrRoomIDEmpty
 	}
-	if len(s) != 36 {
+	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
 		return "", ErrRoomIDMalformed
 	}
 	var raw [16]byte
-	ri := 0
-	for i := range 36 {
-		c := s[i]
-		if i == 8 || i == 13 || i == 18 || i == 23 {
-			if c != '-' {
-				return "", ErrRoomIDMalformed
-			}
-			continue
-		}
-		hi, ok := hexNibble(c)
-		if !ok {
-			return "", ErrRoomIDMalformed
-		}
-		// Two nibbles per byte, indexed by position in the de-hyphenated
-		// stream rather than in s.
-		if ri%2 == 0 {
-			raw[ri/2] = hi << 4
-		} else {
-			raw[ri/2] |= hi
-		}
-		ri++
-	}
-	// version 4
-	if raw[6]>>4 != 0x4 {
+	if _, err := hex.Decode(raw[:], []byte(s[0:8]+s[9:13]+s[14:18]+s[19:23]+s[24:36])); err != nil {
 		return "", ErrRoomIDMalformed
 	}
-	// variant 10xx
-	if raw[8]>>6 != 0x2 {
+	if raw[6]>>4 != 0x4 || raw[8]>>6 != 0x2 {
 		return "", ErrRoomIDMalformed
 	}
 	// Lowercased so two textual spellings of the same UUID address the same
@@ -141,24 +116,8 @@ func (id RoomID) String() string { return string(id) }
 
 // formatUUID renders 16 bytes as canonical lowercase 8-4-4-4-12 hex.
 func formatUUID(b [16]byte) string {
-	const hyphen = "-"
 	h := hex.EncodeToString(b[:])
-	return h[0:8] + hyphen + h[8:12] + hyphen + h[12:16] + hyphen + h[16:20] + hyphen + h[20:32]
-}
-
-// hexNibble decodes one hex character, either case, to its 4-bit value. The
-// bool is false for non-hex input.
-func hexNibble(c byte) (byte, bool) {
-	switch {
-	case c >= '0' && c <= '9':
-		return c - '0', true
-	case c >= 'a' && c <= 'f':
-		return c - 'a' + 10, true
-	case c >= 'A' && c <= 'F':
-		return c - 'A' + 10, true
-	default:
-		return 0, false
-	}
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
 // RoomKV is the I/O-free view of a room's key-value namespace: a flat map of
