@@ -13,21 +13,15 @@ import (
 // RoomRepo stores each room in one celld cell. The app's Paste cell coordinates
 // exact byte allocations across sibling rooms.
 type RoomRepo struct {
-	base   string
-	client *http.Client
+	*cell
 	// PushSubject is the VAPID `sub` claim ("https://<apex>") handed to the
 	// cell with every push write, so its tokens name this deployment.
 	PushSubject string
 }
 
 func NewRoomRepo(base string, c *http.Client) *RoomRepo {
-	if c == nil {
-		c = &http.Client{Timeout: 10 * time.Second}
-	}
-	return &RoomRepo{base: base, client: c}
+	return &RoomRepo{cell: newCell(base, c)}
 }
-
-func (r *RoomRepo) paste() *PasteRepo { return &PasteRepo{base: r.base, client: r.client} }
 
 // roomKey addresses the cell. The app slug leads so a room is unreachable
 // without knowing which app it belongs to, which is what makes the cross-app
@@ -40,24 +34,14 @@ func roomKey(app domain.Slug, id domain.RoomID) string {
 // CreateRoom records the room and its app-scoped creation ledger through one
 // Room-cell request.
 func (r *RoomRepo) CreateRoom(room domain.Room, subnet string, appCap int64, now time.Time) error {
-	status, err := r.paste().call(context.Background(), http.MethodPost, "/room/create", "room",
+	return r.ask(context.Background(), "room create", http.MethodPost, "/room/create", "room",
 		roomKey(room.AppSlug, room.ID), map[string]any{
 			"appSlug": room.AppSlug.String(), "id": room.ID.String(),
 			"createdAt": room.CreatedAt.UTC().UnixMilli(),
 			"updatedAt": room.UpdatedAt.UTC().UnixMilli(),
 			"subnet":    subnet, "at": now.UTC().UnixMilli(),
 			"appCap": appCap,
-		}, nil)
-	if err != nil {
-		return err
-	}
-	if status == http.StatusInsufficientStorage {
-		return domain.ErrAppRoomsFull
-	}
-	if status >= 300 {
-		return fmt.Errorf("celld: room create: unexpected status %d", status)
-	}
-	return nil
+		}, nil, map[int]error{http.StatusInsufficientStorage: domain.ErrAppRoomsFull})
 }
 
 func (r *RoomRepo) GetRoom(app domain.Slug, id domain.RoomID) (domain.Room, error) {
@@ -67,7 +51,7 @@ func (r *RoomRepo) GetRoom(app domain.Slug, id domain.RoomID) (domain.Room, erro
 		CreatedAt int64  `json:"createdAt"`
 		UpdatedAt int64  `json:"updatedAt"`
 	}
-	status, err := r.paste().call(context.Background(), http.MethodGet, "/room/meta", "room",
+	status, err := r.call(context.Background(), http.MethodGet, "/room/meta", "room",
 		roomKey(app, id), nil, &wire)
 	if err != nil {
 		return domain.Room{}, err
@@ -86,7 +70,7 @@ func (r *RoomRepo) GetValue(app domain.Slug, id domain.RoomID, key string) ([]by
 	var wire struct {
 		Value []byte `json:"value"`
 	}
-	status, err := r.paste().call(context.Background(), http.MethodGet,
+	status, err := r.call(context.Background(), http.MethodGet,
 		"/room/get?key="+urlQuery(key), "room", roomKey(app, id), nil, &wire)
 	if err != nil {
 		return nil, err
@@ -108,7 +92,7 @@ func (r *RoomRepo) ScanRoom(app domain.Slug, id domain.RoomID) (domain.RoomKV, e
 		Values map[string][]byte `json:"values"`
 		Seq    uint64            `json:"seq"`
 	}
-	status, err := r.paste().call(context.Background(), http.MethodGet, "/room/scan", "room",
+	status, err := r.call(context.Background(), http.MethodGet, "/room/scan", "room",
 		roomKey(app, id), nil, &wire)
 	if err != nil {
 		return domain.RoomKV{}, err
@@ -136,7 +120,7 @@ func (r *RoomRepo) PutValue(app domain.Slug, id domain.RoomID, key string, val [
 		Seq   uint64 `json:"seq"`
 		Bytes int    `json:"bytes"`
 	}
-	status, err := r.paste().call(context.Background(), http.MethodPost, "/room/put", "room", roomKey(app, id),
+	if err := r.ask(context.Background(), "room put", http.MethodPost, "/room/put", "room", roomKey(app, id),
 		map[string]any{
 			"key": key, "value": base64.StdEncoding.EncodeToString(val),
 			// The frame encoding computed HERE, with the same encoder the HTTP
@@ -146,20 +130,12 @@ func (r *RoomRepo) PutValue(app domain.Slug, id domain.RoomID, key string, val [
 			"wire":    string(domain.RoomWireValue(val)),
 			"roomCap": domain.MaxRoomBytes, "keyCap": domain.MaxRoomKeys,
 			"appCap": appCap, "now": now.UTC().UnixMilli(),
-		}, &res)
-	if err != nil {
+		}, &res, map[int]error{
+			http.StatusNotFound:              domain.ErrNotFound,
+			http.StatusRequestEntityTooLarge: domain.ErrRoomDataFull,
+			http.StatusInsufficientStorage:   domain.ErrAppRoomsFull,
+		}); err != nil {
 		return 0, err
-	}
-	switch status {
-	case http.StatusNotFound:
-		return 0, domain.ErrNotFound
-	case http.StatusRequestEntityTooLarge:
-		return 0, domain.ErrRoomDataFull
-	case http.StatusInsufficientStorage:
-		return 0, domain.ErrAppRoomsFull
-	}
-	if status >= 300 {
-		return 0, fmt.Errorf("celld: room put: unexpected status %d", status)
 	}
 	return res.Seq, nil
 }
@@ -169,16 +145,9 @@ func (r *RoomRepo) DeleteValue(app domain.Slug, id domain.RoomID, key string, no
 		Seq   uint64 `json:"seq"`
 		Bytes int    `json:"bytes"`
 	}
-	status, err := r.paste().call(context.Background(), http.MethodPost, "/room/del", "room", roomKey(app, id),
-		map[string]any{"key": key, "now": now.UTC().UnixMilli()}, &res)
-	if err != nil {
+	if err := r.ask(context.Background(), "room delete", http.MethodPost, "/room/del", "room",
+		roomKey(app, id), map[string]any{"key": key, "now": now.UTC().UnixMilli()}, &res, notFound); err != nil {
 		return 0, err
-	}
-	if status == http.StatusNotFound {
-		return 0, domain.ErrNotFound
-	}
-	if status >= 300 {
-		return 0, fmt.Errorf("celld: room delete: unexpected status %d", status)
 	}
 	return res.Seq, nil
 }
@@ -193,7 +162,7 @@ func (r *RoomRepo) CountRoomCreates(app domain.Slug, subnet string, now time.Tim
 	}
 	u := fmt.Sprintf("/paste/roomcounts?subnet=%s&now=%d&window=%d",
 		urlQuery(subnet), now.UTC().UnixMilli(), window.Milliseconds())
-	if _, err := r.paste().call(context.Background(), http.MethodGet, u, "slug",
+	if _, err := r.call(context.Background(), http.MethodGet, u, "slug",
 		app.String(), nil, &res); err != nil {
 		return 0, 0, err
 	}

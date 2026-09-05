@@ -22,11 +22,12 @@ import (
 	"github.com/Zamua/hostthis/internal/roomwire"
 )
 
-// fakeCell accepts the upstream socket and immediately sends one snapshot
-// frame, as the room cell does in its join event.
-func fakeCell(t *testing.T, payload []byte) *httptest.Server {
+// fakeRoomCell accepts the upstream socket and immediately sends one snapshot
+// frame, as the room cell does in its join event, then runs after; nil holds
+// the socket open until the client goes away.
+func fakeRoomCell(t *testing.T, payload []byte, after func(*websocket.Conn)) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/room/join") {
 			http.NotFound(w, r)
 			return
@@ -35,166 +36,32 @@ func fakeCell(t *testing.T, payload []byte) *httptest.Server {
 		if err != nil {
 			return
 		}
-		_ = c.Write(r.Context(), websocket.MessageText, payload)
-		// Hold the socket open until the client goes away.
+		if err := c.Write(r.Context(), websocket.MessageText, payload); err != nil {
+			return
+		}
+		if after != nil {
+			after(c)
+			return
+		}
 		for {
 			if _, _, err := c.Read(r.Context()); err != nil {
 				return
 			}
 		}
 	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 func testKey() roomwire.RoomKey {
 	return roomwire.RoomKey{App: "app12345", ID: domain.NewRoomID()}
 }
 
-// The snapshot the cell sends arrives at the client byte-for-byte: the proxy
-// pipes, never parses.
-func TestRoomProxyPipesTheSnapshotVerbatim(t *testing.T) {
-	cell := fakeCell(t, []byte(`{"type":"snapshot","seq":0,"state":{}}`))
-	defer cell.Close()
-	p := celld.NewRoomProxy(cell.URL)
-
-	key := testKey()
-	id, err := p.Admit(key)
-	if err != nil {
-		t.Fatalf("admit: %v", err)
-	}
-
-	// A client socket via a local echo of the production path: an httptest
-	// server whose handler runs Serve, exactly as the upgrade handler does.
-	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, aerr := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-		if aerr != nil {
-			return
-		}
-		p.Serve(r.Context(), key, id, c)
-	}))
-	defer front.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	client, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(front.URL, "http"), nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer client.Close(websocket.StatusNormalClosure, "") //nolint:errcheck
-
-	_, data, err := client.Read(ctx)
-	if err != nil {
-		t.Fatalf("read snapshot: %v", err)
-	}
-	if want := `{"type":"snapshot","seq":0,"state":{}}`; string(data) != want {
-		t.Fatalf("snapshot arrived as %q; the proxy must pipe frames verbatim", data)
-	}
-}
-
-func TestRoomProxyPipesSnapshotAboveLibraryDefault(t *testing.T) {
-	payload := bytes.Repeat([]byte("x"), 64<<10)
-	cell := fakeCell(t, payload)
-	defer cell.Close()
-	p := celld.NewRoomProxy(cell.URL)
-	key := testKey()
-	id, err := p.Admit(key)
-	if err != nil {
-		t.Fatalf("admit: %v", err)
-	}
-	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, aerr := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-		if aerr == nil {
-			p.Serve(r.Context(), key, id, c)
-		}
-	}))
-	defer front.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	client, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(front.URL, "http"), nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer client.Close(websocket.StatusNormalClosure, "") //nolint:errcheck
-	client.SetReadLimit(roomwire.MaxServerFrameBytes)
-	_, got, err := client.Read(ctx)
-	if err != nil {
-		t.Fatalf("read large snapshot: %v", err)
-	}
-	if !bytes.Equal(got, payload) {
-		t.Fatalf("large snapshot changed in proxy: got %d bytes, want %d", len(got), len(payload))
-	}
-}
-
-func TestRoomProxyPreservesUpstreamClose(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		code   websocket.StatusCode
-		reason string
-	}{
-		{name: "service restart", code: 1012, reason: "cell restarting"},
-		{name: "policy refusal", code: 1008, reason: "reserved control frame"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cell := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-				if err != nil {
-					return
-				}
-				if err := c.Write(r.Context(), websocket.MessageText, []byte(`{"type":"snapshot"}`)); err != nil {
-					return
-				}
-				_ = c.Close(tc.code, tc.reason)
-			}))
-			defer cell.Close()
-			p := celld.NewRoomProxy(cell.URL)
-			key := testKey()
-			id, err := p.Admit(key)
-			if err != nil {
-				t.Fatalf("admit: %v", err)
-			}
-			front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-				if err == nil {
-					p.Serve(r.Context(), key, id, c)
-				}
-			}))
-			defer front.Close()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			client, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(front.URL, "http"), nil)
-			if err != nil {
-				t.Fatalf("dial: %v", err)
-			}
-			defer client.CloseNow() //nolint:errcheck
-			if _, _, err := client.Read(ctx); err != nil {
-				t.Fatalf("read snapshot: %v", err)
-			}
-			_, _, err = client.Read(ctx)
-			var closeErr websocket.CloseError
-			if !errors.As(err, &closeErr) {
-				t.Fatalf("close error = %v, want websocket.CloseError", err)
-			}
-			if closeErr.Code != tc.code || closeErr.Reason != tc.reason {
-				t.Fatalf("close = %d %q, want %d %q", closeErr.Code, closeErr.Reason, tc.code, tc.reason)
-			}
-		})
-	}
-}
-
-func TestRoomProxyPreservesAbruptUpstreamLoss(t *testing.T) {
-	cell := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-		if err != nil {
-			return
-		}
-		if err := c.Write(r.Context(), websocket.MessageText, []byte(`{"type":"snapshot"}`)); err != nil {
-			return
-		}
-		c.CloseNow() //nolint:errcheck
-	}))
-	defer cell.Close()
-	p := celld.NewRoomProxy(cell.URL)
+// proxied admits one connection to a proxy at base and dials it through a
+// front server whose handler runs Serve, exactly as the upgrade handler does.
+func proxied(t *testing.T, base string) (*celld.RoomProxy, *websocket.Conn, context.Context) {
+	t.Helper()
+	p := celld.NewRoomProxy(base)
 	key := testKey()
 	id, err := p.Admit(key)
 	if err != nil {
@@ -206,21 +73,79 @@ func TestRoomProxyPreservesAbruptUpstreamLoss(t *testing.T) {
 			p.Serve(r.Context(), key, id, c)
 		}
 	}))
-	defer front.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	t.Cleanup(front.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
 	client, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(front.URL, "http"), nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer client.CloseNow() //nolint:errcheck
-	if _, _, err := client.Read(ctx); err != nil {
+	t.Cleanup(func() { client.CloseNow() }) //nolint:errcheck
+	return p, client, ctx
+}
+
+// The snapshot the cell sends arrives at the client byte-for-byte: the proxy
+// pipes, never parses.
+func TestRoomProxyPipesTheSnapshotVerbatim(t *testing.T) {
+	cell := fakeRoomCell(t, []byte(`{"type":"snapshot","seq":0,"state":{}}`), nil)
+	_, client, ctx := proxied(t, cell.URL)
+	_, data, err := client.Read(ctx)
+	if err != nil {
 		t.Fatalf("read snapshot: %v", err)
 	}
-	_, _, err = client.Read(ctx)
-	if status := websocket.CloseStatus(err); status != -1 {
-		t.Fatalf("close status = %d, want -1 after abrupt upstream loss (error %v)", status, err)
+	if want := `{"type":"snapshot","seq":0,"state":{}}`; string(data) != want {
+		t.Fatalf("snapshot arrived as %q; the proxy must pipe frames verbatim", data)
+	}
+}
+
+func TestRoomProxyPipesSnapshotAboveLibraryDefault(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 64<<10)
+	cell := fakeRoomCell(t, payload, nil)
+	_, client, ctx := proxied(t, cell.URL)
+	client.SetReadLimit(roomwire.MaxServerFrameBytes)
+	_, got, err := client.Read(ctx)
+	if err != nil {
+		t.Fatalf("read large snapshot: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("large snapshot changed in proxy: got %d bytes, want %d", len(got), len(payload))
+	}
+}
+
+// How the cell ends the upstream socket is how the client sees its socket
+// end: a close frame keeps its code and reason, and an abrupt loss (no close
+// frame, status -1) stays abrupt.
+func TestRoomProxyPreservesUpstreamClose(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		code   websocket.StatusCode
+		reason string
+	}{
+		{name: "service restart", code: 1012, reason: "cell restarting"},
+		{name: "policy refusal", code: 1008, reason: "reserved control frame"},
+		{name: "abrupt loss", code: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cell := fakeRoomCell(t, []byte(`{"type":"snapshot"}`), func(c *websocket.Conn) {
+				if tc.code < 0 {
+					c.CloseNow() //nolint:errcheck
+					return
+				}
+				_ = c.Close(tc.code, tc.reason)
+			})
+			_, client, ctx := proxied(t, cell.URL)
+			if _, _, err := client.Read(ctx); err != nil {
+				t.Fatalf("read snapshot: %v", err)
+			}
+			_, _, err := client.Read(ctx)
+			if got := websocket.CloseStatus(err); got != tc.code {
+				t.Fatalf("close status = %d, want %d (error %v)", got, tc.code, err)
+			}
+			var closeErr websocket.CloseError
+			if errors.As(err, &closeErr) && closeErr.Reason != tc.reason {
+				t.Fatalf("close reason = %q, want %q", closeErr.Reason, tc.reason)
+			}
+		})
 	}
 }
 
@@ -257,36 +182,15 @@ func TestRoomProxyShutdownWaitsForAdmittedConnection(t *testing.T) {
 }
 
 func TestRoomProxyShutdownClosesActiveClientWithServiceRestart(t *testing.T) {
-	cell := fakeCell(t, []byte(`{"type":"snapshot"}`))
-	defer cell.Close()
-	p := celld.NewRoomProxy(cell.URL)
-	key := testKey()
-	id, err := p.Admit(key)
-	if err != nil {
-		t.Fatalf("admit: %v", err)
-	}
-	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-		if err == nil {
-			p.Serve(r.Context(), key, id, c)
-		}
-	}))
-	defer front.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	client, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(front.URL, "http"), nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer client.CloseNow() //nolint:errcheck
+	cell := fakeRoomCell(t, []byte(`{"type":"snapshot"}`), nil)
+	p, client, ctx := proxied(t, cell.URL)
 	if _, _, err := client.Read(ctx); err != nil {
 		t.Fatalf("read snapshot: %v", err)
 	}
 
 	done := make(chan error, 1)
 	go func() { done <- p.Shutdown(ctx) }()
-	_, _, err = client.Read(ctx)
+	_, _, err := client.Read(ctx)
 	var closeErr websocket.CloseError
 	if !errors.As(err, &closeErr) {
 		t.Fatalf("close error = %v, want websocket.CloseError", err)
@@ -328,29 +232,8 @@ func TestRoomProxyCapsAndRelease(t *testing.T) {
 // An unreachable cell closes the client cleanly rather than hanging the
 // handler: the proxy's dial failure is a connection outcome, not a stall.
 func TestRoomProxyUnreachableCellClosesTheClient(t *testing.T) {
-	p := celld.NewRoomProxy("http://127.0.0.1:1")
-	key := testKey()
-	id, err := p.Admit(key)
-	if err != nil {
-		t.Fatalf("admit: %v", err)
-	}
-	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, aerr := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-		if aerr != nil {
-			return
-		}
-		p.Serve(r.Context(), key, id, c)
-	}))
-	defer front.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	client, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(front.URL, "http"), nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer client.Close(websocket.StatusNormalClosure, "") //nolint:errcheck
-	_, _, err = client.Read(ctx)
+	_, client, ctx := proxied(t, "http://127.0.0.1:1")
+	_, _, err := client.Read(ctx)
 	var closeErr websocket.CloseError
 	if !errors.As(err, &closeErr) {
 		t.Fatalf("read error = %v, want websocket.CloseError", err)

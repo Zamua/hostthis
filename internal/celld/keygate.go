@@ -18,18 +18,12 @@ import (
 // SubnetsForIdentity asks how many networks one key is grandfathered on. Admission
 // maintains that reverse index in the Identity cell so the query stays a point read.
 type KeyGateRepo struct {
-	base   string
-	client *http.Client
+	*cell
 }
 
 func NewKeyGateRepo(base string, c *http.Client) *KeyGateRepo {
-	if c == nil {
-		c = &http.Client{Timeout: 10 * time.Second}
-	}
-	return &KeyGateRepo{base: base, client: c}
+	return &KeyGateRepo{cell: newCell(base, c)}
 }
-
-func (r *KeyGateRepo) paste() *PasteRepo { return &PasteRepo{base: r.base, client: r.client} }
 
 // AdmitNewKey records a fresh key against its subnet, or reports that it was
 // already on file.
@@ -44,7 +38,7 @@ func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitP
 		KnownAlready bool `json:"knownAlready"`
 		Admitted     bool `json:"admitted"`
 	}
-	if _, err := r.paste().call(context.Background(), http.MethodPost, "/subnet/admit", "subnet", subnet,
+	if _, err := r.call(context.Background(), http.MethodPost, "/subnet/admit", "subnet", subnet,
 		map[string]any{
 			"identity": identity, "now": now.UTC().UnixMilli(),
 			"window": window.Milliseconds(), "limit": limitPerSubnet,
@@ -55,7 +49,7 @@ func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitP
 		return false, domain.ErrTooManyNewKeys
 	}
 	if !res.KnownAlready {
-		if _, err := r.paste().call(context.Background(), http.MethodPost, "/identity/notesubnet",
+		if _, err := r.call(context.Background(), http.MethodPost, "/identity/notesubnet",
 			"scope", identity, map[string]any{"subnet": subnet, "now": now.UTC().UnixMilli()}, nil); err != nil {
 			return false, err
 		}
@@ -71,7 +65,7 @@ func (r *KeyGateRepo) SubnetSnapshot(subnet string, now time.Time, window time.D
 		OldestFirstSeen int64 `json:"oldestFirstSeen"`
 	}
 	u := fmt.Sprintf("/subnet/snapshot?now=%d&window=%d", now.UTC().UnixMilli(), window.Milliseconds())
-	if _, err := r.paste().call(context.Background(), http.MethodGet, u, "subnet", subnet, nil, &res); err != nil {
+	if _, err := r.call(context.Background(), http.MethodGet, u, "subnet", subnet, nil, &res); err != nil {
 		return 0, time.Time{}, err
 	}
 	if res.OldestFirstSeen == 0 {
@@ -86,7 +80,7 @@ func (r *KeyGateRepo) SubnetsForIdentity(identity string, now time.Time, window 
 		Count int `json:"count"`
 	}
 	u := fmt.Sprintf("/identity/subnets?now=%d&window=%d", now.UTC().UnixMilli(), window.Milliseconds())
-	if _, err := r.paste().call(context.Background(), http.MethodGet, u, "scope", identity, nil, &res); err != nil {
+	if _, err := r.call(context.Background(), http.MethodGet, u, "scope", identity, nil, &res); err != nil {
 		return 0, err
 	}
 	return res.Count, nil

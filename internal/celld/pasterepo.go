@@ -1,7 +1,6 @@
 package celld
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,10 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -34,17 +31,9 @@ import (
 // pending. The intent's exact row fingerprint lets recovery either confirm that
 // row or fence the generation in the Paste cell before releasing its charge.
 // Writing the row first would instead leave a visible, uncharged orphan.
-type PasteRepo struct {
-	base   string
-	client *http.Client
-}
+type PasteRepo struct{ *cell }
 
-func NewPasteRepo(base string, c *http.Client) *PasteRepo {
-	if c == nil {
-		c = &http.Client{Timeout: 10 * time.Second}
-	}
-	return &PasteRepo{base: base, client: c}
-}
+func NewPasteRepo(base string, c *http.Client) *PasteRepo { return &PasteRepo{newCell(base, c)} }
 
 // pasteRow is the wire and stored shape. Private so the domain type can change
 // without a stored-format migration.
@@ -109,87 +98,6 @@ func (r pasteRow) domain() domain.Paste {
 	}
 }
 
-// isCellAnswer reports whether a status is part of the adapter's vocabulary
-// rather than a failure. Kept as a list so adding a new one is a deliberate
-// edit, not a widened comparison.
-func isCellAnswer(status int) bool {
-	switch status {
-	case http.StatusNotFound, http.StatusConflict,
-		http.StatusRequestEntityTooLarge, http.StatusInsufficientStorage:
-		return true
-	}
-	return false
-}
-
-// do sends one cell request and returns the raw response; call is the usual
-// wrapper. Callers needing the body of an answer status (a 429 carrying its
-// wait) use do directly.
-func (r *PasteRepo) do(ctx context.Context, method, path, key, val string, body any) (*http.Response, error) {
-	// The routing param is MERGED rather than appended: a path may already carry
-	// query params of its own, and a second bare "?" makes the whole string one
-	// unparseable query, which presents as the cell rejecting a param that is
-	// plainly in the URL.
-	sep := "?"
-	if strings.Contains(path, "?") {
-		sep = "&"
-	}
-	u := fmt.Sprintf("%s%s%s%s=%s", r.base, path, sep, key, url.QueryEscape(val))
-	var payload []byte
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("celld: encode %s: %w", path, err)
-		}
-		payload = b
-	}
-	rdr := bytes.NewReader(payload)
-	req, err := http.NewRequestWithContext(ctx, method, u, rdr)
-	if err != nil {
-		return nil, fmt.Errorf("celld: build %s: %w", path, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("celld: %s: %w", path, err)
-	}
-	return resp, nil
-}
-
-func (r *PasteRepo) call(ctx context.Context, method, path, key, val string, body, out any) (int, error) {
-	resp, err := r.do(ctx, method, path, key, val, body)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close() //nolint:errcheck
-	// Some statuses are ANSWERS, not faults: the caller maps them to domain
-	// sentinels (not-found, slug taken, over quota, at capacity). Wrapping one
-	// as an error hides the sentinel behind a transport failure, and the caller's
-	// switch on it becomes unreachable - which is what happened to 404/409 until
-	// the owner-index suite caught it, and to 413/507 until the room suite did.
-	//
-	// A status not on this list means the cell did something the adapter does not
-	// model, which IS a fault.
-	if resp.StatusCode >= 400 && !isCellAnswer(resp.StatusCode) {
-		// Carry the cell's own explanation up. The identity cell refuses an
-		// impossible charge total and says WHICH value it refused; discarding
-		// that would trade a legible failure for a bare status code, and the
-		// number is the whole diagnostic.
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		if len(detail) > 0 {
-			return resp.StatusCode, fmt.Errorf("celld: %s: status %d: %s", path, resp.StatusCode, detail)
-		}
-		return resp.StatusCode, nil
-	}
-	// Answer statuses >= 300 carry sentinel meaning, not a decodable body: a
-	// cell 404 says "not found\n", which is no caller's JSON.
-	if out != nil && resp.StatusCode < 300 {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil && !errors.Is(err, io.EOF) {
-			return resp.StatusCode, fmt.Errorf("celld: decode %s: %w", path, err)
-		}
-	}
-	return resp.StatusCode, nil
-}
-
 // InsertWithQuotaCheck runs the three-step create described on the type.
 func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error {
 	owner := p.Identity.String()
@@ -211,7 +119,7 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 
 	// 1. Reserve. Over-quota is refused HERE, before any row exists, so a
 	//    rejected upload leaves nothing behind.
-	status, err := r.call(ctx, http.MethodPost, "/identity/reserve", "scope", owner, map[string]any{
+	if err := r.ask(ctx, "reserve", http.MethodPost, "/identity/reserve", "scope", owner, map[string]any{
 		"slug": p.Slug.String(), "generation": generation,
 		"size": p.Size, "userCap": userCap,
 		"now": now.UTC().UnixMilli(), "status": string(p.Status),
@@ -222,74 +130,49 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 			"fingerprint": fingerprint,
 			"startedAt":   now.UTC().UnixMilli(),
 		},
-	}, nil)
-	if status == http.StatusInsufficientStorage {
-		return domain.ErrOverUserQuota
-	}
-	if status == http.StatusConflict {
-		return domain.ErrSlugTaken
-	}
-	if err != nil {
+	}, nil, map[int]error{
+		http.StatusInsufficientStorage: domain.ErrOverUserQuota,
+		http.StatusConflict:            domain.ErrSlugTaken,
+	}); err != nil {
 		return err
-	}
-	if status >= 300 {
-		return fmt.Errorf("celld: reserve: unexpected status %d", status)
 	}
 
 	// 2. A lost response is ambiguous: retry the exact generation once so the
-	//    cell's same-generation replay can prove whether the row landed.
-	putBody := map[string]any{
+	//    cell's same-generation replay can prove whether the row landed. A
+	//    transport failure is NOT released: the durable intent owns resolution,
+	//    and releasing could erase a row whose success response was lost.
+	status, err := r.callArtifactMutation(ctx, "/paste/put", p.Slug, map[string]any{
 		"row": wireRow, "generation": generation, "fingerprint": fingerprint,
-	}
-	for range 2 {
-		status, err = r.call(ctx, http.MethodPost, "/paste/put", "slug", p.Slug.String(), putBody, nil)
-		if err == nil {
-			break
+	}, nil)
+	if err := answer("paste put", status, err, map[int]error{http.StatusConflict: domain.ErrSlugTaken}); err != nil {
+		if errors.Is(err, domain.ErrSlugTaken) {
+			_, _ = r.call(ctx, http.MethodPost, "/identity/release", "scope", owner,
+				map[string]any{
+					"slug": p.Slug.String(), "generation": generation, "intentId": intentID,
+				}, nil)
 		}
-	}
-	if err != nil {
-		// The durable intent owns resolution. Releasing here could erase a row
-		// whose successful response was the only thing lost.
 		return err
 	}
-	if status == http.StatusConflict {
-		_, _ = r.call(ctx, http.MethodPost, "/identity/release", "scope", owner,
-			map[string]any{
-				"slug": p.Slug.String(), "generation": generation, "intentId": intentID,
-			}, nil)
-		return domain.ErrSlugTaken
-	}
-	if status >= 300 {
-		return fmt.Errorf("celld: paste put: unexpected status %d", status)
-	}
 
-	// 3. Confirm. The intent is discharged only once the row is durable.
+	// 3. Confirm. The intent is discharged only once the row is durable. A
+	//    lost response is fine: the resolver observes the matching row and
+	//    completes the confirm.
 	status, err = r.call(ctx, http.MethodPost, "/identity/confirm", "scope", owner,
 		map[string]any{
 			"slug": p.Slug.String(), "generation": generation,
 			"status": string(p.Status), "intentId": intentID,
 		}, nil)
 	if err != nil {
-		// The resolver observes the matching row and completes the confirm.
 		return nil
 	}
-	if status >= 300 {
-		return fmt.Errorf("celld: confirm: unexpected status %d", status)
-	}
-	return nil
+	return answer("confirm", status, nil, nil)
 }
 
 func (r *PasteRepo) getRow(slug domain.Slug) (pasteRow, error) {
 	var row pasteRow
-	status, err := r.call(context.Background(), http.MethodGet, "/paste/get", "slug", slug.String(), nil, &row)
-	if err != nil {
+	if err := r.ask(context.Background(), "paste get", http.MethodGet, "/paste/get", "slug", slug.String(),
+		nil, &row, notFound); err != nil {
 		return pasteRow{}, err
-	}
-	if status == http.StatusNotFound {
-		return pasteRow{}, domain.ErrNotFound
-	}
-	if status >= 300 {
-		return pasteRow{}, fmt.Errorf("celld: paste get: unexpected status %d", status)
 	}
 	return row, nil
 }
@@ -305,17 +188,10 @@ func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
 // MarkReady advances a still-pending paste. Absent or already-settled is a
 // no-op rather than an error: a late finalizer racing the reconciler is normal.
 func (r *PasteRepo) MarkReady(paste domain.Paste) error {
-	status, err := r.call(context.Background(), http.MethodPost, "/paste/status", "slug", paste.Slug.String(),
-		map[string]any{
+	return r.ask(context.Background(), "ready transition", http.MethodPost, "/paste/status", "slug",
+		paste.Slug.String(), map[string]any{
 			"status": string(domain.PasteStatusReady), "generation": paste.Generation,
-		}, nil)
-	if err != nil {
-		return err
-	}
-	if status >= 300 {
-		return fmt.Errorf("celld: ready transition: unexpected status %d", status)
-	}
-	return nil
+		}, nil, nil)
 }
 
 // MarkFailed persists the failed row before driving its absolute allocation to
@@ -330,13 +206,7 @@ func (r *PasteRepo) MarkFailed(paste domain.Paste) error {
 			"generation": paste.Generation,
 			"opId":       "fail:" + paste.Generation,
 		}, nil)
-	if err != nil {
-		return err
-	}
-	if status >= 300 {
-		return fmt.Errorf("celld: fail accounting: unexpected status %d", status)
-	}
-	return nil
+	return answer("fail accounting", status, err, nil)
 }
 
 // SumActiveBytesByOwner reads the identity cell's maintained aggregate. A point
@@ -345,12 +215,9 @@ func (r *PasteRepo) SumActiveBytesByOwner(owner string, _ time.Time) (int, error
 	var res struct {
 		Bytes int `json:"bytes"`
 	}
-	status, err := r.call(context.Background(), http.MethodGet, "/identity/bytes", "scope", owner, nil, &res)
-	if err != nil {
+	if err := r.ask(context.Background(), "identity bytes", http.MethodGet, "/identity/bytes", "scope", owner,
+		nil, &res, nil); err != nil {
 		return 0, err
-	}
-	if status >= 300 {
-		return 0, fmt.Errorf("celld: identity bytes: unexpected status %d", status)
 	}
 	return res.Bytes, nil
 }
@@ -383,12 +250,9 @@ type ownerEntry struct {
 
 func (r *PasteRepo) ownerEntries(owner string) ([]ownerEntry, error) {
 	var out []ownerEntry
-	status, err := r.call(context.Background(), http.MethodGet, "/identity/list", "scope", owner, nil, &out)
-	if err != nil {
+	if err := r.ask(context.Background(), "identity list", http.MethodGet, "/identity/list", "scope", owner,
+		nil, &out, nil); err != nil {
 		return nil, err
-	}
-	if status >= 300 {
-		return nil, fmt.Errorf("celld: identity list: unexpected status %d", status)
 	}
 	return out, nil
 }
@@ -433,12 +297,9 @@ func (r *PasteRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 	var res struct {
 		FirstSeen int64 `json:"firstSeen"`
 	}
-	status, err := r.call(context.Background(), http.MethodGet, "/identity/firstSeen", "scope", owner, nil, &res)
-	if err != nil {
+	if err := r.ask(context.Background(), "identity firstSeen", http.MethodGet, "/identity/firstSeen", "scope",
+		owner, nil, &res, nil); err != nil {
 		return time.Time{}, err
-	}
-	if status >= 300 {
-		return time.Time{}, fmt.Errorf("celld: identity firstSeen: unexpected status %d", status)
 	}
 	if res.FirstSeen == 0 {
 		return time.Time{}, nil
@@ -499,21 +360,13 @@ func (r *PasteRepo) SetName(slug domain.Slug, name string, wantIdentity domain.I
 
 // Delete removes a paste and stops charging its owner.
 //
-// TWO cells, not three. The index entry and the quota reservation are the SAME
-// record - the identity cell stores a per-slug entry carrying the size, and the
-// charged total is the sum over those entries - so dropping the entry releases
-// the quota in one write. They cannot diverge, because there is nothing to keep
-// in step.
+// TWO cells, not three: the index entry and the quota reservation are the
+// SAME identity-cell record (a per-slug entry carrying the size, summed for
+// the charged total), so dropping the entry releases the quota in one write.
 //
-// ORDER: the row first, then the entry.
-//
-// A crash between them leaves the row gone with its index entry still present,
-// which is precisely what DropStaleOwnerEntry repairs and what the owner-index
-// conformance pins. The other order would free the owner's quota while the
-// paste still exists, letting them exceed their cap - the money-losing
-// direction, and the one no repair path is watching for. So the step that is
-// irreversible in the wrong direction goes last, where the fewest crashes can
-// reach it.
+// ORDER: the row first, then the entry. A crash between them leaves a stale
+// entry, which DropStaleOwnerEntry repairs. The other order would free quota
+// while the paste still exists, which no repair path watches for.
 func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
 	row, err := r.getRow(slug)
 	if err != nil {
@@ -719,8 +572,7 @@ func (r *PasteRepo) Unpin(slug domain.Slug, generation string) error {
 
 // setPin also updates the owner index, which renders the listing from its own
 // denormalised entry: without this the pin is honoured when serving but
-// invisible in `list`, so an owner cannot see which version their URL is stuck
-// to. Found by migrating a pinned paste and reading the listing afterwards.
+// invisible in `list`.
 func (r *PasteRepo) setPin(slug domain.Slug, generation string, ver int) error {
 	opID, err := newOpaqueID("pin")
 	if err != nil {
@@ -745,11 +597,6 @@ func (r *PasteRepo) setPin(slug domain.Slug, generation string, ver int) error {
 
 // OwnerSummary is the `whoami` view. One point read of the identity cell, which
 // already holds every entry it charges for, plus the first-seen stamp.
-//
-// SiteBytes is zero: sites are not yet on celld, so reporting anything else
-// would be inventing a number. That is a gap in the port's coverage rather than
-// a property of the backend, and it is named here so a reader does not mistake
-// an unimplemented surface for an empty one.
 func (r *PasteRepo) OwnerSummary(owner string, now time.Time) (domain.OwnerSummary, error) {
 	entries, err := r.ownerEntries(owner)
 	if err != nil {
