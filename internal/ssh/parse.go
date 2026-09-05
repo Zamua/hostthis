@@ -2,7 +2,6 @@ package ssh
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -63,8 +62,6 @@ func parseUploadFlags(argv []string) (uploadArgs, error) {
 	}
 	return out, nil
 }
-
-func parseInt(s string) (int, error) { return strconv.Atoi(s) }
 
 // humanBytes formats a byte count compactly: 540B, 1.2k, 3.8M.
 func humanBytes(n int) string {
