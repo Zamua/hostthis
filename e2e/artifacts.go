@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -101,4 +102,21 @@ func artifactsRoot(t *testing.T) string {
 		t.Fatalf("artifacts root: %v", err)
 	}
 	return filepath.Join(root, "artifacts")
+}
+
+// settle runs actions that wait on a shell, under renderTimeout rather than
+// the tab's whole budget: a stuck render then leaves a live context to
+// screenshot from, where waiting on br.Ctx would burn the budget and kill it,
+// and the blank-page case the suite exists to catch would publish a filmstrip
+// with no frames. A failure is filmed as <label>-stuck and reported with what
+// the shell left in #<elem> and the page's errors. label is a filename slug.
+func (f *Flow) settle(label, elem string, actions ...chromedp.Action) {
+	f.t.Helper()
+	ctx, cancel := context.WithTimeout(f.br.Ctx, renderTimeout)
+	defer cancel()
+	if err := chromedp.Run(ctx, actions...); err != nil {
+		f.Shot(label + "-stuck")
+		f.t.Fatalf("%s never settled: %v\n#%s: %q\npage errors: %v",
+			label, err, elem, elementText(f.br, elem), f.br.Errors())
+	}
 }

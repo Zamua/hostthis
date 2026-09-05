@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -97,6 +96,7 @@ const readDeepLink = `(() => {
 // anchor, a gutter click that cites a line in the fragment, and a #L10-L20
 // arrival that selects the range and brings it into view.
 func TestTextRender(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, textFixture(), UploadOpts{Type: "txt", Name: "text proof"})
 
@@ -106,20 +106,12 @@ func TestTextRender(t *testing.T) {
 
 	// aria-busy flips false only after the rows are appended, and the error
 	// path writes no .row at all, so the pair matches nothing but a finished
-	// render. Scoped under the browser cap so a stuck render leaves a live
-	// context to screenshot from; waiting on br.Ctx would burn the budget and
-	// kill it.
+	// render.
 	var got textRender
-	renderCtx, cancel := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancel()
-	if err := chromedp.Run(renderCtx,
+	flow.settle("render", "text",
 		chromedp.WaitVisible(`#text[aria-busy="false"] .row`, chromedp.ByQuery),
 		chromedp.Evaluate(readTextRender, &got),
-	); err != nil {
-		flow.Shot("stuck")
-		t.Fatalf("read rendered text: %v\n#text: %q\npage errors: %v",
-			err, textShellText(t, br), br.Errors())
-	}
+	)
 	flow.Shot("plain")
 
 	if got.Rows != textFixtureLines {
@@ -140,15 +132,10 @@ func TestTextRender(t *testing.T) {
 
 	// A live gutter, not a painted one: clicking line 5's number must mark the
 	// row and write the citation into the fragment.
-	selectCtx, cancelSelect := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancelSelect()
-	if err := chromedp.Run(selectCtx,
+	flow.settle("select-line-5", "text",
 		chromedp.Click("#L5 .lg-num", chromedp.ByQuery),
 		chromedp.Poll(lineSelectedJS, nil),
-	); err != nil {
-		flow.Shot("select-stuck")
-		t.Fatalf("click line 5's gutter: %v\npage errors: %v", err, br.Errors())
-	}
+	)
 	flow.Shot("line-selected")
 
 	// Through about:blank so the fragment arrives on a cross-document load,
@@ -160,17 +147,11 @@ func TestTextRender(t *testing.T) {
 	br.Open(t, paste.URL+"#L10-L20")
 
 	var dl deepLinkState
-	deepCtx, cancelDeep := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancelDeep()
-	if err := chromedp.Run(deepCtx,
+	flow.settle("deep-link", "text",
 		chromedp.WaitVisible("#text .row.lg-sel", chromedp.ByQuery),
 		chromedp.Poll(anchorSettledJS, nil),
 		chromedp.Evaluate(readDeepLink, &dl),
-	); err != nil {
-		flow.Shot("deeplink-stuck")
-		t.Fatalf("resolve #L10-L20 on arrival: %v\n#text: %q\npage errors: %v",
-			err, textShellText(t, br), br.Errors())
-	}
+	)
 	flow.Shot("deep-linked")
 
 	wantSel := []string{"10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"}
@@ -189,19 +170,4 @@ func TestTextRender(t *testing.T) {
 	}
 
 	br.AssertNoPageErrors(t)
-}
-
-// textShellText is what the text shell left on screen, for a failure message.
-func textShellText(t *testing.T, br *Browser) string {
-	t.Helper()
-	var s string
-	if err := chromedp.Run(br.Ctx,
-		chromedp.Evaluate(`(document.getElementById("text") || {}).textContent || ""`, &s),
-	); err != nil {
-		return "unreadable: " + err.Error()
-	}
-	if len(s) > 200 {
-		s = s[:200]
-	}
-	return s
 }

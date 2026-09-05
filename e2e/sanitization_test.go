@@ -102,6 +102,7 @@ var sanitizerCases = []struct {
 // HTML on hostthis' own origin, so a marked or DOMPurify bump that stops
 // stripping has to fail here.
 func TestSanitization(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	br := NewBrowser(t)
 	// The decoy image's 404 is the fixture doing its job. Scoped to that exact
@@ -109,7 +110,14 @@ func TestSanitization(t *testing.T) {
 	br.Ignore(srv.BaseURL + "/p/" + decoyImageSrc)
 	flow := NewFlow(t, br, "sanitization")
 
+	// Every paste is uploaded up front, so the finalizer works on the later
+	// ones while the browser is busy with the earlier.
 	control := srv.Upload(t, []byte(controlHTML), UploadOpts{Type: "html"})
+	pastes := make([]Paste, len(sanitizerCases))
+	for i, c := range sanitizerCases {
+		pastes[i] = srv.Upload(t, []byte(c.md), UploadOpts{Type: "md"})
+	}
+
 	br.Open(t, control.URL)
 	if err := chromedp.Run(br.Ctx, chromedp.WaitVisible("#control-end", chromedp.ByQuery)); err != nil {
 		t.Fatalf("control page never rendered: %v", err)
@@ -136,10 +144,8 @@ func TestSanitization(t *testing.T) {
 	}
 	br.AssertNoPageErrors(t)
 
-	pastes := make([]Paste, len(sanitizerCases))
 	for i, c := range sanitizerCases {
 		before := len(br.Errors())
-		pastes[i] = srv.Upload(t, []byte(c.md), UploadOpts{Type: "md"})
 		br.Open(t, pastes[i].URL)
 		if err := chromedp.Run(br.Ctx,
 			chromedp.WaitVisible(fixtureEndSel, chromedp.ByQuery),
@@ -164,43 +170,39 @@ func TestSanitization(t *testing.T) {
 	// to load-bearing without anyone noticing.
 	assertShellCSP(t, pastes[0].URL)
 
-	assertRawIsNotMarkup(t, srv, br, flow, pastes)
+	assertRawIsNotMarkup(t, srv, br, flow, pastes[0])
 }
 
 // assertRawIsNotMarkup covers the second door onto the same untrusted bytes.
 // ?raw serves the payload unrendered; served as a type the browser parses as
-// markup it executes exactly what the shell path strips.
-func assertRawIsNotMarkup(t *testing.T, srv *Server, br *Browser, flow *Flow, pastes []Paste) {
+// markup it executes exactly what the shell path strips. One paste stands for
+// all: the raw Content-Type is set by kind, not by content.
+func assertRawIsNotMarkup(t *testing.T, srv *Server, br *Browser, flow *Flow, p Paste) {
 	t.Helper()
-	for i, p := range pastes {
-		label := sanitizerCases[i].label
-		// A header read cannot ride the loading page's meta refresh the way a
-		// browser assertion does, so the paste has to be ready first.
-		srv.WaitReady(t, p)
-		resp, err := http.Get(p.URL + "?raw=1")
-		if err != nil {
-			t.Errorf("%s: raw fetch: %v", label, err)
-			continue
-		}
-		ct := resp.Header.Get("Content-Type")
-		code := resp.StatusCode
-		_ = resp.Body.Close()
-		if code != http.StatusOK {
-			t.Errorf("%s: raw returned %d", label, code)
-			continue
-		}
-		if ct == "" {
-			t.Errorf("%s: raw carries no Content-Type, leaving the browser to sniff one", label)
-			continue
-		}
+	// A header read cannot ride the loading page's meta refresh the way a
+	// browser assertion does, so the paste has to be ready first.
+	srv.WaitReady(t, p)
+	resp, err := http.Get(p.URL + "?raw=1")
+	if err != nil {
+		t.Fatalf("raw fetch: %v", err)
+	}
+	ct := resp.Header.Get("Content-Type")
+	code := resp.StatusCode
+	_ = resp.Body.Close()
+	switch {
+	case code != http.StatusOK:
+		t.Errorf("raw returned %d", code)
+	case ct == "":
+		t.Errorf("raw carries no Content-Type, leaving the browser to sniff one")
+	default:
 		if markup := markupType(ct); markup != "" {
-			t.Errorf("%s: raw served as %q, which a browser parses as markup and executes", label, markup)
+			t.Errorf("raw served as %q, which a browser parses as markup and executes", markup)
 		}
 	}
 
 	// What the header claims and what the browser concluded are different
 	// facts: a type the browser overrides by sniffing is still a live payload.
-	raw := pastes[0].URL + "?raw=1"
+	raw := p.URL + "?raw=1"
 	br.Open(t, raw)
 	waitSettled(t, br)
 	flow.Shot("raw-served-as-text")

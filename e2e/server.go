@@ -41,29 +41,75 @@ type Server struct {
 
 	signer xssh.Signer
 	logs   *syncBuffer
+
+	cmd     *exec.Cmd
+	done    chan struct{}
+	dataDir string
 }
 
-// StartServer builds and starts hostthisd, waits until it serves, and stops it
-// when the test ends. Ports are ephemeral and the data dir is per-test, so
-// parallel tests never collide.
+var (
+	serverOnce sync.Once
+	shared     *Server
+	sharedErr  error
+)
+
+// StartServer returns the one hostthisd the whole package shares, starting it
+// on first call. Every test uploads to the same daemon; slugs are unique, so
+// the data dir and the metadata backend are never contended for the same
+// paste. A failed test logs the daemon's output, which is shared too.
 func StartServer(t *testing.T) *Server {
 	t.Helper()
+	serverOnce.Do(func() { shared, sharedErr = startServer() })
+	if sharedErr != nil {
+		t.Fatalf("start daemon: %v", sharedErr)
+	}
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("hostthisd log:\n%s", shared.logs.String())
+		}
+	})
+	return shared
+}
 
+// stopSharedServer signals the daemon and removes its data dir. TestMain
+// calls it after every test has run.
+func stopSharedServer() {
+	if shared == nil {
+		return
+	}
+	shared.stop()
+	_ = os.RemoveAll(shared.dataDir)
+}
+
+// startServer builds and starts hostthisd and waits until it serves.
+func startServer() (*Server, error) {
 	bin, err := buildDaemon()
 	if err != nil {
-		t.Fatalf("build daemon: %v", err)
+		return nil, fmt.Errorf("build daemon: %w", err)
 	}
 	root, err := repoRoot()
 	if err != nil {
-		t.Fatalf("repo root: %v", err)
+		return nil, fmt.Errorf("repo root: %w", err)
+	}
+	signer, err := newSigner()
+	if err != nil {
+		return nil, err
+	}
+	dataDir, err := os.MkdirTemp("", "hostthis-e2e-data")
+	if err != nil {
+		return nil, err
 	}
 
 	// 127.0.0.1 rather than localhost for the apex: the apex is also the Host
 	// the browser sends, and localhost can resolve to ::1 while the daemon
 	// listens on v4 only.
-	httpAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
-	sshAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
-	metricsAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	ports, err := freePorts(3)
+	if err != nil {
+		return nil, err
+	}
+	httpAddr := fmt.Sprintf("127.0.0.1:%d", ports[0])
+	sshAddr := fmt.Sprintf("127.0.0.1:%d", ports[1])
+	metricsAddr := fmt.Sprintf("127.0.0.1:%d", ports[2])
 
 	logs := &syncBuffer{}
 	cmd := exec.Command(bin)
@@ -75,72 +121,70 @@ func StartServer(t *testing.T) *Server {
 		"HOSTTHIS_HTTP_ADDR="+httpAddr,
 		"HOSTTHIS_SSH_ADDR="+sshAddr,
 		"HOSTTHIS_METRICS_ADDR="+metricsAddr,
-		"HOSTTHIS_DATA_DIR="+t.TempDir(),
+		"HOSTTHIS_DATA_DIR="+dataDir,
 		"HOSTTHIS_LANDING="+filepath.Join(root, "web", "landing.html"),
 	)
 	cmd.Stdout = logs
 	cmd.Stderr = logs
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("start daemon: %v", err)
+		return nil, fmt.Errorf("start daemon: %w", err)
 	}
 
-	// Registered before the stop cleanup, so it runs after it and prints a log
-	// that already has the shutdown lines in it.
-	t.Cleanup(func() {
-		if t.Failed() {
-			t.Logf("hostthisd log:\n%s", logs.String())
-		}
-	})
-
-	// Closed, not sent on: both the readiness wait and the stop cleanup need to
-	// observe the exit, and a value would only reach whichever read it first.
+	// Closed, not sent on: both the readiness wait and stop need to observe
+	// the exit, and a value would only reach whichever read it first.
 	done := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(done) }()
-
-	t.Cleanup(func() {
-		select {
-		case <-done:
-			return
-		default:
-		}
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		select {
-		case <-done:
-		case <-time.After(stopTimeout):
-			_ = cmd.Process.Kill()
-			<-done
-		}
-	})
 
 	s := &Server{
 		BaseURL: "http://" + httpAddr,
 		SSHAddr: sshAddr,
-		signer:  newSigner(t),
+		signer:  signer,
 		logs:    logs,
+		cmd:     cmd,
+		done:    done,
+		dataDir: dataDir,
 	}
-	s.waitReady(t, done)
-	return s
+	if err := s.waitReady(); err != nil {
+		s.stop()
+		return nil, err
+	}
+	return s, nil
+}
+
+// stop sends SIGTERM and kills the process if it ignores it.
+func (s *Server) stop() {
+	select {
+	case <-s.done:
+		return
+	default:
+	}
+	_ = s.cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-s.done:
+	case <-time.After(stopTimeout):
+		_ = s.cmd.Process.Kill()
+		<-s.done
+	}
 }
 
 // waitReady blocks until BOTH listeners are up. The two bind independently and
 // /healthz answers first, so waiting on http alone hands back a server whose
 // ssh port still refuses the upload that follows. An early exit is reported as
 // itself, so a config error reads as one instead of as a timeout.
-func (s *Server) waitReady(t *testing.T, done <-chan struct{}) {
-	t.Helper()
+func (s *Server) waitReady() error {
 	deadline := time.Now().Add(readyTimeout)
 	for time.Now().Before(deadline) {
 		select {
-		case <-done:
-			t.Fatalf("hostthisd exited before serving\n%s", s.logs.String())
+		case <-s.done:
+			return fmt.Errorf("hostthisd exited before serving\n%s", s.logs.String())
 		default:
 		}
 		if s.httpUp() && s.sshUp() {
-			return
+			return nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("hostthisd did not serve http+ssh within %s\n%s", readyTimeout, s.logs.String())
+	return fmt.Errorf("hostthisd did not serve http+ssh within %s\n%s", readyTimeout, s.logs.String())
 }
 
 func (s *Server) httpUp() bool {
@@ -276,32 +320,35 @@ func slugFromURL(raw string) (string, error) {
 	return slug, nil
 }
 
-// newSigner mints the identity every upload from one server uses. Reusing it
+// newSigner mints the identity every upload uses. One key for the suite
 // keeps the per-subnet fresh-key gate from being spent a slot per paste.
-func newSigner(t *testing.T) xssh.Signer {
-	t.Helper()
+func newSigner() (xssh.Signer, error) {
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatalf("generate key: %v", err)
+		return nil, fmt.Errorf("generate key: %w", err)
 	}
 	signer, err := xssh.NewSignerFromKey(priv)
 	if err != nil {
-		t.Fatalf("signer: %v", err)
+		return nil, fmt.Errorf("signer: %w", err)
 	}
-	return signer
+	return signer, nil
 }
 
-// freePort reserves an ephemeral port and releases it for the daemon to bind.
-// The gap is a race no OS API closes short of passing the listener into the
-// child, which is not worth the coupling.
-func freePort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve port: %v", err)
+// freePorts reserves n ephemeral ports and releases them for the daemon to
+// bind. The gap is a race no OS API closes short of passing the listeners into
+// the child, which is not worth the coupling. All n are held before any is
+// released, so the kernel cannot hand the same port out twice.
+func freePorts(n int) ([]int, error) {
+	ports := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, fmt.Errorf("reserve port: %w", err)
+		}
+		defer ln.Close() //nolint:errcheck
+		ports = append(ports, ln.Addr().(*net.TCPAddr).Port)
 	}
-	defer ln.Close() //nolint:errcheck
-	return ln.Addr().(*net.TCPAddr).Port
+	return ports, nil
 }
 
 var (

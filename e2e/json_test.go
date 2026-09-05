@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"context"
 	"reflect"
 	"slices"
 	"strings"
@@ -90,6 +89,7 @@ const readJSONSQLResult = `(() => {
 // live filter, and its SQL console loads the paste through read_json_auto,
 // where a numeric ORDER BY proves score was typed as a number rather than text.
 func TestJSONRender(t *testing.T) {
+	t.Parallel()
 	srv := StartServer(t)
 	paste := srv.Upload(t, []byte(jsonFixture), UploadOpts{Type: "json", Name: "json proof"})
 
@@ -99,21 +99,14 @@ func TestJSONRender(t *testing.T) {
 
 	// Both outcomes end the shell's work: renderTree is the only producer of
 	// .tree and the boot failure path is the only producer of .err, while the
-	// unrendered page holds a lone div.status. Scoped under the browser cap so
-	// a stuck render leaves a live context to screenshot from.
+	// unrendered page holds a lone div.status.
 	var tree *jsonTree
 	var shellErr string
-	renderCtx, cancel := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancel()
-	if err := chromedp.Run(renderCtx,
+	flow.settle("render", "content",
 		chromedp.WaitVisible(`#content .tree, #content .err`, chromedp.ByQuery),
 		chromedp.Evaluate(`(document.querySelector("#content .err") || {}).textContent || ""`, &shellErr),
 		chromedp.Evaluate(readJSONTree, &tree),
-	); err != nil {
-		flow.Shot("stuck")
-		t.Fatalf("shell settled on neither a tree nor an error: %v\n#content: %q\npage errors: %v",
-			err, contentText(t, br), br.Errors())
-	}
+	)
 	flow.Shot("tree")
 
 	if shellErr != "" {
@@ -152,36 +145,25 @@ func TestJSONRender(t *testing.T) {
 	// The filter rebuilds the tree per keystroke, marks the match, and reports
 	// the hit count, so a viewer that painted once and died fails here.
 	var marks []string
-	filterCtx, cancelFilter := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancelFilter()
-	if err := chromedp.Run(filterCtx,
+	flow.settle("filter", "content",
 		chromedp.SendKeys("#filter", "charlie", chromedp.ByQuery),
 		chromedp.Poll(filterHitJS, nil),
 		chromedp.Evaluate(`[...document.querySelectorAll("#content mark")].map((e) => e.textContent)`, &marks),
-	); err != nil {
-		flow.Shot("stuck-filter")
-		t.Fatalf("filter never reported its match: %v\n#content: %q\npage errors: %v",
-			err, contentText(t, br), br.Errors())
-	}
+	)
 	flow.Shot("filter-charlie")
 	if want := []string{"charlie"}; !slices.Equal(marks, want) {
 		t.Errorf("filter marks = %q, want %q", marks, want)
 	}
 
 	// The console's editor mounts asynchronously after the click.
-	consoleCtx, cancelConsole := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancelConsole()
-	if err := chromedp.Run(consoleCtx,
+	flow.settle("open-console", "content",
 		chromedp.Click("#sqlbtn", chromedp.ByQuery),
 		chromedp.WaitVisible("#editor .cm-content", chromedp.ByQuery),
 		chromedp.SendKeys("#editor .cm-content", sortQuery, chromedp.ByQuery),
 		// Escape closes the completion popup so it cannot sit over the Run
 		// button when the click lands.
 		chromedp.KeyEvent(kb.Escape),
-	); err != nil {
-		flow.Shot("stuck-console")
-		t.Fatalf("open sql console: %v\npage errors: %v", err, br.Errors())
-	}
+	)
 
 	// The keystrokes went through CodeMirror, so what the editor holds is what
 	// Run will execute; checking it first makes a mistyped query fail as one.
@@ -199,17 +181,11 @@ func TestJSONRender(t *testing.T) {
 
 	// The first run also fetches and instantiates duckdb, all served locally.
 	var res jsonSQLResult
-	resultCtx, cancelResult := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancelResult()
-	if err := chromedp.Run(resultCtx,
+	flow.settle("sql-run", "content",
 		chromedp.Click("#run", chromedp.ByQuery),
 		chromedp.WaitVisible(`#content table, #content .err`, chromedp.ByQuery),
 		chromedp.Evaluate(readJSONSQLResult, &res),
-	); err != nil {
-		flow.Shot("stuck-result")
-		t.Fatalf("sql run settled on neither a result nor an error: %v\n#content: %q\npage errors: %v",
-			err, contentText(t, br), br.Errors())
-	}
+	)
 	flow.Shot("result-sorted")
 
 	if res.Err != "" {
