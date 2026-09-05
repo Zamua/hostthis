@@ -360,21 +360,13 @@ func (r *PasteRepo) SetName(slug domain.Slug, name string, wantIdentity domain.I
 
 // Delete removes a paste and stops charging its owner.
 //
-// TWO cells, not three. The index entry and the quota reservation are the SAME
-// record - the identity cell stores a per-slug entry carrying the size, and the
-// charged total is the sum over those entries - so dropping the entry releases
-// the quota in one write. They cannot diverge, because there is nothing to keep
-// in step.
+// TWO cells, not three: the index entry and the quota reservation are the
+// SAME identity-cell record (a per-slug entry carrying the size, summed for
+// the charged total), so dropping the entry releases the quota in one write.
 //
-// ORDER: the row first, then the entry.
-//
-// A crash between them leaves the row gone with its index entry still present,
-// which is precisely what DropStaleOwnerEntry repairs and what the owner-index
-// conformance pins. The other order would free the owner's quota while the
-// paste still exists, letting them exceed their cap - the money-losing
-// direction, and the one no repair path is watching for. So the step that is
-// irreversible in the wrong direction goes last, where the fewest crashes can
-// reach it.
+// ORDER: the row first, then the entry. A crash between them leaves a stale
+// entry, which DropStaleOwnerEntry repairs. The other order would free quota
+// while the paste still exists, which no repair path watches for.
 func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
 	row, err := r.getRow(slug)
 	if err != nil {
@@ -580,8 +572,7 @@ func (r *PasteRepo) Unpin(slug domain.Slug, generation string) error {
 
 // setPin also updates the owner index, which renders the listing from its own
 // denormalised entry: without this the pin is honoured when serving but
-// invisible in `list`, so an owner cannot see which version their URL is stuck
-// to. Found by migrating a pinned paste and reading the listing afterwards.
+// invisible in `list`.
 func (r *PasteRepo) setPin(slug domain.Slug, generation string, ver int) error {
 	opID, err := newOpaqueID("pin")
 	if err != nil {
@@ -606,11 +597,6 @@ func (r *PasteRepo) setPin(slug domain.Slug, generation string, ver int) error {
 
 // OwnerSummary is the `whoami` view. One point read of the identity cell, which
 // already holds every entry it charges for, plus the first-seen stamp.
-//
-// SiteBytes is zero: sites are not yet on celld, so reporting anything else
-// would be inventing a number. That is a gap in the port's coverage rather than
-// a property of the backend, and it is named here so a reader does not mistake
-// an unimplemented surface for an empty one.
 func (r *PasteRepo) OwnerSummary(owner string, now time.Time) (domain.OwnerSummary, error) {
 	entries, err := r.ownerEntries(owner)
 	if err != nil {

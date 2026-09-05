@@ -81,14 +81,9 @@ func (c *cell) call(ctx context.Context, method, path, key, val string, body, ou
 		return 0, err
 	}
 	defer resp.Body.Close() //nolint:errcheck
-	// Some statuses are ANSWERS, not faults: the caller maps them to domain
-	// sentinels (not-found, slug taken, over quota, at capacity). Wrapping one
-	// as an error hides the sentinel behind a transport failure, and the caller's
-	// switch on it becomes unreachable - which is what happened to 404/409 until
-	// the owner-index suite caught it, and to 413/507 until the room suite did.
-	//
-	// A status not on this list means the cell did something the adapter does not
-	// model, which IS a fault.
+	// Answer statuses are returned, never wrapped: wrapping one as an error
+	// would hide the sentinel behind a transport failure. A status off the
+	// list is a fault: the cell did something the adapter does not model.
 	if resp.StatusCode >= 400 && !isCellAnswer(resp.StatusCode) {
 		// Carry the cell's own explanation up. The identity cell refuses an
 		// impossible charge total and says WHICH value it refused; discarding
