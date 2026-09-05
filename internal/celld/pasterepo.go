@@ -495,8 +495,7 @@ func (r *PasteRepo) DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, e
 // deliberately.
 func (r *PasteRepo) SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
 	var res struct {
-		Changed bool   `json:"changed"`
-		Reason  string `json:"reason"`
+		Changed bool `json:"changed"`
 	}
 	if _, err := r.call(context.Background(), http.MethodPost, "/paste/rename", "slug", slug.String(),
 		map[string]any{
@@ -506,10 +505,8 @@ func (r *PasteRepo) SetName(slug domain.Slug, name string, wantIdentity domain.I
 		return err
 	}
 	if !res.Changed {
-		if res.Reason == "absent" {
-			return domain.ErrNotFound
-		}
-		return domain.ErrNotFound // a foreign or re-minted slug is not this owner's paste
+		// Absent, foreign and re-minted slugs all read as not this owner's paste.
+		return domain.ErrNotFound
 	}
 	return nil
 }
