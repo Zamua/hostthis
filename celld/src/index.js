@@ -54,21 +54,6 @@ function toRow(body) {
   };
 }
 
-function fromRow(id, scope, row) {
-  return {
-    id,
-    scope,
-    kind: row.kind,
-    subject: row.subject,
-    reached: row.reached ?? [],
-    guard: row.guard ?? "",
-    generation: row.generation ?? "",
-    status: row.status ?? "",
-    fingerprint: row.fingerprint ?? "",
-    startedAt: row.startedAt ?? 0,
-  };
-}
-
 // The Identity cell owns the state that must agree for one owner: outstanding
 // intents, quota reservations, and the paste index. Every mutating request uses
 // blockConcurrencyWhile so its read-check-write sequence cannot interleave.
@@ -80,12 +65,9 @@ export class Identity {
 
   async fetch(request) {
     const url = new URL(request.url);
-    const scope = url.searchParams.get("scope") ?? "";
     const op = url.pathname.split("/").pop();
 
     switch (op) {
-      case "outstanding":
-        return this.outstanding(scope);
       case "bytes":
         return this.bytes();
       case "list":
@@ -95,12 +77,6 @@ export class Identity {
     }
     return this.state.blockConcurrencyWhile(async () => {
       switch (op) {
-        case "begin":
-          return this.begin(await request.json());
-        case "advance":
-          return this.advance(await request.json());
-        case "complete":
-          return this.complete(await request.json());
         case "reserve":
           return this.reserve(await request.json());
         case "release":
@@ -109,8 +85,6 @@ export class Identity {
           return this.confirm(await request.json());
         case "drop":
           return this.drop(await request.json());
-        case "touch":
-          return this.touch(await request.json());
         case "artifactseed":
           return this.artifactSeed(await request.json());
         case "artifactdecide":
@@ -128,35 +102,6 @@ export class Identity {
           return new Response("unknown op\n", { status: 404 });
       }
     });
-  }
-
-  // Recording the same id twice must converge on ONE intent rather than
-  // accumulate, which is why the id is the key and not a generated one.
-  async begin(body) {
-    await this.state.storage.put(intentKey(body.id), toRow(body));
-    return new Response(null, { status: 204 });
-  }
-
-  // Advancing past a step already recorded is a no-op, and advancing an intent
-  // that is already complete is a race rather than a fault.
-  async advance(body) {
-    const key = intentKey(body.id);
-    const row = await this.state.storage.get(key);
-    if (row === undefined || row === null) {
-      return new Response(null, { status: 204 });
-    }
-    if (!row.reached.includes(body.step)) {
-      row.reached = [...row.reached, body.step];
-      await this.state.storage.put(key, row);
-    }
-    return new Response(null, { status: 204 });
-  }
-
-  // Forgetting an intent twice is normal when two resolvers race, so a missing
-  // key is success.
-  async complete(body) {
-    await this.state.storage.delete(intentKey(body.id));
-    return new Response(null, { status: 204 });
   }
 
   // Quota admission, reservation, and intent creation must commit as one local
@@ -439,29 +384,6 @@ export class Identity {
     return Response.json({ dropped: had });
   }
 
-  // Mutable fields are duplicated into the owner index so listing remains a
-  // point read. Every mutation must update both cells or the listing goes stale.
-  async touch(body) {
-    const entries = (await this.state.storage.get("entries")) ?? {};
-    const e = entries[body.slug];
-    if (!e) {
-      return Response.json({ updated: false });
-    }
-    if (body.generation && e.generation && body.generation !== e.generation) {
-      return Response.json({ updated: false, reason: "generation-mismatch" }, { status: 409 });
-    }
-    if (body.at !== undefined && body.at !== null) {
-      e.updatedAt = body.at;
-    }
-    for (const k of ["name", "status", "kind", "latestVersion", "pinnedVersion", "servedSize", "contentSha"]) {
-      if (body[k] !== undefined && body[k] !== null) {
-        e[k] = body[k];
-      }
-    }
-    await this.state.storage.put("entries", entries);
-    return Response.json({ updated: true });
-  }
-
   async artifactSeed(body) {
     if (typeof body.slug !== "string" || !body.slug ||
         typeof body.generation !== "string" || !body.generation ||
@@ -661,19 +583,6 @@ export class Identity {
       await this.state.storage.put("subnets", subnets);
     }
     return Response.json({ count: n });
-  }
-
-  // The ONLY intent read, and it is scope-bounded by construction: a cell cannot see
-  // another scope's storage, so the property the KV backend has to maintain by
-  // key layout is structural here.
-  async outstanding(scope) {
-    const stored = await this.state.storage.list({ prefix: INTENT_PREFIX });
-    const out = [];
-    for (const [key, row] of stored) {
-      out.push(fromRow(key.slice(INTENT_PREFIX.length), scope, row));
-    }
-    out.sort((a, b) => a.startedAt - b.startedAt);
-    return Response.json(out);
   }
 }
 
@@ -1106,12 +1015,7 @@ export class Room {
     const url = new URL(request.url);
     const op = url.pathname.split("/").pop();
     if (op === "count") {
-      return Response.json({
-        sockets: this.state.getWebSockets().length,
-        // Survives hibernation, so a non-zero value after a move proves the
-        // cell was restored rather than freshly created.
-        seen: (await this.state.storage.get("seen")) ?? 0,
-      });
+      return Response.json({ sockets: this.state.getWebSockets().length });
     }
     switch (op) {
       case "create":
@@ -1760,12 +1664,6 @@ export class Room {
         // reaped by the runtime
       }
     }
-  }
-
-  async webSocketClose(ws, code, reason, wasClean) {
-    // Recorded so a client-side close code can be checked against what the
-    // cell believed happened.
-    await this.state.storage.put("lastClose", { code, reason, wasClean });
   }
 }
 
@@ -2861,7 +2759,7 @@ export default {
       }
       return env.PASTES.get(env.PASTES.idFromName(slug)).fetch(request);
     }
-    if (!url.pathname.startsWith("/intents/") && !url.pathname.startsWith("/identity/")) {
+    if (!url.pathname.startsWith("/identity/")) {
       return new Response("not found\n", { status: 404 });
     }
     const scope = url.searchParams.get("scope");
