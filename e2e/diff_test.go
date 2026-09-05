@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"slices"
@@ -90,18 +89,10 @@ func TestDiffRender(t *testing.T) {
 
 	// aria-busy starts true in the static shell and flips to false only when
 	// the renderer finished or the fetch failed, so waiting on it reports a
-	// failed load through the assertions below instead of as a timeout. Scoped
-	// under the browser cap so a stuck render leaves a live context to
-	// screenshot from; waiting on br.Ctx would burn the budget and kill it.
-	renderCtx, cancel := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancel()
-	if err := chromedp.Run(renderCtx,
+	// failed load through the assertions below instead of as a timeout.
+	flow.settle("render", "diff",
 		chromedp.WaitVisible(`#diff[aria-busy="false"]`, chromedp.ByQuery),
-	); err != nil {
-		flow.Shot("stuck")
-		t.Fatalf("diff shell never settled: %v\n#diff: %q\npage errors: %v",
-			err, diffShellText(t, br), br.Errors())
-	}
+	)
 	flow.Shot("line-by-line")
 
 	var (
@@ -119,7 +110,7 @@ func TestDiffRender(t *testing.T) {
 	}
 
 	if want := []string{"greet.go", "greet_test.go"}; !slices.Equal(fileNames, want) {
-		t.Fatalf("file blocks = %q, want %q\n#diff: %q", fileNames, want, diffShellText(t, br))
+		t.Fatalf("file blocks = %q, want %q\n#diff: %q", fileNames, want, elementText(br, "diff"))
 	}
 	if insCount != 4 || delCount != 2 {
 		t.Errorf("rendered %d added and %d removed line(s), want 4 and 2", insCount, delCount)
@@ -138,17 +129,12 @@ func TestDiffRender(t *testing.T) {
 	// timeout here rather than as a count mismatch.
 	var sideAfter int
 	var sidePressed bool
-	toggleCtx, cancelToggle := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancelToggle()
-	if err := chromedp.Run(toggleCtx,
+	flow.settle("side-by-side", "diff",
 		chromedp.Click("#btn-side", chromedp.ByQuery),
 		chromedp.Poll(sideBySideCountJS+" > 0", nil),
 		chromedp.Evaluate(sideBySideCountJS, &sideAfter),
 		chromedp.Evaluate(sidePressedJS, &sidePressed),
-	); err != nil {
-		flow.Shot("stuck")
-		t.Fatalf("side-by-side toggle never re-rendered: %v\npage errors: %v", err, br.Errors())
-	}
+	)
 	flow.Shot("side-by-side")
 
 	if sideAfter != 4 {
@@ -159,21 +145,6 @@ func TestDiffRender(t *testing.T) {
 	}
 
 	br.AssertNoPageErrors(t)
-}
-
-// diffShellText is what the shell left in #diff, for a failure message.
-func diffShellText(t *testing.T, br *Browser) string {
-	t.Helper()
-	var s string
-	if err := chromedp.Run(br.Ctx,
-		chromedp.Evaluate(`(document.getElementById("diff") || {}).textContent || ""`, &s),
-	); err != nil {
-		return "unreadable: " + err.Error()
-	}
-	if len(s) > 200 {
-		s = s[:200]
-	}
-	return s
 }
 
 // fetchBody reads a paste page over plain http, for assertions on which shell

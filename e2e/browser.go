@@ -260,3 +260,18 @@ func consoleText(args []*runtime.RemoteObject) string {
 	}
 	return strings.Join(parts, " ")
 }
+
+// elementText is what a shell left in the element with the given id, for a
+// failure message.
+func elementText(b *Browser, id string) string {
+	var s string
+	if err := chromedp.Run(b.Ctx,
+		chromedp.Evaluate(`(document.getElementById("`+id+`") || {}).textContent || ""`, &s),
+	); err != nil {
+		return "unreadable: " + err.Error()
+	}
+	if len(s) > 200 {
+		s = s[:200]
+	}
+	return s
+}

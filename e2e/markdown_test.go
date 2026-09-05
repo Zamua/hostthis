@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"context"
 	"reflect"
 	"strings"
 	"testing"
@@ -88,21 +87,11 @@ func TestMarkdownRender(t *testing.T) {
 
 	// The document arrives in one innerHTML assignment and heading ids are added
 	// after it, so an anchored h1 means every other block is already in the DOM.
-	// Scoped under the browser cap so a stuck render leaves a live context to
-	// screenshot from. Waiting on br.Ctx directly would burn the whole budget
-	// and then kill the context, so the blank-page case this test exists to
-	// catch would publish a filmstrip with no frames.
 	var got markdownRender
-	renderCtx, cancel := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancel()
-	if err := chromedp.Run(renderCtx,
+	flow.settle("render", "content",
 		chromedp.WaitVisible("#content h1.anchored", chromedp.ByQuery),
 		chromedp.Evaluate(readMarkdownRender, &got),
-	); err != nil {
-		flow.Shot("stuck")
-		t.Fatalf("read rendered markdown: %v\n#content: %q\npage errors: %v",
-			err, contentText(t, br), br.Errors())
-	}
+	)
 	flow.Shot("rendered")
 
 	if got.Heading != "Renderer proof" {

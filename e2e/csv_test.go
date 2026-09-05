@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"context"
 	"slices"
 	"testing"
 
@@ -58,11 +57,7 @@ func TestCSVRender(t *testing.T) {
 	var cols []string
 	var scoreType, summary string
 	var sourceOrder []string
-	// Scoped under the browser cap so a stuck render leaves a live context to
-	// screenshot from; waiting on br.Ctx would burn the budget and kill it.
-	renderCtx, cancel := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancel()
-	if err := chromedp.Run(renderCtx,
+	flow.settle("render", "content",
 		// The table is built detached and attached in one statement, so a
 		// queryable table is a finished one.
 		chromedp.WaitVisible(`#content table`, chromedp.ByQuery),
@@ -70,9 +65,7 @@ func TestCSVRender(t *testing.T) {
 		chromedp.Evaluate(rowOrderJS, &sourceOrder),
 		chromedp.Evaluate(textContentJS(scoreHeader+" .type"), &scoreType),
 		chromedp.Evaluate(textContentJS("#summary"), &summary),
-	); err != nil {
-		t.Fatalf("wait for rendered table: %v", err)
-	}
+	)
 	flow.Shot("table")
 
 	if want := []string{"name", "score", "region"}; !slices.Equal(cols, want) {
@@ -90,15 +83,13 @@ func TestCSVRender(t *testing.T) {
 	}
 
 	var sortedOrder []string
-	if err := chromedp.Run(br.Ctx,
+	flow.settle("sort", "content",
 		chromedp.Click(scoreHeader, chromedp.ByQuery),
 		// Waiting on the header's own indicator, so a click that never reached
 		// the handler fails as a timeout here rather than as an order mismatch.
 		chromedp.Poll(sortedIndicatorJS, nil),
 		chromedp.Evaluate(rowOrderJS, &sortedOrder),
-	); err != nil {
-		t.Fatalf("sort by score: %v", err)
-	}
+	)
 	flow.Shot("sorted-by-score")
 
 	if slices.Equal(sortedOrder, sourceOrder) {

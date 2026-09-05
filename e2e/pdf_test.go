@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -90,19 +89,11 @@ func TestPDFRender(t *testing.T) {
 	flow := NewFlow(t, br, "pdf-render")
 	br.Open(t, paste.URL)
 
-	// Scoped under the browser cap so a stuck render leaves a live context to
-	// screenshot from; waiting on br.Ctx would burn the budget and kill it.
-	renderCtx, cancel := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancel()
 	var got pdfRender
-	if err := chromedp.Run(renderCtx,
+	flow.settle("render", "content",
 		chromedp.Poll(pdfSettledJS, nil),
 		chromedp.Evaluate(readPDFRender, &got),
-	); err != nil {
-		flow.Shot("stuck")
-		t.Fatalf("shell settled on neither a page nor an error: %v\n#content: %q\npage errors: %v",
-			err, contentText(t, br), br.Errors())
-	}
+	)
 	flow.Shot("rendered")
 
 	if got.Err != "" {
@@ -138,16 +129,11 @@ func TestPDFRender(t *testing.T) {
 	// Both clipboard outcomes end in a flash, so the .on class is deterministic
 	// while a dead handler times out here instead of passing vacuously.
 	var flashed string
-	copyCtx, cancelCopy := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancelCopy()
-	if err := chromedp.Run(copyCtx,
+	flow.settle("copy-link", "copied",
 		chromedp.Click("#pos", chromedp.ByQuery),
 		chromedp.Poll(`document.getElementById("copied").classList.contains("on")`, nil),
 		chromedp.Evaluate(`document.getElementById("copied").textContent`, &flashed),
-	); err != nil {
-		flow.Shot("copy-stuck")
-		t.Fatalf("copy-link control never flashed: %v\npage errors: %v", err, br.Errors())
-	}
+	)
 	flow.Shot("copy-flash")
 
 	if flashed != "link copied" && flashed != "link is in the address bar" {

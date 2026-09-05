@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"context"
 	"math"
 	"slices"
 	"testing"
@@ -74,19 +73,11 @@ func TestFlamegraphRender(t *testing.T) {
 	flow := NewFlow(t, br, "flamegraph-render")
 	br.Open(t, paste.URL)
 
-	// Scoped under the browser cap so a stuck render leaves a live context to
-	// screenshot from; waiting on br.Ctx would burn the budget and kill it.
 	var got flameState
-	renderCtx, cancel := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancel()
-	if err := chromedp.Run(renderCtx,
+	flow.settle("render", "flame",
 		chromedp.WaitReady(flameSettled, chromedp.ByQuery),
 		chromedp.Evaluate(probeFlame, &got),
-	); err != nil {
-		flow.Shot("stuck")
-		t.Fatalf("flame shell never settled: %v\n#flame: %q\npage errors: %v",
-			err, flameText(t, br), br.Errors())
-	}
+	)
 	flow.Shot("initial")
 
 	if len(got.Frames) == 0 {
@@ -126,17 +117,11 @@ func TestFlamegraphRender(t *testing.T) {
 	// where flushBuffers exists but is not chain context, so a click that never
 	// reached the handler fails here rather than as a stale probe.
 	var zoomed flameState
-	zoomCtx, cancelZoom := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancelZoom()
-	if err := chromedp.Run(zoomCtx,
+	flow.settle("zoom", "flame",
 		chromedp.Click(`#flame .fr[data-name="flushBuffers"]`, chromedp.ByQuery),
 		chromedp.WaitReady(`#flame .fr.chain[data-name="flushBuffers"]`, chromedp.ByQuery),
 		chromedp.Evaluate(probeFlame, &zoomed),
-	); err != nil {
-		flow.Shot("stuck-zoom")
-		t.Fatalf("zoom into flushBuffers: %v\n#flame: %q\npage errors: %v",
-			err, flameText(t, br), br.Errors())
-	}
+	)
 	flow.Shot("zoomed")
 
 	if names := frameNames(zoomed.Frames); !slices.Equal(names, []string{"all", "profileMain", "flushBuffers"}) {
@@ -158,17 +143,11 @@ func TestFlamegraphRender(t *testing.T) {
 	// Reset restores the whole profile. encodeFrames is absent while zoomed, so
 	// its reappearance is the reset having rendered.
 	var reset flameState
-	resetCtx, cancelReset := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancelReset()
-	if err := chromedp.Run(resetCtx,
+	flow.settle("reset", "flame",
 		chromedp.Click(`#reset`, chromedp.ByQuery),
 		chromedp.WaitReady(`#flame .fr[data-name="encodeFrames"]`, chromedp.ByQuery),
 		chromedp.Evaluate(probeFlame, &reset),
-	); err != nil {
-		flow.Shot("stuck-reset")
-		t.Fatalf("reset zoom: %v\n#flame: %q\npage errors: %v",
-			err, flameText(t, br), br.Errors())
-	}
+	)
 	flow.Shot("reset")
 
 	if names := frameNames(reset.Frames); !slices.Equal(names, []string{"all", "profileMain", "encodeFrames", "flushBuffers"}) {
@@ -203,18 +182,3 @@ func frameIndex(frames []flameFrame) map[string]flameFrame {
 // near absorbs the sub-pixel rounding of a percentage width without letting a
 // wrong share through: the closest wrong value differs by 1/40.
 func near(got, want float64) bool { return math.Abs(got-want) < 0.01 }
-
-// flameText is what the shell left on screen, for a failure message.
-func flameText(t *testing.T, br *Browser) string {
-	t.Helper()
-	var s string
-	if err := chromedp.Run(br.Ctx,
-		chromedp.Evaluate(`(document.getElementById("flame") || {}).textContent || ""`, &s),
-	); err != nil {
-		return "unreadable: " + err.Error()
-	}
-	if len(s) > 200 {
-		s = s[:200]
-	}
-	return s
-}
