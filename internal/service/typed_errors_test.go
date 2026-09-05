@@ -1,16 +1,9 @@
 package service
 
-// Pins for the typed error detectors (isSlugTaken, isStorageRateLimitErr,
-// isCrossShard). Each detector gets BOTH directions pinned:
-//
-//   - a text LOOKALIKE (an unrelated error whose message contains the substring
-//     a text match would key on) must NOT classify;
-//   - the real sentinel, bare AND %w-wrapped, MUST classify: identity survives
-//     any wrapping the storage layers add.
-//
-// Where the classification has a behavioral consequence (remint vs surface,
-// Sybil refusal vs generic error, deploy-failed translation vs verbatim), the
-// consequence is pinned through the service entry point, not just the boolean.
+// The behavioral CONSEQUENCE of sentinel classification (remint vs surface,
+// Sybil refusal vs generic error), pinned through the service entry points: a
+// text lookalike must not classify, and the real sentinel must classify bare
+// and %w-wrapped. The boolean table itself is TestClassifyCommitErr.
 
 import (
 	"bytes"
@@ -24,36 +17,11 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// --- 2a: isSlugTaken -------------------------------------------------------
-
-func TestIsSlugTaken_Classification(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		// Unrelated error text containing "slug" must not read as a collision:
-		// a remint would silently swallow the real error and burn the retry
-		// budget.
-		{"text lookalike does not misfire", fmt.Errorf("room slug validation failed"), false},
-		{"nil", nil, false},
-		{"unrelated error", errors.New("disk on fire"), false},
-		{"bare sentinel", storage.ErrSlugTaken, true},
-		{"wrapped sentinel", fmt.Errorf("insert: %w", storage.ErrSlugTaken), true},
-		{"domain name for the same sentinel", fmt.Errorf("preclaim: %w", domain.ErrSlugTaken), true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isSlugTaken(tc.err); got != tc.want {
-				t.Fatalf("isSlugTaken(%v) = %v, want %v", tc.err, got, tc.want)
-			}
-		})
-	}
-}
-
-// slugLookalikeErrRepo fails every insert with an error whose text
-// contains "slug" but which is NOT the slug-taken sentinel.
+// slugLookalikeErrRepo fails every insert with an error whose text contains
+// "slug" but which is NOT the slug-taken sentinel. The embedded nil PasteRepo
+// makes any other call panic.
 type slugLookalikeErrRepo struct {
+	PasteRepo
 	calls int
 }
 
@@ -63,11 +31,6 @@ func (r *slugLookalikeErrRepo) InsertWithQuotaCheck(context.Context, domain.Past
 	r.calls++
 	return errSlugLookalike
 }
-func (r *slugLookalikeErrRepo) Get(domain.Slug) (domain.Paste, error) {
-	return domain.Paste{}, storage.ErrNotFound
-}
-func (r *slugLookalikeErrRepo) MarkReady(domain.Paste) error  { return nil }
-func (r *slugLookalikeErrRepo) MarkFailed(domain.Paste) error { return nil }
 
 // TestUpload_Create_LookalikeErrorIsNotARemint pins the classification
 // CONSEQUENCE: an insert failure whose text contains "slug" but is not the
@@ -90,11 +53,11 @@ func TestUpload_Create_LookalikeErrorIsNotARemint(t *testing.T) {
 	}
 }
 
-// --- 2b: isStorageRateLimitErr ---------------------------------------------
-
-// fakeKeyGateRepo returns a canned AdmitNewKey error and records whether
-// the refusal-enrichment snapshot was consulted.
+// fakeKeyGateRepo returns a canned AdmitNewKey error and records whether the
+// refusal-enrichment snapshot was consulted. The embedded nil KeyGateRepo
+// makes any other call panic.
 type fakeKeyGateRepo struct {
+	KeyGateRepo
 	admitErr      error
 	snapshotCalls int
 }
@@ -104,13 +67,9 @@ var fakeOldest = time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 func (f *fakeKeyGateRepo) AdmitNewKey(string, string, time.Time, int, time.Duration) (bool, error) {
 	return false, f.admitErr
 }
-func (f *fakeKeyGateRepo) DeleteFirstSeenOlderThan(time.Time) (int, error) { return 0, nil }
 func (f *fakeKeyGateRepo) SubnetSnapshot(string, time.Time, time.Duration) (int, time.Time, error) {
 	f.snapshotCalls++
 	return 3, fakeOldest, nil
-}
-func (f *fakeKeyGateRepo) SubnetsForIdentity(string, time.Time, time.Duration) (int, error) {
-	return 0, nil
 }
 
 // TestKeyGateAdmit_RateLimitClassification pins what Admit DOES with the

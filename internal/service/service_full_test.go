@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"path/filepath"
 	"testing"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -37,15 +36,6 @@ func fullBlobUnit(t *testing.T) *StandaloneBlobUnit {
 	return NewStandaloneBlobUnit(fullBlobStore{real: realBlobs(t)})
 }
 
-func realBlobs(t *testing.T) *storage.CompressedBlobStore {
-	t.Helper()
-	disk, err := storage.NewBlobStore(filepath.Join(t.TempDir(), "blobs"))
-	if err != nil {
-		t.Fatalf("blob store: %v", err)
-	}
-	return storage.NewCompressedBlobStore(disk)
-}
-
 // TestUpload_BlobQuotaDrivesFinalizeToFailed pins how the durable ceiling
 // surfaces on the ASYNC create path: Create hands out the URL as pending
 // before the blob is attempted, so the bucket-quota rejection cannot be a
@@ -75,17 +65,11 @@ func TestUpload_BlobQuotaDrivesFinalizeToFailed(t *testing.T) {
 // update path returns the graceful ErrServiceFull, not a wrapped blob-write
 // error.
 func TestManageUpdate_BlobQuotaSurfacesServiceFull(t *testing.T) {
-	dir := t.TempDir()
 	repo := storagetest.NewRepo(t)
 
 	// An owned paste, so Update reaches the blob write instead of being
 	// rejected by the owner check.
-	disk, err := storage.NewBlobStore(filepath.Join(dir, "seedblobs"))
-	if err != nil {
-		t.Fatalf("seed blobs: %v", err)
-	}
-	seedBlobs := storage.NewCompressedBlobStore(disk)
-	up := NewUpload(repo, NewStandaloneBlobUnit(seedBlobs))
+	up := NewUpload(repo, NewStandaloneBlobUnit(realBlobs(t)))
 	t.Cleanup(up.WaitFinalize)
 	res, err := up.Create(bytes.NewReader([]byte("<!doctype html><p>v1</p>")), "key:owner", "demo", "")
 	if err != nil {

@@ -12,7 +12,7 @@ import (
 // borrows: every decode stays byte-exact across many reuses and after an
 // aborted read (Close before EOF).
 func TestDecoderPoolReuse(t *testing.T) {
-	c := NewCompressedBlobStore(newFakeRawStore())
+	c := NewCompressedBlobStore(newFakeDurable())
 
 	blobs := map[string][]byte{}
 	for i, n := range []int{10, 4096, 200_000, 1 << 20} {
@@ -67,7 +67,7 @@ func TestDecoderPoolReuse(t *testing.T) {
 // TestDecoderPoolConcurrent pins that a pooled decoder is never handed to two
 // readers at once and that concurrent decodes stay byte-exact. Run with -race.
 func TestDecoderPoolConcurrent(t *testing.T) {
-	c := NewCompressedBlobStore(newFakeRawStore())
+	c := NewCompressedBlobStore(newFakeDurable())
 	body := bytes.Repeat([]byte("concurrent-zstd-pool-payload "), 50_000)
 	sha := shaOf(body)
 	if err := c.Put(sha, bytes.NewReader(body), int64(len(body))); err != nil {

@@ -5,20 +5,14 @@ import (
 	"context"
 	"errors"
 	"io"
-	"path/filepath"
 	"testing"
 
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-func newStandaloneUnit(t *testing.T) (*StandaloneBlobUnit, *storage.CompressedBlobStore) {
+func newStandaloneUnit(t *testing.T) *StandaloneBlobUnit {
 	t.Helper()
-	disk, err := storage.NewBlobStore(filepath.Join(t.TempDir(), "blobs"))
-	if err != nil {
-		t.Fatalf("blob store: %v", err)
-	}
-	store := storage.NewCompressedBlobStore(disk)
-	return NewStandaloneBlobUnit(store), store
+	return NewStandaloneBlobUnit(realBlobs(t))
 }
 
 func stage(t *testing.T, u *StandaloneBlobUnit, raw []byte) string {
@@ -36,26 +30,22 @@ func stage(t *testing.T, u *StandaloneBlobUnit, raw []byte) string {
 	return staged.SHA
 }
 
+// streamIdentityStore records what PutPrecompressed received. The embedded nil
+// store makes any other call panic.
 type streamIdentityStore struct {
+	testBlobStore
 	want     io.Reader
 	gotSame  bool
 	gotSize  int64
 	gotBytes []byte
 }
 
-func (s *streamIdentityStore) Put(string, io.Reader, int64) error { return nil }
 func (s *streamIdentityStore) PutPrecompressed(_ string, r io.Reader, size int64) error {
 	s.gotSame = r == s.want
 	s.gotSize = size
 	var err error
 	s.gotBytes, err = io.ReadAll(r)
 	return err
-}
-func (s *streamIdentityStore) EncodeTo(io.Writer, io.Reader) (string, int, int64, error) {
-	return "", 0, 0, errors.New("unexpected encode")
-}
-func (s *streamIdentityStore) GetReader(string) (io.ReadCloser, int64, error) {
-	return nil, 0, errors.New("unexpected read")
 }
 
 // StagePrecompressed forwards the spill stream instead of materializing it.
@@ -76,7 +66,7 @@ func TestStandalone_StagePrecompressedStreamsOriginalReader(t *testing.T) {
 }
 
 func TestStandalone_StagePrecompressedRead_RoundTrip(t *testing.T) {
-	u, _ := newStandaloneUnit(t)
+	u := newStandaloneUnit(t)
 	raw := []byte("<!doctype html><h1>round trip</h1>")
 	sha := stage(t, u, raw)
 
@@ -90,7 +80,7 @@ func TestStandalone_StagePrecompressedRead_RoundTrip(t *testing.T) {
 }
 
 func TestStandalone_StageEncodingRead_RoundTrip(t *testing.T) {
-	u, _ := newStandaloneUnit(t)
+	u := newStandaloneUnit(t)
 	raw := []byte("body{margin:0}\n/* a stylesheet a site file would carry */")
 
 	sha, stored, err := u.StageEncoding(context.Background(), bytes.NewReader(raw))
@@ -113,7 +103,7 @@ func TestStandalone_StageEncodingRead_RoundTrip(t *testing.T) {
 }
 
 func TestStandalone_Read_NotFound(t *testing.T) {
-	u, _ := newStandaloneUnit(t)
+	u := newStandaloneUnit(t)
 	if _, _, err := u.Read(context.Background(), "deadbeef"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("Read missing: got %v, want storage.ErrNotFound", err)
 	}

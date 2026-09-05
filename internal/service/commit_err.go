@@ -40,7 +40,7 @@ func classifyCommitErr(err error) (commitErrClass, error) {
 		return commitServiceFull, ErrServiceFull
 	case errors.Is(err, domain.ErrOverUserQuota):
 		return commitOverQuota, ErrOverQuota
-	case isSlugTaken(err):
+	case errors.Is(err, domain.ErrSlugTaken):
 		return commitSlugTaken, ErrSlugTaken
 	default:
 		return commitOther, err

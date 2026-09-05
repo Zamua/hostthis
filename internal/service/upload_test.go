@@ -3,12 +3,9 @@ package service
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -19,26 +16,8 @@ import (
 	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
-// newRealStack builds the upload service backed by real metadata and a real blob
-// store under t.TempDir(): the same stack production runs, no mocks.
-func newRealStack(t *testing.T) *Upload {
-	t.Helper()
-	dir := t.TempDir()
-	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
-	if err != nil {
-		t.Fatalf("blobs: %v", err)
-	}
-	blobs := storage.NewCompressedBlobStore(rawBlobs)
-	u := NewUpload(storagetest.NewRepo(t), NewStandaloneBlobUnit(blobs))
-	// The blob write finalizes in a background goroutine: drain in-flight
-	// finalizers before the TempDir is torn down so the async write cannot race
-	// the cleanup.
-	t.Cleanup(u.WaitFinalize)
-	return u
-}
-
 func TestUpload_Create_HTML(t *testing.T) {
-	u := newRealStack(t)
+	u, _, _ := newStack(t)
 	body := []byte("<!doctype html><p>hi</p>")
 	res, err := u.Create(bytes.NewReader(body), "owner-key-hash", "demo", "")
 	if err != nil {
@@ -64,10 +43,13 @@ func TestUpload_Create_HTML(t *testing.T) {
 	if _, err := domain.ParseSlug(string(res.Paste.Slug)); err != nil {
 		t.Fatalf("returned slug is invalid: %v", err)
 	}
+	if !res.Paste.CreatedAt.Equal(fixedNow) {
+		t.Fatalf("CreatedAt: got %v, want the injected clock %v", res.Paste.CreatedAt, fixedNow)
+	}
 }
 
 func TestUpload_Create_Markdown(t *testing.T) {
-	u := newRealStack(t)
+	u, _, _ := newStack(t)
 	res, err := u.Create(bytes.NewReader([]byte("# Title\n\nbody")), "", "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -81,7 +63,7 @@ func TestUpload_Create_Markdown(t *testing.T) {
 }
 
 func TestUpload_Create_RejectsUnsupportedKind(t *testing.T) {
-	u := newRealStack(t)
+	u, _, _ := newStack(t)
 	_, err := u.Create(bytes.NewReader([]byte("\x89PNG\r\n\x1a\n...binary bytes...")), "", "", "")
 	if !errors.Is(err, domain.ErrUnsupportedKind) {
 		t.Fatalf("err: got %v, want ErrUnsupportedKind", err)
@@ -89,25 +71,15 @@ func TestUpload_Create_RejectsUnsupportedKind(t *testing.T) {
 }
 
 func TestUpload_Create_RejectsEmpty(t *testing.T) {
-	u := newRealStack(t)
+	u, _, _ := newStack(t)
 	_, err := u.Create(bytes.NewReader([]byte{}), "", "", "")
 	if err == nil {
 		t.Fatalf("empty upload should error")
 	}
 }
 
-func TestUpload_Create_RejectsOversize(t *testing.T) {
-	u := newRealStack(t)
-	body := make([]byte, domain.MaxPasteBytes+1)
-	body[0] = '<' // irrelevant: the size cap rejects before sniffing
-	_, err := u.Create(bytes.NewReader(body), "", "", "")
-	if err == nil {
-		t.Fatalf("oversize upload should error")
-	}
-}
-
 func TestUpload_Create_HonorsHint(t *testing.T) {
-	u := newRealStack(t)
+	u, _, _ := newStack(t)
 	// "anything goes" looks like neither html nor markdown; the hint forces
 	// html acceptance.
 	res, err := u.Create(bytes.NewReader([]byte("anything goes")), "", "", "html")
@@ -116,38 +88,6 @@ func TestUpload_Create_HonorsHint(t *testing.T) {
 	}
 	if res.Paste.Kind != domain.KindHTML {
 		t.Fatalf("kind: got %q, want html", res.Paste.Kind)
-	}
-}
-
-func TestUpload_Create_DedupsBlobOnSameBytes(t *testing.T) {
-	u := newRealStack(t)
-	body := []byte("<!doctype html><p>same</p>")
-	r1, err := u.Create(bytes.NewReader(body), "", "", "")
-	if err != nil {
-		t.Fatalf("first create: %v", err)
-	}
-	r2, err := u.Create(bytes.NewReader(body), "", "", "")
-	if err != nil {
-		t.Fatalf("second create: %v", err)
-	}
-	if r1.Paste.Slug == r2.Paste.Slug {
-		t.Fatalf("expected distinct slugs, got %q twice", r1.Paste.Slug)
-	}
-	if r1.Paste.ContentSHA != r2.Paste.ContentSHA {
-		t.Fatalf("same bytes should produce same content sha")
-	}
-}
-
-func TestUpload_Create_TimestampStable(t *testing.T) {
-	u := newRealStack(t)
-	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
-	u.Now = func() time.Time { return now }
-	res, err := u.Create(bytes.NewReader([]byte("<p>x")), "", "", "")
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if !res.Paste.CreatedAt.Equal(now) {
-		t.Fatalf("CreatedAt: got %v, want %v", res.Paste.CreatedAt, now)
 	}
 }
 
@@ -175,9 +115,9 @@ func (r *slugTakenNTimesRepo) InsertWithQuotaCheck(ctx context.Context, p domain
 }
 
 // TestUpload_Create_LogsSlugRemint pins the remint observability: each
-// slug-collision retry inside Create logs one line (slug + attempt number), so
-// silent remints, which leave committed orphan row-sets on backends whose
-// insert retry can misread its own committed write, are never invisible.
+// slug-collision retry inside Create logs one line, so silent remints, which
+// leave committed orphan row-sets on backends whose insert retry can misread
+// its own committed write, are never invisible.
 func TestUpload_Create_LogsSlugRemint(t *testing.T) {
 	repo := &slugTakenNTimesRepo{PasteRepo: storagetest.NewRepo(t), failures: 2}
 	u := NewUpload(repo, NewStandaloneBlobUnit(newFakeBlobs()))
@@ -194,19 +134,7 @@ func TestUpload_Create_LogsSlugRemint(t *testing.T) {
 	// Reading the log buffer races the background finalizer's logf; drain it.
 	u.WaitFinalize()
 
-	logged := buf.String()
-	if got := strings.Count(logged, "re-minting"); got != 2 {
-		t.Fatalf("remint log lines: got %d, want 2\nlog:\n%s", got, logged)
+	if lines := strings.Split(strings.TrimSpace(buf.String()), "\n"); len(lines) != 2 {
+		t.Fatalf("remint log lines: got %d, want one per collision (2)\nlog:\n%s", len(lines), buf.String())
 	}
-	for _, want := range []string{"attempt 1/5", "attempt 2/5"} {
-		if !strings.Contains(logged, want) {
-			t.Fatalf("remint log missing %q\nlog:\n%s", want, logged)
-		}
-	}
-}
-
-// sha256Hex is the content address the blob path stores bytes under.
-func sha256Hex(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
 }

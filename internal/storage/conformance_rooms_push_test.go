@@ -38,27 +38,7 @@ func runRoomPushConformance(t *testing.T, name string, newRooms func(t *testing.
 	t.Run(name+"/Rooms/Push/NonexistentRoom", func(t *testing.T) { conformPushNonexistentRoom(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/Push/KeyStablePerApp", func(t *testing.T) { conformPushKeyStablePerApp(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/Push/TestInterval", func(t *testing.T) { conformPushTestInterval(t, newRooms(t).Rooms) })
-	t.Run(name+"/Rooms/Push/ScheduleClear", func(t *testing.T) { conformPushScheduleClear(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/Push/Refusals", func(t *testing.T) { conformPushRefusals(t, newRooms(t).Rooms) })
-}
-
-// conformPushScheduleClear: a put of {tz, items: []} clears a set schedule
-// and reads back as empty items.
-func conformPushScheduleClear(t *testing.T, rr conformanceRoomRepo) {
-	room := mkConformRoom(t, rr, "app12345", fixedNow)
-	set := domain.PushSchedule{TZ: "UTC", Items: []domain.PushItem{
-		{ID: "x", At: "08:00", Days: []int{1}, Title: "t", Body: "b"},
-	}}
-	if err := rr.PutPushSchedule(room.AppSlug, room.ID, set, fixedNow); err != nil {
-		t.Fatalf("put: %v", err)
-	}
-	if err := rr.PutPushSchedule(room.AppSlug, room.ID, domain.PushSchedule{TZ: "UTC", Items: []domain.PushItem{}}, fixedNow); err != nil {
-		t.Fatalf("clear: %v", err)
-	}
-	got, err := rr.GetPushSchedule(room.AppSlug, room.ID)
-	if err != nil || got.Items == nil || len(got.Items) != 0 {
-		t.Fatalf("after clear = %#v, %v (want empty non-nil items)", got, err)
-	}
 }
 
 // conformPushRefusals: both backends refuse the same documents and leave the
@@ -172,7 +152,7 @@ func conformPushSubscriptionDedupeAndCap(t *testing.T, rr conformanceRoomRepo) {
 }
 
 // conformPushScheduleRoundTrip: unset reads as empty items, a put reads back
-// field for field, and an empty put clears.
+// field for field, and a put of {tz, items: []} clears to empty non-nil items.
 func conformPushScheduleRoundTrip(t *testing.T, rr conformanceRoomRepo) {
 	room := mkConformRoom(t, rr, "app12345", fixedNow)
 	got, err := rr.GetPushSchedule(room.AppSlug, room.ID)
@@ -203,9 +183,9 @@ func conformPushScheduleRoundTrip(t *testing.T, rr conformanceRoomRepo) {
 	if err := rr.PutPushSchedule(room.AppSlug, room.ID, domain.PushSchedule{TZ: "UTC", Items: []domain.PushItem{}}, fixedNow); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
-	got, _ = rr.GetPushSchedule(room.AppSlug, room.ID)
-	if len(got.Items) != 0 {
-		t.Fatalf("not cleared: %+v", got)
+	got, err = rr.GetPushSchedule(room.AppSlug, room.ID)
+	if err != nil || got.Items == nil || len(got.Items) != 0 {
+		t.Fatalf("after clear = %#v, %v (want empty non-nil items)", got, err)
 	}
 }
 

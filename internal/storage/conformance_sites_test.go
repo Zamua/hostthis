@@ -31,27 +31,9 @@ type conformanceSiteRepo interface {
 	service.SiteRepo
 }
 
-// siteOf builds a Site with one slug-derived file, stamped at fixedNow with the
-// size is that file's, and so the deduped, total.
-func siteOf(slug, identity string, size int) domain.Site {
-	man := domain.NewManifest()
-	man.Add("index.html", domain.ManifestEntry{
-		SHA:         "sha-" + slug + "-index",
-		Size:        size,
-		ContentType: "text/html; charset=utf-8",
-	})
-	return domain.Site{
-		Slug:      domain.Slug(slug),
-		Identity:  domain.Identity(identity),
-		Manifest:  man,
-		CreatedAt: fixedNow,
-		UpdatedAt: fixedNow,
-	}
-}
-
-// siteOfV folds a version tag into the file's SHA, so two deploys of the SAME
-// slug at different v produce DISTINCT manifests. That is what lets the replace
-// conformance prove the row's manifest swaps, not just its timestamps.
+// siteOfV builds a Site with one slug-derived file stamped at fixedNow; v is
+// folded into the file's SHA so two deploys of the same slug at different v
+// produce distinct manifests.
 func siteOfV(slug, identity string, size int, v string) domain.Site {
 	man := domain.NewManifest()
 	man.Add("index.html", domain.ManifestEntry{
@@ -68,6 +50,10 @@ func siteOfV(slug, identity string, size int, v string) domain.Site {
 	}
 }
 
+func siteOf(slug, identity string, size int) domain.Site {
+	return siteOfV(slug, identity, size, "index")
+}
+
 // insertSite deploys a site with no caps (caps=0 -> no quota enforcement).
 func insertSite(t *testing.T, sr conformanceSiteRepo, s domain.Site) {
 	t.Helper()
@@ -81,7 +67,7 @@ func insertSite(t *testing.T, sr conformanceSiteRepo, s domain.Site) {
 func runSiteConformance(t *testing.T, name string, newSites func(t *testing.T) (conformanceRepo, conformanceSiteRepo)) {
 	t.Helper()
 	t.Run(name+"/Sites/DeployAndReadBack", func(t *testing.T) { _, sr := newSites(t); conformSiteDeployAndReadBack(t, sr) })
-	t.Run(name+"/Sites/GetNotFound", func(t *testing.T) { _, sr := newSites(t); conformSiteGetNotFound(t, sr) })
+	t.Run(name+"/Sites/GetNotFound", func(t *testing.T) { r, sr := newSites(t); conformSiteGetNotFound(t, r, sr) })
 	t.Run(name+"/Sites/SumByIdentity", func(t *testing.T) { r, sr := newSites(t); conformSiteSumByIdentity(t, r, sr) })
 	t.Run(name+"/Sites/QuotaCountsSiteBytes", func(t *testing.T) { _, sr := newSites(t); conformSiteQuotaCountsSiteBytes(t, sr) })
 	t.Run(name+"/Sites/PerOwnerCapCountsBoth", func(t *testing.T) { r, sr := newSites(t); conformSitePerOwnerCapCountsBoth(t, r, sr) })
@@ -182,6 +168,10 @@ func conformSiteReplaceInPlace(t *testing.T, r conformanceRepo, sr conformanceSi
 	// updated_at restarts from the re-deploy.
 	if !got.UpdatedAt.Equal(later) {
 		t.Fatalf("updated_at should be the re-deploy time: got %v, want %v", got.UpdatedAt, later)
+	}
+	// A re-deploy APPENDS a version: the prior one stays live for rollback.
+	if vs, err := r.ListVersions(slug); err != nil || len(vs) != 2 {
+		t.Fatalf("versions after re-deploy = %d (err %v), want 2", len(vs), err)
 	}
 	// BOTH versions are charged. A re-deploy appends rather than replacing, so
 	// the prior version stays live and rollable-back, and its bytes are still
@@ -317,9 +307,16 @@ func conformSiteDeployAndReadBack(t *testing.T, sr conformanceSiteRepo) {
 	}
 }
 
-func conformSiteGetNotFound(t *testing.T, sr conformanceSiteRepo) {
+// conformSiteGetNotFound: a missing slug and a DOCUMENT both read as not-found
+// through the site port, so a paste is never served raw through the directory
+// path.
+func conformSiteGetNotFound(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	if _, err := sr.Get("nosite12"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("get missing site: got %v, want ErrNotFound", err)
+	}
+	insert(t, r, pasteOf("docb2345", "key:owner-s", 5))
+	if _, err := sr.Get("docb2345"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("document via the site port = %v, want ErrNotFound", err)
 	}
 }
 

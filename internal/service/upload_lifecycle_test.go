@@ -32,7 +32,10 @@ type fakeBlobs struct {
 
 func newFakeBlobs() *fakeBlobs { return &fakeBlobs{stored: map[string][]byte{}} }
 
+// syncOrderBlob counts StagePrecompressed calls. The embedded nil BlobUnit
+// makes any other call panic.
 type syncOrderBlob struct {
+	BlobUnit
 	stageCalls int
 	stageErr   error
 }
@@ -40,12 +43,6 @@ type syncOrderBlob struct {
 func (b *syncOrderBlob) StagePrecompressed(context.Context, string, io.Reader, int64) error {
 	b.stageCalls++
 	return b.stageErr
-}
-func (*syncOrderBlob) StageEncoding(context.Context, io.Reader) (string, int, error) {
-	return "", 0, errors.New("unexpected encoding")
-}
-func (*syncOrderBlob) Read(context.Context, string) (io.ReadCloser, int64, error) {
-	return nil, 0, errors.New("unexpected read")
 }
 
 type syncOrderRepo struct {

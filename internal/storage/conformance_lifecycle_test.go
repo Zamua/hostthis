@@ -40,19 +40,11 @@ type lifecycleRepo interface {
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
 }
 
-// lifecycleInsert mirrors the suite's insert helper against the narrow surface.
-func lifecycleInsert(t *testing.T, r lifecycleRepo, p domain.Paste) {
-	t.Helper()
-	if err := r.InsertWithQuotaCheck(context.Background(), p, 0, fixedNow); err != nil {
-		t.Fatalf("insert %q: %v", p.Slug, err)
-	}
-}
-
 func lifecyclePaste(t *testing.T, r lifecycleRepo, slug, identity string, size int) domain.Paste {
 	t.Helper()
 	p := pasteOf(slug, identity, size)
 	p.Status = domain.PasteStatusPending
-	lifecycleInsert(t, r, p)
+	insert(t, r, p)
 	return p
 }
 
@@ -180,7 +172,7 @@ func conformStatusOnMissingPasteIsNoOp(t *testing.T, r lifecycleRepo) {
 func conformReadyAtInsertIsLegal(t *testing.T, r lifecycleRepo) {
 	p := pasteOf("lc723456", "key:lifecycle", 100)
 	p.Status = domain.PasteStatusReady
-	lifecycleInsert(t, r, p)
+	insert(t, r, p)
 	if got := statusOf(t, r, p.Slug); got != domain.PasteStatusReady {
 		t.Fatalf("status after a ready insert = %q; want %q", got, domain.PasteStatusReady)
 	}

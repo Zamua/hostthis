@@ -16,15 +16,6 @@ import (
 	"time"
 )
 
-// durableBlobStore is the contract the write-back cache requires of the backend
-// it fronts. The cache sits BELOW the compression layer, so it moves only
-// opaque already-compressed bytes keyed by sha.
-type durableBlobStore interface {
-	Put(sha string, r io.Reader, size int64) error
-	Get(sha string) ([]byte, error)
-	GetReader(sha string) (io.ReadCloser, int64, error)
-}
-
 // WriteBackConfig tunes the local-disk write-back cache.
 type WriteBackConfig struct {
 	// Dir is the local cache directory. Required.
@@ -57,7 +48,7 @@ type WriteBackConfig struct {
 // is not yet confirmed durable in the backend, so the local copy is the ONLY one
 // and must not be evicted.
 type WriteBackBlobStore struct {
-	durable  durableBlobStore
+	durable  InnerBlobStore
 	dir      string
 	maxBytes int64
 	logger   *log.Logger
@@ -89,7 +80,7 @@ const uploadedMarkerSuffix = ".up"
 // NewWriteBackBlobStore builds the cache, re-enqueues any blob the cache dir
 // shows was not confirmed uploaded before the last shutdown, and starts the
 // uploader pool. Call Close to stop the uploaders.
-func NewWriteBackBlobStore(durable durableBlobStore, cfg WriteBackConfig) (*WriteBackBlobStore, error) {
+func NewWriteBackBlobStore(durable InnerBlobStore, cfg WriteBackConfig) (*WriteBackBlobStore, error) {
 	if cfg.Dir == "" {
 		return nil, errors.New("writeback: cache dir required")
 	}

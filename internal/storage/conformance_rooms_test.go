@@ -68,10 +68,8 @@ func runRoomConformance(t *testing.T, name string, newRooms func(t *testing.T) r
 	t.Run(name+"/Rooms/PerRoomKeyCap", func(t *testing.T) { conformRoomPerRoomKeyCap(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/PerRoomCapConcurrentCeiling", func(t *testing.T) { conformRoomPerRoomCapConcurrentCeiling(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/PerAppAggregateCap", func(t *testing.T) { conformRoomPerAppAggregateCap(t, newRooms(t).Rooms) })
-	t.Run(name+"/Rooms/PerAppAggregateSiblingGrowth", func(t *testing.T) { conformRoomPerAppAggregateSiblingGrowth(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/PerAppAggregateConcurrentCeiling", func(t *testing.T) { conformRoomPerAppAggregateConcurrentCeiling(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/DeleteFreesCap", func(t *testing.T) { conformRoomDeleteFreesCap(t, newRooms(t).Rooms) })
-	t.Run(name+"/Rooms/DeleteFreesSiblingCap", func(t *testing.T) { conformRoomDeleteFreesSiblingCap(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/CreationAtFullApp", func(t *testing.T) { conformRoomCreationAtFullApp(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/ReservedObjectKeys", func(t *testing.T) { conformRoomReservedObjectKeys(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/CreationRateLimitCounts", func(t *testing.T) { conformRoomCreationRateLimitCounts(t, newRooms(t).Rooms) })
@@ -315,7 +313,8 @@ func conformRoomPerRoomCapConcurrentCeiling(t *testing.T, rr conformanceRoomRepo
 }
 
 // conformRoomPerAppAggregateCap: the per-app byte cap sums across ALL of an
-// app's rooms, and a different app has its own budget.
+// app's rooms, a room's earlier budget observation cannot hide later sibling
+// growth, and a different app has its own budget.
 func conformRoomPerAppAggregateCap(t *testing.T, rr conformanceRoomRepo) {
 	const app = "app12345"
 	const appCap = 100
@@ -333,35 +332,17 @@ func conformRoomPerAppAggregateCap(t *testing.T, rr conformanceRoomRepo) {
 	if _, err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 10), appCap, fixedNow); err != nil {
 		t.Fatalf("write within app cap (90+10=100): %v", err)
 	}
+	// Room A saw 90 free at its first write; B's 10 has since landed, so
+	// growing A by 10 (100+10 > 100) must be refused and leave A untouched.
+	if _, err := rr.PutValue(roomA.AppSlug, roomA.ID, "k", make([]byte, 100), appCap, fixedNow); !errors.Is(err, storage.ErrAppRoomsFull) {
+		t.Fatalf("stale sibling total admitted 100+10 bytes: got %v, want ErrAppRoomsFull", err)
+	}
+	if got, err := rr.GetValue(roomA.AppSlug, roomA.ID, "k"); err != nil || len(got) != 90 {
+		t.Fatalf("rejected growth changed room A to %d bytes (err %v), want 90", len(got), err)
+	}
 	roomC := mkConformRoom(t, rr, "app99999", fixedNow)
 	if _, err := rr.PutValue(roomC.AppSlug, roomC.ID, "k", make([]byte, 90), appCap, fixedNow); err != nil {
 		t.Fatalf("different app should have its own budget: %v", err)
-	}
-}
-
-// A room's earlier budget observation cannot hide later sibling growth.
-func conformRoomPerAppAggregateSiblingGrowth(t *testing.T, rr conformanceRoomRepo) {
-	const (
-		app    = "app12345"
-		appCap = 100
-	)
-	roomA := mkConformRoom(t, rr, app, fixedNow)
-	roomB := mkConformRoom(t, rr, app, fixedNow)
-	if _, err := rr.PutValue(roomA.AppSlug, roomA.ID, "k", make([]byte, 40), appCap, fixedNow); err != nil {
-		t.Fatalf("seed room A: %v", err)
-	}
-	if _, err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 40), appCap, fixedNow); err != nil {
-		t.Fatalf("seed room B: %v", err)
-	}
-	if _, err := rr.PutValue(roomA.AppSlug, roomA.ID, "k", make([]byte, 70), appCap, fixedNow); !errors.Is(err, storage.ErrAppRoomsFull) {
-		t.Fatalf("stale sibling total admitted 70+40 bytes: got %v, want ErrAppRoomsFull", err)
-	}
-	got, err := rr.GetValue(roomA.AppSlug, roomA.ID, "k")
-	if err != nil {
-		t.Fatalf("get rejected room A value: %v", err)
-	}
-	if len(got) != 40 {
-		t.Fatalf("rejected growth changed room A to %d bytes, want 40", len(got))
 	}
 }
 
@@ -415,9 +396,9 @@ func conformRoomPerAppAggregateConcurrentCeiling(t *testing.T, rr conformanceRoo
 }
 
 // conformRoomDeleteFreesCap: a DeleteValue credits BOTH the per-room total and
-// the per-app counter, so a re-PUT of the freed size succeeds. Fails if a
-// delete credits neither (the re-PUT still 413s) or only one of them (still
-// 507s).
+// the per-app counter, so a re-PUT of the freed size succeeds in the same room
+// and a sibling room can grow into it. Fails if a delete credits neither (the
+// re-PUT still 413s) or only one of them (still 507s).
 func conformRoomDeleteFreesCap(t *testing.T, rr conformanceRoomRepo) {
 	const app = "app12345"
 	room := mkConformRoom(t, rr, app, fixedNow)
@@ -461,27 +442,15 @@ func conformRoomDeleteFreesCap(t *testing.T, rr conformanceRoomRepo) {
 	if roomBytes(kv) != domain.MaxRoomBytes {
 		t.Fatalf("room bytes after reclaim = %d, want %d (anchor + reclaimed)", roomBytes(kv), domain.MaxRoomBytes)
 	}
-}
 
-// A completed delete must free capacity for a sibling room immediately.
-func conformRoomDeleteFreesSiblingCap(t *testing.T, rr conformanceRoomRepo) {
-	const (
-		app    = "app12345"
-		appCap = 100
-	)
-	roomA := mkConformRoom(t, rr, app, fixedNow)
-	roomB := mkConformRoom(t, rr, app, fixedNow)
-	if _, err := rr.PutValue(roomA.AppSlug, roomA.ID, "k", make([]byte, 60), appCap, fixedNow); err != nil {
-		t.Fatalf("seed room A: %v", err)
+	// The freed app bytes are visible to a SIBLING room immediately: deleting
+	// the anchor lets another room under the same app grow into its space.
+	if _, err := rr.DeleteValue(room.AppSlug, room.ID, "anchor", fixedNow); err != nil {
+		t.Fatalf("delete anchor: %v", err)
 	}
-	if _, err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 40), appCap, fixedNow); err != nil {
-		t.Fatalf("seed room B: %v", err)
-	}
-	if _, err := rr.DeleteValue(roomA.AppSlug, roomA.ID, "k", fixedNow); err != nil {
-		t.Fatalf("delete room A value: %v", err)
-	}
-	if _, err := rr.PutValue(roomB.AppSlug, roomB.ID, "k", make([]byte, 100), appCap, fixedNow); err != nil {
-		t.Fatalf("grow room B into capacity freed by A: %v", err)
+	sibling := mkConformRoom(t, rr, app, fixedNow)
+	if _, err := rr.PutValue(sibling.AppSlug, sibling.ID, "k", make([]byte, anchor), appCap, fixedNow); err != nil {
+		t.Fatalf("grow a sibling into capacity freed by a delete: %v", err)
 	}
 }
 

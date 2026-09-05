@@ -140,7 +140,7 @@ func (s *Rooms) Create(appSlug domain.Slug, subnet string) (domain.Room, error) 
 			return room, nil
 		case errors.Is(err, domain.ErrAppRoomsFull):
 			return domain.Room{}, ErrAppRoomsCap
-		case isSlugTaken(err):
+		case errors.Is(err, domain.ErrSlugTaken):
 			continue
 		default:
 			return domain.Room{}, err
