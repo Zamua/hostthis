@@ -99,6 +99,42 @@ function requireShape(body, shape) {
   return true;
 }
 
+// The version fence shared by the owner and app allocation ledgers. A decision
+// below the current version is stale, at it a replay that must repeat the
+// recorded target, above it by more than one a gap. Only the next version
+// decides; the caller persists record and nextTotal when they are present.
+function fence(current, total, version, target, cap) {
+  const refuse = (error) => ({
+    status: 409,
+    body: { error, version: current.version, allocated: current.allocated, total },
+  });
+  if (version < current.version) {
+    return refuse("stale-version");
+  }
+  if (version === current.version) {
+    if (target !== current.target) {
+      return refuse("version-target-mismatch");
+    }
+    const granted = current.target === current.allocated;
+    return {
+      status: granted ? 200 : 507,
+      body: { granted, version: current.version, allocated: current.allocated, total },
+    };
+  }
+  if (version !== current.version + 1) {
+    return refuse("version-gap");
+  }
+  const nextTotal = total - current.allocated + target;
+  const granted = target <= current.allocated || cap <= 0 || nextTotal <= cap;
+  const record = { version, allocated: granted ? target : current.allocated, target };
+  return {
+    status: granted ? 200 : 507,
+    body: { granted, version, allocated: record.allocated, total: granted ? nextTotal : total },
+    record,
+    nextTotal,
+  };
+}
+
 // A stored intent is a private shape, so the Go port's type can change without
 // a stored-format migration. Mirrors internal/storage's intentRow.
 function toRow(body) {
@@ -476,51 +512,20 @@ export class Identity {
         return Response.json({ error: "artifact-unseeded" }, { status: 409 });
       }
       const total = Object.values(entries).reduce((sum, item) => sum + chargedSize(item), 0);
-      if (body.version < current.version) {
-        return Response.json({
-          error: "stale-version", version: current.version,
-          allocated: current.allocated, total,
-        }, { status: 409 });
+      const decision = fence(current, total, body.version, body.target, body.userCap);
+      if (!decision.record) {
+        return Response.json(decision.body, { status: decision.status });
       }
-      if (body.version === current.version) {
-        if (body.target !== current.target) {
-          return Response.json({
-            error: "version-target-mismatch", version: current.version,
-            allocated: current.allocated, total,
-          }, { status: 409 });
-        }
-        const granted = current.target === current.allocated;
-        return Response.json({
-          granted, version: current.version, allocated: current.allocated, total,
-        }, { status: granted ? 200 : 507 });
-      }
-      if (body.version !== current.version + 1) {
-        return Response.json({
-          error: "version-gap", version: current.version,
-          allocated: current.allocated, total,
-        }, { status: 409 });
-      }
-      const nextTotal = total - current.allocated + body.target;
-      if (!Number.isSafeInteger(nextTotal) || nextTotal < 0) {
+      if (!Number.isSafeInteger(decision.nextTotal) || decision.nextTotal < 0) {
         return Response.json({ error: "invalid-artifact-total" }, { status: 500 });
       }
-      const granted = body.target <= current.allocated ||
-        body.userCap <= 0 || nextTotal <= body.userCap;
-      const record = {
-        version: body.version,
-        allocated: granted ? body.target : current.allocated,
-        target: body.target,
-      };
       entry.accountingVersion = body.version;
-      if (granted) {
+      if (decision.body.granted) {
         entry.size = body.target;
         entry.chargedSize = body.target;
       }
-      await tx.put(new Map([[key, record], ["entries", entries]]));
-      return Response.json({
-        granted, version: record.version, allocated: record.allocated,
-        total: granted ? nextTotal : total,
-      }, { status: granted ? 200 : 507 });
+      await tx.put(new Map([[key, decision.record], ["entries", entries]]));
+      return Response.json(decision.body, { status: decision.status });
     });
   }
 
@@ -1828,50 +1833,15 @@ export class Paste {
         version: 0, allocated: 0, target: 0,
       };
       const total = (await tx.get("roomAllocated")) ?? 0;
-
-      if (body.version < current.version) {
-        return Response.json({
-          error: "stale-version", version: current.version,
-          allocated: current.allocated, total,
-        }, { status: 409 });
-      }
-      if (body.version === current.version) {
-        if (body.targetBytes !== current.target) {
-          return Response.json({
-            error: "version-target-mismatch", version: current.version,
-            allocated: current.allocated, total,
-          }, { status: 409 });
+      const decision = fence(current, total, body.version, body.targetBytes, body.appCap);
+      if (decision.record) {
+        const updates = new Map([[key, decision.record]]);
+        if (decision.body.granted && decision.nextTotal !== total) {
+          updates.set("roomAllocated", decision.nextTotal);
         }
-        const granted = current.target === current.allocated;
-        return Response.json({
-          granted, version: current.version,
-          allocated: current.allocated, total,
-        }, { status: granted ? 200 : 507 });
+        await tx.put(updates);
       }
-      if (body.version !== current.version + 1) {
-        return Response.json({
-          error: "version-gap", version: current.version,
-          allocated: current.allocated, total,
-        }, { status: 409 });
-      }
-
-      const nextTotal = total - current.allocated + body.targetBytes;
-      const granted = body.targetBytes <= current.allocated ||
-        body.appCap <= 0 || nextTotal <= body.appCap;
-      const record = {
-        version: body.version,
-        allocated: granted ? body.targetBytes : current.allocated,
-        target: body.targetBytes,
-      };
-      const updates = new Map([[key, record]]);
-      if (granted && nextTotal !== total) {
-        updates.set("roomAllocated", nextTotal);
-      }
-      await tx.put(updates);
-      return Response.json({
-        granted, version: record.version, allocated: record.allocated,
-        total: granted ? nextTotal : total,
-      }, { status: granted ? 200 : 507 });
+      return Response.json(decision.body, { status: decision.status });
     });
   }
 
