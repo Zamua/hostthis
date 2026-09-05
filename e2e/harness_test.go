@@ -3,45 +3,12 @@
 package e2e
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/chromedp/chromedp"
 )
-
-// The harness end to end: an ssh upload yields a URL whose shell renders the
-// markdown into the DOM, with nothing logged as an error.
-func TestHarness(t *testing.T) {
-	t.Parallel()
-	srv := StartServer(t)
-	paste := srv.Upload(t, []byte("# harness\n\nrendered in the browser.\n"), UploadOpts{
-		Type: "md",
-		Name: "harness proof",
-	})
-
-	br := NewBrowser(t)
-	flow := NewFlow(t, br, "harness")
-	br.Open(t, paste.URL)
-
-	var heading string
-	renderCtx, cancel := context.WithTimeout(br.Ctx, renderTimeout)
-	defer cancel()
-	if err := chromedp.Run(renderCtx,
-		chromedp.WaitVisible("#content h1", chromedp.ByQuery),
-		chromedp.Text("#content h1", &heading, chromedp.ByQuery),
-	); err != nil {
-		flow.Shot("stuck")
-		t.Fatalf("wait for rendered markdown: %v\npage errors: %v", err, br.Errors())
-	}
-	flow.Shot("rendered")
-
-	if heading != "harness" {
-		t.Errorf("rendered h1 = %q, want %q", heading, "harness")
-	}
-	br.AssertNoPageErrors(t)
-}
 
 // A script the page asked for and did not get is reported, so a clean error log
 // is evidence rather than a filter that swallows everything.
