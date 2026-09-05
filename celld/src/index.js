@@ -71,6 +71,21 @@ async function dispatch(self, table, request) {
   return runOp(self, entry, entry.body ? await request.json() : undefined, url);
 }
 
+// Field checks on a request body: "string" is a non-empty string, "uint" a
+// safe integer at or above zero, "posint" one at or above one.
+function requireShape(body, shape) {
+  for (const [key, kind] of Object.entries(shape)) {
+    const value = body[key];
+    const ok = kind === "string"
+      ? typeof value === "string" && value !== ""
+      : Number.isSafeInteger(value) && value >= (kind === "posint" ? 1 : 0);
+    if (!ok) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // A stored intent is a private shape, so the Go port's type can change without
 // a stored-format migration. Mirrors internal/storage's intentRow.
 function toRow(body) {
@@ -197,7 +212,7 @@ export class Identity {
 
   // Step 3: the row landed, so the entry is real and the intent is discharged.
   async confirm(body) {
-    if (typeof body.generation !== "string" || !body.generation) {
+    if (!requireShape(body, { generation: "string" })) {
       return Response.json({ error: "missing-generation" }, { status: 400 });
     }
     return this.state.storage.transaction(async (tx) => {
@@ -224,7 +239,7 @@ export class Identity {
   // the entry rather than marking it is deliberate - a failed paste charges
   // nothing, and the row itself stays in the paste cell to serve an error.
   async release(body) {
-    if (typeof body.generation !== "string" || !body.generation) {
+    if (!requireShape(body, { generation: "string" })) {
       return Response.json({ error: "missing-generation" }, { status: 400 });
     }
     return this.state.storage.transaction(async (tx) => {
@@ -397,10 +412,7 @@ export class Identity {
   }
 
   async artifactSeed(body) {
-    if (typeof body.slug !== "string" || !body.slug ||
-        typeof body.generation !== "string" || !body.generation ||
-        !Number.isSafeInteger(body.charge) || body.charge < 0 ||
-        !Number.isSafeInteger(body.servedSize) || body.servedSize < 0) {
+    if (!requireShape(body, { slug: "string", generation: "string", charge: "uint", servedSize: "uint" })) {
       return Response.json({ error: "invalid-artifact-seed" }, { status: 400 });
     }
     return this.state.storage.transaction(async (tx) => {
@@ -444,10 +456,7 @@ export class Identity {
   }
 
   async artifactDecide(body) {
-    if (typeof body.slug !== "string" || !body.slug ||
-        typeof body.generation !== "string" || !body.generation ||
-        !Number.isSafeInteger(body.version) || body.version < 1 ||
-        !Number.isSafeInteger(body.target) || body.target < 0) {
+    if (!requireShape(body, { slug: "string", generation: "string", version: "posint", target: "uint" })) {
       return Response.json({ error: "invalid-artifact-decision" }, { status: 400 });
     }
     return this.state.storage.transaction(async (tx) => {
@@ -514,10 +523,7 @@ export class Identity {
   }
 
   async artifactProject(body) {
-    if (typeof body.slug !== "string" || !body.slug ||
-        typeof body.generation !== "string" || !body.generation ||
-        !Number.isSafeInteger(body.version) || body.version < 0 ||
-        !Number.isSafeInteger(body.servedSize) || body.servedSize < 0) {
+    if (!requireShape(body, { slug: "string", generation: "string", version: "uint", servedSize: "uint" })) {
       return Response.json({ error: "invalid-artifact-projection" }, { status: 400 });
     }
     return this.state.storage.transaction(async (tx) => {
@@ -545,9 +551,7 @@ export class Identity {
   }
 
   async artifactDrop(body) {
-    if (typeof body.slug !== "string" || !body.slug ||
-        typeof body.generation !== "string" || !body.generation ||
-        !Number.isSafeInteger(body.version) || body.version < 1) {
+    if (!requireShape(body, { slug: "string", generation: "string", version: "posint" })) {
       return Response.json({ error: "invalid-artifact-drop" }, { status: 400 });
     }
     return this.state.storage.transaction(async (tx) => {
@@ -1676,10 +1680,10 @@ export class Paste {
   }
 
   async put(body) {
-    if (typeof body.generation !== "string" || !body.generation) {
+    if (!requireShape(body, { generation: "string" })) {
       return Response.json({ error: "missing-generation" }, { status: 400 });
     }
-    if (typeof body.fingerprint !== "string" || !body.fingerprint || !body.row) {
+    if (!requireShape(body, { fingerprint: "string" }) || !body.row) {
       return Response.json({ error: "missing-create-fingerprint" }, { status: 400 });
     }
     return this.state.storage.transaction(async (tx) => {
@@ -1724,7 +1728,7 @@ export class Paste {
   }
 
   async abortCreate(body) {
-    if (typeof body.generation !== "string" || !body.generation) {
+    if (!requireShape(body, { generation: "string" })) {
       return Response.json({ error: "missing-generation" }, { status: 400 });
     }
     return this.state.storage.transaction(async (tx) => {
@@ -1824,8 +1828,7 @@ export class Paste {
   }
 
   async roomDecide(body) {
-    if (!Number.isSafeInteger(body.version) || body.version < 1 ||
-        !Number.isSafeInteger(body.targetBytes) || body.targetBytes < 0) {
+    if (!requireShape(body, { version: "posint", targetBytes: "uint" })) {
       return Response.json({ error: "invalid-budget-decision" }, { status: 400 });
     }
     return this.state.storage.transaction(async (tx) => {
@@ -2267,7 +2270,7 @@ export class Paste {
     if (prior) {
       return prior;
     }
-    if (!Number.isSafeInteger(body.size) || body.size < 0) {
+    if (!requireShape(body, { size: "uint" })) {
       return Response.json({ error: "invalid-size" }, { status: 400 });
     }
     const row = await this.state.storage.get("row");
@@ -2565,7 +2568,7 @@ export class Paste {
   // Only a still-PENDING row transitions, so a late finalizer cannot resurrect
   // a paste the reconciler already failed, and a repeat is harmless.
   async setStatus(body) {
-    if (typeof body.generation !== "string" || !body.generation) {
+    if (!requireShape(body, { generation: "string" })) {
       return Response.json({ error: "missing-generation" }, { status: 400 });
     }
     if (body.status === "failed") {
