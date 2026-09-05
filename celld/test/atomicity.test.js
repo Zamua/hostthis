@@ -430,6 +430,19 @@ test("Identity create alarm retains a conflicting same-generation row", async ()
   assert.notEqual(h.identityStorage.alarm, null);
 });
 
+test("Identity create alarm leaves an in-flight create alone until the grace elapses", async () => {
+  const h = createIntentHarness();
+  const now = Date.now();
+  const body = { ...createIntentBody(), now };
+  assert.equal((await h.identity.reserve(body)).status, 200);
+  assert.equal(h.identityStorage.alarm, now + 30_000);
+
+  await h.identity.alarm();
+  assert.notEqual(h.identityStorage.data.get(`intent:${body.intent.id}`), undefined);
+  assert.equal(h.identityStorage.data.get("entries").newslug2.generation, body.generation);
+  assert.equal(h.identityStorage.alarm, now + 30_000);
+});
+
 test("Identity create alarm retains malformed and unknown intents", async () => {
   for (const [name, intent] of [
     ["unknown", { kind: "create_passte", subject: "newslug2", generation: "generation-1" }],

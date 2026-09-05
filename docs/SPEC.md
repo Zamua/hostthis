@@ -3037,7 +3037,9 @@ publication records the same fingerprint. While the intent is outstanding,
 replaying the same generation succeeds only when its fingerprint matches; a
 same-generation request with different content is a conflict, and once the
 intent is discharged a repeated reservation for the slug is refused as taken
-regardless of fingerprint. Recovery atomically inspects the Paste cell and, when the
+regardless of fingerprint. Recovery runs once the intent is older than a fixed
+grace (30 seconds), so an in-flight create is never mistaken for a crashed one. It
+atomically inspects the Paste cell and, when the
 matching row is absent, fences that generation against every late `put` before it
 releases the reservation. When the row is present, recovery requires the matching
 fingerprint and confirms from the row's authoritative status. Confirmation may
