@@ -693,6 +693,9 @@ const PUSH_SERVICE_HOSTS = [
 ];
 const VAPID_TTL_MS = 12 * 60 * 60 * 1000;
 const VAPID_KEY = "pushVapid";
+// A push service can answer 404 for a registration it has not finished
+// propagating; a gone answer inside this window is a failed send, not a prune.
+const PUSH_PRUNE_GRACE_MS = 60_000;
 const ECDH_P256 = { name: "ECDH", namedCurve: "P-256" };
 const ECDSA_P256 = { name: "ECDSA", namedCurve: "P-256" };
 const P256_SPKI_PREFIX = new Uint8Array([
@@ -1571,7 +1574,7 @@ export class Room {
       title: "Test notification", body: "Push notifications are working.", tag: "hostthis-test",
     }));
     const date = localDate(now, push.schedule?.tz ?? "UTC");
-    const outcome = await this.deliver(push, this.dispatch(push, doc, payload, date, new Map()));
+    const outcome = await this.deliver(push, this.dispatch(push, doc, payload, date, new Map(), now));
     await this.savePush(push);
     return Response.json(outcome);
   }
@@ -1616,7 +1619,7 @@ export class Room {
     for (const { item, date } of fires) {
       const payload = this.resolvePayload(item, doc, date);
       if (payload) {
-        sends.push(...this.dispatch(push, doc, payload, date, signed));
+        sends.push(...this.dispatch(push, doc, payload, date, signed, now));
       }
     }
     await this.deliver(push, sends);
@@ -1644,7 +1647,7 @@ export class Room {
   // Charges the daily counter of every subscription under the cap and starts
   // one send per charged subscription. The cap is decided here, before any
   // send runs, so concurrent sends never race on it.
-  dispatch(push, doc, payload, date, signed) {
+  dispatch(push, doc, payload, date, signed, now) {
     const sends = [];
     for (const sub of push.subscriptions) {
       const count = sub.sent?.[date] ?? 0;
@@ -1652,7 +1655,7 @@ export class Room {
         continue;
       }
       sub.sent = { [date]: count + 1 };
-      sends.push(this.sendPush(sub, payload, doc.meta.appSlug, push.subject, signed).then((result) => ({ sub, result })));
+      sends.push(this.sendPush(sub, payload, doc.meta.appSlug, push.subject, signed, now).then((result) => ({ sub, result })));
     }
     return sends;
   }
@@ -1696,7 +1699,7 @@ export class Room {
     return signed.get(origin);
   }
 
-  async sendPush(sub, payload, appSlug, subject, signed) {
+  async sendPush(sub, payload, appSlug, subject, signed, now) {
     try {
       const authorization = await this.vapidHeader(new URL(sub.endpoint).origin, appSlug, subject, signed);
       const body = await encryptPush(sub, payload);
@@ -1714,7 +1717,7 @@ export class Room {
         signal: AbortSignal.timeout(this.env.PUSH_SEND_TIMEOUT_MS ?? PUSH_SEND_TIMEOUT_MS),
       });
       await res.body?.cancel();
-      if (res.status === 404 || res.status === 410) {
+      if ((res.status === 404 || res.status === 410) && now - sub.added >= PUSH_PRUNE_GRACE_MS) {
         return "gone";
       }
       return res.ok ? "sent" : "failed";

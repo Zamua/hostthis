@@ -622,11 +622,26 @@ test("Room alarm survives a failed VAPID signing and a throwing push service", a
   assert.equal((await h.call("pushsublist")).body.subscriptions.length, 1);
 });
 
+test("Room push keeps a gone answer for a subscription younger than a minute", async () => {
+  const h = harness({ service: { status: () => 410 } });
+  const now = Date.parse("2026-09-05T15:00:00Z");
+  assert.equal((await h.call("pushsubput", { ...subscription(1), now })).status, 204);
+  const fresh = await h.call("pushtest", { now: now + 5_000 });
+  assert.deepStrictEqual(fresh, { status: 200, body: { sent: 0, pruned: 0 } });
+  assert.equal(h.push().subscriptions.length, 1);
+  assert.deepStrictEqual(h.push().subscriptions[0].sent, { "2026-09-05": 1 });
+
+  const aged = await h.call("pushtest", { now: now + 70_000 });
+  assert.deepStrictEqual(aged, { status: 200, body: { sent: 0, pruned: 1 } });
+  assert.equal(h.push().subscriptions.length, 0);
+});
+
 test("Room pushtest sends inline, counts, prunes, and rate limits per minute", async () => {
   const h = harness({ service: { status: (url) => (url.endsWith("/2") ? 410 : 201) } });
-  assert.equal((await h.call("pushsubput", subscription(1))).status, 204);
-  assert.equal((await h.call("pushsubput", subscription(2))).status, 204);
   const now = Date.parse("2026-09-05T15:00:00Z");
+  const added = now - 120_000;
+  assert.equal((await h.call("pushsubput", { ...subscription(1), now: added })).status, 204);
+  assert.equal((await h.call("pushsubput", { ...subscription(2), now: added })).status, 204);
   const first = await h.call("pushtest", { now });
   assert.deepStrictEqual(first, { status: 200, body: { sent: 1, pruned: 1 } });
   assert.equal(h.sends.length, 2);
