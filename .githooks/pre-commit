@@ -4,12 +4,13 @@
 # What it checks (Go-only; no-op when no .go files are staged):
 #   1. gofmt    every staged .go file is properly formatted
 #   2. go vet   the whole module passes vet
-#   3. golangci-lint (if installed) runs against the staged diff
+#   3. go fix   no pending modernizations (go fix -diff is empty)
+#   4. golangci-lint (if installed) runs against the staged diff
 #
 # Activate once per clone:
 #   git config core.hooksPath .githooks
 #
-# Install golangci-lint (pinned in .githooks/README.md):
+# Install golangci-lint:
 #   brew install golangci-lint
 #   # or: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 #
