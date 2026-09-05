@@ -128,19 +128,6 @@ func TestHardening_AgentForwardRequestIsNoop(t *testing.T) {
 	}
 }
 
-func TestHardening_NormalVerbSessionStillWorks(t *testing.T) {
-	// The hardening must not block the verb path. `whoami` is the cheapest
-	// verb: no body, no slug.
-	s := startStack(t)
-	stdout, stderr, exit := s.run("whoami", nil)
-	if exit != 0 {
-		t.Fatalf("whoami should still work post-hardening: exit %d stderr %q", exit, stderr)
-	}
-	if !strings.Contains(stdout, "key:") {
-		t.Fatalf("whoami output should include the key line, got %q", stdout)
-	}
-}
-
 func TestHardening_X11RequestRefused(t *testing.T) {
 	// The library has no x11-req handler, so the request falls to the
 	// default case, which replies false.

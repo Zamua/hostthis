@@ -1,7 +1,6 @@
 package ssh
 
 import (
-	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
@@ -57,49 +56,77 @@ func TestParseOutputFormat(t *testing.T) {
 	}
 }
 
-func TestNewPasteView_Naming(t *testing.T) {
-	t.Run("unset name is empty string not dash", func(t *testing.T) {
-		v := newPasteListItem(domain.Paste{Slug: "abc12345", Name: ""})
-		if v.Name != "" {
-			t.Fatalf("name: got %q want empty string", v.Name)
-		}
-	})
+// TestListItem pins the list-row mapper for pastes and sites: naming, the
+// served/latest/pinned triple, and SIZE as what the QUOTA CHARGED (every live
+// version for a paste, StoredBytes for a site), so a list sums to the figure
+// whoami shows. served_size_bytes carries the served version's own size so a
+// JSON consumer never has to infer which number it holds.
+func TestListItem(t *testing.T) {
+	ip := func(n int) *int { return &n }
+	man := domain.NewManifest()
+	man.Add("index.html", domain.ManifestEntry{SHA: "a", Size: 4000})
+	cases := []struct {
+		name       string
+		item       listItemView
+		kind       string
+		size       int
+		servedSize *int
+		multi      bool
+		served     *int
+		latest     *int
+		pinned     *int
+	}{
+		{"unnamed paste keeps empty name, not the table dash",
+			newPasteListItem(domain.Paste{Slug: "abc12345", Kind: "html"}),
+			"html", 0, ip(0), false, ip(0), ip(0), ip(0)},
+		{"unpinned serves latest",
+			newPasteListItem(domain.Paste{Slug: "s", Kind: "html", LatestVersion: 5, Size: 7}),
+			"html", 7, ip(7), false, ip(5), ip(5), ip(0)},
+		{"pinned serves the pin",
+			newPasteListItem(domain.Paste{Slug: "s", Kind: "html", PinnedVersion: 3, LatestVersion: 5, Size: 7}),
+			"html", 7, ip(7), false, ip(3), ip(5), ip(3)},
+		{"multi-version paste is charged every live version and flagged",
+			newPasteListItem(domain.Paste{Slug: "p", Kind: "html", Size: 14266, StoredBytes: 40890, LatestVersion: 3}),
+			"html", 40890, ip(14266), true, ip(3), ip(3), ip(0)},
+		{"single-version paste is unflagged",
+			newPasteListItem(domain.Paste{Slug: "p", Kind: "html", Size: 500, StoredBytes: 500, LatestVersion: 1}),
+			"html", 500, ip(500), false, ip(1), ip(1), ip(0)},
+		{"absent stored total falls back to the served size, never zero",
+			newPasteListItem(domain.Paste{Slug: "p", Kind: "html", Size: 777, LatestVersion: 1}),
+			"html", 777, ip(777), false, ip(1), ip(1), ip(0)},
+		{"site is charged StoredBytes, not the manifest total, with null versions",
+			newSiteListItem(domain.Site{Slug: "sitezzz1", Manifest: man, StoredBytes: 1500}),
+			"site", 1500, nil, false, nil, nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.item
+			if got.Name != "" || got.Kind != tc.kind || got.SizeBytes != tc.size || got.multiVersion != tc.multi {
+				t.Fatalf("name %q kind %q size %d multi %v, want \"\" %q %d %v",
+					got.Name, got.Kind, got.SizeBytes, got.multiVersion, tc.kind, tc.size, tc.multi)
+			}
+			for _, f := range []struct {
+				name      string
+				got, want *int
+			}{
+				{"served_size_bytes", got.ServedSizeBytes, tc.servedSize},
+				{"served_version", got.ServedVersion, tc.served},
+				{"latest_version", got.LatestVersion, tc.latest},
+				{"pinned_version", got.PinnedVersion, tc.pinned},
+			} {
+				if (f.got == nil) != (f.want == nil) || (f.got != nil && *f.got != *f.want) {
+					t.Fatalf("%s: got %v want %v", f.name, deref(f.got), deref(f.want))
+				}
+			}
+		})
+	}
 }
 
-func TestNewPasteView_VersionState(t *testing.T) {
-	t.Run("unpinned serves latest", func(t *testing.T) {
-		v := newPasteListItem(domain.Paste{Slug: "s", PinnedVersion: 0, LatestVersion: 5})
-		if *v.ServedVersion != 5 || *v.LatestVersion != 5 || *v.PinnedVersion != 0 {
-			t.Fatalf("unpinned: got served=%d latest=%d pinned=%d", *v.ServedVersion, *v.LatestVersion, *v.PinnedVersion)
-		}
-	})
-
-	t.Run("pinned serves the pin", func(t *testing.T) {
-		v := newPasteListItem(domain.Paste{Slug: "s", PinnedVersion: 3, LatestVersion: 5})
-		if *v.ServedVersion != 3 || *v.LatestVersion != 5 || *v.PinnedVersion != 3 {
-			t.Fatalf("pinned: got served=%d latest=%d pinned=%d", *v.ServedVersion, *v.LatestVersion, *v.PinnedVersion)
-		}
-	})
-
-	t.Run("site has null version fields + site kind", func(t *testing.T) {
-		v := newSiteListItem(domain.Site{Slug: "portfolio2"})
-		if v.Kind != "site" {
-			t.Fatalf("site kind: got %q want site", v.Kind)
-		}
-		if v.ServedVersion != nil || v.LatestVersion != nil || v.PinnedVersion != nil {
-			t.Fatalf("site version fields should be nil, got served=%v latest=%v pinned=%v", v.ServedVersion, v.LatestVersion, v.PinnedVersion)
-		}
-	})
-}
-
-func TestNewPasteViews_EmptyMarshalsToArray(t *testing.T) {
-	b, err := json.Marshal(newListView(nil, nil))
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+func deref(p *int) any {
+	if p == nil {
+		return nil
 	}
-	if string(b) != "[]" {
-		t.Fatalf("empty list should marshal to [], got %s", b)
-	}
+	return *p
 }
 
 func TestNewVersionsView(t *testing.T) {

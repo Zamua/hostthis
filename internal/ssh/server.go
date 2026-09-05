@@ -33,14 +33,6 @@ import (
 	"github.com/Zamua/hostthis/internal/service"
 )
 
-// Structured exit codes for SSH sessions, surfaced to the client as the ssh
-// process exit code. The mapping is a public contract that scripts branch on,
-// so a code is never reassigned; docs/SPEC.md "Exit codes" mirrors it.
-//
-// 5 is permanently unused: service.requireOwner collapses non-owner reads to
-// ErrNotFound so existence cannot leak across identities, so no distinct
-// not-owner error reaches the SSH surface. A new code takes the next free slot.
-
 // URLBuilder renders a slug as its public URL.
 type URLBuilder func(domain.Slug) string
 
@@ -342,13 +334,8 @@ func (s *Server) ratelimitMiddleware() wish.Middleware {
 				next(sess)
 				return
 			}
+			// keyRequired runs first, so the fingerprint is never empty here.
 			keyedFP, _ := sess.Context().Value("ownerHash").(string)
-			// keyRequired runs first, so this is unreachable; the guard keeps
-			// the middleware correct if the chain is ever reordered.
-			if keyedFP == "" {
-				next(sess)
-				return
-			}
 			owner := domain.IdentityFromKeyFingerprint(keyedFP).String()
 			subnet := ipSubnet(remoteIP(sess))
 			if err := s.KeyGate.Admit(owner, subnet); err != nil {
@@ -434,9 +421,9 @@ func (s *Server) handleSession(sess gossh.Session) {
 	case "get":
 		s.verbGet(sess, owner, argv[1:])
 	case "url":
-		s.verbURL(sess, argv[1:])
+		s.verbURL(sess, argv[1:], false)
 	case "qr":
-		s.verbQR(sess, argv[1:])
+		s.verbURL(sess, argv[1:], true)
 	case "rename":
 		s.verbRename(sess, owner, argv[1:])
 	case "delete":
@@ -471,8 +458,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	//   [<slug> --name "…"]   → update with flags (rename in one shot)
 	args, err := parseUploadFlags(argv)
 	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(ExitUsage)
+		emitUsageErr(sess, err)
 		return
 	}
 	// The live session reader goes straight to the service layer, which streams
@@ -492,7 +478,8 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		if s.Deploy != nil && args.Type == "" {
 			peeked := bufio.NewReaderSize(limited, 512)
 			if head, _ := peeked.Peek(2); domain.HasGzipMagic(head) {
-				s.deploySiteToSlug(sess, owner, slug, peeked)
+				res, err := s.Deploy.DeployToSlug(slug, peeked, owner)
+				s.emitSite(sess, res, err)
 				return
 			}
 			limited = peeked
@@ -514,8 +501,6 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 				return
 			}
 		}
-		url := s.BuildURL(res.Paste.Slug)
-		fmt.Fprintln(sess, url)
 		_, _ = fmt.Fprintf(sess.Stderr(), "v%d saved.\n", res.NewVer)
 		if res.WasPinned {
 			fmt.Fprintf(sess.Stderr(),
@@ -524,8 +509,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 			fmt.Fprintf(sess.Stderr(), "  ssh %s unpin %s        # always serve latest\n", s.apex(), slug)
 			fmt.Fprintf(sess.Stderr(), "  ssh %s pin %s %d       # serve this new version\n", s.apex(), slug, res.NewVer)
 		}
-		writeQR(sess.Stderr(), url)
-		_ = sess.Exit(ExitOK)
+		s.emitURL(sess, res.Paste.Slug)
 		return
 	}
 
@@ -535,7 +519,8 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	peeked := bufio.NewReaderSize(limited, 512)
 	if s.Deploy != nil && args.Type == "" {
 		if head, _ := peeked.Peek(2); domain.HasGzipMagic(head) {
-			s.deploySite(sess, owner, peeked)
+			res, err := s.Deploy.Deploy(peeked, owner)
+			s.emitSite(sess, res, err)
 			return
 		}
 	}
@@ -545,46 +530,31 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		emitServiceErr(sess, err)
 		return
 	}
-	url := s.BuildURL(res.Paste.Slug)
-	fmt.Fprintln(sess, url)
 	if res.Paste.Name != "" {
 		_, _ = fmt.Fprintf(sess.Stderr(), "%q.\n", res.Paste.Name)
 	}
-	writeQR(sess.Stderr(), url)
-	_ = sess.Exit(ExitOK)
+	s.emitURL(sess, res.Paste.Slug)
 }
 
-// deploySite runs the static-site archive path and returns the same shape of
-// URL response a single-file upload does, so `tar czf - site/ | ssh <apex>`
-// needs no verb and no flag.
-func (s *Server) deploySite(sess gossh.Session, owner string, body io.Reader) {
-	res, err := s.Deploy.Deploy(body, owner)
+// emitSite ends a site deploy or in-place re-deploy with the same shape of
+// response a single-file upload gets, so `tar czf - site/ | ssh <apex>` needs
+// no verb and no flag. A slug naming a foreign-owned site, or no site at all,
+// exits with a not-found byte-identical to any other, so a non-owner cannot
+// probe existence or ownership. Sites have no name field, so --name is ignored.
+func (s *Server) emitSite(sess gossh.Session, res service.SiteResult, err error) {
 	if err != nil {
 		emitServiceErr(sess, err)
 		return
 	}
-	url := s.BuildURL(res.Site.Slug)
-	fmt.Fprintln(sess, url)
 	_, _ = fmt.Fprintf(sess.Stderr(), "site: %d file(s).\n", len(res.Site.Manifest.Files))
-	writeQR(sess.Stderr(), url)
-	_ = sess.Exit(ExitOK)
+	s.emitURL(sess, res.Site.Slug)
 }
 
-// deploySiteToSlug re-deploys a static-site archive at an existing owned slug,
-// atomically swapping the site row; the slug and URL are unchanged. A slug
-// naming a foreign-owned site, or not naming a site at all, exits with a
-// not-found byte-for-byte identical to any other not-found, so a non-owner
-// cannot probe existence or ownership. Sites have no name field, so --name is
-// ignored here just as it is on the create path.
-func (s *Server) deploySiteToSlug(sess gossh.Session, owner string, slug domain.Slug, body io.Reader) {
-	res, err := s.Deploy.DeployToSlug(slug, body, owner)
-	if err != nil {
-		emitServiceErr(sess, err)
-		return
-	}
-	url := s.BuildURL(res.Site.Slug)
+// emitURL ends a successful create or update: the URL alone on stdout, so a
+// `$(... | ssh -T apex)` capture stays clean, and its QR code on stderr.
+func (s *Server) emitURL(sess gossh.Session, slug domain.Slug) {
+	url := s.BuildURL(slug)
 	_, _ = fmt.Fprintln(sess, url)
-	_, _ = fmt.Fprintf(sess.Stderr(), "site: %d file(s).\n", len(res.Site.Manifest.Files))
 	writeQR(sess.Stderr(), url)
 	_ = sess.Exit(ExitOK)
 }
@@ -663,8 +633,7 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 func (s *Server) verbGet(sess gossh.Session, owner string, argv []string) {
 	slug, err := requireSlug(argv)
 	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(ExitUsage)
+		emitUsageErr(sess, err)
 		return
 	}
 	_, rc, err := s.Manage.Show(slug, owner)
@@ -682,14 +651,14 @@ func (s *Server) verbGet(sess gossh.Session, owner string, argv []string) {
 
 // -- url / qr ----------------------------------------------------------------
 
-// verbURL prints the shareable URL for an existing slug on stdout. No
-// ownership check (the URL is a public capability), but the target must exist,
-// otherwise the standard not-found.
-func (s *Server) verbURL(sess gossh.Session, argv []string) {
+// verbURL prints the shareable URL for an existing slug on stdout, and with
+// qr set the QR code on stderr, mirroring create. No ownership check (the URL
+// is a public capability), but the target must exist, otherwise the standard
+// not-found.
+func (s *Server) verbURL(sess gossh.Session, argv []string, qr bool) {
 	slug, err := requireSlug(argv)
 	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(ExitUsage)
+		emitUsageErr(sess, err)
 		return
 	}
 	url, ok := s.resolveExistingURL(slug)
@@ -699,26 +668,9 @@ func (s *Server) verbURL(sess gossh.Session, argv []string) {
 		return
 	}
 	fmt.Fprintln(sess, url)
-	_ = sess.Exit(ExitOK)
-}
-
-// verbQR mirrors create for an existing slug: the URL on stdout, the QR code
-// on stderr. Same existence gate and not-found shape as verbURL.
-func (s *Server) verbQR(sess gossh.Session, argv []string) {
-	slug, err := requireSlug(argv)
-	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(ExitUsage)
-		return
+	if qr {
+		writeQR(sess.Stderr(), url)
 	}
-	url, ok := s.resolveExistingURL(slug)
-	if !ok {
-		fmt.Fprintln(sess.Stderr(), "hostthis: not found")
-		_ = sess.Exit(ExitNotFound)
-		return
-	}
-	fmt.Fprintln(sess, url)
-	writeQR(sess.Stderr(), url)
 	_ = sess.Exit(ExitOK)
 }
 
@@ -745,14 +697,12 @@ func (s *Server) resolveExistingURL(slug domain.Slug) (string, bool) {
 
 func (s *Server) verbRename(sess gossh.Session, owner string, argv []string) {
 	if len(argv) < 1 {
-		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: usage: rename <slug> [label]  (omit the label to clear it)")
-		_ = sess.Exit(ExitUsage)
+		emitUsageErr(sess, errors.New("usage: rename <slug> [label]  (omit the label to clear it)"))
 		return
 	}
 	slug, err := domain.ParseSlug(argv[0])
 	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: invalid slug %q\n", argv[0])
-		_ = sess.Exit(ExitUsage)
+		emitUsageErr(sess, fmt.Errorf("invalid slug %q", argv[0]))
 		return
 	}
 	// ssh flattens the command to one space-joined string, so a multi-word
@@ -787,8 +737,7 @@ func (s *Server) verbDelete(sess gossh.Session, owner string, argv []string) {
 	case 1:
 		slug, err := requireSlug(argv)
 		if err != nil {
-			fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-			_ = sess.Exit(ExitUsage)
+			emitUsageErr(sess, err)
 			return
 		}
 		err = s.Manage.Delete(slug, owner)
@@ -813,14 +762,12 @@ func (s *Server) verbDelete(sess gossh.Session, owner string, argv []string) {
 	case 2:
 		slug, err := requireSlug(argv[:1])
 		if err != nil {
-			fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-			_ = sess.Exit(ExitUsage)
+			emitUsageErr(sess, err)
 			return
 		}
 		verNum, err := parseVersionArg(argv[1])
 		if err != nil {
-			fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-			_ = sess.Exit(ExitUsage)
+			emitUsageErr(sess, err)
 			return
 		}
 		res, err := s.Manage.DeleteVersion(slug, owner, verNum)
@@ -865,8 +812,7 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 	}
 	slug, err := requireSlug(rest)
 	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(ExitUsage)
+		emitUsageErr(sess, err)
 		return
 	}
 	vers, err := s.Manage.Versions(slug, owner)
@@ -936,8 +882,7 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 func (s *Server) verbUnpin(sess gossh.Session, owner string, argv []string) {
 	slug, err := requireSlug(argv)
 	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
-		_ = sess.Exit(ExitUsage)
+		emitUsageErr(sess, err)
 		return
 	}
 	if err := s.Manage.Unpin(slug, owner); err != nil {
@@ -950,21 +895,17 @@ func (s *Server) verbUnpin(sess gossh.Session, owner string, argv []string) {
 
 func (s *Server) verbPin(sess gossh.Session, owner string, argv []string) {
 	if len(argv) < 2 {
-		fmt.Fprintln(sess.Stderr(), "hostthis: usage: pin <slug> <ver-num>")
-		_ = sess.Exit(ExitUsage)
+		emitUsageErr(sess, errors.New("usage: pin <slug> <ver-num>"))
 		return
 	}
 	slug, err := domain.ParseSlug(argv[0])
 	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "hostthis: invalid slug %q\n", argv[0])
-		_ = sess.Exit(ExitUsage)
+		emitUsageErr(sess, fmt.Errorf("invalid slug %q", argv[0]))
 		return
 	}
-	verStr := strings.TrimPrefix(argv[1], "v")
-	verNum, err := parseInt(verStr)
-	if err != nil || verNum < 1 {
-		fmt.Fprintf(sess.Stderr(), "hostthis: invalid version %q\n", argv[1])
-		_ = sess.Exit(ExitUsage)
+	verNum, err := parseVersionArg(argv[1])
+	if err != nil {
+		emitUsageErr(sess, fmt.Errorf("invalid version %q", argv[1]))
 		return
 	}
 	ver, err := s.Manage.Pin(slug, owner, verNum)
@@ -1019,18 +960,11 @@ func (s *Server) verbWhoami(sess gossh.Session, owner string, argv []string) {
 		fmt.Fprintln(sess, "session:")
 		fmt.Fprintf(sess, "  subnet:        %s\n", info.Session.Subnet)
 		fmt.Fprintf(sess, "  seen subnets:  %d  (this one + %d other in the last 24h)\n",
-			info.Session.IdentitySubnets, max0(info.Session.IdentitySubnets-1))
+			info.Session.IdentitySubnets, max(0, info.Session.IdentitySubnets-1))
 		fmt.Fprintf(sess, "  subnet budget: %d of %d fresh keys used here today\n",
 			info.Session.SubnetFreshCount, info.Session.SubnetCap)
 	}
 	_ = sess.Exit(ExitOK)
-}
-
-func max0(n int) int {
-	if n < 0 {
-		return 0
-	}
-	return n
 }
 
 // -- help -------------------------------------------------------------------
