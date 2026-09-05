@@ -557,7 +557,9 @@ function artifactHarness(options = {}) {
   };
 }
 
-function deletableArtifactHarness() {
+// Two versions with the second served, so version 1 is deletable. `pinned`
+// pins the row to version 2 instead of serving it as the latest.
+function deletableArtifactHarness({ pinned = false } = {}) {
   const pasteSeed = artifactPasteSeed();
   pasteSeed.get("versions").push({
     ver: 2, kind: "markdown", contentSha: "v2", size: 4,
@@ -571,8 +573,12 @@ function deletableArtifactHarness() {
   const identitySeed = artifactIdentitySeed({ charge: 6 });
   const entry = identitySeed.get("entries").slugone1;
   entry.servedSize = 4;
-  entry.latestVersion = 2;
-  entry.contentSha = "v2";
+  if (pinned) {
+    row.pinnedVersion = 2;
+  } else {
+    entry.latestVersion = 2;
+    entry.contentSha = "v2";
+  }
   return artifactHarness({ pasteSeed, identitySeed });
 }
 
@@ -676,20 +682,7 @@ test("Paste delete commits before an unavailable allocation release", async () =
 });
 
 test("Paste delete refuses the version served at commit time", async () => {
-  const pasteSeed = artifactPasteSeed();
-  pasteSeed.get("versions").push({
-    ver: 2, kind: "markdown", contentSha: "v2", size: 4,
-    createdAt: 8, deleted: false, manifest: null,
-  });
-  pasteSeed.set("maxVer", 2);
-  const row = pasteSeed.get("row");
-  row.pinnedVersion = 2;
-  row.kind = "markdown";
-  row.contentSha = "v2";
-  row.size = 4;
-  const identitySeed = artifactIdentitySeed({ charge: 6 });
-  identitySeed.get("entries").slugone1.servedSize = 4;
-  const h = artifactHarness({ pasteSeed, identitySeed });
+  const h = deletableArtifactHarness({ pinned: true });
 
   const deleted = await responseJSON(await h.paste().deleteVersion({
     opId: "delete-served", generation: "generation-1", ver: 2,
@@ -703,18 +696,7 @@ test("Paste delete refuses the version served at commit time", async () => {
 });
 
 test("Paste pin fences unchanged charge and projects the served version", async () => {
-  const pasteSeed = artifactPasteSeed();
-  pasteSeed.get("versions").push({
-    ver: 2, kind: "markdown", contentSha: "v2", size: 4,
-    createdAt: 8, deleted: false, manifest: null,
-  });
-  pasteSeed.set("maxVer", 2);
-  pasteSeed.get("row").size = 4;
-  pasteSeed.get("row").kind = "markdown";
-  pasteSeed.get("row").contentSha = "v2";
-  const identitySeed = artifactIdentitySeed({ charge: 6 });
-  identitySeed.get("entries").slugone1.servedSize = 4;
-  const h = artifactHarness({ pasteSeed, identitySeed });
+  const h = deletableArtifactHarness();
 
   assert.deepStrictEqual(await responseJSON(await h.paste().pin({
     opId: "pin-1", generation: "generation-1", ver: 1,
