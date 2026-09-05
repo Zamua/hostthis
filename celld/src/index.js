@@ -164,6 +164,7 @@ export class Identity {
     }
     return this.state.storage.transaction(async (tx) => {
       const entries = (await tx.get("entries")) ?? {};
+      const active = Object.values(entries).reduce((n, e) => n + chargedSize(e), 0);
       const existing = entries[body.slug];
       if (existing) {
         if (existing.generation !== generation) {
@@ -179,10 +180,8 @@ export class Identity {
             existing.createFingerprint !== body.intent.fingerprint) {
           return Response.json({ error: "reservation-mismatch" }, { status: 409 });
         }
-        const active = Object.values(entries).reduce((n, e) => n + chargedSize(e), 0);
         return Response.json({ active, replayed: true });
       }
-      const active = Object.values(entries).reduce((n, e) => n + chargedSize(e), 0);
       if (body.userCap > 0 && active + body.size > body.userCap) {
         return Response.json({ error: "over-quota", active }, { status: 507 });
       }
@@ -199,7 +198,7 @@ export class Identity {
         kind: body.kind ?? "",
         name: body.name ?? "",
         contentSha: body.contentSha ?? "",
-        createFingerprint: body.intent?.fingerprint ?? "",
+        createFingerprint: body.intent.fingerprint,
       };
       const firstSeen = await tx.get("firstSeen");
       const updates = new Map([
