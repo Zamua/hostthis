@@ -303,7 +303,7 @@ function createIntentHarness() {
     },
   };
   const env = {
-    PASTE: {
+    PASTES: {
       idFromName(name) { return name; },
       get() { return endpoint; },
     },
@@ -436,7 +436,7 @@ test("Identity create alarm retains malformed and unknown intents", async () => 
     ["malformed", { kind: "create_paste", subject: "newslug2", generation: "generation-1" }],
   ]) {
     const storage = new FakeStorage(new Map([[`intent:${name}`, intent]]), false, 1);
-    const identity = new Identity(state(storage), { PASTE: { idFromName() {}, get() {} } });
+    const identity = new Identity(state(storage), { PASTES: { idFromName() {}, get() {} } });
     await identity.alarm();
     assert.notEqual(storage.data.get(`intent:${name}`), undefined, name);
     assert.notEqual(storage.alarm, null, name);

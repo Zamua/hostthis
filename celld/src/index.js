@@ -295,7 +295,7 @@ export class Identity {
   }
 
   pasteCell(slug) {
-    return this.env.PASTE.get(this.env.PASTE.idFromName(slug));
+    return this.env.PASTES.get(this.env.PASTES.idFromName(slug));
   }
 
   async resolveCreateIntent(id, intent) {
