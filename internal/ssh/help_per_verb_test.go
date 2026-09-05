@@ -1,9 +1,8 @@
 package ssh_test
 
 // Pins the `help <verb>` and `<verb> --help` / `<verb> -h` shapes against a
-// real ssh server + client (startStack). The global help banner is pinned
-// byte-exact by the characterization suite; this file covers only the
-// verb-specific shapes.
+// real ssh server + client. The global help banner is pinned byte-exact by the
+// characterization suite; this file covers only the verb-specific shapes.
 
 import (
 	"strings"
@@ -19,79 +18,61 @@ var verbHelpVerbs = []string{
 }
 
 // TestHelpVerb_HelpSpaceVerb pins that `help <verb>` emits the verb-specific
-// block (Usage: + Examples:) and exits 0, for every known verb.
+// block (Usage: + Examples:), exits 0, and that the Usage line names THAT
+// verb, for every known verb. The Usage line is matched as a whole token: a
+// substring search over the body cannot see two descriptors swapped, since
+// "pin" occurs inside "unpin" and "delete" inside "deleted".
 func TestHelpVerb_HelpSpaceVerb(t *testing.T) {
 	s := startStack(t)
 	for _, v := range verbHelpVerbs {
-		t.Run("help_"+v, func(t *testing.T) {
+		t.Run(v, func(t *testing.T) {
 			_, stderr, exit := s.run("help "+v, nil)
 			if exit != 0 {
 				t.Fatalf("exit: %d (stderr: %q)", exit, stderr)
 			}
-			if !strings.Contains(stderr, "Usage:") {
-				t.Fatalf("expected Usage: section in verb help, got %q", stderr)
-			}
-			if !strings.Contains(stderr, "Examples:") {
-				t.Fatalf("expected Examples: section in verb help, got %q", stderr)
+			if !strings.Contains(stderr, "Usage:") || !strings.Contains(stderr, "Examples:") {
+				t.Fatalf("expected Usage: and Examples: sections in verb help, got %q", stderr)
 			}
 			// The global banner's opening line is the canary: verb help
 			// must not fall through to it.
 			if strings.Contains(stderr, "Pipe a rendered file in") {
 				t.Fatalf("verb help leaked the global banner: %q", stderr)
 			}
-		})
-	}
-}
-
-// TestHelpVerb_VerbDashDashHelp pins that `<verb> --help` produces the
-// `help <verb>` body byte-for-byte, so the two surfaces cannot drift.
-func TestHelpVerb_VerbDashDashHelp(t *testing.T) {
-	s := startStack(t)
-	for _, v := range verbHelpVerbs {
-		t.Run(v+"_dashdash_help", func(t *testing.T) {
-			if v == "help" {
-				// Degenerate: the dispatcher's `help` case sees `--help`
-				// as the verb arg, which is not in the descriptor map.
-				t.Skip("help --help has bespoke unknown-verb shape covered elsewhere")
+			usage, ok := usageLine(stderr)
+			if !ok {
+				t.Fatalf("no Usage: line in help for %q, got %q", v, stderr)
 			}
-			_, stderr, exit := s.run(v+" --help", nil)
-			if exit != 0 {
-				t.Fatalf("exit: %d (stderr: %q)", exit, stderr)
-			}
-			if !strings.Contains(stderr, "Usage:") {
-				t.Fatalf("expected Usage: section for %s --help, got %q", v, stderr)
-			}
-			_, helpVerbStderr, _ := s.run("help "+v, nil)
-			if stderr != helpVerbStderr {
-				t.Fatalf("`%s --help` diverged from `help %s`:\n got %q\n want %q",
-					v, v, stderr, helpVerbStderr)
+			// "ssh <apex> <verb> ..."; the verb is the third whitespace token.
+			if fields := strings.Fields(usage); len(fields) < 3 || fields[2] != v {
+				t.Fatalf("help %q printed the usage %q: the descriptors are swapped or mis-keyed", v, usage)
 			}
 		})
 	}
 }
 
-// TestHelpVerb_VerbDashH mirrors the --help pin for the `-h` shorthand, kept
-// separate so a regression in one form cannot mask the other.
-func TestHelpVerb_VerbDashH(t *testing.T) {
+// TestHelpVerb_VerbHelpFlags pins that `<verb> --help` and `<verb> -h` each
+// produce the `help <verb>` body byte-for-byte, so the surfaces cannot drift.
+func TestHelpVerb_VerbHelpFlags(t *testing.T) {
 	s := startStack(t)
-	for _, v := range verbHelpVerbs {
-		t.Run(v+"_dash_h", func(t *testing.T) {
+	for _, flag := range []string{"--help", "-h"} {
+		for _, v := range verbHelpVerbs {
 			if v == "help" {
-				t.Skip("help -h has bespoke unknown-verb shape covered elsewhere")
+				// Degenerate: the dispatcher's `help` case sees the flag as
+				// the verb arg, which is not in the descriptor map.
+				continue
 			}
-			_, stderr, exit := s.run(v+" -h", nil)
-			if exit != 0 {
-				t.Fatalf("exit: %d (stderr: %q)", exit, stderr)
-			}
-			if !strings.Contains(stderr, "Usage:") {
-				t.Fatalf("expected Usage: section for %s -h, got %q", v, stderr)
-			}
-			_, helpVerbStderr, _ := s.run("help "+v, nil)
-			if stderr != helpVerbStderr {
-				t.Fatalf("`%s -h` diverged from `help %s`:\n got %q\n want %q",
-					v, v, stderr, helpVerbStderr)
-			}
-		})
+			t.Run(v+" "+flag, func(t *testing.T) {
+				_, stderr, exit := s.run(v+" "+flag, nil)
+				if exit != 0 {
+					t.Fatalf("exit: %d (stderr: %q)", exit, stderr)
+				}
+				_, helpVerbStderr, _ := s.run("help "+v, nil)
+				if stderr != helpVerbStderr || !strings.Contains(stderr, "Usage:") {
+					t.Fatalf("`%s %s` diverged from `help %s`:\n got %q\n want %q",
+						v, flag, v, stderr, helpVerbStderr)
+				}
+			})
+		}
 	}
 }
 
@@ -129,88 +110,35 @@ func TestHelpVerb_BareHelpUnchanged(t *testing.T) {
 	}
 }
 
-// TestHelpVerb_PtyCrLf pins the PTY-aware CRLF translation: CRLF-terminated
-// with a PTY allocated, LF-only without one.
+// TestHelpVerb_PtyCrLf pins the PTY-aware CRLF translation for both verb-help
+// surfaces: CRLF-terminated with a PTY allocated, LF-only without one.
 func TestHelpVerb_PtyCrLf(t *testing.T) {
 	s := startStack(t)
+	cmds := []string{"help get", "list --help"}
 
 	t.Run("NoPty_LF_Only", func(t *testing.T) {
-		_, stderr, exit := s.run("help get", nil)
-		if exit != 0 {
-			t.Fatalf("exit: %d", exit)
-		}
-		if strings.Contains(stderr, "\r\n") {
-			t.Fatalf("no-PTY verb help should be LF-only, found CRLF in %q", stderr)
-		}
-		if !strings.Contains(stderr, "Usage:") {
-			t.Fatalf("expected Usage: line, got %q", stderr)
+		for _, cmd := range cmds {
+			_, stderr, exit := s.run(cmd, nil)
+			if exit != 0 || !strings.Contains(stderr, "Usage:") {
+				t.Fatalf("%q: exit %d stderr %q", cmd, exit, stderr)
+			}
+			if strings.Contains(stderr, "\r\n") {
+				t.Fatalf("no-PTY %q should be LF-only, found CRLF in %q", cmd, stderr)
+			}
 		}
 	})
 
 	t.Run("WithPty_CRLF", func(t *testing.T) {
-		_, stderr, exit := s.runPty("help get")
-		if exit != 0 {
-			t.Fatalf("exit: %d", exit)
-		}
-		if !strings.Contains(stderr, "\r\n") {
-			t.Fatalf("PTY verb help should be CRLF, got LF-only %q", stderr)
-		}
-	})
-
-	t.Run("VerbDashDashHelp_NoPty_LF", func(t *testing.T) {
-		_, stderr, exit := s.run("list --help", nil)
-		if exit != 0 {
-			t.Fatalf("exit: %d", exit)
-		}
-		if strings.Contains(stderr, "\r\n") {
-			t.Fatalf("no-PTY `list --help` should be LF-only, found CRLF in %q", stderr)
-		}
-	})
-
-	t.Run("VerbDashDashHelp_WithPty_CRLF", func(t *testing.T) {
-		_, stderr, exit := s.runPty("list --help")
-		if exit != 0 {
-			t.Fatalf("exit: %d", exit)
-		}
-		if !strings.Contains(stderr, "\r\n") {
-			t.Fatalf("PTY `list --help` should be CRLF, got LF-only %q", stderr)
-		}
-	})
-}
-
-// TestHelpVerb_VerbBodyMentionsVerb catches a copy-paste regression where two
-// descriptors' signatures swap: each verb's Usage: line must name that verb.
-//
-// The Usage line, matched as a whole token, is what makes the swap visible.
-// A substring search over the whole body cannot see it: "pin" occurs inside
-// "unpin" and "delete" inside "deleted", so swapping the pin/unpin or
-// delete/versions descriptors satisfies a Contains check in BOTH directions.
-func TestHelpVerb_VerbBodyMentionsVerb(t *testing.T) {
-	s := startStack(t)
-	for _, verb := range []string{
-		"get", "list", "url", "qr", "rename", "delete",
-		"versions", "pin", "unpin", "whoami", "help",
-	} {
-		t.Run(verb, func(t *testing.T) {
-			_, stderr, exit := s.run("help "+verb, nil)
+		for _, cmd := range cmds {
+			_, stderr, exit := s.runPty(cmd)
 			if exit != 0 {
-				t.Fatalf("exit: %d", exit)
+				t.Fatalf("%q: exit %d", cmd, exit)
 			}
-			usage, ok := usageLine(stderr)
-			if !ok {
-				t.Fatalf("no Usage: line in help for %q, got %q", verb, stderr)
+			if !strings.Contains(stderr, "\r\n") {
+				t.Fatalf("PTY %q should be CRLF, got LF-only %q", cmd, stderr)
 			}
-			// "ssh <apex> <verb> ..."; the verb is the third whitespace token.
-			fields := strings.Fields(usage)
-			if len(fields) < 3 {
-				t.Fatalf("Usage line for %q is too short to name a verb: %q", verb, usage)
-			}
-			if fields[2] != verb {
-				t.Fatalf("help %q printed the usage for %q (%q): the descriptors are swapped or mis-keyed",
-					verb, fields[2], usage)
-			}
-		})
-	}
+		}
+	})
 }
 
 // usageLine returns the line following the "Usage:" header, trimmed.

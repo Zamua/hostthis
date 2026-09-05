@@ -666,30 +666,39 @@ func TestSybilGate_Characterization(t *testing.T) {
 	// the production path end to end.
 	t.Run("ThirdFreshKey_Exit6_AndRichMessage", func(t *testing.T) {
 		g := startStack(t, withKeyGate(2))
-		c1, _ := newKeyClient(t, g.sshAddr)
-		_, _, e1 := g.runOn(c1, "whoami", nil)
-		if e1 != 0 {
-			t.Fatalf("first key should be admitted, got exit %d", e1)
-		}
-		c2, _ := newKeyClient(t, g.sshAddr)
-		_, _, e2 := g.runOn(c2, "whoami", nil)
-		if e2 != 0 {
-			t.Fatalf("second key should be admitted, got exit %d", e2)
+		for i := range 2 {
+			c, _ := newKeyClient(t, g.sshAddr)
+			if _, _, e := g.runOn(c, "whoami", nil); e != 0 {
+				t.Fatalf("fresh key %d should be admitted, got exit %d", i+1, e)
+			}
 		}
 		c3, _ := newKeyClient(t, g.sshAddr)
 		_, stderr, e3 := g.runOn(c3, "whoami", nil)
 		if e3 != 6 {
 			t.Fatalf("third key should be refused with exit 6, got %d (%q)", e3, stderr)
 		}
-		// The SybilRefusal path prints subnet + cap usage.
-		if !strings.Contains(stderr, "too many new keys from this network today") {
-			t.Fatalf("expected canonical sybil refusal line, got %q", stderr)
+		// The SybilRefusal path prints subnet + cap usage, then guidance.
+		for _, want := range []string{"too many new keys from this network today", "subnet ", "to get in:"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("expected %q in refusal, got %q", want, stderr)
+			}
 		}
-		if !strings.Contains(stderr, "subnet ") {
-			t.Fatalf("expected 'subnet ...' detail, got %q", stderr)
+		// "(b) wait until <YYYY-MM-DD HH:MM UTC> - the oldest entry ages out
+		// then": the prefix (2-space indent included) byte-exact, the
+		// timestamp by shape since it is now+window.
+		_, after, ok := strings.Cut(stderr, "  (b) wait until ")
+		if !ok {
+			t.Fatalf("missing '(b) wait until ' line in refusal:\n%q", stderr)
 		}
-		if !strings.Contains(stderr, "to get in:") {
-			t.Fatalf("expected guidance block, got %q", stderr)
+		line, _, _ := strings.Cut(after, "\n")
+		wantTail := regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC - the oldest entry ages out then$`)
+		if !wantTail.MatchString(line) {
+			t.Fatalf("'(b) wait until ' tail drift:\n got: %q\nwant pattern: %q", line, wantTail.String())
+		}
+		// The keyless refusal fires before the gate is consulted, so the
+		// gate never sees an empty fingerprint.
+		if _, stderr, e := g.runAnon("whoami", nil); e != 3 || !strings.Contains(stderr, "ssh key required") {
+			t.Fatalf("anon on a gated stack: exit %d stderr %q, want the key-required refusal", e, stderr)
 		}
 	})
 
@@ -725,34 +734,44 @@ func TestSybilGate_Characterization(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestProxyProtocol_Characterization(t *testing.T) {
-	t.Run("RealClientIPDistinguishesSubnetsForSybilGate", func(t *testing.T) {
-		// Cap at 1 fresh key per subnet. Without PROXY parsing both fresh
-		// keys would come from 127.0.0.0/24 and the second would be rejected;
-		// admitting both from different /24s proves the gate sees the proxied
-		// IP.
-		p := startStack(t, withProxyProto(), withKeyGate(1))
-		c1 := dialWithProxy(t, p.sshAddr, "TCP4", "203.0.113.10", 50000)
-		_, _, e1 := p.runOn(c1, "whoami", nil)
-		if e1 != 0 {
-			t.Fatalf("first proxied client (203.0.113.0/24) should be admitted, got exit %d", e1)
-		}
-		c2 := dialWithProxy(t, p.sshAddr, "TCP4", "198.51.100.10", 50001)
-		_, _, e2 := p.runOn(c2, "whoami", nil)
-		if e2 != 0 {
-			t.Fatalf("second proxied client (198.51.100.0/24) should be admitted on a different subnet, got exit %d", e2)
-		}
-		// A second fresh key from the FIRST proxied subnet is refused: that
-		// subnet's slot is full.
-		c3 := dialWithProxy(t, p.sshAddr, "TCP4", "203.0.113.20", 50002)
-		_, stderr, e3 := p.runOn(c3, "whoami", nil)
-		if e3 != 6 {
-			t.Fatalf("third proxied client from the full subnet should hit Sybil refusal, got exit %d (%q)",
-				e3, stderr)
-		}
-		if !strings.Contains(stderr, "203.0.113.0/24") {
-			t.Fatalf("expected the proxied subnet '203.0.113.0/24' in the refusal, got %q", stderr)
-		}
-	})
+	// Cap at 2 fresh keys per subnet. Without PROXY parsing every key would
+	// come from 127.0.0.0/24 and the third would be refused regardless;
+	// refusing the third from ONE proxied subnet while admitting a fresh key
+	// from ANOTHER proves the gate sees the proxied IP, bucketed /24 for
+	// IPv4 and /48 for IPv6.
+	for _, tc := range []struct {
+		family     string
+		same       [3]string // one subnet, differing only below the mask
+		other      string    // a different subnet
+		wantSubnet []string  // substrings of the refusal's subnet line
+	}{
+		{"TCP4", [3]string{"203.0.113.10", "203.0.113.11", "203.0.113.20"}, "198.51.100.10", []string{"203.0.113.0/24"}},
+		{"TCP6", [3]string{"2001:db8:1::aa", "2001:db8:1:1234::bb", "2001:db8:1:ffff::cc"}, "2001:db8:2::dd", []string{"/48", "2001:db8:1"}},
+	} {
+		t.Run(tc.family, func(t *testing.T) {
+			p := startStack(t, withProxyProto(), withKeyGate(2))
+			for i, ip := range tc.same[:2] {
+				c := dialWithProxy(t, p.sshAddr, tc.family, ip, 50000+i)
+				if _, _, e := p.runOn(c, "whoami", nil); e != 0 {
+					t.Fatalf("proxied client %s should be admitted, got exit %d", ip, e)
+				}
+			}
+			c3 := dialWithProxy(t, p.sshAddr, tc.family, tc.same[2], 50002)
+			_, stderr, e3 := p.runOn(c3, "whoami", nil)
+			if e3 != 6 {
+				t.Fatalf("third client from the full subnet should hit Sybil refusal, got exit %d (%q)", e3, stderr)
+			}
+			for _, want := range append([]string{"too many new keys from this network today"}, tc.wantSubnet...) {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("expected %q in the refusal, got %q", want, stderr)
+				}
+			}
+			c4 := dialWithProxy(t, p.sshAddr, tc.family, tc.other, 50003)
+			if _, _, e := p.runOn(c4, "whoami", nil); e != 0 {
+				t.Fatalf("fresh key from a different subnet should be admitted, got exit %d", e)
+			}
+		})
+	}
 }
 
 // A headerless connection is refused when PROXY parsing is enabled: only the
@@ -874,7 +893,7 @@ func TestExitCodes_Characterization(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 15. Owner-collapse: NotOwner is indistinguishable from NotFound at the SSH
+// 14. Owner-collapse: NotOwner is indistinguishable from NotFound at the SSH
 //     boundary, across every owner-gated verb
 // ---------------------------------------------------------------------------
 
@@ -931,99 +950,5 @@ func TestOwnerCollapse_Characterization(t *testing.T) {
 				t.Fatalf("foreign %s leaks the service layer name: %q", tc.name, stderr)
 			}
 		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// 17. Sybil gate - IPv6 (/48) subnet path via PROXY protocol v1 TCP6
-// ---------------------------------------------------------------------------
-
-func TestProxyProtocol_IPv6_SybilCharacterization(t *testing.T) {
-	// KeyGate buckets IPv6 by /48 (ipSubnet in server.go): three fresh keys
-	// from the SAME /48 refuse the third, while a fresh key from a DIFFERENT
-	// /48 succeeds.
-	t.Run("SameSlash48_ThirdRefused_DifferentSlash48_Admitted", func(t *testing.T) {
-		p := startStack(t, withProxyProto(), withKeyGate(2))
-
-		// Three addresses in 2001:db8:1::/48, differing only in the lower 80
-		// bits, which ipSubnet buckets together.
-		c1 := dialWithProxy(t, p.sshAddr, "TCP6", "2001:db8:1::aa", 50000)
-		_, _, e1 := p.runOn(c1, "whoami", nil)
-		if e1 != 0 {
-			t.Fatalf("first IPv6 client in 2001:db8:1::/48 should be admitted, got exit %d", e1)
-		}
-		c2 := dialWithProxy(t, p.sshAddr, "TCP6", "2001:db8:1:1234::bb", 50001)
-		_, _, e2 := p.runOn(c2, "whoami", nil)
-		if e2 != 0 {
-			t.Fatalf("second IPv6 client in same /48 should be admitted (cap=2), got exit %d", e2)
-		}
-		// A third fresh key with different lower bits but the SAME /48.
-		c3 := dialWithProxy(t, p.sshAddr, "TCP6", "2001:db8:1:ffff::cc", 50002)
-		_, stderr3, e3 := p.runOn(c3, "whoami", nil)
-		if e3 != 6 {
-			t.Fatalf("third IPv6 client in full /48 should hit Sybil refusal (exit 6), got %d (%q)",
-				e3, stderr3)
-		}
-		if !strings.Contains(stderr3, "too many new keys from this network today") {
-			t.Fatalf("expected canonical sybil refusal, got %q", stderr3)
-		}
-		// The subnet detail line names the IPv6 /48. Only the prefix is
-		// asserted: the exact mask canonicalization of 2001:db8:1:: is
-		// net.IP.Mask's business.
-		if !strings.Contains(stderr3, "/48") {
-			t.Fatalf("expected '/48' in IPv6 subnet detail, got %q", stderr3)
-		}
-		if !strings.Contains(stderr3, "2001:db8:1") {
-			t.Fatalf("expected '2001:db8:1' prefix in IPv6 subnet detail, got %q", stderr3)
-		}
-
-		// A fresh key from 2001:db8:2::/48 gets in.
-		c4 := dialWithProxy(t, p.sshAddr, "TCP6", "2001:db8:2::dd", 50003)
-		_, _, e4 := p.runOn(c4, "whoami", nil)
-		if e4 != 0 {
-			t.Fatalf("fresh key from a different /48 should be admitted, got exit %d (Sybil gate is per-/48)", e4)
-		}
-	})
-}
-
-// ---------------------------------------------------------------------------
-// 18. Sybil refusal - "(b) wait until <timestamp>" line shape
-// ---------------------------------------------------------------------------
-
-func TestSybil_WaitUntilLine_Characterization(t *testing.T) {
-	// The refusal's enrichment path emits a "(b) wait until
-	// <YYYY-MM-DD HH:MM UTC> - the oldest entry ages out then" line. The
-	// prefix is pinned byte-exact and the tail by regex, since the timestamp
-	// is now+window and cannot be pinned literally.
-	g := startStack(t, withKeyGate(2))
-	c1, _ := newKeyClient(t, g.sshAddr)
-	_, _, _ = g.runOn(c1, "whoami", nil)
-	c2, _ := newKeyClient(t, g.sshAddr)
-	_, _, _ = g.runOn(c2, "whoami", nil)
-	c3, _ := newKeyClient(t, g.sshAddr)
-	_, stderr, e3 := g.runOn(c3, "whoami", nil)
-	if e3 != 6 {
-		t.Fatalf("third key should be refused, got exit %d", e3)
-	}
-	// The server emits "  (b) wait until %s - the oldest entry ages out
-	// then\n", where %s is now+window as "2006-01-02 15:04 UTC". The 2-space
-	// indent and literal prefix are part of the pin.
-	const wantPrefix = "  (b) wait until "
-	_, after, ok := strings.Cut(stderr, wantPrefix)
-	if !ok {
-		t.Fatalf("missing '(b) wait until ' line in refusal:\n%q", stderr)
-	}
-	rest := after
-	nl := strings.Index(rest, "\n")
-	if nl < 0 {
-		t.Fatalf("'(b) wait until ' line is unterminated: %q", rest)
-	}
-	line := rest[:nl]
-	// The timestamp tail: YYYY-MM-DD HH:MM UTC followed by the trailing
-	// " - the oldest entry ages out then" sentence.
-	wantTail := regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC - the oldest entry ages out then$`)
-	if !wantTail.MatchString(line) {
-		t.Fatalf("'(b) wait until ' tail drift:\n got: %q\nwant pattern: %q",
-			line, wantTail.String())
 	}
 }
