@@ -1,9 +1,6 @@
-// The site surface, served by the paste family.
-//
-// A directory IS a paste whose version manifest holds N entries, so this
-// satisfies the service's SiteRepo port without a second key family, a second
-// enumeration index, or a second quota scan. It exists so the service layer
-// keeps one vocabulary; when that vocabulary collapses too, the port goes.
+// The site surface, served by the paste family: a directory IS a paste whose
+// version manifest holds N entries, so this satisfies the service's SiteRepo
+// port without a second key family, enumeration index, or quota scan.
 
 package storage
 
@@ -14,12 +11,9 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// SiteBackingRepo is the slice of a paste repo the site surface needs.
-//
-// An interface rather than a concrete repo because the translation below is
-// pure vocabulary - directory to paste and back - with nothing backend-specific
-// in it. Naming the six methods it actually uses lets every backend share this
-// one implementation instead of each writing its own copy of the same mapping.
+// SiteBackingRepo is the slice of a paste repo the site surface needs. An
+// interface rather than a concrete repo: the translation is pure vocabulary,
+// directory to paste and back, so every backend shares this one implementation.
 type SiteBackingRepo interface {
 	Get(domain.Slug) (domain.Paste, error)
 	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
@@ -85,20 +79,13 @@ func (a *Sites) InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedB
 }
 
 // ReplaceWithQuotaCheck re-deploys an existing directory by APPENDING the new
-// manifest as a version.
-//
-// Prior versions stay live, exactly as they do for a document, so a directory
-// pins, rolls back and rolls forward like anything else. That is the point of
-// one paste model: a redeploy is an update, and an update has never thrown
-// away what it replaced.
-//
-// It therefore CHARGES like an update too: each live manifest version counts
-// in full against quota, even when its blobs are physically deduplicated. An
-// owner reclaims the logical charge by deleting versions they no longer want.
+// manifest as a version. Prior versions stay live, so a directory pins and
+// rolls back like a document, and each live manifest version is charged in
+// full even when its blobs are physically deduplicated.
 //
 // Ownership is enforced here rather than inside the append: a slug that is not
-// a directory, and one owned by another identity, both yield the not-found
-// sentinel, so "not yours" stays indistinguishable from "does not exist".
+// a directory, and one owned by another identity, both yield not-found, so
+// "not yours" stays indistinguishable from "does not exist".
 func (a *Sites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error {
 	existing, err := a.repo.Get(s.Slug)
 	if err != nil {
@@ -126,9 +113,8 @@ func (a *Sites) SumActiveBytesByOwner(string, time.Time) (int64, error) {
 	return 0, nil
 }
 
-// ListSitesByOwner returns NOTHING, for the reason the sum returns zero: a
-// directory is already in the paste listing the caller concatenates this
-// onto, so returning it here would show it twice.
+// ListSitesByOwner returns nothing, for the reason the sum returns zero: a
+// directory is already in the paste listing this is concatenated onto.
 func (a *Sites) ListSitesByOwner(string, time.Time) ([]domain.Site, error) {
 	return nil, nil
 }

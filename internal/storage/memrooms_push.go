@@ -9,12 +9,10 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// The push surface of MemRoomRepo: subscriptions and schedules with the
-// contract's validation and caps, a VAPID public key per app, and the test
-// rate limit. Nothing is delivered; delivery is a celld feature. The domain
-// rules run here as well as in the service so the storage contract, which the
-// conformance suite pins against both backends, refuses the same documents
-// the cell does.
+// The push surface of MemRoomRepo: subscriptions, schedules, a VAPID public key
+// per app, and the test rate limit. Nothing is delivered; delivery is a celld
+// feature. The domain rules run here as well as in the service so the storage
+// contract refuses the same documents the cell does.
 
 type memPushSub struct {
 	sub   domain.PushSubscription
