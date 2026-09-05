@@ -14,6 +14,10 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
+// ErrPurgeRejected is returned when the edge answers a purge with a non-2xx
+// status; the wrapped message carries the status and body.
+var ErrPurgeRejected = errors.New("cloudflare purge rejected")
+
 // Cloudflare purges a paste's cached representations from the Cloudflare CDN
 // edge. The token needs only the zone "Cache:Purge" permission.
 //
@@ -74,7 +78,7 @@ func (c *Cloudflare) purgeURLs(urls []string) error {
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		err := fmt.Errorf("cloudflare purge non-2xx: %d %s", resp.StatusCode, string(body))
+		err := fmt.Errorf("%w: %d %s", ErrPurgeRejected, resp.StatusCode, string(body))
 		c.logf("%v (urls=%v)", err, urls)
 		return err
 	}
