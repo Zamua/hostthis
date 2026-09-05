@@ -457,9 +457,3 @@ func (r *MemRepo) SubnetsForIdentity(identity string, now time.Time, window time
 	}
 	return n, nil
 }
-
-// WaitPendingConfirms is a no-op: every MemRepo write is synchronous, so there
-// is never a deferred confirm to drain. It exists because callers written for
-// backends with asynchronous index confirms drain before asserting, through
-// the pendingConfirmsDrainer seam.
-func (r *MemRepo) WaitPendingConfirms() {}

@@ -106,21 +106,6 @@ func pasteOf(slug, identity string, size int) domain.Paste {
 	}
 }
 
-// pendingConfirmsDrainer is implemented by a backend whose
-// InsertWithQuotaCheck defers the derived-index confirm to a background
-// goroutine. Draining it after an insert makes ListByOwner / CountByOwner /
-// OwnerFirstSeen deterministic; backends that write the index synchronously do
-// not implement it.
-type pendingConfirmsDrainer interface{ WaitPendingConfirms() }
-
-// drainConfirms blocks until any deferred confirm-insert the repo launched has
-// run. No-op for backends that confirm synchronously.
-func drainConfirms(r conformanceRepo) {
-	if d, ok := r.(pendingConfirmsDrainer); ok {
-		d.WaitPendingConfirms()
-	}
-}
-
 // insert creates a paste with no caps (caps=0 = no quota enforcement) and
 // fails the test on error.
 func insert(t *testing.T, r conformanceRepo, p domain.Paste) {
@@ -128,7 +113,6 @@ func insert(t *testing.T, r conformanceRepo, p domain.Paste) {
 	if err := r.InsertWithQuotaCheck(context.Background(), p, 0, fixedNow); err != nil {
 		t.Fatalf("insert %q: %v", p.Slug, err)
 	}
-	drainConfirms(r)
 }
 
 // --- contract: insert / get -----------------------------------------

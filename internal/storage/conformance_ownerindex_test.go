@@ -46,9 +46,6 @@ func ownerInsert(t *testing.T, r ownerIndexRepo, p domain.Paste) {
 	if err := r.InsertWithQuotaCheck(context.Background(), p, 0, fixedNow); err != nil {
 		t.Fatalf("insert %q: %v", p.Slug, err)
 	}
-	if d, ok := r.(pendingConfirmsDrainer); ok {
-		d.WaitPendingConfirms()
-	}
 }
 
 // Everything inserted for an owner appears in that owner's listing, and nobody
@@ -160,9 +157,6 @@ func conformOwnerListReflectsMutation(t *testing.T, r ownerIndexRepo) {
 	if err := r.SetName(p.Slug, "after", domain.Identity(owner), p.CreatedAt); err != nil {
 		t.Fatalf("SetName: %v", err)
 	}
-	if d, ok := r.(pendingConfirmsDrainer); ok {
-		d.WaitPendingConfirms()
-	}
 
 	got, err := r.ListByOwner(owner)
 	if err != nil {
@@ -267,9 +261,6 @@ func conformDeleteReleasesAndDelists(t *testing.T, r ownerIndexRepo) {
 	if err := r.Delete(doomed.Slug, domain.Identity(owner), doomed.CreatedAt); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if d, ok := r.(pendingConfirmsDrainer); ok {
-		d.WaitPendingConfirms()
-	}
 
 	n, err := chargedBytes(t, r, owner)
 	if err != nil {
@@ -303,9 +294,6 @@ func conformVersionChangesTheCharge(t *testing.T, r ownerIndexRepo) {
 		domain.KindHTML, "sha-v2", 300, 0, fixedNow); err != nil {
 		t.Fatalf("AppendVersionWithQuotaCheck: %v", err)
 	}
-	if d, ok := r.(pendingConfirmsDrainer); ok {
-		d.WaitPendingConfirms()
-	}
 
 	n, err := chargedBytes(t, r, owner)
 	if err != nil {
@@ -338,9 +326,6 @@ func conformDeleteVersionRefundsTheCharge(t *testing.T, r ownerIndexRepo) {
 
 	if err := r.DeleteVersion(p.Slug, p.Generation, 1); err != nil {
 		t.Fatalf("DeleteVersion(1): %v", err)
-	}
-	if d, ok := r.(pendingConfirmsDrainer); ok {
-		d.WaitPendingConfirms()
 	}
 	n, err := chargedBytes(t, r, owner)
 	if err != nil {
