@@ -1,7 +1,6 @@
 package celld
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,10 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -34,17 +31,9 @@ import (
 // pending. The intent's exact row fingerprint lets recovery either confirm that
 // row or fence the generation in the Paste cell before releasing its charge.
 // Writing the row first would instead leave a visible, uncharged orphan.
-type PasteRepo struct {
-	base   string
-	client *http.Client
-}
+type PasteRepo struct{ *cell }
 
-func NewPasteRepo(base string, c *http.Client) *PasteRepo {
-	if c == nil {
-		c = &http.Client{Timeout: 10 * time.Second}
-	}
-	return &PasteRepo{base: base, client: c}
-}
+func NewPasteRepo(base string, c *http.Client) *PasteRepo { return &PasteRepo{newCell(base, c)} }
 
 // pasteRow is the wire and stored shape. Private so the domain type can change
 // without a stored-format migration.
@@ -107,112 +96,6 @@ func (r pasteRow) domain() domain.Paste {
 		UpdatedAt:     time.UnixMilli(r.UpdatedAt).UTC(),
 		Manifest:      r.Manifest,
 	}
-}
-
-// isCellAnswer reports whether a status is part of the adapter's vocabulary
-// rather than a failure. Kept as a list so adding a new one is a deliberate
-// edit, not a widened comparison.
-func isCellAnswer(status int) bool {
-	switch status {
-	case http.StatusNotFound, http.StatusConflict,
-		http.StatusRequestEntityTooLarge, http.StatusInsufficientStorage:
-		return true
-	}
-	return false
-}
-
-// do sends one cell request and returns the raw response; call is the usual
-// wrapper. Callers needing the body of an answer status (a 429 carrying its
-// wait) use do directly.
-func (r *PasteRepo) do(ctx context.Context, method, path, key, val string, body any) (*http.Response, error) {
-	// The routing param is MERGED rather than appended: a path may already carry
-	// query params of its own, and a second bare "?" makes the whole string one
-	// unparseable query, which presents as the cell rejecting a param that is
-	// plainly in the URL.
-	sep := "?"
-	if strings.Contains(path, "?") {
-		sep = "&"
-	}
-	u := fmt.Sprintf("%s%s%s%s=%s", r.base, path, sep, key, url.QueryEscape(val))
-	var payload []byte
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("celld: encode %s: %w", path, err)
-		}
-		payload = b
-	}
-	rdr := bytes.NewReader(payload)
-	req, err := http.NewRequestWithContext(ctx, method, u, rdr)
-	if err != nil {
-		return nil, fmt.Errorf("celld: build %s: %w", path, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("celld: %s: %w", path, err)
-	}
-	return resp, nil
-}
-
-func (r *PasteRepo) call(ctx context.Context, method, path, key, val string, body, out any) (int, error) {
-	resp, err := r.do(ctx, method, path, key, val, body)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close() //nolint:errcheck
-	// Some statuses are ANSWERS, not faults: the caller maps them to domain
-	// sentinels (not-found, slug taken, over quota, at capacity). Wrapping one
-	// as an error hides the sentinel behind a transport failure, and the caller's
-	// switch on it becomes unreachable - which is what happened to 404/409 until
-	// the owner-index suite caught it, and to 413/507 until the room suite did.
-	//
-	// A status not on this list means the cell did something the adapter does not
-	// model, which IS a fault.
-	if resp.StatusCode >= 400 && !isCellAnswer(resp.StatusCode) {
-		// Carry the cell's own explanation up. The identity cell refuses an
-		// impossible charge total and says WHICH value it refused; discarding
-		// that would trade a legible failure for a bare status code, and the
-		// number is the whole diagnostic.
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		if len(detail) > 0 {
-			return resp.StatusCode, fmt.Errorf("celld: %s: status %d: %s", path, resp.StatusCode, detail)
-		}
-		return resp.StatusCode, nil
-	}
-	// Answer statuses >= 300 carry sentinel meaning, not a decodable body: a
-	// cell 404 says "not found\n", which is no caller's JSON.
-	if out != nil && resp.StatusCode < 300 {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil && !errors.Is(err, io.EOF) {
-			return resp.StatusCode, fmt.Errorf("celld: decode %s: %w", path, err)
-		}
-	}
-	return resp.StatusCode, nil
-}
-
-var notFound = map[int]error{http.StatusNotFound: domain.ErrNotFound}
-
-// answer maps the outcome of one call: a listed status returns its sentinel,
-// any other status past 2xx is a fault naming op.
-func answer(op string, status int, err error, answers map[int]error) error {
-	if err != nil {
-		return err
-	}
-	if mapped, ok := answers[status]; ok {
-		return mapped
-	}
-	if status >= 300 {
-		return fmt.Errorf("celld: %s: unexpected status %d", op, status)
-	}
-	return nil
-}
-
-// ask is call with its status mapped by answer.
-func (r *PasteRepo) ask(ctx context.Context, op, method, path, key, val string, body, out any,
-	answers map[int]error,
-) error {
-	status, err := r.call(ctx, method, path, key, val, body, out)
-	return answer(op, status, err, answers)
 }
 
 // InsertWithQuotaCheck runs the three-step create described on the type.
