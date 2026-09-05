@@ -4,8 +4,7 @@ Every pull request can publish a browsable report: pass or fail, the failure
 output, and whatever screenshots the tests recorded, at one URL that opens on a
 phone. GitHub's own artifacts are login-gated zips, which is why this exists.
 
-The infrastructure is in place and currently **inert**. It switches on the day
-an `e2e-ci` target appears in the Makefile.
+The workflow runs the `e2e-ci` Makefile target on every pull request.
 
 ## The contract
 
