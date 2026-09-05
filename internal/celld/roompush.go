@@ -23,16 +23,9 @@ func (r *RoomRepo) PushKey(app domain.Slug) (string, error) {
 	var res struct {
 		Key string `json:"key"`
 	}
-	status, err := r.paste().call(context.Background(), http.MethodPost, "/paste/pushkey", "slug",
-		app.String(), nil, &res)
-	if err != nil {
+	if err := r.ask(context.Background(), "push key", http.MethodPost, "/paste/pushkey", "slug",
+		app.String(), nil, &res, notFound); err != nil {
 		return "", err
-	}
-	if status == http.StatusNotFound {
-		return "", domain.ErrNotFound
-	}
-	if status >= 300 {
-		return "", fmt.Errorf("celld: push key: unexpected status %d", status)
 	}
 	return res.Key, nil
 }
@@ -65,7 +58,7 @@ func (r *RoomRepo) PutPushSubscription(app domain.Slug, id domain.RoomID, sub do
 // the cell's error code, the `error` field a refusal carries. Only the code
 // tells a cap the caller can act on from a contract fault at the same status.
 func (r *RoomRepo) pushPut(path string, app domain.Slug, id domain.RoomID, body any) (int, string, error) {
-	resp, err := r.paste().do(context.Background(), http.MethodPost, path, "room", roomKey(app, id), body)
+	resp, err := r.do(context.Background(), http.MethodPost, path, "room", roomKey(app, id), body)
 	if err != nil {
 		return 0, "", err
 	}
@@ -79,18 +72,8 @@ func (r *RoomRepo) pushPut(path string, app domain.Slug, id domain.RoomID, body 
 }
 
 func (r *RoomRepo) DeletePushSubscription(app domain.Slug, id domain.RoomID, endpoint string) error {
-	status, err := r.paste().call(context.Background(), http.MethodPost, "/room/pushsubdel", "room",
-		roomKey(app, id), map[string]string{"endpoint": endpoint}, nil)
-	if err != nil {
-		return err
-	}
-	if status == http.StatusNotFound {
-		return domain.ErrNotFound
-	}
-	if status >= 300 {
-		return fmt.Errorf("celld: push subscription delete: unexpected status %d", status)
-	}
-	return nil
+	return r.ask(context.Background(), "push subscription delete", http.MethodPost, "/room/pushsubdel",
+		"room", roomKey(app, id), map[string]string{"endpoint": endpoint}, nil, notFound)
 }
 
 func (r *RoomRepo) ListPushSubscriptions(app domain.Slug, id domain.RoomID) ([]domain.PushSubscriptionSummary, error) {
@@ -100,16 +83,9 @@ func (r *RoomRepo) ListPushSubscriptions(app domain.Slug, id domain.RoomID) ([]d
 			Added    wireTime `json:"added"`
 		} `json:"subscriptions"`
 	}
-	status, err := r.paste().call(context.Background(), http.MethodPost, "/room/pushsublist", "room",
-		roomKey(app, id), nil, &wire)
-	if err != nil {
+	if err := r.ask(context.Background(), "push subscription list", http.MethodPost, "/room/pushsublist",
+		"room", roomKey(app, id), nil, &wire, notFound); err != nil {
 		return nil, err
-	}
-	if status == http.StatusNotFound {
-		return nil, domain.ErrNotFound
-	}
-	if status >= 300 {
-		return nil, fmt.Errorf("celld: push subscription list: unexpected status %d", status)
 	}
 	out := make([]domain.PushSubscriptionSummary, 0, len(wire.Subscriptions))
 	for _, w := range wire.Subscriptions {
@@ -144,16 +120,9 @@ func (r *RoomRepo) PutPushSchedule(app domain.Slug, id domain.RoomID, sched doma
 
 func (r *RoomRepo) GetPushSchedule(app domain.Slug, id domain.RoomID) (domain.PushSchedule, error) {
 	var sched domain.PushSchedule
-	status, err := r.paste().call(context.Background(), http.MethodPost, "/room/pushscheduleget", "room",
-		roomKey(app, id), nil, &sched)
-	if err != nil {
+	if err := r.ask(context.Background(), "push schedule get", http.MethodPost, "/room/pushscheduleget",
+		"room", roomKey(app, id), nil, &sched, notFound); err != nil {
 		return domain.PushSchedule{}, err
-	}
-	if status == http.StatusNotFound {
-		return domain.PushSchedule{}, domain.ErrNotFound
-	}
-	if status >= 300 {
-		return domain.PushSchedule{}, fmt.Errorf("celld: push schedule get: unexpected status %d", status)
 	}
 	if sched.Items == nil {
 		sched.Items = []domain.PushItem{}
@@ -164,7 +133,7 @@ func (r *RoomRepo) GetPushSchedule(app domain.Slug, id domain.RoomID) (domain.Pu
 // TestPush runs the cell's inline test send. A 429 carries the wait in its
 // body, which is why this reads the response itself rather than through call.
 func (r *RoomRepo) TestPush(app domain.Slug, id domain.RoomID, now time.Time) (domain.PushTestResult, error) {
-	resp, err := r.paste().do(context.Background(), http.MethodPost, "/room/pushtest", "room",
+	resp, err := r.do(context.Background(), http.MethodPost, "/room/pushtest", "room",
 		roomKey(app, id), map[string]any{"now": now.UTC().UnixMilli()})
 	if err != nil {
 		return domain.PushTestResult{}, err
