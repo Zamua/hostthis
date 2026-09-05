@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"errors"
 	"io"
 	"strconv"
 	"strings"
@@ -63,8 +64,8 @@ func TestSiteExtractor_ManifestByteCapTrips(t *testing.T) {
 	if err == nil {
 		t.Fatalf("manifest path-text cap never tripped")
 	}
-	if !strings.Contains(err.Error(), "manifest path text") {
-		t.Fatalf("expected the manifest path-text cap, got %v", err)
+	if !errors.Is(err, ErrTooManyFiles) {
+		t.Fatalf("expected ErrTooManyFiles from the manifest path-text cap, got %v", err)
 	}
 	if e.pathBytes <= MaxManifestBytes {
 		t.Fatalf("cap tripped at %d bytes, which is not over %d", e.pathBytes, MaxManifestBytes)

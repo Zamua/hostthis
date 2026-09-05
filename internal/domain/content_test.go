@@ -70,7 +70,7 @@ func TestDetectKind(t *testing.T) {
 func TestDetectKind_RejectsNonTextUnderATextHint(t *testing.T) {
 	body := []byte("<!doctype html><h1>looks like html</h1>")
 
-	for _, hint := range []string{"html", "md", "diff"} {
+	for _, hint := range []string{"html", "md", "diff", "flamegraph", "text"} {
 		t.Run(hint+"/binary sniff is rejected", func(t *testing.T) {
 			if _, err := DetectKind(body, hint, stubSniffer("application/octet-stream")); err == nil {
 				t.Fatalf("hint %q with binary-sniffing bytes must be rejected: a hint must not be able "+

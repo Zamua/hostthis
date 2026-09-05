@@ -126,48 +126,30 @@ func validSchedule() PushSchedule {
 }
 
 func TestValidatePushSchedule_Valid(t *testing.T) {
-	if err := ValidatePushSchedule(validSchedule(), testNow); err != nil {
-		t.Fatalf("valid schedule refused: %v", err)
-	}
-	// Empty items clears the schedule; tz is still required.
-	for _, s := range []PushSchedule{{TZ: "UTC"}, {TZ: "Europe/Paris", Items: []PushItem{}}} {
-		if err := ValidatePushSchedule(s, testNow); err != nil {
-			t.Fatalf("empty schedule %+v refused: %v", s, err)
-		}
-	}
-	// All fields at their caps.
-	full := PushSchedule{TZ: "UTC", Items: []PushItem{{
-		ID: strings.Repeat("a", MaxPushIDLen), At: "23:59", Days: []int{0, 1, 2, 3, 4, 5, 6},
-		Title: strings.Repeat("t", MaxPushTitleBytes), Body: strings.Repeat("b", MaxPushBodyBytes),
-		URL: strings.Repeat("u", MaxPushURLBytes), Tag: strings.Repeat("g", MaxPushTagBytes),
-	}}}
-	if err := ValidatePushSchedule(full, testNow); err != nil {
-		t.Fatalf("schedule at caps refused: %v", err)
-	}
-	// A Z offset is an RFC 3339 offset.
-	z := PushSchedule{TZ: "UTC", Items: []PushItem{{ID: "z", When: "2026-09-12T08:00:00Z", Title: "t", Body: "b"}}}
-	if err := ValidatePushSchedule(z, testNow); err != nil {
-		t.Fatalf("Z offset refused: %v", err)
-	}
-	// Text caps count bytes: a multibyte title fits by bytes, not by runes.
-	wide := PushSchedule{TZ: "UTC", Items: []PushItem{{ID: "w", When: "2026-09-12T08:00:00Z",
-		Title: strings.Repeat("é", MaxPushTitleBytes/2), Body: "b"}}}
-	if err := ValidatePushSchedule(wide, testNow); err != nil {
-		t.Fatalf("64-byte multibyte title refused: %v", err)
-	}
-	// A one-shot one second ahead of now is in the future.
-	soon := PushSchedule{TZ: "UTC", Items: []PushItem{{ID: "s", When: testNow.Add(time.Second).Format(time.RFC3339),
-		Title: "t", Body: "b"}}}
-	if err := ValidatePushSchedule(soon, testNow); err != nil {
-		t.Fatalf("when one second ahead refused: %v", err)
-	}
-	// Max item count.
 	many := PushSchedule{TZ: "UTC"}
 	for i := range MaxPushItems {
 		many.Items = append(many.Items, oneShot("i"+string(rune('a'+i))))
 	}
-	if err := ValidatePushSchedule(many, testNow); err != nil {
-		t.Fatalf("%d items refused: %v", MaxPushItems, err)
+	cases := map[string]PushSchedule{
+		"typical":                               validSchedule(),
+		"empty items clears, tz still required": {TZ: "UTC"},
+		"empty non-nil items":                   {TZ: "Europe/Paris", Items: []PushItem{}},
+		"every field at its cap": {TZ: "UTC", Items: []PushItem{{
+			ID: strings.Repeat("a", MaxPushIDLen), At: "23:59", Days: []int{0, 1, 2, 3, 4, 5, 6},
+			Title: strings.Repeat("t", MaxPushTitleBytes), Body: strings.Repeat("b", MaxPushBodyBytes),
+			URL: strings.Repeat("u", MaxPushURLBytes), Tag: strings.Repeat("g", MaxPushTagBytes),
+		}}},
+		"Z is an RFC 3339 offset": {TZ: "UTC", Items: []PushItem{{ID: "z", When: "2026-09-12T08:00:00Z", Title: "t", Body: "b"}}},
+		"text caps count bytes, not runes": {TZ: "UTC", Items: []PushItem{{ID: "w", When: "2026-09-12T08:00:00Z",
+			Title: strings.Repeat("é", MaxPushTitleBytes/2), Body: "b"}}},
+		"one-shot one second ahead": {TZ: "UTC", Items: []PushItem{{ID: "s",
+			When: testNow.Add(time.Second).Format(time.RFC3339), Title: "t", Body: "b"}}},
+		"max item count": many,
+	}
+	for name, s := range cases {
+		if err := ValidatePushSchedule(s, testNow); err != nil {
+			t.Errorf("%s: refused: %v", name, err)
+		}
 	}
 }
 

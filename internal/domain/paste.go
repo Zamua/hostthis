@@ -53,8 +53,8 @@ type Paste struct {
 	// Root, a directory is N, so one lookup resolves a request path for either
 	// (docs/SPEC.md "Serving a directory").
 	//
-	// Empty on a paste stored before versions carried a manifest; the flat
-	// fields above describe that paste's one blob.
+	// Empty when the stored row carries no manifest; the flat fields above
+	// describe that paste's one blob.
 	Manifest Manifest
 }
 
@@ -80,8 +80,8 @@ type Version struct {
 	CreatedAt  time.Time
 	Deleted    bool
 
-	// Manifest is the version's content. Empty on a version read by a backend
-	// that has not been collapsed yet; the flat fields describe it then.
+	// Manifest is the version's content. Empty when the stored row carries no
+	// manifest; the flat fields describe it then.
 	Manifest Manifest
 }
 

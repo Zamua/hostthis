@@ -24,10 +24,21 @@ func TestAssetExtensionsAllResolveToAContentType(t *testing.T) {
 	}
 }
 
-// The content types media, data and script assets serve as. Pinned by value
-// because a wrong type here makes <video>/<audio> sources fail silently.
-func TestContentTypeForPath_MediaAndDataAssets(t *testing.T) {
+// Content types pinned by value: a wrong media type makes <video>/<audio>
+// sources fail silently, and an unknown extension must download, never render
+// as HTML.
+func TestContentTypeForPath(t *testing.T) {
 	cases := map[string]string{
+		"index.html":  "text/html; charset=utf-8",
+		"style.css":   "text/css; charset=utf-8",
+		"app.js":      "text/javascript; charset=utf-8",
+		"mod.mjs":     "text/javascript; charset=utf-8",
+		"data.json":   "application/json; charset=utf-8",
+		"logo.svg":    "image/svg+xml",
+		"pic.png":     "image/png",
+		"font.woff2":  "font/woff2",
+		"mystery.xyz": "application/octet-stream",
+		"noext":       "application/octet-stream",
 		"clip.mp4":    "video/mp4",
 		"clip.webm":   "video/webm",
 		"clip.mov":    "video/quicktime",

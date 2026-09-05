@@ -124,7 +124,7 @@ func TestDetectKind_MalformedLineBeforeTheEndStillRejects(t *testing.T) {
 	}
 }
 
-// The hint forces the kind, and a binary payload is still refused under it.
+// The hint forces the kind.
 func TestDetectKind_FoldedHint(t *testing.T) {
 	for _, h := range []string{"flamegraph", "flame", "folded"} {
 		got, err := domain.DetectKind([]byte("anything at all\n"), h, sniff)
@@ -134,8 +134,5 @@ func TestDetectKind_FoldedHint(t *testing.T) {
 		if got != domain.KindFlamegraph {
 			t.Fatalf("hint %q: got %q, want flamegraph", h, got)
 		}
-	}
-	if _, err := domain.DetectKind([]byte("\x00\x01\x02\xff\xfe"+strings.Repeat("\x00", 60)), "flamegraph", sniff); err == nil {
-		t.Fatal("binary accepted under a flamegraph hint")
 	}
 }

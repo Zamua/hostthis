@@ -196,8 +196,7 @@ type fileType struct {
 
 // fileTypes is the ONE table of known file extensions. Holding the content
 // type and the asset flag on a single entry is what keeps them from diverging:
-// an extension cannot be admitted as an asset while having no content type,
-// which served video and audio files as application/octet-stream.
+// an extension cannot be admitted as an asset while having no content type.
 //
 // Enumerating the ASSET set rather than the route set is what makes a novel
 // route shape default to the SPA index instead of a 404. ".html" is

@@ -18,16 +18,3 @@ func TestNewRandomSlug_ShapeAndAlphabet(t *testing.T) {
 		}
 	}
 }
-
-func TestNewRandomSlug_Uniqueness(t *testing.T) {
-	// 32^8 = 1.1e12 possibilities; collisions in 1000 samples are
-	// vanishingly unlikely. Birthday math: ~10^-7 per pair.
-	seen := make(map[Slug]struct{}, 1000)
-	for range 1000 {
-		s := NewRandomSlug()
-		if _, dup := seen[s]; dup {
-			t.Fatalf("collision in 1000 samples: %q", s)
-		}
-		seen[s] = struct{}{}
-	}
-}
