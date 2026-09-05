@@ -204,21 +204,16 @@ GET    /api/rooms/&lt;uuid&gt;/push/subscriptions   -&gt; [{"endpoint", "added"}
 PUT    /api/rooms/&lt;uuid&gt;/push/schedule          body: Schedule
 GET    /api/rooms/&lt;uuid&gt;/push/schedule        -&gt; Schedule
 POST   /api/rooms/&lt;uuid&gt;/push/test            -&gt; {"sent", "pruned"}  send now</pre>
-<p>Subscribe with <code>pushManager.subscribe({ applicationServerKey })</code> using
-the key from <code>/api/push/key</code>, PUT the subscription, then PUT a schedule:</p>
-<pre>{ "tz": "America/New_York",
-  "items": [ { "id": "morning", "at": "08:00", "days": [1,2,3,4,5,6],
-               "title": "Reminder", "bodyKey": "note:{date}",
-               "url": "/", "tag": "daily" } ] }</pre>
-<p><code>at</code> is local time in <code>tz</code> on the listed weekdays (0 = Sunday);
-a one-shot item uses <code>"when": "&lt;RFC 3339&gt;"</code> instead. The body is a
-fixed <code>body</code>, or <code>bodyKey</code>: a room key read at send time with
-<code>{date}</code> replaced by the local date. A missing key sends nothing. The
-payload delivered to the service worker is <code>{"title","body","url","tag"}</code>.
-Endpoints answering 404 or 410 are dropped.</p>
-<p>Limits: 16 subscriptions and 16 items per room, 2 KiB payload, 8 sends per device
-per day, one test per minute. <code>push</code> and <code>push/...</code> are reserved
-keys.</p>
+<p>Schedule:</p>
+<pre>{ "tz": "&lt;IANA zone&gt;",
+  "items": [ { "id", "at": "HH:MM", "days": [0..6], "title",
+               "body" | "bodyKey", "url", "tag" } ] }</pre>
+<p><code>at</code>/<code>days</code> fire weekly at local time in <code>tz</code> (0 = Sunday);
+<code>when</code> (RFC 3339) fires once instead. <code>bodyKey</code> names a room key read
+at send time, <code>{date}</code> replaced by the local date; a missing key sends nothing.
+Payload: <code>{"title","body","url","tag"}</code>. 404/410 endpoints are dropped.</p>
+<p>Limits: 16 subscriptions, 16 items per room; 2 KiB payload; 8 sends per device per
+day; one test per minute. <code>push</code> and <code>push/...</code> are reserved keys.</p>
 </div>
 
 <h2>Limits</h2>

@@ -148,25 +148,21 @@ GET    /api/rooms/<uuid>/push/schedule        -> Schedule
 POST   /api/rooms/<uuid>/push/test            -> {"sent", "pruned"}  send now
 ```
 
-Subscribe with `pushManager.subscribe({ applicationServerKey })` using the
-key from `/api/push/key`, PUT the subscription, then PUT a schedule:
+Schedule:
 
 ```
-{ "tz": "America/New_York",
-  "items": [ { "id": "morning", "at": "08:00", "days": [1,2,3,4,5,6],
-               "title": "Reminder", "bodyKey": "note:{date}",
-               "url": "/", "tag": "daily" } ] }
+{ "tz": "<IANA zone>",
+  "items": [ { "id", "at": "HH:MM", "days": [0..6], "title",
+               "body" | "bodyKey", "url", "tag" } ] }
 ```
 
-`at` is local time in `tz` on the listed weekdays (0 = Sunday); a one-shot
-item uses `"when": "<RFC 3339>"` instead. The body is a fixed `body`, or
-`bodyKey`: a room key read at send time with `{date}` replaced by the local
-date. A missing key sends nothing. The payload delivered to the service
-worker is `{"title","body","url","tag"}`. Endpoints answering 404 or 410 are
-dropped.
+`at`/`days` fire weekly at local time in `tz` (0 = Sunday); `when` (RFC 3339)
+fires once instead. `bodyKey` names a room key read at send time, `{date}`
+replaced by the local date; a missing key sends nothing. Payload:
+`{"title","body","url","tag"}`. 404/410 endpoints are dropped.
 
-Limits: 16 subscriptions and 16 items per room, 2 KiB payload, 8 sends per
-device per day, one test per minute. `push` and `push/...` are reserved keys.
+Limits: 16 subscriptions, 16 items per room; 2 KiB payload; 8 sends per
+device per day; one test per minute. `push` and `push/...` are reserved keys.
 
 ## LIMITS
 
