@@ -38,6 +38,39 @@ function setOwn(object, key, value) {
   });
 }
 
+// Each cell class routes through an op table: op name to { run, mutating,
+// body, room }. A mutating op runs under blockConcurrencyWhile so its
+// read-check-write sequence cannot interleave; body parses the request JSON;
+// room loads the room document and answers 404 without one. run receives
+// (self, body, url, doc).
+const read = (run, flags = {}) => ({ run, ...flags });
+const mutation = (run, flags = {}) => ({ mutating: true, body: true, run, ...flags });
+
+function runOp(self, entry, body, url) {
+  const run = async () => {
+    let doc;
+    if (entry.room) {
+      doc = await self.loadRoom();
+      if (!doc) {
+        return new Response("not found\n", { status: 404 });
+      }
+    }
+    return entry.run(self, body, url, doc);
+  };
+  return entry.mutating ? self.state.blockConcurrencyWhile(run) : run();
+}
+
+// Null for an op the table does not name, so a class can fall through to its
+// own default.
+async function dispatch(self, table, request) {
+  const url = new URL(request.url);
+  const entry = table[url.pathname.split("/").pop()];
+  if (!entry) {
+    return null;
+  }
+  return runOp(self, entry, entry.body ? await request.json() : undefined, url);
+}
+
 // A stored intent is a private shape, so the Go port's type can change without
 // a stored-format migration. Mirrors internal/storage's intentRow.
 function toRow(body) {
@@ -54,9 +87,24 @@ function toRow(body) {
   };
 }
 
+const IDENTITY_OPS = {
+  bytes: read((self) => self.bytes()),
+  list: read((self) => self.list()),
+  firstSeen: read((self) => self.firstSeen()),
+  reserve: mutation((self, body) => self.reserve(body)),
+  release: mutation((self, body) => self.release(body)),
+  confirm: mutation((self, body) => self.confirm(body)),
+  drop: mutation((self, body) => self.drop(body)),
+  artifactseed: mutation((self, body) => self.artifactSeed(body)),
+  artifactdecide: mutation((self, body) => self.artifactDecide(body)),
+  artifactproject: mutation((self, body) => self.artifactProject(body)),
+  artifactdrop: mutation((self, body) => self.artifactDrop(body)),
+  notesubnet: mutation((self, body) => self.noteSubnet(body)),
+  subnets: mutation((self, _body, url) => self.subnets(url), { body: false }),
+};
+
 // The Identity cell owns the state that must agree for one owner: outstanding
-// intents, quota reservations, and the paste index. Every mutating request uses
-// blockConcurrencyWhile so its read-check-write sequence cannot interleave.
+// intents, quota reservations, and the paste index.
 export class Identity {
   constructor(state, env) {
     this.state = state;
@@ -64,44 +112,8 @@ export class Identity {
   }
 
   async fetch(request) {
-    const url = new URL(request.url);
-    const op = url.pathname.split("/").pop();
-
-    switch (op) {
-      case "bytes":
-        return this.bytes();
-      case "list":
-        return this.list();
-      case "firstSeen":
-        return this.firstSeen();
-    }
-    return this.state.blockConcurrencyWhile(async () => {
-      switch (op) {
-        case "reserve":
-          return this.reserve(await request.json());
-        case "release":
-          return this.release(await request.json());
-        case "confirm":
-          return this.confirm(await request.json());
-        case "drop":
-          return this.drop(await request.json());
-        case "artifactseed":
-          return this.artifactSeed(await request.json());
-        case "artifactdecide":
-          return this.artifactDecide(await request.json());
-        case "artifactproject":
-          return this.artifactProject(await request.json());
-        case "artifactdrop":
-          return this.artifactDrop(await request.json());
-        case "notesubnet":
-          return this.noteSubnet(await request.json());
-        case "subnets":
-          return this.subnets(Number(url.searchParams.get("now")),
-            Number(url.searchParams.get("window")));
-        default:
-          return new Response("unknown op\n", { status: 404 });
-      }
-    });
+    return (await dispatch(this, IDENTITY_OPS, request))
+      ?? new Response("unknown op\n", { status: 404 });
   }
 
   // Quota admission, reservation, and intent creation must commit as one local
@@ -567,7 +579,9 @@ export class Identity {
     return new Response(null, { status: 204 });
   }
 
-  async subnets(now, windowMs) {
+  async subnets(url) {
+    const now = Number(url.searchParams.get("now"));
+    const windowMs = Number(url.searchParams.get("window"));
     const subnets = (await this.state.storage.get("subnets")) ?? {};
     let changed = false;
     let n = 0;
@@ -943,6 +957,22 @@ function publicItem(item) {
   return rest;
 }
 
+const ROOM_OPS = {
+  count: read((self) => Response.json({ sockets: self.state.getWebSockets().length })),
+  meta: read((self, _body, _url, doc) => Response.json(doc.meta), { room: true }),
+  get: read((self, _body, url, doc) => self.getValue(doc, url.searchParams.get("key")), { room: true }),
+  scan: read((self, _body, _url, doc) => Response.json({ values: doc.kv, seq: doc.seq }), { room: true }),
+  create: mutation((self, body) => self.createBlocked(body)),
+  put: mutation((self, body, _url, doc) => self.putBlocked(doc, body), { room: true }),
+  del: mutation((self, body, _url, doc) => self.delBlocked(doc, body), { room: true }),
+  pushsublist: read((self) => self.pushSubList(), { room: true }),
+  pushscheduleget: read((self) => self.pushScheduleGet(), { room: true }),
+  pushsubput: mutation((self, body) => self.pushSubPut(body), { room: true }),
+  pushsubdel: mutation((self, body) => self.pushSubDel(body), { room: true }),
+  pushscheduleput: mutation((self, body) => self.pushSchedulePut(body), { room: true }),
+  pushtest: mutation((self, body, _url, doc) => self.pushTest(doc, body), { room: true }),
+};
+
 export class Room {
   constructor(state, env) {
     this.state = state;
@@ -1012,36 +1042,9 @@ export class Room {
   }
 
   async fetch(request) {
-    const url = new URL(request.url);
-    const op = url.pathname.split("/").pop();
-    if (op === "count") {
-      return Response.json({ sockets: this.state.getWebSockets().length });
-    }
-    switch (op) {
-      case "create":
-        return this.create(await request.json());
-      case "meta":
-        return this.meta();
-      case "get":
-        return this.getValue(url.searchParams.get("key"));
-      case "scan":
-        return this.scan();
-      case "put":
-        return this.put(await request.json());
-      case "del":
-        return this.del(await request.json());
-      case "pushsublist":
-        return this.pushSubList();
-      case "pushscheduleget":
-        return this.pushScheduleGet();
-      case "pushsubput":
-        return this.state.blockConcurrencyWhile(async () => this.pushSubPut(await request.json()));
-      case "pushsubdel":
-        return this.state.blockConcurrencyWhile(async () => this.pushSubDel(await request.json()));
-      case "pushscheduleput":
-        return this.state.blockConcurrencyWhile(async () => this.pushSchedulePut(await request.json()));
-      case "pushtest":
-        return this.state.blockConcurrencyWhile(async () => this.pushTest(await request.json()));
+    const handled = await dispatch(this, ROOM_OPS, request);
+    if (handled) {
+      return handled;
     }
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket\n", { status: 426 });
@@ -1067,8 +1070,17 @@ export class Room {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  async create(body) {
-    return this.state.blockConcurrencyWhile(() => this.createBlocked(body));
+  // Direct entry points, same gating as the op table.
+  create(body) {
+    return runOp(this, ROOM_OPS.create, body);
+  }
+
+  put(body) {
+    return runOp(this, ROOM_OPS.put, body);
+  }
+
+  del(body) {
+    return runOp(this, ROOM_OPS.del, body);
   }
 
   async recordRoomCreated(body) {
@@ -1110,42 +1122,14 @@ export class Room {
     return Response.json({ created: true });
   }
 
-  async meta() {
-    const doc = await this.loadRoom();
-    if (!doc) {
-      return new Response("not found\n", { status: 404 });
-    }
-    return Response.json(doc.meta);
-  }
-
-  async getValue(key) {
-    const doc = await this.loadRoom();
-    if (!doc) {
-      return new Response("not found\n", { status: 404 });
-    }
+  getValue(doc, key) {
     if (!Object.hasOwn(doc.kv, key)) {
       return new Response("not found\n", { status: 404 });
     }
     return Response.json({ value: doc.kv[key] });
   }
 
-  async scan() {
-    const doc = await this.loadRoom();
-    if (!doc) {
-      return new Response("not found\n", { status: 404 });
-    }
-    return Response.json({ values: doc.kv, seq: doc.seq });
-  }
-
-  async put(body) {
-    return this.state.blockConcurrencyWhile(() => this.putBlocked(body));
-  }
-
-  async putBlocked(body) {
-    let doc = await this.loadRoom();
-    if (!doc) {
-      return new Response("not found\n", { status: 404 });
-    }
+  async putBlocked(doc, body) {
     if (doc.pending) {
       const recovered = await this.resumePending(doc);
       if (recovered.outcome === "unavailable") {
@@ -1223,15 +1207,7 @@ export class Room {
     return Response.json({ seq: result.doc.seq, bytes: result.doc.bytes });
   }
 
-  async del(body) {
-    return this.state.blockConcurrencyWhile(() => this.delBlocked(body));
-  }
-
-  async delBlocked(body) {
-    let doc = await this.loadRoom();
-    if (!doc) {
-      return new Response("not found\n", { status: 404 });
-    }
+  async delBlocked(doc, body) {
     if (doc.pending) {
       const recovered = await this.resumePending(doc);
       if (recovered.outcome === "unavailable") {
@@ -1384,9 +1360,6 @@ export class Room {
   }
 
   async pushSubPut(body) {
-    if (!await this.loadRoom()) {
-      return new Response("not found\n", { status: 404 });
-    }
     const checked = validateSubscription(body);
     if (checked.error) {
       return checked.error;
@@ -1409,9 +1382,6 @@ export class Room {
   }
 
   async pushSubDel(body) {
-    if (!await this.loadRoom()) {
-      return new Response("not found\n", { status: 404 });
-    }
     if (typeof body?.endpoint !== "string") {
       return Response.json({ error: "invalid-endpoint" }, { status: 400 });
     }
@@ -1425,9 +1395,6 @@ export class Room {
   }
 
   async pushSubList() {
-    if (!await this.loadRoom()) {
-      return new Response("not found\n", { status: 404 });
-    }
     const push = await this.loadPush();
     return Response.json({
       subscriptions: push.subscriptions.map((s) => ({
@@ -1437,9 +1404,6 @@ export class Room {
   }
 
   async pushSchedulePut(body) {
-    if (!await this.loadRoom()) {
-      return new Response("not found\n", { status: 404 });
-    }
     const now = body.now ?? Date.now();
     const checked = validateSchedule(body, now);
     if (checked.error) {
@@ -1459,9 +1423,6 @@ export class Room {
   }
 
   async pushScheduleGet() {
-    if (!await this.loadRoom()) {
-      return new Response("not found\n", { status: 404 });
-    }
     const push = await this.loadPush();
     return Response.json({
       tz: push.schedule?.tz ?? "",
@@ -1469,11 +1430,7 @@ export class Room {
     });
   }
 
-  async pushTest(body) {
-    const doc = await this.loadRoom();
-    if (!doc) {
-      return new Response("not found\n", { status: 404 });
-    }
+  async pushTest(doc, body) {
     const now = body?.now ?? Date.now();
     const push = await this.loadPush();
     const elapsed = now - (push.lastTestAt ?? 0);
@@ -1688,6 +1645,25 @@ function b64len(b64) {
 // the index reader holds an identity and does not know the slugs. No single
 // cell can serve both, which is exactly why the create spans two and needs an
 // intent to survive a crash between them.
+const PASTE_OPS = {
+  get: read((self) => self.get()),
+  versions: read((self) => self.listVersions()),
+  put: mutation((self, body) => self.put(body)),
+  abortcreate: mutation((self, body) => self.abortCreate(body)),
+  status: mutation((self, body) => self.setStatus(body)),
+  rename: mutation((self, body) => self.rename(body)),
+  roomcreated: mutation((self, body) => self.roomCreated(body)),
+  roomcounts: mutation((self, _body, url) => self.roomCounts(url), { body: false }),
+  roompreflight: mutation((self, body) => self.roomPreflight(body)),
+  roomdecide: mutation((self, body) => self.roomDecide(body)),
+  remove: mutation((self, body) => self.remove(body)),
+  append: mutation((self, body) => self.append(body)),
+  delversion: mutation((self, body) => self.deleteVersion(body)),
+  pin: mutation((self, body) => self.pin(body)),
+  pushkey: mutation((self) => self.pushKey(), { body: false }),
+  pushsign: mutation((self, body) => self.pushSign(body)),
+};
+
 export class Paste {
   constructor(state, env) {
     this.state = state;
@@ -1695,48 +1671,8 @@ export class Paste {
   }
 
   async fetch(request) {
-    const url = new URL(request.url);
-    const op = url.pathname.split("/").pop();
-    switch (op) {
-      case "get":
-        return this.get();
-      case "versions":
-        return this.listVersions();
-    }
-    return this.state.blockConcurrencyWhile(async () => {
-      switch (op) {
-        case "put":
-          return this.put(await request.json());
-        case "abortcreate":
-          return this.abortCreate(await request.json());
-        case "status":
-          return this.setStatus(await request.json());
-        case "rename":
-          return this.rename(await request.json());
-        case "roomcreated":
-          return this.roomCreated(await request.json());
-        case "roomcounts":
-          return this.roomCounts(url.searchParams);
-        case "roompreflight":
-          return this.roomPreflight(await request.json());
-        case "roomdecide":
-          return this.roomDecide(await request.json());
-        case "remove":
-          return this.remove(await request.json());
-        case "append":
-          return this.append(await request.json());
-        case "delversion":
-          return this.deleteVersion(await request.json());
-        case "pin":
-          return this.pin(await request.json());
-        case "pushkey":
-          return this.pushKey();
-        case "pushsign":
-          return this.pushSign(await request.json());
-        default:
-          return new Response("unknown op\n", { status: 404 });
-      }
-    });
+    return (await dispatch(this, PASTE_OPS, request))
+      ?? new Response("unknown op\n", { status: 404 });
   }
 
   async put(body) {
@@ -1828,10 +1764,10 @@ export class Paste {
   // walked, so the ledger stays bounded by recent activity with no background
   // sweep. Nothing reads a dropped row - it is outside every window a caller
   // can ask about.
-  async roomCounts(params) {
-    const now = Number(params.get("now"));
-    const windowMs = Number(params.get("window"));
-    const subnet = params.get("subnet");
+  async roomCounts(url) {
+    const now = Number(url.searchParams.get("now"));
+    const windowMs = Number(url.searchParams.get("window"));
+    const subnet = url.searchParams.get("subnet");
     const ledger = (await this.state.storage.get("roomLedger")) ?? [];
     const live = ledger.filter((e) => now - e.at < windowMs);
     if (live.length !== ledger.length) {
@@ -2667,26 +2603,19 @@ export class IntentLog {
 // The subnet is the rate-limit unit, so it is the cell. Mutating and pruning
 // decisions run under blockConcurrencyWhile because v0.4 may serve several
 // fetches concurrently.
+const SUBNET_OPS = {
+  admit: mutation((self, body) => self.admit(body)),
+  snapshot: mutation((self, _body, url) => self.snapshot(url), { body: false }),
+};
+
 export class Subnet {
   constructor(state) {
     this.state = state;
   }
 
   async fetch(request) {
-    const url = new URL(request.url);
-    const op = url.pathname.split("/").pop();
-    return this.state.blockConcurrencyWhile(async () => {
-      const body = request.method === "POST" ? await request.json() : {};
-      switch (op) {
-        case "admit":
-          return this.admit(body);
-        case "snapshot":
-          return this.snapshot(Number(url.searchParams.get("now")),
-            Number(url.searchParams.get("window")));
-        default:
-          return new Response("unknown op\n", { status: 404 });
-      }
-    });
+    return (await dispatch(this, SUBNET_OPS, request))
+      ?? new Response("unknown op\n", { status: 404 });
   }
 
   // Rows outside the window are dropped as they are walked past: nothing reads
@@ -2722,8 +2651,9 @@ export class Subnet {
     return Response.json({ knownAlready: false, admitted: true });
   }
 
-  async snapshot(now, windowMs) {
-    const rows = await this.live(now, windowMs);
+  async snapshot(url) {
+    const rows = await this.live(Number(url.searchParams.get("now")),
+      Number(url.searchParams.get("window")));
     const stamps = Object.values(rows);
     return Response.json({
       freshCount: stamps.length,
