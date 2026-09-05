@@ -25,7 +25,7 @@ type ownerIndexRepo interface {
 	Get(domain.Slug) (domain.Paste, error)
 	MarkFailed(domain.Paste) error
 	ListByOwner(owner string) ([]domain.Paste, error)
-	CountByOwner(owner string) (int, error)
+	OwnerSummary(owner string, now time.Time) (domain.OwnerSummary, error)
 	OwnerFirstSeen(owner string) (time.Time, error)
 	DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, error)
 	SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error
@@ -68,12 +68,12 @@ func conformOwnerListIsScopedAndComplete(t *testing.T, r ownerIndexRepo) {
 			t.Fatalf("listing contains %s owned by %q; want only %q", p.Slug, p.Identity, mine)
 		}
 	}
-	n, err := r.CountByOwner(mine)
+	sum, err := r.OwnerSummary(mine, fixedNow)
 	if err != nil {
-		t.Fatalf("CountByOwner: %v", err)
+		t.Fatalf("OwnerSummary: %v", err)
 	}
-	if n != 2 {
-		t.Fatalf("CountByOwner = %d; want 2, agreeing with the listing", n)
+	if sum.Active != 2 {
+		t.Fatalf("OwnerSummary.Active = %d; want 2, agreeing with the listing", sum.Active)
 	}
 }
 

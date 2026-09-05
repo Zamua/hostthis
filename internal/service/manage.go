@@ -34,7 +34,6 @@ type PasteAdmin interface {
 	// cache), so the delete guard below can never free the served blob.
 	IsVersionServed(domain.Slug, int) (bool, error)
 	DeleteVersion(domain.Slug, string, int) error
-	CountByOwner(owner string) (int, error)
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
 	OwnerFirstSeen(owner string) (time.Time, error)
 	// OwnerSummary is whoami's roll-up in one call: count + first-seen +
@@ -55,10 +54,6 @@ type PasteAdmin interface {
 	// this by always reporting false.
 	DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, error)
 }
-
-// ErrNotOwner is returned by an owner-gated operation when the requesting
-// identity doesn't match the paste's. The SSH/HTTP surfaces map it to 403.
-var ErrNotOwner = errors.New("service: not the paste owner")
 
 // ErrNotFound is returned when a paste / version doesn't exist. An owner-gated
 // read of a slug owned by someone else maps here too, so existence never leaks

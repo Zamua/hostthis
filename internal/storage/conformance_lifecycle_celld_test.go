@@ -132,10 +132,6 @@ func (n namespacedRepo) ListByOwner(o string) ([]domain.Paste, error) {
 	return got, nil
 }
 
-func (n namespacedRepo) CountByOwner(o string) (int, error) {
-	return n.inner.CountByOwner(n.owner(o))
-}
-
 func (n namespacedRepo) OwnerFirstSeen(o string) (time.Time, error) {
 	return n.inner.OwnerFirstSeen(n.owner(o))
 }

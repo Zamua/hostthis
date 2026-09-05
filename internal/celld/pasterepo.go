@@ -427,20 +427,6 @@ func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 	return out, nil
 }
 
-func (r *PasteRepo) CountByOwner(owner string) (int, error) {
-	entries, err := r.ownerEntries(owner)
-	if err != nil {
-		return 0, err
-	}
-	n := 0
-	for _, e := range entries {
-		if domain.PasteStatus(e.Status) != domain.PasteStatusFailed {
-			n++
-		}
-	}
-	return n, nil
-}
-
 // OwnerFirstSeen is stamped by the identity cell on its first reservation, so
 // it survives every paste being deleted.
 func (r *PasteRepo) OwnerFirstSeen(owner string) (time.Time, error) {
