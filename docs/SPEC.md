@@ -2226,7 +2226,10 @@ Delivery is Web Push (RFC 8030) with `aes128gcm` content encoding (RFC 8291)
 and a VAPID `Authorization` header (RFC 8292), sent with `TTL: 86400` and
 normal urgency. The notification payload is the JSON object
 `{ "title", "body", "url", "tag" }`; a payload over 2 KiB is skipped, never
-truncated. A `404` or `410` from the push service deletes that subscription.
+truncated. A `404` or `410` from the push service deletes that subscription,
+unless it was added less than a minute earlier: a push service can answer
+`404` for a registration it has not finished propagating, so inside that
+window the send counts as failed and the subscription stays.
 Other failures are not retried within a fire; the next scheduled fire is the
 retry. A send waits at most 10 seconds and never follows a redirect: a 3xx is
 a failure, so ciphertext and the VAPID token reach only the endpoint the
