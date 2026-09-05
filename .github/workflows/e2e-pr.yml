@@ -2,11 +2,7 @@ name: e2e report (PR)
 
 # Publishes a browsable report for every pull request: results, plus whatever
 # screenshots the tests recorded, at one URL a reviewer can open on a phone.
-#
-# This file is INFRASTRUCTURE ONLY. It runs no tests of its own. It calls the
-# `e2e-ci` make target and does nothing when that target does not exist, so the
-# workflow can land before any test does and switch on the day one appears.
-# The contract it expects is in docs/E2E-REPORTS.md.
+# Runs the `e2e-ci` make target; the contract is in docs/E2E-REPORTS.md.
 on:
   pull_request:
 
@@ -32,22 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The seam. Everything below is conditional on it, so this workflow is
-      # inert until someone adds the target.
-      - name: Look for the e2e-ci target
-        id: seam
-        run: |
-          if grep -qE '^e2e-ci:' Makefile; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-            echo "found the e2e-ci target"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "no e2e-ci target in the Makefile; nothing to run"
-            echo "See docs/E2E-REPORTS.md for the contract." >> "$GITHUB_STEP_SUMMARY"
-          fi
-
       - uses: actions/setup-go@v5
-        if: steps.seam.outputs.present == 'true'
         with:
           go-version: '1.26'
           cache: true
@@ -56,7 +37,6 @@ jobs:
       # recorded here and the job is failed at the very end instead.
       - name: Run e2e
         id: tests
-        if: steps.seam.outputs.present == 'true'
         continue-on-error: true
         run: |
           mkdir -p "$E2E_ARTIFACTS"
@@ -70,7 +50,7 @@ jobs:
       # number is safe either way (an integer), but the reference stays here
       # so the next editor sees which values are untrusted.
       - name: Render report
-        if: always() && steps.seam.outputs.present == 'true'
+        if: always()
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
@@ -87,7 +67,7 @@ jobs:
             --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
       - name: Upload artifacts
-        if: always() && steps.seam.outputs.present == 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-report-pr${{ github.event.pull_request.number }}-${{ github.run_attempt }}
@@ -104,7 +84,7 @@ jobs:
       # from forks never receive secrets, so they skip too.
       - name: Publish report
         id: publish
-        if: always() && steps.seam.outputs.present == 'true' && env.HOSTTHIS_SSH_KEY != ''
+        if: always() && env.HOSTTHIS_SSH_KEY != ''
         continue-on-error: true
         env:
           REPORT_NAME: "hostthis e2e PR #${{ github.event.pull_request.number }}"
@@ -158,7 +138,7 @@ jobs:
             "e2e ${{ steps.tests.outcome }}: ${{ steps.publish.outputs.url }} (commit \`${GITHUB_SHA:0:8}\`)"
 
       - name: Summary
-        if: always() && steps.seam.outputs.present == 'true'
+        if: always()
         run: |
           {
             echo "### e2e: ${{ steps.tests.outcome }}"
@@ -172,7 +152,7 @@ jobs:
 
       # The suite's own result decides the job, after the report exists.
       - name: Gate on the suite result
-        if: always() && steps.seam.outputs.present == 'true' && steps.tests.outcome != 'success'
+        if: always() && steps.tests.outcome != 'success'
         run: |
           echo "e2e failed; report: ${{ steps.publish.outputs.url }}"
           exit 1

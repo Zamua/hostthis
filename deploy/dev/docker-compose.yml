@@ -11,7 +11,6 @@
 services:
   minio:
     image: minio/minio:latest
-    container_name: hostthis-dev-minio
     command: server --console-address :9001 /data
     environment:
       MINIO_ROOT_USER: admin
@@ -29,7 +28,6 @@ services:
 
   bucket-init:
     image: minio/mc:latest
-    container_name: hostthis-dev-bucket-init
     depends_on:
       minio:
         condition: service_healthy

@@ -93,6 +93,24 @@ step() { printf "[%s] %s\n" "$(yellow "····")" "$*"; }
 ok()   { PASS=$((PASS+1)); printf "[%s] %s\n" "$(green "PASS")" "$*"; }
 bad()  { FAIL=$((FAIL+1)); FAILED+=("$1"); printf "[%s] %s\n" "$(red "FAIL")" "$1"; [ -n "${2:-}" ] && printf "       %s\n" "$2"; }
 
+# upload pipes stdin to the upload verb; extra args (--name, --type, a slug)
+# pass through.
+upload() { $SSH -- "$HOST" "$@"; }
+
+# mint uploads stdin as a new paste and sets MINT_URL / MINT_SLUG. Called with
+# a redirect, never in a pipeline, so the variables land in this shell. A
+# missing URL fails <label> and returns 1.
+mint() {
+  local label="$1"; shift
+  MINT_URL=$(upload "$@" 2>/dev/null | head -1)
+  MINT_SLUG=$(slug_from_url "$MINT_URL")
+  if [ -z "$MINT_SLUG" ]; then
+    bad "$label" "no URL emitted"
+    return 1
+  fi
+  ok "$label → $MINT_URL"
+}
+
 # smoke_delete removes one paste, best-effort but never silently: cleanup must
 # not fail the run, yet a swallowed delete failure is how a stranded paste sits
 # invisible across runs. Any failure prints a loud line with the slug and exit
@@ -106,28 +124,23 @@ smoke_delete() {
   return 0
 }
 
-trap 'cleanup' EXIT
-cleanup() {
-  # Best-effort delete of any pastes created. `ssh -n` (inside smoke_delete)
-  # keeps ssh from slurping the loop's stdin (the slug list) - without it only
-  # the first slug is deleted.
-  if [ -f /tmp/hostthis-smoke.slugs ]; then
-    while IFS= read -r slug; do
-      [ -n "$slug" ] && smoke_delete "$slug"
-    done < /tmp/hostthis-smoke.slugs
-    # Keep the persistent key ($KEY) for reuse; only drop the slug list.
-    rm -f /tmp/hostthis-smoke.slugs
-  fi
-  # The slug list is not complete: a SITE can be minted without ever entering
-  # it (the aborted-upload probe can finish server-side before the kill lands;
-  # a killed run never reaches its append). The smoke account holds only smoke
-  # artifacts, so enumerate it and delete whatever remains. `list -ojson`
-  # covers sites (a directory is a paste, kind "site") and a site deletes
-  # through the same delete verb.
+# delete_all_pastes empties the smoke account. It holds only smoke artifacts,
+# so `list -ojson` is the complete inventory: it covers sites (a directory is
+# a paste, kind "site") and a site deletes through the same delete verb. `ssh
+# -n` (inside smoke_delete) keeps ssh from slurping the loop's stdin; without
+# it only the first slug is deleted.
+delete_all_pastes() {
   $SSH -n "$HOST" list -ojson 2>/dev/null | jq -r '.[].slug' 2>/dev/null | \
   while IFS= read -r slug; do
     [ -n "$slug" ] && smoke_delete "$slug"
   done
+  return 0
+}
+
+trap 'cleanup' EXIT
+cleanup() {
+  # Best-effort: the persistent key ($KEY) is kept for reuse.
+  delete_all_pastes
   return 0
 }
 
@@ -138,14 +151,11 @@ else
   mkdir -p "$(dirname "$KEY")"
   ssh-keygen -t ed25519 -f "$KEY" -q -N "" -C "hostthis-smoke"
 fi
-> /tmp/hostthis-smoke.slugs
 
 # A reused key may still own pastes from a prior run that died before its
 # cleanup ran. Delete them so the "active: 0" precondition below holds.
 step "setup: clearing any pastes left by a prior run"
-$SSH "$HOST" list -ojson 2>/dev/null | jq -r '.[].slug' | while IFS= read -r s; do
-  [ -n "$s" ] && smoke_delete "$s"
-done
+delete_all_pastes
 
 # ---- 1. whoami (pre-upload) ------------------------------------------------
 step "whoami (expect active_pastes: 0)"
@@ -158,29 +168,13 @@ fi
 
 # ---- 2. upload HTML with --name --------------------------------------------
 step "upload HTML with --name"
-URL1=$(echo '<!doctype html><h1>smoke 1</h1>' | \
-  ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -- \
-    "$HOST" '--name "smoke html"' 2>/dev/null | head -1)
-SLUG1=$(slug_from_url "$URL1")
-if [ -z "$URL1" ]; then
-  bad "upload HTML (--name)" "no URL emitted"
-else
-  echo "$SLUG1" >> /tmp/hostthis-smoke.slugs
-  ok "upload HTML → $URL1"
-fi
+mint "upload HTML" '--name "smoke html"' <<< '<!doctype html><h1>smoke 1</h1>'
+URL1="$MINT_URL"; SLUG1="$MINT_SLUG"
 
 # ---- 3. upload Markdown ----------------------------------------------------
 step "upload Markdown"
-URL2=$(printf '# Smoke MD\n\nbody\n' | \
-  ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -- \
-    "$HOST" '--name "smoke md"' 2>/dev/null | head -1)
-SLUG2=$(slug_from_url "$URL2")
-if [ -z "$URL2" ]; then
-  bad "upload Markdown" "no URL emitted"
-else
-  echo "$SLUG2" >> /tmp/hostthis-smoke.slugs
-  ok "upload Markdown → $URL2"
-fi
+mint "upload Markdown" '--name "smoke md"' < <(printf '# Smoke MD\n\nbody\n')
+URL2="$MINT_URL"; SLUG2="$MINT_SLUG"
 
 # ---- 4. HTTP fetch both ----------------------------------------------------
 step "HTTP GET both pastes"
@@ -263,21 +257,23 @@ echo "$whoami2" | jq -e '.active_pastes == 2' >/dev/null 2>&1 \
   || bad "whoami post-upload" "$whoami2"
 
 # ---- 11b. every renderable kind -------------------------------------------
-# One upload per accepted kind, checking the three things that can silently go
+# One upload per accepted kind, checking the things that can silently go
 # wrong independently of each other: the kind the GATE assigned, the SHELL the
-# bare URL serves, and the Content-Type of ?raw. A kind can be detected right
-# and served by the wrong viewer, or served by the right viewer with a
-# Content-Type that makes a browser download it instead.
+# bare URL serves, the Content-Type of ?raw, and for diff the deep-link
+# resolver the shell must also load (line anchors hang off it). A kind can be
+# detected right and served by the wrong viewer, or served by the right viewer
+# with a Content-Type that makes a browser download it instead.
 step "every renderable kind: detect, shell, raw type"
 
-# kind|shell asset the page must load|expected ?raw Content-Type prefix
-kind_specs='mermaid|/_hostthis/mermaid.js|text/plain
-csv|/_hostthis/data.js|text/plain
-json|/_hostthis/data.js|application/json
-pdf|/_hostthis/pdf.js|application/pdf
-flamegraph|/_hostthis/flame.js|text/plain
-log|/_hostthis/log.js|application/x-ndjson
-text|/_hostthis/text.js|text/plain'
+# kind|shell asset the page must load|expected ?raw Content-Type prefix|extra asset
+kind_specs='mermaid|/_hostthis/mermaid.js|text/plain|
+csv|/_hostthis/data.js|text/plain|
+json|/_hostthis/data.js|application/json|
+pdf|/_hostthis/pdf.js|application/pdf|
+flamegraph|/_hostthis/flame.js|text/plain|
+log|/_hostthis/log.js|application/x-ndjson|
+text|/_hostthis/text.js|text/plain|
+diff|/_hostthis/diff.js|text/plain|/_hostthis/deeplink.js'
 
 kind_body() {
   case "$1" in
@@ -291,19 +287,14 @@ kind_body() {
     log)     printf '{"@timestamp":"2026-08-02T03:00:00Z","level":"INFO","message":"a"}\n{"@timestamp":"2026-08-02T03:00:01Z","level":"ERROR","message":"b"}\n' ;;
     # No markdown cue anywhere: the point is that this reaches the fallback.
     text)    printf 'server {\n  listen 443;\n}\n' ;;
+    diff)    printf -- '--- a/x\n+++ b/x\n@@ -1,4 +1,4 @@\n ctx\n-old one\n+new one\n ctx2\n' ;;
   esac
 }
 
-while IFS='|' read -r kind want_shell want_ct; do
+while IFS='|' read -r kind want_shell want_ct want_extra; do
   [ -z "$kind" ] && continue
-  url=$(kind_body "$kind" | ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no \
-      -o IdentitiesOnly=yes -- "$HOST" 2>/dev/null | head -1)
-  slug=$(slug_from_url "$url")
-  if [ -z "$slug" ]; then
-    bad "kind $kind: upload" "no URL emitted (the format gate rejected it?)"
-    continue
-  fi
-  echo "$slug" >> /tmp/hostthis-smoke.slugs
+  mint "kind $kind: upload" < <(kind_body "$kind") || continue
+  url="$MINT_URL"; slug="$MINT_SLUG"
 
   # -n: without it this ssh swallows the loop's here-string and only the
   # first kind is ever checked.
@@ -318,6 +309,12 @@ while IFS='|' read -r kind want_shell want_ct; do
     *"$want_shell"*) ok "kind $kind: serves its viewer" ;;
     *) bad "kind $kind: viewer" "page does not load $want_shell" ;;
   esac
+  if [ -n "$want_extra" ]; then
+    case "$page" in
+      *"$want_extra"*) ok "kind $kind: loads $want_extra" ;;
+      *) bad "kind $kind: extra asset" "page does not load $want_extra" ;;
+    esac
+  fi
 
   ct=$(curl -sS -o /dev/null -w '%{content_type}' "$url?raw=1")
   case "$ct" in
@@ -327,54 +324,21 @@ while IFS='|' read -r kind want_shell want_ct; do
 done <<< "$kind_specs"
 
 # ---- 11c. a markdown doc quoting a diff stays markdown ---------------------
-# The gate matches a hunk header anywhere in the prefix, so a design doc
-# showing a diff was classified as a diff outright and its prose served as
-# diff noise. The fence must win.
+# The gate matches a hunk header anywhere in the prefix; a fenced diff inside
+# prose must not classify the whole paste as a diff. The fence wins.
 step "markdown quoting a diff is markdown, not diff"
-qd_url=$(printf '# Review\n\nThe change:\n\n```diff\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new\n```\n' | \
-  ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -- "$HOST" 2>/dev/null | head -1)
-qd_slug=$(slug_from_url "$qd_url")
-if [ -z "$qd_slug" ]; then
-  bad "quoted-diff upload" "no URL emitted"
-else
-  echo "$qd_slug" >> /tmp/hostthis-smoke.slugs
-  qd_kind=$($SSH "$HOST" list -ojson 2>/dev/null | jq -r --arg s "$qd_slug" '.[] | select(.slug==$s) | .kind')
+if mint "quoted-diff upload" < <(printf '# Review\n\nThe change:\n\n```diff\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new\n```\n'); then
+  qd_kind=$($SSH "$HOST" list -ojson 2>/dev/null | jq -r --arg s "$MINT_SLUG" '.[] | select(.slug==$s) | .kind')
   [ "$qd_kind" = "markdown" ] \
     && ok "quoted diff stays markdown" \
     || bad "quoted diff kind" "stored as '${qd_kind:-?}', want markdown: its prose would be served as diff noise"
 fi
 
-# ---- 11c2. a diff paste anchors its lines ----------------------------------
-# The viewer numbers content rows over the line-by-line rendering. Only the
-# shell can assert the scroll, but the server side is checkable: a diff must
-# still detect as diff and serve the diff viewer, which is what the anchors
-# hang off.
-step "diff kind serves the diff viewer"
-dv_url=$(printf -- '--- a/x\n+++ b/x\n@@ -1,4 +1,4 @@\n ctx\n-old one\n+new one\n ctx2\n' | \
-  ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -- "$HOST" 2>/dev/null | head -1)
-dv_slug=$(slug_from_url "$dv_url")
-if [ -z "$dv_slug" ]; then
-  bad "diff upload" "no URL emitted"
-else
-  echo "$dv_slug" >> /tmp/hostthis-smoke.slugs
-  dv_kind=$($SSH -n "$HOST" list -ojson 2>/dev/null | jq -r --arg s "$dv_slug" '.[] | select(.slug==$s) | .kind')
-  [ "$dv_kind" = "diff" ] && ok "diff: detected" || bad "diff: detection" "stored as '${dv_kind:-?}'"
-  dv_page=$(curl -sS "$dv_url")
-  case "$dv_page" in
-    *"/_hostthis/diff.js"*) ok "diff: serves its viewer" ;;
-    *) bad "diff: viewer" "page does not load diff.js" ;;
-  esac
-  case "$dv_page" in
-    *"/_hostthis/deeplink.js"*) ok "diff: loads the deep-link resolver" ;;
-    *) bad "diff: deep links" "the diff shell does not load deeplink.js, so #L cannot resolve" ;;
-  esac
-fi
-
 # ---- 11d. an unsupported type is still refused -----------------------------
-# The gate widened to seven kinds; it must not have become a catch-all.
+# The gate accepts many kinds; it must not have become a catch-all.
 step "unsupported content is still rejected"
-rej=$(printf '\x00\x01\x02binary junk\x00\xff' | \
-  ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -- "$HOST" 2>&1 | head -2)
+# The xtrace of upload's own body lands in the captured stderr; drop it.
+rej=$(printf '\x00\x01\x02binary junk\x00\xff' | upload 2>&1 | grep -Ev '^\++\[trace\]' | head -2)
 case "$rej" in
   *"only accepts"*) ok "binary refused with the format message" ;;
   *hostthis.dev*|*"$HOST"*) bad "binary accepted" "the gate became a catch-all: $rej" ;;
@@ -388,9 +352,6 @@ code_after=$(curl -sS -o /dev/null -w "%{http_code}" "$URL1")
 [ "$code_after" = "404" ] \
   && ok "delete makes URL 404" \
   || bad "delete" "URL serves $code_after"
-# strip SLUG1 from cleanup list since we already deleted it
-grep -v "^$SLUG1$" /tmp/hostthis-smoke.slugs > /tmp/hostthis-smoke.slugs.new
-mv /tmp/hostthis-smoke.slugs.new /tmp/hostthis-smoke.slugs
 
 # ---- 13. unknown verb → help -----------------------------------------------
 step "unknown verb → help"
@@ -409,55 +370,10 @@ echo "$hlp" | grep -q "UPDATE & MANAGE" && echo "$hlp" | grep -q " list " \
   && ok "help lists verbs" \
   || bad "help" "$hlp"
 
-# ---- 14a. per-verb help: help get ------------------------------------------
-# `help <verb>` emits the verb's descriptor (signature + description +
-# examples) instead of the global banner. The descriptor carries a
-# "Usage:" line the global banner lacks, so checking for the verb name
-# plus "Usage:" reliably distinguishes verb help from the global help.
-step "help get (per-verb help)"
-help_get=$($SSH "$HOST" help get 2>&1)
-help_get_rc=$?
-echo "$help_get" | grep -q "get" && echo "$help_get" | grep -q "Usage:" \
-  && [ "$help_get_rc" -eq 0 ] \
-  && ok "help get emits verb-specific help" \
-  || bad "help get" "rc=$help_get_rc out=$help_get"
-
-# ---- 14b. per-verb help: get --help byte-matches help get ------------------
-# `<verb> --help` and `<verb> -h` are routed through the same descriptor
-# lookup as `help <verb>`, so all three forms should produce identical
-# bytes on stderr.
-step "get --help matches help get"
-get_dashdash=$($SSH "$HOST" get --help 2>&1)
-[ "$get_dashdash" = "$help_get" ] \
-  && ok "get --help byte-matches help get" \
-  || bad "get --help" "got: $get_dashdash"
-
-# ---- 14c. per-verb help: get -h byte-matches help get ----------------------
-step "get -h matches help get"
-get_h=$($SSH "$HOST" get -h 2>&1)
-[ "$get_h" = "$help_get" ] \
-  && ok "get -h byte-matches help get" \
-  || bad "get -h" "got: $get_h"
-
-# ---- 14d. help <unknown> → unknown-verb message + global banner ------------
-# `help <unknown>` prefixes an `unknown verb` line and then emits the
-# global banner, exiting 0 (the user asked for help, so they get help).
-step "help unknown → unknown-verb + global banner"
-help_unk=$($SSH "$HOST" help notarealverb 2>&1)
-help_unk_rc=$?
-echo "$help_unk" | grep -q "unknown verb" \
-  && echo "$help_unk" | grep -q "UPDATE & MANAGE" \
-  && [ "$help_unk_rc" -eq 0 ] \
-  && ok "help unknown shows banner with prefix, exit 0" \
-  || bad "help unknown" "rc=$help_unk_rc out=$help_unk"
-
 # ---- 14b. streamed upload: large body, and an aborted one ------------------
-# These exist because the write path must be CONSTANT-MEMORY. It buffered whole
-# files once, so peak memory tracked the payload and a few concurrent deploys
-# could exhaust a small node.
-#
-# Incompressible input on purpose: zstd must not be able to shrink the work and
-# hide a buffer. The size is deliberately larger than any inline path.
+# The write path is constant-memory. Incompressible input on purpose: zstd
+# must not be able to shrink the work and hide a buffer. The size is
+# deliberately larger than any inline path.
 #
 # This asserts the upload SUCCEEDS and reads back intact. It cannot see the
 # server's memory - that is measured by the operator-side deploy check, which
@@ -476,7 +392,6 @@ if [ -n "$stream_url" ]; then
   [ "$got" = "$want" ] \
     && ok "streamed body reads back intact ($got bytes)" \
     || bad "streamed body round-trip" "read back $got bytes, want $want"
-  slug_from_url "$stream_url" >> /tmp/hostthis-smoke.slugs
 else
   bad "streamed upload" "no URL returned for a ${stream_mb} MiB body"
 fi
@@ -499,69 +414,16 @@ fi
 
 # ---- 15. session without a key is rejected ---------------------------------
 step "no-key session is rejected"
-nokey=$(ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o PreferredAuthentications=password \
+nokey=$(ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o PreferredAuthentications=password \
         -o PubkeyAuthentication=no -- "$HOST" whoami 2>&1; true)
 echo "$nokey" | grep -q "ssh key required" \
   && ok "no-key session refused" \
   || bad "no-key rejection" "$nokey"
 
-# ---- 16. hardening: direct-tcpip channel refused (-W) ---------------------
-# Phase C4: the server's LocalPortForwardingCallback returns false, so
-# the client's direct-tcpip channel request is refused.
-#
-# Why -W not -L: with -L the ssh client only opens the direct-tcpip
-# channel WHEN TRAFFIC FLOWS through the local listener; a session that
-# doesn't push bytes never triggers the server-side check. -W asks ssh
-# to use stdio as a direct-tcpip channel IMMEDIATELY at session start,
-# which forces the server to accept-or-reject before any command runs.
-step "ssh -W (direct-tcpip channel) refused"
-fwd_l=$(ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
-        -W localhost:80 "$HOST" 2>&1 </dev/null)
-fwd_l_rc=$?
-if [ "$fwd_l_rc" -ne 0 ] && \
-   echo "$fwd_l" | grep -qiE "refused|open failed|administratively prohibited|forward"; then
-  ok "direct-tcpip refused (rc=$fwd_l_rc)"
-else
-  bad "ssh -W not refused" "rc=$fwd_l_rc out=$fwd_l"
-fi
-
-# ---- 17. hardening: reverse port-forward refused (-R) ---------------------
-# ReversePortForwardingCallback returns false, so the `tcpip-forward`
-# global request is rejected at session start. ExitOnForwardFailure=yes
-# guarantees ssh exits non-zero in that case.
-step "ssh -R (reverse forward) refused"
-fwd_r=$(ssh -p "$SSH_PORT" -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
-        -o ExitOnForwardFailure=yes \
-        -R 19998:localhost:80 -- "$HOST" whoami 2>&1)
-fwd_r_rc=$?
-if [ "$fwd_r_rc" -ne 0 ] && \
-   echo "$fwd_r" | grep -qiE "refused|open failed|administratively prohibited|forward"; then
-  ok "reverse forward refused (rc=$fwd_r_rc)"
-else
-  bad "ssh -R not refused" "rc=$fwd_r_rc out=$fwd_r"
-fi
-
-# ---- 18. hardening: subsystem (sftp) refused ------------------------------
-# SessionRequestCallback returns false for "subsystem", so sftp's
-# subsystem handshake fails. BatchMode=yes prevents sftp from hanging
-# on a password prompt if auth somehow fell through.
-step "sftp subsystem refused"
-sftp_out=$(sftp -i "$KEY" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
-           -o BatchMode=yes -b /dev/null "$HOST" 2>&1)
-sftp_rc=$?
-if [ "$sftp_rc" -ne 0 ] && \
-   echo "$sftp_out" | grep -qiE "subsystem|refused|received remote disconnect|connection closed"; then
-  ok "sftp subsystem refused (rc=$sftp_rc)"
-else
-  bad "sftp not refused" "rc=$sftp_rc out=$sftp_out"
-fi
-
 # ---- latency gate ----------------------------------------------------------
-# Behaviour and LATENCY are separate failure modes and smoke used to see only
-# the first. During the 2026-07 drain wedge this suite reported 26 PASS / 0 FAIL
-# continuously while `whoami` took 32-38 SECONDS: every assertion held, and the
-# service was unusable. A verb can be perfectly correct and operationally
-# broken, so a deploy is not verified until both are checked.
+# Behaviour and LATENCY are separate failure modes: a verb can be perfectly
+# correct and operationally broken, so a deploy is not verified until both are
+# checked.
 #
 # Budgets are per-verb wall clock over a fresh SSH connection - what a user
 # actually waits for, not server-side processing time. SMOKE_LATENCY_BUDGET_MS

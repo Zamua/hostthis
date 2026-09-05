@@ -1,20 +1,9 @@
 package celld_test
 
-// Release must be idempotent BELOW the port's guard.
-//
-// The conformance suite can only call delete twice, and a status guard stops
-// the second call before it reaches release - so a port-level assertion cannot
-// see this. A resolver replaying after a crash has no such guard: it calls
-// release directly against an intent it has not yet discharged.
-//
-// That is the dangerous case, because release is the one operation where a
-// repeat costs money. Expressed as arithmetic ("subtract N") a replay
-// under-charges the owner permanently and nothing surfaces it. Expressed as
-// membership ("this slug is no longer counted") a replay is a no-op by
-// construction, which is what lets a resolver promise only at-least-once.
-//
-// This drives the cell's release endpoint directly, twice, and asserts the
-// charged total is identical after the replay.
+// Release is membership, not arithmetic: replaying it against the same
+// generation leaves the owner's charged total unchanged. The adapter's status
+// guard stops a second delete before it reaches release, so only a direct
+// replay, the shape a crash-recovering resolver produces, can pin this.
 
 import (
 	"context"
@@ -52,11 +41,16 @@ func TestReleaseReplayDoesNotUnderCharge(t *testing.T) {
 		}
 	}
 
+	stored, err := repo.Get(doomed.Slug)
+	if err != nil {
+		t.Fatalf("get %s: %v", doomed.Slug, err)
+	}
+
 	// Drive the cell's release directly, bypassing the adapter's status guard,
 	// which is exactly what a replaying resolver does.
 	release := func() {
 		t.Helper()
-		body := fmt.Sprintf(`{"slug":%q}`, doomed.Slug.String())
+		body := fmt.Sprintf(`{"slug":%q,"generation":%q}`, doomed.Slug.String(), stored.Generation)
 		req, err := http.NewRequest(http.MethodPost,
 			fmt.Sprintf("%s/identity/release?scope=%s", base, owner),
 			strings.NewReader(body))

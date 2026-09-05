@@ -49,15 +49,12 @@ jobs:
             exit 1
           fi
 
-      - name: build
-        run: go build ./...
-
       - name: test
         run: make test
 
-  # The celld-gated suites run against `celld dev`, which uses the production
-  # Worker runtime with a local persistent object store. A separate operator
-  # gate qualifies object-store restore behavior against MinIO.
+  # The celld-gated suites run against a real celld node backed by MinIO, the
+  # production shape. A separate operator gate qualifies object-store restore
+  # behavior.
   celld:
     runs-on: ubuntu-latest
     steps:
@@ -126,6 +123,8 @@ jobs:
             go test -count=1 ./internal/storage -run 'TestConformance_Celld'
           CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
             go test -count=1 ./internal/http -run 'TestLiveRoom'
+          CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
+            go test -count=1 ./internal/celld -run 'TestReleaseReplay'
 
       # The node's own log is the only diagnostic when it dies mid-suite,
       # which presents as connection-refused test noise.
