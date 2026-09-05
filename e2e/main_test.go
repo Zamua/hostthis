@@ -9,6 +9,7 @@ import (
 
 func TestMain(m *testing.M) {
 	code := m.Run()
+	stopSharedServer()
 	removeDaemonBuild()
 	os.Exit(code)
 }
