@@ -10,10 +10,9 @@ import (
 
 // Room is the aggregate for the no-auth, capability-based persistence tier
 // (SPEC.md "Rooms (app persistence)"): a key-value namespace under a deployed
-// static-site app, addressed by an unguessable UUIDv4. Possession of that UUID
-// is the entire access model, and the storage layer namespaces every value by
-// the triple (app-slug, room-uuid, key) so a room can never cross-read another
-// room's or another app's data.
+// app, addressed by an unguessable UUIDv4 whose possession is the entire access
+// model. Every value is namespaced by (app-slug, room-uuid, key), so a room can
+// never cross-read another room's or app's data.
 type Room struct {
 	AppSlug   Slug   // the owning app: the static site's slug
 	ID        RoomID // the UUIDv4 capability
@@ -87,11 +86,9 @@ func NewRoomID() RoomID {
 
 // ParseRoomID validates that s is a well-formed UUIDv4 and returns it typed
 // and lowercased. Use it at every boundary where untrusted input becomes a
-// RoomID: HTTP path segments, repo reads.
-//
-// Validation is strict: exactly the 36-char 8-4-4-4-12 hex layout, version 4,
-// RFC 4122 variant. Tighter than "any UUID shape" so a forged id of the wrong
-// version or form is malformed (400) rather than a real-but-absent room (404).
+// RoomID. Strict: exactly the 36-char 8-4-4-4-12 hex layout, version 4, RFC
+// 4122 variant, so a forged id of the wrong form is malformed (400) rather
+// than a real-but-absent room (404).
 func ParseRoomID(s string) (RoomID, error) {
 	if s == "" {
 		return "", ErrRoomIDEmpty
@@ -126,13 +123,12 @@ func formatUUID(b [16]byte) string {
 type RoomKV struct {
 	Values map[string][]byte
 
-	// Seq is the room's sequence at the instant this view was materialized:
-	// a dense uint64 the backend assigns at commit, +1 per committed mutation
-	// (PUT or DELETE, including the idempotent delete of an absent key). A
-	// snapshot stamped Seq == S reflects EXACTLY the mutations with seq <= S,
-	// which is what lets a relay late-joiner splice the live stream onto the
-	// snapshot: discard frames with seq <= S, apply seq > S in order. Zero for
-	// a fresh room and for the zero value.
+	// Seq is the room's sequence at the instant this view was materialized: a
+	// dense uint64 assigned at commit, +1 per mutation (PUT or DELETE, including
+	// the delete of an absent key). A snapshot stamped S reflects EXACTLY the
+	// mutations with seq <= S, which lets a relay late-joiner splice the live
+	// stream onto it: discard seq <= S, apply seq > S in order. Zero for a
+	// fresh room.
 	Seq uint64
 }
 
