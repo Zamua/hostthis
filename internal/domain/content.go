@@ -242,9 +242,7 @@ func hasAnyPrefix(s string, prefixes []string) bool {
 var pdfMagic = []byte("%PDF-")
 
 // HasPDFMagic reports whether the prefix opens with the PDF signature.
-func HasPDFMagic(b []byte) bool {
-	return len(b) >= len(pdfMagic) && string(b[:len(pdfMagic)]) == string(pdfMagic)
-}
+func HasPDFMagic(b []byte) bool { return bytes.HasPrefix(b, pdfMagic) }
 
 // mermaidOpeners are the diagram keywords Mermaid accepts on the opening line.
 // Matching the opener is what keeps this gate off prose: no English sentence
@@ -408,26 +406,13 @@ func looksLikeLog(b []byte) bool {
 }
 
 func hasAnyKey(m map[string]json.RawMessage, keys []string) bool {
-	for _, k := range keys {
-		if _, ok := m[k]; ok {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(keys, func(k string) bool { _, ok := m[k]; return ok })
 }
 
 // isBulkAction reports whether an NDJSON line is an Elasticsearch/OpenSearch
 // bulk action rather than a document: a single key naming an operation.
 func isBulkAction(m map[string]json.RawMessage) bool {
-	if len(m) != 1 {
-		return false
-	}
-	for _, op := range []string{"index", "create", "update", "delete"} {
-		if _, ok := m[op]; ok {
-			return true
-		}
-	}
-	return false
+	return len(m) == 1 && hasAnyKey(m, []string{"index", "create", "update", "delete"})
 }
 
 // looksLikeJSON reports whether the content is a JSON value or a JSONL stream.
