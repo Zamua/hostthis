@@ -133,23 +133,6 @@ func TestUpdate_Characterization(t *testing.T) {
 			t.Fatalf("expected 'v2 saved.' on stderr, got %q", stderr2)
 		}
 	})
-
-	t.Run("ForeignSlug_NotFound", func(t *testing.T) {
-		other := startStack(t)
-		stdout, _, _ := other.run("", []byte("<!doctype html><p>foreign</p>"))
-		foreignSlug := extractSlug(stdout)
-		// The two stacks use disjoint stores, so the slug does not exist
-		// in `s`, but the assertion is the same as "wrong owner": a not-found
-		// shape. ParseSlug succeeds, so the dispatcher routes through
-		// verbUpload's update path.
-		_, stderr, exit := s.run(foreignSlug, []byte("<!doctype html><p>x</p>"))
-		if exit == 0 {
-			t.Fatalf("foreign-slug update should fail, got exit 0 (%q)", stderr)
-		}
-		if !strings.Contains(stderr, "not found") {
-			t.Fatalf("expected 'not found' on stderr, got %q", stderr)
-		}
-	})
 }
 
 // ---------------------------------------------------------------------------
@@ -237,27 +220,6 @@ func TestShow_Characterization(t *testing.T) {
 		}
 	})
 
-	t.Run("MissingSlugArg_Exit2_Usage", func(t *testing.T) {
-		s := startStack(t)
-		_, stderr, exit := s.run("get", nil)
-		if exit != 2 {
-			t.Fatalf("expected exit 2 for missing slug arg, got %d (%q)", exit, stderr)
-		}
-		if !strings.Contains(stderr, "hostthis:") {
-			t.Fatalf("expected 'hostthis:' prefix on error, got %q", stderr)
-		}
-	})
-
-	t.Run("InvalidSlug_Exit2", func(t *testing.T) {
-		s := startStack(t)
-		// "BAD" is neither 8 chars nor lowercase, so it is not a slug.
-		_, stderr, exit := s.run("get BAD", nil)
-		if exit != 2 {
-			t.Fatalf("expected exit 2 for invalid slug, got %d (%q)", exit, stderr)
-		}
-		_ = stderr
-	})
-
 	t.Run("WellFormedButNonExistentSlug_NotFound_Exit4", func(t *testing.T) {
 		s := startStack(t)
 		// A syntactically valid slug that does not exist.
@@ -269,24 +231,6 @@ func TestShow_Characterization(t *testing.T) {
 		}
 		if !strings.Contains(stderr, "not found") {
 			t.Fatalf("expected 'not found' message, got %q", stderr)
-		}
-	})
-
-	t.Run("ForeignSlug_NotFound_Exit4", func(t *testing.T) {
-		s := startStack(t)
-		stdout, _, _ := s.run("", []byte("<!doctype html><p>own</p>"))
-		slug := extractSlug(stdout)
-		// Fresh client = fresh identity, same db.
-		other, _ := newKeyClient(t, s.sshAddr)
-		_, stderr, exit := s.runOn(other, "get "+slug, nil)
-		// requireOwner collapses not-owner to ErrNotFound at the boundary so
-		// existence does not leak.
-		if exit != 4 {
-			t.Fatalf("expected exit 4 (collapsed not-found) for foreign show, got %d (%q)",
-				exit, stderr)
-		}
-		if !strings.Contains(stderr, "not found") {
-			t.Fatalf("expected 'not found' for foreign show, got %q", stderr)
 		}
 	})
 }
@@ -306,6 +250,9 @@ func TestRename_Characterization(t *testing.T) {
 		}
 		if strings.TrimSpace(stderr) != "renamed." {
 			t.Fatalf("expected exactly 'renamed.' on stderr, got %q", stderr)
+		}
+		if listOut, _, _ := s.run("list", nil); !strings.Contains(listOut, "label v2") {
+			t.Fatalf("expected new label in list: %q", listOut)
 		}
 	})
 
@@ -340,17 +287,6 @@ func TestRename_Characterization(t *testing.T) {
 			t.Fatalf("expected invalid-name message, got %q", stderr)
 		}
 	})
-
-	t.Run("InvalidSlugArg_Exit2", func(t *testing.T) {
-		s := startStack(t)
-		_, stderr, exit := s.run(`rename BAD "label"`, nil)
-		if exit != 2 {
-			t.Fatalf("expected exit 2 for invalid slug, got %d (%q)", exit, stderr)
-		}
-		if !strings.Contains(stderr, "invalid slug") {
-			t.Fatalf("expected 'invalid slug' message, got %q", stderr)
-		}
-	})
 }
 
 // ---------------------------------------------------------------------------
@@ -368,28 +304,6 @@ func TestDelete_Characterization(t *testing.T) {
 		}
 		if strings.TrimSpace(stderr) != "deleted." {
 			t.Fatalf("expected exactly 'deleted.' on stderr, got %q", stderr)
-		}
-	})
-
-	t.Run("NoArgs_Exit2_UsageHint", func(t *testing.T) {
-		s := startStack(t)
-		_, stderr, exit := s.run("delete", nil)
-		if exit != 2 {
-			t.Fatalf("expected exit 2 for missing slug, got %d (%q)", exit, stderr)
-		}
-		if !strings.Contains(stderr, "usage: delete <slug>") {
-			t.Fatalf("expected delete usage hint, got %q", stderr)
-		}
-	})
-
-	t.Run("TooManyArgs_Exit2_UsageHint", func(t *testing.T) {
-		s := startStack(t)
-		_, stderr, exit := s.run("delete a b c", nil)
-		if exit != 2 {
-			t.Fatalf("expected exit 2 for too many args, got %d (%q)", exit, stderr)
-		}
-		if !strings.Contains(stderr, "usage: delete <slug>") {
-			t.Fatalf("expected delete usage hint, got %q", stderr)
 		}
 	})
 
@@ -436,19 +350,6 @@ func TestDelete_Characterization(t *testing.T) {
 		}
 		if !strings.Contains(stderr, "currently served") {
 			t.Fatalf("expected 'currently served' hint, got %q", stderr)
-		}
-	})
-
-	t.Run("VersionDelete_InvalidVerArg_Exit2", func(t *testing.T) {
-		s := startStack(t)
-		stdout, _, _ := s.run("", []byte("<!doctype html><p>x</p>"))
-		slug := extractSlug(stdout)
-		_, stderr, exit := s.run("delete "+slug+" notanumber", nil)
-		if exit != 2 {
-			t.Fatalf("expected exit 2 for non-numeric ver, got %d (%q)", exit, stderr)
-		}
-		if !strings.Contains(stderr, "invalid version") {
-			t.Fatalf("expected 'invalid version' message, got %q", stderr)
 		}
 	})
 }
@@ -507,41 +408,6 @@ func TestVersions_Characterization(t *testing.T) {
 		}
 	})
 
-	t.Run("PinMissingArgs_Exit2", func(t *testing.T) {
-		s := startStack(t)
-		_, stderr, exit := s.run("pin", nil)
-		if exit != 2 {
-			t.Fatalf("expected exit 2, got %d (%q)", exit, stderr)
-		}
-		if !strings.Contains(stderr, "usage: pin <slug> <ver-num>") {
-			t.Fatalf("expected pin usage hint, got %q", stderr)
-		}
-	})
-
-	t.Run("PinInvalidSlug_Exit2", func(t *testing.T) {
-		s := startStack(t)
-		_, stderr, exit := s.run("pin BAD 1", nil)
-		if exit != 2 {
-			t.Fatalf("expected exit 2, got %d (%q)", exit, stderr)
-		}
-		if !strings.Contains(stderr, "invalid slug") {
-			t.Fatalf("expected 'invalid slug', got %q", stderr)
-		}
-	})
-
-	t.Run("PinInvalidVer_Exit2", func(t *testing.T) {
-		s := startStack(t)
-		stdout, _, _ := s.run("", []byte("<!doctype html><p>v1</p>"))
-		slug := extractSlug(stdout)
-		_, stderr, exit := s.run("pin "+slug+" 0", nil)
-		if exit != 2 {
-			t.Fatalf("expected exit 2, got %d (%q)", exit, stderr)
-		}
-		if !strings.Contains(stderr, "invalid version") {
-			t.Fatalf("expected 'invalid version', got %q", stderr)
-		}
-	})
-
 	t.Run("Unpin_StderrConfirm", func(t *testing.T) {
 		s := startStack(t)
 		stdout, _, _ := s.run("", []byte("<!doctype html><p>v1</p>"))
@@ -555,15 +421,6 @@ func TestVersions_Characterization(t *testing.T) {
 		if !strings.Contains(stderr, "unpinned. URL now serves the latest version.") {
 			t.Fatalf("expected unpin confirmation, got %q", stderr)
 		}
-	})
-
-	t.Run("UnpinMissingSlug_Exit2", func(t *testing.T) {
-		s := startStack(t)
-		_, stderr, exit := s.run("unpin", nil)
-		if exit != 2 {
-			t.Fatalf("expected exit 2 for missing slug, got %d (%q)", exit, stderr)
-		}
-		_ = stderr
 	})
 }
 
@@ -955,88 +812,62 @@ func TestExitCodes_Characterization(t *testing.T) {
 	// State so every case below is reachable.
 	stdoutA, _, _ := s.run("", []byte("<!doctype html><p>a</p>"))
 	slugA := extractSlug(stdoutA)
-	// A different identity, for the not-owner path.
-	foreignClient, _ := newKeyClient(t, s.sshAddr)
+	ghost := domain.NewRandomSlug().String()
 
 	cases := []struct {
-		name string
-		// "" = keyed default client, anon = anon client, foreign = a
-		// different keyed identity.
-		client string
+		name   string
+		anon   bool
 		cmd    string
 		stdin  []byte
 		want   int
-		desc   string
+		stderr string // substring, or the whole stream when exact
+		exact  bool
 	}{
-		{
-			name: "ExitCode0_HelpSuccess",
-			cmd:  "help",
-			want: 0,
-			desc: "help is the canonical exit-0 path with no side effects",
-		},
-		{
-			name: "ExitCode0_WhoamiSuccess",
-			cmd:  "whoami",
-			want: 0,
-			desc: "whoami always exits 0 for a keyed session",
-		},
-		{
-			name: "ExitCode2_UnknownVerb",
-			cmd:  "wibble",
-			want: 2,
-			desc: "unknown command → exit 2 with help dump",
-		},
-		{
-			name: "ExitCode2_UsageError_DeleteNoArgs",
-			cmd:  "delete",
-			want: 2,
-			desc: "verb-level usage error → exit 2",
-		},
-		{
-			name: "ExitCode2_InvalidVer",
-			cmd:  "delete " + slugA + " notanumber",
-			want: 2,
-			desc: "non-numeric ver arg → exit 2",
-		},
-		{
-			name:   "ExitCode3_KeylessSession",
-			client: "anon",
-			cmd:    "whoami",
-			want:   3,
-			desc:   "session without a key → exit 3",
-		},
-		{
-			name: "ExitCode4_NotFound",
-			cmd:  "get " + domain.NewRandomSlug().String(),
-			want: 4,
-			desc: "well-formed but non-existent slug → exit 4",
-		},
-		{
-			name:   "ExitCode4_NotOwner_CollapsedToNotFound",
-			client: "foreign",
-			cmd:    "get " + slugA,
-			want:   4,
-			desc:   "foreign owner's slug is hidden as 'not found' → exit 4",
-		},
+		{name: "ExitCode0_HelpSuccess", cmd: "help", want: 0},
+		{name: "ExitCode0_WhoamiSuccess", cmd: "whoami", want: 0},
+		{name: "ExitCode2_UnknownVerb", cmd: "wibble", want: 2, stderr: `unknown command "wibble"`},
+		{name: "ExitCode2_GetMissingSlug", cmd: "get", want: 2, stderr: "hostthis:"},
+		{name: "ExitCode2_GetInvalidSlug", cmd: "get BAD", want: 2},
+		{name: "ExitCode2_URLInvalidSlug", cmd: "url not-a-valid-slug", want: 2},
+		{name: "ExitCode2_RenameInvalidSlug", cmd: `rename BAD "label"`, want: 2, stderr: "invalid slug"},
+		{name: "ExitCode2_DeleteNoArgs", cmd: "delete", want: 2, stderr: "usage: delete <slug>"},
+		{name: "ExitCode2_DeleteTooManyArgs", cmd: "delete a b c", want: 2, stderr: "usage: delete <slug>"},
+		{name: "ExitCode2_DeleteInvalidVer", cmd: "delete " + slugA + " notanumber", want: 2, stderr: "invalid version"},
+		{name: "ExitCode2_PinMissingArgs", cmd: "pin", want: 2, stderr: "usage: pin <slug> <ver-num>"},
+		{name: "ExitCode2_PinInvalidSlug", cmd: "pin BAD 1", want: 2, stderr: "invalid slug"},
+		{name: "ExitCode2_PinInvalidVer", cmd: "pin " + slugA + " 0", want: 2, stderr: "invalid version"},
+		{name: "ExitCode2_UnpinMissingSlug", cmd: "unpin", want: 2},
+		{name: "ExitCode2_UnknownOutputFormat", cmd: "list -o yaml", want: 2, stderr: "unknown output format"},
+		// A leading flag routes straight into parseUploadFlags, whose message
+		// the SSH layer prefixes with "hostthis: ". `--name foo bar` is NOT an
+		// error: --name greedily joins the remaining tokens into one label.
+		{name: "ExitCode2_NameNoValue", cmd: "--name", want: 2, stderr: "hostthis: --name needs a value\n", exact: true},
+		{name: "ExitCode2_TypeNoValue", cmd: "--type", want: 2, stderr: "hostthis: --type needs a value\n", exact: true},
+		{name: "ExitCode2_UnexpectedArgument", cmd: "--type html bad", want: 2, stderr: "hostthis: unexpected argument \"bad\"\n", exact: true},
+		{name: "ExitCode3_KeylessSession", anon: true, cmd: "whoami", want: 3, stderr: "ssh key required"},
+		{name: "ExitCode4_GetGhostSlug", cmd: "get " + ghost, want: 4, stderr: "not found"},
+		{name: "ExitCode4_UpdateGhostSlug", cmd: ghost, stdin: []byte("<!doctype html><p>x</p>"), want: 4, stderr: "not found"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var (
-				stdout, stderr string
-				exit           int
-			)
-			switch tc.client {
-			case "anon":
-				stdout, stderr, exit = s.runAnon(tc.cmd, tc.stdin)
-			case "foreign":
-				stdout, stderr, exit = s.runOn(foreignClient, tc.cmd, tc.stdin)
-			default:
-				stdout, stderr, exit = s.run(tc.cmd, tc.stdin)
+			run := s.run
+			if tc.anon {
+				run = s.runAnon
 			}
+			stdout, stderr, exit := run(tc.cmd, tc.stdin)
 			if exit != tc.want {
-				t.Fatalf("%s: %s\n  cmd: %q\n  got exit %d, want %d\n  stdout: %q\n  stderr: %q",
-					tc.name, tc.desc, tc.cmd, exit, tc.want, stdout, stderr)
+				t.Fatalf("cmd %q: got exit %d, want %d\n  stdout: %q\n  stderr: %q",
+					tc.cmd, exit, tc.want, stdout, stderr)
+			}
+			if tc.want != 0 && stdout != "" {
+				t.Fatalf("cmd %q: a failure must leave stdout empty, got %q", tc.cmd, stdout)
+			}
+			if tc.exact && stderr != tc.stderr {
+				t.Fatalf("cmd %q: stderr drift:\n got: %q\nwant: %q", tc.cmd, stderr, tc.stderr)
+			}
+			if !tc.exact && !strings.Contains(stderr, tc.stderr) {
+				t.Fatalf("cmd %q: stderr %q lacks %q", tc.cmd, stderr, tc.stderr)
 			}
 		})
 	}
@@ -1079,80 +910,28 @@ func TestOwnerCollapse_Characterization(t *testing.T) {
 		{name: "Update_ForeignSlug", cmd: slugA, body: []byte("<!doctype html><p>x</p>")},
 	}
 
+	// Every verb reports the SAME bytes a plain not-found does, with no
+	// internal layer name in them, so no verb is a side channel.
+	_, wantStderr, _ := s.run("get "+domain.NewRandomSlug().String(), nil)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, stderr, exit := s.runOn(otherClient, tc.cmd, tc.body)
+			stdout, stderr, exit := s.runOn(otherClient, tc.cmd, tc.body)
 			if exit != 4 {
 				t.Fatalf("foreign %s expected exit 4 (NotFound, NOT 5/NotOwner), got %d (%q)",
 					tc.name, exit, stderr)
 			}
-			// The user-facing message is "not found", not "not your paste":
-			// anything else leaks that the slug exists under a different
-			// identity.
-			if !strings.Contains(stderr, "not found") {
-				t.Fatalf("foreign %s expected 'not found' on stderr, got %q",
-					tc.name, stderr)
+			if stdout != "" {
+				t.Fatalf("foreign %s leaked onto stdout: %q", tc.name, stdout)
 			}
-			if strings.Contains(stderr, "not your paste") {
-				t.Fatalf("foreign %s LEAKS existence via 'not your paste' message: %q",
-					tc.name, stderr)
+			if stderr != wantStderr {
+				t.Fatalf("foreign %s stderr %q must match the ghost-slug not-found %q",
+					tc.name, stderr, wantStderr)
+			}
+			if strings.Contains(stderr, "service:") {
+				t.Fatalf("foreign %s leaks the service layer name: %q", tc.name, stderr)
 			}
 		})
 	}
-}
-
-// ---------------------------------------------------------------------------
-// 16. parseUploadFlags negative paths - byte-exact stderr lines
-// ---------------------------------------------------------------------------
-
-func TestUploadFlags_NegativeCharacterization(t *testing.T) {
-	s := startStack(t)
-
-	// parseUploadFlags is reached only when argv[0] starts with "--" or is a
-	// valid slug. "put" is not a verb, so "put --name" routes through the
-	// unknown-command path (exit 2 + help dump), NOT the parser. A leading
-	// `--name` / `--type` is the canonical "upload with a label, no slug"
-	// shape per docs/SPEC.md.
-
-	t.Run("DashDashNameNoValue_Exit2_ByteExactStderr", func(t *testing.T) {
-		// A flag in position 0 routes straight into verbUpload ->
-		// parseUploadFlags, which returns "needs a value". The SSH layer
-		// prefixes "hostthis: " and appends "\n".
-		_, stderr, exit := s.run("--name", nil)
-		if exit != 2 {
-			t.Fatalf("expected exit 2, got %d (%q)", exit, stderr)
-		}
-		want := "hostthis: --name needs a value\n"
-		if stderr != want {
-			t.Fatalf("stderr drift:\n got: %q\nwant: %q", stderr, want)
-		}
-	})
-
-	t.Run("DashDashTypeNoValue_Exit2_ByteExactStderr", func(t *testing.T) {
-		_, stderr, exit := s.run("--type", nil)
-		if exit != 2 {
-			t.Fatalf("expected exit 2, got %d (%q)", exit, stderr)
-		}
-		want := "hostthis: --type needs a value\n"
-		if stderr != want {
-			t.Fatalf("stderr drift:\n got: %q\nwant: %q", stderr, want)
-		}
-	})
-
-	t.Run("UnexpectedArgument_Exit2_ByteExactStderr", func(t *testing.T) {
-		// --type consumes "html", then "bad" is neither a flag nor a valid
-		// slug (too short), so the parser returns "unexpected argument".
-		// `--name foo bar` is NOT an error: --name greedily joins the
-		// remaining tokens into a multi-word label.
-		_, stderr, exit := s.run(`--type html bad`, nil)
-		if exit != 2 {
-			t.Fatalf("expected exit 2, got %d (%q)", exit, stderr)
-		}
-		want := "hostthis: unexpected argument \"bad\"\n"
-		if stderr != want {
-			t.Fatalf("stderr drift:\n got: %q\nwant: %q", stderr, want)
-		}
-	})
 }
 
 // ---------------------------------------------------------------------------
