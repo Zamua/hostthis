@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -245,10 +246,7 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 	// requireOwner is a pre-check for a clean error; the authoritative owner
 	// re-check happens inside Delete's {slug} transaction, so a delete+re-mint
 	// of the slug by another identity in the window cannot destroy their paste.
-	if err := m.Repo.Delete(slug, p.Identity, p.CreatedAt); err != nil {
-		return err
-	}
-	return nil
+	return m.Repo.Delete(slug, p.Identity, p.CreatedAt)
 }
 
 // Versions returns the slug's full history (newest first), including
@@ -349,10 +347,7 @@ func (m *Manage) Unpin(slug domain.Slug, owner string) error {
 	if err != nil {
 		return err
 	}
-	if err := m.Repo.Unpin(slug, paste.Generation); err != nil {
-		return err
-	}
-	return nil
+	return m.Repo.Unpin(slug, paste.Generation)
 }
 
 // WhoamiInfo is the per-owner summary the `whoami` verb renders.
@@ -396,13 +391,6 @@ func (m *Manage) Whoami(owner, subnet string) (WhoamiInfo, error) {
 
 // validName holds the spec's rule: 1-60 printable Unicode chars, no newlines.
 func validName(s string) bool {
-	if utf8.RuneCountInString(s) == 0 || utf8.RuneCountInString(s) > 60 {
-		return false
-	}
-	for _, r := range s {
-		if r == '\n' || r == '\r' {
-			return false
-		}
-	}
-	return true
+	n := utf8.RuneCountInString(s)
+	return n > 0 && n <= 60 && !strings.ContainsAny(s, "\n\r")
 }

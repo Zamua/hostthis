@@ -57,8 +57,8 @@ var errCompressedCapExceeded = errors.New("compressed cap exceeded")
 //     MaxPasteBytes plus the magic header
 //   - a raw-byte counter that aborts at HardRawByteCap
 //
-// Returns errRawCapExceeded, errCompressedCapExceeded (both mapped by the
-// caller), or any other error verbatim.
+// Returns errRawCapExceeded, errCompressedCapExceeded, or any other error
+// verbatim.
 //
 // Single-pass: bytes are hashed AND compressed AND counted in one traversal,
 // so peak memory is the staging buffer plus a chunk buffer and the source is
@@ -94,10 +94,10 @@ func streamUpload(r io.Reader) (stagedUpload, error) {
 	mw := io.MultiWriter(zw, hasher, rawCount, prefix)
 	if _, err := io.Copy(mw, r); err != nil {
 		_ = zw.Close()
-		return stagedUpload{}, mapPipelineErr(err)
+		return stagedUpload{}, err
 	}
 	if err := zw.Close(); err != nil {
-		return stagedUpload{}, mapPipelineErr(err)
+		return stagedUpload{}, err
 	}
 	// zstd can emit a final block on Close that crosses the compressed cap,
 	// past the cappedWriter's per-Write check.
@@ -119,17 +119,6 @@ func streamUpload(r io.Reader) (stagedUpload, error) {
 		CompressedSize: written.n - len(blobMagicV1),
 		Prefix:         prefix.bytes(),
 	}, nil
-}
-
-func mapPipelineErr(err error) error {
-	switch {
-	case errors.Is(err, errRawCapExceeded):
-		return errRawCapExceeded
-	case errors.Is(err, errCompressedCapExceeded):
-		return errCompressedCapExceeded
-	default:
-		return err
-	}
 }
 
 // cappedWriter forwards Write to inner, returning errCompressedCapExceeded
@@ -160,9 +149,7 @@ type rawCountWriter struct {
 
 func (w *rawCountWriter) Write(p []byte) (int, error) {
 	if w.n+len(p) > w.limit {
-		remaining := max(w.limit-w.n, 0)
 		w.n = w.limit
-		_ = remaining // accounting only; the actual write is what's reported
 		return 0, errRawCapExceeded
 	}
 	w.n += len(p)

@@ -91,9 +91,10 @@ func (e *SybilRefusal) NextSlotFreesAt() time.Time {
 // On refusal returns *SybilRefusal (which is also errors.Is(ErrSybilRateLimit)).
 func (g *KeyGate) Admit(identity, ipSubnet string) error {
 	now := g.Now().UTC()
-	known, err := g.Repo.AdmitNewKey(identity, ipSubnet, now, g.MaxFreshKeysPerSubnet, g.Window)
-	if err != nil {
-		if isStorageRateLimitErr(err) {
+	if _, err := g.Repo.AdmitNewKey(identity, ipSubnet, now, g.MaxFreshKeysPerSubnet, g.Window); err != nil {
+		// The sentinel is matched by identity through any wrapping, never by
+		// message text.
+		if errors.Is(err, domain.ErrTooManyNewKeys) {
 			// Best-effort enrichment: a failing snapshot falls back to the
 			// bare sentinel rather than turning a refusal into an error.
 			count, oldest, sErr := g.Repo.SubnetSnapshot(ipSubnet, now, g.Window)
@@ -108,7 +109,6 @@ func (g *KeyGate) Admit(identity, ipSubnet string) error {
 		}
 		return err
 	}
-	_ = known
 	return nil
 }
 
@@ -142,13 +142,4 @@ func (g *KeyGate) Inspect(identity, ipSubnet string) (SessionInfo, error) {
 		SubnetCap:        g.MaxFreshKeysPerSubnet,
 		IdentitySubnets:  idSubnets,
 	}, nil
-}
-
-// isStorageRateLimitErr reports whether err is the keygate rate-limit sentinel
-// (domain.ErrTooManyNewKeys, aliased as storage.ErrTooManyNewKeys). Matched by
-// identity through any wrapping, never by message text: a string compare
-// demotes a wrapped rate-limit error to a generic failure and loses the
-// enriched Sybil refusal.
-func isStorageRateLimitErr(err error) bool {
-	return errors.Is(err, domain.ErrTooManyNewKeys)
 }
