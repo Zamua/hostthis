@@ -3616,9 +3616,7 @@ uploaded Markdown still can NOT execute JS even though uploaded HTML can
 - DOMPurify is the safety net for the markdown path, replacing the old
 server-side bluemonday pass. The server never renders Markdown on the
 read path, which keeps its memory constant regardless of paste size
-(it streams the raw bytes with `io.Copy`, like the HTML path). The
-in-repo `internal/render` package and `cmd/render-md` dev tool are
-retained for offline use but are no longer on the live read path.
+(it streams the raw bytes with `io.Copy`, like the HTML path).
 
 ### Diff rendering
 
