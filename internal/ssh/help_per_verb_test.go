@@ -148,7 +148,7 @@ func TestHelpVerb_PtyCrLf(t *testing.T) {
 	})
 
 	t.Run("WithPty_CRLF", func(t *testing.T) {
-		_, stderr, exit := runCmdWithPty(t, s.keyedClient, "help get")
+		_, stderr, exit := s.runPty("help get")
 		if exit != 0 {
 			t.Fatalf("exit: %d", exit)
 		}
@@ -168,7 +168,7 @@ func TestHelpVerb_PtyCrLf(t *testing.T) {
 	})
 
 	t.Run("VerbDashDashHelp_WithPty_CRLF", func(t *testing.T) {
-		_, stderr, exit := runCmdWithPty(t, s.keyedClient, "list --help")
+		_, stderr, exit := s.runPty("list --help")
 		if exit != 0 {
 			t.Fatalf("exit: %d", exit)
 		}

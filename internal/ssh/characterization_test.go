@@ -6,20 +6,13 @@ package ssh_test
 // Conventions:
 //   - One sub-test per spec behavior bullet, each asserting a concrete
 //     stdout/stderr/exit shape rather than a vague match.
-//   - The fixture uses the startStack pattern (real metadata repo, blob store, ssh
-//     client and ssh server), so assertions exercise the full handler path.
+//   - The fixture is startStack (real metadata repo, blob store, ssh client and
+//     ssh server), so assertions exercise the full handler path.
 //   - Names are Test<Area>_Characterization_<Case>, so `go test -run
 //     Characterization` selects them.
 
 import (
-	"bufio"
-	"bytes"
-	"fmt"
-	"io"
-	"log"
 	"net"
-	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -29,146 +22,7 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	httpapi "github.com/Zamua/hostthis/internal/http"
-	"github.com/Zamua/hostthis/internal/service"
-	hostssh "github.com/Zamua/hostthis/internal/ssh"
-	"github.com/Zamua/hostthis/internal/storage"
-	"github.com/Zamua/hostthis/internal/storagetest"
 )
-
-// ---------------------------------------------------------------------------
-// Fixture variants
-// ---------------------------------------------------------------------------
-
-// gatedStack wraps a stack-like bundle with a live KeyGate so Sybil behavior
-// can be characterized. Separate from startStack, which leaves KeyGate nil to
-// keep the other tests deterministic.
-type gatedStack struct {
-	t           *testing.T
-	httpURL     string
-	sshAddr     string
-	repo        *storage.MemRepo
-	keyGateRepo *storage.MemRepo
-	keyGate     *service.KeyGate
-}
-
-// startGatedStack stands up a hostthisd-style stack with a live KeyGate at the
-// given per-subnet limit (window fixed at 24h).
-func startGatedStack(t *testing.T, freshKeysPerSubnet int) *gatedStack {
-	t.Helper()
-	dir := t.TempDir()
-	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
-	if err != nil {
-		t.Fatalf("blobs: %v", err)
-	}
-	blobs := storage.NewCompressedBlobStore(rawBlobs)
-	blobUnit := service.NewStandaloneBlobUnit(blobs)
-	repo := storagetest.NewRepo(t)
-	upload := service.NewUpload(repo, blobUnit)
-	t.Cleanup(upload.WaitFinalize)
-	manage := service.NewManage(repo, blobUnit)
-	kgRepo := storagetest.NewRepo(t)
-	keyGate := service.NewKeyGate(kgRepo)
-	keyGate.MaxFreshKeysPerSubnet = freshKeysPerSubnet
-	manage.KeyGate = keyGate
-
-	httpSrv := httptest.NewServer((&httpapi.Server{Pastes: repo, Blobs: blobUnit}).Handler())
-	t.Cleanup(httpSrv.Close)
-
-	l := mustListen(t)
-	addr := l.Addr().String()
-	_ = l.Close()
-
-	sshSrv := &hostssh.Server{
-		Addr:       addr,
-		ApexDomain: "paste.test",
-		Upload:     upload,
-		Manage:     manage,
-		Pastes:     repo,
-		KeyGate:    keyGate,
-		BuildURL: func(s domain.Slug) string {
-			return httpSrv.URL + "/p/" + s.String()
-		},
-		Logger: log.New(io.Discard, "", 0),
-	}
-	go func() { _ = sshSrv.ListenAndServe() }()
-	waitForSSH(t, addr)
-	return &gatedStack{
-		t:           t,
-		httpURL:     httpSrv.URL,
-		sshAddr:     addr,
-		repo:        repo,
-		keyGateRepo: kgRepo,
-		keyGate:     keyGate,
-	}
-}
-
-// dialKeyed opens a fresh ssh client with a fresh ed25519 key.
-func dialKeyed(t *testing.T, addr string) (*xssh.Client, string) {
-	t.Helper()
-	return newKeyClient(t, addr)
-}
-
-// runCmd issues one ssh command and returns (stdout, stderr, exit). The body
-// argument is optional.
-func runCmd(t *testing.T, cli *xssh.Client, cmd string, stdin []byte) (string, string, int) {
-	t.Helper()
-	sess, err := cli.NewSession()
-	if err != nil {
-		t.Fatalf("session: %v", err)
-	}
-	defer sess.Close() //nolint:errcheck
-	var stdout, stderr bytes.Buffer
-	sess.Stdout = &stdout
-	sess.Stderr = &stderr
-	if stdin != nil {
-		sess.Stdin = bytes.NewReader(stdin)
-	}
-	exit := 0
-	if err := sess.Run(cmd); err != nil {
-		var ee *xssh.ExitError
-		if asExitErr(err, &ee) {
-			exit = ee.ExitStatus()
-		} else {
-			t.Fatalf("run %q: %v\nstderr: %s", cmd, err, stderr.String())
-		}
-	}
-	return stdout.String(), stderr.String(), exit
-}
-
-// runCmdWithPty is runCmd with a PTY allocated, which drives the PTY-vs-pipe
-// rendering split.
-func runCmdWithPty(t *testing.T, cli *xssh.Client, cmd string) (string, string, int) {
-	t.Helper()
-	sess, err := cli.NewSession()
-	if err != nil {
-		t.Fatalf("session: %v", err)
-	}
-	defer sess.Close() //nolint:errcheck
-	// The size + terminal-mode flags are arbitrary: only the PTY's presence
-	// changes server behavior.
-	modes := xssh.TerminalModes{
-		xssh.ECHO:          0,
-		xssh.TTY_OP_ISPEED: 14400,
-		xssh.TTY_OP_OSPEED: 14400,
-	}
-	if err := sess.RequestPty("xterm", 24, 80, modes); err != nil {
-		t.Fatalf("requestpty: %v", err)
-	}
-	var stdout, stderr bytes.Buffer
-	sess.Stdout = &stdout
-	sess.Stderr = &stderr
-	exit := 0
-	if err := sess.Run(cmd); err != nil {
-		var ee *xssh.ExitError
-		if asExitErr(err, &ee) {
-			exit = ee.ExitStatus()
-		} else {
-			t.Fatalf("run-pty %q: %v\nstderr: %s", cmd, err, stderr.String())
-		}
-	}
-	return stdout.String(), stderr.String(), exit
-}
 
 // ---------------------------------------------------------------------------
 // 1. Upload (put) - default verb, stdin
@@ -774,7 +628,7 @@ func TestHelp_Characterization(t *testing.T) {
 	t.Run("HelpVerb_WithPty_CRLF", func(t *testing.T) {
 		// With a PTY, emitHelp translates LF to CRLF so the client's raw
 		// terminal renders without the staircase effect.
-		_, stderr, exit := runCmdWithPty(t, s.keyedClient, "help")
+		_, stderr, exit := s.runPty("help")
 		if exit != 0 {
 			t.Fatalf("exit: %d", exit)
 		}
@@ -818,7 +672,7 @@ func TestHelp_Characterization(t *testing.T) {
 
 	t.Run("PtyOnly_NoArgs_ShowsHelp", func(t *testing.T) {
 		// Empty argv WITH a PTY shows help; without a PTY it is an upload.
-		_, stderr, exit := runCmdWithPty(t, s.keyedClient, "")
+		_, stderr, exit := s.runPty("")
 		if exit != 0 {
 			t.Fatalf("exit: %d", exit)
 		}
@@ -954,19 +808,19 @@ func TestSybilGate_Characterization(t *testing.T) {
 	// refused. Loopback ssh traffic all shares 127.0.0.0/24, so this drives
 	// the production path end to end.
 	t.Run("ThirdFreshKey_Exit6_AndRichMessage", func(t *testing.T) {
-		g := startGatedStack(t, 2)
-		c1, _ := dialKeyed(g.t, g.sshAddr)
-		_, _, e1 := runCmd(g.t, c1, "whoami", nil)
+		g := startStack(t, withKeyGate(2))
+		c1, _ := newKeyClient(t, g.sshAddr)
+		_, _, e1 := g.runOn(c1, "whoami", nil)
 		if e1 != 0 {
 			t.Fatalf("first key should be admitted, got exit %d", e1)
 		}
-		c2, _ := dialKeyed(g.t, g.sshAddr)
-		_, _, e2 := runCmd(g.t, c2, "whoami", nil)
+		c2, _ := newKeyClient(t, g.sshAddr)
+		_, _, e2 := g.runOn(c2, "whoami", nil)
 		if e2 != 0 {
 			t.Fatalf("second key should be admitted, got exit %d", e2)
 		}
-		c3, _ := dialKeyed(g.t, g.sshAddr)
-		_, stderr, e3 := runCmd(g.t, c3, "whoami", nil)
+		c3, _ := newKeyClient(t, g.sshAddr)
+		_, stderr, e3 := g.runOn(c3, "whoami", nil)
 		if e3 != 6 {
 			t.Fatalf("third key should be refused with exit 6, got %d (%q)", e3, stderr)
 		}
@@ -986,21 +840,8 @@ func TestSybilGate_Characterization(t *testing.T) {
 		// Cap at 1: two sessions using the SAME key from the same subnet are
 		// both admitted, because the second reuses an existing
 		// (identity, subnet) row and never consults the cap.
-		g := startGatedStack(t, 1)
-		_, priv, err := genEd25519()
-		if err != nil {
-			t.Fatalf("genkey: %v", err)
-		}
-		signer, err := xssh.NewSignerFromKey(priv)
-		if err != nil {
-			t.Fatalf("signer: %v", err)
-		}
-		cfg := &xssh.ClientConfig{
-			User:            "x",
-			Auth:            []xssh.AuthMethod{xssh.PublicKeys(signer)},
-			HostKeyCallback: xssh.InsecureIgnoreHostKey(),
-			Timeout:         3 * time.Second,
-		}
+		g := startStack(t, withKeyGate(1))
+		_, cfg := freshKeyConfig(t)
 		dial := func() *xssh.Client {
 			cli, err := xssh.Dial("tcp", g.sshAddr, cfg)
 			if err != nil {
@@ -1010,12 +851,12 @@ func TestSybilGate_Characterization(t *testing.T) {
 			return cli
 		}
 		c1 := dial()
-		_, _, e1 := runCmd(t, c1, "whoami", nil)
+		_, _, e1 := g.runOn(c1, "whoami", nil)
 		if e1 != 0 {
 			t.Fatalf("first session: exit %d", e1)
 		}
 		c2 := dial()
-		_, _, e2 := runCmd(t, c2, "whoami", nil)
+		_, _, e2 := g.runOn(c2, "whoami", nil)
 		if e2 != 0 {
 			t.Fatalf("returning-key session should be admitted past the cap, got exit %d", e2)
 		}
@@ -1026,117 +867,27 @@ func TestSybilGate_Characterization(t *testing.T) {
 // 11. PROXY protocol (HOSTTHIS_SSH_PROXY_PROTOCOL=true)
 // ---------------------------------------------------------------------------
 
-// proxyProtoStack stands up a hostthisd-style SSH server with PROXY-protocol
-// v1 parsing enabled via the env var. Tests inject a v1 PROXY header on the
-// wire before the SSH handshake.
-type proxyProtoStack struct {
-	t       *testing.T
-	sshAddr string
-	keyGate *service.KeyGate
-}
-
-func startProxyProtoStack(t *testing.T, freshKeysPerSubnet int) *proxyProtoStack {
-	t.Helper()
-	t.Setenv("HOSTTHIS_SSH_PROXY_PROTOCOL", "true")
-	dir := t.TempDir()
-	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
-	if err != nil {
-		t.Fatalf("blobs: %v", err)
-	}
-	blobs := storage.NewCompressedBlobStore(rawBlobs)
-	blobUnit := service.NewStandaloneBlobUnit(blobs)
-	repo := storagetest.NewRepo(t)
-	upload := service.NewUpload(repo, blobUnit)
-	t.Cleanup(upload.WaitFinalize)
-	manage := service.NewManage(repo, blobUnit)
-	kgRepo := storagetest.NewRepo(t)
-	kg := service.NewKeyGate(kgRepo)
-	kg.MaxFreshKeysPerSubnet = freshKeysPerSubnet
-	manage.KeyGate = kg
-
-	httpSrv := httptest.NewServer((&httpapi.Server{Pastes: repo, Blobs: blobUnit}).Handler())
-	t.Cleanup(httpSrv.Close)
-
-	l := mustListen(t)
-	addr := l.Addr().String()
-	_ = l.Close()
-
-	sshSrv := &hostssh.Server{
-		Addr:       addr,
-		ApexDomain: "paste.test",
-		Upload:     upload,
-		Manage:     manage,
-		Pastes:     repo,
-		KeyGate:    kg,
-		BuildURL: func(s domain.Slug) string {
-			return httpSrv.URL + "/p/" + s.String()
-		},
-		Logger: log.New(io.Discard, "", 0),
-	}
-	go func() { _ = sshSrv.ListenAndServe() }()
-	waitForSSH(t, addr)
-	return &proxyProtoStack{t: t, sshAddr: addr, keyGate: kg}
-}
-
-// dialWithProxyV1 opens a TCP connection, writes a PROXY v1 header claiming
-// the given src/dst tuple, then runs an SSH handshake on top.
-func dialWithProxyV1(t *testing.T, addr, srcIP string, srcPort int) *xssh.Client {
-	t.Helper()
-	c, err := net.DialTimeout("tcp", addr, 3*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	// PROXY v1: "PROXY TCP4 <src-ip> <dst-ip> <src-port> <dst-port>\r\n"
-	hdr := fmt.Sprintf("PROXY TCP4 %s 127.0.0.1 %d 2222\r\n", srcIP, srcPort)
-	if _, err := c.Write([]byte(hdr)); err != nil {
-		t.Fatalf("write proxy header: %v", err)
-	}
-
-	_, priv, err := genEd25519()
-	if err != nil {
-		t.Fatalf("genkey: %v", err)
-	}
-	signer, err := xssh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatalf("signer: %v", err)
-	}
-	cfg := &xssh.ClientConfig{
-		User:            "anyone",
-		Auth:            []xssh.AuthMethod{xssh.PublicKeys(signer)},
-		HostKeyCallback: xssh.InsecureIgnoreHostKey(),
-		Timeout:         3 * time.Second,
-	}
-	clientConn, chans, reqs, err := xssh.NewClientConn(c, addr, cfg)
-	if err != nil {
-		_ = c.Close()
-		t.Fatalf("ssh handshake (with proxy header): %v", err)
-	}
-	cli := xssh.NewClient(clientConn, chans, reqs)
-	t.Cleanup(func() { _ = cli.Close() })
-	return cli
-}
-
 func TestProxyProtocol_Characterization(t *testing.T) {
 	t.Run("RealClientIPDistinguishesSubnetsForSybilGate", func(t *testing.T) {
 		// Cap at 1 fresh key per subnet. Without PROXY parsing both fresh
 		// keys would come from 127.0.0.0/24 and the second would be rejected;
 		// admitting both from different /24s proves the gate sees the proxied
 		// IP.
-		p := startProxyProtoStack(t, 1)
-		c1 := dialWithProxyV1(t, p.sshAddr, "203.0.113.10", 50000)
-		_, _, e1 := runCmd(t, c1, "whoami", nil)
+		p := startStack(t, withProxyProto(), withKeyGate(1))
+		c1 := dialWithProxy(t, p.sshAddr, "TCP4", "203.0.113.10", 50000)
+		_, _, e1 := p.runOn(c1, "whoami", nil)
 		if e1 != 0 {
 			t.Fatalf("first proxied client (203.0.113.0/24) should be admitted, got exit %d", e1)
 		}
-		c2 := dialWithProxyV1(t, p.sshAddr, "198.51.100.10", 50001)
-		_, _, e2 := runCmd(t, c2, "whoami", nil)
+		c2 := dialWithProxy(t, p.sshAddr, "TCP4", "198.51.100.10", 50001)
+		_, _, e2 := p.runOn(c2, "whoami", nil)
 		if e2 != 0 {
 			t.Fatalf("second proxied client (198.51.100.0/24) should be admitted on a different subnet, got exit %d", e2)
 		}
 		// A second fresh key from the FIRST proxied subnet is refused: that
 		// subnet's slot is full.
-		c3 := dialWithProxyV1(t, p.sshAddr, "203.0.113.20", 50002)
-		_, stderr, e3 := runCmd(t, c3, "whoami", nil)
+		c3 := dialWithProxy(t, p.sshAddr, "TCP4", "203.0.113.20", 50002)
+		_, stderr, e3 := p.runOn(c3, "whoami", nil)
 		if e3 != 6 {
 			t.Fatalf("third proxied client from the full subnet should hit Sybil refusal, got exit %d (%q)",
 				e3, stderr)
@@ -1151,7 +902,7 @@ func TestProxyProtocol_Characterization(t *testing.T) {
 // reverse proxy should reach this listener and it always sends a header, so
 // serving a bare connection would attribute the client to the proxy itself.
 func TestProxyProtocol_HeaderlessConnectionRefused(t *testing.T) {
-	p := startProxyProtoStack(t, 10)
+	p := startStack(t, withProxyProto(), withKeyGate(10))
 	c, err := net.DialTimeout("tcp", p.sshAddr, 3*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -1188,7 +939,7 @@ func TestPty_Characterization_List(t *testing.T) {
 	t.Run("WithPty_StdoutSeesCR", func(t *testing.T) {
 		// With a PTY allocated, the server's PTY layer cooks outbound newlines
 		// to CR+LF on the way to the client.
-		stdout, _, _ := runCmdWithPty(t, s.keyedClient, "list")
+		stdout, _, _ := s.runPty("list")
 		if !strings.Contains(stdout, "\r") {
 			t.Fatalf("list stdout over PTY session should contain CR, got %q", stdout)
 		}
@@ -1288,79 +1039,6 @@ func TestExitCodes_Characterization(t *testing.T) {
 					tc.name, tc.desc, tc.cmd, exit, tc.want, stdout, stderr)
 			}
 		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// 14. Edge cases - concurrent ops from the same identity
-// ---------------------------------------------------------------------------
-
-// concurrentUpload runs one upload on its own session under cli and returns
-// the URL or an error. It never calls t.Fatalf, so it is safe to drive from
-// many goroutines and aggregate failures in the parent.
-func concurrentUpload(cli *xssh.Client, body []byte) (string, error) {
-	sess, err := cli.NewSession()
-	if err != nil {
-		return "", fmt.Errorf("session: %w", err)
-	}
-	defer sess.Close() //nolint:errcheck
-	var stdout, stderr bytes.Buffer
-	sess.Stdout = &stdout
-	sess.Stderr = &stderr
-	sess.Stdin = bytes.NewReader(body)
-	if err := sess.Run(""); err != nil {
-		return "", fmt.Errorf("run: %w (stderr=%q)", err, stderr.String())
-	}
-	return strings.TrimSpace(stdout.String()), nil
-}
-
-func TestConcurrent_Characterization(t *testing.T) {
-	// N back-to-back uploads, each on a freshly-dialed ssh connection, all
-	// succeed with distinct slugs. Pins that the slug-collision retry loop
-	// (5 attempts) suffices across N inserts and that per-session handshake
-	// teardown leaks no state.
-	//
-	// Sequential, not parallel: what is pinned here is the collision retry
-	// across N inserts, not write concurrency, and many quick sequential
-	// uploads are the realistic workload.
-	s := startStack(t)
-	const N = 6
-	urls := map[string]struct{}{}
-	for i := range N {
-		body := fmt.Appendf(nil, "<!doctype html><p>seq %d</p>", i)
-		cli, _ := newKeyClient(t, s.sshAddr)
-		url, err := concurrentUpload(cli, body)
-		if err != nil {
-			t.Fatalf("upload %d: %v", i, err)
-		}
-		if !strings.HasPrefix(url, s.httpURL+"/p/") {
-			t.Fatalf("upload %d: expected URL, got %q", i, url)
-		}
-		if _, dup := urls[url]; dup {
-			t.Fatalf("duplicate URL from sequential uploads: %q", url)
-		}
-		urls[url] = struct{}{}
-	}
-	if len(urls) != N {
-		t.Fatalf("expected %d distinct slugs, got %d", N, len(urls))
-	}
-	// Every upload above used a fresh keyed identity, so `list` on the default
-	// client shows zero pastes: per-identity isolation.
-	listOut, _, _ := s.run("list", nil)
-	rows := bufio.NewScanner(strings.NewReader(listOut))
-	count := 0
-	for rows.Scan() {
-		if strings.HasPrefix(strings.TrimSpace(rows.Text()), "SLUG") {
-			continue
-		}
-		if strings.TrimSpace(rows.Text()) == "" {
-			continue
-		}
-		count++
-	}
-	if count != 0 {
-		t.Fatalf("default-client list should be empty (uploads were on fresh identities), got %d rows: %q",
-			count, listOut)
 	}
 }
 
@@ -1481,68 +1159,28 @@ func TestUploadFlags_NegativeCharacterization(t *testing.T) {
 // 17. Sybil gate - IPv6 (/48) subnet path via PROXY protocol v1 TCP6
 // ---------------------------------------------------------------------------
 
-// dialWithProxyV6 mirrors dialWithProxyV1 for IPv6, driving the /48 mask path
-// in ipSubnet.
-func dialWithProxyV6(t *testing.T, addr, srcIP string, srcPort int) *xssh.Client {
-	t.Helper()
-	c, err := net.DialTimeout("tcp", addr, 3*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	// PROXY v1 IPv6 form:
-	//   PROXY TCP6 <src-ipv6> <dst-ipv6> <src-port> <dst-port>\r\n
-	// The dst is ::1 because PROXY v1 requires src + dst to share a family
-	// even though the listener is on 127.0.0.1; the gate only ever reads src.
-	hdr := fmt.Sprintf("PROXY TCP6 %s ::1 %d 2222\r\n", srcIP, srcPort)
-	if _, err := c.Write([]byte(hdr)); err != nil {
-		t.Fatalf("write proxy header: %v", err)
-	}
-	_, priv, err := genEd25519()
-	if err != nil {
-		t.Fatalf("genkey: %v", err)
-	}
-	signer, err := xssh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatalf("signer: %v", err)
-	}
-	cfg := &xssh.ClientConfig{
-		User:            "anyone",
-		Auth:            []xssh.AuthMethod{xssh.PublicKeys(signer)},
-		HostKeyCallback: xssh.InsecureIgnoreHostKey(),
-		Timeout:         3 * time.Second,
-	}
-	clientConn, chans, reqs, err := xssh.NewClientConn(c, addr, cfg)
-	if err != nil {
-		_ = c.Close()
-		t.Fatalf("ssh handshake (with proxy header): %v", err)
-	}
-	cli := xssh.NewClient(clientConn, chans, reqs)
-	t.Cleanup(func() { _ = cli.Close() })
-	return cli
-}
-
 func TestProxyProtocol_IPv6_SybilCharacterization(t *testing.T) {
 	// KeyGate buckets IPv6 by /48 (ipSubnet in server.go): three fresh keys
 	// from the SAME /48 refuse the third, while a fresh key from a DIFFERENT
 	// /48 succeeds.
 	t.Run("SameSlash48_ThirdRefused_DifferentSlash48_Admitted", func(t *testing.T) {
-		p := startProxyProtoStack(t, 2)
+		p := startStack(t, withProxyProto(), withKeyGate(2))
 
 		// Three addresses in 2001:db8:1::/48, differing only in the lower 80
 		// bits, which ipSubnet buckets together.
-		c1 := dialWithProxyV6(t, p.sshAddr, "2001:db8:1::aa", 50000)
-		_, _, e1 := runCmd(t, c1, "whoami", nil)
+		c1 := dialWithProxy(t, p.sshAddr, "TCP6", "2001:db8:1::aa", 50000)
+		_, _, e1 := p.runOn(c1, "whoami", nil)
 		if e1 != 0 {
 			t.Fatalf("first IPv6 client in 2001:db8:1::/48 should be admitted, got exit %d", e1)
 		}
-		c2 := dialWithProxyV6(t, p.sshAddr, "2001:db8:1:1234::bb", 50001)
-		_, _, e2 := runCmd(t, c2, "whoami", nil)
+		c2 := dialWithProxy(t, p.sshAddr, "TCP6", "2001:db8:1:1234::bb", 50001)
+		_, _, e2 := p.runOn(c2, "whoami", nil)
 		if e2 != 0 {
 			t.Fatalf("second IPv6 client in same /48 should be admitted (cap=2), got exit %d", e2)
 		}
 		// A third fresh key with different lower bits but the SAME /48.
-		c3 := dialWithProxyV6(t, p.sshAddr, "2001:db8:1:ffff::cc", 50002)
-		_, stderr3, e3 := runCmd(t, c3, "whoami", nil)
+		c3 := dialWithProxy(t, p.sshAddr, "TCP6", "2001:db8:1:ffff::cc", 50002)
+		_, stderr3, e3 := p.runOn(c3, "whoami", nil)
 		if e3 != 6 {
 			t.Fatalf("third IPv6 client in full /48 should hit Sybil refusal (exit 6), got %d (%q)",
 				e3, stderr3)
@@ -1561,8 +1199,8 @@ func TestProxyProtocol_IPv6_SybilCharacterization(t *testing.T) {
 		}
 
 		// A fresh key from 2001:db8:2::/48 gets in.
-		c4 := dialWithProxyV6(t, p.sshAddr, "2001:db8:2::dd", 50003)
-		_, _, e4 := runCmd(t, c4, "whoami", nil)
+		c4 := dialWithProxy(t, p.sshAddr, "TCP6", "2001:db8:2::dd", 50003)
+		_, _, e4 := p.runOn(c4, "whoami", nil)
 		if e4 != 0 {
 			t.Fatalf("fresh key from a different /48 should be admitted, got exit %d (Sybil gate is per-/48)", e4)
 		}
@@ -1578,13 +1216,13 @@ func TestSybil_WaitUntilLine_Characterization(t *testing.T) {
 	// <YYYY-MM-DD HH:MM UTC> - the oldest entry ages out then" line. The
 	// prefix is pinned byte-exact and the tail by regex, since the timestamp
 	// is now+window and cannot be pinned literally.
-	g := startGatedStack(t, 2)
-	c1, _ := dialKeyed(g.t, g.sshAddr)
-	_, _, _ = runCmd(g.t, c1, "whoami", nil)
-	c2, _ := dialKeyed(g.t, g.sshAddr)
-	_, _, _ = runCmd(g.t, c2, "whoami", nil)
-	c3, _ := dialKeyed(g.t, g.sshAddr)
-	_, stderr, e3 := runCmd(g.t, c3, "whoami", nil)
+	g := startStack(t, withKeyGate(2))
+	c1, _ := newKeyClient(t, g.sshAddr)
+	_, _, _ = g.runOn(c1, "whoami", nil)
+	c2, _ := newKeyClient(t, g.sshAddr)
+	_, _, _ = g.runOn(c2, "whoami", nil)
+	c3, _ := newKeyClient(t, g.sshAddr)
+	_, stderr, e3 := g.runOn(c3, "whoami", nil)
 	if e3 != 6 {
 		t.Fatalf("third key should be refused, got exit %d", e3)
 	}
