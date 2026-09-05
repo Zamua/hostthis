@@ -27,6 +27,6 @@ services:
       HOSTTHIS_URL_MODE: path
       HOSTTHIS_PUBLIC_SCHEME: http
     restart: unless-stopped
-    # Distroless's nonroot uid is 65532. Make sure the host's ./data
-    # dir is writable by that uid; setup.sh handles it.
+    # Distroless's nonroot uid is 65532. The host's ./data dir must be
+    # writable by that uid; `make data-dir-perms` handles it.
     user: "65532:65532"
