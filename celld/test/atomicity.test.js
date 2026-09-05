@@ -28,6 +28,28 @@ async function assertCrashAtomic({ seed, invoke }) {
   }
 }
 
+// Sweeps every local commit boundary of a paste operation: a reference run
+// counts the commits, then each boundary gets a fresh harness crashed there,
+// recovered through the pending alarm, and handed to `converged`. Counting from
+// the reference run keeps a newly added commit inside the sweep.
+async function assertCrashConverges({ harness, invoke, converged }) {
+  const reference = harness();
+  await invoke(reference, "reference");
+  const commits = reference.pasteStorage.commits;
+  assert.ok(commits > 0, "reference run committed nothing");
+  for (let boundary = 1; boundary <= commits; boundary++) {
+    const h = harness();
+    h.pasteStorage.crashAfter = boundary;
+    await assert.rejects(() => invoke(h, `crash-${boundary}`), SimulatedCrash);
+    h.pasteStorage.commits = 0;
+    h.pasteStorage.crashAfter = Infinity;
+    if (h.pasteStorage.data.get("artifactPending")) {
+      await h.paste().alarm();
+    }
+    await converged(h);
+  }
+}
+
 function mapEqual(left, right) {
   try {
     assert.deepStrictEqual(left, right);
@@ -416,23 +438,18 @@ test("Paste.put commits row, version seed, and counter together", async () => {
 });
 
 test("Paste append converges after every local commit crash", async () => {
-  for (const boundary of [1, 2, 3]) {
-    const h = artifactHarness();
-    h.pasteStorage.crashAfter = boundary;
-    await assert.rejects(() => h.paste().append(appendBody(`append-crash-${boundary}`)), SimulatedCrash);
-
-    h.pasteStorage.commits = 0;
-    h.pasteStorage.crashAfter = Infinity;
-    if (h.pasteStorage.data.get("artifactPending")) {
-      await h.paste().alarm();
-    }
-    assert.equal(h.pasteStorage.data.get("versions").length, 2);
-    assert.equal(h.pasteStorage.data.get("maxVer"), 2);
-    assert.equal(h.pasteStorage.data.get("row").accountingVersion, 1);
-    assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
-    assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
-    assert.equal(h.pasteStorage.alarm, null);
-  }
+  await assertCrashConverges({
+    harness: artifactHarness,
+    invoke: (h, run) => h.paste().append(appendBody(`append-${run}`)),
+    converged(h) {
+      assert.equal(h.pasteStorage.data.get("versions").length, 2);
+      assert.equal(h.pasteStorage.data.get("maxVer"), 2);
+      assert.equal(h.pasteStorage.data.get("row").accountingVersion, 1);
+      assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
+      assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+      assert.equal(h.pasteStorage.alarm, null);
+    },
+  });
 });
 
 test("Paste serializes concurrent version appends", async () => {
@@ -453,25 +470,20 @@ test("Paste serializes concurrent version appends", async () => {
 });
 
 test("Paste delete converges after every local commit crash", async () => {
-  for (const boundary of [1, 2, 3]) {
-    const h = deletableArtifactHarness();
-    h.pasteStorage.crashAfter = boundary;
-    await assert.rejects(() => h.paste().deleteVersion({
-      opId: `delete-crash-${boundary}`, generation: "generation-1", ver: 1,
-    }), SimulatedCrash);
-
-    h.pasteStorage.commits = 0;
-    h.pasteStorage.crashAfter = Infinity;
-    if (h.pasteStorage.data.get("artifactPending")) {
-      await h.paste().alarm();
-    }
-    assert.equal(h.pasteStorage.data.get("versions")[0].deleted, true);
-    assert.equal(h.pasteStorage.data.get("row").size, 4);
-    assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 4);
-    assert.equal(h.identityStorage.data.get("entries").slugone1.servedSize, 4);
-    assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
-    assert.equal(h.pasteStorage.alarm, null);
-  }
+  await assertCrashConverges({
+    harness: deletableArtifactHarness,
+    invoke: (h, run) => h.paste().deleteVersion({
+      opId: `delete-${run}`, generation: "generation-1", ver: 1,
+    }),
+    converged(h) {
+      assert.equal(h.pasteStorage.data.get("versions")[0].deleted, true);
+      assert.equal(h.pasteStorage.data.get("row").size, 4);
+      assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 4);
+      assert.equal(h.identityStorage.data.get("entries").slugone1.servedSize, 4);
+      assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+      assert.equal(h.pasteStorage.alarm, null);
+    },
+  });
 });
 
 function artifactPasteSeed({ generation = "generation-1", charge = 2 } = {}) {
@@ -901,29 +913,24 @@ test("Paste removal clears a failed incarnation whose allocation is already abse
 });
 
 test("Paste failure converges after every local commit crash", async () => {
-  for (const boundary of [1, 2, 3]) {
-    const pasteSeed = artifactPasteSeed();
-    pasteSeed.get("row").status = "pending";
-    const identitySeed = artifactIdentitySeed();
-    identitySeed.get("entries").slugone1.status = "pending";
-    const h = artifactHarness({ pasteSeed, identitySeed });
-    h.pasteStorage.crashAfter = boundary;
-    const body = {
-      status: "failed", generation: "generation-1",
-      opId: `fail-crash-${boundary}`,
-    };
-
-    await assert.rejects(() => h.paste().setStatus(body), SimulatedCrash);
-    h.pasteStorage.commits = 0;
-    h.pasteStorage.crashAfter = Infinity;
-    if (h.pasteStorage.data.get("artifactPending")) {
-      await h.paste().alarm();
-    }
-    assert.equal(h.pasteStorage.data.get("row").status, "failed");
-    assert.equal(h.identityStorage.data.get("entries").slugone1, undefined);
-    assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
-    assert.equal(h.pasteStorage.alarm, null);
-  }
+  await assertCrashConverges({
+    harness() {
+      const pasteSeed = artifactPasteSeed();
+      pasteSeed.get("row").status = "pending";
+      const identitySeed = artifactIdentitySeed();
+      identitySeed.get("entries").slugone1.status = "pending";
+      return artifactHarness({ pasteSeed, identitySeed });
+    },
+    invoke: (h, run) => h.paste().setStatus({
+      status: "failed", generation: "generation-1", opId: `fail-${run}`,
+    }),
+    converged(h) {
+      assert.equal(h.pasteStorage.data.get("row").status, "failed");
+      assert.equal(h.identityStorage.data.get("entries").slugone1, undefined);
+      assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+      assert.equal(h.pasteStorage.alarm, null);
+    },
+  });
 });
 
 test("Identity projection cannot mutate a replacement generation", async () => {
