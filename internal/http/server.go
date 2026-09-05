@@ -38,9 +38,10 @@ type BlobReader interface {
 // Server bundles the dependencies.
 type Server struct {
 	Pastes      PasteReader
-	Sites       SiteReader  // optional; nil disables static-site serving
-	Rooms       RoomService // optional; nil disables the /api/rooms surface
-	Relay       RoomRelay   // optional; nil disables the /api/rooms/<uuid>/ws relay
+	Sites       SiteReader      // optional; nil disables static-site serving
+	Rooms       RoomService     // optional; nil disables the /api/rooms surface
+	RoomPush    RoomPushService // optional; nil disables the push routes
+	Relay       RoomRelay       // optional; nil disables the /api/rooms/<uuid>/ws relay
 	Blobs       BlobReader
 	LandingHTML []byte // optional; apex landing page bytes embedded at build
 	ApexDomain  string // e.g. "hostthis.dev"; used to peel slug subdomains
@@ -90,6 +91,10 @@ func (s *Server) Handler() http.Handler {
 				s.handleRoomsAPI(w, r, slug, rest)
 				return
 			}
+			if r.URL.Path == pushKeyPath {
+				s.handlePushKey(w, r, slug)
+				return
+			}
 			s.serveSlug(w, r, slug, r.URL.Path)
 			return
 		}
@@ -115,6 +120,10 @@ func (s *Server) Handler() http.Handler {
 			// it.
 			if rest, ok := roomAPIPath(sitePath); ok {
 				s.handleRoomsAPI(w, r, slug, rest)
+				return
+			}
+			if sitePath == pushKeyPath {
+				s.handlePushKey(w, r, slug)
 				return
 			}
 			s.serveSlug(w, r, slug, sitePath)

@@ -15,6 +15,9 @@ import (
 type RoomRepo struct {
 	base   string
 	client *http.Client
+	// PushSubject is the VAPID `sub` claim ("https://<apex>") handed to the
+	// cell with every push write, so its tokens name this deployment.
+	PushSubject string
 }
 
 func NewRoomRepo(base string, c *http.Client) *RoomRepo {

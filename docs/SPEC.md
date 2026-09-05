@@ -2186,7 +2186,8 @@ or starting with `push/` is refused with 400. Room keys with other shapes
 (`push:2026-09-06`) are ordinary data.
 
 A `PushSubscription` is the browser's JSON: `endpoint` (an `https` URL of at
-most 1 KiB), `keys.p256dh` (the 65-byte uncompressed P-256 point, base64url)
+most 1 KiB whose host belongs to a known push service: Apple, Google, Mozilla
+or Microsoft), `keys.p256dh` (the 65-byte uncompressed P-256 point, base64url)
 and `keys.auth` (16 bytes, base64url). Subscriptions are deduplicated by
 endpoint; a repeated PUT refreshes the keys. Anyone holding the room link can
 add a device, which is the trust model rooms already have.
@@ -2204,12 +2205,14 @@ A `Schedule` is:
 }
 ```
 
-- `tz` is an IANA zone the runtime knows. `at` is `HH:MM` local time in `tz`
-  and `days` is a non-empty set of weekdays (0 = Sunday); a one-shot item
-  carries `when` (RFC 3339 with offset) instead of `at` and `days`.
+- `tz` is always present and names an IANA zone the runtime knows. `at` is
+  `HH:MM` local time in `tz` and `days` is a non-empty set of distinct weekdays
+  (0 = Sunday); a one-shot item carries `when` (RFC 3339 with offset, in the
+  future) instead of `at` and `days`.
 - `id` is 1 to 32 characters of `[A-Za-z0-9_-]`, unique within the schedule.
-  `title` is at most 64 characters, `url` at most 512, `tag` at most 64.
-- Exactly one of `body` (at most 1 KiB) or `bodyKey` (a valid room key, in
+  `title` is 1 to 64 bytes of UTF-8, `url` at most 512 bytes, `tag` at most 64
+  bytes; `url` and `tag` are optional.
+- Exactly one of `body` (at most 1 KiB of UTF-8) or `bodyKey` (a valid room key, in
   which `{date}` is substituted with the local date in `tz`, e.g.
   `2026-09-06`) is present. The body is read from the room at send time, so
   the server runs no app logic: the app pre-writes the next days' summaries
@@ -2225,7 +2228,10 @@ normal urgency. The notification payload is the JSON object
 `{ "title", "body", "url", "tag" }`; a payload over 2 KiB is skipped, never
 truncated. A `404` or `410` from the push service deletes that subscription.
 Other failures are not retried within a fire; the next scheduled fire is the
-retry. Nothing is recorded about who received what.
+retry. A send waits at most 10 seconds and never follows a redirect: a 3xx is
+a failure, so ciphertext and the VAPID token reach only the endpoint the
+subscriber registered. The sends of one fire run concurrently. Nothing is
+recorded about who received what.
 
 The Room cell owns the whole feature: the subscription list, the schedule,
 per-subscription daily send counters, the timer, encryption, and the outbound
@@ -2254,8 +2260,11 @@ push fire.
 When the alarm fires, every item whose due instant has passed fires once. A due
 instant more than 15 minutes in the past is skipped rather than replayed: a
 stale reminder is worse than none. A fired or skipped one-shot item is removed
-from the schedule. A recurring item's next due instant is then recomputed. Daily
-send counters are keyed by the local date in `tz`; the ninth send to one
+from the schedule. A recurring item's next due instant is then recomputed. The
+local date that resolves `{date}` and the daily counter is the item's due
+instant in `tz`, not the instant the alarm happened to run. Counters count
+attempts, including failed ones, so a broken push service cannot turn one
+subscription into unbounded outbound traffic; the ninth attempt to one
 subscription in one local day is skipped.
 
 Push state lives in the Room cell beside the room document but outside the KV

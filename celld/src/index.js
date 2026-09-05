@@ -670,6 +670,356 @@ export class Identity {
 // A Room cell owns one room's KV document, dense mutation sequence, budget
 // recovery state, and hibernatable WebSockets. Its app's Paste cell serializes
 // cross-room byte allocations.
+// Web Push: RFC 8030 delivery, RFC 8291 aes128gcm encryption, RFC 8292 VAPID.
+// The runtime imports no HKDF and no raw EC point, so HKDF is HMAC by hand and
+// a subscriber's point is wrapped in the P-256 SPKI prefix before import.
+
+const PUSH_KEY = "push";
+const PUSH_MAX_SUBSCRIPTIONS = 16;
+const PUSH_MAX_ITEMS = 16;
+const PUSH_MAX_ENDPOINT = 1024;
+const PUSH_MAX_BODY = 1024;
+const PUSH_MAX_PAYLOAD = 2048;
+const PUSH_MAX_ROOM_KEY = 256;
+const PUSH_DAILY_CAP = 8;
+const PUSH_STALE_MS = 15 * 60 * 1000;
+const PUSH_TEST_INTERVAL_MS = 60 * 1000;
+const PUSH_SEND_TIMEOUT_MS = 10 * 1000;
+const PUSH_RECORD_SIZE = 4096;
+// Push-service hosts, matched exactly or as a dot-suffix; ciphertext and VAPID
+// tokens go nowhere else.
+const PUSH_SERVICE_HOSTS = [
+  "push.apple.com", "fcm.googleapis.com", "push.services.mozilla.com", "notify.windows.com",
+];
+const VAPID_TTL_MS = 12 * 60 * 60 * 1000;
+const VAPID_KEY = "pushVapid";
+const ECDH_P256 = { name: "ECDH", namedCurve: "P-256" };
+const ECDSA_P256 = { name: "ECDSA", namedCurve: "P-256" };
+const P256_SPKI_PREFIX = new Uint8Array([
+  48, 89, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206, 61, 3, 1, 7, 3, 66, 0,
+]);
+const PUSH_ID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
+const PUSH_AT_PATTERN = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
+function utf8(text) {
+  return new TextEncoder().encode(text);
+}
+
+function concat(...parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
+function b64u(bytes) {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// Accepts base64url or base64, padded or not; null for anything else.
+function unb64u(text) {
+  if (typeof text !== "string" || !/^[A-Za-z0-9_=+/-]*$/.test(text)) {
+    return null;
+  }
+  const normalized = text.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
+  if (normalized.length % 4 === 1) {
+    return null;
+  }
+  try {
+    const binary = atob(normalized + "=".repeat((4 - (normalized.length % 4)) % 4));
+    return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  } catch {
+    return null;
+  }
+}
+
+async function hmacSha256(key, data) {
+  const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return new Uint8Array(await crypto.subtle.sign("HMAC", k, data));
+}
+
+// HKDF-SHA256 extract + expand, one block: every length the protocol asks for
+// is at most 32 bytes.
+async function hkdf(salt, ikm, info, length) {
+  const prk = await hmacSha256(salt, ikm);
+  const block = await hmacSha256(prk, concat(info, new Uint8Array([1])));
+  return block.slice(0, length);
+}
+
+function importP256Point(point) {
+  return crypto.subtle.importKey("spki", concat(P256_SPKI_PREFIX, point), ECDH_P256, false, []);
+}
+
+// exportKey("raw") returns the bare point on some runtimes and SPKI on others;
+// the point is always the last 65 bytes.
+async function rawPoint(publicKey) {
+  const raw = new Uint8Array(await crypto.subtle.exportKey("raw", publicKey));
+  return raw.slice(raw.length - 65);
+}
+
+// RFC 8291 aes128gcm: one record, rs 4096, header || AES-GCM(plaintext || 0x02).
+// serverKeys and salt are injectable so a test can pin the RFC vector.
+export async function encryptPush(subscription, plaintext, { serverKeys, salt } = {}) {
+  serverKeys ??= await crypto.subtle.generateKey(ECDH_P256, true, ["deriveBits"]);
+  salt ??= crypto.getRandomValues(new Uint8Array(16));
+  const uaPoint = unb64u(subscription.p256dh);
+  const auth = unb64u(subscription.auth);
+  const uaKey = await importP256Point(uaPoint);
+  const secret = new Uint8Array(
+    await crypto.subtle.deriveBits({ name: "ECDH", public: uaKey }, serverKeys.privateKey, 256),
+  );
+  const asPoint = await rawPoint(serverKeys.publicKey);
+  const ikm = await hkdf(auth, secret, concat(utf8("WebPush: info\0"), uaPoint, asPoint), 32);
+  const cek = await hkdf(salt, ikm, utf8("Content-Encoding: aes128gcm\0"), 16);
+  const nonce = await hkdf(salt, ikm, utf8("Content-Encoding: nonce\0"), 12);
+  const key = await crypto.subtle.importKey("raw", cek, "AES-GCM", false, ["encrypt"]);
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, key, concat(plaintext, new Uint8Array([2]))),
+  );
+  const recordSize = new Uint8Array(4);
+  new DataView(recordSize.buffer).setUint32(0, PUSH_RECORD_SIZE);
+  return concat(salt, recordSize, new Uint8Array([asPoint.length]), asPoint, ciphertext);
+}
+
+// ES256 JWS compact form; WebCrypto's ECDSA output is already r || s.
+export async function signVapid(privateKey, claims) {
+  const part = (value) => b64u(utf8(JSON.stringify(value)));
+  const input = `${part({ typ: "JWT", alg: "ES256" })}.${part(claims)}`;
+  const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, privateKey, utf8(input));
+  return `${input}.${b64u(new Uint8Array(signature))}`;
+}
+
+function httpsOrigin(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.origin === value ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+const localFormats = new Map();
+
+function localFormat(tz) {
+  let format = localFormats.get(tz);
+  if (!format) {
+    format = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz, hourCycle: "h23",
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+    localFormats.set(tz, format);
+  }
+  return format;
+}
+
+function knownTimeZone(tz) {
+  if (typeof tz !== "string" || !tz) {
+    return false;
+  }
+  try {
+    localFormat(tz);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function localParts(ms, tz) {
+  const parts = {};
+  for (const { type, value } of localFormat(tz).formatToParts(new Date(ms))) {
+    parts[type] = value;
+  }
+  return {
+    year: Number(parts.year), month: Number(parts.month), day: Number(parts.day),
+    hour: Number(parts.hour) % 24, minute: Number(parts.minute), second: Number(parts.second),
+  };
+}
+
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+export function localDate(ms, tz) {
+  const p = localParts(ms, tz);
+  return `${p.year}-${pad2(p.month)}-${pad2(p.day)}`;
+}
+
+function offsetAt(ms, tz) {
+  const p = localParts(ms, tz);
+  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - Math.floor(ms / 1000) * 1000;
+}
+
+// The instant of a wall-clock time in tz. A skipped clock (spring forward)
+// resolves to the shifted time; a repeated clock to its first occurrence.
+export function zonedToUTC(year, month, day, hour, minute, tz) {
+  const guess = Date.UTC(year, month - 1, day, hour, minute);
+  const first = guess - offsetAt(guess, tz);
+  const second = guess - offsetAt(first, tz);
+  for (const candidate of [first, second]) {
+    const p = localParts(candidate, tz);
+    if (p.day === day && p.hour === hour && p.minute === minute) {
+      return candidate;
+    }
+  }
+  return Math.max(first, second);
+}
+
+// Next instant strictly after now at which the item fires, in tz.
+export function nextDue(item, tz, now) {
+  if (item.when !== undefined) {
+    return Date.parse(item.when);
+  }
+  const [hour, minute] = item.at.split(":").map(Number);
+  const today = localParts(now, tz);
+  for (let k = 0; k <= 7; k++) {
+    const day = new Date(Date.UTC(today.year, today.month - 1, today.day + k));
+    if (!item.days.includes(day.getUTCDay())) {
+      continue;
+    }
+    const at = zonedToUTC(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), hour, minute, tz);
+    if (at > now) {
+      return at;
+    }
+  }
+  return null;
+}
+
+function invalid(error, status = 400) {
+  return { error: Response.json({ error }, { status }) };
+}
+
+function pushServiceHost(host) {
+  return PUSH_SERVICE_HOSTS.some((known) => host === known || host.endsWith(`.${known}`));
+}
+
+function validateSubscription(body) {
+  if (typeof body?.endpoint !== "string" || utf8(body.endpoint).length > PUSH_MAX_ENDPOINT) {
+    return invalid("invalid-endpoint");
+  }
+  try {
+    const url = new URL(body.endpoint);
+    if (url.protocol !== "https:" || !pushServiceHost(url.hostname)) {
+      return invalid("invalid-endpoint");
+    }
+  } catch {
+    return invalid("invalid-endpoint");
+  }
+  const p256dh = unb64u(body.keys?.p256dh);
+  if (!p256dh || p256dh.length !== 65 || p256dh[0] !== 4) {
+    return invalid("invalid-p256dh");
+  }
+  const auth = unb64u(body.keys?.auth);
+  if (!auth || auth.length !== 16) {
+    return invalid("invalid-auth");
+  }
+  return { subscription: { endpoint: body.endpoint, p256dh: b64u(p256dh), auth: b64u(auth) } };
+}
+
+function validRoomKey(key) {
+  if (typeof key !== "string" || !key || utf8(key).length > PUSH_MAX_ROOM_KEY) {
+    return false;
+  }
+  return key !== "ws" && key !== "push" && !key.startsWith("push/");
+}
+
+function optionalText(value, max) {
+  return value === undefined || (typeof value === "string" && utf8(value).length <= max);
+}
+
+function validateItem(item, now) {
+  if (item === null || typeof item !== "object" || Array.isArray(item)) {
+    return "invalid-item";
+  }
+  if (typeof item.id !== "string" || !PUSH_ID_PATTERN.test(item.id)) {
+    return "invalid-id";
+  }
+  const recurring = item.at !== undefined || item.days !== undefined;
+  if (recurring === (item.when !== undefined)) {
+    return "invalid-time";
+  }
+  if (recurring) {
+    if (typeof item.at !== "string" || !PUSH_AT_PATTERN.test(item.at)) {
+      return "invalid-at";
+    }
+    if (!Array.isArray(item.days) || item.days.length === 0 || item.days.length > 7 ||
+        !item.days.every((d) => Number.isInteger(d) && d >= 0 && d <= 6) ||
+        new Set(item.days).size !== item.days.length) {
+      return "invalid-days";
+    }
+  } else if (typeof item.when !== "string" || !RFC3339_PATTERN.test(item.when) ||
+             !(Date.parse(item.when) > now)) {
+    return "invalid-when";
+  }
+  if (typeof item.title !== "string" || !item.title || utf8(item.title).length > 64) {
+    return "invalid-title";
+  }
+  if (!optionalText(item.url, 512)) {
+    return "invalid-url";
+  }
+  if (!optionalText(item.tag, 64)) {
+    return "invalid-tag";
+  }
+  if ((item.body !== undefined) === (item.bodyKey !== undefined)) {
+    return "invalid-body";
+  }
+  if (item.body !== undefined && (typeof item.body !== "string" || utf8(item.body).length > PUSH_MAX_BODY)) {
+    return "invalid-body";
+  }
+  if (item.bodyKey !== undefined && !validRoomKey(item.bodyKey)) {
+    return "invalid-body-key";
+  }
+  return null;
+}
+
+function validateSchedule(body, now) {
+  if (!knownTimeZone(body?.tz)) {
+    return invalid("invalid-tz");
+  }
+  if (!Array.isArray(body.items)) {
+    return invalid("invalid-items");
+  }
+  if (body.items.length > PUSH_MAX_ITEMS) {
+    return invalid("too-many-items", 413);
+  }
+  const ids = new Set();
+  const items = [];
+  for (const item of body.items) {
+    const error = validateItem(item, now);
+    if (error) {
+      return invalid(error);
+    }
+    if (ids.has(item.id)) {
+      return invalid("duplicate-id");
+    }
+    ids.add(item.id);
+    const copy = { id: item.id };
+    for (const field of ["at", "days", "when", "title", "body", "bodyKey", "url", "tag"]) {
+      if (item[field] !== undefined) {
+        copy[field] = field === "days" ? [...item.days] : item[field];
+      }
+    }
+    items.push(copy);
+  }
+  return { schedule: { tz: body.tz, items } };
+}
+
+function publicItem(item) {
+  const { due, ...rest } = item;
+  return rest;
+}
+
 export class Room {
   constructor(state, env) {
     this.state = state;
@@ -762,6 +1112,18 @@ export class Room {
         return this.put(await request.json());
       case "del":
         return this.del(await request.json());
+      case "pushsublist":
+        return this.pushSubList();
+      case "pushscheduleget":
+        return this.pushScheduleGet();
+      case "pushsubput":
+        return this.state.blockConcurrencyWhile(async () => this.pushSubPut(await request.json()));
+      case "pushsubdel":
+        return this.state.blockConcurrencyWhile(async () => this.pushSubDel(await request.json()));
+      case "pushscheduleput":
+        return this.state.blockConcurrencyWhile(async () => this.pushSchedulePut(await request.json()));
+      case "pushtest":
+        return this.state.blockConcurrencyWhile(async () => this.pushTest(await request.json()));
     }
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket\n", { status: 426 });
@@ -993,7 +1355,7 @@ export class Room {
   async persistPending(doc) {
     await this.state.storage.transaction(async (tx) => {
       await tx.put("state", doc);
-      await tx.setAlarm(Date.now());
+      await this.rearm(Date.now(), tx);
     });
   }
 
@@ -1001,12 +1363,12 @@ export class Room {
     delete doc.pending;
     await this.state.storage.transaction(async (tx) => {
       await tx.put("state", doc);
-      await tx.deleteAlarm();
+      await this.rearm(null, tx);
     });
   }
 
   async retryPendingLater() {
-    await this.state.storage.setAlarm(Date.now() + 1000);
+    await this.rearm(Date.now() + 1000);
     return "unavailable";
   }
 
@@ -1019,7 +1381,7 @@ export class Room {
     const version = doc.budgetVersion;
     const growing = pending.mutation !== undefined;
     if (rearm) {
-      await this.state.storage.setAlarm(Date.now());
+      await this.rearm(Date.now());
     }
 
     let response;
@@ -1065,10 +1427,300 @@ export class Room {
     });
   }
 
-  async alarm() {
+  // info.now is a test hook; the runtime passes retry metadata only.
+  async alarm(info = {}) {
     await this.state.blockConcurrencyWhile(async () => {
       await this.resumePending(undefined, true);
+      await this.firePush(info.now ?? Date.now());
     });
+  }
+
+  // One alarm serves both the budget retry and the push timer: a re-arm takes
+  // the earlier deadline, and neither side can disarm the other's.
+  async rearm(budgetAt, tx = this.state.storage) {
+    const pushAt = (await tx.get(PUSH_KEY))?.nextFireAt ?? null;
+    const at = budgetAt === null ? pushAt : pushAt === null ? budgetAt : Math.min(budgetAt, pushAt);
+    if (at === null) {
+      await tx.deleteAlarm();
+    } else {
+      await tx.setAlarm(at);
+    }
+  }
+
+  async loadPush() {
+    return (await this.state.storage.get(PUSH_KEY)) ??
+      { subscriptions: [], schedule: null, nextFireAt: null, lastTestAt: 0 };
+  }
+
+  // A pending budget already holds the alarm at its retry instant, which the
+  // push save must keep; without one the push deadline is the whole alarm.
+  async savePush(push) {
+    const dues = (push.schedule?.items ?? []).map((item) => item.due);
+    push.nextFireAt = dues.length ? Math.min(...dues) : null;
+    await this.state.storage.transaction(async (tx) => {
+      await tx.put(PUSH_KEY, push);
+      const doc = await tx.get("state");
+      const budgetAt = doc?.pending ? (await tx.getAlarm()) ?? Date.now() : null;
+      await this.rearm(budgetAt, tx);
+    });
+  }
+
+  async pushSubPut(body) {
+    if (!await this.loadRoom()) {
+      return new Response("not found\n", { status: 404 });
+    }
+    const checked = validateSubscription(body);
+    if (checked.error) {
+      return checked.error;
+    }
+    const push = await this.loadPush();
+    const existing = push.subscriptions.find((s) => s.endpoint === checked.subscription.endpoint);
+    if (existing) {
+      Object.assign(existing, checked.subscription);
+    } else {
+      if (push.subscriptions.length >= PUSH_MAX_SUBSCRIPTIONS) {
+        return Response.json({ error: "too-many-subscriptions" }, { status: 413 });
+      }
+      push.subscriptions.push({ ...checked.subscription, added: body.now ?? Date.now(), sent: {} });
+    }
+    if (typeof body.subject === "string") {
+      push.subject = body.subject;
+    }
+    await this.savePush(push);
+    return new Response(null, { status: 204 });
+  }
+
+  async pushSubDel(body) {
+    if (!await this.loadRoom()) {
+      return new Response("not found\n", { status: 404 });
+    }
+    if (typeof body?.endpoint !== "string") {
+      return Response.json({ error: "invalid-endpoint" }, { status: 400 });
+    }
+    const push = await this.loadPush();
+    const kept = push.subscriptions.filter((s) => s.endpoint !== body.endpoint);
+    if (kept.length !== push.subscriptions.length) {
+      push.subscriptions = kept;
+      await this.savePush(push);
+    }
+    return new Response(null, { status: 204 });
+  }
+
+  async pushSubList() {
+    if (!await this.loadRoom()) {
+      return new Response("not found\n", { status: 404 });
+    }
+    const push = await this.loadPush();
+    return Response.json({
+      subscriptions: push.subscriptions.map((s) => ({
+        endpoint: s.endpoint, added: new Date(s.added).toISOString(),
+      })),
+    });
+  }
+
+  async pushSchedulePut(body) {
+    if (!await this.loadRoom()) {
+      return new Response("not found\n", { status: 404 });
+    }
+    const now = body.now ?? Date.now();
+    const checked = validateSchedule(body, now);
+    if (checked.error) {
+      return checked.error;
+    }
+    const { schedule } = checked;
+    for (const item of schedule.items) {
+      item.due = nextDue(item, schedule.tz, now);
+    }
+    const push = await this.loadPush();
+    push.schedule = schedule;
+    if (typeof body.subject === "string") {
+      push.subject = body.subject;
+    }
+    await this.savePush(push);
+    return new Response(null, { status: 204 });
+  }
+
+  async pushScheduleGet() {
+    if (!await this.loadRoom()) {
+      return new Response("not found\n", { status: 404 });
+    }
+    const push = await this.loadPush();
+    return Response.json({
+      tz: push.schedule?.tz ?? "",
+      items: (push.schedule?.items ?? []).map(publicItem),
+    });
+  }
+
+  async pushTest(body) {
+    const doc = await this.loadRoom();
+    if (!doc) {
+      return new Response("not found\n", { status: 404 });
+    }
+    const now = body?.now ?? Date.now();
+    const push = await this.loadPush();
+    const elapsed = now - (push.lastTestAt ?? 0);
+    if (elapsed < PUSH_TEST_INTERVAL_MS) {
+      return Response.json({
+        error: "rate-limited",
+        retryAfter: Math.ceil((PUSH_TEST_INTERVAL_MS - elapsed) / 1000),
+      }, { status: 429 });
+    }
+    push.lastTestAt = now;
+    await this.savePush(push);
+    const payload = utf8(JSON.stringify({
+      title: "Test notification", body: "Push notifications are working.", tag: "hostthis-test",
+    }));
+    const date = localDate(now, push.schedule?.tz ?? "UTC");
+    const outcome = await this.deliver(push, this.dispatch(push, doc, payload, date, new Map()));
+    await this.savePush(push);
+    return Response.json(outcome);
+  }
+
+  // Fires every item whose due instant has passed. The schedule advances and
+  // persists before any send, so a crash mid-fire loses sends rather than
+  // repeating them.
+  async firePush(now) {
+    const push = await this.loadPush();
+    if (!push.schedule?.items.length || push.nextFireAt === null) {
+      return;
+    }
+    if (push.nextFireAt > now) {
+      // The runtime consumed the alarm; the deadline must be set again.
+      await this.savePush(push);
+      return;
+    }
+    const { tz } = push.schedule;
+    const fires = [];
+    const kept = [];
+    for (const item of push.schedule.items) {
+      if (item.due > now) {
+        kept.push(item);
+        continue;
+      }
+      if (now - item.due <= PUSH_STALE_MS) {
+        fires.push({ item, date: localDate(item.due, tz) });
+      }
+      if (item.when === undefined) {
+        item.due = nextDue(item, tz, now);
+        kept.push(item);
+      }
+    }
+    push.schedule.items = kept;
+    await this.savePush(push);
+    const doc = fires.length ? await this.loadRoom() : null;
+    if (!doc) {
+      return;
+    }
+    const signed = new Map();
+    const sends = [];
+    for (const { item, date } of fires) {
+      const payload = this.resolvePayload(item, doc, date);
+      if (payload) {
+        sends.push(...this.dispatch(push, doc, payload, date, signed));
+      }
+    }
+    await this.deliver(push, sends);
+    await this.savePush(push);
+  }
+
+  // date is the item's local due date in tz.
+  resolvePayload(item, doc, date) {
+    let body = item.body;
+    if (body === undefined) {
+      const key = item.bodyKey.replaceAll("{date}", date);
+      if (!Object.hasOwn(doc.kv, key)) {
+        return null;
+      }
+      const bytes = unb64u(doc.kv[key]);
+      if (!bytes) {
+        return null;
+      }
+      body = new TextDecoder().decode(bytes);
+    }
+    const payload = utf8(JSON.stringify({ title: item.title, body, url: item.url, tag: item.tag }));
+    return payload.length > PUSH_MAX_PAYLOAD ? null : payload;
+  }
+
+  // Charges the daily counter of every subscription under the cap and starts
+  // one send per charged subscription. The cap is decided here, before any
+  // send runs, so concurrent sends never race on it.
+  dispatch(push, doc, payload, date, signed) {
+    const sends = [];
+    for (const sub of push.subscriptions) {
+      const count = sub.sent?.[date] ?? 0;
+      if (count >= PUSH_DAILY_CAP) {
+        continue;
+      }
+      sub.sent = { [date]: count + 1 };
+      sends.push(this.sendPush(sub, payload, doc.meta.appSlug, push.subject, signed).then((result) => ({ sub, result })));
+    }
+    return sends;
+  }
+
+  // Awaits the sends of one fire together and prunes gone subscriptions.
+  // Mutates push; the caller persists.
+  async deliver(push, sends) {
+    const outcome = { sent: 0, pruned: 0 };
+    const gone = new Set();
+    for (const settled of await Promise.allSettled(sends)) {
+      if (settled.status !== "fulfilled") {
+        continue;
+      }
+      if (settled.value.result === "gone") {
+        gone.add(settled.value.sub);
+      } else if (settled.value.result === "sent") {
+        outcome.sent++;
+      }
+    }
+    outcome.pruned = gone.size;
+    push.subscriptions = push.subscriptions.filter((sub) => !gone.has(sub));
+    return outcome;
+  }
+
+  // signed caches the in-flight signing per origin so concurrent sends to one
+  // push service share a token.
+  vapidHeader(origin, appSlug, subject, signed) {
+    if (!signed.has(origin)) {
+      const claims = { aud: origin };
+      if (subject) {
+        claims.sub = subject;
+      }
+      signed.set(origin, this.appCall(appSlug, "pushsign", claims).then(async (res) => {
+        if (!res.ok) {
+          throw new Error("vapid signing unavailable");
+        }
+        const { token, key } = await res.json();
+        return `vapid t=${token}, k=${key}`;
+      }));
+    }
+    return signed.get(origin);
+  }
+
+  async sendPush(sub, payload, appSlug, subject, signed) {
+    try {
+      const authorization = await this.vapidHeader(new URL(sub.endpoint).origin, appSlug, subject, signed);
+      const body = await encryptPush(sub, payload);
+      const res = await (this.env.PUSH_FETCH ?? fetch)(sub.endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Encoding": "aes128gcm",
+          "Content-Type": "application/octet-stream",
+          TTL: "86400",
+          Urgency: "normal",
+          Authorization: authorization,
+        },
+        body,
+        redirect: "manual",
+        signal: AbortSignal.timeout(this.env.PUSH_SEND_TIMEOUT_MS ?? PUSH_SEND_TIMEOUT_MS),
+      });
+      await res.body?.cancel();
+      if (res.status === 404 || res.status === 410) {
+        return "gone";
+      }
+      return res.ok ? "sent" : "failed";
+    } catch {
+      return "failed";
+    }
   }
 
   async webSocketMessage(ws, message) {
@@ -1165,6 +1817,10 @@ export class Paste {
           return this.deleteVersion(await request.json());
         case "pin":
           return this.pin(await request.json());
+        case "pushkey":
+          return this.pushKey();
+        case "pushsign":
+          return this.pushSign(await request.json());
         default:
           return new Response("unknown op\n", { status: 404 });
       }
@@ -1273,6 +1929,42 @@ export class Paste {
       perSubnet: live.filter((e) => e.subnet === subnet).length,
       perApp: live.length,
     });
+  }
+
+  async vapidKeys() {
+    let keys = await this.state.storage.get(VAPID_KEY);
+    if (!keys) {
+      const pair = await crypto.subtle.generateKey(ECDSA_P256, true, ["sign", "verify"]);
+      keys = {
+        privateJwk: await crypto.subtle.exportKey("jwk", pair.privateKey),
+        publicKey: b64u(await rawPoint(pair.publicKey)),
+      };
+      await this.state.storage.put(VAPID_KEY, keys);
+    }
+    return keys;
+  }
+
+  async pushKey() {
+    return Response.json({ key: (await this.vapidKeys()).publicKey });
+  }
+
+  // Signs for one push-service origin; the private key never leaves the cell.
+  async pushSign(body) {
+    const aud = httpsOrigin(body?.aud);
+    if (!aud) {
+      return Response.json({ error: "invalid-aud" }, { status: 400 });
+    }
+    if (body.sub !== undefined && typeof body.sub !== "string") {
+      return Response.json({ error: "invalid-sub" }, { status: 400 });
+    }
+    const keys = await this.vapidKeys();
+    const privateKey = await crypto.subtle.importKey("jwk", keys.privateJwk, ECDSA_P256, false, ["sign"]);
+    const now = body.now ?? Date.now();
+    const claims = { aud, exp: Math.floor((now + VAPID_TTL_MS) / 1000) };
+    if (body.sub) {
+      claims.sub = body.sub;
+    }
+    return Response.json({ token: await signVapid(privateKey, claims), key: keys.publicKey });
   }
 
   async roomPreflight(body) {

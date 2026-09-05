@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -219,14 +220,31 @@ var (
 	ErrRoomValueTooLarge = errors.New("room value is too large")
 )
 
-// ValidateRoomKey checks a key against the empty + length rules. Use it at the
-// boundary where an untrusted key (an HTTP path segment) becomes a stored key.
+// Reserved room path segments: the room API serves these as something other
+// than data (the relay upgrade, the push surface), so no value may live there.
+const (
+	RoomKeyWS   = "ws"
+	RoomKeyPush = "push"
+)
+
+// IsReservedRoomKey reports whether key is "ws", "push", or under "push/".
+// Keys of other shapes ("push:2026-09-06", "pushy") are ordinary data.
+func IsReservedRoomKey(key string) bool {
+	return key == RoomKeyWS || key == RoomKeyPush || strings.HasPrefix(key, RoomKeyPush+"/")
+}
+
+// ValidateRoomKey checks a key against the empty, length and reserved rules.
+// Use it at the boundary where an untrusted key (an HTTP path segment) becomes
+// a stored key.
 func ValidateRoomKey(key string) error {
 	if key == "" {
 		return ErrRoomKeyEmpty
 	}
 	if len(key) > MaxRoomKeyLen {
 		return ErrRoomKeyTooLong
+	}
+	if IsReservedRoomKey(key) {
+		return ErrRoomKeyReserved
 	}
 	return nil
 }

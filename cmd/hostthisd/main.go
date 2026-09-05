@@ -73,7 +73,7 @@ func main() {
 		logger.Fatalf("--apex-domain is required (or set HOSTTHIS_APEX_DOMAIN). Pass the public domain hostthis serves on, e.g. paste.example.com.")
 	}
 
-	metadata, err := buildMetadata(*dataDir, logger)
+	metadata, err := buildMetadata(*dataDir, *apexDomain, logger)
 	if err != nil {
 		logger.Fatalf("metadata backend: %v", err)
 	}
@@ -124,8 +124,10 @@ func main() {
 	// Rooms: the no-auth, capability-based app-persistence tier under
 	// /api/rooms. Nil when the metadata backend has no room repo.
 	var roomsSvc *service.Rooms
+	var roomPushSvc *service.RoomPush
 	if roomRepo != nil {
 		roomsSvc = service.NewRooms(roomRepo)
+		roomPushSvc = service.NewRoomPush(roomRepo)
 	}
 
 	// Relay: the real-time per-room WebSocket layer over the rooms tier (SPEC
@@ -197,6 +199,7 @@ func main() {
 	}
 	if roomsSvc != nil {
 		httpServer.Rooms = roomsSvc
+		httpServer.RoomPush = roomPushSvc
 	}
 	var relayDrain relayShutdowner = idleRelay{}
 	if metadata.RoomRelay != nil {

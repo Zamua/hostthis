@@ -14,7 +14,7 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-func buildMetadataCelld(logger *log.Logger) (*metadataBundle, error) {
+func buildMetadataCelld(apex string, logger *log.Logger) (*metadataBundle, error) {
 	base := envOr("HOSTTHIS_CELLD_ENDPOINT", "")
 	if base == "" {
 		return nil, errors.New("HOSTTHIS_CELLD_ENDPOINT is required for the celld backend")
@@ -23,13 +23,15 @@ func buildMetadataCelld(logger *log.Logger) (*metadataBundle, error) {
 	// rather than each surface opening its own.
 	client := &http.Client{Timeout: 30 * time.Second}
 	repo := celld.NewPasteRepo(base, client)
+	rooms := celld.NewRoomRepo(base, client)
+	rooms.PushSubject = "https://" + apex
 
 	logger.Printf("metadata backend: celld at %s", base)
 	return &metadataBundle{
 		Repo:    repo,
 		KeyGate: celld.NewKeyGateRepo(base, client),
 		Sites:   storage.NewSites(repo),
-		Rooms:   celld.NewRoomRepo(base, client),
+		Rooms:   rooms,
 		// Every socket terminates at its Room cell, which owns broadcast order.
 		RoomRelay: celld.NewRoomProxy(base),
 	}, nil

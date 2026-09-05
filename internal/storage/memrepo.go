@@ -32,6 +32,7 @@ type MemRepo struct {
 	rooms      map[memRoomKey]*memRoom
 	roomBytes  map[domain.Slug]int64
 	roomLedger map[domain.Slug][]memRoomCreate
+	pushKeys   map[domain.Slug]string // app -> VAPID public key, base64url
 }
 
 type memPaste struct {
@@ -52,6 +53,7 @@ func NewMemRepo() *MemRepo {
 		rooms:      make(map[memRoomKey]*memRoom),
 		roomBytes:  make(map[domain.Slug]int64),
 		roomLedger: make(map[domain.Slug][]memRoomCreate),
+		pushKeys:   make(map[domain.Slug]string),
 	}
 }
 

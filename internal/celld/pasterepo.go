@@ -121,7 +121,10 @@ func isCellAnswer(status int) bool {
 	return false
 }
 
-func (r *PasteRepo) call(ctx context.Context, method, path, key, val string, body, out any) (int, error) {
+// do sends one cell request and returns the raw response; call is the usual
+// wrapper. Callers needing the body of an answer status (a 429 carrying its
+// wait) use do directly.
+func (r *PasteRepo) do(ctx context.Context, method, path, key, val string, body any) (*http.Response, error) {
 	// The routing param is MERGED rather than appended: a path may already carry
 	// query params of its own, and a second bare "?" makes the whole string one
 	// unparseable query, which presents as the cell rejecting a param that is
@@ -135,19 +138,27 @@ func (r *PasteRepo) call(ctx context.Context, method, path, key, val string, bod
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return 0, fmt.Errorf("celld: encode %s: %w", path, err)
+			return nil, fmt.Errorf("celld: encode %s: %w", path, err)
 		}
 		payload = b
 	}
 	rdr := bytes.NewReader(payload)
 	req, err := http.NewRequestWithContext(ctx, method, u, rdr)
 	if err != nil {
-		return 0, fmt.Errorf("celld: build %s: %w", path, err)
+		return nil, fmt.Errorf("celld: build %s: %w", path, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("celld: %s: %w", path, err)
+		return nil, fmt.Errorf("celld: %s: %w", path, err)
+	}
+	return resp, nil
+}
+
+func (r *PasteRepo) call(ctx context.Context, method, path, key, val string, body, out any) (int, error) {
+	resp, err := r.do(ctx, method, path, key, val, body)
+	if err != nil {
+		return 0, err
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	// Some statuses are ANSWERS, not faults: the caller maps them to domain
