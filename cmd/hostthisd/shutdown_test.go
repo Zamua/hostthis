@@ -72,6 +72,19 @@ func closedSignal() <-chan struct{} {
 	return ch
 }
 
+// immediate is a drain that returns as soon as it is entered.
+func immediate() *testDrain {
+	return &testDrain{entered: make(chan struct{}), release: closedSignal()}
+}
+
+// newTestSSH parks Shutdown until shutdownRelease and Close until closeRelease.
+func newTestSSH(shutdownRelease, closeRelease <-chan struct{}) *testSSH {
+	return &testSSH{
+		shutdownEntered: make(chan struct{}), shutdownRelease: shutdownRelease,
+		closeEntered: make(chan struct{}), closeRelease: closeRelease,
+	}
+}
+
 func awaitSignal(t *testing.T, name string, ch <-chan struct{}) {
 	t.Helper()
 	select {
@@ -86,10 +99,7 @@ func TestShutdownStopsAdmissionBeforeConcurrentDrains(t *testing.T) {
 	public := &testDrain{entered: make(chan struct{}), release: release}
 	metrics := &testDrain{entered: make(chan struct{}), release: release}
 	relay := &testRelay{testDrain: &testDrain{entered: make(chan struct{}), release: release}}
-	ssh := &testSSH{
-		shutdownEntered: make(chan struct{}), shutdownRelease: release,
-		closeEntered: make(chan struct{}), closeRelease: closedSignal(),
-	}
+	ssh := newTestSSH(release, closedSignal())
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	done := make(chan error, 1)
@@ -115,13 +125,7 @@ func TestShutdownWaitsForSSHThenFinalizersThenCleanup(t *testing.T) {
 	finalRelease := make(chan struct{})
 	finalStarted := make(chan struct{})
 	cleanupStarted := make(chan struct{})
-	ssh := &testSSH{
-		shutdownEntered: make(chan struct{}), shutdownRelease: sshRelease,
-		closeEntered: make(chan struct{}), closeRelease: closedSignal(),
-	}
-	immediate := func() *testDrain {
-		return &testDrain{entered: make(chan struct{}), release: closedSignal()}
-	}
+	ssh := newTestSSH(sshRelease, closedSignal())
 	relay := &testRelay{testDrain: immediate()}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -161,13 +165,7 @@ func TestShutdownWaitsForSSHThenFinalizersThenCleanup(t *testing.T) {
 func TestShutdownForceClosesSSHBeforeWaitingFinalizers(t *testing.T) {
 	closeRelease := make(chan struct{})
 	finalStarted := make(chan struct{})
-	ssh := &testSSH{
-		shutdownEntered: make(chan struct{}), shutdownRelease: make(chan struct{}),
-		closeEntered: make(chan struct{}), closeRelease: closeRelease,
-	}
-	immediate := func() *testDrain {
-		return &testDrain{entered: make(chan struct{}), release: closedSignal()}
-	}
+	ssh := newTestSSH(make(chan struct{}), closeRelease)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	done := make(chan error, 1)
@@ -192,13 +190,7 @@ func TestShutdownForceClosesSSHBeforeWaitingFinalizers(t *testing.T) {
 
 func TestShutdownReturnsAtHardDeadline(t *testing.T) {
 	finalRelease := make(chan struct{})
-	immediate := func() *testDrain {
-		return &testDrain{entered: make(chan struct{}), release: closedSignal()}
-	}
-	ssh := &testSSH{
-		shutdownEntered: make(chan struct{}), shutdownRelease: closedSignal(),
-		closeEntered: make(chan struct{}), closeRelease: closedSignal(),
-	}
+	ssh := newTestSSH(closedSignal(), closedSignal())
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
 	started := time.Now()

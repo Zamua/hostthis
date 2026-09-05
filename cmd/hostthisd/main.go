@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	httppprof "net/http/pprof"
@@ -43,8 +42,8 @@ func main() {
 		urlMode         = flag.String("mode", envOr("HOSTTHIS_URL_MODE", "path"), "url mode: subdomain (prod) | path (dev)")
 		scheme          = flag.String("scheme", envOr("HOSTTHIS_PUBLIC_SCHEME", "https"), "public URL scheme (https for prod, http for local dev)")
 		landingPath     = flag.String("landing", envOr("HOSTTHIS_LANDING", "web/landing.html"), "path to apex landing HTML")
-		freshKeysLimit  = flag.Int("fresh-keys-per-subnet", envOrInt("HOSTTHIS_FRESH_KEYS_PER_SUBNET", 20), "max distinct new key fingerprints admitted per IP subnet per window")
-		freshKeysWindow = flag.Duration("fresh-keys-window", envOrDuration("HOSTTHIS_FRESH_KEYS_WINDOW", 24*time.Hour), "rolling window for the Sybil rate limit on fresh keys")
+		freshKeysLimit  = flag.Int("fresh-keys-per-subnet", envParse("HOSTTHIS_FRESH_KEYS_PER_SUBNET", 20, strconv.Atoi, "an integer"), "max distinct new key fingerprints admitted per IP subnet per window")
+		freshKeysWindow = flag.Duration("fresh-keys-window", envParse("HOSTTHIS_FRESH_KEYS_WINDOW", 24*time.Hour, time.ParseDuration, "a duration"), "rolling window for the Sybil rate limit on fresh keys")
 		cpuProfile      = flag.String("cpuprofile", "", "write a CPU profile to this file until shutdown (local file; opens no network surface)")
 	)
 	flag.Parse()
@@ -94,7 +93,7 @@ func main() {
 	// metadata commit, so a one-owner create storm cannot amplify in the
 	// storage tier's CAS layer, while other identities pass independently.
 	// A repo decorator, so the upload service stays admission-unaware.
-	admissionWidth := envOrInt("HOSTTHIS_CREATE_ADMISSION_WIDTH", service.DefaultCreateAdmissionWidth)
+	admissionWidth := envParse("HOSTTHIS_CREATE_ADMISSION_WIDTH", service.DefaultCreateAdmissionWidth, strconv.Atoi, "an integer")
 	if admissionWidth < 1 {
 		logger.Fatalf("HOSTTHIS_CREATE_ADMISSION_WIDTH must be >= 1, got %d", admissionWidth)
 	}
@@ -290,8 +289,11 @@ func main() {
 	}
 }
 
-// buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured store.
+// buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured store:
+// the raw backend, optionally fronted by the write-back cache, under the
+// compression layer.
 func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, func(), error) {
+	var raw storage.InnerBlobStore
 	backend := strings.ToLower(envOr("HOSTTHIS_BLOB_BACKEND", "disk"))
 	switch backend {
 	case "", "disk":
@@ -300,11 +302,7 @@ func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlob
 			return nil, nil, err
 		}
 		logger.Printf("blobs: disk backend at %s/blobs (zstd-compressed at rest)", dataDir)
-		inner, cleanup, err := maybeWrapWriteBack(bs, dataDir, logger)
-		if err != nil {
-			return nil, nil, err
-		}
-		return storage.NewCompressedBlobStore(inner), cleanup, nil
+		raw = bs
 	case "s3":
 		// The celld backend holds no bytes, so the byte plane needs a durable
 		// home of its own. Content-addressed, exactly like disk: interchangeable
@@ -323,35 +321,28 @@ func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlob
 		}
 		logger.Printf("blobs: s3 backend at %s/%s (zstd-compressed at rest)",
 			envOr("HOSTTHIS_S3_BUCKET", ""), envOr("HOSTTHIS_S3_BLOB_PREFIX", "blob"))
-		inner, cleanup, err := maybeWrapWriteBack(bs, dataDir, logger)
-		if err != nil {
-			return nil, nil, err
-		}
-		return storage.NewCompressedBlobStore(inner), cleanup, nil
+		raw = bs
 	default:
 		return nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|s3)", backend)
 	}
-}
-
-// writeBackInner is what maybeWrapWriteBack needs of a durable backend: the
-// Put/Get/GetReader the compression layer wraps.
-type writeBackInner interface {
-	Put(sha string, r io.Reader, size int64) error
-	Get(sha string) ([]byte, error)
-	GetReader(sha string) (io.ReadCloser, int64, error)
+	inner, cleanup, err := maybeWrapWriteBack(raw, dataDir, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	return storage.NewCompressedBlobStore(inner), cleanup, nil
 }
 
 // maybeWrapWriteBack fronts the durable backend with the local-disk write-back
 // cache when HOSTTHIS_BLOB_WRITEBACK=true. Disabled, it returns the durable
 // backend unchanged, preserving strict durable-before-ack. The cleanup func
 // stops the uploaders and is a no-op when disabled.
-func maybeWrapWriteBack(durable writeBackInner, dataDir string, logger *log.Logger) (storage.InnerBlobStore, func(), error) {
+func maybeWrapWriteBack(durable storage.InnerBlobStore, dataDir string, logger *log.Logger) (storage.InnerBlobStore, func(), error) {
 	if strings.ToLower(envOr("HOSTTHIS_BLOB_WRITEBACK", "false")) != "true" {
 		return durable, func() {}, nil
 	}
 	cfg := storage.WriteBackConfig{
 		Dir:      envOr("HOSTTHIS_BLOB_WRITEBACK_DIR", filepath.Join(dataDir, "blob-cache")),
-		MaxBytes: envOrInt64("HOSTTHIS_BLOB_WRITEBACK_MAX_BYTES", 1<<30),
+		MaxBytes: envParse("HOSTTHIS_BLOB_WRITEBACK_MAX_BYTES", int64(1<<30), parseInt64, "an integer"),
 		Logger:   logger,
 	}
 	wb, err := storage.NewWriteBackBlobStore(durable, cfg)
@@ -412,45 +403,24 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// envParse reads key through parse, or returns fallback when it is unset.
+//
 // A malformed value is a configuration ERROR, not a reason to fall back. The
 // operator set the variable deliberately, and silently substituting the default
 // leaves the startup log confirming a value they never got. Exits rather than
 // returning an error because these are read during flag setup, before there is
 // anywhere to return one to.
-func configFatal(key, val, want string) {
-	fmt.Fprintf(os.Stderr, "hostthisd: %s=%q is not %s\n", key, val, want)
-	os.Exit(2)
-}
-
-func envOrInt(key string, fallback int) int {
+func envParse[T any](key string, fallback T, parse func(string) (T, error), want string) T {
 	v := os.Getenv(key)
 	if v == "" {
 		return fallback
 	}
-	n, err := strconv.Atoi(v)
+	n, err := parse(v)
 	if err != nil {
-		configFatal(key, v, "an integer")
+		fmt.Fprintf(os.Stderr, "hostthisd: %s=%q is not %s\n", key, v, want)
+		os.Exit(2)
 	}
 	return n
 }
 
-func envOrInt64(key string, fallback int64) int64 {
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		configFatal(key, v, "an integer")
-	}
-	return n
-}
-
-func envOrDuration(key string, fallback time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-	}
-	return fallback
-}
+func parseInt64(s string) (int64, error) { return strconv.ParseInt(s, 10, 64) }

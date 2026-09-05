@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -52,17 +54,20 @@ func TestNoScaffoldingMarkersInGoSources(t *testing.T) {
 			return rerr
 		}
 		scanned++
-		lower := strings.ToLower(string(body))
 		rel, _ := filepath.Rel(root, path)
-		for _, marker := range scaffoldingMarkers {
-			if line, ok := findMarkerLine(lower, string(body), marker); ok {
-				t.Errorf("%s:%d carries the scaffolding marker %q.\n"+
-					"Code annotated this way exists to build a fixture or reproduce a fault, and "+
-					"a release must not carry it. Restore what it displaced before merging.",
-					rel, line, marker)
+		lines := bufio.NewScanner(bytes.NewReader(body))
+		for n := 1; lines.Scan(); n++ {
+			lower := strings.ToLower(lines.Text())
+			for _, marker := range scaffoldingMarkers {
+				if strings.Contains(lower, marker) {
+					t.Errorf("%s:%d carries the scaffolding marker %q.\n"+
+						"Code annotated this way exists to build a fixture or reproduce a fault, and "+
+						"a release must not carry it. Restore what it displaced before merging.",
+						rel, n, marker)
+				}
 			}
 		}
-		return nil
+		return lines.Err()
 	})
 	if err != nil {
 		t.Fatalf("walk %s: %v", root, err)
@@ -95,53 +100,5 @@ func moduleRoot(t *testing.T) string {
 			t.Fatal("no go.mod above the test directory; cannot locate the module root")
 		}
 		dir = parent
-	}
-}
-
-// findMarkerLine reports the 1-indexed line of marker's first occurrence.
-// lower is body lowercased, so the search is case-insensitive while the line
-// count is taken over the original bytes.
-func findMarkerLine(lower, body, marker string) (int, bool) {
-	i := strings.Index(lower, marker)
-	if i < 0 {
-		return 0, false
-	}
-	return strings.Count(body[:i], "\n") + 1, true
-}
-
-func TestFindMarkerLine(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		body     string
-		marker   string
-		wantLine int
-		wantOK   bool
-	}{
-		{name: "absent", body: "package p\n", marker: "never merge", wantOK: false},
-		{
-			name:   "case-insensitive on a later line",
-			body:   "package p\n\n// THROWAWAY (never merge): wire the legacy repo\nvar x = 1\n",
-			marker: "never merge", wantLine: 3, wantOK: true,
-		},
-		{
-			name:   "first line",
-			body:   "// do not merge\npackage p\n",
-			marker: "do not merge", wantLine: 1, wantOK: true,
-		},
-		{
-			name:   "substring of a longer word still counts",
-			body:   "package p\n// a throwaway fixture\n",
-			marker: "throwaway", wantLine: 2, wantOK: true,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			line, ok := findMarkerLine(strings.ToLower(tc.body), tc.body, tc.marker)
-			if ok != tc.wantOK {
-				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
-			}
-			if ok && line != tc.wantLine {
-				t.Fatalf("line = %d, want %d", line, tc.wantLine)
-			}
-		})
 	}
 }

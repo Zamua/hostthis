@@ -88,7 +88,7 @@ func (f *fakeDurable) putRaw(sha string, body []byte) {
 	f.objs[sha] = append([]byte(nil), body...)
 }
 
-func newTestWriteBack(t *testing.T, durable durableBlobStore, cfg WriteBackConfig) *WriteBackBlobStore {
+func newTestWriteBack(t *testing.T, durable InnerBlobStore, cfg WriteBackConfig) *WriteBackBlobStore {
 	t.Helper()
 	if cfg.Dir == "" {
 		cfg.Dir = t.TempDir()
