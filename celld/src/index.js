@@ -71,6 +71,19 @@ async function dispatch(self, table, request) {
   return runOp(self, entry, entry.body ? await request.json() : undefined, url);
 }
 
+// One cell-to-cell POST: the cell named id in namespace ns, addressed by the
+// query key the Worker's router expects for that namespace.
+function cellCall(ns, id, path, query, body) {
+  return ns.get(ns.idFromName(id)).fetch(new Request(
+    `https://cell${path}?${query}=${encodeURIComponent(id)}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  ));
+}
+
 // Field checks on a request body: "string" is a non-empty string, "uint" a
 // safe integer at or above zero, "posint" one at or above one.
 function requireShape(body, shape) {
@@ -268,10 +281,6 @@ export class Identity {
     });
   }
 
-  pasteCell(slug) {
-    return this.env.PASTES.get(this.env.PASTES.idFromName(slug));
-  }
-
   async resolveCreateIntent(id, intent) {
     if (
       !intent.subject || !intent.generation
@@ -281,14 +290,8 @@ export class Identity {
     }
     let response;
     try {
-      response = await this.pasteCell(intent.subject).fetch(new Request(
-        `https://cell/paste/abortcreate?slug=${encodeURIComponent(intent.subject)}`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ generation: intent.generation }),
-        },
-      ));
+      response = await cellCall(this.env.PASTES, intent.subject, "/paste/abortcreate", "slug",
+        { generation: intent.generation });
     } catch {
       return false;
     }
@@ -1030,19 +1033,8 @@ export class Room {
     }
   }
 
-  appCell(appSlug) {
-    return this.env.PASTES.get(this.env.PASTES.idFromName(appSlug));
-  }
-
-  async appCall(appSlug, op, body) {
-    const res = await this.appCell(appSlug).fetch(
-      new Request(`https://cell/paste/${op}?slug=${encodeURIComponent(appSlug)}`, {
-        method: "POST",
-        body: JSON.stringify(body),
-        headers: { "content-type": "application/json" },
-      }),
-    );
-    return res;
+  appCall(appSlug, op, body) {
+    return cellCall(this.env.PASTES, appSlug, `/paste/${op}`, "slug", body);
   }
 
   async fetch(request) {
@@ -1969,16 +1961,8 @@ export class Paste {
     return Response.json({ changed: true });
   }
 
-  identityCell(owner) {
-    return this.env.IDENTITY.get(this.env.IDENTITY.idFromName(owner));
-  }
-
-  async identityCall(owner, op, body) {
-    return this.identityCell(owner).fetch(new Request(`https://cell/identity/${op}?scope=${encodeURIComponent(owner)}`, {
-      method: "POST",
-      body: JSON.stringify(body),
-      headers: { "content-type": "application/json" },
-    }));
+  identityCall(owner, op, body) {
+    return cellCall(this.env.IDENTITY, owner, `/identity/${op}`, "scope", body);
   }
 
   receiptKey(generation, opId) {
