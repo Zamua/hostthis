@@ -28,17 +28,14 @@ var _ PasteManager = (*Manage)(nil)
 
 // CacheInvalidating decorates a PasteManager with CDN cache invalidation,
 // firing the purger after a SUCCESSFUL mutation that changes the bytes served
-// at a paste's public URL (Update / Delete / Pin / Unpin). Verbs that do NOT
-// change served bytes are delegated untouched through the embedded interface,
-// so no purge fires; that includes DeleteVersion, which is refused outright for
-// the currently-served version.
+// at a paste's public URL (Update / Delete / Pin / Unpin). Verbs that do not
+// change served bytes pass through the embedded interface untouched; that
+// includes DeleteVersion, which is refused outright for the served version.
+// The inner verb service holds no CachePurger.
 //
-// The inner verb service holds no CachePurger and makes no purge calls: that is
-// the point of composing invalidation here at the edge.
-//
-// The purge is best-effort. PurgePaste errors are swallowed (the mutation
-// already succeeded on origin, and the impl logs internally), so a transient
-// CDN issue never turns a successful update or delete into a failure.
+// The purge is best-effort: errors are swallowed (the mutation already
+// succeeded on origin, and the impl logs), so a transient CDN issue never turns
+// a successful mutation into a failure.
 type CacheInvalidating struct {
 	PasteManager
 	purger CachePurger

@@ -13,25 +13,22 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// blobMagicV1 and blobCompressionLevel mirror storage.magicV1 and
-// storage.compressionLevel, kept local because the service layer must not
-// import the storage package. Together they are a second implementation of the
-// at-rest blob format: a diverged magic makes fresh blobs read back as
-// uncompressed, and a diverged level changes the stored bytes the quota is
-// charged for. TestStreamUploadMatchesStorageAtRestFormat pins the two encoders
-// byte-identical.
+// blobMagicV1 and blobCompressionLevel duplicate storage.magicV1 and
+// storage.compressionLevel because the service layer must not import storage.
+// A diverged magic reads fresh blobs back as uncompressed; a diverged level
+// changes the stored bytes the quota charges.
+// TestStreamUploadMatchesStorageAtRestFormat pins the two encoders identical.
 var blobMagicV1 = [4]byte{'H', 'Z', 0x00, 0x01}
 
 const blobCompressionLevel = zstd.SpeedDefault
 
 // stagedUpload is the result of streaming bytes through the upload pipeline.
-// Body is magic-prefixed + zstd-encoded, ready for
-// BlobStore.PutPrecompressed; CompressedSize excludes the 4-byte magic.
+// CompressedSize excludes the 4-byte magic.
 type stagedUpload struct {
 	SHA string
-	// File holds the at-rest bytes, spilled to disk rather than kept in memory
-	// so peak memory does not track the payload. Positioned at 0 and owned by
-	// the caller, which MUST close and remove it.
+	// File holds the at-rest bytes (magic + zstd), ready for PutPrecompressed.
+	// Spilled to disk so peak memory does not track the payload. Positioned at
+	// 0 and owned by the caller, which MUST close and remove it.
 	File           *os.File
 	RawSize        int
 	CompressedSize int
@@ -49,25 +46,16 @@ var errRawCapExceeded = errors.New("raw cap exceeded")
 // MaxPasteBytes mid-stream.
 var errCompressedCapExceeded = errors.New("compressed cap exceeded")
 
-// streamUpload tees r through three sinks:
-//
-//   - a sha256 hasher over UNCOMPRESSED bytes, so dedup is by original
-//     content and matches user intent
-//   - a zstd encoder writing to an in-memory staging buffer, capped at
-//     MaxPasteBytes plus the magic header
-//   - a raw-byte counter that aborts at HardRawByteCap
+// streamUpload tees r in one pass through a sha256 hasher over UNCOMPRESSED
+// bytes (dedup is by original content), a zstd encoder spilling to a temp file
+// capped at MaxPasteBytes plus the magic, a raw-byte counter that aborts at
+// HardRawByteCap, and a sniff-prefix capture. The source is never materialized;
+// peak memory is a chunk buffer plus the compressor window.
 //
 // Returns errRawCapExceeded, errCompressedCapExceeded, or any other error
 // verbatim.
-//
-// Single-pass: bytes are hashed AND compressed AND counted in one traversal,
-// so peak memory is the staging buffer plus a chunk buffer and the source is
-// never materialized in full.
 func streamUpload(r io.Reader) (stagedUpload, error) {
-	// Staging starts with the magic header so PutPrecompressed is a straight
-	// write with no further wrapping.
-	// Spilled to a temp file, not a buffer: an upload must not cost its own size
-	// in RAM. The caller owns the file and removes it.
+	// The magic header goes first so PutPrecompressed is a straight write.
 	f, ferr := os.CreateTemp(os.Getenv("HOSTTHIS_STAGING_DIR"), "hostthis-paste-*")
 	if ferr != nil {
 		return stagedUpload{}, fmt.Errorf("staging temp: %w", ferr)
