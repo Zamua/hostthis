@@ -363,5 +363,5 @@ func (f *fakeBlobs) EncodeTo(w io.Writer, r io.Reader) (string, int, int64, erro
 		return "", 0, 0, err
 	}
 	n, err := w.Write(body)
-	return domain.HashContent(raw), len(body) - storage.CompressedBodyPrefixLen, int64(n), err
+	return sha256Hex(raw), len(body) - storage.CompressedBodyPrefixLen, int64(n), err
 }

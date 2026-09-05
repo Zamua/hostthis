@@ -7,12 +7,12 @@ import (
 	"strings"
 )
 
-// GzipMagic is the two-byte gzip member header (RFC 1952).
-var GzipMagic = [2]byte{0x1f, 0x8b}
+// gzipMagic is the two-byte gzip member header (RFC 1952).
+var gzipMagic = [2]byte{0x1f, 0x8b}
 
 // HasGzipMagic reports whether b begins with the gzip magic bytes.
 func HasGzipMagic(b []byte) bool {
-	return len(b) >= 2 && b[0] == GzipMagic[0] && b[1] == GzipMagic[1]
+	return len(b) >= 2 && b[0] == gzipMagic[0] && b[1] == gzipMagic[1]
 }
 
 // FileSink receives one safe, fully-validated regular file from the archive.

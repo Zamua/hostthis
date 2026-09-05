@@ -24,32 +24,3 @@ func (a Allowance) Remaining() int64 {
 	}
 	return max(a.Cap-a.Used, 0)
 }
-
-// Admit reports whether accepting incoming more bytes stays within the cap.
-// Landing exactly on the cap is allowed.
-func (a Allowance) Admit(incoming int64) error {
-	if a.Unlimited() {
-		return nil
-	}
-	if incoming <= 0 {
-		// Cannot push anyone over, and must stay admissible for an identity
-		// already at the cap.
-		return nil
-	}
-	// Compared against headroom rather than by summing: a large enough incoming
-	// makes used+incoming overflow and wrap into acceptance.
-	if a.Used >= a.Cap {
-		return ErrOverUserQuota
-	}
-	if incoming > a.Cap-a.Used {
-		return ErrOverUserQuota
-	}
-	return nil
-}
-
-// AdmitReplacing reports whether swapping a record of oldBytes for one of
-// newBytes stays within the cap. The displaced bytes are credited back: they
-// are still counted in Used but are about to stop existing, and without the
-// credit a same-size redeploy is charged twice, so an identity at its limit
-// could never update in place.
-//

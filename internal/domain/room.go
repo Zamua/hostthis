@@ -177,33 +177,6 @@ type RoomKV struct {
 	Seq uint64
 }
 
-// NewRoomKV returns an empty namespace ready to fill.
-func NewRoomKV() RoomKV { return RoomKV{Values: make(map[string][]byte)} }
-
-// Get returns the value for key and whether it exists. A miss becomes a 404 at
-// the HTTP layer.
-func (kv RoomKV) Get(key string) ([]byte, bool) {
-	v, ok := kv.Values[key]
-	return v, ok
-}
-
-// Put records val under key. The caller must run the CanPut cap check first;
-// Put only mutates the map.
-func (kv RoomKV) Put(key string, val []byte) { kv.Values[key] = val }
-
-// Delete removes key. Idempotent: deleting an absent key is a no-op.
-func (kv RoomKV) Delete(key string) { delete(kv.Values, key) }
-
-// TotalBytes is the value-byte sum charged against the per-room byte cap. Keys
-// are not counted.
-func (kv RoomKV) TotalBytes() int {
-	var n int
-	for _, v := range kv.Values {
-		n += len(v)
-	}
-	return n
-}
-
 // KeyCount is the distinct-key count charged against the per-room key cap.
 func (kv RoomKV) KeyCount() int { return len(kv.Values) }
 
@@ -212,12 +185,6 @@ var (
 	ErrRoomKeyEmpty = errors.New("room key is empty")
 	// ErrRoomKeyTooLong is returned when a key exceeds MaxRoomKeyLen.
 	ErrRoomKeyTooLong = errors.New("room key is too long")
-	// ErrRoomFull is returned by CanPut when the write would push the room
-	// past its byte or key-count cap. Surfaces as 413 at HTTP.
-	ErrRoomFull = errors.New("room is at its data cap")
-	// ErrRoomValueTooLarge is returned by CanPut when a single value exceeds
-	// MaxRoomValueBytes, which can never fit whatever the room holds.
-	ErrRoomValueTooLarge = errors.New("room value is too large")
 )
 
 // Reserved room path segments: the room API serves these as something other
@@ -245,38 +212,6 @@ func ValidateRoomKey(key string) error {
 	}
 	if IsReservedRoomKey(key) {
 		return ErrRoomKeyReserved
-	}
-	return nil
-}
-
-// CanPut reports whether writing val under key keeps the room within its caps,
-// computing the post-write totals WITHOUT mutating the namespace so a rejected
-// write leaves the prior state untouched. Overwriting an existing key charges
-// only the size delta; a new key charges its full size and one key slot.
-//
-// Returns:
-//   - ErrRoomValueTooLarge if val alone exceeds MaxRoomValueBytes
-//   - ErrRoomFull          if the post-write byte total > MaxRoomBytes
-//     OR the post-write key count > MaxRoomKeys
-//   - nil                  if the write fits
-func (kv RoomKV) CanPut(key string, val []byte) error {
-	if len(val) > MaxRoomValueBytes {
-		return ErrRoomValueTooLarge
-	}
-	// Replacing an existing key frees its old bytes.
-	prior := 0
-	if existing, ok := kv.Values[key]; ok {
-		prior = len(existing)
-	}
-	if kv.TotalBytes()-prior+len(val) > MaxRoomBytes {
-		return ErrRoomFull
-	}
-	postKeys := kv.KeyCount()
-	if _, ok := kv.Values[key]; !ok {
-		postKeys++
-	}
-	if postKeys > MaxRoomKeys {
-		return ErrRoomFull
 	}
 	return nil
 }

@@ -1,7 +1,6 @@
 package domain
 
 import (
-	"bytes"
 	"errors"
 	"strings"
 	"testing"
@@ -84,86 +83,6 @@ func TestParseRoomID(t *testing.T) {
 	}
 }
 
-func TestRoomKV_PutGetDeleteScan(t *testing.T) {
-	kv := NewRoomKV()
-	if _, ok := kv.Get("missing"); ok {
-		t.Fatal("empty namespace returned a hit")
-	}
-	kv.Put("a", []byte("alpha"))
-	kv.Put("b", []byte("beta"))
-	if v, ok := kv.Get("a"); !ok || !bytes.Equal(v, []byte("alpha")) {
-		t.Fatalf("get a = %q,%v", v, ok)
-	}
-	if kv.KeyCount() != 2 {
-		t.Fatalf("key count = %d, want 2", kv.KeyCount())
-	}
-	if kv.TotalBytes() != len("alpha")+len("beta") {
-		t.Fatalf("total bytes = %d", kv.TotalBytes())
-	}
-	// Overwrite replaces, doesn't add a key.
-	kv.Put("a", []byte("AA"))
-	if kv.KeyCount() != 2 {
-		t.Fatalf("overwrite changed key count to %d", kv.KeyCount())
-	}
-	if kv.TotalBytes() != len("AA")+len("beta") {
-		t.Fatalf("overwrite total bytes = %d", kv.TotalBytes())
-	}
-	// Delete is idempotent.
-	kv.Delete("a")
-	kv.Delete("a")
-	if _, ok := kv.Get("a"); ok {
-		t.Fatal("a still present after delete")
-	}
-	if kv.KeyCount() != 1 {
-		t.Fatalf("key count after delete = %d, want 1", kv.KeyCount())
-	}
-}
-
-func TestRoomKV_CanPut_ByteCap(t *testing.T) {
-	kv := NewRoomKV()
-	// One value at exactly the cap fits.
-	atCap := make([]byte, MaxRoomBytes)
-	if err := kv.CanPut("big", atCap); err != nil {
-		t.Fatalf("value at cap rejected: %v", err)
-	}
-	kv.Put("big", atCap)
-	// Any new byte over the cap is rejected; prior state stays intact.
-	if err := kv.CanPut("more", []byte("x")); !errors.Is(err, ErrRoomFull) {
-		t.Fatalf("over-cap write = %v, want ErrRoomFull", err)
-	}
-	// Overwriting "big" with something smaller is fine (delta is negative).
-	if err := kv.CanPut("big", []byte("small")); err != nil {
-		t.Fatalf("shrinking overwrite rejected: %v", err)
-	}
-}
-
-func TestRoomKV_CanPut_ValueTooLarge(t *testing.T) {
-	kv := NewRoomKV()
-	tooBig := make([]byte, MaxRoomValueBytes+1)
-	if err := kv.CanPut("x", tooBig); !errors.Is(err, ErrRoomValueTooLarge) {
-		t.Fatalf("oversize value = %v, want ErrRoomValueTooLarge", err)
-	}
-}
-
-func TestRoomKV_CanPut_KeyCountCap(t *testing.T) {
-	kv := NewRoomKV()
-	for i := range MaxRoomKeys {
-		k := keyN(i)
-		if err := kv.CanPut(k, []byte("v")); err != nil {
-			t.Fatalf("key %d rejected under cap: %v", i, err)
-		}
-		kv.Put(k, []byte("v"))
-	}
-	// One more distinct key tips over the key-count cap.
-	if err := kv.CanPut("overflow", []byte("v")); !errors.Is(err, ErrRoomFull) {
-		t.Fatalf("over-key-count write = %v, want ErrRoomFull", err)
-	}
-	// But overwriting an EXISTING key at the cap is allowed (count unchanged).
-	if err := kv.CanPut(keyN(0), []byte("v2")); err != nil {
-		t.Fatalf("overwrite at key cap rejected: %v", err)
-	}
-}
-
 func TestValidateRoomKey(t *testing.T) {
 	if err := ValidateRoomKey(""); !errors.Is(err, ErrRoomKeyEmpty) {
 		t.Fatalf("empty key = %v", err)
@@ -178,9 +97,4 @@ func TestValidateRoomKey(t *testing.T) {
 	if err := ValidateRoomKey("card/abc123"); err != nil {
 		t.Fatalf("slashed key rejected: %v", err)
 	}
-}
-
-func keyN(i int) string {
-	const digits = "0123456789"
-	return "k" + string(digits[i/100%10]) + string(digits[i/10%10]) + string(digits[i%10])
 }

@@ -106,21 +106,6 @@ func pasteOf(slug, identity string, size int) domain.Paste {
 	}
 }
 
-// pendingConfirmsDrainer is implemented by a backend whose
-// InsertWithQuotaCheck defers the derived-index confirm to a background
-// goroutine. Draining it after an insert makes ListByOwner / CountByOwner /
-// OwnerFirstSeen deterministic; backends that write the index synchronously do
-// not implement it.
-type pendingConfirmsDrainer interface{ WaitPendingConfirms() }
-
-// drainConfirms blocks until any deferred confirm-insert the repo launched has
-// run. No-op for backends that confirm synchronously.
-func drainConfirms(r conformanceRepo) {
-	if d, ok := r.(pendingConfirmsDrainer); ok {
-		d.WaitPendingConfirms()
-	}
-}
-
 // insert creates a paste with no caps (caps=0 = no quota enforcement) and
 // fails the test on error.
 func insert(t *testing.T, r conformanceRepo, p domain.Paste) {
@@ -128,7 +113,6 @@ func insert(t *testing.T, r conformanceRepo, p domain.Paste) {
 	if err := r.InsertWithQuotaCheck(context.Background(), p, 0, fixedNow); err != nil {
 		t.Fatalf("insert %q: %v", p.Slug, err)
 	}
-	drainConfirms(r)
 }
 
 // --- contract: insert / get -----------------------------------------
@@ -523,13 +507,13 @@ func conformOwnerStats(t *testing.T, r conformanceRepo) {
 	// A different owner's paste must not leak into the stats.
 	insert(t, r, pasteOf("st323456", "key:other", 500))
 
-	// CountByOwner.
-	n, err := r.CountByOwner(owner)
+	// OwnerSummary.Active.
+	sum, err := r.OwnerSummary(owner, fixedNow)
 	if err != nil {
-		t.Fatalf("count by owner: %v", err)
+		t.Fatalf("owner summary: %v", err)
 	}
-	if n != 2 {
-		t.Fatalf("count by owner: got %d, want 2", n)
+	if sum.Active != 2 {
+		t.Fatalf("owner summary active: got %d, want 2", sum.Active)
 	}
 
 	// ListByOwner: most recently updated first (pB before pA), owner-scoped.
@@ -581,22 +565,22 @@ func conformOwnerStats(t *testing.T, r conformanceRepo) {
 		t.Fatalf("unknown owner first seen should be zero time, got %v", first)
 	}
 
-	// CountByOwner counts only LIVE pastes and must AGREE with ListByOwner even
-	// when a delete leaves a stale derived-index entry behind: a raw
-	// len(index) count would over-report the orphan.
+	// OwnerSummary.Active counts only LIVE pastes and must AGREE with
+	// ListByOwner even when a delete leaves a stale derived-index entry
+	// behind: a raw len(index) count would over-report the orphan.
 	if err := r.Delete("st223456", domain.Identity(owner), fixedNow); err != nil {
 		t.Fatalf("delete for count-repair regression: %v", err)
 	}
-	n, err = r.CountByOwner(owner)
+	sum, err = r.OwnerSummary(owner, fixedNow)
 	if err != nil {
-		t.Fatalf("count by owner after delete: %v", err)
+		t.Fatalf("owner summary after delete: %v", err)
 	}
 	list, err = r.ListByOwner(owner)
 	if err != nil {
 		t.Fatalf("list by owner after delete: %v", err)
 	}
-	if n != 1 || len(list) != 1 {
-		t.Fatalf("after deleting 1 of 2: CountByOwner=%d, ListByOwner=%d, want both 1 (count must ignore orphan index entries)", n, len(list))
+	if sum.Active != 1 || len(list) != 1 {
+		t.Fatalf("after deleting 1 of 2: OwnerSummary.Active=%d, ListByOwner=%d, want both 1 (count must ignore orphan index entries)", sum.Active, len(list))
 	}
 }
 

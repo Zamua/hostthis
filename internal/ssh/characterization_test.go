@@ -1370,12 +1370,11 @@ func TestConcurrent_Characterization(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestOwnerCollapse_Characterization(t *testing.T) {
-	// requireOwner returns ErrNotFound (NOT ErrNotOwner) whenever the slug
-	// belongs to a different identity, so a foreign-slug verb always exits 4,
-	// never 5. Surfacing ErrNotOwner distinctly would require both an
-	// exitForServiceErr NotOwner branch and a new exit-code 5 test, which
-	// makes changing this an explicit policy decision rather than a silent
-	// one.
+	// requireOwner returns ErrNotFound whenever the slug belongs to a
+	// different identity, so a foreign-slug verb always exits 4, never 5.
+	// Surfacing not-owner distinctly would require a new sentinel, an
+	// exitForServiceErr branch and a new exit-code 5 test, which makes
+	// changing this an explicit policy decision rather than a silent one.
 	s := startStack(t)
 
 	// Identity A creates a paste.

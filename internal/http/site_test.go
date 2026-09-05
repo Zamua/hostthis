@@ -26,14 +26,6 @@ func (r stubSiteReader) Get(slug domain.Slug) (domain.Site, error) {
 // content-addressed path does.
 type stubBlobMap struct{ m map[string][]byte }
 
-func (b stubBlobMap) ReadAll(_ context.Context, _, sha string) ([]byte, error) {
-	body, ok := b.m[sha]
-	if !ok {
-		return nil, storage.ErrNotFound
-	}
-	return body, nil
-}
-
 func (b stubBlobMap) Read(_ context.Context, sha string) (io.ReadCloser, int64, error) {
 	body, ok := b.m[sha]
 	if !ok {

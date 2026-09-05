@@ -245,11 +245,7 @@ func (z *zstdReadCloser) Close() error {
 	return z.inner.Close()
 }
 
-func hasMagicV1(b []byte) bool {
-	return len(b) >= len(magicV1) &&
-		b[0] == magicV1[0] && b[1] == magicV1[1] &&
-		b[2] == magicV1[2] && b[3] == magicV1[3]
-}
+func hasMagicV1(b []byte) bool { return bytes.HasPrefix(b, magicV1[:]) }
 
 // estimatedCompressedSize gives Buffer a head start. Never below the magic
 // header length, so the empty-input case still allocates.

@@ -121,37 +121,3 @@ func (s *S3BlobStore) Get(sha string) ([]byte, error) {
 	defer rc.Close() //nolint:errcheck
 	return io.ReadAll(rc)
 }
-
-// WalkBlobs visits every stored sha. Used by the offline sweep, never by a
-// request path.
-func (s *S3BlobStore) WalkBlobs(fn func(sha string) error) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	for obj := range s.client.ListObjects(ctx, s.bucket,
-		minio.ListObjectsOptions{Prefix: s.prefix + "/", Recursive: true}) {
-		if obj.Err != nil {
-			return fmt.Errorf("blob s3: list: %w", obj.Err)
-		}
-		sha := obj.Key[strings.LastIndex(obj.Key, "/")+1:]
-		if sha == "" {
-			continue
-		}
-		if err := fn(sha); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Remove deletes a blob. An already-absent key is success: the sweep may have
-// removed it, and failing here would turn a benign race into an error.
-func (s *S3BlobStore) Remove(sha string) error {
-	if len(sha) < 2 {
-		return nil
-	}
-	err := s.client.RemoveObject(context.Background(), s.bucket, s.key(sha), minio.RemoveObjectOptions{})
-	if err != nil && minio.ToErrorResponse(err).StatusCode != 404 {
-		return fmt.Errorf("blob s3: remove %s: %w", sha, err)
-	}
-	return nil
-}

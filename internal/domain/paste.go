@@ -2,7 +2,6 @@ package domain
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"time"
 )
@@ -24,20 +23,6 @@ const (
 	// page; the reservation is released.
 	PasteStatusFailed PasteStatus = "failed"
 )
-
-// NormalizeStatus maps a persisted status string to a PasteStatus. An absent
-// or unrecognized value reads as ready: a row carrying no status field is
-// complete, which keeps the field a purely additive migration with no flag day.
-func NormalizeStatus(s string) PasteStatus {
-	switch PasteStatus(s) {
-	case PasteStatusPending:
-		return PasteStatusPending
-	case PasteStatusFailed:
-		return PasteStatusFailed
-	default:
-		return PasteStatusReady
-	}
-}
 
 // Paste is the unit a user uploads. The currently-served bytes are addressed
 // by ContentSHA + Kind; older versions live in a parallel versions table,
@@ -69,38 +54,8 @@ type Paste struct {
 	// (docs/SPEC.md "Serving a directory").
 	//
 	// Empty on a paste stored before versions carried a manifest; the flat
-	// fields above are what those resolve through, via the Root accessors.
+	// fields above describe that paste's one blob.
 	Manifest Manifest
-}
-
-// IsSingle reports whether the served version holds a single document, the
-// shape a paste has always had. A manifest-less paste counts as single: its
-// flat fields describe exactly one blob.
-func (p Paste) IsSingle() bool { return len(p.Manifest.Files) <= 1 }
-
-// RootKind is the render kind of the root entry, falling back to the flat Kind
-// for a paste whose stored row carries no manifest.
-func (p Paste) RootKind() ContentKind {
-	if e, ok := p.Manifest.Files[Root]; ok && e.Kind != "" {
-		return ContentKind(e.Kind)
-	}
-	return p.Kind
-}
-
-// RootSHA is the root entry's sha, falling back to the flat ContentSHA.
-func (p Paste) RootSHA() string {
-	if e, ok := p.Manifest.Files[Root]; ok && e.SHA != "" {
-		return e.SHA
-	}
-	return p.ContentSHA
-}
-
-// RootSize is the root entry's size, falling back to the flat Size.
-func (p Paste) RootSize() int {
-	if e, ok := p.Manifest.Files[Root]; ok && e.SHA != "" {
-		return e.Size
-	}
-	return p.Size
 }
 
 // Version is a whole-MANIFEST snapshot in a paste's history. v1 is the
@@ -111,9 +66,7 @@ func (p Paste) RootSize() int {
 // directory is an N-entry one, and nothing downstream needs to distinguish
 // them (docs/SPEC.md "One paste, not two aggregates").
 //
-// Kind/ContentSHA/Size describe the ROOT entry. They are retained while the
-// storage layers are collapsed onto Manifest; once every reader takes the
-// manifest they go away, and RootKind/RootSHA/RootSize are what remain.
+// Kind/ContentSHA/Size describe the ROOT entry.
 //
 // Deleted=true is a tombstone: the row stays so version numbers are never
 // reused and `versions` still shows the history, but the blob bytes are gone
@@ -128,8 +81,7 @@ type Version struct {
 	Deleted    bool
 
 	// Manifest is the version's content. Empty on a version read by a backend
-	// that has not been collapsed yet, which is why the accessors below fall
-	// back to the flat fields rather than assuming it is populated.
+	// that has not been collapsed yet; the flat fields describe it then.
 	Manifest Manifest
 }
 
@@ -137,49 +89,6 @@ type Version struct {
 // makes the one-entry case explicit rather than a convention repeated at call
 // sites.
 const Root = "/"
-
-// IsSingle reports whether this version is a single document rather than a
-// directory.
-//
-// This is the ONLY place the paste-vs-site distinction survives, and it is now
-// a question about a manifest rather than about a type. A version with no
-// manifest is treated as single, which is what every pre-collapse backend
-// produces.
-func (v Version) IsSingle() bool { return len(v.Manifest.Files) <= 1 }
-
-// RootKind is the render kind of the root entry, falling back to the flat Kind
-// for a version whose backend has not been collapsed onto the manifest yet.
-func (v Version) RootKind() ContentKind {
-	if e, ok := v.Manifest.Files[Root]; ok && e.Kind != "" {
-		return ContentKind(e.Kind)
-	}
-	return v.Kind
-}
-
-// RootSHA is the blob behind the root entry, with the same fallback.
-func (v Version) RootSHA() string {
-	if e, ok := v.Manifest.Files[Root]; ok && e.SHA != "" {
-		return e.SHA
-	}
-	return v.ContentSHA
-}
-
-// RootSize is the root entry's size, with the same fallback. The CHARGED size
-// is the manifest's deduped total, which counts every file - conflating the two
-// under-charges a directory to the size of its index page.
-func (v Version) RootSize() int {
-	if e, ok := v.Manifest.Files[Root]; ok && e.Size != 0 {
-		return e.Size
-	}
-	return v.Size
-}
-
-// HashContent returns the canonical content hash blobs are addressed by, and
-// which dedupable uploads are detected with.
-func HashContent(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
 
 // NewPasteGeneration returns an opaque token that identifies one slug incarnation.
 func NewPasteGeneration() string {

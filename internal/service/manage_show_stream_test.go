@@ -105,8 +105,8 @@ func TestShow_ReturnsAnUndrainedStream(t *testing.T) {
 }
 
 // Ownership gates the read, and the gate runs BEFORE any blob work. The error
-// is ErrNotFound rather than ErrNotOwner by design: requireOwner refuses to
-// leak the existence of another identity's slug.
+// is ErrNotFound by design: requireOwner refuses to leak the existence of
+// another identity's slug.
 func TestShow_RefusesNonOwnerWithoutTouchingTheBlob(t *testing.T) {
 	blob := &streamOnlyBlobUnit{body: "secret"}
 	m := NewManage(&showRepoStub{owner: showOwner}, blob)

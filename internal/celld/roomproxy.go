@@ -3,7 +3,6 @@ package celld
 import (
 	"context"
 	"errors"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -310,22 +309,4 @@ func (p *RoomProxy) Serve(ctx context.Context, key roomwire.RoomKey, id uint64, 
 	} else {
 		upstream.CloseNow() //nolint:errcheck
 	}
-}
-
-// Probe reports whether the cell endpoint answers at all; used only by wiring
-// sanity checks, never on a request path.
-func (p *RoomProxy) Probe(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.base+"/healthz", nil)
-	if err != nil {
-		return err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode != http.StatusOK {
-		return errors.New("celld healthz: " + resp.Status)
-	}
-	return nil
 }

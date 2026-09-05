@@ -23,8 +23,6 @@ type durableBlobStore interface {
 	Put(sha string, r io.Reader, size int64) error
 	Get(sha string) ([]byte, error)
 	GetReader(sha string) (io.ReadCloser, int64, error)
-	WalkBlobs(fn func(sha string) error) error
-	Remove(sha string) error
 }
 
 // WriteBackConfig tunes the local-disk write-back cache.
@@ -401,30 +399,6 @@ func (w *WriteBackBlobStore) GetReader(sha string) (io.ReadCloser, int64, error)
 		return nil, 0, fmt.Errorf("writeback open %s: %w", sha, err)
 	}
 	return w.durable.GetReader(sha)
-}
-
-// WalkBlobs delegates to the durable backend, which is authoritative for what
-// exists for GC purposes. A not-yet-uploaded local-only blob belongs to a live
-// paste whose metadata references it, so it is not a GC candidate and shows up
-// in the backend once uploaded.
-func (w *WriteBackBlobStore) WalkBlobs(fn func(sha string) error) error {
-	return w.durable.WalkBlobs(fn)
-}
-
-// Remove deletes sha from both the durable backend and the local cache.
-func (w *WriteBackBlobStore) Remove(sha string) error {
-	derr := w.durable.Remove(sha)
-	// Too short to shard, so it cannot name a cache path; the durable backend
-	// above decides what such a sha means.
-	if len(sha) < 2 {
-		return derr
-	}
-	fi, statErr := os.Stat(w.blobPath(sha))
-	if err := os.Remove(w.blobPath(sha)); err == nil && statErr == nil {
-		w.diskBytes.Add(-fi.Size())
-	}
-	_ = os.Remove(w.markerPath(sha))
-	return derr
 }
 
 // rescanPending re-enqueues every cached blob lacking the uploaded marker, so an
