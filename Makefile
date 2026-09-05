@@ -6,9 +6,9 @@
 .DEFAULT_GOAL := help
 
 # Developer-facing targets only. Operator deploy targets (deploy-*,
-# logs-*, promote, etc.) live in the operator's private infra repo
-# at infra/hostthis/Makefile and are run from there. This file ships
-# in the public repo and stays clean of operator paths / ssh / sudo.
+# logs-*, promote, etc.) live in the operator's private deploy repo.
+# This file ships in the public repo and stays clean of operator
+# paths / ssh / sudo.
 
 help:
 	@echo "Developer targets:"
@@ -28,8 +28,7 @@ help:
 	@echo "  make rebuild-site-fixtures  rebuild the vite SPA test fixtures (needs npm)"
 	@echo "  make clean         remove ./bin, ./data and the e2e output"
 	@echo
-	@echo "Deploy targets live in the operator's private infra repo:"
-	@echo "  make -C ~/Dropbox/workspace/macmini/infra/hostthis <target>"
+	@echo "Deploy targets live in the operator's private deploy repo."
 
 # -- local Go ----------------------------------------------------------------
 
@@ -52,10 +51,10 @@ dev run:
 	go run ./cmd/hostthisd
 
 # Standalone smoke target - runs against whatever HOSTTHIS_HOST is set
-# to (defaults to hostthis.dev). Useful for ad-hoc verification + run
-# by the operator's deploy as a post-deploy check.
+# to (the script defaults it to hostthis.dev). Useful for ad-hoc
+# verification + run by the operator's deploy as a post-deploy check.
 smoke:
-	HOSTTHIS_HOST="$(or $(HOSTTHIS_HOST),hostthis.dev)" ./scripts/smoke.sh
+	./scripts/smoke.sh
 
 # -- e2e (browser) -----------------------------------------------------------
 

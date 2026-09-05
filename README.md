@@ -23,9 +23,8 @@ a command argument and never trigger the warning.
 
 Publishes HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV
 or JSON document, a profile as an interactive flame graph, structured
-logs, or plain text with linkable lines, for a configurable window
-(30 days by default; the operator can change or disable it) at a random
-subdomain. One ssh pipe, no signup, no install. Identity is your ssh
+logs, or plain text with linkable lines, at a random subdomain. One
+ssh pipe, no signup, no install. Identity is your ssh
 public key: anyone with a different key can read the URL but cannot
 update, rename, pin, or delete the paste.
 

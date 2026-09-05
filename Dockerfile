@@ -19,9 +19,9 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/
 # ---- runtime stage ----------------------------------------------------------
 FROM gcr.io/distroless/static-debian12:nonroot
 
-# Distroless ships /etc/passwd with `nonroot` (uid 65532). Our data
-# dir must be writable by that user; compose mounts a volume that
-# we chown via an init/setup step if needed.
+# Distroless ships /etc/passwd with `nonroot` (uid 65532). The data
+# dir must be writable by that user; `make data-dir-perms` chowns the
+# host dir compose mounts.
 WORKDIR /app
 
 COPY --from=build /out/hostthisd /app/hostthisd
