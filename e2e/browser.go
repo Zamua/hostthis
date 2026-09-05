@@ -12,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/cdp"
 	cdplog "github.com/chromedp/cdproto/log"
 	"github.com/chromedp/cdproto/runtime"
+	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 )
 
@@ -24,11 +26,16 @@ const (
 	viewportHeight = 900
 )
 
-// browserTimeout bounds one test's whole browser session. It has to cover a
-// cold fetch of a renderer's own libraries, not just a paint.
+// browserTimeout bounds one test's whole tab. It has to cover a cold fetch of
+// a renderer's own libraries, not just a paint.
 const browserTimeout = 90 * time.Second
 
-// browserLaunchAttempts bounds the launch retry above.
+// renderTimeout bounds one wait for a shell to settle. Shorter than the tab
+// budget so a shell that never settles reports that, rather than spending the
+// rest of the test's time on it.
+const renderTimeout = 30 * time.Second
+
+// browserLaunchAttempts bounds the launch retry in launchBrowser.
 const browserLaunchAttempts = 2
 
 // Browser is a headless tab plus every error its page reported. The error log
@@ -55,12 +62,84 @@ func (b *Browser) Ignore(substr string) {
 	b.ignored = append(b.ignored, substr)
 }
 
-// NewBrowser starts headless Chrome and returns a tab bound to the test's
-// lifetime. E2E_CHROME_PATH pins the binary; without it chromedp searches the
-// macOS bundle paths and the Linux names on PATH.
+var (
+	browserOnce sync.Once
+	// rootCtx is the tab whose first Run launched Chrome. Cancelling it ends the
+	// process, so it lives until package teardown and every test tab hangs off
+	// it.
+	rootCtx     context.Context
+	cancelRoot  context.CancelFunc
+	cancelAlloc context.CancelFunc
+	browserErr  error
+)
+
+// NewBrowser returns a fresh tab in the one Chrome the package shares, bound
+// to the test's lifetime. The tab gets its own browser context, so storage a
+// shell persists (the diff layout, for one) never leaks between tests.
 func NewBrowser(t *testing.T) *Browser {
 	t.Helper()
+	browserOnce.Do(func() { browserErr = launchBrowser(t) })
+	if browserErr != nil {
+		t.Fatalf("start chrome after %d attempts: %v (set E2E_CHROME_PATH if it is installed somewhere unusual)",
+			browserLaunchAttempts, browserErr)
+	}
 
+	// The tab is created by hand rather than through WithNewBrowserContext: a
+	// context that owns no window yet refuses a plain createTarget in headless
+	// Chrome ("no browser is open"), and only newWindow gets it one.
+	var bcID cdp.BrowserContextID
+	var tid target.ID
+	browserExec := cdp.WithExecutor(rootCtx, chromedp.FromContext(rootCtx).Browser)
+	if err := chromedp.Run(rootCtx, chromedp.ActionFunc(func(context.Context) error {
+		var err error
+		if bcID, err = target.CreateBrowserContext().Do(browserExec); err != nil {
+			return err
+		}
+		tid, err = target.CreateTarget("about:blank").
+			WithBrowserContextID(bcID).WithNewWindow(true).Do(browserExec)
+		return err
+	})); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = target.DisposeBrowserContext(bcID).Do(browserExec)
+	})
+
+	tabCtx, cancelTab := chromedp.NewContext(rootCtx, chromedp.WithTargetID(tid))
+	ctx, cancelTimeout := context.WithTimeout(tabCtx, browserTimeout)
+	t.Cleanup(cancelTimeout)
+	t.Cleanup(cancelTab)
+
+	b := &Browser{Ctx: ctx}
+	chromedp.ListenTarget(ctx, b.record)
+	// Log.enable both opens the tab and surfaces a script tag whose src 404s:
+	// a failed subresource throws no JS exception and reaches the Log domain
+	// only.
+	if err := chromedp.Run(ctx, cdplog.Enable()); err != nil {
+		t.Fatalf("open tab: %v", err)
+	}
+	return b
+}
+
+// stopSharedBrowser closes Chrome. TestMain calls it after every test has run.
+func stopSharedBrowser() {
+	if cancelRoot != nil {
+		cancelRoot()
+		cancelAlloc()
+	}
+}
+
+// launchBrowser starts headless Chrome through the root tab. E2E_CHROME_PATH
+// pins the binary; without it chromedp searches the macOS bundle paths and the
+// Linux names on PATH.
+//
+// The launch is retried once against a FRESH allocator. A CI runner under load
+// can miss the DevTools websocket handshake, and that failure has nothing to
+// do with the renderer a test is here to check. A second attempt cannot mask a
+// real defect, because a browser that cannot start fails both times; the retry
+// only removes a startup race from the verdict. Retrying in place would not
+// work: a dead allocator stays dead, so each attempt builds its own.
+func launchBrowser(t *testing.T) error {
 	opts := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
 	opts = append(opts,
 		chromedp.WindowSize(viewportWidth, viewportHeight),
@@ -73,47 +152,23 @@ func NewBrowser(t *testing.T) *Browser {
 		opts = append(opts, chromedp.ExecPath(path))
 	}
 
-	// Launching Chrome is retried once against a FRESH allocator. A CI runner
-	// under load can miss the DevTools websocket handshake, and that failure has
-	// nothing to do with the renderer a test is here to check: observed once as
-	// "websocket url timeout reached" on a comments-only diff, green on rerun.
-	// A second attempt cannot mask a real defect, because a browser that cannot
-	// start fails both times; the retry only removes a startup race from the
-	// verdict. Retrying in place would not work - a dead allocator stays dead,
-	// so each attempt builds its own.
-	var b *Browser
 	var lastErr error
 	for attempt := 1; attempt <= browserLaunchAttempts; attempt++ {
-		allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
-		tabCtx, cancelTab := chromedp.NewContext(allocCtx)
-		ctx, cancelTimeout := context.WithTimeout(tabCtx, browserTimeout)
-
-		cand := &Browser{Ctx: ctx}
-		chromedp.ListenTarget(ctx, cand.record)
-
-		// Log.enable both forces the launch and surfaces a script tag whose src
-		// 404s: a failed subresource throws no JS exception and reaches the Log
-		// domain only.
-		lastErr = chromedp.Run(ctx, cdplog.Enable())
-		if lastErr == nil {
-			t.Cleanup(cancelTimeout)
-			t.Cleanup(cancelTab)
-			t.Cleanup(cancelAlloc)
-			b = cand
-			break
+		allocCtx, cancelA := chromedp.NewExecAllocator(context.Background(), opts...)
+		ctx, cancelR := chromedp.NewContext(allocCtx)
+		// The root tab is never navigated, so a launch failure is the only
+		// thing this Run can report.
+		if lastErr = chromedp.Run(ctx); lastErr == nil {
+			rootCtx, cancelRoot, cancelAlloc = ctx, cancelR, cancelA
+			return nil
 		}
-		// Tear the failed attempt down immediately rather than deferring to
-		// cleanup, so a retry never races a half-dead browser.
-		cancelTimeout()
-		cancelTab()
-		cancelAlloc()
+		// Tear the failed attempt down immediately rather than deferring, so a
+		// retry never races a half-dead browser.
+		cancelR()
+		cancelA()
 		t.Logf("chrome launch attempt %d/%d failed: %v", attempt, browserLaunchAttempts, lastErr)
 	}
-	if b == nil {
-		t.Fatalf("start chrome after %d attempts: %v (set E2E_CHROME_PATH if it is installed somewhere unusual)",
-			browserLaunchAttempts, lastErr)
-	}
-	return b
+	return lastErr
 }
 
 // Open navigates and returns once the document has loaded. A renderer fills its

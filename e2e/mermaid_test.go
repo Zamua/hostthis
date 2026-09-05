@@ -6,7 +6,6 @@ import (
 	"context"
 	"slices"
 	"testing"
-	"time"
 
 	"github.com/chromedp/chromedp"
 )
@@ -21,11 +20,6 @@ const mermaidSource = `flowchart TD
 `
 
 var wantNodeLabels = []string{"Upload over ssh", "Sniff the kind", "Mermaid shell", "Markdown shell"}
-
-// renderTimeout bounds the wait for mermaid to settle. Shorter than the browser
-// budget so a shell that never settles reports that, rather than spending the
-// rest of the test's time on it.
-const renderTimeout = 30 * time.Second
 
 // diagram is the shape of the rendered svg, read back out of the page.
 type diagram struct {
