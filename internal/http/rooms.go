@@ -114,6 +114,12 @@ func (s *Server) handleRoomsAPI(w http.ResponseWriter, r *http.Request, appSlug 
 		s.handleRoomWS(w, r, appSlug, id)
 		return true
 	}
+	// "push" and everything under "push/" is the push surface, carved out the
+	// same way.
+	if sub, ok := roomPushSubpath(key); ok {
+		s.handleRoomPush(w, r, appSlug, id, sub)
+		return true
+	}
 
 	switch r.Method {
 	case http.MethodGet:

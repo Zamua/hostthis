@@ -285,6 +285,36 @@ func (n namespacedRooms) CountRoomCreates(app domain.Slug, subnet string, now ti
 	return n.inner.CountRoomCreates(n.app(app), n.prefix+subnet, now, window)
 }
 
+func (n namespacedRooms) PushKey(app domain.Slug) (string, error) {
+	return n.inner.PushKey(n.app(app))
+}
+
+func (n namespacedRooms) PutPushSubscription(app domain.Slug, id domain.RoomID, sub domain.PushSubscription,
+	now time.Time,
+) error {
+	return n.inner.PutPushSubscription(n.app(app), id, sub, now)
+}
+
+func (n namespacedRooms) DeletePushSubscription(app domain.Slug, id domain.RoomID, endpoint string) error {
+	return n.inner.DeletePushSubscription(n.app(app), id, endpoint)
+}
+
+func (n namespacedRooms) ListPushSubscriptions(app domain.Slug, id domain.RoomID) ([]domain.PushSubscriptionSummary, error) {
+	return n.inner.ListPushSubscriptions(n.app(app), id)
+}
+
+func (n namespacedRooms) PutPushSchedule(app domain.Slug, id domain.RoomID, sched domain.PushSchedule, now time.Time) error {
+	return n.inner.PutPushSchedule(n.app(app), id, sched, now)
+}
+
+func (n namespacedRooms) GetPushSchedule(app domain.Slug, id domain.RoomID) (domain.PushSchedule, error) {
+	return n.inner.GetPushSchedule(n.app(app), id)
+}
+
+func (n namespacedRooms) TestPush(app domain.Slug, id domain.RoomID, now time.Time) (domain.PushTestResult, error) {
+	return n.inner.TestPush(n.app(app), id, now)
+}
+
 // The FULL contract suite against celld, not a subset.
 //
 // It ran as three partial entries first - lifecycle, owner index, sites - and

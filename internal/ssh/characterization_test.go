@@ -925,7 +925,7 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"    your active pastes. HTML, Markdown, diff, Mermaid, PDF, CSV, JSON,\n" +
 	"    folded stacks, NDJSON logs, plain text, or a gzip-tar site archive.\n" +
 	"\n" +
-	"    Apps can persist + sync state: https://paste.test/  (rooms + realtime API)\n"
+	"    Apps can persist + sync state: https://paste.test/  (rooms, realtime + push API)\n"
 
 // ---------------------------------------------------------------------------
 // 10. Auth refusal + Sybil refusal

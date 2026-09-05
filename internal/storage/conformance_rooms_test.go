@@ -28,6 +28,7 @@ import (
 // backend supporting the rooms tier must satisfy.
 type conformanceRoomRepo interface {
 	service.RoomRepo
+	service.RoomPushRepo
 }
 
 // roomConformanceStores bundles the three repos a backend's room factory
@@ -58,6 +59,7 @@ func mkConformRoom(t *testing.T, rr conformanceRoomRepo, app string, now time.Ti
 // fresh store bundle per subtest.
 func runRoomConformance(t *testing.T, name string, newRooms func(t *testing.T) roomConformanceStores) {
 	t.Helper()
+	runRoomPushConformance(t, name, newRooms)
 	t.Run(name+"/Rooms/RoundTrip", func(t *testing.T) { conformRoomRoundTrip(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/CrossRoomIsolation", func(t *testing.T) { conformRoomCrossRoomIsolation(t, newRooms(t).Rooms) })
 	t.Run(name+"/Rooms/CrossAppIsolation", func(t *testing.T) { conformRoomCrossAppIsolation(t, newRooms(t).Rooms) })

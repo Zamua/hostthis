@@ -1152,7 +1152,7 @@ LIMITS
     your active pastes. HTML, Markdown, diff, Mermaid, PDF, CSV, JSON,
     folded stacks, NDJSON logs, plain text, or a gzip-tar site archive.
 
-    Apps can persist + sync state: https://{{apex}}/  (rooms + realtime API)`
+    Apps can persist + sync state: https://{{apex}}/  (rooms, realtime + push API)`
 
 // helpText renders helpTextTemplate. apex must be non-empty.
 func helpText(apex string) string {

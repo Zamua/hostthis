@@ -42,17 +42,20 @@ type siteStore interface {
 	httpapi.SiteReader
 }
 
-// roomStore is the room write/read view the service layer consumes.
+// roomStore is the room write/read view the service layer consumes, the push
+// surface included.
 type roomStore interface {
 	service.RoomRepo
+	service.RoomPushRepo
 }
 
-// buildMetadata reads HOSTTHIS_METADATA_BACKEND and defaults to memory.
-func buildMetadata(dataDir string, logger *log.Logger) (*metadataBundle, error) {
+// buildMetadata reads HOSTTHIS_METADATA_BACKEND and defaults to memory. apex
+// names the deployment in VAPID tokens the celld backend signs.
+func buildMetadata(dataDir, apex string, logger *log.Logger) (*metadataBundle, error) {
 	backend := strings.ToLower(envOr("HOSTTHIS_METADATA_BACKEND", "memory"))
 	switch backend {
 	case "celld":
-		return buildMetadataCelld(logger)
+		return buildMetadataCelld(apex, logger)
 	case "memory":
 		return buildMetadataMemory(dataDir, logger)
 	default:
