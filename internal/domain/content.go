@@ -313,9 +313,7 @@ func looksLikeFolded(b []byte) bool {
 		if idx < 0 || stack == "" || !isPositiveInt(line[idx+1:]) {
 			// The caller sniffs a PREFIX, so the window's final line is
 			// routinely cut mid-count. Only that line is forgiven; a malformed
-			// line anywhere earlier is proof this is not a profile. Treating a
-			// truncated line as malformed rejected every real profile, since
-			// they are far longer than the sniff window.
+			// line anywhere earlier is proof this is not a profile.
 			if i == len(lines)-1 {
 				continue
 			}

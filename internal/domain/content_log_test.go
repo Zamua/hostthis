@@ -86,8 +86,8 @@ func TestDetectKind_LogPrefixIsTruncated(t *testing.T) {
 	}
 }
 
-// Plain text used to be REJECTED unless it carried a Markdown cue, so a
-// config file or a stack trace bounced.
+// Plain text with no Markdown cue (a config file, a stack trace) falls back
+// to text rather than being refused.
 func TestDetectKind_PlainTextFallsBackToText(t *testing.T) {
 	for _, tc := range []struct {
 		name string

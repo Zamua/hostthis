@@ -7,9 +7,7 @@ import "testing"
 //
 // An internal test on purpose: the assertion that matters is that the fixture
 // SATISFIES BOTH gates, which is only checkable from inside the package. A
-// fixture that trips just one gate proves nothing about their order, and an
-// earlier version of this test had exactly that defect - reordering the gates
-// left it green.
+// fixture that trips just one gate proves nothing about their order.
 func TestGateOrder_JSONBeatsCSV(t *testing.T) {
 	// JSONL with three keys per line: three lines, three consistent
 	// comma-separated fields, so it is a well-formed CSV too.
