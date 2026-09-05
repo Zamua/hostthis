@@ -1015,12 +1015,7 @@ export class Room {
     const url = new URL(request.url);
     const op = url.pathname.split("/").pop();
     if (op === "count") {
-      return Response.json({
-        sockets: this.state.getWebSockets().length,
-        // Survives hibernation, so a non-zero value after a move proves the
-        // cell was restored rather than freshly created.
-        seen: (await this.state.storage.get("seen")) ?? 0,
-      });
+      return Response.json({ sockets: this.state.getWebSockets().length });
     }
     switch (op) {
       case "create":
@@ -1669,12 +1664,6 @@ export class Room {
         // reaped by the runtime
       }
     }
-  }
-
-  async webSocketClose(ws, code, reason, wasClean) {
-    // Recorded so a client-side close code can be checked against what the
-    // cell believed happened.
-    await this.state.storage.put("lastClose", { code, reason, wasClean });
   }
 }
 
