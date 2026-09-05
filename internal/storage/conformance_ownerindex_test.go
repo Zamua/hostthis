@@ -41,35 +41,6 @@ func chargedBytes(t *testing.T, r ownerIndexRepo, owner string) (int, error) {
 	return r.SumActiveBytesByOwner(owner, fixedNow)
 }
 
-// Everything inserted for an owner appears in that owner's listing, and nobody
-// else's does.
-func conformOwnerListIsScopedAndComplete(t *testing.T, r ownerIndexRepo) {
-	const mine, theirs = "key:oi-mine", "key:oi-theirs"
-	insert(t, r, pasteOf("oi123456", mine, 10))
-	insert(t, r, pasteOf("oi223456", mine, 20))
-	insert(t, r, pasteOf("oi323456", theirs, 30))
-
-	got, err := r.ListByOwner(mine)
-	if err != nil {
-		t.Fatalf("ListByOwner: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("listing has %d pastes; want 2", len(got))
-	}
-	for _, p := range got {
-		if p.Identity.String() != mine {
-			t.Fatalf("listing contains %s owned by %q; want only %q", p.Slug, p.Identity, mine)
-		}
-	}
-	sum, err := r.OwnerSummary(mine, fixedNow)
-	if err != nil {
-		t.Fatalf("OwnerSummary: %v", err)
-	}
-	if sum.Active != 2 {
-		t.Fatalf("OwnerSummary.Active = %d; want 2, agreeing with the listing", sum.Active)
-	}
-}
-
 // A FAILED paste is not offered to its owner: it charges nothing and cannot be
 // served, so listing it would show something they cannot act on.
 func conformOwnerListExcludesFailed(t *testing.T, r ownerIndexRepo) {
@@ -88,28 +59,6 @@ func conformOwnerListExcludesFailed(t *testing.T, r ownerIndexRepo) {
 		if x.Slug == p.Slug {
 			t.Fatalf("failed paste %s still listed for its owner", p.Slug)
 		}
-	}
-}
-
-// First-seen is a property of the IDENTITY, not of any paste, so it survives
-// the pastes and does not move when a later one is added.
-func conformOwnerFirstSeenIsStable(t *testing.T, r ownerIndexRepo) {
-	const owner = "key:oi-firstseen"
-	insert(t, r, pasteOf("oi523456", owner, 10))
-	first, err := r.OwnerFirstSeen(owner)
-	if err != nil {
-		t.Fatalf("OwnerFirstSeen: %v", err)
-	}
-	if first.IsZero() {
-		t.Fatal("OwnerFirstSeen is zero after an insert; want the first reservation's time")
-	}
-	insert(t, r, pasteOf("oi623456", owner, 10))
-	again, err := r.OwnerFirstSeen(owner)
-	if err != nil {
-		t.Fatalf("OwnerFirstSeen after a second insert: %v", err)
-	}
-	if !again.Equal(first) {
-		t.Fatalf("OwnerFirstSeen moved from %v to %v; it must not track the latest paste", first, again)
 	}
 }
 
@@ -276,8 +225,10 @@ func conformDeleteReleasesAndDelists(t *testing.T, r ownerIndexRepo) {
 	}
 }
 
-// Every retained version is charged, so changing the version set must update
-// both the aggregate charge and the point-readable owner summary.
+// Every retained version is charged and a deleted one is refunded, so changing
+// the version set must update the aggregate charge in both directions. The two
+// are not mirror images: append can be refused and checks quota first, while a
+// version delete cannot be refused and only has an ordering question.
 func conformVersionChangesTheCharge(t *testing.T, r ownerIndexRepo) {
 	const owner = "key:oi-version"
 	p := pasteOf("oie23456", owner, 700)
@@ -287,56 +238,24 @@ func conformVersionChangesTheCharge(t *testing.T, r ownerIndexRepo) {
 		domain.KindHTML, "sha-v2", 300, 0, fixedNow); err != nil {
 		t.Fatalf("AppendVersionWithQuotaCheck: %v", err)
 	}
-
-	n, err := chargedBytes(t, r, owner)
-	if err != nil {
-		t.Fatalf("charged after appending a version: %v", err)
-	}
-	if n != 1000 {
-		t.Fatalf("charged = %d after appending 300 to a 700-byte paste; want 1000. "+
-			"Every retained version counts, so a denormalised size must be updated by the "+
-			"version write and not only by the insert.", n)
-	}
-}
-
-// Deleting a version gives its bytes back. The mirror of
-// VersionChangesTheCharge, and needed separately because the two operations are
-// NOT mirror images: append can be refused and so checks quota first, while a
-// version delete cannot be refused and only has an ordering question.
-func conformDeleteVersionRefundsTheCharge(t *testing.T, r ownerIndexRepo) {
-	const owner = "key:oi-delver"
-	p := pasteOf("oif23456", owner, 700)
-	insert(t, r, p)
-
-	_, err := r.AppendVersionWithQuotaCheck(context.Background(), p.Slug, p.Generation,
-		domain.KindHTML, "sha-v2", 300, 0, fixedNow)
-	if err != nil {
-		t.Fatalf("AppendVersionWithQuotaCheck: %v", err)
-	}
 	if n, err := chargedBytes(t, r, owner); err != nil || n != 1000 {
-		t.Fatalf("charged = %d after the append (err %v); want 1000", n, err)
+		t.Fatalf("charged = %d after appending 300 to a 700-byte paste (err %v); want 1000. "+
+			"Every retained version counts, so a denormalised size must be updated by the "+
+			"version write and not only by the insert.", n, err)
 	}
 
 	if err := r.DeleteVersion(p.Slug, p.Generation, 1); err != nil {
 		t.Fatalf("DeleteVersion(1): %v", err)
 	}
-	n, err := chargedBytes(t, r, owner)
-	if err != nil {
-		t.Fatalf("charged after deleting the version: %v", err)
-	}
-	if n != 300 {
-		t.Fatalf("charged = %d after deleting a 700-byte version from a 1000-byte total; "+
-			"want 300. Deleted versions contribute zero bytes.", n)
+	if n, err := chargedBytes(t, r, owner); err != nil || n != 300 {
+		t.Fatalf("charged = %d after deleting a 700-byte version from a 1000-byte total (err %v); "+
+			"want 300. Deleted versions contribute zero bytes.", n, err)
 	}
 }
 
 func runOwnerIndexConformance(t *testing.T, name string, newRepo func(t *testing.T) ownerIndexRepo) {
 	t.Helper()
-	t.Run(name+"/OwnerListIsScopedAndComplete", func(t *testing.T) {
-		conformOwnerListIsScopedAndComplete(t, newRepo(t))
-	})
 	t.Run(name+"/OwnerListExcludesFailed", func(t *testing.T) { conformOwnerListExcludesFailed(t, newRepo(t)) })
-	t.Run(name+"/OwnerFirstSeenIsStable", func(t *testing.T) { conformOwnerFirstSeenIsStable(t, newRepo(t)) })
 	t.Run(name+"/DropStaleEntryOnlyWhenAbsent", func(t *testing.T) {
 		conformDropStaleEntryOnlyWhenAbsent(t, newRepo(t))
 	})
@@ -346,7 +265,4 @@ func runOwnerIndexConformance(t *testing.T, name string, newRepo func(t *testing
 	t.Run(name+"/ReleaseIsIdempotent", func(t *testing.T) { conformReleaseIsIdempotent(t, newRepo(t)) })
 	t.Run(name+"/DeleteReleasesAndDelists", func(t *testing.T) { conformDeleteReleasesAndDelists(t, newRepo(t)) })
 	t.Run(name+"/VersionChangesTheCharge", func(t *testing.T) { conformVersionChangesTheCharge(t, newRepo(t)) })
-	t.Run(name+"/DeleteVersionRefundsTheCharge", func(t *testing.T) {
-		conformDeleteVersionRefundsTheCharge(t, newRepo(t))
-	})
 }

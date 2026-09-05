@@ -494,11 +494,13 @@ func conformRepoIsNotOwnerGated(t *testing.T, r conformanceRepo) {
 
 func conformOwnerStats(t *testing.T, r conformanceRepo) {
 	const owner = "key:stats"
-	// Distinct UpdatedAt so the list order is observable rather than a tie.
+	// Distinct stamps so the list order is observable rather than a tie, and
+	// so first-seen is provably the earliest paste, not the latest.
 	pA := pasteOf("st123456", owner, 100)
 	insert(t, r, pA)
 	pB := pasteOf("st223456", owner, 200)
-	pB.UpdatedAt = fixedNow.Add(time.Hour)
+	pB.CreatedAt = fixedNow.Add(time.Hour)
+	pB.UpdatedAt = pB.CreatedAt
 	insert(t, r, pB)
 	// A different owner's paste must not leak into the stats.
 	insert(t, r, pasteOf("st323456", "key:other", 500))
@@ -544,7 +546,8 @@ func conformOwnerStats(t *testing.T, r conformanceRepo) {
 		t.Fatalf("sum active bytes: got %d, want 300", used)
 	}
 
-	// OwnerFirstSeen = earliest created_at (both at fixedNow here).
+	// OwnerFirstSeen is a property of the identity: the earliest created_at,
+	// unmoved by the later paste.
 	first, err := r.OwnerFirstSeen(owner)
 	if err != nil {
 		t.Fatalf("owner first seen: %v", err)
@@ -564,7 +567,7 @@ func conformOwnerStats(t *testing.T, r conformanceRepo) {
 	// OwnerSummary.Active counts only LIVE pastes and must AGREE with
 	// ListByOwner even when a delete leaves a stale derived-index entry
 	// behind: a raw len(index) count would over-report the orphan.
-	if err := r.Delete("st223456", domain.Identity(owner), fixedNow); err != nil {
+	if err := r.Delete("st223456", domain.Identity(owner), pB.CreatedAt); err != nil {
 		t.Fatalf("delete for count-repair regression: %v", err)
 	}
 	sum, err = r.OwnerSummary(owner, fixedNow)
