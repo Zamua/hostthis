@@ -2,6 +2,11 @@
 // Paste rows use slug-scoped cells, so cross-cell creates recover through the
 // owner's durable intent log.
 
+// A create intent younger than this is an in-flight create, not a crash.
+// Recovery before the Go side has written the Paste row would fence and
+// release a create that is about to succeed.
+const CREATE_INTENT_GRACE_MS = 30_000;
+
 const INTENT_PREFIX = "intent:";
 const CREATE_ABORT_PREFIX = "create-abort:";
 const ARTIFACT_ACCOUNT_PREFIX = "artifact-account:";
@@ -221,17 +226,14 @@ export class Identity {
       if (firstSeen === undefined || firstSeen === null) {
         updates.set("firstSeen", body.now ?? 0);
       }
-      if (body.intent) {
-        updates.set(intentKey(body.intent.id), toRow({
-          ...body.intent,
-          generation,
-          status: body.status ?? "pending",
-        }));
-      }
+      // The cell clock, not the caller's: recovery is scheduled against it.
+      const now = Date.now();
+      updates.set(intentKey(body.intent.id), {
+        ...toRow({ ...body.intent, generation, status: body.status ?? "pending" }),
+        reservedAt: now,
+      });
       await tx.put(updates);
-      if (body.intent) {
-        await tx.setAlarm(Date.now());
-      }
+      await tx.setAlarm(now + CREATE_INTENT_GRACE_MS);
       return Response.json({ active: active + body.size });
     });
   }
@@ -295,7 +297,7 @@ export class Identity {
   }
 
   pasteCell(slug) {
-    return this.env.PASTE.get(this.env.PASTE.idFromName(slug));
+    return this.env.PASTES.get(this.env.PASTES.idFromName(slug));
   }
 
   async resolveCreateIntent(id, intent) {
@@ -355,10 +357,17 @@ export class Identity {
   async alarm() {
     return this.state.blockConcurrencyWhile(async () => {
       const intents = await this.state.storage.list({ prefix: INTENT_PREFIX });
+      const now = Date.now();
       let retry = false;
+      let nextDue = Infinity;
       for (const [key, intent] of intents) {
         if (intent.kind !== "create_paste") {
           retry = true;
+          continue;
+        }
+        const due = (intent.reservedAt ?? 0) + CREATE_INTENT_GRACE_MS;
+        if (due > now) {
+          nextDue = Math.min(nextDue, due);
           continue;
         }
         const id = key.slice(INTENT_PREFIX.length);
@@ -367,7 +376,9 @@ export class Identity {
         }
       }
       if (retry) {
-        await this.state.storage.setAlarm(Date.now() + 1000);
+        await this.state.storage.setAlarm(now + 1000);
+      } else if (nextDue !== Infinity) {
+        await this.state.storage.setAlarm(nextDue);
       } else {
         await this.state.storage.deleteAlarm();
       }
