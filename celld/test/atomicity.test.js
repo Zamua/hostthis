@@ -582,6 +582,22 @@ test("Paste alarm retries back off to a ceiling and never throw", async (t) => {
   h.pasteStorage.get = get;
   assert.equal(h.pasteStorage.alarm - now, 300000);
   assert.notEqual(h.pasteStorage.data.get("artifactPending"), undefined);
+
+  h.pasteStorage.alarm = now;
+  h.pasteStorage.transaction = async () => { throw new Error("handler reset"); };
+  await assert.rejects(h.paste().alarm());
+  assert.equal(h.pasteStorage.alarm - now, 300000, "a dying handler left the alarm due at once");
+});
+
+test("Paste append refuses a version too large to persist before any charge", async () => {
+  const h = artifactHarness();
+  h.pasteStorage.tooBig = (key) => key === "artifactPending";
+  const refused = await responseJSON(await h.paste().append(appendBody("append-huge")));
+  assert.deepStrictEqual(refused, { status: 413, body: { error: "version-too-large" } });
+  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal(h.pasteStorage.alarm, null);
+  assert.deepStrictEqual(h.transport.calls, []);
+  assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 2);
 });
 
 test("Paste delete converges after every local commit crash", async () => {

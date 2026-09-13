@@ -3029,9 +3029,13 @@ monotonic versions make response loss and delayed delivery safe.
 A failed attempt, including one that throws, leaves the operation pending and
 re-arms the alarm with exponential backoff from one second to a five-minute
 ceiling, so a stuck operation costs a bounded number of commits instead of a
-tight retry loop. A publish the storage layer refuses outright can never succeed
-on retry: the append ends with a permanent `version-too-large` receipt (413) and
-settles the granted charge back down through the same version fence.
+tight retry loop. The alarm re-arms at that deadline before any outbound call,
+so a handler the runtime kills mid-call cannot fire again at once; the count
+restarts when the operation advances a stage. A candidate version too large to
+persist is refused with `version-too-large` (413) before any charge. One the
+storage layer refuses only at publish can never succeed on retry: the append
+ends with a permanent receipt carrying the same answer and settles the granted
+charge back down through the same version fence.
 
 Cell storage caps a single value at about 2 MiB, so a Paste cell never keeps a
 growing history in one value. Each version's metadata lives under `ver:<n>` and

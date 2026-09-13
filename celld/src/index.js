@@ -42,6 +42,15 @@ function manifestKey(ver) {
   return MANIFEST_PREFIX + ver;
 }
 
+function retryDelay(attempts) {
+  return Math.min(RETRY_BASE_MS * 2 ** (attempts - 1), RETRY_MAX_MS);
+}
+
+// SQLite refuses an oversized value identically on every retry.
+function isTooBig(error) {
+  return String(error?.message ?? error).includes("too big");
+}
+
 // Cell storage caps one value near 2 MiB, so a history is one key per version
 // with each manifest apart. Reads accept a legacy single-value history until a
 // version write splits it.
@@ -2014,7 +2023,7 @@ export class Paste {
       }
       const attempts = (pending.attempts ?? 0) + 1;
       await tx.put(ARTIFACT_PENDING, { ...pending, attempts });
-      await tx.setAlarm(Date.now() + Math.min(RETRY_BASE_MS * 2 ** (attempts - 1), RETRY_MAX_MS));
+      await tx.setAlarm(Date.now() + retryDelay(attempts));
     });
     return result;
   }
@@ -2047,8 +2056,11 @@ export class Paste {
     if (!pending) {
       return { outcome: "complete" };
     }
+    // Re-armed at the next backoff deadline, not now: a new deadline resets the
+    // runtime's own retry state, so a handler killed mid-call would otherwise
+    // fire again at once.
     if (rearm) {
-      await this.state.storage.setAlarm(Date.now());
+      await this.state.storage.setAlarm(Date.now() + retryDelay((pending.attempts ?? 0) + 1));
     }
 
     if (pending.stage === "decide") {
@@ -2118,8 +2130,7 @@ export class Paste {
         try {
           await this.publishAppend(pending);
         } catch (error) {
-          // SQLite refuses an oversized value identically on every retry.
-          if (!String(error?.message ?? error).includes("too big")) {
+          if (!isTooBig(error)) {
             throw error;
           }
           await this.abandonAppend(pending);
@@ -2133,6 +2144,7 @@ export class Paste {
             await tx.put("row", row);
           }
           pending.stage = ["remove", "fail"].includes(pending.kind) ? "drop" : "project";
+          pending.attempts = 0;
           await tx.put(ARTIFACT_PENDING, pending);
         });
       }
@@ -2223,7 +2235,7 @@ export class Paste {
         ["row", row],
         [versionKey(version.ver), version],
         ["maxVer", version.ver],
-        [ARTIFACT_PENDING, { ...current, stage: "project" }],
+        [ARTIFACT_PENDING, { ...current, stage: "project", attempts: 0 }],
         [this.receiptKey(pending.generation, pending.opId), receipt],
       ]);
       if (manifest) {
@@ -2252,6 +2264,7 @@ export class Paste {
           version: current.version + 1,
           target: current.target - mutation.size,
           latestVersion,
+          attempts: 0,
         }],
         [this.receiptKey(current.generation, current.opId),
           { status: 413, body: { error: "version-too-large" } }],
@@ -2369,10 +2382,17 @@ export class Paste {
         manifest: body.manifest ?? null,
       },
     };
-    await this.state.storage.transaction(async (tx) => {
-      await tx.put(ARTIFACT_PENDING, pending);
-      await tx.setAlarm(Date.now());
-    });
+    try {
+      await this.state.storage.transaction(async (tx) => {
+        await tx.put(ARTIFACT_PENDING, pending);
+        await tx.setAlarm(Date.now());
+      });
+    } catch (error) {
+      if (!isTooBig(error)) {
+        throw error;
+      }
+      return Response.json({ error: "version-too-large" }, { status: 413 });
+    }
     const result = await this.resumeArtifactPending();
     const receipt = await this.state.storage.get(this.receiptKey(body.generation, body.opId));
     if (receipt) {
