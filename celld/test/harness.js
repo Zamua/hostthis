@@ -26,6 +26,9 @@ export class FakeStorage {
     this.alarm = alarm;
     this.commits = 0;
     this.crashAfter = Infinity;
+    // (key, value) => true refuses the put the way SQLite refuses an
+    // oversized value.
+    this.tooBig = null;
   }
 
   async get(key) {
@@ -38,6 +41,9 @@ export class FakeStorage {
       : keyOrEntries instanceof Map
         ? [...keyOrEntries]
         : Object.entries(keyOrEntries);
+    if (entries.some(([key, entry]) => this.tooBig?.(String(key), entry))) {
+      throw new Error("storage.put: string or blob too big");
+    }
     for (const [key, entry] of entries) {
       this.data.set(String(key), clone(entry));
     }
@@ -74,6 +80,7 @@ export class FakeStorage {
 
   async transaction(callback) {
     const tx = new FakeStorage(this.data, true, this.alarm);
+    tx.tooBig = this.tooBig;
     const result = await callback(tx);
     this.data = tx.data;
     this.alarm = tx.alarm;
@@ -90,6 +97,14 @@ export class FakeStorage {
       throw new SimulatedCrash("process stopped after a durable commit");
     }
   }
+}
+
+// A paste's version history as stored, in either layout, oldest first.
+export function storedVersions(storage) {
+  return storage.data.get("versions") ?? [...storage.data]
+    .filter(([key]) => key.startsWith("ver:"))
+    .map(([, version]) => version)
+    .sort((a, b) => a.ver - b.ver);
 }
 
 export function state(storage) {

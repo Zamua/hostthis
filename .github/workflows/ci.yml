@@ -87,12 +87,12 @@ jobs:
         run: |
           docker run -d --name ci-minio -p 9000:9000 \
             -e MINIO_ROOT_USER=admin -e MINIO_ROOT_PASSWORD=supersecret \
-            minio/minio:latest server /data
+            quay.io/minio/minio:latest server /data
           for _ in $(seq 1 30); do
             curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null && break
             sleep 1
           done
-          docker run --rm --network host --entrypoint sh minio/mc:latest -c \
+          docker run --rm --network host --entrypoint sh quay.io/minio/mc:latest -c \
             'mc alias set local http://127.0.0.1:9000 admin supersecret >/dev/null && mc mb local/ci-fleet'
 
           export AWS_ACCESS_KEY_ID=admin AWS_SECRET_ACCESS_KEY=supersecret

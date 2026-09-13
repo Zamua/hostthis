@@ -430,6 +430,9 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 	if err != nil {
 		return domain.AppendResult{}, err
 	}
+	if status == http.StatusRequestEntityTooLarge {
+		return domain.AppendResult{}, fmt.Errorf("%w: version too large to store", domain.ErrTooManyFiles)
+	}
 	if status == http.StatusConflict {
 		return domain.AppendResult{}, fmt.Errorf("celld: append accounting conflict")
 	}

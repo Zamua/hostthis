@@ -368,16 +368,18 @@ test("Room budget completion does not disarm a pending push fire", async () => {
   assert.equal(h.roomStorage.alarm, due);
 });
 
-test("Room push save does not disarm a pending budget retry", async () => {
+test("Room push save does not disarm a pending budget retry", async (t) => {
+  const now = Date.parse("2026-09-05T15:00:00Z");
+  const realNow = Date.now;
+  Date.now = () => now;
+  t.after(() => { Date.now = realNow; });
   const h = harness();
   h.transport.failBefore = 1;
-  const before = Date.now();
   assert.equal((await h.room().put(putBody("aaaaaa"))).status, 502);
   assert.ok(h.roomStorage.data.get("state").pending);
   const retryAt = h.roomStorage.alarm;
-  assert.ok(retryAt >= before && retryAt <= Date.now() + 1000);
+  assert.ok(retryAt >= now && retryAt <= now + 1000);
 
-  const now = Date.parse("2026-09-05T15:00:00Z");
   assert.equal((await h.call("pushscheduleput", { ...schedule([recurring({ days: [0] })]), now })).status, 204);
   assert.equal(h.roomStorage.alarm, retryAt, "push save pushed the budget retry out");
   assert.equal((await h.call("pushsubput", subscription())).status, 204);
