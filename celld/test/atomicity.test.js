@@ -4,7 +4,7 @@ import test from "node:test";
 import worker, { Identity, Paste, Room, Subnet } from "../src/index.js";
 import {
   FakeStorage, PASTE_CELL_ID, ROOM_CELL_ID, ROOM_ID, SimulatedCrash,
-  clone, fakeCellID, putBody, roomDoc, state,
+  clone, fakeCellID, putBody, roomDoc, state, storedVersions,
 } from "./harness.js";
 
 async function assertCrashAtomic({ seed, invoke }) {
@@ -435,7 +435,7 @@ test("Paste.put replays only the exact creation fingerprint", async () => {
     row: replay, generation: "generation-1", fingerprint: "fingerprint-other",
   })).status, 409);
   assert.equal(storage.data.get("row").contentSha, "original");
-  assert.equal(storage.data.get("versions").length, 1);
+  assert.equal(storedVersions(storage).length, 1);
   assert.equal((await paste.put({
     row: replay, generation: "generation-2", fingerprint: "fingerprint-2",
   })).status, 409);
@@ -458,7 +458,7 @@ test("Paste append converges after every local commit crash", async () => {
     harness: artifactHarness,
     invoke: (h, run) => h.paste().append(appendBody(`append-${run}`)),
     converged(h) {
-      assert.equal(h.pasteStorage.data.get("versions").length, 2);
+      assert.equal(storedVersions(h.pasteStorage).length, 2);
       assert.equal(h.pasteStorage.data.get("maxVer"), 2);
       assert.equal(h.pasteStorage.data.get("row").accountingVersion, 1);
       assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
@@ -481,8 +481,107 @@ test("Paste serializes concurrent version appends", async () => {
   const results = await Promise.all([append("append-2", "v2"), append("append-3", "v3")]);
   assert.deepStrictEqual((await Promise.all(results.map(responseJSON))).map((result) => result.body.ver), [2, 3]);
   assert.equal(h.pasteStorage.data.get("maxVer"), 3);
-  assert.deepStrictEqual(h.pasteStorage.data.get("versions").map((version) => version.ver), [1, 2, 3]);
+  assert.deepStrictEqual(storedVersions(h.pasteStorage).map((version) => version.ver), [1, 2, 3]);
   assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
+});
+
+test("Paste history grows without any value outgrowing one version", async () => {
+  const h = artifactHarness();
+  const manifest = { "/index.html": { blob: "b".repeat(2000) } };
+  h.pasteStorage.tooBig = (_key, value) => JSON.stringify(value).length > 3000;
+  for (let ver = 2; ver <= 6; ver++) {
+    const appended = await h.paste().append({ ...appendBody(`append-${ver}`), size: 1, manifest });
+    assert.equal(appended.status, 200);
+  }
+  assert.equal(h.pasteStorage.data.has("versions"), false);
+  assert.deepStrictEqual(storedVersions(h.pasteStorage).map((version) => version.ver), [1, 2, 3, 4, 5, 6]);
+  assert.deepStrictEqual(h.pasteStorage.data.get("row").manifest, manifest);
+  const listed = await responseJSON(await h.paste().listVersions());
+  assert.deepStrictEqual(listed.body.map((version) => version.ver), [6, 5, 4, 3, 2, 1]);
+  assert.deepStrictEqual(listed.body[0].manifest, manifest);
+  assert.equal(listed.body.at(-1).manifest, null);
+});
+
+test("Paste splits a legacy single-value history on its first version write", async () => {
+  const pasteSeed = artifactPasteSeed();
+  const legacyManifest = { "/": { blob: "v1" } };
+  pasteSeed.get("versions")[0].manifest = legacyManifest;
+  pasteSeed.get("row").manifest = legacyManifest;
+  const h = artifactHarness({ pasteSeed });
+  assert.equal((await h.paste().append(appendBody())).status, 200);
+  assert.equal(h.pasteStorage.data.has("versions"), false);
+  assert.deepStrictEqual(h.pasteStorage.data.get("ver:1"), {
+    ver: 1, kind: "html", contentSha: "v1", size: 2, createdAt: 7, deleted: false,
+  });
+  assert.deepStrictEqual(h.pasteStorage.data.get("manifest:1"), legacyManifest);
+  assert.equal(h.pasteStorage.data.has("manifest:2"), false);
+  assert.equal(h.pasteStorage.data.get("row").manifest, null);
+  assert.equal((await h.paste().pin({ opId: "pin-1", generation: "generation-1", ver: 1 })).status, 200);
+  assert.deepStrictEqual(h.pasteStorage.data.get("row").manifest, legacyManifest);
+});
+
+test("Paste alarm publishes an append granted before the storage limit refused it", async () => {
+  const h = artifactHarness();
+  h.pasteStorage.tooBig = (key) => key === "versions";
+  assert.equal((await h.paste().append(appendBody())).status, 200);
+
+  const stuck = artifactHarness({
+    identitySeed: h.identityStorage.data,
+    pasteSeed: new Map([...artifactPasteSeed(), ["artifactPending", {
+      kind: "append", stage: "decide", opId: "append-1", slug: "slugone1", owner: "owner",
+      generation: "generation-1", version: 1, target: 6, userCap: 10, latestVersion: 2,
+      wasPinned: false,
+      mutation: { ver: 2, kind: "markdown", contentSha: "v2", size: 4, createdAt: 8, deleted: false, manifest: null },
+    }]]),
+  });
+  stuck.pasteStorage.tooBig = (key) => key === "versions";
+  await stuck.paste().alarm();
+  assert.deepStrictEqual(storedVersions(stuck.pasteStorage).map((version) => version.ver), [1, 2]);
+  assert.equal(stuck.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal(stuck.pasteStorage.alarm, null);
+  assert.equal(stuck.identityStorage.data.get("entries").slugone1.chargedSize, 6);
+});
+
+test("Paste append refused by storage settles its grant and answers 413 for good", async () => {
+  const h = artifactHarness();
+  h.pasteStorage.tooBig = (key) => key.startsWith("manifest:");
+  const body = { ...appendBody("append-huge"), manifest: { "/": { blob: "huge" } } };
+  const refused = await responseJSON(await h.paste().append(body));
+  assert.deepStrictEqual(refused, { status: 413, body: { error: "version-too-large" } });
+  assert.deepStrictEqual(storedVersions(h.pasteStorage).map((version) => version.ver), [1]);
+  assert.equal(h.pasteStorage.data.get("row").accountingVersion, 2);
+  assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 2);
+  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal(h.pasteStorage.alarm, null);
+
+  h.pasteStorage.tooBig = null;
+  assert.deepStrictEqual(await responseJSON(await h.paste().append(body)), refused);
+  assert.equal((await h.paste().append(appendBody("append-2"))).status, 200);
+});
+
+test("Paste alarm retries back off to a ceiling and never throw", async (t) => {
+  const realNow = Date.now;
+  const now = 1_000_000;
+  Date.now = () => now;
+  t.after(() => { Date.now = realNow; });
+  const h = artifactHarness();
+  h.transport.failBefore = Infinity;
+  assert.equal((await h.paste().append(appendBody())).status, 502);
+  const delays = [h.pasteStorage.alarm - now];
+  for (let fire = 0; fire < 10; fire++) {
+    await h.paste().alarm();
+    delays.push(h.pasteStorage.alarm - now);
+  }
+  assert.deepStrictEqual(delays, [
+    1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000, 256000, 300000, 300000,
+  ]);
+
+  const get = h.pasteStorage.get;
+  h.pasteStorage.get = async () => { throw new Error("storage unavailable"); };
+  await h.paste().alarm();
+  h.pasteStorage.get = get;
+  assert.equal(h.pasteStorage.alarm - now, 300000);
+  assert.notEqual(h.pasteStorage.data.get("artifactPending"), undefined);
 });
 
 test("Paste delete converges after every local commit crash", async () => {
@@ -492,7 +591,7 @@ test("Paste delete converges after every local commit crash", async () => {
       opId: `delete-${run}`, generation: "generation-1", ver: 1,
     }),
     converged(h) {
-      assert.equal(h.pasteStorage.data.get("versions")[0].deleted, true);
+      assert.equal(storedVersions(h.pasteStorage)[0].deleted, true);
       assert.equal(h.pasteStorage.data.get("row").size, 4);
       assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 4);
       assert.equal(h.identityStorage.data.get("entries").slugone1.servedSize, 4);
@@ -610,12 +709,12 @@ test("Paste append recovers a response-lost reservation without duplicating the 
   h.transport.failAfter = 1;
 
   assert.equal((await h.paste().append(appendBody())).status, 502);
-  assert.equal(h.pasteStorage.data.get("versions").length, 1);
+  assert.equal(storedVersions(h.pasteStorage).length, 1);
   assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
   assert.notEqual(h.pasteStorage.alarm, null);
 
   await h.paste().alarm();
-  assert.equal(h.pasteStorage.data.get("versions").length, 2);
+  assert.equal(storedVersions(h.pasteStorage).length, 2);
   assert.equal(h.pasteStorage.data.get("row").accountingVersion, 1);
   assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
   assert.equal(h.pasteStorage.alarm, null);
@@ -625,7 +724,7 @@ test("Paste append recovers a response-lost reservation without duplicating the 
     status: 200,
     body: { appended: true, ver: 2, wasPinned: false, totalSize: 6 },
   });
-  assert.equal(h.pasteStorage.data.get("versions").length, 2);
+  assert.equal(storedVersions(h.pasteStorage).length, 2);
 });
 
 test("Paste projection reloads state after recovering prior accounting", async () => {
@@ -653,7 +752,7 @@ test("Paste append keeps a quota refusal permanent across later capacity", async
   const h = artifactHarness({ extra: 6 });
   const refused = await responseJSON(await h.paste().append(appendBody("append-refused")));
   assert.deepStrictEqual(refused, { status: 507, body: { error: "over-quota" } });
-  assert.equal(h.pasteStorage.data.get("versions").length, 1);
+  assert.equal(storedVersions(h.pasteStorage).length, 1);
   assert.equal(h.pasteStorage.data.get("row").accountingVersion, 1);
 
   const entries = h.identityStorage.data.get("entries");
@@ -661,9 +760,9 @@ test("Paste append keeps a quota refusal permanent across later capacity", async
   await h.identityStorage.put("entries", entries);
 
   assert.deepStrictEqual(await responseJSON(await h.paste().append(appendBody("append-refused"))), refused);
-  assert.equal(h.pasteStorage.data.get("versions").length, 1);
+  assert.equal(storedVersions(h.pasteStorage).length, 1);
   assert.equal((await h.paste().append(appendBody("append-2"))).status, 200);
-  assert.equal(h.pasteStorage.data.get("versions").length, 2);
+  assert.equal(storedVersions(h.pasteStorage).length, 2);
 });
 
 test("Paste projection remains available after a quota refusal", async () => {
@@ -687,7 +786,7 @@ test("Paste delete commits before an unavailable allocation release", async () =
     opId: "delete-1", generation: "generation-1", ver: 1,
   }));
   assert.deepStrictEqual(deleted, { status: 200, body: { deleted: true, totalSize: 4 } });
-  assert.equal(h.pasteStorage.data.get("versions")[0].deleted, true);
+  assert.equal(storedVersions(h.pasteStorage)[0].deleted, true);
   assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
   assert.notEqual(h.pasteStorage.alarm, null);
 
@@ -706,7 +805,7 @@ test("Paste delete refuses the version served at commit time", async () => {
   assert.deepStrictEqual(deleted, {
     status: 409, body: { error: "version-served" },
   });
-  assert.equal(h.pasteStorage.data.get("versions")[1].deleted, false);
+  assert.equal(storedVersions(h.pasteStorage)[1].deleted, false);
   assert.equal(h.pasteStorage.data.get("row").pinnedVersion, 2);
   assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
 });
@@ -792,7 +891,7 @@ test("Paste receipts are scoped to one artifact generation", async () => {
     status: 200,
     body: { appended: true, ver: 2, wasPinned: false, totalSize: 2 },
   });
-  assert.equal(h.pasteStorage.data.get("versions").length, 2);
+  assert.equal(storedVersions(h.pasteStorage).length, 2);
 });
 
 test("Paste rejects an old incarnation without mutating the replacement allocation", async () => {
@@ -800,7 +899,7 @@ test("Paste rejects an old incarnation without mutating the replacement allocati
   const h = artifactHarness({ identitySeed });
 
   assert.equal((await h.paste().append(appendBody("stale-generation"))).status, 409);
-  assert.equal(h.pasteStorage.data.get("versions").length, 1);
+  assert.equal(storedVersions(h.pasteStorage).length, 1);
   assert.equal(h.identityStorage.data.get("entries").slugone1.generation, "generation-2");
   assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 2);
 });
@@ -840,7 +939,7 @@ test("Paste empty generation against an adopted row is a conflict", async () => 
   }));
   assert.equal(refused.status, 409);
   assert.equal(refused.body.error, "generation-mismatch");
-  assert.equal(h.pasteStorage.data.get("versions").length, 1);
+  assert.equal(storedVersions(h.pasteStorage).length, 1);
 });
 
 test("Paste rename persists a guarded projection through response loss", async () => {
