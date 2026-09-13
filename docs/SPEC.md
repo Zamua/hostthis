@@ -3026,6 +3026,23 @@ Permanent operation receipts make a repeated request return the original result
 instead of appending a second version. Absolute targets, generation guards, and
 monotonic versions make response loss and delayed delivery safe.
 
+A failed attempt, including one that throws, leaves the operation pending and
+re-arms the alarm with exponential backoff from one second to a five-minute
+ceiling, so a stuck operation costs a bounded number of commits instead of a
+tight retry loop. The alarm re-arms at that deadline before any outbound call,
+so a handler the runtime kills mid-call cannot fire again at once; the count
+restarts when the operation advances a stage. A candidate version too large to
+persist is refused with `version-too-large` (413) before any charge. One the
+storage layer refuses only at publish can never succeed on retry: the append
+ends with a permanent receipt carrying the same answer and settles the granted
+charge back down through the same version fence.
+
+Cell storage caps a single value at about 2 MiB, so a Paste cell never keeps a
+growing history in one value. Each version's metadata lives under `ver:<n>` and
+its manifest under `manifest:<n>`, and `maxVer` bounds the key range. A history
+stored as a single `versions` value is split into those keys by the first write
+that touches it, in the same transaction as that write.
+
 A first-version create reserves the Identity charge and persists a create intent
 with an opaque fingerprint of the exact Paste row in one transaction. Paste
 publication records the same fingerprint. While the intent is outstanding,
@@ -3239,7 +3256,7 @@ identity:
 
 - **Identity**, one per owner: quota entries, listing summaries, first-seen,
   durable intents, and the keygate reverse index.
-- **Paste**, one per app slug: paste row, versions, claim, the app-scoped
+- **Paste**, one per app slug: paste row, per-version keys, claim, the app-scoped
   room creation and byte-budget coordinator, and the app's VAPID key pair. Room accounting works without a
   paste row, so a static site can own rooms under the same slug.
 - **Room**, one per `(app slug, room UUID)`: room document, dense sequence,

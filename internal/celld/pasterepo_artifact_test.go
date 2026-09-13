@@ -2,6 +2,7 @@ package celld
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -60,6 +61,17 @@ func TestAppendMapsAtomicQuotaRefusal(t *testing.T) {
 	}
 	if f.last().Path != "/paste/append" {
 		t.Fatalf("path = %q, want /paste/append", f.last().Path)
+	}
+}
+
+func TestAppendMapsStorageRefusalToTheManifestCap(t *testing.T) {
+	f := fixedCell(http.StatusRequestEntityTooLarge, `{"error":"version-too-large"}`)
+	repo := NewPasteRepo("https://cell", f.client())
+	_, err := repo.AppendVersionWithQuotaCheck(
+		context.Background(), "slugone1", "generation-1", domain.KindHTML, "sha-v2", 4, 10, time.Unix(8, 0),
+	)
+	if !errors.Is(err, domain.ErrTooManyFiles) {
+		t.Fatalf("err = %v, want ErrTooManyFiles", err)
 	}
 }
 

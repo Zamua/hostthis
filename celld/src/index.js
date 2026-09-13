@@ -12,6 +12,11 @@ const CREATE_ABORT_PREFIX = "create-abort:";
 const ARTIFACT_ACCOUNT_PREFIX = "artifact-account:";
 const ARTIFACT_PENDING = "artifactPending";
 const ARTIFACT_RECEIPT_PREFIX = "artifact-receipt:";
+const VERSION_PREFIX = "ver:";
+const MANIFEST_PREFIX = "manifest:";
+const LEGACY_VERSIONS = "versions";
+const RETRY_BASE_MS = 1000;
+const RETRY_MAX_MS = 5 * 60_000;
 
 function artifactAccountKey(slug, generation) {
   return `${ARTIFACT_ACCOUNT_PREFIX}${slug}:${generation}`;
@@ -27,6 +32,62 @@ function intentKey(id) {
 
 function createAbortKey(generation) {
   return CREATE_ABORT_PREFIX + generation;
+}
+
+function versionKey(ver) {
+  return VERSION_PREFIX + ver;
+}
+
+function manifestKey(ver) {
+  return MANIFEST_PREFIX + ver;
+}
+
+function retryDelay(attempts) {
+  return Math.min(RETRY_BASE_MS * 2 ** (attempts - 1), RETRY_MAX_MS);
+}
+
+// SQLite refuses an oversized value identically on every retry.
+function isTooBig(error) {
+  return String(error?.message ?? error).includes("too big");
+}
+
+// Cell storage caps one value near 2 MiB, so a history is one key per version
+// with each manifest apart. Reads accept a legacy single-value history until a
+// version write splits it.
+async function loadVersions(storage) {
+  const legacy = await storage.get(LEGACY_VERSIONS);
+  if (legacy) {
+    return legacy.map(({ manifest: _manifest, ...version }) => version);
+  }
+  const maxVer = (await storage.get("maxVer")) ?? 0;
+  const found = await Promise.all(
+    Array.from({ length: maxVer }, (_, i) => storage.get(versionKey(i + 1))));
+  return found.filter(Boolean);
+}
+
+async function loadManifest(storage, ver) {
+  const legacy = await storage.get(LEGACY_VERSIONS);
+  if (legacy) {
+    return legacy.find((version) => version.ver === ver)?.manifest ?? null;
+  }
+  return (await storage.get(manifestKey(ver))) ?? null;
+}
+
+async function splitLegacyVersions(tx) {
+  const legacy = await tx.get(LEGACY_VERSIONS);
+  if (!legacy) {
+    return;
+  }
+  const updates = new Map();
+  for (const { manifest, ...version } of legacy) {
+    updates.set(versionKey(version.ver), version);
+    if (manifest) {
+      updates.set(manifestKey(version.ver), manifest);
+    }
+  }
+  updates.set("maxVer", Math.max((await tx.get("maxVer")) ?? 0, ...legacy.map((v) => v.ver)));
+  await tx.put(updates);
+  await tx.delete(LEGACY_VERSIONS);
 }
 
 function setOwn(object, key, value) {
@@ -1705,20 +1766,27 @@ export class Paste {
       }
       body.row.generation = body.generation;
       body.row.accountingVersion = 0;
-      // v1 is SEEDED into the version list rather than living only on the row.
-      // Keeping it off the list made every reader special-case it - the listing
-      // omitted it, and the byte total needed a separate baseSize to add it back.
-      // One list with every version in it removes both.
-      await tx.put(new Map([
+      // v1 is SEEDED as a version rather than living only on the row, so no
+      // reader special-cases it. An earlier incarnation's history is cleared.
+      const stale = [LEGACY_VERSIONS];
+      const staleMaxVer = (await tx.get("maxVer")) ?? 0;
+      for (let ver = 1; ver <= staleMaxVer; ver++) {
+        stale.push(versionKey(ver), manifestKey(ver));
+      }
+      await tx.delete(stale);
+      const updates = new Map([
         ["row", body.row],
         ["createFingerprint", body.fingerprint],
-        ["versions", [{
+        [versionKey(1), {
           ver: 1, kind: body.row.kind, contentSha: body.row.contentSha,
           size: body.row.size, createdAt: body.row.createdAt, deleted: false,
-          manifest: body.row.manifest ?? null,
-        }]],
+        }],
         ["maxVer", 1],
-      ]));
+      ]);
+      if (body.row.manifest) {
+        updates.set(manifestKey(1), body.row.manifest);
+      }
+      await tx.put(updates);
       return new Response(null, { status: 204 });
     });
   }
@@ -1877,7 +1945,7 @@ export class Paste {
       });
     }
     if (await this.state.storage.get("legacyAdoptionPending")) {
-      const versions = (await this.state.storage.get("versions")) ?? [];
+      const versions = await loadVersions(this.state.storage);
       const charge = row.status === "failed" ? 0 : this.liveCharge(versions);
       let response;
       let seed;
@@ -1946,9 +2014,18 @@ export class Paste {
     return versions.reduce((sum, version) => version.deleted ? sum : sum + (version.size ?? 0), 0);
   }
 
-  async retryArtifactPending() {
-    await this.state.storage.setAlarm(Date.now() + 1000);
-    return { outcome: "unavailable" };
+  // Backoff bounds the commits a stuck operation costs.
+  async retryArtifactPending(result = { outcome: "unavailable" }) {
+    await this.state.storage.transaction(async (tx) => {
+      const pending = await tx.get(ARTIFACT_PENDING);
+      if (!pending) {
+        return;
+      }
+      const attempts = (pending.attempts ?? 0) + 1;
+      await tx.put(ARTIFACT_PENDING, { ...pending, attempts });
+      await tx.setAlarm(Date.now() + retryDelay(attempts));
+    });
+    return result;
   }
 
   artifactProjection(row, pending) {
@@ -1979,8 +2056,11 @@ export class Paste {
     if (!pending) {
       return { outcome: "complete" };
     }
+    // Re-armed at the next backoff deadline, not now: a new deadline resets the
+    // runtime's own retry state, so a handler killed mid-call would otherwise
+    // fire again at once.
     if (rearm) {
-      await this.state.storage.setAlarm(Date.now());
+      await this.state.storage.setAlarm(Date.now() + retryDelay((pending.attempts ?? 0) + 1));
     }
 
     if (pending.stage === "decide") {
@@ -2043,40 +2123,19 @@ export class Paste {
       }
       if (!response.ok || decision.granted !== true ||
           decision.version !== pending.version || decision.allocated !== pending.target) {
-        await this.state.storage.setAlarm(Date.now() + 1000);
-        return { outcome: "conflict", status: response.status };
+        return this.retryArtifactPending({ outcome: "conflict", status: response.status });
       }
 
       if (pending.kind === "append") {
-        await this.state.storage.transaction(async (tx) => {
-          const current = await tx.get(ARTIFACT_PENDING);
-          if (!current || current.opId !== pending.opId || current.stage !== "decide") {
-            return;
+        try {
+          await this.publishAppend(pending);
+        } catch (error) {
+          if (!isTooBig(error)) {
+            throw error;
           }
-          const row = await tx.get("row");
-          const versions = (await tx.get("versions")) ?? [];
-          versions.push(pending.mutation);
-          row.updatedAt = pending.mutation.createdAt ?? row.updatedAt;
-          row.accountingVersion = pending.version;
-          this.rollServed(row, versions);
-          const receipt = {
-            status: 200,
-            body: {
-              appended: true,
-              ver: pending.mutation.ver,
-              wasPinned: pending.wasPinned,
-              totalSize: pending.target,
-            },
-          };
-          pending.stage = "project";
-          await tx.put(new Map([
-            ["row", row],
-            ["versions", versions],
-            ["maxVer", pending.mutation.ver],
-            [ARTIFACT_PENDING, pending],
-            [this.receiptKey(pending.generation, pending.opId), receipt],
-          ]));
-        });
+          await this.abandonAppend(pending);
+          return this.resumeArtifactPending();
+        }
       } else {
         await this.state.storage.transaction(async (tx) => {
           const row = await tx.get("row");
@@ -2085,6 +2144,7 @@ export class Paste {
             await tx.put("row", row);
           }
           pending.stage = ["remove", "fail"].includes(pending.kind) ? "drop" : "project";
+          pending.attempts = 0;
           await tx.put(ARTIFACT_PENDING, pending);
         });
       }
@@ -2104,8 +2164,7 @@ export class Paste {
         return this.retryArtifactPending();
       }
       if (!response.ok) {
-        await this.state.storage.setAlarm(Date.now() + 1000);
-        return { outcome: "conflict", status: response.status };
+        return this.retryArtifactPending({ outcome: "conflict", status: response.status });
       }
       await this.clearArtifactPending();
       return { outcome: "complete" };
@@ -2123,8 +2182,7 @@ export class Paste {
         return this.retryArtifactPending();
       }
       if (!response.ok) {
-        await this.state.storage.setAlarm(Date.now() + 1000);
-        return { outcome: "conflict", status: response.status };
+        return this.retryArtifactPending({ outcome: "conflict", status: response.status });
       }
       await this.state.storage.transaction(async (tx) => {
         const current = await tx.get(ARTIFACT_PENDING);
@@ -2148,6 +2206,71 @@ export class Paste {
     }
 
     return this.retryArtifactPending();
+  }
+
+  async publishAppend(pending) {
+    await this.state.storage.transaction(async (tx) => {
+      const current = await tx.get(ARTIFACT_PENDING);
+      if (!current || current.opId !== pending.opId || current.stage !== "decide") {
+        return;
+      }
+      await splitLegacyVersions(tx);
+      const row = await tx.get("row");
+      const { manifest, ...version } = pending.mutation;
+      const versions = await loadVersions(tx);
+      versions.push(version);
+      row.updatedAt = version.createdAt ?? row.updatedAt;
+      row.accountingVersion = pending.version;
+      await this.rollServed(tx, row, versions, pending.mutation);
+      const receipt = {
+        status: 200,
+        body: {
+          appended: true,
+          ver: version.ver,
+          wasPinned: pending.wasPinned,
+          totalSize: pending.target,
+        },
+      };
+      const updates = new Map([
+        ["row", row],
+        [versionKey(version.ver), version],
+        ["maxVer", version.ver],
+        [ARTIFACT_PENDING, { ...current, stage: "project", attempts: 0 }],
+        [this.receiptKey(pending.generation, pending.opId), receipt],
+      ]);
+      if (manifest) {
+        updates.set(manifestKey(version.ver), manifest);
+      } else {
+        await tx.delete(manifestKey(version.ver));
+      }
+      await tx.put(updates);
+    });
+  }
+
+  // The grant already stands at pending.version, so the release is the next
+  // version at the charge without this append.
+  async abandonAppend(pending) {
+    const latestVersion = (await this.state.storage.get("maxVer")) ?? 1;
+    await this.state.storage.transaction(async (tx) => {
+      const current = await tx.get(ARTIFACT_PENDING);
+      if (!current || current.opId !== pending.opId || current.stage !== "decide") {
+        return;
+      }
+      const { mutation, ...rest } = current;
+      await tx.put(new Map([
+        [ARTIFACT_PENDING, {
+          ...rest,
+          kind: "abandon",
+          version: current.version + 1,
+          target: current.target - mutation.size,
+          latestVersion,
+          attempts: 0,
+        }],
+        [this.receiptKey(current.generation, current.opId),
+          { status: 413, body: { error: "version-too-large" } }],
+      ]));
+      await tx.setAlarm(Date.now());
+    });
   }
 
   async queueProjection(row, fields) {
@@ -2234,7 +2357,7 @@ export class Paste {
     if (refused) {
       return refused;
     }
-    const versions = (await this.state.storage.get("versions")) ?? [];
+    const versions = await loadVersions(this.state.storage);
     const nextVer = ((await this.state.storage.get("maxVer")) ?? 1) + 1;
     const target = this.liveCharge(versions) + body.size;
     const pending = {
@@ -2259,10 +2382,17 @@ export class Paste {
         manifest: body.manifest ?? null,
       },
     };
-    await this.state.storage.transaction(async (tx) => {
-      await tx.put(ARTIFACT_PENDING, pending);
-      await tx.setAlarm(Date.now());
-    });
+    try {
+      await this.state.storage.transaction(async (tx) => {
+        await tx.put(ARTIFACT_PENDING, pending);
+        await tx.setAlarm(Date.now());
+      });
+    } catch (error) {
+      if (!isTooBig(error)) {
+        throw error;
+      }
+      return Response.json({ error: "version-too-large" }, { status: 413 });
+    }
     const result = await this.resumeArtifactPending();
     const receipt = await this.state.storage.get(this.receiptKey(body.generation, body.opId));
     if (receipt) {
@@ -2277,7 +2407,12 @@ export class Paste {
   // NEWEST FIRST, which is the order every reader wants and none should have to
   // impose: a listing sorted by insertion leaks the storage order into the UI.
   async listVersions() {
-    const versions = (await this.state.storage.get("versions")) ?? [];
+    const storage = this.state.storage;
+    const versions = (await storage.get(LEGACY_VERSIONS)) ??
+      await Promise.all((await loadVersions(storage)).map(async (version) => ({
+        ...version,
+        manifest: (await storage.get(manifestKey(version.ver))) ?? null,
+      })));
     return Response.json([...versions].sort((a, b) => b.ver - a.ver));
   }
 
@@ -2295,7 +2430,7 @@ export class Paste {
     if (refused) {
       return refused;
     }
-    const versions = (await this.state.storage.get("versions")) ?? [];
+    const versions = await loadVersions(this.state.storage);
     const version = versions.find((candidate) => candidate.ver === body.ver);
     if (!version) {
       return Response.json({ deleted: false, reason: "absent" });
@@ -2314,7 +2449,7 @@ export class Paste {
     if (row.pinnedVersion === body.ver) {
       row.pinnedVersion = 0;
     }
-    this.rollServed(row, versions);
+    await this.rollServed(this.state.storage, row, versions);
     const target = this.liveCharge(versions);
     const receipt = { status: 200, body: { deleted: true, totalSize: target } };
     const pending = {
@@ -2330,8 +2465,9 @@ export class Paste {
       latestVersion: (await this.state.storage.get("maxVer")) ?? 1,
     };
     await this.state.storage.transaction(async (tx) => {
+      await splitLegacyVersions(tx);
       await tx.put(new Map([
-        ["versions", versions],
+        [versionKey(version.ver), version],
         ["row", row],
         [ARTIFACT_PENDING, pending],
         [this.receiptKey(body.generation, body.opId), receipt],
@@ -2351,7 +2487,7 @@ export class Paste {
   // row.size is the SERVED version's size, NOT the sum of live versions. The
   // quota total is a different number, kept in the identity cell, and conflating
   // them makes a multi-version paste report its whole history as its size.
-  rollServed(row, versions) {
+  async rollServed(storage, row, versions, fresh = null) {
     const live = versions.filter((v) => !v.deleted);
     if (!live.length) {
       row.contentSha = "";
@@ -2369,7 +2505,9 @@ export class Paste {
     const v = pinned ?? live.reduce((a, b) => (b.ver > a.ver ? b : a));
     row.contentSha = v.contentSha;
     row.kind = v.kind;
-    row.manifest = v.manifest ?? null;
+    row.manifest = v.ver === fresh?.ver
+      ? fresh.manifest ?? null
+      : await loadManifest(storage, v.ver);
     row.size = v.size;
   }
 
@@ -2387,13 +2525,13 @@ export class Paste {
     if (refused) {
       return refused;
     }
-    const versions = (await this.state.storage.get("versions")) ?? [];
+    const versions = await loadVersions(this.state.storage);
     const wanted = body.ver ?? 0;
     if (wanted !== 0 && !versions.some((version) => version.ver === wanted && !version.deleted)) {
       return Response.json({ pinned: false, reason: "absent" });
     }
     row.pinnedVersion = wanted;
-    this.rollServed(row, versions);
+    await this.rollServed(this.state.storage, row, versions);
     const target = this.liveCharge(versions);
     const receipt = { status: 200, body: { pinned: true, ver: wanted } };
     const pending = {
@@ -2512,9 +2650,16 @@ export class Paste {
     return this.receiptResponse(receipt);
   }
 
+  // A thrown alarm would fall to the runtime's own retry, which neither backs
+  // off far enough nor keeps the operation's state.
   async alarm() {
     await this.state.blockConcurrencyWhile(async () => {
-      await this.resumeArtifactPending(true);
+      try {
+        await this.resumeArtifactPending(true);
+      } catch (error) {
+        console.error(`paste alarm: ${error}`);
+        await this.retryArtifactPending();
+      }
     });
   }
 
