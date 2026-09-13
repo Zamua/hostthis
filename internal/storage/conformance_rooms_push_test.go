@@ -161,7 +161,7 @@ func conformPushScheduleRoundTrip(t *testing.T, rr conformanceRoomRepo) {
 	}
 	want := domain.PushSchedule{TZ: "America/New_York", Items: []domain.PushItem{
 		{ID: "morning", At: "08:00", Days: []int{1, 2, 3, 4, 5, 6}, Title: "Rota", BodyKey: "push:{date}", URL: "/?room=x#/", Tag: "rota-today"},
-		{ID: "once", When: "2026-09-12T08:00:00-04:00", Title: "Rota", Body: "Deep clean"},
+		{ID: "once", When: "2099-09-12T08:00:00-04:00", Title: "Rota", Body: "Deep clean"},
 	}}
 	if err := rr.PutPushSchedule(room.AppSlug, room.ID, want, fixedNow); err != nil {
 		t.Fatalf("put: %v", err)
