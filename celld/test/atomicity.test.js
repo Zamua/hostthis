@@ -1632,6 +1632,22 @@ test("Room creation does not persist when its ledger is unavailable", async () =
   assert.equal(roomStorage.data.has("state"), false);
 });
 
+test("Paste ops are reachable by id through the op query when the path names none", async () => {
+  const h = artifactHarness();
+  const call = async (path, init) => responseJSON(await h.paste().fetch(new Request(`https://cell${path}`, init)));
+
+  const row = await call("/do/Paste:abc?op=get");
+  assert.equal(row.status, 200);
+  assert.equal(row.body.slug, "slugone1");
+  const versions = await call("/do/Paste:abc?op=versions");
+  assert.deepStrictEqual(versions.body.map((version) => version.ver), [1]);
+  assert.equal((await h.paste().fetch(new Request("https://cell/do/Paste:abc?op=nope"))).status, 404);
+  assert.equal((await h.paste().fetch(new Request("https://cell/do/Paste:abc"))).status, 404);
+
+  const byPath = await call("/paste/get?op=versions");
+  assert.equal(byPath.body.slug, "slugone1");
+});
+
 test("Room creation refuses a full app before persisting", async () => {
   const h = roomHarness({ room: null, pasteSeed: budgetSeed(6, 4) });
   const result = await responseJSON(await h.room().create({

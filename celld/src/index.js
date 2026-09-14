@@ -137,10 +137,12 @@ function runOp(self, entry, body, url) {
 }
 
 // Null for an op the table does not name, so a class can fall through to its
-// own default.
+// own default. The `op` query names the op when the path cannot: celld's
+// internal `/do/<cell>` route addresses a cell by id and takes no further path,
+// which is how an operator tool reaches a cell without knowing its name.
 async function dispatch(self, table, request) {
   const url = new URL(request.url);
-  const entry = table[url.pathname.split("/").pop()];
+  const entry = table[url.pathname.split("/").pop()] ?? table[url.searchParams.get("op")];
   if (!entry) {
     return null;
   }

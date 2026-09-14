@@ -2548,7 +2548,11 @@ legacy entry, only a sha:
 
 ### Migration off the legacy namespace
 
-An offline operator tool, kept outside this repo, retires `blob/`:
+An offline operator tool, kept outside this repo, retires `blob/`. No index
+names every paste, so the tool enumerates Paste cells from the fleet bucket
+(`celld cell list Paste`) and reaches each by id over celld's internal
+`/do/<cell>` route, naming the op in an `op` query because that route takes no
+path after the cell (`/do/Paste:<id>?op=get`, `?op=versions`, `?op=rehome`).
 
 1. **Re-home.** For each non-deleted version holding a legacy entry, mint an
    upload id, server-side copy each referenced object to `uploads/<id>/<n>`,
