@@ -25,9 +25,8 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// conformanceSiteRepo is the union of the two site-side service interfaces a
-// static-site backend must satisfy: deploy/read/per-owner byte sum, plus the
-// sweep's delete and referenced-blob set.
+// conformanceSiteRepo is the site-side service interface a static-site backend
+// must satisfy: deploy, read, delete and the per-owner byte sum.
 type conformanceSiteRepo interface {
 	service.SiteRepo
 }
@@ -500,12 +499,8 @@ func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conform
 	}
 }
 
-// conformSiteEveryPathCharged pins that quota counts every PATH, not every
-// distinct hash.
-//
-// Nothing in the store deduplicates - a blob id is minted fresh per staged file
-// - so three paths holding the same bytes are three objects on disk. Charging
-// once would bill for a third of what was written.
+// conformSiteEveryPathCharged pins that quota counts every PATH: three paths
+// holding the same bytes are three stored objects.
 func conformSiteEveryPathCharged(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	man := domain.NewManifest()
 	man.Add("a.html", domain.ManifestEntry{SHA: "sha-dd", Size: 400, ContentType: "text/html; charset=utf-8"})

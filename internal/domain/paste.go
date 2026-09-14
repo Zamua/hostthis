@@ -91,10 +91,11 @@ func DocumentManifest(e ManifestEntry) Manifest {
 	return Manifest{Files: map[string]ManifestEntry{Root: e}}
 }
 
-// RootEntry is a document's served file: its manifest's root entry, or, for a
-// legacy row without one, the flat descriptor's sha.
+// RootEntry is the file a paste's root serves: a document's one entry, a
+// directory's index.html, or, for a legacy row without a manifest, the flat
+// descriptor's sha.
 func (p Paste) RootEntry() ManifestEntry {
-	if e, ok := p.Manifest.Files[Root]; ok {
+	if e, ok := p.Manifest.Lookup(Root); ok {
 		return e
 	}
 	return ManifestEntry{SHA: p.ContentSHA, Kind: string(p.Kind)}

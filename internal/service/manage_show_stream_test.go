@@ -124,17 +124,21 @@ func (u *entryRecordingUnit) Read(_ context.Context, e domain.ManifestEntry) (io
 	return io.NopCloser(strings.NewReader("")), 0, nil
 }
 
-// Show reads a document through its manifest root entry, and a legacy row
-// without one through its flat sha.
+// Show reads a document through its manifest root entry, a directory through
+// its index.html, and a legacy row without a manifest through its flat sha.
 func TestShow_ReadsTheRootEntry(t *testing.T) {
 	keyed := domain.Paste{Identity: showOwner, ContentSHA: "stale",
 		Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: "uploads/u/0"})}
+	site := domain.Paste{Identity: showOwner, Kind: domain.KindSite, Manifest: domain.Manifest{
+		Files: map[string]domain.ManifestEntry{"index.html": {Key: "uploads/s/0"}, "app.js": {Key: "uploads/s/1"}},
+	}}
 	legacy := domain.Paste{Identity: showOwner, ContentSHA: "abc123"}
 	for name, tc := range map[string]struct {
 		paste domain.Paste
 		want  domain.ManifestEntry
 	}{
 		"keyed":  {keyed, domain.ManifestEntry{Key: "uploads/u/0"}},
+		"site":   {site, domain.ManifestEntry{Key: "uploads/s/0"}},
 		"legacy": {legacy, domain.ManifestEntry{SHA: "abc123"}},
 	} {
 		t.Run(name, func(t *testing.T) {
