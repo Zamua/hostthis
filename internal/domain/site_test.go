@@ -138,11 +138,8 @@ func TestManifest_HasWebContent(t *testing.T) {
 	}
 }
 
-// Size and CompressedSize count PER PATH, not per distinct hash.
-//
-// Two paths holding the same content are two objects on disk - a blob id is
-// minted fresh per staged file - so folding them by SHA would report a store we
-// do not have, and under-charge for bytes we did write.
+// Size and CompressedSize count PER PATH: two paths holding the same content
+// are two stored objects, so both are counted.
 func TestManifest_SizesCountEveryPath(t *testing.T) {
 	m := NewManifest()
 	m.Add("a.html", ManifestEntry{SHA: "x", Size: 100, CompressedSize: 40})

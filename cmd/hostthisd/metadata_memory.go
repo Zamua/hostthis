@@ -2,7 +2,7 @@
 // configuration, which is what `make run` and the e2e suite want.
 //
 // EPHEMERAL: metadata lives for the process. Blobs still go to the configured
-// blob backend, so a restart leaves orphans the sweep reclaims. The startup
+// blob backend, so a restart leaves objects no metadata names. The startup
 // line says so.
 
 package main

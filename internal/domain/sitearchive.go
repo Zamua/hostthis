@@ -114,7 +114,7 @@ func (e *SiteExtractor) Add(ent ArchiveEntry, body io.Reader, sink FileSink) err
 	}
 
 	capped := &cappedReader{r: body, running: &e.running, capBytes: e.capBytes}
-	sha, compressedSize, err := sink.Store(rel, capped, ent.Size)
+	key, compressedSize, err := sink.Store(rel, capped, ent.Size)
 	if err != nil {
 		if errors.Is(err, ErrArchiveTooLarge) {
 			return ErrArchiveTooLarge
@@ -133,7 +133,7 @@ func (e *SiteExtractor) Add(ent ArchiveEntry, body io.Reader, sink FileSink) err
 		e.pathBytes += len(rel)
 	}
 	e.man.Add(rel, ManifestEntry{
-		SHA:            sha,
+		Key:            key,
 		Size:           int(capped.read),
 		CompressedSize: compressedSize,
 		ContentType:    ContentTypeForPath(rel),

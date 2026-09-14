@@ -31,7 +31,7 @@ func shutdownDaemon(
 	public, metrics shutdowner,
 	relay relayShutdowner,
 	ssh sshShutdowner,
-	waitFinalize, cleanup func(),
+	waitFinalize func(),
 ) error {
 	relay.StopAdmission()
 
@@ -67,7 +67,6 @@ func shutdownDaemon(
 
 	go func() {
 		waitFinalize()
-		cleanup()
 		results <- nil
 	}()
 

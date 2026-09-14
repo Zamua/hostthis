@@ -2,31 +2,16 @@ package storage
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
-	"io"
 	"strings"
 	"testing"
 )
 
-func shaOf(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
-
 func TestCompressedBlobStore_StoresMagicHeader(t *testing.T) {
 	body := []byte("compressible text - repeats well " + strings.Repeat("xy", 1000))
-	sha := shaOf(body)
 	inner := newFakeDurable()
-	c := NewCompressedBlobStore(inner)
-	if err := c.Put(sha, bytes.NewReader(body), int64(len(body))); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	raw, err := inner.Get(sha)
-	if err != nil {
-		t.Fatalf("inner Get: %v", err)
-	}
+	putEncoded(t, NewCompressedBlobStore(inner), "uploads/u1/0", body)
+	raw := readKey(t, inner, "uploads/u1/0")
 	if !hasMagicV1(raw) {
 		t.Fatalf("inner store missing magic prefix: first 4 bytes = % x", raw[:4])
 	}
@@ -34,13 +19,9 @@ func TestCompressedBlobStore_StoresMagicHeader(t *testing.T) {
 
 func TestCompressedBlobStore_ActuallyCompresses(t *testing.T) {
 	body := bytes.Repeat([]byte("the quick brown fox jumps over the lazy dog\n"), 1000)
-	sha := shaOf(body)
 	inner := newFakeDurable()
-	c := NewCompressedBlobStore(inner)
-	if err := c.Put(sha, bytes.NewReader(body), int64(len(body))); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	stored := inner.rawSize(sha)
+	putEncoded(t, NewCompressedBlobStore(inner), "uploads/u1/0", body)
+	stored := inner.rawSize("uploads/u1/0")
 	if stored >= len(body) {
 		t.Fatalf("compression did not reduce size: input=%d stored=%d", len(body), stored)
 	}
@@ -50,77 +31,61 @@ func TestCompressedBlobStore_ActuallyCompresses(t *testing.T) {
 	}
 }
 
-func TestCompressedBlobStore_GetPropagatesNotFound(t *testing.T) {
-	inner := newFakeDurable()
-	c := NewCompressedBlobStore(inner)
-	_, err := c.Get(shaOf([]byte("missing")))
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected ErrNotFound, got %v", err)
-	}
-}
-
-// TestCompressedBlobStore_GetReaderMatchesGet pins that every blob shape,
-// legacy uncompressed bodies included, round-trips through the buffered Get
-// and byte-identically through the streaming GetReader.
-func TestCompressedBlobStore_GetReaderMatchesGet(t *testing.T) {
+// Every stored shape decodes byte-identically, through the key read and the
+// legacy read alike, including objects written before compression existed.
+func TestCompressedBlobStore_ReadsRoundTrip(t *testing.T) {
 	cases := map[string]struct {
-		body   []byte
-		legacy bool
+		body []byte
+		raw  bool
 	}{
 		"compressible": {body: bytes.Repeat([]byte("the quick brown fox\n"), 5000)},
 		"tiny":         {body: []byte("<h1>hi</h1>")},
 		"empty":        {body: nil},
-		"legacy":       {body: []byte("<!doctype html><h1>legacy</h1>"), legacy: true},
-		"legacy-short": {body: []byte("hi\n"), legacy: true},
+		"uncompressed": {body: []byte("<!doctype html><h1>legacy</h1>"), raw: true},
+		"short-raw":    {body: []byte("hi\n"), raw: true},
 		"binary":       {body: []byte{0x00, 0x01, 0x02, 0xff, 0xfe, 'H', 'Z', 0x00}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			sha := shaOf(tc.body)
 			inner := newFakeDurable()
 			c := NewCompressedBlobStore(inner)
-			if tc.legacy {
-				inner.putRaw(sha, tc.body)
-			} else if err := c.Put(sha, bytes.NewReader(tc.body), int64(len(tc.body))); err != nil {
-				t.Fatalf("Put: %v", err)
+			const sha = "abcdef"
+			if tc.raw {
+				inner.putRaw("uploads/u1/0", tc.body)
+				inner.putRaw("legacy/"+sha, tc.body)
+			} else {
+				putEncoded(t, c, "uploads/u1/0", tc.body)
+				putEncoded(t, c, "legacy/"+sha, tc.body)
 			}
-
-			want, err := c.Get(sha)
-			if err != nil {
-				t.Fatalf("Get: %v", err)
+			if got := readKey(t, c, "uploads/u1/0"); !bytes.Equal(got, tc.body) {
+				t.Fatalf("GetReader: got %d bytes, want %d", len(got), len(tc.body))
 			}
-			if !bytes.Equal(want, tc.body) {
-				t.Fatalf("Get round-trip: want %d bytes, got %d", len(tc.body), len(want))
-			}
-			rc, _, err := c.GetReader(sha)
-			if err != nil {
-				t.Fatalf("GetReader: %v", err)
-			}
-			defer rc.Close() //nolint:errcheck
-			got, err := io.ReadAll(rc)
-			if err != nil {
-				t.Fatalf("ReadAll: %v", err)
-			}
-			if !bytes.Equal(got, want) {
-				t.Fatalf("GetReader != Get: want %d bytes %q, got %d bytes %q",
-					len(want), truncForLog(want), len(got), truncForLog(got))
+			if got := readLegacy(t, c, sha); !bytes.Equal(got, tc.body) {
+				t.Fatalf("GetLegacyReader: got %d bytes, want %d", len(got), len(tc.body))
 			}
 		})
 	}
 }
 
-func TestCompressedBlobStore_GetReaderPropagatesNotFound(t *testing.T) {
-	inner := newFakeDurable()
-	c := NewCompressedBlobStore(inner)
-	_, _, err := c.GetReader(shaOf([]byte("missing")))
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected ErrNotFound, got %v", err)
+func TestCompressedBlobStore_ReadsPropagateNotFound(t *testing.T) {
+	c := NewCompressedBlobStore(newFakeDurable())
+	if _, _, err := c.GetReader("uploads/missing/0"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetReader: expected ErrNotFound, got %v", err)
+	}
+	if _, _, err := c.GetLegacyReader("abcdef"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetLegacyReader: expected ErrNotFound, got %v", err)
 	}
 }
 
-func truncForLog(b []byte) []byte {
-	if len(b) > 32 {
-		return b[:32]
+// EncodeTo reports the payload size the quota charges, which excludes framing.
+func TestCompressedBlobStore_EncodeToSizes(t *testing.T) {
+	c := NewCompressedBlobStore(newFakeDurable())
+	var buf bytes.Buffer
+	payload, total, err := c.EncodeTo(&buf, strings.NewReader(strings.Repeat("abc", 500)))
+	if err != nil {
+		t.Fatalf("EncodeTo: %v", err)
 	}
-	return b
+	if total != int64(buf.Len()) || payload != buf.Len()-CompressedBodyPrefixLen {
+		t.Fatalf("payload/total = %d/%d for %d written bytes", payload, total, buf.Len())
+	}
 }

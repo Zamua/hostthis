@@ -44,7 +44,7 @@ type streamOnlyBlobUnit struct {
 	reads int
 }
 
-func (u *streamOnlyBlobUnit) Read(context.Context, string) (io.ReadCloser, int64, error) {
+func (u *streamOnlyBlobUnit) Read(context.Context, domain.ManifestEntry) (io.ReadCloser, int64, error) {
 	u.reads++
 	return io.NopCloser(strings.NewReader(u.body)), int64(len(u.body)), nil
 }
@@ -101,6 +101,57 @@ func TestShow_ReturnsAnUndrainedStream(t *testing.T) {
 	}
 	if string(rest) != "defghij" {
 		t.Fatalf("remainder = %q; want \"defghij\"", rest)
+	}
+}
+
+// pasteStub serves one paste; the embedded nil PasteAdmin makes any other repo
+// call panic.
+type pasteStub struct {
+	PasteAdmin
+	p domain.Paste
+}
+
+func (s pasteStub) Get(domain.Slug) (domain.Paste, error) { return s.p, nil }
+
+// entryRecordingUnit records the entry Show asks the byte plane for.
+type entryRecordingUnit struct {
+	BlobUnit
+	got domain.ManifestEntry
+}
+
+func (u *entryRecordingUnit) Read(_ context.Context, e domain.ManifestEntry) (io.ReadCloser, int64, error) {
+	u.got = e
+	return io.NopCloser(strings.NewReader("")), 0, nil
+}
+
+// Show reads a document through its manifest root entry, a directory through
+// its index.html, and a legacy row without a manifest through its flat sha.
+func TestShow_ReadsTheRootEntry(t *testing.T) {
+	keyed := domain.Paste{Identity: showOwner, ContentSHA: "stale",
+		Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: "uploads/u/0"})}
+	site := domain.Paste{Identity: showOwner, Kind: domain.KindSite, Manifest: domain.Manifest{
+		Files: map[string]domain.ManifestEntry{"index.html": {Key: "uploads/s/0"}, "app.js": {Key: "uploads/s/1"}},
+	}}
+	legacy := domain.Paste{Identity: showOwner, ContentSHA: "abc123"}
+	for name, tc := range map[string]struct {
+		paste domain.Paste
+		want  domain.ManifestEntry
+	}{
+		"keyed":  {keyed, domain.ManifestEntry{Key: "uploads/u/0"}},
+		"site":   {site, domain.ManifestEntry{Key: "uploads/s/0"}},
+		"legacy": {legacy, domain.ManifestEntry{SHA: "abc123"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			unit := &entryRecordingUnit{}
+			_, rc, err := NewManage(pasteStub{p: tc.paste}, unit).Show("abcd1234", showOwner)
+			if err != nil {
+				t.Fatalf("Show: %v", err)
+			}
+			_ = rc.Close()
+			if unit.got.Key != tc.want.Key || unit.got.SHA != tc.want.SHA {
+				t.Fatalf("Show read %+v, want key %q sha %q", unit.got, tc.want.Key, tc.want.SHA)
+			}
+		})
 	}
 }
 

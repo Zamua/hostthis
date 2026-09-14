@@ -66,9 +66,16 @@ type stackOpts struct {
 	keyGateCap int
 	sites      bool
 	proxyProto bool
+	manageRepo func(*storage.MemRepo) service.PasteAdmin
 }
 
 type stackOpt func(*stackOpts)
+
+// withManageRepo wraps the repo the manage service sees, so a test can script
+// one of its answers while everything else stays real.
+func withManageRepo(wrap func(*storage.MemRepo) service.PasteAdmin) stackOpt {
+	return func(o *stackOpts) { o.manageRepo = wrap }
+}
 
 // withKeyGate wires a live KeyGate at the given per-subnet fresh-key cap
 // (window fixed at 24h). Loopback traffic all shares 127.0.0.0/24.
@@ -100,7 +107,11 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	repo := storagetest.NewRepo(t)
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
-	manage := service.NewManage(repo, blobUnit)
+	var admin service.PasteAdmin = repo
+	if o.manageRepo != nil {
+		admin = o.manageRepo(repo)
+	}
+	manage := service.NewManage(admin, blobUnit)
 
 	httpSrv := &httpapi.Server{Pastes: repo, Blobs: blobUnit}
 	sshSrv := &hostssh.Server{

@@ -21,6 +21,7 @@ package storage_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -149,19 +150,29 @@ func conformStatusTransitionsAreIdempotent(t *testing.T, r lifecycleRepo) {
 	}
 }
 
-// Neither transition invents a paste. A slug that was never inserted stays
-// absent, and the call is not an error: the caller cannot distinguish "already
-// resolved" from "never existed" and must not have to.
-func conformStatusOnMissingPasteIsNoOp(t *testing.T, r lifecycleRepo) {
+// MarkReady on a paste that is gone, absent or under another generation,
+// reports not found so a finalizer can discard the bytes it wrote. MarkFailed
+// there is a no-op, and neither transition invents or touches a paste.
+func conformStatusOnGonePaste(t *testing.T, r lifecycleRepo) {
 	missing := domain.Paste{Slug: "lc623456", Generation: "generation-missing"}
-	if err := r.MarkReady(missing); err != nil {
-		t.Fatalf("MarkReady on a missing paste = %v; want nil", err)
+	if err := r.MarkReady(missing); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("MarkReady on a missing paste = %v; want ErrNotFound", err)
 	}
 	if err := r.MarkFailed(missing); err != nil {
 		t.Fatalf("MarkFailed on a missing paste = %v; want nil", err)
 	}
 	if _, err := r.Get(missing.Slug); err == nil {
 		t.Fatal("a status transition created a paste that was never inserted")
+	}
+
+	p := lifecyclePaste(t, r, "lc823456", "key:lifecycle", 100)
+	other := p
+	other.Generation = "generation-other"
+	if err := r.MarkReady(other); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("MarkReady under another generation = %v; want ErrNotFound", err)
+	}
+	if got := statusOf(t, r, p.Slug); got != domain.PasteStatusPending {
+		t.Fatalf("status = %q after MarkReady under another generation; want %q", got, domain.PasteStatusPending)
 	}
 }
 
@@ -197,6 +208,6 @@ func runLifecycleConformance(t *testing.T, name string, newRepo func(t *testing.
 	t.Run(name+"/StatusTransitionsAreIdempotent", func(t *testing.T) {
 		conformStatusTransitionsAreIdempotent(t, newRepo(t))
 	})
-	t.Run(name+"/StatusOnMissingPasteIsNoOp", func(t *testing.T) { conformStatusOnMissingPasteIsNoOp(t, newRepo(t)) })
+	t.Run(name+"/StatusOnGonePaste", func(t *testing.T) { conformStatusOnGonePaste(t, newRepo(t)) })
 	t.Run(name+"/ReadyAtInsertIsLegal", func(t *testing.T) { conformReadyAtInsertIsLegal(t, newRepo(t)) })
 }
