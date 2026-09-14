@@ -2471,9 +2471,13 @@ bytes.
 
 - **Delete a version:** commit the tombstone, then delete that version's
   `uploads/<upload-id>/`.
-- **Delete a paste:** commit the removal, then delete each version's prefix.
-  Version records survive the removal, so the service point-reads versions 1
-  through the latest for their upload ids. Nothing is scanned.
+- **Delete a paste:** commit the removal, then delete each removed version's
+  prefix.
+- **The delete names its own bytes.** The metadata delete answers with the
+  upload ids of exactly what it removed, taken inside the same commit and kept
+  in its receipt, so a replayed request gets the same answer. The service
+  never re-reads versions afterwards: once a slug is removed it can be
+  re-created, and a later read could name the new owner's uploads.
 - **A crash between the two steps** leaks that prefix but never breaks a read.
 
 Nothing asks whether anything else still uses the bytes, because nothing else
@@ -2653,9 +2657,10 @@ behaviors are expressed in terms of inputs and observable outputs:
   app-final and content-inaccessible, and its bytes stop counting
   against quota. The repo does NOT enforce refuse-current /
   refuse-pinned-current: those guards live in `Manage.DeleteVersion`, not
-  the repo. Whole-paste `Delete` is a full removal (the paste leaves every
-  listing; there is nothing left to show versions of), but its version
-  records stay point-readable so the service can delete their bytes.
+  the repo. `DeleteVersion` returns the tombstoned version's upload id.
+  Whole-paste `Delete` is a full removal (the paste leaves every listing;
+  there is nothing left to show versions of) and returns the upload ids of
+  every version it removed.
 - **Owner-gating is a service-layer concern.** The repos are NOT
   owner-aware: `Get`, `Delete`, `SetName`, and so on operate on a slug
   regardless of who owns it. IDOR protection (a cross-owner read
@@ -2694,9 +2699,10 @@ Pastes are created through `InsertWithQuotaCheck` / `AppendVersion-
 WithQuotaCheck` with caps set to 0 (the documented "no quota
 enforcement" path), so no backend needs an extra unchecked helper.
 
-**The metadata contract never deletes bytes.** It records upload ids; the
-service deletes each prefix after the metadata commits (see "Blob storage
-backends → Deleting bytes").
+**The metadata contract never deletes bytes.** It records upload ids and
+names the removed ones in each delete's answer; the service deletes those
+prefixes after the metadata commits (see "Blob storage backends → Deleting
+bytes").
 
 ### The two backends and the conformance gate
 
