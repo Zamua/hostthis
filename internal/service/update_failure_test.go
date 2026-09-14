@@ -39,6 +39,7 @@ func TestUpdate_FailedAppendObjects(t *testing.T) {
 	}{
 		{"over quota", domain.ErrOverUserQuota, ErrOverQuota, false},
 		{"not found", domain.ErrNotFound, domain.ErrNotFound, false},
+		{"another change settling", domain.ErrBusy, domain.ErrBusy, false},
 		{"outcome unknown", errors.New("celld: /paste/append: connection reset"), nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,6 +97,7 @@ func TestUpdate_CelldAppendAnswerDecidesTheObjects(t *testing.T) {
 		wantKept bool
 	}{
 		{"explicit absent", http.StatusOK, `{"appended":false,"reason":"absent"}`, false},
+		{"another operation pending", http.StatusLocked, `{"error":"artifact-operation-pending"}`, false},
 		{"unknown op", http.StatusNotFound, "unknown op\n", true},
 		{"accounting conflict", http.StatusConflict, `{"error":"artifact-accounting-conflict"}`, true},
 		{"empty server error", http.StatusInternalServerError, "", true},

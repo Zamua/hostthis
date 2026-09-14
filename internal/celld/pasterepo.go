@@ -235,7 +235,7 @@ func (r *PasteRepo) MarkFailed(paste domain.Paste) error {
 			"generation": paste.Generation,
 			"opId":       "fail:" + paste.Generation,
 		}, nil)
-	return answer("fail accounting", status, err, nil)
+	return answer("fail accounting", status, err, map[int]error{http.StatusLocked: domain.ErrBusy})
 }
 
 // SumActiveBytesByOwner reads the identity cell's maintained aggregate. A point
@@ -414,6 +414,9 @@ func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantC
 	if err != nil {
 		return nil, err
 	}
+	if status == http.StatusLocked {
+		return nil, domain.ErrBusy
+	}
 	if status == http.StatusConflict {
 		return nil, fmt.Errorf("celld: remove accounting conflict")
 	}
@@ -476,6 +479,8 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 		return domain.AppendResult{}, domain.ErrOverUserQuota
 	case status == http.StatusRequestEntityTooLarge:
 		return domain.AppendResult{}, fmt.Errorf("%w: version too large to store", domain.ErrTooManyFiles)
+	case status == http.StatusLocked:
+		return domain.AppendResult{}, domain.ErrBusy
 	case status >= 300 || res.Appended == nil:
 		return domain.AppendResult{}, fmt.Errorf("celld: append: unrecognised answer: status %d %s", status, res.Error)
 	case *res.Appended:
@@ -548,6 +553,9 @@ func (r *PasteRepo) DeleteVersion(slug domain.Slug, generation string, ver int) 
 		map[string]any{"opId": opID, "generation": generation, "ver": ver}, &res)
 	if err != nil {
 		return "", err
+	}
+	if status == http.StatusLocked {
+		return "", domain.ErrBusy
 	}
 	if status == http.StatusConflict {
 		if res.Error == "version-served" {
@@ -625,6 +633,9 @@ func (r *PasteRepo) setPin(slug domain.Slug, generation string, ver int) error {
 		map[string]any{"opId": opID, "generation": generation, "ver": ver}, &res)
 	if err != nil {
 		return err
+	}
+	if status == http.StatusLocked {
+		return domain.ErrBusy
 	}
 	if status == http.StatusConflict {
 		return fmt.Errorf("celld: pin accounting conflict")

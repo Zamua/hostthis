@@ -980,6 +980,35 @@ test("Paste legacy adoption answers a refused seed with 409 whatever Identity an
   assert.equal(storedVersions(h.pasteStorage).length, 1);
 });
 
+test("Paste refuses a mutation behind another operation's pending work with 423 and persists nothing", async () => {
+  const h = artifactHarness();
+  h.transport.failBefore = 100;
+  assert.equal((await h.paste().append({ ...appendBody("append-stuck"), uploadId: "up-2" })).status, 502);
+
+  const before = clone(h.pasteStorage.data);
+  const commits = h.pasteStorage.commits;
+  const busy = { status: 423, body: { error: "artifact-operation-pending" } };
+  for (const [name, run] of [
+    ["append", () => h.paste().append({ ...appendBody("append-other"), uploadId: "up-3" })],
+    ["delete version", () => h.paste().deleteVersion({ opId: "delete-other", generation: "generation-1", ver: 1 })],
+    ["pin", () => h.paste().pin({ opId: "pin-other", generation: "generation-1", ver: 1 })],
+    ["remove", () => h.paste().remove({
+      opId: "remove-other", generation: "generation-1", identity: "owner", createdAt: 7,
+    })],
+    ["fail", () => h.paste().fail({ opId: "fail-other", generation: "generation-1" })],
+    ["other generation", () => h.paste().append({
+      ...appendBody("append-stuck"), generation: "generation-2", uploadId: "up-2",
+    })],
+  ]) {
+    assert.deepStrictEqual(await responseJSON(await run()), busy, name);
+  }
+  assert.deepStrictEqual(h.pasteStorage.data, before);
+  assert.equal(h.pasteStorage.commits, commits);
+
+  const own = await responseJSON(await h.paste().append({ ...appendBody("append-stuck"), uploadId: "up-2" }));
+  assert.deepStrictEqual(own, { status: 502, body: { error: "artifact-operation-pending" } });
+});
+
 test("Paste rename persists a guarded projection through response loss", async () => {
   const h = artifactHarness();
   h.transport.failAfter = 1;

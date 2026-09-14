@@ -34,7 +34,7 @@ func newCell(base string, c *http.Client) *cell {
 // edit, not a widened comparison.
 func isCellAnswer(status int) bool {
 	switch status {
-	case http.StatusNotFound, http.StatusConflict,
+	case http.StatusNotFound, http.StatusConflict, http.StatusLocked,
 		http.StatusRequestEntityTooLarge, http.StatusInsufficientStorage:
 		return true
 	}

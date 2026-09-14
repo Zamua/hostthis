@@ -2348,8 +2348,10 @@ export class Paste {
     }
     const pending = await this.state.storage.get(ARTIFACT_PENDING);
     if (pending) {
+      // Another operation holds the cell: this request persisted nothing and
+      // never will, which 423 tells apart from its own unresolved work (502).
       if (pending.generation !== generation || pending.opId !== opId) {
-        return Response.json({ error: "artifact-operation-pending" }, { status: 502 });
+        return Response.json({ error: "artifact-operation-pending" }, { status: 423 });
       }
       await this.resumeArtifactPending();
       const recovered = await this.state.storage.get(this.receiptKey(generation, opId));

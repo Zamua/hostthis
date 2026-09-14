@@ -17,7 +17,7 @@ import (
 func definitive(err error) bool {
 	for _, sentinel := range []error{
 		domain.ErrNotFound, domain.ErrSlugTaken, domain.ErrOverUserQuota,
-		domain.ErrServiceFull, domain.ErrTooManyFiles,
+		domain.ErrServiceFull, domain.ErrTooManyFiles, domain.ErrBusy,
 	} {
 		if errors.Is(err, sentinel) {
 			return true

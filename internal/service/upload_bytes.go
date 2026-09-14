@@ -38,7 +38,7 @@ func abandonUpload(blob BlobUnit, logger *log.Logger, uploadID string, commitErr
 func refusedCommit(err error) bool {
 	for _, refusal := range []error{
 		domain.ErrOverUserQuota, domain.ErrServiceFull, domain.ErrSlugTaken,
-		domain.ErrNotFound, domain.ErrTooManyFiles,
+		domain.ErrNotFound, domain.ErrTooManyFiles, domain.ErrBusy,
 	} {
 		if errors.Is(err, refusal) {
 			return true

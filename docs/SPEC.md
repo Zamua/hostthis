@@ -1539,6 +1539,9 @@ described here. The slug and URL are unchanged either way. Failure modes
 - *upload too large to consider* (exit 1): raw input exceeded the
   100 MiB hard-fast-fail. No compressed-size check was attempted.
 - *usage error* (exit 2): malformed args, bad flag value.
+- *another change to this paste is still settling; retry shortly* (exit 1):
+  an earlier change to the paste has not settled yet. Nothing was saved and
+  the upload's bytes are deleted.
 
 See "Exit codes" below for the canonical mapping.
 
@@ -2492,7 +2495,7 @@ its error:
 - an untar abort (bomb guard, unsafe entry, too many files, empty archive);
 - a site insert refused (slug taken through every retry, over quota);
 - a refused redeploy or update append (over quota, not found, version too
-  large, service full);
+  large, service full, another change still settling);
 - a create whose background blob write fails and marks the paste failed;
 - a create whose paste is gone when its background blob write lands, as the
   ready transition reports.
@@ -2503,9 +2506,9 @@ does not positively identify may still publish the version, and deleting its
 bytes then would break a live read. A leak is always preferable to that.
 
 The celld adapter therefore maps only identified answers to the definitive
-errors: an over-quota (507) or too-large (413) status, a conflict whose body
-names `slug-taken` or `create-aborted`, and a success answer stating
-`reason: "absent"`. Any other status or body, empty ones included, is an error
+errors: an over-quota (507), too-large (413), or operation-pending (423)
+status, a conflict whose body names `slug-taken` or `create-aborted`, and a
+success answer stating `reason: "absent"`. Any other status or body, empty ones included, is an error
 the service treats as ambiguous.
 
 A process killed mid-upload leaks its prefix. That rare leak is accepted: there
@@ -2833,7 +2836,11 @@ re-arms the alarm with exponential backoff from one second to a five-minute
 ceiling, so a stuck operation costs a bounded number of commits instead of a
 tight retry loop. An append whose Identity decision is neither a grant nor a
 quota refusal keeps its operation pending and answers
-`artifact-accounting-conflict` (409), whatever status Identity returned. The alarm re-arms at that deadline before any outbound call,
+`artifact-accounting-conflict` (409), whatever status Identity returned. A
+mutation that finds a different operation pending persists nothing and answers
+`artifact-operation-pending` (423). A repeat of the pending operation itself
+that is still unresolved after resuming answers `artifact-operation-pending`
+(502), because it may yet complete. The alarm re-arms at that deadline before any outbound call,
 so a handler the runtime kills mid-call cannot fire again at once; the count
 restarts when the operation advances a stage. A candidate version too large to
 persist is refused with `version-too-large` (413) before any charge. One the
