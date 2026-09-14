@@ -1135,6 +1135,29 @@ test("Paste append records its upload id and versions list every version's id", 
   ]);
 });
 
+test("Paste head carries the served version's upload id through append, pin, unpin, and rehome", async () => {
+  const h = artifactHarness();
+  const head = () => h.pasteStorage.data.get("row").uploadId;
+  assert.equal((await h.paste().append({ ...appendBody("append-2"), uploadId: "up-2" })).status, 200);
+  assert.equal(head(), "up-2");
+  assert.equal((await h.paste().append({ ...appendBody("append-3"), uploadId: "up-3" })).status, 200);
+  assert.equal(head(), "up-3");
+
+  const pin = (opId, ver) => h.paste().pin({ opId, generation: "generation-1", ver });
+  assert.equal((await pin("pin-2", 2)).status, 200);
+  assert.equal(head(), "up-2");
+  assert.equal((await pin("unpin", 0)).status, 200);
+  assert.equal(head(), "up-3");
+
+  const rehome = (ver, uploadId) => h.paste().rehome({
+    generation: "generation-1", ver, uploadId, manifest: { Files: {} },
+  });
+  assert.equal((await rehome(2, "up-2b")).status, 200);
+  assert.equal(head(), "up-3");
+  assert.equal((await rehome(3, "up-3b")).status, 200);
+  assert.equal(head(), "up-3b");
+});
+
 test("Paste removal names every version's upload and replays it after re-creation", async () => {
   const h = artifactHarness();
   await appendUploads(h, [2, 3]);
@@ -1220,7 +1243,9 @@ test("Paste rehome splits a single-value history and repoints the served version
   assert.equal(h.pasteStorage.data.has("versions"), false);
   assert.equal(h.pasteStorage.data.get("ver:1").uploadId, "up-new");
   assert.deepStrictEqual(h.pasteStorage.data.get("manifest:1"), rehomedManifest);
-  assert.deepStrictEqual(h.pasteStorage.data.get("row"), { ...row, manifest: rehomedManifest });
+  assert.deepStrictEqual(h.pasteStorage.data.get("row"), {
+    ...row, manifest: rehomedManifest, uploadId: "up-new",
+  });
   assert.deepStrictEqual(h.transport.calls, []);
   assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
   assert.equal(h.pasteStorage.alarm, null);

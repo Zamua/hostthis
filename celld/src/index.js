@@ -2520,6 +2520,7 @@ export class Paste {
     const live = versions.filter((v) => !v.deleted);
     if (!live.length) {
       row.contentSha = "";
+      row.uploadId = "";
       row.manifest = null;
       row.size = 0;
       row.pinnedVersion = 0;
@@ -2530,6 +2531,7 @@ export class Paste {
       row.pinnedVersion = 0;
     }
     row.contentSha = v.contentSha;
+    row.uploadId = v.uploadId ?? "";
     row.kind = v.kind;
     row.manifest = v.ver === fresh?.ver
       ? fresh.manifest ?? null
@@ -2620,6 +2622,7 @@ export class Paste {
       }
       if (served.ver === body.ver) {
         row.manifest = body.manifest;
+        row.uploadId = body.uploadId;
         updates.set("row", row);
       }
       await tx.put(updates);
