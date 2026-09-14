@@ -2570,12 +2570,22 @@ path after the cell (`/do/Paste:<id>?op=get`, `?op=versions`, `?op=rehome`).
 1. **Re-home.** For each non-deleted version holding a legacy entry, mint an
    upload id, server-side copy each referenced object to `uploads/<id>/<n>`,
    and rewrite that version's manifest (and the head's copy when it serves that
-   version) through a guarded metadata operation. The tool is idempotent and
-   resumable. A re-homed file's ETag changes once.
+   version) through the Paste cell's `rehome` operation. The tool is idempotent
+   and resumable. A re-homed file's ETag changes once.
 2. **Verify.** No live manifest references a sha-only entry, smoke and e2e pass,
    and a sample of pastes reads byte-identical before and after.
 3. **Drop.** Delete `blob/` wholesale, which also frees every legacy object no
    version references. The dual-read path is then removed.
+
+`rehome` takes the paste's generation, a live version, an upload id of one
+`[A-Za-z0-9_-]` segment of at most 128 bytes (the rule `domain.ValidUploadID`
+applies), and a manifest in the stored shape
+(`{"Files": {"<path>": {"Key": ...}}}`) with at least one entry, every key being
+`uploads/<upload-id>/<n>`. Anything else is refused before any write with
+`invalid-rehome` or `invalid-manifest` (400), so a version can never point at
+another upload's prefix, whose delete would remove its bytes. A legacy document
+that reads only its flat sha is re-homed with a one-entry manifest as well: a
+null manifest would leave it reading `blob/`, which the drop deletes.
 
 ---
 

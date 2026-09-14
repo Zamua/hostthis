@@ -95,6 +95,26 @@ function isUploadId(value) {
   return value === undefined || value === null || typeof value === "string";
 }
 
+// The shape domain.ValidUploadID accepts: one key segment, so a prefix delete
+// built from it cannot widen past its own upload.
+function isUploadSegment(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+}
+
+// Every entry of a re-homed manifest must name an object of that upload: an
+// entry keyed elsewhere would lose its bytes when the other upload is deleted.
+function isRehomedManifest(manifest, uploadId) {
+  const files = manifest?.Files;
+  if (typeof files !== "object" || files === null || Array.isArray(files)) {
+    return false;
+  }
+  const entries = Object.values(files);
+  const prefix = `uploads/${uploadId}/`;
+  return entries.length > 0 && entries.every((entry) =>
+    typeof entry?.Key === "string" && entry.Key.startsWith(prefix) &&
+    /^(0|[1-9][0-9]*)$/.test(entry.Key.slice(prefix.length)));
+}
+
 function withUploadId(version, uploadId) {
   return uploadId ? { ...version, uploadId } : version;
 }
@@ -2594,10 +2614,10 @@ export class Paste {
   // unchanged, so no accounting runs and a repeat rewrites the same values. A
   // legacy row is refused rather than adopted, because adoption seeds Identity.
   async rehome(body) {
-    if (!requireShape(body, { generation: "string", ver: "posint", uploadId: "string" })) {
+    if (!requireShape(body, { generation: "string", ver: "posint" }) || !isUploadSegment(body.uploadId)) {
       return Response.json({ error: "invalid-rehome" }, { status: 400 });
     }
-    if (typeof body.manifest !== "object" || Array.isArray(body.manifest)) {
+    if (!isRehomedManifest(body.manifest, body.uploadId)) {
       return Response.json({ error: "invalid-manifest" }, { status: 400 });
     }
     const row = await this.state.storage.get("row");
@@ -2618,12 +2638,10 @@ export class Paste {
     const served = servedOf(row, versions.filter((candidate) => !candidate.deleted));
     await this.state.storage.transaction(async (tx) => {
       await splitLegacyVersions(tx);
-      const updates = new Map([[versionKey(body.ver), { ...version, uploadId: body.uploadId }]]);
-      if (body.manifest) {
-        updates.set(manifestKey(body.ver), body.manifest);
-      } else {
-        await tx.delete(manifestKey(body.ver));
-      }
+      const updates = new Map([
+        [versionKey(body.ver), { ...version, uploadId: body.uploadId }],
+        [manifestKey(body.ver), body.manifest],
+      ]);
       if (served.ver === body.ver) {
         row.manifest = body.manifest;
         row.uploadId = body.uploadId;

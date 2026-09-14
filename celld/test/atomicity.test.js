@@ -1200,7 +1200,7 @@ test("Paste head carries the served version's upload id through append, pin, unp
   assert.equal(head(), "up-3");
 
   const rehome = (ver, uploadId) => h.paste().rehome({
-    generation: "generation-1", ver, uploadId, manifest: { Files: {} },
+    generation: "generation-1", ver, uploadId, manifest: { Files: { "/": { Key: `uploads/${uploadId}/0` } } },
   });
   assert.equal((await rehome(2, "up-2b")).status, 200);
   assert.equal(head(), "up-3");
@@ -1276,7 +1276,11 @@ test("Paste version delete names the tombstoned upload on every path", async () 
   })), { status: 200, body: { deleted: true, totalSize: 1, upload: "" } });
 });
 
-const rehomedManifest = { "/": { key: "uploads/up-new/0" } };
+const rehomedManifest = { Files: { "/": { Key: "uploads/up-new/0", SHA: "", Size: 2, CompressedSize: 11 } } };
+
+function keyedManifest(...keys) {
+  return { Files: Object.fromEntries(keys.map((Key, n) => [`file-${n}`, { Key }])) };
+}
 
 function rehomeBody(overrides = {}) {
   return { generation: "generation-1", ver: 1, uploadId: "up-new", manifest: rehomedManifest, ...overrides };
@@ -1318,10 +1322,21 @@ test("Paste rehome rewrites the row only for the version it serves", async () =>
   assert.deepStrictEqual(h.pasteStorage.data.get("ver:2"), { ...v2, uploadId: "up-new" });
   assert.deepStrictEqual(h.pasteStorage.data.get("manifest:2"), rehomedManifest);
 
-  assert.equal((await h.paste().rehome(rehomeBody({ ver: 3, manifest: null }))).status, 200);
-  assert.equal(h.pasteStorage.data.has("manifest:3"), false);
-  assert.equal(h.pasteStorage.data.get("row").manifest, null);
+  assert.equal((await h.paste().rehome(rehomeBody({ ver: 3 }))).status, 200);
+  assert.deepStrictEqual(h.pasteStorage.data.get("manifest:3"), rehomedManifest);
+  assert.deepStrictEqual(h.pasteStorage.data.get("row").manifest, rehomedManifest);
+  assert.equal(h.pasteStorage.data.get("row").uploadId, "up-new");
   assert.equal(h.pasteStorage.data.get("row").size, 4);
+});
+
+test("Paste rehome accepts a manifest whose every key is an object of the upload", async () => {
+  const h = uploadedArtifactHarness();
+  const uploadId = `Up_-${"a".repeat(124)}`;
+  const manifest = keyedManifest(`uploads/${uploadId}/0`, `uploads/${uploadId}/12`);
+  assert.deepStrictEqual(await responseJSON(await h.paste().rehome(rehomeBody({ ver: 2, uploadId, manifest }))),
+    { status: 200, body: { rehomed: true } });
+  assert.deepStrictEqual(h.pasteStorage.data.get("manifest:2"), manifest);
+  assert.equal(h.pasteStorage.data.get("ver:2").uploadId, uploadId);
 });
 
 test("Paste rehome refuses without writing, adopting, or calling Identity", async () => {
@@ -1331,8 +1346,30 @@ test("Paste rehome refuses without writing, adopting, or calling Identity", asyn
   delete row.accountingVersion;
   legacyRow.pasteStorage.data.set("row", row);
   const mismatch = { status: 409, body: { error: "generation-mismatch" } };
+  const invalidRehome = { status: 400, body: { error: "invalid-rehome" } };
+  const invalidManifest = { status: 400, body: { error: "invalid-manifest" } };
+  const badManifest = (manifest) => rehomeBody({ ver: 2, manifest });
+  const badUploadId = (uploadId) => rehomeBody({ ver: 2, uploadId, manifest: keyedManifest(`uploads/${uploadId}/0`) });
 
   for (const [name, h, body, expected] of [
+    ["null manifest", uploadedArtifactHarness(), badManifest(null), invalidManifest],
+    ["array manifest", uploadedArtifactHarness(), badManifest([]), invalidManifest],
+    ["manifest without files", uploadedArtifactHarness(), badManifest({}), invalidManifest],
+    ["manifest without entries", uploadedArtifactHarness(), badManifest({ Files: {} }), invalidManifest],
+    ["sha-only entry", uploadedArtifactHarness(), badManifest({ Files: { "/": { SHA: "legacy-v2" } } }), invalidManifest],
+    ["empty key", uploadedArtifactHarness(), badManifest(keyedManifest("")), invalidManifest],
+    ["another upload's key", uploadedArtifactHarness(), badManifest(keyedManifest("uploads/up-3/0")), invalidManifest],
+    ["key sharing a prefix", uploadedArtifactHarness(), badManifest(keyedManifest("uploads/up-newer/0")), invalidManifest],
+    ["key escaping the upload", uploadedArtifactHarness(),
+      badManifest(keyedManifest("uploads/up-new/../up-3/0")), invalidManifest],
+    ["the prefix itself", uploadedArtifactHarness(), badManifest(keyedManifest("uploads/up-new/")), invalidManifest],
+    ["legacy key", uploadedArtifactHarness(), badManifest(keyedManifest("blob/ab/abcd")), invalidManifest],
+    ["one foreign key among good ones", uploadedArtifactHarness(),
+      badManifest(keyedManifest("uploads/up-new/0", "uploads/up-3/1")), invalidManifest],
+    ["upload id with a slash", uploadedArtifactHarness(), badUploadId("up/new"), invalidRehome],
+    ["upload id of dots", uploadedArtifactHarness(), badUploadId(".."), invalidRehome],
+    ["upload id too long", uploadedArtifactHarness(), badUploadId("a".repeat(129)), invalidRehome],
+    ["non-string upload id", uploadedArtifactHarness(), rehomeBody({ ver: 2, uploadId: 7 }), invalidRehome],
     ["deleted", uploadedArtifactHarness(), rehomeBody({ ver: 1 }),
       { status: 409, body: { error: "version-deleted" } }],
     ["absent version", uploadedArtifactHarness(), rehomeBody({ ver: 9 }),
