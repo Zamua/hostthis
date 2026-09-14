@@ -25,8 +25,10 @@ type PasteRepo interface {
 	Get(domain.Slug) (domain.Paste, error)
 	// MarkReady / MarkFailed advance a still-PENDING paste only (MarkFailed
 	// also releases its reservation), so a late finalizer cannot resurrect a
-	// reconciler-failed paste; both no-op on a missing or non-pending paste.
-	// docs/SPEC.md "Paste lifecycle status".
+	// reconciler-failed paste; both no-op on a non-pending paste. MarkReady
+	// reports a paste that is gone, absent or under another generation, as
+	// domain.ErrNotFound; MarkFailed no-ops there. docs/SPEC.md "Paste
+	// lifecycle status".
 	MarkReady(domain.Paste) error
 	MarkFailed(domain.Paste) error
 }
@@ -244,6 +246,12 @@ func (u *Upload) finalize(paste domain.Paste, staged stagedUpload) {
 		return
 	}
 	if err := u.Repo.MarkReady(paste); err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			// The paste is gone and nothing else names this upload, so the
+			// object just written would leak.
+			discardUpload(u.Blob, u.Logger, paste.UploadID)
+			return
+		}
 		// The bytes ARE durable and only the status flip failed, so the paste
 		// stays pending and is served as a loading page until something flips
 		// it. Nothing retries the flip, so surface it loudly.

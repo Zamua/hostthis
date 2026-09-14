@@ -201,13 +201,26 @@ func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
 	return row.domain(), nil
 }
 
-// MarkReady advances a still-pending paste. Absent or already-settled is a
-// no-op rather than an error: a late finalizer racing the reconciler is normal.
+// MarkReady advances a still-pending paste. An already-settled paste is a
+// no-op: a late finalizer racing the reconciler is normal. A paste that is
+// gone, absent or re-minted under another generation, is domain.ErrNotFound.
 func (r *PasteRepo) MarkReady(paste domain.Paste) error {
-	return r.ask(context.Background(), "ready transition", http.MethodPost, "/paste/status", "slug",
+	var res struct {
+		Reason string `json:"reason"`
+		Error  string `json:"error"`
+	}
+	status, err := r.call(context.Background(), http.MethodPost, "/paste/status", "slug",
 		paste.Slug.String(), map[string]any{
 			"status": string(domain.PasteStatusReady), "generation": paste.Generation,
-		}, nil, nil)
+		}, &res)
+	switch {
+	case err != nil:
+		return err
+	case status < 300 && res.Reason == "absent",
+		status == http.StatusConflict && res.Error == "generation-mismatch":
+		return domain.ErrNotFound
+	}
+	return answer("ready transition", status, nil, nil)
 }
 
 // MarkFailed persists the failed row before driving its absolute allocation to

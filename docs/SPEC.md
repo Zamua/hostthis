@@ -568,7 +568,9 @@ After `Create` returns the URL, a background goroutine (owned by the
 upload service) runs the finalizer:
 
 1. stream the spill file to `uploads/<upload-id>/0`,
-2. on success: flip the paste `pending -> ready`,
+2. on success: flip the paste `pending -> ready`; when the paste is gone
+   (deleted meanwhile, or its slug re-minted under another generation), delete
+   `uploads/<upload-id>/` instead,
 3. on failure: flip the paste `pending -> failed`, then delete
    `uploads/<upload-id>/`.
 
@@ -2491,7 +2493,9 @@ its error:
 - a site insert refused (slug taken through every retry, over quota);
 - a refused redeploy or update append (over quota, not found, version too
   large, service full);
-- a create whose background blob write fails and marks the paste failed.
+- a create whose background blob write fails and marks the paste failed;
+- a create whose paste is gone when its background blob write lands, as the
+  ready transition reports.
 
 An ambiguous outcome keeps the bytes: a lost response, a transport failure, an
 accounting conflict the cell keeps pending, or any answer the metadata adapter

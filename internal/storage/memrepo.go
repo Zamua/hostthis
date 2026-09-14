@@ -166,24 +166,35 @@ func (r *MemRepo) Get(slug domain.Slug) (domain.Paste, error) {
 	return p.row, nil
 }
 
+// MarkReady reports a paste that is gone, absent or under another generation,
+// as not found, so the finalizer can discard the bytes it wrote.
 func (r *MemRepo) MarkReady(paste domain.Paste) error {
-	return r.setStatus(paste, domain.PasteStatusReady)
-}
-func (r *MemRepo) MarkFailed(paste domain.Paste) error {
-	return r.setStatus(paste, domain.PasteStatusFailed)
-}
-
-// setStatus advances a PENDING paste and nothing else. Ready and failed are
-// TERMINAL: a late finalizer racing the reconciler must not resurrect a failed
-// paste or fail a served one. An absent slug is a no-op for the same reason.
-func (r *MemRepo) setStatus(paste domain.Paste, st domain.PasteStatus) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if p, ok := r.pastes[paste.Slug]; ok && p.row.Status == domain.PasteStatusPending &&
-		p.row.Generation == paste.Generation {
-		p.row.Status = st
+	if !r.setStatus(paste, domain.PasteStatusReady) {
+		return ErrNotFound
 	}
 	return nil
+}
+
+func (r *MemRepo) MarkFailed(paste domain.Paste) error {
+	r.setStatus(paste, domain.PasteStatusFailed)
+	return nil
+}
+
+// setStatus advances a PENDING paste and nothing else, and reports whether the
+// paste exists under that generation. Ready and failed are TERMINAL: a late
+// finalizer racing the reconciler must not resurrect a failed paste or fail a
+// served one.
+func (r *MemRepo) setStatus(paste domain.Paste, st domain.PasteStatus) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.pastes[paste.Slug]
+	if !ok || p.row.Generation != paste.Generation {
+		return false
+	}
+	if p.row.Status == domain.PasteStatusPending {
+		p.row.Status = st
+	}
+	return true
 }
 
 // --- PasteAdmin --------------------------------------------------------------
