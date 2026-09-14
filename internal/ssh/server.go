@@ -266,7 +266,10 @@ func (s *Server) ListenAndServe() error {
 	}()
 	s.Logger.Printf("ssh: listening on %s", s.Addr)
 	err = srv.Serve(ln)
-	if errors.Is(err, net.ErrClosed) {
+	// Shutdown/Close close the listener and then the server's done channel;
+	// Serve reports ErrServerClosed instead of net.ErrClosed when it observes
+	// the second before returning from the failed Accept.
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, gossh.ErrServerClosed) {
 		return nil
 	}
 	return err
