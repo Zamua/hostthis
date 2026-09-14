@@ -85,14 +85,17 @@ jobs:
       # and restart-storms the application, dropping mid-suite connections.
       - name: celld storage and room contracts
         run: |
+          # One pinned image for server and client: the fork bundles mc, so the
+          # job depends on a single registry pull.
+          minio=pgsty/minio@sha256:68910c297bf4a22116283aa4e51cccd1d34b2301117538dcdbef5b0008c82573
           docker run -d --name ci-minio -p 9000:9000 \
             -e MINIO_ROOT_USER=admin -e MINIO_ROOT_PASSWORD=supersecret \
-            quay.io/minio/minio:latest server /data
+            "$minio" server /data
           for _ in $(seq 1 30); do
             curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null && break
             sleep 1
           done
-          docker run --rm --network host --entrypoint sh quay.io/minio/mc:latest -c \
+          docker run --rm --network host --entrypoint sh "$minio" -c \
             'mc alias set local http://127.0.0.1:9000 admin supersecret >/dev/null && mc mb local/ci-fleet'
 
           export AWS_ACCESS_KEY_ID=admin AWS_SECRET_ACCESS_KEY=supersecret
