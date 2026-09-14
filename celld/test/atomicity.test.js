@@ -959,6 +959,27 @@ test("Paste empty generation against an adopted row is a conflict", async () => 
   assert.equal(storedVersions(h.pasteStorage).length, 1);
 });
 
+test("Paste append answers an accounting conflict with 409 whatever Identity answered", async () => {
+  const h = artifactHarness({ identitySeed: new Map() });
+  const conflict = await responseJSON(await h.paste().append({ ...appendBody(), uploadId: "up-2" }));
+  assert.deepStrictEqual(conflict, { status: 409, body: { error: "artifact-accounting-conflict" } });
+  assert.equal(storedVersions(h.pasteStorage).length, 1);
+  assert.notEqual(h.pasteStorage.data.get("artifactPending"), undefined);
+});
+
+test("Paste legacy adoption answers a refused seed with 409 whatever Identity answered", async () => {
+  const pasteSeed = artifactPasteSeed();
+  const row = pasteSeed.get("row");
+  delete row.generation;
+  delete row.accountingVersion;
+  delete row.size;
+  const h = artifactHarness({ pasteSeed, identitySeed: new Map() });
+  const refused = await responseJSON(await h.paste().append({ ...appendBody("legacy-op"), generation: "" }));
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error, "adoption-seed-conflict");
+  assert.equal(storedVersions(h.pasteStorage).length, 1);
+});
+
 test("Paste rename persists a guarded projection through response loss", async () => {
   const h = artifactHarness();
   h.transport.failAfter = 1;

@@ -1990,7 +1990,7 @@ export class Paste {
         return Response.json({ error: "identity-unavailable" }, { status: 502 });
       }
       if (!response.ok) {
-        return Response.json({ error: "adoption-seed-conflict", detail: seed }, { status: response.status });
+        return Response.json({ error: "adoption-seed-conflict", detail: seed }, { status: 409 });
       }
       row.accountingVersion = seed.version;
       await this.state.storage.transaction(async (tx) => {
@@ -2144,7 +2144,7 @@ export class Paste {
       }
       if (!response.ok || decision.granted !== true ||
           decision.version !== pending.version || decision.allocated !== pending.target) {
-        return this.retryArtifactPending({ outcome: "conflict", status: response.status });
+        return this.retryArtifactPending({ outcome: "conflict" });
       }
 
       if (pending.kind === "append") {
@@ -2185,7 +2185,7 @@ export class Paste {
         return this.retryArtifactPending();
       }
       if (!response.ok) {
-        return this.retryArtifactPending({ outcome: "conflict", status: response.status });
+        return this.retryArtifactPending({ outcome: "conflict" });
       }
       await this.clearArtifactPending();
       return { outcome: "complete" };
@@ -2203,7 +2203,7 @@ export class Paste {
         return this.retryArtifactPending();
       }
       if (!response.ok) {
-        return this.retryArtifactPending({ outcome: "conflict", status: response.status });
+        return this.retryArtifactPending({ outcome: "conflict" });
       }
       await this.state.storage.transaction(async (tx) => {
         const current = await tx.get(ARTIFACT_PENDING);
@@ -2423,7 +2423,7 @@ export class Paste {
       return this.receiptResponse(receipt);
     }
     if (result.outcome === "conflict") {
-      return Response.json({ error: "artifact-accounting-conflict" }, { status: result.status });
+      return Response.json({ error: "artifact-accounting-conflict" }, { status: 409 });
     }
     return Response.json({ error: "artifact-accounting-unavailable" }, { status: 502 });
   }

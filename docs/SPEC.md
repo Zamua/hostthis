@@ -2493,10 +2493,16 @@ its error:
   large, service full);
 - a create whose background blob write fails and marks the paste failed.
 
-An ambiguous outcome keeps the bytes: a lost response, a transport failure, or
-an accounting conflict the cell keeps pending may still publish the version,
-and deleting its bytes then would break a live read. A leak is always
-preferable to that.
+An ambiguous outcome keeps the bytes: a lost response, a transport failure, an
+accounting conflict the cell keeps pending, or any answer the metadata adapter
+does not positively identify may still publish the version, and deleting its
+bytes then would break a live read. A leak is always preferable to that.
+
+The celld adapter therefore maps only identified answers to the definitive
+errors: an over-quota (507) or too-large (413) status, a conflict whose body
+names `slug-taken` or `create-aborted`, and a success answer stating
+`reason: "absent"`. Any other status or body, empty ones included, is an error
+the service treats as ambiguous.
 
 A process killed mid-upload leaks its prefix. That rare leak is accepted: there
 is no sweep.
@@ -2821,7 +2827,9 @@ monotonic versions make response loss and delayed delivery safe.
 A failed attempt, including one that throws, leaves the operation pending and
 re-arms the alarm with exponential backoff from one second to a five-minute
 ceiling, so a stuck operation costs a bounded number of commits instead of a
-tight retry loop. The alarm re-arms at that deadline before any outbound call,
+tight retry loop. An append whose Identity decision is neither a grant nor a
+quota refusal keeps its operation pending and answers
+`artifact-accounting-conflict` (409), whatever status Identity returned. The alarm re-arms at that deadline before any outbound call,
 so a handler the runtime kills mid-call cannot fire again at once; the count
 restarts when the operation advances a stage. A candidate version too large to
 persist is refused with `version-too-large` (413) before any charge. One the
@@ -2862,7 +2870,9 @@ sum `StoredBytes` only.
 A legacy artifact row that predates generations adopts lazily, on first
 mutation: the Paste cell assigns a fresh opaque generation, derives the charge
 from its live versions, and idempotently seeds the Identity account before the
-mutation proceeds; no quota refusal applies to already-retained data. A caller
+mutation proceeds; no quota refusal applies to already-retained data. A seed
+Identity refuses answers `adoption-seed-conflict` (409) and the mutation does
+not run. A caller
 holding the legacy row (an empty generation) addresses that incarnation; an
 empty generation against an adopted row remains a conflict. Reads serve legacy
 rows unchanged. There is no offline reconciliation pass and no flag day.

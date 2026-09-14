@@ -120,7 +120,10 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 
 	// 1. Reserve. Over-quota is refused HERE, before any row exists, so a
 	//    rejected upload leaves nothing behind.
-	if err := r.ask(ctx, "reserve", http.MethodPost, "/identity/reserve", "scope", owner, map[string]any{
+	var refusal struct {
+		Error string `json:"error"`
+	}
+	status, err := r.call(ctx, http.MethodPost, "/identity/reserve", "scope", owner, map[string]any{
 		"slug": p.Slug.String(), "generation": generation,
 		"size": p.Size, "userCap": userCap,
 		"now": now.UTC().UnixMilli(), "status": string(p.Status),
@@ -131,28 +134,40 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 			"fingerprint": fingerprint,
 			"startedAt":   now.UTC().UnixMilli(),
 		},
-	}, nil, map[int]error{
-		http.StatusInsufficientStorage: domain.ErrOverUserQuota,
-		http.StatusConflict:            domain.ErrSlugTaken,
-	}); err != nil {
+	}, &refusal)
+	switch {
+	case err != nil:
 		return err
+	case status == http.StatusInsufficientStorage:
+		return domain.ErrOverUserQuota
+	case status == http.StatusConflict && refusal.Error == "slug-taken":
+		return domain.ErrSlugTaken
+	case status >= 300:
+		return fmt.Errorf("celld: reserve: status %d %s", status, refusal.Error)
 	}
 
 	// 2. A lost response is ambiguous: retry the exact generation once so the
 	//    cell's same-generation replay can prove whether the row landed. A
 	//    transport failure is NOT released: the durable intent owns resolution,
 	//    and releasing could erase a row whose success response was lost.
-	status, err := r.callArtifactMutation(ctx, "/paste/put", p.Slug, map[string]any{
+	status, err = r.callArtifactMutation(ctx, "/paste/put", p.Slug, map[string]any{
 		"row": wireRow, "generation": generation, "fingerprint": fingerprint,
-	}, nil)
-	if err := answer("paste put", status, err, map[int]error{http.StatusConflict: domain.ErrSlugTaken}); err != nil {
-		if errors.Is(err, domain.ErrSlugTaken) {
-			_, _ = r.call(ctx, http.MethodPost, "/identity/release", "scope", owner,
-				map[string]any{
-					"slug": p.Slug.String(), "generation": generation, "intentId": intentID,
-				}, nil)
-		}
+	}, &refusal)
+	if err != nil {
 		return err
+	}
+	if status == http.StatusConflict && (refusal.Error == "slug-taken" || refusal.Error == "create-aborted") {
+		// This generation's row can never land, so its charge is released.
+		_, _ = r.call(ctx, http.MethodPost, "/identity/release", "scope", owner,
+			map[string]any{
+				"slug": p.Slug.String(), "generation": generation, "intentId": intentID,
+			}, nil)
+		return domain.ErrSlugTaken
+	}
+	if status >= 300 {
+		// Any other conflict may name this generation's own row; the intent
+		// resolves it.
+		return fmt.Errorf("celld: paste put: status %d %s", status, refusal.Error)
 	}
 
 	// 3. Confirm. The intent is discharged only once the row is durable. A
@@ -426,9 +441,11 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 		return domain.AppendResult{}, err
 	}
 	var res struct {
-		Appended  bool `json:"appended"`
-		Ver       int  `json:"ver"`
-		WasPinned bool `json:"wasPinned"`
+		Appended  *bool  `json:"appended"`
+		Reason    string `json:"reason"`
+		Error     string `json:"error"`
+		Ver       int    `json:"ver"`
+		WasPinned bool   `json:"wasPinned"`
 	}
 	status, err := r.callArtifactMutation(ctx, "/paste/append", slug, map[string]any{
 		"opId": opID, "generation": generation, "userCap": userCap,
@@ -437,22 +454,24 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 		"kind": string(kind), "contentSha": "", "uploadId": uploadID, "size": size,
 		"manifest": manifest, "now": now.UTC().UnixMilli(),
 	}, &res)
-	if status == http.StatusInsufficientStorage {
-		return domain.AppendResult{}, domain.ErrOverUserQuota
-	}
-	if err != nil {
+	// Only an identified refusal is definitive: the service deletes the upload's
+	// bytes on one, and any other answer may still publish the version.
+	switch {
+	case err != nil:
 		return domain.AppendResult{}, err
-	}
-	if status == http.StatusRequestEntityTooLarge {
+	case status == http.StatusInsufficientStorage:
+		return domain.AppendResult{}, domain.ErrOverUserQuota
+	case status == http.StatusRequestEntityTooLarge:
 		return domain.AppendResult{}, fmt.Errorf("%w: version too large to store", domain.ErrTooManyFiles)
-	}
-	if status == http.StatusConflict {
-		return domain.AppendResult{}, fmt.Errorf("celld: append accounting conflict")
-	}
-	if !res.Appended {
+	case status >= 300 || res.Appended == nil:
+		return domain.AppendResult{}, fmt.Errorf("celld: append: unrecognised answer: status %d %s", status, res.Error)
+	case *res.Appended:
+		return domain.AppendResult{NewVer: res.Ver, WasPinned: res.WasPinned}, nil
+	case res.Reason == "absent":
 		return domain.AppendResult{}, domain.ErrNotFound
+	default:
+		return domain.AppendResult{}, fmt.Errorf("celld: append: unrecognised refusal %q", res.Reason)
 	}
-	return domain.AppendResult{NewVer: res.Ver, WasPinned: res.WasPinned}, nil
 }
 
 // AppendVersionWithQuotaCheck atomically reserves charge and publishes one version.

@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
 	"github.com/Zamua/hostthis/internal/storagetest"
@@ -59,6 +63,56 @@ func TestUpdate_FailedAppendObjects(t *testing.T) {
 			}
 			if n := objectsUnder(t, root); n != want {
 				t.Fatalf("objects after failed update = %d, want %d", n, want)
+			}
+		})
+	}
+}
+
+// appendAnswerCell serves an owned row and answers every append with one
+// scripted status and body.
+type appendAnswerCell struct {
+	status int
+	body   string
+}
+
+func (c appendAnswerCell) RoundTrip(req *http.Request) (*http.Response, error) {
+	status, body := http.StatusOK, `{"slug":"slugone1","identity":"key:owner","generation":"generation-1","status":"ready","kind":"html"}`
+	if req.URL.Path == "/paste/append" {
+		status, body = c.status, c.body
+	}
+	return &http.Response{
+		StatusCode: status, Header: make(http.Header), Request: req,
+		Body: io.NopCloser(strings.NewReader(body)),
+	}, nil
+}
+
+// Over the celld adapter only an explicit absent answer deletes the staged
+// object; an answer the adapter cannot identify keeps it.
+func TestUpdate_CelldAppendAnswerDecidesTheObjects(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		status   int
+		body     string
+		wantKept bool
+	}{
+		{"explicit absent", http.StatusOK, `{"appended":false,"reason":"absent"}`, false},
+		{"unknown op", http.StatusNotFound, "unknown op\n", true},
+		{"accounting conflict", http.StatusConflict, `{"error":"artifact-accounting-conflict"}`, true},
+		{"empty server error", http.StatusInternalServerError, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blobs, root := realBlobsAt(t)
+			repo := celld.NewPasteRepo("https://cell", &http.Client{Transport: appendAnswerCell{tc.status, tc.body}})
+			m := NewManage(repo, NewStandaloneBlobUnit(blobs))
+			if _, err := m.Update("slugone1", "key:owner", strings.NewReader("<!doctype html><p>v2</p>"), ""); err == nil {
+				t.Fatal("update = nil, want the append's failure")
+			}
+			want := 0
+			if tc.wantKept {
+				want = 1
+			}
+			if n := objectsUnder(t, root); n != want {
+				t.Fatalf("objects after refused update = %d, want %d", n, want)
 			}
 		})
 	}

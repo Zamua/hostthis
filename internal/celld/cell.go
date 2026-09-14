@@ -90,14 +90,19 @@ func (c *cell) call(ctx context.Context, method, path, key, val string, body, ou
 		if len(detail) > 0 {
 			return resp.StatusCode, fmt.Errorf("celld: %s: status %d: %s", path, resp.StatusCode, detail)
 		}
+		return resp.StatusCode, fmt.Errorf("celld: %s: status %d", path, resp.StatusCode)
+	}
+	if out == nil {
 		return resp.StatusCode, nil
 	}
-	// Answer statuses >= 300 carry sentinel meaning, not a decodable body: a
-	// cell 404 says "not found\n", which is no caller's JSON.
-	if out != nil && resp.StatusCode < 300 {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil && !errors.Is(err, io.EOF) {
-			return resp.StatusCode, fmt.Errorf("celld: decode %s: %w", path, err)
-		}
+	if resp.StatusCode >= 300 {
+		// An answer's JSON body names which refusal it is. A plain-text body (a
+		// cell 404's "not found\n") decodes to nothing and leaves out untouched.
+		_ = json.NewDecoder(resp.Body).Decode(out)
+		return resp.StatusCode, nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil && !errors.Is(err, io.EOF) {
+		return resp.StatusCode, fmt.Errorf("celld: decode %s: %w", path, err)
 	}
 	return resp.StatusCode, nil
 }
