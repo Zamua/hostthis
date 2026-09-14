@@ -90,6 +90,21 @@ async function splitLegacyVersions(tx) {
   await tx.delete(LEGACY_VERSIONS);
 }
 
+// A caller that predates upload ids sends none, and its versions record none.
+function isUploadId(value) {
+  return value === undefined || value === null || typeof value === "string";
+}
+
+function withUploadId(version, uploadId) {
+  return uploadId ? { ...version, uploadId } : version;
+}
+
+// The pin when it is live, otherwise the newest live version.
+function servedOf(row, live) {
+  return (row.pinnedVersion ? live.find((v) => v.ver === row.pinnedVersion) : null) ??
+    live.reduce((a, b) => (b.ver > a.ver ? b : a));
+}
+
 function setOwn(object, key, value) {
   Object.defineProperty(object, key, {
     value,
@@ -1721,6 +1736,7 @@ const PASTE_OPS = {
   append: mutation((self, body) => self.append(body)),
   delversion: mutation((self, body) => self.deleteVersion(body)),
   pin: mutation((self, body) => self.pin(body)),
+  rehome: mutation((self, body) => self.rehome(body)),
   pushkey: mutation((self) => self.pushKey(), { body: false }),
   pushsign: mutation((self, body) => self.pushSign(body)),
 };
@@ -1742,6 +1758,9 @@ export class Paste {
     }
     if (!requireShape(body, { fingerprint: "string" }) || !body.row) {
       return Response.json({ error: "missing-create-fingerprint" }, { status: 400 });
+    }
+    if (!isUploadId(body.row.uploadId)) {
+      return Response.json({ error: "invalid-upload-id" }, { status: 400 });
     }
     return this.state.storage.transaction(async (tx) => {
       // The slug namespace is global, and this cell IS the slug, so uniqueness is
@@ -1777,10 +1796,10 @@ export class Paste {
       const updates = new Map([
         ["row", body.row],
         ["createFingerprint", body.fingerprint],
-        [versionKey(1), {
+        [versionKey(1), withUploadId({
           ver: 1, kind: body.row.kind, contentSha: body.row.contentSha,
           size: body.row.size, createdAt: body.row.createdAt, deleted: false,
-        }],
+        }, body.row.uploadId)],
         ["maxVer", 1],
       ]);
       if (body.row.manifest) {
@@ -2349,6 +2368,9 @@ export class Paste {
     if (!requireShape(body, { size: "uint" })) {
       return Response.json({ error: "invalid-size" }, { status: 400 });
     }
+    if (!isUploadId(body.uploadId)) {
+      return Response.json({ error: "invalid-upload-id" }, { status: 400 });
+    }
     const row = await this.state.storage.get("row");
     if (!row) {
       return Response.json({ appended: false, reason: "absent" });
@@ -2372,7 +2394,7 @@ export class Paste {
       userCap: body.userCap ?? 0,
       latestVersion: nextVer,
       wasPinned: (row.pinnedVersion ?? 0) !== 0,
-      mutation: {
+      mutation: withUploadId({
         ver: nextVer,
         kind: body.kind,
         contentSha: body.contentSha,
@@ -2380,7 +2402,7 @@ export class Paste {
         createdAt: body.now,
         deleted: false,
         manifest: body.manifest ?? null,
-      },
+      }, body.uploadId),
     };
     try {
       await this.state.storage.transaction(async (tx) => {
@@ -2413,7 +2435,9 @@ export class Paste {
         ...version,
         manifest: (await storage.get(manifestKey(version.ver))) ?? null,
       })));
-    return Response.json([...versions].sort((a, b) => b.ver - a.ver));
+    return Response.json(versions
+      .map((version) => ({ ...version, uploadId: version.uploadId ?? "" }))
+      .sort((a, b) => b.ver - a.ver));
   }
 
   // Shrink publishes the tombstone before releasing owner capacity.
@@ -2436,7 +2460,9 @@ export class Paste {
       return Response.json({ deleted: false, reason: "absent" });
     }
     if (version.deleted) {
-      return Response.json({ deleted: true, totalSize: this.liveCharge(versions) });
+      return Response.json({
+        deleted: true, totalSize: this.liveCharge(versions), upload: version.uploadId ?? "",
+      });
     }
     const live = versions.filter((candidate) => !candidate.deleted);
     const served = row.pinnedVersion ||
@@ -2451,7 +2477,10 @@ export class Paste {
     }
     await this.rollServed(this.state.storage, row, versions);
     const target = this.liveCharge(versions);
-    const receipt = { status: 200, body: { deleted: true, totalSize: target } };
+    const receipt = {
+      status: 200,
+      body: { deleted: true, totalSize: target, upload: version.uploadId ?? "" },
+    };
     const pending = {
       kind: "deleteVersion",
       stage: "decide",
@@ -2496,13 +2525,10 @@ export class Paste {
       row.pinnedVersion = 0;
       return;
     }
-    const pinned = row.pinnedVersion
-      ? live.find((v) => v.ver === row.pinnedVersion)
-      : null;
-    if (row.pinnedVersion && !pinned) {
+    const v = servedOf(row, live);
+    if (row.pinnedVersion && v.ver !== row.pinnedVersion) {
       row.pinnedVersion = 0;
     }
-    const v = pinned ?? live.reduce((a, b) => (b.ver > a.ver ? b : a));
     row.contentSha = v.contentSha;
     row.kind = v.kind;
     row.manifest = v.ver === fresh?.ver
@@ -2558,6 +2584,49 @@ export class Paste {
     return this.receiptResponse(receipt);
   }
 
+  // Repoints a live version at a re-homed upload. Sizes and charge are
+  // unchanged, so no accounting runs and a repeat rewrites the same values. A
+  // legacy row is refused rather than adopted, because adoption seeds Identity.
+  async rehome(body) {
+    if (!requireShape(body, { generation: "string", ver: "posint", uploadId: "string" })) {
+      return Response.json({ error: "invalid-rehome" }, { status: 400 });
+    }
+    if (typeof body.manifest !== "object" || Array.isArray(body.manifest)) {
+      return Response.json({ error: "invalid-manifest" }, { status: 400 });
+    }
+    const row = await this.state.storage.get("row");
+    if (!row) {
+      return Response.json({ error: "paste-absent" }, { status: 404 });
+    }
+    if (row.generation !== body.generation) {
+      return Response.json({ error: "generation-mismatch" }, { status: 409 });
+    }
+    const versions = await loadVersions(this.state.storage);
+    const version = versions.find((candidate) => candidate.ver === body.ver);
+    if (!version) {
+      return Response.json({ error: "version-absent" }, { status: 404 });
+    }
+    if (version.deleted) {
+      return Response.json({ error: "version-deleted" }, { status: 409 });
+    }
+    const served = servedOf(row, versions.filter((candidate) => !candidate.deleted));
+    await this.state.storage.transaction(async (tx) => {
+      await splitLegacyVersions(tx);
+      const updates = new Map([[versionKey(body.ver), { ...version, uploadId: body.uploadId }]]);
+      if (body.manifest) {
+        updates.set(manifestKey(body.ver), body.manifest);
+      } else {
+        await tx.delete(manifestKey(body.ver));
+      }
+      if (served.ver === body.ver) {
+        row.manifest = body.manifest;
+        updates.set("row", row);
+      }
+      await tx.put(updates);
+    });
+    return Response.json({ rehomed: true });
+  }
+
   // Deletion tombstones the incarnation before its allocation is released.
   async remove(body) {
     const prior = await this.mutationReceipt(body.generation, body.opId);
@@ -2575,7 +2644,6 @@ export class Paste {
     if (refused) {
       return refused;
     }
-    const receipt = { status: 200, body: { removed: true } };
     const version = (row.accountingVersion ?? 0) + 1;
     const pending = {
       kind: "remove",
@@ -2589,7 +2657,14 @@ export class Paste {
       userCap: 0,
       latestVersion: (await this.state.storage.get("maxVer")) ?? 1,
     };
-    await this.state.storage.transaction(async (tx) => {
+    // The ids are taken inside the removal: once the row is gone the slug can be
+    // re-created, and a later read would name the new incarnation's uploads.
+    const receipt = await this.state.storage.transaction(async (tx) => {
+      const uploads = (await loadVersions(tx))
+        .sort((a, b) => a.ver - b.ver)
+        .map((v) => v.uploadId)
+        .filter(Boolean);
+      const removed = { status: 200, body: { removed: true, uploads } };
       await tx.delete("row");
       await tx.put(new Map([
         ["artifactTombstone", {
@@ -2600,9 +2675,10 @@ export class Paste {
           accountingVersion: version,
         }],
         [ARTIFACT_PENDING, pending],
-        [this.receiptKey(body.generation, body.opId), receipt],
+        [this.receiptKey(body.generation, body.opId), removed],
       ]));
       await tx.setAlarm(Date.now());
+      return removed;
     });
     await this.resumeArtifactPending();
     return this.receiptResponse(receipt);
