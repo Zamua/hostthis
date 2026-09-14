@@ -772,15 +772,16 @@ object key, so resolving a file needs the manifest alone. A redeploy stages
 every file, changed or not, under a new prefix: no two uploads share bytes,
 and deleting one version's bytes cannot affect any other.
 
-The flat descriptor's root entry is ALWAYS the manifest's root entry. Pairing
-the root with some other staged file's key would serve the wrong bytes
-silently rather than fail.
+A read resolves the root through the manifest: its `/` entry, else
+`index.html`. The flat descriptor keeps kind and size; its content sha is set
+only on rows written before per-upload keys, where it is the legacy read
+fallback. A version written with a key leaves that sha empty, so a stale flat
+field can never name bytes the manifest does not.
 
-A directory is written through the SAME insert a document uses: the caller
-supplies a manifest, which is carried into the stored descriptor verbatim. A
-caller that supplies none leaves it empty and the insert synthesizes the
-one-entry form from the flat fields, so a document needs to know nothing about
-manifests. There is no site-specific write path.
+A directory is written through the SAME insert a document uses, and every
+caller supplies a manifest, carried into the stored descriptor verbatim. A
+document supplies a one-entry manifest at `/` holding its object key. There is
+no site-specific write path.
 
 ### Serving a directory
 
@@ -2483,13 +2484,19 @@ bytes.
 Nothing asks whether anything else still uses the bytes, because nothing else
 can.
 
-Every failed upload deletes its own prefix before returning its error:
+An upload that is definitively refused deletes its own prefix before returning
+its error:
 
 - an untar abort (bomb guard, unsafe entry, too many files, empty archive);
-- a site insert that fails or exhausts its slug retries;
-- a refused redeploy;
-- an update whose append is refused after staging (over quota, conflict);
+- a site insert refused (slug taken through every retry, over quota);
+- a refused redeploy or update append (over quota, not found, version too
+  large, service full);
 - a create whose background blob write fails and marks the paste failed.
+
+An ambiguous outcome keeps the bytes: a lost response, a transport failure, or
+an accounting conflict the cell keeps pending may still publish the version,
+and deleting its bytes then would break a live read. A leak is always
+preferable to that.
 
 A process killed mid-upload leaks its prefix. That rare leak is accepted: there
 is no sweep.
