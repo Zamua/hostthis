@@ -499,32 +499,25 @@ With* options. Refusal behavior is pinned by
   application/pdf` and rendered by pdf.js with scripting disabled, so an
   embedded-JS PDF cannot execute.
 - **Streaming I/O**: server reads stdin as a stream (no full-buffer
-  allocation), tees through three sinks in parallel: a sha256 hasher
-  (over uncompressed bytes - content addressability is by ORIGINAL
-  content), a zstd writer (compressed output to staging), and a
-  raw-byte counter (the 100 MiB fast-fail). After EOF, the compressed
-  staging buffer's size is compared against the 10 MiB cap. If it
-  fits, the staged bytes are flushed to the configured `BlobStore`
-  under the original-content sha256 key. If not, the upload is
-  rejected with `upload exceeds 10 MiB compressed cap; your bytes
-  compress to <actual> - try removing binary data` and the staging
-  buffer is discarded.
+  allocation) through two sinks: a zstd writer into a temporary spill
+  file and a raw-byte counter (the 100 MiB fast-fail). After EOF, the
+  spill file's size is compared against the 10 MiB cap. If it fits, the
+  file streams to the configured `BlobStore` under the upload's own
+  prefix (see "Blob storage backends → Object keys"). If not, the upload
+  is rejected with `upload exceeds 10 MiB compressed cap; your bytes
+  compress to <actual> - try removing binary data` and the spill file is
+  discarded.
 - **Storage backend**: pluggable. See "Blob storage backends" below.
-  Default is the on-disk store (`data/blobs/<sha256[:2]>/<sha256>`).
+  Default is the on-disk store (`data/blobs/uploads/<upload-id>/<n>`).
   Markdown and diff are never rendered on the read path: such a read
   either streams the raw bytes (when the client asks for them via `?raw`)
   or serves the fixed client-render shell, so server memory is constant
   regardless of paste size.
 - **Storage compression**: all blob bytes are persisted zstd-encoded
-  by the storage layer. Compression is invisible above the BlobStore
-  interface - `Put` compresses on the way in (level 3, balance of
-  speed and ratio), `Get` decompresses on the way out. The blob key
-  remains the sha256 of the ORIGINAL (uncompressed) bytes, so dedup
-  works on logical content. Both the disk store and the S3 backend
-  share the same encoding. See "Blob storage backends → On-disk
-  format" below for the compression-version header and the fallback
-  for older uncompressed blobs (rolling-migration support; no flag
-  day).
+  (level 3) by the storage layer, identically on disk and S3.
+  Compression is invisible above the BlobStore interface. See "Blob
+  storage backends → On-disk format" for the header and the fallback for
+  uncompressed objects.
 
 ## Paste lifecycle status (async blob write)
 
@@ -535,105 +528,70 @@ acknowledgement, so the uploader gets a URL back as soon as the paste is
 durably reserved + named, not after the bytes finish landing in the
 object store.
 
-This whole section describes the DETACHED-store path (the default - local,
-where the blob write happens after
-the metadata commit. On a backend that binds bytes inside the metadata
-commit this model COLLAPSES: the bytes are staged
-durably before the metadata commits and the pointer co-commits with the row, so
-there is no window between row and bytes - such a paste commits
-`ready` directly and the pending machinery below does not run for it.
-
-### Why it exists
-
-The original `Create` ran strictly synchronously: stream + hash +
-compress (in memory, ~3 ms), then `PutPrecompressed` the blob to the
-object store (~250 ms, the bottleneck), then the metadata insert
-(~20 ms). The uploader waited for all three before seeing the URL.
-
-The blob bytes are content-addressed and immutable, and the metadata
-insert already enforces quota (the committed paste + version rows count
-against the owner's quota the moment they land). So we can return the URL
-right after the metadata is committed and finish the blob write in the
-background. The cost is a window where the URL exists but the bytes do not
-yet, which the status models explicitly.
+The bytes and the metadata are written in two steps, and the status models
+the window between them.
 
 ### The three states
 
 - **`pending`**: the metadata is committed (slug claimed, quota checked,
-  paste row written) but the content blob has not finished landing in
-  the object store. A GET on a pending paste serves a lightweight
+  paste row written) but the content has not finished landing in the
+  object store. A GET on a pending paste serves a lightweight
   **loading page** that auto-refreshes (a `<meta http-equiv="refresh">`
-  ~1 s poll) until the paste resolves. The pending paste's authoritative
-  rows already count toward the uploader's quota (the quota scan / sum
-  includes any non-`failed` paste), so a pending paste counts against
+  ~1 s poll) until the paste resolves. A pending paste counts against
   quota exactly like a ready one.
-- **`ready`**: the blob write succeeded and the status was flipped
-  `pending -> ready` by the background finalizer. A GET serves the
-  content exactly as before this feature existed. This is the terminal
-  success state.
-- **`failed`**: the background blob write failed (object store error,
-  or the finalizer explicitly failed the write). A GET serves a small
-  **error page**. A `failed` paste is excluded from the quota scan / sum
-  as part of the transition, so it no longer charges quota.
+- **`ready`**: the blob write succeeded and the background finalizer
+  flipped the paste `pending -> ready`. A GET serves the content. This is
+  the terminal success state.
+- **`failed`**: the background blob write failed. A GET serves a small
+  **error page**. The transition releases the paste's quota charge.
 
-A paste that predates this feature (a row with no persisted status) is
-read as **`ready`**: the absence of a status means "written before the
-lifecycle existed, therefore complete." This keeps the change a pure
-additive migration with no flag day.
+A row with no persisted status is read as **`ready`**.
 
 ### Create: the synchronous half
 
-`Create` now does, synchronously, before returning the URL:
+`Create` does, synchronously, before returning the URL:
 
-1. stream + hash + compress (hold the compressed body in the handling
-   pod's memory),
+1. mint the upload id, then stream + compress into a spill file on local
+   disk,
 2. detect the content kind,
 3. **check quota + write the authoritative paste row with
-   `status=pending`** (the fast metadata path, ~20 ms),
+   `status=pending`**, whose manifest already names the object key
+   `uploads/<upload-id>/0`,
 4. return the URL.
 
-Quota is enforced HERE, synchronously, by the same quota check used
-before (a serialized in-transaction
-sum on the single-transaction backends). An over-quota upload is rejected before any URL is
-handed out: the async split does not weaken the quota gate.
+Quota is enforced here, inside the serialized metadata commit, so an
+over-quota upload is rejected before any URL is handed out.
 
 ### Finalize: the asynchronous half
 
 After `Create` returns the URL, a background goroutine (owned by the
 upload service) runs the finalizer:
 
-1. `PutPrecompressed` the held bytes to the object store,
-2. on success: flip the paste `pending -> ready` (a small metadata CAS),
-3. on failure: flip the paste `pending -> failed` (a failed paste is
-   excluded from the quota scan / sum, returning the charged bytes).
+1. stream the spill file to `uploads/<upload-id>/0`,
+2. on success: flip the paste `pending -> ready`,
+3. on failure: flip the paste `pending -> failed`, then delete
+   `uploads/<upload-id>/`.
 
 The transitions are guarded: the finalizer only advances a paste that is
-still `pending`, so a late-arriving finalize against a row something else
-already moved off `pending` is a no-op rather than a resurrection.
+still `pending`, so a late finalize against a row already moved off
+`pending` is a no-op rather than a resurrection. Graceful shutdown waits
+for in-flight finalizers.
 
 ### Durability trade (read this)
 
-The compressed bytes live ONLY in the handling pod's memory between the
-synchronous metadata commit and the background blob write. **If the pod
-crashes in that window, those bytes are lost**: the metadata says
-`pending` but no blob will ever arrive. This is the one durability
-regression the feature introduces, and it is bounded:
+Between the metadata commit and the blob write, the compressed bytes exist
+only in the handling pod's spill file. **If the process dies in that
+window, those bytes are lost**: the metadata says `pending` and no bytes
+will arrive.
 
-- The window is the blob-write latency (~250 ms), not the whole request.
+- The window is the blob-write latency, not the whole request.
 - A paste stuck `pending` STAYS pending: nothing ages it out (see
   "Phantom entries are accepted, not repaired"). It keeps its charged
-  bytes and shows a loading screen until its owner deletes it. This is the
-  detached-store path only - a bind-inside-commit backend commits
-  READY with the bytes already durable, so it has no pending window at all.
-- Nothing that was previously durable becomes less durable: a `ready`
-  paste is exactly as durable as before (blob in object store, metadata
-  committed). Only the brief pending window is at-risk, and only for
-  bytes the uploader has not yet been told are permanent.
-
-This is an explicit, documented trade: a ~250 ms at-risk window on the
-freshest uploads, in exchange for hiding the ~250 ms blob-write latency
-from every uploader. It applies only to the detached-store path; the
-deployed shape does not take it.
+  bytes and shows a loading screen until its owner deletes it, which also
+  deletes whatever part of its prefix landed.
+- A `ready` paste is fully durable: bytes in the object store, metadata
+  committed. Only bytes the uploader has not yet been told are permanent
+  are at risk.
 
 ## Static site archives
 
@@ -648,7 +606,7 @@ https://abc12345.hostthis.dev
 
 There is no new verb and no flag. hostthis DETECTS the archive the same
 way it detects Markdown vs HTML (by sniffing the upload), safe-untars
-it, stores each file as a content-addressed blob plus a manifest, and
+it, stores each file under the deploy's own upload prefix plus a manifest, and
 serves the directory at `<slug>.hostthis.dev/<path>`. Everything else -
 identity, quota, versioning, the security model - is
 identical to a single-file paste. A static site is just "a paste that
@@ -746,8 +704,8 @@ An **Artifact** is a slug, an owner, and a versioned **Manifest**:
   sites from colliding is gone, because there is no second family to collide
   with.
 - `Identity` - the owner's SSH key fingerprint. Quota and capability gate.
-- `Manifest` - the value object mapping each safe relative path to its blob
-  (sha256, size, content-type-by-extension).
+- `Manifest` - the value object mapping each safe relative path to its file
+  (object key, size, compressed size, content-type-by-extension).
 - `PinnedVersion` / `LatestVersion`, `CreatedAt` / `UpdatedAt` - as before.
 
 **A single document is a one-entry manifest at `/`.** That is the whole
@@ -770,18 +728,14 @@ MANIFEST, not a single blob reference:
 Per-file versioning was rejected: it gives no coherent answer to "what did this
 look like at version 3" and no sensible pin target.
 
-**Stored shape.** The version row carries the encoded manifest alongside the
-flat root descriptor (kind, sha, size) it already had. The flat fields are
-RETAINED rather than replaced: a row written before versions carried a manifest
-has no other description of its content, and resolves through them via
-`Version.RootKind` / `RootSHA` / `RootSize`. So the manifest is additive - no
-migration, and an old row is readable unchanged. A manifest that fails to
-decode falls back the same way rather than failing the read, since the content
-it describes is still perfectly readable.
+**Stored shape.** The version row carries the encoded manifest, its upload id,
+and a flat root descriptor (kind, root entry, size). A row without a manifest,
+or whose manifest fails to decode, resolves through the flat descriptor rather
+than failing the read.
 
-Every version WRITTEN from here on carries one, including a single document,
-whose manifest is simply of length one at `/`. That is what lets a reader stop
-asking which shape it holds.
+Every version is written with a manifest, including a single document, whose
+manifest is of length one at `/`. That is what lets a reader stop asking which
+shape it holds.
 
 The manifest lives INSIDE the served-content descriptor, not beside it, so the
 head's existing "the whole served descriptor rolls, never one field" invariant
@@ -801,90 +755,32 @@ any other artifact. An update has never thrown away what it replaced, and a
 directory is not an exception.
 
 It therefore charges like an update: every live version counts against quota.
-Each version's charge is the sum of every final manifest path's compressed size.
-The same content hash may refer to one physical blob, but logical quota charges
-each retained path in each retained version. An owner reclaims bytes only by
-deleting versions they no longer retain.
-
-**A redeploy is the migration.** A directory deployed before the collapse has
-no artifact, so redeploying it writes one and drops the legacy row. That is not
-only a convenience: without it a legacy directory becomes permanently
-un-redeployable the moment the artifact path is wired. The artifact is written
-FIRST, so a failure between the two steps leaves the old row readable rather
-than losing it.
-
-The legacy row cannot be kept as a rollback escape hatch. A directory present
-in both families is enumerated by both, so its owner would see it twice and be
-charged for it twice.
+Each version's charge is the sum of every final manifest path's compressed size,
+and each version holds its own copy of every file, so the charge is also what
+it occupies. An owner reclaims bytes only by deleting versions they no longer
+retain.
 
 **One artifact appears in one listing.** A directory is an artifact, so it is
 enumerated by the artifact index. Anything that also reports it as a site would
-show it twice and charge it twice - the same trap in two places. During the
-migration the site surface therefore reports ONLY rows the artifact families do
-not yet cover, and that set empties as the migration runs.
-
-**Unchanged files reuse physical storage, not logical quota.** Blobs are
-content-addressed across paths, versions, artifacts, and owners. Reusing an
-existing hash writes no second physical object. It still contributes its
-compressed size to every final manifest path that retains it, so physical
-storage deduplication can never weaken a user's quota ceiling.
+show it twice and charge it twice - the same trap in two places.
 
 ### Storage
 
-Files live in the content-addressed `BlobStore`: each is `Put` under its
-sha256, so identical files across versions, across artifacts, and across owners
-are stored once.
+Each upload's files live under that upload's own prefix in the `BlobStore`
+(see "Blob storage backends → Object keys"). A manifest entry carries its
+object key, so resolving a file needs the manifest alone. A redeploy stages
+every file, changed or not, under a new prefix: no two uploads share bytes,
+and deleting one version's bytes cannot affect any other.
 
-On the transactional blob path, where blobs are addressed by ID rather than by
-hash, each manifest entry carries its own blob id. A manifest is therefore
-self-sufficient: resolving a file needs the manifest alone, with no side-table
-to keep in step with it. A redeploy stages only the files that CHANGED, so an
-entry with no newly staged blob keeps the id a previous deploy bound.
-
-The flat descriptor's blob id is the ROOT entry's, on every write path that
-sets one. Pairing the root's content hash with an arbitrary one of a
-directory's staged blobs resolves the root to some other file's bytes - a
-silent content mixup rather than an error.
-
-### Draining the legacy site family
-
-A directory deployed before the collapse migrates when redeployed, but one
-nobody touches would sit on the legacy read path forever - and the old family
-cannot be deleted while any row remains. A sweep converts the rest: a
-node-local scan of the site family on the units THIS node mounted, no fan-out.
-It runs late for the same reason the intent sweep does - converting a row writes
-to families on other shards, which may not be mounted anywhere during a cold
-start - so a first pass runs once the node is serving.
-
-It then repeats on the sweep interval until it converges. Which units a node
-owns is still settling while a rollout is in flight, so a pass that runs then
-can legitimately see nothing, and a once-only pass would never run again. Each
-pass reports what it moved even when that is nothing, because a drain that is
-silent when idle cannot be told from one that was never wired.
-
-Each conversion is ONE transaction. The two families co-shard on the slug, so
-the artifact is written and the legacy row deleted together: the directory is
-never in both places (listed twice, charged twice) and never in neither (lost).
-The charged size carries over verbatim - a migration must not re-price what the
-owner is already paying.
-
-**Only a directory's own identity may supersede it**, checked inside that
-transaction against the legacy row's recorded owner rather than trusted from the
-caller. Every caller does check first, so this refuses nothing they would ask
-for; it is stated here because the shape a caller that forgot would take is slug
-takeover - one identity's artifact standing where another's directory was.
+The flat descriptor's root entry is ALWAYS the manifest's root entry. Pairing
+the root with some other staged file's key would serve the wrong bytes
+silently rather than fail.
 
 A directory is written through the SAME insert a document uses: the caller
 supplies a manifest, which is carried into the stored descriptor verbatim. A
 caller that supplies none leaves it empty and the insert synthesizes the
 one-entry form from the flat fields, so a document needs to know nothing about
 manifests. There is no site-specific write path.
-
-One **ArtifactRepo** persists, gets and deletes artifacts on every metadata
-backend. There is no second repository, no second enumeration index, no second
-quota scan, and no second entry in the durable-intent vocabulary. Quota is the
-stored-byte total across an artifact's non-deleted versions - the same rule
-for one file or two hundred.
 
 ### Serving a directory
 
@@ -905,9 +801,6 @@ Lookup resolves either shape. A document keys its single entry at `/`, having
 no filename to be known by; a directory keys files by path and answers `/` with
 its index. The root lookup checks `/` first and then `index.html`, so one
 function serves both.
-
-A slug with no artifact falls back to a legacy site row, the separate family
-that predates the unified model. That fallback is what the migration removes.
 
 ### SPA fallback (route vs. asset)
 
@@ -1009,10 +902,8 @@ Nothing about the product opinions changes for sites:
   upload uses, gated by the same Sybil per-subnet admission.
 - **Quota** counts every path in every retained version against the SAME
   per-identity cap, using each final manifest entry's stored (post-zstd)
-  compressed size. It does not deduplicate repeated content hashes for quota:
-  content-addressing is a physical storage optimization, while quota is the
-  logical amount retained for the owner. Each entry keeps its uncompressed
-  `Size` for display; `CompressedSize` is the quota basis. The untar guard
+  compressed size. Each entry keeps its uncompressed `Size` for display;
+  `CompressedSize` is the quota basis. The untar guard
   separately bounds the uncompressed running total against the owner's remaining
   allowance. The persisted charge is computed from the final normalized
   manifest, so duplicate archive entries that overwrite one path do not charge
@@ -1022,7 +913,7 @@ Nothing about the product opinions changes for sites:
   same URL, new immutable manifest), so rollback / history ride the
   existing machinery; otherwise a deploy lands as a fresh slug, matching
   whatever pastes do. Either way a deploy is ATOMIC - the new manifest
-  only becomes the served one once every blob is written and the
+  only becomes the served one once every file is written and the
   manifest is persisted; a half-uploaded site never serves.
 
 #### Deploy to an existing site slug (re-deploy in place)
@@ -1041,10 +932,11 @@ site-vs-paste, the slug decides new-vs-update.
   other not-found, so a non-owner cannot probe for which slugs exist
   or who owns them. This matches the paste-update ownership posture
   exactly (see "Upload (update an existing slug)").
-- **Atomic append.** Every blob in the final manifest is staged first. The
-  metadata operation then admits and publishes one immutable manifest version.
-  The old served version remains visible until publication finishes, and a
-  half-finished deploy never serves a partial site.
+- **Atomic append.** Every file is staged under a new upload prefix first. The
+  metadata operation then admits and publishes one immutable manifest version;
+  a refused redeploy deletes that prefix. The old served version remains
+  visible until publication finishes, and a half-finished deploy never serves
+  a partial site.
 - **Quota charges the appended version in full.** A redeploy retains every prior
   live version, so it receives no replacement credit. Admission evaluates the
   owner's existing all-live charge plus the final manifest's logical compressed
@@ -1079,8 +971,7 @@ The harness ships four committed site fixtures under
   real file served directly, never via the fallback.
 
 For each fixture the harness tars the build output, deploys it through the
-real `DeploySite` use case over a real repo + content-addressed
-blob store, then fetches every built file back over the real HTTP serving
+real `DeploySite` use case over a real repo + blob store, then fetches every built file back over the real HTTP serving
 surface and asserts the served bytes are byte-identical to the fixture
 file, the content-type matches the extension, `/` serves the root
 `index.html`, the deep route serves the root `index.html` via the SPA
@@ -1272,8 +1163,8 @@ Room data is small JSON/bytes blobs - app STATE, not files - so it lives
 in the **metadata backend** hostthis already runs (the configurable
 metadata store: the memory engine for dev, celld for the
 object-store-backed and horizontally-scaled deploys), NOT in the
-content-addressed BlobStore. The BlobStore is for the larger,
-dedupe-worthy file bytes of pastes and sites; room values are small,
+BlobStore. The BlobStore holds the larger file bytes of pastes and
+sites; room values are small,
 mutable, and per-room, so they belong with the metadata. Large blobs are
 explicitly out of scope for rooms - an app that needs to host files uses
 the archive/site feature, not a room value.
@@ -1362,7 +1253,7 @@ informs them):
   the per-identity paste quota: one app cannot consume the whole service.
 - **Durable total-bytes ceiling.** Room data does NOT carry its own
   service-wide byte scan. Rooms hold no blobs (a room value lives entirely
-  in the metadata backend, not the content-addressed `BlobStore`), so a
+  in the metadata backend, not the `BlobStore`), so a
   room write touches no object-store quota directly and is bounded by the
   per-room and per-app caps above. The service's durable total-bytes
   ceiling is enforced at the object store for the blob-holding kinds
@@ -1648,8 +1539,8 @@ described here. The slug and URL are unchanged either way. Failure modes
 
 See "Exit codes" below for the canonical mapping.
 
-Update creates a new immutable version under the hood (SHA-keyed blob
-ref). What the URL serves next
+Update creates a new immutable version under the hood, stored under
+its own upload prefix. What the URL serves next
 depends on pin state:
 
 - If the paste is *unpinned* (default for new uploads): the new
@@ -1675,7 +1566,7 @@ portfolio2 -                    213.0k   site      -
 ```
 **SIZE is what the item COSTS the owner, not the size of what it serves.**
 For a paste that is every LIVE version summed, so a paste at v3 shows more
-than the v3 bytes alone; for a site it is the deduped stored total. That is
+than the v3 bytes alone; for a site it is its stored total. That is
 the only reading under which the SIZE column sums to the usage `whoami`
 reports, which is what makes `list` a per-item breakdown of the quota.
 
@@ -1797,7 +1688,7 @@ stderr line):
 A static **site** is discriminated by `kind: "site"`: it has no versions,
 so `served_version` / `latest_version` / `pinned_version` are `null`.
 `size_bytes` is the item's CHARGED total: every live version for a paste,
-the deduped stored total for a site. `served_size_bytes` is the bytes of
+the stored total for a site. `served_size_bytes` is the bytes of
 the version being served, and is `null` for a site, which has no versions.
 
 Both are emitted because json mode prints only the array - the human
@@ -1923,7 +1814,7 @@ first. The middle column carries a status marker:
 
 - `current` - the version the URL is currently serving (the
   pinned ver_num or `MAX(non-deleted ver_num)` when unpinned).
-- `deleted` - the blob bytes were freed via `delete <slug> <ver>`. The
+- `deleted` - the version's bytes were deleted via `delete <slug> <ver>`. The
   metadata row remains as a tombstone so the version number isn't
   reused; the size column is `-` since no bytes exist anymore.
 - empty - non-current, non-deleted version (still occupies quota).
@@ -1973,13 +1864,14 @@ ssh hostthis.dev delete abc12345
 deleted.
 ```
 Wipes the slug record + all versions (including any tombstone rows
-from prior `delete <slug> <ver>` calls). Reuses the slug for future
+from prior `delete <slug> <ver>` calls), then deletes every version's
+bytes (see "Blob storage backends → Deleting bytes"). Reuses the slug for future
 random generation. No undo. No confirm prompt (ssh sessions don't
 tty cleanly; the verb is explicit enough).
 
 **Delete heals its own lost tail (row absent, index entry present).** A
 whole-paste delete is two transactions: the `{slug}` CAS removes the
-paste row, its versions, the slug binding and the blob binds; a
+paste row, its versions and the slug binding; a
 follow-on `{id}`-shard CAS drops the owner's enumeration row and
 owner-document entry together. No durable intent covers a delete, so a
 process death (or a refused handoff) between the two strands the second
@@ -2029,8 +1921,8 @@ ssh hostthis.dev delete abc12345 2
 deleted v2. freed 187.3k.
 ```
 
-Deletes the blob bytes for one historical version, leaving the
-metadata row in place as a tombstone. The version number is NOT
+Tombstones one historical version, then deletes its bytes. The
+metadata row stays in place as the tombstone. The version number is NOT
 reused (a future `update` still bumps to `MAX(ver_num)+1`); `versions`
 shows the row with a `deleted` marker.
 
@@ -2301,7 +2193,7 @@ The per-identity quota and per-paste cap are distinct: 100 MiB total and
 payload; the per-identity quota bounds accumulated logical storage.
 
 **Writes are constant-memory.** A single-document upload compresses into a
-temporary spill file while hashing and counting it, then streams that file to
+temporary spill file while counting it, then streams that file to
 the blob store. A static-site file follows the same spill-then-stream shape.
 Resident memory is bounded by compressor and copy buffers rather than payload
 size. Static sites count against the same identity cap using each manifest
@@ -2314,14 +2206,13 @@ therefore costs a copy buffer regardless of whether the paste is a
 kilobyte or the 10 MiB ceiling, and the decompressed size never lands in the
 heap.
 
-Blob storage is content-addressed by the uncompressed SHA-256, so identical
-content shares one physical object. Quota is logical rather than physical:
-every manifest path and every live version carries its own compressed-byte
-charge even when their content hashes match.
+Every upload stores its own copy of each file, so quota and physical storage
+agree: every manifest path in every live version is charged its compressed
+size, and that is what it occupies.
 
-Deleted versions contribute zero bytes to logical quota and are inaccessible.
-Their metadata remains as a tombstone; physical content-addressed objects are
-not synchronously deleted.
+Deleted versions contribute zero bytes to quota and are inaccessible. Their
+metadata remains as a tombstone, and their bytes are deleted once the
+tombstone commits.
 
 ### Same-identity create admission: a width-2 gate
 
@@ -2358,43 +2249,27 @@ entry.
 The total durable bytes the whole service can hold are bounded at the
 **object store**, not by an app-level scan on the write path. The
 operator sets a hard quota on the blob bucket (e.g. a MinIO bucket
-quota); the storage layer never adds the bytes up itself. When a blob
-`Put` is rejected by the object store because the bucket is at its
-quota, the blob store surfaces the `ErrServiceFull` sentinel, and the
-upload / site-deploy services translate it into a graceful
-"service is at capacity; try again later" response.
+quota); the storage layer never adds the bytes up itself. A blob `Put`
+the object store refuses at quota fails that upload, which deletes its
+own prefix like any other failed upload.
 Room push adds its own caps (16 subscriptions and 16 schedule items per
 room, 2 KiB payload, 8 sends per subscription per local day, one test per
 minute); see "Room push".
 
-Rooms hold no blobs, so a room write never produces `ErrServiceFull`;
-the system recovers as owners delete content and the
-sweep reclaims their bytes, freeing room under the quota.
+Rooms hold no blobs, so a room write never meets the bucket quota. Space
+returns as owners delete content, because a delete removes its bytes.
 
-**Why this lives at the object store, not in the app.** hostthis
-previously enforced the ceiling with an app-level pre-check: before
-accepting any paste / site / room write it summed the active bytes
-across the entire metadata keyspace (every `versions/*`, every site's
-`DedupedSize`, every app's room bytes) and rejected the write if the
-total exceeded a configured cap. That design had three problems an
-object-store quota fixes:
+**Why this lives at the object store, not in the app.** An app-level
+ceiling would sum active bytes across the whole metadata keyspace before
+every write:
 
-- **It was O(active rows) on every write.** The sum was a full scan of
-  the byte-holding keyspace (a cross-shard aggregate on the sharded
-  backend), recomputed on the hot path of every single upload. The
-  cost grew with the amount of stored content, so the busiest service
-  paid the highest per-write tax.
-- **One bad record poisoned every write.** Because the sum had to decode
-  every byte-holding row, a single undecodable / corrupt record made the
-  aggregate fail, and that failure rejected EVERY write service-wide -
-  not just a write touching the bad record. The blast radius of one
-  poisoned row was the whole service.
-- **It counted the wrong number.** The scan summed LOGICAL
-  (uncompressed, pre-dedup) bytes, an estimate of disk pressure that
-  could be 5–10× larger than reality after zstd compression and
-  content-addressed dedup. A bucket quota counts the REAL physical bytes
-  the object store actually holds (post-compression, post-dedup), so the
-  ceiling tracks true storage rather than a worst-case overestimate.
+- **O(active rows) on every write.** A cross-cell aggregate on the hot
+  path, whose cost grows with the amount of stored content.
+- **One bad record would poison every write.** A single undecodable row
+  would fail the aggregate and so reject every write service-wide.
+- **It would count the wrong number.** Logical uncompressed bytes
+  overstate storage 5-10x after zstd. A bucket quota counts the physical
+  bytes the object store actually holds.
 
 A bucket quota is a HARD ceiling enforced durably by the storage layer
 with no blast radius: a rejected `Put` fails only that one write, the
@@ -2501,8 +2376,8 @@ cap is at the limit, not over it. A cap of zero or less means no limit.
 
 The per-identity quota check, Paste transitions, and Sybil admission are
 serialized inside their owning aggregate. The durable total-bytes ceiling is
-separate: it lives at the object store as a bucket quota and surfaces as
-`ErrServiceFull` from blob `Put`.
+separate: it lives at the object store as a bucket quota, where a refused
+blob `Put` fails only that upload.
 
 - **Memory backend.** One mutex covers the store. Maintained per-owner and
   per-app aggregates make quota decisions point-addressed and exact.
@@ -2523,7 +2398,7 @@ cannot race a stale check.
 - One IP subnet → ~20 fresh keys × 10 MiB = ~200 MiB/day logical
   (~20–40 MiB/day actual storage after zstd)
 - All identities combined → the object-store bucket quota on real
-  physical bytes (post-compression, post-dedup), enforced by the storage
+  physical bytes (post-compression), enforced by the storage
   layer, not an app-level scan
 - Concurrent per-identity and per-app quota races → serialized aggregate-local
   decisions on both backends; the Room escrow protocol preserves the cross-cell
@@ -2551,36 +2426,79 @@ cannot race a stale check.
 
 ## Blob storage backends
 
-Blob bytes are independent of metadata. The service uses one
-content-addressed blob port and selects its adapter with
-`HOSTTHIS_BLOB_BACKEND`:
+Blob bytes are independent of metadata. The service uses one blob port and
+selects its adapter with `HOSTTHIS_BLOB_BACKEND`:
 
 ```text
 HOSTTHIS_BLOB_BACKEND=disk    # default
 HOSTTHIS_BLOB_BACKEND=s3      # production
 ```
 
-Both adapters key the same compressed representation by the SHA256 of the
-original bytes. Metadata therefore stores a content identity, never a provider
-URL, filesystem path, or object-store key. Changing providers does not change
-the domain or metadata shape.
+The port has three operations:
 
-**`Put` and the `ErrServiceFull` sentinel.** When an object store rejects a
-write because its bucket quota is exhausted, the S3 adapter maps that response
-to `ErrServiceFull`. Upload and site-deploy services translate the sentinel into
-the graceful "service is at capacity" result. The application performs no
-service-wide byte scan. The disk adapter has no bucket quota and therefore
-cannot produce this result.
+- `Put(key)` streams one object in.
+- `GetReader(key)` streams it back out.
+- `DeletePrefix(prefix)` deletes every object under a prefix. An absent prefix
+  deletes nothing and succeeds.
+
+Metadata stores object keys, never a provider URL or filesystem path, so
+changing providers does not change the domain or metadata shape.
+
+### Object keys: one prefix per upload
+
+```
+uploads/<upload-id>/<n>
+```
+
+- `upload-id` is a random id minted when an upload starts, before any bytes
+  are written.
+- `n` is the file's position in the upload: a document is `0`, a site's files
+  are `0..N-1`.
+- Each manifest entry stores its object key, so a reader never derives one. A
+  version records its upload id, which is how a delete finds its bytes.
+- The key carries no slug or generation. A site deploy stages every file before
+  its slug is chosen, and a slug collision retries with the same staged files.
+- Storage involves no hashing, and uploads share nothing: an identical
+  re-upload writes new objects under new keys.
+
+A stored file's ETag is its object key (see "Edge caching"). An upload's
+objects never change, so the key is a stable validator.
+
+### Deleting bytes
+
+Metadata commits first, then bytes, so a reader never follows a row to missing
+bytes.
+
+- **Delete a version:** commit the tombstone, then delete that version's
+  `uploads/<upload-id>/`.
+- **Delete a paste:** commit the removal, then delete each version's prefix.
+  Version records survive the removal, so the service point-reads versions 1
+  through the latest for their upload ids. Nothing is scanned.
+- **A crash between the two steps** leaks that prefix but never breaks a read.
+
+Nothing asks whether anything else still uses the bytes, because nothing else
+can.
+
+Every failed upload deletes its own prefix before returning its error:
+
+- an untar abort (bomb guard, unsafe entry, too many files, empty archive);
+- a site insert that fails or exhausts its slug retries;
+- a refused redeploy;
+- an update whose append is refused after staging (over quota, conflict);
+- a create whose background blob write fails and marks the paste failed.
+
+A process killed mid-upload leaks its prefix. That rare leak is accepted: there
+is no sweep.
 
 ### Available backends
 
-- **`disk`** stores each object at
-  `<data-dir>/blobs/<sha256[:2]>/<sha256>`. It is the local development and test
-  default.
-- **`s3`** stores each object at
-  `<prefix>/<sha256[:2]>/<sha256>` in the configured bucket. It is the durable
-  production byte plane. Endpoint, bucket, region, credentials, TLS, and prefix
-  come from `HOSTTHIS_S3_*` settings.
+- **`disk`** stores each object at `<data-dir>/blobs/<key>`. It is the local
+  development, test and e2e default.
+- **`s3`** stores each object at `<key>` in the configured bucket. It is the
+  durable production byte plane. `DeletePrefix` lists only that one upload's
+  prefix, which is written once and never churned, so its cost is bounded by
+  the upload's file count. Endpoint, bucket, region, credentials, and TLS come
+  from `HOSTTHIS_S3_*` settings.
 
 Neither adapter is supplied by the metadata backend. Production combines celld
 metadata with S3 blobs; local development normally combines memory metadata with
@@ -2588,7 +2506,7 @@ disk blobs.
 
 ### On-disk format
 
-Every blob written by either backend is zstd-compressed (level 3) and
+Every object written by either backend is zstd-compressed (level 3) and
 prefixed with a 4-byte magic header `HZ\0\x01` (`HZ` for hostthis-zstd,
 `\0\x01` for format version 1). The compressed body follows the magic.
 Layout:
@@ -2598,112 +2516,38 @@ Layout:
 4..N      : zstd-encoded original bytes
 ```
 
-Reads:
-- Decoder inspects the first 4 bytes. If they match the magic, the
-  rest is zstd-decoded and returned.
-- If they don't match, the blob is treated as a legacy uncompressed
-  blob (written before this change) and returned as-is. Backstop for
-  the rolling migration; remains in place indefinitely as defensive
-  code since the cost is one cheap byte-compare per Get.
+Reads inspect the first 4 bytes. If they match the magic, the rest is
+zstd-decoded; otherwise the object is uncompressed and returned as-is, at the
+cost of one byte-compare per read. Writes are always compressed and prefixed,
+so an object's stored bytes are identical whichever adapter wrote them.
 
-Writes:
-- Always compressed + prefixed; legacy raw-bytes writes are never
-  emitted by the current binary.
+### Legacy content-addressed entries (dual-read)
 
-Object/file naming is the sha256 of the ORIGINAL (uncompressed)
-bytes - dedup happens on logical content, not on the compressed
-representation. Two pastes with identical bytes share one stored object.
-The same magic+zstd format is shared by every blob backend, so
-a blob's stored bytes are identical whichever path wrote them.
+Legacy objects are content-addressed by the sha256 of their uncompressed bytes:
+on S3 at `blob/<sha[:2]>/<sha>` (`blob` is `HOSTTHIS_S3_BLOB_PREFIX`), on disk
+at `<data-dir>/blobs/<sha[:2]>/<sha>`. One such object may back many paths,
+versions, and owners. A manifest entry carries either an object key or, for a
+legacy entry, only a sha:
 
-### Local-disk write-back cache (optional, opt-in)
+- An entry with a key reads that key.
+- A legacy entry reads its sha's object, and its ETag is the sha.
+- New uploads write only `uploads/`.
+- A legacy version has no upload id. Deleting it, or its paste, removes
+  metadata only: its objects may be shared, so no delete path touches `blob/`.
 
-A blob `Put` against S3 dominates upload latency, while local hashing,
-compression, and metadata writes are comparatively small. For deploys that can
-tolerate a local-durability window, an optional **local-disk write-back cache**
-can sit in front of either blob adapter. It is useful in practice only for a
-remote adapter.
+### Migration off the legacy namespace
 
-It is **off by default**. The strict, durable-before-ack behavior is unchanged
-unless an operator opts in with:
+An offline operator tool, kept outside this repo, retires `blob/`:
 
-```
-HOSTTHIS_BLOB_WRITEBACK=true            # enable the write-back cache (default false)
-HOSTTHIS_BLOB_WRITEBACK_DIR=<path>      # local cache dir (default <data-dir>/blob-cache)
-HOSTTHIS_BLOB_WRITEBACK_MAX_BYTES=<n>   # soft cap on cache size in bytes (default 1 GiB)
-```
-
-When enabled, the cache wraps the configured blob adapter and changes the blob
-path as follows:
-
-- **`Put` writes locally first, uploads asynchronously.** The bytes (the
-  already-compressed, magic-prefixed stored representation) are written
-  to the local cache directory with the same atomic tmp-write + fsync +
-  rename the disk store uses, then the SHA is enqueued for a background
-  uploader. `Put` returns as soon as the local write is durable on the
-  pod's disk - typically a few ms - without waiting for the object store.
-  The content-addressed skip still applies: if the durable backend
-  already has the object (checked cheaply), the local write and the
-  enqueue are skipped.
-
-- **A background uploader drains the queue to the durable backend.** A
-  small pool of workers pops SHAs, reads the bytes back from the local
-  cache, and `Put`s them to the durable backend with bounded retry and
-  exponential backoff. On a successful durable upload the cache entry is
-  marked uploaded (eligible for eviction). A failed upload is re-enqueued
-  after backoff so a transient object-store outage doesn't lose the blob;
-  it just extends the durability window.
-
-- **`Get` / `GetReader` read the cache first, fall back to the durable
-  backend.** A blob that is still local (uploaded or not) serves from the
-  pod's disk. A blob that has been evicted (or was never cached, e.g.
-  written by a different pod or before the cache was enabled) is fetched
-  from the durable backend transparently. Reads are therefore always
-  correct regardless of upload state.
-
-- **Startup re-scan re-enqueues pending uploads.** On boot the cache
-  walks its directory and re-enqueues every entry that has not been
-  confirmed uploaded to the durable backend. This makes the uploader
-  durable across a process restart: a crash or redeploy that leaves
-  un-uploaded blobs on a surviving disk recovers them on the next boot
-  rather than stranding them. (Whether the disk survives a restart is the
-  deploy's concern; see the durability caveat below.)
-
-- **Bounded cache with eviction.** The cache tracks its on-disk size and,
-  once it exceeds `HOSTTHIS_BLOB_WRITEBACK_MAX_BYTES`, evicts
-  already-uploaded entries oldest-first until it is back under the cap. An
-  entry that has not yet been confirmed uploaded is NEVER evicted - that
-  would lose the only copy of a not-yet-durable blob. The cap is therefore
-  a soft cap: a burst of uploads that outruns the uploader can push the
-  cache temporarily over the cap, and it drains back down as uploads
-  complete.
-
-**Durability caveat (operator-facing, read before enabling).** With the
-write-back cache on, a blob is durable on the pod's local disk
-immediately but NOT durable in the object store until the async upload
-completes. If the pod's local disk does not survive a restart - the
-production deploy uses an ephemeral `emptyDir`-class volume, so it does
-not - then a pod loss between the `Put` ack and the async upload loses
-any blob still in flight. The object-store copy is the only cross-pod
-durable copy. This is the same narrow durability window class as a
-fast-ack metadata write: the ack is honored locally and the durable copy
-follows shortly after. The startup re-scan closes the window for a clean
-restart (the disk is still there) but NOT for a reschedule onto a fresh
-node with an empty volume. Operators who cannot tolerate that window must
-leave the cache off (the default), which preserves today's
-durable-before-ack guarantee. Operators who enable it on a deploy with a
-persistent local volume get the latency win with no durability loss for
-process restarts, only for total volume loss.
-
-**Where it sits in the stack.** The cache is a storage adapter that
-implements the same inner contract the compression layer wraps
-(`Put` / `Get` / `GetReader`) plus the sweep contract
-(`WalkBlobs` / `Remove`). It is wired between the compression layer and
-the durable backend, so it sees the compressed stored bytes and is
-invisible to the upload service, which still depends only on the
-`BlobStore` interface. Sweep GC walks the DURABLE backend (authoritative
-for what blobs exist), and `Remove` deletes from both the durable backend
-and the local cache.
+1. **Re-home.** For each non-deleted version holding a legacy entry, mint an
+   upload id, server-side copy each referenced object to `uploads/<id>/<n>`,
+   and rewrite that version's manifest (and the head's copy when it serves that
+   version) through a guarded metadata operation. The tool is idempotent and
+   resumable. A re-homed file's ETag changes once.
+2. **Verify.** No live manifest references a sha-only entry, smoke and e2e pass,
+   and a sample of pastes reads byte-identical before and after.
+3. **Drop.** Delete `blob/` wholesale, which also frees every legacy object no
+   version references. The dual-read path is then removed.
 
 ---
 
@@ -2738,24 +2582,23 @@ transaction.
 
 Metadata and payload storage are independent ports. Local development combines
 the memory adapter with the disk BlobStore. Production combines celld metadata
-with the content-addressed S3 BlobStore. The celld fleet bucket and payload
+with the S3 BlobStore. The celld fleet bucket and payload
 bucket are separate security and lifecycle domains.
 
 ### The storage contract and its conformance suite
 
 Whatever backend is in use, the rest of the app depends on it only
-through four small Go interfaces declared in `internal/service`:
+through small Go interfaces declared in `internal/service`:
 
 - `PasteRepo` (upload): `InsertWithQuotaCheck`, `Get`.
 - `PasteAdmin` (manage): `Get`, `ListByOwner`, `Delete`, `SetName`,
   `SetPinnedVersion`, `Unpin`, `AppendVersionWithQuotaCheck`,
   `ListVersions`, `GetVersion`, `DeleteVersion`, `SumActiveBytesByOwner`,
   `OwnerFirstSeen`, `OwnerSummary`.
-- `SweepRepo` (sweep):
 - `KeyGateRepo` (keygate): `AdmitNewKey`, `SubnetSnapshot`,
   `SubnetsForIdentity`.
 
-Every backend implements all four identically. The observable contract
+Every backend implements them identically. The observable contract
 those interfaces expose, not the storage internals, is the load-bearing
 thing: callers see the same return values, the same sentinel errors,
 and the same accounting regardless of which backend is wired. Adding a
@@ -2773,25 +2616,6 @@ caller matches against. The message text is stable contract too (it
 keeps the historical `storage:` prefix): sentinel messages appear in
 user-facing output, so moving the definitions must not change a byte of
 them.
-
-One sentinel is domain-owned without being universal:
-`ErrConcurrentChange`. It reports that another write to the same record
-landed while this one was deciding what to do, leaving a decision that
-cannot be salvaged without re-reading. The operation applied NOTHING,
-which is what makes a retry safe, and the retry is the CALLER's: an
-interactive verb reports it and the user re-runs, the sweep skips
-that reference and the next pass picks it up (its index entry is still
-standing, because a cascade that failed did not drop it). It lives in
-the domain because the sweep must recognise it without importing an
-adapter. A backend whose concurrency control cannot lose this way simply
-never returns it, so the conformance suite does not require it.
-
-Retrying in the repo instead was rejected: the optimistic-commit layer
-already spends a bounded retry budget internally and only surfaces a
-conflict once that is exhausted, so a second loop above it re-runs an
-already-exhausted one. Where a stale read taken OUTSIDE the transaction
-is the thing that must be redone, the only correct place to start over
-is the caller.
 
 **Observable contract (what every backend must agree on).** These
 behaviors are expressed in terms of inputs and observable outputs:
@@ -2821,64 +2645,22 @@ behaviors are expressed in terms of inputs and observable outputs:
 - **Pin / unpin.** `SetPinnedVersion` makes a version sticky and rolls
   the head to it; `Unpin` clears the pin and rolls the head back to the
   latest non-deleted version.
-- **DeleteVersion tombstones (content-inaccessible, blob GC-able).**
+- **DeleteVersion tombstones (content-inaccessible).**
   Flips a version's deleted flag, leaving the metadata row so the
   number is not reused and history stays auditable. `ListVersions`
   returns tombstones (newest first, marked `deleted`); `GetVersion`
-  returns a tombstone too (so the row is still visible for the paste's
-  lifetime). The tombstoned version's content SHA is NOT in the
-  referenced set, so the sweep reclaims its blob: a deleted version is
+  returns a tombstone too, upload id included. A deleted version is
   app-final and content-inaccessible, and its bytes stop counting
-  against quota. Recoverability of the dropped blob is provided beneath
-  the app by object-store versioning plus a noncurrent-version
-  lifecycle (an operator-level safety net, not an app feature). The
-  repo does NOT enforce refuse-current / refuse-pinned-current: those
-  guards live in `Manage.DeleteVersion`, not the repo. Whole-paste
-  `Delete` is a full removal (the paste leaves every listing; there is
-  nothing left to show versions of) and is unaffected by this rule.
+  against quota. The repo does NOT enforce refuse-current /
+  refuse-pinned-current: those guards live in `Manage.DeleteVersion`, not
+  the repo. Whole-paste `Delete` is a full removal (the paste leaves every
+  listing; there is nothing left to show versions of), but its version
+  records stay point-readable so the service can delete their bytes.
 - **Owner-gating is a service-layer concern.** The repos are NOT
   owner-aware: `Get`, `Delete`, `SetName`, and so on operate on a slug
   regardless of who owns it. IDOR protection (a cross-owner read
   surfacing as not-found) lives in `Manage.requireOwner`. A backend
   must NOT add owner checks; doing so would change observable behavior.
-- **Sweep convergence guard (unreachable refs).** "One pass drains what
-  it scans" holds only when the store the scan READS is the store the
-  deletes WRITE. Real deployments have shown states where they diverge:
-  records physically placed where the routed delete cannot reach them
-  (e.g. bulk-imported legacy data placed under a different sharding
-  function than live routing uses) or a diverged replica resurrecting a
-  deleted record. In such a state every processing "succeeds" while
-  nothing persists, and an unguarded sweep re-processes the same refs
-  every pass forever (a constant deleted/cleaned count each cycle and
-  millions of pointless metadata ops per day). The sweep therefore keeps
-  an in-process guard across passes, in live mode, covering all three
-  record kinds (pastes, sites, rooms): it remembers the refs it processed
-  in the previous pass, and a ref that RESURFACES in the next scan after
-  being processed is classified UNREACHABLE - skipped (not re-processed),
-  excluded from the deleted and cleaned counts, and reported once per
-  pass as a distinct skipped-count log line so the operator knows
-  external cleanup is required. An unreachable ref that stops appearing
-  (externally purged, or the store converged) is forgotten, so a later
-  legitimate record with the same identity is processed normally; a
-  process restart also clears the guard, giving each boot one fresh
-  attempt (self-healing when the store converges later). The guard's
-  memory is bounded; at the cap it fails open (refs are processed as if
-  unguarded, and the overflow is logged). The guard never weakens abort
-  semantics: scan/aggregation errors still abort the pass, and dry-run
-  (which mutates nothing) neither consults nor updates it.
-- **Dry-run (observability).** The sweep has two modes, selected by the
-  operator's disable flag, and a "disabled" sweep is NEVER a no-op. In
-  DRY-RUN mode it runs the full computation (which blobs are orphaned) and
-  LOGS each would-be deletion, but mutates nothing - no blob removed, no
-  rate-limit row pruned. In LIVE mode it performs the deletions. Both fail-closed guards
-  apply in dry-run too: a dry run against a store with an undecodable
-  record logs that the blob GC WOULD abort, surfacing the bad record
-  without touching anything. Dry-run is how an operator earns confidence
-  before trusting a sweep: deploy a change, watch the dry-run log confirm
-  it would clean only what's expected, then flip to live. There is no
-  third mode - the disable flag toggles dry-run vs live, and the safety net
-  for a live over-deletion is the object store's versioning/soft-delete (a
-  wrongly-removed blob is a recoverable prior version, not a hard loss).
 - **Owner stats.** `ListByOwner` returns the owner's pastes ordered most
   recently updated first, with `LatestVersion` populated;
   `OwnerSummary.Active` counts them; `SumActiveBytesByOwner` matches the
@@ -2895,7 +2677,7 @@ behaviors are expressed in terms of inputs and observable outputs:
 **Conformance suite.** `internal/storage/conformance_test.go` is a
 backend-agnostic suite that pins exactly the observable contract above.
 It takes a backend through a single factory. The backend type is just
-the union of the four service interfaces (no backend-specific helpers,
+the union of the service interfaces (no backend-specific helpers,
 so the suite cannot accidentally pin a behavior one backend has and
 another lacks):
 
@@ -2903,8 +2685,6 @@ another lacks):
 type conformanceRepo interface {
     service.PasteRepo
     service.PasteAdmin
-    service.SweepRepo
-    service.KeyGateRepo
 }
 
 func runConformance(t *testing.T, name string, newRepo func(t *testing.T) conformanceRepo)
@@ -2914,14 +2694,9 @@ Pastes are created through `InsertWithQuotaCheck` / `AppendVersion-
 WithQuotaCheck` with caps set to 0 (the documented "no quota
 enforcement" path), so no backend needs an extra unchecked helper.
 
-**Tombstoned versions release their bytes.** A deleted version is
-app-final and content-inaccessible, and "DeleteVersion frees quota"
-implies the storage is freed too, so `DeleteVersion` unbinds that
-version's blob in the same transaction that writes the tombstone.
-Recoverability does not depend on the app keeping a reference: it is
-provided beneath the app by object-store versioning plus a
-noncurrent-version lifecycle, an operator-level safety net configured
-outside this repo.
+**The metadata contract never deletes bytes.** It records upload ids; the
+service deletes each prefix after the metadata commits (see "Blob storage
+backends → Deleting bytes").
 
 ### The two backends and the conformance gate
 
@@ -2945,7 +2720,7 @@ failing test in one of them.
 ### Static-site storage
 
 A static site is a paste whose version kind is `site` and whose manifest maps
-safe relative paths to content-addressed blob descriptors. The root manifest
+safe relative paths to object keys. The root manifest
 entry is `/`. Site files live in the configured `BlobStore`; metadata stores
 only the paste row, version descriptors, and manifest.
 
@@ -2956,12 +2731,12 @@ or quota sum:
 - A first deploy inserts one site-kind paste.
 - A redeploy appends a manifest version. Prior live versions remain available
   for pin, rollback, roll-forward, and per-version deletion.
-- Each version is charged by every manifest path's compressed size. Shared
-  content deduplicates only the physical object in the `BlobStore`.
+- Each version is charged by every manifest path's compressed size.
 - List and owner-byte accounting use the paste projection, where sites already
   appear, so the site adapter returns no duplicate listing or sum.
-- Files are staged by content hash before a slug is chosen. A slug collision
-  retries the metadata insert without rewriting the archive.
+- Files are staged under the deploy's upload prefix before a slug is chosen. A
+  slug collision retries the metadata insert with the same staged files; an
+  insert that fails or exhausts its retries deletes the prefix.
 - Reads reject a document-kind paste as not found rather than treating its
   one-file manifest as a directory.
 
@@ -3322,8 +3097,8 @@ bindings into different semantics:
   transitions owned by Identity, Paste, Room, and Subnet.
 - Queues and Workflows are asynchronous and cannot decide a synchronous room or
   upload admission response.
-- R2 does not replace the existing provider-neutral, content-addressed BlobStore
-  contract and its S3 adapter.
+- R2 does not replace the existing provider-neutral BlobStore contract and its
+  S3 adapter.
 - Service bindings do not remove hostthis's app/room protocol or public policy
   boundary.
 
@@ -3332,9 +3107,9 @@ hostthis adapter or domain rule.
 
 ### Blob and operational boundaries
 
-Paste and site payloads stay outside celld in the content-addressed S3
-BlobStore. Room values are small mutable metadata and remain in Room cells.
-Blob deduplication, pending/finalize, and orphan collection are unchanged.
+Paste and site payloads stay outside celld in the S3 BlobStore. Room values are
+small mutable metadata and remain in Room cells. `hostthisd` writes and deletes
+payload bytes around its metadata calls; cells never touch them.
 
 One fleet bucket serves one Worker application. The Worker and operator routes
 are unauthenticated and remain cluster-internal behind NetworkPolicy;
@@ -3361,13 +3136,13 @@ A non-negotiated paste read response (an HTML paste) sets:
 
 ```
 Cache-Control: public, max-age=3600
-ETag: "<sha256>"
+ETag: "<object key>"
 Last-Modified: <RFC1123 from paste.UpdatedAt>
 ```
 
 CDNs cache for one hour, then revalidate. Browsers cache and send
 conditional `If-None-Match` / `If-Modified-Since` on revisits;
-hostthis returns 304 Not Modified when the content SHA matches,
+hostthis returns 304 Not Modified when the ETag matches,
 saving body bytes on the wire.
 
 Apex landing page is `Cache-Control: public, max-age=300` (5 min) so
@@ -3433,9 +3208,9 @@ paste update. A site is different: its `index.html` loads sub-resources
 while they are fresh under `max-age` - so a re-deploy would not show until
 each asset's `max-age` expired (the classic SPA "stale bundle after
 deploy" trap). `no-cache` makes every site file revalidate against its
-content-SHA ETag on each load: a 304 when the SHA is unchanged (cheap, no
-body bytes) and fresh bytes when it changed, so a re-deploy is visible on
-the next normal reload with no filename-hashing or version query. The
+object-key ETag on each load: a 304 while the file is unchanged (cheap, no
+body bytes) and fresh bytes after a re-deploy, which gives every file a new
+key, so a re-deploy is visible on the next normal reload with no filename-hashing or version query. The
 edge-cache benefit is preserved: a CDN still stores the bytes and serves
 them after a 304, so egress stays absorbed; only a cheap revalidation
 request reaches origin.
@@ -3637,8 +3412,9 @@ and follows `prefers-color-scheme`.
 
 Content persists until its owner deletes it, so takedown is an operator
 action rather than something the clock does. An operator can delete a
-slug's row directly from the metadata store; the next read 404s and the
-next sweep GCs the blob. A user-facing "report this paste" UI is out of
+slug's row directly from the metadata store; the next read 404s. That route
+deletes no bytes, so the operator also deletes the upload prefixes its versions
+record. A user-facing "report this paste" UI is out of
 scope for v1.
 
 ---
@@ -3754,10 +3530,7 @@ file). Defaults in parens:
                          / HOSTTHIS_S3_ACCESS_KEY           S3 access key                         (required for s3)
                          / HOSTTHIS_S3_SECRET_KEY           S3 secret key                         (required for s3)
                          / HOSTTHIS_S3_USE_SSL              endpoint uses TLS                     (false)
-                         / HOSTTHIS_S3_BLOB_PREFIX          object-key prefix                     (blob)
-                         / HOSTTHIS_BLOB_WRITEBACK          enable local write-back cache         (false)
-                         / HOSTTHIS_BLOB_WRITEBACK_DIR      write-back cache directory            (<data-dir>/blob-cache)
-                         / HOSTTHIS_BLOB_WRITEBACK_MAX_BYTES soft cache ceiling                   (1 GiB)
+                         / HOSTTHIS_S3_BLOB_PREFIX          legacy sha namespace (dual-read)      (blob)
 
 # Limits
                          / HOSTTHIS_CREATE_ADMISSION_WIDTH  same-identity create admission width    (2)
@@ -3788,8 +3561,7 @@ whose connection was force-closed or lost may still be inside metadata work, so
 both graceful shutdown and force close return only after every admitted handler
 has finished. A handshake accepted before shutdown that completes afterward is
 refused before its command dispatches. Upload finalizers are waited only after
-SSH can no longer start one, and blob write-back cleanup starts only after those
-finalizers finish. The whole sequence has a 35-second hard bound. Work still
+SSH can no longer start one. The whole sequence has a 35-second hard bound. Work still
 blocked at that point is left to the documented pending-state and startup
 recovery protocols. The 20-second and 35-second limits are product constants,
 not operator knobs.
@@ -3803,9 +3575,8 @@ blob compression (zstd level 3, all blobs), the sandbox headers
 (X-Frame-Options, Referrer-Policy, Permissions-Policy), and the slug
 alphabet (`abcdefghijkmnpqrstuvwxyz23456789`). The durable total-bytes
 ceiling is a quota on the blob bucket at the object store, not an app flag
-(see "Limits"): a `Put` rejected past it surfaces as a graceful "service is
-at capacity" response, and the system recovers as owners delete content
-and the sweep reclaims bytes. Per-IP rate limiting on top of the Sybil
+(see "Limits"): a `Put` rejected past it fails that upload, and space
+returns as owners delete content. Per-IP rate limiting on top of the Sybil
 gate is a reverse-proxy concern.
 
 ---
