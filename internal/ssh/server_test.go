@@ -232,10 +232,17 @@ func TestServerForceCloseWaitsForActiveUploadHandler(t *testing.T) {
 	}
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- srv.Close() }()
+	// The client losing its connection proves Close has force-closed it, so a
+	// still-pending Close is waiting on the handler, not merely unscheduled.
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("force close did not drop the active connection")
+	}
 	select {
 	case err := <-closeDone:
 		t.Fatalf("force close returned before active handler: %v", err)
-	case <-time.After(25 * time.Millisecond):
+	default:
 	}
 	close(repo.release)
 	select {
@@ -247,7 +254,6 @@ func TestServerForceCloseWaitsForActiveUploadHandler(t *testing.T) {
 		t.Fatal("force close did not wait for handler completion")
 	}
 	upload.WaitFinalize()
-	<-runDone
 	select {
 	case err := <-serveDone:
 		if err != nil {
