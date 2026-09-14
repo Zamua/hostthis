@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -27,7 +28,10 @@ type PasteAdmin interface {
 	SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 	SetPinnedVersion(domain.Slug, string, domain.Version) error
 	Unpin(domain.Slug, string) error
-	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, generation string, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (domain.AppendResult, error)
+	// AppendVersionWithQuotaCheck records uploadID on the new version, so a
+	// later delete can name the prefix holding its bytes.
+	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, generation string, kind domain.ContentKind,
+		uploadID string, manifest domain.Manifest, size int, userCap int64, now time.Time) (domain.AppendResult, error)
 	ListVersions(domain.Slug) ([]domain.Version, error)
 	GetVersion(domain.Slug, int) (domain.Version, error)
 	// IsVersionServed reports whether ver is the version the URL serves,
@@ -73,9 +77,12 @@ type Manage struct {
 	// (domain.MIMESniffer).
 	Sniff   domain.MIMESniffer
 	Repo    PasteAdmin
-	Blob    BlobUnit // content-addressed writes and streaming reads
+	Blob    BlobUnit // per-upload writes, streaming reads, prefix deletes
 	KeyGate *KeyGate // optional; populates WhoamiInfo.Session when set
 	Now     func() time.Time
+	// Logger records object deletions that fail after the outcome is decided.
+	// nil discards.
+	Logger *log.Logger
 }
 
 func NewManage(repo PasteAdmin, blob BlobUnit) *Manage {
@@ -119,7 +126,7 @@ func (m *Manage) Show(slug domain.Slug, owner string) (domain.Paste, io.ReadClos
 	if err != nil {
 		return domain.Paste{}, nil, err
 	}
-	rc, _, err := m.Blob.Read(context.Background(), p.ContentSHA)
+	rc, _, err := m.Blob.Read(context.Background(), p.RootEntry())
 	if err != nil {
 		return domain.Paste{}, nil, fmt.Errorf("blob: %w", err)
 	}
@@ -139,6 +146,7 @@ type UpdateResult struct {
 // new version also becomes the served one; on a PINNED paste the pin holds and
 // the new version is recorded but not served.
 func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint string) (UpdateResult, error) {
+	uploadID := domain.NewUploadID()
 	staged, err := streamUpload(body)
 	defer staged.discard()
 	switch {
@@ -167,17 +175,21 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 	}
 	now := m.Now().UTC()
 	ctx := context.Background()
-	if err := m.Blob.StagePrecompressed(ctx, staged.SHA, staged.File, staged.encodedSize()); err != nil {
+	key := domain.UploadObjectKey(uploadID, 0)
+	if err := m.Blob.StagePrecompressed(ctx, key, staged.File, staged.encodedSize()); err != nil {
+		// A failed put can still leave a partial object, and no metadata names it.
+		discardUpload(m.Blob, m.Logger, uploadID)
 		if class, terr := classifyCommitErr(err); class != commitOther {
 			return UpdateResult{}, terr
 		}
 		return UpdateResult{}, fmt.Errorf("blob write: %w", err)
 	}
 	res, err := m.Repo.AppendVersionWithQuotaCheck(
-		ctx, slug, existing.Generation, kind, staged.SHA, staged.CompressedSize,
-		int64(domain.UserQuotaBytes), now,
+		ctx, slug, existing.Generation, kind, uploadID, documentManifest(key, kind, staged),
+		staged.CompressedSize, int64(domain.UserQuotaBytes), now,
 	)
 	if err != nil {
+		abandonUpload(m.Blob, m.Logger, uploadID, err)
 		_, terr := classifyCommitErr(err)
 		return UpdateResult{}, terr
 	}

@@ -56,9 +56,9 @@ type namespacedRepo struct {
 // unrelated stores. Namespacing both through one prefix is what keeps them the
 // same store.
 func (n namespacedRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string,
-	m domain.Manifest, root domain.ManifestEntry, size int, userCap int64, now time.Time,
+	uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
 ) (storage.AppendResult, error) {
-	return n.inner.AppendManifestVersion(ctx, n.slug(slug), generation, m, root, size, userCap, now)
+	return n.inner.AppendManifestVersion(ctx, n.slug(slug), generation, uploadID, m, size, userCap, now)
 }
 
 func (n namespacedRepo) slug(s domain.Slug) domain.Slug {
@@ -125,9 +125,9 @@ func (n namespacedRepo) DropStaleOwnerEntry(s domain.Slug, o string) (bool, erro
 }
 
 func (n namespacedRepo) AppendVersionWithQuotaCheck(ctx context.Context, s domain.Slug, generation string,
-	kind domain.ContentKind, sha string, size int, cap int64, at time.Time,
+	kind domain.ContentKind, uploadID string, m domain.Manifest, size int, cap int64, at time.Time,
 ) (domain.AppendResult, error) {
-	return n.inner.AppendVersionWithQuotaCheck(ctx, n.slug(s), generation, kind, sha, size, cap, at)
+	return n.inner.AppendVersionWithQuotaCheck(ctx, n.slug(s), generation, kind, uploadID, m, size, cap, at)
 }
 
 func (n namespacedRepo) DeleteVersion(s domain.Slug, generation string, ver int) error {

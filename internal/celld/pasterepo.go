@@ -44,6 +44,7 @@ type pasteRow struct {
 	Status        string `json:"status"`
 	Kind          string `json:"kind"`
 	ContentSHA    string `json:"contentSha"`
+	UploadID      string `json:"uploadId,omitempty"`
 	Size          int    `json:"size"`
 	Name          string `json:"name"`
 	PinnedVersion int    `json:"pinnedVersion"`
@@ -60,7 +61,7 @@ func rowOf(p domain.Paste) pasteRow {
 		Slug: p.Slug.String(), Identity: p.Identity.String(),
 		Generation: p.Generation,
 		Status:     string(p.Status), Kind: string(p.Kind),
-		ContentSHA: p.ContentSHA, Size: p.Size, Name: p.Name,
+		ContentSHA: p.ContentSHA, UploadID: p.UploadID, Size: p.Size, Name: p.Name,
 		PinnedVersion: p.PinnedVersion,
 		CreatedAt:     p.CreatedAt.UTC().UnixMilli(),
 		UpdatedAt:     p.UpdatedAt.UTC().UnixMilli(),
@@ -90,7 +91,7 @@ func (r pasteRow) domain() domain.Paste {
 		Slug: domain.Slug(r.Slug), Identity: domain.Identity(r.Identity),
 		Generation: r.Generation,
 		Status:     domain.PasteStatus(r.Status), Kind: domain.ContentKind(r.Kind),
-		ContentSHA: r.ContentSHA, Size: r.Size, Name: r.Name,
+		ContentSHA: r.ContentSHA, UploadID: r.UploadID, Size: r.Size, Name: r.Name,
 		PinnedVersion: r.PinnedVersion,
 		CreatedAt:     time.UnixMilli(r.CreatedAt).UTC(),
 		UpdatedAt:     time.UnixMilli(r.UpdatedAt).UTC(),
@@ -405,7 +406,7 @@ func (r *PasteRepo) callArtifactMutation(ctx context.Context, path string, slug 
 }
 
 func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, generation string,
-	kind domain.ContentKind, contentSHA string, size int, manifest domain.Manifest,
+	kind domain.ContentKind, uploadID string, manifest domain.Manifest, size int,
 	userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
 	// An empty generation addresses a legacy row; the cell adopts it on this
@@ -421,7 +422,9 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 	}
 	status, err := r.callArtifactMutation(ctx, "/paste/append", slug, map[string]any{
 		"opId": opID, "generation": generation, "userCap": userCap,
-		"kind": string(kind), "contentSha": contentSHA, "size": size,
+		// contentSha is sent empty: a version staged under an upload has no
+		// sha, and a cell predating uploadId still stores a well-formed row.
+		"kind": string(kind), "contentSha": "", "uploadId": uploadID, "size": size,
 		"manifest": manifest, "now": now.UTC().UnixMilli(),
 	}, &res)
 	if status == http.StatusInsufficientStorage {
@@ -444,9 +447,9 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 
 // AppendVersionWithQuotaCheck atomically reserves charge and publishes one version.
 func (r *PasteRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, generation string,
-	kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time,
+	kind domain.ContentKind, uploadID string, manifest domain.Manifest, size int, userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
-	return r.appendArtifact(ctx, slug, generation, kind, contentSHA, size, domain.Manifest{}, userCap, now)
+	return r.appendArtifact(ctx, slug, generation, kind, uploadID, manifest, size, userCap, now)
 }
 
 // ListVersions is a single-cell read: the appended versions live beside the row.
@@ -455,6 +458,7 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 		Ver        int             `json:"ver"`
 		Kind       string          `json:"kind"`
 		ContentSHA string          `json:"contentSha"`
+		UploadID   string          `json:"uploadId"`
 		Size       int             `json:"size"`
 		CreatedAt  int64           `json:"createdAt"`
 		Deleted    bool            `json:"deleted"`
@@ -471,7 +475,7 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	for _, w := range wire {
 		out = append(out, domain.Version{
 			Slug: slug, VerNum: w.Ver, Kind: domain.ContentKind(w.Kind),
-			ContentSHA: w.ContentSHA, Size: w.Size, Manifest: w.Manifest,
+			ContentSHA: w.ContentSHA, UploadID: w.UploadID, Size: w.Size, Manifest: w.Manifest,
 			CreatedAt: time.UnixMilli(w.CreatedAt).UTC(), Deleted: w.Deleted,
 		})
 	}
@@ -617,9 +621,9 @@ func (r *PasteRepo) OwnerSummary(owner string, now time.Time) (domain.OwnerSumma
 
 // AppendManifestVersion appends a retained file-set version.
 func (r *PasteRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string,
-	m domain.Manifest, root domain.ManifestEntry, size int, userCap int64, now time.Time,
+	uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
-	return r.appendArtifact(ctx, slug, generation, domain.KindSite, root.SHA, size, m, userCap, now)
+	return r.appendArtifact(ctx, slug, generation, domain.KindSite, uploadID, m, size, userCap, now)
 }
 
 // urlQuery escapes a value for a query string. Named rather than inlined so

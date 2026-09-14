@@ -17,8 +17,8 @@ import (
 type SiteBackingRepo interface {
 	Get(domain.Slug) (domain.Paste, error)
 	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
-	AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string, m domain.Manifest,
-		root domain.ManifestEntry, size int, userCap int64, now time.Time) (AppendResult, error)
+	AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string, uploadID string,
+		m domain.Manifest, size int, userCap int64, now time.Time) (AppendResult, error)
 	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 }
 
@@ -52,6 +52,7 @@ func siteFromArtifact(p domain.Paste) domain.Site {
 	return domain.Site{
 		Slug:      p.Slug,
 		Identity:  p.Identity,
+		UploadID:  p.UploadID,
 		Manifest:  p.Manifest,
 		CreatedAt: p.CreatedAt,
 		UpdatedAt: p.UpdatedAt,
@@ -60,17 +61,16 @@ func siteFromArtifact(p domain.Paste) domain.Site {
 
 // InsertWithQuotaCheck stores a new directory as a paste.
 //
-// storedBytes is the CHARGED size: a directory's distinct blob total, which is
-// what the quota counts, rather than the root file's size.
+// storedBytes is the CHARGED size: every manifest path's compressed size, which
+// is what the quota counts, rather than the root file's size.
 func (a *Sites) InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error {
-	root, _ := s.Manifest.Lookup("/")
 	return a.repo.InsertWithQuotaCheck(ctx, domain.Paste{
 		Slug:       s.Slug,
 		Generation: domain.NewPasteGeneration(),
 		Identity:   s.Identity,
 		Status:     domain.PasteStatusReady,
 		Kind:       domain.KindSite,
-		ContentSHA: root.SHA,
+		UploadID:   s.UploadID,
 		Size:       storedBytes,
 		CreatedAt:  s.CreatedAt,
 		UpdatedAt:  s.UpdatedAt,
@@ -81,7 +81,7 @@ func (a *Sites) InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedB
 // ReplaceWithQuotaCheck re-deploys an existing directory by APPENDING the new
 // manifest as a version. Prior versions stay live, so a directory pins and
 // rolls back like a document, and each live manifest version is charged in
-// full even when its blobs are physically deduplicated.
+// full, matching the objects it holds.
 //
 // Ownership is enforced here rather than inside the append: a slug that is not
 // a directory, and one owned by another identity, both yield not-found, so
@@ -94,9 +94,8 @@ func (a *Sites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, stored
 	if existing.Kind != domain.KindSite || existing.Identity != s.Identity {
 		return ErrNotFound
 	}
-	root, _ := s.Manifest.Lookup("/")
 	_, err = a.repo.AppendManifestVersion(
-		ctx, s.Slug, existing.Generation, s.Manifest, root, storedBytes, userCap, now,
+		ctx, s.Slug, existing.Generation, s.UploadID, s.Manifest, storedBytes, userCap, now,
 	)
 	return err
 }

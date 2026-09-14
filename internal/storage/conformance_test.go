@@ -93,6 +93,7 @@ func pasteOf(slug, identity string, size int) domain.Paste {
 		Identity:      domain.Identity(identity),
 		Kind:          domain.KindHTML,
 		ContentSHA:    "sha-" + slug + "-v1",
+		UploadID:      "up-" + slug + "-v1",
 		Size:          size,
 		PinnedVersion: 0,
 		CreatedAt:     fixedNow,
@@ -122,7 +123,7 @@ func conformInsertAndGet(t *testing.T, r conformanceRepo) {
 		t.Fatalf("get: %v", err)
 	}
 	if got.Slug != p.Slug || got.Identity != p.Identity || got.Kind != p.Kind ||
-		got.ContentSHA != p.ContentSHA || got.Size != p.Size || got.Name != p.Name {
+		got.ContentSHA != p.ContentSHA || got.UploadID != p.UploadID || got.Size != p.Size || got.Name != p.Name {
 		t.Fatalf("round-trip mismatch:\n got  %+v\n want %+v", got, p)
 	}
 }
@@ -200,12 +201,12 @@ func conformQuotaCountsAllVersions(t *testing.T, r conformanceRepo) {
 	}
 	// Append v2 = 600 → total 1200 > 1000 → reject. Pins "all non-deleted
 	// versions count toward quota," not just the head.
-	_, err := r.AppendVersionWithQuotaCheck(context.Background(), "v1234567", generationOf("v1234567"), domain.KindHTML, "sha-v-v2", 600, cap, fixedNow)
+	_, err := r.AppendVersionWithQuotaCheck(context.Background(), "v1234567", generationOf("v1234567"), domain.KindHTML, "up-v-v2", domain.Manifest{}, 600, cap, fixedNow)
 	if !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("append over cap: got %v, want ErrOverUserQuota", err)
 	}
 	// A smaller append that keeps the sum under cap succeeds.
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "v1234567", generationOf("v1234567"), domain.KindHTML, "sha-v-v2b", 300, cap, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "v1234567", generationOf("v1234567"), domain.KindHTML, "up-v-v2b", domain.Manifest{}, 300, cap, fixedNow); err != nil {
 		t.Fatalf("append within cap (600+300=900): %v", err)
 	}
 }
@@ -233,11 +234,11 @@ func conformQuotaFreedByDeleteVersion(t *testing.T, r conformanceRepo) {
 	if err := r.InsertWithQuotaCheck(context.Background(), pasteOf("dv123456", "key:dv", 300), cap, fixedNow); err != nil {
 		t.Fatalf("v1 insert 300: %v", err)
 	}
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dv123456", generationOf("dv123456"), domain.KindHTML, "sha-dv-v2", 600, cap, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dv123456", generationOf("dv123456"), domain.KindHTML, "up-dv-v2", domain.Manifest{}, 600, cap, fixedNow); err != nil {
 		t.Fatalf("v2 append 600 (total 900): %v", err)
 	}
 	// v3 = 300 would be 1200 > 1000.
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dv123456", generationOf("dv123456"), domain.KindHTML, "sha-dv-v3", 300, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dv123456", generationOf("dv123456"), domain.KindHTML, "up-dv-v3", domain.Manifest{}, 300, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("v3 pre-tombstone should be over quota: %v", err)
 	}
 	// Tombstone v1 (300), freeing those bytes.
@@ -245,7 +246,7 @@ func conformQuotaFreedByDeleteVersion(t *testing.T, r conformanceRepo) {
 		t.Fatalf("delete version 1: %v", err)
 	}
 	// Now 600 used → v3 of 300 fits.
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dv123456", generationOf("dv123456"), domain.KindHTML, "sha-dv-v3b", 300, cap, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dv123456", generationOf("dv123456"), domain.KindHTML, "up-dv-v3b", domain.Manifest{}, 300, cap, fixedNow); err != nil {
 		t.Fatalf("v3 post-tombstone should fit: %v", err)
 	}
 }
@@ -269,7 +270,7 @@ func conformQuotaPerIdentityIndependent(t *testing.T, r conformanceRepo) {
 
 func conformAppendBumpsVersion(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("ab123456", "key:a", 10))
-	res, err := r.AppendVersionWithQuotaCheck(context.Background(), "ab123456", generationOf("ab123456"), domain.KindMarkdown, "sha-ab-v2", 20, 0, fixedNow)
+	res, err := r.AppendVersionWithQuotaCheck(context.Background(), "ab123456", generationOf("ab123456"), domain.KindMarkdown, "up-ab-v2", domain.Manifest{}, 20, 0, fixedNow)
 	if err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
@@ -284,14 +285,14 @@ func conformAppendBumpsVersion(t *testing.T, r conformanceRepo) {
 	if err != nil {
 		t.Fatalf("get after append: %v", err)
 	}
-	if p.ContentSHA != "sha-ab-v2" || p.Size != 20 || p.Kind != domain.KindMarkdown {
-		t.Fatalf("unpinned head should roll to v2, got sha=%q size=%d kind=%q", p.ContentSHA, p.Size, p.Kind)
+	if p.UploadID != "up-ab-v2" || p.Size != 20 || p.Kind != domain.KindMarkdown {
+		t.Fatalf("unpinned head should roll to v2, got upload=%q size=%d kind=%q", p.UploadID, p.Size, p.Kind)
 	}
 }
 
 func conformPinUnpinRollsHead(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("pu123456", "key:p", 10))
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "pu123456", generationOf("pu123456"), domain.KindHTML, "sha-pu-v2", 20, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "pu123456", generationOf("pu123456"), domain.KindHTML, "up-pu-v2", domain.Manifest{}, 20, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
 	// Pin to v1: head rolls back to v1's bytes.
@@ -303,22 +304,22 @@ func conformPinUnpinRollsHead(t *testing.T, r conformanceRepo) {
 		t.Fatalf("pin v1: %v", err)
 	}
 	p, _ := r.Get("pu123456")
-	if p.PinnedVersion != 1 || p.ContentSHA != v1.ContentSHA || p.Size != v1.Size {
-		t.Fatalf("pin should roll head to v1, got pinned=%d sha=%q size=%d", p.PinnedVersion, p.ContentSHA, p.Size)
+	if p.PinnedVersion != 1 || p.UploadID != v1.UploadID || p.Size != v1.Size {
+		t.Fatalf("pin should roll head to v1, got pinned=%d upload=%q size=%d", p.PinnedVersion, p.UploadID, p.Size)
 	}
 	// Unpin: head rolls forward to latest (v2).
 	if err := r.Unpin("pu123456", generationOf("pu123456")); err != nil {
 		t.Fatalf("unpin: %v", err)
 	}
 	p, _ = r.Get("pu123456")
-	if p.PinnedVersion != 0 || p.ContentSHA != "sha-pu-v2" || p.Size != 20 {
-		t.Fatalf("unpin should roll head to v2, got pinned=%d sha=%q size=%d", p.PinnedVersion, p.ContentSHA, p.Size)
+	if p.PinnedVersion != 0 || p.UploadID != "up-pu-v2" || p.Size != 20 {
+		t.Fatalf("unpin should roll head to v2, got pinned=%d upload=%q size=%d", p.PinnedVersion, p.UploadID, p.Size)
 	}
 }
 
 func conformAppendRespectsPin(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("ap123456", "key:a", 10))
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "ap123456", generationOf("ap123456"), domain.KindHTML, "sha-ap-v2", 20, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "ap123456", generationOf("ap123456"), domain.KindHTML, "up-ap-v2", domain.Manifest{}, 20, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
 	v1, _ := r.GetVersion("ap123456", 1)
@@ -326,7 +327,7 @@ func conformAppendRespectsPin(t *testing.T, r conformanceRepo) {
 		t.Fatalf("pin v1: %v", err)
 	}
 	// Append v3 while pinned: WasPinned=true, head stays on v1.
-	res, err := r.AppendVersionWithQuotaCheck(context.Background(), "ap123456", generationOf("ap123456"), domain.KindHTML, "sha-ap-v3", 30, 0, fixedNow)
+	res, err := r.AppendVersionWithQuotaCheck(context.Background(), "ap123456", generationOf("ap123456"), domain.KindHTML, "up-ap-v3", domain.Manifest{}, 30, 0, fixedNow)
 	if err != nil {
 		t.Fatalf("append v3 (pinned): %v", err)
 	}
@@ -334,42 +335,42 @@ func conformAppendRespectsPin(t *testing.T, r conformanceRepo) {
 		t.Fatalf("append-while-pinned: got NewVer=%d WasPinned=%v, want 3/true", res.NewVer, res.WasPinned)
 	}
 	p, _ := r.Get("ap123456")
-	if p.ContentSHA != v1.ContentSHA || p.PinnedVersion != 1 {
-		t.Fatalf("pinned head must stay on v1 after append, got sha=%q pinned=%d", p.ContentSHA, p.PinnedVersion)
+	if p.UploadID != v1.UploadID || p.PinnedVersion != 1 {
+		t.Fatalf("pinned head must stay on v1 after append, got upload=%q pinned=%d", p.UploadID, p.PinnedVersion)
 	}
 }
 
 // conformPinOlderAfterMultipleAppends pins a NON-adjacent older version after
-// the head has rolled forward to v3: the denormalized head ContentSHA/Size must
+// the head has rolled forward to v3: the denormalized head UploadID/Size must
 // roll back to the pinned version's bytes, since that head field is what the
 // public serving path resolves. PinUnpinRollsHead only covers pinning one
 // version back.
 func conformPinOlderAfterMultipleAppends(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("po123456", "key:p", 10))
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "po123456", generationOf("po123456"), domain.KindHTML, "sha-po-v2", 20, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "po123456", generationOf("po123456"), domain.KindHTML, "up-po-v2", domain.Manifest{}, 20, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "po123456", generationOf("po123456"), domain.KindHTML, "sha-po-v3", 30, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "po123456", generationOf("po123456"), domain.KindHTML, "up-po-v3", domain.Manifest{}, 30, 0, fixedNow); err != nil {
 		t.Fatalf("append v3: %v", err)
 	}
 	// Unpinned through all three appends: head followed to v3.
-	if p, _ := r.Get("po123456"); p.ContentSHA != "sha-po-v3" || p.PinnedVersion != 0 {
-		t.Fatalf("unpinned head should be v3, got sha=%q pinned=%d", p.ContentSHA, p.PinnedVersion)
+	if p, _ := r.Get("po123456"); p.UploadID != "up-po-v3" || p.PinnedVersion != 0 {
+		t.Fatalf("unpinned head should be v3, got upload=%q pinned=%d", p.UploadID, p.PinnedVersion)
 	}
 	v1, err := r.GetVersion("po123456", 1)
 	if err != nil {
 		t.Fatalf("get v1: %v", err)
 	}
-	// The v1 row must still carry v1's own sha (not the head's).
-	if v1.ContentSHA == "sha-po-v3" {
-		t.Fatalf("v1 row carries the head's sha %q - version rows are leaking the head content", v1.ContentSHA)
+	// The v1 row must still carry v1's own upload (not the head's).
+	if v1.UploadID == "up-po-v3" {
+		t.Fatalf("v1 row carries the head's upload %q - version rows are leaking the head content", v1.UploadID)
 	}
 	// Pin v1 (two versions behind the head): head must roll back to v1's bytes.
 	if err := r.SetPinnedVersion("po123456", generationOf("po123456"), v1); err != nil {
 		t.Fatalf("pin v1: %v", err)
 	}
-	if p, _ := r.Get("po123456"); p.PinnedVersion != 1 || p.ContentSHA != v1.ContentSHA || p.Size != 10 {
-		t.Fatalf("pin v1 must roll head to v1, got pinned=%d sha=%q size=%d (want sha=%q size=10)", p.PinnedVersion, p.ContentSHA, p.Size, v1.ContentSHA)
+	if p, _ := r.Get("po123456"); p.PinnedVersion != 1 || p.UploadID != v1.UploadID || p.Size != 10 {
+		t.Fatalf("pin v1 must roll head to v1, got pinned=%d upload=%q size=%d (want upload=%q size=10)", p.PinnedVersion, p.UploadID, p.Size, v1.UploadID)
 	}
 	// Re-pin to v2 (the middle version): head must roll to v2's bytes.
 	v2, err := r.GetVersion("po123456", 2)
@@ -379,21 +380,21 @@ func conformPinOlderAfterMultipleAppends(t *testing.T, r conformanceRepo) {
 	if err := r.SetPinnedVersion("po123456", generationOf("po123456"), v2); err != nil {
 		t.Fatalf("pin v2: %v", err)
 	}
-	if p, _ := r.Get("po123456"); p.PinnedVersion != 2 || p.ContentSHA != "sha-po-v2" || p.Size != 20 {
-		t.Fatalf("pin v2 must roll head to v2, got pinned=%d sha=%q size=%d", p.PinnedVersion, p.ContentSHA, p.Size)
+	if p, _ := r.Get("po123456"); p.PinnedVersion != 2 || p.UploadID != "up-po-v2" || p.Size != 20 {
+		t.Fatalf("pin v2 must roll head to v2, got pinned=%d upload=%q size=%d", p.PinnedVersion, p.UploadID, p.Size)
 	}
 	// Unpin: head rolls forward to the latest (v3).
 	if err := r.Unpin("po123456", generationOf("po123456")); err != nil {
 		t.Fatalf("unpin: %v", err)
 	}
-	if p, _ := r.Get("po123456"); p.PinnedVersion != 0 || p.ContentSHA != "sha-po-v3" || p.Size != 30 {
-		t.Fatalf("unpin must roll head to v3, got pinned=%d sha=%q size=%d", p.PinnedVersion, p.ContentSHA, p.Size)
+	if p, _ := r.Get("po123456"); p.PinnedVersion != 0 || p.UploadID != "up-po-v3" || p.Size != 30 {
+		t.Fatalf("unpin must roll head to v3, got pinned=%d upload=%q size=%d", p.PinnedVersion, p.UploadID, p.Size)
 	}
 }
 
 func conformDeleteVersionTombstones(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("dt123456", "key:d", 10))
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dt123456", generationOf("dt123456"), domain.KindHTML, "sha-dt-v2", 20, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dt123456", generationOf("dt123456"), domain.KindHTML, "up-dt-v2", domain.Manifest{}, 20, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
 	if err := r.DeleteVersion("dt123456", generationOf("dt123456"), 1); err != nil {
@@ -437,7 +438,7 @@ func conformDeleteVersionTombstones(t *testing.T, r conformanceRepo) {
 
 func conformVerNumNotReused(t *testing.T, r conformanceRepo) {
 	insert(t, r, pasteOf("vn123456", "key:v", 10))
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "vn123456", generationOf("vn123456"), domain.KindHTML, "sha-vn-v2", 10, 0, fixedNow); err != nil {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "vn123456", generationOf("vn123456"), domain.KindHTML, "up-vn-v2", domain.Manifest{}, 10, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
 	v1, err := r.GetVersion("vn123456", 1)
@@ -452,7 +453,7 @@ func conformVerNumNotReused(t *testing.T, r conformanceRepo) {
 	if err := r.DeleteVersion("vn123456", generationOf("vn123456"), 2); err != nil {
 		t.Fatalf("delete v2: %v", err)
 	}
-	res, err := r.AppendVersionWithQuotaCheck(context.Background(), "vn123456", generationOf("vn123456"), domain.KindHTML, "sha-vn-v3", 10, 0, fixedNow)
+	res, err := r.AppendVersionWithQuotaCheck(context.Background(), "vn123456", generationOf("vn123456"), domain.KindHTML, "up-vn-v3", domain.Manifest{}, 10, 0, fixedNow)
 	if err != nil {
 		t.Fatalf("append after tombstone: %v", err)
 	}

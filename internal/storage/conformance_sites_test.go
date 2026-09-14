@@ -401,7 +401,7 @@ func conformSitePerOwnerCapCountsBoth(t *testing.T, r conformanceRepo, sr confor
 	}
 
 	// The append path counts site bytes too: at cap, any append is rejected.
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "pb2pst1", generationOf("pb2pst1"), domain.KindHTML, "sha-pb2-v2", 1, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "pb2pst1", generationOf("pb2pst1"), domain.KindHTML, "up-pb2-v2", domain.Manifest{}, 1, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("append at full combined cap should be rejected (site bytes must count): got %v", err)
 	}
 }

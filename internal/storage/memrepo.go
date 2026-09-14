@@ -100,6 +100,7 @@ func (p *memPaste) rollServed() {
 	}
 	p.row.Kind = v.Kind
 	p.row.ContentSHA = v.ContentSHA
+	p.row.UploadID = v.UploadID
 	p.row.Manifest = v.Manifest
 	p.row.Size = v.Size
 	p.row.LatestVersion = p.maxVer
@@ -147,7 +148,7 @@ func (r *MemRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, userCa
 	// v1 is SEEDED into the version list: one list holds every version, so no
 	// reader special-cases the first.
 	mp.versions = append(mp.versions, domain.Version{
-		Slug: p.Slug, VerNum: 1, Kind: p.Kind, ContentSHA: p.ContentSHA,
+		Slug: p.Slug, VerNum: 1, Kind: p.Kind, ContentSHA: p.ContentSHA, UploadID: p.UploadID,
 		Size: p.Size, CreatedAt: p.CreatedAt, Manifest: p.Manifest,
 	})
 	r.pastes[p.Slug] = mp
@@ -287,19 +288,19 @@ func (r *MemRepo) setPin(slug domain.Slug, generation string, ver int) error {
 }
 
 func (r *MemRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.Slug, generation string,
-	kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time,
+	kind domain.ContentKind, uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
-	return r.appendVersion(slug, generation, kind, contentSHA, size, domain.Manifest{}, userCap, now)
+	return r.appendVersion(slug, generation, kind, uploadID, m, size, userCap, now)
 }
 
 func (r *MemRepo) AppendManifestVersion(_ context.Context, slug domain.Slug, generation string,
-	m domain.Manifest, root domain.ManifestEntry, size int, userCap int64, now time.Time,
+	uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
 ) (AppendResult, error) {
-	return r.appendVersion(slug, generation, domain.KindSite, root.SHA, size, m, userCap, now)
+	return r.appendVersion(slug, generation, domain.KindSite, uploadID, m, size, userCap, now)
 }
 
-func (r *MemRepo) appendVersion(slug domain.Slug, generation string, kind domain.ContentKind, contentSHA string,
-	size int, m domain.Manifest, userCap int64, now time.Time,
+func (r *MemRepo) appendVersion(slug domain.Slug, generation string, kind domain.ContentKind, uploadID string,
+	m domain.Manifest, size int, userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -314,7 +315,7 @@ func (r *MemRepo) appendVersion(slug domain.Slug, generation string, kind domain
 	// than derived from the (tombstone-holding) list.
 	p.maxVer++
 	p.versions = append(p.versions, domain.Version{
-		Slug: slug, VerNum: p.maxVer, Kind: kind, ContentSHA: contentSHA,
+		Slug: slug, VerNum: p.maxVer, Kind: kind, UploadID: uploadID,
 		Size: size, CreatedAt: now, Manifest: m,
 	})
 	wasPinned := p.row.PinnedVersion != 0

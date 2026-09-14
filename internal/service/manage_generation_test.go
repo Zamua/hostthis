@@ -25,10 +25,10 @@ func (r *generationSwapRepo) runSwap() {
 }
 
 func (r *generationSwapRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, generation string,
-	kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time,
+	kind domain.ContentKind, uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
 	r.runSwap()
-	return r.MemRepo.AppendVersionWithQuotaCheck(ctx, slug, generation, kind, contentSHA, size, userCap, now)
+	return r.MemRepo.AppendVersionWithQuotaCheck(ctx, slug, generation, kind, uploadID, m, size, userCap, now)
 }
 
 func (r *generationSwapRepo) SetPinnedVersion(slug domain.Slug, generation string, version domain.Version) error {
@@ -129,7 +129,7 @@ func TestManageMutationsFenceReplacementIncarnation(t *testing.T) {
 		}},
 		{"delete version", func(t *testing.T, inner *storage.MemRepo, old domain.Paste) {
 			if _, err := inner.AppendVersionWithQuotaCheck(context.Background(), old.Slug, old.Generation,
-				domain.KindHTML, "old-v2", 4, 0, old.UpdatedAt.Add(time.Second)); err != nil {
+				domain.KindHTML, "old-v2", domain.Manifest{}, 4, 0, old.UpdatedAt.Add(time.Second)); err != nil {
 				t.Fatalf("append v2: %v", err)
 			}
 		}, func(m *Manage, old domain.Paste) error {

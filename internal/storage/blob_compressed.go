@@ -2,8 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"sync"
@@ -48,10 +46,9 @@ func putPooledDecoder(d *zstd.Decoder) {
 	zstdDecoderPool.Put(d)
 }
 
-// CompressedBlobStore wraps another BlobStore and transparently zstd-encodes on
-// Put, decodes on Get. The at-rest format carries a 4-byte magic prefix; a blob
-// without it is returned as-is, so uncompressed blobs stay readable. Callers
-// above keep thinking in original bytes, and dedup stays keyed on their sha256.
+// CompressedBlobStore owns the at-rest encoding over a raw object store:
+// writes arrive already encoded, reads decode. An object without the magic
+// prefix is returned as-is, so uncompressed objects stay readable.
 type CompressedBlobStore struct {
 	Inner innerBlobStore
 }
@@ -59,20 +56,24 @@ type CompressedBlobStore struct {
 // innerBlobStore is the minimal contract this wrapper depends on, declared
 // here so the storage package need not import the service-layer interface.
 type innerBlobStore interface {
-	Put(sha string, r io.Reader, size int64) error
-	Get(sha string) ([]byte, error)
-	GetReader(sha string) (io.ReadCloser, int64, error)
+	Put(key string, r io.Reader, size int64) error
+	GetReader(key string) (io.ReadCloser, int64, error)
+	GetLegacyReader(sha string) (io.ReadCloser, int64, error)
+	DeletePrefix(prefix string) error
 }
 
 // InnerBlobStore is the exported alias of innerBlobStore, so wiring code in
-// cmd/ can name the type the compression layer wraps. The write-back cache
-// both satisfies it and fronts one: it sits BELOW the compression layer and
-// moves only opaque already-compressed bytes keyed by sha.
+// cmd/ can name the raw backend it selects.
 type InnerBlobStore = innerBlobStore
 
 // PutPrecompressed streams a body already encoded in the at-rest format.
-func (c *CompressedBlobStore) PutPrecompressed(sha string, body io.Reader, size int64) error {
-	return c.Inner.Put(sha, body, size)
+func (c *CompressedBlobStore) PutPrecompressed(key string, body io.Reader, size int64) error {
+	return c.Inner.Put(key, body, size)
+}
+
+// DeletePrefix deletes every object under prefix.
+func (c *CompressedBlobStore) DeletePrefix(prefix string) error {
+	return c.Inner.DeletePrefix(prefix)
 }
 
 // magic prefix for blobs written by this layer.
@@ -94,87 +95,43 @@ func NewCompressedBlobStore(inner innerBlobStore) *CompressedBlobStore {
 	return &CompressedBlobStore{Inner: inner}
 }
 
-// Put reads UNCOMPRESSED bytes from r and writes `magic + zstd(bytes)` to the
-// inner store. The size argument is ignored: the inner store is handed the
-// COMPRESSED length, which is what a backend wanting a Content-Length needs.
-func (c *CompressedBlobStore) Put(sha string, r io.Reader, _ int64) error {
-	body, err := EncodeCompressedBody(r)
-	if err != nil {
-		return err
-	}
-	return c.Inner.Put(sha, bytes.NewReader(body), int64(len(body)))
-}
-
-// CompressedBodyPrefixLen is the width of the at-rest framing prefix that
-// EncodeCompressedBody writes ahead of the zstd stream. Exported so a caller
-// computing the quota-relevant payload size subtracts the real width rather
-// than hardcoding it.
+// CompressedBodyPrefixLen is the width of the at-rest framing prefix EncodeTo
+// writes ahead of the zstd stream. Exported so a caller computing the
+// quota-relevant payload size subtracts the real width rather than hardcoding
+// it.
 const CompressedBodyPrefixLen = len(magicV1)
 
-// EncodeCompressedBody returns `magic + zstd(r)` buffered in memory. The body
-// must already be bounded by the caller's per-file cap.
-func EncodeCompressedBody(r io.Reader) ([]byte, error) {
-	var buf bytes.Buffer
-	buf.Grow(int(estimatedCompressedSize(0)))
-	if _, err := buf.Write(magicV1[:]); err != nil {
-		return nil, fmt.Errorf("compressed blob write magic: %w", err)
-	}
-	enc, err := zstd.NewWriter(&buf, zstd.WithEncoderLevel(compressionLevel))
-	if err != nil {
-		return nil, fmt.Errorf("compressed blob: zstd writer: %w", err)
-	}
-	if _, err := io.Copy(enc, r); err != nil {
-		_ = enc.Close()
-		return nil, fmt.Errorf("compressed blob encode: %w", err)
-	}
-	if err := enc.Close(); err != nil {
-		return nil, fmt.Errorf("compressed blob close encoder: %w", err)
-	}
-	return buf.Bytes(), nil
-}
-
-// Get returns the UNCOMPRESSED bytes for sha. A blob without the magic header
-// is returned as-is.
-func (c *CompressedBlobStore) Get(sha string) ([]byte, error) {
-	body, err := c.Inner.Get(sha)
-	if err != nil {
-		return nil, err
-	}
-	if !hasMagicV1(body) {
-		return body, nil
-	}
-	dec, err := zstd.NewReader(nil)
-	if err != nil {
-		return nil, fmt.Errorf("compressed blob: zstd reader: %w", err)
-	}
-	defer dec.Close()
-	out, err := dec.DecodeAll(body[len(magicV1):], nil)
-	if err != nil {
-		return nil, fmt.Errorf("compressed blob decode %s: %w", sha, err)
-	}
-	return out, nil
-}
-
-// GetReader streams the UNCOMPRESSED bytes for sha without buffering the whole
-// blob the way Get does, yielding byte-identical output. The caller MUST Close
-// it: Close releases both the zstd decoder and the inner reader. The int64 is
-// the inner COMPRESSED length, not the decoded length, so it must not be used
-// as a Content-Length.
-func (c *CompressedBlobStore) GetReader(sha string) (io.ReadCloser, int64, error) {
-	inner, size, err := c.Inner.GetReader(sha)
+// GetReader streams the UNCOMPRESSED bytes at key. The caller MUST Close it:
+// Close releases both the zstd decoder and the inner reader. The int64 is the
+// inner COMPRESSED length, so it must not be used as a Content-Length.
+func (c *CompressedBlobStore) GetReader(key string) (io.ReadCloser, int64, error) {
+	inner, size, err := c.Inner.GetReader(key)
 	if err != nil {
 		return nil, 0, err
 	}
-	dec, derr := DecodeCompressedStream(inner, sha)
-	if derr != nil {
-		return nil, 0, derr
+	dec, err := decodeCompressedStream(inner, key)
+	if err != nil {
+		return nil, 0, err
 	}
 	return dec, size, nil
 }
 
-// DecodeCompressedStream wraps a stored blob stream with decompression and
+// GetLegacyReader is GetReader for a legacy content-addressed object.
+func (c *CompressedBlobStore) GetLegacyReader(sha string) (io.ReadCloser, int64, error) {
+	inner, size, err := c.Inner.GetLegacyReader(sha)
+	if err != nil {
+		return nil, 0, err
+	}
+	dec, err := decodeCompressedStream(inner, sha)
+	if err != nil {
+		return nil, 0, err
+	}
+	return dec, size, nil
+}
+
+// decodeCompressedStream wraps a stored blob stream with decompression and
 // closes the underlying reader on every error path. label identifies failures.
-func DecodeCompressedStream(rc io.ReadCloser, label string) (io.ReadCloser, error) {
+func decodeCompressedStream(rc io.ReadCloser, label string) (io.ReadCloser, error) {
 	// A blob shorter than the header is not an error: the short read fails the
 	// magic check and is served through unwrapped.
 	hdr := make([]byte, len(magicV1))
@@ -234,15 +191,6 @@ func (z *zstdReadCloser) Close() error {
 
 func hasMagicV1(b []byte) bool { return bytes.HasPrefix(b, magicV1[:]) }
 
-// estimatedCompressedSize gives Buffer a head start. Never below the magic
-// header length, so the empty-input case still allocates.
-func estimatedCompressedSize(uncompressed int) int {
-	if uncompressed <= 0 {
-		return len(magicV1) + 64
-	}
-	return len(magicV1) + uncompressed/2 // optimistic; Buffer grows if needed
-}
-
 type countingWriter struct {
 	w io.Writer
 	n int64
@@ -254,23 +202,23 @@ func (w *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// EncodeTo writes the at-rest representation while hashing the raw bytes.
-func (s *CompressedBlobStore) EncodeTo(w io.Writer, r io.Reader) (string, int, int64, error) {
+// EncodeTo streams the at-rest representation of r into w, returning the
+// quota-relevant payload size and the total length written.
+func (c *CompressedBlobStore) EncodeTo(w io.Writer, r io.Reader) (int, int64, error) {
 	counted := &countingWriter{w: w}
 	if _, err := counted.Write(magicV1[:]); err != nil {
-		return "", 0, 0, fmt.Errorf("compressed blob write magic: %w", err)
+		return 0, 0, fmt.Errorf("compressed blob write magic: %w", err)
 	}
 	enc, err := zstd.NewWriter(counted, zstd.WithEncoderLevel(compressionLevel))
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("compressed blob: zstd writer: %w", err)
+		return 0, 0, fmt.Errorf("compressed blob: zstd writer: %w", err)
 	}
-	hasher := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(enc, hasher), r); err != nil {
+	if _, err := io.Copy(enc, r); err != nil {
 		_ = enc.Close()
-		return "", 0, 0, fmt.Errorf("compressed blob encode: %w", err)
+		return 0, 0, fmt.Errorf("compressed blob encode: %w", err)
 	}
 	if err := enc.Close(); err != nil {
-		return "", 0, 0, fmt.Errorf("compressed blob close encoder: %w", err)
+		return 0, 0, fmt.Errorf("compressed blob close encoder: %w", err)
 	}
-	return hex.EncodeToString(hasher.Sum(nil)), int(counted.n) - CompressedBodyPrefixLen, counted.n, nil
+	return int(counted.n) - CompressedBodyPrefixLen, counted.n, nil
 }

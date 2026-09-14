@@ -25,7 +25,7 @@ func TestAppendRetriesWithOneOperationID(t *testing.T) {
 
 	repo := NewPasteRepo("https://cell", f.client())
 	result, err := repo.AppendVersionWithQuotaCheck(
-		context.Background(), "slugone1", "generation-1", domain.KindMarkdown, "sha-v2", 4, 10, time.Unix(8, 0),
+		context.Background(), "slugone1", "generation-1", domain.KindMarkdown, "up-v2", domain.Manifest{}, 4, 10, time.Unix(8, 0),
 	)
 	if err != nil {
 		t.Fatalf("append: %v", err)
@@ -54,7 +54,7 @@ func TestAppendMapsAtomicQuotaRefusal(t *testing.T) {
 	f := fixedCell(http.StatusInsufficientStorage, `{"error":"over-quota"}`)
 	repo := NewPasteRepo("https://cell", f.client())
 	_, err := repo.AppendVersionWithQuotaCheck(
-		context.Background(), "slugone1", "generation-1", domain.KindHTML, "sha-v2", 4, 10, time.Unix(8, 0),
+		context.Background(), "slugone1", "generation-1", domain.KindHTML, "up-v2", domain.Manifest{}, 4, 10, time.Unix(8, 0),
 	)
 	if err != domain.ErrOverUserQuota {
 		t.Fatalf("err = %v, want ErrOverUserQuota", err)
@@ -68,7 +68,7 @@ func TestAppendMapsStorageRefusalToTheManifestCap(t *testing.T) {
 	f := fixedCell(http.StatusRequestEntityTooLarge, `{"error":"version-too-large"}`)
 	repo := NewPasteRepo("https://cell", f.client())
 	_, err := repo.AppendVersionWithQuotaCheck(
-		context.Background(), "slugone1", "generation-1", domain.KindHTML, "sha-v2", 4, 10, time.Unix(8, 0),
+		context.Background(), "slugone1", "generation-1", domain.KindHTML, "up-v2", domain.Manifest{}, 4, 10, time.Unix(8, 0),
 	)
 	if !errors.Is(err, domain.ErrTooManyFiles) {
 		t.Fatalf("err = %v, want ErrTooManyFiles", err)
@@ -116,7 +116,7 @@ func TestMutationsPassAnEmptyLegacyGenerationThrough(t *testing.T) {
 
 	repo := NewPasteRepo("https://cell", f.client())
 	if _, err := repo.AppendVersionWithQuotaCheck(
-		context.Background(), "legacy12", "", domain.KindMarkdown, "sha-v2", 4, 10, time.Unix(8, 0),
+		context.Background(), "legacy12", "", domain.KindMarkdown, "up-v2", domain.Manifest{}, 4, 10, time.Unix(8, 0),
 	); err != nil {
 		t.Fatalf("append: %v", err)
 	}

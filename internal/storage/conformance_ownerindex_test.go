@@ -32,7 +32,7 @@ type ownerIndexRepo interface {
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
 	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, generation string, kind domain.ContentKind,
-		contentSHA string, size int, userCap int64, now time.Time) (domain.AppendResult, error)
+		uploadID string, manifest domain.Manifest, size int, userCap int64, now time.Time) (domain.AppendResult, error)
 	DeleteVersion(domain.Slug, string, int) error
 }
 
@@ -235,7 +235,7 @@ func conformVersionChangesTheCharge(t *testing.T, r ownerIndexRepo) {
 	insert(t, r, p)
 
 	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), p.Slug, p.Generation,
-		domain.KindHTML, "sha-v2", 300, 0, fixedNow); err != nil {
+		domain.KindHTML, "up-v2", domain.Manifest{}, 300, 0, fixedNow); err != nil {
 		t.Fatalf("AppendVersionWithQuotaCheck: %v", err)
 	}
 	if n, err := chargedBytes(t, r, owner); err != nil || n != 1000 {

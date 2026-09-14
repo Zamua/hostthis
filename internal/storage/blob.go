@@ -7,11 +7,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-// BlobStore is a content-addressed on-disk store. Bytes live at
-// <root>/<sha256[:2]>/<sha256>; records pointing at the same bytes share one
-// file.
+// BlobStore is the on-disk object store. An object lives at <root>/<key>; a
+// legacy content-addressed object at <root>/<sha[:2]>/<sha>.
 //
 // It does NOT satisfy service.BlobStore: the at-rest encoding is
 // CompressedBlobStore's. Giving the raw store the encoder methods would let a
@@ -27,25 +27,22 @@ func NewBlobStore(root string) (*BlobStore, error) {
 	return &BlobStore{root: root}, nil
 }
 
-// Put streams r into the content-addressed location for sha. An existing file
-// at the destination is trusted as-is: only a sha256 collision could reach it
-// with different bytes. size is for parity with S3-shaped backends.
-func (b *BlobStore) Put(sha string, r io.Reader, size int64) error {
-	if len(sha) < 2 {
-		return fmt.Errorf("blob: sha too short")
+func (b *BlobStore) path(key string) string {
+	return filepath.Join(b.root, filepath.FromSlash(key))
+}
+
+// Put streams r to key. size is for parity with S3-shaped backends.
+func (b *BlobStore) Put(key string, r io.Reader, _ int64) error {
+	if err := checkKey(key); err != nil {
+		return err
 	}
-	dir := filepath.Join(b.root, sha[:2])
+	dst := b.path(key)
+	dir := filepath.Dir(dst)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("blob mkdir %q: %w", dir, err)
 	}
-	dst := filepath.Join(dir, sha)
-	if _, err := os.Stat(dst); err == nil {
-		// Drain r so a caller streaming a request body does not block.
-		_, _ = io.Copy(io.Discard, r)
-		return nil
-	}
 	// tmp + fsync + rename: a crash leaves the complete file or nothing, never
-	// a partial blob visible under the final name.
+	// a partial object visible under the final name.
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
 		return fmt.Errorf("blob tmp create: %w", err)
@@ -70,42 +67,48 @@ func (b *BlobStore) Put(sha string, r io.Reader, size int64) error {
 	return nil
 }
 
-// GetReader returns a streaming reader over the bytes for sha, or ErrNotFound.
-// The caller MUST Close it. The int64 is the on-disk length of the raw stored
-// bytes: for blobs wrapped by CompressedBlobStore that is the compressed
-// length, not the decoded one.
-func (b *BlobStore) GetReader(sha string) (io.ReadCloser, int64, error) {
-	if len(sha) < 2 {
-		return nil, 0, fmt.Errorf("blob: sha too short")
+// GetReader streams the object at key, or ErrNotFound. The caller MUST Close
+// it. The int64 is the stored length: for objects written through
+// CompressedBlobStore that is the compressed length, not the decoded one.
+func (b *BlobStore) GetReader(key string) (io.ReadCloser, int64, error) {
+	if err := checkKey(key); err != nil {
+		return nil, 0, err
 	}
-	dst := filepath.Join(b.root, sha[:2], sha)
-	f, err := os.Open(dst) //nolint:gosec // path derived from validated sha
+	return b.open(b.path(key), key)
+}
+
+// GetLegacyReader streams a legacy content-addressed object, or ErrNotFound.
+func (b *BlobStore) GetLegacyReader(sha string) (io.ReadCloser, int64, error) {
+	if err := checkSHA(sha); err != nil {
+		return nil, 0, err
+	}
+	return b.open(filepath.Join(b.root, sha[:2], sha), sha)
+}
+
+func (b *BlobStore) open(path, label string) (io.ReadCloser, int64, error) {
+	f, err := os.Open(path) //nolint:gosec // path built from a checked key or sha
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, 0, ErrNotFound
 		}
-		return nil, 0, fmt.Errorf("blob open %q: %w", sha, err)
+		return nil, 0, fmt.Errorf("blob open %q: %w", label, err)
 	}
 	fi, err := f.Stat()
 	if err != nil {
 		_ = f.Close()
-		return nil, 0, fmt.Errorf("blob stat %q: %w", sha, err)
+		return nil, 0, fmt.Errorf("blob stat %q: %w", label, err)
 	}
 	return f, fi.Size(), nil
 }
 
-// Get returns the bytes for sha, or ErrNotFound.
-func (b *BlobStore) Get(sha string) ([]byte, error) {
-	if len(sha) < 2 {
-		return nil, fmt.Errorf("blob: sha too short")
+// DeletePrefix removes every object under prefix. A prefix is a directory
+// here, so this is one tree removal; an absent one is already deleted.
+func (b *BlobStore) DeletePrefix(prefix string) error {
+	if err := checkPrefix(prefix); err != nil {
+		return err
 	}
-	dst := filepath.Join(b.root, sha[:2], sha)
-	body, err := os.ReadFile(dst)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, ErrNotFound
-		}
-		return nil, fmt.Errorf("blob read %q: %w", sha, err)
+	if err := os.RemoveAll(b.path(strings.TrimSuffix(prefix, "/"))); err != nil {
+		return fmt.Errorf("blob delete prefix %q: %w", prefix, err)
 	}
-	return body, nil
+	return nil
 }

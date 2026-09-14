@@ -27,7 +27,7 @@ func (s stubPasteReader) Get(slug domain.Slug) (domain.Paste, error) {
 
 type stubBlobReader struct{ body []byte }
 
-func (s stubBlobReader) Read(_ context.Context, _ string) (io.ReadCloser, int64, error) {
+func (s stubBlobReader) Read(_ context.Context, _ domain.ManifestEntry) (io.ReadCloser, int64, error) {
 	return io.NopCloser(bytes.NewReader(s.body)), int64(len(s.body)), nil
 }
 
@@ -234,7 +234,7 @@ func TestPasteRead_Lifecycle(t *testing.T) {
 // failingBlobReader models the blob plane erroring under a read.
 type failingBlobReader struct{ err error }
 
-func (f failingBlobReader) Read(_ context.Context, _ string) (io.ReadCloser, int64, error) {
+func (f failingBlobReader) Read(_ context.Context, _ domain.ManifestEntry) (io.ReadCloser, int64, error) {
 	return nil, 0, f.err
 }
 

@@ -23,12 +23,11 @@ func (r stubSiteReader) Get(slug domain.Slug) (domain.Site, error) {
 	return r.s, nil
 }
 
-// stubBlobMap returns bytes by sha, ignoring the slug as the standalone
-// content-addressed path does.
+// stubBlobMap returns bytes by entry address.
 type stubBlobMap struct{ m map[string][]byte }
 
-func (b stubBlobMap) Read(_ context.Context, sha string) (io.ReadCloser, int64, error) {
-	body, ok := b.m[sha]
+func (b stubBlobMap) Read(_ context.Context, e domain.ManifestEntry) (io.ReadCloser, int64, error) {
+	body, ok := b.m[e.Address()]
 	if !ok {
 		return nil, 0, storage.ErrNotFound
 	}

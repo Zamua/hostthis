@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/archive"
@@ -43,14 +44,17 @@ type PasteByteSummer interface {
 }
 
 // DeploySite is the application service for a static-site upload: safe-untar,
-// content-addressed blob per file, manifest, persisted Site. The per-identity
-// quota is enforced BOTH mid-untar (the decompression-bomb guard) AND at
-// persistence time (InsertWithQuotaCheck).
+// one object per file under the deploy's own upload prefix, manifest,
+// persisted Site. The per-identity quota is enforced BOTH mid-untar (the
+// decompression-bomb guard) AND at persistence time (InsertWithQuotaCheck).
 type DeploySite struct {
 	Sites  SiteRepo
 	Pastes PasteByteSummer
 	Blob   BlobUnit
 	Now    func() time.Time
+	// Logger records object deletions that fail after the outcome is decided.
+	// nil discards.
+	Logger *log.Logger
 }
 
 // NewDeploySite wires defaults.
@@ -93,20 +97,21 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		return SiteResult{}, ErrEmptyOwner
 	}
 	now := d.Now().UTC()
-	man, err := d.extract(body, owner, now)
+	man, uploadID, err := d.extract(body, owner, now)
 	if err != nil {
 		return SiteResult{}, err
 	}
 
 	site := domain.Site{
 		Identity:  domain.Identity(owner),
+		UploadID:  uploadID,
 		Manifest:  man,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 	stored := man.CompressedSize()
 
-	// Staged blobs are content-addressed, so a slug collision only retries the
+	// Objects are keyed by upload, not slug, so a collision retries only the
 	// metadata insert. The one-shot archive never needs to be read again.
 	for range maxDeployRetries {
 		site.Slug = domain.NewRandomSlug()
@@ -114,46 +119,54 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		if errors.Is(err, domain.ErrSlugTaken) {
 			continue
 		}
-		if _, terr := classifyCommitErr(err); terr != nil {
+		if err != nil {
+			abandonUpload(d.Blob, d.Logger, uploadID, err)
+			_, terr := classifyCommitErr(err)
 			return SiteResult{}, terr
 		}
 		return SiteResult{Site: site}, nil
 	}
+	discardUpload(d.Blob, d.Logger, uploadID)
 	return SiteResult{}, ErrSlugTaken
 }
 
-// extract safe-untars body into staged blobs under the owner's remaining
-// budget and returns the manifest. The decompression-bomb guard aborts the
-// instant the running total would cross that budget, so a site can never be
-// extracted over-quota. Bucket-quota rejections translate via the classifier;
-// ErrUnsafeArchive / ErrTooManyFiles / ErrNoWebContent surface verbatim so the
-// SSH layer can message them precisely.
-func (d *DeploySite) extract(body io.Reader, owner string, now time.Time) (domain.Manifest, error) {
+// extract safe-untars body into a fresh upload under the owner's remaining
+// budget and returns the manifest and that upload's id. The decompression-bomb
+// guard aborts the instant the running total would cross that budget, so a
+// site can never be extracted over-quota. Bucket-quota rejections translate via
+// the classifier; ErrUnsafeArchive / ErrTooManyFiles / ErrNoWebContent surface
+// verbatim so the SSH layer can message them precisely. A failed extract
+// deletes whatever it staged.
+func (d *DeploySite) extract(body io.Reader, owner string, now time.Time) (domain.Manifest, string, error) {
 	usedPaste, err := d.Pastes.SumActiveBytesByOwner(owner, now)
 	if err != nil {
-		return domain.Manifest{}, fmt.Errorf("sum paste bytes: %w", err)
+		return domain.Manifest{}, "", fmt.Errorf("sum paste bytes: %w", err)
 	}
 	usedSite, err := d.Sites.SumActiveBytesByOwner(owner, now)
 	if err != nil {
-		return domain.Manifest{}, fmt.Errorf("sum site bytes: %w", err)
+		return domain.Manifest{}, "", fmt.Errorf("sum site bytes: %w", err)
 	}
 	budget := siteExtractBudget(int64(domain.UserQuotaBytes), int64(usedPaste), usedSite)
 
-	man, err := archive.Untar(body, &blobSink{blob: d.Blob}, budget)
+	uploadID := domain.NewUploadID()
+	man, err := archive.Untar(body, &blobSink{blob: d.Blob, uploadID: uploadID}, budget)
 	switch {
 	case errors.Is(err, domain.ErrArchiveTooLarge):
-		return domain.Manifest{}, ErrOverQuota
+		err = ErrOverQuota
 	case errors.Is(err, domain.ErrUnsupportedKind):
-		return domain.Manifest{}, domain.ErrUnsupportedKind
+		err = domain.ErrUnsupportedKind
 	case err != nil:
-		_, terr := classifyCommitErr(err)
-		return domain.Manifest{}, terr
+		_, err = classifyCommitErr(err)
 	case len(man.Files) == 0:
-		return domain.Manifest{}, ErrEmptySite
+		err = ErrEmptySite
 	case !man.HasWebContent():
-		return domain.Manifest{}, domain.ErrNoWebContent
+		err = domain.ErrNoWebContent
 	}
-	return man, nil
+	if err != nil {
+		discardUpload(d.Blob, d.Logger, uploadID)
+		return domain.Manifest{}, "", err
+	}
+	return man, uploadID, nil
 }
 
 // Delete removes an owned static site by slug. A non-site slug and a
@@ -206,7 +219,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		return SiteResult{}, ErrNotFound
 	}
 
-	man, err := d.extract(body, owner, now)
+	man, uploadID, err := d.extract(body, owner, now)
 	if err != nil {
 		return SiteResult{}, err
 	}
@@ -214,11 +227,15 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	site := domain.Site{
 		Slug:      slug,
 		Identity:  domain.Identity(owner),
+		UploadID:  uploadID,
 		Manifest:  man,
 		CreatedAt: existing.CreatedAt, // preserved across re-deploys
 		UpdatedAt: now,
 	}
 	err = d.Sites.ReplaceWithQuotaCheck(context.Background(), site, man.CompressedSize(), int64(domain.UserQuotaBytes), now)
+	if err != nil {
+		abandonUpload(d.Blob, d.Logger, uploadID, err)
+	}
 	switch class, terr := classifyCommitErr(err); {
 	case class == commitOK:
 		return SiteResult{Site: site}, nil
@@ -231,9 +248,13 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	}
 }
 
-// blobSink streams each file through the detached byte plane.
+// blobSink stores each archive file as the next object of one upload. A path
+// the archive repeats leaves its earlier object unreferenced in that same
+// prefix, which the upload's delete still covers.
 type blobSink struct {
-	blob BlobUnit
+	blob     BlobUnit
+	uploadID string
+	next     int
 }
 
 // siteExtractBudget is the unallocated owner quota available to the next
@@ -243,12 +264,14 @@ func siteExtractBudget(cap, usedPaste, usedSite int64) int64 {
 }
 
 func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
+	key := domain.UploadObjectKey(s.uploadID, s.next)
+	s.next++
 	// No buffer: the body streams through the compressor into the object store,
-	// hashing as it goes, so an in-flight file costs the compressor window and a
-	// copy buffer rather than its own size. The untar guard admits a single file
-	// up to the owner's whole remaining allowance, so buffering would size peak
-	// memory to the QUOTA.
-	sha, compressedSize, err := s.blob.StageEncoding(context.Background(), r)
+	// so an in-flight file costs the compressor window and a copy buffer rather
+	// than its own size. The untar guard admits a single file up to the owner's
+	// whole remaining allowance, so buffering would size peak memory to the
+	// QUOTA.
+	compressedSize, err := s.blob.StageEncoding(context.Background(), key, r)
 	if err != nil {
 		// The untar's cap sentinel has to survive so SafeUntar can tell a
 		// too-large archive from a real I/O failure.
@@ -257,7 +280,7 @@ func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
 		}
 		return "", 0, fmt.Errorf("blob put %q: %w", p, err)
 	}
-	return sha, compressedSize, nil
+	return key, compressedSize, nil
 }
 
 // ArchiveAdapter presents DeploySite as the upload service's ArchiveDeployer,

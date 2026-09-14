@@ -16,7 +16,7 @@ type generationSwapSiteRepo struct {
 }
 
 func (r *generationSwapSiteRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string,
-	manifest domain.Manifest, root domain.ManifestEntry, size int, userCap int64, now time.Time,
+	uploadID string, manifest domain.Manifest, size int, userCap int64, now time.Time,
 ) (AppendResult, error) {
 	if err := r.Delete(r.old.Slug, r.old.Identity, r.old.CreatedAt); err != nil {
 		return AppendResult{}, err
@@ -24,7 +24,7 @@ func (r *generationSwapSiteRepo) AppendManifestVersion(ctx context.Context, slug
 	if err := r.InsertWithQuotaCheck(ctx, r.replacement, 0, r.replacement.CreatedAt); err != nil {
 		return AppendResult{}, err
 	}
-	return r.MemRepo.AppendManifestVersion(ctx, slug, generation, manifest, root, size, userCap, now)
+	return r.MemRepo.AppendManifestVersion(ctx, slug, generation, uploadID, manifest, size, userCap, now)
 }
 
 func siteManifest(sha string) domain.Manifest {

@@ -31,14 +31,6 @@ type PasteRepo interface {
 	MarkFailed(domain.Paste) error
 }
 
-// BlobStore owns the at-rest encoding and writes content-addressed bytes.
-// Known lengths let S3-shaped backends avoid unknown-size multipart buffering.
-type BlobStore interface {
-	Put(sha string, r io.Reader, size int64) error
-	PutPrecompressed(sha string, r io.Reader, size int64) error
-	EncodeTo(w io.Writer, r io.Reader) (sha string, payloadSize int, totalSize int64, err error)
-}
-
 // ErrSlugTaken is returned when the internal slug re-mint retry budget is
 // exhausted.
 var ErrSlugTaken = errors.New("service: slug taken (after retries)")
@@ -46,7 +38,7 @@ var ErrSlugTaken = errors.New("service: slug taken (after retries)")
 // Upload is the application service for new paste creation.
 type Upload struct {
 	Repo PasteRepo
-	// Blob is the content-addressed byte plane.
+	// Blob is the byte plane; each upload writes under its own prefix.
 	Blob BlobUnit
 	Now  func() time.Time
 	// Sniff is the domain.MIMESniffer port. Overridable so a test can drive a
@@ -65,11 +57,6 @@ type Upload struct {
 	// success or failure. Test seam for waiting on the async half; nil in
 	// production.
 	onFinalizeDone func()
-	// SyncBlob makes Create commit the row READY and write the blob INLINE on
-	// the ack path, skipping the pending/MarkReady flip. A BENCHMARK TOGGLE
-	// (env HOSTTHIS_BLOB_SYNC) for A/B-ing sync against async on one binary,
-	// not a production mode.
-	SyncBlob bool
 }
 
 // NewUpload wires defaults.
@@ -143,6 +130,7 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		body = peeked
 	}
 
+	uploadID := domain.NewUploadID()
 	staged, err := streamUpload(body)
 	// Freed here EXCEPT where ownership transfers to the finalize goroutine,
 	// which discards it itself once the background write is done.
@@ -174,21 +162,18 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		return Result{}, domain.ErrUnsupportedKind
 	}
 	now := u.Now().UTC()
-	status := domain.PasteStatusPending
-	if u.SyncBlob {
-		status = domain.PasteStatusReady
-	}
 	p := domain.Paste{
 		Identity:      domain.Identity(owner),
 		Generation:    domain.NewPasteGeneration(),
-		Status:        status,
+		Status:        domain.PasteStatusPending,
 		Kind:          kind,
-		ContentSHA:    staged.SHA,
+		UploadID:      uploadID,
 		Size:          staged.CompressedSize,
 		Name:          name,
 		PinnedVersion: 0, // unpinned by default - public URL follows the latest version
 		CreatedAt:     now,
 		UpdatedAt:     now,
+		Manifest:      documentManifest(domain.UploadObjectKey(uploadID, 0), kind, staged),
 	}
 	// Retry on slug collision; SlugAlphabet's 32^8 slugs make a collision
 	// inside 5 retries vanishingly unlikely. The quota check lives INSIDE
@@ -198,27 +183,14 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	const maxRetries = 5
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		p.Slug = domain.NewRandomSlug()
-		ctx := context.Background()
-		if status == domain.PasteStatusReady {
-			// The benchmark path writes bytes before metadata. A failed write
-			// therefore cannot leave a ready row pointing at absent content.
-			if err := u.Blob.StagePrecompressed(ctx, staged.SHA, staged.File, staged.encodedSize()); err != nil {
-				if class, terr := classifyCommitErr(err); class != commitOther {
-					return Result{}, terr
-				}
-				return Result{}, fmt.Errorf("blob write: %w", err)
-			}
-		}
-		err := u.Repo.InsertWithQuotaCheck(ctx, p, int64(domain.UserQuotaBytes), now)
+		err := u.Repo.InsertWithQuotaCheck(context.Background(), p, int64(domain.UserQuotaBytes), now)
 		switch class, terr := classifyCommitErr(err); class {
 		case commitOK:
-			if status == domain.PasteStatusPending {
-				// The bytes land after the row, so the caller gets its URL now
-				// and the finalizer flips the status when they are durable.
-				// Ownership of the spill file transfers to the goroutine.
-				transferred = true
-				u.startFinalize(p, staged)
-			}
+			// The bytes land after the row, so the caller gets its URL now and
+			// the finalizer flips the status when they are durable. Ownership
+			// of the spill file transfers to the goroutine.
+			transferred = true
+			u.startFinalize(p, staged)
 			return Result{Paste: p}, nil
 		case commitSlugTaken:
 			u.logf("upload: slug %s taken, re-minting (attempt %d/%d)", p.Slug, attempt, maxRetries)
@@ -259,13 +231,16 @@ func (u *Upload) startFinalize(paste domain.Paste, staged stagedUpload) {
 // concurrent uploads times payload size (docs/SPEC.md "Writes are
 // constant-memory").
 func (u *Upload) finalize(paste domain.Paste, staged stagedUpload) {
-	if err := u.Blob.StagePrecompressed(context.Background(), staged.SHA, staged.File, staged.encodedSize()); err != nil {
+	if err := u.Blob.StagePrecompressed(context.Background(), paste.RootEntry().Key, staged.File, staged.encodedSize()); err != nil {
 		// Flip to failed and release the reservation so the paste stops
 		// charging quota and a read serves the error page.
 		u.logf("upload: finalize %s: blob write failed: %v", paste.Slug, err)
 		if ferr := u.Repo.MarkFailed(paste); ferr != nil {
 			u.logf("upload: finalize %s: mark failed: %v", paste.Slug, ferr)
 		}
+		// No read ever serves this prefix, including whatever the failed write
+		// left in it.
+		discardUpload(u.Blob, u.Logger, paste.UploadID)
 		return
 	}
 	if err := u.Repo.MarkReady(paste); err != nil {
