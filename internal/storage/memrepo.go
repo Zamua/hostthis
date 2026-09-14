@@ -241,19 +241,27 @@ func (r *MemRepo) DropStaleOwnerEntry(domain.Slug, string) (bool, error) {
 }
 
 // Delete removes a paste, guarded by owner and creation time so a delete
-// cannot land on a slug re-minted by someone else in between.
-func (r *MemRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
+// cannot land on a slug re-minted by someone else in between. It answers with
+// every version's upload, tombstones included: re-deleting a tombstone's
+// prefix is harmless and recovers one a crash left behind.
+func (r *MemRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p, ok := r.pastes[slug]
 	if !ok {
-		return ErrNotFound
+		return nil, ErrNotFound
 	}
 	if p.row.Identity != wantIdentity || !p.row.CreatedAt.Equal(wantCreatedAt) {
-		return ErrNotFound
+		return nil, ErrNotFound
 	}
 	delete(r.pastes, slug)
-	return nil
+	var uploads []string
+	for _, v := range p.versions {
+		if v.UploadID != "" {
+			uploads = append(uploads, v.UploadID)
+		}
+	}
+	return uploads, nil
 }
 
 func (r *MemRepo) SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
@@ -364,26 +372,27 @@ func (r *MemRepo) IsVersionServed(slug domain.Slug, ver int) (bool, error) {
 	return live && v.VerNum == ver, nil
 }
 
-// DeleteVersion tombstones a retained version. The served version is refused
-// inside the same lock that applies the tombstone.
-func (r *MemRepo) DeleteVersion(slug domain.Slug, generation string, ver int) error {
+// DeleteVersion tombstones a retained version and answers with its upload id,
+// also when it was already a tombstone. The served version is refused inside
+// the same lock that applies the tombstone.
+func (r *MemRepo) DeleteVersion(slug domain.Slug, generation string, ver int) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p, ok := r.pastes[slug]
 	if !ok || p.row.Generation != generation {
-		return ErrNotFound
+		return "", ErrNotFound
 	}
 	if served, live := p.served(); live && served.VerNum == ver {
-		return domain.ErrVersionCurrentlyServed
+		return "", domain.ErrVersionCurrentlyServed
 	}
 	for i := range p.versions {
 		if p.versions[i].VerNum == ver {
 			p.versions[i].Deleted = true
 			p.rollServed()
-			return nil
+			return p.versions[i].UploadID, nil
 		}
 	}
-	return nil
+	return "", nil
 }
 
 // --- KeyGateRepo (Sybil admission) ------------------------------------------

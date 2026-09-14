@@ -37,7 +37,7 @@ func deployStack(t *testing.T) (*DeploySite, *storage.Sites, *storage.Compressed
 func assertNoObjects(t *testing.T, root string) {
 	t.Helper()
 	if n := objectsUnder(t, root); n != 0 {
-		t.Fatalf("a failed deploy left %d object(s) in the store", n)
+		t.Fatalf("store holds %d upload object(s), want none", n)
 	}
 }
 
@@ -101,7 +101,7 @@ func TestDeploySite_HappyPath(t *testing.T) {
 }
 
 func TestDeploySite_Delete(t *testing.T) {
-	d, sites, _ := deployFixture(t)
+	d, sites, _, root := deployStack(t)
 	arc := gzipTar(t, map[string]string{"index.html": "<h1>hi</h1>"})
 	res, err := d.Deploy(bytes.NewReader(arc), "key:owner")
 	if err != nil {
@@ -122,6 +122,7 @@ func TestDeploySite_Delete(t *testing.T) {
 	if _, err := sites.Get(slug); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("site should be gone: got %v", err)
 	}
+	assertNoObjects(t, root)
 	if err := d.Delete(domain.NewRandomSlug(), "key:owner"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing delete: got %v, want ErrNotFound", err)
 	}

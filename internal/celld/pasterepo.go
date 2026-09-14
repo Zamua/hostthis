@@ -361,17 +361,21 @@ func (r *PasteRepo) SetName(slug domain.Slug, name string, wantIdentity domain.I
 // ORDER: the row first, then the entry. A crash between them leaves a stale
 // entry, which DropStaleOwnerEntry repairs. The other order would free quota
 // while the paste still exists, which no repair path watches for.
-func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
+//
+// The cell answers with the uploads of the incarnation it removed, kept in its
+// receipt, so a retried request names the same bytes rather than a re-mint's.
+func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) ([]string, error) {
 	row, err := r.getRow(slug)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	opID, err := newOpaqueID("remove")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var res struct {
-		Removed bool `json:"removed"`
+		Removed bool     `json:"removed"`
+		Uploads []string `json:"uploads"`
 	}
 	status, err := r.callArtifactMutation(context.Background(), "/paste/remove", slug,
 		map[string]any{
@@ -380,15 +384,21 @@ func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantC
 			"createdAt": wantCreatedAt.UTC().UnixMilli(),
 		}, &res)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if status == http.StatusConflict {
-		return fmt.Errorf("celld: remove accounting conflict")
+		return nil, fmt.Errorf("celld: remove accounting conflict")
 	}
 	if !res.Removed {
-		return domain.ErrNotFound
+		return nil, domain.ErrNotFound
 	}
-	return nil
+	uploads := make([]string, 0, len(res.Uploads))
+	for _, id := range res.Uploads {
+		if id != "" {
+			uploads = append(uploads, id)
+		}
+	}
+	return uploads, nil
 }
 
 func (r *PasteRepo) callArtifactMutation(ctx context.Context, path string, slug domain.Slug,
@@ -489,30 +499,34 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 // conservative, visible, and repairable from the paste cell. The other order
 // frees the charge while the bytes remain, which under-charges silently and is
 // the direction nothing watches.
-func (r *PasteRepo) DeleteVersion(slug domain.Slug, generation string, ver int) error {
+//
+// The answer names the version's upload, also when it was already deleted, and
+// is empty for a legacy version.
+func (r *PasteRepo) DeleteVersion(slug domain.Slug, generation string, ver int) (string, error) {
 	opID, err := newOpaqueID("delete-version")
 	if err != nil {
-		return err
+		return "", err
 	}
 	var res struct {
 		Deleted bool   `json:"deleted"`
+		Upload  string `json:"upload"`
 		Error   string `json:"error"`
 	}
 	status, err := r.callArtifactMutation(context.Background(), "/paste/delversion", slug,
 		map[string]any{"opId": opID, "generation": generation, "ver": ver}, &res)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if status == http.StatusConflict {
 		if res.Error == "version-served" {
-			return domain.ErrVersionCurrentlyServed
+			return "", domain.ErrVersionCurrentlyServed
 		}
-		return fmt.Errorf("celld: delete-version accounting conflict")
+		return "", fmt.Errorf("celld: delete-version accounting conflict")
 	}
 	if !res.Deleted {
-		return domain.ErrNotFound
+		return "", domain.ErrNotFound
 	}
-	return nil
+	return res.Upload, nil
 }
 
 // GetVersion reads one retained version. Single-cell.

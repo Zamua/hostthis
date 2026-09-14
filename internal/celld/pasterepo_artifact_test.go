@@ -120,7 +120,7 @@ func TestMutationsPassAnEmptyLegacyGenerationThrough(t *testing.T) {
 	); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	if err := repo.DeleteVersion("legacy12", "", 1); err != nil {
+	if _, err := repo.DeleteVersion("legacy12", "", 1); err != nil {
 		t.Fatalf("delete version: %v", err)
 	}
 	if err := repo.SetPinnedVersion("legacy12", "", domain.Version{VerNum: 1}); err != nil {

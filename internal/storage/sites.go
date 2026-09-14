@@ -19,7 +19,7 @@ type SiteBackingRepo interface {
 	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
 	AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string, uploadID string,
 		m domain.Manifest, size int, userCap int64, now time.Time) (AppendResult, error)
-	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
+	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) ([]string, error)
 }
 
 // Sites adapts the paste repo onto the site port.
@@ -100,7 +100,7 @@ func (a *Sites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, stored
 	return err
 }
 
-func (a *Sites) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
+func (a *Sites) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) ([]string, error) {
 	return a.repo.Delete(slug, wantIdentity, wantCreatedAt)
 }
 

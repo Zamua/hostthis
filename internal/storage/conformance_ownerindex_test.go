@@ -30,10 +30,10 @@ type ownerIndexRepo interface {
 	DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, error)
 	SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
-	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
+	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) ([]string, error)
 	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, generation string, kind domain.ContentKind,
 		uploadID string, manifest domain.Manifest, size int, userCap int64, now time.Time) (domain.AppendResult, error)
-	DeleteVersion(domain.Slug, string, int) error
+	DeleteVersion(domain.Slug, string, int) (string, error)
 }
 
 func chargedBytes(t *testing.T, r ownerIndexRepo, owner string) (int, error) {
@@ -193,14 +193,14 @@ func conformDeleteReleasesAndDelists(t *testing.T, r ownerIndexRepo) {
 	insert(t, r, keep)
 
 	// A foreign owner cannot delete it.
-	if err := r.Delete(doomed.Slug, domain.Identity("key:someone-else"), doomed.CreatedAt); err == nil {
+	if _, err := r.Delete(doomed.Slug, domain.Identity("key:someone-else"), doomed.CreatedAt); err == nil {
 		t.Fatal("a foreign identity deleted a paste it does not own")
 	}
 	if n, err := chargedBytes(t, r, owner); err != nil || n != 1000 {
 		t.Fatalf("charged = %d after a refused delete (err %v); want 1000 unchanged", n, err)
 	}
 
-	if err := r.Delete(doomed.Slug, domain.Identity(owner), doomed.CreatedAt); err != nil {
+	if _, err := r.Delete(doomed.Slug, domain.Identity(owner), doomed.CreatedAt); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
@@ -244,7 +244,7 @@ func conformVersionChangesTheCharge(t *testing.T, r ownerIndexRepo) {
 			"version write and not only by the insert.", n, err)
 	}
 
-	if err := r.DeleteVersion(p.Slug, p.Generation, 1); err != nil {
+	if _, err := r.DeleteVersion(p.Slug, p.Generation, 1); err != nil {
 		t.Fatalf("DeleteVersion(1): %v", err)
 	}
 	if n, err := chargedBytes(t, r, owner); err != nil || n != 300 {

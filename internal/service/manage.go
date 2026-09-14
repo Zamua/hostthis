@@ -24,7 +24,9 @@ type PasteAdmin interface {
 	// service ownership check runs outside any transaction, so a delete+re-mint
 	// of the same slug in the window would otherwise let the op hit a different
 	// paste. CreatedAt is immutable per paste, so it names the exact instance.
-	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
+	// Delete answers with the upload id of every version it removed, taken
+	// inside its commit: a read afterwards could name a re-minted slug's uploads.
+	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) (uploadIDs []string, err error)
 	SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 	SetPinnedVersion(domain.Slug, string, domain.Version) error
 	Unpin(domain.Slug, string) error
@@ -38,7 +40,9 @@ type PasteAdmin interface {
 	// decided from the authoritative head + rows (never a disposable read
 	// cache), so the delete guard below can never free the served blob.
 	IsVersionServed(domain.Slug, int) (bool, error)
-	DeleteVersion(domain.Slug, string, int) error
+	// DeleteVersion answers with the tombstoned version's upload id, empty for
+	// a legacy version.
+	DeleteVersion(domain.Slug, string, int) (uploadID string, err error)
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
 	OwnerFirstSeen(owner string) (time.Time, error)
 	// OwnerSummary is whoami's roll-up in one call: count + first-seen +
@@ -219,9 +223,10 @@ func (m *Manage) Rename(slug domain.Slug, owner, name string) error {
 	return m.Repo.SetName(slug, name, p.Identity, p.CreatedAt)
 }
 
-// Delete removes a paste and its versions (FK cascade). A delete whose paste
-// row is already gone but whose slug lingers in the caller's own index heals
-// that residue and succeeds (docs/SPEC.md "Delete heals its own lost tail").
+// Delete removes a paste and its versions, then deletes every removed version's
+// bytes. A delete whose paste row is already gone but whose slug lingers in the
+// caller's own index heals that residue and succeeds (docs/SPEC.md "Delete
+// heals its own lost tail").
 func (m *Manage) Delete(slug domain.Slug, owner string) error {
 	p, err := m.requireOwner(slug, owner)
 	if err != nil {
@@ -242,7 +247,16 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 		}
 		return nil
 	}
-	return m.Repo.Delete(slug, p.Identity, p.CreatedAt)
+	uploads, err := m.Repo.Delete(slug, p.Identity, p.CreatedAt)
+	if err != nil {
+		return err
+	}
+	// Bytes go only after the removal commits, so no reader follows a row to
+	// missing objects.
+	for _, id := range uploads {
+		discardUpload(m.Blob, m.Logger, id)
+	}
+	return nil
 }
 
 // Versions returns the slug's full history (newest first), including
@@ -269,7 +283,7 @@ var ErrVersionAlreadyDeleted = errors.New("service: version already deleted")
 // URL serves. Freeing it requires `pin` to a different version, or `unpin`.
 var ErrVersionCurrentlyServed = errors.New("service: version is currently served by the URL; pin a different version first")
 
-// DeleteVersion frees a single version's blob bytes (tombstones the row).
+// DeleteVersion tombstones a single version, then deletes its bytes.
 // Refused when:
 //   - paste doesn't exist or owner doesn't match → ErrNotFound
 //   - target version doesn't exist → ErrNotFound
@@ -304,12 +318,14 @@ func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (Dele
 		return DeleteVersionResult{}, ErrVersionCurrentlyServed
 	}
 
-	if err := m.Repo.DeleteVersion(slug, paste.Generation, verNum); err != nil {
+	upload, err := m.Repo.DeleteVersion(slug, paste.Generation, verNum)
+	if err != nil {
 		if errors.Is(err, domain.ErrVersionCurrentlyServed) {
 			return DeleteVersionResult{}, ErrVersionCurrentlyServed
 		}
 		return DeleteVersionResult{}, err
 	}
+	discardUpload(m.Blob, m.Logger, upload)
 	// No cache purge: the served bytes did not change, only an older
 	// version's bytes that no URL surface exposed.
 	return DeleteVersionResult{VerNum: verNum, FreedBytes: target.Size}, nil

@@ -19,6 +19,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -68,6 +70,7 @@ func runConformanceWithSites(
 	t.Run(name+"/QuotaCountsAllVersions", func(t *testing.T) { conformQuotaCountsAllVersions(t, newRepo(t)) })
 	t.Run(name+"/QuotaFreedByDelete", func(t *testing.T) { conformQuotaFreedByDelete(t, newRepo(t)) })
 	t.Run(name+"/QuotaFreedByDeleteVersion", func(t *testing.T) { conformQuotaFreedByDeleteVersion(t, newRepo(t)) })
+	t.Run(name+"/DeletesNameTheirUploads", func(t *testing.T) { conformDeletesNameTheirUploads(t, newRepo(t)) })
 	t.Run(name+"/QuotaPerIdentityIndependent", func(t *testing.T) { conformQuotaPerIdentityIndependent(t, newRepo(t)) })
 	t.Run(name+"/AppendBumpsVersion", func(t *testing.T) { conformAppendBumpsVersion(t, newRepo(t)) })
 	t.Run(name+"/PinUnpinRollsHead", func(t *testing.T) { conformPinUnpinRollsHead(t, newRepo(t)) })
@@ -221,7 +224,7 @@ func conformQuotaFreedByDelete(t *testing.T, r conformanceRepo) {
 		t.Fatalf("pre-delete 300 should be over quota: %v", err)
 	}
 	// Delete the 900 paste, freeing all its bytes.
-	if err := r.Delete("d1234567", "key:d", fixedNow); err != nil {
+	if _, err := r.Delete("d1234567", "key:d", fixedNow); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if err := r.InsertWithQuotaCheck(context.Background(), pasteOf("d2234567", "key:d", 300), cap, fixedNow); err != nil {
@@ -242,7 +245,7 @@ func conformQuotaFreedByDeleteVersion(t *testing.T, r conformanceRepo) {
 		t.Fatalf("v3 pre-tombstone should be over quota: %v", err)
 	}
 	// Tombstone v1 (300), freeing those bytes.
-	if err := r.DeleteVersion("dv123456", generationOf("dv123456"), 1); err != nil {
+	if _, err := r.DeleteVersion("dv123456", generationOf("dv123456"), 1); err != nil {
 		t.Fatalf("delete version 1: %v", err)
 	}
 	// Now 600 used → v3 of 300 fits.
@@ -397,7 +400,7 @@ func conformDeleteVersionTombstones(t *testing.T, r conformanceRepo) {
 	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "dt123456", generationOf("dt123456"), domain.KindHTML, "up-dt-v2", domain.Manifest{}, 20, 0, fixedNow); err != nil {
 		t.Fatalf("append v2: %v", err)
 	}
-	if err := r.DeleteVersion("dt123456", generationOf("dt123456"), 1); err != nil {
+	if _, err := r.DeleteVersion("dt123456", generationOf("dt123456"), 1); err != nil {
 		t.Fatalf("delete v1: %v", err)
 	}
 	// The tombstoned row stays in ListVersions, flagged deleted.
@@ -431,8 +434,51 @@ func conformDeleteVersionTombstones(t *testing.T, r conformanceRepo) {
 	}
 	// Re-deleting an already-tombstoned version is a repo-level no-op: the
 	// service layer, not the repo, maps repeats to ErrVersionAlreadyDeleted.
-	if err := r.DeleteVersion("dt123456", generationOf("dt123456"), 1); err != nil {
+	if _, err := r.DeleteVersion("dt123456", generationOf("dt123456"), 1); err != nil {
 		t.Fatalf("re-delete tombstone should be a no-op at the repo level, got %v", err)
+	}
+}
+
+// A delete answers with the uploads of exactly what it removed, so the service
+// deletes those bytes without reading versions again. A legacy version names
+// none, a repeated version delete names the same upload, and a paste delete
+// names every version's upload, tombstones included, ascending.
+func conformDeletesNameTheirUploads(t *testing.T, r conformanceRepo) {
+	const slug = "du123456"
+	legacy := pasteOf(slug, "key:du", 10)
+	legacy.UploadID = ""
+	insert(t, r, legacy)
+	for _, id := range []string{"up-du-v2", "up-du-v3"} {
+		if _, err := r.AppendVersionWithQuotaCheck(context.Background(), slug, generationOf(slug), domain.KindHTML, id, domain.Manifest{}, 10, 0, fixedNow); err != nil {
+			t.Fatalf("append %s: %v", id, err)
+		}
+	}
+	vers, err := r.ListVersions(slug)
+	if err != nil {
+		t.Fatalf("list versions: %v", err)
+	}
+	listed := map[int]string{}
+	for _, v := range vers {
+		listed[v.VerNum] = v.UploadID
+	}
+	if want := map[int]string{1: "", 2: "up-du-v2", 3: "up-du-v3"}; !maps.Equal(listed, want) {
+		t.Fatalf("listed upload ids = %v, want %v", listed, want)
+	}
+
+	for attempt := range 2 {
+		if id, err := r.DeleteVersion(slug, generationOf(slug), 2); err != nil || id != "up-du-v2" {
+			t.Fatalf("DeleteVersion(2) attempt %d = (%q, %v), want up-du-v2", attempt+1, id, err)
+		}
+	}
+	if id, err := r.DeleteVersion(slug, generationOf(slug), 1); err != nil || id != "" {
+		t.Fatalf("DeleteVersion of a legacy version = (%q, %v), want no upload", id, err)
+	}
+	ids, err := r.Delete(slug, "key:du", fixedNow)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if want := []string{"up-du-v2", "up-du-v3"}; !slices.Equal(ids, want) {
+		t.Fatalf("Delete named uploads %v, want %v", ids, want)
 	}
 }
 
@@ -450,7 +496,7 @@ func conformVerNumNotReused(t *testing.T, r conformanceRepo) {
 	}
 	// Tombstone v2, then append again: the next number must be 3, since
 	// MAX(ver_num) counts tombstones.
-	if err := r.DeleteVersion("vn123456", generationOf("vn123456"), 2); err != nil {
+	if _, err := r.DeleteVersion("vn123456", generationOf("vn123456"), 2); err != nil {
 		t.Fatalf("delete v2: %v", err)
 	}
 	res, err := r.AppendVersionWithQuotaCheck(context.Background(), "vn123456", generationOf("vn123456"), domain.KindHTML, "up-vn-v3", domain.Manifest{}, 10, 0, fixedNow)
@@ -484,7 +530,7 @@ func conformRepoIsNotOwnerGated(t *testing.T, r conformanceRepo) {
 	if err := r.SetName("og123456", "renamed", got.Identity, got.CreatedAt); err != nil {
 		t.Fatalf("repo SetName is not owner-gated: %v", err)
 	}
-	if err := r.Delete("og123456", got.Identity, got.CreatedAt); err != nil {
+	if _, err := r.Delete("og123456", got.Identity, got.CreatedAt); err != nil {
 		t.Fatalf("repo Delete is not owner-gated: %v", err)
 	}
 }
@@ -568,7 +614,7 @@ func conformOwnerStats(t *testing.T, r conformanceRepo) {
 	// OwnerSummary.Active counts only LIVE pastes and must AGREE with
 	// ListByOwner even when a delete leaves a stale derived-index entry
 	// behind: a raw len(index) count would over-report the orphan.
-	if err := r.Delete("st223456", domain.Identity(owner), pB.CreatedAt); err != nil {
+	if _, err := r.Delete("st223456", domain.Identity(owner), pB.CreatedAt); err != nil {
 		t.Fatalf("delete for count-repair regression: %v", err)
 	}
 	sum, err = r.OwnerSummary(owner, fixedNow)

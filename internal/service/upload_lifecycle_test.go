@@ -177,7 +177,7 @@ func TestUpload_Finalize_FencesReplacementIncarnation(t *testing.T) {
 				t.Fatalf("create: %v", err)
 			}
 			old := res.Paste
-			if err := repo.Delete(old.Slug, old.Identity, old.CreatedAt); err != nil {
+			if _, err := repo.Delete(old.Slug, old.Identity, old.CreatedAt); err != nil {
 				t.Fatalf("delete old incarnation: %v", err)
 			}
 			replacement := old

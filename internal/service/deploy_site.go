@@ -25,8 +25,9 @@ type SiteRepo interface {
 	Get(domain.Slug) (domain.Site, error)
 	// Delete re-checks wantIdentity + wantCreatedAt inside its {slug}
 	// transaction, so a delete+re-mint of the slug by another identity in the
-	// window cannot destroy the new owner's paste.
-	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
+	// window cannot destroy the new owner's paste. It answers with the upload id
+	// of every version it removed.
+	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) (uploadIDs []string, err error)
 	// SumActiveBytesByOwner returns the identity's active SITE bytes. The
 	// deploy path adds the paste-side sum to compute the budget the untar may
 	// fill before the persistence-time check.
@@ -169,9 +170,10 @@ func (d *DeploySite) extract(body io.Reader, owner string, now time.Time) (domai
 	return man, uploadID, nil
 }
 
-// Delete removes an owned static site by slug. A non-site slug and a
-// foreign-owned site both collapse to ErrNotFound, the same sentinel the
-// paste-delete path returns, so existence and ownership never leak.
+// Delete removes an owned static site by slug, then deletes every removed
+// version's bytes. A non-site slug and a foreign-owned site both collapse to
+// ErrNotFound, the same sentinel the paste-delete path returns, so existence
+// and ownership never leak.
 func (d *DeploySite) Delete(slug domain.Slug, owner string) error {
 	if owner == "" {
 		return ErrEmptyOwner
@@ -186,7 +188,14 @@ func (d *DeploySite) Delete(slug domain.Slug, owner string) error {
 	if existing.Identity.String() != owner {
 		return ErrNotFound
 	}
-	return d.Sites.Delete(slug, existing.Identity, existing.CreatedAt)
+	uploads, err := d.Sites.Delete(slug, existing.Identity, existing.CreatedAt)
+	if err != nil {
+		return err
+	}
+	for _, id := range uploads {
+		discardUpload(d.Blob, d.Logger, id)
+	}
+	return nil
 }
 
 // DeployToSlug appends a SITE version at an existing owned slug. Same pipeline

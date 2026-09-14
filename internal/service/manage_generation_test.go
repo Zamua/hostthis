@@ -41,7 +41,7 @@ func (r *generationSwapRepo) Unpin(slug domain.Slug, generation string) error {
 	return r.MemRepo.Unpin(slug, generation)
 }
 
-func (r *generationSwapRepo) DeleteVersion(slug domain.Slug, generation string, version int) error {
+func (r *generationSwapRepo) DeleteVersion(slug domain.Slug, generation string, version int) (string, error) {
 	r.runSwap()
 	return r.MemRepo.DeleteVersion(slug, generation, version)
 }
@@ -76,7 +76,7 @@ func armGenerationReplacement(t *testing.T, repo *generationSwapRepo, old domain
 	replacement.UpdatedAt = replacement.CreatedAt
 	replacement.PinnedVersion = 0
 	repo.swap = func() {
-		if err := repo.Delete(old.Slug, old.Identity, old.CreatedAt); err != nil {
+		if _, err := repo.Delete(old.Slug, old.Identity, old.CreatedAt); err != nil {
 			t.Fatalf("delete old incarnation: %v", err)
 		}
 		if err := repo.InsertWithQuotaCheck(context.Background(), replacement, 0, replacement.CreatedAt); err != nil {
