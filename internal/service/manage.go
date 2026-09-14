@@ -251,8 +251,8 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 	if err != nil {
 		return err
 	}
-	// Bytes go only after the removal commits, so no reader follows a row to
-	// missing objects.
+	// Bytes go only after the removal commits, so no read that starts
+	// afterwards follows a row to missing objects.
 	for _, id := range uploads {
 		discardUpload(m.Blob, m.Logger, id)
 	}

@@ -2472,8 +2472,9 @@ objects never change, so the key is a stable validator.
 
 ### Deleting bytes
 
-Metadata commits first, then bytes, so a reader never follows a row to missing
-bytes.
+Metadata commits first, then bytes, so a read that starts after the commit
+never follows a row to missing bytes. A GET that read the head before the
+commit and opens an object after its prefix is deleted answers 500.
 
 - **Delete a version:** commit the tombstone, then delete that version's
   `uploads/<upload-id>/`.
