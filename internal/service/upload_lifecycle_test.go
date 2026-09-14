@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,10 +17,11 @@ import (
 )
 
 // fakeBlobs is a controllable BlobStore for the lifecycle tests: it can be
-// told to fail PutPrecompressed and records the SHAs it stored.
+// told to fail PutPrecompressed and records what it stored and deleted.
 type fakeBlobs struct {
 	mu       sync.Mutex
 	stored   map[string][]byte
+	deleted  []string
 	failPut  bool
 	putCalls int
 	// holdPut, when non-nil, parks every PutPrecompressed until the channel
@@ -32,80 +35,7 @@ type fakeBlobs struct {
 
 func newFakeBlobs() *fakeBlobs { return &fakeBlobs{stored: map[string][]byte{}} }
 
-// syncOrderBlob counts StagePrecompressed calls. The embedded nil BlobUnit
-// makes any other call panic.
-type syncOrderBlob struct {
-	BlobUnit
-	stageCalls int
-	stageErr   error
-}
-
-func (b *syncOrderBlob) StagePrecompressed(context.Context, string, io.Reader, int64) error {
-	b.stageCalls++
-	return b.stageErr
-}
-
-type syncOrderRepo struct {
-	blob        *syncOrderBlob
-	insertCalls int
-	markCalls   int
-	inserted    domain.Paste
-}
-
-func (r *syncOrderRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, _ int64, _ time.Time) error {
-	if r.blob.stageCalls == 0 {
-		return errors.New("metadata inserted before bytes")
-	}
-	r.insertCalls++
-	r.inserted = p
-	return nil
-}
-func (*syncOrderRepo) Get(domain.Slug) (domain.Paste, error) {
-	return domain.Paste{}, domain.ErrNotFound
-}
-func (r *syncOrderRepo) MarkReady(domain.Paste) error  { r.markCalls++; return nil }
-func (r *syncOrderRepo) MarkFailed(domain.Paste) error { r.markCalls++; return nil }
-
-// Sync mode makes ready metadata visible only after its bytes are durable.
-func TestUpload_SyncBlobOrdersBytesBeforeReadyMetadata(t *testing.T) {
-	blob := &syncOrderBlob{}
-	repo := &syncOrderRepo{blob: blob}
-	u := NewUpload(repo, blob)
-	u.SyncBlob = true
-
-	res, err := u.Create(bytes.NewReader([]byte("# body")), "key:owner", "", "")
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if blob.stageCalls != 1 || repo.insertCalls != 1 {
-		t.Fatalf("stage/insert calls = %d/%d, want 1/1", blob.stageCalls, repo.insertCalls)
-	}
-	if res.Paste.Status != domain.PasteStatusReady || repo.inserted.Status != domain.PasteStatusReady {
-		t.Fatalf("result/inserted status = %q/%q, want ready", res.Paste.Status, repo.inserted.Status)
-	}
-	if repo.markCalls != 0 {
-		t.Fatalf("status transition calls = %d, want 0", repo.markCalls)
-	}
-}
-
-// A failed synchronous byte write leaves no metadata behind.
-func TestUpload_SyncBlobWriteFailureSkipsMetadata(t *testing.T) {
-	writeErr := errors.New("blob unavailable")
-	blob := &syncOrderBlob{stageErr: writeErr}
-	repo := &syncOrderRepo{blob: blob}
-	u := NewUpload(repo, blob)
-	u.SyncBlob = true
-
-	_, err := u.Create(bytes.NewReader([]byte("# body")), "key:owner", "", "")
-	if !errors.Is(err, writeErr) {
-		t.Fatalf("Create = %v, want blob error", err)
-	}
-	if repo.insertCalls != 0 || repo.markCalls != 0 {
-		t.Fatalf("insert/status calls = %d/%d, want 0/0", repo.insertCalls, repo.markCalls)
-	}
-}
-
-func (f *fakeBlobs) PutPrecompressed(sha string, body io.Reader, size int64) error {
+func (f *fakeBlobs) PutPrecompressed(key string, body io.Reader, size int64) error {
 	if f.holdPut != nil {
 		<-f.holdPut
 	}
@@ -122,37 +52,53 @@ func (f *fakeBlobs) PutPrecompressed(sha string, body io.Reader, size int64) err
 	if f.failPut {
 		return errors.New("simulated blob write failure")
 	}
-	f.stored[sha] = b
+	f.stored[key] = b
 	return nil
 }
 
-func (f *fakeBlobs) Put(sha string, r io.Reader, size int64) error {
-	return f.PutPrecompressed(sha, r, size)
+// EncodeTo delegates to the real encoder so size assertions use the production
+// at-rest format.
+func (f *fakeBlobs) EncodeTo(w io.Writer, r io.Reader) (int, int64, error) {
+	return (&storage.CompressedBlobStore{}).EncodeTo(w, r)
 }
 
-func (f *fakeBlobs) Get(sha string) ([]byte, error) {
+func (f *fakeBlobs) GetReader(key string) (io.ReadCloser, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	b, ok := f.stored[sha]
+	b, ok := f.stored[key]
 	if !ok {
-		return nil, storage.ErrNotFound
-	}
-	return b, nil
-}
-
-func (f *fakeBlobs) GetReader(sha string) (io.ReadCloser, int64, error) {
-	b, err := f.Get(sha)
-	if err != nil {
-		return nil, 0, err
+		return nil, 0, storage.ErrNotFound
 	}
 	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
 }
 
-func (f *fakeBlobs) has(sha string) bool {
+func (f *fakeBlobs) GetLegacyReader(string) (io.ReadCloser, int64, error) {
+	return nil, 0, storage.ErrNotFound
+}
+
+func (f *fakeBlobs) DeletePrefix(prefix string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	_, ok := f.stored[sha]
+	f.deleted = append(f.deleted, prefix)
+	for key := range f.stored {
+		if strings.HasPrefix(key, prefix) {
+			delete(f.stored, key)
+		}
+	}
+	return nil
+}
+
+func (f *fakeBlobs) has(key string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.stored[key]
 	return ok
+}
+
+func (f *fakeBlobs) deletedPrefixes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.deleted)
 }
 
 // testBlobStore is the combined read+write surface a StandaloneBlobUnit needs,
@@ -231,12 +177,13 @@ func TestUpload_Finalize_FencesReplacementIncarnation(t *testing.T) {
 				t.Fatalf("create: %v", err)
 			}
 			old := res.Paste
-			if err := repo.Delete(old.Slug, old.Identity, old.CreatedAt); err != nil {
+			if _, err := repo.Delete(old.Slug, old.Identity, old.CreatedAt); err != nil {
 				t.Fatalf("delete old incarnation: %v", err)
 			}
 			replacement := old
 			replacement.Generation = domain.NewPasteGeneration()
-			replacement.ContentSHA = "replacement-sha"
+			replacement.UploadID = domain.NewUploadID()
+			replacement.Manifest = domain.DocumentManifest(domain.ManifestEntry{Key: domain.UploadObjectKey(replacement.UploadID, 0)})
 			replacement.Size = 1
 			replacement.Status = domain.PasteStatusPending
 			if err := repo.InsertWithQuotaCheck(context.Background(), replacement, 0, replacement.CreatedAt); err != nil {
@@ -272,12 +219,15 @@ func TestUpload_Finalize_PendingToReady(t *testing.T) {
 	if got.Status != domain.PasteStatusReady {
 		t.Fatalf("status after finalize: got %q, want ready", got.Status)
 	}
-	if !blobs.has(res.Paste.ContentSHA) {
-		t.Fatalf("blob was not stored by finalize")
+	if !blobs.has(domain.UploadObjectKey(res.Paste.UploadID, 0)) {
+		t.Fatalf("finalize did not store object 0 of upload %q", res.Paste.UploadID)
+	}
+	if deleted := blobs.deletedPrefixes(); len(deleted) != 0 {
+		t.Fatalf("a successful finalize deleted %v", deleted)
 	}
 }
 
-// Background blob-write failure flips the paste to failed.
+// A failed background write marks the paste failed and deletes its prefix.
 func TestUpload_Finalize_BlobFailureToFailed(t *testing.T) {
 	blobs := newFakeBlobs()
 	blobs.failPut = true
@@ -293,6 +243,9 @@ func TestUpload_Finalize_BlobFailureToFailed(t *testing.T) {
 	}
 	if got.Status != domain.PasteStatusFailed {
 		t.Fatalf("status after failed finalize: got %q, want failed", got.Status)
+	}
+	if want := []string{domain.UploadPrefix(res.Paste.UploadID)}; !slices.Equal(blobs.deletedPrefixes(), want) {
+		t.Fatalf("deleted prefixes = %v, want %v", blobs.deletedPrefixes(), want)
 	}
 }
 
@@ -346,19 +299,4 @@ func TestUpload_Create_QuotaEnforcedSynchronously(t *testing.T) {
 		t.Fatalf("pending paste should count toward quota: got %d, want %d", n, res.Paste.Size)
 	}
 	waitFinalize(t, done)
-}
-
-// EncodeTo delegates to the real encoder so size assertions use the production
-// at-rest format.
-func (f *fakeBlobs) EncodeTo(w io.Writer, r io.Reader) (string, int, int64, error) {
-	raw, err := io.ReadAll(r)
-	if err != nil {
-		return "", 0, 0, err
-	}
-	body, err := storage.EncodeCompressedBody(bytes.NewReader(raw))
-	if err != nil {
-		return "", 0, 0, err
-	}
-	n, err := w.Write(body)
-	return sha256Hex(raw), len(body) - storage.CompressedBodyPrefixLen, int64(n), err
 }

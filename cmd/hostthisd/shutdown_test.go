@@ -104,7 +104,7 @@ func TestShutdownStopsAdmissionBeforeConcurrentDrains(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- shutdownDaemon(ctx, 500*time.Millisecond, public, metrics, relay, ssh, func() {}, func() {})
+		done <- shutdownDaemon(ctx, 500*time.Millisecond, public, metrics, relay, ssh, func() {})
 	}()
 
 	awaitSignal(t, "public HTTP drain", public.entered)
@@ -120,11 +120,10 @@ func TestShutdownStopsAdmissionBeforeConcurrentDrains(t *testing.T) {
 	}
 }
 
-func TestShutdownWaitsForSSHThenFinalizersThenCleanup(t *testing.T) {
+func TestShutdownWaitsForSSHThenFinalizers(t *testing.T) {
 	sshRelease := make(chan struct{})
 	finalRelease := make(chan struct{})
 	finalStarted := make(chan struct{})
-	cleanupStarted := make(chan struct{})
 	ssh := newTestSSH(sshRelease, closedSignal())
 	relay := &testRelay{testDrain: immediate()}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -134,7 +133,7 @@ func TestShutdownWaitsForSSHThenFinalizersThenCleanup(t *testing.T) {
 		done <- shutdownDaemon(ctx, 500*time.Millisecond, immediate(), immediate(), relay, ssh, func() {
 			close(finalStarted)
 			<-finalRelease
-		}, func() { close(cleanupStarted) })
+		})
 	}()
 
 	awaitSignal(t, "SSH drain", ssh.shutdownEntered)
@@ -145,13 +144,7 @@ func TestShutdownWaitsForSSHThenFinalizersThenCleanup(t *testing.T) {
 	}
 	close(sshRelease)
 	awaitSignal(t, "finalizers", finalStarted)
-	select {
-	case <-cleanupStarted:
-		t.Fatal("blob cleanup started before finalizers completed")
-	default:
-	}
 	close(finalRelease)
-	awaitSignal(t, "blob cleanup", cleanupStarted)
 	if err := <-done; err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
@@ -172,7 +165,7 @@ func TestShutdownForceClosesSSHBeforeWaitingFinalizers(t *testing.T) {
 	go func() {
 		done <- shutdownDaemon(ctx, 20*time.Millisecond, immediate(), immediate(),
 			&testRelay{testDrain: immediate()}, ssh,
-			func() { close(finalStarted) }, func() {})
+			func() { close(finalStarted) })
 	}()
 
 	awaitSignal(t, "SSH force close", ssh.closeEntered)
@@ -196,7 +189,7 @@ func TestShutdownReturnsAtHardDeadline(t *testing.T) {
 	started := time.Now()
 	err := shutdownDaemon(ctx, time.Second, immediate(), immediate(),
 		&testRelay{testDrain: immediate()}, ssh,
-		func() { <-finalRelease }, func() {})
+		func() { <-finalRelease })
 	close(finalRelease)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("shutdown error = %v, want deadline", err)

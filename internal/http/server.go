@@ -30,9 +30,10 @@ type SiteReader interface {
 	Get(domain.Slug) (domain.Site, error)
 }
 
-// BlobReader is the streaming read side of the content-addressed byte plane.
+// BlobReader is the streaming read side of the byte plane. It resolves an entry
+// by its object key, or a legacy entry by its sha.
 type BlobReader interface {
-	Read(ctx context.Context, sha string) (io.ReadCloser, int64, error)
+	Read(ctx context.Context, entry domain.ManifestEntry) (io.ReadCloser, int64, error)
 }
 
 // Server bundles the dependencies.
@@ -244,9 +245,11 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 	shell := shellFor(p.Kind)
 	rawWanted := shell != nil && wantsRaw(r)
 
-	// ETag is the content SHA for HTML and for any raw body. The shell is
-	// content-INDEPENDENT, so it validates on its shell version instead.
-	etag := `"` + p.ContentSHA + `"`
+	// ETag is the stored file's address for HTML and for any raw body: an
+	// address never names different bytes. The shell is content-INDEPENDENT,
+	// so it validates on its shell version instead.
+	root := p.RootEntry()
+	etag := `"` + root.Address() + `"`
 	if shell != nil && !rawWanted {
 		etag = `"` + shell.version + `"`
 	}
@@ -257,7 +260,7 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 	// streamBlob copies the stored bytes out under ct without buffering, so
 	// server memory stays constant regardless of paste size.
 	streamBlob := func(ct, what string) {
-		rc, _, err := s.Blobs.Read(r.Context(), p.ContentSHA)
+		rc, _, err := s.Blobs.Read(r.Context(), root)
 		if err != nil {
 			s.logf("warn: paste read 500: slug=%s %s blob read: %v", slug, what, err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -417,17 +420,17 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 	// no-cache, unlike a paste's max-age: under max-age a browser serves a
 	// site's sub-resources without revalidating, so a re-deploy stays invisible
 	// until each asset expires. no-cache revalidates every file against its
-	// content-SHA ETag, a cheap 304 when unchanged.
+	// object-key ETag, a cheap 304 when unchanged.
 	h := w.Header()
 	setSandboxHeaders(h)
 	h.Set("Permissions-Policy", permissionsPolicy)
 	h.Set("Cache-Control", "public, no-cache")
-	if notModified(w, r, `"`+entry.SHA+`"`, updatedAt) {
+	if notModified(w, r, `"`+entry.Address()+`"`, updatedAt) {
 		return
 	}
 
 	// Streamed so a GET never buffers the whole asset.
-	rc, _, err := s.Blobs.Read(r.Context(), entry.SHA)
+	rc, _, err := s.Blobs.Read(r.Context(), entry)
 	if err != nil {
 		s.logf("warn: site read 500: slug=%s file blob read: %v", slug, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

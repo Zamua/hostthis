@@ -37,8 +37,8 @@ func TestUpload_Create_HTML(t *testing.T) {
 	if res.Paste.Size <= 0 || res.Paste.Size > len(body)*2+64 {
 		t.Fatalf("size: got %d, want positive ~within 2x of %d", res.Paste.Size, len(body))
 	}
-	if res.Paste.ContentSHA != sha256Hex(body) {
-		t.Fatalf("sha mismatch")
+	if res.Paste.UploadID == "" || res.Paste.RootEntry().Key != domain.UploadObjectKey(res.Paste.UploadID, 0) {
+		t.Fatalf("root key %q, want object 0 of upload %q", res.Paste.RootEntry().Key, res.Paste.UploadID)
 	}
 	if _, err := domain.ParseSlug(string(res.Paste.Slug)); err != nil {
 		t.Fatalf("returned slug is invalid: %v", err)

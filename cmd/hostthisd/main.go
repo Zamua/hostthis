@@ -78,7 +78,7 @@ func main() {
 	}
 	pasteRepo := metadata.Repo
 	keyGateRepo := metadata.KeyGate
-	blobs, blobsCleanup, err := buildBlobStore(*dataDir, logger)
+	blobs, err := buildBlobStore(*dataDir, logger)
 	if err != nil {
 		logger.Fatalf("blob store: %v", err)
 	}
@@ -99,20 +99,15 @@ func main() {
 	createGate := service.NewCreateAdmission(admissionWidth)
 	uploadSvc := service.NewUpload(service.GateCreates(pasteRepo, createGate), blobUnit)
 	uploadSvc.Logger = logger // record background blob-finalize outcomes
-	// HOSTTHIS_BLOB_SYNC is a benchmark toggle for a sync-vs-async A/B on one
-	// binary: Create writes the blob inline on the ack path instead of
-	// finalizing in the background.
-	if strings.EqualFold(os.Getenv("HOSTTHIS_BLOB_SYNC"), "true") {
-		uploadSvc.SyncBlob = true
-		logger.Printf("upload: HOSTTHIS_BLOB_SYNC=true (inline blob write; benchmark mode)")
-	}
 	manageSvc := service.NewManage(pasteRepo, blobUnit)
+	manageSvc.Logger = logger
 
 	// Static-site archive deploys reuse the same blob store and per-identity
 	// quota as pastes. Nil when the metadata backend exposes no site repo.
 	var deploySvc *service.DeploySite
 	if siteRepo != nil {
 		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobUnit)
+		deploySvc.Logger = logger
 		// Create dispatches the multi-file shape itself, so no transport forks
 		// on content (docs/SPEC.md "One paste, not two aggregates").
 		uploadSvc.Archive = service.ArchiveAdapter{Deployer: deploySvc}
@@ -270,71 +265,44 @@ func main() {
 		relayDrain,
 		sshServer,
 		uploadSvc.WaitFinalize,
-		blobsCleanup,
 	); err != nil {
 		logger.Printf("shutdown: %v", err)
 	}
 }
 
-// buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured store:
-// the raw backend, optionally fronted by the write-back cache, under the
-// compression layer.
-func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, func(), error) {
+// buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured raw
+// backend under the compression layer.
+func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, error) {
 	var raw storage.InnerBlobStore
 	backend := strings.ToLower(envOr("HOSTTHIS_BLOB_BACKEND", "disk"))
 	switch backend {
 	case "", "disk":
 		bs, err := storage.NewBlobStore(filepath.Join(dataDir, "blobs"))
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		logger.Printf("blobs: disk backend at %s/blobs (zstd-compressed at rest)", dataDir)
 		raw = bs
 	case "s3":
 		bs, err := storage.NewS3BlobStore(storage.S3BlobConfig{
-			Endpoint:  envOr("HOSTTHIS_S3_ENDPOINT", ""),
-			Bucket:    envOr("HOSTTHIS_S3_BUCKET", ""),
-			Region:    envOr("HOSTTHIS_S3_REGION", "us-east-1"),
-			AccessKey: envOr("HOSTTHIS_S3_ACCESS_KEY", ""),
-			SecretKey: envOr("HOSTTHIS_S3_SECRET_KEY", ""),
-			UseSSL:    strings.EqualFold(envOr("HOSTTHIS_S3_USE_SSL", "false"), "true"),
-			Prefix:    envOr("HOSTTHIS_S3_BLOB_PREFIX", "blob"),
+			Endpoint:     envOr("HOSTTHIS_S3_ENDPOINT", ""),
+			Bucket:       envOr("HOSTTHIS_S3_BUCKET", ""),
+			Region:       envOr("HOSTTHIS_S3_REGION", "us-east-1"),
+			AccessKey:    envOr("HOSTTHIS_S3_ACCESS_KEY", ""),
+			SecretKey:    envOr("HOSTTHIS_S3_SECRET_KEY", ""),
+			UseSSL:       strings.EqualFold(envOr("HOSTTHIS_S3_USE_SSL", "false"), "true"),
+			LegacyPrefix: envOr("HOSTTHIS_S3_BLOB_PREFIX", "blob"),
 		})
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		logger.Printf("blobs: s3 backend at %s/%s (zstd-compressed at rest)",
+		logger.Printf("blobs: s3 backend at bucket %s, legacy reads from %s/ (zstd-compressed at rest)",
 			envOr("HOSTTHIS_S3_BUCKET", ""), envOr("HOSTTHIS_S3_BLOB_PREFIX", "blob"))
 		raw = bs
 	default:
-		return nil, nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|s3)", backend)
+		return nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|s3)", backend)
 	}
-	inner, cleanup, err := maybeWrapWriteBack(raw, dataDir, logger)
-	if err != nil {
-		return nil, nil, err
-	}
-	return storage.NewCompressedBlobStore(inner), cleanup, nil
-}
-
-// maybeWrapWriteBack fronts the durable backend with the local-disk write-back
-// cache when HOSTTHIS_BLOB_WRITEBACK=true. Disabled, it returns the durable
-// backend unchanged, preserving strict durable-before-ack. The cleanup func
-// stops the uploaders and is a no-op when disabled.
-func maybeWrapWriteBack(durable storage.InnerBlobStore, dataDir string, logger *log.Logger) (storage.InnerBlobStore, func(), error) {
-	if strings.ToLower(envOr("HOSTTHIS_BLOB_WRITEBACK", "false")) != "true" {
-		return durable, func() {}, nil
-	}
-	cfg := storage.WriteBackConfig{
-		Dir:      envOr("HOSTTHIS_BLOB_WRITEBACK_DIR", filepath.Join(dataDir, "blob-cache")),
-		MaxBytes: envParse("HOSTTHIS_BLOB_WRITEBACK_MAX_BYTES", int64(1<<30), parseInt64, "an integer"),
-		Logger:   logger,
-	}
-	wb, err := storage.NewWriteBackBlobStore(durable, cfg)
-	if err != nil {
-		return nil, nil, fmt.Errorf("blob write-back cache: %w", err)
-	}
-	logger.Printf("blobs: write-back cache ENABLED at %s (max %d bytes); durability window applies, see SPEC", cfg.Dir, cfg.MaxBytes)
-	return wb, wb.Close, nil
+	return storage.NewCompressedBlobStore(raw), nil
 }
 
 // buildCachePurger reads HOSTTHIS_CACHE_BACKEND and returns the configured
@@ -405,5 +373,3 @@ func envParse[T any](key string, fallback T, parse func(string) (T, error), want
 	}
 	return n
 }
-
-func parseInt64(s string) (int64, error) { return strconv.ParseInt(s, 10, 64) }

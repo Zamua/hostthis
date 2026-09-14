@@ -12,21 +12,23 @@ import (
 )
 
 // fullBlobStore models the object store rejecting a Put at its bucket quota:
-// every write fails with storage.ErrServiceFull. Reads delegate to a real disk
-// store, so it carries the whole surface a StandaloneBlobUnit needs.
+// every write fails with storage.ErrServiceFull. Everything else delegates to a
+// real disk store, so it carries the whole surface a StandaloneBlobUnit needs.
 type fullBlobStore struct{ real *storage.CompressedBlobStore }
 
-func (f fullBlobStore) Put(sha string, r io.Reader, size int64) error {
-	_, _ = io.Copy(io.Discard, r)
-	return storage.ErrServiceFull
-}
-func (f fullBlobStore) PutPrecompressed(sha string, body io.Reader, size int64) error {
+func (f fullBlobStore) PutPrecompressed(_ string, body io.Reader, _ int64) error {
 	_, _ = io.Copy(io.Discard, body)
 	return storage.ErrServiceFull
 }
-func (f fullBlobStore) Get(sha string) ([]byte, error) { return f.real.Get(sha) }
-func (f fullBlobStore) GetReader(sha string) (io.ReadCloser, int64, error) {
-	return f.real.GetReader(sha)
+func (f fullBlobStore) EncodeTo(w io.Writer, r io.Reader) (int, int64, error) {
+	return f.real.EncodeTo(w, r)
+}
+func (f fullBlobStore) DeletePrefix(prefix string) error { return f.real.DeletePrefix(prefix) }
+func (f fullBlobStore) GetReader(key string) (io.ReadCloser, int64, error) {
+	return f.real.GetReader(key)
+}
+func (f fullBlobStore) GetLegacyReader(sha string) (io.ReadCloser, int64, error) {
+	return f.real.GetLegacyReader(sha)
 }
 
 // fullBlobUnit wraps fullBlobStore as the BlobUnit seam: Stage fails, reads
@@ -96,9 +98,4 @@ func TestDeploySite_BlobQuotaSurfacesServiceFull(t *testing.T) {
 	if !errors.Is(err, ErrServiceFull) {
 		t.Fatalf("blob-quota deploy = %v, want service.ErrServiceFull", err)
 	}
-}
-
-// EncodeTo delegates to the real at-rest encoder.
-func (f fullBlobStore) EncodeTo(w io.Writer, r io.Reader) (string, int, int64, error) {
-	return f.real.EncodeTo(w, r)
 }

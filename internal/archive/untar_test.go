@@ -4,8 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -17,12 +15,13 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// recordingSink captures every file Untar hands it, computing the SHA the same
-// way the real blob sink does (over uncompressed bytes), and the total bytes
-// it was handed across all files.
+// recordingSink captures every file Untar hands it and the total bytes it was
+// handed across all files, naming each stored file the next object key the way
+// the real blob sink does.
 type recordingSink struct {
 	files map[string][]byte
 	total int64
+	next  int
 }
 
 func newRecordingSink() *recordingSink { return &recordingSink{files: map[string][]byte{}} }
@@ -40,9 +39,10 @@ func (s *recordingSink) Store(p string, r io.Reader, _ int64) (string, int, erro
 	}
 	body := buf.Bytes()
 	s.files[p] = body
-	sum := sha256.Sum256(body)
+	key := "uploads/test/" + strconv.Itoa(s.next)
+	s.next++
 	// Test double doesn't compress; report the raw length as the "stored" size.
-	return hex.EncodeToString(sum[:]), len(body), nil
+	return key, len(body), nil
 }
 
 type tarEntry struct {
@@ -111,8 +111,8 @@ func TestSafeUntar_HappyPath(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing %q from manifest", want)
 		}
-		if e.SHA == "" || e.Size == 0 {
-			t.Fatalf("entry %q has empty sha/size: %+v", want, e)
+		if e.Key == "" || e.Size == 0 {
+			t.Fatalf("entry %q has empty key/size: %+v", want, e)
 		}
 	}
 	// Content-type by extension.
@@ -226,7 +226,8 @@ func TestSafeUntar_CorruptTarInGzip(t *testing.T) {
 	}
 }
 
-func TestSafeUntar_IdenticalFilesShareASHAButNotAnEntry(t *testing.T) {
+// Identical bytes at two paths are two stored objects, each path its own entry.
+func TestSafeUntar_IdenticalFilesAreSeparateObjects(t *testing.T) {
 	same := "<h1>same bytes</h1>"
 	arc := makeGzipTar(t, []tarEntry{
 		{name: "index.html", body: same},
@@ -236,12 +237,9 @@ func TestSafeUntar_IdenticalFilesShareASHAButNotAnEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SafeUntar: %v", err)
 	}
-	if man.Files["index.html"].SHA != man.Files["copy.html"].SHA {
-		t.Fatalf("identical files should share a SHA")
+	if man.Files["index.html"].Key == man.Files["copy.html"].Key {
+		t.Fatalf("identical files share object %q", man.Files["index.html"].Key)
 	}
-	// The SHA identifies the content; it does not collapse the two files. Each
-	// path is its own manifest entry and its own object on disk, so the size
-	// counts both.
 	if want := 2 * len(same); man.Size() != want {
 		t.Fatalf("size: got %d, want %d (both paths counted)", man.Size(), want)
 	}

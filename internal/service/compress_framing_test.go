@@ -32,10 +32,11 @@ func TestStreamUploadMatchesStorageAtRestFormat(t *testing.T) {
 			if err != nil {
 				t.Fatalf("streamUpload: %v", err)
 			}
-			want, err := storage.EncodeCompressedBody(bytes.NewReader(tc.raw))
-			if err != nil {
-				t.Fatalf("EncodeCompressedBody: %v", err)
+			var encoded bytes.Buffer
+			if _, _, err := (&storage.CompressedBlobStore{}).EncodeTo(&encoded, bytes.NewReader(tc.raw)); err != nil {
+				t.Fatalf("EncodeTo: %v", err)
 			}
+			want := encoded.Bytes()
 			if !bytes.Equal(stagedBytes(t, staged), want) {
 				t.Fatalf("at-rest body differs between the streaming upload path and the storage encoder:\n stream: %d bytes, prefix %x\nstorage: %d bytes, prefix %x",
 					len(stagedBytes(t, staged)), head(stagedBytes(t, staged), 8), len(want), head(want, 8))

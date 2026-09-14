@@ -1,8 +1,6 @@
 package service
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -25,8 +23,7 @@ const blobCompressionLevel = zstd.SpeedDefault
 // stagedUpload is the result of streaming bytes through the upload pipeline.
 // CompressedSize excludes the 4-byte magic.
 type stagedUpload struct {
-	SHA string
-	// File holds the at-rest bytes (magic + zstd), ready for PutPrecompressed.
+	// File holds the at-rest bytes (magic + zstd), ready for StagePrecompressed.
 	// Spilled to disk so peak memory does not track the payload. Positioned at
 	// 0 and owned by the caller, which MUST close and remove it.
 	File           *os.File
@@ -46,67 +43,74 @@ var errRawCapExceeded = errors.New("raw cap exceeded")
 // MaxPasteBytes mid-stream.
 var errCompressedCapExceeded = errors.New("compressed cap exceeded")
 
-// streamUpload tees r in one pass through a sha256 hasher over UNCOMPRESSED
-// bytes (dedup is by original content), a zstd encoder spilling to a temp file
-// capped at MaxPasteBytes plus the magic, a raw-byte counter that aborts at
-// HardRawByteCap, and a sniff-prefix capture. The source is never materialized;
-// peak memory is a chunk buffer plus the compressor window.
+// streamUpload tees r in one pass through a zstd encoder spilling to a temp
+// file capped at MaxPasteBytes plus the magic, a raw-byte counter that aborts
+// at HardRawByteCap, and a sniff-prefix capture. The source is never
+// materialized; peak memory is a chunk buffer plus the compressor window.
 //
 // Returns errRawCapExceeded, errCompressedCapExceeded, or any other error
-// verbatim.
+// verbatim. On error the spill file is already removed.
 func streamUpload(r io.Reader) (stagedUpload, error) {
-	// The magic header goes first so PutPrecompressed is a straight write.
+	// The magic header goes first so StagePrecompressed is a straight write.
 	f, ferr := os.CreateTemp(os.Getenv("HOSTTHIS_STAGING_DIR"), "hostthis-paste-*")
 	if ferr != nil {
 		return stagedUpload{}, fmt.Errorf("staging temp: %w", ferr)
 	}
-	written := &byteCount{}
-	staging := io.MultiWriter(f, written)
-	if _, err := staging.Write(blobMagicV1[:]); err != nil {
+	fail := func(err error) (stagedUpload, error) {
 		_ = f.Close()
 		_ = os.Remove(f.Name())
 		return stagedUpload{}, err
+	}
+	written := &byteCount{}
+	staging := io.MultiWriter(f, written)
+	if _, err := staging.Write(blobMagicV1[:]); err != nil {
+		return fail(err)
 	}
 
 	cap := &cappedWriter{inner: staging, limit: domain.MaxPasteBytes + len(blobMagicV1)}
 
 	zw, err := zstd.NewWriter(cap, zstd.WithEncoderLevel(blobCompressionLevel))
 	if err != nil {
-		return stagedUpload{}, fmt.Errorf("zstd writer: %w", err)
+		return fail(fmt.Errorf("zstd writer: %w", err))
 	}
 
-	hasher := sha256.New()
 	rawCount := &rawCountWriter{limit: domain.HardRawByteCap}
 	prefix := &prefixBuffer{cap: domain.SniffPrefixLen}
 
-	mw := io.MultiWriter(zw, hasher, rawCount, prefix)
+	mw := io.MultiWriter(zw, rawCount, prefix)
 	if _, err := io.Copy(mw, r); err != nil {
 		_ = zw.Close()
-		return stagedUpload{}, err
+		return fail(err)
 	}
 	if err := zw.Close(); err != nil {
-		return stagedUpload{}, err
+		return fail(err)
 	}
 	// zstd can emit a final block on Close that crosses the compressed cap,
 	// past the cappedWriter's per-Write check.
 	if written.n > domain.MaxPasteBytes+len(blobMagicV1) {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return stagedUpload{}, errCompressedCapExceeded
+		return fail(errCompressedCapExceeded)
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return stagedUpload{}, fmt.Errorf("rewind staged paste: %w", err)
+		return fail(fmt.Errorf("rewind staged paste: %w", err))
 	}
 
 	return stagedUpload{
-		SHA:            hex.EncodeToString(hasher.Sum(nil)),
 		File:           f,
 		RawSize:        rawCount.n,
 		CompressedSize: written.n - len(blobMagicV1),
 		Prefix:         prefix.bytes(),
 	}, nil
+}
+
+// documentManifest is a single document's one-entry manifest, naming the
+// object its staged bytes are written to.
+func documentManifest(key string, kind domain.ContentKind, s stagedUpload) domain.Manifest {
+	return domain.DocumentManifest(domain.ManifestEntry{
+		Key:            key,
+		Size:           s.RawSize,
+		CompressedSize: s.CompressedSize,
+		Kind:           string(kind),
+	})
 }
 
 // cappedWriter forwards Write to inner, returning errCompressedCapExceeded

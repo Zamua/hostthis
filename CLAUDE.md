@@ -130,7 +130,7 @@ cmd/hostthisd/       single binary entry point
 internal/
   domain/            pure types + invariants (no I/O)
   storage/           metadata repos + on-disk blob store
-  service/           use cases (upload, manage, sweep)
+  service/           use cases (upload, manage, deploy, rooms)
   ssh/               gliderlabs ssh server + verb dispatch
   http/              apex landing + paste read surface
   render/            markdown → sanitized HTML
@@ -162,8 +162,7 @@ make docker-down   # tear down
 Two metadata backends: `memory` (the default; in-process, ephemeral, what
 dev/test/e2e run) and `celld` (production; a cell runtime reached over HTTP,
 see `docs/SPEC.md` "Celld-backed metadata storage"). Two blob backends:
-`disk` (default) and `s3` (production; content-addressed, same key layout as
-disk).
+`disk` (default) and `s3` (production; same per-upload key layout as disk).
 
 The conformance suite is the contract between them: it runs against the
 memory backend on every `go test ./...`, and against a live celld fleet when

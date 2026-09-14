@@ -16,8 +16,8 @@ import (
 // Untar streams a gzip-tar archive from src, applying the domain's guards to
 // every entry. quotaBudget is the identity's remaining quota in bytes.
 //
-// No durable I/O of its own: on error the caller persists nothing, and blobs
-// the sink already wrote are content-addressed and GC'd if unreferenced.
+// No durable I/O of its own: on error the caller persists nothing and deletes
+// whatever the sink already wrote.
 func Untar(src io.Reader, sink domain.FileSink, quotaBudget int64) (domain.Manifest, error) {
 	ex := domain.NewSiteExtractor(quotaBudget)
 

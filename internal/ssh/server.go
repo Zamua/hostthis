@@ -1116,6 +1116,8 @@ func emitServiceErr(sess gossh.Session, err error) {
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrUnsafeArchive.Error())
 	case errors.Is(err, domain.ErrTooManyFiles):
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrTooManyFiles.Error())
+	case errors.Is(err, domain.ErrBusy):
+		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: another change to this paste is still settling; retry shortly")
 	default:
 		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
 	}

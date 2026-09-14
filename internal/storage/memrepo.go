@@ -100,6 +100,7 @@ func (p *memPaste) rollServed() {
 	}
 	p.row.Kind = v.Kind
 	p.row.ContentSHA = v.ContentSHA
+	p.row.UploadID = v.UploadID
 	p.row.Manifest = v.Manifest
 	p.row.Size = v.Size
 	p.row.LatestVersion = p.maxVer
@@ -147,7 +148,7 @@ func (r *MemRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, userCa
 	// v1 is SEEDED into the version list: one list holds every version, so no
 	// reader special-cases the first.
 	mp.versions = append(mp.versions, domain.Version{
-		Slug: p.Slug, VerNum: 1, Kind: p.Kind, ContentSHA: p.ContentSHA,
+		Slug: p.Slug, VerNum: 1, Kind: p.Kind, ContentSHA: p.ContentSHA, UploadID: p.UploadID,
 		Size: p.Size, CreatedAt: p.CreatedAt, Manifest: p.Manifest,
 	})
 	r.pastes[p.Slug] = mp
@@ -165,24 +166,35 @@ func (r *MemRepo) Get(slug domain.Slug) (domain.Paste, error) {
 	return p.row, nil
 }
 
+// MarkReady reports a paste that is gone, absent or under another generation,
+// as not found, so the finalizer can discard the bytes it wrote.
 func (r *MemRepo) MarkReady(paste domain.Paste) error {
-	return r.setStatus(paste, domain.PasteStatusReady)
-}
-func (r *MemRepo) MarkFailed(paste domain.Paste) error {
-	return r.setStatus(paste, domain.PasteStatusFailed)
-}
-
-// setStatus advances a PENDING paste and nothing else. Ready and failed are
-// TERMINAL: a late finalizer racing the reconciler must not resurrect a failed
-// paste or fail a served one. An absent slug is a no-op for the same reason.
-func (r *MemRepo) setStatus(paste domain.Paste, st domain.PasteStatus) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if p, ok := r.pastes[paste.Slug]; ok && p.row.Status == domain.PasteStatusPending &&
-		p.row.Generation == paste.Generation {
-		p.row.Status = st
+	if !r.setStatus(paste, domain.PasteStatusReady) {
+		return ErrNotFound
 	}
 	return nil
+}
+
+func (r *MemRepo) MarkFailed(paste domain.Paste) error {
+	r.setStatus(paste, domain.PasteStatusFailed)
+	return nil
+}
+
+// setStatus advances a PENDING paste and nothing else, and reports whether the
+// paste exists under that generation. Ready and failed are TERMINAL: a late
+// finalizer racing the reconciler must not resurrect a failed paste or fail a
+// served one.
+func (r *MemRepo) setStatus(paste domain.Paste, st domain.PasteStatus) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.pastes[paste.Slug]
+	if !ok || p.row.Generation != paste.Generation {
+		return false
+	}
+	if p.row.Status == domain.PasteStatusPending {
+		p.row.Status = st
+	}
+	return true
 }
 
 // --- PasteAdmin --------------------------------------------------------------
@@ -240,19 +252,27 @@ func (r *MemRepo) DropStaleOwnerEntry(domain.Slug, string) (bool, error) {
 }
 
 // Delete removes a paste, guarded by owner and creation time so a delete
-// cannot land on a slug re-minted by someone else in between.
-func (r *MemRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
+// cannot land on a slug re-minted by someone else in between. It answers with
+// every version's upload, tombstones included: re-deleting a tombstone's
+// prefix is harmless and recovers one a crash left behind.
+func (r *MemRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p, ok := r.pastes[slug]
 	if !ok {
-		return ErrNotFound
+		return nil, ErrNotFound
 	}
 	if p.row.Identity != wantIdentity || !p.row.CreatedAt.Equal(wantCreatedAt) {
-		return ErrNotFound
+		return nil, ErrNotFound
 	}
 	delete(r.pastes, slug)
-	return nil
+	var uploads []string
+	for _, v := range p.versions {
+		if v.UploadID != "" {
+			uploads = append(uploads, v.UploadID)
+		}
+	}
+	return uploads, nil
 }
 
 func (r *MemRepo) SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
@@ -287,19 +307,19 @@ func (r *MemRepo) setPin(slug domain.Slug, generation string, ver int) error {
 }
 
 func (r *MemRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.Slug, generation string,
-	kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time,
+	kind domain.ContentKind, uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
-	return r.appendVersion(slug, generation, kind, contentSHA, size, domain.Manifest{}, userCap, now)
+	return r.appendVersion(slug, generation, kind, uploadID, m, size, userCap, now)
 }
 
 func (r *MemRepo) AppendManifestVersion(_ context.Context, slug domain.Slug, generation string,
-	m domain.Manifest, root domain.ManifestEntry, size int, userCap int64, now time.Time,
+	uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
 ) (AppendResult, error) {
-	return r.appendVersion(slug, generation, domain.KindSite, root.SHA, size, m, userCap, now)
+	return r.appendVersion(slug, generation, domain.KindSite, uploadID, m, size, userCap, now)
 }
 
-func (r *MemRepo) appendVersion(slug domain.Slug, generation string, kind domain.ContentKind, contentSHA string,
-	size int, m domain.Manifest, userCap int64, now time.Time,
+func (r *MemRepo) appendVersion(slug domain.Slug, generation string, kind domain.ContentKind, uploadID string,
+	m domain.Manifest, size int, userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -314,7 +334,7 @@ func (r *MemRepo) appendVersion(slug domain.Slug, generation string, kind domain
 	// than derived from the (tombstone-holding) list.
 	p.maxVer++
 	p.versions = append(p.versions, domain.Version{
-		Slug: slug, VerNum: p.maxVer, Kind: kind, ContentSHA: contentSHA,
+		Slug: slug, VerNum: p.maxVer, Kind: kind, UploadID: uploadID,
 		Size: size, CreatedAt: now, Manifest: m,
 	})
 	wasPinned := p.row.PinnedVersion != 0
@@ -363,26 +383,27 @@ func (r *MemRepo) IsVersionServed(slug domain.Slug, ver int) (bool, error) {
 	return live && v.VerNum == ver, nil
 }
 
-// DeleteVersion tombstones a retained version. The served version is refused
-// inside the same lock that applies the tombstone.
-func (r *MemRepo) DeleteVersion(slug domain.Slug, generation string, ver int) error {
+// DeleteVersion tombstones a retained version and answers with its upload id,
+// also when it was already a tombstone. The served version is refused inside
+// the same lock that applies the tombstone.
+func (r *MemRepo) DeleteVersion(slug domain.Slug, generation string, ver int) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p, ok := r.pastes[slug]
 	if !ok || p.row.Generation != generation {
-		return ErrNotFound
+		return "", ErrNotFound
 	}
 	if served, live := p.served(); live && served.VerNum == ver {
-		return domain.ErrVersionCurrentlyServed
+		return "", domain.ErrVersionCurrentlyServed
 	}
 	for i := range p.versions {
 		if p.versions[i].VerNum == ver {
 			p.versions[i].Deleted = true
 			p.rollServed()
-			return nil
+			return p.versions[i].UploadID, nil
 		}
 	}
-	return nil
+	return "", nil
 }
 
 // --- KeyGateRepo (Sybil admission) ------------------------------------------

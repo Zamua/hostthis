@@ -14,17 +14,13 @@ var gzipMagic = []byte{0x1f, 0x8b}
 // HasGzipMagic reports whether b begins with the gzip magic bytes.
 func HasGzipMagic(b []byte) bool { return bytes.HasPrefix(b, gzipMagic) }
 
-// FileSink receives one safe, fully-validated regular file from the archive.
-// SafeUntar streams the file's bytes to the sink so the caller can hash +
-// store each file as a content-addressed blob without SafeUntar importing any
-// storage code.
+// FileSink receives one safe, fully-validated regular file from the archive
+// and stores it, so the extractor imports no storage code.
 type FileSink interface {
-	// Store consumes exactly size bytes from r and returns the content SHA
-	// it stored them under (content-addressing is by the file's
-	// uncompressed bytes, so the manifest can reference the blob). size is
-	// the tar header's declared size; the decompression-bomb guard has
-	// already admitted these bytes against the running total.
-	Store(p string, r io.Reader, size int64) (sha string, compressedSize int, err error)
+	// Store consumes r and returns the object key the bytes were stored under
+	// and their stored (compressed) size. size is the header's declared size,
+	// advisory only: the bomb guard meters what r actually yields.
+	Store(p string, r io.Reader, size int64) (key string, compressedSize int, err error)
 }
 
 // isJunkPath reports whether rel is an OS-generated metadata file that must

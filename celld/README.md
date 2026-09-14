@@ -47,5 +47,5 @@ runtime.
 | Subnet | one subnet's fresh-identity admission window |
 
 A celld fleet serves one Worker application. Paste and site payloads remain in
-the provider-neutral content-addressed blob store; celld owns metadata and room
+the provider-neutral per-upload blob store; celld owns metadata and room
 state only.

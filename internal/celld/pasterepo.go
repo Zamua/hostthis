@@ -44,6 +44,7 @@ type pasteRow struct {
 	Status        string `json:"status"`
 	Kind          string `json:"kind"`
 	ContentSHA    string `json:"contentSha"`
+	UploadID      string `json:"uploadId,omitempty"`
 	Size          int    `json:"size"`
 	Name          string `json:"name"`
 	PinnedVersion int    `json:"pinnedVersion"`
@@ -60,7 +61,7 @@ func rowOf(p domain.Paste) pasteRow {
 		Slug: p.Slug.String(), Identity: p.Identity.String(),
 		Generation: p.Generation,
 		Status:     string(p.Status), Kind: string(p.Kind),
-		ContentSHA: p.ContentSHA, Size: p.Size, Name: p.Name,
+		ContentSHA: p.ContentSHA, UploadID: p.UploadID, Size: p.Size, Name: p.Name,
 		PinnedVersion: p.PinnedVersion,
 		CreatedAt:     p.CreatedAt.UTC().UnixMilli(),
 		UpdatedAt:     p.UpdatedAt.UTC().UnixMilli(),
@@ -90,7 +91,7 @@ func (r pasteRow) domain() domain.Paste {
 		Slug: domain.Slug(r.Slug), Identity: domain.Identity(r.Identity),
 		Generation: r.Generation,
 		Status:     domain.PasteStatus(r.Status), Kind: domain.ContentKind(r.Kind),
-		ContentSHA: r.ContentSHA, Size: r.Size, Name: r.Name,
+		ContentSHA: r.ContentSHA, UploadID: r.UploadID, Size: r.Size, Name: r.Name,
 		PinnedVersion: r.PinnedVersion,
 		CreatedAt:     time.UnixMilli(r.CreatedAt).UTC(),
 		UpdatedAt:     time.UnixMilli(r.UpdatedAt).UTC(),
@@ -119,7 +120,10 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 
 	// 1. Reserve. Over-quota is refused HERE, before any row exists, so a
 	//    rejected upload leaves nothing behind.
-	if err := r.ask(ctx, "reserve", http.MethodPost, "/identity/reserve", "scope", owner, map[string]any{
+	var refusal struct {
+		Error string `json:"error"`
+	}
+	status, err := r.call(ctx, http.MethodPost, "/identity/reserve", "scope", owner, map[string]any{
 		"slug": p.Slug.String(), "generation": generation,
 		"size": p.Size, "userCap": userCap,
 		"now": now.UTC().UnixMilli(), "status": string(p.Status),
@@ -130,28 +134,40 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 			"fingerprint": fingerprint,
 			"startedAt":   now.UTC().UnixMilli(),
 		},
-	}, nil, map[int]error{
-		http.StatusInsufficientStorage: domain.ErrOverUserQuota,
-		http.StatusConflict:            domain.ErrSlugTaken,
-	}); err != nil {
+	}, &refusal)
+	switch {
+	case err != nil:
 		return err
+	case status == http.StatusInsufficientStorage:
+		return domain.ErrOverUserQuota
+	case status == http.StatusConflict && refusal.Error == "slug-taken":
+		return domain.ErrSlugTaken
+	case status >= 300:
+		return fmt.Errorf("celld: reserve: status %d %s", status, refusal.Error)
 	}
 
 	// 2. A lost response is ambiguous: retry the exact generation once so the
 	//    cell's same-generation replay can prove whether the row landed. A
 	//    transport failure is NOT released: the durable intent owns resolution,
 	//    and releasing could erase a row whose success response was lost.
-	status, err := r.callArtifactMutation(ctx, "/paste/put", p.Slug, map[string]any{
+	status, err = r.callArtifactMutation(ctx, "/paste/put", p.Slug, map[string]any{
 		"row": wireRow, "generation": generation, "fingerprint": fingerprint,
-	}, nil)
-	if err := answer("paste put", status, err, map[int]error{http.StatusConflict: domain.ErrSlugTaken}); err != nil {
-		if errors.Is(err, domain.ErrSlugTaken) {
-			_, _ = r.call(ctx, http.MethodPost, "/identity/release", "scope", owner,
-				map[string]any{
-					"slug": p.Slug.String(), "generation": generation, "intentId": intentID,
-				}, nil)
-		}
+	}, &refusal)
+	if err != nil {
 		return err
+	}
+	if status == http.StatusConflict && (refusal.Error == "slug-taken" || refusal.Error == "create-aborted") {
+		// This generation's row can never land, so its charge is released.
+		_, _ = r.call(ctx, http.MethodPost, "/identity/release", "scope", owner,
+			map[string]any{
+				"slug": p.Slug.String(), "generation": generation, "intentId": intentID,
+			}, nil)
+		return domain.ErrSlugTaken
+	}
+	if status >= 300 {
+		// Any other conflict may name this generation's own row; the intent
+		// resolves it.
+		return fmt.Errorf("celld: paste put: status %d %s", status, refusal.Error)
 	}
 
 	// 3. Confirm. The intent is discharged only once the row is durable. A
@@ -185,13 +201,26 @@ func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
 	return row.domain(), nil
 }
 
-// MarkReady advances a still-pending paste. Absent or already-settled is a
-// no-op rather than an error: a late finalizer racing the reconciler is normal.
+// MarkReady advances a still-pending paste. An already-settled paste is a
+// no-op: a late finalizer racing the reconciler is normal. A paste that is
+// gone, absent or re-minted under another generation, is domain.ErrNotFound.
 func (r *PasteRepo) MarkReady(paste domain.Paste) error {
-	return r.ask(context.Background(), "ready transition", http.MethodPost, "/paste/status", "slug",
+	var res struct {
+		Reason string `json:"reason"`
+		Error  string `json:"error"`
+	}
+	status, err := r.call(context.Background(), http.MethodPost, "/paste/status", "slug",
 		paste.Slug.String(), map[string]any{
 			"status": string(domain.PasteStatusReady), "generation": paste.Generation,
-		}, nil, nil)
+		}, &res)
+	switch {
+	case err != nil:
+		return err
+	case status < 300 && res.Reason == "absent",
+		status == http.StatusConflict && res.Error == "generation-mismatch":
+		return domain.ErrNotFound
+	}
+	return answer("ready transition", status, nil, nil)
 }
 
 // MarkFailed persists the failed row before driving its absolute allocation to
@@ -206,7 +235,7 @@ func (r *PasteRepo) MarkFailed(paste domain.Paste) error {
 			"generation": paste.Generation,
 			"opId":       "fail:" + paste.Generation,
 		}, nil)
-	return answer("fail accounting", status, err, nil)
+	return answer("fail accounting", status, err, map[int]error{http.StatusLocked: domain.ErrBusy})
 }
 
 // SumActiveBytesByOwner reads the identity cell's maintained aggregate. A point
@@ -360,17 +389,21 @@ func (r *PasteRepo) SetName(slug domain.Slug, name string, wantIdentity domain.I
 // ORDER: the row first, then the entry. A crash between them leaves a stale
 // entry, which DropStaleOwnerEntry repairs. The other order would free quota
 // while the paste still exists, which no repair path watches for.
-func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error {
+//
+// The cell answers with the uploads of the incarnation it removed, kept in its
+// receipt, so a retried request names the same bytes rather than a re-mint's.
+func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) ([]string, error) {
 	row, err := r.getRow(slug)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	opID, err := newOpaqueID("remove")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var res struct {
-		Removed bool `json:"removed"`
+		Removed bool     `json:"removed"`
+		Uploads []string `json:"uploads"`
 	}
 	status, err := r.callArtifactMutation(context.Background(), "/paste/remove", slug,
 		map[string]any{
@@ -379,15 +412,24 @@ func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantC
 			"createdAt": wantCreatedAt.UTC().UnixMilli(),
 		}, &res)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if status == http.StatusLocked {
+		return nil, domain.ErrBusy
 	}
 	if status == http.StatusConflict {
-		return fmt.Errorf("celld: remove accounting conflict")
+		return nil, fmt.Errorf("celld: remove accounting conflict")
 	}
 	if !res.Removed {
-		return domain.ErrNotFound
+		return nil, domain.ErrNotFound
 	}
-	return nil
+	uploads := make([]string, 0, len(res.Uploads))
+	for _, id := range res.Uploads {
+		if id != "" {
+			uploads = append(uploads, id)
+		}
+	}
+	return uploads, nil
 }
 
 func (r *PasteRepo) callArtifactMutation(ctx context.Context, path string, slug domain.Slug,
@@ -405,7 +447,7 @@ func (r *PasteRepo) callArtifactMutation(ctx context.Context, path string, slug 
 }
 
 func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, generation string,
-	kind domain.ContentKind, contentSHA string, size int, manifest domain.Manifest,
+	kind domain.ContentKind, uploadID string, manifest domain.Manifest, size int,
 	userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
 	// An empty generation addresses a legacy row; the cell adopts it on this
@@ -415,38 +457,46 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 		return domain.AppendResult{}, err
 	}
 	var res struct {
-		Appended  bool `json:"appended"`
-		Ver       int  `json:"ver"`
-		WasPinned bool `json:"wasPinned"`
+		Appended  *bool  `json:"appended"`
+		Reason    string `json:"reason"`
+		Error     string `json:"error"`
+		Ver       int    `json:"ver"`
+		WasPinned bool   `json:"wasPinned"`
 	}
 	status, err := r.callArtifactMutation(ctx, "/paste/append", slug, map[string]any{
 		"opId": opID, "generation": generation, "userCap": userCap,
-		"kind": string(kind), "contentSha": contentSHA, "size": size,
+		// contentSha is sent empty: a version staged under an upload has no
+		// sha, and a cell predating uploadId still stores a well-formed row.
+		"kind": string(kind), "contentSha": "", "uploadId": uploadID, "size": size,
 		"manifest": manifest, "now": now.UTC().UnixMilli(),
 	}, &res)
-	if status == http.StatusInsufficientStorage {
-		return domain.AppendResult{}, domain.ErrOverUserQuota
-	}
-	if err != nil {
+	// Only an identified refusal is definitive: the service deletes the upload's
+	// bytes on one, and any other answer may still publish the version.
+	switch {
+	case err != nil:
 		return domain.AppendResult{}, err
-	}
-	if status == http.StatusRequestEntityTooLarge {
+	case status == http.StatusInsufficientStorage:
+		return domain.AppendResult{}, domain.ErrOverUserQuota
+	case status == http.StatusRequestEntityTooLarge:
 		return domain.AppendResult{}, fmt.Errorf("%w: version too large to store", domain.ErrTooManyFiles)
-	}
-	if status == http.StatusConflict {
-		return domain.AppendResult{}, fmt.Errorf("celld: append accounting conflict")
-	}
-	if !res.Appended {
+	case status == http.StatusLocked:
+		return domain.AppendResult{}, domain.ErrBusy
+	case status >= 300 || res.Appended == nil:
+		return domain.AppendResult{}, fmt.Errorf("celld: append: unrecognised answer: status %d %s", status, res.Error)
+	case *res.Appended:
+		return domain.AppendResult{NewVer: res.Ver, WasPinned: res.WasPinned}, nil
+	case res.Reason == "absent":
 		return domain.AppendResult{}, domain.ErrNotFound
+	default:
+		return domain.AppendResult{}, fmt.Errorf("celld: append: unrecognised refusal %q", res.Reason)
 	}
-	return domain.AppendResult{NewVer: res.Ver, WasPinned: res.WasPinned}, nil
 }
 
 // AppendVersionWithQuotaCheck atomically reserves charge and publishes one version.
 func (r *PasteRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, generation string,
-	kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time,
+	kind domain.ContentKind, uploadID string, manifest domain.Manifest, size int, userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
-	return r.appendArtifact(ctx, slug, generation, kind, contentSHA, size, domain.Manifest{}, userCap, now)
+	return r.appendArtifact(ctx, slug, generation, kind, uploadID, manifest, size, userCap, now)
 }
 
 // ListVersions is a single-cell read: the appended versions live beside the row.
@@ -455,6 +505,7 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 		Ver        int             `json:"ver"`
 		Kind       string          `json:"kind"`
 		ContentSHA string          `json:"contentSha"`
+		UploadID   string          `json:"uploadId"`
 		Size       int             `json:"size"`
 		CreatedAt  int64           `json:"createdAt"`
 		Deleted    bool            `json:"deleted"`
@@ -471,7 +522,7 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	for _, w := range wire {
 		out = append(out, domain.Version{
 			Slug: slug, VerNum: w.Ver, Kind: domain.ContentKind(w.Kind),
-			ContentSHA: w.ContentSHA, Size: w.Size, Manifest: w.Manifest,
+			ContentSHA: w.ContentSHA, UploadID: w.UploadID, Size: w.Size, Manifest: w.Manifest,
 			CreatedAt: time.UnixMilli(w.CreatedAt).UTC(), Deleted: w.Deleted,
 		})
 	}
@@ -485,30 +536,37 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 // conservative, visible, and repairable from the paste cell. The other order
 // frees the charge while the bytes remain, which under-charges silently and is
 // the direction nothing watches.
-func (r *PasteRepo) DeleteVersion(slug domain.Slug, generation string, ver int) error {
+//
+// The answer names the version's upload, also when it was already deleted, and
+// is empty for a legacy version.
+func (r *PasteRepo) DeleteVersion(slug domain.Slug, generation string, ver int) (string, error) {
 	opID, err := newOpaqueID("delete-version")
 	if err != nil {
-		return err
+		return "", err
 	}
 	var res struct {
 		Deleted bool   `json:"deleted"`
+		Upload  string `json:"upload"`
 		Error   string `json:"error"`
 	}
 	status, err := r.callArtifactMutation(context.Background(), "/paste/delversion", slug,
 		map[string]any{"opId": opID, "generation": generation, "ver": ver}, &res)
 	if err != nil {
-		return err
+		return "", err
+	}
+	if status == http.StatusLocked {
+		return "", domain.ErrBusy
 	}
 	if status == http.StatusConflict {
 		if res.Error == "version-served" {
-			return domain.ErrVersionCurrentlyServed
+			return "", domain.ErrVersionCurrentlyServed
 		}
-		return fmt.Errorf("celld: delete-version accounting conflict")
+		return "", fmt.Errorf("celld: delete-version accounting conflict")
 	}
 	if !res.Deleted {
-		return domain.ErrNotFound
+		return "", domain.ErrNotFound
 	}
-	return nil
+	return res.Upload, nil
 }
 
 // GetVersion reads one retained version. Single-cell.
@@ -576,6 +634,9 @@ func (r *PasteRepo) setPin(slug domain.Slug, generation string, ver int) error {
 	if err != nil {
 		return err
 	}
+	if status == http.StatusLocked {
+		return domain.ErrBusy
+	}
 	if status == http.StatusConflict {
 		return fmt.Errorf("celld: pin accounting conflict")
 	}
@@ -617,9 +678,9 @@ func (r *PasteRepo) OwnerSummary(owner string, now time.Time) (domain.OwnerSumma
 
 // AppendManifestVersion appends a retained file-set version.
 func (r *PasteRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string,
-	m domain.Manifest, root domain.ManifestEntry, size int, userCap int64, now time.Time,
+	uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
-	return r.appendArtifact(ctx, slug, generation, domain.KindSite, root.SHA, size, m, userCap, now)
+	return r.appendArtifact(ctx, slug, generation, domain.KindSite, uploadID, m, size, userCap, now)
 }
 
 // urlQuery escapes a value for a query string. Named rather than inlined so

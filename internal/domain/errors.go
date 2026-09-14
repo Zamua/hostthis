@@ -43,6 +43,10 @@ var (
 	// remove the bytes currently selected by the paste's serving head.
 	ErrVersionCurrentlyServed = errors.New("storage: version is currently served")
 
+	// ErrBusy is returned when a paste mutation is refused, having persisted
+	// nothing, because another change to that paste has not settled yet.
+	ErrBusy = errors.New("storage: another change to this paste is still settling; retry shortly")
+
 	// ErrTooManyNewKeys is returned by AdmitNewKey when the subnet has
 	// hit its fresh-key quota for the window (the Sybil rate limit).
 	ErrTooManyNewKeys = errors.New("storage: too many new keys from this network")

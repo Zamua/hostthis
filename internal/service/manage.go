@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -23,18 +24,25 @@ type PasteAdmin interface {
 	// service ownership check runs outside any transaction, so a delete+re-mint
 	// of the same slug in the window would otherwise let the op hit a different
 	// paste. CreatedAt is immutable per paste, so it names the exact instance.
-	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) error
+	// Delete answers with the upload id of every version it removed, taken
+	// inside its commit: a read afterwards could name a re-minted slug's uploads.
+	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) (uploadIDs []string, err error)
 	SetName(slug domain.Slug, name string, wantIdentity domain.Identity, wantCreatedAt time.Time) error
 	SetPinnedVersion(domain.Slug, string, domain.Version) error
 	Unpin(domain.Slug, string) error
-	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, generation string, kind domain.ContentKind, contentSHA string, size int, userCap int64, now time.Time) (domain.AppendResult, error)
+	// AppendVersionWithQuotaCheck records uploadID on the new version, so a
+	// later delete can name the prefix holding its bytes.
+	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, generation string, kind domain.ContentKind,
+		uploadID string, manifest domain.Manifest, size int, userCap int64, now time.Time) (domain.AppendResult, error)
 	ListVersions(domain.Slug) ([]domain.Version, error)
 	GetVersion(domain.Slug, int) (domain.Version, error)
 	// IsVersionServed reports whether ver is the version the URL serves,
 	// decided from the authoritative head + rows (never a disposable read
 	// cache), so the delete guard below can never free the served blob.
 	IsVersionServed(domain.Slug, int) (bool, error)
-	DeleteVersion(domain.Slug, string, int) error
+	// DeleteVersion answers with the tombstoned version's upload id, empty for
+	// a legacy version.
+	DeleteVersion(domain.Slug, string, int) (uploadID string, err error)
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
 	OwnerFirstSeen(owner string) (time.Time, error)
 	// OwnerSummary is whoami's roll-up in one call: count + first-seen +
@@ -73,9 +81,12 @@ type Manage struct {
 	// (domain.MIMESniffer).
 	Sniff   domain.MIMESniffer
 	Repo    PasteAdmin
-	Blob    BlobUnit // content-addressed writes and streaming reads
+	Blob    BlobUnit // per-upload writes, streaming reads, prefix deletes
 	KeyGate *KeyGate // optional; populates WhoamiInfo.Session when set
 	Now     func() time.Time
+	// Logger records object deletions that fail after the outcome is decided.
+	// nil discards.
+	Logger *log.Logger
 }
 
 func NewManage(repo PasteAdmin, blob BlobUnit) *Manage {
@@ -119,7 +130,7 @@ func (m *Manage) Show(slug domain.Slug, owner string) (domain.Paste, io.ReadClos
 	if err != nil {
 		return domain.Paste{}, nil, err
 	}
-	rc, _, err := m.Blob.Read(context.Background(), p.ContentSHA)
+	rc, _, err := m.Blob.Read(context.Background(), p.RootEntry())
 	if err != nil {
 		return domain.Paste{}, nil, fmt.Errorf("blob: %w", err)
 	}
@@ -139,6 +150,7 @@ type UpdateResult struct {
 // new version also becomes the served one; on a PINNED paste the pin holds and
 // the new version is recorded but not served.
 func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint string) (UpdateResult, error) {
+	uploadID := domain.NewUploadID()
 	staged, err := streamUpload(body)
 	defer staged.discard()
 	switch {
@@ -167,17 +179,21 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 	}
 	now := m.Now().UTC()
 	ctx := context.Background()
-	if err := m.Blob.StagePrecompressed(ctx, staged.SHA, staged.File, staged.encodedSize()); err != nil {
+	key := domain.UploadObjectKey(uploadID, 0)
+	if err := m.Blob.StagePrecompressed(ctx, key, staged.File, staged.encodedSize()); err != nil {
+		// A failed put can still leave a partial object, and no metadata names it.
+		discardUpload(m.Blob, m.Logger, uploadID)
 		if class, terr := classifyCommitErr(err); class != commitOther {
 			return UpdateResult{}, terr
 		}
 		return UpdateResult{}, fmt.Errorf("blob write: %w", err)
 	}
 	res, err := m.Repo.AppendVersionWithQuotaCheck(
-		ctx, slug, existing.Generation, kind, staged.SHA, staged.CompressedSize,
-		int64(domain.UserQuotaBytes), now,
+		ctx, slug, existing.Generation, kind, uploadID, documentManifest(key, kind, staged),
+		staged.CompressedSize, int64(domain.UserQuotaBytes), now,
 	)
 	if err != nil {
+		abandonUpload(m.Blob, m.Logger, uploadID, err)
 		_, terr := classifyCommitErr(err)
 		return UpdateResult{}, terr
 	}
@@ -207,9 +223,10 @@ func (m *Manage) Rename(slug domain.Slug, owner, name string) error {
 	return m.Repo.SetName(slug, name, p.Identity, p.CreatedAt)
 }
 
-// Delete removes a paste and its versions (FK cascade). A delete whose paste
-// row is already gone but whose slug lingers in the caller's own index heals
-// that residue and succeeds (docs/SPEC.md "Delete heals its own lost tail").
+// Delete removes a paste and its versions, then deletes every removed version's
+// bytes. A delete whose paste row is already gone but whose slug lingers in the
+// caller's own index heals that residue and succeeds (docs/SPEC.md "Delete
+// heals its own lost tail").
 func (m *Manage) Delete(slug domain.Slug, owner string) error {
 	p, err := m.requireOwner(slug, owner)
 	if err != nil {
@@ -230,7 +247,16 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 		}
 		return nil
 	}
-	return m.Repo.Delete(slug, p.Identity, p.CreatedAt)
+	uploads, err := m.Repo.Delete(slug, p.Identity, p.CreatedAt)
+	if err != nil {
+		return err
+	}
+	// Bytes go only after the removal commits, so no read that starts
+	// afterwards follows a row to missing objects.
+	for _, id := range uploads {
+		discardUpload(m.Blob, m.Logger, id)
+	}
+	return nil
 }
 
 // Versions returns the slug's full history (newest first), including
@@ -257,7 +283,7 @@ var ErrVersionAlreadyDeleted = errors.New("service: version already deleted")
 // URL serves. Freeing it requires `pin` to a different version, or `unpin`.
 var ErrVersionCurrentlyServed = errors.New("service: version is currently served by the URL; pin a different version first")
 
-// DeleteVersion frees a single version's blob bytes (tombstones the row).
+// DeleteVersion tombstones a single version, then deletes its bytes.
 // Refused when:
 //   - paste doesn't exist or owner doesn't match → ErrNotFound
 //   - target version doesn't exist → ErrNotFound
@@ -292,12 +318,14 @@ func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (Dele
 		return DeleteVersionResult{}, ErrVersionCurrentlyServed
 	}
 
-	if err := m.Repo.DeleteVersion(slug, paste.Generation, verNum); err != nil {
+	upload, err := m.Repo.DeleteVersion(slug, paste.Generation, verNum)
+	if err != nil {
 		if errors.Is(err, domain.ErrVersionCurrentlyServed) {
 			return DeleteVersionResult{}, ErrVersionCurrentlyServed
 		}
 		return DeleteVersionResult{}, err
 	}
+	discardUpload(m.Blob, m.Logger, upload)
 	// No cache purge: the served bytes did not change, only an older
 	// version's bytes that no URL surface exposed.
 	return DeleteVersionResult{VerNum: verNum, FreedBytes: target.Size}, nil

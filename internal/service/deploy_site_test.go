@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,11 +19,26 @@ import (
 // the test exercises the actual untar -> blob -> manifest -> persist path.
 func deployFixture(t *testing.T) (*DeploySite, *storage.Sites, *storage.CompressedBlobStore) {
 	t.Helper()
-	blobs := realBlobs(t)
+	d, sites, blobs, _ := deployStack(t)
+	return d, sites, blobs
+}
+
+// deployStack is deployFixture plus the disk blob root, for tests that count
+// what a deploy left in the store.
+func deployStack(t *testing.T) (*DeploySite, *storage.Sites, *storage.CompressedBlobStore, string) {
+	t.Helper()
+	blobs, root := realBlobsAt(t)
 	sites := storage.NewSites(storagetest.NewRepo(t))
 	d := NewDeploySite(sites, storagetest.NewRepo(t), NewStandaloneBlobUnit(blobs))
 	d.Now = func() time.Time { return fixedNow }
-	return d, sites, blobs
+	return d, sites, blobs, root
+}
+
+func assertNoObjects(t *testing.T, root string) {
+	t.Helper()
+	if n := objectsUnder(t, root); n != 0 {
+		t.Fatalf("store holds %d upload object(s), want none", n)
+	}
 }
 
 // ownerCharge is the identity's charged bytes. A directory is a paste, so
@@ -72,7 +88,10 @@ func TestDeploySite_HappyPath(t *testing.T) {
 		t.Fatalf("created_at: got %v, want the injected clock %v", got.CreatedAt, fixedNow)
 	}
 	e := got.Manifest.Files["index.html"]
-	body, err := blobs.Get(e.SHA)
+	if want := domain.UploadPrefix(got.UploadID); got.UploadID == "" || !strings.HasPrefix(e.Key, want) {
+		t.Fatalf("entry key %q is not under the deploy's prefix %q", e.Key, want)
+	}
+	body, err := readObject(t, blobs, e.Key)
 	if err != nil {
 		t.Fatalf("get blob: %v", err)
 	}
@@ -82,7 +101,7 @@ func TestDeploySite_HappyPath(t *testing.T) {
 }
 
 func TestDeploySite_Delete(t *testing.T) {
-	d, sites, _ := deployFixture(t)
+	d, sites, _, root := deployStack(t)
 	arc := gzipTar(t, map[string]string{"index.html": "<h1>hi</h1>"})
 	res, err := d.Deploy(bytes.NewReader(arc), "key:owner")
 	if err != nil {
@@ -103,6 +122,7 @@ func TestDeploySite_Delete(t *testing.T) {
 	if _, err := sites.Get(slug); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("site should be gone: got %v", err)
 	}
+	assertNoObjects(t, root)
 	if err := d.Delete(domain.NewRandomSlug(), "key:owner"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing delete: got %v, want ErrNotFound", err)
 	}
@@ -156,11 +176,12 @@ func TestDeploySite_ChargesCompressedFinalManifest(t *testing.T) {
 	}
 }
 
-func TestDeploySite_DedupesAcrossDeploys(t *testing.T) {
+// Identical content deployed twice lands under two upload prefixes, so deleting
+// one deploy's bytes cannot reach the other's.
+func TestDeploySite_UploadsShareNothing(t *testing.T) {
 	d, _, blobs := deployFixture(t)
 	shared := "<!doctype html><h1>shared</h1>"
-	arc := gzipTar(t, map[string]string{"index.html": shared})
-	r1, err := d.Deploy(bytes.NewReader(arc), "key:a")
+	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": shared})), "key:a")
 	if err != nil {
 		t.Fatalf("deploy 1: %v", err)
 	}
@@ -168,11 +189,14 @@ func TestDeploySite_DedupesAcrossDeploys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deploy 2: %v", err)
 	}
-	if r1.Site.Manifest.Files["index.html"].SHA != r2.Site.Manifest.Files["index.html"].SHA {
-		t.Fatalf("identical content should share a blob SHA")
+	if r1.Site.UploadID == r2.Site.UploadID {
+		t.Fatalf("two deploys share upload %q", r1.Site.UploadID)
 	}
-	if _, err := blobs.Get(r1.Site.Manifest.Files["index.html"].SHA); err != nil {
-		t.Fatalf("shared blob: %v", err)
+	if err := d.Blob.DeleteUpload(context.Background(), r1.Site.UploadID); err != nil {
+		t.Fatalf("delete deploy 1 bytes: %v", err)
+	}
+	if body, err := readObject(t, blobs, r2.Site.Manifest.Files["index.html"].Key); err != nil || string(body) != shared {
+		t.Fatalf("deploy 2 after deleting deploy 1 = (%q, %v), want %q", body, err, shared)
 	}
 }
 
@@ -229,17 +253,10 @@ func TestDeployToSlug_ReplacesInPlace(t *testing.T) {
 	}
 
 	// A redeploy is an UPDATE: it appends a version and the previous one stays
-	// live, so the owner is charged for both and can roll back to either. The
-	// new version's own bytes must be part of that, and dedup means the growth
-	// is only what actually changed rather than the whole redeploy.
+	// live, so the owner is charged for both and can roll back to either.
 	used2 := ownerCharge(t, owner)
-	if used2 <= used1 {
-		t.Fatalf("a redeploy must ADD its version's bytes: used1 %d, used2 %d", used1, used2)
-	}
-	grew := used2 - used1
-	wantV2 := int64(r2.Site.Manifest.CompressedSize())
-	if grew > wantV2 {
-		t.Fatalf("a redeploy must charge at most its own size: grew %d, v2 is %d", grew, wantV2)
+	if grew, wantV2 := used2-used1, int64(r2.Site.Manifest.CompressedSize()); grew != wantV2 {
+		t.Fatalf("a redeploy must add exactly its own size: grew %d, v2 is %d", grew, wantV2)
 	}
 
 	// Both versions are addressable, which is what rollback needs.
@@ -310,7 +327,7 @@ func TestDeployToSlug_ForeignSlug(t *testing.T) {
 		t.Fatalf("alice deploy: %v", err)
 	}
 	slug := r.Site.Slug
-	aliceSHA := r.Site.Manifest.Files["index.html"].SHA
+	aliceKey := r.Site.Manifest.Files["index.html"].Key
 
 	_, err = d.DeployToSlug(slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>mallory</h1>"})), "key:mallory")
 	if !errors.Is(err, ErrNotFound) {
@@ -321,17 +338,13 @@ func TestDeployToSlug_ForeignSlug(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get alice's site: %v", err)
 	}
-	if got.Manifest.Files["index.html"].SHA != aliceSHA {
+	if got.Manifest.Files["index.html"].Key != aliceKey {
 		t.Fatalf("rejected foreign re-deploy mutated the owner's manifest: %+v", got.Manifest.Files)
 	}
 }
 
-// The charge is the post-compression bytes staging actually wrote.
-//
-// Two paths holding IDENTICAL content are two objects on disk, because a blob id
-// is minted fresh per staged file rather than derived from the content. The
-// quota therefore counts both. Folding them by hash would bill for one copy of
-// bytes we stored twice.
+// The charge is the post-compression bytes staging actually wrote: two paths
+// holding identical content are two stored objects, so both are charged.
 func TestDeploySite_ChargesEveryStoredCopy(t *testing.T) {
 	body := "<!doctype html><h1>same bytes</h1>"
 
@@ -354,9 +367,7 @@ func TestDeploySite_ChargesEveryStoredCopy(t *testing.T) {
 		t.Fatalf("fixture: a one-file deploy must charge something, got %d", single)
 	}
 	if dup != 2*single {
-		t.Fatalf("two identical files charged %d, want %d (twice the one-file charge): "+
-			"the store writes both, so folding them by hash bills for bytes we did store",
-			dup, 2*single)
+		t.Fatalf("two identical files charged %d, want %d (twice the one-file charge)", dup, 2*single)
 	}
 }
 
@@ -364,22 +375,26 @@ func TestDeploySite_ChargesEveryStoredCopy(t *testing.T) {
 //
 // Driven against a real metadata repo + a real compressed blob store: a
 // tripped guard must leave NOTHING durable (no site row, no active bytes
-// charged).
+// charged, no object in the store).
 
 // TestGuard_DeployBombStoresNothing: the decompression-bomb guard aborts
-// mid-untar and persists nothing (SPEC: "The aborted upload writes nothing
-// durable"). The archive inflates to 2 MiB against a 1 MiB per-identity cap.
+// mid-untar and persists nothing. The archive inflates to 2 MiB against a
+// 1 MiB per-identity cap.
 func TestGuard_DeployBombStoresNothing(t *testing.T) {
 	withSmallQuota(t, 1<<20)
-	d, sites, _ := deployFixture(t)
+	d, sites, _, root := deployStack(t)
 	owner := "key:bomber"
 
-	arc := gzipTar(t, map[string]string{"index.html": string(bytes.Repeat([]byte("A"), 2<<20))})
+	arc := gzipTar(t, map[string]string{
+		"app.css":    "body{}",
+		"index.html": string(bytes.Repeat([]byte("A"), 2<<20)),
+	})
 	_, err := d.Deploy(bytes.NewReader(arc), owner)
 	if !errors.Is(err, ErrOverQuota) {
 		t.Fatalf("bomb deploy: got %v, want ErrOverQuota", err)
 	}
 	noSites(t, d, sites, owner)
+	assertNoObjects(t, root)
 
 	// Zero bytes charged: the abort never crossed the persistence boundary, so
 	// a follow-up deploy has the whole budget available.
@@ -399,24 +414,37 @@ func TestGuard_DeployBombStoresNothing(t *testing.T) {
 // all-or-nothing. One unsafe entry voids the whole deploy and persists no site
 // row, even though the archive also carries a valid index.html.
 func TestGuard_DeployTraversalStoresNothing(t *testing.T) {
-	d, sites, _ := deployFixture(t)
-	arc := gzipTar(t, map[string]string{
-		"index.html":       "<h1>ok</h1>",
-		"../../etc/passwd": "root:x:0:0",
-		"assets/app.css":   "body{}",
+	d, sites, _, root := deployStack(t)
+	// Ordered so valid files are staged before the unsafe entry trips.
+	arc := gzipTarEntries(t, [][2]string{
+		{"index.html", "<h1>ok</h1>"},
+		{"assets/app.css", "body{}"},
+		{"../../etc/passwd", "root:x:0:0"},
 	})
 	_, err := d.Deploy(bytes.NewReader(arc), "key:test")
 	if !errors.Is(err, domain.ErrUnsafeArchive) {
 		t.Fatalf("traversal deploy: got %v, want ErrUnsafeArchive", err)
 	}
 	noSites(t, d, sites, "key:test")
+	assertNoObjects(t, root)
+}
+
+// An archive with files but no web content is refused after staging them all.
+func TestGuard_DeployNoWebContentStoresNothing(t *testing.T) {
+	d, sites, _, root := deployStack(t)
+	arc := gzipTar(t, map[string]string{"data.json": "{}", "logo.png": "\x89PNG"})
+	if _, err := d.Deploy(bytes.NewReader(arc), "key:test"); !errors.Is(err, domain.ErrNoWebContent) {
+		t.Fatalf("no web content: got %v, want ErrNoWebContent", err)
+	}
+	noSites(t, d, sites, "key:test")
+	assertNoObjects(t, root)
 }
 
 // TestGuard_DeployManifestSizeCapStoresNothing: the manifest path-text cap
 // rejects with ErrTooManyFiles and persists no site row, through the full
 // service path (the domain test pins the cap in isolation).
 func TestGuard_DeployManifestSizeCapStoresNothing(t *testing.T) {
-	d, sites, _ := deployFixture(t)
+	d, sites, _, root := deployStack(t)
 
 	// ~900-byte paths so the path-text total crosses MaxManifestBytes (1 MiB)
 	// well before MaxSiteFiles (5000), isolating the cap under test.
@@ -432,6 +460,77 @@ func TestGuard_DeployManifestSizeCapStoresNothing(t *testing.T) {
 		t.Fatalf("manifest cap deploy: got %v, want ErrTooManyFiles", err)
 	}
 	noSites(t, d, sites, "key:test")
+	assertNoObjects(t, root)
+}
+
+// scriptedSiteRepo is a real site repo whose writes can be made to answer with
+// a scripted error instead.
+type scriptedSiteRepo struct {
+	*storage.Sites
+	insertErr, replaceErr error
+}
+
+func (r scriptedSiteRepo) InsertWithQuotaCheck(ctx context.Context, s domain.Site, stored int, userCap int64, now time.Time) error {
+	if r.insertErr != nil {
+		return r.insertErr
+	}
+	return r.Sites.InsertWithQuotaCheck(ctx, s, stored, userCap, now)
+}
+
+func (r scriptedSiteRepo) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, stored int, userCap int64, now time.Time) error {
+	if r.replaceErr != nil {
+		return r.replaceErr
+	}
+	return r.Sites.ReplaceWithQuotaCheck(ctx, s, stored, userCap, now)
+}
+
+// A refused metadata write deletes the objects staged for it. An error that
+// does not prove the write was refused keeps them, because it may still
+// publish a version that reads them.
+func TestDeploySite_FailedInsertObjects(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		insertErr error
+		wantKept  bool
+	}{
+		{"refused", domain.ErrOverUserQuota, false},
+		{"outcome unknown", errors.New("celld: /paste/put: connection reset"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, blobs, root := deployStack(t)
+			d := NewDeploySite(scriptedSiteRepo{Sites: storage.NewSites(storagetest.NewRepo(t)), insertErr: tc.insertErr},
+				storagetest.NewRepo(t), NewStandaloneBlobUnit(blobs))
+			if _, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>x</h1>"})), "key:owner"); err == nil {
+				t.Fatal("deploy succeeded against a failing insert")
+			}
+			if kept := objectsUnder(t, root) > 0; kept != tc.wantKept {
+				t.Fatalf("objects kept = %v, want %v", kept, tc.wantKept)
+			}
+		})
+	}
+}
+
+// A refused redeploy deletes only its own upload; the served version's objects
+// stay readable.
+func TestDeployToSlug_RefusedRedeployDeletesItsUpload(t *testing.T) {
+	d, sites, blobs, root := deployStack(t)
+	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>v1</h1>"})), "key:owner")
+	if err != nil {
+		t.Fatalf("deploy v1: %v", err)
+	}
+	before := objectsUnder(t, root)
+
+	d.Sites = scriptedSiteRepo{Sites: sites, replaceErr: domain.ErrOverUserQuota}
+	v2 := gzipTar(t, map[string]string{"index.html": "<h1>v2</h1>", "app.js": "1"})
+	if _, err := d.DeployToSlug(r1.Site.Slug, bytes.NewReader(v2), "key:owner"); !errors.Is(err, ErrOverQuota) {
+		t.Fatalf("refused redeploy = %v, want ErrOverQuota", err)
+	}
+	if after := objectsUnder(t, root); after != before {
+		t.Fatalf("objects after refused redeploy = %d, want the %d v1 holds", after, before)
+	}
+	if body, err := readObject(t, blobs, r1.Site.Manifest.Files["index.html"].Key); err != nil || string(body) != "<h1>v1</h1>" {
+		t.Fatalf("v1 after refused redeploy = (%q, %v)", body, err)
+	}
 }
 
 // --- slug collisions ------------------------------------------------------
@@ -458,30 +557,38 @@ type zeroPasteBytes struct{}
 
 func (zeroPasteBytes) SumActiveBytesByOwner(string, time.Time) (int, error) { return 0, nil }
 
-// countingBlobUnit counts StageEncoding calls. The embedded nil BlobUnit makes
-// any other call panic.
+// countingBlobUnit counts StageEncoding and DeleteUpload calls. The embedded
+// nil BlobUnit makes any other call panic.
 type countingBlobUnit struct {
 	BlobUnit
-	stages int
+	stages  int
+	deletes []string
 }
 
-func (b *countingBlobUnit) StageEncoding(_ context.Context, r io.Reader) (string, int, error) {
+func (b *countingBlobUnit) StageEncoding(_ context.Context, _ string, r io.Reader) (int, error) {
 	b.stages++
 	n, err := io.Copy(io.Discard, r)
-	return "sha", int(n), err
+	return int(n), err
+}
+
+func (b *countingBlobUnit) DeleteUpload(_ context.Context, uploadID string) error {
+	b.deletes = append(b.deletes, uploadID)
+	return nil
 }
 
 // A slug collision retries metadata only: the one-shot archive is staged once,
-// whether the retry lands or the budget is exhausted.
+// whether the retry lands or the budget is exhausted, and an exhausted budget
+// deletes the staged upload.
 func TestDeploySite_SlugCollisionDoesNotRestageArchive(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		collisions  int
 		wantErr     error
 		wantInserts int
+		wantDeletes int
 	}{
-		{"one collision then lands", 1, nil, 2},
-		{"budget exhausted", maxDeployRetries, ErrSlugTaken, maxDeployRetries},
+		{"one collision then lands", 1, nil, 2, 0},
+		{"budget exhausted", maxDeployRetries, ErrSlugTaken, maxDeployRetries, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := &collisionSiteRepo{collisions: tc.collisions}
@@ -498,6 +605,9 @@ func TestDeploySite_SlugCollisionDoesNotRestageArchive(t *testing.T) {
 			}
 			if len(repo.inserts) != tc.wantInserts {
 				t.Fatalf("metadata inserts = %d, want %d", len(repo.inserts), tc.wantInserts)
+			}
+			if len(blobs.deletes) != tc.wantDeletes {
+				t.Fatalf("upload deletes = %v, want %d", blobs.deletes, tc.wantDeletes)
 			}
 			if tc.wantErr != nil {
 				return

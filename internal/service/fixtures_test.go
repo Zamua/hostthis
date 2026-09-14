@@ -5,8 +5,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	crand "crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
+	"io"
+	"io/fs"
 	"path/filepath"
 	"testing"
 	"time"
@@ -23,11 +24,20 @@ var fixedNow = time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 // t.TempDir().
 func realBlobs(t *testing.T) *storage.CompressedBlobStore {
 	t.Helper()
-	disk, err := storage.NewBlobStore(filepath.Join(t.TempDir(), "blobs"))
+	blobs, _ := realBlobsAt(t)
+	return blobs
+}
+
+// realBlobsAt is realBlobs plus its disk root, for tests that inspect what the
+// store holds.
+func realBlobsAt(t *testing.T) (*storage.CompressedBlobStore, string) {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "blobs")
+	disk, err := storage.NewBlobStore(root)
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
-	return storage.NewCompressedBlobStore(disk)
+	return storage.NewCompressedBlobStore(disk), root
 }
 
 // newStack wires the upload and manage services over real metadata and real
@@ -119,8 +129,36 @@ func gzipTarEntries(t *testing.T, files [][2]string) []byte {
 	return buf.Bytes()
 }
 
-// sha256Hex is the content address the blob path stores bytes under.
-func sha256Hex(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+// readObject drains one stored object through the production decoder.
+func readObject(t *testing.T, blobs *storage.CompressedBlobStore, key string) ([]byte, error) {
+	t.Helper()
+	rc, _, err := blobs.GetReader(key)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close() //nolint:errcheck
+	return io.ReadAll(rc)
+}
+
+// objectsUnder counts the object files below a disk blob root's uploads/
+// namespace, so a test can prove a failed upload left nothing behind.
+func objectsUnder(t *testing.T, root string) int {
+	t.Helper()
+	n := 0
+	err := filepath.WalkDir(filepath.Join(root, "uploads"), func(_ string, d fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fs.SkipDir
+		}
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			n++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk blob root: %v", err)
+	}
+	return n
 }

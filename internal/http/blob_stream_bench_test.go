@@ -3,8 +3,6 @@ package http
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -37,8 +35,8 @@ func (d *discardResponseWriter) WriteHeader(int)             {}
 // the only way to allocate per payload now is to do it here, on purpose.
 type bufferingBlobReader struct{ inner BlobReader }
 
-func (b bufferingBlobReader) Read(ctx context.Context, sha string) (io.ReadCloser, int64, error) {
-	rc, _, err := b.inner.Read(ctx, sha)
+func (b bufferingBlobReader) Read(ctx context.Context, entry domain.ManifestEntry) (io.ReadCloser, int64, error) {
+	rc, _, err := b.inner.Read(ctx, entry)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -50,18 +48,13 @@ func (b bufferingBlobReader) Read(ctx context.Context, sha string) (io.ReadClose
 	return io.NopCloser(bytes.NewReader(body)), int64(len(body)), nil
 }
 
-func shaOfBench(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
-
-func benchServer(b *testing.B, blobs BlobReader, sha string, updatedAt time.Time) (*Server, *http.Request) {
+func benchServer(b *testing.B, blobs BlobReader, key string, updatedAt time.Time) (*Server, *http.Request) {
 	b.Helper()
 	paste := domain.Paste{
-		Slug:       "abc23456",
-		Kind:       domain.KindHTML,
-		ContentSHA: sha,
-		UpdatedAt:  updatedAt,
+		Slug:      "abc23456",
+		Kind:      domain.KindHTML,
+		Manifest:  domain.DocumentManifest(domain.ManifestEntry{Key: key}),
+		UpdatedAt: updatedAt,
 	}
 	srv := &Server{
 		Pastes:     stubPasteReader{p: paste},
@@ -82,11 +75,15 @@ func newBenchBlobStore(b *testing.B) (*storage.CompressedBlobStore, string) {
 	c := storage.NewCompressedBlobStore(disk)
 	// ~4 MiB of compressible HTML, representative of a large paste.
 	body := bytes.Repeat([]byte("<p>the quick brown fox jumps over the lazy dog</p>\n"), 85000)
-	sha := shaOfBench(body)
-	if err := c.Put(sha, bytes.NewReader(body), int64(len(body))); err != nil {
-		b.Fatalf("Put: %v", err)
+	key := domain.UploadObjectKey(domain.NewUploadID(), 0)
+	var encoded bytes.Buffer
+	if _, _, err := c.EncodeTo(&encoded, bytes.NewReader(body)); err != nil {
+		b.Fatalf("EncodeTo: %v", err)
 	}
-	return c, sha
+	if err := c.PutPrecompressed(key, &encoded, int64(encoded.Len())); err != nil {
+		b.Fatalf("PutPrecompressed: %v", err)
+	}
+	return c, key
 }
 
 // runConcurrentGETs stands in for N concurrent clients on one large paste.
@@ -105,8 +102,8 @@ func runConcurrentGETs(b *testing.B, srv *Server, r *http.Request) {
 // straight from the streaming zstd decoder. Compare allocs/op + B/op against
 // the buffered baseline below.
 func BenchmarkServePaste_StreamedGetReader(b *testing.B) {
-	store, sha := newBenchBlobStore(b)
-	srv, r := benchServer(b, service.NewStandaloneBlobUnit(store), sha, time.Now().UTC())
+	store, key := newBenchBlobStore(b)
+	srv, r := benchServer(b, service.NewStandaloneBlobUnit(store), key, time.Now().UTC())
 	b.ReportAllocs()
 	runConcurrentGETs(b, srv, r)
 }
@@ -115,8 +112,8 @@ func BenchmarkServePaste_StreamedGetReader(b *testing.B) {
 // allocated per GET. The B/op delta against the streamed bench is the
 // full-payload spike streaming removes, and it scales with concurrency.
 func BenchmarkServePaste_BufferedGet(b *testing.B) {
-	store, sha := newBenchBlobStore(b)
-	srv, r := benchServer(b, bufferingBlobReader{inner: service.NewStandaloneBlobUnit(store)}, sha, time.Now().UTC())
+	store, key := newBenchBlobStore(b)
+	srv, r := benchServer(b, bufferingBlobReader{inner: service.NewStandaloneBlobUnit(store)}, key, time.Now().UTC())
 	b.ReportAllocs()
 	runConcurrentGETs(b, srv, r)
 }

@@ -25,7 +25,7 @@ const (
 )
 
 // Paste is the unit a user uploads. The currently-served bytes are addressed
-// by ContentSHA + Kind; older versions live in a parallel versions table,
+// by the served manifest; older versions live in a parallel versions table,
 // addressed by (Slug, VerNum).
 //
 // There is no Published flag or per-paste secret: the slug IS the secret
@@ -36,8 +36,11 @@ type Paste struct {
 	Identity   Identity    // "key:<fp>" or "ip:<subnet>" - quota AND capability gate
 	Status     PasteStatus // pending | ready | failed (blob-write lifecycle)
 	Kind       ContentKind // html | markdown of the currently-served version
-	ContentSHA string      // sha256 of the currently-served bytes
-	Size       int         // bytes (currently-served version)
+	ContentSHA string      // a legacy served version's root sha; empty for an upload-keyed one
+	// UploadID names the served version's object prefix. Empty for a legacy
+	// version, whose content-addressed objects may be shared.
+	UploadID string
+	Size     int // bytes (currently-served version)
 	// StoredBytes is what the quota charges for this paste: the sum across every
 	// live version, not just the served one. Populated on list reads; zero
 	// elsewhere, where Size is the only figure available.
@@ -59,17 +62,18 @@ type Paste struct {
 // initial upload; each `update` or redeploy writes a new row with ver_num+1.
 // The manifest is what makes ONE paste type enough for both a document (one
 // entry at Root) and a directory (N entries); nothing downstream distinguishes
-// them (docs/SPEC.md "One paste, not two aggregates"). Kind/ContentSHA/Size
-// describe the ROOT entry.
+// them (docs/SPEC.md "One paste, not two aggregates"). Kind/Size describe the
+// ROOT entry; ContentSHA is a legacy version's root sha.
 //
 // Deleted=true is a tombstone: the row stays so version numbers are never
-// reused and `versions` still shows the history, but the blob bytes are gone
+// reused and `versions` still shows the history, but the content is gone
 // (quota SUMs skip it; serving falls back to MAX of non-deleted ver_num).
 type Version struct {
 	Slug       Slug
 	VerNum     int
 	Kind       ContentKind
 	ContentSHA string
+	UploadID   string // prefix holding this version's objects; empty for a legacy version
 	Size       int
 	CreatedAt  time.Time
 	Deleted    bool
@@ -81,6 +85,21 @@ type Version struct {
 
 // Root is the manifest path a single-document paste serves at.
 const Root = "/"
+
+// DocumentManifest is the one-entry manifest a single document is stored as.
+func DocumentManifest(e ManifestEntry) Manifest {
+	return Manifest{Files: map[string]ManifestEntry{Root: e}}
+}
+
+// RootEntry is the file a paste's root serves: a document's one entry, a
+// directory's index.html, or, for a legacy row without a manifest, the flat
+// descriptor's sha.
+func (p Paste) RootEntry() ManifestEntry {
+	if e, ok := p.Manifest.Lookup(Root); ok {
+		return e
+	}
+	return ManifestEntry{SHA: p.ContentSHA, Kind: string(p.Kind)}
+}
 
 // NewPasteGeneration returns an opaque token that identifies one slug incarnation.
 func NewPasteGeneration() string {

@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,9 +25,8 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// conformanceSiteRepo is the union of the two site-side service interfaces a
-// static-site backend must satisfy: deploy/read/per-owner byte sum, plus the
-// sweep's delete and referenced-blob set.
+// conformanceSiteRepo is the site-side service interface a static-site backend
+// must satisfy: deploy, read, delete and the per-owner byte sum.
 type conformanceSiteRepo interface {
 	service.SiteRepo
 }
@@ -62,6 +62,29 @@ func insertSite(t *testing.T, sr conformanceSiteRepo, s domain.Site) {
 	}
 }
 
+// conformSiteDeleteNamesEveryDeploy pins that a site records each deploy's
+// upload and that deleting it names all of them, the redeploy's included.
+func conformSiteDeleteNamesEveryDeploy(t *testing.T, sr conformanceSiteRepo) {
+	first := siteOf("sdel1111", "key:sdel", 100)
+	first.UploadID = "up-sdel-v1"
+	insertSite(t, sr, first)
+	second := siteOfV("sdel1111", "key:sdel", 50, "v2")
+	second.UploadID = "up-sdel-v2"
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), second, second.Manifest.Size(), 0, fixedNow); err != nil {
+		t.Fatalf("redeploy: %v", err)
+	}
+	if got, err := sr.Get("sdel1111"); err != nil || got.UploadID != "up-sdel-v2" {
+		t.Fatalf("served site upload = (%q, %v), want up-sdel-v2", got.UploadID, err)
+	}
+	ids, err := sr.Delete("sdel1111", "key:sdel", fixedNow)
+	if err != nil {
+		t.Fatalf("delete site: %v", err)
+	}
+	if want := []string{"up-sdel-v1", "up-sdel-v2"}; !slices.Equal(ids, want) {
+		t.Fatalf("site delete named uploads %v, want %v", ids, want)
+	}
+}
+
 // runSiteConformance runs the site contract subtests. newSites must produce a
 // fresh paste/site pair sharing one backing store per subtest.
 func runSiteConformance(t *testing.T, name string, newSites func(t *testing.T) (conformanceRepo, conformanceSiteRepo)) {
@@ -77,6 +100,7 @@ func runSiteConformance(t *testing.T, name string, newSites func(t *testing.T) (
 	t.Run(name+"/Sites/ReplaceInPlace", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceInPlace(t, r, sr) })
 	t.Run(name+"/Sites/ReplaceNotFoundShape", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceNotFoundShape(t, r, sr) })
 	t.Run(name+"/Sites/ReplaceChargesEachVersion", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceChargesEachVersion(t, r, sr) })
+	t.Run(name+"/Sites/DeleteNamesEveryDeploy", func(t *testing.T) { _, sr := newSites(t); conformSiteDeleteNamesEveryDeploy(t, sr) })
 	t.Run(name+"/Sites/ListByOwner", func(t *testing.T) { r, sr := newSites(t); conformSiteListByOwner(t, r, sr) })
 }
 
@@ -121,7 +145,7 @@ func conformSiteListByOwner(t *testing.T, r conformanceRepo, sr conformanceSiteR
 
 	// A delete must drop out of the listing, leaving A's other site and B
 	// untouched.
-	if err := sr.Delete("aone1111", "key:AAAA", fixedNow); err != nil {
+	if _, err := sr.Delete("aone1111", "key:AAAA", fixedNow); err != nil {
 		t.Fatalf("delete site: %v", err)
 	}
 	if a := slugsOf(ownerA); len(a) != 1 || !a["atwo2222"] || a["aone1111"] {
@@ -401,7 +425,7 @@ func conformSitePerOwnerCapCountsBoth(t *testing.T, r conformanceRepo, sr confor
 	}
 
 	// The append path counts site bytes too: at cap, any append is rejected.
-	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "pb2pst1", generationOf("pb2pst1"), domain.KindHTML, "sha-pb2-v2", 1, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
+	if _, err := r.AppendVersionWithQuotaCheck(context.Background(), "pb2pst1", generationOf("pb2pst1"), domain.KindHTML, "up-pb2-v2", domain.Manifest{}, 1, cap, fixedNow); !errors.Is(err, storage.ErrOverUserQuota) {
 		t.Fatalf("append at full combined cap should be rejected (site bytes must count): got %v", err)
 	}
 }
@@ -475,12 +499,8 @@ func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conform
 	}
 }
 
-// conformSiteEveryPathCharged pins that quota counts every PATH, not every
-// distinct hash.
-//
-// Nothing in the store deduplicates - a blob id is minted fresh per staged file
-// - so three paths holding the same bytes are three objects on disk. Charging
-// once would bill for a third of what was written.
+// conformSiteEveryPathCharged pins that quota counts every PATH: three paths
+// holding the same bytes are three stored objects.
 func conformSiteEveryPathCharged(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	man := domain.NewManifest()
 	man.Add("a.html", domain.ManifestEntry{SHA: "sha-dd", Size: 400, ContentType: "text/html; charset=utf-8"})

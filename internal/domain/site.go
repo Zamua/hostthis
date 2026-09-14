@@ -8,19 +8,15 @@ import (
 )
 
 // Site is the aggregate for a static-site upload: a directory of files served
-// off a single slug. The Manifest maps each safe relative path to the SHA256
-// of its uncompressed blob, so the content-addressed BlobStore dedupes
-// identical files across deploys and sites.
+// off a single slug. The Manifest maps each safe relative path to the object
+// holding its bytes, every one under UploadID's prefix.
 type Site struct {
 	Slug     Slug
 	Identity Identity // owner; "key:<fp>" - quota AND ownership gate
-	Manifest Manifest // path -> blob ref (sha + size + content-type)
-	// StoredBytes is what the quota charged for this site: the deduped total of
-	// the STORED (post-zstd) blob sizes, recorded at deploy.
-	//
-	// Carried on the Site rather than recomputed from Manifest because the
-	// per-entry compressed sizes are not persisted, so a loaded manifest cannot
-	// reproduce this figure. Zero on a Site that has not been read from storage.
+	UploadID string   // prefix holding this deploy's objects
+	Manifest Manifest // path -> object key + size + content-type
+	// StoredBytes is what the quota charged for this site. Zero on a Site that
+	// has not been read from storage.
 	StoredBytes int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
@@ -29,7 +25,8 @@ type Site struct {
 // ManifestEntry is one file in a site. ContentType is a function of the
 // path's extension alone, no I/O.
 type ManifestEntry struct {
-	SHA            string // sha256 of the file's uncompressed bytes
+	Key            string // object holding the file's bytes, under its upload's prefix
+	SHA            string // a legacy entry's content address, read only when Key is empty
 	Size           int    // uncompressed bytes (for display)
 	CompressedSize int    // stored post-zstd bytes; the quota basis (matches how pastes charge)
 	ContentType    string // by extension; see ContentTypeForPath
@@ -39,6 +36,15 @@ type ManifestEntry struct {
 	// single-document paste keeps its detected kind; a file inside a directory
 	// leaves it empty and is served raw.
 	Kind string
+}
+
+// Address names the entry's bytes: its object key, or a legacy entry's sha.
+// Neither ever names different bytes, so it doubles as an HTTP validator.
+func (e ManifestEntry) Address() string {
+	if e.Key != "" {
+		return e.Key
+	}
+	return e.SHA
 }
 
 // Manifest maps each safe, site-root-relative path to its blob ref. Pure
@@ -314,10 +320,8 @@ func (m Manifest) HasWebContent() bool {
 	return false
 }
 
-// Size is the total UNCOMPRESSED bytes of every file, counted per PATH, not
-// folded by content hash: a blob id is minted per staged file rather than
-// derived from the content, so two paths holding identical bytes are two
-// stored files.
+// Size is the total UNCOMPRESSED bytes of every file, counted per PATH: every
+// path is its own stored object, identical bytes included.
 func (m Manifest) Size() int {
 	var total int
 	for _, e := range m.Files {

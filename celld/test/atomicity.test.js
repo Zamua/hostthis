@@ -456,9 +456,10 @@ test("Paste.put commits row, version seed, and counter together", async () => {
 test("Paste append converges after every local commit crash", async () => {
   await assertCrashConverges({
     harness: artifactHarness,
-    invoke: (h, run) => h.paste().append(appendBody(`append-${run}`)),
+    invoke: (h, run) => h.paste().append({ ...appendBody(`append-${run}`), uploadId: "up-2" }),
     converged(h) {
       assert.equal(storedVersions(h.pasteStorage).length, 2);
+      assert.equal(storedVersions(h.pasteStorage)[1].uploadId, "up-2");
       assert.equal(h.pasteStorage.data.get("maxVer"), 2);
       assert.equal(h.pasteStorage.data.get("row").accountingVersion, 1);
       assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
@@ -801,7 +802,7 @@ test("Paste delete commits before an unavailable allocation release", async () =
   const deleted = await responseJSON(await h.paste().deleteVersion({
     opId: "delete-1", generation: "generation-1", ver: 1,
   }));
-  assert.deepStrictEqual(deleted, { status: 200, body: { deleted: true, totalSize: 4 } });
+  assert.deepStrictEqual(deleted, { status: 200, body: { deleted: true, totalSize: 4, upload: "" } });
   assert.equal(storedVersions(h.pasteStorage)[0].deleted, true);
   assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
   assert.notEqual(h.pasteStorage.alarm, null);
@@ -849,7 +850,7 @@ test("Paste removal fences release before allowing a new incarnation", async () 
   const removed = await responseJSON(await h.paste().remove({
     opId: "remove-1", generation: "generation-1", identity: "owner", createdAt: 7,
   }));
-  assert.deepStrictEqual(removed, { status: 200, body: { removed: true } });
+  assert.deepStrictEqual(removed, { status: 200, body: { removed: true, uploads: [] } });
   assert.equal(h.pasteStorage.data.has("row"), false);
   assert.equal(h.pasteStorage.data.get("artifactTombstone").generation, "generation-1");
   assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 2);
@@ -958,6 +959,56 @@ test("Paste empty generation against an adopted row is a conflict", async () => 
   assert.equal(storedVersions(h.pasteStorage).length, 1);
 });
 
+test("Paste append answers an accounting conflict with 409 whatever Identity answered", async () => {
+  const h = artifactHarness({ identitySeed: new Map() });
+  const conflict = await responseJSON(await h.paste().append({ ...appendBody(), uploadId: "up-2" }));
+  assert.deepStrictEqual(conflict, { status: 409, body: { error: "artifact-accounting-conflict" } });
+  assert.equal(storedVersions(h.pasteStorage).length, 1);
+  assert.notEqual(h.pasteStorage.data.get("artifactPending"), undefined);
+});
+
+test("Paste legacy adoption answers a refused seed with 409 whatever Identity answered", async () => {
+  const pasteSeed = artifactPasteSeed();
+  const row = pasteSeed.get("row");
+  delete row.generation;
+  delete row.accountingVersion;
+  delete row.size;
+  const h = artifactHarness({ pasteSeed, identitySeed: new Map() });
+  const refused = await responseJSON(await h.paste().append({ ...appendBody("legacy-op"), generation: "" }));
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error, "adoption-seed-conflict");
+  assert.equal(storedVersions(h.pasteStorage).length, 1);
+});
+
+test("Paste refuses a mutation behind another operation's pending work with 423 and persists nothing", async () => {
+  const h = artifactHarness();
+  h.transport.failBefore = 100;
+  assert.equal((await h.paste().append({ ...appendBody("append-stuck"), uploadId: "up-2" })).status, 502);
+
+  const before = clone(h.pasteStorage.data);
+  const commits = h.pasteStorage.commits;
+  const busy = { status: 423, body: { error: "artifact-operation-pending" } };
+  for (const [name, run] of [
+    ["append", () => h.paste().append({ ...appendBody("append-other"), uploadId: "up-3" })],
+    ["delete version", () => h.paste().deleteVersion({ opId: "delete-other", generation: "generation-1", ver: 1 })],
+    ["pin", () => h.paste().pin({ opId: "pin-other", generation: "generation-1", ver: 1 })],
+    ["remove", () => h.paste().remove({
+      opId: "remove-other", generation: "generation-1", identity: "owner", createdAt: 7,
+    })],
+    ["fail", () => h.paste().fail({ opId: "fail-other", generation: "generation-1" })],
+    ["other generation", () => h.paste().append({
+      ...appendBody("append-stuck"), generation: "generation-2", uploadId: "up-2",
+    })],
+  ]) {
+    assert.deepStrictEqual(await responseJSON(await run()), busy, name);
+  }
+  assert.deepStrictEqual(h.pasteStorage.data, before);
+  assert.equal(h.pasteStorage.commits, commits);
+
+  const own = await responseJSON(await h.paste().append({ ...appendBody("append-stuck"), uploadId: "up-2" }));
+  assert.deepStrictEqual(own, { status: 502, body: { error: "artifact-operation-pending" } });
+});
+
 test("Paste rename persists a guarded projection through response loss", async () => {
   const h = artifactHarness();
   h.transport.failAfter = 1;
@@ -1018,7 +1069,7 @@ test("Paste removal clears a failed incarnation whose allocation is already abse
     opId: "remove-failed", generation: "generation-1",
     identity: "owner", createdAt: 7,
   }));
-  assert.deepStrictEqual(removed, { status: 200, body: { removed: true } });
+  assert.deepStrictEqual(removed, { status: 200, body: { removed: true, uploads: [] } });
   assert.equal(h.pasteStorage.data.get("row"), undefined);
   assert.equal(h.pasteStorage.data.get("artifactTombstone"), undefined);
   assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
@@ -1057,6 +1108,294 @@ test("Identity projection cannot mutate a replacement generation", async () => {
   });
   assert.equal(response.status, 409);
   assert.deepStrictEqual(storage.data, before);
+});
+
+// Version 1 tombstoned, version 2 from before upload ids with a sha-only
+// manifest, version 3 newest. `pinned` serves version 2 instead.
+function uploadedArtifactHarness({ pinned = false } = {}) {
+  const pasteSeed = artifactPasteSeed();
+  pasteSeed.delete("versions");
+  const v2Manifest = { "/": { sha: "legacy-v2" } };
+  const v3Manifest = { "/": { key: "uploads/up-3/0" } };
+  pasteSeed.set("ver:1", {
+    ver: 1, kind: "html", contentSha: "v1", size: 2, createdAt: 7, deleted: true, uploadId: "up-1",
+  });
+  pasteSeed.set("ver:2", { ver: 2, kind: "html", contentSha: "v2", size: 2, createdAt: 8, deleted: false });
+  pasteSeed.set("manifest:2", v2Manifest);
+  pasteSeed.set("ver:3", {
+    ver: 3, kind: "markdown", contentSha: "v3", size: 4, createdAt: 9, deleted: false, uploadId: "up-3",
+  });
+  pasteSeed.set("manifest:3", v3Manifest);
+  pasteSeed.set("maxVer", 3);
+  Object.assign(pasteSeed.get("row"), pinned
+    ? { contentSha: "v2", size: 2, manifest: v2Manifest, pinnedVersion: 2 }
+    : { kind: "markdown", contentSha: "v3", size: 4, manifest: v3Manifest });
+  const identitySeed = artifactIdentitySeed({ charge: 6 });
+  Object.assign(identitySeed.get("entries").slugone1, { servedSize: pinned ? 2 : 4, latestVersion: 3 });
+  return artifactHarness({ pasteSeed, identitySeed });
+}
+
+async function appendUploads(h, vers) {
+  for (const ver of vers) {
+    const appended = await h.paste().append({
+      ...appendBody(`append-${ver}`), size: 1, uploadId: `up-${ver}`,
+    });
+    assert.equal(appended.status, 200);
+  }
+}
+
+test("Paste.put records the create's upload id on version 1", async () => {
+  const row = {
+    slug: "newslug2", identity: "owner", kind: "html", contentSha: "abc", size: 3,
+    createdAt: 7, updatedAt: 7, status: "ready", uploadId: "up-1",
+  };
+  const create = (storage, sent) => new Paste(state(storage)).put({
+    row: sent, generation: "generation-1", fingerprint: "fingerprint-1",
+  });
+
+  const storage = new FakeStorage();
+  assert.equal((await create(storage, row)).status, 204);
+  assert.equal(storage.data.get("ver:1").uploadId, "up-1");
+  assert.equal(storage.data.get("row").uploadId, "up-1");
+
+  const older = new FakeStorage();
+  const { uploadId: _uploadId, ...oldRow } = row;
+  assert.equal((await create(older, oldRow)).status, 204);
+  assert.equal(Object.hasOwn(older.data.get("ver:1"), "uploadId"), false);
+
+  const malformed = new FakeStorage();
+  assert.equal((await create(malformed, { ...row, uploadId: 7 })).status, 400);
+  assert.equal(malformed.commits, 0);
+});
+
+test("Paste append records its upload id and versions list every version's id", async () => {
+  const h = artifactHarness();
+  const legacy = await responseJSON(await h.paste().listVersions());
+  assert.deepStrictEqual(legacy.body.map((version) => version.uploadId), [""]);
+
+  assert.equal((await h.paste().append({ ...appendBody("append-bad"), uploadId: 7 })).status, 400);
+  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+
+  assert.equal((await h.paste().append({ ...appendBody(), uploadId: "up-2" })).status, 200);
+  assert.equal(h.pasteStorage.data.get("ver:2").uploadId, "up-2");
+  const listed = await responseJSON(await h.paste().listVersions());
+  assert.deepStrictEqual(listed.body.map(({ ver, uploadId }) => ({ ver, uploadId })), [
+    { ver: 2, uploadId: "up-2" },
+    { ver: 1, uploadId: "" },
+  ]);
+});
+
+test("Paste head carries the served version's upload id through append, pin, unpin, and rehome", async () => {
+  const h = artifactHarness();
+  const head = () => h.pasteStorage.data.get("row").uploadId;
+  assert.equal((await h.paste().append({ ...appendBody("append-2"), uploadId: "up-2" })).status, 200);
+  assert.equal(head(), "up-2");
+  assert.equal((await h.paste().append({ ...appendBody("append-3"), uploadId: "up-3" })).status, 200);
+  assert.equal(head(), "up-3");
+
+  const pin = (opId, ver) => h.paste().pin({ opId, generation: "generation-1", ver });
+  assert.equal((await pin("pin-2", 2)).status, 200);
+  assert.equal(head(), "up-2");
+  assert.equal((await pin("unpin", 0)).status, 200);
+  assert.equal(head(), "up-3");
+
+  const rehome = (ver, uploadId) => h.paste().rehome({
+    generation: "generation-1", ver, uploadId, manifest: { Files: { "/": { Key: `uploads/${uploadId}/0` } } },
+  });
+  assert.equal((await rehome(2, "up-2b")).status, 200);
+  assert.equal(head(), "up-3");
+  assert.equal((await rehome(3, "up-3b")).status, 200);
+  assert.equal(head(), "up-3b");
+});
+
+test("Paste removal names every version's upload and replays it after re-creation", async () => {
+  const h = artifactHarness();
+  await appendUploads(h, [2, 3]);
+  assert.equal((await h.paste().deleteVersion({
+    opId: "delete-2", generation: "generation-1", ver: 2,
+  })).status, 200);
+  const body = { opId: "remove-1", generation: "generation-1", identity: "owner", createdAt: 7 };
+
+  const removed = await responseJSON(await h.paste().remove(body));
+  assert.deepStrictEqual(removed, { status: 200, body: { removed: true, uploads: ["up-2", "up-3"] } });
+  assert.equal(h.pasteStorage.data.get("artifactTombstone"), undefined);
+
+  assert.equal((await h.paste().put({
+    generation: "generation-2",
+    fingerprint: "fingerprint-2",
+    row: {
+      slug: "slugone1", identity: "other", kind: "html", contentSha: "new",
+      size: 1, status: "ready", createdAt: 9, updatedAt: 9, uploadId: "new-1",
+    },
+  })).status, 204);
+  assert.deepStrictEqual(await responseJSON(await h.paste().remove(body)), removed);
+});
+
+test("Paste removal reads a single-value history's upload ids", async () => {
+  const h = deletableArtifactHarness();
+  const legacy = h.pasteStorage.data.get("versions");
+  legacy[1].uploadId = "up-2";
+  h.pasteStorage.data.set("versions", legacy);
+  assert.deepStrictEqual(await responseJSON(await h.paste().remove({
+    opId: "remove-legacy", generation: "generation-1", identity: "owner", createdAt: 7,
+  })), { status: 200, body: { removed: true, uploads: ["up-2"] } });
+});
+
+test("Paste removal keeps its named uploads after every local commit crash", async () => {
+  await assertCrashConverges({
+    harness: uploadedArtifactHarness,
+    invoke: (h, run) => h.paste().remove({
+      opId: `remove-${run}`, generation: "generation-1", identity: "owner", createdAt: 7,
+    }),
+    converged(h) {
+      const receipts = [...h.pasteStorage.data]
+        .filter(([key]) => key.startsWith("artifact-receipt:"))
+        .map(([, receipt]) => receipt.body);
+      assert.deepStrictEqual(receipts, [{ removed: true, uploads: ["up-1", "up-3"] }]);
+      assert.equal(h.pasteStorage.data.get("row"), undefined);
+      assert.equal(h.pasteStorage.data.get("artifactTombstone"), undefined);
+      assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+      assert.equal(h.identityStorage.data.get("entries").slugone1, undefined);
+    },
+  });
+});
+
+test("Paste version delete names the tombstoned upload on every path", async () => {
+  const h = artifactHarness();
+  await appendUploads(h, [2, 3]);
+  const body = { opId: "delete-2", generation: "generation-1", ver: 2 };
+  const expected = { status: 200, body: { deleted: true, totalSize: 3, upload: "up-2" } };
+
+  assert.deepStrictEqual(await responseJSON(await h.paste().deleteVersion(body)), expected);
+  assert.deepStrictEqual(await responseJSON(await h.paste().deleteVersion(body)), expected);
+  assert.deepStrictEqual(await responseJSON(await h.paste().deleteVersion({
+    ...body, opId: "delete-2-again",
+  })), expected);
+  assert.deepStrictEqual(await responseJSON(await h.paste().deleteVersion({
+    opId: "delete-1", generation: "generation-1", ver: 1,
+  })), { status: 200, body: { deleted: true, totalSize: 1, upload: "" } });
+});
+
+const rehomedManifest = { Files: { "/": { Key: "uploads/up-new/0", SHA: "", Size: 2, CompressedSize: 11 } } };
+
+function keyedManifest(...keys) {
+  return { Files: Object.fromEntries(keys.map((Key, n) => [`file-${n}`, { Key }])) };
+}
+
+function rehomeBody(overrides = {}) {
+  return { generation: "generation-1", ver: 1, uploadId: "up-new", manifest: rehomedManifest, ...overrides };
+}
+
+test("Paste rehome splits a single-value history and repoints the served version idempotently", async () => {
+  const h = artifactHarness();
+  const row = h.pasteStorage.data.get("row");
+  const rehome = async () => responseJSON(await h.paste().fetch(new Request("https://cell/paste/rehome", {
+    method: "POST", body: JSON.stringify(rehomeBody()),
+  })));
+
+  assert.deepStrictEqual(await rehome(), { status: 200, body: { rehomed: true } });
+  assert.equal(h.pasteStorage.data.has("versions"), false);
+  assert.equal(h.pasteStorage.data.get("ver:1").uploadId, "up-new");
+  assert.deepStrictEqual(h.pasteStorage.data.get("manifest:1"), rehomedManifest);
+  assert.deepStrictEqual(h.pasteStorage.data.get("row"), {
+    ...row, manifest: rehomedManifest, uploadId: "up-new",
+  });
+  assert.deepStrictEqual(h.transport.calls, []);
+  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal(h.pasteStorage.alarm, null);
+
+  const settled = clone(h.pasteStorage.data);
+  assert.deepStrictEqual(await rehome(), { status: 200, body: { rehomed: true } });
+  assert.deepStrictEqual(h.pasteStorage.data, settled);
+});
+
+test("Paste rehome rewrites the row only for the version it serves", async () => {
+  const pinned = uploadedArtifactHarness({ pinned: true });
+  assert.equal((await pinned.paste().rehome(rehomeBody({ ver: 2 }))).status, 200);
+  assert.deepStrictEqual(pinned.pasteStorage.data.get("row").manifest, rehomedManifest);
+
+  const h = uploadedArtifactHarness();
+  const row = h.pasteStorage.data.get("row");
+  const v2 = h.pasteStorage.data.get("ver:2");
+  assert.equal((await h.paste().rehome(rehomeBody({ ver: 2 }))).status, 200);
+  assert.deepStrictEqual(h.pasteStorage.data.get("row"), row);
+  assert.deepStrictEqual(h.pasteStorage.data.get("ver:2"), { ...v2, uploadId: "up-new" });
+  assert.deepStrictEqual(h.pasteStorage.data.get("manifest:2"), rehomedManifest);
+
+  assert.equal((await h.paste().rehome(rehomeBody({ ver: 3 }))).status, 200);
+  assert.deepStrictEqual(h.pasteStorage.data.get("manifest:3"), rehomedManifest);
+  assert.deepStrictEqual(h.pasteStorage.data.get("row").manifest, rehomedManifest);
+  assert.equal(h.pasteStorage.data.get("row").uploadId, "up-new");
+  assert.equal(h.pasteStorage.data.get("row").size, 4);
+});
+
+test("Paste rehome accepts a manifest whose every key is an object of the upload", async () => {
+  const h = uploadedArtifactHarness();
+  const uploadId = `Up_-${"a".repeat(124)}`;
+  const manifest = keyedManifest(`uploads/${uploadId}/0`, `uploads/${uploadId}/12`);
+  assert.deepStrictEqual(await responseJSON(await h.paste().rehome(rehomeBody({ ver: 2, uploadId, manifest }))),
+    { status: 200, body: { rehomed: true } });
+  assert.deepStrictEqual(h.pasteStorage.data.get("manifest:2"), manifest);
+  assert.equal(h.pasteStorage.data.get("ver:2").uploadId, uploadId);
+});
+
+test("Paste rehome refuses without writing, adopting, or calling Identity", async () => {
+  const legacyRow = uploadedArtifactHarness();
+  const row = legacyRow.pasteStorage.data.get("row");
+  delete row.generation;
+  delete row.accountingVersion;
+  legacyRow.pasteStorage.data.set("row", row);
+  const mismatch = { status: 409, body: { error: "generation-mismatch" } };
+  const invalidRehome = { status: 400, body: { error: "invalid-rehome" } };
+  const invalidManifest = { status: 400, body: { error: "invalid-manifest" } };
+  const badManifest = (manifest) => rehomeBody({ ver: 2, manifest });
+  const badUploadId = (uploadId) => rehomeBody({ ver: 2, uploadId, manifest: keyedManifest(`uploads/${uploadId}/0`) });
+
+  for (const [name, h, body, expected] of [
+    ["null manifest", uploadedArtifactHarness(), badManifest(null), invalidManifest],
+    ["array manifest", uploadedArtifactHarness(), badManifest([]), invalidManifest],
+    ["manifest without files", uploadedArtifactHarness(), badManifest({}), invalidManifest],
+    ["manifest without entries", uploadedArtifactHarness(), badManifest({ Files: {} }), invalidManifest],
+    ["sha-only entry", uploadedArtifactHarness(), badManifest({ Files: { "/": { SHA: "legacy-v2" } } }), invalidManifest],
+    ["empty key", uploadedArtifactHarness(), badManifest(keyedManifest("")), invalidManifest],
+    ["another upload's key", uploadedArtifactHarness(), badManifest(keyedManifest("uploads/up-3/0")), invalidManifest],
+    ["key sharing a prefix", uploadedArtifactHarness(), badManifest(keyedManifest("uploads/up-newer/0")), invalidManifest],
+    ["key escaping the upload", uploadedArtifactHarness(),
+      badManifest(keyedManifest("uploads/up-new/../up-3/0")), invalidManifest],
+    ["the prefix itself", uploadedArtifactHarness(), badManifest(keyedManifest("uploads/up-new/")), invalidManifest],
+    ["legacy key", uploadedArtifactHarness(), badManifest(keyedManifest("blob/ab/abcd")), invalidManifest],
+    ["one foreign key among good ones", uploadedArtifactHarness(),
+      badManifest(keyedManifest("uploads/up-new/0", "uploads/up-3/1")), invalidManifest],
+    ["upload id with a slash", uploadedArtifactHarness(), badUploadId("up/new"), invalidRehome],
+    ["upload id of dots", uploadedArtifactHarness(), badUploadId(".."), invalidRehome],
+    ["upload id too long", uploadedArtifactHarness(), badUploadId("a".repeat(129)), invalidRehome],
+    ["non-string upload id", uploadedArtifactHarness(), rehomeBody({ ver: 2, uploadId: 7 }), invalidRehome],
+    ["deleted", uploadedArtifactHarness(), rehomeBody({ ver: 1 }),
+      { status: 409, body: { error: "version-deleted" } }],
+    ["absent version", uploadedArtifactHarness(), rehomeBody({ ver: 9 }),
+      { status: 404, body: { error: "version-absent" } }],
+    ["other generation", uploadedArtifactHarness(), rehomeBody({ ver: 2, generation: "generation-2" }), mismatch],
+    ["legacy row", legacyRow, rehomeBody({ ver: 2 }), mismatch],
+    ["no row", artifactHarness({ pasteSeed: new Map() }), rehomeBody(),
+      { status: 404, body: { error: "paste-absent" } }],
+    ["empty upload id", uploadedArtifactHarness(), rehomeBody({ ver: 2, uploadId: "" }),
+      { status: 400, body: { error: "invalid-rehome" } }],
+    ["no manifest", uploadedArtifactHarness(), rehomeBody({ ver: 2, manifest: undefined }),
+      { status: 400, body: { error: "invalid-manifest" } }],
+  ]) {
+    const before = clone(h.pasteStorage.data);
+    assert.deepStrictEqual(await responseJSON(await h.paste().rehome(body)), expected, name);
+    assert.deepStrictEqual(h.pasteStorage.data, before, name);
+    assert.equal(h.pasteStorage.commits, 0, name);
+    assert.deepStrictEqual(h.transport.calls, [], name);
+  }
+});
+
+test("Paste rehome commits split, version, manifest, and row together", async () => {
+  await assertCrashAtomic({
+    seed: artifactPasteSeed(),
+    invoke: (storage) => new Paste(state(storage)).rehome(rehomeBody()),
+  });
 });
 
 function budgetSeed(a = 4, b = 4) {
@@ -1378,6 +1717,22 @@ test("Room creation does not persist when its ledger is unavailable", async () =
   });
   assert.equal(response.status, 502);
   assert.equal(roomStorage.data.has("state"), false);
+});
+
+test("Paste ops are reachable by id through the op query when the path names none", async () => {
+  const h = artifactHarness();
+  const call = async (path, init) => responseJSON(await h.paste().fetch(new Request(`https://cell${path}`, init)));
+
+  const row = await call("/do/Paste:abc?op=get");
+  assert.equal(row.status, 200);
+  assert.equal(row.body.slug, "slugone1");
+  const versions = await call("/do/Paste:abc?op=versions");
+  assert.deepStrictEqual(versions.body.map((version) => version.ver), [1]);
+  assert.equal((await h.paste().fetch(new Request("https://cell/do/Paste:abc?op=nope"))).status, 404);
+  assert.equal((await h.paste().fetch(new Request("https://cell/do/Paste:abc"))).status, 404);
+
+  const byPath = await call("/paste/get?op=versions");
+  assert.equal(byPath.body.slug, "slugone1");
 });
 
 test("Room creation refuses a full app before persisting", async () => {
