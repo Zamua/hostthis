@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"time"
@@ -31,9 +32,15 @@ import (
 // fingerprint lets recovery confirm that row or fence the generation before
 // releasing its charge. Writing the row first would instead leave a visible,
 // uncharged orphan.
-type PasteRepo struct{ *cell }
+type PasteRepo struct {
+	*cell
 
-func NewPasteRepo(base string, c *http.Client) *PasteRepo { return &PasteRepo{newCell(base, c)} }
+	// Logger receives one line per stored manifest skipped as undecodable. Nil
+	// drops them.
+	Logger *log.Logger
+}
+
+func NewPasteRepo(base string, c *http.Client) *PasteRepo { return &PasteRepo{cell: newCell(base, c)} }
 
 // pasteRow is the wire and stored shape. Private so the domain type can change
 // without a stored-format migration.
@@ -185,12 +192,41 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 }
 
 func (r *PasteRepo) getRow(slug domain.Slug) (pasteRow, error) {
-	var row pasteRow
+	// The outer Manifest shadows pasteRow's, so the manifest decodes apart from
+	// the rest of the row, which stays strict.
+	var wire struct {
+		pasteRow
+		Manifest json.RawMessage `json:"manifest"`
+	}
 	if err := r.ask(context.Background(), "paste get", http.MethodGet, "/paste/get", "slug", slug.String(),
-		nil, &row, notFound); err != nil {
+		nil, &wire, notFound); err != nil {
 		return pasteRow{}, err
 	}
+	row := wire.pasteRow
+	row.Manifest = r.storedManifest(wire.Manifest, slug, 0)
 	return row, nil
+}
+
+// storedManifest decodes a stored manifest. One of the wrong shape reads as no
+// manifest, so reads, version listings and deletes of a damaged record keep
+// working (CLAUDE.md engineering principle 3). ver is 0 for the row's manifest.
+func (r *PasteRepo) storedManifest(raw json.RawMessage, slug domain.Slug, ver int) domain.Manifest {
+	var m domain.Manifest
+	if len(raw) == 0 {
+		return m
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		if r.Logger != nil {
+			where := slug.String()
+			if ver != 0 {
+				where = fmt.Sprintf("%s v%d", slug, ver)
+			}
+			r.Logger.Printf("celld: paste %s: undecodable manifest read as none: %v", where, err)
+		}
+		// A failed decode may have filled some entries; none of them is trusted.
+		return domain.Manifest{}
+	}
+	return m
 }
 
 func (r *PasteRepo) Get(slug domain.Slug) (domain.Paste, error) {
@@ -509,7 +545,7 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 		Size       int             `json:"size"`
 		CreatedAt  int64           `json:"createdAt"`
 		Deleted    bool            `json:"deleted"`
-		Manifest   domain.Manifest `json:"manifest"`
+		Manifest   json.RawMessage `json:"manifest"`
 	}
 	status, err := r.call(context.Background(), http.MethodGet, "/paste/versions", "slug", slug.String(), nil, &wire)
 	if err != nil {
@@ -522,7 +558,8 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	for _, w := range wire {
 		out = append(out, domain.Version{
 			Slug: slug, VerNum: w.Ver, Kind: domain.ContentKind(w.Kind),
-			ContentSHA: w.ContentSHA, UploadID: w.UploadID, Size: w.Size, Manifest: w.Manifest,
+			ContentSHA: w.ContentSHA, UploadID: w.UploadID, Size: w.Size,
+			Manifest:  r.storedManifest(w.Manifest, slug, w.Ver),
 			CreatedAt: time.UnixMilli(w.CreatedAt).UTC(), Deleted: w.Deleted,
 		})
 	}

@@ -22,6 +22,7 @@ func buildMetadataCelld(apex string, logger *log.Logger) (*metadataBundle, error
 	// rather than each surface opening its own.
 	client := &http.Client{Timeout: 30 * time.Second}
 	repo := celld.NewPasteRepo(base, client)
+	repo.Logger = logger
 	rooms := celld.NewRoomRepo(base, client)
 	rooms.PushSubject = "https://" + apex
 
