@@ -88,41 +88,30 @@ func TestDeleteVersion_RemovesOnlyThatVersionsBytes(t *testing.T) {
 	}
 }
 
-// A legacy version's object is content-addressed and may back other pastes,
-// so deleting its paste removes metadata only.
-func TestDelete_LegacyVersionKeepsItsObject(t *testing.T) {
+// A version recorded without an upload id owns no objects: deleting its paste
+// succeeds and removes only the prefixes its other versions name.
+func TestDelete_VersionWithoutUploadRemovesMetadataOnly(t *testing.T) {
 	_, m, repo, _, root := bytesStack(t)
-	disk, err := storage.NewBlobStore(root)
-	if err != nil {
-		t.Fatalf("disk store: %v", err)
-	}
-	const sha = "0123456789abcdef"
-	legacyBody := []byte("<!doctype html><p>legacy</p>")
-	if err := disk.Put(sha[:2]+"/"+sha, bytes.NewReader(legacyBody), int64(len(legacyBody))); err != nil {
-		t.Fatalf("seed legacy object: %v", err)
-	}
-	legacy := domain.Paste{
+	unkeyed := domain.Paste{
 		Slug: "legacy23", Generation: "generation-legacy", Identity: bytesOwner,
-		Status: domain.PasteStatusReady, Kind: domain.KindHTML, ContentSHA: sha,
-		Size: len(legacyBody), CreatedAt: fixedNow, UpdatedAt: fixedNow,
+		Status: domain.PasteStatusReady, Kind: domain.KindHTML, ContentSHA: "0123456789abcdef",
+		Size: 28, CreatedAt: fixedNow, UpdatedAt: fixedNow,
 	}
-	if err := repo.InsertWithQuotaCheck(context.Background(), legacy, 0, fixedNow); err != nil {
-		t.Fatalf("insert legacy paste: %v", err)
+	if err := repo.InsertWithQuotaCheck(context.Background(), unkeyed, 0, fixedNow); err != nil {
+		t.Fatalf("insert paste: %v", err)
 	}
-	if _, err := m.Update(legacy.Slug, bytesOwner, strings.NewReader("<!doctype html><p>v2</p>"), ""); err != nil {
+	if _, err := m.Update(unkeyed.Slug, bytesOwner, strings.NewReader("<!doctype html><p>v2</p>"), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
+	if n := objectsUnder(t, root); n != 1 {
+		t.Fatalf("upload objects before delete = %d, want 1 (v2)", n)
+	}
 
-	if err := m.Delete(legacy.Slug, bytesOwner); err != nil {
+	if err := m.Delete(unkeyed.Slug, bytesOwner); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if n := objectsUnder(t, root); n != 0 {
 		t.Fatalf("upload objects after delete = %d, want 0", n)
-	}
-	if rc, _, err := disk.GetLegacyReader(sha); err != nil {
-		t.Fatalf("legacy object after delete: %v", err)
-	} else {
-		_ = rc.Close()
 	}
 }
 

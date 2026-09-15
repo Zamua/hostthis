@@ -731,9 +731,10 @@ Per-file versioning was rejected: it gives no coherent answer to "what did this
 look like at version 3" and no sensible pin target.
 
 **Stored shape.** The version row carries the encoded manifest, its upload id,
-and a flat root descriptor (kind, root entry, size). A row without a manifest,
-or whose manifest fails to decode, resolves through the flat descriptor rather
-than failing the read.
+and a flat root descriptor (kind, size). A row without a manifest, or whose
+manifest fails to decode, keeps its metadata rather than failing the read, and
+has no content to serve (see "Blob storage backends → Entries without an
+object key").
 
 Every version is written with a manifest, including a single document, whose
 manifest is of length one at `/`. That is what lets a reader stop asking which
@@ -775,10 +776,8 @@ every file, changed or not, under a new prefix: no two uploads share bytes,
 and deleting one version's bytes cannot affect any other.
 
 A read resolves the root through the manifest: its `/` entry, else
-`index.html`. The flat descriptor keeps kind and size; its content sha is set
-only on rows written before per-upload keys, where it is the legacy read
-fallback. A version written with a key leaves that sha empty, so a stale flat
-field can never name bytes the manifest does not.
+`index.html`. The flat descriptor keeps kind and size and never names bytes, so
+a stale flat field can never serve bytes the manifest does not.
 
 A directory is written through the SAME insert a document uses, and every
 caller supplies a manifest, carried into the stored descriptor verbatim. A
@@ -2546,19 +2545,21 @@ zstd-decoded; otherwise the object is uncompressed and returned as-is, at the
 cost of one byte-compare per read. Writes are always compressed and prefixed,
 so an object's stored bytes are identical whichever adapter wrote them.
 
-### Legacy content-addressed entries (dual-read)
+### Entries without an object key
 
-Legacy objects are content-addressed by the sha256 of their uncompressed bytes:
-on S3 at `blob/<sha[:2]>/<sha>` (`blob` is `HOSTTHIS_S3_BLOB_PREFIX`), on disk
-at `<data-dir>/blobs/<sha[:2]>/<sha>`. One such object may back many paths,
-versions, and owners. A manifest entry carries either an object key or, for a
-legacy entry, only a sha:
+A manifest entry names its bytes by its object key and nothing else. An entry
+without a key, like a paste whose row carries no manifest, is unreadable:
 
-- An entry with a key reads that key.
-- A legacy entry reads its sha's object, and its ETag is the sha.
-- New uploads write only `uploads/`.
-- A legacy version has no upload id. Deleting it, or its paste, removes
-  metadata only: its objects may be shared, so no delete path touches `blob/`.
+- The HTTP read surface answers 404, the same shape as an unknown path, for a
+  document's URL, its `?raw=1` URL, and a site file alike. No shell is served
+  for it.
+- `get` answers the standard not found (exit 4).
+- Neither touches the blob store.
+
+Such a record still decodes: fields no read uses, such as a content sha, are
+ignored, so listing, versions, and deletes keep working for it. A version
+recorded without an upload id owns no prefix, so deleting it, or its paste,
+removes metadata only.
 
 ### Migration off the legacy namespace
 
@@ -3579,7 +3580,6 @@ file). Defaults in parens:
                          / HOSTTHIS_S3_ACCESS_KEY           S3 access key                         (required for s3)
                          / HOSTTHIS_S3_SECRET_KEY           S3 secret key                         (required for s3)
                          / HOSTTHIS_S3_USE_SSL              endpoint uses TLS                     (false)
-                         / HOSTTHIS_S3_BLOB_PREFIX          legacy sha namespace (dual-read)      (blob)
 
 # Limits
                          / HOSTTHIS_CREATE_ADMISSION_WIDTH  same-identity create admission width    (2)

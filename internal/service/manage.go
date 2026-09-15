@@ -130,7 +130,11 @@ func (m *Manage) Show(slug domain.Slug, owner string) (domain.Paste, io.ReadClos
 	if err != nil {
 		return domain.Paste{}, nil, err
 	}
-	rc, _, err := m.Blob.Read(context.Background(), p.RootEntry())
+	root := p.RootEntry()
+	if root.Key == "" {
+		return domain.Paste{}, nil, ErrNotFound
+	}
+	rc, _, err := m.Blob.Read(context.Background(), root)
 	if err != nil {
 		return domain.Paste{}, nil, fmt.Errorf("blob: %w", err)
 	}

@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"path/filepath"
 	"testing"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -109,7 +108,6 @@ func TestStandalone_Read_NotFound(t *testing.T) {
 	u := newStandaloneUnit(t)
 	for _, entry := range []domain.ManifestEntry{
 		{Key: domain.UploadObjectKey(domain.NewUploadID(), 0)},
-		{SHA: "deadbeef"},
 		{},
 	} {
 		if _, _, err := u.Read(context.Background(), entry); !errors.Is(err, storage.ErrNotFound) {
@@ -118,30 +116,13 @@ func TestStandalone_Read_NotFound(t *testing.T) {
 	}
 }
 
-// A legacy entry reads its content-addressed object, and an entry carrying a
-// key reads the key even when a sha is also present.
-func TestStandalone_Read_DualRead(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "blobs")
-	disk, err := storage.NewBlobStore(root)
-	if err != nil {
-		t.Fatalf("blob store: %v", err)
-	}
-	u := NewStandaloneBlobUnit(storage.NewCompressedBlobStore(disk))
-	const sha = "0123abcd"
-	legacy := []byte("<h1>written before upload prefixes</h1>")
-	if err := disk.Put(sha[:2]+"/"+sha, bytes.NewReader(legacy), int64(len(legacy))); err != nil {
-		t.Fatalf("seed legacy object: %v", err)
-	}
-
-	got, err := readStream(t, u, domain.ManifestEntry{SHA: sha})
-	if err != nil || !bytes.Equal(got, legacy) {
-		t.Fatalf("legacy read = (%q, %v), want %q", got, err, legacy)
-	}
-
-	keyed := stage(t, u, []byte("<h1>re-homed</h1>"))
-	keyed.SHA = sha
-	if got, err := readStream(t, u, keyed); err != nil || string(got) != "<h1>re-homed</h1>" {
-		t.Fatalf("entry with key and sha = (%q, %v), want the keyed object", got, err)
+// An entry without an object key names no bytes, so its read never reaches the
+// store: the embedded nil store panics on any call.
+func TestStandalone_Read_KeylessEntryNeverReachesTheStore(t *testing.T) {
+	u := NewStandaloneBlobUnit(&streamIdentityStore{})
+	entry := domain.ManifestEntry{Size: 3, CompressedSize: 2, ContentType: "text/html; charset=utf-8"}
+	if rc, _, err := u.Read(context.Background(), entry); !errors.Is(err, domain.ErrNotFound) || rc != nil {
+		t.Fatalf("Read keyless entry = (%v, %v), want ErrNotFound", rc, err)
 	}
 }
 

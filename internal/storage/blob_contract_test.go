@@ -6,8 +6,6 @@ package storage_test
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"io"
 	"testing"
@@ -19,29 +17,15 @@ import (
 type rawBlobStore interface {
 	Put(key string, r io.Reader, size int64) error
 	GetReader(key string) (io.ReadCloser, int64, error)
-	GetLegacyReader(sha string) (io.ReadCloser, int64, error)
 	DeletePrefix(prefix string) error
 }
 
-// blobBackend is one store plus the raw key a legacy sha is stored under, so
-// the suite can seed legacy objects through Put.
-type blobBackend struct {
-	store     rawBlobStore
-	legacyKey func(sha string) string
-}
-
-func runBlobContract(t *testing.T, newBackend func(t *testing.T) blobBackend) {
-	t.Run("RoundTrip", func(t *testing.T) { blobContractRoundTrip(t, newBackend(t)) })
-	t.Run("MissingIsNotFound", func(t *testing.T) { blobContractMissing(t, newBackend(t)) })
-	t.Run("DeletePrefixRemovesOnlyThatUpload", func(t *testing.T) { blobContractDeletePrefix(t, newBackend(t)) })
-	t.Run("DeleteAbsentPrefixSucceeds", func(t *testing.T) { blobContractDeleteAbsent(t, newBackend(t)) })
-	t.Run("LegacyRead", func(t *testing.T) { blobContractLegacyRead(t, newBackend(t)) })
-	t.Run("RejectsUnsafeNames", func(t *testing.T) { blobContractRejectsUnsafe(t, newBackend(t)) })
-}
-
-func shaOf(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+func runBlobContract(t *testing.T, newStore func(t *testing.T) rawBlobStore) {
+	t.Run("RoundTrip", func(t *testing.T) { blobContractRoundTrip(t, newStore(t)) })
+	t.Run("MissingIsNotFound", func(t *testing.T) { blobContractMissing(t, newStore(t)) })
+	t.Run("DeletePrefixRemovesOnlyThatUpload", func(t *testing.T) { blobContractDeletePrefix(t, newStore(t)) })
+	t.Run("DeleteAbsentPrefixSucceeds", func(t *testing.T) { blobContractDeleteAbsent(t, newStore(t)) })
+	t.Run("RejectsUnsafeNames", func(t *testing.T) { blobContractRejectsUnsafe(t, newStore(t)) })
 }
 
 func put(t *testing.T, s rawBlobStore, key string, body []byte) {
@@ -67,14 +51,14 @@ func deleteAfter(t *testing.T, s rawBlobStore, id string) {
 	t.Cleanup(func() { _ = s.DeletePrefix(domain.UploadPrefix(id)) })
 }
 
-func blobContractRoundTrip(t *testing.T, b blobBackend) {
+func blobContractRoundTrip(t *testing.T, s rawBlobStore) {
 	id := domain.NewUploadID()
-	deleteAfter(t, b.store, id)
+	deleteAfter(t, s, id)
 	key := domain.UploadObjectKey(id, 0)
 	body := []byte("the bytes a paste is made of\n")
-	put(t, b.store, key, body)
+	put(t, s, key, body)
 
-	rc, n, err := b.store.GetReader(key)
+	rc, n, err := s.GetReader(key)
 	if err != nil {
 		t.Fatalf("get reader: %v", err)
 	}
@@ -90,95 +74,72 @@ func blobContractRoundTrip(t *testing.T, b blobBackend) {
 
 // A missing object is ErrNotFound, not an opaque transport error, so the read
 // path can tell "no such object" from "the store is broken".
-func blobContractMissing(t *testing.T, b blobBackend) {
-	if _, err := read(t, b.store, domain.UploadObjectKey(domain.NewUploadID(), 0)); !errors.Is(err, storage.ErrNotFound) {
+func blobContractMissing(t *testing.T, s rawBlobStore) {
+	if _, err := read(t, s, domain.UploadObjectKey(domain.NewUploadID(), 0)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("GetReader of an absent key = %v, want ErrNotFound", err)
-	}
-	if _, _, err := b.store.GetLegacyReader(shaOf([]byte("never written"))); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("GetLegacyReader of an absent sha = %v, want ErrNotFound", err)
 	}
 }
 
 // A prefix delete ends on a segment boundary: an upload whose id merely starts
 // with the deleted one keeps its objects.
-func blobContractDeletePrefix(t *testing.T, b blobBackend) {
+func blobContractDeletePrefix(t *testing.T, s rawBlobStore) {
 	doomed := domain.NewUploadID()
 	lookalike := doomed + "x"
 	other := domain.NewUploadID()
 	for _, id := range []string{doomed, lookalike, other} {
-		deleteAfter(t, b.store, id)
+		deleteAfter(t, s, id)
 	}
-	put(t, b.store, domain.UploadObjectKey(doomed, 0), []byte("a"))
-	put(t, b.store, domain.UploadObjectKey(doomed, 1), []byte("b"))
-	put(t, b.store, domain.UploadObjectKey(lookalike, 0), []byte("c"))
-	put(t, b.store, domain.UploadObjectKey(other, 0), []byte("d"))
+	put(t, s, domain.UploadObjectKey(doomed, 0), []byte("a"))
+	put(t, s, domain.UploadObjectKey(doomed, 1), []byte("b"))
+	put(t, s, domain.UploadObjectKey(lookalike, 0), []byte("c"))
+	put(t, s, domain.UploadObjectKey(other, 0), []byte("d"))
 
-	if err := b.store.DeletePrefix(domain.UploadPrefix(doomed)); err != nil {
+	if err := s.DeletePrefix(domain.UploadPrefix(doomed)); err != nil {
 		t.Fatalf("DeletePrefix: %v", err)
 	}
 	for _, n := range []int{0, 1} {
-		if _, err := read(t, b.store, domain.UploadObjectKey(doomed, n)); !errors.Is(err, storage.ErrNotFound) {
+		if _, err := read(t, s, domain.UploadObjectKey(doomed, n)); !errors.Is(err, storage.ErrNotFound) {
 			t.Fatalf("object %d of the deleted upload = %v, want ErrNotFound", n, err)
 		}
 	}
 	for id, want := range map[string]string{lookalike: "c", other: "d"} {
-		got, err := read(t, b.store, domain.UploadObjectKey(id, 0))
+		got, err := read(t, s, domain.UploadObjectKey(id, 0))
 		if err != nil || string(got) != want {
 			t.Fatalf("surviving upload %s = (%q, %v), want %q", id, got, err, want)
 		}
 	}
 }
 
-func blobContractDeleteAbsent(t *testing.T, b blobBackend) {
-	if err := b.store.DeletePrefix(domain.UploadPrefix(domain.NewUploadID())); err != nil {
+func blobContractDeleteAbsent(t *testing.T, s rawBlobStore) {
+	if err := s.DeletePrefix(domain.UploadPrefix(domain.NewUploadID())); err != nil {
 		t.Fatalf("DeletePrefix of an absent upload = %v, want nil", err)
-	}
-}
-
-func blobContractLegacyRead(t *testing.T, b blobBackend) {
-	body := []byte("content-addressed before uploads had prefixes")
-	sha := shaOf(append(body, []byte(domain.NewUploadID())...))
-	put(t, b.store, b.legacyKey(sha), body)
-
-	rc, _, err := b.store.GetLegacyReader(sha)
-	if err != nil {
-		t.Fatalf("GetLegacyReader: %v", err)
-	}
-	defer rc.Close() //nolint:errcheck
-	if got, _ := io.ReadAll(rc); !bytes.Equal(got, body) {
-		t.Fatalf("GetLegacyReader = %q, want %q", got, body)
 	}
 }
 
 // No name read back from metadata may reach outside its own object, and no
 // prefix delete may widen past one upload.
-func blobContractRejectsUnsafe(t *testing.T, b blobBackend) {
+func blobContractRejectsUnsafe(t *testing.T, s rawBlobStore) {
 	for _, key := range []string{"", "/uploads/x/0", "uploads/../x", "uploads/x/", "uploads//0", `uploads\x`} {
-		if err := b.store.Put(key, bytes.NewReader([]byte("x")), 1); err == nil {
+		if err := s.Put(key, bytes.NewReader([]byte("x")), 1); err == nil {
 			t.Errorf("Put(%q) = nil, want a refusal", key)
 		}
-		if _, _, err := b.store.GetReader(key); err == nil || errors.Is(err, storage.ErrNotFound) {
+		if _, _, err := s.GetReader(key); err == nil || errors.Is(err, storage.ErrNotFound) {
 			t.Errorf("GetReader(%q) = %v, want a refusal", key, err)
 		}
 	}
 	for _, prefix := range []string{"", "/", "uploads", "uploads/x", "../", "uploads/../"} {
-		if err := b.store.DeletePrefix(prefix); err == nil {
+		if err := s.DeletePrefix(prefix); err == nil {
 			t.Errorf("DeletePrefix(%q) = nil, want a refusal", prefix)
-		}
-	}
-	for _, sha := range []string{"", "a", "../../etc", "ab/cd", "ABCD"} {
-		if _, _, err := b.store.GetLegacyReader(sha); err == nil || errors.Is(err, storage.ErrNotFound) {
-			t.Errorf("GetLegacyReader(%q) = %v, want a refusal", sha, err)
 		}
 	}
 }
 
 func TestDiskBlobContract(t *testing.T) {
-	runBlobContract(t, func(t *testing.T) blobBackend {
+	runBlobContract(t, func(t *testing.T) rawBlobStore {
 		bs, err := storage.NewBlobStore(t.TempDir())
 		if err != nil {
 			t.Fatalf("NewBlobStore: %v", err)
 		}
-		return blobBackend{store: bs, legacyKey: func(sha string) string { return sha[:2] + "/" + sha }}
+		return bs
 	})
 }

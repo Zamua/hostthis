@@ -285,19 +285,17 @@ func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlob
 		raw = bs
 	case "s3":
 		bs, err := storage.NewS3BlobStore(storage.S3BlobConfig{
-			Endpoint:     envOr("HOSTTHIS_S3_ENDPOINT", ""),
-			Bucket:       envOr("HOSTTHIS_S3_BUCKET", ""),
-			Region:       envOr("HOSTTHIS_S3_REGION", "us-east-1"),
-			AccessKey:    envOr("HOSTTHIS_S3_ACCESS_KEY", ""),
-			SecretKey:    envOr("HOSTTHIS_S3_SECRET_KEY", ""),
-			UseSSL:       strings.EqualFold(envOr("HOSTTHIS_S3_USE_SSL", "false"), "true"),
-			LegacyPrefix: envOr("HOSTTHIS_S3_BLOB_PREFIX", "blob"),
+			Endpoint:  envOr("HOSTTHIS_S3_ENDPOINT", ""),
+			Bucket:    envOr("HOSTTHIS_S3_BUCKET", ""),
+			Region:    envOr("HOSTTHIS_S3_REGION", "us-east-1"),
+			AccessKey: envOr("HOSTTHIS_S3_ACCESS_KEY", ""),
+			SecretKey: envOr("HOSTTHIS_S3_SECRET_KEY", ""),
+			UseSSL:    strings.EqualFold(envOr("HOSTTHIS_S3_USE_SSL", "false"), "true"),
 		})
 		if err != nil {
 			return nil, err
 		}
-		logger.Printf("blobs: s3 backend at bucket %s, legacy reads from %s/ (zstd-compressed at rest)",
-			envOr("HOSTTHIS_S3_BUCKET", ""), envOr("HOSTTHIS_S3_BLOB_PREFIX", "blob"))
+		logger.Printf("blobs: s3 backend at bucket %s (zstd-compressed at rest)", envOr("HOSTTHIS_S3_BUCKET", ""))
 		raw = bs
 	default:
 		return nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|s3)", backend)

@@ -32,12 +32,12 @@ type conformanceSiteRepo interface {
 }
 
 // siteOfV builds a Site with one slug-derived file stamped at fixedNow; v is
-// folded into the file's SHA so two deploys of the same slug at different v
+// folded into the file's key so two deploys of the same slug at different v
 // produce distinct manifests.
 func siteOfV(slug, identity string, size int, v string) domain.Site {
 	man := domain.NewManifest()
 	man.Add("index.html", domain.ManifestEntry{
-		SHA:         "sha-" + slug + "-" + v,
+		Key:         "key-" + slug + "-" + v,
 		Size:        size,
 		ContentType: "text/html; charset=utf-8",
 	})
@@ -182,7 +182,7 @@ func conformSiteReplaceInPlace(t *testing.T, r conformanceRepo, sr conformanceSi
 		t.Fatalf("get after replace: %v", err)
 	}
 	e, ok := got.Manifest.Files["index.html"]
-	if !ok || e.SHA != "sha-"+slug+"-v2" || e.Size != 250 {
+	if !ok || e.Key != "key-"+slug+"-v2" || e.Size != 250 {
 		t.Fatalf("manifest not swapped: got %+v", got.Manifest.Files)
 	}
 	// created_at is the slug's birth time, unchanged by the re-deploy.
@@ -232,7 +232,7 @@ func conformSiteReplaceNotFoundShape(t *testing.T, r conformanceRepo, sr conform
 	if err != nil {
 		t.Fatalf("owner's site after rejected foreign replace: %v", err)
 	}
-	if e := got.Manifest.Files["index.html"]; e.SHA != "sha-rfor1234-v1" {
+	if e := got.Manifest.Files["index.html"]; e.Key != "key-rfor1234-v1" {
 		t.Fatalf("foreign replace must not mutate the owner's row: got %+v", got.Manifest.Files)
 	}
 
@@ -288,15 +288,15 @@ func conformSiteReplaceChargesEachVersion(t *testing.T, r conformanceRepo, sr co
 func conformSiteDeployAndReadBack(t *testing.T, sr conformanceSiteRepo) {
 	man := domain.NewManifest()
 	man.Add("index.html", domain.ManifestEntry{
-		SHA: "sha-rb-index", Size: 100, CompressedSize: 73,
+		Key: "key-rb-index", Size: 100, CompressedSize: 73,
 		ContentType: "text/html; charset=utf-8", Kind: "html",
 	})
 	man.Add("assets/app.js", domain.ManifestEntry{
-		SHA: "sha-rb-js", Size: 200, CompressedSize: 121,
+		Key: "key-rb-js", Size: 200, CompressedSize: 121,
 		ContentType: "text/javascript; charset=utf-8", Kind: "javascript",
 	})
 	man.Add("style.css", domain.ManifestEntry{
-		SHA: "sha-rb-css", Size: 50, CompressedSize: 42,
+		Key: "key-rb-css", Size: 50, CompressedSize: 42,
 		ContentType: "text/css; charset=utf-8", Kind: "css",
 	})
 	s := domain.Site{
@@ -323,7 +323,7 @@ func conformSiteDeployAndReadBack(t *testing.T, sr conformanceSiteRepo) {
 		if !ok {
 			t.Fatalf("manifest missing path %q after round-trip", p)
 		}
-		if ge.SHA != want.SHA || ge.Size != want.Size ||
+		if ge.Key != want.Key || ge.Size != want.Size ||
 			ge.CompressedSize != want.CompressedSize ||
 			ge.ContentType != want.ContentType || ge.Kind != want.Kind {
 			t.Fatalf("manifest entry %q mismatch: got %+v, want %+v", p, ge, want)
@@ -503,9 +503,9 @@ func conformSiteSlugCollisionVsPaste(t *testing.T, r conformanceRepo, sr conform
 // holding the same bytes are three stored objects.
 func conformSiteEveryPathCharged(t *testing.T, r conformanceRepo, sr conformanceSiteRepo) {
 	man := domain.NewManifest()
-	man.Add("a.html", domain.ManifestEntry{SHA: "sha-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
-	man.Add("b.html", domain.ManifestEntry{SHA: "sha-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
-	man.Add("c.html", domain.ManifestEntry{SHA: "sha-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
+	man.Add("a.html", domain.ManifestEntry{Key: "key-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
+	man.Add("b.html", domain.ManifestEntry{Key: "key-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
+	man.Add("c.html", domain.ManifestEntry{Key: "key-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
 	s := domain.Site{
 		Slug: "dd123456", Identity: "key:dd", Manifest: man,
 		CreatedAt: fixedNow, UpdatedAt: fixedNow}

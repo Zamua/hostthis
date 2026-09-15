@@ -88,6 +88,31 @@ func TestListVersionsReadsUploadIDs(t *testing.T) {
 	}
 }
 
+// Stored rows may still carry content shas. They decode, and name no bytes.
+func TestGetDecodesRowsCarryingContentSHAs(t *testing.T) {
+	for name, body := range map[string]string{
+		"row without a manifest": `{"slug":"slugone1","generation":"generation-1","status":"ready",
+			"kind":"html","contentSha":"abc","size":3}`,
+		"entry holding only a sha": `{"slug":"slugone1","generation":"generation-1","status":"ready",
+			"kind":"html","contentSha":"abc","size":3,
+			"manifest":{"Files":{"/":{"SHA":"abc","Size":3,"CompressedSize":2,"ContentType":"","Kind":"html"}}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := NewPasteRepo("https://cell", fixedCell(http.StatusOK, body).client())
+			p, err := repo.Get("slugone1")
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			if p.Size != 3 || p.Kind != domain.KindHTML {
+				t.Fatalf("paste = %+v, want its metadata intact", p)
+			}
+			if key := p.RootEntry().Key; key != "" {
+				t.Fatalf("root key = %q, want none", key)
+			}
+		})
+	}
+}
+
 func removeCell(t *testing.T, removeAnswer string) *fakeCell {
 	return &fakeCell{reply: func(c cellRequest) (*http.Response, error) {
 		switch c.Path {

@@ -31,7 +31,7 @@ type SiteReader interface {
 }
 
 // BlobReader is the streaming read side of the byte plane. It resolves an entry
-// by its object key, or a legacy entry by its sha.
+// by its object key.
 type BlobReader interface {
 	Read(ctx context.Context, entry domain.ManifestEntry) (io.ReadCloser, int64, error)
 }
@@ -230,6 +230,14 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 		return
 	}
 
+	// A root without an object key names no bytes. Answering here keeps a
+	// shell from serving 200 for content its raw fetch could never read.
+	root := p.RootEntry()
+	if root.Key == "" {
+		http.NotFound(w, r)
+		return
+	}
+
 	h := w.Header()
 	setSandboxHeaders(h)
 	h.Set("Permissions-Policy", permissionsPolicy)
@@ -245,11 +253,10 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 	shell := shellFor(p.Kind)
 	rawWanted := shell != nil && wantsRaw(r)
 
-	// ETag is the stored file's address for HTML and for any raw body: an
-	// address never names different bytes. The shell is content-INDEPENDENT,
-	// so it validates on its shell version instead.
-	root := p.RootEntry()
-	etag := `"` + root.Address() + `"`
+	// ETag is the stored file's object key for HTML and for any raw body: a key
+	// never names different bytes. The shell is content-INDEPENDENT, so it
+	// validates on its shell version instead.
+	etag := `"` + root.Key + `"`
 	if shell != nil && !rawWanted {
 		etag = `"` + shell.version + `"`
 	}
@@ -408,7 +415,7 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 	// (domain.Manifest.LookupWithSPAFallback, SPEC.md "SPA fallback (route vs.
 	// asset)"). A fallback hit is byte-identical to requesting "/".
 	entry, hit, _ := manifest.LookupWithSPAFallback(reqPath)
-	if !hit {
+	if !hit || entry.Key == "" {
 		http.NotFound(w, r)
 		return
 	}
@@ -425,7 +432,7 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 	setSandboxHeaders(h)
 	h.Set("Permissions-Policy", permissionsPolicy)
 	h.Set("Cache-Control", "public, no-cache")
-	if notModified(w, r, `"`+entry.Address()+`"`, updatedAt) {
+	if notModified(w, r, `"`+entry.Key+`"`, updatedAt) {
 		return
 	}
 

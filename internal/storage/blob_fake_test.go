@@ -39,10 +39,6 @@ func (f *fakeDurable) read(key string) (io.ReadCloser, int64, error) {
 
 func (f *fakeDurable) GetReader(key string) (io.ReadCloser, int64, error) { return f.read(key) }
 
-func (f *fakeDurable) GetLegacyReader(sha string) (io.ReadCloser, int64, error) {
-	return f.read("legacy/" + sha)
-}
-
 func (f *fakeDurable) DeletePrefix(prefix string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -85,15 +81,6 @@ func readKey(t testing.TB, s interface {
 }, key string) []byte {
 	t.Helper()
 	rc, _, err := s.GetReader(key)
-	return drain(t, rc, err)
-}
-
-// readLegacy drains the legacy object at sha, failing the test on any error.
-func readLegacy(t testing.TB, s interface {
-	GetLegacyReader(string) (io.ReadCloser, int64, error)
-}, sha string) []byte {
-	t.Helper()
-	rc, _, err := s.GetLegacyReader(sha)
 	return drain(t, rc, err)
 }
 

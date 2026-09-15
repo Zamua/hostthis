@@ -20,7 +20,6 @@ type BlobStore interface {
 // blobReadStore is the streaming read surface used by StandaloneBlobUnit.
 type blobReadStore interface {
 	GetReader(key string) (io.ReadCloser, int64, error)
-	GetLegacyReader(sha string) (io.ReadCloser, int64, error)
 }
 
 // StandaloneBlobUnit adapts an object store to the service byte port.
@@ -64,16 +63,13 @@ func (u *StandaloneBlobUnit) StageEncoding(ctx context.Context, key string, r io
 	return size, nil
 }
 
-// Read falls back to the legacy content address for an entry that predates
-// upload keys (docs/SPEC.md "Legacy content-addressed entries").
+// Read answers an entry without an object key with ErrNotFound before touching
+// the store (docs/SPEC.md "Entries without an object key").
 func (u *StandaloneBlobUnit) Read(_ context.Context, entry domain.ManifestEntry) (io.ReadCloser, int64, error) {
-	switch {
-	case entry.Key != "":
-		return u.store.GetReader(entry.Key)
-	case entry.SHA != "":
-		return u.store.GetLegacyReader(entry.SHA)
+	if entry.Key == "" {
+		return nil, 0, domain.ErrNotFound
 	}
-	return nil, 0, domain.ErrNotFound
+	return u.store.GetReader(entry.Key)
 }
 
 func (u *StandaloneBlobUnit) DeleteUpload(_ context.Context, uploadID string) error {

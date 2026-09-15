@@ -58,7 +58,6 @@ type CompressedBlobStore struct {
 type innerBlobStore interface {
 	Put(key string, r io.Reader, size int64) error
 	GetReader(key string) (io.ReadCloser, int64, error)
-	GetLegacyReader(sha string) (io.ReadCloser, int64, error)
 	DeletePrefix(prefix string) error
 }
 
@@ -110,19 +109,6 @@ func (c *CompressedBlobStore) GetReader(key string) (io.ReadCloser, int64, error
 		return nil, 0, err
 	}
 	dec, err := decodeCompressedStream(inner, key)
-	if err != nil {
-		return nil, 0, err
-	}
-	return dec, size, nil
-}
-
-// GetLegacyReader is GetReader for a legacy content-addressed object.
-func (c *CompressedBlobStore) GetLegacyReader(sha string) (io.ReadCloser, int64, error) {
-	inner, size, err := c.Inner.GetLegacyReader(sha)
-	if err != nil {
-		return nil, 0, err
-	}
-	dec, err := decodeCompressedStream(inner, sha)
 	if err != nil {
 		return nil, 0, err
 	}

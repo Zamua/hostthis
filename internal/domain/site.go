@@ -25,8 +25,10 @@ type Site struct {
 // ManifestEntry is one file in a site. ContentType is a function of the
 // path's extension alone, no I/O.
 type ManifestEntry struct {
-	Key            string // object holding the file's bytes, under its upload's prefix
-	SHA            string // a legacy entry's content address, read only when Key is empty
+	// Key is the object holding the file's bytes, under its upload's prefix.
+	// Objects never change, so it doubles as an HTTP validator. An entry
+	// without one names no bytes.
+	Key            string
 	Size           int    // uncompressed bytes (for display)
 	CompressedSize int    // stored post-zstd bytes; the quota basis (matches how pastes charge)
 	ContentType    string // by extension; see ContentTypeForPath
@@ -36,15 +38,6 @@ type ManifestEntry struct {
 	// single-document paste keeps its detected kind; a file inside a directory
 	// leaves it empty and is served raw.
 	Kind string
-}
-
-// Address names the entry's bytes: its object key, or a legacy entry's sha.
-// Neither ever names different bytes, so it doubles as an HTTP validator.
-func (e ManifestEntry) Address() string {
-	if e.Key != "" {
-		return e.Key
-	}
-	return e.SHA
 }
 
 // Manifest maps each safe, site-root-relative path to its blob ref. Pure
