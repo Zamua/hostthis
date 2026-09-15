@@ -1,10 +1,8 @@
 package storage_test
 
 import (
-	"fmt"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/Zamua/hostthis/internal/storage"
 )
@@ -23,25 +21,17 @@ func TestS3BlobContract(t *testing.T) {
 	if endpoint == "" {
 		t.Skip("MINIO_TEST_ENDPOINT not set; skipping the s3 blob store tests")
 	}
-	runBlobContract(t, func(t *testing.T) blobBackend {
-		// A per-run legacy namespace, so a rerun cannot see the previous run's
-		// objects and the "absent" assertions stay meaningful.
-		legacy := fmt.Sprintf("blobtest/%d", time.Now().UnixNano())
+	runBlobContract(t, func(t *testing.T) rawBlobStore {
 		bs, err := storage.NewS3BlobStore(storage.S3BlobConfig{
-			Endpoint:     endpoint,
-			Bucket:       envOrDefaultTest("MINIO_TEST_METADATA_BUCKET", "hostthis-metadata"),
-			Region:       "us-east-1",
-			AccessKey:    envOrDefaultTest("MINIO_TEST_ACCESS_KEY", "admin"),
-			SecretKey:    envOrDefaultTest("MINIO_TEST_SECRET_KEY", "supersecret"),
-			LegacyPrefix: legacy,
+			Endpoint:  endpoint,
+			Bucket:    envOrDefaultTest("MINIO_TEST_METADATA_BUCKET", "hostthis-metadata"),
+			Region:    "us-east-1",
+			AccessKey: envOrDefaultTest("MINIO_TEST_ACCESS_KEY", "admin"),
+			SecretKey: envOrDefaultTest("MINIO_TEST_SECRET_KEY", "supersecret"),
 		})
 		if err != nil {
 			t.Fatalf("new s3 blob store: %v", err)
 		}
-		t.Cleanup(func() { _ = bs.DeletePrefix(legacy + "/") })
-		return blobBackend{
-			store:     bs,
-			legacyKey: func(sha string) string { return legacy + "/" + sha[:2] + "/" + sha },
-		}
+		return bs
 	})
 }

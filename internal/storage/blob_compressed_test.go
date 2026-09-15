@@ -31,8 +31,8 @@ func TestCompressedBlobStore_ActuallyCompresses(t *testing.T) {
 	}
 }
 
-// Every stored shape decodes byte-identically, through the key read and the
-// legacy read alike, including objects written before compression existed.
+// Every stored shape decodes byte-identically, including objects stored
+// without the magic prefix.
 func TestCompressedBlobStore_ReadsRoundTrip(t *testing.T) {
 	cases := map[string]struct {
 		body []byte
@@ -41,7 +41,7 @@ func TestCompressedBlobStore_ReadsRoundTrip(t *testing.T) {
 		"compressible": {body: bytes.Repeat([]byte("the quick brown fox\n"), 5000)},
 		"tiny":         {body: []byte("<h1>hi</h1>")},
 		"empty":        {body: nil},
-		"uncompressed": {body: []byte("<!doctype html><h1>legacy</h1>"), raw: true},
+		"uncompressed": {body: []byte("<!doctype html><h1>raw</h1>"), raw: true},
 		"short-raw":    {body: []byte("hi\n"), raw: true},
 		"binary":       {body: []byte{0x00, 0x01, 0x02, 0xff, 0xfe, 'H', 'Z', 0x00}},
 	}
@@ -49,19 +49,13 @@ func TestCompressedBlobStore_ReadsRoundTrip(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			inner := newFakeDurable()
 			c := NewCompressedBlobStore(inner)
-			const sha = "abcdef"
 			if tc.raw {
 				inner.putRaw("uploads/u1/0", tc.body)
-				inner.putRaw("legacy/"+sha, tc.body)
 			} else {
 				putEncoded(t, c, "uploads/u1/0", tc.body)
-				putEncoded(t, c, "legacy/"+sha, tc.body)
 			}
 			if got := readKey(t, c, "uploads/u1/0"); !bytes.Equal(got, tc.body) {
 				t.Fatalf("GetReader: got %d bytes, want %d", len(got), len(tc.body))
-			}
-			if got := readLegacy(t, c, sha); !bytes.Equal(got, tc.body) {
-				t.Fatalf("GetLegacyReader: got %d bytes, want %d", len(got), len(tc.body))
 			}
 		})
 	}
@@ -71,9 +65,6 @@ func TestCompressedBlobStore_ReadsPropagateNotFound(t *testing.T) {
 	c := NewCompressedBlobStore(newFakeDurable())
 	if _, _, err := c.GetReader("uploads/missing/0"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("GetReader: expected ErrNotFound, got %v", err)
-	}
-	if _, _, err := c.GetLegacyReader("abcdef"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("GetLegacyReader: expected ErrNotFound, got %v", err)
 	}
 }
 

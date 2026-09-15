@@ -12,6 +12,7 @@ package ssh_test
 //     Characterization` selects them.
 
 import (
+	"context"
 	"net"
 	"reflect"
 	"regexp"
@@ -832,6 +833,20 @@ func TestExitCodes_Characterization(t *testing.T) {
 	stdoutA, _, _ := s.run("", []byte("<!doctype html><p>a</p>"))
 	slugA := extractSlug(stdoutA)
 	ghost := domain.NewRandomSlug().String()
+	// A ready paste of the same owner whose row carries no manifest, so its
+	// root has no object key.
+	owned, err := s.repo.Get(domain.Slug(slugA))
+	if err != nil {
+		t.Fatalf("get %s: %v", slugA, err)
+	}
+	keyless := domain.Paste{
+		Slug: "unkeyed3", Generation: "generation-unkeyed", Identity: owned.Identity,
+		Status: domain.PasteStatusReady, Kind: domain.KindHTML, ContentSHA: "0123456789abcdef",
+		Size: 8, CreatedAt: owned.CreatedAt, UpdatedAt: owned.CreatedAt,
+	}
+	if err := s.repo.InsertWithQuotaCheck(context.Background(), keyless, 0, owned.CreatedAt); err != nil {
+		t.Fatalf("insert keyless paste: %v", err)
+	}
 
 	cases := []struct {
 		name   string
@@ -865,6 +880,7 @@ func TestExitCodes_Characterization(t *testing.T) {
 		{name: "ExitCode2_UnexpectedArgument", cmd: "--type html bad", want: 2, stderr: "hostthis: unexpected argument \"bad\"\n", exact: true},
 		{name: "ExitCode3_KeylessSession", anon: true, cmd: "whoami", want: 3, stderr: "ssh key required"},
 		{name: "ExitCode4_GetGhostSlug", cmd: "get " + ghost, want: 4, stderr: "not found"},
+		{name: "ExitCode4_GetKeylessRoot", cmd: "get " + keyless.Slug.String(), want: 4, stderr: "hostthis: not found\n", exact: true},
 		{name: "ExitCode4_UpdateGhostSlug", cmd: ghost, stdin: []byte("<!doctype html><p>x</p>"), want: 4, stderr: "not found"},
 	}
 

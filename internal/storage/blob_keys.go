@@ -31,16 +31,3 @@ func checkPrefix(prefix string) error {
 	}
 	return checkKey(body)
 }
-
-// checkSHA accepts lowercase hex, the only shape a legacy content address has.
-func checkSHA(sha string) error {
-	if len(sha) < 2 {
-		return fmt.Errorf("%w: sha %q", errInvalidKey, sha)
-	}
-	for i := 0; i < len(sha); i++ {
-		if c := sha[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return fmt.Errorf("%w: sha %q", errInvalidKey, sha)
-		}
-	}
-	return nil
-}

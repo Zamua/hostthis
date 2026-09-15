@@ -10,8 +10,7 @@ import (
 	"strings"
 )
 
-// BlobStore is the on-disk object store. An object lives at <root>/<key>; a
-// legacy content-addressed object at <root>/<sha[:2]>/<sha>.
+// BlobStore is the on-disk object store. An object lives at <root>/<key>.
 //
 // It does NOT satisfy service.BlobStore: the at-rest encoding is
 // CompressedBlobStore's. Giving the raw store the encoder methods would let a
@@ -74,29 +73,17 @@ func (b *BlobStore) GetReader(key string) (io.ReadCloser, int64, error) {
 	if err := checkKey(key); err != nil {
 		return nil, 0, err
 	}
-	return b.open(b.path(key), key)
-}
-
-// GetLegacyReader streams a legacy content-addressed object, or ErrNotFound.
-func (b *BlobStore) GetLegacyReader(sha string) (io.ReadCloser, int64, error) {
-	if err := checkSHA(sha); err != nil {
-		return nil, 0, err
-	}
-	return b.open(filepath.Join(b.root, sha[:2], sha), sha)
-}
-
-func (b *BlobStore) open(path, label string) (io.ReadCloser, int64, error) {
-	f, err := os.Open(path) //nolint:gosec // path built from a checked key or sha
+	f, err := os.Open(b.path(key)) //nolint:gosec // path built from a checked key
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, 0, ErrNotFound
 		}
-		return nil, 0, fmt.Errorf("blob open %q: %w", label, err)
+		return nil, 0, fmt.Errorf("blob open %q: %w", key, err)
 	}
 	fi, err := f.Stat()
 	if err != nil {
 		_ = f.Close()
-		return nil, 0, fmt.Errorf("blob stat %q: %w", label, err)
+		return nil, 0, fmt.Errorf("blob stat %q: %w", key, err)
 	}
 	return f, fi.Size(), nil
 }

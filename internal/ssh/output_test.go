@@ -64,7 +64,7 @@ func TestParseOutputFormat(t *testing.T) {
 func TestListItem(t *testing.T) {
 	ip := func(n int) *int { return &n }
 	man := domain.NewManifest()
-	man.Add("index.html", domain.ManifestEntry{SHA: "a", Size: 4000})
+	man.Add("index.html", domain.ManifestEntry{Key: "a", Size: 4000})
 	cases := []struct {
 		name       string
 		item       listItemView

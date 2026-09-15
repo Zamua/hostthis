@@ -23,11 +23,11 @@ func (r stubSiteReader) Get(slug domain.Slug) (domain.Site, error) {
 	return r.s, nil
 }
 
-// stubBlobMap returns bytes by entry address.
+// stubBlobMap returns bytes by object key.
 type stubBlobMap struct{ m map[string][]byte }
 
 func (b stubBlobMap) Read(_ context.Context, e domain.ManifestEntry) (io.ReadCloser, int64, error) {
-	body, ok := b.m[e.Address()]
+	body, ok := b.m[e.Key]
 	if !ok {
 		return nil, 0, storage.ErrNotFound
 	}
@@ -38,10 +38,10 @@ func buildSiteServer(t *testing.T) *Server {
 	t.Helper()
 	now := time.Now().UTC()
 	m := domain.NewManifest()
-	m.Add("index.html", domain.ManifestEntry{SHA: "sha-index", Size: 10, ContentType: "text/html; charset=utf-8"})
-	m.Add("css/style.css", domain.ManifestEntry{SHA: "sha-css", Size: 5, ContentType: "text/css; charset=utf-8"})
-	m.Add("blog/index.html", domain.ManifestEntry{SHA: "sha-blog", Size: 6, ContentType: "text/html; charset=utf-8"})
-	m.Add("data.bin", domain.ManifestEntry{SHA: "sha-bin", Size: 3, ContentType: "application/octet-stream"})
+	m.Add("index.html", domain.ManifestEntry{Key: "key-index", Size: 10, ContentType: "text/html; charset=utf-8"})
+	m.Add("css/style.css", domain.ManifestEntry{Key: "key-css", Size: 5, ContentType: "text/css; charset=utf-8"})
+	m.Add("blog/index.html", domain.ManifestEntry{Key: "key-blog", Size: 6, ContentType: "text/html; charset=utf-8"})
+	m.Add("data.bin", domain.ManifestEntry{Key: "key-bin", Size: 3, ContentType: "application/octet-stream"})
 	site := domain.Site{
 		Slug:      "abc23456",
 		Identity:  "key:test",
@@ -53,10 +53,10 @@ func buildSiteServer(t *testing.T) *Server {
 		ApexDomain: "paste.test",
 		Sites:      stubSiteReader{s: site},
 		Blobs: stubBlobMap{m: map[string][]byte{
-			"sha-index": []byte("<h1>root</h1>"),
-			"sha-css":   []byte("body{}"),
-			"sha-blog":  []byte("<h1>blog</h1>"),
-			"sha-bin":   []byte("\x00\x01\x02"),
+			"key-index": []byte("<h1>root</h1>"),
+			"key-css":   []byte("body{}"),
+			"key-blog":  []byte("<h1>blog</h1>"),
+			"key-bin":   []byte("\x00\x01\x02"),
 		}},
 	}
 }
@@ -156,8 +156,8 @@ func TestSite_SPAFallback_SameHeadersAsRoot(t *testing.T) {
 				route.Header().Get(hdr), root.Header().Get(hdr))
 		}
 	}
-	if route.Header().Get("ETag") != `"sha-index"` {
-		t.Fatalf("fallback etag: got %q, want %q", route.Header().Get("ETag"), `"sha-index"`)
+	if route.Header().Get("ETag") != `"key-index"` {
+		t.Fatalf("fallback etag: got %q, want %q", route.Header().Get("ETag"), `"key-index"`)
 	}
 	// Sites serve no-cache so a re-deploy shows on the next reload. Under
 	// max-age a browser would keep serving cached js/css sub-resources without
@@ -184,7 +184,7 @@ func TestSite_SandboxHeaders(t *testing.T) {
 	if h.Get("Permissions-Policy") == "" {
 		t.Fatalf("missing Permissions-Policy")
 	}
-	if h.Get("ETag") != `"sha-index"` {
+	if h.Get("ETag") != `"key-index"` {
 		t.Fatalf("etag: got %q", h.Get("ETag"))
 	}
 }
@@ -196,12 +196,12 @@ func TestSite_FallsThroughToPasteWhenNoSite(t *testing.T) {
 	now := time.Now().UTC()
 	p := domain.Paste{
 		Slug: "abc23456", Identity: "key:test", Kind: domain.KindHTML,
-		ContentSHA: "sha-p", Size: 5, UpdatedAt: now}
+		Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: "key-p"}), Size: 5, UpdatedAt: now}
 	srv := &Server{
 		ApexDomain: "paste.test",
 		Pastes:     stubPasteReader{p: p},
 		Sites:      stubSiteReader{s: domain.Site{Slug: "zzzzzzzz"}}, // different slug
-		Blobs:      stubBlobMap{m: map[string][]byte{"sha-p": []byte("paste")}},
+		Blobs:      stubBlobMap{m: map[string][]byte{"key-p": []byte("paste")}},
 	}
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Host = "abc23456.paste.test"
@@ -218,8 +218,8 @@ func TestSite_FallsThroughToPasteWhenNoSite(t *testing.T) {
 func TestArtifact_DirectoryServesFromHeadManifest(t *testing.T) {
 	now := time.Now().UTC()
 	m := domain.NewManifest()
-	m.Add("index.html", domain.ManifestEntry{SHA: "sha-index", Size: 5, ContentType: "text/html"})
-	m.Add("app.css", domain.ManifestEntry{SHA: "sha-css", Size: 3, ContentType: "text/css"})
+	m.Add("index.html", domain.ManifestEntry{Key: "key-index", Size: 5, ContentType: "text/html"})
+	m.Add("app.css", domain.ManifestEntry{Key: "key-css", Size: 3, ContentType: "text/css"})
 
 	srv := &Server{
 		ApexDomain: "paste.test",
@@ -229,8 +229,8 @@ func TestArtifact_DirectoryServesFromHeadManifest(t *testing.T) {
 			Kind: domain.KindSite, UpdatedAt: now, Manifest: m,
 		}},
 		Blobs: stubBlobMap{m: map[string][]byte{
-			"sha-index": []byte("index"),
-			"sha-css":   []byte("css"),
+			"key-index": []byte("index"),
+			"key-css":   []byte("css"),
 		}},
 	}
 
@@ -258,8 +258,8 @@ func TestArtifact_DocumentRejectsDeepPaths(t *testing.T) {
 		ApexDomain: "paste.test",
 		Pastes: stubPasteReader{p: domain.Paste{
 			Slug: "wxyz6789", Identity: "key:test", Kind: domain.KindHTML,
-			ContentSHA: "sha-d", Size: 3, UpdatedAt: time.Now().UTC()}},
-		Blobs: stubBlobMap{m: map[string][]byte{"sha-d": []byte("doc")}},
+			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: "key-d"}), Size: 3, UpdatedAt: time.Now().UTC()}},
+		Blobs: stubBlobMap{m: map[string][]byte{"key-d": []byte("doc")}},
 	}
 	// The bare URL must SERVE, or the 404 below would prove only that the
 	// request never reached the document path.

@@ -1185,7 +1185,7 @@ test("Paste append records its upload id and versions list every version's id", 
   ]);
 });
 
-test("Paste head carries the served version's upload id through append, pin, unpin, and rehome", async () => {
+test("Paste head carries the served version's upload id through append, pin, and unpin", async () => {
   const h = artifactHarness();
   const head = () => h.pasteStorage.data.get("row").uploadId;
   assert.equal((await h.paste().append({ ...appendBody("append-2"), uploadId: "up-2" })).status, 200);
@@ -1198,14 +1198,6 @@ test("Paste head carries the served version's upload id through append, pin, unp
   assert.equal(head(), "up-2");
   assert.equal((await pin("unpin", 0)).status, 200);
   assert.equal(head(), "up-3");
-
-  const rehome = (ver, uploadId) => h.paste().rehome({
-    generation: "generation-1", ver, uploadId, manifest: { Files: { "/": { Key: `uploads/${uploadId}/0` } } },
-  });
-  assert.equal((await rehome(2, "up-2b")).status, 200);
-  assert.equal(head(), "up-3");
-  assert.equal((await rehome(3, "up-3b")).status, 200);
-  assert.equal(head(), "up-3b");
 });
 
 test("Paste removal names every version's upload and replays it after re-creation", async () => {
@@ -1274,128 +1266,6 @@ test("Paste version delete names the tombstoned upload on every path", async () 
   assert.deepStrictEqual(await responseJSON(await h.paste().deleteVersion({
     opId: "delete-1", generation: "generation-1", ver: 1,
   })), { status: 200, body: { deleted: true, totalSize: 1, upload: "" } });
-});
-
-const rehomedManifest = { Files: { "/": { Key: "uploads/up-new/0", SHA: "", Size: 2, CompressedSize: 11 } } };
-
-function keyedManifest(...keys) {
-  return { Files: Object.fromEntries(keys.map((Key, n) => [`file-${n}`, { Key }])) };
-}
-
-function rehomeBody(overrides = {}) {
-  return { generation: "generation-1", ver: 1, uploadId: "up-new", manifest: rehomedManifest, ...overrides };
-}
-
-test("Paste rehome splits a single-value history and repoints the served version idempotently", async () => {
-  const h = artifactHarness();
-  const row = h.pasteStorage.data.get("row");
-  const rehome = async () => responseJSON(await h.paste().fetch(new Request("https://cell/paste/rehome", {
-    method: "POST", body: JSON.stringify(rehomeBody()),
-  })));
-
-  assert.deepStrictEqual(await rehome(), { status: 200, body: { rehomed: true } });
-  assert.equal(h.pasteStorage.data.has("versions"), false);
-  assert.equal(h.pasteStorage.data.get("ver:1").uploadId, "up-new");
-  assert.deepStrictEqual(h.pasteStorage.data.get("manifest:1"), rehomedManifest);
-  assert.deepStrictEqual(h.pasteStorage.data.get("row"), {
-    ...row, manifest: rehomedManifest, uploadId: "up-new",
-  });
-  assert.deepStrictEqual(h.transport.calls, []);
-  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
-  assert.equal(h.pasteStorage.alarm, null);
-
-  const settled = clone(h.pasteStorage.data);
-  assert.deepStrictEqual(await rehome(), { status: 200, body: { rehomed: true } });
-  assert.deepStrictEqual(h.pasteStorage.data, settled);
-});
-
-test("Paste rehome rewrites the row only for the version it serves", async () => {
-  const pinned = uploadedArtifactHarness({ pinned: true });
-  assert.equal((await pinned.paste().rehome(rehomeBody({ ver: 2 }))).status, 200);
-  assert.deepStrictEqual(pinned.pasteStorage.data.get("row").manifest, rehomedManifest);
-
-  const h = uploadedArtifactHarness();
-  const row = h.pasteStorage.data.get("row");
-  const v2 = h.pasteStorage.data.get("ver:2");
-  assert.equal((await h.paste().rehome(rehomeBody({ ver: 2 }))).status, 200);
-  assert.deepStrictEqual(h.pasteStorage.data.get("row"), row);
-  assert.deepStrictEqual(h.pasteStorage.data.get("ver:2"), { ...v2, uploadId: "up-new" });
-  assert.deepStrictEqual(h.pasteStorage.data.get("manifest:2"), rehomedManifest);
-
-  assert.equal((await h.paste().rehome(rehomeBody({ ver: 3 }))).status, 200);
-  assert.deepStrictEqual(h.pasteStorage.data.get("manifest:3"), rehomedManifest);
-  assert.deepStrictEqual(h.pasteStorage.data.get("row").manifest, rehomedManifest);
-  assert.equal(h.pasteStorage.data.get("row").uploadId, "up-new");
-  assert.equal(h.pasteStorage.data.get("row").size, 4);
-});
-
-test("Paste rehome accepts a manifest whose every key is an object of the upload", async () => {
-  const h = uploadedArtifactHarness();
-  const uploadId = `Up_-${"a".repeat(124)}`;
-  const manifest = keyedManifest(`uploads/${uploadId}/0`, `uploads/${uploadId}/12`);
-  assert.deepStrictEqual(await responseJSON(await h.paste().rehome(rehomeBody({ ver: 2, uploadId, manifest }))),
-    { status: 200, body: { rehomed: true } });
-  assert.deepStrictEqual(h.pasteStorage.data.get("manifest:2"), manifest);
-  assert.equal(h.pasteStorage.data.get("ver:2").uploadId, uploadId);
-});
-
-test("Paste rehome refuses without writing, adopting, or calling Identity", async () => {
-  const legacyRow = uploadedArtifactHarness();
-  const row = legacyRow.pasteStorage.data.get("row");
-  delete row.generation;
-  delete row.accountingVersion;
-  legacyRow.pasteStorage.data.set("row", row);
-  const mismatch = { status: 409, body: { error: "generation-mismatch" } };
-  const invalidRehome = { status: 400, body: { error: "invalid-rehome" } };
-  const invalidManifest = { status: 400, body: { error: "invalid-manifest" } };
-  const badManifest = (manifest) => rehomeBody({ ver: 2, manifest });
-  const badUploadId = (uploadId) => rehomeBody({ ver: 2, uploadId, manifest: keyedManifest(`uploads/${uploadId}/0`) });
-
-  for (const [name, h, body, expected] of [
-    ["null manifest", uploadedArtifactHarness(), badManifest(null), invalidManifest],
-    ["array manifest", uploadedArtifactHarness(), badManifest([]), invalidManifest],
-    ["manifest without files", uploadedArtifactHarness(), badManifest({}), invalidManifest],
-    ["manifest without entries", uploadedArtifactHarness(), badManifest({ Files: {} }), invalidManifest],
-    ["sha-only entry", uploadedArtifactHarness(), badManifest({ Files: { "/": { SHA: "legacy-v2" } } }), invalidManifest],
-    ["empty key", uploadedArtifactHarness(), badManifest(keyedManifest("")), invalidManifest],
-    ["another upload's key", uploadedArtifactHarness(), badManifest(keyedManifest("uploads/up-3/0")), invalidManifest],
-    ["key sharing a prefix", uploadedArtifactHarness(), badManifest(keyedManifest("uploads/up-newer/0")), invalidManifest],
-    ["key escaping the upload", uploadedArtifactHarness(),
-      badManifest(keyedManifest("uploads/up-new/../up-3/0")), invalidManifest],
-    ["the prefix itself", uploadedArtifactHarness(), badManifest(keyedManifest("uploads/up-new/")), invalidManifest],
-    ["legacy key", uploadedArtifactHarness(), badManifest(keyedManifest("blob/ab/abcd")), invalidManifest],
-    ["one foreign key among good ones", uploadedArtifactHarness(),
-      badManifest(keyedManifest("uploads/up-new/0", "uploads/up-3/1")), invalidManifest],
-    ["upload id with a slash", uploadedArtifactHarness(), badUploadId("up/new"), invalidRehome],
-    ["upload id of dots", uploadedArtifactHarness(), badUploadId(".."), invalidRehome],
-    ["upload id too long", uploadedArtifactHarness(), badUploadId("a".repeat(129)), invalidRehome],
-    ["non-string upload id", uploadedArtifactHarness(), rehomeBody({ ver: 2, uploadId: 7 }), invalidRehome],
-    ["deleted", uploadedArtifactHarness(), rehomeBody({ ver: 1 }),
-      { status: 409, body: { error: "version-deleted" } }],
-    ["absent version", uploadedArtifactHarness(), rehomeBody({ ver: 9 }),
-      { status: 404, body: { error: "version-absent" } }],
-    ["other generation", uploadedArtifactHarness(), rehomeBody({ ver: 2, generation: "generation-2" }), mismatch],
-    ["legacy row", legacyRow, rehomeBody({ ver: 2 }), mismatch],
-    ["no row", artifactHarness({ pasteSeed: new Map() }), rehomeBody(),
-      { status: 404, body: { error: "paste-absent" } }],
-    ["empty upload id", uploadedArtifactHarness(), rehomeBody({ ver: 2, uploadId: "" }),
-      { status: 400, body: { error: "invalid-rehome" } }],
-    ["no manifest", uploadedArtifactHarness(), rehomeBody({ ver: 2, manifest: undefined }),
-      { status: 400, body: { error: "invalid-manifest" } }],
-  ]) {
-    const before = clone(h.pasteStorage.data);
-    assert.deepStrictEqual(await responseJSON(await h.paste().rehome(body)), expected, name);
-    assert.deepStrictEqual(h.pasteStorage.data, before, name);
-    assert.equal(h.pasteStorage.commits, 0, name);
-    assert.deepStrictEqual(h.transport.calls, [], name);
-  }
-});
-
-test("Paste rehome commits split, version, manifest, and row together", async () => {
-  await assertCrashAtomic({
-    seed: artifactPasteSeed(),
-    invoke: (storage) => new Paste(state(storage)).rehome(rehomeBody()),
-  });
 });
 
 function budgetSeed(a = 4, b = 4) {

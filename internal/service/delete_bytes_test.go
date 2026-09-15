@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -88,41 +89,54 @@ func TestDeleteVersion_RemovesOnlyThatVersionsBytes(t *testing.T) {
 	}
 }
 
-// A legacy version's object is content-addressed and may back other pastes,
-// so deleting its paste removes metadata only.
-func TestDelete_LegacyVersionKeepsItsObject(t *testing.T) {
-	_, m, repo, _, root := bytesStack(t)
-	disk, err := storage.NewBlobStore(root)
-	if err != nil {
-		t.Fatalf("disk store: %v", err)
+// recordingDeleteUnit is a working byte plane that records every prefix delete.
+type recordingDeleteUnit struct {
+	BlobUnit
+	deleted []string
+}
+
+func (u *recordingDeleteUnit) DeleteUpload(ctx context.Context, uploadID string) error {
+	u.deleted = append(u.deleted, uploadID)
+	return u.BlobUnit.DeleteUpload(ctx, uploadID)
+}
+
+// A version recorded without an upload id owns no objects: deleting its paste
+// deletes exactly the prefixes its other versions name.
+func TestDelete_VersionWithoutUploadRemovesMetadataOnly(t *testing.T) {
+	up, _, repo, blobs, root := bytesStack(t)
+	unit := &recordingDeleteUnit{BlobUnit: NewStandaloneBlobUnit(blobs)}
+	m := NewManage(repo, unit)
+	other := createReady(t, up, "<!doctype html><p>other</p>")
+	unkeyed := domain.Paste{
+		Slug: "unkeyed2", Generation: "generation-unkeyed", Identity: bytesOwner,
+		Status: domain.PasteStatusReady, Kind: domain.KindHTML, ContentSHA: "0123456789abcdef",
+		Size: 28, CreatedAt: fixedNow, UpdatedAt: fixedNow,
 	}
-	const sha = "0123456789abcdef"
-	legacyBody := []byte("<!doctype html><p>legacy</p>")
-	if err := disk.Put(sha[:2]+"/"+sha, bytes.NewReader(legacyBody), int64(len(legacyBody))); err != nil {
-		t.Fatalf("seed legacy object: %v", err)
+	if err := repo.InsertWithQuotaCheck(context.Background(), unkeyed, 0, fixedNow); err != nil {
+		t.Fatalf("insert paste: %v", err)
 	}
-	legacy := domain.Paste{
-		Slug: "legacy23", Generation: "generation-legacy", Identity: bytesOwner,
-		Status: domain.PasteStatusReady, Kind: domain.KindHTML, ContentSHA: sha,
-		Size: len(legacyBody), CreatedAt: fixedNow, UpdatedAt: fixedNow,
-	}
-	if err := repo.InsertWithQuotaCheck(context.Background(), legacy, 0, fixedNow); err != nil {
-		t.Fatalf("insert legacy paste: %v", err)
-	}
-	if _, err := m.Update(legacy.Slug, bytesOwner, strings.NewReader("<!doctype html><p>v2</p>"), ""); err != nil {
+	if _, err := m.Update(unkeyed.Slug, bytesOwner, strings.NewReader("<!doctype html><p>v2</p>"), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
+	v2, err := repo.GetVersion(unkeyed.Slug, 2)
+	if err != nil || v2.UploadID == "" {
+		t.Fatalf("v2 = (%+v, %v), want a version with an upload id", v2, err)
+	}
+	if n := objectsUnder(t, root); n != 2 {
+		t.Fatalf("upload objects before delete = %d, want 2 (another paste, v2)", n)
+	}
 
-	if err := m.Delete(legacy.Slug, bytesOwner); err != nil {
+	if err := m.Delete(unkeyed.Slug, bytesOwner); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if n := objectsUnder(t, root); n != 0 {
-		t.Fatalf("upload objects after delete = %d, want 0", n)
+	if want := []string{v2.UploadID}; !slices.Equal(unit.deleted, want) {
+		t.Fatalf("deleted uploads = %q, want %q", unit.deleted, want)
 	}
-	if rc, _, err := disk.GetLegacyReader(sha); err != nil {
-		t.Fatalf("legacy object after delete: %v", err)
-	} else {
-		_ = rc.Close()
+	if n := objectsUnder(t, root); n != 1 {
+		t.Fatalf("upload objects after delete = %d, want 1 (another paste)", n)
+	}
+	if body, err := readObject(t, blobs, other.RootEntry().Key); err != nil || string(body) != "<!doctype html><p>other</p>" {
+		t.Fatalf("another paste after the delete = (%q, %v)", body, err)
 	}
 }
 

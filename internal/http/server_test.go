@@ -112,13 +112,13 @@ func TestSubdomain_OnlyServesRoot(t *testing.T) {
 	}
 }
 
-// readyHTMLServer wires one ready HTML paste at abc23456 with shaA as its
-// content, updated at updatedAt.
+// readyHTMLServer wires one ready HTML paste at abc23456 stored at keyA,
+// updated at updatedAt.
 func readyHTMLServer(body []byte, updatedAt time.Time) *Server {
 	return &Server{
 		Pastes: stubPasteReader{p: domain.Paste{
 			Slug: "abc23456", Status: domain.PasteStatusReady, Kind: domain.KindHTML,
-			ContentSHA: shaA, UpdatedAt: updatedAt,
+			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: keyA}), UpdatedAt: updatedAt,
 		}},
 		Blobs:      stubBlobReader{body: body},
 		ApexDomain: "paste.test",
@@ -147,8 +147,8 @@ func TestPasteRead_CacheHeaders(t *testing.T) {
 	if got := w.Header().Get("Cache-Control"); got != "public, max-age=3600" {
 		t.Errorf("Cache-Control: got %q, want public, max-age=3600", got)
 	}
-	if got := w.Header().Get("ETag"); got != `"`+shaA+`"` {
-		t.Errorf("ETag: got %q, want the content SHA", got)
+	if got := w.Header().Get("ETag"); got != `"`+keyA+`"` {
+		t.Errorf("ETag: got %q, want the object key", got)
 	}
 	if got := w.Header().Get("Last-Modified"); got != "Sun, 07 Jun 2026 14:00:00 GMT" {
 		t.Errorf("Last-Modified: got %q", got)
@@ -160,7 +160,7 @@ func TestPasteRead_Conditional304(t *testing.T) {
 	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	srv := readyHTMLServer([]byte("body"), updatedAt)
 	for name, hdr := range map[string]map[string]string{
-		"If-None-Match":     {"If-None-Match": `"` + shaA + `"`},
+		"If-None-Match":     {"If-None-Match": `"` + keyA + `"`},
 		"If-Modified-Since": {"If-Modified-Since": updatedAt.Add(time.Hour).UTC().Format(stdhttp.TimeFormat)},
 	} {
 		w := getPaste(srv, hdr)
@@ -250,12 +250,12 @@ func (f failingPasteReader) Get(domain.Slug) (domain.Paste, error) { return doma
 func TestPasteRead5xxLogsSlugAndError(t *testing.T) {
 	now := time.Now().UTC()
 	paste := domain.Paste{
-		Slug:       "abc23456",
-		Kind:       domain.KindMarkdown,
-		ContentSHA: "deadbeef",
-		Status:     domain.PasteStatusReady,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		Slug:      "abc23456",
+		Kind:      domain.KindMarkdown,
+		Manifest:  domain.DocumentManifest(domain.ManifestEntry{Key: "uploads/u/0"}),
+		Status:    domain.PasteStatusReady,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 
 	t.Run("blob read failure", func(t *testing.T) {
