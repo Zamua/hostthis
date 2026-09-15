@@ -731,10 +731,9 @@ Per-file versioning was rejected: it gives no coherent answer to "what did this
 look like at version 3" and no sensible pin target.
 
 **Stored shape.** The version row carries the encoded manifest, its upload id,
-and a flat root descriptor (kind, size). A row without a manifest, or whose
-manifest fails to decode, keeps its metadata rather than failing the read, and
-has no content to serve (see "Blob storage backends → Entries without an
-object key").
+and a flat root descriptor (kind, size). A row without a manifest keeps its
+metadata but has no content to serve (see "Blob storage backends → Entries
+without an object key").
 
 Every version is written with a manifest, including a single document, whose
 manifest is of length one at `/`. That is what lets a reader stop asking which
