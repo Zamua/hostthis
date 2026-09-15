@@ -17,15 +17,16 @@ import (
 func TestRoomsHTTP_RoomsLiveAlongsidePasteAndSite(t *testing.T) {
 	now := time.Now().UTC()
 	m := domain.NewManifest()
-	m.Add("index.html", domain.ManifestEntry{SHA: "sha-site", Size: 18, ContentType: "text/html; charset=utf-8"})
+	m.Add("index.html", domain.ManifestEntry{Key: "key-site", Size: 18, ContentType: "text/html; charset=utf-8"})
 	srv := &Server{
 		ApexDomain: "hostthis.test",
-		Pastes:     stubPasteReader{p: domain.Paste{Slug: "pastenyz", Kind: domain.KindHTML, ContentSHA: "sha-paste", UpdatedAt: now}},
-		Sites:      stubSiteReader{s: siteAt("sitewxyz", m)},
-		Rooms:      service.NewRooms(storage.NewMemRoomRepo(storagetest.NewRepo(t))),
+		Pastes: stubPasteReader{p: domain.Paste{Slug: "pastenyz", Kind: domain.KindHTML, UpdatedAt: now,
+			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: "key-paste"})}},
+		Sites: stubSiteReader{s: siteAt("sitewxyz", m)},
+		Rooms: service.NewRooms(storage.NewMemRoomRepo(storagetest.NewRepo(t))),
 		Blobs: stubBlobMap{m: map[string][]byte{
-			"sha-paste": []byte("<h1>a paste</h1>"),
-			"sha-site":  []byte("<h1>site home</h1>"),
+			"key-paste": []byte("<h1>a paste</h1>"),
+			"key-site":  []byte("<h1>site home</h1>"),
 		}},
 	}
 

@@ -295,10 +295,10 @@ func TestRoomsHTTP_APIPrefixNotShadowedBySite(t *testing.T) {
 	srv := buildRoomServer(t)
 	const slug = "appz2345"
 	m := domain.NewManifest()
-	m.Add("index.html", domain.ManifestEntry{SHA: "sha-i", Size: 1, ContentType: "text/html; charset=utf-8"})
-	m.Add("api/rooms", domain.ManifestEntry{SHA: "sha-x", Size: 1, ContentType: "text/html; charset=utf-8"})
+	m.Add("index.html", domain.ManifestEntry{Key: "key-i", Size: 1, ContentType: "text/html; charset=utf-8"})
+	m.Add("api/rooms", domain.ManifestEntry{Key: "key-x", Size: 1, ContentType: "text/html; charset=utf-8"})
 	srv.Sites = stubSiteReader{s: siteAt(slug, m)}
-	srv.Blobs = stubBlobMap{m: map[string][]byte{"sha-i": []byte("i"), "sha-x": []byte("SHADOW")}}
+	srv.Blobs = stubBlobMap{m: map[string][]byte{"key-i": []byte("i"), "key-x": []byte("SHADOW")}}
 
 	w := req(t, srv, http.MethodPost, slug, "/api/rooms", nil)
 	if w.Code != http.StatusCreated {

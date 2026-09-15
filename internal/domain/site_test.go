@@ -8,7 +8,7 @@ import (
 func mustManifest(files map[string]string) Manifest {
 	m := NewManifest()
 	for p, body := range files {
-		m.Add(p, ManifestEntry{SHA: "sha-" + p, Size: len(body), ContentType: ContentTypeForPath(p)})
+		m.Add(p, ManifestEntry{Key: "key-" + p, Size: len(body), ContentType: ContentTypeForPath(p)})
 	}
 	return m
 }
@@ -21,16 +21,16 @@ func TestManifest_Lookup_DirectoryIndex(t *testing.T) {
 	})
 	cases := []struct {
 		req    string
-		want   string // expected SHA, "" means miss
+		want   string // expected key, "" means miss
 		wantOK bool
 	}{
-		{"/", "sha-index.html", true},
-		{"", "sha-index.html", true},
-		{"/index.html", "sha-index.html", true},
-		{"/css/style.css", "sha-css/style.css", true},
-		{"/blog/", "sha-blog/index.html", true},
-		{"/blog", "sha-blog/index.html", true}, // bare dir name resolves to its index
-		{"/blog/index.html", "sha-blog/index.html", true},
+		{"/", "key-index.html", true},
+		{"", "key-index.html", true},
+		{"/index.html", "key-index.html", true},
+		{"/css/style.css", "key-css/style.css", true},
+		{"/blog/", "key-blog/index.html", true},
+		{"/blog", "key-blog/index.html", true}, // bare dir name resolves to its index
+		{"/blog/index.html", "key-blog/index.html", true},
 		{"/missing.html", "", false},
 		{"/blog/missing.css", "", false},
 		{"/nope/", "", false}, // a dir with no index.html is a miss
@@ -41,8 +41,8 @@ func TestManifest_Lookup_DirectoryIndex(t *testing.T) {
 			if ok != c.wantOK {
 				t.Fatalf("ok: got %v, want %v", ok, c.wantOK)
 			}
-			if ok && e.SHA != c.want {
-				t.Fatalf("sha: got %q, want %q", e.SHA, c.want)
+			if ok && e.Key != c.want {
+				t.Fatalf("key: got %q, want %q", e.Key, c.want)
 			}
 		})
 	}
@@ -58,23 +58,23 @@ func TestManifest_LookupWithSPAFallback(t *testing.T) {
 	cases := []struct {
 		name        string
 		req         string
-		wantSHA     string // "" means a miss (404)
+		wantKey     string // "" means a miss (404)
 		wantHit     bool
 		wantViaFall bool
 	}{
 		// Direct hits resolve exactly like Lookup, never via fallback.
-		{"root index", "/", "sha-index.html", true, false},
-		{"explicit index", "/index.html", "sha-index.html", true, false},
-		{"real css asset", "/css/style.css", "sha-css/style.css", true, false},
-		{"nested dir index", "/blog/", "sha-blog/index.html", true, false},
-		{"bare dir name", "/blog", "sha-blog/index.html", true, false},
+		{"root index", "/", "key-index.html", true, false},
+		{"explicit index", "/index.html", "key-index.html", true, false},
+		{"real css asset", "/css/style.css", "key-css/style.css", true, false},
+		{"nested dir index", "/blog/", "key-blog/index.html", true, false},
+		{"bare dir name", "/blog", "key-blog/index.html", true, false},
 
 		// Route-shaped misses fall back to the ROOT index.html (200).
-		{"no-extension route", "/about", "sha-index.html", true, true},
-		{"deep no-ext route", "/users/123", "sha-index.html", true, true},
-		{"deeper no-ext route", "/users/123/edit", "sha-index.html", true, true},
-		{"html-extension route", "/about.html", "sha-index.html", true, true},
-		{"unknown-extension route", "/weird.zzz", "sha-index.html", true, true},
+		{"no-extension route", "/about", "key-index.html", true, true},
+		{"deep no-ext route", "/users/123", "key-index.html", true, true},
+		{"deeper no-ext route", "/users/123/edit", "key-index.html", true, true},
+		{"html-extension route", "/about.html", "key-index.html", true, true},
+		{"unknown-extension route", "/weird.zzz", "key-index.html", true, true},
 
 		// Asset-shaped misses stay a clean miss (404), no fallback.
 		{"missing js asset", "/assets/nope.js", "", false, false},
@@ -93,8 +93,8 @@ func TestManifest_LookupWithSPAFallback(t *testing.T) {
 			if via != c.wantViaFall {
 				t.Fatalf("viaFallback: got %v, want %v", via, c.wantViaFall)
 			}
-			if hit && e.SHA != c.wantSHA {
-				t.Fatalf("sha: got %q, want %q", e.SHA, c.wantSHA)
+			if hit && e.Key != c.wantKey {
+				t.Fatalf("key: got %q, want %q", e.Key, c.wantKey)
 			}
 		})
 	}
@@ -142,9 +142,9 @@ func TestManifest_HasWebContent(t *testing.T) {
 // are two stored objects, so both are counted.
 func TestManifest_SizesCountEveryPath(t *testing.T) {
 	m := NewManifest()
-	m.Add("a.html", ManifestEntry{SHA: "x", Size: 100, CompressedSize: 40})
-	m.Add("b.html", ManifestEntry{SHA: "x", Size: 100, CompressedSize: 40}) // same bytes, still stored
-	m.Add("c.css", ManifestEntry{SHA: "y", Size: 50, CompressedSize: 20})
+	m.Add("a.html", ManifestEntry{Key: "x", Size: 100, CompressedSize: 40})
+	m.Add("b.html", ManifestEntry{Key: "x", Size: 100, CompressedSize: 40}) // same bytes, still stored
+	m.Add("c.css", ManifestEntry{Key: "y", Size: 50, CompressedSize: 20})
 	if got := m.Size(); got != 250 {
 		t.Fatalf("Size: got %d, want 250 (both x paths counted)", got)
 	}

@@ -12,16 +12,14 @@ import (
 )
 
 // S3BlobStore is the object store over an S3-compatible bucket. An object
-// lives at <key> in the bucket; a legacy content-addressed object at
-// <legacy prefix>/<sha[:2]>/<sha>.
+// lives at <key> in the bucket.
 //
 // Like the disk store it does NOT satisfy service.BlobStore: the at-rest
 // encoding belongs to CompressedBlobStore, and every wiring path goes through
 // that wrapper.
 type S3BlobStore struct {
-	client       *minio.Client
-	bucket       string
-	legacyPrefix string
+	client *minio.Client
+	bucket string
 }
 
 // S3BlobConfig is the connection and placement for an S3BlobStore.
@@ -32,9 +30,6 @@ type S3BlobConfig struct {
 	AccessKey string
 	SecretKey string
 	UseSSL    bool
-	// LegacyPrefix names the content-addressed namespace legacy entries are
-	// read from. New objects never go there.
-	LegacyPrefix string
 }
 
 func NewS3BlobStore(cfg S3BlobConfig) (*S3BlobStore, error) {
@@ -50,11 +45,7 @@ func NewS3BlobStore(cfg S3BlobConfig) (*S3BlobStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("blob s3: client: %w", err)
 	}
-	legacy := strings.Trim(cfg.LegacyPrefix, "/")
-	if legacy == "" {
-		legacy = "blob"
-	}
-	return &S3BlobStore{client: client, bucket: cfg.Bucket, legacyPrefix: legacy}, nil
+	return &S3BlobStore{client: client, bucket: cfg.Bucket}, nil
 }
 
 // Put streams r to key. size must be accurate when known: a negative length
@@ -76,18 +67,6 @@ func (s *S3BlobStore) GetReader(key string) (io.ReadCloser, int64, error) {
 	if err := checkKey(key); err != nil {
 		return nil, 0, err
 	}
-	return s.get(key)
-}
-
-// GetLegacyReader streams a legacy content-addressed object.
-func (s *S3BlobStore) GetLegacyReader(sha string) (io.ReadCloser, int64, error) {
-	if err := checkSHA(sha); err != nil {
-		return nil, 0, err
-	}
-	return s.get(s.legacyPrefix + "/" + sha[:2] + "/" + sha)
-}
-
-func (s *S3BlobStore) get(key string) (io.ReadCloser, int64, error) {
 	obj, err := s.client.GetObject(context.Background(), s.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
 		return nil, 0, fmt.Errorf("blob s3: get %s: %w", key, err)

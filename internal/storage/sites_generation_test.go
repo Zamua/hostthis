@@ -27,9 +27,9 @@ func (r *generationSwapSiteRepo) AppendManifestVersion(ctx context.Context, slug
 	return r.MemRepo.AppendManifestVersion(ctx, slug, generation, uploadID, manifest, size, userCap, now)
 }
 
-func siteManifest(sha string) domain.Manifest {
+func siteManifest(key string) domain.Manifest {
 	manifest := domain.NewManifest()
-	manifest.Add("index.html", domain.ManifestEntry{SHA: sha, Size: 7, CompressedSize: 5, ContentType: "text/html"})
+	manifest.Add("index.html", domain.ManifestEntry{Key: key, Size: 7, CompressedSize: 5, ContentType: "text/html"})
 	return manifest
 }
 

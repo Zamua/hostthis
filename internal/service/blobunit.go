@@ -18,8 +18,8 @@ type BlobUnit interface {
 	// their quota-relevant stored size.
 	StageEncoding(ctx context.Context, key string, r io.Reader) (storedSize int, err error)
 
-	// Read streams an entry's decompressed bytes: its object key, or a legacy
-	// entry's sha.
+	// Read streams the decompressed bytes at an entry's object key. An entry
+	// without a key is ErrNotFound.
 	Read(ctx context.Context, entry domain.ManifestEntry) (io.ReadCloser, int64, error)
 
 	// DeleteUpload deletes every object under the upload's prefix. An upload

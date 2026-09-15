@@ -27,9 +27,6 @@ func (f fullBlobStore) DeletePrefix(prefix string) error { return f.real.DeleteP
 func (f fullBlobStore) GetReader(key string) (io.ReadCloser, int64, error) {
 	return f.real.GetReader(key)
 }
-func (f fullBlobStore) GetLegacyReader(sha string) (io.ReadCloser, int64, error) {
-	return f.real.GetLegacyReader(sha)
-}
 
 // fullBlobUnit wraps fullBlobStore as the BlobUnit seam: Stage fails, reads
 // delegate.

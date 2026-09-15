@@ -36,9 +36,9 @@ type Paste struct {
 	Identity   Identity    // "key:<fp>" or "ip:<subnet>" - quota AND capability gate
 	Status     PasteStatus // pending | ready | failed (blob-write lifecycle)
 	Kind       ContentKind // html | markdown of the currently-served version
-	ContentSHA string      // a legacy served version's root sha; empty for an upload-keyed one
-	// UploadID names the served version's object prefix. Empty for a legacy
-	// version, whose content-addressed objects may be shared.
+	ContentSHA string      // stored descriptor field; no read resolves bytes through it
+	// UploadID names the served version's object prefix. Empty for a version
+	// recorded without one, which owns no objects.
 	UploadID string
 	Size     int // bytes (currently-served version)
 	// StoredBytes is what the quota charges for this paste: the sum across every
@@ -54,7 +54,7 @@ type Paste struct {
 	// Manifest is the SERVED version's content in full. A document is one
 	// entry at Root, a directory is N, so one lookup resolves a request path
 	// for either (docs/SPEC.md "Serving a directory"). Empty when the stored
-	// row carries no manifest; the flat fields above describe the one blob.
+	// row carries no manifest, which leaves nothing to read.
 	Manifest Manifest
 }
 
@@ -63,7 +63,7 @@ type Paste struct {
 // The manifest is what makes ONE paste type enough for both a document (one
 // entry at Root) and a directory (N entries); nothing downstream distinguishes
 // them (docs/SPEC.md "One paste, not two aggregates"). Kind/Size describe the
-// ROOT entry; ContentSHA is a legacy version's root sha.
+// ROOT entry.
 //
 // Deleted=true is a tombstone: the row stays so version numbers are never
 // reused and `versions` still shows the history, but the content is gone
@@ -73,13 +73,13 @@ type Version struct {
 	VerNum     int
 	Kind       ContentKind
 	ContentSHA string
-	UploadID   string // prefix holding this version's objects; empty for a legacy version
+	UploadID   string // prefix holding this version's objects; empty when it owns none
 	Size       int
 	CreatedAt  time.Time
 	Deleted    bool
 
 	// Manifest is the version's content. Empty when the stored row carries no
-	// manifest; the flat fields describe it then.
+	// manifest, which leaves nothing to read.
 	Manifest Manifest
 }
 
@@ -91,14 +91,12 @@ func DocumentManifest(e ManifestEntry) Manifest {
 	return Manifest{Files: map[string]ManifestEntry{Root: e}}
 }
 
-// RootEntry is the file a paste's root serves: a document's one entry, a
-// directory's index.html, or, for a legacy row without a manifest, the flat
-// descriptor's sha.
+// RootEntry is the file a paste's root serves: a document's one entry or a
+// directory's index.html. A manifest with neither yields an entry without a
+// key, which no read resolves.
 func (p Paste) RootEntry() ManifestEntry {
-	if e, ok := p.Manifest.Lookup(Root); ok {
-		return e
-	}
-	return ManifestEntry{SHA: p.ContentSHA, Kind: string(p.Kind)}
+	e, _ := p.Manifest.Lookup(Root)
+	return e
 }
 
 // NewPasteGeneration returns an opaque token that identifies one slug incarnation.

@@ -10,17 +10,19 @@ import (
 )
 
 const (
-	shaA = "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe"
-	shaB = "00001111222233334444555566667777888899990000111122223333deadbeef"
+	keyA = "uploads/a/0"
+	keyB = "uploads/b/0"
 )
 
-// serveReady serves one GET of a ready paste of kind through the mux.
-func serveReady(t *testing.T, kind domain.ContentKind, slug, sha string, body []byte, target, accept string) *httptest.ResponseRecorder {
+// serveReady serves one GET of a ready paste of kind, stored at key, through
+// the mux.
+func serveReady(t *testing.T, kind domain.ContentKind, slug, key string, body []byte, target, accept string) *httptest.ResponseRecorder {
 	t.Helper()
 	srv := &Server{
 		Pastes: stubPasteReader{p: domain.Paste{
 			Slug: domain.Slug(slug), Status: domain.PasteStatusReady, Kind: kind,
-			ContentSHA: sha, UpdatedAt: time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC),
+			Manifest:  domain.DocumentManifest(domain.ManifestEntry{Key: key}),
+			UpdatedAt: time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC),
 		}},
 		Blobs:      stubBlobReader{body: body},
 		ApexDomain: "paste.test",
@@ -38,7 +40,7 @@ func serveReady(t *testing.T, kind domain.ContentKind, slug, sha string, body []
 // Every registered kind serves the same contract: the bare URL is the shell
 // for every Accept (no negotiation, so it edge-caches), with the shell's CSP
 // and a content-independent ETag; ?raw=1 is the stored bytes under the kind's
-// raw type, ETag'd by content, with no CSP.
+// raw type, ETag'd by object key, with no CSP.
 func TestShells_ServeContractForEveryKind(t *testing.T) {
 	if len(shells) == 0 {
 		t.Fatal("no shells registered")
@@ -47,7 +49,7 @@ func TestShells_ServeContractForEveryKind(t *testing.T) {
 	for kind, sh := range shells {
 		t.Run(string(kind), func(t *testing.T) {
 			for _, accept := range []string{"text/html,application/xhtml+xml", "*/*"} {
-				w := serveReady(t, kind, "abc23456", shaA, src, "/p/abc23456", accept)
+				w := serveReady(t, kind, "abc23456", keyA, src, "/p/abc23456", accept)
 				if ct := w.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
 					t.Errorf("Accept %q: Content-Type %q, want the shell", accept, ct)
 				}
@@ -61,24 +63,24 @@ func TestShells_ServeContractForEveryKind(t *testing.T) {
 					t.Errorf("Accept %q: Cache-Control %q, want public, max-age=3600", accept, cc)
 				}
 				etag := w.Header().Get("ETag")
-				if etag != `"`+sh.version+`"` || strings.Contains(etag, shaA) {
+				if etag != `"`+sh.version+`"` || strings.Contains(etag, keyA) {
 					t.Errorf("Accept %q: shell ETag %q, want the shell version", accept, etag)
 				}
-				other := serveReady(t, kind, "xyz98765", shaB, []byte("other"), "/p/xyz98765", accept)
+				other := serveReady(t, kind, "xyz98765", keyB, []byte("other"), "/p/xyz98765", accept)
 				if got := other.Header().Get("ETag"); got != etag {
 					t.Errorf("shell ETag depends on content: %q vs %q", etag, got)
 				}
 			}
 
-			w := serveReady(t, kind, "abc23456", shaA, src, "/p/abc23456?raw=1", "text/html")
+			w := serveReady(t, kind, "abc23456", keyA, src, "/p/abc23456?raw=1", "text/html")
 			if ct := w.Header().Get("Content-Type"); ct != rawContentType[kind] {
 				t.Errorf("raw Content-Type %q, want %q", ct, rawContentType[kind])
 			}
 			if got := w.Body.String(); got != string(src) {
 				t.Errorf("raw body %q, want the stored bytes", got)
 			}
-			if got := w.Header().Get("ETag"); got != `"`+shaA+`"` {
-				t.Errorf("raw ETag %q, want the content SHA", got)
+			if got := w.Header().Get("ETag"); got != `"`+keyA+`"` {
+				t.Errorf("raw ETag %q, want the object key", got)
 			}
 			if csp := w.Header().Get("Content-Security-Policy"); csp != "" {
 				t.Errorf("raw response carries a CSP: %q", csp)
@@ -90,11 +92,11 @@ func TestShells_ServeContractForEveryKind(t *testing.T) {
 	}
 }
 
-// HTML is served as itself: the stored bytes, content ETag, no shell CSP, and
-// the same edge-cacheable posture.
+// HTML is served as itself: the stored bytes, object-key ETag, no shell CSP,
+// and the same edge-cacheable posture.
 func TestHTMLPaste_ServedAsItself(t *testing.T) {
 	body := []byte("<!doctype html><h1>html paste</h1>")
-	w := serveReady(t, domain.KindHTML, "abc23456", shaA, body, "/p/abc23456", "text/html")
+	w := serveReady(t, domain.KindHTML, "abc23456", keyA, body, "/p/abc23456", "text/html")
 	if ct := w.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
 		t.Errorf("Content-Type %q, want text/html", ct)
 	}
@@ -104,8 +106,8 @@ func TestHTMLPaste_ServedAsItself(t *testing.T) {
 	if csp := w.Header().Get("Content-Security-Policy"); csp != "" {
 		t.Errorf("HTML paste carries a CSP: %q", csp)
 	}
-	if got := w.Header().Get("ETag"); got != `"`+shaA+`"` {
-		t.Errorf("ETag %q, want the content SHA", got)
+	if got := w.Header().Get("ETag"); got != `"`+keyA+`"` {
+		t.Errorf("ETag %q, want the object key", got)
 	}
 	if cc := w.Header().Get("Cache-Control"); cc != "public, max-age=3600" {
 		t.Errorf("Cache-Control %q, want public, max-age=3600", cc)

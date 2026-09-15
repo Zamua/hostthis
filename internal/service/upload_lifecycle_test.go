@@ -72,10 +72,6 @@ func (f *fakeBlobs) GetReader(key string) (io.ReadCloser, int64, error) {
 	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
 }
 
-func (f *fakeBlobs) GetLegacyReader(string) (io.ReadCloser, int64, error) {
-	return nil, 0, storage.ErrNotFound
-}
-
 func (f *fakeBlobs) DeletePrefix(prefix string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

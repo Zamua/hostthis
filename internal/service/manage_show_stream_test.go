@@ -32,7 +32,8 @@ type showRepoStub struct {
 }
 
 func (s *showRepoStub) Get(slug domain.Slug) (domain.Paste, error) {
-	return domain.Paste{Slug: slug, Identity: domain.Identity(s.owner), ContentSHA: "sha-1"}, nil
+	return domain.Paste{Slug: slug, Identity: domain.Identity(s.owner),
+		Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: "uploads/show/0"})}, nil
 }
 
 // streamOnlyBlobUnit serves Read and refuses ReadAll, so a caller that buffers
@@ -124,22 +125,20 @@ func (u *entryRecordingUnit) Read(_ context.Context, e domain.ManifestEntry) (io
 	return io.NopCloser(strings.NewReader("")), 0, nil
 }
 
-// Show reads a document through its manifest root entry, a directory through
-// its index.html, and a legacy row without a manifest through its flat sha.
+// Show reads a document through its manifest root entry and a directory
+// through its index.html.
 func TestShow_ReadsTheRootEntry(t *testing.T) {
 	keyed := domain.Paste{Identity: showOwner, ContentSHA: "stale",
 		Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: "uploads/u/0"})}
 	site := domain.Paste{Identity: showOwner, Kind: domain.KindSite, Manifest: domain.Manifest{
 		Files: map[string]domain.ManifestEntry{"index.html": {Key: "uploads/s/0"}, "app.js": {Key: "uploads/s/1"}},
 	}}
-	legacy := domain.Paste{Identity: showOwner, ContentSHA: "abc123"}
 	for name, tc := range map[string]struct {
 		paste domain.Paste
-		want  domain.ManifestEntry
+		want  string
 	}{
-		"keyed":  {keyed, domain.ManifestEntry{Key: "uploads/u/0"}},
-		"site":   {site, domain.ManifestEntry{Key: "uploads/s/0"}},
-		"legacy": {legacy, domain.ManifestEntry{SHA: "abc123"}},
+		"keyed": {keyed, "uploads/u/0"},
+		"site":  {site, "uploads/s/0"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			unit := &entryRecordingUnit{}
@@ -148,8 +147,28 @@ func TestShow_ReadsTheRootEntry(t *testing.T) {
 				t.Fatalf("Show: %v", err)
 			}
 			_ = rc.Close()
-			if unit.got.Key != tc.want.Key || unit.got.SHA != tc.want.SHA {
-				t.Fatalf("Show read %+v, want key %q sha %q", unit.got, tc.want.Key, tc.want.SHA)
+			if unit.got.Key != tc.want {
+				t.Fatalf("Show read %+v, want key %q", unit.got, tc.want)
+			}
+		})
+	}
+}
+
+// A root without an object key names no bytes: Show is the standard not-found
+// and never asks the byte plane.
+func TestShow_KeylessRootIsNotFound(t *testing.T) {
+	for name, p := range map[string]domain.Paste{
+		"row without a manifest": {Identity: showOwner, ContentSHA: "abc123"},
+		"root without a key":     {Identity: showOwner, Manifest: domain.DocumentManifest(domain.ManifestEntry{Size: 3})},
+		"directory without an index": {Identity: showOwner, Kind: domain.KindSite, Manifest: domain.Manifest{
+			Files: map[string]domain.ManifestEntry{"app.js": {Key: "uploads/s/1"}},
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			unit := &streamOnlyBlobUnit{body: "bytes under an old address"}
+			_, rc, err := NewManage(pasteStub{p: p}, unit).Show("abcd1234", showOwner)
+			if !errors.Is(err, ErrNotFound) || rc != nil || unit.reads != 0 {
+				t.Fatalf("Show = (%v, %v) with %d reads, want ErrNotFound and none", rc, err, unit.reads)
 			}
 		})
 	}

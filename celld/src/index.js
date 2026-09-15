@@ -95,26 +95,6 @@ function isUploadId(value) {
   return value === undefined || value === null || typeof value === "string";
 }
 
-// The shape domain.ValidUploadID accepts: one key segment, so a prefix delete
-// built from it cannot widen past its own upload.
-function isUploadSegment(value) {
-  return typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
-}
-
-// Every entry of a re-homed manifest must name an object of that upload: an
-// entry keyed elsewhere would lose its bytes when the other upload is deleted.
-function isRehomedManifest(manifest, uploadId) {
-  const files = manifest?.Files;
-  if (typeof files !== "object" || files === null || Array.isArray(files)) {
-    return false;
-  }
-  const entries = Object.values(files);
-  const prefix = `uploads/${uploadId}/`;
-  return entries.length > 0 && entries.every((entry) =>
-    typeof entry?.Key === "string" && entry.Key.startsWith(prefix) &&
-    /^(0|[1-9][0-9]*)$/.test(entry.Key.slice(prefix.length)));
-}
-
 function withUploadId(version, uploadId) {
   return uploadId ? { ...version, uploadId } : version;
 }
@@ -1758,7 +1738,6 @@ const PASTE_OPS = {
   append: mutation((self, body) => self.append(body)),
   delversion: mutation((self, body) => self.deleteVersion(body)),
   pin: mutation((self, body) => self.pin(body)),
-  rehome: mutation((self, body) => self.rehome(body)),
   pushkey: mutation((self) => self.pushKey(), { body: false }),
   pushsign: mutation((self, body) => self.pushSign(body)),
 };
@@ -2608,48 +2587,6 @@ export class Paste {
     });
     await this.resumeArtifactPending();
     return this.receiptResponse(receipt);
-  }
-
-  // Repoints a live version at a re-homed upload. Sizes and charge are
-  // unchanged, so no accounting runs and a repeat rewrites the same values. A
-  // legacy row is refused rather than adopted, because adoption seeds Identity.
-  async rehome(body) {
-    if (!requireShape(body, { generation: "string", ver: "posint" }) || !isUploadSegment(body.uploadId)) {
-      return Response.json({ error: "invalid-rehome" }, { status: 400 });
-    }
-    if (!isRehomedManifest(body.manifest, body.uploadId)) {
-      return Response.json({ error: "invalid-manifest" }, { status: 400 });
-    }
-    const row = await this.state.storage.get("row");
-    if (!row) {
-      return Response.json({ error: "paste-absent" }, { status: 404 });
-    }
-    if (row.generation !== body.generation) {
-      return Response.json({ error: "generation-mismatch" }, { status: 409 });
-    }
-    const versions = await loadVersions(this.state.storage);
-    const version = versions.find((candidate) => candidate.ver === body.ver);
-    if (!version) {
-      return Response.json({ error: "version-absent" }, { status: 404 });
-    }
-    if (version.deleted) {
-      return Response.json({ error: "version-deleted" }, { status: 409 });
-    }
-    const served = servedOf(row, versions.filter((candidate) => !candidate.deleted));
-    await this.state.storage.transaction(async (tx) => {
-      await splitLegacyVersions(tx);
-      const updates = new Map([
-        [versionKey(body.ver), { ...version, uploadId: body.uploadId }],
-        [manifestKey(body.ver), body.manifest],
-      ]);
-      if (served.ver === body.ver) {
-        row.manifest = body.manifest;
-        row.uploadId = body.uploadId;
-        updates.set("row", row);
-      }
-      await tx.put(updates);
-    });
-    return Response.json({ rehomed: true });
   }
 
   // Deletion tombstones the incarnation before its allocation is released.
