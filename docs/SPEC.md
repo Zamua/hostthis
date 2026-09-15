@@ -731,9 +731,9 @@ Per-file versioning was rejected: it gives no coherent answer to "what did this
 look like at version 3" and no sensible pin target.
 
 **Stored shape.** The version row carries the encoded manifest, its upload id,
-and a flat root descriptor (kind, size). A row without a manifest keeps its
-metadata but has no content to serve (see "Blob storage backends → Entries
-without an object key").
+and a flat root descriptor (kind, size). A row without a manifest, or whose
+manifest fails to decode, keeps its metadata but has no content to serve (see
+"Blob storage backends → Entries without an object key").
 
 Every version is written with a manifest, including a single document, whose
 manifest is of length one at `/`. That is what lets a reader stop asking which
@@ -2559,6 +2559,14 @@ Such a record still decodes: fields no read uses, such as a content sha, are
 ignored, so listing, versions, and deletes keep working for it. A version
 recorded without an upload id owns no prefix, so deleting it, or its paste,
 removes metadata only.
+
+A stored manifest that fails to decode (a string, a number, an entry field of
+the wrong type) reads as no manifest, on the paste row and on each listed
+version alike. Its paste or version is then unreadable as above, while listing,
+versions, and deletes keep working for it, and the metadata adapter
+logs one skip per decode naming the slug and, for a version, its number. The
+tolerance covers the manifest alone: any other field of the wrong type still
+fails the read.
 
 ---
 
