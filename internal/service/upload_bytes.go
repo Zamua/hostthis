@@ -10,7 +10,8 @@ import (
 
 // discardUpload deletes an upload's objects. A failure is logged, not
 // returned: the caller's outcome is already decided, and a leaked prefix costs
-// space, never a read. An empty id is a legacy version with nothing to delete.
+// space, never a read. An empty id is a version recorded without an upload id,
+// which owns nothing to delete.
 func discardUpload(blob BlobUnit, logger *log.Logger, uploadID string) {
 	if uploadID == "" {
 		return

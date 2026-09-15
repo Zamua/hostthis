@@ -41,7 +41,7 @@ type PasteAdmin interface {
 	// cache), so the delete guard below can never free the served blob.
 	IsVersionServed(domain.Slug, int) (bool, error)
 	// DeleteVersion answers with the tombstoned version's upload id, empty for
-	// a legacy version.
+	// a version recorded without one.
 	DeleteVersion(domain.Slug, string, int) (uploadID string, err error)
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
 	OwnerFirstSeen(owner string) (time.Time, error)

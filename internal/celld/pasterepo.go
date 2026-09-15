@@ -538,7 +538,7 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 // the direction nothing watches.
 //
 // The answer names the version's upload, also when it was already deleted, and
-// is empty for a legacy version.
+// is empty for a version recorded without an upload id.
 func (r *PasteRepo) DeleteVersion(slug domain.Slug, generation string, ver int) (string, error) {
 	opID, err := newOpaqueID("delete-version")
 	if err != nil {
