@@ -76,7 +76,8 @@ func TestAppendCarriesUploadID(t *testing.T) {
 func TestListVersionsReadsUploadIDs(t *testing.T) {
 	f := fixedCell(http.StatusOK, `[
 		{"ver":2,"kind":"html","uploadId":"upload-2","size":4,"createdAt":1},
-		{"ver":1,"kind":"html","contentSha":"abc","size":3,"createdAt":1}
+		{"ver":1,"kind":"html","contentSha":"abc","size":3,"createdAt":1,
+			"manifest":{"Files":{"/":{"SHA":"abc","Size":3}}}}
 	]`)
 	repo := NewPasteRepo("https://cell", f.client())
 	vers, err := repo.ListVersions("slugone1")
@@ -84,7 +85,11 @@ func TestListVersionsReadsUploadIDs(t *testing.T) {
 		t.Fatalf("list versions: %v", err)
 	}
 	if len(vers) != 2 || vers[0].UploadID != "upload-2" || vers[1].UploadID != "" || vers[1].ContentSHA != "abc" {
-		t.Fatalf("versions = %+v, want v2 with upload-2 and a legacy v1", vers)
+		t.Fatalf("versions = %+v, want v2 with upload-2 and a v1 recorded without one", vers)
+	}
+	// A stored entry holding only a sha decodes, and names no bytes.
+	if root, ok := vers[1].Manifest.Files[domain.Root]; !ok || root.Key != "" || root.Size != 3 {
+		t.Fatalf("v1 root entry = (%+v, %v), want a decoded entry without a key", root, ok)
 	}
 }
 

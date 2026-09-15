@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -88,12 +89,26 @@ func TestDeleteVersion_RemovesOnlyThatVersionsBytes(t *testing.T) {
 	}
 }
 
+// recordingDeleteUnit is a working byte plane that records every prefix delete.
+type recordingDeleteUnit struct {
+	BlobUnit
+	deleted []string
+}
+
+func (u *recordingDeleteUnit) DeleteUpload(ctx context.Context, uploadID string) error {
+	u.deleted = append(u.deleted, uploadID)
+	return u.BlobUnit.DeleteUpload(ctx, uploadID)
+}
+
 // A version recorded without an upload id owns no objects: deleting its paste
-// succeeds and removes only the prefixes its other versions name.
+// deletes exactly the prefixes its other versions name.
 func TestDelete_VersionWithoutUploadRemovesMetadataOnly(t *testing.T) {
-	_, m, repo, _, root := bytesStack(t)
+	up, _, repo, blobs, root := bytesStack(t)
+	unit := &recordingDeleteUnit{BlobUnit: NewStandaloneBlobUnit(blobs)}
+	m := NewManage(repo, unit)
+	other := createReady(t, up, "<!doctype html><p>other</p>")
 	unkeyed := domain.Paste{
-		Slug: "legacy23", Generation: "generation-legacy", Identity: bytesOwner,
+		Slug: "unkeyed2", Generation: "generation-unkeyed", Identity: bytesOwner,
 		Status: domain.PasteStatusReady, Kind: domain.KindHTML, ContentSHA: "0123456789abcdef",
 		Size: 28, CreatedAt: fixedNow, UpdatedAt: fixedNow,
 	}
@@ -103,15 +118,25 @@ func TestDelete_VersionWithoutUploadRemovesMetadataOnly(t *testing.T) {
 	if _, err := m.Update(unkeyed.Slug, bytesOwner, strings.NewReader("<!doctype html><p>v2</p>"), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if n := objectsUnder(t, root); n != 1 {
-		t.Fatalf("upload objects before delete = %d, want 1 (v2)", n)
+	v2, err := repo.GetVersion(unkeyed.Slug, 2)
+	if err != nil || v2.UploadID == "" {
+		t.Fatalf("v2 = (%+v, %v), want a version with an upload id", v2, err)
+	}
+	if n := objectsUnder(t, root); n != 2 {
+		t.Fatalf("upload objects before delete = %d, want 2 (another paste, v2)", n)
 	}
 
 	if err := m.Delete(unkeyed.Slug, bytesOwner); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if n := objectsUnder(t, root); n != 0 {
-		t.Fatalf("upload objects after delete = %d, want 0", n)
+	if want := []string{v2.UploadID}; !slices.Equal(unit.deleted, want) {
+		t.Fatalf("deleted uploads = %q, want %q", unit.deleted, want)
+	}
+	if n := objectsUnder(t, root); n != 1 {
+		t.Fatalf("upload objects after delete = %d, want 1 (another paste)", n)
+	}
+	if body, err := readObject(t, blobs, other.RootEntry().Key); err != nil || string(body) != "<!doctype html><p>other</p>" {
+		t.Fatalf("another paste after the delete = (%q, %v)", body, err)
 	}
 }
 
