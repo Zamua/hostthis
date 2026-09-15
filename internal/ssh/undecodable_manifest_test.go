@@ -36,10 +36,6 @@ func (r cellRowRepo) Delete(s domain.Slug, id domain.Identity, at time.Time) ([]
 	return r.cell.Delete(s, id, at)
 }
 
-func (r cellRowRepo) DropStaleOwnerEntry(s domain.Slug, owner string) (bool, error) {
-	return r.cell.DropStaleOwnerEntry(s, owner)
-}
-
 func TestUndecodableManifest_GetNotFoundVersionsAndDeleteWork(t *testing.T) {
 	slug := domain.NewRandomSlug()
 	var owner atomic.Value
@@ -67,6 +63,7 @@ func TestUndecodableManifest_GetNotFoundVersionsAndDeleteWork(t *testing.T) {
 	}))
 	owner.Store(domain.IdentityFromKeyFingerprint(s.keyedOwner).String())
 
+	// Pins behaviour only: requireOwner already maps any Get error to not-found.
 	if _, stderr, exit := s.run("get "+slug.String(), nil); exit != hostssh.ExitNotFound {
 		t.Fatalf("get exit = %d, want %d (stderr %q)", exit, hostssh.ExitNotFound, stderr)
 	}
