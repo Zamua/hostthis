@@ -1232,7 +1232,7 @@ test("Paste and Identity accept a sent contentSha without storing or answering i
   assert.equal(listed.body.some(hasContentSha), false);
 });
 
-test("Paste drops a stored contentSha when it rewrites the head and listing entry", async () => {
+test("Paste and Identity drop a stored contentSha when they rewrite the head or listing entry", async () => {
   const pasteSeed = artifactPasteSeed();
   pasteSeed.get("row").contentSha = "v1";
   pasteSeed.get("versions")[0].contentSha = "v1";
@@ -1243,6 +1243,14 @@ test("Paste drops a stored contentSha when it rewrites the head and listing entr
   assert.equal((await h.paste().append(appendBody())).status, 200);
   assert.equal(hasContentSha(h.pasteStorage.data.get("row")), false);
   assert.equal(hasContentSha(h.identityStorage.data.get("entries").slugone1), false);
+
+  const legacy = new FakeStorage(new Map([["entries", {
+    slugone1: { size: 2, status: "ready", at: 7, kind: "html", contentSha: "v1" },
+  }]]));
+  assert.equal((await new Identity(state(legacy)).artifactSeed({
+    slug: "slugone1", generation: "generation-1", charge: 2, servedSize: 2,
+  })).status, 200);
+  assert.equal(hasContentSha(legacy.data.get("entries").slugone1), false);
 });
 
 test("Paste removal names every version's upload and replays it after re-creation", async () => {

@@ -39,7 +39,7 @@ func TestSitesReplaceFencesReplacementIncarnation(t *testing.T) {
 	inner := NewMemRepo()
 	sites := NewSites(inner)
 	initial := domain.Site{
-		Slug: "site2345", Identity: "key:owner", Manifest: siteManifest("old-sha"),
+		Slug: "site2345", Identity: "key:owner", Manifest: siteManifest("old-key"),
 		CreatedAt: at, UpdatedAt: at,
 	}
 	if err := sites.InsertWithQuotaCheck(context.Background(), initial, 5, 0, at); err != nil {
@@ -58,7 +58,7 @@ func TestSitesReplaceFencesReplacementIncarnation(t *testing.T) {
 	sites = NewSites(repo)
 
 	update := initial
-	update.Manifest = siteManifest("update-sha")
+	update.Manifest = siteManifest("update-key")
 	update.UpdatedAt = at.Add(2 * time.Second)
 	if err := sites.ReplaceWithQuotaCheck(context.Background(), update, 5, 0, update.UpdatedAt); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("replace error = %v, want ErrNotFound", err)

@@ -560,6 +560,8 @@ export class Identity {
         kind: body.kind ?? existing?.kind ?? "",
         name: body.name ?? existing?.name ?? "",
       };
+      // A stored contentSha would describe a version that may no longer be served.
+      delete entries[body.slug].contentSha;
       const updates = new Map([["entries", entries]]);
       if (!decision) {
         updates.set(key, { version: 0, allocated: body.charge, target: body.charge });
@@ -2512,8 +2514,7 @@ export class Paste {
   // Roll the row onto the version the public URL serves: the pin when set,
   // otherwise the newest live one. The row's kind, upload id, manifest and size
   // are a VIEW of that version, so every mutation that can change which version
-  // is served has to pass through here or the view goes stale - which is how a
-  // pin ended up moving the marker without moving the content.
+  // is served has to pass through here or the view goes stale.
   //
   // row.size is the SERVED version's size, NOT the sum of live versions. The
   // quota total is a different number, kept in the identity cell, and conflating
