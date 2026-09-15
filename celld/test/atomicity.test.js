@@ -293,7 +293,7 @@ test("Identity create alarm confirms a matching paste generation", async () => {
     fingerprint: body.intent.fingerprint,
     row: {
       slug: body.slug, identity: "owner", status: "pending", kind: "html",
-      contentSha: "abc", size: body.size, createdAt: 9, updatedAt: 9,
+      size: body.size, createdAt: 9, updatedAt: 9,
     },
   })).status, 204);
 
@@ -343,7 +343,7 @@ test("Identity create alarm fences a late put before releasing quota", async () 
     fingerprint: body.intent.fingerprint,
     row: {
       slug: body.slug, identity: "owner", status: "pending", kind: "html",
-      contentSha: "abc", size: body.size, createdAt: 9, updatedAt: 9,
+      size: body.size, createdAt: 9, updatedAt: 9,
     },
   })).status, 409);
   assert.equal(h.pasteStorage.data.get("row"), undefined);
@@ -358,7 +358,7 @@ test("Identity create alarm confirms the Paste row status monotonically", async 
     fingerprint: body.intent.fingerprint,
     row: {
       slug: body.slug, identity: "owner", status: "ready", kind: "html",
-      contentSha: "abc", size: body.size, createdAt: 9, updatedAt: 9,
+      size: body.size, createdAt: 9, updatedAt: 9,
     },
   })).status, 204);
   const entries = h.identityStorage.data.get("entries");
@@ -380,7 +380,7 @@ test("Identity create alarm retains a conflicting same-generation row", async ()
     fingerprint: "fingerprint-conflict",
     row: {
       slug: body.slug, identity: "other", status: "ready", kind: "markdown",
-      contentSha: "different", size: 99, createdAt: 10, updatedAt: 10,
+      size: 99, createdAt: 10, updatedAt: 10,
     },
   })).status, 204);
 
@@ -421,20 +421,20 @@ test("Paste.put replays only the exact creation fingerprint", async () => {
   const storage = new FakeStorage();
   const paste = new Paste(state(storage));
   const original = {
-    slug: "newslug2", identity: "owner", kind: "html", contentSha: "original",
+    slug: "newslug2", identity: "owner", kind: "html",
     size: 3, createdAt: 7, updatedAt: 7, status: "pending",
   };
   assert.equal((await paste.put({
     row: original, generation: "generation-1", fingerprint: "fingerprint-1",
   })).status, 204);
-  const replay = { ...original, contentSha: "replacement", size: 99 };
+  const replay = { ...original, size: 99 };
   assert.equal((await paste.put({
     row: original, generation: "generation-1", fingerprint: "fingerprint-1",
   })).status, 204);
   assert.equal((await paste.put({
     row: replay, generation: "generation-1", fingerprint: "fingerprint-other",
   })).status, 409);
-  assert.equal(storage.data.get("row").contentSha, "original");
+  assert.equal(storage.data.get("row").size, 3);
   assert.equal(storedVersions(storage).length, 1);
   assert.equal((await paste.put({
     row: replay, generation: "generation-2", fingerprint: "fingerprint-2",
@@ -443,7 +443,7 @@ test("Paste.put replays only the exact creation fingerprint", async () => {
 
 test("Paste.put commits row, version seed, and counter together", async () => {
   const row = {
-    identity: "owner", kind: "html", contentSha: "abc", size: 3,
+    identity: "owner", kind: "html", size: 3,
     createdAt: 7, updatedAt: 7, status: "ready",
   };
   await assertCrashAtomic({
@@ -472,14 +472,14 @@ test("Paste append converges after every local commit crash", async () => {
 test("Paste serializes concurrent version appends", async () => {
   const h = artifactHarness({ serial: true });
   const paste = h.paste();
-  const append = (opId, contentSha) => paste.fetch(new Request("https://cell/paste/append", {
+  const append = (opId) => paste.fetch(new Request("https://cell/paste/append", {
     method: "POST",
     body: JSON.stringify({
       opId, generation: "generation-1", userCap: 10,
-      kind: "html", contentSha, size: 2, now: 8,
+      kind: "html", size: 2, now: 8,
     }),
   }));
-  const results = await Promise.all([append("append-2", "v2"), append("append-3", "v3")]);
+  const results = await Promise.all([append("append-2"), append("append-3")]);
   assert.deepStrictEqual((await Promise.all(results.map(responseJSON))).map((result) => result.body.ver), [2, 3]);
   assert.equal(h.pasteStorage.data.get("maxVer"), 3);
   assert.deepStrictEqual(storedVersions(h.pasteStorage).map((version) => version.ver), [1, 2, 3]);
@@ -512,7 +512,7 @@ test("Paste splits a legacy single-value history on its first version write", as
   assert.equal((await h.paste().append(appendBody())).status, 200);
   assert.equal(h.pasteStorage.data.has("versions"), false);
   assert.deepStrictEqual(h.pasteStorage.data.get("ver:1"), {
-    ver: 1, kind: "html", contentSha: "v1", size: 2, createdAt: 7, deleted: false,
+    ver: 1, kind: "html", size: 2, createdAt: 7, deleted: false,
   });
   assert.deepStrictEqual(h.pasteStorage.data.get("manifest:1"), legacyManifest);
   assert.equal(h.pasteStorage.data.has("manifest:2"), false);
@@ -532,7 +532,7 @@ test("Paste alarm publishes an append granted before the storage limit refused i
       kind: "append", stage: "decide", opId: "append-1", slug: "slugone1", owner: "owner",
       generation: "generation-1", version: 1, target: 6, userCap: 10, latestVersion: 2,
       wasPinned: false,
-      mutation: { ver: 2, kind: "markdown", contentSha: "v2", size: 4, createdAt: 8, deleted: false, manifest: null },
+      mutation: { ver: 2, kind: "markdown", size: 4, createdAt: 8, deleted: false, manifest: null },
     }]]),
   });
   stuck.pasteStorage.tooBig = (key) => key === "versions";
@@ -621,12 +621,12 @@ test("Paste delete converges after every local commit crash", async () => {
 function artifactPasteSeed({ generation = "generation-1", charge = 2 } = {}) {
   return new Map([
     ["row", {
-      slug: "slugone1", identity: "owner", kind: "html", contentSha: "v1", size: 2,
+      slug: "slugone1", identity: "owner", kind: "html", size: 2,
       createdAt: 7, updatedAt: 7, status: "ready", pinnedVersion: 0,
       generation, accountingVersion: 0,
     }],
     ["versions", [{
-      ver: 1, kind: "html", contentSha: "v1", size: charge,
+      ver: 1, kind: "html", size: charge,
       createdAt: 7, deleted: false, manifest: null,
     }]],
     ["maxVer", 1],
@@ -638,7 +638,7 @@ function artifactIdentitySeed({ generation = "generation-1", charge = 2, extra =
     slugone1: {
       generation, size: charge, chargedSize: charge, servedSize: 2,
       accountingVersion: 0, status: "ready", at: 7, updatedAt: 7,
-      latestVersion: 1, kind: "html", name: "", contentSha: "v1",
+      latestVersion: 1, kind: "html", name: "",
     },
   };
   if (extra > 0) {
@@ -694,13 +694,12 @@ function artifactHarness(options = {}) {
 function deletableArtifactHarness({ pinned = false } = {}) {
   const pasteSeed = artifactPasteSeed();
   pasteSeed.get("versions").push({
-    ver: 2, kind: "markdown", contentSha: "v2", size: 4,
+    ver: 2, kind: "markdown", size: 4,
     createdAt: 8, deleted: false, manifest: null,
   });
   pasteSeed.set("maxVer", 2);
   const row = pasteSeed.get("row");
   row.kind = "markdown";
-  row.contentSha = "v2";
   row.size = 4;
   const identitySeed = artifactIdentitySeed({ charge: 6 });
   const entry = identitySeed.get("entries").slugone1;
@@ -709,7 +708,6 @@ function deletableArtifactHarness({ pinned = false } = {}) {
     row.pinnedVersion = 2;
   } else {
     entry.latestVersion = 2;
-    entry.contentSha = "v2";
   }
   return artifactHarness({ pasteSeed, identitySeed });
 }
@@ -717,7 +715,7 @@ function deletableArtifactHarness({ pinned = false } = {}) {
 function appendBody(opId = "append-1", userCap = 10) {
   return {
     opId, generation: "generation-1", userCap, kind: "markdown",
-    contentSha: "v2", size: 4, now: 8,
+    size: 4, now: 8,
   };
 }
 
@@ -755,7 +753,7 @@ test("Paste projection reloads state after recovering prior accounting", async (
   assert.deepStrictEqual(renamed, { status: 200, body: { changed: true } });
   const row = h.pasteStorage.data.get("row");
   assert.equal(row.accountingVersion, 1);
-  assert.equal(row.contentSha, "v2");
+  assert.equal(row.kind, "markdown");
   assert.equal(row.size, 4);
   assert.equal(row.name, "after recovery");
   const entry = h.identityStorage.data.get("entries").slugone1;
@@ -863,7 +861,7 @@ test("Paste removal fences release before allowing a new incarnation", async () 
     generation: "generation-2",
     fingerprint: "fingerprint-2",
     row: {
-      slug: "slugone1", identity: "other", kind: "html", contentSha: "new",
+      slug: "slugone1", identity: "other", kind: "html",
       size: 1, status: "ready", createdAt: 9, updatedAt: 9,
     },
   })).status, 204);
@@ -896,7 +894,7 @@ test("Paste receipts are scoped to one artifact generation", async () => {
     generation: "generation-2",
     fingerprint: "fingerprint-2",
     row: {
-      slug: "slugone1", identity: "owner", kind: "html", contentSha: "new-v1",
+      slug: "slugone1", identity: "owner", kind: "html",
       size: 1, status: "ready", createdAt: 9, updatedAt: 9,
     },
   })).status, 204);
@@ -1118,18 +1116,18 @@ function uploadedArtifactHarness({ pinned = false } = {}) {
   const v2Manifest = { "/": { sha: "legacy-v2" } };
   const v3Manifest = { "/": { key: "uploads/up-3/0" } };
   pasteSeed.set("ver:1", {
-    ver: 1, kind: "html", contentSha: "v1", size: 2, createdAt: 7, deleted: true, uploadId: "up-1",
+    ver: 1, kind: "html", size: 2, createdAt: 7, deleted: true, uploadId: "up-1",
   });
-  pasteSeed.set("ver:2", { ver: 2, kind: "html", contentSha: "v2", size: 2, createdAt: 8, deleted: false });
+  pasteSeed.set("ver:2", { ver: 2, kind: "html", size: 2, createdAt: 8, deleted: false });
   pasteSeed.set("manifest:2", v2Manifest);
   pasteSeed.set("ver:3", {
-    ver: 3, kind: "markdown", contentSha: "v3", size: 4, createdAt: 9, deleted: false, uploadId: "up-3",
+    ver: 3, kind: "markdown", size: 4, createdAt: 9, deleted: false, uploadId: "up-3",
   });
   pasteSeed.set("manifest:3", v3Manifest);
   pasteSeed.set("maxVer", 3);
   Object.assign(pasteSeed.get("row"), pinned
-    ? { contentSha: "v2", size: 2, manifest: v2Manifest, pinnedVersion: 2 }
-    : { kind: "markdown", contentSha: "v3", size: 4, manifest: v3Manifest });
+    ? { size: 2, manifest: v2Manifest, pinnedVersion: 2 }
+    : { kind: "markdown", size: 4, manifest: v3Manifest });
   const identitySeed = artifactIdentitySeed({ charge: 6 });
   Object.assign(identitySeed.get("entries").slugone1, { servedSize: pinned ? 2 : 4, latestVersion: 3 });
   return artifactHarness({ pasteSeed, identitySeed });
@@ -1146,7 +1144,7 @@ async function appendUploads(h, vers) {
 
 test("Paste.put records the create's upload id on version 1", async () => {
   const row = {
-    slug: "newslug2", identity: "owner", kind: "html", contentSha: "abc", size: 3,
+    slug: "newslug2", identity: "owner", kind: "html", size: 3,
     createdAt: 7, updatedAt: 7, status: "ready", uploadId: "up-1",
   };
   const create = (storage, sent) => new Paste(state(storage)).put({
@@ -1200,6 +1198,53 @@ test("Paste head carries the served version's upload id through append, pin, and
   assert.equal(head(), "up-3");
 });
 
+const hasContentSha = (value) => Object.hasOwn(value, "contentSha");
+
+test("Paste and Identity accept a sent contentSha without storing or answering it", async () => {
+  const created = createIntentHarness();
+  const reserve = { ...createIntentBody(), contentSha: "abc" };
+  assert.equal((await created.identity.reserve(reserve)).status, 200);
+  assert.equal((await created.paste.put({
+    generation: reserve.generation,
+    fingerprint: reserve.intent.fingerprint,
+    row: {
+      slug: reserve.slug, identity: "owner", status: "pending", kind: "html",
+      contentSha: "abc", size: reserve.size, createdAt: 9, updatedAt: 9,
+    },
+  })).status, 204);
+  assert.equal(hasContentSha(created.identityStorage.data.get("entries").newslug2), false);
+  assert.equal(hasContentSha(created.pasteStorage.data.get("row")), false);
+  assert.equal(hasContentSha(created.pasteStorage.data.get("ver:1")), false);
+  assert.equal(hasContentSha((await responseJSON(await created.paste.get())).body), false);
+
+  const h = artifactHarness();
+  assert.equal((await h.paste().append({ ...appendBody(), contentSha: "v2" })).status, 200);
+  assert.equal(hasContentSha(h.pasteStorage.data.get("ver:2")), false);
+  assert.equal(hasContentSha(h.pasteStorage.data.get("row")), false);
+  const versions = await responseJSON(await h.paste().listVersions());
+  assert.equal(versions.body.some(hasContentSha), false);
+
+  const identity = new Identity(state(h.identityStorage));
+  assert.equal((await identity.artifactProject({
+    slug: "slugone1", generation: "generation-1", version: 1, servedSize: 4, contentSha: "v2",
+  })).status, 200);
+  const listed = await responseJSON(await identity.list());
+  assert.equal(listed.body.some(hasContentSha), false);
+});
+
+test("Paste drops a stored contentSha when it rewrites the head and listing entry", async () => {
+  const pasteSeed = artifactPasteSeed();
+  pasteSeed.get("row").contentSha = "v1";
+  pasteSeed.get("versions")[0].contentSha = "v1";
+  const identitySeed = artifactIdentitySeed();
+  identitySeed.get("entries").slugone1.contentSha = "v1";
+  const h = artifactHarness({ pasteSeed, identitySeed });
+
+  assert.equal((await h.paste().append(appendBody())).status, 200);
+  assert.equal(hasContentSha(h.pasteStorage.data.get("row")), false);
+  assert.equal(hasContentSha(h.identityStorage.data.get("entries").slugone1), false);
+});
+
 test("Paste removal names every version's upload and replays it after re-creation", async () => {
   const h = artifactHarness();
   await appendUploads(h, [2, 3]);
@@ -1216,7 +1261,7 @@ test("Paste removal names every version's upload and replays it after re-creatio
     generation: "generation-2",
     fingerprint: "fingerprint-2",
     row: {
-      slug: "slugone1", identity: "other", kind: "html", contentSha: "new",
+      slug: "slugone1", identity: "other", kind: "html",
       size: 1, status: "ready", createdAt: 9, updatedAt: 9, uploadId: "new-1",
     },
   })).status, 204);
