@@ -2561,34 +2561,6 @@ ignored, so listing, versions, and deletes keep working for it. A version
 recorded without an upload id owns no prefix, so deleting it, or its paste,
 removes metadata only.
 
-### Migration off the legacy namespace
-
-An offline operator tool, kept outside this repo, retires `blob/`. No index
-names every paste, so the tool enumerates Paste cells from the fleet bucket
-(`celld cell list Paste`) and reaches each by id over celld's internal
-`/do/<cell>` route, naming the op in an `op` query because that route takes no
-path after the cell (`/do/Paste:<id>?op=get`, `?op=versions`, `?op=rehome`).
-
-1. **Re-home.** For each non-deleted version holding a legacy entry, mint an
-   upload id, server-side copy each referenced object to `uploads/<id>/<n>`,
-   and rewrite that version's manifest (and the head's copy when it serves that
-   version) through the Paste cell's `rehome` operation. The tool is idempotent
-   and resumable. A re-homed file's ETag changes once.
-2. **Verify.** No live manifest references a sha-only entry, smoke and e2e pass,
-   and a sample of pastes reads byte-identical before and after.
-3. **Drop.** Delete `blob/` wholesale, which also frees every legacy object no
-   version references. The dual-read path is then removed.
-
-`rehome` takes the paste's generation, a live version, an upload id of one
-`[A-Za-z0-9_-]` segment of at most 128 bytes (the rule `domain.ValidUploadID`
-applies), and a manifest in the stored shape
-(`{"Files": {"<path>": {"Key": ...}}}`) with at least one entry, every key being
-`uploads/<upload-id>/<n>`. Anything else is refused before any write with
-`invalid-rehome` or `invalid-manifest` (400), so a version can never point at
-another upload's prefix, whose delete would remove its bytes. A legacy document
-that reads only its flat sha is re-homed with a one-entry manifest as well: a
-null manifest would leave it reading `blob/`, which the drop deletes.
-
 ---
 
 ## Metadata storage backends
@@ -3096,6 +3068,11 @@ Paste artifact state and app-room accounting are distinct logical aggregates
 co-located in one physical cell because both are addressed by the app slug. This
 reuses the existing permanent class and avoids a second app-slug coordinator;
 room methods do not depend on a paste row.
+
+An operator tool reaches a Paste cell by id over celld's internal `/do/<cell>`
+route. That route takes no path after the cell, so the op is named in an `op`
+query instead (`/do/Paste:<id>?op=get`, `?op=versions`); a path that names an
+op wins over the query.
 
 ### Concurrency and local atomicity
 
