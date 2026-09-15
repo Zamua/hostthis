@@ -50,7 +50,6 @@ type pasteRow struct {
 	Generation    string `json:"generation"`
 	Status        string `json:"status"`
 	Kind          string `json:"kind"`
-	ContentSHA    string `json:"contentSha"`
 	UploadID      string `json:"uploadId,omitempty"`
 	Size          int    `json:"size"`
 	Name          string `json:"name"`
@@ -68,7 +67,7 @@ func rowOf(p domain.Paste) pasteRow {
 		Slug: p.Slug.String(), Identity: p.Identity.String(),
 		Generation: p.Generation,
 		Status:     string(p.Status), Kind: string(p.Kind),
-		ContentSHA: p.ContentSHA, UploadID: p.UploadID, Size: p.Size, Name: p.Name,
+		UploadID: p.UploadID, Size: p.Size, Name: p.Name,
 		PinnedVersion: p.PinnedVersion,
 		CreatedAt:     p.CreatedAt.UTC().UnixMilli(),
 		UpdatedAt:     p.UpdatedAt.UTC().UnixMilli(),
@@ -98,7 +97,7 @@ func (r pasteRow) domain() domain.Paste {
 		Slug: domain.Slug(r.Slug), Identity: domain.Identity(r.Identity),
 		Generation: r.Generation,
 		Status:     domain.PasteStatus(r.Status), Kind: domain.ContentKind(r.Kind),
-		ContentSHA: r.ContentSHA, UploadID: r.UploadID, Size: r.Size, Name: r.Name,
+		UploadID: r.UploadID, Size: r.Size, Name: r.Name,
 		PinnedVersion: r.PinnedVersion,
 		CreatedAt:     time.UnixMilli(r.CreatedAt).UTC(),
 		UpdatedAt:     time.UnixMilli(r.UpdatedAt).UTC(),
@@ -135,7 +134,7 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 		"size": p.Size, "userCap": userCap,
 		"now": now.UTC().UnixMilli(), "status": string(p.Status),
 		"updatedAt": p.UpdatedAt.UTC().UnixMilli(),
-		"kind":      string(p.Kind), "name": p.Name, "contentSha": p.ContentSHA,
+		"kind":      string(p.Kind), "name": p.Name,
 		"intent": map[string]any{
 			"id": intentID, "kind": "create_paste", "subject": p.Slug.String(),
 			"fingerprint": fingerprint,
@@ -303,7 +302,6 @@ type ownerEntry struct {
 	At          int64  `json:"at"`
 	Kind        string `json:"kind"`
 	Name        string `json:"name"`
-	ContentSHA  string `json:"contentSha"`
 
 	// UpdatedAt and LatestVersion are denormalised into the identity cell so a
 	// listing stays a POINT READ rather than N round trips.
@@ -346,7 +344,7 @@ func (r *PasteRepo) ListByOwner(owner string) ([]domain.Paste, error) {
 		out = append(out, domain.Paste{
 			Slug: domain.Slug(e.Slug), Identity: domain.Identity(owner),
 			Status: domain.PasteStatus(e.Status), Kind: domain.ContentKind(e.Kind),
-			ContentSHA: e.ContentSHA, Size: e.ServedSize, StoredBytes: e.ChargedSize,
+			Size: e.ServedSize, StoredBytes: e.ChargedSize,
 			Name:      e.Name,
 			CreatedAt: at, UpdatedAt: updated, LatestVersion: latest,
 			PinnedVersion: e.PinnedVersion,
@@ -501,9 +499,7 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 	}
 	status, err := r.callArtifactMutation(ctx, "/paste/append", slug, map[string]any{
 		"opId": opID, "generation": generation, "userCap": userCap,
-		// contentSha is sent empty: a version staged under an upload has no
-		// sha, and a cell predating uploadId still stores a well-formed row.
-		"kind": string(kind), "contentSha": "", "uploadId": uploadID, "size": size,
+		"kind": string(kind), "uploadId": uploadID, "size": size,
 		"manifest": manifest, "now": now.UTC().UnixMilli(),
 	}, &res)
 	// Only an identified refusal is definitive: the service deletes the upload's
@@ -538,14 +534,13 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 // ListVersions is a single-cell read: the appended versions live beside the row.
 func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	var wire []struct {
-		Ver        int             `json:"ver"`
-		Kind       string          `json:"kind"`
-		ContentSHA string          `json:"contentSha"`
-		UploadID   string          `json:"uploadId"`
-		Size       int             `json:"size"`
-		CreatedAt  int64           `json:"createdAt"`
-		Deleted    bool            `json:"deleted"`
-		Manifest   json.RawMessage `json:"manifest"`
+		Ver       int             `json:"ver"`
+		Kind      string          `json:"kind"`
+		UploadID  string          `json:"uploadId"`
+		Size      int             `json:"size"`
+		CreatedAt int64           `json:"createdAt"`
+		Deleted   bool            `json:"deleted"`
+		Manifest  json.RawMessage `json:"manifest"`
 	}
 	status, err := r.call(context.Background(), http.MethodGet, "/paste/versions", "slug", slug.String(), nil, &wire)
 	if err != nil {
@@ -558,7 +553,7 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	for _, w := range wire {
 		out = append(out, domain.Version{
 			Slug: slug, VerNum: w.Ver, Kind: domain.ContentKind(w.Kind),
-			ContentSHA: w.ContentSHA, UploadID: w.UploadID, Size: w.Size,
+			UploadID: w.UploadID, Size: w.Size,
 			Manifest:  r.storedManifest(w.Manifest, slug, w.Ver),
 			CreatedAt: time.UnixMilli(w.CreatedAt).UTC(), Deleted: w.Deleted,
 		})

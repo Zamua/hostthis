@@ -95,7 +95,6 @@ func pasteOf(slug, identity string, size int) domain.Paste {
 		Generation:    generationOf(slug),
 		Identity:      domain.Identity(identity),
 		Kind:          domain.KindHTML,
-		ContentSHA:    "sha-" + slug + "-v1",
 		UploadID:      "up-" + slug + "-v1",
 		Size:          size,
 		PinnedVersion: 0,
@@ -126,7 +125,7 @@ func conformInsertAndGet(t *testing.T, r conformanceRepo) {
 		t.Fatalf("get: %v", err)
 	}
 	if got.Slug != p.Slug || got.Identity != p.Identity || got.Kind != p.Kind ||
-		got.ContentSHA != p.ContentSHA || got.UploadID != p.UploadID || got.Size != p.Size || got.Name != p.Name {
+		got.UploadID != p.UploadID || got.Size != p.Size || got.Name != p.Name {
 		t.Fatalf("round-trip mismatch:\n got  %+v\n want %+v", got, p)
 	}
 }

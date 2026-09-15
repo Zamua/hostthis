@@ -2555,8 +2555,8 @@ without a key, like a paste whose row carries no manifest, is unreadable:
 - `get` answers the standard not found (exit 4).
 - Neither touches the blob store.
 
-Such a record still decodes: fields no read uses, such as a content sha, are
-ignored, so listing, versions, and deletes keep working for it. A version
+Such a record still decodes: stored or wire fields outside the current shape
+are ignored, so listing, versions, and deletes keep working for it. A version
 recorded without an upload id owns no prefix, so deleting it, or its paste,
 removes metadata only.
 

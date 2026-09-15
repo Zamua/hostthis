@@ -42,11 +42,10 @@ func serveOne(srv *Server, target, ifNoneMatch string) *httptest.ResponseRecorde
 
 func TestServePaste_KeyedDocumentReadsAndValidatesOnItsKey(t *testing.T) {
 	const key = "uploads/u1/0"
-	blobs := &recordingBlobs{bodies: map[string]string{key: "<h1>keyed</h1>", "stale": "<h1>wrong</h1>"}}
+	blobs := &recordingBlobs{bodies: map[string]string{key: "<h1>keyed</h1>"}}
 	srv := &Server{
 		Pastes: stubPasteReader{p: domain.Paste{
-			// The flat sha names no bytes; the manifest's key does.
-			Slug: "abc23456", Kind: domain.KindHTML, ContentSHA: "stale", UpdatedAt: time.Now().UTC(),
+			Slug: "abc23456", Kind: domain.KindHTML, UpdatedAt: time.Now().UTC(),
 			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: key}),
 		}},
 		Blobs: blobs,
@@ -88,7 +87,7 @@ func TestServePaste_RawMarkdownReadsItsKey(t *testing.T) {
 // never reaches the byte plane, even while an object under its old sha exists.
 func TestServePaste_KeylessRootIsNotFound(t *testing.T) {
 	for name, p := range map[string]domain.Paste{
-		"row without a manifest": {Slug: "abc23456", Status: domain.PasteStatusReady, Kind: domain.KindHTML, ContentSHA: "deadbeef"},
+		"row without a manifest": {Slug: "abc23456", Status: domain.PasteStatusReady, Kind: domain.KindHTML},
 		"root without a key": {Slug: "abc23456", Status: domain.PasteStatusReady, Kind: domain.KindMarkdown,
 			Manifest: domain.DocumentManifest(domain.ManifestEntry{Size: 15})},
 	} {

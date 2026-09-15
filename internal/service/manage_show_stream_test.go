@@ -128,7 +128,7 @@ func (u *entryRecordingUnit) Read(_ context.Context, e domain.ManifestEntry) (io
 // Show reads a document through its manifest root entry and a directory
 // through its index.html.
 func TestShow_ReadsTheRootEntry(t *testing.T) {
-	keyed := domain.Paste{Identity: showOwner, ContentSHA: "stale",
+	keyed := domain.Paste{Identity: showOwner,
 		Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: "uploads/u/0"})}
 	site := domain.Paste{Identity: showOwner, Kind: domain.KindSite, Manifest: domain.Manifest{
 		Files: map[string]domain.ManifestEntry{"index.html": {Key: "uploads/s/0"}, "app.js": {Key: "uploads/s/1"}},
@@ -158,7 +158,7 @@ func TestShow_ReadsTheRootEntry(t *testing.T) {
 // and never asks the byte plane.
 func TestShow_KeylessRootIsNotFound(t *testing.T) {
 	for name, p := range map[string]domain.Paste{
-		"row without a manifest": {Identity: showOwner, ContentSHA: "abc123"},
+		"row without a manifest": {Identity: showOwner},
 		"root without a key":     {Identity: showOwner, Manifest: domain.DocumentManifest(domain.ManifestEntry{Size: 3})},
 		"directory without an index": {Identity: showOwner, Kind: domain.KindSite, Manifest: domain.Manifest{
 			Files: map[string]domain.ManifestEntry{"app.js": {Key: "uploads/s/1"}},

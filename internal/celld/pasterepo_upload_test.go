@@ -39,7 +39,6 @@ func TestInsertRowCarriesUploadID(t *testing.T) {
 		return nil, nil
 	}}
 	p := createPaste()
-	p.ContentSHA = ""
 	p.UploadID = "upload-1"
 	p.Manifest = domain.DocumentManifest(domain.ManifestEntry{Key: domain.UploadObjectKey("upload-1", 0)})
 
@@ -65,8 +64,8 @@ func TestAppendCarriesUploadID(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 	body := f.last().fields(t)
-	if body["uploadId"] != "upload-2" || body["contentSha"] != "" {
-		t.Fatalf("append uploadId/contentSha = %#v/%#v, want upload-2 and empty", body["uploadId"], body["contentSha"])
+	if body["uploadId"] != "upload-2" {
+		t.Fatalf("append uploadId = %#v, want upload-2", body["uploadId"])
 	}
 	if got := rootKey(t, body["manifest"]); got != "uploads/upload-2/0" {
 		t.Fatalf("append root key = %#v, want uploads/upload-2/0", got)
@@ -76,7 +75,7 @@ func TestAppendCarriesUploadID(t *testing.T) {
 func TestListVersionsReadsUploadIDs(t *testing.T) {
 	f := fixedCell(http.StatusOK, `[
 		{"ver":2,"kind":"html","uploadId":"upload-2","size":4,"createdAt":1},
-		{"ver":1,"kind":"html","contentSha":"abc","size":3,"createdAt":1,
+		{"ver":1,"kind":"html","size":3,"createdAt":1,
 			"manifest":{"Files":{"/":{"SHA":"abc","Size":3}}}}
 	]`)
 	repo := NewPasteRepo("https://cell", f.client())
@@ -84,7 +83,7 @@ func TestListVersionsReadsUploadIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list versions: %v", err)
 	}
-	if len(vers) != 2 || vers[0].UploadID != "upload-2" || vers[1].UploadID != "" || vers[1].ContentSHA != "abc" {
+	if len(vers) != 2 || vers[0].UploadID != "upload-2" || vers[1].UploadID != "" || vers[1].Size != 3 {
 		t.Fatalf("versions = %+v, want v2 with upload-2 and a v1 recorded without one", vers)
 	}
 	// A stored entry holding only a sha decodes, and names no bytes.
@@ -93,13 +92,41 @@ func TestListVersionsReadsUploadIDs(t *testing.T) {
 	}
 }
 
-// Stored rows may still carry content shas. They decode, and name no bytes.
-func TestGetDecodesRowsCarryingContentSHAs(t *testing.T) {
+// A Worker answer may still carry contentSha; every read decodes past it.
+func TestReadsDecodeAnswersCarryingContentSha(t *testing.T) {
+	answer := func(body string) *PasteRepo {
+		return NewPasteRepo("https://cell", fixedCell(http.StatusOK, body).client())
+	}
+	t.Run("get", func(t *testing.T) {
+		p, err := answer(`{"slug":"slugone1","generation":"generation-1","status":"ready",
+			"kind":"html","contentSha":"abc","uploadId":"up-1","size":3}`).Get("slugone1")
+		if err != nil || p.UploadID != "up-1" || p.Size != 3 {
+			t.Fatalf("get = (%+v, %v), want the row decoded", p, err)
+		}
+	})
+	t.Run("versions", func(t *testing.T) {
+		vers, err := answer(`[{"ver":2,"kind":"html","contentSha":"abc","uploadId":"up-2",
+			"size":4,"createdAt":1}]`).ListVersions("slugone1")
+		if err != nil || len(vers) != 1 || vers[0].UploadID != "up-2" || vers[0].Size != 4 {
+			t.Fatalf("versions = (%+v, %v), want one decoded version", vers, err)
+		}
+	})
+	t.Run("owner listing", func(t *testing.T) {
+		listed, err := answer(`[{"slug":"slugone1","status":"ready","kind":"html","contentSha":"abc",
+			"servedSize":3,"chargedSize":3,"at":7}]`).ListByOwner("owner")
+		if err != nil || len(listed) != 1 || listed[0].Size != 3 {
+			t.Fatalf("listing = (%+v, %v), want one decoded entry", listed, err)
+		}
+	})
+}
+
+// Stored rows without object keys decode, and name no bytes.
+func TestGetDecodesRowsWithoutObjectKeys(t *testing.T) {
 	for name, body := range map[string]string{
 		"row without a manifest": `{"slug":"slugone1","generation":"generation-1","status":"ready",
-			"kind":"html","contentSha":"abc","size":3}`,
+			"kind":"html","size":3}`,
 		"entry holding only a sha": `{"slug":"slugone1","generation":"generation-1","status":"ready",
-			"kind":"html","contentSha":"abc","size":3,
+			"kind":"html","size":3,
 			"manifest":{"Files":{"/":{"SHA":"abc","Size":3,"CompressedSize":2,"ContentType":"","Kind":"html"}}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {

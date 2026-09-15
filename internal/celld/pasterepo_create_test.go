@@ -17,7 +17,7 @@ func createPaste() domain.Paste {
 	return domain.Paste{
 		Slug: "create23", Generation: "generation-1", Identity: "key:owner",
 		Status: domain.PasteStatusPending, Kind: domain.KindHTML,
-		ContentSHA: "sha", Size: 3, CreatedAt: at, UpdatedAt: at,
+		Size: 3, CreatedAt: at, UpdatedAt: at,
 	}
 }
 

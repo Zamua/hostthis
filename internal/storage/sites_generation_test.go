@@ -51,8 +51,7 @@ func TestSitesReplaceFencesReplacementIncarnation(t *testing.T) {
 	}
 	replacement := old
 	replacement.Generation = "replacement-generation"
-	replacement.ContentSHA = "replacement-sha"
-	replacement.Manifest = siteManifest(replacement.ContentSHA)
+	replacement.Manifest = siteManifest("replacement-key")
 	replacement.CreatedAt = at.Add(time.Second)
 	replacement.UpdatedAt = replacement.CreatedAt
 	repo := &generationSwapSiteRepo{MemRepo: inner, old: old, replacement: replacement}
@@ -68,7 +67,7 @@ func TestSitesReplaceFencesReplacementIncarnation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get replacement: %v", err)
 	}
-	if got.Generation != replacement.Generation || got.ContentSHA != replacement.ContentSHA || got.LatestVersion != 1 {
+	if got.Generation != replacement.Generation || got.RootEntry().Key != "replacement-key" || got.LatestVersion != 1 {
 		t.Fatalf("replacement changed: got %+v", got)
 	}
 }
