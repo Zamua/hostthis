@@ -291,6 +291,14 @@ func TestServerShutdownStopsListeningAndCloseForcesConnections(t *testing.T) {
 		t.Fatalf("dial active SSH connection: %v", err)
 	}
 	defer client.Close() //nolint:errcheck
+	// Dial returns once the client's handshake finishes, before the server
+	// tracks the connection; a channel open round-trips through the server's
+	// post-tracking loop, so Shutdown cannot run ahead of it.
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("open session on active SSH connection: %v", err)
+	}
+	defer sess.Close() //nolint:errcheck
 	clientDone := make(chan error, 1)
 	go func() { clientDone <- client.Wait() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
