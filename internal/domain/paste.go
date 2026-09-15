@@ -36,7 +36,6 @@ type Paste struct {
 	Identity   Identity    // "key:<fp>" or "ip:<subnet>" - quota AND capability gate
 	Status     PasteStatus // pending | ready | failed (blob-write lifecycle)
 	Kind       ContentKind // html | markdown of the currently-served version
-	ContentSHA string      // stored descriptor field; no read resolves bytes through it
 	// UploadID names the served version's object prefix. Empty for a version
 	// recorded without one, which owns no objects.
 	UploadID string
@@ -69,14 +68,13 @@ type Paste struct {
 // reused and `versions` still shows the history, but the content is gone
 // (quota SUMs skip it; serving falls back to MAX of non-deleted ver_num).
 type Version struct {
-	Slug       Slug
-	VerNum     int
-	Kind       ContentKind
-	ContentSHA string
-	UploadID   string // prefix holding this version's objects; empty when it owns none
-	Size       int
-	CreatedAt  time.Time
-	Deleted    bool
+	Slug      Slug
+	VerNum    int
+	Kind      ContentKind
+	UploadID  string // prefix holding this version's objects; empty when it owns none
+	Size      int
+	CreatedAt time.Time
+	Deleted   bool
 
 	// Manifest is the version's content. Empty when the stored row carries no
 	// manifest, which leaves nothing to read.

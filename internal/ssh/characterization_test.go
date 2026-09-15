@@ -841,7 +841,7 @@ func TestExitCodes_Characterization(t *testing.T) {
 	}
 	keyless := domain.Paste{
 		Slug: "unkeyed3", Generation: "generation-unkeyed", Identity: owned.Identity,
-		Status: domain.PasteStatusReady, Kind: domain.KindHTML, ContentSHA: "0123456789abcdef",
+		Status: domain.PasteStatusReady, Kind: domain.KindHTML,
 		Size: 8, CreatedAt: owned.CreatedAt, UpdatedAt: owned.CreatedAt,
 	}
 	if err := s.repo.InsertWithQuotaCheck(context.Background(), keyless, 0, owned.CreatedAt); err != nil {

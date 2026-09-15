@@ -39,7 +39,7 @@ func TestSitesReplaceFencesReplacementIncarnation(t *testing.T) {
 	inner := NewMemRepo()
 	sites := NewSites(inner)
 	initial := domain.Site{
-		Slug: "site2345", Identity: "key:owner", Manifest: siteManifest("old-sha"),
+		Slug: "site2345", Identity: "key:owner", Manifest: siteManifest("old-key"),
 		CreatedAt: at, UpdatedAt: at,
 	}
 	if err := sites.InsertWithQuotaCheck(context.Background(), initial, 5, 0, at); err != nil {
@@ -51,15 +51,14 @@ func TestSitesReplaceFencesReplacementIncarnation(t *testing.T) {
 	}
 	replacement := old
 	replacement.Generation = "replacement-generation"
-	replacement.ContentSHA = "replacement-sha"
-	replacement.Manifest = siteManifest(replacement.ContentSHA)
+	replacement.Manifest = siteManifest("replacement-key")
 	replacement.CreatedAt = at.Add(time.Second)
 	replacement.UpdatedAt = replacement.CreatedAt
 	repo := &generationSwapSiteRepo{MemRepo: inner, old: old, replacement: replacement}
 	sites = NewSites(repo)
 
 	update := initial
-	update.Manifest = siteManifest("update-sha")
+	update.Manifest = siteManifest("update-key")
 	update.UpdatedAt = at.Add(2 * time.Second)
 	if err := sites.ReplaceWithQuotaCheck(context.Background(), update, 5, 0, update.UpdatedAt); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("replace error = %v, want ErrNotFound", err)
@@ -68,7 +67,7 @@ func TestSitesReplaceFencesReplacementIncarnation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get replacement: %v", err)
 	}
-	if got.Generation != replacement.Generation || got.ContentSHA != replacement.ContentSHA || got.LatestVersion != 1 {
+	if got.Generation != replacement.Generation || got.RootEntry().Key != "replacement-key" || got.LatestVersion != 1 {
 		t.Fatalf("replacement changed: got %+v", got)
 	}
 }

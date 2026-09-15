@@ -109,7 +109,7 @@ func TestDelete_VersionWithoutUploadRemovesMetadataOnly(t *testing.T) {
 	other := createReady(t, up, "<!doctype html><p>other</p>")
 	unkeyed := domain.Paste{
 		Slug: "unkeyed2", Generation: "generation-unkeyed", Identity: bytesOwner,
-		Status: domain.PasteStatusReady, Kind: domain.KindHTML, ContentSHA: "0123456789abcdef",
+		Status: domain.PasteStatusReady, Kind: domain.KindHTML,
 		Size: 28, CreatedAt: fixedNow, UpdatedAt: fixedNow,
 	}
 	if err := repo.InsertWithQuotaCheck(context.Background(), unkeyed, 0, fixedNow); err != nil {

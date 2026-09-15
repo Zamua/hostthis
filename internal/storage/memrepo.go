@@ -92,14 +92,13 @@ func (p *memPaste) served() (domain.Version, bool) {
 }
 
 // rollServed copies the served version's fields onto the row: the row's kind,
-// sha, manifest and size are a VIEW of the served version.
+// upload id, manifest and size are a VIEW of the served version.
 func (p *memPaste) rollServed() {
 	v, ok := p.served()
 	if !ok {
 		return
 	}
 	p.row.Kind = v.Kind
-	p.row.ContentSHA = v.ContentSHA
 	p.row.UploadID = v.UploadID
 	p.row.Manifest = v.Manifest
 	p.row.Size = v.Size
@@ -148,7 +147,7 @@ func (r *MemRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, userCa
 	// v1 is SEEDED into the version list: one list holds every version, so no
 	// reader special-cases the first.
 	mp.versions = append(mp.versions, domain.Version{
-		Slug: p.Slug, VerNum: 1, Kind: p.Kind, ContentSHA: p.ContentSHA, UploadID: p.UploadID,
+		Slug: p.Slug, VerNum: 1, Kind: p.Kind, UploadID: p.UploadID,
 		Size: p.Size, CreatedAt: p.CreatedAt, Manifest: p.Manifest,
 	})
 	r.pastes[p.Slug] = mp
