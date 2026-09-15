@@ -14,7 +14,7 @@ func TestPaste_RootEntry(t *testing.T) {
 	}{
 		"document":    {Paste{Manifest: DocumentManifest(ManifestEntry{Key: "uploads/d/0"})}, "uploads/d/0"},
 		"directory":   {Paste{Manifest: Manifest{Files: map[string]ManifestEntry{"index.html": {Key: "uploads/s/0"}}}}, "uploads/s/0"},
-		"no manifest": {Paste{Kind: KindHTML, ContentSHA: "abc123", Size: 3}, ""},
+		"no manifest": {Paste{Kind: KindHTML, Size: 3}, ""},
 		"no root":     {Paste{Manifest: Manifest{Files: map[string]ManifestEntry{"app.js": {Key: "uploads/s/1"}}}}, ""},
 	} {
 		if got := tc.paste.RootEntry().Key; got != tc.want {

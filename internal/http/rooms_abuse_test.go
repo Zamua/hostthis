@@ -84,10 +84,9 @@ func TestRoomsHTTP_CreateUnknownAppIs404(t *testing.T) {
 func TestRoomsHTTP_CreateLivePasteAppSucceeds(t *testing.T) {
 	now := time.Now().UTC()
 	livePaste := domain.Paste{
-		Slug:       "appz2345",
-		Kind:       domain.KindHTML,
-		ContentSHA: "sha",
-		UpdatedAt:  now,
+		Slug:      "appz2345",
+		Kind:      domain.KindHTML,
+		UpdatedAt: now,
 	}
 	srv := &Server{
 		ApexDomain: "hostthis.test",

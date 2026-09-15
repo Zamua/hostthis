@@ -311,7 +311,6 @@ export class Identity {
         latestVersion: 1,
         kind: body.kind ?? "",
         name: body.name ?? "",
-        contentSha: body.contentSha ?? "",
         createFingerprint: body.intent.fingerprint,
       };
       const firstSeen = await tx.get("firstSeen");
@@ -560,8 +559,9 @@ export class Identity {
         pinnedVersion: body.pinnedVersion ?? existing?.pinnedVersion ?? 0,
         kind: body.kind ?? existing?.kind ?? "",
         name: body.name ?? existing?.name ?? "",
-        contentSha: body.contentSha ?? existing?.contentSha ?? "",
       };
+      // A stored contentSha would describe a version that may no longer be served.
+      delete entries[body.slug].contentSha;
       const updates = new Map([["entries", entries]]);
       if (!decision) {
         updates.set(key, { version: 0, allocated: body.charge, target: body.charge });
@@ -625,11 +625,13 @@ export class Identity {
         return Response.json({ error: "projection-version-mismatch" }, { status: 409 });
       }
       entry.servedSize = body.servedSize;
-      for (const key of ["status", "kind", "name", "contentSha", "latestVersion", "pinnedVersion", "updatedAt"]) {
+      for (const key of ["status", "kind", "name", "latestVersion", "pinnedVersion", "updatedAt"]) {
         if (body[key] !== undefined && body[key] !== null) {
           entry[key] = body[key];
         }
       }
+      // A stored contentSha would describe a version that may no longer be served.
+      delete entry.contentSha;
       await tx.put("entries", entries);
       return Response.json({ updated: true });
     });
@@ -1784,6 +1786,8 @@ export class Paste {
       if (await tx.get("artifactTombstone")) {
         return Response.json({ error: "slug-taken" }, { status: 409 });
       }
+      // Not part of the row; a caller may still send it.
+      delete body.row.contentSha;
       body.row.generation = body.generation;
       body.row.accountingVersion = 0;
       // v1 is SEEDED as a version rather than living only on the row, so no
@@ -1798,8 +1802,8 @@ export class Paste {
         ["row", body.row],
         ["createFingerprint", body.fingerprint],
         [versionKey(1), withUploadId({
-          ver: 1, kind: body.row.kind, contentSha: body.row.contentSha,
-          size: body.row.size, createdAt: body.row.createdAt, deleted: false,
+          ver: 1, kind: body.row.kind, size: body.row.size,
+          createdAt: body.row.createdAt, deleted: false,
         }, body.row.uploadId)],
         ["maxVer", 1],
       ]);
@@ -1982,7 +1986,6 @@ export class Paste {
           pinnedVersion: row.pinnedVersion ?? 0,
           kind: row.kind,
           name: row.name ?? "",
-          contentSha: row.contentSha ?? "",
         });
         seed = await response.json();
       } catch {
@@ -2057,7 +2060,6 @@ export class Paste {
       status: row.status,
       kind: row.kind,
       name: row.name ?? "",
-      contentSha: row.contentSha ?? "",
       latestVersion: pending.latestVersion,
       pinnedVersion: row.pinnedVersion ?? 0,
       updatedAt: row.updatedAt ?? row.createdAt ?? 0,
@@ -2400,7 +2402,6 @@ export class Paste {
       mutation: withUploadId({
         ver: nextVer,
         kind: body.kind,
-        contentSha: body.contentSha,
         size: body.size,
         createdAt: body.now,
         deleted: false,
@@ -2511,18 +2512,18 @@ export class Paste {
   }
 
   // Roll the row onto the version the public URL serves: the pin when set,
-  // otherwise the newest live one. The row's kind, sha, manifest and size are a
-  // VIEW of that version, so every mutation that can change which version is
-  // served has to pass through here or the view goes stale - which is how a pin
-  // ended up moving the marker without moving the content.
+  // otherwise the newest live one. The row's kind, upload id, manifest and size
+  // are a VIEW of that version, so every mutation that can change which version
+  // is served has to pass through here or the view goes stale.
   //
   // row.size is the SERVED version's size, NOT the sum of live versions. The
   // quota total is a different number, kept in the identity cell, and conflating
   // them makes a multi-version paste report its whole history as its size.
   async rollServed(storage, row, versions, fresh = null) {
     const live = versions.filter((v) => !v.deleted);
+    // A stored contentSha would describe a version that may no longer be served.
+    delete row.contentSha;
     if (!live.length) {
-      row.contentSha = "";
       row.uploadId = "";
       row.manifest = null;
       row.size = 0;
@@ -2533,7 +2534,6 @@ export class Paste {
     if (row.pinnedVersion && v.ver !== row.pinnedVersion) {
       row.pinnedVersion = 0;
     }
-    row.contentSha = v.contentSha;
     row.uploadId = v.uploadId ?? "";
     row.kind = v.kind;
     row.manifest = v.ver === fresh?.ver

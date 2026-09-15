@@ -31,7 +31,7 @@ func TestReleaseReplayDoesNotUnderCharge(t *testing.T) {
 		return domain.Paste{
 			Slug: domain.Slug(slug), Identity: domain.Identity(owner),
 			Status: domain.PasteStatusPending, Kind: domain.KindMarkdown,
-			ContentSHA: "sha", Size: size, CreatedAt: now, UpdatedAt: now,
+			Size: size, CreatedAt: now, UpdatedAt: now,
 		}
 	}
 	doomed, survivor := mk("rp123456", 700), mk("rp223456", 300)

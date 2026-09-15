@@ -55,7 +55,6 @@ func seedGenerationPaste(t *testing.T, repo *storage.MemRepo) domain.Paste {
 		Identity:   "key:owner",
 		Status:     domain.PasteStatusReady,
 		Kind:       domain.KindHTML,
-		ContentSHA: "old-sha",
 		Size:       10,
 		CreatedAt:  at,
 		UpdatedAt:  at,
@@ -70,7 +69,6 @@ func armGenerationReplacement(t *testing.T, repo *generationSwapRepo, old domain
 	t.Helper()
 	replacement := old
 	replacement.Generation = "replacement-generation"
-	replacement.ContentSHA = "replacement-sha"
 	replacement.Size = 7
 	replacement.CreatedAt = old.CreatedAt.Add(time.Second)
 	replacement.UpdatedAt = replacement.CreatedAt
@@ -92,10 +90,10 @@ func assertReplacementUnchanged(t *testing.T, repo *storage.MemRepo, want domain
 	if err != nil {
 		t.Fatalf("get replacement: %v", err)
 	}
-	if got.Generation != want.Generation || got.ContentSHA != want.ContentSHA ||
+	if got.Generation != want.Generation || got.Size != want.Size ||
 		got.PinnedVersion != want.PinnedVersion || got.LatestVersion != 1 {
-		t.Fatalf("replacement changed: got %+v, want generation=%q sha=%q pin=%d latest=1",
-			got, want.Generation, want.ContentSHA, want.PinnedVersion)
+		t.Fatalf("replacement changed: got %+v, want generation=%q size=%d pin=%d latest=1",
+			got, want.Generation, want.Size, want.PinnedVersion)
 	}
 }
 

@@ -79,7 +79,7 @@ func TestOwnerListingSeparatesServedAndChargedBytes(t *testing.T) {
 	f := fixedCell(http.StatusOK, `[{
 		"slug":"slugone1","status":"ready","kind":"html",
 		"servedSize":2,"chargedSize":6,"at":7000,"updatedAt":8000,
-		"latestVersion":2,"contentSha":"v1"
+		"latestVersion":2
 	}]`)
 	repo := NewPasteRepo("https://cell", f.client())
 	listed, err := repo.ListByOwner("owner")
