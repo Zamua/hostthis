@@ -936,12 +936,25 @@ browser; the server never renders markdown on the read path. Heading
 anchors and the `#<heading-slug>` deep-link contract behave as they do
 there, including the load-order rule (see "Deep links").
 
-**Navigation.** The shell draws a left sidebar file tree built from the
-file list, breadcrumbs for the current path, and a right sidebar table of
-contents built from the current document's headings. A search bar matches
+**Navigation.** The shell draws a left sidebar that browses the file list
+ONE level at a time - the folder the reader is in, its child folders and
+its files, with a control for the parent folder - breadcrumbs for the
+current path, and a right sidebar table of contents built from the
+current document's headings. A whole tree is not drawn: depth costs
+indentation and rows without bounding either, while search reaches any
+file at any depth. Entering a child folder moves the sidebar alone; the
+document changes only when a file is opened, and opening one from
+anywhere puts the sidebar in that document's folder. A search bar matches
 file paths, headings and body text, entirely in the browser. Both
 sidebars collapse to drawers on a narrow screen, so a base reads on a
 phone.
+
+The breadcrumb trail occupies ONE line. Where the path does not fit, its
+middle collapses into a control that expands the whole path on demand and
+collapses it again, and the first and last segments always survive.
+Fitting is measured rather than counted, since four long names overflow a
+bar that ten short ones sit in. Every visible segment moves the sidebar to
+that folder.
 
 Opening a document replaces the rendered content in place rather than
 reloading the page, and the URL follows it, so a link to any document
@@ -953,8 +966,9 @@ listing of what is under it, the same listing the root falls back to.
 Bodies are indexed lazily in the background, bounded at **500 markdown
 files or 8 MiB of markdown**, whichever comes first, and indexed in
 path-sort order so the bound falls in a deterministic place. Beyond
-either limit the interface reports the index as partial: a search box
-that silently returns fewer results than the base holds is worse than
+either limit, or where a document could not be read, the interface
+reports the index as partial and names which applies: a search box that
+silently returns fewer results than the base holds is worse than
 one that states its limit. Path matching still covers every file in the
 base, because paths come from the file list rather than the bodies;
 heading and body matching cover the indexed files.

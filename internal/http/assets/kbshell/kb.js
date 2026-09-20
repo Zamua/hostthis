@@ -59,6 +59,15 @@
     return m ? m[0] : "";
   }
 
+  // In path mode a base is printed as "<apex>/p/<slug>", with no trailing
+  // slash, so a relative link in the root document resolves a level ABOVE the
+  // base and leaves it. The slash is added before anything renders, so every
+  // link a document draws resolves inside the base.
+  function normalizeRootURL() {
+    if (!base || location.pathname !== base) return;
+    history.replaceState(null, "", base + "/" + location.search + location.hash);
+  }
+
   function pathOf(pathname) {
     var p = pathname;
     if (base && p.indexOf(base) === 0) p = p.slice(base.length);
@@ -91,34 +100,135 @@
 
   // -- chrome ---------------------------------------------------------------
 
+  // The trail is ONE line. When the path does not fit, its middle collapses
+  // into a button that expands it again, and the expanded trail may wrap. Fit
+  // is MEASURED at every render: four long names overflow a bar that ten short
+  // ones sit in comfortably, so counting segments decides it wrong.
+  var crumbPath = "";
+  var crumbIsFile = false;
+  var crumbExpanded = false;
+
   function setCrumbs(path, isFile) {
-    crumbsEl.textContent = "";
-    var root = document.createElement("a");
-    root.className = "kb-crumb";
-    root.dataset.crumbKind = "root";
-    root.href = base + "/";
-    root.textContent = "root";
-    root.addEventListener("click", function (ev) {
+    crumbPath = path;
+    crumbIsFile = isFile;
+    crumbExpanded = false;
+    drawCrumbs();
+  }
+
+  function crumbsOverflow() { return crumbsEl.scrollWidth > crumbsEl.clientWidth; }
+
+  function makeSep() {
+    var sep = document.createElement("span");
+    sep.className = "kb-sep";
+    sep.textContent = "/";
+    return sep;
+  }
+
+  function makeRootCrumb() {
+    var a = document.createElement("a");
+    a.className = "kb-crumb";
+    a.dataset.crumbKind = "root";
+    a.href = base + "/";
+    a.textContent = "root";
+    a.addEventListener("click", function (ev) {
       if (!plainClick(ev)) return;
       ev.preventDefault();
       navigate("", "");
     });
-    crumbsEl.appendChild(root);
-    if (!path) return;
-    var parts = path.replace(/\/+$/, "").split("/");
-    parts.forEach(function (name, i) {
-      var sep = document.createElement("span");
-      sep.className = "kb-sep";
-      sep.textContent = "/";
-      crumbsEl.appendChild(sep);
-      var crumb = document.createElement("span");
-      crumb.className = "kb-crumb";
-      var last = i === parts.length - 1;
-      crumb.dataset.crumbKind = last && isFile ? "file" : "dir";
-      if (last) crumb.setAttribute("aria-current", "page");
-      crumb.textContent = name;
-      crumbsEl.appendChild(crumb);
+    return a;
+  }
+
+  function makeCrumb(name, path, isFileCrumb, isLast) {
+    var crumb;
+    if (isFileCrumb) {
+      crumb = document.createElement("span");
+      crumb.dataset.crumbKind = "file";
+    } else {
+      crumb = document.createElement("button");
+      crumb.type = "button";
+      crumb.dataset.crumbKind = "dir";
+      // A folder crumb moves the SIDEBAR. Which document is open is the
+      // reader's business, and a folder is not a document.
+      crumb.addEventListener("click", function () {
+        if (tree) tree.show(path);
+      });
+    }
+    crumb.className = "kb-crumb";
+    crumb.textContent = name;
+    if (isLast) crumb.setAttribute("aria-current", "page");
+    return crumb;
+  }
+
+  function makeMoreCrumb() {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "kb-crumb kb-crumb-more";
+    btn.dataset.crumbKind = "ellipsis";
+    btn.textContent = "…";
+    btn.setAttribute("aria-expanded", String(crumbExpanded));
+    btn.setAttribute("aria-label", crumbExpanded ? "Collapse this path" : "Show every folder in this path");
+    btn.addEventListener("click", function () {
+      crumbExpanded = !crumbExpanded;
+      drawCrumbs();
+      var moved = crumbsEl.querySelector(".kb-crumb-more");
+      if (moved) moved.focus();
     });
+    return btn;
+  }
+
+  // hideOrder is the order middle segments give way in: the centre first, then
+  // outward taking the root side before the file side, so the folders nearest
+  // the current file survive longest. The first and last segments never go.
+  function hideOrder(n) {
+    var centre = Math.floor((n - 1) / 2);
+    var order = [centre];
+    var left = centre - 1;
+    var right = centre + 1;
+    while (left >= 1 || right <= n - 2) {
+      if (left >= 1) order.push(left--);
+      if (right <= n - 2) order.push(right++);
+    }
+    return order;
+  }
+
+  function drawCrumbs() {
+    crumbsEl.textContent = "";
+    crumbsEl.classList.toggle("expanded", crumbExpanded);
+    crumbsEl.classList.remove("tight");
+    crumbsEl.appendChild(makeRootCrumb());
+    if (!crumbPath) return;
+
+    var parts = crumbPath.replace(/\/+$/, "").split("/");
+    var items = parts.map(function (name, i) {
+      var last = i === parts.length - 1;
+      var sep = makeSep();
+      var crumb = makeCrumb(name, parts.slice(0, i + 1).join("/"), last && crumbIsFile, last);
+      crumbsEl.appendChild(sep);
+      crumbsEl.appendChild(crumb);
+      return { sep: sep, crumb: crumb };
+    });
+
+    if (crumbExpanded) {
+      crumbsEl.appendChild(makeSep());
+      crumbsEl.appendChild(makeMoreCrumb());
+      return;
+    }
+    // Two segments leave no middle to collapse, and a trail that fits keeps
+    // every segment: the control exists only where it does something.
+    if (items.length < 3 || !crumbsOverflow()) return;
+
+    var centre = Math.floor((items.length - 1) / 2);
+    crumbsEl.insertBefore(makeSep(), items[centre].sep);
+    crumbsEl.insertBefore(makeMoreCrumb(), items[centre].sep);
+
+    var order = hideOrder(items.length);
+    for (var i = 0; i < order.length && crumbsOverflow(); i++) {
+      items[order[i]].sep.hidden = true;
+      items[order[i]].crumb.hidden = true;
+    }
+    // Root, ellipsis and file alone can still exceed the bar. The file name is
+    // then the one that gives, ellipsised in place rather than clipped.
+    if (crumbsOverflow()) crumbsEl.classList.add("tight");
   }
 
   function buildTOC() {
@@ -275,6 +385,8 @@
   // file list; no response templates content into the page.
   function listing(prefix) {
     begin(prefix, false);
+    // The sidebar follows the reader into the folder being listed.
+    if (tree) tree.show(prefix.replace(/\/+$/, ""));
     var h = document.createElement("h1");
     h.textContent = prefix ? prefix.replace(/\/+$/, "") : "Files";
     docEl.appendChild(h);
@@ -481,16 +593,25 @@
       return;
     }
     if (!st.partial) {
+      // Emptied as well as hidden: a progress line left in the element is read
+      // back by anything that reads its text rather than its visibility.
       noteEl.hidden = true;
+      noteEl.textContent = "";
       return;
     }
-    var why = st.indexed < st.total
-      ? "the index stops at " + st.maxFiles + " documents or " +
-        Math.round(st.maxBytes / (1024 * 1024)) + " MiB of markdown"
-      : st.failures + " document(s) could not be read";
+    // The reasons are independent and can both hold, so they are reported from
+    // what actually stopped the walk rather than inferred from the count.
+    var why = [];
+    if (st.bounded) {
+      why.push("the index stops at " + st.maxFiles + " documents or " +
+        Math.round(st.maxBytes / (1024 * 1024)) + " MiB of markdown");
+    }
+    if (st.failures) {
+      why.push(st.failures + " document(s) could not be read");
+    }
     noteEl.hidden = false;
     noteEl.textContent = "Partial index: text and headings cover " + st.indexed + " of " +
-      st.total + " documents, because " + why + ". File names still match across the whole base.";
+      st.total + " documents, because " + why.join(" and ") + ". File names still match across the whole base.";
   }
 
   function hideResults() {
@@ -565,10 +686,14 @@
     var cls = narrow.matches ? drawer : hide;
     var on = document.body.classList.toggle(cls);
     btn.setAttribute("aria-expanded", String(narrow.matches ? on : !on));
+    // A pane changes what the bar has to work with, and the trail's collapse is
+    // a measurement rather than a count.
+    drawCrumbs();
   }
 
   function closeDrawers() {
     document.body.classList.remove("tree-open", "toc-open");
+    drawCrumbs();
   }
 
   function wireToggles() {
@@ -615,6 +740,10 @@
     });
   }
 
+  function wireResize() {
+    addEventListener("resize", drawCrumbs);
+  }
+
   function wireScroll() {
     var ticking = false;
     mainEl.addEventListener("scroll", function () {
@@ -631,6 +760,7 @@
     files = list.filter(function (p) { return typeof p === "string" && p !== ""; });
     files.forEach(function (p) { fileSet[p] = true; });
     base = resolveBase(files);
+    normalizeRootURL();
 
     tree = Tree.build(files, {
       isDoc: isDoc,
@@ -645,6 +775,7 @@
     wireDocLinks();
     wireHistory();
     wireScroll();
+    wireResize();
     wireToggles();
     wireSearch();
 

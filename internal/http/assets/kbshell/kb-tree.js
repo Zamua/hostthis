@@ -1,7 +1,14 @@
-// File tree for the knowledge base shell: the base's paths as a nested,
-// collapsible list. Markdown opens in the shell; every other file is a link to
-// its own URL, where the server serves it raw, marked with an external-link
-// icon so the difference is visible before the click.
+// File navigation for the knowledge base shell: the base's paths as drill-down
+// navigation, ONE level at a time. The sidebar shows the folder the reader is
+// in and its children; entering a child folder re-renders the sidebar and
+// leaves the document alone. Markdown opens in the shell; every other file is a
+// link to its own URL, where the server serves it raw, marked with an
+// external-link icon so the difference is visible before the click.
+//
+// One level rather than a recursive tree because indentation and row count both
+// grow with depth, and a ten-level base spends the column on whitespace. Search
+// reaches any file at any depth without walking to it, which is what makes
+// navigating one level at a time enough.
 (function () {
   "use strict";
 
@@ -76,52 +83,86 @@
     });
   }
 
+  // dirIndex maps every folder's path to its node, so the sidebar can open a
+  // folder named by a breadcrumb or by the document being read.
+  function dirIndex(root) {
+    var map = { "": root };
+    (function walk(node) {
+      node.children.forEach(function (child) {
+        if (!child.dir) return;
+        map[child.path] = child;
+        walk(child);
+      });
+    })(root);
+    return map;
+  }
+
+  function parentOf(path) {
+    var cut = path.lastIndexOf("/");
+    return cut < 0 ? "" : path.slice(0, cut);
+  }
+
+  function nameOf(path) { return path.slice(path.lastIndexOf("/") + 1); }
+
   function build(files, opts) {
     var root = nest(files);
-    // A small base is easier to read whole; a large one opens on the top level
-    // and expands to wherever the reader actually is.
-    var openAll = files.length <= 30;
-    var anchors = {};
-    var dirs = {};
-    var current = null;
+    var dirs = dirIndex(root);
 
-    function renderList(node) {
-      var ul = document.createElement("ul");
-      node.children.forEach(function (child) {
-        ul.appendChild(child.dir ? renderDir(child) : renderFile(child));
-      });
-      return ul;
+    var el = document.createElement("div");
+    el.className = "kb-tree-body";
+
+    var here = "";          // the folder the sidebar is showing
+    var currentFile = null; // the document being read, marked when it is here
+    var anchors = {};       // path -> the file anchor in THIS render
+
+    function row(tag, cls) {
+      var e = document.createElement(tag);
+      if (tag === "button") e.type = "button";
+      e.className = "kb-row " + cls;
+      return e;
+    }
+
+    function renderUp() {
+      var parent = parentOf(here);
+      var btn = row("button", "kb-up");
+      btn.dataset.parent = parent;
+      btn.setAttribute("aria-label", "Up to " + (parent || "root"));
+      btn.appendChild(icon("chevron", "kb-chev kb-chev-back"));
+      var label = document.createElement("span");
+      label.textContent = parent === "" ? "root" : nameOf(parent);
+      btn.appendChild(label);
+      btn.addEventListener("click", function () { show(parent); });
+      return btn;
+    }
+
+    function renderHere() {
+      var head = document.createElement("p");
+      head.className = "kb-tree-here";
+      head.dataset.dir = here;
+      head.textContent = here === "" ? "Files" : nameOf(here);
+      if (here) head.title = here;
+      return head;
     }
 
     function renderDir(node) {
       var li = document.createElement("li");
-      var btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "kb-row kb-dir";
+      var btn = row("button", "kb-dir");
       btn.dataset.dir = node.path;
-      btn.setAttribute("aria-expanded", openAll ? "true" : "false");
-      btn.appendChild(icon("chevron", "kb-chev"));
       btn.appendChild(icon("folder"));
       var label = document.createElement("span");
       label.textContent = node.name;
       btn.appendChild(label);
-      var kids = renderList(node);
-      kids.hidden = !openAll;
-      btn.addEventListener("click", function () {
-        var open = btn.getAttribute("aria-expanded") === "true";
-        btn.setAttribute("aria-expanded", open ? "false" : "true");
-        kids.hidden = open;
-      });
-      dirs[node.path] = { btn: btn, kids: kids };
+      btn.appendChild(icon("chevron", "kb-chev kb-chev-into"));
+      // Sidebar navigation only: which document is open is the reader's
+      // business, and a folder is not a document.
+      btn.addEventListener("click", function () { show(node.path); });
       li.appendChild(btn);
-      li.appendChild(kids);
       return li;
     }
 
     function renderFile(node) {
       var li = document.createElement("li");
-      var a = document.createElement("a");
-      a.className = "kb-row kb-file";
+      var a = row("a", "kb-file");
       a.dataset.path = node.path;
       a.href = opts.hrefFor(node.path);
       var doc = opts.isDoc(node.path);
@@ -149,33 +190,49 @@
       return li;
     }
 
-    function expandTo(path) {
-      var parts = path.split("/");
-      for (var i = 1; i < parts.length; i++) {
-        var d = dirs[parts.slice(0, i).join("/")];
-        if (d) {
-          d.btn.setAttribute("aria-expanded", "true");
-          d.kids.hidden = false;
-        }
-      }
+    function render() {
+      el.textContent = "";
+      anchors = {};
+      // The root has no parent, so nothing to go up to.
+      if (here !== "") el.appendChild(renderUp());
+      el.appendChild(renderHere());
+      var ul = document.createElement("ul");
+      ul.className = "kb-tree-list";
+      (dirs[here] || root).children.forEach(function (child) {
+        ul.appendChild(child.dir ? renderDir(child) : renderFile(child));
+      });
+      el.appendChild(ul);
+      mark();
     }
 
-    var el = renderList(root);
-    el.className = "kb-tree-root";
+    function mark() {
+      var a = currentFile ? anchors[currentFile] : null;
+      if (!a) return;
+      a.classList.add("current");
+      a.setAttribute("aria-current", "page");
+      // inline as well as block: a long row can sit outside the pane
+      // horizontally, where revealing it vertically alone shows nothing.
+      a.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+
+    function show(dir) {
+      here = Object.prototype.hasOwnProperty.call(dirs, dir) ? dir : "";
+      render();
+    }
+
+    render();
+
     return {
       el: el,
+      // show moves the sidebar to a folder, for a breadcrumb or a listing.
+      show: show,
+      // setCurrent follows the reader: a document opened from a search hit, a
+      // link or a typed URL puts the sidebar in that document's folder.
       setCurrent: function (path) {
-        if (current && anchors[current]) {
-          anchors[current].classList.remove("current");
-          anchors[current].removeAttribute("aria-current");
-        }
-        current = path;
-        if (!path || !anchors[path]) return;
-        expandTo(path);
-        anchors[path].classList.add("current");
-        anchors[path].setAttribute("aria-current", "page");
-        anchors[path].scrollIntoView({ block: "nearest" });
+        currentFile = path || null;
+        show(path ? parentOf(path) : here);
       },
+      at: function () { return here; },
     };
   }
 
