@@ -14,10 +14,10 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// pasteCacheURLs must return EVERY cache key a paste is reachable at. The
-// markdown shell fetches "?raw=1" as a separate cache entry, so purging
-// only the base URL would leave an edited markdown paste serving stale
-// content - this test pins that both variants are produced.
+// pasteCacheURLs must return EVERY cache key a paste is reachable at. A render
+// shell fetches "?raw=1" and a knowledge base's shell also fetches "?files=1",
+// each its own cache entry, so purging only the base URL would leave an edited
+// artifact serving stale content - this test pins that all three are produced.
 func TestPasteCacheURLs_Variants(t *testing.T) {
 	slug := domain.Slug("abc12345")
 	cases := []struct {
@@ -29,6 +29,7 @@ func TestPasteCacheURLs_Variants(t *testing.T) {
 			want: []string{
 				"https://abc12345.hostthis.dev/",
 				"https://abc12345.hostthis.dev/?raw=1",
+				"https://abc12345.hostthis.dev/?files=1",
 			},
 		},
 		{
@@ -36,6 +37,7 @@ func TestPasteCacheURLs_Variants(t *testing.T) {
 			want: []string{
 				"https://abc12345.hostthis.dev/",
 				"https://abc12345.hostthis.dev/?raw=1",
+				"https://abc12345.hostthis.dev/?files=1",
 			},
 		},
 		{
@@ -43,6 +45,7 @@ func TestPasteCacheURLs_Variants(t *testing.T) {
 			want: []string{
 				"http://localhost:8080/p/abc12345",
 				"http://localhost:8080/p/abc12345?raw=1",
+				"http://localhost:8080/p/abc12345?files=1",
 			},
 		},
 	}
