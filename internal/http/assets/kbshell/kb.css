@@ -1,0 +1,376 @@
+/* Knowledge base shell: two sidebars around one rendered document. The palette
+   and the document typography match the single-document shells, so a base
+   reads as the same product as a markdown paste. */
+:root {
+  --bg: #ffffff; --ink: #1f2328; --soft: #59636e; --link: #0969da;
+  --rule: #d1d9e0; --code-bg: #eff1f3; --zebra: #f6f8fa; --bar: #f6f8fa;
+  --sel: #ddf4ff; --mark: rgba(255, 212, 0, .45);
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117; --ink: #e6edf3; --soft: #9198a1; --link: #4493f8;
+    --rule: #3d444d; --code-bg: #656c7633; --zebra: #151b23; --bar: #161b22;
+    --sel: #163356; --mark: rgba(255, 212, 0, .30);
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  -webkit-text-size-adjust: 100%;
+}
+[hidden] { display: none !important; }
+
+/* -- header ---------------------------------------------------------------- */
+
+#kb-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  flex-wrap: wrap;
+  padding: .45rem .7rem;
+  background: var(--bar);
+  border-bottom: 1px solid var(--rule);
+  font-size: .85rem;
+}
+.kb-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: .3rem;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: .25rem .45rem;
+}
+.kb-btn:hover { border-color: var(--soft); }
+.kb-btn svg { width: 1.05em; height: 1.05em; }
+
+/* Breadcrumbs take the slack and truncate from the left, so the file name (the
+   part that identifies the document) survives on a narrow screen. */
+#kb-crumbs {
+  flex: 1 1 8rem;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: .3rem;
+  overflow: hidden;
+  white-space: nowrap;
+  direction: rtl;
+}
+#kb-crumbs > * { direction: ltr; }
+.kb-crumb { color: var(--soft); text-decoration: none; }
+a.kb-crumb:hover { color: var(--link); text-decoration: underline; }
+.kb-crumb[aria-current="page"] { color: var(--ink); font-weight: 600; }
+.kb-sep { color: var(--rule); }
+
+#kb-search {
+  flex: 1 1 12rem;
+  max-width: 26rem;
+  min-width: 0;
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: .25rem .5rem;
+}
+#kb-raw { color: var(--link); text-decoration: none; font-size: .8rem; }
+
+/* -- panes ----------------------------------------------------------------- */
+
+#kb-body {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+  position: relative;
+}
+#kb-tree {
+  flex: 0 0 17rem;
+  overflow: auto;
+  padding: .6rem .5rem 3rem;
+  border-right: 1px solid var(--rule);
+  font-size: .85rem;
+}
+#kb-main { flex: 1 1 auto; overflow: auto; min-width: 0; }
+#kb-doc { max-width: 72ch; margin: 0 auto; padding: 2rem 1.4rem 5rem; }
+#kb-toc {
+  flex: 0 0 15rem;
+  overflow: auto;
+  padding: 1rem .8rem 3rem;
+  border-left: 1px solid var(--rule);
+  font-size: .82rem;
+}
+#kb-toc[hidden] { display: none !important; }
+body.tree-hidden #kb-tree, body.toc-hidden #kb-toc { display: none; }
+
+/* -- file tree ------------------------------------------------------------- */
+
+#kb-tree ul { list-style: none; margin: 0; padding: 0 0 0 .8rem; }
+#kb-tree > ul { padding-left: 0; }
+.kb-row {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  width: 100%;
+  padding: .2rem .35rem;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  overflow: hidden;
+}
+.kb-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-row:hover { background: var(--zebra); }
+.kb-row.current { background: var(--sel); font-weight: 600; }
+.kb-ico { flex: 0 0 auto; width: 1em; height: 1em; color: var(--soft); }
+.kb-row.current .kb-ico { color: inherit; }
+/* The chevron points down when open; collapsed rotates it, so the arrow shows
+   the state rather than needing a second icon. */
+.kb-chev { transition: transform .12s; }
+.kb-dir[aria-expanded="false"] .kb-chev { transform: rotate(-90deg); }
+.kb-ext .kb-ico-ext { color: var(--link); opacity: .75; }
+
+/* -- table of contents ----------------------------------------------------- */
+
+#kb-toc-title {
+  margin: 0 0 .5rem;
+  font-size: .72rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--soft);
+}
+#kb-toc-list { list-style: none; margin: 0; padding: 0; }
+.kb-toc-link {
+  display: block;
+  padding: .18rem .5rem;
+  color: var(--soft);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kb-toc-link:hover { color: var(--ink); }
+.kb-toc-link[aria-current="true"] { color: var(--link); border-left-color: var(--link); }
+.kb-toc-link.lvl-2 { padding-left: 1rem; }
+.kb-toc-link.lvl-3 { padding-left: 1.6rem; }
+.kb-toc-link.lvl-4, .kb-toc-link.lvl-5, .kb-toc-link.lvl-6 { padding-left: 2.2rem; font-size: .95em; }
+
+/* -- search results -------------------------------------------------------- */
+
+/* The results overlay the panes rather than displacing them: a search is a
+   transient view of the same base, and shifting the layout under the reader's
+   finger on a phone loses their place. */
+#kb-results {
+  position: absolute;
+  z-index: 20;
+  top: 0;
+  left: 0;
+  right: 0;
+  max-height: min(70vh, 34rem);
+  overflow: auto;
+  background: var(--bg);
+  border-bottom: 1px solid var(--rule);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .18);
+}
+#kb-index-note {
+  padding: .4rem .8rem;
+  background: var(--zebra);
+  border-bottom: 1px solid var(--rule);
+  color: var(--soft);
+  font-size: .76rem;
+}
+#kb-results-empty, .kb-more { padding: .8rem; color: var(--soft); font-size: .85rem; }
+.kb-more { padding: .4rem .8rem; margin: 0; }
+.kb-hit {
+  display: block;
+  padding: .5rem .8rem;
+  border-bottom: 1px solid var(--rule);
+  color: inherit;
+  text-decoration: none;
+}
+.kb-hit:hover, .kb-hit:focus { background: var(--zebra); outline: none; }
+.kb-hit-head { display: flex; align-items: center; gap: .4rem; }
+.kb-hit-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kb-hit-kind {
+  flex: 0 0 auto;
+  font-size: .68rem;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--soft);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 0 .4rem;
+}
+.kb-hit-snip {
+  margin-top: .2rem;
+  color: var(--soft);
+  font-size: .8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kb-hit mark { background: var(--mark); color: inherit; border-radius: 3px; }
+
+#kb-scrim { display: none; position: absolute; inset: 0; z-index: 15; background: rgba(0, 0, 0, .35); }
+
+/* -- document -------------------------------------------------------------- */
+
+#kb-doc > *:first-child { margin-top: 0; }
+#kb-doc h1, #kb-doc h2, #kb-doc h3, #kb-doc h4, #kb-doc h5, #kb-doc h6 {
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 1.5rem 0 1rem;
+}
+#kb-doc h1 { font-size: 2rem; margin-top: 0; padding-bottom: .3em; border-bottom: 1px solid var(--rule); }
+#kb-doc h2 { font-size: 1.5rem; padding-bottom: .3em; border-bottom: 1px solid var(--rule); }
+#kb-doc h3 { font-size: 1.25rem; }
+#kb-doc h4 { font-size: 1rem; }
+#kb-doc h5 { font-size: .875rem; }
+#kb-doc h6 { font-size: .85rem; color: var(--soft); }
+#kb-doc p { margin: 0 0 1rem; }
+#kb-doc a { color: var(--link); text-decoration: none; }
+#kb-doc a:hover { text-decoration: underline; }
+#kb-doc strong { font-weight: 600; }
+#kb-doc hr { border: 0; border-top: 1px solid var(--rule); margin: 1.5rem 0; }
+#kb-doc blockquote {
+  margin: 0 0 1rem;
+  padding: 0 1rem;
+  border-left: .25rem solid var(--rule);
+  color: var(--soft);
+}
+#kb-doc blockquote > :last-child { margin-bottom: 0; }
+#kb-doc ul, #kb-doc ol { padding-left: 2rem; margin: 0 0 1rem; }
+#kb-doc li { margin: .25rem 0; }
+#kb-doc li > p { margin: .25rem 0; }
+#kb-doc code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 85%;
+  background: var(--code-bg);
+  padding: .2em .4em;
+  border-radius: 6px;
+}
+#kb-doc pre {
+  background: var(--zebra);
+  border-radius: 6px;
+  padding: 1rem;
+  overflow-x: auto;
+  line-height: 1.45;
+  font-size: 85%;
+  margin: 0 0 1rem;
+}
+#kb-doc pre code { background: transparent; padding: 0; font-size: 100%; }
+#kb-doc img { max-width: 100%; height: auto; }
+#kb-doc table {
+  border-collapse: collapse;
+  margin: 0 0 1rem;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+}
+#kb-doc th, #kb-doc td { border: 1px solid var(--rule); padding: .4rem .85rem; text-align: left; }
+#kb-doc th { font-weight: 600; background: var(--zebra); }
+#kb-doc tr:nth-child(2n) { background: var(--zebra); }
+#kb-doc .footnotes {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  font-size: .9rem;
+  color: var(--soft);
+}
+
+/* Deep links: an anchored heading is clickable, and the flash is what makes
+   the addressed element findable after the scroll settles. */
+.anchored { cursor: pointer; }
+.anchored:hover::after { content: " #"; color: var(--soft); font-weight: 400; }
+.dl-flash { background: rgba(255, 212, 0, .22); border-radius: 4px; transition: background .4s; }
+
+/* A generated listing stands in for a document, so it carries the same reading
+   width and link treatment rather than looking like a second file tree. */
+#kb-listing { list-style: none; padding: 0; }
+#kb-listing li { margin: .1rem 0; }
+#kb-listing a {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .25rem .3rem;
+  border-radius: 6px;
+  color: var(--link);
+  text-decoration: none;
+}
+#kb-listing a:hover { background: var(--zebra); }
+#kb-error { border-left: .25rem solid var(--rule); padding: .2rem 0 .2rem 1rem; }
+#kb-error h1 { border: 0; font-size: 1.25rem; }
+#kb-error p { color: var(--soft); }
+#kb-error code { overflow-wrap: anywhere; }
+
+/* -- narrow screens -------------------------------------------------------- */
+
+/* Below each breakpoint the pane becomes a drawer over the document instead of
+   a column crushed to an unreadable width. */
+@media (max-width: 1100px) {
+  #kb-toc {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(80vw, 15rem);
+    background: var(--bg);
+    transform: translateX(100%);
+    transition: transform .18s ease;
+    z-index: 16;
+  }
+  body.toc-open #kb-toc { transform: none; }
+  body.toc-open #kb-scrim { display: block; }
+  body.toc-hidden #kb-toc { display: block; }
+}
+@media (max-width: 760px) {
+  #kb-tree {
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(82vw, 18rem);
+    background: var(--bg);
+    transform: translateX(-100%);
+    transition: transform .18s ease;
+    z-index: 16;
+  }
+  body.tree-open #kb-tree { transform: none; }
+  body.tree-open #kb-scrim { display: block; }
+  body.tree-hidden #kb-tree { display: block; }
+  #kb-doc { padding: 1.2rem 1rem 4rem; }
+}
+@media (max-width: 560px) {
+  /* The search field takes its own row: sharing one with the breadcrumbs
+     leaves both too narrow to read. */
+  #kb-search { flex: 1 1 100%; max-width: none; order: 3; }
+  #kb-raw { order: 2; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #kb-tree, #kb-toc, .kb-chev { transition: none; }
+}

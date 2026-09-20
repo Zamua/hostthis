@@ -5,6 +5,7 @@ import (
 	stdhttp "net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,6 +140,63 @@ func TestKnowledgeBase_FileList(t *testing.T) {
 		}
 		if !slices.Equal(got, want) {
 			t.Fatalf("%s: files %v, want %v", target, got, want)
+		}
+	}
+}
+
+// The shell is a page plus its assets. Every script and stylesheet it names
+// must be whitelisted - an unlisted one 404s while the page still serves 200,
+// so nothing else fails - and every file shipped under the shell's directory
+// must be reachable or it is dead weight in the binary.
+func TestKnowledgeBaseShell_AssetsAreWiredAndServable(t *testing.T) {
+	sh := shells[domain.KindKnowledgeBase]
+	if sh == nil {
+		t.Fatal("no shell registered for the knowledge base kind")
+	}
+	page := string(sh.html(domain.KindKnowledgeBase))
+
+	// marked and DOMPurify are the markdown shell's and deeplink.js is shared;
+	// the flat asset namespace is what lets this page load them by name.
+	for _, name := range []string{
+		"kb.css", "kb.js", "kb-tree.js", "kb-search.js",
+		"deeplink.js", "marked.min.js", "purify.min.js",
+	} {
+		if !strings.Contains(page, "/_hostthis/"+name+"?v=") {
+			t.Errorf("the shell page does not load %s", name)
+		}
+		if _, ok := assetSource[name]; !ok {
+			t.Errorf("the page loads %s but no shell whitelists it", name)
+		}
+	}
+
+	entries, err := sh.fs.ReadDir(sh.dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", sh.dir, err)
+	}
+	for _, e := range entries {
+		// shell.html IS the page; it is never served as an asset.
+		if e.Name() == "shell.html" {
+			continue
+		}
+		if _, ok := sh.assets[e.Name()]; !ok {
+			t.Errorf("%s/%s is embedded but not whitelisted, so the browser 404s on it", sh.dir, e.Name())
+		}
+	}
+}
+
+// The interface hangs off these elements: the tree, the document, the table of
+// contents, the breadcrumbs and the search surface. They are the handles the
+// browser suite targets, so a rename has to be a deliberate change here too.
+func TestKnowledgeBaseShell_StructuralHooks(t *testing.T) {
+	page := string(shells[domain.KindKnowledgeBase].html(domain.KindKnowledgeBase))
+	for _, hook := range []string{
+		`id="kb-tree"`, `id="kb-doc"`, `id="kb-main"`, `id="kb-crumbs"`,
+		`id="kb-toc"`, `id="kb-toc-list"`, `id="kb-search"`, `id="kb-results"`,
+		`id="kb-hits"`, `id="kb-index-note"`, `id="kb-raw"`,
+		`id="kb-files-toggle"`, `id="kb-toc-toggle"`,
+	} {
+		if !strings.Contains(page, hook) {
+			t.Errorf("the shell page is missing %s", hook)
 		}
 	}
 }

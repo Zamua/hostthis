@@ -939,7 +939,16 @@ there, including the load-order rule (see "Deep links").
 **Navigation.** The shell draws a left sidebar file tree built from the
 file list, breadcrumbs for the current path, and a right sidebar table of
 contents built from the current document's headings. A search bar matches
-file paths, headings and body text, entirely in the browser.
+file paths, headings and body text, entirely in the browser. Both
+sidebars collapse to drawers on a narrow screen, so a base reads on a
+phone.
+
+Opening a document replaces the rendered content in place rather than
+reloading the page, and the URL follows it, so a link to any document
+loads the same thing directly. A link inside a document to another `.md`
+file in the base navigates the shell the same way; a link to anything
+else follows to that file's own URL. A path naming a directory renders a
+listing of what is under it, the same listing the root falls back to.
 
 Bodies are indexed lazily in the background, bounded at **500 markdown
 files or 8 MiB of markdown**, whichever comes first, and indexed in
