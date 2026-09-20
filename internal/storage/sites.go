@@ -17,8 +17,8 @@ import (
 type SiteBackingRepo interface {
 	Get(domain.Slug) (domain.Paste, error)
 	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
-	AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string, uploadID string,
-		m domain.Manifest, size int, userCap int64, now time.Time) (AppendResult, error)
+	AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string, kind domain.ContentKind,
+		uploadID string, m domain.Manifest, size int, userCap int64, now time.Time) (AppendResult, error)
 	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) ([]string, error)
 }
 
@@ -36,13 +36,14 @@ func NewSites(repo SiteBackingRepo) *Sites {
 // A slug that is a DOCUMENT reads as not-found, not as a one-file site: the
 // caller asked for a directory, and answering with a document would let a
 // paste be served through the site path. The shape is read from the kind, not
-// inferred from the manifest's size.
+// inferred from the manifest's size; both directory kinds answer here, since
+// storage treats a site and a knowledge base identically.
 func (a *Sites) Get(slug domain.Slug) (domain.Site, error) {
 	p, err := a.repo.Get(slug)
 	if err != nil {
 		return domain.Site{}, err
 	}
-	if p.Kind != domain.KindSite {
+	if !p.Kind.IsDirectory() {
 		return domain.Site{}, ErrNotFound
 	}
 	return siteFromArtifact(p), nil
@@ -52,6 +53,7 @@ func siteFromArtifact(p domain.Paste) domain.Site {
 	return domain.Site{
 		Slug:      p.Slug,
 		Identity:  p.Identity,
+		Kind:      p.Kind,
 		UploadID:  p.UploadID,
 		Manifest:  p.Manifest,
 		CreatedAt: p.CreatedAt,
@@ -69,7 +71,7 @@ func (a *Sites) InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedB
 		Generation: domain.NewPasteGeneration(),
 		Identity:   s.Identity,
 		Status:     domain.PasteStatusReady,
-		Kind:       domain.KindSite,
+		Kind:       s.Kind,
 		UploadID:   s.UploadID,
 		Size:       storedBytes,
 		CreatedAt:  s.CreatedAt,
@@ -91,11 +93,13 @@ func (a *Sites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, stored
 	if err != nil {
 		return err
 	}
-	if existing.Kind != domain.KindSite || existing.Identity != s.Identity {
+	if !existing.Kind.IsDirectory() || existing.Identity != s.Identity {
 		return ErrNotFound
 	}
+	// The appended version carries the shape THIS deploy decided, so a redeploy
+	// that adds or drops a root index.html changes what the slug serves as.
 	_, err = a.repo.AppendManifestVersion(
-		ctx, s.Slug, existing.Generation, s.UploadID, s.Manifest, storedBytes, userCap, now,
+		ctx, s.Slug, existing.Generation, s.Kind, s.UploadID, s.Manifest, storedBytes, userCap, now,
 	)
 	return err
 }

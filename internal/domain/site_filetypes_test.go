@@ -70,14 +70,14 @@ func TestContentTypeForPath(t *testing.T) {
 // or ".md" path is a client-side route the SPA fallback serves the index for.
 func TestKnownNonAssetExtensionsStayRoutes(t *testing.T) {
 	for _, ext := range []string{".html", ".htm", ".md", ".markdown"} {
-		if looksLikeAsset("page" + ext) {
+		if LooksLikeAsset("page" + ext) {
 			t.Fatalf("%q must not count as an asset: a miss has to fall through to the SPA index", ext)
 		}
 		if got := ContentTypeForPath("page" + ext); got == "application/octet-stream" {
 			t.Fatalf("%q should have a real content type, got %q", ext, got)
 		}
 	}
-	if !looksLikeAsset("/img/LOGO.PNG") {
+	if !LooksLikeAsset("/img/LOGO.PNG") {
 		t.Fatalf("asset matching must be case-insensitive")
 	}
 	if got := ContentTypeForPath("/img/LOGO.PNG"); got != "image/png" {

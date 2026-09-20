@@ -147,16 +147,29 @@ func TestSite_PasteUpdateSurvivesGzipPeek(t *testing.T) {
 	}
 }
 
-// An archive with no web content is rejected like any unsupported upload.
-func TestSite_NoWebContentRejected(t *testing.T) {
+// An archive with no root index.html deploys as a knowledge base whatever it
+// holds: the shell serves the root, a .md path serves raw under ?raw=1, and
+// every other file serves as a site's would.
+func TestKnowledgeBase_DeployAndServe(t *testing.T) {
 	s := startStack(t, withSites())
-	arc := makeSiteArchive(t, map[string]string{"data.json": "{}", "notes.txt": "hi"})
-	_, stderr, exit := s.run("", arc)
-	if exit == 0 {
-		t.Fatalf("expected nonzero exit for no-web-content archive")
+	arc := makeSiteArchive(t, map[string]string{
+		"README.md":      "# notes\n",
+		"guide/setup.md": "# setup\n",
+		"data.json":      "{}",
+	})
+	stdout, stderr, exit := s.run("", arc)
+	if exit != 0 {
+		t.Fatalf("deploy exit %d: stderr %q", exit, stderr)
 	}
-	if !strings.Contains(stderr, "no web content") {
-		t.Fatalf("stderr should explain rejection, got %q", stderr)
+	base := strings.TrimSpace(stdout)
+	if code, body := getBody(t, base); code != 200 || !strings.Contains(body, "/_hostthis/kb.js") {
+		t.Fatalf("root: code %d body %q, want the knowledge base shell", code, body)
+	}
+	if code, body := getBody(t, base+"/guide/setup.md?raw=1"); code != 200 || body != "# setup\n" {
+		t.Fatalf("raw markdown: code %d body %q", code, body)
+	}
+	if code, body := getBody(t, base+"/data.json"); code != 200 || body != "{}" {
+		t.Fatalf("non-markdown file: code %d body %q", code, body)
 	}
 }
 

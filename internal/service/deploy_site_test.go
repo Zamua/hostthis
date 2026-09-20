@@ -131,15 +131,61 @@ func TestDeploySite_Delete(t *testing.T) {
 	}
 }
 
-func TestDeploySite_RejectsNoWebContent(t *testing.T) {
-	d, _, _ := deployFixture(t)
-	arc := gzipTar(t, map[string]string{
-		"data.json": "{}",
-		"logo.png":  "\x89PNG",
-	})
-	_, err := d.Deploy(bytes.NewReader(arc), "key:test")
-	if !errors.Is(err, domain.ErrNoWebContent) {
-		t.Fatalf("no web content: got %v, want ErrNoWebContent", err)
+// The shape is decided from the extracted manifest and stored on the row: a
+// root index.html is a site, anything else a knowledge base. An archive holding
+// no web content at all is now accepted as one.
+func TestDeploySite_ShapeFromManifest(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		want  domain.ContentKind
+	}{
+		{"root index", map[string]string{"index.html": "<h1>hi</h1>", "app.js": "1"}, domain.KindSite},
+		{"markdown only", map[string]string{"README.md": "# hi\n", "guide/setup.md": "# setup\n"}, domain.KindKnowledgeBase},
+		{"no markdown and no web content", map[string]string{"data.json": "{}", "logo.png": "\x89PNG"}, domain.KindKnowledgeBase},
+		{"index below the root", map[string]string{"a/index.html": "<h1>a</h1>", "b/notes.md": "# b\n"}, domain.KindKnowledgeBase},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sites, _ := deployFixture(t)
+			res, err := d.Deploy(bytes.NewReader(gzipTar(t, tc.files)), "key:shape")
+			if err != nil {
+				t.Fatalf("deploy: %v", err)
+			}
+			if res.Site.Kind != tc.want {
+				t.Fatalf("deployed kind: got %q, want %q", res.Site.Kind, tc.want)
+			}
+			got, err := sites.Get(res.Site.Slug)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			if got.Kind != tc.want {
+				t.Fatalf("stored kind: got %q, want %q", got.Kind, tc.want)
+			}
+		})
+	}
+}
+
+// Each deploy decides from its OWN manifest, so a redeploy that adds a root
+// index.html turns a knowledge base into a site at the same slug.
+func TestDeployToSlug_ReDecidesShape(t *testing.T) {
+	d, sites, _ := deployFixture(t)
+	const owner = "key:reshape"
+	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"README.md": "# notes\n"})), owner)
+	if err != nil {
+		t.Fatalf("deploy knowledge base: %v", err)
+	}
+	if r1.Site.Kind != domain.KindKnowledgeBase {
+		t.Fatalf("first deploy kind: got %q, want knowledgebase", r1.Site.Kind)
+	}
+	if _, err := d.DeployToSlug(r1.Site.Slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>site now</h1>"})), owner); err != nil {
+		t.Fatalf("redeploy: %v", err)
+	}
+	got, err := sites.Get(r1.Site.Slug)
+	if err != nil {
+		t.Fatalf("get after redeploy: %v", err)
+	}
+	if got.Kind != domain.KindSite {
+		t.Fatalf("redeployed kind: got %q, want site", got.Kind)
 	}
 }
 
@@ -424,17 +470,6 @@ func TestGuard_DeployTraversalStoresNothing(t *testing.T) {
 	_, err := d.Deploy(bytes.NewReader(arc), "key:test")
 	if !errors.Is(err, domain.ErrUnsafeArchive) {
 		t.Fatalf("traversal deploy: got %v, want ErrUnsafeArchive", err)
-	}
-	noSites(t, d, sites, "key:test")
-	assertNoObjects(t, root)
-}
-
-// An archive with files but no web content is refused after staging them all.
-func TestGuard_DeployNoWebContentStoresNothing(t *testing.T) {
-	d, sites, _, root := deployStack(t)
-	arc := gzipTar(t, map[string]string{"data.json": "{}", "logo.png": "\x89PNG"})
-	if _, err := d.Deploy(bytes.NewReader(arc), "key:test"); !errors.Is(err, domain.ErrNoWebContent) {
-		t.Fatalf("no web content: got %v, want ErrNoWebContent", err)
 	}
 	noSites(t, d, sites, "key:test")
 	assertNoObjects(t, root)

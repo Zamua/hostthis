@@ -203,8 +203,8 @@ func (s *Server) serveSlug(w http.ResponseWriter, r *http.Request, slug domain.S
 	// many entries its manifest holds: a directory of one file is still a
 	// directory, and serving it as a document would render it instead of
 	// handing back the bytes.
-	if p.Kind == domain.KindSite {
-		s.serveFromManifest(w, r, slug, p.Manifest, p.UpdatedAt, reqPath)
+	if p.Kind.IsDirectory() {
+		s.serveDirectory(w, r, slug, p.Kind, p.Manifest, p.UploadID, p.UpdatedAt, reqPath)
 		return
 	}
 	// A document answers only at its own URL; deeper paths belong to a
@@ -403,8 +403,20 @@ func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug 
 		// the paste path tries next and surfaces its own 404 or 500.
 		return false
 	}
-	s.serveFromManifest(w, r, slug, site.Manifest, site.UpdatedAt, reqPath)
+	s.serveDirectory(w, r, slug, site.Kind, site.Manifest, site.UploadID, site.UpdatedAt, reqPath)
 	return true
+}
+
+// serveDirectory routes a directory artifact to the surface its kind declares:
+// a site hands back its files, a knowledge base browses them.
+func (s *Server) serveDirectory(w http.ResponseWriter, r *http.Request, slug domain.Slug,
+	kind domain.ContentKind, manifest domain.Manifest, uploadID string, updatedAt time.Time, reqPath string,
+) {
+	if kind == domain.KindKnowledgeBase {
+		s.serveKnowledgeBase(w, r, slug, manifest, uploadID, updatedAt, reqPath)
+		return
+	}
+	s.serveFromManifest(w, r, slug, manifest, updatedAt, reqPath)
 }
 
 // serveFromManifest resolves reqPath against a manifest and writes the file.

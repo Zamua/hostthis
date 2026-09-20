@@ -13,6 +13,9 @@ import (
 type Site struct {
 	Slug     Slug
 	Identity Identity // owner; "key:<fp>" - quota AND ownership gate
+	// Kind is the directory shape this deploy landed as, decided from its own
+	// manifest (ArchiveKind) and stored: site or knowledgebase.
+	Kind     ContentKind
 	UploadID string   // prefix holding this deploy's objects
 	Manifest Manifest // path -> object key + size + content-type
 	// StoredBytes is what the quota charged for this site. Zero on a Site that
@@ -83,9 +86,6 @@ var (
 	// ErrTooManyFiles is returned when the entry count would exceed
 	// MaxSiteFiles or the manifest path text would exceed MaxManifestBytes.
 	ErrTooManyFiles = errors.New("archive has too many files")
-	// ErrNoWebContent is returned when an archive safe-untars cleanly but
-	// holds no web content (no index.html and no .html/.css/.js file).
-	ErrNoWebContent = errors.New("archive has no web content (need an index.html or .html/.css/.js file)")
 )
 
 // NewManifest returns an empty manifest.
@@ -194,8 +194,8 @@ var fileTypes = map[string]fileType{
 	// Markup + prose: known types, but a miss is a ROUTE, not a 404.
 	".html": {contentType: "text/html; charset=utf-8"},
 	".htm":  {contentType: "text/html; charset=utf-8"},
-	// Markdown is served raw, not rendered (rendering is the single-file paste
-	// path). Plain text so it isn't run as markup.
+	// A site serves markdown raw; rendering it is the single-file paste and
+	// knowledge base path. Plain text so it isn't run as markup.
 	".md":       {contentType: "text/plain; charset=utf-8"},
 	".markdown": {contentType: "text/plain; charset=utf-8"},
 
@@ -266,10 +266,11 @@ var assetExtensions = func() map[string]struct{} {
 	return out
 }()
 
-// looksLikeAsset reports whether reqPath's LAST segment has a known
+// LooksLikeAsset reports whether reqPath's LAST segment has a known
 // static-asset extension, so "/users/123/edit" is a route and "/img/logo.png"
-// is an asset.
-func looksLikeAsset(reqPath string) bool {
+// is an asset. The rule a manifest MISS is judged by: a route-shaped miss
+// resolves to a page, an asset-shaped one stays a 404.
+func LooksLikeAsset(reqPath string) bool {
 	ext := strings.ToLower(path.Ext(path.Base(reqPath)))
 	_, ok := assetExtensions[ext]
 	return ok
@@ -287,7 +288,7 @@ func (m Manifest) LookupWithSPAFallback(reqPath string) (entry ManifestEntry, hi
 	if e, ok := m.Lookup(reqPath); ok {
 		return e, true, false
 	}
-	if looksLikeAsset(reqPath) {
+	if LooksLikeAsset(reqPath) {
 		return ManifestEntry{}, false, false
 	}
 	if e, ok := m.Files["index.html"]; ok {
@@ -296,19 +297,22 @@ func (m Manifest) LookupWithSPAFallback(reqPath string) (entry ManifestEntry, hi
 	return ManifestEntry{}, false, false
 }
 
-// HasWebContent reports whether the manifest holds at least one piece
-// of web content: an index.html anywhere, or any .html / .css / .js
-// file. An archive with none of these is not a site (see ErrNoWebContent).
-func (m Manifest) HasWebContent() bool {
-	for p := range m.Files {
-		base := path.Base(p)
-		if base == "index.html" {
-			return true
-		}
-		switch strings.ToLower(path.Ext(p)) {
-		case ".html", ".htm", ".css", ".js", ".mjs":
-			return true
-		}
+// ArchiveKind is the shape an extracted archive is stored as: a root index.html
+// makes it a site, anything else a knowledge base. The root lookup is the whole
+// rule, so an archive is accepted whatever else it holds.
+func (m Manifest) ArchiveKind() ContentKind {
+	if _, ok := m.Lookup(Root); ok {
+		return KindSite
+	}
+	return KindKnowledgeBase
+}
+
+// IsMarkdownPath reports whether a path is markdown by extension: what a
+// knowledge base renders in its shell, as opposed to links to as a raw file.
+func IsMarkdownPath(p string) bool {
+	switch strings.ToLower(path.Ext(p)) {
+	case ".md", ".markdown":
+		return true
 	}
 	return false
 }

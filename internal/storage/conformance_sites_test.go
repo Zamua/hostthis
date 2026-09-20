@@ -44,6 +44,7 @@ func siteOfV(slug, identity string, size int, v string) domain.Site {
 	return domain.Site{
 		Slug:      domain.Slug(slug),
 		Identity:  domain.Identity(identity),
+		Kind:      domain.KindSite,
 		Manifest:  man,
 		CreatedAt: fixedNow,
 		UpdatedAt: fixedNow,
@@ -302,6 +303,7 @@ func conformSiteDeployAndReadBack(t *testing.T, sr conformanceSiteRepo) {
 	s := domain.Site{
 		Slug:      "rb123456",
 		Identity:  "key:rb",
+		Kind:      domain.KindSite,
 		Manifest:  man,
 		CreatedAt: fixedNow,
 		UpdatedAt: fixedNow,
@@ -507,7 +509,7 @@ func conformSiteEveryPathCharged(t *testing.T, r conformanceRepo, sr conformance
 	man.Add("b.html", domain.ManifestEntry{Key: "key-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
 	man.Add("c.html", domain.ManifestEntry{Key: "key-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
 	s := domain.Site{
-		Slug: "dd123456", Identity: "key:dd", Manifest: man,
+		Slug: "dd123456", Identity: "key:dd", Kind: domain.KindSite, Manifest: man,
 		CreatedAt: fixedNow, UpdatedAt: fixedNow}
 	// Three paths of identical content: three copies stored, so 1200.
 	if got := s.Manifest.Size(); got != 1200 {

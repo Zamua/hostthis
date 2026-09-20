@@ -312,9 +312,9 @@ func (r *MemRepo) AppendVersionWithQuotaCheck(_ context.Context, slug domain.Slu
 }
 
 func (r *MemRepo) AppendManifestVersion(_ context.Context, slug domain.Slug, generation string,
-	uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
+	kind domain.ContentKind, uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
 ) (AppendResult, error) {
-	return r.appendVersion(slug, generation, domain.KindSite, uploadID, m, size, userCap, now)
+	return r.appendVersion(slug, generation, kind, uploadID, m, size, userCap, now)
 }
 
 func (r *MemRepo) appendVersion(slug domain.Slug, generation string, kind domain.ContentKind, uploadID string,
