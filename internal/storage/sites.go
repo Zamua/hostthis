@@ -6,10 +6,25 @@ package storage
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
+
+// ErrNotDirectoryKind rejects a write whose Site carries a kind that is not a
+// directory kind. Get reads the shape from the kind, so a row stored under any
+// other one answers as not-found: the deploy would report success and hand out
+// a dead URL. Failing the write is the only place this is still visible.
+var ErrNotDirectoryKind = errors.New("storage: not a directory kind")
+
+func checkDirectoryKind(s domain.Site) error {
+	if !s.Kind.IsDirectory() {
+		return fmt.Errorf("%w: %q (slug %s)", ErrNotDirectoryKind, s.Kind, s.Slug)
+	}
+	return nil
+}
 
 // SiteBackingRepo is the slice of a paste repo the site surface needs. An
 // interface rather than a concrete repo: the translation is pure vocabulary,
@@ -66,6 +81,9 @@ func siteFromArtifact(p domain.Paste) domain.Site {
 // storedBytes is the CHARGED size: every manifest path's compressed size, which
 // is what the quota counts, rather than the root file's size.
 func (a *Sites) InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error {
+	if err := checkDirectoryKind(s); err != nil {
+		return err
+	}
 	return a.repo.InsertWithQuotaCheck(ctx, domain.Paste{
 		Slug:       s.Slug,
 		Generation: domain.NewPasteGeneration(),
@@ -89,6 +107,9 @@ func (a *Sites) InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedB
 // a directory, and one owned by another identity, both yield not-found, so
 // "not yours" stays indistinguishable from "does not exist".
 func (a *Sites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error {
+	if err := checkDirectoryKind(s); err != nil {
+		return err
+	}
 	existing, err := a.repo.Get(s.Slug)
 	if err != nil {
 		return err
