@@ -1682,9 +1682,9 @@ is needed because `VERS` cannot carry the explanation: it shows the SERVED
 version NUMBER, not how many versions are stored, and a paste whose v1 was
 deleted is charged for two while still displaying `v3`.
 
-Lists BOTH text pastes AND deployed static **sites** (a site shows
-`KIND=site`, its stored byte total, and `-` in `VERS` since
-sites are not versioned). This matters because a site counts against the
+Lists BOTH text pastes AND deployed **directories** (a directory shows its
+own kind - `site` or `knowledgebase` - and its stored byte total; one
+carrying no version timeline shows `-` in `VERS`). This matters because a site counts against the
 same 100 MiB per-identity quota as pastes: if `list` omitted sites, an owner
 could hit `would exceed your 100 MiB total quota` with no visible way to see
 or free what is using it (deleting the visible text pastes reclaims almost
@@ -1790,11 +1790,12 @@ stderr line):
 `name` is the empty string when unset (not the `-` table sentinel).
 `pinned_version` is `0` when the paste follows latest (unpinned);
 `served_version` is `pinned_version` when pinned, else `latest_version`.
-A static **site** is discriminated by `kind: "site"`: it has no versions,
-so `served_version` / `latest_version` / `pinned_version` are `null`.
+A **directory** is discriminated by its kind: `"site"` for a static site,
+`"knowledgebase"` for a browsable base. A row with no version timeline has
+`served_version` / `latest_version` / `pinned_version` `null`.
 `size_bytes` is the item's CHARGED total: every live version for a paste,
-the stored total for a site. `served_size_bytes` is the bytes of
-the version being served, and is `null` for a site, which has no versions.
+the stored total for a directory. `served_size_bytes` is the bytes of
+the version being served, and is `null` where there are no versions.
 
 Both are emitted because json mode prints only the array - the human
 footer never reaches a script - and a consumer cannot infer which figure
