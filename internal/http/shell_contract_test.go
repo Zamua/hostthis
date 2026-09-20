@@ -146,28 +146,35 @@ func TestServeAsset_WhitelistAndDeny(t *testing.T) {
 	}
 }
 
-// Every shell's bootstrap fetches "<path>?raw=1", the suffix
+// Every shell's bootstrap fetches "<path>?raw=1", and the knowledge base shell
+// fetches "<path>?files=1" for its file list as well. Those are the suffixes
 // internal/cache/urls.go purges alongside the bare URL. A shell fetching any
 // other query would serve stale bytes after an edit with nothing failing.
 func TestShells_FetchRawQueryInLockstepWithCachePurge(t *testing.T) {
+	// The queries each kind's scripts must spell. Absent means "?raw=1" alone.
+	extra := map[domain.ContentKind][]string{
+		domain.KindKnowledgeBase: {`"?files=1"`},
+	}
 	seen := map[*clientShell]bool{}
 	for kind, sh := range shells {
 		if seen[sh] {
 			continue
 		}
 		seen[sh] = true
-		found := false
+		var scripts strings.Builder
 		for name := range sh.assets {
 			if !strings.HasSuffix(name, ".js") || strings.Contains(name, ".min.") {
 				continue
 			}
 			b, err := sh.fs.ReadFile(sh.dir + "/" + name)
-			if err == nil && strings.Contains(string(b), `"?raw=1"`) {
-				found = true
+			if err == nil {
+				scripts.Write(b)
 			}
 		}
-		if !found {
-			t.Errorf("%s: no first-party script under %s fetches \"?raw=1\"", kind, sh.dir)
+		for _, query := range append([]string{`"?raw=1"`}, extra[kind]...) {
+			if !strings.Contains(scripts.String(), query) {
+				t.Errorf("%s: no first-party script under %s fetches %s", kind, sh.dir, query)
+			}
 		}
 	}
 }

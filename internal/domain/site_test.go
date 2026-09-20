@@ -48,6 +48,49 @@ func TestManifest_Lookup_DirectoryIndex(t *testing.T) {
 	}
 }
 
+// File is the exact lookup, with none of Lookup's directory-index rule: a
+// directory-shaped path misses, whatever index.html sits under it.
+func TestManifest_File_ExactPathsOnly(t *testing.T) {
+	m := mustManifest(map[string]string{
+		"index.html":      "root",
+		"blog/index.html": "blog",
+		"css/style.css":   "css",
+	})
+	cases := []struct {
+		req    string
+		want   string // expected key, "" means miss
+		wantOK bool
+	}{
+		{"/index.html", "key-index.html", true},
+		{"/blog/index.html", "key-blog/index.html", true},
+		{"/css/style.css", "key-css/style.css", true},
+		{"/blog", "", false},
+		{"/blog/", "", false},
+		{"/", "", false},
+		{"", "", false},
+		{"/missing.html", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.req, func(t *testing.T) {
+			e, ok := m.File(c.req)
+			if ok != c.wantOK {
+				t.Fatalf("ok: got %v, want %v", ok, c.wantOK)
+			}
+			if ok && e.Key != c.want {
+				t.Fatalf("key: got %q, want %q", e.Key, c.want)
+			}
+		})
+	}
+
+	// The Root KEY is an exact path like any other: a single document is known
+	// by it, so the root resolves for a document manifest and misses for a
+	// directory's.
+	doc := DocumentManifest(ManifestEntry{Key: "key-doc"})
+	if e, ok := doc.File(Root); !ok || e.Key != "key-doc" {
+		t.Fatalf("document root = (%q, %v), want its one entry", e.Key, ok)
+	}
+}
+
 func TestManifest_LookupWithSPAFallback(t *testing.T) {
 	m := mustManifest(map[string]string{
 		"index.html":      "root",
@@ -114,27 +157,59 @@ func TestManifest_LookupWithSPAFallback_NoRootIndex(t *testing.T) {
 	}
 }
 
-func TestManifest_HasWebContent(t *testing.T) {
+// An extracted archive's shape follows the root lookup alone: a root index.html
+// is a site, anything else is a knowledge base. Nothing else about the files
+// participates, so an archive holding no web content is still a directory.
+func TestManifest_ArchiveKind(t *testing.T) {
 	cases := []struct {
 		name  string
 		files map[string]string
-		want  bool
+		want  ContentKind
 	}{
-		{"index.html", map[string]string{"index.html": "x"}, true},
-		{"nested index", map[string]string{"app/index.html": "x"}, true},
-		{"css only", map[string]string{"style.css": "x"}, true},
-		{"js only", map[string]string{"app.js": "x"}, true},
-		{"html in dir", map[string]string{"about/page.html": "x"}, true},
-		{"images only", map[string]string{"logo.png": "x", "data.json": "y"}, false},
-		{"text only", map[string]string{"readme.txt": "x"}, false},
-		{"empty", map[string]string{}, false},
+		{"root index", map[string]string{"index.html": "x", "app.js": "y"}, KindSite},
+		{"nested index only", map[string]string{"a/index.html": "x", "b/notes.md": "y"}, KindKnowledgeBase},
+		{"markdown only", map[string]string{"README.md": "x", "guide/setup.md": "y"}, KindKnowledgeBase},
+		{"neither markdown nor html", map[string]string{"logo.png": "x", "data.json": "y"}, KindKnowledgeBase},
+		{"css and js without an index", map[string]string{"style.css": "x", "app.js": "y"}, KindKnowledgeBase},
+		{"empty", map[string]string{}, KindKnowledgeBase},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := mustManifest(c.files).HasWebContent(); got != c.want {
-				t.Fatalf("HasWebContent: got %v, want %v", got, c.want)
+			if got := mustManifest(c.files).ArchiveKind(); got != c.want {
+				t.Fatalf("ArchiveKind: got %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// Both archive kinds are directories and no document kind is: serving reads the
+// shape off the kind, so a document admitted here would be served as a file
+// tree and a directory as one rendered document.
+func TestContentKind_IsDirectory(t *testing.T) {
+	for _, k := range []ContentKind{KindSite, KindKnowledgeBase} {
+		if !k.IsDirectory() {
+			t.Errorf("%q: IsDirectory false, want true", k)
+		}
+	}
+	for _, k := range []ContentKind{KindHTML, KindMarkdown, KindDiff, KindPDF, KindCSV, KindJSON, KindText, KindLog, ""} {
+		if k.IsDirectory() {
+			t.Errorf("%q: IsDirectory true, want false", k)
+		}
+	}
+}
+
+// Markdown is recognised by extension, the rule deciding what a knowledge base
+// renders rather than links to.
+func TestIsMarkdownPath(t *testing.T) {
+	for _, p := range []string{"README.md", "guide/setup.MD", "a/b.markdown"} {
+		if !IsMarkdownPath(p) {
+			t.Errorf("%q: not markdown, want markdown", p)
+		}
+	}
+	for _, p := range []string{"index.html", "app.js", "notes.txt", "md", "/", ""} {
+		if IsMarkdownPath(p) {
+			t.Errorf("%q: markdown, want not markdown", p)
+		}
 	}
 }
 

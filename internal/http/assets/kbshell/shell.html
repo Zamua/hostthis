@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" data-kind="__KIND__">
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<meta name=color-scheme content="light dark">
+<title>hostthis</title>
+<link rel="stylesheet" href="/_hostthis/kb.css?v=__VER__">
+<header id="kb-bar">
+  <button id="kb-files-toggle" class="kb-btn" type="button" aria-expanded="true" aria-controls="kb-tree" aria-label="Files" title="Files">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2.5 12.5v-9h3.4l1.3 1.8h6.3v7.2z"/></svg>
+  </button>
+  <nav id="kb-crumbs" aria-label="Breadcrumb"></nav>
+  <a id="kb-raw" href="?raw=1" hidden>raw</a>
+  <input id="kb-search" type="search" placeholder="Search files, headings, text" autocomplete="off" spellcheck="false" aria-label="Search this knowledge base">
+  <button id="kb-toc-toggle" class="kb-btn" type="button" aria-expanded="true" aria-controls="kb-toc" aria-label="On this page" title="On this page">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 4h10M5 8h8M7 12h6"/></svg>
+  </button>
+</header>
+<div id="kb-body">
+  <aside id="kb-tree" aria-label="Files in this knowledge base"></aside>
+  <main id="kb-main">
+    <article id="kb-doc" aria-busy="true"></article>
+  </main>
+  <aside id="kb-toc" aria-label="On this page" hidden>
+    <p id="kb-toc-title">On this page</p>
+    <ul id="kb-toc-list"></ul>
+  </aside>
+  <div id="kb-scrim"></div>
+  <div id="kb-results" hidden>
+    <p id="kb-index-note" hidden></p>
+    <div id="kb-hits"></div>
+    <p id="kb-results-empty" hidden>No matches.</p>
+  </div>
+</div>
+<script src="/_hostthis/deeplink.js?v=__VER__"></script>
+<script src="/_hostthis/marked.min.js?v=__VER__"></script>
+<script src="/_hostthis/purify.min.js?v=__VER__"></script>
+<script src="/_hostthis/kb-tree.js?v=__VER__"></script>
+<script src="/_hostthis/kb-search.js?v=__VER__"></script>
+<script src="/_hostthis/kb.js?v=__VER__"></script>

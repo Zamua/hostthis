@@ -4,11 +4,46 @@ package storage_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
 )
+
+// A directory is stored under the kind that decides how it is SERVED, so a kind
+// that is not a directory kind is refused at the door. Stored, it would read
+// back as not-found through the site port: the deploy would report success and
+// hand out a URL nothing answers.
+func TestArtifactSites_RefusesANonDirectoryKind(t *testing.T) {
+	repo := storage.NewMemRepo()
+	sites := storage.NewSites(repo)
+
+	for _, kind := range []domain.ContentKind{"", domain.KindHTML, domain.KindMarkdown} {
+		s := siteOf("kinda234", "key:owner-k", 10)
+		s.Kind = kind
+		if err := sites.InsertWithQuotaCheck(context.Background(), s, 10, 0, fixedNow); err == nil {
+			t.Fatalf("kind %q: insert must be refused", kind)
+		}
+		if _, err := repo.Get(s.Slug); !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("kind %q: a refused insert left a row behind (%v)", kind, err)
+		}
+	}
+
+	// A redeploy carries the kind THAT deploy decided, so it is guarded the
+	// same way and leaves the live version untouched when refused.
+	live := siteOf("kindb234", "key:owner-k", 10)
+	insertSite(t, sites, live)
+	blank := siteOf("kindb234", "key:owner-k", 20)
+	blank.Kind = ""
+	if err := sites.ReplaceWithQuotaCheck(context.Background(), blank, 20, 0, fixedNow); err == nil {
+		t.Fatal("a redeploy with no kind must be refused")
+	}
+	got, err := sites.Get("kindb234")
+	if err != nil || got.Kind != domain.KindSite {
+		t.Fatalf("after the refused redeploy the site reads back as (%q, %v), want site", got.Kind, err)
+	}
+}
 
 func TestArtifactSites_InsertGetAndList(t *testing.T) {
 	repo := storage.NewMemRepo()

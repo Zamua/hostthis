@@ -708,11 +708,12 @@ func (r *PasteRepo) OwnerSummary(owner string, now time.Time) (domain.OwnerSumma
 // second quota, no second enumeration index. The slug namespace stays global
 // because the paste cell IS the slug.
 
-// AppendManifestVersion appends a retained file-set version.
+// AppendManifestVersion appends a retained file-set version under the directory
+// shape this deploy decided.
 func (r *PasteRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string,
-	uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
+	kind domain.ContentKind, uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
-	return r.appendArtifact(ctx, slug, generation, domain.KindSite, uploadID, m, size, userCap, now)
+	return r.appendArtifact(ctx, slug, generation, kind, uploadID, m, size, userCap, now)
 }
 
 // urlQuery escapes a value for a query string. Named rather than inlined so

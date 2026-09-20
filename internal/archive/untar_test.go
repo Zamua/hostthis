@@ -122,8 +122,8 @@ func TestSafeUntar_HappyPath(t *testing.T) {
 	if got := man.Files["js/app.js"].ContentType; got != "text/javascript; charset=utf-8" {
 		t.Fatalf("js content-type: got %q", got)
 	}
-	if !man.HasWebContent() {
-		t.Fatalf("expected web content")
+	if got := man.ArchiveKind(); got != domain.KindSite {
+		t.Fatalf("archive kind: got %q, want site (a root index.html)", got)
 	}
 }
 

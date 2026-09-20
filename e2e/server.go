@@ -6,16 +6,20 @@
 package e2e
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -259,6 +263,45 @@ func (s *Server) Upload(t *testing.T, content []byte, opts UploadOpts) Paste {
 		t.Fatalf("upload printed %q: %v\nstderr: %s", raw, err, stderr.String())
 	}
 	return Paste{Slug: slug, URL: raw}
+}
+
+// UploadDir deploys a directory the way a user does, by piping a gzip-tar over
+// the same ssh path Upload uses: the archive's shape is decided from the bytes,
+// so seeding the manifest directly would skip the decision. files maps each
+// path in the archive to its contents, which may be binary. An archive with a
+// root index.html deploys as a site; one WITHOUT deploys as a knowledge base.
+func (s *Server) UploadDir(t *testing.T, files map[string]string, opts UploadOpts) Paste {
+	t.Helper()
+	return s.Upload(t, gzipTar(t, files), opts)
+}
+
+// gzipTar builds the archive in memory. Entries are written in path order so a
+// failed deploy names the same entry every run.
+func gzipTar(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		body := files[name]
+		hdr := &tar.Header{Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("tar header %q: %v", name, err)
+		}
+		if _, err := tw.Write([]byte(body)); err != nil {
+			t.Fatalf("tar body %q: %v", name, err)
+		}
+	}
+	// Closed in order and checked: a dropped error here would ship a truncated
+	// archive, which the server rejects as a corrupt upload rather than as the
+	// fixture bug it is.
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	return buf.Bytes()
 }
 
 // pasteReadyTimeout bounds the wait for a fresh upload to leave the pending

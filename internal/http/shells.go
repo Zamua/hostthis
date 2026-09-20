@@ -81,6 +81,10 @@ var dataShell = &clientShell{
 
 // shells maps each client-rendered kind to its shell. A kind absent from this
 // map is served directly (HTML) or is not a paste at all (site).
+//
+// The knowledge base is here for the same reason the document kinds are - one
+// fixed page, one raw fetch - but it is reached through the directory path,
+// since its shell answers at many paths rather than at one.
 var shells = map[domain.ContentKind]*clientShell{
 	domain.KindMarkdown:   {version: mdShellVersion, fs: mdShellFS, dir: "assets/mdshell", assets: mdShellAssets},
 	domain.KindDiff:       {version: diffShellVersion, fs: diffShellFS, dir: "assets/diffshell", assets: diffShellAssets},
@@ -91,6 +95,8 @@ var shells = map[domain.ContentKind]*clientShell{
 	domain.KindFlamegraph: {version: flameShellVersion, fs: flameShellFS, dir: "assets/flameshell", assets: flameShellAssets},
 	domain.KindText:       {version: textShellVersion, fs: textShellFS, dir: "assets/textshell", assets: textShellAssets},
 	domain.KindLog:        {version: logShellVersion, fs: logShellFS, dir: "assets/logshell", assets: logShellAssets},
+
+	domain.KindKnowledgeBase: {version: kbShellVersion, fs: kbShellFS, dir: "assets/kbshell", assets: kbShellAssets},
 }
 
 // rawContentType is the Content-Type each client-rendered kind's ?raw response
@@ -108,6 +114,9 @@ var rawContentType = map[domain.ContentKind]string{
 	domain.KindFlamegraph: "text/plain; charset=utf-8",
 	domain.KindText:       "text/plain; charset=utf-8",
 	domain.KindLog:        "application/x-ndjson; charset=utf-8",
+	// A knowledge base's raw representation is the markdown document the path
+	// resolves to; its other files serve under their own extension's type.
+	domain.KindKnowledgeBase: "text/markdown; charset=utf-8",
 }
 
 // shellFor returns the shell for kind, or nil when the kind renders without one.

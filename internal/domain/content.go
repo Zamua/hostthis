@@ -26,6 +26,11 @@ const (
 	// inside is confirmed by the safe-untar, not by the format gate. Served
 	// as a directory off its slug, not as one rendered file.
 	KindSite ContentKind = "site"
+	// KindKnowledgeBase is the other shape a gzip-tar archive lands as: a
+	// directory with no root index.html, browsed as a set of documents rather
+	// than served as a site. The shape is decided from the extracted manifest
+	// (Manifest.ArchiveKind) and stored, so serving never re-derives it.
+	KindKnowledgeBase ContentKind = "knowledgebase"
 	// KindMermaid is Mermaid diagram source, detected by an opening diagram
 	// keyword. Mermaid also renders inside a markdown paste's fenced blocks;
 	// this kind is for a bare diagram uploaded on its own.
@@ -53,6 +58,11 @@ const (
 	// bar KindSite does rather than being a fallback for unclassifiable bytes.
 	KindPDF ContentKind = "pdf"
 )
+
+// IsDirectory reports whether the kind is served as a directory of files rather
+// than as one rendered document. The shape is DECLARED by the kind: counting
+// manifest entries would get a one-file directory wrong.
+func (k ContentKind) IsDirectory() bool { return k == KindSite || k == KindKnowledgeBase }
 
 // ErrUnsupportedKind is returned when content sniffs outside the accepted set.
 // The message is what the user sees on stderr.

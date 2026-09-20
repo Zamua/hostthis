@@ -44,6 +44,7 @@ func siteOfV(slug, identity string, size int, v string) domain.Site {
 	return domain.Site{
 		Slug:      domain.Slug(slug),
 		Identity:  domain.Identity(identity),
+		Kind:      domain.KindSite,
 		Manifest:  man,
 		CreatedAt: fixedNow,
 		UpdatedAt: fixedNow,
@@ -52,6 +53,55 @@ func siteOfV(slug, identity string, size int, v string) domain.Site {
 
 func siteOf(slug, identity string, size int) domain.Site {
 	return siteOfV(slug, identity, size, "index")
+}
+
+// knowledgeBaseOf builds a directory with NO root index, the shape that makes
+// an archive a knowledge base rather than a site.
+func knowledgeBaseOf(slug, identity string, size int) domain.Site {
+	man := domain.NewManifest()
+	man.Add("notes/README.md", domain.ManifestEntry{
+		Key:         "key-" + slug + "-readme",
+		Size:        size,
+		ContentType: "text/plain; charset=utf-8",
+	})
+	return domain.Site{
+		Slug:      domain.Slug(slug),
+		Identity:  domain.Identity(identity),
+		Kind:      domain.KindKnowledgeBase,
+		UploadID:  "up-" + slug + "-v1",
+		Manifest:  man,
+		CreatedAt: fixedNow,
+		UpdatedAt: fixedNow,
+	}
+}
+
+// conformSiteRedeployChangesKind pins that a directory's SHAPE rides the
+// appended version rather than the row it was born with: a knowledge base
+// redeployed with a root index.html serves as a site afterwards. A backend that
+// kept the original kind would serve a browsable shell over a built site.
+func conformSiteRedeployChangesKind(t *testing.T, sr conformanceSiteRepo) {
+	const slug = "kindc234"
+	insertSite(t, sr, knowledgeBaseOf(slug, "key:kind", 40))
+	got, err := sr.Get(slug)
+	if err != nil || got.Kind != domain.KindKnowledgeBase {
+		t.Fatalf("a directory with no root index reads back as (%q, %v), want knowledgebase", got.Kind, err)
+	}
+
+	site := siteOfV(slug, "key:kind", 60, "v2")
+	site.UploadID = "up-" + slug + "-v2"
+	if err := sr.ReplaceWithQuotaCheck(context.Background(), site, site.Manifest.Size(), 0, fixedNow); err != nil {
+		t.Fatalf("redeploy with a root index: %v", err)
+	}
+	got, err = sr.Get(slug)
+	if err != nil {
+		t.Fatalf("get after redeploy: %v", err)
+	}
+	if got.Kind != domain.KindSite {
+		t.Fatalf("served kind after a redeploy that added a root index = %q, want site", got.Kind)
+	}
+	if _, ok := got.Manifest.Files["index.html"]; !ok {
+		t.Fatalf("the served manifest is not the redeploy's: %+v", got.Manifest.Files)
+	}
 }
 
 // insertSite deploys a site with no caps (caps=0 -> no quota enforcement).
@@ -101,6 +151,7 @@ func runSiteConformance(t *testing.T, name string, newSites func(t *testing.T) (
 	t.Run(name+"/Sites/ReplaceNotFoundShape", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceNotFoundShape(t, r, sr) })
 	t.Run(name+"/Sites/ReplaceChargesEachVersion", func(t *testing.T) { r, sr := newSites(t); conformSiteReplaceChargesEachVersion(t, r, sr) })
 	t.Run(name+"/Sites/DeleteNamesEveryDeploy", func(t *testing.T) { _, sr := newSites(t); conformSiteDeleteNamesEveryDeploy(t, sr) })
+	t.Run(name+"/Sites/RedeployChangesKind", func(t *testing.T) { _, sr := newSites(t); conformSiteRedeployChangesKind(t, sr) })
 	t.Run(name+"/Sites/ListByOwner", func(t *testing.T) { r, sr := newSites(t); conformSiteListByOwner(t, r, sr) })
 }
 
@@ -302,6 +353,7 @@ func conformSiteDeployAndReadBack(t *testing.T, sr conformanceSiteRepo) {
 	s := domain.Site{
 		Slug:      "rb123456",
 		Identity:  "key:rb",
+		Kind:      domain.KindSite,
 		Manifest:  man,
 		CreatedAt: fixedNow,
 		UpdatedAt: fixedNow,
@@ -507,7 +559,7 @@ func conformSiteEveryPathCharged(t *testing.T, r conformanceRepo, sr conformance
 	man.Add("b.html", domain.ManifestEntry{Key: "key-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
 	man.Add("c.html", domain.ManifestEntry{Key: "key-dd", Size: 400, ContentType: "text/html; charset=utf-8"})
 	s := domain.Site{
-		Slug: "dd123456", Identity: "key:dd", Manifest: man,
+		Slug: "dd123456", Identity: "key:dd", Kind: domain.KindSite, Manifest: man,
 		CreatedAt: fixedNow, UpdatedAt: fixedNow}
 	// Three paths of identical content: three copies stored, so 1200.
 	if got := s.Manifest.Size(); got != 1200 {

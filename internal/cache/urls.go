@@ -12,9 +12,11 @@ import (
 //
 // A client-rendered paste serves its shell at the base URL and the bytes at
 // "?raw=1", a SEPARATE cache entry, so BOTH must be purged or an edit shows
-// stale content until max-age expires. For an HTML paste the extra purge is a
-// harmless no-op. The "?raw=1" suffix MUST match what the render shell
-// fetches; TestMdShell_FetchesRawQuery pins the two.
+// stale content until max-age expires. A knowledge base's shell reads its file
+// list from a third, "?files=1". Every variant is purged for every slug: the
+// list is kind-independent because the purger knows only the slug, and an
+// unused variant purges as a harmless no-op. The suffixes MUST match what the
+// shells fetch; TestShells_FetchRawQueryInLockstepWithCachePurge pins them.
 func pasteCacheURLs(scheme, apex, mode string, slug domain.Slug) []string {
 	if scheme == "" {
 		scheme = "https"
@@ -29,5 +31,5 @@ func pasteCacheURLs(scheme, apex, mode string, slug domain.Slug) []string {
 		// the trailing slash.
 		base = scheme + "://" + slug.String() + "." + apex + "/"
 	}
-	return []string{base, base + "?raw=1"}
+	return []string{base, base + "?raw=1", base + "?files=1"}
 }

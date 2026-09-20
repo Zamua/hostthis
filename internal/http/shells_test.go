@@ -79,6 +79,27 @@ func TestShells_ReferencedAssetsAreServable(t *testing.T) {
 	t.Logf("checked %d asset references across %d sources", checked, len(sources))
 }
 
+// assetVersionRef finds the ?v= stamp a shell page puts on each asset URL.
+var assetVersionRef = regexp.MustCompile(`/_hostthis/[A-Za-z0-9._-]+\?v=([A-Za-z0-9._-]+)`)
+
+// Every asset URL a page emits carries THAT shell's version. Assets are served
+// immutable, so a stamp left behind on one pins a changed file in caches for a
+// year while the page itself keeps revalidating.
+func TestShells_AssetURLsCarryTheShellVersion(t *testing.T) {
+	checked := 0
+	for kind, sh := range shells {
+		for _, m := range assetVersionRef.FindAllStringSubmatch(string(sh.html(kind)), -1) {
+			checked++
+			if m[1] != sh.version {
+				t.Errorf("%s: asset URL stamped %q, want the shell version %q", kind, m[1], sh.version)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no versioned asset URLs found, so this guard checked NOTHING")
+	}
+}
+
 // Every whitelisted asset must actually exist in its shell's embedded FS.
 // A typo'd whitelist entry otherwise serves a 404 that looks like a routing bug.
 func TestShells_WhitelistedAssetsExist(t *testing.T) {

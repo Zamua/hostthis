@@ -88,7 +88,7 @@ const maxDeployRetries = 5
 // mid-untar, so peak memory is one file at a time, never the inflated archive.
 //
 // Returns:
-//   - domain.ErrUnsupportedKind: not a valid gzip-tar, or holds no web content
+//   - domain.ErrUnsupportedKind: not a valid gzip-tar
 //   - ErrOverQuota: the archive expands past the owner's remaining quota,
 //     caught mid-untar by the decompression-bomb guard or at persistence time
 //     by the atomic check
@@ -104,7 +104,10 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	}
 
 	site := domain.Site{
-		Identity:  domain.Identity(owner),
+		Identity: domain.Identity(owner),
+		// The shape is decided here, from THIS deploy's manifest, and stored on
+		// the row; serving never re-derives it.
+		Kind:      man.ArchiveKind(),
 		UploadID:  uploadID,
 		Manifest:  man,
 		CreatedAt: now,
@@ -135,9 +138,9 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 // budget and returns the manifest and that upload's id. The decompression-bomb
 // guard aborts the instant the running total would cross that budget, so a
 // site can never be extracted over-quota. Bucket-quota rejections translate via
-// the classifier; ErrUnsafeArchive / ErrTooManyFiles / ErrNoWebContent surface
-// verbatim so the SSH layer can message them precisely. A failed extract
-// deletes whatever it staged.
+// the classifier; ErrUnsafeArchive / ErrTooManyFiles surface verbatim so the
+// SSH layer can message them precisely. A failed extract deletes whatever it
+// staged.
 func (d *DeploySite) extract(body io.Reader, owner string, now time.Time) (domain.Manifest, string, error) {
 	usedPaste, err := d.Pastes.SumActiveBytesByOwner(owner, now)
 	if err != nil {
@@ -160,8 +163,6 @@ func (d *DeploySite) extract(body io.Reader, owner string, now time.Time) (domai
 		_, err = classifyCommitErr(err)
 	case len(man.Files) == 0:
 		err = ErrEmptySite
-	case !man.HasWebContent():
-		err = domain.ErrNoWebContent
 	}
 	if err != nil {
 		discardUpload(d.Blob, d.Logger, uploadID)
@@ -207,7 +208,7 @@ func (d *DeploySite) Delete(slug domain.Slug, owner string) error {
 // Returns:
 //   - ErrEmptyOwner: anonymous / empty identity
 //   - ErrNotFound: slug is not a site owned by owner
-//   - domain.ErrUnsupportedKind / domain.ErrNoWebContent: not web content
+//   - domain.ErrUnsupportedKind: not a valid gzip-tar
 //   - ErrOverQuota / ErrServiceFull: over the per-identity / service cap
 //   - ErrEmptySite: the archive safe-untars to zero files
 func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string) (SiteResult, error) {
@@ -234,8 +235,11 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	}
 
 	site := domain.Site{
-		Slug:      slug,
-		Identity:  domain.Identity(owner),
+		Slug:     slug,
+		Identity: domain.Identity(owner),
+		// A redeploy re-decides the shape from its own manifest, so adding a
+		// root index.html turns a knowledge base into a site at the same slug.
+		Kind:      man.ArchiveKind(),
 		UploadID:  uploadID,
 		Manifest:  man,
 		CreatedAt: existing.CreatedAt, // preserved across re-deploys
@@ -307,7 +311,7 @@ func (a ArchiveAdapter) Deploy(body io.Reader, owner string) (Result, error) {
 	return Result{Paste: domain.Paste{
 		Slug:      res.Site.Slug,
 		Identity:  res.Site.Identity,
-		Kind:      domain.KindSite,
+		Kind:      res.Site.Kind,
 		CreatedAt: res.Site.CreatedAt,
 		UpdatedAt: res.Site.UpdatedAt,
 	}}, nil

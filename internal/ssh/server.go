@@ -538,7 +538,13 @@ func (s *Server) emitSite(sess gossh.Session, res service.SiteResult, err error)
 		emitServiceErr(sess, err)
 		return
 	}
-	_, _ = fmt.Fprintf(sess.Stderr(), "site: %d file(s).\n", len(res.Site.Manifest.Files))
+	// The archive's shape is what the deploy landed as, so the line names it:
+	// a base of notes deployed as a knowledge base must not report a site.
+	kind := "site"
+	if res.Site.Kind == domain.KindKnowledgeBase {
+		kind = "knowledge base"
+	}
+	_, _ = fmt.Fprintf(sess.Stderr(), "%s: %d file(s).\n", kind, len(res.Site.Manifest.Files))
 	s.emitURL(sess, res.Site.Slug)
 }
 
@@ -1113,8 +1119,6 @@ func emitServiceErr(sess gossh.Session, err error) {
 		fmt.Fprintln(sess.Stderr(), "hostthis: name must be 1–60 printable chars, no newlines")
 	case errors.Is(err, domain.ErrUnsupportedKind):
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrUnsupportedKind.Error())
-	case errors.Is(err, domain.ErrNoWebContent):
-		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrNoWebContent.Error())
 	case errors.Is(err, domain.ErrUnsafeArchive):
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrUnsafeArchive.Error())
 	case errors.Is(err, domain.ErrTooManyFiles):
