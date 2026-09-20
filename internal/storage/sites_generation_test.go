@@ -16,7 +16,7 @@ type generationSwapSiteRepo struct {
 }
 
 func (r *generationSwapSiteRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string,
-	uploadID string, manifest domain.Manifest, size int, userCap int64, now time.Time,
+	kind domain.ContentKind, uploadID string, manifest domain.Manifest, size int, userCap int64, now time.Time,
 ) (AppendResult, error) {
 	if _, err := r.Delete(r.old.Slug, r.old.Identity, r.old.CreatedAt); err != nil {
 		return AppendResult{}, err
@@ -24,7 +24,7 @@ func (r *generationSwapSiteRepo) AppendManifestVersion(ctx context.Context, slug
 	if err := r.InsertWithQuotaCheck(ctx, r.replacement, 0, r.replacement.CreatedAt); err != nil {
 		return AppendResult{}, err
 	}
-	return r.MemRepo.AppendManifestVersion(ctx, slug, generation, uploadID, manifest, size, userCap, now)
+	return r.MemRepo.AppendManifestVersion(ctx, slug, generation, kind, uploadID, manifest, size, userCap, now)
 }
 
 func siteManifest(key string) domain.Manifest {
@@ -39,8 +39,8 @@ func TestSitesReplaceFencesReplacementIncarnation(t *testing.T) {
 	inner := NewMemRepo()
 	sites := NewSites(inner)
 	initial := domain.Site{
-		Slug: "site2345", Identity: "key:owner", Manifest: siteManifest("old-key"),
-		CreatedAt: at, UpdatedAt: at,
+		Slug: "site2345", Identity: "key:owner", Kind: domain.KindSite,
+		Manifest: siteManifest("old-key"), CreatedAt: at, UpdatedAt: at,
 	}
 	if err := sites.InsertWithQuotaCheck(context.Background(), initial, 5, 0, at); err != nil {
 		t.Fatalf("insert initial site: %v", err)

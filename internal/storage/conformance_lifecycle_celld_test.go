@@ -56,9 +56,9 @@ type namespacedRepo struct {
 // unrelated stores. Namespacing both through one prefix is what keeps them the
 // same store.
 func (n namespacedRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string,
-	uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
+	kind domain.ContentKind, uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
 ) (storage.AppendResult, error) {
-	return n.inner.AppendManifestVersion(ctx, n.slug(slug), generation, uploadID, m, size, userCap, now)
+	return n.inner.AppendManifestVersion(ctx, n.slug(slug), generation, kind, uploadID, m, size, userCap, now)
 }
 
 func (n namespacedRepo) slug(s domain.Slug) domain.Slug {

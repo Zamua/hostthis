@@ -95,8 +95,11 @@ func TestListItem(t *testing.T) {
 			newPasteListItem(domain.Paste{Slug: "p", Kind: "html", Size: 777, LatestVersion: 1}),
 			"html", 777, ip(777), false, ip(1), ip(1), ip(0)},
 		{"site is charged StoredBytes, not the manifest total, with null versions",
-			newSiteListItem(domain.Site{Slug: "sitezzz1", Manifest: man, StoredBytes: 1500}),
+			newSiteListItem(domain.Site{Slug: "sitezzz1", Kind: domain.KindSite, Manifest: man, StoredBytes: 1500}),
 			"site", 1500, nil, false, nil, nil, nil},
+		{"a knowledge base lists under its own kind, not as a site",
+			newSiteListItem(domain.Site{Slug: "kbasezz1", Kind: domain.KindKnowledgeBase, Manifest: man, StoredBytes: 900}),
+			"knowledgebase", 900, nil, false, nil, nil, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

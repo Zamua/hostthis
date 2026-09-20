@@ -97,25 +97,26 @@ func writeJSON(w io.Writer, v any) error {
 // View structs (the published JSON contract) + mappers from domain types.
 // ---------------------------------------------------------------------------
 
-// listItemView is one row of `list -o json`: a text paste OR a static site,
-// discriminated by Kind ("site" for sites). The version fields are *int so an
-// unversioned site serializes them as null.
+// listItemView is one row of `list -o json`: a text paste OR a directory,
+// discriminated by Kind. The version fields are *int so an unversioned row
+// serializes them as null.
 type listItemView struct {
 	Slug          string `json:"slug"`
 	Name          string `json:"name"` // "" when unset (not the "-" table sentinel)
 	SizeBytes     int    `json:"size_bytes"`
-	Kind          string `json:"kind"`           // html/markdown/diff, or "site"
-	ServedVersion *int   `json:"served_version"` // null for sites
+	Kind          string `json:"kind"`           // a document's render kind, or a directory's: site / knowledgebase
+	ServedVersion *int   `json:"served_version"` // null for an unversioned row
 	// ServedSizeBytes is the bytes of the version being SERVED, where SizeBytes
-	// is every live version (what the quota charges). Null for a site. Both are
-	// given because served_version alone cannot tell them apart: a deleted
-	// version leaves a paste charged for fewer versions than its number implies.
+	// is every live version (what the quota charges). Null for an unversioned
+	// row. Both are given because served_version alone cannot tell them apart: a
+	// deleted version leaves a paste charged for fewer versions than its number
+	// implies.
 	ServedSizeBytes *int `json:"served_size_bytes"`
 	// multiVersion marks a row whose STORED size exceeds the served version's,
 	// so the table can explain the difference. Unexported: display state.
 	multiVersion  bool
-	LatestVersion *int `json:"latest_version"` // null for sites
-	PinnedVersion *int `json:"pinned_version"` // null for sites; 0 when unpinned
+	LatestVersion *int `json:"latest_version"` // null for an unversioned row
+	PinnedVersion *int `json:"pinned_version"` // null for an unversioned row; 0 when unpinned
 	// updatedAt orders the list. Unexported: a sort key, not output.
 	updatedAt time.Time
 }
@@ -139,17 +140,18 @@ func newPasteListItem(p domain.Paste) listItemView {
 	}
 }
 
-// newSiteListItem maps a domain.Site to a list item. Sites have no label and
-// no versions; SizeBytes is what the quota charged, so a list sums to the
-// figure whoami reports.
+// newSiteListItem maps a domain.Site to a list item under the directory's OWN
+// kind, so a knowledge base is not reported as a site. A directory carries no
+// label; SizeBytes is what the quota charged, so a list sums to the figure
+// whoami reports.
 func newSiteListItem(s domain.Site) listItemView {
 	return listItemView{
 		updatedAt: s.UpdatedAt,
 		Slug:      string(s.Slug),
 		Name:      "",
 		SizeBytes: s.StoredBytes,
-		Kind:      "site",
-		// version fields nil: sites are not versioned
+		Kind:      string(s.Kind),
+		// version fields nil: this path carries no version timeline
 	}
 }
 

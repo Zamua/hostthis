@@ -6,10 +6,25 @@ package storage
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
+
+// ErrNotDirectoryKind rejects a write whose Site carries a kind that is not a
+// directory kind. Get reads the shape from the kind, so a row stored under any
+// other one answers as not-found: the deploy would report success and hand out
+// a dead URL. Failing the write is the only place this is still visible.
+var ErrNotDirectoryKind = errors.New("storage: not a directory kind")
+
+func checkDirectoryKind(s domain.Site) error {
+	if !s.Kind.IsDirectory() {
+		return fmt.Errorf("%w: %q (slug %s)", ErrNotDirectoryKind, s.Kind, s.Slug)
+	}
+	return nil
+}
 
 // SiteBackingRepo is the slice of a paste repo the site surface needs. An
 // interface rather than a concrete repo: the translation is pure vocabulary,
@@ -17,8 +32,8 @@ import (
 type SiteBackingRepo interface {
 	Get(domain.Slug) (domain.Paste, error)
 	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
-	AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string, uploadID string,
-		m domain.Manifest, size int, userCap int64, now time.Time) (AppendResult, error)
+	AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string, kind domain.ContentKind,
+		uploadID string, m domain.Manifest, size int, userCap int64, now time.Time) (AppendResult, error)
 	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) ([]string, error)
 }
 
@@ -36,13 +51,14 @@ func NewSites(repo SiteBackingRepo) *Sites {
 // A slug that is a DOCUMENT reads as not-found, not as a one-file site: the
 // caller asked for a directory, and answering with a document would let a
 // paste be served through the site path. The shape is read from the kind, not
-// inferred from the manifest's size.
+// inferred from the manifest's size; both directory kinds answer here, since
+// storage treats a site and a knowledge base identically.
 func (a *Sites) Get(slug domain.Slug) (domain.Site, error) {
 	p, err := a.repo.Get(slug)
 	if err != nil {
 		return domain.Site{}, err
 	}
-	if p.Kind != domain.KindSite {
+	if !p.Kind.IsDirectory() {
 		return domain.Site{}, ErrNotFound
 	}
 	return siteFromArtifact(p), nil
@@ -52,6 +68,7 @@ func siteFromArtifact(p domain.Paste) domain.Site {
 	return domain.Site{
 		Slug:      p.Slug,
 		Identity:  p.Identity,
+		Kind:      p.Kind,
 		UploadID:  p.UploadID,
 		Manifest:  p.Manifest,
 		CreatedAt: p.CreatedAt,
@@ -64,12 +81,15 @@ func siteFromArtifact(p domain.Paste) domain.Site {
 // storedBytes is the CHARGED size: every manifest path's compressed size, which
 // is what the quota counts, rather than the root file's size.
 func (a *Sites) InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error {
+	if err := checkDirectoryKind(s); err != nil {
+		return err
+	}
 	return a.repo.InsertWithQuotaCheck(ctx, domain.Paste{
 		Slug:       s.Slug,
 		Generation: domain.NewPasteGeneration(),
 		Identity:   s.Identity,
 		Status:     domain.PasteStatusReady,
-		Kind:       domain.KindSite,
+		Kind:       s.Kind,
 		UploadID:   s.UploadID,
 		Size:       storedBytes,
 		CreatedAt:  s.CreatedAt,
@@ -87,15 +107,20 @@ func (a *Sites) InsertWithQuotaCheck(ctx context.Context, s domain.Site, storedB
 // a directory, and one owned by another identity, both yield not-found, so
 // "not yours" stays indistinguishable from "does not exist".
 func (a *Sites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error {
+	if err := checkDirectoryKind(s); err != nil {
+		return err
+	}
 	existing, err := a.repo.Get(s.Slug)
 	if err != nil {
 		return err
 	}
-	if existing.Kind != domain.KindSite || existing.Identity != s.Identity {
+	if !existing.Kind.IsDirectory() || existing.Identity != s.Identity {
 		return ErrNotFound
 	}
+	// The appended version carries the shape THIS deploy decided, so a redeploy
+	// that adds or drops a root index.html changes what the slug serves as.
 	_, err = a.repo.AppendManifestVersion(
-		ctx, s.Slug, existing.Generation, s.UploadID, s.Manifest, storedBytes, userCap, now,
+		ctx, s.Slug, existing.Generation, s.Kind, s.UploadID, s.Manifest, storedBytes, userCap, now,
 	)
 	return err
 }
