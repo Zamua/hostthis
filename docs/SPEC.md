@@ -239,7 +239,7 @@ content, so a paste can be *cited* and not merely sent:
 
 | Fragment | Kinds | Meaning |
 | --- | --- | --- |
-| `#<heading-slug>` | markdown | scroll to that heading |
+| `#<heading-slug>` | markdown, knowledge base | scroll to that heading |
 | `#page=<n>` | pdf | that page |
 | `#row=<n>` | csv | that row (1-based, excluding the header) |
 | `#F<f>L<n>` / `#F<f>L<a>-L<b>` | diff | that line of file `f`, or that range |
@@ -635,13 +635,20 @@ confirm a tar inside (a gzip-tar = `.tar.gz` / `.tgz`). The detection
 is by content, never by filename - the SSH pipe carries no filename, so
 this matches how every other format is recognized.
 
-A gzip-tar that survives the safe-untar (below) AND contains web
-content (an `index.html`, or at least one `.html` / `.css` / `.js`
-file) routes to the **site** path. A gzip-tar with no web content is
-**rejected** as unsupported, the same outcome as any unsupported
-upload today (see the "Supported formats" rejection). This keeps the
-scope narrow on purpose: hostthis hosts renderable web content, not
-arbitrary file trees.
+What the archive holds decides the shape, and the decision is made
+after the safe-untar (below), on the extracted manifest:
+
+- a root `index.html` -> **site**, even when markdown sits alongside
+  it,
+- otherwise at least one `.md` file anywhere -> **knowledge base**,
+- otherwise **rejected** as unsupported, the same outcome as any other
+  unsupported upload (see the "Supported formats" rejection).
+
+The chosen shape is stored on the row and never re-derived at serve
+time (see "Serving a directory"). Each deploy decides from its own
+manifest, so a redeploy that adds a root `index.html` lands as a site.
+This keeps the scope narrow on purpose: hostthis hosts renderable
+content, not arbitrary file trees.
 
 Scope for this version is **gzip-tar only**. Plain (uncompressed) tar
 and zip are natural follow-ons but out of scope here; an upload that
@@ -790,10 +797,10 @@ whole descriptor including its manifest, so resolving a request path is a
 manifest lookup on a value already in hand - not a head read followed by a
 version read, and not a site lookup followed by a paste lookup.
 
-**The shape is DECLARED, never inferred.** An artifact whose kind is `site` is
-a directory; anything else is a document. Counting manifest entries would get a
-one-file directory wrong, serving it rendered instead of handing back its
-bytes.
+**The shape is DECLARED, never inferred.** An artifact whose kind is `site` or
+`knowledgebase` is a directory; anything else is a document. Counting manifest
+entries would get a one-file directory wrong, serving it rendered instead of
+handing back its bytes.
 
 A document answers only at its own URL. A deeper path under it is a 404: paths
 inside an artifact are a directory's affair.
@@ -868,8 +875,9 @@ domain decision). An unknown extension is served as
 `application/octet-stream` - never mislabeled as `text/html`, so an
 unexpected file can't be coerced into running as script on the origin.
 A `.md` / `.txt` file in a site is served raw as `text/plain` (NOT
-rendered - Markdown rendering is the single-file paste path, where the
-browser renders it client-side, not the site path).
+rendered - a site serves its files; rendering markdown inside a
+directory is the knowledge base shape, and a single-file markdown paste
+renders its own bytes).
 
 Site reads carry the **same sandbox headers** as HTML paste reads
 (`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
@@ -877,13 +885,85 @@ Site reads carry the **same sandbox headers** as HTML paste reads
 **raw**: the site's own HTML/CSS/JS runs exactly as uploaded, secured
 by per-subdomain origin isolation, not by sanitizing the bytes.
 
+### Knowledge bases (a directory of markdown)
+
+An archive with no root `index.html` but at least one `.md` file is a
+**knowledge base**: the same directory artifact, browsable and searchable
+as a set of documents rather than served as a site. Pipe a folder of
+notes the way you pipe a built site:
+
+```
+$ tar czf - docs/ | ssh hostthis.dev
+https://abc12345.hostthis.dev
+```
+
+Its kind is `knowledgebase`, decided at deploy time from the extracted
+manifest (see "Detection: gzip-tar as a format") and stored on the row,
+so serving never re-derives it.
+
+**What the shell serves.** A knowledge base is served by a fixed,
+content-independent HTML page, exactly like the markdown, diff and log
+shells: its ETag is the shell version and never varies with content. The
+shell answers
+
+- the root,
+- any path resolving to a `.md` file in the manifest, and
+- any path with no manifest entry that looks like a route rather than a
+  missing asset, by the same last-segment rule the SPA fallback uses
+  above. A missing `.js` or `.png` still 404s.
+
+`?raw=1` on a `.md` path serves that file's raw bytes, the contract every
+shell uses to fetch what it renders. Every non-markdown file (images,
+PDFs, CSS) serves raw at its own path exactly as a site's files do, with
+the content-type its extension implies.
+
+**The root document.** The root renders `README.md` when the manifest
+holds one, else the `.md` whose path sorts first, else a generated
+listing of the base's files. The listing is the shell's own: no response
+templates content into a page.
+
+**Rendering is client-side.** The shell loads the same vendored `marked`
+plus `DOMPurify` the markdown paste shell loads and renders in the
+browser; the server never renders markdown on the read path. Heading
+anchors and the `#<heading-slug>` deep-link contract behave as they do
+there, including the load-order rule (see "Deep links").
+
+**Navigation.** The shell draws a left sidebar file tree built from the
+file list, breadcrumbs for the current path, and a right sidebar table of
+contents built from the current document's headings. A search bar matches
+file paths, headings and body text, entirely in the browser.
+
+Bodies are indexed lazily in the background, and the index is bounded.
+When the bound is reached the interface says so: a search box that
+silently returns fewer results than the base holds is worse than one that
+states its limit.
+
+**Security is unchanged.** Same sandbox headers, same origin isolation,
+and the shell runs under the same `Content-Security-Policy` as the other
+shells (`script-src 'self'`, `connect-src 'self'`, no inline script).
+Non-markdown files are served raw, as they are for a site.
+
+#### The file list (`?files=1`)
+
+`?files=1` on a knowledge base URL returns the base's file paths as JSON.
+That is how the shell builds its tree and its search index without the
+server templating anything into the page. The list covers the whole base
+whichever of its paths carries the query.
+
+It is a **query on the existing slug route**, not a new path namespace,
+so no file in the base can shadow it: a base holding `files.json` or a
+`_files/` directory still serves those at their own paths. A knowledge
+base's CDN purge covers this URL alongside the bare URL and `?raw=1` (see
+"Purge every served URL variant").
+
 ### Same security model as HTML pastes (not a new posture)
 
 A static site introduces **no new security posture**. An HTML paste is
 already served RAW (its JS runs) and is secured by **origin isolation**:
 each paste gets its own subdomain, its own browser origin, and the same
 response headers (see "HTML sandboxing"). Only the Markdown path is
-sanitized, because Markdown is rendered server-side; raw HTML never is.
+sanitized, and in the browser: its shell renders the raw bytes through
+DOMPurify. Raw HTML is never sanitized.
 
 A static site is the SAME model: raw files, its own subdomain, the same
 headers, the same origin isolation between sites and against the apex.
@@ -2743,7 +2823,9 @@ failing test in one of them.
 A static site is a paste whose version kind is `site` and whose manifest maps
 safe relative paths to object keys. The root manifest
 entry is `/`. Site files live in the configured `BlobStore`; metadata stores
-only the paste row, version descriptors, and manifest.
+only the paste row, version descriptors, and manifest. A knowledge base is the
+same representation under version kind `knowledgebase`; storage treats the two
+directory kinds identically.
 
 `storage.Sites` translates the `service.SiteRepo` vocabulary onto the same
 `PasteRepo` used by documents. There is no second site key family, owner index,
@@ -3325,6 +3407,7 @@ content behind. In subdomain mode the variants for a slug are:
 ```
 https://<slug>.<apex>/          the page (an HTML paste, or the markdown/diff shell)
 https://<slug>.<apex>/?raw=1    the raw bytes the markdown/diff shell fetches
+https://<slug>.<apex>/?files=1  a knowledge base's file list
 ```
 
 The markdown (and diff) render shell is a fixed, content-independent page
