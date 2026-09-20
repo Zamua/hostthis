@@ -635,23 +635,20 @@ confirm a tar inside (a gzip-tar = `.tar.gz` / `.tgz`). The detection
 is by content, never by filename - the SSH pipe carries no filename, so
 this matches how every other format is recognized.
 
-What the archive holds decides the shape, and the decision is made
-after the safe-untar (below), on the extracted manifest:
+The shape is decided after the safe-untar (below), on the extracted
+manifest:
 
-- a root `index.html` -> **site**, even when markdown sits alongside
-  it,
-- otherwise at least one `.md` file anywhere -> **knowledge base**,
-- otherwise any web content (`.html` / `.htm` / `.css` / `.js` /
-  `.mjs`) -> **site**. It carries no root `index.html`, so its root
-  404s and its deeper paths serve their files,
-- otherwise **rejected** as unsupported, the same outcome as any other
-  unsupported upload (see the "Supported formats" rejection).
+- a root `index.html` -> **site**,
+- otherwise -> **knowledge base**.
+
+That is the whole rule. An archive surviving the safe-untar is served
+whatever it holds, and the untar guards (path safety, the
+decompression-bomb bound, the file-count and manifest-size caps) are the
+only bound on what gets in.
 
 The chosen shape is stored on the row and never re-derived at serve
 time (see "Serving a directory"). Each deploy decides from its own
 manifest, so a redeploy that adds a root `index.html` lands as a site.
-This keeps the scope narrow on purpose: hostthis hosts renderable
-content, not arbitrary file trees.
 
 Scope for this version is **gzip-tar only**. Plain (uncompressed) tar
 and zip are natural follow-ons but out of scope here; an upload that
@@ -888,12 +885,12 @@ Site reads carry the **same sandbox headers** as HTML paste reads
 **raw**: the site's own HTML/CSS/JS runs exactly as uploaded, secured
 by per-subdomain origin isolation, not by sanitizing the bytes.
 
-### Knowledge bases (a directory of markdown)
+### Knowledge bases (a directory with no root index)
 
-An archive with no root `index.html` but at least one `.md` file is a
-**knowledge base**: the same directory artifact, browsable and searchable
-as a set of documents rather than served as a site. Pipe a folder of
-notes the way you pipe a built site:
+An archive with no root `index.html` is a **knowledge base**: the same
+directory artifact, browsable and searchable as a set of documents
+rather than served as a site. Pipe a folder of notes the way you pipe a
+built site:
 
 ```
 $ tar czf - docs/ | ssh hostthis.dev
@@ -916,14 +913,22 @@ shell answers
   above. A missing `.js` or `.png` still 404s.
 
 `?raw=1` on a `.md` path serves that file's raw bytes, the contract every
-shell uses to fetch what it renders. Every non-markdown file (images,
-PDFs, CSS) serves raw at its own path exactly as a site's files do, with
-the content-type its extension implies.
+shell uses to fetch what it renders.
+
+**What renders, and what is linked.** Markdown renders inside the shell.
+An HTML file does not: it appears in the navigation and links out to its
+own URL, where it serves raw exactly as a site's file does, because the
+shell sanitizes what it renders while a site's HTML is meant to run as
+itself on its own origin, and linking preserves both. Every other file
+type (images, PDFs, CSS, data) likewise appears in the navigation and
+links to its raw URL, served with the content-type its extension
+implies.
 
 **The root document.** The root renders `README.md` when the manifest
 holds one, else the `.md` whose path sorts first, else a generated
-listing of the base's files. The listing is the shell's own: no response
-templates content into a page.
+listing of the base's files, which is what a base holding no markdown at
+all shows. The listing is the shell's own: no response templates content
+into a page.
 
 **Rendering is client-side.** The shell loads the same vendored `marked`
 plus `DOMPurify` the markdown paste shell loads and renders in the
