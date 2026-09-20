@@ -58,8 +58,10 @@ body {
 .kb-btn:hover { border-color: var(--soft); }
 .kb-btn svg { width: 1.05em; height: 1.05em; }
 
-/* Breadcrumbs take the slack and truncate from the left, so the file name (the
-   part that identifies the document) survives on a narrow screen. */
+/* Breadcrumbs take the slack in the bar and stay on ONE line: the middle
+   collapses into the ellipsis button when the path does not fit, and only the
+   expanded trail wraps. Nothing shrinks by default, so the overflow the
+   collapse measures is real rather than absorbed by a flexing segment. */
 #kb-crumbs {
   flex: 1 1 8rem;
   min-width: 0;
@@ -68,12 +70,28 @@ body {
   gap: .3rem;
   overflow: hidden;
   white-space: nowrap;
-  direction: rtl;
 }
-#kb-crumbs > * { direction: ltr; }
-.kb-crumb { color: var(--soft); text-decoration: none; }
-a.kb-crumb:hover { color: var(--link); text-decoration: underline; }
-.kb-crumb[aria-current="page"] { color: var(--ink); font-weight: 600; }
+#kb-crumbs.expanded { flex-wrap: wrap; white-space: normal; row-gap: .15rem; }
+.kb-crumb, .kb-sep { flex: 0 0 auto; }
+.kb-crumb {
+  font: inherit;
+  color: var(--soft);
+  background: none;
+  border: 0;
+  padding: 0;
+  text-decoration: none;
+  cursor: pointer;
+}
+a.kb-crumb:hover, button.kb-crumb:hover { color: var(--link); text-decoration: underline; }
+.kb-crumb-more { letter-spacing: .12em; }
+.kb-crumb[aria-current="page"] { color: var(--ink); font-weight: 600; cursor: default; }
+/* Collapsed as far as it goes and still too wide: the file name is the one that
+   gives, ellipsised in place rather than clipped mid-character. */
+#kb-crumbs.tight .kb-crumb[aria-current="page"] {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .kb-sep { color: var(--rule); }
 
 #kb-search {
@@ -96,6 +114,10 @@ a.kb-crumb:hover { color: var(--link); text-decoration: underline; }
   display: flex;
   min-height: 0;
   position: relative;
+  /* The drawers are positioned against this box and park off-canvas under their
+     breakpoints. Unclipped, an off-canvas panel's width becomes scrollable page
+     width, so a phone scrolls sideways into empty space beside the document. */
+  overflow: hidden;
 }
 #kb-tree {
   flex: 0 0 17rem;
@@ -116,15 +138,30 @@ a.kb-crumb:hover { color: var(--link); text-decoration: underline; }
 #kb-toc[hidden] { display: none !important; }
 body.tree-hidden #kb-tree, body.toc-hidden #kb-toc { display: none; }
 
-/* -- file tree ------------------------------------------------------------- */
+/* -- file navigation (one level at a time) --------------------------------- */
 
-#kb-tree ul { list-style: none; margin: 0; padding: 0 0 0 .8rem; }
-#kb-tree > ul { padding-left: 0; }
+/* The children of the folder being shown, indented one step under its name.
+   One step, at any depth: the sidebar never draws a path, only a level. */
+.kb-tree-list { list-style: none; margin: 0; padding: 0 0 0 .8rem; }
+.kb-tree-here {
+  margin: .15rem 0 .3rem;
+  padding: 0 .35rem;
+  font-size: .72rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .kb-row {
   display: flex;
   align-items: center;
   gap: .35rem;
   width: 100%;
+  /* At least as wide as its content, so a long name scrolls the pane instead
+     of being cut short of the part that identifies it. */
+  min-width: max-content;
   padding: .2rem .35rem;
   border: 0;
   border-radius: 6px;
@@ -134,17 +171,17 @@ body.tree-hidden #kb-tree, body.toc-hidden #kb-toc { display: none; }
   text-align: left;
   text-decoration: none;
   cursor: pointer;
-  overflow: hidden;
 }
-.kb-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-row span { white-space: nowrap; }
 .kb-row:hover { background: var(--zebra); }
 .kb-row.current { background: var(--sel); font-weight: 600; }
+.kb-up { color: var(--soft); }
 .kb-ico { flex: 0 0 auto; width: 1em; height: 1em; color: var(--soft); }
 .kb-row.current .kb-ico { color: inherit; }
-/* The chevron points down when open; collapsed rotates it, so the arrow shows
-   the state rather than needing a second icon. */
-.kb-chev { transition: transform .12s; }
-.kb-dir[aria-expanded="false"] .kb-chev { transform: rotate(-90deg); }
+/* The chevron points the way the row goes: back for the parent, onward for a
+   child folder, which carries it at the end of the row. */
+.kb-chev-back { transform: rotate(180deg); }
+.kb-chev-into { margin-left: auto; opacity: .55; }
 .kb-ext .kb-ico-ext { color: var(--link); opacity: .75; }
 
 /* -- table of contents ----------------------------------------------------- */
@@ -181,31 +218,35 @@ body.tree-hidden #kb-tree, body.toc-hidden #kb-toc { display: none; }
 #kb-results {
   position: absolute;
   z-index: 20;
-  top: 0;
+  top: .5rem;
   left: 0;
   right: 0;
+  width: min(46rem, calc(100% - 1rem));
+  margin: 0 auto;
   max-height: min(70vh, 34rem);
   overflow: auto;
   background: var(--bg);
-  border-bottom: 1px solid var(--rule);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, .18);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .22);
 }
 #kb-index-note {
-  padding: .4rem .8rem;
+  padding: .5rem .9rem;
   background: var(--zebra);
   border-bottom: 1px solid var(--rule);
   color: var(--soft);
   font-size: .76rem;
 }
-#kb-results-empty, .kb-more { padding: .8rem; color: var(--soft); font-size: .85rem; }
-.kb-more { padding: .4rem .8rem; margin: 0; }
+#kb-results-empty, .kb-more { padding: .9rem; color: var(--soft); font-size: .85rem; }
+.kb-more { padding: .5rem .9rem; margin: 0; }
 .kb-hit {
   display: block;
-  padding: .5rem .8rem;
+  padding: .6rem .9rem;
   border-bottom: 1px solid var(--rule);
   color: inherit;
   text-decoration: none;
 }
+.kb-hit:last-child { border-bottom: 0; }
 .kb-hit:hover, .kb-hit:focus { background: var(--zebra); outline: none; }
 .kb-hit-head { display: flex; align-items: center; gap: .4rem; }
 .kb-hit-path {
@@ -225,13 +266,18 @@ body.tree-hidden #kb-tree, body.toc-hidden #kb-toc { display: none; }
   border-radius: 999px;
   padding: 0 .4rem;
 }
+/* Two lines of context: one cuts most snippets mid-phrase, which is where the
+   match usually is. */
 .kb-hit-snip {
-  margin-top: .2rem;
+  margin-top: .3rem;
   color: var(--soft);
-  font-size: .8rem;
+  font-size: .82rem;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .kb-hit mark { background: var(--mark); color: inherit; border-radius: 3px; }
 
@@ -372,5 +418,5 @@ body.tree-hidden #kb-tree, body.toc-hidden #kb-toc { display: none; }
   #kb-raw { order: 2; }
 }
 @media (prefers-reduced-motion: reduce) {
-  #kb-tree, #kb-toc, .kb-chev { transition: none; }
+  #kb-tree, #kb-toc { transition: none; }
 }
