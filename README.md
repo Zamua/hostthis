@@ -100,6 +100,17 @@ flattened, so `tar czf - site/` serves at the root. macOS sidecar files
 `._*`, `.DS_Store`, and `__MACOSX/` are skipped. Delete a site with
 `delete <slug>`, the same as a paste.
 
+An archive with no root `index.html` deploys as a **knowledge base**
+instead: the same URL browses the directory as a set of documents, with
+a file tree, breadcrumbs, a table of contents, and search over paths,
+headings and text. Markdown renders in the browser; every other file
+appears in the tree and links out to its own raw URL, exactly as a
+site's file does. Pipe a folder of notes the same way:
+
+```
+tar czf - docs/ | ssh -T hostthis.dev
+```
+
 ## ROOMS API
 
 A deployed site or paste can store and sync state in a room, with no
