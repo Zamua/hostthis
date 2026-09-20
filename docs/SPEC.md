@@ -641,6 +641,9 @@ after the safe-untar (below), on the extracted manifest:
 - a root `index.html` -> **site**, even when markdown sits alongside
   it,
 - otherwise at least one `.md` file anywhere -> **knowledge base**,
+- otherwise any web content (`.html` / `.htm` / `.css` / `.js` /
+  `.mjs`) -> **site**. It carries no root `index.html`, so its root
+  404s and its deeper paths serve their files,
 - otherwise **rejected** as unsupported, the same outcome as any other
   unsupported upload (see the "Supported formats" rejection).
 
@@ -933,10 +936,14 @@ file list, breadcrumbs for the current path, and a right sidebar table of
 contents built from the current document's headings. A search bar matches
 file paths, headings and body text, entirely in the browser.
 
-Bodies are indexed lazily in the background, and the index is bounded.
-When the bound is reached the interface says so: a search box that
-silently returns fewer results than the base holds is worse than one that
-states its limit.
+Bodies are indexed lazily in the background, bounded at **500 markdown
+files or 8 MiB of markdown**, whichever comes first, and indexed in
+path-sort order so the bound falls in a deterministic place. Beyond
+either limit the interface reports the index as partial: a search box
+that silently returns fewer results than the base holds is worse than
+one that states its limit. Path matching still covers every file in the
+base, because paths come from the file list rather than the bodies;
+heading and body matching cover the indexed files.
 
 **Security is unchanged.** Same sandbox headers, same origin isolation,
 and the shell runs under the same `Content-Security-Policy` as the other
