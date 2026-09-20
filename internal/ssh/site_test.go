@@ -161,6 +161,11 @@ func TestKnowledgeBase_DeployAndServe(t *testing.T) {
 	if exit != 0 {
 		t.Fatalf("deploy exit %d: stderr %q", exit, stderr)
 	}
+	// The deploy names the shape it landed as, so a base of notes is not
+	// reported back as a site.
+	if !strings.Contains(stderr, "knowledge base: 3 file(s).") {
+		t.Fatalf("deploy should narrate a knowledge base, stderr %q", stderr)
+	}
 	base := strings.TrimSpace(stdout)
 	if code, body := getBody(t, base); code != 200 || !strings.Contains(body, "/_hostthis/kb.js") {
 		t.Fatalf("root: code %d body %q, want the knowledge base shell", code, body)
