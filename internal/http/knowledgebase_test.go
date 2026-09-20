@@ -14,8 +14,9 @@ import (
 
 var kbUpdated = time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 
-// buildKBServer wires a knowledge base: markdown, an HTML file, a binary asset
-// and a file whose name collides with the file-list query, under no root index.
+// buildKBServer wires a knowledge base: markdown, an HTML file, a binary asset,
+// a nested index.html and a file whose name collides with the file-list query,
+// under no root index.
 func buildKBServer(t *testing.T) *Server {
 	t.Helper()
 	m := domain.NewManifest()
@@ -23,6 +24,7 @@ func buildKBServer(t *testing.T) *Server {
 		{"README.md", "key-readme"},
 		{"guide/setup.md", "key-setup"},
 		{"guide/diagram.png", "key-png"},
+		{"guide/index.html", "key-guide-index"},
 		{"report.html", "key-html"},
 		{"files.json", "key-files"},
 	} {
@@ -35,11 +37,12 @@ func buildKBServer(t *testing.T) *Server {
 			Kind: domain.KindKnowledgeBase, UploadID: "up-kb", UpdatedAt: kbUpdated, Manifest: m,
 		}},
 		Blobs: stubBlobMap{m: map[string][]byte{
-			"key-readme": []byte("# notes\n"),
-			"key-setup":  []byte("# setup\n"),
-			"key-png":    []byte("\x89PNG"),
-			"key-html":   []byte("<h1>report</h1>"),
-			"key-files":  []byte(`{"own":"file"}`),
+			"key-readme":      []byte("# notes\n"),
+			"key-setup":       []byte("# setup\n"),
+			"key-png":         []byte("\x89PNG"),
+			"key-guide-index": []byte("<h1>guide index</h1>"),
+			"key-html":        []byte("<h1>report</h1>"),
+			"key-files":       []byte(`{"own":"file"}`),
 		}},
 	}
 }
@@ -74,7 +77,11 @@ func TestKnowledgeBase_Serves(t *testing.T) {
 		{"markdown at the root", "/README.md", 200, "", "text/html; charset=utf-8"},
 		{"nested markdown", "/guide/setup.md", 200, "", "text/html; charset=utf-8"},
 		{"route-shaped miss", "/search", 200, "", "text/html; charset=utf-8"},
-		{"directory with no index", "/guide/", 200, "", "text/html; charset=utf-8"},
+		{"directory with a trailing slash", "/guide/", 200, "", "text/html; charset=utf-8"},
+		// The directory-index rule is a site's: here a directory is a place in
+		// the base, and the shell lists what is under it.
+		{"directory holding an index.html", "/guide", 200, "", "text/html; charset=utf-8"},
+		{"a nested index.html at its own path", "/guide/index.html", 200, "<h1>guide index</h1>", "text/html; charset=utf-8"},
 		{"missing markdown is a route", "/guide/absent.md", 200, "", "text/html; charset=utf-8"},
 		{"raw markdown", "/guide/setup.md?raw=1", 200, "# setup\n", "text/markdown; charset=utf-8"},
 		{"html links out and serves raw", "/report.html", 200, "<h1>report</h1>", "text/html; charset=utf-8"},
@@ -124,7 +131,7 @@ func TestKnowledgeBase_Serves(t *testing.T) {
 // the query, and a file named like the query does not shadow it.
 func TestKnowledgeBase_FileList(t *testing.T) {
 	mux := buildKBServer(t).Handler()
-	want := []string{"README.md", "files.json", "guide/diagram.png", "guide/setup.md", "report.html"}
+	want := []string{"README.md", "files.json", "guide/diagram.png", "guide/index.html", "guide/setup.md", "report.html"}
 
 	for _, target := range []string{"/?files=1", "/guide/setup.md?files=1", "/files.json?files=1", "/search?files=1"} {
 		w := kbGet(t, mux, target)

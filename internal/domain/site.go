@@ -175,6 +175,27 @@ func (m Manifest) Lookup(reqPath string) (ManifestEntry, bool) {
 	return ManifestEntry{}, false
 }
 
+// File resolves reqPath to the entry stored at EXACTLY that path, with none of
+// Lookup's directory-index rule: in a knowledge base a directory is a place to
+// list, so resolving "/guide" or "/guide/" to a nested index.html would serve
+// that HTML raw where the shell owes a listing.
+//
+// The root resolves only to the Root KEY, which a single document keys its one
+// entry at, having no filename to be known by. A directory keys nothing there,
+// so its root misses and belongs to whatever serves it.
+func (m Manifest) File(reqPath string) (ManifestEntry, bool) {
+	if reqPath == "" || reqPath == Root {
+		e, ok := m.Files[Root]
+		return e, ok
+	}
+	clean := strings.TrimPrefix(reqPath, "/")
+	if strings.HasSuffix(clean, "/") {
+		return ManifestEntry{}, false
+	}
+	e, ok := m.Files[clean]
+	return e, ok
+}
+
 // fileType is one known extension's serving policy: the content type its files
 // are served as, and whether a manifest MISS on it is a 404 (a real static
 // asset) rather than the SPA index (a client-side route).

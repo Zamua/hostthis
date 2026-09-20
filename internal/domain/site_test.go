@@ -48,6 +48,49 @@ func TestManifest_Lookup_DirectoryIndex(t *testing.T) {
 	}
 }
 
+// File is the exact lookup, with none of Lookup's directory-index rule: a
+// directory-shaped path misses, whatever index.html sits under it.
+func TestManifest_File_ExactPathsOnly(t *testing.T) {
+	m := mustManifest(map[string]string{
+		"index.html":      "root",
+		"blog/index.html": "blog",
+		"css/style.css":   "css",
+	})
+	cases := []struct {
+		req    string
+		want   string // expected key, "" means miss
+		wantOK bool
+	}{
+		{"/index.html", "key-index.html", true},
+		{"/blog/index.html", "key-blog/index.html", true},
+		{"/css/style.css", "key-css/style.css", true},
+		{"/blog", "", false},
+		{"/blog/", "", false},
+		{"/", "", false},
+		{"", "", false},
+		{"/missing.html", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.req, func(t *testing.T) {
+			e, ok := m.File(c.req)
+			if ok != c.wantOK {
+				t.Fatalf("ok: got %v, want %v", ok, c.wantOK)
+			}
+			if ok && e.Key != c.want {
+				t.Fatalf("key: got %q, want %q", e.Key, c.want)
+			}
+		})
+	}
+
+	// The Root KEY is an exact path like any other: a single document is known
+	// by it, so the root resolves for a document manifest and misses for a
+	// directory's.
+	doc := DocumentManifest(ManifestEntry{Key: "key-doc"})
+	if e, ok := doc.File(Root); !ok || e.Key != "key-doc" {
+		t.Fatalf("document root = (%q, %v), want its one entry", e.Key, ok)
+	}
+}
+
 func TestManifest_LookupWithSPAFallback(t *testing.T) {
 	m := mustManifest(map[string]string{
 		"index.html":      "root",

@@ -23,7 +23,9 @@ func (s *Server) serveKnowledgeBase(w http.ResponseWriter, r *http.Request, slug
 		return
 	}
 
-	entry, hit := manifest.Lookup(reqPath)
+	// An EXACT lookup: a directory-shaped path is the shell's, which lists what
+	// is under it, so the site's directory-index rule must not claim it first.
+	entry, hit := manifest.File(reqPath)
 	// The root is the shell's even when no file resolves there: which document
 	// opens is the shell's choice from the file list, not the server's.
 	doc := reqPath == domain.Root || domain.IsMarkdownPath(reqPath)
