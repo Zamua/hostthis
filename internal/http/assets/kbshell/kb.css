@@ -298,8 +298,20 @@ body.tree-hidden #kb-tree, body.toc-hidden #kb-toc { display: none; }
 #kb-doc h5 { font-size: .875rem; }
 #kb-doc h6 { font-size: .85rem; color: var(--soft); }
 #kb-doc p { margin: 0 0 1rem; }
-#kb-doc a { color: var(--link); text-decoration: none; }
-#kb-doc a:hover { text-decoration: underline; }
+#kb-doc a[href] { color: var(--link); text-decoration: none; }
+#kb-doc a[href]:hover { text-decoration: underline; }
+/* Sanitizing removes the target of a link it will not follow. What is left is
+   text, and reads as text, rather than inviting a click that goes nowhere. */
+#kb-doc a:not([href]) { color: inherit; }
+/* A link out of the base carries the mark the file navigation already uses for
+   a file the shell cannot render, so the two read as the same thing. */
+#kb-doc a.kb-ext-link .kb-ico-ext {
+  display: inline-block;
+  vertical-align: -.1em;
+  margin-left: .2em;
+  color: var(--link);
+  opacity: .75;
+}
 #kb-doc strong { font-weight: 600; }
 #kb-doc hr { border: 0; border-top: 1px solid var(--rule); margin: 1.5rem 0; }
 #kb-doc blockquote {

@@ -23,10 +23,14 @@ var kbFiller = strings.Repeat("Filler text that pads this section so the reading
 // headings per document, relative links both down into a subdirectory and back
 // up out of one, an HTML file and a binary asset. "quokka" appears in one
 // document's BODY and in no path or heading, so a search for it can only match
-// through the text index.
+// through the text index. The README carries one of every link kind the shell
+// tells apart: markdown in this base, a file it cannot render, another origin,
+// a non-web target, and a link the sanitizer strips the target from.
 var knowledgeBaseFiles = map[string]string{
 	"README.md": "# Knowledge base root\n\nStart with the [setup guide](guides/setup.md) " +
 		"or the [api reference](reference/api.md).\n\n" +
+		"Also [the project site](https://example.com/docs), the [raw page](notes/page.html), " +
+		"[write in](mailto:nobody@example.com) and <a href=\"javascript:void(0)\">a stripped link</a>.\n\n" +
 		"## Overview\n\n" + kbFiller +
 		"## What is inside\n\n" + kbFiller,
 	"guides/setup.md": "# Setup\n\n[Tuning](advanced/tuning.md) goes deeper.\n\n" +
@@ -116,6 +120,7 @@ type kbView struct {
 	Marker        string   `json:"marker"`
 	HistoryLength int      `json:"historyLength"`
 	PageFits      bool     `json:"pageFits"`
+	DocLinks      []string `json:"docLinks"`
 }
 
 const readKBView = `(() => {
@@ -151,6 +156,15 @@ const readKBView = `(() => {
     marker: window.__kbMarker || "",
     historyLength: history.length,
     pageFits: document.documentElement.scrollWidth <= window.innerWidth,
+    // One line per link in the document: where it points, whether the shell
+    // marked it as leaving the base, and how it opens.
+    docLinks: all("#kb-doc a").map((a) => [
+      a.getAttribute("href") || "",
+      a.dataset.external || "",
+      a.target || "",
+      a.rel || "",
+      a.querySelector(".kb-ico-ext") ? "mark" : "",
+    ].join("|")),
   };
 })()`
 
@@ -1148,6 +1162,101 @@ const readKBPanes = `(() => {
     pageWidth: document.documentElement.scrollWidth,
   };
 })()`
+
+// kbLinkColors compares a link the sanitizer disarmed against a live one and
+// against the document's own text, which is what "renders as plain text" means.
+type kbLinkColors struct {
+	Doc  string `json:"doc"`
+	Dead string `json:"dead"`
+	Live string `json:"live"`
+}
+
+const readKBLinkColors = `(() => {
+  const doc = document.getElementById("kb-doc");
+  const links = Array.from(doc.querySelectorAll("a"));
+  const dead = links.find((a) => !a.hasAttribute("href"));
+  const live = links.find((a) => a.getAttribute("href") === "guides/setup.md");
+  return {
+    doc: getComputedStyle(doc).color,
+    dead: dead ? getComputedStyle(dead).color : "",
+    live: live ? getComputedStyle(live).color : "",
+  };
+})()`
+
+// A document's links divide into those that stay in this base and those that
+// leave it. The shell must say which before the click: what leaves is marked
+// and opens in a new tab, what stays opens in place, and what the sanitizer
+// disarmed stops looking like a link at all.
+func TestKnowledgeBaseLinks(t *testing.T) {
+	t.Parallel()
+	srv := StartServer(t)
+	paste := srv.UploadDir(t, knowledgeBaseFiles, UploadOpts{Name: "knowledge base links"})
+
+	br := NewBrowser(t)
+	flow := NewFlow(t, br, "knowledge-base-links")
+	br.Open(t, paste.URL)
+
+	var view kbView
+	var colors kbLinkColors
+	flow.settle("root", "kb-doc",
+		chromedp.WaitVisible(`#kb-tree[data-tree-ready="1"]`, chromedp.ByQuery),
+		chromedp.WaitVisible(settled("README.md"), chromedp.ByQuery),
+		chromedp.Evaluate(readKBView, &view),
+		chromedp.Evaluate(readKBLinkColors, &colors),
+	)
+	flow.Shot("links")
+
+	// href | data-external | target | rel | external mark, in document order.
+	want := []string{
+		"guides/setup.md||||",
+		"reference/api.md||||",
+		"https://example.com/docs|1|_blank|noopener noreferrer|mark",
+		"notes/page.html|1|_blank|noopener noreferrer|mark",
+		"mailto:nobody@example.com|1|||mark",
+		"||||",
+	}
+	if !slices.Equal(view.DocLinks, want) {
+		t.Errorf("document links =\n  %q\nwant\n  %q", view.DocLinks, want)
+	}
+
+	if colors.Dead != colors.Doc {
+		t.Errorf("a disarmed link renders in %q, want the document's own %q", colors.Dead, colors.Doc)
+	}
+	if colors.Dead == colors.Live {
+		t.Errorf("a disarmed link renders in %q, the same colour as a live link", colors.Dead)
+	}
+
+	// A link that leaves the base keeps the shell out of it: the click handler
+	// skips anything marked external, so the page it is on does not change.
+	var after kbView
+	flow.settle("external-click-does-not-navigate", "kb-doc",
+		chromedp.Evaluate(`window.__kbMarker = "alive"`, nil),
+		// target="_blank" would open a tab this session does not drive, so the
+		// anchor is neutralised first: what is under test is the shell's own
+		// handler declining it, not the browser's tab handling.
+		chromedp.Evaluate(`(() => {
+		  const a = document.querySelector('#kb-doc a[href="https://example.com/docs"]');
+		  a.removeAttribute("target");
+		  a.addEventListener("click", (ev) => ev.preventDefault(), { once: true });
+		  a.click();
+		})()`, nil),
+		chromedp.Evaluate(readKBView, &after),
+	)
+	if after.DocPath != "README.md" || after.Marker != "alive" {
+		t.Errorf("clicking a link out of the base moved the shell to %q (marker %q), want it to stay on README.md",
+			after.DocPath, after.Marker)
+	}
+
+	// The raw page the document links to is the same bytes the server serves at
+	// its own URL, which is why linking out rather than rendering is correct.
+	body, ctype := get(t, paste.URL+"/notes/page.html")
+	if !strings.Contains(body, "served raw") {
+		t.Errorf("linked HTML file served %q, want the file's own bytes", body)
+	}
+	if !strings.HasPrefix(ctype, "text/html") {
+		t.Errorf("linked HTML file content-type = %q, want text/html", ctype)
+	}
+}
 
 // get fetches a URL the page linked to, for an assertion about what the server
 // serves rather than about what the shell drew.
