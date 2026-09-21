@@ -959,9 +959,18 @@ that folder.
 Opening a document replaces the rendered content in place rather than
 reloading the page, and the URL follows it, so a link to any document
 loads the same thing directly. A link inside a document to another `.md`
-file in the base navigates the shell the same way; a link to anything
-else follows to that file's own URL. A path naming a directory renders a
-listing of what is under it, the same listing the root falls back to.
+file in the base navigates the shell the same way, without a reload. A
+link that LEAVES the base says so before it is followed: it carries the
+same external mark the file navigation uses and opens in a new tab, so
+the base being read is never replaced. That covers a link to another
+origin, a link elsewhere on this one, and a link to a non-markdown file
+in this very base, which the shell cannot render and which serves raw at
+its own URL. A non-web target (`mailto:`, `tel:`) carries the mark but is
+followed in place, since a new tab for a mail client leaves an empty one
+behind. A link whose target the sanitizer removed renders as plain text,
+because a link that cannot go anywhere should not look like one. A path
+naming a directory renders a listing of what is under it, the same
+listing the root falls back to.
 
 Bodies are indexed lazily in the background, bounded at **500 markdown
 files or 8 MiB of markdown**, whichever comes first, and indexed in

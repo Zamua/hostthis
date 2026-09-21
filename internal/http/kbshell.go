@@ -13,7 +13,7 @@ var kbShellFS embed.FS
 
 // kbShellVersion: bump whenever a file under assets/kbshell/ changes in a way
 // visitors must re-fetch (see clientShell.version).
-const kbShellVersion = "kbshell-v3"
+const kbShellVersion = "kbshell-v4"
 
 var kbShellAssets = map[string]string{
 	"kb.css":       "text/css; charset=utf-8",
