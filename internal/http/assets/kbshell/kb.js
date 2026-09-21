@@ -353,8 +353,49 @@
       });
   }
 
+  // underBase: a slug subdomain IS the base, so every same-origin path sits in
+  // it; in path mode only what sits under "/p/<slug>".
+  function underBase(pathname) {
+    if (!base) return true;
+    return pathname === base || pathname.indexOf(base + "/") === 0;
+  }
+
+  // linkKind says where a link in a rendered document goes: "doc" stays in this
+  // base, "away" leaves it, "scheme" is a non-web target, and "" is a link the
+  // sanitizer left without a target.
+  function linkKind(a) {
+    var href = a.getAttribute("href");
+    if (href === null || href === "") return "";
+    var url;
+    try { url = new URL(href, location.href); } catch (e) { return "away"; }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "scheme";
+    if (url.origin !== location.origin || !underBase(url.pathname)) return "away";
+    if (url.pathname === location.pathname) return "doc";
+    // A file the shell cannot render serves raw at its own URL, which leaves
+    // the shell even though the file is in this base.
+    if (has(pathOf(url.pathname)) && !isDoc(pathOf(url.pathname))) return "away";
+    return "doc";
+  }
+
+  // decorateLinks marks what leaves the base and sends it to a new tab. It runs
+  // after sanitizing, so a document cannot supply the mark itself.
+  function decorateLinks(root) {
+    root.querySelectorAll("a").forEach(function (a) {
+      var kind = linkKind(a);
+      if (kind === "" || kind === "doc") return;
+      a.classList.add("kb-ext-link");
+      a.dataset.external = "1";
+      if (kind === "away") {
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+      }
+      a.appendChild(Tree.icon("external", "kb-ico-ext"));
+    });
+  }
+
   function paint(text, path) {
     docEl.innerHTML = DOMPurify.sanitize(marked.parse(text));
+    decorateLinks(docEl);
     docEl.removeAttribute("aria-busy");
     rendered = path;
     addHeadingIds(docEl);
