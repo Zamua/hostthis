@@ -60,6 +60,9 @@ func roomAPIPath(reqPath string) (rest string, ok bool) {
 // can never shadow the API prefix; room CREATION additionally requires a live
 // app (see createRoom).
 func (s *Server) handleRoomsAPI(w http.ResponseWriter, r *http.Request, appSlug domain.Slug, apiPath string) bool {
+	// Room values change under fixed URLs, so no response here may be stored,
+	// errors included: without a directive a CDN caches a 404 by its own default.
+	w.Header().Set("Cache-Control", "no-store")
 	if s.Rooms == nil {
 		http.NotFound(w, r)
 		return true
@@ -182,7 +185,6 @@ func (s *Server) scanRoom(w http.ResponseWriter, r *http.Request, appSlug domain
 		out[k] = domain.RoomWireValue(v)
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(out)
 }
 
@@ -199,7 +201,6 @@ func (s *Server) getRoomValue(w http.ResponseWriter, r *http.Request, appSlug do
 	// application/json only when the stored bytes are recognizably JSON, else
 	// application/octet-stream, so an app's opaque bytes are never mislabeled
 	// as something a browser would execute.
-	w.Header().Set("Cache-Control", "no-store")
 	if domain.RoomValueIsJSON(val) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	} else {

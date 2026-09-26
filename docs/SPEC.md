@@ -3310,6 +3310,14 @@ Apex landing page is `Cache-Control: public, max-age=300` (5 min) so
 content updates propagate quickly without becoming a no-cache origin
 hammer.
 
+The rooms API (`/api/rooms`, see "Rooms (app persistence)") is never
+cacheable: every response it writes, success or error, carries
+`Cache-Control: no-store`. A room key's value changes under one fixed URL,
+so any stored copy is a stale one. Errors matter as much as successes: when
+the origin says nothing, a CDN applies its own default and can hold a 404
+for minutes, so a key read before it is written would keep answering 404
+after the PUT that creates it.
+
 ### 5xx observability on the read surface
 
 Every 5xx returned by the paste/site read path (a metadata read failure,
