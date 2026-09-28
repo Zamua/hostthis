@@ -5,8 +5,7 @@ conventions we've agreed on and the workflow that keeps the repo coherent
 over time. Read [`docs/SPEC.md`](docs/SPEC.md) next for what hostthis
 actually does.
 
-This project is currently private but is being written with the assumption
-it will be open-sourced. Don't put environment-specific notes, personal
+This project is public (open source). Don't put environment-specific notes, personal
 identifiers, or operator-specific configuration here or anywhere else in
 the tree - keep those in your local untracked config.
 
@@ -109,19 +108,12 @@ in the same spirit as spec-first. The list grows as decisions get made.
 
 ## Tests: assert the property, not the spelling
 
-An over-specified test disguises itself as an upstream bug, which is how it
-survives. `TestRoomWireValue/invalid_utf8` asserted the JSON ENCODING FORM of a
-replacement character - Go 1.27 emits U+FFFD literally where older Go escaped it
-as a `\uFFFD` sequence - when the behaviour it cared about was that invalid
-UTF-8 becomes U+FFFD. Both spellings are valid JSON for the same string, so the
-test pinned the toolchain rather than the code, and it went unowned because it
-read as a Go problem.
-
-Rule: when an assertion compares a SERIALIZED form - JSON text, wire bytes,
-formatted output - decode it and assert the value instead, unless the encoding
-itself is the property under test (escaping of control characters, say). Surveyed
-2026-08-23: this was the only instance in the tree, so the class is small, but it
-comes due all at once on a toolchain move.
+When an assertion compares a SERIALIZED form - JSON text, wire bytes, formatted
+output - decode it and assert the value instead, unless the encoding itself is the
+property under test (escaping of control characters, say). Two spellings can be
+valid JSON for the same string (`"\uFFFD"` and a literal U+FFFD), so asserting the
+spelling pins the Go toolchain, not the code, and such a test fails on a toolchain
+upgrade while looking like an upstream bug.
 
 ## Repo layout
 
@@ -133,7 +125,6 @@ internal/
   service/           use cases (upload, manage, deploy, rooms)
   ssh/               gliderlabs ssh server + verb dispatch
   http/              apex landing + paste read surface
-  render/            markdown → sanitized HTML
 e2e/                 browser suite behind the `e2e` build tag
 web/landing.html     embedded apex landing page
 docs/SPEC.md         product spec; source of truth for behavior
@@ -145,7 +136,7 @@ README.md            user-facing manpage
 
 ## Local setup
 
-Go 1.25+ and Docker required.
+Go 1.26+ (per `go.mod`) and Docker required.
 
 ```
 make build         # local Go build → ./bin/hostthisd
@@ -227,21 +218,21 @@ here: extending this suite does not edit `docs/SPEC.md`.
 ## Deploy
 
 This repo ships application code and a `make smoke` target only. Deploy
-mechanics (rsync to a host, build the image remotely, rolling restart,
-log tailing, takedown) live OUTSIDE this repo, in the operator's private
+mechanics (image publishing, cluster manifests, rollout, log tailing,
+takedown) live OUTSIDE this repo, in the operator's private
 infra checkout. The shape is intentional: anyone cloning the public repo
 gets a clean buildable + testable Go service with no operator paths,
 ssh aliases, or sudo invocations baked in.
 
 If you operate a deploy of hostthis, your operator-side concerns belong
-next to the production `compose.yml` + `.env` (one directory per app),
+next to your production deployment config (one directory per app),
 and you reference this repo from there as a source dependency. The
 operator-side Makefile shells through to `make -C <hostthis-repo> smoke`
 for post-deploy verification.
 
 The runtime config (apex domain, URL mode, scheme, S3 credentials,
-MinIO root creds) is read from `HOSTTHIS_*` and `MINIO_*` env vars by
-the operator-side compose file. The binary refuses to start without
+MinIO root creds) is read from `HOSTTHIS_*` and `MINIO_*` env vars, which
+the operator's deployment supplies. The binary refuses to start without
 `HOSTTHIS_APEX_DOMAIN` set.
 
 ## Don'ts
