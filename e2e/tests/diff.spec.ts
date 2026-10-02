@@ -27,7 +27,6 @@ index 3333333..4444444 100644
  import "testing"
  
  func TestGreet(t *testing.T) {
-	t.Parallel()
 +	t.Parallel()
  	if greet("x") == "" {
  		t.Fatal("empty greeting")
