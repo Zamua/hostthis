@@ -251,13 +251,17 @@ export async function get(url: string) {
   return { body: buf.toString(), contentType: r.headers.get('content-type') || '' };
 }
 
-// headingReached is true once the shell has scrolled a heading to or below the
-// reading pane's top.
-export function headingReached(page: Page, id: string) {
+// headingCentered is what resolving a fragment guarantees: the shell's reveal
+// scrolls the target to the middle of the reading pane. Merely being in view
+// is not evidence, since a heading near the top of a document is in view
+// without any scroll. The tolerance absorbs font metrics differing by engine.
+export function headingCentered(page: Page, id: string) {
   return page.evaluate((id) => {
-    const main = document.getElementById('kb-main')!;
+    const main = document.getElementById('kb-main')!.getBoundingClientRect();
     const el = document.getElementById(id);
-    return !!el && el.getBoundingClientRect().top >= main.getBoundingClientRect().top;
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    return Math.abs((r.top + r.bottom) / 2 - (main.top + main.bottom) / 2) < 60;
   }, id);
 }
 
