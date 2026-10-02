@@ -1,7 +1,7 @@
 import { test, expect } from '../fixtures';
 import {
   atFolder, clearSearch, clickSel, deepBaseFiles, deepDir, deepFile, deepNames, drill, get,
-  headingReached, knowledgeBaseFiles, readKBLinkColors, readKBPanes, readKBSearch, readKBTarget,
+  headingCentered, knowledgeBaseFiles, readKBLinkColors, readKBPanes, readKBSearch, readKBTarget,
   readKBView, settled, treeLeft, treeRight, wideContentFiles,
 } from './knowledgebase.helpers';
 
@@ -117,17 +117,26 @@ test('knowledge base', async ({ server, page, pageErrors, shot }) => {
   ).toEqual({ heading: rel.heading, crumbs: rel.crumbs, tocLinks: rel.tocLinks, current: rel.current, here: rel.here });
 
   // -- a heading fragment resolves on load, and again on hashchange ---------
+  // Leaving for another document first makes the fragment URL a real load:
+  // from the same page, a URL differing only by its fragment is an in-page
+  // jump, which would never exercise the load path.
+  await page.evaluate(() => ((window as unknown as { __kbMarker?: string }).__kbMarker = 'alive'));
+  await page.goto('about:blank');
   await page.goto(paste.url + '/guides/setup.md#configure-the-listener');
   await expect(page.locator(settled('guides/setup.md'))).toBeVisible();
+  expect(
+    await page.evaluate(() => (window as unknown as { __kbMarker?: string }).__kbMarker ?? ''),
+    'the fragment URL loaded a fresh document',
+  ).toBe('');
   // The browser resolved the fragment against an empty document at parse
   // time, so the shell resolving it is an event later than the paint.
-  await expect.poll(() => headingReached(page, 'configure-the-listener'), { timeout: 10_000 }).toBe(true);
+  await expect.poll(() => headingCentered(page, 'configure-the-listener'), { timeout: 10_000 }).toBe(true);
   const onLoad = await readKBTarget(page);
   await shot('deep-link');
   expect.soft([onLoad.found, onLoad.inView], `fragment #configure-the-listener resolves into the reading pane: ${JSON.stringify(onLoad)}`).toEqual([true, true]);
 
   await page.evaluate(() => (location.hash = '#verify-the-install'));
-  await expect.poll(() => headingReached(page, 'verify-the-install'), { timeout: 10_000 }).toBe(true);
+  await expect.poll(() => headingCentered(page, 'verify-the-install'), { timeout: 10_000 }).toBe(true);
   const onChange = await readKBTarget(page);
   expect.soft([onChange.found, onChange.inView], `hashchange to #verify-the-install resolves: ${JSON.stringify(onChange)}`).toEqual([true, true]);
 
