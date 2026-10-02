@@ -58,28 +58,22 @@ smoke:
 
 # -- e2e (browser) -----------------------------------------------------------
 
-# Where the flows write their screenshots. CI overrides it; see
-# docs/E2E-REPORTS.md for the layout the report consumes.
-E2E_ARTIFACTS ?= $(CURDIR)/artifacts
-# Pinned and fetched on demand, so the target needs nothing installed first.
-GOTESTSUM_VERSION ?= v1.13.0
+# The browser suite is a Playwright project under e2e/, run in Chromium and
+# WebKit. E2E_FLAGS passes through to `playwright test`, e.g.
+# make e2e E2E_FLAGS='tests/mermaid.spec.ts --project webkit'.
+e2e: e2e/node_modules
+	cd e2e && npx playwright test $(E2E_FLAGS)
 
-# The e2e suite is behind a build tag, so `make test` never picks it up and a
-# checkout without Chrome still tests clean. Set E2E_CHROME_PATH if Chrome is
-# installed somewhere the driver does not look. E2E_FLAGS scopes a run, e.g.
-# make e2e E2E_FLAGS='-run TestMermaidRender -v'.
-e2e:
-	E2E_ARTIFACTS="$(E2E_ARTIFACTS)" go test -tags e2e -count=1 $(E2E_FLAGS) ./e2e/...
+# CI installs the browsers with their system libraries first. The HTML report
+# lands in e2e/playwright-report, and a failing suite still writes it before
+# make fails.
+e2e-ci: e2e/node_modules
+	cd e2e && npx playwright install --with-deps chromium webkit
+	cd e2e && npx playwright test $(E2E_FLAGS)
 
-# Emits the two things the pull-request report expects: JUnit at results.xml
-# and one screenshot directory per flow under $(E2E_ARTIFACTS). A failing suite
-# is the case the report matters most for, and gotestsum writes the report
-# before exiting non-zero, so both survive a failure and make still fails.
-e2e-ci:
-	@mkdir -p "$(E2E_ARTIFACTS)"
-	E2E_ARTIFACTS="$(E2E_ARTIFACTS)" \
-	go run gotest.tools/gotestsum@$(GOTESTSUM_VERSION) \
-		--junitfile results.xml -- -tags e2e -count=1 ./e2e/...
+e2e/node_modules: e2e/package-lock.json
+	cd e2e && npm ci
+	@touch $@
 
 fmt:
 	gofmt -s -w .
@@ -127,4 +121,4 @@ data-dir-perms:
 # Screenshots accumulate across runs, so a renamed flow leaves a directory the
 # report would list as unmatched. Removing them is how a local run starts clean.
 clean:
-	rm -rf bin data artifacts results.xml
+	rm -rf bin data e2e/playwright-report e2e/test-results
