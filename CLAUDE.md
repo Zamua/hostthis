@@ -125,7 +125,7 @@ internal/
   service/           use cases (upload, manage, deploy, rooms)
   ssh/               gliderlabs ssh server + verb dispatch
   http/              apex landing + paste read surface
-e2e/                 browser suite behind the `e2e` build tag
+e2e/                 Playwright browser suite (Chromium + WebKit)
 web/landing.html     embedded apex landing page
 docs/SPEC.md         product spec; source of truth for behavior
 Dockerfile           multi-stage build; distroless static image
@@ -136,7 +136,7 @@ README.md            user-facing manpage
 
 ## Local setup
 
-Go 1.26+ (per `go.mod`) and Docker required.
+Go 1.26+ (per `go.mod`) and Docker required; Node for the browser suite.
 
 ```
 make build         # local Go build → ./bin/hostthisd
@@ -186,31 +186,33 @@ fetches the raw bytes and renders them client-side. A shell whose bundle 404s
 or throws serves a blank page while every status code stays 200, so
 `scripts/smoke.sh` cannot see it. The `e2e/` suite is what does.
 
+It is a Playwright Test project, and every test runs in both Chromium and
+WebKit: one test, every engine, so Safari's engine is covered without a second
+suite.
+
 ```
-make e2e        # run it; needs a local Chrome
-make e2e-ci     # same, plus JUnit at results.xml and screenshots for the PR report
-make e2e E2E_FLAGS='-run TestMermaidRender -v'   # one flow
+make e2e        # run it (installs e2e/node_modules on first use)
+make e2e-ci     # same, after installing the browsers and their system libraries
+make e2e E2E_FLAGS='tests/mermaid.spec.ts --project webkit'   # one file, one engine
 ```
 
-Every file in `e2e/` carries `//go:build e2e`, so the untagged build never sees
-the package and `make test` needs no browser. A test starts a real `hostthisd`
-on ephemeral ports with a temp data dir, uploads over SSH the way a user does,
-and drives headless Chrome through chromedp. No staging, no MinIO, no network
-dependency. Set `E2E_CHROME_PATH` if Chrome is installed somewhere the driver
-does not look.
+The harness is `e2e/fixtures.ts`. A run builds `hostthisd` once and mints one
+SSH key; each Playwright worker starts its own daemon on ephemeral ports with a
+temp data dir and memory metadata, and tests upload over SSH the way a user
+does. No staging, no MinIO, no network dependency. The `pageErrors` fixture
+records uncaught exceptions, `console.error`, and failed or erroring
+sub-resources, so a test that ends in `pageErrors.expectNone()` fails on a
+blank page even when every response is a 200.
 
 **A screenshot is evidence, not an assertion.** Every test asserts a semantic
-DOM signal (an element, its text, a count, a state change) and records
-screenshots beside it for a human to review. Pixel diffing and golden images
-are excluded on purpose: font rasterization differs between a CI runner and a
-laptop, and that flake ends with the suite being ignored.
+DOM signal (an element, its text, a count, a state change) and attaches
+screenshots through `shot(label)` for a human to review. Pixel diffing and
+`toHaveScreenshot` are excluded on purpose: font rasterization differs between
+a CI runner and a laptop, and that flake ends with the suite being ignored.
 
-The output contract is [`docs/E2E-REPORTS.md`](docs/E2E-REPORTS.md): JUnit at
-`results.xml`, plus one directory per flow under `$E2E_ARTIFACTS` (default
-`./artifacts`) holding `NN-label.png` steps and a `meta.json` whose `nodeid` is
-the Go test function owning the flow. That name is how the pull-request report
-attaches a filmstrip to a result, so a renamed test needs its flow renamed with
-it. Screenshots accumulate across local runs; `make clean` removes them.
+Every pull request publishes Playwright's HTML report to hostthis (one site per
+PR, redeployed in place) and comments the link. Traces are kept for failures
+only, which keeps each report small.
 
 A test adds no product behavior, so the spec-first rule has nothing to bite on
 here: extending this suite does not edit `docs/SPEC.md`.
