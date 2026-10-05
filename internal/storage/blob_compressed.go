@@ -1,8 +1,8 @@
 package storage
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -52,9 +52,7 @@ func putPooledDecoder(d *zstd.Decoder) {
 }
 
 // CompressedBlobStore is the service byte plane over a raw object store: it
-// owns the at-rest encoding and the per-upload object namespace. An object
-// without the magic prefix is returned as-is, so uncompressed objects stay
-// readable.
+// owns the at-rest encoding and the per-upload object namespace.
 type CompressedBlobStore struct {
 	Inner InnerBlobStore
 }
@@ -138,23 +136,25 @@ func (c *CompressedBlobStore) DeleteUpload(_ context.Context, uploadID string) e
 	return c.Inner.DeletePrefix(domain.UploadPrefix(uploadID))
 }
 
+// errUnframed marks a stored object that lacks the at-rest magic. Every write
+// frames its object, so such an object is damaged.
+var errUnframed = errors.New("object lacks the at-rest magic")
+
 // decodeCompressedStream wraps a stored blob stream with decompression and
 // closes the underlying reader on every error path. label identifies failures.
 func decodeCompressedStream(rc io.ReadCloser, label string) (io.ReadCloser, error) {
-	// A blob shorter than the header is not an error: the short read fails the
-	// magic check and is served through unwrapped.
-	hdr := make([]byte, len(zstdenc.Magic))
-	n, rerr := io.ReadFull(rc, hdr)
-	if rerr != nil && rerr != io.ErrUnexpectedEOF && rerr != io.EOF {
+	var hdr [len(zstdenc.Magic)]byte
+	_, err := io.ReadFull(rc, hdr[:])
+	switch {
+	case err == io.EOF || err == io.ErrUnexpectedEOF || (err == nil && hdr != zstdenc.Magic):
+		err = fmt.Errorf("compressed blob %s: %w", label, errUnframed)
+	case err != nil:
+		err = fmt.Errorf("compressed blob read header %s: %w", label, err)
+	}
+	if err != nil {
 		_ = rc.Close()
-		return nil, fmt.Errorf("compressed blob read header %s: %w", label, rerr)
+		return nil, err
 	}
-	hdr = hdr[:n]
-	if !bytes.HasPrefix(hdr, zstdenc.Magic[:]) {
-		// Uncompressed: the peeked bytes are real content, so prepend them.
-		return newPrefixReadCloser(hdr, rc), nil
-	}
-	// The magic is consumed; decode the rest with a pooled decoder.
 	dec, err := getPooledDecoder(rc)
 	if err != nil {
 		_ = rc.Close()
@@ -162,23 +162,6 @@ func decodeCompressedStream(rc io.ReadCloser, label string) (io.ReadCloser, erro
 	}
 	return &zstdReadCloser{dec: dec, inner: rc}, nil
 }
-
-// prefixReadCloser serves the peeked header bytes before continuing from the
-// underlying reader, for uncompressed blobs where those bytes are content.
-type prefixReadCloser struct {
-	r      io.Reader
-	closer io.Closer
-}
-
-func newPrefixReadCloser(prefix []byte, rc io.ReadCloser) *prefixReadCloser {
-	return &prefixReadCloser{
-		r:      io.MultiReader(bytes.NewReader(prefix), rc),
-		closer: rc,
-	}
-}
-
-func (p *prefixReadCloser) Read(b []byte) (int, error) { return p.r.Read(b) }
-func (p *prefixReadCloser) Close() error               { return p.closer.Close() }
 
 // zstdReadCloser couples a streaming zstd decoder to its inner reader so Close
 // releases both.
