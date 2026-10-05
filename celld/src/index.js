@@ -86,7 +86,7 @@ async function splitLegacyVersions(tx) {
     }
   }
   updates.set("maxVer", Math.max((await tx.get("maxVer")) ?? 0, ...legacy.map((v) => v.ver)));
-  await tx.put(updates);
+  await tx.put(Object.fromEntries(updates));
   await tx.delete(LEGACY_VERSIONS);
 }
 
@@ -329,7 +329,7 @@ export class Identity {
         ...toRow({ ...body.intent, generation, status: body.status ?? "pending" }),
         reservedAt: now,
       });
-      await tx.put(updates);
+      await tx.put(Object.fromEntries(updates));
       await tx.setAlarm(now + CREATE_INTENT_GRACE_MS);
       return Response.json({ active: active + body.size });
     });
@@ -566,7 +566,7 @@ export class Identity {
       if (!decision) {
         updates.set(key, { version: 0, allocated: body.charge, target: body.charge });
       }
-      await tx.put(updates);
+      await tx.put(Object.fromEntries(updates));
       return Response.json({ seeded: !decision, version, allocated: body.charge });
     });
   }
@@ -602,7 +602,7 @@ export class Identity {
         entry.size = body.target;
         entry.chargedSize = body.target;
       }
-      await tx.put(new Map([[key, decision.record], ["entries", entries]]));
+      await tx.put(Object.fromEntries([[key, decision.record], ["entries", entries]]));
       return Response.json(decision.body, { status: decision.status });
     });
   }
@@ -1810,7 +1810,7 @@ export class Paste {
       if (body.row.manifest) {
         updates.set(manifestKey(1), body.row.manifest);
       }
-      await tx.put(updates);
+      await tx.put(Object.fromEntries(updates));
       return new Response(null, { status: 204 });
     });
   }
@@ -1931,7 +1931,7 @@ export class Paste {
         if (decision.body.granted && decision.nextTotal !== total) {
           updates.set("roomAllocated", decision.nextTotal);
         }
-        await tx.put(updates);
+        await tx.put(Object.fromEntries(updates));
       }
       return Response.json(decision.body, { status: decision.status });
     });
@@ -1965,7 +1965,7 @@ export class Paste {
       row.generation = crypto.randomUUID();
       row.accountingVersion = 0;
       await this.state.storage.transaction(async (tx) => {
-        await tx.put(new Map([["row", row], ["legacyAdoptionPending", true]]));
+        await tx.put(Object.fromEntries([["row", row], ["legacyAdoptionPending", true]]));
       });
     }
     if (await this.state.storage.get("legacyAdoptionPending")) {
@@ -2265,7 +2265,7 @@ export class Paste {
       } else {
         await tx.delete(manifestKey(version.ver));
       }
-      await tx.put(updates);
+      await tx.put(Object.fromEntries(updates));
     });
   }
 
@@ -2279,7 +2279,7 @@ export class Paste {
         return;
       }
       const { mutation, ...rest } = current;
-      await tx.put(new Map([
+      await tx.put(Object.fromEntries([
         [ARTIFACT_PENDING, {
           ...rest,
           kind: "abandon",
@@ -2324,7 +2324,7 @@ export class Paste {
       latestVersion: (await this.state.storage.get("maxVer")) ?? 1,
     };
     await this.state.storage.transaction(async (tx) => {
-      await tx.put(new Map([["row", row], [ARTIFACT_PENDING, pending]]));
+      await tx.put(Object.fromEntries([["row", row], [ARTIFACT_PENDING, pending]]));
       await tx.setAlarm(Date.now());
     });
     await this.resumeArtifactPending();
@@ -2499,7 +2499,7 @@ export class Paste {
     };
     await this.state.storage.transaction(async (tx) => {
       await splitLegacyVersions(tx);
-      await tx.put(new Map([
+      await tx.put(Object.fromEntries([
         [versionKey(version.ver), version],
         ["row", row],
         [ARTIFACT_PENDING, pending],
@@ -2578,7 +2578,7 @@ export class Paste {
       latestVersion: (await this.state.storage.get("maxVer")) ?? 1,
     };
     await this.state.storage.transaction(async (tx) => {
-      await tx.put(new Map([
+      await tx.put(Object.fromEntries([
         ["row", row],
         [ARTIFACT_PENDING, pending],
         [this.receiptKey(body.generation, body.opId), receipt],
@@ -2628,7 +2628,7 @@ export class Paste {
         .filter(Boolean);
       const removed = { status: 200, body: { removed: true, uploads } };
       await tx.delete("row");
-      await tx.put(new Map([
+      await tx.put(Object.fromEntries([
         ["artifactTombstone", {
           slug: row.slug,
           identity: row.identity,
@@ -2677,7 +2677,7 @@ export class Paste {
       latestVersion: (await this.state.storage.get("maxVer")) ?? 1,
     };
     await this.state.storage.transaction(async (tx) => {
-      await tx.put(new Map([
+      await tx.put(Object.fromEntries([
         ["row", row],
         [ARTIFACT_PENDING, pending],
         [this.receiptKey(body.generation, body.opId), receipt],
