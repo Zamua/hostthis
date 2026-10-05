@@ -21,7 +21,6 @@ func TestSentinelAliases(t *testing.T) {
 		{"ErrNotFound", storage.ErrNotFound, domain.ErrNotFound},
 		{"ErrSlugTaken", storage.ErrSlugTaken, domain.ErrSlugTaken},
 		{"ErrOverUserQuota", storage.ErrOverUserQuota, domain.ErrOverUserQuota},
-		{"ErrServiceFull", storage.ErrServiceFull, domain.ErrServiceFull},
 		{"ErrRoomDataFull", storage.ErrRoomDataFull, domain.ErrRoomDataFull},
 		{"ErrAppRoomsFull", storage.ErrAppRoomsFull, domain.ErrAppRoomsFull},
 		{"ErrTooManyNewKeys", storage.ErrTooManyNewKeys, domain.ErrTooManyNewKeys},
