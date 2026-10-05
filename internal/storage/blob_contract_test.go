@@ -1,7 +1,7 @@
 package storage_test
 
-// The raw object store contract, run against every backend: disk always, S3
-// when MINIO_TEST_ENDPOINT names an object store. Anything one backend passes
+// The raw object store contract, run against every backend: disk always,
+// celld when CELLD_TEST_ENDPOINT names a fleet. Anything one backend passes
 // and another fails is a divergence, not a feature.
 
 import (
