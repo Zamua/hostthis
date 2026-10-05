@@ -6,19 +6,15 @@ import (
 	"io"
 	"os"
 
-	"github.com/klauspost/compress/zstd"
-
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/zstdenc"
 )
 
-// blobMagicV1 and blobCompressionLevel duplicate storage.magicV1 and
-// storage.compressionLevel because the service layer must not import storage.
-// A diverged magic reads fresh blobs back as uncompressed; a diverged level
-// changes the stored bytes the quota charges.
+// blobMagicV1 duplicates storage.magicV1 because the service layer must not
+// import storage. A diverged magic reads fresh blobs back as uncompressed.
+// Both layers encode through zstdenc, so the level cannot diverge.
 // TestStreamUploadMatchesStorageAtRestFormat pins the two encoders identical.
 var blobMagicV1 = [4]byte{'H', 'Z', 0x00, 0x01}
-
-const blobCompressionLevel = zstd.SpeedDefault
 
 // stagedUpload is the result of streaming bytes through the upload pipeline.
 // CompressedSize excludes the 4-byte magic.
@@ -69,10 +65,7 @@ func streamUpload(r io.Reader) (stagedUpload, error) {
 
 	cap := &cappedWriter{inner: staging, limit: domain.MaxPasteBytes + len(blobMagicV1)}
 
-	zw, err := zstd.NewWriter(cap, zstd.WithEncoderLevel(blobCompressionLevel))
-	if err != nil {
-		return fail(fmt.Errorf("zstd writer: %w", err))
-	}
+	zw := zstdenc.Get(cap)
 
 	rawCount := &rawCountWriter{limit: domain.HardRawByteCap}
 	prefix := &prefixBuffer{cap: domain.SniffPrefixLen}
@@ -85,6 +78,7 @@ func streamUpload(r io.Reader) (stagedUpload, error) {
 	if err := zw.Close(); err != nil {
 		return fail(err)
 	}
+	zstdenc.Put(zw)
 	// zstd can emit a final block on Close that crosses the compressed cap,
 	// past the cappedWriter's per-Write check.
 	if written.n > domain.MaxPasteBytes+len(blobMagicV1) {

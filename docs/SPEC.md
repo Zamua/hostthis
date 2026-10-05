@@ -514,7 +514,9 @@ With* options. Refusal behavior is pinned by
   or serves the fixed client-render shell, so server memory is constant
   regardless of paste size.
 - **Storage compression**: all blob bytes are persisted zstd-encoded
-  (level 3) by the storage layer, identically on every blob backend.
+  (level 3, 1 MiB window) by the storage layer, identically on every blob
+  backend. Encoders are pooled and single-threaded, so an in-flight upload
+  costs about one window of memory however many arrive at once.
   Compression is invisible above the BlobStore interface. See "Blob
   storage backends → On-disk format" for the header and the fallback for
   uncompressed objects.
