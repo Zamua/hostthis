@@ -2,10 +2,13 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"sync"
 	"testing"
+
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
 // TestDecoderPoolReuse pins that a pooled zstd decoder carries no state between
@@ -38,9 +41,9 @@ func TestDecoderPoolReuse(t *testing.T) {
 	// Aborted download: the decoder returns to the pool via Reset(nil), and
 	// the next borrower must still be clean.
 	for key := range blobs {
-		rc, _, err := c.GetReader(key)
+		rc, _, err := c.Read(context.Background(), domain.ManifestEntry{Key: key})
 		if err != nil {
-			t.Fatalf("GetReader: %v", err)
+			t.Fatalf("Read: %v", err)
 		}
 		_, _ = rc.Read(make([]byte, 8))
 		_ = rc.Close()
@@ -64,9 +67,9 @@ func TestDecoderPoolConcurrent(t *testing.T) {
 	for range 16 {
 		wg.Go(func() {
 			for range 30 {
-				rc, _, err := c.GetReader("uploads/pool/0")
+				rc, _, err := c.Read(context.Background(), domain.ManifestEntry{Key: "uploads/pool/0"})
 				if err != nil {
-					t.Errorf("GetReader: %v", err)
+					t.Errorf("Read: %v", err)
 					return
 				}
 				out, rerr := io.ReadAll(rc)

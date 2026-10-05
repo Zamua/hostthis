@@ -16,15 +16,15 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// fakeBlobs is a controllable BlobStore for the lifecycle tests: it can be
-// told to fail PutPrecompressed and records what it stored and deleted.
+// fakeBlobs is a controllable raw object store for the lifecycle tests: it can
+// be told to fail Put and records what it stored and deleted.
 type fakeBlobs struct {
 	mu       sync.Mutex
 	stored   map[string][]byte
 	deleted  []string
 	failPut  bool
 	putCalls int
-	// holdPut, when non-nil, parks every PutPrecompressed until the channel
+	// holdPut, when non-nil, parks every Put until the channel
 	// is closed. The blob write is the background finalizer's FIRST act, so
 	// parking it holds the whole finalizer (no MarkReady/MarkFailed can run),
 	// which is what lets a test assert pre-finalize state without racing the
@@ -35,7 +35,7 @@ type fakeBlobs struct {
 
 func newFakeBlobs() *fakeBlobs { return &fakeBlobs{stored: map[string][]byte{}} }
 
-func (f *fakeBlobs) PutPrecompressed(key string, body io.Reader, size int64) error {
+func (f *fakeBlobs) Put(key string, body io.Reader, size int64) error {
 	if f.holdPut != nil {
 		<-f.holdPut
 	}
@@ -54,12 +54,6 @@ func (f *fakeBlobs) PutPrecompressed(key string, body io.Reader, size int64) err
 	}
 	f.stored[key] = b
 	return nil
-}
-
-// EncodeTo delegates to the real encoder so size assertions use the production
-// at-rest format.
-func (f *fakeBlobs) EncodeTo(w io.Writer, r io.Reader) (int, int64, error) {
-	return (&storage.CompressedBlobStore{}).EncodeTo(w, r)
 }
 
 func (f *fakeBlobs) GetReader(key string) (io.ReadCloser, int64, error) {
@@ -97,20 +91,16 @@ func (f *fakeBlobs) deletedPrefixes() []string {
 	return slices.Clone(f.deleted)
 }
 
-// testBlobStore is the combined read+write surface a StandaloneBlobUnit needs,
-// satisfied by the test fakes and by *storage.CompressedBlobStore.
-type testBlobStore interface {
-	BlobStore
-	blobReadStore
-}
+// fakeBlobUnit is the production encoding over a fake raw store.
+func fakeBlobUnit() BlobUnit { return storage.NewCompressedBlobStore(newFakeBlobs()) }
 
-// newStackWithBlobs wires the real metadata repo with a caller-supplied blob
-// store (wrapped in the StandaloneBlobUnit seam) plus a finalize-done signal so
+// newStackWithBlobs wires the real metadata repo with a caller-supplied raw
+// blob store under the production encoding, plus a finalize-done signal so
 // tests can wait deterministically.
-func newStackWithBlobs(t *testing.T, blobs testBlobStore) (*Upload, *celld.PasteRepo, chan struct{}) {
+func newStackWithBlobs(t *testing.T, blobs storage.InnerBlobStore) (*Upload, *celld.PasteRepo, chan struct{}) {
 	t.Helper()
 	repo := newRepo(t)
-	u := NewUpload(repo, NewStandaloneBlobUnit(blobs))
+	u := NewUpload(repo, storage.NewCompressedBlobStore(blobs))
 	done := make(chan struct{}, 8)
 	u.onFinalizeDone = func() { done <- struct{}{} }
 	t.Cleanup(u.WaitFinalize)

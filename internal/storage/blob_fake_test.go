@@ -2,10 +2,13 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
 // fakeDurable is an in-memory raw object store keyed like the real ones.
@@ -27,7 +30,7 @@ func (f *fakeDurable) Put(key string, r io.Reader, _ int64) error {
 	return nil
 }
 
-func (f *fakeDurable) read(key string) (io.ReadCloser, int64, error) {
+func (f *fakeDurable) GetReader(key string) (io.ReadCloser, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	b, ok := f.objs[key]
@@ -36,8 +39,6 @@ func (f *fakeDurable) read(key string) (io.ReadCloser, int64, error) {
 	}
 	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
 }
-
-func (f *fakeDurable) GetReader(key string) (io.ReadCloser, int64, error) { return f.read(key) }
 
 func (f *fakeDurable) DeletePrefix(prefix string) error {
 	f.mu.Lock()
@@ -50,42 +51,32 @@ func (f *fakeDurable) DeletePrefix(prefix string) error {
 	return nil
 }
 
-func (f *fakeDurable) rawSize(key string) int {
+// raw returns the stored bytes at key, bypassing the encoding.
+func (f *fakeDurable) raw(key string) []byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.objs[key])
+	return f.objs[key]
 }
 
-// putRaw stores bytes as-is, bypassing the compression layer.
+// putRaw stores bytes as-is, bypassing the encoding.
 func (f *fakeDurable) putRaw(key string, body []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.objs[key] = append([]byte(nil), body...)
 }
 
-// putEncoded writes body through the production encoder. The buffer is test-only.
+// putEncoded writes body through the production encoder.
 func putEncoded(t testing.TB, c *CompressedBlobStore, key string, body []byte) {
 	t.Helper()
-	var buf bytes.Buffer
-	if _, _, err := c.EncodeTo(&buf, bytes.NewReader(body)); err != nil {
-		t.Fatalf("EncodeTo: %v", err)
-	}
-	if err := c.PutPrecompressed(key, &buf, int64(buf.Len())); err != nil {
-		t.Fatalf("PutPrecompressed: %v", err)
+	if _, err := c.StageEncoding(context.Background(), key, bytes.NewReader(body)); err != nil {
+		t.Fatalf("StageEncoding: %v", err)
 	}
 }
 
-// readKey drains the object at key, failing the test on any error.
-func readKey(t testing.TB, s interface {
-	GetReader(string) (io.ReadCloser, int64, error)
-}, key string) []byte {
+// readKey drains the decoded object at key, failing the test on any error.
+func readKey(t testing.TB, c *CompressedBlobStore, key string) []byte {
 	t.Helper()
-	rc, _, err := s.GetReader(key)
-	return drain(t, rc, err)
-}
-
-func drain(t testing.TB, rc io.ReadCloser, err error) []byte {
-	t.Helper()
+	rc, _, err := c.Read(context.Background(), domain.ManifestEntry{Key: key})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

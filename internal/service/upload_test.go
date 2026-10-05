@@ -119,7 +119,7 @@ func (r *slugTakenNTimesRepo) InsertWithQuotaCheck(ctx context.Context, p domain
 // its own committed write, are never invisible.
 func TestUpload_Create_LogsSlugRemint(t *testing.T) {
 	repo := &slugTakenNTimesRepo{PasteRepo: newRepo(t), failures: 2}
-	u := NewUpload(repo, NewStandaloneBlobUnit(newFakeBlobs()))
+	u := NewUpload(repo, fakeBlobUnit())
 	var buf bytes.Buffer
 	u.Logger = log.New(&buf, "", 0)
 
