@@ -39,7 +39,7 @@ func (r *slugLookalikeErrRepo) InsertWithQuotaCheck(context.Context, domain.Past
 // bogus "slug taken (after retries)", hiding the real failure.
 func TestUpload_Create_LookalikeErrorIsNotARemint(t *testing.T) {
 	repo := &slugLookalikeErrRepo{}
-	u := NewUpload(repo, NewStandaloneBlobUnit(newFakeBlobs()))
+	u := NewUpload(repo, fakeBlobUnit())
 
 	_, err := u.Create(bytes.NewReader([]byte("# body")), "key:owner", "", "")
 	if !errors.Is(err, errSlugLookalike) {

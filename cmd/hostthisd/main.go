@@ -78,13 +78,10 @@ func main() {
 	}
 	pasteRepo := metadata.Repo
 	keyGateRepo := metadata.KeyGate
-	blobs, err := buildBlobStore(logger)
+	blobUnit, err := buildBlobStore(logger)
 	if err != nil {
 		logger.Fatalf("blob store: %v", err)
 	}
-
-	blobUnit := service.NewStandaloneBlobUnit(blobs)
-
 	siteRepo := metadata.Sites
 	roomRepo := metadata.Rooms
 

@@ -28,7 +28,7 @@ func deployStack(t *testing.T) (*DeploySite, *storage.Sites, *storage.Compressed
 	t.Helper()
 	blobs, root := realBlobsAt(t)
 	sites := storage.NewSites(newRepo(t))
-	d := NewDeploySite(sites, newRepo(t), NewStandaloneBlobUnit(blobs))
+	d := NewDeploySite(sites, newRepo(t), blobs)
 	d.Now = func() time.Time { return fixedNow }
 	return d, sites, blobs, root
 }
@@ -533,7 +533,7 @@ func TestDeploySite_FailedInsertObjects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, blobs, root := deployStack(t)
 			d := NewDeploySite(scriptedSiteRepo{Sites: storage.NewSites(newRepo(t)), insertErr: tc.insertErr},
-				newRepo(t), NewStandaloneBlobUnit(blobs))
+				newRepo(t), blobs)
 			if _, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>x</h1>"})), "key:owner"); err == nil {
 				t.Fatal("deploy succeeded against a failing insert")
 			}

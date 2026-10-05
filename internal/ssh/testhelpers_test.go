@@ -119,7 +119,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	if o.rawBlobs != nil {
 		raw = o.rawBlobs(raw)
 	}
-	blobUnit := service.NewStandaloneBlobUnit(storage.NewCompressedBlobStore(raw))
+	blobUnit := storage.NewCompressedBlobStore(raw)
 	repo := celld.NewPasteRepo(endpoint, nil)
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)

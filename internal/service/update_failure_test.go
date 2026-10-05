@@ -43,7 +43,7 @@ func TestUpdate_FailedAppendObjects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := newRepo(t)
 			blobs, root := realBlobsAt(t)
-			up := NewUpload(repo, NewStandaloneBlobUnit(blobs))
+			up := NewUpload(repo, blobs)
 			t.Cleanup(up.WaitFinalize)
 			res, err := up.Create(bytes.NewReader([]byte("<!doctype html><p>v1</p>")), "key:owner", "", "")
 			if err != nil {
@@ -51,7 +51,7 @@ func TestUpdate_FailedAppendObjects(t *testing.T) {
 			}
 			up.WaitFinalize()
 
-			m := NewManage(scriptedAppendRepo{PasteRepo: repo, appendErr: tc.appendErr}, NewStandaloneBlobUnit(blobs))
+			m := NewManage(scriptedAppendRepo{PasteRepo: repo, appendErr: tc.appendErr}, blobs)
 			_, err = m.Update(res.Paste.Slug, "key:owner", bytes.NewReader([]byte("<!doctype html><p>v2</p>")), "")
 			if err == nil || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) {
 				t.Fatalf("update = %v, want %v", err, tc.wantErr)
@@ -103,7 +103,7 @@ func TestUpdate_CelldAppendAnswerDecidesTheObjects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			blobs, root := realBlobsAt(t)
 			repo := celld.NewPasteRepo("https://cell", &http.Client{Transport: appendAnswerCell{tc.status, tc.body}})
-			m := NewManage(repo, NewStandaloneBlobUnit(blobs))
+			m := NewManage(repo, blobs)
 			if _, err := m.Update("slugone1", "key:owner", strings.NewReader("<!doctype html><p>v2</p>"), ""); err == nil {
 				t.Fatal("update = nil, want the append's failure")
 			}

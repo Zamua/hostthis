@@ -155,8 +155,7 @@ func deployFixture(t *testing.T, demo string) ([]distFile, deployedSite) {
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
-	blobs := storage.NewCompressedBlobStore(rawBlobs)
-	blobUnit := service.NewStandaloneBlobUnit(blobs)
+	blobUnit := storage.NewCompressedBlobStore(rawBlobs)
 	pastes := celld.NewPasteRepo(endpoint, nil)
 	sites := storage.NewSites(pastes)
 	deploy := service.NewDeploySite(sites, pastes, blobUnit)

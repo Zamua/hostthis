@@ -13,13 +13,7 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-type rawBlobStore interface {
-	Put(key string, r io.Reader, size int64) error
-	GetReader(key string) (io.ReadCloser, int64, error)
-	DeletePrefix(prefix string) error
-}
-
-func runBlobContract(t *testing.T, newStore func(t *testing.T) rawBlobStore) {
+func runBlobContract(t *testing.T, newStore func(t *testing.T) storage.InnerBlobStore) {
 	t.Run("RoundTrip", func(t *testing.T) { blobContractRoundTrip(t, newStore(t)) })
 	t.Run("MissingIsNotFound", func(t *testing.T) { blobContractMissing(t, newStore(t)) })
 	t.Run("DeletePrefixRemovesOnlyThatUpload", func(t *testing.T) { blobContractDeletePrefix(t, newStore(t)) })
@@ -27,14 +21,14 @@ func runBlobContract(t *testing.T, newStore func(t *testing.T) rawBlobStore) {
 	t.Run("RejectsUnsafeNames", func(t *testing.T) { blobContractRejectsUnsafe(t, newStore(t)) })
 }
 
-func put(t *testing.T, s rawBlobStore, key string, body []byte) {
+func put(t *testing.T, s storage.InnerBlobStore, key string, body []byte) {
 	t.Helper()
 	if err := s.Put(key, bytes.NewReader(body), int64(len(body))); err != nil {
 		t.Fatalf("put %s: %v", key, err)
 	}
 }
 
-func read(t *testing.T, s rawBlobStore, key string) ([]byte, error) {
+func read(t *testing.T, s storage.InnerBlobStore, key string) ([]byte, error) {
 	t.Helper()
 	rc, _, err := s.GetReader(key)
 	if err != nil {
@@ -46,11 +40,11 @@ func read(t *testing.T, s rawBlobStore, key string) ([]byte, error) {
 
 // deleteAfter removes an upload's prefix at test end, so a durable bucket does
 // not accumulate test objects.
-func deleteAfter(t *testing.T, s rawBlobStore, id string) {
+func deleteAfter(t *testing.T, s storage.InnerBlobStore, id string) {
 	t.Cleanup(func() { _ = s.DeletePrefix(domain.UploadPrefix(id)) })
 }
 
-func blobContractRoundTrip(t *testing.T, s rawBlobStore) {
+func blobContractRoundTrip(t *testing.T, s storage.InnerBlobStore) {
 	id := domain.NewUploadID()
 	deleteAfter(t, s, id)
 	key := domain.UploadObjectKey(id, 0)
@@ -73,7 +67,7 @@ func blobContractRoundTrip(t *testing.T, s rawBlobStore) {
 
 // A missing object is ErrNotFound, not an opaque transport error, so the read
 // path can tell "no such object" from "the store is broken".
-func blobContractMissing(t *testing.T, s rawBlobStore) {
+func blobContractMissing(t *testing.T, s storage.InnerBlobStore) {
 	if _, err := read(t, s, domain.UploadObjectKey(domain.NewUploadID(), 0)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("GetReader of an absent key = %v, want ErrNotFound", err)
 	}
@@ -81,7 +75,7 @@ func blobContractMissing(t *testing.T, s rawBlobStore) {
 
 // A prefix delete ends on a segment boundary: an upload whose id merely starts
 // with the deleted one keeps its objects.
-func blobContractDeletePrefix(t *testing.T, s rawBlobStore) {
+func blobContractDeletePrefix(t *testing.T, s storage.InnerBlobStore) {
 	doomed := domain.NewUploadID()
 	lookalike := doomed + "x"
 	other := domain.NewUploadID()
@@ -109,7 +103,7 @@ func blobContractDeletePrefix(t *testing.T, s rawBlobStore) {
 	}
 }
 
-func blobContractDeleteAbsent(t *testing.T, s rawBlobStore) {
+func blobContractDeleteAbsent(t *testing.T, s storage.InnerBlobStore) {
 	if err := s.DeletePrefix(domain.UploadPrefix(domain.NewUploadID())); err != nil {
 		t.Fatalf("DeletePrefix of an absent upload = %v, want nil", err)
 	}
@@ -117,7 +111,7 @@ func blobContractDeleteAbsent(t *testing.T, s rawBlobStore) {
 
 // No name read back from metadata may reach outside its own object, and no
 // prefix delete may widen past one upload.
-func blobContractRejectsUnsafe(t *testing.T, s rawBlobStore) {
+func blobContractRejectsUnsafe(t *testing.T, s storage.InnerBlobStore) {
 	for _, key := range []string{"", "/uploads/x/0", "uploads/../x", "uploads/x/", "uploads//0", `uploads\x`} {
 		if err := s.Put(key, bytes.NewReader([]byte("x")), 1); err == nil {
 			t.Errorf("Put(%q) = nil, want a refusal", key)

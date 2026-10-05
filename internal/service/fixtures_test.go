@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	crand "crypto/rand"
 	"errors"
 	"io"
@@ -55,9 +56,9 @@ func newStack(t *testing.T) (*Upload, *Manage, *celld.PasteRepo) {
 	t.Helper()
 	blobs := realBlobs(t)
 	repo := newRepo(t)
-	upload := NewUpload(repo, NewStandaloneBlobUnit(blobs))
+	upload := NewUpload(repo, blobs)
 	t.Cleanup(upload.WaitFinalize)
-	manage := NewManage(repo, NewStandaloneBlobUnit(blobs))
+	manage := NewManage(repo, blobs)
 	upload.Now = func() time.Time { return fixedNow }
 	manage.Now = func() time.Time { return fixedNow }
 	return upload, manage, repo
@@ -138,7 +139,7 @@ func gzipTarEntries(t *testing.T, files [][2]string) []byte {
 // readObject drains one stored object through the production decoder.
 func readObject(t *testing.T, blobs *storage.CompressedBlobStore, key string) ([]byte, error) {
 	t.Helper()
-	rc, _, err := blobs.GetReader(key)
+	rc, _, err := blobs.Read(context.Background(), domain.ManifestEntry{Key: key})
 	if err != nil {
 		return nil, err
 	}

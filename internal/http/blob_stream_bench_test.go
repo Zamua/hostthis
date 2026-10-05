@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
@@ -72,12 +71,8 @@ func newBenchBlobStore(b *testing.B) (*storage.CompressedBlobStore, string) {
 	// ~4 MiB of compressible HTML, representative of a large paste.
 	body := bytes.Repeat([]byte("<p>the quick brown fox jumps over the lazy dog</p>\n"), 85000)
 	key := domain.UploadObjectKey(domain.NewUploadID(), 0)
-	var encoded bytes.Buffer
-	if _, _, err := c.EncodeTo(&encoded, bytes.NewReader(body)); err != nil {
-		b.Fatalf("EncodeTo: %v", err)
-	}
-	if err := c.PutPrecompressed(key, &encoded, int64(encoded.Len())); err != nil {
-		b.Fatalf("PutPrecompressed: %v", err)
+	if _, err := c.StageEncoding(context.Background(), key, bytes.NewReader(body)); err != nil {
+		b.Fatalf("StageEncoding: %v", err)
 	}
 	return c, key
 }
@@ -119,7 +114,7 @@ func runConcurrentGETs(b *testing.B, srv *Server, r *http.Request) {
 // the buffered baseline below.
 func BenchmarkServePaste_StreamedGetReader(b *testing.B) {
 	store, key := newBenchBlobStore(b)
-	srv, r := benchServer(b, service.NewStandaloneBlobUnit(store), key, time.Now().UTC())
+	srv, r := benchServer(b, store, key, time.Now().UTC())
 	b.ReportAllocs()
 	runConcurrentGETs(b, srv, r)
 }
@@ -129,7 +124,7 @@ func BenchmarkServePaste_StreamedGetReader(b *testing.B) {
 // full-payload spike streaming removes, and it scales with concurrency.
 func BenchmarkServePaste_BufferedGet(b *testing.B) {
 	store, key := newBenchBlobStore(b)
-	srv, r := benchServer(b, bufferingBlobReader{inner: service.NewStandaloneBlobUnit(store)}, key, time.Now().UTC())
+	srv, r := benchServer(b, bufferingBlobReader{inner: store}, key, time.Now().UTC())
 	b.ReportAllocs()
 	runConcurrentGETs(b, srv, r)
 }

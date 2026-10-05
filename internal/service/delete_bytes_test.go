@@ -24,7 +24,7 @@ func bytesStack(t *testing.T) (*Upload, *Manage, *celld.PasteRepo, *storage.Comp
 	t.Helper()
 	repo := newRepo(t)
 	blobs, root := realBlobsAt(t)
-	unit := NewStandaloneBlobUnit(blobs)
+	unit := blobs
 	up := NewUpload(repo, unit)
 	t.Cleanup(up.WaitFinalize)
 	return up, NewManage(repo, unit), repo, blobs, root
@@ -104,7 +104,7 @@ func (u *recordingDeleteUnit) DeleteUpload(ctx context.Context, uploadID string)
 // deletes exactly the prefixes its other versions name.
 func TestDelete_VersionWithoutUploadRemovesMetadataOnly(t *testing.T) {
 	up, _, repo, blobs, root := bytesStack(t)
-	unit := &recordingDeleteUnit{BlobUnit: NewStandaloneBlobUnit(blobs)}
+	unit := &recordingDeleteUnit{BlobUnit: blobs}
 	m := NewManage(repo, unit)
 	other := createReady(t, up, "<!doctype html><p>other</p>")
 	unkeyed := domain.Paste{
@@ -153,7 +153,7 @@ func TestDelete_ByteFailureDoesNotFailTheDelete(t *testing.T) {
 	up, _, repo, blobs, _ := bytesStack(t)
 	p := createReady(t, up, "<!doctype html><p>doomed</p>")
 	var logs bytes.Buffer
-	m := NewManage(repo, failingDeleteUnit{BlobUnit: NewStandaloneBlobUnit(blobs)})
+	m := NewManage(repo, failingDeleteUnit{BlobUnit: blobs})
 	m.Logger = log.New(&logs, "", 0)
 
 	if err := m.Delete(p.Slug, bytesOwner); err != nil {
@@ -190,7 +190,7 @@ func (r *remintOnDeleteRepo) Delete(slug domain.Slug, identity domain.Identity, 
 func TestDelete_BytesComeFromTheDeleteAnswer(t *testing.T) {
 	up, _, repo, blobs, _ := bytesStack(t)
 	old := createReady(t, up, "<!doctype html><p>old</p>")
-	unit := NewStandaloneBlobUnit(blobs)
+	unit := blobs
 	newID := domain.NewUploadID()
 	newKey := domain.UploadObjectKey(newID, 0)
 	if _, err := unit.StageEncoding(context.Background(), newKey, strings.NewReader("<p>new owner</p>")); err != nil {
