@@ -2655,9 +2655,11 @@ uploads arrive at once:
   alone and counts as the whole budget; an unknown size counts as the whole
   budget.
 - **Budget.** The admitted writes of one process never weigh more than the
-  budget together. The default is 64 MiB (`HOSTTHIS_CELLD_PUT_BUDGET_BYTES`).
+  budget together. The default is 16 MiB (`HOSTTHIS_CELLD_PUT_BUDGET_BYTES`).
   The queue is per process, so the bound the runtime sees is the budget times
-  the number of `hostthisd` processes.
+  the number of `hostthisd` processes. The runtime's memory is paid on its
+  node, which also runs the bucket and the app, so the default is sized for
+  node headroom rather than for throughput.
 - **Waits, never rejects.** A write that does not fit waits in arrival order
   (FIFO) for earlier writes to finish. Waiting reads none of the body: it stays
   in the request's spill file.
@@ -3733,7 +3735,7 @@ file). Defaults in parens:
 
 # Limits
                          / HOSTTHIS_CREATE_ADMISSION_WIDTH  same-identity create admission width    (2)
-                         / HOSTTHIS_CELLD_PUT_BUDGET_BYTES  in-flight celld write bytes per process (67108864)
+                         / HOSTTHIS_CELLD_PUT_BUDGET_BYTES  in-flight celld write bytes per process (16777216)
                          / HOSTTHIS_CELLD_PUT_WAIT          max wait for celld write admission       (30s)
 
 # CDN / cache purger

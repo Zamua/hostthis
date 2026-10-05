@@ -270,7 +270,7 @@ func main() {
 }
 
 const (
-	defaultCelldPutBudget = 64 << 20
+	defaultCelldPutBudget = 16 << 20
 	defaultCelldPutWait   = 30 * time.Second
 )
 
