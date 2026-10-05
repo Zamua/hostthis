@@ -139,6 +139,11 @@ func main() {
 		landing = []byte(strings.ReplaceAll(string(landing), "{{APEX}}", *apexDomain))
 	}
 
+	uploadGate, err := buildUploadAdmission(logger)
+	if err != nil {
+		logger.Fatalf("%v", err)
+	}
+
 	build := buildURL(*scheme, *apexDomain, *urlMode, logger)
 
 	// A decorator, so a mutation invalidates the edge cache for its slug while
@@ -163,6 +168,7 @@ func main() {
 		Pastes:      pasteRepo,
 		Now:         time.Now,
 		KeyGate:     keyGate,
+		Uploads:     uploadGate,
 		BuildURL:    build,
 		Logger:      logger,
 		Metrics:     appMetrics,
@@ -270,9 +276,24 @@ func main() {
 }
 
 const (
-	defaultCelldPutBudget = 16 << 20
-	defaultCelldPutWait   = 30 * time.Second
+	defaultCelldPutBudget    = 16 << 20
+	defaultCelldPutWait      = 30 * time.Second
+	defaultUploadConcurrency = 8
+	defaultUploadWait        = 30 * time.Second
 )
+
+// buildUploadAdmission bounds concurrent uploads per process, since each holds
+// an encoder and stream buffers (docs/SPEC.md "Upload admission").
+func buildUploadAdmission(logger *log.Logger) (*hostssh.UploadAdmission, error) {
+	limit := envParse("HOSTTHIS_UPLOAD_CONCURRENCY", defaultUploadConcurrency, strconv.Atoi, "an integer")
+	wait := envParse("HOSTTHIS_UPLOAD_WAIT", defaultUploadWait, time.ParseDuration, "a duration")
+	gate, err := hostssh.NewUploadAdmission(limit, wait)
+	if err != nil {
+		return nil, fmt.Errorf("HOSTTHIS_UPLOAD_CONCURRENCY / HOSTTHIS_UPLOAD_WAIT: %w", err)
+	}
+	logger.Printf("config: upload concurrency %d per process, wait %s", limit, wait)
+	return gate, nil
+}
 
 // buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured raw
 // backend under the compression layer.
