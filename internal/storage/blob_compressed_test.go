@@ -35,31 +35,44 @@ func TestCompressedBlobStore_ActuallyCompresses(t *testing.T) {
 	}
 }
 
-// Every stored shape decodes byte-identically, including objects stored
-// without the magic prefix.
+// Every encoded shape decodes byte-identically.
 func TestCompressedBlobStore_ReadsRoundTrip(t *testing.T) {
-	cases := map[string]struct {
-		body []byte
-		raw  bool
-	}{
-		"compressible": {body: bytes.Repeat([]byte("the quick brown fox\n"), 5000)},
-		"tiny":         {body: []byte("<h1>hi</h1>")},
-		"empty":        {body: nil},
-		"uncompressed": {body: []byte("<!doctype html><h1>raw</h1>"), raw: true},
-		"short-raw":    {body: []byte("hi\n"), raw: true},
-		"binary":       {body: []byte{0x00, 0x01, 0x02, 0xff, 0xfe, 'H', 'Z', 0x00}},
+	cases := map[string][]byte{
+		"compressible": bytes.Repeat([]byte("the quick brown fox\n"), 5000),
+		"tiny":         []byte("<h1>hi</h1>"),
+		"empty":        nil,
+		"binary":       {0x00, 0x01, 0x02, 0xff, 0xfe, 'H', 'Z', 0x00},
 	}
-	for name, tc := range cases {
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := NewCompressedBlobStore(newFakeDurable())
+			putEncoded(t, c, "uploads/u1/0", body)
+			if got := readKey(t, c, "uploads/u1/0"); !bytes.Equal(got, body) {
+				t.Fatalf("Read: got %d bytes, want %d", len(got), len(body))
+			}
+		})
+	}
+}
+
+// An object without the magic is damaged: its read fails up front, and the
+// objects beside it stay readable.
+func TestCompressedBlobStore_UnframedObjectFailsAlone(t *testing.T) {
+	for name, stored := range map[string][]byte{
+		"uncompressed":  []byte("<!doctype html><h1>raw</h1>"),
+		"short":         []byte("hi\n"),
+		"partial-magic": zstdenc.Magic[:3],
+		"empty":         {},
+	} {
 		t.Run(name, func(t *testing.T) {
 			inner := newFakeDurable()
 			c := NewCompressedBlobStore(inner)
-			if tc.raw {
-				inner.putRaw("uploads/u1/0", tc.body)
-			} else {
-				putEncoded(t, c, "uploads/u1/0", tc.body)
+			inner.putRaw("uploads/u1/0", stored)
+			putEncoded(t, c, "uploads/u1/1", []byte("neighbour"))
+			if rc, _, err := c.Read(context.Background(), domain.ManifestEntry{Key: "uploads/u1/0"}); !errors.Is(err, errUnframed) || rc != nil {
+				t.Fatalf("Read unframed = (%v, %v), want errUnframed", rc, err)
 			}
-			if got := readKey(t, c, "uploads/u1/0"); !bytes.Equal(got, tc.body) {
-				t.Fatalf("Read: got %d bytes, want %d", len(got), len(tc.body))
+			if got := readKey(t, c, "uploads/u1/1"); string(got) != "neighbour" {
+				t.Fatalf("neighbour read %q", got)
 			}
 		})
 	}

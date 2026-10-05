@@ -519,8 +519,8 @@ With* options. Refusal behavior is pinned by
   backend. Encoders are pooled and single-threaded, so an in-flight upload
   costs about one window of memory however many arrive at once.
   Compression is invisible above the BlobStore interface. See "Blob
-  storage backends → On-disk format" for the header and the fallback for
-  uncompressed objects.
+  storage backends → On-disk format" for the header and how a read treats
+  an object without it.
 
 ## Paste lifecycle status (async blob write)
 
@@ -2692,10 +2692,12 @@ Layout:
 4..N      : zstd-encoded original bytes
 ```
 
-Reads inspect the first 4 bytes. If they match the magic, the rest is
-zstd-decoded; otherwise the object is uncompressed and returned as-is, at the
-cost of one byte-compare per read. Writes are always compressed and prefixed,
-so an object's stored bytes are identical whichever adapter wrote them.
+Writes are always compressed and prefixed, so an object's stored bytes are
+identical whichever adapter wrote them. Reads inspect the first 4 bytes and
+zstd-decode the rest. An object that does not start with the magic, an empty
+one included, is damaged: its read fails before any byte is served (the HTTP
+read surface logs the slug and answers 500, `get` exits 1), while every other
+object stays readable.
 
 ### Entries without an object key
 
