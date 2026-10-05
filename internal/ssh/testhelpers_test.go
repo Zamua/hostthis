@@ -68,6 +68,7 @@ type stackOpts struct {
 	proxyProto bool
 	manageRepo func(*storage.MemRepo) service.PasteAdmin
 	rawBlobs   func(storage.InnerBlobStore) storage.InnerBlobStore
+	uploads    *hostssh.UploadAdmission
 }
 
 type stackOpt func(*stackOpts)
@@ -83,6 +84,9 @@ func withManageRepo(wrap func(*storage.MemRepo) service.PasteAdmin) stackOpt {
 func withRawBlobs(wrap func(storage.InnerBlobStore) storage.InnerBlobStore) stackOpt {
 	return func(o *stackOpts) { o.rawBlobs = wrap }
 }
+
+// withUploads wires a per-process upload admission gate.
+func withUploads(a *hostssh.UploadAdmission) stackOpt { return func(o *stackOpts) { o.uploads = a } }
 
 // withKeyGate wires a live KeyGate at the given per-subnet fresh-key cap
 // (window fixed at 24h). Loopback traffic all shares 127.0.0.0/24.
@@ -130,6 +134,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		Upload:     upload,
 		Manage:     manage,
 		Pastes:     repo,
+		Uploads:    o.uploads,
 		Logger:     log.New(io.Discard, "", 0),
 	}
 	if o.sites {

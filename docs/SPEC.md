@@ -1663,8 +1663,9 @@ described here. The slug and URL are unchanged either way. Failure modes
   an earlier change to the paste has not settled yet. Nothing was saved and
   the upload's bytes are deleted.
 - *busy storing other uploads; try again in a minute* (exit 1): the upload
-  waited too long for the blob store to admit its bytes (see "Celld upload
-  admission"). Nothing was saved.
+  waited too long for a free upload slot (see "Upload admission") or for the
+  blob store to admit its bytes (see "Celld upload admission"). Nothing was
+  saved.
 
 See "Exit codes" below for the canonical mapping.
 
@@ -2675,6 +2676,41 @@ uploads arrive at once:
 Only the celld backend is queued; `disk` and `s3` writes pass straight through.
 Both settings are validated at startup: a budget below 1 or a wait that is not
 a positive duration stops the process.
+
+### Upload admission: bounded concurrent uploads per process
+
+Every in-flight upload holds a compressor (its history window and tables) plus
+transport, decompression and archive buffers for as long as it streams. The
+process's working memory therefore grows with the number of uploads running at
+once, not with the request rate, so it is bounded by count. The celld queue
+above bounds only the encoded bytes on their way to the store; it cannot bound
+the encoders that produce them.
+
+- **What counts as an upload.** Every SSH command that streams a body through
+  the upload pipeline: a new paste (single file or site archive), a paste
+  update, and a site redeploy. Every other verb (`list`, `get`, `versions`,
+  `delete`, ...) and every HTTP read is not gated.
+- **Limit.** Each `hostthisd` process runs at most 8 uploads at once
+  (`HOSTTHIS_UPLOAD_CONCURRENCY`). The gate is per process, so the total
+  bound is the limit times the number of processes.
+- **Waits, never rejects.** An upload beyond the limit waits in arrival order
+  (FIFO). While it waits the server reads none of its body, so SSH flow control
+  holds the bytes on the client once the channel's receive window fills, and a
+  waiting upload costs no encoder.
+- **Bounded wait.** An upload still waiting after the wait limit (default 30s,
+  `HOSTTHIS_UPLOAD_WAIT`) fails with the same busy error as a celld write:
+  `hostthis: busy storing other uploads; try again in a minute` (exit 1).
+  Nothing is read or saved. A client that disconnects while waiting leaves the
+  queue.
+- **Held for the whole upload.** An admitted upload keeps its slot until the
+  command finishes, including the synchronous blob writes of an update or site
+  deploy, and releases it on every exit: success, error, or client
+  disconnect. A new single-file paste keeps it while its body is read and
+  encoded; the background write that follows (see "Paste lifecycle status")
+  runs outside the slot.
+
+Both settings are validated at startup: a limit below 1, a wait that is not a
+positive duration, or an unparseable value stops the process.
 
 ### On-disk format
 
@@ -3737,6 +3773,8 @@ file). Defaults in parens:
                          / HOSTTHIS_CREATE_ADMISSION_WIDTH  same-identity create admission width    (2)
                          / HOSTTHIS_CELLD_PUT_BUDGET_BYTES  in-flight celld write bytes per process (16777216)
                          / HOSTTHIS_CELLD_PUT_WAIT          max wait for celld write admission       (30s)
+                         / HOSTTHIS_UPLOAD_CONCURRENCY      concurrent uploads per process          (8)
+                         / HOSTTHIS_UPLOAD_WAIT             max wait for an upload slot              (30s)
 
 # CDN / cache purger
                          / HOSTTHIS_CACHE_BACKEND           noop | cloudflare                       (noop)
