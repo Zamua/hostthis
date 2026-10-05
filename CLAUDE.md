@@ -148,24 +148,18 @@ make docker-up     # docker compose up; same ports; data persists in ./data
 make docker-down   # tear down
 ```
 
-### Backends: memory + celld metadata, disk + celld + s3 blobs
+### Backends: memory + celld metadata, disk + celld blobs
 
 Two metadata backends: `memory` (the default; in-process, ephemeral, what
 dev/test/e2e run) and `celld` (production; a cell runtime reached over HTTP,
-see `docs/SPEC.md` "Celld-backed metadata storage"). Three blob backends:
-`disk` (default), `celld` (production; the Worker's R2 binding, reached at
-`HOSTTHIS_CELLD_ENDPOINT`) and `s3`, all with the same per-upload key layout.
+see `docs/SPEC.md` "Celld-backed metadata storage"). Two blob backends:
+`disk` (default) and `celld` (production; the Worker's R2 binding, reached at
+`HOSTTHIS_CELLD_ENDPOINT`), both with the same per-upload key layout.
 
 The conformance suite is the contract between them: it runs against the
 memory backend on every `go test ./...`, and against a live celld fleet when
 `CELLD_TEST_ENDPOINT` names one, which also runs the blob contract against the
-celld blob backend. The s3 blob tests need a local MinIO:
-
-```
-make dev-minio-up         # MinIO at :9000
-go test ./internal/storage -run TestS3Blob   # needs MINIO_TEST_ENDPOINT=http://localhost:9000
-make dev-minio-down       # teardown (with volume wipe)
-```
+celld blob backend.
 
 Quick smoke from another terminal once it's live:
 
@@ -201,7 +195,7 @@ make e2e E2E_FLAGS='tests/mermaid.spec.ts --project webkit'   # one file, one en
 The harness is `e2e/fixtures.ts`. A run builds `hostthisd` once and mints one
 SSH key; each Playwright worker starts its own daemon on ephemeral ports with a
 temp data dir and memory metadata, and tests upload over SSH the way a user
-does. No staging, no MinIO, no network dependency. The `pageErrors` fixture
+does. No staging, no celld fleet, no network dependency. The `pageErrors` fixture
 records uncaught exceptions, `console.error`, and failed or erroring
 sub-resources, so a test that ends in `pageErrors.expectNone()` fails on a
 blank page even when every response is a 200.
@@ -234,8 +228,8 @@ and you reference this repo from there as a source dependency. The
 operator-side Makefile shells through to `make -C <hostthis-repo> smoke`
 for post-deploy verification.
 
-The runtime config (apex domain, URL mode, scheme, S3 credentials,
-MinIO root creds) is read from `HOSTTHIS_*` and `MINIO_*` env vars, which
+The runtime config (apex domain, URL mode, scheme, storage backends) is
+read from `HOSTTHIS_*` env vars, which
 the operator's deployment supplies. The binary refuses to start without
 `HOSTTHIS_APEX_DOMAIN` set.
 

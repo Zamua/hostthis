@@ -30,7 +30,7 @@ func (b *BlobStore) path(key string) string {
 	return filepath.Join(b.root, filepath.FromSlash(key))
 }
 
-// Put streams r to key. size is for parity with S3-shaped backends.
+// Put streams r to key. size is for parity with the celld backend.
 func (b *BlobStore) Put(key string, r io.Reader, _ int64) error {
 	if err := checkKey(key); err != nil {
 		return err

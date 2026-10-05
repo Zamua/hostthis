@@ -10,7 +10,7 @@ import (
 )
 
 // BlobStore owns the at-rest encoding and the object namespace. Known lengths
-// let S3-shaped backends avoid unknown-size multipart buffering.
+// let the celld backend send a Content-Length instead of a chunked body.
 type BlobStore interface {
 	PutPrecompressed(key string, r io.Reader, size int64) error
 	EncodeTo(w io.Writer, r io.Reader) (payloadSize int, totalSize int64, err error)
