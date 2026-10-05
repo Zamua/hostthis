@@ -2526,7 +2526,6 @@ selects its adapter with `HOSTTHIS_BLOB_BACKEND`:
 ```text
 HOSTTHIS_BLOB_BACKEND=disk    # default
 HOSTTHIS_BLOB_BACKEND=celld   # production
-HOSTTHIS_BLOB_BACKEND=s3      # available
 ```
 
 The port has three operations:
@@ -2628,12 +2627,6 @@ is no sweep.
   end on a segment boundary, so no route can empty the binding. The Worker
   stores opaque bytes: compression stays in `hostthisd`, and no route reads a
   whole body into memory.
-- **`s3`** stores each object at `<key>` in the configured bucket.
-  `DeletePrefix` lists only that one upload's prefix, which is written once and
-  never churned, so its cost is bounded by the upload's file count. Endpoint,
-  bucket, region, credentials, and TLS come from `HOSTTHIS_S3_*` settings. It
-  remains available until payloads written through it have moved to the celld
-  backend.
 
 Production combines celld metadata with celld blobs; local development normally
 combines memory metadata with disk blobs. The blob backend is chosen
@@ -2673,7 +2666,7 @@ uploads arrive at once:
 - **Reads and deletes are not queued.** `GetReader` streams without growing
   the runtime's memory, and `DeletePrefix` carries no body.
 
-Only the celld backend is queued; `disk` and `s3` writes pass straight through.
+Only the celld backend is queued; `disk` writes pass straight through.
 Both settings are validated at startup: a budget below 1 or a wait that is not
 a positive duration stops the process.
 
@@ -2787,8 +2780,7 @@ transaction.
 Metadata and payload storage are independent ports. Local development combines
 the memory adapter with the disk BlobStore. Production combines celld metadata
 with the celld BlobStore, so payloads live in the fleet bucket under
-`r2/payloads/`, beside celld's own state and outside every cell. The S3
-BlobStore keeps payloads in a separate bucket with its own credentials.
+`r2/payloads/`, beside celld's own state and outside every cell.
 
 ### The storage contract and its conformance suite
 
@@ -3761,13 +3753,7 @@ file). Defaults in parens:
                          / HOSTTHIS_CELLD_ENDPOINT          celld Worker base URL                  (required for celld metadata or blobs)
 
 # Blob backend
-                         / HOSTTHIS_BLOB_BACKEND            disk | celld | s3                      (disk)
-                         / HOSTTHIS_S3_ENDPOINT             S3-compatible endpoint                (provider default)
-                         / HOSTTHIS_S3_BUCKET               payload bucket                         (required for s3)
-                         / HOSTTHIS_S3_REGION               bucket region                         (us-east-1)
-                         / HOSTTHIS_S3_ACCESS_KEY           S3 access key                         (required for s3)
-                         / HOSTTHIS_S3_SECRET_KEY           S3 secret key                         (required for s3)
-                         / HOSTTHIS_S3_USE_SSL              endpoint uses TLS                     (false)
+                         / HOSTTHIS_BLOB_BACKEND            disk | celld                           (disk)
 
 # Limits
                          / HOSTTHIS_CREATE_ADMISSION_WIDTH  same-identity create admission width    (2)

@@ -1,5 +1,5 @@
 .PHONY: help build test smoke dev run docker-build docker-up docker-down \
-        dev-minio-up dev-minio-down e2e e2e-ci \
+        e2e e2e-ci \
         fmt vet clean data-dir-perms rebuild-site-fixtures
 
 # Default goal: show the help text rather than silently no-op.
@@ -23,7 +23,6 @@ help:
 	@echo "  make docker-build  build the container image (tag hostthis:dev)"
 	@echo "  make docker-up     bring up local compose stack"
 	@echo "  make docker-down   tear it down"
-	@echo "  make dev-minio-up  start local MinIO for the s3 blob-store tests"
 	@echo "  make fmt / vet     gofmt / go vet"
 	@echo "  make rebuild-site-fixtures  rebuild the vite SPA test fixtures (needs npm)"
 	@echo "  make clean         remove ./bin, ./data and the e2e output"
@@ -101,16 +100,6 @@ docker-up: data-dir-perms
 
 docker-down:
 	docker compose down
-
-# -- Dev MinIO (for the s3 blob-store tests) --------------------------------
-
-dev-minio-up:
-	docker compose -f deploy/dev/docker-compose.yml up -d
-	@echo "minio: http://localhost:9000 (s3 api)  http://localhost:9001 (console: admin/supersecret)"
-	@echo "buckets used by the s3 blob-store tests are created by the init container"
-
-dev-minio-down:
-	docker compose -f deploy/dev/docker-compose.yml down -v
 
 # Compose mounts ./data into the container under distroless's nonroot uid
 # (65532). Make sure the host dir is writable by that uid.
