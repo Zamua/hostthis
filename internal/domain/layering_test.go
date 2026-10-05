@@ -31,6 +31,8 @@ const internalPrefix = "github.com/Zamua/hostthis/internal/"
 //	http, ssh         transports; they reach service, never an adapter.
 var layerPolicy = map[string][]string{
 	"mime": {},
+	// A leaf like mime: the pooled at-rest encoder both byte paths share.
+	"zstdenc": {},
 	// Collectors only: the consumer declares a recorder port and this package
 	// satisfies it, so it must never reach the layers it observes.
 	"metrics": {},
@@ -40,10 +42,10 @@ var layerPolicy = map[string][]string{
 	"roomwire": {"domain"},
 	"archive":  {"domain"},
 	"cache":    {"domain"},
-	"storage":  {"domain"},
-	"service":  {"archive", "domain", "mime"},
-	"http":     {"archive", "domain", "mime", "roomwire", "service"},
-	"ssh":      {"archive", "domain", "mime", "service"},
+	"storage":  {"domain", "zstdenc"},
+	"service":  {"archive", "domain", "mime", "zstdenc"},
+	"http":     {"archive", "domain", "mime", "roomwire", "service", "zstdenc"},
+	"ssh":      {"archive", "domain", "mime", "service", "zstdenc"},
 
 	// The celld backend implements domain-shaped ports directly and does not
 	// depend on the in-process storage adapter.
@@ -56,7 +58,7 @@ var layerPolicy = map[string][]string{
 	// Test-only fixture that opens the metadata repo other packages' tests
 	// build on. Nothing in production may import it, which holds because it is
 	// in no production package's allowed set.
-	"storagetest": {"domain", "storage"},
+	"storagetest": {"domain", "storage", "zstdenc"},
 }
 
 // domainBannedStd are the stdlib packages the domain may not reach, even
