@@ -21,7 +21,4 @@ done
 echo "celld runtime: $url"
 
 cd "$root"
-HOSTTHIS_CELLD_ENDPOINT=$url \
-HOSTTHIS_METADATA_BACKEND=celld \
-HOSTTHIS_BLOB_BACKEND=celld \
-  go run ./cmd/hostthisd
+HOSTTHIS_CELLD_ENDPOINT=$url go run ./cmd/hostthisd

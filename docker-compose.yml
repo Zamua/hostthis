@@ -9,8 +9,26 @@
 #
 # Production: drop these mappings, run with --network=host, and
 # have a TLS-terminating reverse proxy front 127.0.0.1:8080.
+#
+# The celld service runs the Worker under Miniflare, the same runtime the
+# tests use; production runs it on celld instead. Its port is not published.
 
 services:
+  celld:
+    image: node:24-slim
+    working_dir: /celld/localrt
+    command: ["sh", "-c", "npm ci --no-audit --no-fund && exec node serve.mjs"]
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8787"
+      PERSIST_DIR: /data
+    volumes:
+      - ./celld:/celld
+      # Linux modules stay in the volume, apart from the host's own install.
+      - localrt-modules:/celld/localrt/node_modules
+      - ./data/celld:/data
+    restart: unless-stopped
+
   hostthis:
     build: .
     image: hostthis:dev
@@ -26,7 +44,13 @@ services:
       HOSTTHIS_APEX_DOMAIN: localhost:18080
       HOSTTHIS_URL_MODE: path
       HOSTTHIS_PUBLIC_SCHEME: http
+      HOSTTHIS_CELLD_ENDPOINT: http://celld:8787
+    depends_on:
+      - celld
     restart: unless-stopped
     # Distroless's nonroot uid is 65532. The host's ./data dir must be
     # writable by that uid; `make data-dir-perms` handles it.
     user: "65532:65532"
+
+volumes:
+  localrt-modules:

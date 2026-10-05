@@ -8,7 +8,6 @@ import (
 )
 
 // RoomRepo is the persistence contract the Rooms service needs.
-// storage.MemRoomRepo and celld.RoomRepo satisfy it.
 type RoomRepo interface {
 	// CreateRoom records a new empty room + its creation-accounting row,
 	// enforcing the per-app aggregate cap. ErrSlugTaken if (app, id)

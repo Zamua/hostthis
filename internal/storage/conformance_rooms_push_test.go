@@ -2,8 +2,7 @@ package storage_test
 
 // Room push in the backend-agnostic conformance suite: the storage contract
 // for subscriptions, schedules, the app key and the test interval. Delivery is
-// out of scope; the memory backend sends nothing and the celld backend has no
-// subscriber to reach.
+// out of scope: the suite has no subscriber to reach.
 
 import (
 	"encoding/base64"

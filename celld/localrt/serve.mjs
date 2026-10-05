@@ -3,7 +3,8 @@
 // and serves until signalled or, when stdin is a pipe or socket, until it
 // closes, so a parent process that dies takes the runtime with it.
 //
-// PORT picks the port (default ephemeral). PERSIST_DIR keeps cells and
+// HOST and PORT pick the listener (default loopback, ephemeral port; the
+// routes are cluster-internal and carry no auth). PERSIST_DIR keeps cells and
 // payloads across restarts; without it cells live in memory and payloads in a
 // temp dir removed on exit.
 import { Miniflare } from "miniflare";
@@ -26,7 +27,7 @@ const mf = new Miniflare({
   modulesRoot: join(here, ".."),
   modulesRules: [{ type: "ESModule", include: ["**/*.js", "**/*.mjs"] }],
   compatibilityDate: config.compatibility_date,
-  host: "127.0.0.1",
+  host: process.env.HOST ?? "127.0.0.1",
   // The Worker reads no request.cf, and fetching it would need the network.
   cf: false,
   port: Number(process.env.PORT ?? 0),
