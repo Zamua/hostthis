@@ -7,12 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
 type generationSwapRepo struct {
-	*storage.MemRepo
+	*celld.PasteRepo
 	swap func()
 }
 
@@ -28,25 +29,25 @@ func (r *generationSwapRepo) AppendVersionWithQuotaCheck(ctx context.Context, sl
 	kind domain.ContentKind, uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
 	r.runSwap()
-	return r.MemRepo.AppendVersionWithQuotaCheck(ctx, slug, generation, kind, uploadID, m, size, userCap, now)
+	return r.PasteRepo.AppendVersionWithQuotaCheck(ctx, slug, generation, kind, uploadID, m, size, userCap, now)
 }
 
 func (r *generationSwapRepo) SetPinnedVersion(slug domain.Slug, generation string, version domain.Version) error {
 	r.runSwap()
-	return r.MemRepo.SetPinnedVersion(slug, generation, version)
+	return r.PasteRepo.SetPinnedVersion(slug, generation, version)
 }
 
 func (r *generationSwapRepo) Unpin(slug domain.Slug, generation string) error {
 	r.runSwap()
-	return r.MemRepo.Unpin(slug, generation)
+	return r.PasteRepo.Unpin(slug, generation)
 }
 
 func (r *generationSwapRepo) DeleteVersion(slug domain.Slug, generation string, version int) (string, error) {
 	r.runSwap()
-	return r.MemRepo.DeleteVersion(slug, generation, version)
+	return r.PasteRepo.DeleteVersion(slug, generation, version)
 }
 
-func seedGenerationPaste(t *testing.T, repo *storage.MemRepo) domain.Paste {
+func seedGenerationPaste(t *testing.T, repo *celld.PasteRepo) domain.Paste {
 	t.Helper()
 	at := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	paste := domain.Paste{
@@ -84,16 +85,18 @@ func armGenerationReplacement(t *testing.T, repo *generationSwapRepo, old domain
 	return replacement
 }
 
-func assertReplacementUnchanged(t *testing.T, repo *storage.MemRepo, want domain.Paste) {
+func assertReplacementUnchanged(t *testing.T, repo *celld.PasteRepo, want domain.Paste) {
 	t.Helper()
 	got, err := repo.Get(want.Slug)
 	if err != nil {
 		t.Fatalf("get replacement: %v", err)
 	}
-	if got.Generation != want.Generation || got.Size != want.Size ||
-		got.PinnedVersion != want.PinnedVersion || got.LatestVersion != 1 {
-		t.Fatalf("replacement changed: got %+v, want generation=%q size=%d pin=%d latest=1",
+	if got.Generation != want.Generation || got.Size != want.Size || got.PinnedVersion != want.PinnedVersion {
+		t.Fatalf("replacement changed: got %+v, want generation=%q size=%d pin=%d",
 			got, want.Generation, want.Size, want.PinnedVersion)
+	}
+	if vs, err := repo.ListVersions(want.Slug); err != nil || len(vs) != 1 {
+		t.Fatalf("replacement versions = %+v (%v), want only v1", vs, err)
 	}
 }
 
@@ -102,7 +105,7 @@ func TestManageMutationsFenceReplacementIncarnation(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// seed prepares the old incarnation beyond the bare paste.
-		seed func(t *testing.T, inner *storage.MemRepo, old domain.Paste)
+		seed func(t *testing.T, inner *celld.PasteRepo, old domain.Paste)
 		// mutate runs the verb under test as the old incarnation's owner.
 		mutate func(m *Manage, old domain.Paste) error
 	}{
@@ -114,7 +117,7 @@ func TestManageMutationsFenceReplacementIncarnation(t *testing.T) {
 			_, err := m.Pin(old.Slug, old.Identity.String(), 1)
 			return err
 		}},
-		{"unpin", func(t *testing.T, inner *storage.MemRepo, old domain.Paste) {
+		{"unpin", func(t *testing.T, inner *celld.PasteRepo, old domain.Paste) {
 			v1, err := inner.GetVersion(old.Slug, 1)
 			if err != nil {
 				t.Fatalf("get v1: %v", err)
@@ -125,7 +128,7 @@ func TestManageMutationsFenceReplacementIncarnation(t *testing.T) {
 		}, func(m *Manage, old domain.Paste) error {
 			return m.Unpin(old.Slug, old.Identity.String())
 		}},
-		{"delete version", func(t *testing.T, inner *storage.MemRepo, old domain.Paste) {
+		{"delete version", func(t *testing.T, inner *celld.PasteRepo, old domain.Paste) {
 			if _, err := inner.AppendVersionWithQuotaCheck(context.Background(), old.Slug, old.Generation,
 				domain.KindHTML, "old-v2", domain.Manifest{}, 4, 0, old.UpdatedAt.Add(time.Second)); err != nil {
 				t.Fatalf("append v2: %v", err)
@@ -136,12 +139,12 @@ func TestManageMutationsFenceReplacementIncarnation(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			inner := storage.NewMemRepo()
+			inner := newRepo(t)
 			old := seedGenerationPaste(t, inner)
 			if tc.seed != nil {
 				tc.seed(t, inner, old)
 			}
-			repo := &generationSwapRepo{MemRepo: inner}
+			repo := &generationSwapRepo{PasteRepo: inner}
 			replacement := armGenerationReplacement(t, repo, old)
 			manage := NewManage(repo, NewStandaloneBlobUnit(newFakeBlobs()))
 

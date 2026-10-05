@@ -12,13 +12,11 @@ import (
 
 	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/storage"
-	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // scriptedAppendRepo is a real repo whose append answers with a scripted error.
 type scriptedAppendRepo struct {
-	*storage.MemRepo
+	*celld.PasteRepo
 	appendErr error
 }
 
@@ -43,7 +41,7 @@ func TestUpdate_FailedAppendObjects(t *testing.T) {
 		{"outcome unknown", errors.New("celld: /paste/append: connection reset"), nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			repo := storagetest.NewRepo(t)
+			repo := newRepo(t)
 			blobs, root := realBlobsAt(t)
 			up := NewUpload(repo, NewStandaloneBlobUnit(blobs))
 			t.Cleanup(up.WaitFinalize)
@@ -53,7 +51,7 @@ func TestUpdate_FailedAppendObjects(t *testing.T) {
 			}
 			up.WaitFinalize()
 
-			m := NewManage(scriptedAppendRepo{MemRepo: repo, appendErr: tc.appendErr}, NewStandaloneBlobUnit(blobs))
+			m := NewManage(scriptedAppendRepo{PasteRepo: repo, appendErr: tc.appendErr}, NewStandaloneBlobUnit(blobs))
 			_, err = m.Update(res.Paste.Slug, "key:owner", bytes.NewReader([]byte("<!doctype html><p>v2</p>")), "")
 			if err == nil || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) {
 				t.Fatalf("update = %v, want %v", err, tc.wantErr)

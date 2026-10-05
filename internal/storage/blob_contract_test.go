@@ -1,8 +1,8 @@
 package storage_test
 
-// The raw object store contract, run against every backend: disk always,
-// celld when CELLD_TEST_ENDPOINT names a fleet. Anything one backend passes
-// and another fails is a divergence, not a feature.
+// The raw object store contract, run against every backend: disk, and celld
+// on the local runtime or the node CELLD_TEST_ENDPOINT names. Anything one
+// backend passes and another fails is a divergence, not a feature.
 
 import (
 	"bytes"

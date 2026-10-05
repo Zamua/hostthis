@@ -1,14 +1,14 @@
 package http
 
-// The realtime room contract against a LIVE celld fleet: handler -> proxy ->
+// The realtime room contract against the celld Worker: handler -> proxy ->
 // room cell, the production path end to end. These resurrect the guarantees
 // the hub-relay suite pinned before its deletion - broadcast fan-out, the
 // late-join splice, isolation, the admission cap - now stated against the
 // stack that actually ships.
 //
-// Skipped unless CELLD_TEST_ENDPOINT names a running fleet. Slugs and rooms
-// are namespaced per run: the fleet is durable and a rerun must not inherit
-// state.
+// Runs against the local runtime, or the node CELLD_TEST_ENDPOINT names. Slugs
+// and rooms are namespaced per run: a node is durable and a rerun must not
+// inherit state.
 
 import (
 	"bytes"
@@ -18,10 +18,11 @@ import (
 	"io"
 	nethttp "net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Zamua/hostthis/internal/celldtest"
 
 	"github.com/coder/websocket"
 
@@ -32,10 +33,7 @@ import (
 
 func liveCelldServer(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
-	base := os.Getenv("CELLD_TEST_ENDPOINT")
-	if base == "" {
-		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the live celld room harness")
-	}
+	base := celldtest.Target(t)
 	repo := celld.NewPasteRepo(base, nil)
 	srv := &Server{
 		// Empty apex: path mode plus no origin verification, which is what a

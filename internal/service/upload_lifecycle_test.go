@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
-	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // fakeBlobs is a controllable BlobStore for the lifecycle tests: it can be
@@ -107,9 +107,9 @@ type testBlobStore interface {
 // newStackWithBlobs wires the real metadata repo with a caller-supplied blob
 // store (wrapped in the StandaloneBlobUnit seam) plus a finalize-done signal so
 // tests can wait deterministically.
-func newStackWithBlobs(t *testing.T, blobs testBlobStore) (*Upload, *storage.MemRepo, chan struct{}) {
+func newStackWithBlobs(t *testing.T, blobs testBlobStore) (*Upload, *celld.PasteRepo, chan struct{}) {
 	t.Helper()
-	repo := storagetest.NewRepo(t)
+	repo := newRepo(t)
 	u := NewUpload(repo, NewStandaloneBlobUnit(blobs))
 	done := make(chan struct{}, 8)
 	u.onFinalizeDone = func() { done <- struct{}{} }

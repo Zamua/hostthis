@@ -5,22 +5,20 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"runtime"
 	"strconv"
 	"testing"
+
+	"github.com/Zamua/hostthis/internal/celldtest"
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
 // TestCelldBlobContract runs the object store contract against a live celld
-// Worker. Skipped unless CELLD_TEST_ENDPOINT is set.
+// Worker: the local runtime, or the node CELLD_TEST_ENDPOINT names.
 func TestCelldBlobContract(t *testing.T) {
-	base := os.Getenv("CELLD_TEST_ENDPOINT")
-	if base == "" {
-		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld blob store tests")
-	}
+	base := celldtest.Target(t)
 	runBlobContract(t, func(t *testing.T) rawBlobStore {
 		bs, err := storage.NewCelldBlobStore(base, nil)
 		if err != nil {

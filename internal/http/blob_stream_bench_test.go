@@ -68,11 +68,7 @@ func benchServer(b *testing.B, blobs BlobReader, key string, updatedAt time.Time
 
 func newBenchBlobStore(b *testing.B) (*storage.CompressedBlobStore, string) {
 	b.Helper()
-	disk, err := storage.NewBlobStore(b.TempDir())
-	if err != nil {
-		b.Fatalf("NewBlobStore: %v", err)
-	}
-	c := storage.NewCompressedBlobStore(disk)
+	c := storage.NewCompressedBlobStore(memObjects{})
 	// ~4 MiB of compressible HTML, representative of a large paste.
 	body := bytes.Repeat([]byte("<p>the quick brown fox jumps over the lazy dog</p>\n"), 85000)
 	key := domain.UploadObjectKey(domain.NewUploadID(), 0)
@@ -85,6 +81,26 @@ func newBenchBlobStore(b *testing.B) (*storage.CompressedBlobStore, string) {
 	}
 	return c, key
 }
+
+// memObjects is a raw object store in memory, so the benchmarks measure the
+// serve path's own allocations rather than an object store client's.
+type memObjects map[string][]byte
+
+func (m memObjects) Put(key string, r io.Reader, _ int64) error {
+	b, err := io.ReadAll(r)
+	m[key] = b
+	return err
+}
+
+func (m memObjects) GetReader(key string) (io.ReadCloser, int64, error) {
+	b, ok := m[key]
+	if !ok {
+		return nil, 0, storage.ErrNotFound
+	}
+	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
+}
+
+func (m memObjects) DeletePrefix(string) error { return nil }
 
 // runConcurrentGETs stands in for N concurrent clients on one large paste.
 func runConcurrentGETs(b *testing.B, srv *Server, r *http.Request) {

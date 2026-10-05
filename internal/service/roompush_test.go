@@ -8,13 +8,11 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/storage"
-	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 func newPushSvc(t *testing.T) (*RoomPush, *Rooms, *fixedClock) {
 	t.Helper()
-	repo := storage.NewMemRoomRepo(storagetest.NewRepo(t))
+	repo := newRoomRepo(t)
 	clk := &fixedClock{t: time.Now().UTC().Truncate(time.Second)}
 	push := NewRoomPush(repo)
 	push.Now = clk.now
