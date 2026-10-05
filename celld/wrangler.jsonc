@@ -13,7 +13,10 @@
       { "name": "IDENTITY", "class_name": "Identity" },
       { "name": "PASTES", "class_name": "Paste" },
       { "name": "ROOMS", "class_name": "Room" },
-      { "name": "SUBNETS", "class_name": "Subnet" }
+      { "name": "SUBNETS", "class_name": "Subnet" },
+      // Unused by the Worker; celld registers only bound classes, so leftover
+      // IntentLog cells need it to activate.
+      { "name": "INTENT_LOGS", "class_name": "IntentLog" }
     ]
   },
   "migrations": [

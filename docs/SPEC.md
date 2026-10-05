@@ -3248,7 +3248,9 @@ identity:
 - **Subnet**, one per source network: Sybil-admission rows.
 
 The deprecated `IntentLog` class remains only so the original migration stays
-resolvable. No request routes to it.
+resolvable. No request routes to it, but it keeps a binding (`INTENT_LOGS`):
+celld registers only classes that have one, and a cell left over from the
+original migration must still be able to activate.
 
 Paste artifact state and app-room accounting are distinct logical aggregates
 co-located in one physical cell because both are addressed by the app slug. This
