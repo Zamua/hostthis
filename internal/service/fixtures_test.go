@@ -7,49 +7,55 @@ import (
 	crand "crypto/rand"
 	"errors"
 	"io"
-	"io/fs"
-	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/Zamua/hostthis/internal/celld"
+	"github.com/Zamua/hostthis/internal/celldtest"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
-	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // fixedNow is the clock every real-stack fixture injects.
 var fixedNow = time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 
-// realBlobs is the production blob stack (compressed over disk) under
-// t.TempDir().
+// realBlobs is the production blob stack (compressed over celld) on the test's
+// local runtime namespace.
 func realBlobs(t *testing.T) *storage.CompressedBlobStore {
 	t.Helper()
 	blobs, _ := realBlobsAt(t)
 	return blobs
 }
 
-// realBlobsAt is realBlobs plus its disk root, for tests that inspect what the
-// store holds.
-func realBlobsAt(t *testing.T) (*storage.CompressedBlobStore, string) {
+// realBlobsAt is realBlobs plus a ledger of the keys written through it, for
+// tests that inspect what the store holds.
+func realBlobsAt(t *testing.T) (*storage.CompressedBlobStore, *keyLedger) {
 	t.Helper()
-	root := filepath.Join(t.TempDir(), "blobs")
-	disk, err := storage.NewBlobStore(root)
+	raw, err := storage.NewCelldBlobStore(celldtest.Endpoint(t), nil)
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
-	return storage.NewCompressedBlobStore(disk), root
+	ledger := &keyLedger{InnerBlobStore: raw}
+	return storage.NewCompressedBlobStore(ledger), ledger
+}
+
+// newRepo is the test's metadata repo. Every call in one test addresses the
+// same cells, so pastes and sites share one slug space as in production.
+func newRepo(t *testing.T) *celld.PasteRepo {
+	t.Helper()
+	return celld.NewPasteRepo(celldtest.Endpoint(t), nil)
 }
 
 // newStack wires the upload and manage services over real metadata and real
 // blobs: the same stack production runs, no mocks.
-func newStack(t *testing.T) (*Upload, *Manage, *storage.MemRepo) {
+func newStack(t *testing.T) (*Upload, *Manage, *celld.PasteRepo) {
 	t.Helper()
 	blobs := realBlobs(t)
-	repo := storagetest.NewRepo(t)
+	repo := newRepo(t)
 	upload := NewUpload(repo, NewStandaloneBlobUnit(blobs))
-	// Blobs are written by a background finalizer goroutine. Drain it before
-	// the t.TempDir() cleanup (registered above, so LIFO runs it later)
-	// RemoveAll's the blob dir out from under an in-flight finalize.
 	t.Cleanup(upload.WaitFinalize)
 	manage := NewManage(repo, NewStandaloneBlobUnit(blobs))
 	upload.Now = func() time.Time { return fixedNow }
@@ -140,25 +146,50 @@ func readObject(t *testing.T, blobs *storage.CompressedBlobStore, key string) ([
 	return io.ReadAll(rc)
 }
 
-// objectsUnder counts the object files below a disk blob root's uploads/
-// namespace, so a test can prove a failed upload left nothing behind.
-func objectsUnder(t *testing.T, root string) int {
+// keyLedger records every key written through it, so a test can ask the real
+// store which of them still exist.
+type keyLedger struct {
+	storage.InnerBlobStore
+	mu   sync.Mutex
+	keys []string
+}
+
+func (l *keyLedger) Put(key string, r io.Reader, size int64) error {
+	l.mu.Lock()
+	l.keys = append(l.keys, key)
+	l.mu.Unlock()
+	return l.InnerBlobStore.Put(key, r, size)
+}
+
+// objectsUnder counts the objects under uploads/ that the store still holds,
+// so a test can prove a failed upload left nothing behind.
+func objectsUnder(t *testing.T, l *keyLedger) int {
 	t.Helper()
+	l.mu.Lock()
+	keys := slices.Clone(l.keys)
+	l.mu.Unlock()
+	slices.Sort(keys)
 	n := 0
-	err := filepath.WalkDir(filepath.Join(root, "uploads"), func(_ string, d fs.DirEntry, err error) error {
-		if errors.Is(err, fs.ErrNotExist) {
-			return fs.SkipDir
+	for _, key := range slices.Compact(keys) {
+		if !strings.HasPrefix(key, "uploads/") {
+			continue
 		}
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() {
+		rc, _, err := l.GetReader(key)
+		switch {
+		case err == nil:
+			_ = rc.Close()
 			n++
+		case !errors.Is(err, storage.ErrNotFound):
+			t.Fatalf("read %s: %v", key, err)
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk blob root: %v", err)
 	}
 	return n
+}
+
+// newRoomRepo is the room surface over the test's cells.
+func newRoomRepo(t *testing.T) *celld.RoomRepo {
+	t.Helper()
+	rooms := celld.NewRoomRepo(celldtest.Endpoint(t), nil)
+	rooms.PushSubject = "https://paste.test"
+	return rooms
 }

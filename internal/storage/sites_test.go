@@ -7,6 +7,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/Zamua/hostthis/internal/celld"
+	"github.com/Zamua/hostthis/internal/celldtest"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
 )
@@ -16,7 +18,7 @@ import (
 // back as not-found through the site port: the deploy would report success and
 // hand out a URL nothing answers.
 func TestArtifactSites_RefusesANonDirectoryKind(t *testing.T) {
-	repo := storage.NewMemRepo()
+	repo := celld.NewPasteRepo(celldtest.Endpoint(t), nil)
 	sites := storage.NewSites(repo)
 
 	for _, kind := range []domain.ContentKind{"", domain.KindHTML, domain.KindMarkdown} {
@@ -46,7 +48,7 @@ func TestArtifactSites_RefusesANonDirectoryKind(t *testing.T) {
 }
 
 func TestArtifactSites_InsertGetAndList(t *testing.T) {
-	repo := storage.NewMemRepo()
+	repo := celld.NewPasteRepo(celldtest.Endpoint(t), nil)
 	sites := storage.NewSites(repo)
 	s := siteOf("sitea234", "key:owner-s", 49)
 	if err := sites.InsertWithQuotaCheck(context.Background(), s, 49, 0, fixedNow); err != nil {
@@ -83,7 +85,7 @@ func TestArtifactSites_InsertGetAndList(t *testing.T) {
 // A directory's bytes are already in the ARTIFACT sum the service adds this to,
 // so reporting them again would bill every directory twice.
 func TestArtifactSites_SumIsZeroToAvoidDoubleCounting(t *testing.T) {
-	repo := storage.NewMemRepo()
+	repo := celld.NewPasteRepo(celldtest.Endpoint(t), nil)
 	sites := storage.NewSites(repo)
 	const owner = "key:owner-s"
 	insertSite(t, sites, siteOf("sitec234", owner, 49))

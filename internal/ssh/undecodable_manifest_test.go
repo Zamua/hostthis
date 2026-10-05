@@ -16,13 +16,12 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
-	"github.com/Zamua/hostthis/internal/storage"
 )
 
 // cellRowRepo answers the row reads and delete from the celld adapter, so the
 // verbs meet that adapter's decoding of a stored row.
 type cellRowRepo struct {
-	*storage.MemRepo
+	*celld.PasteRepo
 	cell *celld.PasteRepo
 }
 
@@ -58,8 +57,8 @@ func TestUndecodableManifest_GetNotFoundVersionsAndDeleteWork(t *testing.T) {
 	t.Cleanup(cell.Close)
 	repo := celld.NewPasteRepo(cell.URL, cell.Client())
 
-	s := startStack(t, withManageRepo(func(m *storage.MemRepo) service.PasteAdmin {
-		return cellRowRepo{MemRepo: m, cell: repo}
+	s := startStack(t, withManageRepo(func(m *celld.PasteRepo) service.PasteAdmin {
+		return cellRowRepo{PasteRepo: m, cell: repo}
 	}))
 	owner.Store(domain.IdentityFromKeyFingerprint(s.keyedOwner).String())
 

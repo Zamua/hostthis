@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Zamua/hostthis/internal/celld"
+	"github.com/Zamua/hostthis/internal/celldtest"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
-	"github.com/Zamua/hostthis/internal/storage"
-	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // liveAppSiteReader treats EVERY parseable slug as a live site, standing in
@@ -35,13 +35,21 @@ func (liveAppSiteReader) Get(slug domain.Slug) (domain.Site, error) {
 // metadata repo, in subdomain mode, so a request runs mux -> service -> storage.
 func buildRoomServer(t *testing.T) *Server {
 	t.Helper()
-	repo := storage.NewMemRoomRepo(storagetest.NewRepo(t))
+	repo := newRoomRepo(t)
 	return &Server{
 		ApexDomain: "hostthis.test",
 		Rooms:      service.NewRooms(repo),
 		RoomPush:   service.NewRoomPush(repo),
 		Sites:      liveAppSiteReader{},
 	}
+}
+
+// newRoomRepo is the room surface over the test's cells on the local runtime.
+func newRoomRepo(t *testing.T) *celld.RoomRepo {
+	t.Helper()
+	rooms := celld.NewRoomRepo(celldtest.Endpoint(t), nil)
+	rooms.PushSubject = "https://hostthis.test"
+	return rooms
 }
 
 // reqOpt adjusts one request before it is served.

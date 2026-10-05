@@ -15,6 +15,7 @@ export class Server {
 
   constructor(
     private proc: ChildProcess,
+    private runtime: Runtime,
     private httpAddr: string,
     readonly sshPort: number,
     private dataDir: string,
@@ -48,6 +49,7 @@ export class Server {
       ]);
       if (killed) this.proc.kill('SIGKILL');
     }
+    await this.runtime.stop();
     rmSync(this.dataDir, { recursive: true, force: true });
   }
 
@@ -116,6 +118,43 @@ export class Server {
   }
 }
 
+// Runtime is the celld Worker under Miniflare (celld/localrt), one per worker,
+// so each daemon owns its cells. It exits when its stdin closes.
+class Runtime {
+  private constructor(
+    private proc: ChildProcess,
+    readonly url: string,
+  ) {}
+
+  static async start(timeoutMs = 30_000): Promise<Runtime> {
+    const proc = spawn('node', ['serve.mjs'], {
+      cwd: join(process.env.HOSTTHIS_E2E_ROOT!, 'celld', 'localrt'),
+      stdio: ['pipe', 'pipe', 'inherit'],
+    });
+    let out = '';
+    const url = await new Promise<string>((res, rej) => {
+      const timer = setTimeout(() => rej(new Error(`celld runtime not ready after ${timeoutMs}ms`)), timeoutMs);
+      proc.on('exit', (code) => rej(new Error(`celld runtime exited ${code} before serving`)));
+      proc.stdout!.on('data', (d) => {
+        out += d;
+        const m = out.match(/^LISTENING (\S+)$/m);
+        if (m) {
+          clearTimeout(timer);
+          res(m[1]);
+        }
+      });
+    });
+    return new Runtime(proc, url);
+  }
+
+  async stop() {
+    if (this.proc.exitCode !== null) return;
+    const exited = new Promise((r) => this.proc.once('exit', r));
+    this.proc.stdin!.end();
+    await Promise.race([exited, sleep(10_000).then(() => this.proc.kill('SIGKILL'))]);
+  }
+}
+
 // PageErrors is the cheap half of the blank-page check: a shell whose bundle
 // 404s or throws renders nothing and says so only here.
 export class PageErrors {
@@ -173,6 +212,7 @@ type TestFixtures = {
 export const test = base.extend<TestFixtures, { server: Server }>({
   server: [
     async ({}, use) => {
+      const runtime = await Runtime.start();
       const ports = await freePorts(3);
       const httpAddr = `127.0.0.1:${ports[0]}`;
       const dataDir = mkdtempSync(join(tmpdir(), 'hostthis-e2e-data-'));
@@ -189,10 +229,13 @@ export const test = base.extend<TestFixtures, { server: Server }>({
           HOSTTHIS_SSH_ADDR: `127.0.0.1:${ports[1]}`,
           HOSTTHIS_METRICS_ADDR: `127.0.0.1:${ports[2]}`,
           HOSTTHIS_DATA_DIR: dataDir,
+          HOSTTHIS_METADATA_BACKEND: 'celld',
+          HOSTTHIS_BLOB_BACKEND: 'celld',
+          HOSTTHIS_CELLD_ENDPOINT: runtime.url,
           HOSTTHIS_LANDING: join(process.env.HOSTTHIS_E2E_ROOT!, 'web', 'landing.html'),
         },
       });
-      const server = new Server(proc, httpAddr, ports[1], dataDir);
+      const server = new Server(proc, runtime, httpAddr, ports[1], dataDir);
       await server.waitServing();
       await use(server);
       await server.stop();

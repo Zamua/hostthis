@@ -8,8 +8,6 @@ import (
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
-	"github.com/Zamua/hostthis/internal/storage"
-	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // create POSTs /api/rooms from remoteAddr with the given X-Forwarded-For.
@@ -71,7 +69,7 @@ func TestRoomsHTTP_XFFTrustedWhenOptedIn(t *testing.T) {
 func TestRoomsHTTP_CreateUnknownAppIs404(t *testing.T) {
 	srv := &Server{
 		ApexDomain: "hostthis.test",
-		Rooms:      service.NewRooms(storage.NewMemRoomRepo(storagetest.NewRepo(t))),
+		Rooms:      service.NewRooms(newRoomRepo(t)),
 		// No Sites, no Pastes: no slug resolves to a live app.
 	}
 	if w := req(t, srv, http.MethodPost, "appz2345", "/api/rooms", nil); w.Code != http.StatusNotFound {
@@ -90,7 +88,7 @@ func TestRoomsHTTP_CreateLivePasteAppSucceeds(t *testing.T) {
 	}
 	srv := &Server{
 		ApexDomain: "hostthis.test",
-		Rooms:      service.NewRooms(storage.NewMemRoomRepo(storagetest.NewRepo(t))),
+		Rooms:      service.NewRooms(newRoomRepo(t)),
 		Pastes:     stubPasteReader{p: livePaste},
 	}
 	if w := req(t, srv, http.MethodPost, "appz2345", "/api/rooms", nil); w.Code != http.StatusCreated {

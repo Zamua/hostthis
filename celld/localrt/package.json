@@ -1,0 +1,11 @@
+{
+  "name": "hostthis-celld-localrt",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node serve.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "^4.20260730.0"
+  }
+}
