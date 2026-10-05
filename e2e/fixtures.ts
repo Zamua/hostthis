@@ -229,8 +229,6 @@ export const test = base.extend<TestFixtures, { server: Server }>({
           HOSTTHIS_SSH_ADDR: `127.0.0.1:${ports[1]}`,
           HOSTTHIS_METRICS_ADDR: `127.0.0.1:${ports[2]}`,
           HOSTTHIS_DATA_DIR: dataDir,
-          HOSTTHIS_METADATA_BACKEND: 'celld',
-          HOSTTHIS_BLOB_BACKEND: 'celld',
           HOSTTHIS_CELLD_ENDPOINT: runtime.url,
           HOSTTHIS_LANDING: join(process.env.HOSTTHIS_E2E_ROOT!, 'web', 'landing.html'),
         },

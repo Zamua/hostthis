@@ -1,8 +1,7 @@
 package storage_test
 
-// The raw object store contract, run against every backend: disk, and celld
-// on the local runtime or the node CELLD_TEST_ENDPOINT names. Anything one
-// backend passes and another fails is a divergence, not a feature.
+// The raw object store contract, run against celld on the local runtime or
+// the node CELLD_TEST_ENDPOINT names.
 
 import (
 	"bytes"
@@ -132,14 +131,4 @@ func blobContractRejectsUnsafe(t *testing.T, s rawBlobStore) {
 			t.Errorf("DeletePrefix(%q) = nil, want a refusal", prefix)
 		}
 	}
-}
-
-func TestDiskBlobContract(t *testing.T) {
-	runBlobContract(t, func(t *testing.T) rawBlobStore {
-		bs, err := storage.NewBlobStore(t.TempDir())
-		if err != nil {
-			t.Fatalf("NewBlobStore: %v", err)
-		}
-		return bs
-	})
 }

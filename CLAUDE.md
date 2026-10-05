@@ -43,7 +43,7 @@ technical layer.
   SQL, no SSH, no HTTP, no third-party SDKs. It's plain Go data + pure
   functions you can test without spinning up anything.
 - Infrastructure adapters (metadata repo, SSH server, HTTP handlers,
-  filesystem blob store) live in separate packages and depend on the
+  object store) live in separate packages and depend on the
   domain. The domain never depends back.
 - Application services orchestrate use cases by composing the domain
   with the adapters via small interfaces. Routes / SSH handlers /
@@ -121,7 +121,9 @@ upgrade while looking like an upstream bug.
 cmd/hostthisd/       single binary entry point
 internal/
   domain/            pure types + invariants (no I/O)
-  storage/           metadata repos + on-disk blob store
+  celld/             metadata adapters over the celld Worker
+  celldtest/         runs the Worker locally for tests
+  storage/           site view, blob store layers, storage contract tests
   service/           use cases (upload, manage, deploy, rooms)
   ssh/               gliderlabs ssh server + verb dispatch
   http/              apex landing + paste read surface
@@ -162,18 +164,18 @@ make docker-up     # docker compose up; same ports; data persists in ./data
 make docker-down   # tear down
 ```
 
-### Backends: memory + celld metadata, disk + celld blobs
+### Storage: one domain, in the Worker
 
-Two metadata backends: `memory` (the default; in-process, ephemeral, what
-dev/test/e2e run) and `celld` (production; a cell runtime reached over HTTP,
-see `docs/SPEC.md` "Celld-backed metadata storage"). Two blob backends:
-`disk` (default) and `celld` (production; the Worker's R2 binding, reached at
-`HOSTTHIS_CELLD_ENDPOINT`), both with the same per-upload key layout.
+The domain lives once, in the celld Worker (`celld/src`): metadata in its
+cells, payloads in its R2 binding, both reached at `HOSTTHIS_CELLD_ENDPOINT`
+(see `docs/SPEC.md` "Metadata storage backends"). There is no Go copy of it to
+keep in step. Production runs the Worker on celld; `make run`, the Go tests and
+the browser suite run the same code under Miniflare.
 
-The conformance suite is the contract between them: it runs against the
-memory backend on every `go test ./...`, and against a live celld fleet when
-`CELLD_TEST_ENDPOINT` names one, which also runs the blob contract against the
-celld blob backend.
+The conformance suite pins the adapters' contract: it runs against the local
+runtime on every `go test ./...`, and against a real celld node when
+`CELLD_TEST_ENDPOINT` names one (the CI `celld` job), along with the blob
+contract and the live room suite.
 
 Quick smoke from another terminal once it's live:
 

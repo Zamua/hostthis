@@ -507,8 +507,9 @@ With* options. Refusal behavior is pinned by
   is rejected with `upload exceeds 10 MiB compressed cap; your bytes
   compress to <actual> - try removing binary data` and the spill file is
   discarded.
-- **Storage backend**: pluggable. See "Blob storage backends" below.
-  Default is the on-disk store (`data/blobs/uploads/<upload-id>/<n>`).
+- **Storage backend**: the celld Worker's payload binding, under the
+  upload's own `uploads/<upload-id>/<n>` keys. See "Blob storage backends"
+  below.
   Markdown and diff are never rendered on the read path: such a read
   either streams the raw bytes (when the client asks for them via `?raw`)
   or serves the fixed client-render shell, so server memory is constant
@@ -1287,10 +1288,8 @@ existence of any specific room.
 ### Storage: a room-namespaced KV over the metadata backend
 
 Room data is small JSON/bytes blobs - app STATE, not files - so it lives
-in the **metadata backend** hostthis already runs (the configurable
-metadata store: the memory engine for dev, celld for the
-object-store-backed and horizontally-scaled deploys), NOT in the
-BlobStore. The BlobStore holds the larger file bytes of pastes and
+in the **metadata backend** hostthis already runs (the celld cells), NOT
+in the BlobStore. The BlobStore holds the larger file bytes of pastes and
 sites; room values are small,
 mutable, and per-room, so they belong with the metadata. Large blobs are
 explicitly out of scope for rooms - an app that needs to host files uses
@@ -1303,18 +1302,16 @@ The implementation follows the existing repo-behind-service pattern:
 - The `RoomRepo` port in `internal/service` exposes creation, point reads,
   snapshots, PUT, DELETE, and creation-ledger counts. The service applies use-case
   policy; HTTP only translates requests and responses.
-- The memory adapter and celld adapter implement the same port. Memory keeps exact
-  app aggregates under one mutex. Celld stores one whole Room document per Room
-  cell and coordinates app-wide allocations through the app's Paste cell.
+- The celld adapter implements the port. It stores one whole Room document per
+  Room cell and coordinates app-wide allocations through the app's Paste cell.
 - Every address includes `(app_slug, room_id)`, so cross-app isolation is
-  structural rather than a filter. The backend-agnostic conformance suite pins
-  the observable contract.
+  structural rather than a filter. The conformance suite pins the observable
+  contract.
 
 The slug-must-name-a-live-app **existence requirement** is enforced at the
 HTTP layer (it reads the site + paste readers the router already holds),
-NOT inside the room repo, so it holds identically across backends without
-the room repo needing a separate existence reader: room creation 404s a
-slug that names no live site or paste on every backend.
+NOT inside the room repo, so the room repo needs no separate existence
+reader: room creation 404s a slug that names no live site or paste.
 
 ### Quota and abuse
 
@@ -1872,8 +1869,7 @@ enforces: the identity's active paste bytes PLUS its active static-site
 bytes (both post-compression). It must include sites - the deploy/upload
 write-check rejects at the paste+site sum, so a paste-only `used_bytes`
 would under-report and disagree with the cap (a user could see "22% used"
-while writes are rejected as over-quota). When the metadata backend has no
-site repo, `used_bytes` is paste bytes only. `active_pastes` still counts
+while writes are rejected as over-quota). `active_pastes` still counts
 pastes only (sites are enumerated by `list`).
 
 ### Rename
@@ -2290,10 +2286,7 @@ subscription in one local day is skipped.
 
 Push state lives in the Room cell beside the room document but outside the KV
 namespace: it is not part of a scan or snapshot, does not count against the
-room byte ceiling, and is bounded only by its own caps. The memory backend
-stores subscriptions and schedules with the same validation and reports the
-public key, but delivers nothing: push delivery is a celld feature, and the
-conformance suite pins the storage contract on both backends.
+room byte ceiling, and is bounded only by its own caps.
 
 ### Caps
 
@@ -2474,19 +2467,14 @@ cap is at the limit, not over it. A cap of zero or less means no limit.
 ### Atomicity
 
 The per-identity quota check, Paste transitions, and Sybil admission are
-serialized inside their owning aggregate.
+serialized inside their owning aggregate. celld v0.4 may serve several events
+concurrently, so every check-and-mutate route in Identity, Paste, Room, and
+Subnet runs under `blockConcurrencyWhile`. Local multi-key transitions use one
+storage transaction or batch. Room's cross-cell byte invariant additionally
+uses the versioned escrow protocol above.
 
-- **Memory backend.** One mutex covers the store. Maintained per-owner and
-  per-app aggregates make quota decisions point-addressed and exact.
-- **Celld backend.** v0.4 may serve several events concurrently, so every
-  check-and-mutate route in Identity, Paste, Room, and Subnet runs under
-  `blockConcurrencyWhile`. Local multi-key transitions use one storage
-  transaction or batch. Room's cross-cell byte invariant additionally uses the
-  versioned escrow protocol above.
-
-The service layer treats both backends identically: a local multi-record
-transition fully lands or remains at its prior state, and concurrent admission
-cannot race a stale check.
+To the service layer, a local multi-record transition fully lands or remains at
+its prior state, and concurrent admission cannot race a stale check.
 
 ### Threat model: what's bounded and what isn't
 
@@ -2495,8 +2483,7 @@ cannot race a stale check.
 - One IP subnet → ~20 fresh keys × 10 MiB = ~200 MiB/day logical
   (~20–40 MiB/day actual storage after zstd)
 - Concurrent per-identity and per-app quota races → serialized aggregate-local
-  decisions on both backends; the Room escrow protocol preserves the cross-cell
-  app ceiling
+  decisions; the Room escrow protocol preserves the cross-cell app ceiling
 
 *Not bounded by the protocol* (operator-layer concerns):
 - *Multi-IP Sybil via residential-proxy fleets*. An attacker with 100
@@ -2520,15 +2507,9 @@ cannot race a stale check.
 
 ## Blob storage backends
 
-Blob bytes are independent of metadata. The service uses one blob port and
-selects its adapter with `HOSTTHIS_BLOB_BACKEND`:
-
-```text
-HOSTTHIS_BLOB_BACKEND=disk    # default
-HOSTTHIS_BLOB_BACKEND=celld   # production
-```
-
-The port has three operations:
+Blob bytes are independent of metadata. The service uses one blob port,
+implemented over the celld Worker's payload binding (below). The port has
+three operations:
 
 - `Put(key)` streams one object in.
 - `GetReader(key)` streams it back out.
@@ -2604,34 +2585,28 @@ the service treats as ambiguous.
 A process killed mid-upload leaks its prefix. That rare leak is accepted: there
 is no sweep.
 
-### Available backends
+### The celld payload store
 
-- **`disk`** stores each object at `<data-dir>/blobs/<key>`. It is the local
-  development, test and e2e default.
-- **`celld`** stores each object at `r2/payloads/<key>` in the celld fleet
-  bucket, through the Worker's `PAYLOADS` R2 binding (`bucket_name`
-  `payloads`). It is the production byte plane. `hostthisd` reaches it at
-  `HOSTTHIS_CELLD_ENDPOINT` and needs no object-store credential of its own.
-  The Worker exposes three stateless, cluster-internal routes, served outside
-  any cell:
-  - `PUT /blob/<key>` streams the request body into the binding and answers
-    204. The request carries the object's length as `Content-Length`.
-  - `GET /blob/<key>` streams the object back, or answers 404 when it is
-    absent. The runtime sends a streamed body chunked, so the stored size
-    travels in an `X-Blob-Size` header; a response without it is an error.
-  - `DELETE /blob?prefix=<prefix>` pages through the binding's listing of that
-    prefix and deletes in batches of up to 1000 keys, answering 204. An absent
-    prefix deletes nothing and succeeds.
+Each object is stored at `r2/payloads/<key>` in the celld fleet bucket,
+through the Worker's `PAYLOADS` R2 binding (`bucket_name` `payloads`).
+`hostthisd` reaches it at `HOSTTHIS_CELLD_ENDPOINT` and needs no object-store
+credential of its own. The Worker exposes three stateless, cluster-internal
+routes, served outside any cell:
 
-  The Worker validates every key with the same rule as the Go adapters and
-  answers 400 otherwise. A delete prefix must also start with `uploads/` and
-  end on a segment boundary, so no route can empty the binding. The Worker
-  stores opaque bytes: compression stays in `hostthisd`, and no route reads a
-  whole body into memory.
+- `PUT /blob/<key>` streams the request body into the binding and answers
+  204. The request carries the object's length as `Content-Length`.
+- `GET /blob/<key>` streams the object back, or answers 404 when it is
+  absent. The runtime sends a streamed body chunked, so the stored size
+  travels in an `X-Blob-Size` header; a response without it is an error.
+- `DELETE /blob?prefix=<prefix>` pages through the binding's listing of that
+  prefix and deletes in batches of up to 1000 keys, answering 204. An absent
+  prefix deletes nothing and succeeds.
 
-Production combines celld metadata with celld blobs; local development normally
-combines memory metadata with disk blobs. The blob backend is chosen
-independently of the metadata backend, so any pairing is valid.
+The Worker validates every key with the same rule as the Go adapters and
+answers 400 otherwise. A delete prefix must also start with `uploads/` and
+end on a segment boundary, so no route can empty the binding. The Worker
+stores opaque bytes: compression stays in `hostthisd`, and no route reads a
+whole body into memory.
 
 The celld fleet bucket must never carry a storage quota. Payloads share it with
 celld's own state and lease writes, so a full quota would refuse those too and
@@ -2667,7 +2642,6 @@ uploads arrive at once:
 - **Reads and deletes are not queued.** `GetReader` streams without growing
   the runtime's memory, and `DeletePrefix` carries no body.
 
-Only the celld backend is queued; `disk` writes pass straight through.
 Both settings are validated at startup: a budget below 1 or a wait that is not
 a positive duration stops the process.
 
@@ -2751,37 +2725,35 @@ fails the read.
 
 ## Metadata storage backends
 
-Two adapters implement the application's metadata ports:
-
-- **memory** - the default in-process adapter. It is ephemeral, requires no
-  external service, and is used by local development and most tests.
-- **celld** - the production adapter. Identity, Paste, Room, and Subnet cells
-  own durable metadata over a celld fleet's object store.
-
-The service and transport layers depend only on domain-shaped ports. The
-backend-agnostic conformance suite runs the same behavior against memory and a
-live celld Worker.
+The domain lives once, in the celld Worker (`celld/src`): Identity, Paste,
+Room, and Subnet cells own durable metadata over a celld fleet's object store,
+and the `internal/celld` adapters implement the application's metadata ports
+over HTTP. There is no second implementation of the domain in Go.
 
 ```text
-HOSTTHIS_METADATA_BACKEND=memory                  # default
-HOSTTHIS_METADATA_BACKEND=celld                   # production
-HOSTTHIS_CELLD_ENDPOINT=http://celld:8080         # required for celld
+HOSTTHIS_CELLD_ENDPOINT=http://celld:8080         # required
 ```
+
+The same Worker runs everywhere. Production runs it on celld. Development, the
+Go tests, and the browser suite run it on this machine under Miniflare
+(workerd), from `celld/localrt`, with cells in memory or a local persist
+directory and payloads in a local R2 store.
+
+The service and transport layers depend only on domain-shaped ports. The
+conformance suite pins their behavior against the Worker.
 
 ### Atomicity contract
 
-The memory adapter serializes every check-and-mutate operation under one mutex.
-The celld Worker serializes mutating events per cell and commits local multi-key
-transitions with one storage transaction or batch. Cross-cell invariants use the
+The celld Worker serializes mutating events per cell and commits local
+multi-key transitions with one storage transaction or batch. Cross-cell invariants use the
 durable protocols specified in the celld section below; they are not one global
 transaction.
 
 ### Blob and operator boundary
 
-Metadata and payload storage are independent ports. Local development combines
-the memory adapter with the disk BlobStore. Production combines celld metadata
-with the celld BlobStore, so payloads live in the fleet bucket under
-`r2/payloads/`, beside celld's own state and outside every cell.
+Metadata and payload storage are independent ports, both served by the Worker:
+payloads live in the fleet bucket under `r2/payloads/`, beside celld's own state
+and outside every cell.
 
 ### The storage contract and its conformance suite
 
@@ -2897,23 +2869,12 @@ names the removed ones in each delete's answer; the service deletes those
 prefixes after the metadata commits (see "Blob storage backends → Deleting
 bytes").
 
-### The two backends and the conformance gate
+### The conformance gate
 
-`HOSTTHIS_METADATA_BACKEND` selects the metadata plane:
-
-- **memory** (default) - `storage.MemRepo`, an in-process implementation of
-  every port under one mutex. Ephemeral by design; the dev, test and e2e
-  engine. Being single-mutex makes it the STRICTEST backend: every
-  check-then-write is atomic, so anything admitted concurrently here is
-  admissible everywhere.
-- **celld** - the production plane, specified under "Celld-backed metadata
-  storage".
-
-What keeps two implementations honest is the conformance suite, not
-inspection: the same assertions run against MemRepo on every
-`go test ./...` and against a live celld fleet when `CELLD_TEST_ENDPOINT`
-names one. A behavior difference between backends is, by construction, a
-failing test in one of them.
+The conformance suite runs against the Worker under Miniflare on every
+`go test ./...`, and against a real celld node when `CELLD_TEST_ENDPOINT` names
+one (CI runs that node against an object store, the production shape). The
+Worker code is the same in both; the second run pins celld itself.
 
 
 ### Static-site storage
@@ -2942,9 +2903,9 @@ or quota sum:
   one-file manifest as a directory.
 
 This representation makes paste/site slug collision impossible by construction:
-one slug names one paste aggregate and its version history. Memory and celld
-backends run the same site conformance suite, including manifest round-trip,
-version charging, quota interaction, ownership privacy, and slug reservation.
+one slug names one paste aggregate and its version history. The site
+conformance suite covers manifest round-trip, version charging, quota
+interaction, ownership privacy, and slug reservation.
 
 ### Artifact accounting on celld
 
@@ -3077,11 +3038,7 @@ There is no room-retention or full-room-delete interface. Rooms persist
 indefinitely. Creation-ledger entries are the only room records removed by
 elapsed time, because they are rate-limit state rather than user content.
 
-The memory adapter stores the room aggregate under one mutex. One critical
-section checks both byte ceilings, mutates the namespace, and increments the
-sequence, so its cap and sequence are exact.
-
-The celld adapter uses two cells through the same port:
+The celld adapter uses two cells:
 
 - The **Room** cell owns one room's metadata, KV document, byte count, dense
   sequence, pending budget operation, recovery alarm, and hibernatable sockets.
@@ -3215,7 +3172,7 @@ retained data. Missing wire entries on pre-relay rooms serve as `null` in
 snapshots, exactly as they did before the relay existed. There is no offline
 Room reconciliation pass.
 
-Every backend runs the same observable conformance cases: round-trip, reserved
+The conformance cases cover round-trip, reserved
 object-property keys, cross-room and cross-app isolation, nonexistent-room
 shape, room byte/key ceilings, exact serial and concurrent app ceilings,
 immediate cross-room capacity release, creation refusal at a full app, creation
@@ -3659,9 +3616,9 @@ The HTTP listener serves two process-health endpoints ahead of Host-based routin
 - **`/healthz`** returns `200 ok` whenever the HTTP server responds and echoes
   `X-Backend-Color` when the replica is color-labeled. Kubernetes uses it for
   startup, readiness, and liveness.
-- **`/readyz`** is a compatibility endpoint returning `{"ready":true}`. Current
-  metadata adapters have no application-side activation phase: memory is local,
-  and celld activates cells on demand.
+- **`/readyz`** is a compatibility endpoint returning `{"ready":true}`. The
+  metadata adapter has no application-side activation phase: celld activates
+  cells on demand.
 
 Both answer on any Host without authentication. They expose no metadata, storage
 counters, or operator controls.
@@ -3746,17 +3703,13 @@ file). Defaults in parens:
 --apex-domain            / HOSTTHIS_APEX_DOMAIN             public apex                             (hostthis.dev)
 --mode                   / HOSTTHIS_URL_MODE                subdomain (prod) | path (dev)           (path)
 --scheme                 / HOSTTHIS_PUBLIC_SCHEME           https | http                            (https)
---data-dir               / HOSTTHIS_DATA_DIR                where metadata + blobs live             (./data)
+--data-dir               / HOSTTHIS_DATA_DIR                where the ssh host key lives            (./data)
 --landing                / HOSTTHIS_LANDING                 path to landing.html                    (web/landing.html)
 --fresh-keys-per-subnet  / HOSTTHIS_FRESH_KEYS_PER_SUBNET   sybil-gate threshold                    (20)
 --fresh-keys-window      / HOSTTHIS_FRESH_KEYS_WINDOW       sybil-gate rolling window               (24h)
 
-# Metadata backend
-                         / HOSTTHIS_METADATA_BACKEND        memory | celld                         (memory)
-                         / HOSTTHIS_CELLD_ENDPOINT          celld Worker base URL                  (required for celld metadata or blobs)
-
-# Blob backend
-                         / HOSTTHIS_BLOB_BACKEND            disk | celld                           (disk)
+# Storage (metadata and blobs)
+                         / HOSTTHIS_CELLD_ENDPOINT          celld Worker base URL                  (required)
 
 # Limits
                          / HOSTTHIS_CREATE_ADMISSION_WIDTH  same-identity create admission width    (2)

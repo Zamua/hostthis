@@ -1,13 +1,18 @@
 # hostthis on celld
 
-This directory contains hostthis's production metadata and payload Worker. The
-Go service reaches its HTTP and WebSocket routes through the `internal/celld`
-and `internal/storage` adapters; public SSH and HTTP remain owned by
-`hostthisd`.
+This directory contains hostthis's metadata and payload Worker: the one
+implementation of the domain. The Go service reaches its HTTP and WebSocket
+routes through the `internal/celld` and `internal/storage` adapters; public SSH
+and HTTP remain owned by `hostthisd`.
 
 ## Local development
 
-Install celld v0.6.1, then run the Worker with celld's local runtime:
+`localrt/` runs the Worker under Miniflare (workerd) with the bindings
+`wrangler.jsonc` declares. The Go tests (`internal/celldtest`), `make run` and
+the browser suite all use it; `npm ci --prefix localrt` installs it.
+
+To run the Worker on celld itself, install celld v0.6.1 and use its local
+runtime:
 
 ```sh
 celld dev --port 8087
@@ -26,7 +31,8 @@ celld deploy . --bucket s3://<bucket> --endpoint <s3-endpoint>
 celld --bucket s3://<bucket> --endpoint <s3-endpoint> --listen 127.0.0.1:8087
 ```
 
-From the repository root, the live adapter suites target the local listener:
+From the repository root, the adapter suites target that node instead of
+Miniflare:
 
 ```sh
 CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
