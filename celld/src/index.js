@@ -2801,11 +2801,100 @@ export class Subnet {
   }
 }
 
+// Payload bytes live in the PAYLOADS R2 binding. The Worker stores them
+// opaque (compression stays in hostthisd) and never reads a body into memory.
+const BLOB_PATH = "/blob/";
+const BLOB_DELETE_PREFIX = "uploads/";
+const R2_DELETE_BATCH = 1000;
+
+// The Go adapters' rule: relative, slash-separated, plain segments.
+function validBlobKey(key) {
+  if (typeof key !== "string" || key === "" || /[\\\0]/.test(key)) {
+    return false;
+  }
+  return key.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+}
+
+// A key under uploads/ plus a trailing slash, so a delete ends on a segment
+// boundary and can never reach past one upload.
+function validBlobPrefix(prefix) {
+  if (typeof prefix !== "string" || !prefix.endsWith("/")) {
+    return false;
+  }
+  const body = prefix.slice(0, -1);
+  return body.startsWith(BLOB_DELETE_PREFIX) && validBlobKey(body);
+}
+
+function blobKeyOf(url) {
+  try {
+    return decodeURIComponent(url.pathname.slice(BLOB_PATH.length));
+  } catch {
+    return null;
+  }
+}
+
+// Lists the whole prefix before deleting, so no cursor has to survive the
+// deletes. One upload's key names are bounded by its file count.
+async function deleteBlobPrefix(bucket, prefix) {
+  const keys = [];
+  let cursor;
+  do {
+    const page = await bucket.list({ prefix, cursor });
+    for (const object of page.objects) keys.push(object.key);
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  for (let i = 0; i < keys.length; i += R2_DELETE_BATCH) {
+    await bucket.delete(keys.slice(i, i + R2_DELETE_BATCH));
+  }
+}
+
+async function handleBlob(request, env, url) {
+  if (url.pathname === "/blob" && request.method === "DELETE") {
+    const prefix = url.searchParams.get("prefix");
+    if (!validBlobPrefix(prefix)) {
+      return new Response("invalid prefix\n", { status: 400 });
+    }
+    await deleteBlobPrefix(env.PAYLOADS, prefix);
+    return new Response(null, { status: 204 });
+  }
+  if (!url.pathname.startsWith(BLOB_PATH)) {
+    return new Response("not found\n", { status: 404 });
+  }
+  const key = blobKeyOf(url);
+  if (!validBlobKey(key)) {
+    return new Response("invalid key\n", { status: 400 });
+  }
+  if (request.method === "PUT") {
+    // A zero-length request has no body stream.
+    await env.PAYLOADS.put(key, request.body ?? new Uint8Array(0));
+    return new Response(null, { status: 204 });
+  }
+  if (request.method === "GET") {
+    const object = await env.PAYLOADS.get(key);
+    if (object === null) {
+      return new Response("not found\n", { status: 404 });
+    }
+    // The runtime streams a body chunked and drops Content-Length, so the
+    // size travels in its own header.
+    return new Response(object.body, {
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(object.size),
+        "X-Blob-Size": String(object.size),
+      },
+    });
+  }
+  return new Response("method not allowed\n", { status: 405 });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") {
       return new Response("ok\n");
+    }
+    if (url.pathname === "/blob" || url.pathname.startsWith(BLOB_PATH)) {
+      return handleBlob(request, env, url);
     }
     if (url.pathname.startsWith("/room/")) {
       const room = url.searchParams.get("room");

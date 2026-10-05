@@ -282,6 +282,13 @@ func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlob
 		}
 		logger.Printf("blobs: disk backend at %s/blobs (zstd-compressed at rest)", dataDir)
 		raw = bs
+	case "celld":
+		bs, err := storage.NewCelldBlobStore(envOr("HOSTTHIS_CELLD_ENDPOINT", ""), nil)
+		if err != nil {
+			return nil, fmt.Errorf("HOSTTHIS_BLOB_BACKEND=celld: %w", err)
+		}
+		logger.Printf("blobs: celld backend at %s (zstd-compressed at rest)", envOr("HOSTTHIS_CELLD_ENDPOINT", ""))
+		raw = bs
 	case "s3":
 		bs, err := storage.NewS3BlobStore(storage.S3BlobConfig{
 			Endpoint:  envOr("HOSTTHIS_S3_ENDPOINT", ""),
@@ -297,7 +304,7 @@ func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlob
 		logger.Printf("blobs: s3 backend at bucket %s (zstd-compressed at rest)", envOr("HOSTTHIS_S3_BUCKET", ""))
 		raw = bs
 	default:
-		return nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|s3)", backend)
+		return nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|celld|s3)", backend)
 	}
 	return storage.NewCompressedBlobStore(raw), nil
 }

@@ -514,7 +514,7 @@ With* options. Refusal behavior is pinned by
   or serves the fixed client-render shell, so server memory is constant
   regardless of paste size.
 - **Storage compression**: all blob bytes are persisted zstd-encoded
-  (level 3) by the storage layer, identically on disk and S3.
+  (level 3) by the storage layer, identically on every blob backend.
   Compression is invisible above the BlobStore interface. See "Blob
   storage backends → On-disk format" for the header and the fallback for
   uncompressed objects.
@@ -2519,7 +2519,8 @@ selects its adapter with `HOSTTHIS_BLOB_BACKEND`:
 
 ```text
 HOSTTHIS_BLOB_BACKEND=disk    # default
-HOSTTHIS_BLOB_BACKEND=s3      # production
+HOSTTHIS_BLOB_BACKEND=celld   # production
+HOSTTHIS_BLOB_BACKEND=s3      # available
 ```
 
 The port has three operations:
@@ -2601,19 +2602,44 @@ is no sweep.
 
 - **`disk`** stores each object at `<data-dir>/blobs/<key>`. It is the local
   development, test and e2e default.
-- **`s3`** stores each object at `<key>` in the configured bucket. It is the
-  durable production byte plane. `DeletePrefix` lists only that one upload's
-  prefix, which is written once and never churned, so its cost is bounded by
-  the upload's file count. Endpoint, bucket, region, credentials, and TLS come
-  from `HOSTTHIS_S3_*` settings.
+- **`celld`** stores each object at `r2/payloads/<key>` in the celld fleet
+  bucket, through the Worker's `PAYLOADS` R2 binding (`bucket_name`
+  `payloads`). It is the production byte plane. `hostthisd` reaches it at
+  `HOSTTHIS_CELLD_ENDPOINT` and needs no object-store credential of its own.
+  The Worker exposes three stateless, cluster-internal routes, served outside
+  any cell:
+  - `PUT /blob/<key>` streams the request body into the binding and answers
+    204. The request carries the object's length as `Content-Length`.
+  - `GET /blob/<key>` streams the object back, or answers 404 when it is
+    absent. The runtime sends a streamed body chunked, so the stored size
+    travels in an `X-Blob-Size` header; a response without it is an error.
+  - `DELETE /blob?prefix=<prefix>` pages through the binding's listing of that
+    prefix and deletes in batches of up to 1000 keys, answering 204. An absent
+    prefix deletes nothing and succeeds.
 
-Neither adapter is supplied by the metadata backend. Production combines celld
-metadata with S3 blobs; local development normally combines memory metadata with
-disk blobs.
+  The Worker validates every key with the same rule as the Go adapters and
+  answers 400 otherwise. A delete prefix must also start with `uploads/` and
+  end on a segment boundary, so no route can empty the binding. The Worker
+  stores opaque bytes: compression stays in `hostthisd`, and no route reads a
+  whole body into memory.
+- **`s3`** stores each object at `<key>` in the configured bucket.
+  `DeletePrefix` lists only that one upload's prefix, which is written once and
+  never churned, so its cost is bounded by the upload's file count. Endpoint,
+  bucket, region, credentials, and TLS come from `HOSTTHIS_S3_*` settings. It
+  remains available until payloads written through it have moved to the celld
+  backend.
+
+Production combines celld metadata with celld blobs; local development normally
+combines memory metadata with disk blobs. The blob backend is chosen
+independently of the metadata backend, so any pairing is valid.
+
+The celld fleet bucket must never carry a storage quota. Payloads share it with
+celld's own state and lease writes, so a full quota would refuse those too and
+stop the fleet, not just new uploads.
 
 ### On-disk format
 
-Every object written by either backend is zstd-compressed (level 3) and
+Every object written by any backend is zstd-compressed (level 3) and
 prefixed with a 4-byte magic header `HZ\0\x01` (`HZ` for hostthis-zstd,
 `\0\x01` for format version 1). The compressed body follows the magic.
 Layout:
@@ -2685,8 +2711,9 @@ transaction.
 
 Metadata and payload storage are independent ports. Local development combines
 the memory adapter with the disk BlobStore. Production combines celld metadata
-with the S3 BlobStore. The celld fleet bucket and payload
-bucket are separate security and lifecycle domains.
+with the celld BlobStore, so payloads live in the fleet bucket under
+`r2/payloads/`, beside celld's own state and outside every cell. The S3
+BlobStore keeps payloads in a separate bucket with its own credentials.
 
 ### The storage contract and its conformance suite
 
@@ -3216,8 +3243,9 @@ bindings into different semantics:
   transitions owned by Identity, Paste, Room, and Subnet.
 - Queues and Workflows are asynchronous and cannot decide a synchronous room or
   upload admission response.
-- R2 does not replace the existing provider-neutral BlobStore contract and its
-  S3 adapter.
+- R2 does not replace the provider-neutral BlobStore contract. It backs one
+  adapter of that contract (the celld blob backend), and compression, keys,
+  and lifecycle stay in `hostthisd`.
 - Service bindings do not remove hostthis's app/room protocol or public policy
   boundary.
 
@@ -3226,9 +3254,16 @@ hostthis adapter or domain rule.
 
 ### Blob and operational boundaries
 
-Paste and site payloads stay outside celld in the S3 BlobStore. Room values are
-small mutable metadata and remain in Room cells. `hostthisd` writes and deletes
-payload bytes around its metadata calls; cells never touch them.
+Paste and site payloads live in the fleet bucket under `r2/payloads/`, reached
+through the Worker's stateless `/blob` routes and its `PAYLOADS` R2 binding
+(see "Blob storage backends"). No cell reads or writes them: `hostthisd` writes
+and deletes payload bytes around its metadata calls, and the byte routes run in
+the Worker outside any cell. Room values are small mutable metadata and remain
+in Room cells.
+
+The fleet bucket must never carry a storage quota. Payload growth shares it
+with celld's state and lease writes, and a quota that fills would refuse those
+as well.
 
 One fleet bucket serves one Worker application. The Worker and operator routes
 are unauthenticated and remain cluster-internal behind NetworkPolicy;
@@ -3648,10 +3683,10 @@ file). Defaults in parens:
 
 # Metadata backend
                          / HOSTTHIS_METADATA_BACKEND        memory | celld                         (memory)
-                         / HOSTTHIS_CELLD_ENDPOINT          celld Worker base URL                  (required for celld)
+                         / HOSTTHIS_CELLD_ENDPOINT          celld Worker base URL                  (required for celld metadata or blobs)
 
 # Blob backend
-                         / HOSTTHIS_BLOB_BACKEND            disk | s3                              (disk)
+                         / HOSTTHIS_BLOB_BACKEND            disk | celld | s3                      (disk)
                          / HOSTTHIS_S3_ENDPOINT             S3-compatible endpoint                (provider default)
                          / HOSTTHIS_S3_BUCKET               payload bucket                         (required for s3)
                          / HOSTTHIS_S3_REGION               bucket region                         (us-east-1)

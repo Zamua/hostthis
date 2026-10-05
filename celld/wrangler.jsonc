@@ -6,6 +6,8 @@
   "main": "src/index.js",
   "no_bundle": true,
   "compatibility_date": "2025-01-01",
+  // Paste and site payloads, stored under r2/payloads/ in the fleet bucket.
+  "r2_buckets": [{ "binding": "PAYLOADS", "bucket_name": "payloads" }],
   "durable_objects": {
     "bindings": [
       { "name": "IDENTITY", "class_name": "Identity" },

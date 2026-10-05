@@ -71,9 +71,9 @@ jobs:
 
       - name: install pinned celld
         env:
-          CELLD_ARCHIVE_SHA256: 0488628597154725db2f61f85434fb381e1b2535d1e9f097c6d20727cd337973
+          CELLD_ARCHIVE_SHA256: 79a8253cff5d4e8a4a9f7a2611e393390f7fe9025f00e88467875b007c44866b
         run: |
-          curl -fsSL https://github.com/denoland/celld/releases/download/v0.4.0/celld-x86_64-unknown-linux-gnu.gz \
+          curl -fsSL https://github.com/denoland/celld/releases/download/v0.6.1/celld-x86_64-unknown-linux-gnu.gz \
             -o "$RUNNER_TEMP/celld.gz"
           printf '%s  %s\n' "$CELLD_ARCHIVE_SHA256" "$RUNNER_TEMP/celld.gz" | sha256sum -c -
           gunzip -c "$RUNNER_TEMP/celld.gz" > "$RUNNER_TEMP/celld"
@@ -123,7 +123,7 @@ jobs:
           fi
 
           CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
-            go test -count=1 ./internal/storage -run 'TestConformance_Celld'
+            go test -count=1 ./internal/storage -run 'TestConformance_Celld|TestCelldBlobContract'
           CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
             go test -count=1 ./internal/http -run 'TestLiveRoom'
           CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
