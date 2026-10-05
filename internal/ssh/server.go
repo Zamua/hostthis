@@ -61,6 +61,7 @@ type Server struct {
 	Pastes      PasteReader      // by-slug read for the `versions` current-marker
 	Sites       SiteReader       // optional; by-slug site read for `url`/`qr` (nil = paste-only)
 	KeyGate     *service.KeyGate // optional; nil disables the Sybil rate limit
+	Uploads     *UploadAdmission // optional; nil admits every upload at once
 	Now         func() time.Time // clock; defaults to time.Now when nil
 	BuildURL    URLBuilder
 	Logger      *log.Logger
@@ -456,6 +457,18 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	if err != nil {
 		emitUsageErr(sess, err)
 		return
+	}
+	// Admission precedes the first read of the body, so a queued upload holds
+	// no encoder and SSH flow control stalls its client.
+	if s.Uploads != nil {
+		release, err := s.Uploads.Acquire(sess.Context())
+		if err != nil {
+			if sess.Context().Err() == nil {
+				emitServiceErr(sess, err)
+			}
+			return
+		}
+		defer release()
 	}
 	// The live session reader goes straight to the service layer's streaming
 	// pipeline; buffering the body here would peak memory at HardRawByteCap
