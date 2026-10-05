@@ -7,6 +7,8 @@ import (
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
+
+	"github.com/Zamua/hostthis/internal/zstdenc"
 )
 
 // zstdDecoderPool reuses streaming zstd decoders across blob reads. A fresh
@@ -84,10 +86,6 @@ func (c *CompressedBlobStore) DeletePrefix(prefix string) error {
 // Cheap to inspect on every Get, and distinct enough that no real
 // HTML/Markdown blob matches by accident.
 var magicV1 = [4]byte{'H', 'Z', 0x00, 0x01}
-
-// SpeedDefault (level 3): ratio close to the slower levels on HTML/text at a
-// fraction of their cost.
-const compressionLevel = zstd.SpeedDefault
 
 // NewCompressedBlobStore wraps inner with the compression layer.
 func NewCompressedBlobStore(inner innerBlobStore) *CompressedBlobStore {
@@ -195,10 +193,7 @@ func (c *CompressedBlobStore) EncodeTo(w io.Writer, r io.Reader) (int, int64, er
 	if _, err := counted.Write(magicV1[:]); err != nil {
 		return 0, 0, fmt.Errorf("compressed blob write magic: %w", err)
 	}
-	enc, err := zstd.NewWriter(counted, zstd.WithEncoderLevel(compressionLevel))
-	if err != nil {
-		return 0, 0, fmt.Errorf("compressed blob: zstd writer: %w", err)
-	}
+	enc := zstdenc.Get(counted)
 	if _, err := io.Copy(enc, r); err != nil {
 		_ = enc.Close()
 		return 0, 0, fmt.Errorf("compressed blob encode: %w", err)
@@ -206,5 +201,6 @@ func (c *CompressedBlobStore) EncodeTo(w io.Writer, r io.Reader) (int, int64, er
 	if err := enc.Close(); err != nil {
 		return 0, 0, fmt.Errorf("compressed blob close encoder: %w", err)
 	}
+	zstdenc.Put(enc)
 	return int(counted.n) - CompressedBodyPrefixLen, counted.n, nil
 }
