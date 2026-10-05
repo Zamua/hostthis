@@ -919,35 +919,19 @@ test("Paste rejects an old incarnation without mutating the replacement allocati
   assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 2);
 });
 
-test("Paste legacy row adopts on first mutation and survives response loss", async () => {
+test("Paste row without a generation answers any mutation with generation-mismatch", async () => {
   const pasteSeed = artifactPasteSeed();
   delete pasteSeed.get("row").generation;
-  delete pasteSeed.get("row").accountingVersion;
-  const identitySeed = new Map([["entries", {
-    slugone1: { size: 2, status: "ready", at: 7, updatedAt: 7 },
-  }]]);
-  const h = artifactHarness({ pasteSeed, identitySeed });
-  h.transport.failAfter = 1;
-
-  const first = await h.paste().append({ ...appendBody("legacy-op"), generation: "" });
-  assert.equal(first.status, 502);
-  const generation = h.pasteStorage.data.get("row").generation;
-  assert.ok(generation);
-  assert.equal(h.pasteStorage.data.get("legacyAdoptionPending"), true);
-
-  const retried = await responseJSON(await h.paste().append({
-    ...appendBody("legacy-op"), generation,
-  }));
-  assert.equal(retried.status, 200);
-  assert.equal(retried.body.appended, true);
-  assert.equal(h.pasteStorage.data.get("legacyAdoptionPending"), undefined);
-  assert.equal(h.pasteStorage.data.get("row").generation, generation);
-  const entry = h.identityStorage.data.get("entries").slugone1;
-  assert.equal(entry.generation, generation);
-  assert.equal(entry.chargedSize, 6);
+  const h = artifactHarness({ pasteSeed });
+  for (const generation of ["", "generation-1"]) {
+    const refused = await responseJSON(await h.paste().append({ ...appendBody(`op-${generation}`), generation }));
+    assert.deepStrictEqual(refused, { status: 409, body: { error: "generation-mismatch" } });
+  }
+  assert.equal(storedVersions(h.pasteStorage).length, 1);
+  assert.equal(h.pasteStorage.data.get("row").generation, undefined);
 });
 
-test("Paste empty generation against an adopted row is a conflict", async () => {
+test("Paste empty generation is a generation-mismatch", async () => {
   const h = artifactHarness();
   const refused = await responseJSON(await h.paste().append({
     ...appendBody("empty-generation"), generation: "",
@@ -963,19 +947,6 @@ test("Paste append answers an accounting conflict with 409 whatever Identity ans
   assert.deepStrictEqual(conflict, { status: 409, body: { error: "artifact-accounting-conflict" } });
   assert.equal(storedVersions(h.pasteStorage).length, 1);
   assert.notEqual(h.pasteStorage.data.get("artifactPending"), undefined);
-});
-
-test("Paste legacy adoption answers a refused seed with 409 whatever Identity answered", async () => {
-  const pasteSeed = artifactPasteSeed();
-  const row = pasteSeed.get("row");
-  delete row.generation;
-  delete row.accountingVersion;
-  delete row.size;
-  const h = artifactHarness({ pasteSeed, identitySeed: new Map() });
-  const refused = await responseJSON(await h.paste().append({ ...appendBody("legacy-op"), generation: "" }));
-  assert.equal(refused.status, 409);
-  assert.equal(refused.body.error, "adoption-seed-conflict");
-  assert.equal(storedVersions(h.pasteStorage).length, 1);
 });
 
 test("Paste refuses a mutation behind another operation's pending work with 423 and persists nothing", async () => {
@@ -1243,14 +1214,6 @@ test("Paste and Identity drop a stored contentSha when they rewrite the head or 
   assert.equal((await h.paste().append(appendBody())).status, 200);
   assert.equal(hasContentSha(h.pasteStorage.data.get("row")), false);
   assert.equal(hasContentSha(h.identityStorage.data.get("entries").slugone1), false);
-
-  const legacy = new FakeStorage(new Map([["entries", {
-    slugone1: { size: 2, status: "ready", at: 7, kind: "html", contentSha: "v1" },
-  }]]));
-  assert.equal((await new Identity(state(legacy)).artifactSeed({
-    slug: "slugone1", generation: "generation-1", charge: 2, servedSize: 2,
-  })).status, 200);
-  assert.equal(hasContentSha(legacy.data.get("entries").slugone1), false);
 });
 
 test("Paste removal names every version's upload and replays it after re-creation", async () => {

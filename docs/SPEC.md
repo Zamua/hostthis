@@ -2925,8 +2925,10 @@ Stable state has equality. Growth reserves first and publishes second. Shrink or
 whole deletion tombstones locally first and releases second. Recovery may
 conservatively overcharge, but no visible retained version may be uncharged.
 
-Each incarnation of a slug carries an opaque `generation`. Every accounting,
-projection, delete, and recovery call includes it. Identity rejects a generation
+Each incarnation of a slug carries an opaque `generation`, and every artifact
+row has one. Every accounting, projection, delete, and recovery call includes
+it. The Paste cell answers a mutation whose generation is empty or differs from
+the row's with `generation-mismatch` (409); Identity rejects a generation
 that does not match its current entry, and permanent operation receipts remain
 keyed by `(slug, generation, operation ID)`. A delayed call from an artifact that was deleted
 and re-minted can therefore neither charge, release, nor rewrite the new
@@ -3011,16 +3013,6 @@ The owner listing exposes two different quantities:
 
 Pinning changes `Size` and served kind/content, never `StoredBytes`. Owner totals
 sum `StoredBytes` only.
-
-A legacy artifact row that predates generations adopts lazily, on first
-mutation: the Paste cell assigns a fresh opaque generation, derives the charge
-from its live versions, and idempotently seeds the Identity account before the
-mutation proceeds; no quota refusal applies to already-retained data. A seed
-Identity refuses answers `adoption-seed-conflict` (409) and the mutation does
-not run. A caller
-holding the legacy row (an empty generation) addresses that incarnation; an
-empty generation against an adopted row remains a conflict. Reads serve legacy
-rows unchanged. There is no offline reconciliation pass and no flag day.
 
 ### Room storage
 
