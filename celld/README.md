@@ -1,12 +1,13 @@
 # hostthis on celld
 
-This directory contains hostthis's production metadata Worker. The Go service
-reaches its HTTP and WebSocket routes through the `internal/celld` adapter;
-public SSH and HTTP remain owned by `hostthisd`.
+This directory contains hostthis's production metadata and payload Worker. The
+Go service reaches its HTTP and WebSocket routes through the `internal/celld`
+and `internal/storage` adapters; public SSH and HTTP remain owned by
+`hostthisd`.
 
 ## Local development
 
-Install celld v0.4.0, then run the Worker with celld's local runtime:
+Install celld v0.6.1, then run the Worker with celld's local runtime:
 
 ```sh
 celld dev --port 8087
@@ -29,7 +30,7 @@ From the repository root, the live adapter suites target the local listener:
 
 ```sh
 CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
-  go test -count=1 ./internal/storage -run TestConformance_Celld
+  go test -count=1 ./internal/storage -run 'TestConformance_Celld|TestCelldBlobContract'
 CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
   go test -count=1 ./internal/http -run TestLiveRoom
 ```
@@ -46,6 +47,7 @@ runtime.
 | Room | one room's metadata, key/value state, sequence, and sockets |
 | Subnet | one subnet's fresh-identity admission window |
 
-A celld fleet serves one Worker application. Paste and site payloads remain in
-the provider-neutral per-upload blob store; celld owns metadata and room
-state only.
+A celld fleet serves one Worker application. Paste and site payloads live in
+the `PAYLOADS` R2 binding (`r2/payloads/` in the fleet bucket), reached through
+the stateless `/blob` routes outside any cell. The Worker stores them as opaque
+bytes; keys, compression, and lifecycle stay in `hostthisd`.

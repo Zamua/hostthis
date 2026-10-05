@@ -5,10 +5,10 @@ import test from "node:test";
 // Every env binding the Worker reads is declared in wrangler.jsonc. A misspelt
 // binding is a TypeError at runtime, and a try/catch around a cell call turns
 // that into a silent retry loop.
-test("every cell namespace the Worker reads is a declared binding", () => {
+test("every binding the Worker reads is declared", () => {
   const src = readFileSync(new URL("../src/index.js", import.meta.url), "utf8");
   const cfg = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
-  const declared = new Set([...cfg.matchAll(/"name":\s*"([A-Z_]+)"/g)].map((m) => m[1]));
+  const declared = new Set([...cfg.matchAll(/"(?:name|binding)":\s*"([A-Z_]+)"/g)].map((m) => m[1]));
   const used = new Set([
     ...src.matchAll(/\benv\.([A-Z_]+)\.(?:get|idFromName)\(|\bcellCall\(this\.env\.([A-Z_]+),/g),
   ].map((m) => m[1] ?? m[2]));
