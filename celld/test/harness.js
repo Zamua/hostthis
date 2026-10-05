@@ -36,11 +36,13 @@ export class FakeStorage {
   }
 
   async put(keyOrEntries, value) {
+    // workerd silently writes nothing for a Map, so one here is a bug.
+    if (keyOrEntries instanceof Map) {
+      throw new TypeError("storage.put: pass entries as a plain object, not a Map");
+    }
     const entries = typeof keyOrEntries === "string"
       ? [[keyOrEntries, value]]
-      : keyOrEntries instanceof Map
-        ? [...keyOrEntries]
-        : Object.entries(keyOrEntries);
+      : Object.entries(keyOrEntries);
     if (entries.some(([key, entry]) => this.tooBig?.(String(key), entry))) {
       throw new Error("storage.put: string or blob too big");
     }
