@@ -438,6 +438,7 @@ func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantC
 	var res struct {
 		Removed bool     `json:"removed"`
 		Uploads []string `json:"uploads"`
+		Error   string   `json:"error"`
 	}
 	status, err := r.callArtifactMutation(context.Background(), "/paste/remove", slug,
 		map[string]any{
@@ -450,6 +451,9 @@ func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantC
 	}
 	if status == http.StatusLocked {
 		return nil, domain.ErrBusy
+	}
+	if replaced(status, res.Error) {
+		return nil, domain.ErrNotFound
 	}
 	if status == http.StatusConflict {
 		return nil, fmt.Errorf("celld: remove accounting conflict")
@@ -513,6 +517,8 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 		return domain.AppendResult{}, fmt.Errorf("%w: version too large to store", domain.ErrTooManyFiles)
 	case status == http.StatusLocked:
 		return domain.AppendResult{}, domain.ErrBusy
+	case replaced(status, res.Error):
+		return domain.AppendResult{}, domain.ErrNotFound
 	case status >= 300 || res.Appended == nil:
 		return domain.AppendResult{}, fmt.Errorf("celld: append: unrecognised answer: status %d %s", status, res.Error)
 	case *res.Appended:
@@ -589,6 +595,9 @@ func (r *PasteRepo) DeleteVersion(slug domain.Slug, generation string, ver int) 
 	if status == http.StatusLocked {
 		return "", domain.ErrBusy
 	}
+	if replaced(status, res.Error) {
+		return "", domain.ErrNotFound
+	}
 	if status == http.StatusConflict {
 		if res.Error == "version-served" {
 			return "", domain.ErrVersionCurrentlyServed
@@ -659,7 +668,8 @@ func (r *PasteRepo) setPin(slug domain.Slug, generation string, ver int) error {
 		return err
 	}
 	var res struct {
-		Pinned bool `json:"pinned"`
+		Pinned bool   `json:"pinned"`
+		Error  string `json:"error"`
 	}
 	status, err := r.callArtifactMutation(context.Background(), "/paste/pin", slug,
 		map[string]any{"opId": opID, "generation": generation, "ver": ver}, &res)
@@ -668,6 +678,9 @@ func (r *PasteRepo) setPin(slug domain.Slug, generation string, ver int) error {
 	}
 	if status == http.StatusLocked {
 		return domain.ErrBusy
+	}
+	if replaced(status, res.Error) {
+		return domain.ErrNotFound
 	}
 	if status == http.StatusConflict {
 		return fmt.Errorf("celld: pin accounting conflict")
@@ -720,3 +733,9 @@ func (r *PasteRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug,
 // every call site escapes, which is what keeps a key containing & or = from
 // silently becoming two parameters.
 func urlQuery(v string) string { return url.QueryEscape(v) }
+
+// replaced reports the cell's refusal of a call addressed to an incarnation
+// the slug no longer holds: the paste the caller named is gone.
+func replaced(status int, code string) bool {
+	return status == http.StatusConflict && code == "generation-mismatch"
+}
