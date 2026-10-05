@@ -146,7 +146,7 @@ func TestManageMutationsFenceReplacementIncarnation(t *testing.T) {
 			}
 			repo := &generationSwapRepo{PasteRepo: inner}
 			replacement := armGenerationReplacement(t, repo, old)
-			manage := NewManage(repo, NewStandaloneBlobUnit(newFakeBlobs()))
+			manage := NewManage(repo, fakeBlobUnit())
 
 			if err := tc.mutate(manage, old); !errors.Is(err, storage.ErrNotFound) {
 				t.Fatalf("%s error = %v, want ErrNotFound", tc.name, err)

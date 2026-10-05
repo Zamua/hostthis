@@ -10,12 +10,6 @@ import (
 	"github.com/Zamua/hostthis/internal/zstdenc"
 )
 
-// blobMagicV1 duplicates storage.magicV1 because the service layer must not
-// import storage. A diverged magic reads fresh blobs back as uncompressed.
-// Both layers encode through zstdenc, so the level cannot diverge.
-// TestStreamUploadMatchesStorageAtRestFormat pins the two encoders identical.
-var blobMagicV1 = [4]byte{'H', 'Z', 0x00, 0x01}
-
 // stagedUpload is the result of streaming bytes through the upload pipeline.
 // CompressedSize excludes the 4-byte magic.
 type stagedUpload struct {
@@ -39,15 +33,14 @@ var errRawCapExceeded = errors.New("raw cap exceeded")
 // MaxPasteBytes mid-stream.
 var errCompressedCapExceeded = errors.New("compressed cap exceeded")
 
-// streamUpload tees r in one pass through a zstd encoder spilling to a temp
-// file capped at MaxPasteBytes plus the magic, a raw-byte counter that aborts
-// at HardRawByteCap, and a sniff-prefix capture. The source is never
+// streamUpload tees r in one pass through the at-rest encoder spilling to a
+// temp file capped at MaxPasteBytes plus the magic, a raw-byte counter that
+// aborts at HardRawByteCap, and a sniff-prefix capture. The source is never
 // materialized; peak memory is a chunk buffer plus the compressor window.
 //
 // Returns errRawCapExceeded, errCompressedCapExceeded, or any other error
 // verbatim. On error the spill file is already removed.
 func streamUpload(r io.Reader) (stagedUpload, error) {
-	// The magic header goes first so StagePrecompressed is a straight write.
 	f, ferr := os.CreateTemp(os.Getenv("HOSTTHIS_STAGING_DIR"), "hostthis-paste-*")
 	if ferr != nil {
 		return stagedUpload{}, fmt.Errorf("staging temp: %w", ferr)
@@ -57,32 +50,21 @@ func streamUpload(r io.Reader) (stagedUpload, error) {
 		_ = os.Remove(f.Name())
 		return stagedUpload{}, err
 	}
-	written := &byteCount{}
-	staging := io.MultiWriter(f, written)
-	if _, err := staging.Write(blobMagicV1[:]); err != nil {
+	// Every encoded byte, the final block Close emits included, passes the cap.
+	capped := &cappedWriter{inner: f, limit: domain.MaxPasteBytes + len(zstdenc.Magic)}
+	zw, err := zstdenc.NewWriter(capped)
+	if err != nil {
 		return fail(err)
 	}
-
-	cap := &cappedWriter{inner: staging, limit: domain.MaxPasteBytes + len(blobMagicV1)}
-
-	zw := zstdenc.Get(cap)
-
 	rawCount := &rawCountWriter{limit: domain.HardRawByteCap}
 	prefix := &prefixBuffer{cap: domain.SniffPrefixLen}
 
-	mw := io.MultiWriter(zw, rawCount, prefix)
-	if _, err := io.Copy(mw, r); err != nil {
+	if _, err := io.Copy(io.MultiWriter(zw, rawCount, prefix), r); err != nil {
 		_ = zw.Close()
 		return fail(err)
 	}
 	if err := zw.Close(); err != nil {
 		return fail(err)
-	}
-	zstdenc.Put(zw)
-	// zstd can emit a final block on Close that crosses the compressed cap,
-	// past the cappedWriter's per-Write check.
-	if written.n > domain.MaxPasteBytes+len(blobMagicV1) {
-		return fail(errCompressedCapExceeded)
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return fail(fmt.Errorf("rewind staged paste: %w", err))
@@ -91,7 +73,7 @@ func streamUpload(r io.Reader) (stagedUpload, error) {
 	return stagedUpload{
 		File:           f,
 		RawSize:        rawCount.n,
-		CompressedSize: written.n - len(blobMagicV1),
+		CompressedSize: capped.written - len(zstdenc.Magic),
 		Prefix:         prefix.bytes(),
 	}, nil
 }
@@ -164,15 +146,9 @@ func (p *prefixBuffer) Write(b []byte) (int, error) {
 
 func (p *prefixBuffer) bytes() []byte { return p.buf }
 
-// byteCount tallies what passed through, so the encoded length is known without
-// holding the bytes.
-type byteCount struct{ n int }
-
-func (c *byteCount) Write(p []byte) (int, error) { c.n += len(p); return len(p), nil }
-
 // encodedSize is the exact at-rest length, magic included - what a size-aware
 // stage needs.
-func (s stagedUpload) encodedSize() int64 { return int64(s.CompressedSize + len(blobMagicV1)) }
+func (s stagedUpload) encodedSize() int64 { return int64(s.CompressedSize + len(zstdenc.Magic)) }
 
 // discard closes and removes a staged upload's spill file. Safe on a zero value.
 func (s stagedUpload) discard() {

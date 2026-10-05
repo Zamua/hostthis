@@ -181,7 +181,7 @@ func TestServerForceCloseWaitsForActiveUploadHandler(t *testing.T) {
 		t.Fatalf("blob store: %v", err)
 	}
 	repo := &blockingPasteRepo{entered: make(chan struct{}), release: make(chan struct{})}
-	upload := service.NewUpload(repo, service.NewStandaloneBlobUnit(storage.NewCompressedBlobStore(rawBlobs)))
+	upload := service.NewUpload(repo, storage.NewCompressedBlobStore(rawBlobs))
 
 	listener := mustListen(t)
 	addr := listener.Addr().String()

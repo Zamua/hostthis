@@ -14,14 +14,14 @@ import (
 func encode(t testing.TB, body []byte) []byte {
 	t.Helper()
 	var out bytes.Buffer
-	e := Get(&out)
+	e := get(&out)
 	if _, err := io.Copy(e, bytes.NewReader(body)); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.Close(); err != nil {
 		t.Fatal(err)
 	}
-	Put(e)
+	put(e)
 	return out.Bytes()
 }
 
@@ -76,14 +76,14 @@ func TestWarmEncodeAllocatesLittle(t *testing.T) {
 	body := make([]byte, 9<<20)
 	_, _ = rand.Read(body)
 	run := func() {
-		e := Get(io.Discard)
+		e := get(io.Discard)
 		if _, err := io.Copy(e, bytes.NewReader(body)); err != nil {
 			t.Fatal(err)
 		}
 		if err := e.Close(); err != nil {
 			t.Fatal(err)
 		}
-		Put(e)
+		put(e)
 	}
 	run()
 	var before, after runtime.MemStats

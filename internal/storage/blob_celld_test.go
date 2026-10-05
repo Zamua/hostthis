@@ -19,7 +19,7 @@ import (
 // Worker: the local runtime, or the node CELLD_TEST_ENDPOINT names.
 func TestCelldBlobContract(t *testing.T) {
 	base := celldtest.Target(t)
-	runBlobContract(t, func(t *testing.T) rawBlobStore {
+	runBlobContract(t, func(t *testing.T) storage.InnerBlobStore {
 		bs, err := storage.NewCelldBlobStore(base, nil)
 		if err != nil {
 			t.Fatalf("new celld blob store: %v", err)
