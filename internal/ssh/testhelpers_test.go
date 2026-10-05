@@ -67,6 +67,7 @@ type stackOpts struct {
 	sites      bool
 	proxyProto bool
 	manageRepo func(*storage.MemRepo) service.PasteAdmin
+	rawBlobs   func(storage.InnerBlobStore) storage.InnerBlobStore
 }
 
 type stackOpt func(*stackOpts)
@@ -75,6 +76,12 @@ type stackOpt func(*stackOpts)
 // one of its answers while everything else stays real.
 func withManageRepo(wrap func(*storage.MemRepo) service.PasteAdmin) stackOpt {
 	return func(o *stackOpts) { o.manageRepo = wrap }
+}
+
+// withRawBlobs wraps the raw blob store under the compression layer, as
+// cmd/hostthisd does for a backend decorator.
+func withRawBlobs(wrap func(storage.InnerBlobStore) storage.InnerBlobStore) stackOpt {
+	return func(o *stackOpts) { o.rawBlobs = wrap }
 }
 
 // withKeyGate wires a live KeyGate at the given per-subnet fresh-key cap
@@ -103,7 +110,11 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	}
 	// Same wrapping as cmd/hostthisd: service and http surface both go through
 	// the compression layer.
-	blobUnit := service.NewStandaloneBlobUnit(storage.NewCompressedBlobStore(rawBlobs))
+	var raw storage.InnerBlobStore = rawBlobs
+	if o.rawBlobs != nil {
+		raw = o.rawBlobs(raw)
+	}
+	blobUnit := service.NewStandaloneBlobUnit(storage.NewCompressedBlobStore(raw))
 	repo := storagetest.NewRepo(t)
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)

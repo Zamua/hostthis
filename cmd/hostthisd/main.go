@@ -269,6 +269,11 @@ func main() {
 	}
 }
 
+const (
+	defaultCelldPutBudget = 64 << 20
+	defaultCelldPutWait   = 30 * time.Second
+)
+
 // buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured raw
 // backend under the compression layer.
 func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, error) {
@@ -287,8 +292,18 @@ func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlob
 		if err != nil {
 			return nil, fmt.Errorf("HOSTTHIS_BLOB_BACKEND=celld: %w", err)
 		}
-		logger.Printf("blobs: celld backend at %s (zstd-compressed at rest)", envOr("HOSTTHIS_CELLD_ENDPOINT", ""))
-		raw = bs
+		// Celld holds in-flight upload bytes in memory, so its writes queue by
+		// weight (docs/SPEC.md "Celld upload admission").
+		budget := envParse("HOSTTHIS_CELLD_PUT_BUDGET_BYTES", defaultCelldPutBudget,
+			func(v string) (int64, error) { return strconv.ParseInt(v, 10, 64) }, "an integer")
+		wait := envParse("HOSTTHIS_CELLD_PUT_WAIT", defaultCelldPutWait, time.ParseDuration, "a duration")
+		gated, err := storage.NewGatedBlobStore(bs, budget, wait)
+		if err != nil {
+			return nil, fmt.Errorf("HOSTTHIS_CELLD_PUT_BUDGET_BYTES / HOSTTHIS_CELLD_PUT_WAIT: %w", err)
+		}
+		logger.Printf("blobs: celld backend at %s (zstd-compressed at rest; put budget %d bytes, wait %s)",
+			envOr("HOSTTHIS_CELLD_ENDPOINT", ""), budget, wait)
+		raw = gated
 	case "s3":
 		bs, err := storage.NewS3BlobStore(storage.S3BlobConfig{
 			Endpoint:  envOr("HOSTTHIS_S3_ENDPOINT", ""),

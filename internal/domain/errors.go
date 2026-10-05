@@ -41,6 +41,10 @@ var (
 	// nothing, because another change to that paste has not settled yet.
 	ErrBusy = errors.New("storage: another change to this paste is still settling; retry shortly")
 
+	// ErrStoreBusy is returned when a blob write waited too long for admission
+	// to the blob store, having written nothing. Retrying later can succeed.
+	ErrStoreBusy = errors.New("storage: busy storing other uploads; try again in a minute")
+
 	// ErrTooManyNewKeys is returned by AdmitNewKey when the subnet has
 	// hit its fresh-key quota for the window (the Sybil rate limit).
 	ErrTooManyNewKeys = errors.New("storage: too many new keys from this network")

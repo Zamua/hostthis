@@ -1660,6 +1660,9 @@ described here. The slug and URL are unchanged either way. Failure modes
 - *another change to this paste is still settling; retry shortly* (exit 1):
   an earlier change to the paste has not settled yet. Nothing was saved and
   the upload's bytes are deleted.
+- *busy storing other uploads; try again in a minute* (exit 1): the upload
+  waited too long for the blob store to admit its bytes (see "Celld upload
+  admission"). Nothing was saved.
 
 See "Exit codes" below for the canonical mapping.
 
@@ -2636,6 +2639,38 @@ independently of the metadata backend, so any pairing is valid.
 The celld fleet bucket must never carry a storage quota. Payloads share it with
 celld's own state and lease writes, so a full quota would refuse those too and
 stop the fleet, not just new uploads.
+
+### Celld upload admission: a byte-weighted queue
+
+The celld runtime holds an upload's bytes in memory while it forwards them to
+the bucket, so the bytes in flight across concurrent writes set its memory
+peak. Every `hostthisd` process therefore admits its celld writes through a
+byte-weighted queue, which gives that peak a fixed ceiling however many
+uploads arrive at once:
+
+- **Weight is the stored size.** A write weighs its at-rest (compressed)
+  length, clamped to `[1, budget]`. A body larger than the budget is admitted
+  alone and counts as the whole budget; an unknown size counts as the whole
+  budget.
+- **Budget.** The admitted writes of one process never weigh more than the
+  budget together. The default is 64 MiB (`HOSTTHIS_CELLD_PUT_BUDGET_BYTES`).
+  The queue is per process, so the bound the runtime sees is the budget times
+  the number of `hostthisd` processes.
+- **Waits, never rejects.** A write that does not fit waits in arrival order
+  (FIFO) for earlier writes to finish. Waiting reads none of the body: it stays
+  in the request's spill file.
+- **Bounded wait.** A write still waiting after the wait limit (default 30s,
+  `HOSTTHIS_CELLD_PUT_WAIT`) fails with the busy error and writes nothing. The
+  SSH user sees `hostthis: busy storing other uploads; try again in a minute`
+  (exit 1) on an update or site deploy. A new paste has already returned its
+  URL when its write runs (see "Paste lifecycle status"), so a busy write there
+  fails the paste like any other background write failure.
+- **Reads and deletes are not queued.** `GetReader` streams without growing
+  the runtime's memory, and `DeletePrefix` carries no body.
+
+Only the celld backend is queued; `disk` and `s3` writes pass straight through.
+Both settings are validated at startup: a budget below 1 or a wait that is not
+a positive duration stops the process.
 
 ### On-disk format
 
@@ -3696,6 +3731,8 @@ file). Defaults in parens:
 
 # Limits
                          / HOSTTHIS_CREATE_ADMISSION_WIDTH  same-identity create admission width    (2)
+                         / HOSTTHIS_CELLD_PUT_BUDGET_BYTES  in-flight celld write bytes per process (67108864)
+                         / HOSTTHIS_CELLD_PUT_WAIT          max wait for celld write admission       (30s)
 
 # CDN / cache purger
                          / HOSTTHIS_CACHE_BACKEND           noop | cloudflare                       (noop)
