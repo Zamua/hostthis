@@ -2596,7 +2596,8 @@ bytes then would break a live read. A leak is always preferable to that.
 
 The celld adapter therefore maps only identified answers to the definitive
 errors: an over-quota (507), too-large (413), or operation-pending (423)
-status, a conflict whose body names `slug-taken` or `create-aborted`, and a
+status, a conflict whose body names `slug-taken`, `create-aborted`, or
+`generation-mismatch` (the paste was replaced, so it reads as not found), and a
 success answer stating `reason: "absent"`. Any other status or body, empty ones included, is an error
 the service treats as ambiguous.
 
@@ -2966,7 +2967,7 @@ projection, delete, and recovery call includes it. Identity rejects a generation
 that does not match its current entry, and permanent operation receipts remain
 keyed by `(slug, generation, operation ID)`. A delayed call from an artifact that was deleted
 and re-minted can therefore neither charge, release, nor rewrite the new
-artifact.
+artifact; its caller is told the paste it named is not found.
 
 The Identity decision record is:
 
