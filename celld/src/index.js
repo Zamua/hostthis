@@ -237,7 +237,6 @@ const IDENTITY_OPS = {
   release: mutation((self, body) => self.release(body)),
   confirm: mutation((self, body) => self.confirm(body)),
   drop: mutation((self, body) => self.drop(body)),
-  artifactseed: mutation((self, body) => self.artifactSeed(body)),
   artifactdecide: mutation((self, body) => self.artifactDecide(body)),
   artifactproject: mutation((self, body) => self.artifactProject(body)),
   artifactdrop: mutation((self, body) => self.artifactDrop(body)),
@@ -524,51 +523,6 @@ export class Identity {
       await this.state.storage.put("entries", entries);
     }
     return Response.json({ dropped: had });
-  }
-
-  async artifactSeed(body) {
-    if (!requireShape(body, { slug: "string", generation: "string", charge: "uint", servedSize: "uint" })) {
-      return Response.json({ error: "invalid-artifact-seed" }, { status: 400 });
-    }
-    return this.state.storage.transaction(async (tx) => {
-      const entries = (await tx.get("entries")) ?? {};
-      const existing = entries[body.slug];
-      if (existing?.generation && existing.generation !== body.generation) {
-        return Response.json({ error: "generation-mismatch" }, { status: 409 });
-      }
-      const key = artifactAccountKey(body.slug, body.generation);
-      const decision = await tx.get(key);
-      if (decision && decision.allocated !== body.charge) {
-        return Response.json({
-          error: "artifact-seed-conflict", version: decision.version,
-          allocated: decision.allocated, target: decision.target,
-        }, { status: 409 });
-      }
-      const version = decision?.version ?? 0;
-      entries[body.slug] = {
-        ...(existing ?? {}),
-        generation: body.generation,
-        size: body.charge,
-        chargedSize: body.charge,
-        servedSize: body.servedSize,
-        accountingVersion: version,
-        status: body.status ?? existing?.status ?? "ready",
-        at: body.createdAt ?? existing?.at ?? 0,
-        updatedAt: body.updatedAt ?? existing?.updatedAt ?? body.createdAt ?? 0,
-        latestVersion: body.latestVersion ?? existing?.latestVersion ?? 1,
-        pinnedVersion: body.pinnedVersion ?? existing?.pinnedVersion ?? 0,
-        kind: body.kind ?? existing?.kind ?? "",
-        name: body.name ?? existing?.name ?? "",
-      };
-      // A stored contentSha would describe a version that may no longer be served.
-      delete entries[body.slug].contentSha;
-      const updates = new Map([["entries", entries]]);
-      if (!decision) {
-        updates.set(key, { version: 0, allocated: body.charge, target: body.charge });
-      }
-      await tx.put(Object.fromEntries(updates));
-      return Response.json({ seeded: !decision, version, allocated: body.charge });
-    });
   }
 
   async artifactDecide(body) {
@@ -1945,62 +1899,10 @@ export class Paste {
     return Response.json(row);
   }
 
-  // A legacy row (no generation) adopts on first mutation: assign a fresh
-  // generation, then idempotently seed the Identity account from live versions
-  // before any accounting decision runs against it, or a decide would add the
-  // legacy entry's charge a second time. The generation persists before the
-  // seed so a response-lost seed retries under the SAME incarnation. A caller
-  // holding the legacy row addresses it with an empty generation; an empty
-  // generation against an adopted row stays a conflict, because real callers
-  // re-read the row between attempts.
-  async requireAdoptedGeneration(row, body) {
-    if (row.generation) {
-      if (row.generation !== body.generation) {
-        return Response.json({ error: "generation-mismatch" }, { status: 409 });
-      }
-    } else {
-      if (body.generation) {
-        return Response.json({ error: "generation-mismatch" }, { status: 409 });
-      }
-      row.generation = crypto.randomUUID();
-      row.accountingVersion = 0;
-      await this.state.storage.transaction(async (tx) => {
-        await tx.put(Object.fromEntries([["row", row], ["legacyAdoptionPending", true]]));
-      });
+  requireGeneration(row, body) {
+    if (row.generation !== body.generation) {
+      return Response.json({ error: "generation-mismatch" }, { status: 409 });
     }
-    if (await this.state.storage.get("legacyAdoptionPending")) {
-      const versions = await loadVersions(this.state.storage);
-      const charge = row.status === "failed" ? 0 : this.liveCharge(versions);
-      let response;
-      let seed;
-      try {
-        response = await this.identityCall(row.identity, "artifactseed", {
-          slug: row.slug,
-          generation: row.generation,
-          charge,
-          servedSize: row.size,
-          status: row.status,
-          createdAt: row.createdAt,
-          updatedAt: row.updatedAt,
-          latestVersion: (await this.state.storage.get("maxVer")) ?? 1,
-          pinnedVersion: row.pinnedVersion ?? 0,
-          kind: row.kind,
-          name: row.name ?? "",
-        });
-        seed = await response.json();
-      } catch {
-        return Response.json({ error: "identity-unavailable" }, { status: 502 });
-      }
-      if (!response.ok) {
-        return Response.json({ error: "adoption-seed-conflict", detail: seed }, { status: 409 });
-      }
-      row.accountingVersion = seed.version;
-      await this.state.storage.transaction(async (tx) => {
-        await tx.put("row", row);
-        await tx.delete("legacyAdoptionPending");
-      });
-    }
-    body.generation = row.generation;
     return null;
   }
 
@@ -2338,10 +2240,9 @@ export class Paste {
     if (typeof opId !== "string" || !opId) {
       return Response.json({ error: "missing-operation-id" }, { status: 400 });
     }
-    // An empty generation addresses a legacy row: no receipt scope exists
-    // until adoption assigns one, and the adoption gate decides its fate.
+    // No row lacks a generation, so an empty one names nothing.
     if (!generation) {
-      return null;
+      return Response.json({ error: "generation-mismatch" }, { status: 409 });
     }
     const receipt = await this.state.storage.get(this.receiptKey(generation, opId));
     if (receipt) {
@@ -2380,7 +2281,7 @@ export class Paste {
     if (!row) {
       return Response.json({ appended: false, reason: "absent" });
     }
-    const refused = await this.requireAdoptedGeneration(row, body);
+    const refused = this.requireGeneration(row, body);
     if (refused) {
       return refused;
     }
@@ -2454,7 +2355,7 @@ export class Paste {
     if (!row) {
       return Response.json({ deleted: false, reason: "absent" });
     }
-    const refused = await this.requireAdoptedGeneration(row, body);
+    const refused = this.requireGeneration(row, body);
     if (refused) {
       return refused;
     }
@@ -2552,7 +2453,7 @@ export class Paste {
     if (!row) {
       return Response.json({ pinned: false, reason: "absent" });
     }
-    const refused = await this.requireAdoptedGeneration(row, body);
+    const refused = this.requireGeneration(row, body);
     if (refused) {
       return refused;
     }
@@ -2602,7 +2503,7 @@ export class Paste {
     if (row.identity !== body.identity || row.createdAt !== body.createdAt) {
       return Response.json({ removed: false, reason: "not-owner" });
     }
-    const refused = await this.requireAdoptedGeneration(row, body);
+    const refused = this.requireGeneration(row, body);
     if (refused) {
       return refused;
     }
@@ -2655,7 +2556,7 @@ export class Paste {
     if (!row) {
       return Response.json({ changed: false, reason: "absent" });
     }
-    const refused = await this.requireAdoptedGeneration(row, body);
+    const refused = this.requireGeneration(row, body);
     if (refused) {
       return refused;
     }
