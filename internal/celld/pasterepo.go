@@ -488,8 +488,6 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 	kind domain.ContentKind, uploadID string, manifest domain.Manifest, size int,
 	userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
-	// An empty generation addresses a legacy row; the cell adopts it on this
-	// mutation (docs/SPEC.md "lazy adoption").
 	opID, err := newOpaqueID("append")
 	if err != nil {
 		return domain.AppendResult{}, err
