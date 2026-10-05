@@ -22,7 +22,7 @@ func deployFixture(t *testing.T) (*DeploySite, *storage.Sites, *storage.Compress
 	return d, sites, blobs
 }
 
-// deployStack is deployFixture plus the disk blob root, for tests that count
+// deployStack is deployFixture plus the blob key ledger, for tests that count
 // what a deploy left in the store.
 func deployStack(t *testing.T) (*DeploySite, *storage.Sites, *storage.CompressedBlobStore, *keyLedger) {
 	t.Helper()

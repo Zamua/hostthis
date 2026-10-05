@@ -47,18 +47,13 @@ var layerPolicy = map[string][]string{
 	"http":     {"archive", "domain", "mime", "roomwire", "service", "zstdenc"},
 	"ssh":      {"archive", "domain", "mime", "service", "zstdenc"},
 
-	// The celld backend implements domain-shaped ports directly and does not
-	// depend on the in-process storage adapter.
+	// The celld adapters implement domain-shaped ports directly, beside storage
+	// rather than on top of it.
 	"celld": {"domain", "roomwire"},
 
 	// Test-only harness: the importable package is empty and must stay so. Its
 	// _test.go files wire whole stacks, which is why the graph is production-only.
 	"sitevalidation": {},
-
-	// Test-only fixture that opens the metadata repo other packages' tests
-	// build on. Nothing in production may import it, which holds because it is
-	// in no production package's allowed set.
-	"storagetest": {"domain", "storage", "zstdenc"},
 
 	// Test-only: runs the celld Worker locally for other packages' tests. A
 	// leaf, so any test may use it, and in no production package's allowed set.

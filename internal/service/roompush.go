@@ -9,7 +9,7 @@ import (
 
 // RoomPushRepo is the persistence contract for room push (SPEC.md "Room push
 // (scheduled Web Push)"). Every room-scoped method returns domain.ErrNotFound
-// for a missing room. storage.MemRoomRepo and celld.RoomRepo satisfy it.
+// for a missing room.
 type RoomPushRepo interface {
 	// PushKey returns the app's VAPID public key (base64url of the 65-byte
 	// uncompressed P-256 point), generating the pair on first use.

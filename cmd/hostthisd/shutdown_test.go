@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/Zamua/hostthis/internal/celldtest"
 )
 
 type testDrain struct {
@@ -204,6 +206,7 @@ func TestDaemonExitsCleanlyOnSIGTERM(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"HOSTTHIS_DAEMON_PROCESS=1",
 		"HOSTTHIS_TEST_DATA_DIR="+t.TempDir(),
+		"HOSTTHIS_CELLD_ENDPOINT="+celldtest.Endpoint(t),
 	)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {

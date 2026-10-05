@@ -34,7 +34,7 @@ import (
 
 func main() {
 	var (
-		dataDir         = flag.String("data-dir", envOr("HOSTTHIS_DATA_DIR", "./data"), "where metadata + blobs live")
+		dataDir         = flag.String("data-dir", envOr("HOSTTHIS_DATA_DIR", "./data"), "where the ssh host key lives")
 		sshAddr         = flag.String("ssh-addr", envOr("HOSTTHIS_SSH_ADDR", ":2222"), "ssh listen address")
 		httpAddr        = flag.String("http-addr", envOr("HOSTTHIS_HTTP_ADDR", ":8080"), "http listen address")
 		metricsAddr     = flag.String("metrics-addr", envOr("HOSTTHIS_METRICS_ADDR", ":9091"), "prometheus metrics listen address (never route this publicly)")
@@ -72,13 +72,13 @@ func main() {
 		logger.Fatalf("--apex-domain is required (or set HOSTTHIS_APEX_DOMAIN). Pass the public domain hostthis serves on, e.g. paste.example.com.")
 	}
 
-	metadata, err := buildMetadata(*dataDir, *apexDomain, logger)
+	metadata, err := buildMetadata(*apexDomain, logger)
 	if err != nil {
 		logger.Fatalf("metadata backend: %v", err)
 	}
 	pasteRepo := metadata.Repo
 	keyGateRepo := metadata.KeyGate
-	blobs, err := buildBlobStore(*dataDir, logger)
+	blobs, err := buildBlobStore(logger)
 	if err != nil {
 		logger.Fatalf("blob store: %v", err)
 	}
@@ -103,24 +103,12 @@ func main() {
 	manageSvc.Logger = logger
 
 	// Static-site archive deploys reuse the same blob store and per-identity
-	// quota as pastes. Nil when the metadata backend exposes no site repo.
-	var deploySvc *service.DeploySite
-	if siteRepo != nil {
-		deploySvc = service.NewDeploySite(siteRepo, pasteRepo, blobUnit)
-		deploySvc.Logger = logger
-		// Create dispatches the multi-file shape itself, so no transport forks
-		// on content (docs/SPEC.md "One paste, not two aggregates").
-		uploadSvc.Archive = service.ArchiveAdapter{Deployer: deploySvc}
-	}
-
-	// Rooms: the no-auth, capability-based app-persistence tier under
-	// /api/rooms. Nil when the metadata backend has no room repo.
-	var roomsSvc *service.Rooms
-	var roomPushSvc *service.RoomPush
-	if roomRepo != nil {
-		roomsSvc = service.NewRooms(roomRepo)
-		roomPushSvc = service.NewRoomPush(roomRepo)
-	}
+	// quota as pastes.
+	deploySvc := service.NewDeploySite(siteRepo, pasteRepo, blobUnit)
+	deploySvc.Logger = logger
+	// Create dispatches the multi-file shape itself, so no transport forks on
+	// content (docs/SPEC.md "One paste, not two aggregates").
+	uploadSvc.Archive = service.ArchiveAdapter{Deployer: deploySvc}
 
 	keyGate := service.NewKeyGate(keyGateRepo)
 	keyGate.MaxFreshKeysPerSubnet = *freshKeysLimit
@@ -163,7 +151,8 @@ func main() {
 		HostKeyPath: filepath.Join(*dataDir, "ssh_host_ed25519_key"),
 		ApexDomain:  *apexDomain,
 		Upload:      uploadSvc,
-		Deploy:      deploySvc, // nil when the backend has no site repo
+		Deploy:      deploySvc,
+		Sites:       siteRepo,
 		Manage:      pasteMgr,
 		Pastes:      pasteRepo,
 		Now:         time.Now,
@@ -173,9 +162,6 @@ func main() {
 		Logger:      logger,
 		Metrics:     appMetrics,
 	}
-	if siteRepo != nil {
-		sshServer.Sites = siteRepo
-	}
 
 	httpServer := &httpapi.Server{
 		Pastes:      pasteRepo,
@@ -184,13 +170,11 @@ func main() {
 		ApexDomain:  *apexDomain,
 		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),
 		Logf:        logger.Printf,
-	}
-	if siteRepo != nil {
-		httpServer.Sites = siteRepo
-	}
-	if roomsSvc != nil {
-		httpServer.Rooms = roomsSvc
-		httpServer.RoomPush = roomPushSvc
+		Sites:       siteRepo,
+		// Rooms: the no-auth, capability-based app-persistence tier under
+		// /api/rooms.
+		Rooms:    service.NewRooms(roomRepo),
+		RoomPush: service.NewRoomPush(roomRepo),
 	}
 	var relayDrain relayShutdowner = idleRelay{}
 	if metadata.RoomRelay != nil {
@@ -295,40 +279,24 @@ func buildUploadAdmission(logger *log.Logger) (*hostssh.UploadAdmission, error) 
 	return gate, nil
 }
 
-// buildBlobStore reads HOSTTHIS_BLOB_BACKEND and returns the configured raw
-// backend under the compression layer.
-func buildBlobStore(dataDir string, logger *log.Logger) (*storage.CompressedBlobStore, error) {
-	var raw storage.InnerBlobStore
-	backend := strings.ToLower(envOr("HOSTTHIS_BLOB_BACKEND", "disk"))
-	switch backend {
-	case "", "disk":
-		bs, err := storage.NewBlobStore(filepath.Join(dataDir, "blobs"))
-		if err != nil {
-			return nil, err
-		}
-		logger.Printf("blobs: disk backend at %s/blobs (zstd-compressed at rest)", dataDir)
-		raw = bs
-	case "celld":
-		bs, err := storage.NewCelldBlobStore(envOr("HOSTTHIS_CELLD_ENDPOINT", ""), nil)
-		if err != nil {
-			return nil, fmt.Errorf("HOSTTHIS_BLOB_BACKEND=celld: %w", err)
-		}
-		// Celld holds in-flight upload bytes in memory, so its writes queue by
-		// weight (docs/SPEC.md "Celld upload admission").
-		budget := envParse("HOSTTHIS_CELLD_PUT_BUDGET_BYTES", defaultCelldPutBudget,
-			func(v string) (int64, error) { return strconv.ParseInt(v, 10, 64) }, "an integer")
-		wait := envParse("HOSTTHIS_CELLD_PUT_WAIT", defaultCelldPutWait, time.ParseDuration, "a duration")
-		gated, err := storage.NewGatedBlobStore(bs, budget, wait)
-		if err != nil {
-			return nil, fmt.Errorf("HOSTTHIS_CELLD_PUT_BUDGET_BYTES / HOSTTHIS_CELLD_PUT_WAIT: %w", err)
-		}
-		logger.Printf("blobs: celld backend at %s (zstd-compressed at rest; put budget %d bytes, wait %s)",
-			envOr("HOSTTHIS_CELLD_ENDPOINT", ""), budget, wait)
-		raw = gated
-	default:
-		return nil, fmt.Errorf("unknown HOSTTHIS_BLOB_BACKEND %q (want disk|celld)", backend)
+// buildBlobStore returns the celld payload store under the compression layer.
+// Celld holds in-flight upload bytes in memory, so its writes queue by weight
+// (docs/SPEC.md "Celld upload admission").
+func buildBlobStore(logger *log.Logger) (*storage.CompressedBlobStore, error) {
+	base := envOr("HOSTTHIS_CELLD_ENDPOINT", "")
+	bs, err := storage.NewCelldBlobStore(base, nil)
+	if err != nil {
+		return nil, fmt.Errorf("HOSTTHIS_CELLD_ENDPOINT: %w", err)
 	}
-	return storage.NewCompressedBlobStore(raw), nil
+	budget := envParse("HOSTTHIS_CELLD_PUT_BUDGET_BYTES", defaultCelldPutBudget,
+		func(v string) (int64, error) { return strconv.ParseInt(v, 10, 64) }, "an integer")
+	wait := envParse("HOSTTHIS_CELLD_PUT_WAIT", defaultCelldPutWait, time.ParseDuration, "a duration")
+	gated, err := storage.NewGatedBlobStore(bs, budget, wait)
+	if err != nil {
+		return nil, fmt.Errorf("HOSTTHIS_CELLD_PUT_BUDGET_BYTES / HOSTTHIS_CELLD_PUT_WAIT: %w", err)
+	}
+	logger.Printf("blobs: celld at %s (zstd-compressed at rest; put budget %d bytes, wait %s)", base, budget, wait)
+	return storage.NewCompressedBlobStore(gated), nil
 }
 
 // buildCachePurger reads HOSTTHIS_CACHE_BACKEND and returns the configured
