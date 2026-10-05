@@ -14,6 +14,7 @@ require (
 	github.com/pires/go-proxyproto v0.15.0
 	github.com/prometheus/client_golang v1.24.1
 	golang.org/x/crypto v0.55.0
+	golang.org/x/sync v0.22.0
 )
 
 replace google.golang.org/genproto => google.golang.org/genproto v0.0.0-20260608224507-4308a22a1bab
@@ -65,7 +66,6 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56 // indirect
 	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
