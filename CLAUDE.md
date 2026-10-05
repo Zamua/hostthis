@@ -148,16 +148,18 @@ make docker-up     # docker compose up; same ports; data persists in ./data
 make docker-down   # tear down
 ```
 
-### Backends: memory + celld metadata, disk + s3 blobs
+### Backends: memory + celld metadata, disk + celld + s3 blobs
 
 Two metadata backends: `memory` (the default; in-process, ephemeral, what
 dev/test/e2e run) and `celld` (production; a cell runtime reached over HTTP,
-see `docs/SPEC.md` "Celld-backed metadata storage"). Two blob backends:
-`disk` (default) and `s3` (production; same per-upload key layout as disk).
+see `docs/SPEC.md` "Celld-backed metadata storage"). Three blob backends:
+`disk` (default), `celld` (production; the Worker's R2 binding, reached at
+`HOSTTHIS_CELLD_ENDPOINT`) and `s3`, all with the same per-upload key layout.
 
 The conformance suite is the contract between them: it runs against the
 memory backend on every `go test ./...`, and against a live celld fleet when
-`CELLD_TEST_ENDPOINT` names one. The s3 blob tests need a local MinIO:
+`CELLD_TEST_ENDPOINT` names one, which also runs the blob contract against the
+celld blob backend. The s3 blob tests need a local MinIO:
 
 ```
 make dev-minio-up         # MinIO at :9000
