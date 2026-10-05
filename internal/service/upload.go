@@ -105,12 +105,6 @@ var ErrRawTooLarge = errors.New("service: upload too large to consider (raw inpu
 // more than MaxPasteBytes.
 var ErrCompressedTooLarge = errors.New("service: upload exceeds 10 MiB compressed cap")
 
-// ErrServiceFull is the graceful translation of storage.ErrServiceFull: the
-// object store rejected a blob Put because the bucket is at its configured
-// hard quota (SPEC "Limits -> Durable total-bytes ceiling: an object-store
-// quota").
-var ErrServiceFull = errors.New("service: service is at capacity, try again later")
-
 // Create persists a new paste owned by owner, a "key:<fp>" identity built from
 // the uploader's ssh public key fingerprint. That identity gates quota: its
 // active pastes plus this body cannot exceed UserQuotaBytes.
@@ -198,7 +192,7 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 			u.logf("upload: slug %s taken, re-minting (attempt %d/%d)", p.Slug, attempt, maxRetries)
 			continue
 		default:
-			// The translated triad sentinel, or the raw error verbatim.
+			// The translated refusal sentinel, or the raw error verbatim.
 			return Result{}, terr
 		}
 	}
