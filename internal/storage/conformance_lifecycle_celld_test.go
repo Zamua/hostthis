@@ -7,7 +7,7 @@ package storage_test
 // The conformance suite proves that the intent protocol preserves lifecycle
 // behavior across that boundary.
 //
-// Skipped unless CELLD_TEST_ENDPOINT names a running fleet.
+// Runs against the local runtime, or the node CELLD_TEST_ENDPOINT names.
 //
 // Each subtest gets its own owner and slug prefix. celld cells are durable with
 // no teardown hook, so isolation comes from naming: a rerun that reused an
@@ -17,11 +17,12 @@ package storage_test
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Zamua/hostthis/internal/celldtest"
 
 	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
@@ -303,10 +304,7 @@ func (n namespacedRooms) TestPush(app domain.Slug, id domain.RoomID, now time.Ti
 // there that no test would have. A backend either passes the whole contract or
 // its gaps are found by someone else.
 func TestConformance_Celld(t *testing.T) {
-	base := os.Getenv("CELLD_TEST_ENDPOINT")
-	if base == "" {
-		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the celld conformance")
-	}
+	base := celldtest.Target(t)
 	newRepo := func(t *testing.T) conformanceRepo { return newNamespacedCelld(base) }
 	newSites := func(t *testing.T) (conformanceRepo, conformanceSiteRepo) {
 		r := newNamespacedCelld(base)

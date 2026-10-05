@@ -136,12 +136,26 @@ README.md            user-facing manpage
 
 ## Local setup
 
-Go 1.26+ (per `go.mod`) and Docker required; Node for the browser suite.
+Go 1.26+ (per `go.mod`), Node 24+, and Docker required.
+
+The Go tests and `make run` run the celld Worker (`celld/src`) locally under
+Miniflare, from `celld/localrt`. `make test` and `make run` install its
+dependencies on first use; a bare `go test ./...` needs them installed once:
+
+```
+npm ci --prefix celld/localrt
+```
+
+`internal/celldtest` starts one runtime per test binary and hands each test its
+own cell namespace (`celldtest.Endpoint(t)`), so a test builds the production
+adapters (`celld.NewPasteRepo`, `storage.NewCelldBlobStore`, ...) against real
+Worker code with no shared state.
 
 ```
 make build         # local Go build → ./bin/hostthisd
 make test          # run all tests (domain unit + storage + service + ssh/http e2e)
-make run           # run locally, no container; ssh :2222 http :8080, path-mode
+make run           # run locally, no container; ssh :2222 http :8080, path-mode,
+                   # beside the Worker under Miniflare (state in ./data/celld)
 
 make docker-build  # build the container image
 make docker-up     # docker compose up; same ports; data persists in ./data
@@ -193,9 +207,9 @@ make e2e E2E_FLAGS='tests/mermaid.spec.ts --project webkit'   # one file, one en
 ```
 
 The harness is `e2e/fixtures.ts`. A run builds `hostthisd` once and mints one
-SSH key; each Playwright worker starts its own daemon on ephemeral ports with a
-temp data dir and memory metadata, and tests upload over SSH the way a user
-does. No staging, no celld fleet, no network dependency. The `pageErrors` fixture
+SSH key; each Playwright worker starts its own celld Worker under Miniflare and
+its own daemon against it, on ephemeral ports, and tests upload over SSH the way
+a user does. No staging, no celld fleet, no network dependency. The `pageErrors` fixture
 records uncaught exceptions, `console.error`, and failed or erroring
 sub-resources, so a test that ends in `pageErrors.expectNone()` fails on a
 blank page even when every response is a 200.

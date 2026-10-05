@@ -13,16 +13,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
-	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 const bytesOwner = "key:delete-bytes"
 
-func bytesStack(t *testing.T) (*Upload, *Manage, *storage.MemRepo, *storage.CompressedBlobStore, string) {
+func bytesStack(t *testing.T) (*Upload, *Manage, *celld.PasteRepo, *storage.CompressedBlobStore, *keyLedger) {
 	t.Helper()
-	repo := storagetest.NewRepo(t)
+	repo := newRepo(t)
 	blobs, root := realBlobsAt(t)
 	unit := NewStandaloneBlobUnit(blobs)
 	up := NewUpload(repo, unit)
@@ -170,12 +170,12 @@ func TestDelete_ByteFailureDoesNotFailTheDelete(t *testing.T) {
 // remintOnDeleteRepo re-creates the slug the instant a delete commits, the way
 // a concurrent upload can.
 type remintOnDeleteRepo struct {
-	*storage.MemRepo
+	*celld.PasteRepo
 	remint domain.Paste
 }
 
 func (r *remintOnDeleteRepo) Delete(slug domain.Slug, identity domain.Identity, createdAt time.Time) ([]string, error) {
-	ids, err := r.MemRepo.Delete(slug, identity, createdAt)
+	ids, err := r.PasteRepo.Delete(slug, identity, createdAt)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +196,7 @@ func TestDelete_BytesComeFromTheDeleteAnswer(t *testing.T) {
 	if _, err := unit.StageEncoding(context.Background(), newKey, strings.NewReader("<p>new owner</p>")); err != nil {
 		t.Fatalf("stage the re-mint's object: %v", err)
 	}
-	m := NewManage(&remintOnDeleteRepo{MemRepo: repo, remint: domain.Paste{
+	m := NewManage(&remintOnDeleteRepo{PasteRepo: repo, remint: domain.Paste{
 		Slug: old.Slug, Generation: "generation-remint", Identity: "key:new-owner",
 		Status: domain.PasteStatusReady, Kind: domain.KindHTML, UploadID: newID, Size: 1,
 		Manifest:  domain.DocumentManifest(domain.ManifestEntry{Key: newKey}),

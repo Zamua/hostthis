@@ -13,7 +13,6 @@ import (
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
-	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 func TestUpload_Create_HTML(t *testing.T) {
@@ -50,15 +49,15 @@ func TestUpload_Create_HTML(t *testing.T) {
 
 func TestUpload_Create_Markdown(t *testing.T) {
 	u, _, _ := newStack(t)
-	res, err := u.Create(bytes.NewReader([]byte("# Title\n\nbody")), "", "", "")
+	res, err := u.Create(bytes.NewReader([]byte("# Title\n\nbody")), "key:markdown", "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if res.Paste.Kind != domain.KindMarkdown {
 		t.Fatalf("kind: got %q, want markdown", res.Paste.Kind)
 	}
-	if res.Paste.Identity != "" {
-		t.Fatalf("anonymous should have empty Identity, got %q", res.Paste.Identity)
+	if res.Paste.Identity != "key:markdown" {
+		t.Fatalf("Identity: got %q, want the uploader's", res.Paste.Identity)
 	}
 }
 
@@ -82,7 +81,7 @@ func TestUpload_Create_HonorsHint(t *testing.T) {
 	u, _, _ := newStack(t)
 	// "anything goes" looks like neither html nor markdown; the hint forces
 	// html acceptance.
-	res, err := u.Create(bytes.NewReader([]byte("anything goes")), "", "", "html")
+	res, err := u.Create(bytes.NewReader([]byte("anything goes")), "key:hint", "", "html")
 	if err != nil {
 		t.Fatalf("create with html hint: %v", err)
 	}
@@ -119,7 +118,7 @@ func (r *slugTakenNTimesRepo) InsertWithQuotaCheck(ctx context.Context, p domain
 // leave committed orphan row-sets on backends whose insert retry can misread
 // its own committed write, are never invisible.
 func TestUpload_Create_LogsSlugRemint(t *testing.T) {
-	repo := &slugTakenNTimesRepo{PasteRepo: storagetest.NewRepo(t), failures: 2}
+	repo := &slugTakenNTimesRepo{PasteRepo: newRepo(t), failures: 2}
 	u := NewUpload(repo, NewStandaloneBlobUnit(newFakeBlobs()))
 	var buf bytes.Buffer
 	u.Logger = log.New(&buf, "", 0)

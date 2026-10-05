@@ -12,7 +12,6 @@ import (
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
-	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // deployFixture wires real metadata repos + a real compressed blob store so
@@ -25,16 +24,16 @@ func deployFixture(t *testing.T) (*DeploySite, *storage.Sites, *storage.Compress
 
 // deployStack is deployFixture plus the disk blob root, for tests that count
 // what a deploy left in the store.
-func deployStack(t *testing.T) (*DeploySite, *storage.Sites, *storage.CompressedBlobStore, string) {
+func deployStack(t *testing.T) (*DeploySite, *storage.Sites, *storage.CompressedBlobStore, *keyLedger) {
 	t.Helper()
 	blobs, root := realBlobsAt(t)
-	sites := storage.NewSites(storagetest.NewRepo(t))
-	d := NewDeploySite(sites, storagetest.NewRepo(t), NewStandaloneBlobUnit(blobs))
+	sites := storage.NewSites(newRepo(t))
+	d := NewDeploySite(sites, newRepo(t), NewStandaloneBlobUnit(blobs))
 	d.Now = func() time.Time { return fixedNow }
 	return d, sites, blobs, root
 }
 
-func assertNoObjects(t *testing.T, root string) {
+func assertNoObjects(t *testing.T, root *keyLedger) {
 	t.Helper()
 	if n := objectsUnder(t, root); n != 0 {
 		t.Fatalf("store holds %d upload object(s), want none", n)
@@ -46,7 +45,7 @@ func assertNoObjects(t *testing.T, root string) {
 // counting them twice (storage.Sites.SumActiveBytesByOwner).
 func ownerCharge(t *testing.T, owner string) int64 {
 	t.Helper()
-	n, err := storagetest.NewRepo(t).SumActiveBytesByOwner(owner, time.Now().UTC())
+	n, err := newRepo(t).SumActiveBytesByOwner(owner, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("owner charge: %v", err)
 	}
@@ -306,7 +305,7 @@ func TestDeployToSlug_ReplacesInPlace(t *testing.T) {
 	}
 
 	// Both versions are addressable, which is what rollback needs.
-	vs, err := storagetest.NewRepo(t).ListVersions(slug)
+	vs, err := newRepo(t).ListVersions(slug)
 	if err != nil {
 		t.Fatalf("versions: %v", err)
 	}
@@ -533,8 +532,8 @@ func TestDeploySite_FailedInsertObjects(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, blobs, root := deployStack(t)
-			d := NewDeploySite(scriptedSiteRepo{Sites: storage.NewSites(storagetest.NewRepo(t)), insertErr: tc.insertErr},
-				storagetest.NewRepo(t), NewStandaloneBlobUnit(blobs))
+			d := NewDeploySite(scriptedSiteRepo{Sites: storage.NewSites(newRepo(t)), insertErr: tc.insertErr},
+				newRepo(t), NewStandaloneBlobUnit(blobs))
 			if _, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>x</h1>"})), "key:owner"); err == nil {
 				t.Fatal("deploy succeeded against a failing insert")
 			}

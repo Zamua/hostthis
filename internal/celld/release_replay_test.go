@@ -9,20 +9,18 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Zamua/hostthis/internal/celldtest"
 
 	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
 func TestReleaseReplayDoesNotUnderCharge(t *testing.T) {
-	base := os.Getenv("CELLD_TEST_ENDPOINT")
-	if base == "" {
-		t.Skip("CELLD_TEST_ENDPOINT not set; skipping the release-replay probe")
-	}
+	base := celldtest.Target(t)
 	repo := celld.NewPasteRepo(base, nil)
 	owner := fmt.Sprintf("key:replay-%d", time.Now().UnixNano()%1000000)
 	now := time.Now().UTC()

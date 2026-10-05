@@ -5,8 +5,6 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/storage"
-	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // The room-creation rate-limit table is bounded by the COUNT that already reads
@@ -18,7 +16,7 @@ import (
 // and reads 0 whether or not anything was pruned, so it would pass with the
 // prune deleted entirely.
 func TestRoomCreates_CountPrunesPastWindow(t *testing.T) {
-	rooms := storage.NewMemRoomRepo(storagetest.NewRepo(t))
+	rooms := newRoomRepo(t)
 
 	roomsSvc := NewRooms(rooms)
 	roomsSvc.Now = func() time.Time { return fixedNow }

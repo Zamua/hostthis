@@ -36,7 +36,9 @@ jobs:
         with:
           node-version: 'lts/*'
           cache: npm
-          cache-dependency-path: e2e/package-lock.json
+          cache-dependency-path: |
+            e2e/package-lock.json
+            celld/localrt/package-lock.json
 
       # A failing suite is the case a report matters most for, so the result is
       # recorded here and the job is failed at the very end instead.

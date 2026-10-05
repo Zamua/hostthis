@@ -19,9 +19,13 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      # Go tests run the celld Worker under Miniflare (celld/localrt), which
+      # `make test` installs from this lockfile.
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+          cache: npm
+          cache-dependency-path: celld/localrt/package-lock.json
 
       # Formatting: every file must be gofmt-clean.
       - name: gofmt
@@ -52,9 +56,9 @@ jobs:
       - name: test
         run: make test
 
-  # The celld-gated suites run against a real celld node backed by MinIO, the
-  # production shape. A separate operator gate qualifies object-store restore
-  # behavior.
+  # The celld suites run in the go job against the Worker under Miniflare, and
+  # again here against a real celld node backed by MinIO, the production shape.
+  # A separate operator gate qualifies object-store restore behavior.
   celld:
     runs-on: ubuntu-latest
     steps:

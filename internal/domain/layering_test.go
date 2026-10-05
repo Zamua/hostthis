@@ -59,6 +59,10 @@ var layerPolicy = map[string][]string{
 	// build on. Nothing in production may import it, which holds because it is
 	// in no production package's allowed set.
 	"storagetest": {"domain", "storage", "zstdenc"},
+
+	// Test-only: runs the celld Worker locally for other packages' tests. A
+	// leaf, so any test may use it, and in no production package's allowed set.
+	"celldtest": {},
 }
 
 // domainBannedStd are the stdlib packages the domain may not reach, even

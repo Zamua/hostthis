@@ -34,20 +34,27 @@ help:
 build:
 	go build -o bin/hostthisd ./cmd/hostthisd
 
-test:
+# Go tests run the celld Worker locally (internal/celldtest), so they need its
+# runtime installed.
+test: celld/localrt/node_modules
 	go test ./...
 	npm --prefix celld test
 	./scripts/test-repo-contracts.sh
 
 # Run locally (no container) - useful for fast iteration. Defaults to
-# path mode so wildcard DNS isn't required.
-dev run:
+# path mode so wildcard DNS isn't required. The celld Worker runs beside the
+# daemon under Miniflare, persisting under ./data/celld.
+dev run: celld/localrt/node_modules
 	HOSTTHIS_URL_MODE=path \
 	HOSTTHIS_PUBLIC_SCHEME=http \
 	HOSTTHIS_APEX_DOMAIN=localhost:8080 \
 	HOSTTHIS_DATA_DIR=./data \
 	HOSTTHIS_LANDING=./web/landing.html \
-	go run ./cmd/hostthisd
+	./scripts/dev.sh
+
+celld/localrt/node_modules: celld/localrt/package-lock.json
+	cd celld/localrt && npm ci
+	@touch $@
 
 # Standalone smoke target - runs against whatever HOSTTHIS_HOST is set
 # to (the script defaults it to hostthis.dev). Useful for ad-hoc
@@ -60,13 +67,13 @@ smoke:
 # The browser suite is a Playwright project under e2e/, run in Chromium and
 # WebKit. E2E_FLAGS passes through to `playwright test`, e.g.
 # make e2e E2E_FLAGS='tests/mermaid.spec.ts --project webkit'.
-e2e: e2e/node_modules
+e2e: e2e/node_modules celld/localrt/node_modules
 	cd e2e && npx playwright test $(E2E_FLAGS)
 
 # CI installs the browsers with their system libraries first. The HTML report
 # lands in e2e/playwright-report, and a failing suite still writes it before
 # make fails.
-e2e-ci: e2e/node_modules
+e2e-ci: e2e/node_modules celld/localrt/node_modules
 	cd e2e && npx playwright install --with-deps chromium webkit
 	cd e2e && npx playwright test $(E2E_FLAGS)
 

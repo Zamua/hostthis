@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/storage"
-	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // newRoomsSvc wires a Rooms service over the real metadata-backed repo so the
@@ -16,7 +14,7 @@ import (
 func newRoomsSvc(t *testing.T) (*Rooms, *fixedClock) {
 	t.Helper()
 	clk := &fixedClock{t: time.Now().UTC().Truncate(time.Second)}
-	svc := NewRooms(storage.NewMemRoomRepo(storagetest.NewRepo(t)))
+	svc := NewRooms(newRoomRepo(t))
 	svc.Now = clk.now
 	return svc, clk
 }

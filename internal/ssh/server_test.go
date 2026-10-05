@@ -9,13 +9,13 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	xssh "golang.org/x/crypto/ssh"
 
+	"github.com/Zamua/hostthis/internal/celldtest"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
@@ -176,8 +176,7 @@ func (r *blockingPasteRepo) MarkReady(domain.Paste) error          { return nil 
 func (r *blockingPasteRepo) MarkFailed(domain.Paste) error         { return nil }
 
 func TestServerForceCloseWaitsForActiveUploadHandler(t *testing.T) {
-	dir := t.TempDir()
-	rawBlobs, err := storage.NewBlobStore(filepath.Join(dir, "blobs"))
+	rawBlobs, err := storage.NewCelldBlobStore(celldtest.Endpoint(t), nil)
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}

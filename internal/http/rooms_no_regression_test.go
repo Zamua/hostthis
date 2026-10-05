@@ -7,8 +7,6 @@ import (
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
-	"github.com/Zamua/hostthis/internal/storage"
-	"github.com/Zamua/hostthis/internal/storagetest"
 )
 
 // A paste, a site, and the rooms API on one Server, each under its own slug:
@@ -23,7 +21,7 @@ func TestRoomsHTTP_RoomsLiveAlongsidePasteAndSite(t *testing.T) {
 		Pastes: stubPasteReader{p: domain.Paste{Slug: "pastenyz", Kind: domain.KindHTML, UpdatedAt: now,
 			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: "key-paste"})}},
 		Sites: stubSiteReader{s: siteAt("sitewxyz", m)},
-		Rooms: service.NewRooms(storage.NewMemRoomRepo(storagetest.NewRepo(t))),
+		Rooms: service.NewRooms(newRoomRepo(t)),
 		Blobs: stubBlobMap{m: map[string][]byte{
 			"key-paste": []byte("<h1>a paste</h1>"),
 			"key-site":  []byte("<h1>site home</h1>"),
