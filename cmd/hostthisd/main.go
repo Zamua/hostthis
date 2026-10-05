@@ -127,8 +127,7 @@ func main() {
 	keyGate.Window = *freshKeysWindow
 	// Whoami reports per-session subnet and budget info from the keygate.
 	manageSvc.KeyGate = keyGate
-	logger.Printf("config: fresh_keys/subnet=%d per %s (durable total-bytes ceiling is the object-store bucket quota)",
-		*freshKeysLimit, *freshKeysWindow)
+	logger.Printf("config: fresh_keys/subnet=%d per %s", *freshKeysLimit, *freshKeysWindow)
 
 	landing, err := os.ReadFile(*landingPath)
 	if err != nil {

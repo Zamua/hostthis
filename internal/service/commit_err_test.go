@@ -11,7 +11,7 @@ import (
 
 // TestClassifyCommitErr pins the single commit-error translation table
 // every write path (upload create, paste update, site deploy/redeploy)
-// routes through: the storage triad maps to the service vocabulary,
+// routes through: each storage refusal maps to the service vocabulary,
 // bare or wrapped; anything else passes through VERBATIM (the same
 // value, so callers can keep wrapping it with their own context).
 func TestClassifyCommitErr(t *testing.T) {
@@ -23,8 +23,6 @@ func TestClassifyCommitErr(t *testing.T) {
 		wantErr   error // compared with errors.Is; nil means want nil
 	}{
 		{"nil", nil, commitOK, nil},
-		{"service full bare", storage.ErrServiceFull, commitServiceFull, ErrServiceFull},
-		{"service full wrapped", fmt.Errorf("blob put: %w", storage.ErrServiceFull), commitServiceFull, ErrServiceFull},
 		{"over user quota bare", storage.ErrOverUserQuota, commitOverQuota, ErrOverQuota},
 		{"over user quota wrapped", fmt.Errorf("insert: %w", domain.ErrOverUserQuota), commitOverQuota, ErrOverQuota},
 		{"slug taken bare", storage.ErrSlugTaken, commitSlugTaken, ErrSlugTaken},

@@ -23,12 +23,6 @@ var (
 	// identity's active bytes past its per-user cap.
 	ErrOverUserQuota = errors.New("storage: would exceed user quota")
 
-	// ErrServiceFull is returned when the durable total-bytes ceiling
-	// is hit: the object store rejects a blob Put because the bucket is
-	// at its configured hard quota (see docs/SPEC.md "Limits -> Durable
-	// total-bytes ceiling: an object-store quota").
-	ErrServiceFull = errors.New("storage: service is at capacity")
-
 	// ErrRoomDataFull is returned when accepting a write would push a
 	// single room past its per-room byte or key-count cap. The prior
 	// value is left intact. The service layer maps it to a 413.

@@ -7,8 +7,7 @@ package storage_test
 // the backend's factory supplies a non-nil room repo.
 //
 // The room, paste, and site repos from one factory call MUST share the same
-// backing store, so the cross-kind service-wide cap subtest exercises the real
-// interaction rather than three independent stores.
+// backing store.
 
 import (
 	"bytes"

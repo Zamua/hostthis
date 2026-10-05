@@ -20,7 +20,7 @@ type SiteRepo interface {
 	// names the target; s.Identity is the connecting key. A slug that is not a
 	// site, and a site owned by another identity, both return
 	// domain.ErrNotFound, so "not yours" is indistinguishable from "does not
-	// exist". ErrServiceFull / ErrOverUserQuota on quota overflow.
+	// exist". ErrOverUserQuota on quota overflow.
 	ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Site, error)
 	// Delete re-checks wantIdentity + wantCreatedAt inside its {slug}
@@ -137,8 +137,8 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 // extract safe-untars body into a fresh upload under the owner's remaining
 // budget and returns the manifest and that upload's id. The decompression-bomb
 // guard aborts the instant the running total would cross that budget, so a
-// site can never be extracted over-quota. Bucket-quota rejections translate via
-// the classifier; ErrUnsafeArchive / ErrTooManyFiles surface verbatim so the
+// site can never be extracted over-quota. Other sink errors pass through the
+// classifier; ErrUnsafeArchive / ErrTooManyFiles surface verbatim so the
 // SSH layer can message them precisely. A failed extract deletes whatever it
 // staged.
 func (d *DeploySite) extract(body io.Reader, owner string, now time.Time) (domain.Manifest, string, error) {
@@ -209,7 +209,7 @@ func (d *DeploySite) Delete(slug domain.Slug, owner string) error {
 //   - ErrEmptyOwner: anonymous / empty identity
 //   - ErrNotFound: slug is not a site owned by owner
 //   - domain.ErrUnsupportedKind: not a valid gzip-tar
-//   - ErrOverQuota / ErrServiceFull: over the per-identity / service cap
+//   - ErrOverQuota: over the per-identity cap
 //   - ErrEmptySite: the archive safe-untars to zero files
 func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string) (SiteResult, error) {
 	if owner == "" {

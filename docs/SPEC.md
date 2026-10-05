@@ -1376,17 +1376,13 @@ informs them):
   charge MORE than the committed room bytes while recovering an interrupted
   mutation, but it must never charge less. This is the room-tier analogue of
   the per-identity paste quota: one app cannot consume the whole service.
-- **Durable total-bytes ceiling.** Room data does NOT carry its own
-  service-wide byte scan. Rooms hold no blobs (a room value lives entirely
-  in the metadata backend, not the `BlobStore`), so a
-  room write touches no object-store quota directly and is bounded by the
-  per-room and per-app caps above. The service's durable total-bytes
-  ceiling is enforced at the object store for the blob-holding kinds
-  (pastes + sites); see "Limits → Durable total-bytes ceiling: an
-  object-store quota". The per-app aggregate is therefore the primary
-  structural bound on a room's growth, and a reverse-proxy per-IP rate
-  limit remains the appropriate layer for raw request-rate abuse, exactly
-  as for the paste path.
+- **No service-wide cap.** Rooms hold no blobs (a room value lives entirely
+  in the metadata backend, not the `BlobStore`), so room data is bounded only
+  by the per-room and per-app caps above. hostthis carries no service-wide
+  byte cap for rooms or for the blob-holding kinds (pastes + sites). The
+  per-app aggregate is therefore the structural bound on a room's growth, and
+  a reverse-proxy per-IP rate limit remains the appropriate layer for raw
+  request-rate abuse, exactly as for the paste path.
 
 ### Scope fence
 
@@ -2303,9 +2299,11 @@ conformance suite pins the storage contract on both backends.
 ## Limits
 
 A per-identity quota and an SSH-handshake gate, each enforced atomically
-at the app layer, plus a durable total-bytes ceiling enforced one layer
-down at the object store (see "Durable total-bytes ceiling: an
-object-store quota" below).
+at the app layer. Storage is bounded per identity (100 MiB) and, for rooms,
+per room and per app; hostthis carries no service-wide total-bytes cap.
+Room push adds its own caps (16 subscriptions and 16 schedule items per
+room, 2 KiB payload, 8 sends per subscription per local day, one test per
+minute); see "Room push".
 
 ### Per-identity quota: 100 MiB (compressed)
 
@@ -2372,40 +2370,6 @@ contribution to same-owner concurrency, not a global total - and applies
 to the CREATE path only; updates, deletes, and reads are not gated. Gate
 state is transient: an identity with no create in flight holds no gate
 entry.
-
-### Durable total-bytes ceiling: an object-store quota
-
-The total durable bytes the whole service can hold are bounded at the
-**object store**, not by an app-level scan on the write path. The
-operator sets a hard quota on the blob bucket (e.g. a MinIO bucket
-quota); the storage layer never adds the bytes up itself. A blob `Put`
-the object store refuses at quota fails that upload, which deletes its
-own prefix like any other failed upload.
-Room push adds its own caps (16 subscriptions and 16 schedule items per
-room, 2 KiB payload, 8 sends per subscription per local day, one test per
-minute); see "Room push".
-
-Rooms hold no blobs, so a room write never meets the bucket quota. Space
-returns as owners delete content, because a delete removes its bytes.
-
-**Why this lives at the object store, not in the app.** An app-level
-ceiling would sum active bytes across the whole metadata keyspace before
-every write:
-
-- **O(active rows) on every write.** A cross-cell aggregate on the hot
-  path, whose cost grows with the amount of stored content.
-- **One bad record would poison every write.** A single undecodable row
-  would fail the aggregate and so reject every write service-wide.
-- **It would count the wrong number.** Logical uncompressed bytes
-  overstate storage 5-10x after zstd. A bucket quota counts the physical
-  bytes the object store actually holds.
-
-A bucket quota is a HARD ceiling enforced durably by the storage layer
-with no blast radius: a rejected `Put` fails only that one write, the
-quota is always exact, and there is no per-write scan to run or corrupt
-record to trip over. Operators worried about disk pressure set the
-bucket quota (and can tune the blob backend's storage class / lifecycle
-independently); hostthis carries no `--storage-cap-bytes` knob.
 
 ### Sybil rate limit: fresh keys per IP subnet per 24h
 
@@ -2504,9 +2468,7 @@ cap is at the limit, not over it. A cap of zero or less means no limit.
 ### Atomicity
 
 The per-identity quota check, Paste transitions, and Sybil admission are
-serialized inside their owning aggregate. The durable total-bytes ceiling is
-separate: it lives at the object store as a bucket quota, where a refused
-blob `Put` fails only that upload.
+serialized inside their owning aggregate.
 
 - **Memory backend.** One mutex covers the store. Maintained per-owner and
   per-app aggregates make quota decisions point-addressed and exact.
@@ -2526,9 +2488,6 @@ cannot race a stale check.
 - One ssh key → 10 MiB of active LOGICAL bytes, ever
 - One IP subnet → ~20 fresh keys × 10 MiB = ~200 MiB/day logical
   (~20–40 MiB/day actual storage after zstd)
-- All identities combined → the object-store bucket quota on real
-  physical bytes (post-compression), enforced by the storage
-  layer, not an app-level scan
 - Concurrent per-identity and per-app quota races → serialized aggregate-local
   decisions on both backends; the Room escrow protocol preserves the cross-cell
   app ceiling
@@ -2619,7 +2578,7 @@ its error:
 - an untar abort (bomb guard, unsafe entry, too many files, empty archive);
 - a site insert refused (slug taken through every retry, over quota);
 - a refused redeploy or update append (over quota, not found, version too
-  large, service full, another change still settling);
+  large, another change still settling);
 - a create whose background blob write fails and marks the paste failed;
 - a create whose paste is gone when its background blob write lands, as the
   ready transition reports.
@@ -2750,7 +2709,7 @@ backend is only safe if the new backend preserves that observable
 contract.
 
 The sentinel error vocabulary those contracts speak (not-found,
-slug-taken, over-user-quota, service-full, room-data-full,
+slug-taken, over-user-quota, room-data-full,
 app-rooms-full, too-many-new-keys) is OWNED BY THE DOMAIN LAYER
 (`internal/domain`): the sentinels are business outcomes every layer
 must agree on, not backend internals. The storage package re-exports
@@ -2778,8 +2737,7 @@ behaviors are expressed in terms of inputs and observable outputs:
   version of the identity's pastes. Quota is freed by
   `Delete` (removes the paste and all its versions) and by
   `DeleteVersion` (tombstones one version). Per-identity quotas are
-  independent of each other; the durable total-bytes ceiling is a
-  separate concern enforced at the object store, not by this repo.
+  independent of each other, and no service-wide total caps their sum.
 - **Versions.** `AppendVersionWithQuotaCheck` assigns `MAX(ver_num)+1`,
   counting tombstones so numbers are never reused. An unpinned paste's
   head rolls forward to the new version; a pinned paste keeps serving
@@ -3742,11 +3700,9 @@ per-paste cap (10 MiB compressed), the per-identity quota (100 MiB
 compressed), the raw-input fast-fail (100 MiB, prevents unbounded reads),
 blob compression (zstd level 3, all blobs), the sandbox headers
 (X-Frame-Options, Referrer-Policy, Permissions-Policy), and the slug
-alphabet (`abcdefghijkmnpqrstuvwxyz23456789`). The durable total-bytes
-ceiling is a quota on the blob bucket at the object store, not an app flag
-(see "Limits"): a `Put` rejected past it fails that upload, and space
-returns as owners delete content. Per-IP rate limiting on top of the Sybil
-gate is a reverse-proxy concern.
+alphabet (`abcdefghijkmnpqrstuvwxyz23456789`). There is no service-wide
+total-bytes cap; space returns as owners delete content. Per-IP rate
+limiting on top of the Sybil gate is a reverse-proxy concern.
 
 ---
 
