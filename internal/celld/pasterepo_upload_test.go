@@ -86,10 +86,6 @@ func TestListVersionsReadsUploadIDs(t *testing.T) {
 	if len(vers) != 2 || vers[0].UploadID != "upload-2" || vers[1].UploadID != "" || vers[1].Size != 3 {
 		t.Fatalf("versions = %+v, want v2 with upload-2 and a v1 recorded without one", vers)
 	}
-	// A stored entry holding only a sha decodes, and names no bytes.
-	if root, ok := vers[1].Manifest.Files[domain.Root]; !ok || root.Key != "" || root.Size != 3 {
-		t.Fatalf("v1 root entry = (%+v, %v), want a decoded entry without a key", root, ok)
-	}
 }
 
 // A Worker answer may still carry contentSha; every read decodes past it.

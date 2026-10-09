@@ -75,10 +75,6 @@ type Version struct {
 	Size      int
 	CreatedAt time.Time
 	Deleted   bool
-
-	// Manifest is the version's content. Empty when the stored row carries no
-	// manifest, which leaves nothing to read.
-	Manifest Manifest
 }
 
 // Root is the manifest path a single-document paste serves at.

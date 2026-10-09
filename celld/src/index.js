@@ -2333,13 +2333,10 @@ export class Paste {
 
   // NEWEST FIRST, which is the order every reader wants and none should have to
   // impose: a listing sorted by insertion leaks the storage order into the UI.
+  // Metadata only: a manifest per version would make the answer, and the cell's
+  // memory while building it, grow with history times site size.
   async listVersions() {
-    const storage = this.state.storage;
-    const versions = (await storage.get(LEGACY_VERSIONS)) ??
-      await Promise.all((await loadVersions(storage)).map(async (version) => ({
-        ...version,
-        manifest: (await storage.get(manifestKey(version.ver))) ?? null,
-      })));
+    const versions = await loadVersions(this.state.storage);
     return Response.json(versions
       .map((version) => ({ ...version, uploadId: version.uploadId ?? "" }))
       .sort((a, b) => b.ver - a.ver));

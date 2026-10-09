@@ -84,7 +84,7 @@ func TestDeleteVersion_RemovesOnlyThatVersionsBytes(t *testing.T) {
 	if _, err := readObject(t, blobs, p.RootEntry().Key); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("v1 object after its delete = %v, want ErrNotFound", err)
 	}
-	if body, err := readObject(t, blobs, v2.Manifest.Files[domain.Root].Key); err != nil || string(body) != "<!doctype html><p>v2</p>" {
+	if body, err := readObject(t, blobs, domain.UploadObjectKey(v2.UploadID, 0)); err != nil || string(body) != "<!doctype html><p>v2</p>" {
 		t.Fatalf("v2 object after deleting v1 = (%q, %v)", body, err)
 	}
 }
