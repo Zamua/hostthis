@@ -95,42 +95,26 @@ func TestGetStillRefusesAnUndecodableRowField(t *testing.T) {
 	}
 }
 
-func TestListVersionsReadsAnUndecodableManifestAsNone(t *testing.T) {
+// A listing is metadata only, so a manifest an older Worker still sends, even an
+// undecodable one, is ignored rather than decoded or logged.
+func TestListVersionsIgnoresAnyManifestSent(t *testing.T) {
 	for name, manifest := range undecodableManifests {
 		t.Run(name, func(t *testing.T) {
 			body := fmt.Sprintf(`[
-				{"ver":3,"kind":"html","uploadId":"upload-3","size":5,"createdAt":1,"manifest":%[1]s},
-				{"ver":2,"kind":"html","uploadId":"upload-2","size":4,"createdAt":1,
-					"manifest":{"Files":{"/":{"Key":"uploads/upload-2/0","Size":4}}}},
-				{"ver":1,"kind":"html","uploadId":"upload-1","size":3,"createdAt":1,"deleted":true,"manifest":%[1]s}
+				{"ver":2,"kind":"html","uploadId":"upload-2","size":4,"createdAt":1,"manifest":%s},
+				{"ver":1,"kind":"html","uploadId":"upload-1","size":3,"createdAt":1,"deleted":true,
+					"manifest":{"Files":{"/":{"Key":"uploads/upload-1/0","Size":3}}}}
 			]`, manifest)
 			repo, logged := loggedRepo(fixedCell(http.StatusOK, body))
 			vers, err := repo.ListVersions("slugone1")
 			if err != nil {
 				t.Fatalf("list versions: %v", err)
 			}
-			if len(vers) != 3 {
-				t.Fatalf("versions = %+v, want all three", vers)
+			if len(vers) != 2 || vers[0].UploadID != "upload-2" || vers[0].Size != 4 || !vers[1].Deleted {
+				t.Fatalf("versions = %+v, want both with their metadata", vers)
 			}
-			for _, i := range []int{0, 2} {
-				if v := vers[i]; len(v.Manifest.Files) != 0 || v.UploadID == "" || v.Size == 0 {
-					t.Fatalf("v%d = %+v, want its metadata and no manifest", v.VerNum, v)
-				}
-			}
-			if !vers[2].Deleted {
-				t.Fatalf("v1 = %+v, want its tombstone kept", vers[2])
-			}
-			if root := vers[1].Manifest.Files[domain.Root]; root.Key != "uploads/upload-2/0" {
-				t.Fatalf("v2 root = %+v, want its stored key", root)
-			}
-			lines := logLines(logged)
-			if len(lines) != 2 {
-				t.Fatalf("log = %q, want one skip per undecodable version", logged.String())
-			}
-			for _, line := range lines {
-				if !strings.Contains(line, "slugone1") {
-					t.Fatalf("log line %q does not name the slug", line)
-				}
+			if logged.Len() != 0 {
+				t.Fatalf("log = %q, want nothing logged", logged.String())
 			}
 		})
 	}

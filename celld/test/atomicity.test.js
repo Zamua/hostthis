@@ -499,8 +499,28 @@ test("Paste history grows without any value outgrowing one version", async () =>
   assert.deepStrictEqual(h.pasteStorage.data.get("row").manifest, manifest);
   const listed = await responseJSON(await h.paste().listVersions());
   assert.deepStrictEqual(listed.body.map((version) => version.ver), [6, 5, 4, 3, 2, 1]);
-  assert.deepStrictEqual(listed.body[0].manifest, manifest);
-  assert.equal(listed.body.at(-1).manifest, null);
+  assert.ok(listed.body.every((version) => !Object.hasOwn(version, "manifest")));
+});
+
+test("Paste versions list reads no manifest, legacy or split", async () => {
+  const legacySeed = artifactPasteSeed();
+  legacySeed.get("versions")[0].manifest = { "/": { blob: "v1" } };
+  const legacy = await responseJSON(await artifactHarness({ pasteSeed: legacySeed }).paste().listVersions());
+  assert.deepStrictEqual(legacy.body.map((version) => Object.hasOwn(version, "manifest")), [false]);
+
+  const h = artifactHarness();
+  const manifest = { "/index.html": { blob: "b" } };
+  assert.equal((await h.paste().append({ ...appendBody(), manifest })).status, 200);
+  const read = [];
+  const get = h.pasteStorage.get.bind(h.pasteStorage);
+  h.pasteStorage.get = (key) => {
+    read.push(key);
+    return get(key);
+  };
+  const listed = await responseJSON(await h.paste().listVersions());
+  assert.deepStrictEqual(listed.body.map((version) => version.ver), [2, 1]);
+  assert.ok(listed.body.every((version) => !Object.hasOwn(version, "manifest")));
+  assert.deepStrictEqual(read.filter((key) => key.startsWith("manifest:")), []);
 });
 
 test("Paste splits a legacy single-value history on its first version write", async () => {

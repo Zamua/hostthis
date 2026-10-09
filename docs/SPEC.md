@@ -2716,12 +2716,17 @@ recorded without an upload id owns no prefix, so deleting it, or its paste,
 removes metadata only.
 
 A stored manifest that fails to decode (a string, a number, an entry field of
-the wrong type) reads as no manifest, on the paste row and on each listed
-version alike. Its paste or version is then unreadable as above, while listing,
-versions, and deletes keep working for it, and the metadata adapter
-logs one skip per decode naming the slug and, for a version, its number. The
+the wrong type) reads as no manifest on the paste row. Its paste is then
+unreadable as above, while listing, versions, and deletes keep working for it,
+and the metadata adapter logs one skip per decode naming the slug. The
 tolerance covers the manifest alone: any other field of the wrong type still
 fails the read.
+
+A version listing carries metadata only (number, kind, upload id, size,
+creation time, tombstone), never a manifest: the Worker reads no manifest to
+build it and the adapter ignores one if sent. Listing a site's history therefore
+costs the same whatever the site's file count, and a damaged version manifest
+cannot affect `versions`, `pin`, or version deletes.
 
 ---
 
