@@ -538,13 +538,12 @@ func (r *PasteRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain
 // ListVersions is a single-cell read: the appended versions live beside the row.
 func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 	var wire []struct {
-		Ver       int             `json:"ver"`
-		Kind      string          `json:"kind"`
-		UploadID  string          `json:"uploadId"`
-		Size      int             `json:"size"`
-		CreatedAt int64           `json:"createdAt"`
-		Deleted   bool            `json:"deleted"`
-		Manifest  json.RawMessage `json:"manifest"`
+		Ver       int    `json:"ver"`
+		Kind      string `json:"kind"`
+		UploadID  string `json:"uploadId"`
+		Size      int    `json:"size"`
+		CreatedAt int64  `json:"createdAt"`
+		Deleted   bool   `json:"deleted"`
 	}
 	status, err := r.call(context.Background(), http.MethodGet, "/paste/versions", "slug", slug.String(), nil, &wire)
 	if err != nil {
@@ -558,7 +557,6 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 		out = append(out, domain.Version{
 			Slug: slug, VerNum: w.Ver, Kind: domain.ContentKind(w.Kind),
 			UploadID: w.UploadID, Size: w.Size,
-			Manifest:  r.storedManifest(w.Manifest, slug, w.Ver),
 			CreatedAt: time.UnixMilli(w.CreatedAt).UTC(), Deleted: w.Deleted,
 		})
 	}
