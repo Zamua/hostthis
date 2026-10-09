@@ -3349,6 +3349,15 @@ line means the request never reached this process. The slug is the only
 request-derived value logged (slugs are public identifiers; no client
 IPs, no headers, no payload).
 
+### Command log on the SSH surface
+
+Every SSH session logs one line when it ends: the verb, the slug it targets
+(`-` for none), its outcome, and its duration. The verb is the registry name
+(`upload` for the implicit upload, `update` for the bare-slug shortcut,
+`unknown` otherwise) and the slug is logged only when the argument parses as
+one, so no free-form client input reaches the log: no names, labels, flags,
+payload, or key material.
+
 #### The bare URL always serves the shell (no `Accept` negotiation)
 
 A client-rendered kind (Markdown, Diff - any kind that ships a

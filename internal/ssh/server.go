@@ -218,6 +218,7 @@ func (s *Server) ListenAndServe() error {
 			s.terminalMiddleware(),
 			s.ratelimitMiddleware(),
 			s.keyRequiredMiddleware(),
+			s.commandLogMiddleware(),
 			// Counts every admitted session, including ones the gates refuse.
 			s.metricsMiddleware(),
 			// Outermost: shutdown fences new handlers and waits for every active one.
