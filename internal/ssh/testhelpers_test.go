@@ -69,6 +69,7 @@ type stackOpts struct {
 	manageRepo func(*celld.PasteRepo) service.PasteAdmin
 	rawBlobs   func(storage.InnerBlobStore) storage.InnerBlobStore
 	uploads    *hostssh.UploadAdmission
+	logOut     io.Writer
 }
 
 type stackOpt func(*stackOpts)
@@ -87,6 +88,9 @@ func withRawBlobs(wrap func(storage.InnerBlobStore) storage.InnerBlobStore) stac
 
 // withUploads wires a per-process upload admission gate.
 func withUploads(a *hostssh.UploadAdmission) stackOpt { return func(o *stackOpts) { o.uploads = a } }
+
+// withLogOutput sends the ssh server's log to w instead of discarding it.
+func withLogOutput(w io.Writer) stackOpt { return func(o *stackOpts) { o.logOut = w } }
 
 // withKeyGate wires a live KeyGate at the given per-subnet fresh-key cap
 // (window fixed at 24h). Loopback traffic all shares 127.0.0.0/24.
@@ -137,6 +141,9 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		Pastes:     repo,
 		Uploads:    o.uploads,
 		Logger:     log.New(io.Discard, "", 0),
+	}
+	if o.logOut != nil {
+		sshSrv.Logger = log.New(o.logOut, "", 0)
 	}
 	if o.sites {
 		sites := storage.NewSites(repo)
