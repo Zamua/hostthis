@@ -5,6 +5,8 @@ package celldtest
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -18,45 +20,60 @@ import (
 	"time"
 )
 
-var (
+// localRuntime is one Worker process, started on first use.
+type localRuntime struct {
+	token   string
 	once    sync.Once
 	baseURL string
 	bootErr error
-	seq     atomic.Int64
 	mu      sync.Mutex
-	byTest  = map[testing.TB]string{}
+	byTest  map[testing.TB]string
 	// stdin holds the runtime's stdin open; the runtime exits when it closes,
 	// so a killed test binary leaves no orphan.
 	stdin io.Closer
+}
+
+var (
+	seq     atomic.Int64
+	plain   = &localRuntime{byTest: map[testing.TB]string{}}
+	tokened = &localRuntime{token: newToken(), byTest: map[testing.TB]string{}}
 )
+
+func newToken() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 func localrtDir() string {
 	_, file, _, _ := runtime.Caller(0)
 	return filepath.Join(filepath.Dir(file), "..", "..", "celld", "localrt")
 }
 
-func start() {
+func (r *localRuntime) start() {
 	dir := localrtDir()
 	if _, err := os.Stat(filepath.Join(dir, "node_modules", "miniflare")); err != nil {
-		bootErr = fmt.Errorf("celldtest: run `npm ci` in %s first: %w", dir, err)
+		r.bootErr = fmt.Errorf("celldtest: run `npm ci` in %s first: %w", dir, err)
 		return
 	}
 	cmd := exec.Command("node", "serve.mjs")
 	cmd.Dir = dir
+	// Set even when empty, so an inherited token never gates the open runtime.
+	cmd.Env = append(os.Environ(), "HOSTTHIS_CELLD_TOKEN="+r.token)
 	cmd.Stderr = os.Stderr
 	in, err := cmd.StdinPipe()
 	if err != nil {
-		bootErr = err
+		r.bootErr = err
 		return
 	}
-	stdin = in
+	r.stdin = in
 	out, err := cmd.StdoutPipe()
 	if err != nil {
-		bootErr = err
+		r.bootErr = err
 		return
 	}
 	if err := cmd.Start(); err != nil {
-		bootErr = fmt.Errorf("celldtest: start node: %w", err)
+		r.bootErr = fmt.Errorf("celldtest: start node: %w", err)
 		return
 	}
 	ready := make(chan string, 1)
@@ -69,11 +86,32 @@ func start() {
 		}
 	}()
 	select {
-	case baseURL = <-ready:
+	case r.baseURL = <-ready:
 	case <-time.After(30 * time.Second):
 		_ = cmd.Process.Kill()
-		bootErr = fmt.Errorf("celldtest: runtime not ready after 30s")
+		r.bootErr = fmt.Errorf("celldtest: runtime not ready after 30s")
 	}
+}
+
+func (r *localRuntime) endpoint(t testing.TB) string {
+	t.Helper()
+	r.once.Do(r.start)
+	if r.bootErr != nil {
+		t.Fatal(r.bootErr)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ep, ok := r.byTest[t]; ok {
+		return ep
+	}
+	ep := fmt.Sprintf("%s/ns/t%d-%d", r.baseURL, os.Getpid(), seq.Add(1))
+	r.byTest[t] = ep
+	t.Cleanup(func() {
+		r.mu.Lock()
+		delete(r.byTest, t)
+		r.mu.Unlock()
+	})
+	return ep
 }
 
 // Endpoint is t's cell namespace on the shared local runtime, in the shape the
@@ -83,29 +121,22 @@ func start() {
 // production.
 func Endpoint(t testing.TB) string {
 	t.Helper()
-	once.Do(start)
-	if bootErr != nil {
-		t.Fatal(bootErr)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if ep, ok := byTest[t]; ok {
-		return ep
-	}
-	ep := fmt.Sprintf("%s/ns/t%d-%d", baseURL, os.Getpid(), seq.Add(1))
-	byTest[t] = ep
-	t.Cleanup(func() {
-		mu.Lock()
-		delete(byTest, t)
-		mu.Unlock()
-	})
-	return ep
+	return plain.endpoint(t)
 }
 
-// Stop ends the runtime early; it otherwise exits with the test binary.
+// TokenEndpoint is Endpoint on a second local runtime that requires a bearer
+// token on every route but /healthz, and that token.
+func TokenEndpoint(t testing.TB) (endpoint, token string) {
+	t.Helper()
+	return tokened.endpoint(t), tokened.token
+}
+
+// Stop ends the runtimes early; they otherwise exit with the test binary.
 func Stop() {
-	if stdin != nil {
-		_ = stdin.Close()
+	for _, r := range []*localRuntime{plain, tokened} {
+		if r.stdin != nil {
+			_ = r.stdin.Close()
+		}
 	}
 }
 
