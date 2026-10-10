@@ -358,8 +358,7 @@ test("the Worker's router never forwards a cell route", async () => {
     assert.notEqual(res.status, 200, path);
     assert.ok(!(await res.text()).includes("hostthis.cell-image"), path);
   }
-  assert.equal(forwarded.length, 4);
-  assert.ok(forwarded.every((path) => !path.startsWith("/__cell/")));
+  assert.deepStrictEqual(forwarded, []);
 });
 
 function socket({ closed = false } = {}) {
