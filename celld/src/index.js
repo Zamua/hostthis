@@ -257,6 +257,8 @@ const CELL_IMAGE_VERSION = 1;
 // Cloudflare refuses a put of more than 128 entries.
 const MAX_PUT_ENTRIES = 128;
 const VALUE_TAG = "$t";
+// Progress of a restore in parts; no app key starts with "__".
+const RESTORE_MARKER = "__cell:restore";
 const NON_FINITE = ["NaN", "Infinity", "-Infinity", "-0"];
 // Uint8Array travels as "bytes"; these as "view" with their name.
 const TYPED_VIEWS = {
@@ -416,10 +418,29 @@ function decodeValue(value) {
 }
 
 // The caller holds blockConcurrencyWhile, so the entries and the alarm describe
-// one state.
-async function cellImage(storage) {
+// one state. With start or limit the answer is one page of it.
+async function cellImage(storage, url) {
+  const options = {};
+  const start = url.searchParams.get("start");
+  if (start !== null) {
+    options.start = start;
+  }
+  let limit = null;
+  if (url.searchParams.has("limit")) {
+    limit = Number(url.searchParams.get("limit"));
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      return Response.json({ error: "invalid-page" }, { status: 400 });
+    }
+    // One more than the page, to learn the next key.
+    options.limit = limit + 1;
+  }
   const kv = [];
-  for (const [key, value] of await storage.list()) {
+  let next = null;
+  for (const [key, value] of await storage.list(options)) {
+    if (kv.length === limit) {
+      next = key;
+      break;
+    }
     try {
       kv.push([key, encodeValue(value)]);
     } catch (error) {
@@ -430,7 +451,19 @@ async function cellImage(storage) {
     }
   }
   const alarm = (await storage.getAlarm()) ?? null;
-  return Response.json({ format: CELL_IMAGE_FORMAT, version: CELL_IMAGE_VERSION, kv, alarm });
+  return Response.json({ format: CELL_IMAGE_FORMAT, version: CELL_IMAGE_VERSION, kv, alarm, next });
+}
+
+function decodePart(part) {
+  if (part === undefined) {
+    return null;
+  }
+  const { id, index, count } = part ?? {};
+  if (typeof id !== "string" || id === "" || !Number.isSafeInteger(count) || count < 1 ||
+      !Number.isSafeInteger(index) || index < 0 || index >= count) {
+    throw new InvalidImage("part is not { id, index, count }");
+  }
+  return { id, index, count };
 }
 
 function decodeImage(image) {
@@ -450,16 +483,29 @@ function decodeImage(image) {
     if (entries.has(pair[0])) {
       throw new InvalidImage(`key ${pair[0]} appears twice`);
     }
+    if (pair[0] === RESTORE_MARKER) {
+      throw new InvalidImage(`key ${pair[0]} is reserved`);
+    }
     try {
       entries.set(pair[0], decodeValue(pair[1]));
     } catch (error) {
       throw new InvalidImage(`key ${pair[0]}: ${error.message}`);
     }
   }
-  return { entries: [...entries], alarm };
+  return { entries: [...entries], alarm, part: decodePart(image.part) };
 }
 
-// One transaction, so a refused write leaves the cell blank for a retry.
+async function holdsAny(storage, keys) {
+  for (let i = 0; i < keys.length; i += MAX_PUT_ENTRIES) {
+    if ((await storage.get(keys.slice(i, i + MAX_PUT_ENTRIES))).size > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// One transaction per image or part, so a refused write leaves the cell as the
+// previous part left it, for a retry.
 async function restoreCell(state, request) {
   let image;
   try {
@@ -467,15 +513,32 @@ async function restoreCell(state, request) {
   } catch (error) {
     return Response.json({ error: "invalid-image", detail: String(error?.message ?? error) }, { status: 400 });
   }
+  const part = image.part ?? { id: "", index: 0, count: 1 };
+  const last = part.index === part.count - 1;
   return state.blockConcurrencyWhile(async () => {
     const { storage } = state;
-    if ((await storage.list({ limit: 1 })).size > 0 || ((await storage.getAlarm()) ?? null) !== null) {
-      return Response.json({ restored: false, reason: "not-blank" }, { status: 409 });
+    if (part.index === 0) {
+      if ((await storage.list({ limit: 1 })).size > 0 || ((await storage.getAlarm()) ?? null) !== null) {
+        return Response.json({ restored: false, reason: "not-blank" }, { status: 409 });
+      }
+    } else {
+      const progress = await storage.get(RESTORE_MARKER);
+      if (progress?.id !== part.id || progress.next !== part.index || progress.count !== part.count) {
+        return Response.json({ restored: false, reason: "out-of-order" }, { status: 409 });
+      }
+      if (await holdsAny(storage, image.entries.map(([key]) => key))) {
+        return Response.json({ restored: false, reason: "overlap" }, { status: 409 });
+      }
     }
     try {
       await storage.transaction(async (tx) => {
-        for (let i = 0; i < image.entries.length; i += MAX_PUT_ENTRIES) {
-          await tx.put(Object.fromEntries(image.entries.slice(i, i + MAX_PUT_ENTRIES)));
+        await putInBatches(tx, image.entries);
+        if (!last) {
+          await tx.put(RESTORE_MARKER, { id: part.id, next: part.index + 1, count: part.count });
+          return;
+        }
+        if (part.index > 0) {
+          await tx.delete(RESTORE_MARKER);
         }
         if (image.alarm !== null) {
           await tx.setAlarm(Math.max(image.alarm, Date.now()));
@@ -484,13 +547,17 @@ async function restoreCell(state, request) {
     } catch (error) {
       return Response.json({ error: "restore-failed", detail: String(error?.message ?? error) }, { status: 500 });
     }
-    return Response.json({ restored: true, entries: image.entries.length });
+    const answer = { restored: true, entries: image.entries.length };
+    return Response.json(image.part ? { ...answer, part: part.index, complete: last } : answer);
   });
 }
 
 const CELL_ROUTES = {
   name: { method: "GET", run: (state) => Response.json({ name: state.id.name ?? null }) },
-  image: { method: "GET", run: (state) => state.blockConcurrencyWhile(() => cellImage(state.storage)) },
+  image: {
+    method: "GET",
+    run: (state, request) => state.blockConcurrencyWhile(() => cellImage(state.storage, new URL(request.url))),
+  },
   restore: { method: "POST", run: restoreCell },
 };
 

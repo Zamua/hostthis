@@ -3269,6 +3269,28 @@ class binding reaches them:
   commit in one transaction, at most 128 entries per put, so a write the
   storage refuses answers 500 `restore-failed` and leaves the cell blank.
 
+A cell too large for one image (a site with hundreds of versions holds tens of
+megabytes of manifests, past what one isolate can hold as JSON) moves in parts:
+
+- `GET /__cell/image?start=<key>&limit=<n>` answers a page: the entries whose
+  key sorts at or after `start`, in key order, at most `n` of them, the alarm,
+  and `next`, the first key the page leaves out, or `null` at the end. Without
+  the parameters the image is the whole cell and `next` is `null`. Pages
+  describe one state only while nothing writes to the cell, so a mover pages a
+  frozen copy.
+- `POST /__cell/restore` takes an image carrying `part: { id, index, count }`.
+  Index 0 needs a blank cell, as a whole image does. Every later index needs
+  the cell to be mid-restore of the same `id` and waiting for that index,
+  otherwise 409 `out-of-order`. A part whose entries include a key the cell
+  already holds answers 409 `overlap`. Each part commits in one transaction;
+  every part before the last also records the progress under the reserved key
+  `__cell:restore`, and the last removes it and sets the alarm (only the last
+  part's alarm counts). The answer adds `part` and `complete`. A failed part
+  leaves the cell where the previous part left it, so a retry of that part
+  resumes the move.
+- Until the last part lands the cell serves whatever it holds, so a mover sends
+  the entries a cell's reads start from (a paste's `row`) in the last part.
+
 The routes carry no token of their own: they are unreachable through the
 Worker's public router. Subnet cells hold only a rolling admission window and
 are not moved.
