@@ -361,3 +361,36 @@ test("the Worker's router never forwards a cell route", async () => {
   assert.equal(forwarded.length, 4);
   assert.ok(forwarded.every((path) => !path.startsWith("/__cell/")));
 });
+
+function socket({ closed = false } = {}) {
+  const calls = [];
+  return {
+    calls,
+    close(...args) {
+      if (closed) {
+        throw new TypeError("WebSocket already closed");
+      }
+      calls.push(args);
+    },
+  };
+}
+
+test("a room answers a peer's close frame", async () => {
+  const room = new Room(cellState(new FakeStorage(), "r"), {});
+  for (const [code, reason, want] of [
+    [1000, "bye", [1000, "bye"]],
+    [4001, "app", [4001, "app"]],
+    [1001, "away", [1000]],
+    [1005, "", [1000]],
+  ]) {
+    const ws = socket();
+    await room.webSocketClose(ws, code, reason, true);
+    assert.deepStrictEqual(ws.calls, [want], String(code));
+  }
+  await room.webSocketClose(socket({ closed: true }), 1000, "bye", true);
+
+  const errored = socket();
+  await room.webSocketError(errored, new Error("reset"));
+  assert.equal(errored.calls.length, 1);
+  await room.webSocketError(socket({ closed: true }), new Error("reset"));
+});

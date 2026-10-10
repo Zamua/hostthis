@@ -1899,6 +1899,16 @@ export class Room {
     }
   }
 
+  // A runtime that does not reply to a peer's close frame leaves the socket
+  // closing until the handler closes it too.
+  async webSocketClose(ws, code, reason) {
+    answerClose(ws, code, reason);
+  }
+
+  async webSocketError(ws) {
+    answerClose(ws);
+  }
+
   async webSocketMessage(ws, message) {
     if (typeof message === "string") {
       try {
@@ -1922,6 +1932,21 @@ export class Room {
         // reaped by the runtime
       }
     }
+  }
+}
+
+// 1000 and application codes (3000-4999) are the close() codes every runtime
+// accepts, so any other code, and the 1005 a codeless close reports, is
+// answered with 1000. close() on a socket the runtime already closed throws.
+function answerClose(ws, code, reason) {
+  try {
+    if (code === 1000 || (code >= 3000 && code <= 4999)) {
+      ws.close(code, reason);
+    } else {
+      ws.close(1000);
+    }
+  } catch {
+    // closed already
   }
 }
 
