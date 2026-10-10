@@ -393,3 +393,95 @@ test("a room answers a peer's close frame", async () => {
   assert.equal(errored.calls.length, 1);
   await room.webSocketError(socket({ closed: true }), new Error("reset"));
 });
+
+// Pages the source, then restores the pages as parts with the paste's row last.
+async function moveInParts(source, target, limit) {
+  const pages = [];
+  let start = "";
+  do {
+    const page = await ok(source, `/__cell/image?start=${encodeURIComponent(start)}&limit=${limit}`);
+    pages.push(page);
+    start = page.next;
+  } while (start !== null);
+  const kvs = pages.map((page) => page.kv.filter(([key]) => key !== "row"));
+  kvs[kvs.length - 1].push(...pages.flatMap((page) => page.kv.filter(([key]) => key === "row")));
+  const answers = [];
+  for (const [index, kv] of kvs.entries()) {
+    answers.push(await ok(target, "/__cell/restore", {
+      format: "hostthis.cell-image", version: 1, kv, alarm: pages[index].alarm,
+      part: { id: "move-1", index, count: kvs.length },
+    }));
+  }
+  return { pages, answers };
+}
+
+test("an image pages in key order and names the next key", async () => {
+  const { site } = await seededWorld();
+  const whole = await ok(site(), "/__cell/image");
+  assert.equal(whole.next, null);
+  const first = await ok(site(), "/__cell/image?limit=2");
+  assert.deepStrictEqual(first.kv, whole.kv.slice(0, 2));
+  assert.equal(first.next, whole.kv[2][0]);
+  assert.equal(first.alarm, whole.alarm);
+  const rest = await ok(site(), `/__cell/image?start=${encodeURIComponent(first.next)}&limit=1000`);
+  assert.deepStrictEqual(rest.kv, whole.kv.slice(2));
+  assert.equal(rest.next, null);
+  for (const limit of ["0", "-1", "1.5", "x"]) {
+    assert.equal((await call(site(), `/__cell/image?limit=${limit}`)).status, 400, limit);
+  }
+});
+
+test("a cell moved in parts is the same cell, and serves only once the last part lands", async () => {
+  const { site } = await seededWorld();
+  const there = world();
+  const target = () => there.cell("PASTES", "slugone1");
+  const { pages, answers } = await moveInParts(site(), target(), 2);
+  assert.ok(pages.length > 2);
+  assert.deepStrictEqual(answers.map((a) => a.complete), pages.map((_, i) => i === pages.length - 1));
+  assert.deepStrictEqual(there.storageOf("PASTES", "slugone1").data, site().state.storage.data);
+  assert.equal(there.storageOf("PASTES", "slugone1").alarm, site().state.storage.alarm);
+  assert.deepStrictEqual(await ok(target(), "/paste/get?slug=slugone1"), await ok(site(), "/paste/get?slug=slugone1"));
+});
+
+test("parts refuse out of order, a stranger's move, and a key the cell holds, and a retry resumes", async () => {
+  const { site } = await seededWorld();
+  const { kv, alarm } = await ok(site(), "/__cell/image");
+  const blank = new FakeStorage();
+  const target = new Paste(cellState(blank, "slugone1"), {});
+  const part = (index, entries, id = "move-1") => ({
+    format: "hostthis.cell-image", version: 1, kv: entries, alarm, part: { id, index, count: 3 },
+  });
+  const restore = (body) => call(target, "/__cell/restore", body);
+
+  assert.deepStrictEqual((await restore(part(1, kv.slice(1, 2)))).body, { restored: false, reason: "out-of-order" });
+  assert.equal(blank.data.size, 0);
+  assert.equal((await restore(part(0, kv.slice(0, 1)))).status, 200);
+  assert.equal(blank.alarm, null);
+  const held = new Map(blank.data);
+  assert.deepStrictEqual((await restore(part(1, kv.slice(1, 2), "move-2"))).body, { restored: false, reason: "out-of-order" });
+  assert.deepStrictEqual((await restore(part(2, kv.slice(1)))).body, { restored: false, reason: "out-of-order" });
+  assert.deepStrictEqual((await restore(part(1, kv.slice(0, 2)))).body, { restored: false, reason: "overlap" });
+  assert.deepStrictEqual((await restore(part(0, kv.slice(1)))).body, { restored: false, reason: "not-blank" });
+  assert.deepStrictEqual(blank.data, held);
+
+  blank.tooBig = (key) => key === kv[1][0];
+  assert.equal((await restore(part(1, kv.slice(1, 2)))).status, 500);
+  assert.deepStrictEqual(blank.data, held);
+  blank.tooBig = null;
+  assert.equal((await restore(part(1, kv.slice(1, 2)))).status, 200);
+  assert.deepStrictEqual((await restore(part(2, kv.slice(2)))).body, { restored: true, entries: kv.length - 2, part: 2, complete: true });
+  assert.deepStrictEqual(blank.data, site().state.storage.data);
+  assert.equal(blank.alarm, site().state.storage.alarm);
+});
+
+test("an image may not carry the restore progress key", async () => {
+  const target = new Paste(cellState(new FakeStorage(), "slugone1"), {});
+  const res = await call(target, "/__cell/restore", {
+    format: "hostthis.cell-image", version: 1, kv: [["__cell:restore", { id: "x", next: 1, count: 2 }]], alarm: null,
+  });
+  assert.equal(res.status, 400);
+  for (const part of [{}, { id: "", index: 0, count: 1 }, { id: "m", index: 1, count: 1 }, { id: "m", index: 0, count: 0 }]) {
+    const bad = await call(target, "/__cell/restore", { format: "hostthis.cell-image", version: 1, kv: [], alarm: null, part });
+    assert.equal(bad.status, 400, JSON.stringify(part));
+  }
+});

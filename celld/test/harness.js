@@ -33,8 +33,14 @@ export class FakeStorage {
     this.tooBig = null;
   }
 
-  async get(key) {
-    return clone(this.data.get(key));
+  async get(keyOrKeys) {
+    if (!Array.isArray(keyOrKeys)) {
+      return clone(this.data.get(keyOrKeys));
+    }
+    if (keyOrKeys.length > MAX_PUT_ENTRIES) {
+      throw new RangeError(`storage.get: ${keyOrKeys.length} keys, at most ${MAX_PUT_ENTRIES}`);
+    }
+    return new Map(keyOrKeys.filter((key) => this.data.has(key)).map((key) => [key, clone(this.data.get(key))]));
   }
 
   async put(keyOrEntries, value) {
@@ -70,9 +76,12 @@ export class FakeStorage {
     this.afterCommit();
   }
 
-  async list({ prefix = "" } = {}) {
+  // Key order, as storage lists.
+  async list({ prefix = "", start, limit = Infinity } = {}) {
     return new Map([...this.data]
-      .filter(([key]) => key.startsWith(prefix))
+      .filter(([key]) => key.startsWith(prefix) && (start === undefined || key >= start))
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .slice(0, limit)
       .map(([key, value]) => [key, clone(value)]));
   }
 
