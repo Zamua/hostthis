@@ -3252,12 +3252,22 @@ class binding reaches them:
 - `GET /__cell/name` answers the name the cell was addressed by, as the
   runtime reports it (`state.id.name`), or `null` when it does not.
 - `GET /__cell/image` answers the cell's every key-value entry and its alarm
-  time as JSON. A value JSON cannot carry (bytes, a `Date`, a `Map`) travels
-  tagged and comes back as the same type.
+  time as JSON: `{ format: "hostthis.cell-image", version: 1, kv: [[key,
+  value], ...], alarm: <epoch ms> | null }`. A value JSON cannot carry (bytes, a
+  `Date`, a `Map`) travels tagged and comes back as the same type:
+  `{ "$t": <type>, v }` for `undefined`, a non-finite number or `-0`, `bigint`,
+  `date`, `map`, `set`, `bytes` (a `Uint8Array`, base64url), `buffer` (an
+  `ArrayBuffer`), and `view` (any other typed array or a `DataView`, named in
+  `k`); a plain object that owns a `$t` key travels as `object`. A value of any
+  other type fails the image with 500 `unsupported-value` naming its key, so no
+  entry is ever dropped.
 - `POST /__cell/restore` applies an image to a cell that holds nothing, sets
   its alarm (a time already past fires at once), and answers
-  `{ restored: true }`; a cell that holds anything answers
-  `{ restored: false, reason: "not-blank" }` and is left as it was.
+  `{ restored: true, entries: <n> }`; a cell that holds anything answers 409
+  `{ restored: false, reason: "not-blank" }` and is left as it was. A malformed
+  image answers 400 `invalid-image` before any write. The entries and the alarm
+  commit in one transaction, at most 128 entries per put, so a write the
+  storage refuses answers 500 `restore-failed` and leaves the cell blank.
 
 The routes carry no token of their own: they are unreachable through the
 Worker's public router. Subnet cells hold only a rolling admission window and
