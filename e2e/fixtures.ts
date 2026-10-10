@@ -1,5 +1,6 @@
 import { test as base, expect, type Page, type TestInfo } from '@playwright/test';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, connect } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -119,16 +120,20 @@ export class Server {
 }
 
 // Runtime is the celld Worker under Miniflare (celld/localrt), one per worker,
-// so each daemon owns its cells. It exits when its stdin closes.
+// so each daemon owns its cells. It exits when its stdin closes. It requires a
+// bearer token, so every flow the suite drives also proves the daemon sends it.
 class Runtime {
   private constructor(
     private proc: ChildProcess,
     readonly url: string,
+    readonly token: string,
   ) {}
 
   static async start(timeoutMs = 30_000): Promise<Runtime> {
+    const token = randomBytes(16).toString('hex');
     const proc = spawn('node', ['serve.mjs'], {
       cwd: join(process.env.HOSTTHIS_E2E_ROOT!, 'celld', 'localrt'),
+      env: { ...process.env, HOSTTHIS_CELLD_TOKEN: token },
       stdio: ['pipe', 'pipe', 'inherit'],
     });
     let out = '';
@@ -144,7 +149,7 @@ class Runtime {
         }
       });
     });
-    return new Runtime(proc, url);
+    return new Runtime(proc, url, token);
   }
 
   async stop() {
@@ -230,6 +235,7 @@ export const test = base.extend<TestFixtures, { server: Server }>({
           HOSTTHIS_METRICS_ADDR: `127.0.0.1:${ports[2]}`,
           HOSTTHIS_DATA_DIR: dataDir,
           HOSTTHIS_CELLD_ENDPOINT: runtime.url,
+          HOSTTHIS_CELLD_TOKEN: runtime.token,
           HOSTTHIS_LANDING: join(process.env.HOSTTHIS_E2E_ROOT!, 'web', 'landing.html'),
         },
       });

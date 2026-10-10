@@ -3,6 +3,8 @@
 
 export class SimulatedCrash extends Error {}
 
+const MAX_PUT_ENTRIES = 128;
+
 export const PASTE_CELL_ID = "a".repeat(64);
 export const ROOM_CELL_ID = "b".repeat(64);
 export const ROOM_ID = "11111111-1111-4111-8111-111111111111";
@@ -43,6 +45,10 @@ export class FakeStorage {
     const entries = typeof keyOrEntries === "string"
       ? [[keyOrEntries, value]]
       : Object.entries(keyOrEntries);
+    // Cloudflare refuses a put of more than 128 entries.
+    if (entries.length > MAX_PUT_ENTRIES) {
+      throw new RangeError(`storage.put: ${entries.length} entries, at most ${MAX_PUT_ENTRIES}`);
+    }
     if (entries.some(([key, entry]) => this.tooBig?.(String(key), entry))) {
       throw new Error("storage.put: string or blob too big");
     }
@@ -54,6 +60,10 @@ export class FakeStorage {
 
   async delete(keyOrKeys) {
     const keys = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
+    // Cloudflare refuses a delete of more than 128 keys too.
+    if (keys.length > MAX_PUT_ENTRIES) {
+      throw new RangeError(`storage.delete: ${keys.length} keys, at most ${MAX_PUT_ENTRIES}`);
+    }
     for (const key of keys) {
       this.data.delete(String(key));
     }

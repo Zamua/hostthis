@@ -1477,6 +1477,10 @@ or below it, and reconnects for a new full snapshot when it detects a gap. No
 frame history or per-client durable cursor exists. A reconnect is a fresh join,
 which makes browser reload and foreground recovery the same path.
 
+When a peer closes, the Room answers the close frame itself. A runtime that
+does not reply on its own leaves the socket closing until the handler closes it
+too; one that does has already closed it.
+
 ### Lifecycle and bounds
 
 Each Go process admits at most 64 connections for one room and 1024 across one
@@ -2741,10 +2745,12 @@ over HTTP. There is no second implementation of the domain in Go.
 HOSTTHIS_CELLD_ENDPOINT=http://celld:8080         # required
 ```
 
-The same Worker runs everywhere. Production runs it on celld. Development, the
-Go tests, and the browser suite run it on this machine under Miniflare
-(workerd), from `celld/localrt`, with cells in memory or a local persist
-directory and payloads in a local R2 store.
+The same Worker runs everywhere: on celld, on Cloudflare Workers, and, for
+development, the Go tests and the browser suite, on this machine under
+Miniflare (workerd) from `celld/localrt`, with cells in memory or a local
+persist directory and payloads in a local R2 store. On Cloudflare the
+`PAYLOADS` binding names an R2 bucket; on celld it lives inside the fleet
+bucket.
 
 The service and transport layers depend only on domain-shaped ports. The
 conformance suite pins their behavior against the Worker.
@@ -3236,6 +3242,37 @@ It persists a versioned pending operation before the outbound call and uses
 `blockConcurrencyWhile` only around that bounded state machine. The protocol is
 specified under "Room storage."
 
+### Moving cells between runtimes
+
+A deployment moves between runtimes (celld and Cloudflare Workers) by copying
+each cell whole. Every cell class answers three internal paths on its own
+`fetch`, which the Worker's router never forwards, so only code holding the
+class binding reaches them:
+
+- `GET /__cell/name` answers the name the cell was addressed by, as the
+  runtime reports it (`state.id.name`), or `null` when it does not.
+- `GET /__cell/image` answers the cell's every key-value entry and its alarm
+  time as JSON: `{ format: "hostthis.cell-image", version: 1, kv: [[key,
+  value], ...], alarm: <epoch ms> | null }`. A value JSON cannot carry (bytes, a
+  `Date`, a `Map`) travels tagged and comes back as the same type:
+  `{ "$t": <type>, v }` for `undefined`, a non-finite number or `-0`, `bigint`,
+  `date`, `map`, `set`, `bytes` (a `Uint8Array`, base64url), `buffer` (an
+  `ArrayBuffer`), and `view` (any other typed array or a `DataView`, named in
+  `k`); a plain object that owns a `$t` key travels as `object`. A value of any
+  other type fails the image with 500 `unsupported-value` naming its key, so no
+  entry is ever dropped.
+- `POST /__cell/restore` applies an image to a cell that holds nothing, sets
+  its alarm (a time already past fires at once), and answers
+  `{ restored: true, entries: <n> }`; a cell that holds anything answers 409
+  `{ restored: false, reason: "not-blank" }` and is left as it was. A malformed
+  image answers 400 `invalid-image` before any write. The entries and the alarm
+  commit in one transaction, at most 128 entries per put, so a write the
+  storage refuses answers 500 `restore-failed` and leaves the cell blank.
+
+The routes carry no token of their own: they are unreachable through the
+Worker's public router. Subnet cells hold only a rolling admission window and
+are not moved.
+
 ### Input and output gates
 
 The input gate keeps storage-shaped awaits in one local turn, but it opens on
@@ -3291,9 +3328,14 @@ The fleet bucket must never carry a storage quota. Payload growth shares it
 with celld's state and lease writes, and a quota that fills would refuse those
 as well.
 
-One fleet bucket serves one Worker application. The Worker and operator routes
-are unauthenticated and remain cluster-internal behind NetworkPolicy;
-`hostthisd` is the only public surface. Worker health and runtime health are
+One fleet bucket serves one Worker application. `hostthisd` is the only public
+surface. The Worker's routes accept an optional shared token: when the Worker
+has `HOSTTHIS_CELLD_TOKEN` set, every route except `/healthz` (the cell
+routes, `/blob`, and the room join) requires `Authorization: Bearer <token>`
+and answers 401 without it, compared in constant time. `hostthisd` sends the
+header when its own `HOSTTHIS_CELLD_TOKEN` is set. A deployment whose Worker is
+reachable only inside its cluster may leave both unset and rely on
+NetworkPolicy; a Worker reachable across the internet sets both. Worker health and runtime health are
 separate: `/healthz` checks the hostthis Worker, while
 `/.well-known/celld/health` is the node lifecycle probe.
 
@@ -3718,6 +3760,7 @@ file). Defaults in parens:
 
 # Storage (metadata and blobs)
                          / HOSTTHIS_CELLD_ENDPOINT          celld Worker base URL                  (required)
+                         / HOSTTHIS_CELLD_TOKEN             bearer token for Worker calls          (unset)
 
 # Limits
                          / HOSTTHIS_CREATE_ADMISSION_WIDTH  same-identity create admission width    (2)

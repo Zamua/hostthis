@@ -73,6 +73,21 @@ async function loadManifest(storage, ver) {
   return (await storage.get(manifestKey(ver))) ?? null;
 }
 
+// Cloudflare refuses a put or delete of more than MAX_PUT_ENTRIES keys at once;
+// inside a transaction the batches still land as one.
+async function putInBatches(tx, entries) {
+  const list = [...entries];
+  for (let i = 0; i < list.length; i += MAX_PUT_ENTRIES) {
+    await tx.put(Object.fromEntries(list.slice(i, i + MAX_PUT_ENTRIES)));
+  }
+}
+
+async function deleteInBatches(tx, keys) {
+  for (let i = 0; i < keys.length; i += MAX_PUT_ENTRIES) {
+    await tx.delete(keys.slice(i, i + MAX_PUT_ENTRIES));
+  }
+}
+
 async function splitLegacyVersions(tx) {
   const legacy = await tx.get(LEGACY_VERSIONS);
   if (!legacy) {
@@ -86,7 +101,7 @@ async function splitLegacyVersions(tx) {
     }
   }
   updates.set("maxVer", Math.max((await tx.get("maxVer")) ?? 0, ...legacy.map((v) => v.ver)));
-  await tx.put(Object.fromEntries(updates));
+  await putInBatches(tx, updates);
   await tx.delete(LEGACY_VERSIONS);
 }
 
@@ -229,6 +244,272 @@ function toRow(body) {
   };
 }
 
+// --- moving cells between runtimes -------------------------------------------
+//
+// Every cell class answers /__cell/name, /__cell/image and /__cell/restore on
+// its own fetch, ahead of its op table. The Worker's router forwards only
+// /identity/, /paste/, /room/ and /subnet/ paths, so only code holding a class
+// binding reaches these.
+
+const CELL_PATH = "/__cell/";
+const CELL_IMAGE_FORMAT = "hostthis.cell-image";
+const CELL_IMAGE_VERSION = 1;
+// Cloudflare refuses a put of more than 128 entries.
+const MAX_PUT_ENTRIES = 128;
+const VALUE_TAG = "$t";
+const NON_FINITE = ["NaN", "Infinity", "-Infinity", "-0"];
+// Uint8Array travels as "bytes"; these as "view" with their name.
+const TYPED_VIEWS = {
+  Int8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array,
+  Float32Array, Float64Array, BigInt64Array, BigUint64Array, DataView,
+};
+
+class UnsupportedValue extends Error {}
+class InvalidImage extends Error {}
+
+// One stored value as JSON. Strings, booleans, null, finite numbers, plain
+// objects and dense arrays are themselves; every other type storage can hold
+// travels as { "$t": type, v }. A plain object owning a "$t" key is wrapped so
+// it never reads as a tag.
+function encodeValue(value) {
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return value;
+    case "number":
+      if (Number.isFinite(value) && !Object.is(value, -0)) {
+        return value;
+      }
+      return { $t: "number", v: Object.is(value, -0) ? "-0" : String(value) };
+    case "bigint":
+      return { $t: "bigint", v: String(value) };
+    case "undefined":
+      return { $t: "undefined" };
+    case "object":
+      break;
+    default:
+      throw new UnsupportedValue(typeof value);
+  }
+  if (value === null) {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    // JSON has no hole and no named property on an array.
+    if (Object.keys(value).length !== value.length) {
+      throw new UnsupportedValue("sparse or keyed array");
+    }
+    return value.map(encodeValue);
+  }
+  const proto = Object.getPrototypeOf(value);
+  if (proto === Object.prototype || proto === null) {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      setOwn(out, key, encodeValue(item));
+    }
+    return Object.hasOwn(value, VALUE_TAG) ? { $t: "object", v: out } : out;
+  }
+  if (value instanceof Date) {
+    return { $t: "date", v: encodeValue(value.getTime()) };
+  }
+  if (value instanceof Map) {
+    return { $t: "map", v: [...value].map(([key, item]) => [encodeValue(key), encodeValue(item)]) };
+  }
+  if (value instanceof Set) {
+    return { $t: "set", v: [...value].map(encodeValue) };
+  }
+  if (value instanceof ArrayBuffer) {
+    return { $t: "buffer", v: b64u(new Uint8Array(value)) };
+  }
+  if (ArrayBuffer.isView(value)) {
+    const bytes = b64u(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+    if (value.constructor === Uint8Array) {
+      return { $t: "bytes", v: bytes };
+    }
+    const kind = value.constructor.name;
+    if (Object.hasOwn(TYPED_VIEWS, kind) && TYPED_VIEWS[kind] === value.constructor) {
+      return { $t: "view", k: kind, v: bytes };
+    }
+  }
+  throw new UnsupportedValue(proto?.constructor?.name ?? "object");
+}
+
+function decodeObject(object) {
+  const out = {};
+  for (const [key, item] of Object.entries(object)) {
+    setOwn(out, key, decodeValue(item));
+  }
+  return out;
+}
+
+function decodeBytes(text) {
+  const bytes = unb64u(text);
+  if (!bytes) {
+    throw new InvalidImage("bytes are not base64");
+  }
+  return bytes;
+}
+
+function decodeList(list) {
+  if (!Array.isArray(list)) {
+    throw new InvalidImage("tagged list is not an array");
+  }
+  return list;
+}
+
+function decodeValue(value) {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(decodeValue);
+  }
+  if (!Object.hasOwn(value, VALUE_TAG)) {
+    return decodeObject(value);
+  }
+  const { v } = value;
+  switch (value[VALUE_TAG]) {
+    case "undefined":
+      return undefined;
+    case "number":
+      if (!NON_FINITE.includes(v)) {
+        throw new InvalidImage(`number ${v} needs no tag`);
+      }
+      return Number(v);
+    case "bigint":
+      if (typeof v !== "string" || !/^-?\d+$/.test(v)) {
+        throw new InvalidImage("bigint is not an integer");
+      }
+      return BigInt(v);
+    case "object":
+      if (v === null || typeof v !== "object" || Array.isArray(v)) {
+        throw new InvalidImage("wrapped object is not an object");
+      }
+      return decodeObject(v);
+    case "date": {
+      const time = decodeValue(v);
+      if (typeof time !== "number") {
+        throw new InvalidImage("date is not a time");
+      }
+      return new Date(time);
+    }
+    case "map":
+      return new Map(decodeList(v).map((pair) => {
+        if (!Array.isArray(pair) || pair.length !== 2) {
+          throw new InvalidImage("map entry is not a pair");
+        }
+        return [decodeValue(pair[0]), decodeValue(pair[1])];
+      }));
+    case "set":
+      return new Set(decodeList(v).map(decodeValue));
+    case "buffer":
+      return decodeBytes(v).buffer;
+    case "bytes":
+      return decodeBytes(v);
+    case "view":
+      if (!Object.hasOwn(TYPED_VIEWS, value.k)) {
+        throw new InvalidImage(`unknown view ${value.k}`);
+      }
+      return new TYPED_VIEWS[value.k](decodeBytes(v).buffer);
+    default:
+      throw new InvalidImage(`unknown tag ${value[VALUE_TAG]}`);
+  }
+}
+
+// The caller holds blockConcurrencyWhile, so the entries and the alarm describe
+// one state.
+async function cellImage(storage) {
+  const kv = [];
+  for (const [key, value] of await storage.list()) {
+    try {
+      kv.push([key, encodeValue(value)]);
+    } catch (error) {
+      if (!(error instanceof UnsupportedValue)) {
+        throw error;
+      }
+      return Response.json({ error: "unsupported-value", key, type: error.message }, { status: 500 });
+    }
+  }
+  const alarm = (await storage.getAlarm()) ?? null;
+  return Response.json({ format: CELL_IMAGE_FORMAT, version: CELL_IMAGE_VERSION, kv, alarm });
+}
+
+function decodeImage(image) {
+  if (image === null || typeof image !== "object" || image.format !== CELL_IMAGE_FORMAT ||
+      image.version !== CELL_IMAGE_VERSION || !Array.isArray(image.kv)) {
+    throw new InvalidImage("not a version 1 cell image");
+  }
+  const alarm = image.alarm ?? null;
+  if (alarm !== null && !Number.isFinite(alarm)) {
+    throw new InvalidImage("alarm is not a time");
+  }
+  const entries = new Map();
+  for (const pair of image.kv) {
+    if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== "string") {
+      throw new InvalidImage("entry is not a [key, value] pair");
+    }
+    if (entries.has(pair[0])) {
+      throw new InvalidImage(`key ${pair[0]} appears twice`);
+    }
+    try {
+      entries.set(pair[0], decodeValue(pair[1]));
+    } catch (error) {
+      throw new InvalidImage(`key ${pair[0]}: ${error.message}`);
+    }
+  }
+  return { entries: [...entries], alarm };
+}
+
+// One transaction, so a refused write leaves the cell blank for a retry.
+async function restoreCell(state, request) {
+  let image;
+  try {
+    image = decodeImage(await request.json());
+  } catch (error) {
+    return Response.json({ error: "invalid-image", detail: String(error?.message ?? error) }, { status: 400 });
+  }
+  return state.blockConcurrencyWhile(async () => {
+    const { storage } = state;
+    if ((await storage.list({ limit: 1 })).size > 0 || ((await storage.getAlarm()) ?? null) !== null) {
+      return Response.json({ restored: false, reason: "not-blank" }, { status: 409 });
+    }
+    try {
+      await storage.transaction(async (tx) => {
+        for (let i = 0; i < image.entries.length; i += MAX_PUT_ENTRIES) {
+          await tx.put(Object.fromEntries(image.entries.slice(i, i + MAX_PUT_ENTRIES)));
+        }
+        if (image.alarm !== null) {
+          await tx.setAlarm(Math.max(image.alarm, Date.now()));
+        }
+      });
+    } catch (error) {
+      return Response.json({ error: "restore-failed", detail: String(error?.message ?? error) }, { status: 500 });
+    }
+    return Response.json({ restored: true, entries: image.entries.length });
+  });
+}
+
+const CELL_ROUTES = {
+  name: { method: "GET", run: (state) => Response.json({ name: state.id.name ?? null }) },
+  image: { method: "GET", run: (state) => state.blockConcurrencyWhile(() => cellImage(state.storage)) },
+  restore: { method: "POST", run: restoreCell },
+};
+
+// Null for a path outside /__cell/, which the class then routes itself.
+async function cellRoute(state, request) {
+  const { pathname } = new URL(request.url);
+  if (!pathname.startsWith(CELL_PATH)) {
+    return null;
+  }
+  const name = pathname.slice(CELL_PATH.length);
+  if (!Object.hasOwn(CELL_ROUTES, name)) {
+    return new Response("unknown cell route\n", { status: 404 });
+  }
+  if (request.method !== CELL_ROUTES[name].method) {
+    return new Response("method not allowed\n", { status: 405 });
+  }
+  return CELL_ROUTES[name].run(state, request);
+}
+
 const IDENTITY_OPS = {
   bytes: read((self) => self.bytes()),
   list: read((self) => self.list()),
@@ -253,7 +534,8 @@ export class Identity {
   }
 
   async fetch(request) {
-    return (await dispatch(this, IDENTITY_OPS, request))
+    return (await cellRoute(this.state, request))
+      ?? (await dispatch(this, IDENTITY_OPS, request))
       ?? new Response("unknown op\n", { status: 404 });
   }
 
@@ -1076,7 +1358,7 @@ export class Room {
   }
 
   async fetch(request) {
-    const handled = await dispatch(this, ROOM_OPS, request);
+    const handled = (await cellRoute(this.state, request)) ?? (await dispatch(this, ROOM_OPS, request));
     if (handled) {
       return handled;
     }
@@ -1632,6 +1914,16 @@ export class Room {
     }
   }
 
+  // A runtime that does not reply to a peer's close frame leaves the socket
+  // closing until the handler closes it too.
+  async webSocketClose(ws, code, reason) {
+    answerClose(ws, code, reason);
+  }
+
+  async webSocketError(ws) {
+    answerClose(ws);
+  }
+
   async webSocketMessage(ws, message) {
     if (typeof message === "string") {
       try {
@@ -1655,6 +1947,21 @@ export class Room {
         // reaped by the runtime
       }
     }
+  }
+}
+
+// 1000 and application codes (3000-4999) are the close() codes every runtime
+// accepts, so any other code, and the 1005 a codeless close reports, is
+// answered with 1000. close() on a socket the runtime already closed throws.
+function answerClose(ws, code, reason) {
+  try {
+    if (code === 1000 || (code >= 3000 && code <= 4999)) {
+      ws.close(code, reason);
+    } else {
+      ws.close(1000);
+    }
+  } catch {
+    // closed already
   }
 }
 
@@ -1705,7 +2012,8 @@ export class Paste {
   }
 
   async fetch(request) {
-    return (await dispatch(this, PASTE_OPS, request))
+    return (await cellRoute(this.state, request))
+      ?? (await dispatch(this, PASTE_OPS, request))
       ?? new Response("unknown op\n", { status: 404 });
   }
 
@@ -1751,7 +2059,7 @@ export class Paste {
       for (let ver = 1; ver <= staleMaxVer; ver++) {
         stale.push(versionKey(ver), manifestKey(ver));
       }
-      await tx.delete(stale);
+      await deleteInBatches(tx, stale);
       const updates = new Map([
         ["row", body.row],
         ["createFingerprint", body.fingerprint],
@@ -2630,8 +2938,13 @@ export class Paste {
 // resolvable. Superseded by Identity, which co-locates intents with the quota
 // and index they must agree with. Nothing routes here.
 export class IntentLog {
-  async fetch() {
-    return new Response("IntentLog is superseded by Identity\n", { status: 410 });
+  constructor(state) {
+    this.state = state;
+  }
+
+  async fetch(request) {
+    return (await cellRoute(this.state, request))
+      ?? new Response("IntentLog is superseded by Identity\n", { status: 410 });
   }
 }
 
@@ -2651,7 +2964,8 @@ export class Subnet {
   }
 
   async fetch(request) {
-    return (await dispatch(this, SUBNET_OPS, request))
+    return (await cellRoute(this.state, request))
+      ?? (await dispatch(this, SUBNET_OPS, request))
       ?? new Response("unknown op\n", { status: 404 });
   }
 
@@ -2785,11 +3099,56 @@ async function handleBlob(request, env, url) {
   return new Response("method not allowed\n", { status: 405 });
 }
 
+const BEARER = /^bearer +/i;
+
+// HOSTTHIS_CELLD_TOKEN, when set, is the bearer token every route but /healthz
+// requires. Both sides are hashed first, so the compare runs over two equal
+// length digests and its timing says nothing about the token.
+async function authorized(request, env) {
+  const token = env.HOSTTHIS_CELLD_TOKEN;
+  if (!token) {
+    return true;
+  }
+  const header = request.headers.get("Authorization") ?? "";
+  const scheme = BEARER.exec(header);
+  if (!scheme) {
+    return false;
+  }
+  const [want, got] = await Promise.all([token, header.slice(scheme[0].length)]
+    .map(async (text) => new Uint8Array(await crypto.subtle.digest("SHA-256", utf8(text)))));
+  let diff = 0;
+  for (let i = 0; i < want.length; i++) {
+    diff |= want[i] ^ got[i];
+  }
+  return diff === 0;
+}
+
+// Cell-internal paths are reachable only through a class binding, so the
+// router refuses any path naming one, however it is spelled.
+function namesCellInternal(pathname) {
+  return pathname.split("/").some((seg) => {
+    try {
+      return decodeURIComponent(seg) === "__cell";
+    } catch {
+      return false;
+    }
+  });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") {
       return new Response("ok\n");
+    }
+    if (!(await authorized(request, env))) {
+      return new Response("unauthorized\n", {
+        status: 401,
+        headers: { "WWW-Authenticate": "Bearer" },
+      });
+    }
+    if (namesCellInternal(url.pathname)) {
+      return new Response("not found\n", { status: 404 });
     }
     if (url.pathname === "/blob" || url.pathname.startsWith(BLOB_PATH)) {
       return handleBlob(request, env, url);

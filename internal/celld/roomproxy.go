@@ -3,6 +3,7 @@ package celld
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +34,8 @@ type relayReservation struct {
 // pinged from this side; waking a dormant cell every 20s per connection would
 // defeat the hibernation.
 type RoomProxy struct {
-	base string
+	base   string
+	client *http.Client
 
 	mu           sync.Mutex
 	nextID       uint64
@@ -44,11 +46,14 @@ type RoomProxy struct {
 	zero         chan struct{}
 }
 
-func NewRoomProxy(base string) *RoomProxy {
+// NewRoomProxy relays to the Worker at base, dialing through client; nil
+// means http.DefaultClient.
+func NewRoomProxy(base string, client *http.Client) *RoomProxy {
 	zero := make(chan struct{})
 	close(zero)
 	return &RoomProxy{
 		base:         base,
+		client:       client,
 		perRoom:      make(map[roomwire.RoomKey]int),
 		perApp:       make(map[domain.Slug]int),
 		reservations: make(map[uint64]*relayReservation),
@@ -189,7 +194,8 @@ func (p *RoomProxy) Serve(ctx context.Context, key roomwire.RoomKey, id uint64, 
 
 	wsBase := strings.Replace(p.base, "http", "ws", 1)
 	dialCtx, dialCancel := context.WithTimeout(ctx, 10*time.Second)
-	upstream, _, err := websocket.Dial(dialCtx, wsBase+"/room/join?room="+urlQuery(roomKey(key.App, key.ID)), nil)
+	upstream, _, err := websocket.Dial(dialCtx, wsBase+"/room/join?room="+urlQuery(roomKey(key.App, key.ID)),
+		&websocket.DialOptions{HTTPClient: p.client})
 	dialCancel()
 	p.mu.Lock()
 	if current := p.reservations[id]; current == reservation {

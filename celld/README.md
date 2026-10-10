@@ -57,3 +57,11 @@ A celld fleet serves one Worker application. Paste and site payloads live in
 the `PAYLOADS` R2 binding (`r2/payloads/` in the fleet bucket), reached through
 the stateless `/blob` routes outside any cell. The Worker stores them as opaque
 bytes; keys, compression, and lifecycle stay in `hostthisd`.
+
+## Access
+
+With `HOSTTHIS_CELLD_TOKEN` set on the Worker, every route except `/healthz`
+requires `Authorization: Bearer <token>` and answers 401 without it. `hostthisd`
+sends the header when its own `HOSTTHIS_CELLD_TOKEN` is set, and `localrt`
+passes the variable through to the Worker. Left unset, the routes are open, for
+a Worker reachable only inside its cluster.

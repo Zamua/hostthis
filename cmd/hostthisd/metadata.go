@@ -5,6 +5,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -56,9 +57,13 @@ func buildMetadata(apex string, logger *log.Logger) (*metadataBundle, error) {
 	if base == "" {
 		return nil, errors.New("HOSTTHIS_CELLD_ENDPOINT is required")
 	}
+	rt, err := celldTransport(base, http.DefaultTransport)
+	if err != nil {
+		return nil, err
+	}
 	// One client across every adapter, so connections to the fleet are pooled
 	// rather than each surface opening its own.
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second, Transport: rt}
 	repo := celld.NewPasteRepo(base, client)
 	repo.Logger = logger
 	rooms := celld.NewRoomRepo(base, client)
@@ -71,6 +76,16 @@ func buildMetadata(apex string, logger *log.Logger) (*metadataBundle, error) {
 		Sites:   storage.NewSites(repo),
 		Rooms:   rooms,
 		// Every socket terminates at its Room cell, which owns broadcast order.
-		RoomRelay: celld.NewRoomProxy(base),
+		RoomRelay: celld.NewRoomProxy(base, client),
 	}, nil
+}
+
+// celldTransport is rt sending HOSTTHIS_CELLD_TOKEN, when set, to the Worker
+// at base. Every client that calls the Worker is built over it.
+func celldTransport(base string, rt http.RoundTripper) (http.RoundTripper, error) {
+	authed, err := celld.Authorize(rt, base, envOr("HOSTTHIS_CELLD_TOKEN", ""))
+	if err != nil {
+		return nil, fmt.Errorf("HOSTTHIS_CELLD_TOKEN: %w", err)
+	}
+	return authed, nil
 }

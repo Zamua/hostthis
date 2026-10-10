@@ -24,24 +24,25 @@ type CelldBlobStore struct {
 	client *http.Client
 }
 
-// NewCelldBlobStore talks to the Worker at base. A nil client gets one with no
-// overall deadline, since a body of any size streams through it.
+// NewCelldBlobStore talks to the Worker at base. A nil client gets one over
+// CelldBlobTransport with no overall deadline, since a body of any size streams
+// through it.
 func NewCelldBlobStore(base string, client *http.Client) (*CelldBlobStore, error) {
 	if base == "" {
 		return nil, errors.New("blob celld: endpoint required")
 	}
 	if client == nil {
-		client = defaultCelldBlobClient()
+		client = &http.Client{Transport: CelldBlobTransport()}
 	}
 	return &CelldBlobStore{base: strings.TrimRight(base, "/"), client: client}, nil
 }
 
-// defaultCelldBlobClient bounds the wait for a response, which starts only
-// after the request body is fully sent, rather than the whole exchange.
-func defaultCelldBlobClient() *http.Client {
+// CelldBlobTransport bounds the wait for a response, which starts only after
+// the request body is fully sent, rather than the whole exchange.
+func CelldBlobTransport() *http.Transport {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.ResponseHeaderTimeout = time.Minute
-	return &http.Client{Transport: tr}
+	return tr
 }
 
 func (s *CelldBlobStore) objectURL(key string) string {

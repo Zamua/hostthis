@@ -281,7 +281,11 @@ func buildUploadAdmission(logger *log.Logger) (*hostssh.UploadAdmission, error) 
 // (docs/SPEC.md "Celld upload admission").
 func buildBlobStore(logger *log.Logger) (*storage.CompressedBlobStore, error) {
 	base := envOr("HOSTTHIS_CELLD_ENDPOINT", "")
-	bs, err := storage.NewCelldBlobStore(base, nil)
+	rt, err := celldTransport(base, storage.CelldBlobTransport())
+	if err != nil {
+		return nil, err
+	}
+	bs, err := storage.NewCelldBlobStore(base, &http.Client{Transport: rt})
 	if err != nil {
 		return nil, fmt.Errorf("HOSTTHIS_CELLD_ENDPOINT: %w", err)
 	}

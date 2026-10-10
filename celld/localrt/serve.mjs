@@ -3,10 +3,10 @@
 // and serves until signalled or, when stdin is a pipe or socket, until it
 // closes, so a parent process that dies takes the runtime with it.
 //
-// HOST and PORT pick the listener (default loopback, ephemeral port; the
-// routes are cluster-internal and carry no auth). PERSIST_DIR keeps cells and
-// payloads across restarts; without it cells live in memory and payloads in a
-// temp dir removed on exit.
+// HOST and PORT pick the listener (default loopback, ephemeral port).
+// HOSTTHIS_CELLD_TOKEN, when set, is the bearer token every route but /healthz
+// requires. PERSIST_DIR keeps cells and payloads across restarts; without it
+// cells live in memory and payloads in a temp dir removed on exit.
 import { Miniflare } from "miniflare";
 import { fstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,6 +31,9 @@ const mf = new Miniflare({
   // The Worker reads no request.cf, and fetching it would need the network.
   cf: false,
   port: Number(process.env.PORT ?? 0),
+  bindings: process.env.HOSTTHIS_CELLD_TOKEN
+    ? { HOSTTHIS_CELLD_TOKEN: process.env.HOSTTHIS_CELLD_TOKEN }
+    : {},
   r2Buckets: Object.fromEntries(config.r2_buckets.map((b) => [b.binding, b.bucket_name])),
   r2Persist: persist ? join(persist, "r2") : tempDir,
   durableObjectsPersist: persist ? join(persist, "cells") : false,

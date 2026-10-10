@@ -42,7 +42,7 @@ func liveCelldServer(t *testing.T) (*httptest.Server, string) {
 		Pastes:     repo,
 		Sites:      liveAppSiteReader{},
 		Rooms:      service.NewRooms(celld.NewRoomRepo(base, nil)),
-		Relay:      celld.NewRoomProxy(base),
+		Relay:      celld.NewRoomProxy(base, nil),
 	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

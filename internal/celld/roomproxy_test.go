@@ -61,7 +61,11 @@ func testKey() roomwire.RoomKey {
 // front server whose handler runs Serve, exactly as the upgrade handler does.
 func proxied(t *testing.T, base string) (*celld.RoomProxy, *websocket.Conn, context.Context) {
 	t.Helper()
-	p := celld.NewRoomProxy(base)
+	return proxiedBy(t, celld.NewRoomProxy(base, nil))
+}
+
+func proxiedBy(t *testing.T, p *celld.RoomProxy) (*celld.RoomProxy, *websocket.Conn, context.Context) {
+	t.Helper()
 	key := testKey()
 	id, err := p.Admit(key)
 	if err != nil {
@@ -150,7 +154,7 @@ func TestRoomProxyPreservesUpstreamClose(t *testing.T) {
 }
 
 func TestRoomProxyStopsAdmission(t *testing.T) {
-	p := celld.NewRoomProxy("http://127.0.0.1:1")
+	p := celld.NewRoomProxy("http://127.0.0.1:1", nil)
 	p.StopAdmission()
 	p.StopAdmission()
 	if _, err := p.Admit(testKey()); !errors.Is(err, roomwire.ErrRelayDraining) {
@@ -159,7 +163,7 @@ func TestRoomProxyStopsAdmission(t *testing.T) {
 }
 
 func TestRoomProxyShutdownWaitsForAdmittedConnection(t *testing.T) {
-	p := celld.NewRoomProxy("http://127.0.0.1:1")
+	p := celld.NewRoomProxy("http://127.0.0.1:1", nil)
 	key := testKey()
 	id, err := p.Admit(key)
 	if err != nil {
@@ -206,7 +210,7 @@ func TestRoomProxyShutdownClosesActiveClientWithServiceRestart(t *testing.T) {
 // The per-room cap refuses with the shared sentinel, and Release gives the
 // slot back - the admission accounting the HTTP status mapping depends on.
 func TestRoomProxyCapsAndRelease(t *testing.T) {
-	p := celld.NewRoomProxy("http://127.0.0.1:1")
+	p := celld.NewRoomProxy("http://127.0.0.1:1", nil)
 	key := testKey()
 	ids := make([]uint64, 0, roomwire.DefaultMaxConnsPerRoom)
 	for range roomwire.DefaultMaxConnsPerRoom {
