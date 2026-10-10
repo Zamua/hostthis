@@ -1656,3 +1656,34 @@ test("Room creation refuses a full app before persisting", async () => {
   assert.equal(h.roomStorage.data.has("state"), false);
   assert.equal(h.pasteStorage.data.has("roomLedger"), false);
 });
+
+test("Paste append splits a long legacy history within the 128-entry write limit", async () => {
+  const seed = artifactPasteSeed();
+  seed.set("versions", Array.from({ length: 100 }, (_, i) => ({
+    ver: i + 1, kind: "html", size: 1, createdAt: 7, deleted: false, manifest: { "/": { blob: `v${i + 1}` } },
+  })));
+  seed.set("maxVer", 100);
+  const h = artifactHarness({ pasteSeed: seed });
+  assert.equal((await h.paste().append({ ...appendBody("append-1", 1000), size: 1 })).status, 200);
+  assert.equal(h.pasteStorage.data.get("versions"), undefined);
+  assert.equal(storedVersions(h.pasteStorage).length, 101);
+});
+
+test("Paste put re-creates a slug whose old history passed the 128-key delete limit", async () => {
+  const seed = new Map([["maxVer", 100]]);
+  for (let ver = 1; ver <= 100; ver++) {
+    seed.set(`ver:${ver}`, { ver, kind: "html", size: 1, createdAt: 7, deleted: false });
+    seed.set(`manifest:${ver}`, { "/": { blob: `v${ver}` } });
+  }
+  const h = artifactHarness({ pasteSeed: seed });
+  assert.equal((await h.paste().put({
+    generation: "generation-2",
+    fingerprint: "fingerprint-2",
+    row: {
+      slug: "slugone1", identity: "other", kind: "html",
+      size: 1, status: "ready", createdAt: 9, updatedAt: 9,
+    },
+  })).status, 204);
+  assert.deepStrictEqual(storedVersions(h.pasteStorage).map((v) => v.ver), [1]);
+  assert.equal(h.pasteStorage.data.get("manifest:100"), undefined);
+});

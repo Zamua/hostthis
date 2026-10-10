@@ -73,6 +73,21 @@ async function loadManifest(storage, ver) {
   return (await storage.get(manifestKey(ver))) ?? null;
 }
 
+// Cloudflare refuses a put or delete of more than MAX_PUT_ENTRIES keys at once;
+// inside a transaction the batches still land as one.
+async function putInBatches(tx, entries) {
+  const list = [...entries];
+  for (let i = 0; i < list.length; i += MAX_PUT_ENTRIES) {
+    await tx.put(Object.fromEntries(list.slice(i, i + MAX_PUT_ENTRIES)));
+  }
+}
+
+async function deleteInBatches(tx, keys) {
+  for (let i = 0; i < keys.length; i += MAX_PUT_ENTRIES) {
+    await tx.delete(keys.slice(i, i + MAX_PUT_ENTRIES));
+  }
+}
+
 async function splitLegacyVersions(tx) {
   const legacy = await tx.get(LEGACY_VERSIONS);
   if (!legacy) {
@@ -86,7 +101,7 @@ async function splitLegacyVersions(tx) {
     }
   }
   updates.set("maxVer", Math.max((await tx.get("maxVer")) ?? 0, ...legacy.map((v) => v.ver)));
-  await tx.put(Object.fromEntries(updates));
+  await putInBatches(tx, updates);
   await tx.delete(LEGACY_VERSIONS);
 }
 
@@ -2044,7 +2059,7 @@ export class Paste {
       for (let ver = 1; ver <= staleMaxVer; ver++) {
         stale.push(versionKey(ver), manifestKey(ver));
       }
-      await tx.delete(stale);
+      await deleteInBatches(tx, stale);
       const updates = new Map([
         ["row", body.row],
         ["createFingerprint", body.fingerprint],

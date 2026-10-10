@@ -60,6 +60,10 @@ export class FakeStorage {
 
   async delete(keyOrKeys) {
     const keys = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
+    // Cloudflare refuses a delete of more than 128 keys too.
+    if (keys.length > MAX_PUT_ENTRIES) {
+      throw new RangeError(`storage.delete: ${keys.length} keys, at most ${MAX_PUT_ENTRIES}`);
+    }
     for (const key of keys) {
       this.data.delete(String(key));
     }
