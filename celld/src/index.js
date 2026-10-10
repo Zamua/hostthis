@@ -2785,11 +2785,56 @@ async function handleBlob(request, env, url) {
   return new Response("method not allowed\n", { status: 405 });
 }
 
+const BEARER = /^bearer +/i;
+
+// HOSTTHIS_CELLD_TOKEN, when set, is the bearer token every route but /healthz
+// requires. Both sides are hashed first, so the compare runs over two equal
+// length digests and its timing says nothing about the token.
+async function authorized(request, env) {
+  const token = env.HOSTTHIS_CELLD_TOKEN;
+  if (!token) {
+    return true;
+  }
+  const header = request.headers.get("Authorization") ?? "";
+  const scheme = BEARER.exec(header);
+  if (!scheme) {
+    return false;
+  }
+  const [want, got] = await Promise.all([token, header.slice(scheme[0].length)]
+    .map(async (text) => new Uint8Array(await crypto.subtle.digest("SHA-256", utf8(text)))));
+  let diff = 0;
+  for (let i = 0; i < want.length; i++) {
+    diff |= want[i] ^ got[i];
+  }
+  return diff === 0;
+}
+
+// Cell-internal paths are reachable only through a class binding, so the
+// router refuses any path naming one, however it is spelled.
+function namesCellInternal(pathname) {
+  return pathname.split("/").some((seg) => {
+    try {
+      return decodeURIComponent(seg) === "__cell";
+    } catch {
+      return false;
+    }
+  });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") {
       return new Response("ok\n");
+    }
+    if (!(await authorized(request, env))) {
+      return new Response("unauthorized\n", {
+        status: 401,
+        headers: { "WWW-Authenticate": "Bearer" },
+      });
+    }
+    if (namesCellInternal(url.pathname)) {
+      return new Response("not found\n", { status: 404 });
     }
     if (url.pathname === "/blob" || url.pathname.startsWith(BLOB_PATH)) {
       return handleBlob(request, env, url);
