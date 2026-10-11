@@ -94,13 +94,20 @@ function responseKey(request, host) {
   return url.toString();
 }
 
+const NULL_BODY_STATUSES = new Set([204, 205, 304]);
+
 // What the client gets from a stored response: the browser's cache posture,
-// not the edge's.
-function forBrowser(stored) {
+// not the edge's. A 304 or a HEAD gets no body, whatever the cache handed back.
+function forBrowser(stored, method) {
   const headers = new Headers(stored.headers);
   headers.set("Cache-Control", CONTENT_CACHE_CONTROL);
   headers.delete("Cache-Tag");
-  return new Response(stored.body, { status: stored.status, headers });
+  let body = stored.body;
+  if (method === "HEAD" || NULL_BODY_STATUSES.has(stored.status)) {
+    body?.cancel().catch(() => {});
+    body = null;
+  }
+  return new Response(body, { status: stored.status, headers });
 }
 
 // Whole read responses for ttl seconds. A hit answers GET, HEAD and
@@ -122,7 +129,7 @@ export function withEdgeCache(read, { cache, ttl }) {
     // A cache that fails is a miss: the read path still answers.
     const hit = await cache.match(new Request(key, { headers: conditional })).catch(() => undefined);
     if (hit) {
-      return forBrowser(hit);
+      return forBrowser(hit, method);
     }
     const res = await read(request, env, ctx, target);
     const fills = method === "GET" && Object.keys(conditional).length === 0;
