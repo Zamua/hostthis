@@ -13,3 +13,12 @@ test('harness reports a missing subresource', async ({ server, page, pageErrors 
   await expect.poll(() => pageErrors.list().length, { timeout: 10_000 }).toBeGreaterThan(0);
   expect(pageErrors.list().join('\n')).toContain('no-such-asset.js');
 });
+
+// Paste URLs name the server E2E_READS picks. Only the Worker refuses a POST
+// to a read path, so the answer tells the two apart.
+test('harness reads from the server E2E_READS names', async ({ server }) => {
+  const paste = server.upload('# which server\n', { type: 'md' });
+  expect(new URL(paste.url).origin).toBe(server.baseURL);
+  const res = await fetch(paste.url, { method: 'POST' });
+  expect(res.status).toBe(server.reads === 'worker' ? 405 : 200);
+});

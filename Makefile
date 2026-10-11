@@ -91,6 +91,8 @@ smoke:
 # The browser suite is a Playwright project under e2e/, run in Chromium and
 # WebKit. E2E_FLAGS passes through to `playwright test`, e.g.
 # make e2e E2E_FLAGS='tests/mermaid.spec.ts --project webkit'.
+# E2E_READS=worker reads every paste from the celld Worker's public surface
+# instead of hostthisd, into e2e/playwright-report-worker.
 e2e: e2e/node_modules bundle celld/localrt/node_modules
 	cd e2e && npx playwright test $(E2E_FLAGS)
 
@@ -141,4 +143,4 @@ data-dir-perms:
 # Screenshots accumulate across runs, so a renamed flow leaves a directory the
 # report would list as unmatched. Removing them is how a local run starts clean.
 clean:
-	rm -rf bin data celld/dist e2e/playwright-report e2e/test-results
+	rm -rf bin data celld/dist e2e/playwright-report e2e/test-results e2e/playwright-report-worker e2e/test-results-worker
