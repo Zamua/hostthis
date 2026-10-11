@@ -205,7 +205,7 @@ same; the URL-mode default differs on purpose):
 | --- | --- | --- |
 | `HOSTTHIS_APEX_DOMAIN` | unset | public surface off when unset |
 | `HOSTTHIS_URL_MODE` | `subdomain` | `path` also serves `/p/<slug>` on the apex host; dev and tests only |
-| `HOSTTHIS_PUBLIC_SCHEME` | `https` | http-to-https redirect target, VAPID `sub` |
+| `HOSTTHIS_PUBLIC_SCHEME` | `https` | VAPID `sub` |
 | `HOSTTHIS_CLIENT_IP_SOURCE` | unset | `cf-connecting-ip` or `xff-rightmost`; unset puts every client in one bucket |
 | `HOSTTHIS_EDGE_CACHE_TTL_S` | `0` | response cache TTL at the edge; `0` is off (2.7) |
 | `HOSTTHIS_BLOB_CACHE_MAX_BYTES` | `0` | blob cache size ceiling; `0` is off (2.7) |
@@ -223,8 +223,10 @@ Mirrors 1.1 for public hosts:
    here; the landing page stays hostthisd's.
 5. Anything else: 404.
 
-- Plain http with scheme `https`: 301 to https. On Cloudflare the zone's
-  Always Use HTTPS normally answers first.
+- The Worker never redirects between schemes: that is the front door's job
+  (Always Use HTTPS on Cloudflare, the TLS proxy on celld). celld reports every
+  request as `http` unless it trusts forwarded headers, so a Worker-side
+  redirect would loop there.
 - The path is percent-decoded once, as Go's `URL.Path` is; a malformed escape
   is 400. ServeMux's 301 for non-canonical paths (`//`, `/./`, `/../`) is
   reproduced so a URL resolves the same way on both servers.
@@ -390,11 +392,14 @@ GET /api/rooms/<uuid>/ws on <slug>.<apex>
   global per-room cap at accept (`getWebSockets().length`); its value comes
   from data (8, Q2). The per-app cap is dropped; creation limits bound the
   room count.
-- No server ping exists in the Workers API. The runtime answers client pings
-  without waking the cell. How fast a vanished client is reaped on Cloudflare
-  is unmeasured (phase 0). If it is too slow, add a runtime auto-response
-  keepalive (`setWebSocketAutoResponse`) for a reserved `{"type":"ping"}`
-  frame: a spec change (a new reserved type) that needs a celld equivalent.
+- No server ping exists in the Workers API or on celld. The Room cell sets
+  `setWebSocketAutoResponse` for a reserved `{"type":"ping"}` frame (answered
+  `{"type":"pong"}` without waking the cell, on both runtimes); the room
+  client sends it every 20 s. At accept time the cell evicts sockets whose
+  last auto-response is older than 60 s, so a vanished client stops counting
+  against the cap. A socket that has never pinged is never evicted this way;
+  it leaves on close or a failed write. A spec change: a new reserved frame
+  type.
 - A Worker deploy restarts the cells and drops sockets. That is already true
   because the cells run on Cloudflare; clients reconnect and resnapshot.
 - During the flip, sockets through hostthisd and direct sockets share the Room
@@ -452,13 +457,29 @@ One bundle, three modes:
   must be under the apex (else 400). Phase 5 turns hostthisd's Go read path
   into this reverse proxy (Host and client IP in the two headers, `Upgrade`
   passed through), so the read rules exist once.
-- **Direct on celld is unverified.** Before the docs claim it, check on celld:
-  the `assets` config and `env.ASSETS` (celld documents assets served from the
-  fleet bucket; the binding shape is unknown), multi-module upload with
-  `no_bundle` (the public router and decoder should be their own modules),
-  WASM if the decoder is WASM, the Cache API (only matters if the optional
-  caches are enabled), and how a client address reaches the Worker. Until
-  then, celld deployments use off or forwarded.
+- **Direct on celld** (checked against celld v0.6.1 and v0.6.2, which is the
+  minimum version for this work):
+  - Static assets: the same `assets` block (`directory`, `binding`,
+    `run_worker_first` with negation, `_headers`) works, and `env.ASSETS.fetch`
+    takes a Request, URL or string. celld sends a strong sha256 ETag and no
+    compression; the 25 MiB per-file limit matches Cloudflare.
+  - Modules: celld loads one JS module (plus sibling `.wasm`) under
+    `no_bundle`. Source stays split into modules; the build emits one bundled
+    `dist/index.js` (and the decoder's `.wasm`, if any) that both the celld
+    and Cloudflare configs point `main` at.
+  - WASM imports work from v0.6.1.
+  - The Cache API exists but always misses, so the caches stay off on celld.
+  - Client address: none is provided; headers arrive as the client sent
+    them. Use `xff-rightmost` behind an ingress that appends
+    `X-Forwarded-For`; never `cf-connecting-ip`.
+  - `request.url` is `http://` unless the node runs with
+    `--trust-forwarded-headers`; the Worker therefore never redirects schemes.
+  - `request.cf` is `{}`: nothing reads it.
+  - Hibernation APIs, including `setWebSocketAutoResponse`, behave as on
+    Cloudflare. There is no server ping and no read timeout, so a client that
+    vanishes without a FIN stays counted until a write fails (2.9 reaper).
+  - The local dev store returns R2 objects as one chunk; memory tests run
+    against a real bucket.
 
 ## 4. Security
 
