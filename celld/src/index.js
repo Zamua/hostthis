@@ -1,5 +1,6 @@
 import { FORWARDED_HOST, isHostname, normalizeHost, withinApex } from "./public/host.js";
 import { publicRouter } from "./public/router.js";
+import { resolveRead } from "./read.js";
 
 // The owner identity scopes intents, quota reservations, and the paste index.
 // Paste rows use slug-scoped cells, so cross-cell creates recover through the
@@ -2059,6 +2060,8 @@ function b64len(b64) {
 const PASTE_OPS = {
   get: read((self) => self.get()),
   versions: read((self) => self.listVersions()),
+  resolve: read((self, _body, url) => self.resolve(url)),
+  exists: read((self) => self.exists()),
   put: mutation((self, body) => self.put(body)),
   abortcreate: mutation((self, body) => self.abortCreate(body)),
   status: mutation((self, body) => self.setStatus(body)),
@@ -2275,6 +2278,25 @@ export class Paste {
       return new Response("not found\n", { status: 404 });
     }
     return Response.json(row);
+  }
+
+  // The rules run here, so neither a large manifest nor any other row field
+  // leaves the cell: only the answer does (read.js).
+  async resolve(url) {
+    const path = url.searchParams.get("path");
+    if (!path?.startsWith("/")) {
+      return Response.json({ error: "invalid-path" }, { status: 400 });
+    }
+    return Response.json(resolveRead(await this.state.storage.get("row"), {
+      path,
+      raw: url.searchParams.get("raw") === "1",
+      files: url.searchParams.get("files") === "1",
+    }));
+  }
+
+  // Presence, for routes that need no manifest.
+  async exists() {
+    return Response.json({ exists: (await this.state.storage.get("row")) !== undefined });
   }
 
   requireGeneration(row, body) {

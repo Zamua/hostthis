@@ -3233,6 +3233,25 @@ route. That route takes no path after the cell, so the op is named in an `op`
 query instead (`/do/Paste:<id>?op=get`, `?op=versions`); a path that names an
 op wins over the query.
 
+Two read-only Paste ops answer a read without handing out the row:
+
+- `resolve` (`GET /paste/resolve?slug=&path=`, plus `raw=1` and `files=1` for
+  the `?raw` and `?files` flags) runs the read rules ("Serving a directory",
+  "SPA fallback (route vs. asset)", "Knowledge bases") against the row.
+  `path` is the request path, percent-decoded once, starting with `/`; any
+  other is 400 `invalid-path`. The answer is `{found: false}` without a row,
+  `{status}` for a pending or failed document at its root, or
+  `{action, kind, updatedAt, uploadId}` with, by action, the served entry's
+  `{key, contentType, size}`, the `shell` whose template renders, or a
+  knowledge base's `files` in byte order. `action` is one of `html`, `shell`,
+  `raw`, `file`, `kbshell`, `kbraw`, `files` and `notfound`. A manifest that
+  fails to decode reads as none (see "Entries without an object key").
+- `exists` (`GET /paste/exists?slug=`) answers `{exists}`: whether a row is
+  present, whatever its status.
+
+Neither carries the owner identity, the name, the generation, or any version
+but the served one.
+
 ### Concurrency and local atomicity
 
 A v0.4 cell may serve several fetches concurrently. Local storage-shaped awaits
