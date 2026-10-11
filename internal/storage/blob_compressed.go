@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -140,6 +141,11 @@ func (c *CompressedBlobStore) DeleteUpload(_ context.Context, uploadID string) e
 // frames its object, so such an object is damaged.
 var errUnframed = errors.New("object lacks the at-rest magic")
 
+// errNoFrame marks a stored object holding the magic and nothing after it.
+// The encoder writes a frame even for empty input, so such an object is
+// damaged rather than empty.
+var errNoFrame = errors.New("object holds the at-rest magic and no zstd frame")
+
 // decodeCompressedStream wraps a stored blob stream with decompression and
 // closes the underlying reader on every error path. label identifies failures.
 func decodeCompressedStream(rc io.ReadCloser, label string) (io.ReadCloser, error) {
@@ -155,7 +161,16 @@ func decodeCompressedStream(rc io.ReadCloser, label string) (io.ReadCloser, erro
 		_ = rc.Close()
 		return nil, err
 	}
-	dec, err := getPooledDecoder(rc)
+	// A zero-frame stream decodes as empty without error.
+	var first [1]byte
+	if _, err := io.ReadFull(rc, first[:]); err != nil {
+		_ = rc.Close()
+		if err == io.EOF {
+			return nil, fmt.Errorf("compressed blob %s: %w", label, errNoFrame)
+		}
+		return nil, fmt.Errorf("compressed blob read %s: %w", label, err)
+	}
+	dec, err := getPooledDecoder(io.MultiReader(bytes.NewReader(first[:]), rc))
 	if err != nil {
 		_ = rc.Close()
 		return nil, fmt.Errorf("compressed blob %s: zstd reader: %w", label, err)

@@ -78,6 +78,21 @@ func TestCompressedBlobStore_UnframedObjectFailsAlone(t *testing.T) {
 	}
 }
 
+// The magic with no zstd frame after it is damaged, not an empty file: the
+// encoder writes a frame even for empty input.
+func TestCompressedBlobStore_MagicOnlyObjectFailsAlone(t *testing.T) {
+	inner := newFakeDurable()
+	c := NewCompressedBlobStore(inner)
+	inner.putRaw("uploads/u1/0", zstdenc.Magic[:])
+	putEncoded(t, c, "uploads/u1/1", nil)
+	if rc, _, err := c.Read(context.Background(), domain.ManifestEntry{Key: "uploads/u1/0"}); !errors.Is(err, errNoFrame) || rc != nil {
+		t.Fatalf("Read magic-only = (%v, %v), want errNoFrame", rc, err)
+	}
+	if got := readKey(t, c, "uploads/u1/1"); len(got) != 0 {
+		t.Fatalf("empty neighbour read %q", got)
+	}
+}
+
 func TestCompressedBlobStore_ReadsPropagateNotFound(t *testing.T) {
 	c := NewCompressedBlobStore(newFakeDurable())
 	if _, _, err := c.Read(context.Background(), domain.ManifestEntry{Key: "uploads/missing/0"}); !errors.Is(err, ErrNotFound) {
