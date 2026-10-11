@@ -49,6 +49,9 @@ type world struct {
 	// local run.
 	writable bool
 	writeApp string
+	// previous is a hostthisd one release behind the Worker
+	// (PARITY_REFERENCE=previous), whose differences previousRelease names.
+	previous bool
 
 	compared atomic.Int64
 	mu       sync.Mutex
@@ -122,7 +125,7 @@ func (w *world) check(t *testing.T, r request) response {
 // Worker side s's answer got that no allowance explains.
 func (w *world) compare(r request, s *server, h, got response) []string {
 	c := &comparison{w: w, side: s, req: r, h: h, got: got}
-	for _, a := range allowances {
+	for _, a := range w.rules() {
 		if len(differences(c.h, c.got)) == 0 {
 			break
 		}

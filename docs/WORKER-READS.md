@@ -589,7 +589,8 @@ One bundle, three modes:
      `roomcreated` op, and the app cap by real writes, so no constant is
      lowered. A deployed run reads `PARITY_HOSTTHISD_URL`,
      `PARITY_WORKER_URL`, `PARITY_TOKEN_FILE` and `PARITY_SLUGS`, and writes
-     only with `PARITY_ALLOW_WRITES=1` and `PARITY_WRITE_SLUG`.
+     only with `PARITY_ALLOW_WRITES=1` and `PARITY_WRITE_SLUG`;
+     `PARITY_REFERENCE=previous` compares against the previous hostthisd.
 4. **e2e.** The Playwright suite gets `E2E_READS=hostthisd|worker`. In worker
    mode hostthisd emits URLs on the Worker's public host (path mode, with a
    hostname distinct from the internal endpoint's, such as `localhost` versus
@@ -617,12 +618,14 @@ in CI. Release.
 
 **Phase 2, routeless deploy and parity.** Deploy the Worker to staging and
 production with `HOSTTHIS_APEX_DOMAIN` set and no route: no public request
-changes. hostthisd stays on the previous release, which is the reference: it
-sends no `Content-Length`, so the parity run over EVERY live slug (not a
-sample) proves each stored entry's `size` equals its decoded bytes before any
-server declares it. Run the suite in forwarded mode against both environments
-(production read-only, plus writes on a test paste). Only then release the new
-hostthisd. Exit: zero unexplained differences.
+changes. hostthisd stays on the previous release, which is the reference
+(`PARITY_REFERENCE=previous`, which factors out the release's own changes and
+each front door's path handling). An entry's `Size` can be wrong on rows
+written before `DecodedSize` existed, so neither server declares a length from
+it, and the parity run over EVERY live slug (not a sample) holds each body to
+the previous release's whole bytes. Run the suite in forwarded mode against
+both environments (production read-only, plus writes on a test paste). Only
+then release the new hostthisd. Exit: zero unexplained differences.
 
 **Phase 3, edge canary.** Staging gets the option chosen in 2.10. Production
 gets exact-host routes (`<slug>.<apex>/*`) for a few test slugs owned by an
